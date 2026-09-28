@@ -24,15 +24,11 @@ pub(crate) enum ReplyError {
 }
 
 impl ReplyError {
-    pub(crate) fn errno(self) -> i32 {
-        match self {
-            ReplyError::PathTooLong => libc::ENAMETOOLONG,
-            _ => libc::EIO,
-        }
-    }
-
     pub(crate) fn into_io(self) -> io::Error {
-        io::Error::from_raw_os_error(self.errno())
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("malformed getattrlist reply: {self:?}"),
+        )
     }
 }
 
@@ -276,7 +272,7 @@ mod tests {
         buf.extend_from_slice(&[0u8; 32]);
         assert_eq!(decode(&buf).unwrap(), PathBuf::from("/abc"));
         buf[..4].copy_from_slice(&17u32.to_ne_bytes());
-        assert_eq!(decode(&buf).unwrap_err().raw_os_error(), Some(libc::EIO));
+        assert_parser_error(decode(&buf).unwrap_err(), ReplyError::LengthOutOfBounds);
     }
 
     #[test]
@@ -289,41 +285,36 @@ mod tests {
         );
     }
 
-    #[test]
-    fn decode_maps_a_malformed_reply_to_eio_and_an_overlong_one_to_enametoolong() {
-        assert_eq!(
-            decode(&[0u8; 3]).unwrap_err().raw_os_error(),
-            Some(libc::EIO)
-        );
-        let buf = reply(VDIR, 8, u32::MAX, &field(b"/a"));
-        assert_eq!(
-            decode(&buf).unwrap_err().raw_os_error(),
-            Some(libc::ENAMETOOLONG)
-        );
-        let buf = reply(VDIR, -1, 3, &field(b"/a"));
-        assert_eq!(decode(&buf).unwrap_err().raw_os_error(), Some(libc::EIO));
+    fn assert_parser_error(e: io::Error, expected: ReplyError) {
+        assert_eq!(e.raw_os_error(), None, "{e:?}");
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{e:?}");
+        assert!(e.to_string().contains(&format!("{expected:?}")), "{e:?}");
     }
 
     #[test]
-    fn every_malformed_reply_but_an_overlong_path_is_eio() {
+    fn decode_reports_a_malformed_reply_as_a_parser_error_with_no_errno() {
+        assert_parser_error(decode(&[0u8; 3]).unwrap_err(), ReplyError::Truncated);
+        let buf = reply(VDIR, 8, u32::MAX, &field(b"/a"));
+        assert_parser_error(decode(&buf).unwrap_err(), ReplyError::PathTooLong);
+        let buf = reply(VDIR, -1, 3, &field(b"/a"));
+        assert_parser_error(decode(&buf).unwrap_err(), ReplyError::NegativeOffset);
+    }
+
+    #[test]
+    fn every_parser_error_carries_no_errno() {
         for e in [
             ReplyError::LengthExceedsBuffer,
             ReplyError::Truncated,
             ReplyError::NegativeOffset,
             ReplyError::OffsetIntoFixedPart,
+            ReplyError::PathTooLong,
             ReplyError::OffsetOutOfBounds,
             ReplyError::LengthOutOfBounds,
             ReplyError::MissingNul,
             ReplyError::InteriorNul,
             ReplyError::NotAbsolute,
         ] {
-            assert_eq!(e.errno(), libc::EIO, "{e:?}");
-            assert_eq!(e.into_io().raw_os_error(), Some(libc::EIO), "{e:?}");
+            assert_parser_error(e.into_io(), e);
         }
-        assert_eq!(ReplyError::PathTooLong.errno(), libc::ENAMETOOLONG);
-        assert_eq!(
-            ReplyError::PathTooLong.into_io().raw_os_error(),
-            Some(libc::ENAMETOOLONG)
-        );
     }
 }

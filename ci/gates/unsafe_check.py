@@ -20,6 +20,7 @@ MACRO_RULES = re.compile(r"\bmacro_rules\s*!")
 INNER_ATTR = re.compile(r"#\s*!")
 UNSAFE_CODE = re.compile(r"\bunsafe_code\b")
 LOOSENING = re.compile(r"\b(?:allow|expect|warn)\b")
+MOD_ITEM = re.compile(r"\s*(?:pub\s*(?:\([^)]*\))?\s*)?mod\b")
 ATTR_START = re.compile(r"#\s*!?\s*\[")
 PATH_ATTR = re.compile(r"\s*path\s*=")
 CFG_ATTR = re.compile(r"\s*cfg_attr\b")
@@ -105,7 +106,23 @@ def attributes(masked):
             if masked[i] == "[": depth += 1
             elif masked[i] == "]": depth -= 1
             i += 1
-        yield match.start(), masked[match.end():i]
+        yield match.start(), masked[match.end():i], i
+
+
+def next_item_is_mod(masked, end):
+    i = end
+    while True:
+        while i < len(masked) and masked[i].isspace():
+            i += 1
+        outer = ATTR_START.match(masked, i)
+        if not outer or INNER_ATTR.match(masked, i):
+            break
+        depth, i = 1, outer.end()
+        while i < len(masked) and depth:
+            if masked[i] == "[": depth += 1
+            elif masked[i] == "]": depth -= 1
+            i += 1
+    return MOD_ITEM.match(masked, i) is not None
 
 
 def config_findings(value, where):
@@ -270,9 +287,11 @@ def main(argv):
         rel_owner = owner(rel)
         for match in MACRO_EXPORT.finditer(masked):
             fails.append(f"{rel}:{line_of(masked, match.start())}: macro_export in {rel_owner or 'the repository'}; an exported macro's unsafe escapes forbid in every consumer (ADR-0027)")
-        for start, body in attributes(masked):
+        for start, body, end in attributes(masked):
             if rel_owner == sys_crate and INNER_ATTR.match(masked, start) and UNSAFE_CODE.search(body) and LOOSENING.search(body):
-                fails.append(f"{rel}:{line_of(masked, start)}: inner attribute loosens unsafe_code in {sys_crate}; only items may allow it (ADR-0027)")
+                fails.append(f"{rel}:{line_of(masked, start)}: inner attribute loosens unsafe_code in {sys_crate}; only non-module items may allow it (ADR-0027)")
+            elif rel_owner == sys_crate and UNSAFE_CODE.search(body) and LOOSENING.search(body) and next_item_is_mod(masked, end):
+                fails.append(f"{rel}:{line_of(masked, start)}: module-level allow of unsafe_code in {sys_crate}; only non-module items may allow it (ADR-0027)")
             if "$" in body:
                 fails.append(f"{rel}:{line_of(masked, start)}: macro fragment in attribute position; it can spell #[path] (ADR-0027)")
             if PATH_ATTR.match(body) or (CFG_ATTR.match(body) and CFG_ATTR_PATH.search(body)):

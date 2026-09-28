@@ -352,12 +352,6 @@ pub fn open_anchor_resolved(
 /// an autofs mount is unmeasured (#76). Both follow a final symlink — resolving
 /// the link is the job — and both refuse a path that is not a directory.
 /// Descendant resolution elsewhere in this crate remains symlink-refusing.
-///
-/// A lookup failure (EACCES, ENOENT, ENOTDIR) is [`IoError::Io`] on both lanes.
-/// A failure to read the kernel's path is [`IoError::FdPathUnavailable`]: `fd_path`
-/// on Linux, and on macOS an EIO or ENAMETOOLONG from `full_path`, which is what
-/// its reply parser returns for a malformed reply (the kernel's own ENAMETOOLONG
-/// for an over-long input path is classed there too).
 pub fn resolve_dir(path: &Path) -> Result<PathBuf, IoError> {
     if !path.is_absolute() {
         return Err(IoError::RelativeAnchor {

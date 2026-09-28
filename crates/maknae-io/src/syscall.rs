@@ -258,10 +258,9 @@ pub(crate) fn macos_dir_kernel_form(path: &Path) -> nix::Result<nix::Result<std:
 
 #[cfg(target_os = "macos")]
 fn macos_full_path_error(e: std::io::Error) -> nix::Result<nix::Result<std::path::PathBuf>> {
-    let errno = nix::errno::Errno::from_raw(e.raw_os_error().unwrap_or(nix::libc::EIO));
-    match errno {
-        nix::errno::Errno::EIO | nix::errno::Errno::ENAMETOOLONG => Ok(Err(errno)),
-        other => Err(other),
+    match e.raw_os_error() {
+        Some(raw) => Err(nix::errno::Errno::from_raw(raw)),
+        None => Ok(Err(nix::errno::Errno::EIO)),
     }
 }
 
@@ -838,26 +837,26 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn a_reply_parse_errno_is_a_kernel_path_failure() {
-        for errno in [nix::libc::EIO, nix::libc::ENAMETOOLONG] {
-            let got = classify_full_path_error(std::io::Error::from_raw_os_error(errno));
-            assert_eq!(got, Ok(nix::errno::Errno::from_raw(errno)));
-        }
+    fn a_parser_error_without_an_errno_is_a_kernel_path_failure() {
+        let got = classify_full_path_error(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "malformed getattrlist reply",
+        ));
+        assert_eq!(got, Ok(nix::errno::Errno::EIO));
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn a_kernel_lookup_errno_is_an_open_class_failure() {
-        for errno in [nix::libc::EACCES, nix::libc::ENOENT, nix::libc::ENOTDIR] {
+    fn every_kernel_errno_is_an_open_class_failure() {
+        for errno in [
+            nix::libc::EACCES,
+            nix::libc::ENOENT,
+            nix::libc::ENOTDIR,
+            nix::libc::EIO,
+            nix::libc::ENAMETOOLONG,
+        ] {
             let got = classify_full_path_error(std::io::Error::from_raw_os_error(errno));
             assert_eq!(got, Err(nix::errno::Errno::from_raw(errno)));
         }
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn an_error_without_an_errno_is_eio() {
-        let got = classify_full_path_error(std::io::Error::other("no errno"));
-        assert_eq!(got, Ok(nix::errno::Errno::EIO));
     }
 }

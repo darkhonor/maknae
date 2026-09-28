@@ -278,7 +278,7 @@ class AffectedTests(unittest.TestCase):
         self.commit()
         invocations = self.hook(self.base, mutations=True)
         self.assertEqual(len(invocations), 3)
-        self.assertTrue(invocations[0].startswith('unsafe-confinement --root '), invocations)
+        self.assertEqual(invocations[0], 'unsafe-confinement --root ' + self.git('rev-parse', '--show-toplevel'))
         self.assertNotIn('--mutants', invocations[1])
         self.assertTrue(invocations[2].endswith('--mutants a b'), invocations)
 
@@ -287,7 +287,7 @@ class AffectedTests(unittest.TestCase):
         self.commit()
         invocations = self.hook(self.base)
         self.assertEqual(len(invocations), 2)
-        self.assertTrue(invocations[0].startswith('unsafe-confinement --root '), invocations)
+        self.assertEqual(invocations[0], 'unsafe-confinement --root ' + self.git('rev-parse', '--show-toplevel'))
         self.assertNotIn('--mutants', invocations[1])
 
 

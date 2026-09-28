@@ -4772,6 +4772,37 @@ mv "$uc_ia3/lib.rs.new" "$uc_ia3/crates/maknae-sys/src/lib.rs"
 expect_accept "unsafe-confinement/sys-inner-deny-unsafe_code-passes" "unsafe-confinement: ok" \
   "$here/unsafe-confinement.sh" --root "$uc_ia3"
 
+uc_ma1="$(uc_fixture)"
+printf '#[allow(unsafe_code)]\nmod everything;\n' >> "$uc_ma1/crates/maknae-sys/src/lib.rs"
+expect_reject_because "unsafe-confinement/sys-module-level-allow-unsafe_code-is-refused" \
+  "crates/maknae-sys/src/lib.rs:6: module-level allow of unsafe_code in maknae-sys" "$here/unsafe-confinement.sh" --root "$uc_ma1"
+
+uc_ma2="$(uc_fixture)"
+printf '#[cfg_attr(all(), allow(unsafe_code))]\npub mod m {}\n' >> "$uc_ma2/crates/maknae-sys/src/lib.rs"
+expect_reject_because "unsafe-confinement/sys-module-level-cfg_attr-allow-unsafe_code-is-refused" \
+  "crates/maknae-sys/src/lib.rs:6: module-level allow of unsafe_code in maknae-sys" "$here/unsafe-confinement.sh" --root "$uc_ma2"
+
+uc_ma3="$(uc_fixture)"
+printf '#[allow(unsafe_code)]\n#[cfg(unix)]\npub(crate) mod n;\n' >> "$uc_ma3/crates/maknae-sys/src/lib.rs"
+expect_reject_because "unsafe-confinement/sys-module-level-allow-behind-another-attribute-is-refused" \
+  "crates/maknae-sys/src/lib.rs:6: module-level allow of unsafe_code in maknae-sys" "$here/unsafe-confinement.sh" --root "$uc_ma3"
+
+uc_ma4="$(uc_fixture)"
+{ printf '#![warn(unsafe_code)]\n'; cat "$uc_ma4/crates/maknae-sys/src/lib.rs"; } > "$uc_ma4/lib.rs.new"
+mv "$uc_ma4/lib.rs.new" "$uc_ma4/crates/maknae-sys/src/lib.rs"
+expect_reject_because "unsafe-confinement/sys-inner-warn-unsafe_code-is-refused" \
+  "crates/maknae-sys/src/lib.rs:1: inner attribute loosens unsafe_code in maknae-sys" "$here/unsafe-confinement.sh" --root "$uc_ma4"
+
+uc_rme="$(uc_io_source <<'EOF'
+#[r#macro_export]
+macro_rules! m {
+    () => {};
+}
+EOF
+)"
+expect_reject_because "unsafe-confinement/a-raw-macro_export-is-refused" \
+  "crates/maknae-io/src/lib.rs:1: macro_export in maknae-io" "$here/unsafe-confinement.sh" --root "$uc_rme"
+
 ul_fixture() {
   local d
   d="$(mktemp -d -p "$NC_TMP")"
