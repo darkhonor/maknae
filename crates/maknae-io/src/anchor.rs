@@ -332,36 +332,37 @@ pub fn open_anchor_resolved(
 }
 
 /// Resolve an absolute directory to the form the KERNEL reports for a descriptor
-/// on it — `F_GETPATH` on darwin, `readlink /proc/self/fd/N` on Linux.
+/// on it: `readlink /proc/self/fd/N` on Linux, `F_GETPATH` on macOS. That is the
+/// form [`crate::verify_delegated`] names a delegated descriptor by (issue #216).
 ///
-/// **This is deliberately the SAME resolver [`crate::verify_delegated`] uses to
-/// name a delegated descriptor's path** (issue #216). That identity is the whole
-/// point: the defect it closes was two different resolvers disagreeing about the
-/// FORM of one directory. `principal.home` was compared, unresolved, against a
-/// kernel-reported resolved path, so `strip_prefix` never matched and every
-/// `fs.read` was denied fail-closed — a `/home -> /export/home` layout, an
-/// autofs/NFS estate, or any macOS `/var`-rooted path could not serve a single
-/// read. Canonicalizing with anything else (`std::fs::canonicalize`, say) would
-/// leave the two forms free to drift apart again; resolving through the kernel's
-/// own answer makes agreement structural rather than asserted.
+/// The defect #216 closed was two resolvers disagreeing about the FORM of one
+/// directory. `principal.home` was compared, unresolved, against a kernel-reported
+/// resolved path, so `strip_prefix` never matched and every `fs.read` was denied
+/// fail-closed — a `/home -> /export/home` layout, an autofs/NFS estate, or any
+/// macOS `/var`-rooted path could not serve a single read. Canonicalizing with
+/// anything else (`std::fs::canonicalize`, say) would leave the two forms free to
+/// drift apart again.
 ///
-/// The directory is opened with no access (`O_PATH|O_DIRECTORY` on Linux,
-/// `O_SEARCH` on macOS), so resolving needs search on its ancestors and no
-/// permission on the directory itself. `O_DIRECTORY` also triggers automount,
-/// which an autofs home needs. The open is symlink-following **by design** —
-/// resolving the link is the job. Descendant resolution elsewhere in this crate
-/// remains symlink-refusing; nothing here relaxes that.
+/// Linux opens the directory `O_PATH|O_DIRECTORY` and reads its `/proc/self/fd`
+/// link, the same resolver `verify_delegated` uses: `O_PATH` needs no permission
+/// on the directory, and `O_DIRECTORY` triggers an autofs mount. macOS asks
+/// `getattrlist(ATTR_CMN_FULLPATH)` through `maknae_sys::full_path`, which needs
+/// search on the ancestors only and returns the same string `F_GETPATH` returns,
+/// pinned by `full_path_agrees_with_f_getpath_byte_for_byte`; whether it triggers
+/// an autofs mount is unmeasured (#76). Both follow a final symlink — resolving
+/// the link is the job — and both refuse a path that is not a directory.
+/// Descendant resolution elsewhere in this crate remains symlink-refusing.
 pub fn resolve_dir(path: &Path) -> Result<PathBuf, IoError> {
     if !path.is_absolute() {
         return Err(IoError::RelativeAnchor {
             path: path.to_path_buf(),
         });
     }
-    let fd =
-        syscall::open_mutation_directory(path).map_err(|e| syscall::map_open_errno(e, path))?;
-    syscall::fd_path(&fd).map_err(|e| IoError::FdPathUnavailable {
-        kind: crate::checks::kind_of_errno(e),
-    })
+    syscall::dir_kernel_form(path)
+        .map_err(|e| syscall::map_open_errno(e, path))?
+        .map_err(|e| IoError::FdPathUnavailable {
+            kind: crate::checks::kind_of_errno(e),
+        })
 }
 
 fn finish_anchor(
@@ -748,6 +749,120 @@ mod tests {
             Err(super::IoError::RelativeAnchor { .. }) => {}
             other => panic!("expected RelativeAnchor, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn resolve_dir_needs_no_permission_on_the_directory_itself() {
+        if nix::unistd::Uid::effective().is_root() {
+            crate::testutil::skip_or_fail(
+                "resolve_dir_needs_no_permission_on_the_directory_itself",
+                "running as root, which ignores the 0o000 permission bits the fixture depends on",
+            );
+            return;
+        }
+        let base = std::env::temp_dir().join(format!("rd_noperm_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("noperm");
+        std::fs::create_dir_all(&dir).unwrap();
+        let open = super::resolve_dir(&dir).expect("an open directory resolves");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let refused = crate::syscall::open_parent_by_path(&dir);
+        let closed = super::resolve_dir(&dir);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert!(refused.is_err(), "the fixture must refuse a read open");
+        assert_eq!(
+            closed.expect("a directory with no permission bits resolves"),
+            open
+        );
+    }
+
+    #[test]
+    fn resolve_dir_reports_a_regular_file_as_not_a_directory() {
+        let base = std::env::temp_dir().join(format!("rd_file_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let file = base.join("f");
+        std::fs::write(&file, b"x").unwrap();
+        let got = super::resolve_dir(&file);
+        let _ = std::fs::remove_dir_all(&base);
+        assert_eq!(
+            got,
+            Err(super::IoError::Io {
+                path: file,
+                kind: crate::IoKind::NotADirectory
+            })
+        );
+    }
+
+    #[test]
+    fn resolve_dir_reports_a_missing_path_as_not_found() {
+        let missing = std::env::temp_dir().join(format!("rd_absent_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&missing);
+        assert_eq!(
+            super::resolve_dir(&missing),
+            Err(super::IoError::Io {
+                path: missing,
+                kind: crate::IoKind::NotFound
+            })
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn full_path_agrees_with_f_getpath_byte_for_byte() {
+        use std::os::unix::ffi::OsStringExt;
+        let base = std::path::PathBuf::from(format!("/tmp/rd_agree_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("CaseDir");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::os::unix::fs::symlink(&dir, base.join("link")).unwrap();
+        std::fs::write(dir.join("inner"), b"x").unwrap();
+        let probes = [
+            dir.clone(),
+            base.join("link"),
+            base.join("casedir"),
+            std::path::PathBuf::from("/Users"),
+        ];
+        let seen: Vec<_> = probes
+            .iter()
+            .map(|p| {
+                let via_attr = maknae_sys::full_path(p)
+                    .ok()
+                    .map(|r| r.into_os_string().into_vec());
+                let via_fd = crate::syscall::open_mutation_directory(p)
+                    .and_then(|fd| crate::syscall::fd_path(&fd))
+                    .ok()
+                    .map(|r| r.into_os_string().into_vec());
+                (p.clone(), via_attr, via_fd)
+            })
+            .collect();
+        let inner = std::fs::File::open(dir.join("inner")).unwrap();
+        let inner_path = crate::syscall::fd_path(&inner)
+            .unwrap()
+            .into_os_string()
+            .into_vec();
+        drop(inner);
+        let _ = std::fs::remove_dir_all(&base);
+
+        for (p, via_attr, via_fd) in &seen {
+            assert_eq!(
+                via_attr, via_fd,
+                "{p:?}: getattrlist and F_GETPATH disagree"
+            );
+        }
+        let root = seen[0].1.clone().expect("the plain directory resolves");
+        assert!(root.starts_with(b"/private/tmp/"), "{:?}", seen[0]);
+        assert_eq!(seen[1].1, seen[0].1, "a symlink resolves to its target");
+        assert!(seen[3].1.is_some(), "/Users resolves");
+        let mut prefix = root;
+        prefix.push(b'/');
+        assert!(
+            inner_path.starts_with(&prefix),
+            "a descriptor inside the directory is named under full_path's form"
+        );
     }
 
     use super::*;

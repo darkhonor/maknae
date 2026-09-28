@@ -1129,6 +1129,7 @@ dependencies = [
 name = "maknae-io"
 version = "0.0.0"
 dependencies = [
+ "maknae-sys",
  "nix",
  "rustix",
  "tempfile",

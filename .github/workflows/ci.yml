@@ -410,3 +410,9 @@ jobs:
           n="$(printf '%s\n' "$out" | grep -c ': test$' || true)"
           [ "$n" -ge 8 ] || { echo "FAIL: expected the maknae-sys macOS suite, saw $n tests"; exit 1; }
           echo "maknae-sys macOS suite present: $n tests"
+      - name: Confirm the getattrlist/F_GETPATH agreement test ran
+        run: |
+          set -euo pipefail
+          n="$(cargo test --locked -p maknae-io --lib full_path_agrees_with_f_getpath_byte_for_byte -- --list | grep -c ': test$' || true)"
+          [ "$n" -eq 1 ] || { echo "FAIL: expected the agreement test, saw $n"; exit 1; }
+          echo "agreement test present on macOS"

@@ -90,12 +90,14 @@ fn authz_boot_gate_with(
     // hand-edit would not survive anyway. Enroll still canonicalizes for its own
     // grant-writing; the daemon simply never relies on it.
     //
-    // `resolve_dir` is the resolver `verify_delegated` uses to name a delegated
-    // descriptor, so the confinement root and the kernel-reported path agree by
-    // CONSTRUCTION rather than by assertion. `~` keeps working exactly as
-    // operators already write it -- it now expands from the resolved home, so a
-    // `/home -> /export/home`, autofs/NFS or macOS `/var`-rooted layout serves
-    // reads instead of denying every one of them fail-closed.
+    // `resolve_dir` returns the form `verify_delegated` names a delegated
+    // descriptor by: the same `/proc/self/fd` resolver on Linux, and on macOS
+    // `getattrlist(ATTR_CMN_FULLPATH)`, which a test pins byte for byte to
+    // `F_GETPATH`. So the confinement root and the kernel-reported path agree.
+    // `~` keeps working exactly as operators already write it -- it now expands
+    // from the resolved home, so a `/home -> /export/home`, autofs/NFS (autofs
+    // on macOS pending the macOS acceptance run, #76) or macOS `/var`-rooted
+    // layout serves reads instead of denying every one of them fail-closed.
     let home = maknae_io::resolve_dir(&principal.home).map_err(|e| {
         AuthzBootRefusal::UnresolvableHome(format!("principal.home {:?}: {e}", principal.home))
     })?;

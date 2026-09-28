@@ -33,11 +33,11 @@ class PlatformSelection(unittest.TestCase):
         selected = self.selected("Linux")
         for active in ("linux_fd_path", "linux_probe_openat2", "openat2_resolve", "linux_mutation_directory_flags",
                        "linux_path_delegation_flags", "linux_reopen_writable", "linux_confers_no_write",
-                       "linux_reopen_readable"):
+                       "linux_reopen_readable", "linux_dir_kernel_form"):
             self.assertIn(active, selected)
         for absent in ("macos_fd_path", "portable_probe_openat2", "unsupported_fd_path", "macos_mutation_directory_flags",
                        "macos_path_delegation_flags", "macos_reopen_writable", "macos_confers_no_write",
-                       "macos_reopen_readable"):
+                       "macos_reopen_readable", "macos_dir_kernel_form"):
             self.assertNotIn(absent, selected)
         self.assertIn(" in open_read_target", selected)
 
@@ -45,11 +45,12 @@ class PlatformSelection(unittest.TestCase):
         selected = self.selected("Darwin")
         for active in ("macos_fd_path", "portable_probe_openat2", "macos_mutation_directory_flags",
                        "macos_path_delegation_flags", "macos_reopen_writable", "macos_confers_no_write",
-                       "macos_reopen_readable"):
+                       "macos_reopen_readable", "macos_dir_kernel_form"):
             self.assertIn(active, selected)
         for absent in ("linux_fd_path", "linux_probe_openat2", "openat2_resolve",
                        "unsupported_fd_path", "linux_mutation_directory_flags", "linux_path_delegation_flags",
-                       "linux_reopen_writable", "linux_confers_no_write", "linux_reopen_readable"):
+                       "linux_reopen_writable", "linux_confers_no_write", "linux_reopen_readable",
+                       "linux_dir_kernel_form"):
             self.assertNotIn(absent, selected)
         self.assertIn(" in open_read_target", selected)
 
@@ -61,7 +62,7 @@ class PlatformSelection(unittest.TestCase):
             for mutant in excluded:
                 self.assertIsNone(re.search(regex, mutant.replace("syscall.rs:", "other.rs:")))
                 # A similarly named future function is not covered by this rule.
-                altered = re.sub(r"(fd_path|probe_openat2|openat2_resolve|mutation_directory_flags|path_delegation_flags|reopen_writable|confers_no_write|reopen_readable)( ->|$)",
+                altered = re.sub(r"(fd_path|probe_openat2|openat2_resolve|mutation_directory_flags|path_delegation_flags|reopen_writable|confers_no_write|reopen_readable|dir_kernel_form)( ->|$)",
                                  r"\1_extra\2", mutant)
                 self.assertNotEqual(altered, mutant)
                 self.assertIsNone(re.search(regex, altered))

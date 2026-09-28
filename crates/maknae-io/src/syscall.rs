@@ -15,14 +15,17 @@ use std::path::Path;
 
 // Unique implementation names let the mutation gate exclude only code absent
 // from the native build. Aliases preserve the callers' platform-neutral API.
-#[cfg(target_os = "macos")]
-pub(crate) use macos_fd_path as fd_path;
 #[cfg(not(target_os = "linux"))]
 pub(crate) use portable_probe_openat2 as probe_openat2;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) use unsupported_fd_path as fd_path;
 #[cfg(target_os = "linux")]
-pub(crate) use {linux_fd_path as fd_path, linux_probe_openat2 as probe_openat2};
+pub(crate) use {
+    linux_dir_kernel_form as dir_kernel_form, linux_fd_path as fd_path,
+    linux_probe_openat2 as probe_openat2,
+};
+#[cfg(target_os = "macos")]
+pub(crate) use {macos_dir_kernel_form as dir_kernel_form, macos_fd_path as fd_path};
 
 /// Widen `mode_t` to `u32`. The cast is load-bearing on darwin, where `mode_t` is
 /// `u16`, and a no-op on Linux, where it is already `u32` -- so `unnecessary_cast`
@@ -239,6 +242,18 @@ pub(crate) fn macos_fd_path<F: AsFd>(fd: &F) -> nix::Result<std::path::PathBuf> 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn unsupported_fd_path<F: AsFd>(_fd: &F) -> nix::Result<std::path::PathBuf> {
     Err(nix::errno::Errno::ENOSYS)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn linux_dir_kernel_form(path: &Path) -> nix::Result<nix::Result<std::path::PathBuf>> {
+    open_mutation_directory(path).map(|fd| fd_path(&fd))
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_dir_kernel_form(path: &Path) -> nix::Result<nix::Result<std::path::PathBuf>> {
+    maknae_sys::full_path(path)
+        .map(Ok)
+        .map_err(|e| nix::errno::Errno::from_raw(e.raw_os_error().unwrap_or(nix::libc::EIO)))
 }
 
 pub(crate) fn stat_path(path: &Path) -> nix::Result<FileStat> {
