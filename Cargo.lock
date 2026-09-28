@@ -1228,6 +1228,13 @@ name = "maknae-subject-ctx-mint"
 version = "0.0.0"
 
 [[package]]
+name = "maknae-sys"
+version = "0.0.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "maknae-vault"
 version = "0.0.0"
 dependencies = [

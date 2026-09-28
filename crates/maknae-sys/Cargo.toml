@@ -1,0 +1,25 @@
+[package]
+name = "maknae-sys"
+publish.workspace = true
+description = "The one Maknae crate that may hold unsafe code: safe wrappers over OS calls (ADR-0027)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "forbid"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "forbid"
+multiple_unsafe_ops_per_block = "forbid"
+
+[dependencies]
+# Floor, not an exact pin. 0.2.189 is what Cargo.lock already resolves (via nix and
+# rustix), and it is the release whose apple/mod.rs declares every item this crate
+# uses: attrlist, attrgroup_t, ATTR_BIT_MAP_COUNT, ATTR_CMN_OBJTYPE,
+# ATTR_CMN_FULLPATH and getattrlist. An `=` pin would hold every libc user in the
+# workspace at this release and block a libc security fix.
+libc = "0.2.189"

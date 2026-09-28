@@ -261,6 +261,7 @@ files = [
   "crates/maknae-agent/src/render.rs",
   "crates/maknae-agent/src/drive.rs",
   "crates/maknae-agent/src/budget.rs",
+  "crates/maknae-sys/src/reply.rs",
 ]
 # maknae-security request.rs/authorizer.rs and maknae-config value.rs are pure
 # declarations (no executable production regions) → T3, not T1. The mutation set
@@ -269,7 +270,7 @@ files = [
 # critical crates whose fail-closed behavior must be provable to external
 # third parties. Zero missed mutants required.
 # It also carries the loop's decision code (maknae-agent), whose false-assurance surface is T1.
-mutants_crates = ["maknae-security", "maknae-config", "maknae-io", "maknae-kernel", "maknae-vault", "maknae-proto", "maknae-audit-append", "maknae-msgs", "maknae-authz-basic", "maknae-classification-aus", "maknae-llm", "maknae-agent", "maknae-deputy"]
+mutants_crates = ["maknae-security", "maknae-config", "maknae-io", "maknae-kernel", "maknae-vault", "maknae-proto", "maknae-audit-append", "maknae-msgs", "maknae-authz-basic", "maknae-classification-aus", "maknae-llm", "maknae-agent", "maknae-deputy", "maknae-sys"]
 # Crates whose mutation run needs a non-default feature so feature-gated seam
 # code is LIVE (mutants in cfg'd-out code are unkillable-MISSED — the
 # 2026-08-27 main-red class; #77 generalized the maknae-config special case).
@@ -687,6 +688,10 @@ why = "crate rustdoc and re-exports only; no executable production regions, so a
 [[t3]]
 path = "crates/maknae-io/src/error.rs"
 why = "IoError/IoKind enums with Display only (there is no From impl, despite what an earlier version of this line said); no decision logic"
+
+[[t3]]
+path = "crates/maknae-sys/src/lib.rs"
+why = "module declarations and the macOS re-export only; no executable production regions — same treatment as maknae-io/src/lib.rs"
 
 # KNOWN IMPRECISION in the exceptions below, no floor impact.
 #
