@@ -169,6 +169,13 @@ impl std::fmt::Display for VaultError {
                 f,
                 "no keychain item (-25300): this plane is not enrolled; run `sudo maknae enroll`"
             ),
+            VaultError::Keychain { status: -25308 } => write!(
+                f,
+                "keychain read needs user interaction, which is disabled (-25308): the keychain \
+                 is locked, or this binary is not on the item's access list; for `maknae`, \
+                 unlock the login keychain or run it from a console session; for a daemon, run \
+                 the Developer ID-signed build the item was enrolled for"
+            ),
             VaultError::Keychain { status } => write!(f, "keychain read failed: status {status}"),
         }
     }
@@ -217,5 +224,14 @@ mod tests {
         assert!(m.contains("ad-hoc") && m.contains("locked"), "{m}");
         let m = format!("{}", VaultError::Keychain { status: -25300 });
         assert!(m.contains("maknae enroll"), "{m}");
+    }
+
+    #[test]
+    fn the_interaction_refusal_is_named() {
+        let m = format!("{}", VaultError::Keychain { status: -25308 });
+        assert!(
+            m.contains("-25308") && m.contains("console session") && m.contains("Developer ID"),
+            "{m}"
+        );
     }
 }
