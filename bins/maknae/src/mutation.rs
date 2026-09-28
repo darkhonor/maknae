@@ -877,6 +877,19 @@ pub async fn execute_read<S: AsyncRead + AsyncWrite + Unpin + Send>(
         _ => None,
     })
 }
+/// The stderr line for an attempt that did not succeed. A stale refusal gets
+/// none: the model is told, and it is not a failure of the agent's user (#388).
+fn stop_line(outcome: ReportedFinish, reading: bool, stale: bool, effects: u32) -> Option<String> {
+    match outcome {
+        ReportedFinish::Success => None,
+        _ if reading => Some(format!("read not performed: {outcome:?}")),
+        _ if stale => None,
+        _ => Some(format!(
+            "mutation stopped: {outcome:?}; {effects} effect(s) reported"
+        )),
+    }
+}
+
 struct Attempted {
     success: bool,
     content: Option<maknae_io::Zeroizing<Vec<u8>>>,
@@ -1044,13 +1057,8 @@ async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
                 next.next_index,
             )
             .await?;
-            if outcome != ReportedFinish::Success && reading {
-                eprintln!("read not performed: {outcome:?}");
-            } else if outcome != ReportedFinish::Success && !next.stale {
-                eprintln!(
-                    "mutation stopped: {outcome:?}; {} effect(s) reported",
-                    next.next_index
-                );
+            if let Some(line) = stop_line(outcome, reading, next.stale, next.next_index) {
+                eprintln!("{line}");
             }
             return Ok(Attempted {
                 success: outcome == ReportedFinish::Success,
@@ -1066,6 +1074,25 @@ async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_stale_refusal_prints_nothing_and_other_stops_still_do() {
+        use ReportedFinish::*;
+        assert_eq!(stop_line(Success, false, false, 1), None);
+        assert_eq!(stop_line(Success, true, false, 1), None);
+        assert_eq!(stop_line(PathChanged, false, true, 0), None);
+        assert_eq!(
+            stop_line(PathChanged, false, false, 0).as_deref(),
+            Some("mutation stopped: PathChanged; 0 effect(s) reported")
+        );
+        assert_eq!(
+            stop_line(OsRefused, true, false, 0).as_deref(),
+            Some("read not performed: OsRefused")
+        );
+        assert_eq!(
+            stop_line(Partial, false, false, 2).as_deref(),
+            Some("mutation stopped: Partial; 2 effect(s) reported")
+        );
+    }
     fn prepare(request: proto::Verb, content: Option<proto::Bytes>) -> Option<PreparedMutation> {
         prepare_checked(request, content, WriteCheck::Unchecked)
     }
