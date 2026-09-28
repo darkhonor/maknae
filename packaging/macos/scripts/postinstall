@@ -121,11 +121,6 @@ fi
 # Append-only at the FILE level only — never the directory (a +a dir blocks the
 # installer from managing /var/log/maknae on upgrade, the same reason the Linux
 # packaging refuses it).
-#
-# uappnd, not sappnd: macOS runs securelevel 0, where the SYSTEM append-only flag
-# clears only in single-user mode — not survivable for an upgradeable package.
-# Whether sappnd is even settable here is PHASE 2's measurement; the isolation
-# contract records whichever holds.
 chflags uappnd "$AUDIT" 2>/dev/null || :
 
 # VERIFY ownership/mode AND that the append-only flag actually took. The isolation

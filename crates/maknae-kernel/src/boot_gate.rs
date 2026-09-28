@@ -96,7 +96,7 @@ fn authz_boot_gate_with(
     // `F_GETPATH`. So the confinement root and the kernel-reported path agree.
     // `~` keeps working exactly as operators already write it -- it now expands
     // from the resolved home, so a `/home -> /export/home`, autofs/NFS (autofs
-    // on macOS pending the macOS acceptance run, #76) or macOS `/var`-rooted
+    // on macOS unmeasured) or macOS `/var`-rooted
     // layout serves reads instead of denying every one of them fail-closed.
     let home = maknae_io::resolve_dir(&principal.home).map_err(|e| {
         AuthzBootRefusal::UnresolvableHome(format!("principal.home {:?}: {e}", principal.home))
