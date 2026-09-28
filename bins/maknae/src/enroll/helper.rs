@@ -14,9 +14,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
-// macOS-only: referenced solely by the `#[cfg(target_os = "macos")]` Keychain
-// probe/seal functions below. Gated so the Linux `-D warnings` clippy gate does
-// not flag them as dead_code (CI runs on Linux, where these are never used).
+// macOS-only: the Keychain probe's service; gated so Linux clippy sees no dead_code.
 #[cfg(target_os = "macos")]
 const KEYCHAIN_PROBE_SERVICE: &str = "maknae-enroll-probe";
 const PROBE_VALUE: &str = "maknae-enroll-probe-throwaway-value";
