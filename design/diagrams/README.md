@@ -89,12 +89,22 @@ to `ci/gates/`. A stereotype is readable by anyone who knows UML; a bespoke glyp
 | `generated-data-model.svg` | IDEF1X | *What is the shape of the data we record and enforce?* | security assessor, contributor | generated |
 | `generated-system-interfaces.svg` | DoDAF SV-1 | *What talks to what, across which interfaces — and which of them actually exist?* | security assessor, accreditor | generated |
 | `generated-operational-concept.svg` | DoDAF OV-1 | *What is this system for?* | stakeholder, newcomer | generated |
-| `generated-container-architecture.svg` | UML deployment | *What containers exist, in which plane, with what trust and which volumes?* | contributor, security assessor | generated |
+| `generated-service-architecture.svg` | UML 2.5.1 deployment view | *What runs on the host, under which account, in which trust plane, and what may talk to what?* | contributor, security assessor | generated — solid is built, dashed is proposed or post-MVP, dotted is **vision: no ADR, no code** (see [below](#the-service-architecture-built-and-vision)) |
 | `generated-agentic-patterns.svg` | UML activity partitions | *For each published agentic pattern, what does the trust boundary insert — and where is the deny path the field's diagrams omit?* | contributor, reviewer new to the project | generated — **intent, NOT authoritative** (see [`../intent/`](../intent/)) |
 | `plane-architecture.svg` | UML component | *How do the three planes relate?* | onboarding, reviewer | authored |
 | `knowledge-lifecycle.svg` | conceptual | *How does knowledge move through the lifecycle?* | onboarding | authored |
 | `tier-state-machine.svg` | UML state machine | *How does a skill move between tiers?* | reviewer | authored |
 | `action-vocabulary-map.svg` | bespoke, self-describing | *What are the supported verbs, which component serves each, and what depends on what?* | contributor, reviewer | authored |
+
+### The Service Architecture: built and vision
+
+`generated-service-architecture.svg` draws Maknae as it installs: host packages (rpm, deb and the macOS .pkg) running as system services under dedicated accounts, `maknaed` as `_maknae` and `maknae-egress` as `_maknae-egress`, under systemd on Linux and launchd on macOS. The only containers in it are tool invocations. A containerized deployment (Compose or Kubernetes) is a possible future option, designed in [`../container-architecture.md`](../container-architecture.md); this view is the baseline it would build from.
+
+Every node, artifact and flow carries a status, and its line style is that status:
+
+- **Solid, built:** the `maknae` CLI, `maknaed`, `maknae-egress`, Vault, `/etc/maknae` and the `/var/log/maknae` audit trail. The CLI is drawn «untrusted»: the same binary runs the MVP agent loop, `maknae agent`, under the operator's uid, who must be in the `maknae` group to reach the `0660` socket. Both `maknaed` and the CLI log in to Vault with their own AppRole, `maknaed` for its plane certificate and the CLI to mint its cli leaf. Shipped code still relays prompt content through `maknaed`, which forwards each `session.prompt` turn to `maknae-egress`.
+- **Dashed, proposed or post-MVP:** designed in an ADR, `design/container-architecture.md` or an issue, with no code: the gateway and remote tasker (#117), the lake, the dreamer, skills and lake data. The web UI is post-MVP. The OCI Dockerfiles in `packaging/oci` are a deferred stub (#81), not a deployment.
+- **Dotted, vision:** **no ADR and no code.** These elements are unratified: a direction for future capability, not a design that exists. They are the Agent Daemon, tool containers, per-tasker workspaces, the TUI, direct prompt-content delivery to the Egress Daemon, and shared and dedicated modes. No ADR is cited as ratifying them. ADR-0023 (Proposed) decides that the loop is untrusted and is `maknae agent`, and that a separate Rust egress process under `_maknae-egress` makes the model call at the kernel's direction. None of its decisions ratifies the Agent Daemon, tool containers, per-tasker workspaces, the TUI, direct prompt delivery, or shared/dedicated modes.
 
 ### Planned
 
@@ -184,9 +194,9 @@ Regenerate with the command above and commit the result; that is the whole contr
 ### Seven products are curated, not derived
 
 `standards-profile.toml`, `read-path.toml`, `decision-cycle.toml`, `data-model.toml`,
-`system-interfaces.toml`, `operational-concept.toml` and `container-architecture.toml` are hand-maintained inputs.
+`system-interfaces.toml`, `operational-concept.toml` and `service-architecture.toml` are hand-maintained inputs.
 A conformance claim, a call sequence, a precedence ladder, a normalization judgement,
-an interface register and a statement of intent are none of them readable out of a
+an interface register, a statement of intent and a deployment inventory are none of them readable out of a
 manifest, so all seven are kept as reviewable data files in which **every row names
 something a reader can check**.
 

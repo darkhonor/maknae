@@ -152,7 +152,7 @@ def provenance() -> str:
     inputs = ["ci/gates/lib.sh", "Cargo.toml"] + sorted(
         str(p.relative_to(ROOT)) for p in ROOT.glob("*/*/Cargo.toml")
     )
-    sha = sh("git", "log", "-1", "--format=%h", "--", *inputs).strip() or "unknown"
+    sha = sh("git", "log", "-1", "--format=%H", "--", *inputs).strip()[:8] or "unknown"
     date = sh("git", "log", "-1", "--format=%cs", "--", *inputs).strip() or "unknown"
     dirty = ""
     if sh("git", "status", "--porcelain", "--", *inputs).strip():
@@ -197,7 +197,7 @@ def _repo_anchor() -> str:
     inputs = ["ci/gates/lib.sh", "Cargo.toml"] + sorted(
         str(p.relative_to(ROOT)) for p in ROOT.glob("*/*/Cargo.toml")
     )
-    sha = sh("git", "log", "-1", "--format=%h", "--", *inputs).strip() or "unknown"
+    sha = sh("git", "log", "-1", "--format=%H", "--", *inputs).strip()[:8] or "unknown"
     date = sh("git", "log", "-1", "--format=%cs", "--", *inputs).strip() or "unknown"
     return f"{sha} · {date}"
 
@@ -1361,130 +1361,199 @@ def d9_opconcept(prov: str) -> str:
         "UML 2.5.1 (OMG formal/2017-12-05)", "DoDAF 2.02 Change 1 · OV-1")
 
 
-# --- D10: container architecture, UML 2.5.1 deployment view ---------------
+# --- Service Architecture, UML 2.5.1 deployment view ----------------------
 
-def d10_containers(prov: str) -> str:
-    """design/container-architecture.md, drawn.
+def service_architecture(prov: str) -> str:
+    """What runs on the host, under which account, in which trust plane, and
+    what may talk to what.
 
-    UML deployment notation -- containers as «execution environment» nodes,
-    volumes as «artifact», mounts and flows as communication paths. NOT an RMF
-    view: the Microkosmos SV-1 diagrams that lent the visual grammar were built
-    for an Assess-Only package and carry authorization-boundary language and the
-    800-37 inheritance taxonomy. Maknae has no package, so that framing would
-    claim a posture it has not earned.
+    UML deployment notation: each service is a node carrying its account and
+    its service manager, each config or data location an «artifact», each flow
+    a communication path. Every element carries a status and its line style is
+    that status, so nothing unbuilt is drawn as built.
     """
-    d = tomllib.loads((OUT / "container-architecture.toml").read_text())
-    planes, cons, vols, flows = d["plane"], d["container"], d["volume"], d["flow"]
-    check_evidence([d["scope"], d["built"]], "evidence", "container-architecture.toml")
-    by = {c["id"]: c for c in cons}
+    d = tomllib.loads((OUT / "service-architecture.toml").read_text())
+    sc, planes, arts, flows = d["scope"], d["plane"], d["artifact"], d["flow"]
+    check_evidence([sc, d["built"]], "evidence", "service-architecture.toml")
 
-    W, PAD, CW, CH, GAP = 1300, 44, 236, 76, 18
-    TOP = 132
+    W, PAD, LBL, CW, GAP = 1400, 44, 214, 254, 24
+    dash = {"built": None, "proposed": "6 4", "post-mvp": "6 4", "vision": "2 3"}
     style = {"trusted": (TRUST_FILL, TRUST_LINE, TRUST_INK),
              "security-relevant": (OK_FILL, OK_LINE, "#04342C"),
              "untrusted": ("#FDEEE9", WARN, "#7A2415"),
-             "vendor": (PLAIN_FILL, PLAIN_LINE, MUTED)}
-    dashed = {"proposed", "post-mvp"}
+             "vendor": (PLAIN_FILL, PLAIN_LINE, MUTED),
+             "actor": ("#FFFFFF", PLAIN_LINE, INK)}
 
-    p, y = [], TOP
-    pos = {}
+    def colx(c):
+        return PAD + LBL + c * (CW + GAP)
+
+    rows = [{"label": "Actors", "note": "Outside the planes.", "items":
+             [dict(a, trust="actor", kind="actor") for a in d["actor"]], "plane": False}]
     for pl in planes:
-        mine = [c for c in cons if c["plane"] == pl["id"]]
-        bh = CH + 40
-        p.append(box(PAD, y, W - PAD * 2, bh, "#FBFAF7", "#E2DFD6", rx=10))
-        p.append(text(PAD + 14, y + 20, pl["label"], 11.5, "700", fill=TRUST_INK))
-        p.append(text(PAD + 14, y + 34, pl["note"], 9, fill=MUTED))
-        x = PAD + 268
-        for c in mine:
-            fill, line, ink = style[c["trust"]]
-            dash = "5 4" if c["status"] in dashed else None
-            p.append(box(x, y + 12, CW, CH, fill, line, rx=7, dash=dash))
-            p.append(text(x + 11, y + 30, c["name"], 11, "700", fill=ink, mono=True))
-            p.append(text(x + CW - 11, y + 30, c["lang"], 8.5, fill=line, anchor="end"))
-            p.append(text(x + 11, y + 43, f'«{c["trust"]}» · {c["status"]}', 8, fill=line))
-            for k, ln in enumerate(_wrap_words(c["detail"], 36)):
-                p.append(text(x + 11, y + 57 + k * 11, ln, 8, fill=INK))
-            pos[c["id"]] = (x + CW / 2, y + 12, x, y + 12 + CH, x + CW)
-            x += CW + GAP
-        y += bh + 16
+        rows.append({"label": pl["label"], "note": pl["note"], "plane": True,
+                     "items": [dict(n, kind="node") for n in d["node"] if n["plane"] == pl["id"]]})
+    row_of = {it["id"]: r for r, row in enumerate(rows) for it in row["items"]}
+    items = {it["id"]: it for row in rows for it in row["items"]}
 
-    # flows, drawn behind nothing -- planes are stacked so an edge is short
-    for i, f in enumerate(flows):
-        a, b = pos[f["from"]], pos[f["to"]]
-        if a[1] == b[1]:
-            # same plane: route side to side, or the vertical anchors fold the
-            # edge back on itself and the label lands inside the target box.
-            left, right = (a, b) if a[0] < b[0] else (b, a)
-            y1 = y2 = a[1] + CH / 2
-            x1, x2 = (left[4], right[2]) if a[0] < b[0] else (right[2], left[4])
-            lx, ly = (x1 + x2) / 2, y1 - 6
+    same = [f for f in flows if row_of[f["from"]] == row_of[f["to"]]]
+    cross = [f for f in flows if row_of[f["from"]] != row_of[f["to"]]]
+
+    sides = {}
+    for f in flows:
+        a, b = items[f["from"]], items[f["to"]]
+        if f in same:
+            sides.setdefault((f["from"], "bottom"), []).append((b["col"], f["to"], f))
+            sides.setdefault((f["to"], "bottom"), []).append((a["col"], f["from"], f))
         else:
-            x1, y1 = a[0], (a[3] if a[1] < b[1] else a[1])
-            x2, y2 = b[0], (b[1] if a[1] < b[1] else b[3])
-            # stagger, or four edges crossing one gap stack their labels on one
-            # line and none of them is readable
-            lx, ly = (x1 + x2) / 2, (y1 + y2) / 2 + 3 + (i % 3 - 1) * 11
-        p.append(f'<path d="M {x1:.0f} {y1:.0f} C {x1:.0f} {(y1+y2)/2:.0f} '
-                 f'{x2:.0f} {(y1+y2)/2:.0f} {x2:.0f} {y2:.0f}" fill="none" '
-                 f'stroke="{TRUST_LINE}" stroke-width="1" stroke-dasharray="4 3" '
-                 f'opacity="0.6" marker-end="url(#ca)"/>')
-        p.append(text(lx, ly, f["label"], 8.5, fill=MUTED, anchor="middle",
-                      halo="#FFFFFF"))
-    p.insert(0, '<defs><marker id="ca" viewBox="0 0 10 10" refX="9" refY="5" '
+            up, lo = (a, b) if row_of[f["from"]] < row_of[f["to"]] else (b, a)
+            sides.setdefault((up["id"], "bottom"), []).append((lo["col"], lo["id"], f))
+            sides.setdefault((lo["id"], "top"), []).append((up["col"], up["id"], f))
+    anchor = {}
+    for (nid, side), ends in sides.items():
+        ends.sort(key=lambda e: e[0])
+        for k, (_, _, f) in enumerate(ends):
+            anchor[(nid, id(f))] = colx(items[nid]["col"]) + CW * (k + 1) / (len(ends) + 1)
+
+    lane, used = {}, {}
+    for f in sorted(same, key=lambda f: abs(anchor[(f["from"], id(f))] - anchor[(f["to"], id(f))])):
+        x1, x2 = anchor[(f["from"], id(f))], anchor[(f["to"], id(f))]
+        half = len(f["label"]) * 2.4
+        span = (min(x1, x2, (x1 + x2) / 2 - half) - 8, max(x1, x2, (x1 + x2) / 2 + half) + 8)
+        taken = used.setdefault(row_of[f["from"]], [])
+        k = 0
+        while any(k == tk and span[0] < b and a < span[1] for tk, a, b in taken):
+            k += 1
+        taken.append((k, *span))
+        lane[id(f)] = k
+
+    p = []
+    legend = _wrap_words(sc["legend"], 225)
+    y = 104
+    p.append(box(PAD, y, W - PAD * 2, 34 + len(legend) * 13, "#FFFFFF", PLAIN_LINE, rx=6))
+    lx = PAD + 14
+    for st, word in (("built", "built"), ("proposed", "proposed · post-mvp"), ("vision", "vision")):
+        dd = f' stroke-dasharray="{dash[st]}"' if dash[st] else ""
+        p.append(f'<line x1="{lx}" y1="{y + 16}" x2="{lx + 34}" y2="{y + 16}" '
+                 f'stroke="{TRUST_LINE}" stroke-width="1.4"{dd}/>')
+        p.append(text(lx + 40, y + 19, word, 9, "700", fill=TRUST_INK))
+        lx += 150
+    for k, ln in enumerate(legend):
+        p.append(text(PAD + 14, y + 36 + k * 13, ln, 9.5, "700" if k == 0 else "400", fill=INK))
+    y += 34 + len(legend) * 13 + 18
+
+    pos, chan, gap_top = {}, {}, {}
+    for r, row in enumerate(rows):
+        mine = row["items"]
+        lines = max(len(_wrap_words(it["detail"], 44)) for it in mine)
+        ch = (44 + lines * 11) if not row["plane"] else (72 + lines * 11)
+        nchan = 1 + max((k for k, _, _ in used.get(r, [])), default=-1)
+        bh = 12 + ch + 12 + nchan * 28 + (8 if nchan else 0)
+        if row["plane"]:
+            p.append(box(PAD, y, W - PAD * 2, bh, "#FBFAF7", "#E2DFD6", rx=10))
+        p.append(text(PAD + 14, y + 20, row["label"], 11.5, "700", fill=TRUST_INK))
+        for k, ln in enumerate(_wrap_words(row["note"], 38)):
+            p.append(text(PAD + 14, y + 34 + k * 12, ln, 9, fill=MUTED))
+        for it in mine:
+            fill, line, ink = style[it["trust"]]
+            x, top = colx(it["col"]), y + 12
+            p.append(box(x, top, CW, ch, fill, line, rx=7, dash=dash[it["status"]]))
+            p.append(text(x + 11, top + 18, it["name"], 11, "700", fill=ink, mono=True))
+            stereo = "actor" if it["kind"] == "actor" else it["trust"]
+            p.append(text(x + 11, top + 31, f"«{stereo}» · {it['status']}", 8, fill=line))
+            ty = top + 44
+            if it["kind"] == "node":
+                p.append(text(x + 11, top + 44, it["account"], 8.5, "700", fill=INK, mono=True))
+                p.append(text(x + 11, top + 56, it["unit"], 8, fill=MUTED))
+                ty = top + 70
+            for k, ln in enumerate(_wrap_words(it["detail"], 44)):
+                p.append(text(x + 11, ty + k * 11, ln, 8, fill=INK))
+            pos[it["id"]] = (top, top + ch)
+        chan[r] = y + 12 + ch + 12
+        y += bh
+        n = len([f for f in cross if min(row_of[f["from"]], row_of[f["to"]]) == r])
+        gap_top[r] = y
+        y += max(28, 18 + n * 15)
+
+    def stroke(f, path):
+        dd = f' stroke-dasharray="{dash[f["status"]]}"' if dash[f["status"]] else ""
+        return (f'<path d="{path}" fill="none" stroke="{TRUST_LINE}" stroke-width="1.1"'
+                f'{dd} marker-end="url(#sa)"/>')
+
+    for r in chan:
+        mine = [f for f in same if row_of[f["from"]] == r]
+        for f in mine:
+            x1, x2 = anchor[(f["from"], id(f))], anchor[(f["to"], id(f))]
+            y1, y2 = pos[f["from"]][1], pos[f["to"]][1]
+            cy = chan[r] + lane[id(f)] * 28
+            p.append(stroke(f, f"M {x1:.0f} {y1} L {x1:.0f} {cy} L {x2:.0f} {cy} L {x2:.0f} {y2}"))
+            p.append(text((x1 + x2) / 2, cy + 12, f["label"], 8.5, fill=MUTED, anchor="middle",
+                          halo="#FBFAF7"))
+
+    for r in gap_top:
+        mine = [f for f in cross if min(row_of[f["from"]], row_of[f["to"]]) == r]
+        geo = []
+        for f in mine:
+            down = row_of[f["from"]] < row_of[f["to"]]
+            x1, x2 = anchor[(f["from"], id(f))], anchor[(f["to"], id(f))]
+            y1 = pos[f["from"]][1] if down else pos[f["from"]][0]
+            y2 = pos[f["to"]][0] if down else pos[f["to"]][1]
+            geo.append((min(x1, x2) + max(x1, x2), f, x1, y1, x2, y2))
+        geo.sort(key=lambda g: g[0])
+        for k, (_, f, x1, y1, x2, y2) in enumerate(geo):
+            ym = (y1 + y2) / 2
+            p.append(stroke(f, f"M {x1:.0f} {y1} C {x1:.0f} {ym:.0f} {x2:.0f} {ym:.0f} "
+                               f"{x2:.0f} {y2}"))
+            ly = gap_top[r] + 14 + k * 15
+            lo, hi = 0.0, 1.0
+            for _ in range(40):
+                t = (lo + hi) / 2
+                yt = y1 + (y2 - y1) * (1.5 * t - 1.5 * t * t + t ** 3)
+                if (yt < ly) == (y2 > y1):
+                    lo = t
+                else:
+                    hi = t
+            lx = x1 + (x2 - x1) * (3 * t * t - 2 * t ** 3)
+            p.append(text(lx, ly + 3, f["label"], 8.5, fill=MUTED, anchor="middle",
+                          halo="#FFFFFF"))
+
+    p.insert(0, '<defs><marker id="sa" viewBox="0 0 10 10" refX="9" refY="5" '
              'markerWidth="7" markerHeight="7" orient="auto-start-reverse">'
              f'<path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="{TRUST_LINE}" '
              'stroke-width="1.3"/></marker></defs>')
 
-    y += 8
-    p.append(text(PAD, y, "Volumes — both deployment models", 12, "700", fill=TRUST_INK))
+    p.append(text(PAD, y + 4, "Artifacts on the host", 12, "700", fill=TRUST_INK))
     y += 16
-    VW = (W - PAD * 2 - 2 * 14) / 3
-    row = 0
-    for i, v in enumerate(vols):
-        col = i % 3
-        if col == 0 and i:
-            row += 1
-        x = PAD + col * (VW + 14)
-        vy = y + row * 96
-        flagged = "flag" in v
-        p.append(box(x, vy, VW, 86, "#FFF6E6" if flagged else "#FFFFFF",
-                     WARN if flagged else PLAIN_LINE, rx=6))
-        p.append(text(x + 11, vy + 18, v["name"], 10, "700", fill=INK, mono=True))
-        p.append(text(x + VW - 11, vy + 18, "«artifact»", 8, fill=MUTED, anchor="end"))
-        p.append(text(x + 11, vy + 31, v["note"], 8, fill=MUTED))
-        mx = x + 11
-        for m in v["mounts"]:
-            who, mode = m.split(":")
-            hot = mode in ("rw", "append") and by[who]["trust"] == "untrusted"
-            p.append(text(mx, vy + 47, f"{by[who]['name']} {mode}", 8.5, "700" if hot else "400",
-                          fill=WARN if hot else INK, mono=True))
-            mx += 8 + 5.4 * len(f"{by[who]['name']} {mode}")
-        if flagged:
-            for k, ln in enumerate(_wrap_words(v["flag"], 62)):
-                p.append(text(x + 11, vy + 62 + k * 11, ln, 8, "600", fill=WARN))
-    y += (row + 1) * 96 + 10
+    VW = (W - PAD * 2 - 4 * 12) / 5
+    for i, a in enumerate(arts):
+        x = PAD + i * (VW + 12)
+        p.append(box(x, y, VW, 66, "#FFFFFF", PLAIN_LINE, rx=6, dash=dash[a["status"]]))
+        p.append(text(x + 11, y + 18, a["name"], 10, "700", fill=INK, mono=True))
+        p.append(text(x + VW - 11, y + 18, f"«artifact» · {a['status']}", 8, fill=MUTED,
+                      anchor="end"))
+        p.append(text(x + 11, y + 32, a["note"], 8, fill=MUTED))
+        p.append(text(x + 11, y + 52, " · ".join(a["users"]), 8.5, fill=INK, mono=True))
+    y += 66 + 20
 
-    sc = d["scope"]
-    sl = _wrap_words(sc["sans_dcs"], 148)
+    sl = _wrap_words(sc["baseline"], 225)
     p.append(box(PAD, y, W - PAD * 2, 26 + len(sl) * 14, TRUST_FILL, TRUST_LINE, rx=8))
     for k, ln in enumerate(sl):
         p.append(text(PAD + 14, y + 22 + k * 14, ln, 9.5, "600" if k == 0 else "400",
                       fill=TRUST_INK if k == 0 else INK))
     y += 40 + len(sl) * 14
-    for k, ln in enumerate(_wrap_words(d["built"]["claim"], 150)):
+    bl = _wrap_words(d["built"]["claim"], 235)
+    for k, ln in enumerate(bl):
         p.append(text(PAD, y + k * 13, ln, 9.5, fill=WARN))
-    y += 26
+    y += len(bl) * 13 + 10
 
     H = y + 44
     p = [text(PAD, 44, sc["title"], 16, "600"),
-         text(PAD, 66, sc["subtitle"], 11, fill=MUTED),
-         text(PAD, 86, "Visual grammar borrowed from the Microkosmos SV-1 deployment views. "
-              "Their RMF apparatus — authorization boundary, CNSSI 1253", 10, fill=MUTED),
-         text(PAD, 100, "categorization, control-inheritance taxonomy — is deliberately absent: "
-              "those answer an Assess-Only package, and Maknae has none yet.", 10, fill=MUTED)] + p
-    p.append(footer(W, H, f"source: {content_stamp('design/diagrams/container-architecture.toml')}"))
-    return svg(W, H, "\n".join(p), "Maknae container architecture",
-               "UML deployment view of the Maknae container architecture.")
+         text(PAD, 66, f'{sc["notation"]} · {sc["question"]}', 11, fill=INK),
+         text(PAD, 86, f'Readers: {sc["readers"]}.', 10, fill=MUTED)] + p
+    p.append(footer(W, H, f"source: {content_stamp('design/diagrams/service-architecture.toml')}"))
+    return svg(W, H, "\n".join(p), "Maknae service architecture",
+               "UML 2.5.1 deployment view of Maknae installed on a host as system services: "
+               "each service's account and trust plane, and which flows are built, "
+               "proposed or vision.")
 
 
 def check_catalog(written: list) -> None:
@@ -1697,7 +1766,7 @@ def main(argv: list) -> None:
         ("generated-data-model.svg", lambda: d7_datamodel(prov)),
         ("generated-system-interfaces.svg", lambda: d8_interfaces(prov)),
         ("generated-operational-concept.svg", lambda: d9_opconcept(prov)),
-        ("generated-container-architecture.svg", lambda: d10_containers(prov)),
+        ("generated-service-architecture.svg", lambda: service_architecture(prov)),
         ("generated-agentic-patterns.svg", lambda: d11_patterns(prov)),
     ]
     names = [n for n, _ in products]
