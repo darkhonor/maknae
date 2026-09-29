@@ -3,6 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft — for team review; language calls are operator-ratified where marked, proposed otherwise |
+| **Deployment** | A possible future containerized deployment. Maknae today installs as host services from rpm, deb and the macOS .pkg; see the [Service Architecture](diagrams/generated-service-architecture.svg). `egress-proxy` ships as the `maknae-egress` process ([ADR-0023](adr/ADR-0023-runtime-loop-role-and-placement.md)). |
 | **Date** | 2026-07-14 (revised 2026-08-22) |
 | **Scope** | Container decomposition for both deployment models (Compose/Podman stack; full Kubernetes), per-container language selection, trust levels, volumes |
 | **Doctrine** | Language targets best fit for the action being done. Kernel is 100% Rust (operator-ratified 2026-07-14). TDD everywhere (§5). |

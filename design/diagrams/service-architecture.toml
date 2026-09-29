@@ -12,13 +12,13 @@ title = "Service Architecture"
 notation = "UML 2.5.1 deployment view"
 question = "What runs on the host, under which account, in which trust plane, and what may talk to what?"
 readers = "contributor, security assessor"
-legend = "Solid = built. Dashed = proposed: designed, no code. Dotted = vision: NO ADR and NO code, unratified. The Agent Daemon, tool containers, per-tasker workspaces, the TUI, direct prompt delivery to the Egress Daemon, and shared and dedicated modes are all vision."
-baseline = "HOST SERVICES. Maknae installs from rpm, deb and the macOS .pkg as system services, each under its own account: systemd on Linux, launchd on macOS. The only containers drawn are tool invocations, and they are vision. A containerized deployment (Compose or Kubernetes) is a possible future option, designed in design/container-architecture.md; this view is the baseline it would build from."
+legend = "Solid = built. Dashed = proposed or post-mvp: designed, no code. Dotted = vision: NO ADR and NO code, unratified. The Agent Daemon, tool containers, per-tasker workspaces, the TUI, direct prompt delivery to the Egress Daemon, and shared and dedicated modes are all vision."
+baseline = "HOST SERVICES. Maknae installs from rpm, deb and the macOS .pkg as system services, each under its own account: systemd on Linux, launchd on macOS. The only containers drawn are tool invocations, and they are vision; the OCI Dockerfiles in packaging/oci are a deferred stub (#81). A containerized deployment (Compose or Kubernetes) is a possible future option, designed in design/container-architecture.md; this view is the baseline it would build from."
 evidence = "packaging/common/maknaed.service · packaging/common/maknae-egress.service · packaging/common/maknae-egress.socket · packaging/common/maknae.sysusers · packaging/macos/io.maknae.maknaed.plist · packaging/macos/io.maknae.maknae-egress.plist · packaging/isolation-contract.md · design/container-architecture.md"
 
 [built]
-claim = "Built today: the maknae CLI, maknaed under _maknae and maknae-egress under _maknae-egress, with root-owned config and an append-only audit trail. Shipped code still relays prompt content through maknaed: the CLI sends each session.prompt turn to maknaed, which forwards it to maknae-egress. Direct delivery to the Egress Daemon, with maknaed issuing only the grant, is vision. ADR-0023 decides only that the loop is untrusted and that maknae agent is the Rust MVP loop; it ratifies none of the vision elements."
-evidence = "packaging/common/maknaed.service · packaging/common/maknae-egress.service · bins/maknae/src/agent.rs · design/adr/ADR-0023-runtime-loop-role-and-placement.md"
+claim = "Built today: the maknae CLI, maknaed under _maknae and maknae-egress under _maknae-egress, with root-owned config and an append-only audit trail. maknaed logs in to Vault with its own AppRole and has its plane certificate signed; the CLI self-mints its cli leaf with its own AppRole, which SV-1 records as the pre-ADR-0006 model, retired by #116. Shipped code still relays prompt content through maknaed: the CLI sends each session.prompt turn to maknaed, which forwards it to maknae-egress. Direct delivery to the Egress Daemon, with maknaed issuing only the grant, is vision. ADR-0023 (Proposed) decides that the loop is untrusted and is maknae agent, and that a separate Rust egress process under _maknae-egress makes the model call at the kernel's direction. None of its decisions ratifies the Agent Daemon, tool containers, per-tasker workspaces, the TUI, direct prompt delivery, or shared/dedicated modes."
+evidence = "packaging/common/maknaed.service · packaging/common/maknae-egress.service · bins/maknae/src/agent.rs · crates/maknae-kernel/src/handler.rs · crates/maknae-kernel/src/egress_socket.rs · crates/maknae-kernel/src/run.rs · crates/maknae-vault/src/plane.rs · design/diagrams/system-interfaces.toml · design/adr/ADR-0023-runtime-loop-role-and-placement.md"
 
 [[actor]]
 id = "operator"
@@ -42,7 +42,7 @@ note = "Accepts work; trusts nothing."
 [[plane]]
 id = "trust"
 label = "Trust plane"
-note = "The only trusted code."
+note = "Maknae's trusted code, and the secrets service it depends on."
 
 [[plane]]
 id = "runtime"
@@ -54,11 +54,22 @@ id = "cli"
 name = "maknae"
 plane = "interaction"
 col = 1
-trust = "security-relevant"
-account = "operator's uid"
-unit = "CLI built · TUI vision"
+trust = "untrusted"
+account = "operator's uid, in group maknae"
+unit = "CLI · the 0660 socket requires the group"
 status = "built"
-detail = "The operator's console: status, monitoring, tasking. Carries maknae agent, the Rust MVP loop (ADR-0023)."
+detail = "The operator's console: status, monitoring, tasking. The same binary runs the MVP agent loop (maknae agent), untrusted per ADR-0023, under the operator's uid."
+
+[[node]]
+id = "tui"
+name = "TUI"
+plane = "interaction"
+col = 0
+trust = "untrusted"
+account = "operator's uid"
+unit = "terminal console"
+status = "vision"
+detail = "A terminal console for the operator. No ADR, no code."
 
 [[node]]
 id = "gateway"
@@ -69,7 +80,7 @@ trust = "security-relevant"
 account = "account not set"
 unit = "issue #117"
 status = "proposed"
-detail = "The remote door: channels and scheduler, scoped task identities."
+detail = "The remote door: channels and scheduler, scoped task identities. Becomes a trust-plane PEP when #117 lands (ADR-0006 assumption 5)."
 
 [[node]]
 id = "webui"
@@ -91,7 +102,7 @@ trust = "vendor"
 account = "external"
 unit = "HashiCorp Vault"
 status = "built"
-detail = "AppRole, PKI and KV. Holds the provider keys."
+detail = "AppRole, PKI and KV. Holds the provider key."
 
 [[node]]
 id = "egress"
@@ -102,7 +113,7 @@ trust = "trusted"
 account = "_maknae-egress"
 unit = "systemd socket activation · launchd"
 status = "built"
-detail = "Egress Daemon. Holds provider keys from Vault and makes the model calls."
+detail = "Egress Daemon. Holds the provider key from Vault and makes the model calls."
 
 [[node]]
 id = "maknaed"
@@ -181,7 +192,7 @@ users = ["Agent Daemon rw", "tool containers rw"]
 name = "skills"
 status = "proposed"
 note = "Signed manifests."
-users = ["maknaed rw", "Agent Daemon ro"]
+users = ["maknaed rw", "Agent Daemon ro (vision)"]
 
 [[artifact]]
 name = "lake data"
@@ -222,7 +233,25 @@ status = "vision"
 [[flow]]
 from = "maknaed"
 to = "egress"
-label = "relays the turn today · grant only (vision)"
+label = "relays the turn today"
+status = "built"
+
+[[flow]]
+from = "maknaed"
+to = "egress"
+label = "grant only"
+status = "vision"
+
+[[flow]]
+from = "maknaed"
+to = "vault"
+label = "AppRole · PKI sign plane/kernel"
+status = "built"
+
+[[flow]]
+from = "cli"
+to = "vault"
+label = "AppRole · mints cli leaf"
 status = "built"
 
 [[flow]]

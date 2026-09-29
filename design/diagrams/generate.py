@@ -1411,20 +1411,32 @@ def service_architecture(prov: str) -> str:
     anchor = {}
     for (nid, side), ends in sides.items():
         ends.sort(key=lambda e: e[0])
-        for k, (_, other, f) in enumerate(ends):
+        for k, (_, _, f) in enumerate(ends):
             anchor[(nid, id(f))] = colx(items[nid]["col"]) + CW * (k + 1) / (len(ends) + 1)
+
+    lane, used = {}, {}
+    for f in sorted(same, key=lambda f: abs(anchor[(f["from"], id(f))] - anchor[(f["to"], id(f))])):
+        x1, x2 = anchor[(f["from"], id(f))], anchor[(f["to"], id(f))]
+        half = len(f["label"]) * 2.4
+        span = (min(x1, x2, (x1 + x2) / 2 - half) - 8, max(x1, x2, (x1 + x2) / 2 + half) + 8)
+        taken = used.setdefault(row_of[f["from"]], [])
+        k = 0
+        while any(k == tk and span[0] < b and a < span[1] for tk, a, b in taken):
+            k += 1
+        taken.append((k, *span))
+        lane[id(f)] = k
 
     p = []
     legend = _wrap_words(sc["legend"], 225)
     y = 104
     p.append(box(PAD, y, W - PAD * 2, 34 + len(legend) * 13, "#FFFFFF", PLAIN_LINE, rx=6))
     lx = PAD + 14
-    for st, word in (("built", "built"), ("proposed", "proposed"), ("vision", "vision")):
+    for st, word in (("built", "built"), ("proposed", "proposed · post-mvp"), ("vision", "vision")):
         dd = f' stroke-dasharray="{dash[st]}"' if dash[st] else ""
         p.append(f'<line x1="{lx}" y1="{y + 16}" x2="{lx + 34}" y2="{y + 16}" '
                  f'stroke="{TRUST_LINE}" stroke-width="1.4"{dd}/>')
         p.append(text(lx + 40, y + 19, word, 9, "700", fill=TRUST_INK))
-        lx += 110
+        lx += 150
     for k, ln in enumerate(legend):
         p.append(text(PAD + 14, y + 36 + k * 13, ln, 9.5, "700" if k == 0 else "400", fill=INK))
     y += 34 + len(legend) * 13 + 18
@@ -1434,12 +1446,13 @@ def service_architecture(prov: str) -> str:
         mine = row["items"]
         lines = max(len(_wrap_words(it["detail"], 44)) for it in mine)
         ch = (44 + lines * 11) if not row["plane"] else (72 + lines * 11)
-        nchan = len([f for f in same if row_of[f["from"]] == r])
+        nchan = 1 + max((k for k, _, _ in used.get(r, [])), default=-1)
         bh = 12 + ch + 12 + nchan * 28 + (8 if nchan else 0)
         if row["plane"]:
             p.append(box(PAD, y, W - PAD * 2, bh, "#FBFAF7", "#E2DFD6", rx=10))
         p.append(text(PAD + 14, y + 20, row["label"], 11.5, "700", fill=TRUST_INK))
-        p.append(text(PAD + 14, y + 34, row["note"], 9, fill=MUTED))
+        for k, ln in enumerate(_wrap_words(row["note"], 38)):
+            p.append(text(PAD + 14, y + 34 + k * 12, ln, 9, fill=MUTED))
         for it in mine:
             fill, line, ink = style[it["trust"]]
             x, top = colx(it["col"]), y + 12
@@ -1468,10 +1481,10 @@ def service_architecture(prov: str) -> str:
 
     for r in chan:
         mine = [f for f in same if row_of[f["from"]] == r]
-        for k, f in enumerate(mine):
+        for f in mine:
             x1, x2 = anchor[(f["from"], id(f))], anchor[(f["to"], id(f))]
             y1, y2 = pos[f["from"]][1], pos[f["to"]][1]
-            cy = chan[r] + k * 28
+            cy = chan[r] + lane[id(f)] * 28
             p.append(stroke(f, f"M {x1:.0f} {y1} L {x1:.0f} {cy} L {x2:.0f} {cy} L {x2:.0f} {y2}"))
             p.append(text((x1 + x2) / 2, cy + 12, f["label"], 8.5, fill=MUTED, anchor="middle",
                           halo="#FBFAF7"))
