@@ -1,7 +1,7 @@
-<svg width="1400" height="1239" viewBox="0 0 1400 1239" xmlns="http://www.w3.org/2000/svg" role="img">
+<svg width="1400" height="1320" viewBox="0 0 1400 1320" xmlns="http://www.w3.org/2000/svg" role="img">
   <title>Maknae service architecture</title>
   <desc>UML 2.5.1 deployment view of Maknae installed on a host as system services: each service's account and trust plane, and which flows are built, proposed or vision.</desc>
-  <rect x="0" y="0" width="1400" height="1239" fill="#FFFFFF"/>
+  <rect x="0" y="0" width="1400" height="1320" fill="#FFFFFF"/>
 <text x="44" y="44" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#2C2C2A">Service Architecture</text>
 <text x="44" y="66" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A">UML 2.5.1 deployment view · What runs on the host, under which account, in which trust plane, and what may talk to what?</text>
 <text x="44" y="86" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">Readers: contributor, security assessor.</text>
@@ -9,12 +9,12 @@
 <rect x="44" y="104" width="1312" height="60" rx="6" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75"/>
 <line x1="58" y1="120" x2="92" y2="120" stroke="#534AB7" stroke-width="1.4"/>
 <text x="98" y="123" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" fill="#26215C">built</text>
-<line x1="168" y1="120" x2="202" y2="120" stroke="#534AB7" stroke-width="1.4" stroke-dasharray="6 4"/>
-<text x="208" y="123" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" fill="#26215C">proposed</text>
-<line x1="278" y1="120" x2="312" y2="120" stroke="#534AB7" stroke-width="1.4" stroke-dasharray="2 3"/>
-<text x="318" y="123" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" fill="#26215C">vision</text>
-<text x="58" y="140" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="700" fill="#2C2C2A">Solid = built. Dashed = proposed: designed, no code. Dotted = vision: NO ADR and NO code, unratified. The Agent Daemon, tool containers, per-tasker workspaces, the TUI, direct prompt delivery to the Egress Daemon, and shared</text>
-<text x="58" y="153" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">and dedicated modes are all vision.</text>
+<line x1="208" y1="120" x2="242" y2="120" stroke="#534AB7" stroke-width="1.4" stroke-dasharray="6 4"/>
+<text x="248" y="123" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" fill="#26215C">proposed · post-mvp</text>
+<line x1="358" y1="120" x2="392" y2="120" stroke="#534AB7" stroke-width="1.4" stroke-dasharray="2 3"/>
+<text x="398" y="123" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" fill="#26215C">vision</text>
+<text x="58" y="140" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="700" fill="#2C2C2A">Solid = built. Dashed = proposed or post-mvp: designed, no code. Dotted = vision: NO ADR and NO code, unratified. The Agent Daemon, tool containers, per-tasker workspaces, the TUI, direct prompt delivery to the Egress Daemon,</text>
+<text x="58" y="153" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">and shared and dedicated modes are all vision.</text>
 <text x="58" y="202" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#26215C">Actors</text>
 <text x="58" y="216" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">Outside the planes.</text>
 <rect x="536" y="194" width="254" height="55" rx="7" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75"/>
@@ -25,143 +25,161 @@
 <text x="825" y="212" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="700" fill="#2C2C2A">remote tasker</text>
 <text x="825" y="225" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">«actor» · proposed</text>
 <text x="825" y="238" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">OIDC principal, through the gateway.</text>
-<rect x="44" y="309" width="1312" height="129" rx="10" fill="#FBFAF7" stroke="#E2DFD6" stroke-width="0.75"/>
+<rect x="44" y="309" width="1312" height="140" rx="10" fill="#FBFAF7" stroke="#E2DFD6" stroke-width="0.75"/>
 <text x="58" y="329" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#26215C">Interaction plane</text>
 <text x="58" y="343" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">Accepts work; trusts nothing.</text>
-<rect x="536" y="321" width="254" height="105" rx="7" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
-<text x="547" y="339" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="700" fill="#04342C">maknae</text>
-<text x="547" y="352" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#0F6E56">«security-relevant» · built</text>
-<text x="547" y="365" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="700" fill="#2C2C2A">operator's uid</text>
-<text x="547" y="377" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">CLI built · TUI vision</text>
+<rect x="536" y="321" width="254" height="116" rx="7" fill="#FDEEE9" stroke="#B3452F" stroke-width="0.75"/>
+<text x="547" y="339" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="700" fill="#7A2415">maknae</text>
+<text x="547" y="352" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">«untrusted» · built</text>
+<text x="547" y="365" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="700" fill="#2C2C2A">operator's uid, in group maknae</text>
+<text x="547" y="377" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">CLI · the 0660 socket requires the group</text>
 <text x="547" y="391" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">The operator's console: status, monitoring,</text>
-<text x="547" y="402" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">tasking. Carries maknae agent, the Rust MVP</text>
-<text x="547" y="413" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">loop (ADR-0023).</text>
-<rect x="814" y="321" width="254" height="105" rx="7" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75" stroke-dasharray="6 4"/>
+<text x="547" y="402" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">tasking. The same binary runs the MVP agent</text>
+<text x="547" y="413" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">loop (maknae agent), untrusted per ADR-0023,</text>
+<text x="547" y="424" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">under the operator's uid.</text>
+<rect x="258" y="321" width="254" height="116" rx="7" fill="#FDEEE9" stroke="#B3452F" stroke-width="0.75" stroke-dasharray="2 3"/>
+<text x="269" y="339" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="700" fill="#7A2415">TUI</text>
+<text x="269" y="352" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">«untrusted» · vision</text>
+<text x="269" y="365" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="700" fill="#2C2C2A">operator's uid</text>
+<text x="269" y="377" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">terminal console</text>
+<text x="269" y="391" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">A terminal console for the operator. No ADR,</text>
+<text x="269" y="402" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">no code.</text>
+<rect x="814" y="321" width="254" height="116" rx="7" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75" stroke-dasharray="6 4"/>
 <text x="825" y="339" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="700" fill="#04342C">gateway</text>
 <text x="825" y="352" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#0F6E56">«security-relevant» · proposed</text>
 <text x="825" y="365" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="700" fill="#2C2C2A">account not set</text>
 <text x="825" y="377" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">issue #117</text>
 <text x="825" y="391" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">The remote door: channels and scheduler,</text>
-<text x="825" y="402" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">scoped task identities.</text>
-<rect x="1092" y="321" width="254" height="105" rx="7" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75" stroke-dasharray="6 4"/>
+<text x="825" y="402" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">scoped task identities. Becomes a</text>
+<text x="825" y="413" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">trust-plane PEP when #117 lands (ADR-0006</text>
+<text x="825" y="424" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">assumption 5).</text>
+<rect x="1092" y="321" width="254" height="116" rx="7" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75" stroke-dasharray="6 4"/>
 <text x="1103" y="339" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="700" fill="#04342C">web-ui</text>
 <text x="1103" y="352" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#0F6E56">«security-relevant» · post-mvp</text>
 <text x="1103" y="365" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="700" fill="#2C2C2A">account not set</text>
 <text x="1103" y="377" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">roadmap</text>
 <text x="1103" y="391" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">Browser console. Deferred.</text>
-<rect x="44" y="501" width="1312" height="193" rx="10" fill="#FBFAF7" stroke="#E2DFD6" stroke-width="0.75"/>
-<text x="58" y="521" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#26215C">Trust plane</text>
-<text x="58" y="535" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">The only trusted code.</text>
-<rect x="258" y="513" width="254" height="105" rx="7" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<text x="269" y="531" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="700" fill="#5F5E5A">vault</text>
-<text x="269" y="544" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">«vendor» · built</text>
-<text x="269" y="557" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="700" fill="#2C2C2A">external</text>
-<text x="269" y="569" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">HashiCorp Vault</text>
-<text x="269" y="583" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">AppRole, PKI and KV. Holds the provider</text>
-<text x="269" y="594" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">keys.</text>
-<rect x="536" y="513" width="254" height="105" rx="7" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
-<text x="547" y="531" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="700" fill="#26215C">maknae-egress</text>
-<text x="547" y="544" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#534AB7">«trusted» · built</text>
-<text x="547" y="557" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="700" fill="#2C2C2A">_maknae-egress</text>
-<text x="547" y="569" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">systemd socket activation · launchd</text>
-<text x="547" y="583" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">Egress Daemon. Holds provider keys from</text>
-<text x="547" y="594" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">Vault and makes the model calls.</text>
-<rect x="814" y="513" width="254" height="105" rx="7" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
-<text x="825" y="531" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="700" fill="#26215C">maknaed</text>
-<text x="825" y="544" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#534AB7">«trusted» · built</text>
-<text x="825" y="557" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="700" fill="#2C2C2A">_maknae</text>
-<text x="825" y="569" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">systemd · launchd</text>
-<text x="825" y="583" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">The sole PDP. Authorizes on metadata;</text>
-<text x="825" y="594" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">content passes through only on the prompt</text>
-<text x="825" y="605" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">relay. Audit writer.</text>
-<rect x="44" y="772" width="1312" height="176" rx="10" fill="#FBFAF7" stroke="#E2DFD6" stroke-width="0.75"/>
-<text x="58" y="792" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#26215C">Runtime plane</text>
-<text x="58" y="806" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">Untrusted by design.</text>
-<rect x="258" y="784" width="254" height="116" rx="7" fill="#FDEEE9" stroke="#B3452F" stroke-width="0.75" stroke-dasharray="2 3"/>
-<text x="269" y="802" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="700" fill="#7A2415">tool containers</text>
-<text x="269" y="815" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">«untrusted» · vision</text>
-<text x="269" y="828" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="700" fill="#2C2C2A">rootless Podman</text>
-<text x="269" y="840" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">one per invocation</text>
-<text x="269" y="854" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">Signed, pinned images exposing named</text>
-<text x="269" y="865" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">operations. Mount only the tasker's</text>
-<text x="269" y="876" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">workspace. The only containers in the</text>
-<text x="269" y="887" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">deployment.</text>
-<rect x="536" y="784" width="254" height="116" rx="7" fill="#FDEEE9" stroke="#B3452F" stroke-width="0.75" stroke-dasharray="2 3"/>
-<text x="547" y="802" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="700" fill="#7A2415">Agent Daemon</text>
-<text x="547" y="815" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">«untrusted» · vision</text>
-<text x="547" y="828" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="700" fill="#2C2C2A">_maknae-agent | maknae-agent@&lt;name&gt;</text>
-<text x="547" y="840" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">service</text>
-<text x="547" y="854" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">The autonomous agent runtime. Shared mode:</text>
-<text x="547" y="865" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">per-tasker workspace uids. Dedicated mode:</text>
-<text x="547" y="876" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">one instance per operator.</text>
-<rect x="814" y="784" width="254" height="116" rx="7" fill="#FDEEE9" stroke="#B3452F" stroke-width="0.75" stroke-dasharray="6 4"/>
-<text x="825" y="802" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="700" fill="#7A2415">lake</text>
-<text x="825" y="815" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">«untrusted» · proposed</text>
-<text x="825" y="828" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="700" fill="#2C2C2A">account not set</text>
-<text x="825" y="840" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">container-architecture.md</text>
-<text x="825" y="854" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">Knowledge Lake and memory. A policy</text>
-<text x="825" y="865" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">information point, never a decision point.</text>
-<rect x="1092" y="784" width="254" height="116" rx="7" fill="#FDEEE9" stroke="#B3452F" stroke-width="0.75" stroke-dasharray="6 4"/>
-<text x="1103" y="802" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="700" fill="#7A2415">dreamer</text>
-<text x="1103" y="815" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">«untrusted» · proposed</text>
-<text x="1103" y="828" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="700" fill="#2C2C2A">scoped identity</text>
-<text x="1103" y="840" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">container-architecture.md</text>
-<text x="1103" y="854" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">Out-of-band consolidation. Proposals only.</text>
-<path d="M 865 618 L 865 630 L 726 630 L 726 618" fill="none" stroke="#534AB7" stroke-width="1.1" marker-end="url(#sa)"/>
-<text x="795.65" y="642" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FBFAF7" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">relays the turn today · grant only (vision)</text>
-<path d="M 600 618 L 600 658 L 385 658 L 385 618" fill="none" stroke="#534AB7" stroke-width="1.1" marker-end="url(#sa)"/>
-<text x="492.25" y="670" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FBFAF7" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">provider key</text>
-<path d="M 663 900 L 663 912 L 385 912 L 385 900" fill="none" stroke="#534AB7" stroke-width="1.1" stroke-dasharray="2 3" marker-end="url(#sa)"/>
-<text x="524.0" y="924" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FBFAF7" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">spawns, kernel-decided shape</text>
+<rect x="44" y="527" width="1312" height="221" rx="10" fill="#FBFAF7" stroke="#E2DFD6" stroke-width="0.75"/>
+<text x="58" y="547" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#26215C">Trust plane</text>
+<text x="58" y="561" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">Maknae's trusted code, and the secrets</text>
+<text x="58" y="573" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">service it depends on.</text>
+<rect x="258" y="539" width="254" height="105" rx="7" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="269" y="557" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="700" fill="#5F5E5A">vault</text>
+<text x="269" y="570" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">«vendor» · built</text>
+<text x="269" y="583" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="700" fill="#2C2C2A">external</text>
+<text x="269" y="595" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">HashiCorp Vault</text>
+<text x="269" y="609" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">AppRole, PKI and KV. Holds the provider key.</text>
+<rect x="536" y="539" width="254" height="105" rx="7" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
+<text x="547" y="557" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="700" fill="#26215C">maknae-egress</text>
+<text x="547" y="570" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#534AB7">«trusted» · built</text>
+<text x="547" y="583" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="700" fill="#2C2C2A">_maknae-egress</text>
+<text x="547" y="595" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">systemd socket activation · launchd</text>
+<text x="547" y="609" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">Egress Daemon. Holds the provider key from</text>
+<text x="547" y="620" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">Vault and makes the model calls.</text>
+<rect x="814" y="539" width="254" height="105" rx="7" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
+<text x="825" y="557" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="700" fill="#26215C">maknaed</text>
+<text x="825" y="570" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#534AB7">«trusted» · built</text>
+<text x="825" y="583" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="700" fill="#2C2C2A">_maknae</text>
+<text x="825" y="595" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">systemd · launchd</text>
+<text x="825" y="609" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">The sole PDP. Authorizes on metadata;</text>
+<text x="825" y="620" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">content passes through only on the prompt</text>
+<text x="825" y="631" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">relay. Audit writer.</text>
+<rect x="44" y="826" width="1312" height="176" rx="10" fill="#FBFAF7" stroke="#E2DFD6" stroke-width="0.75"/>
+<text x="58" y="846" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#26215C">Runtime plane</text>
+<text x="58" y="860" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">Untrusted by design.</text>
+<rect x="258" y="838" width="254" height="116" rx="7" fill="#FDEEE9" stroke="#B3452F" stroke-width="0.75" stroke-dasharray="2 3"/>
+<text x="269" y="856" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="700" fill="#7A2415">tool containers</text>
+<text x="269" y="869" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">«untrusted» · vision</text>
+<text x="269" y="882" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="700" fill="#2C2C2A">rootless Podman</text>
+<text x="269" y="894" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">one per invocation</text>
+<text x="269" y="908" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">Signed, pinned images exposing named</text>
+<text x="269" y="919" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">operations. Mount only the tasker's</text>
+<text x="269" y="930" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">workspace. The only containers in the</text>
+<text x="269" y="941" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">deployment.</text>
+<rect x="536" y="838" width="254" height="116" rx="7" fill="#FDEEE9" stroke="#B3452F" stroke-width="0.75" stroke-dasharray="2 3"/>
+<text x="547" y="856" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="700" fill="#7A2415">Agent Daemon</text>
+<text x="547" y="869" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">«untrusted» · vision</text>
+<text x="547" y="882" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="700" fill="#2C2C2A">_maknae-agent | maknae-agent@&lt;name&gt;</text>
+<text x="547" y="894" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">service</text>
+<text x="547" y="908" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">The autonomous agent runtime. Shared mode:</text>
+<text x="547" y="919" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">per-tasker workspace uids. Dedicated mode:</text>
+<text x="547" y="930" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">one instance per operator.</text>
+<rect x="814" y="838" width="254" height="116" rx="7" fill="#FDEEE9" stroke="#B3452F" stroke-width="0.75" stroke-dasharray="6 4"/>
+<text x="825" y="856" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="700" fill="#7A2415">lake</text>
+<text x="825" y="869" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">«untrusted» · proposed</text>
+<text x="825" y="882" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="700" fill="#2C2C2A">account not set</text>
+<text x="825" y="894" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">container-architecture.md</text>
+<text x="825" y="908" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">Knowledge Lake and memory. A policy</text>
+<text x="825" y="919" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">information point, never a decision point.</text>
+<rect x="1092" y="838" width="254" height="116" rx="7" fill="#FDEEE9" stroke="#B3452F" stroke-width="0.75" stroke-dasharray="6 4"/>
+<text x="1103" y="856" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="700" fill="#7A2415">dreamer</text>
+<text x="1103" y="869" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">«untrusted» · proposed</text>
+<text x="1103" y="882" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="700" fill="#2C2C2A">scoped identity</text>
+<text x="1103" y="894" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">container-architecture.md</text>
+<text x="1103" y="908" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">Out-of-band consolidation. Proposals only.</text>
+<path d="M 887 644 L 887 684 L 688 684 L 688 644" fill="none" stroke="#534AB7" stroke-width="1.1" marker-end="url(#sa)"/>
+<text x="787.4857142857143" y="696" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FBFAF7" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">relays the turn today</text>
+<path d="M 923 644 L 923 656 L 739 656 L 739 644" fill="none" stroke="#534AB7" stroke-width="1.1" stroke-dasharray="2 3" marker-end="url(#sa)"/>
+<text x="831.0285714285715" y="668" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FBFAF7" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">grant only</text>
+<path d="M 850 644 L 850 712 L 427 712 L 427 644" fill="none" stroke="#534AB7" stroke-width="1.1" marker-end="url(#sa)"/>
+<text x="638.8095238095239" y="724" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FBFAF7" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">AppRole · PKI sign plane/kernel</text>
+<path d="M 587 644 L 587 656 L 343 656 L 343 644" fill="none" stroke="#534AB7" stroke-width="1.1" marker-end="url(#sa)"/>
+<text x="464.73333333333335" y="668" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FBFAF7" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">provider key</text>
+<path d="M 663 954 L 663 966 L 385 966 L 385 954" fill="none" stroke="#534AB7" stroke-width="1.1" stroke-dasharray="2 3" marker-end="url(#sa)"/>
+<text x="524.0" y="978" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FBFAF7" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">spawns, kernel-decided shape</text>
 <path d="M 663 249 C 663 285 663 285 663 321" fill="none" stroke="#534AB7" stroke-width="1.1" marker-end="url(#sa)"/>
 <text x="663.0" y="278" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">console</text>
 <path d="M 941 249 C 941 285 941 285 941 321" fill="none" stroke="#534AB7" stroke-width="1.1" stroke-dasharray="6 4" marker-end="url(#sa)"/>
 <text x="941.0" y="293" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">remote tasking</text>
-<path d="M 621 426 C 621 470 663 470 663 513" fill="none" stroke="#534AB7" stroke-width="1.1" stroke-dasharray="2 3" marker-end="url(#sa)"/>
-<text x="633.3180076628519" y="455" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">prompt content, direct</text>
-<path d="M 705 426 C 705 470 899 470 899 513" fill="none" stroke="#534AB7" stroke-width="1.1" marker-end="url(#sa)"/>
-<text x="796.4444444444797" y="470" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">decisions · prompt relay today</text>
-<path d="M 941 426 C 941 470 983 470 983 513" fill="none" stroke="#534AB7" stroke-width="1.1" stroke-dasharray="6 4" marker-end="url(#sa)"/>
-<text x="968.2490421456084" y="485" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">requests a decision</text>
-<path d="M 621 784 C 621 701 663 701 663 618" fill="none" stroke="#534AB7" stroke-width="1.1" stroke-dasharray="2 3" marker-end="url(#sa)"/>
-<text x="640.0481927711047" y="711" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">prompt content, direct</text>
-<path d="M 705 784 C 705 701 916 701 916 618" fill="none" stroke="#534AB7" stroke-width="1.1" stroke-dasharray="2 3" marker-end="url(#sa)"/>
-<text x="782.5999999998138" y="726" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">every action · tasking intake</text>
-<path d="M 941 784 C 941 701 966 701 966 618" fill="none" stroke="#534AB7" stroke-width="1.1" stroke-dasharray="6 4" marker-end="url(#sa)"/>
-<text x="948.0385542168876" y="741" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">PIP · informs only</text>
-<path d="M 1219 784 C 1219 701 1017 701 1017 618" fill="none" stroke="#534AB7" stroke-width="1.1" stroke-dasharray="6 4" marker-end="url(#sa)"/>
-<text x="1181.3144578314723" y="756" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">proposals only</text>
-<text x="44" y="980" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#26215C">Artifacts on the host</text>
-<rect x="44.0" y="992" width="252.8" height="66" rx="6" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75"/>
-<text x="55.0" y="1010" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#2C2C2A">/etc/maknae</text>
-<text x="285.8" y="1010" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">«artifact» · built</text>
-<text x="55.0" y="1024" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">Config. Root-owned; the daemons read it.</text>
-<text x="55.0" y="1044" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#2C2C2A">maknaed ro · maknae-egress ro</text>
-<rect x="308.8" y="992" width="252.8" height="66" rx="6" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75"/>
-<text x="319.8" y="1010" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#2C2C2A">/var/log/maknae</text>
-<text x="550.6" y="1010" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">«artifact» · built</text>
-<text x="319.8" y="1024" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">Audit trail. Append-only.</text>
-<text x="319.8" y="1044" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#2C2C2A">maknaed append</text>
-<rect x="573.6" y="992" width="252.8" height="66" rx="6" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75" stroke-dasharray="2 3"/>
-<text x="584.6" y="1010" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#2C2C2A">per-tasker workspaces</text>
-<text x="815.4000000000001" y="1010" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">«artifact» · vision</text>
-<text x="584.6" y="1024" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">One per tasker; a tool container mounts only its own.</text>
-<text x="584.6" y="1044" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#2C2C2A">Agent Daemon rw · tool containers rw</text>
-<rect x="838.4000000000001" y="992" width="252.8" height="66" rx="6" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75" stroke-dasharray="6 4"/>
-<text x="849.4000000000001" y="1010" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#2C2C2A">skills</text>
-<text x="1080.2" y="1010" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">«artifact» · proposed</text>
-<text x="849.4000000000001" y="1024" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">Signed manifests.</text>
-<text x="849.4000000000001" y="1044" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#2C2C2A">maknaed rw · Agent Daemon ro</text>
-<rect x="1103.2" y="992" width="252.8" height="66" rx="6" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75" stroke-dasharray="6 4"/>
-<text x="1114.2" y="1010" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#2C2C2A">lake data</text>
-<text x="1345.0" y="1010" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">«artifact» · proposed</text>
-<text x="1114.2" y="1024" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">The governed corpus. Writes brokered by the kernel.</text>
-<text x="1114.2" y="1044" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#2C2C2A">maknaed rw · lake ro · dreamer ro</text>
-<rect x="44" y="1078" width="1312" height="54" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
-<text x="58" y="1100" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="600" fill="#26215C">HOST SERVICES. Maknae installs from rpm, deb and the macOS .pkg as system services, each under its own account: systemd on Linux, launchd on macOS. The only containers drawn are tool invocations, and they are vision. A</text>
-<text x="58" y="1114" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">containerized deployment (Compose or Kubernetes) is a possible future option, designed in design/container-architecture.md; this view is the baseline it would build from.</text>
-<text x="44" y="1146" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#B3452F">Built today: the maknae CLI, maknaed under _maknae and maknae-egress under _maknae-egress, with root-owned config and an append-only audit trail. Shipped code still relays prompt content through maknaed: the CLI sends each</text>
-<text x="44" y="1159" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#B3452F">session.prompt turn to maknaed, which forwards it to maknae-egress. Direct delivery to the Egress Daemon, with maknaed issuing only the grant, is vision. ADR-0023 decides only that the loop is untrusted and that maknae agent is the</text>
-<text x="44" y="1172" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#B3452F">Rust MVP loop; it ratifies none of the vision elements.</text>
-<text x="24" y="1223" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/service-architecture.toml@4a6ab2ef27 · maknae 302c0723 · 2026-09-28</text><text x="1376" y="1223" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">UML 2.5.1 (OMG formal/2017-12-05)</text>
+<path d="M 600 437 C 600 488 385 488 385 539" fill="none" stroke="#534AB7" stroke-width="1.1" marker-end="url(#sa)"/>
+<text x="544.8235294119595" y="466" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">AppRole · mints cli leaf</text>
+<path d="M 663 437 C 663 488 663 488 663 539" fill="none" stroke="#534AB7" stroke-width="1.1" stroke-dasharray="2 3" marker-end="url(#sa)"/>
+<text x="663.0" y="481" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">prompt content, direct</text>
+<path d="M 726 437 C 726 488 899 488 899 539" fill="none" stroke="#534AB7" stroke-width="1.1" marker-end="url(#sa)"/>
+<text x="821.022875816986" y="496" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">decisions · prompt relay today</text>
+<path d="M 941 437 C 941 488 983 488 983 539" fill="none" stroke="#534AB7" stroke-width="1.1" stroke-dasharray="6 4" marker-end="url(#sa)"/>
+<text x="970.4673202614766" y="511" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">requests a decision</text>
+<path d="M 621 838 C 621 741 638 741 638 644" fill="none" stroke="#534AB7" stroke-width="1.1" stroke-dasharray="2 3" marker-end="url(#sa)"/>
+<text x="627.3003436426162" y="765" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">prompt content, direct</text>
+<path d="M 705 838 C 705 741 959 741 959 644" fill="none" stroke="#534AB7" stroke-width="1.1" stroke-dasharray="2 3" marker-end="url(#sa)"/>
+<text x="785.1394207168257" y="780" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">every action · tasking intake</text>
+<path d="M 941 838 C 941 741 995 741 995 644" fill="none" stroke="#534AB7" stroke-width="1.1" stroke-dasharray="6 4" marker-end="url(#sa)"/>
+<text x="953.9057437408337" y="795" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">PIP · informs only</text>
+<path d="M 1219 838 C 1219 741 1032 741 1032 644" fill="none" stroke="#534AB7" stroke-width="1.1" stroke-dasharray="6 4" marker-end="url(#sa)"/>
+<text x="1189.07290132554" y="810" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">proposals only</text>
+<text x="44" y="1034" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#26215C">Artifacts on the host</text>
+<rect x="44.0" y="1046" width="252.8" height="66" rx="6" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="55.0" y="1064" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#2C2C2A">/etc/maknae</text>
+<text x="285.8" y="1064" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">«artifact» · built</text>
+<text x="55.0" y="1078" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">Config. Root-owned; the daemons read it.</text>
+<text x="55.0" y="1098" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#2C2C2A">maknaed ro · maknae-egress ro</text>
+<rect x="308.8" y="1046" width="252.8" height="66" rx="6" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="319.8" y="1064" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#2C2C2A">/var/log/maknae</text>
+<text x="550.6" y="1064" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">«artifact» · built</text>
+<text x="319.8" y="1078" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">Audit trail. Append-only.</text>
+<text x="319.8" y="1098" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#2C2C2A">maknaed append</text>
+<rect x="573.6" y="1046" width="252.8" height="66" rx="6" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75" stroke-dasharray="2 3"/>
+<text x="584.6" y="1064" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#2C2C2A">per-tasker workspaces</text>
+<text x="815.4000000000001" y="1064" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">«artifact» · vision</text>
+<text x="584.6" y="1078" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">One per tasker; a tool container mounts only its own.</text>
+<text x="584.6" y="1098" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#2C2C2A">Agent Daemon rw · tool containers rw</text>
+<rect x="838.4000000000001" y="1046" width="252.8" height="66" rx="6" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75" stroke-dasharray="6 4"/>
+<text x="849.4000000000001" y="1064" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#2C2C2A">skills</text>
+<text x="1080.2" y="1064" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">«artifact» · proposed</text>
+<text x="849.4000000000001" y="1078" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">Signed manifests.</text>
+<text x="849.4000000000001" y="1098" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#2C2C2A">maknaed rw · Agent Daemon ro (vision)</text>
+<rect x="1103.2" y="1046" width="252.8" height="66" rx="6" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75" stroke-dasharray="6 4"/>
+<text x="1114.2" y="1064" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#2C2C2A">lake data</text>
+<text x="1345.0" y="1064" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">«artifact» · proposed</text>
+<text x="1114.2" y="1078" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">The governed corpus. Writes brokered by the kernel.</text>
+<text x="1114.2" y="1098" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="400" fill="#2C2C2A">maknaed rw · lake ro · dreamer ro</text>
+<rect x="44" y="1132" width="1312" height="68" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
+<text x="58" y="1154" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="600" fill="#26215C">HOST SERVICES. Maknae installs from rpm, deb and the macOS .pkg as system services, each under its own account: systemd on Linux, launchd on macOS. The only containers drawn are tool invocations, and they are vision; the OCI</text>
+<text x="58" y="1168" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">Dockerfiles in packaging/oci are a deferred stub (#81). A containerized deployment (Compose or Kubernetes) is a possible future option, designed in design/container-architecture.md; this view is the baseline it would build</text>
+<text x="58" y="1182" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">from.</text>
+<text x="44" y="1214" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#B3452F">Built today: the maknae CLI, maknaed under _maknae and maknae-egress under _maknae-egress, with root-owned config and an append-only audit trail. maknaed logs in to Vault with its own AppRole and has its plane certificate signed; the</text>
+<text x="44" y="1227" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#B3452F">CLI self-mints its cli leaf with its own AppRole, which SV-1 records as the pre-ADR-0006 model, retired by #116. Shipped code still relays prompt content through maknaed: the CLI sends each session.prompt turn to maknaed, which</text>
+<text x="44" y="1240" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#B3452F">forwards it to maknae-egress. Direct delivery to the Egress Daemon, with maknaed issuing only the grant, is vision. ADR-0023 (Proposed) decides that the loop is untrusted and is maknae agent, and that a separate Rust egress process</text>
+<text x="44" y="1253" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#B3452F">under _maknae-egress makes the model call at the kernel's direction. None of its decisions ratifies the Agent Daemon, tool containers, per-tasker workspaces, the TUI, direct prompt delivery, or shared/dedicated modes.</text>
+<text x="24" y="1304" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/service-architecture.toml@e6fc9d5eba · maknae 302c0723 · 2026-09-28</text><text x="1376" y="1304" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">UML 2.5.1 (OMG formal/2017-12-05)</text>
 </svg>
