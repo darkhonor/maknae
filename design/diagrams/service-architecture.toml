@@ -1,0 +1,262 @@
+# The Service Architecture: a UML 2.5.1 deployment view of Maknae as installed
+# on a host from the rpm, deb or macOS .pkg.
+#
+# Every node, artifact and flow carries a status:
+#   built     the shipped code and packaging do this today; [built] names the evidence
+#   proposed  designed in an ADR, design/container-architecture.md or an issue; no code
+#   vision    no ADR and no code; a direction for future capability, unratified
+#   post-mvp  deferred by the roadmap
+
+[scope]
+title = "Service Architecture"
+notation = "UML 2.5.1 deployment view"
+question = "What runs on the host, under which account, in which trust plane, and what may talk to what?"
+readers = "contributor, security assessor"
+legend = "Solid = built. Dashed = proposed: designed, no code. Dotted = vision: NO ADR and NO code, unratified. The Agent Daemon, tool containers, per-tasker workspaces, the TUI, direct prompt delivery to the Egress Daemon, and shared and dedicated modes are all vision."
+baseline = "HOST SERVICES. Maknae installs from rpm, deb and the macOS .pkg as system services, each under its own account: systemd on Linux, launchd on macOS. The only containers drawn are tool invocations, and they are vision. A containerized deployment (Compose or Kubernetes) is a possible future option, designed in design/container-architecture.md; this view is the baseline it would build from."
+evidence = "packaging/common/maknaed.service · packaging/common/maknae-egress.service · packaging/common/maknae-egress.socket · packaging/common/maknae.sysusers · packaging/macos/io.maknae.maknaed.plist · packaging/macos/io.maknae.maknae-egress.plist · packaging/isolation-contract.md · design/container-architecture.md"
+
+[built]
+claim = "Built today: the maknae CLI, maknaed under _maknae and maknae-egress under _maknae-egress, with root-owned config and an append-only audit trail. Shipped code still relays prompt content through maknaed: the CLI sends each session.prompt turn to maknaed, which forwards it to maknae-egress. Direct delivery to the Egress Daemon, with maknaed issuing only the grant, is vision. ADR-0023 decides only that the loop is untrusted and that maknae agent is the Rust MVP loop; it ratifies none of the vision elements."
+evidence = "packaging/common/maknaed.service · packaging/common/maknae-egress.service · bins/maknae/src/agent.rs · design/adr/ADR-0023-runtime-loop-role-and-placement.md"
+
+[[actor]]
+id = "operator"
+name = "operator"
+col = 1
+status = "built"
+detail = "Local. Logs in on the host."
+
+[[actor]]
+id = "tasker"
+name = "remote tasker"
+col = 2
+status = "proposed"
+detail = "OIDC principal, through the gateway."
+
+[[plane]]
+id = "interaction"
+label = "Interaction plane"
+note = "Accepts work; trusts nothing."
+
+[[plane]]
+id = "trust"
+label = "Trust plane"
+note = "The only trusted code."
+
+[[plane]]
+id = "runtime"
+label = "Runtime plane"
+note = "Untrusted by design."
+
+[[node]]
+id = "cli"
+name = "maknae"
+plane = "interaction"
+col = 1
+trust = "security-relevant"
+account = "operator's uid"
+unit = "CLI built · TUI vision"
+status = "built"
+detail = "The operator's console: status, monitoring, tasking. Carries maknae agent, the Rust MVP loop (ADR-0023)."
+
+[[node]]
+id = "gateway"
+name = "gateway"
+plane = "interaction"
+col = 2
+trust = "security-relevant"
+account = "account not set"
+unit = "issue #117"
+status = "proposed"
+detail = "The remote door: channels and scheduler, scoped task identities."
+
+[[node]]
+id = "webui"
+name = "web-ui"
+plane = "interaction"
+col = 3
+trust = "security-relevant"
+account = "account not set"
+unit = "roadmap"
+status = "post-mvp"
+detail = "Browser console. Deferred."
+
+[[node]]
+id = "vault"
+name = "vault"
+plane = "trust"
+col = 0
+trust = "vendor"
+account = "external"
+unit = "HashiCorp Vault"
+status = "built"
+detail = "AppRole, PKI and KV. Holds the provider keys."
+
+[[node]]
+id = "egress"
+name = "maknae-egress"
+plane = "trust"
+col = 1
+trust = "trusted"
+account = "_maknae-egress"
+unit = "systemd socket activation · launchd"
+status = "built"
+detail = "Egress Daemon. Holds provider keys from Vault and makes the model calls."
+
+[[node]]
+id = "maknaed"
+name = "maknaed"
+plane = "trust"
+col = 2
+trust = "trusted"
+account = "_maknae"
+unit = "systemd · launchd"
+status = "built"
+detail = "The sole PDP. Authorizes on metadata; content passes through only on the prompt relay. Audit writer."
+
+[[node]]
+id = "tools"
+name = "tool containers"
+plane = "runtime"
+col = 0
+trust = "untrusted"
+account = "rootless Podman"
+unit = "one per invocation"
+status = "vision"
+detail = "Signed, pinned images exposing named operations. Mount only the tasker's workspace. The only containers in the deployment."
+
+[[node]]
+id = "agent"
+name = "Agent Daemon"
+plane = "runtime"
+col = 1
+trust = "untrusted"
+account = "_maknae-agent | maknae-agent@<name>"
+unit = "service"
+status = "vision"
+detail = "The autonomous agent runtime. Shared mode: per-tasker workspace uids. Dedicated mode: one instance per operator."
+
+[[node]]
+id = "lake"
+name = "lake"
+plane = "runtime"
+col = 2
+trust = "untrusted"
+account = "account not set"
+unit = "container-architecture.md"
+status = "proposed"
+detail = "Knowledge Lake and memory. A policy information point, never a decision point."
+
+[[node]]
+id = "dreamer"
+name = "dreamer"
+plane = "runtime"
+col = 3
+trust = "untrusted"
+account = "scoped identity"
+unit = "container-architecture.md"
+status = "proposed"
+detail = "Out-of-band consolidation. Proposals only."
+
+[[artifact]]
+name = "/etc/maknae"
+status = "built"
+note = "Config. Root-owned; the daemons read it."
+users = ["maknaed ro", "maknae-egress ro"]
+
+[[artifact]]
+name = "/var/log/maknae"
+status = "built"
+note = "Audit trail. Append-only."
+users = ["maknaed append"]
+
+[[artifact]]
+name = "per-tasker workspaces"
+status = "vision"
+note = "One per tasker; a tool container mounts only its own."
+users = ["Agent Daemon rw", "tool containers rw"]
+
+[[artifact]]
+name = "skills"
+status = "proposed"
+note = "Signed manifests."
+users = ["maknaed rw", "Agent Daemon ro"]
+
+[[artifact]]
+name = "lake data"
+status = "proposed"
+note = "The governed corpus. Writes brokered by the kernel."
+users = ["maknaed rw", "lake ro", "dreamer ro"]
+
+[[flow]]
+from = "operator"
+to = "cli"
+label = "console"
+status = "built"
+
+[[flow]]
+from = "tasker"
+to = "gateway"
+label = "remote tasking"
+status = "proposed"
+
+[[flow]]
+from = "cli"
+to = "maknaed"
+label = "decisions · prompt relay today"
+status = "built"
+
+[[flow]]
+from = "gateway"
+to = "maknaed"
+label = "requests a decision"
+status = "proposed"
+
+[[flow]]
+from = "cli"
+to = "egress"
+label = "prompt content, direct"
+status = "vision"
+
+[[flow]]
+from = "maknaed"
+to = "egress"
+label = "relays the turn today · grant only (vision)"
+status = "built"
+
+[[flow]]
+from = "egress"
+to = "vault"
+label = "provider key"
+status = "built"
+
+[[flow]]
+from = "agent"
+to = "maknaed"
+label = "every action · tasking intake"
+status = "vision"
+
+[[flow]]
+from = "agent"
+to = "egress"
+label = "prompt content, direct"
+status = "vision"
+
+[[flow]]
+from = "agent"
+to = "tools"
+label = "spawns, kernel-decided shape"
+status = "vision"
+
+[[flow]]
+from = "lake"
+to = "maknaed"
+label = "PIP · informs only"
+status = "proposed"
+
+[[flow]]
+from = "dreamer"
+to = "maknaed"
+label = "proposals only"
+status = "proposed"
