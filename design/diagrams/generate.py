@@ -1507,7 +1507,7 @@ def service_architecture(prov: str) -> str:
             lo, hi = 0.0, 1.0
             for _ in range(40):
                 t = (lo + hi) / 2
-                yt = y1 + (y2 - y1) * (3 * t * t - 2 * t ** 3)
+                yt = y1 + (y2 - y1) * (1.5 * t - 1.5 * t * t + t ** 3)
                 if (yt < ly) == (y2 > y1):
                     lo = t
                 else:
