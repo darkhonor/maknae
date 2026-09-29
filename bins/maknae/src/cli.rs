@@ -231,6 +231,39 @@ async fn read_reply<S: tokio::io::AsyncRead + Unpin>(
         .map_err(|e| e.to_string())
 }
 
+// The group lookup, one PDP decision and the audit appends, beyond the egress deadline
+// and the reply write.
+const PROMPT_REPLY_MARGIN: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn reply_wait(
+    class: maknae_proto::FrameClass,
+    transport: &maknae_config::TransportConfig,
+) -> std::time::Duration {
+    match class {
+        maknae_proto::FrameClass::Prompt => {
+            std::time::Duration::from_millis(
+                maknae_config::EGRESS_DEADLINE_MS_MAX + maknae_config::TRANSPORT_TIMEOUT_MS_MAX,
+            ) + PROMPT_REPLY_MARGIN
+        }
+        _ => std::time::Duration::from_millis(transport.read_timeout_ms),
+    }
+}
+
+async fn await_reply<S: tokio::io::AsyncRead + Unpin>(
+    stream: &mut S,
+    class: maknae_proto::FrameClass,
+    transport: &maknae_config::TransportConfig,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
+    let wait = reply_wait(class, transport);
+    match tokio::time::timeout(wait, read_reply(stream, class, &response_caps(transport))).await {
+        Err(_elapsed) => Err(format!(
+            "no response from daemon within {}ms (stalled?)",
+            wait.as_millis()
+        )),
+        Ok(r) => r,
+    }
+}
+
 fn request_from_input(
     verb: Verb,
     content_max: usize,
@@ -531,23 +564,7 @@ pub(crate) async fn send_verb(
         Ok(r) => r.map_err(|e| e.to_string())?,
     }
 
-    // Bound the response wait by the configured `read_timeout_ms`: a daemon that accepts
-    // the connection but never answers must not hang the CLI forever (it still fails
-    // non-zero, and `execute` still revokes the token).
-    let read = tokio::time::timeout(
-        std::time::Duration::from_millis(transport.read_timeout_ms),
-        read_reply(&mut stream, class, &response_caps(transport)),
-    )
-    .await;
-    let resp_body = match read {
-        Err(_elapsed) => {
-            return Err(format!(
-                "no response from daemon within {}ms (stalled?)",
-                transport.read_timeout_ms
-            ))
-        }
-        Ok(r) => r?,
-    };
+    let resp_body = await_reply(&mut stream, class, transport).await?;
     let response = decode_response(&resp_body).map_err(|e| e.to_string())?;
 
     match response.result {
@@ -886,6 +903,91 @@ mod tests {
 
     use super::*;
     use std::sync::Mutex;
+
+    fn small_prompt_reply() -> Vec<u8> {
+        maknae_proto::encode_response(&maknae_proto::Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Ok(Payload::PromptReply(maknae_proto::PromptReply {
+                blocks: vec![maknae_proto::ContentBlock::Text {
+                    text: maknae_proto::SecretText(zeroize::Zeroizing::new("sentinel-413".into())),
+                }],
+                tool_calls: vec![],
+                usage: None,
+            })),
+        })
+        .unwrap()
+    }
+
+    async fn reply_after(
+        delay: std::time::Duration,
+        class: maknae_proto::FrameClass,
+        read_timeout_ms: u64,
+    ) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
+        let transport = maknae_config::TransportConfig {
+            read_timeout_ms,
+            ..Default::default()
+        };
+        let body = small_prompt_reply();
+        let (mut cli, mut daemon) = tokio::io::duplex(64 * 1024);
+        let writer = tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let _ = write_frame(&mut daemon, class, &body).await;
+            daemon
+        });
+        let got = await_reply(&mut cli, class, &transport).await;
+        writer.abort();
+        got
+    }
+
+    fn kernel_worst_prompt_reply() -> std::time::Duration {
+        std::time::Duration::from_millis(
+            maknae_config::EGRESS_DEADLINE_MS_MAX + maknae_config::TRANSPORT_TIMEOUT_MS_MAX,
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_prompt_reply_slower_than_read_timeout_ms_is_received() {
+        let got = reply_after(
+            std::time::Duration::from_millis(8_270),
+            maknae_proto::FrameClass::Prompt,
+            5_000,
+        )
+        .await
+        .expect("an 8.27 s model turn must not stop the agent (#413)");
+        assert_eq!(&got[..], &small_prompt_reply()[..]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_prompt_reply_just_inside_the_clis_prompt_wait_is_received() {
+        let delay =
+            kernel_worst_prompt_reply() + PROMPT_REPLY_MARGIN - std::time::Duration::from_millis(1);
+        assert!(reply_after(delay, maknae_proto::FrameClass::Prompt, 5_000)
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_prompt_that_never_answers_still_stops() {
+        let delay =
+            kernel_worst_prompt_reply() + PROMPT_REPLY_MARGIN + std::time::Duration::from_millis(1);
+        let err = reply_after(delay, maknae_proto::FrameClass::Prompt, 5_000)
+            .await
+            .unwrap_err();
+        assert_eq!(err, "no response from daemon within 690000ms (stalled?)");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn control_and_attempt_replies_are_still_bounded_by_read_timeout_ms() {
+        for class in [
+            maknae_proto::FrameClass::Control,
+            maknae_proto::FrameClass::Attempt,
+        ] {
+            let err = reply_after(std::time::Duration::from_millis(8_270), class, 5_000)
+                .await
+                .unwrap_err();
+            assert_eq!(err, "no response from daemon within 5000ms (stalled?)");
+        }
+    }
 
     // `cargo test` runs tests in this file on multiple threads by default, and
     // `MAKNAE_CONFIG_DIR` is process-wide — without this lock the two env-var
