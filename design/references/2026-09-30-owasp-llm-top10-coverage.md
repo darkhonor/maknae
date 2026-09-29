@@ -5,13 +5,13 @@
 | **Status** | Assessment record. It maps Maknae's built, planned and candidate controls to each OWASP LLM 2025 risk, and it synthesizes six supporting assessments of guard tools and architectural defenses. It creates no roadmap commitment and supersedes no ADR. Everything marked **new** below is an idea for maintainer decision, not a design. |
 | **Date** | 2026-09-30 |
 | **Subject** | The [OWASP Top 10 for LLM Applications 2025](https://genai.owasp.org/llm-top-10/) (fetched 2026-09-30), set against Maknae at `main` `dc364cb`. |
-| **Method** | Four deep dives and one landscape survey. Each read its subject's source, model cards and licenses from read-only mirrors pinned to a commit or model revision. Nothing was built, installed or executed, and no weights were downloaded. Maknae claims were checked against the tree at `dc364cb`. Public web material is context, not evidence. A fresh-context critical review and an independent codex review ran before merge. |
+| **Method** | Four deep dives and one landscape survey. Each read its subject's source, model cards and licenses from read-only mirrors pinned to a commit or model revision. Nothing was built, installed or executed, and no weights were downloaded. Maknae claims were checked against the tree at `dc364cb`. Public web material is context, not evidence. |
 | **Audience** | Maknae team (dual-audience: human reviewers and AI agents) |
 
 ## 1. The answer, in brief
 
 **No single tool covers the OWASP LLM Top 10. None can.**
-- **Coverage:** across the open-source and managed guard tools surveyed ([landscape](2026-09-30-guardrails-landscape-assessment.md) §1), none reaches full coverage on more than three of the ten rows. Every standalone model covers at most prompt injection plus a partial row or two.
+- **Coverage:** across the open-source and managed guard tools surveyed ([landscape](2026-09-30-guardrails-landscape-assessment.md) §1), none reaches full coverage on more than two of the ten rows. Every standalone model covers at most prompt injection plus a partial row or two.
 - **Robustness:** independent work defeats the model-based detectors at scale:
   - above 90% attack success for adaptive attacks against Prompt Guard (Nasr, Carlini et al., arXiv 2510.09023);
   - 65–73% against NVIDIA's jailbreak detector (Hackett et al., arXiv 2504.11168).
@@ -30,7 +30,7 @@
 - **LLM07:** "the system prompt should not be considered a secret, nor should it be used as a security control."
 
 **Maknae therefore addresses these risks in five layers, strongest first.** A content filter is the fourth layer and the weakest:
-1. **Policy in the kernel (the PDP), deciding on metadata.** Deterministic, with no added latency. Its decisions never inspect content: file content never reaches `maknaed` (#365), and prompt text is still relayed through it today, with its removal a feasibility question (#417).
+1. **Policy in the kernel (the PDP), deciding on metadata.** Deterministic, with no added latency. Its decisions never inspect content. The kernel never opens or reads a subject's file (#365). But what the agent reads still transits `maknaed` inside the next prompt turn, because prompt text is relayed through it today; removing that is a feasibility question (#417).
 2. **Native tool constraints.** Misuse is made structurally impossible rather than detected.
 3. **Supply-chain and data integrity.** Settled at build and install time, not at runtime.
 4. **A content filter as a weak signal.** It informs the kernel and never authorizes (a PIP, not a PDP).
@@ -47,19 +47,19 @@
 
 | OWASP 2025 | Layer(s) | Built today | Planned | New (this set) |
 |---|---|---|---|---|
-| **LLM01 Prompt Injection** | 1, 2, 4 | Mediation of every action, whatever the model was told (`maknaed` is the sole PDP, ADR-0005). Deny-by-default. The loop is untrusted (ADR-0023 d2). Read-before-write (#388). Tool results are data in a field (`read_file` returns `content` in JSON; a forged `"next"` is inert, #372). | Labels on content (#229). Destination zones (#147). The ceiling rises on ingest (#172 §4). | **Provenance taint / Rule of Two** (§4.1). Integrity labels (§4.2). Normalization + invisible-text check. An optional injection classifier as a weak signal (§4.4). |
-| **LLM02 Sensitive Information Disclosure** | 1, 4 | The shipped deny list (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.vault-token`, `~/.netrc`, `~/.git-credentials`, `~/.docker/config.json`, `~/.maknae`; `packaging/common/authz.yaml`). The MAC classification-ceiling operand (ADR-0008, ADR-0022). Per-role `destinations:` for model egress. The provider key never leaves the Egress Daemon (ADR-0023 d3). File content never reaches the kernel (#365). Zeroizing secret buffers (ADR-0026). | Content labels (#229). Zones (#147). Subject-scoped credentials (#168). | Taint: "sensitive read + new sink" refusable (§4.1). **Secret and PII patterns in both directions** in the Egress Daemon (§4.4). |
-| **LLM03 Supply Chain** | 3 | `deny.toml` supply-chain gate. Documented pins. `cargo auditable` SBOMs. Signed rpm/deb and Developer ID–signed, notarized macOS packages. 100% Rust TCB with `unsafe` confined to `maknae-sys` (ADR-0002, ADR-0027). | Signed CI release builds (#188, #200). | **Hash-pinned model weights** for any guard model. **Signed tool images** (Rabbithole #420 decision 12). Prefer weights with publisher signatures (Granite Guardian 4.1 ships a Sigstore bundle, [landscape](2026-09-30-guardrails-landscape-assessment.md) §2.2). |
+| **LLM01 Prompt Injection** | 1, 2, 4 | Mediation of every action the shipped loop takes through the plane, whatever the model was told (`maknaed` is the sole PDP, ADR-0005). The loop's own direct I/O is not mediated (ADR-0023 d6). Deny-by-default. The loop is untrusted (ADR-0023 d2). Read-before-write (#388). Tool results are data in a field (`read_file` returns `content` in JSON; a forged `"next"` is inert, #372). | Labels on content (#229). Destination zones (#147). The ceiling rises on ingest (#172 §4). | **Provenance taint / Rule of Two** (§4.1). Integrity labels (§4.2). Normalization + invisible-text check. An optional injection classifier as a weak signal (§4.4). |
+| **LLM02 Sensitive Information Disclosure** | 1, 4 | The shipped deny list (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.vault-token`, `~/.netrc`, `~/.git-credentials`, `~/.docker/config.json`, `~/.maknae`; `packaging/common/authz.yaml`). The shipped policy allows `Read(~/**)`, so the deny list is the home directory's confidentiality boundary. The MAC classification-ceiling operand (ADR-0008, ADR-0022), which refuses nothing yet: nothing is marked above the lowest level until #229. Per-role `destinations:` for model egress. On a packaged install the provider key is held only through the Egress Daemon's own custody (ADR-0023 d3), within stated limits: the operator's enroll token can mint an Egress Daemon SecretID, and the dev shape has no custody ([OpenShell assessment](2026-09-29-openshell-assessment.md) §8). The kernel never opens a subject's file (#365), though read content transits it in the next prompt turn. Zeroizing secret buffers (ADR-0026). | Content labels (#229). Zones (#147). Subject-scoped credentials (#168). | Taint: "sensitive read + new sink" refusable (§4.1). Integrity labels (§4.2). Flow rules over tool-call sequences (§6 row 8). **Secret and PII patterns in both directions** in a helper beside the Egress Daemon (§4.4). |
+| **LLM03 Supply Chain** | 3 | `deny.toml` supply-chain gate. Documented pins. `cargo auditable` SBOMs. Checksummed rpm/deb with optional GPG signing (the default build is unsigned, #96). A Developer ID–signed, notarized macOS `.pkg` built by hand (CI signs ad-hoc). 100% Rust TCB with `unsafe` confined to `maknae-sys` (ADR-0002, ADR-0027). | Signed Linux packages by default (#96). Signed CI release builds (#188, #200). Tool-image provenance (Rabbithole #420 decision 12, open). | **Hash-pinned model weights** for any guard model. Prefer weights with publisher signatures (Granite Guardian 4.1 ships a Sigstore bundle, [landscape](2026-09-30-guardrails-landscape-assessment.md) §2.2). |
 | **LLM04 Data and Model Poisoning** | 3 | — (Maknae trains no model) | Lake quarantine and gated promotion; authority tiers ([KLC](../knowledge-lifecycle-contract.md)). | Never load a guard model from an unpinned source; no runtime downloads (every candidate assessed downloads at runtime by default). |
-| **LLM05 Improper Output Handling** | 2, 4 | The Egress Daemon refuses a reply that proposes a tool it did not offer (`crates/maknae-llm/src/wire.rs`, `UnknownTool`), or whose tool call exceeds its declared bounds (`proposed_tool_call_is_acceptable`, `crates/maknae-proto/src/wire.rs`). Model output is never executed by the kernel. Writes are performed subject-side under a grant (#369). | Named tool operations, not argv (Rabbithole #420 decision 3). | **Schema-validated typed tool arguments** (the #423 write bound becomes an explicit schema limit). **YARA-X rules** on output that feeds a tool (code, SQL, template injection; [NeMo](2026-09-30-nemo-guardrails-assessment.md) §10). |
-| **LLM06 Excessive Agency** | 1, 2 | Deny-by-default RBAC plus the MAC ceiling, composed deny-overrides (ADR-0008). Step and tool-call caps (`agent.max_steps` default 8, max 64; `max_tool_calls_per_step` default 4, max 16; `bins/maknae/src/agent.rs`). Every action audited before it happens. | Task classes; separate grants for side effects (`pr-review:approve`); workspace confinement; the Agent Daemon (Rabbithole #420). Containment (#165, #149). | Rule of Two session bits (§4.1). **Flow rules over tool-call sequences on metadata** (after Invariant, [landscape](2026-09-30-guardrails-landscape-assessment.md) §2.5). |
+| **LLM05 Improper Output Handling** | 2, 4 | The Egress Daemon refuses a reply that proposes a tool it did not offer (`crates/maknae-llm/src/wire.rs`, `UnknownTool`), or whose tool call exceeds its declared bounds (`proposed_tool_call_is_acceptable`, `crates/maknae-proto/src/wire.rs`). Model output is never executed by the kernel. Writes are performed subject-side under a grant (#369). | The tool model is an open Rabbithole decision (#420 decision 3); named operations rather than argv are the leading candidate. | **Schema-validated typed tool arguments** (the #423 write bound becomes an explicit schema limit). **YARA-X rules** on output that feeds a tool (code, SQL, template injection; [NeMo](2026-09-30-nemo-guardrails-assessment.md) §10). |
+| **LLM06 Excessive Agency** | 1, 2 | Deny-by-default RBAC plus the MAC ceiling, composed deny-overrides (ADR-0008). Step and tool-call caps (`agent.max_steps` default 8, max 64; `max_tool_calls_per_step` default 4, max 16; `bins/maknae/src/agent.rs`). Every action the shipped loop takes through the plane is audited before it happens. | Open decisions in Rabbithole (#420, vision; no ADR, no code): task classes, separate grants for outbound side effects, workspace confinement, the Agent Daemon. Containment (#165, #149). | Rule of Two session bits (§4.1). Validated tool-argument schemas (§4.3). **Flow rules over tool-call sequences on metadata** (after Invariant, [landscape](2026-09-30-guardrails-landscape-assessment.md) §2.5). |
 | **LLM07 System Prompt Leakage** | 1 (by design), 4 | Prompts carry no authority: every decision is the kernel's. Tool definitions and core-prompt security bindings are compiled in as reviewable text (#264), holding no secrets. | — | **Canary tokens:** a nonce in the system prompt, checked for in egress output, with no model needed ([landscape](2026-09-30-guardrails-landscape-assessment.md) §2.6). |
 | **LLM08 Vector and Embedding Weaknesses** | 1, 3 | — (no vector store yet) | Lake authority tiers, provenance and quarantine (KLC). | Labels on retrieved chunks feed the same taint (§4.2). Partition by subject in the store. |
-| **LLM09 Misinformation** | (application) | Out of the kernel's scope. The audit trail records what the model was sent and what it answered. | — | Optional groundedness check as a weak signal. Not a kernel concern. |
-| **LLM10 Unbounded Consumption** | 1 | Frame caps (`transport.prompt_max_bytes`). The context budget: the agent warns at 80% and 95% and stops before the declared window (#372). Egress deadline (`egress.deadline_ms`). Step and tool-call caps. Usage tokens recorded per prompt in the trail. | — | **Per-subject and per-task token and call quotas as policy**, decided on the usage the trail already records. |
+| **LLM09 Misinformation** | (application) | Out of the kernel's scope. The trail records a digest and length of what was sent, the reply's length and token usage; it keeps no content. | — | Optional groundedness check as a weak signal. Not a kernel concern. |
+| **LLM10 Unbounded Consumption** | 1 | Frame caps (`transport.prompt_max_bytes`). The context budget: the agent warns at 80% and 95% and stops before a turn would exceed the declared context budget (#372). Egress deadline (`egress.deadline_ms`). Step and tool-call caps. Usage tokens recorded per prompt in the trail. | — | **Per-subject and per-task token and call quotas as policy**, decided on the usage the trail already records. |
 
 **Reading the map:**
-- **Layer 1 (the PDP) appears in eight of the ten rows. Layer 4 (a filter) appears in four,** and in each as a supplement.
+- **Layer 1 (the PDP) appears in six of the ten rows. Layer 4 (a filter) appears in four,** and in each as a supplement.
 - The single idea that reaches the most rows (LLM01, LLM02, LLM06 and LLM08) is provenance taint. It is metadata-only.
 
 ## 3. Why a filter cannot be the headline
@@ -78,11 +78,11 @@ The four deep dives agree on four points:
   - NeMo Guardrails sends usage telemetry to NVIDIA by default and fails open on its jailbreak rails.
   - LLM Guard is archived; its URL-reachability scanner is an SSRF and exfiltration channel.
 - **Licenses.**
-  - Meta's Llama licenses incorporate an Acceptable Use Policy, by URL and changeable, that on its face prohibits military, warfare and ITAR use. Meta's 2024 national-security announcement is not in the license text.
+  - Meta's Llama licenses incorporate an Acceptable Use Policy, by URL and changeable. Its prohibited uses include activities "that present a risk of death or bodily harm to individuals, including use of Llama 4 related to the following: Military, warfare, nuclear industries or applications, espionage", and ITAR-subject materials (Prompt Guard 2 `USE_POLICY.md`). Read conservatively, that bars a DoD deployment without written clarification from Meta; this is not legal advice. Meta's 2024 national-security announcement is not in the license text.
   - NVIDIA's Open Model License carries a unilateral-update clause.
   - Apache-2.0 alternatives exist: Protect AI's injection classifier; IBM Granite Guardian, whose weights are also Sigstore-signed; Qwen3Guard.
 
-**Latency.** Every model-based check costs about 100 ms per 512-token window on a CPU, and more for long tool results. Content-safety LLMs cost seconds on a CPU. The kernel's own checks add nothing per call.
+**Latency.** A model-based check costs about 100 ms per 128-token window and several hundred ms per 512-token window on a CPU for the 86M-class classifiers (the 22M-class model is 3–5× cheaper), and scales with the length of a tool result. Content-safety LLMs cost seconds on a CPU. The kernel's own checks add nothing per call.
 
 ## 4. The layers in detail
 
@@ -153,7 +153,7 @@ Meta's "Agents Rule of Two" (Meta AI, 2025-10-31):
 - It returns a score or label that the kernel weighs **alongside taint**. The score is **never** returned to the agent.
 
 **In order of value per cost:**
-1. **Unicode normalization and a corrected invisible-text check**, in front of everything. This closes the character-smuggling bypass class that defeated every model surveyed. It must cover:
+1. **Unicode normalization and a corrected invisible-text check**, in front of everything. This narrows the invisible-character and variation-selector channel that defeated Prompt Guard and the NVIDIA and Protect AI classifiers tested by Hackett et al. It does not address homoglyph substitution. It must cover:
    - variation selectors U+FE00–FE0F and U+E0100–E01EF, which LLM Guard's check misses;
    - tag characters U+E0000–E007F;
    - zero-width and bidi characters;
@@ -168,11 +168,11 @@ Meta's "Agents Rule of Two" (Meta AI, 2025-10-31):
 5. **Optionally, a DeBERTa injection classifier in pure Rust.** candle's `DebertaV2SeqClassificationModel`, or `tract` at a release containing the July 2026 DeBERTa fixes. Loading details:
    - weights loaded from pinned safetensors;
    - tokenizer via the `tokenizers` crate built without its C features;
-   - overlapping 512-token windows, never truncation. Every framework surveyed silently truncates.
+   - overlapping 512-token windows, never truncation. Every framework surveyed truncates by default.
 
-   The license-clean choice is Protect AI's Apache-2.0, ungated model. Meta's Prompt Guard 2 is stronger on vendor numbers but carries the Llama AUP, so it should be at most an operator-supplied, hash-pinned option. Golden-vector parity tests against the reference model are required.
+   The license-clean choice is Protect AI's Apache-2.0, ungated model, with two caveats: it is archived and unmaintained, and an independent benchmark reports heavy over-defense on benign text that discusses injection (InjecGuard, under 60%). PIGuard (MIT, same base architecture; [landscape](2026-09-30-guardrails-landscape-assessment.md) §2.10) is the alternative to evaluate. Meta's Prompt Guard 2 is stronger on vendor numbers but carries the Llama AUP, so it should be at most an operator-supplied, hash-pinned option. Golden-vector parity tests against the reference model are required.
 
-**Latency budget.** Items 1–4 cost microseconds to milliseconds. Item 5 costs about 100 ms per window on a CPU (fewer with the 22M-class model), so it should run concurrently with the kernel's decision and only on content entering the conversation.
+**Latency budget.** Items 1–4 cost microseconds to milliseconds. Item 5 costs about 100 ms per 128-token window and several hundred ms per 512-token window on a CPU (3–5× less with the 22M-class model), so it should run concurrently with the kernel's decision and only on content entering the conversation.
 
 ### 4.5 Detection and response
 
@@ -192,7 +192,7 @@ A filter's false-negative rate should be a measured number, not a vendor's.
 | Tool | Kind | Code / weights licence | Language | Air-gap as shipped | Verdict for Maknae |
 |---|---|---|---|---|---|
 | [Meta Prompt Guard 2](2026-09-30-prompt-guard-assessment.md) | DeBERTa injection classifier | MIT (LlamaFirewall wrapper) / Llama 4 Community License + AUP | Python | Partly (gated; runtime download) | Adapt: pure-Rust path, operator-supplied weights only |
-| [Meta Llama Guard 3/4](2026-09-30-llama-guard-assessment.md) | Harm-content LLM classifier | MIT / Llama 3.2 or 4 License + AUP | Python | Partly | Learn from (taxonomy, first-token scoring); avoid |
+| [Meta Llama Guard 3/4](2026-09-30-llama-guard-assessment.md) | Harm-content LLM classifier | MIT / Llama 3.1, 3.2 or 4 License + AUP | Python | Partly | Learn from (taxonomy, first-token scoring); avoid |
 | [NVIDIA NeMo Guardrails](2026-09-30-nemo-guardrails-assessment.md) | Orchestration framework (mostly LLM-judged rails) | Apache-2.0 / NVIDIA Open Model License | Python | No (telemetry and cloud endpoints by default) | Learn from; adapt YARA rules, taxonomy, JailbreakDetect design |
 | [Protect AI LLM Guard](2026-09-30-llm-guard-assessment.md) | Scanner library | MIT / Apache-2.0 (injection model) | Python | No (runtime downloads) | Archived. Port InvisibleText (fixed), Secrets regexes, the injection model |
 | [LlamaFirewall and others](2026-09-30-guardrails-landscape-assessment.md) | Survey of 20+ tools and three architectural defenses | varies | mostly Python | varies | Architectural defenses win; see §4.1–4.2 |
@@ -212,7 +212,7 @@ Each is a candidate, ranked by coverage per unit cost. None is scheduled.
 | 7 | Integrity labels as a second MAC axis | 01, 02, 08 | 1 | none | L (ADR) |
 | 8 | Flow rules over tool-call sequences (metadata) | 06, 02 | 1 | none | M |
 | 9 | YARA-X rules on tool-bound output | 05 | 4 | ms | S |
-| 10 | Pure-Rust DeBERTa injection signal (Apache-2.0 weights) | 01 | 4 | ~100 ms/window, concurrent | L |
+| 10 | Pure-Rust DeBERTa injection signal (Apache-2.0 weights) | 01 | 4 | ~100 ms per 128 tokens, concurrent | L |
 | 11 | garak / PyRIT / promptfoo suites against the running system | all (measurement) | test | n/a | M |
 
 ## 7. Open questions for the maintainer
@@ -221,7 +221,7 @@ Each is a candidate, ranked by coverage per unit cost. None is scheduled.
 2. **Integrity labels:** a second MAC axis in the kernel (an ADR), or coarse per-session taint only?
 3. **Guard helper process:** a new unprivileged service beside the Egress Daemon, as recommended, or inside the Agent Daemon's trust boundary? Which of items 2–6 in §4.4 go first?
 4. **Guard models:** is any guard model wanted at all? If so, is Apache-2.0-only a rule, which would rule out Meta's models for the DoD target?
-5. **Red-team harness:** should one run in CI, and against which provider? The maintainer's model-testing pin (`gpt-5.6-luna`) applies to any run on the maintainer's key.
+5. **Red-team harness:** should one run in CI, and against which provider?
 
 ## 8. Sources
 
