@@ -89,7 +89,7 @@ to `ci/gates/`. A stereotype is readable by anyone who knows UML; a bespoke glyp
 | `generated-data-model.svg` | IDEF1X | *What is the shape of the data we record and enforce?* | security assessor, contributor | generated |
 | `generated-system-interfaces.svg` | DoDAF SV-1 | *What talks to what, across which interfaces — and which of them actually exist?* | security assessor, accreditor | generated |
 | `generated-operational-concept.svg` | DoDAF OV-1 | *What is this system for?* | stakeholder, newcomer | generated |
-| `generated-service-architecture.svg` | UML 2.5.1 deployment view | *What runs on the host, under which account, in which trust plane, and what may talk to what?* | contributor, security assessor | generated — solid is built, dashed is proposed, dotted is **vision: no ADR, no code** (see [below](#the-service-architecture-built-and-vision)) |
+| `generated-service-architecture.svg` | UML 2.5.1 deployment view | *What runs on the host, under which account, in which trust plane, and what may talk to what?* | contributor, security assessor | generated — solid is built, dashed is proposed or post-MVP, dotted is **vision: no ADR, no code** (see [below](#the-service-architecture-built-and-vision)) |
 | `generated-agentic-patterns.svg` | UML activity partitions | *For each published agentic pattern, what does the trust boundary insert — and where is the deny path the field's diagrams omit?* | contributor, reviewer new to the project | generated — **intent, NOT authoritative** (see [`../intent/`](../intent/)) |
 | `plane-architecture.svg` | UML component | *How do the three planes relate?* | onboarding, reviewer | authored |
 | `knowledge-lifecycle.svg` | conceptual | *How does knowledge move through the lifecycle?* | onboarding | authored |
