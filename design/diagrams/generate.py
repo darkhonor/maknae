@@ -152,7 +152,7 @@ def provenance() -> str:
     inputs = ["ci/gates/lib.sh", "Cargo.toml"] + sorted(
         str(p.relative_to(ROOT)) for p in ROOT.glob("*/*/Cargo.toml")
     )
-    sha = sh("git", "log", "-1", "--format=%h", "--", *inputs).strip() or "unknown"
+    sha = sh("git", "log", "-1", "--format=%H", "--", *inputs).strip()[:8] or "unknown"
     date = sh("git", "log", "-1", "--format=%cs", "--", *inputs).strip() or "unknown"
     dirty = ""
     if sh("git", "status", "--porcelain", "--", *inputs).strip():
@@ -197,7 +197,7 @@ def _repo_anchor() -> str:
     inputs = ["ci/gates/lib.sh", "Cargo.toml"] + sorted(
         str(p.relative_to(ROOT)) for p in ROOT.glob("*/*/Cargo.toml")
     )
-    sha = sh("git", "log", "-1", "--format=%h", "--", *inputs).strip() or "unknown"
+    sha = sh("git", "log", "-1", "--format=%H", "--", *inputs).strip()[:8] or "unknown"
     date = sh("git", "log", "-1", "--format=%cs", "--", *inputs).strip() or "unknown"
     return f"{sha} · {date}"
 
