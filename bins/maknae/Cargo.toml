@@ -75,3 +75,6 @@ security-framework = "3"
 # (spec §4.1-§4.6); `cli.rs`'s wire path touches `maknae-proto`, `maknae-vault`,
 # `maknae-config`, `maknae-msgs`, `clap` and `maknae-io` (delegation arming); `agent.rs`
 # adds `maknae-agent` and nothing else.
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
