@@ -56,7 +56,7 @@ It acts only on behalf of a user, within the authorized set, using what a single
 
 ## Consequences
 
-- **A user's own processes can read that user's key** — accepted by ruling. The user's Vault identity reads the key, so any process running as the user can make a wrapped read of its own, unwrap it and call the provider without `maknaed`. That includes the untrusted loop, a modified client, and anything a model-directed write causes to run as the user (for example a git hook written under an allowed path). Such a read fails no turn. This removes the custody property ADR-0023 decision 2 and `packaging/isolation-contract.md`'s custody row asserted for the loop; the contract changes with the implementing PR. What remains: every read of a key is a wrapped read in Vault's audit log under the user's own identity, so correlating those reads with `session.prompt` records in Maknae's trail can detect a read no turn accounts for. Nothing performs that correlation yet; it is tracked as its own issue. The key is the user's own.
+- **A user's own processes can read that user's key** — accepted by ruling. The user's Vault identity reads the key, so any process running as the user can make a wrapped read of its own, unwrap it and call the provider without `maknaed`. That includes the untrusted loop, a modified client, and anything a model-directed write causes to run as the user (for example a git hook written under an allowed path). Such a read fails no turn. This removes the custody property ADR-0023 decision 2 and `packaging/isolation-contract.md`'s custody row asserted for the loop; the contract changes with the implementing PR. What remains: every read of a key is a wrapped read in Vault's audit log under the user's own identity, so correlating those reads with `session.prompt` records in Maknae's trail can detect a read no turn accounts for. Nothing performs that correlation yet; it is tracked in #429. The key is the user's own.
 - **No user can read another user's key.** Vault enforces it on each user's own identity through the templated policy.
 - **The Egress Daemon still sees each active user's key in plaintext, one call at a time.** A compromised Egress Daemon harvests the keys used while it is compromised. It no longer holds a standing grant over keys not in use.
 - **Revocation takes effect on the next turn when the user's tokens are revoked.** Deleting a userpass user alone refuses renewal but leaves issued tokens valid until they expire.
@@ -80,7 +80,7 @@ It acts only on behalf of a user, within the authorized set, using what a single
 | The credential crosses `maknaed` only sealed to the Egress Daemon and bound to its request | SC-8 (transmission confidentiality and integrity), SC-12 (key establishment), SC-13 (cryptographic protection) | Implements, once built |
 | The Egress Daemon holds no standing credential grant | AC-6 (least privilege) | Strengthens, once built |
 | The trail names user, provider and model, never key material | AU-3 (content of audit records), AU-9 (protection of audit information) | Implements, once built |
-| Key reads outside a turn are detectable | SI-4 (system monitoring), by correlating Vault's audit device with Maknae's trail | Enables detection; the correlation is not built (tracked issue) |
+| Key reads outside a turn are detectable | SI-4 (system monitoring), by correlating Vault's audit device with Maknae's trail | Enables detection; the correlation is not built (#429) |
 
 ## References
 
