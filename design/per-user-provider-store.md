@@ -1,10 +1,10 @@
 # Per-user provider configuration, and whether a database belongs in the configuration path
 
-**Status: OPEN DISCUSSION.** Nothing here is ratified, scheduled, or committed to. This document exists to **pin the idea and its candidate shapes with a date**, in the register of [`model-conduit-policy.md`](model-conduit-policy.md), [`self-development.md`](self-development.md) and [`secrets-custody-tiers.md`](secrets-custody-tiers.md): frame the problem, record what is already true, name the open questions, decide later.
+**Status: decided in part by [ADR-0028](adr/ADR-0028-per-user-model-providers-and-kernel-blind-credentials.md) (2026-10-01).** The file stays the authority for what is authorized; each user selects among authorized providers and never defines one; `maknaed` resolves the selection onto the egress frame; the Egress Daemon reads no store; and no database is introduced. A user's selection lives in their own `~/.maknae/providers.yaml`, and their key in their own Vault subtree, read with their own Vault identity. The database projection below remains an idea for a later need, such as presenting providers to many users.
 
 **Date opened:** 2026-09-13. **Originator:** Alex Ackerman ([@darkhonor](https://github.com/darkhonor)) — the idea, the refinement that makes it work, and the file-stays-authoritative framing are the maintainer's. **Deciders (eventual):** the maintainer.
 
-**This is not active work.** The current milestone is Cooky (epic [#244](https://github.com/darkhonor/maknae/issues/244)); nothing here preempts it and **no issue is opened by this document**. It is adjacent to [#306](https://github.com/darkhonor/maknae/pull/306)'s open questions 15 (*where does the per-user part live, and is it configuration at all?*) and 17 (*what identifies an authorized source?*), and it is the concrete proposal those questions were holding space for.
+The database projection is not active work. The per-user provider model this document framed is ADR-0028's.
 
 ## The idea
 
@@ -53,7 +53,7 @@ Item 4 — *"the egress agent can leverage the database for provider access"* �
 
 **The candidate that keeps the benefit and drops the cost: the KERNEL reads the store; the deputy stays a dumb executor.** The kernel already reads configuration and already decides; it resolves the subject's selected provider and puts it on the frame exactly as today. The database becomes a kernel-side store, the frame contract is unchanged, the deputy keeps its two-key document, and there is one resolver.
 
-**The exception worth examining rather than dismissing** is the custody inversion from `model-conduit-policy.md`: if a user's *credential* should never be visible to the administrator's plane, then something other than the kernel must dereference it, and that is the one argument for the deputy reaching a per-user store directly. That argument is #306's question 22 and is explicitly unresolved there; it should not be settled as a side effect of choosing a configuration store.
+**Per-user credential custody is settled by ADR-0028.** Each user's key is read with that user's own Vault identity and reaches the Egress Daemon only as a sealed, single-use wrapping token; neither `maknaed` nor the Egress Daemon holds a standing grant over users' keys.
 
 ## The engine choice is not obvious, and it follows from where enforcement lives
 
@@ -73,15 +73,15 @@ If **enforcement stays with the PDP** — which every consideration above says i
 
 ## Open questions
 
-Numbered for citation; none are answered.
+Numbered for citation. Questions 2, 5, 6 and 7 are answered by ADR-0028; the others concern the database projection and remain open.
 
 1. **Is the projection rebuilt at boot, or maintained?** A boot-time rebuild from the file is simple and cannot drift for long, but cannot reflect a file edit without a restart. A maintained projection needs a change-detection path and an answer for what a divergent row means.
-2. **What validates a user's selection — the file or the projection?** It must be the file, or a database write is a privilege escalation. Where does that check run: the kernel's boot gate, per request, or both? Note the boot gate cannot validate rows that appear later.
+2. **What validates a user's selection — the file or the projection?** It must be the file, or a database write is a privilege escalation. Where does that check run: the kernel's boot gate, per request, or both? Note the boot gate cannot validate rows that appear later. **Answered (ADR-0028):** against the file, by `maknaed`, on every request.
 3. **What is the write path for a user's own selection, and what authenticates it?** Today the only way into the trust plane is the UDS with `SO_PEERCRED` and live-session checks. A user writing their own row needs an authenticated path; if that is a DB connection, it is a second front door with its own credential problem — and if it is a Maknae verb, the database is an implementation detail rather than an interface.
 4. **Postgres or SQLite — i.e. is RLS load-bearing?** If presentation-only, SQLite costs less and removes the network service. If RLS must enforce, the database has to see the subject, which is question 3's credential problem and [#168](https://github.com/darkhonor/maknae/issues/168)'s.
-5. **Does the deputy ever read the store?** Recommended no, with the kernel resolving onto the frame. The one counter-argument is per-user credential custody (#306 question 22), which must not be settled here by accident.
-6. **What does the audit record say?** A release decision names the destination. If a *selection* came from a projection, the record should be able to say which provider a subject selected and that it was inside the authorized set — otherwise an investigator cannot reconstruct why a given destination was reached. [ADR-0019](adr/ADR-0019-audit-record-model.md) would carry it.
-7. **Does this make `provider` plural, and is that ADR-0023's amendment?** It presupposes several authorized providers, which is #306's question 14. This document does not decide it.
+5. **Does the deputy ever read the store?** Recommended no, with the kernel resolving onto the frame. The one counter-argument is per-user credential custody (#306 question 22), which must not be settled here by accident. **Answered (ADR-0028):** no database; `maknaed` resolves onto the frame, and the Egress Daemon reads only what a user's wrapping token opens.
+6. **What does the audit record say?** A release decision names the destination. If a *selection* came from a projection, the record should be able to say which provider a subject selected and that it was inside the authorized set — otherwise an investigator cannot reconstruct why a given destination was reached. [ADR-0019](adr/ADR-0019-audit-record-model.md) would carry it. **Answered (ADR-0028):** the record names the user, the provider and the model.
+7. **Does this make `provider` plural, and is that ADR-0023's amendment?** It presupposes several authorized providers, which is #306's question 14. This document does not decide it. **Answered (ADR-0028):** yes; it amends ADR-0023 decision 3.
 8. **What is the migration story, given [#268](https://github.com/darkhonor/maknae/issues/268)?** A schema in the trust plane is the first real migration Maknae would own, and #268 asked for the discipline to exist *before* the first one is needed.
 9. **What does the dormancy test say?** ADR-0024: *"if a single-subject deployment has to do something it would not otherwise do, the mechanism is wrong."* A HomeLab operator who is the only user must not have to provision a database to register one provider. Is the store optional-with-file-fallback, or is the file path the single-user shape and the store the multi-user one — and if so, do both paths get exercised?
 
