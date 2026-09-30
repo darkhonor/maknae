@@ -82,7 +82,7 @@ The four deep dives agree on four points:
   - NVIDIA's Open Model License carries a unilateral-update clause.
   - Apache-2.0 alternatives exist: Protect AI's injection classifier; IBM Granite Guardian, whose weights are also Sigstore-signed; Qwen3Guard.
 
-**Latency.** A model-based check costs about 100 ms per 128-token window and several hundred ms per 512-token window on a CPU for the 86M-class classifiers (the 22M-class model is 3–5× cheaper), and scales with the length of a tool result. Content-safety LLMs cost seconds on a CPU. The kernel's own checks add nothing per call.
+**Latency.** A model-based check costs about 100 ms per 128-token window and up to about a second per 512-token window, single-threaded on a CPU, for the 86M-class classifiers (the 22M-class model is 3–5× cheaper), and scales with the length of a tool result. Content-safety LLMs cost seconds on a CPU. The kernel's own checks add nothing per call.
 
 ## 4. The layers in detail
 
@@ -182,7 +182,7 @@ Meta's "Agents Rule of Two" (Meta AI, 2025-10-31):
 
    The license-clean choice is Protect AI's Apache-2.0, ungated model, with two caveats: it is archived and unmaintained, and an independent benchmark reports heavy over-defense on benign text that discusses injection (InjecGuard, under 60%). PIGuard (MIT, same base architecture; [landscape](2026-09-30-guardrails-landscape-assessment.md) §2.10) is the alternative to evaluate. Meta's Prompt Guard 2 is stronger on vendor numbers but carries the Llama AUP, so it should be at most an operator-supplied, hash-pinned option. Golden-vector parity tests against the reference model are required.
 
-**Latency budget.** Items 1–4 cost microseconds to milliseconds. Item 5 costs about 100 ms per 128-token window and several hundred ms per 512-token window on a CPU (3–5× less with the 22M-class model), and must complete before the kernel's decision (above). That makes it a per-turn cost to be justified by measurement (§4.5), and a reason to scan only content newly entering the conversation.
+**Latency budget.** Items 1–4 cost microseconds to milliseconds. Item 5 costs about 100 ms per 128-token window and up to about a second per 512-token window single-threaded on a CPU (3–5× less with the 22M-class model), and must complete before the kernel's decision (above). That makes it a per-turn cost to be justified by measurement (§4.5), and a reason to scan only content newly entering the conversation.
 
 ### 4.5 Detection and response
 
