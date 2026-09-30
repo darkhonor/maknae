@@ -301,7 +301,7 @@ Throughput is not published for any local rail.
 
 1. **JailbreakDetect: embedder plus random forest.**
    - Weights: the RF is under the NVIDIA Open Model License, which is redistributable with the Notice file. The Snowflake embedder is Apache-2.0.
-   - Embedder: a NomicBert-architecture encoder (rotary embeddings, SwiGLU, 2048-token context) running in `candle`, which is pure Rust. candle at `5ba5d5b` already ships it (`candle-transformers/src/models/nomic_bert.rs`), so the work is loading the Snowflake weights into it and proving parity, not a port. The alternative is `tract` running an ONNX export of the embedder.
+   - Embedder: a NomicBert-architecture encoder (rotary embeddings, SwiGLU, 2048-token context) running in `candle`, which is pure Rust. candle at `5ba5d5b` already ships it (`candle-transformers/src/models/nomic_bert.rs`), so the work is loading the Snowflake weights into it and proving parity, not a port. The alternative is `tract` running an ONNX export of the embedder. One parity note: the Snowflake `config.json` at `92d9733` sets `rotary_scaling_factor: 2`, which candle's `nomic_bert.rs` `Config` has no field for; upstream applies that scaling only beyond 2048 tokens, and NeMo truncates at 2048, so it does not arise on this path.
    - Tokenizer: the `tokenizers` crate reading `tokenizer.json`. That crate is Rust, but it pulls `onig` (C) by default unless built with `default-features = false, features = ["fancy-regex"]` [inferred].
    - Random forest:
      - Avoid the pickle entirely.

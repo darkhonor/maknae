@@ -204,7 +204,7 @@ There are no LLM- or API-backed scanners. The only EXT at scan time is URLReacha
   - Each additional ML scanner adds its own model (BanTopics' deberta-large alone is about 1.7 GB **[inferred from architecture]**).
 - **Throughput:** `batch_size` defaults to 1 (`model.py:36-38`). CHUNKS/SENTENCE mode multiplies calls per text, so latency scales with document length.
 - **[inferred] for Maknae:**
-  - The vendor's ~100–200 ms CPU figures are for a 384-character input (roughly 100 tokens), not a 512-token window; a full 512-token window costs more, extrapolating from tract's 344 ms at 256 tokens.
+  - The vendor's CPU figures, about 100–420 ms depending on host and runtime (ONNX at the low end, PyTorch at the high end), are for a 384-character input (roughly 100 tokens), not a 512-token window; a full 512-token window costs more, extrapolating from tract's 344 ms at 256 tokens.
   - A 50 KB tool result in CHUNKS mode (256-character windows with a 25-character overlap) is about 216 windows. At ~100 ms each that is **about 20 s of CPU per blob**.
   - That is incompatible with the maintainer's requirement that no latency be added on top of the policy check. The verdict must reach the kernel before the decision (§9), so the scan cannot be run asynchronously; it can only be made cheaper (a quantized model, token-based windows, fewer windows) or skipped.
 
@@ -254,7 +254,7 @@ There are no LLM- or API-backed scanners. The only EXT at scan time is URLReacha
 - **FIPS:** not directly relevant (no cryptography on the path, apart from MD5 in the redaction mode). The sidecar's own Python/OpenSSL would be a separate, non-AWS-LC crypto module if it served TLS **[inferred]**.
 - **Air gap:** feasible only with a pre-populated HF cache, NLTK data and the spaCy model baked into the package, plus offline environment flags. **URLReachability must be disabled.** The HF/NLTK/spaCy download-on-miss paths need to be made fatal.
 - **macOS on Apple Silicon:** torch, transformers, spaCy and Presidio install on Apple Silicon, and `device()` picks MPS automatically. But this is a Python-plus-wheels distribution to ship and keep patched on a production platform, and it is **unmaintained upstream** **[inferred]**.
-- **Latency:** adds the pre-decision round trip plus the scan: about 100–200 ms of CPU per ~100-token input (the vendor's 384-character figures), more for longer windows, and about 20 s for a 50 KB tool result in CHUNKS mode (§6). Scanning every tool result before the decision would dominate request latency.
+- **Latency:** adds the pre-decision round trip plus the scan: about 100–420 ms of CPU per ~100-token input, depending on host and runtime (the vendor's 384-character figures), more for longer windows, and about 20 s for a 50 KB tool result in CHUNKS mode (§6). Scanning every tool result before the decision would dominate request latency.
 - **Complexity: L.** A Python runtime and a multi-GB dependency set to package offline for two operating systems and two architectures, lifecycle and health management, pinning and a CVE watch on torch, transformers and Presidio carried by Maknae (upstream is dead), and a fail-closed protocol design. All of this for a component with known bypasses.
 
 ## 10. Taking the interesting parts and reimplementing them natively in Rust
