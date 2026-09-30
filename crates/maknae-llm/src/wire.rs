@@ -611,10 +611,10 @@ mod tests {
     #[test]
     fn write_file_states_the_argument_bound_it_is_refused_by() {
         let catalog = baseline_catalog();
-        assert!(catalog[1]
-            .function
-            .description
-            .contains(&maknae_proto::MAX_TOOL_CALL_ARGS_BYTES.to_string()));
+        assert!(catalog[1].function.description.contains(&format!(
+            "may be at most {} bytes,",
+            maknae_proto::MAX_TOOL_CALL_ARGS_BYTES
+        )));
     }
 
     /// The request carries only what Maknae sets — no sampling knobs, and

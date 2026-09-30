@@ -885,10 +885,13 @@ mod tests {
     }
 
     #[test]
-    fn a_six_kilobyte_write_proposal_is_admitted() {
+    fn a_six_kilobyte_write_file_proposal_is_admitted() {
         let reply = maknae_proto::PromptReply {
             blocks: vec![],
-            tool_calls: vec![tc(6 * 1024)],
+            tool_calls: vec![maknae_proto::ProposedToolCall {
+                name: "write_file".into(),
+                ..tc(6 * 1024)
+            }],
             usage: None,
         };
         assert_eq!(admitted_reply(&reply), Ok(()));
@@ -911,7 +914,15 @@ mod tests {
             }),
         };
         assert_eq!(admitted_reply(&reply), Ok(()));
-        assert!(reply_capacity(&reply) <= maknae_config::PROMPT_MAX_BYTES_FLOOR);
+        let cap = reply_capacity(&reply);
+        assert!(cap <= maknae_config::PROMPT_MAX_BYTES_FLOOR);
+        let r = maknae_proto::Response {
+            protocol_version: maknae_proto::PROTOCOL_VERSION,
+            result: maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(reply)),
+        };
+        let buf = maknae_proto::encode_response_zeroizing(&r, cap).unwrap();
+        assert_eq!(buf.capacity(), cap);
+        assert!(buf.len() <= cap);
     }
 
     /// An over-bound tool call is refused BEFORE anything is encoded.
