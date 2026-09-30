@@ -3,7 +3,7 @@
 - **Status:** Accepted (maintainer-ruled 2026-09-30 and 2026-10-01, issue #153). The decisions below are the maintainer's rulings. Mechanism details not stated here — file names beyond those given, the sealed-blob layout, time-to-live values — belong to the implementing pull requests.
 - **Date:** 2026-10-01
 - **Deciders:** Alex Ackerman (maintainer)
-- **Amends:** [ADR-0023](ADR-0023-runtime-loop-role-and-placement.md) decisions 2 and 3; [ADR-0006](ADR-0006-client-authentication-model.md) decisions 1 and 2 and two of its Consequences, for local users only; [ADR-0005](ADR-0005-enforcement-locus-tcb-boundary.md) decision 4's custody bullet and `maknae-vault` crate contract; [ADR-0018](ADR-0018-local-plane-authorization-deployment-model.md) decision 4 (the CLI's standing SecretID) and decision 6 (the Egress Daemon's keychain item). ADR-0023 is still Proposed; its ratification covers it as amended here.
+- **Amends:** [ADR-0023](ADR-0023-runtime-loop-role-and-placement.md) decisions 2 and 3 and two of its Consequences; [ADR-0006](ADR-0006-client-authentication-model.md) decisions 1, 2 and 4 (its credential-at-rest sentence) and two of its Consequences, for local users only; [ADR-0005](ADR-0005-enforcement-locus-tcb-boundary.md) decision 4's custody bullet and `maknae-vault` crate contract; [ADR-0018](ADR-0018-local-plane-authorization-deployment-model.md) decision 4 (the CLI's standing SecretID), decision 6 (the Egress Daemon's keychain item), its amendment banner's credential-at-rest sentence and its Terraform consequence. ADR-0023 is still Proposed; its ratification covers it as amended here.
 
 ## Terms
 
@@ -67,7 +67,7 @@ It acts only on behalf of a user, within the authorized set, using what a single
 - **Each turn adds three Vault round trips** (wrapped read, lookup, unwrap): milliseconds against a model turn.
 - **Content is not addressed.** Prompt content still transits `maknaed` (#417).
 - **One Vault server serves one Maknae instance.**
-- **ADR-0006 stays the target for remote clients,** and its certless local channel (decision 4, #114, #116) is unaffected. #116 no longer removes the local user's Vault identity or token; the shared `cli` AppRole is removed by this ADR's implementation instead.
+- **ADR-0006 stays the target for remote clients,** and its certless local plane channel (decision 4, #114, #116) is unaffected. #116 no longer removes the local user's Vault identity or token; the shared `cli` AppRole is removed by this ADR's implementation instead.
 - **Out of scope:** OAuth, a native Messages API client, non-text modalities, capability declaration, local-versus-remote destination classes (#153); destination governance (#147); the shipped `session.prompt` default (#67, #152).
 
 ## Security control mapping (informative; per ADR-0001)
