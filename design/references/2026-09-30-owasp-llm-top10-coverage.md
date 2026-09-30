@@ -48,7 +48,7 @@
 | OWASP 2025 | Layer(s) | Built today | Planned | New (this set) |
 |---|---|---|---|---|
 | **LLM01 Prompt Injection** | 1, 2, 4 | Mediation of every action the shipped loop takes through the plane, whatever the model was told (`maknaed` is the sole PDP, ADR-0005). The loop's own direct I/O is not mediated (ADR-0023 d6). Deny-by-default. The loop is untrusted (ADR-0023 d2). Read-before-write (#388). Tool results are data in a field (`read_file` returns `content` in JSON; a forged `"next"` is inert, #372). | Labels on content (#229). Destination zones (#147). The ceiling rises on ingest (#172 §4). | **Provenance taint / Rule of Two** (§4.1). Integrity labels (§4.2). Normalization + invisible-text check. An optional injection classifier as a weak signal (§4.4). |
-| **LLM02 Sensitive Information Disclosure** | 1, 4 | The shipped deny list (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.vault-token`, `~/.netrc`, `~/.git-credentials`, `~/.docker/config.json`, `~/.maknae`; `packaging/common/authz.yaml`). The shipped policy allows `Read(~/**)`, so the deny list is the home directory's confidentiality boundary. The MAC classification-ceiling operand (ADR-0008, ADR-0022), which refuses nothing yet: nothing is marked above the lowest level until #229. Per-role `destinations:` for model egress. On a packaged install the provider key is held only through the Egress Daemon's own custody (ADR-0023 d3), within stated limits: the operator's enroll token can mint an Egress Daemon SecretID, and the dev shape has no custody ([OpenShell assessment](2026-09-29-openshell-assessment.md) §8). The kernel never opens a subject's file (#365), though read content transits it in the next prompt turn. Zeroizing secret buffers (ADR-0026). | Content labels (#229). Zones (#147). Subject-scoped credentials (#168). | Taint: "sensitive read + new sink" refusable (§4.1). Integrity labels (§4.2). Flow rules over tool-call sequences (§6 row 8). **Secret and PII patterns in both directions** in a helper beside the Egress Daemon (§4.4). |
+| **LLM02 Sensitive Information Disclosure** | 1, 4 | The shipped deny list (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.vault-token`, `~/.netrc`, `~/.git-credentials`, `~/.docker/config.json`, `~/.maknae`; `packaging/common/authz.yaml`). The shipped policy allows `Read(~/**)`, so the deny list is the home directory's confidentiality boundary. The MAC classification-ceiling operand (ADR-0008, ADR-0022), which refuses nothing yet: nothing is marked above the lowest level until #229. Per-role `destinations:` for model egress. On a packaged install the provider key is held only through the Egress Daemon's own custody (ADR-0023 d3), within stated limits: the operator's enroll token can mint an Egress Daemon SecretID, and the dev shape has no custody ([OpenShell assessment](2026-09-29-openshell-assessment.md) §8). The kernel never opens a subject's file (#365), though read content transits it in the next prompt turn. Zeroizing secret buffers (ADR-0026). | Content labels (#229). Zones (#147). Subject-scoped credentials (#168). | Taint: "sensitive read + new sink" refusable (§4.1). Integrity labels (§4.2). Flow rules over tool-call sequences (§6 row 8). **Secret and PII patterns in both directions** in a helper `maknaed` consults (§4.4). |
 | **LLM03 Supply Chain** | 3 | `deny.toml` supply-chain gate. Documented pins. `cargo auditable` SBOMs. Checksummed rpm/deb with optional GPG signing (the default build is unsigned, #96). A Developer ID–signed, notarized macOS `.pkg` built by hand (CI signs ad-hoc). Maknae's own source is Rust, with `unsafe` confined to `maknae-sys` (ADR-0027); dependencies' `unsafe` is outside that gate, and the trusted processes link the AWS-LC crypto module and, on macOS, Security.framework and CoreFoundation (ADR-0002). | Signed-artifact verification (#96; the unsigned default stays). Automated signed release builds (#188, #200). Tool-image provenance (Rabbithole #420 decision 12, open). | **Hash-pinned model weights** for any guard model. Prefer weights with publisher signatures (Granite Guardian 4.1 ships a Sigstore bundle, [landscape](2026-09-30-guardrails-landscape-assessment.md) §2.2). |
 | **LLM04 Data and Model Poisoning** | 3 | — (Maknae trains no model) | Lake quarantine and gated promotion; authority tiers ([KLC](../knowledge-lifecycle-contract.md)). | Never load a guard model from an unpinned source; no runtime downloads (every candidate assessed downloads at runtime by default). |
 | **LLM05 Improper Output Handling** | 2, 4 | The Egress Daemon refuses a reply that proposes a tool it did not offer (`crates/maknae-llm/src/wire.rs`, `UnknownTool`), or whose tool call exceeds its declared bounds (`proposed_tool_call_is_acceptable`, `crates/maknae-proto/src/wire.rs`). Model output is never executed by the kernel. Writes are performed subject-side under a grant (#369). | The tool model is an open Rabbithole decision (#420 decision 3); named operations rather than argv are the leading candidate. | **Schema-validated typed tool arguments** (the #423 write bound becomes an explicit schema limit). **YARA-X rules** on output that feeds a tool (code, SQL, template injection; [NeMo](2026-09-30-nemo-guardrails-assessment.md) §10). |
@@ -157,9 +157,9 @@ Meta's "Agents Rule of Two" (Meta AI, 2025-10-31):
 - **Latency cannot be hidden by concurrency:**
   - Running the check alongside the model call means content leaves before the verdict exists.
   - The same argument rules out NeMo's speculative generation ([NeMo](2026-09-30-nemo-guardrails-assessment.md) §9).
-- **Reply-leg scanning is not possible today:**
-  - In Cooky the reply's release verdict is computed before the reply exists (ADR-0023 decision 3).
-  - Scanning model replies needs the `session.update` relay leg to become a real decision (#172, #229).
+- **Reply-side verdicts cannot bind in the kernel today:**
+  - In Cooky the reply's release verdict is computed before the reply exists (ADR-0023 decision 3), so no content-dependent release rule can bind in the kernel yet.
+  - Until the `session.update` relay leg becomes a real decision (#172, #229), a check on a model reply is **detective, not preventive**. It can record, alert and trigger containment (§4.5), but it cannot stop that reply.
 - The kernel weighs the verdict **alongside taint**. The score is **never** returned to the agent.
 
 **In order of value per cost:**
@@ -170,11 +170,11 @@ Meta's "Agents Rule of Two" (Meta AI, 2025-10-31):
    - fillers.
 
    It is pure Rust and runs in microseconds.
-2. **Secret and PII patterns in both directions**, in memory with zeroizing buffers.
+2. **Secret and PII patterns in both directions**, in memory with zeroizing buffers. On the outbound prompt it can inform the decision; on the reply it is detective until #172/#229.
    - LLM Guard's 94 provider regexes are MIT, and detect-secrets' built-ins are Apache-2.0.
    - It never writes a temp file: LLM Guard's scanner does, with `delete=False`.
-3. **Canary tokens** against system-prompt leakage (LLM07).
-4. **YARA-X rules** on model output that feeds a tool (LLM05). NeMo's rules are Apache-2.0, and YARA-X is VirusTotal's pure-Rust engine.
+3. **Canary tokens** against system-prompt leakage (LLM07). Detective: a canary in a reply is evidence of leakage, recorded and able to trigger containment.
+4. **YARA-X rules** on model output that feeds a tool (LLM05). NeMo's rules are Apache-2.0, and YARA-X is VirusTotal's pure-Rust engine. Detective on the reply until #172/#229; its verdict can inform the kernel's later decision on the flagged tool call only if it is bound to that call.
 5. **Optionally, a DeBERTa injection classifier in pure Rust.** candle's `DebertaV2SeqClassificationModel`, or `tract` at a release containing the July 2026 DeBERTa fixes. Loading details:
    - weights loaded from pinned safetensors;
    - tokenizer via the `tokenizers` crate built without its C features;
@@ -215,13 +215,13 @@ Each is a candidate, ranked by coverage per unit cost. None is scheduled.
 |---|---|---|---|---|---|
 | 1 | Provenance taint / Rule of Two session bits in the kernel | 01, 02, 06, 08 | 1 | none | M–L (needs sessions #170, labels #229) |
 | 2 | Unicode normalization + corrected invisible-text check | 01 | 4 | µs | S |
-| 3 | Secret/PII patterns, both directions, in a helper beside the Egress Daemon | 02 | 4 | ms | S–M |
+| 3 | Secret/PII patterns, both directions, in a helper `maknaed` consults (preventive outbound; detective on replies until #172/#229) | 02 | 4 | ms plus the helper round trip | S–M |
 | 4 | Explicit, validated tool-argument schemas (folds in #423) | 05, 06 | 2 | none | M |
 | 5 | Per-subject and per-task token and call quotas as policy | 10 | 1 | none | M |
-| 6 | Canary tokens | 07 | 4 | µs | S |
+| 6 | Canary tokens (detective) | 07 | 4 | µs | S |
 | 7 | Integrity labels as a second MAC axis | 01, 02, 08 | 1 | none | L (ADR) |
 | 8 | Flow rules over tool-call sequences (metadata) | 06, 02 | 1 | none | M |
-| 9 | YARA-X rules on tool-bound output | 05 | 4 | ms | S |
+| 9 | YARA-X rules on tool-bound output (detective until #172/#229) | 05 | 4 | ms | S |
 | 10 | Pure-Rust DeBERTa injection signal (Apache-2.0 weights) | 01 | 4 | ~100 ms per 128 tokens, before the decision | L |
 | 11 | garak / PyRIT / promptfoo suites against the running system | all (measurement) | test | n/a | M |
 

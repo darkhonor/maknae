@@ -108,7 +108,7 @@ The PG2-22M `tokenizer.json` is not LFS-tracked, so no hash is exposed; only its
 - **§6.** Meta may terminate for any breach; the licensee must then delete the materials.
 - **§7.** California law, exclusive California venue. That is a known sticking point for US government contracting, where federal law and the Contract Disputes Act and Anti-Deficiency Act issues around open-ended indemnities apply [inferred; needs counsel].
 
-**The AUP clause that matters for DoD.** AUP §2.1 (`PurpleLlama/Llama-Prompt-Guard-2/86M/USE_POLICY.md:41`) prohibits use "related to … **Military, warfare, nuclear industries or applications, espionage, use for materials or activities that are subject to the International Traffic Arms Regulations (ITAR)** …".
+**The AUP clause that matters for DoD.** Under "Prohibited Uses" (`PurpleLlama/Llama-Prompt-Guard-2/86M/USE_POLICY.md:39-41`; the Markdown source numbers the item 3, and it renders as the second top-level item), the AUP prohibits activities "that present a risk of death or bodily harm to individuals, including use of Llama 4 related to the following: **Military, warfare, nuclear industries or applications, espionage, use for materials or activities that are subject to the International Traffic Arms Regulations (ITAR)** …".
 
 - On 2024-11-04 Meta announced it is "making Llama available to U.S. government agencies and contractors working on national security applications" (about.fb.com, Nick Clegg) [3p/vendor statement].
 - That announcement is **not reflected in the AUP text that ships with PG2** (April 2025).
