@@ -769,13 +769,13 @@ mod tests {
         // sympathy with it. Derivation, for the reader:
         //     name "read_file"            9
         //   + call_id "call_1"            6
-        //   + arguments  (MAX_TOOL_CALL_ARGS_BYTES)   4096
+        //   + arguments  (MAX_TOOL_CALL_ARGS_BYTES)  61440
         //   + TOOL_CALL_ENVELOPE                        64
         //   + FRAME_ENVELOPE_MARGIN                    512
         //   + text length 0, blocks 0 × REPLY_BLOCK_ENVELOPE
-        //   = 4687
+        //   = 62031
         assert_eq!(
-            cap, 4687,
+            cap, 62031,
             "reply_capacity's arithmetic changed; recompute the oracle deliberately \
              rather than copying the new value"
         );
@@ -882,6 +882,47 @@ mod tests {
             usage: None,
         };
         assert_eq!(admitted_reply(&reply), Err(ReplyRefusal::NonText));
+    }
+
+    #[test]
+    fn a_six_kilobyte_write_file_proposal_is_admitted() {
+        let reply = maknae_proto::PromptReply {
+            blocks: vec![],
+            tool_calls: vec![maknae_proto::ProposedToolCall {
+                name: "write_file".into(),
+                ..tc(6 * 1024)
+            }],
+            usage: None,
+        };
+        assert_eq!(admitted_reply(&reply), Ok(()));
+    }
+
+    #[test]
+    fn a_proposal_at_every_bound_fits_the_smallest_configurable_reply_frame() {
+        let reply = maknae_proto::PromptReply {
+            blocks: vec![],
+            tool_calls: vec![maknae_proto::ProposedToolCall {
+                name: "n".repeat(maknae_proto::MAX_TOOL_CALL_NAME_BYTES),
+                call_id: "i".repeat(maknae_proto::MAX_TOOL_CALL_ID_BYTES),
+                arguments: maknae_proto::SecretText(maknae_io::Zeroizing::new(
+                    "a".repeat(maknae_proto::MAX_TOOL_CALL_ARGS_BYTES),
+                )),
+            }],
+            usage: Some(maknae_proto::Usage {
+                prompt_tokens: u64::MAX,
+                completion_tokens: Some(u64::MAX),
+            }),
+        };
+        assert_eq!(admitted_reply(&reply), Ok(()));
+        let cap = reply_capacity(&reply);
+        assert!(cap <= maknae_config::PROMPT_MAX_BYTES_FLOOR);
+        let r = maknae_proto::Response {
+            protocol_version: maknae_proto::PROTOCOL_VERSION,
+            result: maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(reply)),
+        };
+        let buf = maknae_proto::encode_response_zeroizing(&r, cap).unwrap();
+        assert_eq!(buf.capacity(), cap);
+        assert!(buf.len() <= cap);
     }
 
     /// An over-bound tool call is refused BEFORE anything is encoded.

@@ -27,7 +27,11 @@ const DEFAULT_SOCKET_PATH: &str = "/run/maknae/maknaed.sock";
 pub const MACOS_DAEMON_SOCKET_PATH: &str = "/usr/local/var/run/maknae/maknaed.sock";
 
 const MAX_CONNECTIONS_RANGE: std::ops::RangeInclusive<i64> = 1..=4096;
-const PROMPT_MAX_BYTES_RANGE: std::ops::RangeInclusive<i64> = 65_536..=16_777_216;
+/// The smallest `prompt_max_bytes` an operator can set. Exported because the
+/// tool-call argument bound is derived from it (`maknae-kernel` pins the fit).
+pub const PROMPT_MAX_BYTES_FLOOR: usize = 65_536;
+const PROMPT_MAX_BYTES_RANGE: std::ops::RangeInclusive<i64> =
+    PROMPT_MAX_BYTES_FLOOR as i64..=16_777_216;
 /// The ceiling on both transport timeouts. Named and exported because the
 /// shipped units' stop timeouts are derived from it (`maknae-kernel`'s
 /// shutdown-chain test evaluates the handler drain at this ceiling too).

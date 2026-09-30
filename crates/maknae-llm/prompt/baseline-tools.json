@@ -36,7 +36,7 @@
     "type": "function",
     "function": {
       "name": "write_file",
-      "description": "Replaces the entire contents of path with content. This is not an edit, patch, or append — whatever was there is gone. Read the file before replacing it, every page until `eof` is true if you need all of its contents. Returns one of: applied; not written — nothing was written because the file exists and you have not read it, or it changed since you read it: read it, then write again; or outcome unknown — the write may have happened: do not retry it.",
+      "description": "Replaces the entire contents of path with content. This is not an edit, patch, or append — whatever was there is gone. Read the file before replacing it, every page until `eof` is true if you need all of its contents. Returns one of: applied; not written — nothing was written because the file exists and you have not read it, or it changed since you read it: read it, then write again; or outcome unknown — the write may have happened: do not retry it. The call's arguments, as JSON with `content` escaped, may be at most 61440 bytes, and a large write must be the only call in its reply; otherwise the reply may be refused, nothing in it is written, and the task ends.",
       "parameters": {
         "type": "object",
         "properties": {

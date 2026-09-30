@@ -131,8 +131,12 @@ impl ContentBlock {
 
 /// Upper bound on a proposed tool call's argument payload (#240a). It rides
 /// the reply frame and is counted by `reply_capacity`, so it is part of the
-/// no-reallocation bound, not a style preference.
-pub const MAX_TOOL_CALL_ARGS_BYTES: usize = 4096;
+/// no-reallocation bound, not a style preference. Sized so one call at every
+/// field's bound, alone in a reply, fits the smallest
+/// `transport.prompt_max_bytes` (#423), with a deliberate margin below the
+/// exact fit; the kernel pins that, and `write_file`'s description states
+/// this number.
+pub const MAX_TOOL_CALL_ARGS_BYTES: usize = 61_440;
 /// Upper bound on the tool name. It reaches audit records and terminals.
 pub const MAX_TOOL_CALL_NAME_BYTES: usize = 64;
 /// Upper bound on the provider's opaque correlation id for the call.

@@ -594,6 +594,29 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn a_write_file_proposal_of_a_900_word_essay_is_admitted() {
+        let essay = "The quick brown fox jumps over the lazy dog, \"again\".\n".repeat(110);
+        let arguments =
+            serde_json::json!({"path": "/srv/work/essay.md", "content": essay}).to_string();
+        assert!(arguments.len() > 6000);
+        let body = serde_json::json!({"choices": [{"message": {"tool_calls": [
+            {"id": "c", "function": {"name": "write_file", "arguments": arguments}}
+        ]}}]})
+        .to_string();
+        let reply = to_prompt_reply(parse(&body).unwrap(), &offered()).unwrap();
+        assert_eq!(reply.tool_calls[0].arguments.0.as_str(), arguments);
+    }
+
+    #[test]
+    fn write_file_states_the_argument_bound_it_is_refused_by() {
+        let catalog = baseline_catalog();
+        assert!(catalog[1].function.description.contains(&format!(
+            "may be at most {} bytes,",
+            maknae_proto::MAX_TOOL_CALL_ARGS_BYTES
+        )));
+    }
+
     /// The request carries only what Maknae sets — no sampling knobs, and
     /// `stream` explicitly false rather than left to a provider default.
     #[test]
