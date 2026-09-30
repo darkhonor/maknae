@@ -14,23 +14,24 @@ Because this is a single-operator private project and every ADR carries its **to
 | 0002 | Kernel is Rust | Accepted |
 | 0003 | Cedar as the policy engine (leading candidate) | **Superseded by 0004** (demoted to an optional backend) |
 | 0004 | Modular authorization architecture — the `maknae-security` contract and its pluggable `maknae-authz-*` backends | Accepted (operator-directed 2026-08-22) |
-| 0005 | Enforcement locus & TCB boundary — split-kernel, mTLS plane transport, plane-cert identity | Accepted (finalized 2026-08-10) |
-| 0006 | Client authentication (AuthN) model — sole trust-plane door; boundary-native factors (peer-cred local, OIDC remote); uniform bounded sessions; X.509 is machine identity only | Accepted (operator-ratified 2026-08-22) — **target model**; code convergence #114/#115/#116 |
+| 0005 | Enforcement locus & TCB boundary — split-kernel, mTLS plane transport, plane-cert identity | Accepted (finalized 2026-08-10); amended 2026-10-01 by 0028 |
+| 0006 | Client authentication (AuthN) model — sole trust-plane door; boundary-native factors (peer-cred local, OIDC remote); uniform bounded sessions; X.509 is machine identity only | Accepted (operator-ratified 2026-08-22) — **target model**; code convergence #114/#115/#116; amended 2026-10-01 by 0028 |
 | 0007 | Key & signature model (non-DCS core) | Accepted (2026-08-10) |
 | 0008 | Authorization composition contract — non-removable `-basic` baseline, extensions decide by their own model and may grant, no operand fails open, unknown vocabulary denies at the composition layer | Accepted (operator-ratified 2026-08-29) |
 | 0009 | Subject-side OS DAC evaluation — fd delegation on the local lane, confinement from the daemon's own fd table, lane-conditional applicability | Accepted (operator-ratified 2026-08-30) |
 | 0010 | Action-scoped grants — the `roles:` surface, role-keyed and code-bounded; deny-overrides unchanged | **Proposed (2026-08-31)** — held Proposed by operator ruling; expected to change as the verb vocabulary is built out |
 | 0016 | Risk-tiered test coverage — tiers, mutation, fail-closed gate | Accepted (2026-08-04) |
-| 0018 | Local-plane authorization & deployment model — group+cert gate, `maknae enroll`, periodic-token continuous operation | Accepted (2026-08-11) |
+| 0018 | Local-plane authorization & deployment model — group+cert gate, `maknae enroll`, periodic-token continuous operation | Accepted (2026-08-11); amended 2026-10-01 by 0028 |
 | 0019 | Audit record model — AU-3-complete content now, crypto integrity/non-repudiation deferred to ADR-0007 | Accepted (2026-08-11) |
 | 0020 | Access-control model & vocabulary — CNSSI 4009-aligned RBAC/ABAC over DAC/MAC, deny-overrides, no clearance bypass | Accepted (2026-08-21) |
 | 0021 | Fail-closed storage I/O tightenings | Accepted (operator-ratified 2026-08-26) *(row added 2026-09-07)* |
 | 0022 | A `ClassificationPolicy` seam — kernel ships US, `maknae-classification-aus` ships PSPF, `rust-dcs` brings the lattice | Accepted (operator-ratified 2026-09-06) *(row added 2026-09-07)*; amended 2026-09-26: sensitivity categories enter the base build, fail-closed at egress for validated detections (decision 10) |
-| 0023 | The runtime loop is the ACP Agent, the kernel the Client — Rust MVP loop as `maknae agent`, model egress brokered per turn | **Proposed (2026-09-07)** — Cooky's implementation issues cite it while Proposed, as with 0010; ratification at or after #242 |
+| 0023 | The runtime loop is the ACP Agent, the kernel the Client — Rust MVP loop as `maknae agent`, model egress brokered per turn | **Proposed (2026-09-07)** — Cooky's implementation issues cite it while Proposed, as with 0010; ratification at or after #242; amended 2026-10-01 by 0028 |
 | 0024 | Tenancy model — Maknae is multi-tenant (several humans, several agent personas, one kernel); every subject is uid-derived and an agent holds no identity of its own; the reserved `agent` token is struck | Accepted (operator-ratified 2026-09-10) |
 | 0025 | FIPS 140-3 validation is a design goal, not a constraint — the `aws-lc-rs <1.18` pin is struck and Maknae builds on the AWS-LC-FIPS 4.x module while it is under CMVP review; the certificate is not tracked | Accepted (maintainer-ruled 2026-09-19) |
 | 0026 | The memory-hygiene boundary — a Maknae-owned buffer of secret-class bytes (content, prompt and reply text, the provider key; Vault authentication material is out of scope) must zeroize from allocation and never grow (the pre-existing sites that do not are listed); third-party codec and transport intermediates (ciborium growth, reqwest/serde_json/hyper/rustls both directions, vaultrs, the bearer header) are a named residual, listed in the ADR | Accepted (maintainer-ruled 2026-09-22, Option A; written 2026-09-25) |
 | 0027 | Unsafe code is confined to `maknae-sys`: one crate under its own `deny`/`forbid` lints, with a safe public surface only, gated by `unsafe-confinement.sh` and native clippy; `unsafe_code = "forbid"` stays on every other member | Accepted (maintainer-ruled 2026-09-28) |
+| 0028 | Per-user model providers with kernel-blind credentials — root-owned authorized set (0..n, admin-pinned models); per-user selection; keys only in Vault under a kernel-derived per-user path, read with the user's own userpass identity; sealed wrapping token the kernel cannot open; Egress Daemon holds no Vault identity | Accepted (maintainer-ruled 2026-09-30 and 2026-10-01) |
 
 A number not in this table is available. The registry lists **written ADRs only** — no reservations.
 
