@@ -518,9 +518,9 @@ These are designs, not filters. The OWASP rows follow the matrix conventions abo
 
 **Is there any single filter that covers the whole Top 10? No.**
 
-- No tool in this survey, open or managed, reaches ✓ on more than three rows. Most reach ✓ on at most one.
+- No tool in this survey, open or managed, reaches ✓ on more than two rows. Most reach ✓ on at most one.
 - **The widest runtime coverage comes from frameworks** (NeMo Guardrails, Guardrails AI, LlamaFirewall, Invariant). They get it by **composing several detectors**, not from one model.
-- **Every single model** (Prompt Guard, Granite Guardian, ShieldGemma, Qwen3Guard, the DeBERTa classifiers) **covers at most LLM01 plus a partial row or two**.
+- **Almost every single model** (Prompt Guard, ShieldGemma, Qwen3Guard, the DeBERTa classifiers) **covers at most LLM01 plus a partial row or two**. Granite Guardian, a bring-your-own-criteria judge, is the exception in breadth: partial on five rows, full on none.
 - Even on LLM01, OWASP itself states that no fool-proof prevention is known.
 
 **Rows that are inherently architectural, where no content filter can address the risk itself:**
@@ -537,11 +537,9 @@ These are designs, not filters. The OWASP rows follow the matrix conventions abo
 **Implication for Maknae [inferred]:**
 
 - The strongest controls in this survey that fit Maknae are the *architectural* ones, and their decisions are expressible on metadata alone: the Rule of Two session bits, FIDES/CaMeL-style integrity and confidentiality labels, and Invariant-style flow rules over tool-call sequences. They fit a `maknaed` whose decisions never inspect content (it relays prompt content to the Egress Daemon today, but decides on the subject, the verb, the object and its marking), and they use the mandatory-operand machinery that the classification-ceiling operand already has. Their reach is bounded by the mediation caveat at the head of §3.
-- A content filter remains a PIP producing one more attribute, which `maknaed` must receive before it decides (see the [coverage map](2026-09-30-owasp-llm-top10-coverage.md) §4.4). The cheapest pure-Rust wins surfaced here need no model:
-  - canary tokens;
-  - Unicode tag-character / hidden-ASCII detection;
-  - secrets regexes;
-  - output schema validation.
+- A content filter remains a PIP producing one more attribute. For outbound content, `maknaed` must receive it before it decides (see the [coverage map](2026-09-30-owasp-llm-top10-coverage.md) §4.4). The cheapest pure-Rust wins surfaced here need no model, and split by where they act:
+  - **Before the decision (preventive):** Unicode tag-character / hidden-ASCII detection, and secrets regexes on the outbound turn.
+  - **On replies (detective until the relay leg becomes a decision, #172/#229):** canary tokens, secrets regexes on the reply, and output checks beyond the shape validation of tool calls that Maknae already performs (`UnknownTool` in `crates/maknae-llm/src/wire.rs`; `admitted_reply` in `crates/maknae-kernel/src/egress.rs`, at `dc364cb`).
 
 ## 5. Sources (pinned)
 
