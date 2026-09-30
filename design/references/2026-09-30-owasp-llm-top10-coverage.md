@@ -13,7 +13,7 @@
 **No single tool covers the OWASP LLM Top 10. None can.**
 - **Coverage:** across the open-source and managed guard tools surveyed ([landscape](2026-09-30-guardrails-landscape-assessment.md) §1), none reaches full coverage on more than two of the ten rows. Every standalone model covers at most prompt injection plus a partial row or two.
 - **Robustness:** independent work defeats the model-based detectors at scale:
-  - above 90% attack success for adaptive attacks against Prompt Guard (Nasr, Carlini et al., arXiv 2510.09023);
+  - above 90% attack success for adaptive attacks against Prompt Guard when the detector's score is fed back to the attacker (75% against a GPT-5 Mini target; Nasr, Carlini et al., arXiv 2510.09023). Maknae never returning the score removes that precondition, but not the attack class;
   - 65–73% against NVIDIA's jailbreak detector (Hackett et al., arXiv 2504.11168).
 - **OWASP's own position** on LLM01 is that "it is unclear if there are fool-proof methods of prevention for prompt injection".
 
@@ -69,7 +69,7 @@ The four deep dives agree on four points:
   - [Prompt Guard 2](2026-09-30-prompt-guard-assessment.md) detects only explicit "ignore previous instructions" phrasing; Meta dropped its broader injection label as "too broad".
   - [Llama Guard](2026-09-30-llama-guard-assessment.md) is a harm-content classifier. An independent ACL 2025 study measured at most 39% accuracy on injected documents.
 - **Robustness.**
-  - Adaptive attacks exceed 90% success against Prompt Guard.
+  - Adaptive attacks exceed 90% success against Prompt Guard when the attacker sees its score.
   - Character smuggling (invisible Unicode, variation selectors, homoglyphs) and word-level perturbation defeat [LLM Guard's](2026-09-30-llm-guard-assessment.md) classifier (67.87%) and NVIDIA's jailbreak model (65–73%).
   - Scores returned to an agent become an oracle for the attacker.
 - **Operations.**
@@ -148,9 +148,19 @@ Meta's "Agents Rule of Two" (Meta AI, 2025-10-31):
 
 ### 4.4 A content filter as a weak signal (layer 4)
 
-**Placement:**
-- In an **unprivileged helper process** beside the Egress Daemon, never in the key-holding Egress Daemon itself (ADR-0002: torch, onnxruntime or libyara are C or C++), and never in `maknaed`.
-- It returns a score or label that the kernel weighs **alongside taint**. The score is **never** returned to the agent.
+**Placement and ordering.** ADR-0023 decision 3 fixes the order: `maknaed` decides `session.prompt` and durably records the intent *before* the Egress Daemon receives the turn. A content verdict therefore has value only if it reaches `maknaed` **before** that decision.
+- **Placement:**
+  - The filter runs in an **unprivileged helper process**.
+  - It never runs in the key-holding Egress Daemon itself, because ADR-0002 holds the egress process to Rust and torch, onnxruntime and libyara are C or C++. It never runs in `maknaed` either.
+  - `maknaed` consults the helper, or receives its verdict, before deciding.
+- **Cost:** a helper beside the Egress Daemon would see content only after the decision, so consulting one is a new channel and an extra round trip on the decision path. That is a real latency cost on every prompt turn, and it is paid only by the checks in §4.4.
+- **Latency cannot be hidden by concurrency:**
+  - Running the check alongside the model call means content leaves before the verdict exists.
+  - The same argument rules out NeMo's speculative generation ([NeMo](2026-09-30-nemo-guardrails-assessment.md) §9).
+- **Reply-leg scanning is not possible today:**
+  - In Cooky the reply's release verdict is computed before the reply exists (ADR-0023 decision 3).
+  - Scanning model replies needs the `session.update` relay leg to become a real decision (#172, #229).
+- The kernel weighs the verdict **alongside taint**. The score is **never** returned to the agent.
 
 **In order of value per cost:**
 1. **Unicode normalization and a corrected invisible-text check**, in front of everything. This narrows the invisible-character and variation-selector channel that defeated Prompt Guard and the NVIDIA and Protect AI classifiers tested by Hackett et al. It does not address homoglyph substitution. It must cover:
@@ -172,7 +182,7 @@ Meta's "Agents Rule of Two" (Meta AI, 2025-10-31):
 
    The license-clean choice is Protect AI's Apache-2.0, ungated model, with two caveats: it is archived and unmaintained, and an independent benchmark reports heavy over-defense on benign text that discusses injection (InjecGuard, under 60%). PIGuard (MIT, same base architecture; [landscape](2026-09-30-guardrails-landscape-assessment.md) §2.10) is the alternative to evaluate. Meta's Prompt Guard 2 is stronger on vendor numbers but carries the Llama AUP, so it should be at most an operator-supplied, hash-pinned option. Golden-vector parity tests against the reference model are required.
 
-**Latency budget.** Items 1–4 cost microseconds to milliseconds. Item 5 costs about 100 ms per 128-token window and several hundred ms per 512-token window on a CPU (3–5× less with the 22M-class model), so it should run concurrently with the kernel's decision and only on content entering the conversation.
+**Latency budget.** Items 1–4 cost microseconds to milliseconds. Item 5 costs about 100 ms per 128-token window and several hundred ms per 512-token window on a CPU (3–5× less with the 22M-class model), and must complete before the kernel's decision (above). That makes it a per-turn cost to be justified by measurement (§4.5), and a reason to scan only content newly entering the conversation.
 
 ### 4.5 Detection and response
 
@@ -219,7 +229,7 @@ Each is a candidate, ranked by coverage per unit cost. None is scheduled.
 
 1. **Rule of Two:** deny the third property outright, or require a separately granted approval? At what grain: session, task or task class?
 2. **Integrity labels:** a second MAC axis in the kernel (an ADR), or coarse per-session taint only?
-3. **Guard helper process:** a new unprivileged service beside the Egress Daemon, as recommended, or inside the Agent Daemon's trust boundary? Which of items 2–6 in §4.4 go first?
+3. **Guard helper process:** `maknaed` must have the verdict before it decides (§4.4). Is a new unprivileged helper that `maknaed` consults on each prompt turn acceptable, given the extra round trip on the decision path? Or should the cheap deterministic checks (items 1–4) run somewhere already on that path? Which of items 1–5 in §4.4 go first?
 4. **Guard models:** is any guard model wanted at all? If so, is Apache-2.0-only a rule, which would rule out Meta's models for the DoD target?
 5. **Red-team harness:** should one run in CI, and against which provider?
 
