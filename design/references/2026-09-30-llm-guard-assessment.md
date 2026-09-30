@@ -4,7 +4,7 @@
 |---|---|
 | **Status** | Assessment record. It informs the OWASP LLM coverage work. It creates no roadmap commitment and supersedes no ADR. |
 | **Date** | 2026-09-30 |
-| **Subject** | [`protectai/llm-guard`](https://github.com/protectai/llm-guard) at commit [`168c103`](https://github.com/protectai/llm-guard/tree/168c1034ffdb33837e7ae6fd6a16b80567c1be03) (2026-07-09, "Archiving Project (#355)"), with its default injection model [`protectai/deberta-v3-base-prompt-injection-v2`](https://huggingface.co/protectai/deberta-v3-base-prompt-injection-v2/tree/90c9989b1a342275dd0d1a95aad283c04e075671) at HF revision `90c9989` (HEAD, a README-only archive notice). A Python library of independent input and output scanners; code MIT, the injection model Apache-2.0. **Archived upstream.** |
+| **Subject** | [`protectai/llm-guard`](https://github.com/protectai/llm-guard) at commit [`168c103`](https://github.com/protectai/llm-guard/tree/168c1034ffdb33837e7ae6fd6a16b80567c1be03) (2026-07-08T23:58:39Z, "Archiving Project (#355)"), with its default injection model [`protectai/deberta-v3-base-prompt-injection-v2`](https://huggingface.co/protectai/deberta-v3-base-prompt-injection-v2/tree/90c9989b1a342275dd0d1a95aad283c04e075671) at HF revision `90c9989` (HEAD, a README-only archive notice dated 2026-07-09). A Python library of independent input and output scanners; code MIT, the injection model Apache-2.0. **Archived upstream.** |
 | **Method** | The repository and the model's card, configs and tokenizer files were mirrored outside this tree and **read only**: nothing was built, installed or executed from the candidate, and no weight files were downloaded. Evidence labels: **[code]** read in the pinned source; **[card]** vendor model card or docs (documented by the vendor); **[measured]** measured during this assessment, and only with Python's standard-library `unicodedata` module, never the candidate's code; **[inferred]** reasoning; **[web]** public web, context not evidence. Public web material is context only and is marked as such. |
 | **Audience** | Maknae team (dual-audience: human reviewers and AI agents) |
 
@@ -16,9 +16,9 @@ This assessment is one of a set of four guard-model assessments ([Prompt Guard](
 
 ## 0. Disposition (read first)
 
-**The proposed use.** Maknae is evaluating a content and prompt-injection filter that inspects prompt text, tool results (file content the loop read, which returns to the trust plane in the next `session.prompt` turn) and model replies, and gives the kernel a recommendation. The filter would be a Policy Information Point (PIP), never a Policy Decision Point (PDP): `maknaed` stays the sole PDP (ADR-0005), and the content informs but never authorizes (AGENTS.md core principle 2). The candidate placement is beside the Egress Daemon (`maknae-egress`), which already receives prompt content from `maknaed` today (ADR-0023 decision 3). The maintainer does not want latency added on top of the policy check.
+**The proposed use.** Maknae is evaluating a content and prompt-injection filter that inspects prompt text, tool results (file content the loop read, which returns to the trust plane in the next `session.prompt` turn) and model replies, and gives the kernel a recommendation. The filter would be a Policy Information Point (PIP), never a Policy Decision Point (PDP): `maknaed` stays the sole PDP (ADR-0005), and the content informs but never authorizes (AGENTS.md core principle 2). The candidate placement is beside the Egress Daemon (`maknae-egress`), which already receives prompt content from `maknaed` today, but only after the kernel has decided and recorded the turn (ADR-0023 decision 3); §9 states what that order costs a filter. The maintainer does not want latency added on top of the policy check.
 
-**LLM Guard is archived** (2026-07-09) after Protect AI's acquisition by Palo Alto Networks (completed 2025-07-22). It is a Python/torch/Presidio stack that pulls models and NLP data at runtime, and two of its scanners are actively hostile to a trust plane: URLReachability fetches attacker-chosen URLs, and Secrets spills prompts to temporary files. Its worthwhile parts are small and portable.
+**LLM Guard is archived** (July 2026) after Protect AI's acquisition by Palo Alto Networks (completed 2025-07-22). It is a Python/torch/Presidio stack that pulls models and NLP data at runtime, and two of its scanners are actively hostile to a trust plane: URLReachability fetches attacker-chosen URLs, and Secrets spills prompts to temporary files. Its worthwhile parts are small and portable.
 
 **Verdict: learn from, and adapt the pieces; avoid adopting it as-is.** The full verdict is §11.
 
@@ -31,7 +31,7 @@ This assessment is one of a set of four guard-model assessments ([Prompt Guard](
   - Cadence: roughly monthly through 2024, then about one release a year.
 - **Activity:**
   - The last functional commit was `9e007675b9` on 2025-09-03 (a placeholder fix).
-  - The repository was **archived on 2026-07-09** (read-only; GitHub API `archived: true`, `pushed_at 2026-07-08T23:58:40Z`). There are 38 open issues frozen, 3,213 stars and 462 forks.
+  - The repository is **archived** (read-only; GitHub API `archived: true`, `pushed_at 2026-07-08T23:58:40Z`). The last commit, `168c103` "Archiving Project (#355)", is dated 2026-07-08T23:58:39Z (UTC), and the matching archive notice on the HF model card is commit `90c9989`, dated 2026-07-09; the archive date is taken as 2026-07-08/09. There are 38 open issues and PRs frozen (GitHub's `open_issues_count`, which counts both), 3,213 stars and 462 forks.
   - `README.md:1-4`: "THIS PROJECT HAS BEEN ARCHIVED. This project and its associated models on Hugging Face are no longer under active development or maintained." The HF model card carries the same banner (model card `README.md:31-34`).
 - **Ownership change:**
   - Palo Alto Networks announced its intent to acquire Protect AI on 2025-04-28 and **completed the acquisition on 2025-07-22** [web: PANW press releases]. Protect AI's technology was folded into **Prisma AIRS** [web].
@@ -168,7 +168,7 @@ There are no LLM- or API-backed scanners. The only EXT at scan time is URLReacha
   - U+034F (Mn);
   - U+3164 / U+115F Hangul fillers (Lo);
   - U+2800 Braille blank (So).
-- **[inferred]** Therefore the default LLM Guard stack (InvisibleText + PromptInjection) is bypassable by variation-selector smuggling end to end. This was not run; it follows from the two facts above.
+- **[inferred]** Therefore a stack of InvisibleText + PromptInjection is bypassable by variation-selector smuggling end to end. This was not run; it follows from the two facts above.
 - **[code]** InvisibleText also **strips ZWJ/ZWNJ**, which breaks emoji sequences and legitimately required joiners in Persian and Indic scripts. It flags any Private-Use character as an attack. Pure-ASCII input returns early (`invisible_text.py:24-29`).
 
 ## 5. Language, runtime and dependencies
@@ -197,14 +197,16 @@ There are no LLM- or API-backed scanners. The only EXT at scan time is URLReacha
 | AWS g5.xlarge GPU | 81.01 ms | **7.65 ms** |
 
   The "QPS" column in that table (for example 3,684 QPS at 104 ms) is arithmetically inconsistent with a single stream, so treat it as characters per second or ignore it **[inferred]**.
-- **candle reference timing [web / vendor example, not this model]:** the candle `debertav2` README reports about 108 ms "Inferenced inputs" for a DeBERTa-v2 text-classification model on CUDA (candle `candle-examples/examples/debertav2/README.md`). This is not comparable CPU data.
+- **candle reference timing [3p: the candle project's example README]:** the candle `debertav2` example runs **exactly this model**, `protectai/deberta-v3-base-prompt-injection-v2`, on one short sentence: "Inferenced inputs in" 123.78 ms with `--cpu` (CPU model not stated) and 100.01 ms on CUDA (candle `candle-examples/examples/debertav2/README.md:113-132`).
+- **Longer inputs [3p]:** tract, pure Rust, measured a DeBERTa-v3-base classifier at about 132 ms for 128 tokens and 344 ms for 256 tokens, single-threaded on an Apple M4 Pro (sonos/tract PR #2531; see the [Prompt Guard assessment](2026-09-30-prompt-guard-assessment.md) §6). Cost grows superlinearly with length.
 - **Memory:**
   - **[inferred]** about 0.75 GB of weights resident in fp32, plus torch/transformers runtime overhead. A Python process with torch + Presidio + spaCy is typically multi-GB.
   - Each additional ML scanner adds its own model (BanTopics' deberta-large alone is about 1.7 GB **[inferred from architecture]**).
 - **Throughput:** `batch_size` defaults to 1 (`model.py:36-38`). CHUNKS/SENTENCE mode multiplies calls per text, so latency scales with document length.
 - **[inferred] for Maknae:**
-  - About 100–200 ms of CPU per ≤512-token window, **per scanned blob**. A 50 KB tool result in CHUNKS mode (256 characters) is about 200 windows, which is seconds of CPU.
-  - That is incompatible with "no delay on top of the policy check" unless it runs asynchronously, only on flagged content, or on a quantized model.
+  - The vendor's ~100–200 ms CPU figures are for a 384-character input (roughly 100 tokens), not a 512-token window; a full 512-token window costs more, extrapolating from tract's 344 ms at 256 tokens.
+  - A 50 KB tool result in CHUNKS mode (256-character windows with a 25-character overlap) is about 216 windows. At ~100 ms each that is **about 20 s of CPU per blob**.
+  - That is incompatible with the maintainer's requirement that no latency be added on top of the policy check. The verdict must reach the kernel before the decision (§9), so the scan cannot be run asynchronously; it can only be made cheaper (a quantized model, token-based windows, fewer windows) or skipped.
 
 ## 7. Strengths
 
@@ -217,7 +219,7 @@ There are no LLM- or API-backed scanners. The only EXT at scan time is URLReacha
 ## 8. Weaknesses
 
 - **Maintenance risk: terminal.**
-  - The code and models are archived (2026-07-09). The last release was 2025-05-19. The owner was acquired (Palo Alto Networks, completed 2025-07-22), and the capability moved into the proprietary Prisma AIRS.
+  - The code and models are archived (July 2026). The last release was 2025-05-19. The owner was acquired (Palo Alto Networks, completed 2025-07-22), and the capability moved into the proprietary Prisma AIRS.
   - There will be no fixes for new bypasses, no retraining and no CVE response.
 - **False positives:**
   - Over-defense on trigger words (InjecGuard, NotInject <60% **[web]**).
@@ -236,22 +238,23 @@ There are no LLM- or API-backed scanners. The only EXT at scan time is URLReacha
   - There is no signing or provenance on the PyPI wheel or the model files.
 - **Dangerous behaviours for a trust-plane component:**
   - **URLReachability performs SSRF on attacker-controlled input:** it issues GET requests to every URL in model output (`url_reachabitlity.py:38`). For an agent that is a ready-made **data-exfiltration channel** (data encoded in the URL's query string) and an internal-network probe.
-  - **Secrets writes the full prompt to a temporary file with `delete=False`** (`secrets.py:466-468`) and removes it only on the happy path (`secrets.py:494`), so an exception leaves plaintext secrets on disk. ADR-0026 requires every Maknae-owned buffer holding secret-class bytes, which include prompt text, to be zeroizing from allocation; a plaintext copy persisted to disk is well outside that rule, so the behaviour could not be carried into a Maknae process.
+  - **Secrets writes the full prompt to a temporary file with `delete=False`** (`secrets.py:466-468`). The prompt reaches disk on every scan, the happy path included: `os.remove` (`secrets.py:494`) unlinks the file but does not wipe its blocks, and on an exception the file is not removed at all, leaving plaintext secrets in place. ADR-0026 requires every Maknae-owned buffer holding secret-class bytes, which include prompt text, to be zeroizing from allocation; a plaintext copy persisted to disk is well outside that rule, so the behaviour could not be carried into a Maknae process.
   - Secrets' `REDACT_HASH` uses unsalted MD5 (`secrets.py:451`). Redaction uses `prompt.find`, so only the first occurrence of a repeated secret is located (`secrets.py:482`).
 
 ## 9. Integration into Maknae as-is
 
 - **Shape:**
   - Only a **Python sidecar service** is practical: the `llm_guard_api` FastAPI server, or a custom gRPC/UDS wrapper, under its own account next to `maknae-egress`.
-  - The Egress Daemon would send each prompt, tool result and reply over a local socket and receive `(is_valid, risk_score)` per scanner.
+  - It would receive each prompt, tool result and reply over a local socket and return `(is_valid, risk_score)` per scanner.
   - The kernel treats the result as a PIP input (inform, never authorize).
+  - **Where the verdict must arrive: ADR-0023's write-ahead order.** ADR-0023 decision 3 fixes the order of a turn: the kernel decides `session.prompt`, appends the write-ahead record, and only then hands the turn to `maknae-egress`. A PIP that sits beside the Egress Daemon and scans what it receives therefore sees the content only after the decision, and its verdict informs nothing. For a verdict on input content to count, it must reach `maknaed` **before** the `session.prompt` decision. With the scanner beside the Egress Daemon, that means a new channel from `maknaed` to the scanner, or an extra round trip before the decision. That cost is on the critical path of every turn, on top of the scan time itself. Running the scan asynchronously, or pipelined with the model call, is not a latency fix for inputs: it sends the content before the verdict exists, which is the objection the [NeMo Guardrails assessment](2026-09-30-nemo-guardrails-assessment.md) raises against IORails speculative generation. Replies are harder still. In the shipped design the reply-leg release verdict is the `session.prompt` verdict, computed before the model output exists (ADR-0023 decision 3, "The response leg is a release"), so no content-dependent check on a reply can bind until that release is un-collapsed into a decided `session.update`, for which #229 landing is a named trigger.
 - **TCB:**
   - If the sidecar is advisory only and fail-closed on timeout or error, it can sit **outside** the TCB as an untrusted PIP. But then an attacker who can make it crash or stall can deny service, and a sidecar that answers "valid" wrongly is only as bad as no filter.
-  - It cannot live *inside* `maknae-egress` without violating ADR-0002, which requires the egress process to be 100% Rust (Python, and the C/C++ extensions in torch, onnxruntime, spaCy and tokenizers).
+  - It cannot live *inside* `maknae-egress` without violating ADR-0002, which requires the egress process to be 100% Rust (Python, and the C/C++ extensions in torch, onnxruntime, spaCy and tokenizers). (Maknae's egress process already links native code, per `cargo tree -p maknae-egress`: the AWS-LC crypto module (`aws-lc-fips-sys`, with the non-FIPS `aws-lc-sys` also in the tree), and, on macOS, Security.framework and CoreFoundation through FFI (`rustls-platform-verifier` → `security-framework-sys` / `core-foundation-sys`, reached through `reqwest`). A model runtime is a different order of native code from either.)
 - **FIPS:** not directly relevant (no cryptography on the path, apart from MD5 in the redaction mode). The sidecar's own Python/OpenSSL would be a separate, non-AWS-LC crypto module if it served TLS **[inferred]**.
 - **Air gap:** feasible only with a pre-populated HF cache, NLTK data and the spaCy model baked into the package, plus offline environment flags. **URLReachability must be disabled.** The HF/NLTK/spaCy download-on-miss paths need to be made fatal.
 - **macOS on Apple Silicon:** torch, transformers, spaCy and Presidio install on Apple Silicon, and `device()` picks MPS automatically. But this is a Python-plus-wheels distribution to ship and keep patched on a production platform, and it is **unmaintained upstream** **[inferred]**.
-- **Latency:** adds an IPC hop plus about 100–200 ms of CPU per 512-token window (vendor numbers). Scanning every tool result synchronously would dominate request latency.
+- **Latency:** adds the pre-decision round trip plus the scan: about 100–200 ms of CPU per ~100-token input (the vendor's 384-character figures), more for longer windows, and about 20 s for a 50 KB tool result in CHUNKS mode (§6). Scanning every tool result before the decision would dominate request latency.
 - **Complexity: L.** A Python runtime and a multi-GB dependency set to package offline for two operating systems and two architectures, lifecycle and health management, pinning and a CVE watch on torch, transformers and Presidio carried by Maknae (upstream is dead), and a fail-closed protocol design. All of this for a component with known bypasses.
 
 ## 10. Taking the interesting parts and reimplementing them natively in Rust
@@ -268,7 +271,7 @@ There are no LLM- or API-backed scanners. The only EXT at scan time is URLReacha
 
 **PromptInjection classifier options:**
 
-- **`candle` (pure Rust):** `candle-transformers::models::debertav2` has `DebertaV2SeqClassificationModel` (candle `candle-transformers/src/models/debertav2.rs:1269`), which loads `config.json` + `model.safetensors` directly. No conversion is needed. **Preferred:** it adds no C or C++ to the process (ADR-0002's 100% Rust rule; the one native component Maknae links today is the AWS-LC crypto module), and it works on Linux amd64/arm64 and macOS (CPU, optionally Metal). candle contains `unsafe` internally; ADR-0027 confines `unsafe` only in Maknae's own workspace members, so a dependency's `unsafe` is a review matter, not a gate result.
+- **`candle` (pure Rust):** `candle-transformers::models::debertav2` has `DebertaV2SeqClassificationModel` (candle `candle-transformers/src/models/debertav2.rs:1269`), which loads `config.json` + `model.safetensors` directly. No conversion is needed. **Preferred:** it adds no C or C++ to the process (ADR-0002's 100% Rust rule; for the native code the egress process already links, see §9), and it works on Linux amd64/arm64 and macOS (CPU, optionally Metal). candle contains `unsafe` internally; ADR-0027 confines `unsafe` only in Maknae's own workspace members, so a dependency's `unsafe` is a review matter, not a gate result.
 - **`tract` (pure-Rust ONNX):** would consume `onnx/model.onnx`. DeBERTa's disentangled relative-attention graph uses Gather/bucket ops. Operator coverage is **unverified**: test it before relying on it.
 - **`ort`:** brings the onnxruntime C++ into the process. It violates ADR-0002 in the kernel or the egress process; it is acceptable only in a separate untrusted sidecar.
 - **Tokenizer:** the `tokenizers` crate loads `tokenizer.json` (Unigram + Metaspace + Precompiled normalizer + TemplateProcessing, all supported). It pulls in `onig` (C) only if the `onig` feature is on; use `default-features=false` with the `fancy-regex` feature to stay pure Rust **[inferred; verify with `cargo tree`]**.
@@ -281,7 +284,7 @@ There are no LLM- or API-backed scanners. The only EXT at scan time is URLReacha
 
 **Performance:**
 
-- fp32 on CPU is likely in the same 100–200 ms per window range as the vendor's PyTorch/ONNX numbers **[inferred]**.
+- fp32 on CPU: candle's own example measures 123.78 ms for one short sentence with this model (§6); a full 512-token window costs more, extrapolating from tract's 344 ms at 256 tokens **[inferred]**.
 - Options to reduce it: int8/fp16 quantization via candle, or distillation.
 - The model is frozen and archived, so any retraining (non-English, jailbreaks, over-defense) falls to Maknae.
 
@@ -292,7 +295,7 @@ There are no LLM- or API-backed scanners. The only EXT at scan time is URLReacha
 
 ## 11. Verdict for Maknae
 
-**Learn from, and adapt the pieces; avoid adopting it as-is.** LLM Guard is archived (2026-07-09) after Protect AI's acquisition by Palo Alto Networks (2025-07-22). It is a Python/torch/Presidio stack that pulls models and NLP data at runtime, and it contains two behaviours that are actively hostile to a trust plane:
+**Learn from, and adapt the pieces; avoid adopting it as-is.** LLM Guard is archived (July 2026) after Protect AI's acquisition by Palo Alto Networks (2025-07-22). It is a Python/torch/Presidio stack that pulls models and NLP data at runtime, and it contains two behaviours that are actively hostile to a trust plane:
 
 - URLReachability fetches attacker-chosen URLs;
 - Secrets spills prompts to temporary files.

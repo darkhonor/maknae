@@ -14,12 +14,13 @@ This assessment is one of a set of four guard-model assessments (Prompt Guard, [
 
 ## 0. Disposition (read first)
 
-**The proposed use.** Maknae is evaluating a content and prompt-injection filter that inspects prompt text, tool results (file content the loop read, which returns to the trust plane in the next `session.prompt` turn) and model replies, and gives the kernel a recommendation: a score, a label or a verdict. The filter would be a Policy Information Point (PIP), never a Policy Decision Point (PDP): `maknaed` stays the sole PDP (ADR-0005), and the content informs but never authorizes (AGENTS.md core principle 2). The candidate placement is beside the Egress Daemon (`maknae-egress`), which already receives prompt content from `maknaed` today (ADR-0023 decision 3). The maintainer does not want latency added on top of the policy check.
+**The proposed use.** Maknae is evaluating a content and prompt-injection filter that inspects prompt text, tool results (file content the loop read, which returns to the trust plane in the next `session.prompt` turn) and model replies, and gives the kernel a recommendation: a score, a label or a verdict. The filter would be a Policy Information Point (PIP), never a Policy Decision Point (PDP): `maknaed` stays the sole PDP (ADR-0005), and the content informs but never authorizes (AGENTS.md core principle 2). The candidate placement is beside the Egress Daemon (`maknae-egress`), which already receives prompt content from `maknaed` today, but only after the kernel has decided and recorded the turn (ADR-0023 decision 3); §9 states what that order costs a filter. The maintainer does not want latency added on top of the policy check.
 
 **Verdict: adapt, cautiously. Learn from Prompt Guard and keep the model optional; do not adopt it as a default or bundled component.**
 
 - PG2 is the most practical off-the-shelf small detector to run in pure Rust today (§10).
-- The model is weak where Maknae needs it: it detects only explicit instruction-override phrasing, independent adaptive attacks exceed 90% evasion, and its 512-token window makes whole-file scanning cost hundreds of milliseconds to seconds on CPU (§4, §6).
+- The model is weak where Maknae needs it: it detects only explicit instruction-override phrasing, a published adaptive attack reaches 75–99% evasion when the detector's score is fed back to the attacker (a precondition Maknae can deny by never exposing the score), and its 512-token window makes whole-file scanning cost seconds on CPU (§4, §6).
+- A verdict can only inform the kernel if it arrives before the `session.prompt` decision, which a scanner beside the Egress Daemon cannot do without a new channel or an extra round trip (§9).
 - The license is a blocker-level question for the DoD target: the Acceptable Use Policy (AUP), on its face, prohibits military, warfare and ITAR uses (§2).
 
 The full verdict is §11.
@@ -42,7 +43,7 @@ The full verdict is §11.
 
 **Activity.**
 
-- `meta-llama/PurpleLlama` is not archived. It has 90 open issues and 4.4k stars, and the last push was 2026-09-29 (GitHub API).
+- `meta-llama/PurpleLlama` is not archived. It has 90 open issues and PRs (GitHub's `open_issues_count`, which counts both) and 4.4k stars, and the last push was 2026-09-29 (GitHub API).
 - The PG2 model-card directory was last touched 2025-05-08 (`7a47e8460a`).
 - The LlamaFirewall PromptGuard scanner code was last touched 2026-03-26 (`9a3d175ade`); the previous change was 2026-01-16 (`fix_mistral_regex=True`, #163).
 - The model is maintained on paper, but in practice the weights are frozen.
@@ -235,13 +236,14 @@ and binds its users to the AUP. §1.b.ii exempts recipients of "an integrated en
    - PG2-22M applies the space-delete/NFKC pair only once. Any space that NFKC *produces* (for example from U+00A0 or U+2000–U+200A, if the charsmap does not already fold them) would survive into the Metaspace pre-tokenizer on 22M but not on 86M [inferred; test it].
    - Removing spaces also discards word boundaries. The model was trained that way, so this costs nothing on the vendor benchmarks, but it is a design trade.
 2. **Hackett et al., "Bypassing Prompt Injection and Jailbreak Detection in LLM Guardrails"**, arXiv 2504.11168 (April 2025), against **PG1** [3p]:
-   - Character-injection attacks: 70.44% attack success rate (ASR) on prompt injection, 73.08% on jailbreaks.
+   - Character-injection attacks: 70.44% attack success rate (ASR) on prompt injection, 73.08% on jailbreaks. The paper's results text attributes these two figures to "Meta Prompt Shield", a naming slip for Prompt Guard; its abstract names "Meta's Prompt Guard".
    - Word-level adversarial-ML (AML) attacks: 2.76% (prompt injection) and 12.66% (jailbreaks). PG1 was the most robust of six systems against those.
    - Techniques included homoglyphs, diacritics, zero-width characters and Unicode tag smuggling.
-3. **Nasr, Carlini et al., "The Attacker Moves Second"**, arXiv 2510.09023 (October 2025) [3p, independent academic]:
-   - A search-based adaptive attack that uses the detector's score reached **> 90% ASR against PromptGuard** (as well as ProtectAI and Model Armor).
+3. **Nasr, Carlini et al., "The Attacker Moves Second"**, arXiv 2510.09023 (October 2025) [3p, multi-lab academic/industry: authors from Google DeepMind, OpenAI, Anthropic and ETH Zürich; Google's Model Armor was among the targets]:
+   - A search-based adaptive attack, **with the detector's confidence score and detection flag fed back to the attacker**, reached **> 90% ASR against PromptGuard** (as well as ProtectAI and Model Armor) with Gemini-2.5 Pro as the base model. Per base model, the PromptGuard figures are 94% (Gemini-2.5 Pro), 75% (GPT-5 Mini), 99% (Llama-3.3 70B) and 95% (MetaSecAlign 70B).
+   - The headline depends on that feedback. Maknae's own recommendation below (never return the score to the agent) removes that precondition, though not the attack class: the paper's human red-team challenge also produced successful injections against PromptGuard.
    - In their human red-team challenge with **PG2-86M** as the AgentDojo defense (Slack suite), ASR with PromptGuard was sometimes *higher* than the undefended baseline. For gemini-2.5-flash it went from 9.3% to 23.8% (Table 3).
-   - Meta's own card concedes it is "not immune to adaptive attacks" (PG2 card `README.md:199`).
+   - Meta's PG2 card concedes that "adversaries may develop sophisticated attacks specifically to bypass detection" (PG2 card `README.md:199`); the PG1 card says Prompt Guard "is not immune to adaptive attacks" (PG1 card `README.md:438`).
    - Implication for Maknae: **never expose the score to the agent** (it is a gradient-free oracle for the attacker), and treat the verdict as a weak signal [inferred].
 4. **Trendyol** (Medium, 2025-07-11) [3p, snippet only]: a LlamaFirewall/PromptGuard bypass via non-English prompts and invisible Unicode, reported to Meta 2025-05-07.
 5. **Quantization fragility** [3p]: gravitee-io's ONNX export reports PG2-86M int8 AUC falling from .95 to .745 on `jackhhao/jailbreak-classification`, while 22M int8 was nearly lossless. Do not quantize 86M without re-validation.
@@ -277,18 +279,17 @@ and binds its users to the AUP. §1.b.ii exempts recipients of "an integrated en
 | [vendor] | PG2-22M | A100, 512 tokens | 19.3 ms ("75% less compute") |
 | [3p] tract PR #2532 (simon0191, merged 2026-07-29) | **PG2-86M** | tract, pure Rust, seq 128, 1 thread, optimized graph (CPU not stated) | ~102 ms |
 | [3p] tract PR #2531 (merged 2026-07-29) | "DeBERTa-v3-base classifier, 86M" | tract, Apple M4 Pro, 1 thread | 132 ms (seq 128); 344 ms (seq 256). About 1.5–1.75× faster on 8 threads (Graviton3) |
-| [3p] candle `debertav2` example README | protectai deberta-v3-base (same architecture class) | short sentence, hardware unstated | ~95–124 ms "inferenced" |
+| [3p] candle `debertav2` example README (`candle-examples/examples/debertav2/README.md:113-132` at `5ba5d5b`) | `protectai/deberta-v3-base-prompt-injection-v2` (DeBERTa-v3-base, the same architecture class as PG2-86M) | one short sentence; `--cpu` (CPU model not stated), and CUDA | 123.78 ms CPU; 100.01 ms CUDA |
 | [3p, competitor marketing] StackOne | "Meta PG v2" | T4 GPU | 43 ms |
 
 **Inferred for Maknae:**
 
-- **PG2-86M on CPU adds on the order of 100 ms per 128-token window and several hundred ms per full 512-token window, single-threaded.** Attention and relative-position cost grow superlinearly with length.
+- **PG2-86M on CPU, single-threaded, costs about 100–130 ms per 128-token window and 344 ms per 256-token window (the tract figures above); a full 512-token window extrapolates to roughly 0.7–1 s.** Attention and relative-position cost grow superlinearly with length.
 - PG2-22M should be roughly 3–5× cheaper.
-- A 20 KB file read, about 5k tokens, is about 10–20 windows. Even multi-threaded, that is **hundreds of ms to seconds** on 86M.
-- This conflicts directly with the maintainer's "no delay on top of the policy check". It is feasible only if scanning is:
-  - asynchronous or pipelined with the model call;
-  - limited to 22M;
-  - or bounded (the first N windows plus sampling), which is itself a bypass surface.
+- A 20 KB file read, about 5k tokens, is about 10 non-overlapping or 20 overlapping 512-token windows: roughly **7–20 s single-threaded** on 86M, and still several seconds on 8 threads (tract measured only a 1.5–1.75× gain from 8 threads).
+- This conflicts directly with the maintainer's requirement that no latency be added on top of the policy check. Because the verdict must reach the kernel before the decision (§9), the scan is on the critical path; it can be made cheaper, not hidden. The levers are:
+  - limiting it to 22M;
+  - or bounding it (the first N windows plus sampling), which is itself a bypass surface.
 
 **Throughput:** batching helps on GPU. On CPU it is compute-bound; no measured numbers are available.
 
@@ -307,7 +308,7 @@ and binds its users to the AUP. §1.b.ii exempts recipients of "an integrated en
 
 - **Narrow scope (PG2):** it only catches explicit override attempts. That means false negatives on subtle indirect injection, which is Maknae's main threat for file and tool content.
 - **PG1's INJECTION label** is the broad alternative, and would be false-positive-heavy on developer content [inferred].
-- **Adaptive attacks** exceed 90% ASR (Nasr/Carlini).
+- **Adaptive attacks** reach 75–99% ASR when the score is fed back to the attacker (Nasr, Carlini et al.), and the paper's human red-teamers also succeeded.
 - Character-level evasions other than ASCII spaces are not demonstrably handled.
 - The 512-token limit needs careful chunking. Meta's own framework truncates silently.
 - Not trained for output (reply) scanning.
@@ -331,9 +332,11 @@ and binds its users to the AUP. §1.b.ii exempts recipients of "an integrated en
 
 ## 9. Integration into Maknae as-is
 
-**How it would run.** A Python sidecar under its own UNIX account. It would load `transformers`, `torch` and the local weights with HF offline mode forced, and expose a Unix-socket RPC that returns `{score, label, model_sha256, window_count}`. The Egress Daemon would forward content windows to it and relay the verdict to `maknaed`, which decides.
+**How it would run.** A Python sidecar under its own UNIX account. It would load `transformers`, `torch` and the local weights with HF offline mode forced, and expose a Unix-socket RPC that returns `{score, label, model_sha256, window_count}`, which `maknaed` takes as a PIP input and decides on.
 
-**TCB.** The sidecar must be **outside** the TCB. It is a PIP, not a PDP, so its compromise can only corrupt a recommendation. It must not run inside `maknae-egress`: that process holds the provider key, and ADR-0002 requires the egress process, like the kernel, to be 100% Rust. Putting torch (C++) into it would put C++ into a process holding a secret. (The one native component Maknae links today is the AWS-LC crypto module; a model runtime is not comparable to that.) The sidecar needs:
+**Where the verdict must arrive: ADR-0023's write-ahead order.** ADR-0023 decision 3 fixes the order of a turn: the kernel decides `session.prompt`, appends the write-ahead record, and only then hands the turn to `maknae-egress`. A PIP that sits beside the Egress Daemon and scans what it receives therefore sees the content only after the decision, and its verdict informs nothing. For a verdict on input content to count, it must reach `maknaed` **before** the `session.prompt` decision. With the scanner beside the Egress Daemon, that means a new channel from `maknaed` to the scanner, or an extra round trip before the decision. That cost is on the critical path of every turn, on top of the scan time itself. Running the scan asynchronously, or pipelined with the model call, is not a latency fix for inputs: it sends the content before the verdict exists, which is the objection the [NeMo Guardrails assessment](2026-09-30-nemo-guardrails-assessment.md) raises against IORails speculative generation. Replies are harder still. In the shipped design the reply-leg release verdict is the `session.prompt` verdict, computed before the model output exists (ADR-0023 decision 3, "The response leg is a release"), so no content-dependent check on a reply can bind until that release is un-collapsed into a decided `session.update`, for which #229 landing is a named trigger.
+
+**TCB.** The sidecar must be **outside** the TCB. It is a PIP, not a PDP, so its compromise can only corrupt a recommendation. It must not run inside `maknae-egress`: that process holds the provider key, and ADR-0002 requires the egress process, like the kernel, to be 100% Rust. Putting torch (C++) into it would put C++ into a process holding a secret. (Maknae's egress process already links native code, per `cargo tree -p maknae-egress`: the AWS-LC crypto module (`aws-lc-fips-sys`, with the non-FIPS `aws-lc-sys` also in the tree), and, on macOS, Security.framework and CoreFoundation through FFI (`rustls-platform-verifier` → `security-framework-sys` / `core-foundation-sys`, reached through `reqwest`). A model runtime is a different order of native code from either.) The sidecar needs:
 
 - a separate account;
 - no network (sandbox it; `HF_HUB_OFFLINE`);
@@ -345,7 +348,7 @@ and binds its users to the AUP. §1.b.ii exempts recipients of "an integrated en
 
 **macOS on Apple Silicon.** torch and transformers support it (CPU or MPS) [inferred]. macOS is a production target for Maknae, so this is a shipping-platform requirement, not a convenience.
 
-**Latency.** Python and torch on CPU is comparable to or worse than the tract numbers in §6, plus IPC and serialization. Each 512-token window costs hundreds of ms on 86M [inferred].
+**Latency.** Python and torch on CPU is comparable to or worse than the tract numbers in §6, plus IPC and serialization, plus the pre-decision round trip above. A full 512-token window costs roughly 0.7–1 s single-threaded on 86M [inferred, extrapolated from tract].
 
 **Complexity: M–L.** The M part is the mechanics: the sidecar, the RPC, chunking and aggregation, and offline packaging of a multi-GB Python/torch runtime for two operating systems and two architectures. What makes it L is the licensing review and a Python runtime in a project that is otherwise Rust.
 
@@ -363,9 +366,9 @@ and binds its users to the AUP. §1.b.ii exempts recipients of "an integrated en
 **Rust stack.**
 
 - **Tokenizer: the HF `tokenizers` crate** (Apache-2.0). Unigram, Precompiled (via the pure-Rust `spm_precompiled`), NFKC, Replace, Metaspace and TemplateProcessing are all supported. Caveats:
-  - **0.23.2** (latest stable, 2026-09-03) has the default features `["progressbar", "onig", "esaxx_fast"]`. `onig` is C (Oniguruma) and `esaxx_fast` is C++. A pure-Rust build must use `default-features = false` and select `fancy-regex`. In 0.23 that is only exposed through `unstable_wasm`, which also turns on `getrandom/wasm_js` [crates.io metadata]. That is awkward and fragile.
+  - **0.23.2** (latest stable, 2026-09-03) has the default features `["progressbar", "onig", "esaxx_fast"]`. `onig` is C (Oniguruma) and `esaxx_fast` is C++. A pure-Rust build sets `default-features = false` and enables `fancy-regex`, which is an optional dependency and therefore an implicit feature. candle at `5ba5d5b` does exactly this: `tokenizers = { version = "0.23.1", default-features = false }` in the workspace (`Cargo.toml:95`) and `features = ["fancy-regex"]` in `candle-core/Cargo.toml:40`. It is a two-line manifest setting.
   - **1.0.0-rc.2** (2026-09-21) restructured the crate: `onig` is gone from the default path, and there is a `regex = ["tk-encode/fancy-regex"]` feature. That is cleaner, but it is a release candidate (the repository was read at `bbccb0513ff9afda385ca5c85c66eddb1318cfc7`).
-  - Alternative: a **bespoke inference-only tokenizer** of a few hundred lines (Unigram Viterbi + the `spm_precompiled` charsmap + NFKC via `unicode-normalization` + hand-coded space rules). It removes regex engines entirely and is easy to audit [inferred, M].
+  - Alternative, optional: a **bespoke inference-only tokenizer** of a few hundred lines (Unigram Viterbi + the `spm_precompiled` charsmap + NFKC via `unicode-normalization` + hand-coded space rules). It would remove the regex engine and the crate's wider dependency set and is easy to audit, but it is not needed to stay pure Rust, and it takes on the parity risk the crate already carries [inferred, M].
 - **Model, option (a): `candle`** (MIT/Apache-2.0; `huggingface/candle` at `5ba5d5b468b5b1df40e82dd3d556987bedeea041`, v0.11.0):
   - `candle-transformers/src/models/debertav2.rs` (1,444 lines) implements DeBERTa-v2/v3 disentangled attention (c2p/p2c, `position_buckets`, `share_att_key`, `norm_rel_ebd`) and `DebertaV2SeqClassificationModel` with its `ContextPooler` (`debertav2.rs:1269-1345`).
   - An example (`candle-examples/examples/debertav2`) already runs text classification on DeBERTa-v3 prompt-injection classifiers on CPU.
@@ -399,7 +402,7 @@ Mitigations:
 **Complexity: L.**
 
 - The model port is S–M: candle already has it, so the work is wiring plus golden tests.
-- The tokenizer is M.
+- The tokenizer is S with the `tokenizers` crate (a manifest setting plus parity tests), or M if the bespoke alternative is chosen.
 - What makes it L:
   - windowing and aggregation, with overlap and a bounded per-request budget;
   - process isolation (a separate PIP daemon, or a crate inside a non-key-holding process);
@@ -417,11 +420,11 @@ Mitigations:
   - candle's existing `DebertaV2SeqClassificationModel`;
   - tract patched in July 2026 specifically for PG2-86M.
 
-  An isolated, non-key-holding PIP process could score content windows without C in the process, and the pattern is model-agnostic.
+  An isolated, non-key-holding PIP process could score content windows without C in the process, and the pattern is model-agnostic. Its verdict must reach `maknaed` before the `session.prompt` decision to count (§9).
 - **The model itself is weak where Maknae needs it:**
   - PG2 detects only *explicit* instruction-override phrasing and dropped indirect-injection coverage.
-  - Independent adaptive attacks exceed 90% evasion.
-  - Its 512-token window makes whole-file scanning cost hundreds of ms to seconds on CPU for 86M, which conflicts with the latency requirement.
+  - A published adaptive attack reaches 75–99% evasion when the score is fed back to the attacker.
+  - Its 512-token window makes whole-file scanning cost seconds on CPU for 86M, on the critical path before the decision, which conflicts with the latency requirement.
 - **The license is a blocker-level question for the DoD target:**
   - The Llama 4 Community License's AUP, on its face, prohibits military, warfare and ITAR uses.
   - The AUP can change by URL.

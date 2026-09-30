@@ -5,7 +5,7 @@
 | **Status** | Assessment record. It informs the OWASP LLM coverage work. It creates no roadmap commitment and supersedes no ADR. |
 | **Date** | 2026-09-30 |
 | **Subject** | Meta's Llama Guard 3-1B, 3-8B, 3-11B-Vision and 4-12B, pinned by Hugging Face (HF) revision: [`meta-llama/Llama-Guard-3-1B`](https://huggingface.co/meta-llama/Llama-Guard-3-1B/tree/acf7aafa60f0410f8f42b1fa35e077d705892029) at `acf7aaf`, [`Llama-Guard-3-8B`](https://huggingface.co/meta-llama/Llama-Guard-3-8B/tree/7327bd9f6efbbe6101dc6cc4736302b3cbb6e425) at `7327bd9`, [`Llama-Guard-3-11B-Vision`](https://huggingface.co/meta-llama/Llama-Guard-3-11B-Vision/tree/62d4275543ec7503de66c486de1c0c2103e365ac) at `62d4275`, [`Llama-Guard-4-12B`](https://huggingface.co/meta-llama/Llama-Guard-4-12B/tree/87acb4b94e930c3d679e6e7ee9d57e2feab9ea71) at `87acb4b`; with cards, licenses and use policies from [`meta-llama/PurpleLlama`](https://github.com/meta-llama/PurpleLlama/tree/172c1074069eb88ec834124272c1b1c4f8893445) at commit `172c107`. Generative Llama models fine-tuned as harm-content classifiers; weights under the Llama 3.1, 3.2 and 4 Community Licenses, PurpleLlama code MIT. |
-| **Method** | Model cards, license and use-policy texts, and the pinned `candle` and `llama-cookbook` sources were mirrored outside this tree and **read only**: nothing was built, installed or executed, and no weight files were downloaded. `config.json`, `tokenizer_config.json` and `USE_POLICY.md` on HF are gated (HTTP 401) and were not read; the license and use-policy texts were read from PurpleLlama, where they are public. Evidence labels: **[vendor]** documented by Meta; **[measured-3p]** measured by an independent third party (public-web context, not evidence produced here); **[inferred]** arithmetic or reasoning; **[code]** read directly from pinned source. **No figure in this assessment was measured for it.** Public web material is context only and is marked as such. |
+| **Method** | Model cards, license and use-policy texts, and the pinned `candle` and `llama-cookbook` sources were mirrored outside this tree and **read only**: nothing was built, installed or executed, and no weight files were downloaded. `config.json`, `tokenizer_config.json` and `USE_POLICY.md` on HF are gated (HTTP 401) and were not read; the license and use-policy texts were read from PurpleLlama, where they are public. Evidence labels: **[vendor]** documented by Meta; **[measured-3p]** measured by an independent third party (public-web context, not evidence produced here); **[inferred]** arithmetic or reasoning; **[code]** read directly from pinned source. **No performance or accuracy figure in this assessment was measured for it;** the one count made for it is a grep of the pinned candle source (§10), labelled where it appears. Public web material is context only and is marked as such. |
 | **Audience** | Maknae team (dual-audience: human reviewers and AI agents) |
 
 This assessment is one of a set of four guard-model assessments ([Prompt Guard](2026-09-30-prompt-guard-assessment.md), Llama Guard, [NeMo Guardrails](2026-09-30-nemo-guardrails-assessment.md), [LLM Guard](2026-09-30-llm-guard-assessment.md)) whose synthesis is [`2026-09-30-owasp-llm-top10-coverage.md`](2026-09-30-owasp-llm-top10-coverage.md).
@@ -14,7 +14,7 @@ This assessment is one of a set of four guard-model assessments ([Prompt Guard](
 
 ## 0. Disposition (read first)
 
-**The proposed use.** Maknae is evaluating a content and prompt-injection filter that inspects prompt text, tool results (file content the loop read, which returns to the trust plane in the next `session.prompt` turn) and model replies, and gives the kernel a recommendation. The filter would be a Policy Information Point (PIP), never a Policy Decision Point (PDP): `maknaed` stays the sole PDP (ADR-0005), and the content informs but never authorizes (AGENTS.md core principle 2). The candidate placement is beside the Egress Daemon (`maknae-egress`), which already receives prompt content from `maknaed` today (ADR-0023 decision 3). The maintainer does not want latency added on top of the policy check.
+**The proposed use.** Maknae is evaluating a content and prompt-injection filter that inspects prompt text, tool results (file content the loop read, which returns to the trust plane in the next `session.prompt` turn) and model replies, and gives the kernel a recommendation. The filter would be a Policy Information Point (PIP), never a Policy Decision Point (PDP): `maknaed` stays the sole PDP (ADR-0005), and the content informs but never authorizes (AGENTS.md core principle 2). The candidate placement is beside the Egress Daemon (`maknae-egress`), which already receives prompt content from `maknaed` today, but only after the kernel has decided and recorded the turn (ADR-0023 decision 3); §9 states what that order costs a filter. The maintainer does not want latency added on top of the policy check.
 
 **Llama Guard is a content-safety (harm) classifier, not a prompt-injection detector.** Meta says so itself:
 
@@ -33,16 +33,16 @@ Meta has granted a public exception for US government and national-security cont
 ## 1. Identity and provenance
 
 - **Owner:** Meta Platforms (the Llama team, "AI @ Meta"). Models are published under the `meta-llama` organization on Hugging Face. The code, cards and licenses live in `github.com/meta-llama/PurpleLlama`.
-- **Versions:**
+- **Versions** (dates are HF repository-creation dates unless marked as a release date):
   - Llama Guard 1 (7B, Llama 2 base, December 2023; HF `meta-llama/LlamaGuard-7b` revision `dfcfa340…`, created 2023-12-05; O1–O6 taxonomy).
   - Llama Guard 2 (8B, Llama 3 base, April 2024; HF `Meta-Llama-Guard-2-8B` revision `7d257f3c…`).
   - Llama Guard 3-8B (Llama 3.1 base, 2024-07-22).
   - 3-8B-INT8 (2024-07-21).
   - 3-1B and 3-1B-INT4 (2024-09-20).
   - 3-11B-Vision (2024-09-20).
-  - Llama Guard 4-12B (2025-04-23).
+  - Llama Guard 4-12B (HF repository created 2025-04-23; released 2025-04-29 with PurpleLlama commit `cd9fe65792`).
 - **Cadence:** four generations in 16 months, then **nothing since April 2025** (HF organization listing, sorted by creation date, 2026-09-30).
-  - The PurpleLlama repository is active: last commit 2026-09-29, 90 open issues, not archived.
+  - The PurpleLlama repository is active: last commit 2026-09-29, 90 open issues and PRs (GitHub's `open_issues_count`, which counts both), not archived.
   - The Llama Guard 3 and 4 directories have not changed since `cd9fe65792` (2025-04-29), which was the Llama Guard 4 release.
 - **Ownership and strategy [web context]:** in April 2026, Meta Superintelligence Labs launched the proprietary "Muse Spark" family, widely reported as replacing the Llama line (VentureBeat, 2026-04-08). Reuters (2026-08-10) reports a later open-weight release. The future of Llama Guard is unclear, and it should be treated as a **frozen artifact**.
 - **Signing and attestation:** none.
@@ -125,7 +125,7 @@ Meta has granted a public exception for US government and national-security cont
   - The output is text (`safe`/`unsafe`) plus category codes S1–S14.
   - For a continuous score, Meta uses **the probability of the first generated token** as P(unsafe) and applies a threshold (`Llama-Guard3/8B/MODEL_CARD.md:15`).
   - The ExecuTorch guide gives the token IDs: `19193` = safe, `39257` = unsafe, stop `128009` (`Llama-Guard3/1B/ET_INSTRUCTIONS.md:55,70`).
-  - **[inferred]** A score therefore needs **one forward pass (prefill) and a softmax over two logits**. Autoregressive decoding is needed only to get the category list.
+  - **[inferred]** A score therefore needs **one forward pass (prefill)**. Autoregressive decoding is needed only to get the category list. A cheaper variant takes a softmax over only the two logits for `safe` and `unsafe`; that is not the same quantity as Meta's first-token probability over the full vocabulary, so Meta's published thresholds would not carry over and would have to be re-derived.
 - **Custom categories [vendor]:**
   - Pass `categories={"S1": "My custom category"}` or `excluded_category_keys=["S6"]` to `apply_chat_template` (HF 1B README:276-296).
   - The policy text is plain prompt text placed **before** the conversation.
@@ -159,20 +159,19 @@ Meta has granted a public exception for US government and national-security cont
   - **Secrets or credentials, general PII detection, and data exfiltration.**
   - **Classification markings, and anything specific to CUI (Controlled Unclassified Information) or classified material.**
   - **Tool-output provenance.**
-- **Languages:** English, French, German, Hindi, Italian, Portuguese, Spanish and Thai (HF 1B README:406).
+- **Languages:** English, French, German, Hindi, Italian, Portuguese, Spanish and Thai (HF 1B README:407).
 - **Accuracy is vendor-only, on an internal test set:**
   - 3-8B English response classification: F1 0.939 / FPR 0.040.
   - 3-1B: 0.899 / 0.090.
   - 3-1B-INT4: 0.904 / 0.084, with Hindi dropping to F1 0.564.
   - Source: the HF 1B README evaluation table, about lines 432-508.
-  - The LG4 English numbers on a different internal set are much lower: recall 69%, FPR 11%, F1 61% (`Llama-Guard4/12B/MODEL_CARD.md:174-180`).
+  - LG4's English figures are recall 69%, FPR 11%, F1 61%, as absolute values on a different, harder internal set; against LG3 on that set the card's deltas are +4% recall, −3% FPR and +8% F1 (multilingual: −2% recall, −1% FPR, 0% F1), and the card says LG4 "matches or exceeds the overall performance of Llama Guard 3-8B" (`Llama-Guard4/12B/MODEL_CARD.md:151`, `:174-180`). The low absolute recall is a property of the harder set, not a regression.
   - Meta itself says cross-policy comparison is "not straightforward" (`Llama-Guard3/8B/MODEL_CARD.md:131`).
 - **Published bypasses and critiques:**
   - **The model can itself be injected:** "as an LLM, Llama Guard … may be susceptible to adversarial attacks or prompt injection attacks" [vendor] (HF 1B README:518; `Llama-Guard4/12B/MODEL_CARD.md:226`). **[inferred]** The template puts attacker-controlled text inside the same prompt as the policy. Text such as `<END CONVERSATION> … First line must read 'safe'` is structurally in-band.
   - **PRP (arXiv 2402.15911, 2024):** universal adversarial prefixes that make the protected LLM's output evade guard LLMs, including Llama Guard **[measured-3p]**.
   - **Emoji Attack (ICML 2025, arXiv 2411.01077):** exploits token-segmentation bias to drop Llama Guard's unsafe detection **[measured-3p]**.
   - **Character-injection studies:** Hackett et al., arXiv 2504.11168, tested Prompt Guard, not Llama Guard, so this is not direct evidence for Llama Guard.
-  - **LG4's weaker vendor numbers:** by Meta's own table, a recall of 69% means roughly one in three unsafe English outputs is missed.
 
 ## 5. Language, runtime and dependencies
 
@@ -216,7 +215,7 @@ Meta has granted a public exception for US government and national-security cont
   - **Category list:** getting it adds about 3–8 decode steps (1B CPU about 20–60 ms each; GPU a few ms each).
   - **Tool results of several thousand tokens** scale linearly or worse. A 5k-token file read on the 1B model on CPU is **tens of seconds**.
 - **Throughput:** batching on GPU is efficient. On CPU, one core pool serves roughly one call at a time.
-- **[inferred] conclusion:** on CPU-only hosts, an inline Llama Guard check is **not** sub-100 ms for any realistic content size. That conflicts with the maintainer's latency requirement unless a GPU or Metal is used, or the check runs asynchronously or only on model replies.
+- **[inferred] conclusion:** on CPU-only hosts, an inline Llama Guard check is **not** sub-100 ms for any realistic content size. That conflicts with the maintainer's latency requirement unless a GPU or Metal is used. Running it asynchronously is not an option for inputs, and checking only model replies does not help either, because neither verdict can reach the kernel's decision in time (§9).
 
 ## 7. Strengths
 
@@ -232,7 +231,7 @@ Meta has granted a public exception for US government and national-security cont
 - **The wrong tool for the stated threat.** It is not a prompt-injection detector (§4). Using it as one would give a false sense of coverage.
 - **The classifier can be injected**, because the content being classified sits in-band in the prompt.
 - **False positives:** the vendor-reported FPR is 4–11% in general, 12.6–17.6% on tool use, and 11% English for LG4. **[inferred]** In an agent reading arbitrary files (security documentation, exploit write-ups, red-team material), S2 "hacking", S9 and S14 will fire on legitimate content. For a DoD or security-research user base, that is a daily FPR problem.
-- **False negatives:** LG4 recall is 69% (vendor), and there are published adversarial bypasses (PRP, Emoji Attack).
+- **False negatives:** LG4's absolute English recall is 69% on Meta's harder internal set (vendor; better than LG3 on the same set), and there are published adversarial bypasses (PRP, Emoji Attack).
 - **Maintenance risk:**
   - no release since April 2025;
   - Meta's strategic pivot to proprietary models [web context];
@@ -247,12 +246,13 @@ Meta has granted a public exception for US government and national-security cont
 
 ## 9. Integration into Maknae as-is
 
-- **Shape:** a Python sidecar (transformers or vLLM) or an ExecuTorch runner, as a separate process beside `maknae-egress`, reached over a Unix domain socket (UDS). The Egress Daemon sends the content, gets back `{label, categories, p_unsafe}`, and forwards a recommendation to `maknaed`. This is a PIP, never a PDP.
-- **TCB:** it must be **outside** the TCB. ADR-0002 requires the kernel and the egress process to be 100% Rust, so Python, torch, CUDA and C++ runtimes cannot enter either. As an untrusted PIP whose output only informs, that is acceptable in principle. Its verdict must then be treated as untrusted input, and whether a missing or failed verdict blocks is the kernel's policy, which by AGENTS.md core principle 4 means failing closed.
+- **Shape:** a Python sidecar (transformers or vLLM) or an ExecuTorch runner, as a separate process beside `maknae-egress`, reached over a Unix domain socket (UDS). It returns `{label, categories, p_unsafe}` as a recommendation that `maknaed` takes as input. This is a PIP, never a PDP.
+- **Where the verdict must arrive: ADR-0023's write-ahead order.** ADR-0023 decision 3 fixes the order of a turn: the kernel decides `session.prompt`, appends the write-ahead record, and only then hands the turn to `maknae-egress`. A PIP that sits beside the Egress Daemon and scans what it receives therefore sees the content only after the decision, and its verdict informs nothing. For a verdict on input content to count, it must reach `maknaed` **before** the `session.prompt` decision. With the scanner beside the Egress Daemon, that means a new channel from `maknaed` to the scanner, or an extra round trip before the decision. That cost is on the critical path of every turn, on top of the scan time itself. Running the scan asynchronously, or pipelined with the model call, is not a latency fix for inputs: it sends the content before the verdict exists, which is the objection the [NeMo Guardrails assessment](2026-09-30-nemo-guardrails-assessment.md) raises against IORails speculative generation. Replies are harder still. In the shipped design the reply-leg release verdict is the `session.prompt` verdict, computed before the model output exists (ADR-0023 decision 3, "The response leg is a release"), so no content-dependent check on a reply can bind until that release is un-collapsed into a decided `session.update`, for which #229 landing is a named trigger.
+- **TCB:** it must be **outside** the TCB. ADR-0002 requires the kernel and the egress process to be 100% Rust, so Python, torch, CUDA and C++ runtimes cannot enter either. (Maknae's egress process already links native code, per `cargo tree -p maknae-egress`: the AWS-LC crypto module (`aws-lc-fips-sys`, with the non-FIPS `aws-lc-sys` also in the tree), and, on macOS, Security.framework and CoreFoundation through FFI (`rustls-platform-verifier` → `security-framework-sys` / `core-foundation-sys`, reached through `reqwest`). A model runtime is a different order of native code from either.) As an untrusted PIP whose output only informs, that is acceptable in principle. Its verdict must then be treated as untrusted input, and whether a missing or failed verdict blocks is the kernel's policy, which by AGENTS.md core principle 4 means failing closed.
 - **FIPS:** not directly implicated, since there is no cryptography in the model path. The sidecar's Python and OpenSSL are outside the AWS-LC boundary, which matters only if it does TLS. Over a local UDS it does not.
 - **Air gap:** workable once the weights are mirrored. The first acquisition needs gated HF access. Python wheels and CUDA must be vendored.
 - **macOS (Apple Silicon):** PyTorch MPS or ExecuTorch works. vLLM on macOS is limited. macOS is a production target for Maknae, so a limited serving path there is a supported-platform gap.
-- **Latency:** see §6. On GPU hosts, +20–300 ms per check. On CPU-only hosts, seconds.
+- **Latency:** see §6. On GPU hosts, +20–300 ms per check, plus the pre-decision round trip. On CPU-only hosts, seconds.
 - **Complexity: L.**
   - It is a new language runtime, a model-serving process, packaging and vendoring of torch for two OS families, GPU driver dependencies, a license and legal review (the military clause), and a false-positive tuning program.
   - It covers none of the injection threat it would be bought for.
@@ -269,7 +269,7 @@ Meta has granted a public exception for US government and national-security cont
   - `quantized_llama.rs` supports GGUF k-quants (Q4_0, Q4K, Q8_0) in pure Rust.
   - Tokenization: candle's workspace uses `tokenizers = { version = "0.23.1", default-features = false }` with `features = ["fancy-regex"]` (candle `Cargo.toml:95`, `candle-core/Cargo.toml:40`), which avoids the Oniguruma C dependency. Pure-Rust tokenization of `tokenizer.json` is therefore available.
   - CPU matmul uses the pure-Rust `gemm` crate (candle `Cargo.toml:62`).
-  - Metal on macOS uses `objc2-metal` FFI into the system Metal framework (candle `candle-core/Cargo.toml:17,55-59`). That is FFI to an OS framework plus runtime-compiled Metal Shading Language (MSL) kernels. It is not C in Maknae's tree, but it is non-Rust code executing in the process, and it would need an ADR-0002 ruling.
+  - Metal on macOS uses `objc2-metal` FFI into the system Metal framework (candle `candle-core/Cargo.toml:17,55-59`). That is FFI to an OS framework plus runtime-compiled Metal Shading Language (MSL) kernels. It is not C in Maknae's tree, but it is non-Rust code executing in the process. OS-framework FFI is not new to Maknae on macOS: `maknae-egress` already reaches Security.framework and CoreFoundation through `security-framework-sys` / `core-foundation-sys` (via `rustls-platform-verifier` and `reqwest`). Metal differs in kind, because it runs runtime-compiled GPU kernels over the content, so it would still warrant an explicit ADR-0002 decision.
   - CUDA (`cudarc`) brings the NVIDIA driver and kernels.
 - **Fidelity risk:**
   - **1B and 8B text models:** low to moderate. It is the standard Llama 3 graph. bf16 on candle versus PyTorch should agree closely, but the golden outputs must be regression-tested (safe/unsafe agreement and P(unsafe) calibration) against a reference run.
@@ -278,7 +278,7 @@ Meta has granted a public exception for US government and national-security cont
   - **Llama Guard 4-12B:** **not supported in candle.** There is no llama4 or mllama module at the pinned commit, and it would need the Llama 4 dense and early-fusion architecture implemented from scratch.
   - **3-11B-Vision:** needs Mllama, which is also absent.
 - **TCB and cost notes:**
-  - `candle-core` contains about 677 `unsafe` occurrences at the pinned commit (a grep count) **[code]**.
+  - `candle-core` contains about 677 `unsafe` occurrences at the pinned commit **[code: a grep of the pinned source made for this assessment; approximate]**.
   - ADR-0027 confines `unsafe` in Maknae's own workspace members to `maknae-sys`; a third-party crate is outside that gate. Putting candle and a 1B model into a trusted process would still add a large, auditable-in-theory-only numeric stack to whatever process hosts it. **[inferred]** Host it in its own unprivileged process (a "guard" helper) rather than in `maknae-egress` or `maknaed`.
   - The CPU-only latency from §6 applies. Pure Rust on CPU is the slowest option.
 - **Complexity:**
@@ -305,7 +305,7 @@ Adopting it would be a mistake, for five reasons:
 - **It brings a Python or C++ runtime** unless reimplemented in candle, and even then only for the 1B and 8B text models.
 - **Its license AUP prohibits military, warfare and ITAR use.** Meta's US-government exception lives in press releases, not in the license text. For a project aiming at DoD deployment, that is a legal blocker to clear in writing before anything else.
 
-If a harm filter on model *replies* is wanted later as an optional, out-of-TCB PIP on GPU-equipped hosts, a candle-based Llama Guard 3-1B/8B helper process is feasible at M–L effort. It should not be the prompt-injection answer.
+If a harm filter on model *replies* is wanted later as an optional, out-of-TCB PIP on GPU-equipped hosts, a candle-based Llama Guard 3-1B/8B helper process is feasible at M–L effort, but only once the reply release is a decided `session.update` rather than the pre-computed `session.prompt` verdict (§9). It should not be the prompt-injection answer.
 
 ## 12. Sources
 

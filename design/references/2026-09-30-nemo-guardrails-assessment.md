@@ -14,7 +14,7 @@ This assessment is one of a set of four guard-model assessments ([Prompt Guard](
 
 ## 0. Disposition (read first)
 
-**The proposed use.** Maknae is evaluating a content and prompt-injection filter that inspects prompt text, tool results (file content the loop read, which returns to the trust plane in the next `session.prompt` turn) and model replies, and gives the kernel a recommendation. The filter would be a Policy Information Point (PIP), never a Policy Decision Point (PDP): `maknaed` stays the sole PDP (ADR-0005), and the content informs but never authorizes (AGENTS.md core principle 2). The candidate placement is beside the Egress Daemon (`maknae-egress`), which already receives prompt content from `maknaed` today (ADR-0023 decision 3). The maintainer does not want latency added on top of the policy check.
+**The proposed use.** Maknae is evaluating a content and prompt-injection filter that inspects prompt text, tool results (file content the loop read, which returns to the trust plane in the next `session.prompt` turn) and model replies, and gives the kernel a recommendation. The filter would be a Policy Information Point (PIP), never a Policy Decision Point (PDP): `maknaed` stays the sole PDP (ADR-0005), and the content informs but never authorizes (AGENTS.md core principle 2). The candidate placement is beside the Egress Daemon (`maknae-egress`), which already receives prompt content from `maknaed` today, but only after the kernel has decided and recorded the turn (ADR-0023 decision 3); §9 states what that order costs a filter. The maintainer does not want latency added on top of the policy check.
 
 **NeMo Guardrails is an orchestration framework, not a classifier.** Its strong rails are mostly additional LLM calls, which add a model round trip each and can be prompt-injected by the content they judge. Its local jailbreak rails are evadable per independent work and **fail open** by design. It ships default-on telemetry to NVIDIA, default cloud endpoints, runtime model downloads, `trust_remote_code`, and onnxruntime (C++) as a core dependency.
 
@@ -42,7 +42,7 @@ This assessment is one of a set of four guard-model assessments ([Prompt Guard](
   - First release `0.1.0` on 2023-04-25 (`CHANGELOG.md:1230`). Current release `v0.24.1` on 2026-09-16. `pyproject.toml:3` says `0.25.0.dev0`.
   - Cadence is roughly one minor release every 1–2 months: 0.21.0 on 2026-03-12, 0.22.0 on 05-22, 0.23.0 on 07-01, 0.24.0 on 08-25.
   - The project is still **pre-1.0**. Its classifier is "Development Status :: 4 - Beta" (`pyproject.toml:13`).
-- **Activity.** Last push 2026-09-29, 249 open issues, 7.2k stars, not archived (GitHub API, 2026-09-30).
+- **Activity.** Last push 2026-09-29, 249 open issues and PRs (GitHub's `open_issues_count`, which counts both), 7.2k stars, not archived (GitHub API, 2026-09-30).
 - **Contribution rules.**
   - DCO, via `Signed-off-by` or GPG-signed commits (`CONTRIBUTING.md:228-236`).
   - An AI-usage policy requires AI disclosure, forbids agent-filed issues and forbids AI co-authors (`AI_POLICY.md`).
@@ -81,7 +81,7 @@ This assessment is one of a set of four guard-model assessments ([Prompt Guard](
   - **Redistribution is permitted in any medium.** A copy of the agreement and a "Notice" file reading "Licensed by NVIDIA Corporation under the NVIDIA Open Model License" must be included (§3.1).
   - Two caveats:
     1. The license is **revocable** on patent or copyright litigation (§2.1).
-    2. "**NVIDIA may update this Agreement … and You agree to either comply with any updated license or cease Your copying, use, and distribution**" (§2.1). That is a unilateral-change clause, which a DoD SCRM reviewer will flag.
+    2. "**NVIDIA may update this Agreement to comply with legal and regulatory requirements at any time and You agree to either comply with any updated license or cease Your copying, use, and distribution of the Model and any Derivative Model**" (§2.1). The update right is limited to legal and regulatory compliance, which is narrower than an unrestricted unilateral-change clause, but the licensee must still comply with the updated terms or stop using the model. A DoD SCRM reviewer will still flag it.
   - There is no MAU cap and no guardrail-bypass termination clause in this version.
 - **Snowflake arctic-embed-m-long** (JailbreakDetect's embedder): Apache-2.0 (HF API `cardData.license`).
 - **NIM containers.** They are governed separately, by the NVIDIA software license and AI product terms [vendor-doc: NGC catalog page]. Production use of NIM requires an NVIDIA AI Enterprise subscription [vendor-doc: docs.api.nvidia.com/nim/docs/product; forums.developer.nvidia.com/t/nim-question/364032].
@@ -124,6 +124,7 @@ Which rails need an LLM or model call, and which are purely local, **[code]**:
   - **Loading.** The embedder is loaded with `trust_remote_code=True` (`model_based/models.py:34-43`). The NomicBert architecture code comes from the HF repository's `auto_map`.
 - **Heuristics details.**
   - Decision rule: `len(chars)/perplexity >= 89.79`, or prefix/suffix 19-word perplexity `>= 1845.65`.
+  - Vendor figure for the length/perplexity threshold: "31.19% of jailbreaks being detected with a false positive rate of 7.44%" on NVIDIA's dataset (`jailbreak-protection.mdx:79`) [vendor-doc].
   - Strings shorter than 20 words skip the second check (`heuristics/checks.py:64-103`; defaults in `library/jailbreak_detection/rail_config.py:39-42`).
   - The perplexity window is GPT-2's 1024 positions with stride 512 (`heuristics/checks.py:36-57`).
 - **Output shape at the framework level.** The framework outputs `RailOutcome.allow()` / `.block()` / transform (`actions/rail_outcome.py`). It is a verdict, with the score discarded in most rails. The LLM judge deliberately returns **only the verdict**, not the reason (`actions/llm_judge.py:81-86`).
@@ -142,18 +143,18 @@ Which rails need an LLM or model call, and which are purely local, **[code]**:
 - **Prompt injection specifically.**
   - No built-in local rail targets **indirect prompt injection in tool results or retrieved content** as such.
   - What exists is:
-    - JailbreakDetect, trained on jailbreak corpora: WildJailbreak, jackhhao/jailbreak-classification and others (JailbreakDetect card `README.md:48-80`);
+    - JailbreakDetect, trained on exactly three open jailbreak datasets: AdvBench, WildJailbreak and jackhhao/jailbreak-classification, with jailbreak data augmented by garak (JailbreakDetect card `README.md:48-80`);
     - self-check LLM prompts that can be pointed at retrieval or tool-output rails;
     - vendor SaaS integrations.
   - The `injection_detection` rail is about *code* injection in model **output** (`library/injection_detection/flows.co:1-5`), not prompt injection.
 - **Languages.**
-  - The heuristics are English-only, and "will yield significantly more false positives on non-English text, including code" (`jailbreak-protection.mdx:97`) [vendor-doc].
+  - The heuristics are English-only, and "will yield significantly more false positives on non-English text, including code" (`jailbreak-protection.mdx:85`, repeated at `:98`) [vendor-doc].
   - The content-safety models are multilingual in the v3 variant [vendor-doc: HF `Llama-3.1-Nemotron-Safety-Guard-8B-v3`].
 - **Vendor accuracy for JailbreakDetect** [vendor-doc; not independent]: on JailbreakHub, F1 0.9601, false-positive rate 0.0042, false-negative rate 0.0435 (JailbreakDetect card `README.md:90-93`).
 - **Published bypass (Hackett et al., 2025)** [third-party]: "Bypassing Prompt Injection and Jailbreak Detection in LLM Guardrails", arXiv:2504.11168v1 (Mindgard).
   - Baseline detection of adversarial jailbreak samples: NeMo Guard Jailbreak Detect, 87.17% (Table A.1).
   - Character injection (emoji smuggling, homoglyphs, zero-width characters and similar) reached an **attack success rate (ASR) of 72.54%** against it on jailbreaks.
-  - Adversarial-ML word perturbation achieved an average ASR of **65.22%**, which the paper calls "**the highest susceptibility to jailbreak evasion**" among the six guardrails tested.
+  - Adversarial-ML word perturbation achieved an average ASR of **65.22%**, which the paper calls "**the highest susceptibility to jailbreak evasion**" among the six guardrails tested. That ranking is for adversarial-ML jailbreak evasion only: under character injection, Vijil Prompt Injection was the most susceptible (87.95% / 91.67%), and NeMo's detector was evaluated on jailbreaks only, not prompt injection.
 - **Structural critiques** [inferred, with code support]:
   1. **LLM-as-judge is itself injectable.** The self-check template interpolates untrusted text directly into the judge prompt (`User message: "{{ user_input }}"`, `examples/bots/abc/prompts.yml:18`). Content that instructs the judge to answer "No" is the obvious attack.
   2. **Fail-open by design** on the jailbreak rails.
@@ -167,7 +168,7 @@ Which rails need an LLM or model call, and which are purely local, **[code]**:
 
 - **Runtime.** Python `>=3.10,<3.14` (`pyproject.toml:8`), asyncio-based.
 - **Core dependencies.** There are 18 direct dependencies (`pyproject.toml:22-44`), and they include:
-  - **`onnxruntime`** (C++), a *core* dependency pulled in via FastEmbed;
+  - **`onnxruntime`** (C++), a *direct* core dependency (`pyproject.toml:27-28`), also required by FastEmbed;
   - `fastembed`, `aiohttp`, `httpx`, `jinja2`, `lark`, `pydantic`, `numpy`, `protobuf`, `simpleeval`, `typer`, `rich`, `prompt-toolkit`.
 - **Transitive counts [measured].** Computed from the pinned `uv.lock` (276 packages locked) by walking its dependency graph with an independent script, not the candidate's code:
 
@@ -201,7 +202,7 @@ Which rails need an LLM or model call, and which are purely local, **[code]**:
 | JailbreakDetect RF (`snowflake.onnx`) | **43.9 MB** (`x-linked-size: 43948411`) | [measured: an HTTP HEAD request to the pinned HF file] |
 | Snowflake arctic-embed-m-long | 137M params (~550 MB fp32) | [HF API safetensors total; size inferred] |
 | JailbreakDetect latency | Not published on the card; test hardware listed as RTX A6000 / A100 | [vendor-doc] JailbreakDetect card `README.md:95-99` |
-| JailbreakDetect latency estimate | Tens of ms per short input on CPU, rising roughly linearly to 2048 tokens | [inferred: 137M encoder plus RF] |
+| JailbreakDetect latency estimate | Tens of ms per short input on CPU. Cost rises superlinearly with length (attention is quadratic in sequence length), so a full 2048-token input costs well over 4× a 512-token one; bound it by scanning fixed-size windows. | [inferred: 137M encoder plus RF] |
 | Content-safety 8B LLM rail | No latency published in the repository docs. One 8B prefill plus up to 50 output tokens. | [inferred] |
 | Content-safety 8B LLM rail, estimate | ~100–400 ms on a datacentre GPU; seconds on CPU | [inferred] |
 | Self-check rails | One full round trip to the configured LLM per rail. The repository's evaluation config *examples* use `fixed_latency: 0.3 s` / `0.25 s` per call. These are illustrative config values, not measurements. | [vendor-doc] `docs/evaluation/evaluate-configuration.mdx:133-144` |
@@ -226,10 +227,10 @@ Throughput is not published for any local rail.
 ## 8. Weaknesses
 
 - **False negatives and bypasses.**
-  - Independent work shows JailbreakDetect is the *most* evadable of six guardrails tested (ASR 65–73%, §4).
+  - Independent work shows JailbreakDetect is the *most* evadable of six guardrails tested under adversarial-ML word perturbation on jailbreaks (65.22% ASR, §4). Under character injection it reached 72.54%, but Vijil Prompt Injection was worse there (87.95% on prompt injection, 91.67% on jailbreaks). NeMo's detector was tested on jailbreaks only.
   - Self-check judges are injectable by the content they judge.
   - Classification stops at the 2048-token truncation.
-- **False positives.** The heuristics over-fire on non-English text and on code (`jailbreak-protection.mdx:97`). Code is exactly what an agent reads in tool results.
+- **False positives.** The heuristics over-fire on non-English text and on code (`jailbreak-protection.mdx:85,98`). Code is exactly what an agent reads in tool results.
 - **Fail-open.**
   - Jailbreak rails fail open silently (`library/jailbreak_detection/actions.py:95-98,157-165,182-186`).
   - The failure policy differs per integration (`runtime-security-faq.mdx:113-117`).
@@ -241,7 +242,7 @@ Throughput is not published for any local rail.
   - It also writes a local audit file, `~/.config/nemoguardrails/usage_stats.json` (`telemetry.py:77-81`).
   - Opt-out is any one of:
     - `NEMO_GUARDRAILS_NO_USAGE_STATS=1`;
-    - `DO_NOT_TRACK=1`;
+    - `DO_NOT_TRACK=1` (either variable alone disables it);
     - a `~/.config/nemoguardrails/do_not_track` file;
     - `CI` or pytest being present (`telemetry.py:346-383`).
   - The payload is deployment metadata: version, platform, CPU architecture, LLM engine names and feature list (`telemetry.py:687-757`; `docs/telemetry.mdx`). It excludes prompts, per the vendor.
@@ -262,19 +263,20 @@ Throughput is not published for any local rail.
 - **A heavy C/C++ surface.** `onnxruntime` is a *core* dependency. It sits beside `torch`, libyara and spaCy's compiled extensions.
 - **Maintenance risk.**
   - The project is pre-1.0 and has breaking changes in minor releases, such as the LangChain demotion and the engine split into LLMRails and IORails.
-  - There are 249 open issues.
+  - There are 249 open issues and PRs.
   - Heuristics are unsupported on `IORails` (`jailbreak-protection.mdx:122-133`).
 - **Licensing friction.** The model weights carry the Open Model License's unilateral-update clause. The 8B safety models also carry the Llama 3.1 terms, and NIM production use needs NVIDIA AI Enterprise.
 
 ## 9. Integration into Maknae as-is
 
 - **Shape.** The only viable shape is a **separate Python sidecar service**, the FastAPI server or a thin wrapper. It would run under its own account beside `maknae-egress` and be called over a Unix socket. The kernel would treat its verdict as PIP input.
-- **TCB.** It must be **outside** the TCB: a Python runtime, 66–212 packages, onnxruntime, torch and libyara, none of which ADR-0002 admits into the kernel or the egress process. That is acceptable only if its output is strictly advisory. It still becomes a new supply-chain surface that DoD SCRM must assess: pip wheels, CUDA if a GPU is used, and HF artefacts.
+- **Where the verdict must arrive: ADR-0023's write-ahead order.** ADR-0023 decision 3 fixes the order of a turn: the kernel decides `session.prompt`, appends the write-ahead record, and only then hands the turn to `maknae-egress`. A PIP that sits beside the Egress Daemon and scans what it receives therefore sees the content only after the decision, and its verdict informs nothing. For a verdict on input content to count, it must reach `maknaed` **before** the `session.prompt` decision. With the scanner beside the Egress Daemon, that means a new channel from `maknaed` to the scanner, or an extra round trip before the decision. That cost is on the critical path of every turn, on top of the scan time itself. Running the scan asynchronously, or pipelined with the model call, is not a latency fix for inputs: it sends the content before the verdict exists, which is the objection this assessment raises (§9, below) against IORails speculative generation. Replies are harder still. In the shipped design the reply-leg release verdict is the `session.prompt` verdict, computed before the model output exists (ADR-0023 decision 3, "The response leg is a release"), so no content-dependent check on a reply can bind until that release is un-collapsed into a decided `session.update`, for which #229 landing is a named trigger.
+- **TCB.** It must be **outside** the TCB: a Python runtime, 66–212 packages, onnxruntime, torch and libyara, none of which ADR-0002 admits into the kernel or the egress process. (Maknae's egress process already links native code, per `cargo tree -p maknae-egress`: the AWS-LC crypto module (`aws-lc-fips-sys`, with the non-FIPS `aws-lc-sys` also in the tree), and, on macOS, Security.framework and CoreFoundation through FFI (`rustls-platform-verifier` → `security-framework-sys` / `core-foundation-sys`, reached through `reqwest`). A model runtime is a different order of native code from either.) That is acceptable only if its output is strictly advisory. It still becomes a new supply-chain surface that DoD SCRM must assess: pip wheels, CUDA if a GPU is used, and HF artefacts.
 - **FIPS.** No FIPS relevance for local classification. However, the sidecar's HTTP clients (`aiohttp`, `httpx`, `urllib`) use Python's OpenSSL, not AWS-LC. That matters if it ever reaches a NIM over TLS.
 - **Air gap.** Achievable only with all of the following:
   - pre-staging every model (§8);
   - setting `HF_HUB_OFFLINE=1` / `TRANSFORMERS_OFFLINE=1`;
-  - `NEMO_GUARDRAILS_NO_USAGE_STATS=1` **and** `DO_NOT_TRACK=1`, with the heartbeat thread checked by egress observation;
+  - `NEMO_GUARDRAILS_NO_USAGE_STATS=1` or `DO_NOT_TRACK=1` (either suffices; set both as belt and braces), with the absence of the heartbeat confirmed by egress observation;
   - pinning `engine` base URLs to local endpoints;
   - vendoring the Snowflake remote code, which still executes arbitrary repository Python at load.
 - **macOS (Apple Silicon).**
@@ -285,7 +287,7 @@ Throughput is not published for any local rail.
 - **Latency.** Maknae wants no delay added on top of the policy check.
   - This is bad for the LLM-backed rails: +1 model round trip per rail per direction.
   - It is marginal for the heuristics: 2–3 s on CPU.
-  - Only the JailbreakDetect RF path, at tens of ms (inferred), is plausibly in budget.
+  - Only the JailbreakDetect RF path, at tens of ms per short window (inferred; superlinear in length), is plausibly in budget, and it still pays the pre-decision round trip.
   - `IORails` speculative generation hides input-rail latency only by sending the prompt to the provider *before* the verdict. That contradicts Maknae's rule that the kernel decides, and records the decision, before content leaves (ADR-0023 decision 3: `session.prompt` is write-ahead egress).
 - **Complexity: XL.**
   - It adds a new Python service with its own packaging for Linux and macOS, model staging and telemetry suppression.
@@ -299,7 +301,7 @@ Throughput is not published for any local rail.
 
 1. **JailbreakDetect: embedder plus random forest.**
    - Weights: the RF is under the NVIDIA Open Model License, which is redistributable with the Notice file. The Snowflake embedder is Apache-2.0.
-   - Embedder port: a NomicBert-architecture encoder (rotary embeddings, SwiGLU, 2048-token context) running in `candle`, which is pure Rust. `candle-transformers` ships BERT-family models; whether a NomicBert module exists there should be verified, and otherwise it is a modest port. The alternative is `tract` running an ONNX export of the embedder.
+   - Embedder: a NomicBert-architecture encoder (rotary embeddings, SwiGLU, 2048-token context) running in `candle`, which is pure Rust. candle at `5ba5d5b` already ships it (`candle-transformers/src/models/nomic_bert.rs`), so the work is loading the Snowflake weights into it and proving parity, not a port. The alternative is `tract` running an ONNX export of the embedder.
    - Tokenizer: the `tokenizers` crate reading `tokenizer.json`. That crate is Rust, but it pulls `onig` (C) by default unless built with `default-features = false, features = ["fancy-regex"]` [inferred].
    - Random forest:
      - Avoid the pickle entirely.
@@ -310,7 +312,7 @@ Throughput is not published for any local rail.
      - Floating-point drift in the embedding can flip RF splits near thresholds.
      - Validate the Rust output against the Python reference on JailbreakHub plus a Maknae corpus, requiring label agreement ≥99.9%.
    - Remaining weakness: the published evasion rate (§4) is a property of the model, not of the port. Treat its score as a weak signal. Unicode normalization and stripping of invisible characters before classification would address the character-injection half of Hackett et al. [inferred].
-   - **Complexity: M.**
+   - **Complexity: S–M** (the encoder exists in candle; the work is the RF conversion and parity testing).
 2. **Perplexity heuristics.**
    - The *logic* is ~40 lines (`heuristics/checks.py:27-103`), and the thresholds are published with their derivation (`jailbreak-protection.mdx:66,93`).
    - It needs a causal LM. GPT-2-large (MIT-licensed [inferred]) is 2–3 s on CPU, so it is out of budget.
@@ -333,13 +335,13 @@ Throughput is not published for any local rail.
    - It is an 8B model with the Llama 3.1 license terms and seconds of CPU latency.
    - **Complexity: L.** Not recommended for the hot path.
 
-**Overall Rust-native complexity for items 1, 3 and 4: M.** Most of the work is the NomicBert port and the equivalence testing.
+**Overall Rust-native complexity for items 1, 3 and 4: S–M.** candle already has NomicBert, so most of the work is the random-forest conversion and the equivalence testing.
 
 ## 11. Verdict for Maknae
 
 **Learn from, and adapt narrowly. Avoid as-is.**
 
-- **Why not as-is.** NeMo Guardrails is a Python orchestration framework whose strong rails are mostly *additional LLM calls*. Those add a full model round trip each, and the judge can be prompt-injected by the content it judges. Its local jailbreak rails are evadable per independent work (ASR 65–73%) and **fail open** by design. It also ships default-on telemetry to NVIDIA with a 10-minute heartbeat, default cloud endpoints, runtime model downloads, `trust_remote_code`, and onnxruntime C++ as a core dependency. Each of these conflicts with ADR-0002, the air gap and fail-closed requirements.
+- **Why not as-is.** NeMo Guardrails is a Python orchestration framework whose strong rails are mostly *additional LLM calls*. Those add a full model round trip each, and the judge can be prompt-injected by the content it judges. Its local jailbreak model is the most evadable of six guardrails under adversarial-ML jailbreak evasion (65.22% ASR) and reached 72.54% under character injection, per independent work, and its jailbreak rails **fail open** by design. It also ships default-on telemetry to NVIDIA with a 10-minute heartbeat, default cloud endpoints, runtime model downloads, `trust_remote_code`, and onnxruntime C++ as a core dependency. Each of these conflicts with ADR-0002, the air gap and fail-closed requirements.
 - **What is worth taking**, all under Apache-2.0 or redistributable terms:
   - the JailbreakDetect *design* (a 137M encoder plus a random forest, reimplemented in pure Rust with candle/tract and a flattened tree table, never the pickle), as one low-weight PIP signal;
   - the YARA output-injection rules, via YARA-X;
