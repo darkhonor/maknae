@@ -10,7 +10,7 @@
 
 This assessment is the landscape survey behind the synthesis [`2026-09-30-owasp-llm-top10-coverage.md`](2026-09-30-owasp-llm-top10-coverage.md). Four candidates have their own deep-dive assessments and appear here only as cross-references: [Meta Prompt Guard](2026-09-30-prompt-guard-assessment.md), [Meta Llama Guard](2026-09-30-llama-guard-assessment.md), [NVIDIA NeMo Guardrails](2026-09-30-nemo-guardrails-assessment.md) and [Protect AI LLM Guard](2026-09-30-llm-guard-assessment.md).
 
-**The Maknae context.** Maknae is evaluating a content and prompt-injection filter as a Policy Information Point (PIP) beside the Egress Daemon (`maknae-egress`), never a Policy Decision Point (PDP): `maknaed` stays the sole PDP (ADR-0005), and content informs but never authorizes (AGENTS.md core principle 2). This survey asks two questions: which OWASP rows any runtime filter can cover at all, and which defenses are architectural, so that the kernel could decide them on metadata.
+**The Maknae context.** Maknae is evaluating a content and prompt-injection filter as a Policy Information Point (PIP), never a Policy Decision Point (PDP). Under ADR-0023's write-ahead order its verdict must reach `maknaed` before the `session.prompt` decision, which is made before the Egress Daemon (`maknae-egress`) receives the turn: `maknaed` stays the sole PDP (ADR-0005), and content informs but never authorizes (AGENTS.md core principle 2). This survey asks two questions: which OWASP rows any runtime filter can cover at all, and which defenses are architectural, so that the kernel could decide them on metadata.
 
 ## 0. The OWASP list itself
 
@@ -537,7 +537,7 @@ These are designs, not filters. The OWASP rows follow the matrix conventions abo
 **Implication for Maknae [inferred]:**
 
 - The strongest controls in this survey that fit Maknae are the *architectural* ones, and their decisions are expressible on metadata alone: the Rule of Two session bits, FIDES/CaMeL-style integrity and confidentiality labels, and Invariant-style flow rules over tool-call sequences. They fit a `maknaed` whose decisions never inspect content (it relays prompt content to the Egress Daemon today, but decides on the subject, the verb, the object and its marking), and they use the mandatory-operand machinery that the classification-ceiling operand already has. Their reach is bounded by the mediation caveat at the head of §3.
-- A content filter in or beside the Egress Daemon remains a PIP producing one more attribute. The cheapest pure-Rust wins surfaced here need no model:
+- A content filter remains a PIP producing one more attribute, which `maknaed` must receive before it decides (see the [coverage map](2026-09-30-owasp-llm-top10-coverage.md) §4.4). The cheapest pure-Rust wins surfaced here need no model:
   - canary tokens;
   - Unicode tag-character / hidden-ASCII detection;
   - secrets regexes;
