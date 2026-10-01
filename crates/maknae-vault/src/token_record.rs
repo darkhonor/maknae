@@ -229,7 +229,7 @@ pub(crate) fn first_present<T>(
 
 pub fn custody_label(custody: &TokenCustody) -> &'static str {
     match custody {
-        TokenCustody::Keychain => "the macOS login keychain",
+        TokenCustody::Keychain => "your default keychain (usually login)",
         TokenCustody::UserCreds(_) => "a systemd-creds user credential",
         TokenCustody::Residual(_) => "a 0600 file (systemd-creds --user is unavailable here)",
     }
@@ -696,7 +696,7 @@ mod tests {
         let d = Path::new("/h");
         assert_eq!(
             custody_label(&TokenCustody::Keychain),
-            "the macOS login keychain"
+            "your default keychain (usually login)"
         );
         assert_eq!(
             custody_label(&TokenCustody::UserCreds(d.join("c"))),

@@ -483,11 +483,11 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
-    fn login_keychain_refs() -> Option<usize> {
+    fn default_keychain_refs() -> Option<usize> {
         within_30s(|| {
-            let login = Keychain::default().ok()?;
+            let default = Keychain::default().ok()?;
             Some(
-                crate::keychain::item_refs(&login, &crate::CLI_TOKEN_KEYCHAIN_ITEM)
+                crate::keychain::item_refs(&default, &crate::CLI_TOKEN_KEYCHAIN_ITEM)
                     .unwrap()
                     .len(),
             )
@@ -500,7 +500,7 @@ mod tests {
         let _serial = crate::keychain::tests::KEYCHAIN_UI
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let before = login_keychain_refs();
+        let before = default_keychain_refs();
         let kc = crate::keychain::tests::scratch_with_cli_item(None);
         let path = kc.path.clone();
         within_30s(move || {
@@ -521,7 +521,7 @@ mod tests {
                 Err(VaultError::TokenAbsent)
             ));
         });
-        assert_eq!(login_keychain_refs(), before);
+        assert_eq!(default_keychain_refs(), before);
     }
 
     #[cfg(target_os = "macos")]
