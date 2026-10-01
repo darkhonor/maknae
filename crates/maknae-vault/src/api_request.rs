@@ -19,24 +19,41 @@ pub(crate) struct ApiBase(String);
 
 impl ApiBase {
     pub(crate) fn new(addr: &str) -> Result<Self, VaultError> {
-        crate::validate_vault_addr(addr)?;
         let parsed = url::Url::parse(addr)
-            .map_err(|_| VaultError::InvalidAddr("not a well-formed URL".into()))?;
-        let refused = if !parsed.username().is_empty() || parsed.password().is_some() {
-            Some("userinfo")
-        } else if parsed.query().is_some() {
-            Some("query")
-        } else if parsed.fragment().is_some() {
-            Some("fragment")
-        } else if !matches!(parsed.path(), "" | "/") {
-            Some("path")
-        } else {
-            None
-        };
+            .map_err(|_| VaultError::InvalidAddr("the Vault address is not a URL".into()))?;
+        let raw_tail = addr
+            .split_once("://")
+            .and_then(|(_, rest)| rest.find(['/', '?', '#']).map(|i| &rest[i..]))
+            .unwrap_or("");
+        let refused =
+            if !parsed.username().is_empty() || parsed.password().is_some() || addr.contains('@') {
+                Some("userinfo")
+            } else if parsed.scheme() != "https" {
+                Some("a scheme other than https")
+            } else if parsed.query().is_some() {
+                Some("query")
+            } else if parsed.fragment().is_some() {
+                Some("fragment")
+            } else if parsed.path() != "/" || !matches!(raw_tail, "" | "/") {
+                Some("path")
+            } else {
+                None
+            };
         if let Some(part) = refused {
-            return Err(VaultError::InvalidAddr(format!("must not carry a {part}")));
+            return Err(VaultError::InvalidAddr(format!(
+                "the Vault address must not carry {part}"
+            )));
         }
-        Ok(Self(format!("{}/v1/", addr.trim_end_matches('/'))))
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| VaultError::InvalidAddr("the Vault address has no host".into()))?;
+        let port = parsed.port().map(|p| format!(":{p}")).unwrap_or_default();
+        Ok(Self(format!("https://{host}{port}/v1/")))
+    }
+
+    #[cfg(test)]
+    fn as_str(&self) -> &str {
+        &self.0
     }
 
     fn url(&self, path: &str) -> String {
@@ -202,6 +219,13 @@ mod tests {
         }
         for bad in [
             "https://u:p@vault.example",
+            "http://u:p@vault.example",
+            "https://@vault.example",
+            "https://:@vault.example",
+            "ftp://vault.example",
+            "https://vault.example/%2e%2e",
+            "https://vault.example/.",
+            "https://vault.example/x/..",
             "https://vault.example/?x=1",
             "https://vault.example/#f",
             "https://vault.example/prefix",
@@ -211,11 +235,19 @@ mod tests {
                 "{bad}"
             );
         }
-        let msg = match ApiBase::new("https://u:p@vault.example") {
-            Err(e) => e.to_string(),
-            Ok(_) => unreachable!(),
-        };
-        assert!(!msg.contains("p@") && !msg.contains("u:p"), "{msg}");
+        for leaky in ["https://u:p@vault.example", "http://u:p@vault.example"] {
+            let msg = match ApiBase::new(leaky) {
+                Err(e) => e.to_string(),
+                Ok(_) => unreachable!(),
+            };
+            assert!(!msg.contains("p@") && !msg.contains("u:p"), "{msg}");
+        }
+        assert_eq!(
+            ApiBase::new("https://vault.example:8200/")
+                .unwrap()
+                .as_str(),
+            "https://vault.example:8200/v1/"
+        );
     }
 
     fn header<'a>(req: &'a Request, name: &str) -> &'a str {
