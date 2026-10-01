@@ -48,6 +48,8 @@ mod peercred;
 mod socket;
 #[cfg(unix)]
 mod stream;
+#[cfg(unix)]
+mod token_record;
 pub use api_shape::{WrapMismatch, MAX_TOKEN_BYTES, MAX_VAULT_BODY_BYTES};
 pub use auth::{AppRoleAuth, AuthMethod, VaultToken};
 pub use ca::{load_ca_pin, CaBundle};
@@ -68,8 +70,9 @@ pub use fips_glue::{assert_fips_provider, install_default_crypto_provider};
 #[cfg(target_os = "macos")]
 pub use keychain::read_cli_secret_from;
 pub use keychain_policy::{
-    daemon_keychain_pointer, gate, parse_pointer, pointer_document, read_gated, KeychainItem,
-    KeychainPlane, CLI_KEYCHAIN_ITEM, KEYCHAIN_ACCOUNT, SYSTEM_KEYCHAIN,
+    daemon_keychain_pointer, gate, parse_pointer, pointer_document, read_gated, KeychainDelete,
+    KeychainItem, KeychainPlane, CLI_KEYCHAIN_ITEM, CLI_TOKEN_KEYCHAIN_ITEM, KEYCHAIN_ACCOUNT,
+    SYSTEM_KEYCHAIN,
 };
 #[cfg(unix)]
 pub use kv::split_kv_path;
@@ -90,6 +93,12 @@ pub use socket::bind_listener as bind_group_gated_uds;
 pub use stream::{
     AcceptRejection, AuthenticatedStream, PlaneConnector, PlaneListener, RawAcceptError,
     RawPlaneConn, RejectReason,
+};
+#[cfg(unix)]
+pub use token_record::{
+    custody_for_store, custody_label, StoredToken, SystemdCreds, TokenCustody,
+    MAX_TOKEN_RECORD_BYTES, TOKEN_CREDS_FILE, TOKEN_EXPIRY_MARGIN, TOKEN_RESIDUAL_FILE,
+    USER_CREDS_MIN_SYSTEMD,
 };
 pub use user_login::{
     userpass_username_is_acceptable, Password, UserLogin, UserToken, MAX_PASSWORD_BYTES,

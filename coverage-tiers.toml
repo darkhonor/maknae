@@ -123,6 +123,7 @@ files = [
   "crates/maknae-vault/src/api_shape.rs",
   "crates/maknae-vault/src/user_login.rs",
   "crates/maknae-vault/src/wrap.rs",
+  "crates/maknae-vault/src/token_record.rs",
   "crates/maknae-seal/src/fips.rs",
   "crates/maknae-seal/src/aad.rs",
   "crates/maknae-seal/src/wire.rs",
