@@ -606,6 +606,7 @@ mod tests {
 
     #[test]
     fn a_kv_data_path_is_bounded_to_the_seal_field_length() {
+        assert_eq!(MAX_KV_DATA_PATH_BYTES, maknae_seal::MAX_AAD_FIELD_BYTES);
         let fits = "a".repeat(MAX_KV_DATA_PATH_BYTES - "kv/data/".len());
         assert_eq!(
             kv_data_path("kv", &fits).unwrap().as_str().len(),

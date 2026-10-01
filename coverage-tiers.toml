@@ -393,7 +393,7 @@ why = "thin main: env scrub + arg resolve + boot + exit mapping; behavior exerci
 
 [[t3]]
 path = "bins/maknae/src/main.rs"
-why = "thin main: env scrub + runtime build + dispatch to cli::run_cli (T3) + bounded teardown; #318's ORDERING (scrub before the multi-thread runtime, because remove_var is only sound single-threaded) is pinned by a source-order test in its own test module. Was \"scaffold stub — re-tier at body landing\"; the body is still elsewhere, so the tier is unchanged and only the description is now accurate"
+why = "thin main: env scrub + runtime build (every runtime thread blocks the hidden prompt's four signals from its start, pinned by a source-order test) + dispatch to cli::run_cli (T3) + bounded teardown; #318's ORDERING (scrub before the multi-thread runtime, because remove_var is only sound single-threaded) is pinned by a source-order test in its own test module. Was \"scaffold stub — re-tier at body landing\"; the body is still elsewhere, so the tier is unchanged and only the description is now accurate"
 
 [[t3]]
 path = "bins/maknae-spifc/src/main.rs"
@@ -612,7 +612,7 @@ why = "#241: the loop's I/O wiring — config, one plane client, stdout — T3 o
 
 [[t3]]
 path = "bins/maknae/src/tty.rs"
-why = "#153: the termios glue for maknae login's hidden prompt — tcgetattr/tcsetattr, an echo re-check and a byte read on stdin's descriptor; proven on a real pseudo-terminal with a 10 s watchdog (echo off, the typed bytes arrive, Ctrl-C and Ctrl-D end it, the saved mode is restored, a non-terminal is refused). The line discipline it drives is T1 in maknae-vault password_line.rs"
+why = "#153: the termios glue for maknae login's hidden prompt — tcgetattr/tcsetattr, an echo re-check and a byte read on stdin's descriptor; proven on a real pseudo-terminal with a 10 s watchdog (echo off, the typed bytes arrive, Ctrl-C and Ctrl-D end it, the saved mode is restored, a non-terminal is refused, and SIGINT, SIGTERM, SIGHUP and SIGQUIT are held back while echo is off and released after the restore, on the prompting thread and on every runtime thread from its start). The line discipline it drives is T1 in maknae-vault password_line.rs"
 
 [[t3]]
 path = "bins/maknae/src/login.rs"

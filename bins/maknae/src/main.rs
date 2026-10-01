@@ -22,6 +22,7 @@ fn main() -> ExitCode {
     maknae_vault::scrub_with(|k| std::env::remove_var(k));
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
+        .on_thread_start(tty::block_prompt_signals)
         .build()
     {
         Ok(runtime) => runtime,
@@ -70,5 +71,21 @@ mod tests {
             "the scrub must precede the runtime build: remove_var needs a single-threaded process"
         );
         assert!(scrub < cli, "the scrub must precede any Vault client");
+    }
+
+    #[test]
+    fn the_runtime_is_built_with_the_prompt_signal_hook() {
+        let src = include_str!("main.rs");
+        let builder = src
+            .find("tokio::runtime::Builder::new_multi_thread")
+            .unwrap();
+        let hook = src
+            .find(concat!(".on_thread_start(", "tty::block_prompt_signals)"))
+            .expect("the runtime does not block the prompt signals on its threads");
+        let build = builder + src[builder..].find(".build()").unwrap();
+        assert!(
+            builder < hook && hook < build,
+            "the hook is outside the runtime builder"
+        );
     }
 }

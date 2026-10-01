@@ -163,8 +163,8 @@ mod tests {
         (line, last)
     }
 
-    fn text(line: PasswordLine) -> String {
-        line.finish().unwrap().expose().to_string()
+    fn reads(line: PasswordLine, want: &str) -> bool {
+        line.finish().is_ok_and(|p| p.expose() == want)
     }
 
     #[test]
@@ -172,7 +172,7 @@ mod tests {
         for end in *b"\r\n" {
             let (line, fed) = typed(&[b'p', b'w', end]);
             assert_eq!(fed, PasswordFeed::Done);
-            assert_eq!(text(line), "pw");
+            assert!(reads(line, "pw"));
         }
     }
 
@@ -188,33 +188,33 @@ mod tests {
         assert_eq!(typed(&[0x04]).1, PasswordFeed::Eof);
         let (line, fed) = typed(&[b'a', 0x04, b'\r']);
         assert_eq!(fed, PasswordFeed::Done);
-        assert_eq!(text(line), "a");
+        assert!(reads(line, "a"));
     }
 
     #[test]
     fn backspace_removes_one_whole_character() {
         for bs in [0x7f, 0x08] {
             let (line, _) = typed(&[b'a', 0xc3, 0xa9, bs, b'b', b'\r']);
-            assert_eq!(text(line), "ab");
+            assert!(reads(line, "ab"));
         }
         let (line, _) = typed(&[b'a', 0xe2, 0x82, 0xac, 0x7f, b'\r']);
-        assert_eq!(text(line), "a");
+        assert!(reads(line, "a"));
         let (line, _) = typed(b"ab\x7f\r");
-        assert_eq!(text(line), "a");
+        assert!(reads(line, "a"));
         let (line, _) = typed(b"\x7fx\r");
-        assert_eq!(text(line), "x");
+        assert!(reads(line, "x"));
     }
 
     #[test]
     fn ctrl_u_clears_the_line() {
         let (line, _) = typed(b"abc\x15d\r");
-        assert_eq!(text(line), "d");
+        assert!(reads(line, "d"));
     }
 
     #[test]
     fn escape_sequences_are_dropped_whole() {
         let (line, _) = typed(b"a\x1b[Ab\x1b[1;5Cc\x1bOPd\x1bxe\r");
-        assert_eq!(text(line), "abcde");
+        assert!(reads(line, "abcde"));
     }
 
     #[test]
@@ -222,13 +222,13 @@ mod tests {
         assert_eq!(typed(b"a\x1b[1\r").1, PasswordFeed::Done);
         assert_eq!(typed(b"a\x1b[1\x03").1, PasswordFeed::Interrupted);
         let (line, _) = typed(b"a\x1b[\rb");
-        assert_eq!(text(line), "a");
+        assert!(reads(line, "a"));
     }
 
     #[test]
     fn other_control_bytes_are_ignored_and_tab_and_space_are_kept() {
         let (line, _) = typed(b"a\x00\x1a\x1f\t b\r");
-        assert_eq!(text(line), "a\t b");
+        assert!(reads(line, "a\t b"));
     }
 
     #[test]
@@ -299,7 +299,7 @@ mod tests {
         line.feed(b'a');
         assert_eq!(line.feed(b'\r'), PasswordFeed::Done);
         assert_eq!(line.feed(0x03), PasswordFeed::Done);
-        assert_eq!(text(line), "a");
+        assert!(reads(line, "a"));
     }
 
     #[test]
@@ -317,10 +317,10 @@ mod tests {
             (b"a\x1bO\xc3\xa9b\r", "a\u{e9}b"),
             (b"ab\xa9\x7f\r", "ab"),
         ];
-        for (bytes, want) in rows {
+        for (i, (bytes, want)) in rows.into_iter().enumerate() {
             let (line, fed) = typed(bytes);
             assert_eq!(fed, PasswordFeed::Done);
-            assert_eq!(text(line), want);
+            assert!(reads(line, want), "row {i}");
         }
     }
 
@@ -338,6 +338,6 @@ mod tests {
         }
         assert_eq!(line.buf.capacity(), MAX_PASSWORD_BYTES);
         assert_eq!(line.feed(b'\r'), PasswordFeed::Done);
-        assert_eq!(text(line), "de");
+        assert!(reads(line, "de"));
     }
 }

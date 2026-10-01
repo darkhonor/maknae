@@ -41,7 +41,8 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "pr
 # helper's self-verification, spec §4.1); `fs` — nix::unistd::chown (artifact_write.rs,
 # spec §4.6 ownership table). PR-J1 Task 8.
 # `term` — termios for `maknae login`'s hidden prompt: rpassword leaves echo off on Ctrl-C and returns a growing String.
-nix = { version = "0.31", default-features = false, features = ["user", "fs", "term"] }
+# `signal` — SigSet masks for that prompt: SIGINT/SIGTERM/SIGHUP/SIGQUIT from another process would end it with echo off.
+nix = { version = "0.31", default-features = false, features = ["user", "fs", "term", "signal"] }
 # Zeroizing wrapper for the operator's Vault token + the minted SecretIDs in transit
 # through the enroll flow (never argv/env/log). PR-J1 Task 8.
 zeroize = "1"
