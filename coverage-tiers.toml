@@ -616,7 +616,7 @@ why = "#153: the termios glue for maknae login's hidden prompt — tcgetattr/tcs
 
 [[t3]]
 path = "bins/maknae/src/login.rs"
-why = "#153: maknae login/logout orchestration — terminal check, account name, config, custody probe, prompt, userpass login, store, erase, revoke; it needs a live Vault and a terminal. Every decision it calls is T1 in maknae-vault (username rule, vault.user_auth, token record and its issuing address, custody and read order, revocable_at, password line); lifetime, logout_line, logout_plan and previous_token (the network-free revoke-or-not decisions, which apply token_record.rs's issued_by) are table-tested here, and the built binary's off-terminal refusal is tested in tests/login_off_tty.rs"
+why = "#153: maknae login/logout orchestration — terminal check, account name, config, custody probe, prompt, userpass login, store, erase, revoke; it needs a live Vault and a terminal. Every decision it calls is T1 in maknae-vault (username rule, vault.user_auth, token record and its issuing address, custody and read order, revocable_at, password line); lifetime, root_refusal, logout_line, logout_plan, previous_token, login_steps, previous_fate, previous_note and new_token_note (the network-free revoke-or-not and store-erase-revoke ordering decisions, which apply token_record.rs's issued_by, and the text each outcome prints) are table-tested here, and the built binary's off-terminal refusal is tested in tests/login_off_tty.rs"
 
 # PR-J1 Task 8 (`maknae enroll`, spec §4.1-§4.6): bin code, per the tiering
 # constraint (decision logic that needed 0-missed lives in the library crates

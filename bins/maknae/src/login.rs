@@ -88,8 +88,89 @@ pub(crate) fn previous_token(
     }
 }
 
-pub(crate) fn other_vault_note(addr: &str) -> String {
-    format!("a token from a different Vault ({addr}) was erased here, not revoked")
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct LoginSteps {
+    pub(crate) erase_older: bool,
+    pub(crate) revoke_new: bool,
+    pub(crate) revoke_previous: bool,
+}
+
+pub(crate) fn login_steps(stored: bool, previous: &Previous) -> LoginSteps {
+    LoginSteps {
+        erase_older: stored,
+        revoke_new: !stored,
+        revoke_previous: matches!(previous, Previous::SameVault(_)),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PreviousFate {
+    Erased,
+    MaybeErased,
+}
+
+pub(crate) fn previous_fate(stored: bool, erased: bool) -> PreviousFate {
+    if stored && erased {
+        PreviousFate::Erased
+    } else {
+        PreviousFate::MaybeErased
+    }
+}
+
+pub(crate) fn previous_note(
+    previous: &Previous,
+    fate: PreviousFate,
+    revoked: Option<Result<(), String>>,
+    now: u64,
+) -> Option<String> {
+    let maybe = fate == PreviousFate::MaybeErased;
+    match (previous, revoked) {
+        (Previous::Nothing, _) => None,
+        (Previous::OtherVault(addr), _) if maybe => Some(format!(
+            "a token from a different Vault ({addr}) may have been erased here and was not revoked"
+        )),
+        (Previous::OtherVault(addr), _) => Some(format!(
+            "a token from a different Vault ({addr}) was erased here, not revoked"
+        )),
+        (Previous::SameVault(_), None) => None,
+        (Previous::SameVault(_), Some(Ok(()))) if maybe => {
+            Some("the previous token may have been erased, so it was revoked".into())
+        }
+        (Previous::SameVault(_), Some(Ok(()))) => None,
+        (Previous::SameVault(old), Some(Err(why))) => Some(format!(
+            "the previous token {}could not be revoked: {why}; it expires on its own within {}",
+            if maybe {
+                "may have been erased and "
+            } else {
+                ""
+            },
+            lifetime(old.expires_at().saturating_sub(now))
+        )),
+    }
+}
+
+pub(crate) fn new_token_note(revoked: Result<(), String>, lease_secs: u64) -> String {
+    match revoked {
+        Ok(()) => "the new token was revoked at Vault".into(),
+        Err(why) => format!(
+            "the new token could not be revoked ({why}) and stays valid for up to {}",
+            lifetime(lease_secs)
+        ),
+    }
+}
+
+pub(crate) fn root_refusal(euid: u32) -> Result<(), String> {
+    if euid == 0 {
+        return Err("run `maknae login` as your own user, not root".into());
+    }
+    Ok(())
+}
+
+fn joined(head: String, note: Option<String>) -> String {
+    match note {
+        Some(note) => format!("{head}; {note}"),
+        None => head,
+    }
 }
 
 pub(crate) async fn run_login() -> ExitCode {
@@ -113,6 +194,7 @@ async fn login() -> Result<String, Failure> {
     if !stdin_is_terminal() {
         return Err(PromptError::NotATerminal.to_string().into());
     }
+    root_refusal(nix::unistd::geteuid().as_raw())?;
     let name = local_username()?;
     let s = session()?;
     check_vault_addr(s.api.vault_addr()).map_err(|e| e.to_string())?;
@@ -145,23 +227,47 @@ async fn login() -> Result<String, Failure> {
                 lifetime(lease)
             )
         })?;
-    store_user_token(&custody, &stored).map_err(|e| e.to_string())?;
-    let erased = erase_user_token(&s.dir, Some(&custody));
-    if let Previous::SameVault(old) = &previous {
-        let _ = s.api.revoke_self(old.token()).await;
+    let store = store_user_token(&custody, &stored);
+    let steps = login_steps(store.is_ok(), &previous);
+    let erased = if steps.erase_older {
+        erase_user_token(&s.dir, Some(&custody)).map(drop)
+    } else {
+        Ok(())
+    };
+    let new_revoked = if steps.revoke_new {
+        Some(revoke(&s.api, &stored).await)
+    } else {
+        None
+    };
+    let previous_revoked = match (&previous, steps.revoke_previous) {
+        (Previous::SameVault(old), true) => Some(revoke(&s.api, old).await),
+        _ => None,
+    };
+    let fate = previous_fate(store.is_ok(), erased.is_ok());
+    let note = previous_note(&previous, fate, previous_revoked, issued_before);
+    if let Err(e) = store {
+        let new = new_revoked.map(|r| new_token_note(r, lease));
+        return Err(joined(joined(e.to_string(), new), note).into());
     }
-    erased.map_err(|e| {
-        format!("the new token is stored, but erasing an older stored token failed: {e}")
-    })?;
-    let mut line = format!(
-        "maknae: logged in to Vault as {name}; the token is held in {} and is valid for {}",
-        custody_label(&custody),
-        lifetime(lease)
-    );
-    if let Previous::OtherVault(addr) = &previous {
-        line = format!("{line}; {}", other_vault_note(addr));
+    if let Err(e) = erased {
+        let head =
+            format!("the new token is stored, but erasing an older stored token failed: {e}");
+        return Err(joined(head, note).into());
     }
-    Ok(line)
+    Ok(joined(
+        format!(
+            "maknae: logged in to Vault as {name}; the token is held in {} and is valid for {}",
+            custody_label(&custody),
+            lifetime(lease)
+        ),
+        note,
+    ))
+}
+
+async fn revoke(api: &VaultApi, stored: &StoredToken) -> Result<(), String> {
+    api.revoke_self(stored.token())
+        .await
+        .map_err(|e| e.to_string())
 }
 
 pub(crate) enum LogoutOutcome {
@@ -447,15 +553,121 @@ mod tests {
                 Previous::Nothing
             ));
         }
-        assert_eq!(
-            other_vault_note(ADDR),
-            "a token from a different Vault (https://vault.example:8200/v1/) was erased here, \
-             not revoked"
-        );
     }
 
     #[test]
-    fn login_rs_and_tty_rs_call_no_environment_reader() {
+    fn login_stores_then_erases_older_copies_and_revokes_new_on_a_failed_store() {
+        let same = Previous::SameVault(stored(10_000));
+        let other = Previous::OtherVault(OTHER.into());
+        let rows = [
+            (true, &same, (true, false, true)),
+            (true, &other, (true, false, false)),
+            (true, &Previous::Nothing, (true, false, false)),
+            (false, &same, (false, true, true)),
+            (false, &other, (false, true, false)),
+            (false, &Previous::Nothing, (false, true, false)),
+        ];
+        for (stored_ok, previous, (erase_older, revoke_new, revoke_previous)) in rows {
+            assert_eq!(
+                login_steps(stored_ok, previous),
+                LoginSteps {
+                    erase_older,
+                    revoke_new,
+                    revoke_previous
+                },
+                "{stored_ok} {previous:?}"
+            );
+        }
+        assert_eq!(previous_fate(true, true), PreviousFate::Erased);
+        assert_eq!(previous_fate(true, false), PreviousFate::MaybeErased);
+        assert_eq!(previous_fate(false, true), PreviousFate::MaybeErased);
+        assert_eq!(previous_fate(false, false), PreviousFate::MaybeErased);
+    }
+
+    type NoteRow<'a> = (
+        &'a Previous,
+        PreviousFate,
+        Option<Result<(), String>>,
+        Option<&'a str>,
+    );
+
+    #[test]
+    fn each_login_note_says_what_happened_to_the_previous_and_new_tokens() {
+        use PreviousFate::{Erased, MaybeErased};
+        let same = Previous::SameVault(stored(6_399));
+        let other = Previous::OtherVault(ADDR.into());
+        let failed = || Some(Err("Vault revoke-self failed: x".to_string()));
+        let rows: [NoteRow; 9] = [
+            (&Previous::Nothing, Erased, None, None),
+            (&Previous::Nothing, MaybeErased, None, None),
+            (
+                &other,
+                Erased,
+                None,
+                Some("a token from a different Vault (https://vault.example:8200/v1/) was erased here, not revoked"),
+            ),
+            (
+                &other,
+                MaybeErased,
+                None,
+                Some("a token from a different Vault (https://vault.example:8200/v1/) may have been erased here and was not revoked"),
+            ),
+            (&same, Erased, Some(Ok(())), None),
+            (&same, Erased, None, None),
+            (
+                &same,
+                MaybeErased,
+                Some(Ok(())),
+                Some("the previous token may have been erased, so it was revoked"),
+            ),
+            (
+                &same,
+                Erased,
+                failed(),
+                Some("the previous token could not be revoked: Vault revoke-self failed: x; it expires on its own within 1h 29m"),
+            ),
+            (
+                &same,
+                MaybeErased,
+                failed(),
+                Some("the previous token may have been erased and could not be revoked: Vault revoke-self failed: x; it expires on its own within 1h 29m"),
+            ),
+        ];
+        for (previous, fate, revoked, want) in rows {
+            assert_eq!(
+                previous_note(previous, fate, revoked, 1_000).as_deref(),
+                want,
+                "{previous:?} {fate:?}"
+            );
+        }
+        assert_eq!(
+            previous_note(&Previous::SameVault(stored(500)), Erased, failed(), 1_000).as_deref(),
+            Some("the previous token could not be revoked: Vault revoke-self failed: x; it expires on its own within 0s")
+        );
+        assert_eq!(
+            new_token_note(Ok(()), 28_800),
+            "the new token was revoked at Vault"
+        );
+        assert_eq!(
+            new_token_note(Err("Vault revoke-self failed: x".into()), 28_800),
+            "the new token could not be revoked (Vault revoke-self failed: x) and stays valid for up to 8h 0m"
+        );
+        assert_eq!(joined("a".into(), None), "a");
+        assert_eq!(joined("a".into(), Some("b".into())), "a; b");
+    }
+
+    #[test]
+    fn root_is_refused_before_anything_else() {
+        assert_eq!(
+            root_refusal(0).unwrap_err(),
+            "run `maknae login` as your own user, not root"
+        );
+        assert!(root_refusal(1).is_ok());
+        assert!(root_refusal(501).is_ok());
+    }
+
+    #[test]
+    fn the_password_path_in_login_rs_and_tty_rs_reads_no_environment_variable() {
         for src in [include_str!("login.rs"), include_str!("tty.rs")] {
             for needle in [
                 concat!("env::", "var"),
