@@ -124,6 +124,8 @@ files = [
   "crates/maknae-vault/src/user_login.rs",
   "crates/maknae-vault/src/wrap.rs",
   "crates/maknae-seal/src/fips.rs",
+  "crates/maknae-seal/src/aad.rs",
+  "crates/maknae-seal/src/wire.rs",
   "crates/maknae-seal/src/seal_pub.rs",
   # Stage-3a "it responds" cohort (Task 9): the wire/frame decode-and-dispatch
   # + config-range + audit-canonicalization + connection/verb decision seams.
