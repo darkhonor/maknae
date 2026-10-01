@@ -34,6 +34,7 @@ mod supervisor_run;
 mod tls;
 mod user_login;
 mod verify;
+mod wrap;
 // The UDS transport is unix-only (UnixStream / SO_PEERCRED); the pure-rustls layers above
 // (tls/resolver/plane_verify) compile everywhere so the Stage-1 client stays cross-platform.
 #[cfg(unix)]
@@ -93,6 +94,10 @@ pub use user_login::{
     MAX_USERNAME_BYTES,
 };
 pub use verify::{verify_plane_uri_san, VerifyError};
+pub use wrap::{
+    kv_data_path, KvDataPath, WrapExpectation, WrapLookup, WrappedSecret, WrappingToken,
+    MAX_WRAP_TTL,
+};
 
 #[used]
 pub static CRATE_MARKER: &[u8] = b"MAKNAE_VAULT";
