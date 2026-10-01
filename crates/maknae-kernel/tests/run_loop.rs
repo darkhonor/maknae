@@ -730,6 +730,7 @@ async fn a_small_prompt_declared_control_is_refused_as_a_mismatch() {
         conversation: "c".into(),
         turns: vec![],
         output_tokens: None,
+        choice: None,
     });
     assert!(body.len() <= maknae_proto::CONTROL_REQUEST_MAX);
     let (recs, responded) = serve_raw(raw_frame(1, &body), default_cfg()).await;
@@ -758,6 +759,7 @@ async fn a_prompt_class_frame_uses_the_prompt_cap() {
             content: vec![maknae_proto::ContentBlock::Text { text }],
         }],
         output_tokens: None,
+        choice: None,
     });
     let mut cfg = default_cfg();
     cfg.prompt_max_bytes = 1 << 20;

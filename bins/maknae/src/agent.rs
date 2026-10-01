@@ -259,6 +259,7 @@ impl Plane for RealPlane<'_> {
             conversation: conversation.to_string(),
             turns: turns.to_vec(),
             output_tokens: self.output_tokens,
+            choice: None,
         };
         // Measured against the frame cap BEFORE sending (ADR-0023 d7). This
         // encodes once here and once inside send_verb; accepted for Cooky.

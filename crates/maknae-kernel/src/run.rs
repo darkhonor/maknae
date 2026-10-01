@@ -1337,6 +1337,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 conversation,
                 turns,
                 output_tokens,
+                ..
             } = &request.verb
             else {
                 unreachable!("dispatch keyed on the verb")

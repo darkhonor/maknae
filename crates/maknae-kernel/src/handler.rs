@@ -388,6 +388,7 @@ mod tests {
                 conversation: "c".into(),
                 turns: vec![],
                 output_tokens: None,
+                choice: None,
             }),
             Dispatch::PromptRequested
         );
@@ -401,6 +402,7 @@ mod tests {
             conversation: "c".into(),
             turns: vec![],
             output_tokens: None,
+            choice: None,
         };
         let r = build_authz_request(&v, 1002, maknae_security::Lane::Local, Some("openai"));
         assert_eq!(
@@ -928,6 +930,7 @@ mod tests {
                 conversation: "c".into(),
                 turns: vec![],
                 output_tokens: None,
+                choice: None,
             },
             Verb::SessionCancel,
             Verb::SessionSetconfigoption,

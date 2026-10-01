@@ -128,6 +128,7 @@ fn prompt(s: &str) -> Verb {
             content: vec![text(s)],
         }],
         output_tokens: None,
+        choice: None,
     }
 }
 fn last_prompt_record(records: &Records) -> maknae_audit_append::AuditRecord {
@@ -635,6 +636,7 @@ async fn the_requested_reply_cap_is_on_the_intent_and_reaches_the_deputy() {
             content: vec![text("hello")],
         }],
         output_tokens: Some(512),
+        choice: None,
     };
     fx.roundtrip(verb, Arc::clone(&records), Some("openai"), eg.clone())
         .await
@@ -700,6 +702,7 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
                     }],
                 }],
                 output_tokens: None,
+                choice: None,
             },
             "image",
         ),
@@ -710,6 +713,7 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
                     content: vec![text("x")],
                 }],
                 output_tokens: None,
+                choice: None,
             },
             "conversation",
         ),
@@ -720,6 +724,7 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
                     content: vec![text("x")],
                 }],
                 output_tokens: None,
+                choice: None,
             },
             "conversation",
         ),
@@ -728,6 +733,7 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
                 conversation: "c".into(),
                 turns: vec![],
                 output_tokens: None,
+                choice: None,
             },
             "no turns",
         ),
@@ -738,6 +744,7 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
                     content: vec![text("x")],
                 }],
                 output_tokens: Some(0),
+                choice: None,
             },
             "reply cap not acceptable",
         ),
@@ -760,6 +767,7 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
                     content: vec![text("")],
                 }],
                 output_tokens: None,
+                choice: None,
             },
             "no text to send",
         ),
@@ -770,6 +778,7 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
                     content: vec![text("   \n\t ")],
                 }],
                 output_tokens: None,
+                choice: None,
             },
             "no text to send",
         ),
@@ -780,6 +789,7 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
                     content: vec![text(""), text("  ")],
                 }],
                 output_tokens: None,
+                choice: None,
             },
             "no text to send",
         ),
@@ -807,6 +817,7 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
                     },
                 ],
                 output_tokens: None,
+                choice: None,
             },
             "shape admission",
         ),
@@ -874,6 +885,7 @@ async fn the_operand_pre_gate_never_consults_the_pdp_and_the_observer_is_live() 
                 }],
             }],
             output_tokens: None,
+            choice: None,
         },
         Verb::SessionPrompt {
             conversation: "has space".into(),
@@ -881,11 +893,13 @@ async fn the_operand_pre_gate_never_consults_the_pdp_and_the_observer_is_live() 
                 content: vec![text("x")],
             }],
             output_tokens: None,
+            choice: None,
         },
         Verb::SessionPrompt {
             conversation: "c".into(),
             turns: vec![],
             output_tokens: None,
+            choice: None,
         },
         // #264 round 5: a prompt bearing no text must also cost ZERO PDP
         // decisions — it is refused by the operand pre-gate, not by policy.
@@ -895,6 +909,7 @@ async fn the_operand_pre_gate_never_consults_the_pdp_and_the_observer_is_live() 
                 content: vec![text("   ")],
             }],
             output_tokens: None,
+            choice: None,
         },
     ] {
         let counting = Arc::new(Counting {
@@ -1002,6 +1017,7 @@ async fn a_pre_gate_refusal_whose_record_cannot_be_appended_is_closed_frameless(
                 conversation: "c".into(),
                 turns: vec![],
                 output_tokens: None,
+                choice: None,
             },
             Arc::clone(&records),
             Some("openai"),

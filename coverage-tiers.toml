@@ -143,6 +143,7 @@ files = [
   # #240's own declaration; its Debug redaction is what keeps prompt content
   # and the provider key path out of operator-visible error strings.
   "crates/maknae-proto/src/egress_frame.rs",
+  "crates/maknae-proto/src/sealed.rs",
   # #240a D3-A: the PURE peer-identity decision. It is a separate file from
   # peercred.rs because that one is whole-file mutation-excluded (syscall I/O),
   # which would make a T1 tier there vacuous — zero mutants, zero missed.

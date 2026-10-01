@@ -1,6 +1,7 @@
 //! Versioned CBOR request/response contract (spec §3).
 use crate::error::ProtoCodecError;
 use crate::frame::FrameClass;
+use crate::SealedKey;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 // PROTOCOL_VERSION STAYS 1 (#77): adding `Verb::Read`/
@@ -249,6 +250,27 @@ pub struct Usage {
     pub completion_tokens: Option<u64>,
 }
 
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderChoice {
+    pub provider: String,
+    pub model: String,
+    pub key_subpath: String,
+    pub key_field: String,
+    pub sealed_key: SealedKey,
+}
+
+impl std::fmt::Debug for ProviderChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderChoice")
+            .field("provider", &self.provider)
+            .field("model", &self.model)
+            .field("key_subpath", &"<omitted>")
+            .field("key_field", &"<omitted>")
+            .field("sealed_key", &self.sealed_key)
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Verb {
     /// The daemon is reachable and serving. Discloses its existence and, via the
@@ -390,6 +412,8 @@ pub enum Verb {
         turns: Vec<Turn>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        choice: Option<ProviderChoice>,
     },
     /// Ask the agent to stop work in progress. *(ADR-0023 decision 3: NOT built
     /// in Cooky — the operand names a session and no session identity exists
@@ -914,6 +938,7 @@ mod tests {
                 conversation: "c".into(),
                 turns: vec![],
                 output_tokens: Some(4096),
+                choice: None,
             },
         };
         let bytes = encode_request(&with).unwrap();
@@ -924,6 +949,7 @@ mod tests {
                 conversation: "c".into(),
                 turns: vec![],
                 output_tokens: None,
+                choice: None,
             },
         };
         assert!(!encode_request(&without)
@@ -1036,6 +1062,7 @@ mod tests {
                     content: vec![text("frame-limit-sentinel")],
                 }],
                 output_tokens: None,
+                choice: None,
             },
         };
         let expected = encode_request(&request).unwrap();
@@ -1100,6 +1127,7 @@ mod tests {
                     content: vec![text("the secret plan")],
                 }],
                 output_tokens: None,
+                choice: None,
             },
         };
         let bytes = encode_request(&req).unwrap();
@@ -1111,6 +1139,65 @@ mod tests {
         );
         assert!(
             dbg.contains("conv-1") && dbg.contains("<15 bytes>"),
+            "{dbg}"
+        );
+    }
+
+    fn choice() -> ProviderChoice {
+        ProviderChoice {
+            provider: "openai".into(),
+            model: "gpt-5.6-luna".into(),
+            key_subpath: "subpath-sentinel/personal".into(),
+            key_field: "field-sentinel".into(),
+            sealed_key: SealedKey::new(vec![0x5a; crate::SEALED_KEY_MIN_BYTES]).unwrap(),
+        }
+    }
+
+    #[test]
+    fn a_prompt_carries_its_provider_choice_only_when_set() {
+        let with = Request {
+            protocol_version: PROTOCOL_VERSION,
+            verb: Verb::SessionPrompt {
+                conversation: "c".into(),
+                turns: vec![],
+                output_tokens: None,
+                choice: Some(choice()),
+            },
+        };
+        let bytes = encode_request(&with).unwrap();
+        assert!(bytes.windows(6).any(|w| w == b"choice"));
+        assert_eq!(decode_request(&bytes).unwrap(), with);
+        let without = Request {
+            protocol_version: PROTOCOL_VERSION,
+            verb: Verb::SessionPrompt {
+                conversation: "c".into(),
+                turns: vec![],
+                output_tokens: None,
+                choice: None,
+            },
+        };
+        let bytes = encode_request(&without).unwrap();
+        assert!(!bytes.windows(6).any(|w| w == b"choice"));
+        assert_eq!(decode_request(&bytes).unwrap(), without);
+    }
+
+    #[test]
+    fn a_provider_choice_debug_names_provider_and_model_and_never_the_key_location() {
+        assert_eq!(
+            format!("{:?}", choice()),
+            "ProviderChoice { provider: \"openai\", model: \"gpt-5.6-luna\", \
+             key_subpath: \"<omitted>\", key_field: \"<omitted>\", \
+             sealed_key: SealedKey(<127 bytes>) }"
+        );
+        let verb = Verb::SessionPrompt {
+            conversation: "c".into(),
+            turns: vec![],
+            output_tokens: None,
+            choice: Some(choice()),
+        };
+        let dbg = format!("{verb:?}");
+        assert!(
+            dbg.contains("openai") && !dbg.contains("sentinel") && !dbg.contains("90, 90"),
             "{dbg}"
         );
     }
@@ -1154,6 +1241,7 @@ mod tests {
                 conversation: "c".into(),
                 turns: vec![Turn::User { content: blocks }],
                 output_tokens: None,
+                choice: None,
             },
         };
         let bytes = encode_request(&req).unwrap();
@@ -1638,6 +1726,7 @@ mod tests {
             conversation: "c".into(),
             turns: turns.clone(),
             output_tokens: None,
+            choice: None,
         };
         let mut buf = Vec::new();
         ciborium::ser::into_writer(&v, &mut buf).unwrap();
@@ -1737,6 +1826,7 @@ mod tests {
                         conversation: "c".into(),
                         turns: vec![],
                         output_tokens: None,
+                        choice: None,
                     },
                     FrameClass::Prompt,
                 ),
