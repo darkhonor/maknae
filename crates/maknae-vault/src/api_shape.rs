@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::VaultError;
 use serde::de::{Deserialize, Deserializer, Visitor};
 use std::fmt;
