@@ -117,10 +117,25 @@ pub(crate) fn previous_fate(stored: bool, erased: bool) -> PreviousFate {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Revocation {
+    Revoked,
+    AlreadyInvalid,
+    Failed(String),
+}
+
+pub(crate) fn revocation(revoked: Result<(), VaultError>) -> Revocation {
+    match revoked {
+        Ok(()) => Revocation::Revoked,
+        Err(VaultError::VaultStatus { status: 403, .. }) => Revocation::AlreadyInvalid,
+        Err(e) => Revocation::Failed(e.to_string()),
+    }
+}
+
 pub(crate) fn previous_note(
     previous: &Previous,
     fate: PreviousFate,
-    revoked: Option<Result<(), String>>,
+    revoked: Option<Revocation>,
     now: u64,
 ) -> Option<String> {
     let maybe = fate == PreviousFate::MaybeErased;
@@ -133,11 +148,14 @@ pub(crate) fn previous_note(
             "a token from a different Vault ({addr}) was erased here, not revoked"
         )),
         (Previous::SameVault(_), None) => None,
-        (Previous::SameVault(_), Some(Ok(()))) if maybe => {
+        (Previous::SameVault(_), Some(Revocation::Revoked)) if maybe => {
             Some("the previous token may have been erased, so it was revoked".into())
         }
-        (Previous::SameVault(_), Some(Ok(()))) => None,
-        (Previous::SameVault(old), Some(Err(why))) => Some(format!(
+        (Previous::SameVault(_), Some(Revocation::AlreadyInvalid)) if maybe => {
+            Some("the previous token may have been erased; Vault reports it already invalid".into())
+        }
+        (Previous::SameVault(_), Some(Revocation::Revoked | Revocation::AlreadyInvalid)) => None,
+        (Previous::SameVault(old), Some(Revocation::Failed(why))) => Some(format!(
             "the previous token {}could not be revoked: {why}; it expires on its own within {}",
             if maybe {
                 "may have been erased and "
@@ -149,10 +167,11 @@ pub(crate) fn previous_note(
     }
 }
 
-pub(crate) fn new_token_note(revoked: Result<(), String>, lease_secs: u64) -> String {
+pub(crate) fn new_token_note(revoked: Revocation, lease_secs: u64) -> String {
     match revoked {
-        Ok(()) => "the new token was revoked at Vault".into(),
-        Err(why) => format!(
+        Revocation::Revoked => "the new token was revoked at Vault".into(),
+        Revocation::AlreadyInvalid => "Vault reports the new token already invalid".into(),
+        Revocation::Failed(why) => format!(
             "the new token could not be revoked ({why}) and stays valid for up to {}",
             lifetime(lease_secs)
         ),
@@ -264,10 +283,8 @@ async fn login() -> Result<String, Failure> {
     ))
 }
 
-async fn revoke(api: &VaultApi, stored: &StoredToken) -> Result<(), String> {
-    api.revoke_self(stored.token())
-        .await
-        .map_err(|e| e.to_string())
+async fn revoke(api: &VaultApi, stored: &StoredToken) -> Revocation {
+    revocation(api.revoke_self(stored.token()).await)
 }
 
 pub(crate) enum LogoutOutcome {
@@ -282,13 +299,10 @@ pub(crate) enum LogoutOutcome {
 }
 
 pub(crate) fn revoke_outcome(revoked: Result<(), VaultError>, left_secs: u64) -> LogoutOutcome {
-    match revoked {
-        Ok(()) => LogoutOutcome::Revoked,
-        Err(VaultError::VaultStatus { status: 403, .. }) => LogoutOutcome::AlreadyInvalid,
-        Err(e) => LogoutOutcome::NotRevoked {
-            why: e.to_string(),
-            left_secs,
-        },
+    match revocation(revoked) {
+        Revocation::Revoked => LogoutOutcome::Revoked,
+        Revocation::AlreadyInvalid => LogoutOutcome::AlreadyInvalid,
+        Revocation::Failed(why) => LogoutOutcome::NotRevoked { why, left_secs },
     }
 }
 
@@ -667,7 +681,7 @@ mod tests {
     type NoteRow<'a> = (
         &'a Previous,
         PreviousFate,
-        Option<Result<(), String>>,
+        Option<Revocation>,
         Option<&'a str>,
     );
 
@@ -676,8 +690,12 @@ mod tests {
         use PreviousFate::{Erased, MaybeErased};
         let same = Previous::SameVault(stored(6_399));
         let other = Previous::OtherVault(ADDR.into());
-        let failed = || Some(Err("Vault revoke-self failed: x".to_string()));
-        let rows: [NoteRow; 9] = [
+        let failed = || {
+            Some(Revocation::Failed(
+                "Vault revoke-self failed: x".to_string(),
+            ))
+        };
+        let rows: [NoteRow; 12] = [
             (&Previous::Nothing, Erased, None, None),
             (&Previous::Nothing, MaybeErased, None, None),
             (
@@ -692,13 +710,21 @@ mod tests {
                 None,
                 Some("a token from a different Vault (https://vault.example:8200/v1/) may have been erased here and was not revoked"),
             ),
-            (&same, Erased, Some(Ok(())), None),
+            (&same, Erased, Some(Revocation::Revoked), None),
+            (&same, Erased, Some(Revocation::AlreadyInvalid), None),
             (&same, Erased, None, None),
+            (&same, MaybeErased, None, None),
             (
                 &same,
                 MaybeErased,
-                Some(Ok(())),
+                Some(Revocation::Revoked),
                 Some("the previous token may have been erased, so it was revoked"),
+            ),
+            (
+                &same,
+                MaybeErased,
+                Some(Revocation::AlreadyInvalid),
+                Some("the previous token may have been erased; Vault reports it already invalid"),
             ),
             (
                 &same,
@@ -725,11 +751,15 @@ mod tests {
             Some("the previous token could not be revoked: Vault revoke-self failed: x; it expires on its own within 0s")
         );
         assert_eq!(
-            new_token_note(Ok(()), 28_800),
+            new_token_note(Revocation::Revoked, 28_800),
             "the new token was revoked at Vault"
         );
         assert_eq!(
-            new_token_note(Err("Vault revoke-self failed: x".into()), 28_800),
+            new_token_note(Revocation::AlreadyInvalid, 28_800),
+            "Vault reports the new token already invalid"
+        );
+        assert_eq!(
+            new_token_note(Revocation::Failed("Vault revoke-self failed: x".into()), 28_800),
             "the new token could not be revoked (Vault revoke-self failed: x) and stays valid for up to 8h 0m"
         );
         assert_eq!(joined("a".into(), None), "a");
