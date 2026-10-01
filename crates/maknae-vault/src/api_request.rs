@@ -20,6 +20,22 @@ pub(crate) struct ApiBase(String);
 impl ApiBase {
     pub(crate) fn new(addr: &str) -> Result<Self, VaultError> {
         crate::validate_vault_addr(addr)?;
+        let parsed = url::Url::parse(addr)
+            .map_err(|_| VaultError::InvalidAddr("not a well-formed URL".into()))?;
+        let refused = if !parsed.username().is_empty() || parsed.password().is_some() {
+            Some("userinfo")
+        } else if parsed.query().is_some() {
+            Some("query")
+        } else if parsed.fragment().is_some() {
+            Some("fragment")
+        } else if !matches!(parsed.path(), "" | "/") {
+            Some("path")
+        } else {
+            None
+        };
+        if let Some(part) = refused {
+            return Err(VaultError::InvalidAddr(format!("must not carry a {part}")));
+        }
         Ok(Self(format!("{}/v1/", addr.trim_end_matches('/'))))
     }
 
@@ -180,6 +196,33 @@ mod tests {
     }
 
     #[test]
+    fn the_base_address_carries_no_userinfo_query_fragment_or_path() {
+        for ok in ["https://vault.example:8200", "https://vault.example:8200/"] {
+            assert!(ApiBase::new(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "https://u:p@vault.example",
+            "https://vault.example/?x=1",
+            "https://vault.example/#f",
+            "https://vault.example/prefix",
+        ] {
+            assert!(
+                matches!(ApiBase::new(bad), Err(VaultError::InvalidAddr(_))),
+                "{bad}"
+            );
+        }
+        let msg = match ApiBase::new("https://u:p@vault.example") {
+            Err(e) => e.to_string(),
+            Ok(_) => unreachable!(),
+        };
+        assert!(!msg.contains("p@") && !msg.contains("u:p"), "{msg}");
+    }
+
+    fn header<'a>(req: &'a Request, name: &str) -> &'a str {
+        req.headers().get(name).unwrap().to_str().unwrap()
+    }
+
+    #[test]
     fn a_plaintext_vault_address_is_refused() {
         assert!(matches!(
             ApiBase::new("http://vault.example:8200"),
@@ -193,6 +236,7 @@ mod tests {
         let body = login_body(&pw("p\"w")).unwrap();
         let req = login_request(&http(), &base(), &corp, "alice", body).unwrap();
         assert_eq!(*req.method(), Method::POST);
+        assert_eq!(header(&req, "content-type"), JSON);
         assert_eq!(
             req.url().as_str(),
             "https://vault.example:8200/v1/auth/corp-userpass/login/alice"
@@ -230,6 +274,7 @@ mod tests {
         let req =
             wrapped_read_request(&http(), &base(), &token, &path, Duration::from_secs(60)).unwrap();
         assert_eq!(*req.method(), Method::GET);
+        assert_eq!(header(&req, X_VAULT_REQUEST), "true");
         assert_eq!(
             req.url().as_str(),
             "https://vault.example:8200/v1/maknae-kv/data/maknae/users/alice/openai"
@@ -262,6 +307,8 @@ mod tests {
         let body = lookup_body(&wrapping()).unwrap();
         let req = lookup_request(&http(), &base(), body).unwrap();
         assert_eq!(*req.method(), Method::POST);
+        assert_eq!(header(&req, "content-type"), JSON);
+        assert_eq!(header(&req, X_VAULT_REQUEST), "true");
         assert_eq!(
             req.url().as_str(),
             "https://vault.example:8200/v1/sys/wrapping/lookup"
@@ -274,6 +321,7 @@ mod tests {
     fn the_unwrap_authenticates_with_the_wrapping_token_and_sends_no_body() {
         let req = unwrap_request(&http(), &base(), &wrapping()).unwrap();
         assert_eq!(*req.method(), Method::POST);
+        assert_eq!(header(&req, X_VAULT_REQUEST), "true");
         assert_eq!(
             req.url().as_str(),
             "https://vault.example:8200/v1/sys/wrapping/unwrap"
