@@ -76,7 +76,7 @@ pub fn model_is_acceptable(s: &str) -> bool {
 }
 
 pub fn key_field_is_acceptable(s: &str) -> bool {
-    !s.is_empty() && s.len() <= MAX_KEY_FIELD_BYTES && !s.chars().any(char::is_whitespace)
+    !s.is_empty() && s.len() <= MAX_KEY_FIELD_BYTES && s.bytes().all(|b| b.is_ascii_graphic())
 }
 
 pub fn key_subpath_is_acceptable(s: &str) -> Result<(), String> {
@@ -120,6 +120,9 @@ pub fn user_key_path(user_prefix: &str, username: &str, subpath: &str) -> Result
     }
     crate::kv_fragment_is_acceptable(user_prefix)
         .map_err(|why| format!("the user prefix {why}"))?;
+    if !crate::vault_path_is_safe(user_prefix) {
+        return Err("the user prefix has a character outside [A-Za-z0-9._/-]".into());
+    }
     if username.contains('/') {
         return Err("the username is not one path segment".into());
     }
@@ -127,6 +130,9 @@ pub fn user_key_path(user_prefix: &str, username: &str, subpath: &str) -> Result
         return Err("the username 'data' is not a usable Vault path segment".into());
     }
     crate::kv_fragment_is_acceptable(username).map_err(|why| format!("the username {why}"))?;
+    if !username.bytes().all(safe_token_byte) {
+        return Err("the username has a character outside [A-Za-z0-9._-]".into());
+    }
     key_subpath_is_acceptable(subpath).map_err(|why| format!("the key subpath {why}"))?;
     Ok(format!("{user_prefix}/{username}/{subpath}"))
 }
@@ -687,6 +693,9 @@ mod tests {
             "",
             "api key",
             "api\tkey",
+            "\u{1b}[31m",
+            "api\0key",
+            "clé",
             &"f".repeat(MAX_KEY_FIELD_BYTES + 1),
         ] {
             assert!(!key_field_is_acceptable(bad), "{bad:?}");
@@ -742,6 +751,34 @@ mod tests {
         ] {
             let e = user_key_path(prefix, user, sub).unwrap_err();
             assert!(e.starts_with(want), "{prefix:?} {user:?} {sub:?}: {e}");
+        }
+        for (prefix, user, want) in [
+            (
+                "maknae/users",
+                "%2e%2e",
+                "the username has a character outside [A-Za-z0-9._-]",
+            ),
+            (
+                "maknae/users",
+                "a#b",
+                "the username has a character outside [A-Za-z0-9._-]",
+            ),
+            (
+                "maknae/users",
+                "a@b",
+                "the username has a character outside [A-Za-z0-9._-]",
+            ),
+            (
+                "maknae/a#b",
+                "alice",
+                "the user prefix has a character outside [A-Za-z0-9._/-]",
+            ),
+        ] {
+            assert_eq!(
+                user_key_path(prefix, user, "x"),
+                Err(want.to_string()),
+                "{prefix:?} {user:?}"
+            );
         }
         let e = user_key_path("maknae/users", "data", "x").unwrap_err();
         assert!(!e.contains("#308"), "{e}");
