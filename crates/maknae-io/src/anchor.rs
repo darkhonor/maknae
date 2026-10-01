@@ -632,6 +632,41 @@ impl Anchor {
         })
     }
 
+    pub fn remove(
+        &self,
+        rel: &Path,
+        desc: Option<DescendantRequired>,
+    ) -> Result<Outcome<bool>, IoError> {
+        let (norm, name) = self.split_target(rel, desc.as_ref())?;
+        let dir = norm.parent().unwrap_or(Path::new(""));
+        let full = self.path.join(&norm);
+
+        let walked: Option<OwnedFd> = if dir.as_os_str().is_empty() {
+            None
+        } else {
+            Some(crate::walk::walk_dirs(
+                &self.fd,
+                &self.path,
+                dir,
+                desc.as_ref(),
+            )?)
+        };
+        let base = match &walked {
+            Some(fd) => fd.as_fd(),
+            None => self.fd.as_fd(),
+        };
+
+        let removed = match crate::syscall::remove_at(&base, &name, false) {
+            Ok(()) => true,
+            Err(nix::errno::Errno::ENOENT) => false,
+            Err(e) => return Err(crate::checks::map_errno_no_disambiguation(e, &full)),
+        };
+        Ok(Outcome {
+            value: removed,
+            effective_strategy: Strategy::Portable,
+        })
+    }
+
     /// Shared prologue for the file verbs: normalize, run the dominating pre-check,
     /// and split off the final component. A zero-component remainder is refused here —
     /// only `enumerate` treats it as the anchor itself.
@@ -2721,6 +2756,83 @@ mod tests {
             .publish(Path::new("../out.yaml"), None, b"y", m(0o640))
             .unwrap_err();
         assert!(matches!(e, IoError::EscapesAnchor { .. }), "got {e:?}");
+    }
+
+    #[test]
+    fn remove_unlinks_a_file_and_reports_it() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        std::fs::write(a.path.join("token"), b"x").unwrap();
+        assert!(a.remove(Path::new("token"), None).unwrap().value);
+        assert!(std::fs::symlink_metadata(a.path.join("token")).is_err());
+    }
+
+    #[test]
+    fn remove_of_an_absent_name_reports_nothing_removed() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        assert!(!a.remove(Path::new("token"), None).unwrap().value);
+    }
+
+    #[test]
+    fn remove_refuses_a_directory_and_keeps_it() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        std::fs::create_dir(a.path.join("sub")).unwrap();
+        let e = a.remove(Path::new("sub"), None).unwrap_err();
+        assert!(matches!(e, IoError::Io { .. }), "{e:?}");
+        assert!(a.path.join("sub").is_dir());
+    }
+
+    #[test]
+    fn remove_unlinks_a_symlink_without_following_it() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        let target = d.path().join("outside");
+        std::fs::write(&target, b"keep").unwrap();
+        std::os::unix::fs::symlink(&target, a.path.join("token")).unwrap();
+        assert!(a.remove(Path::new("token"), None).unwrap().value);
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep");
+        assert!(std::fs::symlink_metadata(a.path.join("token")).is_err());
+    }
+
+    #[test]
+    fn remove_inside_a_checked_subdirectory() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        let sub = a.path.join("grants.d");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o750)).unwrap();
+        std::fs::write(sub.join("g"), b"x").unwrap();
+        let req = DescendantRequired {
+            owner: None,
+            mode_mask: Some(0o007),
+        };
+        assert!(a.remove(Path::new("grants.d/g"), Some(req)).unwrap().value);
+        assert!(std::fs::symlink_metadata(sub.join("g")).is_err());
+    }
+
+    #[test]
+    fn remove_propagates_the_walk_and_shape_refusals() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        assert!(a.remove(Path::new("missing/g"), None).is_err());
+        assert_eq!(
+            a.remove(Path::new("sub/.."), None).unwrap_err(),
+            IoError::EmptyRemainder
+        );
+        assert!(matches!(
+            a.remove(Path::new("../x"), None).unwrap_err(),
+            IoError::EscapesAnchor { .. }
+        ));
+        let req = DescendantRequired {
+            owner: None,
+            mode_mask: Some(0o007),
+        };
+        assert!(matches!(
+            a.remove(Path::new("top"), Some(req)).unwrap_err(),
+            IoError::NoDescendantForRequirement { .. }
+        ));
     }
 
     fn t_append() -> TargetRequired {
