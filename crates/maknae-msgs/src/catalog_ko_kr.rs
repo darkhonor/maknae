@@ -44,13 +44,13 @@ pub(crate) fn text(id: MsgId) -> &'static str {
             "CLI를 사용하기 전에 로그아웃 후 다시 로그인하거나 `newgrp maknae`를 실행하세요"
         }
         MsgId::EnrollEgressBoundsHint => {
-            "maknae-egress: /etc/maknae/egress-bounds.yaml을 만들거나 완성하세요 (kv_mount, key_vault_path_prefix, vault: addr — docs/configuration.md §9.3), chmod 0644로 설정한 뒤: systemctl enable --now maknae-egress.socket — 소켓 유닛은 기본적으로 꺼져 있고, 켜기 전까지 허용된 프롬프트는 모두 준비되지 않음으로 거부돼요"
+            "maknae-egress: /etc/maknae/egress-bounds.yaml을 만들거나 완성하세요 (kv_mount, user_prefix, vault: addr — docs/configuration.md §9.3), chmod 0644로 설정한 뒤: systemctl enable --now maknae-egress.socket — 소켓 유닛은 기본적으로 꺼져 있고, 켜기 전까지 허용된 프롬프트는 모두 준비되지 않음으로 거부돼요"
         }
         MsgId::EnrollEnableDaemonHint => {
             "다음 명령으로 데몬을 시작하세요: systemctl enable --now maknaed"
         }
         MsgId::EnrollEgressBoundsHintMacos => {
-            "maknae-egress: /etc/maknae/egress-bounds.yaml을 만들거나 완성하세요 (kv_mount, key_vault_path_prefix, vault: addr — docs/configuration.md §9.3), chmod 0644로 설정한 뒤: sudo launchctl enable system/io.maknae.maknae-egress && sudo launchctl bootstrap system /Library/LaunchDaemons/io.maknae.maknae-egress.plist — 이 작업은 비활성 상태로 설치되고, 켜기 전까지 허용된 프롬프트는 모두 준비되지 않음으로 거부돼요"
+            "maknae-egress: /etc/maknae/egress-bounds.yaml을 만들거나 완성하세요 (kv_mount, user_prefix, vault: addr — docs/configuration.md §9.3), chmod 0644로 설정한 뒤: sudo launchctl enable system/io.maknae.maknae-egress && sudo launchctl bootstrap system /Library/LaunchDaemons/io.maknae.maknae-egress.plist — 이 작업은 비활성 상태로 설치되고, 켜기 전까지 허용된 프롬프트는 모두 준비되지 않음으로 거부돼요"
         }
         MsgId::EnrollEnableDaemonHintMacos => {
             "다음 명령으로 데몬을 시작하세요: sudo launchctl enable system/io.maknae.maknaed && sudo launchctl bootstrap system /Library/LaunchDaemons/io.maknae.maknaed.plist"

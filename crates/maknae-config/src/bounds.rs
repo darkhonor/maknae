@@ -20,16 +20,9 @@
 //! unwind — and this file is where the invariant is attributed, so it is the
 //! one the next agent opens.)*
 //!
-//! **Why the parser lives here rather than in the binary.** Both processes
-//! read this file — `maknaed` validates every registered `key_vault_path`
-//! against the prefix at BOOT (`maknae-kernel`'s `egress_bounds_boot_gate`),
-//! `maknae-egress` validates the frame's path at USE (`handle::decide`) — and
-//! two parsers over one file is the failure that created `maknae-io`. One
-//! parser, two callers.
-//!
-//! The prefix is **not a secret**: `maknaed`'s Vault policy does not grant the
-//! read, so nothing is protected by hiding it. It lives beside the `provider:`
-//! sections it describes, in the file the operator is already editing.
+//! One parser for both processes: `maknaed` checks registered key paths beneath `user_prefix`
+//! at boot, and `maknae-egress` checks a frame's path against it at USE (`handle::decide`).
+//! `user_prefix` is not a secret: it is a location, not a credential.
 
 use crate::{ConfigError, Value};
 
@@ -37,14 +30,9 @@ use crate::{ConfigError, Value};
 pub const EGRESS_BOUNDS_FILE: &str = "egress-bounds.yaml";
 
 /// Upper bound on the prefix. It reaches audit records and terminals.
-pub const MAX_KEY_VAULT_PREFIX_BYTES: usize = 256;
+pub const MAX_USER_PREFIX_BYTES: usize = 256;
 
 /// What the deputy is allowed to do, and nothing more.
-///
-/// `kv_mount` and `key_vault_path_prefix` together mirror the Vault grant's own
-/// shape, `<mount>/data/<prefix>/*` — so this document is the host-side
-/// statement of exactly what Terraform granted, in the file the granted
-/// process reads. The `vault` block (#240b) says where that grant is redeemed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EgressBounds {
     /// The KV v2 mount the provider keys live in (Terraform `kv_mount_path`;
@@ -57,18 +45,8 @@ pub struct EgressBounds {
     /// cross-check between the two would reintroduce the two-places-for-one-
     /// value problem this change exists to remove.
     pub kv_mount: String,
-    /// The path prefix, **RELATIVE to `kv_mount` and without the `data/`
-    /// segment**, that the deputy's policy grants. Every provider's
-    /// `key_vault_path` must sit under it.
-    ///
-    /// Relative because Terraform's `provider_key_prefix` is documented
-    /// relative to `kv_mount_path` while the old configuration value was
-    /// mount-absolute *plus* the `data/` API artifact: two coordinate systems
-    /// for one value, required to "MATCH". That mismatch is what made #307's
-    /// singular/plural defect invisible — the two host-side values agreed with
-    /// each other and disagreed with the grant, and the boot gate compares only
-    /// the two host-side values, never the grant.
-    pub key_vault_path_prefix: String,
+    /// Relative to `kv_mount`, without `data/`; each user's keys live under `<user_prefix>/<username>/`.
+    pub user_prefix: String,
     /// `vault.addr` — where the deputy logs in (#240b). Declared in THIS file
     /// because the deputy reads its own bounds and nothing else: the AppArmor
     /// profile and the SELinux type carve-out grant it exactly this document,
@@ -78,10 +56,6 @@ pub struct EgressBounds {
     /// two-coordinate-systems-required-to-match shape. The scheme is validated
     /// where the client is built (`maknae-vault`), not here — one validator.
     pub vault_addr: String,
-    /// `vault.approle_mount`, or `None` for the packaged Terraform default.
-    /// `None` is resolved by the DEPUTY from `maknae_vault::DEFAULT_APPROLE_MOUNT`;
-    /// this crate carries no Vault default, so there is one place for it.
-    pub approle_mount: Option<String>,
 }
 
 /// Is this a usable mount-relative Vault path fragment? `Err` names the reason,
@@ -155,8 +129,8 @@ pub fn mount_path_is_acceptable(s: &str) -> Result<(), String> {
     if s.chars().any(char::is_whitespace) {
         return Err("contains whitespace".into());
     }
-    if s.len() > MAX_KEY_VAULT_PREFIX_BYTES {
-        return Err(format!("exceeds {MAX_KEY_VAULT_PREFIX_BYTES} bytes"));
+    if s.len() > MAX_USER_PREFIX_BYTES {
+        return Err(format!("exceeds {MAX_USER_PREFIX_BYTES} bytes"));
     }
     let segs: Vec<&str> = s.split('/').collect();
     let last = segs.len() - 1;
@@ -183,6 +157,13 @@ pub fn mount_path_is_acceptable(s: &str) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// Non-empty, and every byte in the Vault URL path alphabet `[A-Za-z0-9._/-]`.
+pub fn vault_path_is_safe(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'/' | b'-'))
 }
 
 fn err(reason: impl Into<String>) -> ConfigError {
@@ -219,43 +200,38 @@ pub fn bounds_from_document(v: &Value) -> Result<EgressBounds, ConfigError> {
     // and now raises the same error. It kept its own spelling until round-1
     // review pointed out that "one sentence for a wrong key, wherever it
     // appears" was false while these two sites survived.
-    crate::reject_unknown_keys(
-        EGRESS_BOUNDS_FILE,
-        m,
-        &["key_vault_path_prefix", "kv_mount", "vault"],
-    )?;
+    crate::reject_unknown_keys(EGRESS_BOUNDS_FILE, m, &["user_prefix", "kv_mount", "vault"])?;
     let required = |name: &str| -> Result<String, ConfigError> {
         let Some((_, Value::Str(v))) = m.iter().find(|(k, _)| k == name) else {
             return Err(err(format!("'{name}' is required and must be a string")));
         };
-        if v.len() > MAX_KEY_VAULT_PREFIX_BYTES {
+        if v.len() > MAX_USER_PREFIX_BYTES {
             return Err(err(format!(
-                "'{name}' exceeds {MAX_KEY_VAULT_PREFIX_BYTES} bytes"
+                "'{name}' exceeds {MAX_USER_PREFIX_BYTES} bytes"
             )));
         }
         kv_fragment_is_acceptable(v).map_err(|why| err(format!("'{name}' {why}")))?;
+        if !vault_path_is_safe(v) {
+            return Err(err(format!(
+                "'{name}' has a character outside [A-Za-z0-9._/-]"
+            )));
+        }
         Ok(v.clone())
     };
     let kv_mount = required("kv_mount")?;
-    let key_vault_path_prefix = required("key_vault_path_prefix")?;
+    let user_prefix = required("user_prefix")?;
     // #240b: the deputy's Vault connection. Required — a deployment that
     // registers a provider needs the deputy to log in, and an absent block is
     // a refusal here rather than a first-request failure. Every key inside it
     // is enumerated: a `token` or a `secret_id` written here would be a
     // credential in configuration, and nothing may accept one silently.
     let Some((_, vault)) = m.iter().find(|(k, _)| k == "vault") else {
-        return Err(err(
-            "'vault' is required (addr, and optionally approle_mount)",
-        ));
+        return Err(err("'vault' is required (addr)"));
     };
     let Value::Map(vm) = vault else {
         return Err(err("'vault' must be a mapping"));
     };
-    crate::reject_unknown_keys(
-        &format!("{EGRESS_BOUNDS_FILE}/vault"),
-        vm,
-        &["addr", "approle_mount"],
-    )?;
+    crate::reject_unknown_keys(&format!("{EGRESS_BOUNDS_FILE}/vault"), vm, &["addr"])?;
     let Some((_, Value::Str(addr))) = vm.iter().find(|(k, _)| k == "addr") else {
         return Err(err("'vault.addr' is required and must be a string"));
     };
@@ -264,28 +240,15 @@ pub fn bounds_from_document(v: &Value) -> Result<EgressBounds, ConfigError> {
             "'vault.addr' must be a non-empty URL without whitespace",
         ));
     }
-    if addr.len() > MAX_KEY_VAULT_PREFIX_BYTES {
+    if addr.len() > MAX_USER_PREFIX_BYTES {
         return Err(err(format!(
-            "'vault.addr' exceeds {MAX_KEY_VAULT_PREFIX_BYTES} bytes"
+            "'vault.addr' exceeds {MAX_USER_PREFIX_BYTES} bytes"
         )));
     }
-    let approle_mount = match vm.iter().find(|(k, _)| k == "approle_mount") {
-        None => None,
-        Some((_, Value::Str(s))) => {
-            // An AUTH mount, not a KV path: the `data`-segment rule is KV v2's
-            // and its message would be meaningless here, so the check is the
-            // path-shape half only.
-            mount_path_is_acceptable(s)
-                .map_err(|why| err(format!("'vault.approle_mount' {why}")))?;
-            Some(s.clone())
-        }
-        Some(_) => return Err(err("'vault.approle_mount' must be a string")),
-    };
     Ok(EgressBounds {
         kv_mount,
-        key_vault_path_prefix,
+        user_prefix,
         vault_addr: addr.clone(),
-        approle_mount,
     })
 }
 
@@ -293,134 +256,77 @@ pub fn bounds_from_document(v: &Value) -> Result<EgressBounds, ConfigError> {
 mod tests {
     use super::*;
 
-    /// A document carrying BOTH fields (#308). `doc` below remains the
-    /// single-field builder, so the tests that assert a missing `kv_mount` is
-    /// refused keep working.
     fn doc2(mount: &str, prefix: &str) -> Value {
-        doc2_vault(mount, prefix, Some("https://vault.example:8200"), None)
+        doc2_vault(mount, prefix, Some("https://vault.example:8200"))
     }
 
-    /// The full document shape (#240b). `addr: None` omits the `vault` block
-    /// entirely; `approle_mount: None` omits that one key.
-    fn doc2_vault(
-        mount: &str,
-        prefix: &str,
-        addr: Option<&str>,
-        approle_mount: Option<&str>,
-    ) -> Value {
+    fn doc2_vault(mount: &str, prefix: &str, addr: Option<&str>) -> Value {
         let mut m = vec![
             ("kv_mount".into(), Value::Str(mount.into())),
-            ("key_vault_path_prefix".into(), Value::Str(prefix.into())),
+            ("user_prefix".into(), Value::Str(prefix.into())),
         ];
         if let Some(a) = addr {
-            let mut v = vec![("addr".to_string(), Value::Str(a.into()))];
-            if let Some(am) = approle_mount {
-                v.push(("approle_mount".into(), Value::Str(am.into())));
-            }
-            m.push(("vault".into(), Value::Map(v)));
+            m.push((
+                "vault".into(),
+                Value::Map(vec![("addr".to_string(), Value::Str(a.into()))]),
+            ));
         }
         Value::Map(m)
     }
 
-    /// #240b: the deputy's Vault address is declared in ITS file, because the
-    /// deputy may read nothing else. The AppRole mount is optional, and `None`
-    /// is the packaged Terraform default — resolved by the deputy, never here.
+    fn with_vault(vm: Vec<(String, Value)>) -> Value {
+        Value::Map(vec![
+            ("kv_mount".into(), Value::Str("maknae-kv".into())),
+            ("user_prefix".into(), Value::Str("maknae/users".into())),
+            ("vault".into(), Value::Map(vm)),
+        ])
+    }
+
     #[test]
-    fn the_vault_block_is_required_and_its_mount_is_optional() {
-        let ok = |am: Option<&str>| {
-            bounds_from_document(&doc2_vault(
-                "maknae-kv",
-                "maknae/providers",
-                Some("https://v:8200"),
-                am,
-            ))
-        };
-        let b = ok(None).unwrap();
+    fn the_vault_block_is_required_and_carries_only_addr() {
+        let b = bounds_from_document(&doc2_vault(
+            "maknae-kv",
+            "maknae/users",
+            Some("https://v:8200"),
+        ))
+        .unwrap();
         assert_eq!(b.vault_addr, "https://v:8200");
-        assert_eq!(b.approle_mount, None);
-        let b = ok(Some("alt-approle")).unwrap();
-        assert_eq!(b.approle_mount.as_deref(), Some("alt-approle"));
-        // absent block: refused, naming it
-        let e = bounds_from_document(&doc2_vault("maknae-kv", "maknae/providers", None, None))
-            .unwrap_err();
+        let e = bounds_from_document(&doc2_vault("maknae-kv", "maknae/users", None)).unwrap_err();
         assert!(e.to_string().contains("'vault'"), "{e}");
-        // addr empty or whitespace-bearing: refused for its own reason
         for bad in ["", " ", "https://v :8200"] {
-            let e = bounds_from_document(&doc2_vault(
-                "maknae-kv",
-                "maknae/providers",
-                Some(bad),
-                None,
-            ))
-            .unwrap_err();
+            let e = bounds_from_document(&doc2_vault("maknae-kv", "maknae/users", Some(bad)))
+                .unwrap_err();
             assert!(e.to_string().contains("'vault.addr'"), "{bad:?}: {e}");
         }
-        // an approle_mount that is not a usable path is refused by name, each
-        // shape for its own reason; a nested mount is legal; and `data` is NOT
-        // refused here — that rule is KV v2's, not an auth mount's
-        for (bad, want) in [
-            ("", "is empty"),
-            ("/approle", "must not start with '/'"),
-            ("approle/", "must not end with '/'"),
-            ("app role", "contains whitespace"),
-            ("a//b", "empty interior"),
-            ("a/../b", "'.' or '..'"),
-        ] {
-            let e = ok(Some(bad)).unwrap_err();
-            let m = e.to_string();
-            assert!(
-                m.contains("'vault.approle_mount'") && m.contains(want),
-                "{bad:?}: {m}"
-            );
-        }
-        // `auth/<mount>` is the one spelling an operator is LIKELY to write
-        // (`vault write` needs it) and it composes to /auth/auth/…: refused by
-        // name, here, not as a 404 at the boot probe.
-        let e = ok(Some("auth/maknae-approle")).unwrap_err();
-        assert!(e.to_string().contains("starts with 'auth'"), "{e}");
-        // a nested mount is legal, and `data` means nothing special for an auth mount
-        assert_eq!(
-            ok(Some("team/approle")).unwrap().approle_mount.as_deref(),
-            Some("team/approle")
+        let long_addr = format!("https://{}", "h".repeat(MAX_USER_PREFIX_BYTES - 8));
+        assert!(
+            bounds_from_document(&doc2_vault("maknae-kv", "maknae/users", Some(&long_addr)))
+                .is_ok()
         );
-        assert_eq!(
-            ok(Some("data")).unwrap().approle_mount.as_deref(),
-            Some("data")
-        );
-        // both new strings are bounded like the prefix: AT the bound accepted,
-        // one past it refused (the operator both `>` and `>=` refuse alike is
-        // exactly the measured-gap shape the prefix test records)
-        let long = "a".repeat(MAX_KEY_VAULT_PREFIX_BYTES);
-        assert!(ok(Some(&long)).is_ok());
-        assert!(ok(Some(&format!("{long}a"))).is_err());
-        let long_addr = format!("https://{}", "h".repeat(MAX_KEY_VAULT_PREFIX_BYTES - 8));
         assert!(bounds_from_document(&doc2_vault(
             "maknae-kv",
-            "maknae/providers",
-            Some(&long_addr),
-            None
-        ))
-        .is_ok());
-        assert!(bounds_from_document(&doc2_vault(
-            "maknae-kv",
-            "maknae/providers",
-            Some(&format!("{long_addr}h")),
-            None
+            "maknae/users",
+            Some(&format!("{long_addr}h"))
         ))
         .is_err());
-        // the block must be a mapping
         assert!(bounds_from_document(&Value::Map(vec![
             ("kv_mount".into(), Value::Str("maknae-kv".into())),
-            (
-                "key_vault_path_prefix".into(),
-                Value::Str("maknae/providers".into())
-            ),
+            ("user_prefix".into(), Value::Str("maknae/users".into())),
             ("vault".into(), Value::Str("https://v:8200".into())),
         ]))
         .is_err());
-        // an unknown key INSIDE it is refused by name — a `token` here would be
-        // a credential in configuration, which nothing may accept silently
-        let e = bounds_from_document(&Value::Map(vec![
+        let e = bounds_from_document(&with_vault(vec![
+            ("addr".into(), Value::Str("https://v:8200".into())),
+            ("token".into(), Value::Str("x".into())),
+        ]))
+        .unwrap_err();
+        assert!(e.to_string().contains("'token'"), "{e}");
+        assert!(bounds_from_document(&with_vault(vec![("addr".into(), Value::Int(1))])).is_err());
+    }
+
+    #[test]
+    fn the_pre_switch_spellings_are_refused_by_name() {
+        match bounds_from_document(&Value::Map(vec![
             ("kv_mount".into(), Value::Str("maknae-kv".into())),
             (
                 "key_vault_path_prefix".into(),
@@ -428,38 +334,86 @@ mod tests {
             ),
             (
                 "vault".into(),
-                Value::Map(vec![
-                    ("addr".into(), Value::Str("https://v:8200".into())),
-                    ("token".into(), Value::Str("x".into())),
-                ]),
+                Value::Map(vec![("addr".into(), Value::Str("https://v:8200".into()))]),
             ),
-        ]))
-        .unwrap_err();
-        assert!(e.to_string().contains("'token'"), "{e}");
-        // a non-string addr or approle_mount is refused
-        for (k, v) in [("addr", Value::Int(1)), ("approle_mount", Value::Int(1))] {
-            let mut vm = vec![("addr".to_string(), Value::Str("https://v:8200".into()))];
-            if k == "addr" {
-                vm = vec![];
+        ])) {
+            Err(ConfigError::UnknownKey { section, key }) => {
+                assert_eq!(section, EGRESS_BOUNDS_FILE);
+                assert_eq!(key, "key_vault_path_prefix");
             }
-            vm.push((k.into(), v));
-            assert!(bounds_from_document(&Value::Map(vec![
-                ("kv_mount".into(), Value::Str("maknae-kv".into())),
-                (
-                    "key_vault_path_prefix".into(),
-                    Value::Str("maknae/providers".into())
-                ),
-                ("vault".into(), Value::Map(vm)),
-            ]))
-            .is_err());
+            other => panic!("expected UnknownKey key_vault_path_prefix, got {other:?}"),
+        }
+        match bounds_from_document(&with_vault(vec![
+            ("addr".into(), Value::Str("https://v:8200".into())),
+            ("approle_mount".into(), Value::Str("maknae-approle".into())),
+        ])) {
+            Err(ConfigError::UnknownKey { section, key }) => {
+                assert_eq!(section, "egress-bounds.yaml/vault");
+                assert_eq!(key, "approle_mount");
+            }
+            other => panic!("expected UnknownKey approle_mount, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_auth_mount_is_checked_for_shape_and_never_for_a_data_segment() {
+        for (bad, want) in [
+            ("", "is empty"),
+            ("/approle", "must not start with '/'"),
+            ("approle/", "must not end with '/'"),
+            ("app role", "contains whitespace"),
+            ("a//b", "empty interior"),
+            ("a/../b", "'.' or '..'"),
+            ("auth/maknae-approle", "starts with 'auth'"),
+        ] {
+            let why = mount_path_is_acceptable(bad).unwrap_err();
+            assert!(why.contains(want), "{bad:?}: {why}");
+        }
+        assert_eq!(mount_path_is_acceptable("team/approle"), Ok(()));
+        assert_eq!(mount_path_is_acceptable("data"), Ok(()));
+        let long = "a".repeat(MAX_USER_PREFIX_BYTES);
+        assert_eq!(mount_path_is_acceptable(&long), Ok(()));
+        assert!(mount_path_is_acceptable(&format!("{long}a")).is_err());
+    }
+
+    #[test]
+    fn vault_path_is_safe_admits_only_the_vault_path_alphabet() {
+        assert!(vault_path_is_safe("maknae-kv/maknae/users_1/a.b"));
+        for bad in ["", "a#b", "a?b", "a%2eb", "a b", "a\\b", "ä", "a;b"] {
+            assert!(!vault_path_is_safe(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_mount_or_prefix_outside_the_vault_path_alphabet_is_refused_by_name() {
+        for bad in ["maknae#kv", "maknae?kv", "maknae%2ekv"] {
+            let e = bounds_from_document(&doc2(bad, "maknae/users")).unwrap_err();
+            assert!(
+                e.to_string()
+                    .contains("'kv_mount' has a character outside [A-Za-z0-9._/-]"),
+                "{bad:?}: {e}"
+            );
+            let e = bounds_from_document(&doc2("maknae-kv", &format!("maknae/{bad}"))).unwrap_err();
+            assert!(
+                e.to_string()
+                    .contains("'user_prefix' has a character outside [A-Za-z0-9._/-]"),
+                "{bad:?}: {e}"
+            );
+        }
+        for (mount, prefix, key) in [
+            ("maknae kv", "maknae/users", "'kv_mount'"),
+            ("maknae-kv", "maknae/us ers", "'user_prefix'"),
+        ] {
+            let e = bounds_from_document(&doc2(mount, prefix)).unwrap_err();
+            assert!(
+                e.to_string().contains(key) && e.to_string().contains("whitespace"),
+                "{mount:?} {prefix:?}: {e}"
+            );
         }
     }
 
     fn doc(prefix: &str) -> Value {
-        Value::Map(vec![(
-            "key_vault_path_prefix".into(),
-            Value::Str(prefix.into()),
-        )])
+        Value::Map(vec![("user_prefix".into(), Value::Str(prefix.into()))])
     }
 
     /// THE containment control. A bare `starts_with` admits a sibling path
@@ -520,9 +474,8 @@ mod tests {
             bounds_from_document(&doc2("maknae-kv", "maknae/providers")).unwrap(),
             EgressBounds {
                 kv_mount: "maknae-kv".into(),
-                key_vault_path_prefix: "maknae/providers".into(),
+                user_prefix: "maknae/providers".into(),
                 vault_addr: "https://vault.example:8200".into(),
-                approle_mount: None,
             }
         );
     }
@@ -615,34 +568,31 @@ mod tests {
             );
         }
         assert!(
-            bounds_from_document(&doc2(OK_MOUNT, &"a".repeat(MAX_KEY_VAULT_PREFIX_BYTES + 1)))
-                .is_err()
+            bounds_from_document(&doc2(OK_MOUNT, &"a".repeat(MAX_USER_PREFIX_BYTES + 1))).is_err()
         );
         // AT the bound, accepted. Measured gap: `>` → `>=` survived because the
         // only length ever tested was MAX+1, where both operators refuse alike.
-        assert!(
-            bounds_from_document(&doc2(OK_MOUNT, &"a".repeat(MAX_KEY_VAULT_PREFIX_BYTES))).is_ok()
-        );
+        assert!(bounds_from_document(&doc2(OK_MOUNT, &"a".repeat(MAX_USER_PREFIX_BYTES))).is_ok());
         // and the same bound applies to the mount, for the same reason
         assert!(bounds_from_document(&doc2(
-            &"m".repeat(MAX_KEY_VAULT_PREFIX_BYTES + 1),
+            &"m".repeat(MAX_USER_PREFIX_BYTES + 1),
             "maknae/providers"
         ))
         .is_err());
         assert!(bounds_from_document(&doc2(
-            &"m".repeat(MAX_KEY_VAULT_PREFIX_BYTES),
+            &"m".repeat(MAX_USER_PREFIX_BYTES),
             "maknae/providers"
         ))
         .is_ok());
         // a non-string value for either field
         assert!(bounds_from_document(&Value::Map(vec![
             ("kv_mount".into(), Value::Str(OK_MOUNT.into())),
-            ("key_vault_path_prefix".into(), Value::Int(3)),
+            ("user_prefix".into(), Value::Int(3)),
         ]))
         .is_err());
         assert!(bounds_from_document(&Value::Map(vec![
             ("kv_mount".into(), Value::Int(3)),
-            ("key_vault_path_prefix".into(), Value::Str("a/b".into())),
+            ("user_prefix".into(), Value::Str("a/b".into())),
         ]))
         .is_err());
         // a document carrying ONLY the prefix is refused — the mount is not
@@ -654,7 +604,7 @@ mod tests {
         // always claimed and never checked (#210 round-1 review).
         match bounds_from_document(&Value::Map(vec![
             ("kv_mount".into(), Value::Str(OK_MOUNT.into())),
-            ("key_vault_path_prefix".into(), Value::Str("a/b".into())),
+            ("user_prefix".into(), Value::Str("a/b".into())),
             ("mystery".into(), Value::Bool(true)),
         ])) {
             Err(ConfigError::UnknownKey { section, key }) => {

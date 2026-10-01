@@ -1444,6 +1444,11 @@ mod tests {
                 "ProviderConfig",
                 &crate::provider::KEYS,
             ),
+            (
+                include_str!("providers.rs"),
+                "AuthorizedProvider",
+                &crate::providers::PROVIDER_KEYS,
+            ),
         ];
         for (src, name, keys) in cases {
             let mut from_struct = fields(src, name);

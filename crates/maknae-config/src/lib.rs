@@ -43,6 +43,7 @@ mod loader;
 mod policy;
 mod principal;
 mod provider;
+mod providers;
 mod scalar;
 mod transport;
 mod value;
@@ -63,7 +64,8 @@ pub use authz::{
 };
 pub use bounds::{
     bounds_from_document, kv_fragment_is_acceptable, mount_path_is_acceptable,
-    path_is_within_prefix, EgressBounds, EGRESS_BOUNDS_FILE, MAX_KEY_VAULT_PREFIX_BYTES,
+    path_is_within_prefix, vault_path_is_safe, EgressBounds, EGRESS_BOUNDS_FILE,
+    MAX_USER_PREFIX_BYTES,
 };
 pub use bounds_io::load_egress_bounds;
 pub use ceiling::{ceiling_from_core, policy_name_from_core, Ceiling, IngestPosture};
@@ -80,9 +82,14 @@ pub use maknae_io::TargetRequired;
 pub use maknae_security::{ClassificationPolicy, Level};
 pub use policy::{BasicPolicy, LEVELS as US_LEVELS};
 pub use principal::{principal_from_section, Principal, PRINCIPAL_SECTION};
-pub use provider::{
-    provider_from_section, reasoning_effort_is_acceptable, refuse_plaintext_keys, ProviderConfig,
-    MAX_KEY_FIELD_BYTES, MAX_PROVIDER_NAME_BYTES, MAX_REASONING_EFFORT_BYTES, PROVIDER_SECTION,
+pub use provider::{provider_from_section, ProviderConfig, PROVIDER_SECTION};
+pub use providers::{
+    endpoint_is_acceptable, key_field_is_acceptable, key_subpath_is_acceptable,
+    model_is_acceptable, provider_name_is_acceptable, providers_from_section,
+    reasoning_effort_is_acceptable, refuse_plaintext_keys, user_key_path, AuthorizedProvider,
+    ProviderSet, MAX_KEY_FIELD_BYTES, MAX_KEY_SUBPATH_BYTES, MAX_MODELS_PER_PROVIDER,
+    MAX_MODEL_BYTES, MAX_PROVIDERS, MAX_PROVIDER_NAME_BYTES, MAX_REASONING_EFFORT_BYTES,
+    PROVIDERS_SECTION,
 };
 pub use transport::{
     transport_from_section, TransportConfig, MACOS_DAEMON_SOCKET_PATH, PROMPT_MAX_BYTES_FLOOR,

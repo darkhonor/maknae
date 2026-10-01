@@ -187,6 +187,7 @@ files = [
   # #243: the provider registration parser. A wrong arm registers a
   # destination the operator did not name, or lets a pasted key through.
   "crates/maknae-config/src/provider.rs",
+  "crates/maknae-config/src/providers.rs",
   "crates/maknae-config/src/audit_cfg.rs",
   # PR-J1 Task 5: the `principal` section (enrolled-operator identity `maknae
   # enroll` writes into maknae.yaml). The authorization policy resolves

@@ -119,7 +119,7 @@ pub fn decide<'a>(
     {
         return Err(Refusal::MalformedFrame);
     }
-    if !maknae_config::path_is_within_prefix(&req.key_vault_path, &bounds.key_vault_path_prefix) {
+    if !maknae_config::path_is_within_prefix(&req.key_vault_path, &bounds.user_prefix) {
         return Err(Refusal::KeyPathOutsideBounds);
     }
     // #264 review round 4: the CONTENT judgement belongs here, not in
@@ -183,9 +183,8 @@ mod tests {
     fn bounds() -> EgressBounds {
         EgressBounds {
             kv_mount: "maknae-kv".into(),
-            key_vault_path_prefix: "maknae/providers".into(),
+            user_prefix: "maknae/providers".into(),
             vault_addr: "https://vault.example:8200".into(),
-            approle_mount: None,
         }
     }
 

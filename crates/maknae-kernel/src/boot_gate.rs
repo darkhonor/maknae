@@ -227,10 +227,10 @@ pub fn egress_bounds_boot_gate(
             maknae_config::EGRESS_BOUNDS_FILE
         )));
     };
-    if !maknae_config::path_is_within_prefix(&p.key_vault_path, &b.key_vault_path_prefix) {
+    if !maknae_config::path_is_within_prefix(&p.key_vault_path, &b.user_prefix) {
         return Err(EgressBoundsRefusal::OutsideBounds {
             path: p.key_vault_path.clone(),
-            prefix: b.key_vault_path_prefix.clone(),
+            prefix: b.user_prefix.clone(),
         });
     }
     // The deputy's Vault address is validated at BOOT too (#240b, round 8):
@@ -271,9 +271,8 @@ mod tests {
     fn bounds(prefix: &str) -> maknae_config::EgressBounds {
         maknae_config::EgressBounds {
             kv_mount: "maknae-kv".into(),
-            key_vault_path_prefix: prefix.into(),
+            user_prefix: prefix.into(),
             vault_addr: "https://vault.example:8200".into(),
-            approle_mount: None,
         }
     }
 

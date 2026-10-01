@@ -93,17 +93,12 @@ fn main() {
     // beside the bounds file under `egress/`, the SecretID comes from
     // $CREDENTIALS_DIRECTORY on Linux, the System keychain on macOS (#76).
     // Resolved ONCE, fail-closed, and the SecretID is `Zeroizing` from the
-    // read. The AppRole mount defaults to the packaged Terraform's, resolved
-    // HERE rather than in the config crate so there is one place for that
-    // default.
+    // read.
     let egress_dir = bounds_path
         .parent()
         .map(|p| p.join("egress"))
         .unwrap_or_else(|| PathBuf::from("/etc/maknae/egress"));
-    let approle_mount = bounds
-        .approle_mount
-        .clone()
-        .unwrap_or_else(|| maknae_vault::DEFAULT_APPROLE_MOUNT.to_string());
+    let approle_mount = maknae_vault::DEFAULT_APPROLE_MOUNT.to_string();
     let credentials_dir = match maknae_vault::credentials_directory_env() {
         Ok(c) => c,
         Err(e) => fail(format!("egress credential: {e}")),

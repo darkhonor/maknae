@@ -20,6 +20,10 @@
 //! cannot register a destination (ADR-0023 decision 3: custody of the
 //! registration, covering every input path).
 
+use crate::providers::{
+    endpoint_is_acceptable, reasoning_effort_is_acceptable, refuse_plaintext_keys,
+    MAX_KEY_FIELD_BYTES, MAX_PROVIDER_NAME_BYTES, MAX_REASONING_EFFORT_BYTES, OUTPUT_TOKENS_FIELDS,
+};
 use crate::{ConfigError, Value};
 
 /// The registered section name.
@@ -34,31 +38,6 @@ pub(crate) const KEYS: [&str; 7] = [
     "key_field",
     "reasoning_effort",
     "output_tokens_field",
-];
-
-pub const OUTPUT_TOKENS_FIELDS: [&str; 2] = ["max_completion_tokens", "max_tokens"];
-/// Upper bound on `provider.key_field`. It reaches `VaultError::MissingKvField`
-/// and therefore terminals and audit lines, so it is bounded like every other
-/// operator-supplied string that can be printed.
-pub const MAX_KEY_FIELD_BYTES: usize = 64;
-/// Upper bound on `provider.name` (#172): it is written into every egress
-/// audit record's `object`, and the macOS unified-log line cap was measured
-/// with this bound (maknae-audit-append `syslog_fmt.rs` tests).
-pub const MAX_PROVIDER_NAME_BYTES: usize = 32;
-/// Upper bound on `provider.reasoning_effort`, a level name sent on every
-/// request and disclosed by the configuration view.
-pub const MAX_REASONING_EFFORT_BYTES: usize = 16;
-
-/// Spellings under which an operator might paste the key itself. Any of these
-/// present — with any value — refuses the section by name.
-const PLAINTEXT_KEY_KEYS: [&str; 7] = [
-    "key",
-    "api_key",
-    "apikey",
-    "token",
-    "secret",
-    "secret_key",
-    "bearer",
 ];
 
 /// One registered provider. `Clone` so boot can hand it to whoever asks.
@@ -91,14 +70,6 @@ pub struct ProviderConfig {
     pub output_tokens_field: Option<String>,
 }
 
-/// The one shape a reasoning level may take, here and in the deputy's
-/// re-check of the frame.
-pub fn reasoning_effort_is_acceptable(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= MAX_REASONING_EFFORT_BYTES
-        && s.chars().all(|c| c.is_ascii_lowercase())
-}
-
 fn err(reason: impl Into<String>) -> ConfigError {
     ConfigError::InvalidProvider(reason.into())
 }
@@ -113,103 +84,6 @@ fn required_str<'a>(m: &'a [(String, Value)], key: &str) -> Result<&'a str, Conf
         Some(Value::Str(s)) if !s.trim().is_empty() => Ok(s.trim()),
         Some(_) => Err(err(format!("provider.{key} must be a non-empty string"))),
     }
-}
-
-/// `https://…`, or `http://` to a loopback host only. Anything else — a bare
-/// host, another scheme (case-sensitively: `HTTPS://` is not a scheme this
-/// accepts), whitespace, **userinfo** (`user:pw@host` — a credential in a
-/// disclosed field, and the trick that made `localhost:pw@remote` read as
-/// loopback; codex review 2026-09-07), an `http://` to a routable address — is
-/// refused: the loop's content leaves the trust plane over this URL.
-fn endpoint_is_acceptable(url: &str) -> bool {
-    if url.chars().any(char::is_whitespace) {
-        return false;
-    }
-    let (secure, rest) = if let Some(r) = url.strip_prefix("https://") {
-        (true, r)
-    } else if let Some(r) = url.strip_prefix("http://") {
-        (false, r)
-    } else {
-        return false;
-    };
-    // The AUTHORITY is everything up to the first '/'; it must not carry
-    // userinfo, and it must name a host.
-    let authority = rest.split('/').next().unwrap_or("");
-    if authority.contains('@') {
-        return false;
-    }
-    // host[:port]; a bracketed host must PARSE as an IPv6 address (`[1]` is
-    // hex but is not an address -- codex review round 3), or a DNS-label/IPv4
-    // host of [A-Za-z0-9.-] that neither starts nor ends with '-' or '.'; a
-    // port, when present, is decimal digits with no leading zero that parse
-    // to 1..=65535 (`65536` and `00000` are not ports). `https://?query`,
-    // `https://[]` and `localhost:garbage` are not destinations (round 2).
-    let (loopback, port) = if let Some(v6) = authority.strip_prefix('[') {
-        match v6.split_once(']') {
-            Some((h, rest)) => {
-                let Ok(addr) = h.parse::<std::net::Ipv6Addr>() else {
-                    return false;
-                };
-                let port = match rest.strip_prefix(':') {
-                    Some(p) => Some(p),
-                    None if rest.is_empty() => None,
-                    None => return false,
-                };
-                (addr.is_loopback(), port)
-            }
-            None => return false,
-        }
-    } else {
-        let (h, port) = match authority.split_once(':') {
-            Some((h, p)) => (h, Some(p)),
-            None => (authority, None),
-        };
-        let ok = !h.is_empty()
-            && h.chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
-            && !h.starts_with(['-', '.'])
-            && !h.ends_with(['-', '.'])
-            // an empty interior label (`api..example`) is a typo, not a host
-            && !h.contains("..");
-        if !ok {
-            return false;
-        }
-        // A host spelled only in digits and dots is an IPv4 literal and must
-        // PARSE as one: `256.256.256.256` is not a destination (codex review
-        // round 4). Loopback is then the address's own property.
-        let loopback = if h.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
-            match h.parse::<std::net::Ipv4Addr>() {
-                Ok(addr) => addr.is_loopback(),
-                Err(_) => return false,
-            }
-        } else {
-            h == "localhost"
-        };
-        (loopback, port)
-    };
-    if let Some(p) = port {
-        let digits = !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit());
-        if !digits || p.starts_with('0') || p.parse::<u16>().is_err() {
-            return false;
-        }
-    }
-    secure || loopback
-}
-
-/// Refuse a provider VALUE that carries a key under a plaintext-key spelling —
-/// callable on every contribution to the section, not only the winner: a base
-/// block a `config.d/` member shadows still had the key in it (codex review
-/// 2026-09-07). A non-map value refuses nothing here; the parser handles it.
-pub fn refuse_plaintext_keys(v: &Value) -> Result<(), ConfigError> {
-    if let Value::Map(m) = v {
-        if let Some((k, _)) = m
-            .iter()
-            .find(|(k, _)| PLAINTEXT_KEY_KEYS.contains(&k.to_ascii_lowercase().as_str()))
-        {
-            return Err(ConfigError::ProviderPlaintextKey { field: k.clone() });
-        }
-    }
-    Ok(())
 }
 
 /// Read the `provider` section. Absent → `Ok(None)`; present → strictly
