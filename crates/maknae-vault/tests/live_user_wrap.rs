@@ -94,10 +94,22 @@ async fn scenario(
         return Err("unwrapped the wrong value".into());
     }
     match api.unwrap_kv_field(replay, &right).await {
-        Err(VaultError::WrapMismatch(WrapMismatch::Invalid)) => Ok(()),
+        Err(VaultError::WrapMismatch(WrapMismatch::Invalid)) => {}
+        got => {
+            return Err(format!(
+                "a used wrapping token must be invalid, got {:?}",
+                got.map(|_| "a key")
+            ))
+        }
+    }
+    api.revoke_self(&login.token)
+        .await
+        .map_err(|e| format!("revoke-self: {e}"))?;
+    match api.read_wrapped(&login.token, kv_mount, own, ttl).await {
+        Err(VaultError::VaultStatus { status: 403, .. }) => Ok(()),
         got => Err(format!(
-            "a used wrapping token must be invalid, got {:?}",
-            got.map(|_| "a key")
+            "a revoked token must be 403, got {:?}",
+            got.map(|_| "a wrapping token")
         )),
     }
 }
@@ -161,5 +173,5 @@ async fn userpass_login_wrapped_read_lookup_and_checked_unwrap_against_live_vaul
     let _ = vaultrs::auth::userpass::user::delete(&admin, &userpass_mount, &user).await;
     let _ = vaultrs::sys::policy::delete(&admin, &user).await;
     outcome.unwrap();
-    println!("LIVE USER WRAP OK: login, 403 on another path, wrapped read, lookup, refusal before unwrap, unwrap, single use");
+    println!("LIVE USER WRAP OK: login, 403 on another path, wrapped read, lookup, refusal before unwrap, unwrap, single use, revoke-self");
 }

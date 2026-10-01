@@ -11,6 +11,23 @@ pub const CLI_KEYCHAIN_ITEM: KeychainItem = KeychainItem {
     account: "maknae-secret-id",
 };
 
+pub const CLI_TOKEN_KEYCHAIN_ITEM: KeychainItem = KeychainItem {
+    service: "maknae-cli",
+    account: "maknae-vault-token",
+};
+
+pub(crate) const ITEM_NOT_FOUND: i32 = -25300;
+
+pub(crate) const TOKEN_DELETE_REMEDY: &str =
+    "security delete-generic-password -s maknae-cli -a maknae-vault-token";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeychainDelete {
+    Absent,
+    Removed,
+    StillPresent,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeychainPlane {
     Daemon,
@@ -165,6 +182,13 @@ mod tests {
         );
         assert_eq!(CLI_KEYCHAIN_ITEM.service, "maknae-cli");
         assert_eq!(CLI_KEYCHAIN_ITEM.account, "maknae-secret-id");
+        assert_eq!(CLI_TOKEN_KEYCHAIN_ITEM.service, "maknae-cli");
+        assert_eq!(CLI_TOKEN_KEYCHAIN_ITEM.account, "maknae-vault-token");
+        assert_eq!(ITEM_NOT_FOUND, -25300);
+        assert_eq!(
+            TOKEN_DELETE_REMEDY,
+            "security delete-generic-password -s maknae-cli -a maknae-vault-token"
+        );
     }
 
     #[test]

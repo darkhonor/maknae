@@ -34,7 +34,7 @@ fn read_item_from(keychain: &Path, item: &KeychainItem) -> Result<Zeroizing<Stri
 }
 
 #[cfg(target_os = "macos")]
-fn read_item_in(
+pub(crate) fn read_item_in(
     open: impl FnOnce() -> Result<
         security_framework::os::macos::keychain::SecKeychain,
         security_framework::base::Error,
@@ -53,6 +53,61 @@ fn read_item_in(
     let text = std::str::from_utf8(&raw)
         .map_err(|_| VaultError::CredentialSource("the keychain item is not UTF-8".to_string()))?;
     Ok(Zeroizing::new(text.trim().to_string()))
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn delete_item_in(
+    open: impl FnOnce() -> Result<
+        security_framework::os::macos::keychain::SecKeychain,
+        security_framework::base::Error,
+    >,
+    item: &KeychainItem,
+) -> Result<crate::keychain_policy::KeychainDelete, VaultError> {
+    use crate::keychain_policy::KeychainDelete;
+    let status = |e: security_framework::base::Error| VaultError::Keychain { status: e.code() };
+    let _serial = KEYCHAIN_READ.lock().unwrap_or_else(|e| e.into_inner());
+    let kc = open().map_err(status)?;
+    let found = item_refs(&kc, item)?;
+    if found.is_empty() {
+        return Ok(KeychainDelete::Absent);
+    }
+    for reference in found {
+        reference.delete();
+    }
+    if item_refs(&kc, item)?.is_empty() {
+        Ok(KeychainDelete::Removed)
+    } else {
+        Ok(KeychainDelete::StillPresent)
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn item_refs(
+    kc: &security_framework::os::macos::keychain::SecKeychain,
+    item: &KeychainItem,
+) -> Result<Vec<security_framework::os::macos::keychain_item::SecKeychainItem>, VaultError> {
+    use security_framework::item::{ItemClass, ItemSearchOptions, Limit, Reference, SearchResult};
+    let searched = ItemSearchOptions::new()
+        .class(ItemClass::generic_password())
+        .keychains(std::slice::from_ref(kc))
+        .service(item.service)
+        .account(item.account)
+        .load_refs(true)
+        .limit(Limit::All)
+        .search();
+    match searched {
+        Err(e) if e.code() == crate::keychain_policy::ITEM_NOT_FOUND => Ok(Vec::new()),
+        Err(e) => Err(VaultError::Keychain { status: e.code() }),
+        Ok(results) => results
+            .into_iter()
+            .map(|r| match r {
+                SearchResult::Ref(Reference::KeychainItem(found)) => Ok(found),
+                _ => Err(VaultError::CredentialSource(
+                    "the keychain search returned something that is not an item".to_string(),
+                )),
+            })
+            .collect(),
+    }
 }
 
 #[cfg(target_os = "macos")]

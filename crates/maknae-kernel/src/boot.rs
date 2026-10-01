@@ -567,6 +567,24 @@ mod tests {
         assert_eq!(vc.deployment_id, "dev-01");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_bad_root_vault_user_auth_refuses_the_vault_config_maknaed_starts_from() {
+        let d = new_dir("bad_user_auth");
+        put(
+            &d.0,
+            "maknae.yaml",
+            "core:\n  deployment_id: dev-01\n  identity:\n    name: t\n\
+             vault:\n  addr: https://v.example:8200\n  user_auth:\n    type: ldap\n",
+            0o640,
+        );
+        let cfg = boot(&d.0).expect("the document loads; the vault parse is what refuses");
+        assert!(matches!(
+            maknae_vault::vault_config_from_document(cfg.document()),
+            Err(maknae_vault::VaultError::UnknownUserAuth(t)) if t == "ldap"
+        ));
+    }
+
     // A genuinely-unknown section still fails closed EVEN alongside the now-accepted
     // combined sections — the fail-closed-on-unknown security property is preserved.
     #[cfg(unix)]

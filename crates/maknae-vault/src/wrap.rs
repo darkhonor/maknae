@@ -109,7 +109,7 @@ pub(crate) fn client_token<'a>(
 ) -> Result<Option<&'a str>, VaultError> {
     match op {
         VaultOp::UserpassLogin | VaultOp::WrapLookup => Ok(None),
-        VaultOp::WrappedRead => user
+        VaultOp::WrappedRead | VaultOp::RevokeSelf => user
             .map(|t| Some(t.expose()))
             .ok_or_else(missing_client_token),
         VaultOp::Unwrap => wrapping
@@ -430,6 +430,14 @@ mod tests {
         assert_eq!(pick(VaultOp::WrapLookup), None);
         assert!(pick(VaultOp::WrappedRead) == Some("hvs.user"));
         assert!(pick(VaultOp::Unwrap) == Some("hvs.wrap"));
+        assert!(pick(VaultOp::RevokeSelf) == Some("hvs.user"));
+        assert!(matches!(
+            client_token(VaultOp::RevokeSelf, None, Some(&wrap)),
+            Err(VaultError::InvalidSecret {
+                what: "client token",
+                ..
+            })
+        ));
         assert!(matches!(
             client_token(VaultOp::WrappedRead, None, Some(&wrap)),
             Err(VaultError::InvalidSecret {

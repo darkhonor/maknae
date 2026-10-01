@@ -123,6 +123,8 @@ files = [
   "crates/maknae-vault/src/api_shape.rs",
   "crates/maknae-vault/src/user_login.rs",
   "crates/maknae-vault/src/wrap.rs",
+  "crates/maknae-vault/src/token_record.rs",
+  "crates/maknae-vault/src/password_line.rs",
   "crates/maknae-seal/src/fips.rs",
   "crates/maknae-seal/src/aad.rs",
   "crates/maknae-seal/src/wire.rs",
@@ -515,7 +517,11 @@ why = "#153: reqwest request glue; its header, build and serializer error arms c
 
 [[t3]]
 path = "crates/maknae-vault/src/vault_api.rs"
-why = "#153: sends the four user-credential Vault calls; no Vault stub by design. Offline, the dead-address test reaches only execute()'s transport-error path; the response path runs in the operator-gated tests/live_user_wrap.rs. The status and Content-Length admission (admit_response) and the body cap (append_bounded) are T1 in api_shape.rs, every parse and check is T1 in user_login.rs and wrap.rs, and request construction is asserted in api_request.rs. Mutation-excluded like client.rs"
+why = "#153: sends the five user-credential Vault calls (login, wrapped read, lookup, unwrap, revoke-self); no Vault stub by design. Offline, the dead-address test reaches only execute()'s transport-error path; the response path runs in the operator-gated tests/live_user_wrap.rs. The status and Content-Length admission (admit_response) and the body cap (append_bounded) are T1 in api_shape.rs, every parse and check is T1 in user_login.rs and wrap.rs, and request construction is asserted in api_request.rs. Mutation-excluded like client.rs"
+
+[[t3]]
+path = "crates/maknae-vault/src/token_store.rs"
+why = "#153: the user token's custody I/O only — the default keychain (usually login), /usr/bin/systemd-creds over stdin/stdout, and the token files through maknae-io; what stays here is opening the keychain, spawning systemd-creds, the maknae-io publish/read/remove calls and the one-line per-custody dispatch. Every decision it applies (record and its issuing Vault address, expiry, custody choice and order, the erase-every-custody fold that skips the kept custody, continues past a failure and returns the first, maknae-io requirements, refusal mappings) is T1 in token_record.rs. The residual and keychain arms are unit-tested on their platforms; the systemd-creds arm in an operator-run ignored test on a systemd >= 256 host. Mutation-excluded like secret_io.rs"
 
 [[t3]]
 path = "crates/maknae-seal/src/lib.rs"
@@ -603,6 +609,14 @@ why = "clap arg parsing + the CLI's connect/mint/request/response I/O orchestrat
 [[t3]]
 path = "bins/maknae/src/agent.rs"
 why = "#241: the loop's I/O wiring — config, one plane client, stdout — T3 on the bins/maknaed precedent. It is NOT a pure shell: read_outcome, write_outcome and prompt_outcome live here, and all three are controls (a BadRequest or an UNARMED refusal must never render as a final refusal to the model; an uncertain write must never render as certainty; a BadRequest on the prompt leg is a shape fault the subject can fix and must not be reported as a refusal that may have landed). All three are pure functions, deliberately, and carry discriminating table tests plus hand-mutation evidence recorded in #241's pull request (#341). The rest of the file — run, RealPlane — needs a live daemon, Vault and certificates, so it stays report-only. Amended 2026-09-22 (#241): the earlier why said the decision code was all in maknae-agent, which stopped being true when the mappers landed here. (Corrected 2026-09-22, #344: that amendment named only read_outcome and write_outcome and called them 'the two mappers'; prompt_outcome is a third control in the same file and was unlisted, so the tier's justification did not cover it.) Amended 2026-09-28 (#372): user_budget_from_section, loop_prompt_cap, warning_line and stop_line are table-tested here, and the bounds and prompt_cap they call are T1 in maknae-agent::budget. Amended 2026-09-28 (#388): write_outcome now also maps a client-decided stale refusal to Stale (certain, not guessed), and check_for — the loop's read basis as the client's write check — is a fourth control here, table-tested; the check itself is T1 in maknae-io."
+
+[[t3]]
+path = "bins/maknae/src/tty.rs"
+why = "#153: the termios glue for maknae login's hidden prompt — tcgetattr/tcsetattr, an echo re-check and a byte read on stdin's descriptor; proven on a real pseudo-terminal with a 10 s watchdog (echo off, the typed bytes arrive, Ctrl-C and Ctrl-D end it, the saved mode is restored, a non-terminal is refused). The line discipline it drives is T1 in maknae-vault password_line.rs"
+
+[[t3]]
+path = "bins/maknae/src/login.rs"
+why = "#153: maknae login/logout orchestration — terminal check, account name, config, custody probe, prompt, userpass login, store, erase, revoke; it needs a live Vault and a terminal. Every decision it calls is T1 in maknae-vault (username rule, vault.user_auth, token record and its issuing address, custody and read order, revocable_at, password line); lifetime, root_refusal, logout_line, logout_plan, revocation, revoke_outcome, logout_erase_failure, previous_token, login_steps, previous_fate, previous_note and new_token_note (the network-free revoke-or-not and store-erase-revoke ordering decisions, which apply token_record.rs's issued_by, and the text each outcome prints) are table-tested here, and the built binary's off-terminal refusal is tested in tests/login_off_tty.rs"
 
 # PR-J1 Task 8 (`maknae enroll`, spec §4.1-§4.6): bin code, per the tiering
 # constraint (decision logic that needed 0-missed lives in the library crates

@@ -33,8 +33,7 @@ impl ApiBase {
         Ok(Self(format!("https://{host}{port}/v1/")))
     }
 
-    #[cfg(test)]
-    fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
 
@@ -155,6 +154,18 @@ pub(crate) fn unwrap_request(
     let token = client_token(VaultOp::Unwrap, None, Some(token))?;
     finish(authed(
         start(http, Method::POST, base.url("sys/wrapping/unwrap")),
+        token,
+    )?)
+}
+
+pub(crate) fn revoke_self_request(
+    http: &Client,
+    base: &ApiBase,
+    token: &UserToken,
+) -> Result<Request, VaultError> {
+    let token = client_token(VaultOp::RevokeSelf, Some(token), None)?;
+    finish(authed(
+        start(http, Method::POST, base.url("auth/token/revoke-self")),
         token,
     )?)
 }
@@ -351,6 +362,21 @@ mod tests {
         );
         let t = req.headers().get(X_VAULT_TOKEN).unwrap();
         assert!(t.to_str().unwrap() == "hvs.wrap" && t.is_sensitive());
+        assert!(req.body().is_none());
+    }
+
+    #[test]
+    fn revoke_self_authenticates_with_the_user_token_and_sends_no_body() {
+        let token = UserToken::new(Zeroizing::new("hvs.user".into())).unwrap();
+        let req = revoke_self_request(&http(), &base(), &token).unwrap();
+        assert_eq!(*req.method(), Method::POST);
+        assert_eq!(header(&req, X_VAULT_REQUEST), "true");
+        assert_eq!(
+            req.url().as_str(),
+            "https://vault.example:8200/v1/auth/token/revoke-self"
+        );
+        let t = req.headers().get(X_VAULT_TOKEN).unwrap();
+        assert!(t.to_str().unwrap() == "hvs.user" && t.is_sensitive());
         assert!(req.body().is_none());
     }
 

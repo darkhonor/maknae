@@ -1,6 +1,6 @@
 use crate::api_request::{
-    login_body, login_request, lookup_body, lookup_request, unwrap_request, wrapped_read_request,
-    ApiBase,
+    login_body, login_request, lookup_body, lookup_request, revoke_self_request, unwrap_request,
+    wrapped_read_request, ApiBase,
 };
 use crate::api_shape::{admit_response, append_bounded, oversize, VaultOp, MAX_VAULT_BODY_BYTES};
 use crate::user_login::{parse_login, Password, UserLogin, UserToken};
@@ -33,6 +33,10 @@ impl VaultApi {
         let base = ApiBase::new(addr)?;
         let http = crate::http::hardened_http_client(vault_ca, VAULT_API_TIMEOUT)?;
         Ok(Self { base, http })
+    }
+
+    pub fn vault_addr(&self) -> &str {
+        self.base.as_str()
     }
 
     pub async fn login(
@@ -77,6 +81,11 @@ impl VaultApi {
         expect: &WrapExpectation,
     ) -> Result<Zeroizing<String>, VaultError> {
         unwrap_checked(self, token, expect).await
+    }
+
+    pub async fn revoke_self(&self, token: &UserToken) -> Result<(), VaultError> {
+        let req = revoke_self_request(&self.http, &self.base, token)?;
+        self.execute(VaultOp::RevokeSelf, req).await.map(drop)
     }
 
     async fn execute(
@@ -142,6 +151,13 @@ mod tests {
         crate::install_default_crypto_provider();
         let (_dir, ca) = ca();
         let api = VaultApi::new("https://127.0.0.1:1", &ca).unwrap();
+        assert_eq!(api.vault_addr(), "https://127.0.0.1:1/v1/");
+        assert_eq!(
+            VaultApi::new("HTTPS://Vault.Example:443/", &ca)
+                .unwrap()
+                .vault_addr(),
+            "https://vault.example/v1/"
+        );
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -175,6 +191,10 @@ mod tests {
         ));
         assert!(matches!(
             rt.block_on(api.unwrap_kv_field(wrapping(), &expect)),
+            Err(VaultError::VaultTransport { .. })
+        ));
+        assert!(matches!(
+            rt.block_on(api.revoke_self(&user)),
             Err(VaultError::VaultTransport { .. })
         ));
     }

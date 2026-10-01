@@ -25,6 +25,7 @@ mod http;
 mod keychain;
 mod keychain_policy;
 mod operator;
+mod password_line;
 mod plane;
 mod plane_verify;
 mod resolver;
@@ -48,14 +49,18 @@ mod peercred;
 mod socket;
 #[cfg(unix)]
 mod stream;
+#[cfg(unix)]
+mod token_record;
+#[cfg(unix)]
+mod token_store;
 pub use api_shape::{WrapMismatch, MAX_TOKEN_BYTES, MAX_VAULT_BODY_BYTES};
 pub use auth::{AppRoleAuth, AuthMethod, VaultToken};
 pub use ca::{load_ca_pin, CaBundle};
 pub use client::{PlaneClient, PlaneIdentity, PLANE_HTTP_TIMEOUT, PLANE_SHUTDOWN_BOUND};
 pub use config::{
     load_vault_config, user_auth_from_value, validate_deployment_id, validate_vault_addr,
-    vault_config_from_document, UserAuth, UserAuthMethod, VaultConfig, DEFAULT_APPROLE_MOUNT,
-    DEFAULT_PKI_INT_MOUNT, DEFAULT_USERPASS_MOUNT, VAULT_SECTION,
+    vault_config_from_document, UserAuth, UserAuthConfig, UserAuthMethod, VaultConfig,
+    DEFAULT_APPROLE_MOUNT, DEFAULT_PKI_INT_MOUNT, DEFAULT_USERPASS_MOUNT, VAULT_SECTION,
 };
 pub use csr_gen::generate_plane_csr;
 pub use digest::{sha256_hex, Sha256};
@@ -68,13 +73,15 @@ pub use fips_glue::{assert_fips_provider, install_default_crypto_provider};
 #[cfg(target_os = "macos")]
 pub use keychain::read_cli_secret_from;
 pub use keychain_policy::{
-    daemon_keychain_pointer, gate, parse_pointer, pointer_document, read_gated, KeychainItem,
-    KeychainPlane, CLI_KEYCHAIN_ITEM, KEYCHAIN_ACCOUNT, SYSTEM_KEYCHAIN,
+    daemon_keychain_pointer, gate, parse_pointer, pointer_document, read_gated, KeychainDelete,
+    KeychainItem, KeychainPlane, CLI_KEYCHAIN_ITEM, CLI_TOKEN_KEYCHAIN_ITEM, KEYCHAIN_ACCOUNT,
+    SYSTEM_KEYCHAIN,
 };
 #[cfg(unix)]
 pub use kv::split_kv_path;
 pub use kv_io::read_kv_field;
 pub use operator::OperatorClient;
+pub use password_line::{PasswordFeed, PasswordLine};
 pub use peer_identity::{creds_match_listener_uid, creds_match_uid, listener_uid_is, peer_uid_is};
 pub use peercred::PeerCreds;
 pub use plane::Plane;
@@ -90,6 +97,16 @@ pub use socket::bind_listener as bind_group_gated_uds;
 pub use stream::{
     AcceptRejection, AuthenticatedStream, PlaneConnector, PlaneListener, RawAcceptError,
     RawPlaneConn, RejectReason,
+};
+#[cfg(unix)]
+pub use token_record::{
+    check_vault_addr, custody_for_store, custody_label, StoredToken, SystemdCreds, TokenCustody,
+    MAX_TOKEN_RECORD_BYTES, MAX_VAULT_ADDR_BYTES, TOKEN_CREDS_FILE, TOKEN_EXPIRY_MARGIN,
+    TOKEN_RESIDUAL_FILE, USER_CREDS_MIN_SYSTEMD,
+};
+#[cfg(unix)]
+pub use token_store::{
+    erase_user_token, load_user_token, observe_systemd_creds, read_user_token, store_user_token,
 };
 pub use user_login::{
     userpass_username_is_acceptable, Password, UserLogin, UserToken, MAX_PASSWORD_BYTES,

@@ -39,6 +39,7 @@ pub(crate) enum VaultOp {
     WrappedRead,
     WrapLookup,
     Unwrap,
+    RevokeSelf,
 }
 
 impl VaultOp {
@@ -48,6 +49,7 @@ impl VaultOp {
             VaultOp::WrappedRead => "wrapped KV read",
             VaultOp::WrapLookup => "wrapping lookup",
             VaultOp::Unwrap => "unwrap",
+            VaultOp::RevokeSelf => "token revoke-self",
         }
     }
 }
@@ -105,6 +107,7 @@ pub(crate) fn refuse_status(op: VaultOp, status: u16) -> VaultError {
             "the token is expired or revoked (run `maknae login`), or the path is outside your grant"
         }
         (VaultOp::WrappedRead, 404) => "no secret at this path",
+        (VaultOp::RevokeSelf, 403) => "the token is already expired or revoked",
         _ => "",
     };
     VaultError::VaultStatus {
@@ -226,12 +229,14 @@ mod tests {
                 VaultOp::WrappedRead.as_str(),
                 VaultOp::WrapLookup.as_str(),
                 VaultOp::Unwrap.as_str(),
+                VaultOp::RevokeSelf.as_str(),
             ],
             [
                 "userpass login",
                 "wrapped KV read",
                 "wrapping lookup",
-                "unwrap"
+                "unwrap",
+                "token revoke-self"
             ]
         );
     }
@@ -273,6 +278,22 @@ mod tests {
             refuse_status(VaultOp::WrappedRead, 400),
             VaultError::VaultStatus {
                 status: 400,
+                hint: "",
+                ..
+            }
+        ));
+        assert!(matches!(
+            refuse_status(VaultOp::RevokeSelf, 403),
+            VaultError::VaultStatus {
+                status: 403,
+                hint: "the token is already expired or revoked",
+                ..
+            }
+        ));
+        assert!(matches!(
+            refuse_status(VaultOp::RevokeSelf, 500),
+            VaultError::VaultStatus {
+                status: 500,
                 hint: "",
                 ..
             }

@@ -3236,6 +3236,8 @@ async fn boot_after_sink(
                 audit: audit_cfg,
                 vault_approle_mount: vc.as_ref().map(|c| c.approle_mount.clone()),
                 vault_pki_int_mount: vc.as_ref().map(|c| c.pki_int_mount.clone()),
+                vault_user_auth_type: vc.as_ref().map(|c| c.user_auth.r#type.clone()),
+                vault_user_auth_mount: vc.as_ref().map(|c| c.user_auth.mount.clone()),
                 egress: &egress_cfg,
             },
         ))

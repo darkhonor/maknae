@@ -136,6 +136,12 @@ pub enum VaultError {
         why: &'static str,
     },
     HttpClient(String),
+    TokenAbsent,
+    TokenExpired,
+    TokenRecord(&'static str),
+    TokenUnreadable(String),
+    TokenOtherVault(String),
+    TokenStore(String),
 }
 
 impl std::fmt::Display for VaultError {
@@ -231,6 +237,24 @@ impl std::fmt::Display for VaultError {
             VaultError::WrapMismatch(m) => write!(f, "wrapping token refused: {m}"),
             VaultError::KvField { field, why } => write!(f, "KV field {field:?}: {why}"),
             VaultError::HttpClient(m) => write!(f, "Vault HTTP client could not be built: {m}"),
+            VaultError::TokenAbsent => write!(f, "no Vault token is stored: run `maknae login`"),
+            VaultError::TokenExpired => write!(
+                f,
+                "your Vault token has expired or expires within 60 s: run `maknae login`"
+            ),
+            VaultError::TokenRecord(why) => write!(
+                f,
+                "the stored Vault token is unreadable ({why}): run `maknae login`"
+            ),
+            VaultError::TokenUnreadable(m) => write!(
+                f,
+                "the stored Vault token could not be read ({m}): run `maknae login`"
+            ),
+            VaultError::TokenOtherVault(addr) => write!(
+                f,
+                "the stored Vault token was issued by a different Vault ({addr}): run `maknae login`"
+            ),
+            VaultError::TokenStore(m) => write!(f, "Vault token storage failed: {m}"),
         }
     }
 }
@@ -302,6 +326,12 @@ mod tests {
                 why: "absent",
             },
             VaultError::HttpClient("no TLS backend".into()),
+            VaultError::TokenAbsent,
+            VaultError::TokenExpired,
+            VaultError::TokenRecord("no expiry"),
+            VaultError::TokenUnreadable("keychain status -25293".into()),
+            VaultError::TokenOtherVault("https://old.example/v1/".into()),
+            VaultError::TokenStore("keychain add: status -25308".into()),
         ];
         for e in cases {
             assert!(!format!("{e}").is_empty());
@@ -326,5 +356,21 @@ mod tests {
                 && !m.contains("locked"),
             "{m}"
         );
+    }
+
+    #[test]
+    fn each_read_side_token_refusal_tells_the_user_to_log_in() {
+        for e in [
+            VaultError::TokenAbsent,
+            VaultError::TokenExpired,
+            VaultError::TokenRecord("no expiry"),
+            VaultError::TokenUnreadable("keychain status -25293".into()),
+            VaultError::TokenOtherVault("https://old.example/v1/".into()),
+        ] {
+            assert!(e.to_string().ends_with("run `maknae login`"), "{e}");
+        }
+        assert!(!VaultError::TokenStore("x".into())
+            .to_string()
+            .contains("maknae login"));
     }
 }

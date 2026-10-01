@@ -26,6 +26,9 @@ disclose	vault.addr	WHERE vault is, never a credential
 disclose	vault.approle_mount	mount name, never a credential
 disclose	vault.pki_int_mount	mount name, never a credential
 disclose	vault.deployment_id	the supported fallback spelling of core.deployment_id
+disclose	vault.user_auth	the user authentication block: a method type and a mount name, never a credential
+disclose	vault.user_auth.type	the user authentication method; only userpass is accepted
+disclose	vault.user_auth.mount	mount name, never a credential
 disclose	audit.jsonl_path	the log the operator is trying to find
 disclose	principal.name	readable by any local process via getpwuid
 disclose	principal.uid	readable by any local process via getpwuid

@@ -82,7 +82,8 @@ SURFACE=(
   # payload reachable with NO `roles:` grant at all. Inventorying two of three
   # is how the third ships unreviewed, which is this table's own argument.
   "crates/maknae-proto/src/wire.rs|WhoamiView|whoami|2|wire"
-  "crates/maknae-vault/src/config.rs|VaultConfig|vault|5|config"
+  "crates/maknae-vault/src/config.rs|VaultConfig|vault|6|config"
+  "crates/maknae-vault/src/config.rs|UserAuthConfig|vault.user_auth|2|config"
 )
 
 # Sections with NO config struct: their keys are carried verbatim for their

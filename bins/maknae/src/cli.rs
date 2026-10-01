@@ -13,8 +13,8 @@
 //! the wire path since ADR-0009 arming landed.)* The `ping`/`whoami` wire path
 //! below uses only `maknae-proto`, `maknae-vault`, `maknae-config`, `maknae-msgs`,
 //! `clap` and `maknae-io` (delegation arming — `mutation.rs`); `maknae-agent` is the agent loop's
-//! (`agent.rs`) alone; `nix`/`zeroize`/`yaml-rust2`/`rpassword`/
-//! `security-framework` are `enroll/`-only. NO privileged crate
+//! (`agent.rs`) alone; `yaml-rust2`/`rpassword`/`security-framework` are
+//! `enroll/`-only, and `nix`/`zeroize` serve `enroll/` and `login`/`tty`. NO privileged crate
 //! (`maknae-kernel`/`-subject-ctx-mint`/`-audit-append`/`-spif-compile`) — spec §3
 //! P1 — even for `enroll`: it does its own privileged work via `nix` safe wrappers
 //! and process re-exec (`sudo -u`), never by linking the daemon's privileged crates.
@@ -150,6 +150,10 @@ enum Command {
     SubjectList,
     /// Run the agent loop on one prompt (ADR-0023).
     Agent { prompt: String },
+    /// Log in to Vault as your local account; stores only the token.
+    Login,
+    /// Revoke and erase your stored Vault token.
+    Logout,
     /// One-time elevated provisioning: mint credentials, seal them to the
     /// platform HRoT, write daemon+CLI config (spec §4.1). Requires `sudo`.
     Enroll(crate::enroll::EnrollArgs),
@@ -738,6 +742,8 @@ pub async fn run_cli() -> ExitCode {
                 ExitCode::from(1)
             }
         },
+        Command::Login => crate::login::run_login().await,
+        Command::Logout => crate::login::run_logout().await,
         Command::Enroll(args) => crate::enroll::run_enroll(args).await,
         Command::EnrollHelper(args) => crate::enroll::run_enroll_helper(args).await,
     }
@@ -1024,6 +1030,23 @@ mod tests {
     fn parses_whoami() {
         let cli = Cli::try_parse_from(["maknae", "whoami"]).expect("parses");
         assert!(matches!(cli.command, Command::Whoami));
+    }
+
+    #[test]
+    fn login_and_logout_parse_and_take_no_arguments() {
+        let cli = Cli::try_parse_from(["maknae", "login"]).expect("parses");
+        assert!(matches!(cli.command, Command::Login));
+        let cli = Cli::try_parse_from(["maknae", "logout"]).expect("parses");
+        assert!(matches!(cli.command, Command::Logout));
+        for argv in [
+            ["maknae", "login", "password=hunter2"].as_slice(),
+            ["maknae", "login", "--password", "hunter2"].as_slice(),
+            ["maknae", "login", "--password=hunter2"].as_slice(),
+            ["maknae", "login", "alice"].as_slice(),
+            ["maknae", "logout", "--token", "hvs.x"].as_slice(),
+        ] {
+            assert!(Cli::try_parse_from(argv).is_err(), "{argv:?}");
+        }
     }
 
     #[test]
@@ -1315,6 +1338,19 @@ mod tests {
         let vc = maknae_vault::vault_config_from_document(&doc)
             .expect("vault parses from the shared document");
         assert_eq!(vc.addr, "https://v.example:8200");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_cli_reads_vault_user_auth_beside_addr() {
+        let d = cfg_dir(
+            "vault-user-auth",
+            "core:\n  deployment_id: dev-01\n\
+             vault:\n  addr: https://v.example:8200\n  user_auth:\n    type: userpass\n    mount: corp-userpass\n",
+        );
+        let doc = load_config(&d.0, &cli_config_specs()).expect("loads");
+        let vc = maknae_vault::vault_config_from_document(&doc).expect("parses");
+        assert_eq!(vc.user_auth.resolve().unwrap().mount(), "corp-userpass");
     }
 
     // A genuinely-unknown section is still rejected under the CLI registry — fail-closed
