@@ -15,6 +15,7 @@ pub(crate) enum PromptError {
     NoPassword,
     TooLong,
     Terminal(Errno),
+    Read(Errno),
     Password(VaultError),
 }
 
@@ -34,6 +35,7 @@ impl std::fmt::Display for PromptError {
             PromptError::Terminal(e) => {
                 write!(f, "the terminal could not be switched to hidden input: {e}")
             }
+            PromptError::Read(e) => write!(f, "the terminal could not be read: {e}"),
             PromptError::Password(e) => write!(f, "{e}"),
         }
     }
@@ -46,7 +48,9 @@ struct Restore<'a> {
 
 impl Drop for Restore<'_> {
     fn drop(&mut self) {
-        let _ = tcsetattr(self.fd, SetArg::TCSANOW, &self.saved);
+        if tcsetattr(self.fd, SetArg::TCSAFLUSH, &self.saved) == Err(Errno::EINTR) {
+            let _ = tcsetattr(self.fd, SetArg::TCSAFLUSH, &self.saved);
+        }
     }
 }
 
@@ -94,27 +98,34 @@ pub(crate) fn read_password_on(
     drop(restore);
     let _ = writeln!(out);
     match fed? {
-        PasswordFeed::Done => line.finish().map_err(PromptError::Password),
-        PasswordFeed::Interrupted => Err(PromptError::Interrupted),
-        PasswordFeed::TooLong => Err(PromptError::TooLong),
-        PasswordFeed::Eof | PasswordFeed::More => Err(PromptError::NoPassword),
+        Ended::Done => line.finish().map_err(PromptError::Password),
+        Ended::Interrupted => Err(PromptError::Interrupted),
+        Ended::TooLong => Err(PromptError::TooLong),
+        Ended::Eof => Err(PromptError::NoPassword),
     }
 }
 
-fn feed_until_end(
-    fd: BorrowedFd<'_>,
-    line: &mut PasswordLine,
-) -> Result<PasswordFeed, PromptError> {
+enum Ended {
+    Done,
+    Interrupted,
+    TooLong,
+    Eof,
+}
+
+fn feed_until_end(fd: BorrowedFd<'_>, line: &mut PasswordLine) -> Result<Ended, PromptError> {
     let mut byte = Zeroizing::new([0u8; 1]);
     loop {
         match nix::unistd::read(fd, &mut byte[..]) {
-            Ok(0) => return Ok(PasswordFeed::Eof),
+            Ok(0) => return Ok(Ended::Eof),
             Ok(_) => match line.feed(byte[0]) {
                 PasswordFeed::More => {}
-                end => return Ok(end),
+                PasswordFeed::Done => return Ok(Ended::Done),
+                PasswordFeed::Interrupted => return Ok(Ended::Interrupted),
+                PasswordFeed::TooLong => return Ok(Ended::TooLong),
+                PasswordFeed::Eof => return Ok(Ended::Eof),
             },
             Err(Errno::EINTR) => {}
-            Err(e) => return Err(PromptError::Terminal(e)),
+            Err(e) => return Err(PromptError::Read(e)),
         }
     }
 }
@@ -122,10 +133,10 @@ fn feed_until_end(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nix::fcntl::{fcntl, FcntlArg, OFlag};
+    use nix::sys::termios::{ControlFlags, InputFlags, OutputFlags};
     use std::os::fd::OwnedFd;
     use std::sync::mpsc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     struct Prompted(mpsc::Sender<()>);
 
@@ -149,20 +160,36 @@ mod tests {
         (p.master, p.slave)
     }
 
-    fn modes(fd: impl AsFd) -> LocalFlags {
-        tcgetattr(fd).unwrap().local_flags - LocalFlags::PENDIN
+    type Mode = (InputFlags, OutputFlags, ControlFlags, LocalFlags, Vec<u8>);
+
+    fn modes(fd: impl AsFd) -> Mode {
+        let t = tcgetattr(fd).unwrap();
+        (
+            t.input_flags,
+            t.output_flags,
+            t.control_flags,
+            t.local_flags - LocalFlags::PENDIN,
+            t.control_chars.to_vec(),
+        )
     }
 
-    type Typed = (
-        Result<Password, PromptError>,
-        LocalFlags,
-        LocalFlags,
-        Vec<u8>,
-    );
+    const MARKER: &[u8] = b"END-OF-ECHO";
 
-    fn type_at_prompt(keys: &'static [u8]) -> Typed {
+    type Typed = (Result<Password, PromptError>, Mode, Mode, Vec<u8>);
+
+    fn type_at_prompt(keys: &[u8]) -> Typed {
         let (master, slave) = pty();
         let before = modes(&slave);
+        let drain = master.try_clone().unwrap();
+        let (echo_tx, echo_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut chunk = [0u8; 256];
+            while let Ok(n @ 1..) = nix::unistd::read(&drain, &mut chunk) {
+                if echo_tx.send(chunk[..n].to_vec()).is_err() {
+                    break;
+                }
+            }
+        });
         let (prompted_tx, prompted_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
         std::thread::spawn(move || {
@@ -175,11 +202,22 @@ mod tests {
         let (got, after, _slave) = done_rx
             .recv_timeout(Duration::from_secs(10))
             .expect("the prompt did not return within 10 s");
-        fcntl(&master, FcntlArg::F_SETFL(OFlag::O_NONBLOCK)).unwrap();
-        let mut echoed = vec![0u8; 256];
-        let n = nix::unistd::read(&master, &mut echoed).unwrap_or(0);
-        echoed.truncate(n);
-        (got, before, after, echoed)
+        nix::unistd::write(&master, MARKER).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut seen = Vec::new();
+        while !seen.windows(MARKER.len()).any(|w| w == MARKER) {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let chunk = echo_rx
+                .recv_timeout(left)
+                .expect("the marker was never echoed back");
+            seen.extend_from_slice(&chunk);
+        }
+        let at = seen
+            .windows(MARKER.len())
+            .position(|w| w == MARKER)
+            .unwrap();
+        seen.truncate(at);
+        (got, before, after, seen)
     }
 
     #[test]
@@ -194,6 +232,20 @@ mod tests {
     fn ctrl_c_interrupts_and_restores_the_terminal() {
         let (got, before, after, _) = type_at_prompt(b"ab\x03");
         assert!(matches!(got, Err(PromptError::Interrupted)));
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn ctrl_backslash_interrupts_and_restores_the_terminal() {
+        let (got, before, after, _) = type_at_prompt(b"ab\x1c");
+        assert!(matches!(got, Err(PromptError::Interrupted)));
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn an_over_long_password_is_refused_and_the_terminal_restored() {
+        let (got, before, after, _) = type_at_prompt(&[b'a'; 1025]);
+        assert!(matches!(got, Err(PromptError::TooLong)));
         assert_eq!(after, before);
     }
 
@@ -224,6 +276,7 @@ mod tests {
             PromptError::NoPassword,
             PromptError::TooLong,
             PromptError::Terminal(nix::errno::Errno::ENOTTY),
+            PromptError::Read(nix::errno::Errno::EIO),
         ] {
             assert!(!e.to_string().is_empty());
         }
