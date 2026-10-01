@@ -232,11 +232,22 @@ pub(crate) fn keychain_erase_outcome(
         Ok(KeychainDelete::StillPresent) => "the item is still present after delete".to_string(),
         Err(VaultError::Keychain { status }) if status == ITEM_NOT_FOUND => return Ok(false),
         Err(VaultError::Keychain { status }) => format!("keychain status {status}"),
-        Err(_) => "the keychain refused the delete".to_string(),
+        Err(_) => "the keychain search or delete failed".to_string(),
     };
     Err(VaultError::TokenStore(format!(
         "keychain delete: {detail}; remove it with `{TOKEN_DELETE_REMEDY}`"
     )))
+}
+
+pub(crate) fn encrypt_output_refusal(e: &VaultError) -> String {
+    match e {
+        VaultError::TokenRecord(_) => "the credential is over 16 KiB".to_string(),
+        VaultError::TokenUnreadable(m) => format!(
+            "reading systemd-creds output failed ({})",
+            m.strip_prefix("reading the token: ").unwrap_or("io error")
+        ),
+        _ => "reading systemd-creds output failed".to_string(),
+    }
 }
 
 pub(crate) fn read_record(mut r: impl Read, cap: usize) -> Result<Zeroizing<Vec<u8>>, VaultError> {
@@ -630,5 +641,33 @@ mod tests {
             read_record(BrokenOnce(false), 8),
             Err(VaultError::TokenUnreadable(_))
         ));
+    }
+
+    #[test]
+    fn an_encrypt_output_refusal_is_store_side_text() {
+        let over = encrypt_output_refusal(&VaultError::TokenRecord("over its size bound"));
+        assert!(over.contains("over 16 KiB"));
+        let io = encrypt_output_refusal(&VaultError::TokenUnreadable(
+            "reading the token: BrokenPipe".into(),
+        ));
+        assert_eq!(io, "reading systemd-creds output failed (BrokenPipe)");
+        assert_eq!(
+            encrypt_output_refusal(&VaultError::TokenAbsent),
+            "reading systemd-creds output failed"
+        );
+        for text in [over, io] {
+            assert!(!text.contains("maknae login"));
+        }
+    }
+
+    #[test]
+    fn a_non_keychain_erase_failure_names_the_remedy_truthfully() {
+        match keychain_erase_outcome(Err(VaultError::CredentialSource("x".into()))) {
+            Err(VaultError::TokenStore(m)) => {
+                assert!(m.contains("search or delete failed"));
+                assert!(m.contains(TOKEN_DELETE_REMEDY));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 }

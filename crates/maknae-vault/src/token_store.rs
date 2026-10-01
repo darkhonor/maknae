@@ -1,8 +1,8 @@
 use crate::token_record::{
-    decrypt_refusal, every_custody, first_present, keychain_erase_outcome, read_record,
-    systemd_major, token_dir_refusal, token_dir_required, token_file_refusal, token_file_required,
-    StoredToken, SystemdCreds, TokenCustody, MAX_CREDS_FILE_BYTES, MAX_TOKEN_RECORD_BYTES,
-    SYSTEMD_CREDS, TOKEN_CREDS_NAME, TOKEN_FILE_MODE,
+    decrypt_refusal, encrypt_output_refusal, every_custody, first_present, keychain_erase_outcome,
+    read_record, systemd_major, token_dir_refusal, token_dir_required, token_file_refusal,
+    token_file_required, StoredToken, SystemdCreds, TokenCustody, MAX_CREDS_FILE_BYTES,
+    MAX_TOKEN_RECORD_BYTES, SYSTEMD_CREDS, TOKEN_CREDS_NAME, TOKEN_FILE_MODE,
 };
 use crate::{UserToken, VaultError};
 use std::io::{Read, Write};
@@ -14,6 +14,7 @@ use zeroize::Zeroizing;
 use crate::token_record::keychain_read_refusal;
 
 const MAX_STDERR_BYTES: u64 = 4096;
+const MAX_STDERR_DRAIN: u64 = 1 << 20;
 
 fn store_failure(what: &str, detail: impl std::fmt::Display) -> VaultError {
     VaultError::TokenStore(format!("{what}: {detail}"))
@@ -195,7 +196,11 @@ fn run_creds(verb: &str, input: &[u8], cap: usize) -> Result<CredsRun, String> {
     };
     let out = read_record(stdout, cap);
     let mut err_bytes = Vec::new();
-    let _ = stderr.take(MAX_STDERR_BYTES).read_to_end(&mut err_bytes);
+    let mut stderr = stderr;
+    let _ = (&mut stderr)
+        .take(MAX_STDERR_BYTES)
+        .read_to_end(&mut err_bytes);
+    let _ = std::io::copy(&mut stderr.take(MAX_STDERR_DRAIN), &mut std::io::sink());
     if out.is_err() {
         let _ = child.kill();
     }
@@ -214,7 +219,8 @@ fn encrypt(record: &[u8]) -> Result<Zeroizing<Vec<u8>>, VaultError> {
     if !run.status.success() && run.out.is_ok() {
         return Err(store_failure(what, stderr_text(&run.stderr)));
     }
-    run.out.map_err(|e| store_failure(what, e))
+    run.out
+        .map_err(|e| store_failure(what, encrypt_output_refusal(&e)))
 }
 
 fn decrypt(ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>, VaultError> {
