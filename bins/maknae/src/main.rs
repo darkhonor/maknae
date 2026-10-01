@@ -4,6 +4,7 @@
 mod agent;
 mod cli;
 mod enroll;
+mod login;
 mod mutation;
 mod tty;
 
