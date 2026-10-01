@@ -36,6 +36,12 @@ impl UserAuthMethod {
             other => Err(VaultError::UnknownUserAuth(other.to_string())),
         }
     }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UserAuthMethod::Userpass => "userpass",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,12 +122,13 @@ pub fn user_auth_from_value(user_auth: Option<&Value>) -> Result<UserAuth, Vault
 
 /// #210: the keys this section's parser reads — the closed vocabulary, held
 /// EQUAL to `VaultConfig`'s fields by a test below.
-pub(crate) const VAULT_KEYS: [&str; 5] = [
+pub(crate) const VAULT_KEYS: [&str; 6] = [
     "addr",
     "approle_mount",
     "pki_int_mount",
     "deployment_id",
     "insecure_plaintext_secret_path",
+    "user_auth",
 ];
 
 /// The non-sensitive Vault settings.
@@ -138,6 +145,35 @@ pub struct VaultConfig {
     /// design: there is no default plaintext path, so a deployment that never opts
     /// in has no plaintext fallback at all (fail closed).
     pub insecure_plaintext_secret_path: Option<PathBuf>,
+    pub user_auth: UserAuthConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserAuthConfig {
+    pub r#type: String,
+    pub mount: String,
+}
+
+impl UserAuthConfig {
+    pub fn resolve(&self) -> Result<UserAuth, VaultError> {
+        UserAuth::new(UserAuthMethod::parse(&self.r#type)?, &self.mount)
+    }
+}
+
+impl From<&UserAuth> for UserAuthConfig {
+    fn from(auth: &UserAuth) -> Self {
+        Self {
+            r#type: auth.method().as_str().to_string(),
+            mount: auth.mount().to_string(),
+        }
+    }
+}
+
+fn get_value<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
+    match v {
+        Value::Map(entries) => entries.iter().find(|(k, _)| k == key).map(|(_, val)| val),
+        _ => None,
+    }
 }
 
 /// Pull a string value out of a `Value::Map` by key. `Value` exposes no accessor.
@@ -251,12 +287,14 @@ pub fn vault_config_from_document(doc: &Document) -> Result<VaultConfig, VaultEr
     // None, i.e. no plaintext fallback source at all (fail-closed default).
     let insecure_plaintext_secret_path =
         get_str(vault, "insecure_plaintext_secret_path").map(PathBuf::from);
+    let user_auth = UserAuthConfig::from(&user_auth_from_value(get_value(vault, "user_auth"))?);
     Ok(VaultConfig {
         addr,
         deployment_id,
         approle_mount,
         pki_int_mount,
         insecure_plaintext_secret_path,
+        user_auth,
     })
 }
 
@@ -759,6 +797,97 @@ mod tests {
                 .unwrap()
                 .mount(),
             "team/userpass"
+        );
+    }
+
+    #[test]
+    fn vault_user_auth_defaults_to_userpass_on_userpass() {
+        let d = TempDir::new("ua-default");
+        d.write(
+            "maknae.yaml",
+            "core:\n  deployment_id: dev-01\nvault:\n  addr: https://v.example:8200\n",
+        );
+        let c = load_vault_config(&d.0).unwrap();
+        assert_eq!(
+            c.user_auth,
+            UserAuthConfig {
+                r#type: "userpass".into(),
+                mount: "userpass".into()
+            }
+        );
+        assert_eq!(c.user_auth.resolve().unwrap(), UserAuth::userpass_default());
+    }
+
+    #[test]
+    fn vault_user_auth_is_read_beside_addr() {
+        let d = TempDir::new("ua-read");
+        d.write(
+            "maknae.yaml",
+            "core:\n  deployment_id: dev-01\nvault:\n  addr: https://v.example:8200\n  user_auth:\n    type: userpass\n    mount: corp-userpass\n",
+        );
+        let c = load_vault_config(&d.0).unwrap();
+        assert_eq!(c.user_auth.mount, "corp-userpass");
+        assert_eq!(c.user_auth.resolve().unwrap().mount(), "corp-userpass");
+    }
+
+    #[test]
+    fn a_bad_vault_user_auth_refuses_the_whole_vault_config() {
+        let cases: [(&str, &str); 3] = [
+            ("ua-ldap", "  user_auth:\n    type: ldap\n"),
+            (
+                "ua-mount",
+                "  user_auth:\n    type: userpass\n    mount: a#b\n",
+            ),
+            ("ua-scalar", "  user_auth: userpass\n"),
+        ];
+        let mut got = Vec::new();
+        for (tag, block) in cases {
+            let d = TempDir::new(tag);
+            d.write(
+                "maknae.yaml",
+                &format!("core:\n  deployment_id: dev-01\nvault:\n  addr: https://v.example:8200\n{block}"),
+            );
+            got.push(match load_vault_config(&d.0) {
+                Err(VaultError::UnknownUserAuth(t)) => format!("unknown {t}"),
+                Err(VaultError::InvalidMount(m)) => m,
+                Err(VaultError::ConfigShape { key, want }) => format!("{key} {want}"),
+                Err(e) => panic!("{tag}: wrong refusal {e}"),
+                Ok(_) => panic!("{tag}: accepted"),
+            });
+        }
+        assert_eq!(
+            got,
+            [
+                "unknown ldap",
+                "vault.user_auth.mount has a character outside [A-Za-z0-9._/-]",
+                "vault.user_auth a map",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_user_auth_config_resolves_only_through_pr2_validation() {
+        let ldap = UserAuthConfig {
+            r#type: "ldap".into(),
+            mount: "userpass".into(),
+        };
+        assert!(matches!(
+            ldap.resolve(),
+            Err(VaultError::UnknownUserAuth(_))
+        ));
+        let bad = UserAuthConfig {
+            r#type: "userpass".into(),
+            mount: "a#b".into(),
+        };
+        assert!(matches!(bad.resolve(), Err(VaultError::InvalidMount(_))));
+        assert_eq!(UserAuthMethod::Userpass.as_str(), "userpass");
+        let corp = UserAuth::new(UserAuthMethod::Userpass, "corp").unwrap();
+        assert_eq!(
+            UserAuthConfig::from(&corp),
+            UserAuthConfig {
+                r#type: "userpass".into(),
+                mount: "corp".into()
+            }
         );
     }
 }

@@ -929,6 +929,13 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_daemon_refuses_to_build_its_vault_client_from_a_bad_user_auth() {
+        let fx = DispatchFixture::new("bad-user-auth", "  user_auth:\n    type: ldap\n");
+        let built = PlaneClient::from_document(&fx.doc(), &fx.0, Plane::Kernel);
+        assert!(matches!(built, Err(VaultError::UnknownUserAuth(t)) if t == "ldap"));
+    }
+
     /// #318: an inherited `VAULT_TOKEN` must NOT become the daemon's client
     /// token. It is a vaultrs 0.8.0 settings DEFAULT (`default_token`), and
     /// `harden()` replaces only the reqwest client — it keeps vaultrs's token

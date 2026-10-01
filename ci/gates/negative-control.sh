@@ -1007,6 +1007,9 @@ const DISCLOSABLE: &[&str] = &[
     "vault.approle_mount",
     "vault.pki_int_mount",
     "vault.deployment_id",
+    "vault.user_auth",
+    "vault.user_auth.type",
+    "vault.user_auth.mount",
     "audit.jsonl_path",
     "principal",
     "egress.socket_path",
@@ -1091,6 +1094,11 @@ pub struct VaultConfig {
     pub pki_int_mount: String,
     pub deployment_id: String,
     pub insecure_plaintext_secret_path: Option<PathBuf>,
+    pub user_auth: UserAuthConfig,
+}
+pub struct UserAuthConfig {
+    pub r#type: String,
+    pub mount: String,
 }
 FIX
   printf '%s' "$1" > "$fixture/ci/gates/config-disclosure-manifest.txt"
@@ -1105,6 +1113,9 @@ omit	audit.au3_1	deployer-authored, unenumerable
 disclose	vault.approle_mount	mount name
 disclose	vault.pki_int_mount	mount name
 disclose	vault.deployment_id	fallback spelling
+disclose	vault.user_auth	the user authentication block
+disclose	vault.user_auth.type	the method
+disclose	vault.user_auth.mount	mount name
 disclose	principal	readable via getpwuid anyway
 disclose	provider.name	the registered provider label
 disclose	provider.endpoint	where the loop content goes
@@ -1203,10 +1214,10 @@ expect_reject "config-disclosure-drift/struct-anchor-not-found" "$fx/ci/gates/co
 # the reader to delete manifest rows that were correct.
 fx="$(cfg_fixture "$CFG_OK")"
 cat > "$fx/crates/maknae-config/src/document.rs" <<'FIX'
-const DISCLOSABLE: &[&str] = &["transport", "provider.name", "provider.endpoint", "provider.model", "provider.reasoning_effort", "provider.output_tokens_field", "vault.addr", "vault.approle_mount", "vault.pki_int_mount", "vault.deployment_id", "audit.jsonl_path", "principal", "egress.socket_path", "egress.deadline_ms"];
+const DISCLOSABLE: &[&str] = &["transport", "provider.name", "provider.endpoint", "provider.model", "provider.reasoning_effort", "provider.output_tokens_field", "vault.addr", "vault.approle_mount", "vault.pki_int_mount", "vault.deployment_id", "vault.user_auth", "vault.user_auth.type", "vault.user_auth.mount", "audit.jsonl_path", "principal", "egress.socket_path", "egress.deadline_ms"];
 const SUPPRESSED: &[&str] = &["vault.insecure_plaintext_secret_path", "core.handling", "audit.au3_1", "provider.key_vault_path", "provider.key_field"];
 FIX
-expect_accept "config-disclosure-drift/rustfmt-collapsed-array-still-read" ": 30 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_accept "config-disclosure-drift/rustfmt-collapsed-array-still-read" ": 33 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: a section registered in boot.rs with no SURFACE entry. THE THIRD
 # fail-open, and the one that closes the PROPERTY rather than an instance: the
@@ -1512,7 +1523,7 @@ python3 - "$fx" <<'PY'
 import pathlib, sys
 p = pathlib.Path(sys.argv[1]) / "ci/gates/config-disclosure-drift.sh"
 s = p.read_text()
-row = '  "crates/maknae-vault/src/config.rs|VaultConfig|vault|5|config"\n'
+row = '  "crates/maknae-vault/src/config.rs|VaultConfig|vault|6|config"\n'
 last = '  "crates/maknae-proto/src/wire.rs|WhoamiView|whoami|2|wire"\n'
 assert s.count(row) == 1 and s.count(last) == 1, "fixture reorder anchors moved"
 p.write_text(s.replace(row, "").replace(last, last + row))
@@ -1661,7 +1672,7 @@ fi
 # go check a sed flag. This probe pins the corrected order.
 fx="$(cfg_fixture "$CFG_OK" '' '' '' 'std::sync::Arc<String>')"
 expect_accept "config-disclosure-drift/qualified-wrapper-is-a-leaf" \
-  ": 30 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+  ": 33 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # ACCEPT: the config-surface `Vec` exemption holds for the QUALIFIED spelling
 # too. Under the old post-loop `s/.*:://`, `Vec<crate::Principal>` reduced to
@@ -1670,7 +1681,7 @@ expect_accept "config-disclosure-drift/qualified-wrapper-is-a-leaf" \
 # the unqualified `config-vec-of-struct-is-a-leaf` probe below cannot see.
 fx="$(cfg_fixture "$CFG_OK" '' '' '' 'Vec<crate::Principal>')"
 expect_accept "config-disclosure-drift/qualified-config-vec-is-still-a-leaf" \
-  ": 30 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+  ": 33 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # ACCEPT: the mirror image. `Vec<WorkspaceStruct>` on a CONFIG surface is a
 # LEAF -- `flatten` never recurses into `Value::Seq` and `render` masks the
@@ -1679,12 +1690,12 @@ expect_accept "config-disclosure-drift/qualified-config-vec-is-still-a-leaf" \
 # did not, and every config row was silently held to the wire rule.
 fx="$(cfg_fixture "$CFG_OK" '' '' '' 'Vec<Principal>')"
 expect_accept "config-disclosure-drift/config-vec-of-struct-is-a-leaf" \
-  ": 30 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+  ": 33 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # ACCEPT: the clean fixture passes and reports both counts. Without this every
 # rejection above would stay green against a gate that refuses everything.
 fx="$(cfg_fixture "$CFG_OK")"
-expect_accept "config-disclosure-drift/clean-fixture-passes" ": 30 paths decided, 41 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_accept "config-disclosure-drift/clean-fixture-passes" ": 33 paths decided, 44 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
 
 
 # ACCEPT, against the REAL repo: each gate's reported examined-set is
@@ -1747,7 +1758,7 @@ expect_reported_count "p1-manifest/packages-match-the-workspace" "ok (" "$exp_p1
 # control; asserting it here means any future silent shrink is a red build.
 
 expect_accept "config-disclosure-drift/real-repo-counts-pinned" \
-  ": 42 paths decided, 41 struct fields covered" "$here/config-disclosure-drift.sh"
+  ": 45 paths decided, 44 struct fields covered" "$here/config-disclosure-drift.sh"
 
 
 # #158: a grant's own disclosure inventory must reject new data and type changes.
