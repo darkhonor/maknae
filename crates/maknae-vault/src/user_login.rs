@@ -201,7 +201,7 @@ mod tests {
         );
         assert_eq!(
             login_path(&UserAuth::userpass_default(), "bob").unwrap(),
-            "auth/userpass/login/bob"
+            "auth/maknae-userpass/login/bob"
         );
         assert!(matches!(
             login_path(&corp, "../root"),

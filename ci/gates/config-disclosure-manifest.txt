@@ -29,6 +29,8 @@ disclose	vault.deployment_id	the supported fallback spelling of core.deployment_
 disclose	vault.user_auth	the user authentication block: a method type and a mount name, never a credential
 disclose	vault.user_auth.type	the user authentication method; only userpass is accepted
 disclose	vault.user_auth.mount	mount name, never a credential
+disclose	vault.kv_mount	the KV mount user keys live in; a mount name, never a credential, and already world-readable in egress-bounds.yaml
+disclose	vault.user_prefix	where each user's keys sit below the mount; a layout prefix, never a credential, and already world-readable in egress-bounds.yaml
 disclose	audit.jsonl_path	the log the operator is trying to find
 disclose	principal.name	readable by any local process via getpwuid
 disclose	principal.uid	readable by any local process via getpwuid

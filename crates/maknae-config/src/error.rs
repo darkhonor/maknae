@@ -109,6 +109,8 @@ pub enum ConfigError {
     /// resolves to this operator's home, so a silently-dropped malformed
     /// section would leave `~` unresolved rather than refused).
     InvalidPrincipal(String),
+    /// `~/.maknae/providers.yaml` was refused, or names no entry that can be selected.
+    UserProviders(String),
 }
 
 impl std::fmt::Display for ConfigError {
@@ -201,6 +203,9 @@ impl std::fmt::Display for ConfigError {
             }
             ConfigError::InvalidPrincipal(reason) => {
                 write!(f, "invalid principal config: {reason}")
+            }
+            ConfigError::UserProviders(reason) => {
+                write!(f, "providers.yaml: {reason}")
             }
         }
     }
@@ -395,6 +400,18 @@ mod tests {
         assert!(
             !format!("{ip}").contains("100644"),
             "raw st_mode must not leak"
+        );
+    }
+
+    #[test]
+    fn display_covers_user_providers() {
+        let s = format!(
+            "{}",
+            ConfigError::UserProviders("no model access: no providers are defined".into())
+        );
+        assert_eq!(
+            s,
+            "providers.yaml: no model access: no providers are defined"
         );
     }
 }

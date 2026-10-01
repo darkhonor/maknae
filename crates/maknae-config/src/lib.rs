@@ -46,6 +46,8 @@ mod provider;
 mod providers;
 mod scalar;
 mod transport;
+mod user_providers;
+mod user_providers_io;
 mod value;
 
 #[cfg(all(unix, feature = "hermetic-test-seam"))]
@@ -95,6 +97,10 @@ pub use transport::{
     transport_from_section, TransportConfig, MACOS_DAEMON_SOCKET_PATH, PROMPT_MAX_BYTES_FLOOR,
     TRANSPORT_SECTION, TRANSPORT_TIMEOUT_MS_MAX,
 };
+pub use user_providers::{
+    user_providers_from_document, UserProviderEntry, UserProviders, USER_PROVIDERS_FILE,
+};
+pub use user_providers_io::load_user_providers;
 pub use value::Value;
 
 use builder::Builder;

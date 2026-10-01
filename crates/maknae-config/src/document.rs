@@ -292,6 +292,8 @@ const DISCLOSABLE: &[&str] = &[
     "vault.user_auth",
     "vault.user_auth.type",
     "vault.user_auth.mount",
+    "vault.kv_mount",
+    "vault.user_prefix",
     // Audit destination. A path, and the operator already needs it to find the
     // log they are debugging.
     "audit.jsonl_path",
@@ -1026,7 +1028,7 @@ mod tests {
                 vault_approle_mount: Some("maknae-approle".into()),
                 vault_pki_int_mount: Some("maknae-pki-int".into()),
                 vault_user_auth_type: Some("userpass".into()),
-                vault_user_auth_mount: Some("userpass".into()),
+                vault_user_auth_mount: Some("maknae-userpass".into()),
                 egress: &crate::EgressConfig::default(),
             },
         );
@@ -1035,7 +1037,7 @@ mod tests {
         assert_eq!(v["vault"]["approle_mount"], "maknae-approle");
         assert_eq!(v["vault"]["pki_int_mount"], "maknae-pki-int");
         assert_eq!(v["vault"]["user_auth.type"], "userpass");
-        assert_eq!(v["vault"]["user_auth.mount"], "userpass");
+        assert_eq!(v["vault"]["user_auth.mount"], "maknae-userpass");
         // #240: the egress fold is asserted, not just passed — deleting the
         // merge passed every other test and the disclosure gate.
         assert_eq!(v["egress"]["socket_path"], "/run/maknae-egress/egress.sock");
@@ -1460,5 +1462,19 @@ mod tests {
                 "{name}'s fields and its allow-list disagree — one of them was edited alone"
             );
         }
+    }
+
+    #[test]
+    fn the_user_key_location_is_shown_in_the_clear() {
+        let d = doc(vec![(
+            "vault",
+            map(vec![
+                ("kv_mount", Value::Str("maknae-kv".into())),
+                ("user_prefix", Value::Str("maknae/users".into())),
+            ]),
+        )]);
+        let v = d.disclosable_view();
+        assert_eq!(v["vault"]["kv_mount"], "maknae-kv");
+        assert_eq!(v["vault"]["user_prefix"], "maknae/users");
     }
 }

@@ -188,6 +188,7 @@ files = [
   # destination the operator did not name, or lets a pasted key through.
   "crates/maknae-config/src/provider.rs",
   "crates/maknae-config/src/providers.rs",
+  "crates/maknae-config/src/user_providers.rs",
   "crates/maknae-config/src/audit_cfg.rs",
   # PR-J1 Task 5: the `principal` section (enrolled-operator identity `maknae
   # enroll` writes into maknae.yaml). The authorization policy resolves
@@ -383,6 +384,10 @@ why = "the KV v2 network read; this project has no Vault stub and deliberately u
 [[t3]]
 path = "crates/maknae-config/src/bounds_io.rs"
 why = "opens a ROOT-owned artifact through maknae-io; no unit test can create one. The parser and the containment check are pure and T1 in bounds.rs — the secret_io/secret_source split"
+
+[[t3]]
+path = "crates/maknae-config/src/user_providers_io.rs"
+why = "#153: reads ~/.maknae/providers.yaml through maknae-config's existing maknae-io read (CONFIG_ARTIFACT) and maps an absent file to no providers; the parser and the selection it feeds are pure and T1 in user_providers.rs (the bounds/bounds_io split)"
 
 [[t3]]
 path = "bins/maknae-egress/src/main.rs"
