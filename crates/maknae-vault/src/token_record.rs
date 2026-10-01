@@ -477,6 +477,8 @@ mod tests {
         assert!(back.token().expose() == "hvs.CAESIabc_-9");
         assert_eq!(back.expires_at(), 1_790_000_000);
         assert_eq!(back.vault_addr(), ADDR);
+        let zero = StoredToken::decode(b"maknae-vault-token v1 0 https://v/v1/ hvs.a").unwrap();
+        assert_eq!(zero.expires_at(), 0);
     }
 
     #[test]

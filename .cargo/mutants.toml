@@ -141,6 +141,8 @@ exclude_re = [
   #     acceptance round-trip that reads the record back out of `log show` and
   #     compares MAKNAE_RECORD byte-for-byte with the canonical JSON.
   "maknae-audit-append.*SyslogMirror::mirror with \\(\\)",
+  # Password::new refuses an empty password, so is_empty is always false and `false` is equivalent.
+  "^crates/maknae-vault/src/user_login\\.rs:[0-9]+:[0-9]+: replace Password::is_empty -> bool with false$",
 ]
 
 exclude_globs = [
