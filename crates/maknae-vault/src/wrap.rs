@@ -12,6 +12,7 @@ use std::time::Duration;
 use zeroize::Zeroizing;
 
 pub const MAX_WRAP_TTL: Duration = Duration::from_secs(300);
+pub const MAX_KV_DATA_PATH_BYTES: usize = 1024;
 const LEAF_DEPTH: u8 = 2;
 
 pub struct WrappingToken(Zeroizing<String>);
@@ -68,7 +69,13 @@ pub fn kv_data_path(kv_mount: &str, secret_path: &str) -> Result<KvDataPath, Vau
             )));
         }
     }
-    Ok(KvDataPath(format!("{kv_mount}/data/{secret_path}")))
+    let full = format!("{kv_mount}/data/{secret_path}");
+    if full.len() > MAX_KV_DATA_PATH_BYTES {
+        return Err(VaultError::InvalidKeyVaultPath(format!(
+            "the full path exceeds {MAX_KV_DATA_PATH_BYTES} bytes"
+        )));
+    }
+    Ok(KvDataPath(full))
 }
 
 pub(crate) fn wrap_ttl_value(ttl: Duration) -> Result<String, VaultError> {
@@ -556,6 +563,20 @@ mod tests {
         for (field, ok) in rows {
             assert_eq!(kv_field_is_acceptable(field), ok, "{field:?}");
         }
+    }
+
+    #[test]
+    fn a_kv_data_path_is_bounded_to_the_seal_field_length() {
+        let fits = "a".repeat(MAX_KV_DATA_PATH_BYTES - "kv/data/".len());
+        assert_eq!(
+            kv_data_path("kv", &fits).unwrap().as_str().len(),
+            MAX_KV_DATA_PATH_BYTES
+        );
+        let over = format!("{fits}a");
+        assert!(matches!(
+            kv_data_path("kv", &over),
+            Err(VaultError::InvalidKeyVaultPath(m)) if m == "the full path exceeds 1024 bytes"
+        ));
     }
 
     #[test]

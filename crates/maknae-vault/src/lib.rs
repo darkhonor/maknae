@@ -99,7 +99,7 @@ pub use vault_api::VaultApi;
 pub use verify::{verify_plane_uri_san, VerifyError};
 pub use wrap::{
     kv_data_path, KvDataPath, WrapExpectation, WrapLookup, WrappedSecret, WrappingToken,
-    MAX_WRAP_TTL,
+    MAX_KV_DATA_PATH_BYTES, MAX_WRAP_TTL,
 };
 
 #[used]
