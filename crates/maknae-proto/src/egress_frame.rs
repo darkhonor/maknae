@@ -93,11 +93,12 @@ impl std::fmt::Debug for EgressFrameRequest {
     }
 }
 
-/// The deputy's answer. Nothing but the reply: egress returns bytes to the
-/// kernel and does nothing with them (#240a D4).
+/// The deputy's answer: the provider's reply, or a refusal made before any provider I/O.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EgressFrameReply {
-    pub reply: crate::PromptReply,
+#[serde(rename_all = "snake_case")]
+pub enum EgressFrameReply {
+    Reply(crate::PromptReply),
+    RefusedBeforeSend,
 }
 
 /// The largest request frame that crosses the kernel→deputy socket, stated
@@ -531,13 +532,11 @@ mod tests {
         // Over 8 KiB of quoted content — the size codex's trace used on the
         // request leg, and what a model echoing a read file produces here.
         let big = "y".repeat(9 * 1024);
-        let r = EgressFrameReply {
-            reply: crate::PromptReply {
-                blocks: vec![text(&big), text(&big)],
-                tool_calls: vec![],
-                usage: None,
-            },
-        };
+        let r = EgressFrameReply::Reply(crate::PromptReply {
+            blocks: vec![text(&big), text(&big)],
+            tool_calls: vec![],
+            usage: None,
+        });
         let buf = crate::encode_egress_frame_reply(&r, EGRESS_REPLY_FRAME_ENCODE_BYTES).unwrap();
         // Byte-identical to what the growing encoder produced: a buffer
         // change, not a wire change.
@@ -569,16 +568,30 @@ mod tests {
 
     #[test]
     fn the_reply_codec_round_trips_and_refuses_garbage() {
-        let r = EgressFrameReply {
-            reply: crate::PromptReply {
-                blocks: vec![text("ok")],
-                tool_calls: vec![],
-                usage: None,
-            },
-        };
+        let r = EgressFrameReply::Reply(crate::PromptReply {
+            blocks: vec![text("ok")],
+            tool_calls: vec![],
+            usage: None,
+        });
         let buf = crate::encode_egress_frame_reply(&r, EGRESS_REPLY_FRAME_ENCODE_BYTES).unwrap();
         assert_eq!(crate::decode_egress_frame_reply(&buf).unwrap(), r);
         assert!(crate::decode_egress_frame_reply(&[0xffu8, 0xff, 0xff]).is_err());
+    }
+
+    #[test]
+    fn a_refusal_before_send_round_trips_and_carries_nothing_but_its_tag() {
+        let r = EgressFrameReply::RefusedBeforeSend;
+        let buf = crate::encode_egress_frame_reply(&r, EGRESS_REPLY_FRAME_ENCODE_BYTES).unwrap();
+        assert_eq!(crate::decode_egress_frame_reply(&buf).unwrap(), r);
+        let mut tag_only = Vec::new();
+        ciborium::into_writer(&"refused_before_send", &mut tag_only).unwrap();
+        assert_eq!(&buf[..], &tag_only[..]);
+        let reply = EgressFrameReply::Reply(crate::PromptReply {
+            blocks: vec![],
+            tool_calls: vec![],
+            usage: None,
+        });
+        assert_ne!(reply, r);
     }
 
     /// Every field of the shape check earns its place: drop any one and a

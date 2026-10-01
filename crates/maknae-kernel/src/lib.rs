@@ -28,10 +28,10 @@ pub use boot_gate::{
 pub use ceiling_authz::CeilingAuthorizer;
 pub use composition::Composition;
 pub use egress::{
-    admitted_reply, production_egress, production_egress_with, reply_capacity, reply_text_length,
-    unavailable_egress, DurableEgressIntent, Egress, EgressBootRefusal, EgressFailure, EgressReply,
-    EgressRequest, ReplyRefusal, SendOutcome, Unavailable, EGRESS_MAX_REPLY_FRAME_BYTES,
-    EGRESS_USER,
+    admitted_reply, outcome_for_failure, production_egress, production_egress_with, reply_capacity,
+    reply_text_length, unavailable_egress, DurableEgressIntent, Egress, EgressBootRefusal,
+    EgressFailure, EgressReply, EgressRequest, ReplyRefusal, SendOutcome, Unavailable,
+    EGRESS_MAX_REPLY_FRAME_BYTES, EGRESS_USER,
 };
 pub use egress_socket::SocketEgress;
 pub use groupres::*;

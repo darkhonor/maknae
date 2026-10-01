@@ -134,13 +134,13 @@ mod tests {
     fn canned(
         _a: &maknae_deputy::handle::Admitted<'_>,
     ) -> Result<maknae_proto::EgressFrameReply, ServeError> {
-        Ok(maknae_proto::EgressFrameReply {
-            reply: maknae_proto::PromptReply {
+        Ok(maknae_proto::EgressFrameReply::Reply(
+            maknae_proto::PromptReply {
                 blocks: vec![],
                 tool_calls: vec![],
                 usage: None,
             },
-        })
+        ))
     }
 
     fn bounds() -> EgressBounds {
@@ -286,7 +286,14 @@ mod tests {
         });
         serve_one(b, me, &bounds(), canned).unwrap();
         let reply = h.join().unwrap();
-        assert!(reply.reply.blocks.is_empty() && reply.reply.tool_calls.is_empty());
+        assert_eq!(
+            reply,
+            maknae_proto::EgressFrameReply::Reply(maknae_proto::PromptReply {
+                blocks: vec![],
+                tool_calls: vec![],
+                usage: None,
+            })
+        );
     }
 
     #[test]

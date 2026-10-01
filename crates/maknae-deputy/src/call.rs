@@ -296,7 +296,7 @@ pub async fn fulfil<S: KeySource>(
         other => FulfilError::provider(other.to_string()),
     })?;
 
-    Ok(EgressFrameReply { reply })
+    Ok(EgressFrameReply::Reply(reply))
 }
 
 #[cfg(test)]
@@ -520,7 +520,10 @@ mod tests {
         let reply = fulfil(&admitted, &mut keys, CallBounds::default(), "maknae-kv")
             .await
             .unwrap();
-        assert_eq!(reply.reply.blocks.len(), 1);
+        let EgressFrameReply::Reply(reply) = reply else {
+            panic!("the deputy refused an admitted frame");
+        };
+        assert_eq!(reply.blocks.len(), 1);
 
         let sent = h.await.unwrap();
         assert!(sent.contains("\"model\":\"m\""), "sent:\n{sent}");

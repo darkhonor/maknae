@@ -93,6 +93,8 @@ pub enum EgressFailure {
     /// [`SendOutcome::OutcomeUnknown`], never `Failed`: "nothing left" would
     /// be a false statement about content that did (codex on #240).
     AfterSend(String),
+    /// The deputy refused before any provider I/O: nothing left, recorded `Failed`.
+    RefusedBeforeSend,
 }
 
 /// Proof of a durable intent. No public constructor: a value exists only
@@ -200,6 +202,16 @@ pub const EGRESS_MAX_REQUEST_FRAME_BYTES: usize = maknae_proto::EGRESS_REQUEST_F
 /// arm in `run.rs` (mutation-excluded) is pinned here.
 pub fn failure_counts_as_expiry(f: &EgressFailure) -> bool {
     matches!(f, EgressFailure::DeadlineExpired)
+}
+
+pub fn outcome_for_failure(f: &EgressFailure) -> SendOutcome {
+    match f {
+        EgressFailure::DeadlineExpired => SendOutcome::DeadlineExpired,
+        EgressFailure::AfterSend(_) => SendOutcome::OutcomeUnknown,
+        EgressFailure::NotConfigured
+        | EgressFailure::Transport(_)
+        | EgressFailure::RefusedBeforeSend => SendOutcome::Failed,
+    }
 }
 
 /// Why the kernel refused to BOOT over its egress backend (#240). Only
@@ -1216,6 +1228,31 @@ mod tests {
         assert!(!failure_counts_as_expiry(&EgressFailure::AfterSend(
             "x".into()
         )));
+        assert!(!failure_counts_as_expiry(&EgressFailure::RefusedBeforeSend));
+    }
+
+    #[test]
+    fn each_send_failure_maps_to_the_outcome_its_timing_proves() {
+        assert_eq!(
+            outcome_for_failure(&EgressFailure::DeadlineExpired),
+            SendOutcome::DeadlineExpired
+        );
+        assert_eq!(
+            outcome_for_failure(&EgressFailure::AfterSend("x".into())),
+            SendOutcome::OutcomeUnknown
+        );
+        assert_eq!(
+            outcome_for_failure(&EgressFailure::RefusedBeforeSend),
+            SendOutcome::Failed
+        );
+        assert_eq!(
+            outcome_for_failure(&EgressFailure::Transport("x".into())),
+            SendOutcome::Failed
+        );
+        assert_eq!(
+            outcome_for_failure(&EgressFailure::NotConfigured),
+            SendOutcome::Failed
+        );
     }
 
     /// Both refusals render by name — the account, and the resolver's reason.

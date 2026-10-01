@@ -1602,20 +1602,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                         ),
                     }
                 }
-                // The backend's own deadline ran out once the kernel had begun
-                // writing the request: delivery unknown, the same class as the
-                // outer expiry below.
-                Ok(Ok(Err(crate::egress::EgressFailure::DeadlineExpired))) => {
-                    (crate::egress::SendOutcome::DeadlineExpired, None)
-                }
-                // The exchange failed once the kernel had begun writing the
-                // request: the deputy hung up or answered with something
-                // unusable. Delivery unknown — the provider may have the prompt.
-                Ok(Ok(Err(crate::egress::EgressFailure::AfterSend(_)))) => {
-                    (crate::egress::SendOutcome::OutcomeUnknown, None)
-                }
-                // The backend reported failure BEFORE the request left: nothing left.
-                Ok(Ok(Err(_))) => (crate::egress::SendOutcome::Failed, None),
+                Ok(Ok(Err(f))) => (crate::egress::outcome_for_failure(&f), None),
                 Ok(Err(join)) => {
                     // The blocking worker was LOST (it panicked). Whether bytes
                     // left before the panic is unknowable to the kernel.
