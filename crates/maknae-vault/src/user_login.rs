@@ -25,6 +25,14 @@ impl Password {
         Ok(Self(secret))
     }
 
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     pub(crate) fn expose(&self) -> &str {
         &self.0
     }
@@ -141,6 +149,12 @@ pub(crate) fn parse_login(body: &[u8], username: &str) -> Result<UserLogin, Vaul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_password_reports_only_its_length() {
+        let p = Password::new(Zeroizing::new("s3cret".into())).unwrap();
+        assert_eq!((p.len(), p.is_empty()), (6, false));
+    }
 
     fn secret(s: &str) -> Zeroizing<String> {
         Zeroizing::new(s.to_string())

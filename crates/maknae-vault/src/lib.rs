@@ -25,6 +25,7 @@ mod http;
 mod keychain;
 mod keychain_policy;
 mod operator;
+mod password_line;
 mod plane;
 mod plane_verify;
 mod resolver;
@@ -80,6 +81,7 @@ pub use keychain_policy::{
 pub use kv::split_kv_path;
 pub use kv_io::read_kv_field;
 pub use operator::OperatorClient;
+pub use password_line::{PasswordFeed, PasswordLine};
 pub use peer_identity::{creds_match_listener_uid, creds_match_uid, listener_uid_is, peer_uid_is};
 pub use peercred::PeerCreds;
 pub use plane::Plane;
