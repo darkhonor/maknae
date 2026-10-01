@@ -130,32 +130,34 @@ impl UnwrapOps for VaultApi {
 mod tests {
     use super::*;
 
-    fn ca(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("mv-vault-api-{}-{tag}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
+    fn ca() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
         let params = rcgen::CertificateParams::new(vec!["ca.test".to_string()]).unwrap();
         let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
-        let path = d.join("vault-ca.crt");
+        let path = dir.path().join("vault-ca.crt");
         std::fs::write(&path, params.self_signed(&key).unwrap().pem()).unwrap();
-        path
+        (dir, path)
     }
 
     #[test]
     fn construction_fails_closed_on_plaintext_addr_and_missing_ca() {
         crate::install_default_crypto_provider();
         assert!(matches!(
-            VaultApi::new("http://127.0.0.1:1", &ca("plain")),
+            VaultApi::new("http://127.0.0.1:1", &ca().1),
             Err(VaultError::InvalidAddr(_))
         ));
         let absent = std::env::temp_dir().join("mv-vault-api-absent/vault-ca.crt");
-        assert!(VaultApi::new("https://127.0.0.1:1", &absent).is_err());
+        assert!(matches!(
+            VaultApi::new("https://127.0.0.1:1", &absent),
+            Err(VaultError::Io { .. })
+        ));
     }
 
     #[test]
     fn a_dead_vault_fails_every_call_as_a_transport_error() {
         crate::install_default_crypto_provider();
-        let api = VaultApi::new("https://127.0.0.1:1", &ca("dead")).unwrap();
+        let (_dir, ca) = ca();
+        let api = VaultApi::new("https://127.0.0.1:1", &ca).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -196,7 +198,8 @@ mod tests {
     #[test]
     fn a_malformed_path_is_refused_before_any_connection() {
         crate::install_default_crypto_provider();
-        let api = VaultApi::new("https://127.0.0.1:1", &ca("path")).unwrap();
+        let (_dir, ca) = ca();
+        let api = VaultApi::new("https://127.0.0.1:1", &ca).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
