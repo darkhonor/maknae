@@ -54,6 +54,21 @@ impl Plane {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PlaneTokenSource {
+    AppRoleLogin,
+    StoredUserLogin,
+}
+
+impl PlaneTokenSource {
+    pub(crate) fn revoked_by_the_client(self) -> bool {
+        match self {
+            PlaneTokenSource::AppRoleLogin => true,
+            PlaneTokenSource::StoredUserLogin => false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,5 +96,11 @@ mod tests {
         assert_eq!(Plane::Cli.pki_sign_role(), "maknae-cli");
         assert_eq!(Plane::Cli.config_prefix(), "maknae");
         assert_eq!(Plane::Cli.uri_san("dev-01"), "maknae://dev-01/plane/cli");
+    }
+
+    #[test]
+    fn only_a_token_the_client_minted_by_approle_is_revoked_by_it() {
+        assert!(PlaneTokenSource::AppRoleLogin.revoked_by_the_client());
+        assert!(!PlaneTokenSource::StoredUserLogin.revoked_by_the_client());
     }
 }

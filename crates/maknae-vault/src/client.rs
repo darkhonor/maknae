@@ -4,13 +4,14 @@
 //! `supervisor_run.rs`) runs on a shared handle so serving, token renewal, and leaf
 //! rotation all proceed concurrently (ADR-0018 Decision 3).
 use crate::auth::AppRoleAuth;
+use crate::plane::PlaneTokenSource;
 use crate::secret_io::{read_cli_secret, read_daemon_secret};
 use crate::secret_source::{
     resolve_cli_secret_source, resolve_daemon_secret_source, CredentialSourceKind,
 };
 use crate::{
     assert_fips_provider, generate_plane_csr, load_ca_pin, vault_config_from_document,
-    verify::verify_plane_uri_san, Plane, VaultError, VAULT_SECTION,
+    verify::verify_plane_uri_san, Plane, UserToken, VaultConfig, VaultError, VAULT_SECTION,
 };
 use arc_swap::ArcSwapOption;
 use maknae_config::{load_config, Document, SectionSpec};
@@ -88,11 +89,25 @@ pub const PLANE_HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 /// chain (#240, review round 4).
 pub const PLANE_SHUTDOWN_BOUND: std::time::Duration = PLANE_HTTP_TIMEOUT.saturating_mul(2);
 
+enum PlaneAuth {
+    AppRole(AppRoleAuth),
+    UserToken(UserToken),
+}
+
+impl PlaneAuth {
+    fn token_source(&self) -> PlaneTokenSource {
+        match self {
+            PlaneAuth::AppRole(_) => PlaneTokenSource::AppRoleLogin,
+            PlaneAuth::UserToken(_) => PlaneTokenSource::StoredUserLogin,
+        }
+    }
+}
+
 /// The Stage-1 plane-cert client.
 pub struct PlaneClient {
     plane: Plane,
     deployment_id: String,
-    auth: AppRoleAuth,
+    auth: PlaneAuth,
     /// Intermediate PKI mount for `pki/sign` (from config; Terraform `int_mount_path`).
     pki_int_mount: String,
     client: Arc<Mutex<VaultClient>>,
@@ -421,13 +436,32 @@ impl PlaneClient {
         plane: Plane,
         secret_id: Zeroizing<String>,
     ) -> Result<Self, VaultError> {
+        Self::build(doc, dir, plane, |cfg| {
+            // RoleID is non-secret (an identifier), still read from disk here.
+            let role_id = read_trimmed(&dir.join(format!("{}-approle-id", plane.config_prefix())))?;
+            Ok(PlaneAuth::AppRole(AppRoleAuth {
+                role_id,
+                secret_id,
+                approle_mount: cfg.approle_mount.clone(),
+            }))
+        })
+    }
+
+    pub fn for_user(doc: &Document, dir: &Path, token: UserToken) -> Result<Self, VaultError> {
+        Self::build(doc, dir, Plane::Cli, |_| Ok(PlaneAuth::UserToken(token)))
+    }
+
+    fn build(
+        doc: &Document,
+        dir: &Path,
+        plane: Plane,
+        auth: impl FnOnce(&VaultConfig) -> Result<PlaneAuth, VaultError>,
+    ) -> Result<Self, VaultError> {
         assert_fips_provider()?;
         let cfg = vault_config_from_document(doc)?;
         // Loading the CA-pin validates it now (Stage 2 consumes the bundle).
         let _ca = load_ca_pin(dir)?;
-        let prefix = plane.config_prefix();
-        // RoleID is non-secret (an identifier), still read from disk here.
-        let role_id = read_trimmed(&dir.join(format!("{prefix}-approle-id")))?;
+        let auth = auth(&cfg)?;
         let vault_ca = dir.join("tls").join("vault-ca.crt");
         let settings = plane_settings(&cfg.addr, &vault_ca)?;
         let mut client = VaultClient::new(settings)
@@ -441,11 +475,7 @@ impl PlaneClient {
         Ok(Self {
             plane,
             deployment_id: cfg.deployment_id,
-            auth: AppRoleAuth {
-                role_id,
-                secret_id,
-                approle_mount: cfg.approle_mount,
-            },
+            auth,
             pki_int_mount: cfg.pki_int_mount,
             client: Arc::new(Mutex::new(client)),
             identity: Arc::new(RwLock::new(None)),
@@ -505,18 +535,23 @@ impl PlaneClient {
     /// snapshot and returns a clone.
     pub async fn mint(&self) -> Result<PlaneIdentity, VaultError> {
         let mut client = self.client.lock().await;
-        let token = self.auth.authenticate(&client).await?;
-        client.set_token(&token.client_token);
-        // Record the actual lease so the supervisor loop (spawn_supervisor) renews on
-        // the real TTL; surface a non-renewable token (a role misconfig) rather than
-        // silently failing later.
-        self.lease_secs
-            .store(token.lease_duration, Ordering::Relaxed);
-        if !token.renewable {
-            eprintln!(
-                "maknae-vault: WARNING — minted token is not renewable; background \
-                 renewal will fail closed at its TTL (check the AppRole role config)"
-            );
+        match &self.auth {
+            PlaneAuth::AppRole(auth) => {
+                let token = auth.authenticate(&client).await?;
+                client.set_token(&token.client_token);
+                // Record the actual lease so the supervisor loop (spawn_supervisor) renews on
+                // the real TTL; surface a non-renewable token (a role misconfig) rather than
+                // silently failing later.
+                self.lease_secs
+                    .store(token.lease_duration, Ordering::Relaxed);
+                if !token.renewable {
+                    eprintln!(
+                        "maknae-vault: WARNING — minted token is not renewable; background \
+                         renewal will fail closed at its TTL (check the AppRole role config)"
+                    );
+                }
+            }
+            PlaneAuth::UserToken(token) => client.set_token(token.expose()),
         }
 
         // Any failure AFTER the token is installed must revoke the just-issued token —
@@ -525,7 +560,7 @@ impl PlaneClient {
         let (key_der, leaf_pem, chain_pem) = match self.sign_leaf(&client).await {
             Ok(v) => v,
             Err(e) => {
-                let _ = vaultrs::token::revoke_self(&*client).await; // best-effort
+                let _ = self.revoke_minted_token(&client).await;
                 return Err(e);
             }
         };
@@ -534,7 +569,7 @@ impl PlaneClient {
         let (leaf_issued_at, leaf_ttl_secs) = match leaf_validity_unix(&leaf_pem) {
             Ok(v) => v,
             Err(e) => {
-                let _ = vaultrs::token::revoke_self(&*client).await; // best-effort
+                let _ = self.revoke_minted_token(&client).await;
                 return Err(e);
             }
         };
@@ -576,7 +611,7 @@ impl PlaneClient {
             }
         };
         if let Err(e) = build_result {
-            let _ = vaultrs::token::revoke_self(&*client).await; // best-effort
+            let _ = self.revoke_minted_token(&client).await;
             return Err(e);
         }
         Ok(id)
@@ -638,7 +673,7 @@ impl PlaneClient {
         self.supervisor_ctx().rotate_leaf().await
     }
 
-    /// Best-effort revoke on shutdown; failure is logged, never blocks exit.
+    /// Best-effort revoke of a token this client minted; a user's stored token is never revoked.
     pub async fn shutdown(self) {
         // Retire the transport credential FIRST — clear the resolver slot (a live listener
         // stops presenting a leaf) and the identity — so shutdown actually retires the cert
@@ -655,6 +690,9 @@ impl PlaneClient {
                 slot.store(None);
             }
             *guard = None;
+        }
+        if !self.auth.token_source().revoked_by_the_client() {
+            return;
         }
         // BOUNDED (#240, review round 4): the kernel aborts the credential
         // supervisor before this on every path, so the lock is free in
@@ -673,9 +711,19 @@ impl PlaneClient {
                 return;
             }
         };
-        if let Err(e) = vaultrs::token::revoke_self(&*client).await {
+        if let Some(Err(e)) = self.revoke_minted_token(&client).await {
             eprintln!("maknae-vault: token revoke-self on shutdown failed (ignored): {e}");
         }
+    }
+
+    async fn revoke_minted_token(
+        &self,
+        client: &VaultClient,
+    ) -> Option<Result<(), vaultrs::error::ClientError>> {
+        if !self.auth.token_source().revoked_by_the_client() {
+            return None;
+        }
+        Some(vaultrs::token::revoke_self(client).await)
     }
 }
 
@@ -880,6 +928,10 @@ mod tests {
         /// the SecretID files/dirs themselves, which each test wires up per
         /// scenario.
         fn new(tag: &str, extra_vault_yaml: &str) -> Self {
+            Self::with_addr(tag, "https://v.example:8200", extra_vault_yaml)
+        }
+
+        fn with_addr(tag: &str, addr: &str, extra_vault_yaml: &str) -> Self {
             // `assert_fips_provider()` (inside `from_document_with_secret`) reads the
             // PROCESS-GLOBAL rustls default provider; install it here (idempotent —
             // a no-op if some other test already did) rather than relying on test
@@ -895,7 +947,7 @@ mod tests {
             std::fs::create_dir_all(p.join("tls")).unwrap();
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o700)).unwrap();
             let yaml = format!(
-                "core:\n  deployment_id: dev-01\nvault:\n  addr: https://v.example:8200\n{extra_vault_yaml}"
+                "core:\n  deployment_id: dev-01\nvault:\n  addr: {addr}\n{extra_vault_yaml}"
             );
             let cfg_path = p.join("maknae.yaml");
             std::fs::write(&cfg_path, yaml).unwrap();
@@ -1171,7 +1223,10 @@ mod tests {
         };
         let client = result.expect("the CLI order resolves to its own source");
         assert_eq!(client.secret_source(), kind);
-        assert_eq!(client.auth.secret_id.as_str(), secret);
+        let PlaneAuth::AppRole(auth) = &client.auth else {
+            panic!("a CLI SecretID client authenticates with AppRole");
+        };
+        assert_eq!(auth.secret_id.as_str(), secret);
     }
 
     /// #76: the daemon's keychain pointer is found under private/ and wins over the plaintext arm.
@@ -1362,5 +1417,111 @@ mod tests {
             matches!(got, Err(VaultError::CredentialSource(_))),
             "{got:?}"
         );
+    }
+
+    const DEAD_VAULT: &str = "https://127.0.0.1:1";
+
+    fn user_token() -> UserToken {
+        UserToken::new(Zeroizing::new("hvs.user-token-sentinel".into())).unwrap()
+    }
+
+    fn current_thread(paused: bool) -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(paused)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_user_token_client_is_the_cli_plane_and_reads_no_approle_file() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let fx = DispatchFixture::with_addr("user-plane", DEAD_VAULT, "");
+        std::fs::remove_file(fx.0.join("maknae-approle-id")).unwrap();
+        std::fs::remove_file(fx.0.join("maknaed-approle-id")).unwrap();
+        let client = PlaneClient::for_user(&fx.doc(), &fx.0, user_token()).unwrap();
+        assert_eq!(client.plane(), Plane::Cli);
+        assert_eq!(
+            client.auth.token_source(),
+            PlaneTokenSource::StoredUserLogin
+        );
+        let rt = current_thread(false);
+        assert!(matches!(
+            rt.block_on(client.mint()),
+            Err(VaultError::Sign(_))
+        ));
+        assert!(client.current_identity().is_none());
+    }
+
+    #[test]
+    fn only_an_approle_client_sends_revoke_self() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let fx = DispatchFixture::with_addr("revoke-gate", DEAD_VAULT, "");
+        let doc = fx.doc();
+        let user = PlaneClient::for_user(&doc, &fx.0, user_token()).unwrap();
+        let approle = PlaneClient::from_document_with_secret(
+            &doc,
+            &fx.0,
+            Plane::Kernel,
+            Zeroizing::new("secret-id-sentinel".into()),
+        )
+        .unwrap();
+        assert_eq!(approle.auth.token_source(), PlaneTokenSource::AppRoleLogin);
+        let rt = current_thread(false);
+        rt.block_on(async {
+            let held = user.client.lock().await;
+            assert!(user.revoke_minted_token(&held).await.is_none());
+            let held = approle.client.lock().await;
+            assert!(matches!(
+                approle.revoke_minted_token(&held).await,
+                Some(Err(_))
+            ));
+        });
+        assert!(matches!(
+            rt.block_on(approle.mint()),
+            Err(VaultError::Auth(_))
+        ));
+    }
+
+    #[test]
+    fn a_user_token_client_shuts_down_without_reaching_for_its_vault_client() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let fx = DispatchFixture::with_addr("user-shutdown", DEAD_VAULT, "");
+        let doc = fx.doc();
+        let user = PlaneClient::for_user(&doc, &fx.0, user_token()).unwrap();
+        let approle = PlaneClient::from_document_with_secret(
+            &doc,
+            &fx.0,
+            Plane::Kernel,
+            Zeroizing::new("secret-id-sentinel".into()),
+        )
+        .unwrap();
+        let rt = current_thread(true);
+        rt.block_on(async {
+            for (label, client, waits) in [("user", user, false), ("approle", approle, true)] {
+                let vault = Arc::clone(&client.client);
+                let _busy = vault.lock().await;
+                let done =
+                    tokio::time::timeout(std::time::Duration::from_secs(1), client.shutdown())
+                        .await;
+                assert_eq!(done.is_err(), waits, "{label}");
+            }
+        });
+    }
+
+    #[test]
+    fn revoke_self_is_sent_from_one_place_behind_the_token_source_gate() {
+        let source = include_str!("client.rs");
+        let production = source
+            .split("#[cfg(all(test, unix))]")
+            .next()
+            .expect("client.rs has a production part");
+        let call = "vaultrs::token::revoke_self(";
+        assert_eq!(production.matches(call).count(), 1);
+        let gate = production
+            .find("fn revoke_minted_token")
+            .expect("the gated revoke exists");
+        let at = production.find(call).unwrap();
+        assert!(at > gate && production[gate..at].contains(".revoked_by_the_client()"));
     }
 }
