@@ -125,8 +125,9 @@ impl WrapExpectation {
         {
             return Err(VaultError::KvField {
                 field: field
-                    .chars()
-                    .take(maknae_config::MAX_KEY_FIELD_BYTES)
+                    .char_indices()
+                    .take_while(|(i, c)| i + c.len_utf8() <= maknae_config::MAX_KEY_FIELD_BYTES)
+                    .map(|(_, c)| c)
                     .collect(),
                 why: "malformed: empty, whitespace, or over 64 bytes",
             });
@@ -242,14 +243,17 @@ pub(crate) fn parse_lookup(body: &[u8]) -> Result<WrapLookup, VaultError> {
     })
 }
 
+pub(crate) struct CheckedLookup(());
+
 pub(crate) fn check_lookup(
     lookup: &WrapLookup,
     expect: &WrapExpectation,
-) -> Result<(), VaultError> {
+) -> Result<CheckedLookup, VaultError> {
     if lookup.creation_path != expect.creation_path() {
         return Err(VaultError::WrapMismatch(WrapMismatch::CreationPath));
     }
-    check_ttl(lookup.creation_ttl.as_secs(), expect.max_ttl)
+    check_ttl(lookup.creation_ttl.as_secs(), expect.max_ttl)?;
+    Ok(CheckedLookup(()))
 }
 
 struct Level<'f> {
@@ -320,6 +324,7 @@ pub(crate) trait UnwrapOps {
     fn unwrap_body(
         &self,
         token: WrappingToken,
+        checked: &CheckedLookup,
     ) -> impl Future<Output = Result<Zeroizing<Vec<u8>>, VaultError>> + Send;
 }
 
@@ -329,8 +334,8 @@ pub(crate) async fn unwrap_checked<O: UnwrapOps>(
     expect: &WrapExpectation,
 ) -> Result<Zeroizing<String>, VaultError> {
     let lookup = ops.lookup(&token).await?;
-    check_lookup(&lookup, expect)?;
-    let body = ops.unwrap_body(token).await?;
+    let checked = check_lookup(&lookup, expect)?;
+    let body = ops.unwrap_body(token, &checked).await?;
     select_kv_field(&body, expect.field())
 }
 
@@ -489,6 +494,18 @@ mod tests {
     }
 
     #[test]
+    fn a_multibyte_field_is_echoed_only_up_to_the_byte_bound() {
+        let field = "é".repeat(maknae_config::MAX_KEY_FIELD_BYTES);
+        let Err(VaultError::KvField { field: echoed, .. }) =
+            WrapExpectation::new("kv", "a", &field, Duration::from_secs(60))
+        else {
+            panic!("expected KvField");
+        };
+        assert!(echoed.len() <= maknae_config::MAX_KEY_FIELD_BYTES && !echoed.is_empty());
+        assert!(field.starts_with(&echoed));
+    }
+
+    #[test]
     fn a_wrapped_read_with_a_malformed_token_is_refused() {
         let path = kv_data_path("maknae-kv", "maknae/users/alice/openai/personal").unwrap();
         let body = wrapped_body(ALICE, 60, "null").replace("hvs.WRAP", "hvs.WR AP");
@@ -635,7 +652,8 @@ mod tests {
     #[test]
     fn field_selection_returns_only_the_named_field() {
         let v = select_kv_field(KV_BODY, "api_key").unwrap();
-        assert_eq!((v.as_str(), v.capacity()), ("sk-ALICE-SENTINEL", 17));
+        assert!(v.as_str() == "sk-ALICE-SENTINEL");
+        assert_eq!(v.capacity(), 17);
         assert_eq!(
             select_kv_field(br#"{"data":{"data":{"data":"d","k":"sk\u002dX"}}}"#, "k")
                 .unwrap()
@@ -725,6 +743,7 @@ mod tests {
         async fn unwrap_body(
             &self,
             token: WrappingToken,
+            _checked: &CheckedLookup,
         ) -> Result<Zeroizing<Vec<u8>>, VaultError> {
             assert_eq!(token.expose(), "hvs.wrap");
             self.calls.lock().unwrap().push("unwrap");
@@ -746,7 +765,7 @@ mod tests {
     fn a_matching_token_is_looked_up_then_unwrapped_and_yields_only_the_field() {
         let ops = Scripted::new(ALICE, 60, true);
         let key = run(unwrap_checked(&ops, wrapping("hvs.wrap"), &expect())).unwrap();
-        assert_eq!(key.as_str(), "sk-ALICE-SENTINEL");
+        assert!(key.as_str() == "sk-ALICE-SENTINEL");
         assert_eq!(ops.calls(), ["lookup", "unwrap"]);
     }
 
