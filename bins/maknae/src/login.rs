@@ -277,7 +277,29 @@ pub(crate) enum LogoutOutcome {
     OtherVault(String),
     Uncontacted { why: String, left_secs: u64 },
     Revoked,
+    AlreadyInvalid,
     NotRevoked { why: String, left_secs: u64 },
+}
+
+pub(crate) fn revoke_outcome(revoked: Result<(), VaultError>, left_secs: u64) -> LogoutOutcome {
+    match revoked {
+        Ok(()) => LogoutOutcome::Revoked,
+        Err(VaultError::VaultStatus { status: 403, .. }) => LogoutOutcome::AlreadyInvalid,
+        Err(e) => LogoutOutcome::NotRevoked {
+            why: e.to_string(),
+            left_secs,
+        },
+    }
+}
+
+pub(crate) fn logout_erase_failure(outcome: &LogoutOutcome, e: &VaultError) -> String {
+    match outcome {
+        LogoutOutcome::NothingStored => format!("erasing any stored Vault token failed: {e}"),
+        LogoutOutcome::Revoked => {
+            format!("the token was revoked at Vault, but erasing it here failed: {e}")
+        }
+        _ => format!("erasing the stored Vault token failed: {e}"),
+    }
 }
 
 pub(crate) fn logout_line(outcome: &LogoutOutcome) -> String {
@@ -301,6 +323,9 @@ pub(crate) fn logout_line(outcome: &LogoutOutcome) -> String {
         ),
         LogoutOutcome::Revoked => {
             "maknae: logged out; the Vault token was revoked and erased".into()
+        }
+        LogoutOutcome::AlreadyInvalid => {
+            "maknae: logged out; Vault reports the token already invalid; it was erased here".into()
         }
         LogoutOutcome::NotRevoked { why, left_secs } => format!(
             "maknae: logged out; the token was erased here, but Vault did not confirm its \
@@ -365,25 +390,14 @@ async fn logout() -> Result<LogoutOutcome, String> {
         LogoutPlan::OtherVault(addr) => LogoutOutcome::OtherVault(addr),
         LogoutPlan::Uncontacted { why, left_secs } => LogoutOutcome::Uncontacted { why, left_secs },
         LogoutPlan::Revoke { stored, left_secs } => match &session {
-            Ok(s) => match s.api.revoke_self(stored.token()).await {
-                Ok(()) => LogoutOutcome::Revoked,
-                Err(e) => LogoutOutcome::NotRevoked {
-                    why: e.to_string(),
-                    left_secs,
-                },
-            },
+            Ok(s) => revoke_outcome(s.api.revoke_self(stored.token()).await, left_secs),
             Err(why) => LogoutOutcome::Uncontacted {
                 why: why.clone(),
                 left_secs,
             },
         },
     };
-    erase_user_token(&dir, None).map_err(|e| match outcome {
-        LogoutOutcome::Revoked => {
-            format!("the token was revoked at Vault, but erasing it here failed: {e}")
-        }
-        _ => format!("erasing the stored Vault token failed: {e}"),
-    })?;
+    erase_user_token(&dir, None).map_err(|e| logout_erase_failure(&outcome, &e))?;
     Ok(outcome)
 }
 
@@ -426,6 +440,10 @@ mod tests {
         assert_eq!(
             logout_line(&LogoutOutcome::Revoked),
             "maknae: logged out; the Vault token was revoked and erased"
+        );
+        assert_eq!(
+            logout_line(&LogoutOutcome::AlreadyInvalid),
+            "maknae: logged out; Vault reports the token already invalid; it was erased here"
         );
         assert_eq!(
             logout_line(&LogoutOutcome::NotRevoked {
@@ -503,6 +521,68 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn a_revoke_maps_403_to_already_invalid_and_anything_else_to_not_confirmed() {
+        assert!(matches!(revoke_outcome(Ok(()), 9), LogoutOutcome::Revoked));
+        let forbidden = VaultError::VaultStatus {
+            op: "token revoke-self",
+            status: 403,
+            hint: "the token is already expired or revoked",
+        };
+        assert!(matches!(
+            revoke_outcome(Err(forbidden), 9),
+            LogoutOutcome::AlreadyInvalid
+        ));
+        for e in [
+            VaultError::VaultStatus {
+                op: "token revoke-self",
+                status: 500,
+                hint: "",
+            },
+            VaultError::VaultStatus {
+                op: "token revoke-self",
+                status: 401,
+                hint: "",
+            },
+            VaultError::VaultTransport {
+                op: "token revoke-self",
+                detail: "connection refused".into(),
+            },
+        ] {
+            let want = e.to_string();
+            assert!(matches!(
+                revoke_outcome(Err(e), 9),
+                LogoutOutcome::NotRevoked { why, left_secs: 9 } if why == want
+            ));
+        }
+    }
+
+    #[test]
+    fn a_logout_erase_failure_says_what_was_and_was_not_done() {
+        let e = VaultError::TokenStore("erasing the token: x".into());
+        assert_eq!(
+            logout_erase_failure(&LogoutOutcome::NothingStored, &e),
+            "erasing any stored Vault token failed: Vault token storage failed: erasing the token: x"
+        );
+        assert_eq!(
+            logout_erase_failure(&LogoutOutcome::Revoked, &e),
+            "the token was revoked at Vault, but erasing it here failed: Vault token storage \
+             failed: erasing the token: x"
+        );
+        for outcome in [
+            LogoutOutcome::Expired,
+            LogoutOutcome::AlreadyInvalid,
+            LogoutOutcome::Unreadable("x".into()),
+            LogoutOutcome::OtherVault(ADDR.into()),
+        ] {
+            assert_eq!(
+                logout_erase_failure(&outcome, &e),
+                "erasing the stored Vault token failed: Vault token storage failed: erasing the \
+                 token: x"
+            );
+        }
     }
 
     #[test]
