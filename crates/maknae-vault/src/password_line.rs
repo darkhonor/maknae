@@ -21,6 +21,7 @@ enum Escape {
 pub struct PasswordLine {
     buf: Zeroizing<Vec<u8>>,
     escape: Escape,
+    ended: Option<PasswordFeed>,
 }
 
 impl Default for PasswordLine {
@@ -34,10 +35,22 @@ impl PasswordLine {
         Self {
             buf: Zeroizing::new(Vec::with_capacity(MAX_PASSWORD_BYTES)),
             escape: Escape::None,
+            ended: None,
         }
     }
 
     pub fn feed(&mut self, byte: u8) -> PasswordFeed {
+        if let Some(end) = self.ended {
+            return end;
+        }
+        let fed = self.step(byte);
+        if fed != PasswordFeed::More {
+            self.ended = Some(fed);
+        }
+        fed
+    }
+
+    fn step(&mut self, byte: u8) -> PasswordFeed {
         match byte {
             b'\r' | b'\n' => return PasswordFeed::Done,
             0x03 | 0x1c => return PasswordFeed::Interrupted,
@@ -46,20 +59,31 @@ impl PasswordLine {
         match self.escape {
             Escape::Started => {
                 self.escape = match byte {
+                    0x1b => Escape::Started,
                     b'[' => Escape::Csi,
                     b'O' => Escape::Ss3,
                     _ => Escape::None,
                 };
                 return PasswordFeed::More;
             }
-            Escape::Csi => {
-                if (0x40..=0x7e).contains(&byte) {
+            Escape::Csi => match byte {
+                0x20..=0x3f => return PasswordFeed::More,
+                0x40..=0x7e => {
                     self.escape = Escape::None;
+                    return PasswordFeed::More;
                 }
-                return PasswordFeed::More;
-            }
+                0x1b => {
+                    self.escape = Escape::Started;
+                    return PasswordFeed::More;
+                }
+                _ => self.escape = Escape::None,
+            },
             Escape::Ss3 => {
-                self.escape = Escape::None;
+                match byte {
+                    0x30..=0x3f => {}
+                    0x1b => self.escape = Escape::Started,
+                    _ => self.escape = Escape::None,
+                }
                 return PasswordFeed::More;
             }
             Escape::None => {}
@@ -93,14 +117,22 @@ impl PasswordLine {
     }
 
     fn erase_char(&mut self) {
+        let mut continuations = 0;
         while let Some(b) = self.buf.pop() {
-            if b & 0xc0 != 0x80 {
+            if b & 0xc0 != 0x80 || continuations == 3 {
                 break;
             }
+            continuations += 1;
         }
     }
 
     pub fn finish(mut self) -> Result<Password, VaultError> {
+        if self.ended != Some(PasswordFeed::Done) {
+            return Err(VaultError::InvalidSecret {
+                what: "password",
+                why: "line not completed",
+            });
+        }
         match String::from_utf8(std::mem::take(&mut *self.buf)) {
             Ok(s) => Password::new(Zeroizing::new(s)),
             Err(e) => {
@@ -210,7 +242,12 @@ mod tests {
             (line.buf.len(), line.buf.capacity()),
             (MAX_PASSWORD_BYTES, MAX_PASSWORD_BYTES)
         );
-        assert_eq!(line.finish().unwrap().len(), MAX_PASSWORD_BYTES);
+        let mut full = PasswordLine::new();
+        for _ in 0..MAX_PASSWORD_BYTES {
+            full.feed(b'a');
+        }
+        assert_eq!(full.feed(b'\r'), PasswordFeed::Done);
+        assert_eq!(full.finish().unwrap().len(), MAX_PASSWORD_BYTES);
     }
 
     #[test]
@@ -230,5 +267,71 @@ mod tests {
                 why: "not UTF-8"
             })
         ));
+    }
+
+    #[test]
+    fn an_ended_line_stays_ended_and_only_done_can_finish() {
+        let mut line = PasswordLine::new();
+        for _ in 0..=MAX_PASSWORD_BYTES {
+            line.feed(b'a');
+        }
+        assert_eq!(line.feed(b'\r'), PasswordFeed::TooLong);
+        assert_eq!(line.feed(b'x'), PasswordFeed::TooLong);
+        assert!(line.finish().is_err());
+
+        let (line, fed) = typed(b"ab\x03");
+        assert_eq!(fed, PasswordFeed::Interrupted);
+        assert!(line.finish().is_err());
+
+        let (line, fed) = typed(b"ab");
+        assert_eq!(fed, PasswordFeed::More);
+        assert!(line.finish().is_err());
+
+        let mut line = PasswordLine::new();
+        assert_eq!(line.feed(0x04), PasswordFeed::Eof);
+        assert_eq!(line.feed(b'a'), PasswordFeed::Eof);
+        assert!(line.finish().is_err());
+
+        let mut line = PasswordLine::new();
+        line.feed(b'a');
+        assert_eq!(line.feed(b'\r'), PasswordFeed::Done);
+        assert_eq!(line.feed(0x03), PasswordFeed::Done);
+        assert_eq!(text(line), "a");
+    }
+
+    #[test]
+    fn escape_edge_cases_are_dropped_or_aborted_per_ecma_48() {
+        let rows: [(&[u8], &str); 8] = [
+            (b"a\x1b\x1b[Ab\r", "ab"),
+            (b"\x1b[\x1b[Ab\r", "b"),
+            (b"\x1b[1\x01b\r", "b"),
+            (b"\x1b[1\xc3\xa9b\r", "\u{e9}b"),
+            (b"ab\x1b[1\x7fc\r", "ac"),
+            (b"a\x1bO5Pb\r", "ab"),
+            (b"a\x1bOPb\r", "ab"),
+            (b"a\x1b\r", "a"),
+        ];
+        for (bytes, want) in rows {
+            let (line, fed) = typed(bytes);
+            assert_eq!(fed, PasswordFeed::Done);
+            assert_eq!(text(line), want);
+        }
+    }
+
+    #[test]
+    fn backspace_over_invalid_bytes_never_erases_past_one_character() {
+        let (line, _) = typed(&[b'a', 0x80, 0x80, 0x80, 0x80, 0x80, 0x7f, b'\r']);
+        assert_eq!(line.buf.len(), 2);
+    }
+
+    #[test]
+    fn typing_after_ctrl_u_keeps_the_capacity() {
+        let mut line = PasswordLine::new();
+        for &b in b"abc\x15de" {
+            line.feed(b);
+        }
+        assert_eq!(line.buf.capacity(), MAX_PASSWORD_BYTES);
+        assert_eq!(line.feed(b'\r'), PasswordFeed::Done);
+        assert_eq!(text(line), "de");
     }
 }
