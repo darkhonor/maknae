@@ -406,8 +406,8 @@ mod tests {
         let pick = |op| client_token(op, u, w).unwrap();
         assert_eq!(pick(VaultOp::UserpassLogin), None);
         assert_eq!(pick(VaultOp::WrapLookup), None);
-        assert_eq!(pick(VaultOp::WrappedRead), Some("hvs.user"));
-        assert_eq!(pick(VaultOp::Unwrap), Some("hvs.wrap"));
+        assert!(pick(VaultOp::WrappedRead) == Some("hvs.user"));
+        assert!(pick(VaultOp::Unwrap) == Some("hvs.wrap"));
         assert!(matches!(
             client_token(VaultOp::WrappedRead, None, Some(&wrap)),
             Err(VaultError::InvalidSecret {
@@ -530,8 +530,8 @@ mod tests {
     #[test]
     fn a_wrapping_token_from_opened_bytes_is_utf8_and_shape_checked() {
         let t = WrappingToken::from_opened(Zeroizing::new(b"hvs.OPENED".to_vec())).unwrap();
-        assert_eq!(t.expose(), "hvs.OPENED");
-        assert_eq!(format!("{t:?}"), "WrappingToken(<redacted>)");
+        assert!(t.expose() == "hvs.OPENED");
+        assert!(format!("{t:?}") == "WrappingToken(<redacted>)");
         assert!(matches!(
             WrappingToken::from_opened(Zeroizing::new(vec![0xff, 0xfe])),
             Err(VaultError::InvalidSecret {
@@ -547,7 +547,7 @@ mod tests {
         let path = kv_data_path("maknae-kv", "maknae/users/alice/openai/personal").unwrap();
         let body = wrapped_body(ALICE, 60, "null");
         let w = parse_wrapped_read(body.as_bytes(), &path, Duration::from_secs(60)).unwrap();
-        assert_eq!(w.token.expose(), "hvs.WRAP");
+        assert!(w.token.expose() == "hvs.WRAP");
         assert_eq!(
             (w.ttl, w.creation_path.as_str(), w.creation_time.as_str()),
             (Duration::from_secs(60), ALICE, "2026-10-01T00:00:00Z")
@@ -654,18 +654,11 @@ mod tests {
         let v = select_kv_field(KV_BODY, "api_key").unwrap();
         assert!(v.as_str() == "sk-ALICE-SENTINEL");
         assert_eq!(v.capacity(), 17);
-        assert_eq!(
-            select_kv_field(br#"{"data":{"data":{"data":"d","k":"sk\u002dX"}}}"#, "k")
-                .unwrap()
-                .as_str(),
-            "sk-X"
-        );
-        assert_eq!(
-            select_kv_field(br#"{"data":{"data":{"data":"d"}}}"#, "data")
-                .unwrap()
-                .as_str(),
-            "d"
-        );
+        let escaped =
+            select_kv_field(br#"{"data":{"data":{"data":"d","k":"sk\u002dX"}}}"#, "k").unwrap();
+        assert!(escaped.as_str() == "sk-X");
+        let named_data = select_kv_field(br#"{"data":{"data":{"data":"d"}}}"#, "data").unwrap();
+        assert!(named_data.as_str() == "d");
     }
 
     #[test]
@@ -695,9 +688,11 @@ mod tests {
                 String::from_utf8_lossy(body)
             );
         }
-        let e = select_kv_field(br#"{"data":{"data":{"api_key":98765432}}}"#, "api_key")
-            .unwrap_err()
-            .to_string();
+        let Err(e) = select_kv_field(br#"{"data":{"data":{"api_key":98765432}}}"#, "api_key")
+        else {
+            panic!("a non-string field must be refused");
+        };
+        let e = e.to_string();
         assert!(!e.contains("98765432"), "{e}");
     }
 
@@ -728,7 +723,7 @@ mod tests {
 
     impl UnwrapOps for Scripted {
         async fn lookup(&self, token: &WrappingToken) -> Result<WrapLookup, VaultError> {
-            assert_eq!(token.expose(), "hvs.wrap");
+            assert!(token.expose() == "hvs.wrap");
             self.calls.lock().unwrap().push("lookup");
             if !self.lookup_ok {
                 return Err(VaultError::WrapMismatch(WrapMismatch::Invalid));
@@ -745,7 +740,7 @@ mod tests {
             token: WrappingToken,
             _checked: &CheckedLookup,
         ) -> Result<Zeroizing<Vec<u8>>, VaultError> {
-            assert_eq!(token.expose(), "hvs.wrap");
+            assert!(token.expose() == "hvs.wrap");
             self.calls.lock().unwrap().push("unwrap");
             if !self.unwrap_ok {
                 return Err(VaultError::WrapMismatch(WrapMismatch::Invalid));

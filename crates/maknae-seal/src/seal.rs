@@ -151,7 +151,7 @@ mod tests {
         assert_eq!(blob.0.capacity(), blob.as_bytes().len());
         assert_eq!(blob.as_bytes()[0], SEAL_VERSION);
         let opened = open(&key, &aad(ctx()), blob.as_bytes()).unwrap();
-        assert_eq!(opened.as_slice(), TOKEN);
+        assert!(opened.as_slice() == TOKEN);
         assert_eq!(opened.capacity(), blob.as_bytes().len() - HEADER_LEN);
         assert_eq!(
             format!("{blob:?}"),
@@ -167,10 +167,8 @@ mod tests {
         for n in [1, MAX_PLAINTEXT_LEN] {
             let pt = vec![b'x'; n];
             let blob = seal(key.public_key(), &aad(ctx()), &pt).unwrap();
-            assert_eq!(
-                open(&key, &aad(ctx()), blob.as_bytes()).unwrap().as_slice(),
-                &pt[..]
-            );
+            let opened = open(&key, &aad(ctx()), blob.as_bytes()).unwrap();
+            assert!(opened.as_slice() == &pt[..]);
         }
         assert_eq!(
             seal(key.public_key(), &aad(ctx()), b"").unwrap_err(),
@@ -247,12 +245,8 @@ mod tests {
         let key = SealPrivateKey::generate().unwrap();
         let blob = seal(key.public_key(), &aad(ctx()), TOKEN).unwrap();
         let reloaded = SealPrivateKey::from_pkcs8_der(&key.to_pkcs8_der().unwrap()).unwrap();
-        assert_eq!(
-            open(&reloaded, &aad(ctx()), blob.as_bytes())
-                .unwrap()
-                .as_slice(),
-            TOKEN
-        );
+        let opened = open(&reloaded, &aad(ctx()), blob.as_bytes()).unwrap();
+        assert!(opened.as_slice() == TOKEN);
     }
 
     #[test]
@@ -321,7 +315,7 @@ mod tests {
         let sealed = start.elapsed();
         let start = Instant::now();
         for blob in &blobs {
-            assert_eq!(open(&key, &aad, blob.as_bytes()).unwrap().as_slice(), TOKEN);
+            assert!(open(&key, &aad, blob.as_bytes()).unwrap().as_slice() == TOKEN);
         }
         let opened = start.elapsed();
         eprintln!(

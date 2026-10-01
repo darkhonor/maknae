@@ -282,7 +282,7 @@ mod tests {
                 .unwrap(),
             "true"
         );
-        assert_eq!(body_json(&req), serde_json::json!({ "password": "p\"w" }));
+        assert!(body_json(&req) == serde_json::json!({ "password": "p\"w" }));
     }
 
     #[test]
@@ -312,7 +312,7 @@ mod tests {
             "https://vault.example:8200/v1/maknae-kv/data/maknae/users/alice/openai"
         );
         let t = req.headers().get(X_VAULT_TOKEN).unwrap();
-        assert_eq!((t.to_str().unwrap(), t.is_sensitive()), ("hvs.user", true));
+        assert!(t.to_str().unwrap() == "hvs.user" && t.is_sensitive());
         assert_eq!(
             req.headers()
                 .get(X_VAULT_WRAP_TTL)
@@ -346,7 +346,7 @@ mod tests {
             "https://vault.example:8200/v1/sys/wrapping/lookup"
         );
         assert!(req.headers().get(X_VAULT_TOKEN).is_none());
-        assert_eq!(body_json(&req), serde_json::json!({ "token": "hvs.wrap" }));
+        assert!(body_json(&req) == serde_json::json!({ "token": "hvs.wrap" }));
     }
 
     #[test]
@@ -359,7 +359,7 @@ mod tests {
             "https://vault.example:8200/v1/sys/wrapping/unwrap"
         );
         let t = req.headers().get(X_VAULT_TOKEN).unwrap();
-        assert_eq!((t.to_str().unwrap(), t.is_sensitive()), ("hvs.wrap", true));
+        assert!(t.to_str().unwrap() == "hvs.wrap" && t.is_sensitive());
         assert!(req.body().is_none());
     }
 

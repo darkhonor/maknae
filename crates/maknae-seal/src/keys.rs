@@ -108,7 +108,7 @@ mod tests {
     fn a_generated_key_has_a_120_byte_p384_spki_and_a_redacted_debug() {
         let key = SealPrivateKey::generate().unwrap();
         assert_eq!(key.public_key().spki_der().len(), SPKI_P384_LEN);
-        assert_eq!(format!("{key:?}"), "SealPrivateKey(<redacted>)");
+        assert!(format!("{key:?}") == "SealPrivateKey(<redacted>)");
         assert_eq!(format!("{:?}", key.public_key()), "SealPublicKey(P-384)");
     }
 
@@ -171,6 +171,7 @@ mod tests {
         let mut reflowed = canonical.replacen('\n', "", 2);
         reflowed.insert(26, '\n');
         reflowed.push('\n');
+        assert_eq!(reflowed.len(), SEAL_PUB_PEM_LEN);
         for bad in [
             canonical.replace('\n', "\r\n"),
             format!("{canonical}trailing"),

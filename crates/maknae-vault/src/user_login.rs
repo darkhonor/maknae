@@ -195,26 +195,28 @@ mod tests {
         assert!(Password::new(secret("")).is_err());
         assert!(Password::new(secret(&"p".repeat(MAX_PASSWORD_BYTES + 1))).is_err());
         let p = Password::new(secret(&"p".repeat(MAX_PASSWORD_BYTES))).unwrap();
-        assert_eq!(p.expose().len(), MAX_PASSWORD_BYTES);
+        assert!(p.expose().len() == MAX_PASSWORD_BYTES);
         let p = Password::new(secret("hunter2-SENTINEL")).unwrap();
-        assert_eq!(format!("{p:?}"), "Password(<redacted>)");
+        assert!(format!("{p:?}") == "Password(<redacted>)");
     }
 
     #[test]
     fn a_user_token_is_shape_checked_and_redacted() {
         assert!(UserToken::new(secret("hvs.a b")).is_err());
         let t = UserToken::new(secret("hvs.SENTINEL")).unwrap();
-        assert_eq!(t.expose(), "hvs.SENTINEL");
-        assert_eq!(format!("{t:?}"), "UserToken(<redacted>)");
+        assert!(t.expose() == "hvs.SENTINEL");
+        assert!(format!("{t:?}") == "UserToken(<redacted>)");
     }
 
     #[test]
     fn a_login_response_yields_the_token_and_its_lease() {
         let login = parse_login(OK.as_bytes(), "alice").unwrap();
-        assert_eq!(login.token.expose(), "hvs.USERTOKEN");
+        assert!(login.token.expose() == "hvs.USERTOKEN");
         assert_eq!(login.lease, Duration::from_secs(28800));
         assert!(login.renewable);
         assert!(!format!("{login:?}").contains("USERTOKEN"));
+        let fixed = OK.replace(r#""renewable":true"#, r#""renewable":false"#);
+        assert!(!parse_login(fixed.as_bytes(), "alice").unwrap().renewable);
     }
 
     #[test]

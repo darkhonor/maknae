@@ -241,9 +241,9 @@ mod tests {
     #[test]
     fn a_secret_string_deserializes_plain_and_escaped_at_exact_size() {
         let s: SecretStr = serde_json::from_slice(br#""plain""#).unwrap();
-        assert_eq!((s.0.as_str(), s.0.capacity()), ("plain", 5));
+        assert!(s.0.as_str() == "plain" && s.0.capacity() == 5);
         let s: SecretStr = serde_json::from_slice(br#""sk\u002dA""#).unwrap();
-        assert_eq!((s.0.as_str(), s.0.capacity()), ("sk-A", 4));
+        assert!(s.0.as_str() == "sk-A" && s.0.capacity() == 4);
         assert!(serde_json::from_slice::<SecretStr>(b"12").is_err());
     }
 
@@ -261,7 +261,7 @@ mod tests {
             v: Zeroizing<String>,
         }
         let t: T = serde_json::from_slice(br#"{"v":"hvs.x"}"#).unwrap();
-        assert_eq!(t.v.as_str(), "hvs.x");
+        assert!(t.v.as_str() == "hvs.x");
     }
 
     #[test]
