@@ -1252,6 +1252,7 @@ dependencies = [
  "rustls",
  "security-framework",
  "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "tokio-rustls",

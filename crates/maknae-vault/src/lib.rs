@@ -6,6 +6,7 @@
 //! vaultrs's reqwest on the FIPS provider (spec §6.1).
 #![forbid(unsafe_code)]
 
+mod api_shape;
 mod auth;
 mod ca;
 mod client;
@@ -43,6 +44,7 @@ mod peercred;
 mod socket;
 #[cfg(unix)]
 mod stream;
+pub use api_shape::{WrapMismatch, MAX_TOKEN_BYTES, MAX_VAULT_BODY_BYTES};
 pub use auth::{AppRoleAuth, AuthMethod, VaultToken};
 pub use ca::{load_ca_pin, CaBundle};
 pub use client::{PlaneClient, PlaneIdentity, PLANE_HTTP_TIMEOUT, PLANE_SHUTDOWN_BOUND};

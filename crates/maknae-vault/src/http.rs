@@ -61,7 +61,7 @@ pub(crate) fn hardened_http_client(
         .no_proxy()
         .timeout(timeout)
         .build()
-        .map_err(|e| VaultError::Auth(format!("hardened vault http client: {e}")))
+        .map_err(|e| VaultError::HttpClient(e.to_string()))
 }
 
 /// Install the hardened client into a vaultrs `VaultClient` built from its
