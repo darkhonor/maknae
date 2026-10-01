@@ -168,6 +168,8 @@ jobs:
         run: ci/gates/p1-manifest-lint.sh
       - name: P2 invert-tree witness
         run: ci/gates/p2-invert-tree.sh
+      - name: Seal confinement — the kernel never links the unseal path (#153)
+        run: ci/gates/seal-confinement.sh
       - name: P2 artifact witness
         run: ci/gates/p2-artifact-witness.sh
       - name: Build-invocation lint

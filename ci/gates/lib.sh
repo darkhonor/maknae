@@ -9,3 +9,5 @@ UNTRUSTED_BIN="maknae"
 TRUST_CONSUMER_ALLOW=("maknaed=maknae-kernel" "maknae-spifc=maknae-spif-compile")
 SYS_CRATE="maknae-sys"
 SYS_CONSUMER_ALLOW=(maknae-io)
+SEAL_CRATE="maknae-seal"
+SEAL_FORBIDDEN_CONSUMERS=(maknaed maknae-kernel)

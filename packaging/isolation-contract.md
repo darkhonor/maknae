@@ -81,6 +81,7 @@ looks like.)*
 | maknae-subject-ctx | via kernel | — | — |
 | maknae-audit | via kernel | — | — |
 | maknae-vault | linked | linked | — |
+| maknae-seal | forbidden (`seal-confinement.sh`) | — | — |
 | maknae-config | via kernel | linked | — |
 | maknae-llm | — *(2026-09-15, #240: linked by `maknae-egress` and nothing else (corrected 2026-09-25, #297: now through `maknae-deputy`, still into `maknae-egress` only; the column and its gated row are #359, #240 being closed); the deputy's fourth binary column, and the five-cell lint row it needs, are the deferred follow-up named in #240's closing body — until then this row says where the crate lives in prose)* | — | — |
 | maknae-deputy | — *(2026-09-25, #297: linked by `maknae-egress` and nothing else; same prose-until-a-column treatment as the `maknae-llm` row; gated by #359)* | — | — |

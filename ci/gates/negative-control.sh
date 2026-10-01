@@ -214,6 +214,54 @@ expect_reject_because "p2/cli-links-authz-basic" \
 # nearly what was happening.
 expect_accept "p2/clean-workspace-passes" "p2-invert-tree: ok" \
   "$here/p2-invert-tree.sh" "$(p2_fixture)"
+seal_fixture() { # <none|kernel|optional|transitive|daemon|cli>
+  local mode="$1" fx d
+  fx="$(mktemp -d -p "$NC_TMP")"
+  for d in crates/maknae-seal crates/maknae-kernel crates/mid bins/maknaed bins/maknae; do
+    mkdir -p "$fx/$d/src"
+    printf '[package]\nname = "%s"\nversion = "0.0.0"\nedition = "2021"\n[dependencies]\n' "${d#*/}" \
+      > "$fx/$d/Cargo.toml"
+  done
+  printf '[workspace]\nresolver = "3"\nmembers = ["crates/maknae-seal", "crates/maknae-kernel", "crates/mid", "bins/maknaed", "bins/maknae"]\n' \
+    > "$fx/Cargo.toml"
+  echo 'maknae-kernel = { path = "../../crates/maknae-kernel" }' >> "$fx/bins/maknaed/Cargo.toml"
+  echo 'pub const S: u8 = 1;' > "$fx/crates/maknae-seal/src/lib.rs"
+  : > "$fx/crates/maknae-kernel/src/lib.rs"
+  : > "$fx/crates/mid/src/lib.rs"
+  echo 'fn main() {}' > "$fx/bins/maknaed/src/main.rs"
+  echo 'fn main() {}' > "$fx/bins/maknae/src/main.rs"
+  case "$mode" in
+    kernel) echo 'maknae-seal = { path = "../maknae-seal" }' >> "$fx/crates/maknae-kernel/Cargo.toml" ;;
+    optional)
+      echo 'maknae-seal = { path = "../maknae-seal", optional = true }' >> "$fx/crates/maknae-kernel/Cargo.toml"
+      printf '[features]\nx = ["dep:maknae-seal"]\n' >> "$fx/crates/maknae-kernel/Cargo.toml" ;;
+    transitive)
+      echo 'maknae-seal = { path = "../maknae-seal" }' >> "$fx/crates/mid/Cargo.toml"
+      echo 'mid = { path = "../mid" }' >> "$fx/crates/maknae-kernel/Cargo.toml" ;;
+    daemon) echo 'maknae-seal = { path = "../../crates/maknae-seal" }' >> "$fx/bins/maknaed/Cargo.toml" ;;
+    cli) echo 'maknae-seal = { path = "../../crates/maknae-seal" }' >> "$fx/bins/maknae/Cargo.toml" ;;
+  esac
+  echo "$fx"
+}
+expect_reject_because "seal-confinement/kernel-links-seal" \
+  "FAIL: seal-confinement: 'maknae-seal' is reachable from 'maknae-kernel'" \
+  "$here/seal-confinement.sh" "$(seal_fixture kernel)"
+expect_reject_because "seal-confinement/an-optional-feature-gated-edge-is-caught" \
+  "FAIL: seal-confinement: 'maknae-seal' is reachable from 'maknae-kernel'" \
+  "$here/seal-confinement.sh" "$(seal_fixture optional)"
+expect_reject_because "seal-confinement/kernel-reaches-seal-transitively" \
+  "FAIL: seal-confinement: 'maknae-seal' is reachable from 'maknae-kernel'" \
+  "$here/seal-confinement.sh" "$(seal_fixture transitive)"
+expect_reject_because "seal-confinement/daemon-links-seal" \
+  "FAIL: seal-confinement: 'maknae-seal' is reachable from 'maknaed'" \
+  "$here/seal-confinement.sh" "$(seal_fixture daemon)"
+expect_accept "seal-confinement/clean-workspace-passes" "seal-confinement: ok" \
+  "$here/seal-confinement.sh" "$(seal_fixture none)"
+expect_accept "seal-confinement/the-cli-may-link-seal" "seal-confinement: ok" \
+  "$here/seal-confinement.sh" "$(seal_fixture cli)"
+expect_reject_because "seal-confinement/an-absent-seal-crate-fails-closed" \
+  "FAIL: seal-confinement: cargo tree errored" \
+  "$here/seal-confinement.sh" "$(p2_fixture)"
 
 # ---- isolation-contract-lint (#219): a PRESENT file is not a SCANNED file ----
 # This gate had no probe at all before #219, because it resolved its root from
