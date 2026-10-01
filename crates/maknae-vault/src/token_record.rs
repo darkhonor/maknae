@@ -27,7 +27,10 @@ pub struct StoredToken {
 }
 
 fn parse_expiry(digits: &[u8]) -> Option<u64> {
-    if digits.is_empty() || digits.len() > MAX_EXPIRY_DIGITS {
+    if digits.is_empty()
+        || digits.len() > MAX_EXPIRY_DIGITS
+        || (digits.len() > 1 && digits[0] == b'0')
+    {
         return None;
     }
     digits.iter().try_fold(0u64, |acc, &b| {
@@ -82,7 +85,8 @@ impl StoredToken {
         let token = std::str::from_utf8(&rest[at + 1..])
             .map_err(|_| VaultError::TokenRecord("the token is not UTF-8"))?;
         Ok(Self {
-            token: UserToken::new(Zeroizing::new(token.to_owned()))?,
+            token: UserToken::new(Zeroizing::new(token.to_owned()))
+                .map_err(|_| VaultError::TokenRecord("malformed token"))?,
             expires_at,
         })
     }
@@ -225,7 +229,9 @@ pub(crate) fn keychain_erase_outcome(
         Ok(KeychainDelete::Absent) => return Ok(false),
         Ok(KeychainDelete::Removed) => return Ok(true),
         Ok(KeychainDelete::StillPresent) => "the item is still present after delete".to_string(),
-        Err(e) => e.to_string(),
+        Err(VaultError::Keychain { status }) if status == ITEM_NOT_FOUND => return Ok(false),
+        Err(VaultError::Keychain { status }) => format!("keychain status {status}"),
+        Err(_) => "the keychain refused the delete".to_string(),
     };
     Err(VaultError::TokenStore(format!(
         "keychain delete: {detail}; remove it with `{TOKEN_DELETE_REMEDY}`"
@@ -317,9 +323,6 @@ mod tests {
     fn refusal(bytes: &[u8]) -> &'static str {
         match StoredToken::decode(bytes) {
             Err(VaultError::TokenRecord(why)) => why,
-            Err(VaultError::InvalidSecret {
-                what: "user token", ..
-            }) => "token shape",
             Err(e) => panic!("unexpected refusal {e}"),
             Ok(_) => panic!("a malformed record was accepted"),
         }
@@ -327,7 +330,7 @@ mod tests {
 
     #[test]
     fn a_malformed_record_is_refused_by_name() {
-        let rows: [(&[u8], &str); 9] = [
+        let rows: [(&[u8], &str); 12] = [
             (b"", "not a maknae token record"),
             (
                 b"maknae-vault-token v2 1 hvs.a",
@@ -345,7 +348,10 @@ mod tests {
                 "malformed expiry",
             ),
             (b"maknae-vault-token v1 1 \xff", "the token is not UTF-8"),
-            (b"maknae-vault-token v1 1 hvs.a b", "token shape"),
+            (b"maknae-vault-token v1 1 hvs.a b", "malformed token"),
+            (b"maknae-vault-token v1 0001 hvs.a", "malformed expiry"),
+            (b"maknae-vault-token v1 1 ", "malformed token"),
+            (b"maknae-vault-token v1 1 hvs.a\n", "malformed token"),
         ];
         for (bytes, want) in rows {
             assert_eq!(refusal(bytes), want, "{:?}", String::from_utf8_lossy(bytes));
@@ -539,9 +545,14 @@ mod tests {
     fn a_keychain_erase_reports_absence_removal_or_the_manual_remedy() {
         assert!(!keychain_erase_outcome(Ok(KeychainDelete::Absent)).unwrap());
         assert!(keychain_erase_outcome(Ok(KeychainDelete::Removed)).unwrap());
+        assert!(!keychain_erase_outcome(Err(VaultError::Keychain {
+            status: ITEM_NOT_FOUND
+        }))
+        .unwrap());
         for refused in [
             Ok(KeychainDelete::StillPresent),
             Err(VaultError::Keychain { status: -25293 }),
+            Err(VaultError::TokenAbsent),
         ] {
             match keychain_erase_outcome(refused) {
                 Err(VaultError::TokenStore(m)) => {
@@ -549,10 +560,19 @@ mod tests {
                         m.ends_with(&format!("remove it with `{TOKEN_DELETE_REMEDY}`")),
                         "{m}"
                     );
-                    assert!(!m.contains("maknae login"), "{m}");
+                    assert!(
+                        !m.contains("maknae login") && !m.contains("maknae enroll"),
+                        "{m}"
+                    );
                 }
                 other => panic!("expected the manual remedy, got {other:?}"),
             }
+        }
+        match keychain_erase_outcome(Err(VaultError::Keychain { status: -25293 })) {
+            Err(VaultError::TokenStore(m)) => {
+                assert!(m.contains("-25293") && !m.contains("read"), "{m}");
+            }
+            other => panic!("expected the manual remedy, got {other:?}"),
         }
     }
 
