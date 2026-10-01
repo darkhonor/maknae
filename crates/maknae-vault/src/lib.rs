@@ -34,6 +34,7 @@ mod supervisor;
 mod supervisor_run;
 mod tls;
 mod user_login;
+mod vault_api;
 mod verify;
 mod wrap;
 // The UDS transport is unix-only (UnixStream / SO_PEERCRED); the pure-rustls layers above
@@ -94,6 +95,7 @@ pub use user_login::{
     userpass_username_is_acceptable, Password, UserLogin, UserToken, MAX_PASSWORD_BYTES,
     MAX_USERNAME_BYTES,
 };
+pub use vault_api::VaultApi;
 pub use verify::{verify_plane_uri_san, VerifyError};
 pub use wrap::{
     kv_data_path, KvDataPath, WrapExpectation, WrapLookup, WrappedSecret, WrappingToken,
