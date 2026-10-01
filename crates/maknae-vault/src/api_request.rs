@@ -33,8 +33,7 @@ impl ApiBase {
         Ok(Self(format!("https://{host}{port}/v1/")))
     }
 
-    #[cfg(test)]
-    fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
 

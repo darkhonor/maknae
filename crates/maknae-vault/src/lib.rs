@@ -100,9 +100,9 @@ pub use stream::{
 };
 #[cfg(unix)]
 pub use token_record::{
-    custody_for_store, custody_label, StoredToken, SystemdCreds, TokenCustody,
-    MAX_TOKEN_RECORD_BYTES, TOKEN_CREDS_FILE, TOKEN_EXPIRY_MARGIN, TOKEN_RESIDUAL_FILE,
-    USER_CREDS_MIN_SYSTEMD,
+    check_vault_addr, custody_for_store, custody_label, StoredToken, SystemdCreds, TokenCustody,
+    MAX_TOKEN_RECORD_BYTES, MAX_VAULT_ADDR_BYTES, TOKEN_CREDS_FILE, TOKEN_EXPIRY_MARGIN,
+    TOKEN_RESIDUAL_FILE, USER_CREDS_MIN_SYSTEMD,
 };
 #[cfg(unix)]
 pub use token_store::{

@@ -35,6 +35,10 @@ impl VaultApi {
         Ok(Self { base, http })
     }
 
+    pub fn vault_addr(&self) -> &str {
+        self.base.as_str()
+    }
+
     pub async fn login(
         &self,
         auth: &UserAuth,
@@ -147,6 +151,13 @@ mod tests {
         crate::install_default_crypto_provider();
         let (_dir, ca) = ca();
         let api = VaultApi::new("https://127.0.0.1:1", &ca).unwrap();
+        assert_eq!(api.vault_addr(), "https://127.0.0.1:1/v1/");
+        assert_eq!(
+            VaultApi::new("HTTPS://Vault.Example:443/", &ca)
+                .unwrap()
+                .vault_addr(),
+            "https://vault.example/v1/"
+        );
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

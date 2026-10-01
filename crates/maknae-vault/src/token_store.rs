@@ -54,8 +54,12 @@ pub fn read_user_token(cli_dir: &Path) -> Result<StoredToken, VaultError> {
     )
 }
 
-pub fn load_user_token(cli_dir: &Path, now: u64) -> Result<UserToken, VaultError> {
-    read_user_token(cli_dir)?.fresh_at(now)
+pub fn load_user_token(
+    cli_dir: &Path,
+    vault_addr: &str,
+    now: u64,
+) -> Result<UserToken, VaultError> {
+    read_user_token(cli_dir)?.usable_at(vault_addr, now)
 }
 
 pub fn erase_user_token(cli_dir: &Path, keep: Option<&TokenCustody>) -> Result<bool, VaultError> {
@@ -325,8 +329,10 @@ mod tests {
             lease: Duration::from_secs(expires_at),
             renewable: true,
         };
-        StoredToken::from_login(login, 0)
+        StoredToken::from_login(login, 0, ADDR).unwrap()
     }
+
+    const ADDR: &str = "https://vault.example:8200/v1/";
 
     fn residual(d: &Path) -> TokenCustody {
         TokenCustody::Residual(d.join(TOKEN_RESIDUAL_FILE))
@@ -428,10 +434,14 @@ mod tests {
         ));
         assert!(!erase_user_token(d.path(), None).unwrap());
         store_user_token(&residual(d.path()), &stored("hvs.r", 10_000)).unwrap();
-        assert!(load_user_token(d.path(), 0).unwrap().expose() == "hvs.r");
+        assert!(load_user_token(d.path(), ADDR, 0).unwrap().expose() == "hvs.r");
         assert!(matches!(
-            load_user_token(d.path(), 10_000),
+            load_user_token(d.path(), ADDR, 10_000),
             Err(VaultError::TokenExpired)
+        ));
+        assert!(matches!(
+            load_user_token(d.path(), "https://vault.other:8200/v1/", 0),
+            Err(VaultError::TokenOtherVault(a)) if a == ADDR
         ));
         assert!(!erase_user_token(d.path(), Some(&residual(d.path()))).unwrap());
         assert!(erase_user_token(d.path(), None).unwrap());
@@ -537,7 +547,7 @@ mod tests {
                 "-T",
                 "/usr/bin/true",
                 "-w",
-                "maknae-vault-token v1 9 hvs.untrusted",
+                "maknae-vault-token v1 9 https://vault.example:8200/v1/ hvs.untrusted",
                 kc.path.to_str().unwrap(),
             ])
             .status()

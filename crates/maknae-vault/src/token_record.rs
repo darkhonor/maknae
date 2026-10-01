@@ -17,13 +17,31 @@ pub(crate) const TOKEN_FILE_MODE: u32 = 0o600;
 const OWNER_ONLY: u32 = 0o077;
 const RECORD_PREFIX: &[u8] = b"maknae-vault-token v1 ";
 const MAX_EXPIRY_DIGITS: usize = 20;
+pub const MAX_VAULT_ADDR_BYTES: usize = "https://".len() + 253 + ":65535".len() + "/v1/".len();
 pub const MAX_TOKEN_RECORD_BYTES: usize =
-    RECORD_PREFIX.len() + MAX_EXPIRY_DIGITS + 1 + MAX_TOKEN_BYTES;
+    RECORD_PREFIX.len() + MAX_EXPIRY_DIGITS + 1 + MAX_VAULT_ADDR_BYTES + 1 + MAX_TOKEN_BYTES;
 
 #[derive(Debug)]
 pub struct StoredToken {
     token: UserToken,
     expires_at: u64,
+    vault_addr: String,
+}
+
+fn vault_addr_is_recordable(addr: &[u8]) -> bool {
+    !addr.is_empty()
+        && addr.len() <= MAX_VAULT_ADDR_BYTES
+        && addr.iter().all(|b| b.is_ascii_graphic())
+}
+
+pub fn check_vault_addr(vault_addr: &str) -> Result<(), VaultError> {
+    if vault_addr_is_recordable(vault_addr.as_bytes()) {
+        return Ok(());
+    }
+    Err(VaultError::TokenStore(format!(
+        "the Vault address is empty, over {MAX_VAULT_ADDR_BYTES} bytes, or not printable \
+         ASCII without spaces, so a token from it cannot be recorded"
+    )))
 }
 
 fn parse_expiry(digits: &[u8]) -> Option<u64> {
@@ -42,11 +60,25 @@ fn parse_expiry(digits: &[u8]) -> Option<u64> {
 }
 
 impl StoredToken {
-    pub fn from_login(login: UserLogin, issued_before: u64) -> Self {
-        Self {
+    pub fn from_login(
+        login: UserLogin,
+        issued_before: u64,
+        vault_addr: &str,
+    ) -> Result<Self, VaultError> {
+        check_vault_addr(vault_addr)?;
+        Ok(Self {
             expires_at: issued_before.saturating_add(login.lease.as_secs()),
             token: login.token,
-        }
+            vault_addr: vault_addr.to_string(),
+        })
+    }
+
+    pub fn vault_addr(&self) -> &str {
+        &self.vault_addr
+    }
+
+    pub fn issued_by(&self, vault_addr: &str) -> bool {
+        self.vault_addr == vault_addr
     }
 
     pub fn token(&self) -> &UserToken {
@@ -59,11 +91,14 @@ impl StoredToken {
 
     pub fn encode(&self) -> Zeroizing<Vec<u8>> {
         let expiry = self.expires_at.to_string();
+        let addr = self.vault_addr.as_bytes();
         let token = self.token.expose().as_bytes();
-        let len = RECORD_PREFIX.len() + expiry.len() + 1 + token.len();
+        let len = RECORD_PREFIX.len() + expiry.len() + 1 + addr.len() + 1 + token.len();
         let mut out = Zeroizing::new(Vec::with_capacity(len));
         out.extend_from_slice(RECORD_PREFIX);
         out.extend_from_slice(expiry.as_bytes());
+        out.push(b' ');
+        out.extend_from_slice(addr);
         out.push(b' ');
         out.extend_from_slice(token);
         out
@@ -82,12 +117,22 @@ impl StoredToken {
             .ok_or(VaultError::TokenRecord("no expiry"))?;
         let expires_at =
             parse_expiry(&rest[..at]).ok_or(VaultError::TokenRecord("malformed expiry"))?;
+        let rest = &rest[at + 1..];
+        let at = rest
+            .iter()
+            .position(|&b| b == b' ')
+            .ok_or(VaultError::TokenRecord("no Vault address"))?;
+        let addr = &rest[..at];
+        if !vault_addr_is_recordable(addr) {
+            return Err(VaultError::TokenRecord("malformed Vault address"));
+        }
         let token = std::str::from_utf8(&rest[at + 1..])
             .map_err(|_| VaultError::TokenRecord("the token is not UTF-8"))?;
         Ok(Self {
             token: UserToken::new(Zeroizing::new(token.to_owned()))
                 .map_err(|_| VaultError::TokenRecord("malformed token"))?,
             expires_at,
+            vault_addr: String::from_utf8_lossy(addr).into_owned(),
         })
     }
 
@@ -104,6 +149,13 @@ impl StoredToken {
             return Err(VaultError::TokenExpired);
         }
         Ok(self.token)
+    }
+
+    pub fn usable_at(self, vault_addr: &str, now: u64) -> Result<UserToken, VaultError> {
+        if !self.issued_by(vault_addr) {
+            return Err(VaultError::TokenOtherVault(self.vault_addr));
+        }
+        self.fresh_at(now)
     }
 }
 
@@ -280,10 +332,13 @@ mod tests {
         UserToken::new(Zeroizing::new(s.to_string())).unwrap()
     }
 
+    const ADDR: &str = "https://vault.example:8200/v1/";
+
     fn stored(s: &str, expires_at: u64) -> StoredToken {
         StoredToken {
             token: token(s),
             expires_at,
+            vault_addr: ADDR.to_string(),
         }
     }
 
@@ -294,36 +349,125 @@ mod tests {
             lease: Duration::from_secs(28_800),
             renewable: true,
         };
-        let s = StoredToken::from_login(login, 1_000);
+        let s = StoredToken::from_login(login, 1_000, ADDR).unwrap();
         assert_eq!(s.expires_at(), 29_800);
         assert!(s.token().expose() == "hvs.a");
+        assert_eq!(s.vault_addr(), ADDR);
         let login = UserLogin {
             token: token("hvs.a"),
             lease: Duration::from_secs(10),
             renewable: false,
         };
         assert_eq!(
-            StoredToken::from_login(login, u64::MAX).expires_at(),
+            StoredToken::from_login(login, u64::MAX, ADDR)
+                .unwrap()
+                .expires_at(),
             u64::MAX
         );
     }
 
     #[test]
+    fn only_a_recordable_vault_address_is_stored_with_a_token() {
+        let longest = format!("https://{}:65535/v1/", "a".repeat(253));
+        assert_eq!(longest.len(), MAX_VAULT_ADDR_BYTES);
+        assert_eq!(MAX_VAULT_ADDR_BYTES, 271);
+        let over = format!("https://{}:65535/v1/", "a".repeat(254));
+        let login = || UserLogin {
+            token: token("hvs.a"),
+            lease: Duration::from_secs(1),
+            renewable: false,
+        };
+        for ok in [ADDR, "https://[::1]:8200/v1/", longest.as_str(), "!", "~"] {
+            assert_eq!(
+                StoredToken::from_login(login(), 0, ok)
+                    .unwrap()
+                    .vault_addr(),
+                ok
+            );
+        }
+        for bad in [
+            "",
+            "https://vault example/v1/",
+            "https://vault.example/v1/\n",
+            "https://vault.example/v1/\u{7f}",
+            "https://bücher.example/v1/",
+            over.as_str(),
+        ] {
+            match StoredToken::from_login(login(), 0, bad) {
+                Err(VaultError::TokenStore(m)) => {
+                    assert!(m.contains("271 bytes") && !m.contains("hvs.a"), "{m}")
+                }
+                other => panic!("{bad:?} was recorded: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_token_is_presented_only_to_the_vault_that_issued_it() {
+        let rows = [
+            (ADDR, true),
+            ("https://vault.example:8201/v1/", false),
+            ("https://vault.other:8200/v1/", false),
+            ("https://vault.example:8200/v1", false),
+            ("https://vault.example:8200/v1/x", false),
+            ("HTTPS://vault.example:8200/v1/", false),
+            ("https://vault.example/v1/", false),
+            ("", false),
+        ];
+        for (current, presentable) in rows {
+            assert_eq!(
+                stored("hvs.a", 9_000).issued_by(current),
+                presentable,
+                "{current}"
+            );
+            let used = stored("hvs.a", 9_000).usable_at(current, 0);
+            if presentable {
+                assert!(used.unwrap().expose() == "hvs.a");
+            } else {
+                match used {
+                    Err(e @ VaultError::TokenOtherVault(_)) => {
+                        let m = e.to_string();
+                        assert!(m.contains(ADDR) && !m.contains("hvs.a"), "{m}");
+                        assert!(m.ends_with("run `maknae login`"), "{m}");
+                    }
+                    other => panic!("{current:?}: a token from {ADDR} was usable: {other:?}"),
+                }
+            }
+        }
+        assert!(matches!(
+            stored("hvs.a", 1_000).usable_at(ADDR, 1_000),
+            Err(VaultError::TokenExpired)
+        ));
+        assert!(matches!(
+            stored("hvs.a", 1_000).usable_at("https://vault.other/v1/", 1_000),
+            Err(VaultError::TokenOtherVault(a)) if a == ADDR
+        ));
+    }
+
+    #[test]
     fn a_record_round_trips_at_its_exact_size() {
         let bytes = stored("hvs.CAESIabc_-9", 1_790_000_000).encode();
-        assert!(bytes.as_slice() == b"maknae-vault-token v1 1790000000 hvs.CAESIabc_-9");
+        assert!(
+            bytes.as_slice()
+                == b"maknae-vault-token v1 1790000000 https://vault.example:8200/v1/ hvs.CAESIabc_-9"
+        );
         assert_eq!(bytes.capacity(), bytes.len());
         let back = StoredToken::decode(&bytes).unwrap();
         assert!(back.token().expose() == "hvs.CAESIabc_-9");
         assert_eq!(back.expires_at(), 1_790_000_000);
+        assert_eq!(back.vault_addr(), ADDR);
     }
 
     #[test]
     fn the_largest_record_is_exactly_the_bound() {
-        let bytes = stored(&"a".repeat(MAX_TOKEN_BYTES), u64::MAX).encode();
+        let mut largest = stored(&"a".repeat(MAX_TOKEN_BYTES), u64::MAX);
+        largest.vault_addr = "h".repeat(MAX_VAULT_ADDR_BYTES);
+        let bytes = largest.encode();
         assert_eq!(bytes.len(), MAX_TOKEN_RECORD_BYTES);
-        assert_eq!(MAX_TOKEN_RECORD_BYTES, 1067);
-        assert_eq!(StoredToken::decode(&bytes).unwrap().expires_at(), u64::MAX);
+        assert_eq!(MAX_TOKEN_RECORD_BYTES, 1339);
+        let back = StoredToken::decode(&bytes).unwrap();
+        assert_eq!(back.expires_at(), u64::MAX);
+        assert_eq!(back.vault_addr().len(), MAX_VAULT_ADDR_BYTES);
         let mut over = bytes.to_vec();
         over.push(b'a');
         assert!(matches!(
@@ -342,32 +486,71 @@ mod tests {
 
     #[test]
     fn a_malformed_record_is_refused_by_name() {
-        let rows: [(&[u8], &str); 12] = [
+        let long_addr = format!("maknae-vault-token v1 1 {} hvs.a", "h".repeat(272));
+        let rows: [(&[u8], &str); 18] = [
             (b"", "not a maknae token record"),
             (
-                b"maknae-vault-token v2 1 hvs.a",
+                b"maknae-vault-token v2 1 https://v/v1/ hvs.a",
                 "not a maknae token record",
             ),
             (b"maknae-vault-token v1 1", "no expiry"),
-            (b"maknae-vault-token v1  hvs.a", "malformed expiry"),
-            (b"maknae-vault-token v1 1x hvs.a", "malformed expiry"),
             (
-                b"maknae-vault-token v1 18446744073709551616 hvs.a",
+                b"maknae-vault-token v1  https://v/v1/ hvs.a",
                 "malformed expiry",
             ),
             (
-                b"maknae-vault-token v1 123456789012345678901 hvs.a",
+                b"maknae-vault-token v1 1x https://v/v1/ hvs.a",
                 "malformed expiry",
             ),
-            (b"maknae-vault-token v1 1 \xff", "the token is not UTF-8"),
-            (b"maknae-vault-token v1 1 hvs.a b", "malformed token"),
-            (b"maknae-vault-token v1 0001 hvs.a", "malformed expiry"),
-            (b"maknae-vault-token v1 1 ", "malformed token"),
-            (b"maknae-vault-token v1 1 hvs.a\n", "malformed token"),
+            (
+                b"maknae-vault-token v1 18446744073709551616 https://v/v1/ hvs.a",
+                "malformed expiry",
+            ),
+            (
+                b"maknae-vault-token v1 123456789012345678901 https://v/v1/ hvs.a",
+                "malformed expiry",
+            ),
+            (
+                b"maknae-vault-token v1 0001 https://v/v1/ hvs.a",
+                "malformed expiry",
+            ),
+            (b"maknae-vault-token v1 1 hvs.a", "no Vault address"),
+            (b"maknae-vault-token v1 1 ", "no Vault address"),
+            (b"maknae-vault-token v1 1  hvs.a", "malformed Vault address"),
+            (
+                b"maknae-vault-token v1 1 https://v\x7f/v1/ hvs.a",
+                "malformed Vault address",
+            ),
+            (long_addr.as_bytes(), "malformed Vault address"),
+            (
+                b"maknae-vault-token v1 1 https://v/v1/ \xff",
+                "the token is not UTF-8",
+            ),
+            (
+                b"maknae-vault-token v1 1 https://v/v1/ hvs.a b",
+                "malformed token",
+            ),
+            (b"maknae-vault-token v1 1 https://v/v1/ ", "malformed token"),
+            (
+                b"maknae-vault-token v1 1 https://v/v1/ hvs.a\n",
+                "malformed token",
+            ),
+            (
+                b"maknae-vault-token v1 1 https://v/v1/  hvs.a",
+                "malformed token",
+            ),
         ];
         for (bytes, want) in rows {
             assert_eq!(refusal(bytes), want, "{:?}", String::from_utf8_lossy(bytes));
         }
+        let at_bound = format!("maknae-vault-token v1 1 {} hvs.a", "h".repeat(271));
+        assert_eq!(
+            StoredToken::decode(at_bound.as_bytes())
+                .unwrap()
+                .vault_addr()
+                .len(),
+            271
+        );
     }
 
     #[test]
@@ -486,13 +669,13 @@ mod tests {
             }
         );
         assert_eq!(
-            token_file_required(501, 1067),
+            token_file_required(501, 1339),
             TargetRequired {
                 owner: Some(501),
                 mode_mask: Some(0o077),
                 nlink_exactly_one: true,
                 regular_file: true,
-                max_bytes: Some(1067)
+                max_bytes: Some(1339)
             }
         );
         assert_eq!(TOKEN_FILE_MODE, 0o600);

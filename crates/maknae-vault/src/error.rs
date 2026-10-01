@@ -140,6 +140,7 @@ pub enum VaultError {
     TokenExpired,
     TokenRecord(&'static str),
     TokenUnreadable(String),
+    TokenOtherVault(String),
     TokenStore(String),
 }
 
@@ -249,6 +250,10 @@ impl std::fmt::Display for VaultError {
                 f,
                 "the stored Vault token could not be read ({m}): run `maknae login`"
             ),
+            VaultError::TokenOtherVault(addr) => write!(
+                f,
+                "the stored Vault token was issued by a different Vault ({addr}): run `maknae login`"
+            ),
             VaultError::TokenStore(m) => write!(f, "Vault token storage failed: {m}"),
         }
     }
@@ -325,6 +330,7 @@ mod tests {
             VaultError::TokenExpired,
             VaultError::TokenRecord("no expiry"),
             VaultError::TokenUnreadable("keychain status -25293".into()),
+            VaultError::TokenOtherVault("https://old.example/v1/".into()),
             VaultError::TokenStore("keychain add: status -25308".into()),
         ];
         for e in cases {
@@ -359,6 +365,7 @@ mod tests {
             VaultError::TokenExpired,
             VaultError::TokenRecord("no expiry"),
             VaultError::TokenUnreadable("keychain status -25293".into()),
+            VaultError::TokenOtherVault("https://old.example/v1/".into()),
         ] {
             assert!(e.to_string().ends_with("run `maknae login`"), "{e}");
         }

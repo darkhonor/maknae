@@ -1,8 +1,8 @@
 use crate::tty::{read_password, stdin_is_terminal, PromptError};
 use maknae_vault::{
-    custody_for_store, custody_label, erase_user_token, observe_systemd_creds, read_user_token,
-    store_user_token, userpass_username_is_acceptable, vault_config_from_document, StoredToken,
-    SystemdCreds, UserAuth, VaultApi, VaultError,
+    check_vault_addr, custody_for_store, custody_label, erase_user_token, observe_systemd_creds,
+    read_user_token, store_user_token, userpass_username_is_acceptable, vault_config_from_document,
+    StoredToken, SystemdCreds, UserAuth, VaultApi, VaultError,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -68,6 +68,30 @@ pub(crate) fn lifetime(secs: u64) -> String {
     format!("{}h {}m", secs / 3600, secs % 3600 / 60)
 }
 
+#[derive(Debug)]
+pub(crate) enum Previous {
+    Nothing,
+    OtherVault(String),
+    SameVault(StoredToken),
+}
+
+pub(crate) fn previous_token(
+    read: Result<StoredToken, VaultError>,
+    vault_addr: &str,
+    now: u64,
+) -> Previous {
+    match read {
+        Ok(old) if !old.revocable_at(now) => Previous::Nothing,
+        Ok(old) if !old.issued_by(vault_addr) => Previous::OtherVault(old.vault_addr().to_string()),
+        Ok(old) => Previous::SameVault(old),
+        Err(_) => Previous::Nothing,
+    }
+}
+
+pub(crate) fn other_vault_note(addr: &str) -> String {
+    format!("a token from a different Vault ({addr}) was erased here, not revoked")
+}
+
 pub(crate) async fn run_login() -> ExitCode {
     match login().await {
         Ok(line) => {
@@ -91,6 +115,7 @@ async fn login() -> Result<String, Failure> {
     }
     let name = local_username()?;
     let s = session()?;
+    check_vault_addr(s.api.vault_addr()).map_err(|e| e.to_string())?;
     let macos = cfg!(target_os = "macos");
     let creds = if macos {
         SystemdCreds::Absent
@@ -103,7 +128,7 @@ async fn login() -> Result<String, Failure> {
             PromptError::Interrupted => Failure::Interrupted,
             other => Failure::Refused(other.to_string()),
         })?;
-    let previous = read_user_token(&s.dir).ok();
+    let previous = read_user_token(&s.dir);
     let issued_before = now_unix()?;
     let login = s
         .api
@@ -111,27 +136,40 @@ async fn login() -> Result<String, Failure> {
         .await
         .map_err(|e| e.to_string())?;
     drop(password);
+    let previous = previous_token(previous, s.api.vault_addr(), issued_before);
     let lease = login.lease.as_secs();
-    let stored = StoredToken::from_login(login, issued_before);
+    let stored =
+        StoredToken::from_login(login, issued_before, s.api.vault_addr()).map_err(|e| {
+            format!(
+                "{e}; the new token was not stored and stays valid at Vault for up to {}",
+                lifetime(lease)
+            )
+        })?;
     store_user_token(&custody, &stored).map_err(|e| e.to_string())?;
     let erased = erase_user_token(&s.dir, Some(&custody));
-    if let Some(old) = previous {
+    if let Previous::SameVault(old) = &previous {
         let _ = s.api.revoke_self(old.token()).await;
     }
     erased.map_err(|e| {
         format!("the new token is stored, but erasing an older stored token failed: {e}")
     })?;
-    Ok(format!(
+    let mut line = format!(
         "maknae: logged in to Vault as {name}; the token is held in {} and is valid for {}",
         custody_label(&custody),
         lifetime(lease)
-    ))
+    );
+    if let Previous::OtherVault(addr) = &previous {
+        line = format!("{line}; {}", other_vault_note(addr));
+    }
+    Ok(line)
 }
 
 pub(crate) enum LogoutOutcome {
     NothingStored,
     Expired,
     Unreadable(String),
+    OtherVault(String),
+    Uncontacted { why: String, left_secs: u64 },
     Revoked,
     NotRevoked { why: String, left_secs: u64 },
 }
@@ -145,6 +183,15 @@ pub(crate) fn logout_line(outcome: &LogoutOutcome) -> String {
         LogoutOutcome::Unreadable(why) => format!(
             "maknae: logged out; the stored Vault token was unreadable ({why}), so it could not \
              be revoked; it was erased here and may stay valid at Vault until it expires"
+        ),
+        LogoutOutcome::OtherVault(addr) => format!(
+            "maknae: logged out; the stored Vault token was issued by a different Vault ({addr}), \
+             so it was erased here, not revoked; it may stay valid there until it expires"
+        ),
+        LogoutOutcome::Uncontacted { why, left_secs } => format!(
+            "maknae: logged out; Vault was not contacted to revoke the token ({why}); it was \
+             erased here and may stay valid for up to {}",
+            lifetime(*left_secs)
         ),
         LogoutOutcome::Revoked => {
             "maknae: logged out; the Vault token was revoked and erased".into()
@@ -162,10 +209,16 @@ pub(crate) enum LogoutPlan {
     NothingStored,
     Expired,
     Unreadable(String),
+    OtherVault(String),
+    Uncontacted { why: String, left_secs: u64 },
     Revoke { stored: StoredToken, left_secs: u64 },
 }
 
-pub(crate) fn logout_plan(read: Result<StoredToken, VaultError>, now: u64) -> LogoutPlan {
+pub(crate) fn logout_plan(
+    read: Result<StoredToken, VaultError>,
+    vault_addr: Result<&str, &str>,
+    now: u64,
+) -> LogoutPlan {
     match read {
         Err(VaultError::TokenAbsent) => LogoutPlan::NothingStored,
         Err(VaultError::TokenRecord(why)) => LogoutPlan::Unreadable(why.to_string()),
@@ -174,31 +227,49 @@ pub(crate) fn logout_plan(read: Result<StoredToken, VaultError>, now: u64) -> Lo
         }
         Err(other) => LogoutPlan::Unreadable(other.to_string()),
         Ok(stored) if !stored.revocable_at(now) => LogoutPlan::Expired,
-        Ok(stored) => LogoutPlan::Revoke {
-            left_secs: stored.expires_at() - now,
-            stored,
-        },
+        Ok(stored) => {
+            let left_secs = stored.expires_at() - now;
+            match vault_addr {
+                Err(why) => LogoutPlan::Uncontacted {
+                    why: why.to_string(),
+                    left_secs,
+                },
+                Ok(addr) if !stored.issued_by(addr) => {
+                    LogoutPlan::OtherVault(stored.vault_addr().to_string())
+                }
+                Ok(_) => LogoutPlan::Revoke { stored, left_secs },
+            }
+        }
     }
-}
-
-async fn revoke(stored: &StoredToken) -> Result<(), String> {
-    let s = session()?;
-    s.api
-        .revoke_self(stored.token())
-        .await
-        .map_err(|e| e.to_string())
 }
 
 async fn logout() -> Result<LogoutOutcome, String> {
     let dir = crate::cli::resolve_config_dir();
     let now = now_unix()?;
-    let outcome = match logout_plan(read_user_token(&dir), now) {
+    let read = read_user_token(&dir);
+    let session = match &read {
+        Ok(_) => session(),
+        Err(_) => Err(String::new()),
+    };
+    let vault_addr = session.as_ref().map(|s| s.api.vault_addr());
+    let outcome = match logout_plan(read, vault_addr.map_err(String::as_str), now) {
         LogoutPlan::NothingStored => LogoutOutcome::NothingStored,
         LogoutPlan::Expired => LogoutOutcome::Expired,
         LogoutPlan::Unreadable(why) => LogoutOutcome::Unreadable(why),
-        LogoutPlan::Revoke { stored, left_secs } => match revoke(&stored).await {
-            Ok(()) => LogoutOutcome::Revoked,
-            Err(why) => LogoutOutcome::NotRevoked { why, left_secs },
+        LogoutPlan::OtherVault(addr) => LogoutOutcome::OtherVault(addr),
+        LogoutPlan::Uncontacted { why, left_secs } => LogoutOutcome::Uncontacted { why, left_secs },
+        LogoutPlan::Revoke { stored, left_secs } => match &session {
+            Ok(s) => match s.api.revoke_self(stored.token()).await {
+                Ok(()) => LogoutOutcome::Revoked,
+                Err(e) => LogoutOutcome::NotRevoked {
+                    why: e.to_string(),
+                    left_secs,
+                },
+            },
+            Err(why) => LogoutOutcome::Uncontacted {
+                why: why.clone(),
+                left_secs,
+            },
         },
     };
     erase_user_token(&dir, None).map_err(|e| match outcome {
@@ -263,6 +334,20 @@ mod tests {
             "maknae: logged out; the stored Vault token was unreadable (keychain status -25293), \
              so it could not be revoked; it was erased here and may stay valid at Vault until it expires"
         );
+        assert_eq!(
+            logout_line(&LogoutOutcome::OtherVault(ADDR.into())),
+            "maknae: logged out; the stored Vault token was issued by a different Vault \
+             (https://vault.example:8200/v1/), so it was erased here, not revoked; it may stay \
+             valid there until it expires"
+        );
+        assert_eq!(
+            logout_line(&LogoutOutcome::Uncontacted {
+                why: "config error: x".into(),
+                left_secs: 5_399
+            }),
+            "maknae: logged out; Vault was not contacted to revoke the token (config error: x); \
+             it was erased here and may stay valid for up to 1h 29m"
+        );
     }
 
     fn stored(expires_at: u64) -> StoredToken {
@@ -272,42 +357,101 @@ mod tests {
             lease: std::time::Duration::from_secs(expires_at),
             renewable: true,
         };
-        StoredToken::from_login(login, 0)
+        StoredToken::from_login(login, 0, ADDR).unwrap()
     }
+
+    const ADDR: &str = "https://vault.example:8200/v1/";
+    const OTHER: &str = "https://vault.other:8200/v1/";
 
     #[test]
     fn logout_revokes_any_token_that_has_not_expired_even_inside_the_freshness_margin() {
+        let here = Ok(ADDR);
         assert!(matches!(
-            logout_plan(Err(VaultError::TokenAbsent), 1_000),
+            logout_plan(Err(VaultError::TokenAbsent), here, 1_000),
             LogoutPlan::NothingStored
         ));
         assert!(matches!(
-            logout_plan(Err(VaultError::TokenRecord("no expiry")), 1_000),
+            logout_plan(Err(VaultError::TokenRecord("no expiry")), here, 1_000),
             LogoutPlan::Unreadable(why) if why == "no expiry"
         ));
         assert!(matches!(
-            logout_plan(Err(VaultError::TokenUnreadable("keychain status -25293".into())), 1_000),
+            logout_plan(Err(VaultError::TokenUnreadable("keychain status -25293".into())), here, 1_000),
             LogoutPlan::Unreadable(why) if why == "keychain status -25293"
         ));
         assert!(matches!(
-            logout_plan(Ok(stored(1_000)), 1_000),
+            logout_plan(Ok(stored(1_000)), here, 1_000),
             LogoutPlan::Expired
         ));
         assert!(matches!(
-            logout_plan(Ok(stored(1_000)), 2_000),
+            logout_plan(Ok(stored(1_000)), here, 2_000),
             LogoutPlan::Expired
         ));
         assert!(matches!(
-            logout_plan(Ok(stored(1_030)), 1_000),
+            logout_plan(Ok(stored(1_030)), here, 1_000),
             LogoutPlan::Revoke { left_secs: 30, .. }
         ));
         assert!(matches!(
-            logout_plan(Ok(stored(10_000)), 1_000),
+            logout_plan(Ok(stored(10_000)), here, 1_000),
             LogoutPlan::Revoke {
                 left_secs: 9_000,
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn logout_never_sends_a_token_to_a_vault_that_did_not_issue_it() {
+        assert!(matches!(
+            logout_plan(Ok(stored(10_000)), Ok(OTHER), 1_000),
+            LogoutPlan::OtherVault(addr) if addr == ADDR
+        ));
+        assert!(matches!(
+            logout_plan(Ok(stored(1_000)), Ok(OTHER), 1_000),
+            LogoutPlan::Expired
+        ));
+        assert!(matches!(
+            logout_plan(Ok(stored(10_000)), Err("config error: x"), 1_000),
+            LogoutPlan::Uncontacted { why, left_secs: 9_000 } if why == "config error: x"
+        ));
+        assert!(matches!(
+            logout_plan(Err(VaultError::TokenAbsent), Err("config error: x"), 1_000),
+            LogoutPlan::NothingStored
+        ));
+    }
+
+    #[test]
+    fn login_revokes_only_a_live_previous_token_from_the_same_vault() {
+        assert!(matches!(
+            previous_token(Ok(stored(10_000)), ADDR, 1_000),
+            Previous::SameVault(old) if old.token().expose() == "hvs.plan"
+        ));
+        assert!(matches!(
+            previous_token(Ok(stored(10_000)), OTHER, 1_000),
+            Previous::OtherVault(addr) if addr == ADDR
+        ));
+        assert!(matches!(
+            previous_token(Ok(stored(1_000)), ADDR, 1_000),
+            Previous::Nothing
+        ));
+        assert!(matches!(
+            previous_token(Ok(stored(1_000)), OTHER, 1_000),
+            Previous::Nothing
+        ));
+        for read in [
+            VaultError::TokenAbsent,
+            VaultError::TokenRecord("no expiry"),
+            VaultError::TokenUnreadable("x".into()),
+        ] {
+            assert!(matches!(
+                previous_token(Err(read), ADDR, 1_000),
+                Previous::Nothing
+            ));
+        }
+        assert_eq!(
+            other_vault_note(ADDR),
+            "a token from a different Vault (https://vault.example:8200/v1/) was erased here, \
+             not revoked"
+        );
     }
 
     #[test]
