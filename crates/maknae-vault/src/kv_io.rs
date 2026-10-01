@@ -34,3 +34,36 @@ pub async fn read_kv_field(
             }
         })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vaultrs::client::{VaultClient, VaultClientSettingsBuilder};
+
+    fn unreachable_client() -> VaultClient {
+        crate::install_default_crypto_provider();
+        let settings = VaultClientSettingsBuilder::default()
+            .address("http://127.0.0.1:1")
+            .token("")
+            .verify(true)
+            .build()
+            .unwrap();
+        VaultClient::new(settings).unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_unsplittable_path_is_refused_before_any_request() {
+        let err = read_kv_field(&unreachable_client(), "secret/no-marker", "api_key")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, VaultError::InvalidKeyVaultPath(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn a_read_that_cannot_reach_vault_is_an_error_never_an_empty_secret() {
+        let err = read_kv_field(&unreachable_client(), "secret/data/maknae/k", "api_key")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, VaultError::Auth(_)), "{err:?}");
+    }
+}
