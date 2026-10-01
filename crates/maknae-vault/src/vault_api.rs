@@ -1,6 +1,6 @@
 use crate::api_request::{
-    login_body, login_request, lookup_body, lookup_request, unwrap_request, wrapped_read_request,
-    ApiBase,
+    login_body, login_request, lookup_body, lookup_request, revoke_self_request, unwrap_request,
+    wrapped_read_request, ApiBase,
 };
 use crate::api_shape::{admit_response, append_bounded, oversize, VaultOp, MAX_VAULT_BODY_BYTES};
 use crate::user_login::{parse_login, Password, UserLogin, UserToken};
@@ -77,6 +77,11 @@ impl VaultApi {
         expect: &WrapExpectation,
     ) -> Result<Zeroizing<String>, VaultError> {
         unwrap_checked(self, token, expect).await
+    }
+
+    pub async fn revoke_self(&self, token: &UserToken) -> Result<(), VaultError> {
+        let req = revoke_self_request(&self.http, &self.base, token)?;
+        self.execute(VaultOp::RevokeSelf, req).await.map(drop)
     }
 
     async fn execute(
@@ -175,6 +180,10 @@ mod tests {
         ));
         assert!(matches!(
             rt.block_on(api.unwrap_kv_field(wrapping(), &expect)),
+            Err(VaultError::VaultTransport { .. })
+        ));
+        assert!(matches!(
+            rt.block_on(api.revoke_self(&user)),
             Err(VaultError::VaultTransport { .. })
         ));
     }

@@ -515,7 +515,7 @@ why = "#153: reqwest request glue; its header, build and serializer error arms c
 
 [[t3]]
 path = "crates/maknae-vault/src/vault_api.rs"
-why = "#153: sends the four user-credential Vault calls; no Vault stub by design. Offline, the dead-address test reaches only execute()'s transport-error path; the response path runs in the operator-gated tests/live_user_wrap.rs. The status and Content-Length admission (admit_response) and the body cap (append_bounded) are T1 in api_shape.rs, every parse and check is T1 in user_login.rs and wrap.rs, and request construction is asserted in api_request.rs. Mutation-excluded like client.rs"
+why = "#153: sends the five user-credential Vault calls (login, wrapped read, lookup, unwrap, revoke-self); no Vault stub by design. Offline, the dead-address test reaches only execute()'s transport-error path; the response path runs in the operator-gated tests/live_user_wrap.rs. The status and Content-Length admission (admit_response) and the body cap (append_bounded) are T1 in api_shape.rs, every parse and check is T1 in user_login.rs and wrap.rs, and request construction is asserted in api_request.rs. Mutation-excluded like client.rs"
 
 [[t3]]
 path = "crates/maknae-seal/src/lib.rs"
