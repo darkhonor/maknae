@@ -53,17 +53,20 @@ mod tests {
 
     #[tokio::test]
     async fn an_unsplittable_path_is_refused_before_any_request() {
-        let err = read_kv_field(&unreachable_client(), "secret/no-marker", "api_key")
-            .await
-            .unwrap_err();
+        let Err(err) = read_kv_field(&unreachable_client(), "secret/no-marker", "api_key").await
+        else {
+            panic!("an unsplittable path must be refused");
+        };
         assert!(matches!(err, VaultError::InvalidKeyVaultPath(_)), "{err:?}");
     }
 
     #[tokio::test]
     async fn a_read_that_cannot_reach_vault_is_an_error_never_an_empty_secret() {
-        let err = read_kv_field(&unreachable_client(), "secret/data/maknae/k", "api_key")
-            .await
-            .unwrap_err();
+        let Err(err) =
+            read_kv_field(&unreachable_client(), "secret/data/maknae/k", "api_key").await
+        else {
+            panic!("an unreachable Vault must be an error");
+        };
         assert!(matches!(err, VaultError::Auth(_)), "{err:?}");
     }
 }
