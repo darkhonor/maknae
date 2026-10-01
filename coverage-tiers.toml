@@ -519,6 +519,10 @@ path = "crates/maknae-vault/src/vault_api.rs"
 why = "#153: sends the five user-credential Vault calls (login, wrapped read, lookup, unwrap, revoke-self); no Vault stub by design. Offline, the dead-address test reaches only execute()'s transport-error path; the response path runs in the operator-gated tests/live_user_wrap.rs. The status and Content-Length admission (admit_response) and the body cap (append_bounded) are T1 in api_shape.rs, every parse and check is T1 in user_login.rs and wrap.rs, and request construction is asserted in api_request.rs. Mutation-excluded like client.rs"
 
 [[t3]]
+path = "crates/maknae-vault/src/token_store.rs"
+why = "#153: the user token's custody I/O only — the login keychain, /usr/bin/systemd-creds over stdin/stdout, and the token files through maknae-io; every decision it applies (record, expiry, custody choice and order, maknae-io requirements, refusal mappings) is T1 in token_record.rs. The residual and keychain arms are unit-tested on their platforms; the systemd-creds arm in an operator-run ignored test on a systemd >= 256 host. Mutation-excluded like secret_io.rs"
+
+[[t3]]
 path = "crates/maknae-seal/src/lib.rs"
 why = "module declarations and re-exports only"
 

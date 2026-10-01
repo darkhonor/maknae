@@ -50,6 +50,8 @@ mod socket;
 mod stream;
 #[cfg(unix)]
 mod token_record;
+#[cfg(unix)]
+mod token_store;
 pub use api_shape::{WrapMismatch, MAX_TOKEN_BYTES, MAX_VAULT_BODY_BYTES};
 pub use auth::{AppRoleAuth, AuthMethod, VaultToken};
 pub use ca::{load_ca_pin, CaBundle};
@@ -99,6 +101,10 @@ pub use token_record::{
     custody_for_store, custody_label, StoredToken, SystemdCreds, TokenCustody,
     MAX_TOKEN_RECORD_BYTES, TOKEN_CREDS_FILE, TOKEN_EXPIRY_MARGIN, TOKEN_RESIDUAL_FILE,
     USER_CREDS_MIN_SYSTEMD,
+};
+#[cfg(unix)]
+pub use token_store::{
+    erase_user_token, load_user_token, observe_systemd_creds, read_user_token, store_user_token,
 };
 pub use user_login::{
     userpass_username_is_acceptable, Password, UserLogin, UserToken, MAX_PASSWORD_BYTES,
