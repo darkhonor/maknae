@@ -2,7 +2,7 @@ use crate::api_request::{
     login_body, login_request, lookup_body, lookup_request, unwrap_request, wrapped_read_request,
     ApiBase,
 };
-use crate::api_shape::{append_bounded, refuse_status, VaultOp, MAX_VAULT_BODY_BYTES};
+use crate::api_shape::{admit_response, append_bounded, oversize, VaultOp, MAX_VAULT_BODY_BYTES};
 use crate::user_login::{parse_login, Password, UserLogin, UserToken};
 use crate::wrap::{
     kv_data_path, parse_lookup, parse_wrapped_read, unwrap_checked, CheckedLookup, UnwrapOps,
@@ -24,13 +24,6 @@ fn transport(op: VaultOp, e: reqwest::Error) -> VaultError {
     VaultError::VaultTransport {
         op: op.as_str(),
         detail: e.without_url().to_string(),
-    }
-}
-
-fn oversize(op: VaultOp) -> VaultError {
-    VaultError::VaultBody {
-        op: op.as_str(),
-        why: format!("body over {MAX_VAULT_BODY_BYTES} bytes"),
     }
 }
 
@@ -92,16 +85,7 @@ impl VaultApi {
         req: reqwest::Request,
     ) -> Result<Zeroizing<Vec<u8>>, VaultError> {
         let mut resp = self.http.execute(req).await.map_err(|e| transport(op, e))?;
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(refuse_status(op, status.as_u16()));
-        }
-        if resp
-            .content_length()
-            .is_some_and(|n| n > MAX_VAULT_BODY_BYTES as u64)
-        {
-            return Err(oversize(op));
-        }
+        admit_response(op, resp.status().as_u16(), resp.content_length())?;
         let mut body = Zeroizing::new(Vec::with_capacity(MAX_VAULT_BODY_BYTES));
         while let Some(chunk) = resp.chunk().await.map_err(|e| transport(op, e))? {
             append_bounded(&mut body, &chunk).map_err(|_| oversize(op))?;

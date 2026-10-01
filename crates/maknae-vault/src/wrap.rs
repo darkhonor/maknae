@@ -105,6 +105,22 @@ pub(crate) fn client_token<'a>(
     }
 }
 
+fn kv_field_is_acceptable(field: &str) -> bool {
+    !field.is_empty()
+        && field.len() <= maknae_config::MAX_KEY_FIELD_BYTES
+        && !field.chars().any(char::is_whitespace)
+}
+
+fn field_echo(field: &str) -> &str {
+    let end = field
+        .char_indices()
+        .map(|(i, c)| i + c.len_utf8())
+        .take_while(|&end| end <= maknae_config::MAX_KEY_FIELD_BYTES)
+        .last()
+        .unwrap_or(0);
+    &field[..end]
+}
+
 pub struct WrapExpectation {
     creation_path: KvDataPath,
     field: String,
@@ -119,16 +135,9 @@ impl WrapExpectation {
         max_ttl: Duration,
     ) -> Result<Self, VaultError> {
         let creation_path = kv_data_path(kv_mount, secret_path)?;
-        if field.is_empty()
-            || field.len() > maknae_config::MAX_KEY_FIELD_BYTES
-            || field.chars().any(char::is_whitespace)
-        {
+        if !kv_field_is_acceptable(field) {
             return Err(VaultError::KvField {
-                field: field
-                    .char_indices()
-                    .take_while(|(i, c)| i + c.len_utf8() <= maknae_config::MAX_KEY_FIELD_BYTES)
-                    .map(|(_, c)| c)
-                    .collect(),
+                field: field_echo(field).to_string(),
                 why: "malformed: empty, whitespace, or over 64 bytes",
             });
         }
@@ -501,8 +510,52 @@ mod tests {
         else {
             panic!("expected KvField");
         };
-        assert!(echoed.len() <= maknae_config::MAX_KEY_FIELD_BYTES && !echoed.is_empty());
+        assert_eq!(echoed.len(), maknae_config::MAX_KEY_FIELD_BYTES);
         assert!(field.starts_with(&echoed));
+        let odd = format!("a{}", "é".repeat(40));
+        let Err(VaultError::KvField { field: echoed, .. }) =
+            WrapExpectation::new("kv", "a", &odd, Duration::from_secs(60))
+        else {
+            panic!("expected KvField");
+        };
+        assert_eq!(echoed.len(), 63);
+        assert!(odd.starts_with(&echoed));
+    }
+
+    #[test]
+    fn field_echo_is_the_largest_char_boundary_prefix_within_the_bound() {
+        let odd = format!("a{}", "é".repeat(40));
+        let long = "f".repeat(65);
+        let rows: [(&str, usize); 6] = [
+            ("", 0),
+            ("api key", 7),
+            (&long, 64),
+            (&odd, 63),
+            ("é", 2),
+            ("日本", 6),
+        ];
+        for (field, want) in rows {
+            assert_eq!(field_echo(field).len(), want, "{field:?}");
+            assert!(field.starts_with(field_echo(field)));
+        }
+    }
+
+    #[test]
+    fn a_kv_field_is_non_empty_bounded_and_free_of_whitespace() {
+        let max = "f".repeat(maknae_config::MAX_KEY_FIELD_BYTES);
+        let over = "f".repeat(maknae_config::MAX_KEY_FIELD_BYTES + 1);
+        let rows: [(&str, bool); 7] = [
+            ("api_key", true),
+            ("f", true),
+            (&max, true),
+            ("", false),
+            (&over, false),
+            ("api key", false),
+            ("api\tkey", false),
+        ];
+        for (field, ok) in rows {
+            assert_eq!(kv_field_is_acceptable(field), ok, "{field:?}");
+        }
     }
 
     #[test]

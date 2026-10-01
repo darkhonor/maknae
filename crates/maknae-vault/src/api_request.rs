@@ -1,4 +1,4 @@
-use crate::api_shape::VaultOp;
+use crate::api_shape::{addr_refusal, VaultOp};
 use crate::user_login::{login_path, Password, UserToken};
 use crate::wrap::{client_token, wrap_ttl_value, KvDataPath, WrappingToken};
 use crate::{UserAuth, VaultError};
@@ -21,25 +21,7 @@ impl ApiBase {
     pub(crate) fn new(addr: &str) -> Result<Self, VaultError> {
         let parsed = url::Url::parse(addr)
             .map_err(|_| VaultError::InvalidAddr("the Vault address is not a URL".into()))?;
-        let raw_tail = addr
-            .split_once("://")
-            .and_then(|(_, rest)| rest.find(['/', '?', '#']).map(|i| &rest[i..]))
-            .unwrap_or("");
-        let refused =
-            if !parsed.username().is_empty() || parsed.password().is_some() || addr.contains('@') {
-                Some("userinfo")
-            } else if parsed.scheme() != "https" {
-                Some("a scheme other than https")
-            } else if parsed.query().is_some() {
-                Some("query")
-            } else if parsed.fragment().is_some() {
-                Some("fragment")
-            } else if parsed.path() != "/" || !matches!(raw_tail, "" | "/") {
-                Some("path")
-            } else {
-                None
-            };
-        if let Some(part) = refused {
+        if let Some(part) = addr_refusal(&parsed, addr) {
             return Err(VaultError::InvalidAddr(format!(
                 "the Vault address must not carry {part}"
             )));
@@ -242,12 +224,21 @@ mod tests {
             };
             assert!(!msg.contains("p@") && !msg.contains("u:p"), "{msg}");
         }
-        assert_eq!(
-            ApiBase::new("https://vault.example:8200/")
-                .unwrap()
-                .as_str(),
-            "https://vault.example:8200/v1/"
-        );
+        for (addr, base) in [
+            (
+                "https://vault.example:8200/",
+                "https://vault.example:8200/v1/",
+            ),
+            ("https://[::1]:8200", "https://[::1]:8200/v1/"),
+            ("https://vault.example:443", "https://vault.example/v1/"),
+            ("HTTPS://vault.example", "https://vault.example/v1/"),
+            (
+                "https://bücher.example",
+                "https://xn--bcher-kva.example/v1/",
+            ),
+        ] {
+            assert_eq!(ApiBase::new(addr).unwrap().as_str(), base, "{addr}");
+        }
     }
 
     fn header<'a>(req: &'a Request, name: &str) -> &'a str {

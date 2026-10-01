@@ -10,9 +10,13 @@ pub const MAX_PASSWORD_BYTES: usize = 1024;
 
 pub struct Password(Zeroizing<String>);
 
+fn password_len_ok(len: usize) -> bool {
+    (1..=MAX_PASSWORD_BYTES).contains(&len)
+}
+
 impl Password {
     pub fn new(secret: Zeroizing<String>) -> Result<Self, VaultError> {
-        if !(1..=MAX_PASSWORD_BYTES).contains(&secret.len()) {
+        if !password_len_ok(secret.len()) {
             return Err(VaultError::InvalidSecret {
                 what: "password",
                 why: "must be 1..=1024 bytes",
@@ -133,6 +137,7 @@ pub(crate) fn parse_login(body: &[u8], username: &str) -> Result<UserLogin, Vaul
         renewable: auth.renewable,
     })
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,6 +193,13 @@ mod tests {
             login_path(&corp, "../root"),
             Err(VaultError::InvalidUsername(_))
         ));
+    }
+
+    #[test]
+    fn the_password_length_bound_is_one_to_1024_bytes_inclusive() {
+        for (len, ok) in [(0, false), (1, true), (1024, true), (1025, false)] {
+            assert_eq!(password_len_ok(len), ok, "{len}");
+        }
     }
 
     #[test]

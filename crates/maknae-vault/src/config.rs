@@ -44,14 +44,20 @@ pub struct UserAuth {
     mount: String,
 }
 
+fn mount_refusal(mount: &str) -> Option<String> {
+    if let Err(why) = maknae_config::mount_path_is_acceptable(mount) {
+        return Some(format!("vault.user_auth.mount {why}"));
+    }
+    if !crate::api_shape::url_path_is_safe(mount) {
+        return Some("vault.user_auth.mount has a character outside [A-Za-z0-9._/-]".into());
+    }
+    None
+}
+
 impl UserAuth {
     pub fn new(method: UserAuthMethod, mount: &str) -> Result<Self, VaultError> {
-        maknae_config::mount_path_is_acceptable(mount)
-            .map_err(|why| VaultError::InvalidMount(format!("vault.user_auth.mount {why}")))?;
-        if !crate::api_shape::url_path_is_safe(mount) {
-            return Err(VaultError::InvalidMount(
-                "vault.user_auth.mount has a character outside [A-Za-z0-9._/-]".into(),
-            ));
+        if let Some(why) = mount_refusal(mount) {
+            return Err(VaultError::InvalidMount(why));
         }
         Ok(Self {
             method,
@@ -722,6 +728,26 @@ mod tests {
                 Err(e) => panic!("{bad:?}: wrong refusal {e}"),
                 Ok(_) => panic!("{bad:?} must be refused"),
             }
+        }
+    }
+
+    #[test]
+    fn mount_refusal_names_the_rule_each_mount_breaks() {
+        let rows: [(&str, Option<&str>); 5] = [
+            ("userpass", None),
+            ("team/userpass", None),
+            ("", Some("vault.user_auth.mount is empty")),
+            (
+                "a/../b",
+                Some("vault.user_auth.mount has a '.' or '..' segment"),
+            ),
+            (
+                "a#b",
+                Some("vault.user_auth.mount has a character outside [A-Za-z0-9._/-]"),
+            ),
+        ];
+        for (mount, want) in rows {
+            assert_eq!(mount_refusal(mount).as_deref(), want, "{mount:?}");
         }
     }
 

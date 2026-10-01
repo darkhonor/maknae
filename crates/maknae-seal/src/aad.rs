@@ -16,6 +16,21 @@ pub struct SealContext<'a> {
 #[derive(Clone, PartialEq, Eq)]
 pub struct SealAad(Vec<u8>);
 
+fn aad_field_ok(field: &[u8]) -> bool {
+    (1..=MAX_AAD_FIELD_BYTES).contains(&field.len())
+}
+
+fn encode(fields: &[&str; 5]) -> Vec<u8> {
+    let len = AAD_DOMAIN.len() + fields.iter().map(|f| 2 + f.len()).sum::<usize>();
+    let mut out = Vec::with_capacity(len);
+    out.extend_from_slice(AAD_DOMAIN);
+    for field in fields {
+        out.extend_from_slice(&(field.len() as u16).to_be_bytes());
+        out.extend_from_slice(field.as_bytes());
+    }
+    out
+}
+
 impl SealAad {
     pub fn new(ctx: &SealContext<'_>) -> Result<Self, SealError> {
         let fields = [
@@ -25,20 +40,10 @@ impl SealAad {
             ctx.expected_path,
             ctx.key_field,
         ];
-        let mut len = AAD_DOMAIN.len();
-        for field in fields {
-            if !(1..=MAX_AAD_FIELD_BYTES).contains(&field.len()) {
-                return Err(SealError::AadField);
-            }
-            len += 2 + field.len();
+        if !fields.iter().all(|f| aad_field_ok(f.as_bytes())) {
+            return Err(SealError::AadField);
         }
-        let mut out = Vec::with_capacity(len);
-        out.extend_from_slice(AAD_DOMAIN);
-        for field in fields {
-            out.extend_from_slice(&(field.len() as u16).to_be_bytes());
-            out.extend_from_slice(field.as_bytes());
-        }
-        Ok(Self(out))
+        Ok(Self(encode(&fields)))
     }
 
     pub fn as_bytes(&self) -> &[u8] {
@@ -82,6 +87,26 @@ mod tests {
             want.extend_from_slice(f.as_bytes());
         }
         assert_eq!(aad.as_bytes(), &want[..]);
+    }
+
+    #[test]
+    fn an_aad_field_is_one_to_1024_bytes_inclusive() {
+        for (len, ok) in [(0, false), (1, true), (1024, true), (1025, false)] {
+            assert_eq!(aad_field_ok(&vec![b'x'; len]), ok, "{len}");
+        }
+    }
+
+    #[test]
+    fn encode_writes_the_domain_and_each_length_prefixed_field_at_exact_capacity() {
+        let out = encode(&["ab", "c", "", "def", "g"]);
+        let mut want = AAD_DOMAIN.to_vec();
+        want.extend_from_slice(b"\x00\x02ab\x00\x01c\x00\x00\x00\x03def\x00\x01g");
+        assert_eq!(out, want);
+        assert_eq!(out.capacity(), AAD_DOMAIN.len() + 2 * 5 + 7);
+        let long = "y".repeat(300);
+        let out = encode(&[&long, "a", "b", "c", "d"]);
+        assert_eq!(&out[AAD_DOMAIN.len()..AAD_DOMAIN.len() + 2], &[0x01, 0x2c]);
+        assert_eq!(out.len(), out.capacity());
     }
 
     #[test]

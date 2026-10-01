@@ -52,6 +52,47 @@ impl VaultOp {
     }
 }
 
+pub(crate) fn addr_refusal(parsed: &url::Url, addr: &str) -> Option<&'static str> {
+    let raw_tail = addr
+        .split_once("://")
+        .and_then(|(_, rest)| rest.find(['/', '?', '#']).map(|i| &rest[i..]))
+        .unwrap_or("");
+    if addr.contains('@') {
+        Some("userinfo")
+    } else if parsed.scheme() != "https" {
+        Some("a scheme other than https")
+    } else if parsed.query().is_some() {
+        Some("query")
+    } else if parsed.fragment().is_some() {
+        Some("fragment")
+    } else if parsed.path() != "/" || !matches!(raw_tail, "" | "/") {
+        Some("path")
+    } else {
+        None
+    }
+}
+
+pub(crate) fn oversize(op: VaultOp) -> VaultError {
+    VaultError::VaultBody {
+        op: op.as_str(),
+        why: format!("body over {MAX_VAULT_BODY_BYTES} bytes"),
+    }
+}
+
+pub(crate) fn admit_response(
+    op: VaultOp,
+    status: u16,
+    content_length: Option<u64>,
+) -> Result<(), VaultError> {
+    if !(200..300).contains(&status) {
+        return Err(refuse_status(op, status));
+    }
+    if content_length.is_some_and(|n| n > MAX_VAULT_BODY_BYTES as u64) {
+        return Err(oversize(op));
+    }
+    Ok(())
+}
+
 pub(crate) fn refuse_status(op: VaultOp, status: u16) -> VaultError {
     let hint = match (op, status) {
         (VaultOp::UserpassLogin, 400) => {
@@ -236,6 +277,88 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn a_response_is_admitted_only_on_success_within_the_body_cap() {
+        let cap = MAX_VAULT_BODY_BYTES as u64;
+        for (status, len) in [
+            (200, None),
+            (204, Some(0)),
+            (299, Some(cap)),
+            (200, Some(cap)),
+        ] {
+            assert!(
+                admit_response(VaultOp::Unwrap, status, len).is_ok(),
+                "{status} {len:?}"
+            );
+        }
+        for status in [199, 300, 404, 500] {
+            assert!(
+                matches!(
+                    admit_response(VaultOp::WrappedRead, status, Some(0)),
+                    Err(VaultError::VaultStatus { status: s, .. }) if s == status
+                ),
+                "{status}"
+            );
+        }
+        assert!(matches!(
+            admit_response(VaultOp::UserpassLogin, 400, None),
+            Err(VaultError::UserpassLogin("wrong username or password"))
+        ));
+        assert!(matches!(
+            admit_response(VaultOp::Unwrap, 403, Some(cap + 1)),
+            Err(VaultError::WrapMismatch(WrapMismatch::Invalid))
+        ));
+        let over = admit_response(VaultOp::WrapLookup, 200, Some(cap + 1));
+        assert!(
+            matches!(
+                &over,
+                Err(VaultError::VaultBody { op: "wrapping lookup", why }) if why == "body over 65536 bytes"
+            ),
+            "{over:?}"
+        );
+    }
+
+    #[test]
+    fn oversize_names_the_op_and_the_cap() {
+        assert!(matches!(
+            oversize(VaultOp::Unwrap),
+            VaultError::VaultBody { op: "unwrap", why } if why == "body over 65536 bytes"
+        ));
+    }
+
+    #[test]
+    fn a_vault_address_is_refused_by_the_part_it_must_not_carry() {
+        let rows: [(&str, Option<&str>); 23] = [
+            ("https://vault.example:8200", None),
+            ("https://vault.example:8200/", None),
+            ("https://[::1]:8200", None),
+            ("https://vault.example:443", None),
+            ("HTTPS://vault.example", None),
+            ("https://bücher.example", None),
+            ("https://u:p@vault.example", Some("userinfo")),
+            ("https://u@vault.example", Some("userinfo")),
+            ("https://:p@vault.example", Some("userinfo")),
+            ("http://u:p@vault.example", Some("userinfo")),
+            ("https://@vault.example", Some("userinfo")),
+            ("https://:@vault.example", Some("userinfo")),
+            ("http://vault.example", Some("a scheme other than https")),
+            ("ftp://vault.example", Some("a scheme other than https")),
+            ("https://vault.example/?x=1", Some("query")),
+            ("https://vault.example?", Some("query")),
+            ("https://vault.example/#f", Some("fragment")),
+            ("https://vault.example#", Some("fragment")),
+            ("https://vault.example/prefix", Some("path")),
+            ("https://vault.example/%2e%2e", Some("path")),
+            ("https://vault.example/.", Some("path")),
+            ("https://vault.example/x/..", Some("path")),
+            ("https://vault.example\\prefix", Some("path")),
+        ];
+        for (addr, want) in rows {
+            let parsed = url::Url::parse(addr).unwrap();
+            assert_eq!(addr_refusal(&parsed, addr), want, "{addr}");
+        }
     }
 
     #[test]
