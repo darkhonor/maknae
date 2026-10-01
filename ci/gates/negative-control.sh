@@ -214,7 +214,7 @@ expect_reject_because "p2/cli-links-authz-basic" \
 # nearly what was happening.
 expect_accept "p2/clean-workspace-passes" "p2-invert-tree: ok" \
   "$here/p2-invert-tree.sh" "$(p2_fixture)"
-seal_fixture() { # <none|kernel|optional|transitive|daemon|cli>
+seal_fixture() { # <none|kernel|optional|transitive|daemon|cli|renamed|target|renamedep|builddep>
   local mode="$1" fx d
   fx="$(mktemp -d -p "$NC_TMP")"
   for d in crates/maknae-seal crates/maknae-kernel crates/mid bins/maknaed bins/maknae; do
@@ -240,6 +240,17 @@ seal_fixture() { # <none|kernel|optional|transitive|daemon|cli>
       echo 'mid = { path = "../mid" }' >> "$fx/crates/maknae-kernel/Cargo.toml" ;;
     daemon) echo 'maknae-seal = { path = "../../crates/maknae-seal" }' >> "$fx/bins/maknaed/Cargo.toml" ;;
     cli) echo 'maknae-seal = { path = "../../crates/maknae-seal" }' >> "$fx/bins/maknae/Cargo.toml" ;;
+    renamed)
+      sed -i.bak 's/^name = "maknaed"/name = "maknae-daemon"/' "$fx/bins/maknaed/Cargo.toml"
+      rm "$fx/bins/maknaed/Cargo.toml.bak"
+      echo 'maknae-seal = { path = "../../crates/maknae-seal" }' >> "$fx/bins/maknaed/Cargo.toml" ;;
+    target)
+      printf '[target.%s.dependencies]\nmaknae-seal = { path = "../maknae-seal" }\n' "'cfg(target_os=\"windows\")'" \
+        >> "$fx/crates/maknae-kernel/Cargo.toml" ;;
+    renamedep) echo 'sneaky = { package = "maknae-seal", path = "../maknae-seal" }' >> "$fx/crates/maknae-kernel/Cargo.toml" ;;
+    builddep)
+      printf '[build-dependencies]\nmaknae-seal = { path = "../maknae-seal" }\n' >> "$fx/crates/maknae-kernel/Cargo.toml"
+      echo 'fn main() {}' > "$fx/crates/maknae-kernel/build.rs" ;;
   esac
   echo "$fx"
 }
@@ -262,6 +273,18 @@ expect_accept "seal-confinement/the-cli-may-link-seal" "seal-confinement: ok" \
 expect_reject_because "seal-confinement/an-absent-seal-crate-fails-closed" \
   "FAIL: seal-confinement: cargo tree errored" \
   "$here/seal-confinement.sh" "$(p2_fixture)"
+expect_reject_because "seal-confinement/a-renamed-forbidden-consumer-is-not-a-vacuous-pass" \
+  "FAIL: seal-confinement: forbidden consumer 'maknaed' is not a workspace package" \
+  "$here/seal-confinement.sh" "$(seal_fixture renamed)"
+expect_reject_because "seal-confinement/a-target-specific-edge-is-caught" \
+  "FAIL: seal-confinement: 'maknae-seal' is reachable from 'maknae-kernel'" \
+  "$here/seal-confinement.sh" "$(seal_fixture target)"
+expect_reject_because "seal-confinement/a-renamed-dependency-is-caught" \
+  "FAIL: seal-confinement: 'maknae-seal' is reachable from 'maknae-kernel'" \
+  "$here/seal-confinement.sh" "$(seal_fixture renamedep)"
+expect_reject_because "seal-confinement/a-build-dependency-is-caught" \
+  "FAIL: seal-confinement: 'maknae-seal' is reachable from 'maknae-kernel'" \
+  "$here/seal-confinement.sh" "$(seal_fixture builddep)"
 
 # ---- isolation-contract-lint (#219): a PRESENT file is not a SCANNED file ----
 # This gate had no probe at all before #219, because it resolved its root from
