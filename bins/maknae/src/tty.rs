@@ -225,7 +225,11 @@ mod tests {
         let (got, before, after, echoed) = type_at_prompt(b"s3cret\r");
         assert_eq!(got.unwrap().len(), 6);
         assert_eq!(after, before);
-        assert!(!echoed.windows(6).any(|w| w == b"s3cret"), "{echoed:?}");
+        assert!(
+            !echoed.windows(6).any(|w| w == b"s3cret"),
+            "the typed password was echoed ({} bytes before the marker)",
+            echoed.len()
+        );
     }
 
     #[test]
