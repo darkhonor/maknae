@@ -50,6 +50,8 @@ The client reads the Egress Daemon's public key from its own `~/.maknae`, never 
 
 Measured 2026-10-01 with OpenSSL 3.6.4 on Apple Silicon (`openssl speed`): P-384 ECDH 0.14 ms per operation; AES-256-GCM on a wrapping-token-sized input under 1 µs. The shipped path uses `aws-lc-rs`; its timing test lands with the implementation.
 
+**Amended 2026-10-01 (#153 PR 2):** sealing lives in `crates/maknae-seal`; `ci/gates/seal-confinement.sh` keeps `maknaed` and `maknae-kernel` from reaching it.
+
 ### 6. The Egress Daemon has no provider and no Vault identity of its own
 
 It acts only on behalf of a user, within the authorized set, using what a single-use wrapping token opens. Its AppRole, SecretID and KV read policy are removed. It holds the sealing key pair: the private key in its own custody (a systemd encrypted credential on Linux; on macOS the System keychain item of ADR-0018 decision 6, whose contents change from a SecretID to this key), the public key published to each user as decision 5 describes.
