@@ -123,6 +123,8 @@ files = [
   "crates/maknae-vault/src/api_shape.rs",
   "crates/maknae-vault/src/user_login.rs",
   "crates/maknae-vault/src/wrap.rs",
+  "crates/maknae-seal/src/fips.rs",
+  "crates/maknae-seal/src/seal_pub.rs",
   # Stage-3a "it responds" cohort (Task 9): the wire/frame decode-and-dispatch
   # + config-range + audit-canonicalization + connection/verb decision seams.
   # Each holds fail-closed decision logic per the T1 line-drawing rule (a
@@ -271,7 +273,7 @@ files = [
 # critical crates whose fail-closed behavior must be provable to external
 # third parties. Zero missed mutants required.
 # It also carries the loop's decision code (maknae-agent), whose false-assurance surface is T1.
-mutants_crates = ["maknae-security", "maknae-config", "maknae-io", "maknae-kernel", "maknae-vault", "maknae-proto", "maknae-audit-append", "maknae-msgs", "maknae-authz-basic", "maknae-classification-aus", "maknae-llm", "maknae-agent", "maknae-deputy", "maknae-sys"]
+mutants_crates = ["maknae-security", "maknae-config", "maknae-io", "maknae-kernel", "maknae-vault", "maknae-proto", "maknae-audit-append", "maknae-msgs", "maknae-authz-basic", "maknae-classification-aus", "maknae-llm", "maknae-agent", "maknae-deputy", "maknae-sys", "maknae-seal"]
 # Crates whose mutation run needs a non-default feature so feature-gated seam
 # code is LIVE (mutants in cfg'd-out code are unkillable-MISSED — the
 # 2026-08-27 main-red class; #77 generalized the maknae-config special case).
@@ -511,6 +513,22 @@ why = "#153: reqwest request glue; its header, build and serializer error arms c
 [[t3]]
 path = "crates/maknae-vault/src/vault_api.rs"
 why = "#153: sends the four user-credential Vault calls; no Vault stub by design, so execute() is exercised by the dead-address test and the operator-gated tests/live_user_wrap.rs. Every parse and check is T1 in api_shape.rs, user_login.rs and wrap.rs; request construction is asserted in api_request.rs. Mutation-excluded like client.rs"
+
+[[t3]]
+path = "crates/maknae-seal/src/lib.rs"
+why = "module declarations and re-exports only"
+
+[[t3]]
+path = "crates/maknae-seal/src/error.rs"
+why = "SealError enum and Display; no decision logic"
+
+[[t3]]
+path = "crates/maknae-seal/src/glue.rs"
+why = "#153: the live FIPS-module probe and the error-mapping helper, the fips_glue.rs pattern; the decision is fips.rs (T1). Mutation-excluded: fips_gate returning Ok is unkillable on a FIPS build"
+
+[[t3]]
+path = "crates/maknae-seal/src/keys.rs"
+why = "#153: aws-lc and pem call glue for the sealing key pair; its library error arms cannot fire after the length and shape checks. The seal.pub decisions are T1 in seal_pub.rs; the curve and PKCS#8 refusals are asserted here, and the file stays in the mutation set"
 
 # maknae-vault Stage 2 (mTLS transport): all I/O, mutation-excluded (mutants.toml).
 [[t3]]
