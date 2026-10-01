@@ -120,6 +120,14 @@ files = [
   "crates/maknae-vault/src/egress_session.rs",
   # #172: the FIPS-module SHA-256 wrapper behind every egress content digest.
   "crates/maknae-vault/src/digest.rs",
+  "crates/maknae-vault/src/api_shape.rs",
+  "crates/maknae-vault/src/user_login.rs",
+  "crates/maknae-vault/src/wrap.rs",
+  "crates/maknae-seal/src/fips.rs",
+  "crates/maknae-seal/src/aad.rs",
+  "crates/maknae-seal/src/wire.rs",
+  "crates/maknae-seal/src/seal.rs",
+  "crates/maknae-seal/src/seal_pub.rs",
   # Stage-3a "it responds" cohort (Task 9): the wire/frame decode-and-dispatch
   # + config-range + audit-canonicalization + connection/verb decision seams.
   # Each holds fail-closed decision logic per the T1 line-drawing rule (a
@@ -268,7 +276,7 @@ files = [
 # critical crates whose fail-closed behavior must be provable to external
 # third parties. Zero missed mutants required.
 # It also carries the loop's decision code (maknae-agent), whose false-assurance surface is T1.
-mutants_crates = ["maknae-security", "maknae-config", "maknae-io", "maknae-kernel", "maknae-vault", "maknae-proto", "maknae-audit-append", "maknae-msgs", "maknae-authz-basic", "maknae-classification-aus", "maknae-llm", "maknae-agent", "maknae-deputy", "maknae-sys"]
+mutants_crates = ["maknae-security", "maknae-config", "maknae-io", "maknae-kernel", "maknae-vault", "maknae-proto", "maknae-audit-append", "maknae-msgs", "maknae-authz-basic", "maknae-classification-aus", "maknae-llm", "maknae-agent", "maknae-deputy", "maknae-sys", "maknae-seal"]
 # Crates whose mutation run needs a non-default feature so feature-gated seam
 # code is LIVE (mutants in cfg'd-out code are unkillable-MISSED — the
 # 2026-08-27 main-red class; #77 generalized the maknae-config special case).
@@ -501,6 +509,30 @@ why = "#76: the System-keychain read through Security.framework — the ACL, the
 path = "crates/maknae-vault/src/operator.rs"
 why = "OperatorClient — token-authed role-id/secret-id/accessor/CA-chain I/O adapter for enroll (Task 3); thin pass-throughs to verified vaultrs calls + one hand-rolled rustify Endpoint, exercised by a gated live test. The one pure helper (join_ca_chain) has real unit tests."
 
+[[t3]]
+path = "crates/maknae-vault/src/api_request.rs"
+why = "#153: reqwest request glue; its header, build and serializer error arms cannot fire after the T1 token, path and TTL checks, nor its no-host arm once addr_refusal (T1 in api_shape.rs) has admitted only https. Which token rides X-Vault-Token is decided in wrap.rs client_token (T1); every request's method, URL, headers and body are asserted without a server, and the file stays in the mutation set"
+
+[[t3]]
+path = "crates/maknae-vault/src/vault_api.rs"
+why = "#153: sends the four user-credential Vault calls; no Vault stub by design. Offline, the dead-address test reaches only execute()'s transport-error path; the response path runs in the operator-gated tests/live_user_wrap.rs. The status and Content-Length admission (admit_response) and the body cap (append_bounded) are T1 in api_shape.rs, every parse and check is T1 in user_login.rs and wrap.rs, and request construction is asserted in api_request.rs. Mutation-excluded like client.rs"
+
+[[t3]]
+path = "crates/maknae-seal/src/lib.rs"
+why = "module declarations and re-exports only"
+
+[[t3]]
+path = "crates/maknae-seal/src/error.rs"
+why = "SealError enum and Display; no decision logic"
+
+[[t3]]
+path = "crates/maknae-seal/src/glue.rs"
+why = "#153: the live FIPS-module probe and the error-mapping helper, the fips_glue.rs pattern; the decision is fips.rs (T1). Mutation-excluded: fips_gate returning Ok is unkillable on a FIPS build"
+
+[[t3]]
+path = "crates/maknae-seal/src/keys.rs"
+why = "#153: aws-lc and pem call glue for the sealing key pair; its library error arms cannot fire after the length and shape checks. The seal.pub decisions are T1 in seal_pub.rs; the curve and PKCS#8 refusals are asserted here, and the file stays in the mutation set"
+
 # maknae-vault Stage 2 (mTLS transport): all I/O, mutation-excluded (mutants.toml).
 [[t3]]
 path = "crates/maknae-vault/src/tls.rs"
@@ -671,6 +703,51 @@ why = "the read-leg retry taken (EINTR mid-read): cannot be provoked without a s
 path = "crates/maknae-kernel/src/egress_socket.rs"
 anchor = "continue; // EAGAIN or EINTR: re-ask the budget"
 why = "the write-leg retry taken (EAGAIN after poll reported writable, or EINTR): not controllable through a real socket; the decision (`write_is_retried`) is proven on a table and the hard-error direction on the wire"
+
+[[exception]]
+path = "crates/maknae-seal/src/seal.rs"
+anchor = "let okm = lc(prk.expand("
+why = "#153: HKDF expand fails only for an output over 255 hash lengths; the length is the constant 32"
+
+[[exception]]
+path = "crates/maknae-seal/src/seal.rs"
+anchor = "lc(okm.fill(&mut key[..]), SealError::Crypto)?;"
+why = "#153: fill fails only when the buffer length differs from the requested length; both are AES_256_KEY_LEN"
+
+[[exception]]
+path = "crates/maknae-seal/src/seal.rs"
+anchor = "let ephemeral = lc(generated, SealError::Crypto)?;"
+why = "#153: P-384 key generation fails only on an internal aws-lc error; no input reaches it"
+
+[[exception]]
+path = "crates/maknae-seal/src/seal.rs"
+anchor = "let ephemeral_public = lc(ephemeral.compute_public_key(), SealError::Crypto)?;"
+why = "#153: public-key derivation from a key aws-lc just generated fails only on an internal error"
+
+[[exception]]
+path = "crates/maknae-seal/src/seal.rs"
+anchor = "let ephemeral_bytes = lc(point, SealError::Crypto)?;"
+why = "#153: a P-384 uncompressed point is always 97 bytes; the length conversion cannot fail"
+
+[[exception]]
+path = "crates/maknae-seal/src/seal.rs"
+anchor = "let key = agreed?;"
+why = "#153: ECDH against a recipient key that from_spki_der already parsed and validated fails only on an internal error"
+
+[[exception]]
+path = "crates/maknae-seal/src/seal.rs"
+anchor = "let (nonce, tag) = lc(sealed, SealError::Crypto)?;"
+why = "#153: AES-GCM seal of at most 1024 bytes with a module-generated nonce fails only on an internal error"
+
+[[exception]]
+path = "crates/maknae-seal/src/seal.rs"
+anchor = "let nonce = lc(unique, SealError::BlobLength)?;"
+why = "#153: parse_blob always yields a 12-byte nonce slice; the conversion cannot fail"
+
+[[exception]]
+path = "crates/maknae-seal/src/seal.rs"
+anchor = "let opener = agreed?;"
+why = "#153: ECDH against an ephemeral point that ParsedPublicKey already validated fails only on an internal error"
 
 # [[env_bound_override]] — §9 discriminator. t1/t2 only;
 # closed grammar ^target_os:(linux|macos|windows)$.

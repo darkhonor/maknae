@@ -1,0 +1,17 @@
+[package]
+name = "maknae-seal"
+publish.workspace = true
+description = "Seals a per-turn Vault wrapping token to the Egress Daemon: P-384 ECDH, HKDF-SHA-384, AES-256-GCM"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+aws-lc-rs = { version = "1.18", features = ["fips"] }  # 1.18: the AWS-LC-FIPS 4.x line; one aws-lc-rs in the tree (ADR-0025)
+pem = "4"
+zeroize = "1"

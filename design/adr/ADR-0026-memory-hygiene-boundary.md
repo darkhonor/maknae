@@ -42,6 +42,8 @@ Each is converted by the change that next touches it, or filed as its own issue 
 
 ### 2. The residual — the authoritative list
 
+**Amended 2026-10-01 (#153):** the unwrap-leg row.
+
 | where | what stays unwiped |
 |---|---|
 | ciborium 0.2.2 (`decode_request`, `decode_response`, the egress frame decoders) | the growth copies of a value over 4096 bytes or of an indefinite-length value delivered in segments (each segment is appended separately), if freed; the plain owned buffer on a decode error (the scratch is decision 1's — Maknae chooses the entry point) |
@@ -51,6 +53,7 @@ Each is converted by the change that next touches it, or filed as its own issue 
 | serde_json string un-escaping (deputy reply; `maknae agent` tool arguments) | the scratch behind any escaped string |
 | vaultrs `kv2::read` (reqwest + serde_json) | the fetched secret, key included, in the transport and parser buffers |
 | reqwest `bearer_auth` | the provider key in a plain `HeaderValue` for the request's lifetime |
+| rustls / hyper / reqwest `chunk()` and serde_json on the unwrap leg (`crates/maknae-vault/src/vault_api.rs` `execute`, `wrap.rs` `select_kv_field`) | the unwrapped secret, provider key included, in the transport's read buffers and each chunk; serde_json's scratch behind the selected field when it is escaped. The Maknae-owned body and the selected value are zeroizing and never grow |
 
 A new third-party path that carries secret-class bytes is added here in the change that introduces it. **Option A** of #342: accept the boundary; no new dependency, no fork.
 

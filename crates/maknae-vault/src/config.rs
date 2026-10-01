@@ -20,6 +20,100 @@ pub const VAULT_SECTION: &str = "vault";
 pub const DEFAULT_APPROLE_MOUNT: &str = "maknae-approle";
 pub const DEFAULT_PKI_INT_MOUNT: &str = "maknae-pki-int";
 
+pub const DEFAULT_USERPASS_MOUNT: &str = "userpass";
+
+pub(crate) const USER_AUTH_KEYS: [&str; 2] = ["type", "mount"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserAuthMethod {
+    Userpass,
+}
+
+impl UserAuthMethod {
+    pub fn parse(s: &str) -> Result<Self, VaultError> {
+        match s {
+            "userpass" => Ok(UserAuthMethod::Userpass),
+            other => Err(VaultError::UnknownUserAuth(other.to_string())),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserAuth {
+    method: UserAuthMethod,
+    mount: String,
+}
+
+fn mount_refusal(mount: &str) -> Option<String> {
+    if let Err(why) = maknae_config::mount_path_is_acceptable(mount) {
+        return Some(format!("vault.user_auth.mount {why}"));
+    }
+    if !crate::api_shape::url_path_is_safe(mount) {
+        return Some("vault.user_auth.mount has a character outside [A-Za-z0-9._/-]".into());
+    }
+    None
+}
+
+impl UserAuth {
+    pub fn new(method: UserAuthMethod, mount: &str) -> Result<Self, VaultError> {
+        if let Some(why) = mount_refusal(mount) {
+            return Err(VaultError::InvalidMount(why));
+        }
+        Ok(Self {
+            method,
+            mount: mount.to_string(),
+        })
+    }
+
+    pub fn userpass_default() -> Self {
+        Self {
+            method: UserAuthMethod::Userpass,
+            mount: DEFAULT_USERPASS_MOUNT.to_string(),
+        }
+    }
+
+    pub fn method(&self) -> UserAuthMethod {
+        self.method
+    }
+
+    pub fn mount(&self) -> &str {
+        &self.mount
+    }
+}
+
+fn str_entry<'a>(
+    entries: &'a [(String, Value)],
+    key: &str,
+    name: &'static str,
+) -> Result<Option<&'a str>, VaultError> {
+    match entries.iter().find(|(k, _)| k == key).map(|(_, v)| v) {
+        None => Ok(None),
+        Some(Value::Str(s)) => Ok(Some(s.as_str())),
+        Some(_) => Err(VaultError::ConfigShape {
+            key: name,
+            want: "a string",
+        }),
+    }
+}
+
+pub fn user_auth_from_value(user_auth: Option<&Value>) -> Result<UserAuth, VaultError> {
+    let Some(value) = user_auth else {
+        return Ok(UserAuth::userpass_default());
+    };
+    let Value::Map(entries) = value else {
+        return Err(VaultError::ConfigShape {
+            key: "vault.user_auth",
+            want: "a map",
+        });
+    };
+    maknae_config::reject_unknown_keys("vault.user_auth", entries, &USER_AUTH_KEYS)?;
+    let method = str_entry(entries, "type", "vault.user_auth.type")?
+        .ok_or(VaultError::MissingKey("vault.user_auth.type"))?;
+    let mount =
+        str_entry(entries, "mount", "vault.user_auth.mount")?.unwrap_or(DEFAULT_USERPASS_MOUNT);
+    UserAuth::new(UserAuthMethod::parse(method)?, mount)
+}
+
 /// #210: the keys this section's parser reads — the closed vocabulary, held
 /// EQUAL to `VaultConfig`'s fields by a test below.
 pub(crate) const VAULT_KEYS: [&str; 5] = [
@@ -521,5 +615,150 @@ mod tests {
             vault_config_from_document(&doc),
             Err(VaultError::MissingKey("vault"))
         ));
+    }
+
+    fn ua_map(pairs: &[(&str, Value)]) -> Value {
+        Value::Map(
+            pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), v.clone()))
+                .collect(),
+        )
+    }
+
+    fn ua_str(v: &str) -> Value {
+        Value::Str(v.to_string())
+    }
+
+    #[test]
+    fn user_auth_an_absent_block_is_userpass_on_the_default_mount() {
+        let a = user_auth_from_value(None).unwrap();
+        assert_eq!(
+            (a.method(), a.mount()),
+            (UserAuthMethod::Userpass, DEFAULT_USERPASS_MOUNT)
+        );
+        assert_eq!(a, UserAuth::userpass_default());
+    }
+
+    #[test]
+    fn user_auth_the_type_is_required_and_the_mount_defaults() {
+        let a = user_auth_from_value(Some(&ua_map(&[("type", ua_str("userpass"))]))).unwrap();
+        assert_eq!(a.mount(), "userpass");
+        let a = user_auth_from_value(Some(&ua_map(&[
+            ("type", ua_str("userpass")),
+            ("mount", ua_str("corp-userpass")),
+        ])))
+        .unwrap();
+        assert_eq!(a.mount(), "corp-userpass");
+        assert!(matches!(
+            user_auth_from_value(Some(&ua_map(&[("mount", ua_str("userpass"))]))),
+            Err(VaultError::MissingKey("vault.user_auth.type"))
+        ));
+    }
+
+    #[test]
+    fn user_auth_an_unknown_type_is_refused_by_name() {
+        for t in ["ldap", "oidc", "Userpass", "approle", ""] {
+            match user_auth_from_value(Some(&ua_map(&[("type", ua_str(t))]))) {
+                Err(VaultError::UnknownUserAuth(got)) => assert_eq!(got, t),
+                Err(e) => panic!("{t:?}: wrong refusal {e}"),
+                Ok(_) => panic!("{t:?} must be refused"),
+            }
+        }
+    }
+
+    #[test]
+    fn user_auth_an_unknown_key_is_refused() {
+        assert!(matches!(
+            user_auth_from_value(Some(&ua_map(&[
+                ("type", ua_str("userpass")),
+                ("mont", ua_str("userpass"))
+            ]))),
+            Err(VaultError::Config(_))
+        ));
+    }
+
+    #[test]
+    fn user_auth_a_non_string_or_non_map_shape_is_refused() {
+        assert!(matches!(
+            user_auth_from_value(Some(&ua_str("userpass"))),
+            Err(VaultError::ConfigShape {
+                key: "vault.user_auth",
+                want: "a map"
+            })
+        ));
+        assert!(matches!(
+            user_auth_from_value(Some(&ua_map(&[("type", Value::Int(5))]))),
+            Err(VaultError::ConfigShape {
+                key: "vault.user_auth.type",
+                ..
+            })
+        ));
+        assert!(matches!(
+            user_auth_from_value(Some(&ua_map(&[
+                ("type", ua_str("userpass")),
+                ("mount", Value::Int(5))
+            ]))),
+            Err(VaultError::ConfigShape {
+                key: "vault.user_auth.mount",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn user_auth_the_mount_shape_is_validated_naming_its_key() {
+        for bad in [
+            "auth/userpass",
+            "user pass",
+            "a//b",
+            "../x",
+            "a?b",
+            "a#b",
+            "",
+            "userpass/",
+        ] {
+            match user_auth_from_value(Some(&ua_map(&[
+                ("type", ua_str("userpass")),
+                ("mount", ua_str(bad)),
+            ]))) {
+                Err(VaultError::InvalidMount(m)) => {
+                    assert!(m.starts_with("vault.user_auth.mount "), "{bad:?}: {m}")
+                }
+                Err(e) => panic!("{bad:?}: wrong refusal {e}"),
+                Ok(_) => panic!("{bad:?} must be refused"),
+            }
+        }
+    }
+
+    #[test]
+    fn mount_refusal_names_the_rule_each_mount_breaks() {
+        let rows: [(&str, Option<&str>); 5] = [
+            ("userpass", None),
+            ("team/userpass", None),
+            ("", Some("vault.user_auth.mount is empty")),
+            (
+                "a/../b",
+                Some("vault.user_auth.mount has a '.' or '..' segment"),
+            ),
+            (
+                "a#b",
+                Some("vault.user_auth.mount has a character outside [A-Za-z0-9._/-]"),
+            ),
+        ];
+        for (mount, want) in rows {
+            assert_eq!(mount_refusal(mount).as_deref(), want, "{mount:?}");
+        }
+    }
+
+    #[test]
+    fn user_auth_new_validates_the_mount_directly() {
+        assert!(UserAuth::new(UserAuthMethod::Userpass, "a#b").is_err());
+        assert_eq!(
+            UserAuth::new(UserAuthMethod::Userpass, "team/userpass")
+                .unwrap()
+                .mount(),
+            "team/userpass"
+        );
     }
 }

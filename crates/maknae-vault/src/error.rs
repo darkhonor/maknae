@@ -105,6 +105,37 @@ pub enum VaultError {
     Keychain {
         status: i32,
     },
+    UnknownUserAuth(String),
+    ConfigShape {
+        key: &'static str,
+        want: &'static str,
+    },
+    InvalidUsername(String),
+    InvalidSecret {
+        what: &'static str,
+        why: &'static str,
+    },
+    InvalidWrapTtl(&'static str),
+    UserpassLogin(&'static str),
+    VaultStatus {
+        op: &'static str,
+        status: u16,
+        hint: &'static str,
+    },
+    VaultTransport {
+        op: &'static str,
+        detail: String,
+    },
+    VaultBody {
+        op: &'static str,
+        why: String,
+    },
+    WrapMismatch(crate::WrapMismatch),
+    KvField {
+        field: String,
+        why: &'static str,
+    },
+    HttpClient(String),
 }
 
 impl std::fmt::Display for VaultError {
@@ -176,6 +207,30 @@ impl std::fmt::Display for VaultError {
                  launchd daemon); run the Developer ID-signed build the item was enrolled for"
             ),
             VaultError::Keychain { status } => write!(f, "keychain read failed: status {status}"),
+            VaultError::UnknownUserAuth(t) => write!(
+                f,
+                "vault.user_auth.type {t:?} is not supported: the only method is `userpass`"
+            ),
+            VaultError::ConfigShape { key, want } => write!(f, "config key {key} must be {want}"),
+            VaultError::InvalidUsername(m) => write!(f, "invalid Vault username: {m}"),
+            VaultError::InvalidSecret { what, why } => write!(f, "malformed {what}: {why}"),
+            VaultError::InvalidWrapTtl(m) => write!(f, "invalid wrap TTL: {m}"),
+            VaultError::UserpassLogin(m) => write!(f, "userpass login refused: {m}"),
+            VaultError::VaultStatus {
+                op,
+                status,
+                hint: "",
+            } => {
+                write!(f, "Vault {op} returned HTTP {status}")
+            }
+            VaultError::VaultStatus { op, status, hint } => {
+                write!(f, "Vault {op} returned HTTP {status}: {hint}")
+            }
+            VaultError::VaultTransport { op, detail } => write!(f, "Vault {op} failed: {detail}"),
+            VaultError::VaultBody { op, why } => write!(f, "Vault {op} response refused: {why}"),
+            VaultError::WrapMismatch(m) => write!(f, "wrapping token refused: {m}"),
+            VaultError::KvField { field, why } => write!(f, "KV field {field:?}: {why}"),
+            VaultError::HttpClient(m) => write!(f, "Vault HTTP client could not be built: {m}"),
         }
     }
 }
@@ -211,6 +266,42 @@ mod tests {
             },
             VaultError::KeychainPointer("names /tmp/x.keychain".into()),
             VaultError::Keychain { status: -25308 },
+            VaultError::UnknownUserAuth("ldap".into()),
+            VaultError::ConfigShape {
+                key: "vault.user_auth",
+                want: "a map",
+            },
+            VaultError::InvalidUsername("\"Alice\" has an upper-case letter".into()),
+            VaultError::InvalidSecret {
+                what: "password",
+                why: "empty",
+            },
+            VaultError::InvalidWrapTtl("must be whole seconds"),
+            VaultError::UserpassLogin("wrong username or password"),
+            VaultError::VaultStatus {
+                op: "unwrap",
+                status: 500,
+                hint: "",
+            },
+            VaultError::VaultStatus {
+                op: "wrapped KV read",
+                status: 404,
+                hint: "no secret at this path",
+            },
+            VaultError::VaultTransport {
+                op: "unwrap",
+                detail: "connection refused".into(),
+            },
+            VaultError::VaultBody {
+                op: "unwrap",
+                why: "Syntax error at line 1 column 2".into(),
+            },
+            VaultError::WrapMismatch(crate::WrapMismatch::CreationPath),
+            VaultError::KvField {
+                field: "api_key".into(),
+                why: "absent",
+            },
+            VaultError::HttpClient("no TLS backend".into()),
         ];
         for e in cases {
             assert!(!format!("{e}").is_empty());

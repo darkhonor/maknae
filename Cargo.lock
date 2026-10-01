@@ -1202,6 +1202,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "maknae-seal"
+version = "0.0.0"
+dependencies = [
+ "aws-lc-rs",
+ "pem",
+ "zeroize",
+]
+
+[[package]]
 name = "maknae-security"
 version = "0.0.0"
 
@@ -1241,6 +1250,7 @@ version = "0.0.0"
 dependencies = [
  "arc-swap",
  "aws-lc-rs",
+ "bytes",
  "maknae-config",
  "maknae-io",
  "maknae-plane",
@@ -1252,6 +1262,7 @@ dependencies = [
  "rustls",
  "security-framework",
  "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "tokio-rustls",

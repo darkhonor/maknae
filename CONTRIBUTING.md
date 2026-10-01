@@ -115,6 +115,7 @@ cargo deny --locked check
 ci/gates/p1-manifest-lint.sh
 ci/gates/unsafe-confinement.sh
 ci/gates/p2-invert-tree.sh
+ci/gates/seal-confinement.sh
 ci/gates/p2-artifact-witness.sh
 ci/gates/build-invocation-lint.sh
 ci/gates/isolation-contract-lint.sh

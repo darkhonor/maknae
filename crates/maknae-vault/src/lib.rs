@@ -6,6 +6,8 @@
 //! vaultrs's reqwest on the FIPS provider (spec §6.1).
 #![forbid(unsafe_code)]
 
+mod api_request;
+mod api_shape;
 mod auth;
 mod ca;
 mod client;
@@ -31,7 +33,10 @@ mod secret_source;
 mod supervisor;
 mod supervisor_run;
 mod tls;
+mod user_login;
+mod vault_api;
 mod verify;
+mod wrap;
 // The UDS transport is unix-only (UnixStream / SO_PEERCRED); the pure-rustls layers above
 // (tls/resolver/plane_verify) compile everywhere so the Stage-1 client stays cross-platform.
 #[cfg(unix)]
@@ -43,12 +48,14 @@ mod peercred;
 mod socket;
 #[cfg(unix)]
 mod stream;
+pub use api_shape::{WrapMismatch, MAX_TOKEN_BYTES, MAX_VAULT_BODY_BYTES};
 pub use auth::{AppRoleAuth, AuthMethod, VaultToken};
 pub use ca::{load_ca_pin, CaBundle};
 pub use client::{PlaneClient, PlaneIdentity, PLANE_HTTP_TIMEOUT, PLANE_SHUTDOWN_BOUND};
 pub use config::{
-    load_vault_config, validate_deployment_id, validate_vault_addr, vault_config_from_document,
-    VaultConfig, DEFAULT_APPROLE_MOUNT, DEFAULT_PKI_INT_MOUNT, VAULT_SECTION,
+    load_vault_config, user_auth_from_value, validate_deployment_id, validate_vault_addr,
+    vault_config_from_document, UserAuth, UserAuthMethod, VaultConfig, DEFAULT_APPROLE_MOUNT,
+    DEFAULT_PKI_INT_MOUNT, DEFAULT_USERPASS_MOUNT, VAULT_SECTION,
 };
 pub use csr_gen::generate_plane_csr;
 pub use digest::{sha256_hex, Sha256};
@@ -84,7 +91,16 @@ pub use stream::{
     AcceptRejection, AuthenticatedStream, PlaneConnector, PlaneListener, RawAcceptError,
     RawPlaneConn, RejectReason,
 };
+pub use user_login::{
+    userpass_username_is_acceptable, Password, UserLogin, UserToken, MAX_PASSWORD_BYTES,
+    MAX_USERNAME_BYTES,
+};
+pub use vault_api::VaultApi;
 pub use verify::{verify_plane_uri_san, VerifyError};
+pub use wrap::{
+    kv_data_path, KvDataPath, WrapExpectation, WrapLookup, WrappedSecret, WrappingToken,
+    MAX_KV_DATA_PATH_BYTES, MAX_WRAP_TTL,
+};
 
 #[used]
 pub static CRATE_MARKER: &[u8] = b"MAKNAE_VAULT";
