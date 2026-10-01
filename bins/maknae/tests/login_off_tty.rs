@@ -15,7 +15,7 @@ fn login_with_stdin(input: Option<&[u8]>) -> std::process::Output {
         .spawn()
         .unwrap();
     if let Some(bytes) = input {
-        child.stdin.take().unwrap().write_all(bytes).unwrap();
+        let _ = child.stdin.take().unwrap().write_all(bytes);
     }
     child.wait_with_output().unwrap()
 }

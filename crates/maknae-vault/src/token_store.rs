@@ -190,15 +190,15 @@ fn run_creds(verb: &str, input: &[u8], cap: usize) -> Result<CredsRun, String> {
         return Err("no output pipe".to_string());
     };
     let out = read_record(stdout, cap);
+    if out.is_err() {
+        let _ = child.kill();
+    }
     let mut err_bytes = Vec::new();
     let mut stderr = stderr;
     let _ = (&mut stderr)
         .take(MAX_STDERR_BYTES)
         .read_to_end(&mut err_bytes);
     let _ = std::io::copy(&mut stderr.take(MAX_STDERR_DRAIN), &mut std::io::sink());
-    if out.is_err() {
-        let _ = child.kill();
-    }
     let status = child.wait().map_err(|e| e.to_string())?;
     Ok(CredsRun {
         out,
