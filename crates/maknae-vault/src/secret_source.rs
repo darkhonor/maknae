@@ -6,6 +6,7 @@
 //! makes the fail-closed precedence provably testable and mutation-hardened (T1).
 use crate::VaultError;
 use std::env::VarError;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
@@ -202,17 +203,49 @@ pub(crate) fn check_seal_key_len(n: usize) -> Result<(), VaultError> {
     Ok(())
 }
 
-pub fn seal_key_to_hex(der: &[u8]) -> Zeroizing<String> {
+pub struct SealKeyDer(Zeroizing<Vec<u8>>);
+
+impl SealKeyDer {
+    pub(crate) fn new(der: Zeroizing<Vec<u8>>) -> Self {
+        Self(der)
+    }
+
+    pub fn expose(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SealKeyDer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SealKeyDer(<redacted>)")
+    }
+}
+
+pub struct SealKeyHex(Zeroizing<String>);
+
+impl SealKeyHex {
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SealKeyHex {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SealKeyHex(<redacted>)")
+    }
+}
+
+pub fn seal_key_to_hex(der: &[u8]) -> SealKeyHex {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut hex = Zeroizing::new(String::with_capacity(2 * der.len()));
     for b in der {
         hex.push(char::from(DIGITS[usize::from(b >> 4)]));
         hex.push(char::from(DIGITS[usize::from(b & 0x0f)]));
     }
-    hex
+    SealKeyHex(hex)
 }
 
-pub fn seal_key_from_hex(text: &str) -> Result<Zeroizing<Vec<u8>>, VaultError> {
+pub fn seal_key_from_hex(text: &str) -> Result<SealKeyDer, VaultError> {
     let hex = text.as_bytes();
     if !hex.len().is_multiple_of(2) {
         return Err(VaultError::SealKey(SEAL_KEY_NOT_HEX));
@@ -222,7 +255,7 @@ pub fn seal_key_from_hex(text: &str) -> Result<Zeroizing<Vec<u8>>, VaultError> {
     for [hi, lo] in hex.as_chunks::<2>().0 {
         der.push(nibble(*hi)? * 16 + nibble(*lo)?);
     }
-    Ok(der)
+    Ok(SealKeyDer(der))
 }
 
 fn nibble(c: u8) -> Result<u8, VaultError> {
@@ -530,23 +563,24 @@ mod tests {
         let der = key.to_pkcs8_der().unwrap();
         assert!(der.len() <= MAX_SEAL_KEY_BYTES);
         let hex = seal_key_to_hex(&der);
-        assert_eq!(hex.len(), 2 * der.len());
-        assert_eq!(hex.capacity(), 2 * der.len());
-        let back = seal_key_from_hex(&hex).unwrap();
-        assert!(back.as_slice() == der.as_slice());
-        assert_eq!(back.capacity(), der.len());
+        assert_eq!(hex.expose().len(), 2 * der.len());
+        assert_eq!(hex.0.capacity(), 2 * der.len());
+        let back = seal_key_from_hex(hex.expose()).unwrap();
+        assert!(back.expose() == der.as_slice());
+        assert_eq!(back.0.capacity(), der.len());
         assert_eq!(
-            seal_key_to_hex(&[0x00, 0x0f, 0xa5, 0xff]).as_str(),
+            seal_key_to_hex(&[0x00, 0x0f, 0xa5, 0xff]).expose(),
             "000fa5ff"
         );
         assert_eq!(
-            seal_key_from_hex("000fa5ff").unwrap().as_slice(),
+            seal_key_from_hex("000fa5ff").unwrap().expose(),
             [0x00, 0x0f, 0xa5, 0xff]
         );
-        assert_eq!(seal_key_from_hex("09af").unwrap().as_slice(), [0x09, 0xaf]);
+        assert_eq!(seal_key_from_hex("09af").unwrap().expose(), [0x09, 0xaf]);
         assert_eq!(
             seal_key_from_hex(&"ab".repeat(MAX_SEAL_KEY_BYTES))
                 .unwrap()
+                .expose()
                 .len(),
             512
         );
@@ -571,5 +605,23 @@ mod tests {
                 "{bad:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_seal_key_holders_print_nothing_of_the_key() {
+        let der = SealKeyDer::new(Zeroizing::new(vec![0xde, 0xad, 0xbe, 0xef]));
+        let hex = seal_key_to_hex(der.expose());
+        assert_eq!(format!("{der:?}"), "SealKeyDer(<redacted>)");
+        assert_eq!(format!("{hex:?}"), "SealKeyHex(<redacted>)");
+        assert_eq!(
+            format!("{:#?}", (&der, &hex)).matches("<redacted>").count(),
+            2
+        );
+        for shown in [format!("{der:?}"), format!("{hex:?}")] {
+            for leak in ["deadbeef", "222, 173", "de, ad", "DEADBEEF"] {
+                assert!(!shown.contains(leak), "{shown}");
+            }
+        }
+        assert_eq!(hex.expose(), "deadbeef");
     }
 }

@@ -35,7 +35,7 @@ pub(crate) fn read_seal_pub_among(
         .ok_or(VaultError::SealPubAbsent)?;
     std::str::from_utf8(&bytes)
         .map(str::to_string)
-        .map_err(|_| VaultError::SealPubRefused {
+        .map_err(|_| VaultError::SealPubMalformed {
             path: path.to_path_buf(),
             detail: "not UTF-8".to_string(),
         })
@@ -43,7 +43,7 @@ pub(crate) fn read_seal_pub_among(
 
 fn read_one(path: &Path, owner: u32) -> Result<Option<Zeroizing<Vec<u8>>>, VaultError> {
     let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
-        return Err(VaultError::SealPubRefused {
+        return Err(VaultError::SealPubMalformed {
             path: path.to_path_buf(),
             detail: "not a file path".to_string(),
         });
@@ -194,6 +194,37 @@ mod tests {
         assert!(matches!(
             l.read(euid()),
             Err(VaultError::SealPubRefused { path, .. }) if path == l.debian
+        ));
+    }
+
+    #[test]
+    fn a_symlinked_file_or_anchor_directory_is_refused() {
+        let by_file = Layout::new();
+        let dir = by_file.redhat.parent().unwrap();
+        let real = publish(&dir.join("real"), &pem(), 0o644);
+        std::os::unix::fs::symlink(&real, &by_file.redhat).unwrap();
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let by_dir = Layout::new();
+        let target = by_dir.redhat.parent().unwrap().with_file_name("elsewhere");
+        publish(&target, &pem(), 0o644);
+        std::os::unix::fs::symlink(&target, by_dir.redhat.parent().unwrap()).unwrap();
+        for (label, l) in [("file", &by_file), ("directory", &by_dir)] {
+            let got = l.read(euid());
+            assert!(
+                matches!(&got, Err(VaultError::SealPubRefused { detail, .. }) if detail.starts_with("symlink refused")),
+                "{label}: {got:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_key_that_is_not_utf_8_is_malformed_not_a_custody_refusal() {
+        let l = Layout::new();
+        let file = publish(l.redhat.parent().unwrap(), "", 0o644);
+        std::fs::write(&file, [0xff; 215]).unwrap();
+        assert!(matches!(
+            l.read(euid()),
+            Err(VaultError::SealPubMalformed { path, detail }) if path == l.redhat && detail == "not UTF-8"
         ));
     }
 }

@@ -101,8 +101,9 @@ pub use secret_source::{
     credentials_directory_env, resolve_cli_secret_source, resolve_daemon_secret_source,
     resolve_egress_seal_key_source, resolve_egress_secret_source, seal_key_from_hex,
     seal_key_to_hex, CliSecretSource, CredentialSourceKind, DaemonSecretSource,
-    EgressSealKeySource, EgressSecretSource, DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME,
-    EGRESS_CREDENTIALS_DIRECTORY_CRED_NAME, EGRESS_SEAL_KEY_CRED_NAME, MAX_SEAL_KEY_BYTES,
+    EgressSealKeySource, EgressSecretSource, SealKeyDer, SealKeyHex,
+    DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME, EGRESS_CREDENTIALS_DIRECTORY_CRED_NAME,
+    EGRESS_SEAL_KEY_CRED_NAME, MAX_SEAL_KEY_BYTES,
 };
 #[cfg(unix)]
 pub use socket::bind_listener as bind_group_gated_uds;

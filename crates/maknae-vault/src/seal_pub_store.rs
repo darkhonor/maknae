@@ -93,7 +93,16 @@ pub(crate) fn seal_pub_refusal(e: IoError, path: &Path) -> Option<VaultError> {
             kind: IoKind::NotFound,
             ..
         } => None,
-        other => Some(VaultError::SealPubRefused {
+        custody @ (IoError::Symlink { .. }
+        | IoError::NotRegularFile { .. }
+        | IoError::InsecurePermissions { .. }
+        | IoError::NotOwned { .. }
+        | IoError::MultiplyLinked { .. }
+        | IoError::TargetTooLarge { .. }) => Some(VaultError::SealPubRefused {
+            path: path.to_path_buf(),
+            detail: custody.to_string(),
+        }),
+        other => Some(VaultError::SealPubMalformed {
             path: path.to_path_buf(),
             detail: other.to_string(),
         }),
@@ -267,7 +276,33 @@ mod tests {
         };
         assert!(matches!(
             seal_pub_refusal(denied, path),
-            Some(VaultError::SealPubRefused { .. })
+            Some(VaultError::SealPubMalformed { .. })
         ));
+        for custody in [
+            IoError::Symlink { path: path.into() },
+            IoError::NotRegularFile { path: path.into() },
+            IoError::NotOwned {
+                path: path.into(),
+                uid: 501,
+                want: 0,
+            },
+            IoError::MultiplyLinked {
+                path: path.into(),
+                nlink: 2,
+            },
+            IoError::TargetTooLarge {
+                path: path.into(),
+                limit: 215,
+                actual: 216,
+            },
+        ] {
+            assert!(
+                matches!(
+                    seal_pub_refusal(custody, path),
+                    Some(VaultError::SealPubRefused { .. })
+                ),
+                "custody failure"
+            );
+        }
     }
 }

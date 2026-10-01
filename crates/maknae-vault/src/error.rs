@@ -151,6 +151,10 @@ pub enum VaultError {
         path: PathBuf,
         detail: String,
     },
+    SealPubMalformed {
+        path: PathBuf,
+        detail: String,
+    },
     SealKey(&'static str),
 }
 
@@ -278,6 +282,11 @@ impl std::fmt::Display for VaultError {
                 "the Egress Daemon public key at {} was refused ({detail}): it must be a regular file with one link, owned by root, not writable by group or others, in a directory only root can write; ask your administrator",
                 path.display()
             ),
+            VaultError::SealPubMalformed { path, detail } => write!(
+                f,
+                "the Egress Daemon public key at {} could not be used ({detail}): ask your administrator",
+                path.display()
+            ),
             VaultError::SealKey(why) => write!(
                 f,
                 "the Egress Daemon seal key is malformed ({why}): run `sudo maknae enroll --rotate-seal-key`"
@@ -368,6 +377,10 @@ mod tests {
                 path: PathBuf::from("/etc/pki/maknae/seal.pub"),
                 detail: "mode 664".into(),
             },
+            VaultError::SealPubMalformed {
+                path: PathBuf::from("/etc/pki/maknae/seal.pub"),
+                detail: "not UTF-8".into(),
+            },
             VaultError::SealKey("empty or over 512 bytes"),
         ];
         for e in cases {
@@ -436,6 +449,22 @@ mod tests {
         assert!(
             m.contains("/etc/ssl/maknae/seal.pub") && m.contains("mode 664"),
             "{m}"
+        );
+        assert_eq!(
+            VaultError::SealPubRefused {
+                path: PathBuf::from("/etc/ssl/maknae/seal.pub"),
+                detail: "mode 664".into(),
+            }
+            .to_string(),
+            "the Egress Daemon public key at /etc/ssl/maknae/seal.pub was refused (mode 664): it must be a regular file with one link, owned by root, not writable by group or others, in a directory only root can write; ask your administrator"
+        );
+        assert_eq!(
+            VaultError::SealPubMalformed {
+                path: PathBuf::from("/etc/ssl/maknae/seal.pub"),
+                detail: "not UTF-8".into(),
+            }
+            .to_string(),
+            "the Egress Daemon public key at /etc/ssl/maknae/seal.pub could not be used (not UTF-8): ask your administrator"
         );
         assert!(VaultError::SealKey("empty or over 512 bytes")
             .to_string()
