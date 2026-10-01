@@ -521,7 +521,7 @@ why = "#153: sends the five user-credential Vault calls (login, wrapped read, lo
 
 [[t3]]
 path = "crates/maknae-vault/src/token_store.rs"
-why = "#153: the user token's custody I/O only — the login keychain, /usr/bin/systemd-creds over stdin/stdout, and the token files through maknae-io; every decision it applies (record, expiry, custody choice and order, maknae-io requirements, refusal mappings) is T1 in token_record.rs. The residual and keychain arms are unit-tested on their platforms; the systemd-creds arm in an operator-run ignored test on a systemd >= 256 host. Mutation-excluded like secret_io.rs"
+why = "#153: the user token's custody I/O only — the login keychain, /usr/bin/systemd-creds over stdin/stdout, and the token files through maknae-io; what stays here is opening the keychain, spawning systemd-creds, the maknae-io publish/read/remove calls and the one-line per-custody dispatch. Every decision it applies (record and its issuing Vault address, expiry, custody choice and order, the erase-every-custody fold that skips the kept custody, continues past a failure and returns the first, maknae-io requirements, refusal mappings) is T1 in token_record.rs. The residual and keychain arms are unit-tested on their platforms; the systemd-creds arm in an operator-run ignored test on a systemd >= 256 host. Mutation-excluded like secret_io.rs"
 
 [[t3]]
 path = "crates/maknae-seal/src/lib.rs"

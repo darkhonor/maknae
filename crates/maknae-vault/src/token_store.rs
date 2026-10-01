@@ -1,8 +1,8 @@
 use crate::token_record::{
-    decrypt_refusal, encrypt_output_refusal, every_custody, first_present, keychain_erase_outcome,
-    read_record, systemd_major, token_dir_refusal, token_dir_required, token_file_refusal,
-    token_file_required, StoredToken, SystemdCreds, TokenCustody, MAX_CREDS_FILE_BYTES,
-    MAX_TOKEN_RECORD_BYTES, SYSTEMD_CREDS, TOKEN_CREDS_NAME, TOKEN_FILE_MODE,
+    decrypt_refusal, encrypt_output_refusal, erase_every, every_custody, first_present,
+    keychain_erase_outcome, read_record, systemd_major, token_dir_refusal, token_dir_required,
+    token_file_refusal, token_file_required, StoredToken, SystemdCreds, TokenCustody,
+    MAX_CREDS_FILE_BYTES, MAX_TOKEN_RECORD_BYTES, SYSTEMD_CREDS, TOKEN_CREDS_NAME, TOKEN_FILE_MODE,
 };
 use crate::{UserToken, VaultError};
 use std::io::{Read, Write};
@@ -63,20 +63,11 @@ pub fn load_user_token(
 }
 
 pub fn erase_user_token(cli_dir: &Path, keep: Option<&TokenCustody>) -> Result<bool, VaultError> {
-    let mut erased = false;
-    let mut first_failure = None;
-    for custody in every_custody(cli_dir, cfg!(target_os = "macos")) {
-        if Some(&custody) == keep {
-            continue;
-        }
-        match erase_custody(&custody) {
-            Ok(removed) => erased |= removed,
-            Err(e) => {
-                first_failure.get_or_insert(e);
-            }
-        }
-    }
-    first_failure.map_or(Ok(erased), Err)
+    erase_every(
+        every_custody(cli_dir, cfg!(target_os = "macos")),
+        keep,
+        erase_custody,
+    )
 }
 
 fn read_custody(custody: &TokenCustody) -> Result<StoredToken, VaultError> {

@@ -194,6 +194,27 @@ pub(crate) fn every_custody(cli_dir: &Path, macos: bool) -> Vec<TokenCustody> {
     ]
 }
 
+pub(crate) fn erase_every<C: PartialEq>(
+    custodies: impl IntoIterator<Item = C>,
+    keep: Option<&C>,
+    mut erase: impl FnMut(&C) -> Result<bool, VaultError>,
+) -> Result<bool, VaultError> {
+    let mut erased = false;
+    let mut first_failure = None;
+    for custody in custodies {
+        if Some(&custody) == keep {
+            continue;
+        }
+        match erase(&custody) {
+            Ok(removed) => erased |= removed,
+            Err(e) => {
+                first_failure.get_or_insert(e);
+            }
+        }
+    }
+    first_failure.map_or(Ok(erased), Err)
+}
+
 pub(crate) fn first_present<T>(
     reads: impl IntoIterator<Item = Result<T, VaultError>>,
 ) -> Result<T, VaultError> {
@@ -622,6 +643,52 @@ mod tests {
         let lazy = std::iter::once(Ok(3u8))
             .chain(std::iter::from_fn(|| panic!("read past a present custody")));
         assert_eq!(first_present(lazy).unwrap(), 3);
+    }
+
+    type EraseRow<'a> = (
+        &'a [Result<bool, &'static str>],
+        Option<&'a usize>,
+        Result<bool, &'static str>,
+        &'a [usize],
+    );
+
+    fn erase_rows(
+        results: &[Result<bool, &'static str>],
+        keep: Option<&usize>,
+    ) -> (Result<bool, VaultError>, Vec<usize>) {
+        let mut tried = Vec::new();
+        let out = erase_every(0..results.len(), keep, |&i| {
+            tried.push(i);
+            results[i].map_err(VaultError::TokenRecord)
+        });
+        (out, tried)
+    }
+
+    #[test]
+    fn erasing_tries_every_custody_but_the_kept_one_and_reports_the_first_failure() {
+        let ok = |b: bool| -> Result<bool, &'static str> { Ok(b) };
+        let rows: [EraseRow; 9] = [
+            (&[], None, Ok(false), &[]),
+            (&[ok(false), ok(false)], None, Ok(false), &[0, 1]),
+            (&[ok(true), ok(false)], None, Ok(true), &[0, 1]),
+            (&[ok(false), ok(true)], None, Ok(true), &[0, 1]),
+            (&[ok(true), ok(false)], Some(&0), Ok(false), &[1]),
+            (&[ok(false), ok(true)], Some(&1), Ok(false), &[0]),
+            (&[Err("a"), ok(true)], None, Err("a"), &[0, 1]),
+            (&[ok(true), Err("b")], None, Err("b"), &[0, 1]),
+            (&[Err("a"), Err("b")], None, Err("a"), &[0, 1]),
+        ];
+        for (results, keep, want, want_tried) in rows {
+            let (out, tried) = erase_rows(results, keep);
+            let got = match out {
+                Ok(b) => Ok(b),
+                Err(VaultError::TokenRecord(why)) => Err(why),
+                Err(e) => panic!("unexpected {e}"),
+            };
+            assert_eq!(got, want, "{results:?} keep {keep:?}");
+            assert_eq!(tried, want_tried, "{results:?} keep {keep:?}");
+        }
+        assert_eq!(erase_rows(&[ok(true)], Some(&7)).1, vec![0]);
     }
 
     #[test]
