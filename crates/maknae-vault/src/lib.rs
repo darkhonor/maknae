@@ -6,6 +6,7 @@
 //! vaultrs's reqwest on the FIPS provider (spec §6.1).
 #![forbid(unsafe_code)]
 
+mod api_request;
 mod api_shape;
 mod auth;
 mod ca;

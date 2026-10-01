@@ -504,6 +504,10 @@ why = "#76: the System-keychain read through Security.framework — the ACL, the
 path = "crates/maknae-vault/src/operator.rs"
 why = "OperatorClient — token-authed role-id/secret-id/accessor/CA-chain I/O adapter for enroll (Task 3); thin pass-throughs to verified vaultrs calls + one hand-rolled rustify Endpoint, exercised by a gated live test. The one pure helper (join_ca_chain) has real unit tests."
 
+[[t3]]
+path = "crates/maknae-vault/src/api_request.rs"
+why = "#153: reqwest request glue; its header, build and serializer error arms cannot fire after the T1 token, path and TTL checks. Which token rides X-Vault-Token is decided in wrap.rs client_token (T1); every request's method, URL, headers and body are asserted without a server, and the file stays in the mutation set"
+
 # maknae-vault Stage 2 (mTLS transport): all I/O, mutation-excluded (mutants.toml).
 [[t3]]
 path = "crates/maknae-vault/src/tls.rs"
