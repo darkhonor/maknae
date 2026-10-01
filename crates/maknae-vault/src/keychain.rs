@@ -98,13 +98,15 @@ pub(crate) fn item_refs(
     match searched {
         Err(e) if e.code() == crate::keychain_policy::ITEM_NOT_FOUND => Ok(Vec::new()),
         Err(e) => Err(VaultError::Keychain { status: e.code() }),
-        Ok(results) => Ok(results
+        Ok(results) => results
             .into_iter()
-            .filter_map(|r| match r {
-                SearchResult::Ref(Reference::KeychainItem(found)) => Some(found),
-                _ => None,
+            .map(|r| match r {
+                SearchResult::Ref(Reference::KeychainItem(found)) => Ok(found),
+                _ => Err(VaultError::CredentialSource(
+                    "the keychain search returned something that is not an item".to_string(),
+                )),
             })
-            .collect()),
+            .collect(),
     }
 }
 

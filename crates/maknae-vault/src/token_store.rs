@@ -1,14 +1,19 @@
 use crate::token_record::{
-    decrypt_refusal, every_custody, first_present, keychain_erase_outcome, keychain_read_refusal,
-    read_record, systemd_major, token_dir_refusal, token_dir_required, token_file_refusal,
-    token_file_required, StoredToken, SystemdCreds, TokenCustody, MAX_CREDS_FILE_BYTES,
-    MAX_TOKEN_RECORD_BYTES, SYSTEMD_CREDS, TOKEN_CREDS_NAME, TOKEN_FILE_MODE,
+    decrypt_refusal, every_custody, first_present, keychain_erase_outcome, read_record,
+    systemd_major, token_dir_refusal, token_dir_required, token_file_refusal, token_file_required,
+    StoredToken, SystemdCreds, TokenCustody, MAX_CREDS_FILE_BYTES, MAX_TOKEN_RECORD_BYTES,
+    SYSTEMD_CREDS, TOKEN_CREDS_NAME, TOKEN_FILE_MODE,
 };
 use crate::{UserToken, VaultError};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use zeroize::Zeroizing;
+
+#[cfg(target_os = "macos")]
+use crate::token_record::keychain_read_refusal;
+
+const MAX_STDERR_BYTES: u64 = 4096;
 
 fn store_failure(what: &str, detail: impl std::fmt::Display) -> VaultError {
     VaultError::TokenStore(format!("{what}: {detail}"))
@@ -54,12 +59,19 @@ pub fn load_user_token(cli_dir: &Path, now: u64) -> Result<UserToken, VaultError
 
 pub fn erase_user_token(cli_dir: &Path, keep: Option<&TokenCustody>) -> Result<bool, VaultError> {
     let mut erased = false;
+    let mut first_failure = None;
     for custody in every_custody(cli_dir, cfg!(target_os = "macos")) {
-        if Some(&custody) != keep {
-            erased |= erase_custody(&custody)?;
+        if Some(&custody) == keep {
+            continue;
+        }
+        match erase_custody(&custody) {
+            Ok(removed) => erased |= removed,
+            Err(e) => {
+                first_failure.get_or_insert(e);
+            }
         }
     }
-    Ok(erased)
+    first_failure.map_or(Ok(erased), Err)
 }
 
 fn read_custody(custody: &TokenCustody) -> Result<StoredToken, VaultError> {
@@ -160,43 +172,58 @@ fn feed(child: &mut std::process::Child, input: &[u8]) -> std::io::Result<()> {
     stdin.write_all(input)
 }
 
-fn encrypt(record: &[u8]) -> Result<Vec<u8>, VaultError> {
+struct CredsRun {
+    out: Result<Zeroizing<Vec<u8>>, VaultError>,
+    stderr: Vec<u8>,
+    status: std::process::ExitStatus,
+}
+
+fn reap(child: &mut std::process::Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn run_creds(verb: &str, input: &[u8], cap: usize) -> Result<CredsRun, String> {
+    let mut child = creds_command(verb).spawn().map_err(|e| e.to_string())?;
+    if let Err(e) = feed(&mut child, input) {
+        reap(&mut child);
+        return Err(e.to_string());
+    }
+    let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+        reap(&mut child);
+        return Err("no output pipe".to_string());
+    };
+    let out = read_record(stdout, cap);
+    let mut err_bytes = Vec::new();
+    let _ = stderr.take(MAX_STDERR_BYTES).read_to_end(&mut err_bytes);
+    if out.is_err() {
+        let _ = child.kill();
+    }
+    let status = child.wait().map_err(|e| e.to_string())?;
+    Ok(CredsRun {
+        out,
+        stderr: err_bytes,
+        status,
+    })
+}
+
+fn encrypt(record: &[u8]) -> Result<Zeroizing<Vec<u8>>, VaultError> {
     let what = "systemd-creds encrypt --user";
-    let mut child = creds_command("encrypt")
-        .spawn()
-        .map_err(|e| store_failure(what, e))?;
-    feed(&mut child, record).map_err(|e| store_failure(what, e))?;
-    let out = child
-        .wait_with_output()
-        .map_err(|e| store_failure(what, e))?;
-    if !out.status.success() {
-        return Err(store_failure(what, stderr_text(&out.stderr)));
+    let run =
+        run_creds("encrypt", record, MAX_CREDS_FILE_BYTES).map_err(|e| store_failure(what, e))?;
+    if !run.status.success() && run.out.is_ok() {
+        return Err(store_failure(what, stderr_text(&run.stderr)));
     }
-    if out.stdout.len() > MAX_CREDS_FILE_BYTES {
-        return Err(store_failure(what, "the credential is over 16 KiB"));
-    }
-    Ok(out.stdout)
+    run.out.map_err(|e| store_failure(what, e))
 }
 
 fn decrypt(ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>, VaultError> {
-    let mut child = creds_command("decrypt")
-        .spawn()
-        .map_err(|e| decrypt_refusal(&e.to_string()))?;
-    feed(&mut child, ciphertext).map_err(|e| decrypt_refusal(&e.to_string()))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| decrypt_refusal("no stdout"))?;
-    let record = read_record(stdout, MAX_TOKEN_RECORD_BYTES);
-    let mut stderr = Vec::new();
-    if let Some(mut pipe) = child.stderr.take() {
-        let _ = pipe.read_to_end(&mut stderr);
+    let run = run_creds("decrypt", ciphertext, MAX_TOKEN_RECORD_BYTES)
+        .map_err(|e| decrypt_refusal(&e))?;
+    if !run.status.success() {
+        return Err(decrypt_refusal(&stderr_text(&run.stderr)));
     }
-    let status = child.wait().map_err(|e| decrypt_refusal(&e.to_string()))?;
-    if !status.success() {
-        return Err(decrypt_refusal(&stderr_text(&stderr)));
-    }
-    record
+    run.out
 }
 
 #[cfg(target_os = "macos")]
@@ -204,7 +231,8 @@ type Keychain = security_framework::os::macos::keychain::SecKeychain;
 
 #[cfg(target_os = "macos")]
 fn default_keychain() -> Result<Keychain, VaultError> {
-    Keychain::default().map_err(|e| store_failure("keychain open", format!("status {}", e.code())))
+    crate::keychain::default_keychain()
+        .map_err(|e| store_failure("keychain open", format!("status {}", e.code())))
 }
 
 #[cfg(target_os = "macos")]
@@ -228,13 +256,17 @@ fn keychain_store_in(kc: &Keychain, record: &[u8]) -> Result<(), VaultError> {
     let item = crate::CLI_TOKEN_KEYCHAIN_ITEM;
     kc.add_generic_password(item.service, item.account, record)
         .map_err(|e| store_failure("keychain add", format!("status {}", e.code())))?;
-    if keychain_read_in(kc)?.as_slice() != record {
-        return Err(store_failure(
+    match keychain_read_in(kc) {
+        Ok(back) if back.as_slice() == record => Ok(()),
+        Ok(_) => Err(store_failure(
             "keychain verify",
             "the item read back differs from the token stored",
-        ));
+        )),
+        Err(_) => Err(store_failure(
+            "keychain verify",
+            "the item just stored could not be read back",
+        )),
     }
-    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -405,6 +437,19 @@ mod tests {
 
     #[cfg(not(target_os = "macos"))]
     #[test]
+    fn a_failed_credential_erase_still_removes_the_residual_and_is_reported() {
+        let d = cli_dir();
+        store_user_token(&residual(d.path()), &stored("hvs.r", 10_000)).unwrap();
+        std::fs::create_dir(d.path().join(TOKEN_CREDS_FILE)).unwrap();
+        assert!(matches!(
+            erase_user_token(d.path(), None),
+            Err(VaultError::TokenStore(_))
+        ));
+        assert!(!d.path().join(TOKEN_RESIDUAL_FILE).exists());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
     fn a_broken_credential_is_not_skipped_for_the_residual() {
         let d = cli_dir();
         store_user_token(&residual(d.path()), &stored("hvs.r", 10_000)).unwrap();
@@ -431,12 +476,14 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
-    fn login_keychain_refs() -> usize {
+    fn login_keychain_refs() -> Option<usize> {
         within_30s(|| {
-            let login = Keychain::default().unwrap();
-            crate::keychain::item_refs(&login, &crate::CLI_TOKEN_KEYCHAIN_ITEM)
-                .unwrap()
-                .len()
+            let login = Keychain::default().ok()?;
+            Some(
+                crate::keychain::item_refs(&login, &crate::CLI_TOKEN_KEYCHAIN_ITEM)
+                    .unwrap()
+                    .len(),
+            )
         })
     }
 

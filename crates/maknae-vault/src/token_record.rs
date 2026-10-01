@@ -207,6 +207,7 @@ pub(crate) fn token_file_refusal(e: IoError) -> VaultError {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn keychain_read_refusal(e: VaultError) -> VaultError {
     match e {
         VaultError::Keychain { status } if status == ITEM_NOT_FOUND => VaultError::TokenAbsent,
