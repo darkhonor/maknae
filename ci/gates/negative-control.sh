@@ -982,7 +982,7 @@ const VAULT_SECTION: &str = "vault";
 const TRANSPORT_SECTION: &str = "transport";
 const AUDIT_SECTION: &str = "audit";
 const PRINCIPAL_SECTION: &str = "principal";
-const PROVIDER_SECTION: &str = "provider";
+const PROVIDERS_SECTION: &str = "providers";
 const EGRESS_SECTION: &str = "egress";
     let specs = [
         SectionSpec { name: LAKE_SECTION.to_string(), required: false },
@@ -990,7 +990,7 @@ const EGRESS_SECTION: &str = "egress";
         SectionSpec { name: TRANSPORT_SECTION.to_string(), required: false },
         SectionSpec { name: AUDIT_SECTION.to_string(), required: false },
         SectionSpec { name: PRINCIPAL_SECTION.to_string(), required: false },
-        SectionSpec { name: PROVIDER_SECTION.to_string(), required: false },
+        SectionSpec { name: PROVIDERS_SECTION.to_string(), required: false },
         SectionSpec { name: EGRESS_SECTION.to_string(), required: false },
     ];
 FIX
@@ -998,11 +998,12 @@ FIX
   cat > "$fixture/crates/maknae-config/src/document.rs" <<FIX
 const DISCLOSABLE: &[&str] = &[
     "transport",
-    "provider.name",
-    "provider.endpoint",
-    "provider.model",
-    "provider.reasoning_effort",
-    "provider.output_tokens_field",
+        "providers[].name",
+        "providers[].endpoint",
+        "providers[].models",
+        "providers[].models[]",
+        "providers[].reasoning_effort",
+        "providers[].output_tokens_field",
     "vault.addr",
     "vault.approle_mount",
     "vault.pki_int_mount",
@@ -1022,8 +1023,6 @@ const SUPPRESSED: &[&str] = &[
     "vault.insecure_plaintext_secret_path",
     "core.handling",
     "audit.au3_1",
-    "provider.key_vault_path",
-    "provider.key_field",
 ];
 FIX
   # The field is declared MULTI-LINE-parser style deliberately: the shape that
@@ -1054,17 +1053,11 @@ pub struct Principal {
     pub home: PathBuf,
 }
 FIX
-  # #243: the provider registration -- five disclosed leaves and TWO omitted
-  # (#372 added `output_tokens_field`, 6 -> 7; #242 added `reasoning_effort`, 5 -> 6; #308 added `key_field`, 4 -> 5; a
-  # fixture left at four makes the count check fire FIRST and mask every probe's
-  # own reason — which is exactly what it did, 23 of them at once).
-  cat > "$fixture/crates/maknae-config/src/provider.rs" <<'FIX'
-pub struct ProviderConfig {
+  cat > "$fixture/crates/maknae-config/src/providers.rs" <<'FIX'
+pub struct AuthorizedProvider {
     pub name: String,
     pub endpoint: String,
-    pub model: String,
-    pub key_vault_path: String,
-    pub key_field: String,
+    pub models: Vec<String>,
     pub reasoning_effort: Option<String>,
     pub output_tokens_field: Option<String>,
 }
@@ -1123,13 +1116,12 @@ disclose	vault.user_auth.mount	mount name
 disclose	vault.kv_mount	mount name
 disclose	vault.user_prefix	layout prefix below the mount
 disclose	principal	readable via getpwuid anyway
-disclose	provider.name	the registered provider label
-disclose	provider.endpoint	where the loop content goes
-disclose	provider.model	the model identifier
-disclose	provider.reasoning_effort	the reasoning level sent with the model
-disclose	provider.output_tokens_field	the reply-cap field for the endpoint
-omit	provider.key_vault_path	secret-store layout
-omit	provider.key_field	the field inside that secret (#308)
+disclose	providers[].name	the authorized provider label
+disclose	providers[].endpoint	where the loop content goes
+disclose	providers[].models	the model list
+disclose	providers[].models[]	each model identifier
+disclose	providers[].reasoning_effort	the reasoning level sent with the model
+disclose	providers[].output_tokens_field	the reply-cap field for the endpoint
 disclose	audit.jsonl_path	the log the operator is looking for
 disclose	egress.socket_path	the socket the daemon connects to for egress
 disclose	egress.deadline_ms	the outer bound on a provider call
@@ -1220,10 +1212,10 @@ expect_reject "config-disclosure-drift/struct-anchor-not-found" "$fx/ci/gates/co
 # the reader to delete manifest rows that were correct.
 fx="$(cfg_fixture "$CFG_OK")"
 cat > "$fx/crates/maknae-config/src/document.rs" <<'FIX'
-const DISCLOSABLE: &[&str] = &["transport", "provider.name", "provider.endpoint", "provider.model", "provider.reasoning_effort", "provider.output_tokens_field", "vault.addr", "vault.approle_mount", "vault.pki_int_mount", "vault.deployment_id", "vault.user_auth", "vault.user_auth.type", "vault.user_auth.mount", "vault.kv_mount", "vault.user_prefix", "audit.jsonl_path", "principal", "egress.socket_path", "egress.deadline_ms"];
-const SUPPRESSED: &[&str] = &["vault.insecure_plaintext_secret_path", "core.handling", "audit.au3_1", "provider.key_vault_path", "provider.key_field"];
+const DISCLOSABLE: &[&str] = &["transport", "providers[].name", "providers[].endpoint", "providers[].models", "providers[].models[]", "providers[].reasoning_effort", "providers[].output_tokens_field", "vault.addr", "vault.approle_mount", "vault.pki_int_mount", "vault.deployment_id", "vault.user_auth", "vault.user_auth.type", "vault.user_auth.mount", "vault.kv_mount", "vault.user_prefix", "audit.jsonl_path", "principal", "egress.socket_path", "egress.deadline_ms"];
+const SUPPRESSED: &[&str] = &["vault.insecure_plaintext_secret_path", "core.handling", "audit.au3_1"];
 FIX
-expect_accept "config-disclosure-drift/rustfmt-collapsed-array-still-read" ": 35 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_accept "config-disclosure-drift/rustfmt-collapsed-array-still-read" ": 34 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: a section registered in boot.rs with no SURFACE entry. THE THIRD
 # fail-open, and the one that closes the PROPERTY rather than an instance: the
@@ -1678,7 +1670,7 @@ fi
 # go check a sed flag. This probe pins the corrected order.
 fx="$(cfg_fixture "$CFG_OK" '' '' '' 'std::sync::Arc<String>')"
 expect_accept "config-disclosure-drift/qualified-wrapper-is-a-leaf" \
-  ": 35 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+  ": 34 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # ACCEPT: the config-surface `Vec` exemption holds for the QUALIFIED spelling
 # too. Under the old post-loop `s/.*:://`, `Vec<crate::Principal>` reduced to
@@ -1687,7 +1679,7 @@ expect_accept "config-disclosure-drift/qualified-wrapper-is-a-leaf" \
 # the unqualified `config-vec-of-struct-is-a-leaf` probe below cannot see.
 fx="$(cfg_fixture "$CFG_OK" '' '' '' 'Vec<crate::Principal>')"
 expect_accept "config-disclosure-drift/qualified-config-vec-is-still-a-leaf" \
-  ": 35 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+  ": 34 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # ACCEPT: the mirror image. `Vec<WorkspaceStruct>` on a CONFIG surface is a
 # LEAF -- `flatten` never recurses into `Value::Seq` and `render` masks the
@@ -1696,12 +1688,12 @@ expect_accept "config-disclosure-drift/qualified-config-vec-is-still-a-leaf" \
 # did not, and every config row was silently held to the wire rule.
 fx="$(cfg_fixture "$CFG_OK" '' '' '' 'Vec<Principal>')"
 expect_accept "config-disclosure-drift/config-vec-of-struct-is-a-leaf" \
-  ": 35 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+  ": 34 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # ACCEPT: the clean fixture passes and reports both counts. Without this every
 # rejection above would stay green against a gate that refuses everything.
 fx="$(cfg_fixture "$CFG_OK")"
-expect_accept "config-disclosure-drift/clean-fixture-passes" ": 35 paths decided, 46 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_accept "config-disclosure-drift/clean-fixture-passes" ": 34 paths decided, 44 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
 
 
 # ACCEPT, against the REAL repo: each gate's reported examined-set is
@@ -1764,7 +1756,7 @@ expect_reported_count "p1-manifest/packages-match-the-workspace" "ok (" "$exp_p1
 # control; asserting it here means any future silent shrink is a red build.
 
 expect_accept "config-disclosure-drift/real-repo-counts-pinned" \
-  ": 47 paths decided, 46 struct fields covered" "$here/config-disclosure-drift.sh"
+  ": 46 paths decided, 44 struct fields covered" "$here/config-disclosure-drift.sh"
 
 
 # #158: a grant's own disclosure inventory must reject new data and type changes.

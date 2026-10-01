@@ -358,6 +358,7 @@ fn frame_of(req: EgressRequest) -> EgressFrameRequest {
         model: req.model,
         key_vault_path: req.key_vault_path,
         key_field: req.key_field,
+        sealed_key: req.sealed_key,
         reasoning_effort: req.reasoning_effort,
         conversation: req.conversation,
         turns: req.turns,
@@ -381,6 +382,11 @@ mod tests {
             model: "m".into(),
             key_vault_path: "maknae/providers/openai".into(),
             key_field: "api-key".into(),
+            sealed_key: maknae_proto::SealedKey::new(vec![
+                0x5a;
+                maknae_proto::SEALED_KEY_MIN_BYTES
+            ])
+            .unwrap(),
             reasoning_effort: Some("none".into()),
             output_tokens: None,
             output_tokens_field: None,
@@ -406,6 +412,7 @@ mod tests {
         assert_eq!(f.model, r.model);
         assert_eq!(f.key_vault_path, r.key_vault_path);
         assert_eq!(f.key_field, r.key_field);
+        assert_eq!(f.sealed_key, r.sealed_key);
         assert_eq!(f.reasoning_effort.as_deref(), Some("none"));
         assert_eq!(f.conversation, r.conversation);
         assert_eq!(f.turns, r.turns);

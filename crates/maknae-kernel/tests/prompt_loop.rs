@@ -29,6 +29,7 @@ pub struct Recording {
     pub sleep: Option<Duration>,
     pub reply_usage: Option<maknae_proto::Usage>,
     requested: Mutex<Vec<(Option<u64>, Option<maknae_proto::OutputTokensField>)>>,
+    chosen: Mutex<Vec<(String, String, String, usize)>>,
     /// #240: the backend states its own outer deadline; `None` is a
     /// generous default so only the deadline test sets one.
     pub deadline: Option<Duration>,
@@ -43,6 +44,10 @@ impl Recording {
     }
     pub fn requested(&self) -> Vec<(Option<u64>, Option<maknae_proto::OutputTokensField>)> {
         self.requested.lock().unwrap().clone()
+    }
+    /// (model, key_vault_path, key_field, sealed key length) per send.
+    pub fn chosen(&self) -> Vec<(String, String, String, usize)> {
+        self.chosen.lock().unwrap().clone()
     }
 }
 impl maknae_kernel::Egress for Recording {
@@ -63,6 +68,12 @@ impl maknae_kernel::Egress for Recording {
             .lock()
             .unwrap()
             .push((r.output_tokens, r.output_tokens_field));
+        self.chosen.lock().unwrap().push((
+            r.model.clone(),
+            r.key_vault_path.clone(),
+            r.key_field.clone(),
+            r.sealed_key.as_bytes().len(),
+        ));
         // Mirrors `content_measure`: every `Text` block across every turn,
         // PLUS every assistant turn's tool-call arguments — both leave the
         // process, so the recorded sum is what the trail digests.
@@ -126,13 +137,16 @@ fn text(s: &str) -> ContentBlock {
     }
 }
 fn prompt(s: &str) -> Verb {
+    prompt_choosing(s, Some(common::test_choice()))
+}
+fn prompt_choosing(s: &str, choice: Option<maknae_proto::ProviderChoice>) -> Verb {
     Verb::SessionPrompt {
         conversation: "conv-1".into(),
         turns: vec![Turn::User {
             content: vec![text(s)],
         }],
         output_tokens: None,
-        choice: None,
+        choice,
     }
 }
 fn last_prompt_record(records: &Records) -> maknae_audit_append::AuditRecord {
@@ -671,7 +685,7 @@ async fn the_requested_reply_cap_is_on_the_intent_and_reaches_the_deputy() {
             content: vec![text("hello")],
         }],
         output_tokens: Some(512),
-        choice: None,
+        choice: Some(common::test_choice()),
     };
     fx.roundtrip(verb, Arc::clone(&records), Some("openai"), eg.clone())
         .await
@@ -1116,22 +1130,256 @@ async fn an_ungranted_prompt_is_unauthorized_on_the_wire_and_an_absence_then_den
 }
 
 #[tokio::test]
-async fn no_provider_registered_is_a_deny_not_a_crash() {
+async fn zero_authorized_providers_refuses_every_prompt_before_the_pdp() {
     let fx = Fixture::with_policy("prompt-noprov", "Read", GRANTED);
     let records = Records::new(0);
+    let eg = Arc::new(Recording::default());
+    let counting = Arc::new(Counting {
+        inner: fx.authorizer(),
+        decisions: std::sync::atomic::AtomicUsize::new(0),
+    });
     let resp = fx
-        .roundtrip(
+        .roundtrip_with_authorizer(
+            Arc::clone(&counting),
             prompt("hello"),
             Arc::clone(&records),
             None,
-            Arc::new(Recording::default()),
+            eg.clone(),
         )
         .await
         .expect("a refusal frame");
     assert!(matches!(resp.result, RespResult::Err(ref e) if e.code == ProtoErrCode::Unauthorized));
-    assert!(records.snapshot().iter().any(
-        |r| r.action == "session.prompt" && r.outcome.reason.contains("no provider registered")
-    ));
+    let rec = last_prompt_record(&records);
+    assert_eq!(
+        (rec.outcome.result.as_str(), rec.outcome.reason.as_str()),
+        ("deny", maknae_kernel::ChoiceRefusal::NoProviders.reason())
+    );
+    assert_eq!(
+        counting.decisions.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert!(eg.calls().is_empty());
+    assert!(records
+        .snapshot()
+        .iter()
+        .all(|r| r.egress.as_ref().is_none_or(|e| !e.is_intent())));
+}
+
+#[tokio::test]
+async fn every_admission_refusal_is_a_content_free_deny_with_no_intent_and_no_pdp_decision() {
+    use maknae_kernel::ChoiceRefusal;
+    let mut fx = Fixture::with_policy("prompt-admission", "Read", GRANTED);
+    let mut bad_field = common::test_choice();
+    bad_field.key_field = "api 153 sentinel".into();
+    let cases: Vec<(
+        Option<&str>,
+        Option<maknae_proto::ProviderChoice>,
+        ChoiceRefusal,
+    )> = vec![
+        (Some("root"), None, ChoiceRefusal::NoChoice),
+        (
+            Some("root"),
+            Some(common::choice(
+                "anthropic-153-sentinel",
+                common::TEST_MODEL,
+                "openai/personal",
+            )),
+            ChoiceRefusal::UnknownProvider,
+        ),
+        (
+            Some("root"),
+            Some(common::choice(
+                "openai",
+                "gpt-153-sentinel",
+                "openai/personal",
+            )),
+            ChoiceRefusal::ModelNotListed,
+        ),
+        (
+            Some("Root"),
+            Some(common::test_choice()),
+            ChoiceRefusal::UnsafeUsername,
+        ),
+        (
+            None,
+            Some(common::test_choice()),
+            ChoiceRefusal::UnsafeUsername,
+        ),
+        (
+            Some("root"),
+            Some(common::choice(
+                "openai",
+                common::TEST_MODEL,
+                "../bob-153-sentinel/openai",
+            )),
+            ChoiceRefusal::MalformedSubpath,
+        ),
+        (
+            Some("root"),
+            Some(common::choice(
+                "openai",
+                common::TEST_MODEL,
+                "data/sentinel-153",
+            )),
+            ChoiceRefusal::MalformedSubpath,
+        ),
+        (Some("root"), Some(bad_field), ChoiceRefusal::MalformedField),
+    ];
+    for (user, choice, want) in cases {
+        fx.peer_user = user.map(str::to_string);
+        let records = Records::new(0);
+        let eg = Arc::new(Recording::default());
+        let counting = Arc::new(Counting {
+            inner: fx.authorizer(),
+            decisions: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let resp = fx
+            .roundtrip_with_authorizer(
+                Arc::clone(&counting),
+                prompt_choosing("hello", choice),
+                Arc::clone(&records),
+                Some("openai"),
+                eg.clone(),
+            )
+            .await
+            .expect("a refusal frame");
+        assert!(
+            matches!(resp.result, RespResult::Err(ref e) if e.code == ProtoErrCode::Unauthorized),
+            "{want:?}: {resp:?}"
+        );
+        let rec = last_prompt_record(&records);
+        assert_eq!(
+            (
+                rec.outcome.result.as_str(),
+                rec.outcome.reason.as_str(),
+                rec.outcome.posture.as_str()
+            ),
+            ("deny", want.reason(), "unauthorized"),
+            "{want:?}"
+        );
+        assert_eq!(rec.object, None, "{want:?}");
+        assert!(rec.egress.is_none(), "{want:?}");
+        assert!(
+            records
+                .snapshot()
+                .iter()
+                .all(|r| r.egress.as_ref().is_none_or(|e| !e.is_intent())),
+            "{want:?}"
+        );
+        assert_eq!(
+            counting.decisions.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "{want:?}: admission runs before the PDP"
+        );
+        assert!(eg.calls().is_empty(), "{want:?}");
+        let trail = serde_json::to_string(&records.snapshot()).unwrap();
+        for wire in [
+            "153-sentinel",
+            "153 sentinel",
+            "sentinel-153",
+            "openai/personal",
+        ] {
+            assert!(
+                !trail.contains(wire),
+                "{want:?}: request text {wire} reached the trail"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_provider_the_role_is_not_granted_is_denied_by_the_pdp_on_its_admitted_name() {
+    const SENTINEL: &str = "sentinel-153-ungranted";
+    let fx = Fixture::with_policy("prompt-ungranted-dest", "Read", GRANTED);
+    let records = Records::new(0);
+    let eg = Arc::new(Recording::default());
+    let counting = Arc::new(Counting {
+        inner: fx.authorizer(),
+        decisions: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let resp = fx
+        .roundtrip_with_authorizer(
+            Arc::clone(&counting),
+            prompt_choosing(
+                "hello",
+                Some(common::choice(
+                    SENTINEL,
+                    common::TEST_MODEL,
+                    "openai/personal",
+                )),
+            ),
+            Arc::clone(&records),
+            Some(SENTINEL),
+            eg.clone(),
+        )
+        .await
+        .expect("a refusal frame");
+    assert!(matches!(resp.result, RespResult::Err(ref e) if e.code == ProtoErrCode::Unauthorized));
+    let rec = last_prompt_record(&records);
+    assert_eq!(rec.outcome.result, "deny");
+    assert_eq!(
+        rec.outcome.reason,
+        format!("destination not allowlisted for role user: provider:{SENTINEL}")
+    );
+    assert_eq!(
+        counting.decisions.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    assert!(eg.calls().is_empty());
+    assert!(records
+        .snapshot()
+        .iter()
+        .all(|r| r.egress.as_ref().is_none_or(|e| !e.is_intent())));
+}
+
+#[tokio::test]
+async fn the_key_path_is_the_peers_own_username_under_the_root_prefix_and_only_the_model_reaches_the_trail(
+) {
+    let mut fx = Fixture::with_policy("prompt-keypath", "Read", GRANTED);
+    fx.peer_user = Some("alice".into());
+    let records = Records::new(0);
+    let eg = Arc::new(Recording::default());
+    let resp = fx
+        .roundtrip(
+            prompt("hello"),
+            Arc::clone(&records),
+            Some("openai"),
+            eg.clone(),
+        )
+        .await
+        .expect("a reply frame");
+    assert!(
+        matches!(resp.result, RespResult::Ok(Payload::PromptReply(_))),
+        "{resp:?}"
+    );
+    assert_eq!(
+        eg.chosen(),
+        vec![(
+            common::TEST_MODEL.to_string(),
+            "maknae/users/alice/openai/personal".to_string(),
+            "api_key".to_string(),
+            maknae_proto::SEALED_KEY_MIN_BYTES
+        )]
+    );
+    let egress: Vec<_> = records
+        .snapshot()
+        .into_iter()
+        .filter_map(|r| r.egress)
+        .collect();
+    assert_eq!(
+        egress
+            .iter()
+            .map(|e| (e.status, e.model.as_deref()))
+            .collect::<Vec<_>>(),
+        vec![
+            (EgressStatus::IntentOnly, Some(common::TEST_MODEL)),
+            (EgressStatus::Sent, Some(common::TEST_MODEL)),
+        ]
+    );
+    let trail = serde_json::to_string(&records.snapshot()).unwrap();
+    for never in ["maknae/users", "openai/personal", "api_key", "90,90"] {
+        assert!(!trail.contains(never), "{never} reached the trail: {trail}");
+    }
 }
 
 #[tokio::test]

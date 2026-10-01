@@ -130,6 +130,8 @@ pub struct EgressAudit {
     pub content_digest: String,
     pub conversation: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_length: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_tokens: Option<u64>,
@@ -567,6 +569,7 @@ mod tests {
             content_length: 12,
             content_digest: "ab".repeat(16),
             conversation: "conv-1".into(),
+            model: None,
             reply_length: None,
             output_tokens: None,
             prompt_tokens: None,
@@ -574,6 +577,7 @@ mod tests {
         });
         let s = serde_json::to_string(&rec).unwrap();
         assert!(!s.contains("reply_length"), "None is absent, not null: {s}");
+        assert!(!s.contains("\"model\""), "None is absent, not null: {s}");
         let back: AuditRecord = serde_json::from_str(&s).unwrap();
         let e = back.egress.unwrap();
         assert!(e.is_intent());

@@ -42,7 +42,6 @@ mod error;
 mod loader;
 mod policy;
 mod principal;
-mod provider;
 mod providers;
 mod scalar;
 mod transport;
@@ -84,7 +83,6 @@ pub use maknae_io::TargetRequired;
 pub use maknae_security::{ClassificationPolicy, Level};
 pub use policy::{BasicPolicy, LEVELS as US_LEVELS};
 pub use principal::{principal_from_section, Principal, PRINCIPAL_SECTION};
-pub use provider::{provider_from_section, ProviderConfig, PROVIDER_SECTION};
 pub use providers::{
     endpoint_is_acceptable, key_field_is_acceptable, key_subpath_is_acceptable,
     model_is_acceptable, provider_name_is_acceptable, providers_from_section,

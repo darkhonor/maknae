@@ -186,9 +186,6 @@ files = [
   "crates/maknae-vault/src/env.rs",
   "crates/maknae-proto/src/frame.rs",
   "crates/maknae-config/src/transport.rs",
-  # #243: the provider registration parser. A wrong arm registers a
-  # destination the operator did not name, or lets a pasted key through.
-  "crates/maknae-config/src/provider.rs",
   "crates/maknae-config/src/providers.rs",
   "crates/maknae-config/src/user_providers.rs",
   "crates/maknae-config/src/audit_cfg.rs",
@@ -227,6 +224,7 @@ files = [
   "crates/maknae-audit-append/src/session.rs",
   "crates/maknae-kernel/src/authz.rs",
   "crates/maknae-kernel/src/handler.rs",
+  "crates/maknae-kernel/src/provider_choice.rs",
   # #158/#365: namespace/report evidence, subject-side attempts, and durable audit admission.
   "crates/maknae-kernel/src/mutation_exchange.rs",
   "crates/maknae-kernel/src/mutation.rs",

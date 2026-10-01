@@ -47,9 +47,8 @@ SURFACE=(
   "crates/maknae-config/src/egress_cfg.rs|EgressConfig|egress|2|config"
   "crates/maknae-config/src/audit_cfg.rs|AuditConfig|audit|3|config"
   "crates/maknae-config/src/principal.rs|Principal|principal|3|config"
-  # The `provider` section (#243): three disclosed leaves and the Vault path,
-  # which is `omit` -- the layout of the secret store is not what the grant is for.
-  "crates/maknae-config/src/provider.rs|ProviderConfig|provider|7|config"
+  # The `providers` section (#153): five disclosed leaves per authorized provider; keys are per user, never here.
+  "crates/maknae-config/src/providers.rs|AuthorizedProvider|providers[]|5|config"
   # NOTE: `Ceiling` spans TWO YAML levels. Six fields sit under
   # `core.handling.ceiling`, but `accreditation_ref` is a SIBLING of `ceiling`
   # (`parse_handling` accepts exactly those two keys), so the synthesised
@@ -272,7 +271,7 @@ for sec in $registered; do
   covered=""
   for entry in "${SURFACE[@]}"; do
     IFS='|' read -r _ _ p _ <<< "$entry"
-    case "$p" in "$sec"|"$sec".*) covered=1;; esac
+    case "$p" in "$sec"|"$sec".*|"$sec[]"|"$sec[]".*) covered=1;; esac
   done
   case " $NO_STRUCT_SECTIONS " in
     *" $sec "*)

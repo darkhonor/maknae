@@ -1,7 +1,7 @@
 //! The hermetic OpenAI-compatible stub server #240's scope specifies:
 //! "a plain reply, a tool-call reply, a malformed reply, and a 401".
 //!
-//! HTTP over loopback, no TLS — `ProviderConfig` already permits `http://` to
+//! HTTP over loopback, no TLS — `AuthorizedProvider` already permits `http://` to
 //! loopback for exactly this, and a TLS stub would test rustls rather than the
 //! client. The FIPS posture is a RUNTIME-ASSERTION property, enforced by the
 //! deputy's provider install and `assert_fips_provider`, not by a test fixture.

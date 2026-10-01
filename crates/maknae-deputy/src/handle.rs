@@ -195,6 +195,11 @@ mod tests {
             model: "m".into(),
             key_vault_path: key_vault_path.into(),
             key_field: "api-key".into(),
+            sealed_key: maknae_proto::SealedKey::new(vec![
+                0x5a;
+                maknae_proto::SEALED_KEY_MIN_BYTES
+            ])
+            .unwrap(),
             reasoning_effort: None,
             conversation: "conv1".into(),
             turns: vec![Turn::User {

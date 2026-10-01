@@ -369,6 +369,7 @@ mod tests {
             content_length: 999_999_999,
             content_digest: "f".repeat(32),
             conversation: "c".repeat(32),
+            model: Some("m".repeat(128)),
             reply_length,
             output_tokens: Some(u64::MAX),
             prompt_tokens: Some(u64::MAX),
@@ -1086,5 +1087,34 @@ mod tests {
             seen.len(),
             "two outcomes share a MAKNAE_PRIMARY rendering"
         );
+    }
+
+    #[test]
+    fn the_widest_egress_record_with_the_widest_model_degrades_and_its_degraded_line_still_fits() {
+        let mut r = egress_record(
+            EgressStatus::Sent,
+            Some(999_999_999),
+            "permit",
+            "sent",
+            "authorized",
+        );
+        r.subject.user = Some("aackerman".into());
+        r.subject.role = Some("adversary".into());
+        let full = format_line_unchecked(&r, PrimaryOutcome::Ok).unwrap();
+        assert!(
+            full.contains(&format!("\"model\":\"{}\"", "m".repeat(128))),
+            "the widest model reaches the full line: {full}"
+        );
+        assert!(full.len() > MACOS_SYSLOG_MAX, "{}", full.len());
+        match format_record(&r, PrimaryOutcome::Ok).unwrap() {
+            Mirrored::Degraded(l) => {
+                assert!(l.len() <= MACOS_SYSLOG_MAX, "{}", l.len());
+                assert!(
+                    !l.contains("mmmm"),
+                    "the model reached the degraded line: {l}"
+                );
+            }
+            Mirrored::Full(l) => panic!("a {}-byte line mirrored in full", l.len()),
+        }
     }
 }

@@ -17,6 +17,7 @@ mod handler;
 mod mutation;
 mod mutation_exchange;
 mod posture;
+mod provider_choice;
 mod run;
 pub use authz::*;
 pub use blocking_guard::BLOCKING_BREAKER_MAX_IN_FLIGHT;
@@ -43,6 +44,9 @@ pub use mutation::AttemptCaps;
 pub use mutation_exchange::{MutationExchange, PendingReport, ReportError};
 pub use posture::{
     determine, CredentialSource, Posture, PostureMarker, MECHANISM_KEYCHAIN, MECHANISM_TPM2,
+};
+pub use provider_choice::{
+    admit_choice, provider_authority, AdmittedChoice, ChoiceRefusal, ProviderAuthority,
 };
 pub use run::{
     accept_loop, handle, handle_with_attempt_caps, run, ConfigView, Conn, PlaneAccept, WhereCtx,

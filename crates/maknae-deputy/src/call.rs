@@ -367,6 +367,11 @@ mod tests {
             model: "m".into(),
             key_vault_path: "maknae/providers/openai".into(),
             key_field: "api-key".into(),
+            sealed_key: maknae_proto::SealedKey::new(vec![
+                0x5a;
+                maknae_proto::SEALED_KEY_MIN_BYTES
+            ])
+            .unwrap(),
             reasoning_effort: None,
             conversation: "conv1".into(),
             // A UNIQUE sentinel, not a word fragment. `contains("hi")` was
@@ -425,7 +430,7 @@ mod tests {
     }
 
     /// A loopback provider, answering once. Same shape as `maknae-llm`'s
-    /// hermetic suite — `ProviderConfig` permits `http://` to loopback for
+    /// hermetic suite — `AuthorizedProvider` permits `http://` to loopback for
     /// exactly this.
     async fn provider(
         status: &'static str,

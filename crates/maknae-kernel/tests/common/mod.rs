@@ -186,6 +186,7 @@ impl AuditEmit for Records {
 pub struct Fixture {
     pub root: PathBuf,
     pub principal: maknae_config::Principal,
+    pub peer_user: Option<String>,
 }
 impl Fixture {
     pub fn new(tag: &str, allow: &str) -> Self {
@@ -257,7 +258,11 @@ impl Fixture {
             std::fs::Permissions::from_mode(0o640),
         )
         .unwrap();
-        Self { root, principal }
+        Self {
+            root,
+            principal,
+            peer_user: Some("root".into()),
+        }
     }
     pub fn authorizer(
         &self,
@@ -426,7 +431,7 @@ impl Fixture {
             "maknae://d/plane/cli".into(),
             0,
             true,
-            None,
+            self.peer_user.clone(),
             records,
             718,
             config,
@@ -436,16 +441,7 @@ impl Fixture {
             Arc::new(Default::default()),
             Arc::new("basic+ceiling".into()),
             Arc::new("US".into()),
-            // #240a D1: the kernel carries the RESOLVED provider record.
-            Arc::new(provider.map(|n| maknae_config::ProviderConfig {
-                name: n.to_string(),
-                endpoint: "http://127.0.0.1:1/v1".into(),
-                model: "test-model".into(),
-                key_vault_path: "maknae/providers/test".into(),
-                key_field: "api-key".into(),
-                reasoning_effort: None,
-                output_tokens_field: None,
-            })),
+            Arc::new(authority(provider)),
             egress,
             Duration::from_secs(2),
             maknae_security::Lane::Local,
@@ -567,6 +563,45 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.root);
     }
+}
+
+pub const TEST_MODEL: &str = "test-model";
+pub const TEST_USER_PREFIX: &str = "maknae/users";
+
+pub fn authority(provider: Option<&str>) -> Option<maknae_kernel::ProviderAuthority> {
+    use maknae_config::Value;
+    let name = provider?;
+    let set = maknae_config::providers_from_section(Some(&Value::Seq(vec![Value::Map(vec![
+        ("name".into(), Value::Str(name.into())),
+        (
+            "endpoint".into(),
+            Value::Str("http://127.0.0.1:1/v1".into()),
+        ),
+        (
+            "models".into(),
+            Value::Seq(vec![Value::Str(TEST_MODEL.into())]),
+        ),
+    ])])))
+    .unwrap();
+    Some(maknae_kernel::ProviderAuthority {
+        set,
+        user_prefix: TEST_USER_PREFIX.into(),
+    })
+}
+
+pub fn choice(provider: &str, model: &str, subpath: &str) -> maknae_proto::ProviderChoice {
+    maknae_proto::ProviderChoice {
+        provider: provider.into(),
+        model: model.into(),
+        key_subpath: subpath.into(),
+        key_field: "api_key".into(),
+        sealed_key: maknae_proto::SealedKey::new(vec![0x5a; maknae_proto::SEALED_KEY_MIN_BYTES])
+            .unwrap(),
+    }
+}
+
+pub fn test_choice() -> maknae_proto::ProviderChoice {
+    choice("openai", TEST_MODEL, "openai/personal")
 }
 
 /// The subject's half of a read attempt, as `bins/maknae`'s `mutation::execute_read` performs it.
