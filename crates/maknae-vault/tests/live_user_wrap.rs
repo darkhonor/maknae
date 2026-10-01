@@ -20,10 +20,16 @@ fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
-fn random_hex(n: usize) -> String {
-    let mut b = vec![0u8; n];
-    aws_lc_rs::rand::fill(&mut b).unwrap();
-    b.iter().map(|x| format!("{x:02x}")).collect()
+fn random_hex(n: usize) -> Zeroizing<String> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut b = Zeroizing::new(vec![0u8; n]);
+    aws_lc_rs::rand::fill(&mut b[..]).unwrap();
+    let mut out = Zeroizing::new(String::with_capacity(2 * n));
+    for x in b.iter() {
+        out.push(char::from(HEX[usize::from(x >> 4)]));
+        out.push(char::from(HEX[usize::from(x & 0x0f)]));
+    }
+    out
 }
 
 async fn scenario(
@@ -115,8 +121,8 @@ async fn userpass_login_wrapped_read_lookup_and_checked_unwrap_against_live_vaul
     )
     .unwrap();
 
-    let user = format!("maknae-live-{}", random_hex(4));
-    let password = Zeroizing::new(random_hex(24));
+    let user = format!("maknae-live-{}", random_hex(4).as_str());
+    let password = random_hex(24);
     let own = format!("maknae-live/{user}/openai");
     let other = format!("maknae-live/{user}-other/openai");
     let policy =
