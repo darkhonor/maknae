@@ -14,6 +14,7 @@ use zeroize::Zeroizing;
 pub const MAX_WRAP_TTL: Duration = Duration::from_secs(300);
 pub const MAX_KV_DATA_PATH_BYTES: usize = 1024;
 const LEAF_DEPTH: u8 = 2;
+const KV_DATA_SEGMENT: &str = "/data/";
 
 pub struct WrappingToken(Zeroizing<String>);
 
@@ -60,6 +61,15 @@ impl KvDataPath {
 }
 
 pub fn kv_data_path(kv_mount: &str, secret_path: &str) -> Result<KvDataPath, VaultError> {
+    let composed = kv_mount
+        .len()
+        .saturating_add(KV_DATA_SEGMENT.len())
+        .saturating_add(secret_path.len());
+    if composed > MAX_KV_DATA_PATH_BYTES {
+        return Err(VaultError::InvalidKeyVaultPath(format!(
+            "the full path exceeds {MAX_KV_DATA_PATH_BYTES} bytes"
+        )));
+    }
     for (key, value) in [("kv_mount", kv_mount), ("secret path", secret_path)] {
         maknae_config::kv_fragment_is_acceptable(value)
             .map_err(|why| VaultError::InvalidKeyVaultPath(format!("{key} {why}")))?;
@@ -69,13 +79,9 @@ pub fn kv_data_path(kv_mount: &str, secret_path: &str) -> Result<KvDataPath, Vau
             )));
         }
     }
-    let full = format!("{kv_mount}/data/{secret_path}");
-    if full.len() > MAX_KV_DATA_PATH_BYTES {
-        return Err(VaultError::InvalidKeyVaultPath(format!(
-            "the full path exceeds {MAX_KV_DATA_PATH_BYTES} bytes"
-        )));
-    }
-    Ok(KvDataPath(full))
+    Ok(KvDataPath(format!(
+        "{kv_mount}{KV_DATA_SEGMENT}{secret_path}"
+    )))
 }
 
 pub(crate) fn wrap_ttl_value(ttl: Duration) -> Result<String, VaultError> {
@@ -563,6 +569,31 @@ mod tests {
         for (field, ok) in rows {
             assert_eq!(kv_field_is_acceptable(field), ok, "{field:?}");
         }
+    }
+
+    fn exceeds(r: Result<KvDataPath, VaultError>) -> bool {
+        matches!(r, Err(VaultError::InvalidKeyVaultPath(m)) if m == "the full path exceeds 1024 bytes")
+    }
+
+    #[test]
+    fn the_composed_bound_counts_the_mount_the_data_segment_and_the_path() {
+        let mount = "m".repeat(MAX_KV_DATA_PATH_BYTES - "/data/a".len());
+        assert_eq!(
+            kv_data_path(&mount, "a").unwrap().as_str().len(),
+            MAX_KV_DATA_PATH_BYTES
+        );
+        assert!(exceeds(kv_data_path(&format!("{mount}m"), "a")));
+        assert!(exceeds(kv_data_path("kv", &format!("{mount}mm"))));
+    }
+
+    #[test]
+    fn an_oversized_input_is_refused_by_length_before_it_is_parsed() {
+        let mib = "a/".repeat(512 * 1024);
+        assert!(exceeds(kv_data_path("kv", &format!("{mib}a"))));
+        assert!(exceeds(kv_data_path("kv", &mib)));
+        assert!(exceeds(kv_data_path(&mib, "a")));
+        assert!(exceeds(kv_data_path("kv", &"../".repeat(512))));
+        assert!(exceeds(kv_data_path("k v", &"a ".repeat(1024))));
     }
 
     #[test]
