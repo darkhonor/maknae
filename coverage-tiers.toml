@@ -125,6 +125,7 @@ files = [
   "crates/maknae-vault/src/wrap.rs",
   "crates/maknae-vault/src/token_record.rs",
   "crates/maknae-vault/src/password_line.rs",
+  "crates/maknae-vault/src/seal_pub_store.rs",
   "crates/maknae-seal/src/fips.rs",
   "crates/maknae-seal/src/aad.rs",
   "crates/maknae-seal/src/wire.rs",
@@ -529,6 +530,14 @@ why = "#153: sends the five user-credential Vault calls (login, wrapped read, lo
 [[t3]]
 path = "crates/maknae-vault/src/token_store.rs"
 why = "#153: the user token's custody I/O only — the default keychain (usually login), /usr/bin/systemd-creds over stdin/stdout, and the token files through maknae-io; what stays here is opening the keychain, spawning systemd-creds, the maknae-io publish/read/remove calls and the one-line per-custody dispatch. Every decision it applies (record and its issuing Vault address, expiry, custody choice and order, the erase-every-custody fold that skips the kept custody, continues past a failure and returns the first, maknae-io requirements, refusal mappings) is T1 in token_record.rs. The residual and keychain arms are unit-tested on their platforms; the systemd-creds arm in an operator-run ignored test on a systemd >= 256 host. Mutation-excluded like secret_io.rs"
+
+[[t3]]
+path = "crates/maknae-vault/src/seal_pub_io.rs"
+why = "#153: reads the host-wide seal.pub through maknae-io (open_anchor, then read) at each candidate location and returns the one present; the locations, the per-OS candidate list, the exactly-one choice, the maknae-io requirements (root owner, no group/other write, one link, 215 bytes) and the refusal mapping are T1 in seal_pub_store.rs. Unit-tested against a scratch layout owned by the test user; mutation-excluded like token_store.rs"
+
+[[t3]]
+path = "crates/maknae-vault/src/seal_key_io.rs"
+why = "#153: reads the Egress Daemon's seal private key from $CREDENTIALS_DIRECTORY (Linux) or from the System-keychain item the egress pointer names (macOS); the source choice, the length bound and the hex codec are T1 in secret_source.rs, and the pointer and account gate are keychain_policy.rs. The credential arm is unit-tested on every OS, the keychain arm up to the account gate on macOS; mutation-excluded like secret_io.rs"
 
 [[t3]]
 path = "crates/maknae-seal/src/lib.rs"

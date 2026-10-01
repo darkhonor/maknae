@@ -29,6 +29,7 @@ mod password_line;
 mod plane;
 mod plane_verify;
 mod resolver;
+mod seal_key_io;
 mod secret_io;
 mod secret_source;
 mod supervisor;
@@ -45,6 +46,10 @@ mod kv;
 mod kv_io;
 mod peer_identity;
 mod peercred;
+#[cfg(unix)]
+mod seal_pub_io;
+#[cfg(unix)]
+mod seal_pub_store;
 #[cfg(unix)]
 mod socket;
 #[cfg(unix)]
@@ -85,11 +90,19 @@ pub use password_line::{PasswordFeed, PasswordLine};
 pub use peer_identity::{creds_match_listener_uid, creds_match_uid, listener_uid_is, peer_uid_is};
 pub use peercred::PeerCreds;
 pub use plane::Plane;
+pub use seal_key_io::read_egress_seal_key;
+#[cfg(unix)]
+pub use seal_pub_io::read_seal_pub_pem;
+#[cfg(unix)]
+pub use seal_pub_store::{
+    choose_present, linux_home_from_os_release, seal_pub_path, SealPubHome, MAX_SEAL_PUB_BYTES,
+};
 pub use secret_source::{
     credentials_directory_env, resolve_cli_secret_source, resolve_daemon_secret_source,
-    resolve_egress_secret_source, CliSecretSource, CredentialSourceKind, DaemonSecretSource,
-    EgressSecretSource, DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME,
-    EGRESS_CREDENTIALS_DIRECTORY_CRED_NAME,
+    resolve_egress_seal_key_source, resolve_egress_secret_source, seal_key_from_hex,
+    seal_key_to_hex, CliSecretSource, CredentialSourceKind, DaemonSecretSource,
+    EgressSealKeySource, EgressSecretSource, DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME,
+    EGRESS_CREDENTIALS_DIRECTORY_CRED_NAME, EGRESS_SEAL_KEY_CRED_NAME, MAX_SEAL_KEY_BYTES,
 };
 #[cfg(unix)]
 pub use socket::bind_listener as bind_group_gated_uds;
@@ -116,7 +129,7 @@ pub use vault_api::VaultApi;
 pub use verify::{verify_plane_uri_san, VerifyError};
 pub use wrap::{
     kv_data_path, KvDataPath, WrapExpectation, WrapLookup, WrappedSecret, WrappingToken,
-    MAX_KV_DATA_PATH_BYTES, MAX_WRAP_TTL,
+    MAX_KV_DATA_PATH_BYTES, MAX_WRAP_TTL, USER_KEY_WRAP_TTL,
 };
 
 #[used]

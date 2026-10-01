@@ -186,6 +186,8 @@ exclude_globs = [
   "crates/maknae-vault/src/keychain.rs",       # #76: Security.framework I/O; the gate, pointer and order decisions are keychain_policy.rs (T1, NOT excluded)
   "crates/maknae-vault/src/token_store.rs",
   "crates/maknae-vault/src/vault_api.rs",
+  "crates/maknae-vault/src/seal_pub_io.rs",
+  "crates/maknae-vault/src/seal_key_io.rs",
   "crates/maknae-seal/src/error.rs",
   "crates/maknae-seal/src/glue.rs",
   "crates/maknae-seal/src/lib.rs",

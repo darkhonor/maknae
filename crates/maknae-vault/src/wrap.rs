@@ -12,6 +12,7 @@ use std::time::Duration;
 use zeroize::Zeroizing;
 
 pub const MAX_WRAP_TTL: Duration = Duration::from_secs(300);
+pub const USER_KEY_WRAP_TTL: Duration = Duration::from_secs(60);
 pub const MAX_KV_DATA_PATH_BYTES: usize = 1024;
 const LEAF_DEPTH: u8 = 2;
 const KV_DATA_SEGMENT: &str = "/data/";
@@ -469,6 +470,13 @@ mod tests {
                 "{bad:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_user_key_wrap_ttl_is_sixty_seconds_and_a_valid_wrap_ttl() {
+        assert_eq!(USER_KEY_WRAP_TTL, Duration::from_secs(60));
+        assert_eq!(wrap_ttl_value(USER_KEY_WRAP_TTL).unwrap(), "60s");
+        assert!(USER_KEY_WRAP_TTL <= MAX_WRAP_TTL);
     }
 
     #[test]

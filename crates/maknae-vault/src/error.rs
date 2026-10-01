@@ -142,6 +142,16 @@ pub enum VaultError {
     TokenUnreadable(String),
     TokenOtherVault(String),
     TokenStore(String),
+    SealPubAbsent,
+    SealPubAmbiguous {
+        first: &'static str,
+        second: &'static str,
+    },
+    SealPubRefused {
+        path: PathBuf,
+        detail: String,
+    },
+    SealKey(&'static str),
 }
 
 impl std::fmt::Display for VaultError {
@@ -255,6 +265,23 @@ impl std::fmt::Display for VaultError {
                 "the stored Vault token was issued by a different Vault ({addr}): run `maknae login`"
             ),
             VaultError::TokenStore(m) => write!(f, "Vault token storage failed: {m}"),
+            VaultError::SealPubAbsent => write!(
+                f,
+                "no Egress Daemon public key is published on this host: ask your administrator to run `sudo maknae enroll`"
+            ),
+            VaultError::SealPubAmbiguous { first, second } => write!(
+                f,
+                "Egress Daemon public keys are published at both {first} and {second}, and exactly one is expected: ask your administrator to remove the stale one"
+            ),
+            VaultError::SealPubRefused { path, detail } => write!(
+                f,
+                "the Egress Daemon public key at {} was refused ({detail}): it must be a regular file with one link, owned by root, not writable by group or others, in a directory only root can write; ask your administrator",
+                path.display()
+            ),
+            VaultError::SealKey(why) => write!(
+                f,
+                "the Egress Daemon seal key is malformed ({why}): run `sudo maknae enroll --rotate-seal-key`"
+            ),
         }
     }
 }
@@ -332,6 +359,16 @@ mod tests {
             VaultError::TokenUnreadable("keychain status -25293".into()),
             VaultError::TokenOtherVault("https://old.example/v1/".into()),
             VaultError::TokenStore("keychain add: status -25308".into()),
+            VaultError::SealPubAbsent,
+            VaultError::SealPubAmbiguous {
+                first: "/etc/pki/maknae/seal.pub",
+                second: "/etc/ssl/maknae/seal.pub",
+            },
+            VaultError::SealPubRefused {
+                path: PathBuf::from("/etc/pki/maknae/seal.pub"),
+                detail: "mode 664".into(),
+            },
+            VaultError::SealKey("empty or over 512 bytes"),
         ];
         for e in cases {
             assert!(!format!("{e}").is_empty());
@@ -372,5 +409,36 @@ mod tests {
         assert!(!VaultError::TokenStore("x".into())
             .to_string()
             .contains("maknae login"));
+    }
+
+    #[test]
+    fn each_seal_refusal_names_who_can_fix_it() {
+        assert_eq!(
+            VaultError::SealPubAbsent.to_string(),
+            "no Egress Daemon public key is published on this host: ask your administrator to run `sudo maknae enroll`"
+        );
+        let m = VaultError::SealPubAmbiguous {
+            first: "/etc/pki/maknae/seal.pub",
+            second: "/etc/ssl/maknae/seal.pub",
+        }
+        .to_string();
+        assert!(
+            m.contains("/etc/pki/maknae/seal.pub")
+                && m.contains("/etc/ssl/maknae/seal.pub")
+                && m.contains("administrator"),
+            "{m}"
+        );
+        let m = VaultError::SealPubRefused {
+            path: PathBuf::from("/etc/ssl/maknae/seal.pub"),
+            detail: "mode 664".into(),
+        }
+        .to_string();
+        assert!(
+            m.contains("/etc/ssl/maknae/seal.pub") && m.contains("mode 664"),
+            "{m}"
+        );
+        assert!(VaultError::SealKey("empty or over 512 bytes")
+            .to_string()
+            .ends_with("run `sudo maknae enroll --rotate-seal-key`"));
     }
 }
