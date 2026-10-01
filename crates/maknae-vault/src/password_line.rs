@@ -72,20 +72,16 @@ impl PasswordLine {
                     self.escape = Escape::None;
                     return PasswordFeed::More;
                 }
-                0x1b => {
-                    self.escape = Escape::Started;
+                _ => self.escape = Escape::None,
+            },
+            Escape::Ss3 => match byte {
+                0x30..=0x3f => return PasswordFeed::More,
+                0x40..=0x7e => {
+                    self.escape = Escape::None;
                     return PasswordFeed::More;
                 }
                 _ => self.escape = Escape::None,
             },
-            Escape::Ss3 => {
-                match byte {
-                    0x30..=0x3f => {}
-                    0x1b => self.escape = Escape::Started,
-                    _ => self.escape = Escape::None,
-                }
-                return PasswordFeed::More;
-            }
             Escape::None => {}
         }
         match byte {
@@ -118,11 +114,16 @@ impl PasswordLine {
 
     fn erase_char(&mut self) {
         let mut continuations = 0;
-        while let Some(b) = self.buf.pop() {
-            if b & 0xc0 != 0x80 || continuations == 3 {
-                break;
-            }
+        while continuations < 3 && self.buf.last().is_some_and(|b| b & 0xc0 == 0x80) {
+            self.buf.pop();
             continuations += 1;
+        }
+        if self
+            .buf
+            .last()
+            .is_some_and(|&b| continuations == 0 || b >= 0xc0)
+        {
+            self.buf.pop();
         }
     }
 
@@ -252,11 +253,13 @@ mod tests {
 
     #[test]
     fn an_empty_or_non_utf8_line_is_refused() {
+        let (line, fed) = typed(b"\r");
+        assert_eq!(fed, PasswordFeed::Done);
         assert!(matches!(
-            PasswordLine::default().finish(),
+            line.finish(),
             Err(VaultError::InvalidSecret {
                 what: "password",
-                ..
+                why: "must be 1..=1024 bytes"
             })
         ));
         let (line, _) = typed(&[0xff, b'\r']);
@@ -301,7 +304,7 @@ mod tests {
 
     #[test]
     fn escape_edge_cases_are_dropped_or_aborted_per_ecma_48() {
-        let rows: [(&[u8], &str); 8] = [
+        let rows: [(&[u8], &str); 11] = [
             (b"a\x1b\x1b[Ab\r", "ab"),
             (b"\x1b[\x1b[Ab\r", "b"),
             (b"\x1b[1\x01b\r", "b"),
@@ -310,6 +313,9 @@ mod tests {
             (b"a\x1bO5Pb\r", "ab"),
             (b"a\x1bOPb\r", "ab"),
             (b"a\x1b\r", "a"),
+            (b"a\x1bO\x1b[Ab\r", "ab"),
+            (b"a\x1bO\xc3\xa9b\r", "a\u{e9}b"),
+            (b"ab\xa9\x7f\r", "ab"),
         ];
         for (bytes, want) in rows {
             let (line, fed) = typed(bytes);
@@ -321,7 +327,7 @@ mod tests {
     #[test]
     fn backspace_over_invalid_bytes_never_erases_past_one_character() {
         let (line, _) = typed(&[b'a', 0x80, 0x80, 0x80, 0x80, 0x80, 0x7f, b'\r']);
-        assert_eq!(line.buf.len(), 2);
+        assert_eq!(line.buf.len(), 3);
     }
 
     #[test]
