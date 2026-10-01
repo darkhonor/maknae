@@ -5,6 +5,7 @@ mod agent;
 mod cli;
 mod enroll;
 mod mutation;
+mod tty;
 
 use std::process::ExitCode;
 
