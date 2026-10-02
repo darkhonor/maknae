@@ -243,8 +243,60 @@ def check_evidence(rows: list, field: str, where: str) -> None:
 _TEST = re.compile(r"([A-Za-z0-9_.\-]+(?:/[A-Za-z0-9_.\-]+)+)::([A-Za-z_][A-Za-z0-9_]*)")
 
 
+_RAW_STR = re.compile(r'b?r(#*)"')
+_CHAR_LIT = re.compile(r"'(?:\\(?:x[0-9A-Fa-f]{2}|u\{[0-9A-Fa-f]{1,6}\}|.)|[^\\'\n])'")
+
+
+def _rust_code_only(src: str) -> str:
+    """Blank Rust comments (`//` lines, nested `/* */` blocks) and string and
+    char literals (plain, byte, raw) to spaces, keeping newlines, so a test
+    attribute or fn named only inside one never resolves a citation."""
+    out, i, n = [], 0, len(src)
+
+    def blank(a: int, b: int) -> None:
+        out.append("".join(c if c == "\n" else " " for c in src[a:b]))
+
+    while i < n:
+        c = src[i]
+        if src.startswith("//", i):
+            j = src.find("\n", i)
+            j = n if j < 0 else j
+            blank(i, j); i = j
+        elif src.startswith("/*", i):
+            j, depth = i + 2, 1
+            while j < n and depth:
+                if src.startswith("/*", j):
+                    depth += 1; j += 2
+                elif src.startswith("*/", j):
+                    depth -= 1; j += 2
+                else:
+                    j += 1
+            blank(i, j); i = j
+        elif (m := _RAW_STR.match(src, i)) and (i == 0 or not (src[i - 1].isalnum() or src[i - 1] == "_")):
+            close = '"' + m.group(1)
+            j = src.find(close, m.end())
+            j = n if j < 0 else j + len(close)
+            blank(i, j); i = j
+        elif c == '"' or (c == "b" and src.startswith('b"', i) and (i == 0 or not (src[i - 1].isalnum() or src[i - 1] == "_"))):
+            j = i + (2 if c == "b" else 1)
+            while j < n and src[j] != '"':
+                j += 2 if src[j] == "\\" else 1
+            j = min(j + 1, n)
+            blank(i, j); i = j
+        elif c == "'" and (m := _CHAR_LIT.match(src, i)):
+            blank(i, m.end()); i = m.end()
+        else:
+            out.append(c); i += 1
+    return "".join(out)
+
+
+_TEST_ATTR = r"#\[\s*(?:tokio\s*::\s*)?test\s*(?:\([^\]]*\))?\s*\]"
+
+
 def check_tests(rows: list, field: str, where: str) -> None:
-    """Every `path::test_fn` citation must name a #[test] fn that exists in that file."""
+    """Every `path::test_fn` citation must name a #[test] fn that exists in that
+    file, in code: a comment or string literal naming one does not count, and
+    only `#[test]`, `#[tokio::test]` and `#[tokio::test(...)]` mark a test."""
     bad = []
     for r in rows:
         raw = r.get(field, "")
@@ -257,7 +309,8 @@ def check_tests(rows: list, field: str, where: str) -> None:
             f = ROOT / path
             if not f.is_file():
                 bad.append((r, f"{path} (no such file)"))
-            elif not re.search(rf"#\[(?:tokio::)?test[^\]]*\]\s*(?:#\[[^\]]*\]\s*)*(?:async\s+)?fn\s+{fn}\s*\(", f.read_text()):
+            elif not re.search(rf"{_TEST_ATTR}\s*(?:#\[[^\]]*\]\s*)*(?:async\s+)?fn\s+{fn}\s*\(",
+                               _rust_code_only(f.read_text())):
                 bad.append((r, f"{path}::{fn} (no such #[test] fn)"))
     if bad:
         lines = "\n".join(f"    {r.get('name', r.get('label', '?'))}: {t}" for r, t in bad)

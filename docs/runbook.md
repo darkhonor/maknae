@@ -589,8 +589,10 @@ Enroll wrote `/etc/maknae/egress-bounds.yaml` in step 3; this step only checks i
 
 ```bash
 sudo stat -c '%U:%G %a %n' /etc/maknae/egress-bounds.yaml   # root:root 644
-cat /etc/maknae/egress-bounds.yaml
+sudo cat /etc/maknae/egress-bounds.yaml
 ```
+
+The file is `0644`, but `/etc/maknae` is `root:_maknae 0750`, enroll adds you to `maknae`, not `_maknae`, and the directory's ACL lets only `_maknae-egress` traverse it. So you read it with `sudo`.
 
 It holds exactly `vault.addr`, `kv_mount` and `user_prefix` (`docs/configuration.md` §6.1.3). Do not edit it by hand: the next enroll rewrites it.
 

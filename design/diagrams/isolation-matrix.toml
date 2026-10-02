@@ -336,14 +336,14 @@ test = "crates/maknae-kernel/src/egress.rs::a_request_for_a_choice_carries_the_p
 subject = "vault"
 object = "key_a"
 right = "r"
-control = "Vault is the only store of a user's key, and hands it out only response-wrapped (min_wrapping_ttl)"
+control = "Vault is the only store of a user's key, and hands it out only response-wrapped (min_wrapping_ttl); whoever holds the wrapping token can redeem it at sys/wrapping/unwrap, so the user can still read their own key: the accepted residual #429"
 evidence = "deploy/vault-pki/main.tf:209 · ADR-0028"
 
 [[cell]]
 subject = "vault"
 object = "key_b"
 right = "r"
-control = "Vault is the only store of a user's key, and hands it out only response-wrapped (min_wrapping_ttl)"
+control = "Vault is the only store of a user's key, and hands it out only response-wrapped (min_wrapping_ttl); whoever holds the wrapping token can redeem it at sys/wrapping/unwrap, so the user can still read their own key: the accepted residual #429"
 evidence = "deploy/vault-pki/main.tf:209 · ADR-0028"
 
 [[cell]]

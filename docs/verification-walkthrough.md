@@ -106,7 +106,7 @@ VAULT_TOKEN="$VT" vault read -wrap-ttl=60s <kv>/data/<prefix>/<A>/openai
 
 ## C3. An unwrapped read of your own key is refused
 
-**Claim.** Even A cannot read A's own key in the clear. Vault hands it out only inside a wrapping token.
+**Claim.** A direct, unwrapped KV read of A's own key is refused: Vault hands the key out only inside a wrapping token. This does not keep the key from A. A can make a wrapped read and redeem the token at `sys/wrapping/unwrap`, which returns the plaintext key, so any process running as A can read A's key. That is ADR-0028's accepted residual (#429), and this claim does not test it.
 
 **Control.** `cli_a × key_a`: the `maknae-user` policy sets `min_wrapping_ttl = "1s"` on the key path (`deploy/vault-pki/main.tf:209`). The CLI also refuses a reply that carries the key instead of a wrapping token (`crates/maknae-vault/src/wrap.rs::an_unwrapped_response_is_refused`). Credential-path step: `wrapping token (a reply carrying the key is refused)`.
 
@@ -116,7 +116,7 @@ VAULT_TOKEN="$VT" vault read -wrap-ttl=60s <kv>/data/<prefix>/<A>/openai
 VAULT_TOKEN="$VT" vault read <kv>/data/<prefix>/<A>/openai
 ```
 
-**Expected.** HTTP 403, `permission denied`. Vault reports a `min_wrapping_ttl` violation as a plain permission denied, not as a wrapping error. It is the policy working, not a broken grant.
+**Expected.** HTTP 403, `permission denied`. Vault reports a `min_wrapping_ttl` violation as a plain permission denied, not as a wrapping error. It is the policy working, not a broken grant. The 403 shows only that the unwrapped read is refused.
 
 **Measured.** 2026-10-02 on Wrathion (macOS 26.6.2) as `aackerman`: 403 `permission denied`. In PR 4, on a throwaway Vault 2.0.0 with the shipped Terraform, both an unwrapped read and an unwrapped write of a user key were refused (#434, Verification).
 
