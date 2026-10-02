@@ -304,7 +304,7 @@ async fn drain_handlers_bounded(handlers: &mut JoinSet<()>, timeout: Duration) -
 /// identity in an audit trail is a WRONG identity, which is worse than an
 /// absent one. A new field must also not be unbounded — that is the class of
 /// defect the mirror's budget test exists to catch.
-pub const MAX_SUBJECT_USER_BYTES: usize = 32;
+pub const MAX_SUBJECT_USER_BYTES: usize = maknae_vault::MAX_USERNAME_BYTES;
 
 /// The decided subject identity stamped onto a record (#275). Audit-only:
 /// nothing here is an authorization input.

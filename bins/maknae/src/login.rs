@@ -3,6 +3,7 @@ use maknae_vault::{
     check_vault_addr, custody_for_store, custody_label, erase_user_token, observe_systemd_creds,
     read_user_token, store_user_token, userpass_username_is_acceptable, vault_config_from_document,
     StoredToken, SystemdCreds, UserAuth, UserToken, VaultApi, VaultConfig, VaultError,
+    MAX_USERNAME_BYTES,
 };
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -41,8 +42,8 @@ pub(crate) fn local_username() -> Result<String, String> {
         .ok_or_else(|| format!("uid {uid} has no account name"))?;
     userpass_username_is_acceptable(&user.name).map_err(|why| {
         format!(
-            "your account name {:?} {why}; Vault userpass needs 1-64 bytes of [a-z0-9._-] \
-             starting and ending with [a-z0-9_]",
+            "your account name {:?} {why}; maknae needs 1-{MAX_USERNAME_BYTES} bytes of \
+             [a-z0-9._-] starting and ending with [a-z0-9_]",
             user.name
         )
     })?;

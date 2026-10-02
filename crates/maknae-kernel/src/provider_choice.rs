@@ -77,8 +77,7 @@ pub fn admit_choice<'a>(
     }
     let username = username
         .filter(|u| {
-            u.len() <= crate::MAX_SUBJECT_USER_BYTES
-                && maknae_vault::userpass_username_is_acceptable(u).is_ok()
+            maknae_vault::userpass_username_is_acceptable(u).is_ok()
                 && kv_fragment_is_acceptable(u).is_ok()
         })
         .ok_or(ChoiceRefusal::UnsafeUsername)?;

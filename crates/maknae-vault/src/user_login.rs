@@ -5,7 +5,8 @@ use std::fmt;
 use std::time::Duration;
 use zeroize::Zeroizing;
 
-pub const MAX_USERNAME_BYTES: usize = 64;
+/// The audit trail's subject bound, so every user who can log in is named in the trail.
+pub const MAX_USERNAME_BYTES: usize = 32;
 pub const MAX_PASSWORD_BYTES: usize = 1024;
 
 pub struct Password(Zeroizing<String>);
@@ -167,10 +168,8 @@ mod tests {
         for ok in ["alice", "a", "svc_agent", "a.b-c_d", "_x_", "0day"] {
             assert_eq!(userpass_username_is_acceptable(ok), Ok(()), "{ok:?}");
         }
-        assert_eq!(
-            userpass_username_is_acceptable(&"a".repeat(MAX_USERNAME_BYTES)),
-            Ok(())
-        );
+        assert_eq!(MAX_USERNAME_BYTES, 32);
+        assert_eq!(userpass_username_is_acceptable(&"a".repeat(32)), Ok(()));
         let refusals = [
             ("", "is empty"),
             ("Alice", "upper-case"),
@@ -185,11 +184,9 @@ mod tests {
             let e = userpass_username_is_acceptable(bad).unwrap_err();
             assert!(e.contains(why), "{bad:?}: {e}");
         }
-        assert!(
-            userpass_username_is_acceptable(&"a".repeat(MAX_USERNAME_BYTES + 1))
-                .unwrap_err()
-                .contains("exceeds 64 bytes")
-        );
+        assert!(userpass_username_is_acceptable(&"a".repeat(33))
+            .unwrap_err()
+            .contains("exceeds 32 bytes"));
     }
 
     #[test]
