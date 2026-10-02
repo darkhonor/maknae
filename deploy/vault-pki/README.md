@@ -121,14 +121,23 @@ remove the subtree first.
 
 ## Loading a user's provider key
 
-Every read of a key under the user policy is answered only wrapped (an unwrapped read is
-refused), and every write needs `-wrap-ttl` too (an unwrapped write is refused). The user
-loads their own key, logged in with their userpass identity, so the command uses
-`-wrap-ttl=60s`. First get a Vault token with `vault login -method=userpass -path=<userpass_mount> username=<user>` (`maknae login` keeps its own token, not `VAULT_TOKEN`). The command below is not yet run as written; with the defaults, in zsh, for the subpath `openai` and field `api_key`:
+Every read of a key under the user policy is answered only wrapped, and an unwrapped read is refused with `403 permission denied` (measured on the homelab Vault; Vault reports a `min_wrapping_ttl` violation as a plain permission denied). An unwrapped write is refused too (measured on a throwaway Vault 2.0.0 in #434). The user loads their own key, logged in with their userpass identity, so the command uses `-wrap-ttl=60s`.
+
+Get a user token without replacing another token in the shell: `vault login -method=userpass -path=<userpass_mount> -token-only username=<user>` (`maknae login` keeps its own token, not `VAULT_TOKEN`).
+
+zsh (measured on macOS; it stored the key at `maknae-kv/data/maknae/users/<user>/openai`):
 
 ```zsh
-read -rs "KEY?API key: " && echo && printf %s "$KEY" | vault kv put -wrap-ttl=60s maknae-kv/maknae/users/alice/openai api_key=- && unset KEY
+read -rs "VT?Maknae user token: " && echo && read -rs "KEY?OpenAI API key: " && echo && printf '{"data":{"api_key":"%s"}}' "$KEY" | VAULT_TOKEN="$VT" vault write -wrap-ttl=60s <kv_mount>/data/<user_prefix>/<username>/<subpath> - ; unset VT KEY
 ```
+
+bash (not yet measured):
+
+```bash
+read -rsp "Maknae user token: " VT && echo && read -rsp "OpenAI API key: " KEY && echo && printf '{"data":{"api_key":"%s"}}' "$KEY" | VAULT_TOKEN="$VT" vault write -wrap-ttl=60s <kv_mount>/data/<user_prefix>/<username>/<subpath> - ; unset VT KEY
+```
+
+`read -s` keeps both secrets off the screen and out of shell history; `printf` is a builtin, so the key never appears in `ps`; `vault write <kv_mount>/data/...` with `-` writes the KV v2 data path directly, avoiding the `vault kv` preflight against `sys/internal/ui/mounts`, which a user token may not be allowed; Vault answers with a wrapping token around the write's metadata, which holds nothing secret. Do not use `vault kv put ... api_key=-` (measured not to work for a user). A wrapping token from a wrapped read wraps the key itself, so never paste one anywhere.
 
 ## Offline validation (no Vault needed)
 
