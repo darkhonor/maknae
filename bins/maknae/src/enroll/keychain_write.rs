@@ -26,11 +26,16 @@ pub(crate) fn validate_secret_id(s: &str) -> Result<(), EnrollError> {
     }
 }
 
-pub(crate) fn add_command(
-    secret: &Zeroizing<String>,
-    plane: KeychainPlane,
-    binary: &str,
-) -> Zeroizing<String> {
+pub(crate) fn validate_item_content(plane: KeychainPlane, s: &str) -> Result<(), EnrollError> {
+    match plane {
+        KeychainPlane::Daemon => validate_secret_id(s),
+        KeychainPlane::Egress => maknae_vault::seal_key_from_hex(s)
+            .map(drop)
+            .map_err(|_| EnrollError::SealKeyShape),
+    }
+}
+
+pub(crate) fn add_command(secret: &str, plane: KeychainPlane, binary: &str) -> Zeroizing<String> {
     let parts = [
         "add-generic-password -a ",
         KEYCHAIN_ACCOUNT,
@@ -39,7 +44,7 @@ pub(crate) fn add_command(
         " -T ",
         binary,
         " -w ",
-        secret.as_str(),
+        secret,
         " ",
         SYSTEM_KEYCHAIN,
         "\n",
@@ -136,13 +141,13 @@ pub(crate) async fn run(program: &str, args: &[&str]) -> Result<std::process::Ou
 
 #[cfg(target_os = "macos")]
 pub(crate) async fn seal_secret_macos(
-    secret: &Zeroizing<String>,
+    secret: &str,
     plane: KeychainPlane,
     binary: &'static str,
     team: &str,
 ) -> Result<(), EnrollError> {
     use tokio::io::AsyncWriteExt;
-    validate_secret_id(secret)?;
+    validate_item_content(plane, secret)?;
     let stderr = |o: &std::process::Output| String::from_utf8_lossy(&o.stderr).trim().to_string();
     let io = |e: std::io::Error| EnrollError::Command {
         program: SECURITY.to_string(),
@@ -210,6 +215,13 @@ pub(crate) async fn seal_secret_macos(
             })
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) async fn item_in_system_keychain(plane: KeychainPlane) -> Result<bool, EnrollError> {
+    let find = run(SECURITY, &find_args(plane)).await?;
+    Ok(find.status.success()
+        && parse_keychain_line(&String::from_utf8_lossy(&find.stdout)) == Some(SYSTEM_KEYCHAIN))
 }
 
 #[cfg(target_os = "macos")]
@@ -402,11 +414,11 @@ mod tests {
 
     #[test]
     fn the_add_command_is_exact_and_sized_once() {
-        let s = Zeroizing::new(UUID.to_string());
+        let s = Zeroizing::new("30818e020100".to_string());
         let c = add_command(&s, KeychainPlane::Egress, EGRESS_BINARY);
         assert_eq!(
             c.as_str(),
-            format!("add-generic-password -a secret-id -s io.maknae.maknae-egress -T /usr/local/bin/maknae-egress -w {UUID} /Library/Keychains/System.keychain\n")
+            "add-generic-password -a secret-id -s io.maknae.maknae-egress -T /usr/local/bin/maknae-egress -w 30818e020100 /Library/Keychains/System.keychain\n"
         );
         assert_eq!(c.capacity(), c.len());
     }
@@ -553,6 +565,30 @@ mod tests {
             "io.maknae.maknaed",
             "TEAM123456"
         ));
+    }
+
+    #[test]
+    fn each_plane_item_has_its_own_content_shape() {
+        let der = maknae_seal::SealPrivateKey::generate()
+            .unwrap()
+            .to_pkcs8_der()
+            .unwrap();
+        let hex = maknae_vault::seal_key_to_hex(&der);
+        assert!(validate_item_content(KeychainPlane::Daemon, UUID).is_ok());
+        assert!(matches!(
+            validate_item_content(KeychainPlane::Daemon, hex.expose()),
+            Err(EnrollError::SecretIdShape)
+        ));
+        assert!(validate_item_content(KeychainPlane::Egress, hex.expose()).is_ok());
+        for bad in [UUID, "AB", "abc", ""] {
+            assert!(
+                matches!(
+                    validate_item_content(KeychainPlane::Egress, bad),
+                    Err(EnrollError::SealKeyShape)
+                ),
+                "{bad:?}"
+            );
+        }
     }
 }
 

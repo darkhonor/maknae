@@ -31,6 +31,12 @@ pub(crate) fn text(id: MsgId) -> &'static str {
         MsgId::EnrollVaultOpsStarted => "Vault에서 자격 증명을 요청하고 있어요",
         MsgId::EnrollWritingDaemonConfig => "데몬 설정을 기록하고 있어요",
         MsgId::EnrollSealingDaemonCredential => "데몬 자격 증명을 봉인하고 있어요",
+        MsgId::EnrollSealKeyGenerated => {
+            "Egress Daemon의 봉인 키를 만들고 공개 키를 {path}에 게시했어요. 이미 실행 중인 Egress Daemon은 이전 키를 그대로 쓰고 있으니 `sudo {restart}`로 다시 시작하세요"
+        }
+        MsgId::EnrollSealKeyKept => {
+            "Egress Daemon의 기존 봉인 키와 게시된 공개 키를 유지했어요. 교체하려면 --rotate-seal-key를 사용하세요"
+        }
         MsgId::EnrollProvisioningCli => "CLI 설정을 기록하고 있어요",
         MsgId::EnrollPostureSummary => "등록이 완료됐어요. CLI 설정: {cli_dir}",
         MsgId::EnrollReloginNote => {

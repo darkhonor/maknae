@@ -28,6 +28,12 @@ pub(crate) fn text(id: MsgId) -> &'static str {
         MsgId::EnrollVaultOpsStarted => "Requesting credentials from Vault",
         MsgId::EnrollWritingDaemonConfig => "Writing the daemon's configuration",
         MsgId::EnrollSealingDaemonCredential => "Sealing the daemon's credential",
+        MsgId::EnrollSealKeyGenerated => {
+            "Generated the Egress Daemon's sealing key and published its public key at {path}. An Egress Daemon that is already running still holds the previous key: restart it with `sudo {restart}`"
+        }
+        MsgId::EnrollSealKeyKept => {
+            "Kept the Egress Daemon's sealing key and its published public key; pass --rotate-seal-key to replace them"
+        }
         MsgId::EnrollProvisioningCli => "Writing your CLI configuration",
         MsgId::EnrollPostureSummary => "Enrollment complete. CLI config: {cli_dir}",
         MsgId::EnrollReloginNote => {

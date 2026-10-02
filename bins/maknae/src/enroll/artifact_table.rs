@@ -1,7 +1,8 @@
 //! The enroll-created filesystem artifact table (spec §4.6) — PURE, no I/O.
 //!
 //! `artifact_table` enumerates every path `maknae enroll` itself creates: the
-//! daemon's `/etc/maknae/*` set and the CLI's `<cli_dir>/*` set. It does NOT
+//! daemon's `/etc/maknae/*` set and the CLI's `<cli_dir>/*` set; `seal_pub_rows`
+//! adds the host-wide `seal.pub`. It does NOT
 //! include packaging-created rows (`/var/log/maknae`, `/var/log/maknae/audit.jsonl`,
 //! `/run/maknae`, `/usr/local/var/run/maknae`) — those ship with PR-J2's package
 //! scriptlets (spec §9.2), never touched here — nor `authz.yaml` (also packaging's:
@@ -68,6 +69,11 @@ pub enum ContentKind {
     /// The sealed daemon SecretID — `systemd-creds`'s `.cred` ciphertext on
     /// Linux; on macOS the SecretID goes to the System keychain.
     SealedDaemonSecret,
+    /// The Egress Daemon's sealing key: a `systemd-creds` credential on Linux,
+    /// a System keychain pointer on macOS.
+    SealedEgressSealKey,
+    /// The host-wide `seal.pub` users seal to.
+    SealPub,
     /// The root-owned accessor bookkeeping file (`enroll-state.yaml`) —
     /// what `--rotate` and failure-cleanup destroy by.
     EnrollState,
@@ -197,6 +203,22 @@ pub fn artifact_table(cli_dir: &Path, macos: bool, insecure_plaintext: bool) -> 
             ContentKind::SealedDaemonSecret,
         )
     });
+    rows.push(if macos {
+        row(
+            etc.join("egress")
+                .join(maknae_vault::KeychainPlane::Egress.pointer_file()),
+            Owner::RootMaknaeEgressGroup,
+            0o640,
+            ContentKind::SealedEgressSealKey,
+        )
+    } else {
+        row(
+            etc.join("private/maknae-egress-seal-key.cred"),
+            Owner::RootRoot,
+            0o400,
+            ContentKind::SealedEgressSealKey,
+        )
+    });
 
     rows.push(row(
         etc.join("private/posture.yaml"),
@@ -261,6 +283,35 @@ pub fn artifact_table(cli_dir: &Path, macos: bool, insecure_plaintext: bool) -> 
     rows
 }
 
+/// The rows of the host-wide `seal.pub` and the directories enroll creates for it.
+pub fn seal_pub_rows(home: maknae_vault::SealPubHome) -> Vec<Artifact> {
+    let file = Path::new(maknae_vault::seal_pub_path(home));
+    let dir = file.parent().expect("a seal.pub path has a parent");
+    let mut rows = Vec::new();
+    if matches!(home, maknae_vault::SealPubHome::MacOs) {
+        let maknae = dir.parent().expect("the macOS pki dir has a parent");
+        rows.push(row(
+            maknae.to_path_buf(),
+            Owner::RootRoot,
+            0o755,
+            ContentKind::Dir,
+        ));
+    }
+    rows.push(row(
+        dir.to_path_buf(),
+        Owner::RootRoot,
+        0o755,
+        ContentKind::Dir,
+    ));
+    rows.push(row(
+        file.to_path_buf(),
+        Owner::RootRoot,
+        0o644,
+        ContentKind::SealPub,
+    ));
+    rows
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,6 +332,7 @@ mod tests {
             PathBuf::from("/etc/maknae/egress/vault-ca.crt"),
             PathBuf::from("/etc/maknae/private"),
             PathBuf::from("/etc/maknae/private/maknaed-secret-id.cred"),
+            PathBuf::from("/etc/maknae/private/maknae-egress-seal-key.cred"),
             PathBuf::from("/etc/maknae/private/posture.yaml"),
             PathBuf::from("/etc/maknae/private/enroll-state.yaml"),
             cli_dir.to_path_buf(),
@@ -308,6 +360,7 @@ mod tests {
             PathBuf::from("/etc/maknae/private/maknaed-secret-id.keychain"),
             PathBuf::from("/etc/maknae/private/posture.yaml"),
             PathBuf::from("/etc/maknae/private/enroll-state.yaml"),
+            PathBuf::from("/etc/maknae/egress/maknae-egress-secret-id.keychain"),
             cli_dir.to_path_buf(),
             cli_dir.join("tls"),
             cli_dir.join("maknae.yaml"),
@@ -330,7 +383,7 @@ mod tests {
         got_paths.sort();
         want_paths.sort();
         assert_eq!(got_paths, want_paths);
-        assert_eq!(got.len(), 20, "row count drifted");
+        assert_eq!(got.len(), 21, "row count drifted");
     }
 
     #[test]
@@ -342,7 +395,7 @@ mod tests {
         got_paths.sort();
         want_paths.sort();
         assert_eq!(got_paths, want_paths);
-        assert_eq!(got.len(), 20, "row count drifted");
+        assert_eq!(got.len(), 21, "row count drifted");
     }
 
     #[test]
@@ -520,6 +573,11 @@ mod tests {
             find(ContentKind::SealedDaemonSecret),
             maknae_vault::daemon_keychain_pointer(Path::new("/etc/maknae"))
         );
+        assert_eq!(
+            find(ContentKind::SealedEgressSealKey),
+            Path::new("/etc/maknae/egress")
+                .join(maknae_vault::KeychainPlane::Egress.pointer_file())
+        );
     }
 
     #[test]
@@ -620,5 +678,66 @@ mod tests {
                 assert_eq!(paths.len(), before, "macos={macos} plaintext={plaintext}");
             }
         }
+    }
+
+    #[test]
+    fn the_seal_key_custody_is_root_only_on_linux_and_a_deputy_group_pointer_on_macos() {
+        let linux = artifact_table(Path::new("/home/op/.maknae"), false, false);
+        let l = linux
+            .iter()
+            .find(|a| a.content == ContentKind::SealedEgressSealKey)
+            .unwrap();
+        assert_eq!(
+            (l.path.as_path(), l.owner, l.mode),
+            (
+                Path::new("/etc/maknae/private/maknae-egress-seal-key.cred"),
+                Owner::RootRoot,
+                0o400
+            )
+        );
+        let macos = artifact_table(Path::new("/Users/op/.maknae"), true, false);
+        let m = macos
+            .iter()
+            .find(|a| a.content == ContentKind::SealedEgressSealKey)
+            .unwrap();
+        assert_eq!(
+            (m.path.clone(), m.owner, m.mode),
+            (
+                Path::new("/etc/maknae/egress")
+                    .join(maknae_vault::KeychainPlane::Egress.pointer_file()),
+                Owner::RootMaknaeEgressGroup,
+                0o640
+            )
+        );
+    }
+
+    #[test]
+    fn seal_pub_rows_match_independent_oracle_for_each_home() {
+        use maknae_vault::SealPubHome;
+        let dir = |p: &str| row(PathBuf::from(p), Owner::RootRoot, 0o755, ContentKind::Dir);
+        let file = |p: &str| {
+            row(
+                PathBuf::from(p),
+                Owner::RootRoot,
+                0o644,
+                ContentKind::SealPub,
+            )
+        };
+        assert_eq!(
+            seal_pub_rows(SealPubHome::RedHat),
+            vec![dir("/etc/pki/maknae"), file("/etc/pki/maknae/seal.pub")]
+        );
+        assert_eq!(
+            seal_pub_rows(SealPubHome::Debian),
+            vec![dir("/etc/ssl/maknae"), file("/etc/ssl/maknae/seal.pub")]
+        );
+        assert_eq!(
+            seal_pub_rows(SealPubHome::MacOs),
+            vec![
+                dir("/Library/Application Support/Maknae"),
+                dir("/Library/Application Support/Maknae/pki"),
+                file("/Library/Application Support/Maknae/pki/seal.pub")
+            ]
+        );
     }
 }

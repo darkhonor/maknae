@@ -151,7 +151,7 @@ pub fn write_file(
 /// unwritten config file is exactly the failure mode this refuses), so it
 /// fails closed rather than skipping the row. Rows whose content is produced
 /// by an external seal command or the macOS keychain write
-/// (`SealedDaemonSecret`) are the caller's responsibility to exclude from
+/// (`SealedDaemonSecret`, `SealedEgressSealKey`) are the caller's responsibility to exclude from
 /// `rows` — they are written by that step, then ownership-applied via
 /// [`apply_ownership_and_mode`] directly.
 pub fn write_artifacts(
@@ -287,6 +287,44 @@ mod tests {
         let meta = std::fs::metadata(&target).unwrap();
         assert!(meta.is_dir());
         assert_eq!(meta.mode() & 0o777, 0o700);
+    }
+
+    #[test]
+    fn a_seal_pub_directory_packaging_created_is_kept_and_an_absent_one_is_created() {
+        let td = TempDir::new("seal-pub-dir");
+        let present = td.0.join("present");
+        std::fs::create_dir(&present).unwrap();
+        std::fs::set_permissions(&present, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(present.join("other"), b"kept").unwrap();
+        let absent = td.0.join("absent/pki");
+        let mut rows = Vec::new();
+        let mut contents = BTreeMap::new();
+        for dir in [&present, &absent] {
+            let file = dir.join("seal.pub");
+            rows.push(Artifact {
+                path: dir.clone(),
+                owner: Owner::RootRoot,
+                mode: 0o755,
+                content: ContentKind::Dir,
+            });
+            rows.push(Artifact {
+                path: file.clone(),
+                owner: Owner::RootRoot,
+                mode: 0o644,
+                content: ContentKind::SealPub,
+            });
+            contents.insert(file, b"pem\n".to_vec());
+        }
+        write_artifacts(&rows, &contents, &NoopOwnerResolver).unwrap();
+        for dir in [&present, &absent] {
+            assert_eq!(std::fs::metadata(dir).unwrap().mode() & 0o777, 0o755);
+            assert_eq!(
+                std::fs::metadata(dir.join("seal.pub")).unwrap().mode() & 0o777,
+                0o644
+            );
+            assert_eq!(std::fs::read(dir.join("seal.pub")).unwrap(), b"pem\n");
+        }
+        assert_eq!(std::fs::read(present.join("other")).unwrap(), b"kept");
     }
 
     #[test]

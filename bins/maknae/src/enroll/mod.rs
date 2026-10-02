@@ -100,6 +100,12 @@ pub enum EnrollError {
     InvalidVaultMount(String),
     /// `--userpass-mount`, `--kv-mount` or `--user-prefix` failed its shape check.
     InvalidVaultLayout(String),
+    /// os-release names neither a Red Hat nor a Debian family distribution.
+    UnsupportedDistribution,
+    /// os-release could not be read under its root-artifact requirement.
+    OsRelease(String),
+    /// Generating or encoding the Egress Daemon's sealing key failed.
+    Seal(maknae_seal::SealError),
     /// The reachability probe (spec §4.1 step 1) could not reach Vault.
     VaultUnreachable {
         addr: String,
@@ -112,6 +118,8 @@ pub enum EnrollError {
     State(String),
     #[cfg(any(target_os = "macos", test))]
     SecretIdShape,
+    #[cfg(any(target_os = "macos", test))]
+    SealKeyShape,
     /// A keychain operation (delete/add/verify) on a plane's System keychain
     /// item failed, or the add landed elsewhere.
     #[cfg(target_os = "macos")]
@@ -191,6 +199,12 @@ impl std::fmt::Display for EnrollError {
             }
             EnrollError::InvalidVaultMount(msg) => write!(f, "invalid Vault mount: {msg}"),
             EnrollError::InvalidVaultLayout(msg) => write!(f, "invalid Vault setting: {msg}"),
+            EnrollError::UnsupportedDistribution => write!(
+                f,
+                "cannot tell where to publish the Egress Daemon's public key: os-release names neither a Red Hat nor a Debian family distribution"
+            ),
+            EnrollError::OsRelease(msg) => write!(f, "cannot read os-release: {msg}"),
+            EnrollError::Seal(e) => write!(f, "the Egress Daemon's sealing key: {e}"),
             EnrollError::VaultUnreachable { addr, detail } => {
                 write!(f, "cannot reach Vault at {addr}: {detail}")
             }
@@ -200,6 +214,11 @@ impl std::fmt::Display for EnrollError {
             EnrollError::SecretIdShape => write!(
                 f,
                 "the minted SecretID is not a lowercase UUID — refusing to hand it to the keychain"
+            ),
+            #[cfg(any(target_os = "macos", test))]
+            EnrollError::SealKeyShape => write!(
+                f,
+                "the sealing key's hex form is not lower-case hex of a bounded PKCS#8 key — refusing to hand it to the keychain"
             ),
             #[cfg(target_os = "macos")]
             EnrollError::Keychain { op, detail } => write!(f, "keychain {op} failed: {detail}"),
@@ -237,6 +256,12 @@ impl std::error::Error for EnrollError {}
 impl From<maknae_vault::VaultError> for EnrollError {
     fn from(e: maknae_vault::VaultError) -> Self {
         EnrollError::Vault(e)
+    }
+}
+
+impl From<maknae_seal::SealError> for EnrollError {
+    fn from(e: maknae_seal::SealError) -> Self {
+        EnrollError::Seal(e)
     }
 }
 
@@ -375,6 +400,9 @@ pub struct EnrollArgs {
     /// intent, it changes no behavior).
     #[arg(long)]
     pub rotate: bool,
+    /// Replace the Egress Daemon's sealing key pair even if one is already in place.
+    #[arg(long)]
+    pub rotate_seal_key: bool,
     /// Opt into the degraded plaintext daemon-secret fallback (audited,
     /// never a silent default).
     #[arg(long)]
@@ -1047,6 +1075,260 @@ fn check_vault_layout(args: &EnrollArgs) -> Result<(), EnrollError> {
     Ok(())
 }
 
+const OS_RELEASE: &str = "/etc/os-release";
+const VENDOR_OS_RELEASE: &str = "/usr/lib/os-release";
+const MAX_OS_RELEASE_BYTES: u64 = 64 * 1024;
+
+fn read_os_release() -> Result<String, EnrollError> {
+    read_os_release_from(Path::new(OS_RELEASE), Path::new(VENDOR_OS_RELEASE), 0)
+}
+
+fn read_os_release_from(primary: &Path, vendor: &Path, owner: u32) -> Result<String, EnrollError> {
+    let target = maknae_io::TargetRequired {
+        owner: Some(owner),
+        mode_mask: Some(0o022),
+        nlink_exactly_one: false,
+        regular_file: true,
+        max_bytes: Some(MAX_OS_RELEASE_BYTES),
+    };
+    let read =
+        |p: &Path| maknae_io::read_absolute(p, target.clone(), maknae_io::StrategyPref::Auto);
+    let out = match read(primary) {
+        Err(maknae_io::IoError::Symlink { .. })
+        | Err(maknae_io::IoError::Io {
+            kind: maknae_io::IoKind::NotFound,
+            ..
+        }) => match read(vendor) {
+            Err(maknae_io::IoError::Symlink { .. }) => {
+                return Err(EnrollError::OsRelease(format!(
+                    "{p} is a symbolic link or absent, and {v} is a symbolic link too: enroll reads os-release only as a regular root-owned file, so replace {p} with a regular root:root 0644 copy of the file the links name, then re-run enroll",
+                    p = primary.display(),
+                    v = vendor.display()
+                )))
+            }
+            other => other,
+        },
+        other => other,
+    }
+    .map_err(|e| EnrollError::OsRelease(e.to_string()))?;
+    String::from_utf8(out.value.to_vec())
+        .map_err(|_| EnrollError::OsRelease("it is not UTF-8".to_string()))
+}
+
+fn seal_pub_home(
+    macos: bool,
+    os_release: impl FnOnce() -> Result<String, EnrollError>,
+) -> Result<maknae_vault::SealPubHome, EnrollError> {
+    if macos {
+        return Ok(maknae_vault::SealPubHome::MacOs);
+    }
+    maknae_vault::linux_home_from_os_release(&os_release()?)
+        .ok_or(EnrollError::UnsupportedDistribution)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SealKeyAction {
+    Keep,
+    Generate,
+}
+
+fn seal_key_action(custody_present: bool, pub_present: bool, rotate: bool) -> SealKeyAction {
+    if custody_present && pub_present && !rotate {
+        SealKeyAction::Keep
+    } else {
+        SealKeyAction::Generate
+    }
+}
+
+fn seal_pub_present(path: &Path, owner: u32) -> bool {
+    let target = maknae_io::TargetRequired {
+        owner: Some(owner),
+        mode_mask: Some(0o022),
+        nlink_exactly_one: true,
+        regular_file: true,
+        max_bytes: Some(maknae_vault::MAX_SEAL_PUB_BYTES as u64),
+    };
+    maknae_io::read_absolute(path, target, maknae_io::StrategyPref::Auto)
+        .ok()
+        .and_then(|out| String::from_utf8(out.value.to_vec()).ok())
+        .is_some_and(|pem| maknae_seal::SealPublicKey::from_pem(&pem).is_ok())
+}
+
+#[cfg(not(target_os = "macos"))]
+const MAX_SEALED_CRED_BYTES: u64 = 64 * 1024;
+
+#[cfg(not(target_os = "macos"))]
+fn sealed_custody_present(path: &Path, owner: u32) -> bool {
+    let target = maknae_io::TargetRequired {
+        owner: Some(owner),
+        mode_mask: Some(0o077),
+        nlink_exactly_one: true,
+        regular_file: true,
+        max_bytes: Some(MAX_SEALED_CRED_BYTES),
+    };
+    maknae_io::read_absolute(path, target, maknae_io::StrategyPref::Auto).is_ok()
+}
+
+fn retract_seal_pub(path: &Path, owner: u32) -> Result<(), EnrollError> {
+    let io = |e: maknae_io::IoError| EnrollError::Io {
+        path: path.to_path_buf(),
+        source: e.to_string(),
+    };
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        return Err(EnrollError::Io {
+            path: path.to_path_buf(),
+            source: "not a file path".to_string(),
+        });
+    };
+    let required = maknae_io::AnchorRequired {
+        owner: Some(owner),
+        mode_mask: Some(0o022),
+    };
+    let anchor = match maknae_io::open_anchor(dir, required, maknae_io::StrategyPref::Auto) {
+        Ok(a) => a,
+        Err(maknae_io::IoError::Io {
+            kind: maknae_io::IoKind::NotFound,
+            ..
+        }) => return Ok(()),
+        Err(e) => return Err(io(e)),
+    };
+    anchor.remove(Path::new(name), None).map(drop).map_err(io)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GenerateStep {
+    RetractPub,
+    StoreCustody,
+    PublishPub,
+}
+
+const GENERATE_STEPS: [GenerateStep; 3] = [
+    GenerateStep::RetractPub,
+    GenerateStep::StoreCustody,
+    GenerateStep::PublishPub,
+];
+
+fn egress_restart_command(home: maknae_vault::SealPubHome) -> &'static str {
+    match home {
+        maknae_vault::SealPubHome::MacOs => "launchctl kickstart -k system/io.maknae.maknae-egress",
+        maknae_vault::SealPubHome::RedHat | maknae_vault::SealPubHome::Debian => {
+            "systemctl restart maknae-egress.service"
+        }
+    }
+}
+
+fn seal_key_generated_line(locale: Locale, home: maknae_vault::SealPubHome) -> String {
+    msg(locale, MsgId::EnrollSealKeyGenerated)
+        .replace("{path}", maknae_vault::seal_pub_path(home))
+        .replace("{restart}", egress_restart_command(home))
+}
+
+#[cfg(target_os = "macos")]
+async fn egress_custody_present(_custody: &Path) -> Result<bool, EnrollError> {
+    keychain_write::item_in_system_keychain(maknae_vault::KeychainPlane::Egress).await
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn egress_custody_present(custody: &Path) -> Result<bool, EnrollError> {
+    Ok(sealed_custody_present(custody, 0))
+}
+
+#[cfg(target_os = "macos")]
+async fn store_seal_key(
+    der: &[u8],
+    _custody: &artifact_table::Artifact,
+    _verbose: bool,
+    _resolver: &artifact_write::RealOwnerResolver,
+    release_team: &str,
+) -> Result<(), EnrollError> {
+    keychain_write::seal_secret_macos(
+        maknae_vault::seal_key_to_hex(der).expose(),
+        maknae_vault::KeychainPlane::Egress,
+        keychain_write::EGRESS_BINARY,
+        release_team,
+    )
+    .await
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn store_seal_key(
+    der: &[u8],
+    custody: &artifact_table::Artifact,
+    verbose: bool,
+    resolver: &artifact_write::RealOwnerResolver,
+) -> Result<(), EnrollError> {
+    seal_linux(
+        der,
+        &custody.path,
+        maknae_vault::EGRESS_SEAL_KEY_CRED_NAME,
+        verbose,
+    )
+    .await?;
+    artifact_write::apply_ownership_and_mode(custody, resolver)
+}
+
+async fn place_seal_key(
+    args: &EnrollArgs,
+    locale: Locale,
+    table: &[artifact_table::Artifact],
+    home: maknae_vault::SealPubHome,
+    resolver: &artifact_write::RealOwnerResolver,
+    #[cfg(target_os = "macos")] release_team: &str,
+) -> Result<(), EnrollError> {
+    let custody = table
+        .iter()
+        .find(|a| a.content == artifact_table::ContentKind::SealedEgressSealKey)
+        .expect("artifact_table always emits exactly one SealedEgressSealKey row");
+    let pub_path = Path::new(maknae_vault::seal_pub_path(home));
+    let action = seal_key_action(
+        egress_custody_present(&custody.path).await?,
+        seal_pub_present(pub_path, 0),
+        args.rotate_seal_key,
+    );
+    if action == SealKeyAction::Generate {
+        let key = maknae_seal::SealPrivateKey::generate()?;
+        let der = key.to_pkcs8_der()?;
+        for step in GENERATE_STEPS {
+            match step {
+                GenerateStep::RetractPub => retract_seal_pub(pub_path, 0)?,
+                GenerateStep::StoreCustody => {
+                    store_seal_key(
+                        &der,
+                        custody,
+                        args.verbose,
+                        resolver,
+                        #[cfg(target_os = "macos")]
+                        release_team,
+                    )
+                    .await?
+                }
+                GenerateStep::PublishPub => {
+                    let mut contents = BTreeMap::new();
+                    contents.insert(
+                        pub_path.to_path_buf(),
+                        key.public_key().to_pem().into_bytes(),
+                    );
+                    artifact_write::write_artifacts(
+                        &artifact_table::seal_pub_rows(home),
+                        &contents,
+                        resolver,
+                    )?;
+                }
+            }
+        }
+        println!("{}", seal_key_generated_line(locale, home));
+    } else {
+        println!("{}", msg(locale, MsgId::EnrollSealKeyKept));
+    }
+    #[cfg(target_os = "macos")]
+    artifact_write::write_file(
+        custody,
+        maknae_vault::pointer_document(maknae_vault::KeychainPlane::Egress).as_bytes(),
+        resolver,
+    )?;
+    Ok(())
+}
+
 // ============================================================================
 // Group membership (spec §4.1 step 6) — hand-rolled (no dep on the privileged
 // `maknae-kernel` crate's `groupres.rs`; this crate stays strictly
@@ -1134,8 +1416,8 @@ fn seal_argv(cred_name: &str, out_str: &str) -> (&'static str, Vec<String>) {
     )
 }
 
-async fn seal_secret_linux(
-    secret: &Zeroizing<String>,
+async fn seal_linux(
+    plaintext: &[u8],
     out_path: &Path,
     cred_name: &str,
     verbose: bool,
@@ -1161,7 +1443,7 @@ async fn seal_secret_linux(
     {
         let mut stdin = child.stdin.take().expect("piped stdin");
         stdin
-            .write_all(secret.as_bytes())
+            .write_all(plaintext)
             .await
             .map_err(|e| EnrollError::Command {
                 program: "systemd-creds".to_string(),
@@ -1544,6 +1826,8 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
     let macos = cfg!(target_os = "macos");
 
     check_vault_reachable(&args.vault_addr)?;
+    let seal_home = seal_pub_home(macos, read_os_release)
+        .inspect_err(|_| eprintln!("{}", msg(locale, MsgId::EnrollPreflightFailed)))?;
 
     // Daemon-surface gate, pre-mint: Linux's TPM2 round-trip; macOS's release checks.
     #[cfg(target_os = "macos")]
@@ -1683,6 +1967,7 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
         macos,
         #[cfg(target_os = "macos")]
         &release_team,
+        seal_home,
         &daemon_role_id,
         &daemon_secret.secret,
         &vault_ca_bytes,
@@ -1708,6 +1993,7 @@ async fn finish_enrollment(
     cli_dir: &Path,
     macos: bool,
     #[cfg(target_os = "macos")] release_team: &str,
+    seal_home: maknae_vault::SealPubHome,
     daemon_role_id: &str,
     daemon_secret: &Zeroizing<String>,
     vault_ca_pem: &[u8],
@@ -1795,6 +2081,7 @@ async fn finish_enrollment(
         .iter()
         .filter(|a| {
             a.content != artifact_table::ContentKind::SealedDaemonSecret
+                && a.content != artifact_table::ContentKind::SealedEgressSealKey
                 && !a.path.starts_with(cli_dir)
         })
         .cloned()
@@ -1822,8 +2109,8 @@ async fn finish_enrollment(
             )?;
         }
     } else {
-        seal_secret_linux(
-            daemon_secret,
+        seal_linux(
+            daemon_secret.as_bytes(),
             &sealed_row.path,
             maknae_vault::DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME,
             args.verbose,
@@ -1831,6 +2118,17 @@ async fn finish_enrollment(
         .await?;
         artifact_write::apply_ownership_and_mode(sealed_row, &resolver)?;
     }
+
+    place_seal_key(
+        args,
+        locale,
+        &table,
+        seal_home,
+        &resolver,
+        #[cfg(target_os = "macos")]
+        release_team,
+    )
+    .await?;
 
     // ---- Step 6: group membership -------------------------------------------
     let added = ensure_group_membership(operator, args.verbose).await?;
@@ -1949,7 +2247,7 @@ mod tests {
     // ---- #240b: the third plane's seal name and traversal ACL --------------
 
     #[test]
-    fn seal_argv_pins_the_credential_name() {
+    fn seal_argv_pins_the_credential_name_for_both_sealed_credentials() {
         let (bin, args) = seal_argv(
             maknae_vault::DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME,
             "/etc/maknae/private/maknaed-secret-id.cred",
@@ -1964,6 +2262,14 @@ mod tests {
                 "-",
                 "/etc/maknae/private/maknaed-secret-id.cred"
             ]
+        );
+        let (_, args) = seal_argv(
+            maknae_vault::EGRESS_SEAL_KEY_CRED_NAME,
+            "/etc/maknae/private/maknae-egress-seal-key.cred",
+        );
+        assert!(
+            args.iter().any(|a| a == "--name=maknae-egress-seal-key"),
+            "{args:?}"
         );
     }
 
@@ -2034,6 +2340,16 @@ mod tests {
             (
                 maknae_vault::DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME.to_string(),
                 row(artifact_table::ContentKind::SealedDaemonSecret)
+            )
+        );
+        let egress = loaded(include_str!(
+            "../../../../packaging/common/maknae-egress.service"
+        ));
+        assert_eq!(
+            egress,
+            (
+                maknae_vault::EGRESS_SEAL_KEY_CRED_NAME.to_string(),
+                row(artifact_table::ContentKind::SealedEgressSealKey)
             )
         );
     }
@@ -2343,6 +2659,7 @@ mod tests {
             token_file: None,
             cli_dir: None,
             rotate: false,
+            rotate_seal_key: false,
             insecure_plaintext_secret: false,
             verbose: false,
         }
@@ -2867,5 +3184,228 @@ lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
     #[test]
     fn provision_job_from_yaml_rejects_missing_field() {
         assert!(ProvisionJob::from_yaml("cli_dir: /x\n").is_err());
+    }
+
+    #[test]
+    fn the_seal_key_is_generated_only_when_custody_or_seal_pub_is_missing_or_rotation_is_asked() {
+        use SealKeyAction::{Generate, Keep};
+        for (custody, published, rotate, want) in [
+            (true, true, false, Keep),
+            (true, true, true, Generate),
+            (true, false, false, Generate),
+            (true, false, true, Generate),
+            (false, true, false, Generate),
+            (false, true, true, Generate),
+            (false, false, false, Generate),
+            (false, false, true, Generate),
+        ] {
+            assert_eq!(
+                seal_key_action(custody, published, rotate),
+                want,
+                "custody={custody} published={published} rotate={rotate}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_seal_pub_home_is_macos_without_reading_os_release_and_otherwise_comes_from_it() {
+        use maknae_vault::SealPubHome;
+        let never = || -> Result<String, EnrollError> { panic!("macOS must not read os-release") };
+        assert_eq!(seal_pub_home(true, never).unwrap(), SealPubHome::MacOs);
+        let text = |t: &'static str| move || Ok::<String, EnrollError>(t.to_string());
+        assert_eq!(
+            seal_pub_home(
+                false,
+                text("ID=\"rocky\"\nID_LIKE=\"rhel centos fedora\"\n")
+            )
+            .unwrap(),
+            SealPubHome::RedHat
+        );
+        assert_eq!(
+            seal_pub_home(false, text("ID=debian\n")).unwrap(),
+            SealPubHome::Debian
+        );
+        assert!(matches!(
+            seal_pub_home(false, text("ID=arch\n")),
+            Err(EnrollError::UnsupportedDistribution)
+        ));
+        assert!(matches!(
+            seal_pub_home(false, || Err(EnrollError::OsRelease("unreadable".into()))),
+            Err(EnrollError::OsRelease(_))
+        ));
+    }
+
+    #[test]
+    fn os_release_falls_back_to_the_vendor_file_only_for_a_symlink_or_an_absent_file_and_refuses_two_symlinks_by_name(
+    ) {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("maknae-os-release-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let owner = nix::unistd::geteuid().as_raw();
+        let primary = d.join("os-release");
+        let vendor = d.join("vendor-os-release");
+        let put = |p: &Path, text: &str, mode: u32| {
+            std::fs::write(p, text).unwrap();
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        put(&vendor, "ID=rocky\n", 0o644);
+        let absent = read_os_release_from(&primary, &vendor, owner);
+        std::os::unix::fs::symlink(&vendor, &primary).unwrap();
+        let linked = read_os_release_from(&primary, &vendor, owner);
+        let variant = d.join("os-release-workstation");
+        put(&variant, "ID=fedora\n", 0o644);
+        std::fs::remove_file(&vendor).unwrap();
+        std::os::unix::fs::symlink(&variant, &vendor).unwrap();
+        let both_linked = read_os_release_from(&primary, &vendor, owner);
+        std::fs::remove_file(&vendor).unwrap();
+        put(&vendor, "ID=rocky\n", 0o644);
+        std::fs::remove_file(&primary).unwrap();
+        put(&primary, "ID=debian\n", 0o644);
+        let own = read_os_release_from(&primary, &vendor, owner);
+        std::fs::set_permissions(&primary, std::fs::Permissions::from_mode(0o664)).unwrap();
+        let writable = read_os_release_from(&primary, &vendor, owner);
+        let _ = std::fs::remove_dir_all(&d);
+
+        assert_eq!(absent.unwrap(), "ID=rocky\n");
+        assert_eq!(linked.unwrap(), "ID=rocky\n");
+        match both_linked {
+            Err(EnrollError::OsRelease(m)) => assert_eq!(
+                m,
+                format!(
+                    "{p} is a symbolic link or absent, and {v} is a symbolic link too: enroll reads os-release only as a regular root-owned file, so replace {p} with a regular root:root 0644 copy of the file the links name, then re-run enroll",
+                    p = primary.display(),
+                    v = vendor.display()
+                )
+            ),
+            other => panic!("two symlinked os-release files must be refused naming both, got {other:?}"),
+        }
+        assert_eq!(own.unwrap(), "ID=debian\n");
+        assert!(
+            matches!(writable, Err(EnrollError::OsRelease(_))),
+            "a group-writable os-release is refused, never skipped"
+        );
+    }
+
+    #[test]
+    fn a_published_seal_pub_counts_only_as_a_canonical_single_link_root_artifact() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("maknae-seal-pub-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let owner = nix::unistd::geteuid().as_raw();
+        let p = d.join("seal.pub");
+        let mode =
+            |m: u32| std::fs::set_permissions(&p, std::fs::Permissions::from_mode(m)).unwrap();
+        let absent = seal_pub_present(&p, owner);
+        let pem = maknae_seal::SealPrivateKey::generate()
+            .unwrap()
+            .public_key()
+            .to_pem();
+        std::fs::write(&p, &pem).unwrap();
+        mode(0o644);
+        let good = seal_pub_present(&p, owner);
+        let foreign = seal_pub_present(&p, owner.wrapping_add(1));
+        mode(0o664);
+        let writable = seal_pub_present(&p, owner);
+        mode(0o644);
+        std::fs::hard_link(&p, d.join("second")).unwrap();
+        let linked = seal_pub_present(&p, owner);
+        std::fs::remove_file(d.join("second")).unwrap();
+        std::fs::write(&p, "not a key\n").unwrap();
+        let garbage = seal_pub_present(&p, owner);
+        let _ = std::fs::remove_dir_all(&d);
+
+        assert!(!absent, "absent");
+        assert!(good, "a canonical root-artifact seal.pub");
+        assert!(!foreign, "another owner");
+        assert!(!writable, "group-writable");
+        assert!(!linked, "hard-linked");
+        assert!(!garbage, "not a P-384 SPKI PEM");
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_sealed_custody_file_counts_only_when_private_to_its_owner() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("maknae-custody-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let owner = nix::unistd::geteuid().as_raw();
+        let p = d.join("maknae-egress-seal-key.cred");
+        let absent = sealed_custody_present(&p, owner);
+        std::fs::write(&p, b"ciphertext").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o400)).unwrap();
+        let private = sealed_custody_present(&p, owner);
+        let foreign = sealed_custody_present(&p, owner.wrapping_add(1));
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o440)).unwrap();
+        let shared = sealed_custody_present(&p, owner);
+        let _ = std::fs::remove_dir_all(&d);
+
+        assert!(!absent && private && !foreign && !shared);
+    }
+
+    #[test]
+    fn a_generate_retracts_the_old_seal_pub_before_the_new_key_reaches_custody() {
+        assert_eq!(
+            GENERATE_STEPS,
+            [
+                GenerateStep::RetractPub,
+                GenerateStep::StoreCustody,
+                GenerateStep::PublishPub
+            ]
+        );
+    }
+
+    #[test]
+    fn retracting_seal_pub_removes_only_that_file_and_an_absent_one_is_not_an_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("maknae-retract-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let owner = nix::unistd::geteuid().as_raw();
+        let p = d.join("seal.pub");
+        std::fs::write(&p, b"old pem\n").unwrap();
+        std::fs::write(d.join("other"), b"kept").unwrap();
+        let present = retract_seal_pub(&p, owner);
+        let gone = p.exists();
+        let again = retract_seal_pub(&p, owner);
+        let no_dir = retract_seal_pub(&d.join("absent/seal.pub"), owner);
+        let kept = std::fs::read(d.join("other")).unwrap();
+        let _ = std::fs::remove_dir_all(&d);
+
+        assert!(present.is_ok(), "{present:?}");
+        assert!(!gone, "seal.pub is removed");
+        assert!(again.is_ok(), "{again:?}");
+        assert!(no_dir.is_ok(), "{no_dir:?}");
+        assert_eq!(kept, b"kept");
+    }
+
+    #[test]
+    fn a_generated_seal_key_says_how_to_restart_the_egress_daemon_on_each_os() {
+        use maknae_vault::SealPubHome;
+        assert_eq!(
+            seal_key_generated_line(Locale::EnUs, SealPubHome::RedHat),
+            "Generated the Egress Daemon's sealing key and published its public key at /etc/pki/maknae/seal.pub. An Egress Daemon that is already running still holds the previous key: restart it with `sudo systemctl restart maknae-egress.service`"
+        );
+        assert_eq!(
+            seal_key_generated_line(Locale::EnUs, SealPubHome::Debian),
+            "Generated the Egress Daemon's sealing key and published its public key at /etc/ssl/maknae/seal.pub. An Egress Daemon that is already running still holds the previous key: restart it with `sudo systemctl restart maknae-egress.service`"
+        );
+        assert_eq!(
+            seal_key_generated_line(Locale::EnUs, SealPubHome::MacOs),
+            "Generated the Egress Daemon's sealing key and published its public key at /Library/Application Support/Maknae/pki/seal.pub. An Egress Daemon that is already running still holds the previous key: restart it with `sudo launchctl kickstart -k system/io.maknae.maknae-egress`"
+        );
+        assert!(seal_key_generated_line(Locale::KoKr, SealPubHome::MacOs)
+            .contains("`sudo launchctl kickstart -k system/io.maknae.maknae-egress`"));
+        assert!(
+            include_str!("../../../../packaging/macos/io.maknae.maknae-egress.plist")
+                .contains("<key>Label</key>\n  <string>io.maknae.maknae-egress</string>")
+        );
+        assert!(
+            include_str!("../../../../packaging/common/maknae-egress.service")
+                .contains("ExecStart=")
+        );
     }
 }

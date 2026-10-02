@@ -49,6 +49,10 @@ pub enum MsgId {
     EnrollWritingDaemonConfig,
     /// Sealing the daemon's SecretID (spec §4.1 step 5).
     EnrollSealingDaemonCredential,
+    /// A new Egress Daemon sealing key was placed and `seal.pub` published. Carries `{path}` and `{restart}`.
+    EnrollSealKeyGenerated,
+    /// The existing Egress Daemon sealing key and `seal.pub` were kept.
+    EnrollSealKeyKept,
     /// Re-exec'd operator-context CLI provisioning (spec §4.1 step 7).
     EnrollProvisioningCli,
     /// The final posture summary. Carries a `{cli_dir}` placeholder.
@@ -102,6 +106,8 @@ pub const ALL: &[MsgId] = &[
     MsgId::EnrollVaultOpsStarted,
     MsgId::EnrollWritingDaemonConfig,
     MsgId::EnrollSealingDaemonCredential,
+    MsgId::EnrollSealKeyGenerated,
+    MsgId::EnrollSealKeyKept,
     MsgId::EnrollProvisioningCli,
     MsgId::EnrollPostureSummary,
     MsgId::EnrollReloginNote,
@@ -270,6 +276,8 @@ mod tests {
                 | MsgId::EnrollVaultOpsStarted
                 | MsgId::EnrollWritingDaemonConfig
                 | MsgId::EnrollSealingDaemonCredential
+                | MsgId::EnrollSealKeyGenerated
+                | MsgId::EnrollSealKeyKept
                 | MsgId::EnrollProvisioningCli
                 | MsgId::EnrollPostureSummary
                 | MsgId::EnrollReloginNote
@@ -285,7 +293,7 @@ mod tests {
                 | MsgId::HelperStillPrivileged => {}
             }
         }
-        const VARIANT_COUNT: usize = 30;
+        const VARIANT_COUNT: usize = 32;
         assert_eq!(ALL.len(), VARIANT_COUNT);
         for &id in ALL {
             assert_covered(id);

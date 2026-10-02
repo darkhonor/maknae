@@ -1108,6 +1108,7 @@ mod tests {
                 assert_eq!(args.kv_mount, "maknae-kv");
                 assert_eq!(args.user_prefix, "maknae/users");
                 assert!(!args.rotate);
+                assert!(!args.rotate_seal_key);
                 assert!(!args.insecure_plaintext_secret);
                 assert!(!args.verbose);
             }
@@ -1208,6 +1209,7 @@ mod tests {
             "--user-prefix",
             "corp/users",
             "--rotate",
+            "--rotate-seal-key",
             "--insecure-plaintext-secret",
             "--verbose",
         ]);
@@ -1220,6 +1222,7 @@ mod tests {
                 assert_eq!(args.kv_mount, "corp-kv");
                 assert_eq!(args.user_prefix, "corp/users");
                 assert!(args.rotate);
+                assert!(args.rotate_seal_key);
                 assert!(args.insecure_plaintext_secret);
                 assert!(args.verbose);
             }
