@@ -46,9 +46,10 @@ case "$1" in
         install -d -m 0750 -o root    -g _maknae /etc/maknae
         install -d -m 0750 -o root    -g _maknae /etc/maknae/private
         install -d -m 0700 -o _maknae -g _maknae /var/log/maknae
-        # #240b: the deputy's credential set (RoleID + Vault CA copy, written
-        # by `maknae enroll`), under the deputy's OWN group.
+        # #240b: the deputy's Vault CA copy (written by `maknae enroll`), under
+        # the deputy's OWN group.
         install -d -m 0750 -o root    -g _maknae-egress /etc/maknae/egress
+        install -d -m 0755 -o root    -g root           /etc/ssl/maknae
         # #240b (D3): the deputy is in neither root nor _maknae, and the loader
         # refuses any world bit on /etc/maknae, so it reaches the dir by a user
         # ACL granting `rx` — `r` because maknae-io opens the directory

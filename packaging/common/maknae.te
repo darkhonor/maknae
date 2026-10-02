@@ -39,17 +39,17 @@ allow init_t maknae_egress_t:process2 { nnp_transition nosuid_transition };
 #
 # COPY THE .cred RULE'S SHAPE, NEVER ITS GRANTS. That carve-out exists so
 # maknaed_t is granted NO access; this one exists so maknae_egress_t is granted
-# SOME. BOTH daemons read this file — maknaed validates every registered
-# key_vault_path against the prefix at boot, the deputy validates the frame's
-# at use — so both are allowed below. Omitting maknaed_t's grant would make the
+# SOME. BOTH daemons read this file — maknaed builds each turn's key path
+# under its user_prefix, the deputy checks the frame's path against it at
+# use — so both are allowed below. Omitting maknaed_t's grant would make the
 # daemon refuse to boot on an enforcing host, since its boot gate reads this.
 type maknae_egress_bounds_t;
 files_config_file(maknae_egress_bounds_t)
 
-# #240b: the deputy's credential dir (/etc/maknae/egress: its RoleID and its
-# copy of the Vault TLS anchor). Its own type, so the grant is by TYPE and the
+# #240b: the deputy's credential dir (/etc/maknae/egress: its copy of the
+# Vault TLS anchor). Its own type, so the grant is by TYPE and the
 # maknae_etc_t wildcard (maknae.yaml, maknaed-approle-id, tls/) stays
-# unreadable to the deputy. The sealed SecretID is maknae_secret_t and stays
+# unreadable to the deputy. Its sealed seal key is maknae_secret_t and stays
 # neverallow'd below; systemd decrypts it into $CREDENTIALS_DIRECTORY.
 type maknae_egress_etc_t;
 files_config_file(maknae_egress_etc_t)
@@ -110,7 +110,7 @@ allow maknaed_t maknae_egress_etc_t:dir { getattr search };
 allow maknae_egress_t maknae_egress_etc_t:file { read open getattr };
 # The deputy's own entrypoint.
 allow maknae_egress_t maknae_egress_exec_t:file { read execute execute_no_trans open getattr };
-# #240b: the decrypted SecretID in $CREDENTIALS_DIRECTORY — the same label
+# #240b: the decrypted seal key in $CREDENTIALS_DIRECTORY — the same label
 # split as maknaed's (el10 init_var_run_t, el9 tmpfs_t; see the maknaed block
 # below for the probe that established it). Required here as well as there:
 # checkmodule is single-pass, and this block comes first in the file.

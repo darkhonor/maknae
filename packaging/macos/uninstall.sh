@@ -4,8 +4,8 @@
 #
 # RETAINS /var/log/maknae and /etc/maknae. The audit trail is not the installer's to
 # destroy — an uninstall that erases it erases the evidence of everything that ran.
-# The enrollment is NOT reusable: its System-keychain items are deleted, so a
-# reinstall needs `sudo maknae enroll`.
+# The enrollment is NOT reusable: its System-keychain items and its published seal.pub
+# are deleted, so a reinstall needs `sudo maknae enroll`.
 set -euo pipefail
 [ "$(id -u)" -eq 0 ] || { echo "must run as root (sudo)" >&2; exit 1; }
 
@@ -70,6 +70,12 @@ for s in io.maknae.maknaed io.maknae.maknae-egress; do
     esac
 done
 
+SEAL_PUB_DIR="/Library/Application Support/Maknae/pki"
+rm -f "$SEAL_PUB_DIR/seal.pub" 2>/dev/null || :
+rmdir "$SEAL_PUB_DIR" "${SEAL_PUB_DIR%/pki}" 2>/dev/null || :
+seal_left=false
+[ ! -e "$SEAL_PUB_DIR/seal.pub" ] || seal_left=true
+
 # --- accounts: only the ones WE created ------------------------------------
 # TWO conditions, not one. An id match alone is NOT proof the account is ours:
 # preinstall's ensure_* returns the EXISTING id when the record was already present,
@@ -123,7 +129,8 @@ chflags nouappnd /var/log/maknae/audit.jsonl 2>/dev/null || :
 echo "RETAINED: /var/log/maknae and /etc/maknae; remove by hand for a full teardown."
 [ "$ace_left" = false ] || echo "FAILED: /etc/maknae still carries, or could not be read back for, the deputy's ACE or an orphaned user:<UUID> ACE" >&2
 [ -z "$kc_left" ] || echo "FAILED: System-keychain item(s) remain:$kc_left" >&2
-if [ -n "$kc_left" ] || [ "$ace_left" != false ]; then
+[ "$seal_left" = false ] || echo "FAILED: $SEAL_PUB_DIR/seal.pub remains" >&2
+if [ -n "$kc_left" ] || [ "$ace_left" != false ] || [ "$seal_left" != false ]; then
     exit 1
 fi
 echo "Removed."

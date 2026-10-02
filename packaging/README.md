@@ -8,7 +8,7 @@ units (`maknaed.service`, `maknae-egress.service`, `maknae-egress.socket`), the 
 shipped `/etc/maknae` config defaults. `packaging/macos/` builds the Apple Silicon `.pkg` under its own
 lifecycle; see [packaging/macos/README.md](macos/README.md) for the macOS lifecycle: config
 defaults first-install-only, both jobs ship `launchctl disable`d, and the operator runs
-`sudo maknae enroll`, creates `/etc/maknae/egress-bounds.yaml`, then starts both jobs.
+`sudo maknae enroll` (which writes `/etc/maknae/egress-bounds.yaml`), then starts both jobs.
 
 | Layout | Purpose |
 |---|---|
@@ -30,7 +30,7 @@ images (#81) and the Compose/Podman profile are deferred.
 |---|---|---|---|
 | Debian 13 | 257 | AppArmor | **Packaging + AppArmor-load only** — deb builds/installs, both AppArmor profiles load, §4.6 ownership verified; full enroll → serve → AppArmor-enforce-clean **not yet validated** (#94) |
 | RHEL / Rocky 10 | 257 | SELinux | **Full — install → enroll → serve, PROVEN LIVE** (SELinux enforcing, zero AVCs, hands-free reboot) |
-| RHEL / Rocky 9 | 252 | SELinux | **Packaging + daemon-seal only** — operator `enroll` deferred to #73 (see [RHEL 9 caveat](#rhel-9-caveat)) |
+| RHEL / Rocky 9 | 252 | SELinux | **Packaging + enroll; serve not yet run live** — enroll no longer needs `systemd-creds --user` (#73) (see [RHEL 9 caveat](#rhel-9-caveat)) |
 | macOS 26, Apple Silicon | — (launchd) | none | **Full — install → enroll → serve, PROVEN LIVE** on a notarized Developer ID package — smoke phase 1 on the `macos-26` runner, smoke phase 2 with 0 failures, and the first-provider walkthrough passed with `transport.read_timeout_ms: 60000` (#413). See [packaging/macos/README.md](macos/README.md) |
 
 ---
@@ -77,7 +77,9 @@ order**:
 # 2. SELinux/RHEL hosts ONLY — label your Vault TCP port so the daemon may reach it.
 sudo /usr/libexec/maknae/maknae-selinux-ports.sh add <vault-tcp-port>   # default 8200
 
-# 3. Enroll this deployment (writes the sealed daemon credential + the principal).
+# 3. Enroll this deployment (writes the sealed daemon credential, the Egress
+#    Daemon's sealed seal key and its published seal.pub, egress-bounds.yaml
+#    and the principal).
 sudo maknae enroll --deployment-id <id>
 
 # 4. Re-login so your shell picks up the new `maknae` group membership.
@@ -86,10 +88,13 @@ sudo maknae enroll --deployment-id <id>
 # 5. Enable and start the daemon.
 sudo systemctl enable --now maknaed
 
-# 6. With a provider registered (#240): the egress deputy's SOCKET unit is
-#    preset-disabled, and without it every permitted prompt is refused as
-#    "egress backend not ready". Enable it once egress-bounds.yaml is complete.
+# 6. With providers authorized (the `providers:` section of maknae.yaml): the
+#    egress deputy's SOCKET unit is preset-disabled, and without it every
+#    permitted prompt is refused as "egress backend not ready".
 sudo systemctl enable --now maknae-egress.socket
+
+# 7. Each user logs in to Vault (userpass) before any `maknae` command.
+maknae login
 ```
 
 ### Why step 2 (the Vault port label) is required on SELinux hosts
@@ -157,14 +162,15 @@ key; see `sign.sh --help`.
 
 ## RHEL 9 caveat
 
-**On RHEL / Rocky 9 the package installs and the daemon can seal its credential, but
-`maknae enroll` cannot complete.** The operator CLI seal uses `systemd-creds --user`,
-which requires systemd ≥ 256; RHEL 9 ships systemd 252. RHEL 9 is therefore
-**packaging + daemon-seal only this release — operator enroll is deferred to #73.**
-The rpm installs cleanly, the SELinux policy loads and runs enforce-clean (the #365 home-access policy is measured on el10), and the
-daemon's own TPM2 seal works; what is *not* available on el9 is the operator
-enroll → serve round-trip. **RHEL 10 supports the full enroll flow (proven live,
-enforcing).** Debian 13's `--user` CLI seal works (systemd 257), but its full
+**On RHEL / Rocky 9 `maknae enroll` completes, but the enroll → serve round trip has
+not been run live.** Enroll seals the daemon's SecretID and the Egress Daemon's seal
+key with the system `systemd-creds` (TPM2), which systemd 252 provides; the
+`systemd-creds --user` step that needs systemd ≥ 256 served only the CLI SecretID,
+which no longer exists (#73). On el9 `maknae login` keeps the user's Vault token in
+the `0600` file `~/.maknae/maknae-vault-token`, written through `maknae-io`, because
+`systemd-creds --user` is unavailable there. The rpm installs cleanly and the SELinux
+policy loads and runs enforce-clean (the #365 home-access policy is measured on el10).
+**RHEL 10 supports the full enroll flow (proven live, enforcing).** Debian 13's full
 enroll → serve → AppArmor-enforce-clean cycle is **not yet validated — deferred to #94**.
 
 ---
@@ -179,7 +185,7 @@ enroll → serve → AppArmor-enforce-clean cycle is **not yet validated — def
   today it governs the read path (#77). Per-binary MAC separation is a future
   tool-exec increment.
 - **Home access (#365)** — the daemon holds `getattr` and receipt-only `ioctl` over home content (`maknae.te`), no AppArmor home rule, and no ACL; `ProtectHome=read-only`. Serve-time enforce-clean on Rocky 10 (SELinux enforcing, a `0700` home, each kept permission shown load-bearing). On Debian 13 a probe confined by the shipped profile showed AppArmor does not mediate these operations; a full AppArmor serve is the Debian bullet below.
-- **RHEL 9 operator enroll** — deferred to #73 (see above).
+- **RHEL 9 enroll → serve** — enrollable (#73), not yet run live (see above).
 - **Debian 13 full enroll → serve → AppArmor-enforce-clean** — deb builds/installs and
   both AppArmor profiles load, but the daemon has not been run under the AppArmor
   profile with a live credential, so serve-time `apparmor="DENIED"` cleanliness is

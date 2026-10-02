@@ -45,19 +45,21 @@ sudo /usr/libexec/maknae/maknae-selinux-ports.sh add <vault-tcp-port>   # defaul
 sudo maknae enroll --deployment-id <id>
 # re-login so your shell joins the `maknae` group
 sudo systemctl enable --now maknaed
-# with a provider registered (#240), the deputy's socket unit too — it is
-# preset-disabled, and without it every permitted prompt is refused as not ready
+# with providers authorized (`providers:` in maknae.yaml), the deputy's socket
+# unit too — it is preset-disabled, and without it every permitted prompt is
+# refused as not ready
 sudo systemctl enable --now maknae-egress.socket
+# each user, before any maknae command
+maknae login
 ```
 
 **Upgrades follow the same order** — enroll (if not already) before restarting the
 daemon; the fail-closed `~` default applies to a restarted daemon too. The
 append-only `/var/log/maknae/audit.jsonl` trail is preserved across upgrades.
 
-**RHEL 9:** installs and the daemon can seal its credential, but operator `enroll`
-needs systemd ≥ 256 (`systemd-creds --user`); el9 ships 252. RHEL 9 is packaging +
-daemon-seal only this release — operator enroll is deferred to #73. Full flow works
-on RHEL 10.
+**RHEL 9:** installs and enrolls (#73: enroll no longer needs `systemd-creds --user`);
+the enroll → serve round trip has not been run live there. `maknae login` keeps the
+token in the `0600` residual file on el9. Full flow proven on RHEL 10.
 
 See `packaging/README.md` for the full install guide, GPG verification, and the
 SELinux `bin_t` tool-domain honest limit.

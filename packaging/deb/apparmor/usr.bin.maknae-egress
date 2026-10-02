@@ -25,7 +25,7 @@ profile maknae-egress /usr/bin/maknae-egress {
   /etc/maknae/                           r,
   /etc/maknae/egress-bounds.yaml         r,
 
-  # The decrypted SecretID systemd places in $CREDENTIALS_DIRECTORY (memory
+  # The decrypted seal key systemd places in $CREDENTIALS_DIRECTORY (memory
   # backed, 0400, this account only). The SEALED .cred under /etc/maknae/private
   # is deliberately NOT readable here — it is root/systemd's, exactly as the
   # SELinux maknae_secret_t carve-out denies it to maknaed.
@@ -44,15 +44,15 @@ profile maknae-egress /usr/bin/maknae-egress {
   # cgroup probes (which maknaed's profile grants) are never reached here.
   # An enforcing-host denial would say otherwise; that is #242's to see.
 
-  # #240b: the deputy's own credential set — the RoleID and its copy of the
-  # Vault TLS anchor — written by `maknae enroll` as root:_maknae-egress 0640
-  # under a 0750 dir. The sealed SecretID stays under /etc/maknae/private,
-  # denied below; systemd decrypts it into $CREDENTIALS_DIRECTORY.
+  # #240b: the deputy's copy of the Vault TLS anchor, written by
+  # `maknae enroll` as root:_maknae-egress 0640 under a 0750 dir. The sealed
+  # seal key stays under /etc/maknae/private, denied below; systemd decrypts
+  # it into $CREDENTIALS_DIRECTORY.
   /etc/maknae/egress/                    r,
   /etc/maknae/egress/**                  r,
 
   # #240b: the two OUTBOUND legs (the inbound one, AF_UNIX, is below).
-  # Vault (the AppRole login and the KV read,
+  # Vault (the wrapping-token lookup and unwrap,
   # with /etc/maknae/egress/vault-ca.crt PINNED as the only trust anchor on
   # that leg — maknae-vault's own HTTP client, not vaultrs's) and the provider
   # (TLS verified against the SYSTEM trust store — reqwest's platform verifier

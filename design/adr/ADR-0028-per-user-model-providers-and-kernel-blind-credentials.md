@@ -54,9 +54,18 @@ Measured 2026-10-01 with OpenSSL 3.6.4 on Apple Silicon (`openssl speed`): P-384
 
 **Amended 2026-10-01 (#153 PR 2):** sealing lives in `crates/maknae-seal`; `ci/gates/seal-confinement.sh` keeps `maknaed` and `maknae-kernel` from reaching it.
 
+**Amended 2026-10-02 (#153 PR 4):** the public key is published host-wide, not into each user's `~/.maknae`. `maknae enroll` writes one `seal.pub`, owned by root, file `0644` in a directory `0755`: `/etc/pki/maknae/seal.pub` on RHEL-family hosts, `/etc/ssl/maknae/seal.pub` on Debian-family hosts (beside the trust store, never in it), `/Library/Application Support/Maknae/pki/seal.pub` on macOS. Enroll picks the Linux location from `/etc/os-release` (`ID`, then `ID_LIKE`) and refuses a family it does not recognise; the client accepts exactly one present Linux location and refuses none or two. The client reads the file directly, never through `maknaed`, and refuses it unless it is owned by root, carries no group or other write bit, is a regular file with one link and is at most 215 bytes (one P-384 public-key PEM). The kernel still cannot substitute a key: neither `_maknae` nor `_maknae-egress` can write the file or its directory, and `maknaed` never handles it. A per-user copy needed a step per local user that only a provisioning command could take, and that command is parked: a kernel verb that writes policy would be a runtime-patchable policy path (core principle 3). Rotation (`maknae enroll --rotate-seal-key`) replaces the key pair and the one published file; no user takes a step. Each turn's associated data carries the expected path as `maknae_vault::kv_data_path(kv_mount, <user_prefix>/<username>/<subpath>)` on both ends, so a user whose own `kv_mount` or `user_prefix` differs from the root configuration seals a token the Egress Daemon cannot open.
+
 ### 6. The Egress Daemon has no provider and no Vault identity of its own
 
 It acts only on behalf of a user, within the authorized set, using what a single-use wrapping token opens. Its AppRole, SecretID and KV read policy are removed. It holds the sealing key pair: the private key in its own custody (a systemd encrypted credential on Linux; on macOS the System keychain item of ADR-0018 decision 6, whose contents change from a SecretID to this key), the public key published to each user as decision 5 describes.
+
+**Amended 2026-10-02 (#153 PR 4):**
+- **Custody on Linux.** The private key is the TPM2-sealed `systemd-creds` credential named `maknae-egress-seal-key`, at `/etc/maknae/private/maknae-egress-seal-key.cred` (`root:root 0400`), which the unit loads with `LoadCredentialEncrypted=` and the Egress Daemon reads from `$CREDENTIALS_DIRECTORY` through `maknae-io`. Its content is the raw PKCS#8 DER, at most 512 bytes.
+- **Custody on macOS.** The decision-6 item keeps its service, account, ACL and pointer file; its content is the lower-case hex of the PKCS#8 DER, because hex is text and `security -i add-generic-password … -w` carries it unchanged. The Egress Daemon decodes it into a zeroizing buffer sized from the hex length.
+- **Generation.** `maknae enroll` generates the pair only when the custody item or the published `seal.pub` is missing, and then rewrites both; otherwise it keeps the pair. `--rotate-seal-key` forces a new pair.
+- **Refused before send.** Every Egress Daemon refusal before any provider I/O — a frame outside its bounds, a seal that does not open under the request's associated data, a wrapping token whose lookup, time-to-live or `creation_path` does not match, a failed unwrap, a missing field — answers `maknaed` with a refused-before-send reply that carries no reason text, and `maknaed` records the turn `Failed`, never `OutcomeUnknown`. A failure on the provider side still closes the connection, and `maknaed` still records `OutcomeUnknown` for it.
+- **Terraform.** `deploy/vault-pki` landed with the switch (#153 PR 4): the shared `maknae` CLI AppRole, the `maknae-egress` AppRole and both their policies are removed; a userpass mount, the templated `maknae-user` policy and one userpass user per entry of `maknae_users` are added.
 
 ## Consequences
 
@@ -67,7 +76,7 @@ It acts only on behalf of a user, within the authorized set, using what a single
 - **Humans log in again when their token reaches its maximum lifetime,** including during a long `maknae agent` session, where the SecretID was hands-free.
 - **The associated data does not bind the prompt content.** `maknaed`, a trusted component, could attach a user's sealed token to content of its choosing; binding content is left to #417's direct path.
 - **The trail records the user, the provider and the model** — never the key's path, field, wrapping token or sealed bytes.
-- **User enrollment issues no shared SecretID** and **gains administrative steps**: the Vault administrator creates each userpass user, and the Egress Daemon's public key is published to each user; the templated policy lives in `deploy/vault-pki`.
+- **User enrollment issues no shared SecretID** and **gains administrative steps**: the Vault administrator creates each userpass user, and the Egress Daemon's public key is published to each user; the templated policy lives in `deploy/vault-pki`. *(Amended 2026-10-02, #153 PR 4: the public key is published once per host, decision 5.)*
 - **Each turn adds three Vault round trips** (wrapped read, lookup, unwrap): milliseconds against a model turn.
 - **Content is not addressed.** Prompt content still transits `maknaed` (#417).
 - **One Vault server serves one Maknae instance.**

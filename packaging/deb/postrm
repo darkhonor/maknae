@@ -12,6 +12,7 @@ case "$1" in
 
         # Remove configuration and the audit trail on purge only.
         rm -rf /etc/maknae
+        rm -rf /etc/ssl/maknae
         rm -rf /var/log/maknae
 
         systemctl daemon-reload 2>/dev/null || :

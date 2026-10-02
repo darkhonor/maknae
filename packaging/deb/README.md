@@ -73,12 +73,14 @@ refuses to start) until enroll writes it. The order is load-bearing:
 
 ```bash
 sudo apt install -y ./dist/maknae_0.1.0-1_amd64.deb   # pulls apparmor, apparmor-utils
-sudo maknae enroll --deployment-id <id>               # provisions daemon cred + principal
+sudo maknae enroll --deployment-id <id>               # daemon cred, seal key, seal.pub, principal
 # re-login so the operator picks up the `maknae` group membership
 sudo systemctl enable --now maknaed.service
-# with a provider registered (#240), the deputy's socket unit too — it is
-# preset-disabled, and without it every permitted prompt is refused as not ready
+# with providers authorized (`providers:` in maknae.yaml), the deputy's socket
+# unit too — it is preset-disabled, and without it every permitted prompt is
+# refused as not ready
 sudo systemctl enable --now maknae-egress.socket
+maknae login    # your Vault userpass password, prompted with echo off
 maknae ping     # -> pong
 maknae whoami   # -> maknae://<id>/plane/cli
 ```

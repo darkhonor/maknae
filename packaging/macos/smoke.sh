@@ -519,8 +519,9 @@ REFUSE
 
     # --- D1's CENTRAL CLAIM, on the real tree -------------------------------
     # NOT via the daemon. maknaed cannot reach its bind site on an unenrolled host:
-    # run.rs:2731/:2747 refuse a missing `principal` section with exit 3, and a Vault
-    # mint sits between that and the only bind call at run.rs:3020. The shipped
+    # run.rs refuses a missing `principal` section with exit 3 (principal_from_section,
+    # authz_boot_gate), and a Vault mint sits between that and the only bind call,
+    # PlaneListener::bind. The shipped
     # skeleton deliberately has no `principal`, so an unenrolled daemon exits 3 and
     # NO socket is ever created — an assertion routed through the daemon could only
     # ever FAIL. Prove the property directly, as the daemon's own uid, applying
@@ -552,6 +553,9 @@ PROBE
     done
     chmod +a "user:_maknae-egress allow list,search" /etc/maknae \
         && ok "planted the deputy's /etc/maknae ACE" || fail "could not plant the ACE"
+    install -d -m 0755 "/Library/Application Support/Maknae/pki" \
+        && install -m 0644 /dev/null "/Library/Application Support/Maknae/pki/seal.pub" \
+        && ok "planted the published seal.pub" || fail "could not plant seal.pub"
     "$HERE/uninstall.sh" >/dev/null && ok "uninstall.sh ran" || fail "uninstall.sh failed"
     [ ! -e /usr/local/bin/maknaed ] && ok "binary removed" || fail "binary still present"
     [ ! -e "/Library/LaunchDaemons/${LABEL}.plist" ] && ok "plist removed" || fail "plist still present"
@@ -583,7 +587,8 @@ PROBE
     local gone
     for gone in /usr/local/bin/maknae-egress /Library/LaunchDaemons/io.maknae.maknae-egress.plist \
                 /usr/local/var/run/maknae-egress /usr/local/var/log/maknae-egress \
-                /usr/local/var/run/maknae /usr/local/var/log/maknae; do
+                /usr/local/var/run/maknae /usr/local/var/log/maknae \
+                "/Library/Application Support/Maknae/pki"; do
         [ ! -e "$gone" ] && ok "removed $gone" || fail "still present: $gone"
     done
     local dis3; dis3="$(launchctl print-disabled system 2>/dev/null)"
