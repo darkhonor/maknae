@@ -35,7 +35,7 @@ file or a group/other-accessible config dir):
 ```yaml
 vault:
   addr: https://vault.example.internal:8200
-  insecure_plaintext_secret_path: /home/<you>/.maknae/maknaed-secret-id   # absolute
+  insecure_plaintext_secret_path: <your home>/.maknae/maknaed-secret-id   # absolute
 core:
   deployment_id: <the SAME value you passed to `terraform apply -var deployment_id=…`>
 ```
@@ -134,7 +134,7 @@ maknae login
 unset MAKNAE_CONFIG_DIR
 ```
 
-`maknae login` needs a terminal and refuses to run as root. What it prints and where it keeps the token are in [first-provider step U1](first-provider.md#u1-log-in); here the token lands under `~/.maknae-cli`, because the CLI resolves its config dir from `MAKNAE_CONFIG_DIR`.
+`maknae login` needs a terminal and refuses to run as root. What it prints and where it keeps the token are in [first-provider step U1](first-provider.md#u1-log-in); on Linux the token lands under `~/.maknae-cli`, because the CLI resolves its config dir from `MAKNAE_CONFIG_DIR`. On macOS the token is the login-keychain item `maknae-cli`/`maknae-vault-token` whatever the config dir (`crates/maknae-vault/src/token_record.rs`, `keychain_policy.rs`), so `~/.maknae-cli` and `~/.maknae` share one token.
 
 ### 2. Socket dir + the `maknae` group (defense-in-depth outer fence)
 
@@ -180,7 +180,7 @@ Expected: `LIVE TRANSPORT OK: kernel<->cli mTLS + peer-creds round-trip over UDS
 The socket file is removed at the end of the run; leaves + keys are memory-only and gone
 when the process exits. The kernel plane's AppRole token is revoked on `shutdown`; the
 CLI plane's login token is not, and stays valid until it expires or you run
-`MAKNAE_CONFIG_DIR="$HOME/.maknae-cli" maknae logout`.
+`MAKNAE_CONFIG_DIR="$HOME/.maknae-cli" maknae logout`. On macOS that logout revokes and erases the one shared keychain token, the one `~/.maknae` uses too.
 
 ---
 
@@ -413,7 +413,7 @@ destinations:                # #172: per-role egress allowlist for session.promp
   look up and unwrap the user's wrapping token. During an outage the user's own CLI
   cannot mint its leaf or make its wrapped read of the key, so the turn fails before it
   reaches the kernel. If Vault becomes unreachable after the CLI's read, the deputy's
-  lookup fails, it answers refused-before-send, and `maknaed` records the turn's outcome
+  lookup or unwrap fails, it answers refused-before-send, and `maknaed` records the turn's outcome
   `egress.status:"Failed"`; the deputy's journal shows `OpenFailed(Vault)`. Nothing has
   to be restarted when Vault returns.
 - **A permitted prompt, and where it goes (#240).** With providers authorized, a
@@ -567,7 +567,7 @@ A host enrolled before per-user providers (#153) carries the removed AppRoles' c
    rm -f ~/.maknae/maknae-approle-id ~/.maknae/maknae-secret-id.cred
    ```
 
-   On macOS, also delete the login-keychain item `maknae-cli`/`maknae-secret-id` (`security delete-generic-password -s maknae-cli -a maknae-secret-id`). Remove any `provider:` block from `~/.maknae/maknae.yaml`: every CLI verb fails while it is there.
+   On macOS, also delete the login-keychain item `maknae-cli`/`maknae-secret-id` (`security delete-generic-password -s maknae-cli -a maknae-secret-id`; this form is not yet measured). Remove any `provider:` block from `~/.maknae/maknae.yaml`: every CLI verb fails while it is there.
 
 4. **Authorize the provider again** in the new shape (step 5), and have each user log in and store their own key (steps 6 and 9). A key stored at the old shared path is no longer read.
 
@@ -609,7 +609,7 @@ sudo restorecon -Rv /etc/maknae
 - **`endpoint` is POSTed exactly as written.** Give the full chat-completions URL, not the API base (`crates/maknae-llm/src/client.rs`).
 - **`models`** lists the models users may ask this provider for; the kernel refuses any other at admission.
 - **`reasoning_effort: none` is required for `gpt-5.6-luna`.** Without it the model refuses the loop's tools on chat completions: every turn is recorded `OutcomeUnknown`, with `provider answered 400` in the deputy's journal. The journal line carries up to 4 KiB of the provider's error body with the key masked, and that body can quote the rejected request — prompt and file content included — so treat the deputy's journal as holding conversation content (`docs/configuration.md` §6.2).
-- **No key goes in this file.** A field named like a key (`key`, `api_key`, `token`, `secret` and others) refuses boot. Each entry has exactly the keys `name`, `endpoint`, `models`, `reasoning_effort` and `output_tokens_field` (`docs/configuration.md` §6.1).
+- **No key goes in this file.** A field named like a key (`key`, `api_key`, `token`, `secret` and others) refuses boot. Each entry may hold only the keys `name`, `endpoint`, `models`, `reasoning_effort` and `output_tokens_field`; the last two are optional (`docs/configuration.md` §6.1).
 - **The daemon's prompt cap.** `transport.prompt_max_bytes` in `/etc/maknae/maknae.yaml` defaults to 1 MiB, enough for a context window of about 174,000 tokens. For a larger window raise it to `context_tokens × 6`, at most 16 MiB, or the daemon refuses the loop's larger frames. Enroll rewrites that file, so set it again after a re-enroll.
 
 ### 6. Store your key and choose your provider
