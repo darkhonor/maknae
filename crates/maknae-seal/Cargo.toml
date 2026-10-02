@@ -15,3 +15,6 @@ workspace = true
 aws-lc-rs = { version = "1.18", features = ["fips"] }  # 1.18: the AWS-LC-FIPS 4.x line; one aws-lc-rs in the tree (ADR-0025)
 pem = "4"
 zeroize = "1"
+
+[dev-dependencies]
+maknae-proto = { path = "../maknae-proto" }

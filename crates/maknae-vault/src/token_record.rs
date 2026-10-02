@@ -563,8 +563,8 @@ mod tests {
                 "malformed token",
             ),
         ];
-        for (bytes, want) in rows {
-            assert_eq!(refusal(bytes), want, "{:?}", String::from_utf8_lossy(bytes));
+        for (i, (bytes, want)) in rows.into_iter().enumerate() {
+            assert_eq!(refusal(bytes), want, "row {i}");
         }
         let at_bound = format!("maknae-vault-token v1 1 {} hvs.a", "h".repeat(271));
         assert_eq!(

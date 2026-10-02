@@ -59,6 +59,7 @@ async fn the_egress_refusal_record_carries_the_decided_role() {
                     }],
                 }],
                 output_tokens: None,
+                choice: Some(common::test_choice()),
             },
             Arc::clone(&records),
             Some("openai"),

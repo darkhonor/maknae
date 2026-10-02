@@ -24,26 +24,27 @@ pub(crate) fn text(id: MsgId) -> &'static str {
             "warning: this boot's credential posture is not hardware-root-of-trust sealed"
         }
         MsgId::EnrollPreflightFailed => "Enrollment preflight check failed",
-        MsgId::EnrollProbeStarted => "Verifying this host can seal a credential in your context",
-        MsgId::EnrollProbeFailed => {
-            "Credential-sealing capability check failed — nothing has been changed in Vault"
-        }
-        MsgId::EnrollProbeOk => "Credential-sealing capability confirmed",
         MsgId::EnrollTokenPrompt => "Vault token: ",
         MsgId::EnrollVaultOpsStarted => "Requesting credentials from Vault",
         MsgId::EnrollWritingDaemonConfig => "Writing the daemon's configuration",
         MsgId::EnrollSealingDaemonCredential => "Sealing the daemon's credential",
-        MsgId::EnrollProvisioningCli => "Provisioning your CLI credentials",
+        MsgId::EnrollSealKeyGenerated => {
+            "Generated the Egress Daemon's sealing key and published its public key at {path}. An Egress Daemon that is already running still holds the previous key: restart it with `sudo {restart}`"
+        }
+        MsgId::EnrollSealKeyKept => {
+            "Kept the Egress Daemon's sealing key and its published public key; pass --rotate-seal-key to replace them"
+        }
+        MsgId::EnrollProvisioningCli => "Writing your CLI configuration",
         MsgId::EnrollPostureSummary => "Enrollment complete. CLI config: {cli_dir}",
         MsgId::EnrollReloginNote => {
-            "Log out and back in (or run `newgrp maknae`) before using the CLI"
+            "Log out and back in (or run `newgrp maknae`), then run `maknae login` before using the CLI"
         }
         MsgId::EnrollEgressBoundsHint => {
-            "maknae-egress: create or complete /etc/maknae/egress-bounds.yaml (kv_mount, key_vault_path_prefix, vault: addr — docs/configuration.md §9.3), chmod it 0644, then: systemctl enable --now maknae-egress.socket — the socket unit is preset-disabled, and without it every permitted prompt is refused as not ready"
+            "maknae-egress: enroll wrote /etc/maknae/egress-bounds.yaml; start the deputy with: systemctl enable --now maknae-egress.socket — the socket unit is preset-disabled, and without it every permitted prompt is refused as not ready"
         }
         MsgId::EnrollEnableDaemonHint => "Start the daemon with: systemctl enable --now maknaed",
         MsgId::EnrollEgressBoundsHintMacos => {
-            "maknae-egress: create or complete /etc/maknae/egress-bounds.yaml (kv_mount, key_vault_path_prefix, vault: addr — docs/configuration.md §9.3), chmod it 0644, then: sudo launchctl enable system/io.maknae.maknae-egress && sudo launchctl bootstrap system /Library/LaunchDaemons/io.maknae.maknae-egress.plist — the job ships disabled, and without it every permitted prompt is refused as not ready"
+            "maknae-egress: enroll wrote /etc/maknae/egress-bounds.yaml; start the deputy with: sudo launchctl enable system/io.maknae.maknae-egress && sudo launchctl bootstrap system /Library/LaunchDaemons/io.maknae.maknae-egress.plist — the job ships disabled, and without it every permitted prompt is refused as not ready"
         }
         MsgId::EnrollEnableDaemonHintMacos => {
             "Start the daemon with: sudo launchctl enable system/io.maknae.maknaed && sudo launchctl bootstrap system /Library/LaunchDaemons/io.maknae.maknaed.plist"

@@ -1,10 +1,12 @@
 //! `maknae-egress` — the egress deputy (#240a).
 //!
-//! The only process with a route out, running as `_maknae-egress` under its
-//! own Vault policy. It holds a credential and a socket and nothing else: no
-//! policy, no provider registry, no identity map, no audit sink. It never
-//! learns WHO the subject is — the kernel decided that long before the frame
-//! existed — and it never originates a call of its own.
+//! The only process with a route out, running as `_maknae-egress`. It holds
+//! its seal key and a socket and nothing else: no Vault identity, no policy,
+//! no provider registry, no identity map, no audit sink. It makes no identity
+//! decision: the kernel decided who the subject is before the frame existed,
+//! and the `key_vault_path` it is handed carries the requester's user segment
+//! only so it can act on that user's behalf. It never originates a call of its
+//! own.
 //!
 //! **Amended 2026-09-21 by #264:** the binary also links `maknae-llm`'s
 //! compiled-in core prompt and baseline tool definitions, and composes them
@@ -20,11 +22,11 @@
 //! Thin by design (T3, the `bins/maknaed` precedent): the decision is in
 //! `handle`, the I/O in `serve`, the socket in `listen`.
 
-mod keys_vault;
 mod listen;
+mod opener;
 mod serve;
 
-use maknae_deputy::{call, keys};
+use maknae_deputy::call;
 
 use std::path::PathBuf;
 
@@ -57,9 +59,8 @@ fn main() {
             // (#76); the shipped Linux unit socket-activates and passes no
             // bind path, a packaging test asserts that.
             "--bind" => bind = args.next().map(PathBuf::from),
-            // Development only — and it relocates the whole
-            // credential set: the RoleID and the Vault CA are read from
-            // `egress/` BESIDE the bounds file, not from a fixed path.
+            // Development only: the Vault CA and the macOS seal-key pointer
+            // are read from `egress/` beside the bounds file, not from a fixed path.
             "--bounds" => bounds_path = args.next().map(PathBuf::from).unwrap_or(bounds_path),
             other => fail(format!("unknown argument '{other}'")),
         }
@@ -89,42 +90,6 @@ fn main() {
         Err(e) => fail(format!("cannot resolve '{KERNEL_USER}': {e}")),
     };
 
-    // The third plane's credential (#240b): the RoleID and the Vault CA sit
-    // beside the bounds file under `egress/`, the SecretID comes from
-    // $CREDENTIALS_DIRECTORY on Linux, the System keychain on macOS (#76).
-    // Resolved ONCE, fail-closed, and the SecretID is `Zeroizing` from the
-    // read. The AppRole mount defaults to the packaged Terraform's, resolved
-    // HERE rather than in the config crate so there is one place for that
-    // default.
-    let egress_dir = bounds_path
-        .parent()
-        .map(|p| p.join("egress"))
-        .unwrap_or_else(|| PathBuf::from("/etc/maknae/egress"));
-    let approle_mount = bounds
-        .approle_mount
-        .clone()
-        .unwrap_or_else(|| maknae_vault::DEFAULT_APPROLE_MOUNT.to_string());
-    let credentials_dir = match maknae_vault::credentials_directory_env() {
-        Ok(c) => c,
-        Err(e) => fail(format!("egress credential: {e}")),
-    };
-    let auth = match maknae_vault::load_egress_auth(
-        &egress_dir,
-        approle_mount,
-        credentials_dir.as_deref(),
-    ) {
-        Ok(a) => a,
-        Err(e) => fail(format!("egress credential: {e}")),
-    };
-    let vault = match maknae_vault::EgressVault::new(
-        &bounds.vault_addr,
-        &egress_dir.join(maknae_vault::EGRESS_VAULT_CA_FILE),
-        auth,
-    ) {
-        Ok(v) => v,
-        Err(e) => fail(format!("vault client: {e}")),
-    };
-
     // One current-thread runtime for the process: the provider call and the
     // Vault read are futures, and the serving path is otherwise blocking.
     let rt = match tokio::runtime::Builder::new_current_thread()
@@ -135,15 +100,29 @@ fn main() {
         Err(e) => fail(format!("cannot start a runtime: {e}")),
     };
 
-    // Boot probe BEFORE the listener is adopted: one login and one revoke. A
-    // wrong SecretID, or a Vault the deputy cannot reach, refuses START — not
-    // the first live request (the same preference the kernel's bounds boot
-    // gate records) — and refuses it before the listener is adopted, so the
-    // connections already queued on the activation socket are not accepted
-    // and dropped by a process that is about to exit.
-    if let Err(e) = rt.block_on(vault.probe_login()) {
-        fail(format!("vault login probe: {e}"));
-    }
+    let egress_dir = bounds_path
+        .parent()
+        .map(|p| p.join("egress"))
+        .unwrap_or_else(|| PathBuf::from("/etc/maknae/egress"));
+    let credentials_dir = match maknae_vault::credentials_directory_env() {
+        Ok(c) => c,
+        Err(e) => fail(format!("egress seal key: {e}")),
+    };
+    let key = match maknae_vault::read_egress_seal_key(credentials_dir.as_deref(), &egress_dir) {
+        Ok(der) => match maknae_seal::SealPrivateKey::from_pkcs8_der(der.expose()) {
+            Ok(k) => k,
+            Err(e) => fail(format!("egress seal key: {e}")),
+        },
+        Err(e) => fail(format!("egress seal key: {e}")),
+    };
+    let api = match maknae_vault::VaultApi::new(
+        &bounds.vault_addr,
+        &egress_dir.join(maknae_vault::EGRESS_VAULT_CA_FILE),
+    ) {
+        Ok(a) => a,
+        Err(e) => fail(format!("vault client: {e}")),
+    };
+    let opener = opener::SealedOpener { key, api };
 
     let listener = match listen::from_init_system() {
         Ok(Some(l)) => l,
@@ -164,24 +143,6 @@ fn main() {
         Err(e) => fail(e),
     };
 
-    // ONE cache for the PROCESS, outside the accept loop.
-    //
-    // Reviewed finding (#296): this was constructed inside the per-connection
-    // closure, which gave "read on first use, cached per destination" a lifetime
-    // of exactly one request — every prompt would have re-read Vault and then
-    // dropped the entry. The unit test passed because IT held a cache across
-    // calls; the deputy never did. A cache the production path rebuilds per
-    // request is not a cache.
-    //
-    // CONCURRENCY MODEL, stated because a shared mutable cache needs one: the
-    // accept loop is SEQUENTIAL — `incoming()` yields one connection at a time
-    // and each is served to completion before the next is accepted — so access
-    // is serialized by construction and needs no lock. If the deputy ever serves
-    // connections concurrently, this becomes shared state and must gain one;
-    // the `&mut` borrow here is what will force that decision rather than
-    // letting it pass silently.
-    let mut keys = keys::KeyCache::new(keys_vault::VaultKeys { vault });
-
     // Accept forever. A failed connection is refused and the loop continues:
     // one bad or hostile peer must not take the deputy down. This is wiring,
     // not logic — the decision is `handle::decide`, the per-connection I/O is
@@ -190,28 +151,8 @@ fn main() {
         match conn {
             Ok(s) => {
                 if let Err(e) = serve::serve_one(s, expected_uid, &bounds, |admitted| {
-                    // The real fulfilment path: the key is read through the
-                    // cache on first use per destination (#240b), then the
-                    // provider call is made under the FIPS provider installed
-                    // above.
-                    rt.block_on(call::fulfil(
-                        admitted,
-                        &mut keys,
-                        call::CallBounds::default(),
-                        // #308: the KV mount, from the deputy's own bounds
-                        // document — the only place it is declared, because the
-                        // deputy is the only component in the tree that reads KV.
-                        &bounds.kv_mount,
-                    ))
-                    .map_err(|e| {
-                        if let call::FulfilError::Provider {
-                            journal: Some(j), ..
-                        } = &e
-                        {
-                            eprintln!("{}", j.as_str());
-                        }
-                        serve::ServeError::Fulfil(e.to_string())
-                    })
+                    rt.block_on(call::fulfil(admitted, &opener, call::CallBounds::default()))
+                        .map_err(serve::serve_error)
                 }) {
                     eprintln!("maknae-egress: connection refused: {e:?}");
                 }
@@ -266,7 +207,7 @@ mod tests {
         // Differ by design — each named, each with its reason in the units.
         const DEPUTY_DIFFERS: &[&str] = &[
             "ExecStart=",               // its own binary
-            "LoadCredentialEncrypted=", // its own sealed SecretID
+            "LoadCredentialEncrypted=", // its own sealed seal key
             "ProtectHome=",             // `yes` here, `read-only` for the daemon's read path
             "ReadWritePaths=",          // the daemon's audit sink; the deputy writes nothing
             "Restart=",
@@ -299,32 +240,56 @@ mod tests {
         );
     }
 
-    /// `main` runs the scrub before anything else, and the boot probe before
-    /// the listener is adopted — fail-closed ORDERINGS asserted in comments,
-    /// pinned here by source order the way the kernel's boot gate pins its
-    /// gate-before-mint (a behavioural test cannot reach a T3 main).
     #[test]
-    fn main_scrubs_first_and_probes_before_adopting_the_listener() {
+    fn main_scrubs_first_and_loads_its_keys_before_adopting_the_listener() {
         let src = include_str!("main.rs");
         let at = |needle: &str| {
             src.find(needle)
                 .unwrap_or_else(|| panic!("{needle} not in main.rs"))
         };
-        // The WHOLE call site, remover included: `scrub_with(|_| {})` would
-        // keep every other assertion here green while the deputy inherited
-        // HTTPS_PROXY again.
         let scrub = at(concat!(
             "maknae_vault::scrub_with(|k| ",
             "std::env::remove_var(k))"
         ));
-        let fips = at("install_default_crypto_provider()");
-        let client = at("EgressVault::new(");
-        let probe = at("vault.probe_login()");
-        let listener = at("listen::from_init_system()");
+        let fips = at(concat!(
+            "maknae_vault::install_default_crypto_provider",
+            "();"
+        ));
+        let seal = at(concat!(
+            "maknae_vault::read_egress_seal_key",
+            "(credentials_dir.as_deref(), &egress_dir)"
+        ));
+        let parse = at(concat!(
+            "maknae_seal::SealPrivateKey::from_pkcs8_der",
+            "(der.expose())"
+        ));
+        let client = at(concat!("maknae_vault::VaultApi::new", "("));
+        let listener = at(concat!("listen::from_init_system", "()"));
+        let mapped = at(concat!(".map_err(serve::", "serve_error)"));
         assert!(scrub < fips, "the scrub must precede the FIPS install");
-        assert!(scrub < client, "the scrub must precede any client");
+        assert!(scrub < seal, "the scrub must precede reading the seal key");
+        assert!(
+            fips < seal,
+            "the FIPS install must precede reading the seal key"
+        );
+        assert!(seal < parse, "the seal key is parsed from what was read");
         assert!(fips < client, "the FIPS install must precede any client");
-        assert!(probe < listener, "the probe must precede the listener");
+        assert!(
+            parse < listener,
+            "the seal key must be parsed before the listener is adopted"
+        );
+        assert!(
+            client < listener,
+            "the Vault client must exist before the listener is adopted"
+        );
+        assert!(
+            listener < mapped,
+            "the accept loop maps fulfil failures through serve::serve_error"
+        );
+        assert!(
+            !src.contains(concat!("App", "Role")) && !src.contains(concat!("probe", "_login")),
+            "the Egress Daemon holds no Vault identity and logs in to nothing"
+        );
     }
 
     /// The shipped unit socket-activates: its ExecStart carries no --bind.

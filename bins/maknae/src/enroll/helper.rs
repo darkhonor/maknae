@@ -1,43 +1,28 @@
 //! The hidden operator-context helper (`enroll-helper`, spec §4.1). `mod.rs`
-//! re-execs this via `sudo -u $SUDO_USER` for every step that must run AS the
-//! operator: the pre-mint capability probe (`probe`) and the post-mint CLI
-//! provisioning (`provision`). Never invoked directly by an operator — hidden
-//! from `--help` at the clap level (`cli.rs`).
+//! re-execs this via `sudo -u $SUDO_USER` for the one step that must run AS the
+//! operator: writing the CLI configuration set (`provision`). Never invoked
+//! directly by an operator — hidden from `--help` at the clap level (`cli.rs`).
 //!
 //! First act, always: self-verify the process actually landed in the
 //! operator's identity (spec §4.1 — "the helper self-verifies its effective
 //! uid/gid/supplementary groups against the operator before doing anything").
 use super::{EnrollError, HelperArgs, HelperIdentityArgs, HelperVerb, ProvisionJob};
-use crate::enroll::artifact_table::{self, ContentKind};
+use crate::enroll::artifact_table;
 use crate::enroll::artifact_write::{self, SelfOwnerResolver};
 use std::io::Read;
-use std::path::{Path, PathBuf};
-use zeroize::Zeroizing;
-
-// macOS-only: the Keychain probe's service; gated so Linux clippy sees no dead_code.
-#[cfg(target_os = "macos")]
-const KEYCHAIN_PROBE_SERVICE: &str = "maknae-enroll-probe";
-const PROBE_VALUE: &str = "maknae-enroll-probe-throwaway-value";
+use std::path::PathBuf;
 
 pub async fn dispatch(args: HelperArgs) -> Result<(), EnrollError> {
-    match args.verb {
-        HelperVerb::Probe(id) => {
-            assert_operator_context(&id)?;
-            probe(id.verbose)
-        }
-        HelperVerb::Provision(id) => {
-            assert_operator_context(&id)?;
-            let mut payload = String::new();
-            std::io::stdin()
-                .read_to_string(&mut payload)
-                .map_err(|e| EnrollError::Io {
-                    path: PathBuf::from("<stdin>"),
-                    source: e.to_string(),
-                })?;
-            let job = ProvisionJob::from_yaml(&payload)?;
-            provision(job, id.verbose)
-        }
-    }
+    let HelperVerb::Provision(id) = args.verb;
+    assert_operator_context(&id)?;
+    let mut payload = String::new();
+    std::io::stdin()
+        .read_to_string(&mut payload)
+        .map_err(|e| EnrollError::Io {
+            path: PathBuf::from("<stdin>"),
+            source: e.to_string(),
+        })?;
+    provision(ProvisionJob::from_yaml(&payload)?, id.verbose)
 }
 
 /// The helper's mandatory first act (spec §4.1): prove it actually landed at
@@ -109,162 +94,20 @@ fn parse_id_dash_g(text: &str) -> Result<Vec<u32>, EnrollError> {
         .collect()
 }
 
-// ============================================================================
-// probe — spec §4.1 step 1's post-drop capability probe: a real throwaway
-// round trip of this target's CLI-seal mechanism, in the operator's own
-// context, BEFORE any Vault mutation.
-// ============================================================================
-
-fn probe(verbose: bool) -> Result<(), EnrollError> {
-    if cfg!(target_os = "macos") {
-        probe_keychain(PROBE_VALUE, verbose)
-    } else {
-        probe_systemd_creds_user(PROBE_VALUE, verbose)
-    }
-}
-
-fn probe_systemd_creds_user(value: &str, verbose: bool) -> Result<(), EnrollError> {
-    use std::io::Write;
-    use std::process::Stdio;
-
-    if verbose {
-        eprintln!("exec: systemd-creds encrypt --user --with-key=auto - -");
-    }
-    // `--user` (uid-scoped) seals CANNOT use `--with-key=tpm2`: the TPM host key
-    // needs root-only /var/lib/systemd/credential.secret, so systemd-creds refuses
-    // it in --uid= scoped mode (verified on Rocky 10 / systemd 257, issue #89). The
-    // CLI plane is untrusted (ADR-0005: operator-uid compromise is fatal to it), so
-    // host-bound `--with-key=auto` (disk-at-rest, useless off-host) is sufficient.
-    // The DAEMON seal (root, in mod.rs) keeps full `--with-key=tpm2` TPM binding.
-    let mut enc = std::process::Command::new("systemd-creds")
-        .args([
-            "encrypt",
-            "--user",
-            "--with-key=auto",
-            "--name=maknae-enroll-probe",
-            "-",
-            "-",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| EnrollError::Command {
-            program: "systemd-creds".to_string(),
-            detail: e.to_string(),
-        })?;
-    enc.stdin
-        .take()
-        .expect("piped stdin")
-        .write_all(value.as_bytes())
-        .map_err(|e| EnrollError::Command {
-            program: "systemd-creds".to_string(),
-            detail: e.to_string(),
-        })?;
-    let enc_out = enc.wait_with_output().map_err(|e| EnrollError::Command {
-        program: "systemd-creds".to_string(),
-        detail: e.to_string(),
-    })?;
-    if !enc_out.status.success() {
-        return Err(EnrollError::Command {
-            program: "systemd-creds encrypt --user".to_string(),
-            detail: String::from_utf8_lossy(&enc_out.stderr).to_string(),
-        });
-    }
-
-    if verbose {
-        eprintln!("exec: systemd-creds decrypt --user - -");
-    }
-    let mut dec = std::process::Command::new("systemd-creds")
-        .args(["decrypt", "--user", "--name=maknae-enroll-probe", "-", "-"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| EnrollError::Command {
-            program: "systemd-creds".to_string(),
-            detail: e.to_string(),
-        })?;
-    dec.stdin
-        .take()
-        .expect("piped stdin")
-        .write_all(&enc_out.stdout)
-        .map_err(|e| EnrollError::Command {
-            program: "systemd-creds".to_string(),
-            detail: e.to_string(),
-        })?;
-    let dec_out = dec.wait_with_output().map_err(|e| EnrollError::Command {
-        program: "systemd-creds".to_string(),
-        detail: e.to_string(),
-    })?;
-    if !dec_out.status.success() {
-        return Err(EnrollError::Command {
-            program: "systemd-creds decrypt --user".to_string(),
-            detail: String::from_utf8_lossy(&dec_out.stderr).to_string(),
-        });
-    }
-    if dec_out.stdout != value.as_bytes() {
-        return Err(EnrollError::Probe(
-            "systemd-creds --user round trip returned a different value".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn probe_keychain(value: &str, verbose: bool) -> Result<(), EnrollError> {
-    if verbose {
-        eprintln!("keychain: set/get/delete generic password service={KEYCHAIN_PROBE_SERVICE}");
-    }
-    security_framework::passwords::set_generic_password(
-        KEYCHAIN_PROBE_SERVICE,
-        "probe",
-        value.as_bytes(),
-    )
-    .map_err(|e| EnrollError::Probe(format!("keychain write: {e}")))?;
-    let got = security_framework::passwords::get_generic_password(KEYCHAIN_PROBE_SERVICE, "probe")
-        .map_err(|e| EnrollError::Probe(format!("keychain read: {e}")));
-    let _ = security_framework::passwords::delete_generic_password(KEYCHAIN_PROBE_SERVICE, "probe");
-    let got = got?;
-    if got != value.as_bytes() {
-        return Err(EnrollError::Probe(
-            "keychain round trip returned a different value".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(not(target_os = "macos"))]
-fn probe_keychain(_value: &str, _verbose: bool) -> Result<(), EnrollError> {
-    Err(EnrollError::Probe(
-        "Keychain probe requested on a non-macOS build target".to_string(),
-    ))
-}
-
-// ============================================================================
-// provision — spec §4.1 step 7: write the CLI artifact set + seal the real
-// SecretID, entirely in the operator's own context (ownership correct by
-// construction, no post-hoc chown).
-// ============================================================================
-
 fn provision(job: ProvisionJob, verbose: bool) -> Result<(), EnrollError> {
     let table = artifact_table::artifact_table(&job.cli_dir, job.macos, job.insecure_plaintext);
-    let resolver = SelfOwnerResolver;
-
     let cli_yaml = super::build_cli_yaml(
         &job.deployment_id,
         &job.vault_addr,
-        &job.approle_mount,
         &job.pki_int_mount,
+        &job.userpass_mount,
+        &job.kv_mount,
+        &job.user_prefix,
         job.macos,
     );
 
     let mut contents = std::collections::BTreeMap::new();
     contents.insert(job.cli_dir.join("maknae.yaml"), cli_yaml.into_bytes());
-    contents.insert(
-        job.cli_dir.join("maknae-approle-id"),
-        job.role_id.as_bytes().to_vec(),
-    );
     contents.insert(
         job.cli_dir.join("tls/vault-ca.crt"),
         job.vault_ca_pem.as_bytes().to_vec(),
@@ -280,337 +123,22 @@ fn provision(job: ProvisionJob, verbose: bool) -> Result<(), EnrollError> {
 
     let cli_rows: Vec<_> = table
         .iter()
-        .filter(|a| a.path.starts_with(&job.cli_dir) && a.content != ContentKind::SealedCliSecret)
+        .filter(|a| a.path.starts_with(&job.cli_dir))
         .cloned()
         .collect();
-    artifact_write::write_artifacts(&cli_rows, &contents, &resolver)?;
-
-    if job.macos {
-        seal_cli_secret_keychain(&job.secret_id, verbose)?;
-    } else {
-        let sealed_path = job.cli_dir.join("maknae-secret-id.cred");
-        seal_cli_secret_linux(&job.secret_id, &sealed_path, verbose)?;
-        let row = table
-            .iter()
-            .find(|a| a.content == ContentKind::SealedCliSecret)
-            .expect("non-macOS table always has a CLI sealed-secret row");
-        artifact_write::apply_ownership_and_mode(row, &resolver)?;
-    }
-    Ok(())
-}
-
-fn seal_cli_secret_linux(
-    secret: &Zeroizing<String>,
-    out_path: &Path,
-    verbose: bool,
-) -> Result<(), EnrollError> {
-    use std::io::Write;
-    use std::process::Stdio;
-    let out_str = out_path
-        .to_str()
-        .ok_or_else(|| EnrollError::Owner("non-UTF-8 seal output path".to_string()))?;
     if verbose {
         eprintln!(
-            "exec: systemd-creds encrypt --user --with-key=auto --name=maknae-secret-id - {out_str}"
+            "write: {} CLI artifacts under {}",
+            cli_rows.len(),
+            job.cli_dir.display()
         );
     }
-    // `--with-key=auto`, not `tpm2` — see the probe above (#89): the TPM host key is
-    // unavailable to a uid-scoped user; host-bound encryption is sufficient for the
-    // untrusted CLI plane.
-    let mut child = std::process::Command::new("systemd-creds")
-        .args([
-            "encrypt",
-            "--user",
-            "--with-key=auto",
-            "--name=maknae-secret-id",
-            "-",
-            out_str,
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| EnrollError::Command {
-            program: "systemd-creds".to_string(),
-            detail: e.to_string(),
-        })?;
-    child
-        .stdin
-        .take()
-        .expect("piped stdin")
-        .write_all(secret.as_bytes())
-        .map_err(|e| EnrollError::Command {
-            program: "systemd-creds".to_string(),
-            detail: e.to_string(),
-        })?;
-    let out = child.wait_with_output().map_err(|e| EnrollError::Command {
-        program: "systemd-creds".to_string(),
-        detail: e.to_string(),
-    })?;
-    if !out.status.success() {
-        return Err(EnrollError::Command {
-            program: "systemd-creds encrypt --user".to_string(),
-            detail: String::from_utf8_lossy(&out.stderr).to_string(),
-        });
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn keychain_failure(op: &'static str, e: security_framework::base::Error) -> EnrollError {
-    EnrollError::Keychain {
-        op,
-        detail: format!("status {}: {e}", e.code()),
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn cli_item_cleared(
-    deleted: Result<(), security_framework::base::Error>,
-) -> Result<(), EnrollError> {
-    match deleted {
-        Ok(()) => Ok(()),
-        Err(e) if e.code() == -25300 => Ok(()),
-        Err(e) => Err(keychain_failure("delete", e)),
-    }
-}
-
-// Refuses a duplicate (-25299): `set_generic_password` would update the data and keep the old ACL.
-#[cfg(target_os = "macos")]
-fn add_cli_item_in(
-    keychain: &security_framework::os::macos::keychain::SecKeychain,
-    secret: &Zeroizing<String>,
-) -> Result<(), EnrollError> {
-    let item = maknae_vault::CLI_KEYCHAIN_ITEM;
-    keychain
-        .add_generic_password(item.service, item.account, secret.as_bytes())
-        .map_err(|e| keychain_failure("add", e))
-}
-
-#[cfg(target_os = "macos")]
-fn clear_cli_item_in(
-    keychain: &security_framework::os::macos::keychain::SecKeychain,
-) -> Result<(), EnrollError> {
-    use security_framework::item::{ItemClass, ItemSearchOptions};
-    let item = maknae_vault::CLI_KEYCHAIN_ITEM;
-    cli_item_cleared(
-        ItemSearchOptions::new()
-            .class(ItemClass::generic_password())
-            .keychains(std::slice::from_ref(keychain))
-            .service(item.service)
-            .account(item.account)
-            .delete(),
-    )
-}
-
-#[cfg(target_os = "macos")]
-fn verify_cli_item_in(
-    keychain: &security_framework::os::macos::keychain::SecKeychain,
-    secret: &Zeroizing<String>,
-) -> Result<(), EnrollError> {
-    let read_back =
-        maknae_vault::read_cli_secret_from(keychain).map_err(|e| EnrollError::Keychain {
-            op: "verify",
-            detail: e.to_string(),
-        })?;
-    if read_back.as_str() != secret.as_str() {
-        return Err(EnrollError::Keychain {
-            op: "verify",
-            detail: "the CLI's read of the item is not the SecretID just added".to_string(),
-        });
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn seal_cli_secret_in(
-    keychain: &security_framework::os::macos::keychain::SecKeychain,
-    secret: &Zeroizing<String>,
-) -> Result<(), EnrollError> {
-    clear_cli_item_in(keychain)?;
-    add_cli_item_in(keychain, secret)?;
-    verify_cli_item_in(keychain, secret)
-}
-
-#[cfg(target_os = "macos")]
-fn seal_cli_secret_keychain(secret: &Zeroizing<String>, verbose: bool) -> Result<(), EnrollError> {
-    use security_framework::os::macos::keychain::SecKeychain;
-    if verbose {
-        eprintln!(
-            "keychain: replace generic password service={}",
-            maknae_vault::CLI_KEYCHAIN_ITEM.service
-        );
-    }
-    let default = SecKeychain::default().map_err(|e| keychain_failure("open default", e))?;
-    seal_cli_secret_in(&default, secret)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn seal_cli_secret_keychain(
-    _secret: &Zeroizing<String>,
-    _verbose: bool,
-) -> Result<(), EnrollError> {
-    Err(EnrollError::Command {
-        program: "keychain".to_string(),
-        detail: "Keychain seal requested on a non-macOS build target".to_string(),
-    })
+    artifact_write::write_artifacts(&cli_rows, &contents, &SelfOwnerResolver)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[cfg(target_os = "macos")]
-    static SCRATCH_KEYCHAIN: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    #[cfg(target_os = "macos")]
-    struct ScratchKeychain {
-        path: std::path::PathBuf,
-        dir: std::path::PathBuf,
-    }
-
-    #[cfg(target_os = "macos")]
-    impl Drop for ScratchKeychain {
-        fn drop(&mut self) {
-            let _ = std::process::Command::new("/usr/bin/security")
-                .arg("delete-keychain")
-                .arg(&self.path)
-                .stderr(std::process::Stdio::null())
-                .status();
-            let _ = std::fs::remove_dir_all(&self.dir);
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    fn scratch_keychain(tag: &str) -> ScratchKeychain {
-        let dir = std::env::temp_dir().join(format!("maknae-t76-{tag}-{}", std::process::id()));
-        let kc = ScratchKeychain {
-            path: dir.join("t76-helper.keychain"),
-            dir,
-        };
-        drop(ScratchKeychain {
-            path: kc.path.clone(),
-            dir: kc.dir.clone(),
-        });
-        std::fs::create_dir_all(&kc.dir).unwrap();
-        let p = kc.path.to_str().unwrap();
-        for args in [
-            ["create-keychain", "-p", "t76", p],
-            ["unlock-keychain", "-p", "t76", p],
-        ] {
-            assert!(std::process::Command::new("/usr/bin/security")
-                .args(args)
-                .status()
-                .unwrap()
-                .success());
-        }
-        kc
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn the_cli_item_is_added_fresh_or_not_at_all() {
-        use security_framework::os::macos::keychain::SecKeychain;
-        let _serial = SCRATCH_KEYCHAIN.lock().unwrap_or_else(|e| e.into_inner());
-        let scratch = scratch_keychain("add");
-        let kc = SecKeychain::open(&scratch.path).unwrap();
-        let first = Zeroizing::new("sentinel-add-first-t76".to_string());
-        add_cli_item_in(&kc, &first).unwrap();
-        verify_cli_item_in(&kc, &first).unwrap();
-        let second = Zeroizing::new("sentinel-add-second-t76".to_string());
-        match add_cli_item_in(&kc, &second) {
-            Err(EnrollError::Keychain { op: "add", detail }) => {
-                assert!(detail.contains("-25299"), "{detail}")
-            }
-            other => panic!("a duplicate add must refuse, got {other:?}"),
-        }
-        verify_cli_item_in(&kc, &first).unwrap();
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn a_cli_item_that_does_not_read_back_is_refused() {
-        use security_framework::os::macos::keychain::SecKeychain;
-        let _serial = SCRATCH_KEYCHAIN.lock().unwrap_or_else(|e| e.into_inner());
-        let scratch = scratch_keychain("verify");
-        let kc = SecKeychain::open(&scratch.path).unwrap();
-        let added = Zeroizing::new("sentinel-verify-added-t76".to_string());
-        let other = Zeroizing::new("sentinel-verify-other-t76".to_string());
-        assert!(matches!(
-            verify_cli_item_in(&kc, &added),
-            Err(EnrollError::Keychain { op: "verify", .. })
-        ));
-        add_cli_item_in(&kc, &added).unwrap();
-        match verify_cli_item_in(&kc, &other) {
-            Err(EnrollError::Keychain {
-                op: "verify",
-                detail,
-            }) => {
-                assert!(!detail.contains("sentinel"), "{detail}")
-            }
-            got => panic!("a mismatched read-back must refuse, got {got:?}"),
-        }
-        verify_cli_item_in(&kc, &added).unwrap();
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn a_seal_replaces_an_existing_cli_item() {
-        use security_framework::os::macos::keychain::SecKeychain;
-        let _serial = SCRATCH_KEYCHAIN.lock().unwrap_or_else(|e| e.into_inner());
-        let scratch = scratch_keychain("seal");
-        let bystander = scratch_keychain("bystander");
-        let kc = SecKeychain::open(&scratch.path).unwrap();
-        let other = SecKeychain::open(&bystander.path).unwrap();
-        let item = maknae_vault::CLI_KEYCHAIN_ITEM;
-        for k in [&kc, &other] {
-            k.add_generic_password(item.service, item.account, b"sentinel-seal-old-t76")
-                .unwrap();
-        }
-        let new = Zeroizing::new("sentinel-seal-new-t76".to_string());
-        seal_cli_secret_in(&kc, &new).unwrap();
-        assert_eq!(
-            maknae_vault::read_cli_secret_from(&kc).unwrap().as_str(),
-            "sentinel-seal-new-t76"
-        );
-        assert_eq!(
-            maknae_vault::read_cli_secret_from(&other).unwrap().as_str(),
-            "sentinel-seal-old-t76"
-        );
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn a_seal_the_cli_would_read_differently_is_refused() {
-        use security_framework::os::macos::keychain::SecKeychain;
-        let _serial = SCRATCH_KEYCHAIN.lock().unwrap_or_else(|e| e.into_inner());
-        let scratch = scratch_keychain("trim");
-        let kc = SecKeychain::open(&scratch.path).unwrap();
-        let padded = Zeroizing::new("sentinel-seal-padded-t76\n".to_string());
-        match seal_cli_secret_in(&kc, &padded) {
-            Err(EnrollError::Keychain {
-                op: "verify",
-                detail,
-            }) => assert!(!detail.contains("sentinel"), "{detail}"),
-            got => panic!("a seal the CLI reads back differently must refuse, got {got:?}"),
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn only_an_absent_cli_item_clears_quietly() {
-        use security_framework::base::Error;
-        assert!(cli_item_cleared(Ok(())).is_ok());
-        assert!(cli_item_cleared(Err(Error::from_code(-25300))).is_ok());
-        assert!(matches!(
-            cli_item_cleared(Err(Error::from_code(-25308))),
-            Err(EnrollError::Keychain { op: "delete", .. })
-        ));
-        assert!(matches!(
-            cli_item_cleared(Err(Error::from_code(-25293))),
-            Err(EnrollError::Keychain { op: "delete", .. })
-        ));
-    }
 
     #[test]
     #[cfg(not(target_os = "linux"))]
@@ -660,10 +188,6 @@ mod tests {
             egid: nix::unistd::getegid().as_raw(),
             verbose: false,
         };
-        // On the CI/dev host running this test unprivileged, our own identity
-        // trivially matches itself; the "still holds root's groups" branch
-        // only triggers for euid != 0 processes carrying gid 0 supplementary
-        // membership, which a normal test-runner uid does not.
         let result = assert_operator_context(&id);
         assert!(result.is_ok() || matches!(result, Err(EnrollError::HelperStillPrivileged)));
     }

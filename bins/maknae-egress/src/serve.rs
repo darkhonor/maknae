@@ -10,7 +10,10 @@
 //! long-lived socket.
 
 use maknae_config::EgressBounds;
+use maknae_deputy::call::FulfilError;
 use maknae_deputy::handle::{decide, Refusal};
+use maknae_deputy::unseal::OpenFailure;
+use maknae_proto::EgressFrameReply;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 
@@ -24,19 +27,9 @@ pub const MAX_REQUEST_FRAME_BYTES: usize = maknae_proto::EGRESS_REQUEST_FRAME_MA
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ServeError {
-    /// The frame was admitted and the provider call failed. Distinct from
-    /// `Refused` HERE, inside the deputy: it records that the deputy was
-    /// WILLING and something downstream did not work.
-    ///
-    /// *(Scoped 2026-09-22, #344: this ended "— the kernel needs to tell those
-    /// apart", which reads as a property of the wire and is not one. Both
-    /// variants leave `serve_one` through `?` before it writes a reply, so
-    /// neither reaches the kernel as a name: `main.rs` renders the diagnostic
-    /// to the deputy's stderr and closes the connection, and the kernel
-    /// records a failed exchange. The distinction is real for the operator
-    /// reading that stderr and for this file's own reader; carrying it on the
-    /// wire would be a protocol change, which is the maintainer's.)*
+    /// The provider call failed after admission; the connection closes with no reply.
     Fulfil(String),
+    OpenFailed(OpenFailure),
     /// The connected peer is not the kernel, or could not be identified at
     /// all. One variant, because the deputy treats them identically: a peer we
     /// cannot police is refused exactly like a peer we can and shouldn't. The
@@ -45,6 +38,20 @@ pub enum ServeError {
     OversizeFrame(usize),
     Io(String),
     Refused(Refusal),
+}
+
+/// The one `FulfilError` mapping, shared by `main` and the tests.
+pub fn serve_error(e: FulfilError) -> ServeError {
+    if let FulfilError::Provider {
+        journal: Some(j), ..
+    } = &e
+    {
+        eprintln!("{}", j.as_str());
+    }
+    match e {
+        FulfilError::Open(f) => ServeError::OpenFailed(f),
+        other => ServeError::Fulfil(other.to_string()),
+    }
 }
 
 /// One mapping for every I/O failure on this path. A helper rather than four
@@ -89,9 +96,7 @@ pub fn serve_one<F>(
     fulfil: F,
 ) -> Result<(), ServeError>
 where
-    F: FnOnce(
-        &maknae_deputy::handle::Admitted<'_>,
-    ) -> Result<maknae_proto::EgressFrameReply, ServeError>,
+    F: FnOnce(&maknae_deputy::handle::Admitted<'_>) -> Result<EgressFrameReply, ServeError>,
 {
     // BEFORE the first read. A peer we have not authenticated does not get to
     // hand us bytes to parse.
@@ -102,16 +107,32 @@ where
     let body = read_body_zeroizing(&mut stream)?;
 
     let req = maknae_proto::decode_egress_frame_request(&body).map_err(io)?;
-    let admitted = decide(&req, bounds).map_err(ServeError::Refused)?;
-    let reply = fulfil(&admitted)?;
+    let admitted = match decide(&req, bounds) {
+        Ok(a) => a,
+        Err(r) => return refuse_before_send(&mut stream, ServeError::Refused(r)),
+    };
+    match fulfil(&admitted) {
+        Ok(reply) => write_reply(&mut stream, &reply),
+        Err(e @ ServeError::OpenFailed(_)) => refuse_before_send(&mut stream, e),
+        Err(e) => Err(e),
+    }
+}
 
+fn refuse_before_send(stream: &mut UnixStream, why: ServeError) -> Result<(), ServeError> {
+    if let Err(w) = write_reply(stream, &EgressFrameReply::RefusedBeforeSend) {
+        eprintln!("maknae-egress: the refused-before-send reply was not delivered: {w:?}");
+    }
+    Err(why)
+}
+
+fn write_reply(stream: &mut UnixStream, reply: &EgressFrameReply) -> Result<(), ServeError> {
     // Into ONE fixed preallocation that never grows (#241, codex round 2 item
     // B): a reply carries whatever kernel-served content the model quoted
     // back, and the growing buffer this replaces freed a partly-written copy
     // of it on every realloc. A reply past the headroom is a codec error
     // here — before the length prefix, so the kernel reads nothing.
     let out = maknae_proto::encode_egress_frame_reply(
-        &reply,
+        reply,
         maknae_proto::EGRESS_REPLY_FRAME_ENCODE_BYTES,
     )
     .map_err(io)?;
@@ -125,40 +146,37 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use maknae_deputy::call::{fulfil, CallBounds};
+    use maknae_deputy::unseal::{KeyOpener, OpenRequest};
     use maknae_proto::{ContentBlock, EgressFrameRequest, SecretText};
     use std::os::unix::net::UnixListener;
 
-    /// A fulfiller that answers without a provider, so these tests exercise
-    /// the TRANSPORT alone. The provider path has its own tests in `call.rs`
-    /// and `maknae-llm`'s hermetic stub suite.
-    fn canned(
-        _a: &maknae_deputy::handle::Admitted<'_>,
-    ) -> Result<maknae_proto::EgressFrameReply, ServeError> {
-        Ok(maknae_proto::EgressFrameReply {
-            reply: maknae_proto::PromptReply {
-                blocks: vec![],
-                tool_calls: vec![],
-                usage: None,
-            },
-        })
+    const ALICE: &str = "maknae/users/alice/openai/personal";
+    const DEAD_PROVIDER: &str = "http://127.0.0.1:1/v1/chat/completions";
+
+    fn canned(_a: &maknae_deputy::handle::Admitted<'_>) -> Result<EgressFrameReply, ServeError> {
+        Ok(EgressFrameReply::Reply(maknae_proto::PromptReply {
+            blocks: vec![],
+            tool_calls: vec![],
+            usage: None,
+        }))
     }
 
     fn bounds() -> EgressBounds {
         EgressBounds {
             kv_mount: "maknae-kv".into(),
-            key_vault_path_prefix: "maknae/providers".into(),
+            user_prefix: "maknae/users".into(),
             vault_addr: "https://vault.example:8200".into(),
-            approle_mount: None,
         }
     }
 
-    fn frame(key: &str) -> Vec<u8> {
-        let r = EgressFrameRequest {
+    fn request(key: &str) -> EgressFrameRequest {
+        EgressFrameRequest {
             destination: "provider:openai".into(),
             endpoint: "https://api.example.test/v1".into(),
             model: "m".into(),
             key_vault_path: key.into(),
-            key_field: "api-key".into(),
+            key_field: "api_key".into(),
             reasoning_effort: None,
             conversation: "conv1".into(),
             turns: vec![maknae_proto::Turn::User {
@@ -168,13 +186,77 @@ mod tests {
             }],
             output_tokens: None,
             output_tokens_field: None,
-        };
+            sealed_key: maknae_proto::SealedKey::new(vec![7u8; maknae_proto::SEALED_KEY_MIN_BYTES])
+                .unwrap(),
+        }
+    }
+
+    fn encoded(r: &EgressFrameRequest) -> Vec<u8> {
         maknae_proto::encode_egress_frame_request(
-            &r,
+            r,
             maknae_proto::EGRESS_REQUEST_FRAME_ENCODE_BYTES,
         )
         .unwrap()
         .to_vec()
+    }
+
+    fn frame(key: &str) -> Vec<u8> {
+        encoded(&request(key))
+    }
+
+    fn prefixed(body: &[u8]) -> Vec<u8> {
+        let mut out = (body.len() as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(body);
+        out
+    }
+
+    fn fips() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(maknae_vault::install_default_crypto_provider);
+    }
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    struct Opens(Result<&'static str, OpenFailure>);
+    impl KeyOpener for Opens {
+        async fn open(
+            &self,
+            _s: &[u8],
+            _r: &OpenRequest<'_>,
+        ) -> Result<zeroize::Zeroizing<String>, OpenFailure> {
+            self.0.map(|k| zeroize::Zeroizing::new(k.to_string()))
+        }
+    }
+
+    fn served_with<F>(
+        bytes: Vec<u8>,
+        fulfil: F,
+    ) -> (Result<(), ServeError>, Option<EgressFrameReply>)
+    where
+        F: FnOnce(&maknae_deputy::handle::Admitted<'_>) -> Result<EgressFrameReply, ServeError>,
+    {
+        let (a, b) = UnixStream::pair().unwrap();
+        let me = nix::unistd::getuid().as_raw();
+        let h = std::thread::spawn(move || {
+            let mut c = a;
+            c.write_all(&bytes).unwrap();
+            let mut back = Vec::new();
+            c.read_to_end(&mut back).unwrap();
+            back
+        });
+        let out = serve_one(b, me, &bounds(), fulfil);
+        let back = h.join().unwrap();
+        let reply = (!back.is_empty()).then(|| {
+            let n = u32::from_be_bytes(back[..4].try_into().unwrap()) as usize;
+            assert_eq!(back.len(), 4 + n, "one reply frame and nothing after it");
+            maknae_proto::decode_egress_frame_reply(&back[4..]).unwrap()
+        });
+        (out, reply)
     }
 
     /// Serve one connection from a peer that writes `bytes`, optionally
@@ -244,7 +326,7 @@ mod tests {
     fn a_peer_that_is_not_the_kernel_is_refused_before_its_bytes_are_read() {
         let (a, b) = UnixStream::pair().unwrap();
         let me = nix::unistd::getuid().as_raw();
-        let f = frame("maknae/providers/openai");
+        let f = frame(ALICE);
         let expected_len = f.len() as u32;
         // `a` is kept alive for the whole test. An earlier version moved it
         // into a thread and joined before asserting, which made the assertion
@@ -276,7 +358,7 @@ mod tests {
         let me = nix::unistd::getuid().as_raw();
         let h = std::thread::spawn(move || {
             let mut c = a;
-            let f = frame("maknae/providers/openai");
+            let f = frame(ALICE);
             c.write_all(&(f.len() as u32).to_be_bytes()).unwrap();
             c.write_all(&f).unwrap();
             let mut len = [0u8; 4];
@@ -287,18 +369,13 @@ mod tests {
         });
         serve_one(b, me, &bounds(), canned).unwrap();
         let reply = h.join().unwrap();
-        assert!(reply.reply.blocks.is_empty() && reply.reply.tool_calls.is_empty());
-    }
-
-    #[test]
-    fn a_key_path_outside_bounds_is_refused() {
-        let me = nix::unistd::getuid().as_raw();
-        let f = frame("maknae/providers-evil/key");
-        let mut bytes = (f.len() as u32).to_be_bytes().to_vec();
-        bytes.extend_from_slice(&f);
         assert_eq!(
-            served_by_a_peer_that_stays_connected(bytes, false, me),
-            Err(ServeError::Refused(Refusal::KeyPathOutsideBounds))
+            reply,
+            maknae_proto::EgressFrameReply::Reply(maknae_proto::PromptReply {
+                blocks: vec![],
+                tool_calls: vec![],
+                usage: None,
+            })
         );
     }
 
@@ -351,7 +428,7 @@ mod tests {
             drop(UnixStream::connect(&p2).unwrap());
             // 2: a real request -> answered
             let mut c = UnixStream::connect(&p2).unwrap();
-            let f = frame("maknae/providers/openai");
+            let f = frame(ALICE);
             c.write_all(&(f.len() as u32).to_be_bytes()).unwrap();
             c.write_all(&f).unwrap();
             let mut len = [0u8; 4];
@@ -379,7 +456,7 @@ mod tests {
     #[test]
     fn the_receive_buffer_is_zeroizing_from_allocation() {
         let (a, b) = UnixStream::pair().unwrap();
-        let f = frame("maknae/providers/openai");
+        let f = frame(ALICE);
         let mut writer = a;
         writer.write_all(&(f.len() as u32).to_be_bytes()).unwrap();
         writer.write_all(&f).unwrap();
@@ -429,80 +506,96 @@ mod tests {
         );
     }
 
-    /// TWO SERVED CONNECTIONS SHARING A DESTINATION read the credential ONCE.
-    ///
-    /// Reviewed finding (#296): the cache was constructed inside the
-    /// per-connection closure, so "read on first use, cached per destination"
-    /// lasted exactly one request. `keys.rs`'s unit test passed because IT held
-    /// a cache across calls — the deputy did not. This drives the real serving
-    /// path twice and counts reads, which is the assertion that was missing.
     #[test]
-    fn two_served_connections_sharing_a_destination_read_the_key_once() {
-        use std::sync::{Arc, Mutex};
+    fn a_decide_refusal_is_answered_refused_before_send() {
+        let (out, reply) = served_with(prefixed(&frame("maknae/users-evil/alice/key")), canned);
+        assert_eq!(out, Err(ServeError::Refused(Refusal::KeyPathOutsideBounds)));
+        assert_eq!(reply, Some(EgressFrameReply::RefusedBeforeSend));
+    }
 
-        struct Counting {
-            reads: Arc<Mutex<usize>>,
+    #[test]
+    fn an_opener_failure_is_answered_refused_before_send() {
+        let rt = runtime();
+        let (out, reply) = served_with(prefixed(&frame(ALICE)), |admitted| {
+            rt.block_on(fulfil(
+                admitted,
+                &Opens(Err(OpenFailure::Seal)),
+                CallBounds::default(),
+            ))
+            .map_err(serve_error)
+        });
+        assert_eq!(out, Err(ServeError::OpenFailed(OpenFailure::Seal)));
+        assert_eq!(reply, Some(EgressFrameReply::RefusedBeforeSend));
+    }
+
+    #[test]
+    fn a_provider_failure_closes_the_connection_without_a_reply() {
+        fips();
+        let rt = runtime();
+        let mut r = request(ALICE);
+        r.endpoint = DEAD_PROVIDER.into();
+        let (out, reply) = served_with(prefixed(&encoded(&r)), |admitted| {
+            rt.block_on(fulfil(
+                admitted,
+                &Opens(Ok("sk-test-not-real")),
+                CallBounds::default(),
+            ))
+            .map_err(serve_error)
+        });
+        assert!(matches!(out, Err(ServeError::Fulfil(_))), "{out:?}");
+        assert_eq!(reply, None);
+    }
+
+    #[test]
+    fn a_second_connection_opens_its_own_sealed_key() {
+        struct Recording {
+            sealed: std::sync::Mutex<Vec<Vec<u8>>>,
         }
-        impl maknae_deputy::keys::KeySource for Counting {
-            async fn read(
+        impl KeyOpener for Recording {
+            async fn open(
                 &self,
-                _m: &str,
-                _p: &str,
-                _f: &str,
-            ) -> Result<zeroize::Zeroizing<String>, String> {
-                *self.reads.lock().unwrap() += 1;
-                Ok(zeroize::Zeroizing::new("k".into()))
+                sealed: &[u8],
+                _r: &OpenRequest<'_>,
+            ) -> Result<zeroize::Zeroizing<String>, OpenFailure> {
+                self.sealed.lock().unwrap().push(sealed.to_vec());
+                Ok(zeroize::Zeroizing::new("sk-test-not-real".into()))
             }
         }
-
-        let d = tempfile::tempdir().unwrap();
-        let path = d.path().join("egress.sock");
-        let l = UnixListener::bind(&path).unwrap();
-        let me = nix::unistd::getuid().as_raw();
-        let p2 = path.clone();
-        let h = std::thread::spawn(move || {
-            for _ in 0..2 {
-                let mut c = UnixStream::connect(&p2).unwrap();
-                let f = frame("maknae/providers/openai");
-                c.write_all(&(f.len() as u32).to_be_bytes()).unwrap();
-                c.write_all(&f).unwrap();
-                let mut len = [0u8; 4];
-                let _ = c.read_exact(&mut len);
-            }
-        });
-
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        // ONE cache, outside the loop — exactly as main.rs holds it.
-        let reads = Arc::new(Mutex::new(0));
-        let mut keys = maknae_deputy::keys::KeyCache::new(Counting {
-            reads: Arc::clone(&reads),
-        });
-        let b = bounds();
-        let mut served = 0;
-        for conn in l.incoming() {
-            let _ = serve_one(conn.unwrap(), me, &b, |admitted| {
-                rt.block_on(maknae_deputy::call::fulfil(
-                    admitted,
-                    &mut keys,
-                    maknae_deputy::call::CallBounds::default(),
-                    &b.kv_mount,
-                ))
-                .map_err(|e| ServeError::Fulfil(e.to_string()))
+        fips();
+        let rt = runtime();
+        let opener = Recording {
+            sealed: std::sync::Mutex::new(vec![]),
+        };
+        let mut first = request(ALICE);
+        first.endpoint = DEAD_PROVIDER.into();
+        let mut second = first.clone();
+        second.sealed_key =
+            maknae_proto::SealedKey::new(vec![9u8; maknae_proto::SEALED_KEY_MIN_BYTES]).unwrap();
+        for r in [&first, &second] {
+            let (out, reply) = served_with(prefixed(&encoded(r)), |admitted| {
+                rt.block_on(fulfil(admitted, &opener, CallBounds::default()))
+                    .map_err(serve_error)
             });
-            served += 1;
-            if served == 2 {
-                break;
-            }
+            assert!(matches!(out, Err(ServeError::Fulfil(_))), "{out:?}");
+            assert_eq!(reply, None);
         }
-        h.join().unwrap();
         assert_eq!(
-            *reads.lock().unwrap(),
-            1,
-            "two connections to the SAME destination must read the credential once; \
-             a cache the serving path rebuilds per request is not a cache"
+            *opener.sealed.lock().unwrap(),
+            vec![
+                vec![7u8; maknae_proto::SEALED_KEY_MIN_BYTES],
+                vec![9u8; maknae_proto::SEALED_KEY_MIN_BYTES]
+            ],
+            "each connection opens the sealed key its own frame carries"
+        );
+    }
+
+    #[test]
+    fn a_refusal_whose_reply_cannot_be_written_still_returns_the_refusal() {
+        let (a, mut b) = UnixStream::pair().unwrap();
+        drop(a);
+        assert_eq!(
+            refuse_before_send(&mut b, ServeError::Refused(Refusal::KeyPathOutsideBounds)),
+            Err(ServeError::Refused(Refusal::KeyPathOutsideBounds))
         );
     }
 }

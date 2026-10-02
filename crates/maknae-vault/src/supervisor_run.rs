@@ -19,6 +19,7 @@
 //! before expiry).
 use crate::client::{PlaneClient, SupervisorCtx};
 use crate::error::VaultError;
+use crate::plane::PlaneTokenSource;
 use crate::supervisor::{
     leaf_rotate_deadline, next_wake, retry_action, retry_deadline, rotate_now,
 };
@@ -64,6 +65,13 @@ impl PlaneClient {
     /// `current_identity()` returns `None` (fail closed) whether or not the caller
     /// observes the handle.
     pub fn spawn_supervisor(&self) -> tokio::task::JoinHandle<VaultError> {
+        if self.token_source() == PlaneTokenSource::StoredUserLogin {
+            return tokio::spawn(async {
+                VaultError::Renew(
+                    "a stored user login is never renewed by the credential supervisor".into(),
+                )
+            });
+        }
         let ctx = self.supervisor_ctx();
         tokio::spawn(async move { supervisor_loop(ctx).await })
     }

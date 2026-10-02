@@ -298,13 +298,13 @@ async fn drain_handlers_bounded(handlers: &mut JoinSet<()>, timeout: Duration) -
     }
 }
 
-/// `LOGIN_NAME_MAX` on Linux, and the bound on `subject.user` (#275).
+/// The bound on `subject.user` (#275): `maknae_vault::MAX_USERNAME_BYTES`, sized to the measured syslog worst case.
 ///
 /// An over-long name is refused to `None`, never truncated: a truncated
 /// identity in an audit trail is a WRONG identity, which is worse than an
 /// absent one. A new field must also not be unbounded — that is the class of
 /// defect the mirror's budget test exists to catch.
-pub const MAX_SUBJECT_USER_BYTES: usize = 32;
+pub const MAX_SUBJECT_USER_BYTES: usize = maknae_vault::MAX_USERNAME_BYTES;
 
 /// The decided subject identity stamped onto a record (#275). Audit-only:
 /// nothing here is an authorization input.
@@ -409,7 +409,7 @@ pub async fn handle<S, E, P>(
     config_view: Arc<ConfigView>,
     authz_backend_name: Arc<String>,
     classification_policy_name: Arc<String>,
-    provider: Arc<Option<maknae_config::ProviderConfig>>,
+    providers: Arc<Option<crate::provider_choice::ProviderAuthority>>,
     egress: Arc<dyn crate::egress::Egress>,
     authz_decide_timeout: Duration,
     lane: maknae_security::Lane,
@@ -434,7 +434,7 @@ pub async fn handle<S, E, P>(
         config_view,
         authz_backend_name,
         classification_policy_name,
-        provider,
+        providers,
         egress,
         authz_decide_timeout,
         lane,
@@ -474,6 +474,8 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     // group check. `None` on every fail-closed accept-loop arm, where not
     // spawning NSS work is the point -- the record then renders
     // `subject=unknown`, which is honest.
+    // It also chooses the key path's `<username>` segment (ADR-0028 §3), so it
+    // must stay kernel-resolved from the peer uid, never taken from the request.
     peer_user: Option<String>,
     emit: Arc<E>,
     session_id: u64,
@@ -489,10 +491,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     // Captured ONCE at boot from the booted config (ADR-0022): the system
     // `core.handling.policy` selected, by name.
     classification_policy_name: Arc<String>,
-    // #172: the provider registered at boot (#243), by name, or none. The
-    // PEP stamps `provider:<name>` as the egress destination; the client
-    // never names it.
-    provider: Arc<Option<maknae_config::ProviderConfig>>,
+    providers: Arc<Option<crate::provider_choice::ProviderAuthority>>,
     // #172: the egress backend behind the seam. `Unavailable` in Cooky.
     egress: Arc<dyn crate::egress::Egress>,
     authz_decide_timeout: Duration,
@@ -853,18 +852,65 @@ pub async fn handle_with_attempt_caps<S, E, P>(
         return;
     }
 
+    let no_providers = maknae_config::ProviderSet::empty();
+    let admitted = match &request.verb {
+        Verb::SessionPrompt { choice, .. } => {
+            let (set, user_prefix) = match &*providers {
+                Some(a) => (&a.set, a.user_prefix.as_str()),
+                None => (&no_providers, ""),
+            };
+            match crate::provider_choice::admit_choice(
+                set,
+                choice.as_ref(),
+                peer_user.as_deref(),
+                user_prefix,
+            ) {
+                Ok(a) => Some(a),
+                Err(refusal) => {
+                    let appended = emit_request_outcome(
+                        &emit,
+                        &host,
+                        &socket,
+                        peer_uid,
+                        &peer_uri,
+                        peer_user.as_deref(),
+                        None,
+                        session_id,
+                        seq.next(),
+                        verb_to_action(&request.verb),
+                        None,
+                        None,
+                        "deny",
+                        refusal.reason(),
+                        "unauthorized",
+                        &au3_1,
+                    )
+                    .await;
+                    if may_respond(appended) {
+                        write_error_bounded(
+                            &mut stream,
+                            &cfg,
+                            class,
+                            ProtoErrCode::Unauthorized,
+                            "not authorized",
+                        )
+                        .await;
+                    }
+                    close_bounded(&mut stream).await;
+                    return;
+                }
+            }
+        }
+        _ => None,
+    };
+
     // Decide on the BLOCKING pool (the per-request policy re-read is sync file
     // I/O; a stalled /etc/maknae must not pin async workers — the same offload
     // discipline as accept_loop's group lookup), bounded, composed per the
     // parent contract: combine([guarded_decide]) + finalize. Timeout or join
     // failure converts AT THE CALL SITE to a Deny with its own reason
     // (finalize(Indeterminate) would hardcode a different string).
-    let sec_req = build_authz_request(
-        &request.verb,
-        peer_uid,
-        lane,
-        (*provider).as_ref().map(|p| p.name.as_str()),
-    );
+    let sec_req = build_authz_request(&request.verb, peer_uid, lane, admitted.as_ref());
     let authz_breaker = authz_decide_breaker();
     let authz_admission = { authz_breaker.lock().await.begin_attempt_at(Instant::now()) };
     // #275: the role rides out WITH the verdict so the audit record attests the
@@ -1337,15 +1383,12 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 conversation,
                 turns,
                 output_tokens,
+                ..
             } = &request.verb
             else {
                 unreachable!("dispatch keyed on the verb")
             };
-            let Some(pcfg) = provider.as_ref().as_ref() else {
-                // Production-unreachable: the PDP denies this case first (no
-                // destination attribute → Deny), so a Permit never arrives here.
-                // Kept as a fail-closed second refusal that costs nothing and
-                // keeps a "?" out of the trail. Gated like every served frame.
+            let Some(chosen) = admitted.as_ref() else {
                 let appended = emit_request_outcome(
                     &emit,
                     &host,
@@ -1360,7 +1403,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                     None,
                     None,
                     "deny",
-                    "no provider registered for session.prompt",
+                    "session.prompt reached dispatch without an admitted provider choice",
                     "unauthorized",
                     &au3_1,
                 )
@@ -1378,7 +1421,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 close_bounded(&mut stream).await;
                 return;
             };
-            let name = pcfg.name.as_str();
+            let name = chosen.provider.name.as_str();
             let destination = format!("provider:{name}");
             let m = crate::egress::content_measure(turns);
             let egress_meta = |status| EgressAudit {
@@ -1386,6 +1429,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 content_length: m.length,
                 content_digest: m.digest32.clone(),
                 conversation: conversation.clone(),
+                model: Some(chosen.model.to_string()),
                 reply_length: None,
                 output_tokens: *output_tokens,
                 prompt_tokens: None,
@@ -1514,8 +1558,8 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 BreakerAdmission::Admit => {
                     let egress = Arc::clone(&egress);
                     let intent = Arc::clone(&intent);
-                    let req = crate::egress::EgressRequest::for_provider(
-                        pcfg,
+                    let req = crate::egress::EgressRequest::for_choice(
+                        chosen,
                         destination.clone(),
                         conversation.clone(),
                         turns.clone(),
@@ -1601,20 +1645,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                         ),
                     }
                 }
-                // The backend's own deadline ran out once the kernel had begun
-                // writing the request: delivery unknown, the same class as the
-                // outer expiry below.
-                Ok(Ok(Err(crate::egress::EgressFailure::DeadlineExpired))) => {
-                    (crate::egress::SendOutcome::DeadlineExpired, None)
-                }
-                // The exchange failed once the kernel had begun writing the
-                // request: the deputy hung up or answered with something
-                // unusable. Delivery unknown — the provider may have the prompt.
-                Ok(Ok(Err(crate::egress::EgressFailure::AfterSend(_)))) => {
-                    (crate::egress::SendOutcome::OutcomeUnknown, None)
-                }
-                // The backend reported failure BEFORE the request left: nothing left.
-                Ok(Ok(Err(_))) => (crate::egress::SendOutcome::Failed, None),
+                Ok(Ok(Err(f))) => (crate::egress::outcome_for_failure(&f), None),
                 Ok(Err(join)) => {
                     // The blocking worker was LOST (it panicked). Whether bytes
                     // left before the panic is unknowable to the kernel.
@@ -2177,8 +2208,7 @@ pub async fn accept_loop<A, E, P>(
     config_view: Arc<ConfigView>,
     authz_backend_name: Arc<String>,
     classification_policy_name: Arc<String>,
-    // #172: captured at boot like the two names above.
-    provider: Arc<Option<maknae_config::ProviderConfig>>,
+    providers: Arc<Option<crate::provider_choice::ProviderAuthority>>,
     egress: Arc<dyn crate::egress::Egress>,
 ) -> ServeOutcome
 where
@@ -2324,7 +2354,7 @@ where
                                 let authz_backend_name = Arc::clone(&authz_backend_name);
                                 let classification_policy_name =
                                     Arc::clone(&classification_policy_name);
-                                let provider = Arc::clone(&provider);
+                                let providers = Arc::clone(&providers);
                                 let egress = Arc::clone(&egress);
                                 handlers.spawn(async move {
                                     let _permit = permit; // held for the connection's life
@@ -2430,7 +2460,7 @@ where
                                                 config_view,
                                                 authz_backend_name,
                                                 classification_policy_name,
-                                                provider,
+                                                providers,
                                                 egress,
                                                 AUTHZ_DECIDE_TIMEOUT,
                                                 // THIS accept loop owns the on-host
@@ -3034,47 +3064,29 @@ async fn boot_after_sink(
             .await);
         }
     };
-    // #240a D5-E: a registered provider whose Vault path sits outside the
-    // deputy's declared grant must not boot.
-    //
-    // PRE-MINT, deliberately. Every post-`mint()` startup failure has to route
-    // through the unconditional revoke or the privileged kernel-plane token
-    // leaks until lease expiry — the invariant stated at the mint. This check
-    // needs no Vault at all (a config read and a string comparison), so the
-    // right answer is not to revoke afterwards but to never acquire the
-    // credential when the deployment is already unstartable. A pre-mint
-    // failure has nothing minted to revoke.
-    // The read's OWN error is carried into the refusal, never collapsed to
-    // "absent or unreadable" (#240b self-review): a bounds file that is
-    // present, root-owned and readable but refused by the parser — a missing
-    // `vault` block, an unknown key — is `Refused`, naming the parser's
-    // reason; only an I/O failure is `Undeclared`. Otherwise the operator is
-    // sent to check permissions on a file whose permissions are fine.
-    let egress_bounds = match boot.provider() {
-        None => None,
-        Some(_) => Some(
+    let egress_bounds = if boot.providers().is_empty() {
+        None
+    } else {
+        Some(
             maknae_config::load_egress_bounds(&config_dir.join(maknae_config::EGRESS_BOUNDS_FILE))
                 .map_err(|e| {
-                    // Which refusal this is — could not be read, or read and
-                    // refused — is the pure classifier's decision, tested over
-                    // the loader's real error values (boot_gate.rs).
-                    let refusal = crate::boot_gate::classify_bounds_load_error(e);
-                    // main() prints "maknaed: refusing to start: {e}" — no prefix here
-                    RunError::Other(refusal.to_string())
+                    RunError::Other(crate::boot_gate::classify_bounds_load_error(e).to_string())
                 })?,
-        ),
+        )
     };
     if let Err(e) =
-        crate::boot_gate::egress_bounds_boot_gate(boot.provider(), egress_bounds.as_ref())
+        crate::boot_gate::egress_bounds_boot_gate(boot.providers(), egress_bounds.as_ref())
     {
         return Err(RunError::Other(e.to_string()));
     }
-    // #240: THE egress backend, chosen here — PRE-MINT, like the bounds gate,
-    // because a missing `_maknae-egress` account has nothing minted to revoke.
-    // No provider → `Unavailable`; a provider → the deputy's socket under its
-    // uid, resolved once on this blocking path and never per request.
-    let egress = crate::egress::production_egress(boot.provider(), &egress_cfg)
+    let egress = crate::egress::production_egress(boot.providers(), &egress_cfg)
         .map_err(|e| RunError::Other(e.to_string()))?;
+    crate::boot_gate::root_vault_boot_gate(boot.section(maknae_vault::VAULT_SECTION))
+        .map_err(|e| RunError::Other(e.to_string()))?;
+    for shadowed in boot.shadowed_sections(maknae_vault::VAULT_SECTION) {
+        crate::boot_gate::root_vault_boot_gate(Some(shadowed))
+            .map_err(|e| RunError::Other(e.to_string()))?;
+    }
 
     let (authorizer, principal) = match authz_boot_gate(config_dir, principal_opt) {
         Ok(pair) => pair,
@@ -3254,18 +3266,10 @@ async fn boot_after_sink(
     // from `core.handling.policy` (ADR-0022) -- captured here for the same
     // reason as the backend name: fixed for the life of the process.
     let classification_policy_name = Arc::new(boot.classification_policy_name().to_string());
-    // #172: the registered provider's name (the egress destination the PEP
-    // stamps) and the egress backend, both fixed for the life of the process.
-    // The backend was chosen PRE-MINT above (#240).
-    // #240a D1: the kernel carries the RESOLVED record, not just the name —
-    // egress parses no registry and so cannot drift from this view of it.
-    // #240a D5-E: a registered provider whose Vault path sits outside the
-    // deputy's declared grant must not boot. The deputy re-checks the same
-    // thing per request, but this is the more valuable half — it catches the
-    // operator's typo before anything runs, instead of turning it into a
-    // confusing refusal on a live request. The gate itself runs PRE-MINT; see
-    // the call site above the authz gate.
-    let provider = Arc::new(boot.provider().cloned());
+    let providers = Arc::new(crate::provider_choice::provider_authority(
+        boot.providers(),
+        egress_bounds.as_ref(),
+    ));
     let outcome = serve_after_mint(
         &client,
         &ca,
@@ -3281,7 +3285,7 @@ async fn boot_after_sink(
         config_view,
         authz_backend_name,
         classification_policy_name,
-        provider,
+        providers,
         egress,
     )
     .await;
@@ -3324,7 +3328,7 @@ async fn serve_after_mint<B>(
     // Captured at boot, same discipline as `config_view` (see run_inner).
     authz_backend_name: Arc<String>,
     classification_policy_name: Arc<String>,
-    provider: Arc<Option<maknae_config::ProviderConfig>>,
+    providers: Arc<Option<crate::provider_choice::ProviderAuthority>>,
     egress: Arc<dyn crate::egress::Egress>,
 ) -> Result<ServeOutcome, String>
 where
@@ -3367,7 +3371,7 @@ where
         config_view,
         authz_backend_name,
         classification_policy_name,
-        provider,
+        providers,
         egress,
     )
     .await;

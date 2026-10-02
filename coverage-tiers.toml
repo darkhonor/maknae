@@ -114,10 +114,6 @@ files = [
   # (secret_io.rs) is T3 below.
   "crates/maknae-vault/src/secret_source.rs",
   "crates/maknae-vault/src/keychain_policy.rs",
-  # #240b: the deputy's per-read token lifecycle — login/read/revoke composed
-  # over the EgressOps seam; a failed revoke is a failed probe and a withheld
-  # secret. The vaultrs half is egress.rs (T3).
-  "crates/maknae-vault/src/egress_session.rs",
   # #172: the FIPS-module SHA-256 wrapper behind every egress content digest.
   "crates/maknae-vault/src/digest.rs",
   "crates/maknae-vault/src/api_shape.rs",
@@ -125,6 +121,7 @@ files = [
   "crates/maknae-vault/src/wrap.rs",
   "crates/maknae-vault/src/token_record.rs",
   "crates/maknae-vault/src/password_line.rs",
+  "crates/maknae-vault/src/seal_pub_store.rs",
   "crates/maknae-seal/src/fips.rs",
   "crates/maknae-seal/src/aad.rs",
   "crates/maknae-seal/src/wire.rs",
@@ -143,14 +140,11 @@ files = [
   # #240's own declaration; its Debug redaction is what keeps prompt content
   # and the provider key path out of operator-visible error strings.
   "crates/maknae-proto/src/egress_frame.rs",
+  "crates/maknae-proto/src/sealed.rs",
   # #240a D3-A: the PURE peer-identity decision. It is a separate file from
   # peercred.rs because that one is whole-file mutation-excluded (syscall I/O),
   # which would make a T1 tier there vacuous — zero mutants, zero missed.
   "crates/maknae-vault/src/peer_identity.rs",
-  # #240a: the KV v2 path split. Guessing here reads a DIFFERENT secret than the
-  # operator wrote and the boot gate validated — a rfind/find slip turns
-  # secret/data/maknae/data/openai into mount "secret/data/maknae".
-  "crates/maknae-vault/src/kv.rs",
   # #240b: the provider request/response MAPPING, T1 by #240's own declaration.
   # Everything it parses is bytes from a third party outside the enforcement
   # boundary; a shape we do not recognise must be a refusal the loop sees, never
@@ -160,7 +154,8 @@ files = [
   # #240a: the shared bounds parser and its CONTAINMENT check. A bare
   # `starts_with` admits `providers-evil/key` under a `providers` prefix — a
   # malformed or hostile registry entry naming a Vault path outside the
-  # deputy's grant. Both maknaed (at boot) and the deputy (at use) decide on it.
+  # deputy's grant. maknaed checks the prefix's shape and builds the path; only
+  # the deputy checks containment.
   "crates/maknae-config/src/bounds.rs",
   # #240: the `egress` section — the deputy's socket and the provider deadline,
   # range-checked, fail-closed like `transport`.
@@ -171,10 +166,7 @@ files = [
   # #240b: fulfilment is gated on `Admitted`, which has no public constructor —
   # a provider call cannot be made on a frame whose bounds were never checked.
   "crates/maknae-deputy/src/call.rs",
-  # #240b: the credential is read on FIRST USE per destination and cached. "At
-  # boot" is single-provider thinking and fails with two. A failed read is not
-  # cached, so a transient Vault failure cannot poison a destination.
-  "crates/maknae-deputy/src/keys.rs",
+  "crates/maknae-deputy/src/unseal.rs",
   # #318: what ALL THREE binaries refuse to inherit from their environment, and
   # the disjoint list of what they must never stop inheriting. Moved here from
   # bins/maknae-egress/src/env.rs (#240b) when maknaed and maknae adopted the
@@ -184,9 +176,8 @@ files = [
   "crates/maknae-vault/src/env.rs",
   "crates/maknae-proto/src/frame.rs",
   "crates/maknae-config/src/transport.rs",
-  # #243: the provider registration parser. A wrong arm registers a
-  # destination the operator did not name, or lets a pasted key through.
-  "crates/maknae-config/src/provider.rs",
+  "crates/maknae-config/src/providers.rs",
+  "crates/maknae-config/src/user_providers.rs",
   "crates/maknae-config/src/audit_cfg.rs",
   # PR-J1 Task 5: the `principal` section (enrolled-operator identity `maknae
   # enroll` writes into maknae.yaml). The authorization policy resolves
@@ -223,6 +214,7 @@ files = [
   "crates/maknae-audit-append/src/session.rs",
   "crates/maknae-kernel/src/authz.rs",
   "crates/maknae-kernel/src/handler.rs",
+  "crates/maknae-kernel/src/provider_choice.rs",
   # #158/#365: namespace/report evidence, subject-side attempts, and durable audit admission.
   "crates/maknae-kernel/src/mutation_exchange.rs",
   "crates/maknae-kernel/src/mutation.rs",
@@ -368,24 +360,24 @@ path = "bins/maknae-egress/src/listen.rs"
 why = "socket acquisition; the two production arms (an inherited LISTEN_FDS socket, and its failure) need a real init system and cannot be unit-tested. The fallback bind path, the named-absence case and the error rendering ARE tested; the fail-closed DECISION on no socket is main.rs's"
 
 [[t3]]
-path = "bins/maknae-egress/src/keys_vault.rs"
-why = "the Vault-backed key read; no Vault stub exists in this project by design, so the network path is operator-verified. The CACHE it plugs into is pure and T1 in keys.rs — the kv/kv_io split"
+path = "bins/maknae-egress/src/opener.rs"
+why = "#153: opens the turn's sealed key with the Egress Daemon's seal key and unwraps the wrapping token through maknae-vault; the Vault leg has no stub by design. Its tests open real seals, assert the expectation it hands Vault and the refusal mapping through the Unwrapper seam, and reach a dead Vault through the real VaultApi; the decisions are T1 in maknae-deputy's unseal.rs, maknae-seal and maknae-vault's wrap.rs"
 
 [[t3]]
 path = "crates/maknae-llm/src/client.rs"
-why = "the provider HTTP call; exercised by the hermetic stub server #240 specifies (tests/stub_server.rs) and by the FIPS gate in its own test binary. The MAPPING it depends on is pure and T1 in wire.rs — the kv/kv_io, secret_source/secret_io split"
-
-[[t3]]
-path = "crates/maknae-vault/src/kv_io.rs"
-why = "the KV v2 network read; this project has no Vault stub and deliberately uses none — the network is exercised by #[ignore]d live tests against a real Vault. The PARSE it depends on is pure and T1 in kv.rs (the secret_io/secret_source split)"
+why = "the provider HTTP call; exercised by the hermetic stub server #240 specifies (tests/stub_server.rs) and by the FIPS gate in its own test binary. The MAPPING it depends on is pure and T1 in wire.rs — the secret_source/secret_io split"
 
 [[t3]]
 path = "crates/maknae-config/src/bounds_io.rs"
 why = "opens a ROOT-owned artifact through maknae-io; no unit test can create one. The parser and the containment check are pure and T1 in bounds.rs — the secret_io/secret_source split"
 
 [[t3]]
+path = "crates/maknae-config/src/user_providers_io.rs"
+why = "#153: reads ~/.maknae/providers.yaml through maknae-config's existing maknae-io read (CONFIG_ARTIFACT) and maps an absent file to no providers; the parser and the selection it feeds are pure and T1 in user_providers.rs (the bounds/bounds_io split)"
+
+[[t3]]
 path = "bins/maknae-egress/src/main.rs"
-why = "thin main: env scrub + FIPS install + arg parse + bounds load + uid resolve + credential load + Vault client + boot probe + socket acquire; every decision it makes is fail-closed exit-1, the behaviour lives in handle.rs/keys.rs (T1), serve.rs (T2) and listen.rs (T3) and maknae-vault's egress_session.rs and env.rs (T1), and its two load-bearing ORDERINGS (scrub first, probe before the listener) are pinned by a source-order test in its OWN test module — env.rs was deleted by #318 when the scrub list moved to maknae-vault, and its deputy-specific tests moved here with it. Same treatment as bins/maknaed/src/main.rs"
+why = "thin main: env scrub + FIPS install + arg parse + bounds load + uid resolve + seal-key load + Vault client + socket acquire; every decision it makes is fail-closed exit-1, the behaviour lives in maknae-deputy's handle.rs/unseal.rs/call.rs (T1), serve.rs (T2), opener.rs and listen.rs (T3) and maknae-vault's env.rs (T1), and its load-bearing ORDERINGS (scrub first, keys loaded before the listener) are pinned by a source-order test in its OWN test module. Same treatment as bins/maknaed/src/main.rs"
 
 [[t3]]
 path = "bins/maknaed/src/main.rs"
@@ -393,7 +385,7 @@ why = "thin main: env scrub + arg resolve + boot + exit mapping; behavior exerci
 
 [[t3]]
 path = "bins/maknae/src/main.rs"
-why = "thin main: env scrub + runtime build + dispatch to cli::run_cli (T3) + bounded teardown; #318's ORDERING (scrub before the multi-thread runtime, because remove_var is only sound single-threaded) is pinned by a source-order test in its own test module. Was \"scaffold stub — re-tier at body landing\"; the body is still elsewhere, so the tier is unchanged and only the description is now accurate"
+why = "thin main: env scrub + runtime build (every runtime thread blocks the hidden prompt's four signals from its start, pinned by a source-order test) + dispatch to cli::run_cli (T3) + bounded teardown; #318's ORDERING (scrub before the multi-thread runtime, because remove_var is only sound single-threaded) is pinned by a source-order test in its own test module. Was \"scaffold stub — re-tier at body landing\"; the body is still elsewhere, so the tier is unchanged and only the description is now accurate"
 
 [[t3]]
 path = "bins/maknae-spifc/src/main.rs"
@@ -461,7 +453,7 @@ why = "scaffold stub — re-tier at body landing"
 
 [[t3]]
 path = "crates/maknae-deputy/src/lib.rs"
-why = "module declarations only; the decisions are handle/keys/call (T1)"
+why = "module declarations only; the decisions are handle/unseal/call (T1)"
 
 [[t3]]
 path = "crates/maknae-vault/src/lib.rs"
@@ -496,12 +488,8 @@ path = "crates/maknae-vault/src/http.rs"
 why = "#240b: builds the hardened reqwest client every Vault client sends through (no redirects, HTTPS only, no proxy); the two construction-time refusals are unit-tested, the redirect policy is stated by construction — proving it needs a TLS server. Mutation-excluded like client.rs"
 
 [[t3]]
-path = "crates/maknae-vault/src/egress.rs"
-why = "#240b: the deputy's AppRole login, KV read and revoke — live-Vault I/O with no stub by design; the dead-address and fail-closed-construction paths are unit-tested, the SOURCE decision it consumes is T1 in secret_source.rs (the secret_io/secret_source split), mutation-excluded like client.rs"
-
-[[t3]]
 path = "crates/maknae-vault/src/secret_io.rs"
-why = "PR-J1 Task 4: reads an already-resolved DaemonSecretSource/CliSecretSource — file I/O + one systemd-creds subprocess invocation; the fail-closed precedence decisions it consumes live in secret_source.rs (T1). Unit-tested (permission-gate + no-fallthrough coverage), mutation-excluded (mutants.toml, matching the other I/O files in this crate)."
+why = "PR-J1 Task 4: reads an already-resolved DaemonSecretSource — file I/O and the System-keychain read; the fail-closed precedence decisions it consumes live in secret_source.rs (T1). Unit-tested (permission-gate + no-fallthrough coverage), mutation-excluded (mutants.toml, matching the other I/O files in this crate)."
 
 [[t3]]
 path = "crates/maknae-vault/src/keychain.rs"
@@ -522,6 +510,14 @@ why = "#153: sends the five user-credential Vault calls (login, wrapped read, lo
 [[t3]]
 path = "crates/maknae-vault/src/token_store.rs"
 why = "#153: the user token's custody I/O only — the default keychain (usually login), /usr/bin/systemd-creds over stdin/stdout, and the token files through maknae-io; what stays here is opening the keychain, spawning systemd-creds, the maknae-io publish/read/remove calls and the one-line per-custody dispatch. Every decision it applies (record and its issuing Vault address, expiry, custody choice and order, the erase-every-custody fold that skips the kept custody, continues past a failure and returns the first, maknae-io requirements, refusal mappings) is T1 in token_record.rs. The residual and keychain arms are unit-tested on their platforms; the systemd-creds arm in an operator-run ignored test on a systemd >= 256 host. Mutation-excluded like secret_io.rs"
+
+[[t3]]
+path = "crates/maknae-vault/src/seal_pub_io.rs"
+why = "#153: reads the host-wide seal.pub through maknae-io (open_anchor, then read) at each candidate location and returns the one present; the locations, the per-OS candidate list, the exactly-one choice, the maknae-io requirements (root owner, no group/other write, one link, 215 bytes) and the refusal mapping are T1 in seal_pub_store.rs. Unit-tested against a scratch layout owned by the test user; mutation-excluded like token_store.rs"
+
+[[t3]]
+path = "crates/maknae-vault/src/seal_key_io.rs"
+why = "#153: reads the Egress Daemon's seal private key from $CREDENTIALS_DIRECTORY (Linux) or from the System-keychain item the egress pointer names (macOS); the source choice, the length bound and the hex codec are T1 in secret_source.rs, and the pointer and account gate are keychain_policy.rs. The credential arm is unit-tested on every OS, the keychain arm up to the account gate on macOS; mutation-excluded like secret_io.rs"
 
 [[t3]]
 path = "crates/maknae-seal/src/lib.rs"
@@ -608,15 +604,15 @@ why = "clap arg parsing + the CLI's connect/mint/request/response I/O orchestrat
 
 [[t3]]
 path = "bins/maknae/src/agent.rs"
-why = "#241: the loop's I/O wiring — config, one plane client, stdout — T3 on the bins/maknaed precedent. It is NOT a pure shell: read_outcome, write_outcome and prompt_outcome live here, and all three are controls (a BadRequest or an UNARMED refusal must never render as a final refusal to the model; an uncertain write must never render as certainty; a BadRequest on the prompt leg is a shape fault the subject can fix and must not be reported as a refusal that may have landed). All three are pure functions, deliberately, and carry discriminating table tests plus hand-mutation evidence recorded in #241's pull request (#341). The rest of the file — run, RealPlane — needs a live daemon, Vault and certificates, so it stays report-only. Amended 2026-09-22 (#241): the earlier why said the decision code was all in maknae-agent, which stopped being true when the mappers landed here. (Corrected 2026-09-22, #344: that amendment named only read_outcome and write_outcome and called them 'the two mappers'; prompt_outcome is a third control in the same file and was unlisted, so the tier's justification did not cover it.) Amended 2026-09-28 (#372): user_budget_from_section, loop_prompt_cap, warning_line and stop_line are table-tested here, and the bounds and prompt_cap they call are T1 in maknae-agent::budget. Amended 2026-09-28 (#388): write_outcome now also maps a client-decided stale refusal to Stale (certain, not guessed), and check_for — the loop's read basis as the client's write check — is a fourth control here, table-tested; the check itself is T1 in maknae-io."
+why = "#241: the loop's I/O wiring — config, one plane client, stdout — T3 on the bins/maknaed precedent. It is NOT a pure shell: read_outcome, write_outcome and prompt_outcome live here, and all three are controls (a BadRequest or an UNARMED refusal must never render as a final refusal to the model; an uncertain write must never render as certainty; a BadRequest on the prompt leg is a shape fault the subject can fix and must not be reported as a refusal that may have landed). All three are pure functions, deliberately, and carry discriminating table tests plus hand-mutation evidence recorded in #241's pull request (#341). The rest of the file — run, RealPlane — needs a live daemon, Vault and certificates, so it stays report-only. Amended 2026-09-22 (#241): the earlier why said the decision code was all in maknae-agent, which stopped being true when the mappers landed here. (Corrected 2026-09-22, #344: that amendment named only read_outcome and write_outcome and called them 'the two mappers'; prompt_outcome is a third control in the same file and was unlisted, so the tier's justification did not cover it.) Amended 2026-09-28 (#372): user_budget_from_section, loop_prompt_cap, warning_line and stop_line are table-tested here, and the bounds and prompt_cap they call are T1 in maknae-agent::budget. Amended 2026-09-28 (#388): write_outcome now also maps a client-decided stale refusal to Stale (certain, not guessed), and check_for — the loop's read basis as the client's write check — is a fourth control here, table-tested; the check itself is T1 in maknae-io. Amended 2026-10-02 (#153): user_budget_from_section is gone (the budget is per providers.yaml entry, parsed in maknae-config); key_location, choose_entry, login_expired, key_read_failure, seal_key_from, token_copy and turn_choice (each turn: an expired login refused locally, then the wrapped read, then the seal to exactly this request, then the choice, driven by a scripted reader and opened with a test key) are tested here; the seal is T1 in maknae-seal and the path rules T1 in maknae-config and maknae-vault."
 
 [[t3]]
 path = "bins/maknae/src/tty.rs"
-why = "#153: the termios glue for maknae login's hidden prompt — tcgetattr/tcsetattr, an echo re-check and a byte read on stdin's descriptor; proven on a real pseudo-terminal with a 10 s watchdog (echo off, the typed bytes arrive, Ctrl-C and Ctrl-D end it, the saved mode is restored, a non-terminal is refused). The line discipline it drives is T1 in maknae-vault password_line.rs"
+why = "#153: the termios glue for maknae login's hidden prompt — tcgetattr/tcsetattr, an echo re-check and a byte read on stdin's descriptor; proven on a real pseudo-terminal with a 10 s watchdog (echo off, the typed bytes arrive, Ctrl-C and Ctrl-D end it, the saved mode is restored, a non-terminal is refused, and SIGINT, SIGTERM, SIGHUP and SIGQUIT are held back while echo is off and released after the restore, on the prompting thread and on every runtime thread from its start). The line discipline it drives is T1 in maknae-vault password_line.rs"
 
 [[t3]]
 path = "bins/maknae/src/login.rs"
-why = "#153: maknae login/logout orchestration — terminal check, account name, config, custody probe, prompt, userpass login, store, erase, revoke; it needs a live Vault and a terminal. Every decision it calls is T1 in maknae-vault (username rule, vault.user_auth, token record and its issuing address, custody and read order, revocable_at, password line); lifetime, root_refusal, logout_line, logout_plan, revocation, revoke_outcome, logout_erase_failure, previous_token, login_steps, previous_fate, previous_note and new_token_note (the network-free revoke-or-not and store-erase-revoke ordering decisions, which apply token_record.rs's issued_by, and the text each outcome prints) are table-tested here, and the built binary's off-terminal refusal is tested in tests/login_off_tty.rs"
+why = "#153: maknae login/logout orchestration — terminal check, account name, config, custody probe, prompt, userpass login, store, erase, revoke; it needs a live Vault and a terminal. Every decision it calls is T1 in maknae-vault (username rule, vault.user_auth, token record and its issuing address, custody and read order, revocable_at, password line); lifetime, root_refusal, logout_line, logout_plan, revocation, revoke_outcome, logout_erase_failure, previous_token, login_steps, previous_fate, previous_note and new_token_note (the network-free revoke-or-not and store-erase-revoke ordering decisions, which apply token_record.rs's issued_by, and the text each outcome prints) are table-tested here, and the built binary's off-terminal refusal is tested in tests/login_off_tty.rs. #153 PR 4: usable_token (one fresh token from this Vault, or a refusal ending in run `maknae login`) is table-tested here; user_session, which every CLI verb calls before it connects, is its I/O."
 
 # PR-J1 Task 8 (`maknae enroll`, spec §4.1-§4.6): bin code, per the tiering
 # constraint (decision logic that needed 0-missed lives in the library crates
@@ -627,7 +623,7 @@ why = "#153: maknae login/logout orchestration — terminal check, account name,
 # tests even though the tier is T3 — see each file's module doc.
 [[t3]]
 path = "bins/maknae/src/enroll/mod.rs"
-why = "orchestration (spec §4.1 step order, privilege-descent re-exec, rollback/rotate) + clap arg structs; the pure pieces (preflight_check, parse_host_port, the YAML content builders, ProvisionJob's round trip) carry real unit tests but the file is bin orchestration code, T3 per the tiering constraint"
+why = "orchestration (spec §4.1 step order, privilege-descent re-exec, rollback/rotate, the seal-key placement) + clap arg structs; the pure pieces (preflight_check, parse_host_port, check_vault_layout, the YAML content builders proven through the CLI loader and the bounds parser, ProvisionJob's round trip, the rotate filter against a real OperatorClient, seal_key_action, seal_pub_home, the Generate order GENERATE_STEPS, the restart line) and the maknae-io readers and the one remover (os-release fallback and its two-symlink refusal, seal.pub and custody presence, retract_seal_pub, each against a real file) carry real unit tests but the file is bin orchestration code, T3 per the tiering constraint"
 
 [[t3]]
 path = "bins/maknae/src/enroll/artifact_table.rs"
@@ -639,15 +635,15 @@ why = "applies the artifact table to disk — chown/chmod/restorecon + yaml_rust
 
 [[t3]]
 path = "bins/maknae/src/enroll/vault_ops.rs"
-why = "thin OperatorClient call wrappers; the one pure piece (split_ca_chain) carries real unit tests, the async Vault I/O is exercised by the same gated-live-test pattern as crates/maknae-vault/src/operator.rs"
+why = "thin OperatorClient call wrappers; the pure pieces (split_ca_chain, still_provisioned) carry real unit tests, the async Vault I/O is exercised by the same gated-live-test pattern as crates/maknae-vault/src/operator.rs"
 
 [[t3]]
 path = "bins/maknae/src/enroll/helper.rs"
-why = "the operator-context helper — self-verification + systemd-creds/Keychain subprocess/FFI I/O; the pure id-G parser carries real unit tests, the seal/probe I/O is T3 like the rest of this crate's HRoT-sealing call sites"
+why = "the operator-context helper — self-verification and the CLI configuration write; the id-G parser and the identity refusal carry real unit tests, the write runs through artifact_write's tested writer"
 
 [[t3]]
 path = "bins/maknae/src/enroll/keychain_write.rs"
-why = "#76: enroll's keychain write and release-build checks — the pure builders and parsers (SecretID shape, the stdin add command, delete/find argv, keychain-line parse, the codesign requirement strings and team pin, Hardened Runtime/entitlement/ad-hoc refusal, embedded-requirement equality) carry unit tests on every target; on macOS, darwin tests prove that check_install_path accepts a hard-linked file, maps a missing binary to NotInstalled, and maps a non-root-owned install path to NotRootInstalled (not NotInstalled). The runners that call codesign/security remain operator-verified, not unit-tested"
+why = "#76: enroll's keychain write and release-build checks — the pure builders and parsers (SecretID shape, the per-plane content check that routes the egress item to maknae-vault's seal_key_from_hex, the stdin add command, delete/find argv, keychain-line parse, the codesign requirement strings and team pin, Hardened Runtime/entitlement/ad-hoc refusal, embedded-requirement equality) carry unit tests on every target; on macOS, darwin tests prove that check_install_path accepts a hard-linked file, maps a missing binary to NotInstalled, and maps a non-root-owned install path to NotRootInstalled (not NotInstalled). The runners that call codesign/security remain operator-verified, not unit-tested"
 
 # maknae-msgs (PR-J1 Task 1): declaration-only string-table match arms, no
 # decision logic (precedent: maknae-config value.rs). The locale-detect +

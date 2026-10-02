@@ -18,10 +18,9 @@ use serde::{Deserialize, Serialize};
 
 /// What the kernel hands the egress deputy for one decided `session.prompt`.
 ///
-/// `Debug` is hand-written: it must reproduce neither the prompt content nor
-/// `key_vault_path`, which names where the provider credential lives and is
-/// marked `omit` on `ProviderConfig`. `destination` IS shown — it is the
-/// audit-correlation handle and appears in records already.
+/// `Debug` is hand-written: it must reproduce neither the prompt content, nor
+/// `key_vault_path`, nor the sealed key's bytes. `destination` IS shown — it is
+/// the audit-correlation handle and appears in records already.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EgressFrameRequest {
     /// `provider:<name>`, per request, never process-global (#240a I1).
@@ -43,6 +42,7 @@ pub struct EgressFrameRequest {
     /// moment there are two. Before #308 the only field name in the tree was a
     /// test fixture's `api_key`.
     pub key_field: String,
+    pub sealed_key: crate::SealedKey,
     /// The provider's reasoning level, when the registry sets one (#242).
     /// Absent is omitted from the encoding, so a frame without it decodes as
     /// `None`.
@@ -84,6 +84,7 @@ impl std::fmt::Debug for EgressFrameRequest {
             // secret, but together with the path it describes exactly where a
             // credential is kept, and nothing needs it in a log line.
             .field("key_field", &"<omitted>")
+            .field("sealed_key", &self.sealed_key)
             .field("reasoning_effort", &self.reasoning_effort)
             .field("output_tokens", &self.output_tokens)
             .field("output_tokens_field", &self.output_tokens_field)
@@ -93,11 +94,12 @@ impl std::fmt::Debug for EgressFrameRequest {
     }
 }
 
-/// The deputy's answer. Nothing but the reply: egress returns bytes to the
-/// kernel and does nothing with them (#240a D4).
+/// The deputy's answer: the provider's reply, or a refusal made before any provider I/O.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EgressFrameReply {
-    pub reply: crate::PromptReply,
+#[serde(rename_all = "snake_case")]
+pub enum EgressFrameReply {
+    Reply(crate::PromptReply),
+    RefusedBeforeSend,
 }
 
 /// The largest request frame that crosses the kernel→deputy socket, stated
@@ -249,6 +251,7 @@ mod tests {
             model: "some-model".into(),
             key_vault_path: "maknae/providers/openai".into(),
             key_field: "api-key".into(),
+            sealed_key: crate::SealedKey::new(vec![0x5a; crate::SEALED_KEY_MIN_BYTES]).unwrap(),
             reasoning_effort: None,
             conversation: conversation.into(),
             turns,
@@ -259,7 +262,7 @@ mod tests {
 
     /// The frame carries prompt content out of the trust plane. Its `Debug`
     /// must not reproduce it — nor the Vault path that names where the
-    /// provider credential lives (`ProviderConfig` marks that `omit`).
+    /// provider credential lives.
     #[test]
     fn an_egress_frame_debug_redacts_prompt_content_and_the_key_path() {
         let r = req(
@@ -279,6 +282,14 @@ mod tests {
             d.contains("<1 turns>"),
             "the turn count should be shown: {d}"
         );
+        assert!(
+            d.contains(&format!(
+                "SealedKey(<{} bytes>)",
+                crate::SEALED_KEY_MIN_BYTES
+            )),
+            "the sealed key shows only its length: {d}"
+        );
+        assert!(!d.contains("90, 90"), "sealed bytes leaked: {d}");
     }
 
     #[test]
@@ -531,13 +542,11 @@ mod tests {
         // Over 8 KiB of quoted content — the size codex's trace used on the
         // request leg, and what a model echoing a read file produces here.
         let big = "y".repeat(9 * 1024);
-        let r = EgressFrameReply {
-            reply: crate::PromptReply {
-                blocks: vec![text(&big), text(&big)],
-                tool_calls: vec![],
-                usage: None,
-            },
-        };
+        let r = EgressFrameReply::Reply(crate::PromptReply {
+            blocks: vec![text(&big), text(&big)],
+            tool_calls: vec![],
+            usage: None,
+        });
         let buf = crate::encode_egress_frame_reply(&r, EGRESS_REPLY_FRAME_ENCODE_BYTES).unwrap();
         // Byte-identical to what the growing encoder produced: a buffer
         // change, not a wire change.
@@ -569,16 +578,30 @@ mod tests {
 
     #[test]
     fn the_reply_codec_round_trips_and_refuses_garbage() {
-        let r = EgressFrameReply {
-            reply: crate::PromptReply {
-                blocks: vec![text("ok")],
-                tool_calls: vec![],
-                usage: None,
-            },
-        };
+        let r = EgressFrameReply::Reply(crate::PromptReply {
+            blocks: vec![text("ok")],
+            tool_calls: vec![],
+            usage: None,
+        });
         let buf = crate::encode_egress_frame_reply(&r, EGRESS_REPLY_FRAME_ENCODE_BYTES).unwrap();
         assert_eq!(crate::decode_egress_frame_reply(&buf).unwrap(), r);
         assert!(crate::decode_egress_frame_reply(&[0xffu8, 0xff, 0xff]).is_err());
+    }
+
+    #[test]
+    fn a_refusal_before_send_round_trips_and_carries_nothing_but_its_tag() {
+        let r = EgressFrameReply::RefusedBeforeSend;
+        let buf = crate::encode_egress_frame_reply(&r, EGRESS_REPLY_FRAME_ENCODE_BYTES).unwrap();
+        assert_eq!(crate::decode_egress_frame_reply(&buf).unwrap(), r);
+        let mut tag_only = Vec::new();
+        ciborium::into_writer(&"refused_before_send", &mut tag_only).unwrap();
+        assert_eq!(&buf[..], &tag_only[..]);
+        let reply = EgressFrameReply::Reply(crate::PromptReply {
+            blocks: vec![],
+            tool_calls: vec![],
+            usage: None,
+        });
+        assert_ne!(reply, r);
     }
 
     /// Every field of the shape check earns its place: drop any one and a
@@ -634,5 +657,50 @@ mod tests {
             );
         }
         assert!(egress_frame_request_is_acceptable(&base));
+    }
+
+    #[test]
+    fn a_frame_whose_sealed_key_is_outside_its_bounds_does_not_decode() {
+        let r = req(
+            "conv1",
+            vec![crate::Turn::User {
+                content: vec![text("x")],
+            }],
+        );
+        let good =
+            crate::encode_egress_frame_request(&r, EGRESS_REQUEST_FRAME_ENCODE_BYTES).unwrap();
+        assert_eq!(crate::decode_egress_frame_request(&good).unwrap(), r);
+        let unmodified = ciborium::Value::serialized(&r).unwrap();
+        let mut same = Vec::new();
+        ciborium::into_writer(&unmodified, &mut same).unwrap();
+        assert_eq!(
+            crate::decode_egress_frame_request(&same).unwrap(),
+            r,
+            "the Value round trip alone must not be what breaks the frame"
+        );
+        for len in [
+            crate::SEALED_KEY_MIN_BYTES - 1,
+            crate::SEALED_KEY_MAX_BYTES + 1,
+        ] {
+            let mut v = unmodified.clone();
+            let ciborium::Value::Map(fields) = &mut v else {
+                panic!("a frame encodes as a map");
+            };
+            let slot = fields
+                .iter_mut()
+                .find(|(k, _)| k.as_text() == Some("sealed_key"))
+                .expect("the frame carries sealed_key");
+            slot.1 = ciborium::Value::Bytes(vec![0x5a; len]);
+            let mut bad = Vec::new();
+            ciborium::into_writer(&v, &mut bad).unwrap();
+            let msg = crate::decode_egress_frame_request(&bad)
+                .expect_err("an out-of-bounds sealed key")
+                .to_string();
+            assert!(
+                msg.contains(&format!("invalid length {len}"))
+                    && msg.contains("a sealed key of 127..=1150 bytes"),
+                "{len}: {msg}"
+            );
+        }
     }
 }

@@ -6,14 +6,14 @@
 //!
 //! **Closed dependency enumeration** (recorded here and in `Cargo.toml`; no gate
 //! enforces it): `maknae-proto`, `maknae-vault`, `maknae-config`, `maknae-msgs`,
-//! `maknae-io`, `maknae-agent`, `clap`, `tokio`, `nix`, `zeroize`, `yaml-rust2`,
-//! `rpassword`, and macOS-only `security-framework` (`bins/maknae/Cargo.toml`).
+//! `maknae-io`, `maknae-agent`, `maknae-seal`, `clap`, `tokio`, `nix`, `zeroize`, `yaml-rust2`,
+//! and `rpassword` (`bins/maknae/Cargo.toml`).
 //! *(Corrected 2026-09-22, #241: `maknae-io` was missing from both this list and
 //! the "wire path" sentence below, though it has been a direct dependency and on
 //! the wire path since ADR-0009 arming landed.)* The `ping`/`whoami` wire path
 //! below uses only `maknae-proto`, `maknae-vault`, `maknae-config`, `maknae-msgs`,
-//! `clap` and `maknae-io` (delegation arming — `mutation.rs`); `maknae-agent` is the agent loop's
-//! (`agent.rs`) alone; `yaml-rust2`/`rpassword`/`security-framework` are
+//! `clap` and `maknae-io` (delegation arming — `mutation.rs`); `maknae-agent` and `maknae-seal` are the agent loop's
+//! (`agent.rs`) alone; `yaml-rust2`/`rpassword` are
 //! `enroll/`-only, and `nix`/`zeroize` serve `enroll/` and `login`/`tty`. NO privileged crate
 //! (`maknae-kernel`/`-subject-ctx-mint`/`-audit-append`/`-spif-compile`) — spec §3
 //! P1 — even for `enroll`: it does its own privileged work via `nix` safe wrappers
@@ -27,7 +27,7 @@ use maknae_proto::{
 use maknae_proto::{
     decode_response, encode_request_zeroizing, Payload, Request, RespResult, PROTOCOL_VERSION,
 };
-use maknae_vault::{load_ca_pin, Plane, PlaneClient, PlaneConnector, VAULT_SECTION};
+use maknae_vault::{load_ca_pin, PlaneClient, PlaneConnector, VAULT_SECTION};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -35,8 +35,8 @@ use std::process::ExitCode;
 const CONFIG_DIR_ENV: &str = "MAKNAE_CONFIG_DIR";
 
 /// Resolve the CLI's own config directory: `MAKNAE_CONFIG_DIR` if set, else
-/// `$HOME/.maknae`. This is the CLI's OWN Stage-1 config dir (AppRole
-/// credentials + CA pin for `Plane::Cli`) — distinct from the daemon's
+/// `$HOME/.maknae`. This is the CLI's OWN Stage-1 config dir (the user's
+/// Vault token custody + CA pin for `Plane::Cli`) — distinct from the daemon's
 /// `/etc/maknae` (spec §3).
 pub fn resolve_config_dir() -> PathBuf {
     if let Ok(dir) = std::env::var(CONFIG_DIR_ENV) {
@@ -60,9 +60,8 @@ pub fn resolve_config_dir() -> PathBuf {
 /// documented residual of the single-registry design, not a per-verb grammar: an `[agent]`
 /// section with `max_steps: 1000` loads clean under `maknae ping` and is refused by
 /// `maknae agent` (corrected 2026-09-22, #344 — this said "accepted (and validated)",
-/// which `execute` never does). The user-side `provider` block (#372) is the same case:
-/// accepted everywhere, read only by `maknae agent`.
-pub(crate) fn cli_config_specs() -> [SectionSpec; 4] {
+/// which `execute` never does).
+pub(crate) fn cli_config_specs() -> [SectionSpec; 3] {
     [
         SectionSpec {
             name: VAULT_SECTION.to_string(),
@@ -74,10 +73,6 @@ pub(crate) fn cli_config_specs() -> [SectionSpec; 4] {
         },
         SectionSpec {
             name: crate::agent::AGENT_SECTION.to_string(),
-            required: false,
-        },
-        SectionSpec {
-            name: crate::agent::USER_PROVIDER_SECTION.to_string(),
             required: false,
         },
     ]
@@ -149,14 +144,19 @@ enum Command {
     /// Ungranted by default.
     SubjectList,
     /// Run the agent loop on one prompt (ADR-0023).
-    Agent { prompt: String },
+    Agent {
+        /// The providers.yaml entry to use instead of the default.
+        #[arg(long)]
+        provider: Option<String>,
+        prompt: String,
+    },
     /// Log in to Vault as your local account; stores only the token.
     Login,
     /// Revoke and erase your stored Vault token.
     Logout,
     /// One-time elevated provisioning: mint credentials, seal them to the
     /// platform HRoT, write daemon+CLI config (spec §4.1). Requires `sudo`.
-    Enroll(crate::enroll::EnrollArgs),
+    Enroll(Box<crate::enroll::EnrollArgs>),
     /// Hidden operator-context helper `enroll` re-execs via `sudo -u` — not a
     /// user-facing verb.
     #[command(hide = true, name = "enroll-helper")]
@@ -313,7 +313,7 @@ fn absolute_path(path: PathBuf) -> Result<String, String> {
 /// earlier (config/mint/connect/frame) failure.
 async fn execute(verb: Verb) -> Result<bool, String> {
     // Install the aws-lc-rs FIPS provider as the process default BEFORE any operation
-    // that asserts FIPS (`PlaneClient::from_document` → `mint()` assert `.fips()`). The
+    // that asserts FIPS (`PlaneClient::for_user` → `mint()` assert `.fips()`). The
     // daemon does the identical install-then-assert in `run_inner`; the CLI is a separate
     // process with its own empty default provider, so it must install too — without this,
     // `mint()` fails closed with "FIPS provider not active" and the CLI never connects.
@@ -327,12 +327,13 @@ async fn execute(verb: Verb) -> Result<bool, String> {
     // + agent)
     // so a realistic combined config is accepted; a genuinely-unknown section still
     // fails closed with UnknownSection. The single document is then parsed by-section —
-    // transport here, vault inside `PlaneClient::from_document` — never re-loaded under a
+    // transport here, vault inside `PlaneClient::for_user` — never re-loaded under a
     // registry that would reject the other section (the P1-B fix).
     let document = load_config(&dir, &cli_config_specs()).map_err(|e| e.to_string())?;
     let transport =
         transport_from_section(document.section(TRANSPORT_SECTION)).map_err(|e| e.to_string())?;
 
+    let session = crate::login::user_session(&document, &dir)?;
     let (request, content) = request_from_input(
         verb.clone(),
         transport.prompt_max_bytes,
@@ -340,23 +341,17 @@ async fn execute(verb: Verb) -> Result<bool, String> {
     )?;
 
     let client =
-        PlaneClient::from_document(&document, &dir, Plane::Cli).map_err(|e| e.to_string())?;
+        PlaneClient::for_user(&document, &dir, session.token).map_err(|e| e.to_string())?;
     let ca = load_ca_pin(&dir).map_err(|e| e.to_string())?;
     client.mint().await.map_err(|e| e.to_string())?;
-
-    // Once `mint()` succeeds the Vault token is LIVE until lease expiry — so EVERY
-    // post-mint path (success, a daemon ProtoError, OR any transport/codec/timeout error)
-    // must revoke it, or the token leaks. Capture the whole round-trip outcome, revoke the
-    // token UNCONDITIONALLY, THEN propagate. (A pre-mint failure above skips revoke — there
-    // is nothing minted to revoke.)
     let outcome = round_trip(verb, request, content, &transport, &client, &ca).await;
     client.shutdown().await;
     outcome
 }
 
 /// The post-mint round trip: connect → request → (bounded) response → print. Split out so
-/// [`execute`] can revoke the minted token on EVERY return path (success or error) before
-/// propagating this result. Returns `Ok(true)` on a served verb, `Ok(false)` on a daemon
+/// [`execute`] shuts the plane client down on every return path before propagating this
+/// result. Returns `Ok(true)` on a served verb, `Ok(false)` on a daemon
 /// `ProtoError` (already printed), `Err` on any transport/codec/timeout failure.
 ///
 /// On this file's wire path, result printing lives here and in [`print_payload_for_verb`];
@@ -419,8 +414,8 @@ async fn round_trip(
         SentOutcome::Payload(payload) => {
             // The daemon returned SOME successful payload — but it must be the payload
             // for the verb WE sent. A `Payload::Pong` for a `whoami` (or vice-versa) is
-            // a protocol violation, not a result to print; propagate Err so `execute`
-            // revokes the token and the CLI exits non-zero.
+            // a protocol violation, not a result to print; propagate Err so the CLI
+            // exits non-zero.
             print_payload_for_verb(verb, payload)?;
             Ok(true)
         }
@@ -494,8 +489,7 @@ pub(crate) async fn send_verb(
 ) -> Result<SentOutcome, String> {
     // Bound the client-side TLS handshake by the configured `handshake_timeout_ms`: a
     // process that accepts the Unix socket but never completes TLS must not hang the CLI
-    // forever (it still fails non-zero, and `execute` still revokes the token on this
-    // post-mint path — a handshake timeout is a post-mint failure like any other).
+    // forever (it still fails non-zero).
     let connect = tokio::time::timeout(
         std::time::Duration::from_millis(transport.handshake_timeout_ms),
         PlaneConnector::connect(&transport.socket_path, client, ca),
@@ -631,7 +625,7 @@ pub(crate) fn write_request(
 /// Print the successful `payload` IFF its variant matches the requested `verb`
 /// (`Ping`→`Pong`, `Whoami`→`Whoami(_)`). A mismatched variant means the daemon
 /// answered a different question than we asked — a protocol error: return `Err`
-/// (the caller already revokes the token on every error path and exits non-zero).
+/// (the caller exits non-zero).
 fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
     match (verb, payload) {
         (Verb::Ping, Payload::Pong) => {
@@ -735,7 +729,7 @@ pub async fn run_cli() -> ExitCode {
                 }
             }
         }
-        Command::Agent { prompt } => match crate::agent::run(prompt).await {
+        Command::Agent { provider, prompt } => match crate::agent::run(provider, prompt).await {
             Ok(code) => ExitCode::from(code),
             Err(e) => {
                 eprintln!("maknae: {e}");
@@ -744,7 +738,7 @@ pub async fn run_cli() -> ExitCode {
         },
         Command::Login => crate::login::run_login().await,
         Command::Logout => crate::login::run_logout().await,
-        Command::Enroll(args) => crate::enroll::run_enroll(args).await,
+        Command::Enroll(args) => crate::enroll::run_enroll(*args).await,
         Command::EnrollHelper(args) => crate::enroll::run_enroll_helper(args).await,
     }
 }
@@ -1050,6 +1044,33 @@ mod tests {
     }
 
     #[test]
+    fn agent_takes_an_optional_provider_label_before_the_prompt() {
+        match Cli::try_parse_from(["maknae", "agent", "--provider", "home", "hello"])
+            .unwrap()
+            .command
+        {
+            Command::Agent { provider, prompt } => {
+                assert_eq!(
+                    (provider.as_deref(), prompt.as_str()),
+                    (Some("home"), "hello")
+                )
+            }
+            other => panic!("expected Command::Agent, got {other:?}"),
+        }
+        match Cli::try_parse_from(["maknae", "agent", "hello"])
+            .unwrap()
+            .command
+        {
+            Command::Agent { provider, prompt } => {
+                assert_eq!((provider, prompt.as_str()), (None, "hello"))
+            }
+            other => panic!("expected Command::Agent, got {other:?}"),
+        }
+        assert!(Cli::try_parse_from(["maknae", "agent", "--provider"]).is_err());
+        assert!(Cli::try_parse_from(["maknae", "agent", "--provider", "home"]).is_err());
+    }
+
+    #[test]
     fn rejects_unknown_verb() {
         assert!(Cli::try_parse_from(["maknae", "bogus"]).is_err());
     }
@@ -1083,7 +1104,11 @@ mod tests {
                 assert_eq!(args.deployment_id, "dev-01");
                 assert_eq!(args.approle_mount, maknae_vault::DEFAULT_APPROLE_MOUNT);
                 assert_eq!(args.pki_int_mount, maknae_vault::DEFAULT_PKI_INT_MOUNT);
+                assert_eq!(args.userpass_mount, "maknae-userpass");
+                assert_eq!(args.kv_mount, "maknae-kv");
+                assert_eq!(args.user_prefix, "maknae/users");
                 assert!(!args.rotate);
+                assert!(!args.rotate_seal_key);
                 assert!(!args.insecure_plaintext_secret);
                 assert!(!args.verbose);
             }
@@ -1177,7 +1202,14 @@ mod tests {
             "alt-approle",
             "--pki-int-mount",
             "alt-pki-int",
+            "--userpass-mount",
+            "corp-userpass",
+            "--kv-mount",
+            "corp-kv",
+            "--user-prefix",
+            "corp/users",
             "--rotate",
+            "--rotate-seal-key",
             "--insecure-plaintext-secret",
             "--verbose",
         ]);
@@ -1186,7 +1218,11 @@ mod tests {
             Command::Enroll(args) => {
                 assert_eq!(args.approle_mount, "alt-approle");
                 assert_eq!(args.pki_int_mount, "alt-pki-int");
+                assert_eq!(args.userpass_mount, "corp-userpass");
+                assert_eq!(args.kv_mount, "corp-kv");
+                assert_eq!(args.user_prefix, "corp/users");
                 assert!(args.rotate);
+                assert!(args.rotate_seal_key);
                 assert!(args.insecure_plaintext_secret);
                 assert!(args.verbose);
             }
@@ -1195,8 +1231,8 @@ mod tests {
     }
 
     #[test]
-    fn enroll_helper_probe_parses() {
-        let cli = Cli::try_parse_from([
+    fn the_removed_probe_verb_is_refused() {
+        assert!(Cli::try_parse_from([
             "maknae",
             "enroll-helper",
             "probe",
@@ -1205,17 +1241,7 @@ mod tests {
             "--egid",
             "1000",
         ])
-        .expect("parses");
-        match cli.command {
-            Command::EnrollHelper(args) => match args.verb {
-                crate::enroll::HelperVerb::Probe(id) => {
-                    assert_eq!(id.euid, 1000);
-                    assert_eq!(id.egid, 1000);
-                }
-                other => panic!("expected HelperVerb::Probe, got {other:?}"),
-            },
-            other => panic!("expected Command::EnrollHelper, got {other:?}"),
-        }
+        .is_err());
     }
 
     #[test]
@@ -1370,6 +1396,27 @@ mod tests {
             Err(maknae_config::ConfigError::UnknownSection { .. })
         ));
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_user_provider_section_is_refused_by_name() {
+        let d = cfg_dir(
+            "user-provider",
+            "core:\n  deployment_id: dev-01\n\
+             vault:\n  addr: https://v.example:8200\n\
+             provider:\n  context_tokens: 128000\n",
+        );
+        match load_config(&d.0, &cli_config_specs()) {
+            Err(maknae_config::ConfigError::UnknownSection { section, .. }) => {
+                assert_eq!(section, "provider")
+            }
+            other => panic!(
+                "a user provider block must be refused by name, got {:?}",
+                other.map(|_| "a document")
+            ),
+        }
+    }
+
     // ---- read verb surface (#77) ----
 
     #[test]

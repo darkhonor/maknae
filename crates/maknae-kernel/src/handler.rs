@@ -41,9 +41,7 @@ pub enum Dispatch {
     /// The peer asked to enumerate role bindings. No datum; the answer is read
     /// LIVE from the PDP, never from a boot snapshot.
     SubjectListRequested,
-    /// The peer asked to send content to the registered provider (#172). The
-    /// destination is the KERNEL's (the provider registered at boot), never the
-    /// client's; the operands travel in the verb and are pre-gated in `run.rs`.
+    /// The peer asked to send content to the provider its admitted choice names.
     PromptRequested,
 }
 
@@ -245,15 +243,14 @@ pub fn admitted_user_for_test(user: Option<&str>) -> Option<String> {
 
 /// Build the seam Request from the verb + kernel-verified peer uid. Subject
 /// carries `uid` only (i64 carriage of the u32 — lossless); the uid is the whole
-/// subject (ADR-0024). `Read` carries the client-supplied
-/// path as the resource `path` attribute; resource/context otherwise empty.
+/// subject (ADR-0024). `Read` carries the client-supplied path as the resource
+/// `path` attribute, and an admitted `session.prompt` carries `destination`;
+/// the context carries the lane.
 pub fn build_authz_request(
     verb: &Verb,
     peer_uid: u32,
     lane: maknae_security::Lane,
-    // The provider registered at boot (#243), by name, or none. Supplied by
-    // the accept loop's captured boot state, never read off the wire.
-    provider_name: Option<&str>,
+    admitted: Option<&crate::provider_choice::AdmittedChoice<'_>>,
 ) -> maknae_security::Request {
     use maknae_security::{Action, AttrValue, Attributes, Context, Resource, Subject};
     let mut subject = Attributes::new();
@@ -262,13 +259,11 @@ pub fn build_authz_request(
     if let Verb::Read { path, .. } = verb {
         resource.insert("path", AttrValue::Str(path.clone()));
     }
-    // #172: the egress destination is the kernel's registered provider, stamped
-    // here so the PDP decides on `provider:<name>` and the client never names
-    // it. Deliberately a literal, like "path" above: the PDP is swappable behind
-    // the seam and the PEP must not depend on one backend's constant. Absent
-    // when no provider is registered — the arm refuses that.
-    if let (Verb::SessionPrompt { .. }, Some(name)) = (verb, provider_name) {
-        resource.insert("destination", AttrValue::Str(format!("provider:{name}")));
+    if let (Verb::SessionPrompt { .. }, Some(a)) = (verb, admitted) {
+        resource.insert(
+            "destination",
+            AttrValue::Str(format!("provider:{}", a.provider.name)),
+        );
     }
     // The lane is an ARGUMENT, never derived from `verb`. That is the point: the
     // caller is the accept loop, which knows which listener accepted, and there is
@@ -388,6 +383,7 @@ mod tests {
                 conversation: "c".into(),
                 turns: vec![],
                 output_tokens: None,
+                choice: None,
             }),
             Dispatch::PromptRequested
         );
@@ -396,13 +392,42 @@ mod tests {
     }
 
     #[test]
-    fn the_request_carries_the_registered_provider_as_the_destination_and_nothing_when_none() {
+    fn the_request_carries_the_admitted_provider_as_the_destination_and_nothing_without_one() {
+        use maknae_config::Value;
+        let set = maknae_config::providers_from_section(Some(&Value::Seq(vec![Value::Map(vec![
+            ("name".into(), Value::Str("openai".into())),
+            (
+                "endpoint".into(),
+                Value::Str("https://api.example.test/v1".into()),
+            ),
+            ("models".into(), Value::Seq(vec![Value::Str("m".into())])),
+        ])])))
+        .unwrap();
+        let choice = maknae_proto::ProviderChoice {
+            provider: "openai".into(),
+            model: "m".into(),
+            key_subpath: "openai/personal".into(),
+            key_field: "api_key".into(),
+            sealed_key: maknae_proto::SealedKey::new(vec![
+                0x5a;
+                maknae_proto::SEALED_KEY_MIN_BYTES
+            ])
+            .unwrap(),
+        };
+        let admitted = crate::provider_choice::admit_choice(
+            &set,
+            Some(&choice),
+            Some("alice"),
+            "maknae/users",
+        )
+        .unwrap();
         let v = Verb::SessionPrompt {
             conversation: "c".into(),
             turns: vec![],
             output_tokens: None,
+            choice: Some(choice.clone()),
         };
-        let r = build_authz_request(&v, 1002, maknae_security::Lane::Local, Some("openai"));
+        let r = build_authz_request(&v, 1002, maknae_security::Lane::Local, Some(&admitted));
         assert_eq!(
             r.resource.0.get("destination"),
             Some(&maknae_security::AttrValue::Str("provider:openai".into()))
@@ -418,7 +443,7 @@ mod tests {
             &Verb::Ping,
             1002,
             maknae_security::Lane::Local,
-            Some("openai")
+            Some(&admitted)
         )
         .resource
         .0
@@ -928,6 +953,7 @@ mod tests {
                 conversation: "c".into(),
                 turns: vec![],
                 output_tokens: None,
+                choice: None,
             },
             Verb::SessionCancel,
             Verb::SessionSetconfigoption,

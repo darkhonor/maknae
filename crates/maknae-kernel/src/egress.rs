@@ -12,19 +12,18 @@ use maknae_audit_append::{AuditEmit, AuditError, AuditRecord, EgressStatus};
 use maknae_proto::{ContentBlock, PromptReply, Turn};
 use std::sync::Arc;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct EgressRequest {
     /// `provider:<name>`, per request (#240a I1).
     pub destination: String,
-    /// #240a D1: the kernel resolves the provider and hands the backend the
-    /// RESOLVED record. The deputy parses no registry, so it cannot drift from
-    /// the kernel's view of it — one parser, the `maknae-io` lesson.
+    /// The admitted provider's endpoint, resolved by the kernel; the deputy parses no provider set.
     pub endpoint: String,
     pub model: String,
+    /// Composed from the user's admitted choice, never from root configuration.
     pub key_vault_path: String,
-    /// #308: the field name inside the secret, carried per request rather than
-    /// fixed in the deputy — the registry knows it, the deputy must not guess.
+    /// From the user's admitted choice, never from root configuration.
     pub key_field: String,
+    pub sealed_key: maknae_proto::SealedKey,
     /// #242: the registry's reasoning level, carried per request like `model`.
     pub reasoning_effort: Option<String>,
     pub output_tokens: Option<u64>,
@@ -34,29 +33,49 @@ pub struct EgressRequest {
 }
 
 impl EgressRequest {
-    pub fn for_provider(
-        p: &maknae_config::ProviderConfig,
+    pub fn for_choice(
+        c: &crate::provider_choice::AdmittedChoice<'_>,
         destination: String,
         conversation: String,
         turns: Vec<Turn>,
         output_tokens: Option<u64>,
     ) -> Self {
-        let output_tokens_field = output_tokens.map(|_| match p.output_tokens_field.as_deref() {
-            Some("max_tokens") => maknae_proto::OutputTokensField::MaxTokens,
-            _ => maknae_proto::OutputTokensField::MaxCompletionTokens,
-        });
+        let output_tokens_field =
+            output_tokens.map(|_| match c.provider.output_tokens_field.as_deref() {
+                Some("max_tokens") => maknae_proto::OutputTokensField::MaxTokens,
+                _ => maknae_proto::OutputTokensField::MaxCompletionTokens,
+            });
         EgressRequest {
             destination,
-            endpoint: p.endpoint.clone(),
-            model: p.model.clone(),
-            key_vault_path: p.key_vault_path.clone(),
-            key_field: p.key_field.clone(),
-            reasoning_effort: p.reasoning_effort.clone(),
+            endpoint: c.provider.endpoint.clone(),
+            model: c.model.to_string(),
+            key_vault_path: c.key_vault_path.clone(),
+            key_field: c.key_field.to_string(),
+            sealed_key: c.sealed_key.clone(),
+            reasoning_effort: c.provider.reasoning_effort.clone(),
             output_tokens,
             output_tokens_field,
             conversation,
             turns,
         }
+    }
+}
+
+impl std::fmt::Debug for EgressRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EgressRequest")
+            .field("destination", &self.destination)
+            .field("endpoint", &self.endpoint)
+            .field("model", &self.model)
+            .field("key_vault_path", &"<omitted>")
+            .field("key_field", &"<omitted>")
+            .field("sealed_key", &"<omitted>")
+            .field("reasoning_effort", &self.reasoning_effort)
+            .field("output_tokens", &self.output_tokens)
+            .field("output_tokens_field", &self.output_tokens_field)
+            .field("conversation", &self.conversation)
+            .field("turns", &format_args!("<{} turns>", self.turns.len()))
+            .finish()
     }
 }
 
@@ -93,6 +112,8 @@ pub enum EgressFailure {
     /// [`SendOutcome::OutcomeUnknown`], never `Failed`: "nothing left" would
     /// be a false statement about content that did (codex on #240).
     AfterSend(String),
+    /// The deputy refused before any provider I/O: nothing left, recorded `Failed`.
+    RefusedBeforeSend,
 }
 
 /// Proof of a durable intent. No public constructor: a value exists only
@@ -202,8 +223,18 @@ pub fn failure_counts_as_expiry(f: &EgressFailure) -> bool {
     matches!(f, EgressFailure::DeadlineExpired)
 }
 
+pub fn outcome_for_failure(f: &EgressFailure) -> SendOutcome {
+    match f {
+        EgressFailure::DeadlineExpired => SendOutcome::DeadlineExpired,
+        EgressFailure::AfterSend(_) => SendOutcome::OutcomeUnknown,
+        EgressFailure::NotConfigured
+        | EgressFailure::Transport(_)
+        | EgressFailure::RefusedBeforeSend => SendOutcome::Failed,
+    }
+}
+
 /// Why the kernel refused to BOOT over its egress backend (#240). Only
-/// reachable with a provider registered: with none, there is nothing to send
+/// reachable with providers authorized: with none, there is nothing to send
 /// and `Unavailable` is the honest backend.
 #[derive(Debug, PartialEq, Eq)]
 pub enum EgressBootRefusal {
@@ -218,33 +249,33 @@ impl std::fmt::Display for EgressBootRefusal {
         match self {
             EgressBootRefusal::NoSuchAccount(name) => write!(
                 f,
-                "a provider is registered but the egress deputy's account '{name}' does not exist on this host"
+                "providers are authorized but the egress deputy's account '{name}' does not exist on this host"
             ),
             EgressBootRefusal::Resolve(e) => write!(
                 f,
-                "a provider is registered but the egress deputy's account could not be resolved: {e}"
+                "providers are authorized but the egress deputy's account could not be resolved: {e}"
             ),
         }
     }
 }
 
-/// The backend with no provider registered — and every test's default.
+/// The backend with no providers authorized — and every test's default.
 pub fn unavailable_egress() -> Arc<dyn Egress> {
     Arc::new(Unavailable)
 }
 
 /// THE production choice, as a pure decision over an injected resolver so it
 /// can be pinned on a host that has no `_maknae-egress` account (the same
-/// seam `authz_boot_gate_with` uses). No provider → `Unavailable`, and the
-/// account is never looked up. A provider → `SocketEgress` under the deputy's
+/// seam `authz_boot_gate_with` uses). No providers authorized → `Unavailable`, and the
+/// account is never looked up. Any authorized → `SocketEgress` under the deputy's
 /// uid, resolved ONCE here at boot, before the first request — never on an
 /// async worker — and fail-closed by NAME.
 pub fn production_egress_with(
-    provider: Option<&maknae_config::ProviderConfig>,
+    providers: &maknae_config::ProviderSet,
     cfg: &maknae_config::EgressConfig,
     resolve_uid: impl FnOnce(&str) -> Result<Option<u32>, String>,
 ) -> Result<Arc<dyn Egress>, EgressBootRefusal> {
-    if provider.is_none() {
+    if providers.is_empty() {
         return Ok(unavailable_egress());
     }
     let uid = match resolve_uid(EGRESS_USER) {
@@ -270,10 +301,10 @@ pub(crate) fn resolve_account_uid(name: &str) -> Result<Option<u32>, String> {
 
 /// The one production choice, in one place: the real resolver over NSS.
 pub fn production_egress(
-    provider: Option<&maknae_config::ProviderConfig>,
+    providers: &maknae_config::ProviderSet,
     cfg: &maknae_config::EgressConfig,
 ) -> Result<Arc<dyn Egress>, EgressBootRefusal> {
-    production_egress_with(provider, cfg, resolve_account_uid)
+    production_egress_with(providers, cfg, resolve_account_uid)
 }
 
 /// Text only in Cooky (#153, #229). Names the FIRST non-text kind; an empty
@@ -1047,6 +1078,7 @@ mod tests {
                 content_length: 3,
                 content_digest: "a".repeat(32),
                 conversation: "c".into(),
+                model: None,
                 reply_length: None,
                 output_tokens: None,
                 prompt_tokens: None,
@@ -1063,6 +1095,11 @@ mod tests {
             model: "m".into(),
             key_vault_path: "maknae/providers/x".into(),
             key_field: "api-key".into(),
+            sealed_key: maknae_proto::SealedKey::new(vec![
+                0x5a;
+                maknae_proto::SEALED_KEY_MIN_BYTES
+            ])
+            .unwrap(),
             reasoning_effort: None,
             output_tokens: None,
             output_tokens_field: None,
@@ -1073,27 +1110,56 @@ mod tests {
         }
     }
 
-    fn provider() -> maknae_config::ProviderConfig {
-        maknae_config::ProviderConfig {
-            name: "openai".into(),
-            endpoint: "https://api.example.test/v1".into(),
-            model: "m".into(),
-            key_vault_path: "maknae/providers/openai".into(),
-            key_field: "api-key".into(),
-            reasoning_effort: None,
-            output_tokens_field: None,
+    fn set_with(extra: Vec<(String, maknae_config::Value)>) -> maknae_config::ProviderSet {
+        use maknae_config::Value;
+        let mut entry = vec![
+            ("name".to_string(), Value::Str("openai".into())),
+            (
+                "endpoint".to_string(),
+                Value::Str("https://api.example.test/v1".into()),
+            ),
+            (
+                "models".to_string(),
+                Value::Seq(vec![Value::Str("m".into()), Value::Str("m2".into())]),
+            ),
+        ];
+        entry.extend(extra);
+        maknae_config::providers_from_section(Some(&Value::Seq(vec![Value::Map(entry)]))).unwrap()
+    }
+
+    fn set() -> maknae_config::ProviderSet {
+        set_with(vec![])
+    }
+
+    fn chosen(model: &str) -> maknae_proto::ProviderChoice {
+        maknae_proto::ProviderChoice {
+            provider: "openai".into(),
+            model: model.into(),
+            key_subpath: "openai/personal".into(),
+            key_field: "api_key".into(),
+            sealed_key: maknae_proto::SealedKey::new(vec![
+                0x5a;
+                maknae_proto::SEALED_KEY_MIN_BYTES
+            ])
+            .unwrap(),
         }
     }
 
     #[test]
-    fn a_request_for_a_provider_carries_every_registered_field() {
-        let mut p = provider();
-        p.reasoning_effort = Some("none".into());
+    fn a_request_for_a_choice_carries_the_providers_record_the_choices_model_and_the_admitted_path()
+    {
+        let s = set_with(vec![(
+            "reasoning_effort".into(),
+            maknae_config::Value::Str("none".into()),
+        )]);
+        let c = chosen("m2");
+        let a = crate::provider_choice::admit_choice(&s, Some(&c), Some("alice"), "maknae/users")
+            .unwrap();
         let turns = vec![Turn::User {
             content: vec![text("a")],
         }];
-        let r = EgressRequest::for_provider(
-            &p,
+        let r = EgressRequest::for_choice(
+            &a,
             "provider:openai".into(),
             "c".into(),
             turns.clone(),
@@ -1103,10 +1169,11 @@ mod tests {
             r,
             EgressRequest {
                 destination: "provider:openai".into(),
-                endpoint: p.endpoint.clone(),
-                model: p.model.clone(),
-                key_vault_path: p.key_vault_path.clone(),
-                key_field: p.key_field.clone(),
+                endpoint: "https://api.example.test/v1".into(),
+                model: "m2".into(),
+                key_vault_path: "maknae/users/alice/openai/personal".into(),
+                key_field: "api_key".into(),
+                sealed_key: c.sealed_key.clone(),
                 reasoning_effort: Some("none".into()),
                 output_tokens: None,
                 output_tokens_field: None,
@@ -1121,22 +1188,24 @@ mod tests {
     /// backend under `_maknae-egress`'s uid, resolved ONCE at boot and
     /// fail-closed BY NAME when the account is missing or NSS is down.
     #[test]
-    fn production_egress_is_unavailable_without_a_provider_and_the_socket_with_one() {
+    fn production_egress_is_unavailable_with_an_empty_set_and_the_socket_with_one() {
         let cfg = maknae_config::EgressConfig::default();
         let never = |_: &str| -> Result<Option<u32>, String> {
-            panic!("no provider registered: the account must not be resolved")
+            panic!("no providers authorized: the account must not be resolved")
         };
         assert_eq!(
-            production_egress_with(None, &cfg, never).unwrap().ready(),
+            production_egress_with(&maknae_config::ProviderSet::empty(), &cfg, never)
+                .unwrap()
+                .ready(),
             Err(EgressFailure::NotConfigured)
         );
-        let p = provider();
-        match production_egress_with(Some(&p), &cfg, |_| Ok(None)) {
+        let p = set();
+        match production_egress_with(&p, &cfg, |_| Ok(None)) {
             Err(EgressBootRefusal::NoSuchAccount(name)) => assert_eq!(name, EGRESS_USER),
             Err(other) => panic!("a missing account must refuse by name, got {other:?}"),
             Ok(_) => panic!("a missing account must refuse"),
         }
-        match production_egress_with(Some(&p), &cfg, |_| Err("nss down".into())) {
+        match production_egress_with(&p, &cfg, |_| Err("nss down".into())) {
             Err(EgressBootRefusal::Resolve(m)) => assert!(m.contains("nss down"), "{m}"),
             Err(other) => panic!("an NSS failure must refuse, got {other:?}"),
             Ok(_) => panic!("an NSS failure must refuse"),
@@ -1148,7 +1217,7 @@ mod tests {
             socket_path: d.path().join("egress.sock"),
             deadline_ms: 7_000,
         };
-        let b = production_egress_with(Some(&p), &cfg, |name| {
+        let b = production_egress_with(&p, &cfg, |name| {
             assert_eq!(name, EGRESS_USER);
             Ok(Some(4242))
         })
@@ -1186,7 +1255,7 @@ mod tests {
                 EgressFailure::Transport("egress peer is not the expected uid".into())
             );
         }
-        let mine = production_egress_with(Some(&p), &cfg, |_| Ok(Some(me))).unwrap();
+        let mine = production_egress_with(&p, &cfg, |_| Ok(Some(me))).unwrap();
         let e = mine.send(&intent, req()).unwrap_err();
         assert!(
             matches!(e, EgressFailure::AfterSend(_)),
@@ -1216,6 +1285,31 @@ mod tests {
         assert!(!failure_counts_as_expiry(&EgressFailure::AfterSend(
             "x".into()
         )));
+        assert!(!failure_counts_as_expiry(&EgressFailure::RefusedBeforeSend));
+    }
+
+    #[test]
+    fn each_send_failure_maps_to_the_outcome_its_timing_proves() {
+        assert_eq!(
+            outcome_for_failure(&EgressFailure::DeadlineExpired),
+            SendOutcome::DeadlineExpired
+        );
+        assert_eq!(
+            outcome_for_failure(&EgressFailure::AfterSend("x".into())),
+            SendOutcome::OutcomeUnknown
+        );
+        assert_eq!(
+            outcome_for_failure(&EgressFailure::RefusedBeforeSend),
+            SendOutcome::Failed
+        );
+        assert_eq!(
+            outcome_for_failure(&EgressFailure::Transport("x".into())),
+            SendOutcome::Failed
+        );
+        assert_eq!(
+            outcome_for_failure(&EgressFailure::NotConfigured),
+            SendOutcome::Failed
+        );
     }
 
     /// Both refusals render by name — the account, and the resolver's reason.
@@ -1242,9 +1336,9 @@ mod tests {
             resolve_account_uid("no-such-account-maknae-240-test"),
             Ok(None)
         );
-        let p = provider();
+        let p = set();
         let cfg = maknae_config::EgressConfig::default();
-        match production_egress(Some(&p), &cfg) {
+        match production_egress(&p, &cfg) {
             Err(EgressBootRefusal::NoSuchAccount(n)) => {
                 assert_eq!(n, EGRESS_USER);
                 assert_eq!(resolve_account_uid(EGRESS_USER), Ok(None));
@@ -1260,7 +1354,9 @@ mod tests {
         }
         // and no provider never resolves, through the real entry point too
         assert_eq!(
-            production_egress(None, &cfg).unwrap().ready(),
+            production_egress(&maknae_config::ProviderSet::empty(), &cfg)
+                .unwrap()
+                .ready(),
             Err(EgressFailure::NotConfigured)
         );
     }
@@ -1657,26 +1753,33 @@ mod tests {
     }
 
     #[test]
-    fn for_provider_sends_a_reply_cap_only_with_its_field() {
-        let mut p = provider();
-        let at = |p: &maknae_config::ProviderConfig, o| {
-            let r = EgressRequest::for_provider(p, "provider:openai".into(), "c".into(), vec![], o);
+    fn for_choice_sends_a_reply_cap_only_with_its_field() {
+        let at = |s: &maknae_config::ProviderSet, o| {
+            let c = chosen("m");
+            let a =
+                crate::provider_choice::admit_choice(s, Some(&c), Some("alice"), "maknae/users")
+                    .unwrap();
+            let r = EgressRequest::for_choice(&a, "provider:openai".into(), "c".into(), vec![], o);
             (r.output_tokens, r.output_tokens_field)
         };
-        assert_eq!(at(&p, None), (None, None));
+        let plain = set();
+        assert_eq!(at(&plain, None), (None, None));
         assert_eq!(
-            at(&p, Some(9)),
+            at(&plain, Some(9)),
             (
                 Some(9),
                 Some(maknae_proto::OutputTokensField::MaxCompletionTokens)
             )
         );
-        p.output_tokens_field = Some("max_tokens".into());
+        let max_tokens = set_with(vec![(
+            "output_tokens_field".into(),
+            maknae_config::Value::Str("max_tokens".into()),
+        )]);
         assert_eq!(
-            at(&p, Some(9)),
+            at(&max_tokens, Some(9)),
             (Some(9), Some(maknae_proto::OutputTokensField::MaxTokens))
         );
-        assert_eq!(at(&p, None), (None, None));
+        assert_eq!(at(&max_tokens, None), (None, None));
     }
 
     #[test]
@@ -1889,5 +1992,13 @@ mod tests {
                 "identity carried from the intent"
             );
         }
+    }
+
+    #[test]
+    fn an_egress_request_debug_omits_the_key_location_and_the_sealed_key() {
+        assert_eq!(
+            format!("{:?}", req()),
+            r#"EgressRequest { destination: "provider:x", endpoint: "https://api.example.test/v1", model: "m", key_vault_path: "<omitted>", key_field: "<omitted>", sealed_key: "<omitted>", reasoning_effort: None, output_tokens: None, output_tokens_field: None, conversation: "c", turns: <1 turns> }"#
+        );
     }
 }

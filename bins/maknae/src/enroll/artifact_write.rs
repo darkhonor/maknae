@@ -151,9 +151,9 @@ pub fn write_file(
 /// unwritten config file is exactly the failure mode this refuses), so it
 /// fails closed rather than skipping the row. Rows whose content is produced
 /// by an external seal command or the macOS keychain write
-/// (`SealedDaemonSecret`/`SealedCliSecret`/`SealedEgressSecret`) are the
-/// caller's responsibility to exclude from `rows` — they are written by that
-/// step, then ownership-applied via [`apply_ownership_and_mode`] directly.
+/// (`SealedDaemonSecret`, `SealedEgressSealKey`) are the caller's
+/// responsibility to exclude from `rows` — they are written by that step,
+/// then ownership-applied via [`apply_ownership_and_mode`] directly.
 pub fn write_artifacts(
     rows: &[Artifact],
     contents: &BTreeMap<PathBuf, Vec<u8>>,
@@ -290,6 +290,44 @@ mod tests {
     }
 
     #[test]
+    fn a_seal_pub_directory_packaging_created_is_kept_and_an_absent_one_is_created() {
+        let td = TempDir::new("seal-pub-dir");
+        let present = td.0.join("present");
+        std::fs::create_dir(&present).unwrap();
+        std::fs::set_permissions(&present, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(present.join("other"), b"kept").unwrap();
+        let absent = td.0.join("absent/pki");
+        let mut rows = Vec::new();
+        let mut contents = BTreeMap::new();
+        for dir in [&present, &absent] {
+            let file = dir.join("seal.pub");
+            rows.push(Artifact {
+                path: dir.clone(),
+                owner: Owner::RootRoot,
+                mode: 0o755,
+                content: ContentKind::Dir,
+            });
+            rows.push(Artifact {
+                path: file.clone(),
+                owner: Owner::RootRoot,
+                mode: 0o644,
+                content: ContentKind::SealPub,
+            });
+            contents.insert(file, b"pem\n".to_vec());
+        }
+        write_artifacts(&rows, &contents, &NoopOwnerResolver).unwrap();
+        for dir in [&present, &absent] {
+            assert_eq!(std::fs::metadata(dir).unwrap().mode() & 0o777, 0o755);
+            assert_eq!(
+                std::fs::metadata(dir.join("seal.pub")).unwrap().mode() & 0o777,
+                0o644
+            );
+            assert_eq!(std::fs::read(dir.join("seal.pub")).unwrap(), b"pem\n");
+        }
+        assert_eq!(std::fs::read(present.join("other")).unwrap(), b"kept");
+    }
+
+    #[test]
     fn write_file_writes_bytes_and_chmods() {
         let td = TempDir::new("file");
         let target = td.0.join("x.yaml");
@@ -330,15 +368,11 @@ mod tests {
     #[test]
     fn write_artifacts_applies_every_row_of_a_real_table() {
         let td = TempDir::new("full-cli");
-        // Reuse the real CLI half of `artifact_table` (macos=false so it
-        // includes the sealed-secret row, which we deliberately exclude below
-        // — this integration test proves `write_artifacts` handles every OTHER
-        // row of a real table end to end).
         let cli_dir = td.0.join("cli");
         let all = artifact_table(&cli_dir, false, false);
         let cli_rows: Vec<_> = all
             .into_iter()
-            .filter(|a| a.path.starts_with(&cli_dir) && a.content != ContentKind::SealedCliSecret)
+            .filter(|a| a.path.starts_with(&cli_dir))
             .collect();
         let mut contents = BTreeMap::new();
         for row in &cli_rows {

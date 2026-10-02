@@ -17,6 +17,7 @@ mod handler;
 mod mutation;
 mod mutation_exchange;
 mod posture;
+mod provider_choice;
 mod run;
 pub use authz::*;
 pub use blocking_guard::BLOCKING_BREAKER_MAX_IN_FLIGHT;
@@ -28,10 +29,10 @@ pub use boot_gate::{
 pub use ceiling_authz::CeilingAuthorizer;
 pub use composition::Composition;
 pub use egress::{
-    admitted_reply, production_egress, production_egress_with, reply_capacity, reply_text_length,
-    unavailable_egress, DurableEgressIntent, Egress, EgressBootRefusal, EgressFailure, EgressReply,
-    EgressRequest, ReplyRefusal, SendOutcome, Unavailable, EGRESS_MAX_REPLY_FRAME_BYTES,
-    EGRESS_USER,
+    admitted_reply, outcome_for_failure, production_egress, production_egress_with, reply_capacity,
+    reply_text_length, unavailable_egress, DurableEgressIntent, Egress, EgressBootRefusal,
+    EgressFailure, EgressReply, EgressRequest, ReplyRefusal, SendOutcome, Unavailable,
+    EGRESS_MAX_REPLY_FRAME_BYTES, EGRESS_USER,
 };
 pub use egress_socket::SocketEgress;
 pub use groupres::*;
@@ -43,6 +44,9 @@ pub use mutation::AttemptCaps;
 pub use mutation_exchange::{MutationExchange, PendingReport, ReportError};
 pub use posture::{
     determine, CredentialSource, Posture, PostureMarker, MECHANISM_KEYCHAIN, MECHANISM_TPM2,
+};
+pub use provider_choice::{
+    admit_choice, provider_authority, AdmittedChoice, ChoiceRefusal, ProviderAuthority,
 };
 pub use run::{
     accept_loop, handle, handle_with_attempt_caps, run, ConfigView, Conn, PlaneAccept, WhereCtx,

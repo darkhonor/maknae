@@ -62,16 +62,9 @@ pub struct RawDestinations {
 /// under would load and never match, which is the silent-inert grant this
 /// surface exists to refuse. URL patterns are #147's later grammar: refused now.
 pub fn destination_entry_is_acceptable(entry: &str) -> bool {
-    match entry.strip_prefix("provider:") {
-        Some(name) => {
-            !name.is_empty()
-                && name.len() <= crate::provider::MAX_PROVIDER_NAME_BYTES
-                && name
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-        }
-        None => false,
-    }
+    entry
+        .strip_prefix("provider:")
+        .is_some_and(crate::provider_name_is_acceptable)
 }
 
 /// One role's action grants as they appear on disk (#162): the `allow` and
@@ -992,13 +985,10 @@ mod tests {
         assert!(destination_entry_is_acceptable("provider:open-ai_2.0"));
         assert!(!destination_entry_is_acceptable("provider:"));
         // The registration bound applies: an entry no provider can carry never loads.
-        let at = format!(
-            "provider:{}",
-            "n".repeat(crate::provider::MAX_PROVIDER_NAME_BYTES)
-        );
+        let at = format!("provider:{}", "n".repeat(crate::MAX_PROVIDER_NAME_BYTES));
         let over = format!(
             "provider:{}",
-            "n".repeat(crate::provider::MAX_PROVIDER_NAME_BYTES + 1)
+            "n".repeat(crate::MAX_PROVIDER_NAME_BYTES + 1)
         );
         assert!(destination_entry_is_acceptable(&at));
         assert!(!destination_entry_is_acceptable(&over));

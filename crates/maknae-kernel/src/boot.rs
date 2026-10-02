@@ -5,10 +5,10 @@
 //! Maknae reads only its own config; nothing external is read at boot.
 
 use maknae_config::{
-    ceiling_from_core, load_config_rooted, policy_name_from_core, provider_from_section,
+    ceiling_from_core, load_config_rooted, policy_name_from_core, providers_from_section,
     refuse_plaintext_keys, Ceiling, ClassificationPolicy, ConfigError, Document, IngestPosture,
-    ProviderConfig, SectionSpec, Value, AUDIT_SECTION, EGRESS_SECTION, PRINCIPAL_SECTION,
-    PROVIDER_SECTION, TRANSPORT_SECTION,
+    ProviderSet, SectionSpec, Value, AUDIT_SECTION, EGRESS_SECTION, PRINCIPAL_SECTION,
+    PROVIDERS_SECTION, TRANSPORT_SECTION,
 };
 use maknae_vault::VAULT_SECTION;
 use std::path::Path;
@@ -24,12 +24,10 @@ pub struct BootConfig {
     document: Document,
     ceiling: Ceiling,
     policy: &'static dyn ClassificationPolicy,
-    provider: Option<ProviderConfig>,
+    providers: ProviderSet,
 }
 
-/// The sections whose contributing source must be root-controlled (#243;
-/// ADR-0023 decision 3). One today; a name, not a mechanism.
-const ROOT_REQUIRED_SECTIONS: [&str; 1] = [PROVIDER_SECTION];
+const ROOT_REQUIRED_SECTIONS: [&str; 1] = [PROVIDERS_SECTION];
 
 impl std::fmt::Debug for BootConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -37,7 +35,7 @@ impl std::fmt::Debug for BootConfig {
             .field("document", &self.document)
             .field("ceiling", &self.ceiling)
             .field("policy", &self.policy.name())
-            .field("provider", &self.provider)
+            .field("providers", &self.providers)
             .finish()
     }
 }
@@ -65,10 +63,12 @@ impl BootConfig {
         self.policy.name()
     }
 
-    /// The one registered model provider (#243), or `None` — a deployment with
-    /// no provider boots, and its loop has nothing to prompt.
-    pub fn provider(&self) -> Option<&ProviderConfig> {
-        self.provider.as_ref()
+    pub fn providers(&self) -> &ProviderSet {
+        &self.providers
+    }
+
+    pub fn shadowed_sections<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a Value> + 'a {
+        self.document.shadowed_sections(name)
     }
 
     /// The full loaded document — handed to `PlaneClient::from_document` so the daemon
@@ -133,7 +133,7 @@ fn boot_specs() -> [SectionSpec; 7] {
             required: false,
         },
         SectionSpec {
-            name: PROVIDER_SECTION.to_string(),
+            name: PROVIDERS_SECTION.to_string(),
             required: false,
         },
         SectionSpec {
@@ -176,18 +176,15 @@ fn assemble_boot(document: Document) -> Result<BootConfig, ConfigError> {
     let policy = crate::classification::select(&name)
         .ok_or(ConfigError::UnknownClassificationPolicy { name })?;
     let ceiling = ceiling_from_core(core, policy)?;
-    // Every contribution to the provider section is checked for a pasted
-    // key, not only the winner: a base block a root-owned config.d member
-    // shadows would otherwise carry a credential that precedence hid.
-    for shadowed in document.shadowed_sections(PROVIDER_SECTION) {
+    for shadowed in document.shadowed_sections(PROVIDERS_SECTION) {
         refuse_plaintext_keys(shadowed)?;
     }
-    let provider = provider_from_section(document.section(PROVIDER_SECTION))?;
+    let providers = providers_from_section(document.section(PROVIDERS_SECTION))?;
     Ok(BootConfig {
         document,
         ceiling,
         policy,
-        provider,
+        providers,
     })
 }
 
@@ -654,7 +651,6 @@ mod tests {
             Err(maknae_config::ConfigError::Symlink { .. })
         ));
     }
-    // ---- #243: the provider registration, through the hermetic root door.
     #[cfg(unix)]
     fn me() -> maknae_io::TargetRequired {
         maknae_io::TargetRequired {
@@ -666,59 +662,67 @@ mod tests {
         }
     }
     #[cfg(unix)]
-    // #308: `key_vault_path` is mount-relative and `key_field` is required, and
-    // the model is the pinned test model (maintainer ruling 2026-09-13). This
-    // fixture also carried the pre-#307 SINGULAR `maknae/provider/...`, which
-    // matched neither Terraform's `maknae/providers` default nor any other
-    // fixture; both are corrected here.
-    const PROVIDER_BLOCK: &str = "provider:\n  name: openai\n  endpoint: https://api.openai.com/v1\n  model: gpt-5.6-luna\n  key_vault_path: maknae/providers/openai\n  key_field: api-key\n";
+    const PROVIDERS_BLOCK: &str = "providers:\n  - name: openai\n    endpoint: https://api.openai.com/v1\n    models: [gpt-5.6-luna, gpt-5.6]\n";
 
     #[cfg(unix)]
     #[test]
-    fn a_registered_provider_is_carried_and_an_absent_one_is_none() {
-        let d = new_dir("provider");
+    fn an_authorized_set_is_carried_and_an_absent_one_is_empty() {
+        let d = new_dir("providers");
         put(
             &d.0,
             "maknae.yaml",
             "core:\n  identity:\n    name: t\n",
             0o640,
         );
-        assert_eq!(boot_with_requirement(&d.0, me()).unwrap().provider(), None);
+        assert!(boot_with_requirement(&d.0, me())
+            .unwrap()
+            .providers()
+            .is_empty());
         put(
             &d.0,
             "maknae.yaml",
-            &format!("core:\n  identity:\n    name: t\n{PROVIDER_BLOCK}"),
+            &format!("core:\n  identity:\n    name: t\n{PROVIDERS_BLOCK}"),
             0o640,
         );
         let cfg = boot_with_requirement(&d.0, me()).unwrap();
-        let p = cfg.provider().expect("registered");
+        let p = cfg.providers().get("openai").expect("authorized");
         assert_eq!(
+            (p.endpoint.as_str(), p.models.clone()),
             (
-                p.name.as_str(),
-                p.endpoint.as_str(),
-                p.model.as_str(),
-                p.key_vault_path.as_str(),
-                p.key_field.as_str()
-            ),
-            (
-                "openai",
                 "https://api.openai.com/v1",
-                "gpt-5.6-luna",
-                "maknae/providers/openai",
-                "api-key"
+                vec!["gpt-5.6-luna".to_string(), "gpt-5.6".to_string()]
             )
         );
+        assert_eq!(cfg.providers().len(), 1);
         assert!(format!("{cfg:?}").contains("openai"));
     }
 
     #[cfg(unix)]
     #[test]
-    fn a_pasted_key_refuses_boot_by_its_field_name() {
-        let d = new_dir("provider-key");
+    fn the_retired_root_provider_block_is_refused_by_name() {
+        let d = new_dir("provider-retired");
         put(
             &d.0,
             "maknae.yaml",
-            &format!("core: {{}}\n{PROVIDER_BLOCK}  api_key: sk-live\n"),
+            "core: {}\nprovider:\n  name: openai\n  endpoint: https://api.openai.com/v1\n",
+            0o640,
+        );
+        match boot_with_requirement(&d.0, me()) {
+            Err(maknae_config::ConfigError::UnknownSection { section, .. }) => {
+                assert_eq!(section, "provider")
+            }
+            other => panic!("expected UnknownSection naming provider, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pasted_key_in_an_entry_refuses_boot_by_its_field_name() {
+        let d = new_dir("providers-key");
+        put(
+            &d.0,
+            "maknae.yaml",
+            &format!("core: {{}}\n{PROVIDERS_BLOCK}    api_key: sk-live\n"),
             0o640,
         );
         match boot_with_requirement(&d.0, me()) {
@@ -731,38 +735,35 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_provider_registered_through_config_d_is_verified_at_its_own_file() {
-        let d = new_dir("provider-cd");
+    fn a_set_authorized_through_config_d_is_verified_at_its_own_file() {
+        let d = new_dir("providers-cd");
         put(&d.0, "maknae.yaml", "core: {}\n", 0o640);
         let cd = d.0.join("config.d");
         std::fs::create_dir(&cd).unwrap();
         std::fs::set_permissions(&cd, std::fs::Permissions::from_mode(0o750)).unwrap();
-        put(&cd, "10-provider.yaml", PROVIDER_BLOCK, 0o640);
-        assert!(boot_with_requirement(&d.0, me())
+        put(&cd, "10-providers.yaml", PROVIDERS_BLOCK, 0o640);
+        assert!(!boot_with_requirement(&d.0, me())
             .unwrap()
-            .provider()
-            .is_some());
-        // A mode the requirement refuses on the MEMBER itself (0o660 against
-        // mask 0o022), with both directories passing: the member is named.
-        put(&cd, "10-provider.yaml", PROVIDER_BLOCK, 0o660);
+            .providers()
+            .is_empty());
+        put(&cd, "10-providers.yaml", PROVIDERS_BLOCK, 0o660);
         match boot_with_requirement(&d.0, me()) {
             Err(maknae_config::ConfigError::SectionNotRootOwned { section, path }) => {
-                assert_eq!(section, "provider");
-                assert!(path.ends_with("config.d/10-provider.yaml"), "{path}");
+                assert_eq!(section, "providers");
+                assert!(path.ends_with("config.d/10-providers.yaml"), "{path}");
             }
             other => panic!("expected SectionNotRootOwned naming the member, got {other:?}"),
         }
-        // An owner mismatch refuses at the root directory first and names it.
         let wrong = maknae_io::TargetRequired {
             owner: Some(nix::unistd::geteuid().as_raw().wrapping_add(1)),
             ..me()
         };
-        put(&cd, "10-provider.yaml", PROVIDER_BLOCK, 0o640);
+        put(&cd, "10-providers.yaml", PROVIDERS_BLOCK, 0o640);
         match boot_with_requirement(&d.0, wrong) {
             Err(maknae_config::ConfigError::SectionNotRootOwned { section, path }) => {
-                assert_eq!(section, "provider");
+                assert_eq!(section, "providers");
                 assert!(
-                    path.ends_with("provider-cd"),
+                    path.ends_with("providers-cd"),
                     "the root directory is named: {path}"
                 );
             }
@@ -770,48 +771,98 @@ mod tests {
         }
     }
 
-    /// A pasted key in a base provider block that a config.d member shadows is
-    /// still refused: precedence does not launder a credential out of the file.
     #[cfg(unix)]
     #[test]
-    fn a_shadowed_provider_block_with_a_pasted_key_still_refuses_boot() {
-        let d = new_dir("provider-shadow");
+    fn a_shadowed_providers_entry_with_a_pasted_key_still_refuses_boot() {
+        let d = new_dir("providers-shadow");
         put(
             &d.0,
             "maknae.yaml",
-            "core: {}\nprovider:\n  api_key: sk-live\n",
+            "core: {}\nproviders:\n  - name: openai\n    api_key: sk-live\n",
             0o640,
         );
         let cd = d.0.join("config.d");
         std::fs::create_dir(&cd).unwrap();
         std::fs::set_permissions(&cd, std::fs::Permissions::from_mode(0o750)).unwrap();
-        put(&cd, "10-provider.yaml", PROVIDER_BLOCK, 0o640);
+        put(&cd, "10-providers.yaml", PROVIDERS_BLOCK, 0o640);
         match boot_with_requirement(&d.0, me()) {
             Err(maknae_config::ConfigError::ProviderPlaintextKey { field }) => {
                 assert_eq!(field, "api_key")
             }
-            other => panic!("expected ProviderPlaintextKey from the shadowed block, got {other:?}"),
+            other => panic!("expected ProviderPlaintextKey from the shadowed entry, got {other:?}"),
         }
     }
 
-    /// The PRODUCTION `boot()` refuses a provider block the test user owns —
-    /// the custody property, proven on every unprivileged lane.
     #[cfg(unix)]
     #[test]
-    fn production_boot_refuses_a_provider_block_the_subject_owns() {
-        if nix::unistd::geteuid().is_root() {
-            return;
-        }
-        let d = new_dir("provider-prod");
+    fn a_shadowed_providers_block_written_as_a_map_with_a_pasted_key_still_refuses_boot() {
+        let d = new_dir("providers-shadow-map");
         put(
             &d.0,
             "maknae.yaml",
-            &format!("core: {{}}\n{PROVIDER_BLOCK}"),
+            "core: {}\nproviders:\n  token: sk-live\n",
+            0o640,
+        );
+        let cd = d.0.join("config.d");
+        std::fs::create_dir(&cd).unwrap();
+        std::fs::set_permissions(&cd, std::fs::Permissions::from_mode(0o750)).unwrap();
+        put(&cd, "10-providers.yaml", PROVIDERS_BLOCK, 0o640);
+        match boot_with_requirement(&d.0, me()) {
+            Err(maknae_config::ConfigError::ProviderPlaintextKey { field }) => {
+                assert_eq!(field, "token")
+            }
+            other => panic!("expected ProviderPlaintextKey from the shadowed map, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn production_boot_refuses_a_providers_block_the_subject_owns() {
+        if nix::unistd::geteuid().is_root() {
+            return;
+        }
+        let d = new_dir("providers-prod");
+        put(
+            &d.0,
+            "maknae.yaml",
+            &format!("core: {{}}\n{PROVIDERS_BLOCK}"),
             0o640,
         );
         assert!(matches!(
             boot(&d.0),
             Err(maknae_config::ConfigError::SectionNotRootOwned { .. })
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_shadowed_root_vault_block_naming_the_user_key_layout_reaches_the_root_vault_gate() {
+        let d = new_dir("vault-shadow");
+        put(
+            &d.0,
+            "maknae.yaml",
+            "core: {}\nvault:\n  addr: https://vault.example:8200\n  kv_mount: maknae-kv\n",
+            0o640,
+        );
+        let cd = d.0.join("config.d");
+        std::fs::create_dir(&cd).unwrap();
+        std::fs::set_permissions(&cd, std::fs::Permissions::from_mode(0o750)).unwrap();
+        put(
+            &cd,
+            "10-vault.yaml",
+            "vault:\n  addr: https://vault.example:8200\n",
+            0o640,
+        );
+        let boot = boot_with_requirement(&d.0, me()).unwrap();
+        assert_eq!(
+            crate::boot_gate::root_vault_boot_gate(boot.section(VAULT_SECTION)),
+            Ok(())
+        );
+        assert_eq!(
+            boot.shadowed_sections(VAULT_SECTION)
+                .map(|v| crate::boot_gate::root_vault_boot_gate(Some(v)))
+                .collect::<Vec<_>>(),
+            [Err(crate::boot_gate::RootVaultKeyRefused("kv_mount"))]
+        );
     }
 }

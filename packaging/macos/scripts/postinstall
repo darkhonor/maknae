@@ -19,7 +19,7 @@ MGID="$(plutil -extract MaknaeGID raw -o - "$RECEIPT" 2>/dev/null || echo 0)"
 # overwrites, so the shipped defaults are staged OUTSIDE /etc and copied in only
 # when absent. `maknae enroll` rewrites maknae.yaml in place with the real
 # deployment id, vault addr, transport.socket_path and the principal block
-# (bins/maknae/src/enroll/mod.rs:1428-1436); authz.yaml carries the operator's DAC
+# (bins/maknae/src/enroll/mod.rs, build_daemon_yaml); authz.yaml carries the operator's DAC
 # policy. Overwriting either on upgrade would silently de-enroll the host.
 # FAIL CLOSED on the load-bearing controls (PR #287 review, blocking finding 2).
 # The original form wrapped every ownership/mode repair and both chflags calls in

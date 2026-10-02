@@ -1,7 +1,7 @@
 //! The chat-completions call (#240b) — the I/O half of `wire`.
 //!
 //! Split from `wire.rs` for the reason this crate's siblings split
-//! (`secret_io`/`secret_source`, `kv_io`/`kv`): the MAPPING is a decision worth
+//! (`secret_io`/`secret_source`): the MAPPING is a decision worth
 //! mutation-testing, and this is a network call that no unit test should stand
 //! in for. It is exercised by a hermetic OpenAI-compatible stub server, which
 //! is what #240's scope specifies.

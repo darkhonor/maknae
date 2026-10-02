@@ -31,21 +31,9 @@ variable "leaf_ttl_seconds" {
   default     = 259200
 }
 
-variable "token_ttl" {
-  type        = number
-  description = "Token TTL for the SHORT-LIVED CLI token (the `maknae` role): the CLI token lives at most this long and dies with the invocation (no background renewal). The `maknaed` daemon token is periodic (var.token_period) and does not use this. Default 20m."
-  default     = 1200
-}
-
-variable "token_max_ttl" {
-  type        = number
-  description = "Token max TTL for the SHORT-LIVED CLI token (the `maknae` role), in seconds. The `maknaed` daemon uses a periodic token (var.token_period) with NO max-TTL ceiling instead (ADR-0018). Default 24h."
-  default     = 86400
-}
-
 variable "token_period" {
   type        = number
-  description = "Period for the `maknaed` daemon's PERIODIC token (ADR-0018): the token renews indefinitely as long as it is renewed within each period and is never force-expired by a max-TTL ceiling — only genuine Vault failure or revocation fails it closed. A shorter period tightens custody (a leaked/orphaned token dies sooner after the last renewal) at the cost of transient-outage tolerance; longer favors availability. Mirrors the retired 24h operational cadence as a renewable floor. Only the daemon role is periodic; the CLI token stays short-lived. Seconds. Default 24h."
+  description = "Period for the `maknaed` daemon's PERIODIC token (ADR-0018): the token renews indefinitely as long as it is renewed within each period and is never force-expired by a max-TTL ceiling — only genuine Vault failure or revocation fails it closed. A shorter period tightens custody (a leaked/orphaned token dies sooner after the last renewal) at the cost of transient-outage tolerance; longer favors availability. Mirrors the retired 24h operational cadence as a renewable floor. Seconds. Default 24h."
   default     = 86400
 
   # Fail closed on the one invariant-breaking value: token_period = 0 makes the daemon
@@ -59,10 +47,10 @@ variable "token_period" {
 }
 
 # NOTE: there is deliberately NO `secret_id_ttl` variable. A standing SecretID (ttl=0) is an
-# ADR-0018 invariant for BOTH roles, so it is HARD-CODED to 0 in main.tf rather than exposed
+# ADR-0018 invariant for the `maknaed` role, so it is HARD-CODED to 0 in main.tf rather than exposed
 # as a variable — an advisory default would let a stale `terraform.tfvars` / `TF_VAR_secret_id_ttl`
-# override silently reintroduce a time-expiring SecretID and break hands-free reboot / standing
-# CLI login. secret_id_num_uses=0 is likewise hard-coded. (Fail closed, not advisory.)
+# override silently reintroduce a time-expiring SecretID and break hands-free reboot.
+# secret_id_num_uses=0 is likewise hard-coded. (Fail closed, not advisory.)
 
 variable "root_mount_path" {
   type        = string
@@ -82,50 +70,48 @@ variable "approle_path" {
   default     = "maknae-approle"
 }
 
-variable "provider_key_prefix" {
-  description = <<-EOT
-    KV v2 path prefix, RELATIVE to kv_mount_path, under which provider API keys
-    live. #240a.
-
-    MUST equal `key_vault_path_prefix` in /etc/maknae/egress-bounds.yaml.
-    NOTHING CHECKS THAT FOR YOU — see the bottom of this description. Since #308
-    it is at least a plain string comparison rather than a transformation.
-    Before #308 this variable was mount-relative while the configuration value
-    was mount-absolute AND carried the KV v2 `data/` segment: two coordinate
-    systems for one value, required to "match". That is what made #307's
-    singular/plural defect invisible — the two host-side values agreed with each
-    other, the boot gate compares only those two and never this grant, so the
-    daemon booted clean and took a 403 at the credential read.
-
-    Now: this value, `egress-bounds.yaml`'s `key_vault_path_prefix`, and every
-    `provider.key_vault_path` are all mount-relative and `data/`-free. The mount
-    is `kv_mount_path` here and `kv_mount` in egress-bounds.yaml; `data/` is
-    synthesized by the reader and appears in no configuration file.
-
-    WHAT IS ACTUALLY ENFORCED, AND WHERE. Two relations, and only one of them is
-    checked by anything (corrected 2026-09-13 — this description previously
-    concluded "a mismatch is a boot refusal", which is true of only one of them
-    and promised a guarantee the system does not provide):
-
-      1. this value EQUALS egress-bounds.yaml's key_vault_path_prefix
-         -> enforced NOWHERE. No component in the boot path reads Terraform or
-            the Vault policy, so a mismatch here boots cleanly and surfaces as a
-            403 at the credential read. This is #307's mechanism and #308 did not
-            remove it; it is an operator obligation with no automated check.
-
-      2. each provider.key_vault_path is STRICTLY BENEATH that prefix
-         -> enforced AT BOOT by maknae-kernel's egress_bounds_boot_gate, which
-            refuses OutsideBounds and names both values, and re-checked by the
-            deputy on every frame at use. "Strictly beneath" means at least one
-            further segment: maknae/providers/openai is inside maknae/providers,
-            and a path EQUAL to the prefix is OUTSIDE it and is refused.
-  EOT
+variable "user_prefix" {
+  description = "KV v2 path prefix, relative to kv_mount_path, under which each Vault user owns <user_prefix>/<username>/*. Must equal user_prefix in /etc/maknae/egress-bounds.yaml."
   type        = string
-  default     = "maknae/providers"
+  default     = "maknae/users"
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$", var.user_prefix)) && !contains(split("/", var.user_prefix), ".") && !contains(split("/", var.user_prefix), "..") && !contains(split("/", var.user_prefix), "data") && length(var.user_prefix) <= 256
+    error_message = "user_prefix must be 1-256 bytes of '/'-separated [A-Za-z0-9._-] segments, with no empty, '.', '..' or 'data' segment and no leading or trailing '/'."
+  }
+}
+
+variable "userpass_mount" {
+  description = "Userpass auth mount path for local users. Must equal vault.user_auth.mount in maknae.yaml."
+  type        = string
+  default     = "maknae-userpass"
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$", var.userpass_mount)) && !contains(split("/", var.userpass_mount), ".") && !contains(split("/", var.userpass_mount), "..") && split("/", var.userpass_mount)[0] != "auth" && length(var.userpass_mount) <= 256
+    error_message = "userpass_mount must be 1-256 bytes of '/'-separated [A-Za-z0-9._-] segments, with no empty, '.' or '..' segment, no leading or trailing '/', and no leading 'auth' segment (write the bare mount name)."
+  }
+}
+
+variable "maknae_users" {
+  description = "Local users to create in the userpass mount, keyed by local username. Increment password_version to replace that user's password with a new random one."
+  type = map(object({
+    password_version = number
+  }))
+  default = {}
+
+  validation {
+    condition     = alltrue([for name in keys(var.maknae_users) : can(regex("^[a-z0-9_]([a-z0-9._-]{0,30}[a-z0-9_])?$", name)) && name != "data"])
+    error_message = "Each maknae_users key must be 1-32 bytes of [a-z0-9._-], starting and ending with [a-z0-9_], and not 'data': Vault userpass lower-cases usernames, and maknaed derives the key path from the local username and refuses a 'data' segment in it."
+  }
 }
 
 variable "kv_mount_path" {
-  description = "Mount path of the KV v2 engine holding platform secrets (the provider API key, #243)."
+  description = "Mount path of the KV v2 engine holding each user's provider API keys. Must equal kv_mount in /etc/maknae/egress-bounds.yaml."
   type        = string
   default     = "maknae-kv"
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$", var.kv_mount_path)) && !contains(split("/", var.kv_mount_path), ".") && !contains(split("/", var.kv_mount_path), "..") && !contains(split("/", var.kv_mount_path), "data") && length(var.kv_mount_path) <= 256
+    error_message = "kv_mount_path must be 1-256 bytes of '/'-separated [A-Za-z0-9._-] segments, with no empty, '.', '..' or 'data' segment and no leading or trailing '/'."
+  }
 }

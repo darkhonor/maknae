@@ -12,10 +12,10 @@ User=_maknae-egress
 # passed — --bind is also the macOS launchd job's path, and a test asserts
 # this unit carries none.
 ExecStart=/usr/bin/maknae-egress
-# systemd (root) TPM-decrypts the sealed SecretID into $CREDENTIALS_DIRECTORY
+# systemd (root) TPM-decrypts the sealed seal key into $CREDENTIALS_DIRECTORY
 # (0400, _maknae-egress-only, memory-backed). Name pinned: enroll seals
-# --name=maknae-egress-secret-id.
-LoadCredentialEncrypted=maknae-egress-secret-id:/etc/maknae/private/maknae-egress-secret-id.cred
+# --name=maknae-egress-seal-key.
+LoadCredentialEncrypted=maknae-egress-seal-key:/etc/maknae/private/maknae-egress-seal-key.cred
 # #240b: DefaultEnvironment= (system.conf) and `systemctl set-environment` reach
 # every unit, and a proxied estate sets HTTPS_PROXY that way as routine practice.
 # reqwest honours the proxy variables by default and vaultrs fills VAULT_* from

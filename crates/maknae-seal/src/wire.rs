@@ -66,6 +66,17 @@ mod tests {
     }
 
     #[test]
+    fn the_proto_sealed_key_bounds_are_the_blob_bounds() {
+        assert_eq!(
+            (
+                maknae_proto::SEALED_KEY_MIN_BYTES,
+                maknae_proto::SEALED_KEY_MAX_BYTES
+            ),
+            (MIN_SEALED_LEN, MAX_SEALED_LEN)
+        );
+    }
+
+    #[test]
     fn a_blob_splits_into_ephemeral_nonce_and_sealed_bytes() {
         let mut b = blob(MIN_SEALED_LEN);
         b[EPHEMERAL_KEY_LEN] = 0xEE;

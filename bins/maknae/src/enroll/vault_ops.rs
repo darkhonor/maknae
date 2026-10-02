@@ -1,19 +1,14 @@
 //! Thin calls over `maknae_vault::OperatorClient` for the Vault operations
 //! `maknae enroll` needs (spec §4.1 step 3). No ordering/rollback/rotate
-//! decision logic of its own — `mod.rs` owns that; this module just names the
-//! two roles once and wraps the client's four ops for enroll's specific shape.
+//! decision logic of its own — `mod.rs` owns that; this module names the one
+//! role enroll provisions and wraps the client's ops for enroll's shape.
 use maknae_vault::{OperatorClient, VaultError};
 use zeroize::Zeroizing;
 
 /// The daemon's AppRole (Terraform `maknaed`, spec §4.5).
 pub const DAEMON_ROLE: &str = "maknaed";
-/// The CLI's AppRole (Terraform `maknae`, spec §4.5).
-pub const CLI_ROLE: &str = "maknae";
-/// The egress deputy's AppRole (Terraform `maknae-egress`, #240b) — the third
-/// plane. Named once, in `maknae-vault`, and consumed here.
-pub const EGRESS_ROLE: &str = maknae_vault::EGRESS_APPROLE_ROLE;
-/// The roles enroll provisions, in the order it reads and mints them.
-pub const ROLES: [&str; 3] = [DAEMON_ROLE, CLI_ROLE, EGRESS_ROLE];
+/// The roles enroll provisions.
+pub const ROLES: [&str; 1] = [DAEMON_ROLE];
 
 /// A minted SecretID + its accessor, tagged with the role it belongs to — what
 /// `enroll-state.yaml` records and rollback/rotate destroy by.
@@ -23,18 +18,21 @@ pub struct MintedSecret {
     pub accessor: String,
 }
 
-/// Read all three RoleIDs (`maknaed`, `maknae`, `maknae-egress`) — non-secret
-/// identifiers, safe to write into the new deployment's config.
-pub async fn read_role_ids(
+/// Read the daemon's RoleID — a non-secret identifier, safe to write into its config.
+pub async fn read_daemon_role_id(
     client: &OperatorClient,
     mount: &str,
-) -> Result<(String, String, String), VaultError> {
-    let [daemon, cli, egress] = ROLES;
-    Ok((
-        client.read_role_id(mount, daemon).await?,
-        client.read_role_id(mount, cli).await?,
-        client.read_role_id(mount, egress).await?,
-    ))
+) -> Result<String, VaultError> {
+    client.read_role_id(mount, DAEMON_ROLE).await
+}
+
+/// The recorded accessors whose role enroll still provisions.
+pub fn still_provisioned(records: &[(String, String)]) -> Vec<(String, String)> {
+    records
+        .iter()
+        .filter(|(role, _)| ROLES.contains(&role.as_str()))
+        .cloned()
+        .collect()
 }
 
 /// Mint a new SecretID for `role`, tagged for `enroll-state.yaml`/rollback.
@@ -127,16 +125,27 @@ fn split_pem_certs(joined: &str) -> Vec<&str> {
 
 #[cfg(test)]
 mod tests {
-    /// #240b: the third role is the one `deploy/vault-pki` creates, named ONCE
-    /// in maknae-vault and consumed here — not a second literal that could
-    /// drift from the deputy's own constant.
+    use super::*;
+
     #[test]
-    fn the_three_roles_are_the_terraform_roles_in_enroll_order() {
-        assert_eq!(super::ROLES, ["maknaed", "maknae", "maknae-egress"]);
-        assert_eq!(super::EGRESS_ROLE, maknae_vault::EGRESS_APPROLE_ROLE);
+    fn enroll_provisions_only_the_daemon_role() {
+        assert_eq!(ROLES, ["maknaed"]);
     }
 
-    use super::*;
+    #[test]
+    fn only_a_still_provisioned_roles_accessor_is_kept_for_destruction() {
+        let r = |role: &str, acc: &str| (role.to_string(), acc.to_string());
+        assert_eq!(
+            still_provisioned(&[
+                r("maknaed", "acc-1"),
+                r("maknae", "acc-2"),
+                r("maknae-egress", "acc-3")
+            ]),
+            vec![r("maknaed", "acc-1")]
+        );
+        assert!(still_provisioned(&[r("maknae", "acc-2")]).is_empty());
+        assert!(still_provisioned(&[]).is_empty());
+    }
 
     fn cert(tag: &str) -> String {
         format!("{PEM_BEGIN}\n{tag}\n{PEM_END}\n")
@@ -181,7 +190,7 @@ mod tests {
         // Pure-shape check: an empty record set never calls into Vault at all
         // (no live client available in this unit-test tier — T3), so this only
         // asserts `split_ca_chain`'s error/ok shape is exercised above; the
-        // async `destroy_all`/`mint_secret`/`read_role_ids` I/O paths are
+        // async `destroy_all`/`mint_secret`/`read_daemon_role_id` I/O paths are
         // exercised by the gated live test (`tests/live_operator.rs` precedent
         // in `maknae-vault`), documented in the task report.
         assert!(split_ca_chain("x").is_err());

@@ -21,9 +21,8 @@ pub(crate) const SUBJECT_UID: &str = "uid";
 /// Resource attribute key for `fs.*` (spec §4.4).
 pub(crate) const RESOURCE_PATH: &str = "path";
 /// Resource attribute carrying the resolved egress destination of a
-/// `session.prompt` (#172): `provider:<name>`, the provider registered at boot
-/// (#243). Set by the kernel, never the client; absent means "no provider
-/// registered", which the arm refuses.
+/// `session.prompt` (#172): `provider:<name>` from the admitted provider choice.
+/// Set by the kernel, never the client; the arm refuses it absent.
 pub(crate) const RESOURCE_DESTINATION: &str = "destination";
 
 /// One loaded policy snapshot: the parsed grammar + validated bindings.
@@ -291,7 +290,7 @@ fn decide_prompt(lp: &LoadedPolicy, req: &SecRequest, role_key: &str) -> Verdict
         Some(_) => return Verdict::Indeterminate,
         None => {
             return Verdict::Deny {
-                reason: "no provider registered for session.prompt".into(),
+                reason: "no destination on session.prompt".into(),
             }
         }
     };
@@ -1370,13 +1369,12 @@ mod tests {
     }
 
     #[test]
-    fn prompt_with_no_registered_provider_is_a_deny_and_a_non_string_destination_is_indeterminate()
-    {
+    fn prompt_with_no_destination_is_a_deny_and_a_non_string_destination_is_indeterminate() {
         let lp = lp_prompt(USER_PROMPT, USER_OPENAI);
         assert_eq!(
             decide_loaded(&lp, &principal(), &prompt_req(1002, None)),
             Verdict::Deny {
-                reason: "no provider registered for session.prompt".into()
+                reason: "no destination on session.prompt".into()
             }
         );
         let mut r = prompt_req(1002, None);

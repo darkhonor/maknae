@@ -1,7 +1,7 @@
 [package]
 name = "maknae-deputy"
 publish.workspace = true
-description = "The egress deputy's decisions: admission, the credential cache, fulfilment."
+description = "The egress deputy's decisions: admission, the sealed-key opener seam, fulfilment."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

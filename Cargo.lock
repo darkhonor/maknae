@@ -1034,10 +1034,10 @@ dependencies = [
  "maknae-io",
  "maknae-msgs",
  "maknae-proto",
+ "maknae-seal",
  "maknae-vault",
  "nix",
  "rpassword",
- "security-framework",
  "tokio",
  "yaml-rust2",
  "zeroize",
@@ -1118,6 +1118,7 @@ dependencies = [
  "maknae-config",
  "maknae-deputy",
  "maknae-proto",
+ "maknae-seal",
  "maknae-vault",
  "nix",
  "tempfile",
@@ -1206,6 +1207,7 @@ name = "maknae-seal"
 version = "0.0.0"
 dependencies = [
  "aws-lc-rs",
+ "maknae-proto",
  "pem",
  "zeroize",
 ]
@@ -1254,6 +1256,7 @@ dependencies = [
  "maknae-config",
  "maknae-io",
  "maknae-plane",
+ "maknae-seal",
  "nix",
  "rcgen",
  "reqwest",

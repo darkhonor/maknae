@@ -147,6 +147,7 @@ impl Plane for FixturePlane {
                     conversation: conversation.into(),
                     turns: turns.to_vec(),
                     output_tokens: None,
+                    choice: Some(common::test_choice()),
                 },
                 None,
             )

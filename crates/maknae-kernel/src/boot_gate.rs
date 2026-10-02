@@ -126,32 +126,13 @@ impl std::fmt::Display for SiemOffloadUnsupported {
     }
 }
 
-/// Fail closed when the config promises offload the daemon cannot perform.
-///
-/// **Pure predicate, deliberately here and not in `run.rs`.** `run.rs` is T3 and
-/// mutation-excluded — it is orchestration, and its decisions live in the T1
-/// files — so a refusal decision placed there would never be mutation-tested.
-///
-/// **Deliberately not in the parser either.** Erroring during parse would make
-/// `AuditConfig.siem == Some(_)` unreachable at runtime, stranding the
-/// `document.rs` disclosure-mask logic the key is retained for (operator ruling
-/// 2026-09-05: the key stays, reserved for #223). Parse normally; refuse here.
-/// Why a registered provider's Vault path is not startable.
+/// Why an authorized provider set is not startable.
 #[derive(Debug, PartialEq, Eq)]
 pub enum EgressBoundsRefusal {
-    /// A provider is registered but the deputy's grant is not declared: the
-    /// bounds file is absent or could not be read. The content path exists
-    /// with no stated bound on it, so the daemon refuses.
+    /// Providers are authorized but `egress-bounds.yaml` is absent or could not be read.
     Undeclared(String),
-    /// The bounds file WAS read and its parser refused it (#240b) — a missing
-    /// `vault` block, an unknown key. Its own variant so the refusal says so,
-    /// rather than sending the operator to check permissions that are fine.
+    /// The bounds file's parser refused it, or this gate's own `user_prefix`/`vault.addr` check did.
     Refused(String),
-    /// The registered path sits outside the prefix the deputy's Vault policy
-    /// grants. Discovering this at BOOT is the point: the alternative is a
-    /// successful start and a refusal on the first live request, long after
-    /// the operator's typo.
-    OutsideBounds { path: String, prefix: String },
 }
 
 impl std::fmt::Display for EgressBoundsRefusal {
@@ -159,34 +140,17 @@ impl std::fmt::Display for EgressBoundsRefusal {
         match self {
             EgressBoundsRefusal::Undeclared(e) => write!(
                 f,
-                "a provider is registered but {} could not be read: {e}",
+                "providers are authorized but {} could not be read: {e}",
                 maknae_config::EGRESS_BOUNDS_FILE
             ),
             EgressBoundsRefusal::Refused(e) => write!(
                 f,
-                "a provider is registered but the egress bounds were refused — {e}"
-            ),
-            EgressBoundsRefusal::OutsideBounds { path, prefix } => write!(
-                f,
-                "registered provider key_vault_path '{path}' is outside the egress grant prefix '{prefix}'"
+                "providers are authorized but the egress bounds were refused — {e}"
             ),
         }
     }
 }
 
-/// Validate the registered provider against the deputy's declared bounds, at
-/// boot (#240a D5-E).
-///
-/// PURE: the caller loads. The bounds file is root-owned, so a loading gate
-/// could not be unit-tested at all — the same `secret_io`/`secret_source`
-/// split the crate uses elsewhere, applied to a boot decision.
-///
-/// No provider registered means no content can leave and nothing to check.
-/// With one registered, the bounds file MUST exist and MUST contain the
-/// provider's path: the deputy validates the same thing again at use, but the
-/// boot check is the more valuable half, because it catches the operator's
-/// typo before anything runs rather than turning it into a confusing refusal
-/// on a live request.
 /// Which refusal a failed bounds LOAD is (#240b). Pure, over the loader's own
 /// error taxonomy, so the mapping is tested with real values rather than
 /// inferred from a variant name (round 8 of self-review: an absent file is
@@ -211,38 +175,48 @@ pub fn classify_bounds_load_error(e: maknae_config::ConfigError) -> EgressBounds
 }
 
 pub fn egress_bounds_boot_gate(
-    provider: Option<&maknae_config::ProviderConfig>,
+    providers: &maknae_config::ProviderSet,
     bounds: Option<&maknae_config::EgressBounds>,
 ) -> Result<(), EgressBoundsRefusal> {
-    let Some(p) = provider else {
+    if providers.is_empty() {
         return Ok(());
-    };
-    // Since #240b `run.rs` refuses a failed load itself and only ever passes
-    // `Some` here with a provider; this arm is the pure gate's own contract
-    // (a library caller may pass `None`), kept so the gate never admits an
-    // undeclared bound on its own.
+    }
     let Some(b) = bounds else {
         return Err(EgressBoundsRefusal::Undeclared(format!(
             "{} is absent or unreadable",
             maknae_config::EGRESS_BOUNDS_FILE
         )));
     };
-    if !maknae_config::path_is_within_prefix(&p.key_vault_path, &b.key_vault_path_prefix) {
-        return Err(EgressBoundsRefusal::OutsideBounds {
-            path: p.key_vault_path.clone(),
-            prefix: b.key_vault_path_prefix.clone(),
-        });
+    if let Err(why) = maknae_config::kv_fragment_is_acceptable(&b.user_prefix) {
+        return Err(EgressBoundsRefusal::Refused(format!("user_prefix {why}")));
     }
-    // The deputy's Vault address is validated at BOOT too (#240b, round 8):
-    // the config crate deliberately checks only shape ("one validator"), and
-    // "discovering this at boot is the point" applies to a plaintext scheme
-    // as much as to a path outside the grant.
+    if !maknae_config::vault_path_is_safe(&b.user_prefix) {
+        return Err(EgressBoundsRefusal::Refused(
+            "user_prefix has a character outside [A-Za-z0-9._/-]".into(),
+        ));
+    }
+    if b.user_prefix.len() > maknae_config::MAX_USER_PREFIX_BYTES {
+        return Err(EgressBoundsRefusal::Refused(format!(
+            "user_prefix exceeds {} bytes",
+            maknae_config::MAX_USER_PREFIX_BYTES
+        )));
+    }
     if let Err(e) = maknae_vault::validate_vault_addr(&b.vault_addr) {
         return Err(EgressBoundsRefusal::Refused(format!("vault.addr: {e}")));
     }
     Ok(())
 }
 
+/// Fail closed when the config promises offload the daemon cannot perform.
+///
+/// **Pure predicate, deliberately here and not in `run.rs`.** `run.rs` is T3 and
+/// mutation-excluded — it is orchestration, and its decisions live in the T1
+/// files — so a refusal decision placed there would never be mutation-tested.
+///
+/// **Deliberately not in the parser either.** Erroring during parse would make
+/// `AuditConfig.siem == Some(_)` unreachable at runtime, stranding the
+/// `document.rs` disclosure-mask logic the key is retained for (operator ruling
+/// 2026-09-05: the key stays, reserved for #223). Parse normally; refuse here.
 pub fn audit_offload_boot_gate(
     cfg: &maknae_config::AuditConfig,
 ) -> Result<(), SiemOffloadUnsupported> {
@@ -252,84 +226,115 @@ pub fn audit_offload_boot_gate(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RootVaultKeyRefused(pub &'static str);
+
+impl std::fmt::Display for RootVaultKeyRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "vault.{0} in the root maknae.yaml is not read by maknaed: set {0} in {1}",
+            self.0,
+            maknae_config::EGRESS_BOUNDS_FILE
+        )
+    }
+}
+
+pub fn root_vault_boot_gate(
+    vault: Option<&maknae_config::Value>,
+) -> Result<(), RootVaultKeyRefused> {
+    let Some(maknae_config::Value::Map(entries)) = vault else {
+        return Ok(());
+    };
+    match ["kv_mount", "user_prefix"]
+        .into_iter()
+        .find(|key| entries.iter().any(|(k, _)| k.as_str() == *key))
+    {
+        Some(key) => Err(RootVaultKeyRefused(key)),
+        None => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // ---- #240a D5-E: the egress bounds boot gate -------------------------
 
-    fn provider(key_vault_path: &str) -> maknae_config::ProviderConfig {
-        maknae_config::ProviderConfig {
-            name: "openai".into(),
-            endpoint: "https://api.example.test/v1".into(),
-            model: "m".into(),
-            key_vault_path: key_vault_path.into(),
-            key_field: "api-key".into(),
-            reasoning_effort: None,
-            output_tokens_field: None,
-        }
+    fn set() -> maknae_config::ProviderSet {
+        use maknae_config::Value;
+        maknae_config::providers_from_section(Some(&Value::Seq(vec![Value::Map(vec![
+            ("name".into(), Value::Str("openai".into())),
+            (
+                "endpoint".into(),
+                Value::Str("https://api.example.test/v1".into()),
+            ),
+            ("models".into(), Value::Seq(vec![Value::Str("m".into())])),
+        ])])))
+        .unwrap()
     }
 
-    fn bounds(prefix: &str) -> maknae_config::EgressBounds {
+    fn bounds(user_prefix: &str) -> maknae_config::EgressBounds {
         maknae_config::EgressBounds {
             kv_mount: "maknae-kv".into(),
-            key_vault_path_prefix: prefix.into(),
+            user_prefix: user_prefix.into(),
             vault_addr: "https://vault.example:8200".into(),
-            approle_mount: None,
         }
     }
 
-    /// No provider means no content can leave: nothing to bound, nothing to
-    /// refuse. The gate must not invent a requirement where there is no
-    /// egress path at all.
     #[test]
-    fn no_registered_provider_needs_no_bounds() {
-        assert_eq!(super::egress_bounds_boot_gate(None, None), Ok(()));
+    fn no_authorized_provider_needs_no_bounds() {
+        let empty = maknae_config::ProviderSet::empty();
+        assert_eq!(super::egress_bounds_boot_gate(&empty, None), Ok(()));
         assert_eq!(
-            super::egress_bounds_boot_gate(None, Some(&bounds("x-provider"))),
+            super::egress_bounds_boot_gate(&empty, Some(&bounds("/not a fragment"))),
             Ok(())
         );
     }
 
-    /// A registered provider inside the declared grant starts.
     #[test]
-    fn a_registered_provider_within_the_grant_boots() {
+    fn an_authorized_set_with_sound_bounds_boots() {
         assert_eq!(
-            super::egress_bounds_boot_gate(
-                Some(&provider("maknae/providers/openai")),
-                Some(&bounds("maknae/providers")),
-            ),
+            super::egress_bounds_boot_gate(&set(), Some(&bounds("maknae/users"))),
+            Ok(())
+        );
+        let at = "u".repeat(maknae_config::MAX_USER_PREFIX_BYTES);
+        assert_eq!(
+            super::egress_bounds_boot_gate(&set(), Some(&bounds(&at))),
             Ok(())
         );
     }
 
-    /// THE gate. A path outside the grant refuses at BOOT rather than on the
-    /// first live request — and a sibling that merely begins with the prefix
-    /// is outside it.
     #[test]
-    fn a_registered_provider_outside_the_grant_refuses_to_boot() {
+    fn an_authorized_set_refuses_a_user_prefix_that_is_not_a_mount_relative_fragment() {
         for bad in [
-            "secret/data/other/openai",
-            "secret/data/maknae/providers-evil/openai",
+            "",
+            "/maknae/users",
+            "maknae/users/",
+            "maknae-kv/data/maknae/users",
+            "maknae/../users",
+            "maknae users",
+            "maknae/us%rs",
+            "maknae/üsers",
+            "maknae/{users}",
         ] {
-            match super::egress_bounds_boot_gate(
-                Some(&provider(bad)),
-                Some(&bounds("maknae/providers")),
-            ) {
-                Err(super::EgressBoundsRefusal::OutsideBounds { path, prefix }) => {
-                    assert_eq!(path, bad);
-                    assert_eq!(prefix, "maknae/providers");
+            match super::egress_bounds_boot_gate(&set(), Some(&bounds(bad))) {
+                Err(super::EgressBoundsRefusal::Refused(m)) => {
+                    assert!(m.starts_with("user_prefix "), "{bad:?}: {m}")
                 }
-                other => panic!("expected a boot refusal for {bad}, got {other:?}"),
+                other => panic!("expected Refused for {bad:?}, got {other:?}"),
             }
         }
+        let over = "u".repeat(maknae_config::MAX_USER_PREFIX_BYTES + 1);
+        match super::egress_bounds_boot_gate(&set(), Some(&bounds(&over))) {
+            Err(super::EgressBoundsRefusal::Refused(m)) => assert!(m.contains("exceeds"), "{m}"),
+            other => panic!("expected an over-length refusal, got {other:?}"),
+        }
     }
 
-    /// A registered provider with NO declared bounds refuses: a content path
-    /// exists with no stated bound on it. Fail closed, never fail open.
     #[test]
-    fn a_registered_provider_with_undeclared_bounds_refuses_to_boot() {
-        match super::egress_bounds_boot_gate(Some(&provider("maknae/providers/openai")), None) {
+    fn an_authorized_set_with_undeclared_bounds_refuses_to_boot() {
+        match super::egress_bounds_boot_gate(&set(), None) {
             Err(super::EgressBoundsRefusal::Undeclared(m)) => {
-                assert!(m.contains(maknae_config::EGRESS_BOUNDS_FILE) || !m.is_empty())
+                assert!(m.contains(maknae_config::EGRESS_BOUNDS_FILE), "{m}")
             }
             other => panic!("expected an undeclared-bounds refusal, got {other:?}"),
         }
@@ -337,17 +342,16 @@ mod tests {
 
     #[test]
     fn both_refusals_render_actionably() {
+        let u = super::EgressBoundsRefusal::Undeclared("no such file".into()).to_string();
         assert!(
-            super::EgressBoundsRefusal::Undeclared("no such file".into())
-                .to_string()
-                .contains("registered")
+            u.contains("authorized") && u.contains("could not be read"),
+            "{u}"
         );
-        assert!(super::EgressBoundsRefusal::OutsideBounds {
-            path: "a/b".into(),
-            prefix: "c/d".into()
-        }
-        .to_string()
-        .contains("outside the egress grant prefix"));
+        let r = super::EgressBoundsRefusal::Refused("user_prefix is empty".into()).to_string();
+        assert!(
+            r.contains("authorized") && r.contains("user_prefix is empty"),
+            "{r}"
+        );
     }
 
     use super::*;
@@ -682,9 +686,9 @@ mod tests {
     /// not a first-request failure in the deputy.
     #[test]
     fn a_plaintext_vault_addr_in_the_bounds_is_refused_at_boot() {
-        let mut b = bounds("maknae/providers");
+        let mut b = bounds("maknae/users");
         b.vault_addr = "http://vault.example:8200".into();
-        match super::egress_bounds_boot_gate(Some(&provider("maknae/providers/openai")), Some(&b)) {
+        match super::egress_bounds_boot_gate(&set(), Some(&b)) {
             Err(super::EgressBoundsRefusal::Refused(m)) => assert!(m.contains("vault.addr"), "{m}"),
             other => panic!("expected a Refused naming vault.addr, got {other:?}"),
         }
@@ -736,10 +740,10 @@ mod tests {
     fn the_egress_backend_is_selected_after_the_bounds_gate_and_before_the_vault_mint() {
         let run_rs = include_str!("run.rs");
         let gate = run_rs
-            .find("egress_bounds_boot_gate(boot.provider()")
+            .find("egress_bounds_boot_gate(boot.providers()")
             .expect("the egress-bounds gate call moved or was renamed");
         let select = run_rs
-            .find("production_egress(boot.provider(), &egress_cfg)")
+            .find("production_egress(boot.providers(), &egress_cfg)")
             .expect("the egress backend selection moved or was renamed");
         let mint = run_rs
             .find(".mint()")
@@ -755,7 +759,7 @@ mod tests {
     fn the_egress_bounds_gate_is_called_before_the_vault_mint() {
         let run_rs = include_str!("run.rs");
         let gate = run_rs
-            .find("egress_bounds_boot_gate(boot.provider()")
+            .find("egress_bounds_boot_gate(boot.providers()")
             .expect("the egress-bounds gate call moved or was renamed");
         let mint = run_rs
             .find(".mint()")
@@ -765,6 +769,60 @@ mod tests {
             "the egress-bounds gate must run BEFORE mint(): a post-mint refusal \
              leaves the privileged kernel-plane token live until lease expiry \
              unless it routes through the unconditional revoke"
+        );
+    }
+
+    #[test]
+    fn a_root_vault_block_naming_the_user_key_layout_refuses_boot_and_points_at_the_bounds_file() {
+        use maknae_config::Value;
+        let block = |extra: &[(&str, &str)]| {
+            let mut m = vec![(
+                "addr".to_string(),
+                Value::Str("https://vault.example:8200".into()),
+            )];
+            m.extend(
+                extra
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), Value::Str((*v).into()))),
+            );
+            Value::Map(m)
+        };
+        assert_eq!(super::root_vault_boot_gate(None), Ok(()));
+        assert_eq!(super::root_vault_boot_gate(Some(&block(&[]))), Ok(()));
+        assert_eq!(
+            super::root_vault_boot_gate(Some(&block(&[("kv_mount", "maknae-kv")]))),
+            Err(super::RootVaultKeyRefused("kv_mount"))
+        );
+        assert_eq!(
+            super::root_vault_boot_gate(Some(&block(&[("user_prefix", "maknae/users")]))),
+            Err(super::RootVaultKeyRefused("user_prefix"))
+        );
+        assert_eq!(
+            super::RootVaultKeyRefused("user_prefix").to_string(),
+            "vault.user_prefix in the root maknae.yaml is not read by maknaed: set user_prefix in egress-bounds.yaml"
+        );
+    }
+
+    #[test]
+    fn the_root_vault_gate_runs_before_the_vault_mint() {
+        let run_rs = include_str!("run.rs");
+        const GATE: &str = "root_vault_boot_gate(boot.section(maknae_vault::VAULT_SECTION))";
+        const SHADOWED: &str = "for shadowed in boot.shadowed_sections(maknae_vault::VAULT_SECTION) {\n        crate::boot_gate::root_vault_boot_gate(Some(shadowed))";
+        const MINT: &str = "    client\n        .mint()\n        .await\n";
+        assert_eq!(run_rs.matches(GATE).count(), 1, "the root vault gate call");
+        assert_eq!(
+            run_rs.matches(SHADOWED).count(),
+            1,
+            "the shadowed vault gate loop"
+        );
+        assert_eq!(run_rs.matches(MINT).count(), 1, "the vault mint call");
+        let gate = run_rs.find(GATE).unwrap();
+        let shadowed = run_rs.find(SHADOWED).unwrap();
+        let mint = run_rs.find(MINT).unwrap();
+        assert!(gate < mint, "the root vault gate must run before mint()");
+        assert!(
+            shadowed < mint,
+            "the shadowed vault gate must run before mint()"
         );
     }
 }

@@ -98,6 +98,7 @@ install -D -m 0640 %{SOURCE9} %{buildroot}%{_sysconfdir}/maknae/maknae.yaml
 install -d -m 0750 %{buildroot}%{_sysconfdir}/maknae/private
 # #240b: the deputy's credential set dir (files written by `maknae enroll`).
 install -d -m 0750 %{buildroot}%{_sysconfdir}/maknae/egress
+install -d -m 0755 %{buildroot}%{_sysconfdir}/pki/maknae
 install -d -m 0700 %{buildroot}%{_localstatedir}/log/maknae
 # audit.jsonl is NOT a payload file — it is %ghost, created first-install-only in
 # %post (a payload file under the chattr +a dir would fail to replace on upgrade).
@@ -111,7 +112,7 @@ install -d -m 0700 %{buildroot}%{_localstatedir}/log/maknae
 %systemd_post maknaed.service maknae-egress.service maknae-egress.socket
 # SELinux module + contexts
 semodule -i %{_datadir}/selinux/packages/maknae.pp 2>/dev/null || :
-restorecon -Rv %{_bindir}/maknaed %{_bindir}/maknae-egress %{_sysconfdir}/maknae %{_localstatedir}/log/maknae 2>/dev/null || :
+restorecon -Rv %{_bindir}/maknaed %{_bindir}/maknae-egress %{_sysconfdir}/maknae %{_sysconfdir}/pki/maknae %{_localstatedir}/log/maknae 2>/dev/null || :
 # #240b (D3): the egress deputy is in neither root nor _maknae, and the config
 # loader refuses any world bit on /etc/maknae, so it reaches the dir by a user
 # ACL granting `rx` — `r` because maknae-io opens the directory
@@ -171,6 +172,7 @@ fi
 %config(noreplace) %attr(0640,root,_maknae) %{_sysconfdir}/maknae/maknae.yaml
 %dir %attr(0750,root,_maknae) %{_sysconfdir}/maknae/private
 %dir %attr(0750,root,_maknae-egress) %{_sysconfdir}/maknae/egress
+%dir %attr(0755,root,root) %{_sysconfdir}/pki/maknae
 %dir %attr(0700,_maknae,_maknae) %{_localstatedir}/log/maknae
 %ghost %attr(0640,_maknae,_maknae) %{_localstatedir}/log/maknae/audit.jsonl
 

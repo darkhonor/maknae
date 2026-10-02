@@ -4,31 +4,27 @@
 //! deputy is willing to do with a frame once it has one. The split is the
 //! crate convention — `peercred`/`peer_identity`, `secret_io`/`secret_source`.
 //!
-//! What is re-checked here and what is not: the key path is held inside the
-//! deputy's own bounds (the one thing the deputy alone knows); the endpoint's
+//! What is re-checked here and what is not: the key path is held inside
+//! `user_prefix`, defence in depth that names a kernel bug (the binding bound is
+//! the unsealed wrapping token's creation-path check, which the seal's AAD also
+//! binds); the endpoint's
 //! scheme and host are NOT re-checked — that decision is the kernel's, the
 //! PDP, over root-owned configuration (`maknae-config`'s
 //! `endpoint_is_acceptable`: HTTPS anywhere, HTTP to loopback only), and the
 //! deputy originates nothing (ADR-0023 decision 3).
 
+use crate::unseal::{open_request, OpenRequest};
 use maknae_config::EgressBounds;
 use maknae_proto::EgressFrameRequest;
 
 /// Why the deputy refused a frame. Each variant refuses rather than carrying
 /// on — there is no "carry on anyway" arm in `decide`.
 ///
-/// *(Scoped 2026-09-22, #344: this said "Every variant is a refusal the kernel
-/// SEES". The kernel does not see which variant: `serve_one` turns a `Refusal`
-/// into `ServeError::Refused` and returns through `?` before writing any
-/// reply, so the deputy renders the named diagnostic to its own stderr in
-/// `main.rs` and the kernel records the exchange's failure. The names below
-/// are for the operator reading that stderr, and for the reader of this
-/// file.)*
+/// The kernel sees only `RefusedBeforeSend`; the variant goes to the deputy's stderr.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
-    /// The frame named a Vault path outside the deputy's granted prefix. The
-    /// Vault policy is the real bound; this turns a kernel BUG into a named
-    /// refusal instead of a confusing Vault 403.
+    /// The frame named a Vault path outside `user_prefix`: defence in depth naming
+    /// a kernel bug; the binding bound is the wrapping token's creation-path check.
     KeyPathOutsideBounds,
     /// The frame's Vault path is not a well-formed KV fragment — a `.` or `..`
     /// segment, whitespace, an empty segment. The prefix test alone accepts
@@ -67,7 +63,7 @@ pub enum Refusal {
 ///
 /// ```compile_fail,E0451
 /// fn forge(req: &maknae_proto::EgressFrameRequest) -> maknae_deputy::handle::Admitted<'_> {
-///     maknae_deputy::handle::Admitted { req }
+///     maknae_deputy::handle::Admitted { req, open: unimplemented!() }
 /// }
 /// ```
 ///
@@ -79,11 +75,16 @@ pub enum Refusal {
 #[derive(Debug)]
 pub struct Admitted<'a> {
     req: &'a EgressFrameRequest,
+    open: OpenRequest<'a>,
 }
 
 impl<'a> Admitted<'a> {
     pub fn request(&self) -> &'a EgressFrameRequest {
         self.req
+    }
+
+    pub fn open_request(&self) -> &OpenRequest<'a> {
+        &self.open
     }
 }
 
@@ -96,7 +97,7 @@ impl<'a> Admitted<'a> {
 /// on it, and the absence of any such path here is that property.
 pub fn decide<'a>(
     req: &'a EgressFrameRequest,
-    bounds: &EgressBounds,
+    bounds: &'a EgressBounds,
 ) -> Result<Admitted<'a>, Refusal> {
     if !maknae_proto::egress_frame_request_is_acceptable(req) {
         return Err(Refusal::MalformedFrame);
@@ -119,7 +120,7 @@ pub fn decide<'a>(
     {
         return Err(Refusal::MalformedFrame);
     }
-    if !maknae_config::path_is_within_prefix(&req.key_vault_path, &bounds.key_vault_path_prefix) {
+    if !maknae_config::path_is_within_prefix(&req.key_vault_path, &bounds.user_prefix) {
         return Err(Refusal::KeyPathOutsideBounds);
     }
     // #264 review round 4: the CONTENT judgement belongs here, not in
@@ -172,7 +173,8 @@ pub fn decide<'a>(
     }) {
         return Err(Refusal::NoTextToSend);
     }
-    Ok(Admitted { req })
+    let open = open_request(req, bounds)?;
+    Ok(Admitted { req, open })
 }
 
 #[cfg(test)]
@@ -180,12 +182,13 @@ mod tests {
     use super::*;
     use maknae_proto::{ContentBlock, SecretText, Turn};
 
+    const ALICE: &str = "maknae/users/alice/openai/personal";
+
     fn bounds() -> EgressBounds {
         EgressBounds {
             kv_mount: "maknae-kv".into(),
-            key_vault_path_prefix: "maknae/providers".into(),
+            user_prefix: "maknae/users".into(),
             vault_addr: "https://vault.example:8200".into(),
-            approle_mount: None,
         }
     }
 
@@ -195,7 +198,7 @@ mod tests {
             endpoint: "https://api.example.test/v1".into(),
             model: "m".into(),
             key_vault_path: key_vault_path.into(),
-            key_field: "api-key".into(),
+            key_field: "api_key".into(),
             reasoning_effort: None,
             conversation: "conv1".into(),
             turns: vec![Turn::User {
@@ -205,21 +208,51 @@ mod tests {
             }],
             output_tokens: None,
             output_tokens_field: None,
+            sealed_key: maknae_proto::SealedKey::new(vec![7u8; maknae_proto::SEALED_KEY_MIN_BYTES])
+                .unwrap(),
         }
     }
 
-    /// The `compile_fail` doctest on `Admitted` constructs it as `Admitted { req }`;
-    /// this keeps that literal valid inside the crate, so privacy is what fails it.
     #[test]
     fn admitted_holds_the_frame_in_req() {
-        let f = req("maknae/providers/openai");
-        let a = Admitted { req: &f };
+        let f = req(ALICE);
+        let b = bounds();
+        let a = Admitted {
+            req: &f,
+            open: open_request(&f, &b).unwrap(),
+        };
         assert!(std::ptr::eq(a.request(), &f));
+        assert_eq!(a.open_request().provider, "openai");
     }
 
     #[test]
     fn a_frame_within_bounds_is_accepted() {
-        assert!(decide(&req("maknae/providers/openai"), &bounds()).is_ok());
+        assert!(decide(&req(ALICE), &bounds()).is_ok());
+    }
+
+    #[test]
+    fn an_admitted_frame_carries_the_open_request_for_its_own_destination_and_mount() {
+        let f = req(ALICE);
+        let b = bounds();
+        let a = decide(&f, &b).unwrap();
+        let o = a.open_request();
+        assert_eq!(
+            [o.provider, o.kv_mount, o.key_vault_path, o.key_field],
+            ["openai", "maknae-kv", ALICE, "api_key"]
+        );
+    }
+
+    #[test]
+    fn a_destination_that_is_not_a_provider_name_is_refused_by_decide() {
+        for bad in ["openai", "provider:", "provider:open ai"] {
+            let mut r = req(ALICE);
+            r.destination = bad.into();
+            assert_eq!(
+                decide(&r, &bounds()).map(|_| ()),
+                Err(Refusal::MalformedFrame),
+                "{bad}"
+            );
+        }
     }
 
     /// The containment check, from the deputy's side. A sibling path that
@@ -228,7 +261,7 @@ mod tests {
     fn a_key_path_outside_the_prefix_is_refused_by_name() {
         // well-formed fragments (the malformed ones are refused by name
         // first, in their own test) that merely begin with, or miss, the prefix
-        for bad in ["maknae/providers-evil/key", "other/key"] {
+        for bad in ["maknae/users-evil/alice/key", "other/key", "maknae/users"] {
             assert_eq!(
                 decide(&req(bad), &bounds()).unwrap_err(),
                 Refusal::KeyPathOutsideBounds
@@ -242,7 +275,7 @@ mod tests {
     fn a_key_field_with_whitespace_or_over_length_is_a_malformed_frame() {
         let long = "f".repeat(maknae_config::MAX_KEY_FIELD_BYTES + 1);
         for bad in ["api key", long.as_str()] {
-            let mut r = req("maknae/providers/openai");
+            let mut r = req(ALICE);
             r.key_field = bad.into();
             assert_eq!(
                 decide(&r, &bounds()).map(|_| ()),
@@ -250,7 +283,7 @@ mod tests {
                 "{bad}"
             );
         }
-        let mut ok = req("maknae/providers/openai");
+        let mut ok = req(ALICE);
         ok.key_field = "f".repeat(maknae_config::MAX_KEY_FIELD_BYTES);
         assert!(decide(&ok, &bounds()).is_ok());
     }
@@ -259,7 +292,7 @@ mod tests {
     fn a_reasoning_effort_the_config_would_refuse_is_a_malformed_frame() {
         let long = "e".repeat(maknae_config::MAX_REASONING_EFFORT_BYTES + 1);
         for bad in ["None", "low medium", long.as_str()] {
-            let mut r = req("maknae/providers/openai");
+            let mut r = req(ALICE);
             r.reasoning_effort = Some(bad.into());
             assert_eq!(
                 decide(&r, &bounds()).map(|_| ()),
@@ -267,26 +300,26 @@ mod tests {
                 "{bad}"
             );
         }
-        let mut ok = req("maknae/providers/openai");
+        let mut ok = req(ALICE);
         ok.reasoning_effort = Some("none".into());
         assert!(decide(&ok, &bounds()).is_ok());
     }
 
     #[test]
     fn a_reply_cap_the_kernel_would_refuse_is_a_malformed_frame() {
-        let mut zero = req("maknae/providers/openai");
+        let mut zero = req(ALICE);
         zero.output_tokens = Some(0);
         assert_eq!(
             decide(&zero, &bounds()).map(|_| ()),
             Err(Refusal::MalformedFrame)
         );
-        let mut orphan = req("maknae/providers/openai");
+        let mut orphan = req(ALICE);
         orphan.output_tokens_field = Some(maknae_proto::OutputTokensField::MaxTokens);
         assert_eq!(
             decide(&orphan, &bounds()).map(|_| ()),
             Err(Refusal::MalformedFrame)
         );
-        let mut ok = req("maknae/providers/openai");
+        let mut ok = req(ALICE);
         ok.output_tokens = Some(4_096);
         ok.output_tokens_field = Some(maknae_proto::OutputTokensField::MaxTokens);
         assert!(decide(&ok, &bounds()).is_ok());
@@ -297,9 +330,9 @@ mod tests {
     #[test]
     fn a_dot_segment_under_the_prefix_is_refused_as_malformed_not_admitted() {
         for bad in [
-            "maknae/providers/../../secret",
-            "maknae/providers/./x",
-            "maknae/providers//x",
+            "maknae/users/alice/../../secret",
+            "maknae/users/alice/./x",
+            "maknae/users/alice//x",
         ] {
             assert_eq!(
                 decide(&req(bad), &bounds()).map(|_| ()),
@@ -311,7 +344,7 @@ mod tests {
 
     #[test]
     fn a_malformed_frame_is_refused_before_the_bounds_check() {
-        let mut r = req("maknae/providers/openai");
+        let mut r = req(ALICE);
         r.turns.clear();
         assert_eq!(decide(&r, &bounds()).unwrap_err(), Refusal::MalformedFrame);
     }
@@ -447,7 +480,7 @@ mod tests {
             ),
         ];
         for (name, turns, want) in cases {
-            let mut f = req("maknae/providers/openai");
+            let mut f = req(ALICE);
             f.turns = turns;
             assert_eq!(decide(&f, &bounds()).unwrap_err(), want, "{name}");
         }
@@ -485,7 +518,7 @@ mod tests {
                 ],
             ),
         ] {
-            let mut f = req("maknae/providers/openai");
+            let mut f = req(ALICE);
             f.turns = turns;
             assert!(decide(&f, &bounds()).is_ok(), "{name} must be admitted");
         }

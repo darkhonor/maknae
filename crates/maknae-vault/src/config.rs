@@ -20,7 +20,9 @@ pub const VAULT_SECTION: &str = "vault";
 pub const DEFAULT_APPROLE_MOUNT: &str = "maknae-approle";
 pub const DEFAULT_PKI_INT_MOUNT: &str = "maknae-pki-int";
 
-pub const DEFAULT_USERPASS_MOUNT: &str = "userpass";
+pub const DEFAULT_USERPASS_MOUNT: &str = "maknae-userpass";
+
+pub const EGRESS_VAULT_CA_FILE: &str = "vault-ca.crt";
 
 pub(crate) const USER_AUTH_KEYS: [&str; 2] = ["type", "mount"];
 
@@ -122,13 +124,15 @@ pub fn user_auth_from_value(user_auth: Option<&Value>) -> Result<UserAuth, Vault
 
 /// #210: the keys this section's parser reads — the closed vocabulary, held
 /// EQUAL to `VaultConfig`'s fields by a test below.
-pub(crate) const VAULT_KEYS: [&str; 6] = [
+pub(crate) const VAULT_KEYS: [&str; 8] = [
     "addr",
     "approle_mount",
     "pki_int_mount",
     "deployment_id",
     "insecure_plaintext_secret_path",
     "user_auth",
+    "kv_mount",
+    "user_prefix",
 ];
 
 /// The non-sensitive Vault settings.
@@ -146,6 +150,8 @@ pub struct VaultConfig {
     /// in has no plaintext fallback at all (fail closed).
     pub insecure_plaintext_secret_path: Option<PathBuf>,
     pub user_auth: UserAuthConfig,
+    pub kv_mount: Option<String>,
+    pub user_prefix: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,6 +180,38 @@ fn get_value<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
         Value::Map(entries) => entries.iter().find(|(k, _)| k == key).map(|(_, val)| val),
         _ => None,
     }
+}
+
+fn kv_location(
+    vault: &Value,
+    key: &str,
+    name: &'static str,
+    refuse: fn(String) -> VaultError,
+) -> Result<Option<String>, VaultError> {
+    let value = match get_value(vault, key) {
+        None => return Ok(None),
+        Some(Value::Str(s)) => s,
+        Some(_) => {
+            return Err(VaultError::ConfigShape {
+                key: name,
+                want: "a string",
+            })
+        }
+    };
+    if value.len() > maknae_config::MAX_USER_PREFIX_BYTES {
+        return Err(refuse(format!(
+            "{name} exceeds {} bytes",
+            maknae_config::MAX_USER_PREFIX_BYTES
+        )));
+    }
+    maknae_config::kv_fragment_is_acceptable(value)
+        .map_err(|why| refuse(format!("{name} {why}")))?;
+    if !maknae_config::vault_path_is_safe(value) {
+        return Err(refuse(format!(
+            "{name} has a character outside [A-Za-z0-9._/-]"
+        )));
+    }
+    Ok(Some(value.clone()))
 }
 
 /// Pull a string value out of a `Value::Map` by key. `Value` exposes no accessor.
@@ -288,6 +326,18 @@ pub fn vault_config_from_document(doc: &Document) -> Result<VaultConfig, VaultEr
     let insecure_plaintext_secret_path =
         get_str(vault, "insecure_plaintext_secret_path").map(PathBuf::from);
     let user_auth = UserAuthConfig::from(&user_auth_from_value(get_value(vault, "user_auth"))?);
+    let kv_mount = kv_location(
+        vault,
+        "kv_mount",
+        "vault.kv_mount",
+        VaultError::InvalidMount,
+    )?;
+    let user_prefix = kv_location(
+        vault,
+        "user_prefix",
+        "vault.user_prefix",
+        VaultError::InvalidKeyVaultPath,
+    )?;
     Ok(VaultConfig {
         addr,
         deployment_id,
@@ -295,6 +345,8 @@ pub fn vault_config_from_document(doc: &Document) -> Result<VaultConfig, VaultEr
         pki_int_mount,
         insecure_plaintext_secret_path,
         user_auth,
+        kv_mount,
+        user_prefix,
     })
 }
 
@@ -681,7 +733,7 @@ mod tests {
     #[test]
     fn user_auth_the_type_is_required_and_the_mount_defaults() {
         let a = user_auth_from_value(Some(&ua_map(&[("type", ua_str("userpass"))]))).unwrap();
-        assert_eq!(a.mount(), "userpass");
+        assert_eq!(a.mount(), "maknae-userpass");
         let a = user_auth_from_value(Some(&ua_map(&[
             ("type", ua_str("userpass")),
             ("mount", ua_str("corp-userpass")),
@@ -801,7 +853,7 @@ mod tests {
     }
 
     #[test]
-    fn vault_user_auth_defaults_to_userpass_on_userpass() {
+    fn vault_user_auth_defaults_to_userpass_on_maknae_userpass() {
         let d = TempDir::new("ua-default");
         d.write(
             "maknae.yaml",
@@ -812,7 +864,7 @@ mod tests {
             c.user_auth,
             UserAuthConfig {
                 r#type: "userpass".into(),
-                mount: "userpass".into()
+                mount: "maknae-userpass".into()
             }
         );
         assert_eq!(c.user_auth.resolve().unwrap(), UserAuth::userpass_default());
@@ -888,6 +940,95 @@ mod tests {
                 r#type: "userpass".into(),
                 mount: "corp".into()
             }
+        );
+    }
+
+    #[test]
+    fn the_user_key_location_is_optional_and_read_beside_addr() {
+        let d = TempDir::new("kvloc-absent");
+        d.write(
+            "maknae.yaml",
+            "core:\n  deployment_id: dev-01\nvault:\n  addr: https://v.example:8200\n",
+        );
+        let c = load_vault_config(&d.0).unwrap();
+        assert_eq!(c.kv_mount, None);
+        assert_eq!(c.user_prefix, None);
+        let d = TempDir::new("kvloc-present");
+        d.write(
+            "maknae.yaml",
+            "core:\n  deployment_id: dev-01\nvault:\n  addr: https://v.example:8200\n  kv_mount: maknae-kv\n  user_prefix: maknae/users\n",
+        );
+        let c = load_vault_config(&d.0).unwrap();
+        assert_eq!(c.kv_mount.as_deref(), Some("maknae-kv"));
+        assert_eq!(c.user_prefix.as_deref(), Some("maknae/users"));
+    }
+
+    #[test]
+    fn a_bad_user_key_location_refuses_the_whole_vault_config_naming_its_key() {
+        let max = maknae_config::MAX_USER_PREFIX_BYTES;
+        let at = "p".repeat(max);
+        let cases: Vec<(&str, String, String)> = vec![
+            (
+                "kv-lead",
+                "  kv_mount: /maknae-kv\n".into(),
+                "invalid Vault mount: vault.kv_mount must not start with '/'".into(),
+            ),
+            (
+                "kv-char",
+                "  kv_mount: 'kv#1'\n".into(),
+                "invalid Vault mount: vault.kv_mount has a character outside [A-Za-z0-9._/-]"
+                    .into(),
+            ),
+            (
+                "kv-int",
+                "  kv_mount: 3\n".into(),
+                "config key vault.kv_mount must be a string".into(),
+            ),
+            (
+                "up-data",
+                "  user_prefix: maknae/data/users\n".into(),
+                "invalid key_vault_path: vault.user_prefix contains a 'data' segment".into(),
+            ),
+            (
+                "up-char",
+                "  user_prefix: 'a#b'\n".into(),
+                "invalid key_vault_path: vault.user_prefix has a character outside [A-Za-z0-9._/-]"
+                    .into(),
+            ),
+            (
+                "up-long",
+                format!("  user_prefix: {at}p\n"),
+                format!("invalid key_vault_path: vault.user_prefix exceeds {max} bytes"),
+            ),
+            (
+                "up-int",
+                "  user_prefix: 3\n".into(),
+                "config key vault.user_prefix must be a string".into(),
+            ),
+        ];
+        for (tag, block, want) in cases {
+            let d = TempDir::new(tag);
+            d.write(
+                "maknae.yaml",
+                &format!(
+                    "core:\n  deployment_id: dev-01\nvault:\n  addr: https://v.example:8200\n{block}"
+                ),
+            );
+            match load_vault_config(&d.0) {
+                Err(e) => assert!(e.to_string().starts_with(&want), "{tag}: {e}"),
+                Ok(_) => panic!("{tag}: accepted"),
+            }
+        }
+        let d = TempDir::new("up-at");
+        d.write(
+            "maknae.yaml",
+            &format!(
+                "core:\n  deployment_id: dev-01\nvault:\n  addr: https://v.example:8200\n  user_prefix: {at}\n"
+            ),
+        );
+        assert_eq!(
+            load_vault_config(&d.0).unwrap().user_prefix.as_deref(),
+            Some(at.as_str())
         );
     }
 }

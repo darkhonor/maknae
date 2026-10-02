@@ -12,6 +12,7 @@ use std::time::Duration;
 use zeroize::Zeroizing;
 
 pub const MAX_WRAP_TTL: Duration = Duration::from_secs(300);
+pub const USER_KEY_WRAP_TTL: Duration = Duration::from_secs(60);
 pub const MAX_KV_DATA_PATH_BYTES: usize = 1024;
 const LEAF_DEPTH: u8 = 2;
 const KV_DATA_SEGMENT: &str = "/data/";
@@ -172,6 +173,30 @@ impl WrapExpectation {
 
     pub fn max_ttl(&self) -> Duration {
         self.max_ttl
+    }
+}
+
+/// The five strings both the sealer and the opener bind into the seal's AAD.
+pub struct AadParts<'a> {
+    pub conversation: &'a str,
+    pub provider: &'a str,
+    pub model: &'a str,
+    pub expected_path: &'a str,
+    pub key_field: &'a str,
+}
+
+pub fn aad_parts<'a>(
+    expect: &'a WrapExpectation,
+    conversation: &'a str,
+    provider: &'a str,
+    model: &'a str,
+) -> AadParts<'a> {
+    AadParts {
+        conversation,
+        provider,
+        model,
+        expected_path: expect.creation_path(),
+        key_field: expect.field(),
     }
 }
 
@@ -391,6 +416,17 @@ mod tests {
     }
 
     #[test]
+    fn the_aad_parts_are_the_turn_and_the_expectations_path_and_field() {
+        let e = expect();
+        let parts = aad_parts(&e, "conv-aad", "openai", "gpt-5.6-luna");
+        assert_eq!(parts.conversation, "conv-aad");
+        assert_eq!(parts.provider, "openai");
+        assert_eq!(parts.model, "gpt-5.6-luna");
+        assert_eq!(parts.expected_path, ALICE);
+        assert_eq!(parts.key_field, "api_key");
+    }
+
+    #[test]
     fn a_kv_data_path_is_mount_data_path_and_refuses_url_or_traversal_characters() {
         assert_eq!(
             kv_data_path("maknae-kv", "maknae/users/alice/openai/personal")
@@ -469,6 +505,13 @@ mod tests {
                 "{bad:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_user_key_wrap_ttl_is_sixty_seconds_and_a_valid_wrap_ttl() {
+        assert_eq!(USER_KEY_WRAP_TTL, Duration::from_secs(60));
+        assert_eq!(wrap_ttl_value(USER_KEY_WRAP_TTL).unwrap(), "60s");
+        assert!(USER_KEY_WRAP_TTL <= MAX_WRAP_TTL);
     }
 
     #[test]
@@ -606,6 +649,7 @@ mod tests {
 
     #[test]
     fn a_kv_data_path_is_bounded_to_the_seal_field_length() {
+        assert_eq!(MAX_KV_DATA_PATH_BYTES, maknae_seal::MAX_AAD_FIELD_BYTES);
         let fits = "a".repeat(MAX_KV_DATA_PATH_BYTES - "kv/data/".len());
         assert_eq!(
             kv_data_path("kv", &fits).unwrap().as_str().len(),

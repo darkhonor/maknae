@@ -47,9 +47,8 @@ SURFACE=(
   "crates/maknae-config/src/egress_cfg.rs|EgressConfig|egress|2|config"
   "crates/maknae-config/src/audit_cfg.rs|AuditConfig|audit|3|config"
   "crates/maknae-config/src/principal.rs|Principal|principal|3|config"
-  # The `provider` section (#243): three disclosed leaves and the Vault path,
-  # which is `omit` -- the layout of the secret store is not what the grant is for.
-  "crates/maknae-config/src/provider.rs|ProviderConfig|provider|7|config"
+  # The `providers` section (#153): five disclosed leaves per authorized provider; keys are per user, never here.
+  "crates/maknae-config/src/providers.rs|AuthorizedProvider|providers[]|5|config"
   # NOTE: `Ceiling` spans TWO YAML levels. Six fields sit under
   # `core.handling.ceiling`, but `accreditation_ref` is a SIBLING of `ceiling`
   # (`parse_handling` accepts exactly those two keys), so the synthesised
@@ -82,7 +81,7 @@ SURFACE=(
   # payload reachable with NO `roles:` grant at all. Inventorying two of three
   # is how the third ships unreviewed, which is this table's own argument.
   "crates/maknae-proto/src/wire.rs|WhoamiView|whoami|2|wire"
-  "crates/maknae-vault/src/config.rs|VaultConfig|vault|6|config"
+  "crates/maknae-vault/src/config.rs|VaultConfig|vault|8|config"
   "crates/maknae-vault/src/config.rs|UserAuthConfig|vault.user_auth|2|config"
 )
 
@@ -272,7 +271,7 @@ for sec in $registered; do
   covered=""
   for entry in "${SURFACE[@]}"; do
     IFS='|' read -r _ _ p _ <<< "$entry"
-    case "$p" in "$sec"|"$sec".*) covered=1;; esac
+    case "$p" in "$sec"|"$sec".*|"$sec[]"|"$sec[]".*) covered=1;; esac
   done
   case " $NO_STRUCT_SECTIONS " in
     *" $sec "*)
@@ -520,9 +519,9 @@ while IFS=$'\t' read -r fpath fty fkind; do
   #
   # `Vec` IS stripped on the by-construction (wire) surfaces and is NOT on the
   # config surfaces, because the exemption is a fact about the CONSUMER, not
-  # about the type. For a config document, `flatten` never recurses into
-  # `Value::Seq` and `render` masks it whole, so a sequence genuinely is a leaf
-  # and demanding coverage would block legitimate work. A wire struct is
+  # about the type. For a config document, only a sequence whose element paths
+  # are declared is walked; undeclared leaves mask, so a sequence genuinely is a
+  # leaf and demanding coverage would block legitimate work. A wire struct is
   # serialized WHOLE by serde, which recurses into `Vec<T>` -- so turning
   # `members: Vec<String>` into `Vec<MemberView>` shipped four new fields
   # (including `home` and a token path) with IDENTICAL gate counts. That is the

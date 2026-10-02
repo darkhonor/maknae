@@ -1,7 +1,8 @@
 //! The enroll-created filesystem artifact table (spec §4.6) — PURE, no I/O.
 //!
 //! `artifact_table` enumerates every path `maknae enroll` itself creates: the
-//! daemon's `/etc/maknae/*` set and the CLI's `<cli_dir>/*` set. It does NOT
+//! daemon's `/etc/maknae/*` set and the CLI's `<cli_dir>/*` set; `seal_pub_rows`
+//! adds the host-wide `seal.pub`. It does NOT
 //! include packaging-created rows (`/var/log/maknae`, `/var/log/maknae/audit.jsonl`,
 //! `/run/maknae`, `/usr/local/var/run/maknae`) — those ship with PR-J2's package
 //! scriptlets (spec §9.2), never touched here — nor `authz.yaml` (also packaging's:
@@ -26,9 +27,8 @@ pub enum Owner {
     /// `root:root` — the sealed `.cred` blob; systemd (running as root) decrypts
     /// it at unit start, the daemon never reads it directly.
     RootRoot,
-    /// `root:_maknae-egress` — the deputy's own credential set (#240b): its
-    /// RoleID and its Vault CA copy, readable via the deputy's OWN group so the
-    /// daemon's group is never on them; only root can modify.
+    /// `root:_maknae-egress` — the deputy's Vault CA copy, readable via its OWN
+    /// group so the daemon's group is never on it; only root can modify.
     RootMaknaeEgressGroup,
     /// `_maknae:_maknae` — the degraded plaintext SecretID (opt-out only): the
     /// `0o077` group/other-bit gate in `read_secret_credential` forbids a
@@ -54,7 +54,9 @@ pub enum ContentKind {
     DaemonYamlWithTransport,
     /// The CLI's `maknae.yaml` (`core`+`vault`; on macOS also `transport.socket_path`).
     CliYaml,
-    /// A RoleID text file (`maknaed-approle-id` / `maknae-approle-id`) — a
+    /// `egress-bounds.yaml`, read by both `maknaed` and the Egress Daemon.
+    EgressBounds,
+    /// The daemon's RoleID text file (`maknaed-approle-id`) — a
     /// non-secret identifier, safe to write verbatim.
     RoleId,
     /// The operator-supplied Vault TLS CA (`--vault-ca`/`--ca-dir`), copied
@@ -67,10 +69,11 @@ pub enum ContentKind {
     /// The sealed daemon SecretID — `systemd-creds`'s `.cred` ciphertext on
     /// Linux; on macOS the SecretID goes to the System keychain.
     SealedDaemonSecret,
-    /// The sealed CLI SecretID — user-scoped `systemd-creds` `.cred` (Linux
-    /// only; macOS uses the login Keychain instead, which is not a filesystem
-    /// row at all).
-    SealedCliSecret,
+    /// The Egress Daemon's sealing key: a `systemd-creds` credential on Linux,
+    /// a System keychain pointer on macOS.
+    SealedEgressSealKey,
+    /// The host-wide `seal.pub` users seal to.
+    SealPub,
     /// The root-owned accessor bookkeeping file (`enroll-state.yaml`) —
     /// what `--rotate` and failure-cleanup destroy by.
     EnrollState,
@@ -79,17 +82,10 @@ pub enum ContentKind {
     Posture,
     /// The degraded plaintext SecretID (opt-in only, `--insecure-plaintext-secret`).
     PlaintextSecret,
-    /// The egress deputy's RoleID (`egress/maknae-egress-approle-id`, #240b) —
-    /// a non-secret identifier, written verbatim.
-    EgressRoleId,
     /// The deputy's own copy of the Vault TLS CA (`egress/vault-ca.crt`):
     /// `tls/vault-ca.crt` is `root:_maknae` under a `0750` dir the deputy
     /// cannot enter, so it gets its own copy under its own group.
     EgressVaultCaCopy,
-    /// The sealed egress SecretID — `systemd-creds` ciphertext under the name
-    /// `maknae-egress.service`'s `LoadCredentialEncrypted=` loads on Linux;
-    /// on macOS, a pointer file to the System keychain, same as the daemon's.
-    SealedEgressSecret,
 }
 
 /// One row of the enroll-created artifact table.
@@ -114,8 +110,8 @@ fn row(path: PathBuf, owner: Owner, mode: u32, content: ContentKind) -> Artifact
 /// enroll run. `cli_dir` is the already-resolved CLI config directory (passwd-
 /// derived home ∥ `--cli-dir`, spec §4.1's path-resolution rule — this function
 /// does not resolve it itself, keeping it pure). `macos` selects the platform
-/// branch (keychain pointer vs. `systemd-creds` `.cred`; Keychain vs. `.cred` for
-/// the CLI; the `transport` section written into both `maknae.yaml`s).
+/// branch (keychain pointer vs. `systemd-creds` `.cred`; the `transport`
+/// section written into both `maknae.yaml`s).
 /// `insecure_plaintext` adds the opt-out degraded-plaintext row.
 pub fn artifact_table(cli_dir: &Path, macos: bool, insecure_plaintext: bool) -> Vec<Artifact> {
     let etc = Path::new("/etc/maknae");
@@ -141,6 +137,12 @@ pub fn artifact_table(cli_dir: &Path, macos: bool, insecure_plaintext: bool) -> 
             Owner::RootMaknaeGroup,
             0o640,
             ContentKind::RoleId,
+        ),
+        row(
+            etc.join(maknae_config::EGRESS_BOUNDS_FILE),
+            Owner::RootRoot,
+            0o644,
+            ContentKind::EgressBounds,
         ),
         row(
             etc.join("tls"),
@@ -172,18 +174,11 @@ pub fn artifact_table(cli_dir: &Path, macos: bool, insecure_plaintext: bool) -> 
             0o750,
             ContentKind::Dir,
         ),
-        // ---- the third plane's credential set (#240b) ----------------------
         row(
             etc.join("egress"),
             Owner::RootMaknaeEgressGroup,
             0o750,
             ContentKind::Dir,
-        ),
-        row(
-            etc.join("egress").join(maknae_vault::EGRESS_ROLE_ID_FILE),
-            Owner::RootMaknaeEgressGroup,
-            0o640,
-            ContentKind::EgressRoleId,
         ),
         row(
             etc.join("egress").join(maknae_vault::EGRESS_VAULT_CA_FILE),
@@ -193,34 +188,37 @@ pub fn artifact_table(cli_dir: &Path, macos: bool, insecure_plaintext: bool) -> 
         ),
     ];
 
-    if macos {
-        rows.push(row(
+    rows.push(if macos {
+        row(
             maknae_vault::daemon_keychain_pointer(etc),
             Owner::RootMaknaeGroup,
             0o640,
             ContentKind::SealedDaemonSecret,
-        ));
-        rows.push(row(
-            etc.join("egress")
-                .join(maknae_vault::KeychainPlane::Egress.pointer_file()),
-            Owner::RootMaknaeEgressGroup,
-            0o640,
-            ContentKind::SealedEgressSecret,
-        ));
+        )
     } else {
-        rows.push(row(
+        row(
             etc.join("private/maknaed-secret-id.cred"),
             Owner::RootRoot,
             0o400,
             ContentKind::SealedDaemonSecret,
-        ));
-        rows.push(row(
-            etc.join("private/maknae-egress-secret-id.cred"),
+        )
+    });
+    rows.push(if macos {
+        row(
+            etc.join("egress")
+                .join(maknae_vault::KeychainPlane::Egress.pointer_file()),
+            Owner::RootMaknaeEgressGroup,
+            0o640,
+            ContentKind::SealedEgressSealKey,
+        )
+    } else {
+        row(
+            etc.join("private/maknae-egress-seal-key.cred"),
             Owner::RootRoot,
             0o400,
-            ContentKind::SealedEgressSecret,
-        ));
-    }
+            ContentKind::SealedEgressSealKey,
+        )
+    });
 
     rows.push(row(
         etc.join("private/posture.yaml"),
@@ -264,12 +262,6 @@ pub fn artifact_table(cli_dir: &Path, macos: bool, insecure_plaintext: bool) -> 
         ContentKind::CliYaml,
     ));
     rows.push(row(
-        cli_dir.join("maknae-approle-id"),
-        Owner::Operator,
-        0o600,
-        ContentKind::RoleId,
-    ));
-    rows.push(row(
         cli_dir.join("tls/vault-ca.crt"),
         Owner::Operator,
         0o600,
@@ -288,17 +280,35 @@ pub fn artifact_table(cli_dir: &Path, macos: bool, insecure_plaintext: bool) -> 
         ContentKind::IntCa,
     ));
 
-    if !macos {
-        // macOS: no filesystem row — the CLI SecretID lives in the login
-        // Keychain (spec §6.3), looked up by service/account at read time.
+    rows
+}
+
+/// The rows of the host-wide `seal.pub` and the directories enroll creates for it.
+pub fn seal_pub_rows(home: maknae_vault::SealPubHome) -> Vec<Artifact> {
+    let file = Path::new(maknae_vault::seal_pub_path(home));
+    let dir = file.parent().expect("a seal.pub path has a parent");
+    let mut rows = Vec::new();
+    if matches!(home, maknae_vault::SealPubHome::MacOs) {
+        let maknae = dir.parent().expect("the macOS pki dir has a parent");
         rows.push(row(
-            cli_dir.join("maknae-secret-id.cred"),
-            Owner::Operator,
-            0o400,
-            ContentKind::SealedCliSecret,
+            maknae.to_path_buf(),
+            Owner::RootRoot,
+            0o755,
+            ContentKind::Dir,
         ));
     }
-
+    rows.push(row(
+        dir.to_path_buf(),
+        Owner::RootRoot,
+        0o755,
+        ContentKind::Dir,
+    ));
+    rows.push(row(
+        file.to_path_buf(),
+        Owner::RootRoot,
+        0o644,
+        ContentKind::SealPub,
+    ));
     rows
 }
 
@@ -313,26 +323,24 @@ mod tests {
             PathBuf::from("/etc/maknae"),
             PathBuf::from("/etc/maknae/maknae.yaml"),
             PathBuf::from("/etc/maknae/maknaed-approle-id"),
+            PathBuf::from("/etc/maknae/egress-bounds.yaml"),
             PathBuf::from("/etc/maknae/tls"),
             PathBuf::from("/etc/maknae/tls/vault-ca.crt"),
             PathBuf::from("/etc/maknae/tls/maknae-root-ca.crt"),
             PathBuf::from("/etc/maknae/tls/maknae-int-ca.crt"),
             PathBuf::from("/etc/maknae/egress"),
-            PathBuf::from("/etc/maknae/egress/maknae-egress-approle-id"),
             PathBuf::from("/etc/maknae/egress/vault-ca.crt"),
             PathBuf::from("/etc/maknae/private"),
             PathBuf::from("/etc/maknae/private/maknaed-secret-id.cred"),
-            PathBuf::from("/etc/maknae/private/maknae-egress-secret-id.cred"),
+            PathBuf::from("/etc/maknae/private/maknae-egress-seal-key.cred"),
             PathBuf::from("/etc/maknae/private/posture.yaml"),
             PathBuf::from("/etc/maknae/private/enroll-state.yaml"),
             cli_dir.to_path_buf(),
             cli_dir.join("tls"),
             cli_dir.join("maknae.yaml"),
-            cli_dir.join("maknae-approle-id"),
             cli_dir.join("tls/vault-ca.crt"),
             cli_dir.join("tls/maknae-root-ca.crt"),
             cli_dir.join("tls/maknae-int-ca.crt"),
-            cli_dir.join("maknae-secret-id.cred"),
         ]
     }
 
@@ -341,12 +349,12 @@ mod tests {
             PathBuf::from("/etc/maknae"),
             PathBuf::from("/etc/maknae/maknae.yaml"),
             PathBuf::from("/etc/maknae/maknaed-approle-id"),
+            PathBuf::from("/etc/maknae/egress-bounds.yaml"),
             PathBuf::from("/etc/maknae/tls"),
             PathBuf::from("/etc/maknae/tls/vault-ca.crt"),
             PathBuf::from("/etc/maknae/tls/maknae-root-ca.crt"),
             PathBuf::from("/etc/maknae/tls/maknae-int-ca.crt"),
             PathBuf::from("/etc/maknae/egress"),
-            PathBuf::from("/etc/maknae/egress/maknae-egress-approle-id"),
             PathBuf::from("/etc/maknae/egress/vault-ca.crt"),
             PathBuf::from("/etc/maknae/private"),
             PathBuf::from("/etc/maknae/private/maknaed-secret-id.keychain"),
@@ -356,11 +364,9 @@ mod tests {
             cli_dir.to_path_buf(),
             cli_dir.join("tls"),
             cli_dir.join("maknae.yaml"),
-            cli_dir.join("maknae-approle-id"),
             cli_dir.join("tls/vault-ca.crt"),
             cli_dir.join("tls/maknae-root-ca.crt"),
             cli_dir.join("tls/maknae-int-ca.crt"),
-            // No `maknae-secret-id.cred` row on macOS — login Keychain instead.
         ]
     }
 
@@ -377,7 +383,7 @@ mod tests {
         got_paths.sort();
         want_paths.sort();
         assert_eq!(got_paths, want_paths);
-        assert_eq!(got.len(), 23, "row count drifted");
+        assert_eq!(got.len(), 21, "row count drifted");
     }
 
     #[test]
@@ -389,16 +395,11 @@ mod tests {
         got_paths.sort();
         want_paths.sort();
         assert_eq!(got_paths, want_paths);
-        assert_eq!(got.len(), 22, "row count drifted");
+        assert_eq!(got.len(), 21, "row count drifted");
     }
 
-    /// #240b: the third plane's rows. The deputy reads its RoleID and its
-    /// Vault CA copy via ITS OWN group — root:_maknae-egress, never root:_maknae,
-    /// which would put the daemon's group on the deputy's credential set — and
-    /// its sealed SecretID is root-only like the daemon's. `/etc/maknae` itself
-    /// stays 0750: the deputy traverses it by ACL (D3), not by mode.
     #[test]
-    fn egress_rows_are_owned_by_the_deputys_group_and_its_secret_is_root_only() {
+    fn egress_rows_carry_the_deputys_ca_copy_and_no_approle_id() {
         for macos in [false, true] {
             let got = artifact_table(Path::new("/home/op/.maknae"), macos, false);
             let row = |p: &str| got.iter().find(|a| a.path == Path::new(p)).unwrap();
@@ -406,15 +407,6 @@ mod tests {
             assert_eq!(
                 (d.owner, d.mode, d.content),
                 (Owner::RootMaknaeEgressGroup, 0o750, ContentKind::Dir)
-            );
-            let r = row("/etc/maknae/egress/maknae-egress-approle-id");
-            assert_eq!(
-                (r.owner, r.mode, r.content),
-                (
-                    Owner::RootMaknaeEgressGroup,
-                    0o640,
-                    ContentKind::EgressRoleId
-                )
             );
             let c = row("/etc/maknae/egress/vault-ca.crt");
             assert_eq!(
@@ -425,25 +417,55 @@ mod tests {
                     ContentKind::EgressVaultCaCopy
                 )
             );
-            let sealed = if macos {
-                row("/etc/maknae/egress/maknae-egress-secret-id.keychain")
-            } else {
-                row("/etc/maknae/private/maknae-egress-secret-id.cred")
-            };
-            assert_eq!(sealed.content, ContentKind::SealedEgressSecret);
-            if macos {
-                assert_eq!(
-                    (sealed.owner, sealed.mode),
-                    (Owner::RootMaknaeEgressGroup, 0o640)
-                );
-            } else {
-                assert_eq!((sealed.owner, sealed.mode), (Owner::RootRoot, 0o400));
-            }
+            assert!(
+                !got.iter()
+                    .any(|a| a.path.to_string_lossy().ends_with("approle-id")
+                        && a.path != Path::new("/etc/maknae/maknaed-approle-id")),
+                "macos={macos}"
+            );
             let etc = row("/etc/maknae");
             assert_eq!(
                 etc.mode, 0o750,
                 "the deputy traverses by ACL, not by a world bit"
             );
+        }
+    }
+
+    #[test]
+    fn egress_bounds_is_a_root_artifact_both_daemons_can_read() {
+        for macos in [false, true] {
+            let got = artifact_table(Path::new("/home/op/.maknae"), macos, false);
+            let b = got
+                .iter()
+                .find(|a| a.content == ContentKind::EgressBounds)
+                .unwrap();
+            assert_eq!(
+                (b.path.as_path(), b.owner, b.mode),
+                (
+                    Path::new("/etc/maknae/egress-bounds.yaml"),
+                    Owner::RootRoot,
+                    0o644
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn the_cli_set_carries_no_approle_id_and_no_sealed_secret() {
+        for (macos, cli_dir) in [
+            (false, Path::new("/home/op/.maknae")),
+            (true, Path::new("/Users/op/.maknae")),
+        ] {
+            let got = artifact_table(cli_dir, macos, false);
+            for a in got.iter().filter(|a| a.path.starts_with(cli_dir)) {
+                let name = a.path.to_string_lossy();
+                assert!(
+                    !name.ends_with("maknae-approle-id")
+                        && !name.ends_with("maknae-secret-id.cred"),
+                    "{name}"
+                );
+                assert_eq!(a.owner, Owner::Operator, "{name}");
+            }
         }
     }
 
@@ -552,7 +574,7 @@ mod tests {
             maknae_vault::daemon_keychain_pointer(Path::new("/etc/maknae"))
         );
         assert_eq!(
-            find(ContentKind::SealedEgressSecret),
+            find(ContentKind::SealedEgressSealKey),
             Path::new("/etc/maknae/egress")
                 .join(maknae_vault::KeychainPlane::Egress.pointer_file())
         );
@@ -593,7 +615,6 @@ mod tests {
         let got = artifact_table(cli_dir, false, false);
         for p in [
             "maknae.yaml",
-            "maknae-approle-id",
             "tls/vault-ca.crt",
             "tls/maknae-root-ca.crt",
             "tls/maknae-int-ca.crt",
@@ -602,18 +623,6 @@ mod tests {
             assert_eq!(a.mode, 0o600, "{p}");
             assert_eq!(a.owner, Owner::Operator, "{p}");
         }
-    }
-
-    #[test]
-    fn cli_sealed_secret_is_mode_0400_operator_owned_on_linux() {
-        let cli_dir = Path::new("/home/op/.maknae");
-        let got = artifact_table(cli_dir, false, false);
-        let a = got
-            .iter()
-            .find(|a| a.path == cli_dir.join("maknae-secret-id.cred"))
-            .unwrap();
-        assert_eq!(a.mode, 0o400);
-        assert_eq!(a.owner, Owner::Operator);
     }
 
     #[test]
@@ -669,5 +678,66 @@ mod tests {
                 assert_eq!(paths.len(), before, "macos={macos} plaintext={plaintext}");
             }
         }
+    }
+
+    #[test]
+    fn the_seal_key_custody_is_root_only_on_linux_and_a_deputy_group_pointer_on_macos() {
+        let linux = artifact_table(Path::new("/home/op/.maknae"), false, false);
+        let l = linux
+            .iter()
+            .find(|a| a.content == ContentKind::SealedEgressSealKey)
+            .unwrap();
+        assert_eq!(
+            (l.path.as_path(), l.owner, l.mode),
+            (
+                Path::new("/etc/maknae/private/maknae-egress-seal-key.cred"),
+                Owner::RootRoot,
+                0o400
+            )
+        );
+        let macos = artifact_table(Path::new("/Users/op/.maknae"), true, false);
+        let m = macos
+            .iter()
+            .find(|a| a.content == ContentKind::SealedEgressSealKey)
+            .unwrap();
+        assert_eq!(
+            (m.path.clone(), m.owner, m.mode),
+            (
+                Path::new("/etc/maknae/egress")
+                    .join(maknae_vault::KeychainPlane::Egress.pointer_file()),
+                Owner::RootMaknaeEgressGroup,
+                0o640
+            )
+        );
+    }
+
+    #[test]
+    fn seal_pub_rows_match_independent_oracle_for_each_home() {
+        use maknae_vault::SealPubHome;
+        let dir = |p: &str| row(PathBuf::from(p), Owner::RootRoot, 0o755, ContentKind::Dir);
+        let file = |p: &str| {
+            row(
+                PathBuf::from(p),
+                Owner::RootRoot,
+                0o644,
+                ContentKind::SealPub,
+            )
+        };
+        assert_eq!(
+            seal_pub_rows(SealPubHome::RedHat),
+            vec![dir("/etc/pki/maknae"), file("/etc/pki/maknae/seal.pub")]
+        );
+        assert_eq!(
+            seal_pub_rows(SealPubHome::Debian),
+            vec![dir("/etc/ssl/maknae"), file("/etc/ssl/maknae/seal.pub")]
+        );
+        assert_eq!(
+            seal_pub_rows(SealPubHome::MacOs),
+            vec![
+                dir("/Library/Application Support/Maknae"),
+                dir("/Library/Application Support/Maknae/pki"),
+                file("/Library/Application Support/Maknae/pki/seal.pub")
+            ]
+        );
     }
 }

@@ -204,7 +204,7 @@ install -m 0644 "$REPO/packaging/common/maknae.yaml" "$D/usr/local/share/maknae/
 # maknae.yaml carries no `transport:` section, and maknae-config's compiled default
 # is /run/maknae/maknaed.sock (crates/maknae-config/src/transport.rs:15, no darwin
 # cfg) — a path that does not exist on macOS at all. `maknae enroll` writes the
-# correct value (bins/maknae/src/enroll/mod.rs:1432), but the skeleton must not ship
+# correct value (bins/maknae/src/enroll/mod.rs, build_daemon_yaml), but the skeleton must not ship
 # a path this platform cannot host in the meantime.
 cat >> "$D/usr/local/share/maknae/defaults/maknae.yaml" <<'MACOS_TRANSPORT'
 

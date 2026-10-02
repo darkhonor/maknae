@@ -25,7 +25,7 @@ normative statement; this directory holds the packaging that follows from it.
 
 > **`maknae-spifc` is deliberately not packaged.** One manifest, `packaging/common/packaged-binaries.txt`, names the three binaries every package ships (`maknaed`, `maknae`, `maknae-egress`) and drives both the Linux build lanes (`build-deb.sh:72-75`, `ci/gates/packaged-binaries.sh`) and `build-pkg.sh:70-72`; `maknae-spifc`, a setup-only tool, is deliberately not in it (`packaged-binaries.txt:13`).
 >
-> **Install is not enable, and on macOS that takes an explicit step.** `/Library/LaunchDaemons` is scanned at boot (`man launchd`), so `scripts/postinstall` runs `launchctl disable` on both jobs on a fresh install, and on the deputy alone on an upgrade from a package that did not ship it (`scripts/postinstall:74-80`). The flow is: install → `sudo maknae enroll` → create `/etc/maknae/egress-bounds.yaml` → start both jobs, as `docs/first-provider.md` step 5 does.
+> **Install is not enable, and on macOS that takes an explicit step.** `/Library/LaunchDaemons` is scanned at boot (`man launchd`), so `scripts/postinstall` runs `launchctl disable` on both jobs on a fresh install, and on the deputy alone on an upgrade from a package that did not ship it (`scripts/postinstall:74-80`). The flow is: install → `sudo maknae enroll` (which writes `/etc/maknae/egress-bounds.yaml`) → start both jobs → each user runs `maknae login`.
 
 ## Plane secrets: the System keychain
 
@@ -33,20 +33,28 @@ normative statement; this directory holds the packaging that follows from it.
 `/Library/Keychains/System.keychain` (service `io.maknae.maknaed` / `io.maknae.maknae-egress`,
 account `secret-id`), ACL'd to that plane's designated requirement, named by root-owned pointer
 files `private/maknaed-secret-id.keychain` and `egress/maknae-egress-secret-id.keychain` under
-`/etc/maknae`. Each process checks it runs as its own account before reading; the posture this
+`/etc/maknae`. The daemon's item holds its AppRole SecretID; the Egress Daemon's holds the
+lower-case hex of its P-384 seal key's PKCS#8 DER
+([ADR-0028](../../design/adr/ADR-0028-per-user-model-providers-and-kernel-blind-credentials.md)
+decision 6). Each process checks it runs as its own account before reading; the posture this
 gives is `code_bound` — no Secure Enclave route reaches a launchd daemon
 ([ADR-0018](../../design/adr/ADR-0018-local-plane-authorization-deployment-model.md) decision 6).
-Enroll checks, in `bins/maknae/src/enroll/keychain_write.rs`: root-install (`check_install_path`,
-`:315ff`), Developer ID of one team (`own_team`, `:262-282`), and — per plane — Hardened Runtime,
-no entitlements and a strong embedded designated requirement before writing (`verify_release`,
-`:284-302`).
+Enroll checks, in `bins/maknae/src/enroll/keychain_write.rs`: root-install (`check_install_path`),
+Developer ID of one team (`own_team`), and — per plane — Hardened Runtime, no entitlements and a
+strong embedded designated requirement before writing (`verify_release`).
 
-The CLI's own SecretID is separate: a file-based (legacy) item in the operator's default keychain
-(usually login: service `maknae-cli`, account `maknae-secret-id`) — not Data Protection, not
-covered by decision 6 (#116 removes it). `uninstall.sh` deletes only the two plane items
-(`uninstall.sh:61-71`), exiting non-zero if either remains (`uninstall.sh:64,125-127`); smoke
-phase 2 runs it as root, and both plane items were removed. Remove the CLI item yourself:
-`security delete-generic-password -s maknae-cli -a maknae-secret-id`.
+Enroll also publishes the seal key's public half, root-owned `0644` in a `0755` directory, at
+`/Library/Application Support/Maknae/pki/seal.pub`. Every user's `maknae` reads it there directly,
+never through `maknaed`, and refuses it unless it is root-owned, not group- or other-writable, a
+regular file with one link and at most 215 bytes. Neither `_maknae` nor `_maknae-egress` can
+write it.
+
+The CLI holds no SecretID. `maknae login` keeps the user's Vault token in that user's default
+keychain (usually login: service `maknae-cli`, account `maknae-vault-token`), and `maknae logout`
+revokes and erases it. `uninstall.sh` deletes the two plane items (the `kc_left` keychain loop)
+and the published `seal.pub` (the `seal_left` block after it), and its closing `FAILED:` report
+exits non-zero if any remains; smoke phase 2 runs it as root. A user's token item is that user's: run `maknae logout` as each user before
+uninstalling.
 
 ## The FIPS module is a dylib on macOS, and the package must carry it
 

@@ -107,7 +107,7 @@ pub(crate) fn refuse_status(op: VaultOp, status: u16) -> VaultError {
             "the token is expired or revoked (run `maknae login`), or the path is outside your grant"
         }
         (VaultOp::WrappedRead, 404) => "no secret at this path",
-        (VaultOp::RevokeSelf, 403) => "the token is already expired or revoked",
+        (VaultOp::RevokeSelf, 403) => "no permission to revoke, or the token is already invalid",
         _ => "",
     };
     VaultError::VaultStatus {
@@ -286,7 +286,7 @@ mod tests {
             refuse_status(VaultOp::RevokeSelf, 403),
             VaultError::VaultStatus {
                 status: 403,
-                hint: "the token is already expired or revoked",
+                hint: "no permission to revoke, or the token is already invalid",
                 ..
             }
         ));

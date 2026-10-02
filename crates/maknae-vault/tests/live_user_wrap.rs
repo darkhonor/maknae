@@ -122,7 +122,7 @@ async fn userpass_login_wrapped_read_lookup_and_checked_unwrap_against_live_vaul
     let ca = env("MAKNAE_VAULT_CA");
     let operator = Zeroizing::new(env("MAKNAE_VAULT_TOKEN"));
     let kv_mount = env_or("MAKNAE_KV_MOUNT", "maknae-kv");
-    let userpass_mount = env_or("MAKNAE_USERPASS_MOUNT", "userpass");
+    let userpass_mount = env_or("MAKNAE_USERPASS_MOUNT", "maknae-userpass");
     let admin = VaultClient::new(
         VaultClientSettingsBuilder::default()
             .address(&addr)

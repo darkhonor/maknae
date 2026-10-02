@@ -292,6 +292,8 @@ const DISCLOSABLE: &[&str] = &[
     "vault.user_auth",
     "vault.user_auth.type",
     "vault.user_auth.mount",
+    "vault.kv_mount",
+    "vault.user_prefix",
     // Audit destination. A path, and the operator already needs it to find the
     // log they are debugging.
     "audit.jsonl_path",
@@ -319,14 +321,12 @@ const DISCLOSABLE: &[&str] = &[
     "principal.uid",
     "principal.home",
     // Transport shape, as resolved -- see `merge_resolved_defaults`.
-    // The `provider` section (#243, ADR-0023): which destination the loop's
-    // content goes to is exactly what an operator reading the view needs, and
-    // none of it is a credential. The key's Vault PATH is suppressed below.
-    "provider.name",
-    "provider.endpoint",
-    "provider.model",
-    "provider.reasoning_effort",
-    "provider.output_tokens_field",
+    "providers[].name",
+    "providers[].endpoint",
+    "providers[].models",
+    "providers[].models[]",
+    "providers[].reasoning_effort",
+    "providers[].output_tokens_field",
     // The `egress` section (#240): where the daemon finds the deputy and how
     // long one send may take — deployment shape, never a credential.
     "egress.socket_path",
@@ -386,16 +386,6 @@ const SUPPRESSED: &[&str] = &[
     // Its PRESENCE is the finding. Absent on a correctly-enrolled host, so its
     // absence from the view is not itself a signal.
     "vault.insecure_plaintext_secret_path",
-    // Where in Vault the provider's API key lives (#243). Not the key — but the
-    // layout of the secret store is nobody's business on a grant that exists to
-    // show WHAT is configured, and ADR-0023 decision 3 records it as `omit`.
-    "provider.key_vault_path",
-    // The field name inside that secret (#308). Not a secret in itself, and
-    // useless without the path and a token — but together with the path it
-    // describes exactly where a credential is kept, and a grant that exists to
-    // show WHAT is configured has no need of it. Classified with its sibling
-    // rather than separately, so the two cannot drift apart.
-    "provider.key_field",
     // The deployer's AU-3(1) extension object, and everything under it.
     //
     // Masking was the recorded decision and it applied the VALUE rule to a KEY
@@ -448,11 +438,34 @@ enum Disclosure {
     Omit,
 }
 
+fn full_path(section: &str, path: &str) -> String {
+    if path.starts_with("[]") {
+        format!("{section}{path}")
+    } else {
+        format!("{section}.{path}")
+    }
+}
+
+fn is_declared_sequence(disclosable: &[&str], section: &str, path: &str) -> bool {
+    let elements = full_path(section, &format!("{path}[]"));
+    disclosable
+        .iter()
+        .any(|p| *p == elements || p.starts_with(&format!("{elements}.")))
+}
+
+fn join_path(base: &str, key: &str) -> String {
+    if base.is_empty() {
+        key.to_string()
+    } else {
+        format!("{base}.{key}")
+    }
+}
+
 /// ONE classifier, used by the file walk and by [`Document::merge_resolved`],
 /// so the two cannot drift. `maknae-proto`'s `ConfigView` doc names the hazard
 /// of a second redaction implementation; it applies inside this crate too.
 fn classify(section: &str, path: &str, disclosable: &[&str]) -> Disclosure {
-    let full = format!("{section}.{path}");
+    let full = full_path(section, path);
     // PREFIX match, not exact. `core.handling` has eight leaves (the `policy`
     // name joined the seven in ADR-0022 -- exactly the case this rule covers);
     // listing them one by one means the ninth, added later, is disclosed by default --
@@ -483,26 +496,45 @@ fn flatten(
     v: &Value,
     out: &mut BTreeMap<String, String>,
 ) {
+    flatten_at(disclosable, section, prefix, prefix, v, out);
+}
+
+fn flatten_at(
+    disclosable: &[&str],
+    section: &str,
+    cpath: &str,
+    dpath: &str,
+    v: &Value,
+    out: &mut BTreeMap<String, String>,
+) {
     match v {
         Value::Map(entries) => {
             for (k, sub) in entries {
-                let next = if prefix.is_empty() {
-                    k.clone()
-                } else {
-                    format!("{prefix}.{k}")
-                };
-                flatten(disclosable, section, &next, sub, out);
+                flatten_at(
+                    disclosable,
+                    section,
+                    &join_path(cpath, k),
+                    &join_path(dpath, k),
+                    sub,
+                    out,
+                );
+            }
+        }
+        Value::Seq(items) if is_declared_sequence(disclosable, section, cpath) => {
+            let elements = format!("{cpath}[]");
+            for (i, item) in items.iter().enumerate() {
+                flatten_at(
+                    disclosable,
+                    section,
+                    &elements,
+                    &join_path(dpath, &i.to_string()),
+                    item,
+                    out,
+                );
             }
         }
         _ => {
-            if prefix.is_empty() {
-                // A section whose whole body is a scalar: name it by section.
-                // NOTE the CLASSIFIER path is `<section>.<section>` (doubled),
-                // not `<section>`. An author disclosing such a section must
-                // write `"lonely.lonely"`; a bare `"lonely"` on DISCLOSABLE
-                // matches nothing and the field silently masks. (Suppression is
-                // unaffected -- the prefix rule makes a bare section name work,
-                // which is the safe direction.)
+            if dpath.is_empty() {
                 if classify(section, section, disclosable) == Disclosure::Omit {
                     return;
                 }
@@ -512,10 +544,10 @@ fn flatten(
                 );
                 return;
             }
-            if classify(section, prefix, disclosable) == Disclosure::Omit {
+            if classify(section, cpath, disclosable) == Disclosure::Omit {
                 return;
             }
-            out.insert(prefix.to_string(), render(disclosable, section, prefix, v));
+            out.insert(dpath.to_string(), render(disclosable, section, cpath, v));
         }
     }
 }
@@ -1026,7 +1058,7 @@ mod tests {
                 vault_approle_mount: Some("maknae-approle".into()),
                 vault_pki_int_mount: Some("maknae-pki-int".into()),
                 vault_user_auth_type: Some("userpass".into()),
-                vault_user_auth_mount: Some("userpass".into()),
+                vault_user_auth_mount: Some("maknae-userpass".into()),
                 egress: &crate::EgressConfig::default(),
             },
         );
@@ -1035,7 +1067,7 @@ mod tests {
         assert_eq!(v["vault"]["approle_mount"], "maknae-approle");
         assert_eq!(v["vault"]["pki_int_mount"], "maknae-pki-int");
         assert_eq!(v["vault"]["user_auth.type"], "userpass");
-        assert_eq!(v["vault"]["user_auth.mount"], "userpass");
+        assert_eq!(v["vault"]["user_auth.mount"], "maknae-userpass");
         // #240: the egress fold is asserted, not just passed — deleting the
         // merge passed every other test and the disclosure gate.
         assert_eq!(v["egress"]["socket_path"], "/run/maknae-egress/egress.sock");
@@ -1261,30 +1293,6 @@ mod tests {
             "leaf-name collision must not disclose"
         );
     }
-    /// #243: the provider's endpoint, model and name are the view's business;
-    /// the key's Vault path is omitted outright.
-    #[test]
-    fn the_provider_section_discloses_its_destination_and_omits_the_key_path() {
-        let d = doc(vec![(
-            "provider",
-            map(vec![
-                ("name", Value::Str("openai".into())),
-                ("endpoint", Value::Str("https://api.openai.com/v1".into())),
-                ("model", Value::Str("gpt-5".into())),
-                (
-                    "key_vault_path",
-                    Value::Str("maknae/provider/openai".into()),
-                ),
-            ]),
-        )]);
-        let v = d.disclosable_view();
-        assert_eq!(v["provider"]["name"], "openai");
-        assert_eq!(v["provider"]["endpoint"], "https://api.openai.com/v1");
-        assert_eq!(v["provider"]["model"], "gpt-5");
-        assert!(!v["provider"].contains_key("key_vault_path"), "{v:?}");
-        assert!(!format!("{v:?}").contains("maknae/provider"), "{v:?}");
-    }
-
     #[test]
     fn source_of_names_the_contributing_source() {
         let d = doc(vec![(
@@ -1323,18 +1331,20 @@ mod tests {
             (crate::TRANSPORT_SECTION, &crate::transport::TRANSPORT_KEYS),
             (crate::PRINCIPAL_SECTION, &crate::principal::PRINCIPAL_KEYS),
             (crate::EGRESS_SECTION, &crate::egress_cfg::EGRESS_KEYS),
-            (crate::PROVIDER_SECTION, &crate::provider::KEYS),
+            (crate::PROVIDERS_SECTION, &crate::providers::PROVIDER_KEYS),
         ];
         let mut matched: Vec<&str> = Vec::new();
         for path in DISCLOSABLE.iter().chain(SUPPRESSED.iter()) {
             let Some((sect, rest)) = path.split_once('.') else {
                 continue;
             };
+            let sect = sect.strip_suffix("[]").unwrap_or(sect);
             let Some((_, allowed)) = in_crate.iter().find(|(s, _)| *s == sect) else {
                 continue; // core / vault — out of this crate's reach
             };
             // Only the FIRST segment is a section key; `a.b.c` nests below it.
             let key = rest.split('.').next().expect("non-empty");
+            let key = key.strip_suffix("[]").unwrap_or(key);
             assert!(
                 allowed.contains(&key),
                 "disclosure names '{path}', but '{sect}' has no key '{key}' — \
@@ -1440,9 +1450,9 @@ mod tests {
                 &crate::egress_cfg::EGRESS_KEYS,
             ),
             (
-                include_str!("provider.rs"),
-                "ProviderConfig",
-                &crate::provider::KEYS,
+                include_str!("providers.rs"),
+                "AuthorizedProvider",
+                &crate::providers::PROVIDER_KEYS,
             ),
         ];
         for (src, name, keys) in cases {
@@ -1455,5 +1465,85 @@ mod tests {
                 "{name}'s fields and its allow-list disagree — one of them was edited alone"
             );
         }
+    }
+
+    #[test]
+    fn the_user_key_location_is_shown_in_the_clear() {
+        let d = doc(vec![(
+            "vault",
+            map(vec![
+                ("kv_mount", Value::Str("maknae-kv".into())),
+                ("user_prefix", Value::Str("maknae/users".into())),
+            ]),
+        )]);
+        let v = d.disclosable_view();
+        assert_eq!(v["vault"]["kv_mount"], "maknae-kv");
+        assert_eq!(v["vault"]["user_prefix"], "maknae/users");
+    }
+
+    #[test]
+    fn the_providers_section_discloses_each_entry_and_each_model() {
+        let entry = |name: &str, models: &[&str]| {
+            map(vec![
+                ("name", Value::Str(name.into())),
+                ("endpoint", Value::Str(format!("https://{name}.example/v1"))),
+                (
+                    "models",
+                    Value::Seq(models.iter().map(|m| Value::Str((*m).into())).collect()),
+                ),
+                ("reasoning_effort", Value::Str("none".into())),
+            ])
+        };
+        let d = doc(vec![(
+            "providers",
+            Value::Seq(vec![
+                entry("openai", &["gpt-5.6-luna", "gpt-5.6"]),
+                entry("local", &["llama"]),
+            ]),
+        )]);
+        let v = d.disclosable_view();
+        let p = &v["providers"];
+        assert_eq!(p["0.name"], "openai");
+        assert_eq!(p["0.endpoint"], "https://openai.example/v1");
+        assert_eq!(p["0.models.0"], "gpt-5.6-luna");
+        assert_eq!(p["0.models.1"], "gpt-5.6");
+        assert_eq!(p["0.reasoning_effort"], "none");
+        assert_eq!(p["1.name"], "local");
+        assert_eq!(p["1.models.0"], "llama");
+        assert!(!p.contains_key("0.models"), "{p:?}");
+    }
+
+    #[test]
+    fn only_a_sequence_whose_elements_are_declared_is_walked() {
+        let allow: &[&str] = &["s[].name", "s[].tags[]"];
+        let mut out = BTreeMap::new();
+        flatten(
+            allow,
+            "s",
+            "",
+            &Value::Seq(vec![map(vec![
+                ("name", Value::Str("shown".into())),
+                ("tags", Value::Seq(vec![Value::Str("t0".into())])),
+                ("other", Value::Seq(vec![Value::Str("hidden".into())])),
+                ("note", Value::Str("withheld".into())),
+            ])]),
+            &mut out,
+        );
+        assert_eq!(out["0.name"], "shown");
+        assert_eq!(out["0.tags.0"], "t0");
+        assert_eq!(out["0.other"], MASK);
+        assert_eq!(out["0.note"], MASK);
+        assert!(!format!("{out:?}").contains("hidden"), "{out:?}");
+        assert!(!format!("{out:?}").contains("withheld"), "{out:?}");
+        let mut scalar_declared = BTreeMap::new();
+        flatten(
+            &["t.name"],
+            "t",
+            "",
+            &Value::Seq(vec![map(vec![("name", Value::Str("hidden".into()))])]),
+            &mut scalar_declared,
+        );
+        assert_eq!(scalar_declared["t"], MASK);
+        assert!(!format!("{scalar_declared:?}").contains("hidden"));
     }
 }

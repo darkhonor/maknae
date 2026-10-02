@@ -1,5 +1,6 @@
 use maknae_vault::{Password, PasswordFeed, PasswordLine, VaultError};
 use nix::errno::Errno;
+use nix::sys::signal::{SigSet, SigmaskHow, Signal};
 use nix::sys::termios::{
     tcgetattr, tcsetattr, LocalFlags, SetArg, SpecialCharacterIndices, Termios,
 };
@@ -16,6 +17,7 @@ pub(crate) enum PromptError {
     TooLong,
     Terminal(Errno),
     Read(Errno),
+    Signals(Errno),
     Password(VaultError),
 }
 
@@ -36,6 +38,12 @@ impl std::fmt::Display for PromptError {
                 write!(f, "the terminal could not be switched to hidden input: {e}")
             }
             PromptError::Read(e) => write!(f, "the terminal could not be read: {e}"),
+            PromptError::Signals(e) => {
+                write!(
+                    f,
+                    "signals could not be held back during the hidden prompt: {e}"
+                )
+            }
             PromptError::Password(e) => write!(f, "{e}"),
         }
     }
@@ -51,6 +59,29 @@ impl Drop for Restore<'_> {
         if tcsetattr(self.fd, SetArg::TCSAFLUSH, &self.saved) == Err(Errno::EINTR) {
             let _ = tcsetattr(self.fd, SetArg::TCSAFLUSH, &self.saved);
         }
+    }
+}
+
+const PROMPT_SIGNALS: [Signal; 4] = [
+    Signal::SIGINT,
+    Signal::SIGTERM,
+    Signal::SIGHUP,
+    Signal::SIGQUIT,
+];
+
+fn prompt_signals() -> SigSet {
+    PROMPT_SIGNALS.into_iter().collect()
+}
+
+pub(crate) fn block_prompt_signals() {
+    let _ = prompt_signals().thread_block();
+}
+
+struct Unblock(SigSet);
+
+impl Drop for Unblock {
+    fn drop(&mut self) {
+        let _ = self.0.thread_set_mask();
     }
 }
 
@@ -86,6 +117,11 @@ pub(crate) fn read_password_on(
     prompt: &str,
 ) -> Result<Password, PromptError> {
     let saved = tcgetattr(fd).map_err(PromptError::Terminal)?;
+    let unblock = Unblock(
+        prompt_signals()
+            .thread_swap_mask(SigmaskHow::SIG_BLOCK)
+            .map_err(PromptError::Signals)?,
+    );
     tcsetattr(fd, SetArg::TCSAFLUSH, &hidden(&saved)).map_err(PromptError::Terminal)?;
     let restore = Restore { fd, saved };
     let applied = tcgetattr(fd).map_err(PromptError::Terminal)?;
@@ -97,6 +133,7 @@ pub(crate) fn read_password_on(
     let fed = feed_until_end(fd, &mut line);
     drop(restore);
     let _ = writeln!(out);
+    drop(unblock);
     match fed? {
         Ended::Done => line.finish().map_err(PromptError::Password),
         Ended::Interrupted => Err(PromptError::Interrupted),
@@ -133,6 +170,7 @@ fn feed_until_end(fd: BorrowedFd<'_>, line: &mut PasswordLine) -> Result<Ended, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nix::sys::signal;
     use nix::sys::termios::{ControlFlags, InputFlags, OutputFlags};
     use std::os::fd::OwnedFd;
     use std::sync::mpsc;
@@ -147,6 +185,28 @@ mod tests {
 
         fn flush(&mut self) -> std::io::Result<()> {
             let _ = self.0.send(());
+            Ok(())
+        }
+    }
+
+    const STOP_SIGNALS: [signal::Signal; 4] = [
+        signal::Signal::SIGINT,
+        signal::Signal::SIGTERM,
+        signal::Signal::SIGHUP,
+        signal::Signal::SIGQUIT,
+    ];
+
+    struct MaskAtPrompt(mpsc::Sender<signal::SigSet>);
+
+    impl Write for MaskAtPrompt {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            Ok(b.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            if let Ok(mask) = signal::SigSet::thread_get_mask() {
+                let _ = self.0.send(mask);
+            }
             Ok(())
         }
     }
@@ -261,6 +321,68 @@ mod tests {
     }
 
     #[test]
+    fn signals_from_other_processes_wait_until_the_terminal_is_restored() {
+        let (master, slave) = pty();
+        let (prompted_tx, prompted_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let before = signal::SigSet::thread_get_mask().unwrap();
+            let got = read_password_on(slave.as_fd(), &mut MaskAtPrompt(prompted_tx), "Password: ")
+                .map(|p| p.len());
+            let after = signal::SigSet::thread_get_mask().unwrap();
+            let _ = done_tx.send((got, before, after, slave));
+        });
+        let at_prompt = prompted_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the prompt was not shown within 10 s");
+        nix::unistd::write(&master, b"x\r").unwrap();
+        let (got, before, after, _slave) = done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the prompt did not return within 10 s");
+        assert_eq!(got.unwrap(), 1);
+        for sig in STOP_SIGNALS {
+            assert!(
+                !before.contains(sig),
+                "{sig:?} was blocked before the prompt"
+            );
+            assert!(
+                at_prompt.contains(sig),
+                "{sig:?} was deliverable while echo was off"
+            );
+            assert!(
+                !after.contains(sig),
+                "{sig:?} stayed blocked after the terminal was restored"
+            );
+        }
+    }
+
+    #[test]
+    fn every_thread_of_a_runtime_built_with_the_hook_blocks_the_prompt_signals() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .on_thread_start(block_prompt_signals)
+            .build()
+            .unwrap();
+        let (worker, blocking) = rt.block_on(async {
+            let worker = tokio::spawn(async { signal::SigSet::thread_get_mask().unwrap() });
+            let blocking =
+                tokio::task::spawn_blocking(|| signal::SigSet::thread_get_mask().unwrap());
+            (worker.await.unwrap(), blocking.await.unwrap())
+        });
+        rt.shutdown_timeout(Duration::ZERO);
+        for sig in STOP_SIGNALS {
+            assert!(
+                worker.contains(sig),
+                "{sig:?} is deliverable to a worker thread"
+            );
+            assert!(
+                blocking.contains(sig),
+                "{sig:?} is deliverable to a blocking-pool thread"
+            );
+        }
+    }
+
+    #[test]
     fn a_descriptor_that_is_not_a_terminal_is_refused_before_any_prompt() {
         let (r, _w) = nix::unistd::pipe().unwrap();
         let mut out = Vec::new();
@@ -281,6 +403,7 @@ mod tests {
             PromptError::TooLong,
             PromptError::Terminal(nix::errno::Errno::ENOTTY),
             PromptError::Read(nix::errno::Errno::EIO),
+            PromptError::Signals(nix::errno::Errno::EINVAL),
         ] {
             assert!(!e.to_string().is_empty());
         }

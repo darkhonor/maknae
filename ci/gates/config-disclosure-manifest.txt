@@ -29,17 +29,18 @@ disclose	vault.deployment_id	the supported fallback spelling of core.deployment_
 disclose	vault.user_auth	the user authentication block: a method type and a mount name, never a credential
 disclose	vault.user_auth.type	the user authentication method; only userpass is accepted
 disclose	vault.user_auth.mount	mount name, never a credential
+disclose	vault.kv_mount	the KV mount user keys live in; a mount name, never a credential, and already world-readable in egress-bounds.yaml
+disclose	vault.user_prefix	where each user's keys sit below the mount; a layout prefix, never a credential, and already world-readable in egress-bounds.yaml
 disclose	audit.jsonl_path	the log the operator is trying to find
 disclose	principal.name	readable by any local process via getpwuid
 disclose	principal.uid	readable by any local process via getpwuid
 disclose	principal.home	readable by any local process via getpwuid
-disclose	provider.name	the operator's label for the one registered model provider (#243)
-disclose	provider.endpoint	where the loop's content goes; the point of registering it
-disclose	provider.model	the model identifier sent on every request
-disclose	provider.reasoning_effort	the reasoning level sent with the model, when the operator sets one (#242)
-disclose	provider.output_tokens_field	the request field that carries the reply cap for this endpoint (#372)
-omit	provider.key_vault_path	the secret store's layout; not the key, and not the grant's business (ADR-0023 d3)
-omit	provider.key_field	the field inside that secret (#308); with the path it locates a credential, and the grant shows WHAT is configured, not where
+disclose	providers[].name	the operator's label for an authorized provider; its destination id is provider:<name>
+disclose	providers[].endpoint	where a user's content goes when they choose this provider
+disclose	providers[].models	the admin-pinned model list, as a sequence
+disclose	providers[].models[]	each admin-pinned model identifier
+disclose	providers[].reasoning_effort	the reasoning level sent with the model, when the operator sets one (#242)
+disclose	providers[].output_tokens_field	the request field that carries the reply cap for this endpoint (#372)
 disclose	egress.socket_path	the socket the daemon connects to for egress (#240)
 disclose	egress.deadline_ms	the outer bound on one provider call — deployment shape (#240)
 disclose	transport.socket_path	the socket the daemon is listening on

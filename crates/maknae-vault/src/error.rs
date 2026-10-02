@@ -17,12 +17,6 @@ pub enum VaultError {
     /// guess reads a different secret than the operator wrote and the boot
     /// gate validated.
     InvalidKeyVaultPath(String),
-    /// The KV secret exists but carries no such field. Names the FIELD, never
-    /// the secret's contents.
-    MissingKvField {
-        path: String,
-        field: String,
-    },
     /// `deployment_id` failed the charset guard (empty / glob / slash / space).
     InvalidDeploymentId(String),
     /// `vault.addr` is not a valid `https://` URL (a non-TLS addr would disclose
@@ -53,13 +47,6 @@ pub enum VaultError {
     Pem(&'static str),
     /// AppRole login failed.
     Auth(String),
-    /// #240b: a token the deputy created could not be revoked. Named on its
-    /// own because the consequence is its own: the deputy's role bounds its
-    /// tokens to three uses and a short TTL (`deploy/vault-pki`), so the
-    /// leftover token is usable for seconds and at most two more requests —
-    /// usable, so the probe that hit this is a failed probe and a read that
-    /// hit this withholds its secret.
-    Revoke(String),
     /// Local keypair / CSR generation failed.
     CsrGen(String),
     /// `pki/sign` was rejected (e.g. a SAN mismatch surfaced by Vault).
@@ -142,6 +129,20 @@ pub enum VaultError {
     TokenUnreadable(String),
     TokenOtherVault(String),
     TokenStore(String),
+    SealPubAbsent,
+    SealPubAmbiguous {
+        first: &'static str,
+        second: &'static str,
+    },
+    SealPubRefused {
+        path: PathBuf,
+        detail: String,
+    },
+    SealPubMalformed {
+        path: PathBuf,
+        detail: String,
+    },
+    SealKey(&'static str),
 }
 
 impl std::fmt::Display for VaultError {
@@ -153,9 +154,6 @@ impl std::fmt::Display for VaultError {
             ),
             VaultError::Config(e) => write!(f, "config error: {e}"),
             VaultError::InvalidKeyVaultPath(m) => write!(f, "invalid key_vault_path: {m}"),
-            VaultError::MissingKvField { path, field } => {
-                write!(f, "key_vault_path '{path}' has no field '{field}'")
-            }
             VaultError::MissingKey(k) => write!(f, "required config key absent: {k}"),
             VaultError::InvalidDeploymentId(id) => write!(
                 f,
@@ -174,7 +172,6 @@ impl std::fmt::Display for VaultError {
             ),
             VaultError::Pem(what) => write!(f, "malformed PEM: {what}"),
             VaultError::Auth(msg) => write!(f, "AppRole login failed: {msg}"),
-            VaultError::Revoke(msg) => write!(f, "token revoke failed: {msg}"),
             VaultError::CsrGen(msg) => write!(f, "keypair/CSR generation failed: {msg}"),
             VaultError::Sign(msg) => write!(f, "pki/sign rejected: {msg}"),
             VaultError::RenewalExpired => write!(
@@ -255,6 +252,28 @@ impl std::fmt::Display for VaultError {
                 "the stored Vault token was issued by a different Vault ({addr}): run `maknae login`"
             ),
             VaultError::TokenStore(m) => write!(f, "Vault token storage failed: {m}"),
+            VaultError::SealPubAbsent => write!(
+                f,
+                "no Egress Daemon public key is published on this host: ask your administrator to run `sudo maknae enroll`"
+            ),
+            VaultError::SealPubAmbiguous { first, second } => write!(
+                f,
+                "Egress Daemon public keys are published at both {first} and {second}, and exactly one is expected: ask your administrator to remove the stale one"
+            ),
+            VaultError::SealPubRefused { path, detail } => write!(
+                f,
+                "the Egress Daemon public key at {} was refused ({detail}): it must be a regular file with one link, owned by root, not writable by group or others, in a directory only root can write; ask your administrator",
+                path.display()
+            ),
+            VaultError::SealPubMalformed { path, detail } => write!(
+                f,
+                "the Egress Daemon public key at {} could not be used ({detail}): ask your administrator",
+                path.display()
+            ),
+            VaultError::SealKey(why) => write!(
+                f,
+                "the Egress Daemon seal key is malformed ({why}): run `sudo maknae enroll --rotate-seal-key`"
+            ),
         }
     }
 }
@@ -332,6 +351,20 @@ mod tests {
             VaultError::TokenUnreadable("keychain status -25293".into()),
             VaultError::TokenOtherVault("https://old.example/v1/".into()),
             VaultError::TokenStore("keychain add: status -25308".into()),
+            VaultError::SealPubAbsent,
+            VaultError::SealPubAmbiguous {
+                first: "/etc/pki/maknae/seal.pub",
+                second: "/etc/ssl/maknae/seal.pub",
+            },
+            VaultError::SealPubRefused {
+                path: PathBuf::from("/etc/pki/maknae/seal.pub"),
+                detail: "mode 664".into(),
+            },
+            VaultError::SealPubMalformed {
+                path: PathBuf::from("/etc/pki/maknae/seal.pub"),
+                detail: "not UTF-8".into(),
+            },
+            VaultError::SealKey("empty or over 512 bytes"),
         ];
         for e in cases {
             assert!(!format!("{e}").is_empty());
@@ -372,5 +405,52 @@ mod tests {
         assert!(!VaultError::TokenStore("x".into())
             .to_string()
             .contains("maknae login"));
+    }
+
+    #[test]
+    fn each_seal_refusal_names_who_can_fix_it() {
+        assert_eq!(
+            VaultError::SealPubAbsent.to_string(),
+            "no Egress Daemon public key is published on this host: ask your administrator to run `sudo maknae enroll`"
+        );
+        let m = VaultError::SealPubAmbiguous {
+            first: "/etc/pki/maknae/seal.pub",
+            second: "/etc/ssl/maknae/seal.pub",
+        }
+        .to_string();
+        assert!(
+            m.contains("/etc/pki/maknae/seal.pub")
+                && m.contains("/etc/ssl/maknae/seal.pub")
+                && m.contains("administrator"),
+            "{m}"
+        );
+        let m = VaultError::SealPubRefused {
+            path: PathBuf::from("/etc/ssl/maknae/seal.pub"),
+            detail: "mode 664".into(),
+        }
+        .to_string();
+        assert!(
+            m.contains("/etc/ssl/maknae/seal.pub") && m.contains("mode 664"),
+            "{m}"
+        );
+        assert_eq!(
+            VaultError::SealPubRefused {
+                path: PathBuf::from("/etc/ssl/maknae/seal.pub"),
+                detail: "mode 664".into(),
+            }
+            .to_string(),
+            "the Egress Daemon public key at /etc/ssl/maknae/seal.pub was refused (mode 664): it must be a regular file with one link, owned by root, not writable by group or others, in a directory only root can write; ask your administrator"
+        );
+        assert_eq!(
+            VaultError::SealPubMalformed {
+                path: PathBuf::from("/etc/ssl/maknae/seal.pub"),
+                detail: "not UTF-8".into(),
+            }
+            .to_string(),
+            "the Egress Daemon public key at /etc/ssl/maknae/seal.pub could not be used (not UTF-8): ask your administrator"
+        );
+        assert!(VaultError::SealKey("empty or over 512 bytes")
+            .to_string()
+            .ends_with("run `sudo maknae enroll --rotate-seal-key`"));
     }
 }

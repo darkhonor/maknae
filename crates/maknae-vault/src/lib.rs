@@ -15,8 +15,6 @@ mod config;
 mod csr;
 mod csr_gen;
 mod digest;
-mod egress;
-mod egress_session;
 mod env;
 mod error;
 mod fips;
@@ -29,6 +27,7 @@ mod password_line;
 mod plane;
 mod plane_verify;
 mod resolver;
+mod seal_key_io;
 mod secret_io;
 mod secret_source;
 mod supervisor;
@@ -40,11 +39,12 @@ mod verify;
 mod wrap;
 // The UDS transport is unix-only (UnixStream / SO_PEERCRED); the pure-rustls layers above
 // (tls/resolver/plane_verify) compile everywhere so the Stage-1 client stays cross-platform.
-#[cfg(unix)]
-mod kv;
-mod kv_io;
 mod peer_identity;
 mod peercred;
+#[cfg(unix)]
+mod seal_pub_io;
+#[cfg(unix)]
+mod seal_pub_store;
 #[cfg(unix)]
 mod socket;
 #[cfg(unix)]
@@ -60,36 +60,35 @@ pub use client::{PlaneClient, PlaneIdentity, PLANE_HTTP_TIMEOUT, PLANE_SHUTDOWN_
 pub use config::{
     load_vault_config, user_auth_from_value, validate_deployment_id, validate_vault_addr,
     vault_config_from_document, UserAuth, UserAuthConfig, UserAuthMethod, VaultConfig,
-    DEFAULT_APPROLE_MOUNT, DEFAULT_PKI_INT_MOUNT, DEFAULT_USERPASS_MOUNT, VAULT_SECTION,
+    DEFAULT_APPROLE_MOUNT, DEFAULT_PKI_INT_MOUNT, DEFAULT_USERPASS_MOUNT, EGRESS_VAULT_CA_FILE,
+    VAULT_SECTION,
 };
 pub use csr_gen::generate_plane_csr;
 pub use digest::{sha256_hex, Sha256};
-pub use egress::{
-    load_egress_auth, EgressVault, EGRESS_APPROLE_ROLE, EGRESS_ROLE_ID_FILE, EGRESS_VAULT_CA_FILE,
-};
 pub use env::{scrub_with, NEVER_SCRUB_ENV, SCRUBBED_ENV};
 pub use error::VaultError;
 pub use fips_glue::{assert_fips_provider, install_default_crypto_provider};
-#[cfg(target_os = "macos")]
-pub use keychain::read_cli_secret_from;
 pub use keychain_policy::{
     daemon_keychain_pointer, gate, parse_pointer, pointer_document, read_gated, KeychainDelete,
-    KeychainItem, KeychainPlane, CLI_KEYCHAIN_ITEM, CLI_TOKEN_KEYCHAIN_ITEM, KEYCHAIN_ACCOUNT,
-    SYSTEM_KEYCHAIN,
+    KeychainItem, KeychainPlane, CLI_TOKEN_KEYCHAIN_ITEM, KEYCHAIN_ACCOUNT, SYSTEM_KEYCHAIN,
 };
-#[cfg(unix)]
-pub use kv::split_kv_path;
-pub use kv_io::read_kv_field;
 pub use operator::OperatorClient;
 pub use password_line::{PasswordFeed, PasswordLine};
 pub use peer_identity::{creds_match_listener_uid, creds_match_uid, listener_uid_is, peer_uid_is};
 pub use peercred::PeerCreds;
 pub use plane::Plane;
+pub use seal_key_io::read_egress_seal_key;
+#[cfg(unix)]
+pub use seal_pub_io::read_seal_pub_pem;
+#[cfg(unix)]
+pub use seal_pub_store::{
+    choose_present, linux_home_from_os_release, seal_pub_path, SealPubHome, MAX_SEAL_PUB_BYTES,
+};
 pub use secret_source::{
-    credentials_directory_env, resolve_cli_secret_source, resolve_daemon_secret_source,
-    resolve_egress_secret_source, CliSecretSource, CredentialSourceKind, DaemonSecretSource,
-    EgressSecretSource, DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME,
-    EGRESS_CREDENTIALS_DIRECTORY_CRED_NAME,
+    credentials_directory_env, resolve_daemon_secret_source, resolve_egress_seal_key_source,
+    seal_key_from_hex, seal_key_to_hex, CredentialSourceKind, DaemonSecretSource,
+    EgressSealKeySource, SealKeyDer, SealKeyHex, DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME,
+    EGRESS_SEAL_KEY_CRED_NAME, MAX_SEAL_KEY_BYTES,
 };
 #[cfg(unix)]
 pub use socket::bind_listener as bind_group_gated_uds;
@@ -115,8 +114,8 @@ pub use user_login::{
 pub use vault_api::VaultApi;
 pub use verify::{verify_plane_uri_san, VerifyError};
 pub use wrap::{
-    kv_data_path, KvDataPath, WrapExpectation, WrapLookup, WrappedSecret, WrappingToken,
-    MAX_KV_DATA_PATH_BYTES, MAX_WRAP_TTL,
+    aad_parts, kv_data_path, AadParts, KvDataPath, WrapExpectation, WrapLookup, WrappedSecret,
+    WrappingToken, MAX_KV_DATA_PATH_BYTES, MAX_WRAP_TTL, USER_KEY_WRAP_TTL,
 };
 
 #[used]
@@ -142,14 +141,25 @@ pub static CRATE_MARKER: &[u8] = b"MAKNAE_VAULT";
 /// copies of the same plumbing — is gone, and with it this crate's only ambient
 /// `current_dir` read.
 fn read_storage(path: &std::path::Path) -> Result<zeroize::Zeroizing<Vec<u8>>, VaultError> {
+    read_storage_within(path, None)
+}
+
+fn read_storage_within(
+    path: &std::path::Path,
+    max_bytes: Option<u64>,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, VaultError> {
     #[cfg(not(unix))]
     {
-        let _ = path;
+        let _ = (path, max_bytes);
         Err(VaultError::PermissionsUnsupported)
     }
     #[cfg(unix)]
     {
         let target = maknae_io::TargetRequired::OS_DAC_REGULAR;
+        let target = maknae_io::TargetRequired {
+            max_bytes,
+            ..target
+        };
         maknae_io::read_absolute(path, target, maknae_io::StrategyPref::Auto)
             .map(|out| out.value)
             .map_err(|error| VaultError::Io {

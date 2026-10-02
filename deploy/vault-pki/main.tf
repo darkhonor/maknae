@@ -1,4 +1,4 @@
-# Maknae Vault PKI (dev) — CA chain, plane roles, per-plane policies, AppRoles.
+# Maknae Vault PKI (dev) — CA chain, plane roles and policies, the maknaed AppRole, the userpass users.
 # All wiring is by resource reference so Terraform derives the create-ordering edges.
 
 # ---- Root CA (dedicated Maknae dev root; signs exactly one intermediate) --------
@@ -20,16 +20,11 @@ resource "vault_pki_secret_backend_root_cert" "maknae_root" {
   issuer_name    = "maknae-root"
 }
 
-# The KV v2 mount for platform secrets the daemons read and the CLI never can
-# (#243, ADR-0023 decision 3): the model provider's API key lives at
-# `<kv>/data/<provider.key_vault_path>`. NO policy here grants a read on it —
-# the `maknae-egress` principal that does is #240's, and the CLI policy below
-# names no KV path at all. Mounting it is the whole of #243's Vault obligation.
 resource "vault_mount" "maknae_kv" {
   path        = var.kv_mount_path
   type        = "kv"
   options     = { version = "2" }
-  description = "Maknae platform secrets (provider API keys) — read by maknae-egress only"
+  description = "Maknae provider API keys, one subtree per Vault user"
 }
 
 # ---- Intermediate CA (the one and only intermediate; issues plane leaves) -------
@@ -152,63 +147,23 @@ resource "vault_policy" "maknae_kernel" {
   EOT
 }
 
-resource "vault_policy" "maknae_cli" {
-  name   = "maknae-cli"
-  policy = <<-EOT
-    path "${vault_mount.maknae_int.path}/sign/maknae-cli"     { capabilities = ["update"] }
-    path "${vault_mount.maknae_int.path}/revoke"              { capabilities = ["update"] }
-    path "${vault_mount.maknae_int.path}/issuer/default/json" { capabilities = ["read"] }
-    path "auth/token/renew-self"  { capabilities = ["update"] }
-    path "auth/token/lookup-self" { capabilities = ["read"] }
-    path "auth/token/revoke-self" { capabilities = ["update"] }
-  EOT
-}
-
-# ---- #240a: the egress deputy's policy -----------------------------------------
-# The THIRD plane. Deliberately the narrowest of the three: a read on the
-# provider-key prefix and its own token lifecycle, and nothing else. No
-# `pki/sign` role — the deputy's socket carries NO on-host mTLS (ADR-0023
-# decision 3's recorded delta); its peer is authenticated by peer credentials,
-# so there is no plane certificate for it to sign and no URI SAN to verify.
-#
-# The PREFIX, not a literal path: a second provider must not require a policy
-# change and a re-enrolment. The blast radius is stated and accepted — a
-# compromised deputy can read every provider key, which is the same reach it
-# already has by holding the only route out.
-# #240b (2026-09-15): revoke-self ONLY. The deputy's token is use-bounded
-# (below) and never renewed or looked up; the two grants the other planes
-# carry for their periodic tokens would be capabilities nothing exercises.
-resource "vault_policy" "maknae_egress" {
-  name   = "maknae-egress"
-  policy = <<-EOT
-    path "${vault_mount.maknae_kv.path}/data/${var.provider_key_prefix}/*" { capabilities = ["read"] }
-    path "auth/token/revoke-self" { capabilities = ["update"] }
-  EOT
-}
-
 # ---- Operator enroll policy — grants `maknae enroll` its own-token privileges --
-# `maknae enroll` runs under the OPERATOR's own Vault token, not either plane's
-# AppRole token, so it needs its own least-privilege policy: read all three
-# RoleIDs, mint/destroy all three SecretIDs, and read the intermediate issuer
+# `maknae enroll` runs under the OPERATOR's own Vault token, not the plane's
+# AppRole token, so it needs its own least-privilege policy: read the `maknaed`
+# RoleID, mint/destroy its SecretIDs, and read the intermediate issuer
 # bundle it hands to the daemon and CLI at enrollment. AUTH-METHOD paths need the literal `auth/`
 # prefix (vault_auth_backend.approle.path is the BARE mount name; vaultrs/Vault
 # addresses auth methods under `auth/<mount>` — omitting the prefix 403s every
 # enroll op). The PKI issuer path takes NO prefix (secret engines mount at root),
-# mirroring how maknae_kernel/maknae_cli interpolate the int-mount path above.
+# mirroring how maknae_kernel/maknae_user interpolate the int-mount path.
 # No `list` anywhere (§4.5): enroll destroys SecretID accessors by the id it
 # recorded at creation time, never by listing the mount's accessors.
 resource "vault_policy" "maknae_enroll" {
   name   = "maknae-enroll"
   policy = <<-EOT
     path "auth/${vault_auth_backend.approle.path}/role/maknaed/role-id"                    { capabilities = ["read"] }
-    path "auth/${vault_auth_backend.approle.path}/role/maknae/role-id"                      { capabilities = ["read"] }
     path "auth/${vault_auth_backend.approle.path}/role/maknaed/secret-id"                   { capabilities = ["create","update"] }
-    path "auth/${vault_auth_backend.approle.path}/role/maknae/secret-id"                    { capabilities = ["create","update"] }
     path "auth/${vault_auth_backend.approle.path}/role/maknaed/secret-id-accessor/destroy" { capabilities = ["update"] }
-    path "auth/${vault_auth_backend.approle.path}/role/maknae/secret-id-accessor/destroy"  { capabilities = ["update"] }
-    path "auth/${vault_auth_backend.approle.path}/role/maknae-egress/role-id"                    { capabilities = ["read"] }
-    path "auth/${vault_auth_backend.approle.path}/role/maknae-egress/secret-id"                  { capabilities = ["create","update"] }
-    path "auth/${vault_auth_backend.approle.path}/role/maknae-egress/secret-id-accessor/destroy" { capabilities = ["update"] }
     path "${vault_mount.maknae_int.path}/issuer/default/json"                               { capabilities = ["read"] }
   EOT
 }
@@ -225,9 +180,6 @@ resource "vault_auth_backend" "approle" {
 #    scheduled self-outage. Its SecretID is STANDING (num_uses=0, ttl=0) so reboots re-login
 #    hands-free; the bootstrap secret is _maknae-owned and HRoT-sealed at rest by
 #    `maknae enroll` (the daemon holds no SecretID-minting capability).
-#  - maknae (CLI): a SHORT-LIVED token (token_ttl/token_max_ttl, dies fast per invocation)
-#    plus a STANDING, operator-owned SecretID (num_uses=0, ttl=0) so the CLI mints per
-#    invocation without re-seeding.
 # token_no_default_policy drops `default`; the per-plane policy above re-grants
 # renew-self/lookup-self/revoke-self so renewal + zero-trust shutdown-revoke still work.
 # secret_id_ttl and secret_id_num_uses are HARD-CODED to 0 (not variables): a standing
@@ -244,34 +196,59 @@ resource "vault_approle_auth_backend_role" "maknaed" {
   token_no_default_policy = true
 }
 
-# #240a: the deputy's AppRole. Standing SecretID like the daemon's (ADR-0018).
-# #240b (corrected 2026-09-15): NOT a periodic token. The deputy logs in per
-# key read — login, one KV read, revoke-self — and holds no token between
-# reads, so the token it creates is bounded to exactly that: three uses (Vault
-# spends one per request; the read and the revoke are two) and a short TTL,
-# set above twice the deputy's per-request HTTP timeout so a slow-but-alive
-# Vault cannot expire the token between the read and the revoke. A token
-# whose revoke failed is then usable for at most that; the deputy still
-# refuses on that failure.
-resource "vault_approle_auth_backend_role" "maknae_egress" {
-  backend                 = vault_auth_backend.approle.path
-  role_name               = "maknae-egress"
-  token_policies          = [vault_policy.maknae_egress.name]
-  secret_id_ttl           = 0  # ADR-0018 invariant: standing SecretID
-  secret_id_num_uses      = 0  # unlimited logins (hands-free reboots)
-  token_num_uses          = 3   # read + revoke, with one to spare
-  token_ttl               = 120 # seconds: above TWICE the deputy's per-request HTTP timeout (maknae-vault VAULT_HTTP_TIMEOUT, 30 s)
-  token_max_ttl           = 120
+resource "vault_auth_backend" "userpass" {
+  type = "userpass"
+  path = var.userpass_mount
+}
+
+resource "vault_policy" "maknae_user" {
+  name   = "maknae-user"
+  policy = <<-EOT
+    path "${vault_mount.maknae_kv.path}/data/${var.user_prefix}/{{identity.entity.aliases.${vault_auth_backend.userpass.accessor}.name}}/*" {
+      capabilities     = ["create", "read", "update", "delete", "list"]
+      min_wrapping_ttl = "1s"
+    }
+    path "${vault_mount.maknae_kv.path}/metadata/${var.user_prefix}/{{identity.entity.aliases.${vault_auth_backend.userpass.accessor}.name}}/*" {
+      capabilities = ["read", "list", "delete"]
+    }
+    path "${vault_mount.maknae_int.path}/sign/${vault_pki_secret_backend_role.maknae_cli.name}" { capabilities = ["update"] }
+    path "auth/token/lookup-self" { capabilities = ["read"] }
+    path "auth/token/revoke-self" { capabilities = ["update"] }
+  EOT
+}
+
+ephemeral "random_password" "maknae_user" {
+  for_each = var.maknae_users
+  length   = 32
+}
+
+# Policies bind through the maknae-users group; any in-place update of this resource resends the write-only password and resets it.
+resource "vault_userpass_auth_backend_user" "maknae" {
+  for_each                = var.maknae_users
+  mount                   = vault_auth_backend.userpass.path
+  username                = each.key
+  password_wo             = ephemeral.random_password.maknae_user[each.key].result
+  password_wo_version     = each.value.password_version
+  token_ttl               = 28800
+  token_max_ttl           = 86400
   token_no_default_policy = true
 }
 
-resource "vault_approle_auth_backend_role" "maknae" {
-  backend                 = vault_auth_backend.approle.path
-  role_name               = "maknae"
-  token_policies          = [vault_policy.maknae_cli.name]
-  secret_id_ttl           = 0             # ADR-0018 invariant: standing (non-expiring), operator-owned
-  secret_id_num_uses      = 0             # ADR-0018 invariant: CLI mints per invocation w/o re-seed
-  token_ttl               = var.token_ttl # short-lived token, dies fast per invocation
-  token_max_ttl           = var.token_max_ttl
-  token_no_default_policy = true
+resource "vault_identity_entity" "maknae_user" {
+  for_each = var.maknae_users
+  name     = "maknae-${each.key}"
+}
+
+resource "vault_identity_entity_alias" "maknae_user" {
+  for_each       = var.maknae_users
+  name           = each.key
+  mount_accessor = vault_auth_backend.userpass.accessor
+  canonical_id   = vault_identity_entity.maknae_user[each.key].id
+}
+
+resource "vault_identity_group" "maknae_users" {
+  name              = "maknae-users"
+  type              = "internal"
+  policies          = [vault_policy.maknae_user.name]
+  member_entity_ids = [for e in vault_identity_entity.maknae_user : e.id]
 }

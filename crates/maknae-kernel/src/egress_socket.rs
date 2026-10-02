@@ -20,7 +20,9 @@
 
 use crate::egress::DurableEgressIntent;
 use crate::egress::{Egress, EgressFailure, EgressReply, EgressRequest};
-use maknae_proto::{decode_egress_frame_reply, encode_egress_frame_request, EgressFrameRequest};
+use maknae_proto::{
+    decode_egress_frame_reply, encode_egress_frame_request, EgressFrameReply, EgressFrameRequest,
+};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -339,10 +341,13 @@ impl Egress for SocketEgress {
         // decode drops this buffer just the same.
         let mut body = maknae_io::Zeroizing::new(vec![0u8; n]);
         Self::read_exact_by(&mut s, &mut body, deadline_at).map_err(Self::after_send)?;
-        let reply = decode_egress_frame_reply(&body)
+        match decode_egress_frame_reply(&body)
             .map_err(Self::transport)
-            .map_err(Self::after_send)?;
-        Ok(EgressReply { reply: reply.reply })
+            .map_err(Self::after_send)?
+        {
+            EgressFrameReply::Reply(reply) => Ok(EgressReply { reply }),
+            EgressFrameReply::RefusedBeforeSend => Err(EgressFailure::RefusedBeforeSend),
+        }
     }
 }
 
@@ -353,6 +358,7 @@ fn frame_of(req: EgressRequest) -> EgressFrameRequest {
         model: req.model,
         key_vault_path: req.key_vault_path,
         key_field: req.key_field,
+        sealed_key: req.sealed_key,
         reasoning_effort: req.reasoning_effort,
         conversation: req.conversation,
         turns: req.turns,
@@ -376,6 +382,11 @@ mod tests {
             model: "m".into(),
             key_vault_path: "maknae/providers/openai".into(),
             key_field: "api-key".into(),
+            sealed_key: maknae_proto::SealedKey::new(vec![
+                0x5a;
+                maknae_proto::SEALED_KEY_MIN_BYTES
+            ])
+            .unwrap(),
             reasoning_effort: Some("none".into()),
             output_tokens: None,
             output_tokens_field: None,
@@ -401,6 +412,7 @@ mod tests {
         assert_eq!(f.model, r.model);
         assert_eq!(f.key_vault_path, r.key_vault_path);
         assert_eq!(f.key_field, r.key_field);
+        assert_eq!(f.sealed_key, r.sealed_key);
         assert_eq!(f.reasoning_effort.as_deref(), Some("none"));
         assert_eq!(f.conversation, r.conversation);
         assert_eq!(f.turns, r.turns);
@@ -415,7 +427,7 @@ mod tests {
     /// that a refused connection wrote NOTHING.
     fn fake_deputy(
         dir: &std::path::Path,
-        reply: Option<maknae_proto::PromptReply>,
+        reply: Option<maknae_proto::EgressFrameReply>,
     ) -> (PathBuf, StdArc<AtomicUsize>) {
         let path = dir.join("egress.sock");
         let l = UnixListener::bind(&path).unwrap();
@@ -431,7 +443,7 @@ mod tests {
                         s2.fetch_add(4 + n, Ordering::SeqCst);
                         if let Some(r) = reply {
                             let out = maknae_proto::encode_egress_frame_reply(
-                                &maknae_proto::EgressFrameReply { reply: r },
+                                &r,
                                 maknae_proto::EGRESS_REPLY_FRAME_ENCODE_BYTES,
                             )
                             .unwrap();
@@ -677,12 +689,32 @@ mod tests {
             tool_calls: vec![],
             usage: None,
         };
-        let (path, seen) = fake_deputy(d.path(), Some(reply.clone()));
+        let (path, seen) = fake_deputy(
+            d.path(),
+            Some(maknae_proto::EgressFrameReply::Reply(reply.clone())),
+        );
         let me = nix::unistd::getuid().as_raw();
         let e = SocketEgress::new(path, me, Duration::from_secs(2), 64 * 1024);
         let intent = crate::egress::DurableEgressIntent::canned_for_test();
         let got = e.send(&intent, req()).unwrap();
         assert_eq!(got.reply, reply);
+        assert!(seen.load(Ordering::SeqCst) > 0);
+    }
+
+    #[test]
+    fn a_deputy_that_refuses_before_any_provider_io_is_refused_before_send() {
+        let d = tempfile::tempdir().unwrap();
+        let (path, seen) = fake_deputy(
+            d.path(),
+            Some(maknae_proto::EgressFrameReply::RefusedBeforeSend),
+        );
+        let me = nix::unistd::getuid().as_raw();
+        let e = SocketEgress::new(path, me, Duration::from_secs(2), 64 * 1024);
+        let intent = crate::egress::DurableEgressIntent::canned_for_test();
+        assert_eq!(
+            e.send(&intent, req()).unwrap_err(),
+            EgressFailure::RefusedBeforeSend
+        );
         assert!(seen.load(Ordering::SeqCst) > 0);
     }
 
