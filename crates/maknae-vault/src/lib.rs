@@ -114,8 +114,8 @@ pub use user_login::{
 pub use vault_api::VaultApi;
 pub use verify::{verify_plane_uri_san, VerifyError};
 pub use wrap::{
-    kv_data_path, KvDataPath, WrapExpectation, WrapLookup, WrappedSecret, WrappingToken,
-    MAX_KV_DATA_PATH_BYTES, MAX_WRAP_TTL, USER_KEY_WRAP_TTL,
+    aad_parts, kv_data_path, AadParts, KvDataPath, WrapExpectation, WrapLookup, WrappedSecret,
+    WrappingToken, MAX_KV_DATA_PATH_BYTES, MAX_WRAP_TTL, USER_KEY_WRAP_TTL,
 };
 
 #[used]
@@ -141,14 +141,25 @@ pub static CRATE_MARKER: &[u8] = b"MAKNAE_VAULT";
 /// copies of the same plumbing — is gone, and with it this crate's only ambient
 /// `current_dir` read.
 fn read_storage(path: &std::path::Path) -> Result<zeroize::Zeroizing<Vec<u8>>, VaultError> {
+    read_storage_within(path, None)
+}
+
+fn read_storage_within(
+    path: &std::path::Path,
+    max_bytes: Option<u64>,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, VaultError> {
     #[cfg(not(unix))]
     {
-        let _ = path;
+        let _ = (path, max_bytes);
         Err(VaultError::PermissionsUnsupported)
     }
     #[cfg(unix)]
     {
         let target = maknae_io::TargetRequired::OS_DAC_REGULAR;
+        let target = maknae_io::TargetRequired {
+            max_bytes,
+            ..target
+        };
         maknae_io::read_absolute(path, target, maknae_io::StrategyPref::Auto)
             .map(|out| out.value)
             .map_err(|error| VaultError::Io {

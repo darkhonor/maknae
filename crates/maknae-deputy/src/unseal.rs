@@ -1,3 +1,4 @@
+//! Opening a turn's sealed key into its provider key, behind the `KeyOpener` seam (#153).
 use crate::handle::Refusal;
 use maknae_config::EgressBounds;
 use maknae_proto::EgressFrameRequest;
@@ -51,12 +52,12 @@ impl OpenFailure {
             OpenFailure::WrongPath => {
                 "the wrapping token wraps a different path than this request names"
             }
-            OpenFailure::Ttl => "the wrapping token's TTL is above the allowed bound",
+            OpenFailure::Ttl => "the wrapping token's TTL is outside the allowed bound",
             OpenFailure::Invalid => {
                 "the wrapping token is expired, already used, or not a wrapping token"
             }
             OpenFailure::Field => "the key field is absent from the secret",
-            OpenFailure::Vault => "Vault could not be reached or refused the unwrap",
+            OpenFailure::Vault => "the Vault unwrap failed",
         }
     }
 }
@@ -195,10 +196,10 @@ mod tests {
                 "the sealed key does not match this request",
                 "the sealed key does not hold a wrapping token",
                 "the wrapping token wraps a different path than this request names",
-                "the wrapping token's TTL is above the allowed bound",
+                "the wrapping token's TTL is outside the allowed bound",
                 "the wrapping token is expired, already used, or not a wrapping token",
                 "the key field is absent from the secret",
-                "Vault could not be reached or refused the unwrap",
+                "the Vault unwrap failed",
             ]
         );
     }

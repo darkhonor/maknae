@@ -1,5 +1,6 @@
 //! `PlaneClient` — the Stage-1 orchestrator: config → AppRole auth (standing raw
-//! SecretID, ADR-0018) → P-384 CSR → `pki/sign` → memory-only leaf. The identity is Arc-backed
+//! SecretID, ADR-0018) or the user's stored `maknae login` token → P-384 CSR → `pki/sign` →
+//! memory-only leaf. The identity is Arc-backed
 //! (cheap snapshot; key wiped on drop). The credential supervisor (`spawn_supervisor`,
 //! `supervisor_run.rs`) runs on a shared handle so serving, token renewal, and leaf
 //! rotation all proceed concurrently (ADR-0018 Decision 3).
@@ -521,9 +522,8 @@ impl PlaneClient {
             PlaneAuth::UserToken(token) => client.set_token(token.expose()),
         }
 
-        // Any failure AFTER the token is installed must revoke the just-issued token —
-        // otherwise `client.mint().await?` drops the client (shutdown() never runs) and
-        // leaks a usable privileged token until its TTL.
+        // AppRole path only: a failure after the token is installed revokes the just-issued
+        // token, or the dropped client leaks it until its TTL; a user token is never revoked here.
         let (key_der, leaf_pem, chain_pem) = match self.sign_leaf(&client).await {
             Ok(v) => v,
             Err(e) => {
@@ -553,7 +553,7 @@ impl PlaneClient {
         // lock) is fully serialized — no window where mint installs a new identity while the
         // resolver keeps the old cert, and no window where attach seeds a retired cert. The
         // build is synchronous, so nothing is awaited while the std lock is held; the only
-        // await (token revoke on build failure) happens AFTER the guard is dropped, and the
+        // await (the AppRole token revoke on build failure) happens AFTER the guard is dropped, and the
         // identity is NOT committed on that failure path (fail closed).
         let build_result: Result<(), VaultError> = {
             let mut guard = self.identity.write().expect("identity lock poisoned");
@@ -618,6 +618,10 @@ impl PlaneClient {
     /// pattern, generalized so `rotate_leaf`'s lock-discipline-critical code has
     /// exactly ONE implementation, shared by `PlaneClient::rotate_leaf` and the
     /// supervisor loop in `supervisor_run.rs`).
+    pub(crate) fn token_source(&self) -> PlaneTokenSource {
+        self.auth.token_source()
+    }
+
     pub(crate) fn supervisor_ctx(&self) -> SupervisorCtx {
         SupervisorCtx {
             client: Arc::clone(&self.client),
@@ -1393,6 +1397,19 @@ mod tests {
             Err(VaultError::Sign(_))
         ));
         assert!(client.current_identity().is_none());
+    }
+
+    #[test]
+    fn the_supervisor_refuses_a_user_token_client_before_any_renewal() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let fx = DispatchFixture::with_addr("user-supervisor", DEAD_VAULT, "");
+        let client = PlaneClient::for_user(&fx.doc(), &fx.0, user_token()).unwrap();
+        let rt = current_thread(false);
+        let got = rt.block_on(async { client.spawn_supervisor().await.unwrap() });
+        assert!(
+            matches!(&got, VaultError::Renew(m) if m == "a stored user login is never renewed by the credential supervisor"),
+            "{got:?}"
+        );
     }
 
     #[test]

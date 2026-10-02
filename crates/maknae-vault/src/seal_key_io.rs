@@ -3,7 +3,7 @@ use crate::secret_source::{
     check_seal_key_len, resolve_egress_seal_key_source, seal_key_from_hex, EgressSealKeySource,
     SealKeyDer,
 };
-use crate::{KeychainPlane, VaultError};
+use crate::{KeychainPlane, VaultError, MAX_SEAL_KEY_BYTES};
 use std::path::Path;
 
 pub fn read_egress_seal_key(
@@ -16,7 +16,7 @@ pub fn read_egress_seal_key(
     };
     match resolve_egress_seal_key_source(credentials_dir, pointer.as_deref())? {
         EgressSealKeySource::CredentialsDirectory(path) => {
-            let der = crate::read_storage(&path)?;
+            let der = crate::read_storage_within(&path, Some(MAX_SEAL_KEY_BYTES as u64))?;
             check_seal_key_len(der.len())?;
             Ok(SealKeyDer::new(der))
         }
@@ -62,16 +62,16 @@ mod tests {
 
     #[test]
     fn an_empty_or_oversized_credential_is_refused_and_the_bound_is_inclusive() {
-        for n in [0, crate::MAX_SEAL_KEY_BYTES + 1] {
-            let creds = creds_with(&vec![0x30; n]);
-            assert!(
-                matches!(
-                    read_egress_seal_key(creds.path().to_str(), Path::new(NO_EGRESS_DIR)),
-                    Err(VaultError::SealKey(_))
-                ),
-                "{n}"
-            );
-        }
+        let empty = creds_with(&[]);
+        assert!(matches!(
+            read_egress_seal_key(empty.path().to_str(), Path::new(NO_EGRESS_DIR)),
+            Err(VaultError::SealKey(_))
+        ));
+        let over = creds_with(&vec![0x30; crate::MAX_SEAL_KEY_BYTES + 1]);
+        assert!(matches!(
+            read_egress_seal_key(over.path().to_str(), Path::new(NO_EGRESS_DIR)),
+            Err(VaultError::Io { source, .. }) if source.to_string().starts_with("too large (513 bytes, limit 512)")
+        ));
         let creds = creds_with(&[0x30; crate::MAX_SEAL_KEY_BYTES]);
         assert_eq!(
             read_egress_seal_key(creds.path().to_str(), Path::new(NO_EGRESS_DIR))
@@ -80,6 +80,19 @@ mod tests {
                 .len(),
             crate::MAX_SEAL_KEY_BYTES
         );
+    }
+
+    #[test]
+    fn a_huge_credential_is_refused_by_its_size_before_any_read() {
+        let creds = tempfile::tempdir().unwrap();
+        std::fs::File::create(creds.path().join(crate::EGRESS_SEAL_KEY_CRED_NAME))
+            .unwrap()
+            .set_len(1 << 26)
+            .unwrap();
+        assert!(matches!(
+            read_egress_seal_key(creds.path().to_str(), Path::new(NO_EGRESS_DIR)),
+            Err(VaultError::Io { source, .. }) if source.to_string().starts_with("too large (67108864 bytes, limit 512)")
+        ));
     }
 
     #[test]

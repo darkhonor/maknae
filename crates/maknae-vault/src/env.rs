@@ -18,8 +18,8 @@
 //! `LISTEN_FDS`/`LISTEN_PID`/`LISTEN_FDNAMES` carry the deputy's
 //! socket-activated fd (read by `listenfd::ListenFd::from_env()` AFTER the
 //! scrub runs); `XDG_RUNTIME_DIR` is how `systemd-creds --user` finds the
-//! runtime directory in the enroll helper, which is itself a `maknae` process
-//! and so runs this scrub; `MAKNAE_CONFIG_DIR` is documented operator workflow;
+//! runtime directory for `maknae login`'s token store, and `maknae` runs this
+//! scrub; `MAKNAE_CONFIG_DIR` is documented operator workflow;
 //! and `SUDO_UID`/`SUDO_USER` are the operator identity enroll provisions for.
 //! So [`NEVER_SCRUB_ENV`] names every one of them with its reader, and a test
 //! holds the two lists DISJOINT. That turns "remember not to add that one" into
@@ -136,9 +136,9 @@ pub const SCRUBBED_ENV: &[&str] = &[
 /// `maknae` or `maknae-egress` links — `LC_MESSAGES`/`LANG` live in
 /// `maknae-msgs` and `HOSTNAME` in `maknae-kernel`, not in the binaries' own
 /// source — PLUS every variable their CHILD processes need —
-/// `XDG_RUNTIME_DIR` is here for the second reason only, since the enroll
-/// helper's `systemd-creds --user` consumes it and the helper is itself a
-/// `maknae` process running this scrub. The workspace's fourth binary,
+/// `XDG_RUNTIME_DIR` is here for the second reason only, since `maknae login`'s
+/// token store runs `systemd-creds --user`, which consumes it, from a `maknae`
+/// process that has run this scrub. The workspace's fourth binary,
 /// `maknae-spifc`, is a scaffold stub that reads no environment and is not
 /// covered. Runtime and loader variables (`RUST_BACKTRACE`, `LD_*`) are
 /// deliberately absent: nothing here reads them and none is on the scrub list.
@@ -161,11 +161,7 @@ pub const NEVER_SCRUB_ENV: &[&str] = &[
     // Documented operator workflow (`docs/runbook.md`): relocates the CLI's
     // config directory. `bins/maknae/src/cli.rs`.
     "MAKNAE_CONFIG_DIR",
-    // `systemd-creds --user` needs it to find the user's runtime directory, and
-    // the enroll HELPER is itself a `maknae` process — so it runs this scrub.
-    // The parent sets it explicitly for the child (`enroll/mod.rs` builds
-    // `XDG_RUNTIME_DIR=/run/user/<uid>` rather than passing its own through),
-    // which is exactly why removing it here would break the seal it was set for.
+    // `maknae login`'s token store runs `systemd-creds --user`, which needs it.
     "XDG_RUNTIME_DIR",
     // The CLI's config-dir fallback when MAKNAE_CONFIG_DIR is unset
     // (`cli.rs`). Note it falls back to "." when HOME itself is unset.

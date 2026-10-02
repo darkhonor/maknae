@@ -9,7 +9,10 @@ use maknae_agent::transcript::Transcript;
 use maknae_config::{UserProviderEntry, UserProviders, Value};
 use maknae_proto::{Payload, ProviderChoice, SealedKey, Turn, Verb};
 use maknae_seal::{SealAad, SealContext, SealPublicKey};
-use maknae_vault::{PlaneClient, UserToken, VaultApi, VaultError, WrappedSecret};
+use maknae_vault::{
+    aad_parts, PlaneClient, UserToken, VaultApi, VaultError, WrapExpectation, WrappedSecret,
+    USER_KEY_WRAP_TTL,
+};
 use std::future::Future;
 use std::path::Path;
 
@@ -154,8 +157,13 @@ where
     let secret_path =
         maknae_config::user_key_path(key.user_prefix, key.username, &entry.key_subpath)
             .map_err(|_| unusable())?;
-    let expected =
-        maknae_vault::kv_data_path(key.kv_mount, &secret_path).map_err(|_| unusable())?;
+    let expect = WrapExpectation::new(
+        key.kv_mount,
+        &secret_path,
+        &entry.key_field,
+        USER_KEY_WRAP_TTL,
+    )
+    .map_err(|_| unusable())?;
     let wrapped = read(secret_path)
         .await
         .map_err(|e| key_read_failure(&entry.label, &e))?;
@@ -165,12 +173,13 @@ where
             entry.label
         )
     };
+    let parts = aad_parts(&expect, conversation, &entry.provider, &entry.model);
     let aad = SealAad::new(&SealContext {
-        conversation,
-        provider: &entry.provider,
-        model: &entry.model,
-        expected_path: expected.as_str(),
-        key_field: &entry.key_field,
+        conversation: parts.conversation,
+        provider: parts.provider,
+        model: parts.model,
+        expected_path: parts.expected_path,
+        key_field: parts.key_field,
     })
     .map_err(|e| sealing(&e))?;
     let blob = maknae_seal::seal(key.seal_key, &aad, wrapped.token.expose().as_bytes())
@@ -910,12 +919,13 @@ mod tests {
         })
         .await
         .unwrap();
+        let p = maknae_vault::aad_parts(&expect, "c-153", "openai", "gpt-5.6-luna");
         let egress = aad(
-            "c-153",
-            "openai",
-            "gpt-5.6-luna",
-            expect.creation_path(),
-            expect.field(),
+            p.conversation,
+            p.provider,
+            p.model,
+            p.expected_path,
+            p.key_field,
         );
         let opened = maknae_seal::open(&recipient, &egress, choice.sealed_key.as_bytes()).unwrap();
         assert!(opened.as_slice() == b"hvs.wrap-sentinel-153");

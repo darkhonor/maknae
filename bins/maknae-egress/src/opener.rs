@@ -1,7 +1,9 @@
+//! The production `KeyOpener`: open the seal, check the wrapping token, unwrap the key field (#153).
 use maknae_deputy::unseal::{KeyOpener, OpenFailure, OpenRequest};
 use maknae_seal::{SealAad, SealContext, SealPrivateKey};
 use maknae_vault::{
-    VaultApi, VaultError, WrapExpectation, WrapMismatch, WrappingToken, USER_KEY_WRAP_TTL,
+    aad_parts, VaultApi, VaultError, WrapExpectation, WrapMismatch, WrappingToken,
+    USER_KEY_WRAP_TTL,
 };
 use std::future::Future;
 use zeroize::Zeroizing;
@@ -29,7 +31,20 @@ impl Unwrapper for VaultApi {
     }
 }
 
+pub fn vault_diagnostic(e: &VaultError) -> Option<String> {
+    match e {
+        VaultError::WrapMismatch(
+            WrapMismatch::CreationPath | WrapMismatch::CreationTtl { .. } | WrapMismatch::Invalid,
+        )
+        | VaultError::KvField { .. } => None,
+        other => Some(format!("maknae-egress: the Vault unwrap failed: {other}")),
+    }
+}
+
 pub fn vault_failure(e: VaultError) -> OpenFailure {
+    if let Some(line) = vault_diagnostic(&e) {
+        eprintln!("{line}");
+    }
     match e {
         VaultError::WrapMismatch(WrapMismatch::CreationPath) => OpenFailure::WrongPath,
         VaultError::WrapMismatch(WrapMismatch::CreationTtl { .. }) => OpenFailure::Ttl,
@@ -51,12 +66,13 @@ pub fn unseal_token(
         USER_KEY_WRAP_TTL,
     )
     .map_err(|_| OpenFailure::Request)?;
+    let parts = aad_parts(&expectation, req.conversation, req.provider, req.model);
     let aad = SealAad::new(&SealContext {
-        conversation: req.conversation,
-        provider: req.provider,
-        model: req.model,
-        expected_path: expectation.creation_path(),
-        key_field: expectation.field(),
+        conversation: parts.conversation,
+        provider: parts.provider,
+        model: parts.model,
+        expected_path: parts.expected_path,
+        key_field: parts.key_field,
     })
     .map_err(|_| OpenFailure::Seal)?;
     let opened = maknae_seal::open(key, &aad, sealed).map_err(|_| OpenFailure::Seal)?;
@@ -140,13 +156,20 @@ ampbv97Rcx9j
     }
 
     fn sealed_like_the_cli(key: &SealPrivateKey, req: &OpenRequest<'_>, token: &[u8]) -> Vec<u8> {
-        let path = maknae_vault::kv_data_path(req.kv_mount, req.key_vault_path).unwrap();
+        let expect = WrapExpectation::new(
+            req.kv_mount,
+            req.key_vault_path,
+            req.key_field,
+            USER_KEY_WRAP_TTL,
+        )
+        .unwrap();
+        let parts = aad_parts(&expect, req.conversation, req.provider, req.model);
         let aad = SealAad::new(&SealContext {
-            conversation: req.conversation,
-            provider: req.provider,
-            model: req.model,
-            expected_path: path.as_str(),
-            key_field: req.key_field,
+            conversation: parts.conversation,
+            provider: parts.provider,
+            model: parts.model,
+            expected_path: parts.expected_path,
+            key_field: parts.key_field,
         })
         .unwrap();
         maknae_seal::seal(key.public_key(), &aad, token)
@@ -345,6 +368,69 @@ ampbv97Rcx9j
         ];
         for (e, want) in cases {
             assert_eq!(vault_failure(e), want);
+        }
+    }
+
+    #[test]
+    fn a_collapsed_vault_failure_yields_one_diagnostic_line_naming_its_class() {
+        assert_eq!(
+            vault_diagnostic(&VaultError::VaultStatus {
+                op: "unwrap",
+                status: 403,
+                hint: "permission denied",
+            })
+            .as_deref(),
+            Some("maknae-egress: the Vault unwrap failed: Vault unwrap returned HTTP 403: permission denied")
+        );
+        assert_eq!(
+            vault_diagnostic(&VaultError::VaultBody {
+                op: "unwrap",
+                why: "Syntax error at line 1 column 7".into(),
+            })
+            .as_deref(),
+            Some("maknae-egress: the Vault unwrap failed: Vault unwrap response refused: Syntax error at line 1 column 7")
+        );
+        for mapped in [
+            VaultError::WrapMismatch(WrapMismatch::CreationPath),
+            VaultError::WrapMismatch(WrapMismatch::Invalid),
+            VaultError::KvField {
+                field: "api_key-FIELD-SENTINEL".into(),
+                why: "absent",
+            },
+        ] {
+            assert_eq!(vault_diagnostic(&mapped), None, "{mapped:?}");
+        }
+    }
+
+    #[test]
+    fn the_diagnostic_for_a_real_vault_failure_names_no_token_path_or_field() {
+        fips();
+        let d = tempfile::tempdir().unwrap();
+        let ca = d.path().join(maknae_vault::EGRESS_VAULT_CA_FILE);
+        std::fs::write(&ca, TEST_CA_PEM).unwrap();
+        let api = VaultApi::new("https://127.0.0.1:1", &ca).unwrap();
+        let token = || WrappingToken::from_opened(Zeroizing::new(TOKEN.to_vec())).unwrap();
+        let expect = WrapExpectation::new(
+            "maknae-kv",
+            "maknae/users/alice/PATH-SENTINEL",
+            "FIELD-SENTINEL",
+            USER_KEY_WRAP_TTL,
+        )
+        .unwrap();
+        let errors = [
+            run(api.lookup_wrapping(&token())).unwrap_err(),
+            run(api.unwrap_kv_field(token(), &expect)).unwrap_err(),
+        ];
+        for e in errors {
+            let line = vault_diagnostic(&e).expect("a transport failure is collapsed");
+            assert!(line.starts_with("maknae-egress: the Vault unwrap failed: "));
+            for sentinel in [
+                "egress-opener-wrapping-token-sentinel",
+                "PATH-SENTINEL",
+                "FIELD-SENTINEL",
+            ] {
+                assert!(!line.contains(sentinel), "{line}");
+            }
         }
     }
 

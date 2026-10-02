@@ -176,6 +176,30 @@ impl WrapExpectation {
     }
 }
 
+/// The five strings both the sealer and the opener bind into the seal's AAD.
+pub struct AadParts<'a> {
+    pub conversation: &'a str,
+    pub provider: &'a str,
+    pub model: &'a str,
+    pub expected_path: &'a str,
+    pub key_field: &'a str,
+}
+
+pub fn aad_parts<'a>(
+    expect: &'a WrapExpectation,
+    conversation: &'a str,
+    provider: &'a str,
+    model: &'a str,
+) -> AadParts<'a> {
+    AadParts {
+        conversation,
+        provider,
+        model,
+        expected_path: expect.creation_path(),
+        key_field: expect.field(),
+    }
+}
+
 #[derive(Debug)]
 pub struct WrappedSecret {
     pub token: WrappingToken,
@@ -389,6 +413,17 @@ mod tests {
         format!(
             r#"{{"request_id":"","lease_id":"","renewable":false,"lease_duration":0,"data":{data},"wrap_info":{{"token":"hvs.WRAP","accessor":"x","ttl":{ttl},"creation_time":"2026-10-01T00:00:00Z","creation_path":"{path}"}},"warnings":null,"auth":null}}"#
         )
+    }
+
+    #[test]
+    fn the_aad_parts_are_the_turn_and_the_expectations_path_and_field() {
+        let e = expect();
+        let parts = aad_parts(&e, "conv-aad", "openai", "gpt-5.6-luna");
+        assert_eq!(parts.conversation, "conv-aad");
+        assert_eq!(parts.provider, "openai");
+        assert_eq!(parts.model, "gpt-5.6-luna");
+        assert_eq!(parts.expected_path, ALICE);
+        assert_eq!(parts.key_field, "api_key");
     }
 
     #[test]
