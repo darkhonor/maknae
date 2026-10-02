@@ -298,7 +298,7 @@ async fn drain_handlers_bounded(handlers: &mut JoinSet<()>, timeout: Duration) -
     }
 }
 
-/// `LOGIN_NAME_MAX` on Linux, and the bound on `subject.user` (#275).
+/// The bound on `subject.user` (#275): `maknae_vault::MAX_USERNAME_BYTES`, sized to the measured syslog worst case.
 ///
 /// An over-long name is refused to `None`, never truncated: a truncated
 /// identity in an audit trail is a WRONG identity, which is worse than an

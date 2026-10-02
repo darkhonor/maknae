@@ -124,7 +124,7 @@ remove the subtree first.
 Every read of a key under the user policy is answered only wrapped (an unwrapped read is
 refused), and every write needs `-wrap-ttl` too (an unwrapped write is refused). The user
 loads their own key, logged in with their userpass identity, so the command uses
-`-wrap-ttl=60s`; with the defaults, in zsh, for the subpath `openai` and field `api_key`:
+`-wrap-ttl=60s`. First get a Vault token with `vault login -method=userpass -path=<userpass_mount> username=<user>` (`maknae login` keeps its own token, not `VAULT_TOKEN`). The command below is not yet run as written; with the defaults, in zsh, for the subpath `openai` and field `api_key`:
 
 ```zsh
 read -rs "KEY?API key: " && echo && printf %s "$KEY" | vault kv put -wrap-ttl=60s maknae-kv/maknae/users/alice/openai api_key=- && unset KEY
