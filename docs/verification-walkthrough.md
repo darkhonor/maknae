@@ -258,10 +258,10 @@ mv ~/.maknae/providers.yaml.orig ~/.maknae/providers.yaml
 **Expected.** In step 3, B's run stops before it reaches the daemon, exit 1, with a line that begins:
 
 ```
-maknae: pki/sign rejected: 
+maknae: pki/sign rejected: <Vault's answer>
 ```
 
-followed by Vault's answer (`crates/maknae-vault/src/error.rs:176`, printed at `bins/maknae/src/cli.rs:735`). The CLI checks only the token's recorded expiry, not whether it was revoked (`bins/maknae/src/login.rs:90-101`), so the refusal comes from Vault at the certificate mint. In step 4, A gets a reply.
+where `<Vault's answer>` is Vault's own text (`crates/maknae-vault/src/error.rs:176`, printed at `bins/maknae/src/cli.rs:735`). The CLI checks only the token's recorded expiry, not whether it was revoked (`bins/maknae/src/login.rs:90-101`), so the refusal comes from Vault at the certificate mint. In step 4, A gets a reply.
 
 A run that is already past its mint would stop at its next turn's key read. That read gets a 403, printed as `` maknae agent: stopped: Vault refused to read the key for provider entry <label> (HTTP 403): the key is outside your Vault policy, or your login was revoked: run `maknae login` `` (`agent.rs:99-104`). This is from the code path, not shown live.
 
