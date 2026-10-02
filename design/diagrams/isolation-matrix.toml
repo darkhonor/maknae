@@ -12,6 +12,7 @@ subtitle = [
   "Rows are subjects, columns are objects; each cell is the right the code permits, keyed to its control, evidence and test below (ADR-0028).",
   "A's key and B's key are standing objects, rated across all turns. The wrapping token, sealed blob, prompt and metadata are the objects of one of",
   "A's turns; its metadata is the user, provider, model, conversation and key path.",
+  "The cli_b cells rest partly on OS uid separation between A's and B's processes, which no code in this repository proves.",
 ]
 scope = "Out of scope: root on the host and the Vault administrator, who can read everything."
 svg_title = "Maknae per-user isolation matrix"
@@ -162,9 +163,9 @@ evidence = "deploy/vault-pki/main.tf:207 · ADR-0028"
 subject = "cli_b"
 object = "wrap"
 right = "none"
-control = "never exposed to B: it travels only sealed, and the Egress Daemon refuses a token whose creation_path is not the requesting user's path before it unwraps"
-evidence = "bins/maknae-egress/src/opener.rs:83 · crates/maknae-vault/src/wrap.rs:299"
-test = "crates/maknae-vault/src/wrap.rs::another_users_token_is_refused_before_it_is_unwrapped"
+control = "OS process isolation between uids, not proven by code here: the token sits unsealed in A's CLI memory between the wrapped read and the seal, and B holding it could unwrap it at Vault directly; past the seal it travels only sealed, and the creation_path check only stops B using the Egress Daemon with A's token"
+evidence = "bins/maknae/src/agent.rs:373 · bins/maknae/src/agent.rs:176 · bins/maknae-egress/src/opener.rs:83 · crates/maknae-vault/src/wrap.rs:299 · ADR-0028"
+test = "crates/maknae-vault/src/wrap.rs::another_users_token_is_refused_before_it_is_unwrapped · bins/maknae-egress/src/opener.rs::user_a_presenting_user_bs_wrapping_token_is_refused_at_the_path_check"
 
 [[cell]]
 subject = "cli_b"
@@ -177,16 +178,16 @@ test = "crates/maknae-kernel/src/provider_choice.rs::an_admitted_choice_carries_
 [[cell]]
 subject = "cli_b"
 object = "prompt"
-right = "none"
-control = "it lives only in A's process, A's plane connection and the trust-plane accounts; the audit trail keeps only its digest and length, in a 0700 _maknae directory"
-evidence = "crates/maknae-audit-append/src/record.rs:130 · packaging/rpm/maknae.spec:176 · packaging/deb/postinst:48 · packaging/macos/scripts/preinstall:203"
+right = "r"
+control = "residual, while A's CLI runs: none, because maknae agent takes the prompt as positional argv, and argv is world-readable on a default host (Linux /proc/<pid>/cmdline without hidepid, macOS ps -ax -o args); the audit trail keeps only its digest and length, in a 0700 _maknae directory"
+evidence = "bins/maknae/src/cli.rs:147 · crates/maknae-audit-append/src/record.rs:130 · packaging/rpm/maknae.spec:176 · packaging/deb/postinst:48 · packaging/macos/scripts/preinstall:203"
 
 [[cell]]
 subject = "cli_b"
 object = "meta"
-right = "none"
-control = "the audit trail that records it is written by maknaed in a 0700 _maknae directory; B's uid holds no other copy"
-evidence = "crates/maknae-audit-append/src/sink.rs:48 · packaging/rpm/maknae.spec:176 · packaging/deb/postinst:48 · packaging/macos/scripts/preinstall:203"
+right = "p"
+control = "part, residual, while A's CLI runs: none, because argv is world-readable on a default host (Linux /proc without hidepid, macOS ps), so B sees --provider <label> and the process owner; the audit trail holding the rest is written by maknaed in a 0700 _maknae directory"
+evidence = "bins/maknae/src/cli.rs:147 · crates/maknae-audit-append/src/sink.rs:48 · packaging/rpm/maknae.spec:176 · packaging/deb/postinst:48 · packaging/macos/scripts/preinstall:203"
 
 # --- Agent Daemon (planned) -----------------------------------------------
 
@@ -238,15 +239,15 @@ evidence = "ADR-0028"
 subject = "kernel"
 object = "key_a"
 right = "none"
-control = "maknaed's AppRole policy grants no KV path, and the wrapping token reaches it only sealed: the seal private key is held only by the Egress Daemon (Linux root:root 0400 credential loaded by LoadCredentialEncrypted; macOS keychain ACL), and maknaed does not link maknae-seal"
-evidence = "deploy/vault-pki/main.tf:138 · packaging/common/maknae-egress.service · bins/maknae/src/enroll/artifact_table.rs:214 · bins/maknae/src/enroll/keychain_write.rs:44 · ci/gates/seal-confinement.sh"
+control = "maknaed's AppRole policy grants no KV path, and the wrapping token reaches it only sealed: the seal private key is held only by the Egress Daemon (Linux root:root 0400 credential loaded by LoadCredentialEncrypted; macOS keychain ACL), and maknaed does not link maknae-seal; residual: maknaed can attach a user's sealed token to content of its own choosing, using the key without reading it"
+evidence = "deploy/vault-pki/main.tf:138 · packaging/common/maknae-egress.service · bins/maknae/src/enroll/artifact_table.rs:215 · bins/maknae/src/enroll/keychain_write.rs:44 · ci/gates/seal-confinement.sh · ADR-0028"
 
 [[cell]]
 subject = "kernel"
 object = "key_b"
 right = "none"
-control = "as for A's key: no KV grant in maknaed's AppRole policy, no seal private key, and maknae-seal is not linked"
-evidence = "deploy/vault-pki/main.tf:138 · packaging/common/maknae-egress.service · ci/gates/seal-confinement.sh"
+control = "as for A's key: no KV grant in maknaed's AppRole policy, no seal private key, and maknae-seal is not linked; the same residual: maknaed can attach B's sealed token to content of its own choosing"
+evidence = "deploy/vault-pki/main.tf:138 · packaging/common/maknae-egress.service · ci/gates/seal-confinement.sh · ADR-0028"
 
 [[cell]]
 subject = "kernel"
@@ -371,7 +372,7 @@ evidence = "crates/maknae-vault/src/api_request.rs:123 · crates/maknae-vault/sr
 subject = "vault"
 object = "meta"
 right = "p"
-control = "part: it sees the user's userpass identity and the key path of the wrapped read, never the provider, model or conversation"
+control = "part: it sees the user's userpass identity and the key path of the wrapped read, and the provider only as far as the key subpath names it; never the model or conversation"
 evidence = "deploy/vault-pki/main.tf:207 · crates/maknae-vault/src/api_request.rs:123"
 
 # --- Model provider -------------------------------------------------------
@@ -418,5 +419,5 @@ test = "crates/maknae-deputy/src/call.rs::an_admitted_frame_reaches_the_provider
 subject = "model"
 object = "meta"
 right = "p"
-control = "part: the request names the model and its reasoning and output settings, never the user, conversation or key path"
+control = "part: the request names the model and its reasoning and output settings, never the user, conversation or key path, though the bearer key identifies the user's account at the provider"
 evidence = "crates/maknae-deputy/src/call.rs:243"

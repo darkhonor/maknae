@@ -951,7 +951,11 @@ def matrix(name: str) -> str:
     sid, oid = {s["id"] for s in subs}, {o["id"] for o in objs}
     glyph = {r["id"]: r["glyph"] for r in rights}
     grid = {}
-    for c in cells:
+    for n, c in enumerate(cells, 1):
+        for field in ("subject", "object", "right"):
+            if not isinstance(c.get(field), str):
+                sys.exit(f"{name}: cell {n} ({c.get('subject', '?')} × {c.get('object', '?')}): "
+                         f"no {field}")
         c["name"] = f"{c['subject']} × {c['object']}"
         if c["subject"] not in sid:
             sys.exit(f"{name}: cell {c['name']}: unknown subject {c['subject']}")
