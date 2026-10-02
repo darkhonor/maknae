@@ -46,6 +46,14 @@ row = 0
 kind = "external"
 
 [[node]]
+id = "egress"
+label = "maknae-egress"
+sub = "Egress Daemon · no Vault identity"
+col = 1
+row = 0
+kind = "trusted"
+
+[[node]]
 id = "audit"
 label = "audit sink"
 sub = "append-only file"
@@ -143,9 +151,18 @@ n = "I4"
 from = "cli"
 to = "vault"
 status = "built"
-mechanism = "HTTPS; the CLI holds its own AppRole SecretID and self-mints a cli-plane leaf"
-identity = "AppRole role `maknae`"
-evidence = "crates/maknae-vault/src/plane.rs:18 — ADR-0006 names this the PRE-ADR model, retired by #116"
+mechanism = "HTTPS; the user's own userpass token (`maknae login`) mints the cli-plane leaf and reads the user's key only response-wrapped"
+identity = "userpass user, entity `maknae-<user>`, group `maknae-users`"
+evidence = "bins/maknae/src/cli.rs:336 · bins/maknae/src/login.rs:90 · deploy/vault-pki/main.tf:237"
+
+[[iface]]
+n = "I10"
+from = "egress"
+to = "vault"
+status = "built"
+mechanism = "HTTPS; wrapping lookup + unwrap of the user's sealed wrapping token; no Vault identity"
+identity = "none — the wrapping token is the only credential presented"
+evidence = "bins/maknae-egress/src/opener.rs"
 
 [[iface]]
 n = "I5"
