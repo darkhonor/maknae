@@ -46,6 +46,14 @@ row = 0
 kind = "external"
 
 [[node]]
+id = "egress"
+label = "maknae-egress"
+sub = "Egress Daemon · no Vault identity"
+col = 1
+row = 0
+kind = "trusted"
+
+[[node]]
 id = "audit"
 label = "audit sink"
 sub = "append-only file"
@@ -72,10 +80,10 @@ kind = "unbuilt"
 [[node]]
 id = "llm"
 label = "LLM provider"
-sub = "maknae-llm"
-col = 2
-row = 3
-kind = "stub"
+sub = "external · OpenAI-compatible"
+col = 0
+row = 0
+kind = "external"
 
 [[node]]
 id = "mcp"
@@ -143,9 +151,18 @@ n = "I4"
 from = "cli"
 to = "vault"
 status = "built"
-mechanism = "HTTPS; the CLI holds its own AppRole SecretID and self-mints a cli-plane leaf"
-identity = "AppRole role `maknae`"
-evidence = "crates/maknae-vault/src/plane.rs:18 — ADR-0006 names this the PRE-ADR model, retired by #116"
+mechanism = "HTTPS; the user's own userpass token (`maknae login`) mints the cli-plane leaf and reads the user's key only response-wrapped"
+identity = "userpass user, entity `maknae-<user>`, group `maknae-users`"
+evidence = "bins/maknae/src/cli.rs:336 · bins/maknae/src/login.rs:90 · deploy/vault-pki/main.tf:237"
+
+[[iface]]
+n = "I10"
+from = "egress"
+to = "vault"
+status = "built"
+mechanism = "HTTPS; wrapping lookup + unwrap of the user's wrapping token, after the seal is opened; no Vault identity"
+identity = "none — the wrapping token is the only credential presented"
+evidence = "bins/maknae-egress/src/opener.rs · crates/maknae-vault/src/wrap.rs:378"
 
 [[iface]]
 n = "I5"
@@ -176,12 +193,21 @@ evidence = "design/adr/ADR-0006-client-authentication-model.md"
 
 [[iface]]
 n = "I8"
-from = "daemon"
+from = "egress"
 to = "llm"
-status = "stub"
-mechanism = "none — maknae-llm is a one-line CRATE_MARKER"
-identity = "undecided"
-evidence = "crates/maknae-llm/src/lib.rs"
+status = "built"
+mechanism = "HTTPS, the user's key as bearer"
+identity = "the user's own provider API key, unwrapped for this one call"
+evidence = "crates/maknae-deputy/src/call.rs:258"
+
+[[iface]]
+n = "I11"
+from = "daemon"
+to = "egress"
+status = "built"
+mechanism = "AF_UNIX stream at egress.socket_path (default /run/maknae-egress/egress.sock); one connection per decided request; the peer's uid is checked before the first write"
+identity = "the Egress Daemon's uid, from the socket's peer credentials"
+evidence = "crates/maknae-kernel/src/egress_socket.rs · crates/maknae-config/src/egress_cfg.rs:27"
 
 [[iface]]
 n = "I9"
@@ -238,9 +264,9 @@ consequence = "There is nothing to ingress-filter, which is why no firewalld, nf
 evidence = "crates/maknae-kernel/src/run.rs:1879 — PlaneListener::bind on an AF_UNIX path"
 
 [[negative]]
-claim = "The one network flow is EGRESS to Vault, and it is already constrained by something narrower than a firewall rule."
-consequence = "SELinux name_connect on maknae_vault_port_t authorizes the connect per DOMAIN — only maknaed_t may reach that port — where a host firewall rule would authorize it per HOST. A packet filter cannot express 'this process and no other'."
-evidence = "packaging/common/maknae-selinux-ports.sh · packaging/common/maknae.te"
+claim = "Every network flow is EGRESS. The daemons' flows — I3 and I10 to Vault, and I8 from the Egress Daemon to the provider — are each constrained by something narrower than a firewall rule. I4, the CLI to Vault, is not: it is the user's own process."
+consequence = "SELinux authorizes each daemon connect per DOMAIN, where a host firewall rule would authorize it per HOST: name_connect on maknae_vault_port_t for maknaed_t and maknae_egress_t, and the provider leg (http_port_t) for maknae_egress_t alone. A packet filter cannot express 'this process and no other'. The policy's domains are maknaed_t, maknae_egress_t and maknae_tool_t (declared for tools, unused); none is the CLI's, and its executable is not labelled, so I4 runs in the user's own domain, usually unconfined, and SELinux does not confine it."
+evidence = "packaging/common/maknae-selinux-ports.sh · packaging/common/maknae.te:8 · packaging/common/maknae.te:26 · packaging/common/maknae.fc"
 
 [[negative]]
 claim = "Reaching the client plane requires a local account in the gated group, not a route."

@@ -66,6 +66,7 @@ you what state it was derived from.
 | UML | 2.5.1 (formal/2017-12-05) | https://www.omg.org/spec/UML/2.5.1/ |
 | DoDAF | 2.02 Change 1 | https://dodcio.defense.gov/library/dod-architecture-framework/ |
 | IDEF1X | ISO/IEC/IEEE 31320-2:2012 | originally FIPS PUB 184 (withdrawn) |
+| Access-control matrix | B. W. Lampson, "Protection" (1971; ACM SIGOPS OSR 8(1), 1974) | https://doi.org/10.1145/775265.775268 |
 
 **Colour is styling, never notation.** UML specifies shapes, line styles and
 arrowheads; it says nothing about palette. Nothing in these diagrams requires a
@@ -85,6 +86,8 @@ to `ci/gates/`. A stereotype is readable by anyone who knows UML; a bespoke glyp
 | `generated-standards-profile.svg` | DoDAF StdV-1 | *Which technical standards does this claim, and what enforces each?* | security assessor, accreditor | generated |
 | `generated-workspace-packages.svg` | UML package | *How do the crates fit together, and what does each pull in?* | contributor, security assessor | generated |
 | `generated-read-path.svg` | UML sequence (≈ DoDAF SV-10c) | *Where does a read cross a trust boundary, and by what mechanism?* | security assessor, contributor | generated |
+| `generated-credential-path.svg` | UML sequence (≈ DoDAF SV-10c) | *What can each hop see of a user's model key on one turn, and what enforces it?* | security assessor, accreditor | generated |
+| `generated-isolation-matrix.svg` | access-control matrix (Lampson 1974) | *Which subject can read, carry or unwrap which user's credential, and by what control?* | security assessor, accreditor | generated |
 | `generated-decision-cycle.svg` | UML activity (decision nodes) | *How does each `maknae-authz-*` backend layer into one decision, and in what order?* | security assessor, contributor | generated |
 | `generated-data-model.svg` | IDEF1X | *What is the shape of the data we record and enforce?* | security assessor, contributor | generated |
 | `generated-system-interfaces.svg` | DoDAF SV-1 | *What talks to what, across which interfaces — and which of them actually exist?* | security assessor, accreditor | generated |
@@ -102,7 +105,7 @@ to `ci/gates/`. A stereotype is readable by anyone who knows UML; a bespoke glyp
 
 Every node, artifact and flow carries a status, and its line style is that status:
 
-- **Solid, built:** the `maknae` CLI, `maknaed`, `maknae-egress`, Vault, `/etc/maknae` and the `/var/log/maknae` audit trail. The CLI is drawn «untrusted»: the same binary runs the MVP agent loop, `maknae agent`, under the operator's uid, who must be in the `maknae` group to reach the `0660` socket. Both `maknaed` and the CLI log in to Vault with their own AppRole, `maknaed` for its plane certificate and the CLI to mint its cli leaf. Shipped code still relays prompt content through `maknaed`, which forwards each `session.prompt` turn to `maknae-egress`.
+- **Solid, built:** the `maknae` CLI, `maknaed`, `maknae-egress`, Vault, `/etc/maknae` and the `/var/log/maknae` audit trail. The CLI is drawn «untrusted»: the same binary runs the MVP agent loop, `maknae agent`, under the operator's uid, who must be in the `maknae` group to reach the `0660` socket. `maknaed` logs in to Vault with its AppRole for its plane certificate; each user's CLI logs in with userpass (`maknae login`) and mints its cli leaf with the user's token; the Egress Daemon has no Vault identity. Shipped code still relays prompt content through `maknaed`, which forwards each `session.prompt` turn to `maknae-egress`.
 - **Dashed, proposed or post-MVP:** designed in an ADR, `design/container-architecture.md` or an issue, with no code: the gateway and remote tasker (#117), the lake, the dreamer, skills and lake data. The web UI is post-MVP. The OCI Dockerfiles in `packaging/oci` are a deferred stub (#81), not a deployment.
 - **Dotted, vision:** **no ADR and no code.** These elements are unratified: a direction for future capability, not a design that exists. They are the Agent Daemon, tool containers, per-tasker workspaces, the TUI, direct prompt-content delivery to the Egress Daemon, and shared and dedicated modes. No ADR is cited as ratifying them. ADR-0023 (Proposed) decides that the loop is untrusted and is `maknae agent`, and that a separate Rust egress process under `_maknae-egress` makes the model call at the kernel's direction. None of its decisions ratifies the Agent Daemon, tool containers, per-tasker workspaces, the TUI, direct prompt delivery, or shared/dedicated modes.
 
@@ -191,16 +194,16 @@ is understood and accepted: `check_evidence` and byte-stable regeneration fire f
 whoever regenerates, so a stale diagram can be committed and no gate will object.
 Regenerate with the command above and commit the result; that is the whole contract.
 
-### Seven products are curated, not derived
+### Ten products are curated, not derived
 
-`standards-profile.toml`, `read-path.toml`, `decision-cycle.toml`, `data-model.toml`,
-`system-interfaces.toml`, `operational-concept.toml` and `service-architecture.toml` are hand-maintained inputs.
-A conformance claim, a call sequence, a precedence ladder, a normalization judgement,
+`standards-profile.toml`, `read-path.toml`, `credential-path.toml`, `isolation-matrix.toml`, `decision-cycle.toml`, `data-model.toml`,
+`system-interfaces.toml`, `operational-concept.toml`, `service-architecture.toml` and `agentic-patterns.toml` are hand-maintained inputs.
+A conformance claim, a call sequence, an access-control matrix, a precedence ladder, a normalization judgement,
 an interface register, a statement of intent and a deployment inventory are none of them readable out of a
-manifest, so all seven are kept as reviewable data files in which **every row names
+manifest, so all ten are kept as reviewable data files in which **every row names
 something a reader can check**.
 
-None of the seven is part of the provenance stamp, deliberately. The stamp names the last
+None of the ten is part of the provenance stamp, deliberately. The stamp names the last
 commit to touch an *enforcing* input (`ci/gates/lib.sh`, the manifests); a curated file
 travels in the same commit as the SVG it produces, so including it would make the stamp
 chase itself and break `regenerate → diff` — the failure [#202](https://github.com/darkhonor/maknae/pull/202)

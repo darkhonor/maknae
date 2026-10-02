@@ -69,7 +69,7 @@ Maknae is pre-MVP but no longer paper: the trust-plane crates, the `maknaed` dae
 1. **Governance baseline** — Knowledge Lifecycle Contract review; authority basis aligned to the Knowledge Lake's authority-line model; the open questions resolved with rationale.
 2. **Authorization seam & default backend** — build the bundled RBAC default (`maknae-authz-basic`) behind the versioned, policy-agnostic `maknae-security` seam and wire per-request evaluation ([ADR-0004](design/adr/ADR-0004-modular-authorization-architecture.md)). Optional `maknae-authz-*` backends — classification via the external DCS library, or Cedar — are scoped as follow-on, not the core engine decision.
 3. **Trust-plane kernel** — the reference monitor (`maknaed` as the sole PDP) composing the authorization backends deny-overrides, and audit events *(underway)*.
-4. **Runtime loop** — Maknae acts as an agent. One registered OpenAI-compatible provider, its key in Vault and reached only through the egress deputy; `read_file` and `write_file` performed by your own client, each decided and recorded by the kernel before it happens. *(Accepted on Rocky 10, 2026-09-27, and on macOS 2026-09-29, with `transport.read_timeout_ms: 60000` (#413). Set it up: [docs/first-provider.md](docs/first-provider.md).)*
+4. **Runtime loop** — Maknae acts as an agent. Root authorizes the model providers; each user chooses theirs from that set and keeps their own key in Vault under their own login; the Egress Daemon makes the call. `read_file` and `write_file` are performed by your own client, each decided and recorded by the kernel before it happens. *(Accepted on Rocky 10, 2026-09-27, and on macOS 2026-09-29, with `transport.read_timeout_ms: 60000` (#413). Set it up: [docs/first-provider.md](docs/first-provider.md).)*
 5. **Lake integration** — a portable lake instance, authority map v0.1 (egress allowlist plus authority basis), and the quarantine ingest path.
 6. **Learning loop MVP** — gap detection → authorized fetch → quarantine → out-of-band consolidation ("dreaming") → gated promotion.
 7. **Gateway and web UI** — an onboarding wizard (CLI and web) for authority configuration, and the scheduler with scoped task identities.
@@ -90,7 +90,7 @@ Two capabilities are first-class *by design* from the start (design intent, not 
 ├── ci/gates/                # fail-closed CI gates (coverage, negative-control, isolation-contract)
 ├── packaging/               # STIG-baselined deb / rpm / macos / oci packaging
 ├── deploy/                  # deployment assets (Vault PKI, …)
-├── docs/                    # configuration, operator runbook, first-provider walkthrough
+├── docs/                    # configuration, operator runbook, first-provider walkthrough, verification walkthrough
 └── design/
     ├── knowledge-lifecycle-contract.md   # the governance spec — read first
     ├── container-architecture.md         # possible future containerized deployment (Compose / Kubernetes)

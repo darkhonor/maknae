@@ -27,15 +27,12 @@ pub(crate) const EGRESS_KEYS: [&str; 2] = ["socket_path", "deadline_ms"];
 const DEFAULT_SOCKET_PATH: &str = "/run/maknae-egress/egress.sock";
 /// The macOS deputy's socket path.
 pub const MACOS_EGRESS_SOCKET_PATH: &str = "/usr/local/var/run/maknae-egress/egress.sock";
-/// The deputy's worst-case wall time on one request, plus a margin. Every
-/// Vault operation is bounded by `maknae-vault`'s `VAULT_HTTP_TIMEOUT`
-/// (30 s). On a socket-activated FIRST request the deputy is still booting:
-/// its probe is a login and a revoke (60 s). On a cold key cache a read is a
-/// login, a KV read and a fail-closed revoke (90 s) BEFORE the provider call
-/// (`bins/maknae-egress`'s `CallBounds::default().timeout`, 120 s). 270 s,
-/// plus ten for framing and scheduling. (Codex on #240: the earlier 190 s
-/// counted the login and the read only.) Raise the deputy's bounds and this
-/// one together.
+/// The deputy's worst-case wall time on one request, plus a margin: a wrapping
+/// lookup, an unwrap (each bounded by `maknae-vault`'s 30 s `VAULT_API_TIMEOUT`)
+/// and the provider call (`CallBounds::default().timeout` in
+/// `crates/maknae-deputy/src/call.rs`, 120 s) sum to 180 s, and 280 s leaves
+/// headroom for framing and scheduling.
+/// Raise the deputy's bounds and this one together.
 const DEFAULT_DEADLINE_MS: u64 = 280_000;
 /// The ceiling on `deadline_ms`. Named and exported because the shipped units'
 /// stop timeouts are derived from it (`maknae-kernel`'s shutdown-chain test

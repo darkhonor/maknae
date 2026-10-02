@@ -1,0 +1,249 @@
+<svg width="1042" height="2011" viewBox="0 0 1042 2011" xmlns="http://www.w3.org/2000/svg" role="img">
+  <title>Maknae per-user isolation matrix</title>
+  <desc>Lampson access-control matrix of which subject can read, carry or unwrap each user's model credential, prompt and turn metadata, with the enforcing control for each cell.</desc>
+  <rect x="0" y="0" width="1042" height="2011" fill="#FFFFFF"/>
+<text x="44" y="44" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#2C2C2A">Per-user isolation — the access-control matrix for model credentials</text>
+  <text x="44" y="64" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A">Rows are subjects, columns are objects; each cell is the right the code permits, keyed to its control, evidence and test below (ADR-0028).</text>
+  <text x="44" y="79" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A">A's key and B's key are standing objects, rated across all turns. The wrapping token, sealed blob, prompt and metadata are the objects of one of</text>
+  <text x="44" y="94" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A">A's turns; its metadata is the user, provider, model, conversation and key path.</text>
+  <text x="44" y="109" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A">The cli_b cells rest partly on OS uid separation between A's and B's processes, which no code in this repository proves.</text>
+  <text x="44" y="124" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#2C2C2A">Out of scope: root on the host and the Vault administrator, who can read everything.</text>
+  <text x="44" y="168" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">subject \ object</text>
+  <rect x="236" y="144" width="116" height="40" rx="4" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+  <text x="294.0" y="168" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="600" fill="#2C2C2A">A's key</text>
+  <rect x="364" y="144" width="116" height="40" rx="4" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+  <text x="422.0" y="168" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="600" fill="#2C2C2A">B's key</text>
+  <rect x="492" y="144" width="116" height="40" rx="4" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+  <text x="550.0" y="161" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="600" fill="#2C2C2A">wrapping token</text>
+  <text x="550.0" y="174" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="600" fill="#2C2C2A">(A's turn)</text>
+  <rect x="620" y="144" width="116" height="40" rx="4" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+  <text x="678.0" y="161" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="600" fill="#2C2C2A">sealed blob</text>
+  <text x="678.0" y="174" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="600" fill="#2C2C2A">(A's turn)</text>
+  <rect x="748" y="144" width="116" height="40" rx="4" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+  <text x="806.0" y="168" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="600" fill="#2C2C2A">prompt (A's turn)</text>
+  <rect x="876" y="144" width="116" height="40" rx="4" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+  <text x="934.0" y="168" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="600" fill="#2C2C2A">metadata (A's turn)</text>
+  <rect x="40" y="194" width="962" height="26" rx="3" fill="#FAFAF8" stroke="none" stroke-width="0"/>
+  <text x="48" y="211" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#2C2C2A">CLI as user A</text>
+  <text x="290.0" y="212" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">r</text>
+  <text x="301.0" y="205" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">1</text>
+  <text x="418.0" y="212" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">—</text>
+  <text x="429.0" y="205" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">2</text>
+  <text x="546.0" y="212" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">r</text>
+  <text x="557.0" y="205" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">3</text>
+  <text x="674.0" y="212" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">r</text>
+  <text x="685.0" y="205" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">4</text>
+  <text x="802.0" y="212" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">r</text>
+  <text x="813.0" y="205" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">5</text>
+  <text x="930.0" y="212" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">r</text>
+  <text x="941.0" y="205" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">6</text>
+  <text x="48" y="237" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#2C2C2A">CLI as user B</text>
+  <text x="290.0" y="238" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">—</text>
+  <text x="301.0" y="231" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">7</text>
+  <text x="418.0" y="238" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">r</text>
+  <text x="429.0" y="231" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">8</text>
+  <text x="546.0" y="238" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">—</text>
+  <text x="557.0" y="231" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">9</text>
+  <text x="674.0" y="238" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">—</text>
+  <text x="685.0" y="231" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">10</text>
+  <text x="802.0" y="238" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">r</text>
+  <text x="813.0" y="231" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">11</text>
+  <text x="930.0" y="238" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">p</text>
+  <text x="941.0" y="231" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">12</text>
+  <rect x="40" y="246" width="962" height="26" rx="3" fill="#FAFAF8" stroke="none" stroke-width="0"/>
+  <text x="48" y="257" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A">Agent Daemon (planned, no</text>
+  <text x="48" y="268" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A">identity)</text>
+  <text x="290.0" y="264" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">—</text>
+  <text x="301.0" y="257" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">13</text>
+  <text x="418.0" y="264" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">—</text>
+  <text x="429.0" y="257" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">14</text>
+  <text x="546.0" y="264" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">—</text>
+  <text x="557.0" y="257" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">15</text>
+  <text x="674.0" y="264" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">—</text>
+  <text x="685.0" y="257" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">16</text>
+  <text x="802.0" y="264" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">—</text>
+  <text x="813.0" y="257" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">17</text>
+  <text x="930.0" y="264" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">—</text>
+  <text x="941.0" y="257" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">18</text>
+  <text x="48" y="289" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#2C2C2A">maknaed</text>
+  <text x="290.0" y="290" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">—</text>
+  <text x="301.0" y="283" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">19</text>
+  <text x="418.0" y="290" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">—</text>
+  <text x="429.0" y="283" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">20</text>
+  <text x="546.0" y="290" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">s</text>
+  <text x="557.0" y="283" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">21</text>
+  <text x="674.0" y="290" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">s</text>
+  <text x="685.0" y="283" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">22</text>
+  <text x="802.0" y="290" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">r</text>
+  <text x="813.0" y="283" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">23</text>
+  <text x="930.0" y="290" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">r</text>
+  <text x="941.0" y="283" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">24</text>
+  <rect x="40" y="298" width="962" height="26" rx="3" fill="#FAFAF8" stroke="none" stroke-width="0"/>
+  <text x="48" y="315" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#2C2C2A">Egress Daemon</text>
+  <text x="290.0" y="316" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">u</text>
+  <text x="301.0" y="309" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">25</text>
+  <text x="418.0" y="316" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">u</text>
+  <text x="429.0" y="309" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">26</text>
+  <text x="546.0" y="316" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">r</text>
+  <text x="557.0" y="309" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">27</text>
+  <text x="674.0" y="316" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">r</text>
+  <text x="685.0" y="309" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">28</text>
+  <text x="802.0" y="316" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">r</text>
+  <text x="813.0" y="309" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">29</text>
+  <text x="930.0" y="316" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">r</text>
+  <text x="941.0" y="309" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">30</text>
+  <text x="48" y="341" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#2C2C2A">Vault</text>
+  <text x="290.0" y="342" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">r</text>
+  <text x="301.0" y="335" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">31</text>
+  <text x="418.0" y="342" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">r</text>
+  <text x="429.0" y="335" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">32</text>
+  <text x="546.0" y="342" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">r</text>
+  <text x="557.0" y="335" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">33</text>
+  <text x="674.0" y="342" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">—</text>
+  <text x="685.0" y="335" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">34</text>
+  <text x="802.0" y="342" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">—</text>
+  <text x="813.0" y="335" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">35</text>
+  <text x="930.0" y="342" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">p</text>
+  <text x="941.0" y="335" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">36</text>
+  <rect x="40" y="350" width="962" height="26" rx="3" fill="#FAFAF8" stroke="none" stroke-width="0"/>
+  <text x="48" y="367" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#2C2C2A">Model provider</text>
+  <text x="290.0" y="368" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">r</text>
+  <text x="301.0" y="361" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">37</text>
+  <text x="418.0" y="368" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">r</text>
+  <text x="429.0" y="361" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">38</text>
+  <text x="546.0" y="368" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">—</text>
+  <text x="557.0" y="361" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">39</text>
+  <text x="674.0" y="368" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">—</text>
+  <text x="685.0" y="361" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">40</text>
+  <text x="802.0" y="368" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">r</text>
+  <text x="813.0" y="361" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">41</text>
+  <text x="930.0" y="368" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">p</text>
+  <text x="941.0" y="361" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">42</text>
+  <line x1="230" y1="194" x2="230" y2="376" stroke="#D3D1C7" stroke-width="0.6"/>
+  <line x1="358" y1="194" x2="358" y2="376" stroke="#D3D1C7" stroke-width="0.6"/>
+  <line x1="486" y1="194" x2="486" y2="376" stroke="#D3D1C7" stroke-width="0.6"/>
+  <line x1="614" y1="194" x2="614" y2="376" stroke="#D3D1C7" stroke-width="0.6"/>
+  <line x1="742" y1="194" x2="742" y2="376" stroke="#D3D1C7" stroke-width="0.6"/>
+  <line x1="870" y1="194" x2="870" y2="376" stroke="#D3D1C7" stroke-width="0.6"/>
+  <line x1="998" y1="194" x2="998" y2="376" stroke="#D3D1C7" stroke-width="0.6"/>
+  <text x="44" y="406" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#2C2C2A">Rights</text>
+  <text x="52" y="421" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">r</text>
+  <text x="72" y="421" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#2C2C2A">read: can obtain the plaintext</text>
+  <text x="52" y="436" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">s</text>
+  <text x="72" y="436" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#2C2C2A">sealed-only: carries it, cannot read it</text>
+  <text x="52" y="451" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">u</text>
+  <text x="72" y="451" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#2C2C2A">unwrap-once: obtains it only by exchanging a single-use wrapping token, for one call</text>
+  <text x="52" y="466" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">p</text>
+  <text x="72" y="466" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#2C2C2A">part: reads only the fields its footnote names</text>
+  <text x="52" y="481" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">—</text>
+  <text x="72" y="481" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#2C2C2A">none: cannot obtain it</text>
+  <text x="44" y="511" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#2C2C2A">Controls, evidence and tests</text>
+  <text x="44" y="527" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">1. cli_a × key_a: A's own userpass identity reads it, response-wrapped (min_wrapping_ttl), and A can unwrap that token itself: the accepted residual</text>
+  <text x="44" y="539" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">#429 — bins/maknae/src/agent.rs:373 · deploy/vault-pki/main.tf:207 · ADR-0028 · test:</text>
+  <text x="44" y="551" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">crates/maknae-vault/src/api_request.rs::the_wrapped_read_carries_the_user_token_and_the_wrap_ttl</text>
+  <text x="44" y="567" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">2. cli_a × key_b: Vault templated policy maknae-user scopes reads to maknae/users/{{identity.entity.aliases.&lt;accessor&gt;.name}}, so A's login reaches</text>
+  <text x="44" y="579" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">only A's subtree — deploy/vault-pki/main.tf:207 · docs/verification-walkthrough.md (C2, measured 403)</text>
+  <text x="44" y="595" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">3. cli_a × wrap: Vault returns it to A's own wrapped read; a reply carrying the key instead is refused — bins/maknae/src/agent.rs:373 ·</text>
+  <text x="44" y="607" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">crates/maknae-vault/src/wrap.rs:243 · test: crates/maknae-vault/src/wrap.rs::an_unwrapped_response_is_refused</text>
+  <text x="44" y="623" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">4. cli_a × sealed: A's CLI seals it, so A already holds what it contains — bins/maknae/src/agent.rs:185 · crates/maknae-seal/src/seal.rs:54 · test:</text>
+  <text x="44" y="635" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">bins/maknae/src/agent.rs::a_turn_reads_the_wrapped_key_then_seals_it_to_exactly_this_request</text>
+  <text x="44" y="651" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">5. cli_a × prompt: A writes it — bins/maknae/src/agent.rs:506</text>
+  <text x="44" y="667" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">6. cli_a × meta: A chooses the providers.yaml entry; the CLI mints the conversation id — bins/maknae/src/agent.rs:519 · bins/maknae/src/agent.rs:553 ·</text>
+  <text x="44" y="679" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">test: bins/maknae/src/agent.rs::the_entry_is_the_default_or_the_named_label_and_no_entries_means_no_model_access</text>
+  <text x="44" y="695" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">7. cli_b × key_a: Vault templated policy maknae-user scopes reads to maknae/users/{{identity.entity.aliases.&lt;accessor&gt;.name}}, so B's login cannot</text>
+  <text x="44" y="707" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">read A's subtree, wrapped or not — deploy/vault-pki/main.tf:207 · docs/verification-walkthrough.md (C2, measured 403)</text>
+  <text x="44" y="723" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">8. cli_b × key_b: B's own userpass identity reads it, response-wrapped, and B can unwrap that token itself: the accepted residual #429, as for A —</text>
+  <text x="44" y="735" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">deploy/vault-pki/main.tf:207 · ADR-0028</text>
+  <text x="44" y="751" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">9. cli_b × wrap: OS process isolation between uids, not proven by code here: the token sits unsealed in A's CLI memory between the wrapped read and</text>
+  <text x="44" y="763" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">the seal, and B holding it could unwrap it at Vault directly; past the seal it travels only sealed, and the creation_path check only stops B using the</text>
+  <text x="44" y="775" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">Egress Daemon with A's token — bins/maknae/src/agent.rs:373 · bins/maknae/src/agent.rs:185 · bins/maknae-egress/src/opener.rs:83 ·</text>
+  <text x="44" y="787" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">crates/maknae-vault/src/wrap.rs:299 · ADR-0028 · test: crates/maknae-vault/src/wrap.rs::another_users_token_is_refused_before_it_is_unwrapped ·</text>
+  <text x="44" y="799" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">bins/maknae-egress/src/opener.rs::user_a_presenting_user_bs_wrapping_token_is_refused_at_the_path_check</text>
+  <text x="44" y="815" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">10. cli_b × sealed: it crosses only A's plane connection; replayed in B's turn it does not open, because the AAD binds conversation and path and the</text>
+  <text x="44" y="827" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">kernel derives the username from B's uid — crates/maknae-kernel/src/run.rs:862 · crates/maknae-kernel/src/provider_choice.rs:62 ·</text>
+  <text x="44" y="839" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">crates/maknae-seal/src/aad.rs:35 · test:</text>
+  <text x="44" y="851" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">crates/maknae-kernel/src/provider_choice.rs::an_admitted_choice_carries_the_sets_entry_the_choices_model_and_field_and_the_peers_path ·</text>
+  <text x="44" y="863" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">crates/maknae-seal/src/seal.rs::a_blob_retargeted_to_another_request_fails_to_open</text>
+  <text x="44" y="879" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">11. cli_b × prompt: no control while A's CLI runs (#436, undecided): maknae agent takes the prompt as positional argv, and argv is world-readable on a</text>
+  <text x="44" y="891" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">default host (Linux /proc/&lt;pid&gt;/cmdline without hidepid, macOS ps -ax -o args); the audit trail keeps only its digest and length, in a 0700 _maknae</text>
+  <text x="44" y="903" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">directory — bins/maknae/src/cli.rs:147 · crates/maknae-audit-append/src/record.rs:130 · packaging/rpm/maknae.spec:176 · packaging/deb/postinst:48 ·</text>
+  <text x="44" y="915" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">packaging/macos/scripts/preinstall:203</text>
+  <text x="44" y="931" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">12. cli_b × meta: part; no control while A's CLI runs (#436, undecided): argv is world-readable on a default host (Linux /proc without hidepid, macOS</text>
+  <text x="44" y="943" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">ps), so B sees --provider &lt;label&gt; and the process owner; the audit trail holding the rest is written by maknaed in a 0700 _maknae directory —</text>
+  <text x="44" y="955" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">bins/maknae/src/cli.rs:147 · crates/maknae-audit-append/src/sink.rs:48 · packaging/rpm/maknae.spec:176 · packaging/deb/postinst:48 ·</text>
+  <text x="44" y="967" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">packaging/macos/scripts/preinstall:203</text>
+  <text x="44" y="983" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">13. agentd × key_a: not built: no account, process or Vault identity exists yet (epic #420) — ADR-0028</text>
+  <text x="44" y="999" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">14. agentd × key_b: not built: no account, process or Vault identity exists yet (epic #420) — ADR-0028</text>
+  <text x="44" y="1015" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">15. agentd × wrap: not built: no account, process or Vault identity exists yet (epic #420) — ADR-0028</text>
+  <text x="44" y="1031" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">16. agentd × sealed: not built: no account, process or Vault identity exists yet (epic #420) — ADR-0028</text>
+  <text x="44" y="1047" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">17. agentd × prompt: not built: no account, process or Vault identity exists yet (epic #420) — ADR-0028</text>
+  <text x="44" y="1063" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">18. agentd × meta: not built: no account, process or Vault identity exists yet (epic #420) — ADR-0028</text>
+  <text x="44" y="1079" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">19. kernel × key_a: maknaed's AppRole policy grants no KV path, and the wrapping token reaches it only sealed: the seal private key is held only by</text>
+  <text x="44" y="1091" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">the Egress Daemon (Linux root:root 0400 credential loaded by LoadCredentialEncrypted; macOS keychain ACL), and maknaed does not link maknae-seal;</text>
+  <text x="44" y="1103" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">residual: maknaed can attach a user's sealed token to content of its own choosing, using the key without reading it — deploy/vault-pki/main.tf:138 ·</text>
+  <text x="44" y="1115" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">packaging/common/maknae-egress.service · bins/maknae/src/enroll/artifact_table.rs:215 · bins/maknae/src/enroll/keychain_write.rs:44 ·</text>
+  <text x="44" y="1127" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">ci/gates/seal-confinement.sh · ADR-0028</text>
+  <text x="44" y="1143" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">20. kernel × key_b: as for A's key: no KV grant in maknaed's AppRole policy, no seal private key, and maknae-seal is not linked; the same residual:</text>
+  <text x="44" y="1155" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">maknaed can attach B's sealed token to content of its own choosing — deploy/vault-pki/main.tf:138 · packaging/common/maknae-egress.service ·</text>
+  <text x="44" y="1167" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">ci/gates/seal-confinement.sh · ADR-0028</text>
+  <text x="44" y="1183" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">21. kernel × wrap: carried only inside the sealed blob; maknaed does not link maknae-seal and holds no seal private key —</text>
+  <text x="44" y="1195" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">crates/maknae-kernel/src/egress.rs:26 · ci/gates/seal-confinement.sh · ci/gates/lib.sh:13</text>
+  <text x="44" y="1211" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">22. kernel × sealed: forwarded as opaque bytes with the path it admitted; maknaed does not link maknae-seal and holds no seal private key —</text>
+  <text x="44" y="1223" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">crates/maknae-kernel/src/egress.rs:26 · ci/gates/seal-confinement.sh · ci/gates/lib.sh:13 · test:</text>
+  <text x="44" y="1235" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">crates/maknae-kernel/src/egress.rs::a_request_for_a_choice_carries_the_providers_record_the_choices_model_and_the_admitted_path</text>
+  <text x="44" y="1251" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">23. kernel × prompt: prompt content transits maknaed on its way to the Egress Daemon: the open residual #417 — crates/maknae-kernel/src/run.rs:1561 ·</text>
+  <text x="44" y="1263" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">ADR-0028 · test: crates/maknae-kernel/src/egress.rs::a_request_for_a_choice_carries_the_providers_record_the_choices_model_and_the_admitted_path</text>
+  <text x="44" y="1279" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">24. kernel × meta: maknaed decides on it: admission derives the username from the peer uid and composes the key path itself —</text>
+  <text x="44" y="1291" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">crates/maknae-kernel/src/run.rs:862 · crates/maknae-kernel/src/provider_choice.rs:62 · test:</text>
+  <text x="44" y="1303" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">crates/maknae-kernel/src/provider_choice.rs::the_refusals_come_in_the_ruled_order ·</text>
+  <text x="44" y="1315" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">crates/maknae-kernel/src/provider_choice.rs::an_admitted_choice_carries_the_sets_entry_the_choices_model_and_field_and_the_peers_path</text>
+  <text x="44" y="1331" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">25. egress × key_a: creation_path and TTL checked before the unwrap; the key is held in a zeroizing buffer for one call, with no key cache —</text>
+  <text x="44" y="1343" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">crates/maknae-vault/src/wrap.rs:299 · crates/maknae-deputy/src/call.rs:226 · test:</text>
+  <text x="44" y="1355" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">crates/maknae-vault/src/wrap.rs::a_matching_token_is_looked_up_then_unwrapped_and_yields_only_the_field ·</text>
+  <text x="44" y="1367" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">crates/maknae-vault/src/wrap.rs::another_users_token_is_refused_before_it_is_unwrapped</text>
+  <text x="44" y="1383" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">26. egress × key_b: the same check on B's turns: the Egress Daemon sees each active user's key, one call at a time, so a compromised one harvests</text>
+  <text x="44" y="1395" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">every key used while it is compromised — crates/maknae-vault/src/wrap.rs:299 · ADR-0028 · test:</text>
+  <text x="44" y="1407" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">crates/maknae-vault/src/wrap.rs::a_matching_token_is_looked_up_then_unwrapped_and_yields_only_the_field</text>
+  <text x="44" y="1423" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">27. egress × wrap: it reads the plaintext token when it opens the seal, only under this request's AAD and before any Vault call; it then looks it up</text>
+  <text x="44" y="1435" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">(creation_path, TTL at most 60 s) and presents it once to unwrap, and Vault makes it single-use, so the redemption spends it —</text>
+  <text x="44" y="1447" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">bins/maknae-egress/src/opener.rs:78 · bins/maknae-egress/src/opener.rs:79 · crates/maknae-vault/src/wrap.rs:299 · test:</text>
+  <text x="44" y="1459" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">crates/maknae-vault/src/wrap.rs::another_users_token_is_refused_before_it_is_unwrapped ·</text>
+  <text x="44" y="1471" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">crates/maknae-vault/src/wrap.rs::a_token_outside_the_ttl_bound_is_refused_before_it_is_unwrapped</text>
+  <text x="44" y="1487" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">28. egress × sealed: it holds the seal private key and opens the blob only under this request's AAD — bins/maknae-egress/src/opener.rs:78 ·</text>
+  <text x="44" y="1499" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">crates/maknae-seal/src/seal.rs:84 · test: bins/maknae-egress/src/opener.rs::a_blob_sealed_for_one_request_opens_only_under_that_request ·</text>
+  <text x="44" y="1511" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">crates/maknae-seal/src/seal.rs::a_blob_retargeted_to_another_request_fails_to_open</text>
+  <text x="44" y="1527" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">29. egress × prompt: it builds the provider request from the turns — crates/maknae-deputy/src/call.rs:243 · test:</text>
+  <text x="44" y="1539" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">crates/maknae-deputy/src/call.rs::an_admitted_frame_reaches_the_provider_and_returns_its_reply</text>
+  <text x="44" y="1555" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">30. egress × meta: the egress frame carries the destination, model, admitted key path (naming the user), key field and conversation —</text>
+  <text x="44" y="1567" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">crates/maknae-proto/src/egress_frame.rs:25 · test:</text>
+  <text x="44" y="1579" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">crates/maknae-kernel/src/egress.rs::a_request_for_a_choice_carries_the_providers_record_the_choices_model_and_the_admitted_path</text>
+  <text x="44" y="1595" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">31. vault × key_a: Vault is the only store of a user's key, and hands it out only response-wrapped (min_wrapping_ttl); whoever holds the wrapping</text>
+  <text x="44" y="1607" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">token can redeem it at sys/wrapping/unwrap, so the user can still read their own key: the accepted residual #429 — deploy/vault-pki/main.tf:209 ·</text>
+  <text x="44" y="1619" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">ADR-0028</text>
+  <text x="44" y="1635" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">32. vault × key_b: Vault is the only store of a user's key, and hands it out only response-wrapped (min_wrapping_ttl); whoever holds the wrapping</text>
+  <text x="44" y="1647" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">token can redeem it at sys/wrapping/unwrap, so the user can still read their own key: the accepted residual #429 — deploy/vault-pki/main.tf:209 ·</text>
+  <text x="44" y="1659" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">ADR-0028</text>
+  <text x="44" y="1675" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">33. vault × wrap: Vault issues it; sys/wrapping/lookup is unauthenticated and reports its creation_path — crates/maknae-vault/src/api_request.rs:136 ·</text>
+  <text x="44" y="1687" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">ADR-0028</text>
+  <text x="44" y="1703" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">34. vault × sealed: never sent to Vault: the client seals after its wrapped read, and the Egress Daemon presents the opened token, not the blob —</text>
+  <text x="44" y="1715" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">bins/maknae-egress/src/opener.rs:83 · crates/maknae-vault/src/api_request.rs:136 · test:</text>
+  <text x="44" y="1727" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">bins/maknae-egress/src/opener.rs::the_real_opener_reaches_vault_only_after_the_seal_opens</text>
+  <text x="44" y="1743" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">35. vault × prompt: no Vault request carries content: the wrapped read, lookup and unwrap carry only a token and a path —</text>
+  <text x="44" y="1755" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">crates/maknae-vault/src/api_request.rs:123 · crates/maknae-vault/src/api_request.rs:136 · crates/maknae-vault/src/api_request.rs:149</text>
+  <text x="44" y="1771" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">36. vault × meta: part: it sees the user's userpass identity and the key path of the wrapped read, and the provider only as far as the key subpath</text>
+  <text x="44" y="1783" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">names it; never the model or conversation — deploy/vault-pki/main.tf:207 · crates/maknae-vault/src/api_request.rs:123</text>
+  <text x="44" y="1799" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">37. model × key_a: it receives the key as the bearer credential, which is inherent to an API key — crates/maknae-deputy/src/call.rs:258 · test:</text>
+  <text x="44" y="1811" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">crates/maknae-deputy/src/call.rs::an_admitted_frame_reaches_the_provider_and_returns_its_reply</text>
+  <text x="44" y="1827" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">38. model × key_b: on B's turns whenever B's chosen provider is this provider: no control keeps a user's key from their own provider —</text>
+  <text x="44" y="1839" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">crates/maknae-deputy/src/call.rs:258 · test: crates/maknae-deputy/src/call.rs::an_admitted_frame_reaches_the_provider_and_returns_its_reply</text>
+  <text x="44" y="1855" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">39. model × wrap: never sent: the Egress Daemon sends only the opened key, as a bearer header — crates/maknae-deputy/src/call.rs:226 ·</text>
+  <text x="44" y="1867" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">crates/maknae-deputy/src/call.rs:258</text>
+  <text x="44" y="1883" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">40. model × sealed: never sent: the Egress Daemon opens it before the call and sends only the key — crates/maknae-deputy/src/call.rs:226 ·</text>
+  <text x="44" y="1895" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">crates/maknae-deputy/src/call.rs:258</text>
+  <text x="44" y="1911" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">41. model × prompt: it receives the conversation's turns, which is the point of the call — crates/maknae-deputy/src/call.rs:243 · test:</text>
+  <text x="44" y="1923" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">crates/maknae-deputy/src/call.rs::an_admitted_frame_reaches_the_provider_and_returns_its_reply</text>
+  <text x="44" y="1939" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">42. model × meta: part: the request names the model and its reasoning and output settings, never the user, conversation or key path, though the bearer</text>
+  <text x="44" y="1951" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">key identifies the user's account at the provider — crates/maknae-deputy/src/call.rs:243</text>
+  <text x="40" y="1985" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/isolation-matrix.toml@7d056f93fa · maknae 6c75ede3 · 2026-10-02</text>
+  <text x="1002" y="1985" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">Access-control matrix — B. W. Lampson, "Protection", 1971 (ACM SIGOPS OSR 8(1), 1974)</text>
+</svg>

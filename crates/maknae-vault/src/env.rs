@@ -14,7 +14,8 @@
 //! **Two lists, and the second one is the load-bearing half.** A scrub list on
 //! its own is a footgun: several of the variables these binaries read ARE the
 //! mechanism by which a shipped feature works, and scrubbing one would break it
-//! *silently*. `CREDENTIALS_DIRECTORY` is the sealed SecretID systemd decrypts;
+//! *silently*. `CREDENTIALS_DIRECTORY` is where systemd decrypts the sealed credentials
+//! (`maknaed`'s SecretID, the Egress Daemon's seal key);
 //! `LISTEN_FDS`/`LISTEN_PID`/`LISTEN_FDNAMES` carry the deputy's
 //! socket-activated fd (read by `listenfd::ListenFd::from_env()` AFTER the
 //! scrub runs); `XDG_RUNTIME_DIR` is how `systemd-creds --user` finds the
@@ -148,9 +149,11 @@ pub const SCRUBBED_ENV: &[&str] = &[
 /// will not appear by itself. It is written down because the alternative —
 /// each agent rediscovering it — is what produced #318.
 pub const NEVER_SCRUB_ENV: &[&str] = &[
-    // THE MECHANISM, not a convenience: systemd decrypts the sealed SecretID
-    // into this directory. `client.rs` (daemon) and `bins/maknae-egress/src/main.rs`
-    // read it; without it the deputy refuses to start, by design.
+    // THE MECHANISM, not a convenience: systemd decrypts the sealed credential
+    // (maknaed's SecretID, the Egress Daemon's seal key) into this directory.
+    // `client.rs` (daemon) and `bins/maknae-egress/src/main.rs` read it; on
+    // Linux the deputy refuses to start without it, and on macOS a keychain
+    // pointer replaces it (`seal_key_io.rs`).
     "CREDENTIALS_DIRECTORY",
     // Socket activation. `listenfd::ListenFd::from_env()` in
     // `bins/maknae-egress/src/listen.rs` reads these, and it runs AFTER the

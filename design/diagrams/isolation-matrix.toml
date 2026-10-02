@@ -1,0 +1,423 @@
+# Who can read, carry or unwrap each user's credential (ADR-0028), as B. W.
+# Lampson's access-control matrix. Curated, like credential-path.toml: a right
+# is a property of Vault policy, OS custody and code together, readable out of
+# no single manifest, so each cell names its control, the code or measurement
+# that shows it, and the test that proves it where one exists.
+#
+# A cell carries the right the code permits today, never the intended one.
+# Every (subject, object) pair has exactly one cell; generation refuses a gap.
+
+title = "Per-user isolation — the access-control matrix for model credentials"
+subtitle = [
+  "Rows are subjects, columns are objects; each cell is the right the code permits, keyed to its control, evidence and test below (ADR-0028).",
+  "A's key and B's key are standing objects, rated across all turns. The wrapping token, sealed blob, prompt and metadata are the objects of one of",
+  "A's turns; its metadata is the user, provider, model, conversation and key path.",
+  "The cli_b cells rest partly on OS uid separation between A's and B's processes, which no code in this repository proves.",
+]
+scope = "Out of scope: root on the host and the Vault administrator, who can read everything."
+svg_title = "Maknae per-user isolation matrix"
+svg_desc = "Lampson access-control matrix of which subject can read, carry or unwrap each user's model credential, prompt and turn metadata, with the enforcing control for each cell."
+
+[[subject]]
+id = "cli_a"
+label = "CLI as user A"
+
+[[subject]]
+id = "cli_b"
+label = "CLI as user B"
+
+[[subject]]
+id = "agentd"
+label = "Agent Daemon (planned, no identity)"
+
+[[subject]]
+id = "kernel"
+label = "maknaed"
+
+[[subject]]
+id = "egress"
+label = "Egress Daemon"
+
+[[subject]]
+id = "vault"
+label = "Vault"
+
+[[subject]]
+id = "model"
+label = "Model provider"
+
+[[object]]
+id = "key_a"
+label = "A's key"
+
+[[object]]
+id = "key_b"
+label = "B's key"
+
+[[object]]
+id = "wrap"
+label = "wrapping token (A's turn)"
+
+[[object]]
+id = "sealed"
+label = "sealed blob (A's turn)"
+
+[[object]]
+id = "prompt"
+label = "prompt (A's turn)"
+
+[[object]]
+id = "meta"
+label = "metadata (A's turn)"
+
+[[right]]
+id = "r"
+glyph = "r"
+meaning = "read: can obtain the plaintext"
+
+[[right]]
+id = "s"
+glyph = "s"
+meaning = "sealed-only: carries it, cannot read it"
+
+[[right]]
+id = "u"
+glyph = "u"
+meaning = "unwrap-once: obtains it only by exchanging a single-use wrapping token, for one call"
+
+[[right]]
+id = "p"
+glyph = "p"
+meaning = "part: reads only the fields its footnote names"
+
+[[right]]
+id = "none"
+glyph = "—"
+meaning = "none: cannot obtain it"
+
+# --- CLI as user A --------------------------------------------------------
+
+[[cell]]
+subject = "cli_a"
+object = "key_a"
+right = "r"
+control = "A's own userpass identity reads it, response-wrapped (min_wrapping_ttl), and A can unwrap that token itself: the accepted residual #429"
+evidence = "bins/maknae/src/agent.rs:373 · deploy/vault-pki/main.tf:207 · ADR-0028"
+test = "crates/maknae-vault/src/api_request.rs::the_wrapped_read_carries_the_user_token_and_the_wrap_ttl"
+
+[[cell]]
+subject = "cli_a"
+object = "key_b"
+right = "none"
+control = "Vault templated policy maknae-user scopes reads to maknae/users/{{identity.entity.aliases.<accessor>.name}}, so A's login reaches only A's subtree"
+evidence = "deploy/vault-pki/main.tf:207 · docs/verification-walkthrough.md (C2, measured 403)"
+
+[[cell]]
+subject = "cli_a"
+object = "wrap"
+right = "r"
+control = "Vault returns it to A's own wrapped read; a reply carrying the key instead is refused"
+evidence = "bins/maknae/src/agent.rs:373 · crates/maknae-vault/src/wrap.rs:243"
+test = "crates/maknae-vault/src/wrap.rs::an_unwrapped_response_is_refused"
+
+[[cell]]
+subject = "cli_a"
+object = "sealed"
+right = "r"
+control = "A's CLI seals it, so A already holds what it contains"
+evidence = "bins/maknae/src/agent.rs:185 · crates/maknae-seal/src/seal.rs:54"
+test = "bins/maknae/src/agent.rs::a_turn_reads_the_wrapped_key_then_seals_it_to_exactly_this_request"
+
+[[cell]]
+subject = "cli_a"
+object = "prompt"
+right = "r"
+control = "A writes it"
+evidence = "bins/maknae/src/agent.rs:506"
+
+[[cell]]
+subject = "cli_a"
+object = "meta"
+right = "r"
+control = "A chooses the providers.yaml entry; the CLI mints the conversation id"
+evidence = "bins/maknae/src/agent.rs:519 · bins/maknae/src/agent.rs:553"
+test = "bins/maknae/src/agent.rs::the_entry_is_the_default_or_the_named_label_and_no_entries_means_no_model_access"
+
+# --- CLI as user B --------------------------------------------------------
+
+[[cell]]
+subject = "cli_b"
+object = "key_a"
+right = "none"
+control = "Vault templated policy maknae-user scopes reads to maknae/users/{{identity.entity.aliases.<accessor>.name}}, so B's login cannot read A's subtree, wrapped or not"
+evidence = "deploy/vault-pki/main.tf:207 · docs/verification-walkthrough.md (C2, measured 403)"
+
+[[cell]]
+subject = "cli_b"
+object = "key_b"
+right = "r"
+control = "B's own userpass identity reads it, response-wrapped, and B can unwrap that token itself: the accepted residual #429, as for A"
+evidence = "deploy/vault-pki/main.tf:207 · ADR-0028"
+
+[[cell]]
+subject = "cli_b"
+object = "wrap"
+right = "none"
+control = "OS process isolation between uids, not proven by code here: the token sits unsealed in A's CLI memory between the wrapped read and the seal, and B holding it could unwrap it at Vault directly; past the seal it travels only sealed, and the creation_path check only stops B using the Egress Daemon with A's token"
+evidence = "bins/maknae/src/agent.rs:373 · bins/maknae/src/agent.rs:185 · bins/maknae-egress/src/opener.rs:83 · crates/maknae-vault/src/wrap.rs:299 · ADR-0028"
+test = "crates/maknae-vault/src/wrap.rs::another_users_token_is_refused_before_it_is_unwrapped · bins/maknae-egress/src/opener.rs::user_a_presenting_user_bs_wrapping_token_is_refused_at_the_path_check"
+
+[[cell]]
+subject = "cli_b"
+object = "sealed"
+right = "none"
+control = "it crosses only A's plane connection; replayed in B's turn it does not open, because the AAD binds conversation and path and the kernel derives the username from B's uid"
+evidence = "crates/maknae-kernel/src/run.rs:862 · crates/maknae-kernel/src/provider_choice.rs:62 · crates/maknae-seal/src/aad.rs:35"
+test = "crates/maknae-kernel/src/provider_choice.rs::an_admitted_choice_carries_the_sets_entry_the_choices_model_and_field_and_the_peers_path · crates/maknae-seal/src/seal.rs::a_blob_retargeted_to_another_request_fails_to_open"
+
+[[cell]]
+subject = "cli_b"
+object = "prompt"
+right = "r"
+control = "no control while A's CLI runs (#436, undecided): maknae agent takes the prompt as positional argv, and argv is world-readable on a default host (Linux /proc/<pid>/cmdline without hidepid, macOS ps -ax -o args); the audit trail keeps only its digest and length, in a 0700 _maknae directory"
+evidence = "bins/maknae/src/cli.rs:147 · crates/maknae-audit-append/src/record.rs:130 · packaging/rpm/maknae.spec:176 · packaging/deb/postinst:48 · packaging/macos/scripts/preinstall:203"
+
+[[cell]]
+subject = "cli_b"
+object = "meta"
+right = "p"
+control = "part; no control while A's CLI runs (#436, undecided): argv is world-readable on a default host (Linux /proc without hidepid, macOS ps), so B sees --provider <label> and the process owner; the audit trail holding the rest is written by maknaed in a 0700 _maknae directory"
+evidence = "bins/maknae/src/cli.rs:147 · crates/maknae-audit-append/src/sink.rs:48 · packaging/rpm/maknae.spec:176 · packaging/deb/postinst:48 · packaging/macos/scripts/preinstall:203"
+
+# --- Agent Daemon (planned) -----------------------------------------------
+
+[[cell]]
+subject = "agentd"
+object = "key_a"
+right = "none"
+control = "not built: no account, process or Vault identity exists yet (epic #420)"
+evidence = "ADR-0028"
+
+[[cell]]
+subject = "agentd"
+object = "key_b"
+right = "none"
+control = "not built: no account, process or Vault identity exists yet (epic #420)"
+evidence = "ADR-0028"
+
+[[cell]]
+subject = "agentd"
+object = "wrap"
+right = "none"
+control = "not built: no account, process or Vault identity exists yet (epic #420)"
+evidence = "ADR-0028"
+
+[[cell]]
+subject = "agentd"
+object = "sealed"
+right = "none"
+control = "not built: no account, process or Vault identity exists yet (epic #420)"
+evidence = "ADR-0028"
+
+[[cell]]
+subject = "agentd"
+object = "prompt"
+right = "none"
+control = "not built: no account, process or Vault identity exists yet (epic #420)"
+evidence = "ADR-0028"
+
+[[cell]]
+subject = "agentd"
+object = "meta"
+right = "none"
+control = "not built: no account, process or Vault identity exists yet (epic #420)"
+evidence = "ADR-0028"
+
+# --- maknaed --------------------------------------------------------------
+
+[[cell]]
+subject = "kernel"
+object = "key_a"
+right = "none"
+control = "maknaed's AppRole policy grants no KV path, and the wrapping token reaches it only sealed: the seal private key is held only by the Egress Daemon (Linux root:root 0400 credential loaded by LoadCredentialEncrypted; macOS keychain ACL), and maknaed does not link maknae-seal; residual: maknaed can attach a user's sealed token to content of its own choosing, using the key without reading it"
+evidence = "deploy/vault-pki/main.tf:138 · packaging/common/maknae-egress.service · bins/maknae/src/enroll/artifact_table.rs:215 · bins/maknae/src/enroll/keychain_write.rs:44 · ci/gates/seal-confinement.sh · ADR-0028"
+
+[[cell]]
+subject = "kernel"
+object = "key_b"
+right = "none"
+control = "as for A's key: no KV grant in maknaed's AppRole policy, no seal private key, and maknae-seal is not linked; the same residual: maknaed can attach B's sealed token to content of its own choosing"
+evidence = "deploy/vault-pki/main.tf:138 · packaging/common/maknae-egress.service · ci/gates/seal-confinement.sh · ADR-0028"
+
+[[cell]]
+subject = "kernel"
+object = "wrap"
+right = "s"
+control = "carried only inside the sealed blob; maknaed does not link maknae-seal and holds no seal private key"
+evidence = "crates/maknae-kernel/src/egress.rs:26 · ci/gates/seal-confinement.sh · ci/gates/lib.sh:13"
+
+[[cell]]
+subject = "kernel"
+object = "sealed"
+right = "s"
+control = "forwarded as opaque bytes with the path it admitted; maknaed does not link maknae-seal and holds no seal private key"
+evidence = "crates/maknae-kernel/src/egress.rs:26 · ci/gates/seal-confinement.sh · ci/gates/lib.sh:13"
+test = "crates/maknae-kernel/src/egress.rs::a_request_for_a_choice_carries_the_providers_record_the_choices_model_and_the_admitted_path"
+
+[[cell]]
+subject = "kernel"
+object = "prompt"
+right = "r"
+control = "prompt content transits maknaed on its way to the Egress Daemon: the open residual #417"
+evidence = "crates/maknae-kernel/src/run.rs:1561 · ADR-0028"
+test = "crates/maknae-kernel/src/egress.rs::a_request_for_a_choice_carries_the_providers_record_the_choices_model_and_the_admitted_path"
+
+[[cell]]
+subject = "kernel"
+object = "meta"
+right = "r"
+control = "maknaed decides on it: admission derives the username from the peer uid and composes the key path itself"
+evidence = "crates/maknae-kernel/src/run.rs:862 · crates/maknae-kernel/src/provider_choice.rs:62"
+test = "crates/maknae-kernel/src/provider_choice.rs::the_refusals_come_in_the_ruled_order · crates/maknae-kernel/src/provider_choice.rs::an_admitted_choice_carries_the_sets_entry_the_choices_model_and_field_and_the_peers_path"
+
+# --- Egress Daemon --------------------------------------------------------
+
+[[cell]]
+subject = "egress"
+object = "key_a"
+right = "u"
+control = "creation_path and TTL checked before the unwrap; the key is held in a zeroizing buffer for one call, with no key cache"
+evidence = "crates/maknae-vault/src/wrap.rs:299 · crates/maknae-deputy/src/call.rs:226"
+test = "crates/maknae-vault/src/wrap.rs::a_matching_token_is_looked_up_then_unwrapped_and_yields_only_the_field · crates/maknae-vault/src/wrap.rs::another_users_token_is_refused_before_it_is_unwrapped"
+
+[[cell]]
+subject = "egress"
+object = "key_b"
+right = "u"
+control = "the same check on B's turns: the Egress Daemon sees each active user's key, one call at a time, so a compromised one harvests every key used while it is compromised"
+evidence = "crates/maknae-vault/src/wrap.rs:299 · ADR-0028"
+test = "crates/maknae-vault/src/wrap.rs::a_matching_token_is_looked_up_then_unwrapped_and_yields_only_the_field"
+
+[[cell]]
+subject = "egress"
+object = "wrap"
+right = "r"
+control = "it reads the plaintext token when it opens the seal, only under this request's AAD and before any Vault call; it then looks it up (creation_path, TTL at most 60 s) and presents it once to unwrap, and Vault makes it single-use, so the redemption spends it"
+evidence = "bins/maknae-egress/src/opener.rs:78 · bins/maknae-egress/src/opener.rs:79 · crates/maknae-vault/src/wrap.rs:299"
+test = "crates/maknae-vault/src/wrap.rs::another_users_token_is_refused_before_it_is_unwrapped · crates/maknae-vault/src/wrap.rs::a_token_outside_the_ttl_bound_is_refused_before_it_is_unwrapped"
+
+[[cell]]
+subject = "egress"
+object = "sealed"
+right = "r"
+control = "it holds the seal private key and opens the blob only under this request's AAD"
+evidence = "bins/maknae-egress/src/opener.rs:78 · crates/maknae-seal/src/seal.rs:84"
+test = "bins/maknae-egress/src/opener.rs::a_blob_sealed_for_one_request_opens_only_under_that_request · crates/maknae-seal/src/seal.rs::a_blob_retargeted_to_another_request_fails_to_open"
+
+[[cell]]
+subject = "egress"
+object = "prompt"
+right = "r"
+control = "it builds the provider request from the turns"
+evidence = "crates/maknae-deputy/src/call.rs:243"
+test = "crates/maknae-deputy/src/call.rs::an_admitted_frame_reaches_the_provider_and_returns_its_reply"
+
+[[cell]]
+subject = "egress"
+object = "meta"
+right = "r"
+control = "the egress frame carries the destination, model, admitted key path (naming the user), key field and conversation"
+evidence = "crates/maknae-proto/src/egress_frame.rs:25"
+test = "crates/maknae-kernel/src/egress.rs::a_request_for_a_choice_carries_the_providers_record_the_choices_model_and_the_admitted_path"
+
+# --- Vault ----------------------------------------------------------------
+
+[[cell]]
+subject = "vault"
+object = "key_a"
+right = "r"
+control = "Vault is the only store of a user's key, and hands it out only response-wrapped (min_wrapping_ttl); whoever holds the wrapping token can redeem it at sys/wrapping/unwrap, so the user can still read their own key: the accepted residual #429"
+evidence = "deploy/vault-pki/main.tf:209 · ADR-0028"
+
+[[cell]]
+subject = "vault"
+object = "key_b"
+right = "r"
+control = "Vault is the only store of a user's key, and hands it out only response-wrapped (min_wrapping_ttl); whoever holds the wrapping token can redeem it at sys/wrapping/unwrap, so the user can still read their own key: the accepted residual #429"
+evidence = "deploy/vault-pki/main.tf:209 · ADR-0028"
+
+[[cell]]
+subject = "vault"
+object = "wrap"
+right = "r"
+control = "Vault issues it; sys/wrapping/lookup is unauthenticated and reports its creation_path"
+evidence = "crates/maknae-vault/src/api_request.rs:136 · ADR-0028"
+
+[[cell]]
+subject = "vault"
+object = "sealed"
+right = "none"
+control = "never sent to Vault: the client seals after its wrapped read, and the Egress Daemon presents the opened token, not the blob"
+evidence = "bins/maknae-egress/src/opener.rs:83 · crates/maknae-vault/src/api_request.rs:136"
+test = "bins/maknae-egress/src/opener.rs::the_real_opener_reaches_vault_only_after_the_seal_opens"
+
+[[cell]]
+subject = "vault"
+object = "prompt"
+right = "none"
+control = "no Vault request carries content: the wrapped read, lookup and unwrap carry only a token and a path"
+evidence = "crates/maknae-vault/src/api_request.rs:123 · crates/maknae-vault/src/api_request.rs:136 · crates/maknae-vault/src/api_request.rs:149"
+
+[[cell]]
+subject = "vault"
+object = "meta"
+right = "p"
+control = "part: it sees the user's userpass identity and the key path of the wrapped read, and the provider only as far as the key subpath names it; never the model or conversation"
+evidence = "deploy/vault-pki/main.tf:207 · crates/maknae-vault/src/api_request.rs:123"
+
+# --- Model provider -------------------------------------------------------
+
+[[cell]]
+subject = "model"
+object = "key_a"
+right = "r"
+control = "it receives the key as the bearer credential, which is inherent to an API key"
+evidence = "crates/maknae-deputy/src/call.rs:258"
+test = "crates/maknae-deputy/src/call.rs::an_admitted_frame_reaches_the_provider_and_returns_its_reply"
+
+[[cell]]
+subject = "model"
+object = "key_b"
+right = "r"
+control = "on B's turns whenever B's chosen provider is this provider: no control keeps a user's key from their own provider"
+evidence = "crates/maknae-deputy/src/call.rs:258"
+test = "crates/maknae-deputy/src/call.rs::an_admitted_frame_reaches_the_provider_and_returns_its_reply"
+
+[[cell]]
+subject = "model"
+object = "wrap"
+right = "none"
+control = "never sent: the Egress Daemon sends only the opened key, as a bearer header"
+evidence = "crates/maknae-deputy/src/call.rs:226 · crates/maknae-deputy/src/call.rs:258"
+
+[[cell]]
+subject = "model"
+object = "sealed"
+right = "none"
+control = "never sent: the Egress Daemon opens it before the call and sends only the key"
+evidence = "crates/maknae-deputy/src/call.rs:226 · crates/maknae-deputy/src/call.rs:258"
+
+[[cell]]
+subject = "model"
+object = "prompt"
+right = "r"
+control = "it receives the conversation's turns, which is the point of the call"
+evidence = "crates/maknae-deputy/src/call.rs:243"
+test = "crates/maknae-deputy/src/call.rs::an_admitted_frame_reaches_the_provider_and_returns_its_reply"
+
+[[cell]]
+subject = "model"
+object = "meta"
+right = "p"
+control = "part: the request names the model and its reasoning and output settings, never the user, conversation or key path, though the bearer key identifies the user's account at the provider"
+evidence = "crates/maknae-deputy/src/call.rs:243"

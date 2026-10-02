@@ -240,6 +240,83 @@ def check_evidence(rows: list, field: str, where: str) -> None:
         sys.exit(f"{where}: evidence cites paths that do not resolve:\n{lines}")
 
 
+_TEST = re.compile(r"([A-Za-z0-9_.\-]+(?:/[A-Za-z0-9_.\-]+)+)::([A-Za-z_][A-Za-z0-9_]*)")
+
+
+_RAW_STR = re.compile(r'b?r(#*)"')
+_CHAR_LIT = re.compile(r"'(?:\\(?:x[0-9A-Fa-f]{2}|u\{[0-9A-Fa-f]{1,6}\}|.)|[^\\'\n])'")
+
+
+def _rust_code_only(src: str) -> str:
+    """Blank Rust comments (`//` lines, nested `/* */` blocks) and string and
+    char literals (plain, byte, raw) to spaces, keeping newlines, so a test
+    attribute or fn named only inside one never resolves a citation."""
+    out, i, n = [], 0, len(src)
+
+    def blank(a: int, b: int) -> None:
+        out.append("".join(c if c == "\n" else " " for c in src[a:b]))
+
+    while i < n:
+        c = src[i]
+        if src.startswith("//", i):
+            j = src.find("\n", i)
+            j = n if j < 0 else j
+            blank(i, j); i = j
+        elif src.startswith("/*", i):
+            j, depth = i + 2, 1
+            while j < n and depth:
+                if src.startswith("/*", j):
+                    depth += 1; j += 2
+                elif src.startswith("*/", j):
+                    depth -= 1; j += 2
+                else:
+                    j += 1
+            blank(i, j); i = j
+        elif (m := _RAW_STR.match(src, i)) and (i == 0 or not (src[i - 1].isalnum() or src[i - 1] == "_")):
+            close = '"' + m.group(1)
+            j = src.find(close, m.end())
+            j = n if j < 0 else j + len(close)
+            blank(i, j); i = j
+        elif c == '"' or (c == "b" and src.startswith('b"', i) and (i == 0 or not (src[i - 1].isalnum() or src[i - 1] == "_"))):
+            j = i + (2 if c == "b" else 1)
+            while j < n and src[j] != '"':
+                j += 2 if src[j] == "\\" else 1
+            j = min(j + 1, n)
+            blank(i, j); i = j
+        elif c == "'" and (m := _CHAR_LIT.match(src, i)):
+            blank(i, m.end()); i = m.end()
+        else:
+            out.append(c); i += 1
+    return "".join(out)
+
+
+_TEST_ATTR = r"#\[\s*(?:tokio\s*::\s*)?test\s*(?:\([^\]]*\))?\s*\]"
+
+
+def check_tests(rows: list, field: str, where: str) -> None:
+    """Every `path::test_fn` citation must name a #[test] fn that exists in that
+    file, in code: a comment or string literal naming one does not count, and
+    only `#[test]`, `#[tokio::test]` and `#[tokio::test(...)]` mark a test."""
+    bad = []
+    for r in rows:
+        raw = r.get(field, "")
+        for item in (i.strip() for i in raw.split("·")) if raw.strip() else ():
+            m = _TEST.fullmatch(item)
+            if not m:
+                bad.append((r, f"{item!r} (not <repo/path>::<test_fn>)"))
+                continue
+            path, fn = m.groups()
+            f = ROOT / path
+            if not f.is_file():
+                bad.append((r, f"{path} (no such file)"))
+            elif not re.search(rf"{_TEST_ATTR}\s*(?:#\[[^\]]*\]\s*)*(?:async\s+)?fn\s+{fn}\s*\(",
+                               _rust_code_only(f.read_text())):
+                bad.append((r, f"{path}::{fn} (no such #[test] fn)"))
+    if bad:
+        lines = "\n".join(f"    {r.get('name', r.get('label', '?'))}: {t}" for r, t in bad)
+        sys.exit(f"{where}: test citations do not resolve:\n{lines}")
+
+
 # --- facts: the internal crate graph and each crate's direct externals -----
 
 def crate_graph() -> dict:
@@ -746,29 +823,65 @@ def d4_packages(gates, cg, prov) -> str:
 # --- D5: the fs.read path, UML 2.5.1 sequence diagram (~ DoDAF SV-10c) ----
 
 def d5_readpath(prov: str) -> str:
-    """Where a read crosses a trust boundary, and by what mechanism.
+    """Where a read crosses a trust boundary, and by what mechanism."""
+    return sequence("read-path.toml")
 
-    UML 2.5.1 sequence diagram: lifelines with execution occurrences, filled
-    arrowhead for a synchronous call (17.4.4), open arrowhead on a dashed line
-    for a reply. Steps are numbered so the notes can key to them -- eight UML
-    note symbols on one diagram would cost more legibility than they buy.
-    """
-    doc = tomllib.loads((OUT / "read-path.toml").read_text())
-    parts, steps = doc["participant"], doc["step"]
-    check_evidence(steps, "evidence", "read-path.toml")
-    idx = {p["id"]: i for i, p in enumerate(parts)}
 
-    LEFT, PITCH, HEAD, ROW = 92, 170, 150, 44
-    xs = [LEFT + i * PITCH for i in range(len(parts))]
-    W = xs[-1] + 100
-    body_h = HEAD + len(steps) * ROW + 26
-    notes = [(i + 1, s["note"]) for i, s in enumerate(steps) if s.get("note")]
-    H = body_h + 34 + len(notes) * 27 + 58
-
-    style = {"actor":    (PLAIN_FILL, PLAIN_LINE, INK),
+SEQ_STYLE = {"actor":    (PLAIN_FILL, PLAIN_LINE, INK),
              "untrusted": ("#FDEEE9", WARN, "#7A2415"),
              "os":       (OK_FILL, OK_LINE, "#04342C"),
-             "trusted":  (TRUST_FILL, TRUST_LINE, TRUST_INK)}
+             "trusted":  (TRUST_FILL, TRUST_LINE, TRUST_INK),
+             "external": (PLAIN_FILL, MUTED, INK)}
+
+
+def sequence(name: str) -> str:
+    """A UML 2.5.1 sequence diagram drawn from one curated TOML.
+
+    Lifelines with execution occurrences, filled arrowhead for a synchronous
+    call (17.4.4), open arrowhead on a dashed line for a reply. Steps are
+    numbered so the notes can key to them -- eight UML note symbols on one
+    diagram would cost more legibility than they buy.
+
+    One renderer for every sequence, because the read path was hard-coded to
+    one trust boundary and its own title, and the per-turn credential path
+    (#153) needs three boundaries and a line saying what each hop can SEE. A
+    copy would have let the two drift.
+    Geometry fails closed: overlapping boxes, a boundary on an unknown or first
+    participant, an unknown kind and a fourth subtitle line all exit.
+    """
+    doc = tomllib.loads((OUT / name).read_text())
+    parts, steps = doc["participant"], doc["step"]
+    check_evidence(steps, "evidence", name)
+    check_tests(steps, "test", name)
+    idx = {p["id"]: i for i, p in enumerate(parts)}
+    for pa in parts:
+        if pa["kind"] not in SEQ_STYLE:
+            sys.exit(f"{name}: participant {pa['id']}: unknown kind {pa['kind']}")
+    subtitle = doc["subtitle"]
+    if len(subtitle) > 3:
+        sys.exit(f"{name}: subtitle has {len(subtitle)} lines; at most 3 fit above the boundary labels")
+    wrap = doc.get("wrap_cols")
+
+    LEFT, PITCH, HEAD, ROW = 92, doc.get("pitch", 170), 150, 44
+    xs = [LEFT + i * PITCH for i in range(len(parts))]
+    bws = [max(150, int(len(pa["label"]) * 6.2) + 16) for pa in parts]
+    for i in range(len(parts) - 1):
+        if xs[i + 1] - xs[i] < (bws[i] + bws[i + 1]) / 2 + 8:
+            sys.exit(f"{name}: participants {parts[i]['id']} and {parts[i + 1]['id']} "
+                     f"overlap; raise pitch")
+    W = xs[-1] + 100
+
+    lines, ys, cur = [], [], HEAD + 34
+    for s in steps:
+        lab = (_wrap_words(s["label"], wrap)
+               if wrap and s["kind"] != "self" and len(s["label"]) > wrap else [s["label"]])
+        lines.append(lab)
+        up = len(lab) - 1
+        ys.append(cur + 12 * up)
+        cur += ROW + 12 * (up + bool(s.get("sees")) + bool(s.get("test")))
+    body_h = cur - 34 + 26
+    notes = [(i + 1, s["note"]) for i, s in enumerate(steps) if s.get("note")]
+    H = body_h + 34 + len(notes) * 27 + 58
 
     p = ['<defs>'
          f'<marker id="call" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" '
@@ -779,23 +892,33 @@ def d5_readpath(prov: str) -> str:
          f'<path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="{MUTED}" '
          f'stroke-width="1.1"/></marker></defs>']
 
-    # the trust boundary, behind the lifelines
-    bx = 0
-    for i, pa in enumerate(parts):
-        if pa.get("boundary_before"):
-            bx = (xs[i] + xs[i - 1]) / 2
-    if bx:
-        p.append(f'<rect x="{bx}" y="{HEAD-34}" width="{W-bx}" height="{body_h-HEAD+46}" '
-                 f'fill="{TRUST_FILL}" opacity="0.35"/>')
+    # the trust boundaries, behind the lifelines
+    bounds = doc.get("boundary", [])
+    bxs = []
+    for bd in bounds:
+        for key in ("before", "left", "right"):
+            if key not in bd:
+                sys.exit(f"{name}: a [[boundary]] is missing `{key}`")
+        i = idx.get(bd["before"])
+        if not i:
+            sys.exit(f"{name}: boundary before {bd['before']!r}: "
+                     f"{'first participant' if i == 0 else 'unknown participant'}")
+        bxs.append((xs[i] + xs[i - 1]) / 2)
+    for k, (bd, bx) in enumerate(zip(bounds, bxs)):
+        if bd.get("shade", True):
+            end = bxs[k + 1] if k + 1 < len(bxs) else W
+            p.append(f'<rect x="{bx}" y="{HEAD-34}" width="{end-bx}" height="{body_h-HEAD+46}" '
+                     f'fill="{TRUST_FILL}" opacity="0.35"/>')
         p.append(f'<line x1="{bx}" y1="{HEAD-34}" x2="{bx}" y2="{body_h+12}" '
                  f'stroke="{WARN}" stroke-width="1.2" stroke-dasharray="7 4"/>')
-        p.append(text(bx - 8, HEAD - 40, "untrusted", 10, "600", fill=WARN, anchor="end"))
-        p.append(text(bx + 8, HEAD - 40, "TRUST BOUNDARY — trust plane", 10, "600", fill=WARN))
+        if bd["left"]:
+            p.append(text(bx - 8, HEAD - 40, bd["left"], 10, "600", fill=WARN, anchor="end"))
+        p.append(text(bx + 8, HEAD - 40, bd["right"], 10, "600", fill=WARN))
 
     # lifelines
     for i, pa in enumerate(parts):
-        fill, line, ink = style[pa["kind"]]
-        x, bw = xs[i], 150
+        fill, line, ink = SEQ_STYLE[pa["kind"]]
+        x, bw = xs[i], bws[i]
         p.append(box(x - bw / 2, HEAD - 28, bw, 34, fill, line, rx=4))
         p.append(text(x, HEAD - 14, pa["label"], 10.5, "600", fill=ink, anchor="middle"))
         p.append(text(x, HEAD - 3, pa["stereo"], 8, fill=line, anchor="middle"))
@@ -804,7 +927,7 @@ def d5_readpath(prov: str) -> str:
 
     # messages
     for n, s in enumerate(steps):
-        y = HEAD + 34 + n * ROW
+        y, lab = ys[n], lines[n]
         a, b = xs[idx[s["from"]]], xs[idx[s["to"]]]
         rep = s["kind"] == "reply"
         stroke, dash = (MUTED, ' stroke-dasharray="5 3"') if rep else (INK, "")
@@ -816,7 +939,9 @@ def d5_readpath(prov: str) -> str:
             # the canvas -- fully-qualified paths are long. Flip it to the left
             # of the lifeline when it will not fit to the right.
             need = max(len(f'{n+1}. {s["label"]}') * 5.6,
-                       len(s.get("evidence", "")) * 4.6)
+                       len(s.get("evidence", "")) * 4.6,
+                       len(f'sees: {s["sees"]}') * 4.8 if s.get("sees") else 0,
+                       len(f'test: {s["test"]}') * 4.6 if s.get("test") else 0)
             if a + 40 + need > W - 24:
                 lx, anc = a - 40, "end"
             else:
@@ -825,11 +950,23 @@ def d5_readpath(prov: str) -> str:
             p.append(f'<line x1="{a}" y1="{y+4}" x2="{b}" y2="{y+4}" stroke="{stroke}" '
                      f'stroke-width="1"{dash} marker-end="url(#{mark})"/>')
             lx, anc = (a + b) / 2, "middle"
-        p.append(text(lx, y - 2, f'{n+1}. {s["label"]}', 10,
-                      "600" if not rep else "400", fill=INK if not rep else MUTED,
-                      anchor=anc, halo="#FFFFFF"))
+        for k, ln in enumerate(lab):
+            up = len(lab) - 1 - k
+            p.append(text(lx, y - 2 - 12 * up, f'{n+1}. {ln}' if k == 0 else ln, 10,
+                          "600" if not rep else "400", fill=INK if not rep else MUTED,
+                          anchor=anc, halo="#FFFFFF"))
+        last = y - 2
         if s.get("evidence"):
             p.append(text(lx, y + 15, s["evidence"], 7.5, fill=MUTED, anchor=anc,
+                          mono=True, halo="#FFFFFF"))
+            last = y + 15
+        if s.get("sees"):
+            last += 12
+            p.append(text(lx, last, f'sees: {s["sees"]}', 8.5, fill=TRUST_INK, anchor=anc,
+                          halo="#FFFFFF"))
+        if s.get("test"):
+            last += 12
+            p.append(text(lx, last, f'test: {s["test"]}', 7.5, fill=MUTED, anchor=anc,
                           mono=True, halo="#FFFFFF"))
 
     y = body_h + 44
@@ -839,14 +976,129 @@ def d5_readpath(prov: str) -> str:
         p.append(text(LEFT - 52, y, f"{num}.", 9.5, "600", fill=WARN))
         p.append(text(LEFT - 32, y, nt, 9.5, fill=INK))
 
-    p = [text(LEFT - 52, 44, "The fs.read path — boundary crossings", 16, "600"),
-         text(LEFT - 52, 64, "One request, end to end. The OS appears TWICE because that is the "
-              "whole of ADR-0009: the daemon asks only where the object is, and", 11, fill=MUTED),
-         text(LEFT - 52, 79, "only the subject's own re-open performs the read. "
-              "Each step names the code that implements it.", 11, fill=MUTED)] + p
-    p.append(footer(W, H, f"source: {content_stamp('design/diagrams/read-path.toml')}"))
-    return svg(W, H, "\n".join(p), "Maknae fs.read boundary crossings",
-               "UML sequence diagram of the Maknae fs.read path across the trust boundary.")
+    p = ([text(LEFT - 52, 44, doc["title"], 16, "600")]
+         + [text(LEFT - 52, 64 + 15 * k, ln, 11, fill=MUTED) for k, ln in enumerate(subtitle)]
+         + p)
+    p.append(footer(W, H, f"source: {content_stamp(f'design/diagrams/{name}')}"))
+    return svg(W, H, "\n".join(p), doc["svg_title"], doc["svg_desc"])
+
+
+# --- the per-user isolation matrix (Lampson) ------------------------------
+
+def matrix(name: str) -> str:
+    """A Lampson access-control matrix drawn from one curated TOML (#153).
+
+    Subjects are rows, objects are columns, and each cell holds one right and
+    a footnote number; the footnotes carry the control, evidence and test, which
+    no 128 px cell can. Not UML, so it writes its own footer, as `stdv1` does.
+
+    Fails closed on a pair with no cell or two cells: a blank cell reads as
+    "no access", which is exactly the claim a gap must never make silently.
+    """
+    doc = tomllib.loads((OUT / name).read_text())
+    subs, objs, rights, cells = doc["subject"], doc["object"], doc["right"], doc["cell"]
+    for kind, rows in (("subject", subs), ("object", objs), ("right", rights)):
+        ids = [r["id"] for r in rows]
+        for i in sorted({i for i in ids if ids.count(i) > 1}):
+            sys.exit(f"{name}: duplicate {kind} id {i}")
+    sid, oid = {s["id"] for s in subs}, {o["id"] for o in objs}
+    glyph = {r["id"]: r["glyph"] for r in rights}
+    grid = {}
+    for n, c in enumerate(cells, 1):
+        for field in ("subject", "object", "right"):
+            if not isinstance(c.get(field), str):
+                sys.exit(f"{name}: cell {n} ({c.get('subject', '?')} × {c.get('object', '?')}): "
+                         f"no {field}")
+        c["name"] = f"{c['subject']} × {c['object']}"
+        if c["subject"] not in sid:
+            sys.exit(f"{name}: cell {c['name']}: unknown subject {c['subject']}")
+        if c["object"] not in oid:
+            sys.exit(f"{name}: cell {c['name']}: unknown object {c['object']}")
+        if c["right"] not in glyph:
+            sys.exit(f"{name}: cell {c['name']}: unknown right {c['right']}")
+        for field in ("control", "evidence"):
+            if not c.get(field, "").strip():
+                sys.exit(f"{name}: cell {c['name']}: no {field}")
+        if (c["subject"], c["object"]) in grid:
+            sys.exit(f"{name}: duplicate cell {c['name']}")
+        grid[(c["subject"], c["object"])] = c
+    for s in subs:
+        for o in objs:
+            if (s["id"], o["id"]) not in grid:
+                sys.exit(f"{name}: missing cell {s['id']} × {o['id']}")
+    check_evidence(cells, "evidence", name)
+    check_tests(cells, "test", name)
+    num = {(c["subject"], c["object"]): n + 1 for n, c in enumerate(cells)}
+
+    rowh, x0, colw = 26, 230, 128
+    W = x0 + colw * len(objs) + 44
+    subtitle = doc["subtitle"]
+    p = [text(44, 44, doc["title"], 16, "600")]
+    p += [text(44, 64 + 15 * k, ln, 11, fill=MUTED) for k, ln in enumerate(subtitle)]
+    sy = 64 + 15 * len(subtitle)
+    p.append(text(44, sy, doc["scope"], 11, "600"))
+
+    hy = sy + 20
+    p.append(text(44, hy + 24, "subject \\ object", 9, fill=MUTED))
+    for i, o in enumerate(objs):
+        cx = x0 + i * colw + colw / 2
+        p.append(box(x0 + i * colw + 6, hy, colw - 12, 40, PLAIN_FILL, PLAIN_LINE, rx=4))
+        lab = o["label"]
+        lab = ([lab.split(" (", 1)[0], "(" + lab.split(" (", 1)[1]]
+               if len(lab) > 19 and " (" in lab else _wrap_words(lab, 19))
+        if len(lab) > 2:
+            sys.exit(f"{name}: object {o['id']}: label needs {len(lab)} lines; at most 2 fit")
+        for k, ln in enumerate(lab):
+            p.append(text(cx, hy + (24 if len(lab) == 1 else 17 + 13 * k), ln, 10.5, "600",
+                          anchor="middle"))
+
+    top = hy + 50
+    for j, s in enumerate(subs):
+        ry = top + j * rowh
+        if j % 2 == 0:
+            p.append(box(40, ry, W - 80, rowh, "#FAFAF8", "none", rx=3, sw="0"))
+        lab = _wrap_words(s["label"], 29) if len(s["label"]) * 6.2 > x0 - 56 else [s["label"]]
+        if len(lab) == 1:
+            p.append(text(48, ry + 17, lab[0], 11, "600"))
+        else:
+            for k, ln in enumerate(lab[:2]):
+                p.append(text(48, ry + 11 + 11 * k, ln, 10, "600"))
+        for i, o in enumerate(objs):
+            cx = x0 + i * colw + colw / 2
+            key = (s["id"], o["id"])
+            p.append(text(cx - 4, ry + 18, glyph[grid[key]["right"]], 14, "600",
+                          anchor="middle", mono=True))
+            p.append(text(cx + 7, ry + 11, str(num[key]), 8, fill=MUTED))
+    bottom = top + len(subs) * rowh
+    for i in range(len(objs) + 1):
+        gx = x0 + i * colw
+        p.append(f'<line x1="{gx}" y1="{top}" x2="{gx}" y2="{bottom}" stroke="#D3D1C7" '
+                 f'stroke-width="0.6"/>')
+
+    y = bottom + 30
+    p.append(text(44, y, "Rights", 11, "600"))
+    for r in rights:
+        y += 15
+        p.append(text(52, y, r["glyph"], 11, "600", mono=True))
+        p.append(text(72, y, r["meaning"], 10, fill=INK))
+
+    y += 30
+    p.append(text(44, y, "Controls, evidence and tests", 11, "600"))
+    y += 4
+    for c in cells:
+        line = (f"{num[(c['subject'], c['object'])]}. {c['name']}: {c['control']} — "
+                f"{c['evidence']}" + (f" · test: {c['test']}" if c.get("test") else ""))
+        for ln in _wrap_words(line, 150):
+            y += 12
+            p.append(text(44, y, ln, 9, fill=INK))
+        y += 4
+
+    H = y + 56
+    p.append(text(40, H - 26, f"source: {content_stamp(f'design/diagrams/{name}')}",
+                  10, fill=MUTED))
+    p.append(text(W - 40, H - 26, 'Access-control matrix — B. W. Lampson, "Protection", 1971 '
+                  "(ACM SIGOPS OSR 8(1), 1974)", 10, fill=MUTED, anchor="end"))
+    return svg(W, H, "\n  ".join(p), doc["svg_title"], doc["svg_desc"])
 
 
 # --- D6: how maknae-authz-* backends layer into one decision --------------
@@ -1112,15 +1364,25 @@ def d8_interfaces(prov: str) -> str:
         col, dash, sw = line_for[i["status"]]
         if i.get("class") == "platform":
             col, dash, sw = "#8A5B00", "1 3", "1.6"
-        if a["row"] == b["row"]:
+        if a["row"] == b["row"] and a["col"] > b["col"]:
+            x1, y1 = a["x"], a["y"] + NH / 2
+            x2, y2 = b["x"] + NW, b["y"] + NH / 2
+        elif a["row"] == b["row"]:
             x1, y1 = a["x"] + NW, a["y"] + NH / 2
             x2, y2 = b["x"], b["y"] + NH / 2
         else:
             x1, y1 = a["x"] + NW / 2, a["y"] + NH
             x2, y2 = b["x"] + NW / 2, b["y"]
-            if a["col"] != b["col"]:
+            if a["col"] < b["col"]:
                 x1, y1 = a["x"] + NW, a["y"] + NH / 2
                 x2, y2 = b["x"], b["y"] + NH / 2
+            elif a["col"] > b["col"]:
+                # Leftward (maknaed dialling the Egress Daemon): leave by the
+                # left edge and arrive at the right edge, below the point the
+                # target's own outbound edges leave from, so the arrowhead is
+                # not drawn on top of their start.
+                x1, y1 = a["x"], a["y"] + NH / 2
+                x2, y2 = b["x"] + NW, b["y"] + NH * 3 / 4
         d = f' stroke-dasharray="{dash}"' if dash else ""
         my = (y1 + y2) / 2
         p.append(f'<path d="M {x1:.0f} {y1:.0f} C {(x1+x2)/2:.0f} {y1:.0f} '
@@ -1190,8 +1452,9 @@ def d8_interfaces(prov: str) -> str:
          text(PAD, 66, f"Every interface carries a status. {nb} peer interfaces exist and "
               f"{npl} host-platform controls act on the daemon. {nr} are ratified by "
               "ADR-0006 and", 11, fill=MUTED),
-         text(PAD, 82, f"NOT implemented — that ADR carries its own banner saying so. {ns} are "
-              "one-line marker crates with no interface at all.", 11, fill=MUTED),
+         text(PAD, 82, f"NOT implemented — that ADR carries its own banner saying so. {ns} "
+              f"{'is a one-line marker crate' if ns == 1 else 'are one-line marker crates'} "
+              "with no interface at all.", 11, fill=MUTED),
          text(PAD, 98, "Solid violet is a built peer interface; dashed grey is not built; "
               "dotted gold is a mandatory host control, which enforces rather than exchanges.",
               10, fill=MUTED)] + p
@@ -1762,6 +2025,8 @@ def main(argv: list) -> None:
         ("generated-standards-profile.svg", lambda: stdv1(prov)),
         ("generated-workspace-packages.svg", lambda: d4_packages(gates, cg, prov)),
         ("generated-read-path.svg", lambda: d5_readpath(prov)),
+        ("generated-credential-path.svg", lambda: sequence("credential-path.toml")),
+        ("generated-isolation-matrix.svg", lambda: matrix("isolation-matrix.toml")),
         ("generated-decision-cycle.svg", lambda: d6_decision(prov)),
         ("generated-data-model.svg", lambda: d7_datamodel(prov)),
         ("generated-system-interfaces.svg", lambda: d8_interfaces(prov)),
