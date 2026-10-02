@@ -5,12 +5,6 @@ use zeroize::Zeroizing;
 pub const SYSTEM_KEYCHAIN: &str = "/Library/Keychains/System.keychain";
 pub const KEYCHAIN_ACCOUNT: &str = "secret-id";
 
-/// The CLI's own item, in the operator's default keychain (enroll's helper writes it).
-pub const CLI_KEYCHAIN_ITEM: KeychainItem = KeychainItem {
-    service: "maknae-cli",
-    account: "maknae-secret-id",
-};
-
 pub const CLI_TOKEN_KEYCHAIN_ITEM: KeychainItem = KeychainItem {
     service: "maknae-cli",
     account: "maknae-vault-token",
@@ -180,8 +174,6 @@ mod tests {
             KeychainPlane::Egress.pointer_file(),
             "maknae-egress-secret-id.keychain"
         );
-        assert_eq!(CLI_KEYCHAIN_ITEM.service, "maknae-cli");
-        assert_eq!(CLI_KEYCHAIN_ITEM.account, "maknae-secret-id");
         assert_eq!(CLI_TOKEN_KEYCHAIN_ITEM.service, "maknae-cli");
         assert_eq!(CLI_TOKEN_KEYCHAIN_ITEM.account, "maknae-vault-token");
         assert_eq!(ITEM_NOT_FOUND, -25300);

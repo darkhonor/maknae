@@ -151,9 +151,9 @@ pub fn write_file(
 /// unwritten config file is exactly the failure mode this refuses), so it
 /// fails closed rather than skipping the row. Rows whose content is produced
 /// by an external seal command or the macOS keychain write
-/// (`SealedDaemonSecret`/`SealedCliSecret`/`SealedEgressSecret`) are the
-/// caller's responsibility to exclude from `rows` — they are written by that
-/// step, then ownership-applied via [`apply_ownership_and_mode`] directly.
+/// (`SealedDaemonSecret`) are the caller's responsibility to exclude from
+/// `rows` — they are written by that step, then ownership-applied via
+/// [`apply_ownership_and_mode`] directly.
 pub fn write_artifacts(
     rows: &[Artifact],
     contents: &BTreeMap<PathBuf, Vec<u8>>,
@@ -330,15 +330,11 @@ mod tests {
     #[test]
     fn write_artifacts_applies_every_row_of_a_real_table() {
         let td = TempDir::new("full-cli");
-        // Reuse the real CLI half of `artifact_table` (macos=false so it
-        // includes the sealed-secret row, which we deliberately exclude below
-        // — this integration test proves `write_artifacts` handles every OTHER
-        // row of a real table end to end).
         let cli_dir = td.0.join("cli");
         let all = artifact_table(&cli_dir, false, false);
         let cli_rows: Vec<_> = all
             .into_iter()
-            .filter(|a| a.path.starts_with(&cli_dir) && a.content != ContentKind::SealedCliSecret)
+            .filter(|a| a.path.starts_with(&cli_dir))
             .collect();
         let mut contents = BTreeMap::new();
         for row in &cli_rows {

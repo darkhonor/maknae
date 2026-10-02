@@ -114,25 +114,9 @@ pub(crate) fn item_refs(
 pub(crate) type OpenedKeychain =
     Result<security_framework::os::macos::keychain::SecKeychain, security_framework::base::Error>;
 
-// The default keychain is the one the enroll helper adds the CLI item to.
 #[cfg(target_os = "macos")]
 pub(crate) fn default_keychain() -> OpenedKeychain {
     security_framework::os::macos::keychain::SecKeychain::default()
-}
-
-#[cfg(target_os = "macos")]
-pub(crate) fn read_cli_secret_in(
-    open: impl FnOnce() -> OpenedKeychain,
-) -> Result<Zeroizing<String>, VaultError> {
-    read_item_in(open, &crate::CLI_KEYCHAIN_ITEM)
-}
-
-/// The CLI's own read, on a named keychain: enroll verifies the item it just added with it.
-#[cfg(target_os = "macos")]
-pub fn read_cli_secret_from(
-    keychain: &security_framework::os::macos::keychain::SecKeychain,
-) -> Result<Zeroizing<String>, VaultError> {
-    read_cli_secret_in(|| Ok(keychain.clone()))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -270,10 +254,10 @@ pub(crate) mod tests {
         ));
     }
 
-    pub(crate) fn scratch_with_cli_item(secret: Option<&str>) -> Scratch {
+    pub(crate) fn scratch_keychain() -> Scratch {
         let dir = tempfile::tempdir().unwrap();
         let kc = Scratch {
-            path: dir.path().join("t76-cli.keychain"),
+            path: dir.path().join("t76-scratch.keychain"),
             _dir: dir,
         };
         let p = kc.path.to_str().unwrap();
@@ -287,39 +271,7 @@ pub(crate) mod tests {
                 .unwrap()
                 .success());
         }
-        if let Some(s) = secret {
-            security_framework::os::macos::keychain::SecKeychain::open(&kc.path)
-                .unwrap()
-                .add_generic_password(
-                    crate::CLI_KEYCHAIN_ITEM.service,
-                    crate::CLI_KEYCHAIN_ITEM.account,
-                    s.as_bytes(),
-                )
-                .unwrap();
-        }
         kc
-    }
-
-    #[test]
-    fn the_cli_item_is_read_by_its_service_and_account() {
-        let _serial = KEYCHAIN_UI.lock().unwrap_or_else(|e| e.into_inner());
-        let kc = scratch_with_cli_item(Some("sentinel-cli-t76"));
-        let open = security_framework::os::macos::keychain::SecKeychain::open(&kc.path).unwrap();
-        assert_eq!(
-            read_cli_secret_from(&open).unwrap().as_str(),
-            "sentinel-cli-t76"
-        );
-    }
-
-    #[test]
-    fn an_unenrolled_cli_is_named() {
-        let _serial = KEYCHAIN_UI.lock().unwrap_or_else(|e| e.into_inner());
-        let kc = scratch_with_cli_item(None);
-        let open = security_framework::os::macos::keychain::SecKeychain::open(&kc.path).unwrap();
-        assert!(matches!(
-            read_cli_secret_from(&open),
-            Err(VaultError::Keychain { status: -25300 })
-        ));
     }
 
     fn pointer_in(dir: &tempfile::TempDir) -> PathBuf {

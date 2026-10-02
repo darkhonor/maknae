@@ -501,7 +501,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let before = default_keychain_refs();
-        let kc = crate::keychain::tests::scratch_with_cli_item(None);
+        let kc = crate::keychain::tests::scratch_keychain();
         let path = kc.path.clone();
         within_30s(move || {
             let open = Keychain::open(&path).unwrap();
@@ -526,7 +526,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     fn with_an_item_not_trusting_this_binary() -> crate::keychain::tests::Scratch {
-        let kc = crate::keychain::tests::scratch_with_cli_item(None);
+        let kc = crate::keychain::tests::scratch_keychain();
         let item = crate::CLI_TOKEN_KEYCHAIN_ITEM;
         let added = std::process::Command::new("/usr/bin/security")
             .args([

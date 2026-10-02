@@ -57,15 +57,10 @@ yaml-rust2 = "=0.13.0"
 # calls libc in `unsafe`; #403 tracks replacing it with nix's safe termios API. PR-J1 Task 8.
 rpassword = "7"
 
-[target.'cfg(target_os = "macos")'.dependencies]
-# The CLI's login-Keychain-backed SecretID seal (spec §6.3) and the enroll helper's
-# macOS capability probe (Keychain write/read round-trip, spec §4.1 step 1). PR-J1 Task 8.
-security-framework = "3"
-
 # NO privileged crate (maknae-kernel/-subject-ctx-mint/-audit-append/-spif-compile) — spec §3 P1.
 # STRICTLY non-privileged: the closed set of direct deps this crate links is
 # maknae-proto, maknae-vault, maknae-config, maknae-msgs, maknae-io, maknae-agent, maknae-seal, clap,
-# tokio, nix, zeroize, yaml-rust2, rpassword, and macOS-only security-framework — no
+# tokio, nix, zeroize, yaml-rust2 and rpassword — no
 # maknae-mcp either. maknae-agent is non-privileged; it is the loop's decision code and its
 # four direct deps are maknae-proto, serde, serde_json and zeroize. No gate enforces this
 # set, so this comment IS the record.
@@ -75,7 +70,7 @@ security-framework = "3"
 # crate from its graph.)
 # (Corrected 2026-09-22, #241: maknae-io was absent from this enumeration and from the
 # wire-path sentence below, and maknae-agent was described as linking maknae-proto alone.)
-# `yaml-rust2`/`rpassword`/`security-framework` are `enroll/`-only; `nix`/`zeroize` serve `enroll/` and `login`/`tty`
+# `yaml-rust2`/`rpassword` are `enroll/`-only; `nix`/`zeroize` serve `enroll/` and `login`/`tty`
 # (spec §4.1-§4.6); `cli.rs`'s wire path touches `maknae-proto`, `maknae-vault`,
 # `maknae-config`, `maknae-msgs`, `clap` and `maknae-io` (delegation arming); `agent.rs`
 # adds `maknae-agent` and `maknae-seal` and nothing else.

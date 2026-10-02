@@ -41,13 +41,6 @@ pub enum MsgId {
     // ---- PR-J1 Task 8 (`maknae enroll`, spec §4.1) --------------------
     /// Preflight (euid/`$SUDO_UID`/`$SUDO_USER`) rejected the invocation.
     EnrollPreflightFailed,
-    /// The post-drop operator-context capability probe (spec §4.1 step 1)
-    /// started, before any Vault mutation.
-    EnrollProbeStarted,
-    /// The capability probe failed — enroll aborts before minting anything.
-    EnrollProbeFailed,
-    /// The capability probe succeeded.
-    EnrollProbeOk,
     /// The interactive no-echo Vault token prompt.
     EnrollTokenPrompt,
     /// Vault RoleID/SecretID/CA-chain operations (spec §4.1 step 3) started.
@@ -62,8 +55,7 @@ pub enum MsgId {
     EnrollPostureSummary,
     /// Reminder that group membership is not live in pre-existing sessions.
     EnrollReloginNote,
-    /// #240b: the one hand step enroll does not do for the egress deputy —
-    /// the `vault:` block in `egress-bounds.yaml`, and its mode.
+    /// Pointer to the operator's own enable of the egress deputy.
     EnrollEgressBoundsHint,
     /// Pointer to the operator's own `systemctl enable --now maknaed` act.
     EnrollEnableDaemonHint,
@@ -106,9 +98,6 @@ pub const ALL: &[MsgId] = &[
     MsgId::AuditOffloadUnsupported,
     MsgId::PostureDegraded,
     MsgId::EnrollPreflightFailed,
-    MsgId::EnrollProbeStarted,
-    MsgId::EnrollProbeFailed,
-    MsgId::EnrollProbeOk,
     MsgId::EnrollTokenPrompt,
     MsgId::EnrollVaultOpsStarted,
     MsgId::EnrollWritingDaemonConfig,
@@ -277,9 +266,6 @@ mod tests {
                 | MsgId::AuditOffloadUnsupported
                 | MsgId::PostureDegraded
                 | MsgId::EnrollPreflightFailed
-                | MsgId::EnrollProbeStarted
-                | MsgId::EnrollProbeFailed
-                | MsgId::EnrollProbeOk
                 | MsgId::EnrollTokenPrompt
                 | MsgId::EnrollVaultOpsStarted
                 | MsgId::EnrollWritingDaemonConfig
@@ -299,7 +285,7 @@ mod tests {
                 | MsgId::HelperStillPrivileged => {}
             }
         }
-        const VARIANT_COUNT: usize = 33;
+        const VARIANT_COUNT: usize = 30;
         assert_eq!(ALL.len(), VARIANT_COUNT);
         for &id in ALL {
             assert_covered(id);
@@ -326,5 +312,34 @@ mod tests {
             placeholders(msg(Locale::EnUs, MsgId::EnrollGroupAdded)),
             vec!["user"]
         );
+    }
+
+    #[test]
+    fn the_egress_hint_names_the_bounds_file_enroll_wrote_and_asks_for_no_hand_edit() {
+        for locale in [Locale::EnUs, Locale::KoKr] {
+            for id in [
+                MsgId::EnrollEgressBoundsHint,
+                MsgId::EnrollEgressBoundsHintMacos,
+            ] {
+                let m = msg(locale, id);
+                assert!(
+                    m.contains("/etc/maknae/egress-bounds.yaml"),
+                    "{locale:?} {id:?}"
+                );
+                assert!(
+                    !m.contains("key_vault_path_prefix") && !m.contains("chmod"),
+                    "{locale:?} {id:?}: {m}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_closing_note_says_to_run_maknae_login_before_using_the_cli() {
+        for locale in [Locale::EnUs, Locale::KoKr] {
+            let m = msg(locale, MsgId::EnrollReloginNote);
+            assert!(m.contains("`maknae login`"), "{locale:?}: {m}");
+            assert!(m.contains("`newgrp maknae`"), "{locale:?}: {m}");
+        }
     }
 }

@@ -7,13 +7,13 @@
 //! **Closed dependency enumeration** (recorded here and in `Cargo.toml`; no gate
 //! enforces it): `maknae-proto`, `maknae-vault`, `maknae-config`, `maknae-msgs`,
 //! `maknae-io`, `maknae-agent`, `maknae-seal`, `clap`, `tokio`, `nix`, `zeroize`, `yaml-rust2`,
-//! `rpassword`, and macOS-only `security-framework` (`bins/maknae/Cargo.toml`).
+//! and `rpassword` (`bins/maknae/Cargo.toml`).
 //! *(Corrected 2026-09-22, #241: `maknae-io` was missing from both this list and
 //! the "wire path" sentence below, though it has been a direct dependency and on
 //! the wire path since ADR-0009 arming landed.)* The `ping`/`whoami` wire path
 //! below uses only `maknae-proto`, `maknae-vault`, `maknae-config`, `maknae-msgs`,
 //! `clap` and `maknae-io` (delegation arming — `mutation.rs`); `maknae-agent` and `maknae-seal` are the agent loop's
-//! (`agent.rs`) alone; `yaml-rust2`/`rpassword`/`security-framework` are
+//! (`agent.rs`) alone; `yaml-rust2`/`rpassword` are
 //! `enroll/`-only, and `nix`/`zeroize` serve `enroll/` and `login`/`tty`. NO privileged crate
 //! (`maknae-kernel`/`-subject-ctx-mint`/`-audit-append`/`-spif-compile`) — spec §3
 //! P1 — even for `enroll`: it does its own privileged work via `nix` safe wrappers
@@ -156,7 +156,7 @@ enum Command {
     Logout,
     /// One-time elevated provisioning: mint credentials, seal them to the
     /// platform HRoT, write daemon+CLI config (spec §4.1). Requires `sudo`.
-    Enroll(crate::enroll::EnrollArgs),
+    Enroll(Box<crate::enroll::EnrollArgs>),
     /// Hidden operator-context helper `enroll` re-execs via `sudo -u` — not a
     /// user-facing verb.
     #[command(hide = true, name = "enroll-helper")]
@@ -738,7 +738,7 @@ pub async fn run_cli() -> ExitCode {
         },
         Command::Login => crate::login::run_login().await,
         Command::Logout => crate::login::run_logout().await,
-        Command::Enroll(args) => crate::enroll::run_enroll(args).await,
+        Command::Enroll(args) => crate::enroll::run_enroll(*args).await,
         Command::EnrollHelper(args) => crate::enroll::run_enroll_helper(args).await,
     }
 }
@@ -1104,6 +1104,9 @@ mod tests {
                 assert_eq!(args.deployment_id, "dev-01");
                 assert_eq!(args.approle_mount, maknae_vault::DEFAULT_APPROLE_MOUNT);
                 assert_eq!(args.pki_int_mount, maknae_vault::DEFAULT_PKI_INT_MOUNT);
+                assert_eq!(args.userpass_mount, "maknae-userpass");
+                assert_eq!(args.kv_mount, "maknae-kv");
+                assert_eq!(args.user_prefix, "maknae/users");
                 assert!(!args.rotate);
                 assert!(!args.insecure_plaintext_secret);
                 assert!(!args.verbose);
@@ -1198,6 +1201,12 @@ mod tests {
             "alt-approle",
             "--pki-int-mount",
             "alt-pki-int",
+            "--userpass-mount",
+            "corp-userpass",
+            "--kv-mount",
+            "corp-kv",
+            "--user-prefix",
+            "corp/users",
             "--rotate",
             "--insecure-plaintext-secret",
             "--verbose",
@@ -1207,6 +1216,9 @@ mod tests {
             Command::Enroll(args) => {
                 assert_eq!(args.approle_mount, "alt-approle");
                 assert_eq!(args.pki_int_mount, "alt-pki-int");
+                assert_eq!(args.userpass_mount, "corp-userpass");
+                assert_eq!(args.kv_mount, "corp-kv");
+                assert_eq!(args.user_prefix, "corp/users");
                 assert!(args.rotate);
                 assert!(args.insecure_plaintext_secret);
                 assert!(args.verbose);
@@ -1216,8 +1228,8 @@ mod tests {
     }
 
     #[test]
-    fn enroll_helper_probe_parses() {
-        let cli = Cli::try_parse_from([
+    fn the_removed_probe_verb_is_refused() {
+        assert!(Cli::try_parse_from([
             "maknae",
             "enroll-helper",
             "probe",
@@ -1226,17 +1238,7 @@ mod tests {
             "--egid",
             "1000",
         ])
-        .expect("parses");
-        match cli.command {
-            Command::EnrollHelper(args) => match args.verb {
-                crate::enroll::HelperVerb::Probe(id) => {
-                    assert_eq!(id.euid, 1000);
-                    assert_eq!(id.egid, 1000);
-                }
-                other => panic!("expected HelperVerb::Probe, got {other:?}"),
-            },
-            other => panic!("expected Command::EnrollHelper, got {other:?}"),
-        }
+        .is_err());
     }
 
     #[test]

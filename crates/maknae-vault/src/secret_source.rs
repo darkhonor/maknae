@@ -14,11 +14,6 @@ use zeroize::Zeroizing;
 /// (systemd `LoadCredential=maknaed-secret-id:...` / `SetCredentialEncrypted`).
 pub const DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME: &str = "maknaed-secret-id";
 
-/// The credential name the DEPUTY's unit loads (`LoadCredentialEncrypted=
-/// maknae-egress-secret-id:…` in `maknae-egress.service`; `maknae enroll`
-/// seals with the same `--name`). #240b.
-pub const EGRESS_CREDENTIALS_DIRECTORY_CRED_NAME: &str = "maknae-egress-secret-id";
-
 pub const EGRESS_SEAL_KEY_CRED_NAME: &str = "maknae-egress-seal-key";
 pub const MAX_SEAL_KEY_BYTES: usize = 512;
 const SEAL_KEY_LENGTH: &str = "empty or over 512 bytes";

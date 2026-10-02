@@ -1,16 +1,16 @@
 //! `maknae enroll` — one-time elevated provisioning (spec §4.1-§4.6, PR-J1
-//! Task 8). Orchestrates the daemon+CLI credential mint/seal/write flow in the
-//! EXACT step order spec §4.1 lays out; the individual mechanisms live in the
-//! sibling modules:
+//! Task 8). Orchestrates the daemon credential mint/seal and the configuration
+//! writes in the EXACT step order spec §4.1 lays out; the individual mechanisms
+//! live in the sibling modules:
 //!
 //! - [`artifact_table`] — the pure §4.6 row manifest.
 //! - [`artifact_write`] — applies rows to disk (chown/chmod/restorecon/YAML).
 //! - [`vault_ops`] — thin calls over `maknae_vault::OperatorClient`.
 //! - [`helper`] — the hidden operator-context re-exec target (`enroll-helper`).
 //!
-//! **Privilege descent (spec §4.1, no `unsafe`):** every step that must run AS
-//! the operator (the pre-mint capability probe, the post-mint CLI provisioning)
-//! is re-exec'd via `sudo -u $SUDO_USER` with `XDG_RUNTIME_DIR=/run/user/$SUDO_UID`
+//! **Privilege descent (spec §4.1, no `unsafe`):** the one step that must run AS
+//! the operator (the post-mint CLI configuration write) is re-exec'd via
+//! `sudo -u $SUDO_USER` with `XDG_RUNTIME_DIR=/run/user/$SUDO_UID`
 //! pinned ([`run_helper`]) — never an in-process uid drop (`unsafe` is forbidden
 //! outside `maknae-sys`, ADR-0027, and `nix` cfg-gates the direct drop APIs off
 //! Apple targets anyway).
@@ -81,16 +81,11 @@ pub enum EnrollError {
         verb: &'static str,
         detail: String,
     },
-    /// The post-drop capability probe (systemd-creds `--user`/Keychain round
-    /// trip) failed.
-    Probe(String),
     /// The daemon-surface HRoT capability gate (spec §4.1 step 1) failed. On
     /// Linux this is a real root `systemd-creds encrypt --with-key=tpm2` ->
     /// `decrypt` round-trip (the same mechanism the step-5 daemon seal uses —
     /// version-agnostic, unlike the `systemd-analyze has-tpm2` verb which is
-    /// absent on RHEL 9's systemd 252, #93). Checked before the operator-context
-    /// CLI probe so a missing daemon TPM surfaces clearly rather than as a
-    /// confusing subprocess failure.
+    /// absent on RHEL 9's systemd 252, #93).
     HrotUnavailable {
         detail: String,
     },
@@ -103,6 +98,8 @@ pub enum EnrollError {
     /// (#240b). Its own variant: the message names the flag, never
     /// `--vault-addr`.
     InvalidVaultMount(String),
+    /// `--userpass-mount`, `--kv-mount` or `--user-prefix` failed its shape check.
+    InvalidVaultLayout(String),
     /// The reachability probe (spec §4.1 step 1) could not reach Vault.
     VaultUnreachable {
         addr: String,
@@ -115,9 +112,8 @@ pub enum EnrollError {
     State(String),
     #[cfg(any(target_os = "macos", test))]
     SecretIdShape,
-    /// A keychain operation (delete/add/verify) failed: on a plane's System
-    /// keychain item, or on the operator's CLI item in their default keychain.
-    /// For a plane item it also covers an add that landed elsewhere.
+    /// A keychain operation (delete/add/verify) on a plane's System keychain
+    /// item failed, or the add landed elsewhere.
     #[cfg(target_os = "macos")]
     Keychain {
         op: &'static str,
@@ -186,7 +182,6 @@ impl std::fmt::Display for EnrollError {
             EnrollError::HelperFailed { verb, detail } => {
                 write!(f, "enroll-helper {verb} failed: {detail}")
             }
-            EnrollError::Probe(msg) => write!(f, "capability probe failed: {msg}"),
             EnrollError::HrotUnavailable { detail } => {
                 write!(f, "no hardware root of trust available: {detail}")
             }
@@ -195,6 +190,7 @@ impl std::fmt::Display for EnrollError {
                 write!(f, "cannot parse --vault-addr {addr:?} as host:port")
             }
             EnrollError::InvalidVaultMount(msg) => write!(f, "invalid Vault mount: {msg}"),
+            EnrollError::InvalidVaultLayout(msg) => write!(f, "invalid Vault setting: {msg}"),
             EnrollError::VaultUnreachable { addr, detail } => {
                 write!(f, "cannot reach Vault at {addr}: {detail}")
             }
@@ -352,14 +348,22 @@ pub struct EnrollArgs {
     /// This deployment's identifier (charset-guarded by `maknae-vault`).
     #[arg(long)]
     pub deployment_id: String,
-    /// The AppRole auth mount (defaults to the Terraform default; ALWAYS
-    /// persisted into both written configs, spec §4.1).
+    /// The AppRole auth mount `maknaed` logs in through (persisted into the daemon config).
     #[arg(long, default_value_t = maknae_vault::DEFAULT_APPROLE_MOUNT.to_string())]
     pub approle_mount: String,
     /// The intermediate PKI mount (defaults to the Terraform default; ALWAYS
     /// persisted).
     #[arg(long, default_value_t = maknae_vault::DEFAULT_PKI_INT_MOUNT.to_string())]
     pub pki_int_mount: String,
+    /// The userpass auth mount users log in through with `maknae login`.
+    #[arg(long, default_value = "maknae-userpass")]
+    pub userpass_mount: String,
+    /// The KV v2 mount that holds each user's provider keys.
+    #[arg(long, default_value = "maknae-kv")]
+    pub kv_mount: String,
+    /// The path under the KV mount that holds one folder per user.
+    #[arg(long, default_value = "maknae/users")]
+    pub user_prefix: String,
     /// Read the Vault token from this file instead of an interactive prompt.
     #[arg(long)]
     pub token_file: Option<PathBuf>,
@@ -397,11 +401,7 @@ pub struct HelperIdentityArgs {
 /// The hidden `enroll-helper` subcommand's own verbs.
 #[derive(Subcommand, Debug, Clone)]
 pub enum HelperVerb {
-    /// A throwaway round trip of this target's CLI-seal mechanism — proves
-    /// the operator context can seal/unseal BEFORE any Vault mutation.
-    Probe(HelperIdentityArgs),
-    /// Write the CLI artifact set + seal the real SecretID (job payload read
-    /// from stdin — never argv/env, spec §4.1 step 7).
+    /// Write the CLI configuration set (job payload read from stdin, spec §4.1 step 7).
     Provision(HelperIdentityArgs),
 }
 
@@ -414,20 +414,21 @@ pub struct HelperArgs {
 }
 
 // ============================================================================
-// The operator-context handoff payload ("job") — spec §4.1 step 7: the real
-// SecretID travels ONLY over the helper's inherited stdin pipe, never argv/env.
+// The operator-context handoff payload ("job"), sent over the helper's stdin
+// pipe (spec §4.1 step 7).
 // ============================================================================
 
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct ProvisionJob {
     pub cli_dir: PathBuf,
     pub macos: bool,
     pub insecure_plaintext: bool,
     pub deployment_id: String,
     pub vault_addr: String,
-    pub approle_mount: String,
     pub pki_int_mount: String,
-    pub role_id: String,
-    pub secret_id: Zeroizing<String>,
+    pub userpass_mount: String,
+    pub kv_mount: String,
+    pub user_prefix: String,
     pub vault_ca_pem: String,
     pub root_ca_pem: String,
     pub int_ca_pem: String,
@@ -444,10 +445,10 @@ impl ProvisionJob {
             ("insecure_plaintext", Yaml::Boolean(self.insecure_plaintext)),
             ("deployment_id", Yaml::String(self.deployment_id.clone())),
             ("vault_addr", Yaml::String(self.vault_addr.clone())),
-            ("approle_mount", Yaml::String(self.approle_mount.clone())),
             ("pki_int_mount", Yaml::String(self.pki_int_mount.clone())),
-            ("role_id", Yaml::String(self.role_id.clone())),
-            ("secret_id", Yaml::String(self.secret_id.to_string())),
+            ("userpass_mount", Yaml::String(self.userpass_mount.clone())),
+            ("kv_mount", Yaml::String(self.kv_mount.clone())),
+            ("user_prefix", Yaml::String(self.user_prefix.clone())),
             ("vault_ca_pem", Yaml::String(self.vault_ca_pem.clone())),
             ("root_ca_pem", Yaml::String(self.root_ca_pem.clone())),
             ("int_ca_pem", Yaml::String(self.int_ca_pem.clone())),
@@ -485,10 +486,10 @@ impl ProvisionJob {
             insecure_plaintext: get_bool("insecure_plaintext")?,
             deployment_id: get_str("deployment_id")?,
             vault_addr: get_str("vault_addr")?,
-            approle_mount: get_str("approle_mount")?,
             pki_int_mount: get_str("pki_int_mount")?,
-            role_id: get_str("role_id")?,
-            secret_id: Zeroizing::new(get_str("secret_id")?),
+            userpass_mount: get_str("userpass_mount")?,
+            kv_mount: get_str("kv_mount")?,
+            user_prefix: get_str("user_prefix")?,
             vault_ca_pem: get_str("vault_ca_pem")?,
             root_ca_pem: get_str("root_ca_pem")?,
             int_ca_pem: get_str("int_ca_pem")?,
@@ -507,6 +508,7 @@ fn build_daemon_yaml(
     vault_addr: &str,
     approle_mount: &str,
     pki_int_mount: &str,
+    userpass_mount: &str,
     insecure_plaintext_path: Option<&Path>,
     jsonl_path: &str,
     macos: bool,
@@ -517,6 +519,7 @@ fn build_daemon_yaml(
         ("addr", Yaml::String(vault_addr.to_string())),
         ("approle_mount", Yaml::String(approle_mount.to_string())),
         ("pki_int_mount", Yaml::String(pki_int_mount.to_string())),
+        ("user_auth", user_auth_yaml(userpass_mount)),
     ];
     if let Some(p) = insecure_plaintext_path {
         vault_pairs.push((
@@ -570,8 +573,10 @@ fn build_daemon_yaml(
 fn build_cli_yaml(
     deployment_id: &str,
     vault_addr: &str,
-    approle_mount: &str,
     pki_int_mount: &str,
+    userpass_mount: &str,
+    kv_mount: &str,
+    user_prefix: &str,
     macos: bool,
 ) -> String {
     let mut top = vec![
@@ -586,8 +591,10 @@ fn build_cli_yaml(
             "vault",
             artifact_write::yaml_map(vec![
                 ("addr", Yaml::String(vault_addr.to_string())),
-                ("approle_mount", Yaml::String(approle_mount.to_string())),
                 ("pki_int_mount", Yaml::String(pki_int_mount.to_string())),
+                ("user_auth", user_auth_yaml(userpass_mount)),
+                ("kv_mount", Yaml::String(kv_mount.to_string())),
+                ("user_prefix", Yaml::String(user_prefix.to_string())),
             ]),
         ),
     ];
@@ -601,6 +608,27 @@ fn build_cli_yaml(
         ));
     }
     artifact_write::emit_yaml(artifact_write::yaml_map(top))
+}
+
+fn user_auth_yaml(mount: &str) -> Yaml {
+    artifact_write::yaml_map(vec![
+        (
+            "type",
+            Yaml::String(maknae_vault::UserAuthMethod::Userpass.as_str().to_string()),
+        ),
+        ("mount", Yaml::String(mount.to_string())),
+    ])
+}
+
+fn build_egress_bounds_yaml(vault_addr: &str, kv_mount: &str, user_prefix: &str) -> String {
+    artifact_write::emit_yaml(artifact_write::yaml_map(vec![
+        (
+            "vault",
+            artifact_write::yaml_map(vec![("addr", Yaml::String(vault_addr.to_string()))]),
+        ),
+        ("kv_mount", Yaml::String(kv_mount.to_string())),
+        ("user_prefix", Yaml::String(user_prefix.to_string())),
+    ]))
 }
 
 fn build_enroll_state_yaml(mount: &str, records: &[(String, String)]) -> String {
@@ -738,7 +766,7 @@ fn parse_state_accessors(text: &str) -> Result<Vec<(String, String)>, EnrollErro
 /// PURE: parse `https://[user@]host:port[/...]` into `(host, port)`. HTTPS
 /// only — an `http://` address is `None` here so enroll refuses it by name
 /// before the reachability probe, rather than carrying the operator token and
-/// three SecretIDs over plaintext (self-review round 7; the daemon and deputy
+/// the daemon SecretID over plaintext (self-review round 7; the daemon and deputy
 /// clients already refused it, and `OperatorClient` now does too).
 fn parse_host_port(addr: &str) -> Option<(String, u16)> {
     let rest = addr.strip_prefix("https://")?;
@@ -854,8 +882,7 @@ fn tpm2_seal_roundtrip(verbose: bool) -> bool {
 /// round-trip — rather than probing a version-specific presence verb. This is a
 /// HARD daemon-capability gate (the caller aborts enrollment if it returns
 /// false), and it proves the same TPM binding the step-5 daemon seal uses,
-/// pre-mint (§4.1). It is NOT the operator `--user` CLI seal probe — that is a
-/// separate surface in helper.rs (#73 owns its el9 residual).
+/// pre-mint (§4.1).
 fn detect_hrot_capability(verbose: bool) -> bool {
     let ok = tpm2_seal_roundtrip(verbose);
     if verbose {
@@ -996,6 +1023,30 @@ fn insecure_plaintext_path(args: &EnrollArgs) -> Option<PathBuf> {
         .then(|| PathBuf::from("/etc/maknae/private/maknae-secret-id"))
 }
 
+fn check_vault_layout(args: &EnrollArgs) -> Result<(), EnrollError> {
+    maknae_vault::UserAuth::new(maknae_vault::UserAuthMethod::Userpass, &args.userpass_mount)
+        .map_err(|e| EnrollError::InvalidVaultLayout(format!("--userpass-mount: {e}")))?;
+    for (flag, value) in [
+        ("--kv-mount", &args.kv_mount),
+        ("--user-prefix", &args.user_prefix),
+    ] {
+        if value.len() > maknae_config::MAX_USER_PREFIX_BYTES {
+            return Err(EnrollError::InvalidVaultLayout(format!(
+                "{flag} exceeds {} bytes",
+                maknae_config::MAX_USER_PREFIX_BYTES
+            )));
+        }
+        maknae_config::kv_fragment_is_acceptable(value)
+            .map_err(|why| EnrollError::InvalidVaultLayout(format!("{flag} {why}")))?;
+        if !maknae_config::vault_path_is_safe(value) {
+            return Err(EnrollError::InvalidVaultLayout(format!(
+                "{flag} must use only ASCII letters, digits, '.', '_', '/' and '-' (the Vault URL path alphabet)"
+            )));
+        }
+    }
+    Ok(())
+}
+
 // ============================================================================
 // Group membership (spec §4.1 step 6) — hand-rolled (no dep on the privileged
 // `maknae-kernel` crate's `groupres.rs`; this crate stays strictly
@@ -1066,12 +1117,10 @@ async fn ensure_group_membership(operator: &Operator, verbose: bool) -> Result<b
 // Daemon credential sealing (spec §4.1 step 5)
 // ============================================================================
 
-/// The argv for sealing one plane's SecretID under `cred_name` — the name the
-/// plane's unit `LoadCredentialEncrypted=` pins. Factored so a unit test holds
-/// both sealed planes' names (`maknaed-secret-id`, `maknae-egress-secret-id`)
-/// against the units: a mismatch is "Name in credential doesn't match
-/// expectations" at unit start, found once already on live hardware for the
-/// CLI's credential (secret_io.rs).
+/// The argv for sealing one credential under `cred_name` — the name its unit's
+/// `LoadCredentialEncrypted=` pins. Factored so a unit test holds each sealed
+/// name against the shipped unit: a mismatch is "Name in credential doesn't
+/// match expectations" at unit start, found once already on live hardware.
 fn seal_argv(cred_name: &str, out_str: &str) -> (&'static str, Vec<String>) {
     (
         "systemd-creds",
@@ -1204,10 +1253,11 @@ async fn destroy_previous_accessors_or_abort(
     records: &[(String, String)],
     locale: Locale,
 ) -> Result<(), EnrollError> {
+    let records = vault_ops::still_provisioned(records);
     if records.is_empty() {
         return Ok(());
     }
-    let failures = vault_ops::destroy_all(client, mount, records).await;
+    let failures = vault_ops::destroy_all(client, mount, &records).await;
     if failures.is_empty() {
         eprintln!("{}", msg(locale, ROTATE_CLEANUP_DONE));
         return Ok(());
@@ -1545,15 +1595,6 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
         });
     }
 
-    println!("{}", msg(locale, MsgId::EnrollProbeStarted));
-    match run_helper(&operator, "probe", None, args.verbose).await {
-        Ok(()) => println!("{}", msg(locale, MsgId::EnrollProbeOk)),
-        Err(e) => {
-            eprintln!("{}", msg(locale, MsgId::EnrollProbeFailed));
-            return Err(EnrollError::Probe(e.to_string()));
-        }
-    }
-
     // ---- Step 2: token intake ---------------------------------------------
     let token = intake_token(args, locale)?;
 
@@ -1565,6 +1606,7 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
         .map_err(|why| EnrollError::InvalidVaultMount(format!("--approle-mount {why}")))?;
     maknae_config::mount_path_is_acceptable(&args.pki_int_mount)
         .map_err(|why| EnrollError::InvalidVaultMount(format!("--pki-int-mount {why}")))?;
+    check_vault_layout(args)?;
     let vault_ca_path = resolve_vault_ca_path(args);
     let vault_ca_bytes = std::fs::read(&vault_ca_path).map_err(|e| EnrollError::Io {
         path: vault_ca_path.clone(),
@@ -1592,40 +1634,14 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
             .await?;
     }
 
-    let (daemon_role_id, cli_role_id, egress_role_id) =
-        vault_ops::read_role_ids(&client, &args.approle_mount).await?;
+    let daemon_role_id = vault_ops::read_daemon_role_id(&client, &args.approle_mount).await?;
 
     let daemon_secret =
         vault_ops::mint_secret(&client, &args.approle_mount, vault_ops::DAEMON_ROLE).await?;
-    let mut minted: Vec<(String, String)> = vec![(
+    let minted: Vec<(String, String)> = vec![(
         daemon_secret.role.to_string(),
         daemon_secret.accessor.clone(),
     )];
-
-    let cli_secret =
-        match vault_ops::mint_secret(&client, &args.approle_mount, vault_ops::CLI_ROLE).await {
-            Ok(s) => {
-                minted.push((s.role.to_string(), s.accessor.clone()));
-                s
-            }
-            Err(e) => {
-                destroy_and_report(&client, &args.approle_mount, &minted, locale).await;
-                return Err(e.into());
-            }
-        };
-
-    // #240b: the third plane's SecretID, same rollback contract as the CLI's.
-    let egress_secret =
-        match vault_ops::mint_secret(&client, &args.approle_mount, vault_ops::EGRESS_ROLE).await {
-            Ok(s) => {
-                minted.push((s.role.to_string(), s.accessor.clone()));
-                s
-            }
-            Err(e) => {
-                destroy_and_report(&client, &args.approle_mount, &minted, locale).await;
-                return Err(e.into());
-            }
-        };
 
     let (mut root_ca_pem, int_ca_pem) =
         match vault_ops::fetch_and_split_ca_chain(&client, &args.pki_int_mount).await {
@@ -1668,11 +1684,7 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
         #[cfg(target_os = "macos")]
         &release_team,
         &daemon_role_id,
-        &cli_role_id,
-        &egress_role_id,
         &daemon_secret.secret,
-        &cli_secret.secret,
-        &egress_secret.secret,
         &vault_ca_bytes,
         &root_ca_pem,
         &int_ca_pem,
@@ -1697,11 +1709,7 @@ async fn finish_enrollment(
     macos: bool,
     #[cfg(target_os = "macos")] release_team: &str,
     daemon_role_id: &str,
-    cli_role_id: &str,
-    egress_role_id: &str,
     daemon_secret: &Zeroizing<String>,
-    cli_secret: &Zeroizing<String>,
-    egress_secret: &Zeroizing<String>,
     vault_ca_pem: &[u8],
     root_ca_pem: &str,
     int_ca_pem: &str,
@@ -1724,6 +1732,7 @@ async fn finish_enrollment(
         &args.vault_addr,
         &args.approle_mount,
         &args.pki_int_mount,
+        &args.userpass_mount,
         insecure_plaintext_path(args).as_deref(),
         jsonl_path,
         macos,
@@ -1752,15 +1761,13 @@ async fn finish_enrollment(
         daemon_role_id.as_bytes().to_vec(),
     );
     contents.insert(etc.join("tls/vault-ca.crt"), vault_ca_pem.to_vec());
-    // #240b: the deputy's own credential set. Its RoleID, and its own copy of
-    // the Vault CA — `tls/` is root:_maknae 0750 and the deputy cannot enter it.
-    contents.insert(
-        etc.join("egress").join(maknae_vault::EGRESS_ROLE_ID_FILE),
-        egress_role_id.as_bytes().to_vec(),
-    );
     contents.insert(
         etc.join("egress").join(maknae_vault::EGRESS_VAULT_CA_FILE),
         vault_ca_pem.to_vec(),
+    );
+    contents.insert(
+        etc.join(maknae_config::EGRESS_BOUNDS_FILE),
+        build_egress_bounds_yaml(&args.vault_addr, &args.kv_mount, &args.user_prefix).into_bytes(),
     );
     contents.insert(
         etc.join("tls/maknae-root-ca.crt"),
@@ -1788,8 +1795,6 @@ async fn finish_enrollment(
         .iter()
         .filter(|a| {
             a.content != artifact_table::ContentKind::SealedDaemonSecret
-                && a.content != artifact_table::ContentKind::SealedEgressSecret
-                && a.content != artifact_table::ContentKind::SealedCliSecret
                 && !a.path.starts_with(cli_dir)
         })
         .cloned()
@@ -1827,38 +1832,6 @@ async fn finish_enrollment(
         artifact_write::apply_ownership_and_mode(sealed_row, &resolver)?;
     }
 
-    // ---- Step 5b: seal the egress deputy's credential (#240b) ---------------
-    let egress_sealed_row = table
-        .iter()
-        .find(|a| a.content == artifact_table::ContentKind::SealedEgressSecret)
-        .expect("artifact_table always emits exactly one SealedEgressSecret row");
-    if macos {
-        #[cfg(target_os = "macos")]
-        {
-            keychain_write::seal_secret_macos(
-                egress_secret,
-                maknae_vault::KeychainPlane::Egress,
-                keychain_write::EGRESS_BINARY,
-                release_team,
-            )
-            .await?;
-            artifact_write::write_file(
-                egress_sealed_row,
-                maknae_vault::pointer_document(maknae_vault::KeychainPlane::Egress).as_bytes(),
-                &resolver,
-            )?;
-        }
-    } else {
-        seal_secret_linux(
-            egress_secret,
-            &egress_sealed_row.path,
-            maknae_vault::EGRESS_CREDENTIALS_DIRECTORY_CRED_NAME,
-            args.verbose,
-        )
-        .await?;
-        artifact_write::apply_ownership_and_mode(egress_sealed_row, &resolver)?;
-    }
-
     // ---- Step 6: group membership -------------------------------------------
     let added = ensure_group_membership(operator, args.verbose).await?;
     if added {
@@ -1881,10 +1854,10 @@ async fn finish_enrollment(
         insecure_plaintext: args.insecure_plaintext_secret,
         deployment_id: args.deployment_id.clone(),
         vault_addr: args.vault_addr.clone(),
-        approle_mount: args.approle_mount.clone(),
         pki_int_mount: args.pki_int_mount.clone(),
-        role_id: cli_role_id.to_string(),
-        secret_id: cli_secret.clone(),
+        userpass_mount: args.userpass_mount.clone(),
+        kv_mount: args.kv_mount.clone(),
+        user_prefix: args.user_prefix.clone(),
         vault_ca_pem: String::from_utf8_lossy(vault_ca_pem).to_string(),
         root_ca_pem: root_ca_pem.to_string(),
         int_ca_pem: int_ca_pem.to_string(),
@@ -1975,13 +1948,8 @@ mod tests {
 
     // ---- #240b: the third plane's seal name and traversal ACL --------------
 
-    /// The sealed credential's embedded NAME must match what the unit loads:
-    /// `LoadCredentialEncrypted=maknae-egress-secret-id:…` in
-    /// maknae-egress.service. A mismatch is "Name in credential doesn't match
-    /// expectations" at unit start — the runtime seam bug secret_io.rs records
-    /// for the CLI. One argv builder, two names, both pinned.
     #[test]
-    fn seal_argv_pins_the_credential_name_for_both_sealed_planes() {
+    fn seal_argv_pins_the_credential_name() {
         let (bin, args) = seal_argv(
             maknae_vault::DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME,
             "/etc/maknae/private/maknaed-secret-id.cred",
@@ -1996,14 +1964,6 @@ mod tests {
                 "-",
                 "/etc/maknae/private/maknaed-secret-id.cred"
             ]
-        );
-        let (_, args) = seal_argv(
-            maknae_vault::EGRESS_CREDENTIALS_DIRECTORY_CRED_NAME,
-            "/etc/maknae/private/maknae-egress-secret-id.cred",
-        );
-        assert!(
-            args.iter().any(|a| a == "--name=maknae-egress-secret-id"),
-            "{args:?}"
         );
     }
 
@@ -2050,28 +2010,31 @@ mod tests {
         }
     }
 
-    /// The name each seal embeds is the name the plane's UNIT loads — read
-    /// from the shipped unit files, not from a second literal here, so an
-    /// edit to either `LoadCredentialEncrypted=` line goes red before it goes
-    /// "Name in credential doesn't match expectations" at unit start.
     #[test]
     fn the_seal_names_are_the_names_the_shipped_units_load() {
-        fn loaded_name(unit: &str) -> String {
+        fn loaded(unit: &str) -> (String, String) {
             unit.lines()
                 .find_map(|l| l.strip_prefix("LoadCredentialEncrypted="))
                 .and_then(|rest| rest.split_once(':'))
-                .map(|(name, _)| name.to_string())
+                .map(|(name, path)| (name.to_string(), path.to_string()))
                 .expect("the unit carries a LoadCredentialEncrypted= line")
         }
-        let maknaed = include_str!("../../../../packaging/common/maknaed.service");
-        let egress = include_str!("../../../../packaging/common/maknae-egress.service");
+        let row = |kind| {
+            artifact_table::artifact_table(Path::new("/home/op/.maknae"), false, false)
+                .into_iter()
+                .find(|a| a.content == kind)
+                .expect("the row exists")
+                .path
+                .to_string_lossy()
+                .into_owned()
+        };
+        let maknaed = loaded(include_str!("../../../../packaging/common/maknaed.service"));
         assert_eq!(
-            loaded_name(maknaed),
-            maknae_vault::DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME
-        );
-        assert_eq!(
-            loaded_name(egress),
-            maknae_vault::EGRESS_CREDENTIALS_DIRECTORY_CRED_NAME
+            maknaed,
+            (
+                maknae_vault::DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME.to_string(),
+                row(artifact_table::ContentKind::SealedDaemonSecret)
+            )
         );
     }
 
@@ -2374,6 +2337,9 @@ mod tests {
             deployment_id: "dev-01".to_string(),
             approle_mount: maknae_vault::DEFAULT_APPROLE_MOUNT.to_string(),
             pki_int_mount: maknae_vault::DEFAULT_PKI_INT_MOUNT.to_string(),
+            userpass_mount: "maknae-userpass".to_string(),
+            kv_mount: "maknae-kv".to_string(),
+            user_prefix: "maknae/users".to_string(),
             token_file: None,
             cli_dir: None,
             rotate: false,
@@ -2385,19 +2351,91 @@ mod tests {
     // ---- YAML content builders ---------------------------------------------
 
     #[test]
-    fn build_cli_yaml_round_trips_and_carries_both_mounts() {
-        let text = build_cli_yaml("dev-01", "https://v.example:8200", "am", "pm", false);
-        let v = maknae_config::load_str(&text).unwrap();
-        // vault section present with both mounts ALWAYS persisted (spec §4.1) —
-        // parsed through the real `vault_config_from_document`-adjacent shape
-        // check via the same field accessors the CLI's own loader would use.
-        let vault_section = section(&v, "vault").expect("vault section present");
-        if let maknae_config::Value::Map(vfields) = vault_section {
-            assert!(vfields.iter().any(|(k, _)| k == "approle_mount"));
-            assert!(vfields.iter().any(|(k, _)| k == "pki_int_mount"));
-        } else {
-            panic!("vault section not a map");
-        }
+    fn the_cli_config_enroll_writes_loads_through_the_cli_loader_with_the_user_vault_layout() {
+        use std::os::unix::fs::PermissionsExt;
+        let text = build_cli_yaml(
+            "dev-01",
+            "https://v.example:8200",
+            "pm",
+            "corp-userpass",
+            "corp-kv",
+            "corp/users",
+            false,
+        );
+        let d = std::env::temp_dir().join(format!("maknae-enroll-cli-yaml-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let f = d.join("maknae.yaml");
+        std::fs::write(&f, &text).unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let loaded = maknae_config::load_config(&d, &crate::cli::cli_config_specs())
+            .map_err(|e| e.to_string())
+            .and_then(|doc| {
+                maknae_vault::vault_config_from_document(&doc).map_err(|e| e.to_string())
+            });
+        let _ = std::fs::remove_dir_all(&d);
+        let vc = loaded.expect("the written CLI config loads");
+        assert_eq!(vc.user_auth.resolve().unwrap().mount(), "corp-userpass");
+        assert_eq!(vc.kv_mount.as_deref(), Some("corp-kv"));
+        assert_eq!(vc.user_prefix.as_deref(), Some("corp/users"));
+        assert_eq!(vc.pki_int_mount, "pm");
+        assert!(!text.contains("approle_mount"), "{text}");
+    }
+
+    #[test]
+    fn the_egress_bounds_enroll_writes_parse_through_the_parser_both_daemons_use() {
+        let text = build_egress_bounds_yaml("https://v.example:8200", "corp-kv", "corp/users");
+        let bounds = maknae_config::bounds_from_document(&maknae_config::load_str(&text).unwrap())
+            .expect("the kernel's and the Egress Daemon's parser accepts it");
+        assert_eq!(
+            bounds,
+            maknae_config::EgressBounds {
+                kv_mount: "corp-kv".to_string(),
+                user_prefix: "corp/users".to_string(),
+                vault_addr: "https://v.example:8200".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn the_default_vault_layout_is_accepted() {
+        assert!(check_vault_layout(&default_args()).is_ok());
+    }
+
+    #[test]
+    fn each_vault_layout_refusal_names_its_flag() {
+        let refused = |edit: fn(&mut EnrollArgs)| {
+            let mut a = default_args();
+            edit(&mut a);
+            match check_vault_layout(&a) {
+                Err(EnrollError::InvalidVaultLayout(m)) => m,
+                other => panic!("expected a layout refusal, got {other:?}"),
+            }
+        };
+        assert!(
+            refused(|a| a.userpass_mount = "auth/maknae-userpass".into())
+                .starts_with("--userpass-mount")
+        );
+        assert!(refused(|a| a.userpass_mount = "maknae userpass".into())
+            .starts_with("--userpass-mount"));
+        assert!(refused(|a| a.kv_mount = "maknae-kv/data".into()).starts_with("--kv-mount"));
+        assert!(refused(|a| a.user_prefix = "/maknae/users".into()).starts_with("--user-prefix"));
+        assert!(refused(|a| a.user_prefix = "maknae/../users".into()).starts_with("--user-prefix"));
+        assert!(
+            refused(|a| a.user_prefix = "a".repeat(maknae_config::MAX_USER_PREFIX_BYTES + 1))
+                .starts_with("--user-prefix")
+        );
+        assert_eq!(
+            refused(|a| a.kv_mount = "maknae#kv".into()),
+            "--kv-mount must use only ASCII letters, digits, '.', '_', '/' and '-' (the Vault URL path alphabet)"
+        );
+        assert!(refused(|a| a.kv_mount = "maknae?kv".into()).starts_with("--kv-mount"));
+        assert!(refused(|a| a.kv_mount = "maknae%2Fkv".into()).starts_with("--kv-mount"));
+        assert!(refused(|a| a.user_prefix = "maknae/us#ers".into()).starts_with("--user-prefix"));
+        assert!(refused(|a| a.user_prefix = "maknae/users?x=1".into()).starts_with("--user-prefix"));
+        assert!(refused(|a| a.user_prefix = "maknae/%75sers".into()).starts_with("--user-prefix"));
+        assert!(refused(|a| a.user_prefix = "maknae/my users".into()).starts_with("--user-prefix"));
     }
 
     #[test]
@@ -2413,6 +2451,7 @@ mod tests {
             "https://v.example:8200",
             "am",
             "pm",
+            "corp-userpass",
             None,
             "/var/log/maknae/audit.jsonl",
             false,
@@ -2426,6 +2465,7 @@ mod tests {
             "https://v.example:8200",
             "am",
             "pm",
+            "corp-userpass",
             None,
             "/var/log/maknae/audit.jsonl",
             true,
@@ -2457,6 +2497,7 @@ mod tests {
             "https://v.example:8200",
             "am",
             "pm",
+            "corp-userpass",
             None,
             "/var/log/maknae/audit.jsonl",
             true,
@@ -2467,8 +2508,10 @@ mod tests {
             socket(build_cli_yaml(
                 "dev-01",
                 "https://v.example:8200",
-                "am",
                 "pm",
+                "maknae-userpass",
+                "maknae-kv",
+                "maknae/users",
                 macos,
             ))
         };
@@ -2522,6 +2565,7 @@ mod tests {
             "https://v.example:8200",
             "am",
             "pm",
+            "corp-userpass",
             None,
             "/var/log/maknae/audit.jsonl",
             false,
@@ -2539,6 +2583,9 @@ mod tests {
         assert_eq!(principal.uid, 1000);
         let audit =
             maknae_config::audit_from_section(section(&v, "audit"), Path::new("/nope")).unwrap();
+        let vault = section(&v, "vault").expect("vault section present");
+        let user_auth = maknae_vault::user_auth_from_value(section(vault, "user_auth")).unwrap();
+        assert_eq!(user_auth.mount(), "corp-userpass");
         assert_eq!(
             audit.jsonl_path,
             PathBuf::from("/var/log/maknae/audit.jsonl")
@@ -2758,31 +2805,63 @@ lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
         assert!(result.is_ok());
     }
 
+    #[test]
+    fn an_old_enroll_state_keeps_only_the_maknaed_accessor_for_destruction() {
+        let old = build_enroll_state_yaml(
+            "maknae-approle",
+            &[
+                ("maknaed".to_string(), "acc-1".to_string()),
+                ("maknae".to_string(), "acc-2".to_string()),
+                ("maknae-egress".to_string(), "acc-3".to_string()),
+            ],
+        );
+        assert_eq!(
+            vault_ops::still_provisioned(&parse_state_accessors(&old).unwrap()),
+            vec![("maknaed".to_string(), "acc-1".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn rotate_skips_a_previous_enrollments_removed_roles_without_calling_vault() {
+        let client = fixture_operator_client("removed-roles");
+        let previous = parse_state_accessors(&build_enroll_state_yaml(
+            "maknae-approle",
+            &[
+                ("maknae".to_string(), "acc-2".to_string()),
+                ("maknae-egress".to_string(), "acc-3".to_string()),
+            ],
+        ))
+        .unwrap();
+        let result =
+            destroy_previous_accessors_or_abort(&client, "maknae-approle", &previous, Locale::EnUs)
+                .await;
+        assert!(result.is_ok(), "{result:?}");
+    }
+
     // ---- ProvisionJob round trip --------------------------------------------
 
     #[test]
-    fn provision_job_round_trips_through_yaml() {
+    fn provision_job_round_trips_through_yaml_and_carries_no_credential() {
         let job = ProvisionJob {
             cli_dir: PathBuf::from("/home/ops/.maknae"),
-            macos: false,
+            macos: true,
             insecure_plaintext: false,
             deployment_id: "dev-01".to_string(),
             vault_addr: "https://v.example:8200".to_string(),
-            approle_mount: "maknae-approle".to_string(),
             pki_int_mount: "maknae-pki-int".to_string(),
-            role_id: "role-id-value".to_string(),
-            secret_id: Zeroizing::new("s.SECRETVALUE".to_string()),
+            userpass_mount: "corp-userpass".to_string(),
+            kv_mount: "corp-kv".to_string(),
+            user_prefix: "corp/users".to_string(),
             vault_ca_pem: "-----BEGIN CERTIFICATE-----\nA\n-----END CERTIFICATE-----\n".to_string(),
             root_ca_pem: "-----BEGIN CERTIFICATE-----\nB\n-----END CERTIFICATE-----\n".to_string(),
             int_ca_pem: "-----BEGIN CERTIFICATE-----\nC\n-----END CERTIFICATE-----\n".to_string(),
         };
         let text = job.to_yaml();
-        let back = ProvisionJob::from_yaml(&text).unwrap();
-        assert_eq!(back.cli_dir, job.cli_dir);
-        assert_eq!(back.macos, job.macos);
-        assert_eq!(back.role_id, job.role_id);
-        assert_eq!(back.secret_id.as_str(), job.secret_id.as_str());
-        assert_eq!(back.root_ca_pem, job.root_ca_pem);
+        assert_eq!(ProvisionJob::from_yaml(&text).unwrap(), job);
+        assert!(
+            !text.contains("secret_id") && !text.contains("role_id") && !text.contains("approle"),
+            "{text}"
+        );
     }
 
     #[test]

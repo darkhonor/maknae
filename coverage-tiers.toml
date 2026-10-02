@@ -622,7 +622,7 @@ why = "#153: maknae login/logout orchestration — terminal check, account name,
 # tests even though the tier is T3 — see each file's module doc.
 [[t3]]
 path = "bins/maknae/src/enroll/mod.rs"
-why = "orchestration (spec §4.1 step order, privilege-descent re-exec, rollback/rotate) + clap arg structs; the pure pieces (preflight_check, parse_host_port, the YAML content builders, ProvisionJob's round trip) carry real unit tests but the file is bin orchestration code, T3 per the tiering constraint"
+why = "orchestration (spec §4.1 step order, privilege-descent re-exec, rollback/rotate) + clap arg structs; the pure pieces (preflight_check, parse_host_port, check_vault_layout, the YAML content builders proven through the CLI loader and the bounds parser, ProvisionJob's round trip, the rotate filter against a real OperatorClient) carry real unit tests but the file is bin orchestration code, T3 per the tiering constraint"
 
 [[t3]]
 path = "bins/maknae/src/enroll/artifact_table.rs"
@@ -634,11 +634,11 @@ why = "applies the artifact table to disk — chown/chmod/restorecon + yaml_rust
 
 [[t3]]
 path = "bins/maknae/src/enroll/vault_ops.rs"
-why = "thin OperatorClient call wrappers; the one pure piece (split_ca_chain) carries real unit tests, the async Vault I/O is exercised by the same gated-live-test pattern as crates/maknae-vault/src/operator.rs"
+why = "thin OperatorClient call wrappers; the pure pieces (split_ca_chain, still_provisioned) carry real unit tests, the async Vault I/O is exercised by the same gated-live-test pattern as crates/maknae-vault/src/operator.rs"
 
 [[t3]]
 path = "bins/maknae/src/enroll/helper.rs"
-why = "the operator-context helper — self-verification + systemd-creds/Keychain subprocess/FFI I/O; the pure id-G parser carries real unit tests, the seal/probe I/O is T3 like the rest of this crate's HRoT-sealing call sites"
+why = "the operator-context helper — self-verification and the CLI configuration write; the id-G parser and the identity refusal carry real unit tests, the write runs through artifact_write's tested writer"
 
 [[t3]]
 path = "bins/maknae/src/enroll/keychain_write.rs"

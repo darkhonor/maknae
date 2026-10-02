@@ -60,20 +60,17 @@ pub use client::{PlaneClient, PlaneIdentity, PLANE_HTTP_TIMEOUT, PLANE_SHUTDOWN_
 pub use config::{
     load_vault_config, user_auth_from_value, validate_deployment_id, validate_vault_addr,
     vault_config_from_document, UserAuth, UserAuthConfig, UserAuthMethod, VaultConfig,
-    DEFAULT_APPROLE_MOUNT, DEFAULT_PKI_INT_MOUNT, DEFAULT_USERPASS_MOUNT, EGRESS_APPROLE_ROLE,
-    EGRESS_ROLE_ID_FILE, EGRESS_VAULT_CA_FILE, VAULT_SECTION,
+    DEFAULT_APPROLE_MOUNT, DEFAULT_PKI_INT_MOUNT, DEFAULT_USERPASS_MOUNT, EGRESS_VAULT_CA_FILE,
+    VAULT_SECTION,
 };
 pub use csr_gen::generate_plane_csr;
 pub use digest::{sha256_hex, Sha256};
 pub use env::{scrub_with, NEVER_SCRUB_ENV, SCRUBBED_ENV};
 pub use error::VaultError;
 pub use fips_glue::{assert_fips_provider, install_default_crypto_provider};
-#[cfg(target_os = "macos")]
-pub use keychain::read_cli_secret_from;
 pub use keychain_policy::{
     daemon_keychain_pointer, gate, parse_pointer, pointer_document, read_gated, KeychainDelete,
-    KeychainItem, KeychainPlane, CLI_KEYCHAIN_ITEM, CLI_TOKEN_KEYCHAIN_ITEM, KEYCHAIN_ACCOUNT,
-    SYSTEM_KEYCHAIN,
+    KeychainItem, KeychainPlane, CLI_TOKEN_KEYCHAIN_ITEM, KEYCHAIN_ACCOUNT, SYSTEM_KEYCHAIN,
 };
 pub use operator::OperatorClient;
 pub use password_line::{PasswordFeed, PasswordLine};
@@ -91,7 +88,7 @@ pub use secret_source::{
     credentials_directory_env, resolve_daemon_secret_source, resolve_egress_seal_key_source,
     seal_key_from_hex, seal_key_to_hex, CredentialSourceKind, DaemonSecretSource,
     EgressSealKeySource, SealKeyDer, SealKeyHex, DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME,
-    EGRESS_CREDENTIALS_DIRECTORY_CRED_NAME, EGRESS_SEAL_KEY_CRED_NAME, MAX_SEAL_KEY_BYTES,
+    EGRESS_SEAL_KEY_CRED_NAME, MAX_SEAL_KEY_BYTES,
 };
 #[cfg(unix)]
 pub use socket::bind_listener as bind_group_gated_uds;

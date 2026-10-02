@@ -1038,7 +1038,6 @@ dependencies = [
  "maknae-vault",
  "nix",
  "rpassword",
- "security-framework",
  "tokio",
  "yaml-rust2",
  "zeroize",
