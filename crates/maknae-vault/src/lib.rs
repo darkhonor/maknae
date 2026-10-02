@@ -15,8 +15,6 @@ mod config;
 mod csr;
 mod csr_gen;
 mod digest;
-mod egress;
-mod egress_session;
 mod env;
 mod error;
 mod fips;
@@ -41,9 +39,6 @@ mod verify;
 mod wrap;
 // The UDS transport is unix-only (UnixStream / SO_PEERCRED); the pure-rustls layers above
 // (tls/resolver/plane_verify) compile everywhere so the Stage-1 client stays cross-platform.
-#[cfg(unix)]
-mod kv;
-mod kv_io;
 mod peer_identity;
 mod peercred;
 #[cfg(unix)]
@@ -65,13 +60,11 @@ pub use client::{PlaneClient, PlaneIdentity, PLANE_HTTP_TIMEOUT, PLANE_SHUTDOWN_
 pub use config::{
     load_vault_config, user_auth_from_value, validate_deployment_id, validate_vault_addr,
     vault_config_from_document, UserAuth, UserAuthConfig, UserAuthMethod, VaultConfig,
-    DEFAULT_APPROLE_MOUNT, DEFAULT_PKI_INT_MOUNT, DEFAULT_USERPASS_MOUNT, VAULT_SECTION,
+    DEFAULT_APPROLE_MOUNT, DEFAULT_PKI_INT_MOUNT, DEFAULT_USERPASS_MOUNT, EGRESS_APPROLE_ROLE,
+    EGRESS_ROLE_ID_FILE, EGRESS_VAULT_CA_FILE, VAULT_SECTION,
 };
 pub use csr_gen::generate_plane_csr;
 pub use digest::{sha256_hex, Sha256};
-pub use egress::{
-    load_egress_auth, EgressVault, EGRESS_APPROLE_ROLE, EGRESS_ROLE_ID_FILE, EGRESS_VAULT_CA_FILE,
-};
 pub use env::{scrub_with, NEVER_SCRUB_ENV, SCRUBBED_ENV};
 pub use error::VaultError;
 pub use fips_glue::{assert_fips_provider, install_default_crypto_provider};
@@ -82,9 +75,6 @@ pub use keychain_policy::{
     KeychainItem, KeychainPlane, CLI_KEYCHAIN_ITEM, CLI_TOKEN_KEYCHAIN_ITEM, KEYCHAIN_ACCOUNT,
     SYSTEM_KEYCHAIN,
 };
-#[cfg(unix)]
-pub use kv::split_kv_path;
-pub use kv_io::read_kv_field;
 pub use operator::OperatorClient;
 pub use password_line::{PasswordFeed, PasswordLine};
 pub use peer_identity::{creds_match_listener_uid, creds_match_uid, listener_uid_is, peer_uid_is};
@@ -99,9 +89,8 @@ pub use seal_pub_store::{
 };
 pub use secret_source::{
     credentials_directory_env, resolve_cli_secret_source, resolve_daemon_secret_source,
-    resolve_egress_seal_key_source, resolve_egress_secret_source, seal_key_from_hex,
-    seal_key_to_hex, CliSecretSource, CredentialSourceKind, DaemonSecretSource,
-    EgressSealKeySource, EgressSecretSource, SealKeyDer, SealKeyHex,
+    resolve_egress_seal_key_source, seal_key_from_hex, seal_key_to_hex, CliSecretSource,
+    CredentialSourceKind, DaemonSecretSource, EgressSealKeySource, SealKeyDer, SealKeyHex,
     DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME, EGRESS_CREDENTIALS_DIRECTORY_CRED_NAME,
     EGRESS_SEAL_KEY_CRED_NAME, MAX_SEAL_KEY_BYTES,
 };

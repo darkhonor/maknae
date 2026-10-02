@@ -1118,6 +1118,7 @@ dependencies = [
  "maknae-config",
  "maknae-deputy",
  "maknae-proto",
+ "maknae-seal",
  "maknae-vault",
  "nix",
  "tempfile",

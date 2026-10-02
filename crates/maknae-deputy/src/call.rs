@@ -5,16 +5,14 @@
 //! never checked. The property is in the type, not in a comment.
 
 use crate::handle::Admitted;
-use crate::keys::{KeyCache, KeySource};
+use crate::unseal::{KeyOpener, OpenFailure};
 use maknae_proto::{EgressFrameReply, OutputTokensField};
 use std::time::Duration;
 
 /// Why fulfilment failed. Distinct from `handle::Refusal`, which is about
 /// ADMISSION — this is about the call.
 pub enum FulfilError {
-    /// The provider credential could not be obtained. Carries the reason, which
-    /// names the PATH and never the value.
-    Credential(String),
+    Open(OpenFailure),
     /// The call did not produce a usable reply. `journal` is the provider's
     /// error body, key redacted and escaped, for the deputy's journal only;
     /// neither `Display` nor `Debug` renders it.
@@ -36,7 +34,7 @@ impl FulfilError {
 impl std::fmt::Display for FulfilError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            FulfilError::Credential(m) => write!(f, "provider credential unavailable: {m}"),
+            FulfilError::Open(o) => write!(f, "refused before send: {}", o.reason()),
             FulfilError::Provider { summary, .. } => write!(f, "{summary}"),
         }
     }
@@ -45,7 +43,7 @@ impl std::fmt::Display for FulfilError {
 impl std::fmt::Debug for FulfilError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            FulfilError::Credential(m) => f.debug_tuple("Credential").field(m).finish(),
+            FulfilError::Open(o) => f.debug_tuple("Open").field(o).finish(),
             FulfilError::Provider { summary, journal } => write!(
                 f,
                 "Provider {{ {summary:?}, <{}-byte journal line> }}",
@@ -137,16 +135,11 @@ fn text_of(
     Ok(maknae_proto::SecretText(s))
 }
 
-/// Read the credential (first use per destination) and make the call.
-///
-/// The key is fetched, used as a bearer header inside `maknae-llm`, and
-/// dropped: it is `Zeroizing` throughout and is never returned, logged, or
-/// rendered — including in either error variant here.
-pub async fn fulfil<S: KeySource>(
+/// Open this turn's sealed key, make the call, and drop the key.
+pub async fn fulfil<O: KeyOpener>(
     admitted: &Admitted<'_>,
-    keys: &mut KeyCache<S>,
+    opener: &O,
     bounds: CallBounds,
-    kv_mount: &str,
 ) -> Result<EgressFrameReply, FulfilError> {
     let req = admitted.request();
 
@@ -230,15 +223,10 @@ pub async fn fulfil<S: KeySource>(
         });
     }
 
-    // #308: the mount comes from the deputy's OWN bounds document, the path and
-    // the field from the frame. An explicit parameter rather than a field on
-    // `CallBounds` — which has a `Default` — so there is no defaultable mount to
-    // forget: the compiler requires the caller to supply it.
-    let key = keys
-        .get(kv_mount, &req.key_vault_path, &req.key_field)
+    let key = opener
+        .open(req.sealed_key.as_bytes(), admitted.open_request())
         .await
-        .map_err(FulfilError::Credential)?
-        .clone();
+        .map_err(FulfilError::Open)?;
 
     // #264: the trusted preamble and the baseline tool definitions. Both are
     // compiled into `maknae-llm` from reviewable text files under its
@@ -302,6 +290,7 @@ pub async fn fulfil<S: KeySource>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::unseal::OpenRequest;
     use zeroize::Zeroizing;
 
     fn txt(s: &str) -> maknae_proto::ContentBlock {
@@ -353,36 +342,15 @@ mod tests {
         assert_eq!(text_of(&[]).expect("empty").0.capacity(), 0);
     }
 
-    struct Denied;
-    impl KeySource for Denied {
-        async fn read(&self, _m: &str, p: &str, _f: &str) -> Result<Zeroizing<String>, String> {
-            Err(format!("permission denied on {p}"))
-        }
-    }
-
     fn frame() -> maknae_proto::EgressFrameRequest {
         maknae_proto::EgressFrameRequest {
             destination: "provider:openai".into(),
             endpoint: "http://127.0.0.1:1/v1/chat/completions".into(),
             model: "m".into(),
-            key_vault_path: "maknae/providers/openai".into(),
-            key_field: "api-key".into(),
-            sealed_key: maknae_proto::SealedKey::new(vec![
-                0x5a;
-                maknae_proto::SEALED_KEY_MIN_BYTES
-            ])
-            .unwrap(),
+            key_vault_path: "maknae/users/alice/openai/personal".into(),
+            key_field: "api_key".into(),
             reasoning_effort: None,
             conversation: "conv1".into(),
-            // A UNIQUE sentinel, not a word fragment. `contains("hi")` was
-            // satisfied by the PREAMBLE itself ("nothing", "something",
-            // "anything"), so the one assertion that watched real
-            // wire bytes proved nothing about client content reaching the
-            // provider (#264 critical review). The `264` in the string is
-            // that provenance and nothing more: #241 reshaped this fixture's
-            // flat content list into a `Turn::User`, and the sentinel's VALUE
-            // is arbitrary — only its uniqueness is load-bearing, and the
-            // assertion below names the same literal, so it is left as it is.
             turns: vec![maknae_proto::Turn::User {
                 content: vec![maknae_proto::ContentBlock::Text {
                     text: maknae_proto::SecretText(zeroize::Zeroizing::new(
@@ -392,40 +360,58 @@ mod tests {
             }],
             output_tokens: None,
             output_tokens_field: None,
+            sealed_key: maknae_proto::SealedKey::new(vec![7u8; maknae_proto::SEALED_KEY_MIN_BYTES])
+                .unwrap(),
         }
     }
 
     fn bounds() -> maknae_config::EgressBounds {
         maknae_config::EgressBounds {
             kv_mount: "maknae-kv".into(),
-            user_prefix: "maknae/providers".into(),
+            user_prefix: "maknae/users".into(),
             vault_addr: "https://vault.example:8200".into(),
         }
     }
 
-    /// No credential, no call. The refusal names the PATH and carries nothing
-    /// of the secret — and no provider is contacted at all.
-    #[tokio::test]
-    async fn an_unavailable_credential_refuses_before_any_call() {
-        let f = frame();
-        let admitted = crate::handle::decide(&f, &bounds()).unwrap();
-        let mut keys = KeyCache::new(Denied);
-        let e = fulfil(&admitted, &mut keys, CallBounds::default(), "maknae-kv")
-            .await
-            .unwrap_err();
-        match &e {
-            FulfilError::Credential(m) => {
-                assert!(m.contains("maknae/providers/openai"));
-            }
-            other => panic!("expected a credential refusal, got {other:?}"),
+    struct Fixed(&'static str);
+    impl KeyOpener for Fixed {
+        async fn open(
+            &self,
+            _s: &[u8],
+            _r: &OpenRequest<'_>,
+        ) -> Result<Zeroizing<String>, OpenFailure> {
+            Ok(Zeroizing::new(self.0.to_string()))
         }
-        assert!(e.to_string().contains("credential unavailable"));
     }
 
-    struct Fixed(&'static str);
-    impl KeySource for Fixed {
-        async fn read(&self, _m: &str, _p: &str, _f: &str) -> Result<Zeroizing<String>, String> {
-            Ok(Zeroizing::new(self.0.to_string()))
+    struct Refuses(OpenFailure);
+    impl KeyOpener for Refuses {
+        async fn open(
+            &self,
+            _s: &[u8],
+            _r: &OpenRequest<'_>,
+        ) -> Result<Zeroizing<String>, OpenFailure> {
+            Err(self.0)
+        }
+    }
+
+    struct Recording {
+        seen: std::sync::Mutex<Vec<(Vec<u8>, String)>>,
+    }
+    impl KeyOpener for Recording {
+        async fn open(
+            &self,
+            sealed: &[u8],
+            r: &OpenRequest<'_>,
+        ) -> Result<Zeroizing<String>, OpenFailure> {
+            self.seen.lock().unwrap().push((
+                sealed.to_vec(),
+                format!(
+                    "{}|{}|{}|{}|{}|{}",
+                    r.conversation, r.provider, r.model, r.kv_mount, r.key_vault_path, r.key_field
+                ),
+            ));
+            Ok(Zeroizing::new("sk-test-not-real".into()))
         }
     }
 
@@ -520,9 +506,10 @@ mod tests {
         fips();
         let (url, h) = provider("200 OK", r#"{"choices":[{"message":{"content":"pong"}}]}"#).await;
         let f = frame_to(url);
-        let admitted = crate::handle::decide(&f, &bounds()).unwrap();
-        let mut keys = KeyCache::new(Fixed("sk-test-not-real"));
-        let reply = fulfil(&admitted, &mut keys, CallBounds::default(), "maknae-kv")
+        let b = bounds();
+        let admitted = crate::handle::decide(&f, &b).unwrap();
+        let opener = Fixed("sk-test-not-real");
+        let reply = fulfil(&admitted, &opener, CallBounds::default())
             .await
             .unwrap();
         let EgressFrameReply::Reply(reply) = reply else {
@@ -573,9 +560,10 @@ mod tests {
                 )),
             }],
         }];
-        let admitted = crate::handle::decide(&f, &bounds()).unwrap();
-        let mut keys = KeyCache::new(Fixed("sk-test-not-real"));
-        let _ = fulfil(&admitted, &mut keys, CallBounds::default(), "maknae-kv")
+        let b = bounds();
+        let admitted = crate::handle::decide(&f, &b).unwrap();
+        let opener = Fixed("sk-test-not-real");
+        let _ = fulfil(&admitted, &opener, CallBounds::default())
             .await
             .unwrap();
 
@@ -631,9 +619,10 @@ mod tests {
                 provider("200 OK", r#"{"choices":[{"message":{"content":"pong"}}]}"#).await;
             let mut f = frame_to(url);
             f.reasoning_effort = effort.map(str::to_string);
-            let admitted = crate::handle::decide(&f, &bounds()).unwrap();
-            let mut keys = KeyCache::new(Fixed("sk-test-not-real"));
-            let _ = fulfil(&admitted, &mut keys, CallBounds::default(), "maknae-kv")
+            let b = bounds();
+            let admitted = crate::handle::decide(&f, &b).unwrap();
+            let opener = Fixed("sk-test-not-real");
+            let _ = fulfil(&admitted, &opener, CallBounds::default())
                 .await
                 .unwrap();
             let sent = h.await.unwrap();
@@ -673,9 +662,10 @@ mod tests {
         }];
         // Admitted: one content-bearing block is enough, and the blank is NOT
         // the deputy's to drop.
-        let admitted = crate::handle::decide(&f, &bounds()).unwrap();
-        let mut keys = KeyCache::new(Fixed("sk-test-not-real"));
-        let _ = fulfil(&admitted, &mut keys, CallBounds::default(), "maknae-kv")
+        let b = bounds();
+        let admitted = crate::handle::decide(&f, &b).unwrap();
+        let opener = Fixed("sk-test-not-real");
+        let _ = fulfil(&admitted, &opener, CallBounds::default())
             .await
             .unwrap();
 
@@ -727,9 +717,10 @@ mod tests {
                 content: vec![text("omega-tool")],
             },
         ];
-        let admitted = crate::handle::decide(&f, &bounds()).unwrap();
-        let mut keys = KeyCache::new(Fixed("sk-test-not-real"));
-        fulfil(&admitted, &mut keys, CallBounds::default(), "maknae-kv")
+        let b = bounds();
+        let admitted = crate::handle::decide(&f, &b).unwrap();
+        let opener = Fixed("sk-test-not-real");
+        fulfil(&admitted, &opener, CallBounds::default())
             .await
             .unwrap();
         let sent = h.await.unwrap();
@@ -765,9 +756,10 @@ mod tests {
         fips();
         let (url, _h) = provider("401 Unauthorized", r#"{"error":"nope"}"#).await;
         let f = frame_to(url);
-        let admitted = crate::handle::decide(&f, &bounds()).unwrap();
-        let mut keys = KeyCache::new(Fixed("sk-SECRET-VALUE"));
-        let e = fulfil(&admitted, &mut keys, CallBounds::default(), "maknae-kv")
+        let b = bounds();
+        let admitted = crate::handle::decide(&f, &b).unwrap();
+        let opener = Fixed("sk-SECRET-VALUE");
+        let e = fulfil(&admitted, &opener, CallBounds::default())
             .await
             .unwrap_err();
         match &e {
@@ -779,7 +771,7 @@ mod tests {
                     "the key reached the journal"
                 );
             }
-            other => panic!("expected a provider refusal, got {other:?}"),
+            FulfilError::Open(o) => panic!("a provider failure was classed before send: {o:?}"),
         }
         // THE credential assertion #240's scope requires.
         assert!(
@@ -797,9 +789,10 @@ mod tests {
         )
         .await;
         let f = frame_to(url);
-        let admitted = crate::handle::decide(&f, &bounds()).unwrap();
-        let mut keys = KeyCache::new(Fixed("sk-SECRET-VALUE"));
-        let e = fulfil(&admitted, &mut keys, CallBounds::default(), "maknae-kv")
+        let b = bounds();
+        let admitted = crate::handle::decide(&f, &b).unwrap();
+        let opener = Fixed("sk-SECRET-VALUE");
+        let e = fulfil(&admitted, &opener, CallBounds::default())
             .await
             .unwrap_err();
         let FulfilError::Provider { summary, journal } = &e else {
@@ -843,9 +836,10 @@ mod tests {
             let mut f = frame_to(url);
             f.output_tokens = cap;
             f.output_tokens_field = field;
-            let admitted = crate::handle::decide(&f, &bounds()).unwrap();
-            let mut keys = KeyCache::new(Fixed("sk-test-not-real"));
-            fulfil(&admitted, &mut keys, CallBounds::default(), "maknae-kv")
+            let b = bounds();
+            let admitted = crate::handle::decide(&f, &b).unwrap();
+            let opener = Fixed("sk-test-not-real");
+            fulfil(&admitted, &opener, CallBounds::default())
                 .await
                 .unwrap();
             let sent = h.await.unwrap();
@@ -858,5 +852,67 @@ mod tests {
                 assert!(sent.contains(w), "sent:\n{sent}");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn an_opener_failure_is_refused_before_send_and_no_provider_is_contacted() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.set_nonblocking(true).unwrap();
+        let f = frame_to(format!(
+            "http://{}/v1/chat/completions",
+            l.local_addr().unwrap()
+        ));
+        let b = bounds();
+        let admitted = crate::handle::decide(&f, &b).unwrap();
+        let e = fulfil(
+            &admitted,
+            &Refuses(OpenFailure::WrongPath),
+            CallBounds::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(e, FulfilError::Open(OpenFailure::WrongPath)),
+            "{e:?}"
+        );
+        let shown = e.to_string();
+        assert_eq!(
+            shown,
+            "refused before send: the wrapping token wraps a different path than this request names"
+        );
+        assert!(
+            !shown.contains("alice") && !shown.contains("api_key"),
+            "{shown}"
+        );
+        assert!(
+            matches!(l.accept(), Err(ref x) if x.kind() == std::io::ErrorKind::WouldBlock),
+            "the provider was contacted after the opener refused"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_opener_is_handed_the_frames_own_sealed_key_and_open_request() {
+        fips();
+        let (url, h) = provider("200 OK", r#"{"choices":[{"message":{"content":"pong"}}]}"#).await;
+        let f = frame_to(url);
+        let b = bounds();
+        let admitted = crate::handle::decide(&f, &b).unwrap();
+        let opener = Recording {
+            seen: std::sync::Mutex::new(vec![]),
+        };
+        fulfil(&admitted, &opener, CallBounds::default())
+            .await
+            .unwrap();
+        let sent = h.await.unwrap();
+        assert!(sent
+            .to_lowercase()
+            .contains("authorization: bearer sk-test-not-real"));
+        assert_eq!(
+            *opener.seen.lock().unwrap(),
+            vec![(
+                vec![7u8; maknae_proto::SEALED_KEY_MIN_BYTES],
+                "conv1|openai|m|maknae-kv|maknae/users/alice/openai/personal|api_key".to_string()
+            )]
+        );
     }
 }

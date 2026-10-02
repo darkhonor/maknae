@@ -114,10 +114,6 @@ files = [
   # (secret_io.rs) is T3 below.
   "crates/maknae-vault/src/secret_source.rs",
   "crates/maknae-vault/src/keychain_policy.rs",
-  # #240b: the deputy's per-read token lifecycle — login/read/revoke composed
-  # over the EgressOps seam; a failed revoke is a failed probe and a withheld
-  # secret. The vaultrs half is egress.rs (T3).
-  "crates/maknae-vault/src/egress_session.rs",
   # #172: the FIPS-module SHA-256 wrapper behind every egress content digest.
   "crates/maknae-vault/src/digest.rs",
   "crates/maknae-vault/src/api_shape.rs",
@@ -149,10 +145,6 @@ files = [
   # peercred.rs because that one is whole-file mutation-excluded (syscall I/O),
   # which would make a T1 tier there vacuous — zero mutants, zero missed.
   "crates/maknae-vault/src/peer_identity.rs",
-  # #240a: the KV v2 path split. Guessing here reads a DIFFERENT secret than the
-  # operator wrote and the boot gate validated — a rfind/find slip turns
-  # secret/data/maknae/data/openai into mount "secret/data/maknae".
-  "crates/maknae-vault/src/kv.rs",
   # #240b: the provider request/response MAPPING, T1 by #240's own declaration.
   # Everything it parses is bytes from a third party outside the enforcement
   # boundary; a shape we do not recognise must be a refusal the loop sees, never
@@ -173,10 +165,7 @@ files = [
   # #240b: fulfilment is gated on `Admitted`, which has no public constructor —
   # a provider call cannot be made on a frame whose bounds were never checked.
   "crates/maknae-deputy/src/call.rs",
-  # #240b: the credential is read on FIRST USE per destination and cached. "At
-  # boot" is single-provider thinking and fails with two. A failed read is not
-  # cached, so a transient Vault failure cannot poison a destination.
-  "crates/maknae-deputy/src/keys.rs",
+  "crates/maknae-deputy/src/unseal.rs",
   # #318: what ALL THREE binaries refuse to inherit from their environment, and
   # the disjoint list of what they must never stop inheriting. Moved here from
   # bins/maknae-egress/src/env.rs (#240b) when maknaed and maknae adopted the
@@ -370,16 +359,12 @@ path = "bins/maknae-egress/src/listen.rs"
 why = "socket acquisition; the two production arms (an inherited LISTEN_FDS socket, and its failure) need a real init system and cannot be unit-tested. The fallback bind path, the named-absence case and the error rendering ARE tested; the fail-closed DECISION on no socket is main.rs's"
 
 [[t3]]
-path = "bins/maknae-egress/src/keys_vault.rs"
-why = "the Vault-backed key read; no Vault stub exists in this project by design, so the network path is operator-verified. The CACHE it plugs into is pure and T1 in keys.rs — the kv/kv_io split"
+path = "bins/maknae-egress/src/opener.rs"
+why = "#153: opens the turn's sealed key with the Egress Daemon's seal key and unwraps the wrapping token through maknae-vault; the Vault leg has no stub by design. Its tests open real seals, assert the expectation it hands Vault and the refusal mapping through the Unwrapper seam, and reach a dead Vault through the real VaultApi; the decisions are T1 in maknae-deputy's unseal.rs, maknae-seal and maknae-vault's wrap.rs"
 
 [[t3]]
 path = "crates/maknae-llm/src/client.rs"
-why = "the provider HTTP call; exercised by the hermetic stub server #240 specifies (tests/stub_server.rs) and by the FIPS gate in its own test binary. The MAPPING it depends on is pure and T1 in wire.rs — the kv/kv_io, secret_source/secret_io split"
-
-[[t3]]
-path = "crates/maknae-vault/src/kv_io.rs"
-why = "the KV v2 network read; this project has no Vault stub and deliberately uses none — the network is exercised by #[ignore]d live tests against a real Vault. The PARSE it depends on is pure and T1 in kv.rs (the secret_io/secret_source split)"
+why = "the provider HTTP call; exercised by the hermetic stub server #240 specifies (tests/stub_server.rs) and by the FIPS gate in its own test binary. The MAPPING it depends on is pure and T1 in wire.rs — the secret_source/secret_io split"
 
 [[t3]]
 path = "crates/maknae-config/src/bounds_io.rs"
@@ -391,7 +376,7 @@ why = "#153: reads ~/.maknae/providers.yaml through maknae-config's existing mak
 
 [[t3]]
 path = "bins/maknae-egress/src/main.rs"
-why = "thin main: env scrub + FIPS install + arg parse + bounds load + uid resolve + credential load + Vault client + boot probe + socket acquire; every decision it makes is fail-closed exit-1, the behaviour lives in handle.rs/keys.rs (T1), serve.rs (T2) and listen.rs (T3) and maknae-vault's egress_session.rs and env.rs (T1), and its two load-bearing ORDERINGS (scrub first, probe before the listener) are pinned by a source-order test in its OWN test module — env.rs was deleted by #318 when the scrub list moved to maknae-vault, and its deputy-specific tests moved here with it. Same treatment as bins/maknaed/src/main.rs"
+why = "thin main: env scrub + FIPS install + arg parse + bounds load + uid resolve + seal-key load + Vault client + socket acquire; every decision it makes is fail-closed exit-1, the behaviour lives in maknae-deputy's handle.rs/unseal.rs/call.rs (T1), serve.rs (T2), opener.rs and listen.rs (T3) and maknae-vault's env.rs (T1), and its load-bearing ORDERINGS (scrub first, keys loaded before the listener) are pinned by a source-order test in its OWN test module. Same treatment as bins/maknaed/src/main.rs"
 
 [[t3]]
 path = "bins/maknaed/src/main.rs"
@@ -467,7 +452,7 @@ why = "scaffold stub — re-tier at body landing"
 
 [[t3]]
 path = "crates/maknae-deputy/src/lib.rs"
-why = "module declarations only; the decisions are handle/keys/call (T1)"
+why = "module declarations only; the decisions are handle/unseal/call (T1)"
 
 [[t3]]
 path = "crates/maknae-vault/src/lib.rs"
@@ -500,10 +485,6 @@ why = "PlaneClient mint/renew/shutdown — network + keygen orchestration; exerc
 [[t3]]
 path = "crates/maknae-vault/src/http.rs"
 why = "#240b: builds the hardened reqwest client every Vault client sends through (no redirects, HTTPS only, no proxy); the two construction-time refusals are unit-tested, the redirect policy is stated by construction — proving it needs a TLS server. Mutation-excluded like client.rs"
-
-[[t3]]
-path = "crates/maknae-vault/src/egress.rs"
-why = "#240b: the deputy's AppRole login, KV read and revoke — live-Vault I/O with no stub by design; the dead-address and fail-closed-construction paths are unit-tested, the SOURCE decision it consumes is T1 in secret_source.rs (the secret_io/secret_source split), mutation-excluded like client.rs"
 
 [[t3]]
 path = "crates/maknae-vault/src/secret_io.rs"

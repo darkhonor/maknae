@@ -17,12 +17,6 @@ pub enum VaultError {
     /// guess reads a different secret than the operator wrote and the boot
     /// gate validated.
     InvalidKeyVaultPath(String),
-    /// The KV secret exists but carries no such field. Names the FIELD, never
-    /// the secret's contents.
-    MissingKvField {
-        path: String,
-        field: String,
-    },
     /// `deployment_id` failed the charset guard (empty / glob / slash / space).
     InvalidDeploymentId(String),
     /// `vault.addr` is not a valid `https://` URL (a non-TLS addr would disclose
@@ -53,13 +47,6 @@ pub enum VaultError {
     Pem(&'static str),
     /// AppRole login failed.
     Auth(String),
-    /// #240b: a token the deputy created could not be revoked. Named on its
-    /// own because the consequence is its own: the deputy's role bounds its
-    /// tokens to three uses and a short TTL (`deploy/vault-pki`), so the
-    /// leftover token is usable for seconds and at most two more requests —
-    /// usable, so the probe that hit this is a failed probe and a read that
-    /// hit this withholds its secret.
-    Revoke(String),
     /// Local keypair / CSR generation failed.
     CsrGen(String),
     /// `pki/sign` was rejected (e.g. a SAN mismatch surfaced by Vault).
@@ -167,9 +154,6 @@ impl std::fmt::Display for VaultError {
             ),
             VaultError::Config(e) => write!(f, "config error: {e}"),
             VaultError::InvalidKeyVaultPath(m) => write!(f, "invalid key_vault_path: {m}"),
-            VaultError::MissingKvField { path, field } => {
-                write!(f, "key_vault_path '{path}' has no field '{field}'")
-            }
             VaultError::MissingKey(k) => write!(f, "required config key absent: {k}"),
             VaultError::InvalidDeploymentId(id) => write!(
                 f,
@@ -188,7 +172,6 @@ impl std::fmt::Display for VaultError {
             ),
             VaultError::Pem(what) => write!(f, "malformed PEM: {what}"),
             VaultError::Auth(msg) => write!(f, "AppRole login failed: {msg}"),
-            VaultError::Revoke(msg) => write!(f, "token revoke failed: {msg}"),
             VaultError::CsrGen(msg) => write!(f, "keypair/CSR generation failed: {msg}"),
             VaultError::Sign(msg) => write!(f, "pki/sign rejected: {msg}"),
             VaultError::RenewalExpired => write!(

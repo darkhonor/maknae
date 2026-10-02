@@ -44,14 +44,6 @@ pub enum DaemonSecretSource {
     PlaintextPath(PathBuf),
 }
 
-/// Where the egress deputy's SecretID comes from — resolved by
-/// [`resolve_egress_secret_source`], read by `secret_io::read_egress_secret`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EgressSecretSource {
-    CredentialsDirectory(PathBuf),
-    Keychain(PathBuf),
-}
-
 /// Where the CLI's (`maknae`) SecretID comes from — resolved by
 /// [`resolve_cli_secret_source`], read by `secret_io::read_cli_secret`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,27 +139,6 @@ pub fn resolve_daemon_secret_source(
          keychain item (macOS), or configure vault.insecure_plaintext_secret_path"
             .to_string(),
     ))
-}
-
-/// The deputy's SecretID source: the unit's credential, else the macOS keychain pointer (#76). No plaintext arm.
-pub fn resolve_egress_secret_source(
-    credentials_dir_env: Option<&str>,
-    keychain_pointer: Option<&Path>,
-) -> Result<EgressSecretSource, VaultError> {
-    match (credentials_dir_env, keychain_pointer) {
-        (Some(""), _) => Err(VaultError::CredentialSource(
-            "$CREDENTIALS_DIRECTORY is exported but empty — refusing rather than falling through"
-                .to_string(),
-        )),
-        (Some(dir), _) => Ok(EgressSecretSource::CredentialsDirectory(
-            Path::new(dir).join(EGRESS_CREDENTIALS_DIRECTORY_CRED_NAME),
-        )),
-        (None, Some(p)) => Ok(EgressSecretSource::Keychain(p.to_path_buf())),
-        (None, None) => Err(VaultError::CredentialSource(
-            "no egress SecretID source: $CREDENTIALS_DIRECTORY is unset and no keychain pointer is enrolled"
-                .to_string(),
-        )),
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -333,32 +304,6 @@ mod tests {
         let bytes = OsString::from_vec(vec![0xff]);
         assert!(matches!(
             classify(Err(VarError::NotUnicode(bytes))),
-            Err(VaultError::CredentialSource(_))
-        ));
-    }
-
-    // ---- egress resolution (#240b) -------------------------------------------
-
-    #[test]
-    fn the_egress_secret_comes_from_credentials_directory_then_the_keychain() {
-        let ptr = Path::new("/etc/maknae/egress/maknae-egress-secret-id.keychain");
-        assert_eq!(
-            resolve_egress_secret_source(Some("/run/credentials/maknae-egress.service"), Some(ptr))
-                .unwrap(),
-            EgressSecretSource::CredentialsDirectory(PathBuf::from(
-                "/run/credentials/maknae-egress.service/maknae-egress-secret-id"
-            ))
-        );
-        assert_eq!(
-            resolve_egress_secret_source(None, Some(ptr)).unwrap(),
-            EgressSecretSource::Keychain(ptr.to_path_buf())
-        );
-        assert!(matches!(
-            resolve_egress_secret_source(None, None),
-            Err(VaultError::CredentialSource(_))
-        ));
-        assert!(matches!(
-            resolve_egress_secret_source(Some(""), Some(ptr)),
             Err(VaultError::CredentialSource(_))
         ));
     }

@@ -22,6 +22,10 @@ pub const DEFAULT_PKI_INT_MOUNT: &str = "maknae-pki-int";
 
 pub const DEFAULT_USERPASS_MOUNT: &str = "maknae-userpass";
 
+pub const EGRESS_VAULT_CA_FILE: &str = "vault-ca.crt";
+pub const EGRESS_APPROLE_ROLE: &str = "maknae-egress";
+pub const EGRESS_ROLE_ID_FILE: &str = "maknae-egress-approle-id";
+
 pub(crate) const USER_AUTH_KEYS: [&str; 2] = ["type", "mount"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -35,15 +35,7 @@ pub const MAX_USER_PREFIX_BYTES: usize = 256;
 /// What the deputy is allowed to do, and nothing more.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EgressBounds {
-    /// The KV v2 mount the provider keys live in (Terraform `kv_mount_path`;
-    /// `maknae-kv` in the shipped deployment).
-    ///
-    /// **Declared here and nowhere else (#308).** The deputy is the ONLY
-    /// component in the tree that reads KV — `bins/maknae-egress`'s
-    /// `keys_vault.rs` is the single caller of `read_kv_field` — so a
-    /// `vault.kv_mount` in `maknae.yaml` would be read by nobody, and a
-    /// cross-check between the two would reintroduce the two-places-for-one-
-    /// value problem this change exists to remove.
+    /// The KV v2 mount the user keys live in.
     pub kv_mount: String,
     /// Relative to `kv_mount`, without `data/`; each user's keys live under `<user_prefix>/<username>/`.
     pub user_prefix: String,
@@ -480,13 +472,6 @@ mod tests {
         );
     }
 
-    /// #308: the mount is declared HERE, in the deputy's own file, because the
-    /// deputy is the only component in the tree that reads KV — `keys_vault.rs`
-    /// is the single caller. A `vault.kv_mount` in `maknae.yaml` would be read
-    /// by nobody, and a cross-check between the two would be the
-    /// two-places-for-one-value problem this change exists to remove. Together
-    /// the two fields mirror the Vault grant's own shape,
-    /// `<mount>/data/<prefix>/*`.
     #[test]
     fn the_mount_is_required_and_validated_like_the_prefix() {
         // absent

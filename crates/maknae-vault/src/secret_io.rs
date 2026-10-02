@@ -18,7 +18,7 @@
 //! uid doesn't "own" by our check).
 use crate::client::read_secret_credential;
 use crate::keychain::{read_plane_secret, OpenedKeychain};
-use crate::secret_source::{CliSecretSource, DaemonSecretSource, EgressSecretSource};
+use crate::secret_source::{CliSecretSource, DaemonSecretSource};
 use crate::{KeychainPlane, VaultError};
 use std::path::Path;
 use zeroize::Zeroizing;
@@ -91,16 +91,6 @@ pub(crate) fn read_daemon_secret(
         DaemonSecretSource::CredentialsDirectory(path) => read_sealed_trimmed(path),
         DaemonSecretSource::Keychain(pointer) => read_plane_secret(pointer, KeychainPlane::Daemon),
         DaemonSecretSource::PlaintextPath(path) => read_secret_credential(path).map(Zeroizing::new),
-    }
-}
-
-/// Read the deputy's SecretID from its resolved source (#240b, #76).
-pub(crate) fn read_egress_secret(
-    src: &EgressSecretSource,
-) -> Result<Zeroizing<String>, VaultError> {
-    match src {
-        EgressSecretSource::CredentialsDirectory(path) => read_sealed_trimmed(path),
-        EgressSecretSource::Keychain(pointer) => read_plane_secret(pointer, KeychainPlane::Egress),
     }
 }
 
