@@ -474,6 +474,8 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     // group check. `None` on every fail-closed accept-loop arm, where not
     // spawning NSS work is the point -- the record then renders
     // `subject=unknown`, which is honest.
+    // It also chooses the key path's `<username>` segment (ADR-0028 §3), so it
+    // must stay kernel-resolved from the peer uid, never taken from the request.
     peer_user: Option<String>,
     emit: Arc<E>,
     session_id: u64,

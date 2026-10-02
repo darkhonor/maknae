@@ -72,9 +72,7 @@ pub enum ConfigError {
     /// into this build (ADR-0022 decision 4). Fail closed: an enclave that declares a
     /// system this daemon cannot rank must not boot as if it were the default.
     UnknownClassificationPolicy { name: String },
-    /// The `provider` section (#243) is present but malformed: not a map, a key
-    /// outside the exact set, a missing or empty field, an endpoint that is not
-    /// `https://` (or loopback `http://`).
+    /// A `providers` entry is malformed (an unknown key raises `UnknownKey` instead).
     InvalidProvider(String),
     /// `egress-bounds.yaml` was read and refused by its parser (#240b). Its
     /// own variant, so the daemon's boot refusal says "refused", never

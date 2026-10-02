@@ -154,7 +154,8 @@ files = [
   # #240a: the shared bounds parser and its CONTAINMENT check. A bare
   # `starts_with` admits `providers-evil/key` under a `providers` prefix — a
   # malformed or hostile registry entry naming a Vault path outside the
-  # deputy's grant. Both maknaed (at boot) and the deputy (at use) decide on it.
+  # deputy's grant. maknaed checks the prefix's shape and builds the path; only
+  # the deputy checks containment.
   "crates/maknae-config/src/bounds.rs",
   # #240: the `egress` section — the deputy's socket and the provider deadline,
   # range-checked, fail-closed like `transport`.

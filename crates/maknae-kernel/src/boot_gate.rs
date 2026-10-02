@@ -190,6 +190,11 @@ pub fn egress_bounds_boot_gate(
     if let Err(why) = maknae_config::kv_fragment_is_acceptable(&b.user_prefix) {
         return Err(EgressBoundsRefusal::Refused(format!("user_prefix {why}")));
     }
+    if !maknae_config::vault_path_is_safe(&b.user_prefix) {
+        return Err(EgressBoundsRefusal::Refused(
+            "user_prefix has a character outside [A-Za-z0-9._/-]".into(),
+        ));
+    }
     if b.user_prefix.len() > maknae_config::MAX_USER_PREFIX_BYTES {
         return Err(EgressBoundsRefusal::Refused(format!(
             "user_prefix exceeds {} bytes",
@@ -307,6 +312,9 @@ mod tests {
             "maknae-kv/data/maknae/users",
             "maknae/../users",
             "maknae users",
+            "maknae/us%rs",
+            "maknae/üsers",
+            "maknae/{users}",
         ] {
             match super::egress_bounds_boot_gate(&set(), Some(&bounds(bad))) {
                 Err(super::EgressBoundsRefusal::Refused(m)) => {

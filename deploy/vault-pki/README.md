@@ -84,10 +84,10 @@ the outputs of the same names print them.
 
 ## Users and passwords
 
-Each key of `maknae_users` is a local username: 1–64 bytes of `[a-z0-9._-]`, starting
+Each key of `maknae_users` is a local username: 1–32 bytes of `[a-z0-9._-]`, starting
 and ending with `[a-z0-9_]`, and not `data` (Vault lower-cases userpass usernames, and
-`maknaed` derives the key path from the local account and refuses a `data` segment in
-it). `user_prefix` likewise has no `data` segment. Terraform creates the user with a random password
+`maknaed` derives the key path from the local account, refuses a `data` segment in it,
+and refuses a name longer than the 32 bytes its audit trail records). `user_prefix` likewise has no `data` segment. Terraform creates the user with a random password
 from an ephemeral `random_password`, sent through the write-only `password_wo`: it is in
 neither the plan nor the state, and nobody learns it. Set the user's real password out of
 band, with an admin token. The path is `auth/<userpass_mount>/users/<username>/password`;

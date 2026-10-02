@@ -77,7 +77,8 @@ pub fn admit_choice<'a>(
     }
     let username = username
         .filter(|u| {
-            maknae_vault::userpass_username_is_acceptable(u).is_ok()
+            u.len() <= crate::MAX_SUBJECT_USER_BYTES
+                && maknae_vault::userpass_username_is_acceptable(u).is_ok()
                 && kv_fragment_is_acceptable(u).is_ok()
         })
         .ok_or(ChoiceRefusal::UnsafeUsername)?;
@@ -224,6 +225,8 @@ mod tests {
     #[test]
     fn the_username_must_be_one_safe_lower_case_segment() {
         let c = good();
+        let at = "u".repeat(crate::MAX_SUBJECT_USER_BYTES);
+        let over = "u".repeat(crate::MAX_SUBJECT_USER_BYTES + 1);
         for bad in [
             None,
             Some(""),
@@ -232,6 +235,7 @@ mod tests {
             Some(".."),
             Some("a b"),
             Some("data"),
+            Some(over.as_str()),
         ] {
             assert_eq!(
                 refusal(&c, bad),
@@ -239,7 +243,7 @@ mod tests {
                 "{bad:?}"
             );
         }
-        for ok in ["alice", "svc_maknae", "a.b-c"] {
+        for ok in ["alice", "svc_maknae", "a.b-c", at.as_str()] {
             assert!(
                 admit_choice(&set(), Some(&c), Some(ok), PREFIX).is_ok(),
                 "{ok}"
