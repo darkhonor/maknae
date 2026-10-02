@@ -315,7 +315,7 @@ read -rsp "Maknae user token: " VT && echo && read -rsp "OpenAI API key: " KEY &
 - **`read -s`** keeps the token and the key off the screen and out of shell history.
 - **`printf`** is a shell builtin, so the key never appears in the process list.
 - **`vault write <kv_mount>/data/…` with `-`** writes the KV v2 data path directly, so there is no `vault kv` preflight against `sys/internal/ui/mounts`, which your user token (it has no `default` policy) may not be allowed.
-- **`-wrap-ttl=60s`** satisfies the user policy's `min_wrapping_ttl` if that applies to writes, and is harmless if it does not; which one holds is not yet measured.
+- **`-wrap-ttl=60s`** is required: the user policy's `min_wrapping_ttl` applies to writes too. An unwrapped write of a user key was refused (measured on a throwaway Vault 2.0.0 with the shipped Terraform, #434).
 - **`unset`** clears both from the shell.
 
 The field name, `api_key` here, and the subpath are what your `providers.yaml` names in step U3.

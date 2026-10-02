@@ -15,7 +15,7 @@ Controls are cited two ways. A pair such as `cli_b × key_a` is a cell of the is
 | C7 | An unlisted model is refused before any egress | yes, on Rocky 10.2 and macOS 26.6.2 |
 | C8 | Revoking B's token stops B's next run and leaves A unaffected | not yet measured |
 | C9 | A user with no providers has no model access | not yet measured |
-| C10 | Seal-key rotation fails closed until restart | yes, on Rocky 10.2 and macOS 26.6.2 |
+| C10 | Seal-key rotation fails closed until restart | yes, on Rocky 10.2; on macOS 26.6.2 without the deputy's log line |
 
 ## Before you start
 
@@ -84,7 +84,7 @@ maknae agent "Reply with one word: hello."
 
 **Expected.** A reply on standard output, exit 0. In the administrator's audit query, a `session.prompt` pair for A: `status` `"IntentOnly"`, then `"Sent"`, each with `"user":"<A>"`, `"object":"provider:openai"` and `"model":"gpt-5.6-luna"`. The object is `provider:` followed by the provider's `name` (`crates/maknae-kernel/src/run.rs:1425`).
 
-**Measured.** Single-user, 2026-10-02, on Rocky 10.2 (`.42`, RPM) as `byeori`: the reply `Hello hello hello hello hello`, and a `Sent` record with `subject.user` `byeori`, object `provider:openai`, `egress.model` `gpt-5.6-luna`. The same on macOS 26.6.2 (Wrathion, signed `.pkg`) as `aackerman`. On both hosts a scan of the recent records found no `maknae/users`, `api_key`, `hvs.`, `openai/` or `subpath`. Two users on one host: not yet measured.
+**Measured.** Single-user, 2026-10-02, on Rocky 10.2 (`.42`, RPM) as `byeori`: the reply `Hello hello hello hello hello`, and a `Sent` record with `subject.user` `byeori`, object `provider:openai`, `egress.model` `gpt-5.6-luna`. On macOS 26.6.2 (Wrathion, signed `.pkg`) as `aackerman`: the reply `Hello there, friend, nice to meet.`, and a `Sent` record with user `aackerman`, object `provider:openai`, model `gpt-5.6-luna`. The `IntentOnly` record was not noted on macOS. On both hosts a scan of the recent records found no `maknae/users`, `api_key`, `hvs.`, `openai/` or `subpath`. Two users on one host: not yet measured.
 
 ## C2. B cannot read A's key in Vault
 
@@ -122,7 +122,7 @@ VAULT_TOKEN="$VT" vault read <kv>/data/<prefix>/<A>/openai
 
 **Claim.** B cannot make the kernel name A's key path, whatever B writes in `providers.yaml`.
 
-**Control.** `cli_b × key_a` and `cli_b × sealed`, and `kernel × meta`: the kernel builds the key path from the username of the uid that connected, never from the request (`crates/maknae-kernel/src/provider_choice.rs:62`, `admit_choice`). It refuses a subpath with a `.`, `..` or `data` segment as `key subpath malformed`. Credential-path step: `admit (peer-uid username, set, model, subpath, field), PDP, destination stamp: metadata only`.
+**Control.** `cli_b × key_a` and `cli_b × sealed`, and `kernel × meta`: the kernel builds the key path from the username of the uid that connected. It passes that username to `admit_choice` as a parameter (`crates/maknae-kernel/src/run.rs:862-865`, `provider_choice.rs:62`). The request has no username field (`ProviderChoice`, `crates/maknae-proto/src/wire.rs:254-260`). The kernel refuses a subpath with a `.`, `..` or `data` segment. The user sees only the `PROMPT_REFUSED` line. The administrator's audit query shows `"result":"deny"` with `"reason":"key subpath malformed"`. Credential-path step: `admit (peer-uid username, set, model, subpath, field), PDP, destination stamp: metadata only`.
 
 **Command, part 1: the CLI's own refusal.** As B, point the entry's key at A's:
 
@@ -157,7 +157,7 @@ cargo test -p maknae-kernel a_subpath_that_climbs_out_or_names_the_kv_artifact_i
 cargo test -p maknae-kernel an_admitted_choice_carries_the_sets_entry_the_choices_model_and_field_and_the_peers_path
 ```
 
-**Expected, part 2.** Both tests pass. The first gives the kernel subpaths such as `../bob/openai` and `openai/../../bob` and expects `MalformedSubpath` for each. The second expects the admitted path to be `maknae/users/alice/openai/personal`, built from the peer's name `alice`.
+**Expected, part 2.** Both tests pass. The first gives the kernel subpaths such as `../bob/openai` and `openai/../../bob` and expects `MalformedSubpath` for each. The second passes the username `alice` to `admit_choice` directly, standing in for the peer's name, and expects the admitted path `maknae/users/alice/openai/personal`.
 
 **Measured.** By the named tests, which CI runs on every pull request (`cargo test --locked --workspace`, `.github/workflows/ci.yml`). The live CLI refusal: not yet measured. As two real users on one host: not yet measured.
 
@@ -239,7 +239,7 @@ mv ~/.maknae/providers.yaml.orig ~/.maknae/providers.yaml
 **Command.**
 
 1. B completes one turn: `maknae agent "Reply with one word: hello."`
-2. The administrator, with an administrator Vault token, finds every token issued to B's login and revokes it. `maknae login` keeps B's token in B's own custody and never prints it or its accessor, so B cannot hand it over. Listing accessors needs a token with `sudo` on `auth/token/accessors`. Not yet measured:
+2. The administrator, with an administrator Vault token, finds every token issued to B's login and revokes it. `maknae login` keeps B's token in B's own custody and never prints it or its accessor, so B cannot hand it over. Listing accessors needs a token with `sudo` on `auth/token/accessors`. This step is not yet measured. Matching on `.data.meta.username` is inferred from a test fixture (`crates/maknae-vault/src/user_login.rs:164`), not observed on a real token:
 
    ```bash
    for a in $(vault list -format=json auth/token/accessors | jq -r '.[]'); do
@@ -249,7 +249,7 @@ mv ~/.maknae/providers.yaml.orig ~/.maknae/providers.yaml
    done
    ```
 
-   The same loop works in zsh and bash.
+   The same loop works in zsh and bash. An alternative, also not yet measured, is `vault token revoke -mode=path auth/maknae-userpass/login/<B>`. It needs `sudo` on `sys/leases/revoke-prefix`. It is a prefix match, so it also revokes the tokens of any user whose name begins with `<B>`.
 3. B runs a fresh `maknae agent "Reply with one word: hello."`.
 4. A runs `maknae agent "Reply with one word: hello."`.
 
@@ -271,7 +271,7 @@ After the claim, B runs `maknae login` again.
 
 **Claim.** Without a `providers.yaml`, a user has no model access at all.
 
-**Control.** `cli_b × key_b`: the CLI stops before it reads a key or contacts the daemon (`bins/maknae/src/agent.rs:77-89`; test `bins/maknae/src/agent.rs::the_entry_is_the_default_or_the_named_label_and_no_entries_means_no_model_access`). Credential-path step: `load the user token; choose the providers.yaml entry`. The kernel enforces the same independently: a request with no provider choice is refused as `session.prompt carries no provider choice`.
+**Control.** `cli_b × key_b`: the CLI stops before it reads a key or contacts the daemon (`bins/maknae/src/agent.rs:77-89`; test `bins/maknae/src/agent.rs::the_entry_is_the_default_or_the_named_label_and_no_entries_means_no_model_access`). Credential-path step: `load the user token; choose the providers.yaml entry`. The kernel enforces the same independently for a client that sends a prompt with no provider choice. That user sees only the `PROMPT_REFUSED` line. The administrator's audit query shows `"result":"deny"` with `"reason":"session.prompt carries no provider choice"`.
 
 **Command.** As B:
 
@@ -322,7 +322,7 @@ maknae-egress: connection refused: OpenFailed(Seal)
 
 (`bins/maknae-egress/src/main.rs:157`.) In step 4, A gets a reply.
 
-**Measured.** 2026-10-02 on Rocky 10.2 (`.42`): after `enroll --rotate-seal-key`, the prompt was refused, with the journal showing `OpenFailed(Seal)` and the trail `deny` `send failed`, `Failed`. After `systemctl try-restart maknae-egress.service`, the prompt got the reply `Hi there`. The same on macOS 26.6.2 (Wrathion), recovered with `launchctl kickstart -k`.
+**Measured.** 2026-10-02 on Rocky 10.2 (`.42`): after `enroll --rotate-seal-key`, the prompt was refused, with the journal showing `OpenFailed(Seal)` and the trail `deny` `send failed`, `Failed`. After `systemctl try-restart maknae-egress.service`, the prompt got the reply `Hi there`. On macOS 26.6.2 (Wrathion): after `enroll --rotate-seal-key`, the prompt was refused, with the trail status `Failed`, `send failed`. After `launchctl kickstart -k system/io.maknae.maknae-egress`, the prompt got the reply `Hi there`. The `OpenFailed(Seal)` line in `maknae-egress.err` on macOS: not yet measured.
 
 ## Afterwards
 
