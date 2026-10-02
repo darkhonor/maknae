@@ -930,6 +930,120 @@ def sequence(name: str) -> str:
     return svg(W, H, "\n".join(p), doc["svg_title"], doc["svg_desc"])
 
 
+# --- the per-user isolation matrix (Lampson) ------------------------------
+
+def matrix(name: str) -> str:
+    """A Lampson access-control matrix drawn from one curated TOML (#153).
+
+    Subjects are rows, objects are columns, and each cell holds one right and
+    a footnote number; the footnotes carry the control, evidence and test, which
+    no 128 px cell can. Not UML, so it writes its own footer, as `stdv1` does.
+
+    Fails closed on a pair with no cell or two cells: a blank cell reads as
+    "no access", which is exactly the claim a gap must never make silently.
+    """
+    doc = tomllib.loads((OUT / name).read_text())
+    subs, objs, rights, cells = doc["subject"], doc["object"], doc["right"], doc["cell"]
+    for kind, rows in (("subject", subs), ("object", objs), ("right", rights)):
+        ids = [r["id"] for r in rows]
+        for i in sorted({i for i in ids if ids.count(i) > 1}):
+            sys.exit(f"{name}: duplicate {kind} id {i}")
+    sid, oid = {s["id"] for s in subs}, {o["id"] for o in objs}
+    glyph = {r["id"]: r["glyph"] for r in rights}
+    grid = {}
+    for c in cells:
+        c["name"] = f"{c['subject']} × {c['object']}"
+        if c["subject"] not in sid:
+            sys.exit(f"{name}: cell {c['name']}: unknown subject {c['subject']}")
+        if c["object"] not in oid:
+            sys.exit(f"{name}: cell {c['name']}: unknown object {c['object']}")
+        if c["right"] not in glyph:
+            sys.exit(f"{name}: cell {c['name']}: unknown right {c['right']}")
+        for field in ("control", "evidence"):
+            if not c.get(field, "").strip():
+                sys.exit(f"{name}: cell {c['name']}: no {field}")
+        if (c["subject"], c["object"]) in grid:
+            sys.exit(f"{name}: duplicate cell {c['name']}")
+        grid[(c["subject"], c["object"])] = c
+    for s in subs:
+        for o in objs:
+            if (s["id"], o["id"]) not in grid:
+                sys.exit(f"{name}: missing cell {s['id']} × {o['id']}")
+    check_evidence(cells, "evidence", name)
+    check_tests(cells, "test", name)
+    num = {(c["subject"], c["object"]): n + 1 for n, c in enumerate(cells)}
+
+    rowh, x0, colw = 26, 230, 128
+    W = x0 + colw * len(objs) + 44
+    subtitle = doc["subtitle"]
+    p = [text(44, 44, doc["title"], 16, "600")]
+    p += [text(44, 64 + 15 * k, ln, 11, fill=MUTED) for k, ln in enumerate(subtitle)]
+    sy = 64 + 15 * len(subtitle)
+    p.append(text(44, sy, doc["scope"], 11, "600"))
+
+    hy = sy + 20
+    p.append(text(44, hy + 24, "subject \\ object", 9, fill=MUTED))
+    for i, o in enumerate(objs):
+        cx = x0 + i * colw + colw / 2
+        p.append(box(x0 + i * colw + 6, hy, colw - 12, 40, PLAIN_FILL, PLAIN_LINE, rx=4))
+        lab = o["label"]
+        lab = ([lab.split(" (", 1)[0], "(" + lab.split(" (", 1)[1]]
+               if len(lab) > 19 and " (" in lab else _wrap_words(lab, 19))
+        if len(lab) > 2:
+            sys.exit(f"{name}: object {o['id']}: label needs {len(lab)} lines; at most 2 fit")
+        for k, ln in enumerate(lab):
+            p.append(text(cx, hy + (24 if len(lab) == 1 else 17 + 13 * k), ln, 10.5, "600",
+                          anchor="middle"))
+
+    top = hy + 50
+    for j, s in enumerate(subs):
+        ry = top + j * rowh
+        if j % 2 == 0:
+            p.append(box(40, ry, W - 80, rowh, "#FAFAF8", "none", rx=3, sw="0"))
+        lab = _wrap_words(s["label"], 29) if len(s["label"]) * 6.2 > x0 - 56 else [s["label"]]
+        if len(lab) == 1:
+            p.append(text(48, ry + 17, lab[0], 11, "600"))
+        else:
+            for k, ln in enumerate(lab[:2]):
+                p.append(text(48, ry + 11 + 11 * k, ln, 10, "600"))
+        for i, o in enumerate(objs):
+            cx = x0 + i * colw + colw / 2
+            key = (s["id"], o["id"])
+            p.append(text(cx - 4, ry + 18, glyph[grid[key]["right"]], 14, "600",
+                          anchor="middle", mono=True))
+            p.append(text(cx + 7, ry + 11, str(num[key]), 8, fill=MUTED))
+    bottom = top + len(subs) * rowh
+    for i in range(len(objs) + 1):
+        gx = x0 + i * colw
+        p.append(f'<line x1="{gx}" y1="{top}" x2="{gx}" y2="{bottom}" stroke="#D3D1C7" '
+                 f'stroke-width="0.6"/>')
+
+    y = bottom + 30
+    p.append(text(44, y, "Rights", 11, "600"))
+    for r in rights:
+        y += 15
+        p.append(text(52, y, r["glyph"], 11, "600", mono=True))
+        p.append(text(72, y, r["meaning"], 10, fill=INK))
+
+    y += 30
+    p.append(text(44, y, "Controls, evidence and tests", 11, "600"))
+    y += 4
+    for c in cells:
+        line = (f"{num[(c['subject'], c['object'])]}. {c['name']}: {c['control']} — "
+                f"{c['evidence']}" + (f" · test: {c['test']}" if c.get("test") else ""))
+        for ln in _wrap_words(line, 150):
+            y += 12
+            p.append(text(44, y, ln, 9, fill=INK))
+        y += 4
+
+    H = y + 56
+    p.append(text(40, H - 26, f"source: {content_stamp(f'design/diagrams/{name}')}",
+                  10, fill=MUTED))
+    p.append(text(W - 40, H - 26, 'Access-control matrix — B. W. Lampson, "Protection", 1971 '
+                  "(ACM SIGOPS OSR 8(1), 1974)", 10, fill=MUTED, anchor="end"))
+    return svg(W, H, "\n  ".join(p), doc["svg_title"], doc["svg_desc"])
+
+
 # --- D6: how maknae-authz-* backends layer into one decision --------------
 
 def d6_decision(prov: str) -> str:
@@ -1844,6 +1958,7 @@ def main(argv: list) -> None:
         ("generated-workspace-packages.svg", lambda: d4_packages(gates, cg, prov)),
         ("generated-read-path.svg", lambda: d5_readpath(prov)),
         ("generated-credential-path.svg", lambda: sequence("credential-path.toml")),
+        ("generated-isolation-matrix.svg", lambda: matrix("isolation-matrix.toml")),
         ("generated-decision-cycle.svg", lambda: d6_decision(prov)),
         ("generated-data-model.svg", lambda: d7_datamodel(prov)),
         ("generated-system-interfaces.svg", lambda: d8_interfaces(prov)),
