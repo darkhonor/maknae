@@ -99,12 +99,20 @@ history, and `printf %s` sends no trailing newline. Do not type the password int
 `password=-` prompt: it is echoed, and the Enter key is stored as part of the password, so
 every login fails.
 
-Incrementing a user's `password_version` makes the next apply replace that user's password
-with a new random one, which locks the user out until a password is set again. Removing a
-user from `maknae_users` deletes the Vault userpass user and nothing else: the identity
-entity Vault created at that user's first login, its userpass alias, and the user's KV
-subtree `<kv_mount>/<user_prefix>/<username>/` all remain, and are removed by hand
-(`vault delete identity/entity/id/<id>`, `vault kv metadata delete` per key).
+Never edit a user resource after creation. The provider resends the write-only password
+on any in-place update of a `vault_userpass_auth_backend_user`, and the ephemeral value is
+a fresh random one each run, so any such update resets that user's password (measured: an
+apply that only changed `token_policies` reset every user). The user policy is bound through
+the `maknae-users` identity group, whose members are per-user identity entities aliased to
+the userpass mount, so policy changes, adding a policy, and adding or removing users never
+touch an existing user's resource. A user's password is reset by: changing an attribute
+applied to every user (for example a shared TTL), renaming a key in `maknae_users`, or
+incrementing that user's `password_version`; each locks the user out until a password is set again.
+
+Removing a user from `maknae_users` deletes the Vault userpass user, its identity entity and
+alias, and its group membership, and nothing else: the user's KV subtree
+`<kv_mount>/<user_prefix>/<username>/` remains and is removed by hand (`vault kv metadata
+delete` per key).
 
 ## Offline validation (no Vault needed)
 

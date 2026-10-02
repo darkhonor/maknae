@@ -228,8 +228,27 @@ resource "vault_userpass_auth_backend_user" "maknae" {
   username                = each.key
   password_wo             = ephemeral.random_password.maknae_user[each.key].result
   password_wo_version     = each.value.password_version
-  token_policies          = [vault_policy.maknae_user.name]
+  token_policies          = []
   token_ttl               = 28800
   token_max_ttl           = 86400
   token_no_default_policy = true
+}
+
+resource "vault_identity_entity" "maknae_user" {
+  for_each = var.maknae_users
+  name     = each.key
+}
+
+resource "vault_identity_entity_alias" "maknae_user" {
+  for_each       = var.maknae_users
+  name           = each.key
+  mount_accessor = vault_auth_backend.userpass.accessor
+  canonical_id   = vault_identity_entity.maknae_user[each.key].id
+}
+
+resource "vault_identity_group" "maknae_users" {
+  name              = "maknae-users"
+  type              = "internal"
+  policies          = [vault_policy.maknae_user.name]
+  member_entity_ids = [for e in vault_identity_entity.maknae_user : e.id]
 }
