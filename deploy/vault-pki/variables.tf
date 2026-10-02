@@ -85,6 +85,11 @@ variable "userpass_mount" {
   description = "Userpass auth mount path for local users. Must equal vault.user_auth.mount in maknae.yaml."
   type        = string
   default     = "maknae-userpass"
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$", var.userpass_mount)) && !contains(split("/", var.userpass_mount), ".") && !contains(split("/", var.userpass_mount), "..") && split("/", var.userpass_mount)[0] != "auth" && length(var.userpass_mount) <= 256
+    error_message = "userpass_mount must be 1-256 bytes of '/'-separated [A-Za-z0-9._-] segments, with no empty, '.' or '..' segment, no leading or trailing '/', and no leading 'auth' segment (write the bare mount name)."
+  }
 }
 
 variable "maknae_users" {
@@ -104,4 +109,9 @@ variable "kv_mount_path" {
   description = "Mount path of the KV v2 engine holding each user's provider API keys. Must equal kv_mount in /etc/maknae/egress-bounds.yaml."
   type        = string
   default     = "maknae-kv"
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$", var.kv_mount_path)) && !contains(split("/", var.kv_mount_path), ".") && !contains(split("/", var.kv_mount_path), "..") && !contains(split("/", var.kv_mount_path), "data") && length(var.kv_mount_path) <= 256
+    error_message = "kv_mount_path must be 1-256 bytes of '/'-separated [A-Za-z0-9._-] segments, with no empty, '.', '..' or 'data' segment and no leading or trailing '/'."
+  }
 }

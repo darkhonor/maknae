@@ -151,9 +151,9 @@ pub fn write_file(
 /// unwritten config file is exactly the failure mode this refuses), so it
 /// fails closed rather than skipping the row. Rows whose content is produced
 /// by an external seal command or the macOS keychain write
-/// (`SealedDaemonSecret`, `SealedEgressSealKey`) are the caller's responsibility to exclude from
-/// `rows` — they are written by that step, then ownership-applied via
-/// [`apply_ownership_and_mode`] directly.
+/// (`SealedDaemonSecret`, `SealedEgressSealKey`) are the caller's
+/// responsibility to exclude from `rows` — they are written by that step,
+/// then ownership-applied via [`apply_ownership_and_mode`] directly.
 pub fn write_artifacts(
     rows: &[Artifact],
     contents: &BTreeMap<PathBuf, Vec<u8>>,

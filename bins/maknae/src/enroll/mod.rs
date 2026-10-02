@@ -381,7 +381,7 @@ pub struct EnrollArgs {
     #[arg(long, default_value_t = maknae_vault::DEFAULT_PKI_INT_MOUNT.to_string())]
     pub pki_int_mount: String,
     /// The userpass auth mount users log in through with `maknae login`.
-    #[arg(long, default_value = "maknae-userpass")]
+    #[arg(long, default_value = maknae_vault::DEFAULT_USERPASS_MOUNT)]
     pub userpass_mount: String,
     /// The KV v2 mount that holds each user's provider keys.
     #[arg(long, default_value = "maknae-kv")]
@@ -1212,7 +1212,7 @@ fn egress_restart_command(home: maknae_vault::SealPubHome) -> &'static str {
     match home {
         maknae_vault::SealPubHome::MacOs => "launchctl kickstart -k system/io.maknae.maknae-egress",
         maknae_vault::SealPubHome::RedHat | maknae_vault::SealPubHome::Debian => {
-            "systemctl restart maknae-egress.service"
+            "systemctl try-restart maknae-egress.service"
         }
     }
 }
@@ -1883,9 +1883,9 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
     let token = intake_token(args, locale)?;
 
     // ---- Step 3: Vault operations ------------------------------------------
-    // The mount names go into three Vault paths and both written configs; an
-    // `auth/` prefix or a malformed path is refused HERE by name, not as a
-    // 404 on the first RoleID read (#240b self-review).
+    // The mount names go into Vault paths and the written configs (`approle_mount`
+    // only into the daemon config); an `auth/` prefix or a malformed path is
+    // refused HERE by name, not as a 404 on the first RoleID read (#240b self-review).
     maknae_config::mount_path_is_acceptable(&args.approle_mount)
         .map_err(|why| EnrollError::InvalidVaultMount(format!("--approle-mount {why}")))?;
     maknae_config::mount_path_is_acceptable(&args.pki_int_mount)
@@ -2244,7 +2244,7 @@ mod tests {
         );
     }
 
-    // ---- #240b: the third plane's seal name and traversal ACL --------------
+    // ---- sealed credential names and the egress traversal ACL --------------
 
     #[test]
     fn seal_argv_pins_the_credential_name_for_both_sealed_credentials() {
@@ -3387,11 +3387,11 @@ lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
         use maknae_vault::SealPubHome;
         assert_eq!(
             seal_key_generated_line(Locale::EnUs, SealPubHome::RedHat),
-            "Generated the Egress Daemon's sealing key and published its public key at /etc/pki/maknae/seal.pub. An Egress Daemon that is already running still holds the previous key: restart it with `sudo systemctl restart maknae-egress.service`"
+            "Generated the Egress Daemon's sealing key and published its public key at /etc/pki/maknae/seal.pub. An Egress Daemon that is already running still holds the previous key: restart it with `sudo systemctl try-restart maknae-egress.service`"
         );
         assert_eq!(
             seal_key_generated_line(Locale::EnUs, SealPubHome::Debian),
-            "Generated the Egress Daemon's sealing key and published its public key at /etc/ssl/maknae/seal.pub. An Egress Daemon that is already running still holds the previous key: restart it with `sudo systemctl restart maknae-egress.service`"
+            "Generated the Egress Daemon's sealing key and published its public key at /etc/ssl/maknae/seal.pub. An Egress Daemon that is already running still holds the previous key: restart it with `sudo systemctl try-restart maknae-egress.service`"
         );
         assert_eq!(
             seal_key_generated_line(Locale::EnUs, SealPubHome::MacOs),

@@ -75,7 +75,10 @@ pub(crate) fn usable_token(
     vault_addr: &str,
     now: u64,
 ) -> Result<(UserToken, u64), String> {
-    let stored = read.map_err(|e| e.to_string())?;
+    let stored = read.map_err(|e| match e {
+        VaultError::TokenStore(_) => format!("{e}: run `maknae login`"),
+        other => other.to_string(),
+    })?;
     let expires_at = stored.expires_at();
     let token = stored
         .usable_at(vault_addr, now)
@@ -778,9 +781,26 @@ mod tests {
                 ADDR,
             ),
             (Err(VaultError::TokenRecord("no expiry")), ADDR),
+            (
+                Err(VaultError::TokenStore(
+                    "keychain open: status -25300".into(),
+                )),
+                ADDR,
+            ),
             (Ok(stored(1_030)), ADDR),
             (Ok(stored(10_000)), OTHER),
         ];
+        assert_eq!(
+            usable_token(
+                Err(VaultError::TokenStore(
+                    "keychain open: status -25300".into()
+                )),
+                ADDR,
+                1_000
+            )
+            .unwrap_err(),
+            "Vault token storage failed: keychain open: status -25300: run `maknae login`"
+        );
         for (read, addr) in rows {
             let e = usable_token(read, addr, 1_000).unwrap_err();
             assert!(e.ends_with("run `maknae login`"), "{e}");

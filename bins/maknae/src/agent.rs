@@ -90,7 +90,7 @@ pub fn choose_entry<'a>(
 
 pub const LOGIN_EXPIRED: &str = "your Vault login expired: run `maknae login`";
 
-pub const PROMPT_REFUSED: &str = "the kernel refused the exchange — whether the prompt reached the provider is in the host's audit trail (ask your administrator); if it did not, check that ~/.maknae/providers.yaml names a provider and model your administrator has authorized for your role and the key subpath and field of your own Vault secret, that your maknae.yaml vault block matches the host's, and that your login is current (maknae login)";
+pub const PROMPT_REFUSED: &str = "the kernel refused the exchange — whether the prompt reached the provider is in the host's audit trail (ask your administrator); if it did not, check that your providers.yaml names a provider and model your administrator has authorized for your role and the key subpath and field of your own Vault secret, that your maknae.yaml vault block matches the host's, and that your login is current (maknae login)";
 
 pub fn login_expired(expires_at: u64, now: u64) -> bool {
     now.saturating_add(maknae_vault::TOKEN_EXPIRY_MARGIN.as_secs()) >= expires_at
@@ -881,7 +881,7 @@ mod tests {
         );
         assert_eq!(
             PROMPT_REFUSED,
-            "the kernel refused the exchange — whether the prompt reached the provider is in the host's audit trail (ask your administrator); if it did not, check that ~/.maknae/providers.yaml names a provider and model your administrator has authorized for your role and the key subpath and field of your own Vault secret, that your maknae.yaml vault block matches the host's, and that your login is current (maknae login)"
+            "the kernel refused the exchange — whether the prompt reached the provider is in the host's audit trail (ask your administrator); if it did not, check that your providers.yaml names a provider and model your administrator has authorized for your role and the key subpath and field of your own Vault secret, that your maknae.yaml vault block matches the host's, and that your login is current (maknae login)"
         );
         let b = Budget {
             max_steps: 8,

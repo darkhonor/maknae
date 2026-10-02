@@ -1,4 +1,4 @@
-# Maknae Vault PKI (dev) — CA chain, plane roles, per-plane policies, AppRoles.
+# Maknae Vault PKI (dev) — CA chain, plane roles and policies, the maknaed AppRole, the userpass users.
 # All wiring is by resource reference so Terraform derives the create-ordering edges.
 
 # ---- Root CA (dedicated Maknae dev root; signs exactly one intermediate) --------
@@ -148,7 +148,7 @@ resource "vault_policy" "maknae_kernel" {
 }
 
 # ---- Operator enroll policy — grants `maknae enroll` its own-token privileges --
-# `maknae enroll` runs under the OPERATOR's own Vault token, not either plane's
+# `maknae enroll` runs under the OPERATOR's own Vault token, not the plane's
 # AppRole token, so it needs its own least-privilege policy: read the `maknaed`
 # RoleID, mint/destroy its SecretIDs, and read the intermediate issuer
 # bundle it hands to the daemon and CLI at enrollment. AUTH-METHOD paths need the literal `auth/`
