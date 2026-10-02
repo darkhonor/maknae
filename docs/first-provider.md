@@ -4,7 +4,7 @@ This walkthrough connects Maknae to one model provider, so that `maknae agent` c
 
 It is written for a person doing this for the first time. The administrator authorizes a provider for the host; each user logs in, stores their own API key in Vault under their own login, and chooses among the authorized providers. For every key and every rule, see the configuration reference: [the `providers` section](configuration.md#61-the-providers-section) (§6.1), [each user's `providers.yaml`](configuration.md#611-each-users-providersyaml) (§6.1.1), [the user `vault` block](configuration.md#612-the-user-vault-block) (§6.1.2), [`egress-bounds.yaml`](configuration.md#613-egress-boundsyaml) (§6.1.3) and [the worked example](configuration.md#93-authorizing-providers-in-configd) (§9.3). For the full acceptance procedure, including custody and SELinux checks, see [runbook Chapter 4](runbook.md).
 
-The macOS steps are written from the shipped package, and the walkthrough passed on a Mac (macOS 26, Apple Silicon, a notarized Developer ID package) with `transport.read_timeout_ms: 60000` (#413). On a default macOS home (`0750`), the daemon resolves your home via `getattrlist`, which needs no permission on the home itself (measured with a `000` directory the caller owns); the daemon, running as `_maknae`, resolved and booted on a default home.
+The single-user path passed on Rocky 10.2 and on macOS 26.6.2 with a Developer ID-signed, not notarized, package (#434). The earlier walkthrough, before the switch to per-user providers, passed on a notarized package with `transport.read_timeout_ms: 60000` (#413). The per-user steps were not run as one walkthrough, and the second-user steps are not yet measured. On a default macOS home (`0750`), the daemon resolves your home via `getattrlist`, which needs no permission on the home itself (measured with a `000` directory the caller owns); the daemon, running as `_maknae`, resolved and booted on a default home.
 
 ## What you need first
 
@@ -138,6 +138,8 @@ The enrolled administrator resolves to the `admin` role when the policy has no `
 Enroll writes `~/.maknae` only for the account that ran it. Each further local user needs four things from you.
 
 **A known defect limits what a second user can do (#435).** The kernel confines file actions to the enrolled administrator's home (`crates/maknae-kernel/src/mutation.rs`, `handler.rs`), and `~` in `authz.yaml` means that home for every role (`crates/maknae-authz-basic/src/lib.rs`). So a second user can hold conversation turns, but every read and write tool call they make is refused (`NOT_AUTHORIZED`), and no policy edit changes that. Likewise, the shipped `Read(~/.maknae/**)` deny protects the administrator's `~/.maknae`, not the second user's. Both are meant to resolve to the requesting user's home; this is a known defect, #435, to be fixed. What a second user's turns do was read from the code, not yet measured.
+
+**On a multi-user host, other local users can read a running `maknae agent`'s prompt and `--provider` from its command line** (#436, undecided).
 
 1. **Create the account and add it to the `maknae` group.** The daemon's socket is `0660`, group `maknae`.
 
@@ -372,7 +374,7 @@ providers:
 maknae agent --provider local "<prompt>"
 ```
 
-The second entry works only once `local` is authorized like `openai`: its own entry in step 3's `providers:` list (with `llama` in its `models`), a `provider:local` destination for your role in step 4 (step 4a for a second user), and your key stored at subpath `local` in step U2. Without the step 3 entry or the grant, the turn is refused: you see `PROMPT_REFUSED`, and your administrator's audit shows `provider not in the authorized set` (no step 3 entry) or `destination not allowlisted for role <role>: provider:local` (no grant). Without the key, the CLI stops with `no key is stored in Vault for provider entry local: store it, then retry`.
+The second entry works only once `local` is authorized like `openai`: its own entry in step 3's `providers:` list (with `llama` in its `models`), a `provider:local` destination for your role in step 4 (step 4a for a second user), and your key stored at subpath `local` in step U2. Without the step 3 entry or the grant, the turn is refused: you see the refusal line ([When it does not work](#when-it-does-not-work)), and your administrator's audit shows `provider not in the authorized set` (no step 3 entry) or `destination not allowlisted for role <role>: provider:local` (no grant). Without the key, the CLI stops with `no key is stored in Vault for provider entry local: store it, then retry`.
 
 ## 6. Talk to it
 
@@ -386,6 +388,8 @@ cat ~/projects/hello/output.txt
 ```
 
 The answer arrives with exit `0`. A stop prints `maknae agent: stopped: …` and exits `2`.
+
+If you were added as a second user (step 4a), your file reads and writes are refused until #435 is fixed, so use a prompt that touches no file, such as `maknae agent "Reply with one word: hello."`; §7 then shows only the `session.prompt` pair.
 
 To run it again, first `rm ~/projects/hello/output.txt`. The agent may replace only a file it has read in the same conversation, so a re-run that meets the first run's `output.txt` is told to read it first: it reads it, then writes, and §7 shows one extra `fs.read` and one `fs.write` ending `ReportedPathChanged` with no effect (and more records than §7's list, so widen its `tail`).
 

@@ -571,6 +571,14 @@ A host enrolled before per-user providers (#153) carries the removed AppRoles' c
 
 4. **Authorize the provider again** in the new shape (step 5), and have each user log in and store their own key (steps 6 and 9). A key stored at the old shared path is no longer read.
 
+   The administrator then deletes the old shared key with an admin Vault token. It sits at the old `key_vault_path`, under the old `key_vault_path_prefix` (default `maknae/providers`); with the old defaults (not yet measured):
+
+   ```bash
+   vault delete maknae-kv/metadata/maknae/providers/openai
+   ```
+
+   This removes every version of that key. Use your old `kv_mount`, prefix and provider name if they differed.
+
 ### 3b. More than one user
 
 Enroll writes `~/.maknae` only for the account that ran it. To give another local account the agent, follow [first-provider step 4a](first-provider.md#4a-add-another-local-user): it adds the account to the `maknae` group, copies your CLI configuration to it, binds it in `authz.yaml` and creates its Vault user. The consequence for you: once `authz.yaml` has a `bindings:` block, only the names it lists have a role, so the enrolled administrator must be listed under `admin` too, and step 7's grant then belongs under each bound role; restart `maknaed` after adding a name. A second user's file actions are refused for now: the kernel confines them to the enrolled administrator's home, a known defect (#435).

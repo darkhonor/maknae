@@ -31,6 +31,8 @@ Below, `<A>` and `<B>` are their account names. `<kv>` is the KV v2 mount and `<
 
 **B's prompts need no tools.** The kernel confines file actions to the enrolled administrator's home, so every read or write tool call B makes is refused. This is a known defect, #435 (step 4a). Give B prompts that need no file, such as `"Reply with one word: hello."`.
 
+**B's prompt is visible to other local users.** On a multi-user host, other local users can read a running `maknae agent`'s prompt and `--provider` from its command line (#436, undecided).
+
 **The `vault` CLI, in every shell that runs a `vault` command.** Point it at the Vault and CA your Maknae configuration uses:
 
 ```bash
@@ -326,7 +328,7 @@ maknae-egress: connection refused: OpenFailed(Seal)
 
 ## Afterwards
 
-Not yet measured.
+These clean-up steps are not yet measured.
 
 - B runs `maknae login` again (C8).
 - Check that A's and B's `~/.maknae/providers.yaml` are their originals and that no `providers.yaml.orig` or `providers.yaml.aside` is left (C4, C7, C9).

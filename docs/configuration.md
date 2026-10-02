@@ -544,7 +544,7 @@ The top-level key is `providers` only, a list of at most **32** entries. Each en
 | `output_tokens` | no | the reply cap sent with every request: at least 1, and `context_tokens` less `output_tokens` must exceed the 1,536-token preamble allowance. |
 | `default` | no | `true` or `false` (default `false`). |
 
-**How the CLI prints these.** `maknae agent` prints every setup error — every text quoted in §6.1.1 and §6.1.2 other than the `stopped:` lines — after `maknae: ` and exits 1 (`bins/maknae/src/cli.rs`); `maknae login` prints its own after `maknae login: ` (`bins/maknae/src/login.rs`). The texts below are quoted without the prefix.
+**How the CLI prints these.** `maknae agent` prints every setup refusal after `maknae: ` and exits 1 (`bins/maknae/src/cli.rs`); `maknae login` prints its own after `maknae login: ` (`bins/maknae/src/login.rs`). The texts below are quoted without the prefix.
 
 Every refusal of this file reads `providers.yaml: <reason>` (`UserProviders`), for example `providers.yaml: providers[0].context_tokens is required: declare the model's context window in tokens`. Two worth knowing:
 
