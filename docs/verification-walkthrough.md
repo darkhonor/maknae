@@ -232,7 +232,7 @@ mv ~/.maknae/providers.yaml.orig ~/.maknae/providers.yaml
 
 **Claim.** Once the administrator revokes B's Vault token, B gets no more model calls, and A carries on.
 
-**Control.** `cli_b × key_b` and `cli_a × key_a`. Every run mints its client certificate with the stored token (`bins/maknae/src/agent.rs:535`), and every turn makes its own wrapped read of the key with that token (`agent.rs:373`). Credential-path steps: `load the user token; choose the providers.yaml entry` and `wrapped read of <kv>/data/<prefix>/<user>/<subpath>, X-Vault-Wrap-TTL: 60s`.
+**Control.** No matrix cell is keyed to token validity, so the control is cited by credential-path step. Every run mints its client certificate with the stored token (`bins/maknae/src/agent.rs:535`), and every turn makes its own wrapped read of the key with that token (`agent.rs:373`). Credential-path steps: `load the user token; choose the providers.yaml entry` and `wrapped read of <kv>/data/<prefix>/<user>/<subpath>, X-Vault-Wrap-TTL: 60s`. A's unaffected run rests on `cli_a × key_a`, A's own identity.
 
 `maknae agent` runs one prompt per invocation (`bins/maknae/src/cli.rs:146-151`). So "mid-conversation" means between the loop steps of one run, and B's file tools are refused (#435), which leaves no reliable window inside a run. This claim therefore uses fresh runs.
 
@@ -271,7 +271,7 @@ After the claim, B runs `maknae login` again.
 
 **Claim.** Without a `providers.yaml`, a user has no model access at all.
 
-**Control.** `cli_b × key_b`: the CLI stops before it reads a key or contacts the daemon (`bins/maknae/src/agent.rs:77-89`; test `bins/maknae/src/agent.rs::the_entry_is_the_default_or_the_named_label_and_no_entries_means_no_model_access`). Credential-path step: `load the user token; choose the providers.yaml entry`. The kernel enforces the same independently for a client that sends a prompt with no provider choice. That user sees only the `PROMPT_REFUSED` line. The administrator's audit query shows `"result":"deny"` with `"reason":"session.prompt carries no provider choice"`.
+**Control.** `kernel × meta` is the kernel's no-choice admission; the CLI stops before it reads a key or contacts the daemon (`bins/maknae/src/agent.rs:77-89`; test `bins/maknae/src/agent.rs::the_entry_is_the_default_or_the_named_label_and_no_entries_means_no_model_access`). Credential-path step: `load the user token; choose the providers.yaml entry`. The kernel enforces the same independently for a client that sends a prompt with no provider choice. That user sees only the `PROMPT_REFUSED` line. The administrator's audit query shows `"result":"deny"` with `"reason":"session.prompt carries no provider choice"`.
 
 **Command.** As B:
 
