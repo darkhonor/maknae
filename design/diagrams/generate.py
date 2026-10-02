@@ -770,29 +770,66 @@ def d4_packages(gates, cg, prov) -> str:
 # --- D5: the fs.read path, UML 2.5.1 sequence diagram (~ DoDAF SV-10c) ----
 
 def d5_readpath(prov: str) -> str:
-    """Where a read crosses a trust boundary, and by what mechanism.
+    """Where a read crosses a trust boundary, and by what mechanism."""
+    return sequence("read-path.toml")
 
-    UML 2.5.1 sequence diagram: lifelines with execution occurrences, filled
-    arrowhead for a synchronous call (17.4.4), open arrowhead on a dashed line
-    for a reply. Steps are numbered so the notes can key to them -- eight UML
-    note symbols on one diagram would cost more legibility than they buy.
-    """
-    doc = tomllib.loads((OUT / "read-path.toml").read_text())
-    parts, steps = doc["participant"], doc["step"]
-    check_evidence(steps, "evidence", "read-path.toml")
-    idx = {p["id"]: i for i, p in enumerate(parts)}
 
-    LEFT, PITCH, HEAD, ROW = 92, 170, 150, 44
-    xs = [LEFT + i * PITCH for i in range(len(parts))]
-    W = xs[-1] + 100
-    body_h = HEAD + len(steps) * ROW + 26
-    notes = [(i + 1, s["note"]) for i, s in enumerate(steps) if s.get("note")]
-    H = body_h + 34 + len(notes) * 27 + 58
-
-    style = {"actor":    (PLAIN_FILL, PLAIN_LINE, INK),
+SEQ_STYLE = {"actor":    (PLAIN_FILL, PLAIN_LINE, INK),
              "untrusted": ("#FDEEE9", WARN, "#7A2415"),
              "os":       (OK_FILL, OK_LINE, "#04342C"),
-             "trusted":  (TRUST_FILL, TRUST_LINE, TRUST_INK)}
+             "trusted":  (TRUST_FILL, TRUST_LINE, TRUST_INK),
+             "external": (PLAIN_FILL, MUTED, INK)}
+
+
+def sequence(name: str) -> str:
+    """A UML 2.5.1 sequence diagram drawn from one curated TOML.
+
+    Lifelines with execution occurrences, filled arrowhead for a synchronous
+    call (17.4.4), open arrowhead on a dashed line for a reply. Steps are
+    numbered so the notes can key to them -- eight UML note symbols on one
+    diagram would cost more legibility than they buy.
+
+    One renderer for every sequence, because the read path was hard-coded to
+    one trust boundary and its own title, and the per-turn credential path
+    (#153) needs three boundaries and a line saying what each hop can SEE. A
+    copy would have let the two drift; the read path's byte-identical output
+    across the split is what proves the generalisation changed nothing.
+    Geometry fails closed: overlapping boxes, a boundary on an unknown or first
+    participant, an unknown kind and a fourth subtitle line all exit.
+    """
+    doc = tomllib.loads((OUT / name).read_text())
+    parts, steps = doc["participant"], doc["step"]
+    check_evidence(steps, "evidence", name)
+    check_tests(steps, "test", name)
+    idx = {p["id"]: i for i, p in enumerate(parts)}
+    for pa in parts:
+        if pa["kind"] not in SEQ_STYLE:
+            sys.exit(f"{name}: participant {pa['id']}: unknown kind {pa['kind']}")
+    subtitle = doc["subtitle"]
+    if len(subtitle) > 3:
+        sys.exit(f"{name}: subtitle has {len(subtitle)} lines; at most 3 fit above the boundary labels")
+    wrap = doc.get("wrap_cols")
+
+    LEFT, PITCH, HEAD, ROW = 92, doc.get("pitch", 170), 150, 44
+    xs = [LEFT + i * PITCH for i in range(len(parts))]
+    bws = [max(150, int(len(pa["label"]) * 6.2) + 16) for pa in parts]
+    for i in range(len(parts) - 1):
+        if xs[i + 1] - xs[i] < (bws[i] + bws[i + 1]) / 2 + 8:
+            sys.exit(f"{name}: participants {parts[i]['id']} and {parts[i + 1]['id']} "
+                     f"overlap; raise pitch")
+    W = xs[-1] + 100
+
+    lines, ys, cur = [], [], HEAD + 34
+    for s in steps:
+        lab = (_wrap_words(s["label"], wrap)
+               if wrap and s["kind"] != "self" and len(s["label"]) > wrap else [s["label"]])
+        lines.append(lab)
+        up = len(lab) - 1
+        ys.append(cur + 12 * up)
+        cur += ROW + 12 * (up + bool(s.get("sees")) + bool(s.get("test")))
+    body_h = cur - 34 + 26
+    notes = [(i + 1, s["note"]) for i, s in enumerate(steps) if s.get("note")]
+    H = body_h + 34 + len(notes) * 27 + 58
 
     p = ['<defs>'
          f'<marker id="call" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" '
@@ -803,23 +840,30 @@ def d5_readpath(prov: str) -> str:
          f'<path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="{MUTED}" '
          f'stroke-width="1.1"/></marker></defs>']
 
-    # the trust boundary, behind the lifelines
-    bx = 0
-    for i, pa in enumerate(parts):
-        if pa.get("boundary_before"):
-            bx = (xs[i] + xs[i - 1]) / 2
-    if bx:
-        p.append(f'<rect x="{bx}" y="{HEAD-34}" width="{W-bx}" height="{body_h-HEAD+46}" '
-                 f'fill="{TRUST_FILL}" opacity="0.35"/>')
+    # the trust boundaries, behind the lifelines
+    bounds = doc.get("boundary", [])
+    bxs = []
+    for bd in bounds:
+        i = idx.get(bd["before"])
+        if not i:
+            sys.exit(f"{name}: boundary before {bd['before']!r}: "
+                     f"{'first participant' if i == 0 else 'unknown participant'}")
+        bxs.append((xs[i] + xs[i - 1]) / 2)
+    for k, (bd, bx) in enumerate(zip(bounds, bxs)):
+        if bd.get("shade", True):
+            end = bxs[k + 1] if k + 1 < len(bxs) else W
+            p.append(f'<rect x="{bx}" y="{HEAD-34}" width="{end-bx}" height="{body_h-HEAD+46}" '
+                     f'fill="{TRUST_FILL}" opacity="0.35"/>')
         p.append(f'<line x1="{bx}" y1="{HEAD-34}" x2="{bx}" y2="{body_h+12}" '
                  f'stroke="{WARN}" stroke-width="1.2" stroke-dasharray="7 4"/>')
-        p.append(text(bx - 8, HEAD - 40, "untrusted", 10, "600", fill=WARN, anchor="end"))
-        p.append(text(bx + 8, HEAD - 40, "TRUST BOUNDARY — trust plane", 10, "600", fill=WARN))
+        if bd["left"]:
+            p.append(text(bx - 8, HEAD - 40, bd["left"], 10, "600", fill=WARN, anchor="end"))
+        p.append(text(bx + 8, HEAD - 40, bd["right"], 10, "600", fill=WARN))
 
     # lifelines
     for i, pa in enumerate(parts):
-        fill, line, ink = style[pa["kind"]]
-        x, bw = xs[i], 150
+        fill, line, ink = SEQ_STYLE[pa["kind"]]
+        x, bw = xs[i], bws[i]
         p.append(box(x - bw / 2, HEAD - 28, bw, 34, fill, line, rx=4))
         p.append(text(x, HEAD - 14, pa["label"], 10.5, "600", fill=ink, anchor="middle"))
         p.append(text(x, HEAD - 3, pa["stereo"], 8, fill=line, anchor="middle"))
@@ -828,7 +872,7 @@ def d5_readpath(prov: str) -> str:
 
     # messages
     for n, s in enumerate(steps):
-        y = HEAD + 34 + n * ROW
+        y, lab = ys[n], lines[n]
         a, b = xs[idx[s["from"]]], xs[idx[s["to"]]]
         rep = s["kind"] == "reply"
         stroke, dash = (MUTED, ' stroke-dasharray="5 3"') if rep else (INK, "")
@@ -840,7 +884,9 @@ def d5_readpath(prov: str) -> str:
             # the canvas -- fully-qualified paths are long. Flip it to the left
             # of the lifeline when it will not fit to the right.
             need = max(len(f'{n+1}. {s["label"]}') * 5.6,
-                       len(s.get("evidence", "")) * 4.6)
+                       len(s.get("evidence", "")) * 4.6,
+                       len(f'sees: {s["sees"]}') * 4.8 if s.get("sees") else 0,
+                       len(f'test: {s["test"]}') * 4.6 if s.get("test") else 0)
             if a + 40 + need > W - 24:
                 lx, anc = a - 40, "end"
             else:
@@ -849,11 +895,23 @@ def d5_readpath(prov: str) -> str:
             p.append(f'<line x1="{a}" y1="{y+4}" x2="{b}" y2="{y+4}" stroke="{stroke}" '
                      f'stroke-width="1"{dash} marker-end="url(#{mark})"/>')
             lx, anc = (a + b) / 2, "middle"
-        p.append(text(lx, y - 2, f'{n+1}. {s["label"]}', 10,
-                      "600" if not rep else "400", fill=INK if not rep else MUTED,
-                      anchor=anc, halo="#FFFFFF"))
+        for k, ln in enumerate(lab):
+            up = len(lab) - 1 - k
+            p.append(text(lx, y - 2 - 12 * up, f'{n+1}. {ln}' if k == 0 else ln, 10,
+                          "600" if not rep else "400", fill=INK if not rep else MUTED,
+                          anchor=anc, halo="#FFFFFF"))
+        last = y - 2
         if s.get("evidence"):
             p.append(text(lx, y + 15, s["evidence"], 7.5, fill=MUTED, anchor=anc,
+                          mono=True, halo="#FFFFFF"))
+            last = y + 15
+        if s.get("sees"):
+            last += 12
+            p.append(text(lx, last, f'sees: {s["sees"]}', 8.5, fill=TRUST_INK, anchor=anc,
+                          halo="#FFFFFF"))
+        if s.get("test"):
+            last += 12
+            p.append(text(lx, last, f'test: {s["test"]}', 7.5, fill=MUTED, anchor=anc,
                           mono=True, halo="#FFFFFF"))
 
     y = body_h + 44
@@ -863,14 +921,11 @@ def d5_readpath(prov: str) -> str:
         p.append(text(LEFT - 52, y, f"{num}.", 9.5, "600", fill=WARN))
         p.append(text(LEFT - 32, y, nt, 9.5, fill=INK))
 
-    p = [text(LEFT - 52, 44, "The fs.read path — boundary crossings", 16, "600"),
-         text(LEFT - 52, 64, "One request, end to end. The OS appears TWICE because that is the "
-              "whole of ADR-0009: the daemon asks only where the object is, and", 11, fill=MUTED),
-         text(LEFT - 52, 79, "only the subject's own re-open performs the read. "
-              "Each step names the code that implements it.", 11, fill=MUTED)] + p
-    p.append(footer(W, H, f"source: {content_stamp('design/diagrams/read-path.toml')}"))
-    return svg(W, H, "\n".join(p), "Maknae fs.read boundary crossings",
-               "UML sequence diagram of the Maknae fs.read path across the trust boundary.")
+    p = ([text(LEFT - 52, 44, doc["title"], 16, "600")]
+         + [text(LEFT - 52, 64 + 15 * k, ln, 11, fill=MUTED) for k, ln in enumerate(subtitle)]
+         + p)
+    p.append(footer(W, H, f"source: {content_stamp(f'design/diagrams/{name}')}"))
+    return svg(W, H, "\n".join(p), doc["svg_title"], doc["svg_desc"])
 
 
 # --- D6: how maknae-authz-* backends layer into one decision --------------
@@ -1786,6 +1841,7 @@ def main(argv: list) -> None:
         ("generated-standards-profile.svg", lambda: stdv1(prov)),
         ("generated-workspace-packages.svg", lambda: d4_packages(gates, cg, prov)),
         ("generated-read-path.svg", lambda: d5_readpath(prov)),
+        ("generated-credential-path.svg", lambda: sequence("credential-path.toml")),
         ("generated-decision-cycle.svg", lambda: d6_decision(prov)),
         ("generated-data-model.svg", lambda: d7_datamodel(prov)),
         ("generated-system-interfaces.svg", lambda: d8_interfaces(prov)),
