@@ -56,8 +56,8 @@ the credential mint retires the credential on the way out.
 
 **Read this as a snapshot, not a contract.** The tables below were **measured on
 2026-09-19** against `main` at `35897fe` (#318); the `CREDENTIALS_DIRECTORY` and
-`XDG_RUNTIME_DIR` rows were re-read against the code for #153 (2026-10-02). Nothing scans the tree to keep them
-true: a new environment read added later will not appear here by itself, and **no gate
+`XDG_RUNTIME_DIR` rows were re-read against the code for #153 (2026-10-02). Nothing
+scans the tree to keep them true: a new environment read added later will not appear here by itself, and **no gate
 requires a pull request to re-verify them**. That is a deliberate trade — the
 alternative is re-auditing every change — so treat this as a map of the terrain rather
 than a guarantee about it. The two mechanisms that *are* enforced are named at the end.
@@ -83,7 +83,7 @@ same list as `UnsetEnvironment=`):
 
 - **`maknaed` is the only AppRole holder** (`AuthMethod` has one variant, `AppRole`): it logs in with its RoleID artifact plus a sealed SecretID.
 - **Each user authenticates with userpass through `maknae login`** (`bins/maknae/src/login.rs`), which prompts for the password without echo, logs in as the local account name on the `vault.user_auth` mount (§6.1.2), and stores only the returned token (§2).
-- **The Egress Daemon has no Vault identity** (ADR-0028 decision 6). It calls only Vault's wrapping lookup and unwrap (`sys/wrapping/lookup`, `sys/wrapping/unwrap`), each authenticated by the single-use wrapping token a user sealed to it (`bins/maknae-egress/src/main.rs`, `opener.rs`).
+- **The Egress Daemon has no Vault identity** (ADR-0028 decision 6). It calls only `sys/wrapping/lookup` (unauthenticated, with the wrapping token in the request body) and `sys/wrapping/unwrap` (authenticated by that single-use wrapping token, which a user sealed to it) (`bins/maknae-egress/src/main.rs`, `opener.rs`; `crates/maknae-vault/src/wrap.rs`, `api_request.rs`).
 - The operator's own token appears only during `maknae enroll`, supplied by `--token-file` or a no-echo prompt.
 
 An exported `VAULT_ADDR` or `VAULT_TOKEN` is for **your** `vault` CLI, as `docs/runbook.md` uses it; it never reaches ours.
@@ -544,6 +544,8 @@ The top-level key is `providers` only, a list of at most **32** entries. Each en
 | `output_tokens` | no | the reply cap sent with every request: at least 1, and `context_tokens` less `output_tokens` must exceed the 1,536-token preamble allowance. |
 | `default` | no | `true` or `false` (default `false`). |
 
+**How the CLI prints these.** `maknae agent` prints every setup error — every text quoted in §6.1.1 and §6.1.2 other than the `stopped:` lines — after `maknae: ` and exits 1 (`bins/maknae/src/cli.rs`); `maknae login` prints its own after `maknae login: ` (`bins/maknae/src/login.rs`). The texts below are quoted without the prefix.
+
 Every refusal of this file reads `providers.yaml: <reason>` (`UserProviders`), for example `providers.yaml: providers[0].context_tokens is required: declare the model's context window in tokens`. Two worth knowing:
 
 - Writing `key:` as a string refuses with `providers.yaml: providers[<i>].key must be a map of subpath and field; the API key itself is stored only in Vault, never in this file`. Another spelling, such as `api_key:`, refuses as an unknown key.
@@ -553,7 +555,7 @@ Every refusal of this file reads `providers.yaml: <reason>` (`UserProviders`), f
 
 - With one entry, it is used. With two or more, exactly one must be `default: true`, or the file refuses: `providers.yaml: <N> entries and none is marked default: true; mark exactly one (labels: <labels>)`, or `providers.yaml: more than one entry is marked default: true (<labels>)`.
 - `maknae agent --provider <label> "<prompt>"` uses the entry with that label instead. An unknown label refuses with `providers.yaml: no entry is labelled '<label>' (labels: <labels>)`; a value that is not a valid label refuses with `providers.yaml: the requested provider is not a valid label (1 to 32 bytes of ASCII letters, digits, '-', '_' and '.')`.
-- An absent file, an empty document, or a document with no `providers` key means no model access: `maknae agent` stops before contacting anything with `maknae: no model access: no providers are defined in <path>`.
+- An absent file, an empty document, or a document with no `providers` key means no model access: `maknae agent` stops before contacting anything with `no model access: no providers are defined in <path>`.
 
 **Where the key is.** Each turn, `maknae agent` reads the entry's key from Vault with the user's own `maknae login` token, at
 
@@ -590,8 +592,8 @@ vault:
   user_prefix: maknae/users
 ```
 
-- **`kv_mount` and `user_prefix`** are required by `maknae agent`, and enroll writes them from `--kv-mount` (default `maknae-kv`) and `--user-prefix` (default `maknae/users`). Each is at most 256 bytes of `[A-Za-z0-9._/-]`, with no empty, `.`, `..` or `data` segment and no leading or trailing `/`. When one is missing, `maknae agent` stops with `maknae: vault.kv_mount is not set in your maknae.yaml: `sudo maknae enroll` writes it` (likewise `vault.user_prefix`). Only `maknae agent` requires them, but every CLI verb parses the `vault` block, so a malformed value refuses every verb.
-- **`user_auth { type, mount }`** says how `maknae login` authenticates. An absent block means userpass on `maknae-userpass`. When the block is present, `type` is required and must be `userpass`; anything else refuses with `vault.user_auth.type "<type>" is not supported: the only method is `userpass``. `mount` defaults to `maknae-userpass` and is a bare mount name: a leading `auth` segment refuses (`invalid Vault mount: vault.user_auth.mount starts with 'auth' — the auth/ prefix is composed by the client; write the bare mount name as Terraform declares it`), as does a character outside `[A-Za-z0-9._/-]`, whitespace, or an empty, `.` or `..` segment. Keys other than `type` and `mount` refuse with `unknown key '<key>' in 'vault.user_auth'`. The root `maknae.yaml` may carry the same block.
+- **`kv_mount` and `user_prefix`** are required by `maknae agent`, and enroll writes them from `--kv-mount` (default `maknae-kv`) and `--user-prefix` (default `maknae/users`). Each is at most 256 bytes of `[A-Za-z0-9._/-]`, with no empty, `.`, `..` or `data` segment and no leading or trailing `/`. When one is missing, `maknae agent` stops with ``vault.kv_mount is not set in your maknae.yaml: `sudo maknae enroll` writes it`` (likewise `vault.user_prefix`). Only `maknae agent` requires them, but every CLI verb parses the `vault` block, so a malformed value refuses every verb.
+- **`user_auth { type, mount }`** says how `maknae login` authenticates. An absent block means userpass on `maknae-userpass`. When the block is present, `type` is required and must be `userpass`; anything else refuses with ``vault.user_auth.type "<type>" is not supported: the only method is `userpass` ``. `mount` defaults to `maknae-userpass` and is a bare mount name: a leading `auth` segment refuses (`invalid Vault mount: vault.user_auth.mount starts with 'auth' — the auth/ prefix is composed by the client; write the bare mount name as Terraform declares it`), as does a character outside `[A-Za-z0-9._/-]`, whitespace, or an empty, `.` or `..` segment. Keys other than `type` and `mount` refuse with `unknown key '<key>' in 'vault.user_auth'`. The root `maknae.yaml` may carry the same block.
 - **They must match the host.** A user whose `kv_mount` or `user_prefix` differs from the host's `egress-bounds.yaml` (§6.1.3) seals a key the Egress Daemon cannot open: the deputy refuses before any provider I/O, and `maknaed` records every such turn `Failed` (ADR-0028 §5, amended, and §6). The user sees only the generic refusal text (§6.1.1). Keep both files written from the same enroll flags.
 
 ### 6.1.3 `egress-bounds.yaml`
