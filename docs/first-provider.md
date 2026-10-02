@@ -141,9 +141,19 @@ Enroll writes `~/.maknae` only for the account that ran it. Each further local u
 
 1. **Create the account and add it to the `maknae` group.** The daemon's socket is `0660`, group `maknae`.
 
+   On Linux:
+
    ```bash
-   sudo usermod -aG maknae <user>                              # Linux
-   sudo dseditgroup -o edit -a <user> -t user maknae           # macOS
+   sudo useradd -m <user>
+   sudo passwd <user>
+   sudo usermod -aG maknae <user>
+   ```
+
+   On macOS (not yet measured), create the account in System Settings or with `sysadminctl`, which prompts for the password; the account must exist before `dseditgroup` can add it:
+
+   ```bash
+   sudo sysadminctl -addUser <user> -password -
+   sudo dseditgroup -o edit -a <user> -t user maknae
    ```
 
    The user then logs out and in, in a real login session. On Linux, `maknae login` keeps the token through `systemd-creds --user`, which reads `XDG_RUNTIME_DIR`; `sudo -iu` or `su -` may not set it, or may carry the administrator's. On macOS, the token lives in the user's default keychain, which a graphical login creates.
@@ -215,13 +225,13 @@ The user then follows [You (the user)](#you-the-user).
 ## 5. Start
 
 ```bash
-sudo systemctl enable --now maknae-egress.socket
+sudo systemctl enable --now maknae-egress.socket maknaed
 sudo systemctl restart maknaed
 maknae login         # see step U1
 maknae ping          # pong
 ```
 
-Restart the daemon, not just enable it: the authorized provider set is read at boot. Every CLI verb, `maknae ping` included, needs a stored login; without one it fails with `` no Vault token is stored: run `maknae login` ``.
+These are the units enroll's closing hints name. Restart the daemon as well as enabling it: `enable --now` does not restart a daemon that is already running, and the authorized provider set is read at boot. Every CLI verb, `maknae ping` included, needs a stored login; without one it fails with `` no Vault token is stored: run `maknae login` ``.
 
 On macOS, both jobs ship `launchctl disable`d. This start works whether or not you already followed the hints enroll printed:
 
@@ -361,6 +371,8 @@ providers:
 ```bash
 maknae agent --provider local "<prompt>"
 ```
+
+The second entry works only once `local` is authorized like `openai`: its own entry in step 3's `providers:` list (with `llama` in its `models`), a `provider:local` destination for your role in step 4 (step 4a for a second user), and your key stored at subpath `local` in step U2. Without the step 3 entry or the grant, the turn is refused: you see `PROMPT_REFUSED`, and your administrator's audit shows `provider not in the authorized set` (no step 3 entry) or `destination not allowlisted for role <role>: provider:local` (no grant). Without the key, the CLI stops with `no key is stored in Vault for provider entry local: store it, then retry`.
 
 ## 6. Talk to it
 

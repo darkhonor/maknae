@@ -476,12 +476,12 @@ The OpenAI-compatible model providers this host authorizes, and the models each 
 ```yaml
 providers:
   - name: openai
-    endpoint: https://api.openai.com/v1
+    endpoint: https://api.openai.com/v1/chat/completions
     models: [gpt-5.6-luna, gpt-5.6]
     reasoning_effort: none
     output_tokens_field: max_completion_tokens
   - name: local
-    endpoint: http://127.0.0.1:8080/v1
+    endpoint: http://127.0.0.1:8080/v1/chat/completions
     models: [llama]
     output_tokens_field: max_tokens
 ```
@@ -835,11 +835,11 @@ Extension sections belong in `config.d/` (or inline in the base). `config.d/` fi
 ```yaml
 providers:
   - name: openai
-    endpoint: https://api.openai.com/v1
+    endpoint: https://api.openai.com/v1/chat/completions
     models: [gpt-5.6-luna, gpt-5.6]
     reasoning_effort: none
   - name: local
-    endpoint: http://127.0.0.1:8080/v1
+    endpoint: http://127.0.0.1:8080/v1/chat/completions
     models: [llama]
     output_tokens_field: max_tokens
 ```
