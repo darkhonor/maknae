@@ -28,7 +28,7 @@ const DEFAULT_SOCKET_PATH: &str = "/run/maknae-egress/egress.sock";
 /// The macOS deputy's socket path.
 pub const MACOS_EGRESS_SOCKET_PATH: &str = "/usr/local/var/run/maknae-egress/egress.sock";
 /// The deputy's worst-case wall time on one request, plus a margin: a wrapping
-/// lookup, an unwrap (each bounded by `maknae-vault`'s 30 s `VAULT_HTTP_TIMEOUT`)
+/// lookup, an unwrap (each bounded by `maknae-vault`'s 30 s `VAULT_API_TIMEOUT`)
 /// and the provider call (`bins/maknae-egress`'s `CallBounds::default().timeout`,
 /// 120 s) sum to 180 s, and 280 s leaves headroom for framing and scheduling.
 /// Raise the deputy's bounds and this one together.
