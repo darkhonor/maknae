@@ -792,8 +792,7 @@ def sequence(name: str) -> str:
     One renderer for every sequence, because the read path was hard-coded to
     one trust boundary and its own title, and the per-turn credential path
     (#153) needs three boundaries and a line saying what each hop can SEE. A
-    copy would have let the two drift; the read path's byte-identical output
-    across the split is what proves the generalisation changed nothing.
+    copy would have let the two drift.
     Geometry fails closed: overlapping boxes, a boundary on an unknown or first
     participant, an unknown kind and a fourth subtitle line all exit.
     """
@@ -844,6 +843,9 @@ def sequence(name: str) -> str:
     bounds = doc.get("boundary", [])
     bxs = []
     for bd in bounds:
+        for key in ("before", "left", "right"):
+            if key not in bd:
+                sys.exit(f"{name}: a [[boundary]] is missing `{key}`")
         i = idx.get(bd["before"])
         if not i:
             sys.exit(f"{name}: boundary before {bd['before']!r}: "
