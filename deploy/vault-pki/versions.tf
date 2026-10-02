@@ -1,10 +1,16 @@
 terraform {
-  required_version = ">= 1.5"
+  required_version = ">= 1.11"
 
   required_providers {
     vault = {
-      source  = "hashicorp/vault"
-      version = "~> 5.0"
+      source = "hashicorp/vault"
+      # vault_userpass_auth_backend_user does not exist before 5.10.0
+      version = "~> 5.10"
+    }
+    random = {
+      source = "hashicorp/random"
+      # ephemeral random_password does not exist before 3.7.0
+      version = "~> 3.7"
     }
   }
 }

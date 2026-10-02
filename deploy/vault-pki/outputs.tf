@@ -45,25 +45,27 @@ output "maknaed_approle_name" {
   value       = vault_approle_auth_backend_role.maknaed.role_name
 }
 
-output "maknae_approle_name" {
-  description = "AppRole role name for the CLI plane."
-  value       = vault_approle_auth_backend_role.maknae.role_name
-}
-
-# RoleID is the NON-SECRET half of the AppRole credential (a stable identifier, like a
-# username); it cannot authenticate without a SecretID, which is delivered out-of-band
-# (operational step, see README). Every plane needs its RoleID to log in, so expose them.
 output "maknaed_role_id" {
   description = "AppRole RoleID for the trust plane (maknaed). Non-secret; pair with an out-of-band SecretID to log in."
   value       = vault_approle_auth_backend_role.maknaed.role_id
 }
 
-output "maknae_role_id" {
-  description = "AppRole RoleID for the CLI plane (maknae). Non-secret; pair with an out-of-band SecretID to log in."
-  value       = vault_approle_auth_backend_role.maknae.role_id
+output "userpass_mount_path" {
+  description = "Userpass auth mount path local users log in through (maknae enroll --userpass-mount)."
+  value       = vault_auth_backend.userpass.path
 }
 
-output "maknae_egress_role_id" {
-  description = "AppRole RoleID for the egress deputy (maknae-egress, #240b). Non-secret; maknae enroll reads it over the API and writes /etc/maknae/egress/maknae-egress-approle-id."
-  value       = vault_approle_auth_backend_role.maknae_egress.role_id
+output "kv_mount_path" {
+  description = "KV v2 mount holding each user's provider API keys (maknae enroll --kv-mount)."
+  value       = vault_mount.maknae_kv.path
+}
+
+output "user_prefix" {
+  description = "Per-user key prefix within kv_mount_path (maknae enroll --user-prefix)."
+  value       = var.user_prefix
+}
+
+output "user_policy_name" {
+  description = "Templated policy attached to every userpass user."
+  value       = vault_policy.maknae_user.name
 }

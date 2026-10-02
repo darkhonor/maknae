@@ -19,4 +19,4 @@ override.tf.json
 *_override.tf.json
 
 # The provider lock file (.terraform.lock.hcl) is intentionally NOT ignored —
-# it pins hashicorp/vault to the validated version and MUST be committed.
+# it pins hashicorp/vault and hashicorp/random to the validated versions and MUST be committed.
