@@ -125,7 +125,7 @@ subject = "cli_a"
 object = "sealed"
 right = "r"
 control = "A's CLI seals it, so A already holds what it contains"
-evidence = "bins/maknae/src/agent.rs:176 · crates/maknae-seal/src/seal.rs:54"
+evidence = "bins/maknae/src/agent.rs:185 · crates/maknae-seal/src/seal.rs:54"
 test = "bins/maknae/src/agent.rs::a_turn_reads_the_wrapped_key_then_seals_it_to_exactly_this_request"
 
 [[cell]]
@@ -140,7 +140,7 @@ subject = "cli_a"
 object = "meta"
 right = "r"
 control = "A chooses the providers.yaml entry; the CLI mints the conversation id"
-evidence = "bins/maknae/src/agent.rs:524 · bins/maknae/src/agent.rs:553"
+evidence = "bins/maknae/src/agent.rs:519 · bins/maknae/src/agent.rs:553"
 test = "bins/maknae/src/agent.rs::the_entry_is_the_default_or_the_named_label_and_no_entries_means_no_model_access"
 
 # --- CLI as user B --------------------------------------------------------
@@ -164,7 +164,7 @@ subject = "cli_b"
 object = "wrap"
 right = "none"
 control = "OS process isolation between uids, not proven by code here: the token sits unsealed in A's CLI memory between the wrapped read and the seal, and B holding it could unwrap it at Vault directly; past the seal it travels only sealed, and the creation_path check only stops B using the Egress Daemon with A's token"
-evidence = "bins/maknae/src/agent.rs:373 · bins/maknae/src/agent.rs:176 · bins/maknae-egress/src/opener.rs:83 · crates/maknae-vault/src/wrap.rs:299 · ADR-0028"
+evidence = "bins/maknae/src/agent.rs:373 · bins/maknae/src/agent.rs:185 · bins/maknae-egress/src/opener.rs:83 · crates/maknae-vault/src/wrap.rs:299 · ADR-0028"
 test = "crates/maknae-vault/src/wrap.rs::another_users_token_is_refused_before_it_is_unwrapped · bins/maknae-egress/src/opener.rs::user_a_presenting_user_bs_wrapping_token_is_refused_at_the_path_check"
 
 [[cell]]
@@ -179,14 +179,14 @@ test = "crates/maknae-kernel/src/provider_choice.rs::an_admitted_choice_carries_
 subject = "cli_b"
 object = "prompt"
 right = "r"
-control = "residual, while A's CLI runs: none, because maknae agent takes the prompt as positional argv, and argv is world-readable on a default host (Linux /proc/<pid>/cmdline without hidepid, macOS ps -ax -o args); the audit trail keeps only its digest and length, in a 0700 _maknae directory"
+control = "no control while A's CLI runs (#436, undecided): maknae agent takes the prompt as positional argv, and argv is world-readable on a default host (Linux /proc/<pid>/cmdline without hidepid, macOS ps -ax -o args); the audit trail keeps only its digest and length, in a 0700 _maknae directory"
 evidence = "bins/maknae/src/cli.rs:147 · crates/maknae-audit-append/src/record.rs:130 · packaging/rpm/maknae.spec:176 · packaging/deb/postinst:48 · packaging/macos/scripts/preinstall:203"
 
 [[cell]]
 subject = "cli_b"
 object = "meta"
 right = "p"
-control = "part, residual, while A's CLI runs: none, because argv is world-readable on a default host (Linux /proc without hidepid, macOS ps), so B sees --provider <label> and the process owner; the audit trail holding the rest is written by maknaed in a 0700 _maknae directory"
+control = "part; no control while A's CLI runs (#436, undecided): argv is world-readable on a default host (Linux /proc without hidepid, macOS ps), so B sees --provider <label> and the process owner; the audit trail holding the rest is written by maknaed in a 0700 _maknae directory"
 evidence = "bins/maknae/src/cli.rs:147 · crates/maknae-audit-append/src/sink.rs:48 · packaging/rpm/maknae.spec:176 · packaging/deb/postinst:48 · packaging/macos/scripts/preinstall:203"
 
 # --- Agent Daemon (planned) -----------------------------------------------

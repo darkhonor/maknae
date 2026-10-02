@@ -1311,15 +1311,25 @@ def d8_interfaces(prov: str) -> str:
         col, dash, sw = line_for[i["status"]]
         if i.get("class") == "platform":
             col, dash, sw = "#8A5B00", "1 3", "1.6"
-        if a["row"] == b["row"]:
+        if a["row"] == b["row"] and a["col"] > b["col"]:
+            x1, y1 = a["x"], a["y"] + NH / 2
+            x2, y2 = b["x"] + NW, b["y"] + NH / 2
+        elif a["row"] == b["row"]:
             x1, y1 = a["x"] + NW, a["y"] + NH / 2
             x2, y2 = b["x"], b["y"] + NH / 2
         else:
             x1, y1 = a["x"] + NW / 2, a["y"] + NH
             x2, y2 = b["x"] + NW / 2, b["y"]
-            if a["col"] != b["col"]:
+            if a["col"] < b["col"]:
                 x1, y1 = a["x"] + NW, a["y"] + NH / 2
                 x2, y2 = b["x"], b["y"] + NH / 2
+            elif a["col"] > b["col"]:
+                # Leftward (maknaed dialling the Egress Daemon): leave by the
+                # left edge and arrive at the right edge, below the point the
+                # target's own outbound edges leave from, so the arrowhead is
+                # not drawn on top of their start.
+                x1, y1 = a["x"], a["y"] + NH / 2
+                x2, y2 = b["x"] + NW, b["y"] + NH * 3 / 4
         d = f' stroke-dasharray="{dash}"' if dash else ""
         my = (y1 + y2) / 2
         p.append(f'<path d="M {x1:.0f} {y1:.0f} C {(x1+x2)/2:.0f} {y1:.0f} '
@@ -1389,8 +1399,9 @@ def d8_interfaces(prov: str) -> str:
          text(PAD, 66, f"Every interface carries a status. {nb} peer interfaces exist and "
               f"{npl} host-platform controls act on the daemon. {nr} are ratified by "
               "ADR-0006 and", 11, fill=MUTED),
-         text(PAD, 82, f"NOT implemented — that ADR carries its own banner saying so. {ns} are "
-              "one-line marker crates with no interface at all.", 11, fill=MUTED),
+         text(PAD, 82, f"NOT implemented — that ADR carries its own banner saying so. {ns} "
+              f"{'is a one-line marker crate' if ns == 1 else 'are one-line marker crates'} "
+              "with no interface at all.", 11, fill=MUTED),
          text(PAD, 98, "Solid violet is a built peer interface; dashed grey is not built; "
               "dotted gold is a mandatory host control, which enforces rather than exchanges.",
               10, fill=MUTED)] + p

@@ -257,7 +257,7 @@ status = "built"
 [[flow]]
 from = "egress"
 to = "vault"
-label = "unwrap (user's sealed token)"
+label = "unwrap (the user's wrapping token, after opening the seal)"
 status = "built"
 
 [[flow]]
