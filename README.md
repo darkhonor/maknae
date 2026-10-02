@@ -90,7 +90,7 @@ Two capabilities are first-class *by design* from the start (design intent, not 
 ├── ci/gates/                # fail-closed CI gates (coverage, negative-control, isolation-contract)
 ├── packaging/               # STIG-baselined deb / rpm / macos / oci packaging
 ├── deploy/                  # deployment assets (Vault PKI, …)
-├── docs/                    # configuration, operator runbook, first-provider walkthrough
+├── docs/                    # configuration, operator runbook, first-provider walkthrough, verification walkthrough
 └── design/
     ├── knowledge-lifecycle-contract.md   # the governance spec — read first
     ├── container-architecture.md         # possible future containerized deployment (Compose / Kubernetes)
