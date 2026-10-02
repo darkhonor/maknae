@@ -240,6 +240,30 @@ def check_evidence(rows: list, field: str, where: str) -> None:
         sys.exit(f"{where}: evidence cites paths that do not resolve:\n{lines}")
 
 
+_TEST = re.compile(r"([A-Za-z0-9_.\-]+(?:/[A-Za-z0-9_.\-]+)+)::([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def check_tests(rows: list, field: str, where: str) -> None:
+    """Every `path::test_fn` citation must name a #[test] fn that exists in that file."""
+    bad = []
+    for r in rows:
+        raw = r.get(field, "")
+        for item in (i.strip() for i in raw.split("·")) if raw.strip() else ():
+            m = _TEST.fullmatch(item)
+            if not m:
+                bad.append((r, f"{item!r} (not <repo/path>::<test_fn>)"))
+                continue
+            path, fn = m.groups()
+            f = ROOT / path
+            if not f.is_file():
+                bad.append((r, f"{path} (no such file)"))
+            elif not re.search(rf"#\[(?:tokio::)?test[^\]]*\]\s*(?:#\[[^\]]*\]\s*)*(?:async\s+)?fn\s+{fn}\s*\(", f.read_text()):
+                bad.append((r, f"{path}::{fn} (no such #[test] fn)"))
+    if bad:
+        lines = "\n".join(f"    {r.get('name', r.get('label', '?'))}: {t}" for r, t in bad)
+        sys.exit(f"{where}: test citations do not resolve:\n{lines}")
+
+
 # --- facts: the internal crate graph and each crate's direct externals -----
 
 def crate_graph() -> dict:
