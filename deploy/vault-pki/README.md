@@ -29,13 +29,17 @@ The Rust plane-cert client (`maknae-vault`) and the mTLS transport consume this 
   only `<kv_mount>/data/<user_prefix>/<own username>/*` (every read must be
   response-wrapped: `min_wrapping_ttl = "1s"`) and the matching `metadata/` paths, signs
   the `maknae-cli` role, and looks up and revokes its own token.
-- **Users** — one `vault_userpass_auth_backend_user` per entry of `maknae_users`, with
-  the `maknae-user` policy only, an 8h token TTL and a 24h maximum. The user token does
+- **Users** — one `vault_userpass_auth_backend_user` per entry of `maknae_users`, carrying
+  no policy of its own, with an 8h token TTL and a 24h maximum. The user token does
   **not** carry Vault's `default` policy (`token_no_default_policy = true`). The `maknae`
   CLI needs nothing from it: it calls only the userpass login, `auth/token/lookup-self`,
   `auth/token/revoke-self`, the response-wrapped read of the user's own KV key, and
   `<pki_int>/sign/maknae-cli`. It reads no issuer bundle from Vault, never renews a
   token, and never revokes a certificate.
+- **User identities** — one identity entity per user, named `maknae-<user>`, with one
+  alias: the username, on the userpass mount.
+- **`maknae-users` group** — an internal identity group whose members are those entities;
+  it carries the `maknae-user` policy, so every user token gets it as an identity policy.
 - **KV v2 mount** (`maknae-kv`) — provider API keys, one subtree per user. The Egress
   Daemon holds no Vault identity; it opens only the single-use wrapping token a user's
   CLI sends it.
@@ -112,7 +116,19 @@ incrementing that user's `password_version`; each locks the user out until a pas
 Removing a user from `maknae_users` deletes the Vault userpass user, its identity entity and
 alias, and its group membership, and nothing else: the user's KV subtree
 `<kv_mount>/<user_prefix>/<username>/` remains and is removed by hand (`vault kv metadata
-delete` per key).
+delete` per key). Re-adding a removed username gives the new holder the old KV subtree;
+remove the subtree first.
+
+## Loading a user's provider key
+
+Every read of a key under the user policy is answered only wrapped (an unwrapped read is
+refused), and every write needs `-wrap-ttl` too (an unwrapped write is refused). The user
+loads their own key, logged in with their userpass identity, so the command uses
+`-wrap-ttl=60s`; with the defaults, in zsh, for the subpath `openai` and field `api_key`:
+
+```zsh
+read -rs "KEY?API key: " && echo && printf %s "$KEY" | vault kv put -wrap-ttl=60s maknae-kv/maknae/users/alice/openai api_key=- && unset KEY
+```
 
 ## Offline validation (no Vault needed)
 

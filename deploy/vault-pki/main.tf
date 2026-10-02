@@ -222,13 +222,13 @@ ephemeral "random_password" "maknae_user" {
   length   = 32
 }
 
+# Policies bind through the maknae-users group; any in-place update of this resource resends the write-only password and resets it.
 resource "vault_userpass_auth_backend_user" "maknae" {
   for_each                = var.maknae_users
   mount                   = vault_auth_backend.userpass.path
   username                = each.key
   password_wo             = ephemeral.random_password.maknae_user[each.key].result
   password_wo_version     = each.value.password_version
-  token_policies          = []
   token_ttl               = 28800
   token_max_ttl           = 86400
   token_no_default_policy = true
@@ -236,7 +236,7 @@ resource "vault_userpass_auth_backend_user" "maknae" {
 
 resource "vault_identity_entity" "maknae_user" {
   for_each = var.maknae_users
-  name     = each.key
+  name     = "maknae-${each.key}"
 }
 
 resource "vault_identity_entity_alias" "maknae_user" {

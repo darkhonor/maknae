@@ -66,6 +66,6 @@ output "user_prefix" {
 }
 
 output "user_policy_name" {
-  description = "Templated policy attached to every userpass user."
+  description = "Templated user policy, bound to every userpass user through the maknae-users group."
   value       = vault_policy.maknae_user.name
 }

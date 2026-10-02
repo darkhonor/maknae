@@ -193,6 +193,8 @@ Dated as-built amendment; rides the #275 PR. Four statements.
 
 **Why it is here:** AU-3 asks what produced the event. A read or write the loop made on a model's proposal joins by `conversation` to the `session.prompt` egress records, which name the provider (`object`). The provider's registry entry names the model, so the join gives the full attribution without copying it into every record. The identifier is a client claim, and the record treats it as one. The subject and the verdict stay the kernel's own.
 
+**Amended 2026-10-02 (#153):** the provider's registry entry no longer names *the* model, because a provider entry lists several models; the model now rides on every `session.prompt` egress record itself, and the join supplies the rest.
+
 **The JSONL is the full record on both platforms.** The macOS and journald mirror caps do not constrain record content. The constraint is what AU-3/AU-3(1) require, and nothing more.
 
 ## Amendment (2026-09-25, #265) — the stop record, post-sink boot failures, and boot evidence is a gate
