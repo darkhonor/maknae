@@ -301,9 +301,9 @@ test = "crates/maknae-vault/src/wrap.rs::a_matching_token_is_looked_up_then_unwr
 [[cell]]
 subject = "egress"
 object = "wrap"
-right = "u"
-control = "opened only under this request's AAD, looked up (creation_path, TTL at most 60 s), then presented once to unwrap; Vault makes it single-use"
-evidence = "bins/maknae-egress/src/opener.rs:83 · crates/maknae-vault/src/wrap.rs:299"
+right = "r"
+control = "it reads the plaintext token when it opens the seal, only under this request's AAD and before any Vault call; it then looks it up (creation_path, TTL at most 60 s) and presents it once to unwrap, and Vault makes it single-use, so the redemption spends it"
+evidence = "bins/maknae-egress/src/opener.rs:78 · bins/maknae-egress/src/opener.rs:79 · crates/maknae-vault/src/wrap.rs:299"
 test = "crates/maknae-vault/src/wrap.rs::another_users_token_is_refused_before_it_is_unwrapped · crates/maknae-vault/src/wrap.rs::a_token_outside_the_ttl_bound_is_refused_before_it_is_unwrapped"
 
 [[cell]]
@@ -311,7 +311,7 @@ subject = "egress"
 object = "sealed"
 right = "r"
 control = "it holds the seal private key and opens the blob only under this request's AAD"
-evidence = "bins/maknae-egress/src/opener.rs:83 · crates/maknae-seal/src/seal.rs:84"
+evidence = "bins/maknae-egress/src/opener.rs:78 · crates/maknae-seal/src/seal.rs:84"
 test = "bins/maknae-egress/src/opener.rs::a_blob_sealed_for_one_request_opens_only_under_that_request · crates/maknae-seal/src/seal.rs::a_blob_retargeted_to_another_request_fails_to_open"
 
 [[cell]]

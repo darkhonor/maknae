@@ -14,7 +14,7 @@ Controls are cited two ways. A pair such as `cli_b × key_a` is a cell of the is
 | C6 | `maknaed` never links the seal | by CI; not yet measured on a host |
 | C7 | An unlisted model is refused before any egress | yes, on Rocky 10.2 and macOS 26.6.2 |
 | C8 | Revoking B's token stops B's next run and leaves A unaffected | not yet measured |
-| C9 | A user with no providers has no model access | not yet measured |
+| C9 | Withdrawing a user's model access takes host authority, not their `providers.yaml` | not yet measured |
 | C10 | Seal-key rotation fails closed until restart | yes, on Rocky 10.2; on macOS 26.6.2 without the deputy's log line |
 
 ## Before you start
@@ -269,13 +269,21 @@ After the claim, B runs `maknae login` again.
 
 **Measured.** Not yet measured.
 
-## C9. A user with no providers has no model access
+## C9. Withdrawing a user's model access takes host authority
 
-**Claim.** Without a `providers.yaml`, a user has no model access at all.
+**Claim.** B's model access is withdrawn by host authority: B's role grant or destination in `/etc/maknae/authz.yaml`, the provider's entry in the root `providers:` set, or B's Vault access. B's own `~/.maknae/providers.yaml` is not an authorization control. Removing it only stops the shipped CLI.
 
-**Control.** `kernel × meta` is the kernel's no-choice admission; the CLI stops before it reads a key or contacts the daemon (`bins/maknae/src/agent.rs:77-89`; test `bins/maknae/src/agent.rs::the_entry_is_the_default_or_the_named_label_and_no_entries_means_no_model_access`). Credential-path step: `load the user token; choose the providers.yaml entry`. The kernel enforces the same independently for a client that sends a prompt with no provider choice. That user sees only the `PROMPT_REFUSED` line. The administrator's audit query shows `"result":"deny"` with `"reason":"session.prompt carries no provider choice"`.
+**Control.** `kernel × meta`: the kernel admits each prompt against the root-owned provider set and the policy, never against the user's `providers.yaml`, which it does not read. `admit_choice` refuses a prompt with no provider choice, an empty set, or a provider outside the set (`crates/maknae-kernel/src/provider_choice.rs:68-74`). The PDP then refuses a destination that is not on the role's list, with the reason `destination not allowlisted for role <role>: provider:<name>` (`crates/maknae-authz-basic/src/decide.rs:297-302`; test `crates/maknae-authz-basic/src/decide.rs::prompt_with_the_grant_but_an_unlisted_destination_is_a_deny_naming_it`). `cli_b × key_b`: Vault policy and B's own login decide B's key read. Credential-path step: `admit (peer-uid username, set, model, subpath, field), PDP, destination stamp: metadata only`.
 
-**Command.** As B:
+**Not a control.** Without a `providers.yaml`, the shipped CLI stops before it reads a key or contacts the daemon (`bins/maknae/src/agent.rs:77-89`; test `bins/maknae/src/agent.rs::the_entry_is_the_default_or_the_named_label_and_no_entries_means_no_model_access`). Credential-path step: `load the user token; choose the providers.yaml entry`. That is the CLI's own behaviour. A client that is not the shipped CLI can still send a valid provider choice, and the kernel admits it on host authority alone.
+
+**Command.** The administrator removes `provider:openai` from B's role's `destinations` in `/etc/maknae/authz.yaml` (`sudoedit /etc/maknae/authz.yaml`; B's role is `user` in step 4a). Do not edit `bindings:`, so no restart is needed: the policy is re-read on every request ([step 4a](first-provider.md#4a-add-another-local-user)). Then, as B:
+
+```bash
+maknae agent "Reply with one word: hello."
+```
+
+The administrator then restores the line. Separately, to see the shipped CLI's behaviour, as B:
 
 ```bash
 mv ~/.maknae/providers.yaml ~/.maknae/providers.yaml.aside
@@ -283,7 +291,9 @@ maknae agent "Reply with one word: hello."
 mv ~/.maknae/providers.yaml.aside ~/.maknae/providers.yaml
 ```
 
-**Expected.** Exit 1:
+**Expected.** With the destination removed, B sees the `PROMPT_REFUSED` line, exit 2. In the administrator's audit query: `"result":"deny"`, `"reason":"destination not allowlisted for role user: provider:openai"`, with no `egress` block. If A shares B's role, A is refused the same way until the line is restored.
+
+Without the file, exit 1:
 
 ```
 maknae: no model access: no providers are defined in <B's home>/.maknae/providers.yaml

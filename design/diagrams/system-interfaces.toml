@@ -264,9 +264,9 @@ consequence = "There is nothing to ingress-filter, which is why no firewalld, nf
 evidence = "crates/maknae-kernel/src/run.rs:1879 — PlaneListener::bind on an AF_UNIX path"
 
 [[negative]]
-claim = "Every network flow is EGRESS — to Vault, and from the Egress Daemon to the provider — and each is constrained by something narrower than a firewall rule."
-consequence = "SELinux authorizes each connect per DOMAIN, where a host firewall rule would authorize it per HOST: name_connect on maknae_vault_port_t for maknaed_t and maknae_egress_t, and the provider leg (http_port_t) for maknae_egress_t alone. A packet filter cannot express 'this process and no other'."
-evidence = "packaging/common/maknae-selinux-ports.sh · packaging/common/maknae.te"
+claim = "Every network flow is EGRESS. The daemons' flows — I3 and I10 to Vault, and I8 from the Egress Daemon to the provider — are each constrained by something narrower than a firewall rule. I4, the CLI to Vault, is not: it is the user's own process."
+consequence = "SELinux authorizes each daemon connect per DOMAIN, where a host firewall rule would authorize it per HOST: name_connect on maknae_vault_port_t for maknaed_t and maknae_egress_t, and the provider leg (http_port_t) for maknae_egress_t alone. A packet filter cannot express 'this process and no other'. The policy's domains are maknaed_t, maknae_egress_t and maknae_tool_t (declared for tools, unused); none is the CLI's, and its executable is not labelled, so I4 runs in the user's own domain, usually unconfined, and SELinux does not confine it."
+evidence = "packaging/common/maknae-selinux-ports.sh · packaging/common/maknae.te:8 · packaging/common/maknae.te:26 · packaging/common/maknae.fc"
 
 [[negative]]
 claim = "Reaching the client plane requires a local account in the gated group, not a route."

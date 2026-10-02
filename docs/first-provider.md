@@ -457,8 +457,8 @@ A kernel refusal reaches you only as one line, `PROMPT_REFUSED` below; the reaso
 
 | `OpenFailed(…)` | Meaning | Fix |
 |---|---|---|
-| `Seal` | the sealed key does not match this request. After a seal-key rotation, it means the running deputy still holds the previous key | restart the Egress Daemon: `sudo systemctl try-restart maknae-egress.service`; on macOS, `sudo launchctl kickstart -k system/io.maknae.maknae-egress` |
-| `WrongPath` | the wrapping token wraps a different path than the request names. Inferred cause: your `vault.kv_mount` or `vault.user_prefix` differs from the host's `egress-bounds.yaml` | make your `vault` block match the host's (step 2, 4a) |
+| `Seal` | the sealed key does not match this request. After a seal-key rotation, it means the running deputy still holds the previous key. Otherwise, your `vault.kv_mount` or `vault.user_prefix` likely differs from the host's `egress-bounds.yaml`: the CLI binds the key path from your copy into the seal, and the deputy opens it under the path from the host's, so the seal does not open and Vault is never asked | after a rotation, restart the Egress Daemon: `sudo systemctl try-restart maknae-egress.service`; on macOS, `sudo launchctl kickstart -k system/io.maknae.maknae-egress`. Otherwise, make your `vault` block match the host's (step 2, 4a) |
+| `WrongPath` | the seal opened, but Vault's lookup reports the wrapping token was created at a different path than the request names. The `maknae` installed with the host's package does not produce it: its wrapped read refuses a token for any other path before it seals. It means a client sealed a token for another path, such as another user's | send your administrator the journal line and the trail record |
 | `Request` | the request cannot name a Vault key path | send your administrator the journal line |
 | `Token` | the sealed key does not hold a wrapping token | use the `maknae` installed with the host's package |
 | `Ttl` | the wrapping token's TTL is outside the allowed bound | use the `maknae` installed with the host's package |
