@@ -35,6 +35,8 @@ maknae-msgs = { path = "../../crates/maknae-msgs" }
 # filesystem, socket or process API. Its own lib.rs states it that way and says why the
 # feature-set framing was wrong.)
 maknae-agent = { path = "../../crates/maknae-agent" }
+# Without it each turn's wrapping token would cross maknaed readable (ADR-0028).
+maknae-seal = { path = "../../crates/maknae-seal" }
 clap = { version = "4", features = ["derive"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "process", "io-util"] }
 # `user` — nix::unistd::{User,Group,geteuid,getegid} (passwd/group lookup, the enroll-
@@ -62,7 +64,7 @@ security-framework = "3"
 
 # NO privileged crate (maknae-kernel/-subject-ctx-mint/-audit-append/-spif-compile) — spec §3 P1.
 # STRICTLY non-privileged: the closed set of direct deps this crate links is
-# maknae-proto, maknae-vault, maknae-config, maknae-msgs, maknae-io, maknae-agent, clap,
+# maknae-proto, maknae-vault, maknae-config, maknae-msgs, maknae-io, maknae-agent, maknae-seal, clap,
 # tokio, nix, zeroize, yaml-rust2, rpassword, and macOS-only security-framework — no
 # maknae-mcp either. maknae-agent is non-privileged; it is the loop's decision code and its
 # four direct deps are maknae-proto, serde, serde_json and zeroize. No gate enforces this
@@ -76,7 +78,7 @@ security-framework = "3"
 # `yaml-rust2`/`rpassword`/`security-framework` are `enroll/`-only; `nix`/`zeroize` serve `enroll/` and `login`/`tty`
 # (spec §4.1-§4.6); `cli.rs`'s wire path touches `maknae-proto`, `maknae-vault`,
 # `maknae-config`, `maknae-msgs`, `clap` and `maknae-io` (delegation arming); `agent.rs`
-# adds `maknae-agent` and nothing else.
+# adds `maknae-agent` and `maknae-seal` and nothing else.
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

@@ -1,21 +1,16 @@
 //! Gated live loopback — runbook ch.2. Stands up BOTH planes in one process against the
-//! operator's real Vault (two config dirs, each with its own seeded standing raw
-//! SecretID and its own minted leaf), does a real mTLS + peer-cred round-trip over a
-//! real UDS. #[ignore]; operator-present only.
+//! operator's real Vault (the kernel dir with its seeded standing raw SecretID, the CLI
+//! dir with a `maknae login` token), mints both leaves, and does a real mTLS + peer-cred
+//! round-trip over a real UDS. #[ignore]; operator-present only.
 //!
-//! Each config dir follows the same layout as `live_smoke.rs` (see docs/runbook.md),
-//! including a `<prefix>-secret-id` file holding a standing raw SecretID (no wrapping;
-//! ADR-0018) — the env vars below are named after the same `MAKNAE_CONFIG_DIR`
-//! convention the CLI/kernel use, one per plane since this test needs two dirs at once:
-//!
-//!   MAKNAE_KERNEL_CONFIG_DIR=~/.maknae MAKNAE_CLI_CONFIG_DIR=~/.maknae-cli \
+//!   MAKNAE_KERNEL_CONFIG_DIR=/etc/maknae MAKNAE_CLI_CONFIG_DIR=~/.maknae \
 //!     cargo test -p maknae-vault --test live_transport_smoke -- --ignored --nocapture
 #![cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::test]
-#[ignore = "needs live Vault + two seeded standing raw SecretIDs + a real UDS (operator-gated)"]
+#[ignore = "needs live Vault + a kernel SecretID and a CLI maknae login token + a real UDS (operator-gated)"]
 async fn plane_to_plane_roundtrip() {
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
@@ -38,13 +33,27 @@ async fn plane_to_plane_roundtrip() {
     let kca = maknae_vault::load_ca_pin(std::path::Path::new(&kdir)).unwrap();
     let listener = maknae_vault::PlaneListener::bind(&sock, &kclient, &kca, None).unwrap();
 
-    let cclient = maknae_vault::PlaneClient::from_config_dir(
-        std::path::Path::new(&cdir),
-        maknae_vault::Plane::Cli,
+    let cdir = std::path::Path::new(&cdir);
+    let cdoc = maknae_config::load_config(
+        cdir,
+        &[maknae_config::SectionSpec {
+            name: maknae_vault::VAULT_SECTION.to_string(),
+            required: true,
+        }],
     )
     .unwrap();
+    let vault = maknae_vault::vault_config_from_document(&cdoc).unwrap();
+    let api =
+        maknae_vault::VaultApi::new(&vault.addr, &cdir.join("tls").join("vault-ca.crt")).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let token = maknae_vault::load_user_token(cdir, api.vault_addr(), now)
+        .expect("run `maknae login` with MAKNAE_CONFIG_DIR set to the CLI config dir first");
+    let cclient = maknae_vault::PlaneClient::for_user(&cdoc, cdir, token).unwrap();
     cclient.mint().await.expect("cli mint");
-    let cca = maknae_vault::load_ca_pin(std::path::Path::new(&cdir)).unwrap();
+    let cca = maknae_vault::load_ca_pin(cdir).unwrap();
 
     let srv = tokio::spawn(async move {
         // Prompt raw accept, then the bounded handshake — the same anti-DoS split the daemon

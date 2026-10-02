@@ -1034,6 +1034,7 @@ dependencies = [
  "maknae-io",
  "maknae-msgs",
  "maknae-proto",
+ "maknae-seal",
  "maknae-vault",
  "nix",
  "rpassword",

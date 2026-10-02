@@ -114,17 +114,11 @@ pub(crate) fn item_refs(
 pub(crate) type OpenedKeychain =
     Result<security_framework::os::macos::keychain::SecKeychain, security_framework::base::Error>;
 
-#[cfg(not(target_os = "macos"))]
-pub(crate) type OpenedKeychain = ();
-
 // The default keychain is the one the enroll helper adds the CLI item to.
 #[cfg(target_os = "macos")]
 pub(crate) fn default_keychain() -> OpenedKeychain {
     security_framework::os::macos::keychain::SecKeychain::default()
 }
-
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn default_keychain() -> OpenedKeychain {}
 
 #[cfg(target_os = "macos")]
 pub(crate) fn read_cli_secret_in(
@@ -139,15 +133,6 @@ pub fn read_cli_secret_from(
     keychain: &security_framework::os::macos::keychain::SecKeychain,
 ) -> Result<Zeroizing<String>, VaultError> {
     read_cli_secret_in(|| Ok(keychain.clone()))
-}
-
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn read_cli_secret_in(
-    _open: impl FnOnce() -> OpenedKeychain,
-) -> Result<Zeroizing<String>, VaultError> {
-    Err(VaultError::CredentialSource(
-        "the keychain source exists only on macOS".to_string(),
-    ))
 }
 
 #[cfg(not(target_os = "macos"))]

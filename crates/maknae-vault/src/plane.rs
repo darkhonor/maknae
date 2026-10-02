@@ -1,5 +1,4 @@
-//! The two planes. Each maps to THREE distinct names — never hardcode a bare
-//! `maknae`/`maknaed` string; derive from here (spec §3 tri-naming).
+//! The two planes. Never hardcode a bare `maknae`/`maknaed` string; derive from here (spec §3 tri-naming).
 
 /// Which plane a client acts as.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -11,14 +10,6 @@ pub enum Plane {
 }
 
 impl Plane {
-    /// AppRole role used to LOG IN.
-    pub fn approle_role(&self) -> &'static str {
-        match self {
-            Plane::Kernel => "maknaed",
-            Plane::Cli => "maknae",
-        }
-    }
-
     /// PKI role used to `pki/sign`.
     pub fn pki_sign_role(&self) -> &'static str {
         match self {
@@ -27,11 +18,11 @@ impl Plane {
         }
     }
 
-    /// Config-file prefix (`<prefix>-approle-id`, `<prefix>-secret-id`).
-    pub fn config_prefix(&self) -> &'static str {
+    /// Config-file prefix (`<prefix>-approle-id`, `<prefix>-secret-id`); only the kernel plane has an AppRole.
+    pub fn config_prefix(&self) -> Option<&'static str> {
         match self {
-            Plane::Kernel => "maknaed",
-            Plane::Cli => "maknae",
+            Plane::Kernel => Some("maknaed"),
+            Plane::Cli => None,
         }
     }
 
@@ -75,9 +66,8 @@ mod tests {
 
     #[test]
     fn kernel_names() {
-        assert_eq!(Plane::Kernel.approle_role(), "maknaed");
         assert_eq!(Plane::Kernel.pki_sign_role(), "maknae-kernel");
-        assert_eq!(Plane::Kernel.config_prefix(), "maknaed");
+        assert_eq!(Plane::Kernel.config_prefix(), Some("maknaed"));
         assert_eq!(
             Plane::Kernel.uri_san("dev-01"),
             "maknae://dev-01/plane/kernel"
@@ -92,9 +82,8 @@ mod tests {
 
     #[test]
     fn cli_names() {
-        assert_eq!(Plane::Cli.approle_role(), "maknae");
         assert_eq!(Plane::Cli.pki_sign_role(), "maknae-cli");
-        assert_eq!(Plane::Cli.config_prefix(), "maknae");
+        assert_eq!(Plane::Cli.config_prefix(), None);
         assert_eq!(Plane::Cli.uri_san("dev-01"), "maknae://dev-01/plane/cli");
     }
 

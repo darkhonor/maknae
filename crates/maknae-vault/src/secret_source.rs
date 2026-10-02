@@ -1,5 +1,5 @@
 //! Per-plane SecretID credential-SOURCE resolution (spec §5.1) — PURE decision logic,
-//! no I/O. The daemon (`Plane::Kernel`) and the CLI (`Plane::Cli`) each have their own
+//! no I/O. The daemon (`Plane::Kernel`) and the egress deputy each have their own
 //! ordered list of places a SecretID may come from; this module decides WHICH source
 //! wins, `secret_io.rs` then reads it. Keeping resolution pure (no filesystem/env
 //! reads inside these functions — the caller supplies already-observed inputs) is what
@@ -24,12 +24,6 @@ pub const MAX_SEAL_KEY_BYTES: usize = 512;
 const SEAL_KEY_LENGTH: &str = "empty or over 512 bytes";
 const SEAL_KEY_NOT_HEX: &str = "not lower-case hexadecimal of even length";
 
-/// The CLI's user-scoped `systemd-creds` credential file name.
-const CLI_USER_CREDS_FILE: &str = "maknae-secret-id.cred";
-
-/// The CLI's residual plaintext file name (RHEL-9 fallback / no user-creds target).
-const CLI_RESIDUAL_FILE: &str = "maknae-secret-id";
-
 /// Where the daemon's (`maknaed`) standing SecretID comes from — resolved by
 /// [`resolve_daemon_secret_source`], read by `secret_io::read_daemon_secret`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,27 +38,8 @@ pub enum DaemonSecretSource {
     PlaintextPath(PathBuf),
 }
 
-/// Where the CLI's (`maknae`) SecretID comes from — resolved by
-/// [`resolve_cli_secret_source`], read by `secret_io::read_cli_secret`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CliSecretSource {
-    /// A user-scoped `systemd-creds`-encrypted file (`<cli_dir>/maknae-secret-id.cred`).
-    UserCreds(PathBuf),
-    /// The macOS Keychain (no path — looked up by service/account name at read time).
-    Keychain,
-    /// A residual plaintext file (`<cli_dir>/maknae-secret-id`) — RHEL-9 / no
-    /// user-creds-capable target and no Keychain. The universal fallback: this arm
-    /// never fails to resolve (whether the file actually exists is a read-time
-    /// concern, not a resolution-time one).
-    ResidualFile(PathBuf),
-}
-
 /// A small `Copy` classifier mirroring the three DAEMON source kinds — the posture
-/// record `PlaneClient::secret_source()` exposes for Task 7's audit. Both
-/// [`DaemonSecretSource`] and [`CliSecretSource`] map onto it (the CLI's three
-/// branches are the same POSTURE shape: OS-credential-store-sealed, code-bound
-/// keychain, or plaintext-on-disk) so the audit can reason about "is this
-/// plane's SecretID sealed or plaintext" uniformly across planes.
+/// record `PlaneClient::secret_source()` exposes for Task 7's audit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CredentialSourceKind {
     CredentialsDirectory,
@@ -80,16 +55,6 @@ impl From<&DaemonSecretSource> for CredentialSourceKind {
             }
             DaemonSecretSource::Keychain(_) => CredentialSourceKind::Keychain,
             DaemonSecretSource::PlaintextPath(_) => CredentialSourceKind::PlaintextPath,
-        }
-    }
-}
-
-impl From<&CliSecretSource> for CredentialSourceKind {
-    fn from(src: &CliSecretSource) -> Self {
-        match src {
-            CliSecretSource::UserCreds(_) => CredentialSourceKind::CredentialsDirectory,
-            CliSecretSource::Keychain => CredentialSourceKind::Keychain,
-            CliSecretSource::ResidualFile(_) => CredentialSourceKind::PlaintextPath,
         }
     }
 }
@@ -237,33 +202,6 @@ fn nibble(c: u8) -> Result<u8, VaultError> {
     }
 }
 
-/// Resolve the CLI's SecretID source. Resolution order — first match wins:
-///
-/// 1. `<cli_dir>/maknae-secret-id.cred` (if `target_has_user_creds` — a user-scoped
-///    `systemd-creds`-encrypted file is available on this target).
-/// 2. The macOS Keychain (if `macos`).
-/// 3. `<cli_dir>/maknae-secret-id` — the residual plaintext fallback (RHEL-9 /
-///    no user-creds target and no Keychain). This arm is infallible: it always
-///    resolves to a path, whether or not that file exists (existence is a
-///    read-time concern).
-pub fn resolve_cli_secret_source(
-    cli_dir: &Path,
-    target_has_user_creds: bool,
-    macos: bool,
-) -> Result<CliSecretSource, VaultError> {
-    if target_has_user_creds {
-        return Ok(CliSecretSource::UserCreds(
-            cli_dir.join(CLI_USER_CREDS_FILE),
-        ));
-    }
-    if macos {
-        return Ok(CliSecretSource::Keychain);
-    }
-    Ok(CliSecretSource::ResidualFile(
-        cli_dir.join(CLI_RESIDUAL_FILE),
-    ))
-}
-
 /// `$CREDENTIALS_DIRECTORY`: unset is `None`; set but not UTF-8 refuses rather
 /// than reading as unset (#76 codex r3).
 pub fn credentials_directory_env() -> Result<Option<String>, VaultError> {
@@ -388,44 +326,6 @@ mod tests {
         ));
     }
 
-    // ---- CLI resolution -------------------------------------------------------
-
-    #[test]
-    fn cli_prefers_user_creds() {
-        let s = resolve_cli_secret_source(Path::new("/home/u/.maknae"), true, true).unwrap();
-        assert!(matches!(s, CliSecretSource::UserCreds(p) if p.ends_with("maknae-secret-id.cred")));
-    }
-
-    #[test]
-    fn cli_falls_back_to_keychain_on_macos() {
-        let s = resolve_cli_secret_source(Path::new("/home/u/.maknae"), false, true).unwrap();
-        assert_eq!(s, CliSecretSource::Keychain);
-    }
-
-    #[test]
-    fn cli_falls_back_to_residual_file() {
-        let s = resolve_cli_secret_source(Path::new("/home/u/.maknae"), false, false).unwrap();
-        assert!(matches!(s, CliSecretSource::ResidualFile(p) if p.ends_with("maknae-secret-id")));
-    }
-
-    /// Mutation probe: swapping the user-creds/keychain order arms would make this
-    /// resolve to Keychain instead of UserCreds when BOTH are available.
-    #[test]
-    fn cli_order_is_usercreds_then_keychain_then_residual() {
-        assert!(matches!(
-            resolve_cli_secret_source(Path::new("/d"), true, true).unwrap(),
-            CliSecretSource::UserCreds(_)
-        ));
-        assert!(matches!(
-            resolve_cli_secret_source(Path::new("/d"), false, true).unwrap(),
-            CliSecretSource::Keychain
-        ));
-        assert!(matches!(
-            resolve_cli_secret_source(Path::new("/d"), false, false).unwrap(),
-            CliSecretSource::ResidualFile(_)
-        ));
-    }
-
     // ---- CredentialSourceKind mapping -----------------------------------------
 
     #[test]
@@ -442,22 +342,6 @@ mod tests {
         );
         assert_eq!(
             CredentialSourceKind::from(&DaemonSecretSource::PlaintextPath(PathBuf::from("/x"))),
-            CredentialSourceKind::PlaintextPath
-        );
-    }
-
-    #[test]
-    fn cli_source_kind_mapping() {
-        assert_eq!(
-            CredentialSourceKind::from(&CliSecretSource::UserCreds(PathBuf::from("/x"))),
-            CredentialSourceKind::CredentialsDirectory
-        );
-        assert_eq!(
-            CredentialSourceKind::from(&CliSecretSource::Keychain),
-            CredentialSourceKind::Keychain
-        );
-        assert_eq!(
-            CredentialSourceKind::from(&CliSecretSource::ResidualFile(PathBuf::from("/x"))),
             CredentialSourceKind::PlaintextPath
         );
     }

@@ -6,9 +6,12 @@ use maknae_agent::budget::{prompt_cap, ContextBudget, Meter, Notice};
 use maknae_agent::drive::{drive, Budget, StopReason};
 use maknae_agent::plane::{Plane, PlaneError, ReadBasis, ReadOutcome, ReadPage, WriteOutcome};
 use maknae_agent::transcript::Transcript;
-use maknae_config::Value;
-use maknae_proto::{Payload, Turn, Verb};
-use maknae_vault::PlaneClient;
+use maknae_config::{UserProviderEntry, UserProviders, Value};
+use maknae_proto::{Payload, ProviderChoice, SealedKey, Turn, Verb};
+use maknae_seal::{SealAad, SealContext, SealPublicKey};
+use maknae_vault::{PlaneClient, UserToken, VaultApi, VaultError, WrappedSecret};
+use std::future::Future;
+use std::path::Path;
 
 pub const AGENT_SECTION: &str = "agent";
 const AGENT_KEYS: [&str; 2] = ["max_steps", "max_tool_calls_per_step"];
@@ -55,33 +58,131 @@ fn bounded_u32(
     }
 }
 
-pub const USER_PROVIDER_SECTION: &str = "provider";
-const USER_PROVIDER_KEYS: [&str; 2] = ["context_tokens", "output_tokens"];
+pub fn key_location<'a>(
+    kv_mount: Option<&'a str>,
+    user_prefix: Option<&'a str>,
+) -> Result<(&'a str, &'a str), String> {
+    let missing = |key: &str| {
+        format!("vault.{key} is not set in your maknae.yaml: `sudo maknae enroll` writes it")
+    };
+    Ok((
+        kv_mount.ok_or_else(|| missing("kv_mount"))?,
+        user_prefix.ok_or_else(|| missing("user_prefix"))?,
+    ))
+}
 
-/// The subject's own declaration of the model's window (#372). Advisory like
-/// the `agent` bounds: it paces the loop, and the kernel bounds the reply cap.
-pub fn user_budget_from_section(v: Option<&Value>) -> Result<ContextBudget, String> {
-    let entries = match v {
-        None => &[][..],
-        Some(Value::Map(entries)) => entries.as_slice(),
-        Some(_) => return Err(format!("{USER_PROVIDER_SECTION}: section must be a map")),
-    };
-    maknae_config::reject_unknown_keys(USER_PROVIDER_SECTION, entries, &USER_PROVIDER_KEYS)
-        .map_err(|e| e.to_string())?;
-    let tokens = |key: &str| -> Result<Option<u64>, String> {
-        match entries.iter().find(|(k, _)| k == key).map(|(_, v)| v) {
-            None => Ok(None),
-            Some(Value::Int(n)) => u64::try_from(*n)
-                .map(Some)
-                .map_err(|_| format!("{USER_PROVIDER_SECTION}.{key}: must not be negative")),
-            Some(_) => Err(format!("{USER_PROVIDER_SECTION}.{key}: must be an integer")),
+pub fn choose_entry<'a>(
+    providers: &'a UserProviders,
+    label: Option<&str>,
+    dir: &Path,
+) -> Result<&'a UserProviderEntry, String> {
+    if providers.is_empty() {
+        return Err(format!(
+            "no model access: no providers are defined in {}",
+            dir.join(maknae_config::USER_PROVIDERS_FILE).display()
+        ));
+    }
+    providers.select(label).map_err(|e| e.to_string())
+}
+
+pub const LOGIN_EXPIRED: &str = "your Vault login expired: run `maknae login`";
+
+pub const PROMPT_REFUSED: &str = "the kernel refused the exchange — whether the prompt reached the provider is in the host's audit trail (ask your administrator); if it did not, check that ~/.maknae/providers.yaml names a provider and model your administrator has authorized for your role and the key subpath and field of your own Vault secret, that your maknae.yaml vault block matches the host's, and that your login is current (maknae login)";
+
+pub fn login_expired(expires_at: u64, now: u64) -> bool {
+    now.saturating_add(maknae_vault::TOKEN_EXPIRY_MARGIN.as_secs()) >= expires_at
+}
+
+pub fn key_read_failure(label: &str, e: &VaultError) -> String {
+    match e {
+        VaultError::VaultStatus { status: 403, .. } => format!(
+            "Vault refused to read the key for provider entry {label} (HTTP 403): the key is \
+             outside your Vault policy, or your login was revoked: run `maknae login`"
+        ),
+        VaultError::VaultStatus { status: 404, .. } => {
+            format!("no key is stored in Vault for provider entry {label}: store it, then retry")
         }
+        other => format!("reading the key for provider entry {label} from Vault failed: {other}"),
+    }
+}
+
+fn seal_key_from(pem: &str) -> Result<SealPublicKey, String> {
+    SealPublicKey::from_pem(pem).map_err(|e| {
+        format!(
+            "the Egress Daemon public key published on this host is not usable ({e}): ask your \
+             administrator to run `sudo maknae enroll`"
+        )
+    })
+}
+
+fn token_copy(token: &UserToken) -> Result<UserToken, String> {
+    let mut copy = zeroize::Zeroizing::new(String::with_capacity(token.expose().len()));
+    copy.push_str(token.expose());
+    UserToken::new(copy).map_err(|e| e.to_string())
+}
+
+pub struct KeyContext<'a> {
+    pub entry: &'a UserProviderEntry,
+    pub kv_mount: &'a str,
+    pub user_prefix: &'a str,
+    pub username: &'a str,
+    pub seal_key: &'a SealPublicKey,
+    pub expires_at: u64,
+}
+
+pub async fn turn_choice<F, Fut>(
+    key: &KeyContext<'_>,
+    conversation: &str,
+    now: u64,
+    read: F,
+) -> Result<ProviderChoice, String>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: Future<Output = Result<WrappedSecret, VaultError>>,
+{
+    let entry = key.entry;
+    if login_expired(key.expires_at, now) {
+        return Err(LOGIN_EXPIRED.to_string());
+    }
+    let unusable = || {
+        format!(
+            "provider entry {}: its key's Vault path is not acceptable (check vault.kv_mount, \
+             vault.user_prefix and the entry's key subpath)",
+            entry.label
+        )
     };
-    let context = tokens("context_tokens")?.ok_or_else(|| {
-        format!("{USER_PROVIDER_SECTION}.context_tokens is required by maknae agent: declare the model's context window in tokens")
-    })?;
-    ContextBudget::new(context, tokens("output_tokens")?)
-        .map_err(|e| format!("{USER_PROVIDER_SECTION}: {e}"))
+    let secret_path =
+        maknae_config::user_key_path(key.user_prefix, key.username, &entry.key_subpath)
+            .map_err(|_| unusable())?;
+    let expected =
+        maknae_vault::kv_data_path(key.kv_mount, &secret_path).map_err(|_| unusable())?;
+    let wrapped = read(secret_path)
+        .await
+        .map_err(|e| key_read_failure(&entry.label, &e))?;
+    let sealing = |e: &dyn std::fmt::Display| {
+        format!(
+            "sealing the key for provider entry {} failed: {e}",
+            entry.label
+        )
+    };
+    let aad = SealAad::new(&SealContext {
+        conversation,
+        provider: &entry.provider,
+        model: &entry.model,
+        expected_path: expected.as_str(),
+        key_field: &entry.key_field,
+    })
+    .map_err(|e| sealing(&e))?;
+    let blob = maknae_seal::seal(key.seal_key, &aad, wrapped.token.expose().as_bytes())
+        .map_err(|e| sealing(&e))?;
+    let sealed_key = SealedKey::new(blob.into_bytes()).map_err(|e| sealing(&e))?;
+    Ok(ProviderChoice {
+        provider: entry.provider.clone(),
+        model: entry.model.clone(),
+        key_subpath: entry.key_subpath.clone(),
+        key_field: entry.key_field.clone(),
+        sealed_key,
+    })
 }
 
 /// `Some(parsed)` only when the subject's `transport` section sets the key;
@@ -210,10 +311,9 @@ pub fn check_for(basis: ReadBasis) -> crate::mutation::WriteCheck {
 /// write mappers are: it is a CONTROL. A `BadRequest` on `session.prompt` is a
 /// pre-gate fault on the request's own shape — `maknae agent "   "` is refused
 /// for carrying no text to send, and provably never reached the provider: no
-/// egress block was opened and no intent record was written. Reporting that as
-/// "whether the prompt reached the provider is in the audit trail" points the
-/// subject at the EGRESS INTENT, which does not exist for this case — no
-/// exchange was attempted — for a fault they can fix from the message. What
+/// egress block was opened and no intent record was written. Reporting that
+/// with [`PROMPT_REFUSED`] would send the subject to their providers.yaml and
+/// their login for a fault they can fix from the message. What
 /// the trail does hold is the pre-gate deny: the kernel appends
 /// `emit_request_outcome` with a `deny` and the reason
 /// `prompt fails operand pre-gate: …` before it writes the `BadRequest` back,
@@ -247,6 +347,9 @@ pub struct RealPlane<'a> {
     pub ca: &'a maknae_vault::CaBundle,
     pub output_tokens: Option<u64>,
     pub write_max: usize,
+    pub api: &'a VaultApi,
+    pub token: &'a UserToken,
+    pub key: KeyContext<'a>,
 }
 
 impl Plane for RealPlane<'_> {
@@ -255,11 +358,19 @@ impl Plane for RealPlane<'_> {
         conversation: &str,
         turns: &[Turn],
     ) -> Result<maknae_proto::PromptReply, PlaneError> {
+        let now = crate::login::now_unix().map_err(PlaneError::Transport)?;
+        let (api, token, kv_mount) = (self.api, self.token, self.key.kv_mount);
+        let choice = turn_choice(&self.key, conversation, now, |path| async move {
+            api.read_wrapped(token, kv_mount, &path, maknae_vault::USER_KEY_WRAP_TTL)
+                .await
+        })
+        .await
+        .map_err(PlaneError::Transport)?;
         let verb = Verb::SessionPrompt {
             conversation: conversation.to_string(),
             turns: turns.to_vec(),
             output_tokens: self.output_tokens,
-            choice: None,
+            choice: Some(choice),
         };
         // Measured against the frame cap BEFORE sending (ADR-0023 d7). This
         // encodes once here and once inside send_verb; accepted for Cooky.
@@ -352,13 +463,7 @@ pub fn stop_line(r: Option<&StopReason>, budget: &Budget) -> String {
         Some(StopReason::FrameBound) => {
             "stopped: the conversation has reached the platform's frame bound".into()
         }
-        // NOT "refused the prompt" (corrected 2026-09-22, #241): the kernel
-        // answers `LandedUndelivered`, `DeadlineExpired` and `OutcomeUnknown`
-        // with the same generic `Unauthorized`, so the prompt may well have
-        // reached the provider. Only the trail knows which.
-        Some(StopReason::PromptRefused) => {
-            "stopped: the kernel refused the exchange — whether the prompt reached the provider is in the audit trail".into()
-        }
+        Some(StopReason::PromptRefused) => format!("stopped: {PROMPT_REFUSED}"),
         // Distinct from the line above, and the distinction is the point: a
         // `BadRequest` on the prompt leg is a pre-gate fault on the request's
         // own shape, decided before any exchange was attempted, so nothing
@@ -388,8 +493,8 @@ pub fn stop_line(r: Option<&StopReason>, budget: &Budget) -> String {
     }
 }
 
-/// Mirrors `execute()`'s setup exactly (FIPS provider, config, mint, revoke).
-pub async fn run(prompt: String) -> Result<u8, String> {
+/// Mirrors `execute()`'s setup (FIPS provider, config, user token, mint).
+pub async fn run(label: Option<String>, prompt: String) -> Result<u8, String> {
     maknae_vault::install_default_crypto_provider();
     let dir = crate::cli::resolve_config_dir();
     let document = maknae_config::load_config(&dir, &crate::cli::cli_config_specs())
@@ -398,7 +503,16 @@ pub async fn run(prompt: String) -> Result<u8, String> {
         maknae_config::transport_from_section(document.section(maknae_config::TRANSPORT_SECTION))
             .map_err(|e| e.to_string())?;
     let agent = agent_from_section(document.section(AGENT_SECTION))?;
-    let context = user_budget_from_section(document.section(USER_PROVIDER_SECTION))?;
+    let vault = maknae_vault::vault_config_from_document(&document).map_err(|e| e.to_string())?;
+    let (kv_mount, user_prefix) =
+        key_location(vault.kv_mount.as_deref(), vault.user_prefix.as_deref())?;
+    let providers = maknae_config::load_user_providers(&dir).map_err(|e| e.to_string())?;
+    let entry = choose_entry(&providers, label.as_deref(), &dir)?;
+    let context = ContextBudget::new(entry.context_tokens, entry.output_tokens)
+        .map_err(|e| format!("provider entry {}: {e}", entry.label))?;
+    let username = crate::login::local_username()?;
+    let seal_key = seal_key_from(&maknae_vault::read_seal_pub_pem().map_err(|e| e.to_string())?)?;
+    let session = crate::login::user_session(&document, &dir)?;
     let explicit = explicit_prompt_cap(
         document.section(maknae_config::TRANSPORT_SECTION),
         transport.prompt_max_bytes,
@@ -406,7 +520,7 @@ pub async fn run(prompt: String) -> Result<u8, String> {
     let write_max = transport.prompt_max_bytes;
     let mut transport = transport;
     transport.prompt_max_bytes = loop_prompt_cap(context.context_tokens(), explicit);
-    let client = PlaneClient::from_document(&document, &dir, maknae_vault::Plane::Cli)
+    let client = PlaneClient::for_user(&document, &dir, token_copy(&session.token)?)
         .map_err(|e| e.to_string())?;
     let ca = maknae_vault::load_ca_pin(&dir).map_err(|e| e.to_string())?;
     client.mint().await.map_err(|e| e.to_string())?;
@@ -416,6 +530,16 @@ pub async fn run(prompt: String) -> Result<u8, String> {
         ca: &ca,
         output_tokens: context.output_tokens(),
         write_max,
+        api: &session.api,
+        token: &session.token,
+        key: KeyContext {
+            entry,
+            kv_mount,
+            user_prefix,
+            username: &username,
+            seal_key: &seal_key,
+            expires_at: session.expires_at,
+        },
     };
     let mut transcript = Transcript::new(mint_conversation_id(), &prompt);
     let budget = Budget {
@@ -430,7 +554,7 @@ pub async fn run(prompt: String) -> Result<u8, String> {
         &mut |n| eprintln!("{}", warning_line(n)),
     )
     .await;
-    client.shutdown().await; // revoke on EVERY path, as execute() does
+    client.shutdown().await;
     if let Some(answer) = outcome.answer {
         println!("{answer}");
         return Ok(0);
@@ -449,38 +573,6 @@ mod tests {
         maknae_config::load_str(s).unwrap()
     }
     #[test]
-    fn the_user_provider_block_is_bounded_and_closed() {
-        let p = |s: &str| user_budget_from_section(Some(&yaml(s)));
-        let ok = p("context_tokens: 128000\noutput_tokens: 16000\n").unwrap();
-        assert_eq!(
-            (ok.context_tokens(), ok.prompt_budget(), ok.output_tokens()),
-            (128_000, 112_000, Some(16_000))
-        );
-        let bare = p("context_tokens: 1537\n").unwrap();
-        assert_eq!((bare.context_tokens(), bare.output_tokens()), (1_537, None));
-        assert!(user_budget_from_section(None)
-            .unwrap_err()
-            .contains("context_tokens is required"));
-        assert!(p("output_tokens: 10\n")
-            .unwrap_err()
-            .contains("context_tokens is required"));
-        assert!(p("context_tokens: -1\n").unwrap_err().contains("negative"));
-        for bad in [
-            "context_tokens: 1536\n",
-            "context_tokens: 16777217\n",
-            "context_tokens: 4096\noutput_tokens: 4096\n",
-            "context_tokens: 4096\noutput_tokens: -5\n",
-            "context_tokens: lots\n",
-            "context_tokens: 4096\noutput_tokens: many\n",
-            "- 1\n",
-        ] {
-            assert!(p(bad).is_err(), "{bad}");
-        }
-        assert!(p("context_tokens: 4096\nendpoint: https://x\n")
-            .unwrap_err()
-            .contains("endpoint"));
-    }
-    #[test]
     fn only_a_set_prompt_max_bytes_is_explicit() {
         let set = yaml("prompt_max_bytes: 65536\n");
         assert_eq!(explicit_prompt_cap(Some(&set), 65_536), Some(65_536));
@@ -493,6 +585,340 @@ mod tests {
         assert_eq!(loop_prompt_cap(128_000, None), 768_000);
         assert_eq!(loop_prompt_cap(128_000, Some(65_536)), 65_536);
         assert_eq!(loop_prompt_cap(1_537, Some(1_048_576)), 65_536);
+    }
+    const FULL_PATH: &str = "maknae-kv/data/maknae/users/alice/openai/personal";
+
+    fn entry() -> maknae_config::UserProviderEntry {
+        maknae_config::UserProviderEntry {
+            label: "work".into(),
+            provider: "openai".into(),
+            model: "gpt-5.6-luna".into(),
+            key_subpath: "openai/personal".into(),
+            key_field: "api_key".into(),
+            context_tokens: 128_000,
+            output_tokens: Some(16_000),
+            default: true,
+        }
+    }
+
+    fn key<'a>(
+        e: &'a maknae_config::UserProviderEntry,
+        seal_key: &'a maknae_seal::SealPublicKey,
+        kv_mount: &'a str,
+    ) -> KeyContext<'a> {
+        KeyContext {
+            entry: e,
+            kv_mount,
+            user_prefix: "maknae/users",
+            username: "alice",
+            seal_key,
+            expires_at: 10_000,
+        }
+    }
+
+    fn wrapped(token: &str) -> maknae_vault::WrappedSecret {
+        maknae_vault::WrappedSecret {
+            token: maknae_vault::WrappingToken::new(zeroize::Zeroizing::new(token.into())).unwrap(),
+            ttl: std::time::Duration::from_secs(60),
+            creation_path: FULL_PATH.into(),
+            creation_time: "2026-10-02T00:00:00Z".into(),
+        }
+    }
+
+    fn aad(
+        conversation: &str,
+        provider: &str,
+        model: &str,
+        path: &str,
+        field: &str,
+    ) -> maknae_seal::SealAad {
+        maknae_seal::SealAad::new(&maknae_seal::SealContext {
+            conversation,
+            provider,
+            model,
+            expected_path: path,
+            key_field: field,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn both_vault_key_locations_are_required_and_each_is_named() {
+        assert_eq!(
+            key_location(Some("maknae-kv"), Some("maknae/users")),
+            Ok(("maknae-kv", "maknae/users"))
+        );
+        let kv = "vault.kv_mount is not set in your maknae.yaml: `sudo maknae enroll` writes it";
+        assert_eq!(key_location(None, Some("maknae/users")).unwrap_err(), kv);
+        assert_eq!(key_location(None, None).unwrap_err(), kv);
+        assert_eq!(
+            key_location(Some("maknae-kv"), None).unwrap_err(),
+            "vault.user_prefix is not set in your maknae.yaml: `sudo maknae enroll` writes it"
+        );
+    }
+
+    #[test]
+    fn the_entry_is_the_default_or_the_named_label_and_no_entries_means_no_model_access() {
+        let dir = std::path::Path::new("/home/alice/.maknae");
+        let none = maknae_config::user_providers_from_document(&yaml("providers: []\n")).unwrap();
+        let no_access =
+            "no model access: no providers are defined in /home/alice/.maknae/providers.yaml";
+        assert_eq!(choose_entry(&none, None, dir).unwrap_err(), no_access);
+        assert_eq!(
+            choose_entry(&none, Some("work"), dir).unwrap_err(),
+            no_access
+        );
+        let two = maknae_config::user_providers_from_document(&yaml(
+            "providers:\n\
+             \x20 - label: work\n    provider: openai\n    model: gpt-5.6-luna\n\
+             \x20   key: { subpath: openai/personal, field: api_key }\n\
+             \x20   context_tokens: 128000\n    default: true\n\
+             \x20 - label: home\n    provider: openai\n    model: gpt-5.6\n\
+             \x20   key: { subpath: openai/home, field: api_key }\n\
+             \x20   context_tokens: 128000\n",
+        ))
+        .unwrap();
+        assert_eq!(choose_entry(&two, None, dir).unwrap().label, "work");
+        assert_eq!(choose_entry(&two, Some("home"), dir).unwrap().label, "home");
+        let unknown = choose_entry(&two, Some("nope"), dir).unwrap_err();
+        assert!(unknown.contains("nope"), "{unknown}");
+    }
+
+    #[tokio::test]
+    async fn a_turn_reads_the_wrapped_key_then_seals_it_to_exactly_this_request() {
+        let recipient = maknae_seal::SealPrivateKey::generate().unwrap();
+        let e = entry();
+        let k = key(&e, recipient.public_key(), "maknae-kv");
+        let asked = std::sync::Mutex::new(Vec::new());
+        let choice = turn_choice(&k, "c-153", 1_000, |path| {
+            asked.lock().unwrap().push(path);
+            async { Ok(wrapped("hvs.wrap-sentinel-153")) }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            *asked.lock().unwrap(),
+            ["maknae/users/alice/openai/personal"]
+        );
+        assert_eq!(
+            (
+                choice.provider.as_str(),
+                choice.model.as_str(),
+                choice.key_subpath.as_str(),
+                choice.key_field.as_str()
+            ),
+            ("openai", "gpt-5.6-luna", "openai/personal", "api_key")
+        );
+        let sealed = choice.sealed_key.as_bytes();
+        let opened = maknae_seal::open(
+            &recipient,
+            &aad("c-153", "openai", "gpt-5.6-luna", FULL_PATH, "api_key"),
+            sealed,
+        )
+        .unwrap();
+        assert!(opened.as_slice() == b"hvs.wrap-sentinel-153");
+        for (i, other) in [
+            aad("c-154", "openai", "gpt-5.6-luna", FULL_PATH, "api_key"),
+            aad("c-153", "anthropic", "gpt-5.6-luna", FULL_PATH, "api_key"),
+            aad("c-153", "openai", "gpt-5.6", FULL_PATH, "api_key"),
+            aad(
+                "c-153",
+                "openai",
+                "gpt-5.6-luna",
+                "maknae/users/alice/openai/personal",
+                "api_key",
+            ),
+            aad(
+                "c-153",
+                "openai",
+                "gpt-5.6-luna",
+                "maknae-kv/data/maknae/users/bob/openai/personal",
+                "api_key",
+            ),
+            aad("c-153", "openai", "gpt-5.6-luna", FULL_PATH, "org"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert!(
+                matches!(
+                    maknae_seal::open(&recipient, other, sealed),
+                    Err(maknae_seal::SealError::Open)
+                ),
+                "AAD row {i} opened"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_expired_login_stops_the_turn_before_vault_is_asked() {
+        let recipient = maknae_seal::SealPrivateKey::generate().unwrap();
+        let e = entry();
+        let k = key(&e, recipient.public_key(), "maknae-kv");
+        let mut asked = 0;
+        let got = turn_choice(&k, "c-153", 9_941, |_| {
+            asked += 1;
+            async { Ok(wrapped("hvs.wrap-sentinel-153")) }
+        })
+        .await;
+        assert_eq!(got.unwrap_err(), LOGIN_EXPIRED);
+        assert_eq!(asked, 0);
+        assert_eq!(
+            LOGIN_EXPIRED,
+            "your Vault login expired: run `maknae login`"
+        );
+        assert_eq!(maknae_vault::TOKEN_EXPIRY_MARGIN.as_secs(), 60);
+        assert!(!login_expired(10_000, 9_939));
+        assert!(login_expired(10_000, 9_940));
+        assert!(login_expired(10_000, 9_941));
+        assert!(login_expired(10_000, 10_000));
+        assert!(login_expired(10_000, 10_001));
+    }
+
+    #[tokio::test]
+    async fn an_unformable_key_path_is_refused_before_vault_is_asked() {
+        let recipient = maknae_seal::SealPrivateKey::generate().unwrap();
+        let e = entry();
+        let long_mount = "k".repeat(1_000);
+        let k = key(&e, recipient.public_key(), &long_mount);
+        let mut asked = 0;
+        let got = turn_choice(&k, "c-153", 1_000, |_| {
+            asked += 1;
+            async { Ok(wrapped("hvs.wrap-sentinel-153")) }
+        })
+        .await;
+        assert_eq!(
+            got.unwrap_err(),
+            "provider entry work: its key's Vault path is not acceptable (check vault.kv_mount, vault.user_prefix and the entry's key subpath)"
+        );
+        assert_eq!(asked, 0);
+    }
+
+    #[tokio::test]
+    async fn a_failed_key_read_is_named_and_never_shows_the_path_field_or_token() {
+        use maknae_vault::VaultError;
+        let recipient = maknae_seal::SealPrivateKey::generate().unwrap();
+        let e = entry();
+        let k = key(&e, recipient.public_key(), "maknae-kv");
+        let rows = [
+            (
+                VaultError::VaultStatus {
+                    op: "wrapped KV read",
+                    status: 403,
+                    hint: "the token is expired or revoked (run `maknae login`), or the path is outside your grant",
+                },
+                "Vault refused to read the key for provider entry work (HTTP 403): the key is outside your Vault policy, or your login was revoked: run `maknae login`",
+            ),
+            (
+                VaultError::VaultStatus {
+                    op: "wrapped KV read",
+                    status: 404,
+                    hint: "no secret at this path",
+                },
+                "no key is stored in Vault for provider entry work: store it, then retry",
+            ),
+            (
+                VaultError::VaultTransport {
+                    op: "wrapped KV read",
+                    detail: "connection refused".into(),
+                },
+                "reading the key for provider entry work from Vault failed: Vault wrapped KV read failed: connection refused",
+            ),
+            (
+                VaultError::WrapMismatch(maknae_vault::WrapMismatch::CreationPath),
+                "reading the key for provider entry work from Vault failed: wrapping token refused: the token wraps a different path than this request names",
+            ),
+        ];
+        for (failure, want) in rows {
+            let got = turn_choice(&k, "c-153", 1_000, |_| async move { Err(failure) })
+                .await
+                .unwrap_err();
+            assert_eq!(got, want);
+            for secret in [
+                "openai/personal",
+                "api_key",
+                "alice",
+                "maknae/users",
+                "maknae-kv",
+                "hvs.",
+            ] {
+                assert!(!got.contains(secret), "{secret} in {got}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_published_seal_key_must_parse_and_a_token_copy_is_the_same_token() {
+        let k = maknae_seal::SealPrivateKey::generate().unwrap();
+        assert!(seal_key_from(&k.public_key().to_pem()).unwrap() == *k.public_key());
+        assert_eq!(
+            seal_key_from("-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----\n").unwrap_err(),
+            "the Egress Daemon public key published on this host is not usable (the sealing public key is not a canonical P-384 SubjectPublicKeyInfo PEM): ask your administrator to run `sudo maknae enroll`"
+        );
+        let t =
+            maknae_vault::UserToken::new(zeroize::Zeroizing::new("hvs.copy-153".into())).unwrap();
+        assert!(token_copy(&t).unwrap().expose() == "hvs.copy-153");
+    }
+
+    #[test]
+    fn an_unauthorized_prompt_prints_one_line_that_names_what_to_check_and_nothing_else() {
+        assert_eq!(
+            prompt_outcome(Ok(SentOutcome::Refused {
+                code: maknae_proto::ProtoErrCode::Unauthorized,
+                message: "not authorized".into(),
+                armed: false,
+            })),
+            Err(PlaneError::Refused)
+        );
+        assert_eq!(
+            PROMPT_REFUSED,
+            "the kernel refused the exchange — whether the prompt reached the provider is in the host's audit trail (ask your administrator); if it did not, check that ~/.maknae/providers.yaml names a provider and model your administrator has authorized for your role and the key subpath and field of your own Vault secret, that your maknae.yaml vault block matches the host's, and that your login is current (maknae login)"
+        );
+        let b = Budget {
+            max_steps: 8,
+            max_tool_calls_per_step: 4,
+        };
+        assert_eq!(
+            stop_line(Some(&StopReason::PromptRefused), &b),
+            format!("stopped: {PROMPT_REFUSED}")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_sealed_key_opens_under_the_creation_path_the_egress_daemon_expects() {
+        let secret_path =
+            maknae_config::user_key_path("maknae/users", "alice", "openai/personal").unwrap();
+        let expect = maknae_vault::WrapExpectation::new(
+            "maknae-kv",
+            &secret_path,
+            "api_key",
+            maknae_vault::USER_KEY_WRAP_TTL,
+        )
+        .unwrap();
+        assert_eq!(
+            maknae_vault::kv_data_path("maknae-kv", &secret_path)
+                .unwrap()
+                .as_str(),
+            expect.creation_path()
+        );
+        assert_eq!(expect.creation_path(), FULL_PATH);
+        let recipient = maknae_seal::SealPrivateKey::generate().unwrap();
+        let e = entry();
+        let k = key(&e, recipient.public_key(), "maknae-kv");
+        let choice = turn_choice(&k, "c-153", 1_000, |_| async {
+            Ok(wrapped("hvs.wrap-sentinel-153"))
+        })
+        .await
+        .unwrap();
+        let egress = aad(
+            "c-153",
+            "openai",
+            "gpt-5.6-luna",
+            expect.creation_path(),
+            expect.field(),
+        );
+        let opened = maknae_seal::open(&recipient, &egress, choice.sealed_key.as_bytes()).unwrap();
+        assert!(opened.as_slice() == b"hvs.wrap-sentinel-153");
     }
     #[test]
     fn the_warning_and_stop_lines_are_exact() {

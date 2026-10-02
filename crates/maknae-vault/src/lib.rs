@@ -88,11 +88,10 @@ pub use seal_pub_store::{
     choose_present, linux_home_from_os_release, seal_pub_path, SealPubHome, MAX_SEAL_PUB_BYTES,
 };
 pub use secret_source::{
-    credentials_directory_env, resolve_cli_secret_source, resolve_daemon_secret_source,
-    resolve_egress_seal_key_source, seal_key_from_hex, seal_key_to_hex, CliSecretSource,
-    CredentialSourceKind, DaemonSecretSource, EgressSealKeySource, SealKeyDer, SealKeyHex,
-    DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME, EGRESS_CREDENTIALS_DIRECTORY_CRED_NAME,
-    EGRESS_SEAL_KEY_CRED_NAME, MAX_SEAL_KEY_BYTES,
+    credentials_directory_env, resolve_daemon_secret_source, resolve_egress_seal_key_source,
+    seal_key_from_hex, seal_key_to_hex, CredentialSourceKind, DaemonSecretSource,
+    EgressSealKeySource, SealKeyDer, SealKeyHex, DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME,
+    EGRESS_CREDENTIALS_DIRECTORY_CRED_NAME, EGRESS_SEAL_KEY_CRED_NAME, MAX_SEAL_KEY_BYTES,
 };
 #[cfg(unix)]
 pub use socket::bind_listener as bind_group_gated_uds;

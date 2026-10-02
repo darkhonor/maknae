@@ -5,10 +5,8 @@
 //! rotation all proceed concurrently (ADR-0018 Decision 3).
 use crate::auth::AppRoleAuth;
 use crate::plane::PlaneTokenSource;
-use crate::secret_io::{read_cli_secret, read_daemon_secret};
-use crate::secret_source::{
-    resolve_cli_secret_source, resolve_daemon_secret_source, CredentialSourceKind,
-};
+use crate::secret_io::read_daemon_secret;
+use crate::secret_source::{resolve_daemon_secret_source, CredentialSourceKind};
 use crate::{
     assert_fips_provider, generate_plane_csr, load_ca_pin, vault_config_from_document,
     verify::verify_plane_uri_san, Plane, UserToken, VaultConfig, VaultError, VAULT_SECTION,
@@ -199,11 +197,12 @@ pub(crate) fn read_secret_credential(path: &Path) -> Result<String, VaultError> 
     }
 }
 
-/// Whether this target has a user-scoped `systemd-creds` credential file for the
-/// CLI — observed here (filesystem), handed to the PURE `resolve_cli_secret_source`
-/// as a plain `bool`.
-fn cli_dir_has_user_creds(cli_dir: &Path) -> bool {
-    cli_dir.join("maknae-secret-id.cred").is_file()
+fn cli_has_no_approle() -> VaultError {
+    VaultError::CredentialSource(
+        "the CLI plane has no AppRole credential: it mints with the user's Vault token \
+         (PlaneClient::for_user)"
+            .to_string(),
+    )
 }
 
 /// Parse the first PEM cert block to DER (for the returned-leaf SAN self-check).
@@ -335,73 +334,40 @@ impl PlaneClient {
         Self::from_document(&doc, dir, plane)
     }
 
-    /// Build from an ALREADY-LOADED config [`Document`] plus the credential dir,
-    /// resolving THIS PLANE's SecretID credential SOURCE (spec §5.1) and reading it,
-    /// then delegating to [`Self::from_document_with_secret`]. **Keeps its exact
-    /// pre-Task-4 signature** — every existing caller (the daemon's `run.rs`, the
-    /// CLI's `cli.rs`) is unaffected.
+    /// Build from an ALREADY-LOADED config [`Document`] plus the credential dir, resolving
+    /// the kernel plane's SecretID credential SOURCE (spec §5.1) and reading it, then
+    /// delegating to [`Self::from_document_with_secret`].
     ///
-    /// **Dispatches on `plane` — the two planes do NOT share a resolver (round-1
-    /// C1 regression guard):**
     /// - `Plane::Kernel` → [`resolve_daemon_secret_source`]: `$CREDENTIALS_DIRECTORY`
     ///   (if set) → the System-keychain pointer (macOS only) → `vault.insecure_plaintext_secret_path`
-    ///   (from config) → fail closed. This is EXACTLY the daemon's pre-existing boot
-    ///   path when `$CREDENTIALS_DIRECTORY` is set — that env var, when present,
-    ///   ALWAYS wins here, never falling through to a CLI-shaped order.
-    /// - `Plane::Cli` → [`resolve_cli_secret_source`]: a user-scoped `systemd-creds`
-    ///   file (if present in `dir`), else the macOS Keychain on macOS, else the
-    ///   residual plaintext file in `dir` — one source per platform; no fallthrough.
+    ///   (from config) → fail closed.
+    /// - `Plane::Cli` is refused before any credential is read: the CLI mints with the
+    ///   user's Vault token ([`PlaneClient::for_user`]).
     ///
     /// `dir` still supplies the non-section credential files (AppRole id / the
     /// resolved SecretID source / CA pins / Vault CA), read from disk, not the
     /// document.
     pub fn from_document(doc: &Document, dir: &Path, plane: Plane) -> Result<Self, VaultError> {
-        Self::from_document_opening(doc, dir, plane, crate::keychain::default_keychain)
-    }
-
-    /// [`Self::from_document`], with the keychain the CLI plane reads named by the caller.
-    pub(crate) fn from_document_opening(
-        doc: &Document,
-        dir: &Path,
-        plane: Plane,
-        open_keychain: impl FnOnce() -> crate::keychain::OpenedKeychain,
-    ) -> Result<Self, VaultError> {
-        // Parsed here (in addition to inside from_document_with_secret) ONLY to
-        // reach `insecure_plaintext_secret_path` before the secret_id is resolved —
-        // vault_config_from_document is a pure in-memory parse of the
-        // already-loaded `doc` (no I/O), so parsing it twice is cheap and safe, not
-        // a double-read of anything sensitive.
+        if plane == Plane::Cli {
+            return Err(cli_has_no_approle());
+        }
         let cfg = vault_config_from_document(doc)?;
-        let (secret_id, kind) = match plane {
-            Plane::Kernel => {
-                let creds = crate::secret_source::credentials_directory_env()?;
-                let pointer = match creds {
-                    None => crate::keychain::observe_pointer(
-                        &crate::keychain_policy::daemon_keychain_dir(dir),
-                        crate::KeychainPlane::Daemon,
-                    )?,
-                    Some(_) => None,
-                };
-                let src = resolve_daemon_secret_source(
-                    creds.as_deref(),
-                    pointer.as_deref(),
-                    cfg.insecure_plaintext_secret_path.as_deref(),
-                )?;
-                let secret = read_daemon_secret(&src)?;
-                (secret, CredentialSourceKind::from(&src))
-            }
-            Plane::Cli => {
-                let src = resolve_cli_secret_source(
-                    dir,
-                    cli_dir_has_user_creds(dir),
-                    cfg!(target_os = "macos"),
-                )?;
-                let secret = read_cli_secret(&src, open_keychain)?;
-                (secret, CredentialSourceKind::from(&src))
-            }
+        let creds = crate::secret_source::credentials_directory_env()?;
+        let pointer = match creds {
+            None => crate::keychain::observe_pointer(
+                &crate::keychain_policy::daemon_keychain_dir(dir),
+                crate::KeychainPlane::Daemon,
+            )?,
+            Some(_) => None,
         };
+        let src = resolve_daemon_secret_source(
+            creds.as_deref(),
+            pointer.as_deref(),
+            cfg.insecure_plaintext_secret_path.as_deref(),
+        )?;
+        let secret_id = read_daemon_secret(&src)?;
         let mut client = Self::from_document_with_secret(doc, dir, plane, secret_id)?;
-        client.secret_source_kind = kind;
+        client.secret_source_kind = CredentialSourceKind::from(&src);
         Ok(client)
     }
 
@@ -438,7 +404,8 @@ impl PlaneClient {
     ) -> Result<Self, VaultError> {
         Self::build(doc, dir, plane, |cfg| {
             // RoleID is non-secret (an identifier), still read from disk here.
-            let role_id = read_trimmed(&dir.join(format!("{}-approle-id", plane.config_prefix())))?;
+            let prefix = plane.config_prefix().ok_or_else(cli_has_no_approle)?;
+            let role_id = read_trimmed(&dir.join(format!("{prefix}-approle-id")))?;
             Ok(PlaneAuth::AppRole(AppRoleAuth {
                 role_id,
                 secret_id,
@@ -924,7 +891,7 @@ mod tests {
         }
 
         /// A complete config dir: `core`+`vault` document, CA-pin trio, and the
-        /// AppRole ids for BOTH planes — everything `from_document` needs EXCEPT
+        /// kernel plane's AppRole id — everything `from_document` needs EXCEPT
         /// the SecretID files/dirs themselves, which each test wires up per
         /// scenario.
         fn new(tag: &str, extra_vault_yaml: &str) -> Self {
@@ -960,7 +927,6 @@ mod tests {
                 std::fs::write(p.join(f), Self::self_signed_pem()).unwrap();
             }
             std::fs::write(p.join("maknaed-approle-id"), "maknaed-role-id\n").unwrap();
-            std::fs::write(p.join("maknae-approle-id"), "maknae-role-id\n").unwrap();
             DispatchFixture(p)
         }
 
@@ -1173,60 +1139,37 @@ mod tests {
         let _ = std::fs::remove_file(&plain);
     }
 
-    /// The other half of the regression guard: with `$CREDENTIALS_DIRECTORY`
-    /// STILL populated (same env as the first test), `Plane::Cli` must NOT read
-    /// it — proving the two planes do not share a resolver. The CLI's own order
-    /// differs by platform: on macOS it reads a scratch keychain holding a
-    /// sentinel (#76), elsewhere the residual plaintext file. A regression that
-    /// shared the resolver would land on `CredentialsDirectory` with the KERNEL
-    /// secret value instead.
     #[test]
-    fn cli_dispatch_ignores_credentials_directory_uses_cli_order() {
-        let _g = ENV_LOCK.lock().unwrap();
-        #[cfg(target_os = "macos")]
-        let _serial = crate::keychain::tests::KEYCHAIN_UI
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        #[cfg(target_os = "macos")]
-        let enrolled = crate::keychain::tests::scratch_with_cli_item(Some("cli-keychain-value"));
-        #[cfg(target_os = "macos")]
-        let open_keychain =
-            || security_framework::os::macos::keychain::SecKeychain::open(&enrolled.path);
-        #[cfg(not(target_os = "macos"))]
-        let open_keychain = crate::keychain::default_keychain;
-
-        let fx = DispatchFixture::new("cli-order", "");
+    fn the_cli_plane_has_no_approle_path_and_reads_no_daemon_credential() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let fx = DispatchFixture::new("cli-no-approle", "");
         let creds_dir =
-            std::env::temp_dir().join(format!("mv-dispatch-cli-creds-{}", std::process::id()));
+            std::env::temp_dir().join(format!("mv-dispatch-cli-empty-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&creds_dir);
         std::fs::create_dir_all(&creds_dir).unwrap();
-        std::fs::write(creds_dir.join("maknaed-secret-id"), "kernel-secret-value").unwrap();
-        // The CLI's residual-file fallback — present so a non-macOS build (where
-        // Keychain is skipped) can resolve all the way to a successful client.
-        std::fs::write(fx.0.join("maknae-secret-id"), "cli-secret-value").unwrap();
-        std::fs::set_permissions(
-            fx.0.join("maknae-secret-id"),
-            std::fs::Permissions::from_mode(0o600),
-        )
-        .unwrap();
-
         std::env::set_var("CREDENTIALS_DIRECTORY", &creds_dir);
         let doc = fx.doc();
-        let result = PlaneClient::from_document_opening(&doc, &fx.0, Plane::Cli, open_keychain);
+        let built = PlaneClient::from_document(&doc, &fx.0, Plane::Cli);
+        let direct = PlaneClient::from_document_with_secret(
+            &doc,
+            &fx.0,
+            Plane::Cli,
+            Zeroizing::new("cli-secret-value".into()),
+        );
         std::env::remove_var("CREDENTIALS_DIRECTORY");
         let _ = std::fs::remove_dir_all(&creds_dir);
-
-        let (kind, secret) = if cfg!(target_os = "macos") {
-            (CredentialSourceKind::Keychain, "cli-keychain-value")
-        } else {
-            (CredentialSourceKind::PlaintextPath, "cli-secret-value")
-        };
-        let client = result.expect("the CLI order resolves to its own source");
-        assert_eq!(client.secret_source(), kind);
-        let PlaneAuth::AppRole(auth) = &client.auth else {
-            panic!("a CLI SecretID client authenticates with AppRole");
-        };
-        assert_eq!(auth.secret_id.as_str(), secret);
+        for (what, got) in [
+            ("from_document", built),
+            ("from_document_with_secret", direct),
+        ] {
+            match got {
+                Err(VaultError::CredentialSource(m)) => {
+                    assert!(m.contains("PlaneClient::for_user"), "{what}: {m}")
+                }
+                Err(e) => panic!("{what}: expected the no-AppRole refusal, got {e}"),
+                Ok(_) => panic!("{what}: the CLI plane built an AppRole client"),
+            }
+        }
     }
 
     /// #76: the daemon's keychain pointer is found under private/ and wins over the plaintext arm.
@@ -1437,7 +1380,6 @@ mod tests {
     fn a_user_token_client_is_the_cli_plane_and_reads_no_approle_file() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let fx = DispatchFixture::with_addr("user-plane", DEAD_VAULT, "");
-        std::fs::remove_file(fx.0.join("maknae-approle-id")).unwrap();
         std::fs::remove_file(fx.0.join("maknaed-approle-id")).unwrap();
         let client = PlaneClient::for_user(&fx.doc(), &fx.0, user_token()).unwrap();
         assert_eq!(client.plane(), Plane::Cli);

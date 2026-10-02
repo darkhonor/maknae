@@ -2,9 +2,9 @@ use crate::tty::{read_password, stdin_is_terminal, PromptError};
 use maknae_vault::{
     check_vault_addr, custody_for_store, custody_label, erase_user_token, observe_systemd_creds,
     read_user_token, store_user_token, userpass_username_is_acceptable, vault_config_from_document,
-    StoredToken, SystemdCreds, UserAuth, VaultApi, VaultError,
+    StoredToken, SystemdCreds, UserAuth, UserToken, VaultApi, VaultConfig, VaultError,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -27,14 +27,14 @@ struct Session {
     auth: UserAuth,
 }
 
-fn now_unix() -> Result<u64, String> {
+pub(crate) fn now_unix() -> Result<u64, String> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .map_err(|_| "the system clock reads before 1970; set the clock, then retry".to_string())
 }
 
-fn local_username() -> Result<String, String> {
+pub(crate) fn local_username() -> Result<String, String> {
     let uid = nix::unistd::geteuid();
     let user = nix::unistd::User::from_uid(uid)
         .map_err(|e| format!("cannot look up uid {uid}: {e}"))?
@@ -56,9 +56,45 @@ fn session() -> Result<Session, String> {
         .map_err(|e| e.to_string())?;
     let vault = vault_config_from_document(&doc).map_err(|e| e.to_string())?;
     let auth = vault.user_auth.resolve().map_err(|e| e.to_string())?;
-    let api = VaultApi::new(&vault.addr, &dir.join("tls").join("vault-ca.crt"))
-        .map_err(|e| e.to_string())?;
+    let api = vault_api(&dir, &vault)?;
     Ok(Session { dir, api, auth })
+}
+
+fn vault_api(dir: &Path, vault: &VaultConfig) -> Result<VaultApi, String> {
+    VaultApi::new(&vault.addr, &dir.join("tls").join("vault-ca.crt")).map_err(|e| e.to_string())
+}
+
+pub(crate) struct UserSession {
+    pub(crate) api: VaultApi,
+    pub(crate) token: UserToken,
+    pub(crate) expires_at: u64,
+}
+
+pub(crate) fn usable_token(
+    read: Result<StoredToken, VaultError>,
+    vault_addr: &str,
+    now: u64,
+) -> Result<(UserToken, u64), String> {
+    let stored = read.map_err(|e| e.to_string())?;
+    let expires_at = stored.expires_at();
+    let token = stored
+        .usable_at(vault_addr, now)
+        .map_err(|e| e.to_string())?;
+    Ok((token, expires_at))
+}
+
+pub(crate) fn user_session(
+    doc: &maknae_config::Document,
+    dir: &Path,
+) -> Result<UserSession, String> {
+    let vault = vault_config_from_document(doc).map_err(|e| e.to_string())?;
+    let api = vault_api(dir, &vault)?;
+    let (token, expires_at) = usable_token(read_user_token(dir), api.vault_addr(), now_unix()?)?;
+    Ok(UserSession {
+        api,
+        token,
+        expires_at,
+    })
 }
 
 pub(crate) fn lifetime(secs: u64) -> String {
@@ -720,6 +756,35 @@ mod tests {
                 previous_token(Err(read), ADDR, 1_000),
                 Previous::Nothing
             ));
+        }
+    }
+
+    #[test]
+    fn a_cli_verb_uses_only_a_fresh_token_from_this_vault_and_otherwise_says_run_maknae_login() {
+        let (token, expires_at) = usable_token(Ok(stored(10_000)), ADDR, 1_000).unwrap();
+        assert!(token.expose() == "hvs.plan" && expires_at == 10_000);
+        assert_eq!(
+            usable_token(Ok(stored(10_000)), OTHER, 1_000).unwrap_err(),
+            VaultError::TokenOtherVault(ADDR.into()).to_string()
+        );
+        assert_eq!(
+            usable_token(Ok(stored(1_030)), ADDR, 1_000).unwrap_err(),
+            VaultError::TokenExpired.to_string()
+        );
+        let rows = [
+            (Err(VaultError::TokenAbsent), ADDR),
+            (
+                Err(VaultError::TokenUnreadable("keychain status -25293".into())),
+                ADDR,
+            ),
+            (Err(VaultError::TokenRecord("no expiry")), ADDR),
+            (Ok(stored(1_030)), ADDR),
+            (Ok(stored(10_000)), OTHER),
+        ];
+        for (read, addr) in rows {
+            let e = usable_token(read, addr, 1_000).unwrap_err();
+            assert!(e.ends_with("run `maknae login`"), "{e}");
+            assert!(!e.contains("hvs.plan"), "{e}");
         }
     }
 

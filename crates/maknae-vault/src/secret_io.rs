@@ -1,4 +1,4 @@
-//! Read a resolved [`DaemonSecretSource`]/[`CliSecretSource`] into the actual
+//! Read a resolved [`DaemonSecretSource`] into the actual
 //! SecretID bytes (T3, I/O). Each function takes exactly ONE already-resolved source
 //! and returns exactly one `Result` — there is no retry-another-source path here BY
 //! CONSTRUCTION: the no-fallthrough control (spec §5.1) is that
@@ -6,19 +6,19 @@
 //! never sees the sources it didn't pick, so it cannot silently fall back to a
 //! weaker one.
 //!
-//! **Permission-gating split (LOAD BEARING):** the PLAINTEXT branches
-//! (`DaemonSecretSource::PlaintextPath`, `CliSecretSource::ResidualFile`) route
+//! **Permission-gating split (LOAD BEARING):** the PLAINTEXT branch
+//! (`DaemonSecretSource::PlaintextPath`) routes
 //! through `client::read_secret_credential`'s `mode & 0o077` gate — a plaintext file
-//! must be owner-only. The non-plaintext branches (`CredentialsDirectory`, `Keychain`,
-//! `UserCreds`) do NOT go through that gate: systemd `LoadCredential`/
+//! must be owner-only. The non-plaintext branches (`CredentialsDirectory`, `Keychain`)
+//! do NOT go through that gate: systemd `LoadCredential`/
 //! `SetCredentialEncrypted` produce their own `0400`-or-stricter, already-trusted
 //! artifacts, and the keychain arm reads no file as the secret, so re-applying the
 //! plaintext gate to them would be redundant at best and a spurious refusal at
 //! worst (systemd may root-own the credentials directory in a way this process's
 //! uid doesn't "own" by our check).
 use crate::client::read_secret_credential;
-use crate::keychain::{read_plane_secret, OpenedKeychain};
-use crate::secret_source::{CliSecretSource, DaemonSecretSource};
+use crate::keychain::read_plane_secret;
+use crate::secret_source::DaemonSecretSource;
 use crate::{KeychainPlane, VaultError};
 use std::path::Path;
 use zeroize::Zeroizing;
@@ -38,50 +38,6 @@ fn read_sealed_trimmed(path: &Path) -> Result<Zeroizing<String>, VaultError> {
     Ok(Zeroizing::new(text.trim().to_string()))
 }
 
-/// `systemd-creds decrypt --user <path> -` — decrypts a user-scoped credential file
-/// to stdout, captured straight into `Zeroizing` (never touches an intermediate
-/// on-disk plaintext copy). A real Linux implementation (not stubbed): the CLI's
-/// user-creds branch is expected to work today wherever `systemd-creds --user` is
-/// available.
-fn read_systemd_creds_user(path: &Path) -> Result<Zeroizing<String>, VaultError> {
-    let output = std::process::Command::new("systemd-creds")
-        .arg("decrypt")
-        .arg("--user")
-        // Pin the credential name to match the enroll-time seal
-        // (`systemd-creds encrypt --name=maknae-secret-id` in enroll/helper.rs).
-        // Without this, systemd-creds derives the expected name from the input
-        // FILENAME — `maknae-secret-id.cred`, WITH the extension — which does not
-        // match the embedded `maknae-secret-id` and fails "Name in credential
-        // doesn't match expectations." Runtime seam bug found on live hardware.
-        .arg("--name=maknae-secret-id")
-        .arg(path)
-        .arg("-")
-        .output()
-        .map_err(|source| VaultError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    if !output.status.success() {
-        return Err(VaultError::CredentialSource(format!(
-            "systemd-creds decrypt --user {} failed: {}",
-            path.display(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    // Wrap the decrypted bytes in `Zeroizing` THE MOMENT we own them — `output.stdout`
-    // is otherwise a bare `Vec<u8>` holding the plaintext SecretID in an un-zeroized
-    // heap allocation. `str::from_utf8` below borrows from `raw` rather than producing
-    // a second owned (bare) copy, so there is no un-zeroized intermediate at any point.
-    let raw = Zeroizing::new(output.stdout);
-    let text = std::str::from_utf8(&raw).map_err(|_| {
-        VaultError::CredentialSource(format!(
-            "systemd-creds decrypt --user {} produced non-UTF-8 output",
-            path.display()
-        ))
-    })?;
-    Ok(Zeroizing::new(text.trim().to_string()))
-}
-
 /// Read the daemon's SecretID from an already-resolved source. Exactly one source in,
 /// exactly one `Result` out — no fallthrough to a different source on failure.
 pub(crate) fn read_daemon_secret(
@@ -91,20 +47,6 @@ pub(crate) fn read_daemon_secret(
         DaemonSecretSource::CredentialsDirectory(path) => read_sealed_trimmed(path),
         DaemonSecretSource::Keychain(pointer) => read_plane_secret(pointer, KeychainPlane::Daemon),
         DaemonSecretSource::PlaintextPath(path) => read_secret_credential(path).map(Zeroizing::new),
-    }
-}
-
-/// Read the CLI's SecretID from an already-resolved source. Same single-source
-/// contract as [`read_daemon_secret`]. Production passes
-/// [`crate::keychain::default_keychain`] as `open_keychain`.
-pub(crate) fn read_cli_secret(
-    src: &CliSecretSource,
-    open_keychain: impl FnOnce() -> OpenedKeychain,
-) -> Result<Zeroizing<String>, VaultError> {
-    match src {
-        CliSecretSource::UserCreds(path) => read_systemd_creds_user(path),
-        CliSecretSource::Keychain => crate::keychain::read_cli_secret_in(open_keychain),
-        CliSecretSource::ResidualFile(path) => read_secret_credential(path).map(Zeroizing::new),
     }
 }
 
@@ -170,44 +112,6 @@ mod tests {
         );
     }
 
-    fn no_keychain() -> OpenedKeychain {
-        unreachable!("only the keychain arm opens a keychain")
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn keychain_read_fails_closed() {
-        assert!(matches!(
-            read_cli_secret(
-                &CliSecretSource::Keychain,
-                crate::keychain::default_keychain
-            ),
-            Err(VaultError::CredentialSource(_))
-        ));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn the_macos_keychain_arm_reads_the_keychain() {
-        use crate::keychain::tests::{scratch_with_cli_item, KEYCHAIN_UI};
-        use security_framework::os::macos::keychain::SecKeychain;
-        let _serial = KEYCHAIN_UI.lock().unwrap_or_else(|e| e.into_inner());
-
-        let enrolled = scratch_with_cli_item(Some("sentinel-secret-io-t76"));
-        let got = read_cli_secret(&CliSecretSource::Keychain, || {
-            SecKeychain::open(&enrolled.path)
-        });
-        assert_eq!(got.unwrap().as_str(), "sentinel-secret-io-t76");
-
-        let unenrolled = scratch_with_cli_item(None);
-        assert!(matches!(
-            read_cli_secret(&CliSecretSource::Keychain, || SecKeychain::open(
-                &unenrolled.path
-            )),
-            Err(VaultError::Keychain { status: -25300 })
-        ));
-    }
-
     // ---- plaintext branches: gate enforced --------------------------------------
 
     #[test]
@@ -227,41 +131,5 @@ mod tests {
         let src = DaemonSecretSource::PlaintextPath(p.clone());
         assert_eq!(read_daemon_secret(&src).unwrap().as_str(), "secret-value");
         let _ = std::fs::remove_file(&p);
-    }
-
-    #[test]
-    fn cli_residual_branch_rejects_group_other_access() {
-        let p = tmpfile("cli-plain-open", "cli-secret", 0o644);
-        let src = CliSecretSource::ResidualFile(p.clone());
-        assert!(matches!(
-            read_cli_secret(&src, no_keychain),
-            Err(VaultError::InsecureCredential { .. })
-        ));
-        let _ = std::fs::remove_file(&p);
-    }
-
-    #[test]
-    fn cli_residual_branch_accepts_owner_only() {
-        let p = tmpfile("cli-plain-secure", "cli-secret", 0o600);
-        let src = CliSecretSource::ResidualFile(p.clone());
-        assert_eq!(
-            read_cli_secret(&src, no_keychain).unwrap().as_str(),
-            "cli-secret"
-        );
-        let _ = std::fs::remove_file(&p);
-    }
-
-    // ---- CLI user-creds branch: real systemd-creds invocation -------------------
-
-    #[test]
-    fn cli_user_creds_missing_binary_or_file_fails_closed() {
-        // No live systemd-creds assumed on the test host; either the binary is
-        // absent (Io error) or it runs and rejects a nonexistent/garbage input
-        // (CredentialSource error) — either way this must be Err, never a
-        // fabricated Ok.
-        let src = CliSecretSource::UserCreds(std::path::PathBuf::from(
-            "/nonexistent/maknae-secret-id.cred",
-        ));
-        assert!(read_cli_secret(&src, no_keychain).is_err());
     }
 }
