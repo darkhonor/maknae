@@ -57,8 +57,8 @@ maknae login
 daemon; the fail-closed `~` default applies to a restarted daemon too. The
 append-only `/var/log/maknae/audit.jsonl` trail is preserved across upgrades.
 
-**RHEL 9:** installs and enrolls (#73: enroll no longer needs `systemd-creds --user`);
-the enroll → serve round trip has not been run live there. `maknae login` keeps the
+**RHEL 9:** installs; enroll is expected to complete now that the `systemd-creds --user`
+step is gone (#73), but it has not yet been run live there, nor has enroll → serve. `maknae login` keeps the
 token in the `0600` residual file on el9. Full flow proven on RHEL 10.
 
 See `packaging/README.md` for the full install guide, GPG verification, and the

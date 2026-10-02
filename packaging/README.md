@@ -30,7 +30,7 @@ images (#81) and the Compose/Podman profile are deferred.
 |---|---|---|---|
 | Debian 13 | 257 | AppArmor | **Packaging + AppArmor-load only** — deb builds/installs, both AppArmor profiles load, §4.6 ownership verified; full enroll → serve → AppArmor-enforce-clean **not yet validated** (#94) |
 | RHEL / Rocky 10 | 257 | SELinux | **Full — install → enroll → serve, PROVEN LIVE** (SELinux enforcing, zero AVCs, hands-free reboot) |
-| RHEL / Rocky 9 | 252 | SELinux | **Packaging + enroll; serve not yet run live** — enroll no longer needs `systemd-creds --user` (#73) (see [RHEL 9 caveat](#rhel-9-caveat)) |
+| RHEL / Rocky 9 | 252 | SELinux | **Packaging; enroll expected, not yet run live** — enroll no longer needs `systemd-creds --user` (#73) (see [RHEL 9 caveat](#rhel-9-caveat)) |
 | macOS 26, Apple Silicon | — (launchd) | none | **Full — install → enroll → serve, PROVEN LIVE** on a notarized Developer ID package — smoke phase 1 on the `macos-26` runner, smoke phase 2 with 0 failures, and the first-provider walkthrough passed with `transport.read_timeout_ms: 60000` (#413). See [packaging/macos/README.md](macos/README.md) |
 
 ---
@@ -162,8 +162,9 @@ key; see `sign.sh --help`.
 
 ## RHEL 9 caveat
 
-**On RHEL / Rocky 9 `maknae enroll` completes, but the enroll → serve round trip has
-not been run live.** Enroll seals the daemon's SecretID and the Egress Daemon's seal
+**On RHEL / Rocky 9 `maknae enroll` is expected to complete now that the
+`systemd-creds --user` step is gone, but it has not yet been run live, and neither has
+the enroll → serve round trip.** Enroll seals the daemon's SecretID and the Egress Daemon's seal
 key with the system `systemd-creds` (TPM2), which systemd 252 provides; the
 `systemd-creds --user` step that needs systemd ≥ 256 served only the CLI SecretID,
 which no longer exists (#73). On el9 `maknae login` keeps the user's Vault token in
@@ -185,7 +186,7 @@ enroll → serve → AppArmor-enforce-clean cycle is **not yet validated — def
   today it governs the read path (#77). Per-binary MAC separation is a future
   tool-exec increment.
 - **Home access (#365)** — the daemon holds `getattr` and receipt-only `ioctl` over home content (`maknae.te`), no AppArmor home rule, and no ACL; `ProtectHome=read-only`. Serve-time enforce-clean on Rocky 10 (SELinux enforcing, a `0700` home, each kept permission shown load-bearing). On Debian 13 a probe confined by the shipped profile showed AppArmor does not mediate these operations; a full AppArmor serve is the Debian bullet below.
-- **RHEL 9 enroll → serve** — enrollable (#73), not yet run live (see above).
+- **RHEL 9 enroll → serve** — enroll expected to complete (#73), neither run live yet (see above).
 - **Debian 13 full enroll → serve → AppArmor-enforce-clean** — deb builds/installs and
   both AppArmor profiles load, but the daemon has not been run under the AppArmor
   profile with a live credential, so serve-time `apparmor="DENIED"` cleanliness is

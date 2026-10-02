@@ -4,8 +4,10 @@
 //! deputy is willing to do with a frame once it has one. The split is the
 //! crate convention — `peercred`/`peer_identity`, `secret_io`/`secret_source`.
 //!
-//! What is re-checked here and what is not: the key path is held inside the
-//! deputy's own bounds (the one thing the deputy alone knows); the endpoint's
+//! What is re-checked here and what is not: the key path is held inside
+//! `user_prefix`, defence in depth that names a kernel bug (the binding bound is
+//! the unsealed wrapping token's creation-path check, which the seal's AAD also
+//! binds); the endpoint's
 //! scheme and host are NOT re-checked — that decision is the kernel's, the
 //! PDP, over root-owned configuration (`maknae-config`'s
 //! `endpoint_is_acceptable`: HTTPS anywhere, HTTP to loopback only), and the
@@ -21,9 +23,8 @@ use maknae_proto::EgressFrameRequest;
 /// The kernel sees only `RefusedBeforeSend`; the variant goes to the deputy's stderr.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
-    /// The frame named a Vault path outside the deputy's granted prefix. The
-    /// Vault policy is the real bound; this turns a kernel BUG into a named
-    /// refusal instead of a confusing Vault 403.
+    /// The frame named a Vault path outside `user_prefix`: defence in depth naming
+    /// a kernel bug; the binding bound is the wrapping token's creation-path check.
     KeyPathOutsideBounds,
     /// The frame's Vault path is not a well-formed KV fragment — a `.` or `..`
     /// segment, whitespace, an empty segment. The prefix test alone accepts
