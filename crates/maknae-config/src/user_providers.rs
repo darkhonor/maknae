@@ -216,7 +216,7 @@ fn key_of(m: &[(String, Value)], at: &str) -> Result<(String, String), ConfigErr
     let field = required_str(k, &key_at, "field")?;
     if !key_field_is_acceptable(field) {
         return Err(err(format!(
-            "{key_at}.field must be 1 to {MAX_KEY_FIELD_BYTES} bytes with no whitespace"
+            "{key_at}.field must be 1 to {MAX_KEY_FIELD_BYTES} printable ASCII characters with no whitespace"
         )));
     }
     Ok((subpath.to_string(), field.to_string()))
@@ -384,6 +384,11 @@ mod tests {
                 "field: api_key",
                 "field: 'api key'",
                 "providers[0].key.field",
+            ),
+            (
+                "field: api_key",
+                "field: clé",
+                "providers[0].key.field must be 1 to 64 printable ASCII characters with no whitespace",
             ),
             (
                 "context_tokens: 128000",

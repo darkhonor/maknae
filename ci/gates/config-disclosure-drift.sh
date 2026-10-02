@@ -519,9 +519,9 @@ while IFS=$'\t' read -r fpath fty fkind; do
   #
   # `Vec` IS stripped on the by-construction (wire) surfaces and is NOT on the
   # config surfaces, because the exemption is a fact about the CONSUMER, not
-  # about the type. For a config document, `flatten` never recurses into
-  # `Value::Seq` and `render` masks it whole, so a sequence genuinely is a leaf
-  # and demanding coverage would block legitimate work. A wire struct is
+  # about the type. For a config document, only a sequence whose element paths
+  # are declared is walked; undeclared leaves mask, so a sequence genuinely is a
+  # leaf and demanding coverage would block legitimate work. A wire struct is
   # serialized WHOLE by serde, which recurses into `Vec<T>` -- so turning
   # `members: Vec<String>` into `Vec<MemberView>` shipped four new fields
   # (including `home` and a token path) with IDENTICAL gate counts. That is the

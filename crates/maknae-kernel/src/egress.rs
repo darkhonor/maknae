@@ -19,8 +19,9 @@ pub struct EgressRequest {
     /// The admitted provider's endpoint, resolved by the kernel; the deputy parses no provider set.
     pub endpoint: String,
     pub model: String,
+    /// Composed from the user's admitted choice, never from root configuration.
     pub key_vault_path: String,
-    /// The key path and field come from the user's admitted choice, never from root configuration.
+    /// From the user's admitted choice, never from root configuration.
     pub key_field: String,
     pub sealed_key: maknae_proto::SealedKey,
     /// #242: the registry's reasoning level, carried per request like `model`.
@@ -233,7 +234,7 @@ pub fn outcome_for_failure(f: &EgressFailure) -> SendOutcome {
 }
 
 /// Why the kernel refused to BOOT over its egress backend (#240). Only
-/// reachable with a provider registered: with none, there is nothing to send
+/// reachable with providers authorized: with none, there is nothing to send
 /// and `Unavailable` is the honest backend.
 #[derive(Debug, PartialEq, Eq)]
 pub enum EgressBootRefusal {
@@ -258,15 +259,15 @@ impl std::fmt::Display for EgressBootRefusal {
     }
 }
 
-/// The backend with no provider registered — and every test's default.
+/// The backend with no providers authorized — and every test's default.
 pub fn unavailable_egress() -> Arc<dyn Egress> {
     Arc::new(Unavailable)
 }
 
 /// THE production choice, as a pure decision over an injected resolver so it
 /// can be pinned on a host that has no `_maknae-egress` account (the same
-/// seam `authz_boot_gate_with` uses). No provider → `Unavailable`, and the
-/// account is never looked up. A provider → `SocketEgress` under the deputy's
+/// seam `authz_boot_gate_with` uses). No providers authorized → `Unavailable`, and the
+/// account is never looked up. Any authorized → `SocketEgress` under the deputy's
 /// uid, resolved ONCE here at boot, before the first request — never on an
 /// async worker — and fail-closed by NAME.
 pub fn production_egress_with(
@@ -1190,7 +1191,7 @@ mod tests {
     fn production_egress_is_unavailable_with_an_empty_set_and_the_socket_with_one() {
         let cfg = maknae_config::EgressConfig::default();
         let never = |_: &str| -> Result<Option<u32>, String> {
-            panic!("no provider registered: the account must not be resolved")
+            panic!("no providers authorized: the account must not be resolved")
         };
         assert_eq!(
             production_egress_with(&maknae_config::ProviderSet::empty(), &cfg, never)

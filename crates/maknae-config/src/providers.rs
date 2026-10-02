@@ -685,7 +685,7 @@ mod tests {
     }
 
     #[test]
-    fn a_key_field_is_bounded_and_whitespace_free() {
+    fn a_key_field_is_bounded_printable_ascii() {
         assert!(key_field_is_acceptable("api_key"));
         assert!(key_field_is_acceptable("api-key"));
         assert!(key_field_is_acceptable(&"f".repeat(MAX_KEY_FIELD_BYTES)));

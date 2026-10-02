@@ -998,12 +998,12 @@ FIX
   cat > "$fixture/crates/maknae-config/src/document.rs" <<FIX
 const DISCLOSABLE: &[&str] = &[
     "transport",
-        "providers[].name",
-        "providers[].endpoint",
-        "providers[].models",
-        "providers[].models[]",
-        "providers[].reasoning_effort",
-        "providers[].output_tokens_field",
+    "providers[].name",
+    "providers[].endpoint",
+    "providers[].models",
+    "providers[].models[]",
+    "providers[].reasoning_effort",
+    "providers[].output_tokens_field",
     "vault.addr",
     "vault.approle_mount",
     "vault.pki_int_mount",
@@ -1489,7 +1489,8 @@ expect_reject_because "config-disclosure-drift/payload-disposition-table-lies" \
 
 
 # REJECT: a wire-struct field whose type becomes Vec<WorkspaceStruct>. `Vec` is
-# a leaf for a CONFIG document (`flatten` never recurses into `Value::Seq`) and
+# a leaf for a CONFIG document (only a sequence whose element paths are
+# declared is walked; undeclared leaves mask) and
 # is NOT for a wire struct, which serde serializes whole -- the exemption is a
 # fact about the consumer, and it was inherited unexamined when three wire
 # structs joined SURFACE.
@@ -1682,8 +1683,8 @@ expect_accept "config-disclosure-drift/qualified-config-vec-is-still-a-leaf" \
   ": 34 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # ACCEPT: the mirror image. `Vec<WorkspaceStruct>` on a CONFIG surface is a
-# LEAF -- `flatten` never recurses into `Value::Seq` and `render` masks the
-# sequence whole -- so demanding coverage there would block legitimate work.
+# LEAF -- only a sequence whose element paths are declared is walked;
+# undeclared leaves mask -- so demanding coverage there would block legitimate work.
 # Unprobed, the exemption was free to not exist: under the leaked variable it
 # did not, and every config row was silently held to the wire rule.
 fx="$(cfg_fixture "$CFG_OK" '' '' '' 'Vec<Principal>')"

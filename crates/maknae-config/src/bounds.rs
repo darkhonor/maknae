@@ -20,8 +20,9 @@
 //! unwind — and this file is where the invariant is attributed, so it is the
 //! one the next agent opens.)*
 //!
-//! One parser for both processes: `maknaed` checks registered key paths beneath `user_prefix`
-//! at boot, and `maknae-egress` checks a frame's path against it at USE (`handle::decide`).
+//! One parser for both processes: `maknaed` checks the prefix's SHAPE at boot and composes each
+//! user's key path beneath it per request, and `maknae-egress` checks a frame's path against it at
+//! USE (`handle::decide`).
 //! `user_prefix` is not a secret: it is a location, not a credential.
 
 use crate::{ConfigError, Value};
@@ -39,7 +40,7 @@ pub struct EgressBounds {
     pub kv_mount: String,
     /// Relative to `kv_mount`, without `data/`; each user's keys live under `<user_prefix>/<username>/`.
     pub user_prefix: String,
-    /// `vault.addr` — where the deputy logs in (#240b). Declared in THIS file
+    /// `vault.addr` — where the Egress Daemon unwraps wrapping tokens. Declared in THIS file
     /// because the deputy reads its own bounds and nothing else: the AppArmor
     /// profile and the SELinux type carve-out grant it exactly this document,
     /// and `maknae.yaml` is denied to it by design. The same address appears in
@@ -53,8 +54,8 @@ pub struct EgressBounds {
 /// Is this a usable mount-relative Vault path fragment? `Err` names the reason,
 /// so a refusal tells an operator which rule they hit.
 ///
-/// Pure, and shared by the mount, the prefix, and `provider.key_vault_path`, so
-/// all three agree by construction rather than by three hand-kept copies.
+/// Pure, and shared by the mount, the user prefix, the username and the composed
+/// key path, so they agree by construction rather than by hand-kept copies.
 pub fn kv_fragment_is_acceptable(s: &str) -> Result<(), String> {
     if s.is_empty() {
         return Err("is empty".into());

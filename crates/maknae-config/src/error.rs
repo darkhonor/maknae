@@ -74,7 +74,7 @@ pub enum ConfigError {
     UnknownClassificationPolicy { name: String },
     /// The `provider` section (#243) is present but malformed: not a map, a key
     /// outside the exact set, a missing or empty field, an endpoint that is not
-    /// `https://` (or loopback `http://`), or a Vault path with whitespace.
+    /// `https://` (or loopback `http://`).
     InvalidProvider(String),
     /// `egress-bounds.yaml` was read and refused by its parser (#240b). Its
     /// own variant, so the daemon's boot refusal says "refused", never

@@ -243,8 +243,9 @@ pub fn admitted_user_for_test(user: Option<&str>) -> Option<String> {
 
 /// Build the seam Request from the verb + kernel-verified peer uid. Subject
 /// carries `uid` only (i64 carriage of the u32 — lossless); the uid is the whole
-/// subject (ADR-0024). `Read` carries the client-supplied
-/// path as the resource `path` attribute; resource/context otherwise empty.
+/// subject (ADR-0024). `Read` carries the client-supplied path as the resource
+/// `path` attribute, and an admitted `session.prompt` carries `destination`;
+/// the context carries the lane.
 pub fn build_authz_request(
     verb: &Verb,
     peer_uid: u32,

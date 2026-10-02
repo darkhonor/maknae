@@ -262,8 +262,8 @@ pub struct ProviderChoice {
 impl std::fmt::Debug for ProviderChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProviderChoice")
-            .field("provider", &self.provider)
-            .field("model", &self.model)
+            .field("provider", &format_args!("<{} bytes>", self.provider.len()))
+            .field("model", &format_args!("<{} bytes>", self.model.len()))
             .field("key_subpath", &"<omitted>")
             .field("key_field", &"<omitted>")
             .field("sealed_key", &self.sealed_key)
@@ -1182,10 +1182,10 @@ mod tests {
     }
 
     #[test]
-    fn a_provider_choice_debug_names_provider_and_model_and_never_the_key_location() {
+    fn a_provider_choice_debug_prints_only_lengths_and_never_the_key_location() {
         assert_eq!(
             format!("{:?}", choice()),
-            "ProviderChoice { provider: \"openai\", model: \"gpt-5.6-luna\", \
+            "ProviderChoice { provider: <6 bytes>, model: <12 bytes>, \
              key_subpath: \"<omitted>\", key_field: \"<omitted>\", \
              sealed_key: SealedKey(<127 bytes>) }"
         );
@@ -1197,7 +1197,10 @@ mod tests {
         };
         let dbg = format!("{verb:?}");
         assert!(
-            dbg.contains("openai") && !dbg.contains("sentinel") && !dbg.contains("90, 90"),
+            !dbg.contains("openai")
+                && !dbg.contains("gpt-5.6-luna")
+                && !dbg.contains("sentinel")
+                && !dbg.contains("90, 90"),
             "{dbg}"
         );
     }
