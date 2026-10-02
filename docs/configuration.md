@@ -6,16 +6,7 @@ is defined today. It is **fail-closed** by design — when a control cannot be a
 or a value cannot be validated, Maknae refuses to load rather than run with a guessed
 or weakened configuration.
 
-> **Status.** The configuration backbone is built in cycles. This document covers
-> what exists today: the **loading core**, the **document/registry model**, the
-> **`core` section's classification ceiling**, and the **`provider` section** (§6.1).
-> Sections owned by subsystems not yet built (`authz`, `channels`, `dcs`) are marked
-> **Forthcoming**, and `llm` is **Withdrawn** (superseded by `provider`, 2026-09-07).
-> **Writing any of them refuses boot** — an unregistered section is
-> `ConfigError::UnknownSection`, not a warning — so treat every Forthcoming row as "do
-> not write this yet", never as "ignored until it lands" *(clarified 2026-09-13, after a
-> worked example in this file shipped an `llm` block)*. This reference is updated by
-> every cycle that changes the configuration language.
+> **Status.** The configuration backbone is built in cycles. This document covers what exists today: the **loading core**, the **document/registry model**, the **`core` section's classification ceiling**, the **`providers` section** that authorizes model providers (§6.1), each user's **`providers.yaml`** (§6.1.1) and the **egress bounds** (§6.1.3). Sections owned by subsystems not yet built (`authz`, `channels`, `dcs`) are marked **Forthcoming**, and `llm` and `provider` (singular) are **Withdrawn**. **Writing any of them refuses boot** — an unregistered section is `ConfigError::UnknownSection`, not a warning — so treat every Forthcoming row as "do not write this yet", never as "ignored until it lands". This reference is updated by every cycle that changes the configuration language.
 
 ---
 
@@ -44,8 +35,7 @@ argument, defaulting to **`/etc/maknae`** — loads it, selects the classificati
 system `core.handling.policy` names from the ones compiled into the build (§4.1; an
 unknown name is `UnknownClassificationPolicy`), reads `core.handling.ceiling` through
 that system into the runtime **ingest posture**, and **refuses to start (exit 1)** on
-any config error. *(Corrected 2026-09-06, #233: this paragraph said "there is no run loop
-yet, so `maknaed` is boot-check-only" — stale since #77.)* After the config is read the
+any config error. After the config is read the
 daemon builds its authorization composition — the RBAC baseline and the classification
 ceiling, both non-removable (ADR-0008 decision 1; §4.1) — records the composition, the
 selected system and the ceiling level in the audit trail, mints its plane credential,
@@ -65,7 +55,8 @@ the credential mint retires the credential on the way out.
 ### 1.2 What the three binaries read from the environment — and what they refuse to
 
 **Read this as a snapshot, not a contract.** The tables below were **measured on
-2026-09-19** against `main` at `35897fe` (#318). Nothing scans the tree to keep them
+2026-09-19** against `main` at `35897fe` (#318); the `CREDENTIALS_DIRECTORY` and
+`XDG_RUNTIME_DIR` rows were re-read against the code for #153 (2026-10-02). Nothing scans the tree to keep them
 true: a new environment read added later will not appear here by itself, and **no gate
 requires a pull request to re-verify them**. That is a deliberate trade — the
 alternative is re-auditing every change — so treat this as a map of the terrain rather
@@ -88,22 +79,24 @@ same list as `UnsetEnvironment=`):
 
 **You do not configure any of these.** The Vault address comes from `vault.addr` in
 `maknae.yaml` (the daemon), `vault.addr` in `egress-bounds.yaml` (the deputy), or
-`--vault-addr` (`maknae enroll`) — all three **required**, none defaulted. Authentication
-is **AppRole only** (`AuthMethod` has one variant): the machine planes log in with a
-RoleID artifact plus a sealed SecretID, and the one token in the system is the
-*operator's own* during `maknae enroll`, supplied by `--token-file` or a no-echo prompt.
-An exported `VAULT_ADDR` or `VAULT_TOKEN` is for **your** `vault` CLI, as `docs/runbook.md`
-uses it; it never reaches ours.
+`--vault-addr` (`maknae enroll`) — all three **required**, none defaulted. Who authenticates to Vault, and how:
+
+- **`maknaed` is the only AppRole holder** (`AuthMethod` has one variant, `AppRole`): it logs in with its RoleID artifact plus a sealed SecretID.
+- **Each user authenticates with userpass through `maknae login`** (`bins/maknae/src/login.rs`), which prompts for the password without echo, logs in as the local account name on the `vault.user_auth` mount (§6.1.2), and stores only the returned token (§2).
+- **The Egress Daemon has no Vault identity** (ADR-0028 decision 6). It calls only Vault's wrapping lookup and unwrap (`sys/wrapping/lookup`, `sys/wrapping/unwrap`), each authenticated by the single-use wrapping token a user sealed to it (`bins/maknae-egress/src/main.rs`, `opener.rs`).
+- The operator's own token appears only during `maknae enroll`, supplied by `--token-file` or a no-echo prompt.
+
+An exported `VAULT_ADDR` or `VAULT_TOKEN` is for **your** `vault` CLI, as `docs/runbook.md` uses it; it never reaches ours.
 
 **Relied on — never scrubbed** (`maknae_vault::NEVER_SCRUB_ENV`). The scope is *every variable any workspace code these three binaries link reads, plus those their child processes need* — `LC_MESSAGES`/`LANG` are read in `maknae-msgs` and `HOSTNAME` in `maknae-kernel`, not in the binaries' own source, so the narrower phrasing would have let a future crate-level read look out of scope — `XDG_RUNTIME_DIR` is on the list for the second reason, not the first. A fourth binary, `maknae-spifc`, is a scaffold stub that reads nothing and is not covered here:
 
 
 | variable | who reads it | why removing it would break something |
 |---|---|---|
-| `CREDENTIALS_DIRECTORY` | `maknaed`, `maknae-egress` | the directory systemd decrypts the sealed SecretID into. The deputy has no fallback and refuses to start without it |
+| `CREDENTIALS_DIRECTORY` | `maknaed`, `maknae-egress` | the directory systemd decrypts sealed credentials into: `maknaed`'s SecretID, and the deputy's seal key `maknae-egress-seal-key` (`maknae-egress.service`'s `LoadCredentialEncrypted=`). Without it the deputy looks for the macOS keychain pointer instead (`egress/maknae-egress-secret-id.keychain`); with neither, it refuses to start |
 | `LISTEN_FDS` `LISTEN_PID` `LISTEN_FDNAMES` | `maknae-egress` | socket activation — the listening fd itself, read *after* the scrub runs |
 | `MAKNAE_CONFIG_DIR` | `maknae` | relocates the CLI's config directory; documented operator workflow |
-| `XDG_RUNTIME_DIR` | `maknae enroll`'s helper | `systemd-creds --user` locates the user runtime directory through it. The parent *constructs* it for the child rather than passing its own through — and the helper is itself a `maknae` process, so it runs the scrub |
+| `XDG_RUNTIME_DIR` | `maknae login`'s token store; `maknae enroll`'s helper | `systemd-creds --user` locates the user runtime directory through it. `maknae login`'s token store runs it from a `maknae` process that has run the scrub; for enroll's helper, the parent *constructs* the variable for the child (`sudo -u <operator> env XDG_RUNTIME_DIR=/run/user/<uid>`) rather than passing its own through |
 | `HOME` | `maknae` | the config-directory fallback. Note it degrades to `.` when unset |
 | `SUDO_UID` `SUDO_USER` | `maknae enroll` | the operator identity enroll provisions **for**, cross-checked against `passwd` and refused on mismatch. Without them every enroll fails preflight |
 | `LC_MESSAGES` `LANG` | `maknae`, `maknaed` | message locale (en-US / ko-KR) |
@@ -126,34 +119,48 @@ records that in place.
 
 ## 2. Directory layout
 
+The host side, `<config-dir>` (`/etc/maknae` when packaged):
+
 ```
 <config-dir>/
 ├── maknae.yaml           # the base file (required)
 ├── authz.yaml            # the authorization policy — a SEPARATE document, not a section
-├── egress-bounds.yaml    # required WHEN a `provider` section is registered (§6.1)
-├── egress/               # the deputy's credential set, written by `maknae enroll` (§9.3)
+├── egress-bounds.yaml    # required WHEN any provider is authorized (§6.1.3); written by `maknae enroll`, 0644 root:root
+├── egress/               # 0750 root:_maknae-egress, created by the package; files written by `maknae enroll`
+│   ├── vault-ca.crt      # 0640 root:_maknae-egress — the deputy's Vault TLS anchor
+│   └── maknae-egress-secret-id.keychain   # macOS only: points at the System-keychain item holding the deputy's seal key
+├── private/
+│   └── maknae-egress-seal-key.cred        # Linux only: the deputy's seal key, sealed by systemd-creds, 0400 root:root
 └── config.d/             # optional overlay directory of SECTION files
-    ├── 10-provider.yaml  # the `provider` section (§6.1, worked example in §9.3)
+    ├── 10-provider.yaml  # the `providers` section (§6.1, worked example in §9.3)
     └── …
 ```
 
-**Sections versus standalone documents** — the distinction the old tree blurred.
-`maknae.yaml` and `config.d/*.yaml` contribute **registered sections** and are merged
-section-by-section by this loader. `authz.yaml` and `egress-bounds.yaml` are **standalone
-documents with their own readers**: each is opened by path (`<config-dir>/authz.yaml`,
-`<config-dir>/egress-bounds.yaml`), never merged, never shadowed, and putting either
-inside `config.d/` does not work.
+The tree shows the files this reference covers; `maknae enroll` also writes `maknaed`'s own credential and TLS files (`tls/`, `maknaed-approle-id`, the rest of `private/`).
 
-> **Corrected 2026-09-13.** This tree used to list `config.d/authz.yaml` and
-> `config.d/llm.yaml`. Both were unloadable examples, for the reason §6 now states up
-> front: a section the daemon does not register **refuses boot** with
-> `ConfigError::UnknownSection` rather than being ignored, and neither `authz` nor `llm`
-> is in `boot_specs()` — `llm` is Withdrawn outright (superseded by `provider`). The
-> `authz` name was doubly misleading: `/etc/maknae/authz.yaml` **is** a real file, but it
-> is a **standalone policy document with its own reader**, not a `config.d/` member and
-> not a registered section, so putting it in `config.d/` is wrong twice over. The tree
-> now names only what loads today. *(Found in review after §9.3's copy of the same
-> defect was fixed — the sweep should have been the whole file the first time.)*
+The macOS pointer is named `maknae-egress-secret-id.keychain` although it now names the seal key, not a SecretID; the name is a named residual (`KeychainPlane::Egress.pointer_file()`).
+
+The host-wide **`seal.pub`** — the Egress Daemon's public key, which each user's client seals to — is written by `maknae enroll`, root-owned, file `0644` in a `0755` directory, at one of three paths (`crates/maknae-vault/src/seal_pub_store.rs`):
+
+| Host | Path |
+|---|---|
+| Red Hat family | `/etc/pki/maknae/seal.pub` |
+| Debian family | `/etc/ssl/maknae/seal.pub` |
+| macOS | `/Library/Application Support/Maknae/pki/seal.pub` |
+
+The user side, `~/.maknae` (or `$MAKNAE_CONFIG_DIR`):
+
+```
+~/.maknae/
+├── maknae.yaml                 # written by `maknae enroll`: core.deployment_id, the user `vault` block (§6.1.2), and on macOS transport.socket_path
+├── providers.yaml              # written by the user: the providers they use (§6.1.1)
+├── maknae-vault-token.cred     # Linux, systemd 256 or later: the `maknae login` token, a `systemd-creds --user` file
+└── maknae-vault-token          # Linux, older systemd: the same token in a 0600 file
+```
+
+On macOS `maknae login` keeps the token in the default keychain instead (service `maknae-cli`, account `maknae-vault-token`), and neither token file exists (`crates/maknae-vault/src/token_record.rs`, `keychain_policy.rs`).
+
+**Sections versus standalone documents.** `maknae.yaml` and `config.d/*.yaml` contribute **registered sections** and are merged section-by-section by this loader. `authz.yaml` and `egress-bounds.yaml` are **standalone documents with their own readers**: each is opened by path (`<config-dir>/authz.yaml`, `<config-dir>/egress-bounds.yaml`), never merged, never shadowed, and putting either inside `config.d/` does not work. `providers.yaml` is likewise a standalone document, read by the CLI from its own directory.
 
 - **`maknae.yaml`** — the **base** file. Required: it is the deployment's anchor, the
   one file that must exist even if empty. A missing base is an error. An empty base is
@@ -167,9 +174,7 @@ inside `config.d/` does not work.
 - **Extensions `*.yaml` and `*.yml`** (case-insensitive) are loaded. Any other regular
   file (e.g. `README.md`) is **ignored**.
 - **Dotfiles are skipped** (a name beginning with `.`). Editor lock/temp files such as
-  `.#10-provider.yaml` or `.10-provider.yaml.swp` do not trip an error. *(Corrected
-  2026-09-13: this named `.#authz.yaml`, which reads as though `authz.yaml` were a
-  `config.d/` member — it is a standalone document, see §2.)*
+  `.#10-provider.yaml` or `.10-provider.yaml.swp` do not trip an error.
 - A `config.d/` entry that is a **subdirectory or a symlink** is an **error**, not
   ignored. `config.d/` itself must be a real directory, not a symlink.
 - Files are read in **lexical order** by filename.
@@ -185,19 +190,11 @@ For a file carrying no root-required section the **only** check is
 `440`, `750`, `770`, `700`, …); the modes below are **recommended examples**, not an
 exhaustive allowlist.
 
-> **Scoped 2026-09-13.** This paragraph read "The **only** check is
-> `mode & 0o007 == 0`" without qualification, which is wrong for a **root-required
-> section** and would send an operator to a mode that is refused. `provider` (§6.1) is
-> such a section: the file contributing it, and `<config-dir>` and `config.d/`
-> themselves, must additionally be **root-owned** and **not group-writable**
-> (`mode & 0o022 == 0`), so **`660` and `770` are REFUSED** there even though they pass
-> the universal rule — `loader.rs`'s `ROOT_ARTIFACT` versus `CONFIG_ARTIFACT`. The
-> refusal is `SectionNotRootOwned` and it names the path that failed. See §9.3 for the
-> worked example and the full table.
+**A root-required section is held to more.** `providers` (§6.1) is one: the file contributing it, and `<config-dir>` and `config.d/` themselves, must additionally be **root-owned** and **not group-writable** (`mode & 0o022 == 0`), so **`660` and `770` are refused** there even though they pass the universal rule — `loader.rs`'s `ROOT_ARTIFACT` versus `CONFIG_ARTIFACT`. The refusal is `SectionNotRootOwned`, naming the path that failed: `section 'providers' must come from a root-owned, non-group/other-writable source; <path> is not`. See §9.3 for the worked example and the full table.
 
 | Path | Recommended modes | Rejected |
 |---|---|---|
-| Config files (`maknae.yaml`, `config.d/*.yaml`) | `640`, `660`, `600` | anything with a world/other bit (e.g. `644`) — **except `egress-bounds.yaml`, a root artifact that is `0644` by design (§9.3)** |
+| Config files (`maknae.yaml`, `config.d/*.yaml`, `~/.maknae/providers.yaml`) | `640`, `660`, `600` (`640` or `600`, root-owned, for the file carrying `providers`) | anything with a world/other bit (e.g. `644`) — **except `egress-bounds.yaml`, a root artifact that is `0644` by design (§6.1.3)** |
 | Directories (`<config-dir>`, `config.d/`) | `750`, `770`, `700` | anything with a world/other bit (e.g. `775`, world-writable `0o772`) |
 
 Additional file rules:
@@ -213,7 +210,7 @@ Additional file rules:
   only *world* access is refused. **Not covered by this rule at all:** `egress-bounds.yaml`
   is read through the root-artifact requirement (root-owned, not group- or other-
   writable — no world-read rule), is read by two accounts, and is `0644` by design —
-  see §9.3 before "fixing" its mode.
+  see §6.1.3 before "fixing" its mode.
 - **Non-Unix platforms** refuse to load (the permission model is unavailable there;
   Maknae fails closed rather than run unchecked).
 
@@ -225,20 +222,23 @@ Additional file rules:
 
 ## 3. Sections and precedence
 
-> **Changed 2026-09-19 (#210) — every section WITH A PARSER now refuses a key it does not read, and this can stop a host booting that booted yesterday.** Until now MOST of `maknae.yaml`'s parsers pulled the fields they knew by name and silently ignored anything else, so a transposed key NAME left its field at the **default** (`egress` and `provider` already refused, as did `egress-bounds.yaml` — what changed for those three is only that they now raise the same error as everything else): `jsonl_pth` meant the audit sink quietly became `<config-dir>/audit.jsonl`, and `handlng` meant the whole classification-ceiling block was invisible and the instance came up at the system's lowest level. An ignored key silently substitutes the DEFAULT for what you wrote, and the direction is NOT always weaker: `max_connections` defaults to 64 against a ceiling of 4096, so a typo'd raise lands stricter, and a typo'd `insecure_plaintext_secret_path` removes an opt-in weakening. What is constant is that your stated intent is discarded without a word — so it now refuses, naming the token and the level: `unknown key 'jsonl_pth' in 'audit'`. **Before upgrading, check any host whose config carries a key outside the sets below** — including notes or deployer-invented keys inside a section, which used to load. Listed below is every key of the levels this change NEWLY closes, because no single section of this reference lists them all — §4 does not even enumerate all of `core` (it omits `deployment_id`, which is on every enrolled host). **`provider`, `egress`, `core.handling.ceiling`, `egress-bounds.yaml` and `authz.yaml` already refused an unknown key before this change and need no upgrade check** — only their error changed:
+> **Every section with a parser refuses a key it does not read** (#210), naming the token and the level: `unknown key 'jsonl_pth' in 'audit'`. An ignored key would silently substitute the default for what you wrote — `jsonl_pth` would quietly move the audit sink to `<config-dir>/audit.jsonl`, and `handlng` would hide the whole classification-ceiling block so the instance came up at the system's lowest level — and the direction is not always weaker: `max_connections` defaults to 64 against a ceiling of 4096, so a typo'd raise would land stricter. No single section of this reference lists every key, so the closed sets are listed here (§4 does not enumerate all of `core`; it omits `deployment_id`, which is on every enrolled host):
 >
 > | section | every key its parser reads |
 > |---|---|
 > | `core` (own level) | `schema_version`, `deployment_id`, `identity`, `handling` |
-> | `core.handling` *(already closed; listed for completeness)* | `ceiling`, `accreditation_ref`, `policy` |
+> | `core.handling` | `ceiling`, `accreditation_ref`, `policy` |
 > | `transport` | `socket_path`, `max_connections`, `prompt_max_bytes`, `handshake_timeout_ms`, `read_timeout_ms` |
 > | `audit` | `jsonl_path`, `siem`, `au3_1` |
 > | `principal` | `name`, `uid`, `home` |
-> | `vault` | `addr`, `approle_mount`, `pki_int_mount`, `deployment_id`, `insecure_plaintext_secret_path` |
-| `provider` *(user-side, `~/.maknae`; #372, §6.1.1)* | `context_tokens`, `output_tokens` |
+> | `vault` | `addr`, `approle_mount`, `pki_int_mount`, `deployment_id`, `insecure_plaintext_secret_path`, `user_auth`, `kv_mount`, `user_prefix` (`crates/maknae-vault/src/config.rs`). In the **root** `maknae.yaml`, `kv_mount` and `user_prefix` refuse boot — `vault.kv_mount in the root maknae.yaml is not read by maknaed: set kv_mount in egress-bounds.yaml` (likewise `user_prefix`), shadowed `config.d/` blocks included — because the host's copy lives in `egress-bounds.yaml` (§6.1.3); they belong in each user's `maknae.yaml` (§6.1.2) |
+> | `vault.user_auth` | `type`, `mount` |
+> | `providers` (each entry) | `name`, `endpoint`, `models`, `reasoning_effort`, `output_tokens_field` (§6.1) |
+> | `egress` | `socket_path`, `deadline_ms` (§6.2) |
 >
-> `authz.yaml` and `egress-bounds.yaml` have always behaved this way. **Two places are deliberately still open** and a key there continues to load: `lake`, which is registered for a forthcoming subsystem and has no parser, and `core.identity`, left as it is by maintainer direction. **Three limits, stated so the note is not read as more than it is.** (1) This closes wrong key NAMES. A key with the right name and the wrong SHAPE is handled per field and NOT uniformly: the bounded numeric and typed fields refuse (`transport: { max_connections: nope }` is `InvalidTransport`), while the shape-TOLERANT ones — `audit.jsonl_path`, `audit.siem`, and `vault`'s `get_str` keys — silently default that one field. That tolerance is a deliberate decision recorded in the parsers and is unchanged here. (2) `core`'s own level is checked where the DAEMON consumes it, so a `core` typo in a CLI-side `maknae.yaml` is not caught by this at all — it may surface later as a missing-key refusal, or not at all: an extra `handlng` beside a valid `deployment_id` is simply ignored there, and even a misspelled `deployment_id` can be masked by the supported `vault.deployment_id` fallback. (3) A `core` that is present but not a MAP still boots at the system's lowest level, as `ceiling_from_core` has always documented and a test pins — the sibling sections refuse a non-map, `core` does not, and changing that is a decision nobody has taken. **The check applies to the contribution that WINS precedence** — a `config.d/` member replaces a whole section, so a key in a shadowed block is never read and is not refused.
-
+> The CLI's own `maknae.yaml` registers `vault`, `transport` and `agent` only (`bins/maknae/src/cli.rs`), so any other section there — a `provider:` block included — refuses every CLI verb with `UnknownSection`. Standalone documents close their keys the same way: `egress-bounds.yaml` (§6.1.3), `providers.yaml` (§6.1.1) and `authz.yaml`.
+>
+> **Two places are deliberately still open** and a key there continues to load: `lake`, which is registered for a forthcoming subsystem and has no parser, and `core.identity`, left as it is by maintainer direction. **Three limits, stated so the note is not read as more than it is.** (1) This closes wrong key NAMES. A key with the right name and the wrong SHAPE is handled per field and NOT uniformly: the bounded numeric and typed fields refuse (`transport: { max_connections: nope }` is `InvalidTransport`), while the shape-TOLERANT ones — `audit.jsonl_path`, `audit.siem`, and `vault`'s `get_str` keys — silently default that one field. That tolerance is a deliberate decision recorded in the parsers. (2) `core`'s own level is checked where the DAEMON consumes it, so a `core` typo in a CLI-side `maknae.yaml` is not caught by this at all — it may surface later as a missing-key refusal, or not at all: an extra `handlng` beside a valid `deployment_id` is simply ignored there, and even a misspelled `deployment_id` can be masked by the supported `vault.deployment_id` fallback. (3) A `core` that is present but not a MAP still boots at the system's lowest level, as `ceiling_from_core` has always documented and a test pins — the sibling sections refuse a non-map, `core` does not, and changing that is a decision nobody has taken. **The check applies to the contribution that WINS precedence** — a `config.d/` member replaces a whole section, so a key in a shadowed block is never read and is not refused (the plaintext-key scan of `providers` and the root `vault` check above are the exceptions: both read shadowed blocks too).
 
 A configuration file is a YAML **mapping** whose top-level keys are **sections**. Each
 section is owned by one subsystem; a section's value is *conventionally* a mapping, but
@@ -317,9 +317,8 @@ which names the **classification system** the enclave operates under (ADR-0022).
 > from the ones **compiled into the build** (`US`, the default; `AUS`); then it
 > validates the ceiling **through the selected system** (`ceiling_from_core`). A name
 > the build does not carry refuses boot (`UnknownClassificationPolicy`); config names a
-> system, it never adds one. The rule and errors below describe that read. *(Corrected
-> 2026-09-06, #148: the ceiling is enforced on every content request — see the box at
-> the end of this section — not merely read at boot.)*
+> system, it never adds one. The rule and errors below describe that read; the ceiling
+> is then enforced on every content request (the box at the end of this section).
 
 **The rule** (applied when the ceiling is read):
 
@@ -398,8 +397,7 @@ core:
 
 A level the selected system does not rank — a typo, a caveat-bearing marking, another
 system's level — is **invalid** and refuses the load. It never silently becomes `Gated`.
-(Corrected 2026-09-06: case variants such as `secret` are accepted; earlier text made
-them a refusal, which was the live bug #148's sibling.)
+Case variants such as `secret` are accepted.
 
 > **What the ceiling does at runtime (#148 / #154, 2026-09-06).** The declared **level**,
 > in the declared **system**, is a mandatory operand of the authorization composition
@@ -457,95 +455,163 @@ an `UnknownSection` error.
 
 ---
 
-## 6. Extension sections (Forthcoming)
+## 6. Extension sections
 
-These sections are owned by subsystems not yet built. Each is documented here as it
-lands; until then, registering one and providing its content is not yet supported.
-
-**What "not yet supported" means concretely**, because it is stronger than it sounds: a
-section the daemon does not register is `ConfigError::UnknownSection`, which **refuses
-boot** and names the file it came from. The registered set is
-`crates/maknae-kernel/src/boot.rs`'s `boot_specs()` — `lake`, `vault`, `transport`,
-`audit`, `principal`, `provider`, `egress`, plus `core` — so every row below marked
-Forthcoming or Withdrawn will stop the daemon if written, rather than being ignored. Only
-`provider` (§6.1) and `egress` (§6.2) can be configured today. *(Added 2026-09-13: §9.3's worked example used to be a
-`llm` block, which is Withdrawn, and would have done exactly this to anyone who copied
-it.)*
+A section the daemon does not register is `ConfigError::UnknownSection`, which **refuses boot** and names the file it came from: `unknown config section '<section>' in '<path>' (no registered spec)`. The registered set is `crates/maknae-kernel/src/boot.rs`'s `boot_specs()` — `lake`, `vault`, `transport`, `audit`, `principal`, `providers`, `egress`, plus `core` — so every row below marked Forthcoming or Withdrawn stops the daemon if written, rather than being ignored. Of the extension sections, `providers` (§6.1) and `egress` (§6.2) can be configured today.
 
 | Section | Owner | Status |
 |---|---|---|
-| `authz` | authorization policy *(the config-section registration; the `/etc/maknae/authz.yaml` policy FILE is separate and is enforced per request as of #77 — see the runbook)* | Forthcoming |
-| `provider` | the one registered model provider (#243, milestone Cooky) — **see §6.1** | **Shipped** |
+| `authz` | authorization policy *(the config-section registration; the `/etc/maknae/authz.yaml` policy FILE is separate and is enforced per request — see the runbook)* | Forthcoming |
+| `providers` | the model providers this host authorizes (ADR-0028 decision 1) — **see §6.1** | **Shipped** |
 | `egress` | where `maknaed` finds the egress deputy, and the outer bound on one provider call (#240) — **see §6.2** | **Shipped** |
-| `llm` | LLM-provider authentication *(superseded by `provider`, 2026-09-07)* | Withdrawn — **writing it refuses boot**, see §9.3 |
+| `provider` | the single registered provider, replaced by `providers` (#153) | Withdrawn — **writing it refuses boot** |
+| `llm` | LLM-provider authentication, replaced by `provider` and then `providers` | Withdrawn — **writing it refuses boot** |
 | `channels` | channel/comms adapters (Discord, Matrix, …) | Forthcoming |
 | `dcs` | optional DCS classification backend | Forthcoming |
 
-### 6.1 The `provider` section (#243)
+### 6.1 The `providers` section
 
-The **one** OpenAI-compatible model provider the runtime loop may reach (ADR-0023). **Five** keys are required when the block is present, and two are optional: `reasoning_effort` and `output_tokens_field` *(corrected 2026-09-28, #372: this said "exactly five keys, all required", which was already wrong once `reasoning_effort` landed)*. The block is optional, and a deployment without it boots with a loop that has nothing to prompt. Which roles may send content to this provider is decided in `authz.yaml` (`roles:` and `destinations:`), see the runbook, Chapter 3 §7.
-
-> **Changed 2026-09-13 (#308) — `key_vault_path` is now MOUNT-RELATIVE, and `key_field` is new.** Write the secret path exactly as your Vault CLI shows it: `maknae/providers/openai`. The mount is declared once, in `egress-bounds.yaml`'s `kv_mount`, and the KV v2 `data/` segment is **synthesized by the reader** — it appears in no configuration file. A value still carrying the mount or a `data` segment is now **refused at boot by name**, because that is the migration error and the alternative is discovering it at the credential read. `key_field` names the field inside the secret (`api-key`, `api_key`, whatever your deployment used) and is **required with no default**, so nothing guesses.
->
-> *(The two banners below are kept for the trail. They describe the absolute-path shape this change replaces, and the defect it produced.)*
->
-> **Superseded 2026-09-13 — and note the string is the SAME, only the contract changed.** The banner below condemned `maknae/providers/openai`, and that value is now correct: under the pre-#308 *absolute* contract it was missing the mount and the `data/` segment, and under #308's *mount-relative* contract it is exactly right. Read the banner as a record of the old semantics, not as a criticism of the example above it. It read `maknae/providers/openai`, which the config parser accepts (it only requires a relative, whitespace-free string) and the boot bounds gate compares as a string — but `maknae_vault::split_kv_path` **refuses a path with no `/data/` segment** (`"is not a KV v2 path"`), so the value failed at the moment the deputy tried to read it. `key_vault_path` is the **full KV v2 API path**, `<mount>/data/<secret path>`; with `deploy/vault-pki`'s default `maknae-kv` mount that is `maknae-kv/data/…`. Two further requirements that were absent from this section entirely are added below: a `provider` block makes **`/etc/maknae/egress-bounds.yaml` mandatory**, and — at the time — no Vault client was wired *(no longer true since #240b, 2026-09-14: the deputy logs in and reads the key; see the bullet below)*. Read from the code, not from the prose it replaces.
+The OpenAI-compatible model providers this host authorizes, and the models each may be asked for (ADR-0028 decision 1). Each user then chooses, per request, among these in their own `providers.yaml` (§6.1.1); the kernel admits a request only for a provider in this list and a model on that provider's list. Which roles may send content to a provider is decided separately in `authz.yaml` (`roles:` and `destinations:`, destination id `provider:<name>`), see the runbook, Chapter 3 §7.
 
 ```yaml
-provider:
-  name: openai                          # operator's label; appears in the audit trail; <=32 bytes, [A-Za-z0-9-_.]
-  endpoint: https://api.openai.com/v1   # https://, or http:// to loopback only (the hermetic stub); no userinfo; port 1-65535
-  model: gpt-5
-  key_vault_path: maknae/providers/openai  # MOUNT-RELATIVE, no `data/`; never disclosed
-  key_field: api-key                    # the field INSIDE the secret; required, no default
-  reasoning_effort: none                # optional; sent with every request only when set
-  output_tokens_field: max_completion_tokens  # optional; max_completion_tokens (default) or max_tokens
+providers:
+  - name: openai
+    endpoint: https://api.openai.com/v1
+    models: [gpt-5.6-luna, gpt-5.6]
+    reasoning_effort: none
+    output_tokens_field: max_completion_tokens
+  - name: local
+    endpoint: http://127.0.0.1:8080/v1
+    models: [llama]
+    output_tokens_field: max_tokens
 ```
 
-- **The key is never in the config.** A key under `key`, `api_key`, `apikey`, `token`, `secret`, `secret_key` or `bearer` refuses the load (`ProviderPlaintextKey`) before any other defect **in the provider block** is reported (ownership and classification checks run earlier in boot) — in **whichever file** the `provider` block appears, including a base block that a `config.d/` member shadows. This is a field-name check on the `provider` block only; it is not a general secret scanner, and a secret pasted as the *value* of `name` or `key_vault_path` is not detected by it. The key lives in Vault under the mount `egress-bounds.yaml` declares, at the mount-relative path `key_vault_path` names, in the field `key_field` names — readable by the `maknae-egress` principal only.
-- **Who may write the block.** The file that contributes the `provider` section — `maknae.yaml` **or a `config.d/` member** — must be **root-owned and not group/other-writable**, and so must the **config directory and `config.d/` themselves** (a subject who owns the directory could otherwise choose between root-authored candidates by renaming one out of the scan); otherwise boot refuses (`SectionNotRootOwned`, naming the file or directory that failed). The packaged `/etc/maknae` (`root:_maknae 0640` under `0750`) satisfies this; the subject the loop runs as cannot register a destination. A dev-shape `~/.maknae/maknae.yaml` owned by the operator does not, by design.
-- **`reasoning_effort`** is optional. When set, it is sent as `reasoning_effort` on every request to this provider's model; when absent, nothing is sent. It is 1 to 16 lowercase ASCII letters and is not checked against any provider's list of levels, which differ between providers: a level the provider does not know comes back as the provider's own error. Some models need it: `gpt-5.6-luna` refuses function tools on `/v1/chat/completions` unless it is `none`, answering `400` with *"Function tools with reasoning_effort are not supported for gpt-5.6-luna in /v1/chat/completions"* (#242). The deputy re-checks the value's shape on every frame.
-- **`output_tokens_field`** (#372) names the request field the deputy sends the user's reply cap under: `max_completion_tokens` (the default, and OpenAI's current name) or `max_tokens` (the older name, which some OpenAI-compatible servers still require). Anything else refuses the load. It is used only when a request carries `output_tokens` from the user's own block (§6.1.1); without one, neither field is sent. A provider that rejects the name answers `400`, and the deputy's journal carries the provider's reason (§6.2).
-- **The daemon's `transport.prompt_max_bytes`** now defaults to 1 MiB and may be raised to 16 MiB (#372), so a user's declared context window can be carried whole. Raise it to at least the cap the user's loop derives (§6.1.1).
-- **Disclosure.** `admin.config.show` shows `name`, `endpoint`, `model`, `reasoning_effort` and `output_tokens_field` in the clear and omits `key_vault_path` **and `key_field`**. A field *name* is not a secret, but together with the path it describes exactly where a credential is kept, and nothing needs it in a log line.
-- **`key_vault_path` is MOUNT-RELATIVE and `data/`-free** (#308) — `maknae/providers/openai`. It must not start or end with `/`, contain whitespace, an empty segment, a `.`/`..` segment, or **any `data` segment**. That last refusal is the migration guard: a value still reading `maknae-kv/data/maknae/providers/openai` would compose to `maknae-kv/data/maknae-kv/data/maknae/providers/openai` and fetch nothing, and #307 showed that this class fails at the **credential read** rather than at boot, because nothing compares a host-side value to Vault's grant. The cost is stated plainly: a secret path legitimately containing a `data` segment cannot be expressed. That is rare; the migration error is not.
-- **`key_field`** names the field inside the secret — required, at most 64 bytes, no whitespace, and **no default**. Before #308 the only field name in the tree was a test fixture's `api_key`; defaulting to it would have asked the wrong question of a store using `api-key`. Note that naming this key `key:` instead is refused as a **pasted credential** (`ProviderPlaintextKey`) — the plaintext-key check is on the field's *name* and cannot know your value is only a field name.
-- **The examples in this reference use the SHIPPED Terraform defaults, deliberately.** `provider_key_prefix` defaults to `maknae/providers` and `kv_mount_path` to `maknae-kv`, so copy-pasting from here matches the grant `deploy/vault-pki` actually creates. A deployment is free to choose different values — but then **all three change together**, and nothing in the boot path will tell you if they do not. *(Recorded 2026-09-13 after this section briefly carried one deployment's own prefix while the Terraform default was unchanged: the copy-paste path then booted clean and took a 403 at the credential read, which is #307 reintroduced inside the change that fixed it.)*
-- **The invariant is TWO relations, not one — and only one of them is boot-checked.** *(Corrected 2026-09-13: this bullet said all three values were "a literal string equality", which is wrong twice over and could lead an operator into a boot refusal.)*
+The value is a list of at most **32** entries, and each `name` may appear once (`providers[<i>].name '<name>' is listed more than once`). Each entry has exactly the keys `name`, `endpoint`, `models`, `reasoning_effort` and `output_tokens_field`; any other key refuses with `unknown key '<key>' in 'providers'` — including the singular block's `model`, `key_vault_path` and `key_field` (`crates/maknae-config/src/providers.rs`).
 
-  | relation | enforced where |
-  |---|---|
-  | `provider_key_prefix` (Terraform) **equals** `key_vault_path_prefix` (`egress-bounds.yaml`) | **nowhere** — no boot-path component reads Terraform or the Vault policy |
-  | each `provider.key_vault_path` is **strictly beneath** that prefix | **at boot** — `egress_bounds_boot_gate`, refusing `OutsideBounds` and naming both |
+| Key | Required | Accepted |
+|---|---|---|
+| `name` | yes | 1 to 32 bytes of ASCII letters, digits, `-`, `_` and `.`. It is written into every egress audit record, and the user's `providers.yaml` names it. |
+| `endpoint` | yes | `https://`, or `http://` **to loopback only** (`localhost`, a loopback IPv4 literal, or a bracketed loopback IPv6). Refused: any other scheme, an uppercase `HTTPS://` (the scheme match is case-sensitive), whitespace anywhere, **userinfo** (`user:pw@host`), an `http://` to a routable address, a port outside 1–65535 or with a leading zero, and a malformed host such as `256.256.256.256` or `api..example.com`. |
+| `models` | yes | a list of 1 to 32 model identifiers, each 1 to 128 printable ASCII characters with no whitespace, none listed twice. |
+| `reasoning_effort` | no | 1 to 16 lowercase ASCII letters. When set, it is sent as `reasoning_effort` on every request to this provider; when absent, nothing is sent. It is not checked against any provider's list of levels, which differ between providers: a level the provider does not know comes back as the provider's own error. Some models need it: `gpt-5.6-luna` refuses function tools on `/v1/chat/completions` unless it is `none`, answering `400` (#242). |
+| `output_tokens_field` | no | `max_completion_tokens` (the default, and OpenAI's current name) or `max_tokens` (the older name, which some OpenAI-compatible servers still require). It names the request field the deputy sends a user's `output_tokens` under (§6.1.1); without one, neither field is sent. A provider that rejects the name answers `400`, and the deputy's journal carries the provider's reason (§6.2). |
 
-  *Strictly beneath* means **at least one further segment**: `maknae/providers/openai` is inside `maknae/providers`, and a path **equal** to the prefix is **outside** it — so setting `key_vault_path: maknae/providers` is refused at boot. The comparison is segment-aware, so `maknae/providers-evil/x` is not within `maknae/providers` either.
+A malformed entry refuses boot with `InvalidProvider`, which reads `invalid provider config: <reason>` and names the entry by index, for example `invalid provider config: providers[0].endpoint must be an https:// URL (http:// is permitted to loopback only)`.
 
-  What #308 did fix is the *vocabulary*: all three are now mount-relative and `data/`-free, so the first relation is a plain string comparison instead of a transformation between two coordinate systems. What it did **not** fix, and cannot, is that **a Terraform-versus-host mismatch still boots clean and becomes a 403 at the credential read** — that is #307's mechanism and it survives this change, because nothing in the boot path reads the grant.
-- **A `provider` block makes `/etc/maknae/egress-bounds.yaml` MANDATORY.** That file has **three** keys — `kv_mount` and `key_vault_path_prefix`, together mirroring the Vault grant's own shape `<mount>/data/<prefix>/*`, and since #240b a `vault` block (`addr`, and optionally `approle_mount`) saying where the deputy redeems that grant *(corrected 2026-09-14: this said "exactly two"; **an existing two-key file now stops `maknaed` from booting** on a host with a registered provider, naming the missing block — add it before upgrading)* — and boot refuses if it is absent or unreadable (`EgressBoundsRefusal::Undeclared`), if it was read but its parser refused it (`Refused`, naming the reason — a missing `vault` block, an unknown key), or if `provider.key_vault_path` is not **strictly beneath** the prefix (`OutsideBounds`, naming both). "Strictly beneath" means at least one further segment: a path *equal* to the prefix is outside it, and the comparison is segment-aware, so `…/providers-evil/x` is not within `…/providers`. The deputy re-checks the frame's path against the same prefix at use. **Scoped deliberately (corrected 2026-09-13):** it is a **`provider.key_vault_path` versus `key_vault_path_prefix` containment** mismatch that is a boot refusal rather than a 403 at request time. A mismatch between Terraform's grant and this file's prefix is **not** — nothing in the boot path reads the grant, so that one boots clean and 403s at use. See the invariant table above; do not read this sentence as covering both.
-- **The deputy logs in to Vault and reads the key (#240b).** `bins/maknae-egress` authenticates as the **third plane** — its own AppRole (`maknae-egress`, `deploy/vault-pki`) under its own policy, a read on `<kv_mount>/data/<key_vault_path_prefix>/*` and its own token lifecycle and nothing else. What it reads at start, and nothing more: `egress-bounds.yaml` (this file, including the `vault` block), `egress/maknae-egress-approle-id` and `egress/vault-ca.crt` beside it (both written by `maknae enroll`), and its SecretID. On Linux that is `$CREDENTIALS_DIRECTORY/maknae-egress-secret-id`, which systemd decrypts from the sealed `.cred` at unit start. On macOS it is the System-keychain item that `egress/maknae-egress-secret-id.keychain` names (ADR-0018 decision 6). There is **no plaintext fallback**: with neither source the deputy refuses to start, naming the reason. **Token lifecycle:** every key read is one login → KV read → `revoke-self`, and no token stands between reads; at start the deputy performs one login + revoke as a probe, so a wrong SecretID refuses start rather than the first live request. **With a `provider` registered, `maknaed` routes every permitted `session.prompt` to the deputy** over the socket §6.2 names, under the deadline §6.2 sets; with none registered the backend is `Unavailable` and nothing leaves.
-- `admin.provider.list` / `.set` / `.disable` are **not built** in Cooky; registration is this block plus Vault.
+- **No providers is a valid state.** An absent section, or `providers: []`, boots, and `egress-bounds.yaml` is then not read. Every prompt is then refused by the kernel: the administrator's `jq` over the audit trail shows the reason `no model access: no providers are authorized on this host`, while the user sees only `maknae agent: stopped: ` followed by the CLI's generic refusal text (§6.1.1). A `providers:` key with no value (YAML `null`) is not the same thing and refuses boot: `invalid provider config: providers must be a sequence of provider entries`.
+- **Values are taken as written.** Nothing is trimmed; a value with surrounding whitespace fails its own shape rule.
+- **No key is ever in this file.** A key named `key`, `api_key`, `apikey`, `token`, `secret`, `secret_key` or `bearer` (case-insensitive) in any entry refuses boot before any other defect in the section is reported (ownership and classification checks run earlier in boot): `provider config carries a plaintext credential under '<field>': each user's key lives in Vault under their own login, never in the config` (`ProviderPlaintextKey`). The scan covers every entry and **every contribution** to the section, including a base block that a `config.d/` member shadows. It is a field-name check only, not a general secret scanner: a secret pasted as the *value* of `name` is not detected.
+- **Who may write the section.** The file that contributes `providers` — `maknae.yaml` **or a `config.d/` member** — must be **root-owned and not group/other-writable**, and so must the **config directory and `config.d/` themselves** (a subject who owns the directory could otherwise choose between root-authored candidates by renaming one out of the scan); otherwise boot refuses with `SectionNotRootOwned` (§2.2). The packaged `/etc/maknae` (`root:_maknae 0640` under `0750`) satisfies this; the subject the loop runs as cannot authorize a destination. A dev-shape `~/.maknae/maknae.yaml` owned by the operator does not, by design.
+- **Authorized providers make `/etc/maknae/egress-bounds.yaml` mandatory** (§6.1.3), and `maknaed` resolves the deputy's account at boot (§6.2).
+- **The daemon's `transport.prompt_max_bytes`** defaults to 1 MiB and may be raised to 16 MiB (#372), so a user's declared context window can be carried whole. Raise it to at least the cap a user's loop derives (§6.1.1).
+- **Disclosure.** `admin.config.show` shows `providers[].name`, `providers[].endpoint`, `providers[].models` (and each `models[]` entry), `providers[].reasoning_effort` and `providers[].output_tokens_field` in the clear (`ci/gates/config-disclosure-manifest.txt`). None of them is a credential.
+- `admin.provider.list` / `.set` / `.disable` are **not built**; authorization is this section, the bounds file, and the `authz.yaml` grant.
 
-### 6.1.1 The user-side `provider` block (`~/.maknae`, #372)
+### 6.1.1 Each user's `providers.yaml`
 
-`maknae agent` needs the model's context window, and the daemon's `provider` block above is root-owned configuration the subject does not read. So the subject declares the window in their own configuration, in a block also named `provider`:
+Each user lists the providers they use in `providers.yaml` in their own configuration directory (`~/.maknae/providers.yaml`, or under `$MAKNAE_CONFIG_DIR`). The file is the user's, written by the user, held to the same file rules as any config file (§2.2), and read by `maknae agent` only (`crates/maknae-config/src/user_providers.rs`, `user_providers_io.rs`).
 
 ```yaml
-# ~/.maknae/maknae.yaml
-provider:
-  context_tokens: 128000   # required by `maknae agent`: the model's context window, in tokens
-  output_tokens: 16000     # optional: the reply cap sent with every request
+# ~/.maknae/providers.yaml
+providers:
+  - label: work-luna
+    provider: openai
+    model: gpt-5.6-luna
+    key:
+      subpath: openai/personal
+      field: api_key
+    context_tokens: 128000
+    output_tokens: 16000
+    default: true
+  - label: home
+    provider: local
+    model: llama
+    key:
+      subpath: local
+      field: api_key
+    context_tokens: 32000
 ```
 
-- **`context_tokens`** is required by `maknae agent`, which refuses to start without it (`provider.context_tokens is required by maknae agent`). At most 16,777,216. Other verbs accept the block and do not read it.
-- **`output_tokens`** is optional: at least 1, and below `context_tokens`. When set, it rides on every `session.prompt`; the kernel bounds it, records it on the egress intent, and the deputy sends it under the name the daemon's `provider.output_tokens_field` gives. A reply is capped at 1 MiB whatever this says, so above about 250,000 tokens the cap no longer limits the visible reply; on a reasoning model it still bounds the hidden reasoning tokens.
-- **The prompt budget** is `context_tokens` less `output_tokens`, and it must exceed the 1,536-token allowance for the trusted preamble and tool definitions, so the smallest window accepted is 1,537.
-- **How the loop meters it.** Before each turn the loop projects the conversation's size in tokens: the provider's last reported `prompt_tokens`, plus the bytes added since at the bytes-per-token ratio it has observed (clamped to 1–4). Before the provider has reported usage, it counts bytes at 4 per token plus the preamble allowance. The projection is never lower than the conversation's bytes at 4 per token, so a provider that under-reports usage cannot switch the meter off; against such a provider the stop can come later than the model's real window, because that floor counts neither the preamble nor text denser than 4 bytes per token. **Dense text overshoots by one turn.** Bytes the provider has not yet measured are counted at the observed ratio, or at 4 bytes per token before there are two measurements, so text that tokenizes denser — base64, minified data, many non-English scripts — is undercounted until the next reply's usage corrects the ratio. Measured on `.42` (2026-09-28): an 8 KB base64 read projected 2,861 tokens, and the provider counted 6,429. Declare the window with that margin in mind. It warns on stderr once at 80% and once at 95% — `warning: this conversation is at 82% of the declared context budget (104,960 of 128,000 tokens)`, with ` — estimated from bytes; the provider has not reported usage` appended when it has nothing better. It does not send a turn projected past the budget: it prints `stopped: the conversation has reached the declared context budget; compaction arrives with #171` and exits 2. Nothing is sent and nothing is recorded for the turn it stops.
-- **The loop's byte cap follows the window:** `context_tokens × 6` bytes, clamped to 65,536..=16,777,216 — or, when this configuration sets `transport.prompt_max_bytes` explicitly, the smaller of the two. `maknae fs write` keeps the configured `transport.prompt_max_bytes`, 1 MiB by default, so it accepts up to 1 MiB unless the configuration sets it lower.
+The top-level key is `providers` only, a list of at most **32** entries. Each entry has exactly the keys below; any other key refuses with `unknown key '<key>' in 'providers.yaml/providers'` (and inside `key`, `unknown key '<key>' in 'providers.yaml/providers/key'`).
+
+| Key | Required | Accepted |
+|---|---|---|
+| `label` | yes | 1 to 32 bytes of ASCII letters, digits, `-`, `_` and `.`; unique in the file (`providers[<i>].label '<label>' is used more than once`). |
+| `provider` | yes | the `name` of a provider the host authorizes (§6.1); same grammar as `label`. |
+| `model` | yes | 1 to 128 printable ASCII characters with no whitespace; it must be on that provider's `models` list. |
+| `key` | yes | a map of exactly `subpath` and `field` — where your API key is in Vault, never the key itself. `subpath`: at most 256 bytes, `/`-separated segments of `[A-Za-z0-9._-]`, with no empty, `.`, `..` or `data` segment and no leading or trailing `/`. `field`: 1 to 64 printable ASCII characters with no whitespace — the field name inside your Vault secret. |
+| `context_tokens` | yes | the model's context window in tokens, at most 16,777,216. |
+| `output_tokens` | no | the reply cap sent with every request: at least 1, and `context_tokens` less `output_tokens` must exceed the 1,536-token preamble allowance. |
+| `default` | no | `true` or `false` (default `false`). |
+
+Every refusal of this file reads `providers.yaml: <reason>` (`UserProviders`), for example `providers.yaml: providers[0].context_tokens is required: declare the model's context window in tokens`. Two worth knowing:
+
+- Writing `key:` as a string refuses with `providers.yaml: providers[<i>].key must be a map of subpath and field; the API key itself is stored only in Vault, never in this file`. Another spelling, such as `api_key:`, refuses as an unknown key.
+- `maknae agent` checks the budget before it sends anything, prefixed by the entry's label: `provider entry <label>: context_tokens <N> is above the 16777216 ceiling`, `provider entry <label>: output_tokens must be at least 1`, or `provider entry <label>: context_tokens less output_tokens must exceed the 1536-token preamble allowance` (`crates/maknae-agent/src/budget.rs`). The smallest window accepted is therefore 1,537.
+
+**Which entry a turn uses.**
+
+- With one entry, it is used. With two or more, exactly one must be `default: true`, or the file refuses: `providers.yaml: <N> entries and none is marked default: true; mark exactly one (labels: <labels>)`, or `providers.yaml: more than one entry is marked default: true (<labels>)`.
+- `maknae agent --provider <label> "<prompt>"` uses the entry with that label instead. An unknown label refuses with `providers.yaml: no entry is labelled '<label>' (labels: <labels>)`; a value that is not a valid label refuses with `providers.yaml: the requested provider is not a valid label (1 to 32 bytes of ASCII letters, digits, '-', '_' and '.')`.
+- An absent file, an empty document, or a document with no `providers` key means no model access: `maknae agent` stops before contacting anything with `maknae: no model access: no providers are defined in <path>`.
+
+**Where the key is.** Each turn, `maknae agent` reads the entry's key from Vault with the user's own `maknae login` token, at
+
+```
+<kv_mount>/data/<user_prefix>/<username>/<subpath>
+```
+
+field `<field>`, where `kv_mount` and `user_prefix` come from the user's `vault` block (§6.1.2) and `<username>` is the local account name of the uid running the CLI, never a value from any file (ADR-0028 decision 3). The account name must be 1 to 32 bytes of `[a-z0-9._-]`, starting and ending with `[a-z0-9_]`, and must not be `data`. With enroll's defaults (`maknae-kv`, `maknae/users`), user `alice` and the first entry above, that is `maknae-kv/data/maknae/users/alice/openai/personal`, field `api_key`. The read is response-wrapped: Vault answers with a single-use wrapping token, which the CLI seals to the Egress Daemon's `seal.pub` (§2) and sends; the kernel admits the request on metadata alone and never sees the key (ADR-0028 §5). Loading the key into Vault is `docs/first-provider.md`'s step U2.
+
+**What the user sees when the kernel refuses.** A kernel refusal reaches the user only as `maknae agent: stopped: the kernel refused the exchange — whether the prompt reached the provider is in the host's audit trail (ask your administrator); if it did not, check that your providers.yaml names a provider and model your administrator has authorized for your role and the key subpath and field of your own Vault secret, that your maknae.yaml vault block matches the host's, and that your login is current (maknae login)`. The reason — for example `provider not in the authorized set` or `model not on the authorized provider's list` — is what the administrator's `jq` over the audit trail shows (`crates/maknae-kernel/src/provider_choice.rs`).
+
+**How the loop meters the window.**
+
+- **The prompt budget** is `context_tokens` less `output_tokens`. When `output_tokens` is set, it rides on every `session.prompt`; the kernel bounds it, records it on the egress intent, and the deputy sends it under the name the provider's `output_tokens_field` gives (§6.1). A reply is capped at 1 MiB whatever this says, so above about 250,000 tokens the cap no longer limits the visible reply; on a reasoning model it still bounds the hidden reasoning tokens.
+- Before each turn the loop projects the conversation's size in tokens: the provider's last reported `prompt_tokens`, plus the bytes added since at the bytes-per-token ratio it has observed (clamped to 1–4). Before the provider has reported usage, it counts bytes at 4 per token plus the preamble allowance. The projection is never lower than the conversation's bytes at 4 per token, so a provider that under-reports usage cannot switch the meter off; against such a provider the stop can come later than the model's real window, because that floor counts neither the preamble nor text denser than 4 bytes per token. **Dense text overshoots by one turn.** Bytes the provider has not yet measured are counted at the observed ratio, or at 4 bytes per token before there are two measurements, so text that tokenizes denser — base64, minified data, many non-English scripts — is undercounted until the next reply's usage corrects the ratio. Measured on `.42` (2026-09-28): an 8 KB base64 read projected 2,861 tokens, and the provider counted 6,429. Declare the window with that margin in mind. It warns on stderr once at 80% and once at 95% — `warning: this conversation is at 82% of the declared context budget (104,960 of 128,000 tokens)`, with ` — estimated from bytes; the provider has not reported usage` appended when it has nothing better. It does not send a turn projected past the budget: it prints `stopped: the conversation has reached the declared context budget; compaction arrives with #171` and exits 2. Nothing is sent and nothing is recorded for the turn it stops.
+- **The loop's byte cap follows the window:** `context_tokens × 6` bytes, clamped to 65,536..=16,777,216 — or, when the user's `maknae.yaml` sets `transport.prompt_max_bytes` explicitly, the smaller of the two. `maknae fs write` keeps the configured `transport.prompt_max_bytes`, 1 MiB by default, so it accepts up to 1 MiB unless the configuration sets it lower.
 - **The agent's `write_file` is bounded per call, not by `prompt_max_bytes`.** Its arguments, as JSON with the file's content escaped, may be at most 61,440 bytes, a bound chosen with a margin so that a call at this size, alone in a reply, fits the smallest `transport.prompt_max_bytes` an operator can set (65,536). A reply carrying a longer call is refused whole, the agent stops, and nothing is written. Several large calls in one reply, or one beside long text, can together exceed a small daemon `prompt_max_bytes` and are refused the same way; the tool's description tells the model to send a large write as the only call in its reply. The agent cannot write a file larger than one call yet. The written content also rides every later turn back to the model, so with a loop cap near 65,536 a near-limit write leaves little room for the rest of the conversation. A near-limit write is roughly 15,000–20,000 output tokens, so an `output_tokens` below that cuts the call off before it is complete.
-- **Raise the daemon's `transport.prompt_max_bytes` to at least your derived cap, or the daemon refuses the frame and the loop stops with a transport error.** The daemon's default, 1 MiB, covers a window of about 174,000 tokens; its ceiling is 16 MiB.
-- **A configuration directory shared between the CLI and the daemon is not supported.** The two blocks share a name, and each side's parser refuses the other's keys.
+- **The daemon's `transport.prompt_max_bytes` must be at least the user's derived cap, or the daemon refuses the frame and the loop stops with a transport error.** The daemon's default, 1 MiB, covers a window of about 174,000 tokens; its ceiling is 16 MiB.
 - **Where to find a model's window:** the provider's documentation, or models.dev. Maknae reads neither; the number declared here is the number the loop uses.
-- `endpoint` and `model` move into this block later (#153), when provider configuration becomes per-user.
+
+### 6.1.2 The user `vault` block
+
+Each user's `~/.maknae/maknae.yaml` carries a `vault` block, written by `sudo maknae enroll` (`bins/maknae/src/enroll/mod.rs`) and parsed by the same `VaultConfig` as the daemon's (`crates/maknae-vault/src/config.rs`). Beside `addr` and `pki_int_mount` it carries the keys a user's turn needs:
+
+```yaml
+# ~/.maknae/maknae.yaml (the vault block, as enroll writes it with its defaults)
+vault:
+  addr: https://vault.example:8200
+  pki_int_mount: maknae-pki-int
+  user_auth:
+    type: userpass
+    mount: maknae-userpass
+  kv_mount: maknae-kv
+  user_prefix: maknae/users
+```
+
+- **`kv_mount` and `user_prefix`** are required by `maknae agent`, and enroll writes them from `--kv-mount` (default `maknae-kv`) and `--user-prefix` (default `maknae/users`). Each is at most 256 bytes of `[A-Za-z0-9._/-]`, with no empty, `.`, `..` or `data` segment and no leading or trailing `/`. When one is missing, `maknae agent` stops with `maknae: vault.kv_mount is not set in your maknae.yaml: `sudo maknae enroll` writes it` (likewise `vault.user_prefix`). Only `maknae agent` requires them, but every CLI verb parses the `vault` block, so a malformed value refuses every verb.
+- **`user_auth { type, mount }`** says how `maknae login` authenticates. An absent block means userpass on `maknae-userpass`. When the block is present, `type` is required and must be `userpass`; anything else refuses with `vault.user_auth.type "<type>" is not supported: the only method is `userpass``. `mount` defaults to `maknae-userpass` and is a bare mount name: a leading `auth` segment refuses (`invalid Vault mount: vault.user_auth.mount starts with 'auth' — the auth/ prefix is composed by the client; write the bare mount name as Terraform declares it`), as does a character outside `[A-Za-z0-9._/-]`, whitespace, or an empty, `.` or `..` segment. Keys other than `type` and `mount` refuse with `unknown key '<key>' in 'vault.user_auth'`. The root `maknae.yaml` may carry the same block.
+- **They must match the host.** A user whose `kv_mount` or `user_prefix` differs from the host's `egress-bounds.yaml` (§6.1.3) seals a key the Egress Daemon cannot open: the deputy refuses before any provider I/O, and `maknaed` records every such turn `Failed` (ADR-0028 §5, amended, and §6). The user sees only the generic refusal text (§6.1.1). Keep both files written from the same enroll flags.
+
+### 6.1.3 `egress-bounds.yaml`
+
+`/etc/maknae/egress-bounds.yaml` declares, for the host, where user keys live and where the Egress Daemon reaches Vault. `maknaed` composes each user's key path beneath it per request, and the deputy checks each frame's path against it at use (`crates/maknae-config/src/bounds.rs`). `maknae enroll` writes it from `--vault-addr`, `--kv-mount` and `--user-prefix`:
+
+```yaml
+vault:
+  addr: https://vault.example:8200
+kv_mount: maknae-kv
+user_prefix: maknae/users
+```
+
+- **Exactly three keys**: `kv_mount`, `user_prefix` and `vault`, and `vault` holds exactly `addr`. Any other key refuses with `unknown key '<key>' in 'egress-bounds.yaml'` (or `in 'egress-bounds.yaml/vault'`) — including the retired `key_vault_path_prefix` and `approle_mount`.
+- **The fragment grammar.** `kv_mount` and `user_prefix` are each required, a string, at most 256 bytes, in `[A-Za-z0-9._/-]`, with no whitespace, no empty, `.`, `..` or `data` segment, and no leading or trailing `/`. `vault.addr` is required, non-empty, without whitespace, at most 256 bytes, and must be `https://` (checked at boot).
+- **Required only when providers are authorized.** With an empty or absent `providers` section the file is not read. With providers authorized, a file that cannot be read refuses boot with `providers are authorized but egress-bounds.yaml could not be read: <reason>`, and one that was read but refused — by its parser or by the boot gate's own `user_prefix` and `vault.addr` checks — refuses with `providers are authorized but the egress bounds were refused — <reason>` (`crates/maknae-kernel/src/boot_gate.rs`). A parser refusal's reason reads `egress-bounds.yaml: <reason>` (`InvalidEgressBounds`).
+- **Mode `0644 root:root`, by design.** It is read through the root-artifact rule — root-owned, not group- or other-writable — by both `maknaed` and `_maknae-egress`, so it is owned by neither and editable by neither; it is world-readable because nothing in it is a secret and because the deputy is in neither `root` nor `_maknae`. To reach it, the deputy has a POSIX ACL `u:_maknae-egress:rx` on `/etc/maknae` (`r` as well as `x`, because the anchored reader opens the directory `O_RDONLY|O_DIRECTORY`), set by the package's `postinst`/`%post` and re-asserted by `maknae enroll`. A write-granting ACL would raise the group bits into the loader's `0o022` mask and be refused, so the root-artifact check is not weakened.
+- **Not in `config.d/`.** It is a standalone document with its own reader, never merged or shadowed.
+- **The same address appears twice, independently.** `vault.addr` here is where the deputy unwraps; `maknae.yaml`'s `vault.addr` is `maknaed`'s. The two are never compared.
+- On an SELinux host, run `restorecon -R /etc/maknae` after creating the file by hand or after enroll creates `egress/`: a new file or directory inherits `maknae_etc_t`, and the deputy is granted the file's own type (`maknae_egress_bounds_t`) and the directory's (`maknae_egress_etc_t`, `packaging/common/maknae.fc`), not the parent's.
 
 ---
 
@@ -575,13 +641,13 @@ egress:
   maximum, the 60 s transport maximum for the reply write, and 30 s for the group
   lookup, the PDP decision and the audit appends. So it does not stop a turn the daemon
   would still answer, unless an audit append stalls, since those have no time bound.
-  Every other reply is still bounded by `transport.read_timeout_ms`. The default exceeds
-  the deputy's worst-case wall time on one request by ten seconds: every Vault operation
-  is bounded at 30 s, a socket-activated first request waits for the boot probe (login
-  and revoke), a cold key cache costs a login, a KV read and a revoke, and then the 120
-  s provider call — 270 s. At "equal" the kernel would expire first and record
-  delivery-unknown for a call the deputy answered. A slower provider needs the deputy's
-  bound raised and this one with it. Out of range refuses boot by name. Shutdown waits
+  Every other reply is still bounded by `transport.read_timeout_ms`. The default, 280000,
+  covers the deputy's worst-case wall time on one request with room to spare: per turn
+  the deputy makes one wrapping lookup and one unwrap at Vault, each bounded at 30 s,
+  then the provider call, bounded at 120 s — 180 s. There is no boot probe and no key
+  cache. If this bound expired first, the kernel would record delivery-unknown for a
+  call the deputy answered. A slower provider needs the deputy's bound raised and this
+  one with it. Out of range refuses boot by name. Shutdown waits
   for a send in flight: the daemon's handler drain is bounded by one connection's whole
   work — the handshake, the group lookup, the frame read and the response write (each at
   its `transport` timeout), the PDP decision and the verb's own blocking step, this
@@ -595,9 +661,7 @@ egress:
   chain is 396 s; a stop with nothing in flight exits in milliseconds. One more bound at
   the ceiling: the deputy's request cap is 16,842,752 bytes — 16 MiB and a 64 KiB margin
   for the re-wrap — so a prompt that fills `transport.prompt_max_bytes` at its own 16
-  MiB maximum still reaches the deputy *(corrected 2026-09-28, #372: at the old 1 MiB
-  maximum, a full prompt re-wrapped past a 1 MiB request cap and was refused before it
-  was sent)*.
+  MiB maximum still reaches the deputy.
 - **A provider's error reaches the deputy's journal** (#372). When the provider answers
   non-2xx, the deputy reads at most 4 KiB of the body, masks the provider key wherever it
   appears, escapes everything outside printable ASCII and writes one line:
@@ -613,10 +677,11 @@ egress:
   macOS, root and the `_maknae-egress` group, through the file's `_maknae-egress:_maknae-egress
   0750` directory). A journal forwarded to syslog (`/var/log/messages` through rsyslog's
   `imjournal`) or to a remote collector carries the content too.
-- **What the section changes at boot.** With a `provider` registered, `maknaed` resolves
+- **What the section changes at boot.** With providers authorized, `maknaed` resolves
   the deputy's account (`_maknae-egress`) ONCE, before the Vault mint, and refuses to start
-  by name if the account does not exist or cannot be looked up — the macOS package creates
-  it (`preinstall`). With no provider the backend is `Unavailable`, the account is never
+  by name if the account does not exist (`providers are authorized but the egress deputy's
+  account '_maknae-egress' does not exist on this host`) or cannot be looked up — the macOS
+  package creates it (`preinstall`). With no providers the backend is `Unavailable`, the account is never
   looked up, and the section is parsed but idle. Whether the deputy's socket exists is
   checked per request (`egress backend not ready` in the trail), not at boot: the socket
   unit and the daemon start independently — and **nothing enables the socket unit for
@@ -666,8 +731,10 @@ variants. Most are raised by the **directory load** itself; `InvalidCeiling` is 
 by the **typed ceiling read** (`ceiling_from_core`, §4.1), and `UnknownKey` by the
 individual **section parsers**, two of which live outside `maknae-config` (`vault`'s in
 `maknae-vault`, `core`'s own level in `maknae-kernel`'s boot). `egress-bounds.yaml` is
-not part of the directory load at all and is read by the DEPUTY as well as the daemon.
-One name below, `UnknownRole`, is `maknae-authz-basic`'s rather than the config crate's.
+not part of the directory load at all and is read by the DEPUTY as well as the daemon,
+and `providers.yaml` is read by the CLI. Two names below are not the config crate's:
+`UnknownRole` is `maknae-authz-basic`'s, and `RootVaultKeyRefused` is `maknae-kernel`'s
+boot gate (`crates/maknae-kernel/src/boot_gate.rs`).
 
 | Condition | Error |
 |---|---|
@@ -684,12 +751,17 @@ One name below, `UnknownRole`, is `maknae-authz-basic`'s rather than the config 
 | `core` defined in a `config.d/` file | `CoreOverride` |
 | A caller registering a reserved name (`core`) | `ReservedSection` |
 | A duplicate section name in the registration | `DuplicateSpec` |
-| `egress-bounds.yaml` read but refused: a missing `vault` block, a malformed path fragment (#240) | `InvalidEgressBounds` |
+| `egress-bounds.yaml` read but refused: a missing `vault` block or key, a fragment outside `[A-Za-z0-9._/-]` or with an empty, `.`, `..` or `data` segment, a value over 256 bytes (§6.1.3). Reads `egress-bounds.yaml: <reason>`; an unknown key such as `key_vault_path_prefix` or `approle_mount` is `UnknownKey` | `InvalidEgressBounds` |
 | The `egress` section (§6.2): a non-map section, a value of the wrong type or out of range (#240) | `InvalidEgress` |
-| **A key no parser reads** — in `maknae.yaml`'s `core` (own level), `transport`, `audit`, `principal`, `provider`, `egress` and `vault`; in `core.handling` and `core.handling.ceiling`; in `egress-bounds.yaml` and its `vault` block; and at `authz.yaml`'s four map levels (the document, `permissions`, and each role body under `roles:`/`destinations:` — a mistyped ROLE NAME is `UnknownRole`, not this). **Not** `lake` or `core.identity`, which are deliberately open (§3) (#210) | **`UnknownKey`** |
+| **A key no parser reads** — in `maknae.yaml`'s `core` (own level), `transport`, `audit`, `principal`, each `providers` entry, `egress`, `vault` and `vault.user_auth`; in `core.handling` and `core.handling.ceiling`; in `egress-bounds.yaml` and its `vault` block (`egress-bounds.yaml/vault`); in `providers.yaml` at its top level (`providers.yaml`), each entry (`providers.yaml/providers`) and each entry's `key` (`providers.yaml/providers/key`); and at `authz.yaml`'s four map levels (the document, `permissions`, and each role body under `roles:`/`destinations:` — a mistyped ROLE NAME is `UnknownRole`, not this). **Not** `lake` or `core.identity`, which are deliberately open (§3) (#210) | **`UnknownKey`** |
 | A present-but-malformed `core.handling` ceiling | `InvalidCeiling` |
 | `transport.prompt_max_bytes` outside 65536..=16777216 (default 1048576 since #372; it bounds prompt-class frames only, and control and attempt frames have fixed caps) | `InvalidTransport` |
-| The daemon's `provider.output_tokens_field` other than `max_completion_tokens` or `max_tokens` (#372) | `InvalidProvider` |
+| The `providers` section (§6.1): not a list (a null `providers:` included), more than 32 entries, a duplicate `name`, an entry that is not a map, a missing or malformed `name`, `endpoint` or `models`, a malformed `reasoning_effort`, an `output_tokens_field` other than `max_completion_tokens` or `max_tokens`. Reads `invalid provider config: <reason>` | `InvalidProvider` |
+| A key named `key`, `api_key`, `apikey`, `token`, `secret`, `secret_key` or `bearer` in any `providers` contribution, shadowed ones included: `provider config carries a plaintext credential under '<field>': each user's key lives in Vault under their own login, never in the config` | `ProviderPlaintextKey` |
+| The file contributing `providers`, `<config-dir>` or `config.d/` not root-owned, or group/other-writable: `section 'providers' must come from a root-owned, non-group/other-writable source; <path> is not` | `SectionNotRootOwned` |
+| `core.handling.policy` names a system the build does not carry: `core.handling.policy names a classification system this build does not carry: '<name>'` | `UnknownClassificationPolicy` |
+| `providers.yaml` (§6.1.1) malformed, or no entry selectable: `providers.yaml: <reason>` | `UserProviders` |
+| `vault.kv_mount` or `vault.user_prefix` in the root `maknae.yaml`, shadowed `config.d/` blocks included: `vault.kv_mount in the root maknae.yaml is not read by maknaed: set kv_mount in egress-bounds.yaml` | `RootVaultKeyRefused` (kernel) |
 
 ---
 
@@ -744,222 +816,88 @@ core:
 > Remember: the whole block is required and strict. Setting only `cui_permitted: true`
 > without the other five ceiling fields is **invalid** and refuses the load.
 
-### 9.3 A `provider` in `config.d/` — the worked extension example
+### 9.3 Authorizing providers in `config.d/`
 
-> **Corrected 2026-09-13.** This section used to build its example around the **`llm`** section, describing it as a "Forthcoming subsystem, §6". Both halves were wrong, and the second one was not merely stale — it was **unloadable**. §6's own table marks `llm` **Withdrawn** (superseded by `provider`, 2026-09-07), and `llm` is not among the sections the daemon registers (`crates/maknae-kernel/src/boot.rs`, `boot_specs()`: `lake`, `vault`, `transport`, `audit`, `principal`, `provider`, with `core` read directly). An unregistered section is `ConfigError::UnknownSection` (`crates/maknae-config/src/loader.rs`), which is **returned, not warned** — so an operator who copied the old example got a fail-closed boot refusal naming their own file. The example now uses `provider`, the one extension section that is Shipped, and the old `660`/`770` permission advice below is corrected too: for a section like `provider` those modes are **refused**. Every rule stated here was read from the code, not from the prose above it.
-
-Extension sections belong in `config.d/` (or inline in the base). `config.d/` files
-override the base **section-by-section**. Example directory:
+Extension sections belong in `config.d/` (or inline in the base). `config.d/` files override the base **section by section**. A host that authorizes two providers:
 
 ```
-/etc/maknae/                 # 750, root-owned
-├── maknae.yaml              # 640, root-owned — core (+ inline sections)
-├── egress-bounds.yaml       # 0644, root-owned (root:wheel on macOS) — NOT a config.d member; read by BOTH daemons (see the banner below)
-└── config.d/                # 750, root-owned
-    └── 10-provider.yaml     # 640, root-owned — the `provider` section (§6.1)
+/etc/maknae/                 # 0750 root:_maknae
+├── maknae.yaml              # 0640 root:_maknae — core (+ inline sections)
+├── egress-bounds.yaml       # 0644 root:root (root:wheel on macOS) — written by enroll; NOT a config.d member
+└── config.d/                # 0750 root:_maknae
+    └── 10-provider.yaml     # 0640 root:_maknae — the `providers` section (§6.1)
 ```
-
-`egress-bounds.yaml` sits beside `maknae.yaml`, **not** inside `config.d/`: it is a
-separate document with its own reader, not a registered section, so it is neither merged
-nor shadowed. It is held to the same root-owned, not-group-writable requirement, and for
-a reason worth knowing: **both `maknaed` and `_maknae-egress` read it, so it is owned by
-neither and editable by neither.**
 
 `config.d/10-provider.yaml`:
 
 ```yaml
-provider:
-  name: openai                          # <=32 bytes; [A-Za-z0-9-_.] only
-  endpoint: https://api.openai.com/v1   # https://, or http:// to loopback only
-  model: gpt-5
-  key_vault_path: maknae/providers/openai  # MOUNT-RELATIVE, exactly as `vault kv` shows it
-  key_field: api-key                    # the field inside the secret
+providers:
+  - name: openai
+    endpoint: https://api.openai.com/v1
+    models: [gpt-5.6-luna, gpt-5.6]
+    reasoning_effort: none
+  - name: local
+    endpoint: http://127.0.0.1:8080/v1
+    models: [llama]
+    output_tokens_field: max_tokens
 ```
 
-> **Changed 2026-09-13 (#308) — this example is now what you actually type.** `key_vault_path` is **mount-relative and `data/`-free**, the mount is declared once in `egress-bounds.yaml`'s `kv_mount`, and `key_field` names the field inside the secret. The Vault CLI path and the configured path are now the same two strings, so there is no API-versus-CLI spelling to keep straight. *(The banner below is kept for the trail; it describes the absolute-path shape this replaced and the defect that shape produced.)*
->
-> **Corrected again 2026-09-13, and this one would have produced the exact failure the design tries to prevent.** The examples in this section and in §6.1 used `maknae/provider/…` — **singular** — while `deploy/vault-pki`'s `provider_key_prefix` defaults to **`maknae/providers`** (plural), which is also what every fixture in the code uses. Following this section verbatim against the shipped Terraform therefore produced a host-side pair that agreed with *itself* — `key_vault_path` under `key_vault_path_prefix`, so **boot passed** — while the Vault policy granted a read on `maknae-kv/data/maknae/providers/*` and the deputy asked for `.../provider/openai`. That is **a silent 403 at request time**, which `variables.tf` then named as the thing boot validation exists to avoid: *"A mismatch is a boot refusal, not a silent 403 at request time."* The boot gate cannot catch it, because it compares the two host-side values to each other and never to Vault. **That quoted sentence was itself too broad and has since been corrected** (2026-09-13): it holds for the host-side containment check and not for the Terraform-versus-bounds equality, which nothing enforces — see the invariant table in §6.1. **Whenever you change one, change all three: the Terraform variable, `egress-bounds.yaml`, and every `provider.key_vault_path`.**
-
-**And `/etc/maknae/egress-bounds.yaml`, which a `provider` block makes mandatory**
-(`0644 root:root` — read by BOTH daemons through the root-artifact rule, root-owned and
-not group- or other-writable; world-readable because nothing in it is a secret, and
-because the deputy is in neither `root` nor `_maknae`):
+`/etc/maknae/egress-bounds.yaml`, as `sudo maknae enroll --vault-addr https://vault.example:8200` writes it with the default `--kv-mount` and `--user-prefix` (§6.1.3):
 
 ```yaml
-kv_mount: maknae-kv
-key_vault_path_prefix: maknae/providers
 vault:
-  addr: https://vault.example:8200   # where the deputy logs in; https only
-  # approle_mount: maknae-approle    # optional — the packaged Terraform default
+  addr: https://vault.example:8200
+kv_mount: maknae-kv
+user_prefix: maknae/users
 ```
 
-> **Corrected 2026-09-14 (#240b), and this one was a defect on every packaged host.**
-> This passage said `640, root-owned`. The deputy runs as `_maknae-egress`, which is in
-> neither `root` nor `_maknae`, so a `640` file was unreadable to the only process it
-> exists for — and `/etc/maknae` itself is `root:_maknae 0750`, so the deputy could not
-> even traverse to it. The directory cannot simply gain a world `x` bit: the loader
-> refuses any world bit on `<config-dir>` (`mode & 0o007`, §2.2). The fix is a POSIX ACL
-> `u:_maknae-egress:rx` on `/etc/maknae` — `r` as well as `x`, because the anchored
-> reader opens the directory `O_RDONLY|O_DIRECTORY` and a search-only entry fails that
-> open; set by the package's `postinst`/`%post` and re-asserted by `maknae enroll` — and `0644` on
-> this file. A *write*-granting ACL would raise the group bits into the
-> loader's `0o022` mask and be refused, so the root-artifact check is not weakened. §2.2's
-> "keep the config tree free of world ACLs" still holds: this is a user entry for one named
-> account, not a world one.
+A user's `~/.maknae/providers.yaml`, choosing from that set (§6.1.1):
 
-On an SELinux host, `restorecon -R /etc/maknae` after creating the bounds file by hand
-or after enroll creates `egress/`: a new file or directory inherits `maknae_etc_t`, and
-the deputy is granted the file's own type (`maknae_egress_bounds_t`) and the dir's
-(`maknae_egress_etc_t`, `packaging/common/maknae.fc`), not the parent's.
-
-**The deputy's credential set, `/etc/maknae/egress/`** (`0750 root:_maknae-egress`,
-created by the package; the files are written by `maknae enroll`, never by hand):
-
+```yaml
+providers:
+  - label: work-luna
+    provider: openai
+    model: gpt-5.6-luna
+    key:
+      subpath: openai
+      field: api_key
+    context_tokens: 128000
+    output_tokens: 16000
+    default: true
+  - label: home
+    provider: local
+    model: llama
+    key:
+      subpath: local
+      field: api_key
+    context_tokens: 32000
 ```
-/etc/maknae/egress/
-├── maknae-egress-approle-id   # 0640 root:_maknae-egress — the RoleID (not a secret)
-└── vault-ca.crt               # 0640 root:_maknae-egress — the Vault TLS anchor, a copy
-```
-
-`vault-ca.crt` is the ONLY trust anchor on the Vault leg, for all three planes: the system
-store is not consulted there. An operator whose Vault presents a publicly issued
-certificate must put that public root (or the issuing intermediate) in the file they hand
-`--vault-ca`; an empty or non-PEM file is a construction-time refusal naming the path.
-
-The SecretID is not here: enroll seals it to `/etc/maknae/private/maknae-egress-secret-id.cred`
-(`0400 root:root`), and `maknae-egress.service`'s `LoadCredentialEncrypted=` has systemd
-decrypt it into `$CREDENTIALS_DIRECTORY` at unit start.
-
-The `provider` path must be **strictly beneath** that prefix — at least one further
-segment, compared segment-aware — or boot refuses with `OutsideBounds` naming both. A
-missing or unreadable bounds file refuses with `Undeclared`. The same prefix is what
-`deploy/vault-pki` grants the deputy a read on. **Two relations, one of them unchecked:**
-the Terraform `provider_key_prefix` must **equal** this file's `key_vault_path_prefix`,
-and each `provider.key_vault_path` must be **strictly beneath** it — *"beneath"*, so a
-path equal to the prefix is refused. Since #308 all three are mount-relative and
-`data/`-free, so the first is a plain comparison rather than a transformation between two
-coordinate systems. But **only the second is boot-checked.** No boot-path component reads
-Terraform or the Vault policy, so a Terraform-versus-host mismatch still boots clean and
-surfaces as a **403 at the credential read** — #307's mechanism, unchanged by #308.
-Getting the Terraform prefix and this file to agree is an operator obligation with no
-automated check behind it.
-
-Then put the key in Vault, never in a config file:
-
-```
-vault kv put maknae-kv/maknae/providers/openai api-key=sk-…
-```
-
-The mount and the secret path are the same two strings you just configured, and the
-`data/` segment appears in neither: the Vault **CLI** omits it by convention, and since
-#308 the configuration omits it too because the reader synthesizes it. *(Before #308 the
-configuration carried the **API** path including `data/`, so an operator had to hold both
-spellings in mind at once — which is the defect this removed.)*
-
-> **The field name is YOURS and it is authoritative — seed the secret with whatever
-> `key_field` says.** *(Rewritten 2026-09-13: this passage said the name was "not settled",
-> that only a test named one, and to pre-seed `api_key` provisionally. All three became
-> false in #308, and following the old advice would seed a field the configuration does
-> not name — recreating a credential-read failure the moment [#240](https://github.com/darkhonor/maknae/issues/240)
-> wires the client.)* `provider.key_field` is required, carried on every request, and read
-> by `VaultKeys::read`; the example above uses `api-key`, and if your secret uses
-> `api_key` or anything else, write that instead. Nothing defaults.
->
-> **Nothing in the daemon stands between a registration and a live prompt any more
-> (2026-09-15, #240):** the deputy logs in and reads the key, `maknae enroll` provisions
-> its plane, and `maknaed` routes a permitted `session.prompt` to it (§6.2). What does
-> still stand between them: the deputy's socket unit, which is preset-disabled and yours
-> to enable (`sudo systemctl enable --now maknae-egress.socket`, §6.2); and no
-> `session.prompt` client ships yet — the runtime loop is #241's — so the first live
-> prompt, and the live provider call itself, are #241's and #242's acceptance
-> demonstration.
 
 #### Permissions — stricter than §2.2 for this section
 
-§2.2's universal rule is "no world/other bits" (`mode & 0o007 == 0`), which admits
-`660` and `770`. **A root-required section is held to more than that.** `provider` is
-one, so the file that contributes it **and** `<config-dir>` **and** `config.d/` must each
-be **root-owned** and **not writable by group or other** (`mode & 0o022 == 0`) —
-`loader.rs`'s `ROOT_ARTIFACT` (`owner: Some(0)`, `mode_mask: 0o022`) rather than
-`CONFIG_ARTIFACT` (`owner: None`, `mode_mask: 0o007`).
+§2.2's universal rule is "no world/other bits" (`mode & 0o007 == 0`), which admits `660` and `770`. **A root-required section is held to more than that.** `providers` is one, so the file that contributes it **and** `<config-dir>` **and** `config.d/` must each be **root-owned** and **not writable by group or other** (`mode & 0o022 == 0`) — `loader.rs`'s `ROOT_ARTIFACT` (`owner: Some(0)`, `mode_mask: 0o022`) rather than `CONFIG_ARTIFACT` (`owner: None`, `mode_mask: 0o007`).
 
-| Path | Valid with a `provider` block | Refused |
+| Path | Valid with a `providers` section | Refused |
 |---|---|---|
-| The file carrying `provider` | `640`, `600`, `440` — root-owned | **`660`** (group-writable), any world bit, any non-root owner |
+| The file carrying `providers` | `640`, `600`, `440` — root-owned | **`660`** (group-writable), any world bit, any non-root owner |
 | `<config-dir>`, `config.d/` | `750`, `700` — root-owned | **`770`** (group-writable), any world bit, any non-root owner |
+| `egress-bounds.yaml` | `644` — root-owned | any group or other write bit, any non-root owner |
+| `~/.maknae/providers.yaml` | `600`, `640` — the user's own | any world bit |
 
-The failure names the path that failed (`SectionNotRootOwned`). The packaged
-`/etc/maknae` (`root:_maknae 0640` under `0750`) satisfies this as shipped. **A dev-shape
-`~/.maknae/maknae.yaml` owned by the operator does not, by design** — the subject the
-loop runs as must not be able to register a destination for its own content.
+The failure names the path that failed (`SectionNotRootOwned`, §2.2). The packaged `/etc/maknae` (`root:_maknae 0640` under `0750`) satisfies this as shipped. **A dev-shape `~/.maknae/maknae.yaml` owned by the operator does not, by design** — the subject the loop runs as must not be able to authorize a destination for its own content. `config.d/` itself is checked as well as the file, because a subject who can write the directory could otherwise hide a root-authored override and hand the win to the base file.
 
-`config.d/` itself is checked as well as the file, because a subject who can write the
-directory could otherwise hide a root-authored override and hand the win to the base
-file.
+#### The key is never in a file
 
-#### What the parser accepts (`crates/maknae-config/src/provider.rs`)
-
-**Six keys: five required and `reasoning_effort` optional, no others** — any other key
-refuses with `unknown key '<name>' in 'provider'` *(the message changed with #210, which made
-`UnknownKey` the one refusal for a wrong key everywhere)*.
-
-- **`name`** — at most **32 bytes** (it is written into every egress audit record's
-  `object`), and only ASCII letters, digits, `-`, `_` and `.`. A space or a `/` refuses.
-- **`endpoint`** — `https://`, or `http://` **to loopback only** (`localhost`, a
-  loopback IPv4 literal, or a bracketed loopback IPv6). Refused: any other scheme, an
-  uppercase `HTTPS://` (the scheme match is **case-sensitive**), a bare host with no
-  scheme, whitespace anywhere, **userinfo** (`user:pw@host` — a credential in a
-  disclosed field, and the trick that made `localhost:pw@remote` read as loopback), an
-  `http://` to a routable address, a port outside `1–65535` or with a leading zero, and
-  a malformed literal such as `256.256.256.256` or `api..example.com`.
-- **`model`** — any non-empty string; sent verbatim on every request.
-- **`key_vault_path`** — the secret path **relative to `kv_mount`, without `data/`**
-  (#308), e.g. `maknae/providers/openai` — exactly what `vault kv put` takes. Refused: a
-  leading or trailing `/`, whitespace, an empty segment, a `.` or `..` segment, and
-  **any `data` segment**. The deputy composes `<mount>/data/<path>` at read time, so the
-  KV v2 API artifact never appears in configuration — and a configured path therefore
-  **cannot name `metadata/`**, the parallel KV v2 tree a `list` would enumerate. Read by
-  the **`maknae-egress`** principal only, under its own Vault policy.
-- **`key_field`** — the field name inside that secret, e.g. `api-key`. Required, at most
-  64 bytes, no whitespace, **no default**. It is carried per request rather than fixed in
-  the deputy, for the same reason `destination` is: two providers may use different field
-  names, and a constant fails the moment there are two.
-- **`reasoning_effort`** — optional; 1 to 16 lowercase ASCII letters, e.g. `none`. Sent
-  verbatim as `reasoning_effort` on every request when present, and not sent at all when
-  absent. Not checked against a provider's list of levels.
-
-The five required values are trimmed, and an empty-after-trim value is refused as missing. `reasoning_effort` is taken as written: an empty value, or a YAML `null`, is refused by its shape rule rather than treated as absent. To send no level, leave the key out.
-
-#### The key must not be in the file
-
-A field named `key`, `api_key`, `apikey`, `token`, `secret`, `secret_key` or `bearer`
-refuses the load with `ProviderPlaintextKey`, naming the field. Three details worth
-knowing before you write the file:
-
-- **Case-insensitive** on the field name — `API_KEY` and `Token` refuse too.
-- It is checked on **every contribution** to the section, including a base block that
-  a `config.d/` member shadows. Moving the key into a file that loses the override does
-  not hide it.
-- It is reported **before any other defect in the provider block**, so if you pasted a
-  key next to a typo you hear about the key first. (Ownership and classification checks
-  run earlier in boot and can still speak first.)
-
-It is a **field-name check on the `provider` block only** — not a general secret
-scanner. A secret pasted as the *value* of `name` or `key_vault_path` is not detected.
+No configuration file holds a provider key — not the root `providers` section (a key-named field refuses boot with `ProviderPlaintextKey`, §6.1), and not `providers.yaml` (an entry's `key` is a map naming where the key is; a string refuses, §6.1.1). Each user's key lives in Vault under their own login, at `<kv_mount>/data/<user_prefix>/<username>/<subpath>`, and the user loads it there themselves with their own `maknae login` identity: `docs/first-provider.md`, step U2. Each turn the CLI reads it response-wrapped and seals the wrapping token to the Egress Daemon, so neither `maknaed` nor any file on the host ever holds it (ADR-0028 §5).
 
 #### `config.d/` mechanics that apply here (§2.1)
 
-Only immediate entries are read; only `*.yaml` / `*.yml` (case-insensitive); dotfiles
-are skipped, so an editor's `.10-provider.yaml.swp` is harmless; a subdirectory or a
-**symlink** in `config.d/` is an **error**, not ignored; files are read in **lexical
-order**, which is why the example is named `10-provider.yaml`.
+Only immediate entries are read; only `*.yaml` / `*.yml` (case-insensitive); dotfiles are skipped, so an editor's `.10-provider.yaml.swp` is harmless; a subdirectory or a **symlink** in `config.d/` is an **error**, not ignored; files are read in **lexical order**, which is why the example is named `10-provider.yaml`.
 
 #### Verifying it loaded
 
-`admin.config.show` shows `name`, `endpoint` and `model` in the clear and **omits
-`key_vault_path`**. `admin.provider.list` / `.set` / `.disable` are **not built** in
-Cooky — registration is this block plus Vault, and nothing else.
-
-Which roles may send content to this provider is a separate decision, made in
-`authz.yaml` (`roles:` and `destinations:`) — see the runbook, Chapter 3 §7. A
-registered provider is reachable by nobody until that grant exists.
+- `maknaed` boots: a defect in `providers`, a missing or refused `egress-bounds.yaml`, or a missing `_maknae-egress` account refuses start by name (§6.1, §6.1.3, §6.2).
+- `admin.config.show` shows each provider's `name`, `endpoint`, `models`, `reasoning_effort` and `output_tokens_field` in the clear (§6.1).
+- The deputy's socket unit is enabled (`sudo systemctl enable --now maknae-egress.socket`, §6.2), or every permitted prompt is refused as not ready.
+- Which roles may send content to a provider is a separate decision, made in `authz.yaml` (`roles:` and `destinations:`, destination `provider:<name>`) — see the runbook, Chapter 3 §7. An authorized provider is reachable by nobody until that grant exists.
+- A user's first turn (`maknae login`, then `maknae agent "<prompt>"`) is `docs/first-provider.md`'s walk-through.
