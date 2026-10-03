@@ -243,11 +243,11 @@ pub fn admitted_user_for_test(user: Option<&str>) -> Option<String> {
 
 /// Build the seam Request from the verb + kernel-verified peer uid. Subject
 /// carries the kernel-verified `uid` (i64 carriage of the u32 — lossless) and,
-/// when the kernel resolved one, the requester's home; both are kernel-derived.
-/// ADR-0024's "the uid is the whole subject" is the identity claim, and the home
-/// is an attribute of that uid. `Read` carries the client-supplied path as the resource
-/// `path` attribute, and an admitted `session.prompt` carries `destination`;
-/// the context carries the lane.
+/// when the kernel has one, the subject's canonical home; both are
+/// kernel-derived. ADR-0024's "the uid is the whole subject" is the identity
+/// claim, and the home is an attribute of that uid. `Read` carries the
+/// client-supplied path as the resource `path` attribute, and an admitted
+/// `session.prompt` carries `destination`; the context carries the lane.
 pub fn build_authz_request(
     verb: &Verb,
     peer_uid: u32,

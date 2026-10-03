@@ -824,7 +824,6 @@ mod tests {
         }
     }
 
-    /// A read request with an explicit lane and optional OS attribute; no preparation.
     #[test]
     fn the_requesters_home_decides_tilde_not_the_enrolled_principals() {
         let lp = lp_with(None, &[]);
@@ -845,9 +844,9 @@ mod tests {
             maknae_security::SUBJECT_HOME,
             AttrValue::Str("/home/c".into()),
         );
-        assert!(!matches!(
+        assert!(matches!(
             decide_loaded(&lp, &principal(), &req),
-            Verdict::Permit { .. }
+            Verdict::NotApplicable { .. }
         ));
     }
 
@@ -912,6 +911,7 @@ mod tests {
         );
     }
 
+    /// A read request with an explicit lane and optional OS attribute; no preparation.
     fn read_req(lane: Option<&str>, accessible: Option<AttrValue>) -> SecRequest {
         let mut r = request(Some(501), "fs.read", Some("/home/operator/x"));
         r.resource.0 = {

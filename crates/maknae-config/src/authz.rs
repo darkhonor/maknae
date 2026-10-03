@@ -112,12 +112,11 @@ pub struct AuthzPolicy {
     deny_sources: Vec<String>,
 }
 
-/// [`AuthzPolicy::evaluate3`]'s answer (#85): three-valued — the PDP backend
-/// maps `NoMatch` to `NotApplicable` (deny-by-default happens at `finalize`,
-/// with the reason "no grant" distinguishable from "explicit deny"). (#181, 2026-09-02: the
-/// backend now ANNOTATES that absence — `NotApplicable { note }` carries
-/// role/term testimony the audit trail renders; the mapping and the
-/// deny-at-finalize contract here are unchanged.)
+/// [`AuthzPolicy::evaluate3`]'s answer (#85): three-valued. The PDP backend
+/// maps `NoMatch` to `NotApplicable`; deny-by-default happens at `finalize`,
+/// with the reason "no grant" distinguishable from "explicit deny". The backend
+/// annotates that absence (#181): `NotApplicable { note }` carries the role and
+/// term testimony the audit trail renders.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Match3 {
     AllowMatch,
@@ -263,10 +262,10 @@ impl Pattern {
 // PathGlob — the hand-rolled glob matcher (spec §7)
 // ============================================================================
 
-/// A compiled filesystem capability's path specifier: an absolute path split into
-/// `/`-separated segments, each either a literal component (which may itself
-/// contain `*` wildcards, e.g. `*.json`) or `**` (matches across zero or more
-/// components — see [`PathGlob::matches`]).
+/// A compiled filesystem capability's path specifier: a path anchored at the root
+/// or at the home, split into `/`-separated segments, each either a literal
+/// component (which may itself contain `*` wildcards, e.g. `*.json`) or `**`
+/// (matches across zero or more components — see [`PathGlob::matches`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PathGlob {
     anchor: Anchor,
@@ -2028,8 +2027,8 @@ mod tests {
 
     #[test]
     fn evaluate3_allow_and_nomatch_are_distinct() {
-        // The PDP backend needs the no-match/allow distinction (NoMatch → NotApplicable, spec §4.4;
-        // since #181 the backend annotates that absence with WHY, audit-only).
+        // The PDP backend needs the no-match/allow distinction (NoMatch → NotApplicable, spec
+        // §4.4); since #181 it annotates that absence with WHY, audit-only.
         let p = parse_authz(SHIPPED_DEFAULT).unwrap();
         assert!(matches!(
             p.evaluate3(

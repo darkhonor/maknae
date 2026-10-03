@@ -63,7 +63,7 @@
 # 0 bytes turned both into TIMEOUTs, which is a detection. The near-miss is recorded
 # because "it delegates, so it is equivalent" is the reasoning that would have wrongly
 # excluded it too.
-# `BasicAuthorizer::subjects` -- the 3-line PRODUCTION trait wrapper that binds
+# `BasicAuthorizer::subjects` -- the one-line PRODUCTION trait wrapper that binds
 # `load_authz` (the root-owned hardened loader) and forwards to
 # `subjects_with_loader`. `replace ... with None` survives, and cannot be killed
 # in this environment for a structural reason worth writing down:
