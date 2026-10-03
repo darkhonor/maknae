@@ -242,19 +242,25 @@ pub fn admitted_user_for_test(user: Option<&str>) -> Option<String> {
 }
 
 /// Build the seam Request from the verb + kernel-verified peer uid. Subject
-/// carries `uid` only (i64 carriage of the u32 — lossless); the uid is the whole
-/// subject (ADR-0024). `Read` carries the client-supplied path as the resource
+/// carries the kernel-verified `uid` (i64 carriage of the u32 — lossless) and,
+/// when the kernel resolved one, the requester's home; both are kernel-derived.
+/// ADR-0024's "the uid is the whole subject" is the identity claim, and the home
+/// is an attribute of that uid. `Read` carries the client-supplied path as the resource
 /// `path` attribute, and an admitted `session.prompt` carries `destination`;
 /// the context carries the lane.
 pub fn build_authz_request(
     verb: &Verb,
     peer_uid: u32,
+    home: Option<&std::path::Path>,
     lane: maknae_security::Lane,
     admitted: Option<&crate::provider_choice::AdmittedChoice<'_>>,
 ) -> maknae_security::Request {
     use maknae_security::{Action, AttrValue, Attributes, Context, Resource, Subject};
     let mut subject = Attributes::new();
     subject.insert("uid", AttrValue::Int(i64::from(peer_uid)));
+    if let Some(h) = home.and_then(std::path::Path::to_str) {
+        subject.insert(maknae_security::SUBJECT_HOME, AttrValue::Str(h.to_owned()));
+    }
     let mut resource = Attributes::new();
     if let Verb::Read { path, .. } = verb {
         resource.insert("path", AttrValue::Str(path.clone()));
@@ -427,13 +433,19 @@ mod tests {
             output_tokens: None,
             choice: Some(choice.clone()),
         };
-        let r = build_authz_request(&v, 1002, maknae_security::Lane::Local, Some(&admitted));
+        let r = build_authz_request(
+            &v,
+            1002,
+            None,
+            maknae_security::Lane::Local,
+            Some(&admitted),
+        );
         assert_eq!(
             r.resource.0.get("destination"),
             Some(&maknae_security::AttrValue::Str("provider:openai".into()))
         );
         assert!(
-            build_authz_request(&v, 1002, maknae_security::Lane::Local, None)
+            build_authz_request(&v, 1002, None, maknae_security::Lane::Local, None)
                 .resource
                 .0
                 .get("destination")
@@ -442,6 +454,7 @@ mod tests {
         assert!(build_authz_request(
             &Verb::Ping,
             1002,
+            None,
             maknae_security::Lane::Local,
             Some(&admitted)
         )
@@ -720,13 +733,52 @@ mod tests {
     // ---- build_authz_request ----
 
     #[test]
+    fn the_home_is_stamped_on_the_subject_only_when_the_kernel_has_one() {
+        let home = std::path::Path::new("/home/b");
+        let with = build_authz_request(
+            &Verb::Ping,
+            501,
+            Some(home),
+            maknae_security::Lane::Local,
+            None,
+        );
+        assert_eq!(
+            with.subject.0.str(maknae_security::SUBJECT_HOME),
+            Some("/home/b")
+        );
+        let without =
+            build_authz_request(&Verb::Ping, 501, None, maknae_security::Lane::Local, None);
+        assert_eq!(without.subject.0.get(maknae_security::SUBJECT_HOME), None);
+    }
+
+    #[test]
+    fn a_non_utf8_home_is_not_stamped() {
+        use std::os::unix::ffi::OsStrExt;
+        let home = std::path::Path::new(std::ffi::OsStr::from_bytes(&[0x2f, 0xff]));
+        let req = build_authz_request(
+            &Verb::Ping,
+            501,
+            Some(home),
+            maknae_security::Lane::Local,
+            None,
+        );
+        assert_eq!(req.subject.0.get(maknae_security::SUBJECT_HOME), None);
+    }
+
+    #[test]
     fn request_carries_uid_lossless_at_both_extremes() {
-        let r = build_authz_request(&Verb::Ping, 0, maknae_security::Lane::Local, None);
+        let r = build_authz_request(&Verb::Ping, 0, None, maknae_security::Lane::Local, None);
         assert_eq!(
             r.subject.0.get("uid"),
             Some(&maknae_security::AttrValue::Int(0))
         );
-        let r = build_authz_request(&Verb::Whoami, u32::MAX, maknae_security::Lane::Local, None);
+        let r = build_authz_request(
+            &Verb::Whoami,
+            u32::MAX,
+            None,
+            maknae_security::Lane::Local,
+            None,
+        );
         assert_eq!(
             r.subject.0.get("uid"),
             Some(&maknae_security::AttrValue::Int(i64::from(u32::MAX)))
@@ -735,7 +787,7 @@ mod tests {
 
     #[test]
     fn request_action_matches_taxonomy_and_resource_is_empty_for_non_read() {
-        let r = build_authz_request(&Verb::Whoami, 501, maknae_security::Lane::Local, None);
+        let r = build_authz_request(&Verb::Whoami, 501, None, maknae_security::Lane::Local, None);
         assert_eq!(r.action.0, "admin.whoami");
         assert!(r.resource.0.is_empty());
         // Context is no longer empty: every request carries its lane (ADR-0009 D8).
@@ -754,6 +806,7 @@ mod tests {
                 page: None,
             },
             501,
+            None,
             maknae_security::Lane::Local,
             None,
         );
@@ -777,8 +830,8 @@ mod tests {
 
         // The same verb on both lanes: the stamp follows the ARGUMENT, so it cannot
         // be a function of anything the client sent.
-        let local = build_authz_request(&Verb::Whoami, 501, Lane::Local, None);
-        let remote = build_authz_request(&Verb::Whoami, 501, Lane::Remote, None);
+        let local = build_authz_request(&Verb::Whoami, 501, None, Lane::Local, None);
+        let remote = build_authz_request(&Verb::Whoami, 501, None, Lane::Remote, None);
         assert_eq!(
             local.context.0.get(CONTEXT_DAC_LANE),
             Some(&AttrValue::Str("local".into()))
@@ -796,6 +849,7 @@ mod tests {
                 page: None,
             },
             501,
+            None,
             Lane::Local,
             None,
         );
@@ -1103,7 +1157,7 @@ mod tests {
     #[test]
     fn only_read_carries_a_resource_attribute() {
         for v in all_verbs() {
-            let r = build_authz_request(&v, 501, maknae_security::Lane::Local, None);
+            let r = build_authz_request(&v, 501, None, maknae_security::Lane::Local, None);
             if matches!(v, Verb::Read { .. }) {
                 assert!(
                     r.resource.0.str("path").is_some(),

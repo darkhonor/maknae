@@ -241,13 +241,14 @@ fn authorize<P: Authorizer>(
     prepared: &PreparedMutation,
     verb: &Verb,
     uid: u32,
+    home: Option<&Path>,
     authorizer: &P,
     policy_name: &str,
 ) -> Result<(Option<&'static str>, maknae_proto::ObjectLabel), AuthorizeErr> {
     let mut decided_role: Option<&'static str> = None;
     let mut last = None;
     for path in &prepared.paths {
-        let mut request = build_authz_request(verb, uid, Lane::Local, None);
+        let mut request = build_authz_request(verb, uid, home, Lane::Local, None);
         request
             .resource
             .0
@@ -473,7 +474,14 @@ where
         authz_timeout,
         tokio::task::spawn_blocking(move || {
             let prepared = prepare(original.clone(), fd, &principal, lane)?;
-            let decision = authorize(&prepared, &original, uid, &*authorizer, &policy_name);
+            let decision = authorize(
+                &prepared,
+                &original,
+                uid,
+                Some(&principal.home),
+                &*authorizer,
+                &policy_name,
+            );
             Ok::<_, String>((prepared, permit, decision))
         }),
     )
@@ -810,19 +818,19 @@ mod tests {
             conversation: None,
             page: None,
         };
-        let plain = build_authz_request(&verb, 1000, Lane::Local, None);
+        let plain = build_authz_request(&verb, 1000, None, Lane::Local, None);
         let us = object_label("US", &plain).unwrap();
         assert_eq!(
             (us.level.as_str(), us.categories.len()),
             ("UNCLASSIFIED", 0)
         );
-        let mut marked = build_authz_request(&verb, 1000, Lane::Local, None);
+        let mut marked = build_authz_request(&verb, 1000, None, Lane::Local, None);
         marked.resource.0.insert(
             maknae_security::RESOURCE_CLASSIFICATION,
             AttrValue::Str("SECRET//NOFORN".into()),
         );
         assert_eq!(object_label("US", &marked).unwrap().level, "SECRET");
-        let mut foreign = build_authz_request(&verb, 1000, Lane::Local, None);
+        let mut foreign = build_authz_request(&verb, 1000, None, Lane::Local, None);
         foreign.resource.0.insert(
             maknae_security::RESOURCE_CLASSIFICATION,
             AttrValue::Str("NOT A LEVEL".into()),
