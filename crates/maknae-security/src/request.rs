@@ -27,7 +27,7 @@ pub struct Context(pub Attributes);
 /// filesystem attempt is decided only on `local` (ADR-0009 decision 8).
 pub const CONTEXT_DAC_LANE: &str = "dac_lane";
 
-/// The subject's canonical home, stamped only by the kernel (#435).
+/// The home `~` binds to, stamped only by the kernel (#435).
 pub const SUBJECT_HOME: &str = "home";
 
 /// No PEP stamps this; a filesystem attempt carrying it is refused (ADR-0009 decision 8). Owner, mode and gid are never put on a request for a backend to recompute.

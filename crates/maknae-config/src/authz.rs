@@ -285,7 +285,8 @@ enum GlobSeg {
 }
 
 impl PathGlob {
-    /// `~` is kept symbolic and bound at match time to the requester's home (#435); `~name` is refused (#438).
+    /// `~` is kept symbolic and bound at match time to the home the request carries (#435);
+    /// `~name` is refused (#438).
     fn parse(spec: &str) -> Result<PathGlob, AuthzError> {
         let bad = || AuthzError::BadPattern(spec.to_string());
         let (anchor, rest) = if let Some(rest) = spec.strip_prefix('~') {
@@ -953,7 +954,8 @@ fn map_authz_io(e: maknae_io::IoError) -> AuthzError {
 
 /// Load and validate `/etc/maknae/authz.yaml` (spec §5.4/§7): secure read +
 /// root-ownership assertion, then fail-closed grammar validation. `~` in any
-/// pattern stays symbolic until evaluation binds it to the requester's home.
+/// pattern stays symbolic until evaluation binds it at match time to the home the request
+/// carries.
 pub fn load_authz(path: &Path) -> Result<AuthzPolicy, AuthzError> {
     let body = security_load(path)?;
     parse_policy(&body)

@@ -870,6 +870,38 @@ mod tests {
     }
 
     #[test]
+    fn a_root_home_is_unbound_under_a_tilde_policy() {
+        let lp = lp_with(None, &[]);
+        let mut req = request(Some(i64::from(OPERATOR_UID)), "fs.read", Some("/x"));
+        req.subject
+            .0
+            .insert(maknae_security::SUBJECT_HOME, AttrValue::Str("/".into()));
+        assert_eq!(
+            decide_loaded(&lp, &principal(), &req),
+            Verdict::Indeterminate
+        );
+    }
+
+    #[test]
+    fn a_homeless_request_is_decided_normally_under_an_absolute_only_policy() {
+        let mut lp = lp_with(None, &[]);
+        lp.policy = maknae_config::parse_authz(
+            "schema_version: 1\npermissions:\n  allow:\n    - \"Read(/srv/**)\"\n  deny: []\n",
+        )
+        .unwrap();
+        let mut req = request(Some(i64::from(OPERATOR_UID)), "fs.read", Some("/srv/x"));
+        req.subject.0 = {
+            let mut s = Attributes::new();
+            s.insert(SUBJECT_UID, AttrValue::Int(i64::from(OPERATOR_UID)));
+            s
+        };
+        assert!(matches!(
+            decide_loaded(&lp, &principal(), &req),
+            Verdict::Permit { .. }
+        ));
+    }
+
+    #[test]
     fn a_wrong_typed_home_is_indeterminate() {
         let lp = lp_with(None, &[]);
         let mut req = request(
