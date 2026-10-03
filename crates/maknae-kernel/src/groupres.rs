@@ -35,15 +35,14 @@ pub fn maknae_gid() -> Result<nix::unistd::Gid, AuthzError> {
 /// and a circuit breaker precisely because NSS can stall; resolving the name
 /// anywhere else would put an unbounded `getpwuid` back on the async worker.
 ///
-/// The home rides the same lookup so that the PDP and the PEP get one value (#435).
+/// The raw home rides the same record so that the PDP and the PEP get one value (#435).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Membership {
     pub in_group: bool,
     pub user: String,
-    pub home: Option<std::path::PathBuf>,
+    pub dir: std::path::PathBuf,
 }
 
-/// The requester's home in the form `verify_delegated` reports paths in, or `None` when it cannot confine (#435).
 pub fn canonical_home(dir: &std::path::Path) -> Option<std::path::PathBuf> {
     if !dir.is_absolute() {
         return None;
@@ -65,7 +64,7 @@ pub fn uid_in_maknae_group(uid: u32) -> Result<Membership, AuthzError> {
         Ok(Membership {
             in_group,
             user: name.clone(),
-            home: crate::authz::home_if_member(in_group, || canonical_home(&user.dir)),
+            dir: user.dir.clone(),
         })
     };
     // A group that cannot be resolved is NOT a member -- fail closed -- but the
@@ -166,10 +165,15 @@ mod tests {
     #[test]
     fn a_real_directory_resolves_to_its_kernel_form() {
         let d = scratch("real");
-        assert_eq!(
-            canonical_home(&d),
-            Some(maknae_io::resolve_dir(&d).unwrap())
-        );
+        let canon = Some(maknae_io::resolve_dir(&d).unwrap().into_os_string());
+        let doubled = std::path::PathBuf::from(format!("/{}", d.display()));
+        for form in [d.clone(), d.join(""), doubled] {
+            assert_eq!(
+                canonical_home(&form).map(|p| p.into_os_string()),
+                canon,
+                "{form:?}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -212,18 +216,13 @@ mod tests {
     }
 
     #[test]
-    fn the_membership_carries_the_callers_canonical_home() {
+    fn the_membership_carries_the_callers_raw_home() {
         let me = nix::unistd::geteuid().as_raw();
         let Ok(Some(u)) = User::from_uid(Uid::from_raw(me)) else {
+            eprintln!("SKIP: euid {me} does not resolve to a user on this host");
             return;
         };
-        if let Ok(m) = uid_in_maknae_group(me) {
-            let expected = if m.in_group {
-                canonical_home(&u.dir)
-            } else {
-                None
-            };
-            assert_eq!(m.home, expected);
-        }
+        let m = uid_in_maknae_group(me).expect("a resolvable uid must not error");
+        assert_eq!(m.dir, u.dir);
     }
 }

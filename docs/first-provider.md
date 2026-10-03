@@ -137,7 +137,7 @@ The enrolled administrator resolves to the `admin` role when the policy has no `
 
 Enroll writes `~/.maknae` only for the account that ran it. Each further local user needs four things from you.
 
-**A second user works in their own home.** For each request the kernel resolves the requesting user's home from the kernel-verified peer ID, confines file actions to it, and `~` in `authz.yaml` means that home for every role. The shipped `Read(~/.maknae/**)` deny therefore protects each user's own `~/.maknae`. A grant for a folder that does not exist yet permits once the folder is created, with no restart. If the requester's home cannot be resolved (it does not exist, is not a directory, or is `/`), conversation turns still work and file actions are refused with `requester home unavailable`. What a second user's file actions do was read from the code, not yet measured.
+**A second user works in their own home.** For each request the kernel resolves the requesting user's home from the kernel-verified peer ID, confines file actions to it, and `~` in `authz.yaml` means that home for every role. The shipped `Read(~/.maknae/**)` deny therefore protects each user's own `~/.maknae`. A grant for a folder that does not exist yet permits once the folder is created, with no restart. If the requester's home cannot be resolved (it does not exist, is not a directory, is `/`, or does not resolve within the time limit, as on a hung network mount), conversation turns still work and file actions are refused with `requester home unavailable`. What a second user's file actions do was read from the code, not yet measured.
 
 **On a multi-user host, other local users can read a running `maknae agent`'s prompt and `--provider` from its command line** (#436, undecided).
 

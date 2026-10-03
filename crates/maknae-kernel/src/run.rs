@@ -52,7 +52,10 @@ use tokio::sync::mpsc;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
-use crate::authz::{admission_facts, authorize_connection, ConnDecision};
+use crate::authz::{
+    admission_facts, authorize_connection, bounded_home, home_resolve_capacity, ConnDecision,
+    HOME_RESOLVE_TIMEOUT,
+};
 use crate::blocking_guard::{BlockingBreaker, BreakerAdmission, BreakerTransition};
 use crate::boot_gate::authz_boot_gate;
 use crate::groupres::{maknae_gid, uid_in_maknae_group};
@@ -175,13 +178,14 @@ const HANDLER_DRAIN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 fn handler_drain_bound(cfg: &TransportConfig, egress_deadline: Duration) -> Duration {
     // One connection's bounded work, in the order the handler performs it:
     // the mTLS handshake (inside the handler, not on the loop), the peer's
-    // group lookup, the frame read, the PDP decision, the verb's own blocking
-    // step under the same bound (the subject enumeration — a
-    // second `AUTHZ_DECIDE_TIMEOUT`, review round 6), the provider call, the
-    // response write (bounded by the read timeout), the close — then the
-    // margin for the audit appends.
+    // group lookup, the requester home's resolution, the frame read, the PDP
+    // decision, the verb's own blocking step under the same bound (the subject
+    // enumeration — a second `AUTHZ_DECIDE_TIMEOUT`, review round 6), the
+    // provider call, the response write (bounded by the read timeout), the
+    // close — then the margin for the audit appends.
     Duration::from_millis(cfg.handshake_timeout_ms)
         + GROUP_LOOKUP_TIMEOUT
+        + HOME_RESOLVE_TIMEOUT
         + Duration::from_millis(cfg.read_timeout_ms)
         + crate::handler::AUTHZ_DECIDE_TIMEOUT
         + crate::handler::AUTHZ_DECIDE_TIMEOUT
@@ -2389,11 +2393,10 @@ where
                                             let admission =
                                                 group_breaker.lock().await.begin_attempt_at(now);
                                             // #275, #435: the peer's username and
-                                            // home ride the SAME blocking lookup as
-                                            // membership, under its timeout and
-                                            // breaker. Absent on every fail-closed
-                                            // arm.
-                                            let (in_group, peer_user, peer_home) = match admission {
+                                            // raw home ride the SAME blocking lookup
+                                            // as membership. Absent on every
+                                            // fail-closed arm.
+                                            let (in_group, peer_user, peer_dir) = match admission {
                                                 BreakerAdmission::RefuseOpen => {
                                                     if group_breaker
                                                         .lock()
@@ -2445,6 +2448,13 @@ where
                                                     }
                                                 },
                                             };
+                                            let peer_home = bounded_home(
+                                                peer_dir,
+                                                crate::groupres::canonical_home,
+                                                HOME_RESOLVE_TIMEOUT,
+                                                home_resolve_capacity(),
+                                            )
+                                            .await;
                                             // The one production binding of the
                                             // T1-pinned decide-timeout const —
                                             // accepted-documented as ungated T3
@@ -3527,15 +3537,15 @@ mod tests {
     #[test]
     fn the_handler_drain_bound_covers_the_egress_deadline() {
         // at the transport defaults (5 s handshake, 5 s read): 5 + 5 + 5 + 5
-        // + 5 + 0 + 5 + 1 + 10 = 41 s with no provider, plus the deadline with one
+        // + 5 + 5 + 0 + 5 + 1 + 10 = 46 s with no provider, plus the deadline with one
         let cfg = maknae_config::transport_from_section(None).unwrap();
         assert_eq!(
             handler_drain_bound(&cfg, Duration::ZERO),
-            Duration::from_secs(41)
+            Duration::from_secs(46)
         );
         assert_eq!(
             handler_drain_bound(&cfg, Duration::from_secs(120)),
-            Duration::from_secs(161)
+            Duration::from_secs(166)
         );
     }
 
