@@ -1323,6 +1323,7 @@ async fn failed_grant_or_ack_write_stops_before_accepting_more_client_reports() 
         let (mut client, server) = tokio::io::duplex(65536);
         let fds = maknae_io::DelegatedFds::new(4);
         fds.push(std::fs::File::open(&fx.root).unwrap().into());
+        let _turn = common::fs_turn(&create_verb(&fx)).await;
         let task = tokio::spawn(maknae_kernel::handle(
             FailWrites {
                 inner: server,
@@ -1742,6 +1743,9 @@ async fn no_requester_home_means_no_mutation() {
         second_subject_attempt(&fx, create_in(&fx.root.join("new")), &fx.root).await;
     assert!(matches!(result, RespResult::Err(_)), "{result:?}");
     assert_eq!(record.outcome.result, "deny");
-    assert_eq!(record.outcome.reason, "requester home unavailable");
+    assert_eq!(
+        record.outcome.reason,
+        "requester home unavailable: unresolvable"
+    );
     assert!(!fx.root.join("new").exists());
 }

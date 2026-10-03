@@ -52,7 +52,7 @@
   <!-- systemd TimeoutStopSec=890 (#240, #265): the shutdown chain at both ceilings
        (transport timeouts 60 s, egress deadline 600 s), in execution order:
        the stop record's append (5 s), the supervisor abort-reap (1 s), the handler drain (handshake 60 +
-       group lookup 5 + home resolution 5 + frame read 60 + PDP decision 5 + the verb's own
+       group lookup 5 + frame read 60 + home resolution 5 + PDP decision 5 + the verb's own
        blocking step 5 + provider call 600 + response write 60 + close 1 +
        10 s margin = 811 s) and the reap of what it aborts (1 s), the audit
        drain (5 s), the plane client's shutdown (a 30 s lock wait bound, then

@@ -52,10 +52,7 @@ use tokio::sync::mpsc;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
-use crate::authz::{
-    admission_facts, authorize_connection, bounded_home, home_resolve_capacity, ConnDecision,
-    HOME_RESOLVE_TIMEOUT,
-};
+use crate::authz::{admission_facts, authorize_connection, ConnDecision, HOME_RESOLVE_TIMEOUT};
 use crate::blocking_guard::{BlockingBreaker, BreakerAdmission, BreakerTransition};
 use crate::boot_gate::authz_boot_gate;
 use crate::groupres::{maknae_gid, uid_in_maknae_group};
@@ -178,15 +175,15 @@ const HANDLER_DRAIN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 fn handler_drain_bound(cfg: &TransportConfig, egress_deadline: Duration) -> Duration {
     // One connection's bounded work, in the order the handler performs it:
     // the mTLS handshake (inside the handler, not on the loop), the peer's
-    // group lookup, the requester home's resolution, the frame read, the PDP
-    // decision, the verb's own blocking step under the same bound (the subject
-    // enumeration — a second `AUTHZ_DECIDE_TIMEOUT`, review round 6), the
-    // provider call, the response write (bounded by the read timeout), the
-    // close — then the margin for the audit appends.
+    // group lookup, the frame read, the requester home's resolution (filesystem
+    // verbs only), the PDP decision, the verb's own blocking step under the
+    // same bound (the subject enumeration — a second `AUTHZ_DECIDE_TIMEOUT`,
+    // review round 6), the provider call, the response write (bounded by the
+    // read timeout), the close — then the margin for the audit appends.
     Duration::from_millis(cfg.handshake_timeout_ms)
         + GROUP_LOOKUP_TIMEOUT
-        + HOME_RESOLVE_TIMEOUT
         + Duration::from_millis(cfg.read_timeout_ms)
+        + HOME_RESOLVE_TIMEOUT
         + crate::handler::AUTHZ_DECIDE_TIMEOUT
         + crate::handler::AUTHZ_DECIDE_TIMEOUT
         + egress_deadline
@@ -403,7 +400,7 @@ pub async fn handle<S, E, P>(
     peer_uid: u32,
     in_group: bool,
     peer_user: Option<String>,
-    peer_home: Option<PathBuf>,
+    peer_dir: Option<PathBuf>,
     emit: Arc<E>,
     session_id: u64,
     cfg: TransportConfig,
@@ -428,7 +425,7 @@ pub async fn handle<S, E, P>(
         peer_uid,
         in_group,
         peer_user,
-        peer_home,
+        peer_dir,
         emit,
         session_id,
         cfg,
@@ -480,7 +477,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     // It also chooses the key path's `<username>` segment (ADR-0028 §3), so it
     // must stay kernel-resolved from the peer uid, never taken from the request.
     peer_user: Option<String>,
-    peer_home: Option<PathBuf>,
+    peer_dir: Option<PathBuf>,
     emit: Arc<E>,
     session_id: u64,
     cfg: TransportConfig,
@@ -842,7 +839,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             &delegated,
             Arc::clone(&authorizer),
             Arc::clone(&emit),
-            peer_home.clone(),
+            crate::authz::admitted_home(peer_uid, peer_dir).await,
             &cfg,
             &seq,
             record,
@@ -913,13 +910,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     // parent contract: combine([guarded_decide]) + finalize. Timeout or join
     // failure converts AT THE CALL SITE to a Deny with its own reason
     // (finalize(Indeterminate) would hardcode a different string).
-    let sec_req = build_authz_request(
-        &request.verb,
-        peer_uid,
-        peer_home.as_deref(),
-        lane,
-        admitted.as_ref(),
-    );
+    let sec_req = build_authz_request(&request.verb, peer_uid, None, lane, admitted.as_ref());
     let authz_breaker = authz_decide_breaker();
     let authz_admission = { authz_breaker.lock().await.begin_attempt_at(Instant::now()) };
     // #275: the role rides out WITH the verdict so the audit record attests the
@@ -2448,13 +2439,6 @@ where
                                                     }
                                                 },
                                             };
-                                            let peer_home = bounded_home(
-                                                peer_dir,
-                                                crate::groupres::canonical_home,
-                                                HOME_RESOLVE_TIMEOUT,
-                                                home_resolve_capacity(),
-                                            )
-                                            .await;
                                             // The one production binding of the
                                             // T1-pinned decide-timeout const —
                                             // accepted-documented as ungated T3
@@ -2463,7 +2447,7 @@ where
                                             handle(
                                                 conn.stream, conn.peer_uri, conn.peer_uid, in_group,
                                                 peer_user,
-                                                peer_home,
+                                                peer_dir,
                                                 emit, session_id, cfg, wctx.au3_1,
                                                 authorizer,
                                                 config_view,

@@ -177,6 +177,19 @@ impl AuditEmit for Records {
     }
 }
 
+/// The kernel admits one filesystem request per uid at a time (#435), and
+/// every fixture is the test euid, so filesystem requests take turns.
+static FS_TURN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+pub async fn fs_turn(verb: &Verb) -> Option<tokio::sync::MutexGuard<'static, ()>> {
+    match verb {
+        Verb::Read { .. } | Verb::FsWrite { .. } | Verb::FsDelete { .. } | Verb::FsMkdir { .. } => {
+            Some(FS_TURN.lock().await)
+        }
+        _ => None,
+    }
+}
+
 /// A temp root with a real `authz.yaml` (binding the test euid's username to
 /// `user`, so the fixture's peer uid is the `user` role) and a real composed
 /// PDP over it.
@@ -464,7 +477,8 @@ impl Fixture {
         if let Some(fd) = fd {
             fds.push(fd);
         }
-        let task = tokio::spawn(maknae_kernel::handle_with_attempt_caps(
+        let turn = verb.clone();
+        let served = maknae_kernel::handle_with_attempt_caps(
             server,
             "maknae://d/plane/cli".into(),
             self.peer_uid,
@@ -485,7 +499,11 @@ impl Fixture {
             maknae_security::Lane::Local,
             fds,
             attempt_caps,
-        ));
+        );
+        let task = tokio::spawn(async move {
+            let _turn = fs_turn(&turn).await;
+            served.await
+        });
         let body = maknae_proto::encode_request(&maknae_proto::Request {
             protocol_version: maknae_proto::PROTOCOL_VERSION,
             verb,

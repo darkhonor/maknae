@@ -25,7 +25,7 @@ ExecStart=/usr/bin/maknaed
 # a call whose content already left. systemd's default 90 s would SIGKILL that
 # wait. The chain at BOTH ceilings (transport timeouts 60 s, egress deadline
 # 600 s), walked in execution order: the stop record's append 5 s + the
-# credential supervisor's abort and reap 1 s + the handler drain 811 s (handshake 60 + group lookup 5 + home resolution 5 + frame read 60
+# credential supervisor's abort and reap 1 s + the handler drain 811 s (handshake 60 + group lookup 5 + frame read 60 + home resolution 5
 # + PDP decision 5 + the verb's own blocking step 5 + provider call 600 +
 # response write 60 + close 1 + a 10 s margin for the audit appends) + the reap
 # of what it aborts 1 s + the audit drain 5 s + the plane client's shutdown 60 s
@@ -61,8 +61,8 @@ RuntimeDirectoryMode=0751
 # (which chowns/chmods at start, colliding with the chattr +a inode).
 ReadWritePaths=/var/log/maknae
 ProtectSystem=strict
-# read-only: the daemon opens nothing in a home (#365), but each request resolves the
-# requester's home and each attempt stats it, so the path stays visible. Write to any
+# read-only: the daemon opens nothing in a home (#365), but each filesystem request resolves
+# the requester's home and each attempt stats it, so the path stays visible. Write to any
 # home remains forbidden at this layer regardless of DAC/MAC.
 ProtectHome=read-only
 NoNewPrivileges=yes

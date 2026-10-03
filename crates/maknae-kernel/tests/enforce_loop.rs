@@ -248,6 +248,7 @@ async fn read_attempt_with<P>(
 where
     P: maknae_security::Authorizer + Send + Sync + 'static,
 {
+    let _turn = common::fs_turn(&verb).await;
     let held = maknae_io::open_path_for_delegation(delegate).ok();
     let fds = maknae_io::DelegatedFds::new(4);
     if let Some(fd) = &held {
@@ -343,6 +344,7 @@ async fn drive_with<P>(
 where
     P: maknae_security::Authorizer + Send + Sync + 'static,
 {
+    let _turn = common::fs_turn(&verb).await;
     let (mut client, server) = tokio::io::duplex(256 * 1024);
     common::write_frame(&mut client, &request_frame(verb))
         .await
@@ -741,7 +743,7 @@ async fn a_symlinked_requester_home_serves_a_read_beneath_its_target() {
 
     let emit = RecEmit::new();
     let run = read_attempt_as(
-        Some(&peer_home),
+        Some(&link),
         fx.authorizer(),
         emit.clone(),
         nix::unistd::geteuid().as_raw(),
@@ -3053,7 +3055,10 @@ async fn a_requester_with_no_home_gets_turns_but_no_files() {
     assert_unauthorized(&run);
     let req = request_record(&emit.records()).clone();
     assert_eq!(req.outcome.result, "deny");
-    assert_eq!(req.outcome.reason, "requester home unavailable");
+    assert_eq!(
+        req.outcome.reason,
+        "requester home unavailable: unresolvable"
+    );
 
     for (verb, action) in [
         (maknae_proto::Verb::Ping, "liveness.ping"),
@@ -3102,7 +3107,10 @@ async fn a_root_home_is_refused_by_shape() {
     assert_unauthorized(&run);
     let req = request_record(&emit.records()).clone();
     assert_eq!(req.outcome.result, "deny");
-    assert_eq!(req.outcome.reason, "requester home unavailable");
+    assert_eq!(
+        req.outcome.reason,
+        "requester home unavailable: unresolvable"
+    );
 }
 
 #[tokio::test]

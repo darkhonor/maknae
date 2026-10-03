@@ -19,6 +19,7 @@ mod mutation_exchange;
 mod posture;
 mod provider_choice;
 mod run;
+mod uid_gate;
 pub use authz::*;
 pub use blocking_guard::BLOCKING_BREAKER_MAX_IN_FLIGHT;
 pub use boot::{boot, BootConfig};

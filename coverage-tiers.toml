@@ -218,6 +218,9 @@ files = [
   # #158/#365: namespace/report evidence, subject-side attempts, and durable audit admission.
   "crates/maknae-kernel/src/mutation_exchange.rs",
   "crates/maknae-kernel/src/mutation.rs",
+  # #435: per-uid in-flight accounting inside the home-resolution and mutation
+  # capacities. A leaked or missing claim lets one uid exhaust a global slot set.
+  "crates/maknae-kernel/src/uid_gate.rs",
   "crates/maknae-io/src/mutation.rs",
   "crates/maknae-io/src/audit_append.rs",
   "crates/maknae-vault/src/supervisor.rs",
