@@ -226,6 +226,10 @@ mod tests {
             "uid",
             AttrValue::Int(i64::from(nix::unistd::geteuid().as_raw())),
         );
+        subject.insert(
+            maknae_security::SUBJECT_HOME,
+            AttrValue::Str(home.display().to_string()),
+        );
         let mut resource = Attributes::new();
         resource.insert(
             "path",

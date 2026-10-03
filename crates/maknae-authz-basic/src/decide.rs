@@ -540,10 +540,22 @@ fn decide_fs(lp: &LoadedPolicy, req: &SecRequest, role_key: &str, scope: FsScope
         };
     }
     let path = std::path::Path::new(path);
+    let home = match req.subject.0.get(maknae_security::SUBJECT_HOME) {
+        None => None,
+        Some(AttrValue::Str(h)) => Some(std::path::Path::new(h.as_str())),
+        Some(_) => return Verdict::Indeterminate,
+    };
     let matched = match scope {
-        FsScope::Read => lp.policy.evaluate3(&maknae_config::Request::Read(path)),
-        FsScope::Write => lp.policy.evaluate3(&maknae_config::Request::Write(path)),
-        FsScope::WriteSubtree => lp.policy.evaluate_write_subtree(path),
+        FsScope::Read => lp
+            .policy
+            .evaluate3(&maknae_config::Request::Read(path), home),
+        FsScope::Write => lp
+            .policy
+            .evaluate3(&maknae_config::Request::Write(path), home),
+        FsScope::WriteSubtree => lp.policy.evaluate_write_subtree(path, home),
+    };
+    let Ok(matched) = matched else {
+        return Verdict::Indeterminate;
     };
     match matched {
         maknae_config::Match3::DenyMatch { source } => Verdict::Deny {
@@ -583,10 +595,7 @@ mod tests {
     }
 
     fn shipped_policy() -> maknae_config::AuthzPolicy {
-        maknae_config::parse_authz(
-            "schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/**)\"\n  deny:\n    - \"Read(~/.ssh/**)\"\n",
-            Some(std::path::Path::new("/home/operator")),
-        )
+        maknae_config::parse_authz("schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/**)\"\n  deny:\n    - \"Read(~/.ssh/**)\"\n")
         .unwrap()
     }
 
@@ -617,6 +626,10 @@ mod tests {
         if let Some(u) = uid {
             s.insert(SUBJECT_UID, AttrValue::Int(u));
         }
+        s.insert(
+            maknae_security::SUBJECT_HOME,
+            AttrValue::Str(principal().home.to_string_lossy().into_owned()),
+        );
         let mut r = Attributes::new();
         if let Some(p) = path {
             r.insert(RESOURCE_PATH, AttrValue::Str(p.into()));
@@ -649,10 +662,7 @@ mod tests {
                 Some(&[(role, &["operator"])]),
                 &[("operator", OPERATOR_UID)],
             );
-            lp.policy = maknae_config::parse_authz(
-                "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\", \"Write(~/projects/**)\"]\n  deny: [\"Write(~/projects/private/**)\"]\n",
-                Some(std::path::Path::new("/home/operator")),
-            ).unwrap();
+            lp.policy = maknae_config::parse_authz("schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\", \"Write(~/projects/**)\"]\n  deny: [\"Write(~/projects/private/**)\"]\n").unwrap();
             for (action, operation) in [
                 ("fs.write", "write-existing"),
                 ("fs.write", "write-create"),
@@ -705,7 +715,6 @@ mod tests {
         let mut lp = lp_with(None, &[]);
         lp.policy = maknae_config::parse_authz(
             "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\", \"Write(~/**)\"]\n",
-            Some(std::path::Path::new("/home/operator")),
         )
         .unwrap();
         for (action, operation, lane, accessible) in [
@@ -791,7 +800,6 @@ mod tests {
         let mut lp = lp_with(None, &[]);
         lp.policy = maknae_config::parse_authz(
             "schema_version: 1\npermissions:\n  allow: [\"Write(/**)\"]\n",
-            None,
         )
         .unwrap();
         for path in [
@@ -814,6 +822,125 @@ mod tests {
                 "{path:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_requesters_home_decides_tilde_not_the_enrolled_principals() {
+        let lp = lp_with(None, &[]);
+        let mut req = request(
+            Some(i64::from(OPERATOR_UID)),
+            "fs.read",
+            Some("/home/b/notes.txt"),
+        );
+        req.subject.0.insert(
+            maknae_security::SUBJECT_HOME,
+            AttrValue::Str("/home/b".into()),
+        );
+        assert!(matches!(
+            decide_loaded(&lp, &principal(), &req),
+            Verdict::Permit { .. }
+        ));
+        req.subject.0.insert(
+            maknae_security::SUBJECT_HOME,
+            AttrValue::Str("/home/c".into()),
+        );
+        assert!(matches!(
+            decide_loaded(&lp, &principal(), &req),
+            Verdict::NotApplicable { .. }
+        ));
+    }
+
+    #[test]
+    fn a_filesystem_request_with_no_home_is_indeterminate_under_a_tilde_policy() {
+        let lp = lp_with(None, &[]);
+        let mut req = request(
+            Some(i64::from(OPERATOR_UID)),
+            "fs.read",
+            Some("/home/b/notes.txt"),
+        );
+        req.subject.0 = {
+            let mut s = Attributes::new();
+            s.insert(SUBJECT_UID, AttrValue::Int(i64::from(OPERATOR_UID)));
+            s
+        };
+        assert_eq!(
+            decide_loaded(&lp, &principal(), &req),
+            Verdict::Indeterminate
+        );
+    }
+
+    #[test]
+    fn a_root_home_is_unbound_under_a_tilde_policy() {
+        let lp = lp_with(None, &[]);
+        let mut req = request(Some(i64::from(OPERATOR_UID)), "fs.read", Some("/x"));
+        req.subject
+            .0
+            .insert(maknae_security::SUBJECT_HOME, AttrValue::Str("/".into()));
+        assert_eq!(
+            decide_loaded(&lp, &principal(), &req),
+            Verdict::Indeterminate
+        );
+    }
+
+    #[test]
+    fn a_homeless_request_is_decided_normally_under_an_absolute_only_policy() {
+        let mut lp = lp_with(None, &[]);
+        lp.policy = maknae_config::parse_authz(
+            "schema_version: 1\npermissions:\n  allow:\n    - \"Read(/srv/**)\"\n  deny: []\n",
+        )
+        .unwrap();
+        let mut req = request(Some(i64::from(OPERATOR_UID)), "fs.read", Some("/srv/x"));
+        req.subject.0 = {
+            let mut s = Attributes::new();
+            s.insert(SUBJECT_UID, AttrValue::Int(i64::from(OPERATOR_UID)));
+            s
+        };
+        assert!(matches!(
+            decide_loaded(&lp, &principal(), &req),
+            Verdict::Permit { .. }
+        ));
+    }
+
+    #[test]
+    fn a_wrong_typed_home_is_indeterminate() {
+        let lp = lp_with(None, &[]);
+        let mut req = request(
+            Some(i64::from(OPERATOR_UID)),
+            "fs.read",
+            Some("/home/b/notes.txt"),
+        );
+        req.subject
+            .0
+            .insert(maknae_security::SUBJECT_HOME, AttrValue::Int(7));
+        assert_eq!(
+            decide_loaded(&lp, &principal(), &req),
+            Verdict::Indeterminate
+        );
+    }
+
+    #[test]
+    fn a_wrong_typed_home_is_indeterminate_even_where_no_pattern_needs_one() {
+        let mut lp = lp_with(None, &[]);
+        lp.policy = maknae_config::parse_authz(
+            "schema_version: 1\npermissions:\n  allow:\n    - \"Read(/srv/**)\"\n  deny: []\n",
+        )
+        .unwrap();
+        let mut req = request(
+            Some(i64::from(OPERATOR_UID)),
+            "fs.read",
+            Some("/srv/notes.txt"),
+        );
+        assert!(matches!(
+            decide_loaded(&lp, &principal(), &req),
+            Verdict::Permit { .. }
+        ));
+        req.subject
+            .0
+            .insert(maknae_security::SUBJECT_HOME, AttrValue::Int(7));
+        assert_eq!(
+            decide_loaded(&lp, &principal(), &req),
+            Verdict::Indeterminate
+        );
     }
 
     /// A read request with an explicit lane and optional OS attribute; no preparation.
@@ -1513,9 +1640,7 @@ mod tests {
         let body = format!(
             "schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/**)\"\n  deny:\n    - \"Read(~/.ssh/**)\"\nbindings:\n  admin: [\"alex\"]\n  user: [\"ursula\"]\n  guest: [\"gwen\"]\n  adversary: [\"adam\"]\n{roles_block}"
         );
-        let policy =
-            maknae_config::parse_authz(&body, Some(std::path::Path::new("/home/operator")))
-                .unwrap();
+        let policy = maknae_config::parse_authz(&body).unwrap();
         let lookup: UidMap = uid_map.iter().map(|(n, u)| (n.to_string(), *u)).collect();
         // Bound BEFORE the literal: `policy` is moved into it. This is also the
         // killer for the `Ok(DestinationGrants::default())` mutant on

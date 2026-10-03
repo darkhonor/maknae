@@ -910,7 +910,13 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     // parent contract: combine([guarded_decide]) + finalize. Timeout or join
     // failure converts AT THE CALL SITE to a Deny with its own reason
     // (finalize(Indeterminate) would hardcode a different string).
-    let sec_req = build_authz_request(&request.verb, peer_uid, lane, admitted.as_ref());
+    let sec_req = build_authz_request(
+        &request.verb,
+        peer_uid,
+        Some(&principal.home),
+        lane,
+        admitted.as_ref(),
+    );
     let authz_breaker = authz_decide_breaker();
     let authz_admission = { authz_breaker.lock().await.begin_attempt_at(Instant::now()) };
     // #275: the role rides out WITH the verdict so the audit record attests the

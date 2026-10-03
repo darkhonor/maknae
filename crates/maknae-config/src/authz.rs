@@ -80,7 +80,7 @@ pub struct RawActionGrants {
 
 /// The parsed `permissions:` wrapper (spec §7): an allow list and a deny list
 /// of patterns. Deny beats allow; anything matching neither is denied
-/// (default-deny) — see [`AuthzPolicy::evaluate`].
+/// (default-deny) — see [`AuthzPolicy::evaluate3`].
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct AuthzPolicy {
     pub allow: Vec<Pattern>,
@@ -112,13 +112,11 @@ pub struct AuthzPolicy {
     deny_sources: Vec<String>,
 }
 
-/// [`AuthzPolicy::evaluate3`]'s answer (#85): three-valued where
-/// [`Decision`] is two-valued — the PDP backend maps `NoMatch` to
-/// `NotApplicable` (deny-by-default happens at `finalize`, with the reason
-/// "no grant" distinguishable from "explicit deny"). (#181, 2026-09-02: the
-/// backend now ANNOTATES that absence — `NotApplicable { note }` carries
-/// role/term testimony the audit trail renders; the mapping and the
-/// deny-at-finalize contract here are unchanged.)
+/// [`AuthzPolicy::evaluate3`]'s answer (#85): three-valued. The PDP backend
+/// maps `NoMatch` to `NotApplicable`; deny-by-default happens at `finalize`,
+/// with the reason "no grant" distinguishable from "explicit deny". The backend
+/// annotates that absence (#181): `NotApplicable { note }` carries the role and
+/// term testimony the audit trail renders.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Match3 {
     AllowMatch,
@@ -133,82 +131,103 @@ pub enum Request<'a> {
     Write(&'a Path),
 }
 
-/// The policy's answer for a [`Request`] (spec §7): there is no `ask`.
+/// A `~` pattern was evaluated with no home, or with one that is not an
+/// absolute, `.`/`..`-free, UTF-8 path other than `/` (#435).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Decision {
-    Allow,
-    Deny,
+pub struct HomeUnbound;
+
+fn valid_home(home: Option<&Path>) -> Option<&Path> {
+    home.filter(|h| {
+        h.to_str().is_some_and(|s| {
+            let comps: Vec<&str> = s.split('/').filter(|c| !c.is_empty()).collect();
+            s.starts_with('/')
+                && !comps.is_empty()
+                && !comps.iter().any(|c| matches!(*c, "." | ".."))
+        })
+    })
 }
 
 impl AuthzPolicy {
-    /// Deny-wins, default-deny (spec §7): a deny match refuses regardless of
-    /// any allow match; a request matching neither list is refused. The empty
-    /// policy (`allow`/`deny` both empty) therefore permits nothing.
-    pub fn evaluate(&self, req: &Request<'_>) -> Decision {
-        if self.deny.iter().any(|p| p.matches_req(req)) {
-            return Decision::Deny;
-        }
-        if self.allow.iter().any(|p| p.matches_req(req)) {
-            return Decision::Allow;
-        }
-        Decision::Deny
+    fn needs_unbound_home(
+        &self,
+        home: Option<&Path>,
+        mut wants: impl FnMut(&Pattern) -> bool,
+    ) -> bool {
+        home.is_none() && self.deny.iter().chain(&self.allow).any(&mut wants)
     }
 
-    /// Three-valued evaluation with deny provenance (#85, spec §6a.1). Deny
-    /// checked first (deny-overrides within the operand, same order as
-    /// [`AuthzPolicy::evaluate`]); the matched deny entry's ORIGINAL text
-    /// rides in `source` for the audit record (audit-only — never onto the
-    /// wire, spec §4.4). Reuses the same private matcher as `evaluate` — no
-    /// second matching implementation exists to drift.
-    pub fn evaluate3(&self, req: &Request<'_>) -> Match3 {
-        if let Some(i) = self.deny.iter().position(|p| p.matches_req(req)) {
-            return Match3::DenyMatch {
-                source: self
-                    .deny_sources
-                    .get(i)
-                    .cloned()
-                    .unwrap_or_else(|| "<unknown deny entry>".into()),
-            };
+    fn deny_source(&self, i: usize) -> String {
+        self.deny_sources
+            .get(i)
+            .cloned()
+            .unwrap_or_else(|| "<unknown deny entry>".into())
+    }
+
+    /// Three-valued evaluation with deny provenance (#85, spec §6a.1).
+    /// Deny-wins, default-deny (spec §7): deny is checked first; the matched
+    /// deny entry's ORIGINAL text rides in `source` for the audit record
+    /// (audit-only — never onto the wire, spec §4.4). `HomeUnbound` when any
+    /// `~` pattern of the request's capability has no valid `home`, whatever
+    /// its position in either list.
+    pub fn evaluate3(&self, req: &Request<'_>, home: Option<&Path>) -> Result<Match3, HomeUnbound> {
+        let home = valid_home(home);
+        if self.needs_unbound_home(home, |p| p.glob_for(req).is_some_and(|(g, _)| g.is_home())) {
+            return Err(HomeUnbound);
         }
-        if self.allow.iter().any(|p| p.matches_req(req)) {
-            return Match3::AllowMatch;
+        for (i, p) in self.deny.iter().enumerate() {
+            if p.matches_req(req, home)? {
+                return Ok(Match3::DenyMatch {
+                    source: self.deny_source(i),
+                });
+            }
         }
-        Match3::NoMatch
+        for p in &self.allow {
+            if p.matches_req(req, home)? {
+                return Ok(Match3::AllowMatch);
+            }
+        }
+        Ok(Match3::NoMatch)
     }
 
     /// Authorize the whole subtree for recursive deletion (#158). A point grant
     /// cannot authorize destruction of descendants. Denies use conservative
     /// intersection; allows require a provable literal-prefix/** covering grant.
     /// This examines policy only, never a potentially changing directory walk.
-    pub fn evaluate_write_subtree(&self, root: &Path) -> Match3 {
+    pub fn evaluate_write_subtree(
+        &self,
+        root: &Path,
+        home: Option<&Path>,
+    ) -> Result<Match3, HomeUnbound> {
         let Some(text) = root.to_str() else {
-            return Match3::NoMatch;
+            return Ok(Match3::NoMatch);
         };
         if !text.starts_with('/')
             || text.contains('\0')
             || (text != "/" && text[1..].split('/').any(|c| matches!(c, "" | "." | "..")))
         {
-            return Match3::NoMatch;
+            return Ok(Match3::NoMatch);
         }
-        if let Some(i) = self.deny.iter().position(
-            |pattern| matches!(pattern, Pattern::Write(glob) if glob.may_intersect_subtree(text)),
-        ) {
-            return Match3::DenyMatch {
-                source: self
-                    .deny_sources
-                    .get(i)
-                    .cloned()
-                    .unwrap_or_else(|| "<unknown deny entry>".into()),
-            };
+        let home = valid_home(home);
+        if self.needs_unbound_home(home, |p| matches!(p, Pattern::Write(g) if g.is_home())) {
+            return Err(HomeUnbound);
         }
-        if self
-            .allow
-            .iter()
-            .any(|pattern| matches!(pattern, Pattern::Write(glob) if glob.covers_subtree(text)))
-        {
-            return Match3::AllowMatch;
+        for (i, pattern) in self.deny.iter().enumerate() {
+            if let Pattern::Write(glob) = pattern {
+                if glob.may_intersect_subtree(text, home)? {
+                    return Ok(Match3::DenyMatch {
+                        source: self.deny_source(i),
+                    });
+                }
+            }
         }
-        Match3::NoMatch
+        for pattern in &self.allow {
+            if let Pattern::Write(glob) = pattern {
+                if glob.covers_subtree(text, home)? {
+                    return Ok(Match3::AllowMatch);
+                }
+            }
+        }
+        Ok(Match3::NoMatch)
     }
 }
 
@@ -224,12 +243,18 @@ pub enum Pattern {
 }
 
 impl Pattern {
-    fn matches_req(&self, req: &Request<'_>) -> bool {
+    fn glob_for<'a>(&'a self, req: &Request<'a>) -> Option<(&'a PathGlob, &'a Path)> {
         match (self, req) {
-            (Pattern::Read(glob), Request::Read(path))
-            | (Pattern::Write(glob), Request::Write(path)) => glob.matches(path),
-            _ => false,
+            (Pattern::Read(g), Request::Read(p)) | (Pattern::Write(g), Request::Write(p)) => {
+                Some((g, *p))
+            }
+            _ => None,
         }
+    }
+
+    fn matches_req(&self, req: &Request<'_>, home: Option<&Path>) -> Result<bool, HomeUnbound> {
+        self.glob_for(req)
+            .map_or(Ok(false), |(g, p)| g.matches(p, home))
     }
 }
 
@@ -237,13 +262,20 @@ impl Pattern {
 // PathGlob — the hand-rolled glob matcher (spec §7)
 // ============================================================================
 
-/// A compiled filesystem capability's path specifier: an absolute path split into
-/// `/`-separated segments, each either a literal component (which may itself
-/// contain `*` wildcards, e.g. `*.json`) or `**` (matches across zero or more
-/// components — see [`PathGlob::matches`]).
+/// A compiled filesystem capability's path specifier: a path anchored at the root
+/// or at the home, split into `/`-separated segments, each either a literal
+/// component (which may itself contain `*` wildcards, e.g. `*.json`) or `**`
+/// (matches across zero or more components — see [`PathGlob::matches`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PathGlob {
+    anchor: Anchor,
     segments: Vec<GlobSeg>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Anchor {
+    Root,
+    Home,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -253,29 +285,21 @@ enum GlobSeg {
 }
 
 impl PathGlob {
-    /// Compile a path specifier's inner text. `~` expands to
-    /// `principal_home` (a `~` pattern with no principal is refused); any
-    /// other pattern must already be absolute (spec §7: "matched against
-    /// canonical absolute paths" — a relative glob can never match one).
-    fn parse(spec: &str, principal_home: Option<&Path>) -> Result<PathGlob, AuthzError> {
+    /// `~` is kept symbolic and bound at match time to the home the request carries (#435);
+    /// `~name` is refused (#438).
+    fn parse(spec: &str) -> Result<PathGlob, AuthzError> {
         let bad = || AuthzError::BadPattern(spec.to_string());
-        let resolved = if let Some(rest) = spec.strip_prefix('~') {
+        let (anchor, rest) = if let Some(rest) = spec.strip_prefix('~') {
             if !rest.is_empty() && !rest.starts_with('/') {
-                // `~otheruser/...` — not supported; only the enrolled
-                // principal's own home is a valid `~` referent.
                 return Err(bad());
             }
-            let home = principal_home
-                .ok_or_else(|| AuthzError::TildeWithoutPrincipal(spec.to_string()))?;
-            let home_str = home.to_str().ok_or_else(bad)?;
-            format!("{home_str}{rest}")
+            (Anchor::Home, rest)
         } else if spec.starts_with('/') {
-            spec.to_string()
+            (Anchor::Root, spec)
         } else {
             return Err(bad());
         };
-
-        let segments = resolved
+        let segments = rest
             .split('/')
             .filter(|c| !c.is_empty())
             .map(|c| {
@@ -286,46 +310,65 @@ impl PathGlob {
                 }
             })
             .collect();
-        Ok(PathGlob { segments })
+        Ok(PathGlob { anchor, segments })
+    }
+
+    fn is_home(&self) -> bool {
+        self.anchor == Anchor::Home
+    }
+
+    fn base<'h>(&self, home: Option<&'h Path>) -> Result<Vec<&'h str>, HomeUnbound> {
+        if self.anchor == Anchor::Root {
+            return Ok(Vec::new());
+        }
+        let h = valid_home(home).and_then(Path::to_str).ok_or(HomeUnbound)?;
+        Ok(h.split('/').filter(|c| !c.is_empty()).collect())
     }
 
     /// Match a canonical absolute path against the compiled glob (spec §7):
     /// `*` matches within one path component; `**` matches across components
     /// — INCLUDING zero components, so `X/**` also matches `X` itself. Both
     /// `*` and `**` match dotfiles (no special-casing of a leading `.`).
-    /// Matching is byte-wise case-sensitive.
-    pub fn matches(&self, path: &Path) -> bool {
+    /// Matching is byte-wise case-sensitive. A `~` glob's home is a literal
+    /// prefix compared component by component, never a pattern.
+    pub fn matches(&self, path: &Path, home: Option<&Path>) -> Result<bool, HomeUnbound> {
+        let base = self.base(home)?;
         let Some(s) = path.to_str() else {
-            return false;
+            return Ok(false);
         };
         let comps: Vec<&str> = s.split('/').filter(|c| !c.is_empty()).collect();
-        match_segs(&self.segments, &comps)
+        Ok(comps.starts_with(&base) && match_segs(&self.segments, &comps[base.len()..]))
     }
 
-    fn covers_subtree(&self, root: &str) -> bool {
+    fn covers_subtree(&self, root: &str, home: Option<&Path>) -> Result<bool, HomeUnbound> {
+        let base = self.base(home)?;
         let Some((GlobSeg::DoubleStar, prefix)) = self.segments.split_last() else {
-            return false;
+            return Ok(false);
         };
         let mut components = root.split('/').filter(|c| !c.is_empty());
-        prefix.iter().all(|seg| match seg {
-            // Exact component equality is sufficient even when the actual
-            // directory name contains '*': that glob matches its own text.
-            // Other wildcard matches are deliberately not inferred here.
-            GlobSeg::Comp(literal) => components.next() == Some(literal.as_str()),
-            _ => false,
-        })
+        Ok(base.iter().all(|b| components.next() == Some(*b))
+            && prefix.iter().all(|seg| match seg {
+                // Exact component equality is sufficient even when the actual
+                // directory name contains '*': that glob matches its own text.
+                // Other wildcard matches are deliberately not inferred here.
+                GlobSeg::Comp(literal) => components.next() == Some(literal.as_str()),
+                _ => false,
+            }))
     }
 
-    fn may_intersect_subtree(&self, root: &str) -> bool {
-        let prefix = self.segments.iter().map_while(|seg| match seg {
+    fn may_intersect_subtree(&self, root: &str, home: Option<&Path>) -> Result<bool, HomeUnbound> {
+        let base = self.base(home)?;
+        let fixed = self.segments.iter().map_while(|seg| match seg {
             GlobSeg::Comp(literal) if !literal.contains('*') => Some(literal.as_str()),
             _ => None,
         });
         // Either prefix may end first. Only a conflicting fixed component proves
         // disjointness; a wildcard could reach anywhere after its fixed prefix.
-        prefix
+        Ok(base
+            .into_iter()
+            .chain(fixed)
             .zip(root.split('/').filter(|c| !c.is_empty()))
-            .all(|(a, b)| a == b)
+            .all(|(a, b)| a == b))
     }
 }
 
@@ -436,8 +479,6 @@ pub enum AuthzError {
     /// A pattern specifier failed to parse (bad shape, unknown capability,
     /// non-absolute `Read` glob, unknown capability name, …).
     BadPattern(String),
-    /// A pattern used `~` but no principal is enrolled to resolve it against.
-    TildeWithoutPrincipal(String),
     /// `authz.yaml` is world/other-accessible OR writable by group/other
     /// (spec §4.6/§7 — the refusal mask is `0o027`, both halves).
     ///
@@ -473,10 +514,6 @@ impl std::fmt::Display for AuthzError {
             }
             AuthzError::Config(e) => write!(f, "{e}"),
             AuthzError::BadPattern(p) => write!(f, "malformed authz pattern: '{p}'"),
-            AuthzError::TildeWithoutPrincipal(p) => write!(
-                f,
-                "pattern '{p}' uses '~' but no principal is enrolled to resolve it"
-            ),
             AuthzError::InsecurePermissions => {
                 write!(
                     f,
@@ -534,7 +571,7 @@ fn str_seq(v: &Value) -> Result<Vec<String>, AuthzError> {
 }
 
 /// Parse one `Capability(specifier)` string (spec §7).
-fn parse_pattern(spec: &str, principal_home: Option<&Path>) -> Result<Pattern, AuthzError> {
+fn parse_pattern(spec: &str) -> Result<Pattern, AuthzError> {
     let bad = || AuthzError::BadPattern(spec.to_string());
     let open = spec.find('(').ok_or_else(bad)?;
     if !spec.ends_with(')') {
@@ -543,8 +580,8 @@ fn parse_pattern(spec: &str, principal_home: Option<&Path>) -> Result<Pattern, A
     let capability = &spec[..open];
     let inner = &spec[open + 1..spec.len() - 1];
     match capability {
-        "Read" => Ok(Pattern::Read(PathGlob::parse(inner, principal_home)?)),
-        "Write" => Ok(Pattern::Write(PathGlob::parse(inner, principal_home)?)),
+        "Read" => Ok(Pattern::Read(PathGlob::parse(inner)?)),
+        "Write" => Ok(Pattern::Write(PathGlob::parse(inner)?)),
         _ => Err(bad()),
     }
 }
@@ -616,15 +653,15 @@ fn roles_term_list(v: &Value) -> Result<Vec<String>, AuthzError> {
 /// [`AuthzPolicy`], no file I/O and no ownership requirement — the hermetic
 /// door for the PDP backend's proofs. Production loading stays [`load_authz`]
 /// (root-owned, hardened path); this function never touches the filesystem.
-pub fn parse_authz(body: &str, principal_home: Option<&Path>) -> Result<AuthzPolicy, AuthzError> {
-    parse_policy(body, principal_home)
+pub fn parse_authz(body: &str) -> Result<AuthzPolicy, AuthzError> {
+    parse_policy(body)
 }
 
 /// Parse a `schema_version: 1 / permissions: {allow, deny}` document (spec
 /// §7) into an [`AuthzPolicy`]. Pure — takes already-read YAML text, no file
 /// I/O (that's [`load_authz`]'s job); factored out so the grammar/contract
 /// tests can pin parse semantics without touching the filesystem.
-fn parse_policy(body: &str, principal_home: Option<&Path>) -> Result<AuthzPolicy, AuthzError> {
+fn parse_policy(body: &str) -> Result<AuthzPolicy, AuthzError> {
     let root = crate::load_str(body).map_err(|e| AuthzError::Yaml(e.to_string()))?;
     let map = match root {
         Value::Map(m) => m,
@@ -671,11 +708,11 @@ fn parse_policy(body: &str, principal_home: Option<&Path>) -> Result<AuthzPolicy
 
     let allow = allow_raw
         .iter()
-        .map(|s| parse_pattern(s, principal_home))
+        .map(|s| parse_pattern(s))
         .collect::<Result<Vec<_>, _>>()?;
     let deny = deny_raw
         .iter()
-        .map(|s| parse_pattern(s, principal_home))
+        .map(|s| parse_pattern(s))
         .collect::<Result<Vec<_>, _>>()?;
 
     let bindings = match get(&map, "bindings") {
@@ -884,10 +921,9 @@ fn security_load_required(
 pub fn load_authz_with_requirement(
     path: &Path,
     target: maknae_io::TargetRequired,
-    principal_home: Option<&Path>,
 ) -> Result<AuthzPolicy, AuthzError> {
     let body = security_load_required(path, target)?;
-    parse_policy(&body, principal_home)
+    parse_policy(&body)
 }
 
 /// Decode the bytes `maknae-io` returned for `authz.yaml` as UTF-8.
@@ -918,10 +954,11 @@ fn map_authz_io(e: maknae_io::IoError) -> AuthzError {
 
 /// Load and validate `/etc/maknae/authz.yaml` (spec §5.4/§7): secure read +
 /// root-ownership assertion, then fail-closed grammar validation. `~` in any
-/// pattern resolves against `principal_home` (spec §7's enrolled operator).
-pub fn load_authz(path: &Path, principal_home: Option<&Path>) -> Result<AuthzPolicy, AuthzError> {
+/// pattern stays symbolic until evaluation binds it at match time to the home the request
+/// carries.
+pub fn load_authz(path: &Path) -> Result<AuthzPolicy, AuthzError> {
     let body = security_load(path)?;
-    parse_policy(&body, principal_home)
+    parse_policy(&body)
 }
 
 #[cfg(test)]
@@ -930,7 +967,7 @@ mod tests {
 
     const DEST_BASE: &str = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"alex\"]\n  user: [\"ursula\"]\n";
     fn parse_dest(body: &str) -> Result<AuthzPolicy, AuthzError> {
-        parse_authz(body, Some(std::path::Path::new("/home/operator")))
+        parse_authz(body)
     }
 
     #[test]
@@ -1026,7 +1063,7 @@ mod tests {
 
     #[test]
     fn shipped_default_validates_clean() {
-        let policy = parse_policy(SHIPPED_DEFAULT, Some(&home())).unwrap();
+        let policy = parse_policy(SHIPPED_DEFAULT).unwrap();
         assert_eq!(policy.allow.len(), 2);
         assert_eq!(policy.deny.len(), 18);
         assert!(matches!(policy.allow[0], Pattern::Read(_)));
@@ -1051,9 +1088,14 @@ mod tests {
 
     #[test]
     fn shipped_write_authority_is_limited_to_projects() {
-        let policy = parse_policy(SHIPPED_DEFAULT, Some(&home())).unwrap();
+        let policy = parse_policy(SHIPPED_DEFAULT).unwrap();
         assert_eq!(
-            policy.evaluate3(&Request::Write(&home().join("projects/code.rs"))),
+            policy
+                .evaluate3(
+                    &Request::Write(&home().join("projects/code.rs")),
+                    Some(&home())
+                )
+                .unwrap(),
             Match3::AllowMatch
         );
         for relative in [
@@ -1064,13 +1106,17 @@ mod tests {
             ".maknae/config.yaml",
         ] {
             assert_ne!(
-                policy.evaluate3(&Request::Write(&home().join(relative))),
+                policy
+                    .evaluate3(&Request::Write(&home().join(relative)), Some(&home()))
+                    .unwrap(),
                 Match3::AllowMatch,
                 "{relative}"
             );
         }
         assert_eq!(
-            policy.evaluate_write_subtree(&home().join("projects/repo")),
+            policy
+                .evaluate_write_subtree(&home().join("projects/repo"), Some(&home()))
+                .unwrap(),
             Match3::AllowMatch
         );
     }
@@ -1079,7 +1125,7 @@ mod tests {
     fn unknown_schema_version_refused() {
         let yaml = "schema_version: 2\npermissions:\n  allow: []\n";
         assert!(matches!(
-            parse_policy(yaml, Some(&home())),
+            parse_policy(yaml),
             Err(AuthzError::UnknownSchemaVersion(2))
         ));
     }
@@ -1088,7 +1134,7 @@ mod tests {
     fn schema_version_missing_is_unknown_schema_version() {
         let yaml = "permissions:\n  allow: []\n";
         assert!(matches!(
-            parse_policy(yaml, Some(&home())),
+            parse_policy(yaml),
             Err(AuthzError::UnknownSchemaVersion(0))
         ));
     }
@@ -1097,7 +1143,7 @@ mod tests {
     fn schema_version_non_integer_is_unknown_schema_version() {
         let yaml = "schema_version: \"1\"\npermissions:\n  allow: []\n";
         assert!(matches!(
-            parse_policy(yaml, Some(&home())),
+            parse_policy(yaml),
             Err(AuthzError::UnknownSchemaVersion(0))
         ));
     }
@@ -1105,7 +1151,7 @@ mod tests {
     #[test]
     fn unknown_key_refused_naming_key() {
         let yaml = "schema_version: 1\npermissions:\n  allow: []\n  denny: []\n";
-        match parse_policy(yaml, Some(&home())) {
+        match parse_policy(yaml) {
             Err(AuthzError::Config(ConfigError::UnknownKey { key, .. })) => {
                 assert_eq!(key, "denny")
             }
@@ -1116,7 +1162,7 @@ mod tests {
     #[test]
     fn unknown_top_level_key_refused() {
         let yaml = "schema_version: 1\nextra_top_key: 1\n";
-        match parse_policy(yaml, Some(&home())) {
+        match parse_policy(yaml) {
             Err(AuthzError::Config(ConfigError::UnknownKey { key, .. })) => {
                 assert_eq!(key, "extra_top_key")
             }
@@ -1128,20 +1174,23 @@ mod tests {
     fn unknown_capability_refused() {
         let yaml = "schema_version: 1\npermissions:\n  allow:\n    - \"WebSearch(x)\"\n";
         assert!(matches!(
-            parse_policy(yaml, Some(&home())),
+            parse_policy(yaml),
             Err(AuthzError::BadPattern(p)) if p == "WebSearch(x)"
         ));
     }
 
     #[test]
     fn write_policy_is_a_distinct_filesystem_capability() {
-        let policy = parse_policy(
-            "schema_version: 1\npermissions:\n  allow: [\"Write(~/projects/**)\"]\n",
-            Some(&home()),
-        )
-        .expect("Write must be expressible without role action grants");
+        let policy =
+            parse_policy("schema_version: 1\npermissions:\n  allow: [\"Write(~/projects/**)\"]\n")
+                .expect("Write must be expressible without role action grants");
         assert_eq!(
-            policy.evaluate3(&Request::Read(&home().join("projects/sentinel"))),
+            policy
+                .evaluate3(
+                    &Request::Read(&home().join("projects/sentinel")),
+                    Some(&home())
+                )
+                .unwrap(),
             Match3::NoMatch,
             "write authority must never imply read authority",
         );
@@ -1149,7 +1198,7 @@ mod tests {
 
     #[test]
     fn shipped_read_denies_have_write_pairs() {
-        let policy = parse_policy(SHIPPED_DEFAULT, Some(&home())).unwrap();
+        let policy = parse_policy(SHIPPED_DEFAULT).unwrap();
         let mut reads = 0;
         for (pattern, source) in policy.deny.iter().zip(&policy.deny_sources) {
             if let Pattern::Read(glob) = pattern {
@@ -1202,9 +1251,11 @@ mod tests {
             ),
         ] {
             let yaml = format!("schema_version: 1\npermissions:\n  allow: [\"{allow}\"]\n");
-            let policy = parse_policy(&yaml, None).unwrap();
+            let policy = parse_policy(&yaml).unwrap();
             assert_eq!(
-                policy.evaluate_write_subtree(Path::new(root)),
+                policy
+                    .evaluate_write_subtree(Path::new(root), None)
+                    .unwrap(),
                 expected,
                 "{allow} on {root}"
             );
@@ -1227,7 +1278,7 @@ mod tests {
             ("Read(/h/u/projects/p/secret/**)", false),
         ] {
             let yaml = format!("schema_version: 1\npermissions:\n  allow: [\"Write(/h/u/projects/**)\"]\n  deny: [\"{deny}\"]\n");
-            let policy = parse_policy(&yaml, None).unwrap();
+            let policy = parse_policy(&yaml).unwrap();
             let expected = if intersects {
                 Match3::DenyMatch {
                     source: deny.into(),
@@ -1236,7 +1287,9 @@ mod tests {
                 Match3::AllowMatch
             };
             assert_eq!(
-                policy.evaluate_write_subtree(Path::new("/h/u/projects/p")),
+                policy
+                    .evaluate_write_subtree(Path::new("/h/u/projects/p"), None)
+                    .unwrap(),
                 expected,
                 "{deny}"
             );
@@ -1245,11 +1298,8 @@ mod tests {
 
     #[test]
     fn recursive_write_rejects_malformed_roots_and_absent_grants() {
-        let policy = parse_policy(
-            "schema_version: 1\npermissions:\n  allow: [\"Write(/**)\"]\n",
-            None,
-        )
-        .unwrap();
+        let policy =
+            parse_policy("schema_version: 1\npermissions:\n  allow: [\"Write(/**)\"]\n").unwrap();
         for root in [
             "",
             "h/u",
@@ -1260,23 +1310,27 @@ mod tests {
             "/h/u\0bad",
         ] {
             assert_eq!(
-                policy.evaluate_write_subtree(Path::new(root)),
+                policy
+                    .evaluate_write_subtree(Path::new(root), None)
+                    .unwrap(),
                 Match3::NoMatch,
                 "{root:?}"
             );
         }
-        let empty = parse_policy("schema_version: 1\npermissions: {}\n", None).unwrap();
+        let empty = parse_policy("schema_version: 1\npermissions: {}\n").unwrap();
         assert_eq!(
-            empty.evaluate_write_subtree(Path::new("/h/u")),
+            empty
+                .evaluate_write_subtree(Path::new("/h/u"), None)
+                .unwrap(),
             Match3::NoMatch
         );
-        let deny_only = parse_policy(
-            "schema_version: 1\npermissions:\n  deny: [\"Write(/h/u/secret/**)\"]\n",
-            None,
-        )
-        .unwrap();
+        let deny_only =
+            parse_policy("schema_version: 1\npermissions:\n  deny: [\"Write(/h/u/secret/**)\"]\n")
+                .unwrap();
         assert_eq!(
-            deny_only.evaluate_write_subtree(Path::new("/h/u")),
+            deny_only
+                .evaluate_write_subtree(Path::new("/h/u"), None)
+                .unwrap(),
             Match3::DenyMatch {
                 source: "Write(/h/u/secret/**)".into()
             }
@@ -1287,23 +1341,24 @@ mod tests {
     #[test]
     fn recursive_write_never_normalizes_invalid_utf8_into_a_grant() {
         use std::os::unix::ffi::OsStrExt;
-        let policy = parse_policy(
-            "schema_version: 1\npermissions:\n  allow: [\"Write(/**)\"]\n",
-            None,
-        )
-        .unwrap();
+        let policy =
+            parse_policy("schema_version: 1\npermissions:\n  allow: [\"Write(/**)\"]\n").unwrap();
         assert_eq!(
-            policy.evaluate_write_subtree(Path::new(std::ffi::OsStr::from_bytes(b"/h/\xff"))),
+            policy
+                .evaluate_write_subtree(Path::new(std::ffi::OsStr::from_bytes(b"/h/\xff")), None)
+                .unwrap(),
             Match3::NoMatch
         );
     }
 
     #[test]
     fn recursive_write_retains_denial_without_source_metadata() {
-        let mut policy = parse_policy("schema_version: 1\npermissions:\n  allow: [\"Write(/**)\"]\n  deny: [\"Write(/h/u/secret/**)\"]\n", None).unwrap();
+        let mut policy = parse_policy("schema_version: 1\npermissions:\n  allow: [\"Write(/**)\"]\n  deny: [\"Write(/h/u/secret/**)\"]\n").unwrap();
         policy.deny_sources.clear();
         assert_eq!(
-            policy.evaluate_write_subtree(Path::new("/h/u")),
+            policy
+                .evaluate_write_subtree(Path::new("/h/u"), None)
+                .unwrap(),
             Match3::DenyMatch {
                 source: "<unknown deny entry>".into()
             }
@@ -1313,8 +1368,7 @@ mod tests {
     #[test]
     fn write_matching_is_independent_and_preserves_deny_provenance() {
         let policy = parse_policy(
-            "schema_version: 1\npermissions:\n  allow: [\"Read(~/read-only/**)\", \"Write(~/projects/**)\"]\n  deny: [\"Write(~/projects/private/**)\", \"Read(~/projects/opaque/**)\"]\n",
-            Some(&home()),
+            "schema_version: 1\npermissions:\n  allow: [\"Read(~/read-only/**)\", \"Write(~/projects/**)\"]\n  deny: [\"Write(~/projects/private/**)\", \"Read(~/projects/opaque/**)\"]\n"
         ).unwrap();
         for (path, expected) in [
             ("read-only/notes", Match3::NoMatch),
@@ -1330,80 +1384,62 @@ mod tests {
         ] {
             let path = home().join(path);
             let request = Request::Write(&path);
-            assert_eq!(policy.evaluate3(&request), expected, "{}", path.display());
             assert_eq!(
-                policy.evaluate(&request),
-                if expected == Match3::AllowMatch {
-                    Decision::Allow
-                } else {
-                    Decision::Deny
-                }
+                policy.evaluate3(&request, Some(&home())).unwrap(),
+                expected,
+                "{}",
+                path.display()
             );
         }
         let read_policy = parse_policy(
-            "schema_version: 1\npermissions:\n  allow: [\"Read(~/projects/**)\"]\n  deny: [\"Write(~/projects/**)\"]\n",
-            Some(&home()),
+            "schema_version: 1\npermissions:\n  allow: [\"Read(~/projects/**)\"]\n  deny: [\"Write(~/projects/**)\"]\n"
         ).unwrap();
         assert_eq!(
-            read_policy.evaluate3(&Request::Read(&home().join("projects/source.rs"))),
+            read_policy
+                .evaluate3(
+                    &Request::Read(&home().join("projects/source.rs")),
+                    Some(&home())
+                )
+                .unwrap(),
             Match3::AllowMatch
         );
     }
 
     #[test]
-    fn tilde_without_principal_refused() {
-        let yaml = "schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/x)\"\n";
-        assert!(matches!(
-            parse_policy(yaml, None),
-            Err(AuthzError::TildeWithoutPrincipal(p)) if p == "~/x"
-        ));
-    }
-
-    #[test]
     fn tilde_other_user_is_bad_pattern() {
         let yaml = "schema_version: 1\npermissions:\n  allow:\n    - \"Read(~alice/x)\"\n";
-        assert!(matches!(
-            parse_policy(yaml, Some(&home())),
-            Err(AuthzError::BadPattern(_))
-        ));
+        assert!(matches!(parse_policy(yaml), Err(AuthzError::BadPattern(_))));
     }
 
     #[test]
     fn read_relative_pattern_without_tilde_or_slash_is_bad_pattern() {
         let yaml = "schema_version: 1\npermissions:\n  allow:\n    - \"Read(relative/x)\"\n";
-        assert!(matches!(
-            parse_policy(yaml, Some(&home())),
-            Err(AuthzError::BadPattern(_))
-        ));
+        assert!(matches!(parse_policy(yaml), Err(AuthzError::BadPattern(_))));
     }
 
     #[test]
     fn read_absolute_pattern_parses() {
         let yaml = "schema_version: 1\npermissions:\n  allow:\n    - \"Read(/etc/passwd)\"\n";
-        let policy = parse_policy(yaml, Some(&home())).unwrap();
+        let policy = parse_policy(yaml).unwrap();
         // The parsed pattern must retain the requested capability.
         let Pattern::Read(glob) = &policy.allow[0] else {
             panic!("Read policy must retain its capability");
         };
-        assert!(glob.matches(Path::new("/etc/passwd")));
+        assert!(glob
+            .matches(Path::new("/etc/passwd"), Some(&home()))
+            .unwrap());
     }
 
     #[test]
     fn pattern_missing_open_paren_is_bad_pattern() {
         let yaml = "schema_version: 1\npermissions:\n  allow:\n    - \"ReadNoParens\"\n";
-        assert!(matches!(
-            parse_policy(yaml, Some(&home())),
-            Err(AuthzError::BadPattern(_))
-        ));
+        assert!(matches!(parse_policy(yaml), Err(AuthzError::BadPattern(_))));
     }
 
     #[test]
     fn pattern_missing_close_paren_is_bad_pattern() {
         let yaml = "schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/x\"\n";
-        assert!(matches!(
-            parse_policy(yaml, Some(&home())),
-            Err(AuthzError::BadPattern(_))
-        ));
+        assert!(matches!(parse_policy(yaml), Err(AuthzError::BadPattern(_))));
     }
 
     /// `Bash` was RETIRED by #67 in favour of the `terminal.*` action class. A
@@ -1415,10 +1451,7 @@ mod tests {
         for spec in ["Bash(ls)", "Bash(git status:*)", "Bash()"] {
             let yaml = format!("schema_version: 1\npermissions:\n  allow:\n    - \"{spec}\"\n");
             assert!(
-                matches!(
-                    parse_policy(&yaml, Some(&home())),
-                    Err(AuthzError::BadPattern(_))
-                ),
+                matches!(parse_policy(&yaml), Err(AuthzError::BadPattern(_))),
                 "{spec} must be refused as an unknown capability"
             );
         }
@@ -1427,34 +1460,25 @@ mod tests {
     #[test]
     fn permissions_not_a_map_is_yaml_error() {
         let yaml = "schema_version: 1\npermissions: 5\n";
-        assert!(matches!(
-            parse_policy(yaml, Some(&home())),
-            Err(AuthzError::Yaml(_))
-        ));
+        assert!(matches!(parse_policy(yaml), Err(AuthzError::Yaml(_))));
     }
 
     #[test]
     fn allow_not_a_sequence_is_yaml_error() {
         let yaml = "schema_version: 1\npermissions:\n  allow: 5\n";
-        assert!(matches!(
-            parse_policy(yaml, Some(&home())),
-            Err(AuthzError::Yaml(_))
-        ));
+        assert!(matches!(parse_policy(yaml), Err(AuthzError::Yaml(_))));
     }
 
     #[test]
     fn allow_entry_not_a_string_is_yaml_error() {
         let yaml = "schema_version: 1\npermissions:\n  allow:\n    - 5\n";
-        assert!(matches!(
-            parse_policy(yaml, Some(&home())),
-            Err(AuthzError::Yaml(_))
-        ));
+        assert!(matches!(parse_policy(yaml), Err(AuthzError::Yaml(_))));
     }
 
     #[test]
     fn root_not_a_map_is_yaml_error() {
         assert!(matches!(
-            parse_policy("- 1\n- 2\n", Some(&home())),
+            parse_policy("- 1\n- 2\n"),
             Err(AuthzError::Yaml(_))
         ));
     }
@@ -1462,14 +1486,14 @@ mod tests {
     #[test]
     fn malformed_yaml_is_yaml_error() {
         assert!(matches!(
-            parse_policy("schema_version: [1\n", Some(&home())),
+            parse_policy("schema_version: [1\n"),
             Err(AuthzError::Yaml(_))
         ));
     }
 
     #[test]
     fn permissions_absent_is_empty_policy() {
-        let policy = parse_policy("schema_version: 1\n", Some(&home())).unwrap();
+        let policy = parse_policy("schema_version: 1\n").unwrap();
         assert!(policy.allow.is_empty());
         assert!(policy.deny.is_empty());
     }
@@ -1477,8 +1501,7 @@ mod tests {
     // ---- glob matching semantics (spec §7) ----
 
     fn read_glob(pattern: &str) -> PathGlob {
-        let Pattern::Read(g) = parse_pattern(&format!("Read({pattern})"), Some(&home())).unwrap()
-        else {
+        let Pattern::Read(g) = parse_pattern(&format!("Read({pattern})")).unwrap() else {
             panic!("Read pattern must parse as Read");
         };
         g
@@ -1487,7 +1510,9 @@ mod tests {
     #[test]
     fn double_star_matches_dotfiles() {
         let glob = read_glob("~/**");
-        assert!(glob.matches(Path::new("/home/operator/.ssh/id_ed25519")));
+        assert!(glob
+            .matches(Path::new("/home/operator/.ssh/id_ed25519"), Some(&home()))
+            .unwrap());
     }
 
     #[test]
@@ -1498,9 +1523,15 @@ mod tests {
         // `i == 0` and `i == last` coincide; the start/end anchor branches
         // must both apply to that one fragment (over-ALLOW otherwise).
         let glob = read_glob("/etc/passwd");
-        assert!(glob.matches(Path::new("/etc/passwd")));
-        assert!(!glob.matches(Path::new("/etc/passwdX")));
-        assert!(!glob.matches(Path::new("/etc/passwd-backup")));
+        assert!(glob
+            .matches(Path::new("/etc/passwd"), Some(&home()))
+            .unwrap());
+        assert!(!glob
+            .matches(Path::new("/etc/passwdX"), Some(&home()))
+            .unwrap());
+        assert!(!glob
+            .matches(Path::new("/etc/passwd-backup"), Some(&home()))
+            .unwrap());
     }
 
     #[test]
@@ -1510,40 +1541,67 @@ mod tests {
         // — must NOT match `Read(~/**)`. Each path component ("operator" vs
         // "operatorbot") must be compared for exact equality, not prefix.
         let glob = read_glob("~/**");
-        assert!(glob.matches(Path::new("/home/operator/.ssh/id_ed25519")));
-        assert!(!glob.matches(Path::new("/home/operatorbot/.ssh/id_ed25519")));
+        assert!(glob
+            .matches(Path::new("/home/operator/.ssh/id_ed25519"), Some(&home()))
+            .unwrap());
+        assert!(!glob
+            .matches(
+                Path::new("/home/operatorbot/.ssh/id_ed25519"),
+                Some(&home())
+            )
+            .unwrap());
     }
 
     #[test]
     fn double_star_matches_multiple_components_deep() {
         let glob = read_glob("~/**");
-        assert!(glob.matches(Path::new("/home/operator/.ssh/nested/deep/file")));
+        assert!(glob
+            .matches(
+                Path::new("/home/operator/.ssh/nested/deep/file"),
+                Some(&home())
+            )
+            .unwrap());
     }
 
     #[test]
     fn x_slash_doublestar_matches_x_itself() {
         let glob = read_glob("~/.ssh/**");
-        assert!(glob.matches(Path::new("/home/operator/.ssh")));
+        assert!(glob
+            .matches(Path::new("/home/operator/.ssh"), Some(&home()))
+            .unwrap());
     }
 
     #[test]
     fn matching_is_byte_case_sensitive() {
         let glob = read_glob("~/.ssh/**");
-        assert!(!glob.matches(Path::new("/home/operator/.SSH")));
-        assert!(!glob.matches(Path::new("/home/operator/.SSH/id_rsa")));
+        assert!(!glob
+            .matches(Path::new("/home/operator/.SSH"), Some(&home()))
+            .unwrap());
+        assert!(!glob
+            .matches(Path::new("/home/operator/.SSH/id_rsa"), Some(&home()))
+            .unwrap());
     }
 
     #[test]
     fn literal_star_matches_within_component_only() {
         let glob = read_glob("~/*.txt");
-        assert!(glob.matches(Path::new("/home/operator/foo.txt")));
-        assert!(!glob.matches(Path::new("/home/operator/sub/foo.txt")));
+        assert!(glob
+            .matches(Path::new("/home/operator/foo.txt"), Some(&home()))
+            .unwrap());
+        assert!(!glob
+            .matches(Path::new("/home/operator/sub/foo.txt"), Some(&home()))
+            .unwrap());
     }
 
     #[test]
     fn read_pattern_does_not_match_unrelated_path() {
         let glob = read_glob("~/.ssh/**");
-        assert!(!glob.matches(Path::new("/home/operator/.gnupg/pubring.kbx")));
+        assert!(!glob
+            .matches(
+                Path::new("/home/operator/.gnupg/pubring.kbx"),
+                Some(&home())
+            )
+            .unwrap());
     }
 
     #[test]
@@ -1552,45 +1610,56 @@ mod tests {
         use std::os::unix::ffi::OsStrExt;
         let glob = read_glob("~/**");
         let bad = OsStr::from_bytes(&[0x66, 0xff, 0x6f]);
-        assert!(!glob.matches(Path::new(bad)));
+        assert!(!glob.matches(Path::new(bad), Some(&home())).unwrap());
     }
 
     #[test]
-    fn non_utf8_principal_home_is_bad_pattern() {
+    fn a_non_utf8_home_is_unbound() {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;
         let bad_home = OsStr::from_bytes(&[0x2f, 0xff, 0x2f]);
-        assert!(matches!(
-            PathGlob::parse("~/x", Some(Path::new(bad_home))),
-            Err(AuthzError::BadPattern(_))
-        ));
+        assert_eq!(
+            read_glob("~/x").matches(Path::new("/x"), Some(Path::new(bad_home))),
+            Err(HomeUnbound)
+        );
     }
 
-    // ---- evaluate: deny-wins, default-deny (spec §7) ----
+    // ---- evaluate3: deny-wins, default-deny (spec §7) ----
 
     #[test]
     fn deny_beats_allow_and_default_deny() {
         let yaml = "schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/**)\"\n  deny:\n    - \"Read(~/.ssh/**)\"\n";
-        let policy = parse_policy(yaml, Some(&home())).unwrap();
+        let policy = parse_policy(yaml).unwrap();
 
         // deny beats allow: inside ~ AND inside the denied ~/.ssh subtree.
         let denied = Request::Read(Path::new("/home/operator/.ssh/id_rsa"));
-        assert_eq!(policy.evaluate(&denied), Decision::Deny);
+        assert_eq!(
+            policy.evaluate3(&denied, Some(&home())),
+            Ok(Match3::DenyMatch {
+                source: "Read(~/.ssh/**)".into()
+            })
+        );
 
         // allowed: inside ~ but outside the deny list.
         let allowed = Request::Read(Path::new("/home/operator/docs/notes.txt"));
-        assert_eq!(policy.evaluate(&allowed), Decision::Allow);
+        assert_eq!(
+            policy.evaluate3(&allowed, Some(&home())),
+            Ok(Match3::AllowMatch)
+        );
 
         // default-deny: matches neither list (outside the allow's ~ scope).
         let unmatched = Request::Read(Path::new("/etc/passwd"));
-        assert_eq!(policy.evaluate(&unmatched), Decision::Deny);
+        assert_eq!(
+            policy.evaluate3(&unmatched, Some(&home())),
+            Ok(Match3::NoMatch)
+        );
     }
 
     #[test]
     fn empty_policy_permits_nothing() {
         let policy = AuthzPolicy::default();
         let req = Request::Read(Path::new("/home/operator/anything"));
-        assert_eq!(policy.evaluate(&req), Decision::Deny);
+        assert_eq!(policy.evaluate3(&req, Some(&home())), Ok(Match3::NoMatch));
     }
 
     // ---- AuthzError Display ----
@@ -1604,7 +1673,6 @@ mod tests {
                 key: "denny".into(),
             }),
             AuthzError::BadPattern("WebSearch(x)".into()),
-            AuthzError::TildeWithoutPrincipal("~/x".into()),
             AuthzError::InsecurePermissions,
             AuthzError::Symlink,
             AuthzError::NotRootOwned,
@@ -1673,7 +1741,7 @@ mod tests {
         write_mode(&target, SHIPPED_DEFAULT, 0o640);
         let _ = std::fs::remove_file(&link);
         std::os::unix::fs::symlink(&target, &link).unwrap();
-        let got = load_authz(&link, Some(&home()));
+        let got = load_authz(&link);
         let _ = std::fs::remove_file(&link);
         let _ = std::fs::remove_file(&target);
         assert!(matches!(got, Err(AuthzError::Symlink)));
@@ -1683,7 +1751,7 @@ mod tests {
     fn world_accessible_authz_refused() {
         let p = tmp("world");
         write_mode(&p, SHIPPED_DEFAULT, 0o666);
-        let got = load_authz(&p, Some(&home()));
+        let got = load_authz(&p);
         let _ = std::fs::remove_file(&p);
         assert!(matches!(got, Err(AuthzError::InsecurePermissions)));
     }
@@ -1697,7 +1765,7 @@ mod tests {
         // scenario — an authz.yaml NOT owned by root — is reproduced either
         // way, without requiring a #[ignore]-gated privileged test.
         let _ = std::os::unix::fs::chown(&p, Some(65_534), None);
-        let got = load_authz(&p, Some(&home()));
+        let got = load_authz(&p);
         let _ = std::fs::remove_file(&p);
         assert!(matches!(got, Err(AuthzError::NotRootOwned)));
     }
@@ -1725,7 +1793,7 @@ mod tests {
 
     #[test]
     fn missing_authz_file_is_io() {
-        let got = load_authz(&tmp("nope_never_created"), Some(&home()));
+        let got = load_authz(&tmp("nope_never_created"));
         assert!(matches!(got, Err(AuthzError::Io(_))));
     }
 
@@ -1802,10 +1870,18 @@ mod tests {
         // literal is found is a non-match (match_segs's DoubleStar `None`
         // arm — comps exhausted without ever matching `id_rsa`).
         let glob = read_glob("~/**/id_rsa");
-        assert!(!glob.matches(Path::new("/home/operator")));
-        assert!(!glob.matches(Path::new("/home/operator/.ssh")));
-        assert!(glob.matches(Path::new("/home/operator/id_rsa")));
-        assert!(glob.matches(Path::new("/home/operator/.ssh/id_rsa")));
+        assert!(!glob
+            .matches(Path::new("/home/operator"), Some(&home()))
+            .unwrap());
+        assert!(!glob
+            .matches(Path::new("/home/operator/.ssh"), Some(&home()))
+            .unwrap());
+        assert!(glob
+            .matches(Path::new("/home/operator/id_rsa"), Some(&home()))
+            .unwrap());
+        assert!(glob
+            .matches(Path::new("/home/operator/.ssh/id_rsa"), Some(&home()))
+            .unwrap());
     }
 
     #[test]
@@ -1814,9 +1890,15 @@ mod tests {
         // the last fragment is empty (nothing follows the trailing `*`), so
         // only the start-anchor check applies.
         let glob = read_glob("~/foo*");
-        assert!(glob.matches(Path::new("/home/operator/foo")));
-        assert!(glob.matches(Path::new("/home/operator/foobar")));
-        assert!(!glob.matches(Path::new("/home/operator/fo")));
+        assert!(glob
+            .matches(Path::new("/home/operator/foo"), Some(&home()))
+            .unwrap());
+        assert!(glob
+            .matches(Path::new("/home/operator/foobar"), Some(&home()))
+            .unwrap());
+        assert!(!glob
+            .matches(Path::new("/home/operator/fo"), Some(&home()))
+            .unwrap());
     }
 
     #[test]
@@ -1826,8 +1908,12 @@ mod tests {
         // `i == 0` / `!starts_with('*')` guard against both an `==`→`!=` (or
         // `delete !`) mutation, which would relax this to "found anywhere".
         let glob = read_glob("~/a*c");
-        assert!(!glob.matches(Path::new("/home/operator/Xac")));
-        assert!(glob.matches(Path::new("/home/operator/aXc")));
+        assert!(!glob
+            .matches(Path::new("/home/operator/Xac"), Some(&home()))
+            .unwrap());
+        assert!(glob
+            .matches(Path::new("/home/operator/aXc"), Some(&home()))
+            .unwrap());
     }
 
     #[test]
@@ -1836,7 +1922,9 @@ mod tests {
         // `c` appearing mid-string is not enough. Pins the `i == last` /
         // `!ends_with('*')` guard the same way as the start-anchor test above.
         let glob = read_glob("~/a*c");
-        assert!(!glob.matches(Path::new("/home/operator/acX")));
+        assert!(!glob
+            .matches(Path::new("/home/operator/acX"), Some(&home()))
+            .unwrap());
     }
 
     #[test]
@@ -1850,8 +1938,12 @@ mod tests {
         // real, non-trivial gap so `+`/`-`/`*` corruptions of that expression
         // land on a visibly different (or underflow-panicking) position.
         let glob = read_glob("~/abc*def*ghi");
-        assert!(glob.matches(Path::new("/home/operator/abcZZdefWWWghi")));
-        assert!(!glob.matches(Path::new("/home/operator/abcZZdeXWWWghi")));
+        assert!(glob
+            .matches(Path::new("/home/operator/abcZZdefWWWghi"), Some(&home()))
+            .unwrap());
+        assert!(!glob
+            .matches(Path::new("/home/operator/abcZZdeXWWWghi"), Some(&home()))
+            .unwrap());
     }
 
     #[test]
@@ -1865,7 +1957,9 @@ mod tests {
         // its own can't pin this: whether text ends in "z" doesn't depend
         // on `pos`, only a downstream `find` being fooled does.
         let glob = read_glob("~/abxy*xy*z");
-        assert!(!glob.matches(Path::new("/home/operator/abxyPPPz")));
+        assert!(!glob
+            .matches(Path::new("/home/operator/abxyPPPz"), Some(&home()))
+            .unwrap());
     }
 
     #[test]
@@ -1877,7 +1971,9 @@ mod tests {
         // straight past "ghi" so the end-anchor check sees an empty slice
         // instead — pins `pos += offset + frag.len()` in the middle branch.
         let glob = read_glob("~/abc*xy*ghi");
-        assert!(glob.matches(Path::new("/home/operator/abcZZZZZxyghi")));
+        assert!(glob
+            .matches(Path::new("/home/operator/abcZZZZZxyghi"), Some(&home()))
+            .unwrap());
     }
 
     // ---- hermetic-test seam (#85 §6a.4): feature-gated, door unweakened ----
@@ -1900,8 +1996,8 @@ mod tests {
             regular_file: true,
             max_bytes: None,
         };
-        let via_seam = load_authz_with_requirement(&p, relaxed, Some(&home()));
-        let via_door = load_authz(&p, Some(&home()));
+        let via_seam = load_authz_with_requirement(&p, relaxed);
+        let via_door = load_authz(&p);
         let _ = std::fs::remove_dir_all(&dir);
 
         let policy = via_seam.expect("seam loads a fixture the current euid owns");
@@ -1918,8 +2014,14 @@ mod tests {
 
     #[test]
     fn evaluate3_deny_match_carries_full_source_text() {
-        let p = parse_authz(SHIPPED_DEFAULT, Some(&home())).unwrap();
-        match p.evaluate3(&Request::Read(Path::new("/home/operator/.ssh/id_rsa"))) {
+        let p = parse_authz(SHIPPED_DEFAULT).unwrap();
+        match p
+            .evaluate3(
+                &Request::Read(Path::new("/home/operator/.ssh/id_rsa")),
+                Some(&home()),
+            )
+            .unwrap()
+        {
             Match3::DenyMatch { source } => assert_eq!(source, "Read(~/.ssh/**)"),
             other => panic!("expected DenyMatch with source, got {other:?}"),
         }
@@ -1927,16 +2029,20 @@ mod tests {
 
     #[test]
     fn evaluate3_allow_and_nomatch_are_distinct() {
-        // The two-valued evaluate() collapses no-match into deny; the PDP
-        // backend needs the distinction (NoMatch → NotApplicable, spec §4.4;
-        // since #181 the backend annotates that absence with WHY, audit-only).
-        let p = parse_authz(SHIPPED_DEFAULT, Some(&home())).unwrap();
+        // The PDP backend needs the no-match/allow distinction (NoMatch → NotApplicable, spec
+        // §4.4); since #181 it annotates that absence with WHY, audit-only.
+        let p = parse_authz(SHIPPED_DEFAULT).unwrap();
         assert!(matches!(
-            p.evaluate3(&Request::Read(Path::new("/home/operator/notes.txt"))),
+            p.evaluate3(
+                &Request::Read(Path::new("/home/operator/notes.txt")),
+                Some(&home())
+            )
+            .unwrap(),
             Match3::AllowMatch
         ));
         assert!(matches!(
-            p.evaluate3(&Request::Read(Path::new("/etc/hosts"))),
+            p.evaluate3(&Request::Read(Path::new("/etc/hosts")), Some(&home()))
+                .unwrap(),
             Match3::NoMatch
         ));
     }
@@ -1944,11 +2050,15 @@ mod tests {
     #[test]
     fn evaluate3_deny_overrides_allow() {
         // ~/.ssh/** is inside ~/** — both lists match; deny must win and
-        // report ITS source, mirroring evaluate()'s deny-wins contract.
-        let p = parse_authz(SHIPPED_DEFAULT, Some(&home())).unwrap();
+        // report ITS source.
+        let p = parse_authz(SHIPPED_DEFAULT).unwrap();
         let r = Request::Read(Path::new("/home/operator/.ssh/config"));
-        assert_eq!(p.evaluate(&r), Decision::Deny);
-        assert!(matches!(p.evaluate3(&r), Match3::DenyMatch { .. }));
+        assert_eq!(
+            p.evaluate3(&r, Some(&home())),
+            Ok(Match3::DenyMatch {
+                source: "Read(~/.ssh/**)".into()
+            })
+        );
     }
 
     // ---- bindings grammar (#85): additive, role-agnostic, fail-closed ----
@@ -1957,14 +2067,14 @@ mod tests {
     fn bindings_key_absent_is_none() {
         // Absent vs present-empty is load-bearing (spec §3 defaults precedence):
         // an absent key means defaults apply; a present key suppresses them.
-        let p = parse_authz(SHIPPED_DEFAULT, Some(&home())).unwrap();
+        let p = parse_authz(SHIPPED_DEFAULT).unwrap();
         assert!(p.bindings.is_none());
     }
 
     #[test]
     fn bindings_parse_role_to_string_lists() {
         let body = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"alex\"]\n  guest: []\n";
-        let p = parse_authz(body, None).unwrap();
+        let p = parse_authz(body).unwrap();
         let b = p.bindings.unwrap();
         assert_eq!(b["admin"], vec!["alex".to_string()]);
         assert!(b["guest"].is_empty());
@@ -1973,7 +2083,7 @@ mod tests {
     #[test]
     fn bindings_present_but_empty_map_is_some_empty() {
         let body = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings: {}\n";
-        let p = parse_authz(body, None).unwrap();
+        let p = parse_authz(body).unwrap();
         assert_eq!(p.bindings, Some(std::collections::BTreeMap::new()));
     }
 
@@ -1981,7 +2091,7 @@ mod tests {
     fn bindings_non_string_member_refused_with_bindings_message() {
         let body =
             "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [1001]\n";
-        let e = parse_authz(body, None).unwrap_err();
+        let e = parse_authz(body).unwrap_err();
         assert!(
             matches!(&e, AuthzError::Yaml(m) if m.contains("bindings")),
             "error must name bindings, not permissions: {e:?}"
@@ -1994,14 +2104,14 @@ mod tests {
         // not silently treat as empty (fail-closed; spec §3 says write `[]`).
         let body =
             "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  guest:\n";
-        let e = parse_authz(body, None).unwrap_err();
+        let e = parse_authz(body).unwrap_err();
         assert!(matches!(&e, AuthzError::Yaml(m) if m.contains("bindings")));
     }
 
     #[test]
     fn bindings_non_map_refused() {
         let body = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings: [admin]\n";
-        let e = parse_authz(body, None).unwrap_err();
+        let e = parse_authz(body).unwrap_err();
         assert!(matches!(&e, AuthzError::Yaml(m) if m.contains("bindings")));
     }
 
@@ -2019,7 +2129,7 @@ mod tests {
         // Plain map, NOT Option: absent and `roles: {}` are behaviourally
         // identical under the additivity ruling, so an Option would make the
         // None<->Some(empty) mutant undetectable by construction.
-        let p = parse_authz(PREAMBLE, None).unwrap();
+        let p = parse_authz(PREAMBLE).unwrap();
         assert!(p.action_grants.is_empty());
     }
 
@@ -2028,7 +2138,7 @@ mod tests {
         let body = format!(
             "{PREAMBLE}roles:\n  admin:\n    allow: [\"admin.status\"]\n    deny: [\"admin.config.show\"]\n"
         );
-        let p = parse_authz(&body, None).unwrap();
+        let p = parse_authz(&body).unwrap();
         let g = p.action_grants.get("admin").expect("admin entry");
         assert_eq!(g.allow, vec!["admin.status".to_string()]);
         assert_eq!(g.deny, vec!["admin.config.show".to_string()]);
@@ -2040,7 +2150,7 @@ mod tests {
         // `allow` nor `deny` is present. One shape, one arm -- flattening the
         // grammar collapsed what were two distinct paths to the same result.
         let body = format!("{PREAMBLE}roles:\n  admin: {{}}\n");
-        let p = parse_authz(&body, None).unwrap();
+        let p = parse_authz(&body).unwrap();
         assert_eq!(
             p.action_grants.get("admin"),
             Some(&RawActionGrants::default())
@@ -2053,7 +2163,7 @@ mod tests {
         // typo here must not be silently accepted as a second, unenforced
         // grant surface.
         let body = format!("{PREAMBLE}roles:\n  admin:\n    permissions:\n    allow: []\n");
-        let e = parse_authz(&body, None).unwrap_err();
+        let e = parse_authz(&body).unwrap_err();
         assert!(
             matches!(&e, AuthzError::Config(ConfigError::UnknownKey { key, .. }) if key == "permissions"),
             "must name the offending key: {e:?}"
@@ -2063,7 +2173,7 @@ mod tests {
     #[test]
     fn roles_typod_allow_key_refused() {
         let body = format!("{PREAMBLE}roles:\n  admin:\n    allwo: [\"admin.status\"]\n");
-        let e = parse_authz(&body, None).unwrap_err();
+        let e = parse_authz(&body).unwrap_err();
         assert!(
             matches!(&e, AuthzError::Config(ConfigError::UnknownKey { key, .. }) if key == "allwo"),
             "a typo'd allow must refuse, not parse to an empty grant: {e:?}"
@@ -2075,7 +2185,7 @@ mod tests {
         // NOT str_seq's "permissions list entries must be strings" — an
         // operator debugging a roles typo must not be sent to the wrong section.
         let body = format!("{PREAMBLE}roles:\n  admin:\n    allow: [1001]\n");
-        let e = parse_authz(&body, None).unwrap_err();
+        let e = parse_authz(&body).unwrap_err();
         assert!(
             matches!(&e, AuthzError::Yaml(m) if m.contains("roles") && !m.contains("permissions list")),
             "error must name roles: {e:?}"
@@ -2087,7 +2197,7 @@ mod tests {
         // A bare `allow:` parses Null, not an empty sequence. Refuse; do not
         // silently treat as empty — same fail-closed stance as bindings.
         let body = format!("{PREAMBLE}roles:\n  admin:\n    allow:\n");
-        let e = parse_authz(&body, None).unwrap_err();
+        let e = parse_authz(&body).unwrap_err();
         assert!(
             matches!(&e, AuthzError::Yaml(m) if m.contains("roles")),
             "{e:?}"
@@ -2097,7 +2207,7 @@ mod tests {
     #[test]
     fn roles_null_role_body_refused_with_roles_message() {
         let body = format!("{PREAMBLE}roles:\n  admin:\n");
-        let e = parse_authz(&body, None).unwrap_err();
+        let e = parse_authz(&body).unwrap_err();
         assert!(
             matches!(&e, AuthzError::Yaml(m) if m.contains("roles")),
             "{e:?}"
@@ -2107,7 +2217,7 @@ mod tests {
     #[test]
     fn roles_non_map_refused() {
         let body = format!("{PREAMBLE}roles: [admin]\n");
-        let e = parse_authz(&body, None).unwrap_err();
+        let e = parse_authz(&body).unwrap_err();
         assert!(
             matches!(&e, AuthzError::Yaml(m) if m.contains("roles")),
             "{e:?}"
@@ -2117,7 +2227,7 @@ mod tests {
     #[test]
     fn roles_entry_that_is_a_sequence_refused() {
         let body = format!("{PREAMBLE}roles:\n  admin: [admin.status]\n");
-        let e = parse_authz(&body, None).unwrap_err();
+        let e = parse_authz(&body).unwrap_err();
         assert!(
             matches!(&e, AuthzError::Yaml(m) if m.contains("roles")),
             "{e:?}"
@@ -2140,7 +2250,7 @@ mod tests {
         let body = format!(
             "{PREAMBLE}roles:\n  admin:\n    deny: [\"admin.status\"]\n  admin:\n    allow: [\"admin.status\"]\n"
         );
-        let e = parse_authz(&body, None).unwrap_err();
+        let e = parse_authz(&body).unwrap_err();
         assert!(
             matches!(&e, AuthzError::Yaml(m) if m.contains("duplicate")),
             "a second `admin:` block must refuse the document, not overwrite the first: {e:?}"
@@ -2156,7 +2266,7 @@ mod tests {
         let body = format!(
             "{PREAMBLE}roles:\n  admin:\n    allow: [\"admin.status\"]\n    allow: [\"admin.config.show\"]\n"
         );
-        let e = parse_authz(&body, None).unwrap_err();
+        let e = parse_authz(&body).unwrap_err();
         assert!(
             matches!(&e, AuthzError::Yaml(m) if m.contains("duplicate")),
             "{e:?}"
@@ -2168,7 +2278,7 @@ mod tests {
         // The two additive surfaces are independent; parsing one must not
         // suppress or alter the other.
         let body = "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\n  deny: []\nbindings:\n  admin: [\"alex\"]\nroles:\n  admin:\n    allow: [\"admin.status\"]\n";
-        let p = parse_authz(body, Some(Path::new("/home/operator"))).unwrap();
+        let p = parse_authz(body).unwrap();
         assert_eq!(p.allow.len(), 1);
         assert_eq!(
             p.bindings.as_ref().and_then(|b| b.get("admin")),
@@ -2178,5 +2288,226 @@ mod tests {
             p.action_grants["admin"].allow,
             vec!["admin.status".to_string()]
         );
+    }
+
+    #[test]
+    fn a_tilde_pattern_binds_to_the_home_it_is_given() {
+        let g = read_glob("~/projects/**");
+        let a = Path::new("/home/a");
+        let b = Path::new("/home/b");
+        assert_eq!(
+            g.matches(Path::new("/home/a/projects/x"), Some(a)),
+            Ok(true)
+        );
+        assert_eq!(
+            g.matches(Path::new("/home/a/projects/x"), Some(b)),
+            Ok(false)
+        );
+        assert_eq!(
+            g.matches(Path::new("/home/b/projects/x"), Some(b)),
+            Ok(true)
+        );
+    }
+
+    #[test]
+    fn a_tilde_pattern_with_no_home_is_unbound_not_a_miss() {
+        let g = read_glob("~/**");
+        assert_eq!(g.matches(Path::new("/home/a/x"), None), Err(HomeUnbound));
+    }
+
+    #[test]
+    fn an_absolute_pattern_needs_no_home() {
+        let g = read_glob("/etc/passwd");
+        assert_eq!(g.matches(Path::new("/etc/passwd"), None), Ok(true));
+    }
+
+    #[test]
+    fn a_home_is_a_literal_prefix_never_a_pattern() {
+        let g = read_glob("~/**");
+        let starred = Path::new("/home/a*");
+        assert_eq!(g.matches(Path::new("/home/a*/x"), Some(starred)), Ok(true));
+        assert_eq!(
+            g.matches(Path::new("/home/abc/x"), Some(starred)),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn a_sibling_home_sharing_a_prefix_is_not_matched() {
+        let g = read_glob("~/**");
+        assert_eq!(
+            g.matches(Path::new("/home/bob/x"), Some(Path::new("/home/b"))),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn trailing_and_doubled_slashes_in_the_home_bind_identically() {
+        let g = read_glob("~/**");
+        for h in ["/home/b", "/home/b/", "//home//b"] {
+            assert_eq!(
+                g.matches(Path::new("/home/b/x"), Some(Path::new(h))),
+                Ok(true),
+                "{h}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_home_that_is_not_canonical_and_absolute_is_unbound() {
+        let g = read_glob("~/**");
+        for h in ["/", "home/b", "/home/../b", "/home/./b"] {
+            assert_eq!(
+                g.matches(Path::new("/home/b/x"), Some(Path::new(h))),
+                Err(HomeUnbound),
+                "{h}"
+            );
+        }
+    }
+
+    #[test]
+    fn tilde_other_user_is_still_a_bad_pattern() {
+        assert!(matches!(
+            parse_pattern("Read(~other/x)"),
+            Err(AuthzError::BadPattern(_))
+        ));
+    }
+
+    #[test]
+    fn an_unbound_home_is_unbound_for_deny_rules_too() {
+        let p = parse_authz(
+            "schema_version: 1\npermissions:\n  allow:\n    - \"Read(/**)\"\n  deny:\n    - \"Read(~/.maknae/**)\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            p.evaluate3(&Request::Read(Path::new("/home/b/.maknae/token")), None),
+            Err(HomeUnbound)
+        );
+        assert_eq!(
+            p.evaluate3(
+                &Request::Read(Path::new("/home/b/.maknae/token")),
+                Some(Path::new("/home/b"))
+            ),
+            Ok(Match3::DenyMatch {
+                source: "Read(~/.maknae/**)".into()
+            })
+        );
+    }
+
+    #[test]
+    fn an_unbound_home_is_unbound_whatever_order_the_allows_are_in() {
+        let p = parse_authz(
+            "schema_version: 1\npermissions:\n  allow:\n    - \"Read(/srv/**)\"\n    - \"Read(~/**)\"\n  deny: []\n",
+        )
+        .unwrap();
+        assert_eq!(
+            p.evaluate3(&Request::Read(Path::new("/srv/x")), None),
+            Err(HomeUnbound)
+        );
+    }
+
+    #[test]
+    fn an_invalid_home_is_unbound_whatever_order_the_allows_are_in() {
+        let p = parse_authz(
+            "schema_version: 1\npermissions:\n  allow:\n    - \"Read(/srv/**)\"\n    - \"Read(~/**)\"\n  deny: []\n",
+        )
+        .unwrap();
+        for h in ["/", "home/b", "/home/../b"] {
+            assert_eq!(
+                p.evaluate3(&Request::Read(Path::new("/srv/x")), Some(Path::new(h))),
+                Err(HomeUnbound),
+                "{h}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_home_pattern_of_the_other_capability_does_not_need_a_home() {
+        let p = parse_authz(
+            "schema_version: 1\npermissions:\n  allow:\n    - \"Read(/srv/**)\"\n    - \"Write(~/**)\"\n  deny: []\n",
+        )
+        .unwrap();
+        assert_eq!(
+            p.evaluate3(&Request::Read(Path::new("/srv/x")), None),
+            Ok(Match3::AllowMatch)
+        );
+    }
+
+    #[test]
+    fn the_subtree_checks_honour_the_home() {
+        let p = parse_authz(
+            "schema_version: 1\npermissions:\n  allow:\n    - \"Write(~/projects/**)\"\n  deny:\n    - \"Write(~/projects/keep/**)\"\n",
+        )
+        .unwrap();
+        let b = Some(Path::new("/home/b"));
+        assert_eq!(
+            p.evaluate_write_subtree(Path::new("/home/b/projects/repo"), b),
+            Ok(Match3::AllowMatch)
+        );
+        assert!(matches!(
+            p.evaluate_write_subtree(Path::new("/home/b/projects"), b),
+            Ok(Match3::DenyMatch { .. })
+        ));
+        assert_eq!(
+            p.evaluate_write_subtree(Path::new("/home/a/projects/repo"), b),
+            Ok(Match3::NoMatch)
+        );
+        assert!(matches!(
+            p.evaluate_write_subtree(Path::new("/home"), b),
+            Ok(Match3::DenyMatch { .. })
+        ));
+        assert_eq!(
+            p.evaluate_write_subtree(Path::new("/home/b/projects/repo"), None),
+            Err(HomeUnbound)
+        );
+    }
+
+    #[test]
+    fn the_subtree_checks_consume_the_home_before_the_pattern() {
+        let p = parse_authz(
+            "schema_version: 1\npermissions:\n  allow:\n    - \"Write(~/projects/**)\"\n  deny:\n    - \"Write(~/projects/keep/**)\"\n",
+        )
+        .unwrap();
+        let b = Some(Path::new("/home/b"));
+        assert_eq!(
+            p.evaluate_write_subtree(Path::new("/projects/repo"), b),
+            Ok(Match3::NoMatch)
+        );
+        assert!(!matches!(
+            p.evaluate_write_subtree(Path::new("/projects/keep/x"), b),
+            Ok(Match3::DenyMatch { .. })
+        ));
+    }
+
+    #[test]
+    fn an_unbound_home_is_unbound_for_subtrees_whatever_order_the_allows_are_in() {
+        let p = parse_authz(
+            "schema_version: 1\npermissions:\n  allow:\n    - \"Write(/srv/**)\"\n    - \"Write(~/**)\"\n  deny: []\n",
+        )
+        .unwrap();
+        assert_eq!(
+            p.evaluate_write_subtree(Path::new("/srv/x"), None),
+            Err(HomeUnbound)
+        );
+    }
+
+    #[test]
+    fn a_read_home_pattern_does_not_make_a_subtree_write_need_a_home() {
+        let p = parse_authz(
+            "schema_version: 1\npermissions:\n  allow:\n    - \"Write(/srv/**)\"\n  deny:\n    - \"Read(~/**)\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            p.evaluate_write_subtree(Path::new("/srv/x"), None),
+            Ok(Match3::AllowMatch)
+        );
+    }
+
+    #[test]
+    fn a_policy_with_tilde_parses_with_no_home_at_all() {
+        assert!(parse_authz(
+            "schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/**)\"\n  deny: []\n"
+        )
+        .is_ok());
     }
 }

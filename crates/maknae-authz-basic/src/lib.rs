@@ -116,7 +116,7 @@ impl BasicAuthorizer {
         policy_path: PathBuf,
         principal: maknae_config::Principal,
     ) -> Result<Self, AuthzBasicError> {
-        let policy = maknae_config::load_authz(&policy_path, Some(&principal.home))
+        let policy = maknae_config::load_authz(&policy_path)
             .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
         Self::finish_new(policy_path, principal, policy)
     }
@@ -342,15 +342,11 @@ impl maknae_security::Authorizer for BasicAuthorizer {
         &self,
         req: &maknae_security::Request,
     ) -> (maknae_security::Verdict, Option<&'static str>) {
-        let home = self.principal.home.clone();
-        self.decide_with_loader_reporting_role(req, move |p| {
-            maknae_config::load_authz(p, Some(&home))
-        })
+        self.decide_with_loader_reporting_role(req, maknae_config::load_authz)
     }
 
     fn subjects(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
-        let home = self.principal.home.clone();
-        self.subjects_with_loader(move |p| maknae_config::load_authz(p, Some(&home)))
+        self.subjects_with_loader(maknae_config::load_authz)
     }
 
     fn backend_name(&self) -> String {
@@ -436,9 +432,8 @@ impl BasicAuthorizer {
         principal: maknae_config::Principal,
         req: maknae_config::TargetRequired,
     ) -> Result<Self, AuthzBasicError> {
-        let policy =
-            maknae_config::load_authz_with_requirement(&policy_path, req, Some(&principal.home))
-                .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
+        let policy = maknae_config::load_authz_with_requirement(&policy_path, req)
+            .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
         BasicAuthorizer::finish_new(policy_path, principal, policy)
     }
 }
@@ -458,9 +453,8 @@ impl maknae_security::Authorizer for HermeticAuthorizer {
         r: &maknae_security::Request,
     ) -> (maknae_security::Verdict, Option<&'static str>) {
         let req = self.req.clone();
-        let home = self.inner.principal.home.clone();
         self.inner.decide_with_loader_reporting_role(r, move |p| {
-            maknae_config::load_authz_with_requirement(p, req.clone(), Some(&home))
+            maknae_config::load_authz_with_requirement(p, req.clone())
         })
     }
 
@@ -470,9 +464,8 @@ impl maknae_security::Authorizer for HermeticAuthorizer {
     /// nothing about what production answers.
     fn subjects(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
         let req = self.req.clone();
-        let home = self.inner.principal.home.clone();
         self.inner.subjects_with_loader(move |p| {
-            maknae_config::load_authz_with_requirement(p, req.clone(), Some(&home))
+            maknae_config::load_authz_with_requirement(p, req.clone())
         })
     }
 
@@ -546,9 +539,7 @@ mod tests {
     #[test]
     fn shipped_content_defaults_proof() {
         const SHIPPED: &str = include_str!("../../../packaging/common/authz.yaml");
-        let policy =
-            maknae_config::parse_authz(SHIPPED, Some(std::path::Path::new("/home/operator")))
-                .expect("shipped authz.yaml parses");
+        let policy = maknae_config::parse_authz(SHIPPED).expect("shipped authz.yaml parses");
         assert!(
             policy.bindings.is_none(),
             "shipped file has no bindings key"
@@ -568,6 +559,10 @@ mod tests {
         assert!(matches!(admin_whoami, Verdict::Permit { .. }));
         let mut fs_req = liveness_req(Some(501));
         fs_req.action = Action("fs.read".into());
+        fs_req.subject.0.insert(
+            maknae_security::SUBJECT_HOME,
+            AttrValue::Str("/home/operator".into()),
+        );
         fs_req.resource.0.insert(
             RESOURCE_PATH_KEY,
             AttrValue::Str("/home/operator/.ssh/id_rsa".into()),
@@ -635,7 +630,6 @@ mod tests {
                     regular_file: true,
                     max_bytes: None,
                 },
-                Some(std::path::Path::new("/home/operator")),
             )
         };
         let before = auth.decide_with_loader(&liveness_req(Some(0)), seam_loader);
@@ -686,10 +680,7 @@ mod tests {
     /// on a host with one. Bound to `root` alone, which resolves everywhere.
     #[test]
     fn finish_new_resolves_root_validates_eagerly_and_refuses_bad_bindings() {
-        let ok_policy = maknae_config::parse_authz(
-            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\n",
-            None,
-        )
+        let ok_policy = maknae_config::parse_authz("schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\n")
         .unwrap();
         let auth =
             BasicAuthorizer::finish_new("/nonexistent".into(), principal(), ok_policy).unwrap();
@@ -701,19 +692,13 @@ mod tests {
         );
 
         // The advesary-typo rule fails CONSTRUCTION, not just requests.
-        let typo = maknae_config::parse_authz(
-            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  advesary: [\"root\"]\n",
-            None,
-        )
+        let typo = maknae_config::parse_authz("schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  advesary: [\"root\"]\n")
         .unwrap();
         let got = BasicAuthorizer::finish_new("/nonexistent".into(), principal(), typo);
         assert!(matches!(got, Err(AuthzBasicError::Bindings(ref m)) if m.contains("advesary")));
 
         // An unresolvable username refuses construction.
-        let ghost = maknae_config::parse_authz(
-            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  user: [\"no-such-user-maknae-85\"]\n",
-            None,
-        )
+        let ghost = maknae_config::parse_authz("schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  user: [\"no-such-user-maknae-85\"]\n")
         .unwrap();
         let got = BasicAuthorizer::finish_new("/nonexistent".into(), principal(), ghost);
         assert!(
@@ -726,7 +711,7 @@ mod tests {
     const GRANT_PREAMBLE: &str = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n";
 
     fn parse_with_roles(roles_block: &str) -> maknae_config::AuthzPolicy {
-        maknae_config::parse_authz(&format!("{GRANT_PREAMBLE}{roles_block}"), None)
+        maknae_config::parse_authz(&format!("{GRANT_PREAMBLE}{roles_block}"))
             .expect("grammar is valid; the SEMANTIC refusal is what is under test")
     }
 
@@ -838,10 +823,9 @@ mod tests {
         };
         let got = auth
             .subjects_with_loader(|_| {
-                maknae_config::parse_authz(
-                    &format!("{GRANT_PREAMBLE}bindings:\n  admin: [\"root\"]\n"),
-                    None,
-                )
+                maknae_config::parse_authz(&format!(
+                    "{GRANT_PREAMBLE}bindings:\n  admin: [\"root\"]\n"
+                ))
             })
             .expect("a readable policy yields Some");
         assert_eq!(got.len(), 1);
@@ -856,12 +840,23 @@ mod tests {
         // "no bindings", and answering as though it were would tell an
         // operator their policy binds nobody when it binds something broken.
         let invalid = auth.subjects_with_loader(|_| {
-            maknae_config::parse_authz(
-                &format!("{GRANT_PREAMBLE}bindings:\n  admn: [\"root\"]\n"),
-                None,
-            )
+            maknae_config::parse_authz(&format!("{GRANT_PREAMBLE}bindings:\n  admn: [\"root\"]\n"))
         });
         assert!(invalid.is_none(), "invalid bindings must be None");
+    }
+
+    #[test]
+    fn subjects_on_the_shipped_tilde_policy_needs_no_home() {
+        const SHIPPED: &str = include_str!("../../../packaging/common/authz.yaml");
+        let auth = BasicAuthorizer {
+            policy_path: "/nonexistent".into(),
+            principal: principal(),
+            uid_map: [("root".to_string(), 0u32)].into_iter().collect(),
+        };
+        let got = auth.subjects_with_loader(|_| {
+            maknae_config::parse_authz(&format!("{SHIPPED}bindings:\n  admin: [\"root\"]\n"))
+        });
+        assert!(got.is_some(), "{got:?}");
     }
 
     /// `BasicAuthorizer::subjects` FAILS CLOSED on an unreadable path.
@@ -911,10 +906,9 @@ mod tests {
         };
         let got = auth
             .subjects_with_loader(|_| {
-                maknae_config::parse_authz(
-                    &format!("{GRANT_PREAMBLE}bindings:\n  admin: [\"ten\", \"two\"]\n"),
-                    None,
-                )
+                maknae_config::parse_authz(&format!(
+                    "{GRANT_PREAMBLE}bindings:\n  admin: [\"ten\", \"two\"]\n"
+                ))
             })
             .expect("readable policy with an explicit block");
         let admin = got.iter().find(|b| b.role == "admin").expect("admin");
@@ -940,7 +934,7 @@ mod tests {
             uid_map: UidMap::new(),
         };
         let no_key = auth.subjects_with_loader(|_| {
-            maknae_config::parse_authz(GRANT_PREAMBLE, None) // no `bindings:` at all
+            maknae_config::parse_authz(GRANT_PREAMBLE) // no `bindings:` at all
         });
         assert!(
             no_key.is_none(),
@@ -951,10 +945,7 @@ mod tests {
         // the operator wrote "nobody", so saying so is honest.
         let explicit_empty = auth
             .subjects_with_loader(|_| {
-                maknae_config::parse_authz(
-                    &format!("{GRANT_PREAMBLE}bindings:\n  admin: []\n"),
-                    None,
-                )
+                maknae_config::parse_authz(&format!("{GRANT_PREAMBLE}bindings:\n  admin: []\n"))
             })
             .expect("an explicit block is reportable");
         assert!(explicit_empty.is_empty(), "{explicit_empty:?}");
@@ -1007,10 +998,9 @@ mod tests {
         // The injected loader IS the per-request re-read; only the source of
         // the bytes is hermetic. Nothing about the validation is stubbed.
         let v = auth.decide_with_loader(&liveness_req(Some(501)), |_| {
-            maknae_config::parse_authz(
-                &format!("{GRANT_PREAMBLE}roles:\n  admin:\n    allow: [\"admin.contain\"]\n"),
-                None,
-            )
+            maknae_config::parse_authz(&format!(
+                "{GRANT_PREAMBLE}roles:\n  admin:\n    allow: [\"admin.contain\"]\n"
+            ))
         });
         assert_eq!(
             v,
@@ -1047,7 +1037,6 @@ mod tests {
     fn finish_new_without_bindings_needs_no_lookups_and_defaults_apply() {
         let policy = maknae_config::parse_authz(
             "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n",
-            None,
         )
         .unwrap();
         let auth = BasicAuthorizer::finish_new("/nonexistent".into(), principal(), policy).unwrap();
