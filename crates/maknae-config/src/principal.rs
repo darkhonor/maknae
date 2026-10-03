@@ -8,7 +8,7 @@
 //! Fail-closed, but NOT the `transport`/`audit` shape: those sections default
 //! every field when absent-or-partial. `principal` has no safe default identity
 //! to fall back to, so **absent → `Ok(None)`** (no principal configured; callers
-//! that need one — the capability-grant policy — fail closed themselves when they find `None`),
+//! that need one — the authz boot gate, for `uid` — fail closed themselves when they find `None`),
 //! while **present-but-malformed → `Err`** and never collapses to `Ok(None)` — a
 //! malformed section must never be silently treated as "no principal enrolled".
 

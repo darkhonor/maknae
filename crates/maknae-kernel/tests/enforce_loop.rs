@@ -1455,7 +1455,7 @@ async fn four_concurrent_healthy_decisions_do_not_trip_the_breaker() {
 #[tokio::test]
 async fn a_permit_outside_the_anchored_root_is_refused_distinctly() {
     let fx = Fixture::new("outside");
-    // An operator-added absolute grant for a tree OUTSIDE the enrolled home. The
+    // An operator-added absolute grant for a tree OUTSIDE the requester's home. The
     // object is CREATED rather than borrowed from `/etc`: the old fixture granted
     // `Read(/etc/**)` and delegated `/etc/hostname`, neither of which exists on
     // macOS — caught by the darwin-native CI job in `maknae-io`'s PARALLEL fixture
@@ -1471,14 +1471,14 @@ async fn a_permit_outside_the_anchored_root_is_refused_distinctly() {
     std::fs::create_dir_all(&outside_dir).unwrap();
     // Canonical for fixture hygiene, matching `Fixture::new` (#216); it does not
     // change this test's outcome. The grant below is never consulted: the object
-    // is outside `principal.home`, so `verify_delegated` fails confinement at
+    // is outside the requester's home, so `verify_delegated` fails confinement at
     // attempt preparation, BEFORE `decide_fs` (the only caller of the glob
     // matcher) ever runs. The reason assertion below pins that ordering.
     let outside_dir = outside_dir
         .canonicalize()
         .expect("canonicalize the outside dir");
     let outside = outside_dir.join("obj");
-    std::fs::write(&outside, b"outside the enrolled home").unwrap();
+    std::fs::write(&outside, b"outside the requester's home").unwrap();
     fx.write_policy(&format!(
         "schema_version: 1\npermissions:\n  allow:\n    - \"Read({}/**)\"\n  deny: []\n",
         outside_dir.display()
@@ -1487,7 +1487,7 @@ async fn a_permit_outside_the_anchored_root_is_refused_distinctly() {
     // refusal below is confinement's, not "no descriptor arrived".
     assert_eq!(
         std::fs::read(&outside).expect("the subject can open the outside object"),
-        b"outside the enrolled home"
+        b"outside the requester's home"
     );
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
@@ -1517,7 +1517,7 @@ async fn a_permit_outside_the_anchored_root_is_refused_distinctly() {
             assert_eq!(e.code, ProtoErrCode::Unauthorized);
             assert_eq!(e.message, "not authorized", "no note may reach the wire");
         }
-        other => panic!("a grant outside the enrolled home must not deliver: {other:?}"),
+        other => panic!("a grant outside the requester's home must not deliver: {other:?}"),
     }
     let req = request_record(&emit.records()).clone();
     assert_eq!(req.outcome.result, "deny");
@@ -1526,10 +1526,10 @@ async fn a_permit_outside_the_anchored_root_is_refused_distinctly() {
     // `std::fs::read` above.
     assert!(
         req.outcome.reason.starts_with("read evidence refused: "),
-        "an object outside the enrolled home is refused at preparation: {}",
+        "an object outside the requester's home is refused at preparation: {}",
         req.outcome.reason
     );
-    let leak = b"outside the enrolled home";
+    let leak = b"outside the requester's home";
     assert!(
         !frame.windows(leak.len()).any(|w| w == leak),
         "no content from outside the home may ride the frame"
