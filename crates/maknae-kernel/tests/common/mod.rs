@@ -196,6 +196,29 @@ pub fn euid_name() -> String {
         .expect("the test euid has a passwd entry")
         .name
 }
+pub struct DirGuard(pub PathBuf);
+
+impl std::ops::Deref for DirGuard {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for DirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+pub fn second_home(tag: &str) -> DirGuard {
+    let dir = std::env::temp_dir().join(format!("home_{tag}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    DirGuard(dir.canonicalize().expect("canonicalize the second home"))
+}
+
 impl Fixture {
     pub fn new(tag: &str, allow: &str) -> Self {
         Self::with_policy(tag, allow, "")

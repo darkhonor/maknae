@@ -471,19 +471,25 @@ async fn namespace_start(
     records: Arc<impl AuditEmit + Send + Sync + 'static>,
     verb: Verb,
 ) -> (tokio::io::DuplexStream, tokio::task::JoinHandle<()>) {
-    let fd = std::fs::File::open(&fx.root).unwrap().into();
+    namespace_start_in(fx, records, verb, &fx.root).await
+}
+async fn namespace_start_in(
+    fx: &Fixture,
+    records: Arc<impl AuditEmit + Send + Sync + 'static>,
+    verb: Verb,
+    delegate: &std::path::Path,
+) -> (tokio::io::DuplexStream, tokio::task::JoinHandle<()>) {
+    let fd = std::fs::File::open(delegate).unwrap().into();
     let (mut client, task, body) = fx.start(verb, Some(fd), records);
     common::write_frame(&mut client, &body).await.unwrap();
     (client, task)
 }
 fn create_verb(fx: &Fixture) -> Verb {
+    create_in(&fx.root.join("unique-created-client-sentinel"))
+}
+fn create_in(target: &std::path::Path) -> Verb {
     Verb::FsWrite {
-        path: fx
-            .root
-            .join("unique-created-client-sentinel")
-            .to_str()
-            .unwrap()
-            .into(),
+        path: target.to_str().unwrap().into(),
         content_length: 7,
         mode: WriteMode::CreateExclusive,
         conversation: None,
@@ -1551,4 +1557,143 @@ async fn a_replacement_is_a_client_reported_attempt_and_the_daemon_never_writes(
     assert_eq!(completion.phase, MutationPhase::Completion);
     assert_eq!(completion.origin, MutationOrigin::ClientReported);
     assert_eq!(completion.status, MutationStatus::ReportedSuccess);
+}
+
+const MUTATION_PERMIT_REASON: &str = "authorized; intent alone does not establish execution";
+
+fn mkdir_in(target: &std::path::Path) -> Verb {
+    Verb::FsMkdir {
+        path: target.to_str().unwrap().into(),
+        parents: false,
+        components: vec![target.file_name().unwrap().to_str().unwrap().into()],
+    }
+}
+
+async fn second_subject_attempt(
+    fx: &Fixture,
+    verb: Verb,
+    delegate: &std::path::Path,
+) -> (RespResult, AuditRecord) {
+    let records = Records::new(0);
+    let (mut client, task) = namespace_start_in(fx, records.clone(), verb, delegate).await;
+    let result = next_response(&mut client).await.unwrap().result;
+    drop(client);
+    task.await.unwrap();
+    (result, records.snapshot()[1].clone())
+}
+
+fn assert_granted(result: &RespResult, record: &AuditRecord, scope: maknae_proto::MutationScope) {
+    assert!(
+        matches!(result, RespResult::Ok(Payload::MutationAttempt(g)) if g.scope == scope),
+        "{result:?} {:?}",
+        record.outcome
+    );
+    assert_eq!(record.outcome.result, "permit");
+    assert_eq!(record.outcome.reason, MUTATION_PERMIT_REASON);
+}
+
+fn assert_refused(result: &RespResult, record: &AuditRecord, reason_prefix: &str) {
+    assert!(matches!(result, RespResult::Err(_)), "{result:?}");
+    assert_eq!(record.outcome.result, "deny");
+    assert!(
+        record.outcome.reason.starts_with(reason_prefix),
+        "{}",
+        record.outcome.reason
+    );
+}
+
+#[tokio::test]
+async fn a_second_user_creates_beneath_their_own_home() {
+    let b = common::second_home("mutation_create_own");
+    let fx = Fixture::new("create_own", "Write").with_requester_home(Some(b.0.clone()));
+    let target = b.join("new");
+    let (result, record) = second_subject_attempt(&fx, create_in(&target), &b).await;
+    assert_granted(
+        &result,
+        &record,
+        maknae_proto::MutationScope::Exact {
+            path: target.to_str().unwrap().into(),
+            effect: maknae_proto::ReportedEffect::CreatedFile,
+        },
+    );
+}
+
+#[tokio::test]
+async fn a_second_user_cannot_create_in_the_enrolled_home() {
+    let b = common::second_home("mutation_create_enrolled");
+    let fx = Fixture::new("create_enrolled", "Write").with_requester_home(Some(b.0.clone()));
+    let (result, record) =
+        second_subject_attempt(&fx, create_in(&fx.root.join("new")), &fx.root).await;
+    assert_refused(
+        &result,
+        &record,
+        "namespace location evidence refused: escapes the anchor",
+    );
+    assert!(!fx.root.join("new").exists());
+}
+
+#[tokio::test]
+async fn a_second_user_makes_a_directory_beneath_their_own_home() {
+    let b = common::second_home("mutation_mkdir_own");
+    let fx = Fixture::new("mkdir_own", "Write").with_requester_home(Some(b.0.clone()));
+    let target = b.join("newdir");
+    let (result, record) = second_subject_attempt(&fx, mkdir_in(&target), &b).await;
+    assert_granted(
+        &result,
+        &record,
+        maknae_proto::MutationScope::Exact {
+            path: target.to_str().unwrap().into(),
+            effect: maknae_proto::ReportedEffect::CreatedDirectory,
+        },
+    );
+}
+
+#[tokio::test]
+async fn a_second_user_cannot_make_a_directory_in_the_enrolled_home() {
+    let b = common::second_home("mutation_mkdir_enrolled");
+    let fx = Fixture::new("mkdir_enrolled", "Write").with_requester_home(Some(b.0.clone()));
+    let (result, record) =
+        second_subject_attempt(&fx, mkdir_in(&fx.root.join("newdir")), &fx.root).await;
+    assert_refused(
+        &result,
+        &record,
+        "namespace location evidence refused: escapes the anchor",
+    );
+    assert!(!fx.root.join("newdir").exists());
+}
+
+#[tokio::test]
+async fn a_requester_cannot_delete_their_own_home() {
+    let b = common::second_home("mutation_delete_home");
+    let fx = Fixture::new("delete_home", "Write").with_requester_home(Some(b.0.clone()));
+    let policy = format!(
+        "schema_version: 1\npermissions:\n  allow:\n    - \"Write(/**)\"\n  deny: []\nbindings:\n  user: [\"{}\"]\n",
+        common::euid_name()
+    );
+    std::fs::write(fx.root.join("authz.yaml"), policy).unwrap();
+    let (result, record) = second_subject_attempt(
+        &fx,
+        Verb::FsDelete {
+            path: b.to_str().unwrap().into(),
+            recursive: true,
+        },
+        b.parent().unwrap(),
+    )
+    .await;
+    assert_refused(
+        &result,
+        &record,
+        "namespace location evidence refused: escapes the anchor",
+    );
+    assert!(b.exists());
+}
+
+#[tokio::test]
+async fn no_requester_home_means_no_mutation() {
+    let fx = Fixture::new("no_home", "Write").with_requester_home(None);
+    let (result, record) =
+        second_subject_attempt(&fx, create_in(&fx.root.join("new")), &fx.root).await;
+    assert_refused(&result, &record, "requester home unavailable");
+    assert_eq!(record.outcome.reason, "requester home unavailable");
+    assert!(!fx.root.join("new").exists());
 }

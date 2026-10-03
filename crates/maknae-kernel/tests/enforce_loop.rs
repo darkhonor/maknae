@@ -164,7 +164,7 @@ async fn read_attempt<P>(
 where
     P: maknae_security::Authorizer + Send + Sync + 'static,
 {
-    read_attempt_with(
+    read_attempt_as(
         Some(&fx_principal.home),
         authorizer,
         emit,
@@ -172,8 +172,6 @@ where
         verb,
         timeout,
         delegate,
-        None,
-        || {},
     )
     .await
 }
@@ -203,14 +201,6 @@ where
         || {},
     )
     .await
-}
-
-fn second_home(tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("enforce_home_{tag}_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-    dir.canonicalize().expect("canonicalize the second home")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -406,6 +396,57 @@ fn read_content(run: &common::ReadRun) -> Option<&[u8]> {
 
 fn mutation_of(record: &AuditRecord) -> &maknae_audit_append::MutationAudit {
     record.mutation.as_ref().expect("a mutation record")
+}
+
+const READ_PERMIT_REASON: &str = "authorized; intent alone does not establish execution";
+
+fn read_verb(target: &std::path::Path) -> maknae_proto::Verb {
+    maknae_proto::Verb::Read {
+        path: target.to_string_lossy().into_owned(),
+        conversation: None,
+        page: None,
+    }
+}
+
+fn allow_policy(allow: &str, deny: &str) -> String {
+    format!("schema_version: 1\npermissions:\n  allow:\n    - \"{allow}\"\n  deny: [{deny}]\n")
+}
+
+async fn read_as_requester(
+    fx: &Fixture,
+    peer_home: Option<&std::path::Path>,
+    target: &std::path::Path,
+    emit: Arc<RecEmit>,
+) -> common::ReadRun {
+    read_attempt_as(
+        peer_home,
+        fx.authorizer(),
+        emit,
+        nix::unistd::geteuid().as_raw(),
+        read_verb(target),
+        Duration::from_secs(5),
+        target,
+    )
+    .await
+}
+
+fn assert_unauthorized(run: &common::ReadRun) {
+    assert_eq!(run.finish, None);
+    let frame = run.first.as_deref().expect("a deny frame");
+    match maknae_proto::decode_response(frame).unwrap().result {
+        RespResult::Err(e) => assert_eq!(e.code, ProtoErrCode::Unauthorized),
+        other => panic!("expected Unauthorized, got {other:?}"),
+    }
+}
+
+fn assert_denied_with_prefix(emit: &RecEmit, prefix: &str) {
+    let req = request_record(&emit.records()).clone();
+    assert_eq!(req.outcome.result, "deny");
+    assert!(
+        req.outcome.reason.starts_with(prefix),
+        "{}",
+        req.outcome.reason
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -675,134 +716,35 @@ async fn the_shipped_deny_list_actually_denies_a_read_of_ssh_keys() {
     assert!(!frame.windows(pat.len()).any(|w| w == pat));
 }
 
-/// #216 -- FLIPPED 2026-09-12, and now asserts the DESIRED property. This test
-/// previously pinned the defect: an enrolled home whose path traverses a symlink
-/// denied EVERY `fs.read`, fail-closed.
-///
-/// `principal.home` is written by `maknae enroll` VERBATIM from `getpwuid` -- the
-/// directory service's value, not an operator's choice, and re-derived on every
-/// enroll -- and the daemon feeds that one value to TWO consumers: the delegated
-/// lane's confinement root (`handler::delegated_plan`, reached at attempt
-/// preparation), which is prefix-checked against the
-/// KERNEL-reported path of the subject's descriptor; and the `~` referent of every
-/// policy glob (`PathGlob::parse`).
-/// Because the kernel reports the RESOLVED form and the configured form never
-/// prefix-matched it, a `/home -> /export/home` layout, an autofs/NFS estate or
-/// any macOS `/var`-rooted path could not serve a single read. Not a bypass -- a
-/// deployment that answered `os dac: os accessibility unknown` to everything.
-///
-/// **The fix, per the maintainer's ruling of 2026-09-12 (option B):** boot
-/// canonicalises `principal.home` ONCE, in `authz_boot_gate`, at or above
-/// `Principal` -- never at a call site, because a partial fix permits at decision
-/// and then dies in the PEP with a different record shape. Enroll does NOT own
-/// this: `bins/maknae` is untrusted by design (AGENTS.md core principle 1), so
-/// the trust plane must not depend on the CLI having written a canonical value.
-///
-/// The resolver is `maknae_io::resolve_dir`, which returns the form
-/// `verify_delegated` names a delegated descriptor by (the same resolver on
-/// Linux; on macOS `getattrlist`, pinned byte for byte to `F_GETPATH`), so the
-/// confinement root and the kernel-reported path agree. Operators keep
-/// writing `~`: it now expands from the resolved home, which is the point --
-/// nobody should need to know whether their home is NFS-mounted to write policy.
-///
-/// This test mirrors that wiring: the ENROLLED value is the link, and the
-/// resolution happens before either consumer sees it. The unit half -- that the
-/// boot gate is what performs it -- is pinned in `boot_gate.rs`; neither test
-/// covers both halves alone.
 #[tokio::test]
-async fn a_symlinked_principal_home_serves_a_read_beneath_the_enrolled_home() {
+async fn a_symlinked_requester_home_serves_a_read_beneath_its_target() {
     let fx = Fixture::new("symroot");
     fx.write_policy(SHIPPED_POLICY);
+    let b = common::second_home("symroot");
     let content: &[u8] = b"reachable only via the link";
-    std::fs::write(fx.dir.join("notes.txt"), content).unwrap();
-    let me = nix::unistd::geteuid().as_raw();
-
-    // POSITIVE CONTROL: the identical object through the identical policy with the
-    // REAL (canonical) home is permitted and returns the bytes. This establishes
-    // that the object, the policy and the fixture are sound -- so the deny below
-    // is attributable to the home's FORM. (It does not by itself prove a descriptor
-    // was delegated through the link; the `std::fs::read` check before the second
-    // drive does that, because `read_attempt` swallows a failed subject open and an
-    // undelivered descriptor yields the identical `read descriptor missing`.)
-    let real_target = fx.dir.join("notes.txt").to_string_lossy().into_owned();
-    let ctl = RecEmit::new();
-    let run = read_attempt(
-        &fx.principal,
-        fx.authorizer(),
-        ctl.clone(),
-        me,
-        maknae_proto::Verb::Read {
-            path: real_target.clone(),
-            conversation: None,
-            page: None,
-        },
-        Duration::from_secs(5),
-        std::path::Path::new(&real_target),
-    )
-    .await;
-    assert_eq!(
-        read_content(&run),
-        Some(content),
-        "positive control must PERMIT through the real home"
+    std::fs::write(b.join("notes.txt"), content).unwrap();
+    let link = common::DirGuard(
+        b.parent()
+            .expect("a canonical home has a parent")
+            .join(format!("enforce_symroot_link_{}", std::process::id())),
     );
-    assert_eq!(request_record(&ctl.records()).outcome.result, "permit");
-
-    // The link lives BESIDE the canonical real dir -- same parent, so on both
-    // platforms the link-vs-real component is the ONLY form difference; anchored
-    // under the unresolved `temp_dir()` the darwin deny would be over-determined
-    // by the `/var -> /private/var` mismatch as well. It sits OUTSIDE `fx.dir`
-    // because it is about to BE the confinement root, not an object beneath one
-    // -- which also means `Fixture::drop` will not clean it, hence the explicit
-    // `remove_file` after the drive. `stat` of the root follows it to the real,
-    // 0700, euid-owned directory and the root-soundness check passes.
-    let link = fx
-        .dir
-        .parent()
-        .expect("canonical fixture dir has a parent")
-        .join(format!("enforce_symroot_link_{}", std::process::id()));
-    if std::fs::symlink_metadata(&link).is_ok() {
-        std::fs::remove_file(&link).expect("clear a stale entry at the fixture link path");
-    }
-    std::os::unix::fs::symlink(&fx.dir, &link).unwrap();
-    // #216 FLIPPED 2026-09-12. Production resolves `principal.home` ONCE at the
-    // boot gate (`authz_boot_gate`), at or above `Principal`, using the SAME
-    // resolver the kernel names a delegated descriptor with. This mirrors that
-    // wiring exactly: the enrolled value is the LINK, and the daemon canonicalises
-    // it before anything consumes it.
-    let enrolled = maknae_config::Principal {
-        home: link.clone(),
-        ..fx.principal.clone()
-    };
-    let via_link = maknae_config::Principal {
-        home: maknae_io::resolve_dir(&enrolled.home).expect("the enrolled home resolves"),
-        ..enrolled.clone()
-    };
-    assert_ne!(
-        via_link.home, enrolled.home,
-        "the fixture must actually exercise a form difference"
-    );
-    // ONE principal for both consumers, as production wires it: the PDP expands
-    // `~` against the resolved home, and the PEP confines beneath the same form.
-    let pdp_via_link = Arc::new(
-        HermeticAuthorizer::new(fx.dir.join("authz.yaml"), via_link.clone(), seam_req())
-            .expect("policy constructs against the symlinked home"),
-    );
-    // The subject opens THROUGH the link, as a real client would with a home it
-    // was told about; the kernel still reports the resolved form.
+    let _ = std::fs::remove_file(&*link);
+    std::os::unix::fs::symlink(&*b, &*link).unwrap();
+    let peer_home = maknae_kernel::canonical_home(&link).expect("the symlinked home resolves");
+    assert_eq!(peer_home.as_path(), &*b);
+    assert_ne!(peer_home.as_path(), &*link);
     let target = link.join("notes.txt").to_string_lossy().into_owned();
-    // The subject CAN open through the link -- so a descriptor IS delegated below,
-    // and the deny that follows is confinement's, not "no descriptor arrived".
     assert_eq!(
         std::fs::read(&target).expect("the subject can open the object through the link"),
         content
     );
 
     let emit = RecEmit::new();
-    let run = read_attempt(
-        &via_link,
-        pdp_via_link,
+    let run = read_attempt_as(
+        Some(&peer_home),
+        fx.authorizer(),
         emit.clone(),
-        me,
+        nix::unistd::geteuid().as_raw(),
         maknae_proto::Verb::Read {
             path: target.clone(),
             conversation: None,
@@ -812,25 +754,18 @@ async fn a_symlinked_principal_home_serves_a_read_beneath_the_enrolled_home() {
         std::path::Path::new(&target),
     )
     .await;
-    let _ = std::fs::remove_file(&link);
     assert_eq!(
         read_content(&run),
         Some(content),
-        "#216: a symlinked principal.home must PERMIT once boot canonicalises. \
-         A DENY here means the resolution stopped reaching one of the four \
-         consumers -- `read evidence refused` points at the confinement \
-         root, `no capability entry` at the `~` glob expansion. Trail: {:?}",
-        request_record(&emit.records()).outcome.reason
+        "{:?}",
+        request_record(&emit.records()).outcome
     );
     let req = request_record(&emit.records()).clone();
     assert_eq!(req.outcome.result, "permit");
-    // The trail records the RESOLVED object (ADR-0009 decision 6: the verified
-    // path is what the PDP decided on), and `object_requested` carries the link
-    // form the client asked with, because the two now differ.
+    assert_eq!(req.outcome.reason, READ_PERMIT_REASON);
     assert_eq!(
         req.object.as_deref(),
-        Some(via_link.home.join("notes.txt").to_string_lossy().as_ref()),
-        "the audit record names the resolved object"
+        Some(b.join("notes.txt").to_string_lossy().as_ref())
     );
     assert_eq!(req.object_requested.as_deref(), Some(target.as_str()));
 }
@@ -839,10 +774,10 @@ async fn a_symlinked_principal_home_serves_a_read_beneath_the_enrolled_home() {
 async fn ordinary_user_reads_approved_content_through_the_composed_pdp() {
     let fx = Fixture::new("ordinary-user-development");
     let me = nix::unistd::geteuid();
-    let user = nix::unistd::User::from_uid(me).unwrap().unwrap();
+    let user_name = common::euid_name();
     fx.write_policy(&format!(
         "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\n  deny: []\nbindings:\n  user: [{:?}]\n",
-        user.name
+        user_name
     ));
     let target = fx.dir.join("development-sentinel.txt");
     let sentinel = b"ordinary-user-development-158: genuine composed read";
@@ -894,7 +829,7 @@ async fn ordinary_user_reads_approved_content_through_the_composed_pdp() {
     // even though the subject can still open and delegate the same object.
     fx.write_policy(&format!(
         "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\n  deny: []\nbindings:\n  adversary: [{:?}]\n",
-        user.name,
+        user_name,
     ));
     let emit = RecEmit::new();
     let contained = read_attempt(
@@ -929,14 +864,14 @@ async fn filesystem_access_for_users_and_admins_keeps_path_refusals_and_the_os_a
 ) {
     let fx = Fixture::new("shared-filesystem-refusals");
     let me = nix::unistd::geteuid();
-    let user = nix::unistd::User::from_uid(me).unwrap().unwrap();
+    let user_name = common::euid_name();
     let target = fx.dir.join("denied-development-sentinel.txt");
     let sentinel = b"158: never disclose this denied development file";
     std::fs::write(&target, sentinel).unwrap();
     for role in ["user", "admin"] {
         fx.write_policy(&format!(
             "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\n  deny: [\"Read(~/denied-development-sentinel.txt)\"]\nbindings:\n  {role}: [{:?}]\n",
-            user.name,
+            user_name,
         ));
         // The descriptor really arrives: this must reach the path deny,
         // not pass vacuously because the descriptor was missing.
@@ -2482,10 +2417,7 @@ async fn a_grantable_term_with_no_grant_names_the_absent_rule() {
 async fn an_unmatched_read_names_the_missing_capability_entry() {
     let fx = Fixture::new("note-nocap");
     let me = nix::unistd::geteuid();
-    let name = nix::unistd::User::from_uid(me)
-        .expect("NSS")
-        .expect("the test euid has a passwd entry")
-        .name;
+    let name = common::euid_name();
     fx.write_policy(&format!(
         "schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/allowed/**)\"\n  deny: []\nbindings:\n  admin: [\"{name}\"]\n",
     ));
@@ -3044,32 +2976,180 @@ async fn the_shipped_deny_list_denies_a_paged_read_of_ssh_keys() {
 #[tokio::test]
 async fn a_second_users_tilde_read_beneath_their_own_home_is_served() {
     let fx = Fixture::new("second_subject");
-    let b = second_home("second_subject");
+    let b = common::second_home("enforce_second_subject");
     let target = b.join("notes.txt");
     std::fs::write(&target, b"b's own notes").unwrap();
-    fx.write_policy(
-        "schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/**)\"\n  deny: []\n",
-    );
+    fx.write_policy(&allow_policy("Read(~/**)", ""));
     let emit = RecEmit::new();
-    let run = read_attempt_as(
-        Some(&b),
-        fx.authorizer(),
-        emit.clone(),
-        nix::unistd::geteuid().as_raw(),
-        maknae_proto::Verb::Read {
-            path: target.to_string_lossy().into_owned(),
-            conversation: None,
-            page: None,
-        },
-        Duration::from_secs(5),
-        &target,
-    )
-    .await;
+    let run = read_as_requester(&fx, Some(&b), &target, emit.clone()).await;
     assert_eq!(
         read_content(&run),
         Some(&b"b's own notes"[..]),
         "{:?}",
         request_record(&emit.records()).outcome
     );
-    let _ = std::fs::remove_dir_all(&b);
+    let req = request_record(&emit.records()).clone();
+    assert_eq!(req.outcome.result, "permit");
+    assert_eq!(req.outcome.reason, READ_PERMIT_REASON);
+}
+
+#[tokio::test]
+async fn a_second_users_tilde_grant_does_not_reach_the_enrolled_home() {
+    let fx = Fixture::new("tilde_enrolled");
+    let b = common::second_home("enforce_tilde_enrolled");
+    let target = fx.dir.join("x");
+    std::fs::write(&target, b"the enrolled user's file").unwrap();
+    fx.write_policy(&allow_policy("Read(~/**)", ""));
+    let emit = RecEmit::new();
+    let run = read_as_requester(&fx, Some(&b), &target, emit.clone()).await;
+    assert_unauthorized(&run);
+    assert_denied_with_prefix(&emit, "read evidence refused: escapes the anchor");
+}
+
+#[tokio::test]
+async fn an_absolute_grant_cannot_reach_beyond_the_requesters_home() {
+    let fx = Fixture::new("absolute_enrolled");
+    let b = common::second_home("enforce_absolute_enrolled");
+    let target = fx.dir.join("x");
+    std::fs::write(&target, b"the enrolled user's file").unwrap();
+    fx.write_policy(&allow_policy(&format!("Read({}/**)", fx.dir.display()), ""));
+    let emit = RecEmit::new();
+    let run = read_as_requester(&fx, Some(&b), &target, emit.clone()).await;
+    assert_unauthorized(&run);
+    assert_denied_with_prefix(&emit, "read evidence refused: escapes the anchor");
+}
+
+#[tokio::test]
+async fn the_shipped_maknae_deny_protects_the_requesters_own_token() {
+    let fx = Fixture::new("own_token");
+    let b = common::second_home("enforce_own_token");
+    std::fs::create_dir(b.join(".maknae")).unwrap();
+    let target = b.join(".maknae/token");
+    std::fs::write(&target, b"SECRETTOKEN").unwrap();
+    fx.write_policy(&allow_policy("Read(/**)", "\"Read(~/.maknae/**)\""));
+    let emit = RecEmit::new();
+    let run = read_as_requester(&fx, Some(&b), &target, emit.clone()).await;
+    assert_unauthorized(&run);
+    let req = request_record(&emit.records()).clone();
+    assert_eq!(req.outcome.result, "deny");
+    assert!(
+        req.outcome
+            .reason
+            .contains("denied by policy entry Read(~/.maknae/**)"),
+        "{}",
+        req.outcome.reason
+    );
+}
+
+#[tokio::test]
+async fn a_requester_with_no_home_gets_turns_but_no_files() {
+    let fx = Fixture::new("no_home");
+    let b = common::second_home("enforce_no_home");
+    let target = b.join("x");
+    std::fs::write(&target, b"unreachable without a home").unwrap();
+    fx.write_policy(&allow_policy("Read(~/**)", ""));
+    let emit = RecEmit::new();
+    let run = read_as_requester(&fx, None, &target, emit.clone()).await;
+    assert_unauthorized(&run);
+    let req = request_record(&emit.records()).clone();
+    assert_eq!(req.outcome.result, "deny");
+    assert_eq!(req.outcome.reason, "requester home unavailable");
+
+    for (verb, action) in [
+        (maknae_proto::Verb::Ping, "liveness.ping"),
+        (maknae_proto::Verb::Whoami, "admin.whoami"),
+    ] {
+        let emit = RecEmit::new();
+        let frame = drive_with(
+            None,
+            fx.authorizer(),
+            emit.clone(),
+            nix::unistd::geteuid().as_raw(),
+            verb,
+            Duration::from_secs(5),
+            maknae_io::DelegatedFds::new(0),
+            Arc::new(Default::default()),
+            maknae_config::transport_from_section(None).unwrap(),
+            Arc::new("US".to_string()),
+        )
+        .await
+        .expect("a frame");
+        let result = maknae_proto::decode_response(&frame).unwrap().result;
+        assert!(
+            matches!(
+                result,
+                RespResult::Ok(Payload::Pong) | RespResult::Ok(Payload::Whoami(_))
+            ),
+            "{action}: {result:?}"
+        );
+        let req = request_record(&emit.records()).clone();
+        assert_eq!(req.action, action);
+        assert_eq!(req.outcome.result, "permit", "{action}");
+        assert_eq!(req.outcome.reason, "authorized", "{action}");
+    }
+}
+
+#[tokio::test]
+async fn a_root_home_is_refused_by_shape() {
+    let fx = Fixture::new("root_home");
+    let b = common::second_home("enforce_root_home");
+    let target = b.join("x");
+    std::fs::write(&target, b"not served under a root home").unwrap();
+    fx.write_policy(&allow_policy("Read(/**)", ""));
+    let emit = RecEmit::new();
+    let root = std::path::PathBuf::from("/");
+    let run = read_as_requester(&fx, Some(&root), &target, emit.clone()).await;
+    assert_unauthorized(&run);
+    let req = request_record(&emit.records()).clone();
+    assert_eq!(req.outcome.result, "deny");
+    assert_eq!(req.outcome.reason, "requester home unavailable");
+}
+
+#[tokio::test]
+async fn a_grant_written_before_its_folder_exists_serves_once_the_folder_is_created() {
+    let fx = Fixture::new("create_later");
+    let b = common::second_home("enforce_create_later");
+    fx.write_policy(&allow_policy("Read(~/later/**)", ""));
+    let authorizer = fx.authorizer();
+    let target = b.join("later/x");
+    let me = nix::unistd::geteuid().as_raw();
+
+    let emit = RecEmit::new();
+    let run = read_attempt_as(
+        Some(&b),
+        Arc::clone(&authorizer),
+        emit.clone(),
+        me,
+        read_verb(&target),
+        Duration::from_secs(5),
+        &target,
+    )
+    .await;
+    assert_unauthorized(&run);
+    let req = request_record(&emit.records()).clone();
+    assert_eq!(req.outcome.result, "deny");
+    assert_eq!(req.outcome.reason, "read descriptor missing");
+
+    std::fs::create_dir(b.join("later")).unwrap();
+    std::fs::write(&target, b"written later").unwrap();
+    let emit = RecEmit::new();
+    let run = read_attempt_as(
+        Some(&b),
+        authorizer,
+        emit.clone(),
+        me,
+        read_verb(&target),
+        Duration::from_secs(5),
+        &target,
+    )
+    .await;
+    assert_eq!(
+        read_content(&run),
+        Some(&b"written later"[..]),
+        "{:?}",
+        request_record(&emit.records()).outcome
+    );
+    let req = request_record(&emit.records()).clone();
+    assert_eq!(req.outcome.result, "permit");
+    assert_eq!(req.outcome.reason, READ_PERMIT_REASON);
 }
