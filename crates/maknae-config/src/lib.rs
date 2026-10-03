@@ -60,7 +60,7 @@ pub use authz::load_authz_with_requirement;
 // HermeticAuthorizer, #77) can NAME the requirement type without a maknae-io
 // dependency of their own; unix-gated like the fn whose signature carries it.
 pub use authz::{
-    destination_entry_is_acceptable, load_authz, parse_authz, AuthzError, AuthzPolicy, Decision,
+    destination_entry_is_acceptable, load_authz, parse_authz, AuthzError, AuthzPolicy, HomeUnbound,
     Match3, PathGlob, Pattern, RawActionGrants, RawDestinations, Request,
 };
 pub use bounds::{
