@@ -37,6 +37,9 @@ const PROMPT_MAX_BYTES_RANGE: std::ops::RangeInclusive<i64> =
 /// shutdown-chain test evaluates the handler drain at this ceiling too).
 pub const TRANSPORT_TIMEOUT_MS_MAX: u64 = 60_000;
 const TIMEOUT_MS_RANGE: std::ops::RangeInclusive<i64> = 100..=TRANSPORT_TIMEOUT_MS_MAX as i64;
+/// How long the daemon waits for a requester's home to resolve before a
+/// filesystem verb. Shared so the CLI's attempt reply wait covers it.
+pub const HOME_RESOLVE_TIMEOUT_MS: u64 = 5_000;
 
 /// The transport-layer configuration: connection/frame caps + timeouts + the
 /// Unix-domain socket path. `Clone` — the run-loop clones this per accepted

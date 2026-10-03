@@ -45,6 +45,11 @@ pub enum Dispatch {
     PromptRequested,
 }
 
+/// The verbs routed to `mutation::handle`; only these resolve the requester's home.
+pub fn is_filesystem_verb(verb: &Verb) -> bool {
+    dispatch_verb(verb) == Dispatch::MutationRequested
+}
+
 /// Resolve a verb to its dispatch. `Ping → Pong`, `Whoami → WhoamiRequested`.
 pub fn dispatch_verb(verb: &Verb) -> Dispatch {
     match verb {
@@ -389,6 +394,23 @@ mod tests {
         assert_eq!(confinable_home("/".into()), None);
         let odd = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&[0x2f, 0x68, 0xff]));
         assert_eq!(confinable_home(odd), None);
+    }
+
+    #[test]
+    fn exactly_the_four_file_actions_are_filesystem_verbs() {
+        let file_actions = ["fs.read", "fs.write", "fs.delete", "fs.mkdir"];
+        let verbs = all_verbs();
+        assert_eq!(
+            verbs.iter().filter(|v| is_filesystem_verb(v)).count(),
+            file_actions.len()
+        );
+        for v in verbs {
+            assert_eq!(
+                is_filesystem_verb(&v),
+                file_actions.contains(&verb_to_action(&v)),
+                "{v:?}"
+            );
+        }
     }
 
     #[test]

@@ -15,8 +15,8 @@ pub(crate) struct UidClaim {
 }
 
 pub(crate) struct Slot {
-    _claim: UidClaim,
-    _permit: OwnedSemaphorePermit,
+    claim: UidClaim,
+    permit: OwnedSemaphorePermit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,10 +42,13 @@ impl UidGate {
         let permit = Arc::clone(capacity)
             .try_acquire_owned()
             .map_err(|_| Busy::Global)?;
-        Ok(Slot {
-            _claim: claim,
-            _permit: permit,
-        })
+        Ok(Slot { claim, permit })
+    }
+}
+
+impl Slot {
+    pub(crate) fn split(self) -> (UidClaim, OwnedSemaphorePermit) {
+        (self.claim, self.permit)
     }
 }
 

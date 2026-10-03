@@ -27,14 +27,16 @@ pub fn admission_facts(
 }
 
 pub(crate) const HOME_RESOLVE_TIMEOUT: std::time::Duration =
-    crate::blocking_guard::BLOCKING_OPERATION_TIMEOUT;
+    std::time::Duration::from_millis(maknae_config::HOME_RESOLVE_TIMEOUT_MS);
 const MAX_HOME_RESOLVERS: usize = 16;
 const HOME_UNAVAILABLE: &str = "requester home unavailable";
+const HOME_HEALTH_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HomeUnavailable {
     Unresolvable,
     TimedOut,
+    RequesterAtCapacity,
     AtCapacity,
 }
 
@@ -43,6 +45,7 @@ impl HomeUnavailable {
         match self {
             HomeUnavailable::Unresolvable => "unresolvable",
             HomeUnavailable::TimedOut => "timed out",
+            HomeUnavailable::RequesterAtCapacity => "at capacity for this requester",
             HomeUnavailable::AtCapacity => "at capacity",
         }
     }
@@ -52,44 +55,42 @@ impl HomeUnavailable {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Miss {
-    Unresolvable,
-    TimedOut,
-    Busy(crate::uid_gate::Busy),
-}
-
-impl Miss {
-    fn cause(self) -> HomeUnavailable {
-        match self {
-            Miss::Unresolvable => HomeUnavailable::Unresolvable,
-            Miss::TimedOut => HomeUnavailable::TimedOut,
-            Miss::Busy(_) => HomeUnavailable::AtCapacity,
-        }
-    }
+#[derive(Default)]
+struct HealthLog {
+    logged: Option<HomeUnavailable>,
+    at: Option<std::time::Instant>,
 }
 
 #[derive(Default)]
-struct HomeHealth(std::sync::Mutex<Option<HomeUnavailable>>);
+struct HomeHealth(std::sync::Mutex<HealthLog>);
 
 impl HomeHealth {
-    fn observe(&self, outcome: &Result<std::path::PathBuf, Miss>) -> Option<String> {
-        let now = match outcome {
+    fn observe(
+        &self,
+        outcome: &Result<std::path::PathBuf, HomeUnavailable>,
+        now: std::time::Instant,
+    ) -> Option<String> {
+        let state = match outcome {
             Ok(_) => None,
-            Err(Miss::Unresolvable | Miss::Busy(crate::uid_gate::Busy::Requester)) => return None,
-            Err(miss) => Some(miss.cause()),
+            Err(HomeUnavailable::Unresolvable | HomeUnavailable::RequesterAtCapacity) => {
+                return None
+            }
+            Err(cause) => Some(*cause),
         };
-        let before = std::mem::replace(
-            &mut *self
-                .0
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-            now,
-        );
-        if before == now {
+        let mut log = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if log.logged == state
+            || log
+                .at
+                .is_some_and(|at| now.duration_since(at) < HOME_HEALTH_LOG_INTERVAL)
+        {
             return None;
         }
-        Some(match now {
+        log.logged = state;
+        log.at = Some(now);
+        Some(match state {
             Some(cause) => format!(
                 "maknaed: requester home resolution {} — filesystem verbs refuse with `{}` until it recovers",
                 cause.cause(),
@@ -101,19 +102,21 @@ impl HomeHealth {
 }
 
 pub(crate) struct HomeResolver {
-    timeout: std::time::Duration,
     capacity: std::sync::Arc<tokio::sync::Semaphore>,
     gate: crate::uid_gate::UidGate,
     health: HomeHealth,
+    #[cfg(test)]
+    entered: std::sync::Mutex<Vec<u32>>,
 }
 
 impl HomeResolver {
-    pub(crate) fn new(timeout: std::time::Duration, slots: usize) -> Self {
+    pub(crate) fn new(slots: usize) -> Self {
         HomeResolver {
-            timeout,
             capacity: std::sync::Arc::new(tokio::sync::Semaphore::new(slots)),
             gate: crate::uid_gate::UidGate::default(),
             health: HomeHealth::default(),
+            #[cfg(test)]
+            entered: std::sync::Mutex::default(),
         }
     }
 
@@ -121,53 +124,83 @@ impl HomeResolver {
         &self,
         uid: u32,
         dir: Option<std::path::PathBuf>,
+        timeout: std::time::Duration,
         resolve: F,
     ) -> Result<std::path::PathBuf, HomeUnavailable>
     where
         F: FnOnce(&std::path::Path) -> Option<std::path::PathBuf> + Send + 'static,
     {
-        let outcome = self.attempt(uid, dir, resolve).await;
-        if let Some(line) = self.health.observe(&outcome) {
+        #[cfg(test)]
+        self.entered.lock().unwrap().push(uid);
+        let outcome = self.attempt(uid, dir, timeout, resolve).await;
+        if let Some(line) = self.health.observe(&outcome, std::time::Instant::now()) {
             eprintln!("{line}");
         }
-        outcome.map_err(Miss::cause)
+        outcome
+    }
+
+    #[cfg(test)]
+    pub(crate) fn entered(&self, uid: u32) -> usize {
+        self.entered
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|&&u| u == uid)
+            .count()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn claim(&self, uid: u32) -> Option<crate::uid_gate::UidClaim> {
+        self.gate.try_claim(uid)
     }
 
     async fn attempt<F>(
         &self,
         uid: u32,
         dir: Option<std::path::PathBuf>,
+        timeout: std::time::Duration,
         resolve: F,
-    ) -> Result<std::path::PathBuf, Miss>
+    ) -> Result<std::path::PathBuf, HomeUnavailable>
     where
         F: FnOnce(&std::path::Path) -> Option<std::path::PathBuf> + Send + 'static,
     {
-        let dir = dir.ok_or(Miss::Unresolvable)?;
+        let dir = dir.ok_or(HomeUnavailable::Unresolvable)?;
         let slot = self
             .gate
             .try_admit(uid, &self.capacity)
-            .map_err(Miss::Busy)?;
+            .map_err(|busy| match busy {
+                crate::uid_gate::Busy::Requester => HomeUnavailable::RequesterAtCapacity,
+                crate::uid_gate::Busy::Global => HomeUnavailable::AtCapacity,
+            })?;
         let worker = tokio::task::spawn_blocking(move || {
             let _slot = slot;
             resolve(&dir)
         });
-        match tokio::time::timeout(self.timeout, worker).await {
+        match tokio::time::timeout(timeout, worker).await {
             Ok(Ok(Some(home))) => Ok(home),
-            Ok(_) => Err(Miss::Unresolvable),
-            Err(_) => Err(Miss::TimedOut),
+            Ok(_) => Err(HomeUnavailable::Unresolvable),
+            Err(_) => Err(HomeUnavailable::TimedOut),
         }
     }
 }
 
 static HOME_RESOLVER: std::sync::OnceLock<HomeResolver> = std::sync::OnceLock::new();
 
+pub(crate) fn home_resolver() -> &'static HomeResolver {
+    HOME_RESOLVER.get_or_init(|| HomeResolver::new(MAX_HOME_RESOLVERS))
+}
+
 pub(crate) async fn admitted_home(
     uid: u32,
     dir: Option<std::path::PathBuf>,
 ) -> Result<std::path::PathBuf, HomeUnavailable> {
-    HOME_RESOLVER
-        .get_or_init(|| HomeResolver::new(HOME_RESOLVE_TIMEOUT, MAX_HOME_RESOLVERS))
-        .resolve(uid, dir, crate::groupres::canonical_home)
+    home_resolver()
+        .resolve(
+            uid,
+            dir,
+            HOME_RESOLVE_TIMEOUT,
+            crate::groupres::canonical_home,
+        )
         .await
 }
 
@@ -211,10 +244,6 @@ mod tests {
     const FAST: std::time::Duration = std::time::Duration::from_millis(20);
     const PATIENCE: std::time::Duration = std::time::Duration::from_secs(10);
 
-    fn resolver(slots: usize) -> HomeResolver {
-        HomeResolver::new(FAST, slots)
-    }
-
     fn never_runs() -> (
         std::sync::Arc<std::sync::atomic::AtomicBool>,
         impl FnOnce(&std::path::Path) -> Option<std::path::PathBuf> + Send + 'static,
@@ -247,6 +276,14 @@ mod tests {
     }
 
     #[test]
+    fn home_resolution_waits_for_the_bound_the_cli_allows_for() {
+        assert_eq!(
+            HOME_RESOLVE_TIMEOUT,
+            std::time::Duration::from_millis(maknae_config::HOME_RESOLVE_TIMEOUT_MS)
+        );
+    }
+
+    #[test]
     fn each_cause_has_one_stable_reason() {
         assert_eq!(
             HomeUnavailable::Unresolvable.reason(),
@@ -257,6 +294,10 @@ mod tests {
             "requester home unavailable: timed out"
         );
         assert_eq!(
+            HomeUnavailable::RequesterAtCapacity.reason(),
+            "requester home unavailable: at capacity for this requester"
+        );
+        assert_eq!(
             HomeUnavailable::AtCapacity.reason(),
             "requester home unavailable: at capacity"
         );
@@ -264,8 +305,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_resolving_home_is_returned() {
-        let got = resolver(1)
-            .resolve(1, Some("/home/b".into()), |d| Some(d.join("canon")))
+        let got = HomeResolver::new(1)
+            .resolve(1, Some("/home/b".into()), PATIENCE, |d| {
+                Some(d.join("canon"))
+            })
             .await;
         assert_eq!(got, Ok(std::path::PathBuf::from("/home/b/canon")));
     }
@@ -273,34 +316,34 @@ mod tests {
     #[tokio::test]
     async fn no_raw_home_is_unresolvable_and_resolves_nothing() {
         let (ran, f) = never_runs();
-        let got = resolver(1).resolve(1, None, f).await;
+        let got = HomeResolver::new(1).resolve(1, None, PATIENCE, f).await;
         assert_eq!(got, Err(HomeUnavailable::Unresolvable));
         assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[tokio::test]
     async fn a_home_that_does_not_resolve_is_unresolvable() {
-        let got = resolver(1)
-            .resolve(1, Some("/home/b".into()), |_| None)
+        let got = HomeResolver::new(1)
+            .resolve(1, Some("/home/b".into()), PATIENCE, |_| None)
             .await;
         assert_eq!(got, Err(HomeUnavailable::Unresolvable));
     }
 
     #[tokio::test]
     async fn a_panicking_resolver_is_unresolvable() {
-        let got = resolver(1)
-            .resolve(1, Some("/home/b".into()), |_| panic!("x"))
+        let got = HomeResolver::new(1)
+            .resolve(1, Some("/home/b".into()), PATIENCE, |_| panic!("x"))
             .await;
         assert_eq!(got, Err(HomeUnavailable::Unresolvable));
     }
 
     #[tokio::test]
     async fn a_stalled_home_times_out_while_its_worker_still_blocks() {
-        let r = resolver(1);
+        let r = HomeResolver::new(1);
         let (release, held) = std::sync::mpsc::channel::<()>();
         let got = tokio::time::timeout(
             PATIENCE,
-            r.resolve(1, Some("/home/b".into()), held_until(held)),
+            r.resolve(1, Some("/home/b".into()), FAST, held_until(held)),
         )
         .await
         .expect("the caller is not held by the stalled worker");
@@ -310,15 +353,17 @@ mod tests {
 
     #[tokio::test]
     async fn a_stuck_uid_blocks_only_itself() {
-        let r = resolver(4);
+        let r = HomeResolver::new(4);
         let (release, held) = std::sync::mpsc::channel::<()>();
-        let first = r.resolve(1, Some("/home/a".into()), held_until(held)).await;
+        let first = r
+            .resolve(1, Some("/home/a".into()), FAST, held_until(held))
+            .await;
         assert_eq!(first, Err(HomeUnavailable::TimedOut));
         assert_eq!(r.capacity.available_permits(), 3);
 
         let (ran, f) = never_runs();
-        let again = r.resolve(1, Some("/home/a".into()), f).await;
-        assert_eq!(again, Err(HomeUnavailable::AtCapacity));
+        let again = r.resolve(1, Some("/home/a".into()), PATIENCE, f).await;
+        assert_eq!(again, Err(HomeUnavailable::RequesterAtCapacity));
         assert!(
             !ran.load(std::sync::atomic::Ordering::SeqCst),
             "no worker is spawned for a uid already in flight"
@@ -330,7 +375,7 @@ mod tests {
         );
 
         let other = r
-            .resolve(2, Some("/home/b".into()), |d| Some(d.into()))
+            .resolve(2, Some("/home/b".into()), PATIENCE, |d| Some(d.into()))
             .await;
         assert_eq!(other, Ok(std::path::PathBuf::from("/home/b")));
 
@@ -344,22 +389,22 @@ mod tests {
 
     #[tokio::test]
     async fn the_global_capacity_still_bounds_the_total() {
-        let r = resolver(2);
+        let r = HomeResolver::new(2);
         let (release_a, held_a) = std::sync::mpsc::channel::<()>();
         let (release_b, held_b) = std::sync::mpsc::channel::<()>();
         assert_eq!(
-            r.resolve(1, Some("/home/a".into()), held_until(held_a))
+            r.resolve(1, Some("/home/a".into()), FAST, held_until(held_a))
                 .await,
             Err(HomeUnavailable::TimedOut)
         );
         assert_eq!(
-            r.resolve(2, Some("/home/b".into()), held_until(held_b))
+            r.resolve(2, Some("/home/b".into()), FAST, held_until(held_b))
                 .await,
             Err(HomeUnavailable::TimedOut)
         );
         let (ran, f) = never_runs();
         assert_eq!(
-            r.resolve(3, Some("/home/c".into()), f).await,
+            r.resolve(3, Some("/home/c".into()), PATIENCE, f).await,
             Err(HomeUnavailable::AtCapacity)
         );
         assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
@@ -376,32 +421,63 @@ mod tests {
     }
 
     #[test]
-    fn stall_and_capacity_log_on_transition_only() {
-        use crate::uid_gate::Busy;
+    fn stall_and_capacity_log_on_transition_at_most_once_per_interval() {
         let h = HomeHealth::default();
-        let ok: Result<std::path::PathBuf, Miss> = Ok("/home/b".into());
+        let t0 = std::time::Instant::now();
+        let at = |d: std::time::Duration| t0 + d;
+        let secs = std::time::Duration::from_secs;
+        let tick = std::time::Duration::from_millis(1);
+        let ok: Result<std::path::PathBuf, HomeUnavailable> = Ok("/home/b".into());
         let err = |e| Err::<std::path::PathBuf, _>(e);
-        assert_eq!(h.observe(&ok), None);
-        let stalled = h.observe(&err(Miss::TimedOut)).expect("logged");
+        let i = HOME_HEALTH_LOG_INTERVAL;
+
+        assert_eq!(h.observe(&ok, t0), None, "healthy from the start");
+        let stalled = h
+            .observe(&err(HomeUnavailable::TimedOut), t0)
+            .expect("logged");
         assert!(
             stalled.contains("requester home unavailable: timed out"),
             "{stalled}"
         );
-        assert_eq!(h.observe(&err(Miss::TimedOut)), None);
-        let full = h.observe(&err(Miss::Busy(Busy::Global))).expect("logged");
-        assert!(full.contains("at capacity"), "{full}");
-        assert_eq!(h.observe(&err(Miss::Unresolvable)), None);
-        assert_eq!(h.observe(&err(Miss::Busy(Busy::Global))), None);
-        let back = h.observe(&ok).expect("logged");
-        assert!(back.contains("recovered"), "{back}");
-        assert_eq!(h.observe(&ok), None);
-        assert_eq!(h.observe(&err(Miss::Unresolvable)), None);
         assert_eq!(
-            h.observe(&err(Miss::Busy(Busy::Requester))),
+            h.observe(&err(HomeUnavailable::TimedOut), at(secs(1))),
+            None
+        );
+        assert_eq!(h.observe(&ok, at(secs(1))), None, "a flap is held back");
+        assert_eq!(
+            h.observe(&err(HomeUnavailable::AtCapacity), at(secs(1))),
+            None
+        );
+        assert_eq!(h.observe(&ok, at(i - tick)), None);
+        let back = h
+            .observe(&ok, at(i))
+            .expect("logged once the interval passes");
+        assert!(back.contains("recovered"), "{back}");
+        assert_eq!(h.observe(&ok, at(i + i)), None, "no change, no line");
+
+        for quiet in [
+            HomeUnavailable::Unresolvable,
+            HomeUnavailable::RequesterAtCapacity,
+        ] {
+            assert_eq!(h.observe(&err(quiet), at(i + i)), None, "{quiet:?}");
+        }
+        let full = h
+            .observe(&err(HomeUnavailable::AtCapacity), at(i + i))
+            .expect("neither quiet cause changed the state or the clock");
+        assert!(
+            full.contains("requester home unavailable: at capacity"),
+            "{full}"
+        );
+        assert_eq!(
+            h.observe(&err(HomeUnavailable::AtCapacity), at(i * 4)),
+            None
+        );
+        assert_eq!(
+            h.observe(&err(HomeUnavailable::RequesterAtCapacity), at(i * 4)),
             None,
             "one uid's own concurrency is not a daemon-wide state"
         );
-        assert_eq!(h.observe(&ok), None, "and it changed no state");
+        assert!(h.observe(&ok, at(i * 4)).is_some());
     }
 
     struct TempDir(std::path::PathBuf);

@@ -29,7 +29,8 @@ use tokio::{
     sync::Semaphore,
 };
 
-/// No orphan reclamation: the permit and the uid claim follow the actual blocking worker.
+/// No orphan reclamation: the permit follows the actual blocking worker, and the uid
+/// claim lives only as long as that worker.
 static CAPACITY: OnceLock<Arc<Semaphore>> = OnceLock::new();
 static MUTATING: OnceLock<UidGate> = OnceLock::new();
 const MAX_WORKERS: usize = 16;
@@ -79,7 +80,7 @@ fn checked(path: &str) -> Result<(), String> {
 fn prepare(
     verb: Verb,
     fd: Option<OwnedFd>,
-    home: Result<&Path, crate::authz::HomeUnavailable>,
+    home: &Path,
     uid: u32,
     lane: Lane,
 ) -> Result<PreparedMutation, String> {
@@ -88,7 +89,6 @@ fn prepare(
     if lane != Lane::Local {
         return Err("mutation requires local subject execution".into());
     }
-    let home = home.map_err(crate::authz::HomeUnavailable::reason)?;
     if home == Path::new("/") {
         return Err(crate::authz::HomeUnavailable::Unresolvable.reason());
     }
@@ -462,8 +462,15 @@ where
         return false;
     };
     record.object = Some(asked.into());
-    let slot = match mutating().try_admit(uid, &capacity()) {
-        Ok(slot) => slot,
+    let home = match home {
+        Ok(home) => home,
+        Err(cause) => {
+            refuse(stream, cfg, &*emit, record, cause.reason()).await;
+            return true;
+        }
+    };
+    let (claim, permit) = match mutating().try_admit(uid, &capacity()) {
+        Ok(slot) => slot.split(),
         Err(busy) => {
             let reason = match busy {
                 Busy::Requester => "mutation worker budget exhausted for this requester",
@@ -479,26 +486,21 @@ where
     let prepared = tokio::time::timeout(
         authz_timeout,
         tokio::task::spawn_blocking(move || {
-            let prepared = prepare(
-                original.clone(),
-                fd,
-                home.as_deref().map_err(|e| *e),
-                uid,
-                lane,
-            )?;
+            let _claim = claim;
+            let prepared = prepare(original.clone(), fd, &home, uid, lane)?;
             let decision = authorize(
                 &prepared,
                 &original,
                 uid,
-                home.as_deref().ok(),
+                Some(&home),
                 &*authorizer,
                 &policy_name,
             );
-            Ok::<_, String>((prepared, slot, decision))
+            Ok::<_, String>((prepared, permit, decision))
         }),
     )
     .await;
-    let (prepared, slot, decision) = match prepared {
+    let (prepared, permit, decision) = match prepared {
         Ok(Ok(Ok(p))) => p,
         Ok(Ok(Err(reason))) => {
             refuse(stream, cfg, &*emit, record, reason).await;
@@ -583,7 +585,7 @@ where
         .await;
     }
     drop(prepared._evidence);
-    drop(slot);
+    drop(permit);
     true
 }
 
@@ -903,7 +905,7 @@ mod tests {
         let prepared = prepare(
             read(),
             held(),
-            Ok(&fx.principal.home),
+            &fx.principal.home,
             fx.principal.uid,
             Lane::Local,
         )
@@ -921,7 +923,7 @@ mod tests {
             prepare(
                 read(),
                 None,
-                Ok(&fx.principal.home),
+                &fx.principal.home,
                 fx.principal.uid,
                 Lane::Local
             )
@@ -929,31 +931,22 @@ mod tests {
             .as_deref(),
             Some("read descriptor missing")
         );
-        use crate::authz::HomeUnavailable::{AtCapacity, TimedOut, Unresolvable};
-        for (home, reason) in [
-            (
-                Err(Unresolvable),
-                "requester home unavailable: unresolvable",
-            ),
-            (Err(TimedOut), "requester home unavailable: timed out"),
-            (Err(AtCapacity), "requester home unavailable: at capacity"),
-            (
-                Ok(Path::new("/")),
-                "requester home unavailable: unresolvable",
-            ),
-        ] {
-            assert_eq!(
-                prepare(read(), held(), home, fx.principal.uid, Lane::Local)
-                    .err()
-                    .as_deref(),
-                Some(reason),
-                "{home:?}"
-            );
-        }
+        assert_eq!(
+            prepare(
+                read(),
+                held(),
+                Path::new("/"),
+                fx.principal.uid,
+                Lane::Local
+            )
+            .err()
+            .as_deref(),
+            Some("requester home unavailable: unresolvable")
+        );
         assert!(prepare(
             read(),
             held(),
-            Ok(&fx.principal.home),
+            &fx.principal.home,
             fx.principal.uid,
             Lane::Remote
         )
@@ -961,7 +954,7 @@ mod tests {
         assert!(prepare(
             read(),
             Some(fx.fd()),
-            Ok(&fx.principal.home),
+            &fx.principal.home,
             fx.principal.uid,
             Lane::Local
         )
@@ -972,7 +965,7 @@ mod tests {
         assert!(prepare(
             read(),
             Some(std::fs::File::open(&target).unwrap().into()),
-            Ok(&fx.principal.home),
+            &fx.principal.home,
             fx.principal.uid,
             Lane::Local
         )
@@ -983,7 +976,7 @@ mod tests {
         assert!(prepare(
             read(),
             held(),
-            Ok(&fx.principal.home),
+            &fx.principal.home,
             fx.principal.uid,
             Lane::Local
         )
@@ -1071,8 +1064,157 @@ mod tests {
             wake.notify_all();
         }
     }
+    static EUID_TURN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    fn last_reason(emit: &Recorder) -> String {
+        emit.0
+            .lock()
+            .unwrap()
+            .last()
+            .expect("a record")
+            .outcome
+            .reason
+            .clone()
+    }
+    #[tokio::test]
+    async fn the_same_uid_starts_another_action_while_its_first_is_in_the_exchange() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let cfg = maknae_config::transport_from_section(None).unwrap();
+        let seq = Seq::new();
+        let target = fx.root.join("exchange-sentinel");
+        std::fs::write(&target, b"untouched").unwrap();
+        let verb = Verb::FsWrite {
+            path: target.to_str().unwrap().into(),
+            content_length: 0,
+            mode: WriteMode::Existing,
+            conversation: None,
+        };
+        let fds = maknae_io::DelegatedFds::new(1);
+        fds.push(maknae_io::open_path_for_delegation(&target).unwrap());
+        let (mut client, mut server) = tokio::io::duplex(65536);
+        let first = handle(
+            &mut server,
+            &verb,
+            fx.principal.uid,
+            Lane::Local,
+            &fds,
+            Arc::new(fixture_pdp(&fx)),
+            Arc::new(Recorder::default()),
+            Ok(fx.root.clone()),
+            &cfg,
+            &seq,
+            record(),
+            Duration::from_secs(10),
+            AttemptCaps::default(),
+            "US",
+        );
+        let second_emit = Arc::new(Recorder::default());
+        let second = async {
+            let grant = tokio::time::timeout(
+                Duration::from_secs(10),
+                maknae_proto::read_frame_of_class(
+                    &mut client,
+                    maknae_proto::FrameClass::Attempt,
+                    &maknae_proto::FrameCaps {
+                        control: 0,
+                        attempt: maknae_proto::ATTEMPT_RESPONSE_MAX,
+                        prompt: 0,
+                    },
+                ),
+            )
+            .await
+            .expect("the grant arrives in time")
+            .expect("a grant frame");
+            assert!(matches!(
+                maknae_proto::decode_response(&grant).unwrap().result,
+                RespResult::Ok(Payload::MutationAttempt(_))
+            ));
+            let (_idle, mut other) = tokio::io::duplex(65536);
+            assert!(
+                handle(
+                    &mut other,
+                    &verb,
+                    fx.principal.uid,
+                    Lane::Local,
+                    &maknae_io::DelegatedFds::new(1),
+                    Arc::new(fixture_pdp(&fx)),
+                    second_emit.clone(),
+                    Ok(fx.root.clone()),
+                    &cfg,
+                    &seq,
+                    record(),
+                    Duration::from_secs(10),
+                    AttemptCaps::default(),
+                    "US",
+                )
+                .await
+            );
+            drop(client);
+        };
+        let (consumed, ()) = tokio::time::timeout(Duration::from_secs(20), async {
+            tokio::join!(first, second)
+        })
+        .await
+        .expect("both actions end once the client goes away");
+        assert!(consumed);
+        assert_eq!(
+            last_reason(&second_emit),
+            "mutation descriptor missing",
+            "the second action reached its own worker"
+        );
+    }
+    #[tokio::test]
+    async fn an_unusable_home_is_refused_with_its_cause_before_any_slot() {
+        use crate::authz::HomeUnavailable;
+        let fx = Fixture::new();
+        let cfg = maknae_config::transport_from_section(None).unwrap();
+        let seq = Seq::new();
+        let target = fx.root.join("unusable-home-sentinel");
+        std::fs::write(&target, b"untouched").unwrap();
+        let verb = Verb::FsWrite {
+            path: target.to_str().unwrap().into(),
+            content_length: 0,
+            mode: WriteMode::Existing,
+            conversation: None,
+        };
+        for (uid, cause) in (4_350_100..).zip([
+            HomeUnavailable::Unresolvable,
+            HomeUnavailable::TimedOut,
+            HomeUnavailable::RequesterAtCapacity,
+            HomeUnavailable::AtCapacity,
+        ]) {
+            let held = mutating().try_claim(uid).expect("an unclaimed uid");
+            let fds = maknae_io::DelegatedFds::new(1);
+            fds.push(maknae_io::open_path_for_delegation(&target).unwrap());
+            let emit = Arc::new(Recorder::default());
+            let (_client, mut server) = tokio::io::duplex(65536);
+            assert!(
+                handle(
+                    &mut server,
+                    &verb,
+                    uid,
+                    Lane::Local,
+                    &fds,
+                    Arc::new(fixture_pdp(&fx)),
+                    emit.clone(),
+                    Err(cause),
+                    &cfg,
+                    &seq,
+                    record(),
+                    Duration::from_secs(10),
+                    AttemptCaps::default(),
+                    "US",
+                )
+                .await
+            );
+            assert_eq!(last_reason(&emit), cause.reason(), "{cause:?}");
+            assert!(fds.take().is_some(), "no worker took the descriptor");
+            drop(held);
+        }
+    }
     #[tokio::test]
     async fn admission_capacity_stays_with_timed_out_real_policy_worker() {
+        let _turn = EUID_TURN.lock().await;
         let fx = Fixture::new();
         let emit = Arc::new(Recorder::default());
         let cfg = maknae_config::transport_from_section(None).unwrap();
@@ -1223,7 +1365,7 @@ mod tests {
                 &fds,
                 authorizer_for_second,
                 other.clone(),
-                Err(crate::authz::HomeUnavailable::Unresolvable),
+                Ok(PathBuf::from("/")),
                 &cfg,
                 &seq,
                 record(),
@@ -1274,7 +1416,7 @@ mod tests {
         assert!(prepare(
             Verb::Ping,
             None,
-            Ok(&fx.principal.home),
+            &fx.principal.home,
             fx.principal.uid,
             Lane::Local
         )
@@ -1282,7 +1424,7 @@ mod tests {
         assert!(prepare(
             fx.mkdir(true, vec!["one".into(), "two".into()]),
             Some(fx.fd()),
-            Ok(&fx.principal.home),
+            &fx.principal.home,
             fx.principal.uid,
             Lane::Remote
         )
@@ -1290,7 +1432,7 @@ mod tests {
         assert!(prepare(
             fx.mkdir(true, vec!["one".into(), "two".into()]),
             None,
-            Ok(&fx.principal.home),
+            &fx.principal.home,
             fx.principal.uid,
             Lane::Local
         )
@@ -1306,7 +1448,7 @@ mod tests {
             assert!(prepare(
                 fx.mkdir(parents, components),
                 Some(fx.fd()),
-                Ok(&fx.principal.home),
+                &fx.principal.home,
                 fx.principal.uid,
                 Lane::Local
             )
@@ -1318,7 +1460,7 @@ mod tests {
                 recursive: false
             },
             Some(fx.fd()),
-            Ok(&fx.principal.home),
+            &fx.principal.home,
             fx.principal.uid,
             Lane::Local
         )
@@ -1329,7 +1471,7 @@ mod tests {
                 recursive: false
             },
             Some(fx.fd()),
-            Ok(&fx.principal.home),
+            &fx.principal.home,
             fx.principal.uid,
             Lane::Local
         )
@@ -1339,7 +1481,7 @@ mod tests {
         assert!(prepare(
             fx.mkdir(true, vec!["two".into()]),
             Some(std::fs::File::open(&target).unwrap().into()),
-            Ok(&fx.principal.home),
+            &fx.principal.home,
             fx.principal.uid,
             Lane::Local
         )
@@ -1354,7 +1496,7 @@ mod tests {
         let prepared = prepare(
             write(),
             held(),
-            Ok(&fx.principal.home),
+            &fx.principal.home,
             fx.principal.uid,
             Lane::Local,
         )
@@ -1371,7 +1513,7 @@ mod tests {
         assert!(prepare(
             write(),
             Some(fx.fd()),
-            Ok(&fx.principal.home),
+            &fx.principal.home,
             fx.principal.uid,
             Lane::Local
         )
@@ -1380,7 +1522,7 @@ mod tests {
         assert!(prepare(
             write(),
             held(),
-            Ok(&fx.principal.home),
+            &fx.principal.home,
             fx.principal.uid,
             Lane::Local
         )

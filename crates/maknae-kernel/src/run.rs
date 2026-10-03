@@ -804,10 +804,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
         return;
     }
 
-    if matches!(
-        request.verb,
-        Verb::FsWrite { .. } | Verb::FsDelete { .. } | Verb::FsMkdir { .. } | Verb::Read { .. }
-    ) {
+    if crate::handler::is_filesystem_verb(&request.verb) {
         let mut record = make_record(
             "request",
             &host,
@@ -4355,5 +4352,167 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             "a marker with the right mechanism but the wrong target must not \
              determine HrotSealed"
         );
+    }
+}
+
+#[cfg(test)]
+mod home_resolution_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[derive(Default)]
+    struct Recorder(std::sync::Mutex<Vec<AuditRecord>>);
+    impl AuditEmit for Recorder {
+        fn emit(
+            &self,
+            record: &AuditRecord,
+        ) -> impl std::future::Future<Output = Result<(), maknae_audit_append::AuditError>> + Send
+        {
+            self.0.lock().unwrap().push(record.clone());
+            async { Ok(()) }
+        }
+    }
+
+    struct Dir(PathBuf);
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    async fn serve(
+        verb: Verb,
+        uid: u32,
+        user: &str,
+        home: &Path,
+        authorizer: Arc<crate::Composition<maknae_authz_basic::HermeticAuthorizer>>,
+    ) -> (RespResult, Vec<AuditRecord>) {
+        let (mut client, server) = tokio::io::duplex(256 * 1024);
+        let body = maknae_proto::encode_request(&maknae_proto::Request {
+            protocol_version: PROTOCOL_VERSION,
+            verb: verb.clone(),
+        })
+        .unwrap();
+        maknae_proto::write_frame(&mut client, maknae_proto::class_of(&verb), &body)
+            .await
+            .unwrap();
+        let emit = Arc::new(Recorder::default());
+        let backend_name = Arc::new(maknae_security::guarded_backend_name(&*authorizer));
+        handle(
+            server,
+            "maknae://d/plane/cli".to_string(),
+            uid,
+            true,
+            Some(user.to_string()),
+            Some(home.to_path_buf()),
+            emit.clone(),
+            1,
+            maknae_config::transport_from_section(None).unwrap(),
+            serde_json::json!({}),
+            authorizer,
+            Arc::new(ConfigView::default()),
+            backend_name,
+            Arc::new("US".to_string()),
+            Arc::new(None),
+            crate::egress::unavailable_egress(),
+            Duration::from_secs(10),
+            maknae_security::Lane::Local,
+            maknae_io::DelegatedFds::new(1),
+        )
+        .await;
+        let caps = maknae_proto::FrameCaps {
+            control: 1 << 20,
+            attempt: 1 << 20,
+            prompt: 1 << 20,
+        };
+        let (_, reply) = tokio::time::timeout(
+            Duration::from_secs(10),
+            maknae_proto::read_frame_zeroizing(&mut client, &caps),
+        )
+        .await
+        .expect("a reply in time")
+        .expect("a reply frame");
+        let records = emit.0.lock().unwrap().clone();
+        (
+            maknae_proto::decode_response(&reply).unwrap().result,
+            records,
+        )
+    }
+
+    #[tokio::test]
+    async fn only_a_filesystem_verb_resolves_the_requesters_home() {
+        let uid = nix::unistd::geteuid().as_raw();
+        let user = nix::unistd::User::from_uid(nix::unistd::geteuid())
+            .expect("NSS")
+            .expect("the test euid has a passwd entry")
+            .name;
+        let raw = std::env::temp_dir().join(format!("run_home_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&raw);
+        std::fs::create_dir(&raw).unwrap();
+        let dir = Dir(raw.canonicalize().unwrap());
+        std::fs::set_permissions(&dir.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let policy = dir.0.join("authz.yaml");
+        std::fs::write(
+            &policy,
+            "schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/**)\"\n  deny: []\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&policy, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let us = &maknae_config::BasicPolicy;
+        let authorizer = Arc::new(crate::Composition::new(
+            maknae_authz_basic::HermeticAuthorizer::new(
+                policy,
+                maknae_config::Principal {
+                    name: "operator".into(),
+                    uid,
+                    home: dir.0.clone(),
+                },
+                maknae_config::TargetRequired {
+                    owner: None,
+                    mode_mask: Some(0o022),
+                    nlink_exactly_one: false,
+                    regular_file: true,
+                    max_bytes: None,
+                },
+            )
+            .unwrap(),
+            crate::CeilingAuthorizer::new(maknae_config::Ceiling::baseline_for(us), us),
+        ));
+        let held = crate::authz::home_resolver()
+            .claim(uid)
+            .expect("the euid's home slot is free");
+
+        for verb in [Verb::Ping, Verb::Whoami] {
+            let before = crate::authz::home_resolver().entered(uid);
+            let (result, _) = serve(verb.clone(), uid, &user, &dir.0, authorizer.clone()).await;
+            assert!(
+                matches!(
+                    result,
+                    RespResult::Ok(maknae_proto::Payload::Pong)
+                        | RespResult::Ok(maknae_proto::Payload::Whoami(_))
+                ),
+                "{verb:?}: {result:?}"
+            );
+            assert_eq!(
+                crate::authz::home_resolver().entered(uid),
+                before,
+                "{verb:?} never resolves the home"
+            );
+        }
+
+        let before = crate::authz::home_resolver().entered(uid);
+        let read = Verb::Read {
+            path: dir.0.join("x").to_str().unwrap().into(),
+            conversation: None,
+            page: None,
+        };
+        let (result, records) = serve(read, uid, &user, &dir.0, authorizer).await;
+        assert!(matches!(result, RespResult::Err(_)), "{result:?}");
+        assert_eq!(crate::authz::home_resolver().entered(uid), before + 1);
+        assert_eq!(
+            records.last().expect("a request record").outcome.reason,
+            crate::authz::HomeUnavailable::RequesterAtCapacity.reason()
+        );
+        drop(held);
     }
 }

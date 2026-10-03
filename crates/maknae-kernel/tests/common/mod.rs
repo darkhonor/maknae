@@ -177,16 +177,15 @@ impl AuditEmit for Records {
     }
 }
 
-/// The kernel admits one filesystem request per uid at a time (#435), and
+/// The kernel admits one filesystem preparation per uid at a time (#435), and
 /// every fixture is the test euid, so filesystem requests take turns.
 static FS_TURN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 pub async fn fs_turn(verb: &Verb) -> Option<tokio::sync::MutexGuard<'static, ()>> {
-    match verb {
-        Verb::Read { .. } | Verb::FsWrite { .. } | Verb::FsDelete { .. } | Verb::FsMkdir { .. } => {
-            Some(FS_TURN.lock().await)
-        }
-        _ => None,
+    if maknae_kernel::is_filesystem_verb(verb) {
+        Some(FS_TURN.lock().await)
+    } else {
+        None
     }
 }
 
