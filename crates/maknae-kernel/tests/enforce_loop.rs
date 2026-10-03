@@ -2446,9 +2446,14 @@ async fn a_grantable_term_with_no_grant_names_the_absent_rule() {
 #[tokio::test]
 async fn an_unmatched_read_names_the_missing_capability_entry() {
     let fx = Fixture::new("note-nocap");
-    fx.write_policy(
-        "schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/allowed/**)\"\n  deny: []\nbindings:\n  admin: [\"root\"]\n",
-    );
+    let me = nix::unistd::geteuid();
+    let name = nix::unistd::User::from_uid(me)
+        .expect("NSS")
+        .expect("the test euid has a passwd entry")
+        .name;
+    fx.write_policy(&format!(
+        "schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/allowed/**)\"\n  deny: []\nbindings:\n  admin: [\"{name}\"]\n",
+    ));
     std::fs::write(fx.dir.join("outside.txt"), b"not under any entry").unwrap();
     let target = fx.dir.join("outside.txt").to_string_lossy().into_owned();
     let emit = RecEmit::new();
@@ -2456,7 +2461,7 @@ async fn an_unmatched_read_names_the_missing_capability_entry() {
         &fx.principal,
         fx.authorizer(),
         emit.clone(),
-        0,
+        me.as_raw(),
         maknae_proto::Verb::Read {
             path: target.clone(),
             conversation: None,

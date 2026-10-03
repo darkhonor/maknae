@@ -925,7 +925,11 @@ mod tests {
     }
     fn fixture_pdp(fx: &Fixture) -> crate::Composition<maknae_authz_basic::HermeticAuthorizer> {
         let path = fx.root.join("authz.yaml");
-        std::fs::write(&path, "schema_version: 1\npermissions:\n  allow:\n    - \"Write(~/**)\"\n  deny: []\nbindings:\n  user: [\"root\"]\n").unwrap();
+        let name = nix::unistd::User::from_uid(nix::unistd::geteuid())
+            .expect("NSS")
+            .expect("the test euid has a passwd entry")
+            .name;
+        std::fs::write(&path, format!("schema_version: 1\npermissions:\n  allow:\n    - \"Write(~/**)\"\n  deny: []\nbindings:\n  user: [\"{name}\"]\n")).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
         let baseline = maknae_authz_basic::HermeticAuthorizer::new(
             path,
@@ -1004,7 +1008,7 @@ mod tests {
             !handle(
                 &mut server,
                 &Verb::Ping,
-                0,
+                fx.principal.uid,
                 Lane::Local,
                 &fds,
                 authorizer.clone(),
@@ -1039,7 +1043,7 @@ mod tests {
             handle(
                 &mut server,
                 &verb,
-                0,
+                fx.principal.uid,
                 Lane::Local,
                 &fds,
                 authorizer,
@@ -1073,7 +1077,7 @@ mod tests {
         handle(
             &mut server,
             &verb,
-            0,
+            fx.principal.uid,
             Lane::Local,
             &fds,
             delayed,

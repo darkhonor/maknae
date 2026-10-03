@@ -673,7 +673,7 @@ async fn a_replacement_grant_waits_for_durable_intent_and_the_daemon_never_write
 #[tokio::test]
 async fn mkdir_every_prefix_is_decided_and_alias_deny_uses_verified_path() {
     let fx = Fixture::new("mkdir_prefix_deny", "Write");
-    let policy="schema_version: 1\npermissions:\n  allow:\n    - \"Write(~/**)\"\n  deny:\n    - \"Write(~/blocked)\"\nbindings:\n  user: [\"root\"]\n";
+    let policy = format!("schema_version: 1\npermissions:\n  allow:\n    - \"Write(~/**)\"\n  deny:\n    - \"Write(~/blocked)\"\nbindings:\n  user: [\"{}\"]\n", common::euid_name());
     std::fs::write(fx.root.join("authz.yaml"), policy).unwrap();
     let records = Records::new(0);
     let (mut client, task) = namespace_start(
@@ -1323,7 +1323,7 @@ async fn failed_grant_or_ack_write_stops_before_accepting_more_client_reports() 
                 fail: fail.clone(),
             },
             "maknae://d/plane/cli".into(),
-            0,
+            fx.peer_uid,
             true,
             None,
             records.clone(),

@@ -181,12 +181,23 @@ impl AuditEmit for Records {
     }
 }
 
-/// A temp root with a real `authz.yaml` (binding `user: ["root"]`, so the
-/// fixture's peer uid 0 is the `user` role) and a real composed PDP over it.
+/// A temp root with a real `authz.yaml` (binding the test euid's username to
+/// `user`, so the fixture's peer uid is the `user` role) and a real composed
+/// PDP over it.
 pub struct Fixture {
     pub root: PathBuf,
     pub principal: maknae_config::Principal,
+    pub peer_uid: u32,
     pub peer_user: Option<String>,
+}
+
+/// The test euid's username. It must pass `userpass_username_is_acceptable`
+/// (one safe lower-case segment), as the provider tests also require.
+pub fn euid_name() -> String {
+    nix::unistd::User::from_uid(nix::unistd::geteuid())
+        .expect("NSS")
+        .expect("the test euid has a passwd entry")
+        .name
 }
 impl Fixture {
     pub fn new(tag: &str, allow: &str) -> Self {
@@ -194,16 +205,16 @@ impl Fixture {
     }
     /// `new`, then `policy_tail` appended to the policy body (a `roles:` /
     /// `destinations:` block for #172).
-    /// Same as [`Fixture::with_policy`] but binds `root` to the NAMED role, so a
-    /// test can drive the real decision path for each of the four shipped roles
-    /// (#275). The harness's peer uid is 0, which is the one uid guaranteed to
-    /// resolve on every host.
+    /// Same as [`Fixture::with_policy`] but binds the test euid's username to
+    /// the NAMED role, so a test can drive the real decision path for each of
+    /// the four shipped roles (#275). The harness's peer uid is the test euid.
     pub fn with_policy_bound_to(tag: &str, allow: &str, role: &str, policy_tail: &str) -> Self {
         let f = Self::with_policy(tag, allow, policy_tail);
+        let name = euid_name();
         let policy = std::fs::read_to_string(f.root.join("authz.yaml")).unwrap();
         let rebound = policy.replace(
-            "bindings:\n  user: [\"root\"]",
-            &format!("bindings:\n  {role}: [\"root\"]"),
+            &format!("bindings:\n  user: [\"{name}\"]"),
+            &format!("bindings:\n  {role}: [\"{name}\"]"),
         );
         assert!(
             role == "user" || rebound != policy,
@@ -251,7 +262,8 @@ impl Fixture {
                     .collect::<String>()
             )
         };
-        let policy = format!("schema_version: 1\npermissions:\n  allow:\n{allow_lines}{deny_block}bindings:\n  user: [\"root\"]\n{policy_tail}");
+        let name = euid_name();
+        let policy = format!("schema_version: 1\npermissions:\n  allow:\n{allow_lines}{deny_block}bindings:\n  user: [\"{name}\"]\n{policy_tail}");
         std::fs::write(root.join("authz.yaml"), policy).unwrap();
         std::fs::set_permissions(
             root.join("authz.yaml"),
@@ -261,7 +273,8 @@ impl Fixture {
         Self {
             root,
             principal,
-            peer_user: Some("root".into()),
+            peer_uid: nix::unistd::geteuid().as_raw(),
+            peer_user: Some(name),
         }
     }
     pub fn authorizer(
@@ -429,7 +442,7 @@ impl Fixture {
         let task = tokio::spawn(maknae_kernel::handle_with_attempt_caps(
             server,
             "maknae://d/plane/cli".into(),
-            0,
+            self.peer_uid,
             true,
             self.peer_user.clone(),
             records,
