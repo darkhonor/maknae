@@ -291,19 +291,12 @@ pub struct RealPasswd;
 /// Resolve a passwd home directory to its canonical form (#216), falling back to
 /// the value passwd gave when it cannot be resolved.
 ///
-/// **This is the ENROLL half of the 2026-09-12 ruling, and it is deliberately not
-/// load-bearing.** The daemon canonicalises `principal.home` itself, in
-/// `authz_boot_gate`, and never depends on this — `bins/maknae` is the untrusted
-/// binary (AGENTS.md core principle 1), so the trust plane resolving its own
-/// confinement root is the control. What this buys is agreement: enroll consumes
-/// the same value for its OWN work — the `<home>/.maknae` CLI directory and
-/// `revoke_legacy_home_access` — and resolving here keeps that work on the same
-/// form the daemon will confine to.
+/// Not load-bearing for the daemon: it resolves each requester's home per
+/// request (#435) and never relies on the value enroll writes. Enroll uses this
+/// for its own work, the `<home>/.maknae` CLI directory and
+/// `revoke_legacy_home_access`.
 ///
-/// The fallback is intentional. An unresolvable home is not enroll's to refuse:
-/// it writes what passwd said, and the daemon refuses at boot with
-/// `UnresolvableHome`, which is the enforcement point and reports it in one
-/// auditable place rather than two.
+/// An unresolvable home is not enroll's to refuse: it writes what passwd said.
 fn canonical_home(dir: PathBuf) -> PathBuf {
     maknae_io::resolve_dir(&dir).unwrap_or(dir)
 }
@@ -2370,12 +2363,8 @@ mod tests {
 
     // ---- canonical_home (#216) ---------------------------------------------
 
-    /// #216, the ENROLL half of the 2026-09-12 ruling. The daemon canonicalises
-    /// `principal.home` itself and never depends on this — `bins/maknae` is the
-    /// untrusted binary. But enroll consumes the same value for its OWN work
-    /// (the `<home>/.maknae` CLI dir and the legacy home-access revoke), so
-    /// resolving here keeps it on the same form the daemon will confine to,
-    /// instead of one the passwd entry merely spelled.
+    /// Enroll resolves the passwd home for its own work (the `<home>/.maknae`
+    /// CLI dir and the legacy home-access revoke).
     #[test]
     fn canonical_home_resolves_a_symlinked_passwd_dir() {
         let base = std::env::temp_dir().join(format!("ch_link_{}", std::process::id()));
@@ -2393,10 +2382,8 @@ mod tests {
         assert_ne!(got, link, "the link's own form must not survive");
     }
 
-    /// Enroll does NOT hard-fail on an unresolvable home: it writes what passwd
-    /// said, and the DAEMON refuses at boot with `UnresolvableHome`, which is the
-    /// enforcement point and says so in one auditable place. Falling back here
-    /// keeps enroll's existing behaviour for a home that does not exist yet.
+    /// Enroll does not hard-fail on an unresolvable home: it writes what passwd
+    /// said, which keeps a home that does not exist yet enrollable.
     #[test]
     fn canonical_home_falls_back_to_the_passwd_value_when_unresolvable() {
         let missing = std::env::temp_dir().join(format!("ch_missing_{}", std::process::id()));

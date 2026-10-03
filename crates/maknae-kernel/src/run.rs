@@ -3092,8 +3092,8 @@ async fn boot_after_sink(
             .map_err(|e| RunError::Other(e.to_string()))?;
     }
 
-    let (authorizer, _principal) = match authz_boot_gate(config_dir, principal_opt) {
-        Ok(pair) => pair,
+    let authorizer = match authz_boot_gate(config_dir, principal_opt) {
+        Ok(authorizer) => authorizer,
         Err(e) => {
             return Err(refuse_authz_boot(
                 sink.as_ref(),
@@ -3991,15 +3991,9 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
     fn valid_authz_and_principal_reaches_posture_record() {
         let _g = ENV_LOCK.lock().unwrap();
         let d = Dir::new("valid_reaches_posture");
-        // #216: the boot gate resolves `principal.home` through the kernel, so
-        // the fixture names a home that EXISTS. A fictional path is now a boot
-        // refusal by design, which is what this test must not accidentally hit.
         write_common_fixture(
             &d,
-            &format!(
-                "principal:\n  name: op\n  uid: 1000\n  home: {}\n",
-                std::env::temp_dir().display()
-            ),
+            "principal:\n  name: op\n  uid: 1000\n  home: /home/op\n",
         );
         put(
             &d.0,
