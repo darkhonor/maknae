@@ -111,12 +111,8 @@ pub fn fixture_principal() -> maknae_config::Principal {
 }
 
 /// Standard extra args for `handle()` in transport-behavior tests.
-pub fn permissive_authz() -> (Arc<AlwaysPermit>, Arc<maknae_config::Principal>, Duration) {
-    (
-        Arc::new(AlwaysPermit),
-        Arc::new(fixture_principal()),
-        Duration::from_secs(5),
-    )
+pub fn permissive_authz() -> (Arc<AlwaysPermit>, Duration) {
+    (Arc::new(AlwaysPermit), Duration::from_secs(5))
 }
 
 /// A backend whose `backend_name()` PANICS. Permits, so the request reaches
@@ -189,6 +185,7 @@ pub struct Fixture {
     pub principal: maknae_config::Principal,
     pub peer_uid: u32,
     pub peer_user: Option<String>,
+    pub requester_home: Option<PathBuf>,
 }
 
 /// The test euid's username. It must pass `userpass_username_is_acceptable`
@@ -271,11 +268,16 @@ impl Fixture {
         )
         .unwrap();
         Self {
-            root,
-            principal,
             peer_uid: nix::unistd::geteuid().as_raw(),
             peer_user: Some(name),
+            requester_home: Some(root.clone()),
+            root,
+            principal,
         }
+    }
+    pub fn with_requester_home(mut self, home: Option<PathBuf>) -> Self {
+        self.requester_home = home;
+        self
     }
     pub fn authorizer(
         &self,
@@ -438,19 +440,18 @@ impl Fixture {
         if let Some(fd) = fd {
             fds.push(fd);
         }
-        let principal = Arc::new(self.principal.clone());
         let task = tokio::spawn(maknae_kernel::handle_with_attempt_caps(
             server,
             "maknae://d/plane/cli".into(),
             self.peer_uid,
             true,
             self.peer_user.clone(),
+            self.requester_home.clone(),
             records,
             718,
             config,
             serde_json::json!({"mutation": "untrusted extension"}),
             authz,
-            principal,
             Arc::new(Default::default()),
             Arc::new("basic+ceiling".into()),
             Arc::new("US".into()),

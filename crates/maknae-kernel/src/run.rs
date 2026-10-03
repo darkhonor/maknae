@@ -52,7 +52,7 @@ use tokio::sync::mpsc;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
-use crate::authz::{authorize_connection, ConnDecision};
+use crate::authz::{admission_facts, authorize_connection, ConnDecision};
 use crate::blocking_guard::{BlockingBreaker, BreakerAdmission, BreakerTransition};
 use crate::boot_gate::authz_boot_gate;
 use crate::groupres::{maknae_gid, uid_in_maknae_group};
@@ -60,7 +60,6 @@ use crate::handler::{
     build_authz_request, build_whoami, discharge_plan, dispatch_verb, lexical_pregate, may_respond,
     verb_to_action, Dispatch, ServeOutcome, AUTHZ_DECIDE_TIMEOUT,
 };
-use maknae_config::Principal;
 use maknae_proto::{encode_response_zeroizing, ProtoErrCode, ProtoError};
 use maknae_security::{combine, finalize, guarded_decide_reporting_role, Authorizer, Decision};
 
@@ -400,12 +399,12 @@ pub async fn handle<S, E, P>(
     peer_uid: u32,
     in_group: bool,
     peer_user: Option<String>,
+    peer_home: Option<PathBuf>,
     emit: Arc<E>,
     session_id: u64,
     cfg: TransportConfig,
     au3_1: serde_json::Value,
     authorizer: Arc<P>,
-    principal: Arc<Principal>,
     config_view: Arc<ConfigView>,
     authz_backend_name: Arc<String>,
     classification_policy_name: Arc<String>,
@@ -425,12 +424,12 @@ pub async fn handle<S, E, P>(
         peer_uid,
         in_group,
         peer_user,
+        peer_home,
         emit,
         session_id,
         cfg,
         au3_1,
         authorizer,
-        principal,
         config_view,
         authz_backend_name,
         classification_policy_name,
@@ -477,12 +476,12 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     // It also chooses the key path's `<username>` segment (ADR-0028 §3), so it
     // must stay kernel-resolved from the peer uid, never taken from the request.
     peer_user: Option<String>,
+    peer_home: Option<PathBuf>,
     emit: Arc<E>,
     session_id: u64,
     cfg: TransportConfig,
     au3_1: serde_json::Value,
     authorizer: Arc<P>,
-    principal: Arc<Principal>,
     config_view: Arc<ConfigView>,
     // Captured ONCE at boot from the same authorizer (static TCB: the backend
     // set cannot change in-process, so per-request asking could only repeat
@@ -839,7 +838,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             &delegated,
             Arc::clone(&authorizer),
             Arc::clone(&emit),
-            Arc::clone(&principal),
+            peer_home.clone(),
             &cfg,
             &seq,
             record,
@@ -913,7 +912,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     let sec_req = build_authz_request(
         &request.verb,
         peer_uid,
-        Some(&principal.home),
+        peer_home.as_deref(),
         lane,
         admitted.as_ref(),
     );
@@ -2210,7 +2209,6 @@ pub async fn accept_loop<A, E, P>(
     shutdown: impl Future<Output = ()> + Send,
     supervisor: tokio::task::JoinHandle<maknae_vault::VaultError>,
     authorizer: Arc<P>,
-    principal: Arc<Principal>,
     config_view: Arc<ConfigView>,
     authz_backend_name: Arc<String>,
     classification_policy_name: Arc<String>,
@@ -2355,7 +2353,6 @@ where
                                 let cfg = cfg.clone();
                                 let wctx = wctx.clone();
                                 let authorizer = Arc::clone(&authorizer);
-                                let principal = Arc::clone(&principal);
                                 let config_view = Arc::clone(&config_view);
                                 let authz_backend_name = Arc::clone(&authz_backend_name);
                                 let classification_policy_name =
@@ -2401,7 +2398,7 @@ where
                                             // prevent. On every fail-closed arm the
                                             // name is absent, deliberately: not
                                             // spawning NSS work is the point.
-                                            let (in_group, peer_user) = match admission {
+                                            let (in_group, peer_user, peer_home) = match admission {
                                                 BreakerAdmission::RefuseOpen => {
                                                     if group_breaker
                                                         .lock()
@@ -2412,9 +2409,9 @@ where
                                                             "maknaed: `maknae` group lookup circuit breaker open for uid={uid} — failing closed without spawning more NSS work"
                                                         );
                                                     }
-                                                    (false, None)
+                                                    admission_facts(None)
                                                 }
-                                                BreakerAdmission::RefuseAtCapacity => (false, None),
+                                                BreakerAdmission::RefuseAtCapacity => admission_facts(None),
                                                 BreakerAdmission::Admit => match tokio::time::timeout(
                                                     GROUP_LOOKUP_TIMEOUT,
                                                     tokio::task::spawn_blocking(move || {
@@ -2428,8 +2425,8 @@ where
                                                         // either way it is no longer an orphan.
                                                         group_breaker.lock().await.record_success();
                                                         match join {
-                                                            Ok(Ok(m)) => (m.in_group, Some(m.user)),
-                                                            _ => (false, None),
+                                                            Ok(Ok(m)) => admission_facts(Some(m)),
+                                                            _ => admission_facts(None),
                                                         }
                                                     }
                                                     Err(_elapsed) => {
@@ -2449,7 +2446,7 @@ where
                                                                 GROUP_LOOKUP_TIMEOUT.as_secs()
                                                             );
                                                         }
-                                                        (false, None)
+                                                        admission_facts(None)
                                                     }
                                                 },
                                             };
@@ -2461,8 +2458,9 @@ where
                                             handle(
                                                 conn.stream, conn.peer_uri, conn.peer_uid, in_group,
                                                 peer_user,
+                                                peer_home,
                                                 emit, session_id, cfg, wctx.au3_1,
-                                                authorizer, principal,
+                                                authorizer,
                                                 config_view,
                                                 authz_backend_name,
                                                 classification_policy_name,
@@ -3094,7 +3092,7 @@ async fn boot_after_sink(
             .map_err(|e| RunError::Other(e.to_string()))?;
     }
 
-    let (authorizer, principal) = match authz_boot_gate(config_dir, principal_opt) {
+    let (authorizer, _principal) = match authz_boot_gate(config_dir, principal_opt) {
         Ok(pair) => pair,
         Err(e) => {
             return Err(refuse_authz_boot(
@@ -3152,7 +3150,6 @@ async fn boot_after_sink(
         .await
         .map_err(|e| boot_evidence_refused("composition", e))?;
     let authorizer = Arc::new(authorizer);
-    let principal = Arc::new(principal);
 
     // Plane credential: resolve + read this plane's SecretID source (spec §5.1),
     // authenticate, then mint a memory-only leaf below; the credential supervisor then
@@ -3285,7 +3282,6 @@ async fn boot_after_sink(
         Arc::clone(session_ids),
         supervisor,
         Arc::clone(&authorizer),
-        Arc::clone(&principal),
         // Redact ONCE, here, at boot. The run loop receives only the view;
         // the unredacted Document does not travel with it.
         config_view,
@@ -3328,7 +3324,6 @@ async fn serve_after_mint<B>(
     // the baseline alone would pass every gate (critical-review round 3). This
     // signature is the type-level pin: what is served is what was composed.
     authorizer: Arc<crate::composition::Composition<B>>,
-    principal: Arc<Principal>,
     // Already redacted at boot — the raw Document never reaches the run loop.
     config_view: Arc<ConfigView>,
     // Captured at boot, same discipline as `config_view` (see run_inner).
@@ -3373,7 +3368,6 @@ where
         shutdown,
         supervisor,
         authorizer,
-        principal,
         config_view,
         authz_backend_name,
         classification_policy_name,

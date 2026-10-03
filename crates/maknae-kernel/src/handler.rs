@@ -348,7 +348,7 @@ pub const READ_PAGE_MAX_BYTES: u64 = 65_536;
 ///
 /// Three proofs, all required (decision 3): the descriptor proves where the object
 /// is — the kernel-reported path — `confined_beneath` proves the object lies under
-/// the enrolled home, and `root_required` proves the home itself is not a place where
+/// the requester's home, and `root_required` proves the home itself is not a place where
 /// aliases can be planted (decision 7). The descriptor confers no access; the OS
 /// answers at the subject's own re-open.
 ///
@@ -963,7 +963,7 @@ mod tests {
         assert_eq!(
             req.confined_beneath,
             std::path::Path::new("/home/op"),
-            "confinement is the enrolled home, and it is not optional"
+            "confinement is the requester's home, and it is not optional"
         );
         assert_eq!(
             req.root_required.owner,

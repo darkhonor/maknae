@@ -165,7 +165,7 @@ where
     P: maknae_security::Authorizer + Send + Sync + 'static,
 {
     read_attempt_with(
-        fx_principal,
+        Some(&fx_principal.home),
         authorizer,
         emit,
         peer_uid,
@@ -176,6 +176,41 @@ where
         || {},
     )
     .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn read_attempt_as<P>(
+    peer_home: Option<&std::path::Path>,
+    authorizer: Arc<P>,
+    emit: Arc<impl AuditEmit + Send + Sync + 'static>,
+    peer_uid: u32,
+    verb: maknae_proto::Verb,
+    timeout: Duration,
+    delegate: &std::path::Path,
+) -> common::ReadRun
+where
+    P: maknae_security::Authorizer + Send + Sync + 'static,
+{
+    read_attempt_with(
+        peer_home,
+        authorizer,
+        emit,
+        peer_uid,
+        verb,
+        timeout,
+        delegate,
+        None,
+        || {},
+    )
+    .await
+}
+
+fn second_home(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("enforce_home_{tag}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    dir.canonicalize().expect("canonicalize the second home")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -193,7 +228,7 @@ where
     P: maknae_security::Authorizer + Send + Sync + 'static,
 {
     read_attempt_with(
-        fx_principal,
+        Some(&fx_principal.home),
         authorizer,
         emit,
         peer_uid,
@@ -210,7 +245,7 @@ where
 /// the subject reads.
 #[allow(clippy::too_many_arguments)]
 async fn read_attempt_with<P>(
-    fx_principal: &maknae_config::Principal,
+    peer_home: Option<&std::path::Path>,
     authorizer: Arc<P>,
     emit: Arc<impl AuditEmit + Send + Sync + 'static>,
     peer_uid: u32,
@@ -236,12 +271,12 @@ where
         peer_uid,
         true,
         None,
+        peer_home.map(std::path::Path::to_path_buf),
         emit,
         1,
         maknae_config::transport_from_section(None).unwrap(),
         serde_json::json!({}),
         authorizer,
-        Arc::new(fx_principal.clone()),
         Arc::new(Default::default()),
         backend_name,
         Arc::new("US".to_string()),
@@ -281,7 +316,7 @@ where
     P: maknae_security::Authorizer + Send + Sync + 'static,
 {
     drive_with(
-        fx_principal,
+        Some(&fx_principal.home),
         authorizer,
         emit,
         peer_uid,
@@ -297,7 +332,7 @@ where
 
 #[allow(clippy::too_many_arguments)]
 async fn drive_with<P>(
-    fx_principal: &maknae_config::Principal,
+    peer_home: Option<&std::path::Path>,
     authorizer: Arc<P>,
     emit: Arc<impl AuditEmit + Send + Sync + 'static>,
     peer_uid: u32,
@@ -332,12 +367,12 @@ where
         peer_uid,
         true,
         None,
+        peer_home.map(std::path::Path::to_path_buf),
         emit,
         1,
         transport,
         serde_json::json!({}),
         authorizer,
-        Arc::new(fx_principal.clone()),
         Arc::clone(&config_view),
         backend_name,
         classification_policy,
@@ -971,7 +1006,7 @@ async fn filesystem_access_for_users_and_admins_keeps_path_refusals_and_the_os_a
         std::fs::set_permissions(&allowed, std::fs::Permissions::from_mode(0o600)).unwrap();
         let emit = RecEmit::new();
         let run = read_attempt_with(
-            &fx.principal,
+            Some(&fx.dir),
             composed(&fx, "UNCLASSIFIED"),
             emit.clone(),
             me.as_raw(),
@@ -1719,7 +1754,7 @@ async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
     assert_eq!(booted.ceiling().classification.name, "PROTECTED");
     let emit = RecEmit::new();
     let frame = drive_with(
-        &fx.principal,
+        Some(&fx.dir),
         fx.authorizer(),
         emit.clone(),
         0,
@@ -1978,7 +2013,7 @@ async fn an_oversized_config_view_is_refused_explicitly_not_written_oversized() 
 
     let emit = RecEmit::new();
     let frame = drive_with(
-        &fx.principal,
+        Some(&fx.dir),
         fx.authorizer(),
         emit.clone(),
         0,
@@ -2056,7 +2091,7 @@ async fn a_granted_config_show_discloses_the_redacted_view_and_nothing_else() {
 
     let emit = RecEmit::new();
     let frame = drive_with(
-        &fx.principal,
+        Some(&fx.dir),
         fx.authorizer(),
         emit.clone(),
         0,
@@ -2105,7 +2140,7 @@ async fn config_show_without_a_grant_discloses_nothing() {
 
     let emit = RecEmit::new();
     let frame = drive_with(
-        &fx.principal,
+        Some(&fx.dir),
         fx.authorizer(),
         emit.clone(),
         0,
@@ -2520,7 +2555,7 @@ async fn under_a_secret_ceiling_status_still_answers_and_names_both_operands() {
     );
     let emit = RecEmit::new();
     let frame = drive_with(
-        &fx.principal,
+        Some(&fx.dir),
         composed(&fx, "SECRET"),
         emit.clone(),
         0,
@@ -3004,4 +3039,37 @@ async fn the_shipped_deny_list_denies_a_paged_read_of_ssh_keys() {
         "{}",
         req.outcome.reason
     );
+}
+
+#[tokio::test]
+async fn a_second_users_tilde_read_beneath_their_own_home_is_served() {
+    let fx = Fixture::new("second_subject");
+    let b = second_home("second_subject");
+    let target = b.join("notes.txt");
+    std::fs::write(&target, b"b's own notes").unwrap();
+    fx.write_policy(
+        "schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/**)\"\n  deny: []\n",
+    );
+    let emit = RecEmit::new();
+    let run = read_attempt_as(
+        Some(&b),
+        fx.authorizer(),
+        emit.clone(),
+        nix::unistd::geteuid().as_raw(),
+        maknae_proto::Verb::Read {
+            path: target.to_string_lossy().into_owned(),
+            conversation: None,
+            page: None,
+        },
+        Duration::from_secs(5),
+        &target,
+    )
+    .await;
+    assert_eq!(
+        read_content(&run),
+        Some(&b"b's own notes"[..]),
+        "{:?}",
+        request_record(&emit.records()).outcome
+    );
+    let _ = std::fs::remove_dir_all(&b);
 }

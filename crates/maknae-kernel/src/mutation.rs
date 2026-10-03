@@ -8,7 +8,7 @@ use maknae_audit_append::{
     AuditEmit, AuditRecord, MutationAudit, MutationEffectKind, MutationEffectRecord,
     MutationOperation, MutationOrigin, MutationPhase, MutationStatus, Seq,
 };
-use maknae_config::{Principal, TransportConfig};
+use maknae_config::TransportConfig;
 use maknae_io::{MutationDirectory, MutationRequired};
 use maknae_proto::{
     MutationGrant, MutationId, MutationLimits, MutationReport, MutationScope, Payload,
@@ -19,7 +19,7 @@ use maknae_security::{AttrValue, Authorizer, Decision, FsOperation, Lane};
 use std::os::fd::AsFd;
 use std::{
     os::fd::OwnedFd,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, OnceLock},
     time::Duration,
 };
@@ -74,7 +74,8 @@ fn checked(path: &str) -> Result<(), String> {
 fn prepare(
     verb: Verb,
     fd: Option<OwnedFd>,
-    principal: &Principal,
+    home: Option<&Path>,
+    uid: u32,
     lane: Lane,
 ) -> Result<PreparedMutation, String> {
     let asked = path(&verb).ok_or("not a mutation")?;
@@ -82,6 +83,9 @@ fn prepare(
     if lane != Lane::Local {
         return Err("mutation requires local subject execution".into());
     }
+    let home = home
+        .filter(|h| *h != Path::new("/"))
+        .ok_or("requester home unavailable")?;
     let read = matches!(verb, Verb::Read { .. });
     let fd = fd.ok_or(if read {
         "read descriptor missing"
@@ -105,9 +109,8 @@ fn prepare(
         _ => None,
     };
     if let Some((refused, kind, effect)) = object {
-        let verified =
-            maknae_io::verify_delegated(fd.as_fd(), delegated_plan(&principal.home, principal.uid))
-                .map_err(|e| format!("{refused}: {e}"))?;
+        let verified = maknae_io::verify_delegated(fd.as_fd(), delegated_plan(home, uid))
+            .map_err(|e| format!("{refused}: {e}"))?;
         maknae_io::refuse_access_bearing(fd.as_fd(), &verified.path)
             .map_err(|e| format!("{refused}: {e}"))?;
         let path = verified
@@ -129,8 +132,8 @@ fn prepare(
     let directory = maknae_io::verify_mutation_directory(
         fd,
         MutationRequired {
-            confined_beneath: principal.home.clone(),
-            root_required: delegated_plan(&principal.home, principal.uid).root_required,
+            confined_beneath: home.to_path_buf(),
+            root_required: delegated_plan(home, uid).root_required,
         },
     )
     .map_err(|e| format!("namespace location evidence refused: {e}"))?;
@@ -186,7 +189,7 @@ fn prepare(
             },
         ),
         Verb::FsDelete { recursive, .. } => {
-            if Path::new(&root) == principal.home {
+            if Path::new(&root) == home {
                 return Err("cannot delete confinement root".into());
             }
             if recursive {
@@ -436,7 +439,7 @@ pub(crate) async fn handle<S, E, P>(
     delegated: &maknae_io::DelegatedFds,
     authorizer: Arc<P>,
     emit: Arc<E>,
-    principal: Arc<Principal>,
+    home: Option<PathBuf>,
     cfg: &TransportConfig,
     seq: &Seq,
     mut record: AuditRecord,
@@ -473,12 +476,12 @@ where
     let prepared = tokio::time::timeout(
         authz_timeout,
         tokio::task::spawn_blocking(move || {
-            let prepared = prepare(original.clone(), fd, &principal, lane)?;
+            let prepared = prepare(original.clone(), fd, home.as_deref(), uid, lane)?;
             let decision = authorize(
                 &prepared,
                 &original,
                 uid,
-                Some(&principal.home),
+                home.as_deref(),
                 &*authorizer,
                 &policy_name,
             );
@@ -841,7 +844,7 @@ mod tests {
 
     struct Fixture {
         root: std::path::PathBuf,
-        principal: Principal,
+        principal: maknae_config::Principal,
     }
     impl Fixture {
         fn new() -> Self {
@@ -854,7 +857,7 @@ mod tests {
             std::fs::create_dir(&root).unwrap();
             std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
             let root = root.canonicalize().unwrap();
-            let principal = Principal {
+            let principal = maknae_config::Principal {
                 name: "operator".into(),
                 uid: nix::unistd::geteuid().as_raw(),
                 home: root.clone(),
@@ -888,7 +891,14 @@ mod tests {
             page: None,
         };
         let held = || Some(maknae_io::open_path_for_delegation(&target).unwrap());
-        let prepared = prepare(read(), held(), &fx.principal, Lane::Local).unwrap();
+        let prepared = prepare(
+            read(),
+            held(),
+            Some(&fx.principal.home),
+            fx.principal.uid,
+            Lane::Local,
+        )
+        .unwrap();
         assert_eq!(prepared.kind, FsOperation::Read);
         assert_eq!(prepared.paths, vec![target.to_str().unwrap().to_string()]);
         assert_eq!(
@@ -899,28 +909,64 @@ mod tests {
             }
         );
         assert_eq!(
-            prepare(read(), None, &fx.principal, Lane::Local)
-                .err()
-                .as_deref(),
+            prepare(
+                read(),
+                None,
+                Some(&fx.principal.home),
+                fx.principal.uid,
+                Lane::Local
+            )
+            .err()
+            .as_deref(),
             Some("read descriptor missing")
         );
-        assert!(prepare(read(), held(), &fx.principal, Lane::Remote).is_err());
-        assert!(prepare(read(), Some(fx.fd()), &fx.principal, Lane::Local)
-            .err()
-            .unwrap()
-            .starts_with("read evidence refused"));
+        for home in [None, Some(Path::new("/"))] {
+            assert_eq!(
+                prepare(read(), held(), home, fx.principal.uid, Lane::Local)
+                    .err()
+                    .as_deref(),
+                Some("requester home unavailable"),
+                "{home:?}"
+            );
+        }
+        assert!(prepare(
+            read(),
+            held(),
+            Some(&fx.principal.home),
+            fx.principal.uid,
+            Lane::Remote
+        )
+        .is_err());
+        assert!(prepare(
+            read(),
+            Some(fx.fd()),
+            Some(&fx.principal.home),
+            fx.principal.uid,
+            Lane::Local
+        )
+        .err()
+        .unwrap()
+        .starts_with("read evidence refused"));
         #[cfg(target_os = "linux")]
         assert!(prepare(
             read(),
             Some(std::fs::File::open(&target).unwrap().into()),
-            &fx.principal,
+            Some(&fx.principal.home),
+            fx.principal.uid,
             Lane::Local
         )
         .err()
         .unwrap()
         .contains("confers access beyond location"));
         std::fs::hard_link(&target, fx.root.join("second-read-link")).unwrap();
-        assert!(prepare(read(), held(), &fx.principal, Lane::Local).is_err());
+        assert!(prepare(
+            read(),
+            held(),
+            Some(&fx.principal.home),
+            fx.principal.uid,
+            Lane::Local
+        )
+        .is_err());
         assert_eq!(std::fs::read(target).unwrap(), b"sentinel");
     }
     fn fixture_pdp(fx: &Fixture) -> crate::Composition<maknae_authz_basic::HermeticAuthorizer> {
@@ -1000,7 +1046,6 @@ mod tests {
         let emit = Arc::new(Recorder::default());
         let cfg = maknae_config::transport_from_section(None).unwrap();
         let seq = Seq::new();
-        let principal = Arc::new(fx.principal.clone());
         let authorizer = Arc::new(fixture_pdp(&fx));
         let (_client, mut server) = tokio::io::duplex(65536);
         let fds = maknae_io::DelegatedFds::new(4);
@@ -1013,7 +1058,7 @@ mod tests {
                 &fds,
                 authorizer.clone(),
                 emit.clone(),
-                principal.clone(),
+                Some(fx.root.clone()),
                 &cfg,
                 &seq,
                 record(),
@@ -1048,7 +1093,7 @@ mod tests {
                 &fds,
                 authorizer,
                 emit.clone(),
-                principal.clone(),
+                Some(fx.root.clone()),
                 &cfg,
                 &seq,
                 record(),
@@ -1082,7 +1127,7 @@ mod tests {
             &fds,
             delayed,
             emit.clone(),
-            principal,
+            Some(fx.root.clone()),
             &cfg,
             &seq,
             record(),
@@ -1139,18 +1184,27 @@ mod tests {
     #[test]
     fn preparation_requires_local_real_descriptor_and_valid_mkdir_suffix() {
         let fx = Fixture::new();
-        assert!(prepare(Verb::Ping, None, &fx.principal, Lane::Local).is_err());
+        assert!(prepare(
+            Verb::Ping,
+            None,
+            Some(&fx.principal.home),
+            fx.principal.uid,
+            Lane::Local
+        )
+        .is_err());
         assert!(prepare(
             fx.mkdir(true, vec!["one".into(), "two".into()]),
             Some(fx.fd()),
-            &fx.principal,
+            Some(&fx.principal.home),
+            fx.principal.uid,
             Lane::Remote
         )
         .is_err());
         assert!(prepare(
             fx.mkdir(true, vec!["one".into(), "two".into()]),
             None,
-            &fx.principal,
+            Some(&fx.principal.home),
+            fx.principal.uid,
             Lane::Local
         )
         .is_err());
@@ -1165,7 +1219,8 @@ mod tests {
             assert!(prepare(
                 fx.mkdir(parents, components),
                 Some(fx.fd()),
-                &fx.principal,
+                Some(&fx.principal.home),
+                fx.principal.uid,
                 Lane::Local
             )
             .is_err());
@@ -1176,7 +1231,8 @@ mod tests {
                 recursive: false
             },
             Some(fx.fd()),
-            &fx.principal,
+            Some(&fx.principal.home),
+            fx.principal.uid,
             Lane::Local
         )
         .is_err());
@@ -1186,7 +1242,8 @@ mod tests {
                 recursive: false
             },
             Some(fx.fd()),
-            &fx.principal,
+            Some(&fx.principal.home),
+            fx.principal.uid,
             Lane::Local
         )
         .is_err());
@@ -1195,7 +1252,8 @@ mod tests {
         assert!(prepare(
             fx.mkdir(true, vec!["two".into()]),
             Some(std::fs::File::open(&target).unwrap().into()),
-            &fx.principal,
+            Some(&fx.principal.home),
+            fx.principal.uid,
             Lane::Local
         )
         .is_err());
@@ -1206,7 +1264,14 @@ mod tests {
             conversation: None,
         };
         let held = || Some(maknae_io::open_path_for_delegation(&target).unwrap());
-        let prepared = prepare(write(), held(), &fx.principal, Lane::Local).unwrap();
+        let prepared = prepare(
+            write(),
+            held(),
+            Some(&fx.principal.home),
+            fx.principal.uid,
+            Lane::Local,
+        )
+        .unwrap();
         assert_eq!(prepared.kind, FsOperation::WriteExisting);
         assert_eq!(prepared.paths, vec![target.to_str().unwrap().to_string()]);
         assert_eq!(
@@ -1216,9 +1281,23 @@ mod tests {
                 effect: ReportedEffect::ReplacedFile
             }
         );
-        assert!(prepare(write(), Some(fx.fd()), &fx.principal, Lane::Local).is_err());
+        assert!(prepare(
+            write(),
+            Some(fx.fd()),
+            Some(&fx.principal.home),
+            fx.principal.uid,
+            Lane::Local
+        )
+        .is_err());
         std::fs::hard_link(&target, fx.root.join("second-link")).unwrap();
-        assert!(prepare(write(), held(), &fx.principal, Lane::Local).is_err());
+        assert!(prepare(
+            write(),
+            held(),
+            Some(&fx.principal.home),
+            fx.principal.uid,
+            Lane::Local
+        )
+        .is_err());
         assert_eq!(std::fs::read(target).unwrap(), b"sentinel");
     }
 }

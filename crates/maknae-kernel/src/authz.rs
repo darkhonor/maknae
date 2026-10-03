@@ -28,9 +28,49 @@ pub fn home_if_member(
     }
 }
 
+pub fn admission_facts(
+    looked_up: Option<crate::groupres::Membership>,
+) -> (bool, Option<String>, Option<std::path::PathBuf>) {
+    match looked_up {
+        Some(m) => (m.in_group, Some(m.user), m.home),
+        None => (false, None, None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_looked_up_member_carries_its_user_and_home_through() {
+        let m = crate::groupres::Membership {
+            in_group: true,
+            user: "b-435-sentinel".into(),
+            home: Some("/home/b-435-sentinel".into()),
+        };
+        assert_eq!(
+            admission_facts(Some(m)),
+            (
+                true,
+                Some("b-435-sentinel".to_string()),
+                Some(std::path::PathBuf::from("/home/b-435-sentinel"))
+            )
+        );
+        let outsider = crate::groupres::Membership {
+            in_group: false,
+            user: "c-435-sentinel".into(),
+            home: None,
+        };
+        assert_eq!(
+            admission_facts(Some(outsider)),
+            (false, Some("c-435-sentinel".to_string()), None)
+        );
+    }
+
+    #[test]
+    fn a_failed_lookup_admits_no_one_and_carries_no_home() {
+        assert_eq!(admission_facts(None), (false, None, None));
+    }
 
     #[test]
     fn only_a_member_has_its_home_resolved() {
