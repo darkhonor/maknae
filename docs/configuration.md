@@ -643,7 +643,9 @@ egress:
   maximum, the 60 s transport maximum for the reply write, and 30 s for the group
   lookup, the PDP decision and the audit appends. So it does not stop a turn the daemon
   would still answer, unless an audit append stalls, since those have no time bound.
-  Every other reply is still bounded by `transport.read_timeout_ms`. The default, 280000,
+  A file action's reply waits `transport.read_timeout_ms` plus 5 s, the daemon's bound on
+  resolving the requester's home; every other reply is bounded by
+  `transport.read_timeout_ms`. The default, 280000,
   covers the deputy's worst-case wall time on one request with room to spare: per turn
   the deputy makes one wrapping lookup and one unwrap at Vault, each bounded at 30 s,
   then the provider call, bounded at 120 s — 180 s. There is no boot probe and no key
