@@ -1663,6 +1663,53 @@ async fn a_second_user_cannot_make_a_directory_in_the_enrolled_home() {
 }
 
 #[tokio::test]
+async fn a_second_user_deletes_a_tree_beneath_their_own_home() {
+    let b = common::second_home("mutation_delete_own");
+    let fx = Fixture::new("delete_own", "Write").with_requester_home(Some(b.0.clone()));
+    let target = b.join("sub");
+    std::fs::create_dir_all(target.join("child")).unwrap();
+    let (result, record) = second_subject_attempt(
+        &fx,
+        Verb::FsDelete {
+            path: target.to_str().unwrap().into(),
+            recursive: true,
+        },
+        &b,
+    )
+    .await;
+    assert_granted(
+        &result,
+        &record,
+        maknae_proto::MutationScope::RecursiveDelete {
+            root: target.to_str().unwrap().into(),
+        },
+    );
+}
+
+#[tokio::test]
+async fn a_second_user_cannot_delete_in_the_enrolled_home() {
+    let b = common::second_home("mutation_delete_enrolled");
+    let fx = Fixture::new("delete_enrolled", "Write").with_requester_home(Some(b.0.clone()));
+    let target = fx.root.join("victim");
+    std::fs::create_dir_all(target.join("child")).unwrap();
+    let (result, record) = second_subject_attempt(
+        &fx,
+        Verb::FsDelete {
+            path: target.to_str().unwrap().into(),
+            recursive: true,
+        },
+        &fx.root,
+    )
+    .await;
+    assert_refused(
+        &result,
+        &record,
+        "namespace location evidence refused: escapes the anchor",
+    );
+    assert!(target.join("child").exists());
+}
+
+#[tokio::test]
 async fn a_requester_cannot_delete_their_own_home() {
     let b = common::second_home("mutation_delete_home");
     let fx = Fixture::new("delete_home", "Write").with_requester_home(Some(b.0.clone()));
@@ -1693,7 +1740,8 @@ async fn no_requester_home_means_no_mutation() {
     let fx = Fixture::new("no_home", "Write").with_requester_home(None);
     let (result, record) =
         second_subject_attempt(&fx, create_in(&fx.root.join("new")), &fx.root).await;
-    assert_refused(&result, &record, "requester home unavailable");
+    assert!(matches!(result, RespResult::Err(_)), "{result:?}");
+    assert_eq!(record.outcome.result, "deny");
     assert_eq!(record.outcome.reason, "requester home unavailable");
     assert!(!fx.root.join("new").exists());
 }

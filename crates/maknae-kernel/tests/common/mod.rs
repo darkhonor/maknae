@@ -196,6 +196,7 @@ pub fn euid_name() -> String {
         .expect("the test euid has a passwd entry")
         .name
 }
+
 pub struct DirGuard(pub PathBuf);
 
 impl std::ops::Deref for DirGuard {
