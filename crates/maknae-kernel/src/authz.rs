@@ -17,9 +17,35 @@ pub fn authorize_connection(cert_verified: bool, uid_in_group: bool) -> ConnDeci
     }
 }
 
+pub fn home_if_member(
+    in_group: bool,
+    resolve: impl FnOnce() -> Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    if in_group {
+        resolve()
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_member_has_its_home_resolved() {
+        let called = std::cell::Cell::new(false);
+        let resolve = || {
+            called.set(true);
+            Some(std::path::PathBuf::from("/home/b"))
+        };
+        assert_eq!(home_if_member(false, resolve), None);
+        assert!(!called.get(), "a non-member's home is never resolved");
+        assert_eq!(
+            home_if_member(true, || Some("/home/b".into())),
+            Some("/home/b".into())
+        );
+    }
     #[test]
     fn permit_only_when_both() {
         assert!(matches!(

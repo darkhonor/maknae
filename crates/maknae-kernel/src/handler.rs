@@ -373,9 +373,23 @@ pub fn delegated_plan(home: &std::path::Path, owner_uid: u32) -> maknae_io::Dele
     }
 }
 
+/// The requester's home in the form `verify_delegated` reports paths in, or `None` when it cannot confine (#435).
+pub fn confinable_home(resolved: std::path::PathBuf) -> Option<std::path::PathBuf> {
+    (resolved != std::path::Path::new("/") && resolved.to_str().is_some()).then_some(resolved)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_utf8_home_below_the_root_is_confinable() {
+        use std::os::unix::ffi::OsStrExt;
+        assert_eq!(confinable_home("/home/b".into()), Some("/home/b".into()));
+        assert_eq!(confinable_home("/".into()), None);
+        let odd = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&[0x2f, 0x68, 0xff]));
+        assert_eq!(confinable_home(odd), None);
+    }
 
     #[test]
     fn ping_dispatches_pong() {

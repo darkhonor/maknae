@@ -34,10 +34,21 @@ pub fn maknae_gid() -> Result<nix::unistd::Gid, AuthzError> {
 /// explicit. Second, the caller runs this on the BLOCKING pool under a timeout
 /// and a circuit breaker precisely because NSS can stall; resolving the name
 /// anywhere else would put an unbounded `getpwuid` back on the async worker.
+///
+/// The home rides the same lookup so that the PDP and the PEP get one value (#435).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Membership {
     pub in_group: bool,
     pub user: String,
+    pub home: Option<std::path::PathBuf>,
+}
+
+/// The requester's home in the form `verify_delegated` reports paths in, or `None` when it cannot confine (#435).
+pub fn canonical_home(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    if !dir.is_absolute() {
+        return None;
+    }
+    crate::handler::confinable_home(maknae_io::resolve_dir(dir).ok()?)
 }
 
 pub fn uid_in_maknae_group(uid: u32) -> Result<Membership, AuthzError> {
@@ -54,6 +65,7 @@ pub fn uid_in_maknae_group(uid: u32) -> Result<Membership, AuthzError> {
         Ok(Membership {
             in_group,
             user: name.clone(),
+            home: crate::authz::home_if_member(in_group, || canonical_home(&user.dir)),
         })
     };
     // A group that cannot be resolved is NOT a member -- fail closed -- but the
@@ -142,5 +154,76 @@ mod tests {
             uid_in_maknae_group(999_999).is_err(),
             "an unresolvable uid must fail closed, not resolve to a nameless non-member"
         );
+    }
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("groupres_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn a_real_directory_resolves_to_its_kernel_form() {
+        let d = scratch("real");
+        assert_eq!(
+            canonical_home(&d),
+            Some(maknae_io::resolve_dir(&d).unwrap())
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_symlinked_home_resolves_to_its_target() {
+        let d = scratch("linktarget");
+        let link = d.with_extension("link");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&d, &link).unwrap();
+        assert_eq!(canonical_home(&link), canonical_home(&d));
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn an_unusable_home_is_none() {
+        let d = scratch("unusable");
+        let file = d.join("f");
+        std::fs::write(&file, b"").unwrap();
+        for bad in [
+            std::path::PathBuf::from("relative/home"),
+            d.join("missing"),
+            file.clone(),
+            std::path::PathBuf::from("/"),
+        ] {
+            assert_eq!(canonical_home(&bad), None, "{bad:?}");
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_non_utf8_home_is_none() {
+        use std::os::unix::ffi::OsStrExt;
+        let d = scratch("nonutf8");
+        let odd = d.join(std::ffi::OsStr::from_bytes(&[0x68, 0xff]));
+        std::fs::create_dir_all(&odd).unwrap();
+        assert_eq!(canonical_home(&odd), None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_membership_carries_the_callers_canonical_home() {
+        let me = nix::unistd::geteuid().as_raw();
+        let Ok(Some(u)) = User::from_uid(Uid::from_raw(me)) else {
+            return;
+        };
+        if let Ok(m) = uid_in_maknae_group(me) {
+            let expected = if m.in_group {
+                canonical_home(&u.dir)
+            } else {
+                None
+            };
+            assert_eq!(m.home, expected);
+        }
     }
 }
