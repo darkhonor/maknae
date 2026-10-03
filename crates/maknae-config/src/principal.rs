@@ -2,8 +2,8 @@
 //! (`name`/`uid`/`home`) that `maknae enroll` writes into `/etc/maknae/maknae.yaml`.
 //!
 //! The daemon runs as `_maknae`, not the operator, and ADR-0018 removed the old
-//! single-operator record — so a later task's capability-grant policy needs an explicit
-//! referent for `~` (the enrolled operator's home). This section supplies it.
+//! single-operator record. `uid` is the default-admin subject; `home` has no
+//! consumer (the requester's home is resolved per request, #435).
 //!
 //! Fail-closed, but NOT the `transport`/`audit` shape: those sections default
 //! every field when absent-or-partial. `principal` has no safe default identity

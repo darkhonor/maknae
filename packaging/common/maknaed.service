@@ -61,8 +61,8 @@ RuntimeDirectoryMode=0751
 # (which chowns/chmods at start, colliding with the chattr +a inode).
 ReadWritePaths=/var/log/maknae
 ProtectSystem=strict
-# read-only: the daemon opens nothing in a home (#365), but boot resolves the
-# enrolled home and each attempt stats it, so the path stays visible. Write to any
+# read-only: the daemon opens nothing in a home (#365), but each request resolves the
+# requester's home and each attempt stats it, so the path stays visible. Write to any
 # home remains forbidden at this layer regardless of DAC/MAC.
 ProtectHome=read-only
 NoNewPrivileges=yes

@@ -243,7 +243,7 @@ pub fn admitted_user_for_test(user: Option<&str>) -> Option<String> {
 
 /// Build the seam Request from the verb + kernel-verified peer uid. Subject
 /// carries the kernel-verified `uid` (i64 carriage of the u32 — lossless) and,
-/// when the kernel supplies one, the home `~` binds to; both are
+/// when the kernel resolves one, the requester's home `~` binds to; both are
 /// kernel-derived. ADR-0024's "the uid is the whole subject" is the identity
 /// claim; the home is a separate kernel-stamped attribute. `Read` carries the
 /// client-supplied path as the resource `path` attribute, and an admitted

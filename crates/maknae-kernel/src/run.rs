@@ -2388,16 +2388,11 @@ where
                                             let now = Instant::now();
                                             let admission =
                                                 group_breaker.lock().await.begin_attempt_at(now);
-                                            // #275: the peer's OS username rides
-                                            // out of the SAME blocking lookup that
-                                            // answers membership, so it inherits the
-                                            // timeout and the breaker. Resolving it
-                                            // anywhere else would put an unbounded
-                                            // getpwuid back on this async worker —
-                                            // exactly what the breaker exists to
-                                            // prevent. On every fail-closed arm the
-                                            // name is absent, deliberately: not
-                                            // spawning NSS work is the point.
+                                            // #275, #435: the peer's username and
+                                            // home ride the SAME blocking lookup as
+                                            // membership, under its timeout and
+                                            // breaker. Absent on every fail-closed
+                                            // arm.
                                             let (in_group, peer_user, peer_home) = match admission {
                                                 BreakerAdmission::RefuseOpen => {
                                                     if group_breaker

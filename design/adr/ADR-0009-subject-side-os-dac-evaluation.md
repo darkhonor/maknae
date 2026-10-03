@@ -10,6 +10,8 @@
 
 **This is a violation of a ratified trust assumption, not merely an incomplete feature.** [ADR-0006](ADR-0006-client-authentication-model.md) trust assumption 8 (2026-08-22) states: *"No Maknae component performs an action on a client's behalf that exceeds that client's own authority on the host or in the policy model … Any design change that would have the trust plane act with its own privileges **for** a client is a security decision requiring an ADR, not a convenience."* The shipped `fs.read` path does exactly that — it resolves a client-supplied name with `_maknae`'s credentials. **This ADR is the discharge of that clause**, and decision 1 *restores* the assumption rather than carving an exception into it.
 
+**Amended 2026-10-04 (#435):** the bullets below describe the state when this ADR was written. `read_pep` no longer exists; reads go through `crates/maknae-kernel/src/mutation.rs`, and the owner and confinement root are the requester's, as the amendment after decision 4's macOS bullet records.
+
 **What is true today.** The `fs.read` path enforces DAC by **confinement at the anchor**, not by evaluating the subject's access to the target:
 
 - `crates/maknae-kernel/src/run.rs::read_pep(home, owner_uid, path, budget)` is called with `owner_uid = principal.uid` — the *enrolled principal*, never `peer_uid`.
@@ -87,11 +89,11 @@ The daemon cannot distinguish *"the client could not open it"* from *"the client
 
 ### 3. Access and confinement are separate proofs. Both are required.
 
-**Amended 2026-09-26 (#365):** the table and the sentence following it.
+**Amended 2026-09-26 (#365):** the table and the sentence following it. **Amended 2026-10-04 (#435):** the table's first row says the requester's home, not the enrolled one.
 
 | Proof | Established by | Guarantees |
 |---|---|---|
-| the delegated no-access descriptor | the daemon, on its own fd table | where the object is: the kernel-reported path the PDP decides on, beneath the enrolled home |
+| the delegated no-access descriptor | the daemon, on its own fd table | where the object is: the kernel-reported path the PDP decides on, beneath the requester's home |
 | the client's re-open | the subject's own `open(2)` | the subject has OS access to this object for this operation |
 
 Neither substitutes for the other. The re-open says nothing about *where*; the descriptor's location says nothing about *who*. Confinement remains a **Maknae** control — the `~/**` grant — independent of what OS DAC permits, so a subject reading its own world-readable file outside the home is still refused.
@@ -105,6 +107,14 @@ The daemon asks the kernel where the received fd points, using its **own** `/pro
 **Amended 2026-09-26 (#365):** the macOS bullet below — its consumer list and its sentence on enroll.
 
 - **macOS:** `fcntl(fd, F_GETPATH)` — **VERIFIED 2026-08-30** on a `macos-26` runner, the full delegated suite (18 tests) green. `F_GETPATH` and not `F_GETPATH_NOFIRMLINK`: on APFS `/Users` is a firmlink to `/System/Volumes/Data/Users` and the two calls return the two forms; the user-visible form is what an operator writes in `principal.home` and what `realpath` reports, so it is what the confinement prefix-check compares against. *(Corrected 2026-09-04, #216: `principal.home` is not operator-written — `maknae enroll` takes it verbatim from `getpwuid` and re-derives it on every run, with no canonicalization at enroll or load. The `F_GETPATH` choice stands on the form `getpwuid` actually returns on macOS — `/Users/alex`, the firmlink-side name — being the form `F_GETPATH` reports; `realpath` agrees but is nowhere on the path. Where the passwd form and the kernel-reported form differ, every read denies fail-closed, which #216 tracked.)* *(**Resolved 2026-09-12, #216.** The daemon no longer compares two forms. `authz_boot_gate` canonicalizes `principal.home` ONCE, at or above `Principal`, through `maknae_io::resolve_dir` — which is the SAME `F_GETPATH` / `/proc/self/fd` resolver `verify_delegated` names a delegated descriptor with, so the confinement root and the kernel-reported path agree by CONSTRUCTION rather than by assertion. Every consumer reads that one value: the confinement root at both call sites and the `~` expansion every allow/deny glob is parsed against. An unresolvable home refuses boot (`AuthzBootRefusal::UnresolvableHome`) instead of falling back to the configured string. Maintainer ruling: **boot** canonicalizes, not enroll — `bins/maknae` is untrusted by design, so the trust plane must not depend on the CLI having written a canonical value; enroll canonicalizes only for its own work on the home. Operators keep writing `~`, which is the point: nobody should need to know whether their home is NFS-mounted to express policy.)* *(Amended 2026-09-28, #400, [ADR-0027](ADR-0027-unsafe-code-is-confined-to-maknae-sys.md): on macOS, `resolve_dir` no longer opens the home. The `O_SEARCH` open it used needs search permission on the directory itself; measured with a `000` directory the caller owns, the kernel refused it with `EACCES`. The `_maknae`-and-`0750`-home case is pending the macOS acceptance run (#76). *(Measured 2026-09-28, #76: on a notarized install, `maknaed` running as `_maknae` resolved the operator's default `0750` home with `getattrlist` and booted.)* It now calls `maknae_sys::full_path`, which uses `getattrlist(ATTR_CMN_FULLPATH)` and needs search permission on the ancestors only. That is a different call from `F_GETPATH`, so on macOS the two forms no longer agree by construction; `full_path_agrees_with_f_getpath_byte_for_byte` holds the agreement on the `darwin-native` CI lane, which runs whenever Rust changes. Linux still uses the one `/proc/self/fd` resolver.)* If that is wrong the failure is **fail-closed** — a form mismatch makes `strip_prefix` fail, which denies — never a bypass.
+
+**Amended 2026-10-04 (#435), superseding the "Resolved 2026-09-12, #216" note above where it says boot canonicalizes `principal.home` and `~` expands from it:**
+
+- The confinement root and the anchor owner are the **requester's** canonical home and uid, not the enrolled principal's. The home is resolved per request, in the same blocking admission lookup that decides maknae-group membership and only for members, through the same `maknae_io::resolve_dir`. A home that is relative, missing, not a directory, unresolvable, or exactly `/` is `None`.
+- That one value is both the PEP's confinement root and the PDP's `~`. `~` stays symbolic in the compiled policy and binds at decide time through the kernel-stamped `SUBJECT_HOME` attribute; no request field reaches it. There is no second lookup and no cache.
+- Boot no longer canonicalizes `principal.home`, and `AuthzBootRefusal::UnresolvableHome` is gone. `principal.home` has no consumer; the field stays in the config shape until #440. A grant written before its folder exists permits once the folder is created, with no restart.
+- With no home, every filesystem verb is refused with the reason `requester home unavailable`; conversation turns still work.
+- Named residuals. uid 0, or the daemon's own uid, as requester: no new rule; the owner proof and bindings govern them as for anyone. Shared home (two uids, one directory): the owner proof refuses the uid that does not own it. Nested homes (one user's home inside another's): OS DAC decides, because the client opens files as the subject. Home change mid-request (`usermod -d` after admission): the request uses the home resolved at admission, the same value at PDP and PEP, and the next request sees the change.
 
 **Amended 2026-09-26 (#365):** this paragraph's check.
 
@@ -138,9 +148,9 @@ The existing suite's `a_symlink_alias_of_a_denied_file_is_refused` stays green, 
 
 ### 7. The home's owner and mode requirement is retained — enforced by `stat`, not by opening
 
-**Amended 2026-09-26 (#365):** this decision's first paragraph, its last sentence.
+**Amended 2026-09-26 (#365):** this decision's first paragraph, its last sentence. **Amended 2026-10-04 (#435):** the anchor owner is the requester's uid, not `principal.uid`.
 
-Dropping the anchor **open** does not drop the anchor **requirement**. `AnchorRequired { owner: Some(principal.uid), mode_mask: Some(0o022) }` — *"THE alias-planting boundary"*, refusing a home any non-principal can write — is preserved by a plain `stat` of the home path, which requires only search (`x`) on `/home` (universally `0755`) and **no permission on the home itself**. Under SELinux the `stat` also needs `getattr` on the home's type (`user_home_dir_t`), which the shipped policy grants and nothing more.
+Dropping the anchor **open** does not drop the anchor **requirement**. `AnchorRequired { owner: Some(requester_uid), mode_mask: Some(0o022) }` — *"THE alias-planting boundary"*, refusing a home any non-owner can write — is preserved by a plain `stat` of the home path, which requires only search (`x`) on `/home` (universally `0755`) and **no permission on the home itself**. Under SELinux the `stat` also needs `getattr` on the home's type (`user_home_dir_t`), which the shipped policy grants and nothing more.
 
 For each thing the anchor open enforced: inode pinning is replaced by the delegated fd (a stronger pin — an open file description cannot change identity); owner and mode are re-established by `stat` as above; symlink refusal at intermediate components is superseded by decision 6, deliberately.
 
