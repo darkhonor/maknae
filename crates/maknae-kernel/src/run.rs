@@ -117,7 +117,7 @@ pub struct WhereCtx {
 /// `handle` still holds raw configuration in the same scope as the arm that
 /// answers `admin.config.show`: `cfg` (the whole `transport` section --
 /// `socket_path`, `prompt_max_bytes`, `read_timeout_ms`), `au3_1` (the raw
-/// `audit.au3_1` object), and `principal` (`name`, `uid`, `home`). That debt has since been
+/// `audit.au3_1` object), and `principal` (`name`, `uid`). That debt has since been
 /// PAID once: the `admin.status` arm wanting "which socket am I on?" found
 /// `cfg.socket_path` sitting right there, and `listener` is disclosed under
 /// ADR-0010 decision 16 with its own argument and its own gate row. **Any
@@ -3038,7 +3038,11 @@ async fn boot_after_sink(
     // no principal can authorize no one — operator ruling 2026-08-28), or any
     // PDP construction refusal (hardened policy load, bindings semantics).
     // Each → peer-less AU-3 refusal record → RunError::Authz → exit code 3.
-    let principal_opt = match maknae_config::principal_from_section(boot.section("principal")) {
+    let principal_opt = match boot
+        .shadowed_sections("principal")
+        .try_for_each(maknae_config::principal_keys_known)
+        .and_then(|()| maknae_config::principal_from_section(boot.section("principal")))
+    {
         Ok(p) => p,
         Err(e) => {
             return Err(refuse_authz_boot(
@@ -3899,10 +3903,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         let _g = ENV_LOCK.lock().unwrap();
         std::env::remove_var("CREDENTIALS_DIRECTORY");
         let d = Dir::new("missing_authz");
-        write_common_fixture(
-            &d,
-            "principal:\n  name: op\n  uid: 1000\n  home: /home/op\n",
-        );
+        write_common_fixture(&d, "principal:\n  name: op\n  uid: 1000\n");
         // Deliberately no authz.yaml written.
 
         match block_on_run_inner(&d.0) {
@@ -3953,6 +3954,80 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         }
     }
 
+    #[test]
+    fn a_shadowed_principal_carrying_home_refuses_boot() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("CREDENTIALS_DIRECTORY");
+        let d = Dir::new("shadowed_principal_home");
+        write_common_fixture(
+            &d,
+            "principal:\n  name: op\n  uid: 1000\n  home: /home/op\n",
+        );
+        let cd = d.0.join("config.d");
+        std::fs::create_dir(&cd).unwrap();
+        std::fs::set_permissions(&cd, std::fs::Permissions::from_mode(0o750)).unwrap();
+        put(
+            &cd,
+            "10-principal.yaml",
+            "principal:\n  name: op\n  uid: 1000\n",
+            0o640,
+        );
+        put(
+            &d.0,
+            "authz.yaml",
+            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n",
+            0o640,
+        );
+
+        match block_on_run_inner(&d.0) {
+            Err(RunError::Authz(msg)) => assert_eq!(
+                msg.to_string(),
+                "maknae daemon refused to start: the authorization policy could not be loaded: \
+                 unknown key 'home' in 'principal'"
+            ),
+            other => panic!("expected Err(RunError::Authz), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_partial_principal_shadowed_by_a_complete_member_still_boots() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("CREDENTIALS_DIRECTORY");
+        let d = Dir::new("shadowed_principal_partial");
+        write_common_fixture(&d, "principal: {}\n");
+        let cd = d.0.join("config.d");
+        std::fs::create_dir(&cd).unwrap();
+        std::fs::set_permissions(&cd, std::fs::Permissions::from_mode(0o750)).unwrap();
+        put(
+            &cd,
+            "10-principal.yaml",
+            "principal:\n  name: alice\n  uid: 1000\n",
+            0o640,
+        );
+        put(
+            &d.0,
+            "authz.yaml",
+            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n",
+            0o640,
+        );
+
+        let result = block_on_run_inner(&d.0);
+        if let Err(RunError::Authz(msg)) = &result {
+            assert!(
+                !msg.to_string().contains("principal"),
+                "a partial shadowed principal must not refuse boot: {msg}"
+            );
+        }
+        if !nix::unistd::geteuid().is_root() {
+            match result {
+                Err(RunError::Authz(msg)) => {
+                    assert!(msg.to_string().contains("authz.yaml is not owned by root"))
+                }
+                other => panic!("expected the authz.yaml ownership refusal, got {other:?}"),
+            }
+        }
+    }
+
     // (c) A valid default `authz.yaml` + an enrolled principal gets PAST the
     // authz gate: the boot posture record is emitted (client construct + source
     // resolve succeeded), and boot only fails later, at `mint()` (no live Vault
@@ -3977,10 +4052,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
     fn valid_authz_and_principal_reaches_posture_record() {
         let _g = ENV_LOCK.lock().unwrap();
         let d = Dir::new("valid_reaches_posture");
-        write_common_fixture(
-            &d,
-            "principal:\n  name: op\n  uid: 1000\n  home: /home/op\n",
-        );
+        write_common_fixture(&d, "principal:\n  name: op\n  uid: 1000\n");
         put(
             &d.0,
             "authz.yaml",
@@ -4465,7 +4537,6 @@ mod home_resolution_tests {
                 maknae_config::Principal {
                     name: "operator".into(),
                     uid,
-                    home: dir.0.clone(),
                 },
                 maknae_config::TargetRequired {
                     owner: None,

@@ -94,7 +94,7 @@ case "$1" in
         # --- systemd unit --------------------------------------------------------
         # DO NOT auto-enable or start on fresh install: a fresh install is not
         # runnable until `sudo maknae enroll` provisions the daemon credential and
-        # principal (the shipped authz.yaml fail-closes until then), and the
+        # principal (the boot gate refuses to start until then), and the
         # operator enables it explicitly (matches the rpm's preset-disabled default
         # and the documented install -> enroll -> `systemctl enable --now` flow).
         systemctl daemon-reload 2>/dev/null || :

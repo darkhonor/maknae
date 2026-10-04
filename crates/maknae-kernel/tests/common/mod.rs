@@ -106,8 +106,11 @@ pub fn fixture_principal() -> maknae_config::Principal {
     maknae_config::Principal {
         name: "operator".into(),
         uid: 501,
-        home: "/home/operator".into(),
     }
+}
+
+pub fn fixture_home() -> PathBuf {
+    PathBuf::from("/home/operator")
 }
 
 /// Standard extra args for `handle()` in transport-behavior tests.
@@ -278,7 +281,6 @@ impl Fixture {
         let principal = maknae_config::Principal {
             name: "operator".into(),
             uid: nix::unistd::geteuid().as_raw(),
-            home: root.clone(),
         };
         let allow_lines: String = allows
             .iter()

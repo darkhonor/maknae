@@ -327,7 +327,6 @@ mod tests {
         Principal {
             name: "operator".into(),
             uid: 501,
-            home: std::path::PathBuf::from("/home/operator"),
         }
     }
 
@@ -452,11 +451,9 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(d.join("authz.yaml"), std::fs::Permissions::from_mode(0o640))
             .unwrap();
-        let link = d.join("linkhome");
-        std::os::unix::fs::symlink(std::env::temp_dir(), &link).unwrap();
         let sent = Principal {
-            home: link,
-            ..principal()
+            name: "verbatim".into(),
+            uid: 4242,
         };
         let seen: std::cell::RefCell<Option<Principal>> = std::cell::RefCell::new(None);
         let got = authz_boot_gate_with(&d, Some(sent.clone()), |path, pr| {
@@ -465,33 +462,7 @@ mod tests {
         });
         let _ = std::fs::remove_dir_all(&d);
         got.expect("gate success arm");
-        assert_eq!(
-            seen.borrow().as_ref().expect("construct ran").home,
-            sent.home
-        );
-    }
-
-    #[test]
-    fn boot_does_not_depend_on_the_enrolled_home_resolving() {
-        let principal = Principal {
-            name: "op".into(),
-            uid: nix::unistd::geteuid().as_raw(),
-            home: std::path::PathBuf::from("/nonexistent/maknae-435"),
-        };
-        let reached = std::cell::Cell::new(false);
-        let got = authz_boot_gate_with(Path::new("/unused"), Some(principal.clone()), |_, p| {
-            reached.set(true);
-            assert_eq!(p.home, principal.home);
-            Err(AuthzBasicError::Load("construct reached".into()))
-        });
-        assert!(reached.get(), "the gate refused before construct: {got:?}");
-        assert!(
-            matches!(
-                got,
-                Err(AuthzBootRefusal::Construct(AuthzBasicError::Load(ref m))) if m == "construct reached"
-            ),
-            "{got:?}"
-        );
+        assert_eq!(*seen.borrow(), Some(sent));
     }
 
     /// Trigger 2, bindings half — the filesystem-free mapping killer that

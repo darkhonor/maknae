@@ -100,8 +100,8 @@ pub fn boot(config_dir: &Path) -> Result<BootConfig, ConfigError> {
     // minimal-config boot tests — and any pre-Jackrabbit deployment written before
     // `maknae enroll` started emitting a `principal` block — still load. The daemon's
     // actual dependence on a vault block fails closed later at `from_document`/`mint`
-    // (MissingKey); the authorization layer's dependence on a principal (`~` resolution,
-    // Task 6) fails closed there, not here.
+    // (MissingKey); the authorization layer's dependence on a principal (#77) fails
+    // closed there, not here.
     let specs = boot_specs();
     let document = load_config_rooted(config_dir, &specs, &ROOT_REQUIRED_SECTIONS)?;
     assemble_boot(document)
@@ -485,7 +485,7 @@ mod tests {
             &d.0,
             "maknae.yaml",
             "core:\n  identity:\n    name: t\n\
-             principal:\n  name: alice\n  uid: 1000\n  home: /Users/alice\n",
+             principal:\n  name: alice\n  uid: 1000\n",
             0o640,
         );
         let cfg = boot(&d.0).expect("boots with a principal block");
@@ -495,16 +495,13 @@ mod tests {
             .expect("principal section present");
         assert_eq!(p.name, "alice");
         assert_eq!(p.uid, 1000);
-        assert_eq!(p.home, std::path::PathBuf::from("/Users/alice"));
     }
 
     // A pre-Jackrabbit config WITHOUT a `principal` block still LOADS — the
     // optional-registration / upgrade property (spec §5.5), scoped to the loader.
     // (Discharged 2026-08-28, #77: the boot gate now REQUIRES the principal —
     // see boot_gate.rs. The loader half here legitimately still loads a
-    // principal-less document; the refusal is the kernel gate's, downstream.
-    // Historical note: the daemon wouldn't *start* without a principal once authz used `~`
-    // — Task 6 covers that; this only pins that the loader doesn't reject it.)
+    // principal-less document; the refusal is the kernel gate's, downstream.)
     #[cfg(unix)]
     #[test]
     fn config_without_principal_section_still_boots() {

@@ -2,7 +2,7 @@
 # Maknae daemon configuration (shipped skeleton).
 #
 # `sudo maknae enroll` REWRITES this file with your real deployment values and
-# adds the `principal` section (operator uid/home). Until then the daemon
+# adds the `principal` section (operator name/uid). Until then the daemon
 # fail-closes: the boot gate refuses to start without a `principal` (#77 —
 # a daemon that can authorize no one is a failed system) — this is deliberate.
 #
@@ -26,6 +26,6 @@ audit:
   # closed on an audit-open error). Pinned here so it is never defaulted.
   jsonl_path: /var/log/maknae/audit.jsonl
 
-# principal: written by `maknae enroll` (name / uid / home). Absent by design in
-# the shipped skeleton — its absence is what keeps the `~`-based authz.yaml
-# fail-closed until enrollment.
+# principal: written by `maknae enroll` (name / uid). Absent by design in
+# the shipped skeleton — its absence keeps the daemon from starting until
+# enrollment.

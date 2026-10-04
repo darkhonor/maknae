@@ -1050,7 +1050,6 @@ FIX
 pub struct Principal {
     pub name: String,
     pub uid: u32,
-    pub home: PathBuf,
 }
 FIX
   cat > "$fixture/crates/maknae-config/src/providers.rs" <<'FIX'
@@ -1694,7 +1693,7 @@ expect_accept "config-disclosure-drift/config-vec-of-struct-is-a-leaf" \
 # ACCEPT: the clean fixture passes and reports both counts. Without this every
 # rejection above would stay green against a gate that refuses everything.
 fx="$(cfg_fixture "$CFG_OK")"
-expect_accept "config-disclosure-drift/clean-fixture-passes" ": 34 paths decided, 44 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_accept "config-disclosure-drift/clean-fixture-passes" ": 34 paths decided, 43 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
 
 
 # ACCEPT, against the REAL repo: each gate's reported examined-set is
@@ -1757,7 +1756,7 @@ expect_reported_count "p1-manifest/packages-match-the-workspace" "ok (" "$exp_p1
 # control; asserting it here means any future silent shrink is a red build.
 
 expect_accept "config-disclosure-drift/real-repo-counts-pinned" \
-  ": 46 paths decided, 44 struct fields covered" "$here/config-disclosure-drift.sh"
+  ": 45 paths decided, 43 struct fields covered" "$here/config-disclosure-drift.sh"
 
 
 # #158: a grant's own disclosure inventory must reject new data and type changes.

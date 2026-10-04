@@ -66,10 +66,9 @@ The `postinst` performs the equivalent setup and loads the AppArmor profile
 ## The mandatory install flow
 
 The package installs the software but does **not** put the daemon into service. The
-daemon ships **fail-closed**: the shipped `authz.yaml` uses `~` (home-relative)
-patterns that have no meaning until an operator principal exists, so the daemon
-refuses to serve until `enroll` writes that principal. Run the full flow, **in this
-order**:
+daemon ships **fail-closed**: its boot gate requires the `principal` section (#77),
+so the daemon refuses to start until `enroll` writes that principal. Run the full
+flow, **in this order**:
 
 ```bash
 # 1. Install (above).
@@ -130,7 +129,8 @@ restart the daemon.** The daemon's boot gate still
 requires the `principal` section (#77), so a daemon restarted before a
 principal exists refuses to serve. The accumulated audit trail in
 `/var/log/maknae/audit.jsonl` is preserved across upgrades (it is never replaced by
-the package).
+the package). On a host enrolled before #440, the upgraded daemon refuses to start until `principal.home` is removed; see
+[runbook §3b](../docs/runbook.md#3b-upgrading-a-host-whose-principal-carries-home).
 
 ---
 
