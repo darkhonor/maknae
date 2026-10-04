@@ -553,7 +553,8 @@ shim="$(newroot)"; cat >"$shim/cargo-mutants" <<'EOF'
 #!/bin/sh
 exit 0
 EOF
-chmod +x "$shim/cargo-mutants"
+printf '#!/bin/sh\necho "cargo-nextest 0.9.146 (fixture)"\n' >"$shim/cargo-nextest"
+chmod +x "$shim/cargo-mutants" "$shim/cargo-nextest"
 expect "mutation-stage unknown crate" "unknown crate in mutants_crates: xcore" nonzero -- \
   env PATH="$shim:$PATH" COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
       COVERAGE_TIERS_CRATE_DIRS="other=crates/other" "$gate" --root "$r" --injection --mutants-all
@@ -652,7 +653,8 @@ cat >"$shimD/cargo-mutants" <<'EOF'
 #!/bin/sh
 exit 0
 EOF
-chmod +x "$shimD/cargo" "$shimD/cargo-mutants"
+printf '#!/bin/sh\necho "cargo-nextest 0.9.146 (fixture)"\n' >"$shimD/cargo-nextest"
+chmod +x "$shimD/cargo" "$shimD/cargo-mutants" "$shimD/cargo-nextest"
 expect "live mode D: mutation-path name-oracle failure" "cannot resolve mutants_crates package names (mutation stage)" nonzero -- \
   env PATH="$shimD:$PATH" "$gate" --root "$r" --mutants-all
 
@@ -671,7 +673,8 @@ expect "malformed collection shape ([t3] not [[t3]], no traceback)" "array of ta
 # absent in build-and-gate. Shim a stub (same pattern as the unknown-crate
 # fixture) so the mode-identifying contract-shape FAIL is reachable in ANY
 # lane (lane-dependent fixtures are forbidden).
-shimM="$(newroot)"; printf '#!/bin/sh\nexit 0\n' >"$shimM/cargo-mutants"; chmod +x "$shimM/cargo-mutants"
+shimM="$(newroot)"; printf '#!/bin/sh\nexit 0\n' >"$shimM/cargo-mutants"; printf '#!/bin/sh\necho "cargo-nextest 0.9.146 (fixture)"\n' >"$shimM/cargo-nextest"
+chmod +x "$shimM/cargo-mutants" "$shimM/cargo-nextest"
 
 r="$(newroot)"; mk_base "$r"   # mutants_crates = [] in mk_base
 expect "mutation: empty mutants_crates" "empty or missing" nonzero -- \
@@ -856,6 +859,9 @@ cat >"$shim/cargo" <<'EOF'
 #!/usr/bin/env python3
 import json, os, sys
 args = sys.argv[1:]
+if args == ['nextest', '--version']:
+    print('cargo-nextest 0.9.146 (fixture)')
+    sys.exit(0)
 if args[:1] != ['mutants']:
     raise SystemExit('unexpected cargo invocation')
 package = args[args.index('--package') + 1]
@@ -897,7 +903,19 @@ if shape != 'none':
              'timeout': 0, 'unviable': 68}
     else:
         o = {'total_mutants': 7, 'caught': 7, 'missed': 0,
-             'timeout': 0, 'unviable': 0}
+             'timeout': 0, 'unviable': 0,
+             'outcomes': [{'scenario': 'Baseline' if i < 0 else {'Mutant': {'name': 'm%d' % i}},
+                           'log_path': 'log/m%d.log' % i,
+                           'phase_results': [{'phase': 'Build'}, {'phase': 'Test'}]}
+                          for i in range(-1, 7)]}
+        os.makedirs(os.path.join(d, 'log'), exist_ok=True)
+        for i in range(-1, 7):
+            with open(os.path.join(d, 'log', 'm%d.log' % i), 'w') as f:
+                f.write('*** cargo nextest run --verbose\n     Summary [ 0.1s] 1 test run: 1 passed\n'
+                        if i < 0 else '*** cargo nextest run --verbose\n        FAIL [ 0.1s] t\n'
+                        '     Summary [ 0.1s] 1 test run: 0 passed, 1 failed\n')
+        with open(os.path.join(d, 'mutants.json'), 'w') as f:
+            json.dump([{'name': 'm%d' % i} for i in range(7)], f)
     with open(os.path.join(d, 'outcomes.json'), 'w') as f:
         json.dump(o, f)
 if shape == 'enospc':
@@ -908,7 +926,8 @@ if shape == 'enospc':
 print('verified mutant budget for ' + package)
 sys.exit(int(os.environ.get('FIXTURE_MUTANT_EXIT', '0')))
 EOF
-chmod +x "$shim/cargo" "$shim/cargo-mutants"
+printf '#!/bin/sh\necho "cargo-nextest 0.9.146 (fixture)"\n' >"$shim/cargo-nextest"
+chmod +x "$shim/cargo" "$shim/cargo-mutants" "$shim/cargo-nextest"
 for package in maknae-io xcore; do
   expect "mutation watchdog budget: $package" "verified mutant budget for $package" 0 -- \
     env PATH="$shim:$PATH" COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \

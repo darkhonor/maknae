@@ -153,6 +153,15 @@ else
   if ! command -v cargo-mutants >/dev/null 2>&1; then
     r_fail "cargo-mutants missing — cargo install cargo-mutants --locked"
   fi
+  if [ "$mutants_mode" = "all" ] || [[ " ${mutant_crates[*]} " == *" maknae-io "* ]]; then
+    nextest_out="$(cd "$root" && cargo nextest --version 2>&1 || true)"
+    nextest_v="$(printf '%s\n' "$nextest_out" | grep -m1 '^cargo-nextest ' || true)"
+    case "$nextest_v" in
+      "cargo-nextest 0.9.146"|"cargo-nextest 0.9.146 "*) :;;
+      "") r_fail "cargo-nextest missing (cargo nextest --version: $(printf '%s' "$nextest_out" | head -1)) — install cargo-nextest 0.9.146 (the version CI pins)";;
+      *) r_fail "'$nextest_v' is not cargo-nextest 0.9.146 (the version CI pins)";;
+    esac
+  fi
   if [ "$injection" -eq 0 ] && ! command -v cargo >/dev/null 2>&1; then
     r_fail "cargo missing (mutation name oracle) — install rustup/cargo"
   fi
@@ -371,6 +380,162 @@ fi
 # to run before, and did-it-measure-anything after — as a separate script so
 # negative-control.sh can probe them without a 45-minute mutation run.
 oracle="$here/mutation-oracle.sh"
+terminated_list="$here/mutation-terminated.txt"
+
+# A mutant whose test phase has a nextest TIMEOUT and no failure status was caught
+# only by termination; it passes only when an entry for this `uname -s` names it.
+terminated_only() { # <mutants --output dir> <crate>
+  local base="$1"
+  [ -f "$base/mutants.out/outcomes.json" ] && base="$base/mutants.out"
+  python3 - "$terminated_list" "$base" "$2" "$(uname -s)" <<'PYEOF'
+import json, os, re, sys
+from collections import Counter
+listing, base, cname, system = sys.argv[1:]
+ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+STATUS = re.compile(r"\s*(?:TRY \d+ )?([A-Z][A-Z-]*)(?: \+ LEAK)?\s+\[[^\]]*\]\s*(.*)")
+CAPTURED = re.compile(r"\s+(?:stdout|stderr|output) ───")
+rc = 0
+entries = []
+try:
+    with open(listing) as f:
+        rows = f.read().splitlines()
+except OSError as e:
+    print(f"FAIL: {cname}: cannot read the reviewed terminated-mutant list: {e}")
+    sys.exit(1)
+for n, row in enumerate(rows, 1):
+    if not row.strip() or row.startswith("#"):
+        continue
+    fields = row.split("\t")
+    where = f"FAIL: {listing}:{n}:"
+    if (len(fields) != 5 or fields[0] not in ("Linux", "Darwin")
+            or not all(x.strip() for x in fields[1:])):
+        print(f"{where} expected <Linux|Darwin>\\t<file>\\t<function>\\t<replacement-regex>\\t<reason>")
+    else:
+        try:
+            entries.append((fields[0], fields[1], fields[2], re.compile(fields[3]), row))
+            continue
+        except re.error as e:
+            print(f"{where} bad regex: {e}")
+    rc = 1
+try:
+    with open(os.path.join(base, "outcomes.json")) as f:
+        d = json.load(f)
+    outcomes = d["outcomes"]
+    viable = d["caught"] + d["missed"] + d["timeout"]
+    ran = Counter(o["scenario"]["Mutant"]["name"] for o in outcomes if o["scenario"] != "Baseline")
+    with open(os.path.join(base, "mutants.json")) as f:
+        planned = Counter(m["name"] for m in json.load(f))
+except (OSError, ValueError, KeyError, TypeError) as e:
+    print(f"FAIL: {cname}: cannot read the outcomes in outcomes.json and the plan in mutants.json: {e!r}")
+    sys.exit(1)
+if ran != planned:
+    print(f"FAIL: {cname}: outcomes.json covers {sum(ran.values())} mutants but mutants.json plans "
+          f"{sum(planned.values())} (differing: {sorted(((ran - planned) + (planned - ran)).elements())[:3]}), "
+          f"so termination cannot be judged")
+    sys.exit(1)
+found, tested, judged = [], 0, 0
+for o in outcomes:
+    try:
+        m = None if o["scenario"] == "Baseline" else o["scenario"]["Mutant"]
+        name = "baseline" if m is None else m["name"]
+        phases = [r["phase"] for r in o["phase_results"]]
+        path = os.path.join(base, o["log_path"])
+    except (KeyError, TypeError) as e:
+        print(f"FAIL: {cname}: malformed outcome {o!r:.200}: {e!r}")
+        rc = 1
+        continue
+    if "Test" not in phases:
+        continue
+    judged += 1
+    header = summary = timeout = failed = captured = False
+    testing = False
+    failed_tests, timed_out_tests = set(), set()
+    try:
+        with open(path, errors="replace") as f:
+            for raw in f:
+                line = ANSI.sub("", raw)
+                if line.startswith("*** "):
+                    testing = " nextest run " in line and "--no-run" not in line
+                    header |= testing
+                    continue
+                if not testing:
+                    continue
+                captured |= CAPTURED.match(line) is not None
+                if re.match(r"\s*Summary \[", line):
+                    summary = line
+                    continue
+                st = STATUS.match(line)
+                if st:
+                    status, test = st.group(1), st.group(2).rstrip()
+                    timeout |= status == "TIMEOUT"
+                    failed |= status in ("FAIL", "ABORT", "LEAK-FAIL") or (
+                        status.startswith("SIG") and status not in ("SIGTERM", "SIGKILL"))
+                    if status == "TIMEOUT":
+                        timed_out_tests.add(test)
+                    elif status in ("FAIL", "ABORT", "LEAK-FAIL") or status.startswith("SIG"):
+                        failed_tests.add(test)
+    except OSError as e:
+        print(f"FAIL: {cname}: {name}: cannot read its log: {e}")
+        rc = 1
+        continue
+    if not (header and summary):
+        print(f"FAIL: {cname}: {name}: its test phase has no nextest run header or no "
+              f"Summary line in {path}, so termination cannot be judged")
+        rc = 1
+        continue
+    if captured:
+        print(f"FAIL: {cname}: {name}: captured test output in {path}; the nextest "
+              f"`mutants` profile was not applied, so status lines cannot be trusted")
+        rc = 1
+        continue
+    reported = {kind: int(n.group(1)) if n else 0 for kind in ("failed", "timed out")
+                for n in [re.search(r"(\d+) " + kind + r"\b", summary)]}
+    shortfall = [f"{reported[k]} {k} but {len(seen)} such status lines"
+                 for k, seen in (("failed", failed_tests), ("timed out", timed_out_tests))
+                 if len(seen) < reported[k]]
+    if shortfall:
+        print(f"FAIL: {cname}: {name}: its Summary reports {'; '.join(shortfall)} in {path}")
+        rc = 1
+        continue
+    if m is None and (reported["failed"] or reported["timed out"]):
+        print(f"FAIL: {cname}: baseline: its Summary reports {reported['failed']} failed and "
+              f"{reported['timed out']} timed out in {path}")
+        rc = 1
+        continue
+    if o.get("summary") == "CaughtMutant" and not (failed or timeout):
+        print(f"FAIL: {cname}: {name}: caught, but its test phase has no failure or timeout "
+              f"status line in {path}")
+        rc = 1
+        continue
+    tested += 1
+    if timeout and not failed:
+        found.append(m)
+if judged != viable + 1:
+    print(f"FAIL: {cname}: judged {judged} test phases, but outcomes.json counts {viable} viable "
+          f"mutants plus the baseline, so termination cannot be judged")
+    rc = 1
+fired = set()
+for m in found:
+    if m is None:
+        print(f"FAIL: {cname}: the baseline was caught only by termination")
+        rc = 1
+        continue
+    fn = (m.get("function") or {}).get("function_name")
+    hits = [row for p, file, func, rx, row in entries
+            if p == system and file == m.get("file") and func == fn
+            and rx.fullmatch(m.get("replacement") or "")]
+    fired.update(hits)
+    print(f"terminated-only[{cname}]: {m['name']} ({'reviewed' if hits else 'UNREVIEWED'})")
+    if not hits:
+        print(f"FAIL: {cname}: {m['name']} was caught only by termination and matches no {system} entry")
+        rc = 1
+for p, _, _, _, row in entries:
+    if p == system and row not in fired:
+        print(f"terminated-only[{cname}]: entry {row!r} not observed")
+print(f"terminated-only[{cname}]: {len(found)} of {tested} tested outcomes")
+sys.exit(rc)
+PYEOF
+}
 
 if [ "$mutants_mode" != "" ]; then
   if [ "$mutants_mode" = "all" ]; then
@@ -394,27 +559,23 @@ if [ "$mutants_mode" != "" ]; then
       oracle_ok=0
     fi
   fi
-  # BEFORE the first build, so a full scratch volume is reported as itself rather
-  # than discovered N mutants later as a wall of 'unviable' (#301).
-  #
-  # AND IT MUST STOP HERE, before the loop. Recording the failure and continuing
-  # was the whole defect restated: the gate would run `cargo mutants` on the
-  # volume it had just declared unusable, consume what space was left, and
-  # produce exactly the wall of environment-driven `unviable` builds this check
-  # exists to prevent — with the verdict arriving only after all that work, from
-  # the accumulated fail_n. A preflight that does not preempt is not a preflight
-  # (hobibot review, 694a77f).
-  #
-  # WHEN IT APPLIES: whenever real mutant builds will happen, i.e. --injection
-  # off. Under --injection the build is a stub and needs no volume, so imposing
-  # the floor there would make every mutation fixture depend on the host's free
-  # space — on a host whose /tmp is smaller than the floor (the very condition
-  # that caused #301) the fixture suite would fail for the wrong reason. The one
-  # exception is a fixture that DECLARES a floor via MUTATION_ORACLE_MIN_KIB,
-  # which is how this preemption is itself proven: a check that cannot be shown
-  # to fire is not a control.
+  if ! mut_tmp="$(mktemp -d "${TMPDIR:-/tmp}/maknae-mutants.XXXXXXXX")"; then
+    fail "cannot create the mutation scratch dir under ${TMPDIR:-/tmp}"
+    printf '%d violation(s).\n' "$fail_n"; exit 1
+  fi
+  # Tests killed by nextest never run their TempDir drops, and some leave mode-000 dirs.
+  trap 'chmod -R u+rwx -- "$mut_tmp" 2>/dev/null || true; rm -rf -- "$mut_tmp"' EXIT
+  mut_pid=""
+  stop_run() { # <signal> <status>
+    if [ -n "$mut_pid" ]; then kill -s "$1" "$mut_pid" 2>/dev/null || true; wait "$mut_pid" 2>/dev/null || true; fi
+    exit "$2"
+  }
+  trap 'stop_run INT 130' INT
+  trap 'stop_run TERM 143' TERM
+  # Stop before the loop when the scratch volume cannot hold a build (#301): whenever real
+  # builds run, and under --injection only when a fixture declares MUTATION_ORACLE_MIN_KIB.
   if [ "$injection" -eq 0 ] || [ -n "${MUTATION_ORACLE_MIN_KIB:-}" ]; then
-    if ! out="$(bash "$oracle" scratch "${TMPDIR:-/tmp}" 2>&1)"; then
+    if ! out="$(bash "$oracle" scratch "$mut_tmp" 2>&1)"; then
       fail "mutation scratch volume unusable: $out"
       printf '%d violation(s).\n' "$fail_n"; exit 1
     fi
@@ -442,22 +603,25 @@ if [ "$mutants_mode" != "" ]; then
       fi
       extra_mutants_flags+=(--exclude-re "$native_exclusion")
     fi
+    run_env=()
     if [ "$cname" = "maknae-io" ]; then
-      # #238: eight independent five-second subprocess watchdogs reject a
-      # nonadvancing write loop. With two libtest threads the suite takes ~23s
-      # to fail, so the default 20s mutant timeout killed it before libtest could
-      # return failure. Allow serial scheduling plus headroom; each child still
-      # dies after five seconds, and missed/timeout outcomes still fail the gate.
-      extra_mutants_flags+=(--minimum-test-timeout 60)
+      extra_mutants_flags+=(--minimum-test-timeout 60 --test-tool nextest)
+      for v in $(compgen -e | grep '^NEXTEST_' || true); do run_env+=(-u "$v"); done
+      run_env+=(-u CLICOLOR_FORCE NEXTEST_PROFILE=mutants CARGO_TERM_COLOR=never NEXTEST_RETRIES=0
+                NEXTEST_STATUS_LEVEL=fail NEXTEST_FINAL_STATUS_LEVEL=fail)
     fi
+    run_env+=(TMPDIR="$mut_tmp")
     # A per-crate output dir, so each crate's outcomes.json and per-mutant logs
     # survive for the two checks below instead of being overwritten by the next
     # crate in the loop.
     mut_out="$root/target/mutants-$cname"
     rm -rf "$mut_out"
-    if ! (cd "$root" && cargo mutants --package "$cname" --output "$mut_out" "${extra_mutants_flags[@]}"); then
+    (cd "$root" && exec env "${run_env[@]}" cargo mutants --package "$cname" --output "$mut_out" "${extra_mutants_flags[@]}") &
+    mut_pid=$!
+    if ! wait "$mut_pid"; then
       fail "cargo mutants --package $cname reported missed/timeout mutants"
     fi
+    mut_pid=""
     # The exit status above answers "were any mutants missed?". This answers
     # "did the run measure anything at all, and was it the mutations that failed
     # to build or the environment?" — a green exit code answers neither (#301).
@@ -465,6 +629,9 @@ if [ "$mutants_mode" != "" ]; then
       fail "mutation run for $cname cannot be trusted: $out"
     else
       printf '%s\n' "$out"
+    fi
+    if [ "$cname" = "maknae-io" ] && ! terminated_only "$mut_out" "$cname"; then
+      fail "mutation run for $cname fails the terminated-mutant review (see FAIL lines above)"
     fi
   done
 fi
