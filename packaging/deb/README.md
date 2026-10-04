@@ -92,7 +92,7 @@ deliberate (ADR-0010), not a packaging omission.
 
 On **upgrade**, re-run `maknae enroll` before restarting the daemon if the
 shipped `maknae.yaml`/`authz.yaml` changed — the same install→enroll→(re)start
-rule applies, because the shipped defaults are fail-closed until enrollment.
+rule applies, because the daemon refuses to start until enrollment writes `principal`.
 
 ## Removal
 

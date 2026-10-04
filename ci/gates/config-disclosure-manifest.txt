@@ -34,7 +34,6 @@ disclose	vault.user_prefix	where each user's keys sit below the mount; a layout 
 disclose	audit.jsonl_path	the log the operator is trying to find
 disclose	principal.name	readable by any local process via getpwuid
 disclose	principal.uid	readable by any local process via getpwuid
-disclose	principal.home	readable by any local process via getpwuid
 disclose	providers[].name	the operator's label for an authorized provider; its destination id is provider:<name>
 disclose	providers[].endpoint	where a user's content goes when they choose this provider
 disclose	providers[].models	the admin-pinned model list, as a sequence

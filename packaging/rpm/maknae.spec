@@ -58,7 +58,7 @@ SELinux Type Enforcement policy, a fapolicyd trust fragment, and the shipped
 RBAC authorization policy — for deployment on hardened RHEL/Rocky systems.
 
 A fresh install is not runnable until `sudo maknae enroll` provisions the
-daemon credential and the operator principal (the shipped authz.yaml fail-closes
+daemon credential and the operator principal (the daemon refuses to start
 until then). See the install guide.
 
 %build

@@ -100,9 +100,9 @@ pub enum ConfigError {
     /// sequence) — a malformed section must not silently bind all production
     /// defaults (Stage-3a codex round-6 P2).
     InvalidAudit(String),
-    /// The `principal` section is present but malformed (missing `name`/`uid`/
-    /// `home`, a non-integer or negative/overflowing `uid`, an empty `home`,
-    /// or a relative `home`) — PR-J1 Task 5. A present-but-malformed section
+    /// The `principal` section is present but malformed (missing `name`/`uid`,
+    /// an empty `name`, or a non-integer or negative/overflowing `uid`) —
+    /// PR-J1 Task 5. A present-but-malformed section
     /// must never collapse to "absent" (fail-closed: `uid` is the default-admin
     /// subject, so a silently-dropped malformed section would read as no principal).
     InvalidPrincipal(String),

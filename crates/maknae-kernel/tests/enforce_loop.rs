@@ -67,9 +67,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    /// A fixture home dir (0700, euid-owned) that doubles as the enrolled
-    /// principal's home: the anchor's owner requirement is the principal's
-    /// uid, so the principal here IS the test euid.
+    /// A fixture home dir (0700, euid-owned) that doubles as the requester's home.
     fn new(tag: &str) -> Self {
         let dir = std::env::temp_dir().join(format!("enforce_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -105,7 +103,6 @@ impl Fixture {
         let principal = maknae_config::Principal {
             name: "operator".into(),
             uid: nix::unistd::geteuid().as_raw(),
-            home: dir.clone(),
         };
         Fixture { dir, principal }
     }
@@ -153,7 +150,7 @@ fn request_frame(verb: maknae_proto::Verb) -> Vec<u8> {
 /// then reads after the grant.
 #[allow(clippy::too_many_arguments)]
 async fn read_attempt<P>(
-    fx_principal: &maknae_config::Principal,
+    fx_home: &std::path::Path,
     authorizer: Arc<P>,
     emit: Arc<impl AuditEmit + Send + Sync + 'static>,
     peer_uid: u32,
@@ -165,7 +162,7 @@ where
     P: maknae_security::Authorizer + Send + Sync + 'static,
 {
     read_attempt_as(
-        Some(&fx_principal.home),
+        Some(fx_home),
         authorizer,
         emit,
         peer_uid,
@@ -205,7 +202,7 @@ where
 
 #[allow(clippy::too_many_arguments)]
 async fn read_page_attempt<P>(
-    fx_principal: &maknae_config::Principal,
+    fx_home: &std::path::Path,
     authorizer: Arc<P>,
     emit: Arc<impl AuditEmit + Send + Sync + 'static>,
     peer_uid: u32,
@@ -218,7 +215,7 @@ where
     P: maknae_security::Authorizer + Send + Sync + 'static,
 {
     read_attempt_with(
-        Some(&fx_principal.home),
+        Some(fx_home),
         authorizer,
         emit,
         peer_uid,
@@ -296,7 +293,7 @@ where
 /// Drive one request through `handle()` with the given authorizer; return
 /// (raw response frame if any, audit records).
 async fn drive<P>(
-    fx_principal: &maknae_config::Principal,
+    fx_home: &std::path::Path,
     authorizer: Arc<P>,
     emit: Arc<impl AuditEmit + Send + Sync + 'static>,
     peer_uid: u32,
@@ -307,7 +304,7 @@ where
     P: maknae_security::Authorizer + Send + Sync + 'static,
 {
     drive_with(
-        Some(&fx_principal.home),
+        Some(fx_home),
         authorizer,
         emit,
         peer_uid,
@@ -461,7 +458,7 @@ async fn admin_whoami_permits_with_both_records() {
     fx.write_policy(BINDINGS_ROOT_ADMIN);
     let emit = RecEmit::new();
     let frame = drive(
-        &fx.principal,
+        &fx.dir,
         fx.authorizer(),
         emit.clone(),
         0,
@@ -498,7 +495,7 @@ async fn containment_flips_on_file_edit_and_reason_stays_off_the_wire() {
 
     let emit1 = RecEmit::new();
     let first = drive(
-        &fx.principal,
+        &fx.dir,
         authorizer.clone(),
         emit1,
         0,
@@ -516,7 +513,7 @@ async fn containment_flips_on_file_edit_and_reason_stays_off_the_wire() {
 
     let emit2 = RecEmit::new();
     let second = drive(
-        &fx.principal,
+        &fx.dir,
         authorizer,
         emit2.clone(),
         0,
@@ -561,7 +558,7 @@ async fn unbound_uid_is_denied_everything_including_ping() {
     fx.write_policy(BINDINGS_ROOT_ADMIN); // bindings PRESENT, uid 42424 unbound
     let emit = RecEmit::new();
     let frame = drive(
-        &fx.principal,
+        &fx.dir,
         fx.authorizer(),
         emit.clone(),
         42424,
@@ -598,7 +595,7 @@ async fn user_role_pings_but_cannot_whoami() {
 
     let emit = RecEmit::new();
     let ping = drive(
-        &fx.principal,
+        &fx.dir,
         authorizer.clone(),
         emit.clone(),
         0,
@@ -615,7 +612,7 @@ async fn user_role_pings_but_cannot_whoami() {
 
     let emit2 = RecEmit::new();
     let whoami = drive(
-        &fx.principal,
+        &fx.dir,
         authorizer,
         emit2.clone(),
         0,
@@ -641,7 +638,7 @@ async fn defaults_branch_enrolled_uid_is_admin_with_zero_nss() {
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
     let frame = drive(
-        &fx.principal,
+        &fx.dir,
         fx.authorizer(),
         emit.clone(),
         me,
@@ -676,7 +673,7 @@ async fn the_shipped_deny_list_actually_denies_a_read_of_ssh_keys() {
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
     let run = read_attempt(
-        &fx.principal,
+        &fx.dir,
         fx.authorizer(),
         emit.clone(),
         me,
@@ -787,7 +784,7 @@ async fn ordinary_user_reads_approved_content_through_the_composed_pdp() {
     let emit = RecEmit::new();
     let authorizer = composed(&fx, "UNCLASSIFIED");
     let run = read_attempt(
-        &fx.principal,
+        &fx.dir,
         authorizer.clone(),
         emit.clone(),
         me.as_raw(),
@@ -813,7 +810,7 @@ async fn ordinary_user_reads_approved_content_through_the_composed_pdp() {
 
     // Filesystem access grants no management authority to this same user.
     let management = drive(
-        &fx.principal,
+        &fx.dir,
         authorizer.clone(),
         RecEmit::new(),
         me.as_raw(),
@@ -835,7 +832,7 @@ async fn ordinary_user_reads_approved_content_through_the_composed_pdp() {
     ));
     let emit = RecEmit::new();
     let contained = read_attempt(
-        &fx.principal,
+        &fx.dir,
         authorizer,
         emit.clone(),
         me.as_raw(),
@@ -879,7 +876,7 @@ async fn filesystem_access_for_users_and_admins_keeps_path_refusals_and_the_os_a
         // not pass vacuously because the descriptor was missing.
         let emit = RecEmit::new();
         let frame = read_attempt(
-            &fx.principal,
+            &fx.dir,
             composed(&fx, "UNCLASSIFIED"),
             emit.clone(),
             me.as_raw(),
@@ -912,7 +909,7 @@ async fn filesystem_access_for_users_and_admins_keeps_path_refusals_and_the_os_a
         // A universally allowed path still needs the subject's descriptor.
         let emit = RecEmit::new();
         let frame = drive(
-            &fx.principal,
+            &fx.dir,
             composed(&fx, "UNCLASSIFIED"),
             emit.clone(),
             me.as_raw(),
@@ -1000,7 +997,7 @@ async fn a_permitted_read_returns_the_file_bytes() {
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
     let run = read_attempt(
-        &fx.principal,
+        &fx.dir,
         fx.authorizer(),
         emit.clone(),
         me,
@@ -1076,7 +1073,7 @@ async fn a_symlink_alias_of_a_denied_file_is_refused() {
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
     let frame = read_attempt(
-        &fx.principal,
+        &fx.dir,
         fx.authorizer(),
         emit.clone(),
         me,
@@ -1162,7 +1159,7 @@ async fn a_hardlink_alias_of_a_denied_file_is_refused() {
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
     let frame = read_attempt(
-        &fx.principal,
+        &fx.dir,
         fx.authorizer(),
         emit.clone(),
         me,
@@ -1207,7 +1204,7 @@ async fn a_group_writable_home_disables_reads_at_the_anchor_boundary() {
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
     let frame = read_attempt(
-        &fx.principal,
+        &fx.dir,
         fx.authorizer(),
         emit.clone(),
         me,
@@ -1262,7 +1259,7 @@ async fn an_unpaged_read_of_a_large_file_releases_the_first_page_after_a_real_pe
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
     let run = read_page_attempt(
-        &fx.principal,
+        &fx.dir,
         fx.authorizer(),
         emit.clone(),
         me,
@@ -1323,7 +1320,7 @@ async fn a_failed_deny_record_append_withholds_the_error_frame() {
     fx.write_policy(BINDINGS_ROOT_USER); // whoami under user → deny path
     let emit = FailNthEmit::new(2); // admission (1) succeeds; the deny record (2) fails
     let frame = drive(
-        &fx.principal,
+        &fx.dir,
         fx.authorizer(),
         emit.clone(),
         0,
@@ -1350,7 +1347,7 @@ async fn decide_timeout_denies_and_a_fast_decide_is_served() {
     // (a) sleeps past the bound → deny with the timeout reason.
     let emit = RecEmit::new();
     let frame = drive(
-        &fx.principal,
+        &fx.dir,
         Arc::new(SleepAuthorizer(Duration::from_millis(300))),
         emit.clone(),
         0,
@@ -1378,7 +1375,7 @@ async fn decide_timeout_denies_and_a_fast_decide_is_served() {
     // parameter is honored — a zero/too-small binding would fail this side).
     let emit2 = RecEmit::new();
     let frame = drive(
-        &fx.principal,
+        &fx.dir,
         Arc::new(SleepAuthorizer(Duration::from_millis(100))),
         emit2,
         0,
@@ -1406,7 +1403,7 @@ async fn four_concurrent_healthy_decisions_do_not_trip_the_breaker() {
 
     let (one, two, three, four) = tokio::join!(
         drive(
-            &fx.principal,
+            &fx.dir,
             authorizer.clone(),
             emit1.clone(),
             0,
@@ -1414,7 +1411,7 @@ async fn four_concurrent_healthy_decisions_do_not_trip_the_breaker() {
             timeout
         ),
         drive(
-            &fx.principal,
+            &fx.dir,
             authorizer.clone(),
             emit2.clone(),
             0,
@@ -1422,7 +1419,7 @@ async fn four_concurrent_healthy_decisions_do_not_trip_the_breaker() {
             timeout
         ),
         drive(
-            &fx.principal,
+            &fx.dir,
             authorizer.clone(),
             emit3.clone(),
             0,
@@ -1430,7 +1427,7 @@ async fn four_concurrent_healthy_decisions_do_not_trip_the_breaker() {
             timeout
         ),
         drive(
-            &fx.principal,
+            &fx.dir,
             authorizer,
             emit4.clone(),
             0,
@@ -1494,7 +1491,7 @@ async fn a_permit_outside_the_anchored_root_is_refused_distinctly() {
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
     let frame = read_attempt(
-        &fx.principal,
+        &fx.dir,
         fx.authorizer(),
         emit.clone(),
         me,
@@ -1544,7 +1541,7 @@ async fn an_unhonorable_obligation_fails_closed() {
     let fx = Fixture::new("oblig");
     let emit = RecEmit::new();
     let frame = drive(
-        &fx.principal,
+        &fx.dir,
         Arc::new(HostileObligation),
         emit.clone(),
         0,
@@ -1577,7 +1574,7 @@ async fn a_malformed_read_path_is_bad_request_before_the_pdp() {
     let me = nix::unistd::geteuid().as_raw();
     let evasive = format!("{}/../{}", fx.dir.display(), ".ssh/id_rsa");
     let frame = drive(
-        &fx.principal,
+        &fx.dir,
         fx.authorizer(),
         emit.clone(),
         me,
@@ -1626,7 +1623,7 @@ async fn an_unentitled_caller_gets_unauthorized_never_notimplemented() {
     ] {
         let emit = RecEmit::new();
         let frame = drive(
-            &fx.principal,
+            &fx.dir,
             fx.authorizer(),
             emit,
             0,
@@ -1746,7 +1743,7 @@ async fn status_reports_the_backend_that_actually_decided() {
     let fx = Fixture::new("status-unknown-backend");
     let emit = RecEmit::new();
     let frame = drive(
-        &fx.principal,
+        &fx.dir,
         Arc::new(AlwaysPermit),
         emit.clone(),
         0,
@@ -1777,7 +1774,7 @@ async fn a_panicking_backend_name_is_contained_on_the_production_path() {
     let fx = Fixture::new("status-panicking-name");
     let emit = RecEmit::new();
     let frame = drive(
-        &fx.principal,
+        &fx.dir,
         Arc::new(PanickingName),
         emit.clone(),
         0,
@@ -1811,7 +1808,7 @@ async fn a_granted_subject_list_reports_the_policy_file_bindings() {
     );
     let emit = RecEmit::new();
     let frame = drive(
-        &fx.principal,
+        &fx.dir,
         fx.authorizer(),
         emit.clone(),
         0,
@@ -1853,7 +1850,7 @@ async fn a_backend_that_cannot_enumerate_refuses_rather_than_claiming_empty() {
     let fx = Fixture::new("subjlist-unavailable");
     let emit = RecEmit::new();
     let frame = drive(
-        &fx.principal,
+        &fx.dir,
         Arc::new(AlwaysPermit),
         emit.clone(),
         0,
@@ -1901,7 +1898,7 @@ async fn the_new_terms_disclose_nothing_without_a_grant() {
         fx.write_policy(BINDINGS_ROOT_ADMIN); // admin binding, no `roles:` key
         let emit = RecEmit::new();
         let frame = drive(
-            &fx.principal,
+            &fx.dir,
             fx.authorizer(),
             emit.clone(),
             0,
@@ -2130,7 +2127,7 @@ async fn the_same_policy_without_the_grant_does_not_permit() {
     fx.write_policy(BINDINGS_ROOT_ADMIN); // admin binding, no `roles:` key
     let emit = RecEmit::new();
     let frame = drive(
-        &fx.principal,
+        &fx.dir,
         fx.authorizer(),
         emit.clone(),
         0,
@@ -2168,7 +2165,7 @@ async fn a_roles_denied_term_names_the_term_in_audit_but_not_on_the_wire() {
     );
     let emit = RecEmit::new();
     let frame = drive(
-        &fx.principal,
+        &fx.dir,
         fx.authorizer(),
         emit.clone(),
         0,
@@ -2209,7 +2206,7 @@ async fn a_permitted_unbuilt_term_is_audited_then_refused() {
     let fx = Fixture::new("noop-permit");
     let emit = RecEmit::new();
     let frame = drive(
-        &fx.principal,
+        &fx.dir,
         Arc::new(AlwaysPermit),
         emit.clone(),
         0,
@@ -2246,7 +2243,7 @@ async fn a_noop_withholds_its_frame_when_the_record_cannot_append() {
     let fx = Fixture::new("noop-withhold");
     let emit = FailNthEmit::new(2);
     let out = drive(
-        &fx.principal,
+        &fx.dir,
         Arc::new(AlwaysPermit),
         emit.clone(),
         0,
@@ -2281,7 +2278,7 @@ async fn a_corrective_record_that_cannot_append_withholds_its_frame() {
     let fx = Fixture::new("subjlist-corrective-withhold");
     let emit = FailNthEmit::new(3);
     let out = drive(
-        &fx.principal,
+        &fx.dir,
         Arc::new(AlwaysPermit),
         emit.clone(),
         0,
@@ -2322,7 +2319,7 @@ async fn an_unbuilt_term_tells_the_admin_trail_the_roadmap_fact() {
     fx.write_policy(BINDINGS_ROOT_ADMIN);
     let emit = RecEmit::new();
     let frame = drive(
-        &fx.principal,
+        &fx.dir,
         fx.authorizer(),
         emit.clone(),
         0,
@@ -2355,7 +2352,7 @@ async fn an_unbuilt_term_tells_a_user_trail_their_reach() {
     fx.write_policy(BINDINGS_ROOT_USER);
     let emit = RecEmit::new();
     let frame = drive(
-        &fx.principal,
+        &fx.dir,
         fx.authorizer(),
         emit.clone(),
         0,
@@ -2387,7 +2384,7 @@ async fn a_grantable_term_with_no_grant_names_the_absent_rule() {
     fx.write_policy(BINDINGS_ROOT_ADMIN); // bindings, but NO `roles:` key
     let emit = RecEmit::new();
     let frame = drive(
-        &fx.principal,
+        &fx.dir,
         fx.authorizer(),
         emit.clone(),
         0,
@@ -2427,7 +2424,7 @@ async fn an_unmatched_read_names_the_missing_capability_entry() {
     let target = fx.dir.join("outside.txt").to_string_lossy().into_owned();
     let emit = RecEmit::new();
     let frame = read_attempt(
-        &fx.principal,
+        &fx.dir,
         fx.authorizer(),
         emit.clone(),
         me.as_raw(),
@@ -2536,7 +2533,7 @@ async fn under_a_secret_ceiling_unmarked_content_is_served_as_unclassified() {
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
     let run = read_attempt(
-        &fx.principal,
+        &fx.dir,
         composed(&fx, "SECRET"),
         emit.clone(),
         me,
@@ -2577,7 +2574,7 @@ async fn at_baseline_the_composition_permits_what_the_baseline_permits() {
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
     let run = read_attempt(
-        &fx.principal,
+        &fx.dir,
         composed(&fx, "UNCLASSIFIED"),
         emit.clone(),
         me,
@@ -2889,7 +2886,7 @@ async fn a_zero_page_request_is_bad_request_before_the_pdp() {
     let me = nix::unistd::geteuid().as_raw();
     let target = format!("{}/notes.txt", fx.dir.display());
     let frame = drive(
-        &fx.principal,
+        &fx.dir,
         fx.authorizer(),
         emit.clone(),
         me,
@@ -2931,7 +2928,7 @@ async fn the_shipped_deny_list_denies_a_paged_read_of_ssh_keys() {
     let emit = RecEmit::new();
     let me = nix::unistd::geteuid().as_raw();
     let run = read_page_attempt(
-        &fx.principal,
+        &fx.dir,
         fx.authorizer(),
         emit.clone(),
         me,

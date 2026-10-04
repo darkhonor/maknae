@@ -412,8 +412,8 @@ fn match_segs(pat: &[GlobSeg], comps: &[&str]) -> bool {
 /// every starless literal component behave like an implicit trailing `*` —
 /// an over-ALLOW: `Read(/etc/passwd)` matched `/etc/passwd-backup`, and the
 /// shipped-default `Read(~/**)` matched a different user's home directory
-/// whenever its name shared the principal's name as a prefix, e.g.
-/// `/home/operatorbot` under principal home `/home/operator`.)
+/// whose name extended the home's last component, e.g. `/home/operatorbot`
+/// when `~` was `/home/operator`.)
 fn component_matches(pattern: &str, text: &str) -> bool {
     let fragments: Vec<&str> = pattern.split('*').collect();
     let last = fragments.len() - 1;
@@ -1536,7 +1536,7 @@ mod tests {
 
     #[test]
     fn double_star_home_does_not_leak_prefix_sharing_user() {
-        // principal home /home/operator (see `home()`); a DIFFERENT user
+        // `~` is /home/operator (see `home()`); a DIFFERENT user
         // whose name merely shares the "operator" prefix — /home/operatorbot
         // — must NOT match `Read(~/**)`. Each path component ("operator" vs
         // "operatorbot") must be compared for exact equality, not prefix.

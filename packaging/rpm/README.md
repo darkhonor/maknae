@@ -54,7 +54,7 @@ maknae login
 ```
 
 **Upgrades follow the same order** — enroll (if not already) before restarting the
-daemon; the fail-closed `~` default applies to a restarted daemon too. The
+daemon; a restarted daemon also refuses to start without the `principal` section. The
 append-only `/var/log/maknae/audit.jsonl` trail is preserved across upgrades.
 
 **RHEL 9:** installs; enroll is expected to complete now that the `systemd-creds --user`

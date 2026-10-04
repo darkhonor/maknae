@@ -871,7 +871,6 @@ mod tests {
             let principal = maknae_config::Principal {
                 name: "operator".into(),
                 uid: nix::unistd::geteuid().as_raw(),
-                home: root.clone(),
             };
             Self { root, principal }
         }
@@ -902,14 +901,7 @@ mod tests {
             page: None,
         };
         let held = || Some(maknae_io::open_path_for_delegation(&target).unwrap());
-        let prepared = prepare(
-            read(),
-            held(),
-            &fx.principal.home,
-            fx.principal.uid,
-            Lane::Local,
-        )
-        .unwrap();
+        let prepared = prepare(read(), held(), &fx.root, fx.principal.uid, Lane::Local).unwrap();
         assert_eq!(prepared.kind, FsOperation::Read);
         assert_eq!(prepared.paths, vec![target.to_str().unwrap().to_string()]);
         assert_eq!(
@@ -920,15 +912,9 @@ mod tests {
             }
         );
         assert_eq!(
-            prepare(
-                read(),
-                None,
-                &fx.principal.home,
-                fx.principal.uid,
-                Lane::Local
-            )
-            .err()
-            .as_deref(),
+            prepare(read(), None, &fx.root, fx.principal.uid, Lane::Local)
+                .err()
+                .as_deref(),
             Some("read descriptor missing")
         );
         assert_eq!(
@@ -943,18 +929,11 @@ mod tests {
             .as_deref(),
             Some("requester home unavailable: unresolvable")
         );
-        assert!(prepare(
-            read(),
-            held(),
-            &fx.principal.home,
-            fx.principal.uid,
-            Lane::Remote
-        )
-        .is_err());
+        assert!(prepare(read(), held(), &fx.root, fx.principal.uid, Lane::Remote).is_err());
         assert!(prepare(
             read(),
             Some(fx.fd()),
-            &fx.principal.home,
+            &fx.root,
             fx.principal.uid,
             Lane::Local
         )
@@ -965,7 +944,7 @@ mod tests {
         assert!(prepare(
             read(),
             Some(std::fs::File::open(&target).unwrap().into()),
-            &fx.principal.home,
+            &fx.root,
             fx.principal.uid,
             Lane::Local
         )
@@ -973,14 +952,7 @@ mod tests {
         .unwrap()
         .contains("confers access beyond location"));
         std::fs::hard_link(&target, fx.root.join("second-read-link")).unwrap();
-        assert!(prepare(
-            read(),
-            held(),
-            &fx.principal.home,
-            fx.principal.uid,
-            Lane::Local
-        )
-        .is_err());
+        assert!(prepare(read(), held(), &fx.root, fx.principal.uid, Lane::Local).is_err());
         assert_eq!(std::fs::read(target).unwrap(), b"sentinel");
     }
     fn fixture_pdp(fx: &Fixture) -> crate::Composition<maknae_authz_basic::HermeticAuthorizer> {
@@ -1413,18 +1385,11 @@ mod tests {
     #[test]
     fn preparation_requires_local_real_descriptor_and_valid_mkdir_suffix() {
         let fx = Fixture::new();
-        assert!(prepare(
-            Verb::Ping,
-            None,
-            &fx.principal.home,
-            fx.principal.uid,
-            Lane::Local
-        )
-        .is_err());
+        assert!(prepare(Verb::Ping, None, &fx.root, fx.principal.uid, Lane::Local).is_err());
         assert!(prepare(
             fx.mkdir(true, vec!["one".into(), "two".into()]),
             Some(fx.fd()),
-            &fx.principal.home,
+            &fx.root,
             fx.principal.uid,
             Lane::Remote
         )
@@ -1432,7 +1397,7 @@ mod tests {
         assert!(prepare(
             fx.mkdir(true, vec!["one".into(), "two".into()]),
             None,
-            &fx.principal.home,
+            &fx.root,
             fx.principal.uid,
             Lane::Local
         )
@@ -1448,7 +1413,7 @@ mod tests {
             assert!(prepare(
                 fx.mkdir(parents, components),
                 Some(fx.fd()),
-                &fx.principal.home,
+                &fx.root,
                 fx.principal.uid,
                 Lane::Local
             )
@@ -1460,7 +1425,7 @@ mod tests {
                 recursive: false
             },
             Some(fx.fd()),
-            &fx.principal.home,
+            &fx.root,
             fx.principal.uid,
             Lane::Local
         )
@@ -1471,7 +1436,7 @@ mod tests {
                 recursive: false
             },
             Some(fx.fd()),
-            &fx.principal.home,
+            &fx.root,
             fx.principal.uid,
             Lane::Local
         )
@@ -1481,7 +1446,7 @@ mod tests {
         assert!(prepare(
             fx.mkdir(true, vec!["two".into()]),
             Some(std::fs::File::open(&target).unwrap().into()),
-            &fx.principal.home,
+            &fx.root,
             fx.principal.uid,
             Lane::Local
         )
@@ -1493,14 +1458,7 @@ mod tests {
             conversation: None,
         };
         let held = || Some(maknae_io::open_path_for_delegation(&target).unwrap());
-        let prepared = prepare(
-            write(),
-            held(),
-            &fx.principal.home,
-            fx.principal.uid,
-            Lane::Local,
-        )
-        .unwrap();
+        let prepared = prepare(write(), held(), &fx.root, fx.principal.uid, Lane::Local).unwrap();
         assert_eq!(prepared.kind, FsOperation::WriteExisting);
         assert_eq!(prepared.paths, vec![target.to_str().unwrap().to_string()]);
         assert_eq!(
@@ -1513,20 +1471,13 @@ mod tests {
         assert!(prepare(
             write(),
             Some(fx.fd()),
-            &fx.principal.home,
+            &fx.root,
             fx.principal.uid,
             Lane::Local
         )
         .is_err());
         std::fs::hard_link(&target, fx.root.join("second-link")).unwrap();
-        assert!(prepare(
-            write(),
-            held(),
-            &fx.principal.home,
-            fx.principal.uid,
-            Lane::Local
-        )
-        .is_err());
+        assert!(prepare(write(), held(), &fx.root, fx.principal.uid, Lane::Local).is_err());
         assert_eq!(std::fs::read(target).unwrap(), b"sentinel");
     }
 }

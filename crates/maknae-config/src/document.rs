@@ -312,14 +312,13 @@ const DISCLOSABLE: &[&str] = &[
     // under, which is their call to make -- but the mechanism named here no
     // longer exists.)
     //
-    // Disclosed anyway, deliberately: a uid, a login name and a home path are
-    // facts any local process can read from `/etc/passwd`. Withholding them
+    // Disclosed anyway, deliberately: a uid and a login name are facts any
+    // local process can read from `/etc/passwd`. Withholding them
     // from a subject that can call `getpwuid` buys nothing. That argument is
     // about the FACTS, not about who is asking, which is why it survives the
     // audience being wrong.
     "principal.name",
     "principal.uid",
-    "principal.home",
     // Transport shape, as resolved -- see `merge_resolved_defaults`.
     "providers[].name",
     "providers[].endpoint",

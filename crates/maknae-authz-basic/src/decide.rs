@@ -585,12 +585,12 @@ mod tests {
 
     const OPERATOR_UID: u32 = 501;
     const OTHER_UID: u32 = 666;
+    const REQUESTER_HOME: &str = "/home/operator";
 
     fn principal() -> maknae_config::Principal {
         maknae_config::Principal {
             name: "operator".into(),
             uid: OPERATOR_UID,
-            home: "/home/operator".into(),
         }
     }
 
@@ -628,7 +628,7 @@ mod tests {
         }
         s.insert(
             maknae_security::SUBJECT_HOME,
-            AttrValue::Str(principal().home.to_string_lossy().into_owned()),
+            AttrValue::Str(REQUESTER_HOME.into()),
         );
         let mut r = Attributes::new();
         if let Some(p) = path {

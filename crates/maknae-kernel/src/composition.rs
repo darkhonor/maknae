@@ -138,7 +138,6 @@ mod tests {
         let principal = Principal {
             name: "operator".into(),
             uid: nix::unistd::geteuid().as_raw(),
-            home: dir.clone(),
         };
         let req = maknae_config::TargetRequired {
             owner: None,
@@ -212,8 +211,8 @@ mod tests {
         );
     }
 
-    /// A read the baseline PERMITS: a real `Read(~/**)` grant for the enrolled
-    /// principal, a path under its home, prepared as a local read attempt.
+    /// A read the baseline PERMITS: a real `Read(~/**)` grant, a path under the
+    /// requester's home, prepared as a local read attempt.
     fn permitted_read(home: &std::path::Path) -> Request {
         permitted_read_marked(home, None)
     }

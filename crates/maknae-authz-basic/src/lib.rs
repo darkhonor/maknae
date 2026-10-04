@@ -516,7 +516,6 @@ mod tests {
         maknae_config::Principal {
             name: "operator".into(),
             uid: 501,
-            home: "/home/operator".into(),
         }
     }
 
@@ -1118,7 +1117,6 @@ mod tests {
         let principal = maknae_config::Principal {
             name: "operator".into(),
             uid: 501,
-            home: "/home/operator".into(),
         };
         let got = BasicAuthorizer::new(p, principal);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1156,7 +1154,6 @@ mod tests {
             maknae_config::Principal {
                 name: "operator".into(),
                 uid: 501,
-                home: "/home/operator".into(),
             }
         }
 

@@ -291,12 +291,10 @@ pub struct RealPasswd;
 /// Resolve a passwd home directory to its canonical form (#216), falling back to
 /// the value passwd gave when it cannot be resolved.
 ///
-/// Not load-bearing for the daemon: it resolves each requester's home per
-/// request (#435) and never relies on the value enroll writes. Enroll uses this
-/// for its own work, the `<home>/.maknae` CLI directory and
+/// Enroll uses this for its own work: the `<home>/.maknae` CLI directory and
 /// `revoke_legacy_home_access`.
 ///
-/// An unresolvable home is not enroll's to refuse: it writes what passwd said.
+/// An unresolvable home is not enroll's to refuse: it uses what passwd said.
 fn canonical_home(dir: PathBuf) -> PathBuf {
     maknae_io::resolve_dir(&dir).unwrap_or(dir)
 }
@@ -566,10 +564,6 @@ fn build_daemon_yaml(
             artifact_write::yaml_map(vec![
                 ("name", Yaml::String(principal.name.clone())),
                 ("uid", Yaml::Integer(i64::from(principal.uid))),
-                (
-                    "home",
-                    Yaml::String(principal.home.to_string_lossy().to_string()),
-                ),
             ]),
         ),
     ];
@@ -2382,7 +2376,7 @@ mod tests {
         assert_ne!(got, link, "the link's own form must not survive");
     }
 
-    /// Enroll does not hard-fail on an unresolvable home: it writes what passwd
+    /// Enroll does not hard-fail on an unresolvable home: it uses what passwd
     /// said, which keeps a home that does not exist yet enrollable.
     #[test]
     fn canonical_home_falls_back_to_the_passwd_value_when_unresolvable() {
@@ -2877,6 +2871,13 @@ mod tests {
             &op,
         );
         let v = maknae_config::load_str(&text).unwrap();
+        match section(&v, "principal") {
+            Some(maknae_config::Value::Map(entries)) => {
+                let keys: Vec<&str> = entries.iter().map(|(k, _)| k.as_str()).collect();
+                assert_eq!(keys, ["name", "uid"]);
+            }
+            other => panic!("principal must be a map: {other:?}"),
+        }
         // Parses through the SAME section parsers the daemon boot path uses
         // (principal.rs/audit_cfg.rs), proving the emitted document is not
         // just well-formed YAML but a shape those loaders actually accept.

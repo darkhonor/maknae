@@ -180,9 +180,9 @@ files = [
   "crates/maknae-config/src/user_providers.rs",
   "crates/maknae-config/src/audit_cfg.rs",
   # PR-J1 Task 5: the `principal` section (enrolled-operator identity `maknae
-  # enroll` writes into maknae.yaml). The authorization policy resolves
-  # `~` against this — a malformed section that silently collapsed to "absent"
-  # would leave `~` unresolved instead of refused. Fail-closed decision logic,
+  # enroll` writes into maknae.yaml). `uid` is the default-admin subject when
+  # `bindings:` is absent — a malformed section that silently collapsed to
+  # "absent" would drop that subject instead of refusing. Fail-closed decision logic,
   # the T1 line-drawing rule. In [t1].files ONLY (own 95% floor; NOT
   # ratchet_cohort).
   "crates/maknae-config/src/principal.rs",

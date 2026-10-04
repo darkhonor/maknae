@@ -1,9 +1,8 @@
 //! The `principal` section (PR-J1 Task 5) — the enrolled operator identity
-//! (`name`/`uid`/`home`) that `maknae enroll` writes into `/etc/maknae/maknae.yaml`.
+//! (`name`/`uid`) that `maknae enroll` writes into `/etc/maknae/maknae.yaml`.
 //!
 //! The daemon runs as `_maknae`, not the operator, and ADR-0018 removed the old
-//! single-operator record. `uid` is the default-admin subject; `home` has no
-//! consumer (the requester's home is resolved per request, #435).
+//! single-operator record. `uid` is the default-admin subject.
 //!
 //! Fail-closed, but NOT the `transport`/`audit` shape: those sections default
 //! every field when absent-or-partial. `principal` has no safe default identity
@@ -13,20 +12,18 @@
 //! malformed section must never be silently treated as "no principal enrolled".
 
 use crate::{ConfigError, Value};
-use std::path::PathBuf;
 
 /// The registered section name for `principal` (spec §7/§5.5).
 pub const PRINCIPAL_SECTION: &str = "principal";
 
 /// #210: the keys this section's parser reads — the closed vocabulary.
-pub(crate) const PRINCIPAL_KEYS: [&str; 3] = ["name", "uid", "home"];
+pub(crate) const PRINCIPAL_KEYS: [&str; 2] = ["name", "uid"];
 
 /// The enrolled operator identity written by `maknae enroll`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Principal {
     pub name: String,
     pub uid: u32,
-    pub home: PathBuf,
 }
 
 fn get<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
@@ -58,21 +55,30 @@ fn err(field: &str, reason: impl std::fmt::Display) -> ConfigError {
     ConfigError::InvalidPrincipal(format!("principal.{field}: {reason}"))
 }
 
+/// The closed-key check alone, for a shadowed `config.d/` contribution: whole-section
+/// replacement means its required fields are never read, but an unknown key still refuses.
+pub fn principal_keys_known(section: &Value) -> Result<(), ConfigError> {
+    match section {
+        Value::Map(entries) => {
+            crate::reject_unknown_keys(PRINCIPAL_SECTION, entries, &PRINCIPAL_KEYS)
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Read the `principal` section (spec §7/§5.5). `None` (the section is
 /// absent) → `Ok(None)` — no principal enrolled yet (pre-`enroll`, or a
 /// pre-Jackrabbit config). A present section is fail-closed: it must be a
-/// map with a non-empty string `name`, an integer `uid` in `0..=u32::MAX`,
-/// and a non-empty, ABSOLUTE `home` path — any violation is
-/// `Err(InvalidPrincipal)`, never silently downgraded to `Ok(None)`.
+/// map with a non-empty string `name` and an integer `uid` in `0..=u32::MAX`
+/// — any violation is `Err(InvalidPrincipal)`, never silently downgraded to
+/// `Ok(None)`.
 pub fn principal_from_section(v: Option<&Value>) -> Result<Option<Principal>, ConfigError> {
     let section = match v {
         None => return Ok(None),
         Some(section) => section,
     };
     // #210: closed vocabulary — every key below is one this function reads.
-    if let Value::Map(entries) = section {
-        crate::reject_unknown_keys(PRINCIPAL_SECTION, entries, &PRINCIPAL_KEYS)?;
-    }
+    principal_keys_known(section)?;
     if !matches!(section, Value::Map(_)) {
         return Err(ConfigError::InvalidPrincipal(
             "principal section must be a map".into(),
@@ -90,21 +96,9 @@ pub fn principal_from_section(v: Option<&Value>) -> Result<Option<Principal>, Co
         .ok_or_else(|| err("uid", "missing"))
         .and_then(|v| as_u32(v).ok_or_else(|| err("uid", "must be an integer in 0..=u32::MAX")))?;
 
-    let home_str = get(section, "home")
-        .and_then(as_str)
-        .ok_or_else(|| err("home", "missing or not a string"))?;
-    if home_str.is_empty() {
-        return Err(err("home", "must not be empty"));
-    }
-    let home = PathBuf::from(home_str);
-    if !home.is_absolute() {
-        return Err(err("home", "must be an absolute path"));
-    }
-
     Ok(Some(Principal {
         name: name.to_string(),
         uid,
-        home,
     }))
 }
 
@@ -116,7 +110,6 @@ mod tests {
         Value::Map(vec![
             ("name".into(), Value::Str("alice".into())),
             ("uid".into(), Value::Int(1000)),
-            ("home".into(), Value::Str("/Users/alice".into())),
         ])
     }
 
@@ -131,7 +124,6 @@ mod tests {
         let p = principal_from_section(Some(&v)).unwrap().unwrap();
         assert_eq!(p.name, "alice");
         assert_eq!(p.uid, 1000);
-        assert_eq!(p.home, PathBuf::from("/Users/alice"));
     }
 
     #[test]
@@ -154,10 +146,7 @@ mod tests {
 
     #[test]
     fn missing_name_errs() {
-        let v = Value::Map(vec![
-            ("uid".into(), Value::Int(1000)),
-            ("home".into(), Value::Str("/home/a".into())),
-        ]);
+        let v = Value::Map(vec![("uid".into(), Value::Int(1000))]);
         assert!(matches!(
             principal_from_section(Some(&v)),
             Err(ConfigError::InvalidPrincipal(_))
@@ -169,7 +158,6 @@ mod tests {
         let v = Value::Map(vec![
             ("name".into(), Value::Str("".into())),
             ("uid".into(), Value::Int(1000)),
-            ("home".into(), Value::Str("/home/a".into())),
         ]);
         assert!(matches!(
             principal_from_section(Some(&v)),
@@ -179,10 +167,7 @@ mod tests {
 
     #[test]
     fn missing_uid_errs() {
-        let v = Value::Map(vec![
-            ("name".into(), Value::Str("a".into())),
-            ("home".into(), Value::Str("/home/a".into())),
-        ]);
+        let v = Value::Map(vec![("name".into(), Value::Str("a".into()))]);
         assert!(matches!(
             principal_from_section(Some(&v)),
             Err(ConfigError::InvalidPrincipal(_))
@@ -194,7 +179,6 @@ mod tests {
         let v = Value::Map(vec![
             ("name".into(), Value::Str("a".into())),
             ("uid".into(), Value::Str("1000".into())),
-            ("home".into(), Value::Str("/home/a".into())),
         ]);
         assert!(matches!(
             principal_from_section(Some(&v)),
@@ -207,7 +191,6 @@ mod tests {
         let v = Value::Map(vec![
             ("name".into(), Value::Str("a".into())),
             ("uid".into(), Value::Int(-1)),
-            ("home".into(), Value::Str("/home/a".into())),
         ]);
         assert!(matches!(
             principal_from_section(Some(&v)),
@@ -221,7 +204,6 @@ mod tests {
         let v = Value::Map(vec![
             ("name".into(), Value::Str("a".into())),
             ("uid".into(), Value::Int(i64::from(u32::MAX) + 1)),
-            ("home".into(), Value::Str("/home/a".into())),
         ]);
         assert!(matches!(
             principal_from_section(Some(&v)),
@@ -235,7 +217,6 @@ mod tests {
         let v = Value::Map(vec![
             ("name".into(), Value::Str("root".into())),
             ("uid".into(), Value::Int(0)),
-            ("home".into(), Value::Str("/root".into())),
         ]);
         let p = principal_from_section(Some(&v)).unwrap().unwrap();
         assert_eq!(p.uid, 0);
@@ -246,61 +227,9 @@ mod tests {
         let v = Value::Map(vec![
             ("name".into(), Value::Str("a".into())),
             ("uid".into(), Value::Int(i64::from(u32::MAX))),
-            ("home".into(), Value::Str("/home/a".into())),
         ]);
         let p = principal_from_section(Some(&v)).unwrap().unwrap();
         assert_eq!(p.uid, u32::MAX);
-    }
-
-    #[test]
-    fn missing_home_errs() {
-        let v = Value::Map(vec![
-            ("name".into(), Value::Str("a".into())),
-            ("uid".into(), Value::Int(1000)),
-        ]);
-        assert!(matches!(
-            principal_from_section(Some(&v)),
-            Err(ConfigError::InvalidPrincipal(_))
-        ));
-    }
-
-    #[test]
-    fn empty_home_errs() {
-        let v = Value::Map(vec![
-            ("name".into(), Value::Str("a".into())),
-            ("uid".into(), Value::Int(1000)),
-            ("home".into(), Value::Str("".into())),
-        ]);
-        assert!(matches!(
-            principal_from_section(Some(&v)),
-            Err(ConfigError::InvalidPrincipal(_))
-        ));
-    }
-
-    #[test]
-    fn relative_home_errs() {
-        let v = Value::Map(vec![
-            ("name".into(), Value::Str("a".into())),
-            ("uid".into(), Value::Int(1000)),
-            ("home".into(), Value::Str("relative/path".into())),
-        ]);
-        assert!(matches!(
-            principal_from_section(Some(&v)),
-            Err(ConfigError::InvalidPrincipal(_))
-        ));
-    }
-
-    #[test]
-    fn non_string_home_errs() {
-        let v = Value::Map(vec![
-            ("name".into(), Value::Str("a".into())),
-            ("uid".into(), Value::Int(1000)),
-            ("home".into(), Value::Int(1)),
-        ]);
-        assert!(matches!(
-            principal_from_section(Some(&v)),
-            Err(ConfigError::InvalidPrincipal(_))
-        ));
     }
 
     #[test]
@@ -308,7 +237,6 @@ mod tests {
         let v = Value::Map(vec![
             ("name".into(), Value::Int(1)),
             ("uid".into(), Value::Int(1000)),
-            ("home".into(), Value::Str("/home/a".into())),
         ]);
         assert!(matches!(
             principal_from_section(Some(&v)),
@@ -332,6 +260,39 @@ mod tests {
         }
     }
 
+    #[test]
+    fn principal_keys_known_accepts_a_partial_section_and_refuses_home() {
+        let partial = Value::Map(vec![("uid".into(), Value::Int(1000))]);
+        assert_eq!(principal_keys_known(&partial), Ok(()));
+        let with_home = Value::Map(vec![
+            ("name".into(), Value::Str("alice".into())),
+            ("home".into(), Value::Str("/Users/alice".into())),
+        ]);
+        assert_eq!(
+            principal_keys_known(&with_home),
+            Err(ConfigError::UnknownKey {
+                section: PRINCIPAL_SECTION.into(),
+                key: "home".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_principal_carrying_home_is_refused() {
+        let v = Value::Map(vec![
+            ("name".into(), Value::Str("alice".into())),
+            ("uid".into(), Value::Int(1000)),
+            ("home".into(), Value::Str("/Users/alice".into())),
+        ]);
+        match principal_from_section(Some(&v)) {
+            Err(ConfigError::UnknownKey { section, key }) => {
+                assert_eq!(section, PRINCIPAL_SECTION);
+                assert_eq!(key, "home");
+            }
+            other => panic!("expected Err(UnknownKey), got {other:?}"),
+        }
+    }
+
     /// Companion: every key the parser DOES read still loads, so closing the
     /// vocabulary cannot silently reject a valid config.
     #[test]
@@ -339,7 +300,6 @@ mod tests {
         let v = Value::Map(vec![
             ("name".into(), Value::Null),
             ("uid".into(), Value::Null),
-            ("home".into(), Value::Null),
         ]);
         let e = principal_from_section(Some(&v));
         assert!(

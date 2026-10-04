@@ -579,7 +579,17 @@ A host enrolled before per-user providers (#153) carries the removed AppRoles' c
 
    This removes every version of that key. Use your old `kv_mount`, prefix and provider name if they differed.
 
-### 3b. More than one user
+### 3b. Upgrading a host whose principal carries `home`
+
+A host enrolled before #440 has a `home:` line under `principal:` in `/etc/maknae/maknae.yaml`. The package upgrade restarts `maknaed`, and the daemon then refuses to start with:
+
+```text
+maknae daemon refused to start: the authorization policy could not be loaded: unknown key 'home' in 'principal'
+```
+
+It refuses while any file carries the key, whether `maknae.yaml` or a `config.d/` member. Delete the `home:` line from whichever file carries it. Re-enrolling with step 3's command also removes it, but only from `/etc/maknae/maknae.yaml`. Then restart `maknaed`: `sudo systemctl restart maknaed`; on macOS, `sudo launchctl kickstart -k system/io.maknae.maknaed`.
+
+### 3c. More than one user
 
 Enroll writes `~/.maknae` only for the account that ran it. To give another local account the agent, follow [first-provider step 4a](first-provider.md#4a-add-another-local-user): it adds the account to the `maknae` group, copies your CLI configuration to it, binds it in `authz.yaml` and creates its Vault user. The consequence for you: once `authz.yaml` has a `bindings:` block, only the names it lists have a role, so the enrolled administrator must be listed under `admin` too, and step 7's grant then belongs under each bound role; restart `maknaed` after adding a name. A second user's file actions are confined to their own home, resolved per request.
 
