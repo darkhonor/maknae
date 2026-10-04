@@ -1,0 +1,7 @@
+nextest-version = { required = "0.9.146" }
+
+[profile.mutants]
+slow-timeout = { period = "10s", terminate-after = 2 }
+fail-fast = { max-fail = 1, terminate = "immediate" }
+failure-output = "never"
+success-output = "never"

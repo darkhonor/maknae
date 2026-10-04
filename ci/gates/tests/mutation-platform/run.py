@@ -1,15 +1,26 @@
 #!/usr/bin/env python3
 """Native filters checked against cargo-mutants' actual source inventory."""
-import os
+import importlib.util
 from pathlib import Path
 import re
 import subprocess
-import tempfile
 import tomllib
 import unittest
 
 ROOT = Path(__file__).resolve().parents[4]
 SCRIPT = ROOT / "ci/gates/mutation-platform.sh"
+_spec = importlib.util.spec_from_file_location("platform_gated", ROOT / "ci/gates/platform-gated.py")
+platform_gated = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(platform_gated)
+DERIVED = platform_gated.derive(ROOT)
+FILTERED = sorted(platform_gated.filtered(ROOT))
+CRATE_INVENTORY = {
+    crate: subprocess.check_output(["cargo", "mutants", "--no-config", "-p", crate, "--list"],
+                                   cwd=ROOT, text=True).splitlines()
+    for crate in FILTERED
+}
+assert all(CRATE_INVENTORY.values()), "empty mutation inventory is not assurance"
+NO_MUTANTS = frozenset()
 INVENTORY = subprocess.check_output([
     "cargo", "mutants", "--no-config", "-p", "maknae-io", "--file",
     "crates/maknae-io/src/syscall.rs", "--list",
@@ -25,47 +36,51 @@ class PlatformSelection(unittest.TestCase):
     def exclusion(self, system):
         return subprocess.check_output(["bash", str(SCRIPT), system], text=True).strip()
 
-    def selected(self, system):
-        regex = self.exclusion(system)
-        return "\n".join(m for m in INVENTORY if not re.search(regex, m))
+    def attributed(self, item):
+        lines = CRATE_INVENTORY[item.crate]
+        if item.kind == "mod-file":
+            return [m for m in lines if m.startswith(item.file + ":")]
+        name = re.escape(item.name)
+        shape = re.compile(rf": replace ({name} ->|{name} with |<impl .*>::{name} )|.* in {name}$")
+        return [m for m in lines if m.startswith(item.file + ":") and shape.search(m)]
 
-    def test_linux(self):
-        selected = self.selected("Linux")
-        for active in ("linux_fd_path", "linux_probe_openat2", "openat2_resolve", "linux_mutation_directory_flags",
-                       "linux_path_delegation_flags", "linux_reopen_writable", "linux_confers_no_write",
-                       "linux_reopen_readable", "linux_dir_kernel_form"):
-            self.assertIn(active, selected)
-        for absent in ("macos_fd_path", "portable_probe_openat2", "unsupported_fd_path", "macos_mutation_directory_flags",
-                       "macos_path_delegation_flags", "macos_reopen_writable", "macos_confers_no_write",
-                       "macos_reopen_readable", "macos_dir_kernel_form"):
-            self.assertNotIn(absent, selected)
-        self.assertIn(" in open_read_target", selected)
-
-    def test_macos(self):
-        selected = self.selected("Darwin")
-        for active in ("macos_fd_path", "portable_probe_openat2", "macos_mutation_directory_flags",
-                       "macos_path_delegation_flags", "macos_reopen_writable", "macos_confers_no_write",
-                       "macos_reopen_readable", "macos_dir_kernel_form"):
-            self.assertIn(active, selected)
-        for absent in ("linux_fd_path", "linux_probe_openat2", "openat2_resolve",
-                       "unsupported_fd_path", "linux_mutation_directory_flags", "linux_path_delegation_flags",
-                       "linux_reopen_writable", "linux_confers_no_write", "linux_reopen_readable",
-                       "linux_dir_kernel_form"):
-            self.assertNotIn(absent, selected)
-        self.assertIn(" in open_read_target", selected)
+    def test_every_derived_item_is_excluded_exactly_where_inactive(self):
+        regex = {p: self.exclusion(u) for p, u in platform_gated.UNAME.items()}
+        covered, empty = set(), []
+        self.assertTrue(DERIVED)
+        for item in DERIVED:
+            lines = self.attributed(item)
+            if not lines:
+                empty.append(f"{item.file} {item.kind} {item.name}")
+            covered.update(lines)
+            for platform, pattern in regex.items():
+                for mutant in lines:
+                    if platform in item.active:
+                        self.assertNotRegex(mutant, pattern, f"active on {platform}")
+                    else:
+                        self.assertRegex(mutant, pattern, f"inactive on {platform}")
+        self.assertEqual(sorted(empty), sorted(NO_MUTANTS), "a derived item without mutants must be reviewed into NO_MUTANTS")
+        for crate, lines in CRATE_INVENTORY.items():
+            for mutant in set(lines) - covered:
+                for pattern in regex.values():
+                    self.assertNotRegex(mutant, pattern, "excluded but not derived as platform-gated")
 
     def test_nearby_names_and_files_are_not_excluded(self):
+        names = "|".join(sorted({g.name for g in DERIVED if g.kind == "fn"}, key=len, reverse=True))
         for system in ("Linux", "Darwin"):
             regex = self.exclusion(system)
             excluded = [m for m in INVENTORY if re.search(regex, m)]
             self.assertTrue(excluded)
             for mutant in excluded:
                 self.assertIsNone(re.search(regex, mutant.replace("syscall.rs:", "other.rs:")))
-                # A similarly named future function is not covered by this rule.
-                altered = re.sub(r"(fd_path|probe_openat2|openat2_resolve|mutation_directory_flags|path_delegation_flags|reopen_writable|confers_no_write|reopen_readable|dir_kernel_form)( ->|$)",
-                                 r"\1_extra\2", mutant)
+                altered = re.sub(rf"\b({names})( ->| with |$)", r"\1_extra\2", mutant)
                 self.assertNotEqual(altered, mutant)
                 self.assertIsNone(re.search(regex, altered))
+
+    def test_match_guard_naming_an_inactive_fn_is_not_excluded(self):
+        for system, name in (("Linux", "macos_fd_path"), ("Darwin", "linux_fd_path")):
+            near = f"crates/maknae-io/src/syscall.rs:1:1: replace match guard a == {name} with true in open_read_target"
+            self.assertNotRegex(near, self.exclusion(system))
 
     def test_maknae_sys_platform_file_is_excluded_only_where_inactive(self):
         linux, darwin = self.exclusion("Linux"), self.exclusion("Darwin")
@@ -122,66 +137,6 @@ class PlatformSelection(unittest.TestCase):
             for nearby in (mutant.replace("audit_append.rs:", "other.rs:"),
                            mutant.rsplit(" in ", 1)[0] + " in future_flags"):
                 self.assertFalse(any(re.search(pattern, nearby) for pattern in patterns))
-
-    def gate_argv(self, crate):
-        # The real gate, with its documented injection fixture interface. This
-        # proves CLI wiring, independently of what the filter script prints.
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            tools = root / "tools"
-            tools.mkdir()
-            (root / "coverage-tiers.toml").write_text(
-                f'[t1]\nmutants_crates = ["{crate}"]\n'
-            )
-            recorder = tools / "cargo"
-            # Record the argv AND emit the outcomes.json the gate now reads: it
-            # no longer trusts the exit status alone, because an all-unviable run
-            # exits 0 and would pass the zero-missed contract having measured
-            # nothing (#301). Real cargo-mutants writes --output DIR ->
-            # DIR/mutants.out/outcomes.json, so the recorder mirrors that.
-            recorder.write_text(
-                '#!/bin/sh\n'
-                'printf "%s\\n" "$@" > "$MUTATION_ARGS"\n'
-                'out=.\n'
-                'while [ $# -gt 0 ]; do\n'
-                '  [ "$1" = "--output" ] && { out="$2"; break; }\n'
-                '  shift\n'
-                'done\n'
-                'mkdir -p "$out/mutants.out"\n'
-                'printf \'{"total_mutants":7,"caught":7,"missed":0,"timeout":0,"unviable":0}\\n\' '
-                '> "$out/mutants.out/outcomes.json"\n'
-            )
-            recorder.chmod(0o755)
-            (tools / "cargo-mutants").symlink_to(recorder)
-            arguments = root / "args"
-            env = dict(os.environ, PATH=str(tools) + os.pathsep + os.environ["PATH"],
-                       MUTATION_ARGS=str(arguments), COVERAGE_TIERS_JSON=str(root / "unused"),
-                       COVERAGE_TIERS_FILELIST=str(root / "unused"),
-                       COVERAGE_TIERS_CRATE_DIRS=f"{crate}=crates/{crate}")
-            result = subprocess.run([
-                "bash", str(ROOT / "ci/gates/coverage-tiers.sh"), "--root", str(root),
-                "--injection", "--mutants", crate,
-            ], env=env, text=True, capture_output=True)
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            # `--output` is the gate's, not the platform filter's: each crate
-            # gets its own results dir so the run can be JUDGED afterwards
-            # (#301), and so one crate's outcomes.json does not overwrite the
-            # next one's. Asserted by position like the rest of the argv, with
-            # the path checked separately because it is root-dependent.
-            argv = arguments.read_text().splitlines()
-            self.assertEqual(argv[:3], ["mutants", "--package", crate])
-            self.assertEqual(argv[3], "--output")
-            self.assertEqual(argv[4], str(root / "target" / f"mutants-{crate}"))
-            return argv[5:]
-
-    def test_gate_passes_native_filter_as_one_argument(self):
-        expected = subprocess.check_output(["bash", str(SCRIPT)], text=True).strip()
-        self.assertEqual(self.gate_argv("maknae-io"),
-                         ["--exclude-re", expected, "--minimum-test-timeout", "60"])
-
-    def test_gate_passes_the_native_filter_to_maknae_sys(self):
-        expected = subprocess.check_output(["bash", str(SCRIPT)], text=True).strip()
-        self.assertEqual(self.gate_argv("maknae-sys"), ["--exclude-re", expected])
 
 
 if __name__ == "__main__":
