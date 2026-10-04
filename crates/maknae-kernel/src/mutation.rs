@@ -2,13 +2,14 @@
 //! attempt; its progress and completion are client reported.
 use crate::{
     handler::{build_authz_request, delegated_plan, discharge_plan, lexical_pregate},
+    uid_gate::{Busy, UidGate},
     MutationExchange,
 };
 use maknae_audit_append::{
     AuditEmit, AuditRecord, MutationAudit, MutationEffectKind, MutationEffectRecord,
     MutationOperation, MutationOrigin, MutationPhase, MutationStatus, Seq,
 };
-use maknae_config::{Principal, TransportConfig};
+use maknae_config::TransportConfig;
 use maknae_io::{MutationDirectory, MutationRequired};
 use maknae_proto::{
     MutationGrant, MutationId, MutationLimits, MutationReport, MutationScope, Payload,
@@ -19,7 +20,7 @@ use maknae_security::{AttrValue, Authorizer, Decision, FsOperation, Lane};
 use std::os::fd::AsFd;
 use std::{
     os::fd::OwnedFd,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, OnceLock},
     time::Duration,
 };
@@ -28,11 +29,16 @@ use tokio::{
     sync::Semaphore,
 };
 
-/// No orphan reclamation: the permit follows the actual blocking worker.
+/// No orphan reclamation: the permit follows the actual blocking worker, and the uid
+/// claim lives only as long as that worker.
 static CAPACITY: OnceLock<Arc<Semaphore>> = OnceLock::new();
+static MUTATING: OnceLock<UidGate> = OnceLock::new();
 const MAX_WORKERS: usize = 16;
 fn capacity() -> Arc<Semaphore> {
     Arc::clone(CAPACITY.get_or_init(|| Arc::new(Semaphore::new(MAX_WORKERS))))
+}
+fn mutating() -> &'static UidGate {
+    MUTATING.get_or_init(UidGate::default)
 }
 
 enum Evidence {
@@ -74,13 +80,17 @@ fn checked(path: &str) -> Result<(), String> {
 fn prepare(
     verb: Verb,
     fd: Option<OwnedFd>,
-    principal: &Principal,
+    home: &Path,
+    uid: u32,
     lane: Lane,
 ) -> Result<PreparedMutation, String> {
     let asked = path(&verb).ok_or("not a mutation")?;
     checked(asked)?;
     if lane != Lane::Local {
         return Err("mutation requires local subject execution".into());
+    }
+    if home == Path::new("/") {
+        return Err(crate::authz::HomeUnavailable::Unresolvable.reason());
     }
     let read = matches!(verb, Verb::Read { .. });
     let fd = fd.ok_or(if read {
@@ -105,9 +115,8 @@ fn prepare(
         _ => None,
     };
     if let Some((refused, kind, effect)) = object {
-        let verified =
-            maknae_io::verify_delegated(fd.as_fd(), delegated_plan(&principal.home, principal.uid))
-                .map_err(|e| format!("{refused}: {e}"))?;
+        let verified = maknae_io::verify_delegated(fd.as_fd(), delegated_plan(home, uid))
+            .map_err(|e| format!("{refused}: {e}"))?;
         maknae_io::refuse_access_bearing(fd.as_fd(), &verified.path)
             .map_err(|e| format!("{refused}: {e}"))?;
         let path = verified
@@ -129,8 +138,8 @@ fn prepare(
     let directory = maknae_io::verify_mutation_directory(
         fd,
         MutationRequired {
-            confined_beneath: principal.home.clone(),
-            root_required: delegated_plan(&principal.home, principal.uid).root_required,
+            confined_beneath: home.to_path_buf(),
+            root_required: delegated_plan(home, uid).root_required,
         },
     )
     .map_err(|e| format!("namespace location evidence refused: {e}"))?;
@@ -186,7 +195,7 @@ fn prepare(
             },
         ),
         Verb::FsDelete { recursive, .. } => {
-            if Path::new(&root) == principal.home {
+            if Path::new(&root) == home {
                 return Err("cannot delete confinement root".into());
             }
             if recursive {
@@ -436,7 +445,7 @@ pub(crate) async fn handle<S, E, P>(
     delegated: &maknae_io::DelegatedFds,
     authorizer: Arc<P>,
     emit: Arc<E>,
-    principal: Arc<Principal>,
+    home: Result<PathBuf, crate::authz::HomeUnavailable>,
     cfg: &TransportConfig,
     seq: &Seq,
     mut record: AuditRecord,
@@ -453,17 +462,21 @@ where
         return false;
     };
     record.object = Some(asked.into());
-    let permit = match capacity().try_acquire_owned() {
-        Ok(p) => p,
-        Err(_) => {
-            refuse(
-                stream,
-                cfg,
-                &*emit,
-                record,
-                "mutation worker budget exhausted".into(),
-            )
-            .await;
+    let home = match home {
+        Ok(home) => home,
+        Err(cause) => {
+            refuse(stream, cfg, &*emit, record, cause.reason()).await;
+            return true;
+        }
+    };
+    let (claim, permit) = match mutating().try_admit(uid, &capacity()) {
+        Ok(slot) => slot.split(),
+        Err(busy) => {
+            let reason = match busy {
+                Busy::Requester => "mutation worker budget exhausted for this requester",
+                Busy::Global => "mutation worker budget exhausted",
+            };
+            refuse(stream, cfg, &*emit, record, reason.into()).await;
             return true;
         }
     };
@@ -473,12 +486,13 @@ where
     let prepared = tokio::time::timeout(
         authz_timeout,
         tokio::task::spawn_blocking(move || {
-            let prepared = prepare(original.clone(), fd, &principal, lane)?;
+            let _claim = claim;
+            let prepared = prepare(original.clone(), fd, &home, uid, lane)?;
             let decision = authorize(
                 &prepared,
                 &original,
                 uid,
-                Some(&principal.home),
+                Some(&home),
                 &*authorizer,
                 &policy_name,
             );
@@ -841,7 +855,7 @@ mod tests {
 
     struct Fixture {
         root: std::path::PathBuf,
-        principal: Principal,
+        principal: maknae_config::Principal,
     }
     impl Fixture {
         fn new() -> Self {
@@ -854,7 +868,7 @@ mod tests {
             std::fs::create_dir(&root).unwrap();
             std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
             let root = root.canonicalize().unwrap();
-            let principal = Principal {
+            let principal = maknae_config::Principal {
                 name: "operator".into(),
                 uid: nix::unistd::geteuid().as_raw(),
                 home: root.clone(),
@@ -888,7 +902,14 @@ mod tests {
             page: None,
         };
         let held = || Some(maknae_io::open_path_for_delegation(&target).unwrap());
-        let prepared = prepare(read(), held(), &fx.principal, Lane::Local).unwrap();
+        let prepared = prepare(
+            read(),
+            held(),
+            &fx.principal.home,
+            fx.principal.uid,
+            Lane::Local,
+        )
+        .unwrap();
         assert_eq!(prepared.kind, FsOperation::Read);
         assert_eq!(prepared.paths, vec![target.to_str().unwrap().to_string()]);
         assert_eq!(
@@ -899,33 +920,76 @@ mod tests {
             }
         );
         assert_eq!(
-            prepare(read(), None, &fx.principal, Lane::Local)
-                .err()
-                .as_deref(),
+            prepare(
+                read(),
+                None,
+                &fx.principal.home,
+                fx.principal.uid,
+                Lane::Local
+            )
+            .err()
+            .as_deref(),
             Some("read descriptor missing")
         );
-        assert!(prepare(read(), held(), &fx.principal, Lane::Remote).is_err());
-        assert!(prepare(read(), Some(fx.fd()), &fx.principal, Lane::Local)
+        assert_eq!(
+            prepare(
+                read(),
+                held(),
+                Path::new("/"),
+                fx.principal.uid,
+                Lane::Local
+            )
             .err()
-            .unwrap()
-            .starts_with("read evidence refused"));
+            .as_deref(),
+            Some("requester home unavailable: unresolvable")
+        );
+        assert!(prepare(
+            read(),
+            held(),
+            &fx.principal.home,
+            fx.principal.uid,
+            Lane::Remote
+        )
+        .is_err());
+        assert!(prepare(
+            read(),
+            Some(fx.fd()),
+            &fx.principal.home,
+            fx.principal.uid,
+            Lane::Local
+        )
+        .err()
+        .unwrap()
+        .starts_with("read evidence refused"));
         #[cfg(target_os = "linux")]
         assert!(prepare(
             read(),
             Some(std::fs::File::open(&target).unwrap().into()),
-            &fx.principal,
+            &fx.principal.home,
+            fx.principal.uid,
             Lane::Local
         )
         .err()
         .unwrap()
         .contains("confers access beyond location"));
         std::fs::hard_link(&target, fx.root.join("second-read-link")).unwrap();
-        assert!(prepare(read(), held(), &fx.principal, Lane::Local).is_err());
+        assert!(prepare(
+            read(),
+            held(),
+            &fx.principal.home,
+            fx.principal.uid,
+            Lane::Local
+        )
+        .is_err());
         assert_eq!(std::fs::read(target).unwrap(), b"sentinel");
     }
     fn fixture_pdp(fx: &Fixture) -> crate::Composition<maknae_authz_basic::HermeticAuthorizer> {
         let path = fx.root.join("authz.yaml");
-        std::fs::write(&path, "schema_version: 1\npermissions:\n  allow:\n    - \"Write(~/**)\"\n  deny: []\nbindings:\n  user: [\"root\"]\n").unwrap();
+        let name = nix::unistd::User::from_uid(nix::unistd::geteuid())
+            .expect("NSS")
+            .expect("the test euid has a passwd entry")
+            .name;
+        std::fs::write(&path, format!("schema_version: 1\npermissions:\n  allow:\n    - \"Write(~/**)\"\n  deny: []\nbindings:\n  user: [\"{name}\"]\n")).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
         let baseline = maknae_authz_basic::HermeticAuthorizer::new(
             path,
@@ -990,26 +1054,185 @@ mod tests {
             self.pdp.decide_reporting_role(request)
         }
     }
+    struct Release(Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            let (released, wake) = &*self.0;
+            *released
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+            wake.notify_all();
+        }
+    }
+    static EUID_TURN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    fn last_reason(emit: &Recorder) -> String {
+        emit.0
+            .lock()
+            .unwrap()
+            .last()
+            .expect("a record")
+            .outcome
+            .reason
+            .clone()
+    }
+    #[tokio::test]
+    async fn the_same_uid_starts_another_action_while_its_first_is_in_the_exchange() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let cfg = maknae_config::transport_from_section(None).unwrap();
+        let seq = Seq::new();
+        let target = fx.root.join("exchange-sentinel");
+        std::fs::write(&target, b"untouched").unwrap();
+        let verb = Verb::FsWrite {
+            path: target.to_str().unwrap().into(),
+            content_length: 0,
+            mode: WriteMode::Existing,
+            conversation: None,
+        };
+        let fds = maknae_io::DelegatedFds::new(1);
+        fds.push(maknae_io::open_path_for_delegation(&target).unwrap());
+        let (mut client, mut server) = tokio::io::duplex(65536);
+        let first = handle(
+            &mut server,
+            &verb,
+            fx.principal.uid,
+            Lane::Local,
+            &fds,
+            Arc::new(fixture_pdp(&fx)),
+            Arc::new(Recorder::default()),
+            Ok(fx.root.clone()),
+            &cfg,
+            &seq,
+            record(),
+            Duration::from_secs(10),
+            AttemptCaps::default(),
+            "US",
+        );
+        let second_emit = Arc::new(Recorder::default());
+        let second = async {
+            let grant = tokio::time::timeout(
+                Duration::from_secs(10),
+                maknae_proto::read_frame_of_class(
+                    &mut client,
+                    maknae_proto::FrameClass::Attempt,
+                    &maknae_proto::FrameCaps {
+                        control: 0,
+                        attempt: maknae_proto::ATTEMPT_RESPONSE_MAX,
+                        prompt: 0,
+                    },
+                ),
+            )
+            .await
+            .expect("the grant arrives in time")
+            .expect("a grant frame");
+            assert!(matches!(
+                maknae_proto::decode_response(&grant).unwrap().result,
+                RespResult::Ok(Payload::MutationAttempt(_))
+            ));
+            let (_idle, mut other) = tokio::io::duplex(65536);
+            assert!(
+                handle(
+                    &mut other,
+                    &verb,
+                    fx.principal.uid,
+                    Lane::Local,
+                    &maknae_io::DelegatedFds::new(1),
+                    Arc::new(fixture_pdp(&fx)),
+                    second_emit.clone(),
+                    Ok(fx.root.clone()),
+                    &cfg,
+                    &seq,
+                    record(),
+                    Duration::from_secs(10),
+                    AttemptCaps::default(),
+                    "US",
+                )
+                .await
+            );
+            drop(client);
+        };
+        let (consumed, ()) = tokio::time::timeout(Duration::from_secs(20), async {
+            tokio::join!(first, second)
+        })
+        .await
+        .expect("both actions end once the client goes away");
+        assert!(consumed);
+        assert_eq!(
+            last_reason(&second_emit),
+            "mutation descriptor missing",
+            "the second action reached its own worker"
+        );
+    }
+    #[tokio::test]
+    async fn an_unusable_home_is_refused_with_its_cause_before_any_slot() {
+        use crate::authz::HomeUnavailable;
+        let fx = Fixture::new();
+        let cfg = maknae_config::transport_from_section(None).unwrap();
+        let seq = Seq::new();
+        let target = fx.root.join("unusable-home-sentinel");
+        std::fs::write(&target, b"untouched").unwrap();
+        let verb = Verb::FsWrite {
+            path: target.to_str().unwrap().into(),
+            content_length: 0,
+            mode: WriteMode::Existing,
+            conversation: None,
+        };
+        for (uid, cause) in (4_350_100..).zip([
+            HomeUnavailable::Unresolvable,
+            HomeUnavailable::TimedOut,
+            HomeUnavailable::RequesterAtCapacity,
+            HomeUnavailable::AtCapacity,
+        ]) {
+            let held = mutating().try_claim(uid).expect("an unclaimed uid");
+            let fds = maknae_io::DelegatedFds::new(1);
+            fds.push(maknae_io::open_path_for_delegation(&target).unwrap());
+            let emit = Arc::new(Recorder::default());
+            let (_client, mut server) = tokio::io::duplex(65536);
+            assert!(
+                handle(
+                    &mut server,
+                    &verb,
+                    uid,
+                    Lane::Local,
+                    &fds,
+                    Arc::new(fixture_pdp(&fx)),
+                    emit.clone(),
+                    Err(cause),
+                    &cfg,
+                    &seq,
+                    record(),
+                    Duration::from_secs(10),
+                    AttemptCaps::default(),
+                    "US",
+                )
+                .await
+            );
+            assert_eq!(last_reason(&emit), cause.reason(), "{cause:?}");
+            assert!(fds.take().is_some(), "no worker took the descriptor");
+            drop(held);
+        }
+    }
     #[tokio::test]
     async fn admission_capacity_stays_with_timed_out_real_policy_worker() {
+        let _turn = EUID_TURN.lock().await;
         let fx = Fixture::new();
         let emit = Arc::new(Recorder::default());
         let cfg = maknae_config::transport_from_section(None).unwrap();
         let seq = Seq::new();
-        let principal = Arc::new(fx.principal.clone());
         let authorizer = Arc::new(fixture_pdp(&fx));
+        let authorizer_for_second = Arc::new(fixture_pdp(&fx));
         let (_client, mut server) = tokio::io::duplex(65536);
         let fds = maknae_io::DelegatedFds::new(4);
         assert!(
             !handle(
                 &mut server,
                 &Verb::Ping,
-                0,
+                fx.principal.uid,
                 Lane::Local,
                 &fds,
                 authorizer.clone(),
                 emit.clone(),
-                principal.clone(),
+                Ok(fx.root.clone()),
                 &cfg,
                 &seq,
                 record(),
@@ -1039,12 +1262,12 @@ mod tests {
             handle(
                 &mut server,
                 &verb,
-                0,
+                fx.principal.uid,
                 Lane::Local,
                 &fds,
                 authorizer,
                 emit.clone(),
-                principal.clone(),
+                Ok(fx.root.clone()),
                 &cfg,
                 &seq,
                 record(),
@@ -1066,6 +1289,7 @@ mod tests {
         drop(full);
         fds.push(maknae_io::open_path_for_delegation(&target).unwrap());
         let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let release = Release(gate.clone());
         let delayed = Arc::new(Delayed {
             pdp: fixture_pdp(&fx),
             gate: gate.clone(),
@@ -1073,12 +1297,12 @@ mod tests {
         handle(
             &mut server,
             &verb,
-            0,
+            fx.principal.uid,
             Lane::Local,
             &fds,
             delayed,
             emit.clone(),
-            principal,
+            Ok(fx.root.clone()),
             &cfg,
             &seq,
             record(),
@@ -1102,16 +1326,70 @@ mod tests {
             "timeout cannot reclaim a live worker's permit"
         );
         assert_eq!(std::fs::read(&target).unwrap(), b"untouched");
-        let (released, wake) = &*gate;
-        *released.lock().unwrap() = true;
-        wake.notify_one();
+        let rejected = Arc::new(Recorder::default());
+        assert!(
+            handle(
+                &mut server,
+                &verb,
+                fx.principal.uid,
+                Lane::Local,
+                &fds,
+                authorizer_for_second.clone(),
+                rejected.clone(),
+                Ok(fx.root.clone()),
+                &cfg,
+                &seq,
+                record(),
+                Duration::from_secs(1),
+                AttemptCaps::default(),
+                "US",
+            )
+            .await
+        );
+        assert_eq!(
+            rejected.0.lock().unwrap().last().unwrap().outcome.reason,
+            "mutation worker budget exhausted for this requester"
+        );
+        assert_eq!(
+            capacity().available_permits(),
+            MAX_WORKERS - 1,
+            "a uid already in flight takes no global slot"
+        );
+        let other = Arc::new(Recorder::default());
+        assert!(
+            handle(
+                &mut server,
+                &verb,
+                fx.principal.uid.wrapping_add(4_350_000),
+                Lane::Local,
+                &fds,
+                authorizer_for_second,
+                other.clone(),
+                Ok(PathBuf::from("/")),
+                &cfg,
+                &seq,
+                record(),
+                Duration::from_secs(1),
+                AttemptCaps::default(),
+                "US",
+            )
+            .await
+        );
+        assert_eq!(
+            other.0.lock().unwrap().last().unwrap().outcome.reason,
+            "requester home unavailable: unresolvable",
+            "another uid still reaches its own worker"
+        );
+        drop(release);
         tokio::time::timeout(Duration::from_secs(2), async {
-            while capacity().available_permits() != MAX_WORKERS {
+            while capacity().available_permits() != MAX_WORKERS
+                || mutating().try_claim(fx.principal.uid).is_none()
+            {
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .unwrap();
+        .expect("the slot and the uid claim return when the worker ends");
         assert_eq!(
             std::fs::read(target).unwrap(),
             b"untouched",
@@ -1135,18 +1413,27 @@ mod tests {
     #[test]
     fn preparation_requires_local_real_descriptor_and_valid_mkdir_suffix() {
         let fx = Fixture::new();
-        assert!(prepare(Verb::Ping, None, &fx.principal, Lane::Local).is_err());
+        assert!(prepare(
+            Verb::Ping,
+            None,
+            &fx.principal.home,
+            fx.principal.uid,
+            Lane::Local
+        )
+        .is_err());
         assert!(prepare(
             fx.mkdir(true, vec!["one".into(), "two".into()]),
             Some(fx.fd()),
-            &fx.principal,
+            &fx.principal.home,
+            fx.principal.uid,
             Lane::Remote
         )
         .is_err());
         assert!(prepare(
             fx.mkdir(true, vec!["one".into(), "two".into()]),
             None,
-            &fx.principal,
+            &fx.principal.home,
+            fx.principal.uid,
             Lane::Local
         )
         .is_err());
@@ -1161,7 +1448,8 @@ mod tests {
             assert!(prepare(
                 fx.mkdir(parents, components),
                 Some(fx.fd()),
-                &fx.principal,
+                &fx.principal.home,
+                fx.principal.uid,
                 Lane::Local
             )
             .is_err());
@@ -1172,7 +1460,8 @@ mod tests {
                 recursive: false
             },
             Some(fx.fd()),
-            &fx.principal,
+            &fx.principal.home,
+            fx.principal.uid,
             Lane::Local
         )
         .is_err());
@@ -1182,7 +1471,8 @@ mod tests {
                 recursive: false
             },
             Some(fx.fd()),
-            &fx.principal,
+            &fx.principal.home,
+            fx.principal.uid,
             Lane::Local
         )
         .is_err());
@@ -1191,7 +1481,8 @@ mod tests {
         assert!(prepare(
             fx.mkdir(true, vec!["two".into()]),
             Some(std::fs::File::open(&target).unwrap().into()),
-            &fx.principal,
+            &fx.principal.home,
+            fx.principal.uid,
             Lane::Local
         )
         .is_err());
@@ -1202,7 +1493,14 @@ mod tests {
             conversation: None,
         };
         let held = || Some(maknae_io::open_path_for_delegation(&target).unwrap());
-        let prepared = prepare(write(), held(), &fx.principal, Lane::Local).unwrap();
+        let prepared = prepare(
+            write(),
+            held(),
+            &fx.principal.home,
+            fx.principal.uid,
+            Lane::Local,
+        )
+        .unwrap();
         assert_eq!(prepared.kind, FsOperation::WriteExisting);
         assert_eq!(prepared.paths, vec![target.to_str().unwrap().to_string()]);
         assert_eq!(
@@ -1212,9 +1510,23 @@ mod tests {
                 effect: ReportedEffect::ReplacedFile
             }
         );
-        assert!(prepare(write(), Some(fx.fd()), &fx.principal, Lane::Local).is_err());
+        assert!(prepare(
+            write(),
+            Some(fx.fd()),
+            &fx.principal.home,
+            fx.principal.uid,
+            Lane::Local
+        )
+        .is_err());
         std::fs::hard_link(&target, fx.root.join("second-link")).unwrap();
-        assert!(prepare(write(), held(), &fx.principal, Lane::Local).is_err());
+        assert!(prepare(
+            write(),
+            held(),
+            &fx.principal.home,
+            fx.principal.uid,
+            Lane::Local
+        )
+        .is_err());
         assert_eq!(std::fs::read(target).unwrap(), b"sentinel");
     }
 }

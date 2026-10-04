@@ -169,7 +169,7 @@ neverallow maknae_egress_t maknae_secret_t:file { read open };
 allow maknaed_t maknae_private_t:dir { open read search getattr };
 allow maknaed_t maknae_private_t:file { read open getattr };
 
-# #365: the daemon stats the enrolled home by path and receives the subject's
+# #365: the daemon stats the requester's home by path and receives the subject's
 # no-access (O_PATH) descriptors; it opens and reads nothing in a home. Receipt is
 # checked as ioctl; the xperm rules allow only command 0x0000, which no filesystem
 # implements. Receipt covers files and directories of every home content type, so

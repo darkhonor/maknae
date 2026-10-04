@@ -52,7 +52,7 @@ use tokio::sync::mpsc;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
-use crate::authz::{authorize_connection, ConnDecision};
+use crate::authz::{admission_facts, authorize_connection, ConnDecision, HOME_RESOLVE_TIMEOUT};
 use crate::blocking_guard::{BlockingBreaker, BreakerAdmission, BreakerTransition};
 use crate::boot_gate::authz_boot_gate;
 use crate::groupres::{maknae_gid, uid_in_maknae_group};
@@ -60,7 +60,6 @@ use crate::handler::{
     build_authz_request, build_whoami, discharge_plan, dispatch_verb, lexical_pregate, may_respond,
     verb_to_action, Dispatch, ServeOutcome, AUTHZ_DECIDE_TIMEOUT,
 };
-use maknae_config::Principal;
 use maknae_proto::{encode_response_zeroizing, ProtoErrCode, ProtoError};
 use maknae_security::{combine, finalize, guarded_decide_reporting_role, Authorizer, Decision};
 
@@ -176,14 +175,15 @@ const HANDLER_DRAIN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 fn handler_drain_bound(cfg: &TransportConfig, egress_deadline: Duration) -> Duration {
     // One connection's bounded work, in the order the handler performs it:
     // the mTLS handshake (inside the handler, not on the loop), the peer's
-    // group lookup, the frame read, the PDP decision, the verb's own blocking
-    // step under the same bound (the subject enumeration — a
-    // second `AUTHZ_DECIDE_TIMEOUT`, review round 6), the provider call, the
-    // response write (bounded by the read timeout), the close — then the
-    // margin for the audit appends.
+    // group lookup, the frame read, the requester home's resolution (filesystem
+    // verbs only), the PDP decision, the verb's own blocking step under the
+    // same bound (the subject enumeration — a second `AUTHZ_DECIDE_TIMEOUT`,
+    // review round 6), the provider call, the response write (bounded by the
+    // read timeout), the close — then the margin for the audit appends.
     Duration::from_millis(cfg.handshake_timeout_ms)
         + GROUP_LOOKUP_TIMEOUT
         + Duration::from_millis(cfg.read_timeout_ms)
+        + HOME_RESOLVE_TIMEOUT
         + crate::handler::AUTHZ_DECIDE_TIMEOUT
         + crate::handler::AUTHZ_DECIDE_TIMEOUT
         + egress_deadline
@@ -400,12 +400,12 @@ pub async fn handle<S, E, P>(
     peer_uid: u32,
     in_group: bool,
     peer_user: Option<String>,
+    peer_dir: Option<PathBuf>,
     emit: Arc<E>,
     session_id: u64,
     cfg: TransportConfig,
     au3_1: serde_json::Value,
     authorizer: Arc<P>,
-    principal: Arc<Principal>,
     config_view: Arc<ConfigView>,
     authz_backend_name: Arc<String>,
     classification_policy_name: Arc<String>,
@@ -425,12 +425,12 @@ pub async fn handle<S, E, P>(
         peer_uid,
         in_group,
         peer_user,
+        peer_dir,
         emit,
         session_id,
         cfg,
         au3_1,
         authorizer,
-        principal,
         config_view,
         authz_backend_name,
         classification_policy_name,
@@ -477,12 +477,12 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     // It also chooses the key path's `<username>` segment (ADR-0028 §3), so it
     // must stay kernel-resolved from the peer uid, never taken from the request.
     peer_user: Option<String>,
+    peer_dir: Option<PathBuf>,
     emit: Arc<E>,
     session_id: u64,
     cfg: TransportConfig,
     au3_1: serde_json::Value,
     authorizer: Arc<P>,
-    principal: Arc<Principal>,
     config_view: Arc<ConfigView>,
     // Captured ONCE at boot from the same authorizer (static TCB: the backend
     // set cannot change in-process, so per-request asking could only repeat
@@ -804,10 +804,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
         return;
     }
 
-    if matches!(
-        request.verb,
-        Verb::FsWrite { .. } | Verb::FsDelete { .. } | Verb::FsMkdir { .. } | Verb::Read { .. }
-    ) {
+    if crate::handler::is_filesystem_verb(&request.verb) {
         let mut record = make_record(
             "request",
             &host,
@@ -839,7 +836,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             &delegated,
             Arc::clone(&authorizer),
             Arc::clone(&emit),
-            Arc::clone(&principal),
+            crate::authz::admitted_home(peer_uid, peer_dir).await,
             &cfg,
             &seq,
             record,
@@ -910,13 +907,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     // parent contract: combine([guarded_decide]) + finalize. Timeout or join
     // failure converts AT THE CALL SITE to a Deny with its own reason
     // (finalize(Indeterminate) would hardcode a different string).
-    let sec_req = build_authz_request(
-        &request.verb,
-        peer_uid,
-        Some(&principal.home),
-        lane,
-        admitted.as_ref(),
-    );
+    let sec_req = build_authz_request(&request.verb, peer_uid, None, lane, admitted.as_ref());
     let authz_breaker = authz_decide_breaker();
     let authz_admission = { authz_breaker.lock().await.begin_attempt_at(Instant::now()) };
     // #275: the role rides out WITH the verdict so the audit record attests the
@@ -2210,7 +2201,6 @@ pub async fn accept_loop<A, E, P>(
     shutdown: impl Future<Output = ()> + Send,
     supervisor: tokio::task::JoinHandle<maknae_vault::VaultError>,
     authorizer: Arc<P>,
-    principal: Arc<Principal>,
     config_view: Arc<ConfigView>,
     authz_backend_name: Arc<String>,
     classification_policy_name: Arc<String>,
@@ -2355,7 +2345,6 @@ where
                                 let cfg = cfg.clone();
                                 let wctx = wctx.clone();
                                 let authorizer = Arc::clone(&authorizer);
-                                let principal = Arc::clone(&principal);
                                 let config_view = Arc::clone(&config_view);
                                 let authz_backend_name = Arc::clone(&authz_backend_name);
                                 let classification_policy_name =
@@ -2391,17 +2380,11 @@ where
                                             let now = Instant::now();
                                             let admission =
                                                 group_breaker.lock().await.begin_attempt_at(now);
-                                            // #275: the peer's OS username rides
-                                            // out of the SAME blocking lookup that
-                                            // answers membership, so it inherits the
-                                            // timeout and the breaker. Resolving it
-                                            // anywhere else would put an unbounded
-                                            // getpwuid back on this async worker —
-                                            // exactly what the breaker exists to
-                                            // prevent. On every fail-closed arm the
-                                            // name is absent, deliberately: not
-                                            // spawning NSS work is the point.
-                                            let (in_group, peer_user) = match admission {
+                                            // #275, #435: the peer's username and
+                                            // raw home ride the SAME blocking lookup
+                                            // as membership. Absent on every
+                                            // fail-closed arm.
+                                            let (in_group, peer_user, peer_dir) = match admission {
                                                 BreakerAdmission::RefuseOpen => {
                                                     if group_breaker
                                                         .lock()
@@ -2412,9 +2395,9 @@ where
                                                             "maknaed: `maknae` group lookup circuit breaker open for uid={uid} — failing closed without spawning more NSS work"
                                                         );
                                                     }
-                                                    (false, None)
+                                                    admission_facts(None)
                                                 }
-                                                BreakerAdmission::RefuseAtCapacity => (false, None),
+                                                BreakerAdmission::RefuseAtCapacity => admission_facts(None),
                                                 BreakerAdmission::Admit => match tokio::time::timeout(
                                                     GROUP_LOOKUP_TIMEOUT,
                                                     tokio::task::spawn_blocking(move || {
@@ -2428,8 +2411,8 @@ where
                                                         // either way it is no longer an orphan.
                                                         group_breaker.lock().await.record_success();
                                                         match join {
-                                                            Ok(Ok(m)) => (m.in_group, Some(m.user)),
-                                                            _ => (false, None),
+                                                            Ok(Ok(m)) => admission_facts(Some(m)),
+                                                            _ => admission_facts(None),
                                                         }
                                                     }
                                                     Err(_elapsed) => {
@@ -2449,7 +2432,7 @@ where
                                                                 GROUP_LOOKUP_TIMEOUT.as_secs()
                                                             );
                                                         }
-                                                        (false, None)
+                                                        admission_facts(None)
                                                     }
                                                 },
                                             };
@@ -2461,8 +2444,9 @@ where
                                             handle(
                                                 conn.stream, conn.peer_uri, conn.peer_uid, in_group,
                                                 peer_user,
+                                                peer_dir,
                                                 emit, session_id, cfg, wctx.au3_1,
-                                                authorizer, principal,
+                                                authorizer,
                                                 config_view,
                                                 authz_backend_name,
                                                 classification_policy_name,
@@ -3094,8 +3078,8 @@ async fn boot_after_sink(
             .map_err(|e| RunError::Other(e.to_string()))?;
     }
 
-    let (authorizer, principal) = match authz_boot_gate(config_dir, principal_opt) {
-        Ok(pair) => pair,
+    let authorizer = match authz_boot_gate(config_dir, principal_opt) {
+        Ok(authorizer) => authorizer,
         Err(e) => {
             return Err(refuse_authz_boot(
                 sink.as_ref(),
@@ -3152,7 +3136,6 @@ async fn boot_after_sink(
         .await
         .map_err(|e| boot_evidence_refused("composition", e))?;
     let authorizer = Arc::new(authorizer);
-    let principal = Arc::new(principal);
 
     // Plane credential: resolve + read this plane's SecretID source (spec §5.1),
     // authenticate, then mint a memory-only leaf below; the credential supervisor then
@@ -3285,7 +3268,6 @@ async fn boot_after_sink(
         Arc::clone(session_ids),
         supervisor,
         Arc::clone(&authorizer),
-        Arc::clone(&principal),
         // Redact ONCE, here, at boot. The run loop receives only the view;
         // the unredacted Document does not travel with it.
         config_view,
@@ -3328,7 +3310,6 @@ async fn serve_after_mint<B>(
     // the baseline alone would pass every gate (critical-review round 3). This
     // signature is the type-level pin: what is served is what was composed.
     authorizer: Arc<crate::composition::Composition<B>>,
-    principal: Arc<Principal>,
     // Already redacted at boot — the raw Document never reaches the run loop.
     config_view: Arc<ConfigView>,
     // Captured at boot, same discipline as `config_view` (see run_inner).
@@ -3373,7 +3354,6 @@ where
         shutdown,
         supervisor,
         authorizer,
-        principal,
         config_view,
         authz_backend_name,
         classification_policy_name,
@@ -3538,15 +3518,15 @@ mod tests {
     #[test]
     fn the_handler_drain_bound_covers_the_egress_deadline() {
         // at the transport defaults (5 s handshake, 5 s read): 5 + 5 + 5 + 5
-        // + 5 + 0 + 5 + 1 + 10 = 41 s with no provider, plus the deadline with one
+        // + 5 + 5 + 0 + 5 + 1 + 10 = 46 s with no provider, plus the deadline with one
         let cfg = maknae_config::transport_from_section(None).unwrap();
         assert_eq!(
             handler_drain_bound(&cfg, Duration::ZERO),
-            Duration::from_secs(41)
+            Duration::from_secs(46)
         );
         assert_eq!(
             handler_drain_bound(&cfg, Duration::from_secs(120)),
-            Duration::from_secs(161)
+            Duration::from_secs(166)
         );
     }
 
@@ -3997,15 +3977,9 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
     fn valid_authz_and_principal_reaches_posture_record() {
         let _g = ENV_LOCK.lock().unwrap();
         let d = Dir::new("valid_reaches_posture");
-        // #216: the boot gate resolves `principal.home` through the kernel, so
-        // the fixture names a home that EXISTS. A fictional path is now a boot
-        // refusal by design, which is what this test must not accidentally hit.
         write_common_fixture(
             &d,
-            &format!(
-                "principal:\n  name: op\n  uid: 1000\n  home: {}\n",
-                std::env::temp_dir().display()
-            ),
+            "principal:\n  name: op\n  uid: 1000\n  home: /home/op\n",
         );
         put(
             &d.0,
@@ -4378,5 +4352,167 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             "a marker with the right mechanism but the wrong target must not \
              determine HrotSealed"
         );
+    }
+}
+
+#[cfg(test)]
+mod home_resolution_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[derive(Default)]
+    struct Recorder(std::sync::Mutex<Vec<AuditRecord>>);
+    impl AuditEmit for Recorder {
+        fn emit(
+            &self,
+            record: &AuditRecord,
+        ) -> impl std::future::Future<Output = Result<(), maknae_audit_append::AuditError>> + Send
+        {
+            self.0.lock().unwrap().push(record.clone());
+            async { Ok(()) }
+        }
+    }
+
+    struct Dir(PathBuf);
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    async fn serve(
+        verb: Verb,
+        uid: u32,
+        user: &str,
+        home: &Path,
+        authorizer: Arc<crate::Composition<maknae_authz_basic::HermeticAuthorizer>>,
+    ) -> (RespResult, Vec<AuditRecord>) {
+        let (mut client, server) = tokio::io::duplex(256 * 1024);
+        let body = maknae_proto::encode_request(&maknae_proto::Request {
+            protocol_version: PROTOCOL_VERSION,
+            verb: verb.clone(),
+        })
+        .unwrap();
+        maknae_proto::write_frame(&mut client, maknae_proto::class_of(&verb), &body)
+            .await
+            .unwrap();
+        let emit = Arc::new(Recorder::default());
+        let backend_name = Arc::new(maknae_security::guarded_backend_name(&*authorizer));
+        handle(
+            server,
+            "maknae://d/plane/cli".to_string(),
+            uid,
+            true,
+            Some(user.to_string()),
+            Some(home.to_path_buf()),
+            emit.clone(),
+            1,
+            maknae_config::transport_from_section(None).unwrap(),
+            serde_json::json!({}),
+            authorizer,
+            Arc::new(ConfigView::default()),
+            backend_name,
+            Arc::new("US".to_string()),
+            Arc::new(None),
+            crate::egress::unavailable_egress(),
+            Duration::from_secs(10),
+            maknae_security::Lane::Local,
+            maknae_io::DelegatedFds::new(1),
+        )
+        .await;
+        let caps = maknae_proto::FrameCaps {
+            control: 1 << 20,
+            attempt: 1 << 20,
+            prompt: 1 << 20,
+        };
+        let (_, reply) = tokio::time::timeout(
+            Duration::from_secs(10),
+            maknae_proto::read_frame_zeroizing(&mut client, &caps),
+        )
+        .await
+        .expect("a reply in time")
+        .expect("a reply frame");
+        let records = emit.0.lock().unwrap().clone();
+        (
+            maknae_proto::decode_response(&reply).unwrap().result,
+            records,
+        )
+    }
+
+    #[tokio::test]
+    async fn only_a_filesystem_verb_resolves_the_requesters_home() {
+        let uid = nix::unistd::geteuid().as_raw();
+        let user = nix::unistd::User::from_uid(nix::unistd::geteuid())
+            .expect("NSS")
+            .expect("the test euid has a passwd entry")
+            .name;
+        let raw = std::env::temp_dir().join(format!("run_home_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&raw);
+        std::fs::create_dir(&raw).unwrap();
+        let dir = Dir(raw.canonicalize().unwrap());
+        std::fs::set_permissions(&dir.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let policy = dir.0.join("authz.yaml");
+        std::fs::write(
+            &policy,
+            "schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/**)\"\n  deny: []\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&policy, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let us = &maknae_config::BasicPolicy;
+        let authorizer = Arc::new(crate::Composition::new(
+            maknae_authz_basic::HermeticAuthorizer::new(
+                policy,
+                maknae_config::Principal {
+                    name: "operator".into(),
+                    uid,
+                    home: dir.0.clone(),
+                },
+                maknae_config::TargetRequired {
+                    owner: None,
+                    mode_mask: Some(0o022),
+                    nlink_exactly_one: false,
+                    regular_file: true,
+                    max_bytes: None,
+                },
+            )
+            .unwrap(),
+            crate::CeilingAuthorizer::new(maknae_config::Ceiling::baseline_for(us), us),
+        ));
+        let held = crate::authz::home_resolver()
+            .claim(uid)
+            .expect("the euid's home slot is free");
+
+        for verb in [Verb::Ping, Verb::Whoami] {
+            let before = crate::authz::home_resolver().entered(uid);
+            let (result, _) = serve(verb.clone(), uid, &user, &dir.0, authorizer.clone()).await;
+            assert!(
+                matches!(
+                    result,
+                    RespResult::Ok(maknae_proto::Payload::Pong)
+                        | RespResult::Ok(maknae_proto::Payload::Whoami(_))
+                ),
+                "{verb:?}: {result:?}"
+            );
+            assert_eq!(
+                crate::authz::home_resolver().entered(uid),
+                before,
+                "{verb:?} never resolves the home"
+            );
+        }
+
+        let before = crate::authz::home_resolver().entered(uid);
+        let read = Verb::Read {
+            path: dir.0.join("x").to_str().unwrap().into(),
+            conversation: None,
+            page: None,
+        };
+        let (result, records) = serve(read, uid, &user, &dir.0, authorizer).await;
+        assert!(matches!(result, RespResult::Err(_)), "{result:?}");
+        assert_eq!(crate::authz::home_resolver().entered(uid), before + 1);
+        assert_eq!(
+            records.last().expect("a request record").outcome.reason,
+            crate::authz::HomeUnavailable::RequesterAtCapacity.reason()
+        );
+        drop(held);
     }
 }

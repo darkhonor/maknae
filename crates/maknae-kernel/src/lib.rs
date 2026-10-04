@@ -19,6 +19,7 @@ mod mutation_exchange;
 mod posture;
 mod provider_choice;
 mod run;
+mod uid_gate;
 pub use authz::*;
 pub use blocking_guard::BLOCKING_BREAKER_MAX_IN_FLIGHT;
 pub use boot::{boot, BootConfig};
@@ -37,8 +38,8 @@ pub use egress::{
 pub use egress_socket::SocketEgress;
 pub use groupres::*;
 pub use handler::{
-    admitted_user_for_test, build_authz_request, build_whoami, dispatch_verb, may_respond,
-    serve_outcome_to_exit_code, Dispatch, ServeOutcome, KERNEL_ACTIONS,
+    admitted_user_for_test, build_authz_request, build_whoami, dispatch_verb, is_filesystem_verb,
+    may_respond, serve_outcome_to_exit_code, Dispatch, ServeOutcome, KERNEL_ACTIONS,
 };
 pub use mutation::AttemptCaps;
 pub use mutation_exchange::{MutationExchange, PendingReport, ReportError};

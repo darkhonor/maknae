@@ -92,8 +92,8 @@ pub use providers::{
     PROVIDERS_SECTION,
 };
 pub use transport::{
-    transport_from_section, TransportConfig, MACOS_DAEMON_SOCKET_PATH, PROMPT_MAX_BYTES_FLOOR,
-    TRANSPORT_SECTION, TRANSPORT_TIMEOUT_MS_MAX,
+    transport_from_section, TransportConfig, HOME_RESOLVE_TIMEOUT_MS, MACOS_DAEMON_SOCKET_PATH,
+    PROMPT_MAX_BYTES_FLOOR, TRANSPORT_SECTION, TRANSPORT_TIMEOUT_MS_MAX,
 };
 pub use user_providers::{
     user_providers_from_document, UserProviderEntry, UserProviders, USER_PROVIDERS_FILE,

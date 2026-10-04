@@ -111,12 +111,8 @@ pub fn fixture_principal() -> maknae_config::Principal {
 }
 
 /// Standard extra args for `handle()` in transport-behavior tests.
-pub fn permissive_authz() -> (Arc<AlwaysPermit>, Arc<maknae_config::Principal>, Duration) {
-    (
-        Arc::new(AlwaysPermit),
-        Arc::new(fixture_principal()),
-        Duration::from_secs(5),
-    )
+pub fn permissive_authz() -> (Arc<AlwaysPermit>, Duration) {
+    (Arc::new(AlwaysPermit), Duration::from_secs(5))
 }
 
 /// A backend whose `backend_name()` PANICS. Permits, so the request reaches
@@ -181,29 +177,77 @@ impl AuditEmit for Records {
     }
 }
 
-/// A temp root with a real `authz.yaml` (binding `user: ["root"]`, so the
-/// fixture's peer uid 0 is the `user` role) and a real composed PDP over it.
+/// The kernel admits one filesystem preparation per uid at a time (#435), and
+/// every fixture is the test euid, so filesystem requests take turns.
+static FS_TURN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+pub async fn fs_turn(verb: &Verb) -> Option<tokio::sync::MutexGuard<'static, ()>> {
+    if maknae_kernel::is_filesystem_verb(verb) {
+        Some(FS_TURN.lock().await)
+    } else {
+        None
+    }
+}
+
+/// A temp root with a real `authz.yaml` (binding the test euid's username to
+/// `user`, so the fixture's peer uid is the `user` role) and a real composed
+/// PDP over it.
 pub struct Fixture {
     pub root: PathBuf,
     pub principal: maknae_config::Principal,
+    pub peer_uid: u32,
     pub peer_user: Option<String>,
+    pub requester_home: Option<PathBuf>,
 }
+
+/// The test euid's username. It must pass `userpass_username_is_acceptable`
+/// (one safe lower-case segment), as the provider tests also require.
+pub fn euid_name() -> String {
+    nix::unistd::User::from_uid(nix::unistd::geteuid())
+        .expect("NSS")
+        .expect("the test euid has a passwd entry")
+        .name
+}
+
+pub struct DirGuard(pub PathBuf);
+
+impl std::ops::Deref for DirGuard {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for DirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+pub fn second_home(tag: &str) -> DirGuard {
+    let dir = std::env::temp_dir().join(format!("home_{tag}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    DirGuard(dir.canonicalize().expect("canonicalize the second home"))
+}
+
 impl Fixture {
     pub fn new(tag: &str, allow: &str) -> Self {
         Self::with_policy(tag, allow, "")
     }
     /// `new`, then `policy_tail` appended to the policy body (a `roles:` /
     /// `destinations:` block for #172).
-    /// Same as [`Fixture::with_policy`] but binds `root` to the NAMED role, so a
-    /// test can drive the real decision path for each of the four shipped roles
-    /// (#275). The harness's peer uid is 0, which is the one uid guaranteed to
-    /// resolve on every host.
+    /// Same as [`Fixture::with_policy`] but binds the test euid's username to
+    /// the NAMED role, so a test can drive the real decision path for each of
+    /// the four shipped roles (#275). The harness's peer uid is the test euid.
     pub fn with_policy_bound_to(tag: &str, allow: &str, role: &str, policy_tail: &str) -> Self {
         let f = Self::with_policy(tag, allow, policy_tail);
+        let name = euid_name();
         let policy = std::fs::read_to_string(f.root.join("authz.yaml")).unwrap();
         let rebound = policy.replace(
-            "bindings:\n  user: [\"root\"]",
-            &format!("bindings:\n  {role}: [\"root\"]"),
+            &format!("bindings:\n  user: [\"{name}\"]"),
+            &format!("bindings:\n  {role}: [\"{name}\"]"),
         );
         assert!(
             role == "user" || rebound != policy,
@@ -251,7 +295,8 @@ impl Fixture {
                     .collect::<String>()
             )
         };
-        let policy = format!("schema_version: 1\npermissions:\n  allow:\n{allow_lines}{deny_block}bindings:\n  user: [\"root\"]\n{policy_tail}");
+        let name = euid_name();
+        let policy = format!("schema_version: 1\npermissions:\n  allow:\n{allow_lines}{deny_block}bindings:\n  user: [\"{name}\"]\n{policy_tail}");
         std::fs::write(root.join("authz.yaml"), policy).unwrap();
         std::fs::set_permissions(
             root.join("authz.yaml"),
@@ -259,10 +304,16 @@ impl Fixture {
         )
         .unwrap();
         Self {
+            peer_uid: nix::unistd::geteuid().as_raw(),
+            peer_user: Some(name),
+            requester_home: Some(root.clone()),
             root,
             principal,
-            peer_user: Some("root".into()),
         }
+    }
+    pub fn with_requester_home(mut self, home: Option<PathBuf>) -> Self {
+        self.requester_home = home;
+        self
     }
     pub fn authorizer(
         &self,
@@ -425,19 +476,19 @@ impl Fixture {
         if let Some(fd) = fd {
             fds.push(fd);
         }
-        let principal = Arc::new(self.principal.clone());
-        let task = tokio::spawn(maknae_kernel::handle_with_attempt_caps(
+        let turn = verb.clone();
+        let served = maknae_kernel::handle_with_attempt_caps(
             server,
             "maknae://d/plane/cli".into(),
-            0,
+            self.peer_uid,
             true,
             self.peer_user.clone(),
+            self.requester_home.clone(),
             records,
             718,
             config,
             serde_json::json!({"mutation": "untrusted extension"}),
             authz,
-            principal,
             Arc::new(Default::default()),
             Arc::new("basic+ceiling".into()),
             Arc::new("US".into()),
@@ -447,7 +498,11 @@ impl Fixture {
             maknae_security::Lane::Local,
             fds,
             attempt_caps,
-        ));
+        );
+        let task = tokio::spawn(async move {
+            let _turn = fs_turn(&turn).await;
+            served.await
+        });
         let body = maknae_proto::encode_request(&maknae_proto::Request {
             protocol_version: maknae_proto::PROTOCOL_VERSION,
             verb,

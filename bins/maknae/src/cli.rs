@@ -100,7 +100,7 @@ enum Command {
     Ping,
     /// Report the verified peer plane identity (URI-SAN + uid).
     Whoami,
-    /// Read a file under the enrolled home: the daemon decides (the policy in
+    /// Read a file under your home: the daemon decides (the policy in
     /// /etc/maknae/authz.yaml), and the CLI reads under your credentials; raw
     /// bytes to stdout. Paths are sent lexically absolute; `..` is refused by
     /// the daemon's canonical pre-gate.
@@ -249,7 +249,12 @@ fn reply_wait(
                 maknae_config::EGRESS_DEADLINE_MS_MAX + maknae_config::TRANSPORT_TIMEOUT_MS_MAX,
             ) + PROMPT_REPLY_MARGIN
         }
-        _ => std::time::Duration::from_millis(transport.read_timeout_ms),
+        maknae_proto::FrameClass::Attempt => std::time::Duration::from_millis(
+            transport.read_timeout_ms + maknae_config::HOME_RESOLVE_TIMEOUT_MS,
+        ),
+        maknae_proto::FrameClass::Control => {
+            std::time::Duration::from_millis(transport.read_timeout_ms)
+        }
     }
 }
 
@@ -976,17 +981,38 @@ mod tests {
         assert_eq!(err, "no response from daemon within 690000ms (stalled?)");
     }
 
+    const READ_TIMEOUT_MS: u64 = 5_000;
+    const TICK: std::time::Duration = std::time::Duration::from_millis(1);
+
+    fn stalled(wait_ms: u64) -> String {
+        format!("no response from daemon within {wait_ms}ms (stalled?)")
+    }
+
     #[tokio::test(start_paused = true)]
-    async fn control_and_attempt_replies_are_still_bounded_by_read_timeout_ms() {
-        for class in [
-            maknae_proto::FrameClass::Control,
-            maknae_proto::FrameClass::Attempt,
-        ] {
-            let err = reply_after(std::time::Duration::from_millis(8_270), class, 5_000)
-                .await
-                .unwrap_err();
-            assert_eq!(err, "no response from daemon within 5000ms (stalled?)");
-        }
+    async fn control_replies_are_bounded_by_read_timeout_ms() {
+        let read = std::time::Duration::from_millis(READ_TIMEOUT_MS);
+        let class = maknae_proto::FrameClass::Control;
+        assert!(reply_after(read - TICK, class, READ_TIMEOUT_MS)
+            .await
+            .is_ok());
+        let err = reply_after(read + TICK, class, READ_TIMEOUT_MS)
+            .await
+            .unwrap_err();
+        assert_eq!(err, stalled(READ_TIMEOUT_MS));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn attempt_replies_also_wait_out_the_kernels_home_resolution() {
+        let wait_ms = READ_TIMEOUT_MS + maknae_config::HOME_RESOLVE_TIMEOUT_MS;
+        let wait = std::time::Duration::from_millis(wait_ms);
+        let class = maknae_proto::FrameClass::Attempt;
+        assert!(reply_after(wait - TICK, class, READ_TIMEOUT_MS)
+            .await
+            .is_ok());
+        let err = reply_after(wait + TICK, class, READ_TIMEOUT_MS)
+            .await
+            .unwrap_err();
+        assert_eq!(err, stalled(wait_ms));
     }
 
     // `cargo test` runs tests in this file on multiple threads by default, and

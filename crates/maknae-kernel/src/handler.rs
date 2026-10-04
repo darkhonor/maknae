@@ -45,6 +45,11 @@ pub enum Dispatch {
     PromptRequested,
 }
 
+/// The verbs routed to `mutation::handle`; only these resolve the requester's home.
+pub fn is_filesystem_verb(verb: &Verb) -> bool {
+    dispatch_verb(verb) == Dispatch::MutationRequested
+}
+
 /// Resolve a verb to its dispatch. `Ping → Pong`, `Whoami → WhoamiRequested`.
 pub fn dispatch_verb(verb: &Verb) -> Dispatch {
     match verb {
@@ -243,7 +248,7 @@ pub fn admitted_user_for_test(user: Option<&str>) -> Option<String> {
 
 /// Build the seam Request from the verb + kernel-verified peer uid. Subject
 /// carries the kernel-verified `uid` (i64 carriage of the u32 — lossless) and,
-/// when the kernel supplies one, the home `~` binds to; both are
+/// when the kernel resolves one, the requester's home `~` binds to; both are
 /// kernel-derived. ADR-0024's "the uid is the whole subject" is the identity
 /// claim; the home is a separate kernel-stamped attribute. `Read` carries the
 /// client-supplied path as the resource `path` attribute, and an admitted
@@ -348,7 +353,7 @@ pub const READ_PAGE_MAX_BYTES: u64 = 65_536;
 ///
 /// Three proofs, all required (decision 3): the descriptor proves where the object
 /// is — the kernel-reported path — `confined_beneath` proves the object lies under
-/// the enrolled home, and `root_required` proves the home itself is not a place where
+/// the requester's home, and `root_required` proves the home itself is not a place where
 /// aliases can be planted (decision 7). The descriptor confers no access; the OS
 /// answers at the subject's own re-open.
 ///
@@ -373,9 +378,40 @@ pub fn delegated_plan(home: &std::path::Path, owner_uid: u32) -> maknae_io::Dele
     }
 }
 
+/// The requester's home in the form `verify_delegated` reports paths in, or `None` when it cannot confine (#435).
+pub fn confinable_home(resolved: std::path::PathBuf) -> Option<std::path::PathBuf> {
+    (resolved != std::path::Path::new("/") && resolved.to_str().is_some()).then_some(resolved)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_utf8_home_below_the_root_is_confinable() {
+        use std::os::unix::ffi::OsStrExt;
+        assert_eq!(confinable_home("/home/b".into()), Some("/home/b".into()));
+        assert_eq!(confinable_home("/".into()), None);
+        let odd = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&[0x2f, 0x68, 0xff]));
+        assert_eq!(confinable_home(odd), None);
+    }
+
+    #[test]
+    fn exactly_the_four_file_actions_are_filesystem_verbs() {
+        let file_actions = ["fs.read", "fs.write", "fs.delete", "fs.mkdir"];
+        let verbs = all_verbs();
+        assert_eq!(
+            verbs.iter().filter(|v| is_filesystem_verb(v)).count(),
+            file_actions.len()
+        );
+        for v in verbs {
+            assert_eq!(
+                is_filesystem_verb(&v),
+                file_actions.contains(&verb_to_action(&v)),
+                "{v:?}"
+            );
+        }
+    }
 
     #[test]
     fn ping_dispatches_pong() {
@@ -949,7 +985,7 @@ mod tests {
         assert_eq!(
             req.confined_beneath,
             std::path::Path::new("/home/op"),
-            "confinement is the enrolled home, and it is not optional"
+            "confinement is the requester's home, and it is not optional"
         );
         assert_eq!(
             req.root_required.owner,

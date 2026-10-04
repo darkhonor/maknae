@@ -261,7 +261,7 @@ pub fn verify_delegated(fd: BorrowedFd<'_>, req: DelegatedRequired) -> Result<De
     )?;
     // Component-wise. NEVER `str::strip_prefix`: `/home/opx` is a string prefix
     // of `/home/op` and must not match. Confinement is checked FIRST: for an
-    // object outside the enrolled root, "not beneath your home" is the truthful
+    // object outside the confinement root, "not beneath your home" is the truthful
     // reason, whatever kind of object it turns out to be.
     if path.strip_prefix(&req.confined_beneath).is_err() {
         return Err(IoError::EscapesAnchor { path });
@@ -861,7 +861,7 @@ mod tests {
     /// Confinement is a MAKNAE control, independent of what OS DAC permits: the
     /// subject here legitimately opens a file it owns and can read, so the
     /// delegated fd is honest authority -- and it is still refused, because the
-    /// object does not lie beneath the enrolled root (ADR-0009 decision 3).
+    /// object does not lie beneath the confinement root (ADR-0009 decision 3).
     #[test]
     fn a_delegated_fd_outside_the_confinement_root_is_refused() {
         let root = tempfile::tempdir().expect("tempdir");

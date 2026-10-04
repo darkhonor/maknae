@@ -219,7 +219,7 @@ pub(crate) fn linux_fd_path<F: AsFd>(fd: &F) -> nix::Result<std::path::PathBuf> 
 ///
 /// **`F_GETPATH`, deliberately, not `F_GETPATH_NOFIRMLINK`.** On APFS `/Users` is a
 /// firmlink to `/System/Volumes/Data/Users`, and the two calls return the two forms.
-/// The user-visible form is the one an operator writes in `principal.home` and the one
+/// The user-visible form is the one `getpwuid` returns for a home and the one
 /// `realpath` reports, so it is the form the confinement prefix-check compares against.
 ///
 /// **If that reasoning is wrong, the failure is fail-closed, not a bypass.** A form

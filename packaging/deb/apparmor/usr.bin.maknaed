@@ -18,7 +18,7 @@ profile maknaed /usr/bin/maknaed {
   # Binary — map + read.
   /usr/bin/maknaed                       mr,
 
-  # #365: no home rule. The daemon resolves and stats the enrolled home and
+  # #365: no home rule. The daemon resolves and stats the requester's home and
   # receives the subject's no-access descriptors; it opens nothing in a home.
   # The local include is the operator's override file.
   include if exists <local/usr.bin.maknaed>

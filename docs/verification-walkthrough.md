@@ -29,7 +29,7 @@ Controls are cited two ways. A pair such as `cli_b × key_a` is a cell of the is
 
 Below, `<A>` and `<B>` are their account names. `<kv>` is the KV v2 mount and `<prefix>` the user prefix (enroll's defaults: `maknae-kv` and `maknae/users`).
 
-**B's prompts need no tools.** The kernel confines file actions to the enrolled administrator's home, so every read or write tool call B makes is refused. This is a known defect, #435 (step 4a). Give B prompts that need no file, such as `"Reply with one word: hello."`.
+**B's tools work in B's home.** The kernel confines B's file actions to B's own home, so B's reads and writes are decided against B's `~`, not A's.
 
 **B's prompt is visible to other local users.** On a multi-user host, other local users can read a running `maknae agent`'s prompt and `--provider` from its command line (#436, undecided).
 
@@ -236,7 +236,7 @@ mv ~/.maknae/providers.yaml.orig ~/.maknae/providers.yaml
 
 **Control.** No matrix cell is keyed to token validity, so the control is cited by credential-path step. Every run mints its client certificate with the stored token (`bins/maknae/src/agent.rs:535`), and every turn makes its own wrapped read of the key with that token (`agent.rs:373`). Credential-path steps: `load the user token; choose the providers.yaml entry` and `wrapped read of <kv>/data/<prefix>/<user>/<subpath>, X-Vault-Wrap-TTL: 60s`. A's unaffected run rests on `cli_a × key_a`, A's own identity.
 
-`maknae agent` runs one prompt per invocation (`bins/maknae/src/cli.rs:146-151`). So "mid-conversation" means between the loop steps of one run, and B's file tools are refused (#435), which leaves no reliable window inside a run. This claim therefore uses fresh runs.
+`maknae agent` runs one prompt per invocation (`bins/maknae/src/cli.rs:146-151`). So "mid-conversation" means between the loop steps of one run. This claim therefore uses fresh runs.
 
 **Command.**
 

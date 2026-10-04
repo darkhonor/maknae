@@ -60,7 +60,7 @@ files = [
   "crates/maknae-io/src/anchor.rs",
   "crates/maknae-io/src/checks.rs",
   # ADR-0009 confinement: every line is a refusal path, and the failure mode is
-  # exact — a wrong branch hands a subject an object outside its enrolled home,
+  # exact — a wrong branch hands a subject an object outside its home,
   # or accepts a fifo/hardlink/oversize descriptor the named requirements refuse.
   "crates/maknae-io/src/delegated.rs",
   "crates/maknae-io/src/normalize.rs",
@@ -218,6 +218,9 @@ files = [
   # #158/#365: namespace/report evidence, subject-side attempts, and durable audit admission.
   "crates/maknae-kernel/src/mutation_exchange.rs",
   "crates/maknae-kernel/src/mutation.rs",
+  # #435: per-uid in-flight accounting inside the home-resolution and mutation
+  # capacities. A leaked or missing claim lets one uid exhaust a global slot set.
+  "crates/maknae-kernel/src/uid_gate.rs",
   "crates/maknae-io/src/mutation.rs",
   "crates/maknae-io/src/audit_append.rs",
   "crates/maknae-vault/src/supervisor.rs",

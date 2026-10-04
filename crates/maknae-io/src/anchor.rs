@@ -336,7 +336,7 @@ pub fn open_anchor_resolved(
 /// form [`crate::verify_delegated`] names a delegated descriptor by (issue #216).
 ///
 /// The defect #216 closed was two resolvers disagreeing about the FORM of one
-/// directory. `principal.home` was compared, unresolved, against a kernel-reported
+/// directory. The configured home was compared, unresolved, against a kernel-reported
 /// resolved path, so `strip_prefix` never matched and every `fs.read` was denied
 /// fail-closed — a `/home -> /export/home` layout, an autofs/NFS estate, or any
 /// macOS `/var`-rooted path could not serve a single read. Canonicalizing with

@@ -11,7 +11,6 @@
 //! audit them and keep serving. Real peer-creds are synthesised via `PeerCreds`'s public
 //! fields (the same struct the transport attaches).
 mod common;
-use common::fixture_principal;
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -203,7 +202,6 @@ async fn drive(script: Vec<Scripted>, cfg: maknae_config::TransportConfig) -> Ve
             shutdown,
             pending_supervisor(),
             std::sync::Arc::new(common::AlwaysPermit),
-            std::sync::Arc::new(fixture_principal()),
             std::sync::Arc::new(Default::default()),
             std::sync::Arc::new("test-backend".to_string()),
             std::sync::Arc::new("US".to_string()),
@@ -344,7 +342,6 @@ async fn stalled_handshake_does_not_block_next_connection() {
             std::future::pending::<()>(),
             pending_supervisor(),
             std::sync::Arc::new(common::AlwaysPermit),
-            std::sync::Arc::new(fixture_principal()),
             std::sync::Arc::new(Default::default()),
             std::sync::Arc::new("test-backend".to_string()),
             std::sync::Arc::new("US".to_string()),
@@ -441,7 +438,6 @@ async fn at_capacity_audit_does_not_block_accept_loop() {
             std::future::pending::<()>(),
             pending_supervisor(),
             std::sync::Arc::new(common::AlwaysPermit),
-            std::sync::Arc::new(fixture_principal()),
             std::sync::Arc::new(Default::default()),
             std::sync::Arc::new("test-backend".to_string()),
             std::sync::Arc::new("US".to_string()),
@@ -534,7 +530,6 @@ async fn every_at_capacity_refusal_is_recorded_or_counted() {
             },
             pending_supervisor(),
             std::sync::Arc::new(common::AlwaysPermit),
-            std::sync::Arc::new(fixture_principal()),
             std::sync::Arc::new(Default::default()),
             std::sync::Arc::new("test-backend".to_string()),
             std::sync::Arc::new("US".to_string()),
@@ -595,7 +590,6 @@ async fn supervisor_exit_stops_the_loop_and_reports_failure() {
             std::future::pending::<()>(), // shutdown never fires in this test
             supervisor,
             std::sync::Arc::new(common::AlwaysPermit),
-            std::sync::Arc::new(fixture_principal()),
             std::sync::Arc::new(Default::default()),
             std::sync::Arc::new("test-backend".to_string()),
             std::sync::Arc::new("US".to_string()),
@@ -658,7 +652,6 @@ async fn shutdown_signal_yields_graceful_outcome() {
         shutdown,
         pending_supervisor(),
         std::sync::Arc::new(common::AlwaysPermit),
-        std::sync::Arc::new(fixture_principal()),
         std::sync::Arc::new(Default::default()),
         std::sync::Arc::new("test-backend".to_string()),
         std::sync::Arc::new("US".to_string()),

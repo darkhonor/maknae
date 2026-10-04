@@ -643,7 +643,9 @@ egress:
   maximum, the 60 s transport maximum for the reply write, and 30 s for the group
   lookup, the PDP decision and the audit appends. So it does not stop a turn the daemon
   would still answer, unless an audit append stalls, since those have no time bound.
-  Every other reply is still bounded by `transport.read_timeout_ms`. The default, 280000,
+  A file action's reply waits `transport.read_timeout_ms` plus 5 s, the daemon's bound on
+  resolving the requester's home; every other reply is bounded by
+  `transport.read_timeout_ms`. The default, 280000,
   covers the deputy's worst-case wall time on one request with room to spare: per turn
   the deputy makes one wrapping lookup and one unwrap at Vault, each bounded at 30 s,
   then the provider call, bounded at 120 s — 180 s. There is no boot probe and no key
@@ -651,16 +653,16 @@ egress:
   call the deputy answered. A slower provider needs the deputy's bound raised and this
   one with it. Out of range refuses boot by name. Shutdown waits
   for a send in flight: the daemon's handler drain is bounded by one connection's whole
-  work — the handshake, the group lookup, the frame read and the response write (each at
+  work — the handshake, the group lookup, the requester home's resolution, the frame read and the response write (each at
   its `transport` timeout), the PDP decision and the verb's own blocking step, this
   deadline, the close, and a ten-second margin for the audit appends — so the outcome
-  record is written, and the shipped units' stop timeouts (`TimeoutStopSec=885`, launchd
+  record is written, and the shipped units' stop timeouts (`TimeoutStopSec=890`, launchd
   `ExitTimeOut`) cover that drain at BOTH ceilings (60 s transport timeouts, 600 s
   deadline) plus every other term of the shutdown chain — the stop record's append, the
   credential supervisor's abort and reap, the reap of aborted handlers, the audit drain,
   the plane client's bounded lock wait and token revoke, and the runtime teardown — and
   a kernel test holds the unit values to that chain, two-sided. At the defaults the
-  chain is 396 s; a stop with nothing in flight exits in milliseconds. One more bound at
+  chain is 401 s; a stop with nothing in flight exits in milliseconds. One more bound at
   the ceiling: the deputy's request cap is 16,842,752 bytes — 16 MiB and a 64 KiB margin
   for the re-wrap — so a prompt that fills `transport.prompt_max_bytes` at its own 16
   MiB maximum still reaches the deputy.

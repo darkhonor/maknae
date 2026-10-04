@@ -143,7 +143,7 @@ Apache License, Version 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). Thi
 
 ## Filesystem development commands
 
-The CLI runs with your user ID and OS permissions. Users and admins share the filesystem policy in `authz.yaml`; the admin role grants no additional filesystem access. The shipped policy allows reads within your enrolled home and writes within `~/projects/**`, with sensitive-path denies. Operators can change those path grants independently of management roles.
+The CLI runs with your user ID and OS permissions. Users and admins share the filesystem policy in `authz.yaml`; the admin role grants no additional filesystem access. The shipped policy allows reads within your home and writes within `~/projects/**`, with sensitive-path denies. Operators can change those path grants independently of management roles.
 
 ```sh
 printf 'hello\n' | maknae write ~/projects/demo.txt

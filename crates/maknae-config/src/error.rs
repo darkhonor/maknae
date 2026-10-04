@@ -103,9 +103,8 @@ pub enum ConfigError {
     /// The `principal` section is present but malformed (missing `name`/`uid`/
     /// `home`, a non-integer or negative/overflowing `uid`, an empty `home`,
     /// or a relative `home`) — PR-J1 Task 5. A present-but-malformed section
-    /// must never collapse to "absent" (fail-closed: `~` in capability-grant policy
-    /// resolves to this operator's home, so a silently-dropped malformed
-    /// section would leave `~` unresolved rather than refused).
+    /// must never collapse to "absent" (fail-closed: `uid` is the default-admin
+    /// subject, so a silently-dropped malformed section would read as no principal).
     InvalidPrincipal(String),
     /// `~/.maknae/providers.yaml` was refused, or names no entry that can be selected.
     UserProviders(String),
