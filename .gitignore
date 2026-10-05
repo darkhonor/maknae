@@ -2,6 +2,16 @@
 **/*.rs.bk
 Cargo.lock.orig
 
+# macOS Finder and filesystem metadata
+.DS_Store
+._*
+.AppleDouble
+.LSOverride
+.Spotlight-V100/
+.Trashes/
+.fseventsd/
+Icon?
+
 # cargo-mutants output (regenerable; results of record live in PR bodies / CI)
 /mutants.out*
 
