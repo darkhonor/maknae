@@ -231,6 +231,17 @@ pub fn transport_from_section(v: Option<&Value>) -> Result<TransportConfig, Conf
     })
 }
 
+/// The client's bound on writing an attempt or prompt frame (#421). Such a
+/// frame can exceed the socket buffer and so finishes only once `maknaed`
+/// reads, which it does after its group lookup and admission audit append.
+/// The server's client-certificate check may still be running too; it is
+/// short and not a term. Control frames keep `read_timeout_ms`.
+pub fn content_write_bound(transport: &TransportConfig) -> std::time::Duration {
+    std::time::Duration::from_millis(
+        transport.read_timeout_ms + GROUP_LOOKUP_TIMEOUT_MS + ADMISSION_AUDIT_TIMEOUT_MS,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -509,5 +520,15 @@ mod tests {
             !matches!(e, Err(ConfigError::UnknownKey { .. })),
             "a key the parser reads was rejected: {e:?}"
         );
+    }
+
+    #[test]
+    fn the_content_write_bound_is_the_read_timeout_plus_the_daemons_pre_read_bounds() {
+        let t = TransportConfig { read_timeout_ms: 7_000, ..TransportConfig::default() };
+        assert_eq!(
+            content_write_bound(&t),
+            std::time::Duration::from_millis(7_000 + GROUP_LOOKUP_TIMEOUT_MS + ADMISSION_AUDIT_TIMEOUT_MS)
+        );
+        assert_eq!(content_write_bound(&t), std::time::Duration::from_millis(17_000));
     }
 }
