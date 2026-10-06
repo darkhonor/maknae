@@ -358,8 +358,11 @@ matter of course, not as an exception**. The marker carries `MAKNAE_SESSION`,
 record in the append-only JSONL, which has no size cap on either platform. `MAKNAE_PRIMARY=ok`
 means the record is durable in the JSONL. `write-unconfirmed` means the write
 may have landed, so check the JSONL (the marker's hint is `primary-unconfirmed`).
-`refused-breaker-open`, `refused-at-capacity` and `write-failed` mean the record
-was never written, so there is nothing to go read — an AU-5 condition, and the
+`refused-breaker-open` and `refused-at-capacity` mean the primary never attempted
+the write, so nothing was written and there is nothing to go read. `write-failed`
+means the write or its durability sync failed: the record, or partial bytes of it,
+may be present in the JSONL but is not confirmed durable (the marker's hint is
+`primary-write-failed`). Each of these is an AU-5 condition, and the
 count of degraded emissions is the signal your enclave should alert on.
 
 ```json

@@ -306,9 +306,10 @@ fn degraded_line(f: &RecordFields<'_>, primary: PrimaryOutcome) -> String {
     let where_to_read = match primary {
         PrimaryOutcome::Ok => "read-primary-jsonl",
         PrimaryOutcome::WriteUnconfirmed => "primary-unconfirmed",
-        PrimaryOutcome::RefusedBreakerOpen
-        | PrimaryOutcome::RefusedAtCapacity
-        | PrimaryOutcome::WriteFailed => "primary-did-not-write",
+        PrimaryOutcome::WriteFailed => "primary-write-failed",
+        PrimaryOutcome::RefusedBreakerOpen | PrimaryOutcome::RefusedAtCapacity => {
+            "primary-did-not-write"
+        }
     };
     format!(
         // Same key names as the journald degraded datagram, so an operator
@@ -500,7 +501,6 @@ mod tests {
         );
 
         for p in [
-            PrimaryOutcome::WriteFailed,
             PrimaryOutcome::RefusedBreakerOpen,
             PrimaryOutcome::RefusedAtCapacity,
         ] {
@@ -512,6 +512,14 @@ mod tests {
                 "{p:?}: must NOT send the operator to a record that was never written: {bad}"
             );
         }
+        let Mirrored::Degraded(failed) = format_record(&r, PrimaryOutcome::WriteFailed).unwrap()
+        else {
+            panic!("must degrade");
+        };
+        assert!(
+            failed.contains("MAKNAE_DEGRADED=primary-write-failed"),
+            "{failed}"
+        );
     }
 
     #[test]
@@ -524,7 +532,9 @@ mod tests {
         };
         assert!(s.contains("MAKNAE_DEGRADED=primary-unconfirmed"), "{s}");
         assert!(
-            !s.contains("read-primary-jsonl") && !s.contains("primary-did-not-write"),
+            !s.contains("read-primary-jsonl")
+                && !s.contains("primary-did-not-write")
+                && !s.contains("primary-write-failed"),
             "{s}"
         );
     }

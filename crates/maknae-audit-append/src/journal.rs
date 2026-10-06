@@ -191,9 +191,11 @@ pub(crate) fn encode_degraded(rec: &AuditRecord, primary: PrimaryOutcome) -> Vec
             b"maknae audit: DEGRADED - the primary write is unconfirmed; check the JSONL",
             b"primary-unconfirmed",
         ),
-        PrimaryOutcome::RefusedBreakerOpen
-        | PrimaryOutcome::RefusedAtCapacity
-        | PrimaryOutcome::WriteFailed => (
+        PrimaryOutcome::WriteFailed => (
+            b"maknae audit: DEGRADED - the primary write failed; any bytes present are not confirmed durable",
+            b"primary-write-failed",
+        ),
+        PrimaryOutcome::RefusedBreakerOpen | PrimaryOutcome::RefusedAtCapacity => (
             b"maknae audit: DEGRADED - the primary sink did not write this record",
             b"primary-did-not-write",
         ),
@@ -534,7 +536,6 @@ mod tests {
         assert!(ok.contains("read the primary JSONL"), "{ok}");
         assert!(!ok.contains("MAKNAE_RECORD"), "{ok}");
         for p in [
-            PrimaryOutcome::WriteFailed,
             PrimaryOutcome::RefusedBreakerOpen,
             PrimaryOutcome::RefusedAtCapacity,
         ] {
@@ -552,5 +553,10 @@ mod tests {
                 "{p:?}: MESSAGE must not contradict MAKNAE_DEGRADED: {bad}"
             );
         }
+        let failed =
+            String::from_utf8_lossy(&encode_degraded(&r, PrimaryOutcome::WriteFailed)).to_string();
+        assert!(failed.contains("primary-write-failed"), "{failed}");
+        assert!(failed.contains("not confirmed durable"), "{failed}");
+        assert!(!failed.contains("did not write this record"), "{failed}");
     }
 }
