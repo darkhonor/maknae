@@ -76,4 +76,6 @@ rpassword = "7"
 # adds `maknae-agent` and `maknae-seal` and nothing else.
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
+# Socket options for #421's real-buffer test; feature-only, the runtime dependency's features are unchanged.
+nix = { version = "0.31", default-features = false, features = ["socket"] }
+tokio = { workspace = true, features = ["test-util", "net"] }

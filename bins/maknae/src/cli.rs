@@ -258,6 +258,64 @@ fn reply_wait(
     }
 }
 
+/// Instant at which the request frame finished writing.
+#[must_use]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct WriteCompleted(std::time::Instant);
+
+impl WriteCompleted {
+    pub(crate) fn at(self) -> std::time::Instant {
+        self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(at: std::time::Instant) -> Self {
+        Self(at)
+    }
+}
+
+fn request_write_bound(
+    class: maknae_proto::FrameClass,
+    transport: &maknae_config::TransportConfig,
+) -> std::time::Duration {
+    match class {
+        maknae_proto::FrameClass::Control => {
+            std::time::Duration::from_millis(transport.read_timeout_ms)
+        }
+        maknae_proto::FrameClass::Attempt | maknae_proto::FrameClass::Prompt => {
+            maknae_config::content_write_bound(transport)
+        }
+    }
+}
+
+async fn send_request_frame<S: tokio::io::AsyncWrite + Unpin>(
+    stream: &mut S,
+    class: maknae_proto::FrameClass,
+    body: &[u8],
+    transport: &maknae_config::TransportConfig,
+) -> Result<WriteCompleted, String> {
+    let bound = request_write_bound(class, transport);
+    match tokio::time::timeout(bound, write_frame(stream, class, body)).await {
+        Err(_elapsed) => {
+            return Err(match class {
+                maknae_proto::FrameClass::Control => format!(
+                    "request write to the daemon stalled for {}ms (daemon not reading?)",
+                    bound.as_millis()
+                ),
+                maknae_proto::FrameClass::Attempt | maknae_proto::FrameClass::Prompt => format!(
+                    "request write to the daemon stalled for {}ms (read_timeout_ms {}ms + group lookup {}ms + admission audit {}ms); daemon not reading?",
+                    bound.as_millis(),
+                    transport.read_timeout_ms,
+                    maknae_config::GROUP_LOOKUP_TIMEOUT_MS,
+                    maknae_config::ADMISSION_AUDIT_TIMEOUT_MS
+                ),
+            })
+        }
+        Ok(r) => r.map_err(|e| e.to_string())?,
+    }
+    Ok(WriteCompleted(tokio::time::Instant::now().into_std()))
+}
+
 async fn await_reply<S: tokio::io::AsyncRead + Unpin>(
     stream: &mut S,
     class: maknae_proto::FrameClass,
@@ -265,10 +323,16 @@ async fn await_reply<S: tokio::io::AsyncRead + Unpin>(
 ) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
     let wait = reply_wait(class, transport);
     match tokio::time::timeout(wait, read_reply(stream, class, &response_caps(transport))).await {
-        Err(_elapsed) => Err(format!(
-            "no response from daemon within {}ms (stalled?)",
-            wait.as_millis()
-        )),
+        Err(_elapsed) => Err(match class {
+            maknae_proto::FrameClass::Control => format!(
+                "no response from daemon within {}ms; it may be slow admitting the connection (group lookup or admission audit)",
+                wait.as_millis()
+            ),
+            maknae_proto::FrameClass::Attempt | maknae_proto::FrameClass::Prompt => format!(
+                "no response from daemon within {}ms (stalled?)",
+                wait.as_millis()
+            ),
+        }),
         Ok(r) => r,
     }
 }
@@ -548,24 +612,7 @@ pub(crate) async fn send_verb(
     };
     let body =
         encode_request_zeroizing(&request, request_caps.cap(class)).map_err(|e| e.to_string())?;
-    // Bound the request write like the handshake and read: a daemon that accepted but
-    // stopped consuming must not hang the CLI on a full socket buffer (the frame can
-    // exceed the UDS buffer). `read_timeout_ms` doubles as the write bound.
-    let request_started = std::time::Instant::now();
-    match tokio::time::timeout(
-        std::time::Duration::from_millis(transport.read_timeout_ms),
-        write_frame(&mut stream, class, &body),
-    )
-    .await
-    {
-        Err(_elapsed) => {
-            return Err(format!(
-                "request write to the daemon stalled for {}ms (daemon not reading?)",
-                transport.read_timeout_ms
-            ))
-        }
-        Ok(r) => r.map_err(|e| e.to_string())?,
-    }
+    let written = send_request_frame(&mut stream, class, &body, transport).await?;
 
     let resp_body = await_reply(&mut stream, class, transport).await?;
     let response = decode_response(&resp_body).map_err(|e| e.to_string())?;
@@ -575,19 +622,13 @@ pub(crate) async fn send_verb(
             let prepared =
                 prepared.ok_or("protocol error: mutation grant for an ordinary request")?;
             if matches!(prepared.request(), maknae_proto::Verb::Read { .. }) {
-                let read = crate::mutation::execute_read(
-                    prepared,
-                    grant,
-                    &mut stream,
-                    transport,
-                    request_started,
-                )
-                .await?;
+                let read =
+                    crate::mutation::execute_read(prepared, grant, &mut stream, transport, written)
+                        .await?;
                 return Ok(SentOutcome::ReadDone { read });
             }
             let end =
-                crate::mutation::execute(prepared, grant, &mut stream, transport, request_started)
-                    .await?;
+                crate::mutation::execute(prepared, grant, &mut stream, transport, written).await?;
             Ok(SentOutcome::WriteDone {
                 applied: end.applied,
                 stale: end.stale,
@@ -984,8 +1025,182 @@ mod tests {
     const READ_TIMEOUT_MS: u64 = 5_000;
     const TICK: std::time::Duration = std::time::Duration::from_millis(1);
 
+    const DUPLEX: usize = 16 * 1024;
+
+    async fn write_with_reader_delay(
+        class: maknae_proto::FrameClass,
+        body_len: usize,
+        delay: std::time::Duration,
+    ) -> Result<WriteCompleted, String> {
+        assert!(
+            body_len > DUPLEX,
+            "the frame must exceed the in-flight buffer"
+        );
+        let transport = maknae_config::TransportConfig {
+            read_timeout_ms: READ_TIMEOUT_MS,
+            ..Default::default()
+        };
+        let body = vec![0u8; body_len];
+        let (mut cli, mut daemon) = tokio::io::duplex(DUPLEX);
+        let reader = tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let mut sink = Vec::new();
+            let _ = tokio::io::AsyncReadExt::read_to_end(&mut daemon, &mut sink).await;
+        });
+        let got = send_request_frame(&mut cli, class, &body, &transport).await;
+        drop(cli);
+        reader.abort();
+        got
+    }
+
+    fn content_bound() -> std::time::Duration {
+        maknae_config::content_write_bound(&maknae_config::TransportConfig {
+            read_timeout_ms: READ_TIMEOUT_MS,
+            ..Default::default()
+        })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_large_prompt_write_outlasts_the_daemons_pre_read_work() {
+        let _written = write_with_reader_delay(
+            maknae_proto::FrameClass::Prompt,
+            256 * 1024,
+            content_bound() - TICK,
+        )
+        .await
+        .expect("#421: a healthy daemon still in its pre-read work must not fail a prompt write");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_large_attempt_write_outlasts_the_daemons_pre_read_work() {
+        let _written = write_with_reader_delay(
+            maknae_proto::FrameClass::Attempt,
+            maknae_proto::ATTEMPT_REQUEST_MAX,
+            content_bound() - TICK,
+        )
+        .await
+        .expect("#421: an attempt frame exceeds macOS's socket buffer and must not fail there");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_content_write_past_its_bound_names_the_bound_and_its_parts() {
+        let bound = content_bound();
+        let err =
+            write_with_reader_delay(maknae_proto::FrameClass::Prompt, 256 * 1024, bound + TICK)
+                .await
+                .unwrap_err();
+        assert_eq!(
+            err,
+            format!(
+                "request write to the daemon stalled for {}ms (read_timeout_ms {}ms + group lookup {}ms + admission audit {}ms); daemon not reading?",
+                bound.as_millis(),
+                READ_TIMEOUT_MS,
+                maknae_config::GROUP_LOOKUP_TIMEOUT_MS,
+                maknae_config::ADMISSION_AUDIT_TIMEOUT_MS
+            )
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_attempt_window_anchor_is_taken_after_the_write_completes() {
+        let start = tokio::time::Instant::now();
+        let delay = std::time::Duration::from_secs(7);
+        let written = write_with_reader_delay(
+            maknae_proto::FrameClass::Attempt,
+            maknae_proto::ATTEMPT_REQUEST_MAX,
+            delay,
+        )
+        .await
+        .unwrap();
+        assert!(
+            written.at() >= (start + delay).into_std(),
+            "the attempt window must not be charged for the daemon's pre-read work on a large frame"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_control_write_stall_names_the_read_timeout() {
+        const SMALL_DUPLEX: usize = 64;
+        let body = vec![0u8; 4 * SMALL_DUPLEX];
+        assert!(
+            body.len() > SMALL_DUPLEX,
+            "the frame must exceed the in-flight buffer"
+        );
+        let transport = maknae_config::TransportConfig {
+            read_timeout_ms: READ_TIMEOUT_MS,
+            ..Default::default()
+        };
+        let (mut cli, _daemon) = tokio::io::duplex(SMALL_DUPLEX);
+        let err = send_request_frame(
+            &mut cli,
+            maknae_proto::FrameClass::Control,
+            &body,
+            &transport,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "request write to the daemon stalled for 5000ms (daemon not reading?)"
+        );
+    }
+
+    #[test]
+    fn control_writes_keep_the_read_timeout() {
+        let t = maknae_config::TransportConfig {
+            read_timeout_ms: READ_TIMEOUT_MS,
+            ..Default::default()
+        };
+        assert_eq!(
+            request_write_bound(maknae_proto::FrameClass::Control, &t),
+            std::time::Duration::from_millis(READ_TIMEOUT_MS)
+        );
+        assert_eq!(
+            request_write_bound(maknae_proto::FrameClass::Attempt, &t),
+            maknae_config::content_write_bound(&t)
+        );
+        assert_eq!(
+            request_write_bound(maknae_proto::FrameClass::Prompt, &t),
+            maknae_config::content_write_bound(&t)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_frame_larger_than_the_real_socket_buffers_waits_for_a_slow_reader() {
+        use nix::sys::socket::{getsockopt, sockopt};
+        let (mut cli, mut daemon) = tokio::net::UnixStream::pair().unwrap();
+        let snd = getsockopt(&cli, sockopt::SndBuf).unwrap();
+        let rcv = getsockopt(&daemon, sockopt::RcvBuf).unwrap();
+        let body = vec![0u8; 2 * (snd + rcv) + 1];
+        let transport = maknae_config::TransportConfig {
+            read_timeout_ms: 100,
+            ..Default::default()
+        };
+        let reader = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let mut sink = Vec::new();
+            let _ = tokio::io::AsyncReadExt::read_to_end(&mut daemon, &mut sink).await;
+        });
+        let got = send_request_frame(
+            &mut cli,
+            maknae_proto::FrameClass::Prompt,
+            &body,
+            &transport,
+        )
+        .await;
+        drop(cli);
+        let _ = reader.await;
+        let _written = got.expect(
+            "#421: a 300 ms pre-read delay is within the bound, whatever the platform's buffers",
+        );
+    }
+
     fn stalled(wait_ms: u64) -> String {
         format!("no response from daemon within {wait_ms}ms (stalled?)")
+    }
+
+    fn control_stalled(wait_ms: u64) -> String {
+        format!("no response from daemon within {wait_ms}ms; it may be slow admitting the connection (group lookup or admission audit)")
     }
 
     #[tokio::test(start_paused = true)]
@@ -998,7 +1213,7 @@ mod tests {
         let err = reply_after(read + TICK, class, READ_TIMEOUT_MS)
             .await
             .unwrap_err();
-        assert_eq!(err, stalled(READ_TIMEOUT_MS));
+        assert_eq!(err, control_stalled(READ_TIMEOUT_MS));
     }
 
     #[tokio::test(start_paused = true)]

@@ -470,8 +470,10 @@ destinations:                # #172: per-role egress allowlist for session.promp
   canonically-ordered JSONL record (§6 above) BEFORE the daemon released a response —
   the fail-closed audit-then-respond ordering is not just a code comment, it's
   observable: kill the daemon's write access to `audit.jsonl_path` mid-run and the next
-  `maknae ping` hangs until its `read_timeout_ms` and then fails, rather than getting a
-  `pong` with no audit trail behind it.
+  `maknae ping` fails within about 5 s with either `frame truncated` (the daemon
+  closed the connection without replying) or `no response from daemon within {N}ms; it
+  may be slow admitting the connection (group lookup or admission audit)`. The daemon
+  never returns a `pong` without a durable admission record.
 
 ### A note on what this chapter validates that automated tests don't
 
