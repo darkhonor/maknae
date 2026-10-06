@@ -44,8 +44,31 @@ impl Sink {
 /// Queue one diagnostic line for stderr without ever blocking the caller.
 pub(crate) fn report(line: String) {
     static SINK: OnceLock<Sink> = OnceLock::new();
-    SINK.get_or_init(|| Sink::new(DIAG_QUEUE_CAPACITY, Box::new(std::io::stderr())))
+    SINK.get_or_init(|| Sink::new(DIAG_QUEUE_CAPACITY, process_writer()))
         .report(line);
+}
+
+#[cfg(not(test))]
+fn process_writer() -> Box<dyn Write + Send> {
+    Box::new(std::io::stderr())
+}
+
+#[cfg(test)]
+static CAPTURED: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn process_writer() -> Box<dyn Write + Send> {
+    struct Capture;
+    impl Write for Capture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            CAPTURED.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    Box::new(Capture)
 }
 
 #[cfg(test)]
@@ -159,5 +182,9 @@ mod tests {
         let started = Instant::now();
         report("maknaed: diag self-test line".into());
         assert!(started.elapsed() < Duration::from_millis(200));
+        wait_until(|| {
+            String::from_utf8_lossy(&CAPTURED.lock().unwrap())
+                .contains("maknaed: diag self-test line\n")
+        });
     }
 }
