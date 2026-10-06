@@ -265,6 +265,9 @@ files = [
   "crates/maknae-agent/src/budget.rs",
   "crates/maknae-sys/src/reply.rs",
   "crates/maknae-sys/src/macos.rs",
+  # The kernel graph's schema and codec (#485): a wrong check loads a forged or rolled-back enforcement state.
+  "crates/maknae-graph/src/record.rs",
+  "crates/maknae-graph/src/schema.rs",
 ]
 # maknae-security request.rs/authorizer.rs and maknae-config value.rs are pure
 # declarations (no executable production regions) → T3, not T1. The mutation set
@@ -273,7 +276,7 @@ files = [
 # critical crates whose fail-closed behavior must be provable to external
 # third parties. Zero missed mutants required.
 # It also carries the loop's decision code (maknae-agent), whose false-assurance surface is T1.
-mutants_crates = ["maknae-security", "maknae-config", "maknae-io", "maknae-kernel", "maknae-vault", "maknae-proto", "maknae-audit-append", "maknae-msgs", "maknae-authz-basic", "maknae-classification-aus", "maknae-llm", "maknae-agent", "maknae-deputy", "maknae-sys", "maknae-seal"]
+mutants_crates = ["maknae-security", "maknae-config", "maknae-io", "maknae-kernel", "maknae-vault", "maknae-proto", "maknae-audit-append", "maknae-msgs", "maknae-authz-basic", "maknae-classification-aus", "maknae-llm", "maknae-agent", "maknae-deputy", "maknae-sys", "maknae-seal", "maknae-graph"]
 # Crates whose mutation run needs a non-default feature so feature-gated seam
 # code is LIVE (mutants in cfg'd-out code are unkillable-MISSED — the
 # 2026-08-27 main-red class; #77 generalized the maknae-config special case).
@@ -780,6 +783,14 @@ why = "test-only helper shared between module test suites (it exists because the
 [[t3]]
 path = "crates/maknae-io/src/lib.rs"
 why = "crate rustdoc and re-exports only; no executable production regions, so a [t1] classification hard-fails coverage_check.py's absent-from-coverage check"
+
+[[t3]]
+path = "crates/maknae-graph/src/lib.rs"
+why = "crate rustdoc and module declarations only; no executable production regions — same treatment as maknae-io/src/lib.rs"
+
+[[t3]]
+path = "crates/maknae-graph/src/kernel.rs"
+why = "the kernel schema's constant tables only; no executable production regions. Unit tests pin every triple, the compiled kinds and the adversary target; schema.rs and graph.rs (T1) enforce them"
 
 [[t3]]
 path = "crates/maknae-io/src/error.rs"

@@ -9,6 +9,7 @@ members = [
   "crates/maknae-classification-aus",
   "crates/maknae-config",
   "crates/maknae-deputy",
+  "crates/maknae-graph",
   "crates/maknae-io",
   "crates/maknae-kernel",
   "crates/maknae-llm",

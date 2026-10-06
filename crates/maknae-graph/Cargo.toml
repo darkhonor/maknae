@@ -1,0 +1,12 @@
+[package]
+name = "maknae-graph"
+publish.workspace = true
+description = "Typed graph records, schemas and the format-v1 binary codec for Maknae graph spaces"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
