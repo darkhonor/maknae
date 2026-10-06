@@ -181,7 +181,7 @@ fn handler_drain_bound(cfg: &TransportConfig, egress_deadline: Duration) -> Dura
     // review round 6), the provider call, the response write (bounded by the
     // read timeout), the close — then the margin for the audit appends.
     Duration::from_millis(cfg.handshake_timeout_ms)
-        + GROUP_LOOKUP_TIMEOUT
+        + Duration::from_millis(maknae_config::GROUP_LOOKUP_TIMEOUT_MS)
         + Duration::from_millis(cfg.read_timeout_ms)
         + HOME_RESOLVE_TIMEOUT
         + crate::handler::AUTHZ_DECIDE_TIMEOUT
@@ -198,17 +198,6 @@ fn handler_drain_bound(cfg: &TransportConfig, egress_deadline: Duration) -> Dura
 /// same slow-drip permit exhaustion the response-write bound closes. Closing is
 /// best-effort (the socket is dropped either way); 1s is generous for ~30 bytes.
 const STREAM_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
-
-/// Bound on the `maknae`-group membership lookup (NSS: getgrnam/getpwuid, possibly
-/// backed by SSSD/LDAP). `spawn_blocking` keeps a stalled lookup off the async workers
-/// (so the accept loop stays live), but the handler still awaits the join while holding
-/// its connection permit — unbounded, `max_connections` stalled lookups would pin every
-/// permit and the daemon would fast-close all further connections until NSS recovered.
-/// On elapse the handler FAILS CLOSED (not-a-member → deny + audit) and returns,
-/// releasing the permit; the blocking thread finishes in the background (capped at
-/// process exit by [`RUNTIME_SHUTDOWN_TIMEOUT`]). 5s is far above any healthy NSS
-/// round-trip and below the per-connection read/handshake bounds' order.
-const GROUP_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Bound on the Tokio runtime's own teardown in [`run`] (the LAST line of defense for
 /// codex round-11 P1). Aborting an async task can NEVER cancel a `spawn_blocking`
@@ -2399,7 +2388,7 @@ where
                                                 }
                                                 BreakerAdmission::RefuseAtCapacity => admission_facts(None),
                                                 BreakerAdmission::Admit => match tokio::time::timeout(
-                                                    GROUP_LOOKUP_TIMEOUT,
+                                                    Duration::from_millis(maknae_config::GROUP_LOOKUP_TIMEOUT_MS),
                                                     tokio::task::spawn_blocking(move || {
                                                         uid_in_maknae_group(uid)
                                                     }),
@@ -2424,12 +2413,12 @@ where
                                                         {
                                                             eprintln!(
                                                                 "maknaed: `maknae` group lookup circuit breaker tripped after repeated {}s blocking timeouts — failing closed without spawning more NSS work",
-                                                                GROUP_LOOKUP_TIMEOUT.as_secs()
+                                                                maknae_config::GROUP_LOOKUP_TIMEOUT_MS / 1_000
                                                             );
                                                         } else {
                                                             eprintln!(
                                                                 "maknaed: `maknae` group lookup for uid={uid} stalled past {}s — failing closed (deny)",
-                                                                GROUP_LOOKUP_TIMEOUT.as_secs()
+                                                                maknae_config::GROUP_LOOKUP_TIMEOUT_MS / 1_000
                                                             );
                                                         }
                                                         admission_facts(None)

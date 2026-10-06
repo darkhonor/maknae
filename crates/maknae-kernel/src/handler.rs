@@ -235,7 +235,7 @@ pub fn verb_to_action(verb: &Verb) -> &'static str {
 
 /// Bound on one PDP decision (per-request policy re-read is sync file I/O on
 /// the blocking pool; a stalled /etc/maknae must not pin tokio workers —
-/// same rationale family as GROUP_LOOKUP_TIMEOUT). Elapse → Deny (fail
+/// same rationale family as maknae_config::GROUP_LOOKUP_TIMEOUT_MS). Elapse → Deny (fail
 /// closed). 5s: §10.5's orphan-accumulation arithmetic assumes this value;
 /// the VALUE is pinned by a T1 test here because the binding site in run.rs
 /// is mutation-excluded orchestration.
