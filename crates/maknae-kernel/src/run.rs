@@ -531,12 +531,18 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             );
             // #275: the peer identity, bounded and audit-only.
             rec.subject.user = admitted_user(peer_user.as_deref());
-            if let Err(e) = emit.emit(&rec).await {
+            if let Err(e) = emit
+                .emit_within(
+                    &rec,
+                    Duration::from_millis(maknae_config::ADMISSION_AUDIT_TIMEOUT_MS),
+                )
+                .await
+            {
                 // Mid-life audit-write failure on a deny path is logged but does not change
                 // the already-fail-closed outcome (the connection is refused); the permit
                 // path gates on audit success, deny paths already deny.
                 eprintln!(
-                    "maknaed: AUDIT WRITE FAILED on connection-deny (group check) for peer_uid={peer_uid} peer_uri={peer_uri} — rejection proceeded without a durable record: {e}"
+                    "maknaed: admission audit append failed or is unconfirmed on connection-deny (group check) for peer_uid={peer_uid} peer_uri={peer_uri} — the rejection proceeded: {e}"
                 );
             }
             close_bounded(&mut stream).await;
@@ -567,7 +573,12 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             );
             // #275: the peer identity, bounded and audit-only.
             rec.subject.user = admitted_user(peer_user.as_deref());
-            let admission_result = emit.emit(&rec).await;
+            let admission_result = emit
+                .emit_within(
+                    &rec,
+                    Duration::from_millis(maknae_config::ADMISSION_AUDIT_TIMEOUT_MS),
+                )
+                .await;
             if !may_respond(admission_result.is_ok()) {
                 if let Err(e) = admission_result {
                     eprintln!(
@@ -4574,5 +4585,160 @@ mod home_resolution_tests {
             crate::authz::HomeUnavailable::RequesterAtCapacity.reason()
         );
         drop(held);
+    }
+}
+
+#[cfg(test)]
+mod admission_bound_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::AsyncReadExt;
+
+    struct SlowAdmission {
+        delay: Duration,
+        bounded_calls: AtomicUsize,
+    }
+    impl AuditEmit for SlowAdmission {
+        fn emit(
+            &self,
+            rec: &AuditRecord,
+        ) -> impl std::future::Future<Output = Result<(), maknae_audit_append::AuditError>> + Send
+        {
+            let admission = rec.event == "connection";
+            async move {
+                if admission {
+                    std::future::pending::<()>().await;
+                }
+                Ok(())
+            }
+        }
+        fn emit_within(
+            &self,
+            rec: &AuditRecord,
+            bound: Duration,
+        ) -> impl std::future::Future<Output = Result<(), maknae_audit_append::AuditError>> + Send
+        {
+            self.bounded_calls.fetch_add(1, Ordering::SeqCst);
+            let delay = if rec.event == "connection" {
+                self.delay
+            } else {
+                Duration::ZERO
+            };
+            async move {
+                match tokio::time::timeout(bound, tokio::time::sleep(delay)).await {
+                    Ok(()) => Ok(()),
+                    Err(_) => Err(maknae_audit_append::AuditError::WritePrimary(
+                        "unconfirmed".into(),
+                    )),
+                }
+            }
+        }
+    }
+
+    fn bound() -> Duration {
+        Duration::from_millis(maknae_config::ADMISSION_AUDIT_TIMEOUT_MS)
+    }
+
+    async fn drive(in_group: bool, delay: Duration) -> (Vec<u8>, usize, Duration) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let policy = root.join("authz.yaml");
+        std::fs::write(
+            &policy,
+            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&policy, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let uid = nix::unistd::geteuid().as_raw();
+        let us = &maknae_config::BasicPolicy;
+        let authorizer = Arc::new(crate::Composition::new(
+            maknae_authz_basic::HermeticAuthorizer::new(
+                policy,
+                maknae_config::Principal {
+                    name: "operator".into(),
+                    uid,
+                },
+                maknae_config::TargetRequired {
+                    owner: None,
+                    mode_mask: Some(0o022),
+                    nlink_exactly_one: false,
+                    regular_file: true,
+                    max_bytes: None,
+                },
+            )
+            .unwrap(),
+            crate::CeilingAuthorizer::new(maknae_config::Ceiling::baseline_for(us), us),
+        ));
+        let (mut client, server) = tokio::io::duplex(256 * 1024);
+        let verb = Verb::Ping;
+        let body = maknae_proto::encode_request(&maknae_proto::Request {
+            protocol_version: PROTOCOL_VERSION,
+            verb: verb.clone(),
+        })
+        .unwrap();
+        maknae_proto::write_frame(&mut client, maknae_proto::class_of(&verb), &body)
+            .await
+            .unwrap();
+        let emit = Arc::new(SlowAdmission {
+            delay,
+            bounded_calls: AtomicUsize::new(0),
+        });
+        let backend_name = Arc::new(maknae_security::guarded_backend_name(&*authorizer));
+        let t0 = tokio::time::Instant::now();
+        tokio::time::timeout(
+            Duration::from_secs(120),
+            handle(
+                server,
+                "maknae://d/plane/cli".to_string(),
+                uid,
+                in_group,
+                Some("operator".to_string()),
+                Some(root.clone()),
+                emit.clone(),
+                1,
+                maknae_config::transport_from_section(None).unwrap(),
+                serde_json::json!({}),
+                authorizer,
+                Arc::new(ConfigView::default()),
+                backend_name,
+                Arc::new("US".to_string()),
+                Arc::new(None),
+                crate::egress::unavailable_egress(),
+                Duration::from_secs(10),
+                maknae_security::Lane::Local,
+                maknae_io::DelegatedFds::new(1),
+            ),
+        )
+        .await
+        .expect("handle returns within the wrapper");
+        let elapsed = t0.elapsed();
+        let mut rest = Vec::new();
+        client.read_to_end(&mut rest).await.unwrap();
+        let calls = emit.bounded_calls.load(Ordering::SeqCst);
+        (rest, calls, elapsed)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_admission_append_slower_than_its_bound_closes_without_serving() {
+        let (buf, calls, _) = drive(true, Duration::from_secs(60)).await;
+        assert!(buf.is_empty(), "no response frame was written");
+        assert!(calls >= 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_admission_append_inside_its_bound_is_served() {
+        let (buf, calls, _) = drive(true, bound() - Duration::from_millis(1)).await;
+        assert!(!buf.is_empty(), "a reply frame was written");
+        assert!(calls >= 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_deny_paths_admission_append_is_bounded_too() {
+        let (buf, calls, elapsed) = drive(false, Duration::from_secs(60)).await;
+        assert!(elapsed < bound() + Duration::from_secs(1), "{elapsed:?}");
+        assert!(buf.is_empty());
+        assert!(calls >= 1);
     }
 }
