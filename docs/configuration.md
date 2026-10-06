@@ -660,9 +660,9 @@ egress:
   `ExitTimeOut`) cover that drain at BOTH ceilings (60 s transport timeouts, 600 s
   deadline) plus every other term of the shutdown chain — the stop record's append, the
   credential supervisor's abort and reap, the reap of aborted handlers, the audit drain,
-  the plane client's bounded lock wait and token revoke, and the runtime teardown — and
+  the plane client's bounded lock wait and token revoke, the runtime teardown and the diagnostics flush — and
   a kernel test holds the unit values to that chain, two-sided. At the defaults the
-  chain is 406 s; a stop with nothing in flight exits in milliseconds. One more bound at
+  chain is 407 s; a stop with nothing in flight exits in milliseconds. One more bound at
   the ceiling: the deputy's request cap is 16,842,752 bytes — 16 MiB and a 64 KiB margin
   for the re-wrap — so a prompt that fills `transport.prompt_max_bytes` at its own 16
   MiB maximum still reaches the deputy.

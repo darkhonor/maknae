@@ -56,7 +56,7 @@
        blocking step 5 + provider call 600 + response write 60 + close 1 +
        10 s margin = 816 s) and the reap of what it aborts (1 s), the audit
        drain (5 s), the plane client's shutdown (a 30 s lock wait bound, then
-       revoke-self under 30 s) and the runtime teardown (3 s): 891 s. launchd's default is 20 s before SIGKILL. Held
+       revoke-self under 30 s) the runtime teardown (3 s) and the diagnostics flush (1 s): 892 s. launchd's default is 20 s before SIGKILL. Held
        to the chain, two-sided within 10 s, by the same kernel test that reads
        maknaed.service. -->
   <key>ExitTimeOut</key>

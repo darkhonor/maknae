@@ -3576,7 +3576,8 @@ mod tests {
     /// order `accept_loop` and `run_inner` execute them — the stop record's
     /// append (#265), the supervisor abort-reap, the handler drain (deadline + its own bound) and the reap
     /// of what it aborts, the audit drain, the plane client's shutdown (a
-    /// bounded lock wait, then revoke-self) and the runtime teardown. TWO-SIDED:
+    /// bounded lock wait, then revoke-self), the runtime teardown and the diagnostics
+    /// flush. TWO-SIDED:
     /// four rounds each found a term the expression had skipped while the
     /// unit kept the old sum, so a unit more than `STOP_TIMEOUT_SLACK` above
     /// the chain is as red as one below it.
