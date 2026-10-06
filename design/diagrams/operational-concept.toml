@@ -75,36 +75,57 @@ note = "This is the load-bearing sentence of the whole concept, and it is the pa
 
 [[step]]
 n = "3"
-label = "Fetch — authorized sources only"
+label = "Fetch — registered only"
 who = "trust plane"
-detail = "The egress allowlist is the operator's signed authority map. A source not on it is denied."
+detail = "The egress allowlist is the operator's signed authority map. A source not on it is denied, and the gap becomes a learning request."
 status = "unbuilt"
 
 [[step]]
 n = "4"
-label = "Quarantine"
-who = "Tier 3"
-detail = "ALL new knowledge enters here — ingested, generated, or demoted. It may inform work; it may not authorize a privileged action."
+label = "Validate, then admit"
+who = "trust plane · kernel"
+detail = "Held at system high until labeled; above the ceiling is a spillage, refused. Identity, digest and extraction checked. Pass: usable. Exception: review hold."
 status = "unbuilt"
-note = "inform-but-not-authorize — the same rule the reference monitor already applies to tool-supplied content."
+note = "Review hold informs nothing, neither content nor plan structure, until a reviewer disposes of it."
 
 [[step]]
 n = "5"
-label = "Promote — one tier per gate"
-who = "trust plane"
-detail = "3 → 2 → 1 on corroboration or operator sign-off. Automation can never raise a ceiling, and there is no path from Quarantine to Doctrine."
+label = "Placed by the matrix"
+who = "authority basis"
+detail = "Precedence comes from the deployment's authority matrix, not from the route. A URL-only registration never reaches Tier 1."
 status = "unbuilt"
 
 [[step]]
 n = "6"
-label = "Authoritative"
-who = "Tier 1"
-detail = "The \"official way to do things\" — which the agent then applies to the next task."
+label = "Applied"
+who = "Tier 1 · Tier 2"
+detail = "Admitted knowledge advises the next task: requirements and constraints, cited as data. Never instructions to the model."
+status = "unbuilt"
+note = "inform-but-not-authorize — the same rule the reference monitor already applies to tool-supplied content."
+
+# --- the other intake routes (KLC 8.1) and the ladder (KLC 5, 9) -------------
+
+[[route]]
+label = "Operator ingest"
+who = "operator · attested"
+detail = "For policy no tool can reach: the operator downloads and submits it, the agent extracts it. It enters at its matrix position: a CNSS Policy as Tier 1."
+status = "unbuilt"
+
+[[route]]
+label = "Unregistered source"
+who = "review hold"
+detail = "Not admissible. A reviewer registers the source, admits the item as an operator ingest, or rejects it. The dreaming cycle may only propose."
+status = "unbuilt"
+
+[[route]]
+label = "Self-generated knowledge"
+who = "Tier 3 → 2 → 1"
+detail = "Derived objects, memories and skills climb one tier per gate, on corroboration or operator sign-off. Automation never raises a ceiling."
 status = "unbuilt"
 
 [tier0]
 label = "Tier 0 · Doctrine"
-detail = "The authority map, this contract, core skills. Operator signature only, never automated. It is what every other tier is measured against."
+detail = "The authority map, the lifecycle contract, core skills. Operator signature only; never reached by admission or automation. It is what every other tier is measured against."
 status = "unbuilt"
 
 # --- the environments ------------------------------------------------------
@@ -130,6 +151,6 @@ evidence = "README.md — \"That is not a special mode\" · design/adr/ADR-0004-
 
 [delivery]
 built = "Trust plane: maknaed as sole PDP, per-request authorization composed deny-overrides, subject-side OS DAC by descriptor delegation, append-only audit gating the reply, FIPS-asserted mTLS planes."
-unbuilt = "Runtime plane and the entire knowledge lifecycle: the Knowledge Lake, the skill registry, the tier state machine, the promotion pipeline, the consolidation cycle, and the remote gateway."
+unbuilt = "Runtime plane and the entire knowledge lifecycle: the Knowledge Lake, the intake routes and review hold, the skill registry, the tier state machine, the promotion pipeline, the consolidation cycle, and the remote gateway."
 honest = "The kernel that makes the loop safe is substantially real. The loop is not. This graphic is the concept, not a description of a working system."
 evidence = "design/knowledge-lifecycle-contract.md · design/diagrams/generated-system-interfaces.svg"

@@ -1,0 +1,405 @@
+<svg width="1044" height="1598" viewBox="0 0 1044 1598" xmlns="http://www.w3.org/2000/svg" role="img">
+<title>Knowledge position cards</title>
+<desc>Fifteen documents, each with its source and locality, and three independent axes: usability state, who must follow it (shown for a US contractor and a ROK coalition operator), and evidence, with the role each plays.</desc>
+<rect x="0" y="0" width="1044" height="1598" fill="#FFFFFF"/>
+<text x="24" y="36" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="17" font-weight="600" fill="#2C2C2A">Knowledge position cards — three independent questions</text>
+<text x="24" y="58" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#5F5E5A">Can the agent use it?  ·  Who must follow it?  ·  How much should we believe it?  →  what it is good for</text>
+<text x="24" y="76" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#8A877F">Draft for decision. Jurisdiction terms come from profiles; legal-reach statements are simplified illustrations, not legal advice.</text>
+<rect x="24" y="96" width="320" height="256" rx="10" fill="#FFFFFF" stroke="#C9C6BD" stroke-width="1"/>
+<text x="36" y="118" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#2C2C2A">US Executive Order</text>
+<text x="36" y="134" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#8A877F">President of the United States (US profile)</text>
+<text x="36" y="156" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">SOURCE</text>
+<text x="94" y="156" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#2C2C2A">source of record · local copy</text>
+<text x="36" y="180" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">USE</text>
+<rect x="76" y="168" width="82" height="18" rx="4" fill="#FFFFFF" stroke="#E0DDD5" stroke-width="0.8"/>
+<text x="117.0" y="181" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#B4B1A8">Held</text>
+<rect x="162" y="168" width="82" height="18" rx="4" fill="#FFFFFF" stroke="#E0DDD5" stroke-width="0.8"/>
+<text x="203.0" y="181" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#B4B1A8">Provisional</text>
+<rect x="248" y="168" width="82" height="18" rx="4" fill="#E1F5EE" stroke="#0F6E56" stroke-width="1.2"/>
+<text x="289.0" y="181" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#04342C">Admitted</text>
+<text x="36" y="208" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">WHO</text>
+<text x="76" y="209" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">US contractor</text>
+<rect x="76" y="212" width="185" height="17" rx="8.5" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.8"/>
+<text x="82" y="224" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#26215C">via contract (FAR/DFARS clauses)</text>
+<text x="76" y="247" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">ROK coalition operator</text>
+<rect x="76" y="250" width="61" height="17" rx="8.5" fill="#F1EFE8" stroke="#8A877F" stroke-width="0.8"/>
+<text x="82" y="262" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">not bound</text>
+<text x="36" y="286" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">EVIDENCE</text>
+<rect x="94" y="274" width="113" height="18" rx="9" fill="#F7F5EF" stroke="#B4B1A8" stroke-width="0.8"/><text x="150.6" y="287" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#5F5E5A">issued requirement</text>
+<rect x="242.7" y="324" width="89" height="20" rx="4" fill="#3C3489"/>
+<text x="287.35" y="338" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="600" fill="#FFFFFF">Requirement</text>
+<text x="36" y="338" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">GOOD FOR</text>
+<rect x="362" y="96" width="320" height="256" rx="10" fill="#FFFFFF" stroke="#C9C6BD" stroke-width="1"/>
+<text x="374" y="118" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#2C2C2A">ROK Presidential Decree (대통령령)</text>
+<text x="374" y="134" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#8A877F">President of the Republic of Korea (ROK profile)</text>
+<text x="374" y="156" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">SOURCE</text>
+<text x="432" y="156" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#2C2C2A">source of record · local copy</text>
+<text x="374" y="180" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">USE</text>
+<rect x="414" y="168" width="82" height="18" rx="4" fill="#FFFFFF" stroke="#E0DDD5" stroke-width="0.8"/>
+<text x="455.0" y="181" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#B4B1A8">Held</text>
+<rect x="500" y="168" width="82" height="18" rx="4" fill="#FFFFFF" stroke="#E0DDD5" stroke-width="0.8"/>
+<text x="541.0" y="181" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#B4B1A8">Provisional</text>
+<rect x="586" y="168" width="82" height="18" rx="4" fill="#E1F5EE" stroke="#0F6E56" stroke-width="1.2"/>
+<text x="627.0" y="181" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#04342C">Admitted</text>
+<text x="374" y="208" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">WHO</text>
+<text x="414" y="209" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">US contractor</text>
+<rect x="414" y="212" width="228" height="17" rx="8.5" fill="#F1EFE8" stroke="#8A877F" stroke-width="0.8"/>
+<text x="420" y="224" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">not bound unless operating under ROK law</text>
+<text x="414" y="247" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">ROK coalition operator</text>
+<rect x="414" y="250" width="77" height="17" rx="8.5" fill="#CECBF6" stroke="#3C3489" stroke-width="0.8"/>
+<text x="420" y="262" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#26215C">bound at law</text>
+<text x="374" y="286" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">EVIDENCE</text>
+<rect x="432" y="274" width="113" height="18" rx="9" fill="#F7F5EF" stroke="#B4B1A8" stroke-width="0.8"/><text x="488.6" y="287" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#5F5E5A">issued requirement</text>
+<rect x="580.7" y="324" width="89" height="20" rx="4" fill="#3C3489"/>
+<text x="625.35" y="338" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="600" fill="#FFFFFF">Requirement</text>
+<text x="374" y="338" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">GOOD FOR</text>
+<rect x="700" y="96" width="320" height="256" rx="10" fill="#FFFFFF" stroke="#C9C6BD" stroke-width="1"/>
+<text x="712" y="118" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#2C2C2A">EU Directive</text>
+<text x="712" y="134" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#8A877F">European Union (EU profile)</text>
+<text x="712" y="156" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">SOURCE</text>
+<text x="770" y="156" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#2C2C2A">source of record · local copy</text>
+<text x="712" y="180" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">USE</text>
+<rect x="752" y="168" width="82" height="18" rx="4" fill="#FFFFFF" stroke="#E0DDD5" stroke-width="0.8"/>
+<text x="793.0" y="181" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#B4B1A8">Held</text>
+<rect x="838" y="168" width="82" height="18" rx="4" fill="#FFFFFF" stroke="#E0DDD5" stroke-width="0.8"/>
+<text x="879.0" y="181" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#B4B1A8">Provisional</text>
+<rect x="924" y="168" width="82" height="18" rx="4" fill="#E1F5EE" stroke="#0F6E56" stroke-width="1.2"/>
+<text x="965.0" y="181" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#04342C">Admitted</text>
+<text x="712" y="208" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">WHO</text>
+<text x="752" y="209" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">US contractor</text>
+<rect x="752" y="212" width="228" height="17" rx="8.5" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.8"/>
+<text x="758" y="224" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#26215C">via national law, if operating in the EU</text>
+<text x="752" y="247" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">ROK coalition operator</text>
+<rect x="752" y="250" width="61" height="17" rx="8.5" fill="#F1EFE8" stroke="#8A877F" stroke-width="0.8"/>
+<text x="758" y="262" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">not bound</text>
+<text x="712" y="286" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">EVIDENCE</text>
+<rect x="770" y="274" width="113" height="18" rx="9" fill="#F7F5EF" stroke="#B4B1A8" stroke-width="0.8"/><text x="826.6" y="287" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#5F5E5A">issued requirement</text>
+<rect x="770" y="296" width="154" height="18" rx="9" fill="#F7F5EF" stroke="#B4B1A8" stroke-width="0.8"/><text x="847.25" y="309" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#5F5E5A">binds states as to result</text>
+<rect x="918.7" y="324" width="89" height="20" rx="4" fill="#3C3489"/>
+<text x="963.35" y="338" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="600" fill="#FFFFFF">Requirement</text>
+<text x="712" y="338" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">GOOD FOR</text>
+<rect x="24" y="370" width="320" height="256" rx="10" fill="#FFFFFF" stroke="#C9C6BD" stroke-width="1"/>
+<text x="36" y="392" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#2C2C2A">NATO STANAG</text>
+<text x="36" y="408" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#8A877F">NATO Standardization Office</text>
+<text x="36" y="430" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">SOURCE</text>
+<text x="94" y="430" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#2C2C2A">operator ingest · local copy</text>
+<text x="36" y="454" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">USE</text>
+<rect x="76" y="442" width="82" height="18" rx="4" fill="#FFFFFF" stroke="#E0DDD5" stroke-width="0.8"/>
+<text x="117.0" y="455" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#B4B1A8">Held</text>
+<rect x="162" y="442" width="82" height="18" rx="4" fill="#FFFFFF" stroke="#E0DDD5" stroke-width="0.8"/>
+<text x="203.0" y="455" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#B4B1A8">Provisional</text>
+<rect x="248" y="442" width="82" height="18" rx="4" fill="#E1F5EE" stroke="#0F6E56" stroke-width="1.2"/>
+<text x="289.0" y="455" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#04342C">Admitted</text>
+<text x="36" y="482" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">WHO</text>
+<text x="76" y="483" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">US contractor</text>
+<rect x="76" y="486" width="196" height="17" rx="8.5" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.8"/>
+<text x="82" y="498" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#26215C">via US ratification, then contract</text>
+<text x="76" y="521" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">ROK coalition operator</text>
+<rect x="76" y="524" width="185" height="17" rx="8.5" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.8"/>
+<text x="82" y="536" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#26215C">bound only if ROK has adopted it</text>
+<text x="36" y="560" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">EVIDENCE</text>
+<rect x="94" y="548" width="113" height="18" rx="9" fill="#F7F5EF" stroke="#B4B1A8" stroke-width="0.8"/><text x="150.6" y="561" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#5F5E5A">issued requirement</text>
+<rect x="242.7" y="598" width="89" height="20" rx="4" fill="#3C3489"/>
+<text x="287.35" y="612" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="600" fill="#FFFFFF">Requirement</text>
+<text x="36" y="612" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">GOOD FOR</text>
+<rect x="362" y="370" width="320" height="256" rx="10" fill="#FFFFFF" stroke="#C9C6BD" stroke-width="1"/>
+<text x="374" y="392" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#2C2C2A">DISA STIG rule</text>
+<text x="374" y="408" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#8A877F">DISA (US profile)</text>
+<text x="374" y="430" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">SOURCE</text>
+<text x="432" y="430" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#2C2C2A">registered · local copy</text>
+<text x="374" y="454" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">USE</text>
+<rect x="414" y="442" width="82" height="18" rx="4" fill="#FFFFFF" stroke="#E0DDD5" stroke-width="0.8"/>
+<text x="455.0" y="455" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#B4B1A8">Held</text>
+<rect x="500" y="442" width="82" height="18" rx="4" fill="#FFFFFF" stroke="#E0DDD5" stroke-width="0.8"/>
+<text x="541.0" y="455" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#B4B1A8">Provisional</text>
+<rect x="586" y="442" width="82" height="18" rx="4" fill="#E1F5EE" stroke="#0F6E56" stroke-width="1.2"/>
+<text x="627.0" y="455" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#04342C">Admitted</text>
+<text x="374" y="482" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">WHO</text>
+<text x="414" y="483" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">US contractor</text>
+<rect x="414" y="486" width="179" height="17" rx="8.5" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.8"/>
+<text x="420" y="498" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#26215C">via the system owner's contract</text>
+<text x="414" y="521" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">ROK coalition operator</text>
+<rect x="414" y="524" width="201" height="17" rx="8.5" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.8"/>
+<text x="420" y="536" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#26215C">applies on a US DoD system they use</text>
+<text x="374" y="560" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">EVIDENCE</text>
+<rect x="432" y="548" width="113" height="18" rx="9" fill="#F7F5EF" stroke="#B4B1A8" stroke-width="0.8"/><text x="488.6" y="561" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#5F5E5A">issued requirement</text>
+<rect x="432" y="570" width="131" height="18" rx="9" fill="#F7F5EF" stroke="#B4B1A8" stroke-width="0.8"/><text x="497.45" y="583" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#5F5E5A">rationale may be weak</text>
+<rect x="580.7" y="598" width="89" height="20" rx="4" fill="#3C3489"/>
+<text x="625.35" y="612" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="600" fill="#FFFFFF">Requirement</text>
+<text x="374" y="612" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">GOOD FOR</text>
+<rect x="700" y="370" width="320" height="256" rx="10" fill="#FFFFFF" stroke="#C9C6BD" stroke-width="1"/>
+<text x="712" y="392" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#2C2C2A">CloudNativePG documentation</text>
+<text x="712" y="408" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#8A877F">vendor project</text>
+<text x="712" y="430" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">SOURCE</text>
+<text x="770" y="430" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#2C2C2A">registered repo · local copy</text>
+<text x="712" y="454" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">USE</text>
+<rect x="752" y="442" width="82" height="18" rx="4" fill="#FFFFFF" stroke="#E0DDD5" stroke-width="0.8"/>
+<text x="793.0" y="455" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#B4B1A8">Held</text>
+<rect x="838" y="442" width="82" height="18" rx="4" fill="#FFFFFF" stroke="#E0DDD5" stroke-width="0.8"/>
+<text x="879.0" y="455" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#B4B1A8">Provisional</text>
+<rect x="924" y="442" width="82" height="18" rx="4" fill="#E1F5EE" stroke="#0F6E56" stroke-width="1.2"/>
+<text x="965.0" y="455" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#04342C">Admitted</text>
+<text x="712" y="482" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">WHO</text>
+<text x="752" y="483" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">US contractor</text>
+<rect x="752" y="486" width="136" height="17" rx="8.5" fill="#F1EFE8" stroke="#8A877F" stroke-width="0.8"/>
+<text x="758" y="498" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">not bound — feasibility</text>
+<text x="752" y="521" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">ROK coalition operator</text>
+<rect x="752" y="524" width="136" height="17" rx="8.5" fill="#F1EFE8" stroke="#8A877F" stroke-width="0.8"/>
+<text x="758" y="536" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">not bound — feasibility</text>
+<text x="712" y="560" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">EVIDENCE</text>
+<rect x="770" y="548" width="125" height="18" rx="9" fill="#F7F5EF" stroke="#B4B1A8" stroke-width="0.8"/><text x="832.5" y="561" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#5F5E5A">vendor documentation</text>
+<rect x="900.0" y="548" width="96" height="18" rx="9" fill="#F7F5EF" stroke="#B4B1A8" stroke-width="0.8"/><text x="947.75" y="561" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#5F5E5A">vendor interest</text>
+<rect x="770" y="570" width="90" height="18" rx="9" fill="#F7F5EF" stroke="#B4B1A8" stroke-width="0.8"/><text x="814.8" y="583" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#5F5E5A">version-scoped</text>
+<rect x="912.4" y="598" width="96" height="20" rx="4" fill="#0F6E56"/>
+<text x="960.2" y="612" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="600" fill="#FFFFFF">Design input</text>
+<text x="712" y="612" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">GOOD FOR</text>
+<rect x="24" y="644" width="320" height="256" rx="10" fill="#FFFFFF" stroke="#C9C6BD" stroke-width="1"/>
+<text x="36" y="666" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#2C2C2A">ACP draft standard (paper)</text>
+<text x="36" y="682" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#8A877F">single author, TLA+ model-checked</text>
+<text x="36" y="704" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">SOURCE</text>
+<text x="94" y="704" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#2C2C2A">registered · local copy</text>
+<text x="36" y="728" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">USE</text>
+<rect x="76" y="716" width="82" height="18" rx="4" fill="#FFFFFF" stroke="#E0DDD5" stroke-width="0.8"/>
+<text x="117.0" y="729" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#B4B1A8">Held</text>
+<rect x="162" y="716" width="82" height="18" rx="4" fill="#FFFFFF" stroke="#E0DDD5" stroke-width="0.8"/>
+<text x="203.0" y="729" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#B4B1A8">Provisional</text>
+<rect x="248" y="716" width="82" height="18" rx="4" fill="#E1F5EE" stroke="#0F6E56" stroke-width="1.2"/>
+<text x="289.0" y="729" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#04342C">Admitted</text>
+<text x="36" y="756" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">WHO</text>
+<text x="76" y="757" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">US contractor</text>
+<rect x="76" y="760" width="61" height="17" rx="8.5" fill="#F1EFE8" stroke="#8A877F" stroke-width="0.8"/>
+<text x="82" y="772" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">not bound</text>
+<text x="76" y="795" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">ROK coalition operator</text>
+<rect x="76" y="798" width="61" height="17" rx="8.5" fill="#F1EFE8" stroke="#8A877F" stroke-width="0.8"/>
+<text x="82" y="810" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">not bound</text>
+<text x="36" y="834" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">EVIDENCE</text>
+<rect x="94" y="822" width="78" height="18" rx="9" fill="#F7F5EF" stroke="#B4B1A8" stroke-width="0.8"/><text x="132.9" y="835" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#5F5E5A">formal model</text>
+<rect x="176.8" y="822" width="119" height="18" rx="9" fill="#F7F5EF" stroke="#B4B1A8" stroke-width="0.8"/><text x="236.35000000000002" y="835" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#5F5E5A">conformance vectors</text>
+<rect x="94" y="844" width="107" height="18" rx="9" fill="#F7F5EF" stroke="#B4B1A8" stroke-width="0.8"/><text x="147.65" y="857" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#5F5E5A">not peer-reviewed</text>
+<rect x="236.4" y="872" width="96" height="20" rx="4" fill="#0F6E56"/>
+<text x="284.2" y="886" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="600" fill="#FFFFFF">Design input</text>
+<text x="36" y="886" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">GOOD FOR</text>
+<rect x="362" y="644" width="320" height="256" rx="10" fill="#FFFFFF" stroke="#C9C6BD" stroke-width="1"/>
+<text x="374" y="666" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#2C2C2A">SGH position paper</text>
+<text x="374" y="682" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#8A877F">single author, 70-system survey</text>
+<text x="374" y="704" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">SOURCE</text>
+<text x="432" y="704" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#2C2C2A">registered preprint · local copy</text>
+<text x="374" y="728" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">USE</text>
+<rect x="414" y="716" width="82" height="18" rx="4" fill="#FFFFFF" stroke="#E0DDD5" stroke-width="0.8"/>
+<text x="455.0" y="729" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#B4B1A8">Held</text>
+<rect x="500" y="716" width="82" height="18" rx="4" fill="#FFFFFF" stroke="#E0DDD5" stroke-width="0.8"/>
+<text x="541.0" y="729" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#B4B1A8">Provisional</text>
+<rect x="586" y="716" width="82" height="18" rx="4" fill="#E1F5EE" stroke="#0F6E56" stroke-width="1.2"/>
+<text x="627.0" y="729" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#04342C">Admitted</text>
+<text x="374" y="756" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">WHO</text>
+<text x="414" y="757" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">US contractor</text>
+<rect x="414" y="760" width="61" height="17" rx="8.5" fill="#F1EFE8" stroke="#8A877F" stroke-width="0.8"/>
+<text x="420" y="772" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">not bound</text>
+<text x="414" y="795" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">ROK coalition operator</text>
+<rect x="414" y="798" width="61" height="17" rx="8.5" fill="#F1EFE8" stroke="#8A877F" stroke-width="0.8"/>
+<text x="420" y="810" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">not bound</text>
+<text x="374" y="834" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">EVIDENCE</text>
+<rect x="432" y="822" width="107" height="18" rx="9" fill="#F7F5EF" stroke="#B4B1A8" stroke-width="0.8"/><text x="485.65" y="835" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#5F5E5A">position + survey</text>
+<rect x="544.3" y="822" width="66" height="18" rx="9" fill="#F7F5EF" stroke="#B4B1A8" stroke-width="0.8"/><text x="577.3" y="835" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#5F5E5A">no results</text>
+<rect x="615.3" y="822" width="54" height="18" rx="9" fill="#F7F5EF" stroke="#B4B1A8" stroke-width="0.8"/><text x="642.4" y="835" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#5F5E5A">preprint</text>
+<rect x="574.4" y="872" width="96" height="20" rx="4" fill="#0F6E56"/>
+<text x="622.2" y="886" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="600" fill="#FFFFFF">Design input</text>
+<text x="374" y="886" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">GOOD FOR</text>
+<rect x="700" y="644" width="320" height="256" rx="10" fill="#FFFFFF" stroke="#C9C6BD" stroke-width="1"/>
+<text x="712" y="666" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#2C2C2A">Maintainer's own blog</text>
+<text x="712" y="682" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#8A877F">one author, increasingly AI-assisted</text>
+<text x="712" y="704" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">SOURCE</text>
+<text x="770" y="704" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#2C2C2A">registered · fetch on demand</text>
+<text x="712" y="728" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">USE</text>
+<rect x="752" y="716" width="82" height="18" rx="4" fill="#FFFFFF" stroke="#E0DDD5" stroke-width="0.8"/>
+<text x="793.0" y="729" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#B4B1A8">Held</text>
+<rect x="838" y="716" width="82" height="18" rx="4" fill="#FFFFFF" stroke="#E0DDD5" stroke-width="0.8"/>
+<text x="879.0" y="729" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#B4B1A8">Provisional</text>
+<rect x="924" y="716" width="82" height="18" rx="4" fill="#E1F5EE" stroke="#0F6E56" stroke-width="1.2"/>
+<text x="965.0" y="729" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#04342C">Admitted</text>
+<text x="712" y="756" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">WHO</text>
+<text x="752" y="757" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">US contractor</text>
+<rect x="752" y="760" width="61" height="17" rx="8.5" fill="#F1EFE8" stroke="#8A877F" stroke-width="0.8"/>
+<text x="758" y="772" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">not bound</text>
+<text x="752" y="795" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">ROK coalition operator</text>
+<rect x="752" y="798" width="61" height="17" rx="8.5" fill="#F1EFE8" stroke="#8A877F" stroke-width="0.8"/>
+<text x="758" y="810" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">not bound</text>
+<text x="712" y="834" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">EVIDENCE</text>
+<rect x="770" y="822" width="78" height="18" rx="9" fill="#F7F5EF" stroke="#B4B1A8" stroke-width="0.8"/><text x="808.9" y="835" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#5F5E5A">practitioner</text>
+<rect x="852.8" y="822" width="72" height="18" rx="9" fill="#F7F5EF" stroke="#B4B1A8" stroke-width="0.8"/><text x="888.75" y="835" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#5F5E5A">AI-assisted</text>
+<rect x="770" y="844" width="137" height="18" rx="9" fill="#F7F5EF" stroke="#B4B1A8" stroke-width="0.8"/><text x="838.4" y="857" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#5F5E5A">partly author-reviewed</text>
+<rect x="912.4" y="872" width="96" height="20" rx="4" fill="#0F6E56"/>
+<text x="960.2" y="886" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="600" fill="#FFFFFF">Design input</text>
+<text x="712" y="886" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">GOOD FOR</text>
+<rect x="24" y="918" width="320" height="256" rx="10" fill="#FFFFFF" stroke="#C9C6BD" stroke-width="1"/>
+<text x="36" y="940" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#2C2C2A">Techno Tim (technotim.com)</text>
+<text x="36" y="956" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#8A877F">Tim Stewart · vouched by the operator</text>
+<text x="36" y="978" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">SOURCE</text>
+<text x="94" y="978" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#2C2C2A">registered creator · fetch on demand</text>
+<text x="36" y="1002" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">USE</text>
+<rect x="76" y="990" width="82" height="18" rx="4" fill="#FFFFFF" stroke="#E0DDD5" stroke-width="0.8"/>
+<text x="117.0" y="1003" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#B4B1A8">Held</text>
+<rect x="162" y="990" width="82" height="18" rx="4" fill="#FFFFFF" stroke="#E0DDD5" stroke-width="0.8"/>
+<text x="203.0" y="1003" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#B4B1A8">Provisional</text>
+<rect x="248" y="990" width="82" height="18" rx="4" fill="#E1F5EE" stroke="#0F6E56" stroke-width="1.2"/>
+<text x="289.0" y="1003" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#04342C">Admitted</text>
+<text x="36" y="1030" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">WHO</text>
+<text x="76" y="1031" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">US contractor</text>
+<rect x="76" y="1034" width="61" height="17" rx="8.5" fill="#F1EFE8" stroke="#8A877F" stroke-width="0.8"/>
+<text x="82" y="1046" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">not bound</text>
+<text x="76" y="1069" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">ROK coalition operator</text>
+<rect x="76" y="1072" width="61" height="17" rx="8.5" fill="#F1EFE8" stroke="#8A877F" stroke-width="0.8"/>
+<text x="82" y="1084" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">not bound</text>
+<text x="36" y="1108" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">EVIDENCE</text>
+<rect x="94" y="1096" width="78" height="18" rx="9" fill="#F7F5EF" stroke="#B4B1A8" stroke-width="0.8"/><text x="132.9" y="1109" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#5F5E5A">practitioner</text>
+<rect x="176.8" y="1096" width="119" height="18" rx="9" fill="#F7F5EF" stroke="#B4B1A8" stroke-width="0.8"/><text x="236.35000000000002" y="1109" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#5F5E5A">author track record</text>
+<rect x="94" y="1118" width="119" height="18" rx="9" fill="#F7F5EF" stroke="#B4B1A8" stroke-width="0.8"/><text x="153.55" y="1131" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#5F5E5A">vouched by operator</text>
+<rect x="218.10000000000002" y="1118" width="90" height="18" rx="9" fill="#F7F5EF" stroke="#B4B1A8" stroke-width="0.8"/><text x="262.90000000000003" y="1131" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#5F5E5A">homelab-scoped</text>
+<rect x="186.0" y="1146" width="146" height="20" rx="4" fill="#B5651D"/>
+<text x="259.0" y="1160" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="600" fill="#FFFFFF">Troubleshooting lead</text>
+<text x="36" y="1160" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">GOOD FOR</text>
+<rect x="362" y="918" width="320" height="256" rx="10" fill="#FFFFFF" stroke="#C9C6BD" stroke-width="1"/>
+<text x="374" y="940" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#2C2C2A">Christian Lempa (christianlempa.de)</text>
+<text x="374" y="956" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#8A877F">Christian Lempa · vouched by the operator</text>
+<text x="374" y="978" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">SOURCE</text>
+<text x="432" y="978" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#2C2C2A">registered creator · fetch on demand</text>
+<text x="374" y="1002" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">USE</text>
+<rect x="414" y="990" width="82" height="18" rx="4" fill="#FFFFFF" stroke="#E0DDD5" stroke-width="0.8"/>
+<text x="455.0" y="1003" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#B4B1A8">Held</text>
+<rect x="500" y="990" width="82" height="18" rx="4" fill="#FFFFFF" stroke="#E0DDD5" stroke-width="0.8"/>
+<text x="541.0" y="1003" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#B4B1A8">Provisional</text>
+<rect x="586" y="990" width="82" height="18" rx="4" fill="#E1F5EE" stroke="#0F6E56" stroke-width="1.2"/>
+<text x="627.0" y="1003" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#04342C">Admitted</text>
+<text x="374" y="1030" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">WHO</text>
+<text x="414" y="1031" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">US contractor</text>
+<rect x="414" y="1034" width="61" height="17" rx="8.5" fill="#F1EFE8" stroke="#8A877F" stroke-width="0.8"/>
+<text x="420" y="1046" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">not bound</text>
+<text x="414" y="1069" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">ROK coalition operator</text>
+<rect x="414" y="1072" width="61" height="17" rx="8.5" fill="#F1EFE8" stroke="#8A877F" stroke-width="0.8"/>
+<text x="420" y="1084" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">not bound</text>
+<text x="374" y="1108" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">EVIDENCE</text>
+<rect x="432" y="1096" width="78" height="18" rx="9" fill="#F7F5EF" stroke="#B4B1A8" stroke-width="0.8"/><text x="470.9" y="1109" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#5F5E5A">practitioner</text>
+<rect x="514.8" y="1096" width="119" height="18" rx="9" fill="#F7F5EF" stroke="#B4B1A8" stroke-width="0.8"/><text x="574.3499999999999" y="1109" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#5F5E5A">author track record</text>
+<rect x="432" y="1118" width="119" height="18" rx="9" fill="#F7F5EF" stroke="#B4B1A8" stroke-width="0.8"/><text x="491.55" y="1131" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#5F5E5A">vouched by operator</text>
+<rect x="556.1" y="1118" width="90" height="18" rx="9" fill="#F7F5EF" stroke="#B4B1A8" stroke-width="0.8"/><text x="600.9" y="1131" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#5F5E5A">homelab-scoped</text>
+<rect x="524.0" y="1146" width="146" height="20" rx="4" fill="#B5651D"/>
+<text x="597.0" y="1160" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="600" fill="#FFFFFF">Troubleshooting lead</text>
+<text x="374" y="1160" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">GOOD FOR</text>
+<rect x="700" y="918" width="320" height="256" rx="10" fill="#FFFFFF" stroke="#C9C6BD" stroke-width="1"/>
+<text x="712" y="940" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#2C2C2A">StackOverflow accepted answer</text>
+<text x="712" y="956" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#8A877F">community Q&amp;A — the classic</text>
+<text x="712" y="978" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">SOURCE</text>
+<text x="770" y="978" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#2C2C2A">registered community · fetch on demand</text>
+<text x="712" y="1002" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">USE</text>
+<rect x="752" y="990" width="82" height="18" rx="4" fill="#FFFFFF" stroke="#E0DDD5" stroke-width="0.8"/>
+<text x="793.0" y="1003" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#B4B1A8">Held</text>
+<rect x="838" y="990" width="82" height="18" rx="4" fill="#FFFFFF" stroke="#E0DDD5" stroke-width="0.8"/>
+<text x="879.0" y="1003" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#B4B1A8">Provisional</text>
+<rect x="924" y="990" width="82" height="18" rx="4" fill="#E1F5EE" stroke="#0F6E56" stroke-width="1.2"/>
+<text x="965.0" y="1003" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#04342C">Admitted</text>
+<text x="712" y="1030" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">WHO</text>
+<text x="752" y="1031" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">US contractor</text>
+<rect x="752" y="1034" width="61" height="17" rx="8.5" fill="#F1EFE8" stroke="#8A877F" stroke-width="0.8"/>
+<text x="758" y="1046" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">not bound</text>
+<text x="752" y="1069" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">ROK coalition operator</text>
+<rect x="752" y="1072" width="61" height="17" rx="8.5" fill="#F1EFE8" stroke="#8A877F" stroke-width="0.8"/>
+<text x="758" y="1084" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">not bound</text>
+<text x="712" y="1108" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">EVIDENCE</text>
+<rect x="770" y="1096" width="78" height="18" rx="9" fill="#F7F5EF" stroke="#B4B1A8" stroke-width="0.8"/><text x="808.9" y="1109" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#5F5E5A">practitioner</text>
+<rect x="852.8" y="1096" width="101" height="18" rx="9" fill="#F7F5EF" stroke="#B4B1A8" stroke-width="0.8"/><text x="903.5" y="1109" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#5F5E5A">community-vetted</text>
+<rect x="770" y="1118" width="90" height="18" rx="9" fill="#F7F5EF" stroke="#B4B1A8" stroke-width="0.8"/><text x="814.8" y="1131" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#5F5E5A">version-scoped</text>
+<rect x="864.6" y="1118" width="113" height="18" rx="9" fill="#F7F5EF" stroke="#B4B1A8" stroke-width="0.8"/><text x="921.2" y="1131" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#5F5E5A">authorship by date</text>
+<rect x="862.0" y="1146" width="146" height="20" rx="4" fill="#B5651D"/>
+<text x="935.0" y="1160" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="600" fill="#FFFFFF">Troubleshooting lead</text>
+<text x="712" y="1160" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">GOOD FOR</text>
+<rect x="24" y="1192" width="320" height="256" rx="10" fill="#FFFFFF" stroke="#C9C6BD" stroke-width="1"/>
+<text x="36" y="1214" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#2C2C2A">GitHub issue, registered repo</text>
+<text x="36" y="1230" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#8A877F">CloudNativePG issue tracker</text>
+<text x="36" y="1252" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">SOURCE</text>
+<text x="94" y="1252" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#2C2C2A">registered repo · fetch on demand</text>
+<text x="36" y="1276" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">USE</text>
+<rect x="76" y="1264" width="82" height="18" rx="4" fill="#FFFFFF" stroke="#E0DDD5" stroke-width="0.8"/>
+<text x="117.0" y="1277" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#B4B1A8">Held</text>
+<rect x="162" y="1264" width="82" height="18" rx="4" fill="#FFFFFF" stroke="#E0DDD5" stroke-width="0.8"/>
+<text x="203.0" y="1277" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#B4B1A8">Provisional</text>
+<rect x="248" y="1264" width="82" height="18" rx="4" fill="#E1F5EE" stroke="#0F6E56" stroke-width="1.2"/>
+<text x="289.0" y="1277" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#04342C">Admitted</text>
+<text x="36" y="1304" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">WHO</text>
+<text x="76" y="1305" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">US contractor</text>
+<rect x="76" y="1308" width="61" height="17" rx="8.5" fill="#F1EFE8" stroke="#8A877F" stroke-width="0.8"/>
+<text x="82" y="1320" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">not bound</text>
+<text x="76" y="1343" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">ROK coalition operator</text>
+<rect x="76" y="1346" width="61" height="17" rx="8.5" fill="#F1EFE8" stroke="#8A877F" stroke-width="0.8"/>
+<text x="82" y="1358" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">not bound</text>
+<text x="36" y="1382" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">EVIDENCE</text>
+<rect x="94" y="1370" width="78" height="18" rx="9" fill="#F7F5EF" stroke="#B4B1A8" stroke-width="0.8"/><text x="132.9" y="1383" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#5F5E5A">practitioner</text>
+<rect x="176.8" y="1370" width="125" height="18" rx="9" fill="#F7F5EF" stroke="#B4B1A8" stroke-width="0.8"/><text x="239.3" y="1383" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#5F5E5A">maintainer-confirmed</text>
+<rect x="94" y="1392" width="90" height="18" rx="9" fill="#F7F5EF" stroke="#B4B1A8" stroke-width="0.8"/><text x="138.8" y="1405" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#5F5E5A">version-scoped</text>
+<rect x="186.0" y="1420" width="146" height="20" rx="4" fill="#B5651D"/>
+<text x="259.0" y="1434" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="600" fill="#FFFFFF">Troubleshooting lead</text>
+<text x="36" y="1434" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">GOOD FOR</text>
+<rect x="362" y="1192" width="320" height="256" rx="10" fill="#FFFFFF" stroke="#C9C6BD" stroke-width="1"/>
+<text x="374" y="1214" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#2C2C2A">Vendor message-board post</text>
+<text x="374" y="1230" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#8A877F">vendor community forum</text>
+<text x="374" y="1252" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">SOURCE</text>
+<text x="432" y="1252" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#2C2C2A">registered community · fetch on demand</text>
+<text x="374" y="1276" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">USE</text>
+<rect x="414" y="1264" width="82" height="18" rx="4" fill="#FFFFFF" stroke="#E0DDD5" stroke-width="0.8"/>
+<text x="455.0" y="1277" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#B4B1A8">Held</text>
+<rect x="500" y="1264" width="82" height="18" rx="4" fill="#FFFFFF" stroke="#E0DDD5" stroke-width="0.8"/>
+<text x="541.0" y="1277" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#B4B1A8">Provisional</text>
+<rect x="586" y="1264" width="82" height="18" rx="4" fill="#E1F5EE" stroke="#0F6E56" stroke-width="1.2"/>
+<text x="627.0" y="1277" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#04342C">Admitted</text>
+<text x="374" y="1304" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">WHO</text>
+<text x="414" y="1305" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">US contractor</text>
+<rect x="414" y="1308" width="61" height="17" rx="8.5" fill="#F1EFE8" stroke="#8A877F" stroke-width="0.8"/>
+<text x="420" y="1320" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">not bound</text>
+<text x="414" y="1343" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">ROK coalition operator</text>
+<rect x="414" y="1346" width="61" height="17" rx="8.5" fill="#F1EFE8" stroke="#8A877F" stroke-width="0.8"/>
+<text x="420" y="1358" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">not bound</text>
+<text x="374" y="1382" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">EVIDENCE</text>
+<rect x="432" y="1370" width="78" height="18" rx="9" fill="#F7F5EF" stroke="#B4B1A8" stroke-width="0.8"/><text x="470.9" y="1383" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#5F5E5A">practitioner</text>
+<rect x="514.8" y="1370" width="101" height="18" rx="9" fill="#F7F5EF" stroke="#B4B1A8" stroke-width="0.8"/><text x="565.5" y="1383" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#5F5E5A">vendor-moderated</text>
+<rect x="432" y="1392" width="113" height="18" rx="9" fill="#F7F5EF" stroke="#B4B1A8" stroke-width="0.8"/><text x="488.6" y="1405" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#5F5E5A">authorship unknown</text>
+<rect x="524.0" y="1420" width="146" height="20" rx="4" fill="#B5651D"/>
+<text x="597.0" y="1434" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="600" fill="#FFFFFF">Troubleshooting lead</text>
+<text x="374" y="1434" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">GOOD FOR</text>
+<rect x="700" y="1192" width="320" height="256" rx="10" fill="#FFFFFF" stroke="#854F0B" stroke-width="1" stroke-dasharray="5 4"/>
+<text x="712" y="1214" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#2C2C2A">Blog on an unknown site</text>
+<text x="712" y="1230" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#8A877F">unregistered source</text>
+<text x="712" y="1252" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">SOURCE</text>
+<text x="770" y="1252" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#2C2C2A">learning request · never fetched</text>
+<text x="712" y="1276" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">USE</text>
+<rect x="752" y="1264" width="82" height="18" rx="4" fill="#FAEEDA" stroke="#854F0B" stroke-width="1.2"/>
+<text x="793.0" y="1277" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#412402">Held</text>
+<rect x="838" y="1264" width="82" height="18" rx="4" fill="#FFFFFF" stroke="#E0DDD5" stroke-width="0.8"/>
+<text x="879.0" y="1277" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#B4B1A8">Provisional</text>
+<rect x="924" y="1264" width="82" height="18" rx="4" fill="#FFFFFF" stroke="#E0DDD5" stroke-width="0.8"/>
+<text x="965.0" y="1277" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#B4B1A8">Admitted</text>
+<text x="712" y="1304" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">WHO</text>
+<text x="752" y="1305" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">US contractor</text>
+<rect x="752" y="1308" width="61" height="17" rx="8.5" fill="#F1EFE8" stroke="#8A877F" stroke-width="0.8"/>
+<text x="758" y="1320" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">not bound</text>
+<text x="752" y="1343" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">ROK coalition operator</text>
+<rect x="752" y="1346" width="61" height="17" rx="8.5" fill="#F1EFE8" stroke="#8A877F" stroke-width="0.8"/>
+<text x="758" y="1358" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="normal" fill="#5F5E5A">not bound</text>
+<text x="712" y="1382" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">EVIDENCE</text>
+<rect x="770" y="1370" width="166" height="18" rx="9" fill="#F7F5EF" stroke="#B4B1A8" stroke-width="0.8"/><text x="853.15" y="1383" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#5F5E5A">not assessed until reviewed</text>
+<rect x="899.8" y="1420" width="108" height="20" rx="4" fill="#A32D2D"/>
+<text x="953.9" y="1434" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="600" fill="#FFFFFF">Not usable yet</text>
+<text x="712" y="1434" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A877F">GOOD FOR</text>
+<rect x="24" y="1458" width="130" height="18" rx="4" fill="#3C3489"/>
+<text x="89" y="1471" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#FFFFFF">Requirement</text>
+<text x="166" y="1471" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#5F5E5A">binding on someone in scope — the design must meet it; it never instructs the model</text>
+<rect x="24" y="1480" width="130" height="18" rx="4" fill="#0F6E56"/>
+<text x="89" y="1493" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#FFFFFF">Design input</text>
+<text x="166" y="1493" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#5F5E5A">binds no one — informs choices; strong evidence that contradicts a requirement is surfaced, never silently applied</text>
+<rect x="24" y="1502" width="130" height="18" rx="4" fill="#B5651D"/>
+<text x="89" y="1515" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#FFFFFF">Troubleshooting lead</text>
+<text x="166" y="1515" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#5F5E5A">practitioner experience — where to look next; confirmed against the system or an authoritative source before it counts</text>
+<rect x="24" y="1524" width="130" height="18" rx="4" fill="#A32D2D"/>
+<text x="89" y="1537" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#FFFFFF">Not usable yet</text>
+<text x="166" y="1537" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#5F5E5A">review hold — informs nothing until a reviewer registers the source or attests the item</text>
+<text x="24" y="1570" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#5F5E5A">SOURCE: a registration says how content reaches Maknae — a local copy where locality matters, or a known fetch on demand. Maknae is not a local copy of the Internet.</text>
+<text x="24" y="1588" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#5F5E5A">EVIDENCE chips are weights, never gates: bias, authorship (human or AI-assisted) and conflicts of interest lower confidence in any writing.</text>
+</svg>

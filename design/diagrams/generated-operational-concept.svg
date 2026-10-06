@@ -1,7 +1,7 @@
-<svg width="1280" height="1031" viewBox="0 0 1280 1031" xmlns="http://www.w3.org/2000/svg" role="img">
+<svg width="1280" height="1185" viewBox="0 0 1280 1185" xmlns="http://www.w3.org/2000/svg" role="img">
   <title>Maknae operational concept</title>
   <desc>DoDAF OV-1 high-level operational concept graphic for Maknae.</desc>
-  <rect x="0" y="0" width="1280" height="1031" fill="#FFFFFF"/>
+  <rect x="0" y="0" width="1280" height="1185" fill="#FFFFFF"/>
 <text x="44" y="44" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#2C2C2A">What Maknae is for — DoDAF OV-1</text>
 <text x="44" y="68" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#2C2C2A">An AI agent that does real work on your systems, learns from doing it, and cannot be talked into exceeding what you granted — because the grant is decided somewhere the agent cannot reach.</text>
 <text x="44" y="88" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">High-level operational concept. Reader: stakeholder or newcomer. This states INTENT, and marks how much of it exists.</text>
@@ -73,80 +73,107 @@
 <text x="255.0" y="584" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">sole PDP and every request is</text>
 <text x="255.0" y="595" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">decided through the seam.</text>
 <path d="M 434.0 479 h 9" stroke="#5F5E5A" stroke-width="1.2" marker-end="url(#ov)"/>
-<rect x="446.0" y="453" width="187.0" height="100" rx="7" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75" stroke-dasharray="5 4"/>
+<rect x="446.0" y="453" width="187.0" height="112" rx="7" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75" stroke-dasharray="5 4"/>
 <text x="456.0" y="471" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="700" fill="#5F5E5A">3.</text>
-<text x="472.0" y="471" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="700" fill="#2C2C2A">Fetch — authorized sources only</text>
+<text x="472.0" y="471" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="700" fill="#2C2C2A">Fetch — registered only</text>
 <text x="456.0" y="485" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A">trust plane</text>
 <text x="456.0" y="500" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">The egress allowlist is the</text>
 <text x="456.0" y="512" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">operator's signed authority</text>
 <text x="456.0" y="524" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">map. A source not on it is</text>
-<text x="456.0" y="536" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">denied.</text>
+<text x="456.0" y="536" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">denied, and the gap becomes a</text>
+<text x="456.0" y="548" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">learning request.</text>
 <path d="M 635.0 479 h 9" stroke="#5F5E5A" stroke-width="1.2" marker-end="url(#ov)"/>
-<rect x="647.0" y="453" width="187.0" height="162" rx="7" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75" stroke-dasharray="5 4"/>
+<rect x="647.0" y="453" width="187.0" height="174" rx="7" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75" stroke-dasharray="5 4"/>
 <text x="657.0" y="471" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="700" fill="#5F5E5A">4.</text>
-<text x="673.0" y="471" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="700" fill="#2C2C2A">Quarantine</text>
-<text x="657.0" y="485" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A">Tier 3</text>
-<text x="657.0" y="500" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">ALL new knowledge enters here</text>
-<text x="657.0" y="512" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">— ingested, generated, or</text>
-<text x="657.0" y="524" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">demoted. It may inform work;</text>
-<text x="657.0" y="536" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">it may not authorize a</text>
-<text x="657.0" y="548" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">privileged action.</text>
-<text x="657.0" y="564" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">inform-but-not-authorize — the</text>
-<text x="657.0" y="575" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">same rule the reference</text>
-<text x="657.0" y="586" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">monitor already applies to</text>
-<text x="657.0" y="597" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">tool-supplied content.</text>
+<text x="673.0" y="471" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="700" fill="#2C2C2A">Validate, then admit</text>
+<text x="657.0" y="485" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A">trust plane · kernel</text>
+<text x="657.0" y="500" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">Held at system high until</text>
+<text x="657.0" y="512" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">labeled; above the ceiling is</text>
+<text x="657.0" y="524" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">a spillage, refused. Identity,</text>
+<text x="657.0" y="536" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">digest and extraction checked.</text>
+<text x="657.0" y="548" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">Pass: usable. Exception:</text>
+<text x="657.0" y="560" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">review hold.</text>
+<text x="657.0" y="576" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">Review hold informs nothing,</text>
+<text x="657.0" y="587" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">neither content nor plan</text>
+<text x="657.0" y="598" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">structure, until a reviewer</text>
+<text x="657.0" y="609" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">disposes of it.</text>
 <path d="M 836.0 479 h 9" stroke="#5F5E5A" stroke-width="1.2" marker-end="url(#ov)"/>
 <rect x="848.0" y="453" width="187.0" height="112" rx="7" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75" stroke-dasharray="5 4"/>
 <text x="858.0" y="471" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="700" fill="#5F5E5A">5.</text>
-<text x="874.0" y="471" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="700" fill="#2C2C2A">Promote — one tier per gate</text>
-<text x="858.0" y="485" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A">trust plane</text>
-<text x="858.0" y="500" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">3 → 2 → 1 on corroboration or</text>
-<text x="858.0" y="512" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">operator sign-off. Automation</text>
-<text x="858.0" y="524" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">can never raise a ceiling, and</text>
-<text x="858.0" y="536" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">there is no path from</text>
-<text x="858.0" y="548" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">Quarantine to Doctrine.</text>
+<text x="874.0" y="471" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="700" fill="#2C2C2A">Placed by the matrix</text>
+<text x="858.0" y="485" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A">authority basis</text>
+<text x="858.0" y="500" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">Precedence comes from the</text>
+<text x="858.0" y="512" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">deployment's authority matrix,</text>
+<text x="858.0" y="524" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">not from the route. A URL-only</text>
+<text x="858.0" y="536" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">registration never reaches</text>
+<text x="858.0" y="548" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">Tier 1.</text>
 <path d="M 1037.0 479 h 9" stroke="#5F5E5A" stroke-width="1.2" marker-end="url(#ov)"/>
-<rect x="1049.0" y="453" width="187.0" height="88" rx="7" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75" stroke-dasharray="5 4"/>
+<rect x="1049.0" y="453" width="187.0" height="162" rx="7" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75" stroke-dasharray="5 4"/>
 <text x="1059.0" y="471" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="700" fill="#5F5E5A">6.</text>
-<text x="1075.0" y="471" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="700" fill="#2C2C2A">Authoritative</text>
-<text x="1059.0" y="485" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A">Tier 1</text>
-<text x="1059.0" y="500" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">The "official way to do</text>
-<text x="1059.0" y="512" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">things" — which the agent then</text>
-<text x="1059.0" y="524" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">applies to the next task.</text>
-<path d="M 1142.5 625 V 643 H 137.5 V 615" fill="none" stroke="#5F5E5A" stroke-width="1.2" stroke-dasharray="5 4" marker-end="url(#ov)"/>
-<text x="640.0" y="639" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">…and the next task starts better informed than the last</text>
-<rect x="44" y="659" width="1192" height="42" rx="7" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75" stroke-dasharray="5 4"/>
-<text x="58" y="677" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="700" fill="#2C2C2A">Tier 0 · Doctrine</text>
-<text x="58" y="692" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">The authority map, this contract, core skills. Operator signature only, never automated. It is what every other tier is measured against.</text>
-<text x="44" y="721" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#26215C">One kernel, three environments</text>
-<text x="44" y="738" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#5F5E5A">One kernel across all three. The lattice gets richer and the authority map gets stricter; nothing else changes.</text>
-<rect x="44.0" y="755" width="388.0" height="70" rx="7" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
-<text x="56.0" y="775" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="700" fill="#04342C">Homelab</text>
-<text x="56.0" y="789" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#0F6E56">trivial lattice, zero ceremony</text>
-<text x="56.0" y="803" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">One operator, one box, no classification. The same</text>
-<text x="56.0" y="815" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">kernel, with nothing switched off.</text>
-<path d="M 434.0 779 h 9" stroke="#0F6E56" stroke-width="1.2" marker-end="url(#ov)"/>
-<rect x="446.0" y="755" width="388.0" height="70" rx="7" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
-<text x="458.0" y="775" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="700" fill="#04342C">Enterprise</text>
-<text x="458.0" y="789" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#0F6E56">roles, and an authority map with real sources</text>
-<text x="458.0" y="803" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">RBAC via maknae-authz-basic, the shipped in-repo</text>
-<text x="458.0" y="815" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">default.</text>
-<path d="M 836.0 779 h 9" stroke="#0F6E56" stroke-width="1.2" marker-end="url(#ov)"/>
-<rect x="848.0" y="755" width="388.0" height="94" rx="7" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
-<text x="860.0" y="775" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="700" fill="#04342C">Classified · multinational · air-gapped</text>
-<text x="860.0" y="789" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#0F6E56">full lattice, releasability, compartments</text>
-<text x="860.0" y="803" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">Partner operators as attribute-bearing subjects;</text>
-<text x="860.0" y="815" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">every model endpoint local and accredited. ABAC via</text>
-<text x="860.0" y="827" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">the external DCS library, reached through the same</text>
-<text x="860.0" y="839" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">seam.</text>
-<rect x="44" y="875" width="1192" height="96" rx="8" fill="#FBFAF7" stroke="#5F5E5A" stroke-width="0.75"/>
-<text x="60" y="897" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="700" fill="#2C2C2A">What is actually built, as of this rendering</text>
-<text x="60" y="915" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" fill="#0F6E56">BUILT</text>
-<text x="110" y="915" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">Trust plane: maknaed as sole PDP, per-request authorization composed deny-overrides, subject-side OS DAC by descriptor delegation,</text>
-<text x="110" y="928" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">append-only audit gating the reply, FIPS-asserted mTLS planes.</text>
-<text x="60" y="945" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" fill="#B3452F">NOT YET</text>
-<text x="110" y="945" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">Runtime plane and the entire knowledge lifecycle: the Knowledge Lake, the skill registry, the tier state machine, the promotion pipeline,</text>
-<text x="110" y="958" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">the consolidation cycle, and the remote gateway.</text>
-<text x="60" y="975" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="700" fill="#B3452F">The kernel that makes the loop safe is substantially real. The loop is not. This graphic is the concept, not a description of a working system.</text>
-<text x="24" y="1015" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/operational-concept.toml@0b1ad4636a · maknae 69b7594f · 2026-09-28</text><text x="1256" y="1015" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">DoDAF 2.02 Change 1 · OV-1</text>
+<text x="1075.0" y="471" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="700" fill="#2C2C2A">Applied</text>
+<text x="1059.0" y="485" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A">Tier 1 · Tier 2</text>
+<text x="1059.0" y="500" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">Admitted knowledge advises the</text>
+<text x="1059.0" y="512" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">next task: requirements and</text>
+<text x="1059.0" y="524" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">constraints, cited as data.</text>
+<text x="1059.0" y="536" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">Never instructions to the</text>
+<text x="1059.0" y="548" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">model.</text>
+<text x="1059.0" y="564" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">inform-but-not-authorize — the</text>
+<text x="1059.0" y="575" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">same rule the reference</text>
+<text x="1059.0" y="586" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">monitor already applies to</text>
+<text x="1059.0" y="597" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">tool-supplied content.</text>
+<path d="M 1142.5 637 V 655 H 137.5 V 627" fill="none" stroke="#5F5E5A" stroke-width="1.2" stroke-dasharray="5 4" marker-end="url(#ov)"/>
+<text x="640.0" y="651" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">…and the next task starts better informed than the last</text>
+<text x="44" y="671" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#26215C">Other ways knowledge enters</text>
+<rect x="44.0" y="685" width="388.0" height="82" rx="7" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75" stroke-dasharray="5 4"/>
+<text x="54.0" y="703" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="700" fill="#2C2C2A">Operator ingest</text>
+<text x="54.0" y="717" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A">operator · attested</text>
+<text x="54.0" y="731" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">For policy no tool can reach: the operator downloads and</text>
+<text x="54.0" y="743" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">submits it, the agent extracts it. It enters at its matrix</text>
+<text x="54.0" y="755" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">position: a CNSS Policy as Tier 1.</text>
+<rect x="446.0" y="685" width="388.0" height="82" rx="7" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75" stroke-dasharray="5 4"/>
+<text x="456.0" y="703" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="700" fill="#2C2C2A">Unregistered source</text>
+<text x="456.0" y="717" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A">review hold</text>
+<text x="456.0" y="731" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">Not admissible. A reviewer registers the source, admits</text>
+<text x="456.0" y="743" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">the item as an operator ingest, or rejects it. The</text>
+<text x="456.0" y="755" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">dreaming cycle may only propose.</text>
+<rect x="848.0" y="685" width="388.0" height="82" rx="7" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75" stroke-dasharray="5 4"/>
+<text x="858.0" y="703" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="700" fill="#2C2C2A">Self-generated knowledge</text>
+<text x="858.0" y="717" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A">Tier 3 → 2 → 1</text>
+<text x="858.0" y="731" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">Derived objects, memories and skills climb one tier per</text>
+<text x="858.0" y="743" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">gate, on corroboration or operator sign-off. Automation</text>
+<text x="858.0" y="755" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">never raises a ceiling.</text>
+<rect x="44" y="787" width="1192" height="42" rx="7" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75" stroke-dasharray="5 4"/>
+<text x="58" y="805" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="700" fill="#2C2C2A">Tier 0 · Doctrine</text>
+<text x="58" y="820" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">The authority map, the lifecycle contract, core skills. Operator signature only; never reached by admission or automation. It is what every other tier is measured against.</text>
+<text x="44" y="849" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#26215C">One kernel, three environments</text>
+<text x="44" y="866" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#5F5E5A">One kernel across all three. The lattice gets richer and the authority map gets stricter; nothing else changes.</text>
+<rect x="44.0" y="883" width="388.0" height="70" rx="7" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
+<text x="56.0" y="903" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="700" fill="#04342C">Homelab</text>
+<text x="56.0" y="917" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#0F6E56">trivial lattice, zero ceremony</text>
+<text x="56.0" y="931" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">One operator, one box, no classification. The same</text>
+<text x="56.0" y="943" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">kernel, with nothing switched off.</text>
+<path d="M 434.0 907 h 9" stroke="#0F6E56" stroke-width="1.2" marker-end="url(#ov)"/>
+<rect x="446.0" y="883" width="388.0" height="70" rx="7" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
+<text x="458.0" y="903" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="700" fill="#04342C">Enterprise</text>
+<text x="458.0" y="917" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#0F6E56">roles, and an authority map with real sources</text>
+<text x="458.0" y="931" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">RBAC via maknae-authz-basic, the shipped in-repo</text>
+<text x="458.0" y="943" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">default.</text>
+<path d="M 836.0 907 h 9" stroke="#0F6E56" stroke-width="1.2" marker-end="url(#ov)"/>
+<rect x="848.0" y="883" width="388.0" height="94" rx="7" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
+<text x="860.0" y="903" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="700" fill="#04342C">Classified · multinational · air-gapped</text>
+<text x="860.0" y="917" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#0F6E56">full lattice, releasability, compartments</text>
+<text x="860.0" y="931" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">Partner operators as attribute-bearing subjects;</text>
+<text x="860.0" y="943" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">every model endpoint local and accredited. ABAC via</text>
+<text x="860.0" y="955" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">the external DCS library, reached through the same</text>
+<text x="860.0" y="967" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#2C2C2A">seam.</text>
+<rect x="44" y="1003" width="1192" height="122" rx="8" fill="#FBFAF7" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="60" y="1025" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="700" fill="#2C2C2A">What is actually built, as of this rendering</text>
+<text x="60" y="1043" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" fill="#0F6E56">BUILT</text>
+<text x="110" y="1043" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">Trust plane: maknaed as sole PDP, per-request authorization composed deny-overrides, subject-side OS DAC by descriptor delegation,</text>
+<text x="110" y="1056" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">append-only audit gating the reply, FIPS-asserted mTLS planes.</text>
+<text x="60" y="1073" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" fill="#B3452F">NOT YET</text>
+<text x="110" y="1073" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">Runtime plane and the entire knowledge lifecycle: the Knowledge Lake, the intake routes and review hold, the skill registry, the tier</text>
+<text x="110" y="1086" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">state machine, the promotion pipeline, the consolidation cycle, and the remote gateway.</text>
+<text x="60" y="1103" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="700" fill="#B3452F">The kernel that makes the loop safe is substantially real. The loop is not. This graphic is the concept, not a description of a working system.</text>
+<text x="24" y="1169" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/operational-concept.toml@a0d98994ce · maknae 6c75ede3 · 2026-10-02</text><text x="1256" y="1169" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">DoDAF 2.02 Change 1 · OV-1</text>
 </svg>

@@ -95,8 +95,9 @@ to `ci/gates/`. A stereotype is readable by anyone who knows UML; a bespoke glyp
 | `generated-service-architecture.svg` | UML 2.5.1 deployment view | *What runs on the host, under which account, in which trust plane, and what may talk to what?* | contributor, security assessor | generated — solid is built, dashed is proposed or post-MVP, dotted is **vision: no ADR, no code** (see [below](#the-service-architecture-built-and-vision)) |
 | `generated-agentic-patterns.svg` | UML activity partitions | *For each published agentic pattern, what does the trust boundary insert — and where is the deny path the field's diagrams omit?* | contributor, reviewer new to the project | generated — **intent, NOT authoritative** (see [`../intent/`](../intent/)) |
 | `plane-architecture.svg` | UML component | *How do the three planes relate?* | onboarding, reviewer | authored |
-| `knowledge-lifecycle.svg` | conceptual | *How does knowledge move through the lifecycle?* | onboarding | authored |
-| `tier-state-machine.svg` | UML state machine | *How does a skill move between tiers?* | reviewer | authored |
+| `knowledge-lifecycle.svg` | conceptual | *By which route does knowledge enter, and where is it refused or held?* | onboarding | authored |
+| `knowledge-position-cards.svg` | bespoke, self-describing | *For a given document and subject: can the agent use it, who must follow it, how much should we believe it — and so what is it good for?* | maintainer, reviewer | authored — **exploratory, not a decision** |
+| `tier-state-machine.svg` | UML state machine | *How does an object enter, move between tiers and review hold, and leave?* | reviewer | authored |
 | `action-vocabulary-map.svg` | bespoke, self-describing | *What are the supported verbs, which component serves each, and what depends on what?* | contributor, reviewer | authored |
 
 ### The Service Architecture: built and vision
