@@ -323,10 +323,16 @@ async fn await_reply<S: tokio::io::AsyncRead + Unpin>(
 ) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
     let wait = reply_wait(class, transport);
     match tokio::time::timeout(wait, read_reply(stream, class, &response_caps(transport))).await {
-        Err(_elapsed) => Err(format!(
-            "no response from daemon within {}ms (stalled?)",
-            wait.as_millis()
-        )),
+        Err(_elapsed) => Err(match class {
+            maknae_proto::FrameClass::Control => format!(
+                "no response from daemon within {}ms; it may be slow admitting the connection (group lookup or admission audit)",
+                wait.as_millis()
+            ),
+            maknae_proto::FrameClass::Attempt | maknae_proto::FrameClass::Prompt => format!(
+                "no response from daemon within {}ms (stalled?)",
+                wait.as_millis()
+            ),
+        }),
         Ok(r) => r,
     }
 }
@@ -1193,6 +1199,10 @@ mod tests {
         format!("no response from daemon within {wait_ms}ms (stalled?)")
     }
 
+    fn control_stalled(wait_ms: u64) -> String {
+        format!("no response from daemon within {wait_ms}ms; it may be slow admitting the connection (group lookup or admission audit)")
+    }
+
     #[tokio::test(start_paused = true)]
     async fn control_replies_are_bounded_by_read_timeout_ms() {
         let read = std::time::Duration::from_millis(READ_TIMEOUT_MS);
@@ -1203,7 +1213,7 @@ mod tests {
         let err = reply_after(read + TICK, class, READ_TIMEOUT_MS)
             .await
             .unwrap_err();
-        assert_eq!(err, stalled(READ_TIMEOUT_MS));
+        assert_eq!(err, control_stalled(READ_TIMEOUT_MS));
     }
 
     #[tokio::test(start_paused = true)]
