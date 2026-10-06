@@ -79,7 +79,7 @@ HashiCorp Vault Agent sidecar per service that needs secrets: AppRole auto-auth,
 | Volume | Mounted by | Notes |
 |---|---|---|
 | `lake-data` | kernel (rw), lake (ro), dreamer (ro) | The governed corpus; git-backed. **Corrected 2026-08-30 per [KLC](knowledge-lifecycle-contract.md) §6.1 (issue #2):** the frontmatter *is* the tier state, so the untrusted containers previously held `rw` on label state while the only trusted container was read-only. Writes are brokered through a kernel API |
-| `intake-hold` | kernel (rw), or a trust-plane lake storage service the kernel alone commands | Staged and held content awaiting admission or review, at system high until labeled (KLC §8.1). No runtime-plane container mounts it, the `dreamer` included |
+| `intake-hold` | kernel (rw), or a trust-plane lake storage service the kernel alone commands | Content that passed the pre-transfer admission boundary, awaiting admission or review, at system high until labeled (KLC §8.1). No runtime-plane container mounts it, the `dreamer` included |
 | `audit-log` | kernel (append-only) | Export/replication path is a later, kernel-mediated feature |
 | `skill-registry` | kernel (rw), runtime (ro via kernel grants) | Signed manifests |
 | `authority-config` | kernel (ro) | Tier 0: authority map, operator attributes, lattice + instance ceiling; changes arrive as signed commits, not writes |

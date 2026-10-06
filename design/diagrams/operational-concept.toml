@@ -84,7 +84,7 @@ status = "unbuilt"
 n = "4"
 label = "Validate, then admit"
 who = "trust plane · kernel"
-detail = "Held at system high until labeled; above the ceiling is a spillage, refused. Identity, digest and extraction checked. Pass: usable. Exception: review hold."
+detail = "Source maximum checked against the ceiling before any byte. Then held at system high until labeled. Pass: usable. Exception: review hold."
 status = "unbuilt"
 note = "Review hold informs nothing, neither content nor plan structure, until a reviewer disposes of it."
 

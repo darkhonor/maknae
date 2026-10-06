@@ -44,5 +44,5 @@
 <text x="30" y="350" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#5F5E5A">Solid green: promotion — self-generated and derived knowledge only, one gate each (corroboration or operator sign-off).</text>
 <text x="30" y="368" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#5F5E5A">Purple: Tier 0 by operator signature only — never by admission, never by automation.</text>
 <text x="30" y="386" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#5F5E5A">Dashed amber: demotion (stale, contradicted, source downgraded). A demoted external object returns only by re-admission, never by climbing.</text>
-<text x="30" y="404" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#5F5E5A">Not shown: content identified above the instance ceiling is refused as a spillage before it is ever a state here.</text>
+<text x="30" y="404" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#5F5E5A">Not shown: a transfer whose source maximum exceeds the instance ceiling is refused before any byte; a marking above it found later is a data spill.</text>
 </svg>
