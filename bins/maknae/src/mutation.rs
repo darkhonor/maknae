@@ -912,7 +912,7 @@ async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
     stream: &mut S,
     cfg: &TransportConfig,
     cap: usize,
-    request_started: Instant,
+    written_at: Instant,
 ) -> Result<Attempted, String> {
     let reading = matches!(prepared.request, proto::Verb::Read { .. });
     let granted = match &prepared.request {
@@ -933,7 +933,7 @@ async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
     }
     // Charge grant delivery to the attempt window from the request's write completion.
     // Acknowledgments never refresh this deadline.
-    let deadline = request_started
+    let deadline = written_at
         .checked_add(Duration::from_millis(
             grant.limits.deadline_ms.min(cfg.read_timeout_ms),
         ))
@@ -1227,7 +1227,7 @@ mod tests {
         prepared: PreparedMutation,
         grant: MutationGrant,
         cfg: TransportConfig,
-        request_started: Instant,
+        written_at: Instant,
     ) -> (Result<bool, String>, Vec<MutationReport>) {
         let (mut client, server) = tokio::io::duplex(65536);
         let receiver = acknowledge_all(server, proto::ATTEMPT_RESPONSE_MAX);
@@ -1236,7 +1236,7 @@ mod tests {
             grant,
             &mut client,
             &cfg,
-            crate::cli::WriteCompleted::for_test(request_started),
+            crate::cli::WriteCompleted::for_test(written_at),
         )
         .await
         .map(|end| end.applied);
