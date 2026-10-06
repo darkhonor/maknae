@@ -542,9 +542,9 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 // Mid-life audit-write failure on a deny path is logged but does not change
                 // the already-fail-closed outcome (the connection is refused); the permit
                 // path gates on audit success, deny paths already deny.
-                eprintln!(
+                crate::diag::report(format!(
                     "maknaed: admission audit append failed or is unconfirmed on connection-deny (group check) for peer_uid={peer_uid} peer_uri={peer_uri} — the rejection proceeded: {e}"
-                );
+                ));
             }
             close_bounded(&mut stream).await;
             return;
@@ -582,9 +582,9 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 .await;
             if !may_respond(admission_result.is_ok()) {
                 if let Err(e) = admission_result {
-                    eprintln!(
+                    crate::diag::report(format!(
                         "maknaed: admission audit write failed for peer_uid={peer_uid} peer_uri={peer_uri} session_id={session_id} — closing without serving: {e}"
-                    );
+                    ));
                 }
                 close_bounded(&mut stream).await;
                 return;
@@ -2159,9 +2159,9 @@ async fn audit_cert_half_reject<E: AuditEmit>(emit: &E, rec: &AuditRecord, uid: 
         )
         .await
     {
-        eprintln!(
+        crate::diag::report(format!(
             "maknaed: AUDIT WRITE FAILED on accept-reject (cert half) for peer_uid={uid} — rejection proceeded without a durable record: {e}"
-        );
+        ));
     }
 }
 

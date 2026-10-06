@@ -10,6 +10,7 @@ mod boot_gate;
 mod ceiling_authz;
 pub mod classification;
 mod composition;
+mod diag;
 mod egress;
 mod egress_socket;
 mod groupres;
