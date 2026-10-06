@@ -11,7 +11,7 @@ fn valid() -> Vec<u8> {
 }
 
 fn dec(b: &[u8]) -> Result<maknae_graph::graph::Graph, FormatError> {
-    decode(b, &SCHEMA, &compiled())
+    decode(b, GraphSpace::Kernel, &SCHEMA, &compiled())
 }
 
 fn put_u16(b: &mut [u8], at: usize, v: u16) {
@@ -101,8 +101,48 @@ fn every_space_round_trips() {
             b = b.node(n);
         }
         let g = b.build(&SCHEMA, &compiled()).unwrap();
-        assert_eq!(dec(&encode(&g)).unwrap(), g);
+        assert_eq!(decode(&encode(&g), space, &SCHEMA, &compiled()).unwrap(), g);
     }
+}
+
+fn store_in(space: GraphSpace) -> Vec<u8> {
+    let mut b = GraphBuilder::new(space, 3);
+    for n in builder().build(&SCHEMA, &compiled()).unwrap().nodes() {
+        let mut n = n.clone();
+        n.space = space;
+        b = b.node(n);
+    }
+    encode(&b.build(&SCHEMA, &compiled()).unwrap())
+}
+
+#[test]
+fn decode_refuses_a_store_of_another_space() {
+    let kernel = valid();
+    for wanted in [GraphSpace::Shared, GraphSpace::User(SubjectId(1))] {
+        assert_eq!(
+            decode(&kernel, wanted, &SCHEMA, &compiled()).unwrap_err(),
+            FormatError::WrongSpace,
+            "{wanted:?}"
+        );
+    }
+    let user = store_in(GraphSpace::User(SubjectId(1000)));
+    assert_eq!(
+        decode(
+            &user,
+            GraphSpace::User(SubjectId(1001)),
+            &SCHEMA,
+            &compiled()
+        )
+        .unwrap_err(),
+        FormatError::WrongSpace
+    );
+    assert!(decode(
+        &user,
+        GraphSpace::User(SubjectId(1000)),
+        &SCHEMA,
+        &compiled()
+    )
+    .is_ok());
 }
 
 #[test]
@@ -294,7 +334,6 @@ fn huge_count_refuses_at_the_section_end() {
     }
 }
 
-/// Keeps only the first `keep` bytes of section `i`, fixing up its length and every later offset.
 fn cut_section(b: &[u8], i: usize, keep: usize) -> Vec<u8> {
     let (off, len) = section(b, i);
     let mut out = b[..off + keep].to_vec();
@@ -350,6 +389,14 @@ fn overlapping_or_unconsumed_attr_ranges_refuse() {
     assert_eq!(dec(&m).unwrap_err(), FormatError::BadAttrRange);
     let mut m = b.clone();
     put_u32(&mut m, attr_range_at(&b, 11) + 4, 0);
+    assert_eq!(dec(&m).unwrap_err(), FormatError::BadAttrRange);
+}
+
+#[test]
+fn an_attr_count_past_the_table_refuses() {
+    let b = valid();
+    let mut m = b.clone();
+    put_u32(&mut m, first_edge(&b) + 7 * EDGE_LEN + 68, 1);
     assert_eq!(dec(&m).unwrap_err(), FormatError::BadAttrRange);
 }
 
@@ -417,7 +464,6 @@ fn moderately_shared_strings_round_trip() {
     assert_eq!(dec(&bytes).unwrap(), g);
 }
 
-/// Index of `wanted` in the store's sorted string table.
 fn string_index(b: &[u8], wanted: &str) -> u32 {
     let (off, _) = section(b, 0);
     let count = u32::from_le_bytes(b[off..off + 4].try_into().unwrap());
@@ -501,6 +547,10 @@ fn format_error_messages_name_the_cause() {
         ),
         (FormatError::UnknownFlags(4), "unknown store flags 0x0004"),
         (FormatError::UnknownSpaceTag(3), "unknown graph space tag 3"),
+        (
+            FormatError::WrongSpace,
+            "store holds a different graph space than requested",
+        ),
         (
             FormatError::BadSectionCount(6),
             "store declares 6 sections, expected 7",

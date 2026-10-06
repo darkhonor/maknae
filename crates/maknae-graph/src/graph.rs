@@ -25,6 +25,7 @@ pub enum GraphError {
     },
     ForbiddenTarget(EdgeId),
     CompiledProvenance(NodeId),
+    CompiledEdgeProvenance(EdgeId),
     CompiledMismatch {
         kind: NodeKind,
         key: String,
@@ -62,6 +63,9 @@ impl fmt::Display for GraphError {
             ),
             Self::CompiledProvenance(id) => {
                 write!(f, "node {} has a provenance its kind does not allow", id.0)
+            }
+            Self::CompiledEdgeProvenance(id) => {
+                write!(f, "edge {} has a provenance edges do not allow", id.0)
             }
             Self::CompiledMismatch { kind, key } => {
                 write!(
@@ -124,6 +128,14 @@ impl GraphBuilder {
     }
 
     pub fn build(self, schema: &Schema, compiled: &CompiledSet) -> Result<Graph, GraphError> {
+        self.build_encoded(schema, compiled).map(|(g, _)| g)
+    }
+
+    pub(crate) fn build_encoded(
+        self,
+        schema: &Schema,
+        compiled: &CompiledSet,
+    ) -> Result<(Graph, Vec<u8>), GraphError> {
         let GraphBuilder {
             space,
             revision,
@@ -187,6 +199,9 @@ impl GraphBuilder {
             if e.label.is_empty() {
                 return Err(GraphError::EmptyLabel);
             }
+            if e.provenance.kind == ProvenanceKind::Compiled {
+                return Err(GraphError::CompiledEdgeProvenance(e.id));
+            }
             let (Some(f), Some(t)) = (position(e.from), position(e.to)) else {
                 return Err(GraphError::DanglingEdge(e.id));
             };
@@ -226,13 +241,11 @@ impl GraphBuilder {
             in_edges,
             keys,
         };
-        if !crate::format::within_expansion_limit(
-            graph.reference_bytes(),
-            crate::format::encode(&graph).len(),
-        ) {
+        let encoded = crate::format::encode(&graph);
+        if !crate::format::within_expansion_limit(graph.reference_bytes(), encoded.len()) {
             return Err(GraphError::ExpansionLimit);
         }
-        Ok(graph)
+        Ok((graph, encoded))
     }
 }
 

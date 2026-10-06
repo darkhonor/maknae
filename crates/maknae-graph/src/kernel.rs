@@ -121,6 +121,69 @@ mod tests {
     }
 
     #[test]
+    fn schema_tables_are_pinned() {
+        assert_eq!(
+            SCHEMA.node_kinds,
+            &[
+                (NodeKind(1), "ConfigSource"),
+                (NodeKind(2), "Section"),
+                (NodeKind(3), "Subject"),
+                (NodeKind(4), "Role"),
+                (NodeKind(5), "Rule"),
+                (NodeKind(6), "Term"),
+                (NodeKind(7), "Class"),
+                (NodeKind(8), "ClassificationSystem"),
+                (NodeKind(9), "Level"),
+                (NodeKind(10), "Containment"),
+                (NodeKind(11), "PendingChange"),
+                (NodeKind(12), "SyncBase"),
+                (NodeKind(13), "Instance"),
+            ]
+        );
+        assert_eq!(
+            SCHEMA.edge_kinds,
+            &[
+                (EdgeKind(1), "binds"),
+                (EdgeKind(2), "contained"),
+                (EdgeKind(3), "permits"),
+                (EdgeKind(4), "denies"),
+                (EdgeKind(5), "matches"),
+                (EdgeKind(6), "member_of"),
+                (EdgeKind(7), "dominates"),
+                (EdgeKind(8), "declares"),
+                (EdgeKind(9), "declared_by"),
+                (EdgeKind(10), "part_of"),
+                (EdgeKind(11), "pending_for"),
+                (EdgeKind(12), "level_of"),
+            ]
+        );
+        assert_eq!(
+            SCHEMA.triples,
+            &[
+                (SUBJECT, BINDS, ROLE),
+                (SUBJECT, CONTAINED, CONTAINMENT),
+                (ROLE, PERMITS, RULE),
+                (ROLE, DENIES, RULE),
+                (RULE, MATCHES, TERM),
+                (TERM, MEMBER_OF, CLASS),
+                (LEVEL, DOMINATES, LEVEL),
+                (LEVEL, LEVEL_OF, CLASSIFICATION_SYSTEM),
+                (INSTANCE, DECLARES, CLASSIFICATION_SYSTEM),
+                (SECTION, PART_OF, CONFIG_SOURCE),
+                (PENDING_CHANGE, PENDING_FOR, SECTION),
+                (SUBJECT, DECLARED_BY, SECTION),
+                (RULE, DECLARED_BY, SECTION),
+                (CLASSIFICATION_SYSTEM, DECLARED_BY, SECTION),
+                (LEVEL, DECLARED_BY, SECTION),
+                (INSTANCE, DECLARED_BY, SECTION),
+                (CONTAINMENT, DECLARED_BY, SECTION),
+            ]
+        );
+        assert_eq!(SCHEMA.compiled_kinds, &[ROLE, TERM, CLASS]);
+        assert_eq!(SCHEMA.forbidden_targets, &[(BINDS, ROLE, ADVERSARY)]);
+    }
+
+    #[test]
     fn role_term_class_are_compiled_and_nothing_else_is() {
         for &(kind, _) in SCHEMA.node_kinds {
             let expected = [ROLE, TERM, CLASS].contains(&kind);

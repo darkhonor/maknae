@@ -150,6 +150,13 @@ fn every_graph_error_is_reachable() {
             builder().node(node(63, SUBJECT, "4000", ProvenanceKind::Compiled)),
             GraphError::CompiledProvenance(NodeId(63)),
         ),
+        (
+            builder().edge(EdgeRecord {
+                provenance: prov(ProvenanceKind::Compiled),
+                ..edge(207, 20, BINDS, 2)
+            }),
+            GraphError::CompiledEdgeProvenance(EdgeId(207)),
+        ),
     ];
     for (b, want) in cases {
         assert_eq!(build(b).unwrap_err(), want);
@@ -313,6 +320,10 @@ fn graph_error_messages_name_the_cause() {
         (
             GraphError::CompiledProvenance(NodeId(8)),
             "node 8 has a provenance its kind does not allow",
+        ),
+        (
+            GraphError::CompiledEdgeProvenance(EdgeId(9)),
+            "edge 9 has a provenance edges do not allow",
         ),
         (
             GraphError::CompiledMismatch {

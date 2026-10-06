@@ -1,8 +1,11 @@
 mod common;
 
 use common::*;
-use maknae_graph::format::{decode, encode};
+use maknae_graph::format::{
+    decode, encode, FormatError, HEADER_LEN, SECTIONS_START, SECTION_COUNT,
+};
 use maknae_graph::kernel::SCHEMA;
+use maknae_graph::record::GraphSpace;
 
 struct SplitMix(u64);
 
@@ -61,7 +64,7 @@ fn mutated_stores_refuse_or_are_canonical_and_never_panic() {
     let mut accepted = 0usize;
     for _ in 0..20_000 {
         let candidate = mutate(&mut rng, &base);
-        if let Ok(g) = decode(&candidate, &SCHEMA, &set) {
+        if let Ok(g) = decode(&candidate, GraphSpace::Kernel, &SCHEMA, &set) {
             assert_eq!(encode(&g), candidate, "an accepted store must be canonical");
             accepted += 1;
         }
@@ -70,6 +73,10 @@ fn mutated_stores_refuse_or_are_canonical_and_never_panic() {
         accepted < 20_000,
         "mutation never produced a refusal; the harness is not exercising decode"
     );
+    assert!(
+        accepted > 0,
+        "mutation never produced an accepted store; the harness never reaches the canonical check"
+    );
 }
 
 #[test]
@@ -77,12 +84,33 @@ fn random_bodies_behind_a_valid_header_never_panic() {
     let base = encode(&builder().build(&SCHEMA, &compiled()).unwrap());
     let set = compiled();
     let mut rng = SplitMix(0x4d4b_4e47_0002);
+    let mut reached = 0usize;
     for _ in 0..5_000 {
-        let len = 152 + rng.below(512);
-        let mut b = base[..152].to_vec();
-        while b.len() < len {
+        let body = rng.below(2049);
+        let mut cuts: Vec<usize> = (0..SECTION_COUNT - 1)
+            .map(|_| rng.below(body + 1))
+            .collect();
+        cuts.push(0);
+        cuts.push(body);
+        cuts.sort_unstable();
+        let mut b = base[..HEADER_LEN].to_vec();
+        for w in cuts.windows(2) {
+            b.extend_from_slice(&((SECTIONS_START + w[0]) as u64).to_le_bytes());
+            b.extend_from_slice(&((w[1] - w[0]) as u64).to_le_bytes());
+        }
+        assert_eq!(b.len(), SECTIONS_START);
+        for _ in 0..body {
             b.push(rng.next() as u8);
         }
-        let _ = decode(&b, &SCHEMA, &set);
+        if !matches!(
+            decode(&b, GraphSpace::Kernel, &SCHEMA, &set),
+            Err(FormatError::BadSectionLayout)
+        ) {
+            reached += 1;
+        }
     }
+    assert!(
+        reached > 2_500,
+        "only {reached} of 5000 random bodies got past the section table"
+    );
 }

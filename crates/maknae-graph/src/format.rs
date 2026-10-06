@@ -35,6 +35,7 @@ pub enum FormatError {
     NonZeroReserved,
     UnknownFlags(u16),
     UnknownSpaceTag(u8),
+    WrongSpace,
     BadSectionCount(u32),
     BadSectionLayout,
     TrailingBytes,
@@ -63,6 +64,7 @@ impl fmt::Display for FormatError {
             Self::NonZeroReserved => f.write_str("a reserved store field is not zero"),
             Self::UnknownFlags(v) => write!(f, "unknown store flags {v:#06x}"),
             Self::UnknownSpaceTag(t) => write!(f, "unknown graph space tag {t}"),
+            Self::WrongSpace => f.write_str("store holds a different graph space than requested"),
             Self::BadSectionCount(n) => {
                 write!(f, "store declares {n} sections, expected {SECTION_COUNT}")
             }
@@ -202,7 +204,12 @@ pub fn encode(g: &Graph) -> Vec<u8> {
     w.into_inner()
 }
 
-pub fn decode(bytes: &[u8], schema: &Schema, compiled: &CompiledSet) -> Result<Graph, FormatError> {
+pub fn decode(
+    bytes: &[u8],
+    expected: GraphSpace,
+    schema: &Schema,
+    compiled: &CompiledSet,
+) -> Result<Graph, FormatError> {
     let mut r = Reader::new(bytes);
     if r.take(4)? != MAGIC {
         return Err(FormatError::BadMagic);
@@ -235,13 +242,16 @@ pub fn decode(bytes: &[u8], schema: &Schema, compiled: &CompiledSet) -> Result<G
         return Err(FormatError::BadSectionCount(count));
     }
     let space = decode_space(tag, subject)?;
+    if space != expected {
+        return Err(FormatError::WrongSpace);
+    }
 
     let mut sections: [&[u8]; SECTION_COUNT] = [&[]; SECTION_COUNT];
-    let mut expected = SECTIONS_START as u64;
+    let mut next = SECTIONS_START as u64;
     for slot in &mut sections {
         let offset = r.u64()?;
         let len = r.u64()?;
-        if offset != expected {
+        if offset != next {
             return Err(FormatError::BadSectionLayout);
         }
         let end = offset
@@ -249,9 +259,9 @@ pub fn decode(bytes: &[u8], schema: &Schema, compiled: &CompiledSet) -> Result<G
             .filter(|&end| end <= bytes.len() as u64)
             .ok_or(FormatError::BadSectionLayout)?;
         *slot = &bytes[offset as usize..end as usize];
-        expected = end;
+        next = end;
     }
-    if expected != bytes.len() as u64 {
+    if next != bytes.len() as u64 {
         return Err(FormatError::TrailingBytes);
     }
 
@@ -282,20 +292,23 @@ pub fn decode(bytes: &[u8], schema: &Schema, compiled: &CompiledSet) -> Result<G
     done(&r)?;
 
     let mut b = GraphBuilder::new(space, revision);
+    let mut attrs = attrs.into_iter();
     let mut cursor = 0usize;
     for (mut n, start, count) in nodes {
-        n.attrs = take_attrs(&attrs, &mut cursor, start, count)?;
+        n.attrs = take_attrs(&mut attrs, &mut cursor, start, count)?;
         b = b.node(n);
     }
     for (mut e, start, count) in edges {
-        e.attrs = take_attrs(&attrs, &mut cursor, start, count)?;
+        e.attrs = take_attrs(&mut attrs, &mut cursor, start, count)?;
         b = b.edge(e);
     }
-    if cursor != attrs.len() {
+    if attrs.len() != 0 {
         return Err(FormatError::BadAttrRange);
     }
-    let g = b.build(schema, compiled).map_err(FormatError::Graph)?;
-    if encode(&g) != bytes {
+    let (g, encoded) = b
+        .build_encoded(schema, compiled)
+        .map_err(FormatError::Graph)?;
+    if encoded != bytes {
         return Err(FormatError::NonCanonical);
     }
     Ok(g)
@@ -498,20 +511,17 @@ fn read_attr(
 }
 
 fn take_attrs(
-    all: &[(String, AttrValue)],
+    rest: &mut std::vec::IntoIter<(String, AttrValue)>,
     cursor: &mut usize,
     start: u32,
     count: u32,
 ) -> Result<Attrs, FormatError> {
-    let start = start as usize;
-    if start != *cursor {
+    let count = count as usize;
+    if start as usize != *cursor || count > rest.len() {
         return Err(FormatError::BadAttrRange);
     }
-    let slice = all
-        .get(start..start + count as usize)
-        .ok_or(FormatError::BadAttrRange)?;
-    *cursor = start + slice.len();
-    Ok(slice.iter().cloned().collect())
+    *cursor += count;
+    Ok(rest.by_ref().take(count).collect())
 }
 
 #[cfg(test)]
