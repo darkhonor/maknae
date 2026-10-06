@@ -294,6 +294,35 @@ fn huge_count_refuses_at_the_section_end() {
     }
 }
 
+/// Keeps only the first `keep` bytes of section `i`, fixing up its length and every later offset.
+fn cut_section(b: &[u8], i: usize, keep: usize) -> Vec<u8> {
+    let (off, len) = section(b, i);
+    let mut out = b[..off + keep].to_vec();
+    out.extend_from_slice(&b[off + len..]);
+    put_u64(&mut out, HEADER_LEN + i * 16 + 8, keep as u64);
+    for j in i + 1..SECTION_COUNT {
+        let at = HEADER_LEN + j * 16;
+        let o = get_u64(&out, at);
+        put_u64(&mut out, at, o - (len - keep) as u64);
+    }
+    out
+}
+
+#[test]
+fn every_cut_inside_a_parsed_section_refuses_as_truncated() {
+    let b = valid();
+    for i in [0usize, 1, 2, 6] {
+        let len = section(&b, i).1;
+        for keep in 0..len {
+            assert_eq!(
+                dec(&cut_section(&b, i, keep)).unwrap_err(),
+                FormatError::Truncated,
+                "section {i} cut to {keep} of {len}"
+            );
+        }
+    }
+}
+
 /// Offset of the attr-start field of the node at `index` in id order
 /// (ids 1,2,3,4,5,6,10,11,20,21,30,40: node 11 is index 7, node 20 is 8, node 40 is 11).
 fn attr_range_at(b: &[u8], index: usize) -> usize {
