@@ -7,8 +7,8 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-/// Consecutive timed-out audit appends allowed before refusing new appends.
-/// Pinned here because the async append binding is I/O orchestration.
+/// Threshold the breaker is constructed with; timed-out appends are not
+/// counted toward it, and `new` only rejects zero.
 pub const AUDIT_APPEND_BREAKER_TRIP_AFTER: u8 = 3;
 
 /// Maximum concurrent primary audit appends before refusing new work. This is
@@ -17,9 +17,8 @@ pub const AUDIT_APPEND_BREAKER_TRIP_AFTER: u8 = 3;
 pub const AUDIT_APPEND_BREAKER_MAX_IN_FLIGHT: u8 = 32;
 
 /// Age after which a still-unfinished audit append is treated as stale for
-/// admission purposes. The original append future still awaits completion, so
-/// this does not create a false durable outcome; it only permits a bounded
-/// recovery probe after the primary sink has had time to heal.
+/// admission purposes. A stale slot is reclaimed for a bounded recovery probe;
+/// the waiting caller has already been told the write is unconfirmed.
 pub const AUDIT_APPEND_STALE_AFTER: Duration = Duration::from_secs(30);
 
 /// Maximum stale slots that may be reclaimed over one sink lifetime. This
@@ -70,7 +69,7 @@ impl BlockingBreaker {
     ///
     /// Exists because [`BreakerAdmission::RefuseAtCapacity`] is otherwise
     /// unreachable from a test: `max_in_flight` is private and `new()` hardcodes
-    /// it, which would leave one of #189's four `MAKNAE_PRIMARY` markers
+    /// it, which would leave one of #189's `MAKNAE_PRIMARY` markers
     /// unproven in a mutation-excluded file (`sink.rs`).
     pub fn new_with_limits(trip_after: u8, max_in_flight: u8) -> Self {
         Self {
@@ -121,6 +120,11 @@ impl BlockingBreaker {
             self.last_refusal_logged_at = Some(now);
         }
         should_log
+    }
+
+    #[cfg(test)]
+    pub(crate) fn in_flight_len(&self) -> usize {
+        self.in_flight.len()
     }
 
     pub fn record_success(&mut self, attempt: AuditAttempt) {

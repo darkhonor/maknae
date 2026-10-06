@@ -20,8 +20,8 @@ pub(crate) const SYSLOG_IDENTIFIER: &str = "maknaed";
 
 /// Which primary-sink condition produced this mirrored copy.
 ///
-/// **Why it exists.** Three of the four mirror call sites fire *because* the
-/// primary did not durably write, so records legitimately exist in journald
+/// **Why it exists.** The refusal, failure and unconfirmed outcomes mark a
+/// primary that did not durably write, so records legitimately exist in journald
 /// that are absent from the JSONL. Without the marker the two sinks diverge
 /// silently and an auditor cannot distinguish "missing from the JSONL" from
 /// "never generated" — an integrity question with no answer.
@@ -40,6 +40,9 @@ pub(crate) enum PrimaryOutcome {
     /// including a `spawn_blocking` join failure (panic or cancellation),
     /// where the record would otherwise reach neither sink.
     WriteFailed,
+    /// The primary append was attempted and was not confirmed within the
+    /// caller's bound; the blocking write may still complete and land.
+    WriteUnconfirmed,
 }
 
 impl PrimaryOutcome {
@@ -49,6 +52,7 @@ impl PrimaryOutcome {
             Self::RefusedBreakerOpen => "refused-breaker-open",
             Self::RefusedAtCapacity => "refused-at-capacity",
             Self::WriteFailed => "write-failed",
+            Self::WriteUnconfirmed => "write-unconfirmed",
         }
     }
 }
@@ -172,26 +176,28 @@ pub(crate) fn summary_line(f: &RecordFields<'_>) -> String {
 ///
 /// Same discipline as the macOS degraded line — `session_id` + `seq` ARE the
 /// pointer into the primary JSONL, so no digest and no payload; `MAKNAE_PRIMARY`
-/// rides along because three of [`PrimaryOutcome`]'s four values mean the
-/// primary never durably wrote.
+/// carries a hint indicating write status for each outcome.
 pub(crate) fn encode_degraded(rec: &AuditRecord, primary: PrimaryOutcome) -> Vec<u8> {
     let f = fields_of(rec, primary);
-    // The SAME distinction the macOS marker makes: three of PrimaryOutcome's
-    // four values mean the primary never durably wrote, and pointing an
-    // operator at a record that was never written is worse than silence.
-    // MESSAGE and MAKNAE_DEGRADED are derived TOGETHER: a human-readable
-    // "read the primary JSONL" beside a machine field saying
-    // `primary-did-not-write` is a contradiction the operator has to resolve.
-    let (message, where_to_read): (&[u8], &[u8]) = if f.primary == PrimaryOutcome::Ok.as_field() {
-        (
+    // Exhaustive on purpose: a new variant must choose its hint.
+    // MESSAGE and MAKNAE_DEGRADED are derived TOGETHER so they never contradict.
+    let (message, where_to_read): (&[u8], &[u8]) = match primary {
+        PrimaryOutcome::Ok => (
             b"maknae audit: DEGRADED - read the primary JSONL",
             b"read-primary-jsonl",
-        )
-    } else {
-        (
+        ),
+        PrimaryOutcome::WriteUnconfirmed => (
+            b"maknae audit: DEGRADED - the primary write is unconfirmed; check the JSONL",
+            b"primary-unconfirmed",
+        ),
+        PrimaryOutcome::WriteFailed => (
+            b"maknae audit: DEGRADED - the primary write failed; any bytes present are not confirmed durable",
+            b"primary-write-failed",
+        ),
+        PrimaryOutcome::RefusedBreakerOpen | PrimaryOutcome::RefusedAtCapacity => (
             b"maknae audit: DEGRADED - the primary sink did not write this record",
             b"primary-did-not-write",
-        )
+        ),
     };
     let mut buf = Vec::new();
     push_field(&mut buf, "PRIORITY", b"4");
@@ -394,6 +400,7 @@ mod tests {
             P::RefusedBreakerOpen,
             P::RefusedAtCapacity,
             P::WriteFailed,
+            P::WriteUnconfirmed,
         ];
         let mut seen: Vec<&str> = all.iter().map(|p| p.as_field()).collect();
         seen.sort_unstable();
@@ -408,6 +415,7 @@ mod tests {
         assert_eq!(P::RefusedBreakerOpen.as_field(), "refused-breaker-open");
         assert_eq!(P::RefusedAtCapacity.as_field(), "refused-at-capacity");
         assert_eq!(P::WriteFailed.as_field(), "write-failed");
+        assert_eq!(P::WriteUnconfirmed.as_field(), "write-unconfirmed");
     }
 
     #[test]
@@ -506,6 +514,17 @@ mod tests {
         }
     }
 
+    #[test]
+    fn an_unconfirmed_primary_degrades_to_neither_answer() {
+        let b = encode_degraded(&rec("no"), PrimaryOutcome::WriteUnconfirmed);
+        assert_eq!(
+            field(&b, "MAKNAE_DEGRADED").unwrap(),
+            b"primary-unconfirmed"
+        );
+        let msg = String::from_utf8(field(&b, "MESSAGE").unwrap()).unwrap();
+        assert!(msg.contains("the primary write is unconfirmed"), "{msg}");
+    }
+
     /// #275: the journald degraded datagram makes the SAME primary distinction
     /// the macOS marker does. Kills `== -> !=` on that branch.
     #[test]
@@ -516,7 +535,6 @@ mod tests {
         assert!(ok.contains("read the primary JSONL"), "{ok}");
         assert!(!ok.contains("MAKNAE_RECORD"), "{ok}");
         for p in [
-            PrimaryOutcome::WriteFailed,
             PrimaryOutcome::RefusedBreakerOpen,
             PrimaryOutcome::RefusedAtCapacity,
         ] {
@@ -534,5 +552,10 @@ mod tests {
                 "{p:?}: MESSAGE must not contradict MAKNAE_DEGRADED: {bad}"
             );
         }
+        let failed =
+            String::from_utf8_lossy(&encode_degraded(&r, PrimaryOutcome::WriteFailed)).to_string();
+        assert!(failed.contains("primary-write-failed"), "{failed}");
+        assert!(failed.contains("not confirmed durable"), "{failed}");
+        assert!(!failed.contains("did not write this record"), "{failed}");
     }
 }

@@ -40,6 +40,13 @@ const TIMEOUT_MS_RANGE: std::ops::RangeInclusive<i64> = 100..=TRANSPORT_TIMEOUT_
 /// How long the daemon waits for a requester's home to resolve before a
 /// filesystem verb. Shared so the CLI's attempt reply wait covers it.
 pub const HOME_RESOLVE_TIMEOUT_MS: u64 = 5_000;
+/// How long the daemon waits for the peer's `maknae`-group lookup (NSS,
+/// possibly SSSD/LDAP) before failing closed. Shared so the client's
+/// request-write bound can cover it.
+pub const GROUP_LOOKUP_TIMEOUT_MS: u64 = 5_000;
+/// How long the daemon waits for the admission audit append before failing
+/// closed (#421). A design bound, not a measurement. Shared for the same reason.
+pub const ADMISSION_AUDIT_TIMEOUT_MS: u64 = 5_000;
 
 /// The transport-layer configuration: connection/frame caps + timeouts + the
 /// Unix-domain socket path. `Clone` — the run-loop clones this per accepted
@@ -447,6 +454,14 @@ mod tests {
             transport_from_section(Some(&v)),
             Err(ConfigError::InvalidTransport(_))
         ));
+    }
+
+    #[test]
+    fn the_pre_read_bounds_are_five_seconds_and_nonzero() {
+        assert_eq!(GROUP_LOOKUP_TIMEOUT_MS, 5_000);
+        assert_eq!(ADMISSION_AUDIT_TIMEOUT_MS, 5_000);
+        assert_ne!(GROUP_LOOKUP_TIMEOUT_MS, 0);
+        assert_ne!(ADMISSION_AUDIT_TIMEOUT_MS, 0);
     }
 
     #[test]

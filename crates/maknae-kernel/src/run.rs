@@ -175,13 +175,14 @@ const HANDLER_DRAIN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 fn handler_drain_bound(cfg: &TransportConfig, egress_deadline: Duration) -> Duration {
     // One connection's bounded work, in the order the handler performs it:
     // the mTLS handshake (inside the handler, not on the loop), the peer's
-    // group lookup, the frame read, the requester home's resolution (filesystem
+    // group lookup, the admission audit append, the frame read, the requester home's resolution (filesystem
     // verbs only), the PDP decision, the verb's own blocking step under the
     // same bound (the subject enumeration — a second `AUTHZ_DECIDE_TIMEOUT`,
     // review round 6), the provider call, the response write (bounded by the
     // read timeout), the close — then the margin for the audit appends.
     Duration::from_millis(cfg.handshake_timeout_ms)
-        + GROUP_LOOKUP_TIMEOUT
+        + Duration::from_millis(maknae_config::GROUP_LOOKUP_TIMEOUT_MS)
+        + Duration::from_millis(maknae_config::ADMISSION_AUDIT_TIMEOUT_MS)
         + Duration::from_millis(cfg.read_timeout_ms)
         + HOME_RESOLVE_TIMEOUT
         + crate::handler::AUTHZ_DECIDE_TIMEOUT
@@ -199,17 +200,6 @@ fn handler_drain_bound(cfg: &TransportConfig, egress_deadline: Duration) -> Dura
 /// best-effort (the socket is dropped either way); 1s is generous for ~30 bytes.
 const STREAM_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// Bound on the `maknae`-group membership lookup (NSS: getgrnam/getpwuid, possibly
-/// backed by SSSD/LDAP). `spawn_blocking` keeps a stalled lookup off the async workers
-/// (so the accept loop stays live), but the handler still awaits the join while holding
-/// its connection permit — unbounded, `max_connections` stalled lookups would pin every
-/// permit and the daemon would fast-close all further connections until NSS recovered.
-/// On elapse the handler FAILS CLOSED (not-a-member → deny + audit) and returns,
-/// releasing the permit; the blocking thread finishes in the background (capped at
-/// process exit by [`RUNTIME_SHUTDOWN_TIMEOUT`]). 5s is far above any healthy NSS
-/// round-trip and below the per-connection read/handshake bounds' order.
-const GROUP_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
-
 /// Bound on the Tokio runtime's own teardown in [`run`] (the LAST line of defense for
 /// codex round-11 P1). Aborting an async task can NEVER cancel a `spawn_blocking`
 /// operation already running (blocking threads are not abortable), and a dropped
@@ -219,6 +209,10 @@ const GROUP_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// the OS reclaims the stuck thread. This backstop is what makes every shutdown bound
 /// above *terminal* rather than advisory.
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Bound on draining queued diagnostics to stderr before [`run`] returns; for admission
+/// audit failures stderr is the only record.
+const DIAG_FLUSH_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Bound on reaping the credential supervisor after it is aborted at the end of
 /// the accept loop (#240, review round 3). Detached, the supervisor could be
@@ -542,13 +536,19 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             );
             // #275: the peer identity, bounded and audit-only.
             rec.subject.user = admitted_user(peer_user.as_deref());
-            if let Err(e) = emit.emit(&rec).await {
+            if let Err(e) = emit
+                .emit_within(
+                    &rec,
+                    Duration::from_millis(maknae_config::ADMISSION_AUDIT_TIMEOUT_MS),
+                )
+                .await
+            {
                 // Mid-life audit-write failure on a deny path is logged but does not change
                 // the already-fail-closed outcome (the connection is refused); the permit
                 // path gates on audit success, deny paths already deny.
-                eprintln!(
-                    "maknaed: AUDIT WRITE FAILED on connection-deny (group check) for peer_uid={peer_uid} peer_uri={peer_uri} — rejection proceeded without a durable record: {e}"
-                );
+                crate::diag::report(format!(
+                    "maknaed: admission audit append failed or is unconfirmed on connection-deny (group check) for peer_uid={peer_uid} peer_uri={peer_uri} — the rejection proceeded: {e}"
+                ));
             }
             close_bounded(&mut stream).await;
             return;
@@ -578,12 +578,17 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             );
             // #275: the peer identity, bounded and audit-only.
             rec.subject.user = admitted_user(peer_user.as_deref());
-            let admission_result = emit.emit(&rec).await;
+            let admission_result = emit
+                .emit_within(
+                    &rec,
+                    Duration::from_millis(maknae_config::ADMISSION_AUDIT_TIMEOUT_MS),
+                )
+                .await;
             if !may_respond(admission_result.is_ok()) {
                 if let Err(e) = admission_result {
-                    eprintln!(
+                    crate::diag::report(format!(
                         "maknaed: admission audit write failed for peer_uid={peer_uid} peer_uri={peer_uri} session_id={session_id} — closing without serving: {e}"
-                    );
+                    ));
                 }
                 close_bounded(&mut stream).await;
                 return;
@@ -2150,6 +2155,20 @@ impl PlaneAccept for PlaneListener {
     }
 }
 
+async fn audit_cert_half_reject<E: AuditEmit>(emit: &E, rec: &AuditRecord, uid: u32) {
+    if let Err(e) = emit
+        .emit_within(
+            rec,
+            Duration::from_millis(maknae_config::ADMISSION_AUDIT_TIMEOUT_MS),
+        )
+        .await
+    {
+        crate::diag::report(format!(
+            "maknaed: AUDIT WRITE FAILED on accept-reject (cert half) for peer_uid={uid} — rejection proceeded without a durable record: {e}"
+        ));
+    }
+}
+
 /// Hand a connection-refusal record to the bounded background drain; a full
 /// queue counts it for the drain's aggregate record (#265 A6).
 fn offload_refusal(
@@ -2178,6 +2197,58 @@ fn supervisor_exit_reason(
         Err(join_err) => maknae_vault::VaultError::Renew(format!(
             "credential supervisor task did not complete cleanly: {join_err}"
         )),
+    }
+}
+
+async fn drain_refusal_audit<E: AuditEmit + Send + Sync + 'static>(
+    mut rx: mpsc::Receiver<AuditRecord>,
+    emit: Arc<E>,
+    dropped: Arc<std::sync::atomic::AtomicU64>,
+    ids: Arc<SessionIds>,
+    wctx: WhereCtx,
+) {
+    let bound = Duration::from_millis(maknae_config::ADMISSION_AUDIT_TIMEOUT_MS);
+    let append = |rec: AuditRecord| {
+        let emit = Arc::clone(&emit);
+        async move {
+            if let Err(e) = emit.emit_within(&rec, bound).await {
+                eprintln!(
+                    "maknaed: AUDIT WRITE FAILED on a connection refusal (background) for peer_uid={} — rejection proceeded without a durable record: {e}",
+                    rec.source.uid
+                );
+            }
+        }
+    };
+    let flush_dropped = || {
+        let n = dropped.swap(0, std::sync::atomic::Ordering::Relaxed);
+        (n > 0).then(|| {
+            make_record(
+                "connection",
+                &wctx.host,
+                &wctx.socket,
+                maknae_audit_append::NO_PEER_UID,
+                None,
+                None,
+                None,
+                ids.next_session(),
+                1,
+                "connect",
+                None,
+                "deny",
+                &format!("audit queue full: {n} connection-refusal records dropped"),
+                "unauthorized",
+                &wctx.au3_1,
+            )
+        })
+    };
+    while let Some(rec) = rx.recv().await {
+        append(rec).await;
+        if let Some(summary) = flush_dropped() {
+            append(summary).await;
+        }
+    }
+    if let Some(summary) = flush_dropped() {
+        append(summary).await;
     }
 }
 
@@ -2225,8 +2296,7 @@ where
     // bounded channel drained by ONE background task does the append off the loop. The
     // accept branch only `try_send`s (never awaits I/O); a full queue drops the record
     // (the connection is already refused) and is counted.
-    let (atcap_audit_tx, mut atcap_audit_rx) =
-        mpsc::channel::<AuditRecord>(ATCAP_AUDIT_QUEUE_DEPTH);
+    let (atcap_audit_tx, atcap_audit_rx) = mpsc::channel::<AuditRecord>(ATCAP_AUDIT_QUEUE_DEPTH);
     let atcap_audit_emit = Arc::clone(&emit);
     // #265 A6: records the full queue refused are counted here and written by the
     // drain as one aggregate record.
@@ -2236,50 +2306,13 @@ where
         Arc::clone(&session_ids),
         wctx.clone(),
     );
-    let mut atcap_audit_task = tokio::spawn(async move {
-        let append = |rec: AuditRecord| {
-            let emit = Arc::clone(&atcap_audit_emit);
-            async move {
-                if let Err(e) = emit.emit(&rec).await {
-                    eprintln!(
-                        "maknaed: AUDIT WRITE FAILED on a connection refusal (background) for peer_uid={} — rejection proceeded without a durable record: {e}",
-                        rec.source.uid
-                    );
-                }
-            }
-        };
-        let flush_dropped = || {
-            let n = drain_dropped.swap(0, std::sync::atomic::Ordering::Relaxed);
-            (n > 0).then(|| {
-                make_record(
-                    "connection",
-                    &drain_wctx.host,
-                    &drain_wctx.socket,
-                    maknae_audit_append::NO_PEER_UID,
-                    None,
-                    None,
-                    None,
-                    drain_ids.next_session(),
-                    1,
-                    "connect",
-                    None,
-                    "deny",
-                    &format!("audit queue full: {n} connection-refusal records dropped"),
-                    "unauthorized",
-                    &drain_wctx.au3_1,
-                )
-            })
-        };
-        while let Some(rec) = atcap_audit_rx.recv().await {
-            append(rec).await;
-            if let Some(summary) = flush_dropped() {
-                append(summary).await;
-            }
-        }
-        if let Some(summary) = flush_dropped() {
-            append(summary).await;
-        }
-    });
+    let mut atcap_audit_task = tokio::spawn(drain_refusal_audit(
+        atcap_audit_rx,
+        atcap_audit_emit,
+        drain_dropped,
+        drain_ids,
+        drain_wctx,
+    ));
 
     tokio::pin!(shutdown);
     tokio::pin!(supervisor);
@@ -2399,7 +2432,7 @@ where
                                                 }
                                                 BreakerAdmission::RefuseAtCapacity => admission_facts(None),
                                                 BreakerAdmission::Admit => match tokio::time::timeout(
-                                                    GROUP_LOOKUP_TIMEOUT,
+                                                    Duration::from_millis(maknae_config::GROUP_LOOKUP_TIMEOUT_MS),
                                                     tokio::task::spawn_blocking(move || {
                                                         uid_in_maknae_group(uid)
                                                     }),
@@ -2424,12 +2457,12 @@ where
                                                         {
                                                             eprintln!(
                                                                 "maknaed: `maknae` group lookup circuit breaker tripped after repeated {}s blocking timeouts — failing closed without spawning more NSS work",
-                                                                GROUP_LOOKUP_TIMEOUT.as_secs()
+                                                                maknae_config::GROUP_LOOKUP_TIMEOUT_MS / 1_000
                                                             );
                                                         } else {
                                                             eprintln!(
                                                                 "maknaed: `maknae` group lookup for uid={uid} stalled past {}s — failing closed (deny)",
-                                                                GROUP_LOOKUP_TIMEOUT.as_secs()
+                                                                maknae_config::GROUP_LOOKUP_TIMEOUT_MS / 1_000
                                                             );
                                                         }
                                                         admission_facts(None)
@@ -2477,11 +2510,7 @@ where
                                                 reject_reason_str(&rej.reason), "unauthorized",
                                                 &wctx.au3_1,
                                             );
-                                            if let Err(e) = emit.emit(&rec).await {
-                                                eprintln!(
-                                                    "maknaed: AUDIT WRITE FAILED on accept-reject (cert half) for peer_uid={uid} — rejection proceeded without a durable record: {e}"
-                                                );
-                                            }
+                                            audit_cert_half_reject(&*emit, &rec, uid).await;
                                         }
                                     }
                                 });
@@ -2686,6 +2715,7 @@ pub fn run(config_dir: &Path) -> ExitCode {
     // supervisor-failure restart path always reach process exit; on elapse the stuck
     // thread is abandoned to the OS (the fd is closed at process exit anyway).
     runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
+    crate::diag::flush_within(DIAG_FLUSH_TIMEOUT);
     code
 }
 
@@ -3522,15 +3552,15 @@ mod tests {
     #[test]
     fn the_handler_drain_bound_covers_the_egress_deadline() {
         // at the transport defaults (5 s handshake, 5 s read): 5 + 5 + 5 + 5
-        // + 5 + 5 + 0 + 5 + 1 + 10 = 46 s with no provider, plus the deadline with one
+        // + 5 + 5 + 5 + 0 + 5 + 1 + 10 = 51 s with no provider, plus the deadline with one
         let cfg = maknae_config::transport_from_section(None).unwrap();
         assert_eq!(
             handler_drain_bound(&cfg, Duration::ZERO),
-            Duration::from_secs(46)
+            Duration::from_secs(51)
         );
         assert_eq!(
             handler_drain_bound(&cfg, Duration::from_secs(120)),
-            Duration::from_secs(166)
+            Duration::from_secs(171)
         );
     }
 
@@ -3546,7 +3576,8 @@ mod tests {
     /// order `accept_loop` and `run_inner` execute them — the stop record's
     /// append (#265), the supervisor abort-reap, the handler drain (deadline + its own bound) and the reap
     /// of what it aborts, the audit drain, the plane client's shutdown (a
-    /// bounded lock wait, then revoke-self) and the runtime teardown. TWO-SIDED:
+    /// bounded lock wait, then revoke-self), the runtime teardown and the diagnostics
+    /// flush. TWO-SIDED:
     /// four rounds each found a term the expression had skipped while the
     /// unit kept the old sum, so a unit more than `STOP_TIMEOUT_SLACK` above
     /// the chain is as red as one below it.
@@ -3569,7 +3600,8 @@ mod tests {
             + DRAIN_ABORT_REAP_TIMEOUT
             + AUDIT_DRAIN_SHUTDOWN_TIMEOUT
             + maknae_vault::PLANE_SHUTDOWN_BOUND
-            + RUNTIME_SHUTDOWN_TIMEOUT;
+            + RUNTIME_SHUTDOWN_TIMEOUT
+            + DIAG_FLUSH_TIMEOUT;
         let unit = include_str!("../../../packaging/common/maknaed.service");
         let stop: u64 = unit
             .lines()
@@ -4585,5 +4617,273 @@ mod home_resolution_tests {
             crate::authz::HomeUnavailable::RequesterAtCapacity.reason()
         );
         drop(held);
+    }
+}
+
+#[cfg(test)]
+mod admission_bound_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::AsyncReadExt;
+
+    struct SlowAdmission {
+        delay: Duration,
+        bounded_calls: AtomicUsize,
+    }
+    impl AuditEmit for SlowAdmission {
+        fn emit(
+            &self,
+            rec: &AuditRecord,
+        ) -> impl std::future::Future<Output = Result<(), maknae_audit_append::AuditError>> + Send
+        {
+            let admission = rec.event == "connection";
+            async move {
+                if admission {
+                    std::future::pending::<()>().await;
+                }
+                Ok(())
+            }
+        }
+        fn emit_within(
+            &self,
+            rec: &AuditRecord,
+            bound: Duration,
+        ) -> impl std::future::Future<Output = Result<(), maknae_audit_append::AuditError>> + Send
+        {
+            self.bounded_calls.fetch_add(1, Ordering::SeqCst);
+            let delay = if rec.event == "connection" {
+                self.delay
+            } else {
+                Duration::ZERO
+            };
+            async move {
+                match tokio::time::timeout(bound, tokio::time::sleep(delay)).await {
+                    Ok(()) => Ok(()),
+                    Err(_) => Err(maknae_audit_append::AuditError::WritePrimary(
+                        "unconfirmed".into(),
+                    )),
+                }
+            }
+        }
+    }
+
+    fn bound() -> Duration {
+        Duration::from_millis(maknae_config::ADMISSION_AUDIT_TIMEOUT_MS)
+    }
+
+    async fn drive(in_group: bool, delay: Duration) -> (Vec<u8>, usize, Duration) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let policy = root.join("authz.yaml");
+        std::fs::write(
+            &policy,
+            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&policy, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let uid = nix::unistd::geteuid().as_raw();
+        let us = &maknae_config::BasicPolicy;
+        let authorizer = Arc::new(crate::Composition::new(
+            maknae_authz_basic::HermeticAuthorizer::new(
+                policy,
+                maknae_config::Principal {
+                    name: "operator".into(),
+                    uid,
+                },
+                maknae_config::TargetRequired {
+                    owner: None,
+                    mode_mask: Some(0o022),
+                    nlink_exactly_one: false,
+                    regular_file: true,
+                    max_bytes: None,
+                },
+            )
+            .unwrap(),
+            crate::CeilingAuthorizer::new(maknae_config::Ceiling::baseline_for(us), us),
+        ));
+        let (mut client, server) = tokio::io::duplex(256 * 1024);
+        let verb = Verb::Ping;
+        let body = maknae_proto::encode_request(&maknae_proto::Request {
+            protocol_version: PROTOCOL_VERSION,
+            verb: verb.clone(),
+        })
+        .unwrap();
+        maknae_proto::write_frame(&mut client, maknae_proto::class_of(&verb), &body)
+            .await
+            .unwrap();
+        let emit = Arc::new(SlowAdmission {
+            delay,
+            bounded_calls: AtomicUsize::new(0),
+        });
+        let backend_name = Arc::new(maknae_security::guarded_backend_name(&*authorizer));
+        let t0 = tokio::time::Instant::now();
+        tokio::time::timeout(
+            Duration::from_secs(120),
+            handle(
+                server,
+                "maknae://d/plane/cli".to_string(),
+                uid,
+                in_group,
+                Some("operator".to_string()),
+                Some(root.clone()),
+                emit.clone(),
+                1,
+                maknae_config::transport_from_section(None).unwrap(),
+                serde_json::json!({}),
+                authorizer,
+                Arc::new(ConfigView::default()),
+                backend_name,
+                Arc::new("US".to_string()),
+                Arc::new(None),
+                crate::egress::unavailable_egress(),
+                Duration::from_secs(10),
+                maknae_security::Lane::Local,
+                maknae_io::DelegatedFds::new(1),
+            ),
+        )
+        .await
+        .expect("handle returns within the wrapper");
+        let elapsed = t0.elapsed();
+        let mut rest = Vec::new();
+        client.read_to_end(&mut rest).await.unwrap();
+        let calls = emit.bounded_calls.load(Ordering::SeqCst);
+        (rest, calls, elapsed)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_admission_append_slower_than_its_bound_closes_without_serving() {
+        let (buf, calls, elapsed) = drive(true, Duration::from_secs(60)).await;
+        assert!(elapsed < bound() + Duration::from_secs(1), "{elapsed:?}");
+        assert!(buf.is_empty(), "no response frame was written");
+        assert!(calls >= 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_admission_append_inside_its_bound_is_served() {
+        let (buf, calls, _) = drive(true, bound() - Duration::from_millis(1)).await;
+        assert!(!buf.is_empty(), "a reply frame was written");
+        assert!(calls >= 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_deny_paths_admission_append_is_bounded_too() {
+        let (buf, calls, elapsed) = drive(false, Duration::from_secs(60)).await;
+        assert!(elapsed < bound() + Duration::from_secs(1), "{elapsed:?}");
+        assert!(buf.is_empty());
+        assert!(calls >= 1);
+    }
+
+    struct StalledPlain {
+        bounded: std::sync::Mutex<Vec<String>>,
+    }
+    impl AuditEmit for StalledPlain {
+        fn emit(
+            &self,
+            _rec: &AuditRecord,
+        ) -> impl std::future::Future<Output = Result<(), maknae_audit_append::AuditError>> + Send
+        {
+            std::future::pending()
+        }
+        fn emit_within(
+            &self,
+            rec: &AuditRecord,
+            _bound: Duration,
+        ) -> impl std::future::Future<Output = Result<(), maknae_audit_append::AuditError>> + Send
+        {
+            self.bounded
+                .lock()
+                .unwrap()
+                .push(rec.outcome.reason.clone());
+            std::future::ready(Ok(()))
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_refusal_append_does_not_stop_later_records_or_the_summary() {
+        let emit = Arc::new(StalledPlain {
+            bounded: std::sync::Mutex::new(Vec::new()),
+        });
+        let (tx, rx) = mpsc::channel::<AuditRecord>(4);
+        let rec = |msg: &str| {
+            make_record(
+                "connection",
+                "h",
+                "s",
+                1,
+                None,
+                None,
+                None,
+                1,
+                1,
+                "connect",
+                None,
+                "deny",
+                msg,
+                "unauthorized",
+                &serde_json::json!({}),
+            )
+        };
+        tx.send(rec("first")).await.unwrap();
+        tx.send(rec("second")).await.unwrap();
+        drop(tx);
+        let dropped = Arc::new(std::sync::atomic::AtomicU64::new(3));
+        let wctx = WhereCtx {
+            host: "h".into(),
+            socket: "s".into(),
+            au3_1: serde_json::json!({}),
+        };
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            drain_refusal_audit(
+                rx,
+                Arc::clone(&emit),
+                dropped,
+                Arc::new(SessionIds::new()),
+                wctx,
+            ),
+        )
+        .await
+        .expect("the drain finishes despite a plain emit that never resolves");
+        let seen = emit.bounded.lock().unwrap().clone();
+        assert_eq!(seen.len(), 3, "{seen:?}");
+        assert_eq!(seen[0], "first");
+        assert!(seen[1].contains("3 connection-refusal records dropped"));
+        assert_eq!(seen[2], "second");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cert_half_rejection_append_is_bounded() {
+        let emit = SlowAdmission {
+            delay: Duration::from_secs(60),
+            bounded_calls: AtomicUsize::new(0),
+        };
+        let rec = make_record(
+            "connection",
+            "h",
+            "s",
+            1,
+            None,
+            None,
+            None,
+            1,
+            1,
+            "connect",
+            None,
+            "deny",
+            "r",
+            "unauthorized",
+            &serde_json::json!({}),
+        );
+        let t0 = tokio::time::Instant::now();
+        tokio::time::timeout(
+            Duration::from_secs(120),
+            audit_cert_half_reject(&emit, &rec, 1),
+        )
+        .await
+        .expect("returns within the wrapper");
+        assert!(t0.elapsed() < bound() + Duration::from_secs(1));
+        assert_eq!(emit.bounded_calls.load(Ordering::SeqCst), 1);
     }
 }

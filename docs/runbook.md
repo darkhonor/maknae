@@ -355,10 +355,15 @@ on the record the widest `session.prompt` records exceed that — measured at
 1027–1123 bytes — so **on macOS those records mirror as a degraded marker as a
 matter of course, not as an exception**. The marker carries `MAKNAE_SESSION`,
 `MAKNAE_SEQ` and `MAKNAE_PRIMARY`; use the session and seq to find the complete
-record in the append-only JSONL, which has no size cap on either platform. A
-`MAKNAE_PRIMARY` other than `ok` means the primary sink did not durably write,
-so there is nothing to go read — that is an AU-5 condition, and the count of
-degraded emissions is the signal your enclave should alert on.
+record in the append-only JSONL, which has no size cap on either platform. `MAKNAE_PRIMARY=ok`
+means the record is durable in the JSONL. `write-unconfirmed` means the write
+may have landed, so check the JSONL (the marker's hint is `primary-unconfirmed`).
+`refused-breaker-open` and `refused-at-capacity` mean the primary never attempted
+the write, so nothing was written and there is nothing to go read. `write-failed`
+means the write or its durability sync failed: the record, or partial bytes of it,
+may be present in the JSONL but is not confirmed durable (the marker's hint is
+`primary-write-failed`). Each of these is an AU-5 condition, and the
+count of degraded emissions is the signal your enclave should alert on.
 
 ```json
 {"action":"liveness.ping","au3_1":{},"event":"request","integrity":{"prev_hash":null,"sig":null},"outcome":{"posture":"authorized","reason":"authorized","result":"permit"},"seq":2,"session_id":...,"source":{"gid":null,"pid":null,"plane_uri_san":"maknae://<deployment_id>/plane/cli","uid":<your uid>},"subject":{"plane_uri_san":"maknae://<deployment_id>/plane/cli","role":"user","user":"<your login>"},"ts":"...","where":{"component":"kernel","host":"maknaed","socket":"/run/maknae/maknaed.sock"}}

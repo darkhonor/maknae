@@ -225,9 +225,9 @@ pub(crate) const DEGRADED_TOKEN_MAX: usize = 48;
 /// the record in the JSONL — so no digest is carried and no hash primitive is
 /// added to this crate.
 ///
-/// `MAKNAE_PRIMARY` rides along because three of [`PrimaryOutcome`]'s four
-/// values mean the primary never durably wrote; a marker that says "read the
-/// JSONL" for a record that was never written is worse than silence.
+/// `MAKNAE_PRIMARY` carries a degradation hint: `primary-did-not-write` for
+/// refusals, `primary-write-failed` for durable-write failures, `primary-unconfirmed`
+/// for unconfirmed writes, or `read-primary-jsonl` for durable writes.
 pub(crate) enum Mirrored {
     Full(String),
     Degraded(String),
@@ -299,14 +299,16 @@ fn clip_at_boundary(v: &str, max: usize) -> String {
     out
 }
 
-fn degraded_line(f: &RecordFields<'_>) -> String {
+fn degraded_line(f: &RecordFields<'_>, primary: PrimaryOutcome) -> String {
     let action = clip_at_boundary(scrub(f.action).as_str(), DEGRADED_TOKEN_MAX);
     let outcome = clip_at_boundary(scrub(f.outcome).as_str(), DEGRADED_TOKEN_MAX);
-    // Only an actually-durable primary may be pointed at.
-    let where_to_read = if f.primary == PrimaryOutcome::Ok.as_field() {
-        "read-primary-jsonl"
-    } else {
-        "primary-did-not-write"
+    let where_to_read = match primary {
+        PrimaryOutcome::Ok => "read-primary-jsonl",
+        PrimaryOutcome::WriteUnconfirmed => "primary-unconfirmed",
+        PrimaryOutcome::WriteFailed => "primary-write-failed",
+        PrimaryOutcome::RefusedBreakerOpen | PrimaryOutcome::RefusedAtCapacity => {
+            "primary-did-not-write"
+        }
     };
     format!(
         // Same key names as the journald degraded datagram, so an operator
@@ -330,7 +332,10 @@ pub(crate) fn format_record(
     let line = format_line_unchecked(rec, primary)?;
     if line.len() > MACOS_SYSLOG_MAX {
         note_degraded_mirror();
-        return Ok(Mirrored::Degraded(degraded_line(&fields_of(rec, primary))));
+        return Ok(Mirrored::Degraded(degraded_line(
+            &fields_of(rec, primary),
+            primary,
+        )));
     }
     Ok(Mirrored::Full(line))
 }
@@ -466,11 +471,11 @@ mod tests {
         assert!(!l.contains("MAKNAE_RECORD="), "{l}");
     }
 
-    /// Both branches of the primary-outcome test. Kills `== -> !=`.
+    /// Each `PrimaryOutcome` gets its own degradation hint. Kills `== -> !=`.
     ///
-    /// The distinction is load-bearing: three of `PrimaryOutcome`'s four values
-    /// mean the primary never durably wrote, and a marker that says "read the
-    /// JSONL" for a record that was never written is worse than silence.
+    /// The hint directly indicates whether the primary wrote: durable writes
+    /// point to the JSONL, partial/failed writes indicate the specific state,
+    /// and refusals indicate no write occurred.
     #[test]
     fn the_degraded_line_only_points_at_a_primary_that_actually_wrote() {
         let mut r = rec("no");
@@ -484,8 +489,17 @@ mod tests {
             "a durable primary must be pointed at: {ok}"
         );
 
+        let Mirrored::Degraded(unconfirmed) =
+            format_record(&r, PrimaryOutcome::WriteUnconfirmed).unwrap()
+        else {
+            panic!("must degrade");
+        };
+        assert!(
+            unconfirmed.contains("MAKNAE_DEGRADED=primary-unconfirmed"),
+            "{unconfirmed}"
+        );
+
         for p in [
-            PrimaryOutcome::WriteFailed,
             PrimaryOutcome::RefusedBreakerOpen,
             PrimaryOutcome::RefusedAtCapacity,
         ] {
@@ -497,6 +511,31 @@ mod tests {
                 "{p:?}: must NOT send the operator to a record that was never written: {bad}"
             );
         }
+        let Mirrored::Degraded(failed) = format_record(&r, PrimaryOutcome::WriteFailed).unwrap()
+        else {
+            panic!("must degrade");
+        };
+        assert!(
+            failed.contains("MAKNAE_DEGRADED=primary-write-failed"),
+            "{failed}"
+        );
+    }
+
+    #[test]
+    fn an_unconfirmed_primary_points_at_neither_answer() {
+        let mut r = rec("no");
+        r.au3_1 = serde_json::json!({ "pad": "x".repeat(4096) });
+        let Mirrored::Degraded(s) = format_record(&r, PrimaryOutcome::WriteUnconfirmed).unwrap()
+        else {
+            panic!("must degrade");
+        };
+        assert!(s.contains("MAKNAE_DEGRADED=primary-unconfirmed"), "{s}");
+        assert!(
+            !s.contains("read-primary-jsonl")
+                && !s.contains("primary-did-not-write")
+                && !s.contains("primary-write-failed"),
+            "{s}"
+        );
     }
 
     /// `is_full` / `is_degraded` must disagree on the same value — kills the
@@ -1069,6 +1108,7 @@ mod tests {
             P::RefusedBreakerOpen,
             P::RefusedAtCapacity,
             P::WriteFailed,
+            P::WriteUnconfirmed,
         ]
         .iter()
         .map(|p| {

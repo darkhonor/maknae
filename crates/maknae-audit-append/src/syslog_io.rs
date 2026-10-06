@@ -171,6 +171,7 @@ mod tests {
             PrimaryOutcome::RefusedBreakerOpen,
             PrimaryOutcome::RefusedAtCapacity,
             PrimaryOutcome::WriteFailed,
+            PrimaryOutcome::WriteUnconfirmed,
         ] {
             m.mirror(&rec("policy denied"), p);
         }
