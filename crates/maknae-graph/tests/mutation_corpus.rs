@@ -84,14 +84,24 @@ fn random_bodies_behind_a_valid_header_never_panic() {
     let base = encode(&builder().build(&SCHEMA, &compiled()).unwrap());
     let set = compiled();
     let mut rng = SplitMix(0x4d4b_4e47_0002);
+    let strings_off =
+        u64::from_le_bytes(base[HEADER_LEN..HEADER_LEN + 8].try_into().unwrap()) as usize;
+    let strings_len =
+        u64::from_le_bytes(base[HEADER_LEN + 8..HEADER_LEN + 16].try_into().unwrap()) as usize;
+    let real_strings = &base[strings_off..strings_off + strings_len];
     let mut reached = 0usize;
     for _ in 0..5_000 {
-        let body = rng.below(2049);
-        let mut cuts: Vec<usize> = (0..SECTION_COUNT - 1)
-            .map(|_| rng.below(body + 1))
+        let prefix: &[u8] = if rng.below(2) == 0 { real_strings } else { &[] };
+        let body = prefix.len() + rng.below(2049);
+        let fixed = usize::from(!prefix.is_empty());
+        let mut cuts: Vec<usize> = (0..SECTION_COUNT - 1 - fixed)
+            .map(|_| prefix.len() + rng.below(body - prefix.len() + 1))
             .collect();
         cuts.push(0);
         cuts.push(body);
+        if fixed == 1 {
+            cuts.push(prefix.len());
+        }
         cuts.sort_unstable();
         let mut b = base[..HEADER_LEN].to_vec();
         for w in cuts.windows(2) {
@@ -99,7 +109,8 @@ fn random_bodies_behind_a_valid_header_never_panic() {
             b.extend_from_slice(&((w[1] - w[0]) as u64).to_le_bytes());
         }
         assert_eq!(b.len(), SECTIONS_START);
-        for _ in 0..body {
+        b.extend_from_slice(prefix);
+        while b.len() < SECTIONS_START + body {
             b.push(rng.next() as u8);
         }
         if !matches!(
