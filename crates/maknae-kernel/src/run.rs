@@ -210,6 +210,10 @@ const STREAM_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 /// above *terminal* rather than advisory.
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// Bound on draining queued diagnostics to stderr before [`run`] returns; for admission
+/// audit failures stderr is the only record.
+const DIAG_FLUSH_TIMEOUT: Duration = Duration::from_secs(1);
+
 /// Bound on reaping the credential supervisor after it is aborted at the end of
 /// the accept loop (#240, review round 3). Detached, the supervisor could be
 /// holding the plane client's lock across a Vault call — `renew_token_once`,
@@ -2711,6 +2715,7 @@ pub fn run(config_dir: &Path) -> ExitCode {
     // supervisor-failure restart path always reach process exit; on elapse the stuck
     // thread is abandoned to the OS (the fd is closed at process exit anyway).
     runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
+    crate::diag::flush_within(DIAG_FLUSH_TIMEOUT);
     code
 }
 
@@ -3594,7 +3599,8 @@ mod tests {
             + DRAIN_ABORT_REAP_TIMEOUT
             + AUDIT_DRAIN_SHUTDOWN_TIMEOUT
             + maknae_vault::PLANE_SHUTDOWN_BOUND
-            + RUNTIME_SHUTDOWN_TIMEOUT;
+            + RUNTIME_SHUTDOWN_TIMEOUT
+            + DIAG_FLUSH_TIMEOUT;
         let unit = include_str!("../../../packaging/common/maknaed.service");
         let stop: u64 = unit
             .lines()
