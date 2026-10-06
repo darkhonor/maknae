@@ -1,0 +1,16 @@
+[package]
+name = "maknae-state"
+publish.workspace = true
+description = "The kernel graph store at rest: envelope encryption, rollback anchoring, boot recovery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+aws-lc-rs = { version = "1.18", features = ["fips"] }  # 1.18: the AWS-LC-FIPS 4.x line; one aws-lc-rs in the tree (ADR-0025); AES-256-GCM envelope
+zeroize = "1"

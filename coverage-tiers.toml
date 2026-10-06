@@ -271,6 +271,8 @@ files = [
   "crates/maknae-graph/src/graph.rs",
   "crates/maknae-graph/src/record.rs",
   "crates/maknae-graph/src/schema.rs",
+  # The kernel graph store at rest (#488): a wrong check loads a forged, rolled-back or undecryptable enforcement state.
+  "crates/maknae-state/src/envelope.rs",
 ]
 # maknae-security request.rs/authorizer.rs and maknae-config value.rs are pure
 # declarations (no executable production regions) → T3, not T1. The mutation set
@@ -279,7 +281,7 @@ files = [
 # critical crates whose fail-closed behavior must be provable to external
 # third parties. Zero missed mutants required.
 # It also carries the loop's decision code (maknae-agent), whose false-assurance surface is T1.
-mutants_crates = ["maknae-security", "maknae-config", "maknae-io", "maknae-kernel", "maknae-vault", "maknae-proto", "maknae-audit-append", "maknae-msgs", "maknae-authz-basic", "maknae-classification-aus", "maknae-llm", "maknae-agent", "maknae-deputy", "maknae-sys", "maknae-seal", "maknae-graph"]
+mutants_crates = ["maknae-security", "maknae-config", "maknae-io", "maknae-kernel", "maknae-vault", "maknae-proto", "maknae-audit-append", "maknae-msgs", "maknae-authz-basic", "maknae-classification-aus", "maknae-llm", "maknae-agent", "maknae-deputy", "maknae-sys", "maknae-seal", "maknae-graph", "maknae-state"]
 # Crates whose mutation run needs a non-default feature so feature-gated seam
 # code is LIVE (mutants in cfg'd-out code are unkillable-MISSED — the
 # 2026-08-27 main-red class; #77 generalized the maknae-config special case).
@@ -789,6 +791,10 @@ why = "crate rustdoc and re-exports only; no executable production regions, so a
 
 [[t3]]
 path = "crates/maknae-graph/src/lib.rs"
+why = "crate rustdoc and module declarations only; no executable production regions — same treatment as maknae-io/src/lib.rs"
+
+[[t3]]
+path = "crates/maknae-state/src/lib.rs"
 why = "crate rustdoc and module declarations only; no executable production regions — same treatment as maknae-io/src/lib.rs"
 
 [[t3]]

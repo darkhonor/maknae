@@ -17,6 +17,7 @@ members = [
   "crates/maknae-msgs",
   "crates/maknae-proto",
   "crates/maknae-seal",
+  "crates/maknae-state",
   "crates/maknae-security",
   "crates/maknae-spif",
   "crates/maknae-spif-compile",

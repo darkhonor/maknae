@@ -1236,6 +1236,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "maknae-state"
+version = "0.0.0"
+dependencies = [
+ "aws-lc-rs",
+ "zeroize",
+]
+
+[[package]]
 name = "maknae-subject-ctx"
 version = "0.0.0"
 
