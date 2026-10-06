@@ -113,6 +113,7 @@ mod tests {
             mutation: None,
             egress: None,
             conversation: None,
+            graph: None,
             outcome: Outcome {
                 result: "deny".into(),
                 reason: "policy denied".into(),

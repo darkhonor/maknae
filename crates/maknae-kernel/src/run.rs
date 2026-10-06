@@ -354,6 +354,7 @@ fn make_record(
         mutation: None,
         egress: None,
         conversation: None,
+        graph: None,
         outcome: Outcome {
             result: result.to_string(),
             reason: reason.to_string(),

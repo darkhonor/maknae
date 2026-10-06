@@ -212,6 +212,9 @@ files = [
   # Pure; the syslog(3) call lives in syslog_io.rs, tiered separately.
   "crates/maknae-audit-append/src/syslog_fmt.rs",
   "crates/maknae-audit-append/src/session.rs",
+  # #488: the backward rollback-anchor scan. A lost carry-over at a window
+  # boundary skips the newest checkpoint and anchors boot to an older one.
+  "crates/maknae-audit-append/src/scan.rs",
   "crates/maknae-kernel/src/authz.rs",
   "crates/maknae-kernel/src/handler.rs",
   "crates/maknae-kernel/src/provider_choice.rs",

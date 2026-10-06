@@ -1085,6 +1085,7 @@ mod tests {
                 completion_tokens: None,
             }),
             conversation: None,
+            graph: None,
         }
     }
 
