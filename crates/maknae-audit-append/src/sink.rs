@@ -204,7 +204,7 @@ impl AuditSink {
     /// Best-effort journald mirror (ADR-0019 D3).
     ///
     /// **Called on every outcome path after canonicalization, including
-    /// refusals — deliberately.** Three of the four call sites fire precisely
+    /// refusals — deliberately.** The refusal and failure call sites fire precisely
     /// *because* the primary did not durably write, so when the primary is
     /// wedged this is the last-chance record. `primary` marks which condition
     /// produced the copy, so the two sinks never diverge silently.
@@ -835,7 +835,7 @@ mod tests {
     // ----------------------------------------------------------------------
     // macOS unified-log acceptance (#222, spec §5).
     //
-    // WHY HERE AND NOT IN `tests/`: the four MAKNAE_PRIMARY markers can only be
+    // WHY HERE AND NOT IN `tests/`: the MAKNAE_PRIMARY markers can only be
     // driven through the `sink.breaker` seam, which is pub(crate) and
     // unreachable from an integration test. And `sink.rs` is MUTATION-EXCLUDED,
     // so swapping the two refusal arms is caught by NO gate at all on macOS

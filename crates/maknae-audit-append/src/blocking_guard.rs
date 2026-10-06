@@ -70,7 +70,7 @@ impl BlockingBreaker {
     ///
     /// Exists because [`BreakerAdmission::RefuseAtCapacity`] is otherwise
     /// unreachable from a test: `max_in_flight` is private and `new()` hardcodes
-    /// it, which would leave one of #189's four `MAKNAE_PRIMARY` markers
+    /// it, which would leave one of #189's `MAKNAE_PRIMARY` markers
     /// unproven in a mutation-excluded file (`sink.rs`).
     pub fn new_with_limits(trip_after: u8, max_in_flight: u8) -> Self {
         Self {

@@ -170,6 +170,7 @@ mod tests {
         drop(rx);
         std::fs::remove_file(&path).ok();
         m.mirror(&rec(), PrimaryOutcome::WriteFailed); // must not panic
+        m.mirror(&rec(), PrimaryOutcome::WriteUnconfirmed);
     }
 
     /// #275: an oversize datagram now DEGRADES rather than vanishing.
