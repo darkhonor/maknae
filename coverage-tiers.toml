@@ -272,6 +272,7 @@ files = [
   "crates/maknae-graph/src/record.rs",
   "crates/maknae-graph/src/schema.rs",
   # The kernel graph store at rest (#488): a wrong check loads a forged, rolled-back or undecryptable enforcement state.
+  "crates/maknae-state/src/anchor.rs",
   "crates/maknae-state/src/envelope.rs",
 ]
 # maknae-security request.rs/authorizer.rs and maknae-config value.rs are pure

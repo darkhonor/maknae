@@ -1240,6 +1240,7 @@ name = "maknae-state"
 version = "0.0.0"
 dependencies = [
  "aws-lc-rs",
+ "serde_json",
  "zeroize",
 ]
 
