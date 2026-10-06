@@ -2196,6 +2196,58 @@ fn supervisor_exit_reason(
     }
 }
 
+async fn drain_refusal_audit<E: AuditEmit + Send + Sync + 'static>(
+    mut rx: mpsc::Receiver<AuditRecord>,
+    emit: Arc<E>,
+    dropped: Arc<std::sync::atomic::AtomicU64>,
+    ids: Arc<SessionIds>,
+    wctx: WhereCtx,
+) {
+    let bound = Duration::from_millis(maknae_config::ADMISSION_AUDIT_TIMEOUT_MS);
+    let append = |rec: AuditRecord| {
+        let emit = Arc::clone(&emit);
+        async move {
+            if let Err(e) = emit.emit_within(&rec, bound).await {
+                eprintln!(
+                    "maknaed: AUDIT WRITE FAILED on a connection refusal (background) for peer_uid={} — rejection proceeded without a durable record: {e}",
+                    rec.source.uid
+                );
+            }
+        }
+    };
+    let flush_dropped = || {
+        let n = dropped.swap(0, std::sync::atomic::Ordering::Relaxed);
+        (n > 0).then(|| {
+            make_record(
+                "connection",
+                &wctx.host,
+                &wctx.socket,
+                maknae_audit_append::NO_PEER_UID,
+                None,
+                None,
+                None,
+                ids.next_session(),
+                1,
+                "connect",
+                None,
+                "deny",
+                &format!("audit queue full: {n} connection-refusal records dropped"),
+                "unauthorized",
+                &wctx.au3_1,
+            )
+        })
+    };
+    while let Some(rec) = rx.recv().await {
+        append(rec).await;
+        if let Some(summary) = flush_dropped() {
+            append(summary).await;
+        }
+    }
+    if let Some(summary) = flush_dropped() {
+        append(summary).await;
+    }
+}
+
 /// The anti-DoS accept loop (spec §6a/§10). Bounds live handlers with a
 /// `cfg.max_connections` semaphore; audits-and-continues on a surfaced cert-half
 /// rejection (never `?` — a bad handshake must not kill the daemon); fast-closes at
@@ -2240,8 +2292,7 @@ where
     // bounded channel drained by ONE background task does the append off the loop. The
     // accept branch only `try_send`s (never awaits I/O); a full queue drops the record
     // (the connection is already refused) and is counted.
-    let (atcap_audit_tx, mut atcap_audit_rx) =
-        mpsc::channel::<AuditRecord>(ATCAP_AUDIT_QUEUE_DEPTH);
+    let (atcap_audit_tx, atcap_audit_rx) = mpsc::channel::<AuditRecord>(ATCAP_AUDIT_QUEUE_DEPTH);
     let atcap_audit_emit = Arc::clone(&emit);
     // #265 A6: records the full queue refused are counted here and written by the
     // drain as one aggregate record.
@@ -2251,50 +2302,13 @@ where
         Arc::clone(&session_ids),
         wctx.clone(),
     );
-    let mut atcap_audit_task = tokio::spawn(async move {
-        let append = |rec: AuditRecord| {
-            let emit = Arc::clone(&atcap_audit_emit);
-            async move {
-                if let Err(e) = emit.emit(&rec).await {
-                    eprintln!(
-                        "maknaed: AUDIT WRITE FAILED on a connection refusal (background) for peer_uid={} — rejection proceeded without a durable record: {e}",
-                        rec.source.uid
-                    );
-                }
-            }
-        };
-        let flush_dropped = || {
-            let n = drain_dropped.swap(0, std::sync::atomic::Ordering::Relaxed);
-            (n > 0).then(|| {
-                make_record(
-                    "connection",
-                    &drain_wctx.host,
-                    &drain_wctx.socket,
-                    maknae_audit_append::NO_PEER_UID,
-                    None,
-                    None,
-                    None,
-                    drain_ids.next_session(),
-                    1,
-                    "connect",
-                    None,
-                    "deny",
-                    &format!("audit queue full: {n} connection-refusal records dropped"),
-                    "unauthorized",
-                    &drain_wctx.au3_1,
-                )
-            })
-        };
-        while let Some(rec) = atcap_audit_rx.recv().await {
-            append(rec).await;
-            if let Some(summary) = flush_dropped() {
-                append(summary).await;
-            }
-        }
-        if let Some(summary) = flush_dropped() {
-            append(summary).await;
-        }
-    });
+    let mut atcap_audit_task = tokio::spawn(drain_refusal_audit(
+        atcap_audit_rx,
+        atcap_audit_emit,
+        drain_dropped,
+        drain_ids,
+        drain_wctx,
+    ));
 
     tokio::pin!(shutdown);
     tokio::pin!(supervisor);
@@ -4752,6 +4766,84 @@ mod admission_bound_tests {
         assert!(elapsed < bound() + Duration::from_secs(1), "{elapsed:?}");
         assert!(buf.is_empty());
         assert!(calls >= 1);
+    }
+
+    struct StalledPlain {
+        bounded: std::sync::Mutex<Vec<String>>,
+    }
+    impl AuditEmit for StalledPlain {
+        fn emit(
+            &self,
+            _rec: &AuditRecord,
+        ) -> impl std::future::Future<Output = Result<(), maknae_audit_append::AuditError>> + Send
+        {
+            std::future::pending()
+        }
+        fn emit_within(
+            &self,
+            rec: &AuditRecord,
+            _bound: Duration,
+        ) -> impl std::future::Future<Output = Result<(), maknae_audit_append::AuditError>> + Send
+        {
+            self.bounded
+                .lock()
+                .unwrap()
+                .push(rec.outcome.reason.clone());
+            std::future::ready(Ok(()))
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_refusal_append_does_not_stop_later_records_or_the_summary() {
+        let emit = Arc::new(StalledPlain {
+            bounded: std::sync::Mutex::new(Vec::new()),
+        });
+        let (tx, rx) = mpsc::channel::<AuditRecord>(4);
+        let rec = |msg: &str| {
+            make_record(
+                "connection",
+                "h",
+                "s",
+                1,
+                None,
+                None,
+                None,
+                1,
+                1,
+                "connect",
+                None,
+                "deny",
+                msg,
+                "unauthorized",
+                &serde_json::json!({}),
+            )
+        };
+        tx.send(rec("first")).await.unwrap();
+        tx.send(rec("second")).await.unwrap();
+        drop(tx);
+        let dropped = Arc::new(std::sync::atomic::AtomicU64::new(3));
+        let wctx = WhereCtx {
+            host: "h".into(),
+            socket: "s".into(),
+            au3_1: serde_json::json!({}),
+        };
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            drain_refusal_audit(
+                rx,
+                Arc::clone(&emit),
+                dropped,
+                Arc::new(SessionIds::new()),
+                wctx,
+            ),
+        )
+        .await
+        .expect("the drain finishes despite a plain emit that never resolves");
+        let seen = emit.bounded.lock().unwrap().clone();
+        assert_eq!(seen.len(), 3, "{seen:?}");
+        assert_eq!(seen[0], "first");
+        assert!(seen[1].contains("3 connection-refusal records dropped"));
+        assert_eq!(seen[2], "second");
     }
 
     #[tokio::test(start_paused = true)]
