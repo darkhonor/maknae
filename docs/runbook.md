@@ -473,7 +473,7 @@ destinations:                # #172: per-role egress allowlist for session.promp
   `maknae ping` fails within about 5 s with either `frame truncated` (the daemon
   closed the connection without replying) or `no response from daemon within {N}ms; it
   may be slow admitting the connection (group lookup or admission audit)`. The daemon
-  never returns a `pong` without a durable or bounded admission record.
+  never returns a `pong` without a durable admission record.
 
 ### A note on what this chapter validates that automated tests don't
 
