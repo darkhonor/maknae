@@ -123,6 +123,11 @@ impl BlockingBreaker {
         should_log
     }
 
+    #[cfg(test)]
+    pub(crate) fn in_flight_len(&self) -> usize {
+        self.in_flight.len()
+    }
+
     pub fn record_success(&mut self, attempt: AuditAttempt) {
         if let Some(pos) = self
             .in_flight

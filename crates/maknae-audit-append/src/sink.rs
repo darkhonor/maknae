@@ -30,7 +30,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 fn open_audit_file(path: &Path) -> Result<File, AuditError> {
     maknae_io::open_audit_append(
@@ -128,6 +128,25 @@ impl AuditSink {
     /// this future `Send` (a guard held across `.await` would not be, and
     /// would break `tokio::spawn` in the Task 7 run-loop).
     pub async fn append(&self, rec: &AuditRecord) -> Result<(), AuditError> {
+        self.append_inner(rec, None).await
+    }
+
+    /// As [`append`](Self::append), but gives up waiting after `bound`. The
+    /// worker keeps running and releases its own breaker slot, so the record
+    /// may still land after an `Err`.
+    pub async fn append_within(
+        &self,
+        rec: &AuditRecord,
+        bound: Duration,
+    ) -> Result<(), AuditError> {
+        self.append_inner(rec, Some(bound)).await
+    }
+
+    async fn append_inner(
+        &self,
+        rec: &AuditRecord,
+        bound: Option<Duration>,
+    ) -> Result<(), AuditError> {
         let mut line = canonical_json(rec)?;
         line.push('\n');
         let now = Instant::now();
@@ -176,14 +195,24 @@ impl AuditSink {
             }
         };
         let primary = Arc::clone(&self.primary);
-        let joined = tokio::task::spawn_blocking(move || write_line(&primary, &line)).await;
-        // Join failure means the blocking worker ended instead of being
-        // orphaned; the append still fails closed below, but it is not a stuck
-        // in-flight append.
-        self.breaker
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .record_success(attempt);
+        let release = SlotRelease {
+            breaker: Arc::clone(&self.breaker),
+            attempt,
+        };
+        let worker = tokio::task::spawn_blocking(move || {
+            let _release = release;
+            write_line(&primary, &line)
+        });
+        let joined = match bound {
+            None => worker.await,
+            Some(b) => match tokio::time::timeout(b, worker).await {
+                Ok(joined) => joined,
+                Err(_elapsed) => {
+                    self.mirror_journald(rec, PrimaryOutcome::WriteUnconfirmed);
+                    return Err(unconfirmed(b));
+                }
+            },
+        };
         // The `?` used to return HERE, so a join failure -- the case where the
         // primary is most obviously wedged -- reached NEITHER sink. Mirror
         // first, then propagate.
@@ -224,6 +253,27 @@ impl AuditSink {
     }
 }
 
+struct SlotRelease {
+    breaker: Arc<Mutex<BlockingBreaker>>,
+    attempt: AuditAttempt,
+}
+
+impl Drop for SlotRelease {
+    fn drop(&mut self) {
+        self.breaker
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .record_success(self.attempt);
+    }
+}
+
+fn unconfirmed(bound: Duration) -> AuditError {
+    AuditError::WritePrimary(format!(
+        "audit append unconfirmed within {}ms; the record may still land",
+        bound.as_millis()
+    ))
+}
+
 fn write_line(file: &Mutex<Primary>, line: &str) -> Result<(), AuditError> {
     // A writer panic may leave a partial JSONL line. Appending after it would
     // acknowledge a record spliced into that line, not a durable valid record.
@@ -258,6 +308,20 @@ pub trait AuditEmit {
         &self,
         rec: &AuditRecord,
     ) -> impl std::future::Future<Output = Result<(), AuditError>> + Send;
+
+    fn emit_within(
+        &self,
+        rec: &AuditRecord,
+        bound: Duration,
+    ) -> impl std::future::Future<Output = Result<(), AuditError>> + Send {
+        let fut = self.emit(rec);
+        async move {
+            match tokio::time::timeout(bound, fut).await {
+                Ok(r) => r,
+                Err(_) => Err(unconfirmed(bound)),
+            }
+        }
+    }
 }
 
 impl AuditEmit for AuditSink {
@@ -266,6 +330,14 @@ impl AuditEmit for AuditSink {
         rec: &AuditRecord,
     ) -> impl std::future::Future<Output = Result<(), AuditError>> + Send {
         self.append(rec)
+    }
+
+    fn emit_within(
+        &self,
+        rec: &AuditRecord,
+        bound: Duration,
+    ) -> impl std::future::Future<Output = Result<(), AuditError>> + Send {
+        self.append_within(rec, bound)
     }
 }
 
@@ -279,6 +351,8 @@ fn _assert_append_and_emit_futures_are_send(sink: &AuditSink, rec: &AuditRecord)
     fn assert_send<T: Send>(_: T) {}
     assert_send(sink.append(rec));
     assert_send(AuditEmit::emit(sink, rec));
+    assert_send(sink.append_within(rec, Duration::ZERO));
+    assert_send(AuditEmit::emit_within(sink, rec, Duration::ZERO));
 }
 
 #[cfg(test)]
@@ -637,6 +711,125 @@ mod tests {
             siem: None,
             au3_1: serde_json::json!({}),
         }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the held primary lock is the wedge under test
+    async fn a_bounded_append_times_out_releases_its_slot_when_the_worker_finishes_and_the_record_lands(
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        let cfg = maknae_config::AuditConfig {
+            jsonl_path: path.clone(),
+            siem: None,
+            au3_1: serde_json::json!({}),
+        };
+        let sink = AuditSink::open_with_journal(
+            &cfg,
+            std::path::Path::new("/nonexistent/maknae-test-no-journal.sock"),
+        )
+        .unwrap();
+        let wedge = sink.primary.lock().unwrap();
+        let err = sink
+            .append_within(&sample_record(), std::time::Duration::from_millis(50))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("unconfirmed"), "{err}");
+        assert_eq!(
+            sink.breaker.lock().unwrap().in_flight_len(),
+            1,
+            "the worker still holds its slot"
+        );
+        drop(wedge);
+        for _ in 0..200 {
+            if sink.breaker.lock().unwrap().in_flight_len() == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            sink.breaker.lock().unwrap().in_flight_len(),
+            0,
+            "the worker released its own slot"
+        );
+        let lines = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            lines.lines().count(),
+            1,
+            "the unconfirmed record landed late"
+        );
+        sink.append(&sample_record())
+            .await
+            .expect("the healed sink accepts appends");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the held primary lock is the wedge under test
+    async fn repeated_timeouts_under_a_wedge_do_not_exhaust_the_breaker_after_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = maknae_config::AuditConfig {
+            jsonl_path: dir.path().join("audit.jsonl"),
+            siem: None,
+            au3_1: serde_json::json!({}),
+        };
+        let sink = AuditSink::open_with_journal(
+            &cfg,
+            std::path::Path::new("/nonexistent/maknae-test-no-journal.sock"),
+        )
+        .unwrap();
+        let wedge = sink.primary.lock().unwrap();
+        for _ in 0..crate::blocking_guard::AUDIT_APPEND_BREAKER_MAX_IN_FLIGHT {
+            let _ = sink
+                .append_within(&sample_record(), std::time::Duration::from_millis(5))
+                .await;
+        }
+        drop(wedge);
+        for _ in 0..400 {
+            if sink.breaker.lock().unwrap().in_flight_len() == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        sink.append(&sample_record())
+            .await
+            .expect("no permanent RefuseAtCapacity after recovery");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the held primary lock is the wedge under test
+    async fn a_timed_out_append_mirrors_write_unconfirmed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (rx, jpath) = journal_receiver(dir.path());
+        let sink = AuditSink::open_with_journal(&cfg_at(dir.path()), &jpath).unwrap();
+        let wedge = sink.primary.lock().unwrap();
+        assert!(sink
+            .append_within(&sample_record(), std::time::Duration::from_millis(50))
+            .await
+            .is_err());
+        drop(wedge);
+        assert!(
+            recv_text(&rx).contains("MAKNAE_PRIMARY=write-unconfirmed"),
+            "a timed-out append must mirror with its own exact marker"
+        );
+    }
+
+    #[tokio::test]
+    async fn emit_within_default_times_out_a_slow_emitter() {
+        struct Slow;
+        impl AuditEmit for Slow {
+            fn emit(
+                &self,
+                _rec: &AuditRecord,
+            ) -> impl std::future::Future<Output = Result<(), AuditError>> + Send {
+                std::future::pending()
+            }
+        }
+        let err = Slow
+            .emit_within(&sample_record(), std::time::Duration::from_millis(20))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("unconfirmed"), "{err}");
     }
 
     #[cfg(target_os = "linux")] // journald socket round-trip: the macOS mirror ignores the injected path, so no datagram ever arrives and recv_text's expect() would panic after its 2s timeout
@@ -1114,7 +1307,8 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[tokio::test]
-    async fn macos_delivers_each_of_the_four_primary_markers_exactly() {
+    #[allow(clippy::await_holding_lock)] // the held primary lock is the wedge under test
+    async fn macos_delivers_each_primary_marker_exactly() {
         if !macos_gate() {
             return;
         }
@@ -1163,17 +1357,33 @@ mod tests {
                 "the primary write must fail"
             );
         }
+        // write-unconfirmed: the held primary lock wedges the worker past the bound.
+        let n_unconfirmed = macos_nonce();
+        {
+            let sink = AuditSink::open(&cfg_at(dir.path())).unwrap();
+            let wedge = sink.primary.lock().unwrap();
+            let mut r = sample_record();
+            r.session_id = n_unconfirmed;
+            assert!(
+                sink.append_within(&r, std::time::Duration::from_millis(50))
+                    .await
+                    .is_err(),
+                "the bounded append must time out"
+            );
+            drop(wedge);
+        }
 
-        // Same fast-fail as the other two sites; `r` is the last record built
-        // above and carries `n_failed`.
+        // Same fast-fail as the other two sites; `probe` carries `n_unconfirmed`,
+        // the last record emitted.
         let mut probe = sample_record();
-        probe.session_id = n_failed;
-        let msgs = macos_await_nonce_for(&probe, n_failed);
+        probe.session_id = n_unconfirmed;
+        let msgs = macos_await_nonce_for(&probe, n_unconfirmed);
         for (nonce, marker) in [
             (n_ok, "MAKNAE_PRIMARY=ok"),
             (n_breaker, "MAKNAE_PRIMARY=refused-breaker-open"),
             (n_capacity, "MAKNAE_PRIMARY=refused-at-capacity"),
             (n_failed, "MAKNAE_PRIMARY=write-failed"),
+            (n_unconfirmed, "MAKNAE_PRIMARY=write-unconfirmed"),
         ] {
             let needle = format!("session={nonce} ");
             let found = msgs
