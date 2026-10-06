@@ -259,12 +259,10 @@ fn reply_wait(
 }
 
 /// Instant at which the request frame finished writing.
-// Task A3 of #421 consumes `at`; until then only tests construct and read it.
-#[allow(dead_code)]
+#[must_use]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct WriteCompleted(std::time::Instant);
 
-#[allow(dead_code)]
 impl WriteCompleted {
     pub(crate) fn at(self) -> std::time::Instant {
         self.0
@@ -608,8 +606,7 @@ pub(crate) async fn send_verb(
     };
     let body =
         encode_request_zeroizing(&request, request_caps.cap(class)).map_err(|e| e.to_string())?;
-    let request_started = std::time::Instant::now();
-    send_request_frame(&mut stream, class, &body, transport).await?;
+    let written = send_request_frame(&mut stream, class, &body, transport).await?;
 
     let resp_body = await_reply(&mut stream, class, transport).await?;
     let response = decode_response(&resp_body).map_err(|e| e.to_string())?;
@@ -619,19 +616,13 @@ pub(crate) async fn send_verb(
             let prepared =
                 prepared.ok_or("protocol error: mutation grant for an ordinary request")?;
             if matches!(prepared.request(), maknae_proto::Verb::Read { .. }) {
-                let read = crate::mutation::execute_read(
-                    prepared,
-                    grant,
-                    &mut stream,
-                    transport,
-                    request_started,
-                )
-                .await?;
+                let read =
+                    crate::mutation::execute_read(prepared, grant, &mut stream, transport, written)
+                        .await?;
                 return Ok(SentOutcome::ReadDone { read });
             }
             let end =
-                crate::mutation::execute(prepared, grant, &mut stream, transport, request_started)
-                    .await?;
+                crate::mutation::execute(prepared, grant, &mut stream, transport, written).await?;
             Ok(SentOutcome::WriteDone {
                 applied: end.applied,
                 stale: end.stale,
@@ -1065,7 +1056,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_large_prompt_write_outlasts_the_daemons_pre_read_work() {
-        write_with_reader_delay(
+        let _written = write_with_reader_delay(
             maknae_proto::FrameClass::Prompt,
             256 * 1024,
             content_bound() - TICK,
@@ -1076,7 +1067,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_large_attempt_write_outlasts_the_daemons_pre_read_work() {
-        write_with_reader_delay(
+        let _written = write_with_reader_delay(
             maknae_proto::FrameClass::Attempt,
             maknae_proto::ATTEMPT_REQUEST_MAX,
             content_bound() - TICK,
@@ -1101,6 +1092,50 @@ mod tests {
                 maknae_config::GROUP_LOOKUP_TIMEOUT_MS,
                 maknae_config::ADMISSION_AUDIT_TIMEOUT_MS
             )
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_attempt_window_anchor_is_taken_after_the_write_completes() {
+        let start = tokio::time::Instant::now();
+        let delay = std::time::Duration::from_secs(7);
+        let written = write_with_reader_delay(
+            maknae_proto::FrameClass::Attempt,
+            maknae_proto::ATTEMPT_REQUEST_MAX,
+            delay,
+        )
+        .await
+        .unwrap();
+        assert!(
+            written.at() >= (start + delay).into_std(),
+            "the attempt window must not be charged for the daemon's pre-read work on a large frame"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_control_write_stall_names_the_read_timeout() {
+        const SMALL_DUPLEX: usize = 64;
+        let body = vec![0u8; 4 * SMALL_DUPLEX];
+        assert!(
+            body.len() > SMALL_DUPLEX,
+            "the frame must exceed the in-flight buffer"
+        );
+        let transport = maknae_config::TransportConfig {
+            read_timeout_ms: READ_TIMEOUT_MS,
+            ..Default::default()
+        };
+        let (mut cli, _daemon) = tokio::io::duplex(SMALL_DUPLEX);
+        let err = send_request_frame(
+            &mut cli,
+            maknae_proto::FrameClass::Control,
+            &body,
+            &transport,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "request write to the daemon stalled for 5000ms (daemon not reading?)"
         );
     }
 
@@ -1149,7 +1184,7 @@ mod tests {
         .await;
         drop(cli);
         let _ = reader.await;
-        got.expect(
+        let _written = got.expect(
             "#421: a 300 ms pre-read delay is within the bound, whatever the platform's buffers",
         );
     }

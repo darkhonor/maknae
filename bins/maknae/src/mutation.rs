@@ -834,7 +834,7 @@ pub async fn execute<S: AsyncRead + AsyncWrite + Unpin + Send>(
     grant: MutationGrant,
     stream: &mut S,
     cfg: &TransportConfig,
-    request_started: Instant,
+    written: crate::cli::WriteCompleted,
 ) -> Result<WriteEnd, String> {
     run_attempt(
         prepared,
@@ -842,7 +842,7 @@ pub async fn execute<S: AsyncRead + AsyncWrite + Unpin + Send>(
         stream,
         cfg,
         proto::ATTEMPT_REQUEST_MAX,
-        request_started,
+        written.at(),
     )
     .await
     .map(|a| WriteEnd {
@@ -856,7 +856,7 @@ pub async fn execute_read<S: AsyncRead + AsyncWrite + Unpin + Send>(
     grant: MutationGrant,
     stream: &mut S,
     cfg: &TransportConfig,
-    request_started: Instant,
+    written: crate::cli::WriteCompleted,
 ) -> Result<Option<ReadResult>, String> {
     let label = grant.label.clone();
     run_attempt(
@@ -865,7 +865,7 @@ pub async fn execute_read<S: AsyncRead + AsyncWrite + Unpin + Send>(
         stream,
         cfg,
         proto::ATTEMPT_REQUEST_MAX,
-        request_started,
+        written.at(),
     )
     .await
     .map(|a| match (a.success, a.content, a.page) {
@@ -931,7 +931,7 @@ async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
     {
         return Err("invalid mutation grant limits".into());
     }
-    // Charge grant delivery and earlier request work to the same attempt window.
+    // Charge grant delivery to the attempt window from the request's write completion.
     // Acknowledgments never refresh this deadline.
     let deadline = request_started
         .checked_add(Duration::from_millis(
@@ -1231,9 +1231,15 @@ mod tests {
     ) -> (Result<bool, String>, Vec<MutationReport>) {
         let (mut client, server) = tokio::io::duplex(65536);
         let receiver = acknowledge_all(server, proto::ATTEMPT_RESPONSE_MAX);
-        let result = execute(prepared, grant, &mut client, &cfg, request_started)
-            .await
-            .map(|end| end.applied);
+        let result = execute(
+            prepared,
+            grant,
+            &mut client,
+            &cfg,
+            crate::cli::WriteCompleted::for_test(request_started),
+        )
+        .await
+        .map(|end| end.applied);
         drop(client);
         (result, receiver.await.unwrap())
     }
@@ -1292,7 +1298,14 @@ mod tests {
     ) -> (Result<Option<ReadResult>, String>, Vec<MutationReport>) {
         let (mut client, server) = tokio::io::duplex(65536);
         let receiver = acknowledge_all(server, proto::ATTEMPT_RESPONSE_MAX);
-        let result = execute_read(prepared, grant, &mut client, &cfg, Instant::now()).await;
+        let result = execute_read(
+            prepared,
+            grant,
+            &mut client,
+            &cfg,
+            crate::cli::WriteCompleted::for_test(Instant::now()),
+        )
+        .await;
         drop(client);
         (result, receiver.await.unwrap())
     }
@@ -1666,7 +1679,7 @@ mod tests {
             read_grant(&path, 65536),
             &mut client,
             &TransportConfig::default(),
-            Instant::now(),
+            crate::cli::WriteCompleted::for_test(Instant::now()),
         )
         .await;
         drop(client);
@@ -1725,7 +1738,14 @@ mod tests {
         let cfg = TransportConfig::default();
         let (mut client, server) = tokio::io::duplex(65536);
         let receiver = acknowledge_all(server, proto::ATTEMPT_RESPONSE_MAX);
-        let result = execute(prepared, grant, &mut client, &cfg, Instant::now()).await;
+        let result = execute(
+            prepared,
+            grant,
+            &mut client,
+            &cfg,
+            crate::cli::WriteCompleted::for_test(Instant::now()),
+        )
+        .await;
         drop(client);
         (result, receiver.await.unwrap())
     }
@@ -2078,7 +2098,7 @@ mod tests {
                 grant(MutationScope::Directories { paths }),
                 &mut client,
                 &TransportConfig::default(),
-                Instant::now(),
+                crate::cli::WriteCompleted::for_test(Instant::now()),
             )
             .await
         });
@@ -2163,7 +2183,7 @@ mod tests {
                 g,
                 &mut client,
                 &TransportConfig::default(),
-                Instant::now(),
+                crate::cli::WriteCompleted::for_test(Instant::now()),
             )
             .await
         });
@@ -2214,7 +2234,7 @@ mod tests {
                 g,
                 &mut client,
                 &TransportConfig::default(),
-                Instant::now(),
+                crate::cli::WriteCompleted::for_test(Instant::now()),
             )
             .await
         });
@@ -2256,10 +2276,16 @@ mod tests {
             read_timeout_ms: 100,
             ..TransportConfig::default()
         };
-        let task =
-            tokio::spawn(
-                async move { execute(prepared, g, &mut client, &cfg, Instant::now()).await },
-            );
+        let task = tokio::spawn(async move {
+            execute(
+                prepared,
+                g,
+                &mut client,
+                &cfg,
+                crate::cli::WriteCompleted::for_test(Instant::now()),
+            )
+            .await
+        });
         read_frame(&mut server, 65536).await.unwrap();
         assert!(task.await.unwrap().unwrap_err().contains("timed out"));
         assert!(d.0.join("deadline-parent").is_dir());
@@ -3004,8 +3030,16 @@ mod tests {
         };
         let started = Instant::now() - Duration::from_millis(400);
         let (mut client, mut server) = tokio::io::duplex(65536);
-        let task =
-            tokio::spawn(async move { execute(prepared, g, &mut client, &cfg, started).await });
+        let task = tokio::spawn(async move {
+            execute(
+                prepared,
+                g,
+                &mut client,
+                &cfg,
+                crate::cli::WriteCompleted::for_test(started),
+            )
+            .await
+        });
         let bytes = read_frame(&mut server, 65536).await.unwrap();
         let MutationReport::Batch {
             id, first_index: 0, ..
