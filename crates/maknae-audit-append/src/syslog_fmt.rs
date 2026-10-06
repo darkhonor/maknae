@@ -300,15 +300,15 @@ fn clip_at_boundary(v: &str, max: usize) -> String {
     out
 }
 
-fn degraded_line(f: &RecordFields<'_>) -> String {
+fn degraded_line(f: &RecordFields<'_>, primary: PrimaryOutcome) -> String {
     let action = clip_at_boundary(scrub(f.action).as_str(), DEGRADED_TOKEN_MAX);
     let outcome = clip_at_boundary(scrub(f.outcome).as_str(), DEGRADED_TOKEN_MAX);
-    let where_to_read = if f.primary == PrimaryOutcome::Ok.as_field() {
-        "read-primary-jsonl"
-    } else if f.primary == PrimaryOutcome::WriteUnconfirmed.as_field() {
-        "primary-unconfirmed"
-    } else {
-        "primary-did-not-write"
+    let where_to_read = match primary {
+        PrimaryOutcome::Ok => "read-primary-jsonl",
+        PrimaryOutcome::WriteUnconfirmed => "primary-unconfirmed",
+        PrimaryOutcome::RefusedBreakerOpen
+        | PrimaryOutcome::RefusedAtCapacity
+        | PrimaryOutcome::WriteFailed => "primary-did-not-write",
     };
     format!(
         // Same key names as the journald degraded datagram, so an operator
@@ -332,7 +332,10 @@ pub(crate) fn format_record(
     let line = format_line_unchecked(rec, primary)?;
     if line.len() > MACOS_SYSLOG_MAX {
         note_degraded_mirror();
-        return Ok(Mirrored::Degraded(degraded_line(&fields_of(rec, primary))));
+        return Ok(Mirrored::Degraded(degraded_line(
+            &fields_of(rec, primary),
+            primary,
+        )));
     }
     Ok(Mirrored::Full(line))
 }

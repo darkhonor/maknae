@@ -779,10 +779,16 @@ mod tests {
         .unwrap();
         let wedge = sink.primary.lock().unwrap();
         for _ in 0..crate::blocking_guard::AUDIT_APPEND_BREAKER_MAX_IN_FLIGHT {
-            let _ = sink
+            let err = sink
                 .append_within(&sample_record(), std::time::Duration::from_millis(5))
-                .await;
+                .await
+                .expect_err("a wedged append times out");
+            assert!(err.to_string().contains("unconfirmed"), "{err}");
         }
+        assert_eq!(
+            sink.breaker.lock().unwrap().in_flight_len(),
+            crate::blocking_guard::AUDIT_APPEND_BREAKER_MAX_IN_FLIGHT as usize
+        );
         drop(wedge);
         for _ in 0..400 {
             if sink.breaker.lock().unwrap().in_flight_len() == 0 {
@@ -1317,8 +1323,6 @@ mod tests {
         // passes with the two refusal markers SWAPPED, and sink.rs is
         // mutation-excluded, so nothing else would catch that swap on macOS.
         let dir = tempfile::tempdir().unwrap();
-        // A mirror that failed to open never delivers; fail now rather than
-        // burn the polling ceiling.
         assert!(
             AuditSink::open(&cfg_at(dir.path()))
                 .unwrap()

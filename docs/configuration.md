@@ -653,8 +653,8 @@ egress:
   call the deputy answered. A slower provider needs the deputy's bound raised and this
   one with it. Out of range refuses boot by name. Shutdown waits
   for a send in flight: the daemon's handler drain is bounded by one connection's whole
-  work — the handshake, the group lookup, the admission audit append, the requester home's resolution, the frame read and the response write (each at
-  its `transport` timeout), the PDP decision and the verb's own blocking step, this
+  work — the handshake, the frame read and the response write (each at
+  its `transport` timeout), the group lookup and the admission audit append (each a fixed 5 s), the requester home's resolution, the PDP decision and the verb's own blocking step, this
   deadline, the close, and a ten-second margin for the audit appends — so the outcome
   record is written, and the shipped units' stop timeouts (`TimeoutStopSec=895`, launchd
   `ExitTimeOut`) cover that drain at BOTH ceilings (60 s transport timeouts, 600 s

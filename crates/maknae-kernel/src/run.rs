@@ -2151,6 +2151,20 @@ impl PlaneAccept for PlaneListener {
     }
 }
 
+async fn audit_cert_half_reject<E: AuditEmit>(emit: &E, rec: &AuditRecord, uid: u32) {
+    if let Err(e) = emit
+        .emit_within(
+            rec,
+            Duration::from_millis(maknae_config::ADMISSION_AUDIT_TIMEOUT_MS),
+        )
+        .await
+    {
+        eprintln!(
+            "maknaed: AUDIT WRITE FAILED on accept-reject (cert half) for peer_uid={uid} — rejection proceeded without a durable record: {e}"
+        );
+    }
+}
+
 /// Hand a connection-refusal record to the bounded background drain; a full
 /// queue counts it for the drain's aggregate record (#265 A6).
 fn offload_refusal(
@@ -2478,11 +2492,7 @@ where
                                                 reject_reason_str(&rej.reason), "unauthorized",
                                                 &wctx.au3_1,
                                             );
-                                            if let Err(e) = emit.emit(&rec).await {
-                                                eprintln!(
-                                                    "maknaed: AUDIT WRITE FAILED on accept-reject (cert half) for peer_uid={uid} — rejection proceeded without a durable record: {e}"
-                                                );
-                                            }
+                                            audit_cert_half_reject(&*emit, &rec, uid).await;
                                         }
                                     }
                                 });
@@ -4723,7 +4733,8 @@ mod admission_bound_tests {
 
     #[tokio::test(start_paused = true)]
     async fn an_admission_append_slower_than_its_bound_closes_without_serving() {
-        let (buf, calls, _) = drive(true, Duration::from_secs(60)).await;
+        let (buf, calls, elapsed) = drive(true, Duration::from_secs(60)).await;
+        assert!(elapsed < bound() + Duration::from_secs(1), "{elapsed:?}");
         assert!(buf.is_empty(), "no response frame was written");
         assert!(calls >= 1);
     }
@@ -4741,5 +4752,39 @@ mod admission_bound_tests {
         assert!(elapsed < bound() + Duration::from_secs(1), "{elapsed:?}");
         assert!(buf.is_empty());
         assert!(calls >= 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cert_half_rejection_append_is_bounded() {
+        let emit = SlowAdmission {
+            delay: Duration::from_secs(60),
+            bounded_calls: AtomicUsize::new(0),
+        };
+        let rec = make_record(
+            "connection",
+            "h",
+            "s",
+            1,
+            None,
+            None,
+            None,
+            1,
+            1,
+            "connect",
+            None,
+            "deny",
+            "r",
+            "unauthorized",
+            &serde_json::json!({}),
+        );
+        let t0 = tokio::time::Instant::now();
+        tokio::time::timeout(
+            Duration::from_secs(120),
+            audit_cert_half_reject(&emit, &rec, 1),
+        )
+        .await
+        .expect("returns within the wrapper");
+        assert!(t0.elapsed() < bound() + Duration::from_secs(1));
+        assert_eq!(emit.bounded_calls.load(Ordering::SeqCst), 1);
     }
 }
