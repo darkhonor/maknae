@@ -48,17 +48,27 @@ pub(crate) fn report(line: String) {
         .report(line);
 }
 
-#[cfg(not(test))]
 fn process_writer() -> Box<dyn Write + Send> {
-    Box::new(std::io::stderr())
+    #[cfg(test)]
+    {
+        Box::new(tests::Capture)
+    }
+    #[cfg(not(test))]
+    {
+        Box::new(std::io::stderr())
+    }
 }
 
 #[cfg(test)]
-static CAPTURED: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+mod tests {
+    use super::*;
+    use std::sync::{Condvar, Mutex};
+    use std::time::{Duration, Instant};
 
-#[cfg(test)]
-fn process_writer() -> Box<dyn Write + Send> {
-    struct Capture;
+    pub(super) static CAPTURED: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+
+    pub(super) struct Capture;
+
     impl Write for Capture {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
             CAPTURED.lock().unwrap().extend_from_slice(buf);
@@ -68,14 +78,6 @@ fn process_writer() -> Box<dyn Write + Send> {
             Ok(())
         }
     }
-    Box::new(Capture)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::{Condvar, Mutex};
-    use std::time::{Duration, Instant};
 
     #[derive(Default)]
     struct Gate {
