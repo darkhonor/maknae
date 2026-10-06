@@ -215,7 +215,7 @@ impl GraphBuilder {
             in_edges.iter().map(|&i| position(edges[i as usize].to)),
         );
 
-        Ok(Graph {
+        let graph = Graph {
             space,
             revision,
             schema_version: schema.version,
@@ -225,7 +225,14 @@ impl GraphBuilder {
             in_offsets,
             in_edges,
             keys,
-        })
+        };
+        if !crate::format::within_expansion_limit(
+            graph.reference_bytes(),
+            crate::format::encode(&graph).len(),
+        ) {
+            return Err(GraphError::ExpansionLimit);
+        }
+        Ok(graph)
     }
 }
 
@@ -369,7 +376,90 @@ impl Graph {
         &self.keys
     }
 
+    fn reference_bytes(&self) -> usize {
+        let attrs = |a: &crate::record::Attrs| {
+            a.iter()
+                .map(|(k, v)| {
+                    k.len()
+                        + if let crate::record::AttrValue::Str(s) = v {
+                            s.len()
+                        } else {
+                            0
+                        }
+                })
+                .sum::<usize>()
+        };
+        self.nodes
+            .iter()
+            .map(|n| n.key.len() + n.label.len() + attrs(&n.attrs))
+            .sum::<usize>()
+            + self
+                .edges
+                .iter()
+                .map(|e| e.label.len() + attrs(&e.attrs))
+                .sum::<usize>()
+    }
+
     fn position(&self, id: NodeId) -> Option<usize> {
         self.nodes.binary_search_by_key(&id, |n| n.id).ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::record::{AttrValue, Attrs, Provenance};
+
+    static ONE: Schema = Schema {
+        version: 1,
+        node_kinds: &[(NodeKind(1), "N")],
+        edge_kinds: &[(EdgeKind(1), "e")],
+        triples: &[(NodeKind(1), EdgeKind(1), NodeKind(1))],
+        compiled_kinds: &[],
+        forbidden_targets: &[],
+    };
+
+    #[test]
+    fn reference_bytes_counts_every_cloned_string_once() {
+        let p = Provenance {
+            kind: ProvenanceKind::Seed,
+            transition: 0,
+        };
+        let mut a1 = Attrs::new();
+        a1.insert("k".repeat(7), AttrValue::Str("v".repeat(11)));
+        let mut a2 = Attrs::new();
+        a2.insert("q".into(), AttrValue::U64(9));
+        let mut ea = Attrs::new();
+        ea.insert("e".repeat(17), AttrValue::Str("w".repeat(19)));
+        let n = |id, key: &str, label: &str, attrs: Attrs| NodeRecord {
+            id: NodeId(id),
+            space: GraphSpace::Kernel,
+            kind: NodeKind(1),
+            key: key.into(),
+            label: label.into(),
+            provenance: p,
+            revision: 1,
+            attrs,
+        };
+        let g = GraphBuilder::new(GraphSpace::Kernel, 1)
+            .node(n(1, "abc", "abcde", a1))
+            .node(n(2, "ab", "lmnopqrstuvwxyzab", a2))
+            .edge(EdgeRecord {
+                id: EdgeId(1),
+                space: GraphSpace::Kernel,
+                from: NodeId(1),
+                to: NodeId(2),
+                kind: EdgeKind(1),
+                label: "l".repeat(13),
+                provenance: p,
+                revision: 1,
+                attrs: ea,
+            })
+            .build(&ONE, &CompiledSet::default())
+            .unwrap();
+        assert_eq!(
+            g.reference_bytes(),
+            (3 + 5 + 7 + 11) + (2 + 17 + 1) + (13 + 17 + 19)
+        );
     }
 }
