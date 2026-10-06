@@ -64,7 +64,7 @@ Maknae's decision point is `maknaed`: a separate process, a separate uid, reache
 
 Every industry pattern diagram shows work succeeding. Boxes, arrows, a result. **Maknae's interesting behaviour is what happens when the answer is no** — and "no" is the default, since an absent grant, an absent coverage classification, an absent credential and an unknown vocabulary term all deny.
 
-This has a consequence for how Maknae is drawn, and it is the reason this document exists alongside a diagram convention: **a picture of Maknae with no refusal path in it depicts a different system.** `design/diagrams/knowledge-lifecycle.svg` is the worked example of the problem — five boxes in a straight line, *task gap → authorized fetch → quarantine → consolidation → trusted retrieval*, with **no branch and no denial anywhere** — describing the single most security-relevant flow in the product as though nothing is ever refused.
+This has a consequence for how Maknae is drawn, and it is the reason this document exists alongside a diagram convention: **a picture of Maknae with no refusal path in it depicts a different system.** `design/diagrams/knowledge-lifecycle.svg` shows the correction: it was once five boxes in a straight line with **no branch and no denial anywhere**, describing the single most security-relevant flow in the product as though nothing is ever refused. It now draws three intake routes, a refusal for content above the instance ceiling, and a review hold that informs nothing.
 
 ### 3. The claim and its proof ship together
 

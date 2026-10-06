@@ -1,46 +1,48 @@
-<svg width="680" height="280" viewBox="0 0 680 280" xmlns="http://www.w3.org/2000/svg" role="img">
-  <title>Authority tier state machine</title>
-  <desc>Four tiers from quarantine to doctrine. Promotion moves right through validation gates; demotion moves left when knowledge goes stale, is contradicted, or a source is revoked. Quarantined content can be purged.</desc>
-  <defs>
-    <marker id="fwd" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-      <path d="M2 1L8 5L2 9" fill="none" stroke="#0F6E56" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
-    <marker id="back" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-      <path d="M2 1L8 5L2 9" fill="none" stroke="#854F0B" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
-  </defs>
-  <rect x="0" y="0" width="680" height="280" fill="#FFFFFF"/>
-
-  <rect x="30" y="90" width="140" height="64" rx="8" fill="#FAEEDA" stroke="#854F0B" stroke-width="0.75"/>
-  <text x="100" y="116" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#412402">Tier 3</text>
-  <text x="100" y="136" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#854F0B">Quarantine</text>
-
-  <rect x="190" y="90" width="140" height="64" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
-  <text x="260" y="116" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#04342C">Tier 2</text>
-  <text x="260" y="136" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#0F6E56">Provisional</text>
-
-  <rect x="350" y="90" width="140" height="64" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
-  <text x="420" y="116" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#26215C">Tier 1</text>
-  <text x="420" y="136" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#534AB7">Authoritative</text>
-
-  <rect x="510" y="90" width="140" height="64" rx="8" fill="#CECBF6" stroke="#3C3489" stroke-width="0.75"/>
-  <text x="580" y="116" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#26215C">Tier 0</text>
-  <text x="580" y="136" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#3C3489">Doctrine</text>
-
-  <!-- Promotion arrows (upper lane) -->
-  <line x1="172" y1="104" x2="186" y2="104" stroke="#0F6E56" stroke-width="1.5" marker-end="url(#fwd)"/>
-  <line x1="332" y1="104" x2="346" y2="104" stroke="#0F6E56" stroke-width="1.5" marker-end="url(#fwd)"/>
-  <line x1="492" y1="104" x2="506" y2="104" stroke="#0F6E56" stroke-width="1.5" marker-end="url(#fwd)"/>
-
-  <!-- Demotion arrows (lower lane) -->
-  <line x1="186" y1="140" x2="172" y2="140" stroke="#854F0B" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#back)"/>
-  <line x1="346" y1="140" x2="332" y2="140" stroke="#854F0B" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#back)"/>
-  <line x1="506" y1="140" x2="492" y2="140" stroke="#854F0B" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#back)"/>
-
-  <!-- Purge exit from quarantine -->
-  <line x1="100" y1="154" x2="100" y2="196" stroke="#854F0B" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#back)"/>
-  <text x="100" y="218" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#854F0B">Purge</text>
-
-  <text x="340" y="248" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#5F5E5A">Solid arrows: promotion through validation gates &#183; Dashed arrows: demotion (stale, contradicted, source revoked)</text>
-  <text x="340" y="52" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#5F5E5A">Tier names are placeholders — align with Knowledge Lake authority hierarchy during review</text>
+<svg width="820" height="430" viewBox="0 0 820 430" xmlns="http://www.w3.org/2000/svg" role="img">
+  <title>Authority tier state machine (KLC v0.4)</title>
+  <desc>Four tiers plus review hold, which is not a tier. External documents are admitted directly at their tier ceiling through the registered-source or operator-ingest route; derived objects, memories and skills enter at Tier 3 and are promoted one gate at a time. Tier 0 is reached only by operator signature. Demotion moves left; a demoted external object returns only by re-admission. Review hold is disposed by a reviewer, to admission or to purge. Removing a registration moves its objects to review hold.</desc>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#5F5E5A" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker><marker id="ok" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#0F6E56" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker><marker id="bad" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#A32D2D" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker><marker id="hold" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#854F0B" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker><marker id="auth" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#3C3489" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+  <rect x="0" y="0" width="820" height="430" fill="#FFFFFF"/>
+<circle cx="560" cy="40" r="7" fill="#2C2C2A"/>
+<text x="572" y="44" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="600" fill="#2C2C2A">admission — registered or operator</text>
+<path d="M560 47 V96 H300 V148" fill="none" stroke="#0F6E56" stroke-width="1.5" marker-end="url(#ok)"/>
+<path d="M560 96 H420 V148" fill="none" stroke="#0F6E56" stroke-width="1.5" marker-end="url(#ok)"/>
+<path d="M560 96 V148" fill="none" stroke="#0F6E56" stroke-width="1.5" marker-end="url(#ok)"/>
+<text x="566" y="88" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#0F6E56">enters at tier_ceiling — not promotion</text>
+<circle cx="230" cy="112" r="7" fill="#2C2C2A"/>
+<text x="218" y="116" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="600" fill="#2C2C2A">derived · memory · skill</text>
+<path d="M230 119 V148" fill="none" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<rect x="200" y="150" width="120" height="64" rx="8" fill="#FAEEDA" stroke="#854F0B" stroke-width="0.9"/>
+<text x="260.0" y="172" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#412402">Tier 3</text>
+<text x="260.0" y="191" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="11.5" fill="#854F0B">Quarantine</text>
+<rect x="360" y="150" width="120" height="64" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.9"/>
+<text x="420.0" y="172" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#04342C">Tier 2</text>
+<text x="420.0" y="191" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="11.5" fill="#0F6E56">Provisional</text>
+<rect x="520" y="150" width="120" height="64" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.9"/>
+<text x="580.0" y="172" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#26215C">Tier 1</text>
+<text x="580.0" y="191" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="11.5" fill="#534AB7">Authoritative</text>
+<rect x="680" y="150" width="120" height="64" rx="8" fill="#CECBF6" stroke="#3C3489" stroke-width="0.9"/>
+<text x="740.0" y="172" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#26215C">Tier 0</text>
+<text x="740.0" y="191" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="11.5" fill="#3C3489">Doctrine</text>
+<rect x="30" y="150" width="130" height="64" rx="8" fill="#FAEEDA" stroke="#854F0B" stroke-width="0.9" stroke-dasharray="5 4"/>
+<text x="95.0" y="172" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#412402">Review hold</text>
+<text x="95.0" y="191" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="11.5" fill="#854F0B">not a tier</text>
+<path d="M322 166 H358" fill="none" stroke="#0F6E56" stroke-width="1.5" marker-end="url(#ok)"/>
+<path d="M482 166 H518" fill="none" stroke="#0F6E56" stroke-width="1.5" marker-end="url(#ok)"/>
+<path d="M642 166 H678" fill="none" stroke="#3C3489" stroke-width="1.5" marker-end="url(#auth)"/>
+<path d="M358 200 H322" fill="none" stroke="#854F0B" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#hold)"/>
+<path d="M518 200 H482" fill="none" stroke="#854F0B" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#hold)"/>
+<path d="M678 200 H642" fill="none" stroke="#854F0B" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#hold)"/>
+<path d="M50 148 V64 H550" fill="none" stroke="#854F0B" stroke-width="1.5" marker-end="url(#hold)"/>
+<text x="60" y="58" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#854F0B">reviewer registers the source or attests</text>
+<circle cx="180" cy="300" r="9" fill="none" stroke="#2C2C2A" stroke-width="1.5"/><circle cx="180" cy="300" r="5" fill="#2C2C2A"/>
+<text x="198" y="304" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="600" fill="#2C2C2A">Purge — audit record kept</text>
+<path d="M50 214 V300 H168" fill="none" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<path d="M240 214 V270 H190 V288" fill="none" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<path d="M580 214 V250 H130 V218" fill="none" stroke="#854F0B" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#hold)"/>
+<text x="355" y="244" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#854F0B">registration removed → its objects to review hold</text>
+<text x="30" y="350" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#5F5E5A">Solid green: promotion — self-generated and derived knowledge only, one gate each (corroboration or operator sign-off).</text>
+<text x="30" y="368" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#5F5E5A">Purple: Tier 0 by operator signature only — never by admission, never by automation.</text>
+<text x="30" y="386" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#5F5E5A">Dashed amber: demotion (stale, contradicted, source downgraded). A demoted external object returns only by re-admission, never by climbing.</text>
+<text x="30" y="404" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#5F5E5A">Not shown: a transfer whose source maximum exceeds the instance ceiling is refused before any byte; a marking above it found later is a data spill.</text>
 </svg>

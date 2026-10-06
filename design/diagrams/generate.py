@@ -1570,6 +1570,28 @@ def d9_opconcept(prov: str) -> str:
                   9.5, fill=MUTED, anchor="middle", halo="#FFFFFF"))
     y += 34
 
+    routes = d.get("route", [])
+    if routes:
+        p.append(text(PAD, y, "Other ways knowledge enters", 11, "600", fill=TRUST_INK))
+        y += 14
+        RW = (W - PAD * 2 - (len(routes) - 1) * 14) / len(routes)
+        rh = 0
+        for i, r in enumerate(routes):
+            dl4 = _wrap_words(r["detail"], 58)
+            h = 46 + len(dl4) * 12
+            rh = max(rh, h)
+            x = PAD + i * (RW + 14)
+            built = r["status"] == "built"
+            fill, line, ink = ((TRUST_FILL, TRUST_LINE, TRUST_INK) if built
+                               else ("#FFFFFF", MUTED, INK))
+            p.append(box(x, y, RW, h, fill, line, rx=7, dash=None if built else "5 4"))
+            p.append(text(x + 10, y + 18, r["label"], 10.5, "700", fill=ink))
+            p.append(text(x + 10, y + 32, r["who"], 8.5, fill=line))
+            yy = y + 46
+            for ln in dl4:
+                p.append(text(x + 10, yy, ln, 8.5, fill=INK)); yy += 12
+        y += rh + 20
+
     t0 = d["tier0"]
     p.append(box(PAD, y, W - PAD * 2, 42, "#FFFFFF", MUTED, rx=7, dash="5 4"))
     p.append(text(PAD + 14, y + 18, t0["label"], 10.5, "700", fill=INK))
@@ -1598,7 +1620,9 @@ def d9_opconcept(prov: str) -> str:
 
     # --- what is real
     dv = d["delivery"]
-    p.append(box(PAD, y, W - PAD * 2, 96, "#FBFAF7", PLAIN_LINE, rx=8))
+    dvh = 70 + (max(1, len(_wrap_words(dv["built"], 138)))
+                + max(1, len(_wrap_words(dv["unbuilt"], 138)))) * 13
+    p.append(box(PAD, y, W - PAD * 2, dvh, "#FBFAF7", PLAIN_LINE, rx=8))
     p.append(text(PAD + 16, y + 22, "What is actually built, as of this rendering",
                   11, "700", fill=INK))
     yy = y + 40
@@ -1611,7 +1635,7 @@ def d9_opconcept(prov: str) -> str:
         p.append(text(PAD + 66, yy + k * 13, ln, 9.5, fill=INK))
     yy += max(1, len(_wrap_words(dv["unbuilt"], 138))) * 13 + 4
     p.append(text(PAD + 16, yy, dv["honest"], 9.5, "700", fill=WARN))
-    y += 112
+    y += dvh + 16
 
     H = y + 44
     p = [text(PAD, 44, "What Maknae is for — DoDAF OV-1", 16, "600"),

@@ -17,6 +17,8 @@
 
 A plan that argues its own case invites the executor to re-litigate it. A plan that states activities does not. The recorded objection to this author's output has consistently been tokens spent on the second kind, and a schema with nowhere to put it removes the failure structurally rather than by instruction.
 
+**The larger objective is the kernel's.** The graph that matters most is the one `maknaed` owns: a governed record of what the Agent Daemon was asked to do, what it retrieved, what it did, and what each step was authorized against. Plans, retrieved knowledge, memory and activity sharing one record envelope (§5.4) is what lets the daemon **correlate** them. It can tell which passage informed which node, which node touched which object, and which user memory cue changed a plan's shape, without reading prose to find out. That correlation is the scaling mechanism. Monitoring, recovery and audit become queries over typed records instead of reconstruction from logs. The plan-authoring evidence in §4 and the skill in §11 are the first consumer, and the cheapest place to measure the idea. They are not where it carries load (§15.2).
+
 **Context economy is a real secondary consideration, not the reason.** A 27B-class local model has a materially smaller window and less tolerance for distractor text than a frontier model, so progressive disclosure matters more there. But a design optimised only for that would be a different design.
 
 ## 2. What is settled
@@ -159,11 +161,12 @@ There is not one graph. **The axis that decides the mitigations is who may write
 | kernel activity | the kernel alone | **trusted** (TCB) | host lifetime | loss of system integrity |
 | governance / profile | operator or organisation, at boot | **trusted** config | boot to boot | wrong enforcement posture, silently |
 | user plan | the agent | **untrusted** — authored by the untrusted runtime | ephemeral; retention declared | a bad plan, caught by validation |
-| lake knowledge | agent-authored from **external reference sources** | **untrusted data**; edges quarantined at birth | long-lived, shared | wrong knowledge informs a decision |
+| lake knowledge | admitted through a [KLC](knowledge-lifecycle-contract.md) §8.1 intake route: a **registered source**, **operator ingest**, or, after review, an **unregistered source** | **set by the route**: usable at its authority position once validated; unregistered content informs nothing while it waits in review hold | long-lived, shared | wrong knowledge informs a decision |
+| user memory | consolidation of one subject's sessions; agent proposes, kernel commits | **untrusted** context about the user; not policy authority, even when the KLC promotes a standing operator directive to Tier 1 | long-lived, per subject | a false cue steers that subject's plans |
 
 The kernel's graph reaches host state and policy-granted restricted areas — and does not bypass policy to do it. [Core principle 2](../AGENTS.md): *no role or privilege, not even the kernel, bypasses clearance*, which applies to the kernel's own graph as to everything else.
 
-**The governance graph is schema-level, not a fourth instance.** A profile is a *predicate over graphs* — *"a node of kind `write` must have an adjacent node of kind `verify`"* is a subgraph pattern matched against a plan. Expressible as a graph of required patterns, but a schema artifact rather than an instance. **Three instance graphs and one pattern artifact** is the cleaner count.
+**The governance graph is schema-level, not an instance.** A profile is a *predicate over graphs* — *"a node of kind `write` must have an adjacent node of kind `verify`"* is a subgraph pattern matched against a plan. Expressible as a graph of required patterns, but a schema artifact rather than an instance. **Four instance graphs and one pattern artifact** is the cleaner count.
 
 **Shared substrate, separate vocabularies.** `(write) --verifies--> (test)` and `(stig-rule) --implements--> (vendor-paragraph)` have nothing in common at vocabulary level, and one vocabulary spanning both would fit neither. What they share is the *substrate*: node identity, typed edges, provenance fields, versioning, serialization.
 
@@ -171,10 +174,11 @@ The kernel's graph reaches host state and policy-granted restricted areas — an
 
 **Information crosses up the trust gradient only through validation; authority only ever flows down.**
 
-- **lake → plan.** Knowledge informs planning under measured access — this is the intended and load-bearing path, and §6.6 sets which tiers may shape a plan's *structure* versus only its *content*. It is legitimate because the plan is still validated against its profile afterwards. **But the validator must never consult the Lake** — informing what a plan says is not the same as deciding what counts as a valid plan, and only the second would be untrusted data setting policy.
+- **lake → plan.** Knowledge informs planning under measured access — this is the intended and load-bearing path, and §6.6 sets which inputs, by intake route and tier, may shape a plan's *structure* versus only its *content*. It is legitimate because the plan is still validated against its profile afterwards. **But the validator must never consult the Lake** — informing what a plan says is not the same as deciding what counts as a valid plan, and only the second would be untrusted data setting policy.
 - **plan → kernel activity.** One-way. The kernel may read a plan to execute its verify nodes; a plan may never write the kernel's graph.
 - **profile → plan.** Constrains; never populates. A profile that supplies nodes is authoring plans, not judging them.
-- **plan → shared knowledge.** **No content; demand crosses.** A task hitting a knowledge gap becomes a *request*, and what enters the Lake is an external document from an authorized source — never the user's work product. See §8.
+- **plan → shared knowledge.** **No content; demand crosses.** A task hitting a knowledge gap becomes a *request*. What enters the Lake is an external document admitted through an intake route, never the user's work product. See §8.
+- **memory → plan.** A subject's own memory may inform that subject's plans, and it **may add rigor but never remove it**. A cue can insert a read-only, non-state-changing node (§6.5) — a `verify` that only reads, an extra check — or narrow a scope; it cannot insert a node with side effects, drop a node the profile requires, or select a less restrictive profile. This is §6.2's bin inversion applied to a different source: agent-consolidated memory is a known persistence vector for poisoning, and a rule whose failure costs only rigor keeps that vector harmless.
 
 ### 5.2 Unattended activity is a second consumer
 
@@ -186,9 +190,37 @@ The same model tracks activities the platform itself runs — scheduled work of 
 
 **It is also where two-phase authorization earns its shape.** A scheduled graph may outlive the profile and policy that validated it. Phase one validated the *shape* at authoring; phase two evaluates each node **against policy at the moment of execution**. A node authorized last week is not authorized now by having been authorized then.
 
-### 5.3 One conflict to resolve
+### 5.3 What persists, and where
 
-Plan graphs are ephemeral with declared retention; their node-state transitions are an audit trail under ADR-0019. **Both cannot govern the same artifact** — a user declaring zero retention would otherwise delete the record of what the agent did on their behalf. Either the execution record is a separate kernel-retained object referencing the plan, or the plan is audit-retained and only its payload is subject to user retention. Maintainer call.
+Three different things persist, under different rules:
+
+| what | where | retention |
+|---|---|---|
+| the record of what happened: who, what, when, where, outcome | the [ADR-0019](adr/ADR-0019-audit-record-model.md) audit log, which carries the AU-required elements | audit policy; independent of any content |
+| knowledge brought in by a user or the agent | the shared lake | persists, available to every subject the PDP permits |
+| a subject's plans and memory | that subject's space | the subject's declared retention |
+
+The audit trail never depends on a plan being kept. Each node-state transition is an audit event that references the plan node by stable ID and content digest, so deleting a plan leaves the record of what the agent did intact. Kernel space may point at user space by ID; user space never points into kernel space.
+
+**No subject gets raw access to the binary store.** File reads and writes are done by the kernel or by a trust-plane lake storage service that the kernel alone commands (§5.4); subjects reach the graph only through typed `graph.*` requests.
+
+### 5.4 One substrate: the record envelope
+
+§5's "shared substrate, separate vocabularies" has a concrete form in the [graph-native memory idea](graph-native-memory-idea.md#one-graph-model-two-spaces): a `NodeRecord` and `EdgeRecord` carrying stable ID, graph space, kind, label, provenance and revision, in a single `maknae-graph` crate. Each graph above is a space in that envelope; `Kernel` is an addition to that note's two spaces, and plan and memory share a subject's space while differing in node kind:
+
+| §5 graph | `GraphSpace` | Who commits | Vocabulary |
+|---|---|---|---|
+| kernel activity | `Kernel` | the kernel alone | node state, transitions, decisions |
+| user plan | `User(SubjectId)` | the kernel, on the agent's proposal | activity classes, `verifies`, `commit-with`, file scope |
+| lake knowledge | `Shared` | the kernel, at admission (KLC §8.1) | authority and citation edges |
+| user memory | `User(SubjectId)` | the kernel, on consolidation's proposal | preference, episode, lesson, cue |
+
+Four consequences follow for this design:
+
+- **Recovery rungs are separately decidable actions.** Following that note's `graph.*` vocabulary, §6.4's ladder becomes `graph.node.retry`, `graph.node.patch` and `graph.plan.replan`, each its own PDP decision, and none inherits another's grant. §15.4's residual, *who authors the Level-3 replan*, then becomes an ordinary binding in `authz.yaml` rather than an open design question.
+- **Span-level citation narrows taint.** A plan node that cites the **passage** it used, rather than the whole document, inherits only that passage's label and standing. That does not solve §6.6's stranding problem, but it shrinks how far one low-standing read propagates. The same per-format locators answer §7.2's sub-document anchors, with re-extraction stability still open.
+- **Monitoring is a typed query, not a file read.** The activity graph is the most sensitive graph here: it records who did what to which labelled object. A dashboard reading the store directly gets raw bytes of every label, the bypass that note forbids. §15.9's counterfactual evaluation and Boundary Activation Rate become queries over `Kernel` space through `maknaed`.
+- **Storage segmentation follows the same rule.** Partitioning by `(GraphSpace, level)`, with edges pointing only down or sideways, is set out in that note's [storage-segmentation section](graph-native-memory-idea.md#segmenting-storage-by-label). Its warning applies here: partition selection is a pre-filter, and if it becomes the decision it is §15.9's upstream filter.
 
 ---
 
@@ -285,25 +317,33 @@ This document treated all nodes as equally retryable and equally parallelisable.
 
 ### 6.6 Two rules taken from the security literature
 
-**The planner reads trusted information — and the Lake is the trusted-information store, not a threat to planning.**
+**The planner reads admitted knowledge — and the Lake is the trusted-information store, not a threat to planning.**
 
 ACE's rule [R11] is that the abstract plan is built from **trusted information only**, and ControlValve [R12] observes the same property protects its planning stage: *"the planning stage is not exposed to untrusted content, so there is less of a risk of prompt injection."* **The boundary those papers draw is attacker-controllability, not externality.** Their threat is a malicious third-party app description, or tool output arriving mid-execution and rewriting control flow — content an adversary can author. A curated, tier-labelled, provenance-stamped corpus fetched from an operator-signed allowlist (§8) is the *opposite* of that: it is the trusted information ACE says planning should be built from.
 
 **This matters operationally, not just definitionally.** Planning against the Lake — applicable requirements, vendor guidance, example source, the controls that apply — is what has produced more secure and more compliant plans in this project over months of use. A rule that cut planning off from it would make plans worse in exactly the dimension the platform exists to serve, in exchange for mitigating a threat the Lake's own governance already addresses.
 
-**The rule that does transfer, and the tier model already implements it:**
+**The rule that does transfer is keyed to how content arrived ([KLC](knowledge-lifecycle-contract.md) §8.1), and then to its place on the authority matrix:**
 
-| planning input | disposition |
-|---|---|
-| Tier 0 doctrine, Tier 1 authoritative, curated vendor corpus | **trusted** — read freely; this is the intended planning substrate |
-| Tier 3 quarantine, freshly fetched material | may inform *reasoning*; **must not shape the graph's structure** |
-| tool output, MCP/app descriptions, retrieved web content arriving during execution | **untrusted at planning time** — this is ACE's actual threat |
+| planning input | content | structure |
+|---|---|---|
+| operator-ingested or registered-source content admitted at Tier 1 or 2 (a CNSS Policy as Tier 1 policy; CloudNativePG docs from the registered repository) | yes | yes |
+| external content admitted at a ceiling-3 position | yes | **no** |
+| Tier 1 derived content and skills, reached by corroboration or operator sign-off (KLC §9) | yes | yes |
+| Tier 2 and Tier 3 derived or self-generated content (summaries, candidate skills) | yes | **no** |
+| user memory at any tier, and its cues (§5.1) | yes | **may add rigor only** |
+| unregistered-source content in review hold | **no** | **no** |
+| tool output, MCP/app descriptions, retrieved web content arriving during execution | **untrusted at planning time** — ACE's actual threat | **no** |
 
-**And the two-layer split (§3) gives a cleaner boundary than either source has.** The *shape* layer — which activities, in what order, with what dependencies — is control flow, and control flow is derived from trusted tiers only. The *payload* layer may draw on lower-tier material, with its mark travelling (§7). An attacker who poisons a Tier-3 document can then influence what a step's content says; they cannot add a node, remove a gate, or reorder a commit. That is the property ACE is protecting, achieved without blinding the planner.
+**Knowledge advises; it never instructs** ([KLC](knowledge-lifecycle-contract.md) §10.2). "Shapes structure" in the table means a document may contribute **requirements and constraints** to a plan: an applicable STIG control becomes a required `verify` node, and a vendor procedure becomes a set of steps the plan must cover. The planner includes those requirements as nodes; the validator checks the plan against its **profile** alone, never against the Lake (§5.1); and the document never directs the model. A profile rule such as *every node citing a control has a `verify` node adjacent* is structural and needs no Lake read.
+
+**Admission decides usability; the matrix decides weight.** A registered CloudNativePG guide may contribute the steps a `Cluster` manifest task must cover. In the maintainer's matrix it never outranks policy, because vendor material there is feasibility-only. A superseded but genuine policy can inform a dated question and must not shape a plan that claims current compliance. Currentness is a separate attribute from authority, and the planner reads both.
+
+**And the two-layer split (§3) gives a cleaner boundary than either source has.** The *shape* layer — which activities, in what order, with what dependencies — is control flow, and control flow is derived only from inputs the table marks structure-eligible. The *payload* layer may draw on derived and self-generated material, with its mark travelling (§7). An attacker who poisons a derived summary can then influence what a step's content says; they cannot add a node, remove a gate, or reorder a commit. Unregistered content cannot do even that until it has been reviewed. That is the property ACE is protecting, achieved without blinding the planner.
 
 **Structural validation does not protect the data flowing between nodes.** [R3] §2.2 states it plainly: an attacker who controls a source can inject a payload that rides the plan's own data flow — the agent *"would correctly follow its plan"* while carrying malicious content into a later step. **This document has node authorization and no data-plane taint model at all.** ACE's answer is to verify concrete plans against **user-specified secure information-flow constraints**. Named here as a gap rather than solved — but with one warning about the obvious fix.
 
-**The obvious fix is monotone taint, and monotone taint is known to fail on agent workflows.** APPA [R13] states it: conventional IFC *"relies on monotone taint tracking that either over-blocks benign operations or permanently strands downstream execution once an agent ingests unvetted data."* **This matters directly here because the KLC's high-water-mark rule — a derived object takes the maximum of its inputs — is monotone taint.** Applied across a long-running plan it does exactly what APPA describes: one Tier-3 read early in a graph raises the mark for everything downstream, and the plan strands. APPA's alternative is a **dual-phase reference monitor** — prospective evaluation before tool dispatch, then validation of realised outputs before they are admitted to context — turning IFC from an abort-only barrier into a policy-governed recovery. Whatever Maknae adopts, a naive high-water mark over a plan graph is the wrong starting point.
+**The obvious fix is monotone taint, and monotone taint is known to fail on agent workflows.** APPA [R13] states it: conventional IFC *"relies on monotone taint tracking that either over-blocks benign operations or permanently strands downstream execution once an agent ingests unvetted data."* **This matters directly here because the KLC's high-water-mark rule — a derived object takes the maximum of its inputs — is monotone taint.** Applied across a long-running plan it does exactly what APPA describes: one low-standing read early in a graph raises the mark for everything downstream, and the plan strands. APPA's alternative is a **dual-phase reference monitor** — prospective evaluation before tool dispatch, then validation of realised outputs before they are admitted to context — turning IFC from an abort-only barrier into a policy-governed recovery. Whatever Maknae adopts, a naive high-water mark over a plan graph is the wrong starting point.
 
 ### 6.7 State the expressiveness boundary
 
@@ -325,7 +365,7 @@ Two bodies of work bear on it, and neither transfers whole (ruling 5). Both are 
 |---|---|---|
 | unit of governance | the **object** — tier, label, provenance, hash, per document | the **edge**, a first-class authored artifact with its own schema |
 | vocabulary | authority tiers, domains, bands, natures | six relationship types |
-| who may write | the agent **may** ingest: gap → fetch → quarantine at tier 3 | the agent writes **nothing**; one operator-authored surface |
+| who may write | three intake routes (§8.1): registered source after kernel validation, operator ingest by attestation, unregistered source only after review | the agent writes **nothing**; one operator-authored surface |
 | provenance | stamped per object at ingest, with hash | **none per edge** — the tracked file and its git history |
 | enforcement point | policy hooks at retrieval and output | schema validation and compiler rejection at build time |
 | integrity construction | the kernel is the integrity root for label state | `writer == checker`: the committed artifact byte-equals a fresh compile |
@@ -361,32 +401,39 @@ Under ruling 3 the `writer == checker` gate does not survive unchanged: with a g
 
 ## 8. The governed learning loop
 
-Ruling 3 permits agent authorship into the Lake. The [OV-1](diagrams/generated-operational-concept.svg) states how, in six steps:
+Ruling 3 permits agent authorship into the Lake. The [OV-1](diagrams/generated-operational-concept.svg) states how, and the [KLC](knowledge-lifecycle-contract.md) §8.1 is the contract behind it. The agent's own path is six steps:
 
 | | step | plane | what it establishes |
 |---|---|---|---|
 | 1 | tasked work | runtime, **untrusted** | the agent hits a knowledge gap while doing real work |
 | 2 | **request, never act** | **trust plane** | *"The runtime cannot perform a lifecycle transition. It may only ASK for one."* |
-| 3 | **fetch — authorized sources only** | **trust plane** | *"The egress allowlist is the operator's signed authority map. A source not on it is denied."* |
-| 4 | quarantine | Tier 3 | all new knowledge — ingested, generated or demoted; may inform work, may not authorize a privileged action |
-| 5 | promote, one tier per gate | trust plane | 3 → 2 → 1 on corroboration or operator sign-off; **automation can never raise a ceiling, and there is no path from Quarantine to Doctrine** |
-| 6 | authoritative | Tier 1 | applied to the next task |
+| 3 | **fetch — registered only** | **trust plane** | the egress allowlist is the operator's signed authority map; a source not on it is denied, and the gap becomes a learning request |
+| 4 | **validate, then admit** | trust plane, kernel | source identity, digest, extraction and labels checked against the registration; pass is usable at once, any exception goes to review hold |
+| 5 | placed by the matrix | authority basis | precedence comes from the authority matrix, not from the route |
+| 6 | applied | Tier 1 · Tier 2 | informs the next task; still cannot authorize a privileged action by itself |
+
+Two other routes enter the same graph: **operator ingest**, where an operator attests a specific document and it enters at its matrix position, and **review** of an unregistered source, which a reviewer resolves by registering the source, admitting the item as an operator ingest, or rejecting it. The **Tier 3 → 2 → 1 ladder** remains, for knowledge the platform produces itself: derived objects, memories and generated skills.
 
 **Step 2 is why the demand crossing in §5.1 is safe**, and it is the same boundary relied on everywhere else. The untrusted runtime does not fetch. It asks; the trust plane decides and acts. A user's task can therefore drive ingestion into a shared corpus without the user's graph ever being a content source.
 
-**Step 5 answers how an agent-authored edge is confirmed:** corroboration or operator sign-off, one tier at a time, never to Tier 0.
+**How an agent-authored edge is confirmed depends on what produced it.** An edge extracted from a registered source's document is admitted with that document, after the authority-change exception has had its look: a new or removed `supersedes` or `governs` edge touching a Tier-1 object holds for review. An edge the agent *infers* is derived content: it starts at Tier 3 and climbs by corroboration or operator sign-off, one tier at a time, never to Tier 0.
 
 **A pre-authorized source list does three jobs, not one.** The Lake's `references/lake/vendors.yaml` is the worked example — per-vendor authorized URLs, `apache` → `apache.org`, `httpd.apache.org`, `tomcat.apache.org`:
 
 1. **Security** — a search can be steered to attacker-controlled content; an allowlist keyed to the vendor's own domain cannot.
 2. **Legal exposure** — a search can land an *automated* fetcher on a trap or illegal site. An allowlist is the only form of this control that works without a human reading each result.
-3. **Authority basis** — the source determines how far content may be promoted. *"Found on the web"* has no tier.
+3. **Authority basis** — the registration fixes the issuer and issuance type, and so the ceiling content admits at. *"Found on the web"* has no tier.
 
 **One channel remains, named honestly:** gap detection fires during a user's task, so which document gets fetched is shaped by that user's work. The content is public; the fetch pattern is not necessarily. That is traffic analysis rather than content leakage — and because step 3 puts the egress in the trust plane against a signed allowlist, it runs through the one place designed to observe and bound it.
 
-**The implication for the plan graph.** The allowlist is a profile rule with a natural home: a plan node that fetches must name its source, and **a fetch node whose source is not allowlisted is an invalid graph** — refused at validation, before execution. Phase-one authorization doing exactly the work it was proposed for, composing with the runtime check rather than replacing it.
+**The implication for the plan graph.** The intake routes give the validator two checkable rules:
 
-**The OV-1's own status line belongs here:** the trust plane is **BUILT**; the Lake, skill registry, tier state machine and promotion pipeline are **NOT YET**. *"The kernel that makes the loop safe is substantially real. The loop is not."*
+1. A plan node that fetches must name its source. A fetch from a **registered** source is an ordinary node.
+2. A node naming an **unregistered** source is valid only as a learning request: its sole output edge goes to review hold, and **no node downstream of it may consume that output**. A plan in which any node consumes held content is invalid and is refused at validation, before execution. This is defence in depth: the control is hook B, which never returns held content whatever the plan says (§15.1, §15.9).
+
+That is phase-one authorization doing the work it was proposed for, composing with the runtime check rather than replacing it. The rule is reachability over typed edges, which §4.3 showed is cheap.
+
+**The OV-1's own status line belongs here:** the trust plane is **BUILT**; the Lake, the intake routes and review hold, the skill registry, the tier state machine and the promotion pipeline are **NOT YET**. *"The kernel that makes the loop safe is substantially real. The loop is not."*
 
 ---
 
@@ -1023,7 +1070,7 @@ Listed so nothing here is mistaken for evidence.
 6. **Comprehension rot is unmeasured** (§12), as is whether progressive disclosure actually reduces execution-time context (§17).
 7. **No storage-backend evidence** for a structured graph layer, air-gapped or otherwise.
 8. **The cost of this control is unbudgeted here, and the comparable numbers are not small.** §6.8 proposes two authorization phases and never says what they cost in legitimate work refused. The closest measured analogues (§12.18): recoverable IFC runs **83–92 utility against an unguarded 100–117** on AgentThreatBench, and loses **53 points** when its recovery paths are ablated away; ACE's phase separation costs **36% of task utility** on two of ten ASB scenarios; two Fides policies block **all 30 authorized deliveries** alongside all 30 unauthorized ones. **A design that refuses correct plans is a design nobody runs.** Whatever Maknae's figure turns out to be, it belongs in the evaluation from the start, not discovered in deployment — and §12.18 notes that our binary `Permit`/`Deny` composition lacks the graduated third outcome the one zero-false-denial result in the corpus attributes its result to.
-9. **Multi-principal shared memory is asserted, not designed.** §7 and §8 hold that the Lake is shared, the per-user graphs are not, and the platform mediates between them. That is a position, not a mechanism, and there is now a named literature for it — GateMem, Collaborative Memory, CalBench (§12.18) — none of which this document has read. The governance claim in §8 should not be treated as settled until it has.
+9. **Multi-principal shared memory is asserted, not designed.** §7 and §8 hold that the Lake is shared, the per-user graphs are not, and the platform mediates between them. The [graph-native memory idea](graph-native-memory-idea.md#one-graph-model-two-spaces) supplies a reference rule (private may point to shared by ID, shared never points into private), but that is still a position, not a mechanism, and there is now a named literature for it — GateMem, Collaborative Memory, CalBench (§12.18) — none of which this document has read. The governance claim in §8 should not be treated as settled until it has.
 
 ## 17. The limitation the field states, which is this document's deferred item
 
@@ -1068,7 +1115,9 @@ What it asks for instead — **intervention studies, structural ablations, and e
 - Does a validated plan need a **third outcome**? The composition is binary; the one zero-false-denial result in the corpus credits a graduated `APPROVED / ESCALATED / DENIED` model for it (§12.18). A node that neither runs nor fails the plan but suspends for a decision would change what phase two can be, and what §6.4's recovery state machine has to carry.
 - Under fan-out, is the accumulation register keyed to the **plan** or to the **worker**? Keyed to the worker, N parallel branches buy N times the pre-enforcement allowance, measured exactly linear at `CW = 2N` (§12.18). Keyed to the plan, a well-behaved branch inherits a badly-behaved sibling's history. Neither is obviously right and the document assumes neither.
 - Who may author a plan graph, and what defends the planning phase itself? FlowSteer (§12.18) is an attack on exactly that surface and is unread here.
-- §5.3's retention conflict.
+- How long does a subject's plan payload persist by default once its audit events are written (§5.3)?
+- Is `(GraphSpace, level)` the right partition key for the shared store, or does index-leak exposure argue for a finer one (§5.4)? Unmeasured either way.
+- When a registered source's update changes an authority edge, the update holds for review (§8). How large must a change be to count? Every `supersedes` touching a Tier-1 object is the floor; whether a reworded passage cited by an active plan also counts is open.
 
 *The plans measured are `2026-09-06-148-154-ceiling-composition.md` and `2026-09-10-276-strike-reserved-agent-token.md` in the maintainer's out-of-repo plan store, per the AGENTS.md rule that specs and plans never live in this repository. The conversion artifacts were throwaway and are not committed.*
 
@@ -1127,7 +1176,8 @@ Full text at `knowledgebase/research/`, with the findings synthesis at `knowledg
 | [`design/diagrams/generated-operational-concept.svg`](diagrams/generated-operational-concept.svg) — the OV-1 and the governed learning loop | §8 |
 | [`references/2026-09-25-jive-assessment.md`](references/2026-09-25-jive-assessment.md) — the graph-call primitive; the provenance standard this document is held to | §Origin, §6.3, §16 item 1 |
 | [`references/2026-09-22-system-one-models-jev-assessment.md`](references/2026-09-22-system-one-models-jev-assessment.md) — untested classifier calibration | §6.2 |
-| [`design/knowledge-lifecycle-contract.md`](knowledge-lifecycle-contract.md) — object-layer governance; **not current on edges** | §7 |
+| [`design/knowledge-lifecycle-contract.md`](knowledge-lifecycle-contract.md) — object-layer governance and the §8.1 intake routes; **not current on edges** | §5, §6.6, §7, §8 |
+| [`design/graph-native-memory-idea.md`](graph-native-memory-idea.md) — the record envelope, two-space reference rule, `graph.*` actions, storage segmentation | §1, §5.3, §5.4, §16 item 9 |
 | [`design/self-development.md`](self-development.md) — PRs are human-gated | §12 |
 | Knowledge Lake `references/lake/edges.yaml`, `schemas/edges.schema.json` v1, `lib/lake/_edge_graph.py`, `references/lake/vendors.yaml` | §7.1, §8 |
 

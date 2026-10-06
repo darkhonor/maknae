@@ -12,7 +12,7 @@
 
 ## 1. Principles
 
-1. **One trust plane, few trusted containers.** The kernel and the egress enforcement point are the only containers whose compromise defeats the architecture. Everything else is constrained by them, not trusted alongside them.
+1. **One trust plane, few trusted containers.** The kernel and the egress enforcement point are the only containers whose compromise defeats the architecture. A trust-plane lake storage service, if the lake's storage is split out of the kernel (proposed, not decided), would be a third, under the same Rust TCB rule (ADR-0002). Everything else is constrained by them, not trusted alongside them.
 2. **Language per action.** Precedent is the operator's Security MCP server (Go gateway/query services, Python parser, Rust proxy, TypeScript UI): pick the language whose ecosystem and guarantees fit the container's job, not a house language. Pattern inheritance from the upstreams is language-independent (autopsy, open item 3).
 3. **The runtime plane is untrusted by design** (KLC §3). Its containers get velocity-optimized languages; correctness is enforced at the kernel boundary, not assumed in the runtime.
 4. **Both deployment models from birth.** Every container ships with a Compose/Podman definition and a Kubernetes manifest, STIG-default configurations and baselines assumed. Volumes are declared per container (§4); in Kubernetes, kernel-mediated flows become NetworkPolicies; in Compose, internal networks + the egress proxy enforce the same shape (TaeBot's scoped nftables table is the host-level reference).
@@ -24,6 +24,7 @@
 |---|---|---|---|---|---|
 | 1 | `kernel` | Trust | **Trusted** | **Rust** | **Ratified** |
 | 2 | `egress-proxy` | Trust | **Trusted** | **Rust** | Proposed |
+| 2a | `lake-store` | Trust | **Trusted** | **Rust** | Option only: lake storage I/O and intake hold, commanded by the kernel alone; otherwise this lives in `kernel` |
 | 3 | `gateway` | Interaction | Security-relevant | **Go** | Proposed |
 | 4 | `runtime` | Runtime | Untrusted by design | **Python** | Proposed |
 | 5 | `lake` | Runtime (PIP) | Untrusted by design | **Python** | Proposed |
@@ -39,7 +40,7 @@ Durable **operational-state storage** (per-operator session state, scheduler tas
 
 ### 3.1 `kernel` — Rust (ratified)
 
-The trust plane: PDP (the sole policy decision point, ADR-0005), label-schema enforcement, all six KLC hooks, skill-registry signature verification, and the append-only audit writer. Rationale for Rust: memory-safety CSI alignment (the language choice is a citable control), KLC §15 invariants encoded in the type system (illegal states unrepresentable — a `tier_ceiling` automation cannot raise, a downgrade constructible only from a consumed signed authorization), FIPS 140-3 via `aws-lc-rs` (Microkosmos precedent), static binary into a distroless/from-scratch image (TaeBot pattern). The kernel reaches policy through the **policy-agnostic `maknae-security` seam** and composes pluggable `maknae-authz-*` backends deny-overrides ([ADR-0004](adr/ADR-0004-modular-authorization-architecture.md), [ADR-0020](adr/ADR-0020-access-control-model-and-vocabulary.md)).
+The trust plane: PDP (the sole policy decision point, ADR-0005), label-schema enforcement, all six KLC hooks, intake staging and review hold (KLC §8.1), skill-registry signature verification, and the append-only audit writer. Rationale for Rust: memory-safety CSI alignment (the language choice is a citable control), KLC §15 invariants encoded in the type system (illegal states unrepresentable — a `tier_ceiling` automation cannot raise, a downgrade constructible only from a consumed signed authorization), FIPS 140-3 via `aws-lc-rs` (Microkosmos precedent), static binary into a distroless/from-scratch image (TaeBot pattern). The kernel reaches policy through the **policy-agnostic `maknae-security` seam** and composes pluggable `maknae-authz-*` backends deny-overrides ([ADR-0004](adr/ADR-0004-modular-authorization-architecture.md), [ADR-0020](adr/ADR-0020-access-control-model-and-vocabulary.md)).
 
 ### 3.2 `egress-proxy` — Rust (proposed)
 
@@ -59,7 +60,7 @@ The agent loop: LLM conversation orchestration, tool invocation (via kernel-medi
 
 ### 3.5 `lake` — Python (proposed)
 
-The portable Knowledge Lake instance plus the memory subsystem: quarantine ingest, label stamping (as directed by kernel decisions), retrieval serving (per-subject filtered context assembly), FTS-style memory recall. Python is inherited by construction — the lake framework tooling (compilers, gates, edge graph, query contracts from knowledgebase #201) is Python, and Maknae consumes it as the same artifact, not a port. Memory co-locates here at MVP (both are labeled-markdown-plus-index stores with one governance model); splits later if access patterns diverge.
+The portable Knowledge Lake instance plus the memory subsystem: label stamping (as directed by kernel decisions), retrieval serving (per-subject filtered context assembly), FTS-style memory recall. Python is inherited by construction — the lake framework tooling (compilers, gates, edge graph, query contracts from knowledgebase #201) is Python, and Maknae consumes it as the same artifact, not a port. Memory co-locates here at MVP (both are labeled-markdown-plus-index stores with one governance model); splits later if access patterns diverge.
 
 ### 3.6 `dreamer` — Python (proposed)
 
@@ -78,6 +79,7 @@ HashiCorp Vault Agent sidecar per service that needs secrets: AppRole auto-auth,
 | Volume | Mounted by | Notes |
 |---|---|---|
 | `lake-data` | kernel (rw), lake (ro), dreamer (ro) | The governed corpus; git-backed. **Corrected 2026-08-30 per [KLC](knowledge-lifecycle-contract.md) §6.1 (issue #2):** the frontmatter *is* the tier state, so the untrusted containers previously held `rw` on label state while the only trusted container was read-only. Writes are brokered through a kernel API |
+| `intake-hold` | kernel (rw), or a trust-plane lake storage service the kernel alone commands | Content that passed the pre-transfer admission boundary, awaiting admission or review, at system high until labeled (KLC §8.1). No runtime-plane container mounts it, the `dreamer` included |
 | `audit-log` | kernel (append-only) | Export/replication path is a later, kernel-mediated feature |
 | `skill-registry` | kernel (rw), runtime (ro via kernel grants) | Signed manifests |
 | `authority-config` | kernel (ro) | Tier 0: authority map, operator attributes, lattice + instance ceiling; changes arrive as signed commits, not writes |

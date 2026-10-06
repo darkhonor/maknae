@@ -1,40 +1,78 @@
-<svg width="680" height="560" viewBox="0 0 680 560" xmlns="http://www.w3.org/2000/svg" role="img">
-  <title>Maknae self-learning knowledge lifecycle</title>
-  <desc>Five stage flow: task gap detected, fetch from authorized source, quarantine tier, consolidation and promotion, trusted local retrieval. Retrieved knowledge serves future tasks without internet round trips.</desc>
-  <defs>
-    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-      <path d="M2 1L8 5L2 9" fill="none" stroke="#5F5E5A" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
-  </defs>
-  <rect x="0" y="0" width="680" height="560" fill="#FFFFFF"/>
-
-  <rect x="200" y="40" width="280" height="56" rx="8" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-  <text x="340" y="62" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#2C2C2A">Task gap detected</text>
-  <text x="340" y="82" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#5F5E5A">Agent lacks the how-to</text>
-
-  <line x1="340" y1="96" x2="340" y2="132" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
-
-  <rect x="200" y="136" width="280" height="56" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
-  <text x="340" y="158" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#04342C">Authorized fetch</text>
-  <text x="340" y="178" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#0F6E56">Authority map picks sources</text>
-
-  <line x1="340" y1="192" x2="340" y2="228" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
-
-  <rect x="200" y="232" width="280" height="56" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
-  <text x="340" y="254" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#26215C">Quarantine tier</text>
-  <text x="340" y="274" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#534AB7">Labeled, provenance stamped</text>
-
-  <line x1="340" y1="288" x2="340" y2="324" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
-
-  <rect x="200" y="328" width="280" height="56" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
-  <text x="340" y="350" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#26215C">Consolidation + promotion</text>
-  <text x="340" y="370" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#534AB7">Dreaming, validation, tiering</text>
-
-  <line x1="340" y1="384" x2="340" y2="420" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
-
-  <rect x="200" y="424" width="280" height="56" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
-  <text x="340" y="446" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#04342C">Trusted local retrieval</text>
-  <text x="340" y="466" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#0F6E56">Serves all future tasks</text>
-
-  <text x="340" y="520" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#5F5E5A">&#8635; next gap starts the loop again — no repeated internet round trips</text>
+<svg width="820" height="696" viewBox="0 0 820 696" xmlns="http://www.w3.org/2000/svg" role="img">
+  <title>Maknae knowledge lifecycle — intake routes (KLC v0.4)</title>
+  <desc>Three intake routes. A registered source is fetched autonomously by the agent; an operator ingests documents no tool can reach; an unregistered source yields only a learning request. Before any byte is accepted, the source accredited maximum must be dominated by the instance ceiling; otherwise nothing is transferred. Accepted content is held at system high until labeled. A marking above the ceiling found later is handled as a data spill; content passing its checks is admitted at its authority-matrix position; a failed check goes to review hold, which informs nothing until a reviewer registers the source, attests the item, or rejects it. Admitted knowledge advises the next task as cited data, never instructions. Self-generated knowledge climbs Tier 3 to 2 to 1.</desc>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#5F5E5A" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker><marker id="ok" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#0F6E56" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker><marker id="bad" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#A32D2D" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker><marker id="hold" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#854F0B" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker><marker id="auth" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#3C3489" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+  <rect x="0" y="0" width="820" height="696" fill="#FFFFFF"/>
+<rect x="30" y="24" width="240" height="48" rx="8" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.9"/>
+<text x="150.0" y="46" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#2C2C2A">Tasked work hits a gap</text>
+<text x="150.0" y="65" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="11.5" fill="#5F5E5A">runtime · untrusted</text>
+<rect x="290" y="24" width="240" height="48" rx="8" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.9"/>
+<text x="410.0" y="46" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#2C2C2A">Operator has a document</text>
+<text x="410.0" y="65" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="11.5" fill="#5F5E5A">e.g. a hand-downloaded policy PDF</text>
+<rect x="550" y="24" width="240" height="48" rx="8" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.9"/>
+<text x="670.0" y="46" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#2C2C2A">Agent names an unknown source</text>
+<text x="670.0" y="65" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="11.5" fill="#5F5E5A">not in the authority map</text>
+<path d="M150 72 V94" fill="none" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<path d="M410 72 V94" fill="none" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<path d="M670 72 V94" fill="none" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<rect x="30" y="96" width="240" height="76" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.9"/>
+<text x="150.0" y="118" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#04342C">Registered source</text>
+<text x="150.0" y="137" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="11.5" fill="#0F6E56">agent fetches, autonomously</text>
+<text x="150.0" y="153" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="11.5" fill="#0F6E56">EO by FR doc number · CNPG docs</text>
+<rect x="290" y="96" width="240" height="76" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.9"/>
+<text x="410.0" y="118" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#26215C">Operator ingest</text>
+<text x="410.0" y="137" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="11.5" fill="#534AB7">operator submits · agent extracts</text>
+<text x="410.0" y="153" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="11.5" fill="#534AB7">operator attests issuer and level</text>
+<rect x="550" y="96" width="240" height="76" rx="8" fill="#FAEEDA" stroke="#854F0B" stroke-width="0.9" stroke-dasharray="5 4"/>
+<text x="670.0" y="118" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#412402">Unregistered source</text>
+<text x="670.0" y="137" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="11.5" fill="#854F0B">learning request only</text>
+<text x="670.0" y="153" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="11.5" fill="#854F0B">the kernel never fetches it</text>
+<path d="M150 172 V204" fill="none" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<path d="M410 172 V204" fill="none" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<line x1="30" y1="189" x2="530" y2="189" stroke="#A32D2D" stroke-width="1.2" stroke-dasharray="2 3"/>
+<text x="160" y="185" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#A32D2D">boundary: source max ≤ ceiling, pre-transfer</text>
+<text x="160" y="201" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="normal" fill="#A32D2D">unestablished → no transfer</text>
+<rect x="30" y="206" width="500" height="68" rx="8" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.9"/>
+<text x="280.0" y="228" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#2C2C2A">Staged at system high — kernel intake hold</text>
+<text x="280.0" y="247" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="11.5" fill="#5F5E5A">only after the admission boundary passes; label = most</text>
+<text x="280.0" y="263" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="11.5" fill="#5F5E5A">restrictive of submitter assertion and extraction findings</text>
+<path d="M670 172 V308" fill="none" stroke="#854F0B" stroke-width="1.5" marker-end="url(#hold)"/>
+<path d="M140 274 V308" fill="none" stroke="#A32D2D" stroke-width="1.5" marker-end="url(#bad)"/>
+<text x="146" y="289" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#A32D2D">marking above</text>
+<text x="146" y="301" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#A32D2D">ceiling found</text>
+<path d="M410 274 V308" fill="none" stroke="#0F6E56" stroke-width="1.5" marker-end="url(#ok)"/>
+<text x="416" y="294" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#0F6E56">checks pass</text>
+<path d="M530 240 H600 V308" fill="none" stroke="#854F0B" stroke-width="1.5" marker-end="url(#hold)"/>
+<text x="536" y="234" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#854F0B">a check fails</text>
+<rect x="30" y="310" width="220" height="72" rx="8" fill="#FCEBEB" stroke="#A32D2D" stroke-width="0.9"/>
+<text x="140.0" y="332" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#501313">Data spill</text>
+<text x="140.0" y="351" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="11.5" fill="#A32D2D">contain · purge · report</text>
+<text x="140.0" y="367" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="11.5" fill="#A32D2D">admitting source suspended</text>
+<rect x="290" y="310" width="240" height="72" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.9"/>
+<text x="410.0" y="332" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#04342C">Admitted at its matrix position</text>
+<text x="410.0" y="351" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="11.5" fill="#0F6E56">one audited commit</text>
+<text x="410.0" y="367" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="11.5" fill="#0F6E56">Tier 1 · 2 · 3 by the authority basis</text>
+<rect x="550" y="310" width="240" height="72" rx="8" fill="#FAEEDA" stroke="#854F0B" stroke-width="0.9" stroke-dasharray="5 4"/>
+<text x="670.0" y="332" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#412402">Review hold</text>
+<text x="670.0" y="351" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="11.5" fill="#854F0B">informs nothing — not content,</text>
+<text x="670.0" y="367" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="11.5" fill="#854F0B">not plan structure</text>
+<path d="M600 382 V408 H480 V386" fill="none" stroke="#854F0B" stroke-width="1.5" marker-end="url(#hold)"/>
+<text x="540" y="422" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#854F0B">reviewer registers the source or attests</text>
+<path d="M730 382 V440" fill="none" stroke="#854F0B" stroke-width="1.5" marker-end="url(#hold)"/>
+<rect x="640" y="442" width="150" height="50" rx="8" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.9"/>
+<text x="715.0" y="464" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#2C2C2A">Purged</text>
+<text x="715.0" y="483" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="11.5" fill="#5F5E5A">rejected · audit kept</text>
+<path d="M410 382 V448" fill="none" stroke="#0F6E56" stroke-width="1.5" marker-end="url(#ok)"/>
+<rect x="290" y="450" width="240" height="86" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.9"/>
+<text x="410.0" y="472" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#04342C">Retrieval — advises</text>
+<text x="410.0" y="491" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="11.5" fill="#0F6E56">requirements and constraints,</text>
+<text x="410.0" y="507" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="11.5" fill="#0F6E56">cited as data — never instructions</text>
+<text x="410.0" y="523" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="11.5" fill="#0F6E56">the PDP decides every read</text>
+<path d="M290 493 H12 V48 H28" fill="none" stroke="#5F5E5A" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arrow)"/>
+<text x="150" y="486" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#5F5E5A">…the next task starts better informed</text>
+<rect x="30" y="566" width="760" height="60" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.9"/>
+<text x="410.0" y="588" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#26215C">Self-generated knowledge — derived objects, memories, skills</text>
+<text x="410.0" y="607" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="11.5" fill="#534AB7">enters Tier 3 and climbs one gate at a time, on corroboration or operator sign-off · never to Tier 0</text>
+<text x="410" y="656" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#5F5E5A">Red: boundary and spill · Amber: held, informs nothing · Green: usable · Admission is not promotion</text>
+<text x="410" y="676" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#5F5E5A">KLC v0.4 §8.1 · the agent fetches only registered sources; everything else waits for a human</text>
 </svg>
