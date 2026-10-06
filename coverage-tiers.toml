@@ -266,6 +266,7 @@ files = [
   "crates/maknae-sys/src/reply.rs",
   "crates/maknae-sys/src/macos.rs",
   # The kernel graph's schema and codec (#485): a wrong check loads a forged or rolled-back enforcement state.
+  "crates/maknae-graph/src/graph.rs",
   "crates/maknae-graph/src/record.rs",
   "crates/maknae-graph/src/schema.rs",
 ]
