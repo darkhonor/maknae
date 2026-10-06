@@ -225,10 +225,9 @@ pub(crate) const DEGRADED_TOKEN_MAX: usize = 48;
 /// the record in the JSONL — so no digest is carried and no hash primitive is
 /// added to this crate.
 ///
-/// `MAKNAE_PRIMARY` rides along because three of [`PrimaryOutcome`]'s five
-/// values mean the primary never wrote and a fourth leaves it unconfirmed; a
-/// marker that says "read the JSONL" for a record that was never written is
-/// worse than silence.
+/// `MAKNAE_PRIMARY` carries a degradation hint: `primary-did-not-write` for
+/// refusals, `primary-write-failed` for durable-write failures, `primary-unconfirmed`
+/// for unconfirmed writes, or `read-primary-jsonl` for durable writes.
 pub(crate) enum Mirrored {
     Full(String),
     Degraded(String),
@@ -472,11 +471,11 @@ mod tests {
         assert!(!l.contains("MAKNAE_RECORD="), "{l}");
     }
 
-    /// Both branches of the primary-outcome test. Kills `== -> !=`.
+    /// Each `PrimaryOutcome` gets its own degradation hint. Kills `== -> !=`.
     ///
-    /// The distinction is load-bearing: three of `PrimaryOutcome`'s five values
-    /// mean the primary never wrote, and a marker that says "read the
-    /// JSONL" for a record that was never written is worse than silence.
+    /// The hint directly indicates whether the primary wrote: durable writes
+    /// point to the JSONL, partial/failed writes indicate the specific state,
+    /// and refusals indicate no write occurred.
     #[test]
     fn the_degraded_line_only_points_at_a_primary_that_actually_wrote() {
         let mut r = rec("no");

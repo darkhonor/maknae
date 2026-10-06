@@ -176,8 +176,7 @@ pub(crate) fn summary_line(f: &RecordFields<'_>) -> String {
 ///
 /// Same discipline as the macOS degraded line — `session_id` + `seq` ARE the
 /// pointer into the primary JSONL, so no digest and no payload; `MAKNAE_PRIMARY`
-/// rides along because three of [`PrimaryOutcome`]'s five values mean the
-/// primary never wrote, and a fourth leaves it unconfirmed.
+/// carries a hint indicating write status for each outcome.
 pub(crate) fn encode_degraded(rec: &AuditRecord, primary: PrimaryOutcome) -> Vec<u8> {
     let f = fields_of(rec, primary);
     // Exhaustive on purpose: a new variant must choose its hint.
