@@ -1236,6 +1236,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = cfg_at(dir.path());
         let sink = AuditSink::open(&cfg).unwrap();
+        assert!(sink.mirror.is_some(), "the unified-log mirror must open");
 
         // TWO nonces. The oversize record is DROPPED by the formatter, so if it
         // shared the sentinel's nonce the negative could not be expressed at all.
@@ -1316,6 +1317,15 @@ mod tests {
         // passes with the two refusal markers SWAPPED, and sink.rs is
         // mutation-excluded, so nothing else would catch that swap on macOS.
         let dir = tempfile::tempdir().unwrap();
+        // A mirror that failed to open never delivers; fail now rather than
+        // burn the polling ceiling.
+        assert!(
+            AuditSink::open(&cfg_at(dir.path()))
+                .unwrap()
+                .mirror
+                .is_some(),
+            "the unified-log mirror must open"
+        );
 
         // ok
         let n_ok = macos_nonce();
@@ -1455,6 +1465,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let sink = AuditSink::open(&cfg_at(dir.path())).unwrap();
+        assert!(sink.mirror.is_some(), "the unified-log mirror must open");
         sink.append(&at_cap).await.unwrap();
 
         let msgs = macos_await_nonce_for(&at_cap, nonce);
