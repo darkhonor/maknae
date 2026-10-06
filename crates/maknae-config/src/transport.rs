@@ -524,11 +524,19 @@ mod tests {
 
     #[test]
     fn the_content_write_bound_is_the_read_timeout_plus_the_daemons_pre_read_bounds() {
-        let t = TransportConfig { read_timeout_ms: 7_000, ..TransportConfig::default() };
+        let t = TransportConfig {
+            read_timeout_ms: 7_000,
+            ..TransportConfig::default()
+        };
         assert_eq!(
             content_write_bound(&t),
-            std::time::Duration::from_millis(7_000 + GROUP_LOOKUP_TIMEOUT_MS + ADMISSION_AUDIT_TIMEOUT_MS)
+            std::time::Duration::from_millis(
+                7_000 + GROUP_LOOKUP_TIMEOUT_MS + ADMISSION_AUDIT_TIMEOUT_MS
+            )
         );
-        assert_eq!(content_write_bound(&t), std::time::Duration::from_millis(17_000));
+        assert_eq!(
+            content_write_bound(&t),
+            std::time::Duration::from_millis(17_000)
+        );
     }
 }
