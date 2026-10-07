@@ -127,6 +127,10 @@ impl GraphBuilder {
         self
     }
 
+    pub(crate) fn nodes(&self) -> &[NodeRecord] {
+        &self.nodes
+    }
+
     pub fn build(self, schema: &Schema, compiled: &CompiledSet) -> Result<Graph, GraphError> {
         self.build_encoded(schema, compiled).map(|(g, _)| g)
     }

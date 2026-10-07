@@ -272,6 +272,8 @@ files = [
   "crates/maknae-graph/src/bytes.rs",
   "crates/maknae-graph/src/format.rs",
   "crates/maknae-graph/src/graph.rs",
+  "crates/maknae-graph/src/identity.rs",
+  "crates/maknae-graph/src/kernel.rs",
   "crates/maknae-graph/src/record.rs",
   "crates/maknae-graph/src/schema.rs",
   # The kernel graph store at rest (#488): a wrong check loads a forged, rolled-back or undecryptable enforcement state.
@@ -813,10 +815,6 @@ why = "cfg-selected path constants only; no executable production regions — sa
 [[t3]]
 path = "crates/maknae-state/src/lib.rs"
 why = "crate rustdoc and module declarations only; no executable production regions — same treatment as maknae-io/src/lib.rs"
-
-[[t3]]
-path = "crates/maknae-graph/src/kernel.rs"
-why = "the kernel schema's constant tables only; no executable production regions. Unit tests pin every triple, the compiled kinds and the adversary target; schema.rs and graph.rs (T1) enforce them"
 
 [[t3]]
 path = "crates/maknae-io/src/error.rs"

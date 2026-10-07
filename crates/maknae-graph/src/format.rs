@@ -4,7 +4,7 @@ use crate::record::{
     AttrValue, Attrs, EdgeId, EdgeKind, EdgeRecord, GraphSpace, NodeId, NodeKind, NodeRecord,
     Provenance, ProvenanceKind, SubjectId,
 };
-use crate::schema::{CompiledSet, Schema};
+use crate::schema::{CompiledNode, CompiledSet, Schema};
 use std::fmt;
 
 pub const MAGIC: [u8; 4] = *b"MKNG";
@@ -210,6 +210,48 @@ pub fn decode(
     schema: &Schema,
     compiled: &CompiledSet,
 ) -> Result<Graph, FormatError> {
+    let b = parse(bytes, expected, schema)?;
+    rebuild_canonical(b, bytes, schema, compiled)
+}
+
+pub fn decode_stored_compiled(
+    bytes: &[u8],
+    expected: GraphSpace,
+    schema: &Schema,
+) -> Result<(Graph, CompiledSet), FormatError> {
+    let b = parse(bytes, expected, schema)?;
+    let stored = CompiledSet::new(
+        b.nodes()
+            .iter()
+            .filter(|n| n.provenance.kind == ProvenanceKind::Compiled)
+            .map(|n| CompiledNode {
+                kind: n.kind,
+                key: n.key.clone(),
+                label: n.label.clone(),
+                attrs: n.attrs.clone(),
+            })
+            .collect(),
+    );
+    let g = rebuild_canonical(b, bytes, schema, &stored)?;
+    Ok((g, stored))
+}
+
+fn rebuild_canonical(
+    b: GraphBuilder,
+    bytes: &[u8],
+    schema: &Schema,
+    compiled: &CompiledSet,
+) -> Result<Graph, FormatError> {
+    let (g, encoded) = b
+        .build_encoded(schema, compiled)
+        .map_err(FormatError::Graph)?;
+    if encoded != bytes {
+        return Err(FormatError::NonCanonical);
+    }
+    Ok(g)
+}
+
+fn parse(bytes: &[u8], expected: GraphSpace, schema: &Schema) -> Result<GraphBuilder, FormatError> {
     let mut r = Reader::new(bytes);
     if r.take(4)? != MAGIC {
         return Err(FormatError::BadMagic);
@@ -305,13 +347,7 @@ pub fn decode(
     if attrs.len() != 0 {
         return Err(FormatError::BadAttrRange);
     }
-    let (g, encoded) = b
-        .build_encoded(schema, compiled)
-        .map_err(FormatError::Graph)?;
-    if encoded != bytes {
-        return Err(FormatError::NonCanonical);
-    }
-    Ok(g)
+    Ok(b)
 }
 
 fn string_table(g: &Graph) -> Vec<&str> {
@@ -527,6 +563,156 @@ fn take_attrs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::identity::{build, IdentityLayer, SubjectEntry};
+    use crate::kernel::{persisted_compiled_set, SCHEMA};
+
+    fn edge_at(bytes: &[u8], i: usize) -> usize {
+        let at = HEADER_LEN + 2 * 16;
+        let off = u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap()) as usize;
+        off + 4 + i * EDGE_LEN
+    }
+
+    #[test]
+    fn decode_stored_compiled_reads_a_store_from_another_vocabulary_and_reports_its_set() {
+        let roles = persisted_compiled_set("UNCLASSIFIED");
+        let g = build(
+            &IdentityLayer {
+                source: "p".into(),
+                label: "UNCLASSIFIED".into(),
+                bindings_sha256: None,
+                subjects: vec![],
+            },
+            &roles,
+            [1; 32],
+            3,
+            ProvenanceKind::Seed,
+        )
+        .unwrap();
+        let bytes = encode(&g);
+        assert!(matches!(
+            decode(&bytes, GraphSpace::Kernel, &SCHEMA, &CompiledSet::default()),
+            Err(FormatError::Graph(GraphError::CompiledMismatch { .. }))
+        ));
+        let (g2, stored) = decode_stored_compiled(&bytes, GraphSpace::Kernel, &SCHEMA).unwrap();
+        assert_eq!(g2, g);
+        assert_eq!(stored.canonical_bytes(), roles.canonical_bytes());
+        let empty = encode(
+            &GraphBuilder::new(GraphSpace::Kernel, 1)
+                .build(&SCHEMA, &CompiledSet::default())
+                .unwrap(),
+        );
+        let (_, s) = decode_stored_compiled(&empty, GraphSpace::Kernel, &SCHEMA).unwrap();
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn decode_stored_compiled_still_judges_compiled_revision_and_transition() {
+        let roles = persisted_compiled_set("UNCLASSIFIED");
+        let layer = IdentityLayer {
+            source: "p".into(),
+            label: "UNCLASSIFIED".into(),
+            bindings_sha256: None,
+            subjects: vec![],
+        };
+        let g = build(&layer, &roles, [1; 32], 3, ProvenanceKind::Seed).unwrap();
+        let admin = g.lookup(crate::kernel::ROLE, "admin").unwrap().id;
+        let bytes = encode(&g);
+        let at = {
+            let at = HEADER_LEN + 16;
+            let off = u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap()) as usize;
+            off + 4 + (admin.0 as usize - 1) * NODE_LEN
+        };
+        for field in [32usize, 40] {
+            let mut m = bytes.clone();
+            m[at + field] = 1;
+            assert_eq!(
+                decode_stored_compiled(&m, GraphSpace::Kernel, &SCHEMA).unwrap_err(),
+                FormatError::Graph(GraphError::CompiledMismatch {
+                    kind: crate::kernel::ROLE,
+                    key: "admin".into()
+                }),
+                "field {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn decode_stored_compiled_still_refuses_every_non_compiled_defect() {
+        let roles = persisted_compiled_set("UNCLASSIFIED");
+        let g = build(
+            &IdentityLayer {
+                source: "p".into(),
+                label: "UNCLASSIFIED".into(),
+                bindings_sha256: Some([3; 32]),
+                subjects: vec![SubjectEntry {
+                    uid: 7,
+                    name: "a".into(),
+                    role: "user".into(),
+                }],
+            },
+            &roles,
+            [1; 32],
+            3,
+            ProvenanceKind::Seed,
+        )
+        .unwrap();
+        let good = encode(&g);
+        let kernel = GraphSpace::Kernel;
+        let both = |bytes: &[u8]| {
+            (
+                decode(bytes, kernel, &SCHEMA, &roles).unwrap_err(),
+                decode_stored_compiled(bytes, kernel, &SCHEMA).unwrap_err(),
+            )
+        };
+        for n in 0..good.len() {
+            let (a, b) = both(&good[..n]);
+            assert_eq!(a, b, "truncated at {n}");
+        }
+        let mut m = good.clone();
+        m[0] = b'X';
+        assert_eq!(both(&m), (FormatError::BadMagic, FormatError::BadMagic));
+        assert_eq!(
+            decode_stored_compiled(&good, GraphSpace::Shared, &SCHEMA).unwrap_err(),
+            decode(&good, GraphSpace::Shared, &SCHEMA, &roles).unwrap_err()
+        );
+
+        assert_eq!(g.edges().len(), 3);
+        let (e0, e1) = (edge_at(&good, 0), edge_at(&good, 1));
+        let mut m = good.clone();
+        let first = good[e0..e0 + EDGE_LEN].to_vec();
+        m.copy_within(e1..e1 + EDGE_LEN, e0);
+        m[e1..e1 + EDGE_LEN].copy_from_slice(&first);
+        assert_eq!(
+            both(&m),
+            (FormatError::NonCanonical, FormatError::NonCanonical)
+        );
+
+        let mut m = good.clone();
+        m[e0 + 16..e0 + 24].copy_from_slice(&999u64.to_le_bytes());
+        let dangling = FormatError::Graph(GraphError::DanglingEdge(g.edges()[0].id));
+        assert_eq!(both(&m), (dangling.clone(), dangling));
+
+        let subject = g.lookup(crate::kernel::SUBJECT, "uid:7").unwrap().id;
+        let mut m = good.clone();
+        m[e0 + 16..e0 + 24].copy_from_slice(&subject.0.to_le_bytes());
+        let forbidden = FormatError::Graph(GraphError::ForbiddenTriple {
+            from: g.node(g.edges()[0].from).unwrap().kind,
+            edge: g.edges()[0].kind,
+            to: crate::kernel::SUBJECT,
+        });
+        assert_eq!(both(&m), (forbidden.clone(), forbidden));
+
+        for i in 0..SECTIONS_START {
+            let mut f = good.clone();
+            f[i] ^= 1;
+            let a = decode(&f, kernel, &SCHEMA, &roles);
+            let b = decode_stored_compiled(&f, kernel, &SCHEMA);
+            assert_eq!(a.is_ok(), b.is_ok(), "byte {i}");
+            if let (Err(a), Err(b)) = (a, b) {
+                assert_eq!(a, b, "byte {i}");
+            }
+        }
+    }
 
     #[test]
     fn expansion_limit_allows_equality_and_refuses_one_past() {
