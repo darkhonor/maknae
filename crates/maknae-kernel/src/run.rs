@@ -2974,15 +2974,15 @@ impl<E: AuditEmit + Send + Sync> BootAudit for GraphBootAudit<'_, E> {
         authorized: bool,
     ) -> impl Future<Output = Result<(), StoreError>> + Send {
         let reason = if authorized {
-            "reseed-authorized"
+            "intent recorded (reseed-authorized)"
         } else {
-            "first-boot"
+            "intent recorded (first-boot)"
         };
         let rec = self.ctx.record(
             GRAPH_SEED_ACTION,
             "permit",
             reason,
-            "intent",
+            "authorized",
             Some(GraphAudit {
                 revision,
                 ciphertext_sha256: String::new(),
@@ -4516,7 +4516,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             };
             let (seed, ckpt) = (at("graph.seed"), at("graph.checkpoint"));
             assert!(at("authz") < seed && seed < ckpt && ckpt < at("posture"));
-            assert_eq!(recs[seed].outcome.posture, "intent");
+            assert_eq!(recs[seed].outcome.posture, "authorized");
             assert_eq!(recs[seed].graph.as_ref().unwrap().revision, 1);
             let g = recs[ckpt].graph.as_ref().unwrap();
             assert_eq!((g.revision, g.anchor.as_str()), (1, "seeded"));
@@ -4671,7 +4671,12 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
                 seed.outcome.reason.as_str(),
                 seed.outcome.posture.as_str()
             ),
-            ("boot", "permit", "first-boot", "intent")
+            (
+                "boot",
+                "permit",
+                "intent recorded (first-boot)",
+                "authorized"
+            )
         );
         assert_eq!(
             seed.graph,
@@ -4787,7 +4792,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         let recs = trail(&fx);
         let actions: Vec<&str> = recs.iter().map(|(r, _)| r.action.as_str()).collect();
         assert_eq!(actions, ["graph.seed", "graph.checkpoint", "graph.reseed"]);
-        assert_eq!(recs[0].0.outcome.reason, "first-boot");
+        assert_eq!(recs[0].0.outcome.reason, "intent recorded (first-boot)");
         let ignored = &recs[2].0;
         assert_eq!(ignored.outcome.result, "deny");
         assert!(
