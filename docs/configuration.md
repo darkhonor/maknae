@@ -660,13 +660,13 @@ egress:
   work — the handshake, the frame read and the response write (each at
   its `transport` timeout), the group lookup and the admission audit append (each a fixed 5 s), the requester home's resolution, the PDP decision and the verb's own blocking step, this
   deadline, the close, and a ten-second margin for the audit appends — so the outcome
-  record is written, and the shipped units' stop timeouts (`TimeoutStopSec=895`, launchd
+  record is written, and the shipped units' stop timeouts (`TimeoutStopSec=902`, launchd
   `ExitTimeOut`) cover that drain at BOTH ceilings (60 s transport timeouts, 600 s
-  deadline) plus every other term of the shutdown chain — the stop record's append, the
+  deadline) plus every other term of the shutdown chain — the bounded wait for a policy reload's turn, the stop record's append, the
   credential supervisor's abort and reap, the reap of aborted handlers, the audit drain,
   the plane client's bounded lock wait and token revoke, the runtime teardown and the diagnostics flush — and
   a kernel test holds the unit values to that chain, two-sided. At the defaults the
-  chain is 407 s; a stop with nothing in flight exits in milliseconds. One more bound at
+  chain is 412 s; a stop with nothing in flight exits in milliseconds. One more bound at
   the ceiling: the deputy's request cap is 16,842,752 bytes — 16 MiB and a 64 KiB margin
   for the re-wrap — so a prompt that fills `transport.prompt_max_bytes` at its own 16
   MiB maximum still reaches the deputy.

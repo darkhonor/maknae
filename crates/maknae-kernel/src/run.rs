@@ -237,6 +237,10 @@ const SUPERVISOR_ABORT_REAP_TIMEOUT: Duration = Duration::from_secs(1);
 /// drain can take.
 const DRAIN_ABORT_REAP_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// Bound on shutdown's wait for a reload's turn. A reload committing past it may still
+/// publish and append its records after the stop record.
+const RELOAD_STOP_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Close `stream` (TLS close_notify + FIN) within [`STREAM_CLOSE_TIMEOUT`], abandoning
 /// the close on elapse (the stream is dropped regardless, which closes the fd). Every
 /// exit path of [`handle`] funnels through this so no path can hang on a peer that
@@ -3397,12 +3401,20 @@ where
         r
     }
 
-    /// Abandons a reload still loading, waits for one already committing (bounded by
-    /// the local store and audit writes), then stops the reload task.
+    /// Abandons a reload still loading and waits up to `RELOAD_STOP_TIMEOUT` for one
+    /// already committing, then stops the reload task; on elapse it leaves that reload
+    /// running. Only the first call waits.
     async fn stop(&self, reloads: &tokio::task::AbortHandle) {
-        self.stopping.send_replace(true);
-        let _turn = self.lock.lock().await;
-        reloads.abort();
+        if self.stopping.send_replace(true) {
+            return;
+        }
+        match tokio::time::timeout(RELOAD_STOP_TIMEOUT, self.lock.lock()).await {
+            Ok(_turn) => reloads.abort(),
+            Err(_) => eprintln!(
+                "maknaed: a reload still held its turn after {}s; stopping without it",
+                RELOAD_STOP_TIMEOUT.as_secs()
+            ),
+        }
     }
 }
 
@@ -4447,7 +4459,8 @@ mod tests {
             read_timeout_ms: maknae_config::TRANSPORT_TIMEOUT_MS_MAX,
             ..maknae_config::transport_from_section(None).unwrap()
         };
-        let chain = AUDIT_DRAIN_SHUTDOWN_TIMEOUT
+        let chain = RELOAD_STOP_TIMEOUT
+            + AUDIT_DRAIN_SHUTDOWN_TIMEOUT
             + SUPERVISOR_ABORT_REAP_TIMEOUT
             + handler_drain_bound(
                 &ceiling,
@@ -7167,6 +7180,65 @@ mod reload_tests {
             .await
             .expect("shutdown proceeds once the turn is released");
         assert!(reloads.await.unwrap_err().is_cancelled());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reload_that_never_releases_its_turn_does_not_hold_up_the_stop_record() {
+        let fx = fixture("wedged", ROOT_ADMIN).await;
+        let reloads = tokio::spawn(std::future::pending::<()>());
+        let reloader = Arc::clone(&fx.reloader);
+        let (held, turn_held) = tokio::sync::oneshot::channel();
+        let wedged = tokio::spawn(async move {
+            let _turn = reloader.lock.lock().await;
+            let _ = held.send(());
+            std::future::pending::<()>().await;
+        });
+        turn_held.await.unwrap();
+        let shutdown =
+            shutdown_after_reloads(async {}, Arc::clone(&fx.reloader), reloads.abort_handle());
+        let outcome = tokio::time::timeout(
+            RELOAD_STOP_TIMEOUT + Duration::from_secs(5),
+            accept_loop(
+                IdleAccept,
+                Arc::clone(&fx.reloader.sink),
+                Arc::new(SessionIds::new()),
+                maknae_config::transport_from_section(None).unwrap(),
+                WhereCtx {
+                    host: "h".into(),
+                    socket: "s".into(),
+                    au3_1: serde_json::Value::Null,
+                },
+                shutdown,
+                tokio::spawn(std::future::pending()),
+                Arc::clone(&fx.reloader.authorizer),
+                Arc::new(ConfigView::default()),
+                Arc::new("b".into()),
+                Arc::new("US".into()),
+                Arc::new(None),
+                Arc::new(None),
+                crate::egress::unavailable_egress(),
+            ),
+        )
+        .await
+        .expect("the stop record is not ordered behind a turn that is never released");
+        assert!(matches!(outcome, ServeOutcome::GracefulShutdown));
+        let last = all_records(&fx).pop().unwrap();
+        assert_eq!(
+            (last.action.as_str(), last.outcome.reason.as_str()),
+            ("serve", "shutdown: signal received")
+        );
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            fx.reloader.stop(&reloads.abort_handle()),
+        )
+        .await
+        .expect("a second stop does not wait again");
+        assert!(
+            !reloads.is_finished(),
+            "a reload past the bound is left to finish"
+        );
+        wedged.abort();
+        reloads.abort();
     }
 
     #[tokio::test]
