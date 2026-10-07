@@ -1,6 +1,6 @@
 //! The policy reload's ordering: intent, load and compile, persist, install,
-//! outcome. The store publish is the point of no return: once it succeeds the
-//! candidate is installed whatever the checkpoint append does.
+//! outcome. The store publish's rename is the point of no return: once it lands the
+//! candidate is installed whatever the directory sync or the checkpoint append does.
 
 use maknae_graph::identity::IdentityLayer;
 use std::fmt;
@@ -114,38 +114,42 @@ impl fmt::Display for Refusal {
     }
 }
 
+/// A publish that took place; either failure after it is reported, never refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Committed {
+    pub revision: u64,
+    pub durability_error: Option<String>,
+    pub checkpoint_error: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Applied {
     pub revision: u64,
     pub persisted: bool,
+    pub durability_error: Option<String>,
     pub checkpoint_error: Option<String>,
 }
 
 /// The outcome record's `(result, reason, posture)`.
 pub fn outcome(r: &Result<Applied, Refusal>) -> (&'static str, String, &'static str) {
     match r {
-        Ok(Applied {
-            revision,
-            checkpoint_error: Some(e),
-            ..
-        }) => (
-            "permit",
-            format!(
-                "reload applied: revision {revision}; identity persisted; checkpoint append failed: {e}"
-            ),
-            "authorized",
-        ),
-        Ok(Applied {
-            revision,
-            persisted,
-            checkpoint_error: None,
-        }) => {
-            let identity = if *persisted { "persisted" } else { "unchanged" };
-            (
-                "permit",
-                format!("reload applied: revision {revision}; identity {identity}"),
-                "authorized",
-            )
+        Ok(a) => {
+            let identity = if a.persisted {
+                "persisted"
+            } else {
+                "unchanged"
+            };
+            let mut reason = format!(
+                "reload applied: revision {}; identity {identity}",
+                a.revision
+            );
+            if let Some(e) = &a.durability_error {
+                reason.push_str(&format!("; store not durable: {e}"));
+            }
+            if let Some(e) = &a.checkpoint_error {
+                reason.push_str(&format!("; checkpoint append failed: {e}"));
+            }
+            ("permit", reason, "authorized")
         }
         Err(refusal) => ("deny", format!("reload refused: {refusal}"), "unavailable"),
     }
@@ -163,11 +167,10 @@ pub trait Load {
 
 pub trait Store {
     type Candidate;
-    /// Publish; `Ok((revision, checkpoint_error))`.
     fn commit(
         &self,
         candidate: &Self::Candidate,
-    ) -> impl Future<Output = Result<(u64, Option<String>), Refusal>> + Send;
+    ) -> impl Future<Output = Result<Committed, Refusal>> + Send;
 }
 
 pub trait Swap {
@@ -224,14 +227,16 @@ where
         Plan::Unchanged => Applied {
             revision: store_revision,
             persisted: false,
+            durability_error: None,
             checkpoint_error: None,
         },
         Plan::Persist { .. } => {
-            let (revision, checkpoint_error) = store.commit(&candidate).await?;
+            let c = store.commit(&candidate).await?;
             Applied {
-                revision,
+                revision: c.revision,
                 persisted: true,
-                checkpoint_error,
+                durability_error: c.durability_error,
+                checkpoint_error: c.checkpoint_error,
             }
         }
     };
@@ -323,8 +328,17 @@ mod tests {
         Ok(Applied {
             revision,
             persisted: true,
+            durability_error: None,
             checkpoint_error: None,
         })
+    }
+
+    fn committed(revision: u64, durability: Option<&str>, checkpoint: Option<&str>) -> Committed {
+        Committed {
+            revision,
+            durability_error: durability.map(str::to_string),
+            checkpoint_error: checkpoint.map(str::to_string),
+        }
     }
 
     #[tokio::test]
@@ -377,13 +391,15 @@ mod tests {
 
     #[test]
     fn outcome_strings_are_pinned() {
-        let ok = |persisted, checkpoint_error: Option<&str>| {
+        let ok_with = |persisted, durability: Option<&str>, checkpoint: Option<&str>| {
             Ok(Applied {
                 revision: 6,
                 persisted,
-                checkpoint_error: checkpoint_error.map(str::to_string),
+                durability_error: durability.map(str::to_string),
+                checkpoint_error: checkpoint.map(str::to_string),
             })
         };
+        let ok = |persisted, checkpoint: Option<&str>| ok_with(persisted, None, checkpoint);
         assert_eq!(
             outcome(&ok(true, None)),
             (
@@ -405,6 +421,24 @@ mod tests {
             (
                 "permit",
                 "reload applied: revision 6; identity persisted; checkpoint append failed: disk full"
+                    .to_string(),
+                "authorized"
+            )
+        );
+        assert_eq!(
+            outcome(&ok_with(true, Some("dir sync failed"), None)),
+            (
+                "permit",
+                "reload applied: revision 6; identity persisted; store not durable: dir sync failed"
+                    .to_string(),
+                "authorized"
+            )
+        );
+        assert_eq!(
+            outcome(&ok_with(true, Some("dir sync failed"), Some("disk full"))),
+            (
+                "permit",
+                "reload applied: revision 6; identity persisted; store not durable: dir sync failed; checkpoint append failed: disk full"
                     .to_string(),
                 "authorized"
             )
@@ -432,7 +466,7 @@ mod tests {
         fail_intent: bool,
         load_hangs: bool,
         load: Option<Result<Plan, Refusal>>,
-        commit: Option<Result<(u64, Option<String>), Refusal>>,
+        commit: Option<Result<Committed, Refusal>>,
         installed: Mutex<Vec<u64>>,
         outcomes: Mutex<Vec<Result<Applied, Refusal>>>,
     }
@@ -472,12 +506,9 @@ mod tests {
 
     impl Store for Fake {
         type Candidate = u64;
-        fn commit(
-            &self,
-            c: &u64,
-        ) -> impl Future<Output = Result<(u64, Option<String>), Refusal>> + Send {
+        fn commit(&self, c: &u64) -> impl Future<Output = Result<Committed, Refusal>> + Send {
             self.log(format!("commit {c}"));
-            let r = self.commit.clone().unwrap_or(Ok((*c, None)));
+            let r = self.commit.clone().unwrap_or(Ok(committed(*c, None, None)));
             async move { r }
         }
     }
@@ -541,6 +572,7 @@ mod tests {
         let applied = Applied {
             revision: 4,
             persisted: true,
+            durability_error: None,
             checkpoint_error: None,
         };
         assert_eq!(r, Ok(applied.clone()));
@@ -585,7 +617,7 @@ mod tests {
     #[tokio::test]
     async fn a_failed_checkpoint_after_publish_still_installs_and_reports_it() {
         let f = Fake {
-            commit: Some(Ok((4, Some("disk full".into())))),
+            commit: Some(Ok(committed(4, None, Some("disk full")))),
             ..Fake::default()
         };
         let r = run(&f, 3).await;
@@ -594,11 +626,35 @@ mod tests {
             Ok(Applied {
                 revision: 4,
                 persisted: true,
+                durability_error: None,
                 checkpoint_error: Some("disk full".into()),
             })
         );
         assert_eq!(*f.installed.lock().unwrap(), [4]);
         assert_eq!(f.calls().last().map(String::as_str), Some("outcome"));
+    }
+
+    #[tokio::test]
+    async fn a_publish_that_is_not_durable_still_installs_and_reports_it() {
+        let f = Fake {
+            commit: Some(Ok(committed(4, Some("dir sync failed"), None))),
+            ..Fake::default()
+        };
+        let r = run(&f, 3).await;
+        let applied = Applied {
+            revision: 4,
+            persisted: true,
+            durability_error: Some("dir sync failed".into()),
+            checkpoint_error: None,
+        };
+        assert_eq!(r, Ok(applied.clone()));
+        assert_eq!(*f.installed.lock().unwrap(), [4]);
+        assert_eq!(*f.outcomes.lock().unwrap(), [Ok(applied)]);
+        let revision = AtomicU64::new(3);
+        turn(false, &revision, |_| async { r.clone() })
+            .await
+            .unwrap();
+        assert_eq!(revision.load(Ordering::Acquire), 4);
     }
 
     #[tokio::test]
@@ -614,6 +670,7 @@ mod tests {
             Ok(Applied {
                 revision: 3,
                 persisted: false,
+                durability_error: None,
                 checkpoint_error: None,
             })
         );
@@ -622,7 +679,7 @@ mod tests {
     #[tokio::test]
     async fn the_applied_revision_is_the_commits_not_the_candidates() {
         let f = Fake {
-            commit: Some(Ok((8, Some("checkpoint refused".into())))),
+            commit: Some(Ok(committed(8, None, Some("checkpoint refused")))),
             ..Fake::default()
         };
         let first = run(&f, 3).await.unwrap();

@@ -3331,6 +3331,12 @@ async fn report_graph_boot<E: AuditEmit + Send + Sync>(
             .await
             .map_err(|e| boot_evidence_refused("graph reseed", e))?;
     }
+    if let Some(cause) = &report.durability_error {
+        eprintln!(
+            "maknaed: kernel graph store revision {} is in place but may not survive a crash: {cause}",
+            report.revision
+        );
+    }
     if let BootOutcome::Seeded {
         rejected: Some(previous),
         ..
@@ -3514,7 +3520,7 @@ where
     fn commit(
         &self,
         candidate: &ReloadCandidate,
-    ) -> impl Future<Output = Result<(u64, Option<String>), crate::reload::Refusal>> + Send {
+    ) -> impl Future<Output = Result<crate::reload::Committed, crate::reload::Refusal>> + Send {
         let graph = Arc::clone(&candidate.0);
         async move {
             let mut audit = GraphBootAudit {
@@ -3535,7 +3541,11 @@ where
                 .committed
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(committed.digest);
-            Ok((committed.revision, committed.checkpoint_error))
+            Ok(crate::reload::Committed {
+                revision: committed.revision,
+                durability_error: committed.durability_error,
+                checkpoint_error: committed.checkpoint_error,
+            })
         }
     }
 }
@@ -6797,6 +6807,7 @@ mod reload_tests {
             crate::reload::Applied {
                 revision: 2,
                 persisted: true,
+                durability_error: None,
                 checkpoint_error: None,
             }
         );
@@ -6984,6 +6995,47 @@ mod reload_tests {
     }
 
     #[tokio::test]
+    async fn a_reload_whose_store_sync_fails_is_applied_and_says_so() {
+        let fx = fixture("unsynced", ROOT_ADMIN).await;
+        fx.write_policy(ROOT_ADVERSARY);
+        fx.reloader.dir.fail_next_directory_sync();
+        let cause = "published, but the directory sync failed (Other { raw: 5 }): kernel.graph";
+        let applied = fx.reloader.run().await.unwrap();
+        assert_eq!(
+            applied,
+            crate::reload::Applied {
+                revision: 2,
+                persisted: true,
+                durability_error: Some(cause.into()),
+                checkpoint_error: None,
+            }
+        );
+        assert_eq!(fx.root_whoami(), adversary());
+        assert_eq!(fx.baseline().snapshot().revision(), 2);
+        assert_eq!(fx.reloader.dir.store_revision(), 2);
+        let recs = fx.reload_records();
+        let last = recs.last().unwrap();
+        assert_eq!(
+            (
+                last.outcome.result.as_str(),
+                last.outcome.reason.as_str(),
+                last.outcome.posture.as_str()
+            ),
+            (
+                "permit",
+                format!(
+                    "reload applied: revision 2; identity persisted; store not durable: {cause}"
+                )
+                .as_str(),
+                "authorized"
+            )
+        );
+        fx.write_policy(ROOT_ADMIN);
+        let next = fx.reloader.run().await.unwrap();
+        assert_eq!((next.revision, next.durability_error), (3, None));
+    }
+
+    #[tokio::test]
     async fn an_unchanged_file_reloads_without_a_persist() {
         let fx = fixture("unchanged", ROOT_ADMIN).await;
         let before = fx.baseline().snapshot();
@@ -6997,6 +7049,7 @@ mod reload_tests {
             crate::reload::Applied {
                 revision: 1,
                 persisted: false,
+                durability_error: None,
                 checkpoint_error: None,
             }
         );

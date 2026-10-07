@@ -17,6 +17,8 @@ use maknae_io::{
 use std::fmt;
 use std::future::Future;
 use std::path::Path;
+#[cfg(feature = "hermetic-test-seam")]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 pub use maknae_config::state::{MARKER_FILE, MARKER_MAX_BYTES, STATE_DIR, STORE_FILE};
@@ -135,6 +137,13 @@ pub struct StateDir {
     owner: u32,
     marker_owner: u32,
     store_revision: Mutex<u64>,
+    #[cfg(feature = "hermetic-test-seam")]
+    fail_next_sync: AtomicBool,
+}
+
+struct Persisted {
+    digest: [u8; 32],
+    durability_error: Option<String>,
 }
 
 impl StateDir {
@@ -151,6 +160,13 @@ impl StateDir {
         marker_owner: u32,
     ) -> Result<StateDir, StoreError> {
         Self::open_as(path, owner, marker_owner)
+    }
+
+    /// Test seam: the next publish lands, then reports a failed directory sync.
+    #[cfg(feature = "hermetic-test-seam")]
+    #[doc(hidden)]
+    pub fn fail_next_directory_sync(&self) {
+        self.fail_next_sync.store(true, Ordering::SeqCst);
     }
 
     fn open_as(path: &Path, owner: u32, marker_owner: u32) -> Result<StateDir, StoreError> {
@@ -173,6 +189,8 @@ impl StateDir {
             owner,
             marker_owner,
             store_revision: Mutex::new(0),
+            #[cfg(feature = "hermetic-test-seam")]
+            fail_next_sync: AtomicBool::new(false),
         })
     }
 
@@ -195,7 +213,9 @@ impl StateDir {
         *self.floor() = revision;
     }
 
-    fn persist(&self, key: &WrappingKey, graph: &Graph) -> Result<[u8; 32], StoreError> {
+    /// A publish that renamed but did not sync is committed: the store holds the new
+    /// revision, so the floor advances and the failure is returned with the digest.
+    fn persist(&self, key: &WrappingKey, graph: &Graph) -> Result<Persisted, StoreError> {
         let mut floor = self.floor();
         let attempted = graph.revision();
         if attempted <= *floor {
@@ -205,9 +225,16 @@ impl StateDir {
             });
         }
         let file = seal(&format::encode(graph), key)?;
-        self.publish(STORE_FILE, &file)?;
+        let durability_error = match self.publish(STORE_FILE, &file) {
+            Ok(()) => None,
+            Err(e @ IoError::PublishedNotDurable { .. }) => Some(e.to_string()),
+            Err(e) => return Err(e.into()),
+        };
         *floor = attempted;
-        Ok(ciphertext_digest(&file))
+        Ok(Persisted {
+            digest: ciphertext_digest(&file),
+            durability_error,
+        })
     }
 
     fn reseed_marker(&self) -> Result<bool, IoError> {
@@ -274,9 +301,16 @@ impl StateDir {
         }
     }
 
-    fn publish(&self, name: &str, bytes: &[u8]) -> Result<(), StoreError> {
+    fn publish(&self, name: &str, bytes: &[u8]) -> Result<(), IoError> {
         self.anchor
             .publish(Path::new(name), None, bytes, STORE_MODE)?;
+        #[cfg(feature = "hermetic-test-seam")]
+        if self.fail_next_sync.swap(false, Ordering::SeqCst) {
+            return Err(IoError::PublishedNotDurable {
+                path: Path::new(name).to_path_buf(),
+                kind: IoKind::Other { raw: 5 },
+            });
+        }
         Ok(())
     }
 }
@@ -306,6 +340,8 @@ pub struct BootReport {
     pub marker_ignored: Option<String>,
     pub migration: Option<Migration>,
     pub identity_transition: bool,
+    /// The last store write's failed directory sync: it is in place, perhaps not durable.
+    pub durability_error: Option<String>,
 }
 
 /// What the binary brings to boot: its persisted compiled set, that set's
@@ -320,6 +356,7 @@ pub struct BootInputs<'a> {
 pub struct Committed {
     pub revision: u64,
     pub digest: [u8; 32],
+    pub durability_error: Option<String>,
     pub checkpoint_error: Option<String>,
 }
 
@@ -585,17 +622,19 @@ async fn load(
         marker_ignored: None,
         migration: None,
         identity_transition: false,
+        durability_error: None,
     };
     if let Some((m, next)) = migration {
         audit
             .intent_migrate(next.revision(), m.from, m.to, &m.unbound)
             .await?;
-        let digest = dir.persist(key, &next)?;
+        let persisted = dir.persist(key, &next)?;
         audit
-            .checkpoint(next.revision(), digest, ANCHOR_MIGRATED)
+            .checkpoint(next.revision(), persisted.digest, ANCHOR_MIGRATED)
             .await?;
         report.revision = next.revision();
-        report.digest = digest;
+        report.digest = persisted.digest;
+        report.durability_error = persisted.durability_error;
         report.graph = next;
         report.migration = Some(m);
     }
@@ -603,12 +642,13 @@ async fn load(
         audit
             .intent_transition(next.revision(), INITIATOR_ROOT_FILE)
             .await?;
-        let digest = dir.persist(key, &next)?;
+        let persisted = dir.persist(key, &next)?;
         audit
-            .checkpoint(next.revision(), digest, ANCHOR_TRANSITIONED)
+            .checkpoint(next.revision(), persisted.digest, ANCHOR_TRANSITIONED)
             .await?;
         report.revision = next.revision();
-        report.digest = digest;
+        report.digest = persisted.digest;
+        report.durability_error = persisted.durability_error;
         report.graph = next;
         report.identity_transition = true;
     }
@@ -616,7 +656,7 @@ async fn load(
 }
 
 /// Persists a validated identity transition: intent, then publish, then checkpoint. The
-/// publish is the point of no return, so a checkpoint failure after it is reported, not raised.
+/// publish's rename is the point of no return, so a failure after it is reported, not raised.
 /// Callers serialize commits; the floor is re-checked under a lock at publish regardless.
 pub async fn commit(
     dir: &StateDir,
@@ -634,15 +674,16 @@ pub async fn commit(
         });
     }
     audit.intent_transition(revision, initiator).await?;
-    let digest = dir.persist(key, next)?;
+    let persisted = dir.persist(key, next)?;
     let checkpoint_error = audit
-        .checkpoint(revision, digest, ANCHOR_TRANSITIONED)
+        .checkpoint(revision, persisted.digest, ANCHOR_TRANSITIONED)
         .await
         .err()
         .map(|e| e.to_string());
     Ok(Committed {
         revision,
-        digest,
+        digest: persisted.digest,
+        durability_error: persisted.durability_error,
         checkpoint_error,
     })
 }
@@ -674,7 +715,8 @@ async fn seed(
             Some(dir.preserve(&name, &bytes)?)
         }
     };
-    let digest = dir.persist(key, &graph)?;
+    let persisted = dir.persist(key, &graph)?;
+    let digest = persisted.digest;
     if authorized {
         dir.anchor.remove(Path::new(MARKER_FILE), None)?;
     }
@@ -695,6 +737,7 @@ async fn seed(
         marker_ignored: None,
         migration: None,
         identity_transition: false,
+        durability_error: persisted.durability_error,
     })
 }
 

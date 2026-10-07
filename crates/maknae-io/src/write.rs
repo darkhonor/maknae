@@ -30,6 +30,7 @@ pub(crate) fn temp_name(final_name: &str) -> String {
 /// Publish bytes atomically into the directory `dirfd` names.
 ///
 /// openat(O_CREAT|O_EXCL) temp -> write -> fsync temp -> renameat -> fsync dirfd.
+/// A failed dirfd fsync is `IoError::PublishedNotDurable`: the rename has happened.
 /// The temp is unlinked on any failure after create, best-effort: the caller always
 /// gets the ORIGINAL error, never a masking unlink error.
 pub(crate) fn publish_at<F: AsFd>(
@@ -42,9 +43,26 @@ pub(crate) fn publish_at<F: AsFd>(
     // One CONVERSION at the boundary: the inner fn propagates plain errnos, so each
     // exception downstream names an arm rather than a `map_err` closure. It does not
     // reduce the exception count.
+    publish_synced(dirfd, final_name, at, bytes, mode, syscall::fsync_fd)
+}
+
+/// After the rename the final name holds the new bytes, so a failed directory sync is
+/// `PublishedNotDurable`, never a not-published error.
+fn publish_synced<F: AsFd>(
+    dirfd: &F,
+    final_name: &str,
+    at: &Path,
+    bytes: &[u8],
+    mode: Mode,
+    sync_dir: impl FnOnce(&F) -> nix::Result<()>,
+) -> Result<Strategy, IoError> {
     publish_raw(dirfd, final_name, bytes, mode)
-        .map(|()| Strategy::Portable)
-        .map_err(|e| crate::checks::map_errno_no_disambiguation(e, at))
+        .map_err(|e| crate::checks::map_errno_no_disambiguation(e, at))?;
+    sync_dir(dirfd).map_err(|e| IoError::PublishedNotDurable {
+        path: at.to_path_buf(),
+        kind: crate::checks::kind_of_errno(e),
+    })?;
+    Ok(Strategy::Portable)
 }
 
 fn publish_raw<F: AsFd>(dirfd: &F, final_name: &str, bytes: &[u8], mode: Mode) -> nix::Result<()> {
@@ -72,8 +90,7 @@ fn publish_raw<F: AsFd>(dirfd: &F, final_name: &str, bytes: &[u8], mode: Mode) -
         let _ = syscall::unlink_at(dirfd, &tmp);
         return Err(e);
     }
-
-    syscall::fsync_fd(dirfd)
+    Ok(())
 }
 
 /// The shared write loop. Both modes need it, and duplicating it would duplicate its
@@ -175,6 +192,41 @@ mod tests {
             nix::errno::Errno::EEXIST,
             "O_EXCL must refuse a symlink too"
         );
+    }
+
+    #[test]
+    fn a_failed_directory_sync_after_the_rename_is_published_not_durable() {
+        let d = tempfile::tempdir().unwrap();
+        let dirfd = std::fs::File::open(d.path()).unwrap();
+        std::fs::write(d.path().join("f"), b"old").unwrap();
+        let at = d.path().join("f");
+        let e = publish_synced(&dirfd, "f", &at, b"new", Mode(0o600), |_| {
+            Err(nix::errno::Errno::EIO)
+        })
+        .unwrap_err();
+        assert_eq!(
+            e,
+            IoError::PublishedNotDurable {
+                path: at.clone(),
+                kind: crate::IoKind::Other {
+                    raw: nix::errno::Errno::EIO as i32
+                },
+            }
+        );
+        assert_eq!(std::fs::read(&at).unwrap(), b"new");
+    }
+
+    #[test]
+    fn a_failure_before_the_rename_never_runs_the_directory_sync() {
+        let d = tempfile::tempdir().unwrap();
+        let dirfd = std::fs::File::open(d.path()).unwrap();
+        std::fs::create_dir(d.path().join("busy")).unwrap();
+        let at = d.path().join("busy");
+        let e = publish_synced(&dirfd, "busy", &at, b"new", Mode(0o600), |_| {
+            panic!("nothing was renamed, so nothing is synced")
+        })
+        .unwrap_err();
+        assert!(matches!(e, IoError::Io { .. }), "{e:?}");
     }
 
     /// The pid is not decoration: without it a counter restarting at 0 each process

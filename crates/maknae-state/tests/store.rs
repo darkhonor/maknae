@@ -1917,6 +1917,7 @@ async fn commit_persists_at_the_next_revision_and_checkpoints() {
         Committed {
             revision: 2,
             digest: ciphertext_digest(&file),
+            durability_error: None,
             checkpoint_error: None
         }
     );
@@ -2021,6 +2022,132 @@ async fn commit_with_a_failing_checkpoint_still_publishes_and_reports_it() {
     let r = r.unwrap();
     assert_eq!(r.outcome, BootOutcome::Loaded(AnchorState::Advanced));
     assert_eq!(r.revision, 3);
+}
+
+const NOT_DURABLE: &str =
+    "published, but the directory sync failed (Other { raw: 5 }): kernel.graph";
+
+#[tokio::test]
+async fn a_commit_whose_directory_sync_fails_is_committed_and_advances_the_floor() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let dir = fx.dir();
+    run(&dir, &k, None).await.0.unwrap();
+    let e = edited();
+    dir.fail_next_directory_sync();
+    let mut audit = Recorder::default();
+    let c = commit(
+        &dir,
+        &k,
+        &next_graph(2, &e),
+        &mut audit,
+        INITIATOR_ROOT_FILE,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        c,
+        Committed {
+            revision: 2,
+            digest: ciphertext_digest(&fx.store()),
+            durability_error: Some(NOT_DURABLE.into()),
+            checkpoint_error: None
+        }
+    );
+    assert_eq!(
+        audit.events,
+        vec![
+            Event::Transition(2, "root-file".into()),
+            Event::Checkpoint(2, c.digest, "transitioned".into()),
+        ]
+    );
+    assert_eq!(dir.store_revision(), 2);
+    assert_eq!(graph_of(&fx.store(), &k), next_graph(2, &e));
+
+    let r = commit(
+        &dir,
+        &k,
+        &next_graph(2, &e),
+        &mut Recorder::default(),
+        INITIATOR_ROOT_FILE,
+    )
+    .await;
+    assert_eq!(
+        r.unwrap_err(),
+        StoreError::StaleRevision {
+            store: 2,
+            attempted: 2
+        }
+    );
+    let c3 = commit(
+        &dir,
+        &k,
+        &next_graph(3, &e),
+        &mut Recorder::default(),
+        INITIATOR_ROOT_FILE,
+    )
+    .await
+    .unwrap();
+    assert_eq!((c3.revision, c3.durability_error), (3, None));
+    assert_eq!(dir.store_revision(), 3);
+}
+
+#[tokio::test]
+async fn a_boot_seed_whose_directory_sync_fails_boots_and_reports_it() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let dir = fx.dir();
+    dir.fail_next_directory_sync();
+    let (r, events) = run(&dir, &k, None).await;
+    let r = r.unwrap();
+    assert_eq!(r.durability_error.as_deref(), Some(NOT_DURABLE));
+    assert_eq!(r.revision, 1);
+    assert_eq!(r.digest, ciphertext_digest(&fx.store()));
+    assert_eq!(
+        events.last(),
+        Some(&Event::Checkpoint(1, r.digest, "seeded".into()))
+    );
+    assert_eq!(dir.store_revision(), 1);
+}
+
+#[tokio::test]
+async fn a_boot_transition_whose_directory_sync_fails_boots_and_reports_it() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let first = run(&fx.dir(), &k, None).await.0.unwrap();
+    assert_eq!(first.durability_error, None);
+    let dir = fx.dir();
+    dir.fail_next_directory_sync();
+    let (r, events) = run_with(&dir, &k, checkpoint_of(&first), &edited()).await;
+    let r = r.unwrap();
+    assert!(r.identity_transition);
+    assert_eq!(r.durability_error.as_deref(), Some(NOT_DURABLE));
+    assert_eq!(r.digest, ciphertext_digest(&fx.store()));
+    assert_eq!(
+        events.last(),
+        Some(&Event::Checkpoint(2, r.digest, "transitioned".into()))
+    );
+    assert_eq!(dir.store_revision(), 2);
+}
+
+#[tokio::test]
+async fn a_boot_migration_whose_directory_sync_fails_boots_and_reports_it() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let old = sealed_before_identity(1, &k);
+    fx.write(STORE_FILE, &old, 0o600);
+    let i = inputs_with(layer(None, &[]));
+    let dir = fx.dir();
+    dir.fail_next_directory_sync();
+    let (r, events) = run_with(&dir, &k, cp(1, &old), &i).await;
+    let r = r.unwrap();
+    assert!(r.migration.is_some() && !r.identity_transition);
+    assert_eq!(r.durability_error.as_deref(), Some(NOT_DURABLE));
+    assert_eq!(
+        events.last(),
+        Some(&Event::Checkpoint(2, r.digest, "migrated".into()))
+    );
+    assert_eq!(dir.store_revision(), 2);
 }
 
 #[tokio::test]
