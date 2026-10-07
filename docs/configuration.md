@@ -36,13 +36,17 @@ system `core.handling.policy` names from the ones compiled into the build (§4.1
 unknown name is `UnknownClassificationPolicy`), reads `core.handling.ceiling` through
 that system into the runtime **ingest posture**, and **refuses to start (exit 1)** on
 any config error. After the config is read the
-daemon builds its authorization composition — the RBAC baseline and the classification
-ceiling, both non-removable (ADR-0008 decision 1; §4.1) — records the composition, the
-selected system and the ceiling level in the audit trail, mints its plane credential,
-binds the client socket and **serves**: every request is decided through that
-composition until a shutdown signal, and the process exits with the outcome the accept
-loop stopped on. A boot that fails any of those steps exits non-zero, and a step after
-the credential mint retires the credential on the way out.
+daemon loads `authz.yaml`, boots its kernel graph store from it, builds its
+authorization composition — the RBAC baseline, compiled from the store and
+`authz.yaml` into a snapshot, and the classification ceiling, both non-removable
+(ADR-0008 decision 1; §4.1) — records the composition, the selected system and the
+ceiling level in the audit trail, mints its plane credential, binds the client socket
+and **serves**: every request is decided through that composition until a shutdown
+signal, and the process exits with the outcome the accept loop stopped on. A `SIGHUP`
+recompiles the snapshot from `authz.yaml` alone; `maknae.yaml` and `config.d/` are
+read at start only (runbook, "Reload the policy"). A boot that fails any of those
+steps exits non-zero, and a step after the credential mint retires the credential on
+the way out.
 
 - An **empty or `core`-less `maknae.yaml`** boots at the **Public baseline** (§4.1).
 - An **absent config directory or a missing `maknae.yaml`** **fails closed** (exit 1) —
@@ -461,7 +465,7 @@ A section the daemon does not register is `ConfigError::UnknownSection`, which *
 
 | Section | Owner | Status |
 |---|---|---|
-| `authz` | authorization policy *(the config-section registration; the `/etc/maknae/authz.yaml` policy FILE is separate and is enforced per request — see the runbook)* | Forthcoming |
+| `authz` | authorization policy *(the config-section registration; the `/etc/maknae/authz.yaml` policy FILE is separate and is enforced per request from a snapshot compiled at start and at `SIGHUP` reload — see the runbook)* | Forthcoming |
 | `providers` | the model providers this host authorizes (ADR-0028 decision 1) — **see §6.1** | **Shipped** |
 | `egress` | where `maknaed` finds the egress deputy, and the outer bound on one provider call (#240) — **see §6.2** | **Shipped** |
 | `provider` | the single registered provider, replaced by `providers` (#153) | Withdrawn — **writing it refuses boot** |
@@ -656,13 +660,13 @@ egress:
   work — the handshake, the frame read and the response write (each at
   its `transport` timeout), the group lookup and the admission audit append (each a fixed 5 s), the requester home's resolution, the PDP decision and the verb's own blocking step, this
   deadline, the close, and a ten-second margin for the audit appends — so the outcome
-  record is written, and the shipped units' stop timeouts (`TimeoutStopSec=895`, launchd
+  record is written, and the shipped units' stop timeouts (`TimeoutStopSec=902`, launchd
   `ExitTimeOut`) cover that drain at BOTH ceilings (60 s transport timeouts, 600 s
-  deadline) plus every other term of the shutdown chain — the stop record's append, the
+  deadline) plus every other term of the shutdown chain — the bounded wait for a policy reload's turn, the stop record's append, the
   credential supervisor's abort and reap, the reap of aborted handlers, the audit drain,
   the plane client's bounded lock wait and token revoke, the runtime teardown and the diagnostics flush — and
   a kernel test holds the unit values to that chain, two-sided. At the defaults the
-  chain is 407 s; a stop with nothing in flight exits in milliseconds. One more bound at
+  chain is 412 s; a stop with nothing in flight exits in milliseconds. One more bound at
   the ceiling: the deputy's request cap is 16,842,752 bytes — 16 MiB and a 64 KiB margin
   for the re-wrap — so a prompt that fills `transport.prompt_max_bytes` at its own 16
   MiB maximum still reaches the deputy.

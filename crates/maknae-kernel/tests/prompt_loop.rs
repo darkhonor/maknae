@@ -182,6 +182,16 @@ impl<A: maknae_security::Authorizer> maknae_security::Authorizer for Counting<A>
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner.decide_reporting_role(req)
     }
+    fn decide_cited(&self, req: &maknae_security::Request) -> maknae_security::Decided {
+        self.decisions
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.decide_cited(req)
+    }
+    fn decide_cited_all(&self, reqs: &[maknae_security::Request]) -> Vec<maknae_security::Decided> {
+        self.decisions
+            .fetch_add(reqs.len(), std::sync::atomic::Ordering::SeqCst);
+        self.inner.decide_cited_all(reqs)
+    }
     fn subjects(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
         self.inner.subjects()
     }

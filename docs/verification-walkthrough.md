@@ -277,13 +277,13 @@ After the claim, B runs `maknae login` again.
 
 **Not a control.** Without a `providers.yaml`, the shipped CLI stops before it reads a key or contacts the daemon (`bins/maknae/src/agent.rs:77-89`; test `bins/maknae/src/agent.rs::the_entry_is_the_default_or_the_named_label_and_no_entries_means_no_model_access`). Credential-path step: `load the user token; choose the providers.yaml entry`. That is the CLI's own behaviour. A client that is not the shipped CLI can still send a valid provider choice, and the kernel admits it on host authority alone.
 
-**Command.** The administrator removes `provider:openai` from B's role's `destinations` in `/etc/maknae/authz.yaml` (`sudoedit /etc/maknae/authz.yaml`; B's role is `user` in step 4a). Do not edit `bindings:`, so no restart is needed: the policy is re-read on every request ([step 4a](first-provider.md#4a-add-another-local-user)). Then, as B:
+**Command.** The administrator removes `provider:openai` from B's role's `destinations` in `/etc/maknae/authz.yaml` (`sudoedit /etc/maknae/authz.yaml`; B's role is `user` in step 4a). Then reload the policy (`sudo systemctl reload maknaed`; on macOS, `sudo launchctl kill SIGHUP system/io.maknae.maknaed`): an edit applies at reload, not on the next request ([runbook](runbook.md#reload-the-policy)). Then, as B:
 
 ```bash
 maknae agent "Reply with one word: hello."
 ```
 
-The administrator then restores the line. Separately, to see the shipped CLI's behaviour, as B:
+The administrator then restores the line and reloads again. Separately, to see the shipped CLI's behaviour, as B:
 
 ```bash
 mv ~/.maknae/providers.yaml ~/.maknae/providers.yaml.aside
@@ -291,7 +291,7 @@ maknae agent "Reply with one word: hello."
 mv ~/.maknae/providers.yaml.aside ~/.maknae/providers.yaml
 ```
 
-**Expected.** With the destination removed, B sees the `PROMPT_REFUSED` line, exit 2. In the administrator's audit query: `"result":"deny"`, `"reason":"destination not allowlisted for role user: provider:openai"`, with no `egress` block. If A shares B's role, A is refused the same way until the line is restored.
+**Expected.** With the destination removed, B sees the `PROMPT_REFUSED` line, exit 2. In the administrator's audit query: `"result":"deny"`, `"reason":"destination not allowlisted for role user: provider:openai"`, with no `egress` block. If A shares B's role, A is refused the same way until the line is restored and the policy reloaded.
 
 Without the file, exit 1:
 
@@ -343,4 +343,4 @@ These clean-up steps are not yet measured.
 - B runs `maknae login` again (C8).
 - Check that A's and B's `~/.maknae/providers.yaml` are their originals and that no `providers.yaml.orig` or `providers.yaml.aside` is left (C4, C7, C9).
 - Run `unset VT` in every shell that read a token.
-- If the event added B only for this check, remove B from `bindings:` in `/etc/maknae/authz.yaml` and restart `maknaed` (step 4a, part 3), then remove B from `maknae_users` and apply.
+- If the event added B only for this check, remove B from `bindings:` in `/etc/maknae/authz.yaml` and reload `maknaed` (step 4a, part 3), then remove B from `maknae_users` and apply.

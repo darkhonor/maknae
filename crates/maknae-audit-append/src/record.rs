@@ -287,6 +287,16 @@ pub struct GraphAudit {
     pub scanned_bytes: u64,
 }
 
+/// The policy rule a decision cites (AU-3(1)): its node in the compiled policy
+/// graph, its key (unlike the node, the same in every compile of the same
+/// file), and the declaring section, keyed `<source>#<section>`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuleAudit {
+    pub node: u64,
+    pub key: String,
+    pub section: String,
+}
+
 /// The full AU-3/AU-3(1)-complete audit record (ADR-0019 Decision 1).
 ///
 /// `where_` carries `#[serde(rename = "where")]`: `where` is a Rust keyword
@@ -334,6 +344,12 @@ pub struct AuditRecord {
     pub conversation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph: Option<GraphAudit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<RuleAudit>,
+    /// The digest of the policy in force: on the boot `authz` record and each
+    /// `graph.reload` outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_sha256: Option<String>,
     pub outcome: Outcome,
     pub session_id: u64,
     pub seq: u64,
@@ -431,6 +447,8 @@ mod tests {
             egress: None,
             conversation: None,
             graph: None,
+            rule: None,
+            policy_sha256: None,
             outcome: Outcome {
                 result: "permit".into(),
                 reason: "group membership: maknae-ops".into(),
@@ -611,6 +629,27 @@ mod tests {
     }
 
     #[test]
+    fn rule_block_is_omitted_when_absent_and_round_trips_when_present() {
+        let s = canonical_json(&sample()).unwrap();
+        assert!(!s.contains("\"rule\""), "{s}");
+        let back: AuditRecord = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.rule, None);
+        let mut rec = sample();
+        rec.rule = Some(RuleAudit {
+            node: 42,
+            key: "rule:permissions:allow:3".into(),
+            section: "/etc/maknae/authz.yaml#permissions".into(),
+        });
+        let s = canonical_json(&rec).unwrap();
+        assert!(
+            s.contains("\"rule\":{\"key\":\"rule:permissions:allow:3\",\"node\":42,\"section\":\"/etc/maknae/authz.yaml#permissions\"}"),
+            "{s}"
+        );
+        let back: AuditRecord = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.rule, rec.rule);
+    }
+
+    #[test]
     fn integrity_round_trips_empty() {
         let s = canonical_json(&sample()).unwrap();
         assert!(s.contains("\"integrity\""));
@@ -636,13 +675,20 @@ mod tests {
         // action, outcome, session_id, seq, au3_1, integrity — none of
         // that. A mutant that skips the sort (emits declaration/insertion
         // order instead) must fail this.
-        let s = canonical_json(&sample()).unwrap();
+        let mut rec = sample();
+        rec.rule = Some(RuleAudit {
+            node: 1,
+            key: "k".into(),
+            section: "s".into(),
+        });
+        let s = canonical_json(&rec).unwrap();
         let expected_order = [
             "\"action\"",
             "\"au3_1\"",
             "\"event\"",
             "\"integrity\"",
             "\"outcome\"",
+            "\"rule\"",
             "\"seq\"",
             "\"session_id\"",
             "\"source\"",
@@ -750,6 +796,8 @@ mod tests {
                 egress: None,
                 conversation: None,
                 graph: None,
+                rule: None,
+                policy_sha256: None,
                 outcome: Outcome {
                     result: "deny".into(),
                     reason: "r".into(),

@@ -39,20 +39,16 @@ profile maknaed /usr/bin/maknaed {
   /run/credentials/maknaed.service/      r,
   /run/credentials/maknaed.service/**    r,
 
-  # Audit sink. The package pre-creates audit.jsonl and the sink opens the
-  # steady-state file with O_APPEND and no O_CREAT, so AppArmor can enforce the
-  # same append-only MAC posture as the SELinux .te. First-create fallback is
-  # kernel-arbitrated with O_CREAT|O_EXCL, but normal packaged operation does
-  # not require create. The postinst's `chattr +a` stays as a filesystem-level
-  # defense in depth; MAC no longer depends on it for append-only parity. If
-  # audit.jsonl is deleted under confinement, maknaed fails closed until an
-  # operator restores the file.
+  # AppArmor revalidates every write() on an O_APPEND descriptor as `w`, so it
+  # cannot express append-only; the postinst's `chattr +a` on the inode does.
   /var/log/maknae/                       r,
-  /var/log/maknae/audit.jsonl            rak,
+  /var/log/maknae/audit.jsonl            rwk,
   /var/log/maknae/**                     a,
 
-  # #488: the kernel graph store (StateDirectory=maknae).
-  /var/lib/maknae/                       rk,
+  # #488: the kernel graph store (StateDirectory=maknae). The anchor opens the
+  # parent to pin the directory, and the exclusive flock on it is checked as w.
+  /var/lib/                              r,
+  /var/lib/maknae/                       rwk,
   /var/lib/maknae/**                     rwk,
 
   # Runtime UDS — the daemon binds its control socket in /run/maknae and needs

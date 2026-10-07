@@ -19,23 +19,25 @@ User=_maknae
 # Superseded by systemd socket activation, #92.
 SupplementaryGroups=maknae
 ExecStart=/usr/bin/maknaed
+ExecReload=/usr/bin/kill -HUP $MAINPID
 # #240: a permitted session.prompt holds its handler for up to egress.deadline_ms
 # (600 s at the configured ceiling) while the provider answers, and the shutdown
 # drain waits that long plus 10 s to write the outcome record rather than abort
 # a call whose content already left. systemd's default 90 s would SIGKILL that
 # wait. The chain at BOTH ceilings (transport timeouts 60 s, egress deadline
-# 600 s), walked in execution order: the stop record's append 5 s + the
+# 600 s), walked in execution order: the wait for a reload's turn 5 s + the
+# stop record's append 5 s + the
 # credential supervisor's abort and reap 1 s + the handler drain 816 s (handshake 60 + group lookup 5 + admission audit append 5 + frame read 60 + home resolution 5
 # + PDP decision 5 + the verb's own blocking step 5 + provider call 600 +
 # response write 60 + close 1 + a 10 s margin for the audit appends) + the reap
 # of what it aborts 1 s + the audit drain 5 s + the plane client's shutdown 60 s
 # (a lock wait bounded at 30 s — the supervisor is aborted first, so it is free
 # in practice — then revoke-self under the same 30 s) + runtime teardown 3 s +
-# the diagnostics flush 1 s = 892 s. A SIGKILL inside that revoke leaves a live token until its TTL. At the
-# DEFAULTS the same chain is 5 + 1 + 331 + 1 + 5 + 60 + 3 + 1 = 407 s, and a stop with
+# the diagnostics flush 1 s = 897 s. A SIGKILL inside that revoke leaves a live token until its TTL. At the
+# DEFAULTS the same chain is 5 + 5 + 1 + 331 + 1 + 5 + 60 + 3 + 1 = 412 s, and a stop with
 # nothing in flight exits in milliseconds. Held to the chain, two-sided within 10 s, by a kernel test that
 # reads this line (run.rs: the_units_stop_timeouts_cover_the_shutdown_chain_...).
-TimeoutStopSec=895
+TimeoutStopSec=902
 # systemd (root) TPM-decrypts the sealed SecretID into $CREDENTIALS_DIRECTORY
 # (0400, _maknae-only, memory-backed). Name pinned: enroll seals
 # --name=maknaed-secret-id and the daemon reads $CREDENTIALS_DIRECTORY/maknaed-secret-id.
@@ -95,6 +97,8 @@ LockPersonality=yes
 SystemCallFilter=@system-service
 SystemCallArchitectures=native
 Restart=on-failure
+# A SIGHUP that lands before the handler is registered kills the process, an exit systemd counts as clean.
+RestartForceExitStatus=SIGHUP
 RestartSec=5s
 StandardOutput=journal
 StandardError=journal

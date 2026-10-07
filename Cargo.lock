@@ -1076,6 +1076,7 @@ name = "maknae-authz-basic"
 version = "0.0.0"
 dependencies = [
  "maknae-config",
+ "maknae-graph",
  "maknae-io",
  "maknae-security",
  "nix",
@@ -1151,6 +1152,7 @@ dependencies = [
  "maknae-authz-basic",
  "maknae-classification-aus",
  "maknae-config",
+ "maknae-graph",
  "maknae-io",
  "maknae-msgs",
  "maknae-proto",

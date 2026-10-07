@@ -2,19 +2,39 @@
 # maknae postrm — mirrors the rpm removal cleanup.
 set -e
 
+hold_audit_dir() {
+    local d=/var/log/maknae acl
+    [ -d "$d" ] && [ ! -h "$d" ] || return 1
+    chown 0:0 "$d" && setfacl -P -b "$d" && chmod 0700 "$d" || return 1
+    [ "$(stat -c '%u %g %a' "$d")" = "0 0 700" ] || return 1
+    acl="$(getfacl -P -s -p "$d")" && [ -z "$acl" ]
+}
+
 case "$1" in
     purge)
-        # Clear append-only defensively (prerm already did on the remove step, but
-        # purge may be reached directly on a config-only leftover) before removing
-        # the trees — rm cannot unlink inside a chattr +a directory.
-        chattr -a /var/log/maknae/audit.jsonl 2>/dev/null || :
-        chattr -a /var/log/maknae 2>/dev/null || :
+        # rm cannot unlink an append-only inode, and archived trails carry the
+        # attribute too. The directory is root-held while root acts on its
+        # entries; find -type f never follows a symlink.
+        if [ -d /var/log/maknae ] && [ ! -h /var/log/maknae ]; then
+            if ! hold_audit_dir; then
+                echo "maknae: cannot hold /var/log/maknae as root:root 0700 with no ACL; append-only not cleared and it is left root-owned" >&2
+            elif pgrep -u _maknae >/dev/null 2>&1; then
+                echo "maknae: a process runs as _maknae; append-only not cleared and /var/log/maknae is left root-held" >&2
+            else
+                chattr -a /var/log/maknae 2>/dev/null || :
+                find /var/log/maknae -xdev -mindepth 1 -maxdepth 1 -type f -links 1 \
+                    -exec chattr -a {} + 2>/dev/null || :
+                if [ -n "$(find /var/log/maknae -xdev -mindepth 1 -maxdepth 1 -type f -links +1 -print -quit)" ]; then
+                    echo "maknae: a file in /var/log/maknae has more than one link; append-only not cleared" >&2
+                fi
+            fi
+        fi
 
         # Remove configuration, the audit trail and the kernel graph store on
         # purge only.
         rm -rf /etc/maknae
         rm -rf /etc/ssl/maknae
-        rm -rf /var/log/maknae
+        rm -rf /var/log/maknae || echo "maknae: /var/log/maknae was not fully removed; remove it by hand (runbook: Remove a kept trail)" >&2
         rm -rf /var/lib/maknae
 
         systemctl daemon-reload 2>/dev/null || :

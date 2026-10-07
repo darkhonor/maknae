@@ -110,8 +110,8 @@ install -D -m 0750 "$COMMON/maknae-selinux-ports.sh" \
 install -D -m 0640 "$COMMON/authz.yaml"  "$PKG_ROOT/etc/maknae/authz.yaml"
 install -D -m 0640 "$COMMON/maknae.yaml" "$PKG_ROOT/etc/maknae/maknae.yaml"
 
-# NOTE: /var/log/maknae/audit.jsonl is NOT a payload file — it is created
-# first-install-only (and guarded on non-existence) in postinst, then chattr +a.
+# NOTE: /var/log/maknae/audit.jsonl is NOT a payload file — postinst creates it
+# when absent, then chattr +a.
 # Shipping it as payload would collide with the append-only inode on upgrade.
 
 # --- Debian Policy 12.5: copyright ----------------------------------------------

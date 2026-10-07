@@ -4,6 +4,14 @@
 # %config, no %attr (ownership set here by hand).
 set -e
 
+hold_audit_dir() {
+    local d=/var/log/maknae acl
+    [ -d "$d" ] && [ ! -h "$d" ] || return 1
+    chown 0:0 "$d" && setfacl -P -b "$d" && chmod 0700 "$d" || return 1
+    [ "$(stat -c '%u %g %a' "$d")" = "0 0 700" ] || return 1
+    acl="$(getfacl -P -s -p "$d")" && [ -z "$acl" ]
+}
+
 case "$1" in
     configure)
         # --- Users/groups (Jackrabbit §4.6 / §9.1) ------------------------------
@@ -45,7 +53,12 @@ case "$1" in
         # modes are load-bearing. Set them explicitly, not via umask.
         install -d -m 0750 -o root    -g _maknae /etc/maknae
         install -d -m 0750 -o root    -g _maknae /etc/maknae/private
-        install -d -m 0700 -o _maknae -g _maknae /var/log/maknae
+        # Root-held until the audit block below hands it to _maknae.
+        install -d -m 0700 -o root    -g root    /var/log/maknae
+        hold_audit_dir || {
+            echo "maknae: cannot hold /var/log/maknae as root:root 0700 with no ACL; it is left root-owned" >&2
+            exit 1
+        }
         install -d -m 0700 -o _maknae -g _maknae /var/lib/maknae
         # #240b: the deputy's Vault CA copy (written by `maknae enroll`), under
         # the deputy's OWN group.
@@ -61,16 +74,24 @@ case "$1" in
             echo "maknae: setfacl failed — grant _maknae-egress rx on /etc/maknae or the egress deputy cannot start" >&2
 
         # --- Audit sink pre-creation (§4.6 / §9.2) ------------------------------
-        # The MAC policy grants `append`, not `create`, so a first boot that had to
-        # O_CREAT the file would be denied — pre-create it here. Guard on
-        # non-existence so an upgrade never truncates the accumulated trail. Set
-        # append-only at the FILE level ONLY: file `+a` blocks `> audit.jsonl` and
-        # unlink/truncate even on non-MAC/complain hosts. Do NOT `chattr +a` the
-        # DIRECTORY — a +a dir blocks dpkg from managing /var/log/maknae on upgrade.
-        if [ ! -e /var/log/maknae/audit.jsonl ]; then
-            install -m 0640 -o _maknae -g _maknae /dev/null /var/log/maknae/audit.jsonl
+        # The profile grants no create, so the file is pre-created. The inode's
+        # append-only attribute is the trail's only append-only control here, so
+        # failing to set it fails configure.
+        AUDIT=/var/log/maknae/audit.jsonl
+        if [ ! -e "$AUDIT" ] && [ ! -h "$AUDIT" ]; then
+            install -m 0640 -o _maknae -g _maknae /dev/null "$AUDIT"
         fi
-        chattr +a /var/log/maknae/audit.jsonl 2>/dev/null || :
+        if [ -h "$AUDIT" ] || [ ! -f "$AUDIT" ] || [ "$(stat -c %h "$AUDIT")" != 1 ] \
+            || [ "$(stat -c %U:%G "$AUDIT")" != _maknae:_maknae ]; then
+            echo "maknae: $AUDIT is not a regular, single-link _maknae:_maknae file; /var/log/maknae is left root-owned" >&2
+            exit 1
+        fi
+        if ! chattr +a "$AUDIT" || ! lsattr -d "$AUDIT" | cut -d' ' -f1 | grep -q a; then
+            echo "maknae: cannot set the append-only attribute on $AUDIT (filesystem: $(stat -f -c %T "$AUDIT" 2>/dev/null || echo unknown)); /var/log/maknae is left root-owned." >&2
+            echo "  AppArmor cannot make the audit trail append-only; the inode attribute is the control. Put /var/log/maknae on a filesystem that supports chattr +a." >&2
+            exit 1
+        fi
+        chown -h _maknae:_maknae /var/log/maknae
 
         # --- Conffile-ownership convergence (EVERY configure) -------------------
         # dpkg records conffiles as root:root; the daemon runs as `_maknae` and the

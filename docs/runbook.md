@@ -349,6 +349,40 @@ put a blocking NSS lookup back on the async worker — while `role=none` means t
 PDP resolved no role, or the record carries no decision at all (a connection is
 not a decision). Do not read one as the other.
 
+**Reading `rule` (#489).** A decision made by a rule in `authz.yaml` carries a
+`rule` block: `{"key":"<key>","node":<n>,"section":"<path>#<section>"}`, for example
+`{"key":"rule:permissions:allow:3","node":95,"section":"/etc/maknae/authz.yaml#permissions"}`
+for the fourth `allow` entry of `permissions:`, or a `rule:roles.admin:allow:0` key in
+section `/etc/maknae/authz.yaml#roles.admin` for a role grant. The `key` names the
+entry by section, effect and position. `node` is the rule's node in the compiled
+policy; node numbers shift on any recompile that adds a node, and two daemons running
+the same `authz.yaml` over different store histories can number the same rule
+differently. Identify a rule by `policy_sha256` and `key` together, never by `node`:
+`policy_sha256` names the policy in force, and the boot `authz` record and each
+`graph.reload` outcome carry it (see "What the trail shows" under the reload section).
+A record of what a permitted action then did keeps the rule that permitted it,
+whatever the result, because authorization is separate from effect: every egress
+outcome (sent, send failed, send deadline expired, send outcome unknown, or a
+refused reply), every mutation completion including an incomplete one, and the
+corrective record that follows a permitted response which could not be delivered (an
+`admin.subject.list` whose bindings could not be enumerated, a response over the
+frame limit, or one that could not be encoded). A query on `rule.key` therefore finds
+the outcome that says whether content may have left, not only the decision. A record
+has no `rule` block when no rule in the file decided: a structural role decision
+(such as liveness) or deny-by-default. Nor does a refusal made before the PDP decided:
+a request that could not be read or decoded, a path or operand pre-gate, a refused
+provider choice, an open decision breaker, an exhausted decision worker budget, a
+decision task that failed, a decision timeout, or a mutation that could not be
+prepared. Nor does a deny written in place of a permit that was never
+acted on: an unhonorable obligation, a mutation whose object label could not be
+resolved, a `session.prompt` refused because the egress backend was not ready, and
+two defence-in-depth denies that no request should reach (a mutation dispatch
+without prepared evidence, and a `session.prompt` without an admitted provider
+choice). Connection, boot, reload and shutdown records carry no decision and no
+`rule`. An `fs.mkdir` with `parents` decides every directory it creates from one
+policy, and its record cites the rule for the last directory decided: on a permit,
+the requested directory; on a deny, the one refused.
+
 **macOS: a `DEGRADED` mirror line means "read the JSONL" (#275/#273).** The
 unified log delivers one line and drops anything past 1015 bytes. With identity
 on the record the widest `session.prompt` records exceed that — measured at
@@ -439,6 +473,8 @@ destinations:                # #172: per-role egress allowlist for session.promp
   '_maknae-egress' does not exist on this host` — the package creates the account; on a
   source-built host create it (`packaging/common/maknae.sysusers`) before authorizing a
   provider.
+- **When an edit applies.** `maknaed` decides from a snapshot of `authz.yaml` compiled at
+  start; an edit applies at the next [reload](#reload-the-policy) or restart.
 
 ### What it proves
 
@@ -457,15 +493,16 @@ destinations:                # #172: per-role egress allowlist for session.promp
 - **Per-request AUTHORIZATION (#77)** — the DECISION half: every admitted request is
   decided by the PDP — the `Composition` of `maknae-authz-basic` and the
   classification-ceiling operand, behind the `maknae-security` seam (#148/#154) —
-  policy re-read per request. `maknae read ~/some-file` returns bytes under `Read(~/**)`
+  from a snapshot of `authz.yaml` compiled at start and at each reload (#489).
+  `maknae read ~/some-file` returns bytes under `Read(~/**)`
   (the kernel decides; the CLI reads under your credentials);
   `maknae read ~/.ssh/id_rsa` is DENIED by the shipped deny list — wire says
-  `not authorized`, the trail says which pattern and which object. Re-roling or
-  removing an identity ALREADY KNOWN at boot bites on the NEXT request, no
-  restart (containment). Introducing a brand-NEW username is restart-scoped by
-  design (#85 §3, zero per-request NSS): until the restart, a policy naming an
-  unresolvable identity makes every decision Indeterminate → deny — fail
-  closed, recover by restarting (or reverting the edit); #84's reload lifts this.
+  `not authorized`, the trail says which pattern and which object, and the record's
+  `rule` block names the policy section that decided it. A policy edit — re-roling or
+  removing an identity, or adding a new username — applies at the next
+  [reload](#reload-the-policy) or restart, never on the next request. A reload resolves
+  every username on the host the way a start does, and refuses (keeping the running
+  policy) when one has no account; no lookup happens per request (#85 §3).
 - **AU-3 audit lines** — every connection and every request produces a durable,
   canonically-ordered JSONL record (§6 above) BEFORE the daemon released a response —
   the fail-closed audit-then-respond ordering is not just a code comment, it's
@@ -599,7 +636,7 @@ It refuses while any file carries the key, whether `maknae.yaml` or a `config.d/
 
 ### 3c. More than one user
 
-Enroll writes `~/.maknae` only for the account that ran it. To give another local account the agent, follow [first-provider step 4a](first-provider.md#4a-add-another-local-user): it adds the account to the `maknae` group, copies your CLI configuration to it, binds it in `authz.yaml` and creates its Vault user. The consequence for you: once `authz.yaml` has a `bindings:` block, only the names it lists have a role, so the enrolled administrator must be listed under `admin` too, and step 7's grant then belongs under each bound role; restart `maknaed` after adding a name. A second user's file actions are confined to their own home, resolved per request.
+Enroll writes `~/.maknae` only for the account that ran it. To give another local account the agent, follow [first-provider step 4a](first-provider.md#4a-add-another-local-user): it adds the account to the `maknae` group, copies your CLI configuration to it, binds it in `authz.yaml` and creates its Vault user. The consequence for you: once `authz.yaml` has a `bindings:` block, only the names it lists have a role, so the enrolled administrator must be listed under `admin` too, and step 7's grant then belongs under each bound role; [reload](#reload-the-policy) `maknaed` after adding a name. A second user's file actions are confined to their own home, resolved per request.
 
 ### 4. Check the deputy's bounds
 
@@ -650,7 +687,7 @@ As yourself, not root, store your own API key in Vault under your own login: [fi
 
 ### 7. Grant the prompt
 
-Append to `/etc/maknae/authz.yaml`. `tee -a` keeps its owner, mode and label. The policy is re-read on every request, so no restart is needed:
+Append to `/etc/maknae/authz.yaml`. `tee -a` keeps its owner, mode and label. Step 9's restart applies it; a daemon that is already serving applies it at the next reload, `sudo systemctl reload maknaed` ([Reload the policy](#reload-the-policy)):
 
 ```bash
 sudo tee -a /etc/maknae/authz.yaml >/dev/null <<'EOF'
@@ -727,7 +764,7 @@ What to find:
 
 | Record | Shape |
 |---|---|
-| Boot composition evidence | `event:"boot"`, `action:"authz"`, reason `authorization composition: …; system: …; ceiling: …`. Written at every boot, before serving |
+| Boot composition evidence | `event:"boot"`, `action:"authz"`, reason `authorization composition: …; system: …; ceiling: …`, and `policy_sha256`, the digest of the policy the daemon starts with. Written at every boot, before serving |
 | `session.prompt` intent | `object:"provider:openai"`, reason `intent recorded`, `egress.status:"IntentOnly"` with `content_length`, `content_digest`, `conversation` and `model` (the admitted model), and `output_tokens` when the user set a reply cap |
 | `session.prompt` outcome | the same identity, `model` included, at a later `seq`: `egress.status:"Sent"` with `reply_length`, or a named failure (`Failed`, `DeadlineExpired`, `OutcomeUnknown`, `LandedUndelivered`). `prompt_tokens` and `completion_tokens` appear when the provider reported usage; they are the provider's claim, informational |
 | `session.prompt` refused before send | the intent, then an outcome with `egress.status:"Failed"`: the deputy refused before any provider I/O (for example a seal it cannot open, or a wrapping token whose lookup fails). The deputy's journal names the cause (`OpenFailed(…)`) |
@@ -868,6 +905,215 @@ With enroll's defaults and the subpath `openai`, the path is `maknae-kv/metadata
 
 ---
 
+## Reload the policy
+
+`maknaed` decides every request from a snapshot of `/etc/maknae/authz.yaml` compiled when it starts. An edit to the file changes nothing until you reload the daemon or restart it:
+
+```bash
+sudo systemctl reload maknaed                          # Linux
+sudo launchctl kill SIGHUP system/io.maknae.maknaed    # macOS
+```
+
+Both send `SIGHUP`, as does `kill -HUP <pid>` for a daemon started by hand. The command returns before the reload finishes, so read the result in the trail.
+
+- **What a reload reads.** `authz.yaml` only. The principal, the classification system and ceiling, the transport, the audit configuration and the providers are read at start, and a change to any of them needs a restart.
+- **All or nothing.** A reload loads and validates the whole file and resolves every username in `bindings:` on the host, as a start does, so a new username needs only a reload. If anything fails (the file does not parse or validate, or a name has no account on the host), the reload is refused before it touches the store, and the running policy stands. A reload refused while writing the store also keeps the running policy; see the first case under "Records that look out of order" below. The journal (`journalctl -u maknaed`; on macOS `/usr/local/var/log/maknae/maknaed.err`) says `maknaed: reload refused: <cause>; the previous policy stands`. An invalid `authz.yaml` at start still refuses to start, with exit 3.
+- **One at a time.** Reloads run in turn. Signals that arrive while one runs produce one more reload, and a `SIGHUP` sent while the daemon is starting is applied once it serves. One that lands in the first milliseconds of the process, before its handler exists, ends it; systemd (`RestartForceExitStatus=SIGHUP`) and launchd (`KeepAlive`) start it again, after `RestartSec` (5 seconds) on Linux.
+- **Stopping.** A graceful stop abandons a reload that is still loading the file, recorded as `reload refused: shutdown`. It waits up to 5 seconds for a reload that already holds its turn (writing the store or its audit records), then stops without it, so the stop record and the token revoke never wait on a reload for longer than that.
+
+**What the trail shows.** Each reload is its own session, and its records carry `event:"reload"`, so a query that selects `event=="boot"` does not see them. In order:
+
+| Record | Shape |
+|---|---|
+| Intent | `action:"graph.reload"`, `result:"permit"`, reason `intent recorded (SIGHUP)`, `graph.anchor:"reloading"` |
+| Store transition (only when the bindings changed) | `action:"graph.transition"`, reason `intent recorded (root-file)`, at the next store revision; then `action:"graph.checkpoint"`, reason `transitioned`, with that revision and the new store's `ciphertext_sha256` |
+| Outcome, applied | `action:"graph.reload"`, `result:"permit"`, posture `authorized`, reason `reload applied: revision <n>; identity persisted` (or `identity unchanged`), followed by `; store not durable: <cause>` and `; checkpoint append failed: <cause>` when those happened, `graph.anchor:"reloaded"`, and `policy_sha256` of the policy now in force |
+| Outcome, refused | `action:"graph.reload"`, `result:"deny"`, posture `unavailable`, reason `reload refused: <cause>`, where the cause starts `policy load:`, `compile:` or `persist:`, or is `shutdown`; `graph.anchor:"reload-refused"`, and `policy_sha256` of the policy that stands |
+
+`policy_sha256` is the SHA-256 of one `<section>=<sha256 of the section's canonical JSON>` line per top-level section of `authz.yaml`, in section-name order. Two loads of the same policy carry the same value, and a reload that changed only `permissions:`, which leaves the store as it was, still carries a new one. It covers the text of `authz.yaml` only, not the uids its names resolve to: a reload after only a bound account's uid changed carries the same `policy_sha256` and a new `graph.revision`, which tells the two apart.
+
+```bash
+sudo jq -c 'select(.action=="graph.reload") | {ts, session_id, result: .outcome.result, reason: .outcome.reason, policy: .policy_sha256}' /var/log/maknae/audit.jsonl | tail -n 2
+```
+
+If the intent itself cannot be appended, nothing is loaded and no outcome is written; the journal says `reload refused: audit append failed: <cause>`.
+
+**`maknae status`** prints `kernel graph: revision <n> (<state>)`. The revision follows every reload that changed the bindings. The state is the result of this start's rollback check (`seeded`, `reseeded`, `verified`, `advanced` or `rollback-anchor-unavailable`) and stays the same until the next restart.
+
+**Records that look out of order.** Five cases leave the trail looking unusual. In each, the store and the trail agree once the next start has checked them, or that start refuses.
+
+- **A `graph.transition` with no `graph.checkpoint` after it, then `reload refused: persist: …`.** The store write failed after its intent was recorded, and the running policy is the previous one. Nothing reached disk: sealing the store failed, or writing or renaming its temporary file failed (a full or failing disk). Any later reload that changes the bindings rewrites that revision and checkpoints it. Otherwise the next start loads the store and applies `authz.yaml` as a new transition if the file differs from it.
+- **`reload applied: …; store not durable: <cause>`.** The new store was renamed into place, then the directory `fsync` failed. The new policy is in force and the store holds it, with its checkpoint, but a crash before the file system flushes the directory can bring back the previous store, and the next start then refuses it as rolled back against that checkpoint ([The kernel graph store refuses to start](#the-kernel-graph-store-refuses-to-start)). Check the file system. At start, the same failure on a seed, migration or transition is not a refusal: `maknaed` starts and the journal says `kernel graph store revision <n> is in place but may not survive a crash: <cause>`.
+- **`reload applied: …; checkpoint append failed: <cause>`.** The new policy is in force and the store holds it, but the trail has no checkpoint for it; the next start reports `advanced`.
+- **Reload records after the stop record.** A reload in flight can append its records after the stop record, `reload refused: shutdown` included, in two cases: when `maknaed` exits because its credential supervisor stopped, and when a graceful stop gives up its 5-second wait for a reload that is writing the store. They carry their own session id and match the store.
+- **A reload intent with no outcome record.** The daemon exited while a reload was still writing; a `graph.transition` may follow the intent with no checkpoint. The next start checks the store as above and reports what it found.
+
+---
+
+## The audit trail
+
+The trail is `/var/log/maknae/audit.jsonl`, `_maknae:_maknae 0640` in a `0700 _maknae` directory. On Linux the file carries the append-only attribute (`chattr +a`), set by the package on every install and upgrade: writes only append, and truncating, unlinking or opening the file for writing without `O_APPEND` is refused, root included. On Debian the attribute is the trail's only append-only control, because AppArmor cannot express append; on the Red Hat family SELinux enforces it as well. Check it with `lsattr /var/log/maknae/audit.jsonl`, which shows `a`. On macOS the file carries `uappnd` (`ls -lO`).
+
+### Rotate, restore or recreate the trail
+
+While the attribute is clear, nothing else keeps the trail append-only on Debian, so stop the daemon first: it holds the file open. Root then holds the directory: it takes it to root, removes every ACL entry, sets `0700` and checks all three before it acts, so the daemon account cannot swap `audit.jsonl` for a link to another file while root acts on it. Owning the directory is not enough on its own, because an ACL entry or a group or other write bit left by `_maknae` would still let it change the directory's entries. The archived copy stays in `/var/log/maknae`, owned by root and append-only, so neither the daemon account nor a rotation can rewrite or remove it.
+
+On Linux:
+
+```bash
+sudo systemctl stop maknaed.service
+sudo bash -eu <<'ROTATE'
+d=/var/log/maknae f=/var/log/maknae/audit.jsonl
+[ -d "$d" ] && [ ! -h "$d" ] || { echo "$d is not a directory" >&2; exit 1; }
+chown root:root "$d"
+setfacl -P -b "$d"
+chmod 0700 "$d"
+acl="$(getfacl -P -s -p "$d")"
+[ "$(stat -c '%u %g %a' "$d")" = "0 0 700" ] && [ -z "$acl" ] || { echo "$d is not root:root 0700 with no ACL; it is left root-owned" >&2; exit 1; }
+if [ -h "$f" ] || [ ! -f "$f" ] || [ "$(stat -c %h "$f")" != 1 ]; then
+    echo "$f is not a regular, single-link file; $d is left root-owned" >&2; exit 1
+fi
+a="$f.$(date -u +%Y%m%dT%H%M%SZ)"
+chattr -a "$f"
+mv "$f" "$a"
+chown root:root "$a"
+chattr +a "$a"
+install -m 0640 -o _maknae -g _maknae /dev/null "$f"
+if command -v restorecon >/dev/null; then restorecon "$a" "$f"; fi
+chattr +a "$f"
+for x in "$a" "$f"; do
+    lsattr -d "$x" | cut -c6 | grep -qx a || { echo "$x is not append-only; $d is left root-owned" >&2; exit 1; }
+done
+chown -h _maknae:_maknae "$d"
+ROTATE
+sudo systemctl start maknaed.service
+```
+
+On macOS:
+
+```bash
+sudo launchctl bootout system/io.maknae.maknaed
+sudo bash -eu <<'ROTATE'
+d=/var/log/maknae f=/var/log/maknae/audit.jsonl
+[ -d "$d" ] && [ ! -L "$d" ] || { echo "$d is not a directory" >&2; exit 1; }
+chown 0:0 "$d"
+chmod -N "$d"
+chmod 0700 "$d"
+[ "$(stat -f '%u %g %Lp' "$d")" = "0 0 700" ] && [ "$(ls -led "$d" | wc -l)" -eq 1 ] || { echo "$d is not root 0700 with no ACL; it is left root-owned" >&2; exit 1; }
+if [ -L "$f" ] || [ ! -f "$f" ] || [ "$(stat -f %l "$f")" != 1 ]; then
+    echo "$f is not a regular, single-link file; $d is left root-owned" >&2; exit 1
+fi
+a="$f.$(date -u +%Y%m%dT%H%M%SZ)"
+chflags nouappnd "$f"
+mv "$f" "$a"
+chown 0:0 "$a"
+chflags uappnd "$a"
+install -m 0640 -o _maknae -g _maknae /dev/null "$f"
+chflags uappnd "$f"
+for x in "$a" "$f"; do
+    stat -f %Sf "$x" | grep -q uappnd || { echo "$x is not flagged uappnd; $d is left root-owned" >&2; exit 1; }
+done
+chown -h _maknae:_maknae "$d"
+ROTATE
+sudo launchctl bootstrap system /Library/LaunchDaemons/io.maknae.maknaed.plist
+```
+
+The block refuses unless both files carry `a` (Linux) or `uappnd` (macOS). On macOS, `_maknae` owns the live file and can clear `uappnd` on it; it cannot clear the flag on the root-owned archive. To restore a copy instead of starting an empty trail, give the copy's path in place of `/dev/null`. If the block refuses or stops with an error, leave the daemon stopped and work through [The package refuses the audit trail](#the-package-refuses-the-audit-trail). A recreated file loses any ACL granted to a log agent; re-apply it ([Granting the agent read access](../packaging/README.md#granting-the-agent-read-access)). A trail without a `graph.checkpoint` record starts with [`rollback-anchor-unavailable`](#rollback-anchor-unavailable).
+
+### The package refuses the audit trail
+
+The Debian `postinst`, the RPM `%post` and the macOS `postinstall` act on `/var/log/maknae/audit.jsonl` as root. Before they act, they take the directory to root (`0:0`), remove every ACL entry on it, set it `0700` and check the result, and they refuse an entry that is not what the package created:
+
+```
+maknae: cannot hold /var/log/maknae as root:root 0700 with no ACL; it is left root-owned
+maknae: /var/log/maknae/audit.jsonl is not a regular, single-link _maknae:_maknae file; /var/log/maknae is left root-owned
+maknae: cannot set the append-only attribute on /var/log/maknae/audit.jsonl (filesystem: <type>); /var/log/maknae is left root-owned
+```
+
+(macOS prints `as root 0700` and `is not a regular, single-link file`.) The first message means the directory could not be taken to root `0700` with no ACL entry; on Linux, check that `setfacl` and `getfacl` are installed (the `acl` package) and that the file system accepts them. The second means the entry is a symbolic link, a directory or other non-regular file, a file with a second hard link, or a file owned by another account. A symbolic link or a second link is what a compromised daemon account would plant to make root act on another file, so treat it as a possible compromise until you know otherwise. The third means the file system cannot hold the attribute. In every case the directory stays root-owned, so `maknaed` cannot open the trail and the next start fails. On Debian the package stays half-configured. On the Red Hat family, rpm reports the scriptlet failure but keeps the install. On macOS, the installer fails. While the directory is root-held, `rpm -V maknae` reports `UG` on `/var/log/maknae`.
+
+A refused upgrade does not stop the old daemon: it keeps running on the descriptor it already holds. Stop it before you touch the trail, so nothing writes to the file while its protection is lifted:
+
+```bash
+sudo systemctl stop maknaed                          # Linux
+sudo launchctl bootout system/io.maknae.maknaed      # macOS
+```
+
+Inspect the entry without following it:
+
+```bash
+sudo ls -la /var/log/maknae
+sudo stat /var/log/maknae/audit.jsonl                               # stat does not follow a symlink
+sudo find / -xdev -samefile /var/log/maknae/audit.jsonl 2>/dev/null # every name of a multiply-linked file
+```
+
+To recover, first hold the directory completely, because a refused hold can leave an ACL entry or a write bit in place. On Linux:
+
+```bash
+sudo bash -eu <<'HOLD'
+d=/var/log/maknae
+[ -d "$d" ] && [ ! -h "$d" ] || { echo "$d is not a directory" >&2; exit 1; }
+chown root:root "$d"
+setfacl -P -b "$d"
+chmod 0700 "$d"
+acl="$(getfacl -P -s -p "$d")"
+[ "$(stat -c '%u %g %a' "$d")" = "0 0 700" ] && [ -z "$acl" ] || { echo "$d is not root:root 0700 with no ACL; it is left root-owned" >&2; exit 1; }
+HOLD
+```
+
+On macOS:
+
+```bash
+sudo bash -eu <<'HOLD'
+d=/var/log/maknae
+[ -d "$d" ] && [ ! -L "$d" ] || { echo "$d is not a directory" >&2; exit 1; }
+chown 0:0 "$d"
+chmod -N "$d"
+chmod 0700 "$d"
+[ "$(stat -f '%u %g %Lp' "$d")" = "0 0 700" ] && [ "$(ls -led "$d" | wc -l)" -eq 1 ] || { echo "$d is not root 0700 with no ACL; it is left root-owned" >&2; exit 1; }
+HOLD
+```
+
+If the block refuses, do not go on: find out what keeps the directory from being held. Then:
+
+1. Preserve what is there: `sudo cp -a /var/log/maknae /root/maknae-audit-evidence.$(date -u +%Y%m%dT%H%M%SZ)` (`cp -a` copies a link as a link).
+2. Move the entry aside. `mv` moves a link itself, never its target: `sudo mv /var/log/maknae/audit.jsonl /root/`. If the entry is your own trail with the wrong owner (for example a copy restored as root), and `stat` shows a regular file with one link, re-own it instead: `sudo chattr -a` (macOS: `chflags nouappnd`), then `sudo chown -h _maknae:_maknae`, on that path (with the daemon stopped, as above).
+3. For the attribute failure, put `/var/log/maknae` on a file system that supports `chattr +a` (ext4, xfs and btrfs do).
+4. Re-run the package's configuration: `sudo dpkg --configure maknae`, `sudo dnf reinstall maknae`, or the macOS installer again. It creates the file when it is absent, sets the attribute, verifies it and hands the directory back. Then start `maknaed`.
+
+### Remove a kept trail
+
+Removing the package keeps the trail, except a Debian `purge`. On Linux the files keep `+a`, so `rm` is refused until it is cleared. Remove them with the daemon gone and the directory root-held. On Linux:
+
+```bash
+sudo bash -eu <<'REMOVE'
+d=/var/log/maknae
+[ -d "$d" ] && [ ! -h "$d" ] || { echo "$d is not a directory" >&2; exit 1; }
+chown root:root "$d"
+setfacl -P -b "$d"
+chmod 0700 "$d"
+acl="$(getfacl -P -s -p "$d")"
+[ "$(stat -c '%u %g %a' "$d")" = "0 0 700" ] && [ -z "$acl" ] || { echo "$d is not root:root 0700 with no ACL; it is left root-owned" >&2; exit 1; }
+find "$d" -xdev -mindepth 1 -maxdepth 1 -type f -links 1 -exec chattr -a {} +
+rm -rf "$d"
+REMOVE
+```
+
+On macOS:
+
+```bash
+sudo bash -eu <<'REMOVE'
+d=/var/log/maknae
+[ -d "$d" ] && [ ! -L "$d" ] || { echo "$d is not a directory" >&2; exit 1; }
+chown 0:0 "$d"
+chmod -N "$d"
+chmod 0700 "$d"
+[ "$(stat -f '%u %g %Lp' "$d")" = "0 0 700" ] && [ "$(ls -led "$d" | wc -l)" -eq 1 ] || { echo "$d is not root 0700 with no ACL; it is left root-owned" >&2; exit 1; }
+find "$d" -xdev -mindepth 1 -maxdepth 1 -type f -links 1 -exec chflags nouappnd {} +
+rm -rf "$d"
+REMOVE
+```
+
 ## The kernel graph store refuses to start
 
 `maknaed` keeps its enforcement state in an encrypted store, `kernel.graph`, in its state directory: `/var/lib/maknae` on Linux, `/usr/local/var/db/maknae/state` on macOS. Each start checks the store against the latest `graph.checkpoint` record in the audit trail, and refuses to start when the store cannot be trusted. The refusal goes to the journal (`journalctl -u maknaed`) on Linux or to `/usr/local/var/log/maknae/maknaed.err` on macOS, as a first line naming the cause and, for every graph refusal, a second line naming the next step:
@@ -904,12 +1150,24 @@ In the table, `<dir>` is the state directory. Each first line starts `maknaed: r
 | Audit trail unreadable | `kernel graph store: graph store audit failed: <cause>` | `the audit trail anchors the graph store; check that the audit file is readable` | 5 | Check `/var/log/maknae/audit.jsonl`. |
 | Audit append failure | `the boot graph record was not durably appended: <cause>`, or the same with `graph reseed` or `graph rejected-store` for `graph` | none | 1 | A boot record could not be written to the audit trail. Check the audit file and its file system. |
 | No key | `` kernel graph key: no kernel graph key (<detail>): run `sudo maknae enroll` `` | `` run `sudo maknae enroll` to create the kernel graph key `` | 5 | Run `sudo maknae enroll` ([upgrading](upgrading.md#kernel-graph-store-488)), then restart. On Linux systemd refuses the unit first, with `status=243/CREDENTIALS`. |
+| Forged vocabulary | `kernel graph store: graph store vocabulary refused: <cause>`, where `<cause>` is, for example, `compiled nodes differ from the digest they claim` or `the stored digest does not cover the stored compiled nodes` | as for rolled back | 5 | The store's role vocabulary does not match the digest it records, which an upgrade never produces. Investigate, then reseed. A store from an older binary is [migrated](#upgrades-migrate-the-store), not refused. |
+| Identity layer does not build | `kernel graph store: the kernel identity layer does not build: <cause>` | `the identity layer is built from the bindings section of authz.yaml in the configuration directory (/etc/maknae/authz.yaml by default); correct it, then restart; do not reseed` | 5 | Correct `bindings:` in `authz.yaml` and restart. |
 | Malformed key | `kernel graph key: the kernel graph key is malformed (<why>)` | `` replace the key as the runbook's "Replace a malformed key" says: remove it, run `sudo maknae enroll`, then `sudo maknae reseed` `` | 5 | [Replace the key](#replace-a-malformed-key). |
 | Key unreadable | `kernel graph key: <cause>` | `` the kernel graph key could not be read; check the credential `sudo maknae enroll` created (enroll never replaces an existing key) `` | 5 | Check the credential's ownership and mode, or the keychain item. |
 
+### Upgrades migrate the store
+
+The store records a digest of the role vocabulary it was written with. A start that finds a store whose digest is consistent with its own contents but differs from the binary's migrates the store in place. That happens on the first start after an upgrade that changes the vocabulary (including the first start over a store written before #489) and after a change of classification system (`core.handling.policy`), since the compiled roles carry that system's lowest level. After the start's usual `graph.checkpoint`, the trail shows:
+
+- a `graph.migrate` record, reason `intent recorded (vocabulary <old digest, or none> -> <new digest>; unbound: [<uids>])`, at the next revision. `unbound` lists the uids of bindings to a role the new binary no longer has; those bindings are dropped;
+- a `graph.checkpoint`, reason `migrated`, at that revision;
+- if `authz.yaml`'s bindings differ from the migrated store, a `graph.transition` (`root-file`) and a `graph.checkpoint` (`transitioned`) at the revision after.
+
+No action is needed. `maknae status` reports the new revision.
+
 ### Reseed
 
-A reseed replaces the store with a fresh, empty one. **It drops any containment that was never synced back to `bindings.yaml`. Until sync back (#491) is built, that is all of it.**
+A reseed replaces the store with a fresh one, seeded from the bindings in `/etc/maknae/authz.yaml`. Every containment comes from `authz.yaml` today, so the reseed restores it. Once live containment (#165) exists, a reseed will drop any containment not yet synced back to the policy files (#491).
 
 ```bash
 sudo maknae reseed

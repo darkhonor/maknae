@@ -16,7 +16,9 @@ use maknae_authz_basic::HermeticAuthorizer;
 use maknae_proto::{Payload, ProtoErrCode, RespResult};
 
 mod common;
-use common::{AlwaysPermit, FailNthEmit, HostileObligation, PanickingName, SleepAuthorizer};
+use common::{
+    AlwaysPermit, CitingPermit, FailNthEmit, HostileObligation, PanickingName, SleepAuthorizer,
+};
 
 // Reuse run_loop's recording emitter shape locally (each tests/*.rs is its
 // own crate; RecEmit is tiny and its semantics — record synchronously, then
@@ -119,6 +121,7 @@ impl Fixture {
                 self.dir.join("authz.yaml"),
                 self.principal.clone(),
                 seam_req(),
+                maknae_state::envelope::sha256,
             )
             .expect("fixture policy constructs"),
         )
@@ -487,50 +490,55 @@ async fn admin_whoami_permits_with_both_records() {
     assert!(req.object.is_none(), "whoami is resource-free");
 }
 
-#[tokio::test]
-async fn containment_flips_on_file_edit_and_reason_stays_off_the_wire() {
-    // The unique-sentinel enforcement proof: the SAME authorizer instance
-    // permits, the file is rewritten, the very next request denies — only the
-    // real per-request re-read can produce the flip. The deny reason reaches
-    // the trail and NEVER the frame bytes.
-    let fx = Fixture::new("flip");
-    fx.write_policy(BINDINGS_ROOT_ADMIN);
-    let authorizer = fx.authorizer();
-
-    let emit1 = RecEmit::new();
-    let first = drive(
+async fn whoami_on(
+    fx: &Fixture,
+    authorizer: Arc<HermeticAuthorizer>,
+    emit: Arc<RecEmit>,
+) -> Vec<u8> {
+    drive(
         &fx.dir,
-        authorizer.clone(),
-        emit1,
+        authorizer,
+        emit,
         0,
         maknae_proto::Verb::Whoami,
         Duration::from_secs(5),
     )
     .await
-    .expect("first call permits");
+    .expect("every call gets a frame")
+}
+
+#[tokio::test]
+async fn containment_flips_only_at_reload_and_reason_stays_off_the_wire() {
+    // The unique-sentinel enforcement proof: the SAME authorizer instance
+    // permits, the file is rewritten, and only a reload flips it to deny. The
+    // deny reason reaches the trail and NEVER the frame bytes.
+    let fx = Fixture::new("flip");
+    fx.write_policy(BINDINGS_ROOT_ADMIN);
+    let authorizer = fx.authorizer();
+
+    let first = whoami_on(&fx, authorizer.clone(), RecEmit::new()).await;
     assert!(matches!(
         maknae_proto::decode_response(&first).unwrap().result,
         RespResult::Ok(_)
     ));
 
     fx.write_policy(BINDINGS_ROOT_ADVERSARY);
+    let unreloaded = whoami_on(&fx, authorizer.clone(), RecEmit::new()).await;
+    assert!(
+        matches!(
+            maknae_proto::decode_response(&unreloaded).unwrap().result,
+            RespResult::Ok(_)
+        ),
+        "the per-request re-read is removed; a reload is the only transition"
+    );
 
+    authorizer.reload_from_file().unwrap();
     let emit2 = RecEmit::new();
-    let second = drive(
-        &fx.dir,
-        authorizer,
-        emit2.clone(),
-        0,
-        maknae_proto::Verb::Whoami,
-        Duration::from_secs(5),
-    )
-    .await
-    .expect("deny gets a frame too (Unauthorized)");
+    let second = whoami_on(&fx, authorizer, emit2.clone()).await;
     let resp = maknae_proto::decode_response(&second).unwrap();
     match resp.result {
         RespResult::Err(e) => {
             assert_eq!(e.code, ProtoErrCode::Unauthorized);
-            assert_eq!(e.message, "not authorized", "no note may reach the wire");
             assert_eq!(
                 e.message, "not authorized",
                 "wire message is the fixed generic string"
@@ -550,6 +558,26 @@ async fn containment_flips_on_file_edit_and_reason_stays_off_the_wire() {
         "the trail carries the real reason: {}",
         req.outcome.reason
     );
+}
+
+#[tokio::test]
+async fn an_invalid_policy_at_reload_keeps_the_old_snapshot() {
+    use maknae_authz_basic::Baseline;
+    let fx = Fixture::new("badreload");
+    fx.write_policy(BINDINGS_ROOT_ADMIN);
+    let authorizer = fx.authorizer();
+    let before = authorizer.snapshot();
+    fx.write_policy("not: [valid");
+    assert!(authorizer.reload_from_file().is_err());
+    assert!(
+        Arc::ptr_eq(&before, &authorizer.snapshot()),
+        "a refused reload installs nothing"
+    );
+    let after = whoami_on(&fx, authorizer, RecEmit::new()).await;
+    assert!(matches!(
+        maknae_proto::decode_response(&after).unwrap().result,
+        RespResult::Ok(_)
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -714,6 +742,9 @@ async fn the_shipped_deny_list_actually_denies_a_read_of_ssh_keys() {
         "only a real DenyMatch renders the policy-entry source (and proves the ~ expansion round-trip): {}",
         req.outcome.reason
     );
+    let rule = req.rule.as_ref().expect("the deny cites its rule node");
+    assert!(rule.section.ends_with("authz.yaml#permissions"), "{rule:?}");
+    assert!(rule.key.starts_with("rule:permissions:deny:"), "{rule:?}");
     // And the pattern source never leaks onto the wire either.
     let pat = b".ssh";
     assert!(!frame.windows(pat.len()).any(|w| w == pat));
@@ -828,12 +859,13 @@ async fn ordinary_user_reads_approved_content_through_the_composed_pdp() {
         RespResult::Err(ref e) if e.code == ProtoErrCode::Unauthorized)
     );
 
-    // Reuse the same PDP: a containment edit must bite on the next read,
-    // even though the subject can still open and delegate the same object.
+    // Reuse the same PDP: a reloaded containment edit must bite on the next
+    // read, even though the subject can still open and delegate the same object.
     fx.write_policy(&format!(
         "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\n  deny: []\nbindings:\n  adversary: [{:?}]\n",
         user_name,
     ));
+    authorizer.baseline().reload_from_file().unwrap();
     let emit = RecEmit::new();
     let contained = read_attempt(
         &fx.dir,
@@ -1561,12 +1593,18 @@ async fn an_unhonorable_obligation_fails_closed() {
         }
         other => panic!("unknown obligation must deny: {other:?}"),
     }
+    let records = emit.records();
+    let record = request_record(&records);
     assert!(
-        request_record(&emit.records())
+        record
             .outcome
             .reason
             .contains("unhonorable obligation: exfil"),
         "the obligation id is in the trail"
+    );
+    assert_eq!(
+        record.rule, None,
+        "a deny written in place of a permit that was never acted on cites no rule"
     );
 }
 
@@ -1702,10 +1740,7 @@ async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
         Arc::new(Default::default()),
         nondefault_transport(),
         Arc::new(booted.classification_policy_name().to_string()),
-        Arc::new(Some(maknae_kernel::KernelGraphStatus {
-            revision: 41,
-            anchor: "advanced".into(),
-        })),
+        Arc::new(Some(maknae_kernel::KernelGraphStatus::new(41, "advanced"))),
     )
     .await
     .expect("a frame");
@@ -1741,11 +1776,14 @@ async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
     assert_eq!(req.action, "admin.status");
     assert_eq!(req.outcome.result, "permit");
     assert_eq!(req.outcome.posture, "authorized");
+    let rule = req.rule.as_ref().expect("the permit cites its grant");
+    assert!(rule.section.ends_with("authz.yaml#roles.admin"), "{rule:?}");
+    assert_eq!(rule.key, "rule:roles.admin:allow:0", "{rule:?}");
 }
 
 /// `authz_backend` is ASKED OF THE PDP. A backend that does not name itself
 /// reports `unknown`, and this is the input that proves the field is not the
-/// `-basic` literal: `AlwaysPermit` implements only `decide`, so it takes the
+/// `-basic` literal: `AlwaysPermit` does not implement `backend_name`, so it takes the
 /// seam default. Two tests, two backends, two different expected strings --
 /// which is what "asked, not hardcoded" actually requires.
 #[tokio::test]
@@ -1802,14 +1840,9 @@ async fn a_panicking_backend_name_is_contained_on_the_production_path() {
     }
 }
 
-/// `admin.subject.list` reports what the POLICY FILE binds, end to end.
-///
-/// This does NOT prove liveness, and an earlier version of this doc claimed it
-/// did. The fixture policy is on disk before `HermeticAuthorizer::new`, so an
-/// implementation that snapshotted bindings at construction passes it
-/// unchanged. The liveness property is owned by
-/// `wrapper_subjects_delegate_and_read_live` in `maknae-authz-basic`, which
-/// rewrites the policy between two calls and asserts the answer changes.
+/// `admin.subject.list` reports what the policy file binds, end to end. That the
+/// answer follows a reload is owned by `wrapper_subjects_delegate_and_follow_the_snapshot`
+/// in `maknae-authz-basic`.
 #[tokio::test]
 async fn a_granted_subject_list_reports_the_policy_file_bindings() {
     let fx = Fixture::new("subjlist-grant");
@@ -1848,7 +1881,7 @@ async fn a_granted_subject_list_reports_the_policy_file_bindings() {
 /// list. This is the enforcement site of the claim the whole binding fix was
 /// written to protect, and until now nothing tested it.
 ///
-/// `AlwaysPermit` implements only `decide`, so its `subjects()` takes the seam
+/// `AlwaysPermit` does not implement `subjects()`, so it takes the seam
 /// default of `None` -- exactly what a backend that cannot enumerate returns,
 /// and what the shipped `authz.yaml` (no `bindings:` key) produces through
 /// `-basic`. Replacing the kernel's `None` arm with
@@ -1893,6 +1926,41 @@ async fn a_backend_that_cannot_enumerate_refuses_rather_than_claiming_empty() {
         last.outcome.reason.contains("does not enumerate"),
         "the reason must name WHICH refusal: {:?}",
         last.outcome.reason
+    );
+}
+
+#[tokio::test]
+async fn the_corrective_subject_list_record_keeps_the_permits_rule() {
+    let fx = Fixture::new("subjlist-uncited");
+    let emit = RecEmit::new();
+    drive(
+        &fx.dir,
+        Arc::new(CitingPermit),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::AdminSubjectList,
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("a frame");
+    let records = emit.records();
+    let [.., permit, corrective] = records.as_slice() else {
+        panic!("expected the permit and its correction, got {records:?}")
+    };
+    assert_eq!(
+        (
+            permit.outcome.result.as_str(),
+            corrective.outcome.posture.as_str()
+        ),
+        ("permit", "unavailable")
+    );
+    assert_eq!(
+        permit.rule.as_ref().map(|r| r.key.as_str()),
+        Some("rule:roles.admin:allow:0")
+    );
+    assert_eq!(
+        corrective.rule, permit.rule,
+        "the result of a permitted action cites the rule that permitted it"
     );
 }
 
@@ -1985,12 +2053,17 @@ async fn an_oversized_config_view_is_refused_explicitly_not_written_oversized() 
     // record says permit/authorized; a corrective record carries the real
     // posture. `permit` is retained -- the DECISION was a permit; only the
     // delivery was refused.
-    let last = emit.records().last().cloned().expect("a record");
+    let records = emit.records();
+    let [.., permit, last] = records.as_slice() else {
+        panic!("expected the permit and its correction, got {records:?}")
+    };
     assert_eq!(last.outcome.result, "permit");
     assert_eq!(
         last.outcome.posture, "refused-oversize",
         "a Permit-then-not-delivered must never read as a completed action"
     );
+    assert!(permit.rule.is_some(), "{permit:?}");
+    assert_eq!(last.rule, permit.rule);
 }
 
 /// `admin.config.show` end to end: a real `roles:` grant, a real PDP verdict,
@@ -2203,6 +2276,8 @@ async fn a_roles_denied_term_names_the_term_in_audit_but_not_on_the_wire() {
         "the audit trail MUST name the term that denied: {:?}",
         req.outcome.reason
     );
+    let rule = req.rule.as_ref().expect("the deny cites its grant");
+    assert!(rule.section.ends_with("authz.yaml#roles.admin"), "{rule:?}");
 }
 
 /// A PERMITTED but unbuilt term is decided, audited as decided-and-NOT-performed,
@@ -2318,8 +2393,8 @@ async fn a_corrective_record_that_cannot_append_withholds_its_frame() {
 
 // ---------------------------------------------------------------------------
 // #181 — the trail distinguishes WHY an absence denied; the wire never does.
-// Written RED against the un-annotated decide (S2 of the plan), turned green
-// by S3's annotations. Every wire assertion is the SAME generic Unauthorized:
+// Written RED against the un-annotated decide, turned green by the reason
+// annotations. Every wire assertion is the SAME generic Unauthorized:
 // the roadmap and the policy shape are audit-only disclosures.
 // ---------------------------------------------------------------------------
 
@@ -2478,9 +2553,13 @@ fn composed(fx: &Fixture, level: &str) -> Arc<maknae_kernel::Composition<Hermeti
     const US: &maknae_config::BasicPolicy = &maknae_config::BasicPolicy;
     let mut ceiling = maknae_config::Ceiling::baseline_for(US);
     ceiling.classification = US.level_of(level).expect("a US level");
-    let basic =
-        HermeticAuthorizer::new(fx.dir.join("authz.yaml"), fx.principal.clone(), seam_req())
-            .expect("fixture policy constructs");
+    let basic = HermeticAuthorizer::new(
+        fx.dir.join("authz.yaml"),
+        fx.principal.clone(),
+        seam_req(),
+        maknae_state::envelope::sha256,
+    )
+    .expect("fixture policy constructs");
     Arc::new(maknae_kernel::Composition::new(
         basic,
         maknae_kernel::CeilingAuthorizer::new(ceiling, US),

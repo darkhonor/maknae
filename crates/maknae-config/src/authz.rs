@@ -104,12 +104,13 @@ pub struct AuthzPolicy {
     /// Raw strings: role-name semantics belong to `maknae-authz-basic`.
     pub destinations: std::collections::BTreeMap<String, RawDestinations>,
     /// Original entry text for each `allow`/`deny` pattern, index-aligned
-    /// (#85): [`AuthzPolicy::evaluate3`] reports WHICH deny entry matched for
+    /// (#85): [`AuthzPolicy::evaluate3`] reports WHICH entry matched for
     /// the audit record. Private — provenance is not a matching input, and
     /// keeping it un-constructible outside the parser means the pair can
     /// never drift out of alignment.
     allow_sources: Vec<String>,
     deny_sources: Vec<String>,
+    sections: std::collections::BTreeMap<String, String>,
 }
 
 /// [`AuthzPolicy::evaluate3`]'s answer (#85): three-valued. The PDP backend
@@ -119,7 +120,7 @@ pub struct AuthzPolicy {
 /// term testimony the audit trail renders.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Match3 {
-    AllowMatch,
+    AllowMatch { source: String },
     DenyMatch { source: String },
     NoMatch,
 }
@@ -156,6 +157,30 @@ impl AuthzPolicy {
         home.is_none() && self.deny.iter().chain(&self.allow).any(&mut wants)
     }
 
+    /// Canonical JSON of each top-level key present in the file, by key.
+    pub fn section_canonical(&self, key: &str) -> Option<&str> {
+        self.sections.get(key).map(String::as_str)
+    }
+
+    pub fn sections(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.sections.iter().map(|(k, v)| (k.as_str(), v.as_str()))
+    }
+
+    pub fn allow_sources(&self) -> &[String] {
+        &self.allow_sources
+    }
+
+    pub fn deny_sources(&self) -> &[String] {
+        &self.deny_sources
+    }
+
+    fn allow_source(&self, i: usize) -> String {
+        self.allow_sources
+            .get(i)
+            .cloned()
+            .unwrap_or_else(|| "<unknown allow entry>".into())
+    }
+
     fn deny_source(&self, i: usize) -> String {
         self.deny_sources
             .get(i)
@@ -181,9 +206,11 @@ impl AuthzPolicy {
                 });
             }
         }
-        for p in &self.allow {
+        for (i, p) in self.allow.iter().enumerate() {
             if p.matches_req(req, home)? {
-                return Ok(Match3::AllowMatch);
+                return Ok(Match3::AllowMatch {
+                    source: self.allow_source(i),
+                });
             }
         }
         Ok(Match3::NoMatch)
@@ -220,10 +247,12 @@ impl AuthzPolicy {
                 }
             }
         }
-        for pattern in &self.allow {
+        for (i, pattern) in self.allow.iter().enumerate() {
             if let Pattern::Write(glob) = pattern {
                 if glob.covers_subtree(text, home)? {
-                    return Ok(Match3::AllowMatch);
+                    return Ok(Match3::AllowMatch {
+                        source: self.allow_source(i),
+                    });
                 }
             }
         }
@@ -678,6 +707,10 @@ fn parse_policy(body: &str) -> Result<AuthzPolicy, AuthzError> {
             "destinations",
         ],
     )?;
+    let sections = map
+        .iter()
+        .map(|(k, v)| (k.clone(), crate::value::canonical_json(v)))
+        .collect();
 
     // Missing or non-integer schema_version is represented by the sentinel 0
     // (valid versions start at 1) so both cases refuse via the same variant.
@@ -816,6 +849,7 @@ fn parse_policy(body: &str) -> Result<AuthzPolicy, AuthzError> {
         destinations,
         allow_sources: allow_raw,
         deny_sources: deny_raw,
+        sections,
     })
 }
 
@@ -1096,7 +1130,9 @@ mod tests {
                     Some(&home())
                 )
                 .unwrap(),
-            Match3::AllowMatch
+            Match3::AllowMatch {
+                source: "Write(~/projects/**)".into()
+            }
         );
         for relative in [
             "notes",
@@ -1105,11 +1141,13 @@ mod tests {
             ".bashrc",
             ".maknae/config.yaml",
         ] {
-            assert_ne!(
-                policy
-                    .evaluate3(&Request::Write(&home().join(relative)), Some(&home()))
-                    .unwrap(),
-                Match3::AllowMatch,
+            assert!(
+                !matches!(
+                    policy
+                        .evaluate3(&Request::Write(&home().join(relative)), Some(&home()))
+                        .unwrap(),
+                    Match3::AllowMatch { .. }
+                ),
                 "{relative}"
             );
         }
@@ -1117,7 +1155,9 @@ mod tests {
             policy
                 .evaluate_write_subtree(&home().join("projects/repo"), Some(&home()))
                 .unwrap(),
-            Match3::AllowMatch
+            Match3::AllowMatch {
+                source: "Write(~/projects/**)".into()
+            }
         );
     }
 
@@ -1218,12 +1258,16 @@ mod tests {
             (
                 "Write(/h/u/projects/**)",
                 "/h/u/projects/p",
-                Match3::AllowMatch,
+                Match3::AllowMatch {
+                    source: "Write(/h/u/projects/**)".into(),
+                },
             ),
             (
                 "Write(/h/u/projects/**)",
                 "/h/u/projects",
-                Match3::AllowMatch,
+                Match3::AllowMatch {
+                    source: "Write(/h/u/projects/**)".into(),
+                },
             ),
             ("Write(/h/u/projects/p)", "/h/u/projects/p", Match3::NoMatch),
             (
@@ -1237,7 +1281,13 @@ mod tests {
                 Match3::NoMatch,
             ),
             ("Write(/h/**/p/**)", "/h/u/projects/p", Match3::NoMatch),
-            ("Write(/**)", "/", Match3::AllowMatch),
+            (
+                "Write(/**)",
+                "/",
+                Match3::AllowMatch {
+                    source: "Write(/**)".into(),
+                },
+            ),
             ("Read(/h/u/projects/**)", "/h/u/projects/p", Match3::NoMatch),
             (
                 "Write(/h/u/projects/**)",
@@ -1284,7 +1334,9 @@ mod tests {
                     source: deny.into(),
                 }
             } else {
-                Match3::AllowMatch
+                Match3::AllowMatch {
+                    source: "Write(/h/u/projects/**)".into(),
+                }
             };
             assert_eq!(
                 policy
@@ -1372,8 +1424,18 @@ mod tests {
         ).unwrap();
         for (path, expected) in [
             ("read-only/notes", Match3::NoMatch),
-            ("projects/source.rs", Match3::AllowMatch),
-            ("projects/opaque/output", Match3::AllowMatch),
+            (
+                "projects/source.rs",
+                Match3::AllowMatch {
+                    source: "Write(~/projects/**)".into(),
+                },
+            ),
+            (
+                "projects/opaque/output",
+                Match3::AllowMatch {
+                    source: "Write(~/projects/**)".into(),
+                },
+            ),
             (
                 "projects/private/key",
                 Match3::DenyMatch {
@@ -1401,7 +1463,9 @@ mod tests {
                     Some(&home())
                 )
                 .unwrap(),
-            Match3::AllowMatch
+            Match3::AllowMatch {
+                source: "Read(~/projects/**)".into()
+            }
         );
     }
 
@@ -1644,7 +1708,9 @@ mod tests {
         let allowed = Request::Read(Path::new("/home/operator/docs/notes.txt"));
         assert_eq!(
             policy.evaluate3(&allowed, Some(&home())),
-            Ok(Match3::AllowMatch)
+            Ok(Match3::AllowMatch {
+                source: "Read(~/**)".into()
+            })
         );
 
         // default-deny: matches neither list (outside the allow's ~ scope).
@@ -2013,6 +2079,68 @@ mod tests {
     // ---- evaluate3 (#85): three-valued with pattern provenance ----
 
     #[test]
+    fn section_canonical_ignores_comments_whitespace_and_key_order_but_not_values() {
+        let a = parse_authz("schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\n  deny: []\nbindings:\n  admin: [\"alex\"]\n  user: []\n").unwrap();
+        let b = parse_authz("# comment\nschema_version: 1\n\nbindings:\n  user: []\n  admin:\n    - \"alex\"   # trailing\npermissions:\n  deny: []\n  allow:\n    - \"Read(~/**)\"\n").unwrap();
+        assert_eq!(
+            a.section_canonical("bindings"),
+            b.section_canonical("bindings")
+        );
+        assert_eq!(
+            a.section_canonical("permissions"),
+            b.section_canonical("permissions")
+        );
+        assert_eq!(
+            a.section_canonical("bindings"),
+            Some(r#"{"admin":["alex"],"user":[]}"#)
+        );
+        let c = parse_authz("schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"alex\"]\n  user: [\"u\"]\n").unwrap();
+        assert_ne!(
+            a.section_canonical("bindings"),
+            c.section_canonical("bindings")
+        );
+        assert_eq!(a.section_canonical("roles"), None);
+        let empty =
+            parse_authz("schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings: {}\n")
+                .unwrap();
+        assert_eq!(empty.section_canonical("bindings"), Some("{}"));
+        let keys: Vec<&str> = a.sections().map(|(k, _)| k).collect();
+        assert_eq!(keys, ["bindings", "permissions", "schema_version"]);
+        let values: Vec<&str> = a.sections().map(|(_, v)| v).collect();
+        assert_eq!(values[2], "1");
+    }
+
+    #[test]
+    fn allow_match_names_its_entry() {
+        let p = parse_authz("schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\", \"Read(/opt/**)\"]\n  deny: []\n").unwrap();
+        let home = Path::new("/home/x");
+        assert_eq!(
+            p.evaluate3(&Request::Read(Path::new("/opt/a")), Some(home))
+                .unwrap(),
+            Match3::AllowMatch {
+                source: "Read(/opt/**)".into()
+            }
+        );
+        assert_eq!(
+            p.allow_sources(),
+            &["Read(~/**)".to_string(), "Read(/opt/**)".to_string()]
+        );
+        assert!(p.deny_sources().is_empty());
+    }
+
+    #[test]
+    fn write_subtree_allow_match_names_its_entry() {
+        let p = parse_authz("schema_version: 1\npermissions:\n  allow: [\"Write(/srv/**)\", \"Write(/opt/**)\"]\n  deny: [\"Read(/x)\"]\n").unwrap();
+        assert_eq!(
+            p.evaluate_write_subtree(Path::new("/opt/a"), None).unwrap(),
+            Match3::AllowMatch {
+                source: "Write(/opt/**)".into()
+            }
+        );
+        assert_eq!(p.deny_sources(), &["Read(/x)".to_string()]);
+    }
+
+    #[test]
     fn evaluate3_deny_match_carries_full_source_text() {
         let p = parse_authz(SHIPPED_DEFAULT).unwrap();
         match p
@@ -2038,7 +2166,7 @@ mod tests {
                 Some(&home())
             )
             .unwrap(),
-            Match3::AllowMatch
+            Match3::AllowMatch { .. }
         ));
         assert!(matches!(
             p.evaluate3(&Request::Read(Path::new("/etc/hosts")), Some(&home()))
@@ -2429,7 +2557,9 @@ mod tests {
         .unwrap();
         assert_eq!(
             p.evaluate3(&Request::Read(Path::new("/srv/x")), None),
-            Ok(Match3::AllowMatch)
+            Ok(Match3::AllowMatch {
+                source: "Read(/srv/**)".into()
+            })
         );
     }
 
@@ -2442,7 +2572,9 @@ mod tests {
         let b = Some(Path::new("/home/b"));
         assert_eq!(
             p.evaluate_write_subtree(Path::new("/home/b/projects/repo"), b),
-            Ok(Match3::AllowMatch)
+            Ok(Match3::AllowMatch {
+                source: "Write(~/projects/**)".into()
+            })
         );
         assert!(matches!(
             p.evaluate_write_subtree(Path::new("/home/b/projects"), b),
@@ -2499,7 +2631,9 @@ mod tests {
         .unwrap();
         assert_eq!(
             p.evaluate_write_subtree(Path::new("/srv/x"), None),
-            Ok(Match3::AllowMatch)
+            Ok(Match3::AllowMatch {
+                source: "Write(/srv/**)".into()
+            })
         );
     }
 

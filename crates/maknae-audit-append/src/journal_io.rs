@@ -114,6 +114,8 @@ mod tests {
             egress: None,
             conversation: None,
             graph: None,
+            rule: None,
+            policy_sha256: None,
             outcome: Outcome {
                 result: "deny".into(),
                 reason: "policy denied".into(),

@@ -18,12 +18,13 @@ mod request;
 mod value;
 mod verdict;
 
-pub use authorizer::{Authorizer, SubjectBinding};
+pub use authorizer::{decide_each_cited, Authorizer, Decided, RuleCitation, SubjectBinding};
 pub use classification::{first_token, ClassificationPolicy, Level};
 pub use compose::{
-    combine, compose_backend_name, compose_decide, compose_decide_reporting_role, compose_subjects,
-    guarded_backend_name, guarded_decide, guarded_decide_reporting_role, guarded_subjects,
-    ConjunctionAuthorizer,
+    combine, compose_backend_name, compose_decide, compose_decide_cited, compose_decide_cited_all,
+    compose_decide_reporting_role, compose_subjects, guarded_backend_name, guarded_decide,
+    guarded_decide_cited, guarded_decide_cited_all, guarded_decide_reporting_role,
+    guarded_subjects, ConjunctionAuthorizer,
 };
 pub use obligation::{merge_obligations, Obligation, ObligationConflict};
 pub use request::{

@@ -207,10 +207,12 @@ mod tests {
         // Differ by design — each named, each with its reason in the units.
         const DEPUTY_DIFFERS: &[&str] = &[
             "ExecStart=",               // its own binary
+            "ExecReload=",              // the daemon's SIGHUP policy reload
             "LoadCredentialEncrypted=", // its own sealed seal key
             "ProtectHome=",             // `yes` here, `read-only` for the daemon's read path
             "ReadWritePaths=",          // the daemon's audit sink; the deputy writes nothing
             "Restart=",
+            "RestartForceExitStatus=", // a SIGHUP before the daemon's reload handler exists
             "RestartSec=",
             "RuntimeDirectory=", // the deputy's is the socket unit's
             "RuntimeDirectoryMode=",

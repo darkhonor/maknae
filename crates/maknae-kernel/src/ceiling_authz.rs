@@ -63,7 +63,7 @@
 //! echoed.
 //!
 //! **The ceiling and the system are frozen at boot; the baseline is not.**
-//! `-basic` re-reads its policy on every request; the ceiling is the static
+//! `-basic`'s policy snapshot is replaced by a reload; the ceiling is the static
 //! TCB's own declaration (ADR-0002: no hot-swap) and is cloned once from
 //! `BootConfig`, with the `'static` policy the registry selected. "Per-request
 //! enforcement" means the DECISION is re-made per request.
@@ -214,6 +214,10 @@ impl CeilingAuthorizer {
 }
 
 impl Authorizer for CeilingAuthorizer {
+    fn decide_cited_all(&self, reqs: &[maknae_security::Request]) -> Vec<maknae_security::Decided> {
+        maknae_security::decide_each_cited(self, reqs)
+    }
+
     fn decide(&self, req: &Request) -> Verdict {
         decide_ceiling(self.policy, &self.ceiling, &req.action.0, label_of(req))
     }

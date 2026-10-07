@@ -131,7 +131,7 @@ destinations:
 EOF
 ```
 
-The enrolled administrator resolves to the `admin` role when the policy has no `bindings:`. `provider:openai` is `provider:` followed by the `name` from step 3. The policy is re-read on every request; the one exception is a new name in `bindings:`, which needs a restart (step 4a).
+The enrolled administrator resolves to the `admin` role when the policy has no `bindings:`. `provider:openai` is `provider:` followed by the `name` from step 3. An edit to the policy applies when `maknaed` reloads it (`sudo systemctl reload maknaed`; on macOS, `sudo launchctl kill SIGHUP system/io.maknae.maknaed`) or restarts; step 5's start reads it too. A reload that does not validate is refused and the running policy stands, with the cause in the journal and the audit trail ([runbook](runbook.md#reload-the-policy)).
 
 ### 4a. Add another local user
 
@@ -218,7 +218,7 @@ Enroll writes `~/.maknae` only for the account that ran it. Each further local u
        allow: ["provider:openai"]
    ```
 
-   **Restart `maknaed` immediately after saving** (`sudo systemctl restart maknaed`; on macOS, `sudo launchctl kickstart -k system/io.maknae.maknaed`). The policy is re-read on every request, but the map from names in `bindings:` to uids is built when the daemon starts. Until the restart, a name it did not know at start makes every request indeterminate, which is a deny for everyone, you included. A name with no account on the host refuses the restart: `identity '<name>' has no resolvable uid on this host`.
+   **Reload `maknaed` after saving** (`sudo systemctl reload maknaed`; on macOS, `sudo launchctl kill SIGHUP system/io.maknae.maknaed`). Until the reload the daemon keeps deciding from the policy it already had, so the new user has no role yet. The reload resolves every name in `bindings:` on the host; no restart is needed. A name with no account on the host refuses the reload, and the running policy stands: the journal says `maknaed: reload refused: policy load: authz bindings invalid: identity '<name>' has no resolvable uid on this host; the previous policy stands`, and the audit trail records the same cause on a `graph.reload` record ([runbook](runbook.md#reload-the-policy)).
 
 4. **Add the user to `maknae_users`** and set their password (step 1).
 

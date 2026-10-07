@@ -62,7 +62,7 @@
 # test, the abstaining-baseline test and the build_pdp test -- while this gate
 # stays green). Check 1 asserts the FIRST argument is the binding NAMED `authorizer`
 # and that `authz_boot_gate(` precedes it -- a name check, not a provenance
-# check: a `let authorizer = BasicAuthorizer::new(other_policy, ..)` rebinding
+# check: a `let authorizer = BasicAuthorizer::from_snapshot(.., other, ..)` rebinding
 # between the gate and the composition would pass. The sealed trait bounds the
 # TYPE; the construction's policy source is held by review.
 # Check 1 blanks BOTH `//` line comments and `/* */` block comments

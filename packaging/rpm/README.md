@@ -7,7 +7,8 @@ operator group), the shipped default YAMLs (`authz.yaml` / `maknae.yaml`), the
 SELinux module (compiled to `maknae.pp` at build time), the fapolicyd trust
 fragment, and the Vault-port label helper. The `%post` sets `chattr +a` on the
 audit **file** only (`/var/log/maknae/audit.jsonl`) — not the directory, which
-would block rpm from managing `/var/log/maknae` on upgrade.
+would block rpm from managing `/var/log/maknae` on upgrade — beside SELinux's
+append-only rule, and fails if the file system does not support the attribute.
 
 > There is **no CLI user unit** — the `maknae` CLI is operator-invoked, not a
 > systemd service. (Supersedes the earlier scaffold note; Jackrabbit §9.7.)
@@ -63,3 +64,13 @@ token in the `0600` residual file on el9. Full flow proven on RHEL 10.
 
 See `packaging/README.md` for the full install guide, GPG verification, and the
 SELinux `bin_t` tool-domain honest limit.
+
+## Removal
+
+`rpm -e` / `dnf remove` stops and disables the units, unloads the SELinux module,
+and keeps the audit trail: `/var/log/maknae/audit.jsonl` is created by `%post`,
+not owned by the package, so erase leaves it in place with its append-only
+attribute. Upgrading from a package that predates #498, which owned the trail as a `%ghost` file that never carried `+a`, has a residual: if the new `%post` refuses, rpm still deletes the old package's `%ghost` entry, and that trail is lost. Keep a copy before such an upgrade. To remove a kept trail, see
+[Remove a kept trail](../../docs/runbook.md#remove-a-kept-trail): with `maknaed`
+gone, hold the directory as root (`root:root 0700`, no ACL entry, verified), clear `+a` on its regular single-link files
+(`chattr -a`), then `rm -rf /var/log/maknae`.

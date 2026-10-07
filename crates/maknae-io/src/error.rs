@@ -165,6 +165,12 @@ pub enum IoError {
     Locked {
         path: PathBuf,
     },
+    /// The publish renamed the new bytes into place, then the directory sync failed:
+    /// the file holds the new bytes, which may not survive a crash.
+    PublishedNotDurable {
+        path: PathBuf,
+        kind: IoKind,
+    },
 }
 
 impl std::fmt::Display for IoError {
@@ -252,6 +258,11 @@ impl std::fmt::Display for IoError {
                 )
             }
             Self::Locked { path } => write!(f, "locked by another holder: {}", path.display()),
+            Self::PublishedNotDurable { path, kind } => write!(
+                f,
+                "published, but the directory sync failed ({kind:?}): {}",
+                path.display()
+            ),
         }
     }
 }
@@ -282,6 +293,14 @@ mod tests {
         assert_eq!(
             IoError::Symlink { path: p.clone() }.to_string(),
             "symlink refused: /etc/maknae/cfg"
+        );
+        assert_eq!(
+            IoError::PublishedNotDurable {
+                path: p.clone(),
+                kind: IoKind::Other { raw: 5 },
+            }
+            .to_string(),
+            "published, but the directory sync failed (Other { raw: 5 }): /etc/maknae/cfg"
         );
         assert_eq!(
             IoError::SizeChanged {

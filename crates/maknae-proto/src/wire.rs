@@ -291,35 +291,27 @@ pub enum Verb {
     /// paths that ADR-0019 makes audit-only — the one term whose grant re-exports
     /// the trail over the wire. Recipient scoping is an open constraint.
     AdminAuditTail,
-    /// Refresh the construction-time username→uid map and re-validate bindings,
-    /// without restart. Not a policy re-read: the policy file is already re-read
-    /// on every request (the Zero Trust ruling). The genuinely stale state is the
-    /// uid map built once at construction — a username edited in afterwards is
-    /// unresolvable until this lands. Permitting it lets the holder make a
-    /// newly-added host principal effective without a restart — lifting the
-    /// restart-scoped boundary #85 §3 relies on — and un-wedge a policy whose
-    /// unresolvable name is denying every subject on every term. The file itself
-    /// is root-owned, so this term confers no ability to write it.
+    /// Reload the policy over the wire: re-read `authz.yaml`, re-resolve its
+    /// usernames and install the compiled snapshot, as the daemon's `SIGHUP`
+    /// reload does. Permitting it lets the holder make a policy edit or a
+    /// newly-added host principal effective without root's signal — lifting the
+    /// root-paced boundary #85 §3 relies on. The file itself is root-owned, so
+    /// this term confers no ability to write it.
     AdminPolicyReload,
     /// Enumerate role bindings. Discloses who holds what.
     AdminSubjectList,
     /// Bind a subject to a role. A policy mutation — write-ahead audit applies.
     /// MUST refuse the `adversary` role: containment has its own sanctioned
     /// spelling below, and admitting it here would grant containment to anyone
-    /// holding this term while bypassing the constraints written on it. Binding a
-    /// username the daemon has not yet resolved fails the WHOLE policy closed
-    /// until the uid map is refreshed — one edit naming an unknown user denies
-    /// every subject on every term.
+    /// holding this term while bypassing the constraints written on it. MUST
+    /// refuse a username the host cannot resolve.
     AdminSubjectBind,
     /// Remove a subject's role binding. A policy mutation, and the sharper edge:
     /// unbinding the last admin locks out the WIRE until an out-of-band root edit
-    /// of the root-owned policy file — picked up on the next request when the
-    /// re-bound identity was resolved at daemon construction. A name new to the
-    /// uid map instead fails the whole policy closed until restart (#85 §3), so
-    /// the edit can deepen the cliff before it lifts it. A serviceability cliff,
-    /// not an unrecoverable one; recovery is local and always available precisely
-    /// because it needs no request. MUST refuse the `adversary` role — otherwise
-    /// it becomes an unconstrained `admin.release`.
+    /// of the root-owned policy file, applied by a `SIGHUP` reload or a restart.
+    /// A serviceability cliff, not an unrecoverable one; recovery is local and
+    /// always available precisely because it needs no request. MUST refuse the
+    /// `adversary` role — otherwise it becomes an unconstrained `admin.release`.
     AdminSubjectUnbind,
     /// Place a subject under containment (deny-all) by operator decision.
     /// Containment IS a role binding (`adversary`) in the shipped model, so this
@@ -589,9 +581,9 @@ pub enum Payload {
     /// Runtime posture for a permitted `admin.status`.
     Status(StatusView),
     /// Role bindings for a permitted `admin.subject.list`: role → members, as
-    /// the PDP resolves them RIGHT NOW. Never a boot snapshot -- bindings are
-    /// re-read per request, so a snapshot would report authorization state the
-    /// PDP is no longer using, and disclosing stale authz is worse than none.
+    /// the PDP resolves them RIGHT NOW. Never a boot copy -- a reload replaces
+    /// the bindings, so a boot copy would report authorization state the PDP is
+    /// no longer using, and disclosing stale authz is worse than none.
     SubjectList(Vec<RoleBindingView>),
     /// Durable policy authorization for a subject-side attempt, never OS approval.
     MutationAttempt(crate::MutationGrant),

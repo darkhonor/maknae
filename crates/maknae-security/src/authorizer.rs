@@ -19,6 +19,37 @@ pub struct SubjectBinding {
     pub members: Vec<String>,
 }
 
+/// The policy rule a decision was made on: its node in the backend's compiled
+/// graph, its key (which, unlike the node, is the same in every compile of the
+/// same file), and the section of the policy source that declared it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuleCitation {
+    pub node: u64,
+    pub key: String,
+    pub section: String,
+}
+
+/// A verdict, the role it was decided on, and the rule that decided it, from one
+/// evaluation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Decided {
+    pub verdict: Verdict,
+    pub role: Option<&'static str>,
+    pub rule: Option<RuleCitation>,
+}
+
+impl From<Decided> for (Verdict, Option<&'static str>) {
+    fn from(d: Decided) -> Self {
+        (d.verdict, d.role)
+    }
+}
+
+/// [`Authorizer::decide_cited_all`] for a backend with no replaceable state:
+/// [`Authorizer::decide_cited`] once per request, in order.
+pub fn decide_each_cited<A: Authorizer + ?Sized>(a: &A, reqs: &[Request]) -> Vec<Decided> {
+    reqs.iter().map(|r| a.decide_cited(r)).collect()
+}
+
 /// A policy decision point. Total: always returns a `Verdict`, never panics.
 pub trait Authorizer {
     fn decide(&self, req: &Request) -> Verdict;
@@ -31,12 +62,11 @@ pub trait Authorizer {
     /// Only the RBAC baseline and the composition override it.
     ///
     /// **Why it exists (#275).** The audit record must carry the role the
-    /// decision was MADE ON. The in-repo RBAC operand re-reads its policy file
-    /// on every decision, so resolving the role in a second call would both
-    /// read twice and open a window in which the file changes between the
-    /// decision and the stamp — the record would then attest a role the
-    /// decision was not made on. Returning both facts together closes that by
-    /// construction.
+    /// decision was MADE ON. The in-repo RBAC operand decides from a policy
+    /// snapshot that a reload can replace, so resolving the role in a second
+    /// call could read a different snapshot from the one the decision used —
+    /// the record would then attest a role the decision was not made on.
+    /// Returning both facts together closes that by construction.
     ///
     /// **A wrapper that delegates [`Authorizer::decide`] MUST also delegate
     /// this**, or it silently reports no role for a decision that had one.
@@ -48,14 +78,33 @@ pub trait Authorizer {
         (self.decide(req), None)
     }
 
+    /// [`Authorizer::decide_reporting_role`] plus the rule the decision cites,
+    /// from the same evaluation. Defaulted to no citation; the RBAC baseline and
+    /// the composition override it, and a wrapper that delegates `decide` must
+    /// delegate this too.
+    fn decide_cited(&self, req: &Request) -> Decided {
+        let (verdict, role) = self.decide_reporting_role(req);
+        Decided {
+            verdict,
+            role,
+            rule: None,
+        }
+    }
+
+    /// [`Authorizer::decide_cited`] for each request, in order, all from one
+    /// view of the policy: a reload cannot land between two of them. Required:
+    /// a backend with no replaceable state answers with [`decide_each_cited`],
+    /// and a wrapper delegates to what it wraps.
+    fn decide_cited_all(&self, reqs: &[Request]) -> Vec<Decided>;
+
     /// The bindings this PDP would resolve **right now**, for
     /// `admin.subject.list`.
     ///
-    /// Live, not a snapshot, and that is the whole reason this is on the seam
-    /// rather than computed at boot like the config view. Bindings are re-read
-    /// per request by design — a containment edit bites on the next request —
-    /// so a boot snapshot would report bindings the PDP is no longer using.
-    /// Disclosing stale authorization state is worse than disclosing none.
+    /// The bindings the PDP decides from now, not a boot-time copy, and that is
+    /// the whole reason this is on the seam rather than computed at boot like
+    /// the config view: a reload replaces the bindings, so a boot copy would
+    /// report bindings the PDP is no longer using. Disclosing stale
+    /// authorization state is worse than disclosing none.
     ///
     /// `None` means this backend cannot enumerate, which the kernel reports as
     /// unavailable — never as "no bindings", which is a different and
@@ -80,9 +129,8 @@ pub trait Authorizer {
     /// offloads to the blocking pool under a timeout and circuit breaker.
     ///
     /// The asymmetry is deliberate and is a property of the two contracts, not
-    /// of the call sites. `subjects` is REQUIRED to be live — bindings are
-    /// re-read per request so a containment edit bites on the next one — so
-    /// reading a policy file is what implementing it correctly means. A
+    /// of the call sites. `subjects` must answer from the bindings the PDP
+    /// decides from now, and a backend may have to block to obtain them. A
     /// backend's own NAME is an identifier it already knows; resolving one
     /// from a version file, a `dlopen`'d handle, or an IPC probe would pin a
     /// tokio worker with no timeout and no breaker, which is the failure the
@@ -98,7 +146,7 @@ mod tests {
     use crate::request::{Action, Context, Request, Resource, Subject};
     use crate::value::Attributes;
 
-    /// The DEFAULTS themselves. A backend that implements only `decide` must
+    /// The DEFAULTS themselves. A backend that implements only the required methods must
     /// get `None` and `unknown` -- and the values matter, not just the fact
     /// that a default exists.
     ///
@@ -112,6 +160,10 @@ mod tests {
     fn seam_defaults_are_cannot_enumerate_and_unknown() {
         struct OnlyDecides;
         impl Authorizer for OnlyDecides {
+            fn decide_cited_all(&self, reqs: &[crate::Request]) -> Vec<crate::Decided> {
+                crate::decide_each_cited(self, reqs)
+            }
+
             fn decide(&self, _: &Request) -> Verdict {
                 Verdict::NotApplicable { note: None }
             }
@@ -131,6 +183,10 @@ mod tests {
 
     struct Always(Verdict);
     impl Authorizer for Always {
+        fn decide_cited_all(&self, reqs: &[crate::Request]) -> Vec<crate::Decided> {
+            crate::decide_each_cited(self, reqs)
+        }
+
         fn decide(&self, _r: &Request) -> Verdict {
             self.0.clone()
         }
@@ -179,5 +235,58 @@ mod tests {
         // The `Box<dyn Authorizer>` coercion compiling *is* the object-safety proof.
         let b: Box<dyn Authorizer> = Box::new(Always(Verdict::NotApplicable { note: None }));
         assert_eq!(b.decide(&req()), Verdict::NotApplicable { note: None });
+        assert_eq!(
+            b.decide_cited(&req()),
+            Decided {
+                verdict: Verdict::NotApplicable { note: None },
+                role: None,
+                rule: None
+            }
+        );
+    }
+
+    #[test]
+    fn decide_cited_defaults_to_the_role_reporting_answer_with_no_citation() {
+        struct OnlyDecides;
+        impl Authorizer for OnlyDecides {
+            fn decide_cited_all(&self, reqs: &[crate::Request]) -> Vec<crate::Decided> {
+                crate::decide_each_cited(self, reqs)
+            }
+
+            fn decide(&self, _: &Request) -> Verdict {
+                Verdict::Deny {
+                    reason: "only".into(),
+                }
+            }
+            fn decide_reporting_role(&self, r: &Request) -> (Verdict, Option<&'static str>) {
+                (self.decide(r), Some("user"))
+            }
+        }
+        assert_eq!(
+            OnlyDecides.decide_cited(&req()),
+            Decided {
+                verdict: Verdict::Deny {
+                    reason: "only".into()
+                },
+                role: Some("user"),
+                rule: None
+            }
+        );
+        let d = Decided {
+            verdict: Verdict::Indeterminate,
+            role: Some("admin"),
+            rule: Some(RuleCitation {
+                node: 7,
+                key: "k".into(),
+                section: "s".into(),
+            }),
+        };
+        assert_eq!(
+            OnlyDecides.decide_cited_all(&[req(), req()]),
+            vec![OnlyDecides.decide_cited(&req()); 2]
+        );
+        assert!(OnlyDecides.decide_cited_all(&[]).is_empty());
+        let pair: (Verdict, Option<&'static str>) = d.into();
+        assert_eq!(pair, (Verdict::Indeterminate, Some("admin")));
     }
 }

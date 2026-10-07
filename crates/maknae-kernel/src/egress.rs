@@ -1086,6 +1086,8 @@ mod tests {
             }),
             conversation: None,
             graph: None,
+            rule: None,
+            policy_sha256: None,
         }
     }
 
@@ -1876,10 +1878,35 @@ mod tests {
     }
 
     #[test]
+    fn an_outcome_whose_delivery_is_unknown_keeps_the_intents_rule() {
+        let mut record = intent_record();
+        record.rule = Some(maknae_audit_append::RuleAudit {
+            node: 4,
+            key: "rule:destinations.user:allow:0".into(),
+            section: "/etc/maknae/authz.yaml#destinations.user".into(),
+        });
+        let i = DurableEgressIntent { record };
+        for outcome in [SendOutcome::DeadlineExpired, SendOutcome::OutcomeUnknown] {
+            let o = outcome_for(&i, 9, "2026-09-08T00:00:00Z".into(), outcome);
+            assert_eq!(o.outcome.result, "deny");
+            assert_eq!(
+                o.rule.as_ref().map(|r| r.key.as_str()),
+                Some("rule:destinations.user:allow:0"),
+                "{:?}",
+                o.egress.as_ref().map(|e| e.status)
+            );
+        }
+    }
+
+    #[test]
     fn outcome_for_sets_status_result_reason_and_posture_per_send_outcome() {
-        let i = DurableEgressIntent {
-            record: intent_record(),
-        };
+        let mut record = intent_record();
+        record.rule = Some(maknae_audit_append::RuleAudit {
+            node: 4,
+            key: "rule:destinations.user:allow:0".into(),
+            section: "/etc/maknae/authz.yaml#destinations.user".into(),
+        });
+        let i = DurableEgressIntent { record };
         for (outcome, status, result, reason, posture, reply_length) in [
             (
                 SendOutcome::Sent {
@@ -1978,6 +2005,7 @@ mod tests {
                 (result, reason, posture),
                 "{status:?}"
             );
+            assert_eq!(o.rule, i.record.rule, "{status:?}");
             let e = o.egress.as_ref().unwrap();
             assert_eq!(
                 (e.status, e.reply_length, e.is_intent()),

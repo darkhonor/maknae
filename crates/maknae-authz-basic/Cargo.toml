@@ -14,12 +14,13 @@ workspace = true
 [dependencies]
 maknae-security = { path = "../maknae-security" }
 maknae-config = { path = "../maknae-config" }
+maknae-graph = { path = "../maknae-graph" }
 
 [target.'cfg(unix)'.dependencies]
-# getpwnam at BasicAuthorizer construction ONLY — zero per-request NSS (spec §3:
+# getpwnam at policy load ONLY (boot and reload) — zero per-request NSS (spec §3:
 # a per-request lookup would reintroduce the SSSD/LDAP worker-stall class the
-# kernel bounds with spawn_blocking+timeout; resolution happens once, at boot,
-# over names root wrote into the policy file).
+# kernel bounds with spawn_blocking+timeout; resolution happens per load, over
+# names root wrote into the policy file).
 nix = { version = "0.31", default-features = false, features = ["user"] }
 
 [features]

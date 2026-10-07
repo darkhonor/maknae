@@ -1,5 +1,5 @@
-use crate::record::{EdgeKind, NodeKind};
-use crate::schema::Schema;
+use crate::record::{Attrs, EdgeKind, NodeKind};
+use crate::schema::{CompiledNode, CompiledSet, Schema};
 
 pub const SCHEMA_VERSION: u16 = 1;
 
@@ -31,6 +31,26 @@ pub const PENDING_FOR: EdgeKind = EdgeKind(11);
 pub const LEVEL_OF: EdgeKind = EdgeKind(12);
 
 pub const ADVERSARY: &str = "adversary";
+
+pub const ROLES: [&str; 4] = ["admin", "user", "guest", ADVERSARY];
+pub const VOCABULARY_SOURCE_KEY: &str = "binary:vocabulary";
+pub const ATTR_SHA256: &str = "sha256";
+pub const ATTR_NAME: &str = "name";
+pub const ATTR_UID: &str = "uid";
+
+pub fn persisted_compiled_set(label: &str) -> CompiledSet {
+    CompiledSet::new(
+        ROLES
+            .iter()
+            .map(|r| CompiledNode {
+                kind: ROLE,
+                key: (*r).into(),
+                label: label.into(),
+                attrs: Attrs::new(),
+            })
+            .collect(),
+    )
+}
 
 pub static SCHEMA: Schema = Schema {
     version: SCHEMA_VERSION,
@@ -89,6 +109,19 @@ pub static SCHEMA: Schema = Schema {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persisted_compiled_set_is_the_four_roles_labelled() {
+        let set = persisted_compiled_set("UNCLASSIFIED");
+        let keys: Vec<&str> = set.iter().map(|c| c.key.as_str()).collect();
+        assert_eq!(keys, ROLES);
+        for c in set.iter() {
+            assert_eq!(c.kind, ROLE);
+            assert_eq!(c.label, "UNCLASSIFIED");
+            assert!(c.attrs.is_empty());
+        }
+        assert!(ROLES.contains(&ADVERSARY));
+    }
 
     #[test]
     fn every_triple_names_known_kinds() {

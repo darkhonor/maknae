@@ -38,8 +38,8 @@ pub enum Dispatch {
     ConfigShowRequested,
     /// The peer asked for runtime posture. No datum: the daemon's own state.
     StatusRequested,
-    /// The peer asked to enumerate role bindings. No datum; the answer is read
-    /// LIVE from the PDP, never from a boot snapshot.
+    /// The peer asked to enumerate role bindings. No datum; the answer is the
+    /// PDP's current snapshot, never a boot copy.
     SubjectListRequested,
     /// The peer asked to send content to the provider its admitted choice names.
     PromptRequested,
@@ -233,8 +233,8 @@ pub fn verb_to_action(verb: &Verb) -> &'static str {
     }
 }
 
-/// Bound on one PDP decision (per-request policy re-read is sync file I/O on
-/// the blocking pool; a stalled /etc/maknae must not pin tokio workers —
+/// Bound on one PDP decision (the seam permits a backend that blocks, so the
+/// decision runs on the blocking pool; a stall must not pin tokio workers —
 /// same rationale family as maknae_config::GROUP_LOOKUP_TIMEOUT_MS). Elapse → Deny (fail
 /// closed). 5s: §10.5's orphan-accumulation arithmetic assumes this value;
 /// the VALUE is pinned by a T1 test here because the binding site in run.rs
@@ -539,7 +539,7 @@ mod tests {
         // class claim would silently cover 13 of 14. Derived, the invariant
         // maintains itself.
         //
-        // (Corrected 2026-09-02, #181 S4: this comment said the grantable-side
+        // (Corrected 2026-09-02, #181: this comment said the grantable-side
         // tripwire "has no replacement" — true when written, false now. The
         // replacement is `every_grantable_term_dispatches_and_the_hand_copy_matches`
         // below, reaching the real constant through `-basic`'s
@@ -583,7 +583,7 @@ mod tests {
         })
     }
 
-    /// The grantable-side tripwire (#181 S4), replacing what the retired
+    /// The grantable-side tripwire (#181), replacing what the retired
     /// `NoBehaviour` pin provided: a FIFTH term joining `GRANTABLE_ACTIONS`
     /// without a dispatch arm — the "granted-but-unbuilt" state ADR-0010 makes
     /// a contradiction — turns this red, cross-crate, through the re-export.
@@ -1232,13 +1232,36 @@ mod tests {
     /// prefix is gone, so it is a test obligation.
     #[test]
     fn no_action_string_equals_an_adr0019_pseudo_action() {
+        let pseudo: Vec<&str> = ["connect", "read", "decode", "authz", "posture"]
+            .into_iter()
+            .chain(crate::run::GRAPH_PSEUDO_ACTIONS)
+            .collect();
+        assert!(pseudo.contains(&"graph.reload") && pseudo.contains(&"graph.migrate"));
         for v in all_verbs() {
             let a = verb_to_action(&v);
             assert!(
-                !["connect", "read", "decode", "authz", "posture"].contains(&a),
+                !pseudo.contains(&a),
                 "{a} collides with an ADR-0019 transport/boot pseudo-action"
             );
         }
+        for k in KERNEL_ACTIONS {
+            assert!(!pseudo.contains(&k), "{k} collides with a pseudo-action");
+        }
+    }
+
+    /// The terms a request can be decided on are exactly the compiled vocabulary's.
+    #[test]
+    fn the_decidable_actions_are_the_compiled_vocabulary() {
+        let decidable: std::collections::BTreeSet<&str> = all_verbs()
+            .iter()
+            .map(verb_to_action)
+            .chain(KERNEL_ACTIONS)
+            .collect();
+        let compiled: std::collections::BTreeSet<&str> = maknae_authz_basic::ACTION_TERMS
+            .into_iter()
+            .chain(maknae_authz_basic::KERNEL_TERMS)
+            .collect();
+        assert_eq!(decidable, compiled);
     }
 
     /// Every term resolves to one of the seven closed classes. A term whose
