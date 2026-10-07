@@ -371,8 +371,9 @@ the outcome that says whether content may have left, not only the decision. A re
 has no `rule` block when no rule in the file decided: a structural role decision
 (such as liveness) or deny-by-default. Nor does a refusal made before the PDP decided:
 a request that could not be read or decoded, a path or operand pre-gate, a refused
-provider choice, an open decision breaker or a decision timeout, or a mutation that
-could not be prepared. Nor does a deny written in place of a permit that was never
+provider choice, an open decision breaker, an exhausted decision worker budget, a
+decision task that failed, a decision timeout, or a mutation that could not be
+prepared. Nor does a deny written in place of a permit that was never
 acted on: an unhonorable obligation, a mutation whose object label could not be
 resolved, a `session.prompt` refused because the egress backend was not ready, and
 two defence-in-depth denies that no request should reach (a mutation dispatch

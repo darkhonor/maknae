@@ -243,7 +243,8 @@ type AuthorizeErr = (String, String, DecidedBy);
 
 /// Decides every path from one snapshot. Returns the role of the last path
 /// decided, in both arms (on a deny, the path that refused, #275), and that
-/// path's rule unless the refusal came after the PDP permitted.
+/// path's rule, except on a deny written in place of a permit that was never
+/// acted on.
 fn authorize<P: Authorizer>(
     prepared: &PreparedMutation,
     verb: &Verb,
@@ -1579,7 +1580,7 @@ mod tests {
         assert_eq!(path, prepared.paths[1]);
     }
     #[tokio::test]
-    async fn a_refusal_after_the_pdp_permitted_cites_no_rule() {
+    async fn a_deny_in_place_of_an_unacted_permit_cites_no_rule() {
         let _turn = EUID_TURN.lock().await;
         let fx = Fixture::new();
         let pdp = fixture_pdp(&fx);

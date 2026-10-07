@@ -1602,7 +1602,10 @@ async fn an_unhonorable_obligation_fails_closed() {
             .contains("unhonorable obligation: exfil"),
         "the obligation id is in the trail"
     );
-    assert_eq!(record.rule, None, "a deny never cites the permit's rule");
+    assert_eq!(
+        record.rule, None,
+        "a deny written in place of a permit that was never acted on cites no rule"
+    );
 }
 
 #[tokio::test]

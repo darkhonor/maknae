@@ -7297,3 +7297,69 @@ mod reload_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod unencodable_tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct Recorder(std::sync::Mutex<Vec<AuditRecord>>);
+    impl AuditEmit for Recorder {
+        fn emit(
+            &self,
+            record: &AuditRecord,
+        ) -> impl std::future::Future<Output = Result<(), maknae_audit_append::AuditError>> + Send
+        {
+            self.0.lock().unwrap().push(record.clone());
+            async { Ok(()) }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unencodable_permit_keeps_the_rule_that_permitted_it() {
+        let (mut client, mut server) = tokio::io::duplex(64 * 1024);
+        let emit = Arc::new(Recorder::default());
+        let rule = RuleCitation {
+            node: 7,
+            key: "sentinel-unencodable-rule".into(),
+            section: "authz.yaml#permissions".into(),
+        };
+        refuse_unencodable_bounded(
+            &mut server,
+            &maknae_config::transport_from_section(None).unwrap(),
+            maknae_proto::FrameClass::Control,
+            &emit,
+            "h",
+            "s",
+            1000,
+            "maknae://d/plane/cli",
+            Some("alice"),
+            Some("user"),
+            Some(&rule),
+            1,
+            &Seq::new(),
+            "fs.read",
+            &serde_json::json!({}),
+        )
+        .await;
+        let records = emit.0.lock().unwrap().clone();
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].outcome.reason,
+            "delivery failed: response could not be encoded"
+        );
+        assert_eq!(records[0].rule, Some(rule_audit(&rule)));
+        let caps = maknae_proto::FrameCaps {
+            control: 1 << 20,
+            attempt: 1 << 20,
+            prompt: 1 << 20,
+        };
+        let (_, reply) = maknae_proto::read_frame_zeroizing(&mut client, &caps)
+            .await
+            .expect("an error frame");
+        assert!(matches!(
+            maknae_proto::decode_response(&reply).unwrap().result,
+            RespResult::Err(_)
+        ));
+    }
+}
