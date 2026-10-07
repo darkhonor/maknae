@@ -34,6 +34,7 @@ files = [
   "crates/maknae-authz-basic/src/binding.rs",
   "crates/maknae-authz-basic/src/decide.rs",
   "crates/maknae-authz-basic/src/vocabulary.rs",
+  "crates/maknae-authz-basic/src/snapshot.rs",
   # The classification seam (ADR-0022): the `ClassificationPolicy` contract
   # and `first_token`, the two systems that implement it (US in the kernel's
   # config crate, PSPF in its own crate), and the registry that selects one by

@@ -9,7 +9,7 @@
 //! discharged here per `maknae-security/tests/golden.rs`'s deferral), never a
 //! silent non-match.
 
-use crate::binding::{Resolution, ResolvedBindings};
+use crate::binding::{Resolution, Roles};
 use crate::role::Role;
 use maknae_security::{AttrValue, Attributes, Obligation, Request as SecRequest, Verdict};
 
@@ -28,9 +28,40 @@ pub(crate) const RESOURCE_DESTINATION: &str = "destination";
 /// One loaded policy snapshot: the parsed grammar + validated bindings.
 pub(crate) struct LoadedPolicy {
     pub(crate) policy: maknae_config::AuthzPolicy,
-    pub(crate) roles: ResolvedBindings,
+    pub(crate) roles: Roles,
     pub(crate) action_grants: ActionGrants,
     pub(crate) destinations: DestinationGrants,
+}
+
+/// The policy entry a verdict was decided by, in the terms the rule index keys on.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Cited {
+    Path {
+        effect: Effect,
+        source: String,
+    },
+    Grant {
+        role: &'static str,
+        term: String,
+        effect: Effect,
+    },
+    Destination {
+        role: &'static str,
+        destination: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Effect {
+    Allow,
+    Deny,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Decided {
+    pub(crate) verdict: Verdict,
+    pub(crate) role: Option<&'static str>,
+    pub(crate) cited: Option<Cited>,
 }
 
 /// Validated `destinations:` allowlists (#172), role key → `provider:<name>`
@@ -270,38 +301,64 @@ fn no_rule_note(role_key: &str, action: &str) -> String {
 /// the role; an absent grant is an absence (finalize refuses once). An absent
 /// destination attribute means no provider is registered: a Deny the trail
 /// must show, not a policy gap.
-fn decide_prompt(lp: &LoadedPolicy, req: &SecRequest, role_key: &str) -> Verdict {
+fn decide_prompt(
+    lp: &LoadedPolicy,
+    req: &SecRequest,
+    role_key: &'static str,
+) -> (Verdict, Option<Cited>) {
     match lp
         .action_grants
         .evaluate3_action(role_key, "session.prompt")
     {
         maknae_config::Match3::DenyMatch { source } => {
-            return Verdict::Deny {
-                reason: format!("denied by role grant {source}"),
-            }
+            return (
+                Verdict::Deny {
+                    reason: format!("denied by role grant {source}"),
+                },
+                Some(Cited::Grant {
+                    role: role_key,
+                    term: source,
+                    effect: Effect::Deny,
+                }),
+            )
         }
         maknae_config::Match3::NoMatch => {
-            return Verdict::NotApplicable {
-                note: Some(no_rule_note(role_key, "session.prompt")),
-            }
+            return (
+                Verdict::NotApplicable {
+                    note: Some(no_rule_note(role_key, "session.prompt")),
+                },
+                None,
+            )
         }
         maknae_config::Match3::AllowMatch { .. } => {}
     }
     let destination = match req.resource.0.get(RESOURCE_DESTINATION) {
         Some(AttrValue::Str(d)) => d.as_str(),
-        Some(_) => return Verdict::Indeterminate,
+        Some(_) => return (Verdict::Indeterminate, None),
         None => {
-            return Verdict::Deny {
-                reason: "no destination on session.prompt".into(),
-            }
+            return (
+                Verdict::Deny {
+                    reason: "no destination on session.prompt".into(),
+                },
+                None,
+            )
         }
     };
     if lp.destinations.allows(role_key, destination) {
-        permit_with_audit()
+        (
+            permit_with_audit(),
+            Some(Cited::Destination {
+                role: role_key,
+                destination: destination.to_string(),
+            }),
+        )
     } else {
-        Verdict::Deny {
-            reason: format!("destination not allowlisted for role {role_key}: {destination}"),
-        }
+        (
+            Verdict::Deny {
+                reason: format!("destination not allowlisted for role {role_key}: {destination}"),
+            },
+            None,
+        )
     }
 }
 
@@ -335,6 +392,21 @@ pub(crate) fn decide_loaded_with_role(
     principal: &maknae_config::Principal,
     req: &SecRequest,
 ) -> (Verdict, Option<&'static str>) {
+    let d = decide_loaded_cited(lp, principal, req);
+    (d.verdict, d.role)
+}
+
+/// [`decide_loaded_with_role`] plus the policy entry that decided, where one did.
+pub(crate) fn decide_loaded_cited(
+    lp: &LoadedPolicy,
+    principal: &maknae_config::Principal,
+    req: &SecRequest,
+) -> Decided {
+    let undecided = |verdict| Decided {
+        verdict,
+        role: None,
+        cited: None,
+    };
     // Step 2 — subject resolution, matcher invariant first: a PRESENT but
     // wrong-typed `uid` is failed-to-evaluate, never a fall-through. Since
     // #276 struck the reserved subject name, `uid` is the ONLY identity datum
@@ -343,28 +415,25 @@ pub(crate) fn decide_loaded_with_role(
         None => None,
         Some(AttrValue::Int(i)) => match u32::try_from(*i) {
             Ok(u) => Some(u),
-            Err(_) => return (Verdict::Indeterminate, None), // out-of-range carriage
+            Err(_) => return undecided(Verdict::Indeterminate), // out-of-range carriage
         },
-        Some(_) => return (Verdict::Indeterminate, None),
+        Some(_) => return undecided(Verdict::Indeterminate),
     };
     // No uid: the subject cannot be evaluated. Since #276 struck the reserved
     // subject-name token there is no second identity datum to fall back to, so
     // this is the ONLY identity gate -- and it must stay a return, never a
     // fall-through.
     let Some(uid) = uid else {
-        return (Verdict::Indeterminate, None);
+        return undecided(Verdict::Indeterminate);
     };
     let role = match lp.roles.role_for(uid, principal.uid) {
         Resolution::Role(r) => r,
         // Case-1 testimony (#181): the FACT, audit-only. The absence still
         // composes as an absence -- an extension may yet grant.
         Resolution::NoRole => {
-            return (
-                Verdict::NotApplicable {
-                    note: Some("subject resolves to no role".into()),
-                },
-                None,
-            )
+            return undecided(Verdict::NotApplicable {
+                note: Some("subject resolves to no role".into()),
+            })
         }
     };
 
@@ -372,7 +441,7 @@ pub(crate) fn decide_loaded_with_role(
     // so the role can ride out beside the verdict; every arm stays a tail
     // expression exactly as before.
     let class = class_of(&req.action.0);
-    let verdict = match role {
+    let (verdict, cited) = match role {
         // #158, operator ruling 2026-09-07: admin governs Maknae management,
         // not filesystem privilege. Users and admins share the universal path
         // policy. Key the implemented terms exactly; adding a path to an unbuilt
@@ -385,7 +454,7 @@ pub(crate) fn decide_loaded_with_role(
         {
             match attempt_scope(req) {
                 Ok(scope) => decide_fs(lp, req, role.key(), scope),
-                Err(verdict) => verdict,
+                Err(verdict) => (verdict, None),
             }
         }
         // #172: the content-plane egress term, decided for admin AND user by
@@ -397,27 +466,33 @@ pub(crate) fn decide_loaded_with_role(
         Role::Admin | Role::User if req.action.0 == "session.prompt" => {
             decide_prompt(lp, req, role.key())
         }
-        Role::Adversary => Verdict::Deny {
-            reason: "subject contained: role=adversary".into(),
-        },
+        Role::Adversary => (
+            Verdict::Deny {
+                reason: "subject contained: role=adversary".into(),
+            },
+            None,
+        ),
         Role::Guest | Role::User => match class {
-            Some(Class::Liveness) => permit_with_audit(),
+            Some(Class::Liveness) => (permit_with_audit(), None),
             // Case-2 testimony: ROLE-REACH OUTRANKS BUILD-STATE (#181 D4).
             // A non-admin's trail reads its own operational fact -- its reach
             // -- never the roadmap, which is admin-visible only; the wire is
             // the same generic Unauthorized either way.
-            _ => Verdict::NotApplicable {
-                note: Some(no_rule_note(role.key(), &req.action.0)),
-            },
+            _ => (
+                Verdict::NotApplicable {
+                    note: Some(no_rule_note(role.key(), &req.action.0)),
+                },
+                None,
+            ),
         },
         Role::Admin => match class {
-            Some(Class::Liveness) => permit_with_audit(),
+            Some(Class::Liveness) => (permit_with_audit(), None),
             // Keyed to the ONE built admin term. A class-granular permit here
             // would grant admin.contain / admin.credential.broker /
             // admin.policy.reload off an arm that keys nothing — the outcome
             // #67's spec D3 names as the thing that must not land. Individual
             // decidability for the rest is D3's implementation obligation.
-            Some(Class::Admin) if req.action.0 == "admin.whoami" => permit_with_audit(),
+            Some(Class::Admin) if req.action.0 == "admin.whoami" => (permit_with_audit(), None),
             // The three disclosure terms are decided per-ACTION by the operator's
             // `roles:` grants (#162), never by the class. The guard keys on the
             // CONSTANT, not on membership in the grant map: keying on the map
@@ -432,37 +507,51 @@ pub(crate) fn decide_loaded_with_role(
             // omitting the argument.
             Some(Class::Admin) if GRANTABLE_ACTIONS.contains(&req.action.0.as_str()) => {
                 match lp.action_grants.evaluate3_action("admin", &req.action.0) {
-                    maknae_config::Match3::AllowMatch { .. } => permit_with_audit(),
+                    maknae_config::Match3::AllowMatch { source } => (
+                        permit_with_audit(),
+                        Some(Cited::Grant {
+                            role: "admin",
+                            term: source,
+                            effect: Effect::Allow,
+                        }),
+                    ),
                     // Names the term, matching what `decide_fs` does for a path
                     // entry: an audit record that says WHICH entry decided.
-                    maknae_config::Match3::DenyMatch { source } => Verdict::Deny {
-                        reason: format!("denied by role grant {source}"),
-                    },
+                    maknae_config::Match3::DenyMatch { source } => (
+                        Verdict::Deny {
+                            reason: format!("denied by role grant {source}"),
+                        },
+                        Some(Cited::Grant {
+                            role: "admin",
+                            term: source,
+                            effect: Effect::Deny,
+                        }),
+                    ),
                     // No grant is an ABSENCE, not a refusal: deny-by-default
                     // happens once, at `finalize`, with "no grant" kept
                     // distinguishable from an explicit deny.
                     // Case-2 testimony: a grant COULD exist and none is
                     // written -- a policy question, named by term.
-                    maknae_config::Match3::NoMatch => Verdict::NotApplicable {
-                        note: Some(no_rule_note("admin", &req.action.0)),
-                    },
+                    maknae_config::Match3::NoMatch => (
+                        Verdict::NotApplicable {
+                            note: Some(no_rule_note("admin", &req.action.0)),
+                        },
+                        None,
+                    ),
                 }
             }
             // Case-3 testimony: an enumerated admin term outside the grantable
             // set is unbuilt -- a roadmap question, and the admin trail may say
             // so (the wire still may not).
-            Some(Class::Admin) => Verdict::NotApplicable {
-                note: Some(format!(
-                    "term enumerated, not implemented: {}",
-                    req.action.0
-                )),
-            },
-            Some(Class::Fs) => Verdict::NotApplicable {
-                note: Some(format!(
-                    "term enumerated, not implemented: {}",
-                    req.action.0
-                )),
-            },
+            Some(Class::Admin) | Some(Class::Fs) => (
+                Verdict::NotApplicable {
+                    note: Some(format!(
+                        "term enumerated, not implemented: {}",
+                        req.action.0
+                    )),
+                },
+                None,
+            ),
             // Case-3 testimony for whole unbuilt classes. `None` (a term the
             // class map cannot place) shares the arm and the note; for that
             // sub-case the "enumerated" wording is inexact -- and the sub-case
@@ -475,15 +564,22 @@ pub(crate) fn decide_loaded_with_role(
             | Some(Class::Terminal)
             | Some(Class::Mcp)
             | Some(Class::Kernel)
-            | None => Verdict::NotApplicable {
-                note: Some(format!(
-                    "term enumerated, not implemented: {}",
-                    req.action.0
-                )),
-            },
+            | None => (
+                Verdict::NotApplicable {
+                    note: Some(format!(
+                        "term enumerated, not implemented: {}",
+                        req.action.0
+                    )),
+                },
+                None,
+            ),
         },
     };
-    (verdict, Some(role.key()))
+    Decided {
+        verdict,
+        role: Some(role.key()),
+        cited,
+    }
 }
 
 /// Universal filesystem capability grammar (#158). `role_key` supplies audit
@@ -528,24 +624,32 @@ fn attempt_scope(req: &SecRequest) -> Result<FsScope, Verdict> {
     Ok(scope)
 }
 
-fn decide_fs(lp: &LoadedPolicy, req: &SecRequest, role_key: &str, scope: FsScope) -> Verdict {
+fn decide_fs(
+    lp: &LoadedPolicy,
+    req: &SecRequest,
+    role_key: &str,
+    scope: FsScope,
+) -> (Verdict, Option<Cited>) {
     let path = match req.resource.0.get(RESOURCE_PATH) {
         Some(AttrValue::Str(s)) => s.as_str(),
         // Required at THIS point of use: absent or wrong-typed → Indeterminate.
-        _ => return Verdict::Indeterminate,
+        _ => return (Verdict::Indeterminate, None),
     };
     if let Some(offense) = canonical_violation(path) {
         // A non-canonical path is a matcher bypass, refused BEFORE matching —
         // never passed through, never NotApplicable (spec §4.4).
-        return Verdict::Deny {
-            reason: format!("non-canonical resource path ({offense})"),
-        };
+        return (
+            Verdict::Deny {
+                reason: format!("non-canonical resource path ({offense})"),
+            },
+            None,
+        );
     }
     let path = std::path::Path::new(path);
     let home = match req.subject.0.get(maknae_security::SUBJECT_HOME) {
         None => None,
         Some(AttrValue::Str(h)) => Some(std::path::Path::new(h.as_str())),
-        Some(_) => return Verdict::Indeterminate,
+        Some(_) => return (Verdict::Indeterminate, None),
     };
     let matched = match scope {
         FsScope::Read => lp
@@ -557,24 +661,39 @@ fn decide_fs(lp: &LoadedPolicy, req: &SecRequest, role_key: &str, scope: FsScope
         FsScope::WriteSubtree => lp.policy.evaluate_write_subtree(path, home),
     };
     let Ok(matched) = matched else {
-        return Verdict::Indeterminate;
+        return (Verdict::Indeterminate, None);
     };
     match matched {
-        maknae_config::Match3::DenyMatch { source } => Verdict::Deny {
-            // Audit-only provenance (spec §4.4): this reason reaches the
-            // audit record; #77's wiring must never copy it onto the wire.
-            reason: format!("denied by policy entry {source}"),
-        },
-        maknae_config::Match3::AllowMatch { .. } => permit_with_audit(),
+        maknae_config::Match3::DenyMatch { source } => (
+            Verdict::Deny {
+                // Audit-only provenance (spec §4.4): this reason reaches the
+                // audit record; #77's wiring must never copy it onto the wire.
+                reason: format!("denied by policy entry {source}"),
+            },
+            Some(Cited::Path {
+                effect: Effect::Deny,
+                source,
+            }),
+        ),
+        maknae_config::Match3::AllowMatch { source } => (
+            permit_with_audit(),
+            Some(Cited::Path {
+                effect: Effect::Allow,
+                source,
+            }),
+        ),
         // Case-5 testimony (#181): role and term ONLY -- never the path (the
         // D9 hazard). "No capability entry" is accurate where "no rule" would
         // be false: a rule for fs.read exists; no ENTRY matched this request.
-        maknae_config::Match3::NoMatch => Verdict::NotApplicable {
-            note: Some(format!(
-                "role {role_key}: no capability entry for {}",
-                req.action.0
-            )),
-        },
+        maknae_config::Match3::NoMatch => (
+            Verdict::NotApplicable {
+                note: Some(format!(
+                    "role {role_key}: no capability entry for {}",
+                    req.action.0
+                )),
+            },
+            None,
+        ),
     }
 }
 
@@ -614,7 +733,7 @@ mod tests {
         let lookup: UidMap = uid_map.iter().map(|(n, u)| (n.to_string(), *u)).collect();
         LoadedPolicy {
             policy: shipped_policy(),
-            roles: resolve(&b, &lookup).unwrap(),
+            roles: Roles::File(resolve(&b, &lookup).unwrap()),
             // Grants are a SEPARATE fixture (`lp_with_grants`). All 16 call
             // sites of `lp_with` -- the golden matrix among them -- must keep
             // seeing an empty grant map, or the pin stops pinning.
@@ -1649,7 +1768,7 @@ mod tests {
         // `validate_destinations`: every permit test builds its allowlist here.
         let destinations = crate::validate_destinations(&policy.destinations).unwrap();
         LoadedPolicy {
-            roles: resolve(&policy.bindings, &lookup).unwrap(),
+            roles: Roles::File(resolve(&policy.bindings, &lookup).unwrap()),
             action_grants: crate::validate_grants(&policy.action_grants).unwrap(),
             destinations,
             policy,
@@ -2054,5 +2173,89 @@ mod tests {
         assert!(canonical_violation("/a/../b").unwrap().contains("'..'"));
         assert_eq!(canonical_violation("/"), None);
         assert_eq!(canonical_violation("/a/b"), None);
+    }
+
+    #[test]
+    fn decide_loaded_cited_names_the_entry_for_every_cited_arm() {
+        let lp = lp_with_grants(
+            "roles:\n  admin:\n    allow: [\"admin.status\", \"session.prompt\"]\n    deny: [\"admin.config.show\"]\n  user:\n    allow: [\"session.prompt\"]\n    deny: [\"session.prompt\"]\ndestinations:\n  admin:\n    allow: [\"provider:openai\"]\n",
+            GRANT_UIDS,
+        );
+        let path = |uid: u32, p: &str| request(Some(i64::from(uid)), "fs.read", Some(p));
+        let act = |uid: u32, a: &str| request(Some(i64::from(uid)), a, None);
+        let cases: Vec<(SecRequest, Option<&'static str>, Option<Cited>)> = vec![
+            (
+                path(1001, "/home/operator/.ssh/id_ed25519"),
+                Some("admin"),
+                Some(Cited::Path {
+                    effect: Effect::Deny,
+                    source: "Read(~/.ssh/**)".into(),
+                }),
+            ),
+            (
+                path(1002, "/home/operator/notes"),
+                Some("user"),
+                Some(Cited::Path {
+                    effect: Effect::Allow,
+                    source: "Read(~/**)".into(),
+                }),
+            ),
+            (
+                act(1001, "admin.config.show"),
+                Some("admin"),
+                Some(Cited::Grant {
+                    role: "admin",
+                    term: "admin.config.show".into(),
+                    effect: Effect::Deny,
+                }),
+            ),
+            (
+                act(1001, "admin.status"),
+                Some("admin"),
+                Some(Cited::Grant {
+                    role: "admin",
+                    term: "admin.status".into(),
+                    effect: Effect::Allow,
+                }),
+            ),
+            (
+                prompt_req(1001, Some("provider:openai")),
+                Some("admin"),
+                Some(Cited::Destination {
+                    role: "admin",
+                    destination: "provider:openai".into(),
+                }),
+            ),
+            (
+                prompt_req(1002, Some("provider:openai")),
+                Some("user"),
+                Some(Cited::Grant {
+                    role: "user",
+                    term: "session.prompt".into(),
+                    effect: Effect::Deny,
+                }),
+            ),
+            (
+                prompt_req(1001, Some("provider:other")),
+                Some("admin"),
+                None,
+            ),
+            (act(1001, "liveness.ping"), Some("admin"), None),
+            (act(1001, "admin.subject.list"), Some("admin"), None),
+            (path(1001, "/etc/passwd"), Some("admin"), None),
+            (act(1004, "liveness.ping"), Some("adversary"), None),
+            (act(9999, "liveness.ping"), None, None),
+        ];
+        for (req, role, cited) in cases {
+            let d = decide_loaded_cited(&lp, &principal(), &req);
+            assert_eq!((d.role, &d.cited), (role, &cited), "{}", req.action.0);
+            assert_eq!(
+                decide_loaded_with_role(&lp, &principal(), &req),
+                (d.verdict.clone(), d.role)
+            );
+            if cited.is_some() {
+                assert!(!matches!(d.verdict, Verdict::NotApplicable { .. }));
+            }
+        }
     }
 }

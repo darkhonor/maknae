@@ -26,6 +26,7 @@ pub fn grantable_actions() -> &'static [&'static str] {
 }
 
 mod role;
+pub mod snapshot;
 mod vocabulary;
 pub use vocabulary::{class_name, compiled_set, ACTION_TERMS, CLASSES, KERNEL_TERMS};
 
@@ -134,16 +135,7 @@ impl BasicAuthorizer {
         policy: maknae_config::AuthzPolicy,
     ) -> Result<Self, AuthzBasicError> {
         let uid_map = resolve_uid_map(&policy)?;
-        // Eager semantic validation: the same checks every per-request load
-        // repeats (the advesary-typo rule fails construction, not just
-        // requests).
-        binding::resolve(&policy.bindings, &uid_map)
-            .map_err(|e| AuthzBasicError::Bindings(e.to_string()))?;
-        // Grants validate eagerly for the same reason bindings do: an operator
-        // who mistypes a term learns it at boot, in the journal, with the token
-        // named -- not by wondering why a grant they wrote does nothing.
-        validate_grants(&policy.action_grants)?;
-        validate_destinations(&policy.destinations)?;
+        validate(&policy, &uid_map)?;
         Ok(Self {
             policy_path,
             principal,
@@ -189,10 +181,127 @@ impl BasicAuthorizer {
     }
 }
 
+/// Eager semantic validation, the same checks every per-request load repeats, so an
+/// invalid file refuses at boot with the offending token named.
+fn validate(
+    policy: &maknae_config::AuthzPolicy,
+    uid_map: &UidMap,
+) -> Result<binding::ResolvedBindings, AuthzBasicError> {
+    let resolved = binding::resolve(&policy.bindings, uid_map)
+        .map_err(|e| AuthzBasicError::Bindings(e.to_string()))?;
+    validate_grants(&policy.action_grants)?;
+    validate_destinations(&policy.destinations)?;
+    Ok(resolved)
+}
+
+/// A loaded, validated `authz.yaml` with its bound usernames resolved to uids: the
+/// policy input the snapshot compiler takes.
+#[derive(Debug, Clone)]
+pub struct PolicySource {
+    policy: maknae_config::AuthzPolicy,
+    uid_map: UidMap,
+    bindings: binding::ResolvedBindings,
+    principal: maknae_config::Principal,
+    path: PathBuf,
+}
+
+impl PolicySource {
+    /// The production loader (root-owned, `mode & 0o027 == 0`, symlink-refused), then
+    /// one getpwnam per bound username and eager validation.
+    pub fn load(
+        path: PathBuf,
+        principal: maknae_config::Principal,
+    ) -> Result<Self, AuthzBasicError> {
+        let policy =
+            maknae_config::load_authz(&path).map_err(|e| AuthzBasicError::Load(e.to_string()))?;
+        let uid_map = resolve_uid_map(&policy)?;
+        Self::from_parts(policy, uid_map, principal, path)
+    }
+
+    #[cfg(all(unix, feature = "hermetic-test-seam"))]
+    pub fn load_with_requirement(
+        path: PathBuf,
+        principal: maknae_config::Principal,
+        req: maknae_config::TargetRequired,
+    ) -> Result<Self, AuthzBasicError> {
+        let policy = maknae_config::load_authz_with_requirement(&path, req)
+            .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
+        let uid_map = resolve_uid_map(&policy)?;
+        Self::from_parts(policy, uid_map, principal, path)
+    }
+
+    pub fn from_parts(
+        policy: maknae_config::AuthzPolicy,
+        uid_map: std::collections::BTreeMap<String, u32>,
+        principal: maknae_config::Principal,
+        path: PathBuf,
+    ) -> Result<Self, AuthzBasicError> {
+        let bindings = validate(&policy, &uid_map)?;
+        Ok(Self {
+            policy,
+            uid_map,
+            bindings,
+            principal,
+            path,
+        })
+    }
+
+    pub fn policy(&self) -> &maknae_config::AuthzPolicy {
+        &self.policy
+    }
+
+    pub fn principal(&self) -> &maknae_config::Principal {
+        &self.principal
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(crate) fn uid_map(&self) -> &UidMap {
+        &self.uid_map
+    }
+
+    /// The identity layer this file declares; `bindings_sha256` is `None` iff the file
+    /// has no `bindings:` key. Subjects are in uid order, the order `identity::extract`
+    /// produces, so an unchanged file compares equal to its persisted layer.
+    pub fn identity_layer(
+        &self,
+        label: &str,
+        bindings_sha256: Option<[u8; 32]>,
+    ) -> maknae_graph::identity::IdentityLayer {
+        maknae_graph::identity::IdentityLayer {
+            source: self.path.to_string_lossy().into_owned(),
+            label: label.into(),
+            bindings_sha256,
+            subjects: self
+                .bindings
+                .subjects()
+                .map(|(uid, role, name)| maknae_graph::identity::SubjectEntry {
+                    uid,
+                    name: name.into(),
+                    role: role.key().into(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Each top-level section's canonical JSON through the caller's digest, by key.
+    pub fn section_digests(
+        &self,
+        digest: fn(&[u8]) -> [u8; 32],
+    ) -> std::collections::BTreeMap<String, [u8; 32]> {
+        self.policy
+            .sections()
+            .map(|(k, v)| (k.to_string(), digest(v.as_bytes())))
+            .collect()
+    }
+}
+
 /// policy → LoadedPolicy under a uid map; any invalidity → Err (the caller
 /// maps it to `Indeterminate`).
 fn assemble(policy: maknae_config::AuthzPolicy, uid_map: &UidMap) -> Result<LoadedPolicy, ()> {
-    let roles = binding::resolve(&policy.bindings, uid_map).map_err(|_| ())?;
+    let roles = binding::Roles::File(binding::resolve(&policy.bindings, uid_map).map_err(|_| ())?);
     // Anonymous on this lane by design: `finish_new` names the offending term
     // for the operator at boot; a per-request refusal tells a caller only
     // `Indeterminate`. Both refuse -- only the diagnostic differs.
@@ -547,7 +656,7 @@ mod tests {
         );
         let lp = decide::LoadedPolicy {
             policy,
-            roles: binding::resolve(&None, &UidMap::new()).unwrap(),
+            roles: binding::Roles::File(binding::resolve(&None, &UidMap::new()).unwrap()),
             action_grants: decide::ActionGrants::default(),
             destinations: decide::DestinationGrants::default(),
         };
@@ -1131,6 +1240,134 @@ mod tests {
             );
         }
     }
+    fn stand_in_digest(b: &[u8]) -> [u8; 32] {
+        let mut d = [0u8; 32];
+        for (i, x) in b.iter().enumerate() {
+            d[i % 32] ^= x.wrapping_add(i as u8);
+        }
+        d[0] = b.len() as u8;
+        d
+    }
+
+    #[test]
+    fn section_digests_hashes_each_present_section() {
+        let policy = maknae_config::parse_authz(
+            "schema_version: 1\npermissions:\n  allow: [\"Read(/a)\"]\nbindings: {}\n",
+        )
+        .unwrap();
+        let src = PolicySource::from_parts(
+            policy.clone(),
+            Default::default(),
+            principal(),
+            "/etc/maknae/authz.yaml".into(),
+        )
+        .unwrap();
+        let d = src.section_digests(stand_in_digest);
+        let keys: Vec<&str> = d.keys().map(String::as_str).collect();
+        assert_eq!(keys, ["bindings", "permissions", "schema_version"]);
+        assert_eq!(d["bindings"], stand_in_digest(b"{}"));
+        assert_eq!(
+            d["permissions"],
+            stand_in_digest(policy.section_canonical("permissions").unwrap().as_bytes())
+        );
+        assert_ne!(d["permissions"], d["bindings"]);
+    }
+
+    #[test]
+    fn policy_source_keeps_its_parts_and_declares_its_identity_layer() {
+        let policy = maknae_config::parse_authz(
+            "schema_version: 1\nbindings:\n  user: [\"ursula\"]\n  admin: [\"alex\"]\n  adversary: [\"mallory\"]\n",
+        )
+        .unwrap();
+        let uid_map: UidMap = [("alex", 1000), ("ursula", 7), ("mallory", 666)]
+            .iter()
+            .map(|(n, u)| (n.to_string(), *u))
+            .collect();
+        let src = PolicySource::from_parts(
+            policy.clone(),
+            uid_map.clone(),
+            principal(),
+            "/etc/maknae/authz.yaml".into(),
+        )
+        .unwrap();
+        assert_eq!(src.policy(), &policy);
+        assert_eq!(src.principal(), &principal());
+        assert_eq!(src.path(), Path::new("/etc/maknae/authz.yaml"));
+        assert_eq!(src.uid_map(), &uid_map);
+        let layer = src.identity_layer("UNCLASSIFIED", Some([4; 32]));
+        let entry = |uid: u32, name: &str, role: &str| maknae_graph::identity::SubjectEntry {
+            uid,
+            name: name.into(),
+            role: role.into(),
+        };
+        assert_eq!(
+            layer,
+            maknae_graph::identity::IdentityLayer {
+                source: "/etc/maknae/authz.yaml".into(),
+                label: "UNCLASSIFIED".into(),
+                bindings_sha256: Some([4; 32]),
+                subjects: vec![
+                    entry(7, "ursula", "user"),
+                    entry(666, "mallory", "adversary"),
+                    entry(1000, "alex", "admin"),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn policy_source_validates_like_construction() {
+        let parts = |body: &str, uids: &[(&str, u32)]| {
+            PolicySource::from_parts(
+                maknae_config::parse_authz(body).unwrap(),
+                uids.iter().map(|(n, u)| (n.to_string(), *u)).collect(),
+                principal(),
+                "/etc/maknae/authz.yaml".into(),
+            )
+        };
+        assert!(matches!(
+            parts("schema_version: 1\nbindings:\n  user: [\"ghost\"]\n", &[]),
+            Err(AuthzBasicError::Bindings(ref m)) if m.contains("ghost")
+        ));
+        assert_eq!(
+            parts(
+                "schema_version: 1\nroles:\n  admin:\n    allow: [\"admin.contain\"]\n",
+                &[]
+            )
+            .unwrap_err(),
+            AuthzBasicError::UnknownActionTerm("admin.contain".into())
+        );
+        assert_eq!(
+            parts(
+                "schema_version: 1\ndestinations:\n  guest:\n    allow: [\"provider:x\"]\n",
+                &[]
+            )
+            .unwrap_err(),
+            AuthzBasicError::RoleNotSupportedYet("guest".into())
+        );
+    }
+
+    #[test]
+    fn policy_source_load_sits_behind_the_production_door() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("mab_src_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let p = dir.join("authz.yaml");
+        std::fs::write(&p, "schema_version: 1\n").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let got = PolicySource::load(p, principal());
+        let _ = std::fs::remove_dir_all(&dir);
+        if nix::unistd::geteuid().is_root() {
+            assert!(got.is_ok(), "{got:?}");
+        } else {
+            assert!(
+                matches!(got, Err(AuthzBasicError::Load(ref m)) if m.contains("root")),
+                "{got:?}"
+            );
+        }
+    }
+
     /// In-crate killers for the feature-gated wrapper (`cargo mutants -p` runs
     /// only in-package tests, so these — not the kernel e2e — are what kill the
     /// wrapper's mutants when the mutation lane enables the feature).
@@ -1187,6 +1424,34 @@ mod tests {
             std::fs::create_dir_all(&d).unwrap();
             std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
             d
+        }
+
+        #[test]
+        fn policy_source_loads_through_the_hermetic_door_resolving_uids() {
+            let d = fixture_dir("source");
+            let p = d.join("authz.yaml");
+            write_policy(&p, "admin");
+            let got = PolicySource::load_with_requirement(p.clone(), principal(), fixture_req());
+            std::fs::write(
+                &p,
+                "schema_version: 1\nbindings:\n  user: [\"no-such-user-maknae-489\"]\n",
+            )
+            .unwrap();
+            let unresolvable =
+                PolicySource::load_with_requirement(p.clone(), principal(), fixture_req());
+            let missing = PolicySource::load_with_requirement(
+                d.join("absent.yaml"),
+                principal(),
+                fixture_req(),
+            );
+            let _ = std::fs::remove_dir_all(&d);
+            let src = got.unwrap();
+            assert_eq!(src.uid_map().get("root"), Some(&0));
+            assert_eq!(src.path(), p.as_path());
+            assert!(
+                matches!(unresolvable, Err(AuthzBasicError::Bindings(ref m)) if m.contains("no-such-user-maknae-489"))
+            );
+            assert!(matches!(missing, Err(AuthzBasicError::Load(_))));
         }
 
         /// Constructor refuses an unresolvable binding, naming the identity —
