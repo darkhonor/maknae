@@ -1156,7 +1156,20 @@ mod tests {
             let auth = auth.clone();
             std::thread::spawn(move || auth.decide(&whoami(0)))
         };
-        gate.arrived.wait();
+        let (arrived_tx, arrived_rx) = std::sync::mpsc::channel();
+        {
+            let gate = gate.clone();
+            std::thread::spawn(move || {
+                gate.arrived.wait();
+                let _ = arrived_tx.send(());
+            });
+        }
+        assert!(
+            arrived_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .is_ok(),
+            "the decision never reached evaluation"
+        );
         let (tx, rx) = std::sync::mpsc::channel();
         {
             let auth = auth.clone();
