@@ -212,6 +212,7 @@ mod tests {
             "ProtectHome=",             // `yes` here, `read-only` for the daemon's read path
             "ReadWritePaths=",          // the daemon's audit sink; the deputy writes nothing
             "Restart=",
+            "RestartForceExitStatus=", // a SIGHUP before the daemon's reload handler exists
             "RestartSec=",
             "RuntimeDirectory=", // the deputy's is the socket unit's
             "RuntimeDirectoryMode=",
