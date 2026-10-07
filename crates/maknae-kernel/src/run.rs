@@ -31,6 +31,7 @@
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -67,7 +68,9 @@ use crate::handler::{
     verb_to_action, Dispatch, ServeOutcome, AUTHZ_DECIDE_TIMEOUT,
 };
 use maknae_proto::{encode_response_zeroizing, ProtoErrCode, ProtoError};
-use maknae_security::{combine, finalize, guarded_decide_reporting_role, Authorizer, Decision};
+use maknae_security::{
+    combine, finalize, guarded_decide_cited, Authorizer, Decision, RuleCitation,
+};
 
 static AUTHZ_DECIDE_BREAKER: OnceLock<Arc<tokio::sync::Mutex<BlockingBreaker>>> = OnceLock::new();
 static GROUP_LOOKUP_BREAKER: OnceLock<Arc<tokio::sync::Mutex<BlockingBreaker>>> = OnceLock::new();
@@ -719,6 +722,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 &peer_uri,
                 peer_user.as_deref(),
                 None,
+                None,
                 session_id,
                 seq.next(),
                 verb_to_action(&request.verb),
@@ -793,6 +797,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             peer_uid,
             &peer_uri,
             peer_user.as_deref(),
+            None,
             None,
             session_id,
             seq.next(),
@@ -887,6 +892,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                         &peer_uri,
                         peer_user.as_deref(),
                         None,
+                        None,
                         session_id,
                         seq.next(),
                         verb_to_action(&request.verb),
@@ -931,6 +937,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     // "indeterminate operand blocks (fail-closed)" trail string, and dropping
     // the wrapper would change that string silently.
     let mut decided_role: Option<&'static str> = None;
+    let mut decided_rule: Option<RuleCitation> = None;
     let verdict = match authz_admission {
         BreakerAdmission::RefuseOpen => maknae_security::Verdict::Deny {
             reason: "authorization decision circuit breaker open".into(),
@@ -944,16 +951,17 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 tokio::time::timeout(
                     authz_decide_timeout,
                     tokio::task::spawn_blocking(move || {
-                        let (v, role) = guarded_decide_reporting_role(&*a, &sec_req);
-                        (combine(vec![v]), role)
+                        let d = guarded_decide_cited(&*a, &sec_req);
+                        (combine(vec![d.verdict]), d.role, d.rule)
                     }),
                 )
                 .await
             };
             match decided {
-                Ok(Ok((v, role))) => {
+                Ok(Ok((v, role, rule))) => {
                     authz_breaker.lock().await.record_success();
                     decided_role = role;
+                    decided_rule = rule;
                     v
                 }
                 Ok(Err(_join)) => {
@@ -995,6 +1003,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 &peer_uri,
                 peer_user.as_deref(),
                 decided_role,
+                decided_rule.as_ref(),
                 session_id,
                 seq.next(),
                 verb_to_action(&request.verb),
@@ -1034,6 +1043,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             &peer_uri,
             peer_user.as_deref(),
             decided_role,
+            decided_rule.as_ref(),
             session_id,
             seq.next(),
             verb_to_action(&request.verb),
@@ -1072,6 +1082,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 &peer_uri,
                 peer_user.as_deref(),
                 decided_role,
+                decided_rule.as_ref(),
                 session_id,
                 seq.next(),
                 verb_to_action(&request.verb),
@@ -1112,6 +1123,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 &peer_uri,
                 peer_user.as_deref(),
                 decided_role,
+                decided_rule.as_ref(),
                 session_id,
                 seq.next(),
                 verb_to_action(&request.verb),
@@ -1156,6 +1168,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 &peer_uri,
                 peer_user.as_deref(),
                 decided_role,
+                decided_rule.as_ref(),
                 session_id,
                 seq.next(),
                 verb_to_action(&request.verb),
@@ -1189,7 +1202,10 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                     // runs no operand code for this field.
                     authz_backend: (*authz_backend_name).clone(),
                     classification_policy: (*classification_policy_name).clone(),
-                    kernel_graph_revision: kernel_graph.as_ref().as_ref().map(|k| k.revision),
+                    kernel_graph_revision: kernel_graph
+                        .as_ref()
+                        .as_ref()
+                        .map(KernelGraphStatus::revision),
                     kernel_graph_anchor: kernel_graph.as_ref().as_ref().map(|k| k.anchor.clone()),
                 }),
                 // LIVE, via the seam. `None` means the backend cannot
@@ -1289,6 +1305,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                                 &peer_uri,
                                 peer_user.as_deref(),
                                 decided_role,
+                                decided_rule.as_ref(),
                                 session_id,
                                 seq.next(),
                                 verb_to_action(&request.verb),
@@ -1406,6 +1423,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                     &peer_uri,
                     peer_user.as_deref(),
                     decided_role,
+                    decided_rule.as_ref(),
                     session_id,
                     seq.next(),
                     "session.prompt",
@@ -1509,6 +1527,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             // the write-ahead pair.
             intent.subject.user = admitted_user(peer_user.as_deref());
             intent.subject.role = decided_role.map(str::to_string);
+            intent.rule = decided_rule.as_ref().map(rule_audit);
             intent.egress = Some(egress_meta(EgressStatus::IntentOnly));
             let intent = match crate::egress::commit_intent(&*emit, intent).await {
                 Ok(i) => i,
@@ -1827,6 +1846,7 @@ async fn refuse_oversize_bounded<S, E: AuditEmit + Send + Sync>(
         peer_uri,
         peer_user,
         role,
+        None,
         session_id,
         seq.next(),
         action,
@@ -1884,6 +1904,7 @@ async fn refuse_unencodable_bounded<S, E: AuditEmit + Send + Sync>(
         peer_uri,
         peer_user,
         role,
+        None,
         session_id,
         seq.next(),
         action,
@@ -1984,6 +2005,13 @@ fn request_caps(cfg: &TransportConfig, attempt_caps: crate::mutation::AttemptCap
     }
 }
 
+fn rule_audit(c: &RuleCitation) -> maknae_audit_append::RuleAudit {
+    maknae_audit_append::RuleAudit {
+        node: c.node,
+        section: c.section.clone(),
+    }
+}
+
 /// The RESULT-RETURNING request-record emitter the decision paths gate on
 /// (spec D3): unlike `emit_request_deny` (deliberately fire-and-forget for
 /// the pre-decision paths, where nothing is served), every caller here has a
@@ -2000,6 +2028,8 @@ async fn emit_request_outcome<E: AuditEmit + Send + Sync>(
     // #275: the role the decision was MADE ON, or None on records that
     // carry no decision (connection/transport pseudo-actions).
     role: Option<&'static str>,
+    // The rule the same decision cites, beside its role.
+    rule: Option<&RuleCitation>,
     session_id: u64,
     seq: u64,
     action: &str,
@@ -2032,6 +2062,7 @@ async fn emit_request_outcome<E: AuditEmit + Send + Sync>(
     // #275: the peer identity, bounded and audit-only.
     rec.subject.user = admitted_user(peer_user);
     rec.subject.role = role.map(str::to_string);
+    rec.rule = rule.map(rule_audit);
     rec.object_requested = object_requested.map(str::to_string);
     match emit.emit(&rec).await {
         Ok(()) => true,
@@ -2899,9 +2930,24 @@ const GRAPH_RESEED_ACTION: &str = "graph.reseed";
 const GRAPH_REJECTED_ACTION: &str = "graph.rejected";
 const GRAPH_MIGRATE_ACTION: &str = "graph.migrate";
 const GRAPH_TRANSITION_ACTION: &str = "graph.transition";
+const GRAPH_RELOAD_ACTION: &str = "graph.reload";
+
+/// Every `graph.*` pseudo-action this file emits; no verb's action string may equal one.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const GRAPH_PSEUDO_ACTIONS: [&str; 8] = [
+    GRAPH_SEED_ACTION,
+    GRAPH_RESEED_ACTION,
+    GRAPH_REJECTED_ACTION,
+    CHECKPOINT_ACTION,
+    GRAPH_LOAD_ACTION,
+    GRAPH_MIGRATE_ACTION,
+    GRAPH_TRANSITION_ACTION,
+    GRAPH_RELOAD_ACTION,
+];
 
 /// The fields every peer-less boot record shares (spec §5.3).
 struct BootCtx<'a> {
+    event: &'a str,
     host: &'a str,
     socket: &'a str,
     euid: u32,
@@ -2920,7 +2966,7 @@ impl BootCtx<'_> {
         graph: Option<GraphAudit>,
     ) -> AuditRecord {
         let mut rec = make_record(
-            "boot",
+            self.event,
             self.host,
             self.socket,
             self.euid,
@@ -3054,35 +3100,30 @@ impl<E> GraphBootAudit<'_, E> {
     }
 }
 
-/// The graph boot's inputs as this binary has them: the persisted role set labelled
-/// with the system's lowest level and its digest, the full compiled vocabulary, and
-/// the identity layer the policy declares (its bindings digest is SHA-256).
+/// The graph boot's inputs as this binary has them: the vocabulary labelled with the
+/// system's lowest level, and the identity layer the policy declares (its bindings
+/// digest is SHA-256).
 struct GraphInputs {
-    compiled: maknae_graph::schema::CompiledSet,
-    digest: [u8; 32],
-    full: maknae_graph::schema::CompiledSet,
+    vocabulary: crate::vocabulary::Vocabulary,
     identity: maknae_graph::identity::IdentityLayer,
 }
 
 impl GraphInputs {
     fn new(source: &maknae_authz_basic::PolicySource, label: &str) -> Result<Self, StoreError> {
-        let compiled = maknae_graph::kernel::persisted_compiled_set(label);
-        let digest = maknae_state::vocabulary::digest(&compiled)
+        let vocabulary = crate::vocabulary::kernel_vocabulary(label)
             .map_err(|e| StoreError::Identity(e.to_string()))?;
         let sections = source.section_digests(maknae_state::envelope::sha256);
         let identity = source.identity_layer(label, sections.get("bindings").copied());
         Ok(GraphInputs {
-            compiled,
-            digest,
-            full: maknae_authz_basic::compiled_set(label),
+            vocabulary,
             identity,
         })
     }
 
     fn boot(&self) -> BootInputs<'_> {
         BootInputs {
-            compiled: &self.compiled,
-            vocabulary_sha256: self.digest,
+            compiled: &self.vocabulary.persisted,
+            vocabulary_sha256: self.vocabulary.digest,
             identity: &self.identity,
         }
     }
@@ -3170,11 +3211,25 @@ fn store_refusal(e: StoreError, state_dir: &Path) -> RunError {
     }
 }
 
-/// The kernel graph store as boot left it, reported by `admin.status` (#488).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The kernel graph store as `admin.status` reports it (#488): the revision follows
+/// every applied reload; the anchor is the one boot established.
+#[derive(Debug, Clone)]
 pub struct KernelGraphStatus {
-    pub revision: u64,
+    revision: Arc<AtomicU64>,
     pub anchor: String,
+}
+
+impl KernelGraphStatus {
+    pub fn new(revision: u64, anchor: impl Into<String>) -> Self {
+        Self {
+            revision: Arc::new(AtomicU64::new(revision)),
+            anchor: anchor.into(),
+        }
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision.load(AtomicOrdering::Acquire)
+    }
 }
 
 fn kernel_graph_status(report: &BootReport) -> KernelGraphStatus {
@@ -3187,16 +3242,22 @@ fn kernel_graph_status(report: &BootReport) -> KernelGraphStatus {
         } => ANCHOR_SEEDED,
         BootOutcome::Loaded(state) => state.as_str(),
     };
-    KernelGraphStatus {
-        revision: report.revision,
-        anchor: anchor.to_string(),
-    }
+    KernelGraphStatus::new(report.revision, anchor)
 }
 
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
+}
+
+/// The booted store: the directory holds the one-maknaed state-dir lock and, with the
+/// key, is what a reload commits through.
+struct BootedGraph {
+    dir: StateDir,
+    key: WrappingKey,
+    status: KernelGraphStatus,
+    graph: maknae_graph::graph::Graph,
 }
 
 /// Runs before the accept loop, so the blocking audit scan contends with no append.
@@ -3206,7 +3267,7 @@ async fn boot_kernel_graph(
     sink: &Arc<maknae_audit_append::AuditSink>,
     ctx: &BootCtx<'_>,
     inputs: &BootInputs<'_>,
-) -> Result<(StateDir, KernelGraphStatus, maknae_graph::graph::Graph), RunError> {
+) -> Result<BootedGraph, RunError> {
     let key = key.map_err(|e| graph_refusal(GraphFailure::Key(e), state_dir))?;
     let dir = StateDir::open(state_dir, ctx.euid)
         .map_err(|e| graph_refusal(GraphFailure::Store(e), state_dir))?;
@@ -3224,19 +3285,17 @@ async fn boot_kernel_graph(
         ctx,
         scanned_bytes: scan.scanned_bytes,
     };
-    let report = maknae_state::store::boot(
-        &dir,
-        &WrappingKey::new(key.into_bytes()),
-        checkpoint,
-        &mut audit,
-        unix_now(),
-        inputs,
-    )
-    .await
-    .map_err(|e| store_refusal(e, state_dir))?;
+    let key = WrappingKey::new(key.into_bytes());
+    let report = maknae_state::store::boot(&dir, &key, checkpoint, &mut audit, unix_now(), inputs)
+        .await
+        .map_err(|e| store_refusal(e, state_dir))?;
     report_graph_boot(sink.as_ref(), ctx, state_dir, &report).await?;
-    let status = kernel_graph_status(&report);
-    Ok((dir, status, report.graph))
+    Ok(BootedGraph {
+        status: kernel_graph_status(&report),
+        graph: report.graph,
+        dir,
+        key,
+    })
 }
 
 /// What the boot did that the operator did not ask for: an ignored reseed marker, and
@@ -3271,6 +3330,262 @@ async fn report_graph_boot<E: AuditEmit + Send + Sync>(
             .map_err(|e| boot_evidence_refused("graph rejected-store", e))?;
     }
     Ok(())
+}
+
+/// The `SIGHUP` policy reload. `lock` serializes reloads with one another and with
+/// the shutdown record.
+struct Reloader<B: maknae_authz_basic::Baseline, E> {
+    dir: StateDir,
+    key: WrappingKey,
+    authorizer: Arc<crate::composition::Composition<B>>,
+    label: String,
+    vocabulary: crate::vocabulary::Vocabulary,
+    revision: Arc<AtomicU64>,
+    lock: tokio::sync::Mutex<()>,
+    sink: Arc<E>,
+    session_ids: Arc<SessionIds>,
+    host: String,
+    socket: String,
+    euid: u32,
+    au3_1: serde_json::Value,
+}
+
+type ReloadCandidate = (
+    Arc<maknae_graph::graph::Graph>,
+    Arc<maknae_authz_basic::snapshot::Snapshot>,
+);
+
+impl<B, E> Reloader<B, E>
+where
+    B: maknae_authz_basic::Baseline,
+    E: AuditEmit + Send + Sync + 'static,
+{
+    async fn run(self: &Arc<Self>) -> Result<crate::reload::Applied, crate::reload::Refusal> {
+        let _turn = self.lock.lock().await;
+        let seq = Seq::new();
+        let ctx = BootCtx {
+            event: "reload",
+            host: &self.host,
+            socket: &self.socket,
+            euid: self.euid,
+            session_id: self.session_ids.next_session(),
+            seq: &seq,
+            au3_1: &self.au3_1,
+        };
+        let store_revision = self.revision.load(AtomicOrdering::Acquire);
+        let io = ReloadIo {
+            reloader: self,
+            ctx: &ctx,
+            store_revision,
+            committed: std::sync::Mutex::new(None),
+        };
+        let r = crate::reload::run_reload(store_revision, &io, &io, &io, &io).await;
+        if let Ok(applied) = &r {
+            self.revision
+                .store(applied.revision, AtomicOrdering::Release);
+        }
+        r
+    }
+}
+
+struct ReloadIo<'a, B: maknae_authz_basic::Baseline, E> {
+    reloader: &'a Arc<Reloader<B, E>>,
+    ctx: &'a BootCtx<'a>,
+    store_revision: u64,
+    committed: std::sync::Mutex<Option<[u8; 32]>>,
+}
+
+/// Blocking: the policy load resolves usernames.
+fn load_candidate<B: maknae_authz_basic::Baseline>(
+    baseline: &B,
+    vocabulary: &crate::vocabulary::Vocabulary,
+    label: &str,
+    store_revision: u64,
+) -> Result<(crate::reload::Plan, ReloadCandidate), crate::reload::Refusal> {
+    use crate::reload::{Plan, Refusal};
+    let compile_refused = |m: String| Refusal::Compile(m);
+    let source = baseline
+        .load_source()
+        .map_err(|e| Refusal::Load(e.to_string()))?;
+    let digests = source.section_digests(baseline.digest());
+    let next = source.identity_layer(label, digests.get("bindings").copied());
+    let current = baseline.snapshot();
+    let persisted = maknae_graph::identity::extract(current.persisted())
+        .map_err(|e| compile_refused(e.to_string()))?;
+    let plan = crate::reload::plan(&persisted.layer, &next, store_revision);
+    let graph = match plan {
+        Plan::Unchanged => Arc::clone(current.persisted()),
+        Plan::Persist { revision } => Arc::new(
+            maknae_graph::identity::build(
+                &next,
+                &vocabulary.persisted,
+                vocabulary.digest,
+                revision,
+                maknae_graph::record::ProvenanceKind::RootFile,
+            )
+            .map_err(|e| compile_refused(e.to_string()))?,
+        ),
+    };
+    let snapshot = maknae_authz_basic::snapshot::compile(
+        Arc::clone(&graph),
+        &source,
+        &vocabulary.full,
+        &digests,
+    )
+    .map_err(|e| compile_refused(e.to_string()))?;
+    Ok((plan, (graph, Arc::new(snapshot))))
+}
+
+impl<B, E> crate::reload::Load for ReloadIo<'_, B, E>
+where
+    B: maknae_authz_basic::Baseline,
+    E: AuditEmit + Send + Sync + 'static,
+{
+    type Candidate = ReloadCandidate;
+
+    fn load(
+        &self,
+        store_revision: u64,
+    ) -> impl Future<Output = Result<(crate::reload::Plan, ReloadCandidate), crate::reload::Refusal>>
+           + Send {
+        let reloader = Arc::clone(self.reloader);
+        async move {
+            tokio::task::spawn_blocking(move || {
+                load_candidate(
+                    reloader.authorizer.baseline(),
+                    &reloader.vocabulary,
+                    &reloader.label,
+                    store_revision,
+                )
+            })
+            .await
+            .map_err(|e| crate::reload::Refusal::Load(format!("load task: {e}")))?
+        }
+    }
+}
+
+impl<B, E> crate::reload::Store for ReloadIo<'_, B, E>
+where
+    B: maknae_authz_basic::Baseline,
+    E: AuditEmit + Send + Sync + 'static,
+{
+    type Candidate = ReloadCandidate;
+
+    fn commit(
+        &self,
+        candidate: &ReloadCandidate,
+    ) -> impl Future<Output = Result<(u64, Option<String>), crate::reload::Refusal>> + Send {
+        let graph = Arc::clone(&candidate.0);
+        async move {
+            let mut audit = GraphBootAudit {
+                sink: self.reloader.sink.as_ref(),
+                ctx: self.ctx,
+                scanned_bytes: 0,
+            };
+            let committed = maknae_state::store::commit(
+                &self.reloader.dir,
+                &self.reloader.key,
+                &graph,
+                &mut audit,
+                maknae_state::store::INITIATOR_ROOT_FILE,
+            )
+            .await
+            .map_err(|e| crate::reload::Refusal::Persist(e.to_string()))?;
+            *self
+                .committed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(committed.digest);
+            Ok((committed.revision, committed.checkpoint_error))
+        }
+    }
+}
+
+impl<B, E> crate::reload::Swap for ReloadIo<'_, B, E>
+where
+    B: maknae_authz_basic::Baseline,
+    E: AuditEmit + Send + Sync + 'static,
+{
+    type Candidate = ReloadCandidate;
+
+    fn install(&self, candidate: ReloadCandidate) {
+        self.reloader.authorizer.baseline().install(candidate.1);
+    }
+}
+
+impl<B, E> crate::reload::Audit for ReloadIo<'_, B, E>
+where
+    B: maknae_authz_basic::Baseline,
+    E: AuditEmit + Send + Sync + 'static,
+{
+    fn intent(
+        &self,
+        store_revision: u64,
+    ) -> impl Future<Output = Result<(), crate::reload::Refusal>> + Send {
+        let rec = self.ctx.record(
+            GRAPH_RELOAD_ACTION,
+            "permit",
+            "intent recorded (SIGHUP)",
+            "authorized",
+            Some(GraphAudit {
+                revision: store_revision,
+                ciphertext_sha256: String::new(),
+                anchor: "reloading".to_string(),
+                scanned_bytes: 0,
+            }),
+        );
+        let sink = Arc::clone(&self.reloader.sink);
+        async move {
+            sink.emit(&rec).await.map_err(|e| {
+                eprintln!("maknaed: AUDIT WRITE FAILED on the reload intent: {e}");
+                crate::reload::Refusal::Audit(e.to_string())
+            })
+        }
+    }
+
+    fn outcome(
+        &self,
+        r: &Result<crate::reload::Applied, crate::reload::Refusal>,
+    ) -> impl Future<Output = ()> + Send {
+        let (result, reason, posture) = crate::reload::outcome(r);
+        let digest = *self
+            .committed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (revision, anchor) = match r {
+            Ok(applied) => (applied.revision, "reloaded"),
+            Err(_) => (self.store_revision, "reload-refused"),
+        };
+        let rec = self.ctx.record(
+            GRAPH_RELOAD_ACTION,
+            result,
+            &reason,
+            posture,
+            Some(GraphAudit {
+                revision,
+                ciphertext_sha256: digest.map_or_else(String::new, |d| lower_hex(&d)),
+                anchor: anchor.to_string(),
+                scanned_bytes: 0,
+            }),
+        );
+        let sink = Arc::clone(&self.reloader.sink);
+        async move {
+            if let Err(e) = sink.emit(&rec).await {
+                eprintln!("maknaed: AUDIT WRITE FAILED on the reload outcome ({reason}): {e}");
+            }
+        }
+    }
+}
+
+/// One reload per received `SIGHUP`, in turn; a burst delivered while one runs
+/// coalesces into one more.
+async fn reload_task<F, Fut>(mut hup: tokio::signal::unix::Signal, on_hup: F)
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = ()>,
+{
+    while hup.recv().await.is_some() {
+        on_hup().await;
+    }
 }
 
 /// Read the root-owned boot posture marker (`<config_dir>/private/posture.yaml`,
@@ -3387,6 +3702,10 @@ async fn run_inner(
     state_dir: &Path,
     graph_key: GraphKeyReader,
 ) -> Result<ServeOutcome, RunError> {
+    // An unregistered SIGHUP terminates the process; registered, one pending signal
+    // is buffered until the reload task drains it after mint.
+    let hup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+        .map_err(|e| RunError::Other(format!("cannot install SIGHUP handler: {e}")))?;
     // FIPS first (spec §6.1): install the aws-lc-rs FIPS default (once), then assert it —
     // before any crypto/Vault client is built. The assert stays authoritative: on a
     // non-FIPS build the installed default's `.fips()` is false and the daemon refuses.
@@ -3441,6 +3760,7 @@ async fn run_inner(
         &socket,
         euid,
         &boot_seq,
+        hup,
     )
     .await;
     record_start_refusal(
@@ -3474,6 +3794,7 @@ async fn boot_after_sink(
     socket: &str,
     euid: u32,
     boot_seq: &Seq,
+    hup: tokio::signal::unix::Signal,
 ) -> Result<ServeOutcome, RunError> {
     // #189: a configured `audit.siem` promises off-host offload that does not
     // exist until #223. Fail closed -- and audit the refusal, per the ordering
@@ -3559,15 +3880,16 @@ async fn boot_after_sink(
         Ok(source) => source,
         Err(e) => return Err(refuse(e.to_string()).await),
     };
-    let graph_inputs = GraphInputs::new(&source, &boot.policy().unmarked().name)
+    let label = boot.policy().unmarked().name.clone();
+    let graph_inputs = GraphInputs::new(&source, &label)
         .map_err(|e| graph_refusal(GraphFailure::Store(e), state_dir))?;
-    // The kernel graph boots before the PDP is built from it. Bound for the serve's
-    // lifetime: the StateDir holds the one-maknaed state-dir lock.
-    let (_state_dir_lock, graph_status, graph) = boot_kernel_graph(
+    // The kernel graph boots before the PDP is built from it.
+    let booted = boot_kernel_graph(
         state_dir,
         graph_key(config_dir),
         sink,
         &BootCtx {
+            event: "boot",
             host,
             socket,
             euid,
@@ -3578,7 +3900,11 @@ async fn boot_after_sink(
         &graph_inputs.boot(),
     )
     .await?;
-    let authorizer = match authz_boot_gate(source, Arc::new(graph), &graph_inputs.full) {
+    let authorizer = match authz_boot_gate(
+        source,
+        Arc::new(booted.graph),
+        &graph_inputs.vocabulary.full,
+    ) {
         Ok(authorizer) => authorizer,
         Err(e) => return Err(refuse(e.to_string()).await),
     };
@@ -3624,7 +3950,8 @@ async fn boot_after_sink(
         .await
         .map_err(|e| boot_evidence_refused("composition", e))?;
     let authorizer = Arc::new(authorizer);
-    let kernel_graph = Arc::new(Some(graph_status));
+    let graph_revision = Arc::clone(&booted.status.revision);
+    let kernel_graph = Arc::new(Some(booted.status));
 
     // Plane credential: resolve + read this plane's SecretID source (spec §5.1),
     // authenticate, then mint a memory-only leaf below; the credential supervisor then
@@ -3748,6 +4075,22 @@ async fn boot_after_sink(
         boot.providers(),
         egress_bounds.as_ref(),
     ));
+    // Holds the one-maknaed state-dir lock for the serve's lifetime.
+    let reloader = Reloader {
+        dir: booted.dir,
+        key: booted.key,
+        authorizer: Arc::clone(&authorizer),
+        label,
+        vocabulary: graph_inputs.vocabulary,
+        revision: graph_revision,
+        lock: tokio::sync::Mutex::new(()),
+        sink: Arc::clone(sink),
+        session_ids: Arc::clone(session_ids),
+        host: host.to_string(),
+        socket: socket.to_string(),
+        euid,
+        au3_1: audit_cfg.au3_1.clone(),
+    };
     let outcome = serve_after_mint(
         &client,
         &ca,
@@ -3765,6 +4108,8 @@ async fn boot_after_sink(
         kernel_graph,
         providers,
         egress,
+        hup,
+        Arc::new(reloader),
     )
     .await;
 
@@ -3808,6 +4153,8 @@ async fn serve_after_mint<B>(
     kernel_graph: Arc<Option<KernelGraphStatus>>,
     providers: Arc<Option<crate::provider_choice::ProviderAuthority>>,
     egress: Arc<dyn crate::egress::Egress>,
+    hup: tokio::signal::unix::Signal,
+    reloader: Arc<Reloader<B, maknae_audit_append::AuditSink>>,
 ) -> Result<ServeOutcome, String>
 where
     B: maknae_authz_basic::Baseline,
@@ -3835,7 +4182,33 @@ where
     // post-mint startup failure like a bind error (the caller revokes the token and
     // exits non-zero) — never a silently-resolving future that would masquerade as an
     // instant graceful shutdown.
-    let shutdown = install_shutdown_signal()?;
+    let signalled = install_shutdown_signal()?;
+    let reloads = tokio::spawn(reload_task(hup, {
+        let reloader = Arc::clone(&reloader);
+        move || {
+            let reloader = Arc::clone(&reloader);
+            async move {
+                if let Err(refusal) = reloader.run().await {
+                    eprintln!("maknaed: reload refused: {refusal}; the previous policy stands");
+                }
+            }
+        }
+    }));
+    let stop_reloads = {
+        let reloader = Arc::clone(&reloader);
+        let reloads = reloads.abort_handle();
+        move || async move {
+            let _turn = reloader.lock.lock().await;
+            reloads.abort();
+        }
+    };
+    let shutdown = {
+        let stop_reloads = stop_reloads.clone();
+        async move {
+            signalled.await;
+            stop_reloads().await;
+        }
+    };
     let outcome = accept_loop(
         listener,
         Arc::clone(sink),
@@ -3853,6 +4226,7 @@ where
         egress,
     )
     .await;
+    stop_reloads().await;
     Ok(outcome)
 }
 
@@ -4110,15 +4484,15 @@ mod tests {
 mod subject_list_offload_tripwire {
     /// STRUCTURAL TRIPWIRE, deliberately — not a behavioural test.
     ///
-    /// The property: `authorizer.subjects()` reaches `load_authz`, which is
-    /// sync file I/O on `/etc/maknae`, so it must run on the blocking pool
-    /// under the decide breaker and timeout. Called inline it pins a tokio
-    /// worker for as long as that read blocks, and N granted calls against a
-    /// wedged NFS/FUSE mount starve the runtime with the breaker unable to
-    /// trip, because it never sees them.
+    /// The property: the seam permits a backend whose `subjects()` blocks, so
+    /// enumeration runs on the blocking pool under the decide breaker and
+    /// timeout. The shipped backend now reads its installed snapshot; a backend
+    /// that blocks, called inline, pins a tokio worker for as long as it blocks,
+    /// and N granted calls starve the runtime with the breaker unable to trip,
+    /// because it never sees them.
     ///
-    /// That failure is not reproducible at unit scale — it needs a hung
-    /// filesystem and runtime saturation. A behavioural test that "passes"
+    /// That failure is not reproducible at unit scale — it needs a blocking
+    /// backend and runtime saturation. A behavioural test that "passes"
     /// against an inline call would be FALSE COVERAGE, which is worse than no
     /// test: reverting the offload leaves it green. Verified: reverting to the
     /// inline call keeps the whole e2e suite green.
@@ -4783,6 +5157,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         let seq = Seq::new();
         let au3_1 = serde_json::Value::Null;
         let ctx = BootCtx {
+            event: "boot",
             host: "h",
             socket: "s",
             euid: nix::unistd::geteuid().as_raw(),
@@ -4798,7 +5173,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             &ctx,
             &inputs.boot(),
         ))
-        .map(|(dir, status, _)| (dir, status))
+        .map(|b| (b.dir, b.status))
     }
 
     fn trail(fx: &GraphFixture) -> Vec<(AuditRecord, String)> {
@@ -4835,6 +5210,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         let seq = Seq::new();
         let au3_1 = serde_json::Value::Null;
         let ctx = BootCtx {
+            event: "boot",
             host: "h",
             socket: "s",
             euid: nix::unistd::geteuid().as_raw(),
@@ -4842,7 +5218,12 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             seq: &seq,
             au3_1: &au3_1,
         };
-        let (_held, status, graph) = block_on(boot_kernel_graph(
+        let BootedGraph {
+            dir: _held,
+            status,
+            graph,
+            ..
+        } = block_on(boot_kernel_graph(
             &fx.state,
             key(),
             &fx.sink,
@@ -4850,11 +5231,11 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             &inputs.boot(),
         ))
         .unwrap();
-        assert_eq!(status.revision, 1);
+        assert_eq!(status.revision(), 1);
         let stored = maknae_graph::identity::extract(&graph).unwrap();
         assert_eq!(stored.layer, inputs.identity);
         assert_eq!(stored.layer.subjects.len(), 1);
-        let pdp = authz_boot_gate(source, Arc::new(graph), &inputs.full).unwrap();
+        let pdp = authz_boot_gate(source, Arc::new(graph), &inputs.vocabulary.full).unwrap();
         let req = crate::handler::build_authz_request(
             &maknae_proto::Verb::Whoami,
             0,
@@ -4898,6 +5279,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         let seq = Seq::new();
         let au3_1 = serde_json::Value::Null;
         let ctx = BootCtx {
+            event: "boot",
             host: "h",
             socket: "s",
             euid: nix::unistd::geteuid().as_raw(),
@@ -4905,7 +5287,12 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             seq: &seq,
             au3_1: &au3_1,
         };
-        let (_held, status, graph) = block_on(boot_kernel_graph(
+        let BootedGraph {
+            dir: _held,
+            status,
+            graph,
+            ..
+        } = block_on(boot_kernel_graph(
             &fx.state,
             key(),
             &fx.sink,
@@ -4913,7 +5300,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             &inputs.boot(),
         ))
         .unwrap();
-        let baseline = authz_boot_gate(source, Arc::new(graph), &inputs.full).unwrap();
+        let baseline = authz_boot_gate(source, Arc::new(graph), &inputs.vocabulary.full).unwrap();
         let us = &maknae_config::BasicPolicy;
         let pdp = crate::composition::Composition::new(
             baseline,
@@ -4962,7 +5349,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\n  adversary: [\"seven\"]\n",
         );
         let (status, pdp) = boot_and_compose(&fx, source);
-        assert_eq!(status.revision, 6);
+        assert_eq!(status.revision(), 6);
         let actions: Vec<String> = trail(&fx).into_iter().map(|(r, _)| r.action).collect();
         assert_eq!(
             actions,
@@ -5000,7 +5387,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         let fx = graph_fixture("graph_rebind");
         let admin = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\n";
         let (first, pdp) = boot_and_compose(&fx, bound_source(&fx.dir.0, admin));
-        assert_eq!(first.revision, 1);
+        assert_eq!(first.revision(), 1);
         assert!(matches!(
             decide_as_root(&pdp, maknae_proto::Verb::Ping),
             maknae_security::Verdict::Permit { .. }
@@ -5010,7 +5397,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             &fx,
             bound_source(&fx.dir.0, &admin.replace("admin: [", "adversary: [")),
         );
-        assert_eq!((second.revision, second.anchor.as_str()), (2, "verified"));
+        assert_eq!((second.revision(), second.anchor.as_str()), (2, "verified"));
         assert!(trail(&fx)
             .iter()
             .any(|(r, _)| r.action == "graph.transition"));
@@ -5040,7 +5427,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
 
         let status = boot_graph(&fx, key()).unwrap();
         assert_eq!(
-            (status.revision, status.anchor.as_str()),
+            (status.revision(), status.anchor.as_str()),
             (5, "rollback-anchor-unavailable")
         );
         let recs = trail(&fx);
@@ -5049,7 +5436,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             actions,
             ["graph.checkpoint", "graph.migrate", "graph.checkpoint"]
         );
-        let to = bare_inputs(&fx.dir.0).digest;
+        let to = bare_inputs(&fx.dir.0).vocabulary.digest;
         let (m, _) = &recs[1];
         assert_eq!(
             (
@@ -5079,7 +5466,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         let fx = graph_fixture("graph_transition");
         boot_graph_from(&fx, key(), Path::new("/elsewhere")).unwrap();
         let (_held, status) = boot_graph_held(&fx, key()).unwrap();
-        assert_eq!((status.revision, status.anchor.as_str()), (2, "verified"));
+        assert_eq!((status.revision(), status.anchor.as_str()), (2, "verified"));
         let recs = trail(&fx);
         let actions: Vec<&str> = recs.iter().map(|(r, _)| r.action.as_str()).collect();
         assert_eq!(
@@ -5106,7 +5493,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
     fn first_boot_seeds_then_checkpoints_and_a_restart_verifies() {
         let fx = graph_fixture("graph_first_boot");
         let status = boot_graph(&fx, key()).unwrap();
-        assert_eq!((status.revision, status.anchor.as_str()), (1, "seeded"));
+        assert_eq!((status.revision(), status.anchor.as_str()), (1, "seeded"));
 
         let recs = trail(&fx);
         let actions: Vec<&str> = recs.iter().map(|(r, _)| r.action.as_str()).collect();
@@ -5147,7 +5534,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         assert_ne!(seed.seq, ckpt.seq);
 
         let status = boot_graph(&fx, key()).unwrap();
-        assert_eq!((status.revision, status.anchor.as_str()), (1, "verified"));
+        assert_eq!((status.revision(), status.anchor.as_str()), (1, "verified"));
         let recs = trail(&fx);
         assert_eq!(recs.len(), 3);
         let g = recs[2].0.graph.as_ref().unwrap();
@@ -5163,7 +5550,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
     fn a_second_boot_while_the_first_holds_the_state_dir_refuses_with_exit_5() {
         let fx = graph_fixture("graph_in_use");
         let (_held, status) = boot_graph_held(&fx, key()).unwrap();
-        assert_eq!(status.revision, 1);
+        assert_eq!(status.revision(), 1);
         let result = boot_graph(&fx, key()).map(|_| ServeOutcome::GracefulShutdown);
         let Err(e @ RunError::Graph { reason, hint }) = &result else {
             panic!("expected Err(RunError::Graph), got {result:?}");
@@ -6151,5 +6538,474 @@ mod admission_bound_tests {
         .expect("returns within the wrapper");
         assert!(t0.elapsed() < bound() + Duration::from_secs(1));
         assert_eq!(emit.bounded_calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[cfg(unix)]
+#[cfg(test)]
+mod reload_tests {
+    use super::*;
+    use maknae_authz_basic::{Baseline, HermeticAuthorizer};
+    use std::os::unix::fs::PermissionsExt;
+
+    const ROOT_ADMIN: &str = "schema_version: 1\nbindings:\n  admin: [\"root\"]\n";
+    const ROOT_ADVERSARY: &str = "schema_version: 1\nbindings:\n  adversary: [\"root\"]\n";
+
+    struct Fx {
+        dir: PathBuf,
+        reloader: Arc<Reloader<HermeticAuthorizer, maknae_audit_append::AuditSink>>,
+        status: KernelGraphStatus,
+        _guard: Guard,
+    }
+
+    struct Guard(PathBuf);
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn requirement() -> maknae_config::TargetRequired {
+        maknae_config::TargetRequired {
+            owner: None,
+            mode_mask: Some(0o022),
+            nlink_exactly_one: false,
+            regular_file: true,
+            max_bytes: None,
+        }
+    }
+
+    fn principal() -> maknae_config::Principal {
+        maknae_config::Principal {
+            name: "op".into(),
+            uid: nix::unistd::geteuid().as_raw(),
+        }
+    }
+
+    impl Fx {
+        fn policy(&self) -> PathBuf {
+            self.dir.join("authz.yaml")
+        }
+
+        fn write_policy(&self, body: &str) {
+            std::fs::write(self.policy(), body).unwrap();
+            std::fs::set_permissions(self.policy(), std::fs::Permissions::from_mode(0o640))
+                .unwrap();
+        }
+
+        fn store_bytes(&self) -> Vec<u8> {
+            std::fs::read(self.dir.join("state").join(STORE_FILE)).unwrap()
+        }
+
+        fn reload_records(&self) -> Vec<AuditRecord> {
+            std::fs::read_to_string(self.dir.join("audit.jsonl"))
+                .unwrap()
+                .lines()
+                .map(|l| serde_json::from_str::<AuditRecord>(l).unwrap())
+                .filter(|r| r.event == "reload")
+                .collect()
+        }
+
+        fn baseline(&self) -> &HermeticAuthorizer {
+            self.reloader.authorizer.baseline()
+        }
+
+        fn root_whoami(&self) -> maknae_security::Verdict {
+            self.reloader
+                .authorizer
+                .decide(&crate::handler::build_authz_request(
+                    &Verb::Whoami,
+                    0,
+                    None,
+                    maknae_security::Lane::Local,
+                    None,
+                ))
+        }
+    }
+
+    async fn fixture(tag: &str, policy: &str) -> Fx {
+        let raw = std::env::temp_dir().join(format!("maknae_reload_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&raw);
+        std::fs::create_dir_all(raw.join("state")).unwrap();
+        let dir = raw.canonicalize().unwrap();
+        for d in [&dir, &dir.join("state")] {
+            std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let sink = Arc::new(
+            maknae_audit_append::AuditSink::open(&maknae_config::AuditConfig {
+                jsonl_path: dir.join("audit.jsonl"),
+                siem: None,
+                au3_1: serde_json::Value::Null,
+            })
+            .unwrap(),
+        );
+        let path = dir.join("authz.yaml");
+        std::fs::write(&path, policy).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let source = maknae_authz_basic::PolicySource::load_with_requirement(
+            path.clone(),
+            principal(),
+            requirement(),
+        )
+        .unwrap();
+        let inputs = GraphInputs::new(&source, "UNCLASSIFIED").unwrap();
+        let seq = Seq::new();
+        let au3_1 = serde_json::Value::Null;
+        let euid = nix::unistd::geteuid().as_raw();
+        let booted = boot_kernel_graph(
+            &dir.join("state"),
+            maknae_vault::graph_key_from_bytes(&[0x5a; 32]),
+            &sink,
+            &BootCtx {
+                event: "boot",
+                host: "h",
+                socket: "s",
+                euid,
+                session_id: 9 << 32,
+                seq: &seq,
+                au3_1: &au3_1,
+            },
+            &inputs.boot(),
+        )
+        .await
+        .unwrap();
+        let baseline = HermeticAuthorizer::new_over_graph(
+            path,
+            principal(),
+            requirement(),
+            maknae_state::envelope::sha256,
+            Arc::new(booted.graph),
+        )
+        .unwrap();
+        let us = &maknae_config::BasicPolicy;
+        let authorizer = Arc::new(crate::Composition::new(
+            baseline,
+            crate::CeilingAuthorizer::new(maknae_config::Ceiling::baseline_for(us), us),
+        ));
+        let status = booted.status;
+        let reloader = Arc::new(Reloader {
+            dir: booted.dir,
+            key: booted.key,
+            authorizer,
+            label: "UNCLASSIFIED".into(),
+            vocabulary: inputs.vocabulary,
+            revision: Arc::clone(&status.revision),
+            lock: tokio::sync::Mutex::new(()),
+            sink,
+            session_ids: Arc::new(SessionIds::new()),
+            host: "h".into(),
+            socket: "s".into(),
+            euid,
+            au3_1,
+        });
+        Fx {
+            _guard: Guard(dir.clone()),
+            dir,
+            reloader,
+            status,
+        }
+    }
+
+    fn outcomes(recs: &[AuditRecord]) -> Vec<(String, String, String)> {
+        recs.iter()
+            .map(|r| {
+                (
+                    r.action.clone(),
+                    r.outcome.result.clone(),
+                    r.outcome.reason.clone(),
+                )
+            })
+            .collect()
+    }
+
+    fn adversary() -> maknae_security::Verdict {
+        maknae_security::Verdict::Deny {
+            reason: "subject contained: role=adversary".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_reload_applies_a_file_edit_and_records_intent_then_outcome() {
+        let fx = fixture("apply", ROOT_ADMIN).await;
+        assert!(matches!(
+            fx.root_whoami(),
+            maknae_security::Verdict::Permit { .. }
+        ));
+        fx.write_policy(ROOT_ADVERSARY);
+        let applied = fx.reloader.run().await.unwrap();
+        assert_eq!(
+            applied,
+            crate::reload::Applied {
+                revision: 2,
+                persisted: true,
+                checkpoint_error: None,
+            }
+        );
+        assert_eq!(fx.root_whoami(), adversary());
+        assert_eq!(fx.baseline().snapshot().revision(), 2);
+        let recs = fx.reload_records();
+        let actions: Vec<&str> = recs.iter().map(|r| r.action.as_str()).collect();
+        assert_eq!(
+            actions,
+            [
+                "graph.reload",
+                "graph.transition",
+                "graph.checkpoint",
+                "graph.reload"
+            ]
+        );
+        assert_eq!(
+            (
+                recs[0].outcome.result.as_str(),
+                recs[0].outcome.reason.as_str()
+            ),
+            ("permit", "intent recorded (SIGHUP)")
+        );
+        assert_eq!(recs[0].graph.as_ref().unwrap().revision, 1);
+        assert_eq!(
+            recs[2].graph.as_ref().unwrap().anchor,
+            maknae_state::store::ANCHOR_TRANSITIONED
+        );
+        let last = &recs[3];
+        assert_eq!(
+            (
+                last.outcome.result.as_str(),
+                last.outcome.reason.as_str(),
+                last.outcome.posture.as_str()
+            ),
+            (
+                "permit",
+                "reload applied: revision 2; identity persisted",
+                "authorized"
+            )
+        );
+        let graph = last.graph.as_ref().unwrap();
+        assert_eq!((graph.revision, graph.anchor.as_str()), (2, "reloaded"));
+        assert_eq!(
+            graph.ciphertext_sha256,
+            recs[2].graph.as_ref().unwrap().ciphertext_sha256
+        );
+        assert!(recs.iter().all(|r| r.session_id == recs[0].session_id));
+        let seqs: Vec<u64> = recs.iter().map(|r| r.seq).collect();
+        assert_eq!(seqs, [1, 2, 3, 4]);
+    }
+
+    #[tokio::test]
+    async fn the_next_boot_verifies_a_reloaded_store_against_its_checkpoint() {
+        let fx = fixture("reboot", ROOT_ADMIN).await;
+        fx.write_policy(ROOT_ADVERSARY);
+        fx.reloader.run().await.unwrap();
+        let Fx {
+            dir,
+            reloader,
+            _guard,
+            ..
+        } = fx;
+        drop(reloader);
+        let sink = Arc::new(
+            maknae_audit_append::AuditSink::open(&maknae_config::AuditConfig {
+                jsonl_path: dir.join("audit.jsonl"),
+                siem: None,
+                au3_1: serde_json::Value::Null,
+            })
+            .unwrap(),
+        );
+        let source = maknae_authz_basic::PolicySource::load_with_requirement(
+            dir.join("authz.yaml"),
+            principal(),
+            requirement(),
+        )
+        .unwrap();
+        let inputs = GraphInputs::new(&source, "UNCLASSIFIED").unwrap();
+        let seq = Seq::new();
+        let au3_1 = serde_json::Value::Null;
+        let booted = boot_kernel_graph(
+            &dir.join("state"),
+            maknae_vault::graph_key_from_bytes(&[0x5a; 32]),
+            &sink,
+            &BootCtx {
+                event: "boot",
+                host: "h",
+                socket: "s",
+                euid: nix::unistd::geteuid().as_raw(),
+                session_id: 10 << 32,
+                seq: &seq,
+                au3_1: &au3_1,
+            },
+            &inputs.boot(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (booted.status.revision(), booted.status.anchor.as_str()),
+            (2, "verified")
+        );
+    }
+
+    #[tokio::test]
+    async fn kernel_graph_revision_follows_a_reload() {
+        let fx = fixture("status", ROOT_ADMIN).await;
+        assert_eq!(fx.status.revision(), 1);
+        fx.write_policy(ROOT_ADVERSARY);
+        fx.reloader.run().await.unwrap();
+        assert_eq!(fx.status.revision(), 2);
+        assert_eq!(fx.reloader.dir.store_revision(), 2);
+    }
+
+    #[tokio::test]
+    async fn invalid_reload_keeps_old_snapshot_and_store() {
+        let fx = fixture("invalid", ROOT_ADMIN).await;
+        let before = fx.baseline().snapshot();
+        let bytes = fx.store_bytes();
+        fx.write_policy("not: [valid");
+        let refused = fx.reloader.run().await.unwrap_err();
+        assert!(
+            matches!(refused, crate::reload::Refusal::Load(_)),
+            "{refused:?}"
+        );
+        assert!(Arc::ptr_eq(&before, &fx.baseline().snapshot()));
+        assert_eq!(fx.store_bytes(), bytes);
+        assert_eq!(fx.status.revision(), 1);
+        let recs = fx.reload_records();
+        let o = outcomes(&recs);
+        assert_eq!(o.len(), 2, "{o:?}");
+        assert_eq!(o[0].0, "graph.reload");
+        assert_eq!(o[0].1, "permit");
+        assert_eq!((o[1].0.as_str(), o[1].1.as_str()), ("graph.reload", "deny"));
+        assert!(
+            o[1].2.starts_with("reload refused: policy load: "),
+            "{}",
+            o[1].2
+        );
+        assert_eq!(recs[1].outcome.posture, "unavailable");
+        let graph = recs[1].graph.as_ref().unwrap();
+        assert_eq!(
+            (
+                graph.revision,
+                graph.anchor.as_str(),
+                graph.ciphertext_sha256.as_str()
+            ),
+            (1, "reload-refused", "")
+        );
+        assert!(matches!(
+            fx.root_whoami(),
+            maknae_security::Verdict::Permit { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_refused_persist_installs_nothing() {
+        let fx = fixture("persist", ROOT_ADMIN).await;
+        let before = fx.baseline().snapshot();
+        let bytes = fx.store_bytes();
+        fx.write_policy(ROOT_ADVERSARY);
+        fx.reloader.revision.store(0, AtomicOrdering::Release);
+        let refused = fx.reloader.run().await.unwrap_err();
+        assert!(
+            matches!(refused, crate::reload::Refusal::Persist(_)),
+            "{refused:?}"
+        );
+        assert!(Arc::ptr_eq(&before, &fx.baseline().snapshot()));
+        assert_eq!(fx.store_bytes(), bytes);
+        assert!(matches!(
+            fx.root_whoami(),
+            maknae_security::Verdict::Permit { .. }
+        ));
+        let o = outcomes(&fx.reload_records());
+        assert_eq!(o.len(), 2, "{o:?}");
+        assert!(
+            o[1].2.starts_with("reload refused: persist: "),
+            "{}",
+            o[1].2
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_file_reloads_without_a_persist() {
+        let fx = fixture("unchanged", ROOT_ADMIN).await;
+        let before = fx.baseline().snapshot();
+        let bytes = fx.store_bytes();
+        fx.write_policy(&format!(
+            "{ROOT_ADMIN}permissions:\n  allow: [\"Read(~/**)\"]\n  deny: []\n"
+        ));
+        let applied = fx.reloader.run().await.unwrap();
+        assert_eq!(
+            applied,
+            crate::reload::Applied {
+                revision: 1,
+                persisted: false,
+                checkpoint_error: None,
+            }
+        );
+        let after = fx.baseline().snapshot();
+        assert!(
+            !Arc::ptr_eq(&before, &after),
+            "the recompiled snapshot is installed"
+        );
+        assert!(Arc::ptr_eq(before.persisted(), after.persisted()));
+        assert_eq!(fx.store_bytes(), bytes);
+        let o = outcomes(&fx.reload_records());
+        assert_eq!(
+            o.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(),
+            ["graph.reload", "graph.reload"]
+        );
+        assert_eq!(o[1].2, "reload applied: revision 1; identity unchanged");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_hups_in_flight_run_in_turn() {
+        let fx = fixture("turns", ROOT_ADMIN).await;
+        fx.write_policy(ROOT_ADVERSARY);
+        let (a, b) = tokio::join!(fx.reloader.run(), fx.reloader.run());
+        let mut revisions = [a.unwrap().revision, b.unwrap().revision];
+        revisions.sort_unstable();
+        assert_eq!(revisions, [2, 2]);
+        let recs = fx.reload_records();
+        let actions: Vec<&str> = recs.iter().map(|r| r.action.as_str()).collect();
+        assert_eq!(
+            actions,
+            [
+                "graph.reload",
+                "graph.transition",
+                "graph.checkpoint",
+                "graph.reload",
+                "graph.reload",
+                "graph.reload"
+            ]
+        );
+        assert_eq!(recs[0].session_id, recs[3].session_id);
+        assert_eq!(recs[4].session_id, recs[5].session_id);
+        assert_ne!(recs[0].session_id, recs[4].session_id);
+        assert_eq!(
+            recs[5].outcome.reason,
+            "reload applied: revision 2; identity unchanged"
+        );
+        assert_eq!(fx.status.revision(), 2);
+    }
+
+    #[tokio::test]
+    async fn sighup_during_boot_is_buffered_not_fatal() {
+        let hup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()).unwrap();
+        let sent = std::process::Command::new("kill")
+            .args(["-HUP", &std::process::id().to_string()])
+            .status()
+            .unwrap();
+        assert!(sent.success());
+        let seen = Arc::new(AtomicU64::new(0));
+        let task = tokio::spawn(reload_task(hup, {
+            let seen = Arc::clone(&seen);
+            move || {
+                seen.fetch_add(1, AtomicOrdering::SeqCst);
+                async {}
+            }
+        }));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while seen.load(AtomicOrdering::SeqCst) == 0 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(seen.load(AtomicOrdering::SeqCst), 1);
+        task.abort();
     }
 }

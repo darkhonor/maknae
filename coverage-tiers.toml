@@ -56,6 +56,11 @@ files = [
   # maknae-security/compose.rs (T1).
   "crates/maknae-kernel/src/ceiling_authz.rs",
   "crates/maknae-kernel/src/composition.rs",
+  # The policy reload's ordering (intent, load, persist, install, outcome) and
+  # the vocabulary the store and the snapshot compiler are given: a wrong arm
+  # installs a snapshot the store never recorded, or keeps serving a refused one.
+  "crates/maknae-kernel/src/reload.rs",
+  "crates/maknae-kernel/src/vocabulary.rs",
   # The CBOR byte-string content codec (#77): a wrong major type halves the
   # read ceiling and mis-routes oversize; the visitor is a refusal surface.
   "crates/maknae-proto/src/bytes.rs",

@@ -1232,13 +1232,36 @@ mod tests {
     /// prefix is gone, so it is a test obligation.
     #[test]
     fn no_action_string_equals_an_adr0019_pseudo_action() {
+        let pseudo: Vec<&str> = ["connect", "read", "decode", "authz", "posture"]
+            .into_iter()
+            .chain(crate::run::GRAPH_PSEUDO_ACTIONS)
+            .collect();
+        assert!(pseudo.contains(&"graph.reload") && pseudo.contains(&"graph.migrate"));
         for v in all_verbs() {
             let a = verb_to_action(&v);
             assert!(
-                !["connect", "read", "decode", "authz", "posture"].contains(&a),
+                !pseudo.contains(&a),
                 "{a} collides with an ADR-0019 transport/boot pseudo-action"
             );
         }
+        for k in KERNEL_ACTIONS {
+            assert!(!pseudo.contains(&k), "{k} collides with a pseudo-action");
+        }
+    }
+
+    /// The terms a request can be decided on are exactly the compiled vocabulary's.
+    #[test]
+    fn the_decidable_actions_are_the_compiled_vocabulary() {
+        let decidable: std::collections::BTreeSet<&str> = all_verbs()
+            .iter()
+            .map(verb_to_action)
+            .chain(KERNEL_ACTIONS)
+            .collect();
+        let compiled: std::collections::BTreeSet<&str> = maknae_authz_basic::ACTION_TERMS
+            .into_iter()
+            .chain(maknae_authz_basic::KERNEL_TERMS)
+            .collect();
+        assert_eq!(decidable, compiled);
     }
 
     /// Every term resolves to one of the seven closed classes. A term whose

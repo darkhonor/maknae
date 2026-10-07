@@ -239,12 +239,13 @@ fn prepare(
 }
 
 /// Decide every path in the mutation. Returns the role the decision was made
-/// on in BOTH arms (#275): a denied `fs.write` is the security-interesting
-/// record, so stamping `role=none` on it while a role was in fact resolved
-/// would defeat the point. When several paths are decided, the reported role is
-/// the one from the last decision evaluated — on a deny, that is the path that
-/// caused the refusal.
-type AuthorizeErr = (String, String, Option<&'static str>);
+/// on, and the rule it cites, in BOTH arms (#275): a denied `fs.write` is the
+/// security-interesting record, so stamping `role=none` on it while a role was in
+/// fact resolved would defeat the point. When several paths are decided, both
+/// come from the last decision evaluated — on a deny, the path that caused the
+/// refusal.
+type DecidedBy = (Option<&'static str>, Option<maknae_security::RuleCitation>);
+type AuthorizeErr = (String, String, DecidedBy);
 
 fn authorize<P: Authorizer>(
     prepared: &PreparedMutation,
@@ -253,8 +254,8 @@ fn authorize<P: Authorizer>(
     home: Option<&Path>,
     authorizer: &P,
     policy_name: &str,
-) -> Result<(Option<&'static str>, maknae_proto::ObjectLabel), AuthorizeErr> {
-    let mut decided_role: Option<&'static str> = None;
+) -> Result<(DecidedBy, maknae_proto::ObjectLabel), AuthorizeErr> {
+    let mut decided: DecidedBy = (None, None);
     let mut last = None;
     for path in &prepared.paths {
         let mut request = build_authz_request(verb, uid, home, Lane::Local, None);
@@ -268,17 +269,17 @@ fn authorize<P: Authorizer>(
         );
         // `combine(vec![..])` preserved: it is what produces the
         // "indeterminate operand blocks (fail-closed)" trail string.
-        let (v, role) = maknae_security::guarded_decide_reporting_role(authorizer, &request);
-        decided_role = role;
-        match maknae_security::finalize(maknae_security::combine(vec![v])) {
+        let d = maknae_security::guarded_decide_cited(authorizer, &request);
+        decided = (d.role, d.rule);
+        match maknae_security::finalize(maknae_security::combine(vec![d.verdict])) {
             Decision::Permit { obligations } => discharge_plan(&obligations).map_err(|_| {
                 (
                     "unhonorable mutation obligation".to_string(),
                     path.clone(),
-                    decided_role,
+                    decided.clone(),
                 )
             })?,
-            Decision::Deny { reason } => return Err((reason, path.clone(), decided_role)),
+            Decision::Deny { reason } => return Err((reason, path.clone(), decided)),
         }
         last = Some((request, path));
     }
@@ -287,10 +288,10 @@ fn authorize<P: Authorizer>(
         (
             "object label unresolved".to_string(),
             path.clone(),
-            decided_role,
+            decided.clone(),
         )
     })?;
-    Ok((decided_role, label))
+    Ok((decided, label))
 }
 fn mutation_meta(
     seq: u64,
@@ -531,13 +532,18 @@ where
     // the security-interesting record -- attests the role it was refused under.
     // Both arms carry it; the permit arm alone would leave every denied
     // fs.write/fs.delete/fs.mkdir saying role=none while a role WAS resolved.
-    record.subject.role = match &decision {
-        Ok((role, _)) => role.map(str::to_string),
-        Err((_, _, role)) => role.map(str::to_string),
+    let (role, rule) = match &decision {
+        Ok((by, _)) => by,
+        Err((_, _, by)) => by,
     };
+    record.subject.role = role.map(str::to_string);
+    record.rule = rule.as_ref().map(|c| maknae_audit_append::RuleAudit {
+        node: c.node,
+        section: c.section.clone(),
+    });
     let label = match decision {
         Ok((_, label)) => label,
-        Err((reason, denied_path, _role)) => {
+        Err((reason, denied_path, _)) => {
             record.object_requested = (asked != denied_path).then(|| asked.into());
             record.object = Some(denied_path);
             refuse(stream, cfg, &*emit, record, reason).await;

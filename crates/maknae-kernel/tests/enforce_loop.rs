@@ -740,6 +740,8 @@ async fn the_shipped_deny_list_actually_denies_a_read_of_ssh_keys() {
         "only a real DenyMatch renders the policy-entry source (and proves the ~ expansion round-trip): {}",
         req.outcome.reason
     );
+    let rule = req.rule.as_ref().expect("the deny cites its rule node");
+    assert!(rule.section.ends_with("authz.yaml#permissions"), "{rule:?}");
     // And the pattern source never leaks onto the wire either.
     let pat = b".ssh";
     assert!(!frame.windows(pat.len()).any(|w| w == pat));
@@ -1729,10 +1731,7 @@ async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
         Arc::new(Default::default()),
         nondefault_transport(),
         Arc::new(booted.classification_policy_name().to_string()),
-        Arc::new(Some(maknae_kernel::KernelGraphStatus {
-            revision: 41,
-            anchor: "advanced".into(),
-        })),
+        Arc::new(Some(maknae_kernel::KernelGraphStatus::new(41, "advanced"))),
     )
     .await
     .expect("a frame");
@@ -1768,6 +1767,8 @@ async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
     assert_eq!(req.action, "admin.status");
     assert_eq!(req.outcome.result, "permit");
     assert_eq!(req.outcome.posture, "authorized");
+    let rule = req.rule.as_ref().expect("the permit cites its grant");
+    assert!(rule.section.ends_with("authz.yaml#roles.admin"), "{rule:?}");
 }
 
 /// `authz_backend` is ASKED OF THE PDP. A backend that does not name itself
@@ -2230,6 +2231,8 @@ async fn a_roles_denied_term_names_the_term_in_audit_but_not_on_the_wire() {
         "the audit trail MUST name the term that denied: {:?}",
         req.outcome.reason
     );
+    let rule = req.rule.as_ref().expect("the deny cites its grant");
+    assert!(rule.section.ends_with("authz.yaml#roles.admin"), "{rule:?}");
 }
 
 /// A PERMITTED but unbuilt term is decided, audited as decided-and-NOT-performed,
