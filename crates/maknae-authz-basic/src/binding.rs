@@ -269,7 +269,8 @@ impl GraphBindings {
                     .out_edges(s.id, BINDS)
                     .next()
                     .and_then(|e| self.graph.node(e.to))
-                    .map(|r| r.key.clone())
+                    .and_then(|r| Role::from_key(&r.key))
+                    .map(|r| r.key().to_string())
             };
             if let Some(role) = role {
                 out.entry(role).or_default().push(s.key.clone());
@@ -635,6 +636,7 @@ mod tests {
         let g = graph_with(&layer(true, &[(9, "sam", "superadmin")]), &wide);
         let gb = GraphBindings::new(g, SOURCE);
         assert_eq!(gb.role_for(9, 9), Resolution::NoRole);
+        assert_eq!(gb.as_subject_bindings(), Some(vec![]));
     }
 
     #[test]

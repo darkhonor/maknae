@@ -203,6 +203,7 @@ pub struct PolicySource {
     bindings: binding::ResolvedBindings,
     principal: maknae_config::Principal,
     path: PathBuf,
+    source: String,
 }
 
 impl PolicySource {
@@ -236,6 +237,12 @@ impl PolicySource {
         principal: maknae_config::Principal,
         path: PathBuf,
     ) -> Result<Self, AuthzBasicError> {
+        let source = path
+            .to_str()
+            .ok_or_else(|| {
+                AuthzBasicError::Load(format!("policy path {} is not UTF-8", path.display()))
+            })?
+            .to_string();
         let bindings = validate(&policy, &uid_map)?;
         Ok(Self {
             policy,
@@ -243,6 +250,7 @@ impl PolicySource {
             bindings,
             principal,
             path,
+            source,
         })
     }
 
@@ -271,7 +279,7 @@ impl PolicySource {
         bindings_sha256: Option<[u8; 32]>,
     ) -> maknae_graph::identity::IdentityLayer {
         maknae_graph::identity::IdentityLayer {
-            source: self.path.to_string_lossy().into_owned(),
+            source: self.source.clone(),
             label: label.into(),
             bindings_sha256,
             subjects: self
@@ -1312,6 +1320,22 @@ mod tests {
                     entry(1000, "alex", "admin"),
                 ],
             }
+        );
+    }
+
+    #[test]
+    fn policy_source_refuses_a_non_utf8_policy_path() {
+        use std::os::unix::ffi::OsStrExt;
+        let path = PathBuf::from(std::ffi::OsStr::from_bytes(b"/etc/maknae/auth\xffz.yaml"));
+        let got = PolicySource::from_parts(
+            maknae_config::parse_authz("schema_version: 1\n").unwrap(),
+            Default::default(),
+            principal(),
+            path,
+        );
+        assert!(
+            matches!(got, Err(AuthzBasicError::Load(ref m)) if m.contains("is not UTF-8")),
+            "{got:?}"
         );
     }
 

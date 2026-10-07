@@ -192,6 +192,16 @@ fn effect_attrs(effect: Effect) -> (EdgeKind, &'static str) {
     }
 }
 
+fn permissions_declared(canonical: Option<&str>, entries: usize) -> Result<bool, CompileError> {
+    match (canonical, entries) {
+        (Some(_), _) => Ok(true),
+        (None, 0) => Ok(false),
+        (None, n) => Err(CompileError::Policy(format!(
+            "{n} permissions entries without a permissions section"
+        ))),
+    }
+}
+
 fn static_role(key: &str) -> Result<&'static str, CompileError> {
     crate::role::Role::from_key(key)
         .map(|r| r.key())
@@ -274,7 +284,8 @@ pub fn compile(
     let admin = c.id_of(ROLE, "admin")?;
     let user = c.id_of(ROLE, "user")?;
     let policy = source.policy();
-    if policy.section_canonical("permissions").is_some() {
+    let entries = policy.deny_sources().len() + policy.allow_sources().len();
+    if permissions_declared(policy.section_canonical("permissions"), entries)? {
         let sec = c.section("permissions", section_sha256, "permissions")?;
         for (effect, entries) in [
             (Effect::Deny, policy.deny_sources()),
@@ -947,5 +958,112 @@ mod tests {
             "{shown}"
         );
         assert!(shown.ends_with(", rules: 20 }"), "{shown}");
+    }
+
+    #[test]
+    fn permissions_entries_without_their_section_refuse() {
+        assert_eq!(permissions_declared(Some("{}"), 0), Ok(true));
+        assert_eq!(permissions_declared(Some("{}"), 3), Ok(true));
+        assert_eq!(permissions_declared(None, 0), Ok(false));
+        assert_eq!(
+            permissions_declared(None, 2),
+            Err(CompileError::Policy(
+                "2 permissions entries without a permissions section".into()
+            ))
+        );
+    }
+
+    fn sec_request(
+        uid: u32,
+        action: &str,
+        path: Option<&str>,
+        dest: Option<&str>,
+    ) -> maknae_security::Request {
+        use maknae_security::{Action, Attributes, Context, Resource, Subject};
+        let mut s = Attributes::new();
+        s.insert(
+            crate::SUBJECT_UID_KEY,
+            maknae_security::AttrValue::Int(i64::from(uid)),
+        );
+        s.insert(
+            maknae_security::SUBJECT_HOME,
+            maknae_security::AttrValue::Str("/home/operator".into()),
+        );
+        let mut r = Attributes::new();
+        if let Some(p) = path {
+            r.insert(
+                crate::RESOURCE_PATH_KEY,
+                maknae_security::AttrValue::Str(p.into()),
+            );
+        }
+        if let Some(d) = dest {
+            r.insert("destination", maknae_security::AttrValue::Str(d.into()));
+        }
+        let mut c = Attributes::new();
+        c.insert(
+            maknae_security::CONTEXT_DAC_LANE,
+            maknae_security::AttrValue::Str(maknae_security::Lane::Local.as_str().into()),
+        );
+        c.insert(
+            maknae_security::CONTEXT_FS_OPERATION,
+            maknae_security::AttrValue::Str("read".into()),
+        );
+        maknae_security::Request {
+            subject: Subject(s),
+            resource: Resource(r),
+            action: Action(action.into()),
+            context: Context(c),
+        }
+    }
+
+    #[test]
+    fn every_citation_the_decision_core_emits_resolves_in_the_index() {
+        let s = source(&format!(
+            "{SHIPPED}{BINDINGS}roles:\n  admin:\n    allow: [\"admin.status\", \"session.prompt\"]\n    deny: [\"admin.config.show\"]\n  user:\n    allow: [\"session.prompt\"]\n    deny: [\"session.prompt\"]\ndestinations:\n  admin:\n    allow: [\"provider:openai\"]\n"
+        ));
+        let snap = snap(&s);
+        let oracle = crate::assemble(s.policy().clone(), s.uid_map()).unwrap();
+        let cases = [
+            sec_request(
+                1000,
+                "fs.read",
+                Some("/home/operator/.ssh/id_ed25519"),
+                None,
+            ),
+            sec_request(1001, "fs.read", Some("/home/operator/notes"), None),
+            sec_request(1000, "admin.config.show", None, None),
+            sec_request(1000, "admin.status", None, None),
+            sec_request(1000, "session.prompt", None, Some("provider:openai")),
+            sec_request(1001, "session.prompt", None, Some("provider:openai")),
+        ];
+        for req in cases {
+            let d = crate::decide::decide_loaded_cited(&snap.loaded, &principal(), &req);
+            assert_eq!(
+                crate::decide::decide_loaded_with_role(&oracle, &principal(), &req),
+                (d.verdict.clone(), d.role),
+                "{}",
+                req.action.0
+            );
+            let cited = d
+                .cited
+                .unwrap_or_else(|| panic!("{} cites nothing", req.action.0));
+            let hit = snap
+                .cite(&cited)
+                .unwrap_or_else(|| panic!("{cited:?} is not in the index"));
+            let rule = snap.graph().node(NodeId(hit.node)).unwrap();
+            assert_eq!(rule.kind, RULE);
+            let denied = matches!(d.verdict, maknae_security::Verdict::Deny { .. });
+            match cited {
+                Cited::Destination { .. } => {
+                    assert!(matches!(d.verdict, maknae_security::Verdict::Permit { .. }));
+                    assert_eq!(str_attr(rule, ATTR_EFFECT), None);
+                }
+                _ => assert_eq!(
+                    str_attr(rule, ATTR_EFFECT),
+                    Some(if denied { "deny" } else { "allow" }),
+                    "{cited:?}"
+                ),
+            }
+        }
     }
 }
