@@ -4,6 +4,23 @@ Each release that needs an action from you lists it here, newest first. Read eve
 
 ---
 
+## Policy edits apply at reload (#489)
+
+Edits to `/etc/maknae/authz.yaml` no longer take effect on the next request. `maknaed` now decides from a snapshot of the file compiled when it starts, and an edit applies when you reload or restart it:
+
+```bash
+sudo systemctl reload maknaed                          # Linux
+sudo launchctl kill SIGHUP system/io.maknae.maknaed    # macOS
+```
+
+A reload re-reads `authz.yaml` only, and resolves every username in `bindings:`, so adding a user needs no restart. A reload of a file that does not validate is refused, and the running policy stands; the journal and the audit trail name the cause. An invalid `authz.yaml` at start still refuses to start, with exit 3. The [runbook](runbook.md#reload-the-policy) has the details.
+
+The first start after this upgrade migrates the kernel graph store, with no action from you. The trail shows a `graph.migrate` record, the store at its revision + 1, and a `graph.checkpoint`. If your `authz.yaml` has a `bindings:` block, a second transition follows: a `graph.transition` record that seeds those bindings into the store, at revision + 2, and another `graph.checkpoint` ([upgrades migrate the store](runbook.md#upgrades-migrate-the-store)).
+
+**One uid under two names in two roles now refuses.** If `bindings:` lists two usernames that resolve to the same uid under different roles (for example `root` under `admin` and `toor` under `adversary`), the policy is refused, at start and at reload, with `identities '<a>' and '<b>' resolve to the same uid <uid>; bind one of them`. Before this release one of the two roles was silently chosen. Keep one of the names. Two such names under the same role are still accepted.
+
+---
+
 ## Kernel graph store (#488)
 
 `maknaed` now keeps its enforcement state in an encrypted store, and will not start without the key that encrypts it.
@@ -39,7 +56,7 @@ Until you enroll, the daemon does not start, and each platform says so different
 | Key | `/etc/maknae/private/maknaed-graph-key.cred`, a systemd encrypted credential sealed to the TPM2 | System-keychain item `io.maknae.maknaed.graph`, readable only by `/usr/local/bin/maknaed` |
 | Store | `/var/lib/maknae/kernel.graph` | `/usr/local/var/db/maknae/state/kernel.graph` |
 
-The first start after enrolling seeds an empty store and records it on the audit trail. If the daemon refuses to start for any other graph-store reason, see [the kernel graph store refuses to start](runbook.md#the-kernel-graph-store-refuses-to-start).
+The first start after enrolling seeds the store from the bindings in `/etc/maknae/authz.yaml` and records it on the audit trail. If the daemon refuses to start for any other graph-store reason, see [the kernel graph store refuses to start](runbook.md#the-kernel-graph-store-refuses-to-start).
 
 Uninstalling on macOS keeps the store and its keychain item, as it keeps `/etc/maknae` and the audit trail. A Debian purge removes `/var/lib/maknae`.
 

@@ -303,20 +303,15 @@ pub enum Verb {
     /// Bind a subject to a role. A policy mutation — write-ahead audit applies.
     /// MUST refuse the `adversary` role: containment has its own sanctioned
     /// spelling below, and admitting it here would grant containment to anyone
-    /// holding this term while bypassing the constraints written on it. Binding a
-    /// username the daemon has not yet resolved fails the WHOLE policy closed
-    /// until the uid map is refreshed — one edit naming an unknown user denies
-    /// every subject on every term.
+    /// holding this term while bypassing the constraints written on it. A
+    /// username the host cannot resolve refuses the whole reload that carries it.
     AdminSubjectBind,
     /// Remove a subject's role binding. A policy mutation, and the sharper edge:
     /// unbinding the last admin locks out the WIRE until an out-of-band root edit
-    /// of the root-owned policy file — picked up on the next request when the
-    /// re-bound identity was resolved at daemon construction. A name new to the
-    /// uid map instead fails the whole policy closed until restart (#85 §3), so
-    /// the edit can deepen the cliff before it lifts it. A serviceability cliff,
-    /// not an unrecoverable one; recovery is local and always available precisely
-    /// because it needs no request. MUST refuse the `adversary` role — otherwise
-    /// it becomes an unconstrained `admin.release`.
+    /// of the root-owned policy file, applied by a `SIGHUP` reload or a restart.
+    /// A serviceability cliff, not an unrecoverable one; recovery is local and
+    /// always available precisely because it needs no request. MUST refuse the
+    /// `adversary` role — otherwise it becomes an unconstrained `admin.release`.
     AdminSubjectUnbind,
     /// Place a subject under containment (deny-all) by operator decision.
     /// Containment IS a role binding (`adversary`) in the shipped model, so this

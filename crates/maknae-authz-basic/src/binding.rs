@@ -27,7 +27,7 @@ use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-/// username → uid, built once at construction via getpwnam.
+/// username → uid, built once per policy load (start or reload) via getpwnam.
 pub(crate) type UidMap = BTreeMap<String, u32>;
 
 /// Validated, uid-keyed bindings for one loaded policy snapshot.
@@ -147,7 +147,8 @@ impl ResolvedBindings {
     /// `authz.yaml`"). `root` reports as `uid:0`, which appears in no policy
     /// file. The uid IS the authenticated datum (ADR-0018) and the thing
     /// `role_for` keys on, so it is the honest answer to "who is bound"; a
-    /// name is an input resolved once at construction that may since have been
+    /// name is an input resolved once per policy load, and the account may since
+    /// have been renamed.
     pub(crate) fn as_subject_bindings(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
         // NO `bindings:` KEY -> `None`, not an empty list.
         //

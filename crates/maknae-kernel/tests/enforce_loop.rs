@@ -1830,14 +1830,9 @@ async fn a_panicking_backend_name_is_contained_on_the_production_path() {
     }
 }
 
-/// `admin.subject.list` reports what the POLICY FILE binds, end to end.
-///
-/// This does NOT prove liveness, and an earlier version of this doc claimed it
-/// did. The fixture policy is on disk before `HermeticAuthorizer::new`, so an
-/// implementation that snapshotted bindings at construction passes it
-/// unchanged. The liveness property is owned by
-/// `wrapper_subjects_delegate_and_read_live` in `maknae-authz-basic`, which
-/// rewrites the policy between two calls and asserts the answer changes.
+/// `admin.subject.list` reports what the policy file binds, end to end. That the
+/// answer follows a reload is owned by `wrapper_subjects_delegate_and_follow_the_snapshot`
+/// in `maknae-authz-basic`.
 #[tokio::test]
 async fn a_granted_subject_list_reports_the_policy_file_bindings() {
     let fx = Fixture::new("subjlist-grant");

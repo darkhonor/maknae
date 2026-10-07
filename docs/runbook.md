@@ -349,6 +349,13 @@ put a blocking NSS lookup back on the async worker — while `role=none` means t
 PDP resolved no role, or the record carries no decision at all (a connection is
 not a decision). Do not read one as the other.
 
+**Reading `rule` (#489).** A decision made by a rule in `authz.yaml` carries a
+`rule` block: `{"node":<n>,"section":"<path>#<section>"}`, for example
+`/etc/maknae/authz.yaml#permissions` for a path entry or
+`/etc/maknae/authz.yaml#roles.admin` for a role grant. It names the rule's node in
+the compiled policy and the section that declared it. A decision no rule made (a
+structural role decision such as liveness, or deny-by-default) has no `rule` block.
+
 **macOS: a `DEGRADED` mirror line means "read the JSONL" (#275/#273).** The
 unified log delivers one line and drops anything past 1015 bytes. With identity
 on the record the widest `session.prompt` records exceed that — measured at
@@ -439,6 +446,8 @@ destinations:                # #172: per-role egress allowlist for session.promp
   '_maknae-egress' does not exist on this host` — the package creates the account; on a
   source-built host create it (`packaging/common/maknae.sysusers`) before authorizing a
   provider.
+- **When an edit applies.** `maknaed` decides from a snapshot of `authz.yaml` compiled at
+  start; an edit applies at the next [reload](#reload-the-policy) or restart.
 
 ### What it proves
 
@@ -457,15 +466,16 @@ destinations:                # #172: per-role egress allowlist for session.promp
 - **Per-request AUTHORIZATION (#77)** — the DECISION half: every admitted request is
   decided by the PDP — the `Composition` of `maknae-authz-basic` and the
   classification-ceiling operand, behind the `maknae-security` seam (#148/#154) —
-  policy re-read per request. `maknae read ~/some-file` returns bytes under `Read(~/**)`
+  from a snapshot of `authz.yaml` compiled at start and at each reload (#489).
+  `maknae read ~/some-file` returns bytes under `Read(~/**)`
   (the kernel decides; the CLI reads under your credentials);
   `maknae read ~/.ssh/id_rsa` is DENIED by the shipped deny list — wire says
-  `not authorized`, the trail says which pattern and which object. Re-roling or
-  removing an identity ALREADY KNOWN at boot bites on the NEXT request, no
-  restart (containment). Introducing a brand-NEW username is restart-scoped by
-  design (#85 §3, zero per-request NSS): until the restart, a policy naming an
-  unresolvable identity makes every decision Indeterminate → deny — fail
-  closed, recover by restarting (or reverting the edit); #84's reload lifts this.
+  `not authorized`, the trail says which pattern and which object, and the record's
+  `rule` block names the policy section that decided it. A policy edit — re-roling or
+  removing an identity, or adding a new username — applies at the next
+  [reload](#reload-the-policy) or restart, never on the next request. A reload resolves
+  every username on the host the way a start does, and refuses (keeping the running
+  policy) when one has no account; no lookup happens per request (#85 §3).
 - **AU-3 audit lines** — every connection and every request produces a durable,
   canonically-ordered JSONL record (§6 above) BEFORE the daemon released a response —
   the fail-closed audit-then-respond ordering is not just a code comment, it's
@@ -599,7 +609,7 @@ It refuses while any file carries the key, whether `maknae.yaml` or a `config.d/
 
 ### 3c. More than one user
 
-Enroll writes `~/.maknae` only for the account that ran it. To give another local account the agent, follow [first-provider step 4a](first-provider.md#4a-add-another-local-user): it adds the account to the `maknae` group, copies your CLI configuration to it, binds it in `authz.yaml` and creates its Vault user. The consequence for you: once `authz.yaml` has a `bindings:` block, only the names it lists have a role, so the enrolled administrator must be listed under `admin` too, and step 7's grant then belongs under each bound role; restart `maknaed` after adding a name. A second user's file actions are confined to their own home, resolved per request.
+Enroll writes `~/.maknae` only for the account that ran it. To give another local account the agent, follow [first-provider step 4a](first-provider.md#4a-add-another-local-user): it adds the account to the `maknae` group, copies your CLI configuration to it, binds it in `authz.yaml` and creates its Vault user. The consequence for you: once `authz.yaml` has a `bindings:` block, only the names it lists have a role, so the enrolled administrator must be listed under `admin` too, and step 7's grant then belongs under each bound role; [reload](#reload-the-policy) `maknaed` after adding a name. A second user's file actions are confined to their own home, resolved per request.
 
 ### 4. Check the deputy's bounds
 
@@ -650,7 +660,7 @@ As yourself, not root, store your own API key in Vault under your own login: [fi
 
 ### 7. Grant the prompt
 
-Append to `/etc/maknae/authz.yaml`. `tee -a` keeps its owner, mode and label. The policy is re-read on every request, so no restart is needed:
+Append to `/etc/maknae/authz.yaml`. `tee -a` keeps its owner, mode and label. Step 9's restart applies it; a daemon that is already serving applies it at the next reload, `sudo systemctl reload maknaed` ([Reload the policy](#reload-the-policy)):
 
 ```bash
 sudo tee -a /etc/maknae/authz.yaml >/dev/null <<'EOF'
@@ -868,6 +878,47 @@ With enroll's defaults and the subpath `openai`, the path is `maknae-kv/metadata
 
 ---
 
+## Reload the policy
+
+`maknaed` decides every request from a snapshot of `/etc/maknae/authz.yaml` compiled when it starts. An edit to the file changes nothing until you reload the daemon or restart it:
+
+```bash
+sudo systemctl reload maknaed                          # Linux
+sudo launchctl kill SIGHUP system/io.maknae.maknaed    # macOS
+```
+
+Both send `SIGHUP`, as does `kill -HUP <pid>` for a daemon started by hand. The command returns before the reload finishes, so read the result in the trail.
+
+- **What a reload reads.** `authz.yaml` only. The principal, the classification system and ceiling, the transport, the audit configuration and the providers are read at start, and a change to any of them needs a restart.
+- **All or nothing.** A reload loads and validates the whole file and resolves every username in `bindings:` on the host, as a start does, so a new username needs only a reload. If anything fails (the file does not parse or validate, or a name has no account on the host), the reload is refused: the running policy stands and the store is unchanged. The journal (`journalctl -u maknaed`; on macOS `/usr/local/var/log/maknae/maknaed.err`) says `maknaed: reload refused: <cause>; the previous policy stands`. An invalid `authz.yaml` at start still refuses to start, with exit 3.
+- **One at a time.** Reloads run in turn. Signals that arrive while one runs produce one more reload, and a `SIGHUP` sent while the daemon is still starting is applied once it serves.
+- **Stopping.** A graceful stop abandons a reload that is still loading the file, recorded as `reload refused: shutdown`, and waits for one that is already writing the store.
+
+**What the trail shows.** Each reload is its own session, and its records carry `event:"reload"`, so a query that selects `event=="boot"` does not see them. In order:
+
+| Record | Shape |
+|---|---|
+| Intent | `action:"graph.reload"`, `result:"permit"`, reason `intent recorded (SIGHUP)`, `graph.anchor:"reloading"` |
+| Store transition (only when the bindings changed) | `action:"graph.transition"`, reason `intent recorded (root-file)`, at the next store revision; then `action:"graph.checkpoint"`, reason `transitioned`, with that revision and the new store's `ciphertext_sha256` |
+| Outcome, applied | `action:"graph.reload"`, `result:"permit"`, posture `authorized`, reason `reload applied: revision <n>; identity persisted` (or `identity unchanged`), `graph.anchor:"reloaded"` |
+| Outcome, refused | `action:"graph.reload"`, `result:"deny"`, posture `unavailable`, reason `reload refused: <cause>`, where the cause starts `policy load:`, `compile:`, `persist:` or `audit append failed:`, or is `shutdown`; `graph.anchor:"reload-refused"` |
+
+```bash
+sudo jq -c 'select(.action=="graph.reload") | {ts, session_id, result: .outcome.result, reason: .outcome.reason}' /var/log/maknae/audit.jsonl | tail -n 2
+```
+
+If the intent itself cannot be appended, nothing is loaded and no outcome is written; the journal names the audit failure.
+
+**`maknae status`** prints `kernel graph: revision <n> (<state>)`. The revision follows every reload that changed the bindings. The state is the result of this start's rollback check (`seeded`, `reseeded`, `verified`, `advanced` or `rollback-anchor-unavailable`) and stays the same until the next restart.
+
+**Records that look out of order.** Three cases leave the trail looking unusual. In each, the store and the trail agree once the next start has checked them.
+
+- **A `graph.transition` with no `graph.checkpoint` after it, then `reload refused: persist: …`.** The persist outcome is unknown, and the running policy is the previous one. Either the store had moved past the revision the reload planned (nothing was written), or the directory `fsync` failed after the new store was renamed into place (the new store is on disk). The next reload of the same edit rewrites that revision and checkpoints it. Otherwise the next start loads the store as `advanced` and, if `authz.yaml` differs from it, applies the file as a new transition.
+- **`reload applied: …; checkpoint append failed: <cause>`.** The new policy is in force and the store holds it, but the trail has no checkpoint for it; the next start reports `advanced`.
+- **Reload records after the stop record.** When `maknaed` exits because its credential supervisor stopped, not on a graceful `SIGTERM`, a reload in flight can append its records, `reload refused: shutdown` included, after the stop record. They carry their own session id and match the store.
+
+---
+
 ## The kernel graph store refuses to start
 
 `maknaed` keeps its enforcement state in an encrypted store, `kernel.graph`, in its state directory: `/var/lib/maknae` on Linux, `/usr/local/var/db/maknae/state` on macOS. Each start checks the store against the latest `graph.checkpoint` record in the audit trail, and refuses to start when the store cannot be trusted. The refusal goes to the journal (`journalctl -u maknaed`) on Linux or to `/usr/local/var/log/maknae/maknaed.err` on macOS, as a first line naming the cause and, for every graph refusal, a second line naming the next step:
@@ -904,12 +955,24 @@ In the table, `<dir>` is the state directory. Each first line starts `maknaed: r
 | Audit trail unreadable | `kernel graph store: graph store audit failed: <cause>` | `the audit trail anchors the graph store; check that the audit file is readable` | 5 | Check `/var/log/maknae/audit.jsonl`. |
 | Audit append failure | `the boot graph record was not durably appended: <cause>`, or the same with `graph reseed` or `graph rejected-store` for `graph` | none | 1 | A boot record could not be written to the audit trail. Check the audit file and its file system. |
 | No key | `` kernel graph key: no kernel graph key (<detail>): run `sudo maknae enroll` `` | `` run `sudo maknae enroll` to create the kernel graph key `` | 5 | Run `sudo maknae enroll` ([upgrading](upgrading.md#kernel-graph-store-488)), then restart. On Linux systemd refuses the unit first, with `status=243/CREDENTIALS`. |
+| Forged vocabulary | `kernel graph store: graph store vocabulary refused: <cause>`, where `<cause>` is, for example, `compiled nodes differ from the digest they claim` or `the stored digest does not cover the stored compiled nodes` | as for rolled back | 5 | The store's role vocabulary does not match the digest it records, which an upgrade never produces. Investigate, then reseed. A store from an older binary is [migrated](#upgrades-migrate-the-store), not refused. |
+| Identity layer does not build | `kernel graph store: the kernel identity layer does not build: <cause>` | `the identity layer is built from the bindings section of authz.yaml in the configuration directory (/etc/maknae/authz.yaml by default); correct it, then restart; do not reseed` | 5 | Correct `bindings:` in `authz.yaml` and restart. |
 | Malformed key | `kernel graph key: the kernel graph key is malformed (<why>)` | `` replace the key as the runbook's "Replace a malformed key" says: remove it, run `sudo maknae enroll`, then `sudo maknae reseed` `` | 5 | [Replace the key](#replace-a-malformed-key). |
 | Key unreadable | `kernel graph key: <cause>` | `` the kernel graph key could not be read; check the credential `sudo maknae enroll` created (enroll never replaces an existing key) `` | 5 | Check the credential's ownership and mode, or the keychain item. |
 
+### Upgrades migrate the store
+
+The store records a digest of the role vocabulary it was written with. A start that finds a store whose digest is consistent with its own contents but differs from the binary's migrates the store in place. That happens on the first start after an upgrade that changes the vocabulary (including the first start over a store written before #489) and after a change of classification system (`core.handling.policy`), since the compiled roles carry that system's lowest level. After the start's usual `graph.checkpoint`, the trail shows:
+
+- a `graph.migrate` record, reason `intent recorded (vocabulary <old digest, or none> -> <new digest>; unbound: [<uids>])`, at the next revision. `unbound` lists the uids of bindings to a role the new binary no longer has; those bindings are dropped;
+- a `graph.checkpoint`, reason `migrated`, at that revision;
+- if `authz.yaml`'s bindings differ from the migrated store, a `graph.transition` (`root-file`) and a `graph.checkpoint` (`transitioned`) at the revision after.
+
+No action is needed. `maknae status` reports the new revision.
+
 ### Reseed
 
-A reseed replaces the store with a fresh, empty one. **It drops any containment that was never synced back to `bindings.yaml`. Until sync back (#491) is built, that is all of it.**
+A reseed replaces the store with a fresh one, seeded from the bindings in `/etc/maknae/authz.yaml`. **It drops any containment that was never synced back to `bindings.yaml`.** Until live containment (#165) and sync back (#491) are built, every containment comes from `authz.yaml`, so the reseed restores it.
 
 ```bash
 sudo maknae reseed

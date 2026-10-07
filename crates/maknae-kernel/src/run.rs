@@ -1208,7 +1208,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                         .map(KernelGraphStatus::revision),
                     kernel_graph_anchor: kernel_graph.as_ref().as_ref().map(|k| k.anchor.clone()),
                 }),
-                // LIVE, via the seam. `None` means the backend cannot
+                // The current snapshot, via the seam. `None` means the backend cannot
                 // enumerate, and that is reported as unavailable below --
                 // never as an empty list, which would claim "no bindings
                 // exist" and is a different, dangerous answer.

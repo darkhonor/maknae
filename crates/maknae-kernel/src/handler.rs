@@ -38,8 +38,8 @@ pub enum Dispatch {
     ConfigShowRequested,
     /// The peer asked for runtime posture. No datum: the daemon's own state.
     StatusRequested,
-    /// The peer asked to enumerate role bindings. No datum; the answer is read
-    /// LIVE from the PDP, never from a boot snapshot.
+    /// The peer asked to enumerate role bindings. No datum; the answer is the
+    /// PDP's current snapshot, never a boot copy.
     SubjectListRequested,
     /// The peer asked to send content to the provider its admitted choice names.
     PromptRequested,
