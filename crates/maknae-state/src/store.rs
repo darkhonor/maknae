@@ -153,23 +153,31 @@ impl StateDir {
         }
     }
 
-    /// `None` when the name is free; `max_bytes: 0` avoids reading it.
-    fn taken(&self, name: &str) -> Option<String> {
-        let probe = TargetRequired {
+    fn preserve(&self, name: &str, bytes: &[u8]) -> Result<String, StoreError> {
+        let copy = TargetRequired {
             owner: Some(self.owner),
             mode_mask: Some(0o077),
             nlink_exactly_one: true,
             regular_file: true,
-            max_bytes: Some(0),
+            max_bytes: Some(MAX_STORE_BYTES),
         };
-        match self.anchor.read(Path::new(name), None, probe) {
+        let cause = match self.anchor.read(Path::new(name), None, copy) {
             Err(IoError::Io {
                 kind: IoKind::NotFound,
                 ..
-            }) => None,
-            Ok(_) | Err(IoError::TargetTooLarge { .. }) => Some("already preserved".to_string()),
-            Err(e) => Some(format!("name in use: {e}; not overwritten")),
-        }
+            }) => {
+                self.publish(name, bytes)?;
+                return Ok(name.to_string());
+            }
+            Ok(existing) if existing.value[..] == bytes[..] => {
+                return Ok(format!("{name} (already preserved)"));
+            }
+            Ok(_) => "it holds other bytes".to_string(),
+            Err(e) => e.to_string(),
+        };
+        Err(StoreError::StoreFileRefused(format!(
+            "the rejected-copy name {name} is in use and does not hold this store ({cause}); move it aside, then restart"
+        )))
     }
 
     fn read_store(&self) -> Result<Option<Zeroizing<Vec<u8>>>, IoError> {
@@ -364,13 +372,7 @@ async fn seed(
                 .map(|b| format!("{b:02x}"))
                 .collect();
             let name = format!("{REJECTED_PREFIX}{now_unix}.{tag}");
-            match dir.taken(&name) {
-                Some(why) => Some(format!("{name} ({why})")),
-                None => {
-                    dir.publish(&name, &bytes)?;
-                    Some(name)
-                }
-            }
+            Some(dir.preserve(&name, &bytes)?)
         }
     };
     let graph = GraphBuilder::new(GraphSpace::Kernel, revision)

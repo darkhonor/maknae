@@ -1035,14 +1035,36 @@ async fn a_second_reseed_in_the_same_second_keeps_the_first_rejected_copy() {
     );
 }
 
+async fn refused_by_occupied_name(fx: &Fixture, k: &WrappingKey, old: &[u8], name: &str) {
+    let r = run(&fx.dir(), k, None).await.0;
+    match r {
+        Err(e @ StoreError::StoreFileRefused(_)) => {
+            assert_eq!(remedy(&e), Remedy::CheckStoreFile);
+            let StoreError::StoreFileRefused(why) = e else {
+                unreachable!()
+            };
+            assert!(
+                why.starts_with(&format!(
+                    "the rejected-copy name {name} is in use and does not hold this store ("
+                )),
+                "{why}"
+            );
+            assert!(why.ends_with("); move it aside, then restart"), "{why}");
+        }
+        other => panic!("unexpected result {other:?}"),
+    }
+    assert_eq!(fx.store(), old);
+    assert!(fx.exists(MARKER_FILE));
+}
+
 #[tokio::test]
-async fn an_existing_rejected_name_is_never_replaced() {
+async fn an_identical_copy_at_the_rejected_name_counts_as_preserved() {
     let fx = Fixture::new();
     let k = key(1);
     let old = sealed_graph(4, &k);
     fx.write(STORE_FILE, &old, 0o600);
     let name = rejected_name(&old);
-    fx.write(&name, b"first preserved copy", 0o600);
+    fx.write(&name, &old, 0o600);
     fx.mark(0o644);
     let r = run(&fx.dir(), &k, None).await.0.unwrap();
     assert_eq!(r.revision, 5);
@@ -1053,13 +1075,28 @@ async fn an_existing_rejected_name_is_never_replaced() {
             rejected: Some(format!("{name} (already preserved)"))
         }
     );
-    assert_eq!(fs::read(fx.file(&name)).unwrap(), b"first preserved copy");
+    assert_eq!(fs::read(fx.file(&name)).unwrap(), old);
     assert_eq!(fx.rejected(), vec![name]);
     assert_eq!(revision_of(&fx.store(), &k), 5);
+    assert!(!fx.exists(MARKER_FILE));
 }
 
 #[tokio::test]
-async fn an_empty_file_at_the_rejected_name_is_never_replaced() {
+async fn a_rejected_name_holding_other_bytes_refuses_the_reseed() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let old = sealed_graph(4, &k);
+    fx.write(STORE_FILE, &old, 0o600);
+    let name = rejected_name(&old);
+    fx.write(&name, b"first preserved copy", 0o600);
+    fx.mark(0o644);
+    refused_by_occupied_name(&fx, &k, &old, &name).await;
+    assert_eq!(fs::read(fx.file(&name)).unwrap(), b"first preserved copy");
+    assert_eq!(fx.rejected(), vec![name]);
+}
+
+#[tokio::test]
+async fn an_empty_file_at_the_rejected_name_refuses_the_reseed() {
     let fx = Fixture::new();
     let k = key(1);
     let old = sealed_graph(4, &k);
@@ -1067,19 +1104,12 @@ async fn an_empty_file_at_the_rejected_name_is_never_replaced() {
     let name = rejected_name(&old);
     fx.write(&name, b"", 0o600);
     fx.mark(0o644);
-    let r = run(&fx.dir(), &k, None).await.0.unwrap();
-    assert_eq!(
-        r.outcome,
-        BootOutcome::Seeded {
-            authorized: true,
-            rejected: Some(format!("{name} (already preserved)"))
-        }
-    );
+    refused_by_occupied_name(&fx, &k, &old, &name).await;
     assert!(fs::read(fx.file(&name)).unwrap().is_empty());
 }
 
 #[tokio::test]
-async fn a_rejected_name_held_by_a_non_file_is_named_in_use_and_not_overwritten() {
+async fn a_rejected_name_held_by_a_non_file_refuses_the_reseed() {
     let fx = Fixture::new();
     let k = key(1);
     let old = sealed_graph(4, &k);
@@ -1087,18 +1117,22 @@ async fn a_rejected_name_held_by_a_non_file_is_named_in_use_and_not_overwritten(
     let name = rejected_name(&old);
     fs::create_dir(fx.file(&name)).unwrap();
     fx.mark(0o644);
-    let r = run(&fx.dir(), &k, None).await.0.unwrap();
-    match r.outcome {
-        BootOutcome::Seeded {
-            authorized: true,
-            rejected: Some(why),
-        } => {
-            assert!(why.starts_with(&format!("{name} (name in use: ")), "{why}");
-            assert!(why.ends_with("; not overwritten)"), "{why}");
-        }
-        other => panic!("unexpected outcome {other:?}"),
-    }
+    refused_by_occupied_name(&fx, &k, &old, &name).await;
     assert!(fx.file(&name).is_dir());
+    assert_eq!(fs::read_dir(fx.file(&name)).unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn an_unreadable_copy_at_the_rejected_name_refuses_the_reseed() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let old = sealed_graph(4, &k);
+    fx.write(STORE_FILE, &old, 0o600);
+    let name = rejected_name(&old);
+    fx.write(&name, &old, 0o644);
+    fx.mark(0o644);
+    refused_by_occupied_name(&fx, &k, &old, &name).await;
+    assert_eq!(fs::read(fx.file(&name)).unwrap(), old);
 }
 
 #[test]
