@@ -23,6 +23,10 @@ use maknae_security::{Authorizer, Obligation, Request, Verdict};
 pub struct AlwaysPermit;
 
 impl Authorizer for AlwaysPermit {
+    fn decide_cited_all(&self, reqs: &[maknae_security::Request]) -> Vec<maknae_security::Decided> {
+        maknae_security::decide_each_cited(self, reqs)
+    }
+
     fn decide(&self, _r: &Request) -> Verdict {
         Verdict::Permit {
             obligations: vec![Obligation {
@@ -39,6 +43,10 @@ impl Authorizer for AlwaysPermit {
 pub struct SleepAuthorizer(pub Duration);
 
 impl Authorizer for SleepAuthorizer {
+    fn decide_cited_all(&self, reqs: &[maknae_security::Request]) -> Vec<maknae_security::Decided> {
+        maknae_security::decide_each_cited(self, reqs)
+    }
+
     fn decide(&self, _r: &Request) -> Verdict {
         std::thread::sleep(self.0);
         AlwaysPermit.decide(_r)
@@ -49,6 +57,10 @@ impl Authorizer for SleepAuthorizer {
 pub struct HostileObligation;
 
 impl Authorizer for HostileObligation {
+    fn decide_cited_all(&self, reqs: &[maknae_security::Request]) -> Vec<maknae_security::Decided> {
+        maknae_security::decide_each_cited(self, reqs)
+    }
+
     fn decide(&self, _r: &Request) -> Verdict {
         Verdict::Permit {
             obligations: vec![Obligation {
@@ -66,6 +78,31 @@ impl Authorizer for HostileObligation {
                 node: 1,
                 key: "rule:permissions:allow:0".into(),
                 section: "hostile#permissions".into(),
+            }),
+        }
+    }
+}
+
+/// Permits with the audit obligation on a cited rule, and cannot enumerate.
+pub struct CitingPermit;
+
+impl Authorizer for CitingPermit {
+    fn decide_cited_all(&self, reqs: &[maknae_security::Request]) -> Vec<maknae_security::Decided> {
+        maknae_security::decide_each_cited(self, reqs)
+    }
+
+    fn decide(&self, r: &Request) -> Verdict {
+        AlwaysPermit.decide(r)
+    }
+
+    fn decide_cited(&self, r: &Request) -> maknae_security::Decided {
+        maknae_security::Decided {
+            verdict: self.decide(r),
+            role: Some("admin"),
+            rule: Some(maknae_security::RuleCitation {
+                node: 7,
+                key: "rule:roles.admin:allow:0".into(),
+                section: "citing#roles.admin".into(),
             }),
         }
     }
@@ -138,6 +175,10 @@ pub fn permissive_authz() -> (Arc<AlwaysPermit>, Duration) {
 pub struct PanickingName;
 
 impl Authorizer for PanickingName {
+    fn decide_cited_all(&self, reqs: &[maknae_security::Request]) -> Vec<maknae_security::Decided> {
+        maknae_security::decide_each_cited(self, reqs)
+    }
+
     fn decide(&self, _r: &maknae_security::Request) -> Verdict {
         Verdict::Permit {
             obligations: vec![maknae_security::Obligation {

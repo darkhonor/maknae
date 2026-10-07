@@ -44,6 +44,12 @@ impl From<Decided> for (Verdict, Option<&'static str>) {
     }
 }
 
+/// [`Authorizer::decide_cited_all`] for a backend with no replaceable state:
+/// [`Authorizer::decide_cited`] once per request, in order.
+pub fn decide_each_cited<A: Authorizer + ?Sized>(a: &A, reqs: &[Request]) -> Vec<Decided> {
+    reqs.iter().map(|r| a.decide_cited(r)).collect()
+}
+
 /// A policy decision point. Total: always returns a `Verdict`, never panics.
 pub trait Authorizer {
     fn decide(&self, req: &Request) -> Verdict;
@@ -86,12 +92,10 @@ pub trait Authorizer {
     }
 
     /// [`Authorizer::decide_cited`] for each request, in order, all from one
-    /// view of the policy: a reload cannot land between two of them. The
-    /// default is per-request, which is that for a backend with no replaceable
-    /// state; a wrapper that delegates `decide_cited` must delegate this too.
-    fn decide_cited_all(&self, reqs: &[Request]) -> Vec<Decided> {
-        reqs.iter().map(|r| self.decide_cited(r)).collect()
-    }
+    /// view of the policy: a reload cannot land between two of them. Required:
+    /// a backend with no replaceable state answers with [`decide_each_cited`],
+    /// and a wrapper delegates to what it wraps.
+    fn decide_cited_all(&self, reqs: &[Request]) -> Vec<Decided>;
 
     /// The bindings this PDP would resolve **right now**, for
     /// `admin.subject.list`.
@@ -142,7 +146,7 @@ mod tests {
     use crate::request::{Action, Context, Request, Resource, Subject};
     use crate::value::Attributes;
 
-    /// The DEFAULTS themselves. A backend that implements only `decide` must
+    /// The DEFAULTS themselves. A backend that implements only the required methods must
     /// get `None` and `unknown` -- and the values matter, not just the fact
     /// that a default exists.
     ///
@@ -156,6 +160,10 @@ mod tests {
     fn seam_defaults_are_cannot_enumerate_and_unknown() {
         struct OnlyDecides;
         impl Authorizer for OnlyDecides {
+            fn decide_cited_all(&self, reqs: &[crate::Request]) -> Vec<crate::Decided> {
+                crate::decide_each_cited(self, reqs)
+            }
+
             fn decide(&self, _: &Request) -> Verdict {
                 Verdict::NotApplicable { note: None }
             }
@@ -175,6 +183,10 @@ mod tests {
 
     struct Always(Verdict);
     impl Authorizer for Always {
+        fn decide_cited_all(&self, reqs: &[crate::Request]) -> Vec<crate::Decided> {
+            crate::decide_each_cited(self, reqs)
+        }
+
         fn decide(&self, _r: &Request) -> Verdict {
             self.0.clone()
         }
@@ -237,6 +249,10 @@ mod tests {
     fn decide_cited_defaults_to_the_role_reporting_answer_with_no_citation() {
         struct OnlyDecides;
         impl Authorizer for OnlyDecides {
+            fn decide_cited_all(&self, reqs: &[crate::Request]) -> Vec<crate::Decided> {
+                crate::decide_each_cited(self, reqs)
+            }
+
             fn decide(&self, _: &Request) -> Verdict {
                 Verdict::Deny {
                     reason: "only".into(),

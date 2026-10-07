@@ -214,6 +214,10 @@ impl CeilingAuthorizer {
 }
 
 impl Authorizer for CeilingAuthorizer {
+    fn decide_cited_all(&self, reqs: &[maknae_security::Request]) -> Vec<maknae_security::Decided> {
+        maknae_security::decide_each_cited(self, reqs)
+    }
+
     fn decide(&self, req: &Request) -> Verdict {
         decide_ceiling(self.policy, &self.ceiling, &req.action.0, label_of(req))
     }

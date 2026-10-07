@@ -1038,6 +1038,19 @@ mod tests {
             drop(released);
             self.pdp.decide_cited(request)
         }
+
+        fn decide_cited_all(
+            &self,
+            requests: &[maknae_security::Request],
+        ) -> Vec<maknae_security::Decided> {
+            let (lock, wake) = &*self.gate;
+            let mut released = lock.lock().unwrap();
+            while !*released {
+                released = wake.wait(released).unwrap();
+            }
+            drop(released);
+            self.pdp.decide_cited_all(requests)
+        }
     }
     struct Release(Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
     impl Drop for Release {

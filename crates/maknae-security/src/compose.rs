@@ -442,6 +442,10 @@ mod tests {
     fn guarded_seam_methods_convert_panic_to_the_fail_closed_answer() {
         struct Hostile;
         impl Authorizer for Hostile {
+            fn decide_cited_all(&self, reqs: &[crate::Request]) -> Vec<crate::Decided> {
+                crate::decide_each_cited(self, reqs)
+            }
+
             fn decide(&self, _: &Request) -> Verdict {
                 Verdict::NotApplicable { note: None }
             }
@@ -465,6 +469,10 @@ mod tests {
         // easiest wrong one to ship.
         struct Enumerating;
         impl Authorizer for Enumerating {
+            fn decide_cited_all(&self, reqs: &[crate::Request]) -> Vec<crate::Decided> {
+                crate::decide_each_cited(self, reqs)
+            }
+
             fn decide(&self, _: &Request) -> Verdict {
                 Verdict::NotApplicable { note: None }
             }
@@ -491,6 +499,10 @@ mod tests {
         // stripped at this guard, the choke point the kernel calls.
         struct Injecting;
         impl Authorizer for Injecting {
+            fn decide_cited_all(&self, reqs: &[crate::Request]) -> Vec<crate::Decided> {
+                crate::decide_each_cited(self, reqs)
+            }
+
             fn decide(&self, _: &Request) -> Verdict {
                 Verdict::NotApplicable { note: None }
             }
@@ -533,6 +545,10 @@ mod tests {
     fn composed_backend_name_lists_every_operand() {
         struct Named(&'static str);
         impl Authorizer for Named {
+            fn decide_cited_all(&self, reqs: &[crate::Request]) -> Vec<crate::Decided> {
+                crate::decide_each_cited(self, reqs)
+            }
+
             fn decide(&self, _: &Request) -> Verdict {
                 Verdict::NotApplicable { note: None }
             }
@@ -561,6 +577,10 @@ mod tests {
     fn a_backend_name_reaching_the_wire_is_bounded_and_sanitized() {
         struct Nasty(String);
         impl Authorizer for Nasty {
+            fn decide_cited_all(&self, reqs: &[crate::Request]) -> Vec<crate::Decided> {
+                crate::decide_each_cited(self, reqs)
+            }
+
             fn decide(&self, _: &Request) -> Verdict {
                 Verdict::NotApplicable { note: None }
             }
@@ -672,6 +692,10 @@ mod tests {
     fn a_panicking_operand_cannot_promote_another_list_to_sole_authority() {
         struct Hostile;
         impl Authorizer for Hostile {
+            fn decide_cited_all(&self, reqs: &[crate::Request]) -> Vec<crate::Decided> {
+                crate::decide_each_cited(self, reqs)
+            }
+
             fn decide(&self, _: &Request) -> Verdict {
                 Verdict::NotApplicable { note: None }
             }
@@ -681,6 +705,10 @@ mod tests {
         }
         struct Enumerates;
         impl Authorizer for Enumerates {
+            fn decide_cited_all(&self, reqs: &[crate::Request]) -> Vec<crate::Decided> {
+                crate::decide_each_cited(self, reqs)
+            }
+
             fn decide(&self, _: &Request) -> Verdict {
                 Verdict::NotApplicable { note: None }
             }
@@ -710,6 +738,10 @@ mod tests {
     fn composed_subjects_answers_only_when_exactly_one_operand_can() {
         struct Enum(Option<&'static str>);
         impl Authorizer for Enum {
+            fn decide_cited_all(&self, reqs: &[crate::Request]) -> Vec<crate::Decided> {
+                crate::decide_each_cited(self, reqs)
+            }
+
             fn decide(&self, _: &Request) -> Verdict {
                 Verdict::NotApplicable { note: None }
             }
@@ -882,6 +914,10 @@ mod tests {
 
     struct Fixed(Verdict);
     impl Authorizer for Fixed {
+        fn decide_cited_all(&self, reqs: &[crate::Request]) -> Vec<crate::Decided> {
+            crate::decide_each_cited(self, reqs)
+        }
+
         fn decide(&self, _r: &Request) -> Verdict {
             self.0.clone()
         }
@@ -926,6 +962,10 @@ mod tests {
 
     struct Panics;
     impl Authorizer for Panics {
+        fn decide_cited_all(&self, reqs: &[crate::Request]) -> Vec<crate::Decided> {
+            crate::decide_each_cited(self, reqs)
+        }
+
         fn decide(&self, _r: &Request) -> Verdict {
             panic!("hostile/buggy backend");
         }
@@ -962,6 +1002,10 @@ mod tests {
         // and this pins it as that function's `.0` so the two can never drift.
         struct Permits;
         impl Authorizer for Permits {
+            fn decide_cited_all(&self, reqs: &[crate::Request]) -> Vec<crate::Decided> {
+                crate::decide_each_cited(self, reqs)
+            }
+
             fn decide(&self, _: &Request) -> Verdict {
                 Verdict::Permit {
                     obligations: vec![],
@@ -970,6 +1014,10 @@ mod tests {
         }
         struct Denies;
         impl Authorizer for Denies {
+            fn decide_cited_all(&self, reqs: &[crate::Request]) -> Vec<crate::Decided> {
+                crate::decide_each_cited(self, reqs)
+            }
+
             fn decide(&self, _: &Request) -> Verdict {
                 Verdict::Deny {
                     reason: "ceiling".into(),
@@ -996,6 +1044,10 @@ mod tests {
         // that does not key on roles, a lie for a wrapper around one that does.
         struct WithRole;
         impl Authorizer for WithRole {
+            fn decide_cited_all(&self, reqs: &[crate::Request]) -> Vec<crate::Decided> {
+                crate::decide_each_cited(self, reqs)
+            }
+
             fn decide(&self, _: &Request) -> Verdict {
                 Verdict::Permit {
                     obligations: vec![],
@@ -1022,6 +1074,10 @@ mod tests {
         // operand cannot displace the role the baseline resolved (#275).
         struct WithRole(&'static str);
         impl Authorizer for WithRole {
+            fn decide_cited_all(&self, reqs: &[crate::Request]) -> Vec<crate::Decided> {
+                crate::decide_each_cited(self, reqs)
+            }
+
             fn decide(&self, _: &Request) -> Verdict {
                 Verdict::Permit {
                     obligations: vec![],
@@ -1041,6 +1097,10 @@ mod tests {
     fn an_operand_that_reports_no_role_does_not_erase_one_already_found() {
         struct WithRole;
         impl Authorizer for WithRole {
+            fn decide_cited_all(&self, reqs: &[crate::Request]) -> Vec<crate::Decided> {
+                crate::decide_each_cited(self, reqs)
+            }
+
             fn decide(&self, _: &Request) -> Verdict {
                 Verdict::Permit {
                     obligations: vec![],
@@ -1053,6 +1113,10 @@ mod tests {
         // The ceiling operand shape: decides, reports no role (trait default).
         struct Silent;
         impl Authorizer for Silent {
+            fn decide_cited_all(&self, reqs: &[crate::Request]) -> Vec<crate::Decided> {
+                crate::decide_each_cited(self, reqs)
+            }
+
             fn decide(&self, _: &Request) -> Verdict {
                 Verdict::Permit {
                     obligations: vec![],
@@ -1069,6 +1133,10 @@ mod tests {
         // the path production now takes.
         struct Denies;
         impl Authorizer for Denies {
+            fn decide_cited_all(&self, reqs: &[crate::Request]) -> Vec<crate::Decided> {
+                crate::decide_each_cited(self, reqs)
+            }
+
             fn decide(&self, _: &Request) -> Verdict {
                 Verdict::Deny {
                     reason: "ceiling".into(),
@@ -1077,6 +1145,10 @@ mod tests {
         }
         struct Permits;
         impl Authorizer for Permits {
+            fn decide_cited_all(&self, reqs: &[crate::Request]) -> Vec<crate::Decided> {
+                crate::decide_each_cited(self, reqs)
+            }
+
             fn decide(&self, _: &Request) -> Verdict {
                 Verdict::Permit {
                     obligations: vec![],
@@ -1092,6 +1164,10 @@ mod tests {
 
     struct Cites(Verdict, Option<&'static str>, Option<u64>);
     impl Authorizer for Cites {
+        fn decide_cited_all(&self, reqs: &[crate::Request]) -> Vec<crate::Decided> {
+            crate::decide_each_cited(self, reqs)
+        }
+
         fn decide(&self, _: &Request) -> Verdict {
             self.0.clone()
         }
@@ -1228,6 +1304,10 @@ mod tests {
 
     struct ByAction;
     impl Authorizer for ByAction {
+        fn decide_cited_all(&self, reqs: &[crate::Request]) -> Vec<crate::Decided> {
+            crate::decide_each_cited(self, reqs)
+        }
+
         fn decide(&self, r: &Request) -> Verdict {
             if r.action.0 == "deny" {
                 Verdict::Deny {
@@ -1298,6 +1378,10 @@ mod tests {
     fn a_panicking_operand_yields_indeterminate_and_no_role() {
         struct Boom;
         impl Authorizer for Boom {
+            fn decide_cited_all(&self, reqs: &[crate::Request]) -> Vec<crate::Decided> {
+                crate::decide_each_cited(self, reqs)
+            }
+
             fn decide(&self, _: &Request) -> Verdict {
                 panic!("hostile operand")
             }

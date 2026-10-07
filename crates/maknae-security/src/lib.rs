@@ -18,7 +18,7 @@ mod request;
 mod value;
 mod verdict;
 
-pub use authorizer::{Authorizer, Decided, RuleCitation, SubjectBinding};
+pub use authorizer::{decide_each_cited, Authorizer, Decided, RuleCitation, SubjectBinding};
 pub use classification::{first_token, ClassificationPolicy, Level};
 pub use compose::{
     combine, compose_backend_name, compose_decide, compose_decide_cited, compose_decide_cited_all,

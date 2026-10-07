@@ -114,8 +114,17 @@ pub struct BasicAuthorizer {
     path: PathBuf,
     digest: fn(&[u8]) -> [u8; 32],
     snapshot: RwLock<Arc<Snapshot>>,
-    #[cfg(test)]
-    evaluation_gate: Option<Arc<tests::EvaluationGate>>,
+    #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
+    evaluation_gate: Option<Arc<EvaluationGate>>,
+}
+
+/// Parks each evaluation after it has decided on its snapshot and before it
+/// cites: `arrived`, then `release`.
+#[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
+#[derive(Debug)]
+pub struct EvaluationGate {
+    pub arrived: std::sync::Barrier,
+    pub release: std::sync::Barrier,
 }
 
 impl BasicAuthorizer {
@@ -130,7 +139,7 @@ impl BasicAuthorizer {
             path,
             digest,
             snapshot: RwLock::new(snapshot),
-            #[cfg(test)]
+            #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
             evaluation_gate: None,
         }
     }
@@ -159,7 +168,7 @@ impl BasicAuthorizer {
         req: &maknae_security::Request,
     ) -> maknae_security::Decided {
         let d = decide::decide_loaded_cited(snap.loaded(), &self.principal, req);
-        #[cfg(test)]
+        #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
         if let Some(gate) = &self.evaluation_gate {
             gate.arrived.wait();
             gate.release.wait();
@@ -640,6 +649,11 @@ impl HermeticAuthorizer {
     pub fn digest(&self) -> fn(&[u8]) -> [u8; 32] {
         self.inner.digest
     }
+
+    /// Every later evaluation parks on `gate`.
+    pub fn park_evaluations(&mut self, gate: Arc<EvaluationGate>) {
+        self.inner.evaluation_gate = Some(gate);
+    }
 }
 
 /// Every seam method DELEGATES: a default here would make every kernel e2e
@@ -769,13 +783,6 @@ mod tests {
     use maknae_security::{
         Action, AttrValue, Attributes, Authorizer, Context, Resource, Subject, Verdict,
     };
-
-    /// Parks a decision after it has evaluated on the snapshot it cloned out.
-    #[derive(Debug)]
-    pub(super) struct EvaluationGate {
-        pub(super) arrived: std::sync::Barrier,
-        pub(super) release: std::sync::Barrier,
-    }
 
     const LABEL: &str = "UNCLASSIFIED";
     const PATH: &str = "/etc/maknae/authz.yaml";
@@ -1043,10 +1050,21 @@ mod tests {
         assert_eq!(Baseline::digest(&auth)(b"maknae"), test_digest(b"maknae"));
         let held = Baseline::snapshot(&auth);
         assert!(Arc::ptr_eq(&held, &auth.snapshot()));
+        let folded = |body: &str| {
+            let lines: String = source_with(body, &[("root", 0)])
+                .section_digests(test_digest)
+                .iter()
+                .map(|(k, d)| format!("{k}={}\n", maknae_graph::identity::hex(d)))
+                .collect();
+            maknae_graph::identity::hex(&test_digest(lines.as_bytes()))
+        };
+        assert_eq!(Baseline::policy_sha256(&auth), folded(ADMIN_ROOT));
         let next = compiled(&source_with(ADVERSARY_ROOT, &[("root", 0)]));
         Baseline::install(&auth, next.clone());
         assert!(Arc::ptr_eq(&auth.snapshot(), &next));
         assert_eq!(auth.decide(&whoami(0)), contained());
+        assert_eq!(Baseline::policy_sha256(&auth), folded(ADVERSARY_ROOT));
+        assert_ne!(folded(ADVERSARY_ROOT), folded(ADMIN_ROOT));
     }
 
     /// The production `load_source` sits behind the root-owned door.
@@ -1162,20 +1180,40 @@ mod tests {
     }
 
     /// A decision parked after cloning its snapshot out must not block an
-    /// install: the lock is never held across evaluation.
+    /// install, and it cites from the snapshot it decided on.
     #[test]
     fn decide_never_holds_the_lock_while_evaluating() {
-        let mut auth = authorizer_over(ADMIN_ROOT, &[("root", 0)]);
+        let mut auth = BasicAuthorizer::from_snapshot(
+            principal(),
+            PATH.into(),
+            test_digest,
+            compiled(&source_with(SHIPPED, &[])),
+        );
+        let before = auth.decide_cited(&ssh_read(501));
+        assert_eq!(
+            before.rule.as_ref().expect("a path deny cites").key,
+            "rule:permissions:deny:0"
+        );
+        let next = compiled(&source_with(
+            &SHIPPED.replacen("  deny:\n", "  deny:\n    - \"Read(~/.cache/**)\"\n", 1),
+            &[],
+        ));
+        let after =
+            BasicAuthorizer::from_snapshot(principal(), PATH.into(), test_digest, next.clone())
+                .decide_cited(&ssh_read(501));
+        assert_eq!(after.verdict, before.verdict);
+        let (old, new) = (before.rule.clone().unwrap(), after.rule.unwrap());
+        assert_ne!(old.key, new.key);
+        assert_ne!(old.node, new.node);
         let gate = Arc::new(EvaluationGate {
             arrived: std::sync::Barrier::new(2),
             release: std::sync::Barrier::new(2),
         });
         auth.evaluation_gate = Some(gate.clone());
         let auth = Arc::new(auth);
-        let next = compiled(&source_with(ADVERSARY_ROOT, &[("root", 0)]));
         let parked = {
             let auth = auth.clone();
-            std::thread::spawn(move || auth.decide(&whoami(0)))
+            std::thread::spawn(move || auth.decide_cited(&ssh_read(501)))
         };
         let (arrived_tx, arrived_rx) = std::sync::mpsc::channel();
         {
@@ -1207,8 +1245,8 @@ mod tests {
         gate.release.wait();
         assert_eq!(
             parked.join().unwrap(),
-            audit_permit(),
-            "the parked decision finishes on the snapshot it cloned"
+            before,
+            "the parked decision cites from the snapshot it decided on"
         );
     }
 
@@ -1816,7 +1854,17 @@ mod tests {
             assert_eq!(auth.decide(&whoami(0)), audit_permit());
             let d = auth.decide_cited(&super::ssh_read(0));
             assert_eq!(d.role, Some("admin"));
-            assert!(d.rule.expect("cited").section.ends_with("#permissions"));
+            assert!(d
+                .rule
+                .clone()
+                .expect("cited")
+                .section
+                .ends_with("#permissions"));
+            let batch = [whoami(0), super::ssh_read(0)];
+            assert_eq!(
+                auth.decide_cited_all(&batch),
+                vec![auth.inner.decide_cited(&batch[0]), d]
+            );
             assert_eq!(auth.backend_name(), "maknae-authz-basic");
             assert_eq!(
                 auth.subjects().expect("an explicit block")[0].members,
@@ -1960,6 +2008,66 @@ mod tests {
             Baseline::install(&auth, next.clone());
             assert!(Arc::ptr_eq(&auth.inner.snapshot(), &next));
             assert_eq!(auth.decide(&whoami(0)), contained());
+        }
+
+        #[test]
+        fn park_evaluations_parks_every_later_evaluation() {
+            let fx = Fixture::new("park");
+            let mut auth = fx.authorizer("admin");
+            let gate = Arc::new(EvaluationGate {
+                arrived: std::sync::Barrier::new(2),
+                release: std::sync::Barrier::new(2),
+            });
+            auth.park_evaluations(gate.clone());
+            let auth = Arc::new(auth);
+            let parked = {
+                let auth = auth.clone();
+                std::thread::spawn(move || auth.decide(&whoami(0)))
+            };
+            let (tx, rx) = std::sync::mpsc::channel();
+            {
+                let gate = gate.clone();
+                std::thread::spawn(move || {
+                    gate.arrived.wait();
+                    let _ = tx.send(());
+                });
+            }
+            assert!(
+                rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok(),
+                "the evaluation did not park"
+            );
+            gate.release.wait();
+            assert_eq!(parked.join().unwrap(), audit_permit());
+        }
+
+        #[test]
+        fn the_hermetic_batch_reads_one_snapshot() {
+            let fx = Fixture::new("batch");
+            let mut auth = fx.authorizer("admin");
+            let gate = Arc::new(EvaluationGate {
+                arrived: std::sync::Barrier::new(2),
+                release: std::sync::Barrier::new(2),
+            });
+            auth.park_evaluations(gate.clone());
+            write_policy(&fx.policy(), "adversary");
+            let next = auth.compile_from_file().unwrap();
+            let auth = Arc::new(auth);
+            let batch = {
+                let auth = auth.clone();
+                std::thread::spawn(move || auth.decide_cited_all(&[whoami(0), whoami(0)]))
+            };
+            gate.arrived.wait();
+            Baseline::install(&*auth, next);
+            gate.release.wait();
+            gate.arrived.wait();
+            gate.release.wait();
+            let verdicts: Vec<_> = batch
+                .join()
+                .unwrap()
+                .into_iter()
+                .map(|d| d.verdict)
+                .collect();
+            assert_eq!(verdicts, vec![audit_permit(), audit_permit()]);
         }
 
         #[test]

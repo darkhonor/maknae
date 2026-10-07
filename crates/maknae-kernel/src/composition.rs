@@ -327,6 +327,42 @@ mod tests {
         assert_eq!(c.decide_cited_all(&batch), vec![flows, refused]);
     }
 
+    /// An install that lands between two of a batch's baseline evaluations
+    /// does not reach the rest of the batch, through the production fold.
+    #[test]
+    fn the_composed_batch_decides_from_one_snapshot() {
+        use maknae_authz_basic::{Baseline, EvaluationGate};
+        let (g, mut basic) = fixture("batch", READ_POLICY);
+        let gate = std::sync::Arc::new(EvaluationGate {
+            arrived: std::sync::Barrier::new(2),
+            release: std::sync::Barrier::new(2),
+        });
+        basic.park_evaluations(gate.clone());
+        std::fs::write(
+            g.0.join("authz.yaml"),
+            READ_POLICY.replace("deny: []", "deny:\n    - \"Read(~/**)\""),
+        )
+        .unwrap();
+        let next = basic.compile_from_file().unwrap();
+        let c = std::sync::Arc::new(Composition::new(basic, ceiling(secret())));
+        let batch = {
+            let (c, home) = (c.clone(), g.0.clone());
+            std::thread::spawn(move || {
+                c.decide_cited_all(&[permitted_read(&home), permitted_read(&home)])
+            })
+        };
+        gate.arrived.wait();
+        c.baseline().install(next);
+        gate.release.wait();
+        gate.arrived.wait();
+        gate.release.wait();
+        let all = batch.join().unwrap();
+        assert_eq!(all.len(), 2);
+        for d in all {
+            assert!(matches!(d.verdict, Verdict::Permit { .. }), "{d:?}");
+        }
+    }
+
     #[test]
     fn unmarked_content_flows_under_a_secret_ceiling_exactly_as_the_baseline_decides() {
         // The operator's ruling, at the composition: unmarked is the system's lowest level,
