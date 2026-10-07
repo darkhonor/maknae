@@ -82,9 +82,11 @@ files = [
   "crates/maknae-security/src/obligation.rs",
   "crates/maknae-security/src/verdict.rs",
   "crates/maknae-security/src/compose.rs",
+  # The seam trait's defaults: a wrong default reports a role or rule the decision
+  # was not made on, or lets a batch of decisions read more than one snapshot.
+  "crates/maknae-security/src/authorizer.rs",
   # maknae-config loading core (parses untrusted config → policy; a mis-parse or
-  # dup-key bypass loads the wrong policy). value.rs is a bare enum (no production
-  # regions) → T3 below.
+  # dup-key bypass loads the wrong policy). maknae-config value.rs is T1 below (#489).
   "crates/maknae-config/src/error.rs",
   "crates/maknae-config/src/scalar.rs",
   "crates/maknae-config/src/builder.rs",
@@ -292,9 +294,9 @@ files = [
   "crates/maknae-state/src/store.rs",
   "crates/maknae-state/src/vocabulary.rs",
 ]
-# maknae-security request.rs/authorizer.rs and maknae-config value.rs are pure
-# declarations (no executable production regions) → T3, not T1. The mutation set
-# is the whole crate regardless of tier, so they stay mutation-covered.
+# maknae-security request.rs is pure declarations (no executable production
+# regions) → T3, not T1. The mutation set is the whole crate regardless of tier,
+# so it stays mutation-covered.
 # Risk-based mutation set (operator decision 2026-08-04): MLS/DCS/security-
 # critical crates whose fail-closed behavior must be provable to external
 # third parties. Zero missed mutants required.
@@ -434,15 +436,11 @@ why = "scaffold stub — re-tier at body landing"
 
 [[t3]]
 path = "crates/maknae-security/src/lib.rs"
-why = "module declarations + re-exports only; no logic (the four logic files are T1)"
+why = "module declarations + re-exports only; no logic (the logic files are T1)"
 
 [[t3]]
 path = "crates/maknae-security/src/request.rs"
 why = "type declarations (subject/resource/action/context/request) + derives; no hand-written executable logic that could turn a deny into a permit"
-
-[[t3]]
-path = "crates/maknae-security/src/authorizer.rs"
-why = "trait declaration only; no hand-written executable logic (impls live in backends)"
 
 [[t3]]
 path = "crates/maknae-kernel/src/lib.rs"
@@ -625,7 +623,7 @@ why = "nix Group/User/getgrouplist resolution — syscall I/O, cross-platform; t
 
 [[t3]]
 path = "crates/maknae-kernel/src/run.rs"
-why = "run-loop orchestration (accept/read/audit/respond driver) + process entrypoint (boot: FIPS, config, audit sink, authz gate, kernel graph store, posture record, mint, bind, serve) — I/O and control-flow; the mutation-gated decisions it consults live in handler.rs/authz.rs/boot_gate.rs/posture.rs (T1 — incl. READ_PAGE_MAX_BYTES) and maknae-proto (T1 — admits, FrameCaps::responses, read_frame_of_class, page_request_is_acceptable); the graph store's boot decisions are maknae-state (T1), and the records and refusal hints built here are tested against a real sink and state directory. Mutation-excluded (mutants.toml)"
+why = "run-loop orchestration (accept/read/audit/respond driver) + process entrypoint (boot: FIPS, config, audit sink, authz gate, kernel graph store, posture record, mint, bind, serve) — I/O and control-flow; the mutation-gated decisions it consults live in handler.rs/authz.rs/boot_gate.rs/posture.rs (T1 — incl. READ_PAGE_MAX_BYTES) and maknae-proto (T1 — admits, FrameCaps::responses, read_frame_of_class, page_request_is_acceptable); the graph store's boot decisions are maknae-state (T1); the SIGHUP reload's decisions (its ordering, the plan and the graph it calls for, refusing a turn once shutdown began, advancing the revision only on success, and the stop's wait-then-abort-or-leave) are reload.rs (T1), so the reload code here is I/O glue; and the records and refusal hints built here are tested against a real sink and state directory. Mutation-excluded (mutants.toml)"
 
 [[t3]]
 path = "crates/maknae-vault/src/supervisor_run.rs"
@@ -683,15 +681,15 @@ path = "bins/maknae/src/enroll/keychain_write.rs"
 why = "#76: enroll's keychain write and release-build checks — the pure builders and parsers (SecretID shape, the per-plane content check that routes the egress item to maknae-vault's seal_key_from_hex, verification_plane, classify_find, the stdin add command, delete/find argv, keychain-line parse, the codesign requirement strings and team pin, Hardened Runtime/entitlement/ad-hoc refusal, embedded-requirement equality) carry unit tests on every target; on macOS, darwin tests prove that check_install_path accepts a hard-linked file, maps a missing binary to NotInstalled, and maps a non-root-owned install path to NotRootInstalled (not NotInstalled). The runners that call codesign/security remain operator-verified, not unit-tested"
 
 # maknae-msgs (PR-J1 Task 1): declaration-only string-table match arms, no
-# decision logic (precedent: maknae-config value.rs). The locale-detect +
+# decision logic (precedent: maknae-security request.rs). The locale-detect +
 # dispatch decision logic is lib.rs (T1).
 [[t3]]
 path = "crates/maknae-msgs/src/catalog_en_us.rs"
-why = "declaration-only string-table match arms, no decision logic (precedent: maknae-config value.rs)"
+why = "declaration-only string-table match arms, no decision logic (precedent: maknae-security request.rs)"
 
 [[t3]]
 path = "crates/maknae-msgs/src/catalog_ko_kr.rs"
-why = "declaration-only string-table match arms, no decision logic (precedent: maknae-config value.rs)"
+why = "declaration-only string-table match arms, no decision logic (precedent: maknae-security request.rs)"
 
 # [[exception]] — documented-not-tested. Removes every code region whose
 # line_start falls within [anchor, end_anchor] from numerator AND denominator.
@@ -817,7 +815,7 @@ why = "crate rustdoc and module declarations only; no executable production regi
 
 [[t3]]
 path = "crates/maknae-config/src/state.rs"
-why = "cfg-selected path constants only; no executable production regions — same treatment as value.rs"
+why = "cfg-selected path constants only; no executable production regions — same treatment as maknae-io/src/lib.rs"
 
 [[t3]]
 path = "crates/maknae-state/src/lib.rs"
