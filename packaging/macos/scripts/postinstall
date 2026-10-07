@@ -136,6 +136,22 @@ case "$(stat -f '%Sf' "$AUDIT")" in
        exit 1 ;;
 esac
 
+# --- kernel graph store ------------------------------------------------------
+# A reinstall can renumber _maknae, leaving a retained store owned by a uid with no
+# account. Root holds the directory while those entries are re-owned, so the
+# daemon account cannot swap a name for a link to a root file between check and chown.
+STATE="/usr/local/var/db/maknae/state"
+install -d -m 0700 -o "$MUID" -g "$MGID" "$STATE"
+if [ -n "$(find "$STATE" -xdev -mindepth 1 -maxdepth 1 -nouser -print -quit)" ]; then
+    chown 0:0 "$STATE"
+    verify "$STATE held by root" "0 0 700" "$(stat -f '%u %g %Lp' "$STATE")"
+    find "$STATE" -xdev -mindepth 1 -maxdepth 1 -type f -links 1 -nouser \
+        -exec chown -h "$MUID:$MGID" {} +
+    chown "$MUID:$MGID" "$STATE"
+fi
+chmod 0700 "$STATE"
+verify "$STATE ownership/mode" "$MUID $MGID 700" "$(stat -f '%u %g %Lp' "$STATE")"
+
 if [ "$DISABLE_MAKNAED" = false ] && [ "$WAS_LOADED" = "true" ]; then
     # Upgrade of a running daemon: the payload replaced the file but the live
     # process still holds the old inode. Restart it onto the new binary, exactly as

@@ -52,11 +52,13 @@ LoadCredentialEncrypted=maknaed-graph-key:/etc/maknae/private/maknaed-graph-key.
 # `maknae_vault::NEVER_SCRUB_ENV` — read it there rather than from a copy here,
 # which is how this comment briefly shipped a list missing XDG_RUNTIME_DIR. A
 # disjointness test enforces the two constants against each other; nothing
-# enforces prose. The nearest one to this unit is CREDENTIALS_DIRECTORY, the
-# credential loaded immediately above.
+# enforces prose. The nearest one to this unit is CREDENTIALS_DIRECTORY, where
+# systemd places the credentials loaded immediately above.
 UnsetEnvironment=HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy VAULT_ADDR VAULT_TOKEN VAULT_SKIP_VERIFY VAULT_CACERT VAULT_CAPATH VAULT_CLIENT_CERT VAULT_CLIENT_KEY VAULT_NAMESPACE SSL_CERT_FILE SSL_CERT_DIR
 RuntimeDirectory=maknae
 RuntimeDirectoryMode=0751
+StateDirectory=maknae
+StateDirectoryMode=0700
 # ProtectSystem=strict mounts /var/log read-only; without this the audit sink
 # open() gets EROFS and every boot fails closed. Chosen over LogsDirectory=
 # (which chowns/chmods at start, colliding with the chattr +a inode).

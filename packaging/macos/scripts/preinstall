@@ -135,7 +135,7 @@ refuse_unsafe_ancestors() {
 
 for d in /usr/local /usr/local/var /usr/local/var/db /usr/local/var/run /usr/local/var/log /usr/local/lib \
          /etc/maknae /etc/maknae/private /var/log/maknae /usr/local/var/log/maknae \
-         /usr/local/lib/maknae /usr/local/var/run/maknae "$RECEIPT_DIR" \
+         /usr/local/lib/maknae /usr/local/var/run/maknae "$RECEIPT_DIR" /usr/local/var/db/maknae/state \
          /usr/local/var/run/maknae-egress /usr/local/var/log/maknae-egress; do
     [ ! -L "$d" ] || { echo "maknae: $d is a symlink — refusing to install through it" >&2; exit 1; }
 done
@@ -209,6 +209,7 @@ install -d -m 0755 -o 0             -g 0               /usr/local/lib/maknae
 # parent is owned by the daemon's euid and is not group/other-writable.
 install -d -m 0750 -o "$MAKNAE_UID" -g "$OPERATOR_GID" /usr/local/var/run/maknae
 install -d -m 0755 -o 0             -g 0               "$RECEIPT_DIR"
+install -d -m 0700 -o "$MAKNAE_UID" -g "$MAKNAE_GID"   /usr/local/var/db/maknae/state
 
 # VERIFY the D1 row landed. BSD `install -d` exits 0 even when its chown FAILS
 # (measured: `install -d -g 99999 ...` prints "Operation not permitted" and still

@@ -216,6 +216,8 @@ mod tests {
             "RuntimeDirectoryMode=",
             "StandardError=",
             "StandardOutput=",
+            "StateDirectory=", // the daemon's kernel graph store; the deputy keeps no state
+            "StateDirectoryMode=",
             "SupplementaryGroups=", // the daemon's socket-group gate
             "SyslogIdentifier=",
             "TimeoutStopSec=", // the daemon's drain chain; the deputy has no handler

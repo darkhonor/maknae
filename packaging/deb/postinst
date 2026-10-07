@@ -46,6 +46,7 @@ case "$1" in
         install -d -m 0750 -o root    -g _maknae /etc/maknae
         install -d -m 0750 -o root    -g _maknae /etc/maknae/private
         install -d -m 0700 -o _maknae -g _maknae /var/log/maknae
+        install -d -m 0700 -o _maknae -g _maknae /var/lib/maknae
         # #240b: the deputy's Vault CA copy (written by `maknae enroll`), under
         # the deputy's OWN group.
         install -d -m 0750 -o root    -g _maknae-egress /etc/maknae/egress

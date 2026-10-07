@@ -84,6 +84,15 @@ phase1() {
         '')  fail "no daemon log-dir install line found in preinstall" ;;
         *)   fail "daemon log dir not -m 0750 -o \"\$MAKNAE_UID\" -g \"\$MAKNAE_GID\": $dlog_line" ;;
     esac
+    state_line="$(grep -E '^install -d .*/usr/local/var/db/maknae/state$' "$HERE/scripts/preinstall" | tr -s ' ')"
+    case "$state_line" in
+        *'-m 0700 -o "$MAKNAE_UID" -g "$MAKNAE_GID"'*) ok "kernel graph state dir is _maknae:_maknae 0700" ;;
+        '')  fail "no kernel graph state-dir install line found in preinstall" ;;
+        *)   fail "kernel graph state dir not -m 0700 -o \"\$MAKNAE_UID\" -g \"\$MAKNAE_GID\": $state_line" ;;
+    esac
+    grep -qF 'verify "$STATE ownership/mode" "$MUID $MGID 700"' "$HERE/scripts/postinstall" \
+        && ok "postinstall verifies the kernel graph state dir" \
+        || fail "postinstall does not verify the kernel graph state dir"
 
     "$REPO/ci/gates/entitlements-empty.sh" "$HERE"/*.entitlements >/dev/null \
         && ok "every entitlements file is empty" \

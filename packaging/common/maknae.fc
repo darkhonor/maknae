@@ -1,5 +1,5 @@
 # SELinux file contexts for Maknae.
-# Restore: restorecon -Rv /usr/bin/maknaed /etc/maknae /var/log/maknae
+# Restore: restorecon -Rv /usr/bin/maknaed /etc/maknae /var/log/maknae /var/lib/maknae
 
 /usr/bin/maknaed        --      gen_context(system_u:object_r:maknaed_exec_t,s0)
 /usr/bin/maknae-egress  --      gen_context(system_u:object_r:maknae_egress_exec_t,s0)
@@ -15,5 +15,6 @@
 /etc/maknae/private/.*\.cred    gen_context(system_u:object_r:maknae_secret_t,s0)
 /etc/maknae/private/enroll-state\.yaml  gen_context(system_u:object_r:maknae_secret_t,s0)
 /var/log/maknae(/.*)?           gen_context(system_u:object_r:maknae_audit_t,s0)
+/var/lib/maknae(/.*)?           gen_context(system_u:object_r:maknae_state_t,s0)
 /run/maknae(/.*)?               gen_context(system_u:object_r:maknae_runtime_t,s0)
 /run/maknae-egress(/.*)?        gen_context(system_u:object_r:maknae_runtime_t,s0)

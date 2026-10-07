@@ -551,6 +551,7 @@ sudo maknae enroll \
 - **What enroll does:**
   - Mints `maknaed`'s SecretID (the only AppRole) and seals it to the TPM2 (`/etc/maknae/private/maknaed-secret-id.cred`, `root:root 0400`). A re-enroll rotates it.
   - Generates the Egress Daemon's sealing key pair when none is in place: the private key is sealed to the TPM2 at `/etc/maknae/private/maknae-egress-seal-key.cred` (`root:root 0400`), and the public key is published as `seal.pub` (`/etc/pki/maknae/seal.pub` on the Red Hat family, `/etc/ssl/maknae/seal.pub` on the Debian family), where every user's CLI reads it. On a first enroll it prints `` Generated the Egress Daemon's sealing key and published its public key at {path}. An Egress Daemon that is already running still holds the previous key: restart it with `sudo {restart}` ``, with `{restart}` = `systemctl try-restart maknae-egress.service`; on a re-enroll it prints `Kept the Egress Daemon's sealing key and its published public key; pass --rotate-seal-key to replace them`.
+  - Creates the kernel graph key when none is in place, sealed to the TPM2 at `/etc/maknae/private/maknaed-graph-key.cred` (on macOS, the System-keychain item `io.maknae.maknaed.graph`). It never rotates an existing one, because a new key cannot read the existing store ([the kernel graph store refuses to start](#the-kernel-graph-store-refuses-to-start)).
   - Writes `/etc/maknae/egress-bounds.yaml` from `--vault-addr`, `--kv-mount` and `--user-prefix` (step 4).
   - Writes the CA chain.
   - Writes your CLI configuration, `~/.maknae/maknae.yaml` (with the `vault` block carrying `user_auth`, `kv_mount` and `user_prefix`) and `~/.maknae/tls/`. It writes no token: you log in yourself (step 9).
@@ -864,3 +865,64 @@ read -rsp "Maknae user token: " VT && echo && VAULT_TOKEN="$VT" vault delete <kv
 ```
 
 With enroll's defaults and the subpath `openai`, the path is `maknae-kv/metadata/maknae/users/<username>/openai`. Use `vault delete`, not `vault kv metadata delete`: `vault kv` first queries `sys/internal/ui/mounts`, which your user token (it has no `default` policy) may not be allowed.
+
+---
+
+## The kernel graph store refuses to start
+
+`maknaed` keeps its enforcement state in an encrypted store, `kernel.graph`, in its state directory: `/var/lib/maknae` on Linux, `/usr/local/var/db/maknae/state` on macOS. Each start checks the store against the latest `graph.checkpoint` record in the audit trail, and refuses to start when the store cannot be trusted. A refusal exits with code 5 and writes two lines, the cause and the next step, to the journal (`journalctl -u maknaed`) on Linux or to `/usr/local/var/log/maknae/maknaed.err` on macOS:
+
+```text
+maknaed: refusing to start: kernel graph store: graph store revision 3 is older than the audited checkpoint 7: rolled back
+maknaed: if this is expected, run `sudo maknae reseed` and restart; a readable current store is kept for forensics
+```
+
+`maknae status` prints the store's state once the daemon runs, as `kernel graph: revision <n> (<state>)`.
+
+### The causes
+
+| The first line ends with | What happened | Recovery |
+|---|---|---|
+| `graph store revision <n> is older than the audited checkpoint <m>: rolled back` | an older copy of the store, from a backup or snapshot, was put back | reseed |
+| `graph store at revision <n> differs from the audited checkpoint: substituted` | the store is not the one the trail recorded at that revision | reseed |
+| `graph store is missing but the audit trail holds checkpoint <n>` | the store was deleted | reseed |
+| `the graph store does not decrypt: tampered or truncated`, `graph store does not decode: …`, or another envelope error such as `graph store is truncated` | the file is damaged, or it was encrypted under a different key | reseed |
+| `` no kernel graph key (…): run `sudo maknae enroll` `` | the host has no graph key. On Linux, systemd refuses the unit first, with `status=243/CREDENTIALS` | run `sudo maknae enroll` ([upgrading](upgrading.md#kernel-graph-store-488)), then restart |
+| `the kernel graph key is malformed (…)` | the key exists but is unusable | replace the key, below |
+| `the graph store was written by a newer maknaed: …` | a newer `maknaed` wrote the store, and this one is older | **reinstall the newer version. Do not reseed:** the store is valid, and a reseed replaces it |
+| `graph store I/O failed: …` | the state directory or the store has the wrong owner, mode or link count | the second line names the directory: it must be owned by `_maknae`, mode `0700` |
+| `graph store audit failed: …` | the audit trail could not be read or written | check `/var/log/maknae/audit.jsonl` |
+
+### Reseed
+
+A reseed replaces the store with a fresh, empty one. **It drops any containment that was never synced back to `bindings.yaml`. Until sync back (#491) is built, that is all of it.**
+
+```bash
+sudo maknae reseed
+sudo systemctl restart maknaed                          # Linux
+sudo launchctl kickstart -k system/io.maknae.maknaed    # macOS
+```
+
+`sudo maknae reseed` reads and decrypts nothing. It writes a root-owned authorization marker, `reseed.authorized`, into the state directory, prints `reseed authorized; restart maknaed to seed a fresh kernel graph …`, and exits. At its next start `maknaed` finds the marker and seeds the store:
+
+- **A readable current store is kept** as `kernel.graph.rejected.<unix-seconds>.<16 hex digits>` in the state directory. The hex digits are the start of the store's ciphertext SHA-256. A rejected copy is never replaced: if that name exists, the existing file is kept.
+- **A store that cannot be read** (wrong owner, too large, more than one link) is not kept. The new store is written over it, and the trail records why.
+- **The trail records the reseed:** a `graph.seed` record, a `graph.rejected` record naming the kept copy (or why none was kept), and a `graph.checkpoint` record. `maknae status` then reports `reseeded`, and `verified` from the next restart on.
+
+Run `sudo maknae reseed` from an unconfined session, as for enroll. On an SELinux host where administrators are confined users (`sysadm_t`), the marker write into the state directory (`maknae_state_t`) may be denied.
+
+**A marker that root did not write authorizes nothing.** The daemon starts or refuses as if no marker were there; when it starts, it writes `` maknaed: reseed marker ignored: <cause>; only a root-owned reseed.authorized in <directory> written by `sudo maknae reseed` authorizes a reseed ``, and the trail records a denied `graph.reseed`. `sudo maknae reseed` refuses while that file is there (`an unexpected file is at …; investigate before reseeding`). Find out who wrote it, remove it, and run the reseed again.
+
+### Replace a malformed key
+
+The store cannot be read without its key, so a new key needs a reseed.
+
+1. Remove the key. Linux: `sudo rm /etc/maknae/private/maknaed-graph-key.cred`. macOS: `sudo security delete-generic-password -a secret-id -s io.maknae.maknaed.graph /Library/Keychains/System.keychain`.
+2. Run `sudo maknae enroll` with your enrollment arguments. It creates a new key.
+3. Reseed, as above.
+
+**The same holds whenever enroll creates a key while a store exists,** for example after the key was deleted by hand: the store, encrypted under the old key, no longer decrypts, and the daemon refuses with `the graph store does not decrypt`. Reseed.
+
+### `rollback-anchor-unavailable`
+
+When the audit trail holds no `graph.checkpoint` record, for example after you rotate or restore the audit file by hand, the daemon cannot tell whether the store was rolled back. It starts anyway, records `rollback-anchor-unavailable`, and `maknae status` reports it. That start writes a new checkpoint into the new file, so the next restart reports `verified`. Until then a rolled-back store would not be detected: rotate the audit file only while you trust the state directory.
