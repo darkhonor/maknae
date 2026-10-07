@@ -406,6 +406,7 @@ mod tests {
             conversation: None,
             graph: None,
             rule: None,
+            policy_sha256: None,
             outcome: Outcome {
                 result: "permit".into(),
                 reason: "group membership: maknae-ops".into(),

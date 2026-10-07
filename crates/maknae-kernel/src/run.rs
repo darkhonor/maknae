@@ -368,6 +368,7 @@ fn make_record(
         conversation: None,
         graph: None,
         rule: None,
+        policy_sha256: None,
         outcome: Outcome {
             result: result.to_string(),
             reason: reason.to_string(),
@@ -1047,7 +1048,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             &peer_uri,
             peer_user.as_deref(),
             decided_role,
-            decided_rule.as_ref(),
+            None,
             session_id,
             seq.next(),
             verb_to_action(&request.verb),
@@ -2009,9 +2010,10 @@ fn request_caps(cfg: &TransportConfig, attempt_caps: crate::mutation::AttemptCap
     }
 }
 
-fn rule_audit(c: &RuleCitation) -> maknae_audit_append::RuleAudit {
+pub(crate) fn rule_audit(c: &RuleCitation) -> maknae_audit_append::RuleAudit {
     maknae_audit_append::RuleAudit {
         node: c.node,
+        key: c.key.clone(),
         section: c.section.clone(),
     }
 }
@@ -3589,7 +3591,7 @@ where
             Ok(applied) => (applied.revision, "reloaded"),
             Err(_) => (self.store_revision, "reload-refused"),
         };
-        let rec = self.ctx.record(
+        let mut rec = self.ctx.record(
             GRAPH_RELOAD_ACTION,
             result,
             &reason,
@@ -3601,6 +3603,7 @@ where
                 scanned_bytes: 0,
             }),
         );
+        rec.policy_sha256 = Some(self.reloader.authorizer.baseline().policy_sha256());
         let sink = Arc::clone(&self.reloader.sink);
         async move {
             if let Err(e) = sink.emit(&rec).await {
@@ -3967,7 +3970,7 @@ async fn boot_after_sink(
     // auditable at runtime and not only at build time. Same record shape as
     // the authz refusal above; the action is the `authz` pseudo-action.
     let composition_name = maknae_security::guarded_backend_name(&authorizer);
-    let composition_rec = make_record(
+    let mut composition_rec = make_record(
         "boot",
         host,
         socket,
@@ -3992,6 +3995,9 @@ async fn boot_after_sink(
         "authorized",
         &audit_cfg.au3_1,
     );
+    composition_rec.policy_sha256 = Some(maknae_authz_basic::Baseline::policy_sha256(
+        authorizer.baseline(),
+    ));
     sink.emit(&composition_rec)
         .await
         .map_err(|e| boot_evidence_refused("composition", e))?;
@@ -5038,6 +5044,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
                 "authorization composition: maknae-authz-basic+maknae-ceiling; system: US; ceiling: UNCLASSIFIED"
             );
             assert_eq!(comp_rec.outcome.posture, "authorized");
+            assert_eq!(comp_rec.policy_sha256.as_ref().map(String::len), Some(64));
             // #488/#489: the first boot seeds the graph store before the PDP is
             // built from it, so before the composition record; intent before
             // checkpoint.
@@ -6935,6 +6942,10 @@ mod reload_tests {
             ),
             (1, "reload-refused", "")
         );
+        assert_eq!(
+            recs[1].policy_sha256,
+            Some(before.policy_sha256(maknae_state::envelope::sha256))
+        );
         assert!(matches!(
             fx.root_whoami(),
             maknae_security::Verdict::Permit { .. }
@@ -6992,12 +7003,20 @@ mod reload_tests {
         );
         assert!(Arc::ptr_eq(before.persisted(), after.persisted()));
         assert_eq!(fx.store_bytes(), bytes);
-        let o = outcomes(&fx.reload_records());
+        let recs = fx.reload_records();
+        let o = outcomes(&recs);
         assert_eq!(
             o.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(),
             ["graph.reload", "graph.reload"]
         );
         assert_eq!(o[1].2, "reload applied: revision 1; identity unchanged");
+        let digest = maknae_state::envelope::sha256;
+        assert_eq!(recs[0].policy_sha256, None);
+        assert_eq!(
+            recs[1].policy_sha256.as_deref(),
+            Some(after.policy_sha256(digest).as_str())
+        );
+        assert_ne!(after.policy_sha256(digest), before.policy_sha256(digest));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

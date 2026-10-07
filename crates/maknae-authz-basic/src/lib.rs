@@ -153,6 +153,24 @@ impl BasicAuthorizer {
             .unwrap_or_else(PoisonError::into_inner) = snapshot;
     }
 
+    fn decide_on(
+        &self,
+        snap: &Snapshot,
+        req: &maknae_security::Request,
+    ) -> maknae_security::Decided {
+        let d = decide::decide_loaded_cited(snap.loaded(), &self.principal, req);
+        #[cfg(test)]
+        if let Some(gate) = &self.evaluation_gate {
+            gate.arrived.wait();
+            gate.release.wait();
+        }
+        maknae_security::Decided {
+            verdict: d.verdict,
+            role: d.role,
+            rule: d.cited.as_ref().and_then(|c| snap.cite(c)),
+        }
+    }
+
     /// The file-based evaluator the snapshot path must agree with.
     #[cfg(test)]
     fn decide_oracle(
@@ -428,18 +446,12 @@ impl maknae_security::Authorizer for BasicAuthorizer {
     /// One decision from one snapshot: the verdict, the role and the cited
     /// rule all come from the `Arc` cloned out here.
     fn decide_cited(&self, req: &maknae_security::Request) -> maknae_security::Decided {
+        self.decide_on(&self.snapshot(), req)
+    }
+
+    fn decide_cited_all(&self, reqs: &[maknae_security::Request]) -> Vec<maknae_security::Decided> {
         let snap = self.snapshot();
-        #[cfg(test)]
-        if let Some(gate) = &self.evaluation_gate {
-            gate.arrived.wait();
-            gate.release.wait();
-        }
-        let d = decide::decide_loaded_cited(snap.loaded(), &self.principal, req);
-        maknae_security::Decided {
-            verdict: d.verdict,
-            role: d.role,
-            rule: d.cited.as_ref().and_then(|c| snap.cite(c)),
-        }
+        reqs.iter().map(|r| self.decide_on(&snap, r)).collect()
     }
 
     fn subjects(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
@@ -477,6 +489,11 @@ pub trait Baseline: maknae_security::Authorizer + sealed::Sealed + Send + Sync +
     fn load_source(&self) -> Result<PolicySource, AuthzBasicError>;
     /// The section digest this baseline's snapshots are compiled with.
     fn digest(&self) -> fn(&[u8]) -> [u8; 32];
+
+    /// The installed snapshot's [`Snapshot::policy_sha256`].
+    fn policy_sha256(&self) -> String {
+        self.snapshot().policy_sha256(self.digest())
+    }
 }
 
 mod sealed {
@@ -644,6 +661,10 @@ impl maknae_security::Authorizer for HermeticAuthorizer {
         self.inner.decide_cited(r)
     }
 
+    fn decide_cited_all(&self, reqs: &[maknae_security::Request]) -> Vec<maknae_security::Decided> {
+        self.inner.decide_cited_all(reqs)
+    }
+
     fn subjects(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
         self.inner.subjects()
     }
@@ -749,7 +770,7 @@ mod tests {
         Action, AttrValue, Attributes, Authorizer, Context, Resource, Subject, Verdict,
     };
 
-    /// Parks a decision after it has cloned its snapshot out.
+    /// Parks a decision after it has evaluated on the snapshot it cloned out.
     #[derive(Debug)]
     pub(super) struct EvaluationGate {
         pub(super) arrived: std::sync::Barrier,
@@ -916,6 +937,7 @@ mod tests {
             .unwrap()
             .clone();
         assert_eq!(node.key, "rule:permissions:deny:0");
+        assert_eq!(rule.key, node.key);
         assert_eq!(
             (
                 auth.decide(&ssh_read(501)),
@@ -1057,7 +1079,6 @@ mod tests {
         }
     }
 
-    /// Review focus: concurrent deciders see whole snapshots only.
     #[test]
     fn concurrent_decisions_see_whole_snapshots() {
         let admin = compiled(&source_with(ADMIN_ROOT, &[("root", 0)]));
@@ -1189,6 +1210,38 @@ mod tests {
             audit_permit(),
             "the parked decision finishes on the snapshot it cloned"
         );
+    }
+
+    /// An install that lands between two of a batch's evaluations does not
+    /// reach the rest of the batch.
+    #[test]
+    fn decide_cited_all_reads_one_snapshot_for_the_whole_batch() {
+        let mut auth = authorizer_over(ADMIN_ROOT, &[("root", 0)]);
+        let gate = Arc::new(EvaluationGate {
+            arrived: std::sync::Barrier::new(2),
+            release: std::sync::Barrier::new(2),
+        });
+        auth.evaluation_gate = Some(gate.clone());
+        let auth = Arc::new(auth);
+        let next = compiled(&source_with(ADVERSARY_ROOT, &[("root", 0)]));
+        let installed = next.clone();
+        let batch = {
+            let auth = auth.clone();
+            std::thread::spawn(move || auth.decide_cited_all(&[whoami(0), whoami(0)]))
+        };
+        gate.arrived.wait();
+        auth.install(next);
+        gate.release.wait();
+        gate.arrived.wait();
+        gate.release.wait();
+        let verdicts: Vec<_> = batch
+            .join()
+            .unwrap()
+            .into_iter()
+            .map(|d| d.verdict)
+            .collect();
+        assert_eq!(verdicts, vec![audit_permit(), audit_permit()]);
+        assert!(Arc::ptr_eq(&auth.snapshot(), &installed));
     }
 
     #[test]
@@ -1784,8 +1837,8 @@ mod tests {
             }
         }
 
-        /// Review focus: the per-request re-read is gone. A file edit changes
-        /// nothing until a reload; a refused reload keeps the old snapshot.
+        /// A file edit changes nothing until a reload; a refused reload keeps
+        /// the old snapshot.
         #[test]
         fn containment_bites_on_the_next_request_after_a_reload() {
             let fx = Fixture::new("contain");

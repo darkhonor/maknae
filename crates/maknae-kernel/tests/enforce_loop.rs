@@ -742,6 +742,7 @@ async fn the_shipped_deny_list_actually_denies_a_read_of_ssh_keys() {
     );
     let rule = req.rule.as_ref().expect("the deny cites its rule node");
     assert!(rule.section.ends_with("authz.yaml#permissions"), "{rule:?}");
+    assert!(rule.key.starts_with("rule:permissions:deny:"), "{rule:?}");
     // And the pattern source never leaks onto the wire either.
     let pat = b".ssh";
     assert!(!frame.windows(pat.len()).any(|w| w == pat));
@@ -1590,13 +1591,16 @@ async fn an_unhonorable_obligation_fails_closed() {
         }
         other => panic!("unknown obligation must deny: {other:?}"),
     }
+    let records = emit.records();
+    let record = request_record(&records);
     assert!(
-        request_record(&emit.records())
+        record
             .outcome
             .reason
             .contains("unhonorable obligation: exfil"),
         "the obligation id is in the trail"
     );
+    assert_eq!(record.rule, None, "a deny never cites the permit's rule");
 }
 
 #[tokio::test]
@@ -1769,6 +1773,7 @@ async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
     assert_eq!(req.outcome.posture, "authorized");
     let rule = req.rule.as_ref().expect("the permit cites its grant");
     assert!(rule.section.ends_with("authz.yaml#roles.admin"), "{rule:?}");
+    assert_eq!(rule.key, "rule:roles.admin:allow:0", "{rule:?}");
 }
 
 /// `authz_backend` is ASKED OF THE PDP. A backend that does not name itself

@@ -50,6 +50,7 @@ pub struct Snapshot {
     persisted: Arc<Graph>,
     loaded: LoadedPolicy,
     index: BTreeMap<Cited, RuleCitation>,
+    sections: BTreeMap<String, [u8; 32]>,
 }
 
 impl fmt::Debug for Snapshot {
@@ -85,6 +86,17 @@ impl Snapshot {
 
     pub(crate) fn cite(&self, c: &Cited) -> Option<RuleCitation> {
         self.index.get(c).cloned()
+    }
+
+    /// The policy digest, in hex: `digest` over one `<section>=<hex digest>\n`
+    /// line per section this snapshot was compiled from, in section order.
+    pub fn policy_sha256(&self, digest: fn(&[u8]) -> [u8; 32]) -> String {
+        let lines: String = self
+            .sections
+            .iter()
+            .map(|(name, d)| format!("{name}={}\n", hex(d)))
+            .collect();
+        hex(&digest(lines.as_bytes()))
     }
 }
 
@@ -173,10 +185,11 @@ impl Compiler {
         section: &(NodeId, String),
         cited: Cited,
     ) -> NodeId {
-        let id = self.add_node(RULE, key, attrs);
+        let id = self.add_node(RULE, key.clone(), attrs);
         self.add_edge(id, DECLARED_BY, section.0);
         self.index.entry(cited).or_insert(RuleCitation {
             node: id.0,
+            key,
             section: section.1.clone(),
         });
         id
@@ -385,6 +398,7 @@ pub fn compile(
         persisted,
         loaded,
         index: c.index,
+        sections: section_sha256.clone(),
     })
 }
 
@@ -468,6 +482,26 @@ mod tests {
             Some(AttrValue::Str(s)) => Some(s),
             _ => None,
         }
+    }
+
+    #[test]
+    fn the_policy_digest_folds_every_section_digest_in_section_order() {
+        let s = shipped_with_bindings();
+        let lines: String = digests(&s)
+            .iter()
+            .map(|(k, d)| format!("{k}={}\n", hex(d)))
+            .collect();
+        assert!(lines.starts_with("bindings="), "{lines}");
+        assert!(lines.contains("\npermissions="), "{lines}");
+        assert_eq!(
+            snap(&s).policy_sha256(test_digest),
+            hex(&test_digest(lines.as_bytes()))
+        );
+        let edited = source(&format!("{SHIPPED}{BINDINGS}").replacen("Read(", "Write(", 1));
+        assert_ne!(
+            snap(&edited).policy_sha256(test_digest),
+            snap(&s).policy_sha256(test_digest)
+        );
     }
 
     #[test]

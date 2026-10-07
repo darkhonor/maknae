@@ -1087,6 +1087,7 @@ mod tests {
             conversation: None,
             graph: None,
             rule: None,
+            policy_sha256: None,
         }
     }
 

@@ -128,6 +128,23 @@ pub fn guarded_decide_cited(a: &dyn Authorizer, req: &Request) -> Decided {
     )
 }
 
+/// The panic boundary over [`Authorizer::decide_cited_all`]: a panic, or an
+/// answer whose length is not one per request, yields `Indeterminate` for
+/// every request.
+pub fn guarded_decide_cited_all(a: &dyn Authorizer, reqs: &[Request]) -> Vec<Decided> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| a.decide_cited_all(reqs))) {
+        Ok(all) if all.len() == reqs.len() => all,
+        _ => reqs
+            .iter()
+            .map(|_| Decided {
+                verdict: Verdict::Indeterminate,
+                role: None,
+                rule: None,
+            })
+            .collect(),
+    }
+}
+
 /// The same panic boundary for the two DISCLOSURE seam methods.
 ///
 /// `guarded_decide`'s doc already says any PDP host invoking a backend
@@ -273,10 +290,27 @@ pub fn compose_decide_reporting_role(
 /// combined one, the first such in composition order: a composed `Deny` never
 /// cites the rule of an operand that permitted.
 pub fn compose_decide_cited(operands: &[&dyn Authorizer], req: &Request) -> Decided {
-    let decided: Vec<Decided> = operands
+    fold_cited(
+        operands
+            .iter()
+            .map(|a| guarded_decide_cited(*a, req))
+            .collect(),
+    )
+}
+
+/// [`compose_decide_cited`] for each request, with each operand answering all
+/// of them through [`guarded_decide_cited_all`].
+pub fn compose_decide_cited_all(operands: &[&dyn Authorizer], reqs: &[Request]) -> Vec<Decided> {
+    let answers: Vec<Vec<Decided>> = operands
         .iter()
-        .map(|a| guarded_decide_cited(*a, req))
+        .map(|a| guarded_decide_cited_all(*a, reqs))
         .collect();
+    (0..reqs.len())
+        .map(|i| fold_cited(answers.iter().map(|a| a[i].clone()).collect()))
+        .collect()
+}
+
+fn fold_cited(decided: Vec<Decided>) -> Decided {
     let role = decided.iter().find_map(|d| d.role);
     let verdict = combine(decided.iter().map(|d| d.verdict.clone()).collect());
     let rule = decided
@@ -358,6 +392,10 @@ impl Authorizer for ConjunctionAuthorizer {
 
     fn decide_cited(&self, req: &Request) -> Decided {
         compose_decide_cited(&self.refs(), req)
+    }
+
+    fn decide_cited_all(&self, reqs: &[Request]) -> Vec<Decided> {
+        compose_decide_cited_all(&self.refs(), reqs)
     }
 
     /// Names every operand, in composition order.
@@ -1063,6 +1101,7 @@ mod tests {
                 role: self.1,
                 rule: self.2.map(|node| crate::RuleCitation {
                     node,
+                    key: format!("k{node}"),
                     section: format!("s{node}"),
                 }),
             }
@@ -1072,6 +1111,7 @@ mod tests {
     fn cited(node: u64) -> Option<crate::RuleCitation> {
         Some(crate::RuleCitation {
             node,
+            key: format!("k{node}"),
             section: format!("s{node}"),
         })
     }
@@ -1184,6 +1224,74 @@ mod tests {
         );
         let a = Cites(permit(vec![]), Some("admin"), Some(1));
         assert_eq!(guarded_decide_cited(&a, &req()).rule, cited(1));
+    }
+
+    struct ByAction;
+    impl Authorizer for ByAction {
+        fn decide(&self, r: &Request) -> Verdict {
+            if r.action.0 == "deny" {
+                Verdict::Deny {
+                    reason: "by action".into(),
+                }
+            } else {
+                permit(vec![])
+            }
+        }
+    }
+
+    fn acting(action: &str) -> Request {
+        let mut r = req();
+        r.action = crate::request::Action(action.into());
+        r
+    }
+
+    #[test]
+    fn guarded_decide_cited_all_fails_closed_on_a_panic_or_a_short_answer() {
+        let reqs = [req(), req()];
+        let indeterminate = Decided {
+            verdict: Verdict::Indeterminate,
+            role: None,
+            rule: None,
+        };
+        assert_eq!(
+            guarded_decide_cited_all(&Panics, &reqs),
+            vec![indeterminate.clone(); 2]
+        );
+        struct Short;
+        impl Authorizer for Short {
+            fn decide(&self, _: &Request) -> Verdict {
+                permit(vec![])
+            }
+            fn decide_cited_all(&self, _: &[Request]) -> Vec<Decided> {
+                vec![self.decide_cited(&req())]
+            }
+        }
+        assert_eq!(
+            guarded_decide_cited_all(&Short, &reqs),
+            vec![indeterminate; 2]
+        );
+        let a = Cites(permit(vec![]), Some("admin"), Some(1));
+        assert_eq!(
+            guarded_decide_cited_all(&a, &reqs),
+            vec![a.decide_cited(&req()); 2]
+        );
+    }
+
+    #[test]
+    fn compose_decide_cited_all_folds_each_request_by_its_own_answers() {
+        let reqs = [acting("allow"), acting("deny"), acting("allow")];
+        let cites = Cites(permit(vec![]), Some("user"), Some(4));
+        let ops: [&dyn Authorizer; 2] = [&cites, &ByAction];
+        let all = compose_decide_cited_all(&ops, &reqs);
+        let one_by_one: Vec<Decided> = reqs.iter().map(|r| compose_decide_cited(&ops, r)).collect();
+        assert_eq!(all, one_by_one);
+        assert!(matches!(all[1].verdict, Verdict::Deny { .. }));
+        assert_eq!((all[0].rule.clone(), all[1].rule.clone()), (cited(4), None));
+        let c = ConjunctionAuthorizer::new(vec![
+            Box::new(Cites(permit(vec![]), Some("user"), Some(4))),
+            Box::new(ByAction),
+        ]);
+        assert_eq!(c.decide_cited_all(&reqs), one_by_one);
     }
 
     #[test]

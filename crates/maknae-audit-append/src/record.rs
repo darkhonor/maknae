@@ -288,10 +288,12 @@ pub struct GraphAudit {
 }
 
 /// The policy rule a decision cites (AU-3(1)): its node in the compiled policy
-/// graph and the declaring section, keyed `<source>#<section>`.
+/// graph, its key (unlike the node, the same in every compile of the same
+/// file), and the declaring section, keyed `<source>#<section>`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuleAudit {
     pub node: u64,
+    pub key: String,
     pub section: String,
 }
 
@@ -344,6 +346,10 @@ pub struct AuditRecord {
     pub graph: Option<GraphAudit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rule: Option<RuleAudit>,
+    /// The digest of the policy in force: on the boot `authz` record and each
+    /// `graph.reload` outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_sha256: Option<String>,
     pub outcome: Outcome,
     pub session_id: u64,
     pub seq: u64,
@@ -442,6 +448,7 @@ mod tests {
             conversation: None,
             graph: None,
             rule: None,
+            policy_sha256: None,
             outcome: Outcome {
                 result: "permit".into(),
                 reason: "group membership: maknae-ops".into(),
@@ -630,11 +637,12 @@ mod tests {
         let mut rec = sample();
         rec.rule = Some(RuleAudit {
             node: 42,
+            key: "rule:permissions:allow:3".into(),
             section: "/etc/maknae/authz.yaml#permissions".into(),
         });
         let s = canonical_json(&rec).unwrap();
         assert!(
-            s.contains("\"rule\":{\"node\":42,\"section\":\"/etc/maknae/authz.yaml#permissions\"}"),
+            s.contains("\"rule\":{\"key\":\"rule:permissions:allow:3\",\"node\":42,\"section\":\"/etc/maknae/authz.yaml#permissions\"}"),
             "{s}"
         );
         let back: AuditRecord = serde_json::from_str(&s).unwrap();
@@ -670,6 +678,7 @@ mod tests {
         let mut rec = sample();
         rec.rule = Some(RuleAudit {
             node: 1,
+            key: "k".into(),
             section: "s".into(),
         });
         let s = canonical_json(&rec).unwrap();
@@ -788,6 +797,7 @@ mod tests {
                 conversation: None,
                 graph: None,
                 rule: None,
+                policy_sha256: None,
                 outcome: Outcome {
                     result: "deny".into(),
                     reason: "r".into(),

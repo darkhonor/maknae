@@ -45,7 +45,7 @@ impl Authorizer for SleepAuthorizer {
     }
 }
 
-/// A backend returning an obligation the PEP has no handler for.
+/// A backend returning an obligation the PEP has no handler for, on a cited rule.
 pub struct HostileObligation;
 
 impl Authorizer for HostileObligation {
@@ -55,6 +55,18 @@ impl Authorizer for HostileObligation {
                 id: "exfil".into(),
                 params: maknae_security::Attributes::new(),
             }],
+        }
+    }
+
+    fn decide_cited(&self, r: &Request) -> maknae_security::Decided {
+        maknae_security::Decided {
+            verdict: self.decide(r),
+            role: None,
+            rule: Some(maknae_security::RuleCitation {
+                node: 1,
+                key: "rule:permissions:allow:0".into(),
+                section: "hostile#permissions".into(),
+            }),
         }
     }
 }

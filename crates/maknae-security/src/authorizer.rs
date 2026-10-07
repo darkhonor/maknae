@@ -20,10 +20,12 @@ pub struct SubjectBinding {
 }
 
 /// The policy rule a decision was made on: its node in the backend's compiled
-/// graph and the section of the policy source that declared it.
+/// graph, its key (which, unlike the node, is the same in every compile of the
+/// same file), and the section of the policy source that declared it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuleCitation {
     pub node: u64,
+    pub key: String,
     pub section: String,
 }
 
@@ -81,6 +83,14 @@ pub trait Authorizer {
             role,
             rule: None,
         }
+    }
+
+    /// [`Authorizer::decide_cited`] for each request, in order, all from one
+    /// view of the policy: a reload cannot land between two of them. The
+    /// default is per-request, which is that for a backend with no replaceable
+    /// state; a wrapper that delegates `decide_cited` must delegate this too.
+    fn decide_cited_all(&self, reqs: &[Request]) -> Vec<Decided> {
+        reqs.iter().map(|r| self.decide_cited(r)).collect()
     }
 
     /// The bindings this PDP would resolve **right now**, for
@@ -251,9 +261,15 @@ mod tests {
             role: Some("admin"),
             rule: Some(RuleCitation {
                 node: 7,
+                key: "k".into(),
                 section: "s".into(),
             }),
         };
+        assert_eq!(
+            OnlyDecides.decide_cited_all(&[req(), req()]),
+            vec![OnlyDecides.decide_cited(&req()); 2]
+        );
+        assert!(OnlyDecides.decide_cited_all(&[]).is_empty());
         let pair: (Verdict, Option<&'static str>) = d.into();
         assert_eq!(pair, (Verdict::Indeterminate, Some("admin")));
     }

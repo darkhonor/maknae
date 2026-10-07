@@ -241,8 +241,9 @@ fn prepare(
 type DecidedBy = (Option<&'static str>, Option<maknae_security::RuleCitation>);
 type AuthorizeErr = (String, String, DecidedBy);
 
-/// Returns the role and rule of the last decision evaluated, in both arms: on a
-/// deny, the path that refused (#275).
+/// Decides every path from one snapshot. Returns the role of the last path
+/// decided, in both arms (on a deny, the path that refused, #275), and that
+/// path's rule unless the refusal came after the PDP permitted.
 fn authorize<P: Authorizer>(
     prepared: &PreparedMutation,
     verb: &Verb,
@@ -251,40 +252,51 @@ fn authorize<P: Authorizer>(
     authorizer: &P,
     policy_name: &str,
 ) -> Result<(DecidedBy, maknae_proto::ObjectLabel), AuthorizeErr> {
+    let requests: Vec<_> = prepared
+        .paths
+        .iter()
+        .map(|path| {
+            let mut request = build_authz_request(verb, uid, home, Lane::Local, None);
+            request
+                .resource
+                .0
+                .insert("path", AttrValue::Str(path.clone()));
+            request.context.0.insert(
+                maknae_security::CONTEXT_FS_OPERATION,
+                AttrValue::Str(prepared.kind.as_str().into()),
+            );
+            request
+        })
+        .collect();
     let mut decided: DecidedBy = (None, None);
-    let mut last = None;
-    for path in &prepared.paths {
-        let mut request = build_authz_request(verb, uid, home, Lane::Local, None);
-        request
-            .resource
-            .0
-            .insert("path", AttrValue::Str(path.clone()));
-        request.context.0.insert(
-            maknae_security::CONTEXT_FS_OPERATION,
-            AttrValue::Str(prepared.kind.as_str().into()),
-        );
+    for (path, d) in prepared
+        .paths
+        .iter()
+        .zip(maknae_security::guarded_decide_cited_all(
+            authorizer, &requests,
+        ))
+    {
+        decided = (d.role, d.rule);
         // `combine(vec![..])` preserved: it is what produces the
         // "indeterminate operand blocks (fail-closed)" trail string.
-        let d = maknae_security::guarded_decide_cited(authorizer, &request);
-        decided = (d.role, d.rule);
         match maknae_security::finalize(maknae_security::combine(vec![d.verdict])) {
             Decision::Permit { obligations } => discharge_plan(&obligations).map_err(|_| {
                 (
                     "unhonorable mutation obligation".to_string(),
                     path.clone(),
-                    decided.clone(),
+                    (decided.0, None),
                 )
             })?,
             Decision::Deny { reason } => return Err((reason, path.clone(), decided)),
         }
-        last = Some((request, path));
     }
-    let (request, path) = last.expect("prepared nonempty paths");
-    let label = object_label(policy_name, &request).ok_or_else(|| {
+    let path = prepared.paths.last().expect("prepared nonempty paths");
+    let request = requests.last().expect("one request per path");
+    let label = object_label(policy_name, request).ok_or_else(|| {
         (
             "object label unresolved".to_string(),
             path.clone(),
-            decided.clone(),
+            (decided.0, None),
         )
     })?;
     Ok((decided, label))
@@ -533,10 +545,7 @@ where
         Err((_, _, by)) => by,
     };
     record.subject.role = role.map(str::to_string);
-    record.rule = rule.as_ref().map(|c| maknae_audit_append::RuleAudit {
-        node: c.node,
-        section: c.section.clone(),
-    });
+    record.rule = rule.as_ref().map(crate::run::rule_audit);
     let label = match decision {
         Ok((_, label)) => label,
         Err((reason, denied_path, _)) => {
@@ -1483,5 +1492,113 @@ mod tests {
         std::fs::hard_link(&target, fx.root.join("second-link")).unwrap();
         assert!(prepare(write(), held(), &fx.root, fx.principal.uid, Lane::Local).is_err());
         assert_eq!(std::fs::read(target).unwrap(), b"sentinel");
+    }
+    struct ReloadsAfterEachDecision {
+        pdp: crate::Composition<maknae_authz_basic::HermeticAuthorizer>,
+        policy: std::path::PathBuf,
+        next: String,
+    }
+    impl ReloadsAfterEachDecision {
+        fn reload(&self) {
+            std::fs::write(&self.policy, &self.next).unwrap();
+            self.pdp.baseline().reload_from_file().unwrap();
+        }
+    }
+    impl Authorizer for ReloadsAfterEachDecision {
+        fn decide(&self, request: &maknae_security::Request) -> maknae_security::Verdict {
+            self.decide_cited(request).verdict
+        }
+        fn decide_cited(&self, request: &maknae_security::Request) -> maknae_security::Decided {
+            let d = self.pdp.decide_cited(request);
+            self.reload();
+            d
+        }
+        fn decide_cited_all(
+            &self,
+            requests: &[maknae_security::Request],
+        ) -> Vec<maknae_security::Decided> {
+            let all = self.pdp.decide_cited_all(requests);
+            self.reload();
+            all
+        }
+    }
+    #[tokio::test]
+    async fn a_reload_between_paths_cannot_split_a_mutation_across_snapshots() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let pdp = fixture_pdp(&fx);
+        let policy = fx.root.join("authz.yaml");
+        let next = std::fs::read_to_string(&policy)
+            .unwrap()
+            .replace("deny: []", "deny:\n    - \"Write(~/one/two)\"");
+        let pdp = ReloadsAfterEachDecision { pdp, policy, next };
+        let verb = fx.mkdir(true, vec!["one".into(), "two".into()]);
+        let prepared = prepare(
+            verb.clone(),
+            Some(fx.fd()),
+            &fx.root,
+            fx.principal.uid,
+            Lane::Local,
+        )
+        .unwrap();
+        assert_eq!(prepared.paths.len(), 2);
+        let (by, _) = authorize(
+            &prepared,
+            &verb,
+            fx.principal.uid,
+            Some(&fx.root),
+            &pdp,
+            "US",
+        )
+        .expect("both paths decided on the snapshot in force when the mutation began");
+        let rule = by.1.expect("the permit cites its allow rule");
+        assert!(rule.section.ends_with("#permissions"), "{rule:?}");
+        let (reason, path, _) = authorize(
+            &prepared,
+            &verb,
+            fx.principal.uid,
+            Some(&fx.root),
+            &pdp,
+            "US",
+        )
+        .unwrap_err();
+        assert!(reason.contains("Write(~/one/two)"), "{reason}");
+        assert_eq!(path, prepared.paths[1]);
+    }
+    #[tokio::test]
+    async fn a_refusal_after_the_pdp_permitted_cites_no_rule() {
+        let _turn = EUID_TURN.lock().await;
+        let fx = Fixture::new();
+        let pdp = fixture_pdp(&fx);
+        let verb = fx.mkdir(false, vec!["two".into()]);
+        let prepared = prepare(
+            verb.clone(),
+            Some(fx.fd()),
+            &fx.root,
+            fx.principal.uid,
+            Lane::Local,
+        )
+        .unwrap();
+        let (by, _) = authorize(
+            &prepared,
+            &verb,
+            fx.principal.uid,
+            Some(&fx.root),
+            &pdp,
+            "US",
+        )
+        .unwrap();
+        assert!(by.1.is_some(), "the permit itself cites a rule");
+        let (reason, _, by) = authorize(
+            &prepared,
+            &verb,
+            fx.principal.uid,
+            Some(&fx.root),
+            &pdp,
+            "NO-SUCH-SYSTEM",
+        )
+        .unwrap_err();
+        assert_eq!(reason, "object label unresolved");
+        assert_eq!(by, (Some("user"), None));
     }
 }

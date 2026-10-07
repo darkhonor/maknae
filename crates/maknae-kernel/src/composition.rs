@@ -34,8 +34,8 @@
 use crate::ceiling_authz::CeilingAuthorizer;
 use maknae_authz_basic::Baseline;
 use maknae_security::{
-    compose_backend_name, compose_decide_cited, compose_subjects, Authorizer, Decided, Request,
-    SubjectBinding, Verdict,
+    compose_backend_name, compose_decide_cited, compose_decide_cited_all, compose_subjects,
+    Authorizer, Decided, Request, SubjectBinding, Verdict,
 };
 
 /// The daemon's PDP: baseline ∧ ceiling, deny-overrides.
@@ -98,6 +98,10 @@ impl<B: Baseline> Authorizer for Composition<B> {
     /// runs.
     fn decide_cited(&self, req: &Request) -> Decided {
         compose_decide_cited(&self.operands(), req)
+    }
+
+    fn decide_cited_all(&self, reqs: &[Request]) -> Vec<Decided> {
+        compose_decide_cited_all(&self.operands(), reqs)
     }
 
     fn subjects(&self) -> Option<Vec<SubjectBinding>> {
@@ -316,6 +320,11 @@ mod tests {
             refused.rule, None,
             "a ceiling Deny never cites the baseline's allow"
         );
+        let batch = [
+            permitted_read(&g.0),
+            permitted_read_marked(&g.0, Some("TOP SECRET")),
+        ];
+        assert_eq!(c.decide_cited_all(&batch), vec![flows, refused]);
     }
 
     #[test]
