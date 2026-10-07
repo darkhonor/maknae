@@ -1975,15 +1975,8 @@ mod tests {
         }
     }
 
-    /// The golden equivalence matrix: the file-based oracle and the compiled
-    /// snapshot answer every cell with the same `(Verdict, role)`, reason strings
-    /// and notes included.
-    ///
-    /// Not cells: a uid bound under two names in two roles refuses at load on both
-    /// sides, so no decision exists to compare. Not visible here: the order of the
-    /// `contained` and `binds` hops (a built graph never carries both edges) and the
-    /// in-memory policy edges (both sides evaluate the same policy); the snapshot's
-    /// own structural tests cover those.
+    /// File-resolved vs graph-resolved roles over one shared evaluator, compared as
+    /// full `(Verdict, role)`; the evaluator itself is pinned by decide.rs's golden vectors.
     mod equivalence {
         use super::*;
         use maknae_security::FsOperation;
@@ -1996,7 +1989,7 @@ mod tests {
         ];
         const EXPLICIT: &str =
             "bindings: { admin: [alex], user: [ursula], guest: [gus], adversary: [mallory] }\n";
-        const GRANTS: &str = "roles: { admin: { allow: [admin.status, admin.subject.list], deny: [admin.config.show] }, user: { allow: [session.prompt] } }\ndestinations: { user: { allow: [\"provider:openai\"] }, admin: { allow: [\"provider:anthropic\"] } }\n";
+        const GRANTS: &str = "roles: { admin: { allow: [admin.status, admin.subject.list, session.prompt], deny: [admin.config.show] }, user: { allow: [session.prompt] } }\ndestinations: { user: { allow: [\"provider:openai\"] }, admin: { allow: [\"provider:anthropic\"] } }\n";
 
         fn policies() -> Vec<(&'static str, PolicySource)> {
             let uids: &[(&str, u32)] = BASE_UIDS;
@@ -2149,15 +2142,33 @@ mod tests {
             );
             let destinations = [
                 Some(AttrValue::Str("provider:openai".into())),
+                Some(AttrValue::Str("provider:anthropic".into())),
                 Some(AttrValue::Str("provider:other".into())),
                 None,
             ];
 
+            fn distinct<T: std::fmt::Debug>(v: &[T]) -> usize {
+                v.iter()
+                    .map(|x| format!("{x:?}"))
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+            }
+            assert_eq!(
+                (
+                    distinct(&terms),
+                    distinct(&uids),
+                    distinct(&paths),
+                    distinct(&homes),
+                    distinct(&ops),
+                    distinct(&destinations),
+                ),
+                (59, 9, 22, 5, 7, 4)
+            );
             let mut cells = 0usize;
             let mut mismatches: Vec<String> = Vec::new();
             let mut roles_seen = std::collections::BTreeSet::new();
             let mut arms: std::collections::BTreeMap<&'static str, Arms> = Default::default();
-            let mut grant_arms = (false, false);
+            let mut grant_arms = (false, false, false);
             for (variant, src) in policies() {
                 let auth = BasicAuthorizer::from_snapshot(
                     principal(),
@@ -2171,7 +2182,10 @@ mod tests {
                     let snap = auth.decide_reporting_role(&req);
                     roles_seen.insert(oracle.1);
                     match (&oracle.0, req.action.0.as_str()) {
-                        (Verdict::Permit { .. }, "session.prompt") => grant_arms.0 = true,
+                        (Verdict::Permit { .. }, "session.prompt") if oracle.1 == Some("user") => {
+                            grant_arms.0 = true
+                        }
+                        (Verdict::Permit { .. }, "session.prompt") => grant_arms.2 = true,
                         (Verdict::Deny { reason }, _)
                             if reason.starts_with("denied by role grant ") =>
                         {
@@ -2261,7 +2275,7 @@ mod tests {
                 &mismatches[..mismatches.len().min(10)]
             );
             let fs_cells = 4 * 7 * 22 * 5 + 7 * 22 * 5;
-            let other_cells = 54 + 3;
+            let other_cells = 54 + 4;
             assert_eq!(cells, 4 * 9 * (fs_cells + other_cells));
             assert_eq!(
                 roles_seen,
@@ -2277,7 +2291,7 @@ mod tests {
             );
             assert_eq!(
                 grant_arms,
-                (true, true),
+                (true, true, true),
                 "the grants variant must decide by grant"
             );
             for role in ["admin", "user"] {
