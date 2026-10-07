@@ -354,15 +354,17 @@ not a decision). Do not read one as the other.
 `{"key":"rule:permissions:allow:3","node":95,"section":"/etc/maknae/authz.yaml#permissions"}`
 for the fourth `allow` entry of `permissions:`, or a `rule:roles.admin:allow:0` key in
 section `/etc/maknae/authz.yaml#roles.admin` for a role grant. The `key` names the
-entry by section, effect and position and stays the same while the file does; `node`
-is the rule's node in the compiled policy and is renumbered by any reload that changes
-the bindings, so it identifies a rule only within one policy. Match the record to the
-policy in force by `policy_sha256`, which the boot `authz` record and each
-`graph.reload` outcome carry (see "What the trail shows" under the reload section).
+entry by section, effect and position. `node` is the rule's node in the compiled
+policy; node numbers shift on any recompile that adds a node, and two daemons running
+the same `authz.yaml` over different store histories can number the same rule
+differently. Identify a rule by `policy_sha256` and `key` together, never by `node`:
+`policy_sha256` names the policy in force, and the boot `authz` record and each
+`graph.reload` outcome carry it (see "What the trail shows" under the reload section).
 A decision no rule made (a structural role decision such as liveness, or
 deny-by-default) has no `rule` block, and neither does a deny made after the PDP
-permitted (an unhonorable obligation, or a mutation whose object label could not be
-resolved). An `fs.mkdir` with `parents` decides every directory it creates from one
+permitted (an unhonorable obligation, an `admin.subject.list` whose bindings could not
+be enumerated, a prompt whose send did not go out, or a mutation whose object label
+could not be resolved). An `fs.mkdir` with `parents` decides every directory it creates from one
 policy, and its record cites the rule for the last directory decided: on a permit,
 the requested directory; on a deny, the one refused.
 
@@ -913,7 +915,7 @@ Both send `SIGHUP`, as does `kill -HUP <pid>` for a daemon started by hand. The 
 | Outcome, applied | `action:"graph.reload"`, `result:"permit"`, posture `authorized`, reason `reload applied: revision <n>; identity persisted` (or `identity unchanged`), `graph.anchor:"reloaded"`, and `policy_sha256` of the policy now in force |
 | Outcome, refused | `action:"graph.reload"`, `result:"deny"`, posture `unavailable`, reason `reload refused: <cause>`, where the cause starts `policy load:`, `compile:` or `persist:`, or is `shutdown`; `graph.anchor:"reload-refused"`, and `policy_sha256` of the policy that stands |
 
-`policy_sha256` is the SHA-256 of one `<section>=<sha256 of the section's canonical JSON>` line per top-level section of `authz.yaml`, in section-name order. Two loads of the same policy carry the same value, and a reload that changed only `permissions:`, which leaves the store as it was, still carries a new one.
+`policy_sha256` is the SHA-256 of one `<section>=<sha256 of the section's canonical JSON>` line per top-level section of `authz.yaml`, in section-name order. Two loads of the same policy carry the same value, and a reload that changed only `permissions:`, which leaves the store as it was, still carries a new one. It covers the text of `authz.yaml` only, not the uids its names resolve to: a reload after only a bound account's uid changed carries the same `policy_sha256` and a new `graph.revision`, which tells the two apart.
 
 ```bash
 sudo jq -c 'select(.action=="graph.reload") | {ts, session_id, result: .outcome.result, reason: .outcome.reason, policy: .policy_sha256}' /var/log/maknae/audit.jsonl | tail -n 2
