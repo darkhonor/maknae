@@ -794,6 +794,27 @@ fn state_dir_requires_owner_and_private_mode() {
 }
 
 #[test]
+fn a_second_state_dir_open_is_refused_while_the_first_lives() {
+    let fx = Fixture::new();
+    let _first = fx.dir();
+    assert_eq!(
+        StateDir::open_with_marker_owner(fx.path(), fx.uid, fx.uid).unwrap_err(),
+        StoreError::InUse
+    );
+    assert_eq!(
+        StateDir::open(fx.path(), fx.uid).unwrap_err(),
+        StoreError::InUse
+    );
+}
+
+#[test]
+fn the_lock_is_released_when_the_state_dir_drops() {
+    let fx = Fixture::new();
+    drop(fx.dir());
+    StateDir::open(fx.path(), fx.uid).expect("the first StateDir released its lock");
+}
+
+#[test]
 fn store_error_display() {
     assert_eq!(
         StoreError::Io("gone".into()).to_string(),
@@ -802,6 +823,10 @@ fn store_error_display() {
     assert_eq!(
         StoreError::StateDir("mode".into()).to_string(),
         "graph state directory refused: mode"
+    );
+    assert_eq!(
+        StoreError::InUse.to_string(),
+        "another maknaed holds the kernel graph state directory"
     );
     assert_eq!(
         StoreError::StoreFileRefused("too large".into()).to_string(),
@@ -1185,6 +1210,7 @@ fn each_store_error_has_its_remedy() {
         (StoreError::StateDir("mode".into()), Remedy::CheckStateDir),
         (StoreError::Io("EACCES".into()), Remedy::CheckStateDir),
         (StoreError::Audit("down".into()), Remedy::CheckAudit),
+        (StoreError::InUse, Remedy::StopOtherInstance),
     ];
     for (e, want) in cases {
         assert_eq!(remedy(&e), want, "{e:?}");

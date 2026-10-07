@@ -9,8 +9,8 @@ use maknae_graph::kernel::SCHEMA;
 use maknae_graph::record::GraphSpace;
 use maknae_graph::schema::CompiledSet;
 use maknae_io::{
-    open_anchor, Anchor, AnchorRequired, IoError, IoKind, Mode, StrategyPref, TargetRequired,
-    Zeroizing,
+    open_anchor, Anchor, AnchorLock, AnchorRequired, IoError, IoKind, Mode, StrategyPref,
+    TargetRequired, Zeroizing,
 };
 use std::fmt;
 use std::future::Future;
@@ -29,6 +29,7 @@ const STORE_MODE: Mode = Mode(0o600);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreError {
     StateDir(String),
+    InUse,
     StoreFileRefused(String),
     Io(String),
     Envelope(EnvelopeError),
@@ -43,6 +44,7 @@ impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::StateDir(cause) => write!(f, "graph state directory refused: {cause}"),
+            Self::InUse => write!(f, "another maknaed holds the kernel graph state directory"),
             Self::StoreFileRefused(cause) => {
                 write!(f, "graph store file {STORE_FILE} refused: {cause}")
             }
@@ -78,6 +80,7 @@ pub enum Remedy {
     Reinstall,
     Reseed,
     CheckStateDir,
+    StopOtherInstance,
     CheckStoreFile,
     ClearRejectedName,
     CheckAudit,
@@ -92,6 +95,7 @@ pub fn remedy(e: &StoreError) -> Remedy {
         StoreError::StoreFileRefused(_) => Remedy::CheckStoreFile,
         StoreError::RejectedNameInUse { .. } => Remedy::ClearRejectedName,
         StoreError::StateDir(_) | StoreError::Io(_) => Remedy::CheckStateDir,
+        StoreError::InUse => Remedy::StopOtherInstance,
         StoreError::Audit(_) => Remedy::CheckAudit,
     }
 }
@@ -105,6 +109,7 @@ impl From<IoError> for StoreError {
 #[derive(Debug)]
 pub struct StateDir {
     anchor: Anchor,
+    _lock: AnchorLock,
     owner: u32,
     marker_owner: u32,
 }
@@ -135,8 +140,13 @@ impl StateDir {
             StrategyPref::Auto,
         )
         .map_err(|e| StoreError::StateDir(e.to_string()))?;
+        let lock = anchor.try_lock_exclusive().map_err(|e| match e {
+            IoError::Locked { .. } => StoreError::InUse,
+            e => StoreError::StateDir(e.to_string()),
+        })?;
         Ok(StateDir {
             anchor,
+            _lock: lock,
             owner,
             marker_owner,
         })

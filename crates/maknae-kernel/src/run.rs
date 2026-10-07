@@ -3062,6 +3062,10 @@ fn graph_refusal(failure: GraphFailure, state_dir: &Path) -> RunError {
                  mode 0700",
                 state_dir.display()
             ),
+            Remedy::StopOtherInstance => format!(
+                "another maknaed is already running against {}; stop it before starting this one",
+                state_dir.display()
+            ),
             Remedy::CheckAudit => "the audit trail anchors the graph store; check that the \
                  audit file is readable"
                 .to_string(),
@@ -3113,7 +3117,7 @@ async fn boot_kernel_graph(
     key: Result<maknae_vault::GraphKey, maknae_vault::VaultError>,
     sink: &Arc<maknae_audit_append::AuditSink>,
     ctx: &BootCtx<'_>,
-) -> Result<maknae_proto::KernelGraphStatus, RunError> {
+) -> Result<(StateDir, maknae_proto::KernelGraphStatus), RunError> {
     let key = key.map_err(|e| graph_refusal(GraphFailure::Key(e), state_dir))?;
     let dir = StateDir::open(state_dir, ctx.euid)
         .map_err(|e| graph_refusal(GraphFailure::Store(e), state_dir))?;
@@ -3141,7 +3145,8 @@ async fn boot_kernel_graph(
     .await
     .map_err(|e| store_refusal(e, state_dir))?;
     report_graph_boot(sink.as_ref(), ctx, state_dir, &report).await?;
-    Ok(kernel_graph_status(&report))
+    let status = kernel_graph_status(&report);
+    Ok((dir, status))
 }
 
 /// What the boot did that the operator did not ask for: an ignored reseed marker, and
@@ -3507,22 +3512,22 @@ async fn boot_after_sink(
         .map_err(|e| boot_evidence_refused("composition", e))?;
     let authorizer = Arc::new(authorizer);
 
-    let kernel_graph = Arc::new(Some(
-        boot_kernel_graph(
-            state_dir,
-            graph_key(config_dir),
-            sink,
-            &BootCtx {
-                host,
-                socket,
-                euid,
-                session_id: boot_session_id(session_ids),
-                seq: boot_seq,
-                au3_1: &audit_cfg.au3_1,
-            },
-        )
-        .await?,
-    ));
+    // Bound for the serve's lifetime: the StateDir holds the one-maknaed state-dir lock.
+    let (_state_dir_lock, graph_status) = boot_kernel_graph(
+        state_dir,
+        graph_key(config_dir),
+        sink,
+        &BootCtx {
+            host,
+            socket,
+            euid,
+            session_id: boot_session_id(session_ids),
+            seq: boot_seq,
+            au3_1: &audit_cfg.au3_1,
+        },
+    )
+    .await?;
+    let kernel_graph = Arc::new(Some(graph_status));
 
     // Plane credential: resolve + read this plane's SecretID source (spec §5.1),
     // authenticate, then mint a memory-only leaf below; the credential supervisor then
@@ -4647,6 +4652,13 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         fx: &GraphFixture,
         key: Result<maknae_vault::GraphKey, maknae_vault::VaultError>,
     ) -> Result<maknae_proto::KernelGraphStatus, RunError> {
+        boot_graph_held(fx, key).map(|(_, status)| status)
+    }
+
+    fn boot_graph_held(
+        fx: &GraphFixture,
+        key: Result<maknae_vault::GraphKey, maknae_vault::VaultError>,
+    ) -> Result<(StateDir, maknae_proto::KernelGraphStatus), RunError> {
         let seq = Seq::new();
         let au3_1 = serde_json::Value::Null;
         let ctx = BootCtx {
@@ -4727,6 +4739,30 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             recs[1].0.graph.as_ref().unwrap().ciphertext_sha256
         );
         assert!(g.scanned_bytes > 0, "the restart scanned the trail");
+    }
+
+    #[test]
+    fn a_second_boot_while_the_first_holds_the_state_dir_refuses_with_exit_5() {
+        let fx = graph_fixture("graph_in_use");
+        let (_held, status) = boot_graph_held(&fx, key()).unwrap();
+        assert_eq!(status.revision, 1);
+        let result = boot_graph(&fx, key()).map(|_| ServeOutcome::GracefulShutdown);
+        let Err(e @ RunError::Graph { reason, hint }) = &result else {
+            panic!("expected Err(RunError::Graph), got {result:?}");
+        };
+        assert_eq!(
+            reason,
+            "kernel graph store: another maknaed holds the kernel graph state directory"
+        );
+        assert_eq!(
+            hint,
+            &format!(
+                "another maknaed is already running against {}; stop it before starting this one",
+                fx.state.display()
+            )
+        );
+        assert_eq!(refusal_exit_code(e), GRAPH_REFUSAL_EXIT_CODE);
+        assert_eq!(trail(&fx).len(), 2, "the refused boot appended nothing");
     }
 
     #[test]
