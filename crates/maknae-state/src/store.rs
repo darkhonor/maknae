@@ -1,6 +1,8 @@
 use crate::anchor::{assess, AnchorState, BootAction, Checkpoint, Refusal, StoreFacts};
-use crate::envelope::{ciphertext_digest, open, seal, EnvelopeError, WrappingKey};
-use maknae_graph::format;
+use crate::envelope::{
+    ciphertext_digest, open, seal, EnvelopeError, WrappingKey, ENVELOPE_VERSION,
+};
+use maknae_graph::format::{self, FormatError, FORMAT_VERSION};
 use maknae_graph::graph::{Graph, GraphBuilder};
 use maknae_graph::kernel::SCHEMA;
 use maknae_graph::record::GraphSpace;
@@ -30,6 +32,7 @@ pub enum StoreError {
     Format(String),
     Refused(Refusal),
     Audit(String),
+    NewerStore(String),
 }
 
 impl fmt::Display for StoreError {
@@ -40,6 +43,10 @@ impl fmt::Display for StoreError {
             Self::Format(cause) => write!(f, "graph store does not decode: {cause}"),
             Self::Refused(r) => write!(f, "{r}"),
             Self::Audit(cause) => write!(f, "graph store audit failed: {cause}"),
+            Self::NewerStore(detail) => write!(
+                f,
+                "the graph store was written by a newer maknaed: {detail}"
+            ),
         }
     }
 }
@@ -161,10 +168,33 @@ pub trait BootAudit {
     ) -> impl Future<Output = Result<(), StoreError>> + Send;
 }
 
+fn classify_envelope(e: EnvelopeError) -> StoreError {
+    match e {
+        EnvelopeError::UnsupportedVersion(v) if v.cmp(&ENVELOPE_VERSION).is_gt() => {
+            StoreError::NewerStore(e.to_string())
+        }
+        e => StoreError::Envelope(e),
+    }
+}
+
+fn classify_format(e: FormatError) -> StoreError {
+    match e {
+        FormatError::UnsupportedFormatVersion(v) if v.cmp(&FORMAT_VERSION).is_gt() => {
+            StoreError::NewerStore(e.to_string())
+        }
+        FormatError::UnsupportedSchemaVersion { found, expected }
+            if found.cmp(&expected).is_gt() =>
+        {
+            StoreError::NewerStore(e.to_string())
+        }
+        e => StoreError::Format(e.to_string()),
+    }
+}
+
 fn decode_store(file: &[u8], key: &WrappingKey) -> Result<(Graph, StoreFacts), StoreError> {
-    let plain = open(file, key)?;
+    let plain = open(file, key).map_err(classify_envelope)?;
     let graph = format::decode(&plain, GraphSpace::Kernel, &SCHEMA, &CompiledSet::default())
-        .map_err(|e| StoreError::Format(e.to_string()))?;
+        .map_err(classify_format)?;
     let facts = StoreFacts {
         revision: graph.revision(),
         digest: ciphertext_digest(file),

@@ -702,3 +702,134 @@ fn store_error_display() {
         "graph store audit failed: down"
     );
 }
+
+fn encoded_graph(revision: u64) -> Vec<u8> {
+    let g = GraphBuilder::new(GraphSpace::Kernel, revision)
+        .build(&SCHEMA, &CompiledSet::default())
+        .unwrap();
+    format::encode(&g)
+}
+
+fn patch_u16(bytes: &mut [u8], at: usize, v: u16) {
+    bytes[at..at + 2].copy_from_slice(&v.to_le_bytes());
+}
+
+async fn boot_store(file: &[u8], k: &WrappingKey) -> StoreError {
+    let fx = Fixture::new();
+    fx.write(STORE_FILE, file, 0o600);
+    run(&fx.dir(), k, None).await.0.unwrap_err()
+}
+
+fn sealed_with_graph_field(at: usize, v: u16, k: &WrappingKey) -> Vec<u8> {
+    let mut plain = encoded_graph(1);
+    patch_u16(&mut plain, at, v);
+    envelope::seal(&plain, k).unwrap()
+}
+
+#[tokio::test]
+async fn a_newer_envelope_version_is_a_newer_store() {
+    let k = key(1);
+    let mut file = sealed_graph(1, &k);
+    patch_u16(&mut file, 4, 2);
+    let e = boot_store(&file, &k).await;
+    assert_eq!(
+        e,
+        StoreError::NewerStore(EnvelopeError::UnsupportedVersion(2).to_string())
+    );
+}
+
+#[tokio::test]
+async fn an_older_envelope_version_is_corruption() {
+    let k = key(1);
+    let mut file = sealed_graph(1, &k);
+    patch_u16(&mut file, 4, 0);
+    assert_eq!(
+        boot_store(&file, &k).await,
+        StoreError::Envelope(EnvelopeError::UnsupportedVersion(0))
+    );
+}
+
+#[tokio::test]
+async fn a_newer_graph_format_version_is_a_newer_store() {
+    let k = key(1);
+    let e = boot_store(&sealed_with_graph_field(4, 2, &k), &k).await;
+    assert_eq!(
+        e,
+        StoreError::NewerStore(format::FormatError::UnsupportedFormatVersion(2).to_string())
+    );
+}
+
+#[tokio::test]
+async fn an_older_graph_format_version_is_a_format_error() {
+    let k = key(1);
+    let e = boot_store(&sealed_with_graph_field(4, 0, &k), &k).await;
+    assert_eq!(
+        e,
+        StoreError::Format(format::FormatError::UnsupportedFormatVersion(0).to_string())
+    );
+}
+
+#[tokio::test]
+async fn a_newer_schema_version_is_a_newer_store() {
+    let k = key(1);
+    let e = boot_store(&sealed_with_graph_field(6, 2, &k), &k).await;
+    assert_eq!(
+        e,
+        StoreError::NewerStore(
+            format::FormatError::UnsupportedSchemaVersion {
+                found: 2,
+                expected: 1
+            }
+            .to_string()
+        )
+    );
+}
+
+#[tokio::test]
+async fn an_older_schema_version_is_a_format_error() {
+    let k = key(1);
+    let e = boot_store(&sealed_with_graph_field(6, 0, &k), &k).await;
+    assert_eq!(
+        e,
+        StoreError::Format(
+            format::FormatError::UnsupportedSchemaVersion {
+                found: 0,
+                expected: 1
+            }
+            .to_string()
+        )
+    );
+}
+
+#[tokio::test]
+async fn reseed_over_a_newer_store_preserves_it_and_seeds_past_the_checkpoint() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let mut file = sealed_graph(9, &k);
+    patch_u16(&mut file, 4, 2);
+    fx.write(STORE_FILE, &file, 0o600);
+    fx.mark(0o644);
+    let cp = Some(Checkpoint {
+        revision: 3,
+        digest: [0; 32],
+    });
+    let r = run(&fx.dir(), &k, cp).await.0.unwrap();
+    let name = format!("{REJECTED_PREFIX}{NOW}");
+    assert_eq!(r.revision, 4);
+    assert_eq!(
+        r.outcome,
+        BootOutcome::Seeded {
+            authorized: true,
+            rejected: Some(name.clone())
+        }
+    );
+    assert_eq!(fs::read(fx.file(&name)).unwrap(), file);
+}
+
+#[test]
+fn newer_store_display() {
+    assert_eq!(
+        StoreError::NewerStore("v2".into()).to_string(),
+        "the graph store was written by a newer maknaed: v2"
+    );
+}
