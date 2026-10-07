@@ -870,28 +870,40 @@ With enroll's defaults and the subpath `openai`, the path is `maknae-kv/metadata
 
 ## The kernel graph store refuses to start
 
-`maknaed` keeps its enforcement state in an encrypted store, `kernel.graph`, in its state directory: `/var/lib/maknae` on Linux, `/usr/local/var/db/maknae/state` on macOS. Each start checks the store against the latest `graph.checkpoint` record in the audit trail, and refuses to start when the store cannot be trusted. A refusal exits with code 5 and writes two lines, the cause and the next step, to the journal (`journalctl -u maknaed`) on Linux or to `/usr/local/var/log/maknae/maknaed.err` on macOS:
+`maknaed` keeps its enforcement state in an encrypted store, `kernel.graph`, in its state directory: `/var/lib/maknae` on Linux, `/usr/local/var/db/maknae/state` on macOS. Each start checks the store against the latest `graph.checkpoint` record in the audit trail, and refuses to start when the store cannot be trusted. The refusal goes to the journal (`journalctl -u maknaed`) on Linux or to `/usr/local/var/log/maknae/maknaed.err` on macOS, as a first line naming the cause and, for every graph refusal, a second line naming the next step:
 
 ```text
 maknaed: refusing to start: kernel graph store: graph store revision 3 is older than the audited checkpoint 7: rolled back
-maknaed: if this is expected, run `sudo maknae reseed` and restart; a readable current store is kept for forensics
+maknaed: if this is expected, run `sudo maknae reseed` and restart; a readable current kernel.graph is kept for forensics
 ```
+
+**Exit codes:** a boot record that cannot be appended to the audit trail exits 1, graph records included; every other graph refusal exits 5.
 
 `maknae status` prints the store's state once the daemon runs, as `kernel graph: revision <n> (<state>)`.
 
+On an RPM host the package runs `restorecon -R` over `/var/lib/maknae`, which would relabel a foreign file hard-linked into the directory. It relies on `fs.protected_hardlinks=1`, the RHEL and Debian default; keep it set. `/var/log/maknae` has carried the same residual since before the graph store.
+
 ### The causes
 
-| The first line ends with | What happened | Recovery |
-|---|---|---|
-| `graph store revision <n> is older than the audited checkpoint <m>: rolled back` | an older copy of the store, from a backup or snapshot, was put back | reseed |
-| `graph store at revision <n> differs from the audited checkpoint: substituted` | the store is not the one the trail recorded at that revision | reseed |
-| `graph store is missing but the audit trail holds checkpoint <n>` | the store was deleted | reseed |
-| `the graph store does not decrypt: tampered or truncated`, `graph store does not decode: …`, or another envelope error such as `graph store is truncated` | the file is damaged, or it was encrypted under a different key | reseed |
-| `` no kernel graph key (…): run `sudo maknae enroll` `` | the host has no graph key. On Linux, systemd refuses the unit first, with `status=243/CREDENTIALS` | run `sudo maknae enroll` ([upgrading](upgrading.md#kernel-graph-store-488)), then restart |
-| `the kernel graph key is malformed (…)` | the key exists but is unusable | replace the key, below |
-| `the graph store was written by a newer maknaed: …` | a newer `maknaed` wrote the store, and this one is older | **reinstall the newer version. Do not reseed:** the store is valid, and a reseed replaces it |
-| `graph store I/O failed: …` | the state directory or the store has the wrong owner, mode or link count | the second line names the directory: it must be owned by `_maknae`, mode `0700` |
-| `graph store audit failed: …` | the audit trail could not be read or written | check `/var/log/maknae/audit.jsonl` |
+In the table, `<dir>` is the state directory. Each first line starts `maknaed: refusing to start: `, and each second line starts `maknaed: `; both prefixes are left out.
+
+| Cause | First line | Second line | Exit | What to do |
+|---|---|---|---|---|
+| Rolled back | `kernel graph store: graph store revision <n> is older than the audited checkpoint <m>: rolled back` | `` if this is expected, run `sudo maknae reseed` and restart; a readable current kernel.graph is kept for forensics `` | 5 | An older copy of the store, from a backup or snapshot, was put back. If you restored it yourself, reseed; otherwise investigate first. |
+| Substituted | `kernel graph store: graph store at revision <n> differs from the audited checkpoint: substituted` | as for rolled back | 5 | The store is not the one the trail recorded at that revision. Investigate, then reseed. |
+| Missing | `kernel graph store: graph store is missing but the audit trail holds checkpoint <n>` | as for rolled back | 5 | The store was deleted. Reseed. |
+| Revision exhausted | `kernel graph store: graph store revision is exhausted; reseed cannot advance it` | `no automatic remedy; keep <dir> as it is and investigate` | 5 | The revision counter is at its maximum, which no real history reaches. Leave the directory as it is and investigate. |
+| Does not decrypt | `kernel graph store: the graph store does not decrypt: tampered or truncated` | as for rolled back | 5 | The file is damaged. Reseed. The same second line follows the other envelope and decoding errors, such as `graph store is truncated` or `graph store does not decode: …`. |
+| Key does not unwrap | `kernel graph store: the graph store key does not unwrap: wrong key or tampered header` | as for rolled back | 5 | The store was written under a different key, or its header was altered. If the key was replaced, reseed; otherwise investigate first. |
+| Written by a newer version | `kernel graph store: the graph store was written by a newer maknaed: <detail>`, where `<detail>` is, for example, `unsupported graph store envelope version 2`, `unknown graph store cipher 2`, `unknown graph store key wrap 2`, `unsupported store format version 2` or `store schema version 2 differs from the binary's 1` | `this store was written by a newer maknaed; reinstall that version (do not reseed: that replaces a valid store)` | 5 | **Reinstall the newer version. Do not reseed:** the store is valid. |
+| Store file refused | `kernel graph store: graph store file kernel.graph refused: <cause>` | `fix the ownership and mode of <dir>/kernel.graph (it must be _maknae, 0600, one link, ≤64 MiB), then restart; do not reseed — the store may be valid` | 5 | Fix the file and restart. A pending reseed does not replace a file that cannot be read: the start refuses, the marker stays, and the reseed completes at the first start after the file is fixed. |
+| State directory refused | `kernel graph store: graph state directory refused: <cause>` | `check the ownership and mode of <dir>: it must be owned by the maknaed user, mode 0700` | 5 | Fix the directory: owner `_maknae`, mode `0700`. |
+| I/O failure while seeding | `kernel graph store: graph store I/O failed: <cause>` | as for the state directory | 5 | Writing the new store, its rejected copy or removing the marker failed. Check the directory and its file system. |
+| Audit trail unreadable | `kernel graph store: graph store audit failed: <cause>` | `the audit trail anchors the graph store; check that the audit file is readable` | 5 | Check `/var/log/maknae/audit.jsonl`. |
+| Audit append failure | `the boot graph record was not durably appended: <cause>`, or the same with `graph reseed` or `graph rejected-store` for `graph` | none | 1 | A boot record could not be written to the audit trail. Check the audit file and its file system. |
+| No key | `` kernel graph key: no kernel graph key (<detail>): run `sudo maknae enroll` `` | `` run `sudo maknae enroll` to create the kernel graph key `` | 5 | Run `sudo maknae enroll` ([upgrading](upgrading.md#kernel-graph-store-488)), then restart. On Linux systemd refuses the unit first, with `status=243/CREDENTIALS`. |
+| Malformed key | `kernel graph key: the kernel graph key is malformed (<why>)` | `` replace the key as the runbook's "Replace a malformed key" says: remove it, run `sudo maknae enroll`, then `sudo maknae reseed` `` | 5 | [Replace the key](#replace-a-malformed-key). |
+| Key unreadable | `kernel graph key: <cause>` | `` the kernel graph key could not be read; check the credential `sudo maknae enroll` created (enroll never replaces an existing key) `` | 5 | Check the credential's ownership and mode, or the keychain item. |
 
 ### Reseed
 
@@ -906,8 +918,9 @@ sudo launchctl kickstart -k system/io.maknae.maknaed    # macOS
 `sudo maknae reseed` reads and decrypts nothing. It writes a root-owned authorization marker, `reseed.authorized`, into the state directory, prints `reseed authorized; restart maknaed to seed a fresh kernel graph …`, and exits. At its next start `maknaed` finds the marker and seeds the store:
 
 - **A readable current store is kept** as `kernel.graph.rejected.<unix-seconds>.<16 hex digits>` in the state directory. The hex digits are the start of the store's ciphertext SHA-256. A rejected copy is never replaced: if that name exists, the existing file is kept.
-- **A store that cannot be read** (wrong owner, too large, more than one link) is not kept. The new store is written over it, and the trail records why.
-- **The trail records the reseed:** a `graph.seed` record, a `graph.rejected` record naming the kept copy (or why none was kept), and a `graph.checkpoint` record. `maknae status` then reports `reseeded`, and `verified` from the next restart on.
+- **Rejected copies are never pruned.** Each can be up to 64 MiB. Remove old `kernel.graph.rejected.*` files by hand once you no longer need them.
+- **A store that cannot be read** (wrong owner or mode, more than one link, too large) is never overwritten. The start refuses with `graph store file kernel.graph refused`, and the marker stays; fix the file and restart.
+- **The trail records the reseed:** a `graph.seed` record, a `graph.checkpoint` record and, when there was a store to keep, a `graph.rejected` record naming the kept copy. `maknae status` then reports `reseeded`, and `verified` from the next restart on.
 
 Run `sudo maknae reseed` from an unconfined session, as for enroll. On an SELinux host where administrators are confined users (`sysadm_t`), the marker write into the state directory (`maknae_state_t`) may be denied.
 
@@ -915,14 +928,14 @@ Run `sudo maknae reseed` from an unconfined session, as for enroll. On an SELinu
 
 ### Replace a malformed key
 
-The store cannot be read without its key, so a new key needs a reseed.
+The store cannot be read without its key, so a new key needs a reseed. `sudo maknae enroll` never replaces an existing key, so remove it first.
 
 1. Remove the key. Linux: `sudo rm /etc/maknae/private/maknaed-graph-key.cred`. macOS: `sudo security delete-generic-password -a secret-id -s io.maknae.maknaed.graph /Library/Keychains/System.keychain`.
-2. Run `sudo maknae enroll` with your enrollment arguments. It creates a new key.
-3. Reseed, as above.
+2. Run `sudo maknae enroll` with your enrollment arguments. It creates a new key, and warns `a kernel graph store already exists and cannot be opened with the new key; run sudo maknae reseed`.
+3. Run `sudo maknae reseed`, then restart `maknaed`, as above.
 
-**The same holds whenever enroll creates a key while a store exists,** for example after the key was deleted by hand: the store, encrypted under the old key, no longer decrypts, and the daemon refuses with `the graph store does not decrypt`. Reseed.
+**The same holds whenever enroll creates a key while a store exists,** for example after the key was deleted by hand: enroll prints the same warning, the store no longer decrypts, and without a reseed the daemon refuses with `the graph store key does not unwrap: wrong key or tampered header`. Reseed.
 
 ### `rollback-anchor-unavailable`
 
-When the audit trail holds no `graph.checkpoint` record, for example after you rotate or restore the audit file by hand, the daemon cannot tell whether the store was rolled back. It starts anyway, records `rollback-anchor-unavailable`, and `maknae status` reports it. That start writes a new checkpoint into the new file, so the next restart reports `verified`. Until then a rolled-back store would not be detected: rotate the audit file only while you trust the state directory.
+When the audit trail holds no `graph.checkpoint` record, for example after you rotate or restore the audit file by hand, the daemon cannot tell whether the store was rolled back. It starts anyway and records `rollback-anchor-unavailable`, and `maknae status` reports it until the next restart. That start also writes a new checkpoint, so from the next restart on the store is checked against it and `maknae status` reports `verified`. A store rolled back before that start is not detected, and the new checkpoint anchors it: rotate the audit file only while you trust the state directory.

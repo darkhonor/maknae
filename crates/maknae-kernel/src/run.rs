@@ -494,7 +494,6 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     // Captured ONCE at boot from the booted config (ADR-0022): the system
     // `core.handling.policy` selected, by name.
     classification_policy_name: Arc<String>,
-    // Captured ONCE at boot from the graph store's boot report (#488).
     kernel_graph: Arc<Option<maknae_proto::KernelGraphStatus>>,
     providers: Arc<Option<crate::provider_choice::ProviderAuthority>>,
     // #172: the egress backend behind the seam. `Unavailable` in Cooky.
@@ -2697,10 +2696,9 @@ const AUTHZ_REFUSAL_EXIT_CODE: u8 = 3;
 /// other startup failure without parsing stderr.
 const AUDIT_OFFLOAD_REFUSAL_EXIT_CODE: u8 = 4;
 
-/// The distinct process exit code for [`RunError::Graph`] (#488).
 const GRAPH_REFUSAL_EXIT_CODE: u8 = 5;
 
-/// A graph record that cannot be appended is a boot-evidence failure (`Other`, exit 1).
+/// Boot-evidence append failures, graph records included, exit 1; every other graph refusal exits 5.
 fn refusal_exit_code(e: &RunError) -> u8 {
     match e {
         RunError::Authz(_) => AUTHZ_REFUSAL_EXIT_CODE,
@@ -3027,16 +3025,26 @@ fn graph_refusal(failure: GraphFailure, state_dir: &Path) -> RunError {
         GraphFailure::Key(maknae_vault::VaultError::GraphKeyAbsent(_)) => {
             "run `sudo maknae enroll` to create the kernel graph key".to_string()
         }
+        GraphFailure::Key(maknae_vault::VaultError::GraphKey(_)) => {
+            "replace the key as the runbook's \"Replace a malformed key\" says: remove it, run \
+             `sudo maknae enroll`, then `sudo maknae reseed`"
+                .to_string()
+        }
         GraphFailure::Key(_) => "the kernel graph key could not be read; check the credential \
              `sudo maknae enroll` created (enroll never replaces an existing key)"
             .to_string(),
         GraphFailure::Store(e) => match remedy(e) {
             Remedy::Reinstall => "this store was written by a newer maknaed; reinstall that \
-                 version (do not reseed: that destroys a valid store)"
+                 version (do not reseed: that replaces a valid store)"
                 .to_string(),
             Remedy::Reseed => format!(
                 "if this is expected, run `sudo maknae reseed` and restart; a readable current \
                  {STORE_FILE} is kept for forensics"
+            ),
+            Remedy::CheckStoreFile => format!(
+                "fix the ownership and mode of {}/{STORE_FILE} (it must be _maknae, 0600, one \
+                 link, ≤64 MiB), then restart; do not reseed — the store may be valid",
+                state_dir.display()
             ),
             Remedy::CheckStateDir => format!(
                 "check the ownership and mode of {}: it must be owned by the maknaed user, \
@@ -3088,7 +3096,6 @@ fn unix_now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-/// #488: open, verify or seed the kernel graph store, auditing each transition.
 /// Runs before the accept loop, so the blocking audit scan contends with no append.
 async fn boot_kernel_graph(
     state_dir: &Path,
@@ -4829,13 +4836,15 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         ] {
             assert!(hint(f).contains(reseed));
         }
-        let unreadable = hint(GraphFailure::Store(StoreError::Unreadable(
+        let refused = hint(GraphFailure::Store(StoreError::StoreFileRefused(
             "too large".into(),
         )));
-        assert!(
-            unreadable.contains(reseed) && unreadable.contains("kernel.graph"),
-            "{unreadable}"
+        assert_eq!(
+            refused,
+            "fix the ownership and mode of /var/lib/maknae/kernel.graph (it must be _maknae, \
+             0600, one link, ≤64 MiB), then restart; do not reseed — the store may be valid"
         );
+        assert!(!refused.contains(reseed), "{refused}");
         for f in [
             GraphFailure::Store(StoreError::Io("EACCES".into())),
             GraphFailure::Store(StoreError::StateDir("mode".into())),
@@ -4866,8 +4875,17 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             "not exactly 32 bytes",
         )));
         assert!(
-            !malformed.contains(reseed) && malformed != absent,
+            malformed.contains("Replace a malformed key")
+                && malformed.contains("sudo maknae enroll`, then `sudo maknae reseed"),
             "{malformed}"
+        );
+        let unreadable_key = hint(GraphFailure::Key(maknae_vault::VaultError::Io {
+            path: "/run/credentials/maknaed.service/maknaed-graph-key".into(),
+            source: std::io::Error::other("EACCES"),
+        }));
+        assert!(
+            !unreadable_key.contains(reseed) && unreadable_key != absent,
+            "{unreadable_key}"
         );
     }
 
@@ -4890,17 +4908,30 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
     }
 
     #[test]
-    fn an_unreadable_store_file_refuses_naming_it_and_reseed() {
+    fn an_unreadable_store_file_refuses_naming_it_and_never_reseed() {
         let fx = graph_fixture("graph_unreadable");
         put(&fx.state, "kernel.graph", "anything", 0o644);
         match boot_graph(&fx, key()) {
-            Err(RunError::Graph { reason, hint }) => {
-                assert!(reason.contains("kernel.graph is unreadable"), "{reason}");
-                assert!(hint.contains("sudo maknae reseed"), "{hint}");
+            Err(e @ RunError::Graph { .. }) => {
+                assert_eq!(refusal_exit_code(&e), GRAPH_REFUSAL_EXIT_CODE);
+                let RunError::Graph { reason, hint } = e else {
+                    unreachable!()
+                };
+                assert!(
+                    reason
+                        .starts_with("kernel graph store: graph store file kernel.graph refused: "),
+                    "{reason}"
+                );
+                assert!(hint.contains("do not reseed"), "{hint}");
+                assert!(!hint.contains("sudo maknae reseed"), "{hint}");
             }
             other => panic!("expected Err(RunError::Graph), got {other:?}"),
         }
         assert!(trail(&fx).is_empty());
+        assert_eq!(
+            std::fs::read_to_string(fx.state.join("kernel.graph")).unwrap(),
+            "anything"
+        );
     }
 
     #[test]

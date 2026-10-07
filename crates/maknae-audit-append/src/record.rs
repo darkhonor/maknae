@@ -332,7 +332,6 @@ pub struct AuditRecord {
     /// client-supplied, informational.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation: Option<String>,
-    /// The kernel graph store block of a `graph.*` record (#488); absent on every other record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph: Option<GraphAudit>,
     pub outcome: Outcome,

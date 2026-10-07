@@ -1329,13 +1329,47 @@ enum GraphKeyAction {
     Keep,
 }
 
-/// R-S2-2: the graph key is created only when absent and never rotated; a new
-/// key cannot open the existing graph store.
 fn graph_key_action(present: bool) -> GraphKeyAction {
     if present {
         GraphKeyAction::Keep
     } else {
         GraphKeyAction::Create
+    }
+}
+
+fn graph_store_warning(action: GraphKeyAction, store_present: bool) -> bool {
+    action == GraphKeyAction::Create && store_present
+}
+
+/// Any outcome but NotFound, on the directory or the store, counts as present.
+fn graph_store_present(state_dir: &Path, owner: u32) -> bool {
+    let not_found = |e: &maknae_io::IoError| {
+        matches!(
+            e,
+            maknae_io::IoError::Io {
+                kind: maknae_io::IoKind::NotFound,
+                ..
+            }
+        )
+    };
+    let required = maknae_io::AnchorRequired {
+        owner: Some(owner),
+        mode_mask: Some(0o077),
+    };
+    let anchor = match maknae_io::open_anchor(state_dir, required, maknae_io::StrategyPref::Auto) {
+        Ok(anchor) => anchor,
+        Err(e) => return !not_found(&e),
+    };
+    let probe = maknae_io::TargetRequired {
+        owner: Some(owner),
+        mode_mask: Some(0o077),
+        nlink_exactly_one: true,
+        regular_file: true,
+        max_bytes: Some(0),
+    };
+    match anchor.read(Path::new(maknae_config::state::STORE_FILE), None, probe) {
+        Ok(_) => true,
+        Err(e) => !not_found(&e),
     }
 }
 
@@ -1414,7 +1448,12 @@ async fn place_graph_key(
         .find(|a| a.content == artifact_table::ContentKind::SealedGraphKey)
         .expect("artifact_table always emits exactly one SealedGraphKey row");
     let path = custody.path.display().to_string();
-    match graph_key_action(graph_key_present(&custody.path).await?) {
+    let action = graph_key_action(graph_key_present(&custody.path).await?);
+    let store_present = match crate::reseed::kernel_uid() {
+        Ok(uid) => graph_store_present(Path::new(maknae_config::state::STATE_DIR), uid),
+        Err(_) => false,
+    };
+    match action {
         GraphKeyAction::Create => {
             store_graph_key(
                 maknae_vault::GraphKey::generate()?,
@@ -1429,6 +1468,9 @@ async fn place_graph_key(
                 "{}",
                 msg(locale, MsgId::EnrollGraphKeyCreated).replace("{path}", &path)
             );
+            if graph_store_warning(action, store_present) {
+                eprintln!("{}", msg(locale, MsgId::EnrollGraphStoreExists));
+            }
         }
         GraphKeyAction::Keep => println!(
             "{}",
@@ -2508,6 +2550,46 @@ mod tests {
     fn the_graph_key_is_created_only_when_absent() {
         assert_eq!(graph_key_action(false), GraphKeyAction::Create);
         assert_eq!(graph_key_action(true), GraphKeyAction::Keep);
+    }
+
+    #[test]
+    fn enroll_warns_only_when_it_creates_a_key_beside_an_existing_store() {
+        assert!(graph_store_warning(GraphKeyAction::Create, true));
+        assert!(!graph_store_warning(GraphKeyAction::Create, false));
+        assert!(!graph_store_warning(GraphKeyAction::Keep, true));
+        assert!(!graph_store_warning(GraphKeyAction::Keep, false));
+    }
+
+    #[test]
+    fn the_graph_store_is_present_unless_the_directory_or_the_store_is_not_found() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let base = std::env::temp_dir().join(format!("maknae-graph-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let state = base.join("state");
+        let me = std::fs::metadata(&base).unwrap().uid();
+        assert!(!graph_store_present(&state, me));
+        std::fs::create_dir(&state).unwrap();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(!graph_store_present(&state, me));
+        let store = state.join(maknae_config::state::STORE_FILE);
+        std::fs::write(&store, b"sealed").unwrap();
+        std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(graph_store_present(&state, me));
+        std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(graph_store_present(&state, me));
+        assert!(graph_store_present(&state, me.wrapping_add(1)));
+        std::fs::remove_file(&store).unwrap();
+        assert!(!graph_store_present(&state, me));
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn the_store_warning_names_reseed() {
+        assert_eq!(
+            msg(Locale::EnUs, MsgId::EnrollGraphStoreExists),
+            "a kernel graph store already exists and cannot be opened with the new key; run sudo maknae reseed"
+        );
     }
 
     #[test]

@@ -188,6 +188,22 @@ pub fn graph_key_from_bytes(bytes: &[u8]) -> Result<GraphKey, VaultError> {
     Ok(GraphKey(key))
 }
 
+pub(crate) fn graph_key_from_credential(
+    path: &Path,
+    read: Result<Zeroizing<Vec<u8>>, VaultError>,
+) -> Result<GraphKey, VaultError> {
+    match read {
+        Ok(bytes) => graph_key_from_bytes(&bytes),
+        Err(VaultError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => Err(
+            VaultError::GraphKeyAbsent(format!("{} does not exist", path.display())),
+        ),
+        Err(VaultError::Io { source, .. }) if source.kind() == std::io::ErrorKind::FileTooLarge => {
+            Err(VaultError::GraphKey(GRAPH_KEY_LENGTH))
+        }
+        Err(e) => Err(e),
+    }
+}
+
 pub fn graph_key_from_hex(text: &str) -> Result<GraphKey, VaultError> {
     let hex = text.as_bytes();
     if hex.len() != 2 * GRAPH_KEY_BYTES {
@@ -568,6 +584,53 @@ mod tests {
                 "{n}"
             );
         }
+    }
+
+    #[test]
+    fn a_graph_key_credential_read_is_classified_absent_malformed_or_refused() {
+        let path = Path::new("/run/credentials/maknaed.service/maknaed-graph-key");
+        let io = |kind: std::io::ErrorKind| {
+            Err(VaultError::Io {
+                path: path.to_path_buf(),
+                source: std::io::Error::from(kind),
+            })
+        };
+        let key: Vec<u8> = (1u8..=32).collect();
+        assert_eq!(
+            *graph_key_from_credential(path, Ok(Zeroizing::new(key.clone())))
+                .unwrap()
+                .into_bytes(),
+            key[..]
+        );
+        assert!(matches!(
+            graph_key_from_credential(path, Ok(Zeroizing::new(vec![1; 31]))),
+            Err(VaultError::GraphKey(GRAPH_KEY_LENGTH))
+        ));
+        match graph_key_from_credential(path, io(std::io::ErrorKind::NotFound)) {
+            Err(VaultError::GraphKeyAbsent(detail)) => assert_eq!(
+                detail,
+                "/run/credentials/maknaed.service/maknaed-graph-key does not exist"
+            ),
+            other => panic!("expected GraphKeyAbsent, got {other:?}"),
+        }
+        assert!(matches!(
+            graph_key_from_credential(path, io(std::io::ErrorKind::FileTooLarge)),
+            Err(VaultError::GraphKey(GRAPH_KEY_LENGTH))
+        ));
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::IsADirectory,
+            std::io::ErrorKind::Other,
+        ] {
+            match graph_key_from_credential(path, io(kind)) {
+                Err(VaultError::Io { source, .. }) => assert_eq!(source.kind(), kind),
+                other => panic!("expected Io for {kind:?}, got {other:?}"),
+            }
+        }
+        assert!(matches!(
+            graph_key_from_credential(path, Err(VaultError::Random)),
+            Err(VaultError::Random)
+        ));
     }
 
     #[test]

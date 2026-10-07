@@ -1561,6 +1561,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn of_two_adjacent_checkpoints_the_newer_is_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = quiet_sink(dir.path());
+        for (seq, action) in [
+            (1, "a"),
+            (2, "b"),
+            (3, "graph.checkpoint"),
+            (4, "graph.checkpoint"),
+        ] {
+            sink.append(&scan_record(action, seq, 0)).await.unwrap();
+        }
+        let hit = sink.scan_back(action_is("graph.checkpoint")).unwrap();
+        let rec: AuditRecord = serde_json::from_slice(&hit.line.unwrap()).unwrap();
+        assert_eq!(rec.seq, 4);
+    }
+
+    #[tokio::test]
     async fn checkpoint_found_across_window_boundaries() {
         const MIB: usize = 1 << 20;
         let dir = tempfile::tempdir().unwrap();

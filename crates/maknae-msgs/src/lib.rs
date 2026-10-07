@@ -57,6 +57,8 @@ pub enum MsgId {
     EnrollGraphKeyCreated,
     /// The kernel graph key was present and kept (never rotated). Carries `{path}`.
     EnrollGraphKeyKept,
+    /// Enroll created a graph key while a kernel graph store exists.
+    EnrollGraphStoreExists,
     /// Re-exec'd operator-context CLI provisioning (spec §4.1 step 7).
     EnrollProvisioningCli,
     /// The final posture summary. Carries a `{cli_dir}` placeholder.
@@ -114,6 +116,7 @@ pub const ALL: &[MsgId] = &[
     MsgId::EnrollSealKeyKept,
     MsgId::EnrollGraphKeyCreated,
     MsgId::EnrollGraphKeyKept,
+    MsgId::EnrollGraphStoreExists,
     MsgId::EnrollProvisioningCli,
     MsgId::EnrollPostureSummary,
     MsgId::EnrollReloginNote,
@@ -286,6 +289,7 @@ mod tests {
                 | MsgId::EnrollSealKeyKept
                 | MsgId::EnrollGraphKeyCreated
                 | MsgId::EnrollGraphKeyKept
+                | MsgId::EnrollGraphStoreExists
                 | MsgId::EnrollProvisioningCli
                 | MsgId::EnrollPostureSummary
                 | MsgId::EnrollReloginNote
@@ -301,7 +305,7 @@ mod tests {
                 | MsgId::HelperStillPrivileged => {}
             }
         }
-        const VARIANT_COUNT: usize = 34;
+        const VARIANT_COUNT: usize = 35;
         assert_eq!(ALL.len(), VARIANT_COUNT);
         for &id in ALL {
             assert_covered(id);

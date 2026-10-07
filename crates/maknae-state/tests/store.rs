@@ -565,55 +565,144 @@ async fn reseed_preserves_an_undecryptable_store() {
 }
 
 #[tokio::test]
-async fn reseed_replaces_an_unreadable_store() {
+async fn an_authorized_reseed_refuses_an_unreadable_store_and_completes_once_it_is_fixed() {
     let fx = Fixture::new();
     let k = key(1);
-    fx.write(STORE_FILE, &sealed_graph(9, &k), 0o644);
+    let valid = sealed_graph(9, &k);
+    fx.write(STORE_FILE, &valid, 0o644);
     fx.mark(0o644);
-    let (r, _) = run(&fx.dir(), &k, None).await;
-    let r = r.unwrap();
-    assert_eq!(r.revision, 1);
-    match r.outcome {
-        BootOutcome::Seeded {
-            authorized: true,
-            rejected: Some(why),
-        } => assert!(
-            why.starts_with("not preserved: insecure permissions"),
-            "{why}"
-        ),
-        other => panic!("unexpected outcome {other:?}"),
+    let (r, events) = run(&fx.dir(), &k, None).await;
+    match r.unwrap_err() {
+        StoreError::StoreFileRefused(cause) => {
+            assert!(cause.contains("insecure permissions"), "{cause}")
+        }
+        other => panic!("unexpected error {other:?}"),
     }
-    assert!(fx.rejected().is_empty());
-    assert_eq!(revision_of(&fx.store(), &k), 1);
+    assert!(events.is_empty());
+    assert_eq!(fx.store(), valid);
     assert_eq!(
         fs::metadata(fx.file(STORE_FILE)).unwrap().mode() & 0o777,
-        0o600
+        0o644
     );
+    assert!(fx.rejected().is_empty());
+    assert!(fx.exists(MARKER_FILE));
+
+    fs::set_permissions(fx.file(STORE_FILE), fs::Permissions::from_mode(0o600)).unwrap();
+    let r = run(&fx.dir(), &k, None).await.0.unwrap();
+    assert_eq!(r.revision, 10);
+    assert_eq!(
+        r.outcome,
+        BootOutcome::Seeded {
+            authorized: true,
+            rejected: Some(rejected_name(&valid))
+        }
+    );
+    assert_eq!(fs::read(fx.file(&rejected_name(&valid))).unwrap(), valid);
     assert!(!fx.exists(MARKER_FILE));
 }
 
 #[tokio::test]
-async fn unreadable_store_without_a_marker_refuses_as_io() {
+async fn unreadable_store_without_a_marker_is_a_refused_store_file() {
     let fx = Fixture::new();
     let k = key(1);
     fx.write(STORE_FILE, &sealed_graph(1, &k), 0o644);
     let (r, events) = run(&fx.dir(), &k, None).await;
     match r.unwrap_err() {
-        StoreError::Unreadable(cause) => assert!(cause.contains("insecure permissions"), "{cause}"),
+        StoreError::StoreFileRefused(cause) => {
+            assert!(cause.contains("insecure permissions"), "{cause}")
+        }
         other => panic!("unexpected error {other:?}"),
     }
     assert!(events.is_empty());
 }
 
 #[tokio::test]
-async fn reseed_over_a_directory_store_fails_as_io() {
+async fn reseed_over_a_directory_store_is_refused_before_any_intent() {
     let fx = Fixture::new();
     fs::create_dir(fx.file(STORE_FILE)).unwrap();
     fx.mark(0o644);
     let (r, events) = run(&fx.dir(), &key(1), None).await;
-    assert!(matches!(r.unwrap_err(), StoreError::Io(_)));
-    assert_eq!(events, vec![Event::Intent(1, true)]);
+    assert!(matches!(r.unwrap_err(), StoreError::StoreFileRefused(_)));
+    assert!(events.is_empty());
+    assert!(fx.file(STORE_FILE).is_dir());
     assert!(fx.exists(MARKER_FILE));
+}
+
+#[tokio::test]
+async fn no_unreadable_store_is_ever_overwritten_or_told_to_reseed() {
+    let k = key(1);
+    let valid = sealed_graph(3, &k);
+    type Plant = fn(&Fixture, &[u8]);
+    let plants: [(&str, Plant); 6] = [
+        ("group-readable", |fx, b| fx.write(STORE_FILE, b, 0o640)),
+        ("world-readable", |fx, b| fx.write(STORE_FILE, b, 0o604)),
+        ("group-writable", |fx, b| fx.write(STORE_FILE, b, 0o620)),
+        ("two links", |fx, b| {
+            fx.write(STORE_FILE, b, 0o600);
+            fs::hard_link(fx.file(STORE_FILE), fx.file("second-link")).unwrap();
+        }),
+        ("oversized", |fx, _| {
+            let f = fs::File::create(fx.file(STORE_FILE)).unwrap();
+            f.set_len(MAX_STORE_BYTES + 1).unwrap();
+            fs::set_permissions(fx.file(STORE_FILE), fs::Permissions::from_mode(0o600)).unwrap();
+        }),
+        ("symlink", |fx, b| {
+            fx.write("elsewhere", b, 0o600);
+            std::os::unix::fs::symlink("elsewhere", fx.file(STORE_FILE)).unwrap();
+        }),
+    ];
+    for (what, plant) in plants {
+        for marked in [false, true] {
+            let fx = Fixture::new();
+            plant(&fx, &valid);
+            if marked {
+                fx.mark(0o644);
+            }
+            let before = fs::symlink_metadata(fx.file(STORE_FILE)).unwrap();
+            let (r, events) = run(&fx.dir(), &k, None).await;
+            let e = r.unwrap_err();
+            assert!(
+                matches!(e, StoreError::StoreFileRefused(_)),
+                "{what} marked={marked}: {e:?}"
+            );
+            assert_eq!(remedy(&e), Remedy::CheckStoreFile, "{what}");
+            assert_ne!(remedy(&e), Remedy::Reseed, "{what}");
+            assert!(events.is_empty(), "{what} marked={marked}");
+            let after = fs::symlink_metadata(fx.file(STORE_FILE)).unwrap();
+            assert_eq!(
+                (before.ino(), before.mode(), before.len()),
+                (after.ino(), after.mode(), after.len()),
+                "{what} marked={marked}"
+            );
+            assert_eq!(fx.exists(MARKER_FILE), marked, "{what}");
+            assert!(fx.rejected().is_empty(), "{what}");
+        }
+    }
+}
+
+#[test]
+fn a_refused_store_file_never_maps_to_reseed() {
+    let causes = (0u8..=255)
+        .map(|b| String::from_utf8_lossy(&[b]).into_owned())
+        .chain(
+            [
+                "",
+                "reseed",
+                "insecure permissions 100644",
+                "too large",
+                "graph store does not decode",
+                "the graph store does not decrypt: tampered or truncated",
+                "graph store revision 3 is older than the audited checkpoint 7: rolled back",
+            ]
+            .map(String::from),
+        );
+    for cause in causes {
+        let e = StoreError::StoreFileRefused(cause.clone());
+        assert_eq!(remedy(&e), Remedy::CheckStoreFile, "{cause:?}");
+        assert!(e
+            .to_string()
+            .starts_with("graph store file kernel.graph refused: "));
+    }
 }
 
 #[tokio::test]
@@ -680,7 +769,7 @@ async fn oversized_store_refuses() {
     fs::set_permissions(fx.file(STORE_FILE), fs::Permissions::from_mode(0o600)).unwrap();
     let (r, _) = run(&fx.dir(), &key(1), None).await;
     match r.unwrap_err() {
-        StoreError::Unreadable(cause) => assert!(cause.contains("too large"), "{cause}"),
+        StoreError::StoreFileRefused(cause) => assert!(cause.contains("too large"), "{cause}"),
         other => panic!("unexpected error {other:?}"),
     }
 }
@@ -715,8 +804,8 @@ fn store_error_display() {
         "graph state directory refused: mode"
     );
     assert_eq!(
-        StoreError::Unreadable("too large".into()).to_string(),
-        "graph store kernel.graph is unreadable: too large"
+        StoreError::StoreFileRefused("too large".into()).to_string(),
+        "graph store file kernel.graph refused: too large"
     );
     assert_eq!(
         StoreError::Envelope(EnvelopeError::Decrypt).to_string(),
@@ -780,6 +869,38 @@ async fn an_older_envelope_version_is_corruption() {
         boot_store(&file, &k).await,
         StoreError::Envelope(EnvelopeError::UnsupportedVersion(0))
     );
+}
+
+#[tokio::test]
+async fn a_newer_cipher_or_wrap_id_is_a_newer_store() {
+    let k = key(1);
+    for (at, newer, err) in [
+        (6, 2, EnvelopeError::UnknownAead(2)),
+        (6, u16::MAX, EnvelopeError::UnknownAead(u16::MAX)),
+        (8, 2, EnvelopeError::UnknownWrap(2)),
+        (8, u16::MAX, EnvelopeError::UnknownWrap(u16::MAX)),
+    ] {
+        let mut file = sealed_graph(1, &k);
+        patch_u16(&mut file, at, newer);
+        let e = boot_store(&file, &k).await;
+        assert_eq!(e, StoreError::NewerStore(err.to_string()));
+        assert_eq!(remedy(&e), Remedy::Reinstall);
+    }
+}
+
+#[tokio::test]
+async fn a_zero_cipher_or_wrap_id_is_corruption() {
+    let k = key(1);
+    for (at, err) in [
+        (6, EnvelopeError::UnknownAead(0)),
+        (8, EnvelopeError::UnknownWrap(0)),
+    ] {
+        let mut file = sealed_graph(1, &k);
+        patch_u16(&mut file, at, 0);
+        let e = boot_store(&file, &k).await;
+        assert_eq!(e, StoreError::Envelope(err));
+        assert_eq!(remedy(&e), Remedy::Reseed);
+    }
 }
 
 #[tokio::test]
@@ -957,6 +1078,29 @@ async fn an_empty_file_at_the_rejected_name_is_never_replaced() {
     assert!(fs::read(fx.file(&name)).unwrap().is_empty());
 }
 
+#[tokio::test]
+async fn a_rejected_name_held_by_a_non_file_is_named_in_use_and_not_overwritten() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let old = sealed_graph(4, &k);
+    fx.write(STORE_FILE, &old, 0o600);
+    let name = rejected_name(&old);
+    fs::create_dir(fx.file(&name)).unwrap();
+    fx.mark(0o644);
+    let r = run(&fx.dir(), &k, None).await.0.unwrap();
+    match r.outcome {
+        BootOutcome::Seeded {
+            authorized: true,
+            rejected: Some(why),
+        } => {
+            assert!(why.starts_with(&format!("{name} (name in use: ")), "{why}");
+            assert!(why.ends_with("; not overwritten)"), "{why}");
+        }
+        other => panic!("unexpected outcome {other:?}"),
+    }
+    assert!(fx.file(&name).is_dir());
+}
+
 #[test]
 fn each_store_error_has_its_remedy() {
     let cases = [
@@ -982,7 +1126,10 @@ fn each_store_error_has_its_remedy() {
         ),
         (StoreError::Envelope(EnvelopeError::Decrypt), Remedy::Reseed),
         (StoreError::Format("bad".into()), Remedy::Reseed),
-        (StoreError::Unreadable("too large".into()), Remedy::Reseed),
+        (
+            StoreError::StoreFileRefused("too large".into()),
+            Remedy::CheckStoreFile,
+        ),
         (StoreError::StateDir("mode".into()), Remedy::CheckStateDir),
         (StoreError::Io("EACCES".into()), Remedy::CheckStateDir),
         (StoreError::Audit("down".into()), Remedy::CheckAudit),

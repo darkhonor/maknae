@@ -1,6 +1,7 @@
 use crate::anchor::{assess, AnchorState, BootAction, Checkpoint, Refusal, StoreFacts};
 use crate::envelope::{
-    ciphertext_digest, open, seal, EnvelopeError, WrappingKey, ENVELOPE_VERSION,
+    ciphertext_digest, open, seal, EnvelopeError, WrappingKey, AEAD_AES_256_GCM, ENVELOPE_VERSION,
+    WRAP_AES_256_GCM,
 };
 use maknae_graph::format::{self, FormatError, FORMAT_VERSION};
 use maknae_graph::graph::{Graph, GraphBuilder};
@@ -28,7 +29,7 @@ const STORE_MODE: Mode = Mode(0o600);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreError {
     StateDir(String),
-    Unreadable(String),
+    StoreFileRefused(String),
     Io(String),
     Envelope(EnvelopeError),
     Format(String),
@@ -41,7 +42,9 @@ impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::StateDir(cause) => write!(f, "graph state directory refused: {cause}"),
-            Self::Unreadable(cause) => write!(f, "graph store {STORE_FILE} is unreadable: {cause}"),
+            Self::StoreFileRefused(cause) => {
+                write!(f, "graph store file {STORE_FILE} refused: {cause}")
+            }
             Self::Io(cause) => write!(f, "graph store I/O failed: {cause}"),
             Self::Envelope(e) => write!(f, "{e}"),
             Self::Format(cause) => write!(f, "graph store does not decode: {cause}"),
@@ -63,13 +66,14 @@ impl From<EnvelopeError> for StoreError {
     }
 }
 
-/// The operator's next step for a boot failure. A store written by a newer `maknaed`
-/// is never `Reseed`: reseeding destroys a valid store.
+/// The operator's next step for a boot failure. A store written by a newer `maknaed`,
+/// or one that could not be read, is never `Reseed`: reseeding replaces a valid store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Remedy {
     Reinstall,
     Reseed,
     CheckStateDir,
+    CheckStoreFile,
     CheckAudit,
     Investigate,
 }
@@ -78,10 +82,8 @@ pub fn remedy(e: &StoreError) -> Remedy {
     match e {
         StoreError::NewerStore(_) => Remedy::Reinstall,
         StoreError::Refused(Refusal::RevisionExhausted) => Remedy::Investigate,
-        StoreError::Refused(_)
-        | StoreError::Envelope(_)
-        | StoreError::Format(_)
-        | StoreError::Unreadable(_) => Remedy::Reseed,
+        StoreError::Refused(_) | StoreError::Envelope(_) | StoreError::Format(_) => Remedy::Reseed,
+        StoreError::StoreFileRefused(_) => Remedy::CheckStoreFile,
         StoreError::StateDir(_) | StoreError::Io(_) => Remedy::CheckStateDir,
         StoreError::Audit(_) => Remedy::CheckAudit,
     }
@@ -151,8 +153,8 @@ impl StateDir {
         }
     }
 
-    /// Any outcome but NotFound means the name is taken; `max_bytes: 0` avoids reading it.
-    fn taken(&self, name: &str) -> bool {
+    /// `None` when the name is free; `max_bytes: 0` avoids reading it.
+    fn taken(&self, name: &str) -> Option<String> {
         let probe = TargetRequired {
             owner: Some(self.owner),
             mode_mask: Some(0o077),
@@ -160,13 +162,14 @@ impl StateDir {
             regular_file: true,
             max_bytes: Some(0),
         };
-        !matches!(
-            self.anchor.read(Path::new(name), None, probe),
+        match self.anchor.read(Path::new(name), None, probe) {
             Err(IoError::Io {
                 kind: IoKind::NotFound,
                 ..
-            })
-        )
+            }) => None,
+            Ok(_) | Err(IoError::TargetTooLarge { .. }) => Some("already preserved".to_string()),
+            Err(e) => Some(format!("name in use: {e}; not overwritten")),
+        }
     }
 
     fn read_store(&self) -> Result<Option<Zeroizing<Vec<u8>>>, IoError> {
@@ -238,11 +241,21 @@ fn newer_schema(found: u16, expected: u16) -> bool {
     found > expected
 }
 
+fn newer_aead(id: u16) -> bool {
+    id > AEAD_AES_256_GCM
+}
+
+fn newer_wrap(id: u16) -> bool {
+    id > WRAP_AES_256_GCM
+}
+
 fn classify_envelope(e: EnvelopeError) -> StoreError {
     match e {
         EnvelopeError::UnsupportedVersion(v) if newer_envelope(v) => {
             StoreError::NewerStore(e.to_string())
         }
+        EnvelopeError::UnknownAead(a) if newer_aead(a) => StoreError::NewerStore(e.to_string()),
+        EnvelopeError::UnknownWrap(w) if newer_wrap(w) => StoreError::NewerStore(e.to_string()),
         e => StoreError::Envelope(e),
     }
 }
@@ -294,8 +307,7 @@ pub async fn boot(
             }
             Prior::Readable(file)
         }
-        Err(e) if !authorized => return Err(StoreError::Unreadable(e.to_string())),
-        Err(e) => Prior::Unreadable(format!("not preserved: {e}")),
+        Err(e) => return Err(StoreError::StoreFileRefused(e.to_string())),
     };
 
     let mut report = match (
@@ -332,7 +344,6 @@ pub async fn boot(
 enum Prior {
     Absent,
     Readable(Zeroizing<Vec<u8>>),
-    Unreadable(String),
 }
 
 async fn seed(
@@ -353,14 +364,14 @@ async fn seed(
                 .map(|b| format!("{b:02x}"))
                 .collect();
             let name = format!("{REJECTED_PREFIX}{now_unix}.{tag}");
-            if dir.taken(&name) {
-                Some(format!("{name} (already preserved)"))
-            } else {
-                dir.publish(&name, &bytes)?;
-                Some(name)
+            match dir.taken(&name) {
+                Some(why) => Some(format!("{name} ({why})")),
+                None => {
+                    dir.publish(&name, &bytes)?;
+                    Some(name)
+                }
             }
         }
-        Prior::Unreadable(cause) => Some(cause),
     };
     let graph = GraphBuilder::new(GraphSpace::Kernel, revision)
         .build(&SCHEMA, &CompiledSet::default())

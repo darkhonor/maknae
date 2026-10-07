@@ -541,7 +541,7 @@ why = "#153: reads the Egress Daemon's seal private key from $CREDENTIALS_DIRECT
 
 [[t3]]
 path = "crates/maknae-vault/src/graph_key_io.rs"
-why = "#488: reads the kernel graph key from $CREDENTIALS_DIRECTORY (Linux) or from the System-keychain item the graph pointer under <config_dir>/private names (macOS); the source choice, the 32-byte length and the hex codec are T1 in secret_source.rs, and the pointer and account gate are keychain_policy.rs. The credential arm is unit-tested on every OS, the keychain arm up to the account gate on macOS; mutation-excluded like seal_key_io.rs"
+why = "#488: reads the kernel graph key from $CREDENTIALS_DIRECTORY (Linux) or from the System-keychain item the graph pointer under <config_dir>/private names (macOS); the source choice, the absent/malformed/I-O classification of the credential read (graph_key_from_credential), the 32-byte length and the hex codec are T1 in secret_source.rs, and the pointer and account gate are keychain_policy.rs. This file only performs the two reads; the credential arm is unit-tested on every OS, the keychain arm up to the account gate on macOS; mutation-excluded like seal_key_io.rs"
 
 [[t3]]
 path = "crates/maknae-seal/src/lib.rs"
@@ -647,7 +647,7 @@ why = "#153: maknae login/logout orchestration — terminal check, account name,
 # tests even though the tier is T3 — see each file's module doc.
 [[t3]]
 path = "bins/maknae/src/enroll/mod.rs"
-why = "orchestration (spec §4.1 step order, privilege-descent re-exec, rollback/rotate, the seal-key placement) + clap arg structs; the pure pieces (preflight_check, parse_host_port, check_vault_layout, the YAML content builders proven through the CLI loader and the bounds parser, ProvisionJob's round trip, the rotate filter against a real OperatorClient, seal_key_action, seal_pub_home, the Generate order GENERATE_STEPS, the restart line) and the maknae-io readers and the one remover (os-release fallback and its two-symlink refusal, seal.pub and custody presence, retract_seal_pub, each against a real file) carry real unit tests but the file is bin orchestration code, T3 per the tiering constraint"
+why = "orchestration (spec §4.1 step order, privilege-descent re-exec, rollback/rotate, the seal-key placement) + clap arg structs; the pure pieces (preflight_check, parse_host_port, check_vault_layout, the YAML content builders proven through the CLI loader and the bounds parser, ProvisionJob's round trip, the rotate filter against a real OperatorClient, seal_key_action, graph_key_action, graph_store_warning, seal_pub_home, the Generate order GENERATE_STEPS, the restart line) and the maknae-io readers and the one remover (os-release fallback and its two-symlink refusal, seal.pub and custody presence, retract_seal_pub, each against a real file) carry real unit tests but the file is bin orchestration code, T3 per the tiering constraint"
 
 [[t3]]
 path = "bins/maknae/src/enroll/artifact_table.rs"
@@ -671,7 +671,7 @@ why = "#488: sudo maknae reseed — bin code, T3 per the tiering constraint. It 
 
 [[t3]]
 path = "bins/maknae/src/enroll/keychain_write.rs"
-why = "#76: enroll's keychain write and release-build checks — the pure builders and parsers (SecretID shape, the per-plane content check that routes the egress item to maknae-vault's seal_key_from_hex, the stdin add command, delete/find argv, keychain-line parse, the codesign requirement strings and team pin, Hardened Runtime/entitlement/ad-hoc refusal, embedded-requirement equality) carry unit tests on every target; on macOS, darwin tests prove that check_install_path accepts a hard-linked file, maps a missing binary to NotInstalled, and maps a non-root-owned install path to NotRootInstalled (not NotInstalled). The runners that call codesign/security remain operator-verified, not unit-tested"
+why = "#76: enroll's keychain write and release-build checks — the pure builders and parsers (SecretID shape, the per-plane content check that routes the egress item to maknae-vault's seal_key_from_hex, verification_plane, classify_find, the stdin add command, delete/find argv, keychain-line parse, the codesign requirement strings and team pin, Hardened Runtime/entitlement/ad-hoc refusal, embedded-requirement equality) carry unit tests on every target; on macOS, darwin tests prove that check_install_path accepts a hard-linked file, maps a missing binary to NotInstalled, and maps a non-root-owned install path to NotRootInstalled (not NotInstalled). The runners that call codesign/security remain operator-verified, not unit-tested"
 
 # maknae-msgs (PR-J1 Task 1): declaration-only string-table match arms, no
 # decision logic (precedent: maknae-config value.rs). The locale-detect +

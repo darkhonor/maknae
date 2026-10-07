@@ -17,7 +17,14 @@ sudo launchctl kickstart -k system/io.maknae.maknaed    # macOS
 
 Until you enroll, the daemon does not start, and each platform says so differently.
 
-- **Linux.** systemd refuses the unit before `maknaed` runs, because the unit loads a credential that does not exist yet. `systemctl status maknaed` shows `status=243/CREDENTIALS`, and the journal (`journalctl -u maknaed`) names the missing `/etc/maknae/private/maknaed-graph-key.cred`.
+- **Linux.** systemd refuses the unit before `maknaed` runs, because the unit loads a credential that does not exist yet. `systemctl status maknaed` shows `status=243/CREDENTIALS`, and the journal (`journalctl -u maknaed`) says:
+
+  ```text
+  Failed to set up credentials: Protocol error
+  Failed at step CREDENTIALS spawning /usr/bin/maknaed
+  ```
+
+  Neither line names the file. The missing credential is `/etc/maknae/private/maknaed-graph-key.cred`.
 - **macOS.** `maknaed` exits with code 5, and `/usr/local/var/log/maknae/maknaed.err` holds:
 
   ```text
@@ -35,3 +42,15 @@ Until you enroll, the daemon does not start, and each platform says so different
 The first start after enrolling seeds an empty store and records it on the audit trail. If the daemon refuses to start for any other graph-store reason, see [the kernel graph store refuses to start](runbook.md#the-kernel-graph-store-refuses-to-start).
 
 Uninstalling on macOS keeps the store and its keychain item, as it keeps `/etc/maknae` and the audit trail. A Debian purge removes `/var/lib/maknae`.
+
+---
+
+## `principal.home` is no longer accepted
+
+A host enrolled before #440 may still carry a `home:` line under `principal:` in `/etc/maknae/maknae.yaml`. Current `maknaed` refuses to start while any configuration file carries it, `maknae.yaml` or a `config.d/` member, and exits with code 3. The journal holds:
+
+```text
+maknaed: refusing to start: maknae daemon refused to start: the authorization policy could not be loaded: unknown key 'home' in 'principal'
+```
+
+Delete the `home:` line from the file that carries it, then restart `maknaed`. The [runbook](runbook.md#3b-upgrading-a-host-whose-principal-carries-home) has the details.

@@ -1,11 +1,10 @@
 use crate::keychain::{observe_pointer, read_plane_secret};
 use crate::keychain_policy::daemon_keychain_dir;
 use crate::secret_source::{
-    graph_key_from_bytes, graph_key_from_hex, resolve_graph_key_source, GraphKey, GraphKeySource,
-    GRAPH_KEY_LENGTH,
+    graph_key_from_credential, graph_key_from_hex, resolve_graph_key_source, GraphKey,
+    GraphKeySource,
 };
 use crate::{KeychainPlane, VaultError, GRAPH_KEY_BYTES};
-use std::io::ErrorKind;
 use std::path::Path;
 
 pub fn read_graph_key(
@@ -17,18 +16,10 @@ pub fn read_graph_key(
         Some(_) => None,
     };
     match resolve_graph_key_source(credentials_dir, pointer.as_deref())? {
-        GraphKeySource::CredentialsDirectory(path) => {
-            match crate::read_storage_within(&path, Some(GRAPH_KEY_BYTES as u64)) {
-                Ok(bytes) => graph_key_from_bytes(&bytes),
-                Err(VaultError::Io { source, .. }) if source.kind() == ErrorKind::NotFound => Err(
-                    VaultError::GraphKeyAbsent(format!("{} does not exist", path.display())),
-                ),
-                Err(VaultError::Io { source, .. }) if source.kind() == ErrorKind::FileTooLarge => {
-                    Err(VaultError::GraphKey(GRAPH_KEY_LENGTH))
-                }
-                Err(e) => Err(e),
-            }
-        }
+        GraphKeySource::CredentialsDirectory(path) => graph_key_from_credential(
+            &path,
+            crate::read_storage_within(&path, Some(GRAPH_KEY_BYTES as u64)),
+        ),
         GraphKeySource::Keychain(pointer) => {
             graph_key_from_hex(&read_plane_secret(&pointer, KeychainPlane::Graph)?)
         }

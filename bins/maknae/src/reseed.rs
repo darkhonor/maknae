@@ -80,7 +80,7 @@ pub(crate) fn write_reseed_marker(
     Ok(Marker::Written)
 }
 
-fn kernel_uid() -> Result<u32, String> {
+pub(crate) fn kernel_uid() -> Result<u32, String> {
     nix::unistd::User::from_name(KERNEL_USER)
         .map_err(|e| format!("user {KERNEL_USER}: {e}"))?
         .map(|u| u.uid.as_raw())

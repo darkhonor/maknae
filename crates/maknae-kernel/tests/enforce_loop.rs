@@ -2330,7 +2330,7 @@ async fn a_corrective_record_that_cannot_append_withholds_its_frame() {
 
 /// Case 3: an enumerated-but-unbuilt term, asked by the role that would own
 /// it. The trail states the roadmap fact; the wire stays indistinguishable
-/// from unauthorized (ruling R1 -- fingerprinting denied).
+/// from unauthorized (fingerprinting denied).
 #[tokio::test]
 async fn an_unbuilt_term_tells_the_admin_trail_the_roadmap_fact() {
     let fx = Fixture::new("note-unbuilt-admin");

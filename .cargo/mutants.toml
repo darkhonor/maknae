@@ -149,6 +149,10 @@ exclude_re = [
   "^crates/maknae-state/src/store\\.rs:[0-9]+:[0-9]+: replace > with >= in newer_format$",
   # #488: decode() errors only on found != expected schema version, so `>=` is equivalent; held by a_newer_schema_version_is_a_newer_store / an_older_schema_version_is_a_format_error.
   "^crates/maknae-state/src/store\\.rs:[0-9]+:[0-9]+: replace > with >= in newer_schema$",
+  # #488: open() errors only on a cipher id != AEAD_AES_256_GCM, so an equal id never reaches this and `>=` is equivalent; held by a_newer_cipher_or_wrap_id_is_a_newer_store / a_zero_cipher_or_wrap_id_is_corruption.
+  "^crates/maknae-state/src/store\\.rs:[0-9]+:[0-9]+: replace > with >= in newer_aead$",
+  # #488: open() errors only on a wrap id != WRAP_AES_256_GCM, so `>=` is equivalent; held by the same two tests.
+  "^crates/maknae-state/src/store\\.rs:[0-9]+:[0-9]+: replace > with >= in newer_wrap$",
 ]
 
 exclude_globs = [
