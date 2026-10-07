@@ -112,7 +112,12 @@ install -d -m 0700 %{buildroot}%{_localstatedir}/lib/maknae
 %post
 %systemd_post maknaed.service maknae-egress.service maknae-egress.socket
 # Root-held until the audit lifecycle below hands it back to _maknae.
-chown root:root %{_localstatedir}/log/maknae || { echo "maknae: cannot hold %{_localstatedir}/log/maknae as root" >&2; exit 1; }
+d=%{_localstatedir}/log/maknae
+if [ ! -d "$d" ] || [ -h "$d" ] || ! chown 0:0 "$d" || ! setfacl -P -b "$d" || ! chmod 0700 "$d" \
+    || [ "$(stat -c '%%u %%g %%a' "$d")" != "0 0 700" ] || ! acl="$(getfacl -P -s -p "$d")" || [ -n "$acl" ]; then
+    echo "maknae: cannot hold $d as root:root 0700 with no ACL; it is left root-owned" >&2
+    exit 1
+fi
 # SELinux module + contexts
 semodule -i %{_datadir}/selinux/packages/maknae.pp 2>/dev/null || :
 restorecon -Rv %{_bindir}/maknaed %{_bindir}/maknae-egress %{_sysconfdir}/maknae %{_sysconfdir}/pki/maknae %{_localstatedir}/log/maknae %{_localstatedir}/lib/maknae 2>/dev/null || :

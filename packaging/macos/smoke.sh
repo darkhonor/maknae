@@ -93,8 +93,14 @@ phase1() {
     grep -qF 'verify "$STATE ownership/mode" "$MUID $MGID 700"' "$HERE/scripts/postinstall" \
         && ok "postinstall verifies the kernel graph state dir" \
         || fail "postinstall does not verify the kernel graph state dir"
-    local pi="$HERE/scripts/postinstall" hold first last back
-    hold="$(grep -nxF 'chown 0:0 /var/log/maknae' "$pi" | head -n 1 | cut -d: -f1)"
+    local pi="$HERE/scripts/postinstall" hold first last back hfn
+    hfn="$(sed -n '/^hold_dir() {$/,/^}$/p' "$pi")"
+    case "$hfn" in
+        *'chown 0:0 "$1" && chmod -N "$1" && chmod 0700 "$1" || return 1'*'"0 0 700"'*'ls -led "$1" | wc -l)" -eq 1'*)
+            ok "postinstall's hold strips ACLs, forces 0700 and verifies root 0700 with no ACL" ;;
+        *) fail "postinstall's hold_dir does not strip ACLs, force 0700 and verify the result" ;;
+    esac
+    hold="$(grep -nE '^hold_dir /var/log/maknae \|\| ' "$pi" | head -n 1 | cut -d: -f1)"
     first="$(grep -nF '"$AUDIT"' "$pi" | head -n 1 | cut -d: -f1)"
     last="$(grep -nF '"$AUDIT"' "$pi" | tail -n 1 | cut -d: -f1)"
     back="$(grep -nxF 'chown -h "$MUID:$MGID" /var/log/maknae' "$pi" | tail -n 1 | cut -d: -f1)"
@@ -481,8 +487,10 @@ REFUSE
     echo "  -- chflags: uappnd is set; probing whether sappnd is survivable --"
     local adir=/var/log/maknae afile=/var/log/maknae/audit.jsonl aown
     aown="$(stat -f '%u:%g' "$adir")"
-    chown 0:0 "$adir"
-    if [ -L "$afile" ] || [ ! -f "$afile" ] || [ "$(stat -f %l "$afile")" != 1 ]; then
+    if ! { chown 0:0 "$adir" && chmod -N "$adir" && chmod 0700 "$adir" \
+        && [ "$(stat -f '%u %g %Lp' "$adir")" = "0 0 700" ] && [ "$(ls -led "$adir" | wc -l)" -eq 1 ]; }; then
+        fail "$adir could not be held as root 0700 with no ACL; sappnd probe skipped, $adir left root-owned"
+    elif [ -L "$afile" ] || [ ! -f "$afile" ] || [ "$(stat -f %l "$afile")" != 1 ]; then
         fail "$afile is not a regular, single-link file; sappnd probe skipped, $adir left root-owned"
     else
         ls -lO "$afile"

@@ -955,7 +955,7 @@ The trail is `/var/log/maknae/audit.jsonl`, `_maknae:_maknae 0640` in a `0700 _m
 
 ### Rotate, restore or recreate the trail
 
-While the attribute is clear, nothing else keeps the trail append-only on Debian, so stop the daemon first: it holds the file open. Root then holds the directory, so the daemon account cannot swap `audit.jsonl` for a link to another file while root acts on it. The archived copy stays in `/var/log/maknae`, owned by root and append-only, so neither the daemon account nor a rotation can rewrite or remove it.
+While the attribute is clear, nothing else keeps the trail append-only on Debian, so stop the daemon first: it holds the file open. Root then holds the directory: it takes it to root, removes every ACL entry, sets `0700` and checks all three before it acts, so the daemon account cannot swap `audit.jsonl` for a link to another file while root acts on it. Owning the directory is not enough on its own, because an ACL entry or a group or other write bit left by `_maknae` would still let it change the directory's entries. The archived copy stays in `/var/log/maknae`, owned by root and append-only, so neither the daemon account nor a rotation can rewrite or remove it.
 
 On Linux:
 
@@ -965,6 +965,10 @@ sudo bash -eu <<'ROTATE'
 d=/var/log/maknae f=/var/log/maknae/audit.jsonl
 [ -d "$d" ] && [ ! -h "$d" ] || { echo "$d is not a directory" >&2; exit 1; }
 chown root:root "$d"
+setfacl -P -b "$d"
+chmod 0700 "$d"
+acl="$(getfacl -P -s -p "$d")"
+[ "$(stat -c '%u %g %a' "$d")" = "0 0 700" ] && [ -z "$acl" ] || { echo "$d is not root:root 0700 with no ACL; it is left root-owned" >&2; exit 1; }
 if [ -h "$f" ] || [ ! -f "$f" ] || [ "$(stat -c %h "$f")" != 1 ]; then
     echo "$f is not a regular, single-link file; $d is left root-owned" >&2; exit 1
 fi
@@ -992,6 +996,9 @@ sudo bash -eu <<'ROTATE'
 d=/var/log/maknae f=/var/log/maknae/audit.jsonl
 [ -d "$d" ] && [ ! -L "$d" ] || { echo "$d is not a directory" >&2; exit 1; }
 chown 0:0 "$d"
+chmod -N "$d"
+chmod 0700 "$d"
+[ "$(stat -f '%u %g %Lp' "$d")" = "0 0 700" ] && [ "$(ls -led "$d" | wc -l)" -eq 1 ] || { echo "$d is not root 0700 with no ACL; it is left root-owned" >&2; exit 1; }
 if [ -L "$f" ] || [ ! -f "$f" ] || [ "$(stat -f %l "$f")" != 1 ]; then
     echo "$f is not a regular, single-link file; $d is left root-owned" >&2; exit 1
 fi
@@ -1014,14 +1021,15 @@ The block refuses unless both files carry `a` (Linux) or `uappnd` (macOS). On ma
 
 ### The package refuses the audit trail
 
-The Debian `postinst`, the RPM `%post` and the macOS `postinstall` act on `/var/log/maknae/audit.jsonl` as root. Before they act, they take the directory to root (`0:0`), and they refuse an entry that is not what the package created:
+The Debian `postinst`, the RPM `%post` and the macOS `postinstall` act on `/var/log/maknae/audit.jsonl` as root. Before they act, they take the directory to root (`0:0`), remove every ACL entry on it, set it `0700` and check the result, and they refuse an entry that is not what the package created:
 
 ```
+maknae: cannot hold /var/log/maknae as root:root 0700 with no ACL; it is left root-owned
 maknae: /var/log/maknae/audit.jsonl is not a regular, single-link _maknae:_maknae file; /var/log/maknae is left root-owned
 maknae: cannot set the append-only attribute on /var/log/maknae/audit.jsonl (filesystem: <type>); /var/log/maknae is left root-owned
 ```
 
-(macOS prints `is not a regular, single-link file`.) The first message means the entry is a symbolic link, a directory or other non-regular file, a file with a second hard link, or a file owned by another account. A symbolic link or a second link is what a compromised daemon account would plant to make root act on another file, so treat it as a possible compromise until you know otherwise. The second message means the file system cannot hold the attribute. Either way the directory stays `root:root 0700`, so `maknaed` cannot open the trail and the next start fails. On Debian the package stays half-configured. On the Red Hat family, rpm reports the scriptlet failure but keeps the install. On macOS, the installer fails. While the directory is root-held, `rpm -V maknae` reports `UG` on `/var/log/maknae`.
+(macOS prints `as root 0700` and `is not a regular, single-link file`.) The first message means the directory could not be taken to root `0700` with no ACL entry; on Linux, check that `setfacl` and `getfacl` are installed (the `acl` package) and that the file system accepts them. The second means the entry is a symbolic link, a directory or other non-regular file, a file with a second hard link, or a file owned by another account. A symbolic link or a second link is what a compromised daemon account would plant to make root act on another file, so treat it as a possible compromise until you know otherwise. The third means the file system cannot hold the attribute. In every case the directory stays root-owned, so `maknaed` cannot open the trail and the next start fails. On Debian the package stays half-configured. On the Red Hat family, rpm reports the scriptlet failure but keeps the install. On macOS, the installer fails. While the directory is root-held, `rpm -V maknae` reports `UG` on `/var/log/maknae`.
 
 A refused upgrade does not stop the old daemon: it keeps running on the descriptor it already holds. Stop it before you touch the trail, so nothing writes to the file while its protection is lifted:
 
@@ -1038,7 +1046,34 @@ sudo stat /var/log/maknae/audit.jsonl                               # stat does 
 sudo find / -xdev -samefile /var/log/maknae/audit.jsonl 2>/dev/null # every name of a multiply-linked file
 ```
 
-To recover:
+To recover, first hold the directory completely, because a refused hold can leave an ACL entry or a write bit in place. On Linux:
+
+```bash
+sudo bash -eu <<'HOLD'
+d=/var/log/maknae
+[ -d "$d" ] && [ ! -h "$d" ] || { echo "$d is not a directory" >&2; exit 1; }
+chown root:root "$d"
+setfacl -P -b "$d"
+chmod 0700 "$d"
+acl="$(getfacl -P -s -p "$d")"
+[ "$(stat -c '%u %g %a' "$d")" = "0 0 700" ] && [ -z "$acl" ] || { echo "$d is not root:root 0700 with no ACL; it is left root-owned" >&2; exit 1; }
+HOLD
+```
+
+On macOS:
+
+```bash
+sudo bash -eu <<'HOLD'
+d=/var/log/maknae
+[ -d "$d" ] && [ ! -L "$d" ] || { echo "$d is not a directory" >&2; exit 1; }
+chown 0:0 "$d"
+chmod -N "$d"
+chmod 0700 "$d"
+[ "$(stat -f '%u %g %Lp' "$d")" = "0 0 700" ] && [ "$(ls -led "$d" | wc -l)" -eq 1 ] || { echo "$d is not root 0700 with no ACL; it is left root-owned" >&2; exit 1; }
+HOLD
+```
+
+If the block refuses, do not go on: find out what keeps the directory from being held. Then:
 
 1. Preserve what is there: `sudo cp -a /var/log/maknae /root/maknae-audit-evidence.$(date -u +%Y%m%dT%H%M%SZ)` (`cp -a` copies a link as a link).
 2. Move the entry aside. `mv` moves a link itself, never its target: `sudo mv /var/log/maknae/audit.jsonl /root/`. If the entry is your own trail with the wrong owner (for example a copy restored as root), and `stat` shows a regular file with one link, re-own it instead: `sudo chattr -a` (macOS: `chflags nouappnd`), then `sudo chown -h _maknae:_maknae`, on that path (with the daemon stopped, as above).
@@ -1047,12 +1082,35 @@ To recover:
 
 ### Remove a kept trail
 
-Removing the package keeps the trail, except a Debian `purge`. On Linux the files keep `+a`, so `rm` is refused until it is cleared. Remove them with the daemon gone and the directory root-held:
+Removing the package keeps the trail, except a Debian `purge`. On Linux the files keep `+a`, so `rm` is refused until it is cleared. Remove them with the daemon gone and the directory root-held. On Linux:
 
 ```bash
-sudo chown 0:0 /var/log/maknae
-sudo find /var/log/maknae -xdev -mindepth 1 -maxdepth 1 -type f -links 1 -exec chattr -a {} +   # macOS: -exec chflags nouappnd {} +
-sudo rm -rf /var/log/maknae
+sudo bash -eu <<'REMOVE'
+d=/var/log/maknae
+[ -d "$d" ] && [ ! -h "$d" ] || { echo "$d is not a directory" >&2; exit 1; }
+chown root:root "$d"
+setfacl -P -b "$d"
+chmod 0700 "$d"
+acl="$(getfacl -P -s -p "$d")"
+[ "$(stat -c '%u %g %a' "$d")" = "0 0 700" ] && [ -z "$acl" ] || { echo "$d is not root:root 0700 with no ACL; it is left root-owned" >&2; exit 1; }
+find "$d" -xdev -mindepth 1 -maxdepth 1 -type f -links 1 -exec chattr -a {} +
+rm -rf "$d"
+REMOVE
+```
+
+On macOS:
+
+```bash
+sudo bash -eu <<'REMOVE'
+d=/var/log/maknae
+[ -d "$d" ] && [ ! -L "$d" ] || { echo "$d is not a directory" >&2; exit 1; }
+chown 0:0 "$d"
+chmod -N "$d"
+chmod 0700 "$d"
+[ "$(stat -f '%u %g %Lp' "$d")" = "0 0 700" ] && [ "$(ls -led "$d" | wc -l)" -eq 1 ] || { echo "$d is not root 0700 with no ACL; it is left root-owned" >&2; exit 1; }
+find "$d" -xdev -mindepth 1 -maxdepth 1 -type f -links 1 -exec chflags nouappnd {} +
+rm -rf "$d"
+REMOVE
 ```
 
 ## The kernel graph store refuses to start

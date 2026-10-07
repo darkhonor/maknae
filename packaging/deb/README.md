@@ -107,7 +107,7 @@ rule applies, because the daemon refuses to start until enrollment writes `princ
 
 `prerm` stops and disables the units, then unloads the AppArmor profiles. `remove`
 keeps the audit trail with its append-only attribute. `postrm purge` takes
-`/var/log/maknae` to `root:root`, clears `+a` on every regular, single-link file
-in it, unless a process still runs as `_maknae` (it then warns and leaves the directory root-held), and removes it with `/etc/maknae`. A file that keeps `+a` is reported by name and does not stop the purge. The accumulated audit trail is
+`/var/log/maknae` to `root:root 0700` with no ACL entry, verified, clears `+a` on every regular, single-link file
+in it, unless the hold cannot be verified (for example, `acl` was removed before the purge) or a process still runs as `_maknae` (it then warns and leaves the directory root-held), and removes it with `/etc/maknae`. A file that keeps `+a` is reported by name and does not stop the purge. The accumulated audit trail is
 preserved across upgrades (the file is created only when absent and never
 shipped as payload).

@@ -129,9 +129,13 @@ done
 # Clear append-only so the operator CAN remove the trail if they choose to. The
 # directory stays root-held: its account may be gone, and root acts on its entry.
 AUDIT=/var/log/maknae/audit.jsonl
+audit_left=false
 if [ -d /var/log/maknae ] && [ ! -L /var/log/maknae ]; then
-    chown 0:0 /var/log/maknae
-    if [ -f "$AUDIT" ] && [ ! -L "$AUDIT" ] && [ "$(stat -f %l "$AUDIT")" = 1 ]; then
+    if ! { chown 0:0 /var/log/maknae && chmod -N /var/log/maknae && chmod 0700 /var/log/maknae \
+        && [ "$(stat -f '%u %g %Lp' /var/log/maknae)" = "0 0 700" ] \
+        && [ "$(ls -led /var/log/maknae | wc -l)" -eq 1 ]; }; then
+        audit_left=true
+    elif [ -f "$AUDIT" ] && [ ! -L "$AUDIT" ] && [ "$(stat -f %l "$AUDIT")" = 1 ]; then
         chflags nouappnd "$AUDIT" 2>/dev/null || :
     elif [ -e "$AUDIT" ] || [ -L "$AUDIT" ]; then
         echo "WARNING: $AUDIT is not a regular, single-link file; append-only not cleared." >&2
@@ -143,7 +147,8 @@ echo "RETAINED: the kernel graph state at /usr/local/var/db/maknae/state and its
 [ "$ace_left" = false ] || echo "FAILED: /etc/maknae still carries, or could not be read back for, the deputy's ACE or an orphaned user:<UUID> ACE" >&2
 [ -z "$kc_left" ] || echo "FAILED: System-keychain item(s) remain:$kc_left" >&2
 [ "$seal_left" = false ] || echo "FAILED: $SEAL_PUB_DIR/seal.pub remains" >&2
-if [ -n "$kc_left" ] || [ "$ace_left" != false ] || [ "$seal_left" != false ]; then
+[ "$audit_left" = false ] || echo "FAILED: /var/log/maknae could not be held as root 0700 with no ACL; append-only not cleared" >&2
+if [ -n "$kc_left" ] || [ "$ace_left" != false ] || [ "$seal_left" != false ] || [ "$audit_left" != false ]; then
     exit 1
 fi
 echo "Removed."

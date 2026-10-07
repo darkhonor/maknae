@@ -37,6 +37,13 @@ verify() {   # $1=what  $2=expected  $3=actual
     }
 }
 
+# Root-owned 0700 with no ACL, verified; on failure the directory is left root-held.
+hold_dir() {
+    [ -d "$1" ] && [ ! -L "$1" ] || return 1
+    chown 0:0 "$1" && chmod -N "$1" && chmod 0700 "$1" || return 1
+    [ "$(stat -f '%u %g %Lp' "$1")" = "0 0 700" ] && [ "$(ls -led "$1" | wc -l)" -eq 1 ]
+}
+
 # --- DISABLED by default, on a FRESH INSTALL ONLY ---------------------------
 # `man launchd` FILES: /Library/LaunchDaemons = "System-wide daemons provided by
 # the administrator" — it is SCANNED AT BOOT. Merely declining to `bootstrap` is
@@ -108,7 +115,7 @@ done
 
 # --- audit sink -------------------------------------------------------------
 # Root holds the directory while it acts on the entry; a refusal leaves it held.
-chown 0:0 /var/log/maknae
+hold_dir /var/log/maknae || { echo "maknae: cannot hold /var/log/maknae as root 0700 with no ACL; it is left root-owned" >&2; exit 1; }
 if [ -L "$AUDIT" ] || { [ -e "$AUDIT" ] && { [ ! -f "$AUDIT" ] || [ "$(stat -f %l "$AUDIT")" != 1 ]; }; }; then
     echo "maknae: $AUDIT is not a regular, single-link file; /var/log/maknae is left root-owned" >&2
     exit 1
@@ -156,8 +163,7 @@ verify "/var/log/maknae ownership/mode" "$MUID $MGID 700" "$(stat -f '%u %g %Lp'
 STATE="/usr/local/var/db/maknae/state"
 install -d -m 0700 -o "$MUID" -g "$MGID" "$STATE"
 if [ -n "$(find "$STATE" -xdev -mindepth 1 -maxdepth 1 -nouser -print -quit)" ]; then
-    chown 0:0 "$STATE"
-    verify "$STATE held by root" "0 0 700" "$(stat -f '%u %g %Lp' "$STATE")"
+    hold_dir "$STATE" || { echo "maknae: cannot hold $STATE as root 0700 with no ACL; it is left root-owned" >&2; exit 1; }
     find "$STATE" -xdev -mindepth 1 -maxdepth 1 -type f -links 1 -nouser \
         -exec chown -h "$MUID:$MGID" {} +
     chown "$MUID:$MGID" "$STATE"
