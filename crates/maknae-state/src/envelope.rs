@@ -184,8 +184,15 @@ mod tests {
         assert_eq!(&sealed[..4], b"MKNE");
         assert_eq!(sealed.len(), HEADER_LEN + 11 + 16);
         assert_eq!(&sealed[4..12], &[1, 0, 1, 0, 1, 0, 0, 0]);
+        assert_eq!(sealed.capacity(), sealed.len());
         assert_eq!(&*open(&sealed, &kek(7)).unwrap(), b"graph bytes");
-        assert_eq!(&*open(&seal(b"", &kek(7)).unwrap(), &kek(7)).unwrap(), b"");
+        let empty = seal(b"", &kek(7)).unwrap();
+        assert_eq!(empty.capacity(), empty.len());
+        assert_eq!(&*open(&empty, &kek(7)).unwrap(), b"");
+        let big = vec![0x5a; 200];
+        let sealed_big = seal(&big, &kek(7)).unwrap();
+        assert_eq!(sealed_big.capacity(), sealed_big.len());
+        assert_eq!(&*open(&sealed_big, &kek(7)).unwrap(), &big[..]);
     }
 
     #[test]

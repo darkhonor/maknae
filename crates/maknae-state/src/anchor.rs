@@ -36,6 +36,7 @@ pub enum Refusal {
     RolledBack { store: u64, checkpoint: u64 },
     Substituted { revision: u64 },
     Missing { checkpoint: u64 },
+    RevisionExhausted,
 }
 
 impl fmt::Display for Refusal {
@@ -49,6 +50,9 @@ impl fmt::Display for Refusal {
                 f,
                 "graph store at revision {revision} differs from the audited checkpoint: substituted"
             ),
+            Self::RevisionExhausted => {
+                f.write_str("graph store revision is exhausted; reseed cannot advance it")
+            }
             Self::Missing { checkpoint } => write!(
                 f,
                 "graph store is missing but the audit trail holds checkpoint {checkpoint}"
@@ -74,8 +78,9 @@ pub fn assess(
         let floor = store
             .map_or(0, |s| s.revision)
             .max(checkpoint.map_or(0, |c| c.revision));
-        return BootAction::SeedAuthorized {
-            revision: floor + 1,
+        return match floor.checked_add(1) {
+            Some(revision) => BootAction::SeedAuthorized { revision },
+            None => BootAction::Refuse(Refusal::RevisionExhausted),
         };
     }
     match (store, checkpoint) {
@@ -213,6 +218,10 @@ mod tests {
             Refusal::Missing { checkpoint: 4 }.to_string(),
             "graph store is missing but the audit trail holds checkpoint 4"
         );
+        assert_eq!(
+            Refusal::RevisionExhausted.to_string(),
+            "graph store revision is exhausted; reseed cannot advance it"
+        );
     }
 
     fn line(action: &str, graph: &str) -> Vec<u8> {
@@ -272,6 +281,15 @@ mod tests {
                 &format!(r#"{{"revision":7,"ciphertext_sha256":"{upper}"}}"#)
             )),
             None
+        );
+        let seq: String = (0..32u8).map(|b| format!("{b:02x}")).collect();
+        let asym = line(
+            CHECKPOINT_ACTION,
+            &format!(r#"{{"revision":7,"ciphertext_sha256":"{seq}"}}"#),
+        );
+        assert_eq!(
+            parse_checkpoint(&asym).unwrap().digest,
+            core::array::from_fn::<u8, 32, _>(|i| i as u8)
         );
         assert_eq!(parse_checkpoint(b"not json"), None);
         assert_eq!(parse_checkpoint(br#"{"action":"graph.checkpoint"}"#), None);
