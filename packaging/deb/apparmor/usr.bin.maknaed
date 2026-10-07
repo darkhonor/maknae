@@ -51,8 +51,10 @@ profile maknaed /usr/bin/maknaed {
   /var/log/maknae/audit.jsonl            rak,
   /var/log/maknae/**                     a,
 
-  # #488: the kernel graph store (StateDirectory=maknae).
-  /var/lib/maknae/                       rk,
+  # #488: the kernel graph store (StateDirectory=maknae). The anchor opens the
+  # parent to pin the directory, and the exclusive flock on it is checked as w.
+  /var/lib/                              r,
+  /var/lib/maknae/                       rwk,
   /var/lib/maknae/**                     rwk,
 
   # Runtime UDS — the daemon binds its control socket in /run/maknae and needs
