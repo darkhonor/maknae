@@ -890,9 +890,9 @@ sudo launchctl kill SIGHUP system/io.maknae.maknaed    # macOS
 Both send `SIGHUP`, as does `kill -HUP <pid>` for a daemon started by hand. The command returns before the reload finishes, so read the result in the trail.
 
 - **What a reload reads.** `authz.yaml` only. The principal, the classification system and ceiling, the transport, the audit configuration and the providers are read at start, and a change to any of them needs a restart.
-- **All or nothing.** A reload loads and validates the whole file and resolves every username in `bindings:` on the host, as a start does, so a new username needs only a reload. If anything fails (the file does not parse or validate, or a name has no account on the host), the reload is refused: the running policy stands and the store is unchanged. The journal (`journalctl -u maknaed`; on macOS `/usr/local/var/log/maknae/maknaed.err`) says `maknaed: reload refused: <cause>; the previous policy stands`. An invalid `authz.yaml` at start still refuses to start, with exit 3.
+- **All or nothing.** A reload loads and validates the whole file and resolves every username in `bindings:` on the host, as a start does, so a new username needs only a reload. If anything fails (the file does not parse or validate, or a name has no account on the host), the reload is refused before it touches the store, and the running policy stands. A reload refused while writing the store also keeps the running policy; see the first case under "Records that look out of order" below. The journal (`journalctl -u maknaed`; on macOS `/usr/local/var/log/maknae/maknaed.err`) says `maknaed: reload refused: <cause>; the previous policy stands`. An invalid `authz.yaml` at start still refuses to start, with exit 3.
 - **One at a time.** Reloads run in turn. Signals that arrive while one runs produce one more reload, and a `SIGHUP` sent while the daemon is still starting is applied once it serves.
-- **Stopping.** A graceful stop abandons a reload that is still loading the file, recorded as `reload refused: shutdown`, and waits for one that is already writing the store.
+- **Stopping.** A graceful stop abandons a reload that is still loading the file, recorded as `reload refused: shutdown`. It waits up to 5 seconds for a reload that is already writing the store, then stops without it, so the stop record and the token revoke never wait on a reload for longer than that.
 
 **What the trail shows.** Each reload is its own session, and its records carry `event:"reload"`, so a query that selects `event=="boot"` does not see them. In order:
 
@@ -901,21 +901,21 @@ Both send `SIGHUP`, as does `kill -HUP <pid>` for a daemon started by hand. The 
 | Intent | `action:"graph.reload"`, `result:"permit"`, reason `intent recorded (SIGHUP)`, `graph.anchor:"reloading"` |
 | Store transition (only when the bindings changed) | `action:"graph.transition"`, reason `intent recorded (root-file)`, at the next store revision; then `action:"graph.checkpoint"`, reason `transitioned`, with that revision and the new store's `ciphertext_sha256` |
 | Outcome, applied | `action:"graph.reload"`, `result:"permit"`, posture `authorized`, reason `reload applied: revision <n>; identity persisted` (or `identity unchanged`), `graph.anchor:"reloaded"` |
-| Outcome, refused | `action:"graph.reload"`, `result:"deny"`, posture `unavailable`, reason `reload refused: <cause>`, where the cause starts `policy load:`, `compile:`, `persist:` or `audit append failed:`, or is `shutdown`; `graph.anchor:"reload-refused"` |
+| Outcome, refused | `action:"graph.reload"`, `result:"deny"`, posture `unavailable`, reason `reload refused: <cause>`, where the cause starts `policy load:`, `compile:` or `persist:`, or is `shutdown`; `graph.anchor:"reload-refused"` |
 
 ```bash
 sudo jq -c 'select(.action=="graph.reload") | {ts, session_id, result: .outcome.result, reason: .outcome.reason}' /var/log/maknae/audit.jsonl | tail -n 2
 ```
 
-If the intent itself cannot be appended, nothing is loaded and no outcome is written; the journal names the audit failure.
+If the intent itself cannot be appended, nothing is loaded and no outcome is written; the journal says `reload refused: audit append failed: <cause>`.
 
 **`maknae status`** prints `kernel graph: revision <n> (<state>)`. The revision follows every reload that changed the bindings. The state is the result of this start's rollback check (`seeded`, `reseeded`, `verified`, `advanced` or `rollback-anchor-unavailable`) and stays the same until the next restart.
 
 **Records that look out of order.** Three cases leave the trail looking unusual. In each, the store and the trail agree once the next start has checked them.
 
-- **A `graph.transition` with no `graph.checkpoint` after it, then `reload refused: persist: …`.** The persist outcome is unknown, and the running policy is the previous one. Either the store had moved past the revision the reload planned (nothing was written), or the directory `fsync` failed after the new store was renamed into place (the new store is on disk). The next reload of the same edit rewrites that revision and checkpoints it. Otherwise the next start loads the store as `advanced` and, if `authz.yaml` differs from it, applies the file as a new transition.
+- **A `graph.transition` with no `graph.checkpoint` after it, then `reload refused: persist: …`.** The store write failed after its intent was recorded, and the running policy is the previous one. Usually nothing reached disk: sealing the store failed, or writing or renaming its temporary file failed (a full or failing disk). If the failure was the directory `fsync` after the rename, the new store is on disk although the reload was refused. Any later reload that changes the bindings rewrites that revision and checkpoints it. Otherwise the next start loads the store, as `advanced` if the new store reached disk, and applies `authz.yaml` as a new transition if the file differs from it.
 - **`reload applied: …; checkpoint append failed: <cause>`.** The new policy is in force and the store holds it, but the trail has no checkpoint for it; the next start reports `advanced`.
-- **Reload records after the stop record.** When `maknaed` exits because its credential supervisor stopped, not on a graceful `SIGTERM`, a reload in flight can append its records, `reload refused: shutdown` included, after the stop record. They carry their own session id and match the store.
+- **Reload records after the stop record.** A reload in flight can append its records after the stop record, `reload refused: shutdown` included, in two cases: when `maknaed` exits because its credential supervisor stopped, and when a graceful stop gives up its 5-second wait for a reload that is writing the store. They carry their own session id and match the store.
 
 ---
 
@@ -972,7 +972,7 @@ No action is needed. `maknae status` reports the new revision.
 
 ### Reseed
 
-A reseed replaces the store with a fresh one, seeded from the bindings in `/etc/maknae/authz.yaml`. **It drops any containment that was never synced back to `bindings.yaml`.** Until live containment (#165) and sync back (#491) are built, every containment comes from `authz.yaml`, so the reseed restores it.
+A reseed replaces the store with a fresh one, seeded from the bindings in `/etc/maknae/authz.yaml`. Every containment comes from `authz.yaml` today, so the reseed restores it. Once live containment (#165) exists, a reseed will drop any containment not yet synced back to the policy files (#491).
 
 ```bash
 sudo maknae reseed

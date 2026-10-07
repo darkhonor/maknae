@@ -291,7 +291,7 @@ maknae agent "Reply with one word: hello."
 mv ~/.maknae/providers.yaml.aside ~/.maknae/providers.yaml
 ```
 
-**Expected.** With the destination removed, B sees the `PROMPT_REFUSED` line, exit 2. In the administrator's audit query: `"result":"deny"`, `"reason":"destination not allowlisted for role user: provider:openai"`, with no `egress` block. If A shares B's role, A is refused the same way until the line is restored.
+**Expected.** With the destination removed, B sees the `PROMPT_REFUSED` line, exit 2. In the administrator's audit query: `"result":"deny"`, `"reason":"destination not allowlisted for role user: provider:openai"`, with no `egress` block. If A shares B's role, A is refused the same way until the line is restored and the policy reloaded.
 
 Without the file, exit 1:
 
