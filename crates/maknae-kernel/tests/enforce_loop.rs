@@ -16,7 +16,9 @@ use maknae_authz_basic::HermeticAuthorizer;
 use maknae_proto::{Payload, ProtoErrCode, RespResult};
 
 mod common;
-use common::{AlwaysPermit, FailNthEmit, HostileObligation, PanickingName, SleepAuthorizer};
+use common::{
+    AlwaysPermit, CitingPermit, FailNthEmit, HostileObligation, PanickingName, SleepAuthorizer,
+};
 
 // Reuse run_loop's recording emitter shape locally (each tests/*.rs is its
 // own crate; RecEmit is tiny and its semantics — record synchronously, then
@@ -1778,7 +1780,7 @@ async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
 
 /// `authz_backend` is ASKED OF THE PDP. A backend that does not name itself
 /// reports `unknown`, and this is the input that proves the field is not the
-/// `-basic` literal: `AlwaysPermit` implements only `decide`, so it takes the
+/// `-basic` literal: `AlwaysPermit` does not implement `backend_name`, so it takes the
 /// seam default. Two tests, two backends, two different expected strings --
 /// which is what "asked, not hardcoded" actually requires.
 #[tokio::test]
@@ -1876,7 +1878,7 @@ async fn a_granted_subject_list_reports_the_policy_file_bindings() {
 /// list. This is the enforcement site of the claim the whole binding fix was
 /// written to protect, and until now nothing tested it.
 ///
-/// `AlwaysPermit` implements only `decide`, so its `subjects()` takes the seam
+/// `AlwaysPermit` does not implement `subjects()`, so it takes the seam
 /// default of `None` -- exactly what a backend that cannot enumerate returns,
 /// and what the shipped `authz.yaml` (no `bindings:` key) produces through
 /// `-basic`. Replacing the kernel's `None` arm with
@@ -1921,6 +1923,41 @@ async fn a_backend_that_cannot_enumerate_refuses_rather_than_claiming_empty() {
         last.outcome.reason.contains("does not enumerate"),
         "the reason must name WHICH refusal: {:?}",
         last.outcome.reason
+    );
+}
+
+#[tokio::test]
+async fn the_corrective_subject_list_record_cites_no_rule() {
+    let fx = Fixture::new("subjlist-uncited");
+    let emit = RecEmit::new();
+    drive(
+        &fx.dir,
+        Arc::new(CitingPermit),
+        emit.clone(),
+        0,
+        maknae_proto::Verb::AdminSubjectList,
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("a frame");
+    let records = emit.records();
+    let [.., permit, corrective] = records.as_slice() else {
+        panic!("expected the permit and its correction, got {records:?}")
+    };
+    assert_eq!(
+        (
+            permit.outcome.result.as_str(),
+            corrective.outcome.posture.as_str()
+        ),
+        ("permit", "unavailable")
+    );
+    assert_eq!(
+        permit.rule.as_ref().map(|r| r.key.as_str()),
+        Some("rule:roles.admin:allow:0")
+    );
+    assert_eq!(
+        corrective.rule, None,
+        "a deny never cites the permit's rule"
     );
 }
 

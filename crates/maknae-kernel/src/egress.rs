@@ -645,6 +645,9 @@ pub fn outcome_for(
             "unauthorized",
         ),
     };
+    if result == "deny" {
+        r.rule = None;
+    }
     r.outcome.result = result.into();
     r.outcome.reason = reason.into();
     r.outcome.posture = posture.into();
@@ -1879,9 +1882,13 @@ mod tests {
 
     #[test]
     fn outcome_for_sets_status_result_reason_and_posture_per_send_outcome() {
-        let i = DurableEgressIntent {
-            record: intent_record(),
-        };
+        let mut record = intent_record();
+        record.rule = Some(maknae_audit_append::RuleAudit {
+            node: 4,
+            key: "rule:destinations.user:allow:0".into(),
+            section: "/etc/maknae/authz.yaml#destinations.user".into(),
+        });
+        let i = DurableEgressIntent { record };
         for (outcome, status, result, reason, posture, reply_length) in [
             (
                 SendOutcome::Sent {
@@ -1979,6 +1986,11 @@ mod tests {
                 ),
                 (result, reason, posture),
                 "{status:?}"
+            );
+            assert_eq!(
+                o.rule.is_some(),
+                result == "permit",
+                "a send that did not go out cites no rule: {status:?}"
             );
             let e = o.egress.as_ref().unwrap();
             assert_eq!(
