@@ -823,6 +823,15 @@ fn store_error_display() {
         StoreError::Audit("down".into()).to_string(),
         "graph store audit failed: down"
     );
+    assert_eq!(
+        StoreError::RejectedNameInUse {
+            name: "kernel.graph.rejected.1.00".into(),
+            cause: "it holds other bytes".into(),
+        }
+        .to_string(),
+        "the rejected-copy name kernel.graph.rejected.1.00 is in use and does not hold this \
+         store (it holds other bytes); move it aside, then restart"
+    );
 }
 
 fn encoded_graph(revision: u64) -> Vec<u8> {
@@ -1038,11 +1047,9 @@ async fn a_second_reseed_in_the_same_second_keeps_the_first_rejected_copy() {
 async fn refused_by_occupied_name(fx: &Fixture, k: &WrappingKey, old: &[u8], name: &str) {
     let r = run(&fx.dir(), k, None).await.0;
     match r {
-        Err(e @ StoreError::StoreFileRefused(_)) => {
-            assert_eq!(remedy(&e), Remedy::CheckStoreFile);
-            let StoreError::StoreFileRefused(why) = e else {
-                unreachable!()
-            };
+        Err(e @ StoreError::RejectedNameInUse { .. }) => {
+            assert_eq!(remedy(&e), Remedy::ClearRejectedName);
+            let why = e.to_string();
             assert!(
                 why.starts_with(&format!(
                     "the rejected-copy name {name} is in use and does not hold this store ("
@@ -1050,6 +1057,10 @@ async fn refused_by_occupied_name(fx: &Fixture, k: &WrappingKey, old: &[u8], nam
                 "{why}"
             );
             assert!(why.ends_with("); move it aside, then restart"), "{why}");
+            let StoreError::RejectedNameInUse { name: got, .. } = e else {
+                unreachable!()
+            };
+            assert_eq!(got, name);
         }
         other => panic!("unexpected result {other:?}"),
     }
@@ -1163,6 +1174,13 @@ fn each_store_error_has_its_remedy() {
         (
             StoreError::StoreFileRefused("too large".into()),
             Remedy::CheckStoreFile,
+        ),
+        (
+            StoreError::RejectedNameInUse {
+                name: "n".into(),
+                cause: "c".into(),
+            },
+            Remedy::ClearRejectedName,
         ),
         (StoreError::StateDir("mode".into()), Remedy::CheckStateDir),
         (StoreError::Io("EACCES".into()), Remedy::CheckStateDir),

@@ -36,6 +36,7 @@ pub enum StoreError {
     Refused(Refusal),
     Audit(String),
     NewerStore(String),
+    RejectedNameInUse { name: String, cause: String },
 }
 
 impl fmt::Display for StoreError {
@@ -53,6 +54,10 @@ impl fmt::Display for StoreError {
             Self::NewerStore(detail) => write!(
                 f,
                 "the graph store was written by a newer maknaed: {detail}"
+            ),
+            Self::RejectedNameInUse { name, cause } => write!(
+                f,
+                "the rejected-copy name {name} is in use and does not hold this store ({cause}); move it aside, then restart"
             ),
         }
     }
@@ -74,6 +79,7 @@ pub enum Remedy {
     Reseed,
     CheckStateDir,
     CheckStoreFile,
+    ClearRejectedName,
     CheckAudit,
     Investigate,
 }
@@ -84,6 +90,7 @@ pub fn remedy(e: &StoreError) -> Remedy {
         StoreError::Refused(Refusal::RevisionExhausted) => Remedy::Investigate,
         StoreError::Refused(_) | StoreError::Envelope(_) | StoreError::Format(_) => Remedy::Reseed,
         StoreError::StoreFileRefused(_) => Remedy::CheckStoreFile,
+        StoreError::RejectedNameInUse { .. } => Remedy::ClearRejectedName,
         StoreError::StateDir(_) | StoreError::Io(_) => Remedy::CheckStateDir,
         StoreError::Audit(_) => Remedy::CheckAudit,
     }
@@ -175,9 +182,10 @@ impl StateDir {
             Ok(_) => "it holds other bytes".to_string(),
             Err(e) => e.to_string(),
         };
-        Err(StoreError::StoreFileRefused(format!(
-            "the rejected-copy name {name} is in use and does not hold this store ({cause}); move it aside, then restart"
-        )))
+        Err(StoreError::RejectedNameInUse {
+            name: name.to_string(),
+            cause,
+        })
     }
 
     fn read_store(&self) -> Result<Option<Zeroizing<Vec<u8>>>, IoError> {

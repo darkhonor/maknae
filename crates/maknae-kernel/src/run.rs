@@ -3046,6 +3046,17 @@ fn graph_refusal(failure: GraphFailure, state_dir: &Path) -> RunError {
                  link, ≤64 MiB), then restart; do not reseed — the store may be valid",
                 state_dir.display()
             ),
+            Remedy::ClearRejectedName => {
+                let name = match e {
+                    StoreError::RejectedNameInUse { name, .. } => name.as_str(),
+                    _ => "the rejected-copy name",
+                };
+                format!(
+                    "move {}/{name} aside (the current store is intact), then restart; the \
+                     authorized reseed will complete",
+                    state_dir.display()
+                )
+            }
             Remedy::CheckStateDir => format!(
                 "check the ownership and mode of {}: it must be owned by the maknaed user, \
                  mode 0700",
@@ -4845,6 +4856,16 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
              0600, one link, ≤64 MiB), then restart; do not reseed — the store may be valid"
         );
         assert!(!refused.contains(reseed), "{refused}");
+        let in_use = hint(GraphFailure::Store(StoreError::RejectedNameInUse {
+            name: "kernel.graph.rejected.1.00".into(),
+            cause: "it holds other bytes".into(),
+        }));
+        assert_eq!(
+            in_use,
+            "move /var/lib/maknae/kernel.graph.rejected.1.00 aside (the current store is \
+             intact), then restart; the authorized reseed will complete"
+        );
+        assert!(!in_use.contains(reseed), "{in_use}");
         for f in [
             GraphFailure::Store(StoreError::Io("EACCES".into())),
             GraphFailure::Store(StoreError::StateDir("mode".into())),
