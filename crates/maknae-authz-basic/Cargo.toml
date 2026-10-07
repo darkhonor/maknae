@@ -14,6 +14,7 @@ workspace = true
 [dependencies]
 maknae-security = { path = "../maknae-security" }
 maknae-config = { path = "../maknae-config" }
+maknae-graph = { path = "../maknae-graph" }
 
 [target.'cfg(unix)'.dependencies]
 # getpwnam at BasicAuthorizer construction ONLY — zero per-request NSS (spec §3:

@@ -102,7 +102,7 @@ pub use user_providers::{
     user_providers_from_document, UserProviderEntry, UserProviders, USER_PROVIDERS_FILE,
 };
 pub use user_providers_io::load_user_providers;
-pub use value::Value;
+pub use value::{canonical_json, Value};
 
 use builder::Builder;
 

@@ -33,6 +33,7 @@ files = [
   "crates/maknae-authz-basic/src/role.rs",
   "crates/maknae-authz-basic/src/binding.rs",
   "crates/maknae-authz-basic/src/decide.rs",
+  "crates/maknae-authz-basic/src/vocabulary.rs",
   # The classification seam (ADR-0022): the `ClassificationPolicy` contract
   # and `first_token`, the two systems that implement it (US in the kernel's
   # config crate, PSPF in its own crate), and the registry that selects one by
@@ -195,6 +196,9 @@ files = [
   # can read/exec — exactly the T1 line-drawing rule. In [t1].files ONLY (own
   # 95% floor; NOT ratchet_cohort).
   "crates/maknae-config/src/authz.rs",
+  # #489: the canonical JSON each authz.yaml section's digest is taken over; a wrong
+  # byte makes an unchanged section look edited, or an edited one look unchanged.
+  "crates/maknae-config/src/value.rs",
   "crates/maknae-audit-append/src/record.rs",
   # #172: the Egress seam — the DurableEgressIntent type gate, the reply admission, the
   # outcome record derivation. The write-ahead order is a type here, so this file is T1.
@@ -432,10 +436,6 @@ why = "type declarations (subject/resource/action/context/request) + derives; no
 [[t3]]
 path = "crates/maknae-security/src/authorizer.rs"
 why = "trait declaration only; no hand-written executable logic (impls live in backends)"
-
-[[t3]]
-path = "crates/maknae-config/src/value.rs"
-why = "bare Value enum + derives; no hand-written executable logic (zero production regions)"
 
 [[t3]]
 path = "crates/maknae-kernel/src/lib.rs"

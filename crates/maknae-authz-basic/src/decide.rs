@@ -168,8 +168,10 @@ impl ActionGrants {
                 source: t.as_str().to_string(),
             };
         }
-        if allow.iter().any(|t| t.as_str() == action) {
-            return maknae_config::Match3::AllowMatch;
+        if let Some(t) = allow.iter().find(|t| t.as_str() == action) {
+            return maknae_config::Match3::AllowMatch {
+                source: t.as_str().to_string(),
+            };
         }
         maknae_config::Match3::NoMatch
     }
@@ -283,7 +285,7 @@ fn decide_prompt(lp: &LoadedPolicy, req: &SecRequest, role_key: &str) -> Verdict
                 note: Some(no_rule_note(role_key, "session.prompt")),
             }
         }
-        maknae_config::Match3::AllowMatch => {}
+        maknae_config::Match3::AllowMatch { .. } => {}
     }
     let destination = match req.resource.0.get(RESOURCE_DESTINATION) {
         Some(AttrValue::Str(d)) => d.as_str(),
@@ -430,7 +432,7 @@ pub(crate) fn decide_loaded_with_role(
             // omitting the argument.
             Some(Class::Admin) if GRANTABLE_ACTIONS.contains(&req.action.0.as_str()) => {
                 match lp.action_grants.evaluate3_action("admin", &req.action.0) {
-                    maknae_config::Match3::AllowMatch => permit_with_audit(),
+                    maknae_config::Match3::AllowMatch { .. } => permit_with_audit(),
                     // Names the term, matching what `decide_fs` does for a path
                     // entry: an audit record that says WHICH entry decided.
                     maknae_config::Match3::DenyMatch { source } => Verdict::Deny {
@@ -563,7 +565,7 @@ fn decide_fs(lp: &LoadedPolicy, req: &SecRequest, role_key: &str, scope: FsScope
             // audit record; #77's wiring must never copy it onto the wire.
             reason: format!("denied by policy entry {source}"),
         },
-        maknae_config::Match3::AllowMatch => permit_with_audit(),
+        maknae_config::Match3::AllowMatch { .. } => permit_with_audit(),
         // Case-5 testimony (#181): role and term ONLY -- never the path (the
         // D9 hazard). "No capability entry" is accurate where "no rule" would
         // be false: a rule for fs.read exists; no ENTRY matched this request.
@@ -1752,7 +1754,9 @@ mod tests {
         )]));
         assert_eq!(
             grants.evaluate3_action("admin", "admin.status"),
-            maknae_config::Match3::AllowMatch
+            maknae_config::Match3::AllowMatch {
+                source: "admin.status".into()
+            }
         );
         assert_eq!(
             grants.evaluate3_action("admin", "admin.config.show"),

@@ -26,6 +26,8 @@ pub fn grantable_actions() -> &'static [&'static str] {
 }
 
 mod role;
+mod vocabulary;
+pub use vocabulary::{class_name, compiled_set, ACTION_TERMS, CLASSES, KERNEL_TERMS};
 
 use binding::UidMap;
 use decide::LoadedPolicy;
