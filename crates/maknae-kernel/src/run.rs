@@ -1198,16 +1198,11 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 // exist" and is a different, dangerous answer.
                 // OFFLOADED, bounded, and breaker-admitted -- the SAME
                 // discipline the decide path gets 250 lines above, and for the
-                // same reason stated there: `subjects()` reaches
-                // `load_authz`, which is sync file I/O on /etc/maknae. Called
-                // inline it pins a tokio worker for as long as that read
-                // blocks, and N granted calls against a wedged NFS/FUSE mount
+                // same reason stated there: the seam permits a backend whose
+                // `subjects()` blocks. Called inline such a backend pins a
+                // tokio worker for as long as it blocks, and N granted calls
                 // starve the runtime -- with the breaker unable to trip,
                 // because it never sees them.
-                //
-                // The seam's `-> Option<..>` signature is what made this look
-                // synchronous-and-cheap at the call site. It is a policy file
-                // read.
                 Dispatch::SubjectListRequested => {
                     let subj_breaker = authz_decide_breaker();
                     let admission = { subj_breaker.lock().await.begin_attempt_at(Instant::now()) };
@@ -3060,13 +3055,12 @@ impl<E> GraphBootAudit<'_, E> {
 }
 
 /// The graph boot's inputs as this binary has them: the persisted role set labelled
-/// with the system's lowest level and its digest, the full compiled vocabulary, the
-/// policy's SHA-256 section digests, and the identity layer the policy declares.
+/// with the system's lowest level and its digest, the full compiled vocabulary, and
+/// the identity layer the policy declares (its bindings digest is SHA-256).
 struct GraphInputs {
     compiled: maknae_graph::schema::CompiledSet,
     digest: [u8; 32],
     full: maknae_graph::schema::CompiledSet,
-    sections: std::collections::BTreeMap<String, [u8; 32]>,
     identity: maknae_graph::identity::IdentityLayer,
 }
 
@@ -3081,7 +3075,6 @@ impl GraphInputs {
             compiled,
             digest,
             full: maknae_authz_basic::compiled_set(label),
-            sections,
             identity,
         })
     }
@@ -3585,12 +3578,7 @@ async fn boot_after_sink(
         &graph_inputs.boot(),
     )
     .await?;
-    let authorizer = match authz_boot_gate(
-        source,
-        Arc::new(graph),
-        &graph_inputs.full,
-        &graph_inputs.sections,
-    ) {
+    let authorizer = match authz_boot_gate(source, Arc::new(graph), &graph_inputs.full) {
         Ok(authorizer) => authorizer,
         Err(e) => return Err(refuse(e.to_string()).await),
     };
@@ -4843,7 +4831,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         )
         .unwrap();
         let inputs = GraphInputs::new(&source, "UNCLASSIFIED").unwrap();
-        assert!(inputs.sections.contains_key("bindings"));
+        assert!(inputs.identity.bindings_sha256.is_some());
         let seq = Seq::new();
         let au3_1 = serde_json::Value::Null;
         let ctx = BootCtx {
@@ -4866,7 +4854,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         let stored = maknae_graph::identity::extract(&graph).unwrap();
         assert_eq!(stored.layer, inputs.identity);
         assert_eq!(stored.layer.subjects.len(), 1);
-        let pdp = authz_boot_gate(source, Arc::new(graph), &inputs.full, &inputs.sections).unwrap();
+        let pdp = authz_boot_gate(source, Arc::new(graph), &inputs.full).unwrap();
         let req = crate::handler::build_authz_request(
             &maknae_proto::Verb::Whoami,
             0,
@@ -4876,6 +4864,158 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         );
         assert_eq!(
             pdp.decide(&req),
+            maknae_security::Verdict::Deny {
+                reason: "subject contained: role=adversary".into()
+            }
+        );
+    }
+
+    fn bound_source(config_dir: &Path, body: &str) -> maknae_authz_basic::PolicySource {
+        maknae_authz_basic::PolicySource::from_parts(
+            maknae_config::parse_authz(body).unwrap(),
+            [("root".to_string(), 0), ("seven".to_string(), 7)]
+                .into_iter()
+                .collect(),
+            maknae_config::Principal {
+                name: "op".into(),
+                uid: 1000,
+            },
+            config_dir.join("authz.yaml"),
+        )
+        .unwrap()
+    }
+
+    /// Boots the store under `source`'s identity layer, then compiles the PDP
+    /// over the graph the store booted and composes it with the US ceiling.
+    fn boot_and_compose(
+        fx: &GraphFixture,
+        source: maknae_authz_basic::PolicySource,
+    ) -> (
+        KernelGraphStatus,
+        crate::composition::Composition<maknae_authz_basic::BasicAuthorizer>,
+    ) {
+        let inputs = GraphInputs::new(&source, "UNCLASSIFIED").unwrap();
+        let seq = Seq::new();
+        let au3_1 = serde_json::Value::Null;
+        let ctx = BootCtx {
+            host: "h",
+            socket: "s",
+            euid: nix::unistd::geteuid().as_raw(),
+            session_id: 9 << 32,
+            seq: &seq,
+            au3_1: &au3_1,
+        };
+        let (_held, status, graph) = block_on(boot_kernel_graph(
+            &fx.state,
+            key(),
+            &fx.sink,
+            &ctx,
+            &inputs.boot(),
+        ))
+        .unwrap();
+        let baseline = authz_boot_gate(source, Arc::new(graph), &inputs.full).unwrap();
+        let us = &maknae_config::BasicPolicy;
+        let pdp = crate::composition::Composition::new(
+            baseline,
+            crate::ceiling_authz::CeilingAuthorizer::new(
+                maknae_config::Ceiling::baseline_for(us),
+                us,
+            ),
+        );
+        (status, pdp)
+    }
+
+    fn decide_as_root(
+        pdp: &impl maknae_security::Authorizer,
+        verb: maknae_proto::Verb,
+    ) -> maknae_security::Verdict {
+        pdp.decide(&crate::handler::build_authz_request(
+            &verb,
+            0,
+            None,
+            maknae_security::Lane::Local,
+            None,
+        ))
+    }
+
+    /// An S2 store (empty graph, no vocabulary digest) migrates, then takes the
+    /// file's bindings as an identity transition, and the PDP compiles over the
+    /// result.
+    #[test]
+    fn an_s2_store_with_a_bindings_file_migrates_and_the_pdp_compiles_over_it() {
+        let fx = graph_fixture("graph_s2_bound");
+        let k = WrappingKey::new(key().unwrap().into_bytes());
+        let s2 =
+            maknae_graph::graph::GraphBuilder::new(maknae_graph::record::GraphSpace::Kernel, 4)
+                .build(
+                    &maknae_graph::kernel::SCHEMA,
+                    &maknae_graph::schema::CompiledSet::default(),
+                )
+                .unwrap();
+        let file = maknae_state::envelope::seal(&maknae_graph::format::encode(&s2), &k).unwrap();
+        let path = fx.state.join(STORE_FILE);
+        std::fs::write(&path, file).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let source = bound_source(
+            &fx.dir.0,
+            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\n  adversary: [\"seven\"]\n",
+        );
+        let (status, pdp) = boot_and_compose(&fx, source);
+        assert_eq!(status.revision, 6);
+        let actions: Vec<String> = trail(&fx).into_iter().map(|(r, _)| r.action).collect();
+        assert_eq!(
+            actions,
+            [
+                "graph.checkpoint",
+                "graph.migrate",
+                "graph.checkpoint",
+                "graph.transition",
+                "graph.checkpoint"
+            ]
+        );
+        assert!(matches!(
+            decide_as_root(&pdp, maknae_proto::Verb::Whoami),
+            maknae_security::Verdict::Permit { .. }
+        ));
+        let contained = crate::handler::build_authz_request(
+            &maknae_proto::Verb::Ping,
+            7,
+            None,
+            maknae_security::Lane::Local,
+            None,
+        );
+        assert_eq!(
+            maknae_security::Authorizer::decide(&pdp, &contained),
+            maknae_security::Verdict::Deny {
+                reason: "subject contained: role=adversary".into()
+            }
+        );
+    }
+
+    /// A rebinding between boots is a root-file identity transition, and the PDP
+    /// compiles over the transitioned graph: the rebound uid is contained.
+    #[test]
+    fn a_rebinding_between_boots_transitions_and_the_pdp_compiles_over_it() {
+        let fx = graph_fixture("graph_rebind");
+        let admin = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\n";
+        let (first, pdp) = boot_and_compose(&fx, bound_source(&fx.dir.0, admin));
+        assert_eq!(first.revision, 1);
+        assert!(matches!(
+            decide_as_root(&pdp, maknae_proto::Verb::Ping),
+            maknae_security::Verdict::Permit { .. }
+        ));
+        drop(pdp);
+        let (second, pdp) = boot_and_compose(
+            &fx,
+            bound_source(&fx.dir.0, &admin.replace("admin: [", "adversary: [")),
+        );
+        assert_eq!((second.revision, second.anchor.as_str()), (2, "verified"));
+        assert!(trail(&fx)
+            .iter()
+            .any(|(r, _)| r.action == "graph.transition"));
+        assert_eq!(
+            decide_as_root(&pdp, maknae_proto::Verb::Ping),
             maknae_security::Verdict::Deny {
                 reason: "subject contained: role=adversary".into()
             }

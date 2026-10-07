@@ -59,10 +59,7 @@ impl std::fmt::Display for BindingError {
             }
             BindingError::Duplicate(n) => write!(f, "identity '{n}' listed twice in one role"),
             BindingError::Unresolvable(n) => {
-                write!(
-                    f,
-                    "identity '{n}' has no resolved uid (restart to add principals)"
-                )
+                write!(f, "identity '{n}' has no resolved uid")
             }
             BindingError::DuplicateUid { uid, names: (a, b) } => write!(
                 f,

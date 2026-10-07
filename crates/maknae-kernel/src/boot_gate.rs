@@ -22,7 +22,6 @@ use maknae_authz_basic::{AuthzBasicError, BasicAuthorizer, PolicySource};
 use maknae_config::Principal;
 use maknae_graph::graph::Graph;
 use maknae_graph::schema::CompiledSet;
-use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -79,20 +78,20 @@ fn authz_policy_source_with(
 }
 
 /// Compile the boot-time PDP's first snapshot over the booted kernel graph, or
-/// refuse. `section_sha256` must be the source's SHA-256 section digests: the
-/// baseline is built to compile every later reload with SHA-256 too.
+/// refuse. Sections are digested with SHA-256, the digest the baseline keeps
+/// for every later reload.
 pub fn authz_boot_gate(
     source: PolicySource,
     graph: Arc<Graph>,
     vocabulary: &CompiledSet,
-    section_sha256: &BTreeMap<String, [u8; 32]>,
 ) -> Result<BasicAuthorizer, AuthzBootRefusal> {
-    let snapshot =
-        compile(graph, &source, vocabulary, section_sha256).map_err(AuthzBootRefusal::Compile)?;
+    let digest: fn(&[u8]) -> [u8; 32] = maknae_state::envelope::sha256;
+    let snapshot = compile(graph, &source, vocabulary, &source.section_digests(digest))
+        .map_err(AuthzBootRefusal::Compile)?;
     Ok(BasicAuthorizer::from_snapshot(
         source.principal().clone(),
         source.path().to_path_buf(),
-        maknae_state::envelope::sha256,
+        digest,
         Arc::new(snapshot),
     ))
 }
@@ -433,7 +432,7 @@ mod tests {
 
     const LABEL: &str = "UNCLASSIFIED";
 
-    fn sha_digests(source: &PolicySource) -> BTreeMap<String, [u8; 32]> {
+    fn sha_digests(source: &PolicySource) -> std::collections::BTreeMap<String, [u8; 32]> {
         source.section_digests(maknae_state::envelope::sha256)
     }
 
@@ -471,7 +470,6 @@ mod tests {
             source,
             graph.clone(),
             &maknae_authz_basic::compiled_set(LABEL),
-            &digests,
         )
         .expect("gate success arm");
         assert!(Arc::ptr_eq(auth.snapshot().persisted(), &graph));
@@ -499,14 +497,8 @@ mod tests {
         let source = authz_policy_source_with(&d, Some(principal()), hermetic_load);
         let _ = std::fs::remove_dir_all(&d);
         let source = source.unwrap();
-        let digests = sha_digests(&source);
         let stale = identity_graph(&source.identity_layer(LABEL, None));
-        let got = authz_boot_gate(
-            source,
-            stale,
-            &maknae_authz_basic::compiled_set(LABEL),
-            &digests,
-        );
+        let got = authz_boot_gate(source, stale, &maknae_authz_basic::compiled_set(LABEL));
         match got {
             Err(e @ AuthzBootRefusal::Compile(CompileError::Identity(_))) => {
                 let m = e.to_string();

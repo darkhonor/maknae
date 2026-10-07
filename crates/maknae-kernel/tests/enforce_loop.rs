@@ -560,11 +560,17 @@ async fn containment_flips_only_at_reload_and_reason_stays_off_the_wire() {
 
 #[tokio::test]
 async fn an_invalid_policy_at_reload_keeps_the_old_snapshot() {
+    use maknae_authz_basic::Baseline;
     let fx = Fixture::new("badreload");
     fx.write_policy(BINDINGS_ROOT_ADMIN);
     let authorizer = fx.authorizer();
+    let before = authorizer.snapshot();
     fx.write_policy("not: [valid");
     assert!(authorizer.reload_from_file().is_err());
+    assert!(
+        Arc::ptr_eq(&before, &authorizer.snapshot()),
+        "a refused reload installs nothing"
+    );
     let after = whoami_on(&fx, authorizer, RecEmit::new()).await;
     assert!(matches!(
         maknae_proto::decode_response(&after).unwrap().result,

@@ -1068,28 +1068,44 @@ mod tests {
             test_digest,
             admin.clone(),
         ));
+        let start = Arc::new(std::sync::Barrier::new(5));
         let deciders: Vec<_> = (0..4)
             .map(|_| {
                 let auth = auth.clone();
+                let start = start.clone();
                 std::thread::spawn(move || {
+                    start.wait();
                     (0..2_000)
                         .map(|_| auth.decide(&whoami(0)))
                         .collect::<Vec<_>>()
                 })
             })
             .collect();
-        for i in 0..500 {
-            auth.install(if i % 2 == 0 {
+        start.wait();
+        let mut installs = 0u32;
+        while installs < 500 || !deciders.iter().all(|d| d.is_finished()) {
+            auth.install(if installs.is_multiple_of(2) {
                 adversary.clone()
             } else {
                 admin.clone()
             });
+            installs += 1;
         }
+        if !installs.is_multiple_of(2) {
+            auth.install(admin.clone());
+        }
+        let mut seen = (0, 0);
         for d in deciders {
             for v in d.join().unwrap() {
-                assert!(v == audit_permit() || v == contained(), "{v:?}");
+                if v == audit_permit() {
+                    seen.0 += 1;
+                } else {
+                    assert_eq!(v, contained());
+                    seen.1 += 1;
+                }
             }
         }
+        assert_eq!(seen.0 + seen.1, 8_000);
         assert!(Arc::ptr_eq(&auth.snapshot(), &admin));
     }
 
