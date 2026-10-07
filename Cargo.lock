@@ -1240,7 +1240,12 @@ name = "maknae-state"
 version = "0.0.0"
 dependencies = [
  "aws-lc-rs",
+ "maknae-config",
+ "maknae-graph",
+ "maknae-io",
  "serde_json",
+ "tempfile",
+ "tokio",
  "zeroize",
 ]
 

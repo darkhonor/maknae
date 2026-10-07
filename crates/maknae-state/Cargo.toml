@@ -15,3 +15,10 @@ workspace = true
 aws-lc-rs = { version = "1.18", features = ["fips"] }  # 1.18: the AWS-LC-FIPS 4.x line; one aws-lc-rs in the tree (ADR-0025); AES-256-GCM envelope
 zeroize = "1"
 serde_json = "1"
+maknae-config = { path = "../maknae-config" }
+maknae-graph = { path = "../maknae-graph" }
+maknae-io = { path = "../maknae-io" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+tempfile = "3"
