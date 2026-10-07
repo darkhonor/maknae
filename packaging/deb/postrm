@@ -8,12 +8,16 @@ case "$1" in
         # attribute too. The directory is root-held while root acts on its
         # entries; find -type f never follows a symlink.
         if [ -d /var/log/maknae ] && [ ! -h /var/log/maknae ]; then
-            chown root:root /var/log/maknae
-            chattr -a /var/log/maknae 2>/dev/null || :
-            find /var/log/maknae -xdev -mindepth 1 -maxdepth 1 -type f -links 1 \
-                -exec chattr -a {} + 2>/dev/null || :
-            if [ -n "$(find /var/log/maknae -xdev -mindepth 1 -maxdepth 1 -type f -links +1 -print -quit)" ]; then
-                echo "maknae: a file in /var/log/maknae has more than one link; append-only not cleared" >&2
+            chown 0:0 /var/log/maknae
+            if pgrep -u _maknae >/dev/null 2>&1; then
+                echo "maknae: a process runs as _maknae; append-only not cleared and /var/log/maknae is left root-held" >&2
+            else
+                chattr -a /var/log/maknae 2>/dev/null || :
+                find /var/log/maknae -xdev -mindepth 1 -maxdepth 1 -type f -links 1 \
+                    -exec chattr -a {} + 2>/dev/null || :
+                if [ -n "$(find /var/log/maknae -xdev -mindepth 1 -maxdepth 1 -type f -links +1 -print -quit)" ]; then
+                    echo "maknae: a file in /var/log/maknae has more than one link; append-only not cleared" >&2
+                fi
             fi
         fi
 
@@ -21,7 +25,7 @@ case "$1" in
         # purge only.
         rm -rf /etc/maknae
         rm -rf /etc/ssl/maknae
-        rm -rf /var/log/maknae
+        rm -rf /var/log/maknae || echo "maknae: /var/log/maknae was not fully removed; remove it by hand (runbook: Remove a kept trail)" >&2
         rm -rf /var/lib/maknae
 
         systemctl daemon-reload 2>/dev/null || :

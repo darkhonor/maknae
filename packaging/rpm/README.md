@@ -70,7 +70,7 @@ SELinux `bin_t` tool-domain honest limit.
 `rpm -e` / `dnf remove` stops and disables the units, unloads the SELinux module,
 and keeps the audit trail: `/var/log/maknae/audit.jsonl` is created by `%post`,
 not owned by the package, so erase leaves it in place with its append-only
-attribute. To remove a kept trail, see
+attribute. Upgrading from a package that predates #498, which owned the trail as a `%ghost` file that never carried `+a`, has a residual: if the new `%post` refuses, rpm still deletes the old package's `%ghost` entry, and that trail is lost. Keep a copy before such an upgrade. To remove a kept trail, see
 [Remove a kept trail](../../docs/runbook.md#remove-a-kept-trail): with `maknaed`
 gone, hold the directory as root, clear `+a` on its regular single-link files
 (`chattr -a`), then `rm -rf /var/log/maknae`.
