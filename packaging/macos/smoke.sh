@@ -93,6 +93,10 @@ phase1() {
     grep -qF 'verify "$STATE ownership/mode" "$MUID $MGID 700"' "$HERE/scripts/postinstall" \
         && ok "postinstall verifies the kernel graph state dir" \
         || fail "postinstall does not verify the kernel graph state dir"
+    grep -qxF 'chown 0:0 /var/log/maknae' "$HERE/scripts/postinstall" \
+        && grep -qF 'verify "/var/log/maknae ownership/mode" "$MUID $MGID 700"' "$HERE/scripts/postinstall" \
+        && ok "postinstall holds the audit dir as root and hands it back" \
+        || fail "postinstall does not hold the audit dir as root while acting on audit.jsonl"
 
     "$REPO/ci/gates/entitlements-empty.sh" "$HERE"/*.entitlements >/dev/null \
         && ok "every entitlements file is empty" \

@@ -107,6 +107,12 @@ for f in "$ETC/authz.yaml" "$ETC/maknae.yaml"; do
 done
 
 # --- audit sink -------------------------------------------------------------
+# Root holds the directory while it acts on the entry; a refusal leaves it held.
+chown 0:0 /var/log/maknae
+if [ -L "$AUDIT" ] || { [ -e "$AUDIT" ] && { [ ! -f "$AUDIT" ] || [ "$(stat -f %l "$AUDIT")" != 1 ]; }; }; then
+    echo "maknae: $AUDIT is not a regular, single-link file; /var/log/maknae is left root-owned" >&2
+    exit 1
+fi
 if [ ! -e "$AUDIT" ]; then
     install -m 0640 -o "$MUID" -g "$MGID" /dev/null "$AUDIT"
 else
@@ -135,6 +141,8 @@ case "$(stat -f '%Sf' "$AUDIT")" in
        echo "  control. Refusing to report a successful install without it." >&2
        exit 1 ;;
 esac
+chown -h "$MUID:$MGID" /var/log/maknae
+verify "/var/log/maknae ownership/mode" "$MUID $MGID 700" "$(stat -f '%u %g %Lp' /var/log/maknae)"
 
 # --- kernel graph store ------------------------------------------------------
 # A reinstall can renumber _maknae, leaving a retained store owned by a uid with no

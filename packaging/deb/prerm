@@ -5,7 +5,17 @@ set -e
 case "$1" in
     remove)
         # Full removal: clear append-only, unload AppArmor, stop + disable.
-        chattr -a /var/log/maknae/audit.jsonl 2>/dev/null || :
+        # The directory is root-held while root acts on its entry.
+        AUDIT=/var/log/maknae/audit.jsonl
+        if [ -d /var/log/maknae ] && [ ! -h /var/log/maknae ]; then
+            chown root:root /var/log/maknae
+            if [ -h "$AUDIT" ] || { [ -e "$AUDIT" ] && { [ ! -f "$AUDIT" ] || [ "$(stat -c %h "$AUDIT")" != 1 ]; }; }; then
+                echo "maknae: $AUDIT is not a regular, single-link file; append-only not cleared, /var/log/maknae left root-owned" >&2
+            else
+                [ -e "$AUDIT" ] && { chattr -a "$AUDIT" 2>/dev/null || :; }
+                chown -h _maknae:_maknae /var/log/maknae 2>/dev/null || :
+            fi
+        fi
         if command -v apparmor_parser >/dev/null 2>&1; then
             apparmor_parser -R /etc/apparmor.d/usr.bin.maknaed 2>/dev/null || :
             apparmor_parser -R /etc/apparmor.d/usr.bin.maknae-egress 2>/dev/null || :

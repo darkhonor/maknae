@@ -111,6 +111,8 @@ install -d -m 0700 %{buildroot}%{_localstatedir}/lib/maknae
 
 %post
 %systemd_post maknaed.service maknae-egress.service maknae-egress.socket
+# Root-held until the audit lifecycle below hands it back to _maknae.
+chown root:root %{_localstatedir}/log/maknae || { echo "maknae: cannot hold %{_localstatedir}/log/maknae as root" >&2; exit 1; }
 # SELinux module + contexts
 semodule -i %{_datadir}/selinux/packages/maknae.pp 2>/dev/null || :
 restorecon -Rv %{_bindir}/maknaed %{_bindir}/maknae-egress %{_sysconfdir}/maknae %{_sysconfdir}/pki/maknae %{_localstatedir}/log/maknae %{_localstatedir}/lib/maknae 2>/dev/null || :
@@ -130,25 +132,34 @@ fapolicyd-cli --update 2>/dev/null || :
 # The inode attribute backs SELinux's append-only rule; a failure fails %post.
 # FILE-level only: a +a directory would block rpm from managing /var/log/maknae.
 AUDIT=%{_localstatedir}/log/maknae/audit.jsonl
-if [ -h "$AUDIT" ] || { [ -e "$AUDIT" ] && [ ! -f "$AUDIT" ]; }; then
-    echo "maknae: $AUDIT is not a regular file; refusing to install" >&2
-    exit 1
-fi
-if [ $1 -eq 1 ] && [ ! -e "$AUDIT" ]; then
+if [ $1 -eq 1 ] && [ ! -e "$AUDIT" ] && [ ! -h "$AUDIT" ]; then
     install -m 0640 -o _maknae -g _maknae /dev/null "$AUDIT"
 fi
-if [ -e "$AUDIT" ]; then
+if [ -e "$AUDIT" ] || [ -h "$AUDIT" ]; then
+    if [ -h "$AUDIT" ] || [ ! -f "$AUDIT" ] || [ "$(stat -c %%h "$AUDIT")" != 1 ] \
+        || [ "$(stat -c %%U:%%G "$AUDIT")" != _maknae:_maknae ]; then
+        echo "maknae: $AUDIT is not a regular, single-link _maknae:_maknae file; %{_localstatedir}/log/maknae is left root-owned" >&2
+        exit 1
+    fi
     if ! chattr +a "$AUDIT" || ! lsattr -d "$AUDIT" | cut -d' ' -f1 | grep -q a; then
-        echo "maknae: cannot set the append-only attribute on $AUDIT (filesystem: $(stat -f -c %%T "$AUDIT" 2>/dev/null || echo unknown))" >&2
+        echo "maknae: cannot set the append-only attribute on $AUDIT (filesystem: $(stat -f -c %%T "$AUDIT" 2>/dev/null || echo unknown)); %{_localstatedir}/log/maknae is left root-owned" >&2
         exit 1
     fi
 fi
+chown -h _maknae:_maknae %{_localstatedir}/log/maknae
 
 %preun
 %systemd_preun maknaed.service maknae-egress.service maknae-egress.socket
 if [ $1 -eq 0 ]; then
-    # Full removal only: clear the file append-only, then unload the SELinux module.
-    chattr -a %{_localstatedir}/log/maknae/audit.jsonl 2>/dev/null || :
+    # Full removal only: clear the file append-only with the directory root-held,
+    # then unload the SELinux module.
+    AUDIT=%{_localstatedir}/log/maknae/audit.jsonl
+    chown root:root %{_localstatedir}/log/maknae 2>/dev/null || :
+    if [ -f "$AUDIT" ] && [ ! -h "$AUDIT" ] && [ "$(stat -c %%h "$AUDIT")" = 1 ]; then
+        chattr -a "$AUDIT" 2>/dev/null || :
+    elif [ -e "$AUDIT" ] || [ -h "$AUDIT" ]; then
+        echo "maknae: $AUDIT is not a regular, single-link file; append-only not cleared" >&2
+    fi
     semodule -r maknae 2>/dev/null || :
     # NOTE: the operator's Vault port label is intentionally NOT auto-removed here
     # (%preun cannot know the port; a default-8200 removal would orphan/clobber).

@@ -45,7 +45,8 @@ case "$1" in
         # modes are load-bearing. Set them explicitly, not via umask.
         install -d -m 0750 -o root    -g _maknae /etc/maknae
         install -d -m 0750 -o root    -g _maknae /etc/maknae/private
-        install -d -m 0700 -o _maknae -g _maknae /var/log/maknae
+        # Root-held until the audit block below hands it to _maknae.
+        install -d -m 0700 -o root    -g root    /var/log/maknae
         install -d -m 0700 -o _maknae -g _maknae /var/lib/maknae
         # #240b: the deputy's Vault CA copy (written by `maknae enroll`), under
         # the deputy's OWN group.
@@ -65,18 +66,20 @@ case "$1" in
         # append-only attribute is the trail's only append-only control here, so
         # failing to set it fails configure. Never +a the directory (dpkg manages it).
         AUDIT=/var/log/maknae/audit.jsonl
-        if [ -h "$AUDIT" ] || { [ -e "$AUDIT" ] && [ ! -f "$AUDIT" ]; }; then
-            echo "maknae: $AUDIT is not a regular file; refusing to configure" >&2
-            exit 1
-        fi
-        if [ ! -e "$AUDIT" ]; then
+        if [ ! -e "$AUDIT" ] && [ ! -h "$AUDIT" ]; then
             install -m 0640 -o _maknae -g _maknae /dev/null "$AUDIT"
         fi
+        if [ -h "$AUDIT" ] || [ ! -f "$AUDIT" ] || [ "$(stat -c %h "$AUDIT")" != 1 ] \
+            || [ "$(stat -c %U:%G "$AUDIT")" != _maknae:_maknae ]; then
+            echo "maknae: $AUDIT is not a regular, single-link _maknae:_maknae file; /var/log/maknae is left root-owned" >&2
+            exit 1
+        fi
         if ! chattr +a "$AUDIT" || ! lsattr -d "$AUDIT" | cut -d' ' -f1 | grep -q a; then
-            echo "maknae: cannot set the append-only attribute on $AUDIT (filesystem: $(stat -f -c %T "$AUDIT" 2>/dev/null || echo unknown))." >&2
+            echo "maknae: cannot set the append-only attribute on $AUDIT (filesystem: $(stat -f -c %T "$AUDIT" 2>/dev/null || echo unknown)); /var/log/maknae is left root-owned." >&2
             echo "  AppArmor cannot make the audit trail append-only; the inode attribute is the control. Put /var/log/maknae on a filesystem that supports chattr +a." >&2
             exit 1
         fi
+        chown -h _maknae:_maknae /var/log/maknae
 
         # --- Conffile-ownership convergence (EVERY configure) -------------------
         # dpkg records conffiles as root:root; the daemon runs as `_maknae` and the

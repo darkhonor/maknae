@@ -4,11 +4,20 @@ set -e
 
 case "$1" in
     purge)
-        # Clear append-only defensively (prerm already did on the remove step, but
-        # purge may be reached directly on a config-only leftover) before removing
-        # the trees — rm cannot unlink inside a chattr +a directory.
-        chattr -a /var/log/maknae/audit.jsonl 2>/dev/null || :
-        chattr -a /var/log/maknae 2>/dev/null || :
+        # rm cannot unlink an append-only inode. The directory is root-held while
+        # root acts on its entry; a symlink is unlinked by rm without clearing.
+        AUDIT=/var/log/maknae/audit.jsonl
+        if [ -d /var/log/maknae ] && [ ! -h /var/log/maknae ]; then
+            chown root:root /var/log/maknae
+            chattr -a /var/log/maknae 2>/dev/null || :
+            if [ -f "$AUDIT" ] && [ ! -h "$AUDIT" ]; then
+                if [ "$(stat -c %h "$AUDIT")" = 1 ]; then
+                    chattr -a "$AUDIT" 2>/dev/null || :
+                else
+                    echo "maknae: $AUDIT has more than one link; append-only not cleared" >&2
+                fi
+            fi
+        fi
 
         # Remove configuration, the audit trail and the kernel graph store on
         # purge only.

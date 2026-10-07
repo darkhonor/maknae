@@ -126,8 +126,17 @@ for pkgid in io.maknae.daemon io.maknae.cli; do
     pkgutil --pkgs | grep -qx "$pkgid" && pkgutil --forget "$pkgid" || :
 done
 
-# Clear append-only so the operator CAN remove the trail if they choose to.
-chflags nouappnd /var/log/maknae/audit.jsonl 2>/dev/null || :
+# Clear append-only so the operator CAN remove the trail if they choose to. The
+# directory stays root-held: its account may be gone, and root acts on its entry.
+AUDIT=/var/log/maknae/audit.jsonl
+if [ -d /var/log/maknae ] && [ ! -L /var/log/maknae ]; then
+    chown 0:0 /var/log/maknae
+    if [ -f "$AUDIT" ] && [ ! -L "$AUDIT" ] && [ "$(stat -f %l "$AUDIT")" = 1 ]; then
+        chflags nouappnd "$AUDIT" 2>/dev/null || :
+    elif [ -e "$AUDIT" ] || [ -L "$AUDIT" ]; then
+        echo "WARNING: $AUDIT is not a regular, single-link file; append-only not cleared." >&2
+    fi
+fi
 
 echo "RETAINED: /var/log/maknae and /etc/maknae; remove by hand for a full teardown."
 echo "RETAINED: the kernel graph state at /usr/local/var/db/maknae/state and its key, System-keychain item io.maknae.maknaed.graph; remove both by hand for a full teardown."
