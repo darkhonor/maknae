@@ -7407,9 +7407,13 @@ mod unencodable_tests {
             attempt: 1 << 20,
             prompt: 1 << 20,
         };
-        let (_, reply) = maknae_proto::read_frame_zeroizing(&mut client, &caps)
-            .await
-            .expect("an error frame");
+        let (_, reply) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            maknae_proto::read_frame_zeroizing(&mut client, &caps),
+        )
+        .await
+        .expect("the error frame is released")
+        .expect("an error frame");
         assert!(matches!(
             maknae_proto::decode_response(&reply).unwrap().result,
             RespResult::Err(_)
