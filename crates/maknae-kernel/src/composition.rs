@@ -345,22 +345,40 @@ mod tests {
         .unwrap();
         let next = basic.compile_from_file().unwrap();
         let c = std::sync::Arc::new(Composition::new(basic, ceiling(secret())));
+        let arrives = || {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let gate = gate.clone();
+            std::thread::spawn(move || {
+                gate.arrived.wait();
+                let _ = tx.send(());
+            });
+            rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok()
+        };
         let batch = {
             let (c, home) = (c.clone(), g.0.clone());
             std::thread::spawn(move || {
                 c.decide_cited_all(&[permitted_read(&home), permitted_read(&home)])
             })
         };
-        gate.arrived.wait();
-        c.baseline().install(next);
+        assert!(arrives(), "the batch never reached evaluation");
+        c.baseline().install(next.clone());
         gate.release.wait();
-        gate.arrived.wait();
+        assert!(arrives(), "the batch stopped after one evaluation");
         gate.release.wait();
         let all = batch.join().unwrap();
         assert_eq!(all.len(), 2);
         for d in all {
             assert!(matches!(d.verdict, Verdict::Permit { .. }), "{d:?}");
         }
+        assert!(std::sync::Arc::ptr_eq(&c.baseline().snapshot(), &next));
+        let probe = {
+            let (c, home) = (c.clone(), g.0.clone());
+            std::thread::spawn(move || c.decide(&permitted_read(&home)))
+        };
+        assert!(arrives(), "the probe never reached evaluation");
+        gate.release.wait();
+        let probed = probe.join().unwrap();
+        assert!(matches!(probed, Verdict::Deny { .. }), "{probed:?}");
     }
 
     #[test]

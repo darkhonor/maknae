@@ -1179,6 +1179,16 @@ mod tests {
         assert_eq!(auth.decide(&whoami(0)), contained());
     }
 
+    fn arrives(gate: &Arc<EvaluationGate>) -> bool {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let gate = gate.clone();
+        std::thread::spawn(move || {
+            gate.arrived.wait();
+            let _ = tx.send(());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok()
+    }
+
     /// A decision parked after cloning its snapshot out must not block an
     /// install, and it cites from the snapshot it decided on.
     #[test]
@@ -1215,20 +1225,7 @@ mod tests {
             let auth = auth.clone();
             std::thread::spawn(move || auth.decide_cited(&ssh_read(501)))
         };
-        let (arrived_tx, arrived_rx) = std::sync::mpsc::channel();
-        {
-            let gate = gate.clone();
-            std::thread::spawn(move || {
-                gate.arrived.wait();
-                let _ = arrived_tx.send(());
-            });
-        }
-        assert!(
-            arrived_rx
-                .recv_timeout(std::time::Duration::from_secs(5))
-                .is_ok(),
-            "the decision never reached evaluation"
-        );
+        assert!(arrives(&gate), "the decision never reached evaluation");
         let (tx, rx) = std::sync::mpsc::channel();
         {
             let auth = auth.clone();
@@ -1267,10 +1264,10 @@ mod tests {
             let auth = auth.clone();
             std::thread::spawn(move || auth.decide_cited_all(&[whoami(0), whoami(0)]))
         };
-        gate.arrived.wait();
+        assert!(arrives(&gate), "the batch never reached evaluation");
         auth.install(next);
         gate.release.wait();
-        gate.arrived.wait();
+        assert!(arrives(&gate), "the batch stopped after one evaluation");
         gate.release.wait();
         let verdicts: Vec<_> = batch
             .join()
@@ -1280,6 +1277,10 @@ mod tests {
             .collect();
         assert_eq!(verdicts, vec![audit_permit(), audit_permit()]);
         assert!(Arc::ptr_eq(&auth.snapshot(), &installed));
+        let probe = std::thread::spawn(move || auth.decide(&whoami(0)));
+        assert!(arrives(&gate), "the probe never reached evaluation");
+        gate.release.wait();
+        assert_eq!(probe.join().unwrap(), contained());
     }
 
     #[test]
@@ -1714,7 +1715,7 @@ mod tests {
     #[cfg(all(unix, feature = "hermetic-test-seam"))]
     mod hermetic {
         use super::super::*;
-        use super::{audit_permit, contained, principal, whoami, ADMIN_ROOT, CONTAINED};
+        use super::{arrives, audit_permit, contained, principal, whoami, ADMIN_ROOT, CONTAINED};
         use maknae_security::{Authorizer, Verdict};
         use std::os::unix::fs::PermissionsExt;
 
@@ -2024,18 +2025,7 @@ mod tests {
                 let auth = auth.clone();
                 std::thread::spawn(move || auth.decide(&whoami(0)))
             };
-            let (tx, rx) = std::sync::mpsc::channel();
-            {
-                let gate = gate.clone();
-                std::thread::spawn(move || {
-                    gate.arrived.wait();
-                    let _ = tx.send(());
-                });
-            }
-            assert!(
-                rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok(),
-                "the evaluation did not park"
-            );
+            assert!(arrives(&gate), "the evaluation did not park");
             gate.release.wait();
             assert_eq!(parked.join().unwrap(), audit_permit());
         }
@@ -2056,10 +2046,10 @@ mod tests {
                 let auth = auth.clone();
                 std::thread::spawn(move || auth.decide_cited_all(&[whoami(0), whoami(0)]))
             };
-            gate.arrived.wait();
-            Baseline::install(&*auth, next);
+            assert!(arrives(&gate), "the batch never reached evaluation");
+            Baseline::install(&*auth, next.clone());
             gate.release.wait();
-            gate.arrived.wait();
+            assert!(arrives(&gate), "the batch stopped after one evaluation");
             gate.release.wait();
             let verdicts: Vec<_> = batch
                 .join()
@@ -2068,6 +2058,11 @@ mod tests {
                 .map(|d| d.verdict)
                 .collect();
             assert_eq!(verdicts, vec![audit_permit(), audit_permit()]);
+            assert!(Arc::ptr_eq(&auth.inner.snapshot(), &next));
+            let probe = std::thread::spawn(move || auth.decide(&whoami(0)));
+            assert!(arrives(&gate), "the probe never reached evaluation");
+            gate.release.wait();
+            assert_eq!(probe.join().unwrap(), contained());
         }
 
         #[test]
