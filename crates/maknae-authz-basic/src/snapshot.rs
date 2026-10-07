@@ -190,14 +190,22 @@ fn effect_attrs(effect: Effect) -> (EdgeKind, &'static str) {
     }
 }
 
-fn permissions_declared(canonical: Option<&str>, entries: usize) -> Result<bool, CompileError> {
-    match (canonical, entries) {
-        (Some(_), _) => Ok(true),
-        (None, 0) => Ok(false),
-        (None, n) => Err(CompileError::Policy(format!(
-            "{n} permissions entries without a permissions section"
-        ))),
+fn permissions_declared(
+    canonical: Option<&str>,
+    deny: &[String],
+    allow: &[String],
+) -> Result<bool, CompileError> {
+    if canonical.is_some() {
+        return Ok(true);
     }
+    if deny.is_empty() && allow.is_empty() {
+        return Ok(false);
+    }
+    Err(CompileError::Policy(format!(
+        "{} deny and {} allow permissions entries without a permissions section",
+        deny.len(),
+        allow.len()
+    )))
 }
 
 fn static_role(key: &str) -> Result<&'static str, CompileError> {
@@ -282,8 +290,11 @@ pub fn compile(
     let admin = c.id_of(ROLE, "admin")?;
     let user = c.id_of(ROLE, "user")?;
     let policy = source.policy();
-    let entries = policy.deny_sources().len() + policy.allow_sources().len();
-    if permissions_declared(policy.section_canonical("permissions"), entries)? {
+    if permissions_declared(
+        policy.section_canonical("permissions"),
+        policy.deny_sources(),
+        policy.allow_sources(),
+    )? {
         let sec = c.section("permissions", section_sha256, "permissions")?;
         for (effect, entries) in [
             (Effect::Deny, policy.deny_sources()),
@@ -951,15 +962,31 @@ mod tests {
 
     #[test]
     fn permissions_entries_without_their_section_refuse() {
-        assert_eq!(permissions_declared(Some("{}"), 0), Ok(true));
-        assert_eq!(permissions_declared(Some("{}"), 3), Ok(true));
-        assert_eq!(permissions_declared(None, 0), Ok(false));
-        assert_eq!(
-            permissions_declared(None, 2),
-            Err(CompileError::Policy(
-                "2 permissions entries without a permissions section".into()
-            ))
+        let one = || vec!["Read(/x)".to_string()];
+        let refused = |deny: Vec<String>, allow: Vec<String>, msg: &str| {
+            assert_eq!(
+                permissions_declared(None, &deny, &allow),
+                Err(CompileError::Policy(msg.into()))
+            );
+        };
+        refused(
+            one(),
+            vec![],
+            "1 deny and 0 allow permissions entries without a permissions section",
         );
+        refused(
+            vec![],
+            one(),
+            "0 deny and 1 allow permissions entries without a permissions section",
+        );
+        refused(
+            one(),
+            vec![one()[0].clone(), one()[0].clone()],
+            "1 deny and 2 allow permissions entries without a permissions section",
+        );
+        assert_eq!(permissions_declared(None, &[], &[]), Ok(false));
+        assert_eq!(permissions_declared(Some("{}"), &[], &[]), Ok(true));
+        assert_eq!(permissions_declared(Some("{}"), &one(), &one()), Ok(true));
     }
 
     fn sec_request(
