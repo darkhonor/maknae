@@ -200,16 +200,15 @@ mod tests {
         let dirfd = std::fs::File::open(d.path()).unwrap();
         std::fs::write(d.path().join("f"), b"old").unwrap();
         let at = d.path().join("f");
-        let e = publish_synced(&dirfd, "f", &at, b"new", Mode(0o600), |_| {
-            Err(nix::errno::Errno::EIO)
-        })
-        .unwrap_err();
+        use nix::errno::Errno;
+        let e =
+            publish_synced(&dirfd, "f", &at, b"new", Mode(0o600), |_| Err(Errno::EIO)).unwrap_err();
         assert_eq!(
             e,
             IoError::PublishedNotDurable {
                 path: at.clone(),
                 kind: crate::IoKind::Other {
-                    raw: nix::errno::Errno::EIO as i32
+                    raw: Errno::EIO as i32
                 },
             }
         );
