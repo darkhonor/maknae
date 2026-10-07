@@ -34,7 +34,7 @@
 use crate::ceiling_authz::CeilingAuthorizer;
 use maknae_authz_basic::Baseline;
 use maknae_security::{
-    compose_backend_name, compose_decide_reporting_role, compose_subjects, Authorizer, Request,
+    compose_backend_name, compose_decide_cited, compose_subjects, Authorizer, Decided, Request,
     SubjectBinding, Verdict,
 };
 
@@ -51,6 +51,11 @@ pub struct Composition<B: Baseline> {
 impl<B: Baseline> Composition<B> {
     pub fn new(baseline: B, ceiling: CeilingAuthorizer) -> Self {
         Self { baseline, ceiling }
+    }
+
+    /// The baseline operand, for the reload's snapshot swap.
+    pub fn baseline(&self) -> &B {
+        &self.baseline
     }
 
     /// Baseline FIRST — see the module doc.
@@ -81,13 +86,18 @@ impl<B: Baseline> Authorizer for Composition<B> {
         self.decide_reporting_role(req).0
     }
 
-    /// The one decision path (#275). Folds through the seam's
-    /// `compose_decide_reporting_role`, so `combine` and the panic boundary stay
-    /// defined in one place and a future extensions operand is picked up by
-    /// `operands()` automatically. `decide` is this function's `.0`, so every
-    /// existing composition test still covers what production runs.
     fn decide_reporting_role(&self, req: &Request) -> (Verdict, Option<&'static str>) {
-        compose_decide_reporting_role(&self.operands(), req)
+        self.decide_cited(req).into()
+    }
+
+    /// The one decision path (#275). Folds through the seam's
+    /// `compose_decide_cited`, so `combine` and the panic boundary stay defined
+    /// in one place and a future extensions operand is picked up by
+    /// `operands()` automatically. `decide` and `decide_reporting_role` are its
+    /// projections, so every existing composition test covers what production
+    /// runs.
+    fn decide_cited(&self, req: &Request) -> Decided {
+        compose_decide_cited(&self.operands(), req)
     }
 
     fn subjects(&self) -> Option<Vec<SubjectBinding>> {
@@ -107,9 +117,9 @@ mod tests {
     use maknae_security::{Action, AttrValue, Attributes, Context, Resource, Subject};
     use std::path::PathBuf;
 
-    /// A real `-basic` through the hermetic door: same load → `finish_new` →
-    /// per-request decide sequence as production, with only the loader's
-    /// ownership requirement relaxed so an unprivileged test can construct it.
+    /// A real `-basic` through the hermetic door: the production load, compile
+    /// and decide sequence, with only the loader's ownership requirement
+    /// relaxed so an unprivileged test can construct it.
     struct DirGuard(PathBuf);
 
     impl Drop for DirGuard {
@@ -147,7 +157,8 @@ mod tests {
             max_bytes: None,
         };
         let basic =
-            HermeticAuthorizer::new(policy_path, principal, req).expect("fixture constructs");
+            HermeticAuthorizer::new(policy_path, principal, req, maknae_state::envelope::sha256)
+                .expect("fixture constructs");
         (DirGuard(dir), basic)
     }
 
@@ -281,6 +292,30 @@ mod tests {
             ),
             other => panic!("expected the ceiling's Deny over a baseline Permit, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn the_composition_cites_the_baselines_rule_only_when_its_verdict_stands() {
+        use maknae_authz_basic::Baseline;
+        let (g, basic) = fixture("cite", READ_POLICY);
+        let held = basic.snapshot();
+        let c = Composition::new(basic, ceiling(secret()));
+        assert!(std::sync::Arc::ptr_eq(&c.baseline().snapshot(), &held));
+        let flows = c.decide_cited(&permitted_read(&g.0));
+        assert!(matches!(flows.verdict, Verdict::Permit { .. }), "{flows:?}");
+        let rule = flows.rule.clone().expect("the baseline's allow rule");
+        assert!(rule.section.ends_with("authz.yaml#permissions"), "{rule:?}");
+        assert_eq!(
+            c.decide_reporting_role(&permitted_read(&g.0)),
+            (flows.verdict.clone(), flows.role)
+        );
+        assert_eq!(c.decide(&permitted_read(&g.0)), flows.verdict);
+        let refused = c.decide_cited(&permitted_read_marked(&g.0, Some("TOP SECRET")));
+        assert!(matches!(refused.verdict, Verdict::Deny { .. }));
+        assert_eq!(
+            refused.rule, None,
+            "a ceiling Deny never cites the baseline's allow"
+        );
     }
 
     #[test]

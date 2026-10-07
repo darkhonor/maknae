@@ -15,6 +15,7 @@ use maknae_graph::record::{
     Provenance, ProvenanceKind,
 };
 use maknae_graph::schema::CompiledSet;
+use maknae_security::RuleCitation;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
@@ -24,12 +25,6 @@ const ATTR_ENTRY: &str = "entry";
 const ATTR_EFFECT: &str = "effect";
 const ATTR_TERM: &str = "term";
 const ATTR_DESTINATION: &str = "destination";
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuleCitation {
-    pub node: u64,
-    pub section: String,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompileError {
@@ -84,7 +79,10 @@ impl Snapshot {
         self.loaded.roles.as_subject_bindings()
     }
 
-    #[allow(dead_code)]
+    pub(crate) fn loaded(&self) -> &LoadedPolicy {
+        &self.loaded
+    }
+
     pub(crate) fn cite(&self, c: &Cited) -> Option<RuleCitation> {
         self.index.get(c).cloned()
     }
@@ -382,7 +380,7 @@ pub fn compile(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{compiled_set, AuthzBasicError};
+    use crate::{compiled_set, test_digest, AuthzBasicError};
     use maknae_graph::format::encode;
     use maknae_graph::identity::build;
     use maknae_graph::kernel::{persisted_compiled_set, SUBJECT};
@@ -393,15 +391,6 @@ mod tests {
     const WITH_GRANTS_AND_DESTS: &str = "schema_version: 1\nroles:\n  admin:\n    allow: [\"admin.status\"]\n    deny: [\"admin.config.show\"]\n  user:\n    allow: [\"session.prompt\"]\ndestinations:\n  user:\n    allow: [\"provider:openai\"]\n";
     const PATH: &str = "/etc/maknae/authz.yaml";
     const LABEL: &str = "UNCLASSIFIED";
-
-    fn test_digest(b: &[u8]) -> [u8; 32] {
-        let mut d = [0u8; 32];
-        for (i, x) in b.iter().enumerate() {
-            d[i % 32] = d[i % 32].wrapping_mul(31).wrapping_add(*x);
-        }
-        d[31] = d[31].wrapping_add(b.len() as u8);
-        d
-    }
 
     fn uids(pairs: &[(&str, u32)]) -> BTreeMap<String, u32> {
         pairs.iter().map(|(n, u)| (n.to_string(), *u)).collect()

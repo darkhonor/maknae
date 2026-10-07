@@ -31,6 +31,7 @@ fn sample_record() -> AuditRecord {
         egress: None,
         conversation: None,
         graph: None,
+        rule: None,
         outcome: Outcome {
             result: "permit".into(),
             reason: "group membership: maknae-ops".into(),

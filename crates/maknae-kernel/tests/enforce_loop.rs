@@ -119,6 +119,7 @@ impl Fixture {
                 self.dir.join("authz.yaml"),
                 self.principal.clone(),
                 seam_req(),
+                maknae_state::envelope::sha256,
             )
             .expect("fixture policy constructs"),
         )
@@ -487,50 +488,55 @@ async fn admin_whoami_permits_with_both_records() {
     assert!(req.object.is_none(), "whoami is resource-free");
 }
 
-#[tokio::test]
-async fn containment_flips_on_file_edit_and_reason_stays_off_the_wire() {
-    // The unique-sentinel enforcement proof: the SAME authorizer instance
-    // permits, the file is rewritten, the very next request denies — only the
-    // real per-request re-read can produce the flip. The deny reason reaches
-    // the trail and NEVER the frame bytes.
-    let fx = Fixture::new("flip");
-    fx.write_policy(BINDINGS_ROOT_ADMIN);
-    let authorizer = fx.authorizer();
-
-    let emit1 = RecEmit::new();
-    let first = drive(
+async fn whoami_on(
+    fx: &Fixture,
+    authorizer: Arc<HermeticAuthorizer>,
+    emit: Arc<RecEmit>,
+) -> Vec<u8> {
+    drive(
         &fx.dir,
-        authorizer.clone(),
-        emit1,
+        authorizer,
+        emit,
         0,
         maknae_proto::Verb::Whoami,
         Duration::from_secs(5),
     )
     .await
-    .expect("first call permits");
+    .expect("every call gets a frame")
+}
+
+#[tokio::test]
+async fn containment_flips_only_at_reload_and_reason_stays_off_the_wire() {
+    // The unique-sentinel enforcement proof: the SAME authorizer instance
+    // permits, the file is rewritten, and only a reload flips it to deny. The
+    // deny reason reaches the trail and NEVER the frame bytes.
+    let fx = Fixture::new("flip");
+    fx.write_policy(BINDINGS_ROOT_ADMIN);
+    let authorizer = fx.authorizer();
+
+    let first = whoami_on(&fx, authorizer.clone(), RecEmit::new()).await;
     assert!(matches!(
         maknae_proto::decode_response(&first).unwrap().result,
         RespResult::Ok(_)
     ));
 
     fx.write_policy(BINDINGS_ROOT_ADVERSARY);
+    let unreloaded = whoami_on(&fx, authorizer.clone(), RecEmit::new()).await;
+    assert!(
+        matches!(
+            maknae_proto::decode_response(&unreloaded).unwrap().result,
+            RespResult::Ok(_)
+        ),
+        "the per-request re-read is removed; a reload is the only transition"
+    );
 
+    authorizer.reload_from_file().unwrap();
     let emit2 = RecEmit::new();
-    let second = drive(
-        &fx.dir,
-        authorizer,
-        emit2.clone(),
-        0,
-        maknae_proto::Verb::Whoami,
-        Duration::from_secs(5),
-    )
-    .await
-    .expect("deny gets a frame too (Unauthorized)");
+    let second = whoami_on(&fx, authorizer, emit2.clone()).await;
     let resp = maknae_proto::decode_response(&second).unwrap();
     match resp.result {
         RespResult::Err(e) => {
             assert_eq!(e.code, ProtoErrCode::Unauthorized);
-            assert_eq!(e.message, "not authorized", "no note may reach the wire");
             assert_eq!(
                 e.message, "not authorized",
                 "wire message is the fixed generic string"
@@ -550,6 +556,20 @@ async fn containment_flips_on_file_edit_and_reason_stays_off_the_wire() {
         "the trail carries the real reason: {}",
         req.outcome.reason
     );
+}
+
+#[tokio::test]
+async fn an_invalid_policy_at_reload_keeps_the_old_snapshot() {
+    let fx = Fixture::new("badreload");
+    fx.write_policy(BINDINGS_ROOT_ADMIN);
+    let authorizer = fx.authorizer();
+    fx.write_policy("not: [valid");
+    assert!(authorizer.reload_from_file().is_err());
+    let after = whoami_on(&fx, authorizer, RecEmit::new()).await;
+    assert!(matches!(
+        maknae_proto::decode_response(&after).unwrap().result,
+        RespResult::Ok(_)
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -828,12 +848,13 @@ async fn ordinary_user_reads_approved_content_through_the_composed_pdp() {
         RespResult::Err(ref e) if e.code == ProtoErrCode::Unauthorized)
     );
 
-    // Reuse the same PDP: a containment edit must bite on the next read,
-    // even though the subject can still open and delegate the same object.
+    // Reuse the same PDP: a reloaded containment edit must bite on the next
+    // read, even though the subject can still open and delegate the same object.
     fx.write_policy(&format!(
         "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\n  deny: []\nbindings:\n  adversary: [{:?}]\n",
         user_name,
     ));
+    authorizer.baseline().reload_from_file().unwrap();
     let emit = RecEmit::new();
     let contained = read_attempt(
         &fx.dir,
@@ -2478,9 +2499,13 @@ fn composed(fx: &Fixture, level: &str) -> Arc<maknae_kernel::Composition<Hermeti
     const US: &maknae_config::BasicPolicy = &maknae_config::BasicPolicy;
     let mut ceiling = maknae_config::Ceiling::baseline_for(US);
     ceiling.classification = US.level_of(level).expect("a US level");
-    let basic =
-        HermeticAuthorizer::new(fx.dir.join("authz.yaml"), fx.principal.clone(), seam_req())
-            .expect("fixture policy constructs");
+    let basic = HermeticAuthorizer::new(
+        fx.dir.join("authz.yaml"),
+        fx.principal.clone(),
+        seam_req(),
+        maknae_state::envelope::sha256,
+    )
+    .expect("fixture policy constructs");
     Arc::new(maknae_kernel::Composition::new(
         basic,
         maknae_kernel::CeilingAuthorizer::new(ceiling, US),

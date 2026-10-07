@@ -973,6 +973,7 @@ mod tests {
                 regular_file: true,
                 max_bytes: None,
             },
+            maknae_state::envelope::sha256,
         )
         .unwrap();
         let us = &maknae_config::BasicPolicy;

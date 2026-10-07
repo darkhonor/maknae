@@ -19,6 +19,29 @@ pub struct SubjectBinding {
     pub members: Vec<String>,
 }
 
+/// The policy rule a decision was made on: its node in the backend's compiled
+/// graph and the section of the policy source that declared it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuleCitation {
+    pub node: u64,
+    pub section: String,
+}
+
+/// A verdict, the role it was decided on, and the rule that decided it, from one
+/// evaluation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Decided {
+    pub verdict: Verdict,
+    pub role: Option<&'static str>,
+    pub rule: Option<RuleCitation>,
+}
+
+impl From<Decided> for (Verdict, Option<&'static str>) {
+    fn from(d: Decided) -> Self {
+        (d.verdict, d.role)
+    }
+}
+
 /// A policy decision point. Total: always returns a `Verdict`, never panics.
 pub trait Authorizer {
     fn decide(&self, req: &Request) -> Verdict;
@@ -31,12 +54,11 @@ pub trait Authorizer {
     /// Only the RBAC baseline and the composition override it.
     ///
     /// **Why it exists (#275).** The audit record must carry the role the
-    /// decision was MADE ON. The in-repo RBAC operand re-reads its policy file
-    /// on every decision, so resolving the role in a second call would both
-    /// read twice and open a window in which the file changes between the
-    /// decision and the stamp — the record would then attest a role the
-    /// decision was not made on. Returning both facts together closes that by
-    /// construction.
+    /// decision was MADE ON. The in-repo RBAC operand decides from a policy
+    /// snapshot that a reload can replace, so resolving the role in a second
+    /// call could read a different snapshot from the one the decision used —
+    /// the record would then attest a role the decision was not made on.
+    /// Returning both facts together closes that by construction.
     ///
     /// **A wrapper that delegates [`Authorizer::decide`] MUST also delegate
     /// this**, or it silently reports no role for a decision that had one.
@@ -48,14 +70,27 @@ pub trait Authorizer {
         (self.decide(req), None)
     }
 
+    /// [`Authorizer::decide_reporting_role`] plus the rule the decision cites,
+    /// from the same evaluation. Defaulted to no citation; the RBAC baseline and
+    /// the composition override it, and a wrapper that delegates `decide` must
+    /// delegate this too.
+    fn decide_cited(&self, req: &Request) -> Decided {
+        let (verdict, role) = self.decide_reporting_role(req);
+        Decided {
+            verdict,
+            role,
+            rule: None,
+        }
+    }
+
     /// The bindings this PDP would resolve **right now**, for
     /// `admin.subject.list`.
     ///
-    /// Live, not a snapshot, and that is the whole reason this is on the seam
-    /// rather than computed at boot like the config view. Bindings are re-read
-    /// per request by design — a containment edit bites on the next request —
-    /// so a boot snapshot would report bindings the PDP is no longer using.
-    /// Disclosing stale authorization state is worse than disclosing none.
+    /// The bindings the PDP decides from now, not a boot-time copy, and that is
+    /// the whole reason this is on the seam rather than computed at boot like
+    /// the config view: a reload replaces the bindings, so a boot copy would
+    /// report bindings the PDP is no longer using. Disclosing stale
+    /// authorization state is worse than disclosing none.
     ///
     /// `None` means this backend cannot enumerate, which the kernel reports as
     /// unavailable — never as "no bindings", which is a different and
@@ -80,9 +115,8 @@ pub trait Authorizer {
     /// offloads to the blocking pool under a timeout and circuit breaker.
     ///
     /// The asymmetry is deliberate and is a property of the two contracts, not
-    /// of the call sites. `subjects` is REQUIRED to be live — bindings are
-    /// re-read per request so a containment edit bites on the next one — so
-    /// reading a policy file is what implementing it correctly means. A
+    /// of the call sites. `subjects` must answer from the bindings the PDP
+    /// decides from now, and a backend may have to block to obtain them. A
     /// backend's own NAME is an identifier it already knows; resolving one
     /// from a version file, a `dlopen`'d handle, or an IPC probe would pin a
     /// tokio worker with no timeout and no breaker, which is the failure the
@@ -179,5 +213,48 @@ mod tests {
         // The `Box<dyn Authorizer>` coercion compiling *is* the object-safety proof.
         let b: Box<dyn Authorizer> = Box::new(Always(Verdict::NotApplicable { note: None }));
         assert_eq!(b.decide(&req()), Verdict::NotApplicable { note: None });
+        assert_eq!(
+            b.decide_cited(&req()),
+            Decided {
+                verdict: Verdict::NotApplicable { note: None },
+                role: None,
+                rule: None
+            }
+        );
+    }
+
+    #[test]
+    fn decide_cited_defaults_to_the_role_reporting_answer_with_no_citation() {
+        struct OnlyDecides;
+        impl Authorizer for OnlyDecides {
+            fn decide(&self, _: &Request) -> Verdict {
+                Verdict::Deny {
+                    reason: "only".into(),
+                }
+            }
+            fn decide_reporting_role(&self, r: &Request) -> (Verdict, Option<&'static str>) {
+                (self.decide(r), Some("user"))
+            }
+        }
+        assert_eq!(
+            OnlyDecides.decide_cited(&req()),
+            Decided {
+                verdict: Verdict::Deny {
+                    reason: "only".into()
+                },
+                role: Some("user"),
+                rule: None
+            }
+        );
+        let d = Decided {
+            verdict: Verdict::Indeterminate,
+            role: Some("admin"),
+            rule: Some(RuleCitation {
+                node: 7,
+                section: "s".into(),
+            }),
+        };
+        let pair: (Verdict, Option<&'static str>) = d.into();
+        assert_eq!(pair, (Verdict::Indeterminate, Some("admin")));
     }
 }

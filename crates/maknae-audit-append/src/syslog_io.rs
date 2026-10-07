@@ -148,6 +148,7 @@ mod tests {
             egress: None,
             conversation: None,
             graph: None,
+            rule: None,
             outcome: Outcome {
                 result: "deny".into(),
                 reason: reason.into(),

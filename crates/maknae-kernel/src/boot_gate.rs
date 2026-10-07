@@ -1,24 +1,30 @@
-//! The fail-closed authz boot gate (#77, spec D1): the daemon constructs its
-//! PDP at boot or refuses to start. T1 — a wrong arm here is a daemon that
-//! serves without a decider.
+//! The fail-closed authz boot gate (#77, spec D1): the daemon compiles its PDP
+//! at boot or refuses to start. T1 — a wrong arm here is a daemon that serves
+//! without a decider.
 //!
-//! Two refusal triggers, and only two:
+//! Three refusal triggers, and only three:
 //!   1. the `principal` section is absent — the PDP's default role resolution
 //!      keys on the enrolled uid, so a daemon with no principal can authorize
 //!      no one: "boot anyway, deny everything, look healthy" would hide a
 //!      dead deployment behind a green service (operator ruling 2026-08-28);
-//!   2. `BasicAuthorizer::new` refuses — policy load, bindings semantics,
+//!   2. `PolicySource::load` refuses — policy load, bindings semantics,
 //!      (added 2026-08-31, #162) `roles:` grant semantics: an unknown role, a
 //!      structural role (`guest`/`adversary`), a term outside
 //!      `GRANTABLE_ACTIONS`, or a term the role may not hold (`user` holds
 //!      `session.prompt` only; corrected 2026-09-09, #172: the term set is
 //!      two-role now), or (added 2026-09-09, #172) `destinations:` role-key
-//!      semantics. Still ONE trigger, not four: `finish_new` validates all of
-//!      them eagerly and refuses construction, which is what this gate observes.
+//!      semantics. One trigger: the load validates all of them eagerly;
+//!   3. the snapshot compiler refuses the loaded policy against the booted
+//!      kernel graph's identity layer or the binary's vocabulary (#489).
 
-use maknae_authz_basic::{AuthzBasicError, BasicAuthorizer};
+use maknae_authz_basic::snapshot::{compile, CompileError};
+use maknae_authz_basic::{AuthzBasicError, BasicAuthorizer, PolicySource};
 use maknae_config::Principal;
+use maknae_graph::graph::Graph;
+use maknae_graph::schema::CompiledSet;
+use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Arc;
 
 /// Why boot was refused at the authz gate. Rendered into the AU-3 boot
 /// refusal record and the `RunError::Authz` message (exit code 3).
@@ -26,9 +32,11 @@ use std::path::Path;
 pub enum AuthzBootRefusal {
     /// No `principal` section: nothing to key the enrolled-admin default on.
     MissingPrincipal,
-    /// The PDP refused construction (hardened policy load or bindings
-    /// semantics) — the inner rendering carries the reason.
+    /// The policy load refused (hardened policy load or bindings semantics)
+    /// — the inner rendering carries the reason.
     Construct(AuthzBasicError),
+    /// The snapshot compiler refused the loaded policy.
+    Compile(CompileError),
 }
 
 impl std::fmt::Display for AuthzBootRefusal {
@@ -39,6 +47,7 @@ impl std::fmt::Display for AuthzBootRefusal {
                 "config has no `principal` section: the daemon cannot authorize anyone (enroll first)"
             ),
             AuthzBootRefusal::Construct(e) => write!(f, "{e}"),
+            AuthzBootRefusal::Compile(e) => write!(f, "authz {e}"),
         }
     }
 }
@@ -49,27 +58,43 @@ impl From<AuthzBasicError> for AuthzBootRefusal {
     }
 }
 
-/// Construct the boot-time PDP or refuse.
-pub fn authz_boot_gate(
+/// Load and validate `authz.yaml` through the root-owned door, or refuse.
+pub fn authz_policy_source(
     config_dir: &Path,
     principal: Option<Principal>,
-) -> Result<BasicAuthorizer, AuthzBootRefusal> {
-    authz_boot_gate_with(config_dir, principal, BasicAuthorizer::new)
+) -> Result<PolicySource, AuthzBootRefusal> {
+    authz_policy_source_with(config_dir, principal, PolicySource::load)
 }
 
-/// The gate with its constructor injected — the production caller passes
-/// [`BasicAuthorizer::new`] (root-owned door); the success arm is otherwise
-/// unconstructible off-root, and an untestable success arm on a fail-closed
-/// gate is exactly what T1 forbids. The injected fn is the ONLY variable:
-/// ordering and mapping are this fn's own, tested logic.
-fn authz_boot_gate_with(
+/// The load with its loader injected: production passes [`PolicySource::load`]
+/// (root-owned door), whose success arm is unconstructible off-root. Ordering
+/// and mapping are this fn's own, tested logic.
+fn authz_policy_source_with(
     config_dir: &Path,
     principal: Option<Principal>,
-    construct: impl FnOnce(std::path::PathBuf, Principal) -> Result<BasicAuthorizer, AuthzBasicError>,
-) -> Result<BasicAuthorizer, AuthzBootRefusal> {
+    load: impl FnOnce(std::path::PathBuf, Principal) -> Result<PolicySource, AuthzBasicError>,
+) -> Result<PolicySource, AuthzBootRefusal> {
     let principal = principal.ok_or(AuthzBootRefusal::MissingPrincipal)?;
-    let authorizer = construct(config_dir.join("authz.yaml"), principal)?;
-    Ok(authorizer)
+    Ok(load(config_dir.join("authz.yaml"), principal)?)
+}
+
+/// Compile the boot-time PDP's first snapshot over the booted kernel graph, or
+/// refuse. `section_sha256` must be the source's SHA-256 section digests: the
+/// baseline is built to compile every later reload with SHA-256 too.
+pub fn authz_boot_gate(
+    source: PolicySource,
+    graph: Arc<Graph>,
+    vocabulary: &CompiledSet,
+    section_sha256: &BTreeMap<String, [u8; 32]>,
+) -> Result<BasicAuthorizer, AuthzBootRefusal> {
+    let snapshot =
+        compile(graph, &source, vocabulary, section_sha256).map_err(AuthzBootRefusal::Compile)?;
+    Ok(BasicAuthorizer::from_snapshot(
+        source.principal().clone(),
+        source.path().to_path_buf(),
+        maknae_state::envelope::sha256,
+        Arc::new(snapshot),
+    ))
 }
 
 /// `audit.siem` is configured, but off-host audit offload is not implemented.
@@ -335,7 +360,7 @@ mod tests {
     fn missing_principal_refuses_boot() {
         let d = std::env::temp_dir().join(format!("bg_nop_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&d);
-        let got = authz_boot_gate(&d, None);
+        let got = authz_policy_source(&d, None);
         let _ = std::fs::remove_dir_all(&d);
         match got {
             Err(AuthzBootRefusal::MissingPrincipal) => {}
@@ -352,24 +377,27 @@ mod tests {
         assert!(msg.contains("enroll"), "{msg}");
     }
 
-    /// Trigger 2, load half: off-root the euid-owned fixture refuses at the
-    /// hardened door with the `Load` discriminant; as root the fixture IS
-    /// root-owned and construction succeeds (the run.rs CI-limitation
-    /// pattern — both branches carried).
-    #[test]
-    fn refused_policy_load_maps_to_construct_load() {
-        let d = std::env::temp_dir().join(format!("bg_load_{}", std::process::id()));
+    fn policy_dir(tag: &str, body: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("bg_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
-        std::fs::write(
-            d.join("authz.yaml"),
-            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n",
-        )
-        .unwrap();
+        std::fs::write(d.join("authz.yaml"), body).unwrap();
         std::fs::set_permissions(d.join("authz.yaml"), std::fs::Permissions::from_mode(0o640))
             .unwrap();
-        let got = authz_boot_gate(&d, Some(principal()));
+        d
+    }
+
+    const EMPTY_POLICY: &str = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n";
+    const ADMIN_ROOT: &str = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\n";
+
+    /// Trigger 2, load half: off-root the euid-owned fixture refuses at the
+    /// hardened door with the `Load` discriminant; as root the fixture IS
+    /// root-owned and the load succeeds (both branches carried).
+    #[test]
+    fn refused_policy_load_maps_to_construct_load() {
+        let d = policy_dir("load", EMPTY_POLICY);
+        let got = authz_policy_source(&d, Some(principal()));
         let _ = std::fs::remove_dir_all(&d);
         if nix::unistd::geteuid().is_root() {
             assert!(got.is_ok(), "as root the fixture IS root-owned: {got:?}");
@@ -386,46 +414,11 @@ mod tests {
         }
     }
 
-    /// The SUCCESS arm, off-root, nothing stubbed: the hermetic construction
-    /// door (feature-gated, dev-enabled) builds a real `BasicAuthorizer` over
-    /// a fixture policy, and the gate's own logic — principal threading and
-    /// the `authz.yaml` join — is exercised end to end.
-    #[test]
-    fn gate_success_returns_the_authorizer() {
-        let d = std::env::temp_dir().join(format!("bg_ok_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
-        std::fs::write(
-            d.join("authz.yaml"),
-            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(d.join("authz.yaml"), std::fs::Permissions::from_mode(0o640))
-            .unwrap();
-        let seam = |path: std::path::PathBuf, pr: Principal| {
-            maknae_authz_basic::BasicAuthorizer::new_hermetic(
-                path,
-                pr,
-                maknae_config::TargetRequired {
-                    owner: None,
-                    mode_mask: Some(0o022),
-                    nlink_exactly_one: false,
-                    regular_file: true,
-                    max_bytes: None,
-                },
-            )
-        };
-        let got = authz_boot_gate_with(&d, Some(principal()), seam);
-        let _ = std::fs::remove_dir_all(&d);
-        got.expect("gate success arm");
-    }
-
-    fn hermetic_seam(
+    fn hermetic_load(
         path: std::path::PathBuf,
         pr: Principal,
-    ) -> Result<maknae_authz_basic::BasicAuthorizer, AuthzBasicError> {
-        maknae_authz_basic::BasicAuthorizer::new_hermetic(
+    ) -> Result<PolicySource, AuthzBasicError> {
+        PolicySource::load_with_requirement(
             path,
             pr,
             maknae_config::TargetRequired {
@@ -438,38 +431,112 @@ mod tests {
         )
     }
 
-    #[test]
-    fn the_principal_reaches_construct_verbatim() {
-        let d = std::env::temp_dir().join(format!("bg_verbatim_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
-        std::fs::write(
-            d.join("authz.yaml"),
-            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n",
+    const LABEL: &str = "UNCLASSIFIED";
+
+    fn sha_digests(source: &PolicySource) -> BTreeMap<String, [u8; 32]> {
+        source.section_digests(maknae_state::envelope::sha256)
+    }
+
+    /// The identity graph the store would hold for `layer`, built in memory.
+    fn identity_graph(layer: &maknae_graph::identity::IdentityLayer) -> Arc<Graph> {
+        let persisted = maknae_graph::kernel::persisted_compiled_set(LABEL);
+        let vocab = maknae_state::vocabulary::digest(&persisted).unwrap();
+        Arc::new(
+            maknae_graph::identity::build(
+                layer,
+                &persisted,
+                vocab,
+                1,
+                maknae_graph::record::ProvenanceKind::Seed,
+            )
+            .unwrap(),
         )
-        .unwrap();
-        std::fs::set_permissions(d.join("authz.yaml"), std::fs::Permissions::from_mode(0o640))
-            .unwrap();
+    }
+
+    /// The SUCCESS arm, off-root, nothing stubbed: the hermetic load door
+    /// builds a real `PolicySource`, and the gate compiles the PDP over the
+    /// identity graph that source declares.
+    #[test]
+    fn gate_success_returns_the_authorizer() {
+        use maknae_authz_basic::Baseline;
+        use maknae_security::Authorizer;
+        let d = policy_dir("ok", ADMIN_ROOT);
+        let source = authz_policy_source_with(&d, Some(principal()), hermetic_load);
+        let _ = std::fs::remove_dir_all(&d);
+        let source = source.expect("load success arm");
+        assert_eq!(source.path(), d.join("authz.yaml"));
+        let digests = sha_digests(&source);
+        let graph = identity_graph(&source.identity_layer(LABEL, digests.get("bindings").copied()));
+        let auth = authz_boot_gate(
+            source,
+            graph.clone(),
+            &maknae_authz_basic::compiled_set(LABEL),
+            &digests,
+        )
+        .expect("gate success arm");
+        assert!(Arc::ptr_eq(auth.snapshot().persisted(), &graph));
+        assert_eq!(Baseline::principal(&auth), &principal());
+        assert_eq!(
+            Baseline::digest(&auth)(b"x"),
+            maknae_state::envelope::sha256(b"x")
+        );
+        assert_eq!(
+            auth.subjects().unwrap()[0].members,
+            vec!["uid:0".to_string()]
+        );
+        let refused = Baseline::load_source(&auth);
+        assert!(
+            matches!(refused, Err(AuthzBasicError::Load(_))),
+            "the production loader reloads from the gate's path: {refused:?}"
+        );
+    }
+
+    /// Trigger 3: a booted identity layer that is not the file's refuses
+    /// with the compiler's reason.
+    #[test]
+    fn a_compile_refusal_refuses_boot_naming_the_cause() {
+        let d = policy_dir("compile", ADMIN_ROOT);
+        let source = authz_policy_source_with(&d, Some(principal()), hermetic_load);
+        let _ = std::fs::remove_dir_all(&d);
+        let source = source.unwrap();
+        let digests = sha_digests(&source);
+        let stale = identity_graph(&source.identity_layer(LABEL, None));
+        let got = authz_boot_gate(
+            source,
+            stale,
+            &maknae_authz_basic::compiled_set(LABEL),
+            &digests,
+        );
+        match got {
+            Err(e @ AuthzBootRefusal::Compile(CompileError::Identity(_))) => {
+                let m = e.to_string();
+                assert!(m.starts_with("authz snapshot identity refused: "), "{m}");
+                assert!(m.contains("differs"), "{m}");
+            }
+            other => panic!("expected Compile(Identity), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_principal_reaches_the_load_verbatim() {
+        let d = policy_dir("verbatim", EMPTY_POLICY);
         let sent = Principal {
             name: "verbatim".into(),
             uid: 4242,
         };
         let seen: std::cell::RefCell<Option<Principal>> = std::cell::RefCell::new(None);
-        let got = authz_boot_gate_with(&d, Some(sent.clone()), |path, pr| {
+        let got = authz_policy_source_with(&d, Some(sent.clone()), |path, pr| {
             *seen.borrow_mut() = Some(pr.clone());
-            hermetic_seam(path, pr)
+            hermetic_load(path, pr)
         });
         let _ = std::fs::remove_dir_all(&d);
-        got.expect("gate success arm");
+        assert_eq!(got.expect("load success arm").principal(), &sent);
         assert_eq!(*seen.borrow(), Some(sent));
     }
 
     /// Trigger 2, bindings half — the filesystem-free mapping killer that
     /// holds on EVERY lane (root included): a constructed `Bindings` error
     /// converts to the `Construct` arm and its rendering passes through.
-    /// (The bindings refusal itself is proven in maknae-authz-basic via the
-    /// hermetic seam; this pins the GATE's error mapping.)
     #[test]
     fn bindings_error_maps_through_construct_arm_verbatim() {
         let e = AuthzBasicError::Bindings("identity 'ghost' has no resolvable uid".into());

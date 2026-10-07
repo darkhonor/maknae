@@ -15,9 +15,9 @@
 //! any other, which is their call to make and not this crate's (#276).
 //!
 //! Fail-closed everywhere: unknown role key, dual membership, a duplicate
-//! name, or a name absent from the `UidMap` (a brand-new username edited into
-//! the file after construction — adding principals is restart-scoped in v0.1,
-//! spec §3) all make the policy invalid.
+//! name, or a name absent from the `UidMap` (the map is resolved at each load,
+//! so only a name with no uid on the host is absent) all make the policy
+//! invalid.
 
 use crate::role::Role;
 use maknae_graph::graph::Graph;
@@ -352,8 +352,6 @@ mod tests {
 
     #[test]
     fn a_name_missing_from_the_uid_map_is_unresolvable() {
-        // Spec §3: a brand-new username edited into the file after
-        // construction fails closed until restart.
         let got = resolve(&b(&[("user", &["nobody-new"])]), &UidMap::new());
         assert_eq!(got, Err(BindingError::Unresolvable("nobody-new".into())));
     }

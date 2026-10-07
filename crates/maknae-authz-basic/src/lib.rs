@@ -4,10 +4,10 @@
 //! key), per request, deny-by-default, fail-closed. Spec:
 //! `2026-08-26-maknae-authz-basic-design.md` (out-of-repo design spec; specs never live in this repository).
 //!
-//! Composition: `maknaed` constructs [`BasicAuthorizer`] at boot (#77,
-//! `maknae-kernel::boot_gate`) and decides every request through the seam —
-//! bindings are LIVE, re-read per request. The seam stays policy-agnostic
-//! (ADR-0004).
+//! Composition: `maknaed` compiles the policy into a [`snapshot::Snapshot`] at
+//! boot (#77, `maknae-kernel::boot_gate`) and decides every request from the
+//! snapshot installed at the time; a reload installs a new one. The seam stays
+//! policy-agnostic (ADR-0004).
 #![forbid(unsafe_code)]
 
 mod binding;
@@ -32,7 +32,9 @@ pub use vocabulary::{class_name, compiled_set, ACTION_TERMS, CLASSES, KERNEL_TER
 
 use binding::UidMap;
 use decide::LoadedPolicy;
+use snapshot::Snapshot;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, PoisonError, RwLock};
 
 /// Subject attribute key for the authenticated uid (pinned for #77; ADR-0018:
 /// the per-request authorization principal is the uid, from peer-cred).
@@ -41,8 +43,9 @@ pub const SUBJECT_UID_KEY: &str = decide::SUBJECT_UID;
 /// `fs.*` actions (spec §4.4).
 pub const RESOURCE_PATH_KEY: &str = decide::RESOURCE_PATH;
 
-/// Why [`BasicAuthorizer::new`] refused (all fail-closed; §3a). The daemon's
-/// boot gate (#77) surfaces this as a boot refusal.
+/// Why loading or compiling the policy refused (all fail-closed; §3a). The
+/// daemon's boot gate (#77) surfaces this as a boot refusal, a reload as a
+/// refused reload.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AuthzBasicError {
     /// The policy file failed the hardened load (ownership/mode/symlink/
@@ -68,6 +71,9 @@ pub enum AuthzBasicError {
     /// (#172: `user` may hold `session.prompt` only; the admin disclosure
     /// terms are admin-only, ADR-0010 decision 4 as superseded 2026-09-08).
     TermNotGrantableForRole { role: String, term: String },
+    /// The snapshot compiler refused the policy against the persisted identity
+    /// layer or the vocabulary.
+    Compile(snapshot::CompileError),
 }
 
 impl std::fmt::Display for AuthzBasicError {
@@ -92,97 +98,77 @@ impl std::fmt::Display for AuthzBasicError {
                 "authz roles: `{term}` is not grantable to role `{role}` (admin: {}; user: session.prompt)",
                 decide::GRANTABLE_ACTIONS.join(", ")
             ),
+            AuthzBasicError::Compile(e) => write!(f, "authz {e}"),
         }
     }
 }
 
 impl std::error::Error for AuthzBasicError {}
 
-/// The RBAC PDP backend. Holds the policy PATH (never a snapshot: `decide`
-/// re-reads the file per request — the Zero Trust ruling) plus the enrolled
-/// principal and the construction-time username→uid map (zero per-request
-/// NSS; a brand-new username edited into the file after construction is
-/// `Indeterminate` until restart — spec §3).
+/// The RBAC PDP backend: the enrolled principal and the compiled policy
+/// snapshot every decision reads. `path` and `digest` are what a reload loads
+/// and compiles with; nothing reads the file per request.
 #[derive(Debug)]
 pub struct BasicAuthorizer {
-    policy_path: PathBuf,
     principal: maknae_config::Principal,
-    uid_map: UidMap,
+    path: PathBuf,
+    digest: fn(&[u8]) -> [u8; 32],
+    snapshot: RwLock<Arc<Snapshot>>,
+    #[cfg(test)]
+    evaluation_gate: Option<Arc<tests::EvaluationGate>>,
 }
 
 impl BasicAuthorizer {
-    /// Read + parse + validate the policy once, eagerly (a bad file refuses
-    /// construction — the daemon's boot gate), resolving every bound username
-    /// to a uid via getpwnam exactly once. Production load path only: the
-    /// file must be root-owned, `mode & 0o027 == 0`, symlink-refused.
-    pub fn new(
-        policy_path: PathBuf,
+    pub fn from_snapshot(
         principal: maknae_config::Principal,
-    ) -> Result<Self, AuthzBasicError> {
-        let policy = maknae_config::load_authz(&policy_path)
-            .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
-        Self::finish_new(policy_path, principal, policy)
-    }
-
-    /// The post-load half of [`BasicAuthorizer::new`]: uid resolution + eager
-    /// semantic validation + construction. Split out so it is hermetically
-    /// testable with a [`maknae_config::parse_authz`]-produced policy (the
-    /// load half's root-owned requirement is unconstructible off-root; the
-    /// pieces are the same production code either way).
-    fn finish_new(
-        policy_path: PathBuf,
-        principal: maknae_config::Principal,
-        policy: maknae_config::AuthzPolicy,
-    ) -> Result<Self, AuthzBasicError> {
-        let uid_map = resolve_uid_map(&policy)?;
-        validate(&policy, &uid_map)?;
-        Ok(Self {
-            policy_path,
+        path: PathBuf,
+        digest: fn(&[u8]) -> [u8; 32],
+        snapshot: Arc<Snapshot>,
+    ) -> Self {
+        Self {
             principal,
-            uid_map,
-        })
+            path,
+            digest,
+            snapshot: RwLock::new(snapshot),
+            #[cfg(test)]
+            evaluation_gate: None,
+        }
     }
 
-    /// The whole per-request sequence with the file-loader injected: loader →
-    /// parsed policy → validated bindings (construction-time uid map) → pure
-    /// core; any failure → `Indeterminate`. One sequence, two callers:
-    /// production `decide()` injects `load_authz` (root-owned hardened path);
-    /// the hermetic e2e injects the `hermetic-test-seam` loader, which runs
-    /// the SAME maknae-io checks with a fixture-satisfiable owner requirement
-    /// (the PR #139 pattern — the requirement is parameterized, the checks
-    /// are real, nothing is stubbed).
-    /// **Test-only since #275** — production decides through
-    /// [`Self::decide_with_loader_reporting_role`]. Kept so the five existing
-    /// assertions bind a bare `Verdict`; it is that function's `.0`, so they
-    /// check exactly what production enforces.
-    #[allow(dead_code)]
-    fn decide_with_loader(
-        &self,
-        req: &maknae_security::Request,
-        loader: impl Fn(&Path) -> Result<maknae_config::AuthzPolicy, maknae_config::AuthzError>,
-    ) -> maknae_security::Verdict {
-        self.decide_with_loader_reporting_role(req, loader).0
+    /// The installed snapshot. The read guard is released before this returns,
+    /// so an evaluation never holds the lock.
+    pub fn snapshot(&self) -> Arc<Snapshot> {
+        self.snapshot
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
-    /// The verdict AND the role, from ONE policy read (#275). `decide_with_loader`
-    /// is its `.0`, so the two can never disagree and no existing caller changed.
-    fn decide_with_loader_reporting_role(
+    /// The hot swap: the next decision reads `snapshot`; a decision already
+    /// holding the previous one finishes on it.
+    pub fn install(&self, snapshot: Arc<Snapshot>) {
+        *self
+            .snapshot
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = snapshot;
+    }
+
+    /// The file-based evaluator the snapshot path must agree with.
+    #[cfg(test)]
+    fn decide_oracle(
         &self,
+        source: &PolicySource,
         req: &maknae_security::Request,
-        loader: impl Fn(&Path) -> Result<maknae_config::AuthzPolicy, maknae_config::AuthzError>,
     ) -> (maknae_security::Verdict, Option<&'static str>) {
-        let Ok(policy) = loader(&self.policy_path) else {
-            return (maknae_security::Verdict::Indeterminate, None);
-        };
-        match assemble(policy, &self.uid_map) {
+        match assemble(source.policy().clone(), source.uid_map()) {
             Ok(lp) => decide::decide_loaded_with_role(&lp, &self.principal, req),
             Err(()) => (maknae_security::Verdict::Indeterminate, None),
         }
     }
 }
 
-/// Eager semantic validation, the same checks every per-request load repeats, so an
-/// invalid file refuses at boot with the offending token named.
+/// Eager semantic validation, so an invalid file refuses at load with the
+/// offending token named.
 fn validate(
     policy: &maknae_config::AuthzPolicy,
     uid_map: &UidMap,
@@ -306,13 +292,10 @@ impl PolicySource {
     }
 }
 
-/// policy → LoadedPolicy under a uid map; any invalidity → Err (the caller
-/// maps it to `Indeterminate`).
+/// policy → LoadedPolicy under a uid map; any invalidity → Err. Anonymous by
+/// design: `PolicySource::from_parts` has already named the offending token.
 fn assemble(policy: maknae_config::AuthzPolicy, uid_map: &UidMap) -> Result<LoadedPolicy, ()> {
     let roles = binding::Roles::File(binding::resolve(&policy.bindings, uid_map).map_err(|_| ())?);
-    // Anonymous on this lane by design: `finish_new` names the offending term
-    // for the operator at boot; a per-request refusal tells a caller only
-    // `Indeterminate`. Both refuse -- only the diagnostic differs.
     let action_grants = validate_grants(&policy.action_grants).map_err(|_| ())?;
     let destinations = validate_destinations(&policy.destinations).map_err(|_| ())?;
     Ok(LoadedPolicy {
@@ -325,7 +308,7 @@ fn assemble(policy: maknae_config::AuthzPolicy, uid_map: &UidMap) -> Result<Load
 
 /// `destinations:` keys must be roles that can hold a prompt grant (#172):
 /// `admin` and `user`. Structural roles refuse like `roles:` does; an unknown
-/// key refuses by name. Runs at boot (finish_new) and on every per-request load.
+/// key refuses by name. Runs on every load.
 fn validate_destinations(
     raw: &std::collections::BTreeMap<String, maknae_config::RawDestinations>,
 ) -> Result<decide::DestinationGrants, AuthzBasicError> {
@@ -384,8 +367,8 @@ fn validate_grants(
     Ok(decide::ActionGrants::from_validated(out))
 }
 
-/// getpwnam every bound username once. No name is excluded since #276.
-/// Unresolvable → construction refused. `cfg(unix)` is the only lane — the
+/// getpwnam every bound username once per load. No name is excluded since #276.
+/// Unresolvable → the load refuses. `cfg(unix)` is the only lane — the
 /// workspace's non-unix story is fail-closed refusal upstream in
 /// `maknae-config` (`load_authz` refuses off-unix before we are reached).
 fn resolve_uid_map(policy: &maknae_config::AuthzPolicy) -> Result<UidMap, AuthzBasicError> {
@@ -430,42 +413,37 @@ fn lookup_uid(name: &str) -> Option<u32> {
     }
 }
 
-impl BasicAuthorizer {
-    /// Bindings as the PDP would resolve them RIGHT NOW, via the same loader
-    /// `decide` uses. Any failure -- unreadable file, bad grammar, invalid
-    /// bindings -- yields `None`, which the kernel reports as unavailable.
-    /// Never a partial or defaulted list: "these are the bindings" is a claim,
-    /// and a wrong one about authorization state is worse than no answer.
-    fn subjects_with_loader(
-        &self,
-        loader: impl Fn(&Path) -> Result<maknae_config::AuthzPolicy, maknae_config::AuthzError>,
-    ) -> Option<Vec<maknae_security::SubjectBinding>> {
-        let policy = loader(&self.policy_path).ok()?;
-        let resolved = binding::resolve(&policy.bindings, &self.uid_map).ok()?;
-        resolved.as_subject_bindings()
-    }
-}
-
 impl maknae_security::Authorizer for BasicAuthorizer {
-    /// Per-request: re-read the policy file (Zero Trust — a binding edit
-    /// bites on the next request), then run the pure core. ANY load/parse/
-    /// validation failure → `Indeterminate` (finalize turns it into deny).
     fn decide(&self, req: &maknae_security::Request) -> maknae_security::Verdict {
-        self.decide_reporting_role(req).0
+        self.decide_cited(req).verdict
     }
 
-    /// One decision path: `decide` is this function's `.0`, so the verdict the
-    /// kernel enforces and the role it stamps come from the SAME policy read
-    /// (#275).
     fn decide_reporting_role(
         &self,
         req: &maknae_security::Request,
     ) -> (maknae_security::Verdict, Option<&'static str>) {
-        self.decide_with_loader_reporting_role(req, maknae_config::load_authz)
+        self.decide_cited(req).into()
+    }
+
+    /// One decision from one snapshot: the verdict, the role and the cited
+    /// rule all come from the `Arc` cloned out here.
+    fn decide_cited(&self, req: &maknae_security::Request) -> maknae_security::Decided {
+        let snap = self.snapshot();
+        #[cfg(test)]
+        if let Some(gate) = &self.evaluation_gate {
+            gate.arrived.wait();
+            gate.release.wait();
+        }
+        let d = decide::decide_loaded_cited(snap.loaded(), &self.principal, req);
+        maknae_security::Decided {
+            verdict: d.verdict,
+            role: d.role,
+            rule: d.cited.as_ref().and_then(|c| snap.cite(c)),
+        }
     }
 
     fn subjects(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
-        self.subjects_with_loader(maknae_config::load_authz)
+        self.snapshot().subjects()
     }
 
     fn backend_name(&self) -> String {
@@ -490,107 +468,247 @@ impl maknae_security::Authorizer for BasicAuthorizer {
 /// every kernel composition test unwritable. The property the ADR names — the
 /// absent state is not expressible — holds identically: `Composition` requires
 /// a `B: Baseline`, and nothing outside this crate can satisfy that bound.
-pub trait Baseline: maknae_security::Authorizer + sealed::Sealed + Send + Sync + 'static {}
+pub trait Baseline: maknae_security::Authorizer + sealed::Sealed + Send + Sync + 'static {
+    fn snapshot(&self) -> Arc<Snapshot>;
+    fn install(&self, snapshot: Arc<Snapshot>);
+    fn principal(&self) -> &maknae_config::Principal;
+    /// Load and validate the policy file through this baseline's own loader.
+    /// Blocking I/O, including getpwnam: call it off the async workers.
+    fn load_source(&self) -> Result<PolicySource, AuthzBasicError>;
+    /// The section digest this baseline's snapshots are compiled with.
+    fn digest(&self) -> fn(&[u8]) -> [u8; 32];
+}
 
 mod sealed {
     pub trait Sealed {}
 }
 
 impl sealed::Sealed for BasicAuthorizer {}
-impl Baseline for BasicAuthorizer {}
+impl Baseline for BasicAuthorizer {
+    fn snapshot(&self) -> Arc<Snapshot> {
+        BasicAuthorizer::snapshot(self)
+    }
+
+    fn install(&self, snapshot: Arc<Snapshot>) {
+        BasicAuthorizer::install(self, snapshot)
+    }
+
+    fn principal(&self) -> &maknae_config::Principal {
+        &self.principal
+    }
+
+    fn load_source(&self) -> Result<PolicySource, AuthzBasicError> {
+        PolicySource::load(self.path.clone(), self.principal.clone())
+    }
+
+    fn digest(&self) -> fn(&[u8]) -> [u8; 32] {
+        self.digest
+    }
+}
 
 #[cfg(all(unix, feature = "hermetic-test-seam"))]
 impl sealed::Sealed for HermeticAuthorizer {}
 #[cfg(all(unix, feature = "hermetic-test-seam"))]
-impl Baseline for HermeticAuthorizer {}
+impl Baseline for HermeticAuthorizer {
+    fn snapshot(&self) -> Arc<Snapshot> {
+        self.inner.snapshot()
+    }
 
-/// Test-only, requirement-parameterized door over the SAME production decide
-/// sequence (#77; the PR #139 pattern applied at the decide layer): the
-/// loader's `TargetRequired` is the caller's, everything else — eager
-/// `finish_new` validation, per-request re-read through `decide_with_loader`,
-/// the pure core — is the production code path. `BasicAuthorizer`'s own shape
-/// is untouched in every build (no cfg'd fields: the coverage lane compiles
-/// `--all-features` and must not alter production structs). Kernel e2e tests
-/// pass this as `handle()`'s generic authorizer so the wiring under test is
-/// identical to production with the loader differing by exactly the declared
-/// requirement. Production resolution is pinned featureless by
+    fn install(&self, snapshot: Arc<Snapshot>) {
+        self.inner.install(snapshot)
+    }
+
+    fn principal(&self) -> &maknae_config::Principal {
+        &self.inner.principal
+    }
+
+    fn load_source(&self) -> Result<PolicySource, AuthzBasicError> {
+        PolicySource::load_with_requirement(
+            self.inner.path.clone(),
+            self.inner.principal.clone(),
+            self.req.clone(),
+        )
+    }
+
+    fn digest(&self) -> fn(&[u8]) -> [u8; 32] {
+        self.inner.digest
+    }
+}
+
+/// Test-only, requirement-parameterized door over the production load and
+/// compile sequence (#77; the PR #139 pattern): the loader's `TargetRequired`
+/// is the caller's, everything else — eager validation, the snapshot compiler,
+/// the decision core — is the production code. `BasicAuthorizer`'s own shape is
+/// untouched by the feature. Production resolution is pinned featureless by
 /// `ci/gates/feature-resolution-pin.sh`.
 #[cfg(all(unix, feature = "hermetic-test-seam"))]
 #[derive(Debug)]
 pub struct HermeticAuthorizer {
     inner: BasicAuthorizer,
     req: maknae_config::TargetRequired,
+    label: String,
 }
 
 #[cfg(all(unix, feature = "hermetic-test-seam"))]
 impl HermeticAuthorizer {
-    /// Eager-validating constructor: same load→`finish_new` sequence as
-    /// [`BasicAuthorizer::new`], with the door's requirement parameterized.
+    /// Compiles the first snapshot over an identity graph built in memory at
+    /// revision 1, labelled with the US system's lowest level.
     pub fn new(
-        policy_path: PathBuf,
+        path: PathBuf,
         principal: maknae_config::Principal,
         req: maknae_config::TargetRequired,
+        digest: fn(&[u8]) -> [u8; 32],
     ) -> Result<Self, AuthzBasicError> {
-        let inner = BasicAuthorizer::new_hermetic(policy_path, principal, req.clone())?;
-        Ok(Self { inner, req })
+        let label =
+            maknae_security::ClassificationPolicy::unmarked(&maknae_config::BasicPolicy).name;
+        let source =
+            PolicySource::load_with_requirement(path.clone(), principal.clone(), req.clone())?;
+        let snapshot = snapshot_over(&source, &label, digest, None)?;
+        Ok(Self {
+            inner: BasicAuthorizer::from_snapshot(principal, path, digest, snapshot),
+            req,
+            label,
+        })
+    }
+
+    /// Compiles the first snapshot against `persisted`, which must carry the
+    /// identity layer the file declares.
+    pub fn new_over_graph(
+        path: PathBuf,
+        principal: maknae_config::Principal,
+        req: maknae_config::TargetRequired,
+        digest: fn(&[u8]) -> [u8; 32],
+        persisted: Arc<maknae_graph::graph::Graph>,
+    ) -> Result<Self, AuthzBasicError> {
+        let label = maknae_graph::identity::extract(&persisted)
+            .map_err(|e| AuthzBasicError::Compile(snapshot::CompileError::Identity(e.to_string())))?
+            .layer
+            .label;
+        let source =
+            PolicySource::load_with_requirement(path.clone(), principal.clone(), req.clone())?;
+        let snapshot = snapshot::compile(
+            persisted,
+            &source,
+            &compiled_set(&label),
+            &source.section_digests(digest),
+        )
+        .map_err(AuthzBasicError::Compile)?;
+        Ok(Self {
+            inner: BasicAuthorizer::from_snapshot(principal, path, digest, Arc::new(snapshot)),
+            req,
+            label,
+        })
+    }
+
+    /// Load, re-resolve and compile the file against the installed snapshot's
+    /// identity graph, advanced one revision when the file's layer differs.
+    pub fn compile_from_file(&self) -> Result<Arc<Snapshot>, AuthzBasicError> {
+        let source = Baseline::load_source(self)?;
+        let current = self.inner.snapshot();
+        snapshot_over(
+            &source,
+            &self.label,
+            self.inner.digest,
+            Some(current.persisted()),
+        )
+    }
+
+    /// [`Self::compile_from_file`] then install; an `Err` leaves the old snapshot.
+    pub fn reload_from_file(&self) -> Result<(), AuthzBasicError> {
+        let next = self.compile_from_file()?;
+        self.inner.install(next);
+        Ok(())
+    }
+
+    pub fn digest(&self) -> fn(&[u8]) -> [u8; 32] {
+        self.inner.digest
     }
 }
 
-#[cfg(all(unix, feature = "hermetic-test-seam"))]
-impl BasicAuthorizer {
-    /// The construction half of the hermetic door: a REAL `BasicAuthorizer`
-    /// (production `finish_new` sequence) whose load requirement is the
-    /// caller's — so consumers whose success paths are unconstructible
-    /// off-root (the kernel boot gate) can exercise them with nothing
-    /// stubbed. Feature-gated; the feature-resolution-pin gate keeps it out
-    /// of production resolution. NOTE: the instance's own trait `decide()`
-    /// still uses the PRODUCTION loader (root-owned door) — only
-    /// [`HermeticAuthorizer`] parameterizes decide-time.
-    pub fn new_hermetic(
-        policy_path: PathBuf,
-        principal: maknae_config::Principal,
-        req: maknae_config::TargetRequired,
-    ) -> Result<Self, AuthzBasicError> {
-        let policy = maknae_config::load_authz_with_requirement(&policy_path, req)
-            .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
-        BasicAuthorizer::finish_new(policy_path, principal, policy)
-    }
-}
-
+/// Every seam method DELEGATES: a default here would make every kernel e2e
+/// assert against a stub and prove nothing about what production answers.
 #[cfg(all(unix, feature = "hermetic-test-seam"))]
 impl maknae_security::Authorizer for HermeticAuthorizer {
     fn decide(&self, r: &maknae_security::Request) -> maknae_security::Verdict {
-        self.decide_reporting_role(r).0
+        self.inner.decide(r)
     }
 
-    /// Delegates through the HERMETIC loader, exactly as `decide` does.
-    /// Delegating to `inner.decide_reporting_role` instead would silently use
-    /// the production root-owned loader and report `Indeterminate`/`None` in
-    /// every test (#275).
     fn decide_reporting_role(
         &self,
         r: &maknae_security::Request,
     ) -> (maknae_security::Verdict, Option<&'static str>) {
-        let req = self.req.clone();
-        self.inner.decide_with_loader_reporting_role(r, move |p| {
-            maknae_config::load_authz_with_requirement(p, req.clone())
-        })
+        self.inner.decide_reporting_role(r)
     }
 
-    /// DELEGATED, not defaulted. The hermetic wrapper exists to exercise the
-    /// real backend through a fixture-satisfiable loader; reporting `unknown`
-    /// here would make every e2e test assert against a stub value and prove
-    /// nothing about what production answers.
+    fn decide_cited(&self, r: &maknae_security::Request) -> maknae_security::Decided {
+        self.inner.decide_cited(r)
+    }
+
     fn subjects(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
-        let req = self.req.clone();
-        self.inner.subjects_with_loader(move |p| {
-            maknae_config::load_authz_with_requirement(p, req.clone())
-        })
+        self.inner.subjects()
     }
 
     fn backend_name(&self) -> String {
         self.inner.backend_name()
     }
+}
+
+/// Builds the identity graph `source` declares — fresh at revision 1, or `base`
+/// carried forward (unchanged, or at its revision + 1 when the layer differs) —
+/// and compiles the snapshot over it.
+#[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
+fn snapshot_over(
+    source: &PolicySource,
+    label: &str,
+    digest: fn(&[u8]) -> [u8; 32],
+    base: Option<&Arc<maknae_graph::graph::Graph>>,
+) -> Result<Arc<Snapshot>, AuthzBasicError> {
+    use maknae_graph::record::ProvenanceKind;
+    let refused = |m: String| AuthzBasicError::Compile(snapshot::CompileError::Identity(m));
+    let digests = source.section_digests(digest);
+    let layer = source.identity_layer(label, digests.get("bindings").copied());
+    let persisted_set = maknae_graph::kernel::persisted_compiled_set(label);
+    let vocabulary = digest(
+        &persisted_set
+            .canonical_bytes()
+            .map_err(|e| refused(e.to_string()))?,
+    );
+    let build = |revision: u64, initiator: ProvenanceKind| {
+        maknae_graph::identity::build(&layer, &persisted_set, vocabulary, revision, initiator)
+            .map(Arc::new)
+            .map_err(|e| refused(e.to_string()))
+    };
+    let persisted = match base {
+        None => build(1, ProvenanceKind::Seed)?,
+        Some(g) => {
+            let stored = maknae_graph::identity::extract(g).map_err(|e| refused(e.to_string()))?;
+            if stored.layer == layer {
+                g.clone()
+            } else {
+                build(g.revision() + 1, ProvenanceKind::RootFile)?
+            }
+        }
+    };
+    snapshot::compile(persisted, source, &compiled_set(label), &digests)
+        .map(Arc::new)
+        .map_err(AuthzBasicError::Compile)
+}
+
+/// A deterministic 32-byte fold of `bytes` (four FNV-1a-64 lanes). NOT
+/// cryptographic: it stands in for SHA-256 where no store is involved, and a
+/// digest value never enters a verdict.
+#[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
+pub fn test_digest(bytes: &[u8]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    for (lane, chunk) in out.chunks_mut(8).enumerate() {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ lane as u64;
+        for b in bytes {
+            h ^= u64::from(*b);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        chunk.copy_from_slice(&h.to_le_bytes());
+    }
+    out
 }
 
 /// P2 artifact-witness marker: this is a PRIVILEGED trust-plane crate,
@@ -631,11 +749,58 @@ mod tests {
         Action, AttrValue, Attributes, Authorizer, Context, Resource, Subject, Verdict,
     };
 
+    /// Parks a decision after it has cloned its snapshot out.
+    #[derive(Debug)]
+    pub(super) struct EvaluationGate {
+        pub(super) arrived: std::sync::Barrier,
+        pub(super) release: std::sync::Barrier,
+    }
+
+    const LABEL: &str = "UNCLASSIFIED";
+    const PATH: &str = "/etc/maknae/authz.yaml";
+    const ADMIN_ROOT: &str = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\n";
+    const ADVERSARY_ROOT: &str = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  adversary: [\"root\"]\n";
+    const CONTAINED: &str = "subject contained: role=adversary";
+
     fn principal() -> maknae_config::Principal {
         maknae_config::Principal {
             name: "operator".into(),
             uid: 501,
         }
+    }
+
+    fn parse(body: &str) -> maknae_config::AuthzPolicy {
+        maknae_config::parse_authz(body).expect("grammar is valid")
+    }
+
+    /// The production post-load half: one getpwnam per bound name, then eager
+    /// validation.
+    fn finish(policy: maknae_config::AuthzPolicy) -> Result<PolicySource, AuthzBasicError> {
+        let uid_map = resolve_uid_map(&policy)?;
+        PolicySource::from_parts(policy, uid_map, principal(), "/nonexistent".into())
+    }
+
+    fn source_with(body: &str, uids: &[(&str, u32)]) -> PolicySource {
+        PolicySource::from_parts(
+            parse(body),
+            uids.iter().map(|(n, u)| (n.to_string(), *u)).collect(),
+            principal(),
+            PATH.into(),
+        )
+        .unwrap()
+    }
+
+    fn compiled(src: &PolicySource) -> Arc<Snapshot> {
+        snapshot_over(src, LABEL, test_digest, None).unwrap()
+    }
+
+    fn authorizer_over(body: &str, uids: &[(&str, u32)]) -> BasicAuthorizer {
+        BasicAuthorizer::from_snapshot(
+            principal(),
+            "/nonexistent".into(),
+            test_digest,
+            compiled(&source_with(body, uids)),
+        )
     }
 
     fn liveness_req(uid: Option<i64>) -> maknae_security::Request {
@@ -651,12 +816,56 @@ mod tests {
         }
     }
 
+    fn whoami(uid: i64) -> maknae_security::Request {
+        let mut r = liveness_req(Some(uid));
+        r.action = Action("admin.whoami".into());
+        r
+    }
+
+    fn audit_permit() -> Verdict {
+        Verdict::Permit {
+            obligations: vec![maknae_security::Obligation {
+                id: "audit".into(),
+                params: Attributes::new(),
+            }],
+        }
+    }
+
+    fn contained() -> Verdict {
+        Verdict::Deny {
+            reason: CONTAINED.into(),
+        }
+    }
+
+    fn ssh_read(uid: i64) -> maknae_security::Request {
+        let mut r = liveness_req(Some(uid));
+        r.action = Action("fs.read".into());
+        r.subject.0.insert(
+            maknae_security::SUBJECT_HOME,
+            AttrValue::Str("/home/operator".into()),
+        );
+        r.resource.0.insert(
+            RESOURCE_PATH_KEY,
+            AttrValue::Str("/home/operator/.ssh/id_rsa".into()),
+        );
+        r.context.0.insert(
+            maknae_security::CONTEXT_DAC_LANE,
+            AttrValue::Str("local".into()),
+        );
+        r.context.0.insert(
+            maknae_security::CONTEXT_FS_OPERATION,
+            AttrValue::Str("read".into()),
+        );
+        r
+    }
+
+    const SHIPPED: &str = include_str!("../../../packaging/common/authz.yaml");
+
     /// Proof (a): the REAL shipped authz.yaml (byte-identical, via
     /// include_str!) parses, has no bindings key, and the defaults branch
     /// decides: enrolled uid → admin rows; agent name → user rows.
     #[test]
     fn shipped_content_defaults_proof() {
-        const SHIPPED: &str = include_str!("../../../packaging/common/authz.yaml");
         let policy = maknae_config::parse_authz(SHIPPED).expect("shipped authz.yaml parses");
         assert!(
             policy.bindings.is_none(),
@@ -668,33 +877,10 @@ mod tests {
             action_grants: decide::ActionGrants::default(),
             destinations: decide::DestinationGrants::default(),
         };
-        // Enrolled uid → admin: admin verb permitted; deny-list still denies.
-        let admin_whoami = decide::decide_loaded(&lp, &principal(), &{
-            let mut r = liveness_req(Some(501));
-            r.action = Action("admin.whoami".into());
-            r
-        });
+        let admin_whoami = decide::decide_loaded(&lp, &principal(), &whoami(501));
         assert!(matches!(admin_whoami, Verdict::Permit { .. }));
-        let mut fs_req = liveness_req(Some(501));
-        fs_req.action = Action("fs.read".into());
-        fs_req.subject.0.insert(
-            maknae_security::SUBJECT_HOME,
-            AttrValue::Str("/home/operator".into()),
-        );
-        fs_req.resource.0.insert(
-            RESOURCE_PATH_KEY,
-            AttrValue::Str("/home/operator/.ssh/id_rsa".into()),
-        );
-        fs_req.context.0.insert(
-            maknae_security::CONTEXT_DAC_LANE,
-            AttrValue::Str("local".into()),
-        );
-        fs_req.context.0.insert(
-            maknae_security::CONTEXT_FS_OPERATION,
-            AttrValue::Str("read".into()),
-        );
         assert!(matches!(
-            decide::decide_loaded(&lp, &principal(), &fs_req),
+            decide::decide_loaded(&lp, &principal(), &ssh_read(501)),
             Verdict::Deny { ref reason } if reason.contains("Read(~/.ssh/**)")
         ));
         // An UNBOUND uid gets no role under the shipped defaults -- the half
@@ -707,124 +893,383 @@ mod tests {
         );
     }
 
-    /// Proof (c): containment-without-restart — the Zero Trust property,
-    /// end-to-end through the real (seam-parameterized) load path: same
-    /// authorizer instance, file edited between requests, next decide() flips
-    /// to Deny with no restart.
+    /// The decision names its rule, from the snapshot it was made on.
     #[test]
-    fn containment_without_restart_bites_on_the_next_request() {
+    fn decide_cited_names_the_rule_from_the_same_snapshot() {
+        let auth = BasicAuthorizer::from_snapshot(
+            principal(),
+            "/nonexistent".into(),
+            test_digest,
+            compiled(&source_with(SHIPPED, &[])),
+        );
+        let d = auth.decide_cited(&ssh_read(501));
+        assert!(
+            matches!(d.verdict, Verdict::Deny { ref reason } if reason.contains("Read(~/.ssh/**)"))
+        );
+        assert_eq!(d.role, Some("admin"));
+        let rule = d.rule.expect("a path deny cites its rule");
+        assert_eq!(rule.section, format!("{PATH}#permissions"));
+        let node = auth
+            .snapshot()
+            .graph()
+            .node(maknae_graph::record::NodeId(rule.node))
+            .unwrap()
+            .clone();
+        assert_eq!(node.key, "rule:permissions:deny:0");
+        assert_eq!(
+            (
+                auth.decide(&ssh_read(501)),
+                auth.decide_reporting_role(&ssh_read(501))
+            ),
+            (d.verdict.clone(), (d.verdict, d.role))
+        );
+        let uncited = auth.decide_cited(&whoami(501));
+        assert_eq!((uncited.verdict, uncited.rule), (audit_permit(), None));
+    }
+
+    /// The `cfg(test)` file-based evaluator agrees with the snapshot path.
+    #[test]
+    fn the_oracle_and_the_snapshot_agree() {
+        let src = source_with(
+            &format!("{SHIPPED}bindings:\n  user: [\"ursula\"]\n  adversary: [\"mallory\"]\n"),
+            &[("ursula", 1001), ("mallory", 666)],
+        );
+        let auth =
+            BasicAuthorizer::from_snapshot(principal(), PATH.into(), test_digest, compiled(&src));
+        for req in [
+            whoami(501),
+            whoami(1001),
+            whoami(666),
+            whoami(4242),
+            ssh_read(501),
+            ssh_read(1001),
+        ] {
+            assert_eq!(
+                auth.decide_oracle(&src, &req),
+                auth.decide_reporting_role(&req)
+            );
+        }
+        let broken = PolicySource {
+            uid_map: UidMap::new(),
+            ..src.clone()
+        };
+        assert_eq!(
+            auth.decide_oracle(&broken, &whoami(1001)),
+            (Verdict::Indeterminate, None)
+        );
+    }
+
+    #[test]
+    fn subjects_reports_none_without_a_bindings_section_and_an_empty_set_with_one() {
+        let none = authorizer_over("schema_version: 1\n", &[]);
+        assert_eq!(
+            none.subjects(),
+            None,
+            "no bindings key means CANNOT ENUMERATE, not `nobody is bound`"
+        );
+        let empty = authorizer_over("schema_version: 1\nbindings:\n  admin: []\n", &[]);
+        assert_eq!(empty.subjects(), Some(vec![]));
+        let one = authorizer_over(ADMIN_ROOT, &[("root", 0)]);
+        assert_eq!(
+            one.subjects(),
+            Some(vec![maknae_security::SubjectBinding {
+                role: "admin".into(),
+                members: vec!["uid:0".into()],
+            }])
+        );
+    }
+
+    #[test]
+    fn subjects_on_the_shipped_tilde_policy_needs_no_home() {
+        let auth = authorizer_over(
+            &format!("{SHIPPED}bindings:\n  admin: [\"root\"]\n"),
+            &[("root", 0)],
+        );
+        assert!(auth.subjects().is_some());
+    }
+
+    /// TWO members under one role, asserted BY EQUALITY on the sorted vector.
+    /// uids 2 and 10, deliberately: `BTreeMap` iterates them NUMERICALLY
+    /// while `members.sort()` orders the rendered strings LEXICALLY.
+    #[test]
+    fn subjects_reports_every_member_of_a_role_sorted() {
+        let auth = authorizer_over(
+            "schema_version: 1\nbindings:\n  admin: [\"ten\", \"two\"]\n",
+            &[("two", 2), ("ten", 10)],
+        );
+        let got = auth.subjects().expect("an explicit block");
+        let admin = got.iter().find(|b| b.role == "admin").expect("admin");
+        assert_eq!(
+            admin.members,
+            vec!["uid:10".to_string(), "uid:2".to_string()],
+            "both members, LEXICALLY sorted -- not BTreeMap's numeric order"
+        );
+    }
+
+    #[test]
+    fn backend_name_identifies_this_backend() {
+        assert_eq!(
+            authorizer_over("schema_version: 1\n", &[]).backend_name(),
+            "maknae-authz-basic"
+        );
+    }
+
+    #[test]
+    fn the_baseline_trait_reports_this_authorizers_parts() {
+        let auth = authorizer_over(ADMIN_ROOT, &[("root", 0)]);
+        assert_eq!(Baseline::principal(&auth), &principal());
+        assert_eq!(Baseline::digest(&auth)(b"maknae"), test_digest(b"maknae"));
+        let held = Baseline::snapshot(&auth);
+        assert!(Arc::ptr_eq(&held, &auth.snapshot()));
+        let next = compiled(&source_with(ADVERSARY_ROOT, &[("root", 0)]));
+        Baseline::install(&auth, next.clone());
+        assert!(Arc::ptr_eq(&auth.snapshot(), &next));
+        assert_eq!(auth.decide(&whoami(0)), contained());
+    }
+
+    /// The production `load_source` sits behind the root-owned door.
+    #[test]
+    fn production_load_source_sits_behind_the_root_owned_door() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("mab_contain_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("mab_load_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
         let p = dir.join("authz.yaml");
-        let write = |bindings_role: &str| {
-            std::fs::write(
-                &p,
-                format!(
-                    // `root` rather than the struck reserved token (#276): this
-                    // proof's subject is CONTAINMENT -- that a binding edit bites
-                    // on the next request -- not the identity it is written over.
-                    "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  {bindings_role}: [\"root\"]\n"
-                ),
-            )
-            .unwrap();
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
-        };
-        write("user");
-        let auth = BasicAuthorizer {
-            policy_path: p.clone(),
-            principal: principal(),
-            uid_map: [("root".to_string(), 0u32)].into_iter().collect(),
-        };
-        let seam_loader = |path: &Path| {
-            maknae_config::load_authz_with_requirement(
-                path,
-                maknae_io::TargetRequired {
-                    owner: None,
-                    mode_mask: Some(0o022),
-                    nlink_exactly_one: false,
-                    regular_file: true,
-                    max_bytes: None,
-                },
-            )
-        };
-        let before = auth.decide_with_loader(&liveness_req(Some(0)), seam_loader);
-        assert!(matches!(before, Verdict::Permit { .. }), "{before:?}");
-
-        // Containment: root (here: the test) rewrites the binding. No
-        // restart, no new authorizer — the very next request must deny.
-        write("adversary");
-        let after = auth.decide_with_loader(&liveness_req(Some(0)), seam_loader);
-        assert!(
-            matches!(after, Verdict::Deny { ref reason } if reason.contains("role=adversary")),
-            "{after:?}"
+        std::fs::write(&p, ADMIN_ROOT).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let auth = BasicAuthorizer::from_snapshot(
+            principal(),
+            p,
+            test_digest,
+            compiled(&source_with("schema_version: 1\n", &[])),
         );
-
-        // And a garbage file mid-flight → Indeterminate (fail-closed).
-        std::fs::write(&p, "not: [valid").unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
-        // `Some(0)`, NOT `None`: a subject with no uid yields Indeterminate on
-        // its own, so `liveness_req(None)` here would pass whether or not the
-        // GARBAGE POLICY was refused -- proven by substituting a valid policy
-        // and watching it still pass (codex). The identity must be good so the
-        // only thing under test is the policy.
-        let garbage = auth.decide_with_loader(&liveness_req(Some(0)), seam_loader);
-        assert_eq!(garbage, Verdict::Indeterminate);
-        // A brand-new username edited in after construction: Indeterminate
-        // until restart (spec §3 resolution model).
-        std::fs::write(
-            &p,
-            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  user: [\"nobody-new\"]\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
-        // Same reason: a resolvable identity, so the refusal under test is the
-        // unresolvable BINDING and nothing else.
-        let new_name = auth.decide_with_loader(&liveness_req(Some(0)), seam_loader);
-        assert_eq!(new_name, Verdict::Indeterminate);
+        let got = Baseline::load_source(&auth);
         let _ = std::fs::remove_dir_all(&dir);
+        if nix::unistd::geteuid().is_root() {
+            let src = got.expect("as root the fixture IS root-owned");
+            assert_eq!(src.uid_map().get("root"), Some(&0));
+        } else {
+            assert!(
+                matches!(got, Err(AuthzBasicError::Load(ref m)) if m.contains("root")),
+                "unprivileged load must refuse the euid-owned fixture: {got:?}"
+            );
+        }
     }
 
-    /// finish_new (the post-load half of `new`) hermetically: eager
-    /// validation + uid resolution over a host-independent identity
-    /// (`root` — uid 0 exists everywhere).
-    ///
-    /// #276: this used to bind `user: ["agent"]` and assert the reserved token
-    /// was never looked up. With the token struck, `agent` is an ordinary name:
-    /// the binding would break DIFFERENTLY on the two mutation lanes -- a
-    /// `getpwnam` panic on a host without such an account, an assertion failure
-    /// on a host with one. Bound to `root` alone, which resolves everywhere.
+    /// Review focus: concurrent deciders see whole snapshots only.
     #[test]
-    fn finish_new_resolves_root_validates_eagerly_and_refuses_bad_bindings() {
-        let ok_policy = maknae_config::parse_authz("schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\n")
-        .unwrap();
-        let auth =
-            BasicAuthorizer::finish_new("/nonexistent".into(), principal(), ok_policy).unwrap();
-        assert_eq!(auth.uid_map.get("root"), Some(&0), "root resolves to uid 0");
+    fn concurrent_decisions_see_whole_snapshots() {
+        let admin = compiled(&source_with(ADMIN_ROOT, &[("root", 0)]));
+        let adversary = compiled(&source_with(ADVERSARY_ROOT, &[("root", 0)]));
+        let auth = Arc::new(BasicAuthorizer::from_snapshot(
+            principal(),
+            "/nonexistent".into(),
+            test_digest,
+            admin.clone(),
+        ));
+        let deciders: Vec<_> = (0..4)
+            .map(|_| {
+                let auth = auth.clone();
+                std::thread::spawn(move || {
+                    (0..2_000)
+                        .map(|_| auth.decide(&whoami(0)))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        for i in 0..500 {
+            auth.install(if i % 2 == 0 {
+                adversary.clone()
+            } else {
+                admin.clone()
+            });
+        }
+        for d in deciders {
+            for v in d.join().unwrap() {
+                assert!(v == audit_permit() || v == contained(), "{v:?}");
+            }
+        }
+        assert!(Arc::ptr_eq(&auth.snapshot(), &admin));
+    }
+
+    #[test]
+    fn a_poisoned_lock_is_recovered_not_propagated() {
+        let auth = authorizer_over(ADMIN_ROOT, &[("root", 0)]);
+        std::thread::scope(|s| {
+            let _ = s
+                .spawn(|| {
+                    let _guard = auth.snapshot.write().unwrap();
+                    panic!("poison the snapshot lock");
+                })
+                .join();
+        });
+        assert!(auth.snapshot.is_poisoned());
+        assert_eq!(auth.decide(&whoami(0)), audit_permit());
+        auth.install(compiled(&source_with(ADVERSARY_ROOT, &[("root", 0)])));
+        assert_eq!(auth.decide(&whoami(0)), contained());
+    }
+
+    #[test]
+    fn install_is_visible_to_the_next_decide_only() {
+        let auth = authorizer_over(ADMIN_ROOT, &[("root", 0)]);
+        let held = auth.snapshot();
+        auth.install(compiled(&source_with(ADVERSARY_ROOT, &[("root", 0)])));
+        let d = decide::decide_loaded_cited(held.loaded(), &principal(), &whoami(0));
         assert_eq!(
-            auth.uid_map.len(),
+            d.verdict,
+            audit_permit(),
+            "the held snapshot keeps its answer"
+        );
+        assert_eq!(auth.decide(&whoami(0)), contained());
+    }
+
+    /// A decision parked after cloning its snapshot out must not block an
+    /// install: the lock is never held across evaluation.
+    #[test]
+    fn decide_never_holds_the_lock_while_evaluating() {
+        let mut auth = authorizer_over(ADMIN_ROOT, &[("root", 0)]);
+        let gate = Arc::new(EvaluationGate {
+            arrived: std::sync::Barrier::new(2),
+            release: std::sync::Barrier::new(2),
+        });
+        auth.evaluation_gate = Some(gate.clone());
+        let auth = Arc::new(auth);
+        let next = compiled(&source_with(ADVERSARY_ROOT, &[("root", 0)]));
+        let parked = {
+            let auth = auth.clone();
+            std::thread::spawn(move || auth.decide(&whoami(0)))
+        };
+        gate.arrived.wait();
+        let (tx, rx) = std::sync::mpsc::channel();
+        {
+            let auth = auth.clone();
+            std::thread::spawn(move || {
+                auth.install(next);
+                let _ = tx.send(());
+            });
+        }
+        let installed = rx.recv_timeout(std::time::Duration::from_secs(5));
+        assert!(
+            installed.is_ok(),
+            "install blocked behind an evaluating decision"
+        );
+        gate.release.wait();
+        assert_eq!(
+            parked.join().unwrap(),
+            audit_permit(),
+            "the parked decision finishes on the snapshot it cloned"
+        );
+    }
+
+    #[test]
+    fn test_digest_is_a_pinned_four_lane_fold() {
+        assert_eq!(
+            test_digest(b""),
+            [
+                0x25, 0x23, 0x22, 0x84, 0xe4, 0x9c, 0xf2, 0xcb, 0x24, 0x23, 0x22, 0x84, 0xe4, 0x9c,
+                0xf2, 0xcb, 0x27, 0x23, 0x22, 0x84, 0xe4, 0x9c, 0xf2, 0xcb, 0x26, 0x23, 0x22, 0x84,
+                0xe4, 0x9c, 0xf2, 0xcb
+            ]
+        );
+        assert_eq!(
+            &test_digest(b"a")[..8],
+            &0xaf63_dc4c_8601_ec8c_u64.to_le_bytes()
+        );
+        assert_ne!(test_digest(b"ab"), test_digest(b"ba"));
+    }
+
+    #[test]
+    fn snapshot_over_carries_an_unchanged_layer_and_advances_a_changed_one() {
+        let first = compiled(&source_with(ADMIN_ROOT, &[("root", 0)]));
+        assert_eq!(first.revision(), 1);
+        let same = snapshot_over(
+            &source_with(ADMIN_ROOT, &[("root", 0)]),
+            LABEL,
+            test_digest,
+            Some(first.persisted()),
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(same.persisted(), first.persisted()));
+        let moved = snapshot_over(
+            &source_with(ADVERSARY_ROOT, &[("root", 0)]),
+            LABEL,
+            test_digest,
+            Some(first.persisted()),
+        )
+        .unwrap();
+        assert_eq!(moved.revision(), 2);
+        assert!(moved
+            .persisted()
+            .nodes()
+            .iter()
+            .any(|n| n.provenance.kind == maknae_graph::record::ProvenanceKind::RootFile));
+        let g = first.persisted();
+        let b = g.nodes().iter().cloned().map(|mut n| {
+            if n.key == maknae_graph::kernel::VOCABULARY_SOURCE_KEY {
+                n.attrs.insert(
+                    maknae_graph::kernel::ATTR_SHA256.into(),
+                    maknae_graph::record::AttrValue::Str("zz".into()),
+                );
+            }
+            n
+        });
+        let b = b.fold(
+            maknae_graph::graph::GraphBuilder::new(maknae_graph::record::GraphSpace::Kernel, 1),
+            maknae_graph::graph::GraphBuilder::node,
+        );
+        let bad = Arc::new(
+            g.edges()
+                .iter()
+                .cloned()
+                .fold(b, maknae_graph::graph::GraphBuilder::edge)
+                .build(
+                    &maknae_graph::kernel::SCHEMA,
+                    &maknae_graph::kernel::persisted_compiled_set(LABEL),
+                )
+                .unwrap(),
+        );
+        let unreadable = snapshot_over(
+            &source_with(ADMIN_ROOT, &[("root", 0)]),
+            LABEL,
+            test_digest,
+            Some(&bad),
+        );
+        assert!(
+            matches!(
+                unreadable,
+                Err(AuthzBasicError::Compile(snapshot::CompileError::Identity(
+                    _
+                )))
+            ),
+            "{unreadable:?}"
+        );
+    }
+
+    /// The post-load half (one getpwnam per name, eager validation) over a
+    /// host-independent identity (`root` — uid 0 exists everywhere).
+    #[test]
+    fn finish_resolves_root_validates_eagerly_and_refuses_bad_bindings() {
+        let src = finish(parse(ADMIN_ROOT)).unwrap();
+        assert_eq!(
+            src.uid_map().get("root"),
+            Some(&0),
+            "root resolves to uid 0"
+        );
+        assert_eq!(
+            src.uid_map().len(),
             1,
             "every bound name resolves, no exception"
         );
-
-        // The advesary-typo rule fails CONSTRUCTION, not just requests.
-        let typo = maknae_config::parse_authz("schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  advesary: [\"root\"]\n")
-        .unwrap();
-        let got = BasicAuthorizer::finish_new("/nonexistent".into(), principal(), typo);
-        assert!(matches!(got, Err(AuthzBasicError::Bindings(ref m)) if m.contains("advesary")));
-
-        // An unresolvable username refuses construction.
-        let ghost = maknae_config::parse_authz("schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  user: [\"no-such-user-maknae-85\"]\n")
-        .unwrap();
-        let got = BasicAuthorizer::finish_new("/nonexistent".into(), principal(), ghost);
+        let typo = finish(parse("schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  advesary: [\"root\"]\n"));
+        assert!(matches!(typo, Err(AuthzBasicError::Bindings(ref m)) if m.contains("advesary")));
+        let ghost = finish(parse("schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  user: [\"no-such-user-maknae-85\"]\n"));
         assert!(
-            matches!(got, Err(AuthzBasicError::Bindings(ref m)) if m.contains("no-such-user-maknae-85"))
+            matches!(ghost, Err(AuthzBasicError::Bindings(ref m)) if m.contains("no-such-user-maknae-85"))
         );
     }
 
-    // ---- `roles:` action grants: refusal at boot (#162) ----
+    // ---- `roles:` action grants: refusal at load (#162) ----
 
     const GRANT_PREAMBLE: &str = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n";
 
@@ -833,31 +1278,26 @@ mod tests {
             .expect("grammar is valid; the SEMANTIC refusal is what is under test")
     }
 
-    /// A `roles:` key outside the role vocabulary refuses CONSTRUCTION, and the
-    /// error names the offending key. Not a warning, not a skipped entry: a
-    /// grant an operator wrote and the daemon silently ignored is the failure
-    /// mode this whole surface exists to avoid.
+    /// A `roles:` key outside the role vocabulary refuses the load, and the
+    /// error names the offending key.
     #[test]
     fn roles_unknown_role_refuses_construction_naming_the_key() {
-        let p = parse_with_roles("roles:\n  admn:\n    allow: [\"admin.status\"]\n");
-        let got = BasicAuthorizer::finish_new("/nonexistent".into(), principal(), p);
+        let got = finish(parse_with_roles(
+            "roles:\n  admn:\n    allow: [\"admin.status\"]\n",
+        ));
         assert!(
             matches!(got, Err(AuthzBasicError::UnknownRole(ref k)) if k == "admn"),
             "expected UnknownRole(\"admn\"), got {got:?}"
         );
     }
 
-    /// A REAL but STRUCTURAL role gets its own variant. `Role::from_key`
-    /// returns `Some` for these, so this is a second check -- and it must not
-    /// collapse into `UnknownRole`, which would tell an operator their correct
-    /// spelling was a typo. (`user` left this loop with #172.)
+    /// A REAL but STRUCTURAL role gets its own variant, not `UnknownRole`.
     #[test]
     fn roles_real_but_ungrantable_role_refuses_with_its_own_variant() {
         for key in ["guest", "adversary"] {
-            let p = parse_with_roles(&format!(
+            let got = finish(parse_with_roles(&format!(
                 "roles:\n  {key}:\n    allow: [\"admin.status\"]\n"
-            ));
-            let got = BasicAuthorizer::finish_new("/nonexistent".into(), principal(), p);
+            )));
             assert!(
                 matches!(got, Err(AuthzBasicError::RoleNotSupportedYet(ref k)) if k == key),
                 "role `{key}`: expected RoleNotSupportedYet, got {got:?}"
@@ -867,23 +1307,25 @@ mod tests {
 
     #[test]
     fn user_may_hold_only_the_content_plane_term_and_the_error_names_role_and_term() {
-        let p = parse_with_roles("roles:\n  user:\n    allow: [\"admin.status\"]\n");
-        let got = BasicAuthorizer::finish_new("/nonexistent".into(), principal(), p);
+        let got = finish(parse_with_roles(
+            "roles:\n  user:\n    allow: [\"admin.status\"]\n",
+        ));
         assert!(
             matches!(got, Err(AuthzBasicError::TermNotGrantableForRole { ref role, ref term }) if role == "user" && term == "admin.status"),
             "{got:?}"
         );
-        let p = parse_with_roles("roles:\n  user:\n    allow: [\"session.prompt\"]\n");
-        assert!(BasicAuthorizer::finish_new("/nonexistent".into(), principal(), p).is_ok());
+        assert!(finish(parse_with_roles(
+            "roles:\n  user:\n    allow: [\"session.prompt\"]\n"
+        ))
+        .is_ok());
     }
 
     #[test]
     fn destinations_for_a_structural_or_unknown_role_refuse_at_boot_naming_the_role() {
         for (role, want_unknown) in [("guest", false), ("adversary", false), ("ghost", true)] {
-            let p = parse_with_roles(&format!(
+            let got = finish(parse_with_roles(&format!(
                 "destinations:\n  {role}:\n    allow: [\"provider:x\"]\n"
-            ));
-            let got = BasicAuthorizer::finish_new("/nonexistent".into(), principal(), p);
+            )));
             match got {
                 Err(AuthzBasicError::UnknownRole(ref k)) if want_unknown => assert_eq!(k, role),
                 Err(AuthzBasicError::RoleNotSupportedYet(ref k)) if !want_unknown => {
@@ -892,16 +1334,14 @@ mod tests {
                 other => panic!("{role}: {other:?}"),
             }
         }
-        let p = parse_with_roles(
+        assert!(finish(parse_with_roles(
             "destinations:\n  user:\n    allow: [\"provider:x\"]\n  admin:\n    allow: []\n",
-        );
-        assert!(BasicAuthorizer::finish_new("/nonexistent".into(), principal(), p).is_ok());
+        ))
+        .is_ok());
     }
 
     /// A term outside `GRANTABLE_ACTIONS` refuses, whether it is a real verb
     /// this phase withholds (`admin.contain`) or nonexistent (`admin.stauts`).
-    /// Both are `UnknownActionTerm`: the grantable list is the vocabulary here,
-    /// and "exists elsewhere in the system" earns no standing.
     #[test]
     fn roles_ungrantable_term_refuses_construction_naming_the_term() {
         for term in [
@@ -910,8 +1350,9 @@ mod tests {
             "admin.stauts",
             "fs.read",
         ] {
-            let p = parse_with_roles(&format!("roles:\n  admin:\n    allow: [\"{term}\"]\n"));
-            let got = BasicAuthorizer::finish_new("/nonexistent".into(), principal(), p);
+            let got = finish(parse_with_roles(&format!(
+                "roles:\n  admin:\n    allow: [\"{term}\"]\n"
+            )));
             assert!(
                 matches!(got, Err(AuthzBasicError::UnknownActionTerm(ref t)) if t == term),
                 "term `{term}`: expected UnknownActionTerm, got {got:?}"
@@ -919,216 +1360,30 @@ mod tests {
         }
     }
 
-    /// Validation gates the DENY list too. A typo'd deny that parsed silently
-    /// would read to an operator as a denial in force while denying nothing --
-    /// the worst outcome on a policy surface, and invisible without this test.
+    /// Validation gates the DENY list too: a typo'd deny would read as a
+    /// denial in force while denying nothing.
     #[test]
     fn roles_ungrantable_term_in_deny_list_also_refuses() {
-        let p = parse_with_roles("roles:\n  admin:\n    deny: [\"admin.contain\"]\n");
-        let got = BasicAuthorizer::finish_new("/nonexistent".into(), principal(), p);
+        let got = finish(parse_with_roles(
+            "roles:\n  admin:\n    deny: [\"admin.contain\"]\n",
+        ));
         assert!(
             matches!(got, Err(AuthzBasicError::UnknownActionTerm(ref t)) if t == "admin.contain"),
             "deny lists are gated identically to allow lists, got {got:?}"
         );
     }
 
-    #[test]
-    fn subjects_reports_file_bindings_and_none_on_failure() {
-        let auth = BasicAuthorizer {
-            policy_path: "/nonexistent".into(),
-            principal: principal(),
-            uid_map: [("root".to_string(), 0u32)].into_iter().collect(),
-        };
-        let got = auth
-            .subjects_with_loader(|_| {
-                maknae_config::parse_authz(&format!(
-                    "{GRANT_PREAMBLE}bindings:\n  admin: [\"root\"]\n"
-                ))
-            })
-            .expect("a readable policy yields Some");
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].role, "admin");
-        assert_eq!(got[0].members, vec!["uid:0".to_string()]);
-
-        // An unreadable policy yields None -- NOT an empty list.
-        let none = auth.subjects_with_loader(|_| Err(maknae_config::AuthzError::Yaml("x".into())));
-        assert!(none.is_none(), "unreadable must be None, got {none:?}");
-
-        // So does an INVALID one: a binding that does not resolve is not
-        // "no bindings", and answering as though it were would tell an
-        // operator their policy binds nobody when it binds something broken.
-        let invalid = auth.subjects_with_loader(|_| {
-            maknae_config::parse_authz(&format!("{GRANT_PREAMBLE}bindings:\n  admn: [\"root\"]\n"))
-        });
-        assert!(invalid.is_none(), "invalid bindings must be None");
-    }
-
-    #[test]
-    fn subjects_on_the_shipped_tilde_policy_needs_no_home() {
-        const SHIPPED: &str = include_str!("../../../packaging/common/authz.yaml");
-        let auth = BasicAuthorizer {
-            policy_path: "/nonexistent".into(),
-            principal: principal(),
-            uid_map: [("root".to_string(), 0u32)].into_iter().collect(),
-        };
-        let got = auth.subjects_with_loader(|_| {
-            maknae_config::parse_authz(&format!("{SHIPPED}bindings:\n  admin: [\"root\"]\n"))
-        });
-        assert!(got.is_some(), "{got:?}");
-    }
-
-    /// `BasicAuthorizer::subjects` FAILS CLOSED on an unreadable path.
-    ///
-    /// That is all this asserts, and the name says so. An earlier version was
-    /// called `..._use_the_production_loaders` and its comment claimed to prove
-    /// the wrapper reaches `load_authz` "rather than some laxer reader" -- it
-    /// cannot: EVERY loader returns `None` for a nonexistent path, so the
-    /// assertion is satisfied by a hardened reader, a lax one, and a `None`
-    /// stub alike. `.cargo/mutants.toml` records that same fact as the reason
-    /// the wrapper is mutation-excluded; the test and the exclusion note were
-    /// asserting opposite things in one branch.
-    #[test]
-    fn basic_authorizer_subjects_fails_closed_on_an_unreadable_path() {
-        use maknae_security::Authorizer;
-        let auth = BasicAuthorizer {
-            policy_path: "/nonexistent".into(),
-            principal: principal(),
-            uid_map: UidMap::new(),
-        };
-        assert!(auth.subjects().is_none(), "unreadable must fail closed");
-    }
-
-    /// TWO members under one role, asserted BY EQUALITY on the sorted vector.
-    ///
-    /// Replaces `subjects_reports_the_agent_binding` (#276). That test was the
-    /// only one in the crate putting two members under a single role, so it was
-    /// also the only exercise of `as_subject_bindings`'s `or_default().push()`
-    /// accumulation and its `members.sort()`. Retiring it with the reserved
-    /// token would have left `sort()` a newly-unkillable mutant in a `[t1]`
-    /// zero-missed file -- the accumulation is the real subject, and it
-    /// survives the token.
-    #[test]
-    fn subjects_reports_every_member_of_a_role_sorted() {
-        let auth = BasicAuthorizer {
-            policy_path: "/nonexistent".into(),
-            principal: principal(),
-            // uids 2 and 10, deliberately: `BTreeMap` iterates them NUMERICALLY
-            // (2, 10) while `members.sort()` orders the rendered strings
-            // LEXICALLY ("uid:10", "uid:2"). uids 0 and 99 -- the first choice
-            // here -- agree in both orders, so the assertion passed with
-            // `sort()` deleted (codex proved it). The two orders must disagree
-            // or this proves nothing.
-            uid_map: [("two".to_string(), 2u32), ("ten".to_string(), 10u32)]
-                .into_iter()
-                .collect(),
-        };
-        let got = auth
-            .subjects_with_loader(|_| {
-                maknae_config::parse_authz(&format!(
-                    "{GRANT_PREAMBLE}bindings:\n  admin: [\"ten\", \"two\"]\n"
-                ))
-            })
-            .expect("readable policy with an explicit block");
-        let admin = got.iter().find(|b| b.role == "admin").expect("admin");
-        assert_eq!(
-            admin.members,
-            vec!["uid:10".to_string(), "uid:2".to_string()],
-            "both members, LEXICALLY sorted -- not BTreeMap's numeric order"
-        );
-    }
-
-    /// NO `bindings:` key -> `None`, never `Some(vec![])`.
-    ///
-    /// The shipped `packaging/common/authz.yaml` has no `bindings:` key, so
-    /// the DEFAULT deployment took this path and answered "these are the
-    /// bindings, and there are none" -- while the default-role fallback was
-    /// live and the enrolled uid was resolving to admin. That is the exact
-    /// claim the `Option` on this seam exists to refuse.
-    #[test]
-    fn subjects_refuses_to_report_an_empty_set_when_no_block_exists() {
-        let auth = BasicAuthorizer {
-            policy_path: "/nonexistent".into(),
-            principal: principal(),
-            uid_map: UidMap::new(),
-        };
-        let no_key = auth.subjects_with_loader(|_| {
-            maknae_config::parse_authz(GRANT_PREAMBLE) // no `bindings:` at all
-        });
-        assert!(
-            no_key.is_none(),
-            "no bindings key means CANNOT ENUMERATE, not `nobody is bound`: {no_key:?}"
-        );
-
-        // An EXPLICIT empty block is a different state and IS reportable --
-        // the operator wrote "nobody", so saying so is honest.
-        let explicit_empty = auth
-            .subjects_with_loader(|_| {
-                maknae_config::parse_authz(&format!("{GRANT_PREAMBLE}bindings:\n  admin: []\n"))
-            })
-            .expect("an explicit block is reportable");
-        assert!(explicit_empty.is_empty(), "{explicit_empty:?}");
-    }
-
-    #[test]
-    fn backend_name_identifies_this_backend() {
-        let auth = BasicAuthorizer {
-            policy_path: "/nonexistent".into(),
-            principal: principal(),
-            uid_map: UidMap::new(),
-        };
-        assert_eq!(
-            maknae_security::Authorizer::backend_name(&auth),
-            "maknae-authz-basic"
-        );
-    }
-
-    /// A valid `roles:` block CONSTRUCTS. The refusal tests above all pass
-    /// against a validator that refuses everything, so this is the assertion
-    /// that keeps them honest.
+    /// A valid `roles:` block loads. The refusal tests above all pass against
+    /// a validator that refuses everything, so this keeps them honest.
     #[test]
     fn roles_valid_grant_block_constructs() {
-        let p = parse_with_roles(
+        finish(parse_with_roles(
             "roles:\n  admin:\n    allow: [\"admin.status\", \"admin.config.show\"]\n    deny: [\"admin.subject.list\"]\n",
-        );
-        BasicAuthorizer::finish_new("/nonexistent".into(), principal(), p)
-            .expect("every role key and term is in vocabulary");
+        ))
+        .expect("every role key and term is in vocabulary");
     }
 
-    /// The per-request path refuses too, and refuses ANONYMOUSLY.
-    ///
-    /// "Same discriminant at both entry points" is not achievable and is not
-    /// the goal: `assemble` returns `Result<_, ()>`, so there is no discriminant
-    /// to assert. The contract is asymmetric on purpose -- boot NAMES the bad
-    /// term in the journal where an operator is reading, while a per-request
-    /// refusal stays `Indeterminate`, telling a caller nothing about why. What
-    /// must hold at both ends is that neither one proceeds.
-    ///
-    /// This is the case where the file is edited to something invalid AFTER
-    /// construction, which is reachable precisely because `decide` re-reads
-    /// per request (the Zero Trust ruling) rather than holding a snapshot.
-    #[test]
-    fn roles_invalid_grants_edited_in_after_boot_are_indeterminate_per_request() {
-        let auth = BasicAuthorizer {
-            policy_path: "/nonexistent".into(),
-            principal: principal(),
-            uid_map: UidMap::new(),
-        };
-        // The injected loader IS the per-request re-read; only the source of
-        // the bytes is hermetic. Nothing about the validation is stubbed.
-        let v = auth.decide_with_loader(&liveness_req(Some(501)), |_| {
-            maknae_config::parse_authz(&format!(
-                "{GRANT_PREAMBLE}roles:\n  admin:\n    allow: [\"admin.contain\"]\n"
-            ))
-        });
-        assert_eq!(
-            v,
-            Verdict::Indeterminate,
-            "an invalid grant block must fail the request closed, not fall through to the arms"
-        );
-    }
-
-    /// Every error variant renders its offending token. An operator reading a
-    /// boot refusal in the journal gets the token, not just a category.
+    /// Every error variant renders its offending token.
     #[test]
     fn roles_error_display_names_the_offending_token() {
         assert!(AuthzBasicError::UnknownRole("admn".into())
@@ -1149,17 +1404,20 @@ mod tests {
         assert!(d.contains("admin.contain"), "{d}");
         // ...and lists what IS grantable, so the fix is in the message.
         assert!(d.contains("admin.status"), "{d}");
+        assert_eq!(
+            AuthzBasicError::Compile(snapshot::CompileError::Policy("p".into())).to_string(),
+            "authz snapshot policy refused: p"
+        );
     }
 
     #[test]
-    fn finish_new_without_bindings_needs_no_lookups_and_defaults_apply() {
-        let policy = maknae_config::parse_authz(
+    fn finish_without_bindings_needs_no_lookups_and_defaults_apply() {
+        let src = finish(parse(
             "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n",
-        )
+        ))
         .unwrap();
-        let auth = BasicAuthorizer::finish_new("/nonexistent".into(), principal(), policy).unwrap();
         assert!(
-            auth.uid_map.is_empty(),
+            src.uid_map().is_empty(),
             "no bindings → no NSS resolution at all"
         );
     }
@@ -1186,68 +1444,6 @@ mod tests {
         }
     }
 
-    /// The production `Authorizer::decide` path on an euid-owned fixture:
-    /// the hardened door refuses (off root) → Indeterminate — proving decide()
-    /// really rides load_authz and fails closed, not open.
-    #[test]
-    fn production_decide_fails_closed_on_an_unownable_fixture() {
-        use std::os::unix::fs::PermissionsExt;
-        if nix::unistd::geteuid().is_root() {
-            return; // the refusal under test is unconstructible as root
-        }
-        let dir = std::env::temp_dir().join(format!("mab_prod_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let p = dir.join("authz.yaml");
-        std::fs::write(
-            &p,
-            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
-        let auth = BasicAuthorizer {
-            policy_path: p,
-            principal: principal(),
-            uid_map: UidMap::new(),
-        };
-        let v = auth.decide(&liveness_req(Some(501)));
-        let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(v, Verdict::Indeterminate);
-    }
-
-    #[test]
-    fn new_refuses_a_non_root_owned_policy_file_off_root() {
-        // The production door is load_authz (root-owned requirement): an
-        // euid-owned fixture must refuse construction — proving `new` really
-        // sits behind the hardened path (the eager-validation successes are
-        // proven via the seam in tests/proofs.rs).
-        use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("mab_new_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let p = dir.join("authz.yaml");
-        std::fs::write(
-            &p,
-            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
-        let principal = maknae_config::Principal {
-            name: "operator".into(),
-            uid: 501,
-        };
-        let got = BasicAuthorizer::new(p, principal);
-        let _ = std::fs::remove_dir_all(&dir);
-        if nix::unistd::geteuid().is_root() {
-            assert!(got.is_ok(), "as root the fixture IS root-owned: {got:?}");
-        } else {
-            assert!(
-                matches!(got, Err(AuthzBasicError::Load(ref m)) if m.contains("root")),
-                "unprivileged construction must refuse the euid-owned fixture: {got:?}"
-            );
-        }
-    }
     fn stand_in_digest(b: &[u8]) -> [u8; 32] {
         let mut d = [0u8; 32];
         for (i, x) in b.iter().enumerate() {
@@ -1398,9 +1594,8 @@ mod tests {
     #[cfg(all(unix, feature = "hermetic-test-seam"))]
     mod hermetic {
         use super::super::*;
-        use maknae_security::{
-            Action, AttrValue, Attributes, Authorizer, Context, Resource, Subject, Verdict,
-        };
+        use super::{audit_permit, contained, principal, whoami, ADMIN_ROOT, CONTAINED};
+        use maknae_security::{Authorizer, Verdict};
         use std::os::unix::fs::PermissionsExt;
 
         fn fixture_req() -> maknae_config::TargetRequired {
@@ -1413,62 +1608,65 @@ mod tests {
             }
         }
 
-        fn principal() -> maknae_config::Principal {
-            maknae_config::Principal {
-                name: "operator".into(),
-                uid: 501,
-            }
-        }
-
-        fn write_policy(p: &std::path::Path, bindings_role: &str) {
-            std::fs::write(
-                p,
-                format!(
-                    "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  {bindings_role}: [\"root\"]\n"
-                ),
-            )
-            .unwrap();
+        fn write(p: &std::path::Path, body: &str) {
+            std::fs::write(p, body).unwrap();
             std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o640)).unwrap();
         }
 
-        fn whoami_req(uid: i64) -> maknae_security::Request {
-            let mut s = Attributes::new();
-            s.insert("uid", AttrValue::Int(uid));
-            maknae_security::Request {
-                subject: Subject(s),
-                resource: Resource(Attributes::new()),
-                action: Action("admin.whoami".into()),
-                context: Context(Attributes::new()),
+        fn write_policy(p: &std::path::Path, bindings_role: &str) {
+            write(
+                p,
+                &format!(
+                    "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  {bindings_role}: [\"root\"]\n"
+                ),
+            );
+        }
+
+        struct Fixture(std::path::PathBuf);
+
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
             }
         }
 
-        fn fixture_dir(tag: &str) -> std::path::PathBuf {
-            let d = std::env::temp_dir().join(format!("mab_herm_{tag}_{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&d);
-            std::fs::create_dir_all(&d).unwrap();
-            std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
-            d
+        impl Fixture {
+            fn new(tag: &str) -> Self {
+                let d = std::env::temp_dir().join(format!("mab_herm_{tag}_{}", std::process::id()));
+                let _ = std::fs::remove_dir_all(&d);
+                std::fs::create_dir_all(&d).unwrap();
+                std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
+                Fixture(d)
+            }
+
+            fn policy(&self) -> std::path::PathBuf {
+                self.0.join("authz.yaml")
+            }
+
+            fn authorizer(&self, role: &str) -> HermeticAuthorizer {
+                write_policy(&self.policy(), role);
+                HermeticAuthorizer::new(self.policy(), principal(), fixture_req(), test_digest)
+                    .unwrap()
+            }
         }
 
         #[test]
         fn policy_source_loads_through_the_hermetic_door_resolving_uids() {
-            let d = fixture_dir("source");
-            let p = d.join("authz.yaml");
+            let fx = Fixture::new("source");
+            let p = fx.policy();
             write_policy(&p, "admin");
             let got = PolicySource::load_with_requirement(p.clone(), principal(), fixture_req());
-            std::fs::write(
+            write(
                 &p,
                 "schema_version: 1\nbindings:\n  user: [\"no-such-user-maknae-489\"]\n",
-            )
-            .unwrap();
+            );
             let unresolvable =
                 PolicySource::load_with_requirement(p.clone(), principal(), fixture_req());
             let missing = PolicySource::load_with_requirement(
-                d.join("absent.yaml"),
+                fx.0.join("absent.yaml"),
                 principal(),
                 fixture_req(),
             );
-            let _ = std::fs::remove_dir_all(&d);
             let src = got.unwrap();
             assert_eq!(src.uid_map().get("root"), Some(&0));
             assert_eq!(src.path(), p.as_path());
@@ -1478,52 +1676,37 @@ mod tests {
             assert!(matches!(missing, Err(AuthzBasicError::Load(_))));
         }
 
-        /// Constructor refuses an unresolvable binding, naming the identity —
-        /// proving `new` really runs the eager `finish_new` validation.
         #[test]
         fn constructor_refuses_unresolvable_binding() {
-            let d = fixture_dir("bindfail");
-            let p = d.join("authz.yaml");
-            std::fs::write(
-                &p,
+            let fx = Fixture::new("bindfail");
+            write(
+                &fx.policy(),
                 "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  user: [\"no-such-user-maknae-77\"]\n",
-            )
-            .unwrap();
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
-            let got = HermeticAuthorizer::new(p, principal(), fixture_req());
-            let _ = std::fs::remove_dir_all(&d);
+            );
+            let got = HermeticAuthorizer::new(fx.policy(), principal(), fixture_req(), test_digest);
             assert!(
                 matches!(got, Err(AuthzBasicError::Bindings(ref m)) if m.contains("no-such-user-maknae-77")),
                 "{got:?}"
             );
         }
 
-        /// #275: the decision reports the role it was MADE ON, from the same
-        /// policy read. All four shipped roles, through the real decide path.
+        /// #275: the decision reports the role it was MADE ON. All four shipped
+        /// roles, through the real decide path.
         #[test]
         fn the_decision_reports_the_role_it_was_made_on_for_every_shipped_role() {
             for role in ["admin", "user", "guest", "adversary"] {
-                let d = fixture_dir(&format!("role_{role}"));
-                let p = d.join("authz.yaml");
-                write_policy(&p, role);
-                let auth = HermeticAuthorizer::new(p, principal(), fixture_req()).unwrap();
-                let (_v, got) = auth.decide_reporting_role(&whoami_req(0));
-                let _ = std::fs::remove_dir_all(&d);
+                let fx = Fixture::new(&format!("role_{role}"));
+                let auth = fx.authorizer(role);
+                let (_v, got) = auth.decide_reporting_role(&whoami(0));
                 assert_eq!(got, Some(role), "role reported for binding {role}");
             }
         }
 
-        /// A subject bound to nothing reports NO role — never a default. The
-        /// verdict is the annotated absence, and the role is honestly absent.
         #[test]
         fn a_subject_resolving_to_no_role_reports_none_not_a_default() {
-            let d = fixture_dir("norole");
-            let p = d.join("authz.yaml");
-            write_policy(&p, "admin");
-            let auth = HermeticAuthorizer::new(p, principal(), fixture_req()).unwrap();
-            // uid 4242 is bound by nothing; `root` (uid 0) is the only binding.
-            let (v, got) = auth.decide_reporting_role(&whoami_req(4242));
-            let _ = std::fs::remove_dir_all(&d);
+            let fx = Fixture::new("norole");
+            let auth = fx.authorizer("admin");
+            let (v, got) = auth.decide_reporting_role(&whoami(4242));
             assert_eq!(got, None, "an unbound uid must never be given a role");
             assert!(
                 matches!(v, Verdict::NotApplicable { .. }),
@@ -1531,99 +1714,230 @@ mod tests {
             );
         }
 
-        /// The wrapper must delegate through the HERMETIC loader. Delegating to
-        /// the inner authorizer's own override would use the production
-        /// root-owned loader and report Indeterminate/None here — this test is
-        /// what catches that.
+        /// The wrapper DELEGATES every seam method; a trait default would
+        /// answer `None`/`unknown` and prove nothing.
         #[test]
-        fn the_wrapper_reports_a_role_which_proves_it_used_the_hermetic_loader() {
-            let d = fixture_dir("hermloader");
-            let p = d.join("authz.yaml");
-            write_policy(&p, "admin");
-            let auth = HermeticAuthorizer::new(p, principal(), fixture_req()).unwrap();
-            let (v, got) = auth.decide_reporting_role(&whoami_req(0));
-            let _ = std::fs::remove_dir_all(&d);
-            assert_eq!(got, Some("admin"));
-            assert!(matches!(v, Verdict::Permit { .. }), "{v:?}");
+        fn the_wrapper_delegates_every_seam_method() {
+            let fx = Fixture::new("delegate");
+            write(
+                &fx.policy(),
+                &format!(
+                    "{}bindings:\n  admin: [\"root\"]\n",
+                    include_str!("../../../packaging/common/authz.yaml")
+                ),
+            );
+            let auth =
+                HermeticAuthorizer::new(fx.policy(), principal(), fixture_req(), test_digest)
+                    .unwrap();
+            let (v, got) = auth.decide_reporting_role(&whoami(0));
+            assert_eq!((v, got), (audit_permit(), Some("admin")));
+            assert_eq!(auth.decide(&whoami(0)), audit_permit());
+            let d = auth.decide_cited(&super::ssh_read(0));
+            assert_eq!(d.role, Some("admin"));
+            assert!(d.rule.expect("cited").section.ends_with("#permissions"));
+            assert_eq!(auth.backend_name(), "maknae-authz-basic");
+            assert_eq!(
+                auth.subjects().expect("an explicit block")[0].members,
+                vec!["uid:0".to_string()]
+            );
         }
 
-        /// `decide` IS `decide_reporting_role().0` — a guard against a future
-        /// re-implementation splitting the two paths apart again.
         #[test]
         fn decide_agrees_with_the_role_reporting_path() {
-            let d = fixture_dir("agree");
-            let p = d.join("authz.yaml");
-            write_policy(&p, "admin");
-            let auth = HermeticAuthorizer::new(p, principal(), fixture_req()).unwrap();
+            let fx = Fixture::new("agree");
+            let auth = fx.authorizer("admin");
             for uid in [0, 501, 4242] {
                 assert_eq!(
-                    auth.decide(&whoami_req(uid)),
-                    auth.decide_reporting_role(&whoami_req(uid)).0,
+                    auth.decide(&whoami(uid)),
+                    auth.decide_reporting_role(&whoami(uid)).0,
                     "uid {uid}"
                 );
             }
-            let _ = std::fs::remove_dir_all(&d);
         }
 
-        /// Trait-path permit → containment flip: the wrapper's `decide` rides the
-        /// real per-request re-read (the Zero Trust property) end to end.
+        /// Review focus: the per-request re-read is gone. A file edit changes
+        /// nothing until a reload; a refused reload keeps the old snapshot.
         #[test]
-        fn trait_path_permits_then_flips_to_deny_on_file_edit() {
-            let d = fixture_dir("flip");
-            let p = d.join("authz.yaml");
-            write_policy(&p, "admin");
-            let auth = HermeticAuthorizer::new(p.clone(), principal(), fixture_req()).unwrap();
-            let before = auth.decide(&whoami_req(0));
-            assert!(matches!(before, Verdict::Permit { .. }), "{before:?}");
+        fn containment_bites_on_the_next_request_after_a_reload() {
+            let fx = Fixture::new("contain");
+            let auth = fx.authorizer("user");
+            let ping = super::liveness_req(Some(0));
+            assert_eq!(auth.decide(&ping), audit_permit());
 
-            write_policy(&p, "adversary");
-            let after = auth.decide(&whoami_req(0));
-            let _ = std::fs::remove_dir_all(&d);
-            assert!(
-                matches!(after, Verdict::Deny { ref reason } if reason.contains("role=adversary")),
-                "{after:?}"
-            );
-        }
-
-        /// The wrapper's `subjects` and `backend_name` DELEGATE to the inner
-        /// backend rather than taking the trait defaults. A default here would
-        /// make every kernel e2e assert against `None`/`unknown` and prove
-        /// nothing about what production answers -- and it reads LIVE, so a
-        /// binding edited after construction shows up on the next call.
-        #[test]
-        fn wrapper_subjects_delegate_and_read_live() {
-            let d = fixture_dir("subjects");
-            let p = d.join("authz.yaml");
-            write_policy(&p, "admin");
-            let auth = HermeticAuthorizer::new(p.clone(), principal(), fixture_req()).unwrap();
-
-            assert_eq!(auth.backend_name(), "maknae-authz-basic");
-            let before = auth.subjects().expect("readable policy");
-            assert_eq!(before.len(), 1);
-            assert_eq!(before[0].role, "admin");
-            assert_eq!(before[0].members, vec!["uid:0".to_string()]);
-
-            // LIVE: the same edit that flips a verdict flips the listing.
-            write_policy(&p, "adversary");
-            let after = auth.subjects().expect("still readable");
-            let _ = std::fs::remove_dir_all(&d);
+            write_policy(&fx.policy(), "adversary");
             assert_eq!(
-                after[0].role, "adversary",
-                "subjects must re-read, not report a construction-time snapshot"
+                auth.decide(&ping),
+                audit_permit(),
+                "the per-request re-read is removed; a reload is the only transition"
+            );
+            auth.reload_from_file().unwrap();
+            assert_eq!(auth.decide(&whoami(0)), contained());
+
+            write(&fx.policy(), "not: [valid");
+            assert!(matches!(
+                auth.reload_from_file(),
+                Err(AuthzBasicError::Load(_))
+            ));
+            assert_eq!(auth.decide(&whoami(0)), contained());
+
+            write(
+                &fx.policy(),
+                "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  user: [\"nobody-new-maknae-489\"]\n",
+            );
+            assert!(
+                matches!(auth.reload_from_file(), Err(AuthzBasicError::Bindings(ref m)) if m.contains("nobody-new-maknae-489"))
+            );
+            assert_eq!(auth.decide(&whoami(0)), contained());
+        }
+
+        #[test]
+        fn invalid_grants_edited_in_after_boot_refuse_the_reload() {
+            let fx = Fixture::new("grants");
+            let auth = fx.authorizer("admin");
+            let before = auth.snapshot();
+            write(
+                &fx.policy(),
+                &format!("{ADMIN_ROOT}roles:\n  admin:\n    allow: [\"admin.contain\"]\n"),
+            );
+            assert_eq!(
+                auth.reload_from_file(),
+                Err(AuthzBasicError::UnknownActionTerm("admin.contain".into()))
+            );
+            assert!(Arc::ptr_eq(&before, &auth.snapshot()));
+        }
+
+        #[test]
+        fn trait_path_flips_only_at_reload() {
+            let fx = Fixture::new("flip");
+            let auth = fx.authorizer("admin");
+            assert_eq!(auth.decide(&whoami(0)), audit_permit());
+            write_policy(&fx.policy(), "adversary");
+            assert_eq!(auth.decide(&whoami(0)), audit_permit());
+            auth.reload_from_file().unwrap();
+            assert_eq!(
+                auth.decide(&whoami(0)),
+                Verdict::Deny {
+                    reason: CONTAINED.into()
+                }
             );
         }
 
-        /// Every Permit through the wrapper carries exactly the audit obligation —
-        /// the PEP-side discharge contract depends on it.
+        #[test]
+        fn wrapper_subjects_delegate_and_follow_the_snapshot() {
+            let fx = Fixture::new("subjects");
+            let auth = fx.authorizer("admin");
+            assert_eq!(auth.subjects().unwrap()[0].role, "admin");
+            write_policy(&fx.policy(), "adversary");
+            assert_eq!(auth.subjects().unwrap()[0].role, "admin");
+            auth.reload_from_file().unwrap();
+            assert_eq!(auth.subjects().unwrap()[0].role, "adversary");
+        }
+
+        #[test]
+        fn decide_never_touches_the_file() {
+            let fx = Fixture::new("gone");
+            let auth = fx.authorizer("admin");
+            std::fs::remove_file(fx.policy()).unwrap();
+            assert_eq!(auth.decide(&whoami(0)), audit_permit());
+            assert!(matches!(
+                auth.reload_from_file(),
+                Err(AuthzBasicError::Load(_))
+            ));
+        }
+
+        /// A reload that changes the identity layer advances the in-memory
+        /// identity graph one revision; an unchanged one keeps it.
+        #[test]
+        fn compile_from_file_advances_the_revision_only_when_the_layer_changes() {
+            let fx = Fixture::new("revision");
+            let auth = fx.authorizer("admin");
+            assert_eq!(auth.snapshot().revision(), 1);
+            let same = auth.compile_from_file().unwrap();
+            assert!(Arc::ptr_eq(same.persisted(), auth.snapshot().persisted()));
+            write_policy(&fx.policy(), "adversary");
+            let next = auth.compile_from_file().unwrap();
+            assert_eq!(next.revision(), 2);
+            assert_eq!(auth.snapshot().revision(), 1, "compile does not install");
+            assert_eq!(Baseline::digest(&auth)(b"x"), test_digest(b"x"));
+            assert_eq!(auth.digest()(b"y"), test_digest(b"y"));
+        }
+
+        #[test]
+        fn the_hermetic_baseline_delegates_to_its_inner_authorizer() {
+            let fx = Fixture::new("baseline");
+            let auth = fx.authorizer("admin");
+            assert_eq!(Baseline::principal(&auth), &principal());
+            assert!(Arc::ptr_eq(
+                &Baseline::snapshot(&auth),
+                &auth.inner.snapshot()
+            ));
+            let src = Baseline::load_source(&auth).expect("the hermetic loader");
+            assert_eq!(src.uid_map().get("root"), Some(&0));
+            write_policy(&fx.policy(), "adversary");
+            let next = auth.compile_from_file().unwrap();
+            Baseline::install(&auth, next.clone());
+            assert!(Arc::ptr_eq(&auth.inner.snapshot(), &next));
+            assert_eq!(auth.decide(&whoami(0)), contained());
+        }
+
+        #[test]
+        fn new_over_graph_compiles_against_the_given_identity_graph() {
+            let fx = Fixture::new("overgraph");
+            let first = fx.authorizer("admin");
+            let persisted = first.snapshot().persisted().clone();
+            let over = HermeticAuthorizer::new_over_graph(
+                fx.policy(),
+                principal(),
+                fixture_req(),
+                test_digest,
+                persisted.clone(),
+            )
+            .unwrap();
+            assert!(Arc::ptr_eq(over.snapshot().persisted(), &persisted));
+            assert_eq!(over.decide(&whoami(0)), audit_permit());
+            write_policy(&fx.policy(), "adversary");
+            let refused = HermeticAuthorizer::new_over_graph(
+                fx.policy(),
+                principal(),
+                fixture_req(),
+                test_digest,
+                persisted,
+            );
+            assert!(
+                matches!(
+                    refused,
+                    Err(AuthzBasicError::Compile(snapshot::CompileError::Identity(
+                        _
+                    )))
+                ),
+                "{refused:?}"
+            );
+            let empty = Arc::new(
+                maknae_graph::graph::GraphBuilder::new(maknae_graph::record::GraphSpace::Kernel, 1)
+                    .build(
+                        &maknae_graph::kernel::SCHEMA,
+                        &maknae_graph::schema::CompiledSet::default(),
+                    )
+                    .unwrap(),
+            );
+            let no_source = HermeticAuthorizer::new_over_graph(
+                fx.policy(),
+                principal(),
+                fixture_req(),
+                test_digest,
+                empty,
+            );
+            assert!(
+                matches!(no_source, Err(AuthzBasicError::Compile(_))),
+                "{no_source:?}"
+            );
+        }
+
         #[test]
         fn wrapper_permit_carries_exactly_audit_obligation() {
-            let d = fixture_dir("oblig");
-            let p = d.join("authz.yaml");
-            write_policy(&p, "admin");
-            let auth = HermeticAuthorizer::new(p, principal(), fixture_req()).unwrap();
-            let v = auth.decide(&whoami_req(0));
-            let _ = std::fs::remove_dir_all(&d);
-            match v {
+            let fx = Fixture::new("oblig");
+            let auth = fx.authorizer("admin");
+            match auth.decide(&whoami(0)) {
                 Verdict::Permit { obligations } => {
                     assert_eq!(obligations.len(), 1);
                     assert_eq!(obligations[0].id, "audit");
@@ -1637,12 +1951,10 @@ mod tests {
         /// mode requirement is refused at construction (the checks are real).
         #[test]
         fn constructor_honors_the_declared_requirement() {
-            let d = fixture_dir("mode");
-            let p = d.join("authz.yaml");
-            write_policy(&p, "admin");
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o666)).unwrap();
-            let got = HermeticAuthorizer::new(p, principal(), fixture_req());
-            let _ = std::fs::remove_dir_all(&d);
+            let fx = Fixture::new("mode");
+            write_policy(&fx.policy(), "admin");
+            std::fs::set_permissions(fx.policy(), std::fs::Permissions::from_mode(0o666)).unwrap();
+            let got = HermeticAuthorizer::new(fx.policy(), principal(), fixture_req(), test_digest);
             assert!(matches!(got, Err(AuthzBasicError::Load(_))), "{got:?}");
         }
     }

@@ -60,7 +60,7 @@ use tokio::task::JoinSet;
 
 use crate::authz::{admission_facts, authorize_connection, ConnDecision, HOME_RESOLVE_TIMEOUT};
 use crate::blocking_guard::{BlockingBreaker, BreakerAdmission, BreakerTransition};
-use crate::boot_gate::authz_boot_gate;
+use crate::boot_gate::{authz_boot_gate, authz_policy_source};
 use crate::groupres::{maknae_gid, uid_in_maknae_group};
 use crate::handler::{
     build_authz_request, build_whoami, discharge_plan, dispatch_verb, lexical_pregate, may_respond,
@@ -130,9 +130,8 @@ pub struct WhereCtx {
 /// further arm that reaches for one of those owes the same argument** -- the boot-time redaction protects
 /// the `Document`, not the request path in general.
 ///
-/// It is also a BOOT SNAPSHOT. The authz policy is deliberately re-read per
-/// request; this is not. When a config reload lands, this reports stale
-/// settings until restart.
+/// It is also a BOOT SNAPSHOT. A reload replaces the authz policy; it does not
+/// replace this, which reports the boot's settings until restart.
 pub type ConfigView =
     std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>;
 
@@ -361,6 +360,7 @@ fn make_record(
         egress: None,
         conversation: None,
         graph: None,
+        rule: None,
         outcome: Outcome {
             result: result.to_string(),
             reason: reason.to_string(),
@@ -916,9 +916,9 @@ pub async fn handle_with_attempt_caps<S, E, P>(
         _ => None,
     };
 
-    // Decide on the BLOCKING pool (the per-request policy re-read is sync file
-    // I/O; a stalled /etc/maknae must not pin async workers — the same offload
-    // discipline as accept_loop's group lookup), bounded, composed per the
+    // Decide on the BLOCKING pool (the seam permits a backend that blocks; a
+    // stall must not pin async workers — the same offload discipline as
+    // accept_loop's group lookup), bounded, composed per the
     // parent contract: combine([guarded_decide]) + finalize. Timeout or join
     // failure converts AT THE CALL SITE to a Deny with its own reason
     // (finalize(Indeterminate) would hardcode a different string).
@@ -3060,27 +3060,29 @@ impl<E> GraphBootAudit<'_, E> {
 }
 
 /// The graph boot's inputs as this binary has them: the persisted role set labelled
-/// with the system's lowest level, its digest, and the identity layer.
+/// with the system's lowest level and its digest, the full compiled vocabulary, the
+/// policy's SHA-256 section digests, and the identity layer the policy declares.
 struct GraphInputs {
     compiled: maknae_graph::schema::CompiledSet,
     digest: [u8; 32],
+    full: maknae_graph::schema::CompiledSet,
+    sections: std::collections::BTreeMap<String, [u8; 32]>,
     identity: maknae_graph::identity::IdentityLayer,
 }
 
 impl GraphInputs {
-    fn placeholder(config_dir: &Path, label: String) -> Result<Self, StoreError> {
-        let compiled = maknae_graph::kernel::persisted_compiled_set(&label);
+    fn new(source: &maknae_authz_basic::PolicySource, label: &str) -> Result<Self, StoreError> {
+        let compiled = maknae_graph::kernel::persisted_compiled_set(label);
         let digest = maknae_state::vocabulary::digest(&compiled)
             .map_err(|e| StoreError::Identity(e.to_string()))?;
+        let sections = source.section_digests(maknae_state::envelope::sha256);
+        let identity = source.identity_layer(label, sections.get("bindings").copied());
         Ok(GraphInputs {
             compiled,
             digest,
-            identity: maknae_graph::identity::IdentityLayer {
-                source: config_dir.join("authz.yaml").display().to_string(),
-                label,
-                bindings_sha256: None,
-                subjects: Vec::new(),
-            },
+            full: maknae_authz_basic::compiled_set(label),
+            sections,
+            identity,
         })
     }
 
@@ -3211,7 +3213,7 @@ async fn boot_kernel_graph(
     sink: &Arc<maknae_audit_append::AuditSink>,
     ctx: &BootCtx<'_>,
     inputs: &BootInputs<'_>,
-) -> Result<(StateDir, KernelGraphStatus), RunError> {
+) -> Result<(StateDir, KernelGraphStatus, maknae_graph::graph::Graph), RunError> {
     let key = key.map_err(|e| graph_refusal(GraphFailure::Key(e), state_dir))?;
     let dir = StateDir::open(state_dir, ctx.euid)
         .map_err(|e| graph_refusal(GraphFailure::Store(e), state_dir))?;
@@ -3241,7 +3243,7 @@ async fn boot_kernel_graph(
     .map_err(|e| store_refusal(e, state_dir))?;
     report_graph_boot(sink.as_ref(), ctx, state_dir, &report).await?;
     let status = kernel_graph_status(&report);
-    Ok((dir, status))
+    Ok((dir, status, report.graph))
 }
 
 /// What the boot did that the operator did not ask for: an ignored reseed marker, and
@@ -3548,21 +3550,49 @@ async fn boot_after_sink(
             .map_err(|e| RunError::Other(e.to_string()))?;
     }
 
-    let authorizer = match authz_boot_gate(config_dir, principal_opt) {
+    let refuse = |reason: String| {
+        refuse_authz_boot(
+            sink.as_ref(),
+            host,
+            socket,
+            euid,
+            boot_session_id(session_ids),
+            boot_seq.next(),
+            &audit_cfg.au3_1,
+            reason,
+        )
+    };
+    let source = match authz_policy_source(config_dir, principal_opt) {
+        Ok(source) => source,
+        Err(e) => return Err(refuse(e.to_string()).await),
+    };
+    let graph_inputs = GraphInputs::new(&source, &boot.policy().unmarked().name)
+        .map_err(|e| graph_refusal(GraphFailure::Store(e), state_dir))?;
+    // The kernel graph boots before the PDP is built from it. Bound for the serve's
+    // lifetime: the StateDir holds the one-maknaed state-dir lock.
+    let (_state_dir_lock, graph_status, graph) = boot_kernel_graph(
+        state_dir,
+        graph_key(config_dir),
+        sink,
+        &BootCtx {
+            host,
+            socket,
+            euid,
+            session_id: boot_session_id(session_ids),
+            seq: boot_seq,
+            au3_1: &audit_cfg.au3_1,
+        },
+        &graph_inputs.boot(),
+    )
+    .await?;
+    let authorizer = match authz_boot_gate(
+        source,
+        Arc::new(graph),
+        &graph_inputs.full,
+        &graph_inputs.sections,
+    ) {
         Ok(authorizer) => authorizer,
-        Err(e) => {
-            return Err(refuse_authz_boot(
-                sink.as_ref(),
-                host,
-                socket,
-                euid,
-                boot_session_id(session_ids),
-                boot_seq.next(),
-                &audit_cfg.au3_1,
-                e.to_string(),
-            )
-            .await);
-        }
+        Err(e) => return Err(refuse(e.to_string()).await),
     };
     // ADR-0008 decision 1 (#154) + #148: the PDP is the COMPOSITION, and both
     // floors are named fields of it -- the sealed `Baseline` (-basic, from the
@@ -3606,25 +3636,6 @@ async fn boot_after_sink(
         .await
         .map_err(|e| boot_evidence_refused("composition", e))?;
     let authorizer = Arc::new(authorizer);
-
-    let graph_inputs = GraphInputs::placeholder(config_dir, boot.policy().unmarked().name)
-        .map_err(|e| graph_refusal(GraphFailure::Store(e), state_dir))?;
-    // Bound for the serve's lifetime: the StateDir holds the one-maknaed state-dir lock.
-    let (_state_dir_lock, graph_status) = boot_kernel_graph(
-        state_dir,
-        graph_key(config_dir),
-        sink,
-        &BootCtx {
-            host,
-            socket,
-            euid,
-            session_id: boot_session_id(session_ids),
-            seq: boot_seq,
-            au3_1: &audit_cfg.au3_1,
-        },
-        &graph_inputs.boot(),
-    )
-    .await?;
     let kernel_graph = Arc::new(Some(graph_status));
 
     // Plane credential: resolve + read this plane's SecretID source (spec §5.1),
@@ -4628,15 +4639,16 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
                 "authorization composition: maknae-authz-basic+maknae-ceiling; system: US; ceiling: UNCLASSIFIED"
             );
             assert_eq!(comp_rec.outcome.posture, "authorized");
-            // #488: the first boot seeds the graph store between the composition
-            // and posture records, intent before checkpoint.
+            // #488/#489: the first boot seeds the graph store before the PDP is
+            // built from it, so before the composition record; intent before
+            // checkpoint.
             let at = |action: &str| {
                 recs.iter()
                     .position(|r| r.action == action)
                     .unwrap_or_else(|| panic!("no {action} record in: {audit}"))
             };
             let (seed, ckpt) = (at("graph.seed"), at("graph.checkpoint"));
-            assert!(at("authz") < seed && seed < ckpt && ckpt < at("posture"));
+            assert!(seed < ckpt && ckpt < at("authz") && at("authz") < at("posture"));
             assert_eq!(recs[seed].outcome.posture, "authorized");
             assert_eq!(recs[seed].graph.as_ref().unwrap().revision, 1);
             let g = recs[ckpt].graph.as_ref().unwrap();
@@ -4720,7 +4732,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         assert_eq!(last.outcome.reason, e.to_string());
         assert!(!recs
             .iter()
-            .any(|r| r.action == "start" || r.action == "posture"));
+            .any(|r| r.action == "start" || r.action == "posture" || r.action == "authz"));
     }
 
     // ---- #488: the graph boot step over a real audit sink and a real state
@@ -4760,6 +4772,21 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         boot_graph_from(fx, key, &fx.dir.0)
     }
 
+    /// The identity layer of a policy file with no `bindings:` key, at `config_dir`.
+    fn bare_inputs(config_dir: &Path) -> GraphInputs {
+        let source = maknae_authz_basic::PolicySource::from_parts(
+            maknae_config::parse_authz("schema_version: 1\n").unwrap(),
+            Default::default(),
+            maknae_config::Principal {
+                name: "op".into(),
+                uid: 1000,
+            },
+            config_dir.join("authz.yaml"),
+        )
+        .unwrap();
+        GraphInputs::new(&source, "UNCLASSIFIED").unwrap()
+    }
+
     fn boot_graph_from(
         fx: &GraphFixture,
         key: Result<maknae_vault::GraphKey, maknae_vault::VaultError>,
@@ -4775,7 +4802,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             seq: &seq,
             au3_1: &au3_1,
         };
-        let inputs = GraphInputs::placeholder(config_dir, "UNCLASSIFIED".into()).unwrap();
+        let inputs = bare_inputs(config_dir);
         block_on(boot_kernel_graph(
             &fx.state,
             key,
@@ -4783,6 +4810,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             &ctx,
             &inputs.boot(),
         ))
+        .map(|(dir, status, _)| (dir, status))
     }
 
     fn trail(fx: &GraphFixture) -> Vec<(AuditRecord, String)> {
@@ -4795,6 +4823,63 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
 
     fn key() -> Result<maknae_vault::GraphKey, maknae_vault::VaultError> {
         test_graph_key(Path::new("/unused"))
+    }
+
+    /// The store seeds the identity layer the policy file declares, and the PDP
+    /// compiles over the graph the store booted.
+    #[test]
+    fn the_graph_boots_the_policys_identity_layer_and_the_pdp_compiles_over_it() {
+        use maknae_security::Authorizer;
+        let fx = graph_fixture("graph_real_layer");
+        let source = maknae_authz_basic::PolicySource::from_parts(
+            maknae_config::parse_authz("schema_version: 1\nbindings:\n  adversary: [\"root\"]\n")
+                .unwrap(),
+            [("root".to_string(), 0)].into_iter().collect(),
+            maknae_config::Principal {
+                name: "op".into(),
+                uid: 1000,
+            },
+            fx.dir.0.join("authz.yaml"),
+        )
+        .unwrap();
+        let inputs = GraphInputs::new(&source, "UNCLASSIFIED").unwrap();
+        assert!(inputs.sections.contains_key("bindings"));
+        let seq = Seq::new();
+        let au3_1 = serde_json::Value::Null;
+        let ctx = BootCtx {
+            host: "h",
+            socket: "s",
+            euid: nix::unistd::geteuid().as_raw(),
+            session_id: 9 << 32,
+            seq: &seq,
+            au3_1: &au3_1,
+        };
+        let (_held, status, graph) = block_on(boot_kernel_graph(
+            &fx.state,
+            key(),
+            &fx.sink,
+            &ctx,
+            &inputs.boot(),
+        ))
+        .unwrap();
+        assert_eq!(status.revision, 1);
+        let stored = maknae_graph::identity::extract(&graph).unwrap();
+        assert_eq!(stored.layer, inputs.identity);
+        assert_eq!(stored.layer.subjects.len(), 1);
+        let pdp = authz_boot_gate(source, Arc::new(graph), &inputs.full, &inputs.sections).unwrap();
+        let req = crate::handler::build_authz_request(
+            &maknae_proto::Verb::Whoami,
+            0,
+            None,
+            maknae_security::Lane::Local,
+            None,
+        );
+        assert_eq!(
+            pdp.decide(&req),
+            maknae_security::Verdict::Deny {
+                reason: "subject contained: role=adversary".into()
+            }
+        );
     }
 
     #[test]
@@ -4824,9 +4909,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             actions,
             ["graph.checkpoint", "graph.migrate", "graph.checkpoint"]
         );
-        let to = GraphInputs::placeholder(&fx.dir.0, "UNCLASSIFIED".into())
-            .unwrap()
-            .digest;
+        let to = bare_inputs(&fx.dir.0).digest;
         let (m, _) = &recs[1];
         assert_eq!(
             (
@@ -5617,6 +5700,7 @@ mod home_resolution_tests {
                     regular_file: true,
                     max_bytes: None,
                 },
+                maknae_state::envelope::sha256,
             )
             .unwrap(),
             crate::CeilingAuthorizer::new(maknae_config::Ceiling::baseline_for(us), us),
@@ -5739,6 +5823,7 @@ mod admission_bound_tests {
                     regular_file: true,
                     max_bytes: None,
                 },
+                maknae_state::envelope::sha256,
             )
             .unwrap(),
             crate::CeilingAuthorizer::new(maknae_config::Ceiling::baseline_for(us), us),

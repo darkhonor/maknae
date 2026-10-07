@@ -114,6 +114,7 @@ mod tests {
             egress: None,
             conversation: None,
             graph: None,
+            rule: None,
             outcome: Outcome {
                 result: "deny".into(),
                 reason: "policy denied".into(),

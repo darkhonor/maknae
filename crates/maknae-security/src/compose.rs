@@ -21,7 +21,7 @@
 //! `Permit` on a complete evaluation of its own predicate, which a conjunction
 //! of policy types cannot express.)*
 
-use crate::authorizer::{Authorizer, SubjectBinding};
+use crate::authorizer::{Authorizer, Decided, SubjectBinding};
 use crate::obligation::{merge_obligations, Obligation};
 use crate::request::Request;
 use crate::verdict::Verdict;
@@ -113,10 +113,19 @@ pub fn guarded_decide_reporting_role(
     a: &dyn Authorizer,
     req: &Request,
 ) -> (Verdict, Option<&'static str>) {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        a.decide_reporting_role(req)
-    }))
-    .unwrap_or((Verdict::Indeterminate, None))
+    guarded_decide_cited(a, req).into()
+}
+
+/// The panic boundary itself, over the citing seam method: a panicking operand
+/// yields `Indeterminate` with no role and no citation.
+pub fn guarded_decide_cited(a: &dyn Authorizer, req: &Request) -> Decided {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| a.decide_cited(req))).unwrap_or(
+        Decided {
+            verdict: Verdict::Indeterminate,
+            role: None,
+            rule: None,
+        },
+    )
 }
 
 /// The same panic boundary for the two DISCLOSURE seam methods.
@@ -241,9 +250,17 @@ pub fn compose_decide(operands: &[&dyn Authorizer], req: &Request) -> Verdict {
     compose_decide_reporting_role(operands, req).0
 }
 
-/// The same fold, also reporting the role the decision was made on (#275).
-///
-/// **This is the single fold.** `compose_decide` is its `.0`, so there is one
+/// The same fold, also reporting the role the decision was made on (#275):
+/// [`compose_decide_cited`] without the citation.
+pub fn compose_decide_reporting_role(
+    operands: &[&dyn Authorizer],
+    req: &Request,
+) -> (Verdict, Option<&'static str>) {
+    compose_decide_cited(operands, req).into()
+}
+
+/// **This is the single fold.** `compose_decide` and
+/// `compose_decide_reporting_role` are projections of it, so there is one
 /// definition of the composition rule and the panic boundary, exactly as this
 /// module's doc requires — a second copy in a PDP host is how the two drift.
 ///
@@ -251,22 +268,26 @@ pub fn compose_decide(operands: &[&dyn Authorizer], req: &Request) -> Verdict {
 /// and the baseline is passed first, so a later operand cannot displace the
 /// role the RBAC baseline resolved. An operand that does not key on roles
 /// inherits the trait default and reports `None`, contributing nothing here.
-pub fn compose_decide_reporting_role(
-    operands: &[&dyn Authorizer],
-    req: &Request,
-) -> (Verdict, Option<&'static str>) {
-    let mut role = None;
-    let verdicts: Vec<Verdict> = operands
+///
+/// The citation comes only from an operand whose own verdict EQUALS the
+/// combined one, the first such in composition order: a composed `Deny` never
+/// cites the rule of an operand that permitted.
+pub fn compose_decide_cited(operands: &[&dyn Authorizer], req: &Request) -> Decided {
+    let decided: Vec<Decided> = operands
         .iter()
-        .map(|a| {
-            let (v, r) = guarded_decide_reporting_role(*a, req);
-            if role.is_none() {
-                role = r;
-            }
-            v
-        })
+        .map(|a| guarded_decide_cited(*a, req))
         .collect();
-    (combine(verdicts), role)
+    let role = decided.iter().find_map(|d| d.role);
+    let verdict = combine(decided.iter().map(|d| d.verdict.clone()).collect());
+    let rule = decided
+        .iter()
+        .find(|d| d.rule.is_some() && d.verdict == verdict)
+        .and_then(|d| d.rule.clone());
+    Decided {
+        verdict,
+        role,
+        rule,
+    }
 }
 
 /// Name every operand, in composition order, with each name panic-guarded and
@@ -333,6 +354,10 @@ impl Authorizer for ConjunctionAuthorizer {
     /// wrapper around one that does.
     fn decide_reporting_role(&self, req: &Request) -> (Verdict, Option<&'static str>) {
         compose_decide_reporting_role(&self.refs(), req)
+    }
+
+    fn decide_cited(&self, req: &Request) -> Decided {
+        compose_decide_cited(&self.refs(), req)
     }
 
     /// Names every operand, in composition order.
@@ -1025,6 +1050,140 @@ mod tests {
             matches!(v, Verdict::Deny { .. }),
             "a second-operand Deny must survive the fold: {v:?}"
         );
+    }
+
+    struct Cites(Verdict, Option<&'static str>, Option<u64>);
+    impl Authorizer for Cites {
+        fn decide(&self, _: &Request) -> Verdict {
+            self.0.clone()
+        }
+        fn decide_cited(&self, _: &Request) -> Decided {
+            Decided {
+                verdict: self.0.clone(),
+                role: self.1,
+                rule: self.2.map(|node| crate::RuleCitation {
+                    node,
+                    section: format!("s{node}"),
+                }),
+            }
+        }
+    }
+
+    fn cited(node: u64) -> Option<crate::RuleCitation> {
+        Some(crate::RuleCitation {
+            node,
+            section: format!("s{node}"),
+        })
+    }
+
+    #[test]
+    fn a_composed_deny_never_cites_a_permitting_operands_rule() {
+        let a = Cites(permit(vec![]), Some("admin"), Some(1));
+        let b = Cites(
+            Verdict::Deny {
+                reason: "ceiling".into(),
+            },
+            None,
+            None,
+        );
+        let d = compose_decide_cited(&[&a, &b], &req());
+        assert_eq!(
+            d,
+            Decided {
+                verdict: Verdict::Deny {
+                    reason: "ceiling".into()
+                },
+                role: Some("admin"),
+                rule: None
+            }
+        );
+    }
+
+    #[test]
+    fn the_citation_comes_from_the_operand_whose_verdict_is_the_combined_one() {
+        let a = Cites(permit(vec![]), Some("admin"), Some(1));
+        let b = Cites(permit(vec![]), None, Some(2));
+        assert_eq!(compose_decide_cited(&[&a, &b], &req()).rule, cited(1));
+        let abstains = Cites(Verdict::NotApplicable { note: None }, None, None);
+        let denies = Cites(
+            Verdict::Deny {
+                reason: "r3".into(),
+            },
+            Some("user"),
+            Some(3),
+        );
+        let d = compose_decide_cited(&[&abstains, &denies], &req());
+        assert_eq!((d.rule, d.role), (cited(3), Some("user")));
+        let uncited = Cites(permit(vec![]), None, None);
+        assert_eq!(
+            compose_decide_cited(&[&uncited, &b], &req()).rule,
+            cited(2),
+            "an operand with no citation does not stop the search"
+        );
+        let other_deny = Cites(
+            Verdict::Deny {
+                reason: "other".into(),
+            },
+            None,
+            Some(4),
+        );
+        assert_eq!(
+            compose_decide_cited(&[&denies, &other_deny], &req()).rule,
+            cited(3)
+        );
+        assert_eq!(
+            compose_decide_cited(&[&other_deny, &denies], &req()).rule,
+            cited(4),
+            "a Deny's citation must come from the operand whose reason survived"
+        );
+        let reason_differs = Cites(
+            Verdict::Deny {
+                reason: "lost".into(),
+            },
+            None,
+            Some(5),
+        );
+        assert_eq!(
+            compose_decide_cited(&[&denies, &reason_differs], &req()).rule,
+            cited(3)
+        );
+        let c = ConjunctionAuthorizer::new(vec![Box::new(Cites(permit(vec![]), None, Some(9)))]);
+        assert_eq!(c.decide_cited(&req()).rule, cited(9));
+    }
+
+    #[test]
+    fn compose_decide_reporting_role_is_the_cited_fold_minus_the_citation() {
+        let ops: [Cites; 3] = [
+            Cites(Verdict::NotApplicable { note: None }, None, None),
+            Cites(permit(vec![ob("orcon")]), Some("user"), Some(1)),
+            Cites(permit(vec![ob("audit")]), Some("admin"), Some(2)),
+        ];
+        let refs: Vec<&dyn Authorizer> = ops.iter().map(|o| o as &dyn Authorizer).collect();
+        let d = compose_decide_cited(&refs, &req());
+        assert_eq!(
+            compose_decide_reporting_role(&refs, &req()),
+            (d.verdict.clone(), d.role)
+        );
+        assert_eq!(d.role, Some("user"));
+        assert_eq!(
+            d.verdict,
+            combine(vec![permit(vec![ob("orcon")]), permit(vec![ob("audit")])])
+        );
+        assert_eq!(d.rule, None, "no operand's verdict equals the union");
+    }
+
+    #[test]
+    fn guarded_decide_cited_fails_closed_on_panic() {
+        assert_eq!(
+            guarded_decide_cited(&Panics, &req()),
+            Decided {
+                verdict: Verdict::Indeterminate,
+                role: None,
+                rule: None
+            }
+        );
+        let a = Cites(permit(vec![]), Some("admin"), Some(1));
+        assert_eq!(guarded_decide_cited(&a, &req()).rule, cited(1));
     }
 
     #[test]

@@ -1086,6 +1086,7 @@ mod tests {
             }),
             conversation: None,
             graph: None,
+            rule: None,
         }
     }
 
