@@ -74,16 +74,21 @@ pub struct StateDir {
 
 impl StateDir {
     pub fn open(path: &Path, owner: u32) -> Result<StateDir, StoreError> {
-        Self::open_with_marker_owner(path, owner, 0)
+        Self::open_as(path, owner, 0)
     }
 
     /// Test seam: lets an unprivileged test play the marker's owner; production passes uid 0.
+    #[cfg(feature = "hermetic-test-seam")]
     #[doc(hidden)]
     pub fn open_with_marker_owner(
         path: &Path,
         owner: u32,
         marker_owner: u32,
     ) -> Result<StateDir, StoreError> {
+        Self::open_as(path, owner, marker_owner)
+    }
+
+    fn open_as(path: &Path, owner: u32, marker_owner: u32) -> Result<StateDir, StoreError> {
         let anchor = open_anchor(
             path,
             AnchorRequired {
@@ -99,7 +104,7 @@ impl StateDir {
         })
     }
 
-    fn reseed_authorized(&self) -> bool {
+    fn reseed_marker(&self) -> Result<bool, IoError> {
         let marker = TargetRequired {
             owner: Some(self.marker_owner),
             mode_mask: Some(0o022),
@@ -107,9 +112,32 @@ impl StateDir {
             regular_file: true,
             max_bytes: Some(MARKER_MAX_BYTES),
         };
-        self.anchor
-            .read(Path::new(MARKER_FILE), None, marker)
-            .is_ok()
+        match self.anchor.read(Path::new(MARKER_FILE), None, marker) {
+            Ok(_) => Ok(true),
+            Err(IoError::Io {
+                kind: IoKind::NotFound,
+                ..
+            }) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Any outcome but NotFound means the name is taken; `max_bytes: 0` avoids reading it.
+    fn taken(&self, name: &str) -> bool {
+        let probe = TargetRequired {
+            owner: Some(self.owner),
+            mode_mask: Some(0o077),
+            nlink_exactly_one: true,
+            regular_file: true,
+            max_bytes: Some(0),
+        };
+        !matches!(
+            self.anchor.read(Path::new(name), None, probe),
+            Err(IoError::Io {
+                kind: IoKind::NotFound,
+                ..
+            })
+        )
     }
 
     fn read_store(&self) -> Result<Option<Zeroizing<Vec<u8>>>, IoError> {
@@ -152,6 +180,7 @@ pub struct BootReport {
     pub digest: [u8; 32],
     pub outcome: BootOutcome,
     pub graph: Graph,
+    pub marker_ignored: Option<String>,
 }
 
 pub trait BootAudit {
@@ -168,9 +197,21 @@ pub trait BootAudit {
     ) -> impl Future<Output = Result<(), StoreError>> + Send;
 }
 
+fn newer_envelope(v: u16) -> bool {
+    v > ENVELOPE_VERSION
+}
+
+fn newer_format(v: u16) -> bool {
+    v > FORMAT_VERSION
+}
+
+fn newer_schema(found: u16, expected: u16) -> bool {
+    found > expected
+}
+
 fn classify_envelope(e: EnvelopeError) -> StoreError {
     match e {
-        EnvelopeError::UnsupportedVersion(v) if v.cmp(&ENVELOPE_VERSION).is_gt() => {
+        EnvelopeError::UnsupportedVersion(v) if newer_envelope(v) => {
             StoreError::NewerStore(e.to_string())
         }
         e => StoreError::Envelope(e),
@@ -179,11 +220,11 @@ fn classify_envelope(e: EnvelopeError) -> StoreError {
 
 fn classify_format(e: FormatError) -> StoreError {
     match e {
-        FormatError::UnsupportedFormatVersion(v) if v.cmp(&FORMAT_VERSION).is_gt() => {
+        FormatError::UnsupportedFormatVersion(v) if newer_format(v) => {
             StoreError::NewerStore(e.to_string())
         }
         FormatError::UnsupportedSchemaVersion { found, expected }
-            if found.cmp(&expected).is_gt() =>
+            if newer_schema(found, expected) =>
         {
             StoreError::NewerStore(e.to_string())
         }
@@ -209,7 +250,10 @@ pub async fn boot(
     audit: &mut impl BootAudit,
     now_unix: u64,
 ) -> Result<BootReport, StoreError> {
-    let authorized = dir.reseed_authorized();
+    let (authorized, marker_ignored) = match dir.reseed_marker() {
+        Ok(authorized) => (authorized, None),
+        Err(e) => (false, Some(e.to_string())),
+    };
     let mut loaded = None;
     let prior = match dir.read_store() {
         Ok(None) => Prior::Absent,
@@ -225,7 +269,7 @@ pub async fn boot(
         Err(e) => Prior::Unreadable(format!("not preserved: {e}")),
     };
 
-    match (
+    let mut report = match (
         assess(loaded.as_ref().map(|(_, f)| *f), checkpoint, authorized),
         loaded,
     ) {
@@ -239,6 +283,7 @@ pub async fn boot(
                 digest: facts.digest,
                 outcome: BootOutcome::Loaded(state),
                 graph,
+                marker_ignored: None,
             })
         }
         (BootAction::Load(_), None) => Err(StoreError::Format(
@@ -250,7 +295,9 @@ pub async fn boot(
         (BootAction::SeedAuthorized { revision }, _) => {
             seed(dir, key, audit, revision, true, prior, now_unix).await
         }
-    }
+    }?;
+    report.marker_ignored = marker_ignored;
+    Ok(report)
 }
 
 enum Prior {
@@ -272,9 +319,17 @@ async fn seed(
     let rejected = match prior {
         Prior::Absent => None,
         Prior::Readable(bytes) => {
-            let name = format!("{REJECTED_PREFIX}{now_unix}");
-            dir.publish(&name, &bytes)?;
-            Some(name)
+            let tag: String = ciphertext_digest(&bytes)[..8]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            let name = format!("{REJECTED_PREFIX}{now_unix}.{tag}");
+            if dir.taken(&name) {
+                Some(format!("{name} (already preserved)"))
+            } else {
+                dir.publish(&name, &bytes)?;
+                Some(name)
+            }
         }
         Prior::Unreadable(cause) => Some(cause),
     };
@@ -301,5 +356,6 @@ async fn seed(
             rejected,
         },
         graph,
+        marker_ignored: None,
     })
 }

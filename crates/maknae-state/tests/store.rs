@@ -136,6 +136,14 @@ fn revision_of(file: &[u8], k: &WrappingKey) -> u64 {
         .revision()
 }
 
+fn rejected_name(prior: &[u8]) -> String {
+    let tag: String = ciphertext_digest(prior)[..8]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!("{REJECTED_PREFIX}{NOW}.{tag}")
+}
+
 fn checkpoint_of(r: &BootReport) -> Option<Checkpoint> {
     Some(Checkpoint {
         revision: r.revision,
@@ -163,6 +171,7 @@ async fn first_boot_seeds_revision_1_and_checkpoints_seeded() {
     assert_eq!(r.revision, 1);
     assert_eq!(r.graph.revision(), 1);
     assert_eq!(r.digest, ciphertext_digest(&file));
+    assert_eq!(r.marker_ignored, None);
     assert_eq!(
         r.outcome,
         BootOutcome::Seeded {
@@ -229,7 +238,15 @@ async fn reseed_then_restart_verifies() {
     fx.mark(0o644);
     let (r, events) = run(&fx.dir(), &k, checkpoint_of(&first)).await;
     let r = r.unwrap();
-    let name = format!("{REJECTED_PREFIX}{NOW}");
+    let name = rejected_name(&old);
+    let tag = name
+        .strip_prefix("kernel.graph.rejected.1760000000.")
+        .unwrap();
+    assert_eq!(tag.len(), 16);
+    assert!(tag
+        .bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+    assert_eq!(r.marker_ignored, None);
     assert_eq!(r.revision, 2);
     assert_eq!(
         r.outcome,
@@ -376,8 +393,11 @@ async fn an_ignored_marker_is_left_in_place_by_a_first_boot_seed() {
     fx.mark(0o644);
     let other = fx.uid.wrapping_add(1);
     let (r, _) = run(&fx.dir_with_marker_owner(other), &key(1), None).await;
+    let r = r.unwrap();
+    let why = r.marker_ignored.clone().unwrap();
+    assert!(why.starts_with(&format!("owned by {}", fx.uid)), "{why}");
     assert_eq!(
-        r.unwrap().outcome,
+        r.outcome,
         BootOutcome::Seeded {
             authorized: false,
             rejected: None
@@ -407,8 +427,10 @@ async fn production_open_requires_a_root_owned_marker() {
 
 async fn marker_does_not_authorize(fx: &Fixture) {
     let (r, _) = run(&fx.dir(), &key(1), None).await;
+    let r = r.unwrap();
+    assert!(r.marker_ignored.is_some());
     assert_eq!(
-        r.unwrap().outcome,
+        r.outcome,
         BootOutcome::Seeded {
             authorized: false,
             rejected: None
@@ -479,13 +501,14 @@ async fn directory_marker_does_not_authorize() {
 async fn reseed_floor_uses_a_decodable_old_store_without_a_checkpoint() {
     let fx = Fixture::new();
     let k = key(1);
-    fx.write(STORE_FILE, &sealed_graph(9, &k), 0o600);
+    let old = sealed_graph(9, &k);
+    fx.write(STORE_FILE, &old, 0o600);
     fx.mark(0o644);
     let (r, events) = run(&fx.dir(), &k, None).await;
     let r = r.unwrap();
     assert_eq!(r.revision, 10);
     assert_eq!(events[0], Event::Intent(10, true));
-    let name = format!("{REJECTED_PREFIX}{NOW}");
+    let name = rejected_name(&old);
     let copy = fs::read(fx.file(&name)).unwrap();
     assert_eq!(revision_of(&copy, &k), 9);
 
@@ -527,7 +550,7 @@ async fn reseed_preserves_an_undecryptable_store() {
     });
     let (r, _) = run(&fx.dir(), &k, cp).await;
     let r = r.unwrap();
-    let name = format!("{REJECTED_PREFIX}{NOW}");
+    let name = rejected_name(&raw);
     assert_eq!(r.revision, 5);
     assert_eq!(
         r.outcome,
@@ -814,7 +837,7 @@ async fn reseed_over_a_newer_store_preserves_it_and_seeds_past_the_checkpoint() 
         digest: [0; 32],
     });
     let r = run(&fx.dir(), &k, cp).await.0.unwrap();
-    let name = format!("{REJECTED_PREFIX}{NOW}");
+    let name = rejected_name(&file);
     assert_eq!(r.revision, 4);
     assert_eq!(
         r.outcome,
@@ -832,4 +855,94 @@ fn newer_store_display() {
         StoreError::NewerStore("v2".into()).to_string(),
         "the graph store was written by a newer maknaed: v2"
     );
+}
+
+#[tokio::test]
+async fn an_ignored_marker_is_reported_on_a_load() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let first = run(&fx.dir(), &k, None).await.0.unwrap();
+    fx.mark(0o664);
+    let r = run(&fx.dir(), &k, checkpoint_of(&first)).await.0.unwrap();
+    assert_eq!(r.outcome, BootOutcome::Loaded(AnchorState::Verified));
+    let why = r.marker_ignored.unwrap();
+    assert!(why.starts_with("insecure permissions 100664"), "{why}");
+    assert!(fx.exists(MARKER_FILE));
+}
+
+#[tokio::test]
+async fn a_second_reseed_in_the_same_second_keeps_the_first_rejected_copy() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let first = run(&fx.dir(), &k, None).await.0.unwrap();
+    let original = fx.store();
+    fx.mark(0o644);
+    let second = run(&fx.dir(), &k, checkpoint_of(&first)).await.0.unwrap();
+    let interim = fx.store();
+    // A marker that survives the reseed: a crash, or a failed removal, before the marker went.
+    fx.mark(0o644);
+    let third = run(&fx.dir(), &k, checkpoint_of(&second)).await.0.unwrap();
+    assert_eq!(third.revision, 3);
+    assert_eq!(
+        third.outcome,
+        BootOutcome::Seeded {
+            authorized: true,
+            rejected: Some(rejected_name(&interim))
+        }
+    );
+    let mut want = vec![rejected_name(&original), rejected_name(&interim)];
+    want.sort();
+    assert_ne!(want[0], want[1]);
+    assert_eq!(fx.rejected(), want);
+    assert_eq!(
+        fs::read(fx.file(&rejected_name(&original))).unwrap(),
+        original
+    );
+    assert_eq!(
+        fs::read(fx.file(&rejected_name(&interim))).unwrap(),
+        interim
+    );
+}
+
+#[tokio::test]
+async fn an_existing_rejected_name_is_never_replaced() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let old = sealed_graph(4, &k);
+    fx.write(STORE_FILE, &old, 0o600);
+    let name = rejected_name(&old);
+    fx.write(&name, b"first preserved copy", 0o600);
+    fx.mark(0o644);
+    let r = run(&fx.dir(), &k, None).await.0.unwrap();
+    assert_eq!(r.revision, 5);
+    assert_eq!(
+        r.outcome,
+        BootOutcome::Seeded {
+            authorized: true,
+            rejected: Some(format!("{name} (already preserved)"))
+        }
+    );
+    assert_eq!(fs::read(fx.file(&name)).unwrap(), b"first preserved copy");
+    assert_eq!(fx.rejected(), vec![name]);
+    assert_eq!(revision_of(&fx.store(), &k), 5);
+}
+
+#[tokio::test]
+async fn an_empty_file_at_the_rejected_name_is_never_replaced() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let old = sealed_graph(4, &k);
+    fx.write(STORE_FILE, &old, 0o600);
+    let name = rejected_name(&old);
+    fx.write(&name, b"", 0o600);
+    fx.mark(0o644);
+    let r = run(&fx.dir(), &k, None).await.0.unwrap();
+    assert_eq!(
+        r.outcome,
+        BootOutcome::Seeded {
+            authorized: true,
+            rejected: Some(format!("{name} (already preserved)"))
+        }
+    );
+    assert!(fs::read(fx.file(&name)).unwrap().is_empty());
 }

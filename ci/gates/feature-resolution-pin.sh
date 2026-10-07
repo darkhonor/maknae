@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# feature-resolution-pin (#77): production binaries must resolve maknae-config
-# and maknae-authz-basic WITHOUT `hermetic-test-seam` — the seam parameterizes
-# the hardened-load requirement, and a production build that selected it would
-# be a claim-vs-control gap on the authz door.
+# feature-resolution-pin (#77): production binaries must resolve maknae-config,
+# maknae-authz-basic and maknae-state WITHOUT `hermetic-test-seam` — the seam
+# parameterizes the hardened-load requirement (and, in maknae-state, the reseed
+# marker's owner), and a production build that selected it would be a
+# claim-vs-control gap.
 #
 # Soundness precondition (documented, load-bearing): per-package `-e normal`
 # resolution is authoritative ONLY because build-invocation-lint.sh forbids
@@ -23,7 +24,7 @@ for bin in maknaed maknae maknae-spifc; do
     continue
   }
   # tree lines carry glyph prefixes (└──); match the crate token + version.
-  if printf '%s\n' "$out" | grep -E '(maknae-config|maknae-authz-basic) v[0-9]' | grep -q 'hermetic-test-seam'; then
+  if printf '%s\n' "$out" | grep -E '(maknae-config|maknae-authz-basic|maknae-state) v[0-9]' | grep -q 'hermetic-test-seam'; then
     echo "FAIL: $bin's normal resolution enables hermetic-test-seam (production must never select the weaker authz-load requirement)"
     fail=1
   fi

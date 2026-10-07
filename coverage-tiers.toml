@@ -293,7 +293,7 @@ mutants_crates = ["maknae-security", "maknae-config", "maknae-io", "maknae-kerne
 # Contract: every key MUST appear in mutants_crates; every value MUST be a
 # list of strings; an absent table is legal. Validated in coverage-tiers.sh's
 # prologue (BOTH lanes).
-mutants_features = { maknae-config = ["hermetic-test-seam"], maknae-authz-basic = ["hermetic-test-seam"] }
+mutants_features = { maknae-config = ["hermetic-test-seam"], maknae-authz-basic = ["hermetic-test-seam"], maknae-state = ["hermetic-test-seam"] }
 
 [t2]
 floor_production_region = 90
