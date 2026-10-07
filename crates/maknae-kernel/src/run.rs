@@ -3336,8 +3336,8 @@ async fn report_graph_boot<E: AuditEmit + Send + Sync>(
     Ok(())
 }
 
-/// The `SIGHUP` policy reload. `lock` serializes reloads with one another and with
-/// the shutdown record; `stopping` abandons a reload that has not reached its commit.
+/// The `SIGHUP` policy reload. `lock` serializes reloads; shutdown waits on it for at
+/// most `RELOAD_STOP_TIMEOUT`; `stopping` abandons a reload that has not reached its commit.
 struct Reloader<B: maknae_authz_basic::Baseline, E> {
     dir: StateDir,
     key: WrappingKey,
@@ -3403,7 +3403,7 @@ where
 
     /// Abandons a reload still loading and waits up to `RELOAD_STOP_TIMEOUT` for one
     /// already committing, then stops the reload task; on elapse it leaves that reload
-    /// running. Only the first call waits.
+    /// running. Only the first call waits, even if it was dropped mid-wait.
     async fn stop(&self, reloads: &tokio::task::AbortHandle) {
         if self.stopping.send_replace(true) {
             return;
@@ -4441,7 +4441,7 @@ mod tests {
 
     /// #240 (review rounds 2–4): the shipped units' stop timeouts are held to
     /// the shutdown chain at the deadline CEILING, term by term and in the
-    /// order `accept_loop` and `run_inner` execute them — the stop record's
+    /// order `accept_loop` and `run_inner` execute them — the reload wait, the stop record's
     /// append (#265), the supervisor abort-reap, the handler drain (deadline + its own bound) and the reap
     /// of what it aborts, the audit drain, the plane client's shutdown (a
     /// bounded lock wait, then revoke-self), the runtime teardown and the diagnostics

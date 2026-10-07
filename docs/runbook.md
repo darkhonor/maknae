@@ -892,7 +892,7 @@ Both send `SIGHUP`, as does `kill -HUP <pid>` for a daemon started by hand. The 
 - **What a reload reads.** `authz.yaml` only. The principal, the classification system and ceiling, the transport, the audit configuration and the providers are read at start, and a change to any of them needs a restart.
 - **All or nothing.** A reload loads and validates the whole file and resolves every username in `bindings:` on the host, as a start does, so a new username needs only a reload. If anything fails (the file does not parse or validate, or a name has no account on the host), the reload is refused before it touches the store, and the running policy stands. A reload refused while writing the store also keeps the running policy; see the first case under "Records that look out of order" below. The journal (`journalctl -u maknaed`; on macOS `/usr/local/var/log/maknae/maknaed.err`) says `maknaed: reload refused: <cause>; the previous policy stands`. An invalid `authz.yaml` at start still refuses to start, with exit 3.
 - **One at a time.** Reloads run in turn. Signals that arrive while one runs produce one more reload, and a `SIGHUP` sent while the daemon is still starting is applied once it serves.
-- **Stopping.** A graceful stop abandons a reload that is still loading the file, recorded as `reload refused: shutdown`. It waits up to 5 seconds for a reload that is already writing the store, then stops without it, so the stop record and the token revoke never wait on a reload for longer than that.
+- **Stopping.** A graceful stop abandons a reload that is still loading the file, recorded as `reload refused: shutdown`. It waits up to 5 seconds for a reload that already holds its turn (writing the store or its audit records), then stops without it, so the stop record and the token revoke never wait on a reload for longer than that.
 
 **What the trail shows.** Each reload is its own session, and its records carry `event:"reload"`, so a query that selects `event=="boot"` does not see them. In order:
 
@@ -911,11 +911,12 @@ If the intent itself cannot be appended, nothing is loaded and no outcome is wri
 
 **`maknae status`** prints `kernel graph: revision <n> (<state>)`. The revision follows every reload that changed the bindings. The state is the result of this start's rollback check (`seeded`, `reseeded`, `verified`, `advanced` or `rollback-anchor-unavailable`) and stays the same until the next restart.
 
-**Records that look out of order.** Three cases leave the trail looking unusual. In each, the store and the trail agree once the next start has checked them.
+**Records that look out of order.** Four cases leave the trail looking unusual. In each, the store and the trail agree once the next start has checked them.
 
 - **A `graph.transition` with no `graph.checkpoint` after it, then `reload refused: persist: …`.** The store write failed after its intent was recorded, and the running policy is the previous one. Usually nothing reached disk: sealing the store failed, or writing or renaming its temporary file failed (a full or failing disk). If the failure was the directory `fsync` after the rename, the new store is on disk although the reload was refused. Any later reload that changes the bindings rewrites that revision and checkpoints it. Otherwise the next start loads the store, as `advanced` if the new store reached disk, and applies `authz.yaml` as a new transition if the file differs from it.
 - **`reload applied: …; checkpoint append failed: <cause>`.** The new policy is in force and the store holds it, but the trail has no checkpoint for it; the next start reports `advanced`.
 - **Reload records after the stop record.** A reload in flight can append its records after the stop record, `reload refused: shutdown` included, in two cases: when `maknaed` exits because its credential supervisor stopped, and when a graceful stop gives up its 5-second wait for a reload that is writing the store. They carry their own session id and match the store.
+- **A reload intent with no outcome record.** The daemon exited while a reload was still writing; a `graph.transition` may follow the intent with no checkpoint. The next start checks the store as above and reports what it found.
 
 ---
 
