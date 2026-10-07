@@ -1927,7 +1927,7 @@ async fn a_backend_that_cannot_enumerate_refuses_rather_than_claiming_empty() {
 }
 
 #[tokio::test]
-async fn the_corrective_subject_list_record_cites_no_rule() {
+async fn the_corrective_subject_list_record_keeps_the_permits_rule() {
     let fx = Fixture::new("subjlist-uncited");
     let emit = RecEmit::new();
     drive(
@@ -1956,8 +1956,8 @@ async fn the_corrective_subject_list_record_cites_no_rule() {
         Some("rule:roles.admin:allow:0")
     );
     assert_eq!(
-        corrective.rule, None,
-        "a deny never cites the permit's rule"
+        corrective.rule, permit.rule,
+        "the result of a permitted action cites the rule that permitted it"
     );
 }
 
@@ -2050,12 +2050,17 @@ async fn an_oversized_config_view_is_refused_explicitly_not_written_oversized() 
     // record says permit/authorized; a corrective record carries the real
     // posture. `permit` is retained -- the DECISION was a permit; only the
     // delivery was refused.
-    let last = emit.records().last().cloned().expect("a record");
+    let records = emit.records();
+    let [.., permit, last] = records.as_slice() else {
+        panic!("expected the permit and its correction, got {records:?}")
+    };
     assert_eq!(last.outcome.result, "permit");
     assert_eq!(
         last.outcome.posture, "refused-oversize",
         "a Permit-then-not-delivered must never read as a completed action"
     );
+    assert!(permit.rule.is_some(), "{permit:?}");
+    assert_eq!(last.rule, permit.rule);
 }
 
 /// `admin.config.show` end to end: a real `roles:` grant, a real PDP verdict,

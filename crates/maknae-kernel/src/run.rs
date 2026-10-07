@@ -1310,7 +1310,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                                 &peer_uri,
                                 peer_user.as_deref(),
                                 decided_role,
-                                None,
+                                decided_rule.as_ref(),
                                 session_id,
                                 seq.next(),
                                 verb_to_action(&request.verb),
@@ -1381,6 +1381,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                         &peer_uri,
                         peer_user.as_deref(),
                         decided_role,
+                        decided_rule.as_ref(),
                         session_id,
                         &seq,
                         verb_to_action(&request.verb),
@@ -1400,6 +1401,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                         &peer_uri,
                         peer_user.as_deref(),
                         decided_role,
+                        decided_rule.as_ref(),
                         session_id,
                         &seq,
                         verb_to_action(&request.verb),
@@ -1730,6 +1732,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                                     &peer_uri,
                                     peer_user.as_deref(),
                                     decided_role,
+                                    decided_rule.as_ref(),
                                     session_id,
                                     &seq,
                                     "session.prompt",
@@ -1749,6 +1752,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                                     &peer_uri,
                                     peer_user.as_deref(),
                                     decided_role,
+                                    decided_rule.as_ref(),
                                     session_id,
                                     &seq,
                                     "session.prompt",
@@ -1834,6 +1838,7 @@ async fn refuse_oversize_bounded<S, E: AuditEmit + Send + Sync>(
     // #275: the peer's OS username, already bounded.
     peer_user: Option<&str>,
     role: Option<&'static str>,
+    rule: Option<&RuleCitation>,
     session_id: u64,
     seq: &Seq,
     action: &str,
@@ -1851,7 +1856,7 @@ async fn refuse_oversize_bounded<S, E: AuditEmit + Send + Sync>(
         peer_uri,
         peer_user,
         role,
-        None,
+        rule,
         session_id,
         seq.next(),
         action,
@@ -1894,6 +1899,7 @@ async fn refuse_unencodable_bounded<S, E: AuditEmit + Send + Sync>(
     // #275: the peer's OS username, already bounded.
     peer_user: Option<&str>,
     role: Option<&'static str>,
+    rule: Option<&RuleCitation>,
     session_id: u64,
     seq: &Seq,
     action: &str,
@@ -1909,7 +1915,7 @@ async fn refuse_unencodable_bounded<S, E: AuditEmit + Send + Sync>(
         peer_uri,
         peer_user,
         role,
-        None,
+        rule,
         session_id,
         seq.next(),
         action,
@@ -1953,6 +1959,7 @@ async fn write_frame_bounded<S, E: AuditEmit + Send + Sync>(
     peer_uri: &str,
     peer_user: Option<&str>,
     role: Option<&'static str>,
+    rule: Option<&RuleCitation>,
     session_id: u64,
     seq: &Seq,
     action: &str,
@@ -1962,7 +1969,7 @@ async fn write_frame_bounded<S, E: AuditEmit + Send + Sync>(
 {
     if bytes.len() > FrameCaps::responses(cfg.prompt_max_bytes).cap(class) {
         refuse_oversize_bounded(
-            stream, cfg, class, emit, host, socket, peer_uid, peer_uri, peer_user, role,
+            stream, cfg, class, emit, host, socket, peer_uid, peer_uri, peer_user, role, rule,
             session_id, seq, action, au3_1,
         )
         .await;

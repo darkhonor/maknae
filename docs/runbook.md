@@ -360,11 +360,25 @@ the same `authz.yaml` over different store histories can number the same rule
 differently. Identify a rule by `policy_sha256` and `key` together, never by `node`:
 `policy_sha256` names the policy in force, and the boot `authz` record and each
 `graph.reload` outcome carry it (see "What the trail shows" under the reload section).
-A decision no rule made (a structural role decision such as liveness, or
-deny-by-default) has no `rule` block, and neither does a deny made after the PDP
-permitted (an unhonorable obligation, an `admin.subject.list` whose bindings could not
-be enumerated, a prompt whose send did not go out, or a mutation whose object label
-could not be resolved). An `fs.mkdir` with `parents` decides every directory it creates from one
+A record of what a permitted action then did keeps the rule that permitted it,
+whatever the result, because authorization is separate from effect: every egress
+outcome (sent, send failed, send deadline expired, send outcome unknown, or a
+refused reply), every mutation completion including an incomplete one, and the
+corrective record that follows a permitted response which could not be delivered (an
+`admin.subject.list` whose bindings could not be enumerated, a response over the
+frame limit, or one that could not be encoded). A query on `rule.key` therefore finds
+the outcome that says whether content may have left, not only the decision. A record
+has no `rule` block when no rule in the file decided: a structural role decision
+(such as liveness) or deny-by-default. Nor does a refusal made before the PDP decided:
+a request that could not be read or decoded, a path or operand pre-gate, a refused
+provider choice, an open decision breaker or a decision timeout, or a mutation that
+could not be prepared. Nor does a deny written in place of a permit that was never
+acted on: an unhonorable obligation, a mutation whose object label could not be
+resolved, a `session.prompt` refused because the egress backend was not ready, and
+two defence-in-depth denies that no request should reach (a mutation dispatch
+without prepared evidence, and a `session.prompt` without an admitted provider
+choice). Connection, boot, reload and shutdown records carry no decision and no
+`rule`. An `fs.mkdir` with `parents` decides every directory it creates from one
 policy, and its record cites the rule for the last directory decided: on a permit,
 the requested directory; on a deny, the one refused.
 
