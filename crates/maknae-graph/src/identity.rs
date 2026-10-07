@@ -38,6 +38,8 @@ pub enum IdentityError {
     Graph(GraphError),
     BadAttr { node: u64, attr: &'static str },
     UnknownRole(String),
+    Ambiguous { node: u64, what: &'static str },
+    LabelMismatch(String),
 }
 
 impl fmt::Display for IdentityError {
@@ -49,6 +51,13 @@ impl fmt::Display for IdentityError {
                 "identity layer: node {node} lacks a valid `{attr}` attribute"
             ),
             Self::UnknownRole(r) => write!(f, "identity layer: role `{r}` is not compiled in"),
+            Self::Ambiguous { node, what } => {
+                write!(f, "identity layer: node {node} is ambiguous: {what}")
+            }
+            Self::LabelMismatch(key) => write!(
+                f,
+                "identity layer: compiled node `{key}` is labelled differently from the layer"
+            ),
         }
     }
 }
@@ -65,7 +74,7 @@ pub fn unhex(s: &str) -> Option<[u8; 32]> {
     }
     let mut out = [0u8; 32];
     for (o, [hi, lo]) in out.iter_mut().zip(s.as_bytes().as_chunks::<2>().0) {
-        *o = (nibble(*hi) << 4) | nibble(*lo);
+        *o = (nibble(*hi) << 4) + nibble(*lo);
     }
     Some(out)
 }
@@ -217,7 +226,11 @@ pub fn build(
             b = b.edge(a.edge(sid, DECLARED_BY, sec));
         }
     }
-    b.build(&SCHEMA, compiled).map_err(IdentityError::Graph)
+    let g = b.build(&SCHEMA, compiled).map_err(IdentityError::Graph)?;
+    if let Some(c) = compiled.iter().find(|c| c.label != layer.label) {
+        return Err(IdentityError::LabelMismatch(c.key.clone()));
+    }
+    Ok(g)
 }
 
 fn str_attr<'a>(n: &'a NodeRecord, attr: &'static str) -> Result<&'a str, IdentityError> {
@@ -238,10 +251,17 @@ pub fn extract(g: &Graph) -> Result<Extracted, IdentityError> {
     let mut layer = IdentityLayer::default();
     let mut vocabulary_sha256 = None;
     let mut unbound = Vec::new();
+    let mut has_source = false;
     for n in g.nodes().iter().filter(|n| n.kind == CONFIG_SOURCE) {
         if n.key == VOCABULARY_SOURCE_KEY {
             vocabulary_sha256 = Some(digest_attr(n)?);
+        } else if has_source {
+            return Err(IdentityError::Ambiguous {
+                node: n.id.0,
+                what: "more than one policy source",
+            });
         } else {
+            has_source = true;
             layer.source = n.key.clone();
             layer.label = n.label.clone();
         }
@@ -254,10 +274,23 @@ pub fn extract(g: &Graph) -> Result<Extracted, IdentityError> {
             Some(AttrValue::U64(u)) => u32::try_from(*u).ok(),
             _ => None,
         }
+        .filter(|&u| n.key == subject_key(u))
         .ok_or(IdentityError::BadAttr {
             node: n.id.0,
             attr: ATTR_UID,
         })?;
+        if !has_source {
+            return Err(IdentityError::Ambiguous {
+                node: n.id.0,
+                what: "subject without a policy source",
+            });
+        }
+        if g.out_edges(n.id, BINDS).nth(1).is_some() {
+            return Err(IdentityError::Ambiguous {
+                node: n.id.0,
+                what: "more than one binds edge",
+            });
+        }
         let name = str_attr(n, ATTR_NAME)?.to_string();
         let role = if g.out_edges(n.id, CONTAINED).next().is_some() {
             Some(ADVERSARY.to_string())
@@ -361,6 +394,8 @@ mod tests {
             assert_eq!(e.vocabulary_sha256, Some(VOCAB));
             assert!(e.unbound.is_empty());
             assert_eq!(g.revision(), 7);
+            assert!(g.nodes().iter().all(|n| n.label == l.label));
+            assert!(g.edges().iter().all(|e| e.label == l.label));
         }
     }
 
@@ -632,6 +667,7 @@ mod tests {
                 ATTR_UID,
                 Some(AttrValue::U64(u64::from(u32::MAX) + 1)),
             ),
+            (subject, ATTR_UID, Some(AttrValue::U64(1001))),
             (subject, ATTR_NAME, None),
             (subject, ATTR_NAME, Some(AttrValue::U64(1))),
         ];
@@ -643,13 +679,129 @@ mod tests {
                 "{attr} = {v:?}"
             );
         }
-        let max = with_attr(
-            &g,
-            subject,
-            ATTR_UID,
-            Some(AttrValue::U64(u64::from(u32::MAX))),
-        );
+        let max = build(
+            &layer(Some("x"), &[(u32::MAX, "max", "admin")]),
+            &roles(),
+            VOCAB,
+            1,
+            ProvenanceKind::Seed,
+        )
+        .unwrap();
         assert_eq!(extract(&max).unwrap().layer.subjects[0].uid, u32::MAX);
+    }
+
+    fn regraph(
+        g: &Graph,
+        keep_node: impl Fn(&NodeRecord) -> bool,
+        extra_nodes: Vec<NodeRecord>,
+        extra_edges: Vec<EdgeRecord>,
+    ) -> Graph {
+        let nodes: Vec<NodeRecord> = g
+            .nodes()
+            .iter()
+            .filter(|n| keep_node(n))
+            .cloned()
+            .chain(extra_nodes)
+            .collect();
+        let kept = |id: NodeId| nodes.iter().any(|n| n.id == id);
+        let edges: Vec<EdgeRecord> = g
+            .edges()
+            .iter()
+            .filter(|e| kept(e.from) && kept(e.to))
+            .cloned()
+            .chain(extra_edges)
+            .collect();
+        let b = GraphBuilder::new(GraphSpace::Kernel, g.revision());
+        let b = nodes.into_iter().fold(b, |b, n| b.node(n));
+        edges
+            .into_iter()
+            .fold(b, |b, e| b.edge(e))
+            .build(&crate::kernel::SCHEMA, &roles())
+            .unwrap()
+    }
+
+    fn one_admin() -> Graph {
+        build(
+            &layer(Some("x"), &[(1000, "alex", "admin")]),
+            &roles(),
+            VOCAB,
+            1,
+            ProvenanceKind::Seed,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn extract_refuses_a_second_policy_source() {
+        let g = one_admin();
+        let mut second = g
+            .lookup(crate::kernel::CONFIG_SOURCE, "/etc/maknae/authz.yaml")
+            .unwrap()
+            .clone();
+        second.id = NodeId(100);
+        second.key = "/etc/maknae/other.yaml".into();
+        let two = regraph(&g, |_| true, vec![second], vec![]);
+        assert_eq!(
+            extract(&two),
+            Err(IdentityError::Ambiguous {
+                node: 100,
+                what: "more than one policy source"
+            })
+        );
+    }
+
+    #[test]
+    fn extract_refuses_a_subject_with_two_binds_edges() {
+        let g = one_admin();
+        let s = g.lookup(crate::kernel::SUBJECT, "uid:1000").unwrap().id;
+        let mut extra = g.edges()[0].clone();
+        extra.id = EdgeId(100);
+        extra.from = s;
+        extra.to = g.lookup(ROLE, "user").unwrap().id;
+        extra.kind = BINDS;
+        let two = regraph(&g, |_| true, vec![], vec![extra]);
+        assert_eq!(two.out_edges(s, BINDS).count(), 2);
+        assert_eq!(
+            extract(&two),
+            Err(IdentityError::Ambiguous {
+                node: s.0,
+                what: "more than one binds edge"
+            })
+        );
+    }
+
+    #[test]
+    fn extract_refuses_subjects_without_a_policy_source() {
+        let g = one_admin();
+        let s = g.lookup(crate::kernel::SUBJECT, "uid:1000").unwrap().id;
+        let orphan = regraph(
+            &g,
+            |n| !(n.kind == crate::kernel::CONFIG_SOURCE && n.key != VOCABULARY_SOURCE_KEY),
+            vec![],
+            vec![],
+        );
+        assert_eq!(
+            extract(&orphan),
+            Err(IdentityError::Ambiguous {
+                node: s.0,
+                what: "subject without a policy source"
+            })
+        );
+    }
+
+    #[test]
+    fn build_refuses_a_compiled_set_labelled_for_another_level() {
+        let l = layer(Some("x"), &[(1000, "alex", "admin")]);
+        assert_eq!(
+            build(
+                &l,
+                &crate::kernel::persisted_compiled_set("SECRET"),
+                VOCAB,
+                1,
+                ProvenanceKind::Seed
+            ),
+            Err(IdentityError::LabelMismatch("admin".into()))
+        );
     }
 
     #[test]
@@ -730,6 +882,17 @@ mod tests {
             (
                 IdentityError::UnknownRole("x".into()),
                 "identity layer: role `x` is not compiled in",
+            ),
+            (
+                IdentityError::Ambiguous {
+                    node: 3,
+                    what: "more than one binds edge",
+                },
+                "identity layer: node 3 is ambiguous: more than one binds edge",
+            ),
+            (
+                IdentityError::LabelMismatch("admin".into()),
+                "identity layer: compiled node `admin` is labelled differently from the layer",
             ),
         ];
         for (e, want) in cases {

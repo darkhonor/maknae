@@ -214,6 +214,8 @@ pub fn decode(
     rebuild_canonical(b, bytes, schema, compiled)
 }
 
+/// Decodes trusting the store's own `Compiled` nodes as the compiled set; the caller must
+/// judge that set against the binary's vocabulary digest before using the graph.
 pub fn decode_stored_compiled(
     bytes: &[u8],
     expected: GraphSpace,
@@ -596,6 +598,7 @@ mod tests {
         let (g2, stored) = decode_stored_compiled(&bytes, GraphSpace::Kernel, &SCHEMA).unwrap();
         assert_eq!(g2, g);
         assert_eq!(stored.canonical_bytes(), roles.canonical_bytes());
+        assert!(stored.canonical_bytes().is_ok());
         let empty = encode(
             &GraphBuilder::new(GraphSpace::Kernel, 1)
                 .build(&SCHEMA, &CompiledSet::default())

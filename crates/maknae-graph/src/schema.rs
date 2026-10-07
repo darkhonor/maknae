@@ -1,4 +1,4 @@
-use crate::graph::index_u32;
+use crate::graph::{index_u32, GraphError};
 use crate::record::{AttrValue, Attrs, EdgeKind, NodeKind};
 
 #[derive(Debug)]
@@ -71,13 +71,22 @@ impl CompiledSet {
         self.nodes.is_empty()
     }
 
-    pub fn canonical_bytes(&self) -> Vec<u8> {
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, GraphError> {
         fn put(out: &mut Vec<u8>, s: &str) {
             out.extend_from_slice(&index_u32(s.len()).to_le_bytes());
             out.extend_from_slice(s.as_bytes());
         }
         let mut sorted: Vec<&CompiledNode> = self.nodes.iter().collect();
         sorted.sort_by(|a, b| (a.kind, a.key.as_str()).cmp(&(b.kind, b.key.as_str())));
+        if let Some(w) = sorted
+            .windows(2)
+            .find(|w| (w[0].kind, &w[0].key) == (w[1].kind, &w[1].key))
+        {
+            return Err(GraphError::DuplicateKey {
+                kind: w[0].kind,
+                key: w[0].key.clone(),
+            });
+        }
         let mut out = Vec::new();
         out.extend_from_slice(&index_u32(sorted.len()).to_le_bytes());
         for c in sorted {
@@ -99,7 +108,7 @@ impl CompiledSet {
                 }
             }
         }
-        out
+        Ok(out)
     }
 }
 
@@ -153,24 +162,69 @@ mod tests {
         };
         let mut b = a.clone();
         b.key = "j".into();
-        let ab = CompiledSet::new(vec![a.clone(), b.clone()]).canonical_bytes();
-        let ba = CompiledSet::new(vec![b.clone(), a.clone()]).canonical_bytes();
+        let ab = CompiledSet::new(vec![a.clone(), b.clone()])
+            .canonical_bytes()
+            .unwrap();
+        let ba = CompiledSet::new(vec![b.clone(), a.clone()])
+            .canonical_bytes()
+            .unwrap();
         assert_eq!(ab, ba);
         let mut c = a.clone();
         c.label = "M".into();
-        assert_ne!(CompiledSet::new(vec![c, b.clone()]).canonical_bytes(), ab);
+        assert_ne!(
+            CompiledSet::new(vec![c, b.clone()])
+                .canonical_bytes()
+                .unwrap(),
+            ab
+        );
         let mut d = a.clone();
         d.attrs.insert("x".into(), AttrValue::U64(1));
-        let du = CompiledSet::new(vec![d.clone(), b.clone()]).canonical_bytes();
+        let du = CompiledSet::new(vec![d.clone(), b.clone()])
+            .canonical_bytes()
+            .unwrap();
         assert_ne!(du, ab);
         d.attrs.insert("x".into(), AttrValue::Str("1".into()));
-        assert_ne!(CompiledSet::new(vec![d, b.clone()]).canonical_bytes(), du);
+        assert_ne!(
+            CompiledSet::new(vec![d, b.clone()])
+                .canonical_bytes()
+                .unwrap(),
+            du
+        );
         let mut k = a.clone();
         k.kind = NodeKind(3);
-        assert_ne!(CompiledSet::new(vec![k, b]).canonical_bytes(), ab);
+        assert_ne!(CompiledSet::new(vec![k, b]).canonical_bytes().unwrap(), ab);
         assert!(CompiledSet::default().is_empty());
         assert!(!CompiledSet::new(vec![a]).is_empty());
-        assert_eq!(CompiledSet::default().canonical_bytes(), 0u32.to_le_bytes());
+        assert_eq!(
+            CompiledSet::default().canonical_bytes().unwrap(),
+            0u32.to_le_bytes()
+        );
+    }
+
+    #[test]
+    fn canonical_bytes_refuse_a_duplicate_kind_and_key() {
+        let a = CompiledNode {
+            kind: NodeKind(2),
+            key: "k".into(),
+            label: "L".into(),
+            attrs: Attrs::new(),
+        };
+        let mut b = a.clone();
+        b.label = "M".into();
+        let mut other_kind = a.clone();
+        other_kind.kind = NodeKind(3);
+        assert!(CompiledSet::new(vec![a.clone(), other_kind])
+            .canonical_bytes()
+            .is_ok());
+        for set in [vec![a.clone(), b.clone()], vec![b, a]] {
+            assert_eq!(
+                CompiledSet::new(set).canonical_bytes(),
+                Err(GraphError::DuplicateKey {
+                    kind: NodeKind(2),
+                    key: "k".into()
+                })
+            );
+        }
     }
 
     #[test]
@@ -201,7 +255,7 @@ mod tests {
         want.push(1);
         want.extend_from_slice(&1u32.to_le_bytes());
         want.push(b'v');
-        assert_eq!(set.canonical_bytes(), want);
+        assert_eq!(set.canonical_bytes().unwrap(), want);
     }
 
     #[test]
