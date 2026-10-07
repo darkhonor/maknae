@@ -29,7 +29,14 @@ fn write_canonical(v: &Value, out: &mut String) {
         Value::Null => out.push_str("null"),
         Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
         Value::Int(n) => out.push_str(&n.to_string()),
-        Value::Float(f) => out.push_str(&f.to_string()),
+        Value::Float(f) => {
+            let text = f.to_string();
+            let int_shaped = !text.contains(['.', 'e', 'E']);
+            out.push_str(&text);
+            if int_shaped {
+                out.push_str(".0");
+            }
+        }
         Value::Str(s) => write_json_string(s, out),
         Value::Seq(items) => {
             out.push('[');
@@ -124,5 +131,25 @@ mod tests {
             canonical_json(&Value::Seq(vec![Value::Bool(false), Value::Float(-0.25)])),
             "[false,-0.25]"
         );
+    }
+
+    #[test]
+    fn a_float_never_canonicalizes_like_an_int() {
+        assert_eq!(canonical_json(&Value::Int(1)), "1");
+        assert_eq!(canonical_json(&Value::Float(1.0)), "1.0");
+        assert_eq!(canonical_json(&Value::Float(1.5)), "1.5");
+        let big = canonical_json(&Value::Float(1e300));
+        assert_eq!(big, format!("1{}.0", "0".repeat(300)));
+        assert_eq!(big, canonical_json(&Value::Float(1e300)));
+    }
+
+    #[test]
+    fn the_parser_never_yields_a_non_finite_float() {
+        for doc in ["a: .nan\n", "a: .inf\n", "a: -.inf\n", "a: 1e999\n"] {
+            assert!(
+                !matches!(crate::load_str(doc), Ok(Value::Map(ref m)) if matches!(m[0].1, Value::Float(_))),
+                "{doc}"
+            );
+        }
     }
 }

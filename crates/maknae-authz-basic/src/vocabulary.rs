@@ -108,6 +108,34 @@ mod tests {
     }
 
     #[test]
+    fn classes_lists_every_class_variant_in_order() {
+        fn name(c: Class) -> &'static str {
+            match c {
+                Class::Liveness => "liveness",
+                Class::Admin => "admin",
+                Class::Session => "session",
+                Class::Fs => "fs",
+                Class::Terminal => "terminal",
+                Class::Mcp => "mcp",
+                Class::Kernel => "kernel",
+            }
+        }
+        let variants = [
+            Class::Liveness,
+            Class::Admin,
+            Class::Session,
+            Class::Fs,
+            Class::Terminal,
+            Class::Mcp,
+            Class::Kernel,
+        ];
+        assert_eq!(variants.map(name), CLASSES);
+        for v in variants {
+            assert_eq!(class_of(name(v)), Some(v));
+        }
+    }
+
+    #[test]
     fn class_name_names_each_class_by_its_own_prefix() {
         for c in CLASSES {
             assert_eq!(class_name(c), Some(c));
@@ -115,7 +143,7 @@ mod tests {
     }
 
     #[test]
-    fn the_compiled_set_is_roles_then_terms_then_classes_with_member_class_attrs() {
+    fn the_compiled_set_holds_the_persisted_roles_every_term_with_its_class_and_every_class() {
         let set = compiled_set("UNCLASSIFIED");
         let roles: Vec<&str> = set
             .iter()
