@@ -115,11 +115,16 @@ if [ -L "$AUDIT" ] || { [ -e "$AUDIT" ] && { [ ! -f "$AUDIT" ] || [ "$(stat -f %
 fi
 if [ ! -e "$AUDIT" ]; then
     install -m 0640 -o "$MUID" -g "$MGID" /dev/null "$AUDIT"
-else
+elif [ "$(stat -f '%u %g %Lp' "$AUDIT")" != "$MUID $MGID 640" ]; then
     # A RETAINED trail from a previous install (uninstall.sh keeps /var/log/maknae
     # deliberately) carries the OLD numeric owner, and ids are allocated
     # dynamically (D8) so a reinstall can hand out different ones. Left alone, the
-    # daemon fails closed on audit open. Clear append-only, re-own, re-set.
+    # daemon fails closed on audit open. Clear append-only, re-own, re-set, and
+    # never with a writer running.
+    if [ "$WAS_LOADED" = "true" ]; then
+        echo "maknae: $AUDIT needs re-owning while $LABEL is loaded; /var/log/maknae is left root-owned" >&2
+        exit 1
+    fi
     chflags nouappnd "$AUDIT" 2>/dev/null || :
     chown "$MUID:$MGID" "$AUDIT" 2>/dev/null || :
     chmod 0640 "$AUDIT" 2>/dev/null || :

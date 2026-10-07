@@ -43,8 +43,8 @@ The audit trail is append-only by the inode's append-only attribute (`chattr +a`
 not by AppArmor. AppArmor revalidates every `write()` on an `O_APPEND`
 descriptor as `w`, so an `a` grant denies every append, and `a` and `w` cannot be
 combined in one rule (measured on Debian 13, kernel 6.12). With the attribute
-set, writes only append, and truncation, unlink and opens without `O_APPEND` are
-refused, for root as well; only `CAP_LINUX_IMMUTABLE` clears it, and the unit
+set, writes only append, and truncation, unlink and opens for writing without
+`O_APPEND` are refused, for root as well; only `CAP_LINUX_IMMUTABLE` clears it, and the unit
 grants `maknaed` no capabilities. `postinst` sets it on every configure and fails
 the configure, naming the filesystem type, if the file system does not support it.
 
@@ -105,8 +105,9 @@ rule applies, because the daemon refuses to start until enrollment writes `princ
 
 ## Removal
 
-`prerm` clears the file's append-only attribute, unloads the AppArmor profile,
-and stops/disables the unit. `postrm purge` removes `/etc/maknae` and
-`/var/log/maknae` (after clearing `+a`). The accumulated audit trail is
-preserved across upgrades (the file is guarded on non-existence and never
+`prerm` stops and disables the units, then unloads the AppArmor profiles. `remove`
+keeps the audit trail with its append-only attribute. `postrm purge` takes
+`/var/log/maknae` to `root:root`, clears `+a` on every regular, single-link file
+in it, and removes it with `/etc/maknae`. The accumulated audit trail is
+preserved across upgrades (the file is created only when absent and never
 shipped as payload).

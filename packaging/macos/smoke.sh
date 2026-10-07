@@ -93,10 +93,18 @@ phase1() {
     grep -qF 'verify "$STATE ownership/mode" "$MUID $MGID 700"' "$HERE/scripts/postinstall" \
         && ok "postinstall verifies the kernel graph state dir" \
         || fail "postinstall does not verify the kernel graph state dir"
-    grep -qxF 'chown 0:0 /var/log/maknae' "$HERE/scripts/postinstall" \
-        && grep -qF 'verify "/var/log/maknae ownership/mode" "$MUID $MGID 700"' "$HERE/scripts/postinstall" \
-        && ok "postinstall holds the audit dir as root and hands it back" \
-        || fail "postinstall does not hold the audit dir as root while acting on audit.jsonl"
+    local pi="$HERE/scripts/postinstall" hold first last back
+    hold="$(grep -nxF 'chown 0:0 /var/log/maknae' "$pi" | head -n 1 | cut -d: -f1)"
+    first="$(grep -nF '"$AUDIT"' "$pi" | head -n 1 | cut -d: -f1)"
+    last="$(grep -nF '"$AUDIT"' "$pi" | tail -n 1 | cut -d: -f1)"
+    back="$(grep -nxF 'chown -h "$MUID:$MGID" /var/log/maknae' "$pi" | tail -n 1 | cut -d: -f1)"
+    if [ -n "$hold" ] && [ -n "$first" ] && [ -n "$last" ] && [ -n "$back" ] \
+        && [ "$hold" -lt "$first" ] && [ "$last" -lt "$back" ] \
+        && grep -qF 'verify "/var/log/maknae ownership/mode" "$MUID $MGID 700"' "$pi"; then
+        ok "postinstall holds the audit dir as root before acting on audit.jsonl and hands it back after"
+    else
+        fail "postinstall does not hold the audit dir as root around every act on audit.jsonl (hold=$hold first=$first last=$last back=$back)"
+    fi
 
     "$REPO/ci/gates/entitlements-empty.sh" "$HERE"/*.entitlements >/dev/null \
         && ok "every entitlements file is empty" \
@@ -471,13 +479,21 @@ REFUSE
     esac
 
     echo "  -- chflags: uappnd is set; probing whether sappnd is survivable --"
-    ls -lO /var/log/maknae/audit.jsonl
-    if chflags sappnd /var/log/maknae/audit.jsonl 2>/dev/null; then
-        echo "  NOTE: sappnd ACCEPTED at securelevel 0 — record in the contract"
-        chflags nosappnd /var/log/maknae/audit.jsonl 2>/dev/null \
-            || echo "  NOTE: and it could NOT be cleared — sappnd is NOT upgrade-survivable"
+    local adir=/var/log/maknae afile=/var/log/maknae/audit.jsonl aown
+    aown="$(stat -f '%u:%g' "$adir")"
+    chown 0:0 "$adir"
+    if [ -L "$afile" ] || [ ! -f "$afile" ] || [ "$(stat -f %l "$afile")" != 1 ]; then
+        fail "$afile is not a regular, single-link file; sappnd probe skipped, $adir left root-owned"
     else
-        echo "  NOTE: sappnd REFUSED — uappnd is the flag the contract must name"
+        ls -lO "$afile"
+        if chflags sappnd "$afile" 2>/dev/null; then
+            echo "  NOTE: sappnd ACCEPTED at securelevel 0 — record in the contract"
+            chflags nosappnd "$afile" 2>/dev/null \
+                || echo "  NOTE: and it could NOT be cleared — sappnd is NOT upgrade-survivable"
+        else
+            echo "  NOTE: sappnd REFUSED — uappnd is the flag the contract must name"
+        fi
+        chown -h "$aown" "$adir"
     fi
 
     # --- fail-closed boot refusal -------------------------------------------

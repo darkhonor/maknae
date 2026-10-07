@@ -4,18 +4,16 @@ set -e
 
 case "$1" in
     purge)
-        # rm cannot unlink an append-only inode. The directory is root-held while
-        # root acts on its entry; a symlink is unlinked by rm without clearing.
-        AUDIT=/var/log/maknae/audit.jsonl
+        # rm cannot unlink an append-only inode, and archived trails carry the
+        # attribute too. The directory is root-held while root acts on its
+        # entries; find -type f never follows a symlink.
         if [ -d /var/log/maknae ] && [ ! -h /var/log/maknae ]; then
             chown root:root /var/log/maknae
             chattr -a /var/log/maknae 2>/dev/null || :
-            if [ -f "$AUDIT" ] && [ ! -h "$AUDIT" ]; then
-                if [ "$(stat -c %h "$AUDIT")" = 1 ]; then
-                    chattr -a "$AUDIT" 2>/dev/null || :
-                else
-                    echo "maknae: $AUDIT has more than one link; append-only not cleared" >&2
-                fi
+            find /var/log/maknae -xdev -mindepth 1 -maxdepth 1 -type f -links 1 \
+                -exec chattr -a {} + 2>/dev/null || :
+            if [ -n "$(find /var/log/maknae -xdev -mindepth 1 -maxdepth 1 -type f -links +1 -print -quit)" ]; then
+                echo "maknae: a file in /var/log/maknae has more than one link; append-only not cleared" >&2
             fi
         fi
 

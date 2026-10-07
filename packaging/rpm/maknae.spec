@@ -47,7 +47,7 @@ Requires(post): acl
 Requires:       fapolicyd
 Requires(pre):  systemd
 Requires(post): systemd policycoreutils selinux-policy-targeted e2fsprogs
-Requires(preun):  systemd e2fsprogs
+Requires(preun):  systemd
 Requires(postun): systemd policycoreutils
 
 %description
@@ -101,8 +101,8 @@ install -d -m 0750 %{buildroot}%{_sysconfdir}/maknae/egress
 install -d -m 0755 %{buildroot}%{_sysconfdir}/pki/maknae
 install -d -m 0700 %{buildroot}%{_localstatedir}/log/maknae
 install -d -m 0700 %{buildroot}%{_localstatedir}/lib/maknae
-# audit.jsonl is NOT a payload file — it is %ghost, created first-install-only in
-# %post (a payload file under the chattr +a dir would fail to replace on upgrade).
+# audit.jsonl is not a payload file and not package-owned: %post creates it, so
+# erase keeps the trail and an upgrade never replaces the append-only inode.
 
 %pre
 # Create the _maknae and _maknae-egress accounts and the maknae operator group
@@ -128,38 +128,29 @@ setfacl -m u:_maknae-egress:rx %{_sysconfdir}/maknae 2>/dev/null || \
 [ -d /run/maknae-egress ] && chmod 0751 /run/maknae-egress 2>/dev/null || :
 # fapolicyd trust (never restart mid-transaction; the rpm plugin handles it)
 fapolicyd-cli --update 2>/dev/null || :
-# Audit-file lifecycle — first-install-only AND only if absent, then append-only.
-# The inode attribute backs SELinux's append-only rule; a failure fails %post.
-# FILE-level only: a +a directory would block rpm from managing /var/log/maknae.
+# Audit file: created when absent, then append-only; a failure fails %post. Not
+# package-owned, so erase keeps the trail. FILE-level only: a +a directory would
+# block rpm from managing /var/log/maknae.
 AUDIT=%{_localstatedir}/log/maknae/audit.jsonl
-if [ $1 -eq 1 ] && [ ! -e "$AUDIT" ] && [ ! -h "$AUDIT" ]; then
+if [ ! -e "$AUDIT" ] && [ ! -h "$AUDIT" ]; then
     install -m 0640 -o _maknae -g _maknae /dev/null "$AUDIT"
+    restorecon "$AUDIT" 2>/dev/null || :
 fi
-if [ -e "$AUDIT" ] || [ -h "$AUDIT" ]; then
-    if [ -h "$AUDIT" ] || [ ! -f "$AUDIT" ] || [ "$(stat -c %%h "$AUDIT")" != 1 ] \
-        || [ "$(stat -c %%U:%%G "$AUDIT")" != _maknae:_maknae ]; then
-        echo "maknae: $AUDIT is not a regular, single-link _maknae:_maknae file; %{_localstatedir}/log/maknae is left root-owned" >&2
-        exit 1
-    fi
-    if ! chattr +a "$AUDIT" || ! lsattr -d "$AUDIT" | cut -d' ' -f1 | grep -q a; then
-        echo "maknae: cannot set the append-only attribute on $AUDIT (filesystem: $(stat -f -c %%T "$AUDIT" 2>/dev/null || echo unknown)); %{_localstatedir}/log/maknae is left root-owned" >&2
-        exit 1
-    fi
+if [ -h "$AUDIT" ] || [ ! -f "$AUDIT" ] || [ "$(stat -c %%h "$AUDIT")" != 1 ] \
+    || [ "$(stat -c %%U:%%G "$AUDIT")" != _maknae:_maknae ]; then
+    echo "maknae: $AUDIT is not a regular, single-link _maknae:_maknae file; %{_localstatedir}/log/maknae is left root-owned" >&2
+    exit 1
+fi
+if ! chattr +a "$AUDIT" || ! lsattr -d "$AUDIT" | cut -d' ' -f1 | grep -q a; then
+    echo "maknae: cannot set the append-only attribute on $AUDIT (filesystem: $(stat -f -c %%T "$AUDIT" 2>/dev/null || echo unknown)); %{_localstatedir}/log/maknae is left root-owned" >&2
+    exit 1
 fi
 chown -h _maknae:_maknae %{_localstatedir}/log/maknae
 
 %preun
 %systemd_preun maknaed.service maknae-egress.service maknae-egress.socket
 if [ $1 -eq 0 ]; then
-    # Full removal only: clear the file append-only with the directory root-held,
-    # then unload the SELinux module.
-    AUDIT=%{_localstatedir}/log/maknae/audit.jsonl
-    chown root:root %{_localstatedir}/log/maknae 2>/dev/null || :
-    if [ -f "$AUDIT" ] && [ ! -h "$AUDIT" ] && [ "$(stat -c %%h "$AUDIT")" = 1 ]; then
-        chattr -a "$AUDIT" 2>/dev/null || :
-    elif [ -e "$AUDIT" ] || [ -h "$AUDIT" ]; then
-        echo "maknae: $AUDIT is not a regular, single-link file; append-only not cleared" >&2
-    fi
+    # Full removal only. The audit trail and its append-only attribute are kept.
     semodule -r maknae 2>/dev/null || :
     # NOTE: the operator's Vault port label is intentionally NOT auto-removed here
     # (%preun cannot know the port; a default-8200 removal would orphan/clobber).
@@ -195,7 +186,6 @@ fi
 %dir %attr(0755,root,root) %{_sysconfdir}/pki/maknae
 %dir %attr(0700,_maknae,_maknae) %{_localstatedir}/log/maknae
 %dir %attr(0700,_maknae,_maknae) %{_localstatedir}/lib/maknae
-%ghost %attr(0640,_maknae,_maknae) %{_localstatedir}/log/maknae/audit.jsonl
 
 %changelog
 * Mon Aug 17 2026 Alex Ackerman <developer@maknae.io> - 0.1.0-1

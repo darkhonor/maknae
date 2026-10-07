@@ -951,23 +951,98 @@ If the intent itself cannot be appended, nothing is loaded and no outcome is wri
 
 ## The audit trail
 
-The trail is `/var/log/maknae/audit.jsonl`, `_maknae:_maknae 0640` in a `0700 _maknae` directory. On Linux the file carries the append-only attribute (`chattr +a`), set by the package on every install and upgrade: writes only append, and truncating, unlinking or opening the file without `O_APPEND` is refused, root included. On Debian the attribute is the trail's only append-only control, because AppArmor cannot express append; on the Red Hat family SELinux enforces it as well. Check it with `lsattr /var/log/maknae/audit.jsonl`, which shows `a`. On macOS the file carries `uappnd` (`ls -lO`).
+The trail is `/var/log/maknae/audit.jsonl`, `_maknae:_maknae 0640` in a `0700 _maknae` directory. On Linux the file carries the append-only attribute (`chattr +a`), set by the package on every install and upgrade: writes only append, and truncating, unlinking or opening the file for writing without `O_APPEND` is refused, root included. On Debian the attribute is the trail's only append-only control, because AppArmor cannot express append; on the Red Hat family SELinux enforces it as well. Check it with `lsattr /var/log/maknae/audit.jsonl`, which shows `a`. On macOS the file carries `uappnd` (`ls -lO`).
 
 ### Rotate, restore or recreate the trail
 
-The daemon holds the file open, so stop it first. Clear the attribute, act, then set it again:
+While the attribute is clear, nothing else keeps the trail append-only on Debian, so stop the daemon first: it holds the file open. Root then holds the directory, so the daemon account cannot swap `audit.jsonl` for a link to another file while root acts on it. The archived copy stays in `/var/log/maknae`, owned by root and append-only, so neither the daemon account nor a rotation can rewrite or remove it.
+
+On Linux:
 
 ```bash
 sudo systemctl stop maknaed.service
-sudo chattr -a /var/log/maknae/audit.jsonl
-sudo mv /var/log/maknae/audit.jsonl /var/log/maknae/audit.jsonl.$(date -u +%Y%m%dT%H%M%SZ)   # or restore a copy
-sudo install -m 0640 -o _maknae -g _maknae /dev/null /var/log/maknae/audit.jsonl
-sudo restorecon -v /var/log/maknae/audit.jsonl   # Red Hat family only
-sudo chattr +a /var/log/maknae/audit.jsonl
+sudo bash -eu <<'ROTATE'
+d=/var/log/maknae f=/var/log/maknae/audit.jsonl
+[ -d "$d" ] && [ ! -h "$d" ] || { echo "$d is not a directory" >&2; exit 1; }
+chown root:root "$d"
+if [ -h "$f" ] || [ ! -f "$f" ] || [ "$(stat -c %h "$f")" != 1 ]; then
+    echo "$f is not a regular, single-link file; $d is left root-owned" >&2; exit 1
+fi
+a="$f.$(date -u +%Y%m%dT%H%M%SZ)"
+chattr -a "$f"
+mv "$f" "$a"
+chown root:root "$a"
+chattr +a "$a"
+install -m 0640 -o _maknae -g _maknae /dev/null "$f"
+if command -v restorecon >/dev/null; then restorecon "$a" "$f"; fi
+chattr +a "$f"
+lsattr "$a" "$f"
+chown -h _maknae:_maknae "$d"
+ROTATE
 sudo systemctl start maknaed.service
 ```
 
-On macOS, stop and start the daemon with `launchctl`, and use `sudo chflags nouappnd` and `sudo chflags uappnd` in place of `chattr`. A recreated file loses any ACL granted to a log agent; re-apply it ([Granting the agent read access](../packaging/README.md#granting-the-agent-read-access)). A trail without a `graph.checkpoint` record starts with [`rollback-anchor-unavailable`](#rollback-anchor-unavailable).
+On macOS:
+
+```bash
+sudo launchctl bootout system/io.maknae.maknaed
+sudo bash -eu <<'ROTATE'
+d=/var/log/maknae f=/var/log/maknae/audit.jsonl
+[ -d "$d" ] && [ ! -L "$d" ] || { echo "$d is not a directory" >&2; exit 1; }
+chown 0:0 "$d"
+if [ -L "$f" ] || [ ! -f "$f" ] || [ "$(stat -f %l "$f")" != 1 ]; then
+    echo "$f is not a regular, single-link file; $d is left root-owned" >&2; exit 1
+fi
+a="$f.$(date -u +%Y%m%dT%H%M%SZ)"
+chflags nouappnd "$f"
+mv "$f" "$a"
+chown 0:0 "$a"
+chflags uappnd "$a"
+install -m 0640 -o _maknae -g _maknae /dev/null "$f"
+chflags uappnd "$f"
+ls -lO "$a" "$f"
+chown -h _maknae:_maknae "$d"
+ROTATE
+sudo launchctl bootstrap system /Library/LaunchDaemons/io.maknae.maknaed.plist
+```
+
+Every `lsattr` line shows `a`, and every `ls -lO` line shows `uappnd`. On macOS, `_maknae` owns the live file and can clear `uappnd` on it; it cannot clear the flag on the root-owned archive. To restore a copy instead of starting an empty trail, give the copy's path in place of `/dev/null`. If the block refuses or stops with an error, leave the daemon stopped and work through [The package refuses the audit trail](#the-package-refuses-the-audit-trail). A recreated file loses any ACL granted to a log agent; re-apply it ([Granting the agent read access](../packaging/README.md#granting-the-agent-read-access)). A trail without a `graph.checkpoint` record starts with [`rollback-anchor-unavailable`](#rollback-anchor-unavailable).
+
+### The package refuses the audit trail
+
+The Debian `postinst`, the RPM `%post` and the macOS `postinstall` act on `/var/log/maknae/audit.jsonl` as root. Before they act, they take the directory to `root:root`, and they refuse an entry that is not what the package created:
+
+```
+maknae: /var/log/maknae/audit.jsonl is not a regular, single-link _maknae:_maknae file; /var/log/maknae is left root-owned
+maknae: cannot set the append-only attribute on /var/log/maknae/audit.jsonl (filesystem: <type>); /var/log/maknae is left root-owned
+```
+
+(macOS prints `is not a regular, single-link file`.) The first message means the entry is a symbolic link, a directory or other non-regular file, a file with a second hard link, or a file owned by another account. A symbolic link or a second link is what a compromised daemon account would plant to make root act on another file, so treat it as a possible compromise until you know otherwise. The second message means the file system cannot hold the attribute. Either way the directory stays `root:root 0700`, so `maknaed` cannot open the trail and refuses to start. On Debian the package stays half-configured. On the Red Hat family, rpm reports the scriptlet failure but keeps the install. On macOS, the installer fails.
+
+Inspect the entry without following it, and keep the daemon stopped:
+
+```bash
+sudo ls -la /var/log/maknae
+sudo stat /var/log/maknae/audit.jsonl                               # stat does not follow a symlink
+sudo find / -xdev -samefile /var/log/maknae/audit.jsonl 2>/dev/null # every name of a multiply-linked file
+```
+
+To recover:
+
+1. Preserve what is there: `sudo cp -a /var/log/maknae /root/maknae-audit-evidence.$(date -u +%Y%m%dT%H%M%SZ)` (`cp -a` copies a link as a link).
+2. Move the entry aside. `mv` moves a link itself, never its target: `sudo mv /var/log/maknae/audit.jsonl /root/`. If the entry is your own trail with the wrong owner (for example a copy restored as root), and `stat` shows a regular file with one link, re-own it instead: `sudo chattr -a` (macOS: `chflags nouappnd`), then `sudo chown -h _maknae:_maknae`, on that path.
+3. For the attribute failure, put `/var/log/maknae` on a file system that supports `chattr +a` (ext4, xfs and btrfs do).
+4. Re-run the package's configuration: `sudo dpkg --configure maknae`, `sudo dnf reinstall maknae`, or the macOS installer again. It creates the file when it is absent, sets the attribute, verifies it and hands the directory back. Then start `maknaed`.
+
+### Remove a kept trail
+
+Removing the package keeps the trail, except a Debian `purge`. On Linux the files keep `+a`, so `rm` is refused until it is cleared. Remove them with the daemon gone and the directory root-held:
+
+```bash
+sudo chown root:root /var/log/maknae
+sudo find /var/log/maknae -xdev -mindepth 1 -maxdepth 1 -type f -links 1 -exec chattr -a {} +   # macOS: -exec chflags nouappnd {} +
+sudo rm -rf /var/log/maknae
+```
 
 ## The kernel graph store refuses to start
 

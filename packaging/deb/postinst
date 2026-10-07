@@ -64,7 +64,7 @@ case "$1" in
         # --- Audit sink pre-creation (§4.6 / §9.2) ------------------------------
         # The profile grants no create, so the file is pre-created. The inode's
         # append-only attribute is the trail's only append-only control here, so
-        # failing to set it fails configure. Never +a the directory (dpkg manages it).
+        # failing to set it fails configure.
         AUDIT=/var/log/maknae/audit.jsonl
         if [ ! -e "$AUDIT" ] && [ ! -h "$AUDIT" ]; then
             install -m 0640 -o _maknae -g _maknae /dev/null "$AUDIT"

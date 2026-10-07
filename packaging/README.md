@@ -213,14 +213,28 @@ This satisfies AU-9(2), which requires audit storage on a physically separate sy
 
 The audit directory is **`0700 _maknae:_maknae`** and the file is `0640 _maknae:_maknae`. **No group membership grants access** — no group can traverse a `0700` directory — and `maknae` is the *operator* group for the daemon's UDS, not a log-reader group. [`maknae.sysusers`](common/maknae.sysusers) forbids on-disk cross-membership between the two identities, so do **not** add your agent to `maknae`.
 
-The lockdown is deliberate. Grant your agent exactly what it needs, with a POSIX ACL. **The file is append-only (`chattr +a`), and the kernel refuses any write-xattr operation on an append-only inode** — `setfacl` returns `Operation not permitted`, and `CAP_LINUX_IMMUTABLE` does not bypass it. So the flag must be lifted for the duration of the grant:
+The lockdown is deliberate. Grant your agent exactly what it needs, with a POSIX ACL. **The file is append-only (`chattr +a`), and the kernel refuses any write-xattr operation on an append-only inode** — `setfacl` returns `Operation not permitted`, and `CAP_LINUX_IMMUTABLE` does not bypass it. So the flag must be lifted for the duration of the grant, and on Debian nothing else keeps the trail append-only while it is lifted. Stop `maknaed` first, so nothing holds the file open for writing while it is unprotected, and hold the directory as root, so the daemon account cannot swap `audit.jsonl` for a link to another file while root acts on it:
 
 ```bash
-sudo setfacl -m u:vector:x /var/log/maknae            # traverse the directory
-sudo chattr  -a /var/log/maknae/audit.jsonl           # +a blocks setfacl (EPERM)
-sudo setfacl -m u:vector:r /var/log/maknae/audit.jsonl
-sudo chattr  +a /var/log/maknae/audit.jsonl           # restore append-only NOW
+sudo systemctl stop maknaed.service
+sudo bash -eu <<'GRANT'
+d=/var/log/maknae f=/var/log/maknae/audit.jsonl agent=vector
+[ -d "$d" ] && [ ! -h "$d" ] || { echo "$d is not a directory" >&2; exit 1; }
+chown root:root "$d"
+if [ -h "$f" ] || [ ! -f "$f" ] || [ "$(stat -c %h "$f")" != 1 ]; then
+    echo "$f is not a regular, single-link file; $d is left root-owned" >&2; exit 1
+fi
+setfacl -P -m "u:$agent:x" "$d"
+chattr -a "$f"
+setfacl -P -m "u:$agent:r" "$f" || { chattr +a "$f"; exit 1; }
+chattr +a "$f"
+lsattr "$f"
+chown -h _maknae:_maknae "$d"
+GRANT
+sudo systemctl start maknaed.service
 ```
+
+`setfacl -P` never follows a symbolic link, and `lsattr` must show `a`. If the block refuses, the directory stays root-owned; do not start `maknaed` until you have worked through [The package refuses the audit trail](../docs/runbook.md#the-package-refuses-the-audit-trail).
 
 Substitute your agent's service user (`fluent-bit`, `promtail`, `splunk`, …). This grants read and nothing else: no write, no directory listing beyond traversal, and the `0700` default stays in place for everyone else.
 
@@ -240,7 +254,7 @@ That distinction is not pedantry — see the first bullet below.
   after upgrade : user:vector:--x   mask::---     -> test -r  READ DENIED
   ```
   So `getfacl` looks correct on a grant that no longer works. **Troubleshoot with `getfacl … | grep effective` and the `test -r` probe above** — never with "the entry is there, so DAC is fine."
-- **The ACL does not survive the file being recreated.** `audit.jsonl` is package-`%ghost` (created first-install only). A restore or manual rotation that recreates it drops the ACL — re-apply it with the same four commands.
+- **The ACL does not survive the file being recreated.** The package creates `audit.jsonl` only when it is absent. A restore or manual rotation that recreates it drops the ACL — re-apply it with the same procedure.
 - **On an SELinux host, DAC is necessary but not sufficient.** The sink is typed `maknae_audit_t` via `logging_log_file()` ([`maknae.te`](common/maknae.te)), i.e. a generic log-file type. A *confined* agent domain reads it only if its own policy calls `logging_read_generic_logs()`; an unconfined agent is unaffected. Check `ausearch -m AVC` **only after** `test -r` confirms DAC is granted.
 
 ### Agent configurations

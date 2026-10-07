@@ -64,3 +64,13 @@ token in the `0600` residual file on el9. Full flow proven on RHEL 10.
 
 See `packaging/README.md` for the full install guide, GPG verification, and the
 SELinux `bin_t` tool-domain honest limit.
+
+## Removal
+
+`rpm -e` / `dnf remove` stops and disables the units, unloads the SELinux module,
+and keeps the audit trail: `/var/log/maknae/audit.jsonl` is created by `%post`,
+not owned by the package, so erase leaves it in place with its append-only
+attribute. To remove a kept trail, see
+[Remove a kept trail](../../docs/runbook.md#remove-a-kept-trail): with `maknaed`
+gone, hold the directory as root, clear `+a` on its regular single-link files
+(`chattr -a`), then `rm -rf /var/log/maknae`.
