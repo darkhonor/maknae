@@ -1,6 +1,6 @@
 # ADR-0029: The kernel enforcement-state graph
 
-- **Status:** Accepted (maintainer-ruled 2026-10-07, issue #485). The decisions below are the maintainer's rulings. They are built in five slices, one pull request each: #487 (S1) builds only the `maknae-graph` crate and format v1, and is not wired into `maknaed`; encryption at rest, rollback anchoring and `maknaed --reseed` (#488), seeding and the PDP walking the graph (#489), the baseline layer and `admin.baseline.accept` (#490) and sync back (#491) are decided here and built there. Until a slice lands, the behaviour it describes does not exist. Mechanism details not stated here belong to those pull requests.
+- **Status:** Accepted (maintainer-ruled 2026-10-07, issue #485). The decisions below are the maintainer's rulings. They are built in five pull requests: #487 builds only the `maknae-graph` crate and format v1, and is not wired into `maknaed`; encryption at rest, rollback anchoring and `maknaed --reseed` (#488), seeding and the PDP walking the graph (#489), the baseline layer and `admin.baseline.accept` (#490) and sync back (#491) are decided here and built there. Until a slice lands, the behaviour it describes does not exist. Mechanism details not stated here belong to those pull requests. *(Corrected 2026-10-07, #489: this named #487 "S1", an internal label.)*
 - **Date:** 2026-10-07
 - **Deciders:** Alex Ackerman (maintainer)
 
