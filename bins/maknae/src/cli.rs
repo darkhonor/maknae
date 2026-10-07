@@ -671,8 +671,11 @@ pub(crate) fn write_request(
     Ok((request, maknae_proto::Bytes::new(content)))
 }
 
-fn kernel_graph_line(kg: Option<&maknae_proto::KernelGraphStatus>) -> Option<String> {
-    kg.map(|g| format!("kernel graph: revision {} ({})", g.revision, g.anchor))
+fn kernel_graph_line(revision: Option<u64>, anchor: Option<&str>) -> Option<String> {
+    match (revision, anchor) {
+        (Some(r), Some(a)) => Some(format!("kernel graph: revision {r} ({a})")),
+        _ => None,
+    }
 }
 
 /// Print the successful `payload` IFF its variant matches the requested `verb`
@@ -698,7 +701,9 @@ fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
             println!("listener              {}", s.listener);
             println!("authz_backend         {}", s.authz_backend);
             println!("classification_policy {}", s.classification_policy);
-            if let Some(line) = kernel_graph_line(s.kernel_graph.as_ref()) {
+            if let Some(line) =
+                kernel_graph_line(s.kernel_graph_revision, s.kernel_graph_anchor.as_deref())
+            {
                 println!("{line}");
             }
             Ok(())
@@ -1505,13 +1510,11 @@ mod tests {
 
     #[test]
     fn the_status_kernel_graph_line_is_printed_only_when_reported() {
-        assert_eq!(kernel_graph_line(None), None);
+        assert_eq!(kernel_graph_line(None, None), None);
+        assert_eq!(kernel_graph_line(Some(12), None), None);
+        assert_eq!(kernel_graph_line(None, Some("verified")), None);
         assert_eq!(
-            kernel_graph_line(Some(&maknae_proto::KernelGraphStatus {
-                revision: 12,
-                anchor: "verified".into(),
-            }))
-            .as_deref(),
+            kernel_graph_line(Some(12), Some("verified")).as_deref(),
             Some("kernel graph: revision 12 (verified)")
         );
     }

@@ -634,17 +634,14 @@ pub struct StatusView {
     /// build carries. An operator reading a ceiling refusal needs to know
     /// which ladder ranked it.
     pub classification_policy: String,
-    /// The kernel graph store as boot left it (#488). Absent from a daemon that
-    /// predates the store.
+    /// The kernel graph store's revision counter (#488). Absent from a daemon
+    /// that predates the store.
     #[serde(default)]
-    pub kernel_graph: Option<KernelGraphStatus>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct KernelGraphStatus {
-    pub revision: u64,
-    /// `seeded`, `reseeded`, `verified`, `advanced` or `rollback-anchor-unavailable`.
-    pub anchor: String,
+    pub kernel_graph_revision: Option<u64>,
+    /// The rollback-anchor state at boot: `seeded`, `reseeded`, `verified`,
+    /// `advanced` or `rollback-anchor-unavailable`.
+    #[serde(default)]
+    pub kernel_graph_anchor: Option<String>,
 }
 
 /// One role and the identities bound to it.
@@ -941,7 +938,7 @@ pub fn decode_response(b: &[u8]) -> Result<Response, ProtoCodecError> {
 
 #[cfg(test)]
 mod tests {
-    fn status(kernel_graph: Option<KernelGraphStatus>) -> Response {
+    fn status(kernel_graph: Option<(u64, String)>) -> Response {
         Response {
             protocol_version: PROTOCOL_VERSION,
             result: RespResult::Ok(Payload::Status(StatusView {
@@ -950,20 +947,15 @@ mod tests {
                 listener: "/run/maknae.sock".into(),
                 authz_backend: "b".into(),
                 classification_policy: "US".into(),
-                kernel_graph,
+                kernel_graph_revision: kernel_graph.as_ref().map(|k| k.0),
+                kernel_graph_anchor: kernel_graph.map(|k| k.1),
             })),
         }
     }
 
     #[test]
     fn a_status_round_trips_with_and_without_the_kernel_graph() {
-        for kg in [
-            None,
-            Some(KernelGraphStatus {
-                revision: 7,
-                anchor: "verified".into(),
-            }),
-        ] {
+        for kg in [None, Some((7, "verified".to_string()))] {
             let r = status(kg);
             assert_eq!(decode_response(&encode_response(&r).unwrap()).unwrap(), r);
         }
@@ -992,7 +984,8 @@ mod tests {
         )
         .unwrap();
         let view: StatusView = ciborium::from_reader(bytes.as_slice()).unwrap();
-        assert_eq!(view.kernel_graph, None);
+        assert_eq!(view.kernel_graph_revision, None);
+        assert_eq!(view.kernel_graph_anchor, None);
         assert_eq!(view.classification_policy, "US");
     }
 

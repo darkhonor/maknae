@@ -339,7 +339,7 @@ async fn drive_with<P>(
     // derived from the authorizer -- a literal here would make the assertion
     // tautological.
     classification_policy: Arc<String>,
-    kernel_graph: Arc<Option<maknae_proto::KernelGraphStatus>>,
+    kernel_graph: Arc<Option<maknae_kernel::KernelGraphStatus>>,
 ) -> Option<Vec<u8>>
 where
     P: maknae_security::Authorizer + Send + Sync + 'static,
@@ -1702,7 +1702,7 @@ async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
         Arc::new(Default::default()),
         nondefault_transport(),
         Arc::new(booted.classification_policy_name().to_string()),
-        Arc::new(Some(maknae_proto::KernelGraphStatus {
+        Arc::new(Some(maknae_kernel::KernelGraphStatus {
             revision: 41,
             anchor: "advanced".into(),
         })),
@@ -1723,13 +1723,8 @@ async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
             // same package whose CARGO_PKG_VERSION `run.rs` expands, so the
             // distinguishing assertion is free.
             assert_eq!(s.version, env!("CARGO_PKG_VERSION"));
-            assert_eq!(
-                s.kernel_graph,
-                Some(maknae_proto::KernelGraphStatus {
-                    revision: 41,
-                    anchor: "advanced".into(),
-                })
-            );
+            assert_eq!(s.kernel_graph_revision, Some(41));
+            assert_eq!(s.kernel_graph_anchor.as_deref(), Some("advanced"));
             // The VALUE, not merely non-empty: wiring `listener` to any other
             // non-empty config string -- the audit path, the plane socket --
             // passed the emptiness check.

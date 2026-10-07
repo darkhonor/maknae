@@ -410,7 +410,7 @@ pub async fn handle<S, E, P>(
     config_view: Arc<ConfigView>,
     authz_backend_name: Arc<String>,
     classification_policy_name: Arc<String>,
-    kernel_graph: Arc<Option<maknae_proto::KernelGraphStatus>>,
+    kernel_graph: Arc<Option<KernelGraphStatus>>,
     providers: Arc<Option<crate::provider_choice::ProviderAuthority>>,
     egress: Arc<dyn crate::egress::Egress>,
     authz_decide_timeout: Duration,
@@ -494,7 +494,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     // Captured ONCE at boot from the booted config (ADR-0022): the system
     // `core.handling.policy` selected, by name.
     classification_policy_name: Arc<String>,
-    kernel_graph: Arc<Option<maknae_proto::KernelGraphStatus>>,
+    kernel_graph: Arc<Option<KernelGraphStatus>>,
     providers: Arc<Option<crate::provider_choice::ProviderAuthority>>,
     // #172: the egress backend behind the seam. `Unavailable` in Cooky.
     egress: Arc<dyn crate::egress::Egress>,
@@ -1189,7 +1189,8 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                     // runs no operand code for this field.
                     authz_backend: (*authz_backend_name).clone(),
                     classification_policy: (*classification_policy_name).clone(),
-                    kernel_graph: (*kernel_graph).clone(),
+                    kernel_graph_revision: kernel_graph.as_ref().as_ref().map(|k| k.revision),
+                    kernel_graph_anchor: kernel_graph.as_ref().as_ref().map(|k| k.anchor.clone()),
                 }),
                 // LIVE, via the seam. `None` means the backend cannot
                 // enumerate, and that is reported as unavailable below --
@@ -2286,7 +2287,7 @@ pub async fn accept_loop<A, E, P>(
     config_view: Arc<ConfigView>,
     authz_backend_name: Arc<String>,
     classification_policy_name: Arc<String>,
-    kernel_graph: Arc<Option<maknae_proto::KernelGraphStatus>>,
+    kernel_graph: Arc<Option<KernelGraphStatus>>,
     providers: Arc<Option<crate::provider_choice::ProviderAuthority>>,
     egress: Arc<dyn crate::egress::Egress>,
 ) -> ServeOutcome
@@ -3089,7 +3090,14 @@ fn store_refusal(e: StoreError, state_dir: &Path) -> RunError {
     }
 }
 
-fn kernel_graph_status(report: &BootReport) -> maknae_proto::KernelGraphStatus {
+/// The kernel graph store as boot left it, reported by `admin.status` (#488).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KernelGraphStatus {
+    pub revision: u64,
+    pub anchor: String,
+}
+
+fn kernel_graph_status(report: &BootReport) -> KernelGraphStatus {
     let anchor = match report.outcome {
         BootOutcome::Seeded {
             authorized: true, ..
@@ -3099,7 +3107,7 @@ fn kernel_graph_status(report: &BootReport) -> maknae_proto::KernelGraphStatus {
         } => ANCHOR_SEEDED,
         BootOutcome::Loaded(state) => state.as_str(),
     };
-    maknae_proto::KernelGraphStatus {
+    KernelGraphStatus {
         revision: report.revision,
         anchor: anchor.to_string(),
     }
@@ -3117,7 +3125,7 @@ async fn boot_kernel_graph(
     key: Result<maknae_vault::GraphKey, maknae_vault::VaultError>,
     sink: &Arc<maknae_audit_append::AuditSink>,
     ctx: &BootCtx<'_>,
-) -> Result<(StateDir, maknae_proto::KernelGraphStatus), RunError> {
+) -> Result<(StateDir, KernelGraphStatus), RunError> {
     let key = key.map_err(|e| graph_refusal(GraphFailure::Key(e), state_dir))?;
     let dir = StateDir::open(state_dir, ctx.euid)
         .map_err(|e| graph_refusal(GraphFailure::Store(e), state_dir))?;
@@ -3708,7 +3716,7 @@ async fn serve_after_mint<B>(
     // Captured at boot, same discipline as `config_view` (see run_inner).
     authz_backend_name: Arc<String>,
     classification_policy_name: Arc<String>,
-    kernel_graph: Arc<Option<maknae_proto::KernelGraphStatus>>,
+    kernel_graph: Arc<Option<KernelGraphStatus>>,
     providers: Arc<Option<crate::provider_choice::ProviderAuthority>>,
     egress: Arc<dyn crate::egress::Egress>,
 ) -> Result<ServeOutcome, String>
@@ -4651,14 +4659,14 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
     fn boot_graph(
         fx: &GraphFixture,
         key: Result<maknae_vault::GraphKey, maknae_vault::VaultError>,
-    ) -> Result<maknae_proto::KernelGraphStatus, RunError> {
+    ) -> Result<KernelGraphStatus, RunError> {
         boot_graph_held(fx, key).map(|(_, status)| status)
     }
 
     fn boot_graph_held(
         fx: &GraphFixture,
         key: Result<maknae_vault::GraphKey, maknae_vault::VaultError>,
-    ) -> Result<(StateDir, maknae_proto::KernelGraphStatus), RunError> {
+    ) -> Result<(StateDir, KernelGraphStatus), RunError> {
         let seq = Seq::new();
         let au3_1 = serde_json::Value::Null;
         let ctx = BootCtx {
