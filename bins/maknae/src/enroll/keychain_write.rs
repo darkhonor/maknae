@@ -32,6 +32,34 @@ pub(crate) fn validate_item_content(plane: KeychainPlane, s: &str) -> Result<(),
         KeychainPlane::Egress => maknae_vault::seal_key_from_hex(s)
             .map(drop)
             .map_err(|_| EnrollError::SealKeyShape),
+        KeychainPlane::Graph => maknae_vault::graph_key_from_hex(s)
+            .map(drop)
+            .map_err(|_| EnrollError::GraphKeyShape),
+    }
+}
+
+/// The plane whose signing identifier `verify_release` pins for an item's
+/// trusted binary: the graph item is trusted to `maknaed`, `io.maknae.maknaed`.
+pub(crate) const fn verification_plane(item: KeychainPlane) -> KeychainPlane {
+    match item {
+        KeychainPlane::Graph => KeychainPlane::Daemon,
+        other => other,
+    }
+}
+
+/// `security find-generic-password` against the System keychain: exit 44 is the
+/// only absence; any other failure is an error, never "absent", so a broken
+/// lookup cannot lead enroll to create over an existing item.
+pub(crate) fn classify_find(code: Option<i32>, stdout: &str) -> Result<bool, String> {
+    match code {
+        Some(0) => match parse_keychain_line(stdout) {
+            Some(k) if k == SYSTEM_KEYCHAIN => Ok(true),
+            other => Err(format!(
+                "the item was found in {other:?}, not {SYSTEM_KEYCHAIN}"
+            )),
+        },
+        Some(44) => Ok(false),
+        other => Err(format!("find-generic-password exited {other:?}")),
     }
 }
 
@@ -146,6 +174,27 @@ pub(crate) async fn seal_secret_macos(
     binary: &'static str,
     team: &str,
 ) -> Result<(), EnrollError> {
+    validate_item_content(plane, secret)?;
+    let stderr = |o: &std::process::Output| String::from_utf8_lossy(&o.stderr).trim().to_string();
+    let del = run(SECURITY, &delete_args(plane)).await?;
+    if !matches!(del.status.code(), Some(0) | Some(44)) {
+        return Err(EnrollError::Keychain {
+            op: "delete",
+            detail: stderr(&del),
+        });
+    }
+    add_secret_macos(secret, plane, binary, team).await
+}
+
+/// Adds the item without deleting a previous one: `add-generic-password`
+/// without `-U` fails on an existing item rather than replacing it.
+#[cfg(target_os = "macos")]
+pub(crate) async fn add_secret_macos(
+    secret: &str,
+    plane: KeychainPlane,
+    binary: &'static str,
+    team: &str,
+) -> Result<(), EnrollError> {
     use tokio::io::AsyncWriteExt;
     validate_item_content(plane, secret)?;
     let stderr = |o: &std::process::Output| String::from_utf8_lossy(&o.stderr).trim().to_string();
@@ -154,16 +203,8 @@ pub(crate) async fn seal_secret_macos(
         detail: e.to_string(),
     };
 
-    let del = run(SECURITY, &delete_args(plane)).await?;
-    if !matches!(del.status.code(), Some(0) | Some(44)) {
-        return Err(EnrollError::Keychain {
-            op: "delete",
-            detail: stderr(&del),
-        });
-    }
-
     check_install_path(std::path::Path::new(binary))?;
-    verify_release(binary, plane, team).await?;
+    verify_release(binary, verification_plane(plane), team).await?;
     let mut child = tokio::process::Command::new(SECURITY)
         .arg("-i")
         .kill_on_drop(true)
@@ -222,6 +263,13 @@ pub(crate) async fn item_in_system_keychain(plane: KeychainPlane) -> Result<bool
     let find = run(SECURITY, &find_args(plane)).await?;
     Ok(find.status.success()
         && parse_keychain_line(&String::from_utf8_lossy(&find.stdout)) == Some(SYSTEM_KEYCHAIN))
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) async fn item_presence(plane: KeychainPlane) -> Result<bool, EnrollError> {
+    let find = run(SECURITY, &find_args(plane)).await?;
+    classify_find(find.status.code(), &String::from_utf8_lossy(&find.stdout))
+        .map_err(|detail| EnrollError::Keychain { op: "find", detail })
 }
 
 #[cfg(target_os = "macos")]
@@ -588,6 +636,80 @@ mod tests {
                 ),
                 "{bad:?}"
             );
+        }
+    }
+
+    #[test]
+    fn the_graph_item_is_verified_as_maknaed_and_stored_under_its_own_service() {
+        assert_eq!(
+            verification_plane(KeychainPlane::Graph),
+            KeychainPlane::Daemon
+        );
+        assert_eq!(
+            verification_plane(KeychainPlane::Graph).service(),
+            "io.maknae.maknaed"
+        );
+        assert_eq!(
+            verification_plane(KeychainPlane::Daemon),
+            KeychainPlane::Daemon
+        );
+        assert_eq!(
+            verification_plane(KeychainPlane::Egress),
+            KeychainPlane::Egress
+        );
+        let hex = "ab".repeat(32);
+        assert_eq!(
+            add_command(&hex, KeychainPlane::Graph, "/usr/local/bin/maknaed").as_str(),
+            format!("add-generic-password -a secret-id -s io.maknae.maknaed.graph -T /usr/local/bin/maknaed -w {hex} /Library/Keychains/System.keychain\n")
+        );
+        assert_eq!(
+            find_args(KeychainPlane::Graph),
+            [
+                "find-generic-password",
+                "-a",
+                "secret-id",
+                "-s",
+                "io.maknae.maknaed.graph",
+                "/Library/Keychains/System.keychain"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_graph_item_holds_64_lower_case_hex_digits() {
+        let hex = "0f".repeat(32);
+        assert!(validate_item_content(KeychainPlane::Graph, &hex).is_ok());
+        let upper = "0F".repeat(32);
+        let short = "0f".repeat(31);
+        let long = "0f".repeat(33);
+        for bad in [UUID, upper.as_str(), short.as_str(), long.as_str(), ""] {
+            assert!(
+                matches!(
+                    validate_item_content(KeychainPlane::Graph, bad),
+                    Err(EnrollError::GraphKeyShape)
+                ),
+                "{bad:?}"
+            );
+        }
+        assert!(matches!(
+            validate_item_content(KeychainPlane::Egress, &hex),
+            Ok(())
+        ));
+        assert!(matches!(
+            validate_item_content(KeychainPlane::Daemon, &hex),
+            Err(EnrollError::SecretIdShape)
+        ));
+    }
+
+    #[test]
+    fn only_exit_44_reads_as_an_absent_item() {
+        let system = "keychain: \"/Library/Keychains/System.keychain\"\nversion: 256\n";
+        assert_eq!(classify_find(Some(0), system), Ok(true));
+        assert_eq!(classify_find(Some(44), ""), Ok(false));
+        assert!(classify_find(Some(0), "keychain: \"/Users/op/login.keychain-db\"\n").is_err());
+        assert!(classify_find(Some(0), "").is_err());
+        for code in [Some(1), Some(45), Some(51), None] {
+            assert!(classify_find(code, system).is_err(), "{code:?}");
         }
     }
 }

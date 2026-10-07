@@ -539,6 +539,10 @@ path = "crates/maknae-vault/src/seal_key_io.rs"
 why = "#153: reads the Egress Daemon's seal private key from $CREDENTIALS_DIRECTORY (Linux) or from the System-keychain item the egress pointer names (macOS); the source choice, the length bound and the hex codec are T1 in secret_source.rs, and the pointer and account gate are keychain_policy.rs. The credential arm is unit-tested on every OS, the keychain arm up to the account gate on macOS; mutation-excluded like secret_io.rs"
 
 [[t3]]
+path = "crates/maknae-vault/src/graph_key_io.rs"
+why = "#488: reads the kernel graph key from $CREDENTIALS_DIRECTORY (Linux) or from the System-keychain item the graph pointer under <config_dir>/private names (macOS); the source choice, the 32-byte length and the hex codec are T1 in secret_source.rs, and the pointer and account gate are keychain_policy.rs. The credential arm is unit-tested on every OS, the keychain arm up to the account gate on macOS; mutation-excluded like seal_key_io.rs"
+
+[[t3]]
 path = "crates/maknae-seal/src/lib.rs"
 why = "module declarations and re-exports only"
 

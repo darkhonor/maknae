@@ -37,6 +37,10 @@ pub(crate) fn text(id: MsgId) -> &'static str {
         MsgId::EnrollSealKeyKept => {
             "Egress Daemon의 기존 봉인 키와 게시된 공개 키를 유지했어요. 교체하려면 --rotate-seal-key를 사용하세요"
         }
+        MsgId::EnrollGraphKeyCreated => "커널 그래프 키를 {path}에 만들었어요",
+        MsgId::EnrollGraphKeyKept => {
+            "{path}의 커널 그래프 키를 유지했어요. 새 키로는 기존 그래프 저장소를 읽을 수 없어서 이 키는 교체하지 않아요"
+        }
         MsgId::EnrollProvisioningCli => "CLI 설정을 기록하고 있어요",
         MsgId::EnrollPostureSummary => "등록이 완료됐어요. CLI 설정: {cli_dir}",
         MsgId::EnrollReloginNote => {

@@ -187,6 +187,7 @@ exclude_globs = [
   "crates/maknae-vault/src/vault_api.rs",
   "crates/maknae-vault/src/seal_pub_io.rs",
   "crates/maknae-vault/src/seal_key_io.rs",
+  "crates/maknae-vault/src/graph_key_io.rs",
   "crates/maknae-seal/src/error.rs",
   "crates/maknae-seal/src/glue.rs",
   "crates/maknae-seal/src/lib.rs",

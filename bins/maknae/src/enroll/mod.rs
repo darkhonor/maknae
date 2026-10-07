@@ -120,6 +120,8 @@ pub enum EnrollError {
     SecretIdShape,
     #[cfg(any(target_os = "macos", test))]
     SealKeyShape,
+    #[cfg(any(target_os = "macos", test))]
+    GraphKeyShape,
     /// A keychain operation (delete/add/verify) on a plane's System keychain
     /// item failed, or the add landed elsewhere.
     #[cfg(target_os = "macos")]
@@ -219,6 +221,11 @@ impl std::fmt::Display for EnrollError {
             EnrollError::SealKeyShape => write!(
                 f,
                 "the sealing key's hex form is not lower-case hex of a bounded PKCS#8 key — refusing to hand it to the keychain"
+            ),
+            #[cfg(any(target_os = "macos", test))]
+            EnrollError::GraphKeyShape => write!(
+                f,
+                "the kernel graph key's hex form is not 64 lower-case hex digits — refusing to hand it to the keychain"
             ),
             #[cfg(target_os = "macos")]
             EnrollError::Keychain { op, detail } => write!(f, "keychain {op} failed: {detail}"),
@@ -1316,6 +1323,127 @@ async fn place_seal_key(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GraphKeyAction {
+    Create,
+    Keep,
+}
+
+/// R-S2-2: the graph key is created only when absent and never rotated; a new
+/// key cannot open the existing graph store.
+fn graph_key_action(present: bool) -> GraphKeyAction {
+    if present {
+        GraphKeyAction::Keep
+    } else {
+        GraphKeyAction::Create
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn graph_key_present(_custody: &Path) -> Result<bool, EnrollError> {
+    keychain_write::item_presence(maknae_vault::KeychainPlane::Graph).await
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn graph_key_present(custody: &Path) -> Result<bool, EnrollError> {
+    let target = maknae_io::TargetRequired {
+        owner: Some(0),
+        mode_mask: Some(0o077),
+        nlink_exactly_one: true,
+        regular_file: true,
+        max_bytes: Some(MAX_SEALED_CRED_BYTES),
+    };
+    match maknae_io::read_absolute(custody, target, maknae_io::StrategyPref::Auto) {
+        Ok(_) => Ok(true),
+        Err(maknae_io::IoError::Io {
+            kind: maknae_io::IoKind::NotFound,
+            ..
+        }) => Ok(false),
+        Err(e) => Err(EnrollError::Io {
+            path: custody.to_path_buf(),
+            source: format!(
+                "{e}; the kernel graph key is present but unusable, and enroll does not replace it"
+            ),
+        }),
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn store_graph_key(
+    key: maknae_vault::GraphKey,
+    _custody: &artifact_table::Artifact,
+    _verbose: bool,
+    _resolver: &artifact_write::RealOwnerResolver,
+    release_team: &str,
+) -> Result<(), EnrollError> {
+    keychain_write::add_secret_macos(
+        maknae_vault::seal_key_to_hex(&key.into_bytes()[..]).expose(),
+        maknae_vault::KeychainPlane::Graph,
+        keychain_write::DAEMON_BINARY,
+        release_team,
+    )
+    .await
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn store_graph_key(
+    key: maknae_vault::GraphKey,
+    custody: &artifact_table::Artifact,
+    verbose: bool,
+    resolver: &artifact_write::RealOwnerResolver,
+) -> Result<(), EnrollError> {
+    seal_linux(
+        &key.into_bytes()[..],
+        &custody.path,
+        maknae_vault::GRAPH_KEY_CRED_NAME,
+        verbose,
+    )
+    .await?;
+    artifact_write::apply_ownership_and_mode(custody, resolver)
+}
+
+async fn place_graph_key(
+    args: &EnrollArgs,
+    locale: Locale,
+    table: &[artifact_table::Artifact],
+    resolver: &artifact_write::RealOwnerResolver,
+    #[cfg(target_os = "macos")] release_team: &str,
+) -> Result<(), EnrollError> {
+    let custody = table
+        .iter()
+        .find(|a| a.content == artifact_table::ContentKind::SealedGraphKey)
+        .expect("artifact_table always emits exactly one SealedGraphKey row");
+    let path = custody.path.display().to_string();
+    match graph_key_action(graph_key_present(&custody.path).await?) {
+        GraphKeyAction::Create => {
+            store_graph_key(
+                maknae_vault::GraphKey::generate()?,
+                custody,
+                args.verbose,
+                resolver,
+                #[cfg(target_os = "macos")]
+                release_team,
+            )
+            .await?;
+            println!(
+                "{}",
+                msg(locale, MsgId::EnrollGraphKeyCreated).replace("{path}", &path)
+            );
+        }
+        GraphKeyAction::Keep => println!(
+            "{}",
+            msg(locale, MsgId::EnrollGraphKeyKept).replace("{path}", &path)
+        ),
+    }
+    #[cfg(target_os = "macos")]
+    artifact_write::write_file(
+        custody,
+        maknae_vault::pointer_document(maknae_vault::KeychainPlane::Graph).as_bytes(),
+        resolver,
+    )?;
+    Ok(())
+}
+
 // ============================================================================
 // Group membership (spec §4.1 step 6) — hand-rolled (no dep on the privileged
 // `maknae-kernel` crate's `groupres.rs`; this crate stays strictly
@@ -2069,6 +2197,7 @@ async fn finish_enrollment(
         .filter(|a| {
             a.content != artifact_table::ContentKind::SealedDaemonSecret
                 && a.content != artifact_table::ContentKind::SealedEgressSealKey
+                && a.content != artifact_table::ContentKind::SealedGraphKey
                 && !a.path.starts_with(cli_dir)
         })
         .cloned()
@@ -2111,6 +2240,16 @@ async fn finish_enrollment(
         locale,
         &table,
         seal_home,
+        &resolver,
+        #[cfg(target_os = "macos")]
+        release_team,
+    )
+    .await?;
+
+    place_graph_key(
+        args,
+        locale,
+        &table,
         &resolver,
         #[cfg(target_os = "macos")]
         release_team,
@@ -2258,6 +2397,20 @@ mod tests {
             args.iter().any(|a| a == "--name=maknae-egress-seal-key"),
             "{args:?}"
         );
+        let (_, args) = seal_argv(
+            maknae_vault::GRAPH_KEY_CRED_NAME,
+            "/etc/maknae/private/maknaed-graph-key.cred",
+        );
+        assert_eq!(
+            args,
+            vec![
+                "encrypt",
+                "--with-key=tpm2",
+                "--name=maknaed-graph-key",
+                "-",
+                "/etc/maknae/private/maknaed-graph-key.cred"
+            ]
+        );
     }
 
     /// D3: the deputy reaches /etc/maknae by a USER ACL for its own account
@@ -2305,12 +2458,16 @@ mod tests {
 
     #[test]
     fn the_seal_names_are_the_names_the_shipped_units_load() {
-        fn loaded(unit: &str) -> (String, String) {
+        fn loaded(unit: &str) -> Vec<(String, String)> {
             unit.lines()
-                .find_map(|l| l.strip_prefix("LoadCredentialEncrypted="))
-                .and_then(|rest| rest.split_once(':'))
-                .map(|(name, path)| (name.to_string(), path.to_string()))
-                .expect("the unit carries a LoadCredentialEncrypted= line")
+                .filter_map(|l| l.trim().strip_prefix("LoadCredentialEncrypted="))
+                .map(|rest| {
+                    let (name, path) = rest
+                        .split_once(':')
+                        .expect("a LoadCredentialEncrypted= line is name:path");
+                    (name.to_string(), path.to_string())
+                })
+                .collect()
         }
         let row = |kind| {
             artifact_table::artifact_table(Path::new("/home/op/.maknae"), false, false)
@@ -2324,21 +2481,47 @@ mod tests {
         let maknaed = loaded(include_str!("../../../../packaging/common/maknaed.service"));
         assert_eq!(
             maknaed,
-            (
-                maknae_vault::DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME.to_string(),
-                row(artifact_table::ContentKind::SealedDaemonSecret)
-            )
+            vec![
+                (
+                    maknae_vault::DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME.to_string(),
+                    row(artifact_table::ContentKind::SealedDaemonSecret)
+                ),
+                (
+                    maknae_vault::GRAPH_KEY_CRED_NAME.to_string(),
+                    row(artifact_table::ContentKind::SealedGraphKey)
+                ),
+            ]
         );
         let egress = loaded(include_str!(
             "../../../../packaging/common/maknae-egress.service"
         ));
         assert_eq!(
             egress,
-            (
+            vec![(
                 maknae_vault::EGRESS_SEAL_KEY_CRED_NAME.to_string(),
                 row(artifact_table::ContentKind::SealedEgressSealKey)
-            )
+            )]
         );
+    }
+
+    #[test]
+    fn the_graph_key_is_created_only_when_absent() {
+        assert_eq!(graph_key_action(false), GraphKeyAction::Create);
+        assert_eq!(graph_key_action(true), GraphKeyAction::Keep);
+    }
+
+    #[test]
+    fn the_graph_key_is_placed_before_any_step_that_could_start_maknaed() {
+        let src = include_str!("mod.rs");
+        let body = &src[src.find("async fn finish_enrollment(").unwrap()..];
+        let graph = body.find("place_graph_key(").unwrap();
+        for later in [
+            "ensure_group_membership(",
+            "run_helper(",
+            "EnrollEnableDaemonHint",
+        ] {
+            assert!(graph < body.find(later).unwrap(), "{later}");
+        }
     }
 
     /// The mount refusal renders under its OWN identity, naming the flag —

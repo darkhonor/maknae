@@ -19,6 +19,7 @@ mod env;
 mod error;
 mod fips;
 mod fips_glue;
+mod graph_key_io;
 mod http;
 mod keychain;
 mod keychain_policy;
@@ -68,9 +69,11 @@ pub use digest::{sha256_hex, Sha256};
 pub use env::{scrub_with, NEVER_SCRUB_ENV, SCRUBBED_ENV};
 pub use error::VaultError;
 pub use fips_glue::{assert_fips_provider, install_default_crypto_provider};
+pub use graph_key_io::read_graph_key;
 pub use keychain_policy::{
-    daemon_keychain_pointer, gate, parse_pointer, pointer_document, read_gated, KeychainDelete,
-    KeychainItem, KeychainPlane, CLI_TOKEN_KEYCHAIN_ITEM, KEYCHAIN_ACCOUNT, SYSTEM_KEYCHAIN,
+    daemon_keychain_pointer, gate, graph_keychain_pointer, parse_pointer, pointer_document,
+    read_gated, KeychainDelete, KeychainItem, KeychainPlane, CLI_TOKEN_KEYCHAIN_ITEM,
+    KEYCHAIN_ACCOUNT, SYSTEM_KEYCHAIN,
 };
 pub use operator::OperatorClient;
 pub use password_line::{PasswordFeed, PasswordLine};
@@ -85,10 +88,12 @@ pub use seal_pub_store::{
     choose_present, linux_home_from_os_release, seal_pub_path, SealPubHome, MAX_SEAL_PUB_BYTES,
 };
 pub use secret_source::{
-    credentials_directory_env, resolve_daemon_secret_source, resolve_egress_seal_key_source,
+    credentials_directory_env, graph_key_from_bytes, graph_key_from_hex,
+    resolve_daemon_secret_source, resolve_egress_seal_key_source, resolve_graph_key_source,
     seal_key_from_hex, seal_key_to_hex, CredentialSourceKind, DaemonSecretSource,
-    EgressSealKeySource, SealKeyDer, SealKeyHex, DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME,
-    EGRESS_SEAL_KEY_CRED_NAME, MAX_SEAL_KEY_BYTES,
+    EgressSealKeySource, GraphKey, GraphKeySource, SealKeyDer, SealKeyHex,
+    DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME, EGRESS_SEAL_KEY_CRED_NAME, GRAPH_KEY_BYTES,
+    GRAPH_KEY_CRED_NAME, MAX_SEAL_KEY_BYTES,
 };
 #[cfg(unix)]
 pub use socket::bind_listener as bind_group_gated_uds;
@@ -162,9 +167,19 @@ fn read_storage_within(
         };
         maknae_io::read_absolute(path, target, maknae_io::StrategyPref::Auto)
             .map(|out| out.value)
-            .map_err(|error| VaultError::Io {
-                path: path.to_path_buf(),
-                source: std::io::Error::other(error.to_string()),
+            .map_err(|error| {
+                let kind = match error {
+                    maknae_io::IoError::Io {
+                        kind: maknae_io::IoKind::NotFound,
+                        ..
+                    } => std::io::ErrorKind::NotFound,
+                    maknae_io::IoError::TargetTooLarge { .. } => std::io::ErrorKind::FileTooLarge,
+                    _ => std::io::ErrorKind::Other,
+                };
+                VaultError::Io {
+                    path: path.to_path_buf(),
+                    source: std::io::Error::new(kind, error.to_string()),
+                }
             })
     }
 }

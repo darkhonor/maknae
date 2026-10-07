@@ -53,6 +53,10 @@ pub enum MsgId {
     EnrollSealKeyGenerated,
     /// The existing Egress Daemon sealing key and `seal.pub` were kept.
     EnrollSealKeyKept,
+    /// The kernel graph key was absent and enroll created it. Carries `{path}`.
+    EnrollGraphKeyCreated,
+    /// The kernel graph key was present and kept (never rotated). Carries `{path}`.
+    EnrollGraphKeyKept,
     /// Re-exec'd operator-context CLI provisioning (spec §4.1 step 7).
     EnrollProvisioningCli,
     /// The final posture summary. Carries a `{cli_dir}` placeholder.
@@ -108,6 +112,8 @@ pub const ALL: &[MsgId] = &[
     MsgId::EnrollSealingDaemonCredential,
     MsgId::EnrollSealKeyGenerated,
     MsgId::EnrollSealKeyKept,
+    MsgId::EnrollGraphKeyCreated,
+    MsgId::EnrollGraphKeyKept,
     MsgId::EnrollProvisioningCli,
     MsgId::EnrollPostureSummary,
     MsgId::EnrollReloginNote,
@@ -278,6 +284,8 @@ mod tests {
                 | MsgId::EnrollSealingDaemonCredential
                 | MsgId::EnrollSealKeyGenerated
                 | MsgId::EnrollSealKeyKept
+                | MsgId::EnrollGraphKeyCreated
+                | MsgId::EnrollGraphKeyKept
                 | MsgId::EnrollProvisioningCli
                 | MsgId::EnrollPostureSummary
                 | MsgId::EnrollReloginNote
@@ -293,7 +301,7 @@ mod tests {
                 | MsgId::HelperStillPrivileged => {}
             }
         }
-        const VARIANT_COUNT: usize = 32;
+        const VARIANT_COUNT: usize = 34;
         assert_eq!(ALL.len(), VARIANT_COUNT);
         for &id in ALL {
             assert_covered(id);
