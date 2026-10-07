@@ -8,7 +8,7 @@
 //! file is mutation-gated on its native platform (corrected 2026-09-06, #126).
 
 use crate::error::IoError;
-use nix::fcntl::{AtFlags, OFlag};
+use nix::fcntl::{AtFlags, Flock, FlockArg, OFlag};
 use nix::sys::stat::{FileStat, Mode as NixMode};
 use std::os::fd::{AsFd, OwnedFd};
 use std::path::Path;
@@ -262,6 +262,15 @@ fn macos_full_path_error(e: std::io::Error) -> nix::Result<nix::Result<std::path
         Some(raw) => Err(nix::errno::Errno::from_raw(raw)),
         None => Ok(Err(nix::errno::Errno::EIO)),
     }
+}
+
+/// `try_clone_to_owned` is `F_DUPFD_CLOEXEC`, so the lock's descriptor is never inherited.
+pub(crate) fn lock_exclusive_nonblock<F: AsFd>(fd: &F) -> nix::Result<Flock<OwnedFd>> {
+    let dup = fd
+        .as_fd()
+        .try_clone_to_owned()
+        .map_err(|e| nix::errno::Errno::from_raw(e.raw_os_error().unwrap_or(nix::libc::EIO)))?;
+    Flock::lock(dup, FlockArg::LockExclusiveNonblock).map_err(|(_, e)| e)
 }
 
 pub(crate) fn stat_path(path: &Path) -> nix::Result<FileStat> {

@@ -403,7 +403,7 @@ pub(crate) fn decide_loaded_with_role(
             // Case-2 testimony: ROLE-REACH OUTRANKS BUILD-STATE (#181 D4).
             // A non-admin's trail reads its own operational fact -- its reach
             // -- never the roadmap, which is admin-visible only; the wire is
-            // the same generic Unauthorized either way (ruling R1).
+            // the same generic Unauthorized either way.
             _ => Verdict::NotApplicable {
                 note: Some(no_rule_note(role.key(), &req.action.0)),
             },

@@ -143,6 +143,16 @@ exclude_re = [
   "maknae-audit-append.*SyslogMirror::mirror with \\(\\)",
   # Password::new refuses an empty password, so is_empty is always false and `false` is equivalent.
   "^crates/maknae-vault/src/user_login\\.rs:[0-9]+:[0-9]+: replace Password::is_empty -> bool with false$",
+  # #488: open() errors only on a version != ENVELOPE_VERSION, so an equal version never reaches this and `>=` is equivalent; `<`/`==` are killed by a_newer_envelope_version_is_a_newer_store / an_older_envelope_version_is_corruption.
+  "^crates/maknae-state/src/store\\.rs:[0-9]+:[0-9]+: replace > with >= in newer_envelope$",
+  # #488: decode() errors only on a format version != FORMAT_VERSION, so `>=` is equivalent; held by a_newer_graph_format_version_is_a_newer_store / an_older_graph_format_version_is_a_format_error.
+  "^crates/maknae-state/src/store\\.rs:[0-9]+:[0-9]+: replace > with >= in newer_format$",
+  # #488: decode() errors only on found != expected schema version, so `>=` is equivalent; held by a_newer_schema_version_is_a_newer_store / an_older_schema_version_is_a_format_error.
+  "^crates/maknae-state/src/store\\.rs:[0-9]+:[0-9]+: replace > with >= in newer_schema$",
+  # #488: open() errors only on a cipher id != AEAD_AES_256_GCM, so an equal id never reaches this and `>=` is equivalent; held by a_newer_cipher_or_wrap_id_is_a_newer_store / a_zero_cipher_or_wrap_id_is_corruption.
+  "^crates/maknae-state/src/store\\.rs:[0-9]+:[0-9]+: replace > with >= in newer_aead$",
+  # #488: open() errors only on a wrap id != WRAP_AES_256_GCM, so `>=` is equivalent; held by the same two tests.
+  "^crates/maknae-state/src/store\\.rs:[0-9]+:[0-9]+: replace > with >= in newer_wrap$",
 ]
 
 exclude_globs = [
@@ -187,6 +197,7 @@ exclude_globs = [
   "crates/maknae-vault/src/vault_api.rs",
   "crates/maknae-vault/src/seal_pub_io.rs",
   "crates/maknae-vault/src/seal_key_io.rs",
+  "crates/maknae-vault/src/graph_key_io.rs",
   "crates/maknae-seal/src/error.rs",
   "crates/maknae-seal/src/glue.rs",
   "crates/maknae-seal/src/lib.rs",

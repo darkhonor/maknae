@@ -2,10 +2,13 @@
 # Remove a macOS Maknae install. macOS has no native pkg uninstall, so this ships as
 # part of the product.
 #
-# RETAINS /var/log/maknae and /etc/maknae. The audit trail is not the installer's to
+# RETAINS /var/log/maknae, /etc/maknae and the kernel graph store
+# (/usr/local/var/db/maknae/state). The audit trail is not the installer's to
 # destroy — an uninstall that erases it erases the evidence of everything that ran.
-# The enrollment is NOT reusable: its System-keychain items and its published seal.pub
-# are deleted, so a reinstall needs `sudo maknae enroll`.
+# The enrollment is NOT reusable: the plane System-keychain items and the published
+# seal.pub are deleted, so a reinstall needs `sudo maknae enroll`. The graph key's
+# item (io.maknae.maknaed.graph) is RETAINED with the store: without it the store
+# cannot be decrypted, and enroll never replaces an existing graph key.
 set -euo pipefail
 [ "$(id -u)" -eq 0 ] || { echo "must run as root (sudo)" >&2; exit 1; }
 
@@ -127,6 +130,7 @@ done
 chflags nouappnd /var/log/maknae/audit.jsonl 2>/dev/null || :
 
 echo "RETAINED: /var/log/maknae and /etc/maknae; remove by hand for a full teardown."
+echo "RETAINED: the kernel graph state at /usr/local/var/db/maknae/state and its key, System-keychain item io.maknae.maknaed.graph; remove both by hand for a full teardown."
 [ "$ace_left" = false ] || echo "FAILED: /etc/maknae still carries, or could not be read back for, the deputy's ACE or an orphaned user:<UUID> ACE" >&2
 [ -z "$kc_left" ] || echo "FAILED: System-keychain item(s) remain:$kc_left" >&2
 [ "$seal_left" = false ] || echo "FAILED: $SEAL_PUB_DIR/seal.pub remains" >&2

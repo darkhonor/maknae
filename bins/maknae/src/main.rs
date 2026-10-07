@@ -6,6 +6,7 @@ mod cli;
 mod enroll;
 mod login;
 mod mutation;
+mod reseed;
 mod tty;
 
 use std::process::ExitCode;

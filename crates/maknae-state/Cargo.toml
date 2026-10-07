@@ -1,0 +1,30 @@
+[package]
+name = "maknae-state"
+publish.workspace = true
+description = "The kernel graph store at rest: envelope encryption, rollback anchoring, boot recovery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+aws-lc-rs = { version = "1.18", features = ["fips"] }  # 1.18: the AWS-LC-FIPS 4.x line; one aws-lc-rs in the tree (ADR-0025); AES-256-GCM envelope
+zeroize = "1"
+serde_json = "1"
+maknae-config = { path = "../maknae-config" }
+maknae-graph = { path = "../maknae-graph" }
+maknae-io = { path = "../maknae-io" }
+
+[features]
+# Exports StateDir::open_with_marker_owner for tests ONLY: an unprivileged test plays
+# the marker's owner. Never enabled by a production consumer.
+hermetic-test-seam = []
+
+[dev-dependencies]
+maknae-state = { path = ".", features = ["hermetic-test-seam"] }
+tokio = { workspace = true, features = ["macros", "rt"] }
+tempfile = "3"

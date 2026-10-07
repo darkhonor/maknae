@@ -143,6 +143,9 @@ pub enum VaultError {
         detail: String,
     },
     SealKey(&'static str),
+    GraphKey(&'static str),
+    GraphKeyAbsent(String),
+    Random,
 }
 
 impl std::fmt::Display for VaultError {
@@ -274,6 +277,12 @@ impl std::fmt::Display for VaultError {
                 f,
                 "the Egress Daemon seal key is malformed ({why}): run `sudo maknae enroll --rotate-seal-key`"
             ),
+            VaultError::GraphKey(why) => write!(f, "the kernel graph key is malformed ({why})"),
+            VaultError::Random => write!(f, "the FIPS random generator failed"),
+            VaultError::GraphKeyAbsent(detail) => write!(
+                f,
+                "no kernel graph key ({detail}): run `sudo maknae enroll`"
+            ),
         }
     }
 }
@@ -365,6 +374,9 @@ mod tests {
                 detail: "not UTF-8".into(),
             },
             VaultError::SealKey("empty or over 512 bytes"),
+            VaultError::GraphKey("not exactly 32 bytes"),
+            VaultError::GraphKeyAbsent("no credential".into()),
+            VaultError::Random,
         ];
         for e in cases {
             assert!(!format!("{e}").is_empty());

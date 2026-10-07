@@ -51,8 +51,8 @@ pub use provider_choice::{
     admit_choice, provider_authority, AdmittedChoice, ChoiceRefusal, ProviderAuthority,
 };
 pub use run::{
-    accept_loop, handle, handle_with_attempt_caps, run, ConfigView, Conn, PlaneAccept, WhereCtx,
-    MAX_SUBJECT_USER_BYTES,
+    accept_loop, handle, handle_with_attempt_caps, run, ConfigView, Conn, KernelGraphStatus,
+    PlaneAccept, WhereCtx, MAX_SUBJECT_USER_BYTES,
 };
 
 #[used]

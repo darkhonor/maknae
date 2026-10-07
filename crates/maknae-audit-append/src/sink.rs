@@ -26,8 +26,10 @@ use crate::syslog_io::SyslogMirror as Mirror;
 #[cfg(target_os = "macos")]
 const DEFAULT_JOURNAL_SOCKET: &str = "";
 use crate::record::{canonical_json, AuditRecord};
+use crate::scan::{self, ScanResult};
 use std::fs::File;
 use std::io::Write;
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -230,6 +232,22 @@ impl AuditSink {
         joined?
     }
 
+    /// Scan the primary file backward for the newest line `find` accepts.
+    /// Holds the writer mutex throughout, so no append interleaves with the
+    /// scan. Blocking with no size cap: callers run it off the async runtime.
+    pub fn scan_back(&self, find: impl FnMut(&[u8]) -> bool) -> Result<ScanResult, AuditError> {
+        let guard = self.primary.lock().map_err(|_| {
+            AuditError::ReadPrimary("audit writer panicked; primary sink requires recovery".into())
+        })?;
+        let len = guard
+            .file
+            .metadata()
+            .map_err(|e| AuditError::ReadPrimary(e.to_string()))?
+            .len();
+        scan::scan_back(len, |off, buf| guard.file.read_at(buf, off), find)
+            .map_err(|e| AuditError::ReadPrimary(e.to_string()))
+    }
+
     /// Best-effort journald mirror (ADR-0019 D3).
     ///
     /// **Called on every outcome path after canonicalization, including
@@ -386,6 +404,7 @@ mod tests {
             mutation: None,
             egress: None,
             conversation: None,
+            graph: None,
             outcome: Outcome {
                 result: "permit".into(),
                 reason: "group membership: maknae-ops".into(),
@@ -1490,5 +1509,171 @@ mod tests {
             MACOS_SYSLOG_MAX,
             "the delivered byte length must equal what was submitted"
         );
+    }
+
+    fn scan_record(action: &str, seq: u64, pad: usize) -> AuditRecord {
+        let mut rec = sample_record();
+        rec.action = action.into();
+        rec.seq = seq;
+        rec.au3_1 = serde_json::json!({ "pad": "x".repeat(pad) });
+        rec
+    }
+
+    fn line_len(rec: &AuditRecord) -> usize {
+        canonical_json(rec).unwrap().len() + 1
+    }
+
+    fn quiet_sink(dir: &Path) -> AuditSink {
+        AuditSink::open_with_journal(
+            &cfg_at(dir),
+            Path::new("/nonexistent/maknae-test-no-journal.sock"),
+        )
+        .unwrap()
+    }
+
+    fn action_is(action: &'static str) -> impl FnMut(&[u8]) -> bool {
+        move |line| {
+            serde_json::from_slice::<AuditRecord>(line)
+                .map(|r| r.action == action)
+                .unwrap_or(false)
+        }
+    }
+
+    #[tokio::test]
+    async fn scan_back_finds_the_newest_matching_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = quiet_sink(dir.path());
+        for (seq, action) in [(1, "a"), (2, "graph.checkpoint"), (3, "b")] {
+            sink.append(&scan_record(action, seq, 0)).await.unwrap();
+        }
+        let len = std::fs::metadata(dir.path().join("audit.jsonl"))
+            .unwrap()
+            .len();
+
+        let hit = sink.scan_back(action_is("graph.checkpoint")).unwrap();
+        let rec: AuditRecord = serde_json::from_slice(&hit.line.unwrap()).unwrap();
+        assert_eq!(rec.seq, 2);
+        assert_eq!(hit.scanned_bytes, len);
+
+        let hit = sink.scan_back(action_is("a")).unwrap();
+        let rec: AuditRecord = serde_json::from_slice(&hit.line.unwrap()).unwrap();
+        assert_eq!(rec.seq, 1);
+    }
+
+    #[tokio::test]
+    async fn of_two_adjacent_checkpoints_the_newer_is_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = quiet_sink(dir.path());
+        for (seq, action) in [
+            (1, "a"),
+            (2, "b"),
+            (3, "graph.checkpoint"),
+            (4, "graph.checkpoint"),
+        ] {
+            sink.append(&scan_record(action, seq, 0)).await.unwrap();
+        }
+        let hit = sink.scan_back(action_is("graph.checkpoint")).unwrap();
+        let rec: AuditRecord = serde_json::from_slice(&hit.line.unwrap()).unwrap();
+        assert_eq!(rec.seq, 4);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_found_across_window_boundaries() {
+        const MIB: usize = 1 << 20;
+        let dir = tempfile::tempdir().unwrap();
+        let sink = quiet_sink(dir.path());
+        sink.append(&scan_record("graph.checkpoint", 1, 0))
+            .await
+            .unwrap();
+        let mut seq = 2;
+        let mut written = line_len(&scan_record("graph.checkpoint", 1, 0));
+        for _ in 0..40 {
+            let rec = scan_record("filler", seq, 64 * 1024);
+            written += line_len(&rec);
+            sink.append(&rec).await.unwrap();
+            seq += 1;
+        }
+        assert!(written > 2 * MIB + MIB / 2);
+        let target = scan_record("graph.checkpoint", seq, 4096);
+        let target_len = line_len(&target);
+        let target_start = written;
+        sink.append(&target).await.unwrap();
+        seq += 1;
+
+        let tail_len = MIB - target_len / 2;
+        let base = line_len(&scan_record("filler", seq, 0));
+        let tail = scan_record("filler", seq, tail_len - base);
+        assert_eq!(line_len(&tail), tail_len);
+        sink.append(&tail).await.unwrap();
+
+        let len = std::fs::metadata(dir.path().join("audit.jsonl"))
+            .unwrap()
+            .len() as usize;
+        assert_eq!(len, target_start + target_len + tail_len);
+        let boundary = len - MIB;
+        assert!(target_start < boundary && boundary < target_start + target_len - 1);
+
+        let hit = sink.scan_back(action_is("graph.checkpoint")).unwrap();
+        let rec: AuditRecord = serde_json::from_slice(&hit.line.unwrap()).unwrap();
+        assert_eq!(rec.seq, seq - 1);
+        assert!(hit.scanned_bytes >= (len - target_start) as u64);
+        assert_eq!(hit.scanned_bytes, 2 * MIB as u64);
+    }
+
+    #[tokio::test]
+    async fn scan_back_with_no_match_reads_everything() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = quiet_sink(dir.path());
+        for seq in 1..=3 {
+            sink.append(&scan_record("a", seq, 0)).await.unwrap();
+        }
+        let len = std::fs::metadata(dir.path().join("audit.jsonl"))
+            .unwrap()
+            .len();
+        let mut offered = 0;
+        let miss = sink
+            .scan_back(|_| {
+                offered += 1;
+                false
+            })
+            .unwrap();
+        assert_eq!(miss.line, None);
+        assert_eq!(miss.scanned_bytes, len);
+        assert_eq!(offered, 3);
+    }
+
+    #[test]
+    fn scan_back_on_an_empty_trail_reads_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = quiet_sink(dir.path());
+        let miss = sink.scan_back(|_| true).unwrap();
+        assert_eq!(
+            miss,
+            ScanResult {
+                line: None,
+                scanned_bytes: 0
+            }
+        );
+    }
+
+    #[test]
+    fn graph_block_is_omitted_when_absent_and_round_trips_when_present() {
+        let rec = sample_record();
+        assert!(rec.graph.is_none());
+        let s = canonical_json(&rec).unwrap();
+        assert!(!s.contains("\"graph\""), "{s}");
+
+        let mut rec = sample_record();
+        let block = crate::record::GraphAudit {
+            revision: 7,
+            ciphertext_sha256: "ab".repeat(32),
+            anchor: "verified".into(),
+            scanned_bytes: 4096,
+        };
+        rec.graph = Some(block.clone());
+        let s = canonical_json(&rec).unwrap();
+        assert!(s.contains("\"graph\":{"), "{s}");
+        let back: AuditRecord = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.graph, Some(block));
     }
 }

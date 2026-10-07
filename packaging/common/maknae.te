@@ -72,6 +72,9 @@ type maknae_audit_t;
 logging_log_file(maknae_audit_t)
 type maknae_runtime_t;
 files_pid_file(maknae_runtime_t)
+# #488: the kernel graph store (/var/lib/maknae).
+type maknae_state_t;
+files_type(maknae_state_t)
 
 # Operator-labeled Vault port (namespaced — HashiCorp Vault ships no SELinux
 # type; a bare vault_port_t would collide with any future community policy).
@@ -166,6 +169,7 @@ allow maknae_egress_t self:unix_stream_socket { create accept listen getattr get
 # never touches a user home.
 neverallow maknae_egress_t maknae_audit_t:file { read write open };
 neverallow maknae_egress_t maknae_secret_t:file { read open };
+neverallow maknae_egress_t maknae_state_t:{ dir file } *;
 allow maknaed_t maknae_private_t:dir { open read search getattr };
 allow maknaed_t maknae_private_t:file { read open getattr };
 
@@ -224,6 +228,10 @@ allow init_t maknae_secret_t:file { read open getattr };
 # is single-writer and may flock.
 allow maknaed_t maknae_audit_t:dir { open read search getattr };
 allow maknaed_t maknae_audit_t:file { read append open getattr lock };
+
+files_search_var_lib(maknaed_t)
+allow maknaed_t maknae_state_t:dir { search getattr read open write add_name remove_name lock };
+allow maknaed_t maknae_state_t:file { create read write open getattr rename unlink setattr };
 
 # UDS bind + chgrp in /run/maknae.
 # el10's systemd 257 labels the RuntimeDirectory=maknae dir `maknae_runtime_t`

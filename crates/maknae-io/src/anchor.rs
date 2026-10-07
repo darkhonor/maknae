@@ -124,6 +124,12 @@ pub struct Anchor {
     probed: Strategy,
 }
 
+/// An [`Anchor::try_lock_exclusive`] lock; dropping it releases the lock.
+#[derive(Debug)]
+pub struct AnchorLock {
+    _held: nix::fcntl::Flock<OwnedFd>,
+}
+
 /// Read a descriptor the caller has already resolved, under its named requirements.
 ///
 /// Extracted from `Anchor::finish_read` so the anchored path and the ADR-0009
@@ -248,6 +254,20 @@ impl Anchor {
     /// content I hold satisfies the stricter requirement" must re-read it
     /// under that requirement and compare, as `maknae-config`'s
     /// `verify_root_source` does.
+    /// An exclusive `flock` on the pinned directory, held until the returned guard
+    /// drops. It is per open file description: a second [`open_anchor`] of the same
+    /// directory, in this process or another, is refused [`IoError::Locked`].
+    pub fn try_lock_exclusive(&self) -> Result<AnchorLock, IoError> {
+        syscall::lock_exclusive_nonblock(&self.fd)
+            .map(|held| AnchorLock { _held: held })
+            .map_err(|e| match e {
+                nix::errno::Errno::EWOULDBLOCK => IoError::Locked {
+                    path: self.path.clone(),
+                },
+                e => crate::checks::map_errno_no_disambiguation(e, &self.path),
+            })
+    }
+
     pub fn require(&self, req: &AnchorRequired) -> Result<(), IoError> {
         let st = syscall::fstat(&self.fd)
             .map_err(|e| crate::checks::map_errno_no_disambiguation(e, &self.path))?;
@@ -2974,5 +2994,25 @@ mod tests {
             .append(Path::new("sub/.."), None, t_append(), b"y", m(0o640))
             .unwrap_err();
         assert_eq!(e, IoError::EmptyRemainder);
+    }
+
+    #[test]
+    fn a_second_lock_on_the_same_directory_is_refused_until_the_first_drops() {
+        let d = dir(0o750);
+        let first = open_anchor(d.path(), none_req(), StrategyPref::Auto).unwrap();
+        let second = open_anchor(d.path(), none_req(), StrategyPref::Auto).unwrap();
+        let held = first
+            .try_lock_exclusive()
+            .expect("an unheld directory locks");
+        assert_eq!(
+            second.try_lock_exclusive().unwrap_err(),
+            IoError::Locked {
+                path: d.path().to_path_buf()
+            }
+        );
+        drop(held);
+        second
+            .try_lock_exclusive()
+            .expect("the lock is free once its guard drops");
     }
 }

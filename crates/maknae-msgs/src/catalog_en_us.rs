@@ -34,6 +34,13 @@ pub(crate) fn text(id: MsgId) -> &'static str {
         MsgId::EnrollSealKeyKept => {
             "Kept the Egress Daemon's sealing key and its published public key; pass --rotate-seal-key to replace them"
         }
+        MsgId::EnrollGraphKeyCreated => "Created the kernel graph key at {path}",
+        MsgId::EnrollGraphKeyKept => {
+            "Kept the kernel graph key at {path}; it is never rotated, because a new key cannot read the existing graph store"
+        }
+        MsgId::EnrollGraphStoreExists => {
+            "a kernel graph store already exists and cannot be opened with the new key; run sudo maknae reseed"
+        }
         MsgId::EnrollProvisioningCli => "Writing your CLI configuration",
         MsgId::EnrollPostureSummary => "Enrollment complete. CLI config: {cli_dir}",
         MsgId::EnrollReloginNote => {

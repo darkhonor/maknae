@@ -161,6 +161,10 @@ pub enum IoError {
     AccessBearingDescriptor {
         path: PathBuf,
     },
+    /// Another open of this directory holds its exclusive lock.
+    Locked {
+        path: PathBuf,
+    },
 }
 
 impl std::fmt::Display for IoError {
@@ -247,6 +251,7 @@ impl std::fmt::Display for IoError {
                     path.display()
                 )
             }
+            Self::Locked { path } => write!(f, "locked by another holder: {}", path.display()),
         }
     }
 }
@@ -331,6 +336,10 @@ mod tests {
             }
             .to_string(),
             "escapes the anchor: ../x"
+        );
+        assert_eq!(
+            IoError::Locked { path: p.clone() }.to_string(),
+            "locked by another holder: /etc/maknae/cfg"
         );
         // Mode renders OCTAL — a decimal here would misreport permissions to an operator.
         assert_eq!(

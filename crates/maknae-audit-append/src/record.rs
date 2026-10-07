@@ -279,6 +279,14 @@ pub struct MutationAudit {
     pub stopped_at: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphAudit {
+    pub revision: u64,
+    pub ciphertext_sha256: String,
+    pub anchor: String,
+    pub scanned_bytes: u64,
+}
+
 /// The full AU-3/AU-3(1)-complete audit record (ADR-0019 Decision 1).
 ///
 /// `where_` carries `#[serde(rename = "where")]`: `where` is a Rust keyword
@@ -324,6 +332,8 @@ pub struct AuditRecord {
     /// client-supplied, informational.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph: Option<GraphAudit>,
     pub outcome: Outcome,
     pub session_id: u64,
     pub seq: u64,
@@ -420,6 +430,7 @@ mod tests {
             mutation: None,
             egress: None,
             conversation: None,
+            graph: None,
             outcome: Outcome {
                 result: "permit".into(),
                 reason: "group membership: maknae-ops".into(),
@@ -738,6 +749,7 @@ mod tests {
                 mutation: None,
                 egress: None,
                 conversation: None,
+                graph: None,
                 outcome: Outcome {
                     result: "deny".into(),
                     reason: "r".into(),

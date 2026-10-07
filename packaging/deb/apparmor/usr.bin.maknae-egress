@@ -80,6 +80,7 @@ profile maknae-egress /usr/bin/maknae-egress {
   deny @{HOME}/** rwklx,
   deny /home/** rwklx,
   deny /var/log/maknae/** rwklx,
+  deny /var/lib/maknae/** rwklx,
   deny /etc/maknae/private/** rwklx,
   deny /etc/maknae/authz.yaml rwklx,
 }

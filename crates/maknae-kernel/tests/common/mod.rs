@@ -494,6 +494,7 @@ impl Fixture {
             Arc::new(Default::default()),
             Arc::new("basic+ceiling".into()),
             Arc::new("US".into()),
+            std::sync::Arc::new(None),
             Arc::new(authority(provider)),
             egress,
             Duration::from_secs(2),

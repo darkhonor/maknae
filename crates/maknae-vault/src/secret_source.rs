@@ -16,6 +16,10 @@ pub const DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME: &str = "maknaed-secret-id";
 
 pub const EGRESS_SEAL_KEY_CRED_NAME: &str = "maknae-egress-seal-key";
 pub const MAX_SEAL_KEY_BYTES: usize = 512;
+pub const GRAPH_KEY_CRED_NAME: &str = "maknaed-graph-key";
+pub const GRAPH_KEY_BYTES: usize = 32;
+pub(crate) const GRAPH_KEY_LENGTH: &str = "not exactly 32 bytes";
+const GRAPH_KEY_NOT_HEX: &str = "not 64 lower-case hexadecimal characters";
 const SEAL_KEY_LENGTH: &str = "empty or over 512 bytes";
 const SEAL_KEY_NOT_HEX: &str = "not lower-case hexadecimal of even length";
 
@@ -125,6 +129,92 @@ pub fn resolve_egress_seal_key_source(
                 .to_string(),
         )),
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GraphKeySource {
+    CredentialsDirectory(PathBuf),
+    Keychain(PathBuf),
+}
+
+pub fn resolve_graph_key_source(
+    credentials_dir_env: Option<&str>,
+    keychain_pointer: Option<&Path>,
+) -> Result<GraphKeySource, VaultError> {
+    match (credentials_dir_env, keychain_pointer) {
+        (Some(""), _) => Err(VaultError::CredentialSource(
+            "$CREDENTIALS_DIRECTORY is exported but empty — refusing rather than falling through"
+                .to_string(),
+        )),
+        (Some(dir), _) => Ok(GraphKeySource::CredentialsDirectory(
+            Path::new(dir).join(GRAPH_KEY_CRED_NAME),
+        )),
+        (None, Some(p)) => Ok(GraphKeySource::Keychain(p.to_path_buf())),
+        (None, None) => Err(VaultError::GraphKeyAbsent(
+            "$CREDENTIALS_DIRECTORY is unset and no keychain pointer is enrolled".to_string(),
+        )),
+    }
+}
+
+pub struct GraphKey(Zeroizing<[u8; GRAPH_KEY_BYTES]>);
+
+impl GraphKey {
+    pub fn generate() -> Result<Self, VaultError> {
+        use aws_lc_rs::rand::{SecureRandom, SystemRandom};
+        let mut key = Zeroizing::new([0u8; GRAPH_KEY_BYTES]);
+        SystemRandom::new()
+            .fill(&mut key[..])
+            .map_err(|_| VaultError::Random)?;
+        Ok(GraphKey(key))
+    }
+
+    pub fn into_bytes(self) -> Zeroizing<[u8; GRAPH_KEY_BYTES]> {
+        self.0
+    }
+}
+
+impl fmt::Debug for GraphKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("GraphKey(<redacted>)")
+    }
+}
+
+pub fn graph_key_from_bytes(bytes: &[u8]) -> Result<GraphKey, VaultError> {
+    if bytes.len() != GRAPH_KEY_BYTES {
+        return Err(VaultError::GraphKey(GRAPH_KEY_LENGTH));
+    }
+    let mut key = Zeroizing::new([0u8; GRAPH_KEY_BYTES]);
+    key.copy_from_slice(bytes);
+    Ok(GraphKey(key))
+}
+
+pub(crate) fn graph_key_from_credential(
+    path: &Path,
+    read: Result<Zeroizing<Vec<u8>>, VaultError>,
+) -> Result<GraphKey, VaultError> {
+    match read {
+        Ok(bytes) => graph_key_from_bytes(&bytes),
+        Err(VaultError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => Err(
+            VaultError::GraphKeyAbsent(format!("{} does not exist", path.display())),
+        ),
+        Err(VaultError::Io { source, .. }) if source.kind() == std::io::ErrorKind::FileTooLarge => {
+            Err(VaultError::GraphKey(GRAPH_KEY_LENGTH))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+pub fn graph_key_from_hex(text: &str) -> Result<GraphKey, VaultError> {
+    let hex = text.as_bytes();
+    if hex.len() != 2 * GRAPH_KEY_BYTES {
+        return Err(VaultError::GraphKey(GRAPH_KEY_NOT_HEX));
+    }
+    let mut key = Zeroizing::new([0u8; GRAPH_KEY_BYTES]);
+    for (out, [hi, lo]) in key.iter_mut().zip(hex.as_chunks::<2>().0) {
+        let digit = |c| nibble(c).map_err(|_| VaultError::GraphKey(GRAPH_KEY_NOT_HEX));
+        *out = digit(*hi)? * 16 + digit(*lo)?;
+    }
+    Ok(GraphKey(key))
 }
 
 pub(crate) fn check_seal_key_len(n: usize) -> Result<(), VaultError> {
@@ -447,5 +537,153 @@ mod tests {
             }
         }
         assert_eq!(hex.expose(), "deadbeef");
+    }
+
+    #[test]
+    fn the_graph_key_comes_from_its_own_credential_then_the_keychain() {
+        let ptr = Path::new("/etc/maknae/private/maknaed-graph-key.keychain");
+        assert_eq!(
+            resolve_graph_key_source(Some("/run/credentials/maknaed.service"), Some(ptr)).unwrap(),
+            GraphKeySource::CredentialsDirectory(PathBuf::from(
+                "/run/credentials/maknaed.service/maknaed-graph-key"
+            ))
+        );
+        assert_eq!(
+            resolve_graph_key_source(None, Some(ptr)).unwrap(),
+            GraphKeySource::Keychain(ptr.to_path_buf())
+        );
+        assert!(matches!(
+            resolve_graph_key_source(None, None),
+            Err(VaultError::GraphKeyAbsent(_))
+        ));
+        assert!(resolve_graph_key_source(None, None)
+            .unwrap_err()
+            .to_string()
+            .ends_with("run `sudo maknae enroll`"));
+        assert!(matches!(
+            resolve_graph_key_source(Some(""), Some(ptr)),
+            Err(VaultError::CredentialSource(m)) if m.contains("exported but empty")
+        ));
+        assert_eq!(GRAPH_KEY_CRED_NAME, "maknaed-graph-key");
+        assert_eq!(GRAPH_KEY_BYTES, 32);
+    }
+
+    #[test]
+    fn a_graph_key_is_exactly_32_bytes() {
+        let bytes: Vec<u8> = (0u8..32).collect();
+        assert_eq!(
+            *graph_key_from_bytes(&bytes).unwrap().into_bytes(),
+            *<&[u8; 32]>::try_from(bytes.as_slice()).unwrap()
+        );
+        for n in [0, 31, 33, 64] {
+            assert!(
+                matches!(
+                    graph_key_from_bytes(&vec![7; n]),
+                    Err(VaultError::GraphKey("not exactly 32 bytes"))
+                ),
+                "{n}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_graph_key_credential_read_is_classified_absent_malformed_or_refused() {
+        let path = Path::new("/run/credentials/maknaed.service/maknaed-graph-key");
+        let io = |kind: std::io::ErrorKind| {
+            Err(VaultError::Io {
+                path: path.to_path_buf(),
+                source: std::io::Error::from(kind),
+            })
+        };
+        let key: Vec<u8> = (1u8..=32).collect();
+        assert_eq!(
+            *graph_key_from_credential(path, Ok(Zeroizing::new(key.clone())))
+                .unwrap()
+                .into_bytes(),
+            key[..]
+        );
+        assert!(matches!(
+            graph_key_from_credential(path, Ok(Zeroizing::new(vec![1; 31]))),
+            Err(VaultError::GraphKey(GRAPH_KEY_LENGTH))
+        ));
+        match graph_key_from_credential(path, io(std::io::ErrorKind::NotFound)) {
+            Err(VaultError::GraphKeyAbsent(detail)) => assert_eq!(
+                detail,
+                "/run/credentials/maknaed.service/maknaed-graph-key does not exist"
+            ),
+            other => panic!("expected GraphKeyAbsent, got {other:?}"),
+        }
+        assert!(matches!(
+            graph_key_from_credential(path, io(std::io::ErrorKind::FileTooLarge)),
+            Err(VaultError::GraphKey(GRAPH_KEY_LENGTH))
+        ));
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::IsADirectory,
+            std::io::ErrorKind::Other,
+        ] {
+            match graph_key_from_credential(path, io(kind)) {
+                Err(VaultError::Io { source, .. }) => assert_eq!(source.kind(), kind),
+                other => panic!("expected Io for {kind:?}, got {other:?}"),
+            }
+        }
+        assert!(matches!(
+            graph_key_from_credential(path, Err(VaultError::Random)),
+            Err(VaultError::Random)
+        ));
+    }
+
+    #[test]
+    fn the_graph_key_hex_is_64_lower_case_digits() {
+        let hex = format!("000fa5ff{}", "19".repeat(28));
+        let mut want = [0x19u8; 32];
+        want[..4].copy_from_slice(&[0x00, 0x0f, 0xa5, 0xff]);
+        assert_eq!(*graph_key_from_hex(&hex).unwrap().into_bytes(), want);
+        let enrolled = seal_key_to_hex(&want);
+        assert_eq!(
+            *graph_key_from_hex(enrolled.expose()).unwrap().into_bytes(),
+            want
+        );
+        let upper = hex.to_uppercase();
+        let short = "ab".repeat(31);
+        let long = "ab".repeat(33);
+        let odd = format!("{}a", "ab".repeat(31));
+        let spaced = format!("{} ", "ab".repeat(31));
+        let not_hex = format!("{}zz", "ab".repeat(31));
+        for bad in [
+            "",
+            upper.as_str(),
+            short.as_str(),
+            long.as_str(),
+            odd.as_str(),
+            spaced.as_str(),
+            not_hex.as_str(),
+        ] {
+            assert!(
+                matches!(
+                    graph_key_from_hex(bad),
+                    Err(VaultError::GraphKey(
+                        "not 64 lower-case hexadecimal characters"
+                    ))
+                ),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn two_generated_graph_keys_differ_and_are_32_bytes() {
+        let a = GraphKey::generate().unwrap().into_bytes();
+        let b = GraphKey::generate().unwrap().into_bytes();
+        assert_ne!(*a, *b);
+        assert_ne!(*a, [0u8; GRAPH_KEY_BYTES]);
+    }
+
+    #[test]
+    fn the_graph_key_prints_nothing_of_the_key() {
+        let key = graph_key_from_bytes(&[0xde; 32]).unwrap();
+        let shown = format!("{key:?}");
+        assert_eq!(shown, "GraphKey(<redacted>)");
+        assert!(!shown.contains("222") && !shown.contains("de"), "{shown}");
     }
 }

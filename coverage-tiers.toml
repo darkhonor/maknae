@@ -212,6 +212,9 @@ files = [
   # Pure; the syslog(3) call lives in syslog_io.rs, tiered separately.
   "crates/maknae-audit-append/src/syslog_fmt.rs",
   "crates/maknae-audit-append/src/session.rs",
+  # #488: the backward rollback-anchor scan. A lost carry-over at a window
+  # boundary skips the newest checkpoint and anchors boot to an older one.
+  "crates/maknae-audit-append/src/scan.rs",
   "crates/maknae-kernel/src/authz.rs",
   "crates/maknae-kernel/src/handler.rs",
   "crates/maknae-kernel/src/provider_choice.rs",
@@ -271,6 +274,10 @@ files = [
   "crates/maknae-graph/src/graph.rs",
   "crates/maknae-graph/src/record.rs",
   "crates/maknae-graph/src/schema.rs",
+  # The kernel graph store at rest (#488): a wrong check loads a forged, rolled-back or undecryptable enforcement state.
+  "crates/maknae-state/src/anchor.rs",
+  "crates/maknae-state/src/envelope.rs",
+  "crates/maknae-state/src/store.rs",
 ]
 # maknae-security request.rs/authorizer.rs and maknae-config value.rs are pure
 # declarations (no executable production regions) → T3, not T1. The mutation set
@@ -279,14 +286,14 @@ files = [
 # critical crates whose fail-closed behavior must be provable to external
 # third parties. Zero missed mutants required.
 # It also carries the loop's decision code (maknae-agent), whose false-assurance surface is T1.
-mutants_crates = ["maknae-security", "maknae-config", "maknae-io", "maknae-kernel", "maknae-vault", "maknae-proto", "maknae-audit-append", "maknae-msgs", "maknae-authz-basic", "maknae-classification-aus", "maknae-llm", "maknae-agent", "maknae-deputy", "maknae-sys", "maknae-seal", "maknae-graph"]
+mutants_crates = ["maknae-security", "maknae-config", "maknae-io", "maknae-kernel", "maknae-vault", "maknae-proto", "maknae-audit-append", "maknae-msgs", "maknae-authz-basic", "maknae-classification-aus", "maknae-llm", "maknae-agent", "maknae-deputy", "maknae-sys", "maknae-seal", "maknae-graph", "maknae-state"]
 # Crates whose mutation run needs a non-default feature so feature-gated seam
 # code is LIVE (mutants in cfg'd-out code are unkillable-MISSED — the
 # 2026-08-27 main-red class; #77 generalized the maknae-config special case).
 # Contract: every key MUST appear in mutants_crates; every value MUST be a
 # list of strings; an absent table is legal. Validated in coverage-tiers.sh's
 # prologue (BOTH lanes).
-mutants_features = { maknae-config = ["hermetic-test-seam"], maknae-authz-basic = ["hermetic-test-seam"] }
+mutants_features = { maknae-config = ["hermetic-test-seam"], maknae-authz-basic = ["hermetic-test-seam"], maknae-state = ["hermetic-test-seam"] }
 
 [t2]
 floor_production_region = 90
@@ -533,6 +540,10 @@ path = "crates/maknae-vault/src/seal_key_io.rs"
 why = "#153: reads the Egress Daemon's seal private key from $CREDENTIALS_DIRECTORY (Linux) or from the System-keychain item the egress pointer names (macOS); the source choice, the length bound and the hex codec are T1 in secret_source.rs, and the pointer and account gate are keychain_policy.rs. The credential arm is unit-tested on every OS, the keychain arm up to the account gate on macOS; mutation-excluded like secret_io.rs"
 
 [[t3]]
+path = "crates/maknae-vault/src/graph_key_io.rs"
+why = "#488: reads the kernel graph key from $CREDENTIALS_DIRECTORY (Linux) or from the System-keychain item the graph pointer under <config_dir>/private names (macOS); the source choice, the absent/malformed/I-O classification of the credential read (graph_key_from_credential), the 32-byte length and the hex codec are T1 in secret_source.rs, and the pointer and account gate are keychain_policy.rs. This file only performs the two reads; the credential arm is unit-tested on every OS, the keychain arm up to the account gate on macOS; mutation-excluded like seal_key_io.rs"
+
+[[t3]]
 path = "crates/maknae-seal/src/lib.rs"
 why = "module declarations and re-exports only"
 
@@ -605,7 +616,7 @@ why = "nix Group/User/getgrouplist resolution — syscall I/O, cross-platform; t
 
 [[t3]]
 path = "crates/maknae-kernel/src/run.rs"
-why = "run-loop orchestration (accept/read/audit/respond driver) + process entrypoint (boot: FIPS, config, audit sink, authz gate, posture record, mint, bind, serve) — I/O and control-flow; the mutation-gated decisions it consults live in handler.rs/authz.rs/boot_gate.rs/posture.rs (T1 — incl. READ_PAGE_MAX_BYTES) and maknae-proto (T1 — admits, FrameCaps::responses, read_frame_of_class, page_request_is_acceptable). Mutation-excluded (mutants.toml)"
+why = "run-loop orchestration (accept/read/audit/respond driver) + process entrypoint (boot: FIPS, config, audit sink, authz gate, kernel graph store, posture record, mint, bind, serve) — I/O and control-flow; the mutation-gated decisions it consults live in handler.rs/authz.rs/boot_gate.rs/posture.rs (T1 — incl. READ_PAGE_MAX_BYTES) and maknae-proto (T1 — admits, FrameCaps::responses, read_frame_of_class, page_request_is_acceptable); the graph store's boot decisions are maknae-state (T1), and the records and refusal hints built here are tested against a real sink and state directory. Mutation-excluded (mutants.toml)"
 
 [[t3]]
 path = "crates/maknae-vault/src/supervisor_run.rs"
@@ -636,7 +647,7 @@ why = "#153: maknae login/logout orchestration — terminal check, account name,
 # tests even though the tier is T3 — see each file's module doc.
 [[t3]]
 path = "bins/maknae/src/enroll/mod.rs"
-why = "orchestration (spec §4.1 step order, privilege-descent re-exec, rollback/rotate, the seal-key placement) + clap arg structs; the pure pieces (preflight_check, parse_host_port, check_vault_layout, the YAML content builders proven through the CLI loader and the bounds parser, ProvisionJob's round trip, the rotate filter against a real OperatorClient, seal_key_action, seal_pub_home, the Generate order GENERATE_STEPS, the restart line) and the maknae-io readers and the one remover (os-release fallback and its two-symlink refusal, seal.pub and custody presence, retract_seal_pub, each against a real file) carry real unit tests but the file is bin orchestration code, T3 per the tiering constraint"
+why = "orchestration (spec §4.1 step order, privilege-descent re-exec, rollback/rotate, the seal-key placement) + clap arg structs; the pure pieces (preflight_check, parse_host_port, check_vault_layout, the YAML content builders proven through the CLI loader and the bounds parser, ProvisionJob's round trip, the rotate filter against a real OperatorClient, seal_key_action, graph_key_action, graph_store_warning, seal_pub_home, the Generate order GENERATE_STEPS, the restart line) and the maknae-io readers and the one remover (os-release fallback and its two-symlink refusal, seal.pub and custody presence, retract_seal_pub, each against a real file) carry real unit tests but the file is bin orchestration code, T3 per the tiering constraint"
 
 [[t3]]
 path = "bins/maknae/src/enroll/artifact_table.rs"
@@ -655,8 +666,12 @@ path = "bins/maknae/src/enroll/helper.rs"
 why = "the operator-context helper — self-verification and the CLI configuration write; the id-G parser and the identity refusal carry real unit tests, the write runs through artifact_write's tested writer"
 
 [[t3]]
+path = "bins/maknae/src/reseed.rs"
+why = "#488: sudo maknae reseed — bin code, T3 per the tiering constraint. It writes one marker through maknae-io's anchored publish (T1 in maknae-io), refusing anything already at the marker path; the marker's authority is decided by the daemon in maknae-state store.rs (T1). The pieces carry real-file unit tests: the umask-077 mode in a child process, a planted symlink left untouched, a pending marker left as is, the root preflight and the directory requirement"
+
+[[t3]]
 path = "bins/maknae/src/enroll/keychain_write.rs"
-why = "#76: enroll's keychain write and release-build checks — the pure builders and parsers (SecretID shape, the per-plane content check that routes the egress item to maknae-vault's seal_key_from_hex, the stdin add command, delete/find argv, keychain-line parse, the codesign requirement strings and team pin, Hardened Runtime/entitlement/ad-hoc refusal, embedded-requirement equality) carry unit tests on every target; on macOS, darwin tests prove that check_install_path accepts a hard-linked file, maps a missing binary to NotInstalled, and maps a non-root-owned install path to NotRootInstalled (not NotInstalled). The runners that call codesign/security remain operator-verified, not unit-tested"
+why = "#76: enroll's keychain write and release-build checks — the pure builders and parsers (SecretID shape, the per-plane content check that routes the egress item to maknae-vault's seal_key_from_hex, verification_plane, classify_find, the stdin add command, delete/find argv, keychain-line parse, the codesign requirement strings and team pin, Hardened Runtime/entitlement/ad-hoc refusal, embedded-requirement equality) carry unit tests on every target; on macOS, darwin tests prove that check_install_path accepts a hard-linked file, maps a missing binary to NotInstalled, and maps a non-root-owned install path to NotRootInstalled (not NotInstalled). The runners that call codesign/security remain operator-verified, not unit-tested"
 
 # maknae-msgs (PR-J1 Task 1): declaration-only string-table match arms, no
 # decision logic (precedent: maknae-config value.rs). The locale-detect +
@@ -789,6 +804,14 @@ why = "crate rustdoc and re-exports only; no executable production regions, so a
 
 [[t3]]
 path = "crates/maknae-graph/src/lib.rs"
+why = "crate rustdoc and module declarations only; no executable production regions — same treatment as maknae-io/src/lib.rs"
+
+[[t3]]
+path = "crates/maknae-config/src/state.rs"
+why = "cfg-selected path constants only; no executable production regions — same treatment as value.rs"
+
+[[t3]]
+path = "crates/maknae-state/src/lib.rs"
 why = "crate rustdoc and module declarations only; no executable production regions — same treatment as maknae-io/src/lib.rs"
 
 [[t3]]

@@ -72,6 +72,9 @@ pub enum ContentKind {
     /// The Egress Daemon's sealing key: a `systemd-creds` credential on Linux,
     /// a System keychain pointer on macOS.
     SealedEgressSealKey,
+    /// The kernel graph key: a `systemd-creds` credential on Linux, a System
+    /// keychain pointer on macOS. Created when absent, never rotated.
+    SealedGraphKey,
     /// The host-wide `seal.pub` users seal to.
     SealPub,
     /// The root-owned accessor bookkeeping file (`enroll-state.yaml`) —
@@ -219,6 +222,21 @@ pub fn artifact_table(cli_dir: &Path, macos: bool, insecure_plaintext: bool) -> 
             ContentKind::SealedEgressSealKey,
         )
     });
+    rows.push(if macos {
+        row(
+            maknae_vault::graph_keychain_pointer(etc),
+            Owner::RootMaknaeGroup,
+            0o640,
+            ContentKind::SealedGraphKey,
+        )
+    } else {
+        row(
+            etc.join("private/maknaed-graph-key.cred"),
+            Owner::RootRoot,
+            0o400,
+            ContentKind::SealedGraphKey,
+        )
+    });
 
     rows.push(row(
         etc.join("private/posture.yaml"),
@@ -333,6 +351,7 @@ mod tests {
             PathBuf::from("/etc/maknae/private"),
             PathBuf::from("/etc/maknae/private/maknaed-secret-id.cred"),
             PathBuf::from("/etc/maknae/private/maknae-egress-seal-key.cred"),
+            PathBuf::from("/etc/maknae/private/maknaed-graph-key.cred"),
             PathBuf::from("/etc/maknae/private/posture.yaml"),
             PathBuf::from("/etc/maknae/private/enroll-state.yaml"),
             cli_dir.to_path_buf(),
@@ -358,6 +377,7 @@ mod tests {
             PathBuf::from("/etc/maknae/egress/vault-ca.crt"),
             PathBuf::from("/etc/maknae/private"),
             PathBuf::from("/etc/maknae/private/maknaed-secret-id.keychain"),
+            PathBuf::from("/etc/maknae/private/maknaed-graph-key.keychain"),
             PathBuf::from("/etc/maknae/private/posture.yaml"),
             PathBuf::from("/etc/maknae/private/enroll-state.yaml"),
             PathBuf::from("/etc/maknae/egress/maknae-egress-secret-id.keychain"),
@@ -383,7 +403,7 @@ mod tests {
         got_paths.sort();
         want_paths.sort();
         assert_eq!(got_paths, want_paths);
-        assert_eq!(got.len(), 21, "row count drifted");
+        assert_eq!(got.len(), 22, "row count drifted");
     }
 
     #[test]
@@ -395,7 +415,7 @@ mod tests {
         got_paths.sort();
         want_paths.sort();
         assert_eq!(got_paths, want_paths);
-        assert_eq!(got.len(), 21, "row count drifted");
+        assert_eq!(got.len(), 22, "row count drifted");
     }
 
     #[test]
@@ -709,6 +729,47 @@ mod tests {
                 0o640
             )
         );
+    }
+
+    #[test]
+    fn the_graph_key_custody_is_root_only_on_linux_and_a_daemon_group_pointer_on_macos() {
+        let linux = artifact_table(Path::new("/home/op/.maknae"), false, false);
+        let l = linux
+            .iter()
+            .find(|a| a.content == ContentKind::SealedGraphKey)
+            .unwrap();
+        assert_eq!(
+            (l.path.as_path(), l.owner, l.mode),
+            (
+                Path::new("/etc/maknae/private/maknaed-graph-key.cred"),
+                Owner::RootRoot,
+                0o400
+            )
+        );
+        let macos = artifact_table(Path::new("/Users/op/.maknae"), true, false);
+        let m = macos
+            .iter()
+            .find(|a| a.content == ContentKind::SealedGraphKey)
+            .unwrap();
+        assert_eq!(
+            (m.path.as_path(), m.owner, m.mode),
+            (
+                Path::new("/etc/maknae/private/maknaed-graph-key.keychain"),
+                Owner::RootMaknaeGroup,
+                0o640
+            )
+        );
+        for plaintext in [false, true] {
+            for macos in [false, true] {
+                let rows = artifact_table(Path::new("/home/op/.maknae"), macos, plaintext);
+                assert_eq!(
+                    rows.iter()
+                        .filter(|a| a.content == ContentKind::SealedGraphKey)
+                        .count(),
+                    1
+                );
+            }
+        }
     }
 
     #[test]

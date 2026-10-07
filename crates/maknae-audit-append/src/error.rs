@@ -11,6 +11,8 @@ pub enum AuditError {
     /// A write to the primary JSONL sink failed at runtime — the offending
     /// request must not be served (AU-5 fail-closed).
     WritePrimary(String),
+    /// The primary JSONL sink could not be read back (the rollback-anchor scan).
+    ReadPrimary(String),
     /// The record could not be canonicalized to JSON.
     Serialize(String),
 }
@@ -25,6 +27,9 @@ impl std::fmt::Display for AuditError {
             ),
             AuditError::WritePrimary(msg) => {
                 write!(f, "primary audit sink write failed: {msg} (failing closed)")
+            }
+            AuditError::ReadPrimary(msg) => {
+                write!(f, "primary audit sink read failed: {msg}")
             }
             AuditError::Serialize(msg) => {
                 write!(f, "audit record canonicalization failed: {msg}")
@@ -47,6 +52,7 @@ mod tests {
                 detail: "permission denied".into(),
             },
             AuditError::WritePrimary("disk full".into()),
+            AuditError::ReadPrimary("short read".into()),
             AuditError::Serialize("bad utf8".into()),
         ];
         for e in cases {

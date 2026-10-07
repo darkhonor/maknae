@@ -51,6 +51,10 @@ profile maknaed /usr/bin/maknaed {
   /var/log/maknae/audit.jsonl            rak,
   /var/log/maknae/**                     a,
 
+  # #488: the kernel graph store (StateDirectory=maknae).
+  /var/lib/maknae/                       rk,
+  /var/lib/maknae/**                     rwk,
+
   # Runtime UDS — the daemon binds its control socket in /run/maknae and needs
   # read+write there (RuntimeDirectory=maknae, §4.6). rw covers create/bind of
   # the 0660 _maknae:maknae socket file that gates operator access.

@@ -15,6 +15,7 @@ mod error;
 mod journal;
 mod journal_io;
 mod record;
+mod scan;
 mod session;
 mod sink;
 mod syslog_fmt;
@@ -23,10 +24,11 @@ mod syslog_io;
 pub use error::AuditError;
 pub use record::{
     canonical_json, AuditRecord, ByteRangeAudit, CategoryAudit, EgressAudit, EgressStatus,
-    Integrity, LabelAudit, LineSpanAudit, MutationAudit, MutationEffectKind, MutationEffectRecord,
-    MutationOperation, MutationOrigin, MutationPhase, MutationStatus, Outcome, PageAudit,
-    ProvenanceAudit, Source, Subject, TierAudit, Where, NO_PEER_UID,
+    GraphAudit, Integrity, LabelAudit, LineSpanAudit, MutationAudit, MutationEffectKind,
+    MutationEffectRecord, MutationOperation, MutationOrigin, MutationPhase, MutationStatus,
+    Outcome, PageAudit, ProvenanceAudit, Source, Subject, TierAudit, Where, NO_PEER_UID,
 };
+pub use scan::ScanResult;
 pub use session::{Seq, SessionIds};
 pub use sink::{AuditEmit, AuditSink};
 

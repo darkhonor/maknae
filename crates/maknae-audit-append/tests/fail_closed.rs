@@ -30,6 +30,7 @@ fn sample_record() -> AuditRecord {
         mutation: None,
         egress: None,
         conversation: None,
+        graph: None,
         outcome: Outcome {
             result: "permit".into(),
             reason: "group membership: maknae-ops".into(),

@@ -10,10 +10,12 @@ case "$1" in
         chattr -a /var/log/maknae/audit.jsonl 2>/dev/null || :
         chattr -a /var/log/maknae 2>/dev/null || :
 
-        # Remove configuration and the audit trail on purge only.
+        # Remove configuration, the audit trail and the kernel graph store on
+        # purge only.
         rm -rf /etc/maknae
         rm -rf /etc/ssl/maknae
         rm -rf /var/log/maknae
+        rm -rf /var/lib/maknae
 
         systemctl daemon-reload 2>/dev/null || :
         ;;

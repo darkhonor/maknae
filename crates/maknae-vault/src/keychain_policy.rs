@@ -26,6 +26,7 @@ pub enum KeychainDelete {
 pub enum KeychainPlane {
     Daemon,
     Egress,
+    Graph,
 }
 
 impl KeychainPlane {
@@ -33,12 +34,13 @@ impl KeychainPlane {
         match self {
             KeychainPlane::Daemon => "io.maknae.maknaed",
             KeychainPlane::Egress => "io.maknae.maknae-egress",
+            KeychainPlane::Graph => "io.maknae.maknaed.graph",
         }
     }
 
     pub const fn account_name(self) -> &'static str {
         match self {
-            KeychainPlane::Daemon => "_maknae",
+            KeychainPlane::Daemon | KeychainPlane::Graph => "_maknae",
             KeychainPlane::Egress => "_maknae-egress",
         }
     }
@@ -47,6 +49,7 @@ impl KeychainPlane {
         match self {
             KeychainPlane::Daemon => "maknaed-secret-id.keychain",
             KeychainPlane::Egress => "maknae-egress-secret-id.keychain",
+            KeychainPlane::Graph => "maknaed-graph-key.keychain",
         }
     }
 }
@@ -58,6 +61,10 @@ pub fn daemon_keychain_dir(config_dir: &std::path::Path) -> std::path::PathBuf {
 
 pub fn daemon_keychain_pointer(config_dir: &std::path::Path) -> std::path::PathBuf {
     daemon_keychain_dir(config_dir).join(KeychainPlane::Daemon.pointer_file())
+}
+
+pub fn graph_keychain_pointer(config_dir: &std::path::Path) -> std::path::PathBuf {
+    daemon_keychain_dir(config_dir).join(KeychainPlane::Graph.pointer_file())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,11 +168,25 @@ mod tests {
     }
 
     #[test]
+    fn graph_keychain_pointer_is_under_private() {
+        assert_eq!(
+            graph_keychain_pointer(std::path::Path::new("/etc/maknae")),
+            std::path::PathBuf::from("/etc/maknae/private/maknaed-graph-key.keychain")
+        );
+    }
+
+    #[test]
     fn plane_constants() {
         assert_eq!(KeychainPlane::Daemon.service(), "io.maknae.maknaed");
         assert_eq!(KeychainPlane::Egress.service(), "io.maknae.maknae-egress");
         assert_eq!(KeychainPlane::Daemon.account_name(), "_maknae");
         assert_eq!(KeychainPlane::Egress.account_name(), "_maknae-egress");
+        assert_eq!(KeychainPlane::Graph.service(), "io.maknae.maknaed.graph");
+        assert_eq!(KeychainPlane::Graph.account_name(), "_maknae");
+        assert_eq!(
+            KeychainPlane::Graph.pointer_file(),
+            "maknaed-graph-key.keychain"
+        );
         assert_eq!(
             KeychainPlane::Daemon.pointer_file(),
             "maknaed-secret-id.keychain"
@@ -185,7 +206,11 @@ mod tests {
 
     #[test]
     fn a_valid_pointer_names_its_own_plane_item() {
-        for plane in [KeychainPlane::Daemon, KeychainPlane::Egress] {
+        for plane in [
+            KeychainPlane::Daemon,
+            KeychainPlane::Egress,
+            KeychainPlane::Graph,
+        ] {
             assert_eq!(
                 parse_pointer(&good(plane), plane).unwrap(),
                 KeychainItem {
@@ -212,6 +237,14 @@ mod tests {
         let not_a_string = doc(&format!(
             "keychain: {SYSTEM_KEYCHAIN}\nservice: 5\naccount: secret-id\n"
         ));
+        assert!(matches!(
+            parse_pointer(&good(KeychainPlane::Graph), KeychainPlane::Daemon),
+            Err(VaultError::KeychainPointer(_))
+        ));
+        assert!(matches!(
+            parse_pointer(&good(KeychainPlane::Daemon), KeychainPlane::Graph),
+            Err(VaultError::KeychainPointer(_))
+        ));
         for d in [
             foreign_keychain,
             other_plane,
@@ -229,7 +262,11 @@ mod tests {
 
     #[test]
     fn the_written_pointer_is_the_one_the_reader_accepts() {
-        for plane in [KeychainPlane::Daemon, KeychainPlane::Egress] {
+        for plane in [
+            KeychainPlane::Daemon,
+            KeychainPlane::Egress,
+            KeychainPlane::Graph,
+        ] {
             let doc = maknae_config::load_str(&pointer_document(plane)).unwrap();
             assert_eq!(
                 parse_pointer(&doc, plane).unwrap(),

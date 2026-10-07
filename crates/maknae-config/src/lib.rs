@@ -44,6 +44,7 @@ mod policy;
 mod principal;
 mod providers;
 mod scalar;
+pub mod state;
 mod transport;
 mod user_providers;
 mod user_providers_io;
@@ -91,6 +92,7 @@ pub use providers::{
     MAX_MODEL_BYTES, MAX_PROVIDERS, MAX_PROVIDER_NAME_BYTES, MAX_REASONING_EFFORT_BYTES,
     PROVIDERS_SECTION,
 };
+pub use state::{MARKER_FILE, STATE_DIR, STORE_FILE};
 pub use transport::{
     content_write_bound, transport_from_section, TransportConfig, ADMISSION_AUDIT_TIMEOUT_MS,
     GROUP_LOOKUP_TIMEOUT_MS, HOME_RESOLVE_TIMEOUT_MS, MACOS_DAEMON_SOCKET_PATH,

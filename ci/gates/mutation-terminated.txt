@@ -1,1 +1,2 @@
 # Mutants caught only by cargo-nextest termination (#443): <uname -s>\t<file>\t<function>\t<replacement-regex, fullmatched>\t<reason>
+Linux	crates/maknae-io/src/mutation.rs	replace_bytes	\*=	`offset *= count` keeps offset at 0, so the write loop re-writes the first chunk forever; termination is the only observable failure (seen when gating #488)

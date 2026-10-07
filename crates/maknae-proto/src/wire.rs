@@ -634,6 +634,14 @@ pub struct StatusView {
     /// build carries. An operator reading a ceiling refusal needs to know
     /// which ladder ranked it.
     pub classification_policy: String,
+    /// The kernel graph store's revision counter (#488). Absent from a daemon
+    /// that predates the store.
+    #[serde(default)]
+    pub kernel_graph_revision: Option<u64>,
+    /// The rollback-anchor state at boot: `seeded`, `reseeded`, `verified`,
+    /// `advanced` or `rollback-anchor-unavailable`.
+    #[serde(default)]
+    pub kernel_graph_anchor: Option<String>,
 }
 
 /// One role and the identities bound to it.
@@ -930,6 +938,57 @@ pub fn decode_response(b: &[u8]) -> Result<Response, ProtoCodecError> {
 
 #[cfg(test)]
 mod tests {
+    fn status(kernel_graph: Option<(u64, String)>) -> Response {
+        Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Ok(Payload::Status(StatusView {
+                version: "v".into(),
+                protocol_version: PROTOCOL_VERSION,
+                listener: "/run/maknae.sock".into(),
+                authz_backend: "b".into(),
+                classification_policy: "US".into(),
+                kernel_graph_revision: kernel_graph.as_ref().map(|k| k.0),
+                kernel_graph_anchor: kernel_graph.map(|k| k.1),
+            })),
+        }
+    }
+
+    #[test]
+    fn a_status_round_trips_with_and_without_the_kernel_graph() {
+        for kg in [None, Some((7, "verified".to_string()))] {
+            let r = status(kg);
+            assert_eq!(decode_response(&encode_response(&r).unwrap()).unwrap(), r);
+        }
+    }
+
+    #[test]
+    fn a_status_from_a_daemon_without_the_kernel_graph_key_decodes_as_none() {
+        #[derive(Serialize)]
+        struct OldStatusView {
+            version: String,
+            protocol_version: u16,
+            listener: String,
+            authz_backend: String,
+            classification_policy: String,
+        }
+        let mut bytes = Vec::new();
+        ciborium::into_writer(
+            &OldStatusView {
+                version: "v".into(),
+                protocol_version: PROTOCOL_VERSION,
+                listener: "l".into(),
+                authz_backend: "b".into(),
+                classification_policy: "US".into(),
+            },
+            &mut bytes,
+        )
+        .unwrap();
+        let view: StatusView = ciborium::from_reader(bytes.as_slice()).unwrap();
+        assert_eq!(view.kernel_graph_revision, None);
+        assert_eq!(view.kernel_graph_anchor, None);
+        assert_eq!(view.classification_policy, "US");
+    }
+
     #[test]
     fn a_prompt_carries_its_reply_cap_only_when_set_and_the_cap_is_bounded() {
         let with = Request {
