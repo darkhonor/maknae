@@ -47,8 +47,8 @@ use maknae_proto::{
 use maknae_state::anchor::{parse_checkpoint, CHECKPOINT_ACTION};
 use maknae_state::envelope::WrappingKey;
 use maknae_state::store::{
-    remedy, BootAudit, BootOutcome, BootReport, Remedy, StateDir, StoreError, ANCHOR_RESEEDED,
-    ANCHOR_SEEDED, ANCHOR_SEEDING, MARKER_FILE, STORE_FILE,
+    remedy, BootAudit, BootInputs, BootOutcome, BootReport, Remedy, StateDir, StoreError,
+    ANCHOR_RESEEDED, ANCHOR_SEEDED, ANCHOR_SEEDING, MARKER_FILE, STORE_FILE,
 };
 use maknae_vault::{
     AcceptRejection, AuthenticatedStream, PeerCreds, PlaneListener, RawPlaneConn, RejectReason,
@@ -2902,6 +2902,8 @@ const GRAPH_LOAD_ACTION: &str = "graph.load";
 const GRAPH_SEED_ACTION: &str = "graph.seed";
 const GRAPH_RESEED_ACTION: &str = "graph.reseed";
 const GRAPH_REJECTED_ACTION: &str = "graph.rejected";
+const GRAPH_MIGRATE_ACTION: &str = "graph.migrate";
+const GRAPH_TRANSITION_ACTION: &str = "graph.transition";
 
 /// The fields every peer-less boot record shares (spec §5.3).
 struct BootCtx<'a> {
@@ -3011,6 +3013,83 @@ impl<E: AuditEmit + Send + Sync> BootAudit for GraphBootAudit<'_, E> {
             }),
         );
         self.append(rec)
+    }
+
+    fn intent_migrate(
+        &mut self,
+        revision: u64,
+        from: Option<[u8; 32]>,
+        to: [u8; 32],
+        unbound: &[u32],
+    ) -> impl Future<Output = Result<(), StoreError>> + Send {
+        let from = from.map_or_else(|| "none".to_string(), |d| lower_hex(&d));
+        let reason = format!(
+            "intent recorded (vocabulary {from} -> {}; unbound: {unbound:?})",
+            lower_hex(&to)
+        );
+        let rec = self.intent(GRAPH_MIGRATE_ACTION, &reason, revision, "migrating");
+        self.append(rec)
+    }
+
+    fn intent_transition(
+        &mut self,
+        revision: u64,
+        initiator: &'static str,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send {
+        let reason = format!("intent recorded ({initiator})");
+        let rec = self.intent(GRAPH_TRANSITION_ACTION, &reason, revision, "transitioning");
+        self.append(rec)
+    }
+}
+
+impl<E> GraphBootAudit<'_, E> {
+    fn intent(&self, action: &str, reason: &str, revision: u64, anchor: &str) -> AuditRecord {
+        self.ctx.record(
+            action,
+            "permit",
+            reason,
+            "authorized",
+            Some(GraphAudit {
+                revision,
+                ciphertext_sha256: String::new(),
+                anchor: anchor.to_string(),
+                scanned_bytes: self.scanned_bytes,
+            }),
+        )
+    }
+}
+
+/// The graph boot's inputs as this binary has them: the persisted role set labelled
+/// with the system's lowest level, its digest, and the identity layer.
+struct GraphInputs {
+    compiled: maknae_graph::schema::CompiledSet,
+    digest: [u8; 32],
+    identity: maknae_graph::identity::IdentityLayer,
+}
+
+impl GraphInputs {
+    fn placeholder(config_dir: &Path, label: String) -> Result<Self, StoreError> {
+        let compiled = maknae_graph::kernel::persisted_compiled_set(&label);
+        let digest = maknae_state::vocabulary::digest(&compiled)
+            .map_err(|e| StoreError::Identity(e.to_string()))?;
+        Ok(GraphInputs {
+            compiled,
+            digest,
+            identity: maknae_graph::identity::IdentityLayer {
+                source: config_dir.join("authz.yaml").display().to_string(),
+                label,
+                bindings_sha256: None,
+                subjects: Vec::new(),
+            },
+        })
+    }
+
+    fn boot(&self) -> BootInputs<'_> {
+        BootInputs {
+            compiled: &self.compiled,
+            vocabulary_sha256: self.digest,
+            identity: &self.identity,
+        }
     }
 }
 
@@ -3125,6 +3204,7 @@ async fn boot_kernel_graph(
     key: Result<maknae_vault::GraphKey, maknae_vault::VaultError>,
     sink: &Arc<maknae_audit_append::AuditSink>,
     ctx: &BootCtx<'_>,
+    inputs: &BootInputs<'_>,
 ) -> Result<(StateDir, KernelGraphStatus), RunError> {
     let key = key.map_err(|e| graph_refusal(GraphFailure::Key(e), state_dir))?;
     let dir = StateDir::open(state_dir, ctx.euid)
@@ -3149,6 +3229,7 @@ async fn boot_kernel_graph(
         checkpoint,
         &mut audit,
         unix_now(),
+        inputs,
     )
     .await
     .map_err(|e| store_refusal(e, state_dir))?;
@@ -3520,6 +3601,8 @@ async fn boot_after_sink(
         .map_err(|e| boot_evidence_refused("composition", e))?;
     let authorizer = Arc::new(authorizer);
 
+    let graph_inputs = GraphInputs::placeholder(config_dir, boot.policy().unmarked().name)
+        .map_err(|e| graph_refusal(GraphFailure::Store(e), state_dir))?;
     // Bound for the serve's lifetime: the StateDir holds the one-maknaed state-dir lock.
     let (_state_dir_lock, graph_status) = boot_kernel_graph(
         state_dir,
@@ -3533,6 +3616,7 @@ async fn boot_after_sink(
             seq: boot_seq,
             au3_1: &audit_cfg.au3_1,
         },
+        &graph_inputs.boot(),
     )
     .await?;
     let kernel_graph = Arc::new(Some(graph_status));
@@ -4667,6 +4751,14 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         fx: &GraphFixture,
         key: Result<maknae_vault::GraphKey, maknae_vault::VaultError>,
     ) -> Result<(StateDir, KernelGraphStatus), RunError> {
+        boot_graph_from(fx, key, &fx.dir.0)
+    }
+
+    fn boot_graph_from(
+        fx: &GraphFixture,
+        key: Result<maknae_vault::GraphKey, maknae_vault::VaultError>,
+        config_dir: &Path,
+    ) -> Result<(StateDir, KernelGraphStatus), RunError> {
         let seq = Seq::new();
         let au3_1 = serde_json::Value::Null;
         let ctx = BootCtx {
@@ -4677,7 +4769,14 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             seq: &seq,
             au3_1: &au3_1,
         };
-        block_on(boot_kernel_graph(&fx.state, key, &fx.sink, &ctx))
+        let inputs = GraphInputs::placeholder(config_dir, "UNCLASSIFIED".into()).unwrap();
+        block_on(boot_kernel_graph(
+            &fx.state,
+            key,
+            &fx.sink,
+            &ctx,
+            &inputs.boot(),
+        ))
     }
 
     fn trail(fx: &GraphFixture) -> Vec<(AuditRecord, String)> {
@@ -4690,6 +4789,88 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
 
     fn key() -> Result<maknae_vault::GraphKey, maknae_vault::VaultError> {
         test_graph_key(Path::new("/unused"))
+    }
+
+    #[test]
+    fn an_s2_store_migrates_under_an_audited_intent() {
+        let fx = graph_fixture("graph_s2_migrate");
+        let k = WrappingKey::new(key().unwrap().into_bytes());
+        let s2 =
+            maknae_graph::graph::GraphBuilder::new(maknae_graph::record::GraphSpace::Kernel, 4)
+                .build(
+                    &maknae_graph::kernel::SCHEMA,
+                    &maknae_graph::schema::CompiledSet::default(),
+                )
+                .unwrap();
+        let file = maknae_state::envelope::seal(&maknae_graph::format::encode(&s2), &k).unwrap();
+        let path = fx.state.join(STORE_FILE);
+        std::fs::write(&path, file).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let status = boot_graph(&fx, key()).unwrap();
+        assert_eq!(
+            (status.revision, status.anchor.as_str()),
+            (5, "rollback-anchor-unavailable")
+        );
+        let recs = trail(&fx);
+        let actions: Vec<&str> = recs.iter().map(|(r, _)| r.action.as_str()).collect();
+        assert_eq!(
+            actions,
+            ["graph.checkpoint", "graph.migrate", "graph.checkpoint"]
+        );
+        let to = GraphInputs::placeholder(&fx.dir.0, "UNCLASSIFIED".into())
+            .unwrap()
+            .digest;
+        let (m, _) = &recs[1];
+        assert_eq!(
+            (
+                m.outcome.result.as_str(),
+                m.outcome.reason.clone(),
+                m.outcome.posture.as_str()
+            ),
+            (
+                "permit",
+                format!(
+                    "intent recorded (vocabulary none -> {}; unbound: [])",
+                    lower_hex(&to)
+                ),
+                "authorized"
+            )
+        );
+        let g = m.graph.as_ref().unwrap();
+        assert_eq!(
+            (g.revision, g.anchor.as_str(), g.ciphertext_sha256.as_str()),
+            (5, "migrating", "")
+        );
+        assert_eq!(recs[2].0.graph.as_ref().unwrap().anchor, "migrated");
+    }
+
+    #[test]
+    fn a_changed_policy_source_is_a_root_file_transition_under_an_audited_intent() {
+        let fx = graph_fixture("graph_transition");
+        boot_graph_from(&fx, key(), Path::new("/elsewhere")).unwrap();
+        let (_held, status) = boot_graph_held(&fx, key()).unwrap();
+        assert_eq!((status.revision, status.anchor.as_str()), (2, "verified"));
+        let recs = trail(&fx);
+        let actions: Vec<&str> = recs.iter().map(|(r, _)| r.action.as_str()).collect();
+        assert_eq!(
+            actions,
+            [
+                "graph.seed",
+                "graph.checkpoint",
+                "graph.checkpoint",
+                "graph.transition",
+                "graph.checkpoint"
+            ]
+        );
+        let (t, _) = &recs[3];
+        assert_eq!(
+            (t.outcome.result.as_str(), t.outcome.reason.as_str()),
+            ("permit", "intent recorded (root-file)")
+        );
+        let g = t.graph.as_ref().unwrap();
+        assert_eq!((g.revision, g.anchor.as_str()), (2, "transitioning"));
+        assert_eq!(recs[4].0.graph.as_ref().unwrap().anchor, "transitioned");
     }
 
     #[test]

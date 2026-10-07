@@ -3,10 +3,12 @@ use crate::envelope::{
     ciphertext_digest, open, seal, EnvelopeError, WrappingKey, AEAD_AES_256_GCM, ENVELOPE_VERSION,
     WRAP_AES_256_GCM,
 };
+use crate::vocabulary::{self, Assessment};
 use maknae_graph::format::{self, FormatError, FORMAT_VERSION};
-use maknae_graph::graph::{Graph, GraphBuilder};
-use maknae_graph::kernel::SCHEMA;
-use maknae_graph::record::GraphSpace;
+use maknae_graph::graph::Graph;
+use maknae_graph::identity::{self, Extracted, IdentityLayer};
+use maknae_graph::kernel::{ROLE, SCHEMA};
+use maknae_graph::record::{GraphSpace, ProvenanceKind};
 use maknae_graph::schema::CompiledSet;
 use maknae_io::{
     open_anchor, Anchor, AnchorLock, AnchorRequired, IoError, IoKind, Mode, StrategyPref,
@@ -15,6 +17,7 @@ use maknae_io::{
 use std::fmt;
 use std::future::Future;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub use maknae_config::state::{MARKER_FILE, MARKER_MAX_BYTES, STATE_DIR, STORE_FILE};
 
@@ -23,6 +26,10 @@ pub const MAX_STORE_BYTES: u64 = 64 << 20;
 pub const ANCHOR_SEEDING: &str = "seeding";
 pub const ANCHOR_SEEDED: &str = "seeded";
 pub const ANCHOR_RESEEDED: &str = "reseeded";
+pub const ANCHOR_MIGRATED: &str = "migrated";
+pub const ANCHOR_TRANSITIONED: &str = "transitioned";
+pub const INITIATOR_ROOT_FILE: &str = "root-file";
+pub const INITIATOR_SEED: &str = "seed";
 
 const STORE_MODE: Mode = Mode(0o600);
 
@@ -38,6 +45,8 @@ pub enum StoreError {
     Audit(String),
     NewerStore(String),
     RejectedNameInUse { name: String, cause: String },
+    Vocabulary(&'static str),
+    Identity(String),
 }
 
 impl fmt::Display for StoreError {
@@ -61,6 +70,10 @@ impl fmt::Display for StoreError {
                 f,
                 "the rejected-copy name {name} is in use and does not hold this store ({cause}); move it aside, then restart"
             ),
+            Self::Vocabulary(cause) => write!(f, "graph store vocabulary refused: {cause}"),
+            Self::Identity(cause) => {
+                write!(f, "the kernel identity layer does not build: {cause}")
+            }
         }
     }
 }
@@ -91,12 +104,16 @@ pub fn remedy(e: &StoreError) -> Remedy {
     match e {
         StoreError::NewerStore(_) => Remedy::Reinstall,
         StoreError::Refused(Refusal::RevisionExhausted) => Remedy::Investigate,
-        StoreError::Refused(_) | StoreError::Envelope(_) | StoreError::Format(_) => Remedy::Reseed,
+        StoreError::Refused(_)
+        | StoreError::Envelope(_)
+        | StoreError::Format(_)
+        | StoreError::Vocabulary(_) => Remedy::Reseed,
         StoreError::StoreFileRefused(_) => Remedy::CheckStoreFile,
         StoreError::RejectedNameInUse { .. } => Remedy::ClearRejectedName,
         StoreError::StateDir(_) | StoreError::Io(_) => Remedy::CheckStateDir,
         StoreError::InUse => Remedy::StopOtherInstance,
         StoreError::Audit(_) => Remedy::CheckAudit,
+        StoreError::Identity(_) => Remedy::Investigate,
     }
 }
 
@@ -112,6 +129,7 @@ pub struct StateDir {
     _lock: AnchorLock,
     owner: u32,
     marker_owner: u32,
+    store_revision: AtomicU64,
 }
 
 impl StateDir {
@@ -149,7 +167,25 @@ impl StateDir {
             _lock: lock,
             owner,
             marker_owner,
+            store_revision: AtomicU64::new(0),
         })
+    }
+
+    pub fn owner(&self) -> u32 {
+        self.owner
+    }
+
+    /// The revision of the store as this process last read or wrote it; a commit must exceed it.
+    pub fn store_revision(&self) -> u64 {
+        self.store_revision.load(Ordering::SeqCst)
+    }
+
+    fn persist(&self, key: &WrappingKey, graph: &Graph) -> Result<[u8; 32], StoreError> {
+        let file = seal(&format::encode(graph), key)?;
+        self.publish(STORE_FILE, &file)?;
+        self.store_revision
+            .store(graph.revision(), Ordering::SeqCst);
+        Ok(ciphertext_digest(&file))
     }
 
     fn reseed_marker(&self) -> Result<bool, IoError> {
@@ -232,6 +268,13 @@ pub enum BootOutcome {
     Loaded(AnchorState),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Migration {
+    pub from: Option<[u8; 32]>,
+    pub to: [u8; 32],
+    pub unbound: Vec<u32>,
+}
+
 #[derive(Debug)]
 pub struct BootReport {
     pub revision: u64,
@@ -239,6 +282,23 @@ pub struct BootReport {
     pub outcome: BootOutcome,
     pub graph: Graph,
     pub marker_ignored: Option<String>,
+    pub migration: Option<Migration>,
+    pub identity_transition: bool,
+}
+
+/// What the binary brings to boot: its persisted compiled set, that set's
+/// `vocabulary::digest`, and the identity layer resolved from the policy file.
+pub struct BootInputs<'a> {
+    pub compiled: &'a CompiledSet,
+    pub vocabulary_sha256: [u8; 32],
+    pub identity: &'a IdentityLayer,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Committed {
+    pub revision: u64,
+    pub digest: [u8; 32],
+    pub checkpoint_error: Option<String>,
 }
 
 pub trait BootAudit {
@@ -252,6 +312,18 @@ pub trait BootAudit {
         revision: u64,
         digest: [u8; 32],
         anchor: &str,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+    fn intent_migrate(
+        &mut self,
+        revision: u64,
+        from: Option<[u8; 32]>,
+        to: [u8; 32],
+        unbound: &[u32],
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+    fn intent_transition(
+        &mut self,
+        revision: u64,
+        initiator: &'static str,
     ) -> impl Future<Output = Result<(), StoreError>> + Send;
 }
 
@@ -300,15 +372,85 @@ fn classify_format(e: FormatError) -> StoreError {
     }
 }
 
-fn decode_store(file: &[u8], key: &WrappingKey) -> Result<(Graph, StoreFacts), StoreError> {
+struct Decoded {
+    graph: Graph,
+    stored: CompiledSet,
+    extracted: Extracted,
+    facts: StoreFacts,
+}
+
+fn decode_store(file: &[u8], key: &WrappingKey) -> Result<Decoded, StoreError> {
     let plain = open(file, key).map_err(classify_envelope)?;
-    let graph = format::decode(&plain, GraphSpace::Kernel, &SCHEMA, &CompiledSet::default())
+    let (graph, stored) = format::decode_stored_compiled(&plain, GraphSpace::Kernel, &SCHEMA)
         .map_err(classify_format)?;
+    let extracted = identity::extract(&graph).map_err(|e| StoreError::Format(e.to_string()))?;
     let facts = StoreFacts {
         revision: graph.revision(),
         digest: ciphertext_digest(file),
     };
-    Ok((graph, facts))
+    Ok(Decoded {
+        graph,
+        stored,
+        extracted,
+        facts,
+    })
+}
+
+fn build(
+    layer: &IdentityLayer,
+    inputs: &BootInputs<'_>,
+    revision: u64,
+    initiator: ProvenanceKind,
+) -> Result<Graph, StoreError> {
+    identity::build(
+        layer,
+        inputs.compiled,
+        inputs.vocabulary_sha256,
+        revision,
+        initiator,
+    )
+    .map_err(|e| StoreError::Identity(e.to_string()))
+}
+
+fn next_revision(revision: u64) -> Result<u64, StoreError> {
+    revision
+        .checked_add(1)
+        .ok_or(StoreError::Refused(Refusal::RevisionExhausted))
+}
+
+fn sorted(layer: &IdentityLayer) -> IdentityLayer {
+    let mut l = layer.clone();
+    l.subjects.sort_by_key(|s| s.uid);
+    l
+}
+
+fn drop_vanished(layer: &mut IdentityLayer, compiled: &CompiledSet) -> Vec<u32> {
+    let (keep, drop): (Vec<_>, Vec<_>) = layer
+        .subjects
+        .drain(..)
+        .partition(|s| compiled.get(ROLE, &s.role).is_some());
+    layer.subjects = keep;
+    drop.into_iter().map(|s| s.uid).collect()
+}
+
+/// The stored layer carried across a vocabulary change: the label is the binary's, and a
+/// store with no policy source (written before the identity layer) takes the file's source alone.
+fn migrated_layer(
+    stored: &IdentityLayer,
+    file: &IdentityLayer,
+    compiled: &CompiledSet,
+) -> (IdentityLayer, Vec<u32>) {
+    let mut layer = if stored.source.is_empty() {
+        IdentityLayer {
+            source: file.source.clone(),
+            ..IdentityLayer::default()
+        }
+    } else {
+        stored.clone()
+    };
+    layer.label = file.label.clone();
+    let unbound = drop_vanished(&mut layer, compiled);
+    (layer, unbound)
 }
 
 pub async fn boot(
@@ -317,6 +459,7 @@ pub async fn boot(
     checkpoint: Option<Checkpoint>,
     audit: &mut impl BootAudit,
     now_unix: u64,
+    inputs: &BootInputs<'_>,
 ) -> Result<BootReport, StoreError> {
     let (authorized, marker_ignored) = match dir.reseed_marker() {
         Ok(authorized) => (authorized, None),
@@ -331,45 +474,132 @@ pub async fn boot(
                 Err(e) if !authorized => return Err(e),
                 Err(_) => {}
             }
-            Prior::Readable(file)
+            Prior::Readable(file, now_unix)
         }
         Err(e) => return Err(StoreError::StoreFileRefused(e.to_string())),
     };
 
     let mut report = match (
-        assess(loaded.as_ref().map(|(_, f)| *f), checkpoint, authorized),
+        assess(loaded.as_ref().map(|d| d.facts), checkpoint, authorized),
         loaded,
     ) {
         (BootAction::Refuse(r), _) => Err(StoreError::Refused(r)),
-        (BootAction::Load(state), Some((graph, facts))) => {
-            audit
-                .checkpoint(facts.revision, facts.digest, state.as_str())
-                .await?;
-            Ok(BootReport {
-                revision: facts.revision,
-                digest: facts.digest,
-                outcome: BootOutcome::Loaded(state),
-                graph,
-                marker_ignored: None,
-            })
+        (BootAction::Load(state), Some(decoded)) => {
+            load(dir, key, audit, state, decoded, inputs).await
         }
         (BootAction::Load(_), None) => Err(StoreError::Format(
             "assessed a store that was never decoded".into(),
         )),
         (BootAction::SeedFirstBoot, _) => {
-            seed(dir, key, audit, 1, false, Prior::Absent, now_unix).await
+            seed(dir, key, audit, 1, false, Prior::Absent, inputs).await
         }
         (BootAction::SeedAuthorized { revision }, _) => {
-            seed(dir, key, audit, revision, true, prior, now_unix).await
+            seed(dir, key, audit, revision, true, prior, inputs).await
         }
     }?;
     report.marker_ignored = marker_ignored;
     Ok(report)
 }
 
+async fn load(
+    dir: &StateDir,
+    key: &WrappingKey,
+    audit: &mut impl BootAudit,
+    state: AnchorState,
+    decoded: Decoded,
+    inputs: &BootInputs<'_>,
+) -> Result<BootReport, StoreError> {
+    let Decoded {
+        graph,
+        stored,
+        extracted,
+        facts,
+    } = decoded;
+    dir.store_revision.store(facts.revision, Ordering::SeqCst);
+    audit
+        .checkpoint(facts.revision, facts.digest, state.as_str())
+        .await?;
+    let mut report = BootReport {
+        revision: facts.revision,
+        digest: facts.digest,
+        outcome: BootOutcome::Loaded(state),
+        graph,
+        marker_ignored: None,
+        migration: None,
+        identity_transition: false,
+    };
+    let mut layer = extracted.layer;
+    let to = inputs.vocabulary_sha256;
+    match vocabulary::assess(extracted.vocabulary_sha256, &stored, to) {
+        Assessment::Forged(why) => return Err(StoreError::Vocabulary(why)),
+        Assessment::Current => {}
+        Assessment::Upgrade { from } => {
+            let (migrated, mut unbound) = migrated_layer(&layer, inputs.identity, inputs.compiled);
+            unbound.extend(extracted.unbound);
+            unbound.sort_unstable();
+            unbound.dedup();
+            let revision = next_revision(report.revision)?;
+            let graph = build(&migrated, inputs, revision, ProvenanceKind::Kernel)?;
+            audit.intent_migrate(revision, from, to, &unbound).await?;
+            let digest = dir.persist(key, &graph)?;
+            audit.checkpoint(revision, digest, ANCHOR_MIGRATED).await?;
+            report.revision = revision;
+            report.digest = digest;
+            report.graph = graph;
+            report.migration = Some(Migration { from, to, unbound });
+            layer = migrated;
+        }
+    }
+    if sorted(&layer) != sorted(inputs.identity) {
+        let revision = next_revision(report.revision)?;
+        let graph = build(inputs.identity, inputs, revision, ProvenanceKind::RootFile)?;
+        audit
+            .intent_transition(revision, INITIATOR_ROOT_FILE)
+            .await?;
+        let digest = dir.persist(key, &graph)?;
+        audit
+            .checkpoint(revision, digest, ANCHOR_TRANSITIONED)
+            .await?;
+        report.revision = revision;
+        report.digest = digest;
+        report.graph = graph;
+        report.identity_transition = true;
+    }
+    Ok(report)
+}
+
+/// Persists a validated identity transition: intent, then publish, then checkpoint. The
+/// publish is the point of no return, so a checkpoint failure after it is reported, not raised.
+pub async fn commit(
+    dir: &StateDir,
+    key: &WrappingKey,
+    next: &Graph,
+    audit: &mut impl BootAudit,
+    initiator: &'static str,
+) -> Result<Committed, StoreError> {
+    let revision = next.revision();
+    if revision <= dir.store_revision() {
+        return Err(StoreError::Format(
+            "commit must advance the revision".into(),
+        ));
+    }
+    audit.intent_transition(revision, initiator).await?;
+    let digest = dir.persist(key, next)?;
+    let checkpoint_error = audit
+        .checkpoint(revision, digest, ANCHOR_TRANSITIONED)
+        .await
+        .err()
+        .map(|e| e.to_string());
+    Ok(Committed {
+        revision,
+        digest,
+        checkpoint_error,
+    })
+}
+
 enum Prior {
     Absent,
-    Readable(Zeroizing<Vec<u8>>),
+    Readable(Zeroizing<Vec<u8>>, u64),
 }
 
 async fn seed(
@@ -379,12 +609,13 @@ async fn seed(
     revision: u64,
     authorized: bool,
     prior: Prior,
-    now_unix: u64,
+    inputs: &BootInputs<'_>,
 ) -> Result<BootReport, StoreError> {
+    let graph = build(inputs.identity, inputs, revision, ProvenanceKind::Seed)?;
     audit.intent_seed(revision, authorized).await?;
     let rejected = match prior {
         Prior::Absent => None,
-        Prior::Readable(bytes) => {
+        Prior::Readable(bytes, now_unix) => {
             let tag: String = ciphertext_digest(&bytes)[..8]
                 .iter()
                 .map(|b| format!("{b:02x}"))
@@ -393,15 +624,10 @@ async fn seed(
             Some(dir.preserve(&name, &bytes)?)
         }
     };
-    let graph = GraphBuilder::new(GraphSpace::Kernel, revision)
-        .build(&SCHEMA, &CompiledSet::default())
-        .map_err(|e| StoreError::Format(e.to_string()))?;
-    let file = seal(&format::encode(&graph), key)?;
-    dir.publish(STORE_FILE, &file)?;
+    let digest = dir.persist(key, &graph)?;
     if authorized {
         dir.anchor.remove(Path::new(MARKER_FILE), None)?;
     }
-    let digest = ciphertext_digest(&file);
     let anchor = if authorized {
         ANCHOR_RESEEDED
     } else {
@@ -417,5 +643,102 @@ async fn seed(
         },
         graph,
         marker_ignored: None,
+        migration: None,
+        identity_transition: false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use maknae_graph::identity::SubjectEntry;
+    use maknae_graph::kernel::persisted_compiled_set;
+
+    fn subject(uid: u32, role: &str) -> SubjectEntry {
+        SubjectEntry {
+            uid,
+            name: format!("u{uid}"),
+            role: role.into(),
+        }
+    }
+
+    fn file() -> IdentityLayer {
+        IdentityLayer {
+            source: "/etc/maknae/authz.yaml".into(),
+            label: "UNOFFICIAL".into(),
+            bindings_sha256: Some([1; 32]),
+            subjects: vec![subject(0, "admin")],
+        }
+    }
+
+    #[test]
+    fn an_empty_stored_layer_takes_the_files_source_and_label_and_nothing_else() {
+        let (l, unbound) = migrated_layer(
+            &IdentityLayer::default(),
+            &file(),
+            &persisted_compiled_set("UNOFFICIAL"),
+        );
+        assert_eq!(
+            l,
+            IdentityLayer {
+                source: "/etc/maknae/authz.yaml".into(),
+                label: "UNOFFICIAL".into(),
+                bindings_sha256: None,
+                subjects: vec![],
+            }
+        );
+        assert!(unbound.is_empty());
+    }
+
+    #[test]
+    fn a_populated_layer_keeps_its_source_bindings_and_subjects_under_the_binarys_label() {
+        let stored = IdentityLayer {
+            source: "/old/authz.yaml".into(),
+            label: "UNCLASSIFIED".into(),
+            bindings_sha256: Some([2; 32]),
+            subjects: vec![
+                subject(0, "user"),
+                subject(666, "adversary"),
+                subject(9, "guest"),
+            ],
+        };
+        let (l, unbound) = migrated_layer(&stored, &file(), &persisted_compiled_set("UNOFFICIAL"));
+        assert_eq!(
+            l,
+            IdentityLayer {
+                label: "UNOFFICIAL".into(),
+                ..stored
+            }
+        );
+        assert!(unbound.is_empty());
+    }
+
+    #[test]
+    fn a_vanished_role_is_dropped_and_its_uids_reported() {
+        let stored = IdentityLayer {
+            subjects: vec![
+                subject(3, "superadmin"),
+                subject(0, "admin"),
+                subject(4, "gone"),
+            ],
+            ..file()
+        };
+        let (l, unbound) = migrated_layer(&stored, &file(), &persisted_compiled_set("UNOFFICIAL"));
+        assert_eq!(l.subjects, vec![subject(0, "admin")]);
+        assert_eq!(unbound, vec![3, 4]);
+    }
+
+    #[test]
+    fn layers_compare_without_regard_to_subject_order() {
+        let a = IdentityLayer {
+            subjects: vec![subject(2, "user"), subject(1, "user")],
+            ..file()
+        };
+        let b = IdentityLayer {
+            subjects: vec![subject(1, "user"), subject(2, "user")],
+            ..file()
+        };
+        assert_eq!(sorted(&a), sorted(&b));
+        assert_ne!(a, b);
+    }
 }

@@ -1,16 +1,21 @@
 use maknae_graph::format;
-use maknae_graph::graph::GraphBuilder;
-use maknae_graph::kernel::SCHEMA;
-use maknae_graph::record::GraphSpace;
-use maknae_graph::schema::CompiledSet;
+use maknae_graph::graph::{Graph, GraphBuilder};
+use maknae_graph::identity::{self, IdentityLayer, SubjectEntry};
+use maknae_graph::kernel::{
+    persisted_compiled_set, ATTR_SHA256, ROLE, SCHEMA, SUBJECT, VOCABULARY_SOURCE_KEY,
+};
+use maknae_graph::record::{AttrValue, Attrs, GraphSpace, NodeRecord, ProvenanceKind};
+use maknae_graph::schema::{CompiledNode, CompiledSet};
 use maknae_state::anchor::{AnchorState, Checkpoint, Refusal};
 use maknae_state::envelope::{
     self, ciphertext_digest, EnvelopeError, WrappingKey, ENVELOPE_VERSION, KEY_LEN,
 };
 use maknae_state::store::{
-    boot, remedy, BootAudit, BootOutcome, BootReport, Remedy, StateDir, StoreError, MARKER_FILE,
+    boot, commit, remedy, BootAudit, BootInputs, BootOutcome, BootReport, Committed, Migration,
+    Remedy, StateDir, StoreError, INITIATOR_ROOT_FILE, INITIATOR_SEED, MARKER_FILE,
     MAX_STORE_BYTES, REJECTED_PREFIX, STORE_FILE,
 };
+use maknae_state::vocabulary;
 use std::fs;
 use std::future::{ready, Future};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -23,6 +28,8 @@ const NOW: u64 = 1_760_000_000;
 enum Event {
     Intent(u64, bool),
     Checkpoint(u64, [u8; 32], String),
+    Migrate(u64, Option<[u8; 32]>, [u8; 32], Vec<u32>),
+    Transition(u64, String),
 }
 
 #[derive(Default)]
@@ -30,6 +37,17 @@ struct Recorder {
     events: Vec<Event>,
     fail_intent: bool,
     fail_checkpoint: bool,
+    fail_checkpoint_anchor: Option<&'static str>,
+    fail_migrate: bool,
+    fail_transition: bool,
+}
+
+fn refuse(fail: bool, what: &str) -> Result<(), StoreError> {
+    if fail {
+        Err(StoreError::Audit(format!("{what} refused")))
+    } else {
+        Ok(())
+    }
 }
 
 impl BootAudit for Recorder {
@@ -54,12 +72,142 @@ impl BootAudit for Recorder {
     ) -> impl Future<Output = Result<(), StoreError>> + Send {
         self.events
             .push(Event::Checkpoint(revision, digest, anchor.to_owned()));
-        ready(if self.fail_checkpoint {
-            Err(StoreError::Audit("checkpoint refused".into()))
-        } else {
-            Ok(())
-        })
+        let fail = self.fail_checkpoint || self.fail_checkpoint_anchor == Some(anchor);
+        ready(refuse(fail, "checkpoint"))
     }
+
+    fn intent_migrate(
+        &mut self,
+        revision: u64,
+        from: Option<[u8; 32]>,
+        to: [u8; 32],
+        unbound: &[u32],
+    ) -> impl Future<Output = Result<(), StoreError>> + Send {
+        self.events
+            .push(Event::Migrate(revision, from, to, unbound.to_vec()));
+        ready(refuse(self.fail_migrate, "migrate"))
+    }
+
+    fn intent_transition(
+        &mut self,
+        revision: u64,
+        initiator: &'static str,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send {
+        self.events
+            .push(Event::Transition(revision, initiator.to_owned()));
+        ready(refuse(self.fail_transition, "transition"))
+    }
+}
+
+const SOURCE: &str = "/etc/maknae/authz.yaml";
+
+struct Inputs {
+    compiled: CompiledSet,
+    digest: [u8; 32],
+    layer: IdentityLayer,
+}
+
+impl Inputs {
+    fn boot(&self) -> BootInputs<'_> {
+        BootInputs {
+            compiled: &self.compiled,
+            vocabulary_sha256: self.digest,
+            identity: &self.layer,
+        }
+    }
+}
+
+fn layer_at(label: &str, bindings: Option<&[u8]>, subjects: &[(u32, &str, &str)]) -> IdentityLayer {
+    IdentityLayer {
+        source: SOURCE.into(),
+        label: label.into(),
+        bindings_sha256: bindings.map(envelope::sha256),
+        subjects: subjects
+            .iter()
+            .map(|(uid, name, role)| SubjectEntry {
+                uid: *uid,
+                name: (*name).into(),
+                role: (*role).into(),
+            })
+            .collect(),
+    }
+}
+
+fn layer(bindings: Option<&[u8]>, subjects: &[(u32, &str, &str)]) -> IdentityLayer {
+    layer_at("UNCLASSIFIED", bindings, subjects)
+}
+
+fn inputs_with(layer: IdentityLayer) -> Inputs {
+    let compiled = persisted_compiled_set(&layer.label);
+    let digest = vocabulary::digest(&compiled).unwrap();
+    Inputs {
+        compiled,
+        digest,
+        layer,
+    }
+}
+
+fn inputs() -> Inputs {
+    inputs_with(layer(
+        Some(br#"{"admin":["root"]}"#),
+        &[(0, "root", "admin")],
+    ))
+}
+
+fn edited() -> Inputs {
+    inputs_with(layer(Some(br#"{"user":["root"]}"#), &[(0, "root", "user")]))
+}
+
+fn wider() -> CompiledSet {
+    let mut v: Vec<CompiledNode> = persisted_compiled_set("UNCLASSIFIED")
+        .iter()
+        .cloned()
+        .collect();
+    v.push(CompiledNode {
+        kind: ROLE,
+        key: "superadmin".into(),
+        label: "UNCLASSIFIED".into(),
+        attrs: Attrs::new(),
+    });
+    CompiledSet::new(v)
+}
+
+fn seal_graph(g: &Graph, k: &WrappingKey) -> Vec<u8> {
+    envelope::seal(&format::encode(g), k).unwrap()
+}
+
+fn rebuild(
+    g: &Graph,
+    edit: impl Fn(&NodeRecord) -> Option<NodeRecord>,
+    compiled: &CompiledSet,
+) -> Graph {
+    let mut b = GraphBuilder::new(GraphSpace::Kernel, g.revision());
+    for n in g.nodes().iter().filter_map(edit) {
+        b = b.node(n);
+    }
+    for e in g.edges() {
+        b = b.edge(e.clone());
+    }
+    b.build(&SCHEMA, compiled).unwrap()
+}
+
+fn s2_sealed(revision: u64, k: &WrappingKey) -> Vec<u8> {
+    let g = GraphBuilder::new(GraphSpace::Kernel, revision)
+        .build(&SCHEMA, &CompiledSet::default())
+        .unwrap();
+    seal_graph(&g, k)
+}
+
+fn extracted(g: &Graph) -> identity::Extracted {
+    identity::extract(g).unwrap()
+}
+
+fn subject_provenance(g: &Graph) -> Vec<ProvenanceKind> {
+    g.nodes()
+        .iter()
+        .filter(|n| n.kind == SUBJECT)
+        .map(|n| n.provenance.kind)
+        .collect()
 }
 
 fn key(byte: u8) -> WrappingKey {
@@ -125,17 +273,27 @@ impl Fixture {
 }
 
 fn sealed_graph(revision: u64, k: &WrappingKey) -> Vec<u8> {
-    let g = GraphBuilder::new(GraphSpace::Kernel, revision)
-        .build(&SCHEMA, &CompiledSet::default())
-        .unwrap();
-    envelope::seal(&format::encode(&g), k).unwrap()
+    let i = inputs();
+    let g = identity::build(
+        &i.layer,
+        &i.compiled,
+        i.digest,
+        revision,
+        ProvenanceKind::Seed,
+    )
+    .unwrap();
+    seal_graph(&g, k)
+}
+
+fn graph_of(file: &[u8], k: &WrappingKey) -> Graph {
+    let plain = envelope::open(file, k).unwrap();
+    format::decode_stored_compiled(&plain, GraphSpace::Kernel, &SCHEMA)
+        .unwrap()
+        .0
 }
 
 fn revision_of(file: &[u8], k: &WrappingKey) -> u64 {
-    let plain = envelope::open(file, k).unwrap();
-    format::decode(&plain, GraphSpace::Kernel, &SCHEMA, &CompiledSet::default())
-        .unwrap()
-        .revision()
+    graph_of(file, k).revision()
 }
 
 fn rejected_name(prior: &[u8]) -> String {
@@ -158,8 +316,17 @@ async fn run(
     k: &WrappingKey,
     checkpoint: Option<Checkpoint>,
 ) -> (Result<BootReport, StoreError>, Vec<Event>) {
+    run_with(dir, k, checkpoint, &inputs()).await
+}
+
+async fn run_with(
+    dir: &StateDir,
+    k: &WrappingKey,
+    checkpoint: Option<Checkpoint>,
+    i: &Inputs,
+) -> (Result<BootReport, StoreError>, Vec<Event>) {
     let mut audit = Recorder::default();
-    let r = boot(dir, k, checkpoint, &mut audit, NOW).await;
+    let r = boot(dir, k, checkpoint, &mut audit, NOW, &i.boot()).await;
     (r, audit.events)
 }
 
@@ -269,6 +436,8 @@ async fn reseed_then_restart_verifies() {
     assert_eq!(fs::metadata(fx.file(&name)).unwrap().mode() & 0o777, 0o600);
     assert!(!fx.exists(MARKER_FILE));
     assert_eq!(revision_of(&fx.store(), &k), 2);
+    assert_eq!(extracted(&r.graph).layer, inputs().layer);
+    assert_eq!(subject_provenance(&r.graph), [ProvenanceKind::Seed]);
 
     let (again, _) = run(&fx.dir(), &k, checkpoint_of(&r)).await;
     let again = again.unwrap();
@@ -712,7 +881,7 @@ async fn seed_audits_intent_before_persist() {
         fail_intent: true,
         ..Recorder::default()
     };
-    let r = boot(&fx.dir(), &key(1), None, &mut audit, NOW).await;
+    let r = boot(&fx.dir(), &key(1), None, &mut audit, NOW, &inputs().boot()).await;
     assert_eq!(r.unwrap_err(), StoreError::Audit("intent refused".into()));
     assert!(!fx.exists(STORE_FILE));
     assert_eq!(audit.events, vec![Event::Intent(1, false)]);
@@ -729,7 +898,7 @@ async fn reseed_intent_failure_writes_nothing() {
         fail_intent: true,
         ..Recorder::default()
     };
-    let r = boot(&fx.dir(), &k, None, &mut audit, NOW).await;
+    let r = boot(&fx.dir(), &k, None, &mut audit, NOW, &inputs().boot()).await;
     assert!(matches!(r.unwrap_err(), StoreError::Audit(_)));
     assert_eq!(fx.store(), old);
     assert!(fx.rejected().is_empty());
@@ -744,7 +913,7 @@ async fn checkpoint_failure_fails_the_seed_and_the_load() {
         fail_checkpoint: true,
         ..Recorder::default()
     };
-    let r = boot(&fx.dir(), &k, None, &mut audit, NOW).await;
+    let r = boot(&fx.dir(), &k, None, &mut audit, NOW, &inputs().boot()).await;
     assert_eq!(
         r.unwrap_err(),
         StoreError::Audit("checkpoint refused".into())
@@ -753,7 +922,7 @@ async fn checkpoint_failure_fails_the_seed_and_the_load() {
         fail_checkpoint: true,
         ..Recorder::default()
     };
-    let r = boot(&fx.dir(), &k, None, &mut audit, NOW).await;
+    let r = boot(&fx.dir(), &k, None, &mut audit, NOW, &inputs().boot()).await;
     assert_eq!(
         r.unwrap_err(),
         StoreError::Audit("checkpoint refused".into())
@@ -847,6 +1016,14 @@ fn store_error_display() {
     assert_eq!(
         StoreError::Audit("down".into()).to_string(),
         "graph store audit failed: down"
+    );
+    assert_eq!(
+        StoreError::Vocabulary("forged").to_string(),
+        "graph store vocabulary refused: forged"
+    );
+    assert_eq!(
+        StoreError::Identity("role `x` is not compiled in".into()).to_string(),
+        "the kernel identity layer does not build: role `x` is not compiled in"
     );
     assert_eq!(
         StoreError::RejectedNameInUse {
@@ -1211,6 +1388,11 @@ fn each_store_error_has_its_remedy() {
         (StoreError::Io("EACCES".into()), Remedy::CheckStateDir),
         (StoreError::Audit("down".into()), Remedy::CheckAudit),
         (StoreError::InUse, Remedy::StopOtherInstance),
+        (StoreError::Vocabulary("forged"), Remedy::Reseed),
+        (
+            StoreError::Identity("unknown role".into()),
+            Remedy::Investigate,
+        ),
     ];
     for (e, want) in cases {
         assert_eq!(remedy(&e), want, "{e:?}");
@@ -1241,4 +1423,680 @@ async fn a_newer_store_is_never_told_to_reseed() {
         let e = boot_store(&file, &k).await;
         assert_eq!(remedy(&e), Remedy::Reinstall, "{e:?}");
     }
+}
+
+fn cp(revision: u64, file: &[u8]) -> Option<Checkpoint> {
+    Some(Checkpoint {
+        revision,
+        digest: ciphertext_digest(file),
+    })
+}
+
+#[tokio::test]
+async fn first_boot_seeds_the_identity_layer_and_the_digest_node() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let i = inputs();
+    let dir = fx.dir();
+    let r = run_with(&dir, &k, None, &i).await.0.unwrap();
+    let e = extracted(&r.graph);
+    assert_eq!(e.layer, i.layer);
+    assert_eq!(e.vocabulary_sha256, Some(i.digest));
+    assert!(e.unbound.is_empty());
+    assert_eq!(r.graph.nodes().iter().filter(|n| n.kind == ROLE).count(), 4);
+    assert_eq!(subject_provenance(&r.graph), [ProvenanceKind::Seed]);
+    assert_eq!(graph_of(&fx.store(), &k), r.graph);
+    assert_eq!((r.migration, r.identity_transition), (None, false));
+    assert_eq!(dir.store_revision(), 1);
+    assert_eq!(dir.owner(), fx.uid);
+}
+
+#[tokio::test]
+async fn restart_with_the_same_file_loads_without_a_transition() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let first = run(&fx.dir(), &k, None).await.0.unwrap();
+    let before = fx.store();
+    let dir = fx.dir();
+    let (r, events) = run(&dir, &k, checkpoint_of(&first)).await;
+    let r = r.unwrap();
+    assert_eq!((r.migration, r.identity_transition), (None, false));
+    assert_eq!(r.revision, 1);
+    assert_eq!(
+        events,
+        vec![Event::Checkpoint(1, first.digest, "verified".into())]
+    );
+    assert_eq!(fx.store(), before);
+    assert_eq!(dir.store_revision(), 1);
+}
+
+#[tokio::test]
+async fn restart_after_a_file_edit_applies_a_root_file_transition() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let first = run(&fx.dir(), &k, None).await.0.unwrap();
+    let before = fx.store();
+    let e = edited();
+    let dir = fx.dir();
+    let (r, events) = run_with(&dir, &k, checkpoint_of(&first), &e).await;
+    let r = r.unwrap();
+    assert!(r.identity_transition);
+    assert_eq!(r.migration, None);
+    assert_eq!(r.revision, 2);
+    assert_eq!(r.outcome, BootOutcome::Loaded(AnchorState::Verified));
+    assert_eq!(
+        events,
+        vec![
+            Event::Checkpoint(1, first.digest, "verified".into()),
+            Event::Transition(2, "root-file".into()),
+            Event::Checkpoint(2, r.digest, "transitioned".into()),
+        ]
+    );
+    let after = fx.store();
+    assert_ne!(after, before);
+    assert_eq!(r.digest, ciphertext_digest(&after));
+    assert_eq!(graph_of(&after, &k), r.graph);
+    assert_eq!(extracted(&r.graph).layer, e.layer);
+    assert_eq!(subject_provenance(&r.graph), [ProvenanceKind::RootFile]);
+    assert_eq!(dir.store_revision(), 2);
+    drop(dir);
+
+    let (third, events) = run_with(&fx.dir(), &k, checkpoint_of(&r), &e).await;
+    let third = third.unwrap();
+    assert_eq!(third.outcome, BootOutcome::Loaded(AnchorState::Verified));
+    assert!(!third.identity_transition);
+    assert_eq!(events.len(), 1);
+}
+
+#[tokio::test]
+async fn a_failed_transition_intent_persists_nothing() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let first = run(&fx.dir(), &k, None).await.0.unwrap();
+    let before = fx.store();
+    let mut audit = Recorder {
+        fail_transition: true,
+        ..Recorder::default()
+    };
+    let r = boot(
+        &fx.dir(),
+        &k,
+        checkpoint_of(&first),
+        &mut audit,
+        NOW,
+        &edited().boot(),
+    )
+    .await;
+    assert_eq!(
+        r.unwrap_err(),
+        StoreError::Audit("transition refused".into())
+    );
+    assert_eq!(fx.store(), before);
+}
+
+#[tokio::test]
+async fn a_transition_persists_before_its_checkpoint() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let first = run(&fx.dir(), &k, None).await.0.unwrap();
+    let mut audit = Recorder {
+        fail_checkpoint_anchor: Some("transitioned"),
+        ..Recorder::default()
+    };
+    let r = boot(
+        &fx.dir(),
+        &k,
+        checkpoint_of(&first),
+        &mut audit,
+        NOW,
+        &edited().boot(),
+    )
+    .await;
+    assert_eq!(
+        r.unwrap_err(),
+        StoreError::Audit("checkpoint refused".into())
+    );
+    assert_eq!(revision_of(&fx.store(), &k), 2);
+    let (again, _) = run_with(&fx.dir(), &k, checkpoint_of(&first), &edited()).await;
+    let again = again.unwrap();
+    assert_eq!(again.outcome, BootOutcome::Loaded(AnchorState::Advanced));
+    assert_eq!((again.revision, again.identity_transition), (2, false));
+}
+
+async fn s2_boot(
+    revision: u64,
+    i: &Inputs,
+) -> (
+    Fixture,
+    Result<BootReport, StoreError>,
+    Vec<Event>,
+    [u8; 32],
+) {
+    let fx = Fixture::new();
+    let k = key(1);
+    let s2 = s2_sealed(revision, &k);
+    fx.write(STORE_FILE, &s2, 0o600);
+    let (r, events) = run_with(&fx.dir(), &k, cp(revision, &s2), i).await;
+    (fx, r, events, ciphertext_digest(&s2))
+}
+
+fn migrated_digest(events: &[Event]) -> [u8; 32] {
+    match &events[2] {
+        Event::Checkpoint(_, d, anchor) if anchor == "migrated" => *d,
+        other => panic!("expected the migrated checkpoint, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn s2_store_migrates_then_seeds_identity() {
+    let i = inputs();
+    let (fx, r, events, s2) = s2_boot(1, &i).await;
+    let r = r.unwrap();
+    assert_eq!(
+        r.migration,
+        Some(Migration {
+            from: None,
+            to: i.digest,
+            unbound: vec![]
+        })
+    );
+    assert!(r.identity_transition);
+    assert_eq!(r.revision, 3);
+    assert_eq!(r.outcome, BootOutcome::Loaded(AnchorState::Verified));
+    let m = migrated_digest(&events);
+    assert_ne!(m, r.digest);
+    assert_eq!(
+        events,
+        vec![
+            Event::Checkpoint(1, s2, "verified".into()),
+            Event::Migrate(2, None, i.digest, vec![]),
+            Event::Checkpoint(2, m, "migrated".into()),
+            Event::Transition(3, "root-file".into()),
+            Event::Checkpoint(3, r.digest, "transitioned".into()),
+        ]
+    );
+    assert_eq!(extracted(&r.graph).layer, i.layer);
+    assert_eq!(r.digest, ciphertext_digest(&fx.store()));
+}
+
+#[tokio::test]
+async fn s2_store_without_bindings_migrates_in_one_persist() {
+    let i = inputs_with(layer(None, &[]));
+    let (fx, r, events, s2) = s2_boot(1, &i).await;
+    let r = r.unwrap();
+    assert!(r.migration.is_some());
+    assert!(!r.identity_transition);
+    assert_eq!(r.revision, 2);
+    assert_eq!(
+        events,
+        vec![
+            Event::Checkpoint(1, s2, "verified".into()),
+            Event::Migrate(2, None, i.digest, vec![]),
+            Event::Checkpoint(2, r.digest, "migrated".into()),
+        ]
+    );
+    let e = extracted(&graph_of(&fx.store(), &key(1)));
+    assert_eq!(e.layer, i.layer);
+    assert_eq!(e.vocabulary_sha256, Some(i.digest));
+}
+
+#[tokio::test]
+async fn a_pre_s3_store_with_a_checkpoint_at_its_revision_is_verified_then_migrated() {
+    let i = inputs();
+    let (_fx, r, events, _) = s2_boot(7, &i).await;
+    let r = r.unwrap();
+    assert_eq!(r.outcome, BootOutcome::Loaded(AnchorState::Verified));
+    assert_eq!(r.revision, 9);
+    assert_eq!(events[1], Event::Migrate(8, None, i.digest, vec![]));
+    assert_eq!(events[3], Event::Transition(9, "root-file".into()));
+}
+
+#[tokio::test]
+async fn a_migration_at_the_last_revision_refuses_as_exhausted() {
+    let (fx, r, _, _) = s2_boot(u64::MAX, &inputs()).await;
+    assert_eq!(
+        r.unwrap_err(),
+        StoreError::Refused(Refusal::RevisionExhausted)
+    );
+    assert_eq!(revision_of(&fx.store(), &key(1)), u64::MAX);
+}
+
+#[tokio::test]
+async fn migration_persists_before_its_checkpoint_and_a_failed_intent_persists_nothing() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let s2 = s2_sealed(1, &k);
+    fx.write(STORE_FILE, &s2, 0o600);
+    let mut audit = Recorder {
+        fail_migrate: true,
+        ..Recorder::default()
+    };
+    let r = boot(&fx.dir(), &k, cp(1, &s2), &mut audit, NOW, &inputs().boot()).await;
+    assert_eq!(r.unwrap_err(), StoreError::Audit("migrate refused".into()));
+    assert_eq!(fx.store(), s2);
+    assert_eq!(audit.events.len(), 2);
+
+    let mut audit = Recorder {
+        fail_checkpoint_anchor: Some("migrated"),
+        ..Recorder::default()
+    };
+    let r = boot(&fx.dir(), &k, cp(1, &s2), &mut audit, NOW, &inputs().boot()).await;
+    assert_eq!(
+        r.unwrap_err(),
+        StoreError::Audit("checkpoint refused".into())
+    );
+    assert_eq!(revision_of(&fx.store(), &k), 2);
+    assert_eq!(audit.events.len(), 3);
+}
+
+#[tokio::test]
+async fn forged_vocabulary_refuses() {
+    let k = key(1);
+    let i = inputs();
+    let l = layer(None, &[]);
+    let claims_binary = identity::build(&l, &wider(), i.digest, 1, ProvenanceKind::Seed).unwrap();
+    let roles_only = identity::build(&l, &i.compiled, i.digest, 1, ProvenanceKind::Seed).unwrap();
+    let no_digest = rebuild(
+        &roles_only,
+        |n| (n.key != VOCABULARY_SOURCE_KEY).then(|| n.clone()),
+        &i.compiled,
+    );
+    let stale_claim = identity::build(&l, &wider(), [7; 32], 1, ProvenanceKind::Seed).unwrap();
+    for forged in [claims_binary, no_digest, stale_claim] {
+        let fx = Fixture::new();
+        let file = seal_graph(&forged, &k);
+        fx.write(STORE_FILE, &file, 0o600);
+        let (r, events) = run_with(&fx.dir(), &k, cp(1, &file), &i).await;
+        let e = r.unwrap_err();
+        assert!(matches!(e, StoreError::Vocabulary(_)), "{e:?}");
+        assert_eq!(remedy(&e), Remedy::Reseed);
+        assert_eq!(fx.store(), file);
+        assert_eq!(events.len(), 1);
+    }
+
+    let bad_hex = rebuild(
+        &roles_only,
+        |n| {
+            let mut n = n.clone();
+            if n.key == VOCABULARY_SOURCE_KEY {
+                n.attrs
+                    .insert(ATTR_SHA256.into(), AttrValue::Str("AB".repeat(32)));
+            }
+            Some(n)
+        },
+        &i.compiled,
+    );
+    let fx = Fixture::new();
+    let file = seal_graph(&bad_hex, &k);
+    fx.write(STORE_FILE, &file, 0o600);
+    let (r, _) = run_with(&fx.dir(), &k, cp(1, &file), &i).await;
+    assert!(matches!(r.unwrap_err(), StoreError::Format(_)));
+}
+
+#[tokio::test]
+async fn a_binds_to_a_vanished_role_is_dropped_and_reported() {
+    let k = key(1);
+    let i = inputs();
+    let old_bindings: &[u8] = br#"{"admin":["root"],"superadmin":["alice"]}"#;
+    let stored = layer(
+        Some(old_bindings),
+        &[
+            (1000, "alice", "superadmin"),
+            (0, "root", "admin"),
+            (666, "mallory", "adversary"),
+        ],
+    );
+    let wide = vocabulary::digest(&wider()).unwrap();
+    let g = identity::build(&stored, &wider(), wide, 1, ProvenanceKind::Seed).unwrap();
+    let file = seal_graph(&g, &k);
+
+    let kept = inputs_with(layer(
+        Some(old_bindings),
+        &[(0, "root", "admin"), (666, "mallory", "adversary")],
+    ));
+    let fx = Fixture::new();
+    fx.write(STORE_FILE, &file, 0o600);
+    let r = run_with(&fx.dir(), &k, cp(1, &file), &kept)
+        .await
+        .0
+        .unwrap();
+    assert_eq!(
+        r.migration,
+        Some(Migration {
+            from: Some(wide),
+            to: i.digest,
+            unbound: vec![1000]
+        })
+    );
+    assert!(!r.identity_transition);
+    assert_eq!(r.revision, 2);
+    assert_eq!(extracted(&r.graph).layer, kept.layer);
+
+    let fx = Fixture::new();
+    fx.write(STORE_FILE, &file, 0o600);
+    let (r, events) = run_with(&fx.dir(), &k, cp(1, &file), &i).await;
+    let r = r.unwrap();
+    assert_eq!(r.migration.unwrap().unbound, vec![1000]);
+    assert!(r.identity_transition);
+    assert_eq!(r.revision, 3);
+    assert_eq!(
+        events[1],
+        Event::Migrate(2, Some(wide), i.digest, vec![1000])
+    );
+    assert_eq!(extracted(&r.graph).layer, i.layer);
+}
+
+#[tokio::test]
+async fn a_classification_system_change_migrates_the_role_labels() {
+    let k = key(1);
+    let fx = Fixture::new();
+    let first = run(&fx.dir(), &k, None).await.0.unwrap();
+    let aus = inputs_with(layer_at(
+        "UNOFFICIAL",
+        Some(br#"{"admin":["root"]}"#),
+        &[(0, "root", "admin")],
+    ));
+    let (r, events) = run_with(&fx.dir(), &k, checkpoint_of(&first), &aus).await;
+    let r = r.unwrap();
+    assert_eq!(r.migration.as_ref().unwrap().from, Some(inputs().digest));
+    assert!(!r.identity_transition);
+    assert_eq!(r.revision, 2);
+    assert_eq!(events.len(), 3);
+    assert_eq!(extracted(&r.graph).layer, aus.layer);
+    assert!(r.graph.nodes().iter().all(|n| n.label == "UNOFFICIAL"));
+}
+
+#[tokio::test]
+async fn a_multi_subject_restart_with_the_same_file_does_not_churn() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let b: &[u8] = b"five";
+    let one = inputs_with(layer(
+        Some(b),
+        &[
+            (1003, "c", "user"),
+            (0, "root", "admin"),
+            (666, "m", "adversary"),
+            (1001, "a", "guest"),
+            (1002, "b", "user"),
+        ],
+    ));
+    let two = inputs_with(layer(
+        Some(b),
+        &[
+            (1002, "b", "user"),
+            (1001, "a", "guest"),
+            (1003, "c", "user"),
+            (666, "m", "adversary"),
+            (0, "root", "admin"),
+        ],
+    ));
+    let first = run_with(&fx.dir(), &k, None, &one).await.0.unwrap();
+    let (r, events) = run_with(&fx.dir(), &k, checkpoint_of(&first), &two).await;
+    let r = r.unwrap();
+    assert!(!r.identity_transition);
+    assert_eq!(r.revision, 1);
+    assert_eq!(events.len(), 1);
+}
+
+#[tokio::test]
+async fn an_identity_layer_that_does_not_build_refuses_before_any_intent() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let bad = inputs_with(layer(None, &[(5, "x", "superadmin")]));
+    let (r, events) = run_with(&fx.dir(), &k, None, &bad).await;
+    let e = r.unwrap_err();
+    assert!(matches!(e, StoreError::Identity(_)), "{e:?}");
+    assert_eq!(remedy(&e), Remedy::Investigate);
+    assert!(events.is_empty());
+    assert!(!fx.exists(STORE_FILE));
+}
+
+fn next_graph(revision: u64, i: &Inputs) -> Graph {
+    identity::build(
+        &i.layer,
+        &i.compiled,
+        i.digest,
+        revision,
+        ProvenanceKind::RootFile,
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn commit_persists_at_the_next_revision_and_checkpoints() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let dir = fx.dir();
+    run(&dir, &k, None).await.0.unwrap();
+    let e = edited();
+    let mut audit = Recorder::default();
+    let c = commit(
+        &dir,
+        &k,
+        &next_graph(2, &e),
+        &mut audit,
+        INITIATOR_ROOT_FILE,
+    )
+    .await
+    .unwrap();
+    let file = fx.store();
+    assert_eq!(
+        c,
+        Committed {
+            revision: 2,
+            digest: ciphertext_digest(&file),
+            checkpoint_error: None
+        }
+    );
+    assert_eq!(
+        audit.events,
+        vec![
+            Event::Transition(2, "root-file".into()),
+            Event::Checkpoint(2, c.digest, "transitioned".into()),
+        ]
+    );
+    assert_eq!(dir.store_revision(), 2);
+    assert_eq!(graph_of(&file, &k), next_graph(2, &e));
+
+    for stale in [1, 2] {
+        let mut audit = Recorder::default();
+        let r = commit(
+            &dir,
+            &k,
+            &next_graph(stale, &e),
+            &mut audit,
+            INITIATOR_ROOT_FILE,
+        )
+        .await;
+        assert_eq!(
+            r.unwrap_err(),
+            StoreError::Format("commit must advance the revision".into())
+        );
+        assert!(audit.events.is_empty());
+        assert_eq!(fx.store(), file);
+    }
+    drop(dir);
+    let (r, _) = run_with(&fx.dir(), &k, cp(2, &file), &e).await;
+    let r = r.unwrap();
+    assert_eq!(r.outcome, BootOutcome::Loaded(AnchorState::Verified));
+    assert!(!r.identity_transition);
+}
+
+#[tokio::test]
+async fn commit_names_its_initiator() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let dir = fx.dir();
+    run(&dir, &k, None).await.0.unwrap();
+    let mut audit = Recorder::default();
+    commit(
+        &dir,
+        &k,
+        &next_graph(2, &edited()),
+        &mut audit,
+        INITIATOR_SEED,
+    )
+    .await
+    .unwrap();
+    assert_eq!(audit.events[0], Event::Transition(2, "seed".into()));
+}
+
+#[tokio::test]
+async fn commit_with_a_failing_checkpoint_still_publishes_and_reports_it() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let dir = fx.dir();
+    let first = run(&dir, &k, None).await.0.unwrap();
+    let e = edited();
+    let mut audit = Recorder {
+        fail_checkpoint: true,
+        ..Recorder::default()
+    };
+    let c = commit(
+        &dir,
+        &k,
+        &next_graph(2, &e),
+        &mut audit,
+        INITIATOR_ROOT_FILE,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        c.checkpoint_error.as_deref(),
+        Some("graph store audit failed: checkpoint refused")
+    );
+    assert_eq!(c.revision, 2);
+    assert_eq!(c.digest, ciphertext_digest(&fx.store()));
+    assert_eq!(revision_of(&fx.store(), &k), 2);
+    assert_eq!(dir.store_revision(), 2);
+
+    let mut audit = Recorder::default();
+    let c3 = commit(
+        &dir,
+        &k,
+        &next_graph(3, &e),
+        &mut audit,
+        INITIATOR_ROOT_FILE,
+    )
+    .await
+    .unwrap();
+    assert_eq!((c3.revision, c3.checkpoint_error), (3, None));
+    drop(dir);
+    let (r, _) = run_with(&fx.dir(), &k, checkpoint_of(&first), &e).await;
+    let r = r.unwrap();
+    assert_eq!(r.outcome, BootOutcome::Loaded(AnchorState::Advanced));
+    assert_eq!(r.revision, 3);
+}
+
+#[tokio::test]
+async fn commit_with_a_failing_intent_writes_nothing() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let dir = fx.dir();
+    run(&dir, &k, None).await.0.unwrap();
+    let before = fx.store();
+    let mut audit = Recorder {
+        fail_transition: true,
+        ..Recorder::default()
+    };
+    let r = commit(
+        &dir,
+        &k,
+        &next_graph(2, &edited()),
+        &mut audit,
+        INITIATOR_ROOT_FILE,
+    )
+    .await;
+    assert_eq!(
+        r.unwrap_err(),
+        StoreError::Audit("transition refused".into())
+    );
+    assert_eq!(fx.store(), before);
+    assert_eq!(dir.store_revision(), 1);
+    assert_eq!(audit.events.len(), 1);
+}
+
+#[tokio::test]
+async fn a_plain_load_sets_the_store_revision_floor() {
+    let fx = Fixture::new();
+    let k = key(1);
+    fx.write(STORE_FILE, &sealed_graph(7, &k), 0o600);
+    let dir = fx.dir();
+    assert_eq!(dir.store_revision(), 0);
+    let r = run(&dir, &k, None).await.0.unwrap();
+    assert_eq!(r.outcome, BootOutcome::Loaded(AnchorState::Unavailable));
+    assert_eq!(
+        (r.revision, r.migration, r.identity_transition),
+        (7, None, false)
+    );
+    assert_eq!(dir.store_revision(), 7);
+    let before = fx.store();
+    let e = edited();
+    let r = commit(
+        &dir,
+        &k,
+        &next_graph(7, &e),
+        &mut Recorder::default(),
+        INITIATOR_ROOT_FILE,
+    )
+    .await;
+    assert_eq!(
+        r.unwrap_err(),
+        StoreError::Format("commit must advance the revision".into())
+    );
+    assert_eq!(fx.store(), before);
+    commit(
+        &dir,
+        &k,
+        &next_graph(8, &e),
+        &mut Recorder::default(),
+        INITIATOR_ROOT_FILE,
+    )
+    .await
+    .unwrap();
+    assert_eq!(dir.store_revision(), 8);
+}
+
+#[tokio::test]
+async fn restoring_the_pre_reload_store_after_a_reload_refuses_as_rolled_back() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let first = run(&fx.dir(), &k, None).await.0.unwrap();
+    let dir = fx.dir();
+    run(&dir, &k, checkpoint_of(&first)).await.0.unwrap();
+    let saved = fx.store();
+    let c = commit(
+        &dir,
+        &k,
+        &next_graph(2, &edited()),
+        &mut Recorder::default(),
+        INITIATOR_ROOT_FILE,
+    )
+    .await
+    .unwrap();
+    drop(dir);
+    fx.write(STORE_FILE, &saved, 0o600);
+    let (r, _) = run(
+        &fx.dir(),
+        &k,
+        Some(Checkpoint {
+            revision: c.revision,
+            digest: c.digest,
+        }),
+    )
+    .await;
+    assert_eq!(
+        r.unwrap_err(),
+        StoreError::Refused(Refusal::RolledBack {
+            store: 1,
+            checkpoint: 2
+        })
+    );
+}
+
+#[test]
+fn state_dir_is_shareable_across_threads() {
+    fn shareable<T: Send + Sync>() {}
+    shareable::<StateDir>();
 }

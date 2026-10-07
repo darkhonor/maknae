@@ -164,10 +164,14 @@ pub fn open(file: &[u8], kek: &WrappingKey) -> Result<Zeroizing<Vec<u8>>, Envelo
     Ok(body)
 }
 
-pub fn ciphertext_digest(file: &[u8]) -> [u8; 32] {
+pub fn sha256(bytes: &[u8]) -> [u8; 32] {
     let mut out = [0u8; 32];
-    out.copy_from_slice(digest(&SHA256, file).as_ref());
+    out.copy_from_slice(digest(&SHA256, bytes).as_ref());
     out
+}
+
+pub fn ciphertext_digest(file: &[u8]) -> [u8; 32] {
+    sha256(file)
 }
 
 #[cfg(test)]
@@ -268,6 +272,13 @@ mod tests {
     #[test]
     fn digest_is_sha256_of_the_file() {
         assert_eq!(ciphertext_digest(b"abc")[..4], [0xba, 0x78, 0x16, 0xbf]);
+    }
+
+    #[test]
+    fn sha256_is_the_digest_ciphertext_digest_uses() {
+        assert_eq!(sha256(b"abc")[..4], [0xba, 0x78, 0x16, 0xbf]);
+        assert_eq!(sha256(b"abc")[28..], [0xf2, 0x00, 0x15, 0xad]);
+        assert_eq!(ciphertext_digest(b"graph"), sha256(b"graph"));
     }
 
     #[test]

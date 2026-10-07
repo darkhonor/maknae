@@ -1152,6 +1152,7 @@ dependencies = [
  "maknae-authz-basic",
  "maknae-classification-aus",
  "maknae-config",
+ "maknae-graph",
  "maknae-io",
  "maknae-msgs",
  "maknae-proto",

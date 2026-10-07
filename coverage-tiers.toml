@@ -284,6 +284,7 @@ files = [
   "crates/maknae-state/src/anchor.rs",
   "crates/maknae-state/src/envelope.rs",
   "crates/maknae-state/src/store.rs",
+  "crates/maknae-state/src/vocabulary.rs",
 ]
 # maknae-security request.rs/authorizer.rs and maknae-config value.rs are pure
 # declarations (no executable production regions) → T3, not T1. The mutation set
