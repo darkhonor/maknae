@@ -3371,51 +3371,45 @@ where
 {
     async fn run(self: &Arc<Self>) -> Result<crate::reload::Applied, crate::reload::Refusal> {
         let _turn = self.lock.lock().await;
-        if *self.stopping.borrow() {
-            return Err(crate::reload::Refusal::Shutdown);
-        }
-        let seq = Seq::new();
-        let ctx = BootCtx {
-            event: "reload",
-            host: &self.host,
-            socket: &self.socket,
-            euid: self.euid,
-            session_id: self.session_ids.next_session(),
-            seq: &seq,
-            au3_1: &self.au3_1,
-        };
-        let store_revision = self.revision.load(AtomicOrdering::Acquire);
-        let io = ReloadIo {
-            reloader: self,
-            ctx: &ctx,
-            store_revision,
-            committed: std::sync::Mutex::new(None),
-        };
-        let mut stopping = self.stopping.subscribe();
-        let stopped = async move {
-            let _ = stopping.wait_for(|stop| *stop).await;
-        };
-        let r = crate::reload::run_reload(store_revision, &io, &io, &io, &io, stopped).await;
-        if let Ok(applied) = &r {
-            self.revision
-                .store(applied.revision, AtomicOrdering::Release);
-        }
-        r
+        let stopping = *self.stopping.borrow();
+        crate::reload::turn(stopping, &self.revision, |store_revision| async move {
+            let seq = Seq::new();
+            let ctx = BootCtx {
+                event: "reload",
+                host: &self.host,
+                socket: &self.socket,
+                euid: self.euid,
+                session_id: self.session_ids.next_session(),
+                seq: &seq,
+                au3_1: &self.au3_1,
+            };
+            let io = ReloadIo {
+                reloader: self,
+                ctx: &ctx,
+                store_revision,
+                committed: std::sync::Mutex::new(None),
+            };
+            let mut stopping = self.stopping.subscribe();
+            let stopped = async move {
+                let _ = stopping.wait_for(|stop| *stop).await;
+            };
+            crate::reload::run_reload(store_revision, &io, &io, &io, &io, stopped).await
+        })
+        .await
     }
 
     /// Abandons a reload still loading and waits up to `RELOAD_STOP_TIMEOUT` for one
     /// already committing, then stops the reload task; on elapse it leaves that reload
     /// running. Only the first call waits, even if it was dropped mid-wait.
     async fn stop(&self, reloads: &tokio::task::AbortHandle) {
-        if self.stopping.send_replace(true) {
-            return;
-        }
-        match tokio::time::timeout(RELOAD_STOP_TIMEOUT, self.lock.lock()).await {
-            Ok(_turn) => reloads.abort(),
-            Err(_) => eprintln!(
+        let already = self.stopping.send_replace(true);
+        match crate::reload::stop(already, self.lock.lock(), RELOAD_STOP_TIMEOUT).await {
+            crate::reload::Stop::Abort(_turn) => reloads.abort(),
+            crate::reload::Stop::LeaveRunning => eprintln!(
                 "maknaed: a reload still held its turn after {}s; stopping without it",
                 RELOAD_STOP_TIMEOUT.as_secs()
             ),
+            crate::reload::Stop::Repeated => {}
         }
     }
 }
@@ -3434,7 +3428,7 @@ fn load_candidate<B: maknae_authz_basic::Baseline>(
     label: &str,
     store_revision: u64,
 ) -> Result<(crate::reload::Plan, ReloadCandidate), crate::reload::Refusal> {
-    use crate::reload::{Plan, Refusal};
+    use crate::reload::Refusal;
     let compile_refused = |m: String| Refusal::Compile(m);
     let source = baseline
         .load_source()
@@ -3444,10 +3438,12 @@ fn load_candidate<B: maknae_authz_basic::Baseline>(
     let current = baseline.snapshot();
     let persisted = maknae_graph::identity::extract(current.persisted())
         .map_err(|e| compile_refused(e.to_string()))?;
-    let plan = crate::reload::plan(&persisted.layer, &next, store_revision);
-    let graph = match plan {
-        Plan::Unchanged => Arc::clone(current.persisted()),
-        Plan::Persist { revision } => Arc::new(
+    let (plan, graph) = crate::reload::plan_candidate(
+        &persisted.layer,
+        &next,
+        store_revision,
+        current.persisted(),
+        |revision| {
             maknae_graph::identity::build(
                 &next,
                 &vocabulary.persisted,
@@ -3455,9 +3451,10 @@ fn load_candidate<B: maknae_authz_basic::Baseline>(
                 revision,
                 maknae_graph::record::ProvenanceKind::RootFile,
             )
-            .map_err(|e| compile_refused(e.to_string()))?,
-        ),
-    };
+            .map(Arc::new)
+            .map_err(|e| compile_refused(e.to_string()))
+        },
+    )?;
     let snapshot = maknae_authz_basic::snapshot::compile(
         Arc::clone(&graph),
         &source,

@@ -5,6 +5,8 @@
 use maknae_graph::identity::IdentityLayer;
 use std::fmt;
 use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Plan {
@@ -21,6 +23,67 @@ pub fn plan(persisted: &IdentityLayer, next: &IdentityLayer, store_revision: u64
         Plan::Persist {
             revision: store_revision.saturating_add(1),
         }
+    }
+}
+
+/// The [`plan`] and the identity graph it calls for: `current` itself when
+/// unchanged, else what `build` makes at the plan's revision.
+pub fn plan_candidate<G: Clone, E>(
+    persisted: &IdentityLayer,
+    next: &IdentityLayer,
+    store_revision: u64,
+    current: &G,
+    build: impl FnOnce(u64) -> Result<G, E>,
+) -> Result<(Plan, G), E> {
+    let plan = plan(persisted, next, store_revision);
+    let graph = match plan {
+        Plan::Unchanged => current.clone(),
+        Plan::Persist { revision } => build(revision)?,
+    };
+    Ok((plan, graph))
+}
+
+/// One reload's turn: refused once shutdown has begun, otherwise run from the
+/// shared store revision, which advances only on `Ok`.
+pub async fn turn<F, Fut>(
+    stopping: bool,
+    revision: &AtomicU64,
+    reload: F,
+) -> Result<Applied, Refusal>
+where
+    F: FnOnce(u64) -> Fut,
+    Fut: Future<Output = Result<Applied, Refusal>>,
+{
+    if stopping {
+        return Err(Refusal::Shutdown);
+    }
+    let r = reload(revision.load(Ordering::Acquire)).await;
+    if let Ok(applied) = &r {
+        revision.store(applied.revision, Ordering::Release);
+    }
+    r
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Stop<T> {
+    Repeated,
+    /// Holds the turn: abort the reload task before releasing it.
+    Abort(T),
+    LeaveRunning,
+}
+
+/// Only the first stop waits, and for at most `limit`, on the reload turn.
+pub async fn stop<T>(
+    already_stopping: bool,
+    turn: impl Future<Output = T>,
+    limit: Duration,
+) -> Stop<T> {
+    if already_stopping {
+        return Stop::Repeated;
+    }
+    match tokio::time::timeout(limit, turn).await {
+        Ok(held) => Stop::Abort(held),
+        Err(_) => Stop::LeaveRunning,
     }
 }
 
@@ -233,6 +296,83 @@ mod tests {
         let a = layer(&[]);
         let b = layer(&[(0, "admin")]);
         assert_eq!(plan(&a, &b, u64::MAX), Plan::Persist { revision: u64::MAX });
+    }
+
+    #[test]
+    fn an_unchanged_plan_reuses_the_current_graph_and_builds_nothing() {
+        let a = layer(&[(0, "admin")]);
+        let r: Result<_, ()> = plan_candidate(&a, &a.clone(), 4, &"current", |_| {
+            panic!("an unchanged layer builds nothing")
+        });
+        assert_eq!(r, Ok((Plan::Unchanged, "current")));
+    }
+
+    #[test]
+    fn a_changed_layer_builds_at_the_planned_revision_or_refuses() {
+        let a = layer(&[(0, "admin")]);
+        let b = layer(&[(0, "adversary")]);
+        let built: Result<_, ()> = plan_candidate(&a, &b, 4, &0, |revision| Ok(revision * 10));
+        assert_eq!(built, Ok((Plan::Persist { revision: 5 }, 50)));
+        assert_eq!(
+            plan_candidate(&a, &b, 4, &0, |_| Err::<u64, _>("build refused")),
+            Err("build refused")
+        );
+    }
+
+    fn applied(revision: u64) -> Result<Applied, Refusal> {
+        Ok(Applied {
+            revision,
+            persisted: true,
+            checkpoint_error: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn a_turn_after_shutdown_began_is_refused_without_running() {
+        let revision = AtomicU64::new(3);
+        let r = turn(true, &revision, |_| async { panic!("must not run") }).await;
+        assert_eq!(r, Err(Refusal::Shutdown));
+        assert_eq!(revision.load(Ordering::Acquire), 3);
+    }
+
+    #[tokio::test]
+    async fn a_turn_runs_from_the_shared_revision_and_advances_it_only_on_ok() {
+        let revision = AtomicU64::new(3);
+        let r = turn(false, &revision, |from| async move { applied(from + 4) }).await;
+        assert_eq!(r, applied(7));
+        assert_eq!(revision.load(Ordering::Acquire), 7);
+        let refused = turn(false, &revision, |_| async {
+            Err(Refusal::Persist("stale".into()))
+        })
+        .await;
+        assert_eq!(refused, Err(Refusal::Persist("stale".into())));
+        assert_eq!(revision.load(Ordering::Acquire), 7);
+    }
+
+    #[tokio::test]
+    async fn only_the_first_stop_waits_and_it_aborts_once_it_holds_the_turn() {
+        let limit = Duration::from_secs(5);
+        assert_eq!(
+            stop(
+                true,
+                async { panic!("a repeated stop waits on nothing") },
+                limit
+            )
+            .await,
+            Stop::<()>::Repeated
+        );
+        assert_eq!(
+            stop(false, async { "turn" }, limit).await,
+            Stop::Abort("turn")
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_turn_not_released_within_the_limit_is_left_running() {
+        assert_eq!(
+            stop(false, std::future::pending::<()>(), Duration::from_secs(5)).await,
+            Stop::LeaveRunning
+        );
     }
 
     #[test]
