@@ -7,7 +7,7 @@ use crate::vocabulary::{self, Assessment};
 use maknae_graph::format::{self, FormatError, FORMAT_VERSION};
 use maknae_graph::graph::Graph;
 use maknae_graph::identity::{self, Extracted, IdentityLayer};
-use maknae_graph::kernel::{ROLE, SCHEMA};
+use maknae_graph::kernel::{CONFIG_SOURCE, ROLE, SCHEMA};
 use maknae_graph::record::{GraphSpace, ProvenanceKind};
 use maknae_graph::schema::CompiledSet;
 use maknae_io::{
@@ -17,7 +17,7 @@ use maknae_io::{
 use std::fmt;
 use std::future::Future;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 pub use maknae_config::state::{MARKER_FILE, MARKER_MAX_BYTES, STATE_DIR, STORE_FILE};
 
@@ -47,6 +47,7 @@ pub enum StoreError {
     RejectedNameInUse { name: String, cause: String },
     Vocabulary(&'static str),
     Identity(String),
+    StaleRevision { store: u64, attempted: u64 },
 }
 
 impl fmt::Display for StoreError {
@@ -74,6 +75,10 @@ impl fmt::Display for StoreError {
             Self::Identity(cause) => {
                 write!(f, "the kernel identity layer does not build: {cause}")
             }
+            Self::StaleRevision { store, attempted } => write!(
+                f,
+                "graph store commit at revision {attempted} does not advance the store's revision {store}"
+            ),
         }
     }
 }
@@ -113,7 +118,7 @@ pub fn remedy(e: &StoreError) -> Remedy {
         StoreError::StateDir(_) | StoreError::Io(_) => Remedy::CheckStateDir,
         StoreError::InUse => Remedy::StopOtherInstance,
         StoreError::Audit(_) => Remedy::CheckAudit,
-        StoreError::Identity(_) => Remedy::Investigate,
+        StoreError::Identity(_) | StoreError::StaleRevision { .. } => Remedy::Investigate,
     }
 }
 
@@ -129,7 +134,7 @@ pub struct StateDir {
     _lock: AnchorLock,
     owner: u32,
     marker_owner: u32,
-    store_revision: AtomicU64,
+    store_revision: Mutex<u64>,
 }
 
 impl StateDir {
@@ -167,7 +172,7 @@ impl StateDir {
             _lock: lock,
             owner,
             marker_owner,
-            store_revision: AtomicU64::new(0),
+            store_revision: Mutex::new(0),
         })
     }
 
@@ -177,14 +182,31 @@ impl StateDir {
 
     /// The revision of the store as this process last read or wrote it; a commit must exceed it.
     pub fn store_revision(&self) -> u64 {
-        self.store_revision.load(Ordering::SeqCst)
+        *self.floor()
+    }
+
+    fn floor(&self) -> MutexGuard<'_, u64> {
+        self.store_revision
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn set_store_revision(&self, revision: u64) {
+        *self.floor() = revision;
     }
 
     fn persist(&self, key: &WrappingKey, graph: &Graph) -> Result<[u8; 32], StoreError> {
+        let mut floor = self.floor();
+        let attempted = graph.revision();
+        if attempted <= *floor {
+            return Err(StoreError::StaleRevision {
+                store: *floor,
+                attempted,
+            });
+        }
         let file = seal(&format::encode(graph), key)?;
         self.publish(STORE_FILE, &file)?;
-        self.store_revision
-            .store(graph.revision(), Ordering::SeqCst);
+        *floor = attempted;
         Ok(ciphertext_digest(&file))
     }
 
@@ -501,6 +523,13 @@ pub async fn boot(
     Ok(report)
 }
 
+fn is_canonical(graph: &Graph, layer: &IdentityLayer, inputs: &BootInputs<'_>) -> bool {
+    graph
+        .lookup(CONFIG_SOURCE, &layer.source)
+        .and_then(|n| build(layer, inputs, graph.revision(), n.provenance.kind).ok())
+        .is_some_and(|rebuilt| rebuilt == *graph)
+}
+
 async fn load(
     dir: &StateDir,
     key: &WrappingKey,
@@ -515,7 +544,36 @@ async fn load(
         extracted,
         facts,
     } = decoded;
-    dir.store_revision.store(facts.revision, Ordering::SeqCst);
+    let to = inputs.vocabulary_sha256;
+    let mut layer = extracted.layer;
+    let mut revision = facts.revision;
+    let migration = match vocabulary::assess(extracted.vocabulary_sha256, &stored, to) {
+        Assessment::Forged(why) => return Err(StoreError::Vocabulary(why)),
+        Assessment::Current => None,
+        Assessment::Upgrade { from } => {
+            let (migrated, mut unbound) = migrated_layer(&layer, inputs.identity, inputs.compiled);
+            unbound.extend(extracted.unbound);
+            unbound.sort_unstable();
+            revision = next_revision(revision)?;
+            let next = build(&migrated, inputs, revision, ProvenanceKind::Kernel)?;
+            layer = migrated;
+            Some((Migration { from, to, unbound }, next))
+        }
+    };
+    let stale = migration.is_none() && !is_canonical(&graph, &layer, inputs);
+    let transition = if stale || sorted(&layer) != sorted(inputs.identity) {
+        revision = next_revision(revision)?;
+        Some(build(
+            inputs.identity,
+            inputs,
+            revision,
+            ProvenanceKind::RootFile,
+        )?)
+    } else {
+        None
+    };
+
+    dir.set_store_revision(facts.revision);
     audit
         .checkpoint(facts.revision, facts.digest, state.as_str())
         .await?;
@@ -528,41 +586,30 @@ async fn load(
         migration: None,
         identity_transition: false,
     };
-    let mut layer = extracted.layer;
-    let to = inputs.vocabulary_sha256;
-    match vocabulary::assess(extracted.vocabulary_sha256, &stored, to) {
-        Assessment::Forged(why) => return Err(StoreError::Vocabulary(why)),
-        Assessment::Current => {}
-        Assessment::Upgrade { from } => {
-            let (migrated, mut unbound) = migrated_layer(&layer, inputs.identity, inputs.compiled);
-            unbound.extend(extracted.unbound);
-            unbound.sort_unstable();
-            unbound.dedup();
-            let revision = next_revision(report.revision)?;
-            let graph = build(&migrated, inputs, revision, ProvenanceKind::Kernel)?;
-            audit.intent_migrate(revision, from, to, &unbound).await?;
-            let digest = dir.persist(key, &graph)?;
-            audit.checkpoint(revision, digest, ANCHOR_MIGRATED).await?;
-            report.revision = revision;
-            report.digest = digest;
-            report.graph = graph;
-            report.migration = Some(Migration { from, to, unbound });
-            layer = migrated;
-        }
-    }
-    if sorted(&layer) != sorted(inputs.identity) {
-        let revision = next_revision(report.revision)?;
-        let graph = build(inputs.identity, inputs, revision, ProvenanceKind::RootFile)?;
+    if let Some((m, next)) = migration {
         audit
-            .intent_transition(revision, INITIATOR_ROOT_FILE)
+            .intent_migrate(next.revision(), m.from, m.to, &m.unbound)
             .await?;
-        let digest = dir.persist(key, &graph)?;
+        let digest = dir.persist(key, &next)?;
         audit
-            .checkpoint(revision, digest, ANCHOR_TRANSITIONED)
+            .checkpoint(next.revision(), digest, ANCHOR_MIGRATED)
             .await?;
-        report.revision = revision;
+        report.revision = next.revision();
         report.digest = digest;
-        report.graph = graph;
+        report.graph = next;
+        report.migration = Some(m);
+    }
+    if let Some(next) = transition {
+        audit
+            .intent_transition(next.revision(), INITIATOR_ROOT_FILE)
+            .await?;
+        let digest = dir.persist(key, &next)?;
+        audit
+            .checkpoint(next.revision(), digest, ANCHOR_TRANSITIONED)
+            .await?;
+        report.revision = next.revision();
+        report.digest = digest;
+        report.graph = next;
         report.identity_transition = true;
     }
     Ok(report)
@@ -570,6 +617,7 @@ async fn load(
 
 /// Persists a validated identity transition: intent, then publish, then checkpoint. The
 /// publish is the point of no return, so a checkpoint failure after it is reported, not raised.
+/// Callers serialize commits; the floor is re-checked under a lock at publish regardless.
 pub async fn commit(
     dir: &StateDir,
     key: &WrappingKey,
@@ -578,10 +626,12 @@ pub async fn commit(
     initiator: &'static str,
 ) -> Result<Committed, StoreError> {
     let revision = next.revision();
-    if revision <= dir.store_revision() {
-        return Err(StoreError::Format(
-            "commit must advance the revision".into(),
-        ));
+    let store = dir.store_revision();
+    if revision <= store {
+        return Err(StoreError::StaleRevision {
+            store,
+            attempted: revision,
+        });
     }
     audit.intent_transition(revision, initiator).await?;
     let digest = dir.persist(key, next)?;

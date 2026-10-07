@@ -1026,6 +1026,14 @@ fn store_error_display() {
         "the kernel identity layer does not build: role `x` is not compiled in"
     );
     assert_eq!(
+        StoreError::StaleRevision {
+            store: 3,
+            attempted: 2
+        }
+        .to_string(),
+        "graph store commit at revision 2 does not advance the store's revision 3"
+    );
+    assert_eq!(
         StoreError::RejectedNameInUse {
             name: "kernel.graph.rejected.1.00".into(),
             cause: "it holds other bytes".into(),
@@ -1393,6 +1401,13 @@ fn each_store_error_has_its_remedy() {
             StoreError::Identity("unknown role".into()),
             Remedy::Investigate,
         ),
+        (
+            StoreError::StaleRevision {
+                store: 2,
+                attempted: 2,
+            },
+            Remedy::Investigate,
+        ),
     ];
     for (e, want) in cases {
         assert_eq!(remedy(&e), want, "{e:?}");
@@ -1711,7 +1726,7 @@ async fn forged_vocabulary_refuses() {
         assert!(matches!(e, StoreError::Vocabulary(_)), "{e:?}");
         assert_eq!(remedy(&e), Remedy::Reseed);
         assert_eq!(fx.store(), file);
-        assert_eq!(events.len(), 1);
+        assert!(events.is_empty(), "{events:?}");
     }
 
     let bad_hex = rebuild(
@@ -1911,7 +1926,10 @@ async fn commit_persists_at_the_next_revision_and_checkpoints() {
         .await;
         assert_eq!(
             r.unwrap_err(),
-            StoreError::Format("commit must advance the revision".into())
+            StoreError::StaleRevision {
+                store: 2,
+                attempted: stale
+            }
         );
         assert!(audit.events.is_empty());
         assert_eq!(fx.store(), file);
@@ -2043,7 +2061,10 @@ async fn a_plain_load_sets_the_store_revision_floor() {
     .await;
     assert_eq!(
         r.unwrap_err(),
-        StoreError::Format("commit must advance the revision".into())
+        StoreError::StaleRevision {
+            store: 7,
+            attempted: 7
+        }
     );
     assert_eq!(fx.store(), before);
     commit(
@@ -2062,19 +2083,21 @@ async fn a_plain_load_sets_the_store_revision_floor() {
 async fn restoring_the_pre_reload_store_after_a_reload_refuses_as_rolled_back() {
     let fx = Fixture::new();
     let k = key(1);
-    let first = run(&fx.dir(), &k, None).await.0.unwrap();
+    let saved = sealed_graph(7, &k);
+    fx.write(STORE_FILE, &saved, 0o600);
     let dir = fx.dir();
-    run(&dir, &k, checkpoint_of(&first)).await.0.unwrap();
-    let saved = fx.store();
+    run(&dir, &k, cp(7, &saved)).await.0.unwrap();
+    let next = next_graph(dir.store_revision() + 1, &edited());
     let c = commit(
         &dir,
         &k,
-        &next_graph(2, &edited()),
+        &next,
         &mut Recorder::default(),
         INITIATOR_ROOT_FILE,
     )
     .await
     .unwrap();
+    assert_eq!(c.revision, 8);
     drop(dir);
     fx.write(STORE_FILE, &saved, 0o600);
     let (r, _) = run(
@@ -2089,8 +2112,8 @@ async fn restoring_the_pre_reload_store_after_a_reload_refuses_as_rolled_back() 
     assert_eq!(
         r.unwrap_err(),
         StoreError::Refused(Refusal::RolledBack {
-            store: 1,
-            checkpoint: 2
+            store: 7,
+            checkpoint: 8
         })
     );
 }
@@ -2099,4 +2122,141 @@ async fn restoring_the_pre_reload_store_after_a_reload_refuses_as_rolled_back() 
 fn state_dir_is_shareable_across_threads() {
     fn shareable<T: Send + Sync>() {}
     shareable::<StateDir>();
+}
+
+#[tokio::test]
+async fn a_stored_node_the_identity_layer_does_not_project_is_rewritten() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let i = inputs();
+    let clean = identity::build(&i.layer, &i.compiled, i.digest, 1, ProvenanceKind::Seed).unwrap();
+    let mut stray = clean
+        .nodes()
+        .iter()
+        .find(|n| n.kind == SUBJECT)
+        .unwrap()
+        .clone();
+    stray.id = maknae_graph::record::NodeId(clean.nodes().len() as u64 + 1);
+    stray.key = "uid:4242".into();
+    stray.attrs.insert("uid".into(), AttrValue::U64(4242));
+    let mut b = GraphBuilder::new(GraphSpace::Kernel, 1);
+    for n in clean.nodes().iter().cloned().chain([stray]) {
+        b = b.node(n);
+    }
+    for e in clean.edges() {
+        b = b.edge(e.clone());
+    }
+    let tampered = b.build(&SCHEMA, &i.compiled).unwrap();
+    assert_eq!(extracted(&tampered).unbound, vec![4242]);
+    assert_eq!(extracted(&tampered).layer, i.layer);
+    let file = seal_graph(&tampered, &k);
+    fx.write(STORE_FILE, &file, 0o600);
+
+    let (r, events) = run_with(&fx.dir(), &k, cp(1, &file), &i).await;
+    let r = r.unwrap();
+    assert!(r.identity_transition);
+    assert_eq!(r.revision, 2);
+    assert_eq!(events[1], Event::Transition(2, "root-file".into()));
+    let e = extracted(&graph_of(&fx.store(), &k));
+    assert!(e.unbound.is_empty());
+    assert_eq!(e.layer, i.layer);
+}
+
+#[tokio::test]
+async fn a_migrated_store_reloads_without_churn() {
+    let i = inputs_with(layer(None, &[]));
+    let (fx, r, _, _) = s2_boot(1, &i).await;
+    let r = r.unwrap();
+    let (again, events) = run_with(&fx.dir(), &key(1), checkpoint_of(&r), &i).await;
+    let again = again.unwrap();
+    assert_eq!((again.revision, again.identity_transition), (2, false));
+    assert_eq!(again.migration, None);
+    assert_eq!(events.len(), 1);
+}
+
+struct Racer<'a> {
+    dir: &'a StateDir,
+    key: &'a WrappingKey,
+    rival: Graph,
+    inner: Recorder,
+}
+
+impl BootAudit for Racer<'_> {
+    fn intent_seed(
+        &mut self,
+        revision: u64,
+        authorized: bool,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send {
+        self.inner.intent_seed(revision, authorized)
+    }
+
+    fn checkpoint(
+        &mut self,
+        revision: u64,
+        digest: [u8; 32],
+        anchor: &str,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send {
+        self.inner.checkpoint(revision, digest, anchor)
+    }
+
+    fn intent_migrate(
+        &mut self,
+        revision: u64,
+        from: Option<[u8; 32]>,
+        to: [u8; 32],
+        unbound: &[u32],
+    ) -> impl Future<Output = Result<(), StoreError>> + Send {
+        self.inner.intent_migrate(revision, from, to, unbound)
+    }
+
+    fn intent_transition(
+        &mut self,
+        _revision: u64,
+        _initiator: &'static str,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send {
+        let (dir, key, rival) = (self.dir, self.key, self.rival.clone());
+        async move {
+            commit(
+                dir,
+                key,
+                &rival,
+                &mut Recorder::default(),
+                INITIATOR_ROOT_FILE,
+            )
+            .await
+            .unwrap();
+            Ok(())
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_commit_raced_past_its_check_refuses_at_publish() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let dir = fx.dir();
+    run(&dir, &k, None).await.0.unwrap();
+    let mut racer = Racer {
+        dir: &dir,
+        key: &k,
+        rival: next_graph(2, &inputs()),
+        inner: Recorder::default(),
+    };
+    let r = commit(
+        &dir,
+        &k,
+        &next_graph(2, &edited()),
+        &mut racer,
+        INITIATOR_ROOT_FILE,
+    )
+    .await;
+    assert_eq!(
+        r.unwrap_err(),
+        StoreError::StaleRevision {
+            store: 2,
+            attempted: 2
+        }
+    );
+    assert_eq!(graph_of(&fx.store(), &k), next_graph(2, &inputs()));
+    assert_eq!(dir.store_revision(), 2);
 }

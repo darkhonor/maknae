@@ -3149,6 +3149,12 @@ fn graph_refusal(failure: GraphFailure, state_dir: &Path) -> RunError {
             Remedy::CheckAudit => "the audit trail anchors the graph store; check that the \
                  audit file is readable"
                 .to_string(),
+            Remedy::Investigate if matches!(e, StoreError::Identity(_)) => {
+                "the identity layer is built from the bindings section of authz.yaml in the \
+                 configuration directory (/etc/maknae/authz.yaml by default); correct it, then \
+                 restart; do not reseed"
+                    .to_string()
+            }
             Remedy::Investigate => format!(
                 "no automatic remedy; keep {} as it is and investigate",
                 state_dir.display()
@@ -5107,6 +5113,24 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         assert!(
             exhausted.contains("investigate") && !exhausted.contains(reseed),
             "{exhausted}"
+        );
+        let identity = hint(GraphFailure::Store(StoreError::Identity(
+            "role `superadmin` is not compiled in".into(),
+        )));
+        assert!(
+            identity.contains("bindings section of authz.yaml")
+                && identity.contains("/etc/maknae/authz.yaml")
+                && !identity.contains("/var/lib/maknae")
+                && !identity.contains(reseed),
+            "{identity}"
+        );
+        let stale = hint(GraphFailure::Store(StoreError::StaleRevision {
+            store: 2,
+            attempted: 2,
+        }));
+        assert!(
+            stale.contains("investigate") && !stale.contains(reseed),
+            "{stale}"
         );
         let audit = hint(GraphFailure::Store(StoreError::Audit("EIO".into())));
         assert!(
