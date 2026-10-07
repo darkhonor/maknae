@@ -1974,4 +1974,334 @@ mod tests {
             assert!(matches!(got, Err(AuthzBasicError::Load(_))), "{got:?}");
         }
     }
+
+    /// The golden equivalence matrix: the file-based oracle and the compiled
+    /// snapshot answer every cell with the same `(Verdict, role)`, reason strings
+    /// and notes included.
+    ///
+    /// Not cells: a uid bound under two names in two roles refuses at load on both
+    /// sides, so no decision exists to compare. Not visible here: the order of the
+    /// `contained` and `binds` hops (a built graph never carries both edges) and the
+    /// in-memory policy edges (both sides evaluate the same policy); the snapshot's
+    /// own structural tests cover those.
+    mod equivalence {
+        use super::*;
+        use maknae_security::FsOperation;
+
+        const BASE_UIDS: &[(&str, u32)] = &[
+            ("alex", 1000),
+            ("ursula", 1001),
+            ("gus", 1002),
+            ("mallory", 666),
+        ];
+        const EXPLICIT: &str =
+            "bindings: { admin: [alex], user: [ursula], guest: [gus], adversary: [mallory] }\n";
+        const GRANTS: &str = "roles: { admin: { allow: [admin.status, admin.subject.list], deny: [admin.config.show] }, user: { allow: [session.prompt] } }\ndestinations: { user: { allow: [\"provider:openai\"] }, admin: { allow: [\"provider:anthropic\"] } }\n";
+
+        fn policies() -> Vec<(&'static str, PolicySource)> {
+            let uids: &[(&str, u32)] = BASE_UIDS;
+            vec![
+                ("absent", source_with(SHIPPED, &[])),
+                (
+                    "empty",
+                    source_with(&format!("{SHIPPED}bindings: {{}}\n"), &[]),
+                ),
+                (
+                    "explicit",
+                    source_with(&format!("{SHIPPED}{EXPLICIT}"), uids),
+                ),
+                (
+                    "explicit+grants",
+                    source_with(&format!("{SHIPPED}{EXPLICIT}{GRANTS}"), uids),
+                ),
+            ]
+        }
+
+        fn uids() -> Vec<Option<AttrValue>> {
+            let mut v: Vec<Option<AttrValue>> = [1000, 1001, 1002, 666, 501, 4242]
+                .into_iter()
+                .map(|u| Some(AttrValue::Int(u)))
+                .collect();
+            v.push(None);
+            v.push(Some(AttrValue::Str("1000".into())));
+            v.push(Some(AttrValue::Int(-1)));
+            v
+        }
+
+        fn paths() -> Vec<Option<AttrValue>> {
+            let mut v: Vec<Option<AttrValue>> = [
+                "/home/alex/.ssh/id_rsa",
+                "/home/alex/.ssh",
+                "/home/alex/.sshkeys",
+                "/home/alex/projects/a/b.rs",
+                "/home/alex/projects",
+                "/home/alex/projectsX/y",
+                "/home/alex/.aws/credentials",
+                "/home/alex/.docker/config.json",
+                "/home/alex/.docker/other",
+                "/home/alex/notes.txt",
+                "/home/alex",
+                "/home/other/notes.txt",
+                "/etc/passwd",
+                "/opt/x",
+                "/",
+                "~/.ssh/id_rsa",
+                "/home/alex/projects/../.ssh/id_rsa",
+                "/home/alex//x",
+                "/home/alex/x/",
+                "",
+            ]
+            .into_iter()
+            .map(|p| Some(AttrValue::Str(p.into())))
+            .collect();
+            v.push(None);
+            v.push(Some(AttrValue::Int(7)));
+            v
+        }
+
+        fn homes() -> Vec<Option<AttrValue>> {
+            vec![
+                Some(AttrValue::Str("/home/alex".into())),
+                None,
+                Some(AttrValue::Str("/".into())),
+                Some(AttrValue::Str("relative".into())),
+                Some(AttrValue::Int(7)),
+            ]
+        }
+
+        fn operations() -> Vec<Option<&'static str>> {
+            let mut v: Vec<Option<&'static str>> = [
+                FsOperation::WriteExisting,
+                FsOperation::WriteCreate,
+                FsOperation::DeleteEntry,
+                FsOperation::DeleteTree,
+                FsOperation::Mkdir,
+                FsOperation::Read,
+            ]
+            .into_iter()
+            .map(|o| Some(o.as_str()))
+            .collect();
+            v.push(None);
+            v
+        }
+
+        const FS_TERMS: [&str; 4] = ["fs.read", "fs.write", "fs.delete", "fs.mkdir"];
+
+        fn request(
+            action: &str,
+            uid: &Option<AttrValue>,
+            home: &Option<AttrValue>,
+            resource: Option<(&'static str, &AttrValue)>,
+            lane: bool,
+            operation: Option<&str>,
+        ) -> maknae_security::Request {
+            let mut s = Attributes::new();
+            if let Some(u) = uid {
+                s.insert(SUBJECT_UID_KEY, u.clone());
+            }
+            if let Some(h) = home {
+                s.insert(maknae_security::SUBJECT_HOME, h.clone());
+            }
+            let mut r = Attributes::new();
+            if let Some((k, v)) = resource {
+                r.insert(k, v.clone());
+            }
+            let mut c = Attributes::new();
+            if lane {
+                c.insert(
+                    maknae_security::CONTEXT_DAC_LANE,
+                    AttrValue::Str("local".into()),
+                );
+            }
+            if let Some(o) = operation {
+                c.insert(
+                    maknae_security::CONTEXT_FS_OPERATION,
+                    AttrValue::Str(o.into()),
+                );
+            }
+            maknae_security::Request {
+                subject: Subject(s),
+                resource: Resource(r),
+                action: Action(action.into()),
+                context: Context(c),
+            }
+        }
+
+        #[derive(Default)]
+        struct Arms {
+            allow: bool,
+            deny: bool,
+            none: bool,
+        }
+
+        #[test]
+        fn every_shipped_cell_agrees_between_the_file_oracle_and_the_snapshot() {
+            let terms: Vec<&str> = ACTION_TERMS
+                .iter()
+                .chain(KERNEL_TERMS.iter())
+                .copied()
+                .collect();
+            assert_eq!(terms.len(), 59);
+            let (uids, paths, homes, ops) = (uids(), paths(), homes(), operations());
+            assert_eq!(
+                (uids.len(), paths.len(), homes.len(), ops.len()),
+                (9, 22, 5, 7)
+            );
+            let destinations = [
+                Some(AttrValue::Str("provider:openai".into())),
+                Some(AttrValue::Str("provider:other".into())),
+                None,
+            ];
+
+            let mut cells = 0usize;
+            let mut mismatches: Vec<String> = Vec::new();
+            let mut roles_seen = std::collections::BTreeSet::new();
+            let mut arms: std::collections::BTreeMap<&'static str, Arms> = Default::default();
+            let mut grant_arms = (false, false);
+            for (variant, src) in policies() {
+                let auth = BasicAuthorizer::from_snapshot(
+                    principal(),
+                    PATH.into(),
+                    test_digest,
+                    compiled(&src),
+                );
+                let mut check = |req: maknae_security::Request, cell: &dyn Fn() -> String| {
+                    cells += 1;
+                    let oracle = auth.decide_oracle(&src, &req);
+                    let snap = auth.decide_reporting_role(&req);
+                    roles_seen.insert(oracle.1);
+                    match (&oracle.0, req.action.0.as_str()) {
+                        (Verdict::Permit { .. }, "session.prompt") => grant_arms.0 = true,
+                        (Verdict::Deny { reason }, _)
+                            if reason.starts_with("denied by role grant ") =>
+                        {
+                            grant_arms.1 = true
+                        }
+                        _ => {}
+                    }
+                    if FS_TERMS.contains(&req.action.0.as_str()) {
+                        if let Some(role) = oracle.1 {
+                            let a = arms.entry(role).or_default();
+                            match &oracle.0 {
+                                Verdict::Permit { .. } => a.allow = true,
+                                Verdict::Deny { reason }
+                                    if reason.starts_with("denied by policy entry ") =>
+                                {
+                                    a.deny = true
+                                }
+                                Verdict::NotApplicable { note: Some(n) }
+                                    if n.contains("no capability entry") =>
+                                {
+                                    a.none = true
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    if oracle != snap {
+                        mismatches.push(format!(
+                            "{variant} {}: oracle {oracle:?} != snapshot {snap:?}",
+                            cell()
+                        ));
+                    }
+                };
+                for uid in &uids {
+                    for term in &terms {
+                        if FS_TERMS.contains(term) {
+                            let lanes: &[bool] = if *term == "fs.read" {
+                                &[true, false]
+                            } else {
+                                &[true]
+                            };
+                            for &lane in lanes {
+                                for op in &ops {
+                                    for path in &paths {
+                                        for home in &homes {
+                                            let req = request(
+                                                term,
+                                                uid,
+                                                home,
+                                                path.as_ref().map(|p| (RESOURCE_PATH_KEY, p)),
+                                                lane,
+                                                *op,
+                                            );
+                                            check(req, &|| {
+                                                format!(
+                                                    "{term} uid={uid:?} lane={lane} op={op:?} path={path:?} home={home:?}"
+                                                )
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        } else if *term == "session.prompt" {
+                            for d in &destinations {
+                                let req = request(
+                                    term,
+                                    uid,
+                                    &None,
+                                    d.as_ref().map(|d| (decide::RESOURCE_DESTINATION, d)),
+                                    false,
+                                    None,
+                                );
+                                check(req, &|| format!("{term} uid={uid:?} destination={d:?}"));
+                            }
+                        } else {
+                            let req = request(term, uid, &None, None, false, None);
+                            check(req, &|| format!("{term} uid={uid:?}"));
+                        }
+                    }
+                }
+            }
+
+            assert!(
+                mismatches.is_empty(),
+                "{} of {cells} cells disagree; first: {:#?}",
+                mismatches.len(),
+                &mismatches[..mismatches.len().min(10)]
+            );
+            let fs_cells = 4 * 7 * 22 * 5 + 7 * 22 * 5;
+            let other_cells = 54 + 3;
+            assert_eq!(cells, 4 * 9 * (fs_cells + other_cells));
+            assert_eq!(
+                roles_seen,
+                [
+                    None,
+                    Some("admin"),
+                    Some("user"),
+                    Some("guest"),
+                    Some("adversary")
+                ]
+                .into_iter()
+                .collect()
+            );
+            assert_eq!(
+                grant_arms,
+                (true, true),
+                "the grants variant must decide by grant"
+            );
+            for role in ["admin", "user"] {
+                let a = &arms[role];
+                assert!(
+                    a.allow && a.deny && a.none,
+                    "role {role} must reach every match arm"
+                );
+            }
+        }
+
+        #[test]
+        fn subjects_agree_between_the_file_oracle_and_the_snapshot() {
+            let mut seen = Vec::new();
+            for (variant, src) in policies() {
+                let oracle = assemble(src.policy().clone(), src.uid_map())
+                    .unwrap()
+                    .roles
+                    .as_subject_bindings();
+                let snap = compiled(&src).subjects();
+                assert_eq!(oracle, snap, "{variant}");
+                seen.push(oracle.map(|v| v.len()));
+            }
+            assert_eq!(seen, [None, Some(0), Some(4), Some(4)]);
+        }
+    }
 }
