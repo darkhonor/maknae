@@ -15,11 +15,11 @@ use std::fmt;
 use std::future::Future;
 use std::path::Path;
 
-pub use maknae_config::state::{MARKER_FILE, STATE_DIR, STORE_FILE};
+pub use maknae_config::state::{MARKER_FILE, MARKER_MAX_BYTES, STATE_DIR, STORE_FILE};
 
 pub const REJECTED_PREFIX: &str = "kernel.graph.rejected.";
 pub const MAX_STORE_BYTES: u64 = 64 << 20;
-pub const MARKER_MAX_BYTES: u64 = 4096;
+pub const ANCHOR_SEEDING: &str = "seeding";
 pub const ANCHOR_SEEDED: &str = "seeded";
 pub const ANCHOR_RESEEDED: &str = "reseeded";
 

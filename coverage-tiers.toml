@@ -616,7 +616,7 @@ why = "nix Group/User/getgrouplist resolution — syscall I/O, cross-platform; t
 
 [[t3]]
 path = "crates/maknae-kernel/src/run.rs"
-why = "run-loop orchestration (accept/read/audit/respond driver) + process entrypoint (boot: FIPS, config, audit sink, authz gate, posture record, mint, bind, serve) — I/O and control-flow; the mutation-gated decisions it consults live in handler.rs/authz.rs/boot_gate.rs/posture.rs (T1 — incl. READ_PAGE_MAX_BYTES) and maknae-proto (T1 — admits, FrameCaps::responses, read_frame_of_class, page_request_is_acceptable). Mutation-excluded (mutants.toml)"
+why = "run-loop orchestration (accept/read/audit/respond driver) + process entrypoint (boot: FIPS, config, audit sink, authz gate, kernel graph store, posture record, mint, bind, serve) — I/O and control-flow; the mutation-gated decisions it consults live in handler.rs/authz.rs/boot_gate.rs/posture.rs (T1 — incl. READ_PAGE_MAX_BYTES) and maknae-proto (T1 — admits, FrameCaps::responses, read_frame_of_class, page_request_is_acceptable); the graph store's boot decisions are maknae-state (T1), and the records and refusal hints built here are tested against a real sink and state directory. Mutation-excluded (mutants.toml)"
 
 [[t3]]
 path = "crates/maknae-vault/src/supervisor_run.rs"
@@ -664,6 +664,10 @@ why = "thin OperatorClient call wrappers; the pure pieces (split_ca_chain, still
 [[t3]]
 path = "bins/maknae/src/enroll/helper.rs"
 why = "the operator-context helper — self-verification and the CLI configuration write; the id-G parser and the identity refusal carry real unit tests, the write runs through artifact_write's tested writer"
+
+[[t3]]
+path = "bins/maknae/src/reseed.rs"
+why = "#488: sudo maknae reseed — bin code, T3 per the tiering constraint. It writes one marker through maknae-io's anchored publish (T1 in maknae-io), refusing anything already at the marker path; the marker's authority is decided by the daemon in maknae-state store.rs (T1). The pieces carry real-file unit tests: the umask-077 mode in a child process, a planted symlink left untouched, a pending marker left as is, the root preflight and the directory requirement"
 
 [[t3]]
 path = "bins/maknae/src/enroll/keychain_write.rs"

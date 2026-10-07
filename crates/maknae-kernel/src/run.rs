@@ -35,14 +35,20 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use maknae_audit_append::{
-    AuditEmit, AuditRecord, EgressAudit, EgressStatus, Integrity, Outcome, Seq, SessionIds, Source,
-    Subject, Where,
+    AuditEmit, AuditRecord, EgressAudit, EgressStatus, GraphAudit, Integrity, Outcome, Seq,
+    SessionIds, Source, Subject, Where,
 };
 use maknae_config::TransportConfig;
 use maknae_proto::{
     admits, class_of, decode_request, encode_response, read_frame_zeroizing, write_frame,
     FrameCaps, FrameClass, Payload, RespResult, Response, Verb, CONTROL_REQUEST_MAX,
     PROTOCOL_VERSION,
+};
+use maknae_state::anchor::{parse_checkpoint, CHECKPOINT_ACTION};
+use maknae_state::envelope::WrappingKey;
+use maknae_state::store::{
+    BootAudit, BootOutcome, BootReport, StateDir, StoreError, ANCHOR_RESEEDED, ANCHOR_SEEDED,
+    ANCHOR_SEEDING, MARKER_FILE,
 };
 use maknae_vault::{
     AcceptRejection, AuthenticatedStream, PeerCreds, PlaneListener, RawPlaneConn, RejectReason,
@@ -404,6 +410,7 @@ pub async fn handle<S, E, P>(
     config_view: Arc<ConfigView>,
     authz_backend_name: Arc<String>,
     classification_policy_name: Arc<String>,
+    kernel_graph: Arc<Option<maknae_proto::KernelGraphStatus>>,
     providers: Arc<Option<crate::provider_choice::ProviderAuthority>>,
     egress: Arc<dyn crate::egress::Egress>,
     authz_decide_timeout: Duration,
@@ -429,6 +436,7 @@ pub async fn handle<S, E, P>(
         config_view,
         authz_backend_name,
         classification_policy_name,
+        kernel_graph,
         providers,
         egress,
         authz_decide_timeout,
@@ -486,6 +494,8 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     // Captured ONCE at boot from the booted config (ADR-0022): the system
     // `core.handling.policy` selected, by name.
     classification_policy_name: Arc<String>,
+    // Captured ONCE at boot from the graph store's boot report (#488).
+    kernel_graph: Arc<Option<maknae_proto::KernelGraphStatus>>,
     providers: Arc<Option<crate::provider_choice::ProviderAuthority>>,
     // #172: the egress backend behind the seam. `Unavailable` in Cooky.
     egress: Arc<dyn crate::egress::Egress>,
@@ -1180,6 +1190,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                     // runs no operand code for this field.
                     authz_backend: (*authz_backend_name).clone(),
                     classification_policy: (*classification_policy_name).clone(),
+                    kernel_graph: (*kernel_graph).clone(),
                 }),
                 // LIVE, via the seam. `None` means the backend cannot
                 // enumerate, and that is reported as unavailable below --
@@ -2276,6 +2287,7 @@ pub async fn accept_loop<A, E, P>(
     config_view: Arc<ConfigView>,
     authz_backend_name: Arc<String>,
     classification_policy_name: Arc<String>,
+    kernel_graph: Arc<Option<maknae_proto::KernelGraphStatus>>,
     providers: Arc<Option<crate::provider_choice::ProviderAuthority>>,
     egress: Arc<dyn crate::egress::Egress>,
 ) -> ServeOutcome
@@ -2383,6 +2395,7 @@ where
                                 let authz_backend_name = Arc::clone(&authz_backend_name);
                                 let classification_policy_name =
                                     Arc::clone(&classification_policy_name);
+                                let kernel_graph = Arc::clone(&kernel_graph);
                                 let providers = Arc::clone(&providers);
                                 let egress = Arc::clone(&egress);
                                 handlers.spawn(async move {
@@ -2484,6 +2497,7 @@ where
                                                 config_view,
                                                 authz_backend_name,
                                                 classification_policy_name,
+                                                kernel_graph,
                                                 providers,
                                                 egress,
                                                 AUTHZ_DECIDE_TIMEOUT,
@@ -2651,6 +2665,12 @@ enum RunError {
     /// #189: `audit.siem` is configured but off-host offload is unimplemented
     /// (#223). Its own variant, so it maps to its own exit code.
     AuditOffload(String),
+    /// #488: the kernel graph store could not be booted. `hint` is the operator's
+    /// next step for this class of failure.
+    Graph {
+        reason: String,
+        hint: String,
+    },
     Other(String),
 }
 
@@ -2660,6 +2680,7 @@ impl std::fmt::Display for RunError {
             RunError::Authz(m) | RunError::AuditOffload(m) | RunError::Other(m) => {
                 write!(f, "{m}")
             }
+            RunError::Graph { reason, .. } => write!(f, "{reason}"),
         }
     }
 }
@@ -2676,6 +2697,18 @@ const AUTHZ_REFUSAL_EXIT_CODE: u8 = 3;
 /// other startup failure without parsing stderr.
 const AUDIT_OFFLOAD_REFUSAL_EXIT_CODE: u8 = 4;
 
+/// The distinct process exit code for [`RunError::Graph`] (#488).
+const GRAPH_REFUSAL_EXIT_CODE: u8 = 5;
+
+fn refusal_exit_code(e: &RunError) -> u8 {
+    match e {
+        RunError::Authz(_) => AUTHZ_REFUSAL_EXIT_CODE,
+        RunError::AuditOffload(_) => AUDIT_OFFLOAD_REFUSAL_EXIT_CODE,
+        RunError::Graph { .. } => GRAPH_REFUSAL_EXIT_CODE,
+        RunError::Other(_) => 1,
+    }
+}
+
 /// The `maknaed` entrypoint. Builds a Tokio runtime and drives the async orchestration;
 /// any boot/config/credential failure fails closed to a non-zero `ExitCode` (the daemon
 /// refuses to start rather than serve without audit, a constructed PDP, or a
@@ -2689,23 +2722,24 @@ pub fn run(config_dir: &Path) -> ExitCode {
         }
     };
     let code = runtime.block_on(async move {
-        match run_inner(config_dir).await {
+        match run_inner(
+            config_dir,
+            Path::new(maknae_state::store::STATE_DIR),
+            production_graph_key,
+        )
+        .await
+        {
             // The T1 `ServeOutcome` → `ExitCode` mapping (codex round-5 P1) decides:
             // `GracefulShutdown` → SUCCESS, `SupervisorExited` → FAILURE (so process
             // supervision restarts the daemon and re-mints; the diagnostic was already
             // logged by the accept loop when the supervisor's handle resolved).
             Ok(outcome) => crate::handler::serve_outcome_to_exit_code(&outcome),
-            Err(RunError::Authz(e)) => {
+            Err(e) => {
                 eprintln!("maknaed: refusing to start: {e}");
-                ExitCode::from(AUTHZ_REFUSAL_EXIT_CODE)
-            }
-            Err(RunError::AuditOffload(e)) => {
-                eprintln!("maknaed: refusing to start: {e}");
-                ExitCode::from(AUDIT_OFFLOAD_REFUSAL_EXIT_CODE)
-            }
-            Err(RunError::Other(e)) => {
-                eprintln!("maknaed: refusing to start: {e}");
-                ExitCode::FAILURE
+                if let RunError::Graph { hint, .. } = &e {
+                    eprintln!("maknaed: {hint}");
+                }
+                ExitCode::from(refusal_exit_code(&e))
             }
         }
     });
@@ -2837,8 +2871,10 @@ async fn record_start_refusal<E: AuditEmit + Send + Sync>(
     au3_1: &serde_json::Value,
     result: &Result<ServeOutcome, RunError>,
 ) {
-    let Err(RunError::Other(reason)) = result else {
-        return;
+    let (action, reason) = match result {
+        Err(RunError::Other(reason)) => ("start", reason),
+        Err(RunError::Graph { reason, .. }) => (GRAPH_LOAD_ACTION, reason),
+        _ => return,
     };
     let rec = make_record(
         "boot",
@@ -2850,7 +2886,7 @@ async fn record_start_refusal<E: AuditEmit + Send + Sync>(
         None,
         session_id,
         seq,
-        "start",
+        action,
         None,
         "deny",
         reason,
@@ -2860,6 +2896,258 @@ async fn record_start_refusal<E: AuditEmit + Send + Sync>(
     if let Err(e) = sink.emit(&rec).await {
         eprintln!("maknaed: AUDIT WRITE FAILED on the boot start refusal: {e}");
     }
+}
+
+const GRAPH_LOAD_ACTION: &str = "graph.load";
+const GRAPH_SEED_ACTION: &str = "graph.seed";
+const GRAPH_RESEED_ACTION: &str = "graph.reseed";
+const GRAPH_REJECTED_ACTION: &str = "graph.rejected";
+
+/// The fields every peer-less boot record shares (spec §5.3).
+struct BootCtx<'a> {
+    host: &'a str,
+    socket: &'a str,
+    euid: u32,
+    session_id: u64,
+    seq: &'a Seq,
+    au3_1: &'a serde_json::Value,
+}
+
+impl BootCtx<'_> {
+    fn record(
+        &self,
+        action: &str,
+        result: &str,
+        reason: &str,
+        posture: &str,
+        graph: Option<GraphAudit>,
+    ) -> AuditRecord {
+        let mut rec = make_record(
+            "boot",
+            self.host,
+            self.socket,
+            self.euid,
+            None,
+            None,
+            None,
+            self.session_id,
+            self.seq.next(),
+            action,
+            None,
+            result,
+            reason,
+            posture,
+            self.au3_1,
+        );
+        rec.graph = graph;
+        rec
+    }
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Write-ahead: a record that cannot be appended fails the boot step it describes.
+struct GraphBootAudit<'a, E> {
+    sink: &'a E,
+    ctx: &'a BootCtx<'a>,
+    scanned_bytes: u64,
+}
+
+impl<'a, E: AuditEmit + Send + Sync> GraphBootAudit<'a, E> {
+    fn append(&self, rec: AuditRecord) -> impl Future<Output = Result<(), StoreError>> + Send + 'a {
+        let sink = self.sink;
+        async move {
+            sink.emit(&rec)
+                .await
+                .map_err(|e| StoreError::Audit(e.to_string()))
+        }
+    }
+}
+
+impl<E: AuditEmit + Send + Sync> BootAudit for GraphBootAudit<'_, E> {
+    fn intent_seed(
+        &mut self,
+        revision: u64,
+        authorized: bool,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send {
+        let reason = if authorized {
+            "reseed-authorized"
+        } else {
+            "first-boot"
+        };
+        let rec = self.ctx.record(
+            GRAPH_SEED_ACTION,
+            "permit",
+            reason,
+            "intent",
+            Some(GraphAudit {
+                revision,
+                ciphertext_sha256: String::new(),
+                anchor: ANCHOR_SEEDING.to_string(),
+                scanned_bytes: self.scanned_bytes,
+            }),
+        );
+        self.append(rec)
+    }
+
+    fn checkpoint(
+        &mut self,
+        revision: u64,
+        digest: [u8; 32],
+        anchor: &str,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send {
+        let rec = self.ctx.record(
+            CHECKPOINT_ACTION,
+            "permit",
+            anchor,
+            "authorized",
+            Some(GraphAudit {
+                revision,
+                ciphertext_sha256: lower_hex(&digest),
+                anchor: anchor.to_string(),
+                scanned_bytes: self.scanned_bytes,
+            }),
+        );
+        self.append(rec)
+    }
+}
+
+enum GraphFailure {
+    Key(maknae_vault::VaultError),
+    Store(StoreError),
+}
+
+/// The refusal for a graph-store boot failure, with the operator's next step for its
+/// class. A newer store must never be told to reseed: that destroys a valid store.
+fn graph_refusal(failure: GraphFailure, state_dir: &Path) -> RunError {
+    let hint = match &failure {
+        GraphFailure::Key(maknae_vault::VaultError::GraphKeyAbsent(_)) => {
+            "run `sudo maknae enroll` to create the kernel graph key".to_string()
+        }
+        GraphFailure::Key(_) => "the kernel graph key could not be read; check the credential \
+             `sudo maknae enroll` created (enroll never replaces an existing key)"
+            .to_string(),
+        GraphFailure::Store(StoreError::NewerStore(_)) => {
+            "this store was written by a newer maknaed; reinstall that version \
+             (do not reseed: that destroys a valid store)"
+                .to_string()
+        }
+        GraphFailure::Store(
+            StoreError::Refused(_) | StoreError::Envelope(_) | StoreError::Format(_),
+        ) => "if this is expected, run `sudo maknae reseed` and restart; a readable current \
+              store is kept for forensics"
+            .to_string(),
+        GraphFailure::Store(StoreError::Io(_)) => format!(
+            "check the ownership and mode of {}: it must be owned by the maknaed user, mode 0700",
+            state_dir.display()
+        ),
+        GraphFailure::Store(StoreError::Audit(_)) => {
+            "the audit trail anchors the graph store; check that the audit file is readable \
+             and writable"
+                .to_string()
+        }
+    };
+    let reason = match failure {
+        GraphFailure::Key(e) => format!("kernel graph key: {e}"),
+        GraphFailure::Store(e) => format!("kernel graph store: {e}"),
+    };
+    RunError::Graph { reason, hint }
+}
+
+fn kernel_graph_status(report: &BootReport) -> maknae_proto::KernelGraphStatus {
+    let anchor = match report.outcome {
+        BootOutcome::Seeded {
+            authorized: true, ..
+        } => ANCHOR_RESEEDED,
+        BootOutcome::Seeded {
+            authorized: false, ..
+        } => ANCHOR_SEEDED,
+        BootOutcome::Loaded(state) => state.as_str(),
+    };
+    maknae_proto::KernelGraphStatus {
+        revision: report.revision,
+        anchor: anchor.to_string(),
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// #488: open, verify or seed the kernel graph store, auditing each transition.
+/// Runs before the accept loop, so the blocking audit scan contends with no append.
+async fn boot_kernel_graph(
+    state_dir: &Path,
+    key: Result<maknae_vault::GraphKey, maknae_vault::VaultError>,
+    sink: &Arc<maknae_audit_append::AuditSink>,
+    ctx: &BootCtx<'_>,
+) -> Result<maknae_proto::KernelGraphStatus, RunError> {
+    let key = key.map_err(|e| graph_refusal(GraphFailure::Key(e), state_dir))?;
+    let dir = StateDir::open(state_dir, ctx.euid)
+        .map_err(|e| graph_refusal(GraphFailure::Store(e), state_dir))?;
+    let scan_sink = Arc::clone(sink);
+    let scan = tokio::task::spawn_blocking(move || {
+        scan_sink.scan_back(|line| parse_checkpoint(line).is_some())
+    })
+    .await
+    .map_err(|e| e.to_string())
+    .and_then(|r| r.map_err(|e| e.to_string()))
+    .map_err(|e| graph_refusal(GraphFailure::Store(StoreError::Audit(e)), state_dir))?;
+    let checkpoint = scan.line.as_deref().and_then(parse_checkpoint);
+    let mut audit = GraphBootAudit {
+        sink: sink.as_ref(),
+        ctx,
+        scanned_bytes: scan.scanned_bytes,
+    };
+    let report = maknae_state::store::boot(
+        &dir,
+        &WrappingKey::new(key.into_bytes()),
+        checkpoint,
+        &mut audit,
+        unix_now(),
+    )
+    .await
+    .map_err(|e| graph_refusal(GraphFailure::Store(e), state_dir))?;
+    report_graph_boot(sink.as_ref(), ctx, state_dir, &report).await?;
+    Ok(kernel_graph_status(&report))
+}
+
+/// What the boot did that the operator did not ask for: an ignored reseed marker, and
+/// where the replaced store went.
+async fn report_graph_boot<E: AuditEmit + Send + Sync>(
+    sink: &E,
+    ctx: &BootCtx<'_>,
+    state_dir: &Path,
+    report: &BootReport,
+) -> Result<(), RunError> {
+    if let Some(cause) = &report.marker_ignored {
+        let reason = format!("reseed marker ignored: {cause}");
+        eprintln!(
+            "maknaed: {reason}; only a root-owned {} in {} written by `sudo maknae reseed` \
+             authorizes a reseed",
+            MARKER_FILE,
+            state_dir.display()
+        );
+        sink.emit(&ctx.record(GRAPH_RESEED_ACTION, "deny", &reason, "unauthorized", None))
+            .await
+            .map_err(|e| boot_evidence_refused("graph reseed", e))?;
+    }
+    if let BootOutcome::Seeded {
+        rejected: Some(previous),
+        ..
+    } = &report.outcome
+    {
+        let reason = format!("previous kernel graph store: {previous}");
+        eprintln!("maknaed: {reason}");
+        sink.emit(&ctx.record(GRAPH_REJECTED_ACTION, "permit", &reason, "authorized", None))
+            .await
+            .map_err(|e| boot_evidence_refused("graph rejected-store", e))?;
+    }
+    Ok(())
 }
 
 /// Read the root-owned boot posture marker (`<config_dir>/private/posture.yaml`,
@@ -2960,7 +3248,22 @@ fn parse_posture_marker(value: &maknae_config::Value) -> Option<crate::posture::
     })
 }
 
-async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
+/// Where the kernel graph key comes from. Production reads the enrolled credential;
+/// the boot tests inject a fixed key.
+type GraphKeyReader = fn(&Path) -> Result<maknae_vault::GraphKey, maknae_vault::VaultError>;
+
+fn production_graph_key(
+    config_dir: &Path,
+) -> Result<maknae_vault::GraphKey, maknae_vault::VaultError> {
+    let creds = maknae_vault::credentials_directory_env()?;
+    maknae_vault::read_graph_key(creds.as_deref(), config_dir)
+}
+
+async fn run_inner(
+    config_dir: &Path,
+    state_dir: &Path,
+    graph_key: GraphKeyReader,
+) -> Result<ServeOutcome, RunError> {
     // FIPS first (spec §6.1): install the aws-lc-rs FIPS default (once), then assert it —
     // before any crypto/Vault client is built. The assert stays authoritative: on a
     // non-FIPS build the installed default's `.fips()` is false and the daemon refuses.
@@ -3003,6 +3306,8 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
     let boot_seq = Seq::new();
     let result = boot_after_sink(
         config_dir,
+        state_dir,
+        graph_key,
         boot,
         transport,
         egress_cfg,
@@ -3034,6 +3339,8 @@ async fn run_inner(config_dir: &Path) -> Result<ServeOutcome, RunError> {
 #[allow(clippy::too_many_arguments)]
 async fn boot_after_sink(
     config_dir: &Path,
+    state_dir: &Path,
+    graph_key: GraphKeyReader,
     boot: crate::BootConfig,
     transport: maknae_config::TransportConfig,
     egress_cfg: maknae_config::EgressConfig,
@@ -3172,6 +3479,23 @@ async fn boot_after_sink(
         .map_err(|e| boot_evidence_refused("composition", e))?;
     let authorizer = Arc::new(authorizer);
 
+    let kernel_graph = Arc::new(Some(
+        boot_kernel_graph(
+            state_dir,
+            graph_key(config_dir),
+            sink,
+            &BootCtx {
+                host,
+                socket,
+                euid,
+                session_id: boot_session_id(session_ids),
+                seq: boot_seq,
+                au3_1: &audit_cfg.au3_1,
+            },
+        )
+        .await?,
+    ));
+
     // Plane credential: resolve + read this plane's SecretID source (spec §5.1),
     // authenticate, then mint a memory-only leaf below; the credential supervisor then
     // runs concurrently (renewal + leaf rotation; rotation cadence is checked once per
@@ -3308,6 +3632,7 @@ async fn boot_after_sink(
         config_view,
         authz_backend_name,
         classification_policy_name,
+        kernel_graph,
         providers,
         egress,
     )
@@ -3350,6 +3675,7 @@ async fn serve_after_mint<B>(
     // Captured at boot, same discipline as `config_view` (see run_inner).
     authz_backend_name: Arc<String>,
     classification_policy_name: Arc<String>,
+    kernel_graph: Arc<Option<maknae_proto::KernelGraphStatus>>,
     providers: Arc<Option<crate::provider_choice::ProviderAuthority>>,
     egress: Arc<dyn crate::egress::Egress>,
 ) -> Result<ServeOutcome, String>
@@ -3392,6 +3718,7 @@ where
         config_view,
         authz_backend_name,
         classification_policy_name,
+        kernel_graph,
         providers,
         egress,
     )
@@ -3828,9 +4155,22 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
     /// frame, so the guard is just an ordinary stack value — matches `run()`'s
     /// own runtime-construction pattern.
     fn block_on_run_inner(dir: &Path) -> Result<ServeOutcome, RunError> {
-        tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(run_inner(dir))
+        tokio::runtime::Runtime::new().unwrap().block_on(run_inner(
+            dir,
+            &state_dir(dir),
+            test_graph_key,
+        ))
+    }
+
+    fn test_graph_key(_: &Path) -> Result<maknae_vault::GraphKey, maknae_vault::VaultError> {
+        maknae_vault::graph_key_from_bytes(&[0x5a; 32])
+    }
+
+    fn state_dir(config_dir: &Path) -> PathBuf {
+        let state = config_dir.join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+        state
     }
 
     struct TestEmit {
@@ -3924,6 +4264,19 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         );
         assert!(recs[0].outcome.reason.contains("bind: address in use"));
         assert_eq!((recs[0].session_id, recs[0].seq), (7 << 32, 4));
+        let graph = rec(Err(RunError::Graph {
+            reason: "kernel graph store: substituted".into(),
+            hint: "h".into(),
+        }));
+        assert_eq!(graph.len(), 1);
+        assert_eq!(
+            (
+                graph[0].action.as_str(),
+                graph[0].outcome.result.as_str(),
+                graph[0].outcome.reason.as_str()
+            ),
+            ("graph.load", "deny", "kernel graph store: substituted")
+        );
         assert!(rec(Err(RunError::Authz("a".into()))).is_empty());
         assert!(rec(Err(RunError::AuditOffload("o".into()))).is_empty());
         assert!(rec(Ok(ServeOutcome::GracefulShutdown)).is_empty());
@@ -4144,6 +4497,20 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
                 "authorization composition: maknae-authz-basic+maknae-ceiling; system: US; ceiling: UNCLASSIFIED"
             );
             assert_eq!(comp_rec.outcome.posture, "authorized");
+            // #488: the first boot seeds the graph store between the composition
+            // and posture records, intent before checkpoint.
+            let at = |action: &str| {
+                recs.iter()
+                    .position(|r| r.action == action)
+                    .unwrap_or_else(|| panic!("no {action} record in: {audit}"))
+            };
+            let (seed, ckpt) = (at("graph.seed"), at("graph.checkpoint"));
+            assert!(at("authz") < seed && seed < ckpt && ckpt < at("posture"));
+            assert_eq!(recs[seed].outcome.posture, "intent");
+            assert_eq!(recs[seed].graph.as_ref().unwrap().revision, 1);
+            let g = recs[ckpt].graph.as_ref().unwrap();
+            assert_eq!((g.revision, g.anchor.as_str()), (1, "seeded"));
+            assert_eq!(g.ciphertext_sha256.len(), 64);
             // Both boot records share the boot session; they must NOT share a
             // sequence number (the collision the review found).
             assert_eq!(comp_rec.session_id, posture_rec.session_id);
@@ -4181,6 +4548,310 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
                 other => panic!("expected Err(RunError::Authz), got {other:?}"),
             }
         }
+    }
+
+    // #488, root-gated like the test above: a store that does not decrypt refuses
+    // boot with exit 5, and the one refusal record is `graph.load`.
+    #[test]
+    fn a_corrupt_graph_store_refuses_boot_with_a_graph_load_record() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("CREDENTIALS_DIRECTORY");
+        let d = Dir::new("corrupt_graph");
+        write_common_fixture(&d, "principal:\n  name: op\n  uid: 1000\n");
+        put(
+            &d.0,
+            "authz.yaml",
+            "schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/**)\"\n",
+            0o640,
+        );
+        put(&state_dir(&d.0), "kernel.graph", "not an envelope", 0o600);
+
+        let result = block_on_run_inner(&d.0);
+
+        if nix::unistd::geteuid().as_raw() != 0 {
+            assert!(matches!(result, Err(RunError::Authz(_))), "{result:?}");
+            return;
+        }
+        let Err(e @ RunError::Graph { .. }) = &result else {
+            panic!("expected Err(RunError::Graph), got {result:?}");
+        };
+        assert_eq!(refusal_exit_code(e), 5);
+        let audit = std::fs::read_to_string(d.0.join("audit.jsonl")).unwrap();
+        let recs: Vec<AuditRecord> = audit
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let last = recs.last().unwrap();
+        assert_eq!(
+            (last.action.as_str(), last.outcome.result.as_str()),
+            ("graph.load", "deny")
+        );
+        assert_eq!(last.outcome.reason, e.to_string());
+        assert!(!recs
+            .iter()
+            .any(|r| r.action == "start" || r.action == "posture"));
+    }
+
+    // ---- #488: the graph boot step over a real audit sink and a real state
+    // directory, unprivileged ----
+
+    struct GraphFixture {
+        dir: Dir,
+        state: PathBuf,
+        sink: Arc<maknae_audit_append::AuditSink>,
+    }
+
+    fn graph_fixture(tag: &str) -> GraphFixture {
+        let dir = Dir::new(tag);
+        let state = state_dir(&dir.0);
+        let sink = Arc::new(
+            maknae_audit_append::AuditSink::open(&maknae_config::AuditConfig {
+                jsonl_path: dir.0.join("audit.jsonl"),
+                siem: None,
+                au3_1: serde_json::Value::Null,
+            })
+            .unwrap(),
+        );
+        GraphFixture { dir, state, sink }
+    }
+
+    fn boot_graph(
+        fx: &GraphFixture,
+        key: Result<maknae_vault::GraphKey, maknae_vault::VaultError>,
+    ) -> Result<maknae_proto::KernelGraphStatus, RunError> {
+        let seq = Seq::new();
+        let au3_1 = serde_json::Value::Null;
+        let ctx = BootCtx {
+            host: "h",
+            socket: "s",
+            euid: nix::unistd::geteuid().as_raw(),
+            session_id: 9 << 32,
+            seq: &seq,
+            au3_1: &au3_1,
+        };
+        block_on(boot_kernel_graph(&fx.state, key, &fx.sink, &ctx))
+    }
+
+    fn trail(fx: &GraphFixture) -> Vec<(AuditRecord, String)> {
+        std::fs::read_to_string(fx.dir.0.join("audit.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|l| (serde_json::from_str(l).unwrap(), l.to_string()))
+            .collect()
+    }
+
+    fn key() -> Result<maknae_vault::GraphKey, maknae_vault::VaultError> {
+        test_graph_key(Path::new("/unused"))
+    }
+
+    #[test]
+    fn first_boot_seeds_then_checkpoints_and_a_restart_verifies() {
+        let fx = graph_fixture("graph_first_boot");
+        let status = boot_graph(&fx, key()).unwrap();
+        assert_eq!((status.revision, status.anchor.as_str()), (1, "seeded"));
+
+        let recs = trail(&fx);
+        let actions: Vec<&str> = recs.iter().map(|(r, _)| r.action.as_str()).collect();
+        assert_eq!(actions, ["graph.seed", "graph.checkpoint"]);
+        let (seed, _) = &recs[0];
+        assert_eq!(
+            (
+                seed.event.as_str(),
+                seed.outcome.result.as_str(),
+                seed.outcome.reason.as_str(),
+                seed.outcome.posture.as_str()
+            ),
+            ("boot", "permit", "first-boot", "intent")
+        );
+        assert_eq!(
+            seed.graph,
+            Some(GraphAudit {
+                revision: 1,
+                ciphertext_sha256: String::new(),
+                anchor: "seeding".into(),
+                scanned_bytes: 0,
+            })
+        );
+        let (ckpt, line) = &recs[1];
+        assert_eq!(
+            (ckpt.outcome.result.as_str(), ckpt.outcome.reason.as_str()),
+            ("permit", "seeded")
+        );
+        let g = ckpt.graph.as_ref().unwrap();
+        assert_eq!((g.revision, g.anchor.as_str()), (1, "seeded"));
+        let parsed = parse_checkpoint(line.as_bytes()).expect("the checkpoint parses");
+        assert_eq!(lower_hex(&parsed.digest), g.ciphertext_sha256);
+        assert_ne!(seed.seq, ckpt.seq);
+
+        let status = boot_graph(&fx, key()).unwrap();
+        assert_eq!((status.revision, status.anchor.as_str()), (1, "verified"));
+        let recs = trail(&fx);
+        assert_eq!(recs.len(), 3);
+        let g = recs[2].0.graph.as_ref().unwrap();
+        assert_eq!((g.revision, g.anchor.as_str()), (1, "verified"));
+        assert_eq!(
+            g.ciphertext_sha256,
+            recs[1].0.graph.as_ref().unwrap().ciphertext_sha256
+        );
+        assert!(g.scanned_bytes > 0, "the restart scanned the trail");
+    }
+
+    #[test]
+    fn a_corrupt_store_refuses_with_the_reseed_hint_and_records_graph_load() {
+        let fx = graph_fixture("graph_corrupt");
+        put(&fx.state, "kernel.graph", "not an envelope", 0o600);
+        let result = boot_graph(&fx, key()).map(|_| ServeOutcome::GracefulShutdown);
+        let Err(e @ RunError::Graph { hint, .. }) = &result else {
+            panic!("expected Err(RunError::Graph), got {result:?}");
+        };
+        assert!(hint.contains("sudo maknae reseed"), "{hint}");
+        assert_eq!(refusal_exit_code(e), GRAPH_REFUSAL_EXIT_CODE);
+        assert!(trail(&fx).is_empty(), "nothing was seeded or checkpointed");
+
+        block_on(record_start_refusal(
+            fx.sink.as_ref(),
+            "h",
+            "s",
+            0,
+            9 << 32,
+            1,
+            &serde_json::Value::Null,
+            &result,
+        ));
+        let recs = trail(&fx);
+        assert_eq!(recs.len(), 1);
+        assert_eq!(
+            (recs[0].0.action.as_str(), recs[0].0.outcome.result.as_str()),
+            ("graph.load", "deny")
+        );
+        assert_eq!(recs[0].0.outcome.reason, e.to_string());
+        assert!(e.to_string().starts_with("kernel graph store: "), "{e}");
+    }
+
+    #[test]
+    fn a_missing_key_refuses_naming_enroll_before_touching_the_store() {
+        let fx = graph_fixture("graph_no_key");
+        let result = boot_graph(
+            &fx,
+            Err(maknae_vault::VaultError::GraphKeyAbsent(
+                "no credential".into(),
+            )),
+        );
+        match &result {
+            Err(RunError::Graph { reason, hint }) => {
+                assert!(reason.starts_with("kernel graph key: "), "{reason}");
+                assert!(hint.contains("sudo maknae enroll"), "{hint}");
+            }
+            other => panic!("expected Err(RunError::Graph), got {other:?}"),
+        }
+        assert!(trail(&fx).is_empty());
+        assert_eq!(std::fs::read_dir(&fx.state).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_state_dir_with_a_loose_mode_refuses_naming_the_directory() {
+        let fx = graph_fixture("graph_loose_mode");
+        std::fs::set_permissions(&fx.state, std::fs::Permissions::from_mode(0o755)).unwrap();
+        match boot_graph(&fx, key()) {
+            Err(RunError::Graph { hint, .. }) => {
+                assert!(hint.contains("ownership and mode"), "{hint}");
+                assert!(hint.contains(&*fx.state.to_string_lossy()), "{hint}");
+            }
+            other => panic!("expected Err(RunError::Graph), got {other:?}"),
+        }
+        assert!(trail(&fx).is_empty());
+    }
+
+    #[test]
+    fn a_marker_not_owned_by_root_is_ignored_and_audited() {
+        if nix::unistd::geteuid().is_root() {
+            return;
+        }
+        let fx = graph_fixture("graph_marker_ignored");
+        put(&fx.state, "reseed.authorized", "planted\n", 0o644);
+        let status = boot_graph(&fx, key()).unwrap();
+        assert_eq!(
+            status.anchor, "seeded",
+            "the planted marker authorized nothing"
+        );
+        let recs = trail(&fx);
+        let actions: Vec<&str> = recs.iter().map(|(r, _)| r.action.as_str()).collect();
+        assert_eq!(actions, ["graph.seed", "graph.checkpoint", "graph.reseed"]);
+        assert_eq!(recs[0].0.outcome.reason, "first-boot");
+        let ignored = &recs[2].0;
+        assert_eq!(ignored.outcome.result, "deny");
+        assert!(
+            ignored
+                .outcome
+                .reason
+                .starts_with("reseed marker ignored: "),
+            "{}",
+            ignored.outcome.reason
+        );
+    }
+
+    #[test]
+    fn each_graph_failure_class_carries_its_own_hint() {
+        let dir = Path::new("/var/lib/maknae");
+        let hint = |f| match graph_refusal(f, dir) {
+            RunError::Graph { hint, .. } => hint,
+            other => panic!("expected RunError::Graph, got {other:?}"),
+        };
+        let reseed = "sudo maknae reseed";
+        let newer = hint(GraphFailure::Store(StoreError::NewerStore("v2".into())));
+        assert!(
+            newer.contains("reinstall") && !newer.contains(reseed),
+            "{newer}"
+        );
+        for f in [
+            GraphFailure::Store(StoreError::Refused(
+                maknae_state::anchor::Refusal::Substituted { revision: 3 },
+            )),
+            GraphFailure::Store(StoreError::Format("bad".into())),
+            GraphFailure::Store(StoreError::Envelope(
+                maknae_state::envelope::EnvelopeError::Decrypt,
+            )),
+        ] {
+            assert!(hint(f).contains(reseed));
+        }
+        let io = hint(GraphFailure::Store(StoreError::Io("EACCES".into())));
+        assert!(
+            io.contains("/var/lib/maknae") && !io.contains(reseed),
+            "{io}"
+        );
+        let audit = hint(GraphFailure::Store(StoreError::Audit("EIO".into())));
+        assert!(
+            audit.contains("audit") && !audit.contains(reseed),
+            "{audit}"
+        );
+        let absent = hint(GraphFailure::Key(maknae_vault::VaultError::GraphKeyAbsent(
+            "x".into(),
+        )));
+        assert!(absent.contains("sudo maknae enroll"), "{absent}");
+        let malformed = hint(GraphFailure::Key(maknae_vault::VaultError::GraphKey(
+            "not exactly 32 bytes",
+        )));
+        assert!(
+            !malformed.contains(reseed) && malformed != absent,
+            "{malformed}"
+        );
+    }
+
+    #[test]
+    fn each_refusal_class_has_its_own_exit_code() {
+        let graph = RunError::Graph {
+            reason: "r".into(),
+            hint: "h".into(),
+        };
+        assert_eq!(
+            [
+                refusal_exit_code(&RunError::Authz("a".into())),
+                refusal_exit_code(&RunError::AuditOffload("o".into())),
+                refusal_exit_code(&graph),
+                refusal_exit_code(&RunError::Other("x".into())),
+            ],
+            [3, 4, 5, 1]
+        );
     }
 
     // ---- focused unit coverage for the pieces the root-gated happy path above
@@ -4519,6 +5190,7 @@ mod home_resolution_tests {
             backend_name,
             Arc::new("US".to_string()),
             Arc::new(None),
+            Arc::new(None),
             crate::egress::unavailable_egress(),
             Duration::from_secs(10),
             maknae_security::Lane::Local,
@@ -4737,6 +5409,7 @@ mod admission_bound_tests {
                 Arc::new(ConfigView::default()),
                 backend_name,
                 Arc::new("US".to_string()),
+                Arc::new(None),
                 Arc::new(None),
                 crate::egress::unavailable_egress(),
                 Duration::from_secs(10),

@@ -1156,6 +1156,7 @@ dependencies = [
  "maknae-proto",
  "maknae-security",
  "maknae-spif",
+ "maknae-state",
  "maknae-subject-ctx",
  "maknae-subject-ctx-mint",
  "maknae-vault",

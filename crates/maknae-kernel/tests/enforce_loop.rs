@@ -269,6 +269,7 @@ where
         backend_name,
         Arc::new("US".to_string()),
         std::sync::Arc::new(None),
+        std::sync::Arc::new(None),
         maknae_kernel::unavailable_egress(),
         timeout,
         maknae_security::Lane::Local,
@@ -314,6 +315,7 @@ where
         Arc::new(Default::default()),
         maknae_config::transport_from_section(None).unwrap(),
         Arc::new("US".to_string()),
+        std::sync::Arc::new(None),
     )
     .await
 }
@@ -337,6 +339,7 @@ async fn drive_with<P>(
     // derived from the authorizer -- a literal here would make the assertion
     // tautological.
     classification_policy: Arc<String>,
+    kernel_graph: Arc<Option<maknae_proto::KernelGraphStatus>>,
 ) -> Option<Vec<u8>>
 where
     P: maknae_security::Authorizer + Send + Sync + 'static,
@@ -365,6 +368,7 @@ where
         Arc::clone(&config_view),
         backend_name,
         classification_policy,
+        kernel_graph,
         std::sync::Arc::new(None),
         maknae_kernel::unavailable_egress(),
         timeout,
@@ -1698,6 +1702,10 @@ async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
         Arc::new(Default::default()),
         nondefault_transport(),
         Arc::new(booted.classification_policy_name().to_string()),
+        Arc::new(Some(maknae_proto::KernelGraphStatus {
+            revision: 41,
+            anchor: "advanced".into(),
+        })),
     )
     .await
     .expect("a frame");
@@ -1715,6 +1723,13 @@ async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
             // same package whose CARGO_PKG_VERSION `run.rs` expands, so the
             // distinguishing assertion is free.
             assert_eq!(s.version, env!("CARGO_PKG_VERSION"));
+            assert_eq!(
+                s.kernel_graph,
+                Some(maknae_proto::KernelGraphStatus {
+                    revision: 41,
+                    anchor: "advanced".into(),
+                })
+            );
             // The VALUE, not merely non-empty: wiring `listener` to any other
             // non-empty config string -- the audit path, the plane socket --
             // passed the emptiness check.
@@ -1957,6 +1972,7 @@ async fn an_oversized_config_view_is_refused_explicitly_not_written_oversized() 
         Arc::new(view),
         maknae_config::transport_from_section(None).unwrap(),
         Arc::new("US".to_string()),
+        std::sync::Arc::new(None),
     )
     .await
     .expect("a frame");
@@ -2035,6 +2051,7 @@ async fn a_granted_config_show_discloses_the_redacted_view_and_nothing_else() {
         Arc::new(view),
         maknae_config::transport_from_section(None).unwrap(),
         Arc::new("US".to_string()),
+        std::sync::Arc::new(None),
     )
     .await
     .expect("a frame");
@@ -2084,6 +2101,7 @@ async fn config_show_without_a_grant_discloses_nothing() {
         Arc::new(view),
         maknae_config::transport_from_section(None).unwrap(),
         Arc::new("US".to_string()),
+        std::sync::Arc::new(None),
     )
     .await
     .expect("a frame");
@@ -2496,6 +2514,7 @@ async fn under_a_secret_ceiling_status_still_answers_and_names_both_operands() {
         Arc::new(Default::default()),
         nondefault_transport(),
         Arc::new("US".to_string()),
+        std::sync::Arc::new(None),
     )
     .await
     .expect("a frame");
@@ -3073,6 +3092,7 @@ async fn a_requester_with_no_home_gets_turns_but_no_files() {
             Arc::new(Default::default()),
             maknae_config::transport_from_section(None).unwrap(),
             Arc::new("US".to_string()),
+            std::sync::Arc::new(None),
         )
         .await
         .expect("a frame");

@@ -157,6 +157,9 @@ enum Command {
     /// One-time elevated provisioning: mint credentials, seal them to the
     /// platform HRoT, write daemon+CLI config (spec §4.1). Requires `sudo`.
     Enroll(Box<crate::enroll::EnrollArgs>),
+    /// Authorize maknaed to seed a fresh kernel graph at its next start, keeping a
+    /// readable current store aside. Requires `sudo`.
+    Reseed,
     /// Hidden operator-context helper `enroll` re-execs via `sudo -u` — not a
     /// user-facing verb.
     #[command(hide = true, name = "enroll-helper")]
@@ -668,6 +671,10 @@ pub(crate) fn write_request(
     Ok((request, maknae_proto::Bytes::new(content)))
 }
 
+fn kernel_graph_line(kg: Option<&maknae_proto::KernelGraphStatus>) -> Option<String> {
+    kg.map(|g| format!("kernel graph: revision {} ({})", g.revision, g.anchor))
+}
+
 /// Print the successful `payload` IFF its variant matches the requested `verb`
 /// (`Ping`→`Pong`, `Whoami`→`Whoami(_)`). A mismatched variant means the daemon
 /// answered a different question than we asked — a protocol error: return `Err`
@@ -691,6 +698,9 @@ fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
             println!("listener              {}", s.listener);
             println!("authz_backend         {}", s.authz_backend);
             println!("classification_policy {}", s.classification_policy);
+            if let Some(line) = kernel_graph_line(s.kernel_graph.as_ref()) {
+                println!("{line}");
+            }
             Ok(())
         }
         (Verb::AdminConfigShow, Payload::ConfigView(v)) => {
@@ -785,6 +795,7 @@ pub async fn run_cli() -> ExitCode {
         Command::Login => crate::login::run_login().await,
         Command::Logout => crate::login::run_logout().await,
         Command::Enroll(args) => crate::enroll::run_enroll(*args).await,
+        Command::Reseed => crate::reseed::run_reseed(),
         Command::EnrollHelper(args) => crate::enroll::run_enroll_helper(args).await,
     }
 }
@@ -1483,6 +1494,26 @@ mod tests {
             "1000",
         ])
         .is_err());
+    }
+
+    #[test]
+    fn reseed_parses_and_takes_no_arguments() {
+        let cli = Cli::try_parse_from(["maknae", "reseed"]).expect("parses");
+        assert!(matches!(cli.command, Command::Reseed));
+        assert!(Cli::try_parse_from(["maknae", "reseed", "--force"]).is_err());
+    }
+
+    #[test]
+    fn the_status_kernel_graph_line_is_printed_only_when_reported() {
+        assert_eq!(kernel_graph_line(None), None);
+        assert_eq!(
+            kernel_graph_line(Some(&maknae_proto::KernelGraphStatus {
+                revision: 12,
+                anchor: "verified".into(),
+            }))
+            .as_deref(),
+            Some("kernel graph: revision 12 (verified)")
+        );
     }
 
     #[test]
