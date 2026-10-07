@@ -5,7 +5,6 @@
 use maknae_graph::graph::GraphError;
 use maknae_graph::schema::CompiledSet;
 
-#[derive(Debug, Clone)]
 pub struct Vocabulary {
     pub full: CompiledSet,
     pub persisted: CompiledSet,
@@ -13,10 +12,16 @@ pub struct Vocabulary {
 }
 
 pub fn kernel_vocabulary(label: &str) -> Result<Vocabulary, GraphError> {
-    let persisted = maknae_graph::kernel::persisted_compiled_set(label);
+    assemble(
+        maknae_authz_basic::compiled_set(label),
+        maknae_graph::kernel::persisted_compiled_set(label),
+    )
+}
+
+fn assemble(full: CompiledSet, persisted: CompiledSet) -> Result<Vocabulary, GraphError> {
     let digest = maknae_state::vocabulary::digest(&persisted)?;
     Ok(Vocabulary {
-        full: maknae_authz_basic::compiled_set(label),
+        full,
         persisted,
         digest,
     })
@@ -55,5 +60,22 @@ mod tests {
             .full
             .iter()
             .eq(maknae_authz_basic::compiled_set("UNOFFICIAL").iter()));
+    }
+
+    #[test]
+    fn a_persisted_set_that_cannot_be_digested_is_refused() {
+        let node = maknae_graph::kernel::persisted_compiled_set("UNCLASSIFIED")
+            .iter()
+            .next()
+            .cloned()
+            .unwrap();
+        let doubled = CompiledSet::new(vec![node.clone(), node.clone()]);
+        match assemble(CompiledSet::default(), doubled) {
+            Err(GraphError::DuplicateKey { kind, key }) => {
+                assert_eq!((kind, key), (node.kind, node.key));
+            }
+            Err(e) => panic!("unexpected refusal: {e:?}"),
+            Ok(_) => panic!("a duplicated compiled node must not digest"),
+        }
     }
 }

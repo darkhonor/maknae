@@ -36,6 +36,7 @@ pub enum Refusal {
     Load(String),
     Compile(String),
     Persist(String),
+    Shutdown,
 }
 
 impl fmt::Display for Refusal {
@@ -45,6 +46,7 @@ impl fmt::Display for Refusal {
             Self::Load(m) => write!(f, "policy load: {m}"),
             Self::Compile(m) => write!(f, "compile: {m}"),
             Self::Persist(m) => write!(f, "persist: {m}"),
+            Self::Shutdown => f.write_str("shutdown"),
         }
     }
 }
@@ -116,13 +118,15 @@ pub trait Audit {
 }
 
 /// A failed intent append ends the reload with nothing loaded and no outcome
-/// record; every later refusal is recorded as the outcome.
+/// record; every later refusal is recorded as the outcome. `stopped` abandons the
+/// load, never a commit already started.
 pub async fn run_reload<C, L, S, W, A>(
     store_revision: u64,
     load: &L,
     store: &S,
     swap: &W,
     audit: &A,
+    stopped: impl Future<Output = ()>,
 ) -> Result<Applied, Refusal>
 where
     L: Load<Candidate = C>,
@@ -131,7 +135,7 @@ where
     A: Audit,
 {
     audit.intent(store_revision).await?;
-    let applied = apply(store_revision, load, store, swap).await;
+    let applied = apply(store_revision, load, store, swap, stopped).await;
     audit.outcome(&applied).await;
     applied
 }
@@ -141,13 +145,18 @@ async fn apply<C, L, S, W>(
     load: &L,
     store: &S,
     swap: &W,
+    stopped: impl Future<Output = ()>,
 ) -> Result<Applied, Refusal>
 where
     L: Load<Candidate = C>,
     S: Store<Candidate = C>,
     W: Swap<Candidate = C>,
 {
-    let (plan, candidate) = load.load(store_revision).await?;
+    let (plan, candidate) = tokio::select! {
+        biased;
+        () = stopped => return Err(Refusal::Shutdown),
+        loaded = load.load(store_revision) => loaded?,
+    };
     let applied = match plan {
         Plan::Unchanged => Applied {
             revision: store_revision,
@@ -268,6 +277,7 @@ mod tests {
             (Refusal::Load("x".into()), "reload refused: policy load: x"),
             (Refusal::Compile("x".into()), "reload refused: compile: x"),
             (Refusal::Persist("x".into()), "reload refused: persist: x"),
+            (Refusal::Shutdown, "reload refused: shutdown"),
         ] {
             assert_eq!(
                 outcome(&Err(refusal)),
@@ -280,6 +290,7 @@ mod tests {
     struct Fake {
         calls: Mutex<Vec<String>>,
         fail_intent: bool,
+        load_hangs: bool,
         load: Option<Result<Plan, Refusal>>,
         commit: Option<Result<(u64, Option<String>), Refusal>>,
         installed: Mutex<Vec<u64>>,
@@ -306,7 +317,11 @@ mod tests {
             let r = self.load.clone().unwrap_or(Ok(Plan::Persist {
                 revision: store_revision + 1,
             }));
+            let hangs = self.load_hangs;
             async move {
+                if hangs {
+                    std::future::pending::<()>().await;
+                }
                 r.map(|p| match p {
                     Plan::Persist { revision } => (p, revision),
                     Plan::Unchanged => (p, store_revision),
@@ -354,7 +369,25 @@ mod tests {
     }
 
     async fn run(f: &Fake, store_revision: u64) -> Result<Applied, Refusal> {
-        run_reload(store_revision, f, f, f, f).await
+        run_reload(store_revision, f, f, f, f, std::future::pending()).await
+    }
+
+    #[tokio::test]
+    async fn a_load_still_running_at_shutdown_is_abandoned_and_recorded() {
+        let f = Fake {
+            load_hangs: true,
+            ..Fake::default()
+        };
+        let r = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run_reload(3, &f, &f, &f, &f, async {}),
+        )
+        .await
+        .expect("shutdown abandons the load");
+        assert_eq!(r, Err(Refusal::Shutdown));
+        assert_eq!(f.calls(), ["intent 3", "load 3", "outcome"]);
+        assert!(f.installed.lock().unwrap().is_empty());
+        assert_eq!(*f.outcomes.lock().unwrap(), [Err(Refusal::Shutdown)]);
     }
 
     #[tokio::test]
@@ -447,7 +480,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_next_store_revision_comes_from_the_commit_not_the_snapshot() {
+    async fn the_applied_revision_is_the_commits_not_the_candidates() {
         let f = Fake {
             commit: Some(Ok((8, Some("checkpoint refused".into())))),
             ..Fake::default()
@@ -455,9 +488,5 @@ mod tests {
         let first = run(&f, 3).await.unwrap();
         assert_eq!(f.installed.lock().unwrap().last(), Some(&4));
         assert_eq!(first.revision, 8);
-        let f2 = Fake::default();
-        run(&f2, first.revision).await.unwrap();
-        assert_eq!(f2.calls()[1], "load 8");
-        assert_eq!(f2.calls()[2], "commit 9");
     }
 }

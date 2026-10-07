@@ -238,15 +238,11 @@ fn prepare(
     })
 }
 
-/// Decide every path in the mutation. Returns the role the decision was made
-/// on, and the rule it cites, in BOTH arms (#275): a denied `fs.write` is the
-/// security-interesting record, so stamping `role=none` on it while a role was in
-/// fact resolved would defeat the point. When several paths are decided, both
-/// come from the last decision evaluated — on a deny, the path that caused the
-/// refusal.
 type DecidedBy = (Option<&'static str>, Option<maknae_security::RuleCitation>);
 type AuthorizeErr = (String, String, DecidedBy);
 
+/// Returns the role and rule of the last decision evaluated, in both arms: on a
+/// deny, the path that refused (#275).
 fn authorize<P: Authorizer>(
     prepared: &PreparedMutation,
     verb: &Verb,
@@ -1014,23 +1010,24 @@ mod tests {
     }
     impl<P: Authorizer> Authorizer for Delayed<P> {
         fn decide(&self, request: &maknae_security::Request) -> maknae_security::Verdict {
-            self.decide_reporting_role(request).0
+            self.decide_cited(request).verdict
         }
 
-        /// Delegates rather than taking the trait default (#275): a wrapper
-        /// that forwards only `decide` reports no role for a decision that had
-        /// one. The delay behaviour is unchanged -- it gates BOTH entry points
-        /// because `decide` is now this function's `.0`.
         fn decide_reporting_role(
             &self,
             request: &maknae_security::Request,
         ) -> (maknae_security::Verdict, Option<&'static str>) {
+            self.decide_cited(request).into()
+        }
+
+        fn decide_cited(&self, request: &maknae_security::Request) -> maknae_security::Decided {
             let (lock, wake) = &*self.gate;
             let mut released = lock.lock().unwrap();
             while !*released {
                 released = wake.wait(released).unwrap();
             }
-            self.pdp.decide_reporting_role(request)
+            drop(released);
+            self.pdp.decide_cited(request)
         }
     }
     struct Release(Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);

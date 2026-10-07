@@ -3333,7 +3333,7 @@ async fn report_graph_boot<E: AuditEmit + Send + Sync>(
 }
 
 /// The `SIGHUP` policy reload. `lock` serializes reloads with one another and with
-/// the shutdown record.
+/// the shutdown record; `stopping` abandons a reload that has not reached its commit.
 struct Reloader<B: maknae_authz_basic::Baseline, E> {
     dir: StateDir,
     key: WrappingKey,
@@ -3348,6 +3348,9 @@ struct Reloader<B: maknae_authz_basic::Baseline, E> {
     socket: String,
     euid: u32,
     au3_1: serde_json::Value,
+    stopping: tokio::sync::watch::Sender<bool>,
+    #[cfg(test)]
+    load_gate: Option<Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>>,
 }
 
 type ReloadCandidate = (
@@ -3362,6 +3365,9 @@ where
 {
     async fn run(self: &Arc<Self>) -> Result<crate::reload::Applied, crate::reload::Refusal> {
         let _turn = self.lock.lock().await;
+        if *self.stopping.borrow() {
+            return Err(crate::reload::Refusal::Shutdown);
+        }
         let seq = Seq::new();
         let ctx = BootCtx {
             event: "reload",
@@ -3379,12 +3385,24 @@ where
             store_revision,
             committed: std::sync::Mutex::new(None),
         };
-        let r = crate::reload::run_reload(store_revision, &io, &io, &io, &io).await;
+        let mut stopping = self.stopping.subscribe();
+        let stopped = async move {
+            let _ = stopping.wait_for(|stop| *stop).await;
+        };
+        let r = crate::reload::run_reload(store_revision, &io, &io, &io, &io, stopped).await;
         if let Ok(applied) = &r {
             self.revision
                 .store(applied.revision, AtomicOrdering::Release);
         }
         r
+    }
+
+    /// Abandons a reload still loading, waits for one already committing (bounded by
+    /// the local store and audit writes), then stops the reload task.
+    async fn stop(&self, reloads: &tokio::task::AbortHandle) {
+        self.stopping.send_replace(true);
+        let _turn = self.lock.lock().await;
+        reloads.abort();
     }
 }
 
@@ -3451,6 +3469,10 @@ where
         let reloader = Arc::clone(self.reloader);
         async move {
             tokio::task::spawn_blocking(move || {
+                #[cfg(test)]
+                if let Some(gate) = &reloader.load_gate {
+                    let _ = gate.lock().unwrap().recv();
+                }
                 load_candidate(
                     reloader.authorizer.baseline(),
                     &reloader.vocabulary,
@@ -3574,6 +3596,18 @@ where
             }
         }
     }
+}
+
+async fn shutdown_after_reloads<B, E>(
+    signalled: impl Future<Output = ()> + Send,
+    reloader: Arc<Reloader<B, E>>,
+    reloads: tokio::task::AbortHandle,
+) where
+    B: maknae_authz_basic::Baseline,
+    E: AuditEmit + Send + Sync + 'static,
+{
+    signalled.await;
+    reloader.stop(&reloads).await;
 }
 
 /// One reload per received `SIGHUP`, in turn; a burst delivered while one runs
@@ -4090,6 +4124,9 @@ async fn boot_after_sink(
         socket: socket.to_string(),
         euid,
         au3_1: audit_cfg.au3_1.clone(),
+        stopping: tokio::sync::watch::channel(false).0,
+        #[cfg(test)]
+        load_gate: None,
     };
     let outcome = serve_after_mint(
         &client,
@@ -4194,21 +4231,8 @@ where
             }
         }
     }));
-    let stop_reloads = {
-        let reloader = Arc::clone(&reloader);
-        let reloads = reloads.abort_handle();
-        move || async move {
-            let _turn = reloader.lock.lock().await;
-            reloads.abort();
-        }
-    };
-    let shutdown = {
-        let stop_reloads = stop_reloads.clone();
-        async move {
-            signalled.await;
-            stop_reloads().await;
-        }
-    };
+    let reloads = reloads.abort_handle();
+    let shutdown = shutdown_after_reloads(signalled, Arc::clone(&reloader), reloads.clone());
     let outcome = accept_loop(
         listener,
         Arc::clone(sink),
@@ -4226,7 +4250,7 @@ where
         egress,
     )
     .await;
-    stop_reloads().await;
+    reloader.stop(&reloads).await;
     Ok(outcome)
 }
 
@@ -6625,6 +6649,14 @@ mod reload_tests {
     }
 
     async fn fixture(tag: &str, policy: &str) -> Fx {
+        fixture_gated(tag, policy, None).await
+    }
+
+    async fn fixture_gated(
+        tag: &str,
+        policy: &str,
+        load_gate: Option<std::sync::mpsc::Receiver<()>>,
+    ) -> Fx {
         let raw = std::env::temp_dir().join(format!("maknae_reload_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&raw);
         std::fs::create_dir_all(raw.join("state")).unwrap();
@@ -6698,6 +6730,8 @@ mod reload_tests {
             socket: "s".into(),
             euid,
             au3_1,
+            stopping: tokio::sync::watch::channel(false).0,
+            load_gate: load_gate.map(|g| Arc::new(std::sync::Mutex::new(g))),
         });
         Fx {
             _guard: Guard(dir.clone()),
@@ -7007,5 +7041,164 @@ mod reload_tests {
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert_eq!(seen.load(AtomicOrdering::SeqCst), 1);
         task.abort();
+    }
+
+    struct IdleAccept;
+
+    impl PlaneAccept for IdleAccept {
+        type Raw = ();
+        type Stream = tokio::io::DuplexStream;
+
+        async fn accept_raw(&self) -> Result<((), PeerCreds), maknae_vault::RawAcceptError> {
+            std::future::pending().await
+        }
+
+        async fn finish_handshake(
+            &self,
+            _raw: (),
+            _peer_creds: PeerCreds,
+            _handshake_timeout: Duration,
+        ) -> Result<Conn<tokio::io::DuplexStream>, AcceptRejection> {
+            unreachable!("nothing is accepted")
+        }
+    }
+
+    fn all_records(fx: &Fx) -> Vec<AuditRecord> {
+        std::fs::read_to_string(fx.dir.join("audit.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str::<AuditRecord>(l).unwrap())
+            .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reload_stuck_loading_does_not_hold_up_shutdown() {
+        let (_release, gate) = std::sync::mpsc::channel::<()>();
+        let fx = fixture_gated("stuck", ROOT_ADMIN, Some(gate)).await;
+        fx.write_policy(ROOT_ADVERSARY);
+        let before = fx.baseline().snapshot();
+        let bytes = fx.store_bytes();
+        let reload = tokio::spawn({
+            let reloader = Arc::clone(&fx.reloader);
+            async move { reloader.run().await }
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while fx.reload_records().is_empty() && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(fx.reload_records().len(), 1, "the reload is loading");
+
+        let shutdown =
+            shutdown_after_reloads(async {}, Arc::clone(&fx.reloader), reload.abort_handle());
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            accept_loop(
+                IdleAccept,
+                Arc::clone(&fx.reloader.sink),
+                Arc::new(SessionIds::new()),
+                maknae_config::transport_from_section(None).unwrap(),
+                WhereCtx {
+                    host: "h".into(),
+                    socket: "s".into(),
+                    au3_1: serde_json::Value::Null,
+                },
+                shutdown,
+                tokio::spawn(std::future::pending()),
+                Arc::clone(&fx.reloader.authorizer),
+                Arc::new(ConfigView::default()),
+                Arc::new("b".into()),
+                Arc::new("US".into()),
+                Arc::new(None),
+                Arc::new(None),
+                crate::egress::unavailable_egress(),
+            ),
+        )
+        .await
+        .expect("shutdown completes while the load is stuck");
+        assert!(matches!(outcome, ServeOutcome::GracefulShutdown));
+
+        let recs = all_records(&fx);
+        let tail: Vec<(&str, &str, &str)> = recs
+            .iter()
+            .skip_while(|r| r.event != "reload")
+            .map(|r| {
+                (
+                    r.action.as_str(),
+                    r.outcome.result.as_str(),
+                    r.outcome.reason.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            tail,
+            [
+                ("graph.reload", "permit", "intent recorded (SIGHUP)"),
+                ("graph.reload", "deny", "reload refused: shutdown"),
+                ("serve", "permit", "shutdown: signal received"),
+            ]
+        );
+        assert!(Arc::ptr_eq(&before, &fx.baseline().snapshot()));
+        assert_eq!(fx.store_bytes(), bytes);
+        assert!(matches!(
+            reload.await,
+            Ok(Err(crate::reload::Refusal::Shutdown))
+        ));
+    }
+
+    #[tokio::test]
+    async fn shutdown_waits_for_a_reload_holding_the_turn() {
+        let fx = fixture("turn", ROOT_ADMIN).await;
+        let reloads = tokio::spawn(std::future::pending::<()>());
+        let turn = fx.reloader.lock.lock().await;
+        let mut shutdown = Box::pin(shutdown_after_reloads(
+            async {},
+            Arc::clone(&fx.reloader),
+            reloads.abort_handle(),
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), &mut shutdown)
+                .await
+                .is_err(),
+            "shutdown must not pass a reload that holds the turn"
+        );
+        assert!(!reloads.is_finished());
+        drop(turn);
+        tokio::time::timeout(Duration::from_secs(5), shutdown)
+            .await
+            .expect("shutdown proceeds once the turn is released");
+        assert!(reloads.await.unwrap_err().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn a_reload_queued_behind_shutdown_records_nothing() {
+        let fx = fixture("queued", ROOT_ADMIN).await;
+        fx.reloader.stopping.send_replace(true);
+        assert_eq!(
+            fx.reloader.run().await,
+            Err(crate::reload::Refusal::Shutdown)
+        );
+        assert!(fx.reload_records().is_empty());
+    }
+
+    /// Structural tripwire: no runtime test can tell where the registration sits.
+    #[test]
+    fn sighup_is_registered_before_anything_else_in_run_inner() {
+        let src = include_str!("run.rs");
+        let prod = &src[..src.find("\nmod tests {").expect("a test module")];
+        let start = prod.find("\nasync fn run_inner(").expect("run_inner");
+        let body = &prod[start..];
+        let body = &body[body
+            .find(") -> Result<ServeOutcome, RunError> {\n")
+            .expect("signature")..];
+        let first = body
+            .lines()
+            .skip(1)
+            .map(str::trim)
+            .find(|l| !l.is_empty() && !l.starts_with("//"))
+            .expect("a statement");
+        assert_eq!(
+            first,
+            "let hup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())"
+        );
     }
 }
