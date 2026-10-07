@@ -27,6 +27,8 @@ const STORE_MODE: Mode = Mode(0o600);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreError {
+    StateDir(String),
+    Unreadable(String),
     Io(String),
     Envelope(EnvelopeError),
     Format(String),
@@ -38,6 +40,8 @@ pub enum StoreError {
 impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::StateDir(cause) => write!(f, "graph state directory refused: {cause}"),
+            Self::Unreadable(cause) => write!(f, "graph store {STORE_FILE} is unreadable: {cause}"),
             Self::Io(cause) => write!(f, "graph store I/O failed: {cause}"),
             Self::Envelope(e) => write!(f, "{e}"),
             Self::Format(cause) => write!(f, "graph store does not decode: {cause}"),
@@ -56,6 +60,30 @@ impl std::error::Error for StoreError {}
 impl From<EnvelopeError> for StoreError {
     fn from(e: EnvelopeError) -> Self {
         Self::Envelope(e)
+    }
+}
+
+/// The operator's next step for a boot failure. A store written by a newer `maknaed`
+/// is never `Reseed`: reseeding destroys a valid store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Remedy {
+    Reinstall,
+    Reseed,
+    CheckStateDir,
+    CheckAudit,
+    Investigate,
+}
+
+pub fn remedy(e: &StoreError) -> Remedy {
+    match e {
+        StoreError::NewerStore(_) => Remedy::Reinstall,
+        StoreError::Refused(Refusal::RevisionExhausted) => Remedy::Investigate,
+        StoreError::Refused(_)
+        | StoreError::Envelope(_)
+        | StoreError::Format(_)
+        | StoreError::Unreadable(_) => Remedy::Reseed,
+        StoreError::StateDir(_) | StoreError::Io(_) => Remedy::CheckStateDir,
+        StoreError::Audit(_) => Remedy::CheckAudit,
     }
 }
 
@@ -96,7 +124,8 @@ impl StateDir {
                 mode_mask: Some(0o077),
             },
             StrategyPref::Auto,
-        )?;
+        )
+        .map_err(|e| StoreError::StateDir(e.to_string()))?;
         Ok(StateDir {
             anchor,
             owner,
@@ -265,7 +294,7 @@ pub async fn boot(
             }
             Prior::Readable(file)
         }
-        Err(e) if !authorized => return Err(e.into()),
+        Err(e) if !authorized => return Err(StoreError::Unreadable(e.to_string())),
         Err(e) => Prior::Unreadable(format!("not preserved: {e}")),
     };
 

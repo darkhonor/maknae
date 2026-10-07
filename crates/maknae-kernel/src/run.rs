@@ -47,8 +47,8 @@ use maknae_proto::{
 use maknae_state::anchor::{parse_checkpoint, CHECKPOINT_ACTION};
 use maknae_state::envelope::WrappingKey;
 use maknae_state::store::{
-    BootAudit, BootOutcome, BootReport, StateDir, StoreError, ANCHOR_RESEEDED, ANCHOR_SEEDED,
-    ANCHOR_SEEDING, MARKER_FILE,
+    remedy, BootAudit, BootOutcome, BootReport, Remedy, StateDir, StoreError, ANCHOR_RESEEDED,
+    ANCHOR_SEEDED, ANCHOR_SEEDING, MARKER_FILE, STORE_FILE,
 };
 use maknae_vault::{
     AcceptRejection, AuthenticatedStream, PeerCreds, PlaneListener, RawPlaneConn, RejectReason,
@@ -2700,6 +2700,7 @@ const AUDIT_OFFLOAD_REFUSAL_EXIT_CODE: u8 = 4;
 /// The distinct process exit code for [`RunError::Graph`] (#488).
 const GRAPH_REFUSAL_EXIT_CODE: u8 = 5;
 
+/// A graph record that cannot be appended is a boot-evidence failure (`Other`, exit 1).
 fn refusal_exit_code(e: &RunError) -> u8 {
     match e {
         RunError::Authz(_) => AUTHZ_REFUSAL_EXIT_CODE,
@@ -2852,7 +2853,7 @@ async fn refuse_audit_offload_boot<E: AuditEmit + Send + Sync>(
 }
 
 /// #265 C2: boot evidence that cannot be durably appended refuses boot.
-fn boot_evidence_refused(what: &str, e: maknae_audit_append::AuditError) -> RunError {
+fn boot_evidence_refused(what: &str, e: impl std::fmt::Display) -> RunError {
     RunError::Other(format!(
         "the boot {what} record was not durably appended: {e}"
     ))
@@ -3020,7 +3021,7 @@ enum GraphFailure {
 }
 
 /// The refusal for a graph-store boot failure, with the operator's next step for its
-/// class. A newer store must never be told to reseed: that destroys a valid store.
+/// class; `maknae_state::store::remedy` decides the step.
 fn graph_refusal(failure: GraphFailure, state_dir: &Path) -> RunError {
     let hint = match &failure {
         GraphFailure::Key(maknae_vault::VaultError::GraphKeyAbsent(_)) => {
@@ -3029,31 +3030,40 @@ fn graph_refusal(failure: GraphFailure, state_dir: &Path) -> RunError {
         GraphFailure::Key(_) => "the kernel graph key could not be read; check the credential \
              `sudo maknae enroll` created (enroll never replaces an existing key)"
             .to_string(),
-        GraphFailure::Store(StoreError::NewerStore(_)) => {
-            "this store was written by a newer maknaed; reinstall that version \
-             (do not reseed: that destroys a valid store)"
-                .to_string()
-        }
-        GraphFailure::Store(
-            StoreError::Refused(_) | StoreError::Envelope(_) | StoreError::Format(_),
-        ) => "if this is expected, run `sudo maknae reseed` and restart; a readable current \
-              store is kept for forensics"
-            .to_string(),
-        GraphFailure::Store(StoreError::Io(_)) => format!(
-            "check the ownership and mode of {}: it must be owned by the maknaed user, mode 0700",
-            state_dir.display()
-        ),
-        GraphFailure::Store(StoreError::Audit(_)) => {
-            "the audit trail anchors the graph store; check that the audit file is readable \
-             and writable"
-                .to_string()
-        }
+        GraphFailure::Store(e) => match remedy(e) {
+            Remedy::Reinstall => "this store was written by a newer maknaed; reinstall that \
+                 version (do not reseed: that destroys a valid store)"
+                .to_string(),
+            Remedy::Reseed => format!(
+                "if this is expected, run `sudo maknae reseed` and restart; a readable current \
+                 {STORE_FILE} is kept for forensics"
+            ),
+            Remedy::CheckStateDir => format!(
+                "check the ownership and mode of {}: it must be owned by the maknaed user, \
+                 mode 0700",
+                state_dir.display()
+            ),
+            Remedy::CheckAudit => "the audit trail anchors the graph store; check that the \
+                 audit file is readable"
+                .to_string(),
+            Remedy::Investigate => format!(
+                "no automatic remedy; keep {} as it is and investigate",
+                state_dir.display()
+            ),
+        },
     };
     let reason = match failure {
         GraphFailure::Key(e) => format!("kernel graph key: {e}"),
         GraphFailure::Store(e) => format!("kernel graph store: {e}"),
     };
     RunError::Graph { reason, hint }
+}
+
+fn store_refusal(e: StoreError, state_dir: &Path) -> RunError {
+    match e {
+        StoreError::Audit(cause) => boot_evidence_refused("graph", cause),
+        e => graph_refusal(GraphFailure::Store(e), state_dir),
+    }
 }
 
 fn kernel_graph_status(report: &BootReport) -> maknae_proto::KernelGraphStatus {
@@ -3111,7 +3121,7 @@ async fn boot_kernel_graph(
         unix_now(),
     )
     .await
-    .map_err(|e| graph_refusal(GraphFailure::Store(e), state_dir))?;
+    .map_err(|e| store_refusal(e, state_dir))?;
     report_graph_boot(sink.as_ref(), ctx, state_dir, &report).await?;
     Ok(kernel_graph_status(&report))
 }
@@ -4814,10 +4824,29 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         ] {
             assert!(hint(f).contains(reseed));
         }
-        let io = hint(GraphFailure::Store(StoreError::Io("EACCES".into())));
+        let unreadable = hint(GraphFailure::Store(StoreError::Unreadable(
+            "too large".into(),
+        )));
         assert!(
-            io.contains("/var/lib/maknae") && !io.contains(reseed),
-            "{io}"
+            unreadable.contains(reseed) && unreadable.contains("kernel.graph"),
+            "{unreadable}"
+        );
+        for f in [
+            GraphFailure::Store(StoreError::Io("EACCES".into())),
+            GraphFailure::Store(StoreError::StateDir("mode".into())),
+        ] {
+            let h = hint(f);
+            assert!(
+                h.contains("ownership and mode of /var/lib/maknae") && !h.contains(reseed),
+                "{h}"
+            );
+        }
+        let exhausted = hint(GraphFailure::Store(StoreError::Refused(
+            maknae_state::anchor::Refusal::RevisionExhausted,
+        )));
+        assert!(
+            exhausted.contains("investigate") && !exhausted.contains(reseed),
+            "{exhausted}"
         );
         let audit = hint(GraphFailure::Store(StoreError::Audit("EIO".into())));
         assert!(
@@ -4835,6 +4864,38 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             !malformed.contains(reseed) && malformed != absent,
             "{malformed}"
         );
+    }
+
+    #[test]
+    fn a_graph_record_append_failure_is_boot_evidence_not_a_graph_refusal() {
+        let dir = Path::new("/var/lib/maknae");
+        match store_refusal(StoreError::Audit("intent refused".into()), dir) {
+            e @ RunError::Other(_) => {
+                assert_eq!(refusal_exit_code(&e), 1);
+                assert_eq!(
+                    e.to_string(),
+                    "the boot graph record was not durably appended: intent refused"
+                );
+            }
+            other => panic!("expected RunError::Other, got {other:?}"),
+        }
+        let refused = store_refusal(StoreError::Format("bad".into()), dir);
+        assert!(matches!(refused, RunError::Graph { .. }), "{refused:?}");
+        assert_eq!(refusal_exit_code(&refused), GRAPH_REFUSAL_EXIT_CODE);
+    }
+
+    #[test]
+    fn an_unreadable_store_file_refuses_naming_it_and_reseed() {
+        let fx = graph_fixture("graph_unreadable");
+        put(&fx.state, "kernel.graph", "anything", 0o644);
+        match boot_graph(&fx, key()) {
+            Err(RunError::Graph { reason, hint }) => {
+                assert!(reason.contains("kernel.graph is unreadable"), "{reason}");
+                assert!(hint.contains("sudo maknae reseed"), "{hint}");
+            }
+            other => panic!("expected Err(RunError::Graph), got {other:?}"),
+        }
+        assert!(trail(&fx).is_empty());
     }
 
     #[test]

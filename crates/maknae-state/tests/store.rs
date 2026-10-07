@@ -4,10 +4,12 @@ use maknae_graph::kernel::SCHEMA;
 use maknae_graph::record::GraphSpace;
 use maknae_graph::schema::CompiledSet;
 use maknae_state::anchor::{AnchorState, Checkpoint, Refusal};
-use maknae_state::envelope::{self, ciphertext_digest, EnvelopeError, WrappingKey, KEY_LEN};
+use maknae_state::envelope::{
+    self, ciphertext_digest, EnvelopeError, WrappingKey, ENVELOPE_VERSION, KEY_LEN,
+};
 use maknae_state::store::{
-    boot, BootAudit, BootOutcome, BootReport, StateDir, StoreError, MARKER_FILE, MAX_STORE_BYTES,
-    REJECTED_PREFIX, STORE_FILE,
+    boot, remedy, BootAudit, BootOutcome, BootReport, Remedy, StateDir, StoreError, MARKER_FILE,
+    MAX_STORE_BYTES, REJECTED_PREFIX, STORE_FILE,
 };
 use std::fs;
 use std::future::{ready, Future};
@@ -597,7 +599,7 @@ async fn unreadable_store_without_a_marker_refuses_as_io() {
     fx.write(STORE_FILE, &sealed_graph(1, &k), 0o644);
     let (r, events) = run(&fx.dir(), &k, None).await;
     match r.unwrap_err() {
-        StoreError::Io(cause) => assert!(cause.contains("insecure permissions"), "{cause}"),
+        StoreError::Unreadable(cause) => assert!(cause.contains("insecure permissions"), "{cause}"),
         other => panic!("unexpected error {other:?}"),
     }
     assert!(events.is_empty());
@@ -678,7 +680,7 @@ async fn oversized_store_refuses() {
     fs::set_permissions(fx.file(STORE_FILE), fs::Permissions::from_mode(0o600)).unwrap();
     let (r, _) = run(&fx.dir(), &key(1), None).await;
     match r.unwrap_err() {
-        StoreError::Io(cause) => assert!(cause.contains("too large"), "{cause}"),
+        StoreError::Unreadable(cause) => assert!(cause.contains("too large"), "{cause}"),
         other => panic!("unexpected error {other:?}"),
     }
 }
@@ -693,12 +695,12 @@ fn state_dir_requires_owner_and_private_mode() {
     let fx = Fixture::new();
     assert!(matches!(
         StateDir::open(fx.path(), fx.uid.wrapping_add(1)).unwrap_err(),
-        StoreError::Io(_)
+        StoreError::StateDir(_)
     ));
     fs::set_permissions(fx.path(), fs::Permissions::from_mode(0o750)).unwrap();
     assert!(matches!(
         StateDir::open(fx.path(), fx.uid).unwrap_err(),
-        StoreError::Io(_)
+        StoreError::StateDir(_)
     ));
 }
 
@@ -707,6 +709,14 @@ fn store_error_display() {
     assert_eq!(
         StoreError::Io("gone".into()).to_string(),
         "graph store I/O failed: gone"
+    );
+    assert_eq!(
+        StoreError::StateDir("mode".into()).to_string(),
+        "graph state directory refused: mode"
+    );
+    assert_eq!(
+        StoreError::Unreadable("too large".into()).to_string(),
+        "graph store kernel.graph is unreadable: too large"
     );
     assert_eq!(
         StoreError::Envelope(EnvelopeError::Decrypt).to_string(),
@@ -945,4 +955,65 @@ async fn an_empty_file_at_the_rejected_name_is_never_replaced() {
         }
     );
     assert!(fs::read(fx.file(&name)).unwrap().is_empty());
+}
+
+#[test]
+fn each_store_error_has_its_remedy() {
+    let cases = [
+        (StoreError::NewerStore("v2".into()), Remedy::Reinstall),
+        (
+            StoreError::Refused(Refusal::RolledBack {
+                store: 1,
+                checkpoint: 2,
+            }),
+            Remedy::Reseed,
+        ),
+        (
+            StoreError::Refused(Refusal::Substituted { revision: 1 }),
+            Remedy::Reseed,
+        ),
+        (
+            StoreError::Refused(Refusal::Missing { checkpoint: 1 }),
+            Remedy::Reseed,
+        ),
+        (
+            StoreError::Refused(Refusal::RevisionExhausted),
+            Remedy::Investigate,
+        ),
+        (StoreError::Envelope(EnvelopeError::Decrypt), Remedy::Reseed),
+        (StoreError::Format("bad".into()), Remedy::Reseed),
+        (StoreError::Unreadable("too large".into()), Remedy::Reseed),
+        (StoreError::StateDir("mode".into()), Remedy::CheckStateDir),
+        (StoreError::Io("EACCES".into()), Remedy::CheckStateDir),
+        (StoreError::Audit("down".into()), Remedy::CheckAudit),
+    ];
+    for (e, want) in cases {
+        assert_eq!(remedy(&e), want, "{e:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_newer_store_is_never_told_to_reseed() {
+    let newer = [
+        EnvelopeError::UnsupportedVersion(ENVELOPE_VERSION + 1).to_string(),
+        EnvelopeError::UnsupportedVersion(u16::MAX).to_string(),
+        format::FormatError::UnsupportedFormatVersion(u16::MAX).to_string(),
+        String::new(),
+        "reseed".into(),
+        "graph store does not decode".into(),
+    ];
+    for detail in newer {
+        assert_eq!(
+            remedy(&StoreError::NewerStore(detail.clone())),
+            Remedy::Reinstall,
+            "{detail}"
+        );
+    }
+    let k = key(1);
+    for v in (ENVELOPE_VERSION + 1..=ENVELOPE_VERSION + 64).chain([u16::MAX]) {
+        let mut file = sealed_graph(1, &k);
+        patch_u16(&mut file, 4, v);
+        let e = boot_store(&file, &k).await;
+        assert_eq!(remedy(&e), Remedy::Reinstall, "{e:?}");
+    }
 }
