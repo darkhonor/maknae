@@ -97,6 +97,8 @@ LockPersonality=yes
 SystemCallFilter=@system-service
 SystemCallArchitectures=native
 Restart=on-failure
+# A SIGHUP that lands before the handler is registered kills the process, an exit systemd counts as clean.
+RestartForceExitStatus=SIGHUP
 RestartSec=5s
 StandardOutput=journal
 StandardError=journal
