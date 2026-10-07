@@ -934,6 +934,26 @@ If the intent itself cannot be appended, nothing is loaded and no outcome is wri
 
 ---
 
+## The audit trail
+
+The trail is `/var/log/maknae/audit.jsonl`, `_maknae:_maknae 0640` in a `0700 _maknae` directory. On Linux the file carries the append-only attribute (`chattr +a`), set by the package on every install and upgrade: writes only append, and truncating, unlinking or opening the file without `O_APPEND` is refused, root included. On Debian the attribute is the trail's only append-only control, because AppArmor cannot express append; on the Red Hat family SELinux enforces it as well. Check it with `lsattr /var/log/maknae/audit.jsonl`, which shows `a`. On macOS the file carries `uappnd` (`ls -lO`).
+
+### Rotate, restore or recreate the trail
+
+The daemon holds the file open, so stop it first. Clear the attribute, act, then set it again:
+
+```bash
+sudo systemctl stop maknaed.service
+sudo chattr -a /var/log/maknae/audit.jsonl
+sudo mv /var/log/maknae/audit.jsonl /var/log/maknae/audit.jsonl.$(date -u +%Y%m%dT%H%M%SZ)   # or restore a copy
+sudo install -m 0640 -o _maknae -g _maknae /dev/null /var/log/maknae/audit.jsonl
+sudo restorecon -v /var/log/maknae/audit.jsonl   # Red Hat family only
+sudo chattr +a /var/log/maknae/audit.jsonl
+sudo systemctl start maknaed.service
+```
+
+On macOS, stop and start the daemon with `launchctl`, and use `sudo chflags nouappnd` and `sudo chflags uappnd` in place of `chattr`. A recreated file loses any ACL granted to a log agent; re-apply it ([Granting the agent read access](../packaging/README.md#granting-the-agent-read-access)). A trail without a `graph.checkpoint` record starts with [`rollback-anchor-unavailable`](#rollback-anchor-unavailable).
+
 ## The kernel graph store refuses to start
 
 `maknaed` keeps its enforcement state in an encrypted store, `kernel.graph`, in its state directory: `/var/lib/maknae` on Linux, `/usr/local/var/db/maknae/state` on macOS. Each start checks the store against the latest `graph.checkpoint` record in the audit trail, and refuses to start when the store cannot be trusted. The refusal goes to the journal (`journalctl -u maknaed`) on Linux or to `/usr/local/var/log/maknae/maknaed.err` on macOS, as a first line naming the cause and, for every graph refusal, a second line naming the next step:

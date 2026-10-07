@@ -5,7 +5,7 @@ Priority: optional
 Architecture: amd64
 Maintainer: Alex Ackerman <developer@maknae.io>
 Homepage: https://github.com/darkhonor/maknae
-Depends: libc6, systemd, apparmor, apparmor-utils, acl
+Depends: libc6, systemd, apparmor, apparmor-utils, acl, e2fsprogs
 Description: trust-plane daemon and operator CLI for a local AI-agent platform
  Maknae is a security-first, local AI-agent platform. This package installs
  the privileged trust-plane daemon (maknaed) and the non-privileged operator

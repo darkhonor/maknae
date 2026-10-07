@@ -61,16 +61,22 @@ case "$1" in
             echo "maknae: setfacl failed — grant _maknae-egress rx on /etc/maknae or the egress deputy cannot start" >&2
 
         # --- Audit sink pre-creation (§4.6 / §9.2) ------------------------------
-        # The MAC policy grants `append`, not `create`, so a first boot that had to
-        # O_CREAT the file would be denied — pre-create it here. Guard on
-        # non-existence so an upgrade never truncates the accumulated trail. Set
-        # append-only at the FILE level ONLY: file `+a` blocks `> audit.jsonl` and
-        # unlink/truncate even on non-MAC/complain hosts. Do NOT `chattr +a` the
-        # DIRECTORY — a +a dir blocks dpkg from managing /var/log/maknae on upgrade.
-        if [ ! -e /var/log/maknae/audit.jsonl ]; then
-            install -m 0640 -o _maknae -g _maknae /dev/null /var/log/maknae/audit.jsonl
+        # The profile grants no create, so the file is pre-created. The inode's
+        # append-only attribute is the trail's only append-only control here, so
+        # failing to set it fails configure. Never +a the directory (dpkg manages it).
+        AUDIT=/var/log/maknae/audit.jsonl
+        if [ -h "$AUDIT" ] || { [ -e "$AUDIT" ] && [ ! -f "$AUDIT" ]; }; then
+            echo "maknae: $AUDIT is not a regular file; refusing to configure" >&2
+            exit 1
         fi
-        chattr +a /var/log/maknae/audit.jsonl 2>/dev/null || :
+        if [ ! -e "$AUDIT" ]; then
+            install -m 0640 -o _maknae -g _maknae /dev/null "$AUDIT"
+        fi
+        if ! chattr +a "$AUDIT" || ! lsattr -d "$AUDIT" | cut -d' ' -f1 | grep -q a; then
+            echo "maknae: cannot set the append-only attribute on $AUDIT (filesystem: $(stat -f -c %T "$AUDIT" 2>/dev/null || echo unknown))." >&2
+            echo "  AppArmor cannot make the audit trail append-only; the inode attribute is the control. Put /var/log/maknae on a filesystem that supports chattr +a." >&2
+            exit 1
+        fi
 
         # --- Conffile-ownership convergence (EVERY configure) -------------------
         # dpkg records conffiles as root:root; the daemon runs as `_maknae` and the

@@ -46,8 +46,8 @@ Requires:       acl
 Requires(post): acl
 Requires:       fapolicyd
 Requires(pre):  systemd
-Requires(post): systemd policycoreutils selinux-policy-targeted
-Requires(preun):  systemd
+Requires(post): systemd policycoreutils selinux-policy-targeted e2fsprogs
+Requires(preun):  systemd e2fsprogs
 Requires(postun): systemd policycoreutils
 
 %description
@@ -127,14 +127,22 @@ setfacl -m u:_maknae-egress:rx %{_sysconfdir}/maknae 2>/dev/null || \
 # fapolicyd trust (never restart mid-transaction; the rpm plugin handles it)
 fapolicyd-cli --update 2>/dev/null || :
 # Audit-file lifecycle — first-install-only AND only if absent, then append-only.
-# %ghost + this guard means upgrades never truncate the trail or fight chattr +a.
-# FILE-level append-only only (NOT the directory): dir +a would block rpm from
-# managing /var/log/maknae on upgrade. File +a already prevents unlink/truncate
-# of the trail, and SELinux maknae_audit_t withholds create/add_name.
-if [ $1 -eq 1 ] && [ ! -e %{_localstatedir}/log/maknae/audit.jsonl ]; then
-    install -m 0640 -o _maknae -g _maknae /dev/null %{_localstatedir}/log/maknae/audit.jsonl
+# The inode attribute backs SELinux's append-only rule; a failure fails %post.
+# FILE-level only: a +a directory would block rpm from managing /var/log/maknae.
+AUDIT=%{_localstatedir}/log/maknae/audit.jsonl
+if [ -h "$AUDIT" ] || { [ -e "$AUDIT" ] && [ ! -f "$AUDIT" ]; }; then
+    echo "maknae: $AUDIT is not a regular file; refusing to install" >&2
+    exit 1
 fi
-chattr +a %{_localstatedir}/log/maknae/audit.jsonl 2>/dev/null || :
+if [ $1 -eq 1 ] && [ ! -e "$AUDIT" ]; then
+    install -m 0640 -o _maknae -g _maknae /dev/null "$AUDIT"
+fi
+if [ -e "$AUDIT" ]; then
+    if ! chattr +a "$AUDIT" || ! lsattr -d "$AUDIT" | cut -d' ' -f1 | grep -q a; then
+        echo "maknae: cannot set the append-only attribute on $AUDIT (filesystem: $(stat -f -c %%T "$AUDIT" 2>/dev/null || echo unknown))" >&2
+        exit 1
+    fi
+fi
 
 %preun
 %systemd_preun maknaed.service maknae-egress.service maknae-egress.socket
