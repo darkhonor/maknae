@@ -303,8 +303,8 @@ pub enum Verb {
     /// Bind a subject to a role. A policy mutation — write-ahead audit applies.
     /// MUST refuse the `adversary` role: containment has its own sanctioned
     /// spelling below, and admitting it here would grant containment to anyone
-    /// holding this term while bypassing the constraints written on it. A
-    /// username the host cannot resolve refuses the whole reload that carries it.
+    /// holding this term while bypassing the constraints written on it. MUST
+    /// refuse a username the host cannot resolve.
     AdminSubjectBind,
     /// Remove a subject's role binding. A policy mutation, and the sharper edge:
     /// unbinding the last admin locks out the WIRE until an out-of-band root edit

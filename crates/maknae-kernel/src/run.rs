@@ -5362,21 +5362,21 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         ))
     }
 
-    /// An S2 store (empty graph, no vocabulary digest) migrates, then takes the
+    /// A store written before #489 (empty graph, no vocabulary digest) migrates, then takes the
     /// file's bindings as an identity transition, and the PDP compiles over the
     /// result.
     #[test]
-    fn an_s2_store_with_a_bindings_file_migrates_and_the_pdp_compiles_over_it() {
-        let fx = graph_fixture("graph_s2_bound");
+    fn a_store_from_before_identity_with_a_bindings_file_migrates_and_the_pdp_compiles_over_it() {
+        let fx = graph_fixture("graph_pre_identity_bound");
         let k = WrappingKey::new(key().unwrap().into_bytes());
-        let s2 =
+        let old =
             maknae_graph::graph::GraphBuilder::new(maknae_graph::record::GraphSpace::Kernel, 4)
                 .build(
                     &maknae_graph::kernel::SCHEMA,
                     &maknae_graph::schema::CompiledSet::default(),
                 )
                 .unwrap();
-        let file = maknae_state::envelope::seal(&maknae_graph::format::encode(&s2), &k).unwrap();
+        let file = maknae_state::envelope::seal(&maknae_graph::format::encode(&old), &k).unwrap();
         let path = fx.state.join(STORE_FILE);
         std::fs::write(&path, file).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -5447,17 +5447,17 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
     }
 
     #[test]
-    fn an_s2_store_migrates_under_an_audited_intent() {
-        let fx = graph_fixture("graph_s2_migrate");
+    fn a_store_from_before_identity_migrates_under_an_audited_intent() {
+        let fx = graph_fixture("graph_pre_identity_migrate");
         let k = WrappingKey::new(key().unwrap().into_bytes());
-        let s2 =
+        let old =
             maknae_graph::graph::GraphBuilder::new(maknae_graph::record::GraphSpace::Kernel, 4)
                 .build(
                     &maknae_graph::kernel::SCHEMA,
                     &maknae_graph::schema::CompiledSet::default(),
                 )
                 .unwrap();
-        let file = maknae_state::envelope::seal(&maknae_graph::format::encode(&s2), &k).unwrap();
+        let file = maknae_state::envelope::seal(&maknae_graph::format::encode(&old), &k).unwrap();
         let path = fx.state.join(STORE_FILE);
         std::fs::write(&path, file).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();

@@ -539,7 +539,7 @@ mod tests {
         // class claim would silently cover 13 of 14. Derived, the invariant
         // maintains itself.
         //
-        // (Corrected 2026-09-02, #181 S4: this comment said the grantable-side
+        // (Corrected 2026-09-02, #181: this comment said the grantable-side
         // tripwire "has no replacement" — true when written, false now. The
         // replacement is `every_grantable_term_dispatches_and_the_hand_copy_matches`
         // below, reaching the real constant through `-basic`'s
@@ -583,7 +583,7 @@ mod tests {
         })
     }
 
-    /// The grantable-side tripwire (#181 S4), replacing what the retired
+    /// The grantable-side tripwire (#181), replacing what the retired
     /// `NoBehaviour` pin provided: a FIFTH term joining `GRANTABLE_ACTIONS`
     /// without a dispatch arm — the "granted-but-unbuilt" state ADR-0010 makes
     /// a contradiction — turns this red, cross-crate, through the re-export.

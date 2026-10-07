@@ -2343,8 +2343,8 @@ async fn a_corrective_record_that_cannot_append_withholds_its_frame() {
 
 // ---------------------------------------------------------------------------
 // #181 — the trail distinguishes WHY an absence denied; the wire never does.
-// Written RED against the un-annotated decide (S2 of the plan), turned green
-// by S3's annotations. Every wire assertion is the SAME generic Unauthorized:
+// Written RED against the un-annotated decide, turned green by the reason
+// annotations. Every wire assertion is the SAME generic Unauthorized:
 // the roadmap and the policy shape are audit-only disclosures.
 // ---------------------------------------------------------------------------
 

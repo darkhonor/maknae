@@ -191,7 +191,7 @@ fn rebuild(
     b.build(&SCHEMA, compiled).unwrap()
 }
 
-fn s2_sealed(revision: u64, k: &WrappingKey) -> Vec<u8> {
+fn sealed_before_identity(revision: u64, k: &WrappingKey) -> Vec<u8> {
     let g = GraphBuilder::new(GraphSpace::Kernel, revision)
         .build(&SCHEMA, &CompiledSet::default())
         .unwrap();
@@ -1578,7 +1578,7 @@ async fn a_transition_persists_before_its_checkpoint() {
     assert_eq!((again.revision, again.identity_transition), (2, false));
 }
 
-async fn s2_boot(
+async fn boot_over_a_store_from_before_identity(
     revision: u64,
     i: &Inputs,
 ) -> (
@@ -1589,10 +1589,10 @@ async fn s2_boot(
 ) {
     let fx = Fixture::new();
     let k = key(1);
-    let s2 = s2_sealed(revision, &k);
-    fx.write(STORE_FILE, &s2, 0o600);
-    let (r, events) = run_with(&fx.dir(), &k, cp(revision, &s2), i).await;
-    (fx, r, events, ciphertext_digest(&s2))
+    let old = sealed_before_identity(revision, &k);
+    fx.write(STORE_FILE, &old, 0o600);
+    let (r, events) = run_with(&fx.dir(), &k, cp(revision, &old), i).await;
+    (fx, r, events, ciphertext_digest(&old))
 }
 
 fn migrated_digest(events: &[Event]) -> [u8; 32] {
@@ -1603,9 +1603,9 @@ fn migrated_digest(events: &[Event]) -> [u8; 32] {
 }
 
 #[tokio::test]
-async fn s2_store_migrates_then_seeds_identity() {
+async fn a_store_from_before_identity_migrates_then_seeds_identity() {
     let i = inputs();
-    let (fx, r, events, s2) = s2_boot(1, &i).await;
+    let (fx, r, events, old) = boot_over_a_store_from_before_identity(1, &i).await;
     let r = r.unwrap();
     assert_eq!(
         r.migration,
@@ -1623,7 +1623,7 @@ async fn s2_store_migrates_then_seeds_identity() {
     assert_eq!(
         events,
         vec![
-            Event::Checkpoint(1, s2, "verified".into()),
+            Event::Checkpoint(1, old, "verified".into()),
             Event::Migrate(2, None, i.digest, vec![]),
             Event::Checkpoint(2, m, "migrated".into()),
             Event::Transition(3, "root-file".into()),
@@ -1635,9 +1635,9 @@ async fn s2_store_migrates_then_seeds_identity() {
 }
 
 #[tokio::test]
-async fn s2_store_without_bindings_migrates_in_one_persist() {
+async fn a_store_from_before_identity_without_bindings_migrates_in_one_persist() {
     let i = inputs_with(layer(None, &[]));
-    let (fx, r, events, s2) = s2_boot(1, &i).await;
+    let (fx, r, events, old) = boot_over_a_store_from_before_identity(1, &i).await;
     let r = r.unwrap();
     assert!(r.migration.is_some());
     assert!(!r.identity_transition);
@@ -1645,7 +1645,7 @@ async fn s2_store_without_bindings_migrates_in_one_persist() {
     assert_eq!(
         events,
         vec![
-            Event::Checkpoint(1, s2, "verified".into()),
+            Event::Checkpoint(1, old, "verified".into()),
             Event::Migrate(2, None, i.digest, vec![]),
             Event::Checkpoint(2, r.digest, "migrated".into()),
         ]
@@ -1656,9 +1656,9 @@ async fn s2_store_without_bindings_migrates_in_one_persist() {
 }
 
 #[tokio::test]
-async fn a_pre_s3_store_with_a_checkpoint_at_its_revision_is_verified_then_migrated() {
+async fn a_pre_identity_store_checkpointed_at_its_revision_is_verified_then_migrated() {
     let i = inputs();
-    let (_fx, r, events, _) = s2_boot(7, &i).await;
+    let (_fx, r, events, _) = boot_over_a_store_from_before_identity(7, &i).await;
     let r = r.unwrap();
     assert_eq!(r.outcome, BootOutcome::Loaded(AnchorState::Verified));
     assert_eq!(r.revision, 9);
@@ -1668,7 +1668,7 @@ async fn a_pre_s3_store_with_a_checkpoint_at_its_revision_is_verified_then_migra
 
 #[tokio::test]
 async fn a_migration_at_the_last_revision_refuses_as_exhausted() {
-    let (fx, r, _, _) = s2_boot(u64::MAX, &inputs()).await;
+    let (fx, r, _, _) = boot_over_a_store_from_before_identity(u64::MAX, &inputs()).await;
     assert_eq!(
         r.unwrap_err(),
         StoreError::Refused(Refusal::RevisionExhausted)
@@ -1680,22 +1680,38 @@ async fn a_migration_at_the_last_revision_refuses_as_exhausted() {
 async fn migration_persists_before_its_checkpoint_and_a_failed_intent_persists_nothing() {
     let fx = Fixture::new();
     let k = key(1);
-    let s2 = s2_sealed(1, &k);
-    fx.write(STORE_FILE, &s2, 0o600);
+    let old = sealed_before_identity(1, &k);
+    fx.write(STORE_FILE, &old, 0o600);
     let mut audit = Recorder {
         fail_migrate: true,
         ..Recorder::default()
     };
-    let r = boot(&fx.dir(), &k, cp(1, &s2), &mut audit, NOW, &inputs().boot()).await;
+    let r = boot(
+        &fx.dir(),
+        &k,
+        cp(1, &old),
+        &mut audit,
+        NOW,
+        &inputs().boot(),
+    )
+    .await;
     assert_eq!(r.unwrap_err(), StoreError::Audit("migrate refused".into()));
-    assert_eq!(fx.store(), s2);
+    assert_eq!(fx.store(), old);
     assert_eq!(audit.events.len(), 2);
 
     let mut audit = Recorder {
         fail_checkpoint_anchor: Some("migrated"),
         ..Recorder::default()
     };
-    let r = boot(&fx.dir(), &k, cp(1, &s2), &mut audit, NOW, &inputs().boot()).await;
+    let r = boot(
+        &fx.dir(),
+        &k,
+        cp(1, &old),
+        &mut audit,
+        NOW,
+        &inputs().boot(),
+    )
+    .await;
     assert_eq!(
         r.unwrap_err(),
         StoreError::Audit("checkpoint refused".into())
@@ -2165,7 +2181,7 @@ async fn a_stored_node_the_identity_layer_does_not_project_is_rewritten() {
 #[tokio::test]
 async fn a_migrated_store_reloads_without_churn() {
     let i = inputs_with(layer(None, &[]));
-    let (fx, r, _, _) = s2_boot(1, &i).await;
+    let (fx, r, _, _) = boot_over_a_store_from_before_identity(1, &i).await;
     let r = r.unwrap();
     let (again, events) = run_with(&fx.dir(), &key(1), checkpoint_of(&r), &i).await;
     let again = again.unwrap();

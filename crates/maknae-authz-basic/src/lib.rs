@@ -13,7 +13,7 @@
 mod binding;
 mod decide;
 
-/// The grantable term set, re-exported for CROSS-CRATE tripwires (#181 S4).
+/// The grantable term set, re-exported for CROSS-CRATE tripwires (#181).
 ///
 /// The constant itself stays `pub(crate)` in `decide.rs` deliberately: the
 /// `verb-vocabulary-drift` gate's awk anchor matches that exact spelling

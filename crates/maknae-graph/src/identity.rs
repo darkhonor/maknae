@@ -598,7 +598,7 @@ mod tests {
     }
 
     #[test]
-    fn extract_on_the_s2_empty_graph_is_the_empty_layer_with_no_digest() {
+    fn extract_on_an_empty_graph_is_the_empty_layer_with_no_digest() {
         let g = GraphBuilder::new(GraphSpace::Kernel, 1)
             .build(&crate::kernel::SCHEMA, &CompiledSet::default())
             .unwrap();
