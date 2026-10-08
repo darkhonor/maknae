@@ -3638,7 +3638,8 @@ where
     type Candidate = ReloadCandidate;
 
     /// The published set follows the snapshot, not atomically with it: for that
-    /// instant `admin.status` reports the previous load's counts.
+    /// instant `admin.status` and the subject list's unbound and unresolved rows
+    /// report the previous load.
     fn install(&self, candidate: ReloadCandidate) {
         let published = crate::identity_report::Published::of(
             &candidate.1,
@@ -7820,7 +7821,7 @@ mod reload_tests {
                 (
                     None,
                     "no-such-user-maknae-496 (no account)",
-                    "unresolved (no account)"
+                    "unresolved adversary (no account, not contained)"
                 ),
             ]
         );
@@ -7889,6 +7890,32 @@ mod reload_tests {
             matches!(&refused, Err(e) if e.to_string().contains("identity append refused")),
             "{refused:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn an_applied_reload_whose_identity_record_does_not_append_still_applies() {
+        let fx = fixture("probs_append_fails", AUTHZ, Some(ROOT_ADMIN)).await;
+        fx.reloader
+            .sink
+            .fail_identity
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        fx.write_bindings(GHOST_USER);
+        let applied = bounded(fx.reloader.run()).await.unwrap();
+        assert!(applied.persisted);
+        let recs = fx.reload_records();
+        assert_eq!(
+            (
+                recs.last().unwrap().action.as_str(),
+                recs.last().unwrap().outcome.result.as_str()
+            ),
+            ("graph.reload", "permit")
+        );
+        assert!(identity_records(&recs).is_empty());
+        assert_eq!(fx.status.identity.counts(), ["unresolved=1"]);
+        assert!(matches!(
+            fx.root_whoami(),
+            maknae_security::Verdict::Permit { .. }
+        ));
     }
 
     #[tokio::test]

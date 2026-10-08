@@ -729,35 +729,29 @@ fn terminal_safe(s: &str) -> String {
         .collect()
 }
 
-/// One row per subject. A daemon that predates #496 sends one entry per role and
-/// no label or state; its members and role stand in for them.
+/// One row per subject, with the role it is bound or listed under (empty for an
+/// unbound subject). A daemon that predates #496 sends one entry per role and no
+/// label or state; its members stand in for the label.
 fn subject_table(entries: &[maknae_proto::RoleBindingView]) -> Vec<String> {
     if entries.is_empty() {
         return Vec::new();
     }
-    let rows: Vec<[String; 3]> = entries
+    let header = ["UID", "ROLE", "SUBJECT", "STATE"].map(String::from);
+    let rows: Vec<[String; 4]> = entries
         .iter()
         .map(|e| {
             [
                 e.uid.map_or_else(|| "-".to_string(), |u| u.to_string()),
+                terminal_safe(&e.role),
                 terminal_safe(&if e.label.is_empty() {
                     e.members.join(", ")
                 } else {
                     e.label.clone()
                 }),
-                terminal_safe(if e.state.is_empty() {
-                    &e.role
-                } else {
-                    &e.state
-                }),
+                terminal_safe(&e.state),
             ]
         })
         .collect();
-    let header = [
-        "UID".to_string(),
-        "SUBJECT".to_string(),
-        "STATE".to_string(),
-    ];
     let w = |i: usize| {
         rows.iter()
             .chain(std::iter::once(&header))
@@ -765,10 +759,14 @@ fn subject_table(entries: &[maknae_proto::RoleBindingView]) -> Vec<String> {
             .max()
             .unwrap_or(0)
     };
-    let (w0, w1) = (w(0), w(1));
+    let (w0, w1, w2) = (w(0), w(1), w(2));
     std::iter::once(&header)
         .chain(rows.iter())
-        .map(|r| format!("{:<w0$}  {:<w1$}  {}", r[0], r[1], r[2]))
+        .map(|r| {
+            format!("{:<w0$}  {:<w1$}  {:<w2$}  {}", r[0], r[1], r[2], r[3])
+                .trim_end()
+                .to_string()
+        })
         .collect()
 }
 
@@ -1621,11 +1619,11 @@ mod tests {
             Some("kernel graph: revision 3 (verified)")
         );
         assert!(!base.iter().any(|l| l.starts_with("identity problem")));
-        s.identity_problem_counts = vec!["unbound=0".into(), "released=0".into()];
+        s.identity_problem_counts = vec!["unbound_conflict=0".into(), "released=0".into()];
         assert_eq!(status_lines(&s), base, "all-zero counts print nothing");
         s.identity_problem_counts = vec![
             "unresolved=1".into(),
-            "unbound=0".into(),
+            "unbound_conflict=0".into(),
             "carried_forward=1".into(),
             "unresolved_adversary=2".into(),
         ];
@@ -1666,24 +1664,40 @@ mod tests {
                     "contained (carried forward)"
                 ),
                 entry(
+                    "",
+                    &[],
+                    Some(1002),
+                    "uid 1002 (gus, gustav)",
+                    "unbound (conflict: guest, user)"
+                ),
+                entry(
                     "user",
                     &[],
                     None,
                     "ghost (no account)",
                     "unresolved (no account)"
                 ),
+                entry(
+                    "adversary",
+                    &[],
+                    None,
+                    "trudy (no account)",
+                    "unresolved adversary (no account, not contained)"
+                ),
             ]),
             [
-                "UID  SUBJECT             STATE",
-                "0    root (uid 0)        bound admin",
-                "666  uid 666 (mallory)   contained (carried forward)",
-                "-    ghost (no account)  unresolved (no account)",
+                "UID   ROLE       SUBJECT                 STATE",
+                "0     admin      root (uid 0)            bound admin",
+                "666   adversary  uid 666 (mallory)       contained (carried forward)",
+                "1002             uid 1002 (gus, gustav)  unbound (conflict: guest, user)",
+                "-     user       ghost (no account)      unresolved (no account)",
+                "-     adversary  trudy (no account)      unresolved adversary (no account, not contained)",
             ]
         );
         assert!(subject_table(&[]).is_empty());
         assert_eq!(
             subject_table(&[entry("user", &["uid:1", "uid:2"], None, "", "")]),
-            ["UID  SUBJECT       STATE", "-    uid:1, uid:2  user"],
+            ["UID  ROLE  SUBJECT       STATE", "-    user  uid:1, uid:2"],
             "an older daemon's per-role entry"
         );
     }
@@ -1699,7 +1713,7 @@ mod tests {
         );
         assert_eq!(
             subject_table(&[kernel_escaped])[1],
-            "7    \\u{e9}\\u{7f}\\,x (uid 7)  bound user",
+            "7    user  \\u{e9}\\u{7f}\\,x (uid 7)  bound user",
             "an already-escaped label passes unchanged"
         );
         let raw = entry(
@@ -1710,7 +1724,10 @@ mod tests {
             "bound\tx",
         );
         let row = &subject_table(&[raw])[1];
-        assert_eq!(row, "7    a\\u{7}b,\\u{202e}c\\nd  bound\\tx");
+        assert_eq!(
+            row,
+            "7    user\\u{1b}[2J  a\\u{7}b,\\u{202e}c\\nd  bound\\tx"
+        );
         assert!(row.chars().all(|c| c == ' ' || c.is_ascii_graphic()));
     }
 

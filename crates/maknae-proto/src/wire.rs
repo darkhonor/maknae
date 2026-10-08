@@ -580,10 +580,10 @@ pub enum Payload {
     ConfigView(std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>),
     /// Runtime posture for a permitted `admin.status`.
     Status(StatusView),
-    /// Role bindings for a permitted `admin.subject.list`, one entry per subject, as
-    /// the PDP resolves them RIGHT NOW. Never a boot copy -- a reload replaces
-    /// the bindings, so a boot copy would report authorization state the PDP is
-    /// no longer using, and disclosing stale authz is worse than none.
+    /// Role bindings for a permitted `admin.subject.list`, one entry per subject.
+    /// Each binding is the PDP's RIGHT NOW, never a boot copy -- a reload replaces
+    /// the bindings, and disclosing stale authz is worse than none. Labels, and the
+    /// subjects that hold no binding, come from the last applied policy load.
     SubjectList(Vec<RoleBindingView>),
     /// Durable policy authorization for a subject-side attempt, never OS approval.
     MutationAttempt(crate::MutationGrant),
@@ -653,7 +653,8 @@ pub struct RoleBindingView {
     #[serde(default)]
     pub label: String,
     /// `bound <role>`, `contained`, `contained (carried forward)`,
-    /// `unbound (conflict: <roles>)` or `unresolved (no account)`.
+    /// `unbound (conflict: <roles>)`, `unresolved (no account)` or
+    /// `unresolved adversary (no account, not contained)`.
     #[serde(default)]
     pub state: String,
 }
@@ -1031,7 +1032,7 @@ mod tests {
     fn a_status_with_identity_problem_counts_round_trips() {
         let mut r = status(Some((7, "verified".into())));
         if let RespResult::Ok(Payload::Status(s)) = &mut r.result {
-            s.identity_problem_counts = vec!["unbound=2".into(), "released=1".into()];
+            s.identity_problem_counts = vec!["unbound_conflict=2".into(), "released=1".into()];
         }
         assert_eq!(decode_response(&encode_response(&r).unwrap()).unwrap(), r);
     }

@@ -64,6 +64,6 @@ always	binding.role	the policy-file role token an operator would grep for
 always	binding.members	the identities bound to it; the answer admin.subject.list exists to give
 always	binding.uid	the subject's uid when the last applied load knew one (#496); the same id members spells as uid:N, and also given for a subject that holds no role
 always	binding.label	the subject's name as bindings.yaml spelled it, escaped, from the last applied load and never a live account lookup (#496); discloses names that resolve to no account and the names behind an alias conflict
-always	binding.state	what the last applied load made of the subject (#496): bound <role>, contained, contained (carried forward), unbound (conflict: <roles>) or unresolved (no account); fixed kernel vocabulary plus role keys
+always	binding.state	what the last applied load made of the subject (#496): bound <role>, contained, contained (carried forward), unbound (conflict: <roles>), unresolved (no account) or unresolved adversary (no account, not contained); fixed kernel vocabulary plus role keys
 always	whoami.peer_plane_uri_san	the caller's own verified plane identity; it is who they already are
 always	whoami.peer_uid	the caller's own uid, which they can read with getuid()

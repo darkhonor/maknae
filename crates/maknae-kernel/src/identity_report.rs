@@ -159,6 +159,9 @@ pub fn state(s: &ListedSubject) -> String {
         SubjectState::Contained => "contained".into(),
         SubjectState::CarriedForward => "contained (carried forward)".into(),
         SubjectState::Unbound(roles) => format!("unbound (conflict: {})", roles.join(", ")),
+        SubjectState::Unresolved(ADVERSARY) => {
+            "unresolved adversary (no account, not contained)".into()
+        }
         SubjectState::Unresolved(_) => "unresolved (no account)".into(),
     }
 }
@@ -444,6 +447,11 @@ mod tests {
                 "unresolved (no account)",
             ),
             (
+                listed(None, &["trudy"], SubjectState::Unresolved("adversary")),
+                "trudy (no account)",
+                "unresolved adversary (no account, not contained)",
+            ),
+            (
                 listed(
                     Some(1002),
                     &["gus", "gustav"],
@@ -488,6 +496,7 @@ mod tests {
             ),
             listed(Some(4242), &[], SubjectState::Contained),
             listed(None, &["ghost"], SubjectState::Unresolved("user")),
+            listed(None, &["trudy"], SubjectState::Unresolved("adversary")),
         ];
         let got = subject_views(
             vec![
@@ -545,6 +554,13 @@ mod tests {
                     None,
                     "ghost (no account)",
                     "unresolved (no account)"
+                ),
+                (
+                    "adversary",
+                    vec![],
+                    None,
+                    "trudy (no account)",
+                    "unresolved adversary (no account, not contained)"
                 ),
             ]
         );
