@@ -4211,7 +4211,12 @@ async fn run_inner(
         .err()
         .cloned()
         .or_else(|| inconsistent.clone());
-    let prior_trail = stored.and_then(|b| {
+    // Untrusted when inconsistent: used only to locate the trail and name what a reseed sets aside.
+    let peeked_layer = match &peeked {
+        Ok(Some(b)) => Some(b),
+        _ => None,
+    };
+    let prior_trail = peeked_layer.and_then(|b| {
         b.moved_from
             .as_ref()
             .map(PathBuf::from)
@@ -4250,8 +4255,9 @@ async fn run_inner(
             };
             let refused = first_refusal.unwrap_or_else(|| Invalid::Document(cause.clone()));
             let sections = file_sections.as_ref();
+            let trail = prior_trail.as_deref();
             return Err(refuse_start(
-                refused, cause, sections, None, create, config_dir, seams, &ids,
+                refused, cause, sections, trail, create, config_dir, seams, &ids,
             )
             .await);
         }
@@ -4308,7 +4314,7 @@ async fn run_inner(
     )
     .await?;
     let sink = trail.sink;
-    let mut events = match (reseeding, stored) {
+    let mut events = match (reseeding, peeked_layer) {
         (true, Some(replaced)) => vec![crate::baseline::reseeded_event(&replaced.sha256)],
         _ => start.events,
     };
@@ -4383,9 +4389,15 @@ fn inconsistency(b: &BaselineLayer) -> Option<String> {
             "the accepted baseline's recorded digest does not match its sections".to_string(),
         );
     }
-    let declared = maknae_config::Document::from_baseline(&sections)
-        .and_then(crate::boot::assemble)
-        .ok()?;
+    let declared =
+        match maknae_config::Document::from_baseline(&sections).and_then(crate::boot::assemble) {
+            Ok(declared) => declared,
+            Err(e) => {
+                return Some(format!(
+                    "the accepted baseline's sections do not assemble: {e}"
+                ))
+            }
+        };
     let (system, ceiling) = (
         declared.classification_policy_name(),
         &declared.ceiling().classification.name,
@@ -4516,6 +4528,30 @@ struct OpenedTrail {
     moved: Option<crate::baseline::Move>,
 }
 
+/// A start refused before the move record is written is no part of the move: it is
+/// recorded in the old trail, the one still live.
+async fn refused_before_move(
+    old: &Result<Arc<maknae_audit_append::AuditSink>, String>,
+    ctx: &BootCtx<'_>,
+    e: RunError,
+) -> RunError {
+    let refused = Err(e);
+    if let Ok(old) = old {
+        record_start_refusal(
+            old.as_ref(),
+            ctx.host,
+            ctx.socket,
+            ctx.euid,
+            ctx.session_id,
+            ctx.seq.next(),
+            ctx.au3_1,
+            &refused,
+        )
+        .await;
+    }
+    refused.map(drop).unwrap_err()
+}
+
 /// The trail this start appends to, with the move from `prior` performed when the
 /// path changed: the old trail records the move first, the new one links back, and
 /// the anchor is the newer of the two trails' checkpoints.
@@ -4548,12 +4584,21 @@ async fn open_trail(
     })
     .map(Arc::new)
     .map_err(|e| e.to_string());
-    let new = Arc::new(open_prepared(cfg).map_err(|e| RunError::Other(e.to_string()))?);
-    let (old_checkpoint, old_bytes) = match &old {
-        Ok(old) => last_checkpoint(old, state_dir).await?,
-        Err(_) => (None, 0),
+    let new = match open_prepared(cfg) {
+        Ok(new) => Arc::new(new),
+        Err(e) => return Err(refused_before_move(&old, ctx, RunError::Other(e.to_string())).await),
     };
-    let (new_checkpoint, new_bytes) = last_checkpoint(&new, state_dir).await?;
+    let scanned = match &old {
+        Ok(old) => last_checkpoint(old, state_dir).await,
+        Err(_) => Ok((None, 0)),
+    };
+    let ((old_checkpoint, old_bytes), (new_checkpoint, new_bytes)) = match scanned {
+        Ok(o) => match last_checkpoint(&new, state_dir).await {
+            Ok(n) => (o, n),
+            Err(e) => return Err(refused_before_move(&old, ctx, e).await),
+        },
+        Err(e) => return Err(refused_before_move(&old, ctx, e).await),
+    };
     let carried = maknae_state::anchor::newer(old_checkpoint, new_checkpoint);
     let record =
         |reason: &str| ctx.record(GRAPH_BASELINE_ACTION, "permit", reason, "authorized", None);
@@ -4618,6 +4663,9 @@ async fn boot_after_sink(
         egress_bounds,
         ..
     } = validated;
+    if let Some(why) = inconsistent {
+        return Err(graph_refusal(GraphFailure::Inconsistent(why), state_dir));
+    }
     let audit_cfg = &audit;
     let egress = crate::egress::production_egress_with(boot.providers(), &egress_cfg, |_| {
         seams.env.egress_account()
@@ -4653,9 +4701,6 @@ async fn boot_after_sink(
         .map_err(|e| graph_refusal(GraphFailure::Store(e), state_dir))?;
     graph_inputs.accepted_seen = accepted_seen;
     graph_inputs.baseline_events = events;
-    if let Some(why) = inconsistent {
-        return Err(graph_refusal(GraphFailure::Inconsistent(why), state_dir));
-    }
     // The kernel graph boots before the PDP is built from it.
     let mut booted = match boot_kernel_graph(
         state_dir,
@@ -8124,7 +8169,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
     }
 
     #[test]
-    fn a_target_that_does_not_open_prepared_refuses_with_nothing_on_it() {
+    fn a_target_that_does_not_open_prepared_is_refused_in_the_old_trail_only() {
         let _g = env_lock();
         let d = fixture("prepared-race");
         let _ = boot(&d);
@@ -8143,7 +8188,121 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             "{r:?}"
         );
         assert!(trail_of(&d, "audit-2.jsonl").is_empty());
-        assert_eq!(trail_of(&d, "audit.jsonl").len(), before);
+        let old = trail_of(&d, "audit.jsonl")[before..].to_vec();
+        assert_eq!(old.len(), 1, "{old:?}");
+        assert_eq!(old[0].action, "start");
+        assert!(old[0].outcome.reason.contains("not append-only"));
+    }
+
+    fn yaml_with_offload(d: &Dir, trail: &Path) {
+        let yaml = format!(
+            "core:\n  deployment_id: dev-01\nvault:\n  addr: https://v.example:8200\ntransport:\n  socket_path: {}\naudit:\n  jsonl_path: {}\n  siem: https://siem.example:6514\n{PRINCIPAL_BLOCK}",
+            d.0.join("maknaed.sock").display(),
+            trail.display(),
+        );
+        put(&d.0, "maknae.yaml", &yaml, 0o640);
+    }
+
+    #[test]
+    fn a_reseed_refused_at_start_is_recorded_in_the_stored_trail() {
+        let _g = env_lock();
+        let d = fixture("reseed-refused");
+        let _ = boot(&d);
+        let new = prepare_trail(&d, "audit-2.jsonl");
+        yaml_with_offload(&d, &new);
+        put(&state_dir(&d.0), MARKER_FILE, "", 0o644);
+        let before = trail_of(&d, "audit.jsonl").len();
+        let r = block_on_run_inner_with(&d.0, seams_with_own_marker(TestEnv::default()));
+        assert!(r.is_err(), "{r:?}");
+        assert!(
+            trail_of(&d, "audit-2.jsonl").is_empty(),
+            "the new trail is unverified"
+        );
+        assert_eq!(trail_of(&d, "audit.jsonl").len(), before + 1);
+    }
+
+    fn forge_digest(d: &Dir) -> BaselineLayer {
+        let mut forged = accepted(d);
+        forged.sha256 = [7; 32];
+        rewrite_baseline(d, Some(&forged));
+        forged
+    }
+
+    #[test]
+    fn an_inconsistent_store_is_refused_where_its_trail_is() {
+        let _g = env_lock();
+        let d = fixture("inconsistent-trail");
+        let _ = boot(&d);
+        forge_digest(&d);
+        let new = prepare_trail(&d, "audit-2.jsonl");
+        write_yaml(&d, "", "https://v.example:8200", &new, "");
+        let before = trail_of(&d, "audit.jsonl").len();
+        let r = boot(&d);
+        assert!(matches!(r, Err(RunError::Graph { .. })), "{r:?}");
+        let old = trail_of(&d, "audit.jsonl")[before..].to_vec();
+        assert_eq!(
+            old.last().unwrap().outcome.reason,
+            format!("audit trail moves to {} at start", new.display())
+        );
+        let moved = trail_of(&d, "audit-2.jsonl");
+        assert!(moved[0]
+            .outcome
+            .reason
+            .starts_with("audit trail continues from "));
+        assert_eq!(moved.last().unwrap().action, GRAPH_LOAD_ACTION);
+    }
+
+    #[test]
+    fn a_reseed_over_an_inconsistent_store_records_what_it_set_aside() {
+        let _g = env_lock();
+        let d = fixture("reseed-inconsistent");
+        let _ = boot(&d);
+        let forged = forge_digest(&d);
+        put(&state_dir(&d.0), MARKER_FILE, "", 0o644);
+        let before = trail_of(&d, "audit.jsonl").len();
+        let _ = block_on_run_inner_with(&d.0, seams_with_own_marker(TestEnv::default()));
+        let recs = trail_of(&d, "audit.jsonl")[before..].to_vec();
+        assert_eq!(
+            baseline_records(&recs),
+            vec![(
+                "permit".to_string(),
+                crate::baseline::reseeded_event(&forged.sha256)
+            )]
+        );
+    }
+
+    #[test]
+    fn stored_sections_that_do_not_assemble_are_an_inconsistent_store() {
+        let _g = env_lock();
+        let d = fixture("unassembled");
+        let _ = boot(&d);
+        let mut forged = accepted(&d);
+        forged.sections.insert(
+            "core".into(),
+            r#"{"deployment_id":"dev-01","handling":{"policy":"nope"}}"#.into(),
+        );
+        forged.sha256 = crate::baseline::accepted_digest(&forged.sections.clone().into());
+        rewrite_baseline(&d, Some(&forged));
+        let before = trail_of(&d, "audit.jsonl").len();
+        let r = boot(&d);
+        let Err(e @ RunError::Graph { .. }) = &r else {
+            panic!("expected the store refusal, got {r:?}");
+        };
+        assert_eq!(refusal_exit_code(e), GRAPH_REFUSAL_EXIT_CODE);
+        let recs = trail_of(&d, "audit.jsonl")[before..].to_vec();
+        assert_eq!(recs.last().unwrap().action, GRAPH_LOAD_ACTION);
+    }
+
+    #[test]
+    fn an_inconsistent_store_is_refused_before_the_policy_loads() {
+        let _g = env_lock();
+        let d = fixture("inconsistent-policy");
+        let _ = boot(&d);
+        forge_digest(&d);
+        put(&d.0, "authz.yaml", "schema_version: [\n", 0o640);
+        let r = boot(&d);
+        let Err(e) = &r else { panic!("{r:?}") };
+        assert_eq!(refusal_exit_code(e), GRAPH_REFUSAL_EXIT_CODE, "{e}");
     }
 
     #[test]

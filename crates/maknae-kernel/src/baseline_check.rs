@@ -29,8 +29,8 @@ pub enum Invalid {
     Offload(String),
     /// Exit 3, audited (#77).
     Principal(String),
-    /// Exit 1, audited, refused after the policy loads as today's plane client
-    /// refuses it; `principal` is the one the policy load needs.
+    /// Exit 1, audited, refused after the policy loads; `principal` is the one
+    /// the policy load needs.
     Vault {
         cause: String,
         principal: maknae_config::Principal,
