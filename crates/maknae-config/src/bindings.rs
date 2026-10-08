@@ -61,6 +61,9 @@ pub enum BindingsError {
     InsecurePermissions,
     Symlink,
     NotRootOwned,
+    /// The directory holding `bindings.yaml` is not root-owned, or is group- or
+    /// other-writable; carries the directory.
+    InsecureDirectory(String),
     Io(String),
     Yaml(String),
 }
@@ -75,6 +78,9 @@ impl std::fmt::Display for BindingsError {
             ),
             Self::Symlink => f.write_str("bindings.yaml path is a symlink (refused)"),
             Self::NotRootOwned => f.write_str("bindings.yaml is not owned by root (uid 0)"),
+            Self::InsecureDirectory(d) => {
+                f.write_str(&crate::authz::insecure_directory(d, "bindings.yaml"))
+            }
             Self::Io(m) => write!(f, "bindings.yaml i/o error: {m}"),
             Self::Yaml(m) => write!(f, "bindings.yaml yaml error: {m}"),
         }
@@ -180,22 +186,28 @@ fn load_required(
     target: maknae_io::TargetRequired,
 ) -> Result<Bindings, BindingsError> {
     let absolute = std::path::absolute(path).map_err(|e| BindingsError::Io(e.to_string()))?;
+    use crate::authz::RootReadError;
     match crate::authz::read_in_root_dir(&absolute, target) {
         Ok(bytes) => {
             let body = std::str::from_utf8(&bytes)
                 .map_err(|e| BindingsError::Io(format!("invalid UTF-8: {e}")))?;
             parse_bindings(body)
         }
-        Err(maknae_io::IoError::Io {
+        Err(RootReadError::Directory(d)) => {
+            Err(BindingsError::InsecureDirectory(d.display().to_string()))
+        }
+        Err(RootReadError::Io(maknae_io::IoError::Io {
             kind: maknae_io::IoKind::NotFound,
             path: missing,
-        }) if missing == absolute => Ok(Bindings::missing()),
-        Err(maknae_io::IoError::Symlink { .. }) => Err(BindingsError::Symlink),
-        Err(maknae_io::IoError::InsecurePermissions { .. }) => {
+        })) if missing == absolute => Ok(Bindings::missing()),
+        Err(RootReadError::Io(maknae_io::IoError::Symlink { .. })) => Err(BindingsError::Symlink),
+        Err(RootReadError::Io(maknae_io::IoError::InsecurePermissions { .. })) => {
             Err(BindingsError::InsecurePermissions)
         }
-        Err(maknae_io::IoError::NotOwned { .. }) => Err(BindingsError::NotRootOwned),
-        Err(other) => Err(BindingsError::Io(other.to_string())),
+        Err(RootReadError::Io(maknae_io::IoError::NotOwned { .. })) => {
+            Err(BindingsError::NotRootOwned)
+        }
+        Err(RootReadError::Io(other)) => Err(BindingsError::Io(other.to_string())),
     }
 }
 
@@ -337,12 +349,37 @@ mod tests {
     }
 
     #[test]
+    fn a_block_moved_unchanged_keeps_every_section_digest_input() {
+        let authz = "schema_version: 1\nroles:\n  admin:\n    allow: [\"admin.status\"]\n";
+        let block = "bindings:\n  user: [ \"bob\" ]   # c\n  admin: [\"alice\"]\n  adversary:\n    - \"mallory\"\n";
+        let Value::Map(combined) = crate::load_str(&format!("{authz}{block}")).unwrap() else {
+            unreachable!()
+        };
+        let before: BTreeMap<String, String> = combined
+            .iter()
+            .map(|(k, v)| (k.clone(), canonical_json(v)))
+            .collect();
+        let mut after: BTreeMap<String, String> = crate::parse_authz(authz)
+            .unwrap()
+            .sections()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let moved = parse_bindings(&format!("schema_version: 1\n{block}")).unwrap();
+        after.insert(
+            "bindings".into(),
+            moved.section_canonical().unwrap().to_string(),
+        );
+        assert_eq!(after, before);
+    }
+
+    #[test]
     fn every_error_renders_naming_bindings_yaml() {
         for e in [
             BindingsError::UnknownSchemaVersion(3),
             BindingsError::InsecurePermissions,
             BindingsError::Symlink,
             BindingsError::NotRootOwned,
+            BindingsError::InsecureDirectory("/etc/maknae".into()),
             BindingsError::Io("x".into()),
             BindingsError::Yaml("y".into()),
         ] {
@@ -395,7 +432,7 @@ mod tests {
         } else {
             assert_eq!(
                 got,
-                Err(BindingsError::NotRootOwned),
+                Err(BindingsError::InsecureDirectory(d.display().to_string())),
                 "the directory anchor requires owner 0"
             );
         }
@@ -421,20 +458,21 @@ mod tests {
             std::fs::set_permissions(d.join(f), std::fs::Permissions::from_mode(0o640)).unwrap();
         }
         std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o770)).unwrap();
+        let named = d.display().to_string();
         assert_eq!(
             load_required(&d.join(BINDINGS_FILE), own()),
-            Err(BindingsError::InsecurePermissions)
+            Err(BindingsError::InsecureDirectory(named.clone()))
         );
         assert!(
             matches!(
                 load_required(&d.join("missing.yaml"), own()),
-                Err(BindingsError::InsecurePermissions)
+                Err(BindingsError::InsecureDirectory(_))
             ),
             "a missing file in a writable dir is not absent"
         );
         assert!(matches!(
             crate::authz::security_load_required(&d.join("authz.yaml"), own()),
-            Err(crate::AuthzError::InsecurePermissions)
+            Err(crate::AuthzError::InsecureDirectory(n)) if n == named
         ));
         std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o750)).unwrap();
         assert_eq!(
@@ -455,9 +493,48 @@ mod tests {
         if runs_as_root(&d) {
             assert_eq!(got, Ok(Bindings::absent()));
         } else {
-            assert_eq!(got, Err(BindingsError::NotRootOwned));
+            assert_eq!(
+                got,
+                Err(BindingsError::InsecureDirectory(d.display().to_string()))
+            );
         }
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_directory_that_fails_its_check_is_refused_naming_the_directory() {
+        use std::os::unix::fs::MetadataExt;
+        let probe = dir("whoami");
+        let me = std::fs::metadata(&probe).unwrap().uid();
+        let _ = std::fs::remove_dir_all(&probe);
+        for (tag, mode, owner) in [
+            ("dir_g", 0o770, None),
+            ("dir_o", 0o757, None),
+            ("dir_u", 0o750, Some(me.wrapping_add(1))),
+        ] {
+            let d = dir(tag);
+            let p = d.join(BINDINGS_FILE);
+            std::fs::write(&p, "schema_version: 1\n").unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
+            std::fs::set_permissions(&d, std::fs::Permissions::from_mode(mode)).unwrap();
+            let got = load_required(&p, maknae_io::TargetRequired { owner, ..own() });
+            let missing = load_required(
+                &d.join("gone.yaml"),
+                maknae_io::TargetRequired { owner, ..own() },
+            );
+            let _ = std::fs::remove_dir_all(&d);
+            let want = d.display().to_string();
+            assert_eq!(
+                got,
+                Err(BindingsError::InsecureDirectory(want.clone())),
+                "{tag}"
+            );
+            assert_eq!(missing, got, "{tag}: not missing");
+            assert_eq!(
+                got.unwrap_err().to_string(),
+                format!("the directory {want} holding bindings.yaml must be owned by root (uid 0) and not group- or other-writable")
+            );
+        }
     }
 
     #[test]
@@ -512,7 +589,10 @@ mod tests {
         if root {
             assert_eq!(production, Ok(Bindings::absent()));
         } else {
-            assert_eq!(production, Err(BindingsError::NotRootOwned));
+            assert_eq!(
+                production,
+                Err(BindingsError::InsecureDirectory(d.display().to_string()))
+            );
         }
     }
 

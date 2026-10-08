@@ -5109,10 +5109,10 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         }
         if !nix::unistd::geteuid().is_root() {
             match result {
-                Err(RunError::Authz(msg)) => {
-                    assert!(msg.to_string().contains("authz.yaml is not owned by root"))
-                }
-                other => panic!("expected the authz.yaml ownership refusal, got {other:?}"),
+                Err(RunError::Authz(msg)) => assert!(msg
+                    .to_string()
+                    .contains("holding authz.yaml must be owned by root")),
+                other => panic!("expected the authz.yaml directory refusal, got {other:?}"),
             }
         }
     }
@@ -5265,15 +5265,11 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             assert_eq!(start.session_id, posture_rec.session_id);
             assert!(start.seq > posture_rec.seq);
         } else {
-            // Unprivileged (every CI lane, this dev host): the authz gate still
-            // refuses — for `NotRootOwned` specifically (checked below via its
-            // exact Display text, `authz.rs`'s `AuthzError::NotRootOwned` arm),
-            // not a grammar/tilde problem — proving the gate is reached and
-            // enforced, not silently bypassed.
+            // Unprivileged: the policy directory's ownership check refuses first.
             match &result {
                 Err(RunError::Authz(msg)) => assert!(
-                    msg.contains("not owned by root"),
-                    "expected a NotRootOwned refusal, got: {msg}"
+                    msg.contains("holding authz.yaml must be owned by root"),
+                    "expected the directory refusal, got: {msg}"
                 ),
                 other => panic!("expected Err(RunError::Authz), got {other:?}"),
             }
@@ -5358,7 +5354,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         if nix::unistd::geteuid().as_raw() != 0 {
             match &result {
                 Err(RunError::Authz(msg)) => assert!(
-                    msg.contains("not owned by root"),
+                    msg.contains("holding authz.yaml must be owned by root"),
                     "root-only: off root the policy read refuses first, got: {msg}"
                 ),
                 other => panic!("expected Err(RunError::Authz), got {other:?}"),

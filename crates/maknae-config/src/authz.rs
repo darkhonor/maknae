@@ -518,6 +518,9 @@ pub enum AuthzError {
     /// ownership is the control that stops a compromised `_maknae` from
     /// widening its own grants by editing this file.
     NotRootOwned,
+    /// The directory holding `authz.yaml` is not root-owned, or is group- or
+    /// other-writable; carries the directory.
+    InsecureDirectory(String),
     /// File I/O failure (missing file, unreadable, non-UTF-8, …).
     Io(String),
     /// The document is not well-formed YAML, or a section has the wrong shape
@@ -544,6 +547,7 @@ impl std::fmt::Display for AuthzError {
             }
             AuthzError::Symlink => write!(f, "authz.yaml path is a symlink (refused)"),
             AuthzError::NotRootOwned => write!(f, "authz.yaml is not owned by root (uid 0)"),
+            AuthzError::InsecureDirectory(d) => write!(f, "{}", insecure_directory(d, "authz.yaml")),
             AuthzError::Io(m) => write!(f, "authz i/o error: {m}"),
             AuthzError::Yaml(m) => write!(f, "authz yaml error: {m}"),
             AuthzError::BindingsMoved => f.write_str(
@@ -891,6 +895,22 @@ pub(crate) fn security_load_required(
     decode_policy_utf8(&bytes)
 }
 
+/// The refusal for a policy file's directory that fails its owner or mode check.
+pub(crate) fn insecure_directory(dir: &str, file: &str) -> String {
+    format!(
+        "the directory {dir} holding {file} must be owned by root (uid 0) and not group- or other-writable"
+    )
+}
+
+/// Why [`read_in_root_dir`] refused.
+#[cfg(unix)]
+#[derive(Debug)]
+pub(crate) enum RootReadError {
+    /// The directory failed its owner or mode check.
+    Directory(std::path::PathBuf),
+    Io(maknae_io::IoError),
+}
+
 /// Read a root policy file through an anchor on its directory that requires the
 /// file's owner and no group or other write, so only that owner can add, replace
 /// or remove the file. `path` is absolute.
@@ -898,19 +918,29 @@ pub(crate) fn security_load_required(
 pub(crate) fn read_in_root_dir(
     path: &Path,
     target: maknae_io::TargetRequired,
-) -> Result<maknae_io::Zeroizing<Vec<u8>>, maknae_io::IoError> {
-    let parent = path.parent().ok_or(maknae_io::IoError::RootAnchor)?;
-    let name = path
-        .file_name()
-        .ok_or_else(|| maknae_io::IoError::AnchorEndsInDotDot {
+) -> Result<maknae_io::Zeroizing<Vec<u8>>, RootReadError> {
+    let parent = path
+        .parent()
+        .ok_or(RootReadError::Io(maknae_io::IoError::RootAnchor))?;
+    let name = path.file_name().ok_or_else(|| {
+        RootReadError::Io(maknae_io::IoError::AnchorEndsInDotDot {
             path: path.to_path_buf(),
-        })?;
+        })
+    })?;
     let dir = maknae_io::AnchorRequired {
         owner: target.owner,
         mode_mask: Some(0o022),
     };
-    let anchor = maknae_io::open_anchor_resolved(parent, dir, maknae_io::StrategyPref::Auto)?;
-    Ok(anchor.read(Path::new(name), None, target)?.value)
+    let anchor = maknae_io::open_anchor_resolved(parent, dir, maknae_io::StrategyPref::Auto)
+        .map_err(|e| match e {
+            maknae_io::IoError::InsecurePermissions { .. }
+            | maknae_io::IoError::NotOwned { .. } => RootReadError::Directory(parent.to_path_buf()),
+            other => RootReadError::Io(other),
+        })?;
+    Ok(anchor
+        .read(Path::new(name), None, target)
+        .map_err(RootReadError::Io)?
+        .value)
 }
 
 /// Hermetic-test seam (#85 spec §6a.4): [`load_authz`] with a caller-supplied
@@ -945,12 +975,15 @@ fn decode_policy_utf8(bytes: &[u8]) -> Result<String, AuthzError> {
 }
 
 #[cfg(unix)]
-fn map_authz_io(e: maknae_io::IoError) -> AuthzError {
+fn map_authz_io(e: RootReadError) -> AuthzError {
     match e {
-        maknae_io::IoError::Symlink { .. } => AuthzError::Symlink,
-        maknae_io::IoError::InsecurePermissions { .. } => AuthzError::InsecurePermissions,
-        maknae_io::IoError::NotOwned { .. } => AuthzError::NotRootOwned,
-        other => AuthzError::Io(other.to_string()),
+        RootReadError::Directory(d) => AuthzError::InsecureDirectory(d.display().to_string()),
+        RootReadError::Io(maknae_io::IoError::Symlink { .. }) => AuthzError::Symlink,
+        RootReadError::Io(maknae_io::IoError::InsecurePermissions { .. }) => {
+            AuthzError::InsecurePermissions
+        }
+        RootReadError::Io(maknae_io::IoError::NotOwned { .. }) => AuthzError::NotRootOwned,
+        RootReadError::Io(other) => AuthzError::Io(other.to_string()),
     }
 }
 
@@ -1710,6 +1743,7 @@ mod tests {
             AuthzError::InsecurePermissions,
             AuthzError::Symlink,
             AuthzError::NotRootOwned,
+            AuthzError::InsecureDirectory("/etc/maknae".into()),
             AuthzError::Io("boom".into()),
             AuthzError::Yaml("bad shape".into()),
         ];
@@ -1813,7 +1847,59 @@ mod tests {
         let _ = std::os::unix::fs::chown(&p, Some(65_534), None);
         let got = load_authz(&p);
         let _ = std::fs::remove_file(&p);
-        assert!(matches!(got, Err(AuthzError::NotRootOwned)));
+        if mine().owner == Some(0) {
+            assert_eq!(got, Err(AuthzError::NotRootOwned));
+        } else {
+            let dir = p.parent().unwrap().display().to_string();
+            assert_eq!(got, Err(AuthzError::InsecureDirectory(dir)));
+        }
+    }
+
+    fn in_dir(tag: &str, dir_mode: u32) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("maknae_authz_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let d = d.canonicalize().unwrap();
+        write_mode(&d.join("authz.yaml"), SHIPPED_DEFAULT, 0o640);
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(dir_mode)).unwrap();
+        d
+    }
+
+    #[test]
+    fn a_writable_directory_is_refused_naming_the_directory() {
+        for mode in [0o770, 0o757] {
+            let d = in_dir(&format!("dir_{mode:o}"), mode);
+            let got = security_load_required(&d.join("authz.yaml"), mine());
+            let _ = std::fs::remove_dir_all(&d);
+            let want = d.display().to_string();
+            assert_eq!(
+                got,
+                Err(AuthzError::InsecureDirectory(want.clone())),
+                "{mode:o}"
+            );
+            assert_eq!(
+                got.unwrap_err().to_string(),
+                format!("the directory {want} holding authz.yaml must be owned by root (uid 0) and not group- or other-writable")
+            );
+        }
+    }
+
+    #[test]
+    fn a_directory_owned_by_another_uid_is_refused_naming_the_directory() {
+        let d = in_dir("dir_owner", 0o750);
+        let other = maknae_io::TargetRequired {
+            owner: mine().owner.map(|u| u.wrapping_add(1)),
+            ..mine()
+        };
+        let got = security_load_required(&d.join("authz.yaml"), other);
+        let ok = security_load_required(&d.join("authz.yaml"), mine());
+        let _ = std::fs::remove_dir_all(&d);
+        assert_eq!(
+            got,
+            Err(AuthzError::InsecureDirectory(d.display().to_string()))
+        );
+        assert_eq!(ok.as_deref(), Ok(SHIPPED_DEFAULT));
     }
 
     #[test]
@@ -2018,7 +2104,7 @@ mod tests {
         // The PRODUCTION door on the same fixture must still demand root
         // ownership — proves adding the seam weakened nothing.
         assert!(
-            matches!(via_door, Err(AuthzError::NotRootOwned)),
+            matches!(via_door, Err(AuthzError::InsecureDirectory(_))),
             "production load_authz must refuse a non-root fixture: {via_door:?}"
         );
     }
