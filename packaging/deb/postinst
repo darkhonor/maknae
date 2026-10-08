@@ -99,8 +99,8 @@ case "$1" in
         # %attr; on deb we re-assert it idempotently on fresh install AND upgrade.
         # dpkg tracks conffile CONTENT, not ownership, so conffile semantics stay
         # intact.
-        chown root:_maknae /etc/maknae/authz.yaml /etc/maknae/maknae.yaml 2>/dev/null || :
-        chmod 0640         /etc/maknae/authz.yaml /etc/maknae/maknae.yaml 2>/dev/null || :
+        chown root:_maknae /etc/maknae/authz.yaml /etc/maknae/bindings.yaml /etc/maknae/maknae.yaml 2>/dev/null || :
+        chmod 0640         /etc/maknae/authz.yaml /etc/maknae/bindings.yaml /etc/maknae/maknae.yaml 2>/dev/null || :
 
         # --- AppArmor profile ----------------------------------------------------
         if command -v apparmor_parser >/dev/null 2>&1; then

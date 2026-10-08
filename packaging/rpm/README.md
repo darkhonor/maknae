@@ -3,7 +3,7 @@
 Native `rpmbuild` package (`maknae.spec` + `build-rpm.sh`) for RHEL / Rocky. It
 installs the `maknaed` daemon and `maknae` CLI, the hardened `maknaed.service`
 system unit, the sysusers.d definition (`_maknae` service account + `maknae`
-operator group), the shipped default YAMLs (`authz.yaml` / `maknae.yaml`), the
+operator group), the shipped default YAMLs (`authz.yaml` / `bindings.yaml` / `maknae.yaml`), the
 SELinux module (compiled to `maknae.pp` at build time), the fapolicyd trust
 fragment, and the Vault-port label helper. The `%post` sets `chattr +a` on the
 audit **file** only (`/var/log/maknae/audit.jsonl`) — not the directory, which

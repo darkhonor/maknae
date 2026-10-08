@@ -292,6 +292,7 @@ phase1() {
                 "./usr/local/share" "./usr/local/share/maknae" \
                 "./usr/local/share/maknae/defaults" \
                 "./usr/local/share/maknae/defaults/authz.yaml" \
+                "./usr/local/share/maknae/defaults/bindings.yaml" \
                 "./usr/local/share/maknae/defaults/maknae.yaml" | sort > "$x/want"
             lsbom -s "$bom" \
               | sed -e 's|^\.$||' -e 's|libaws_lc_fips_.*_crypto\.dylib|FIPSDYLIB|' \
@@ -461,6 +462,7 @@ REFUSE
         [ "$got" = "$want" ] && ok "$path = $got" || fail "$path = $got (want $want)"
     }
     check_mode "drwxr-x--- root _maknae"    /etc/maknae
+    check_mode "-rw-r----- root _maknae"    /etc/maknae/bindings.yaml
     check_mode "drwx------ _maknae _maknae" /var/log/maknae
     check_mode "drwxr-x--- _maknae maknae"  /usr/local/var/run/maknae
     check_mode "drwxr-x--- _maknae-egress _maknae" /usr/local/var/run/maknae-egress

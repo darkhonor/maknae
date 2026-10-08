@@ -25,6 +25,7 @@ Source9:        maknae.yaml
 Source10:       maknae-egress
 Source11:       maknae-egress.service
 Source12:       maknae-egress.socket
+Source13:       bindings.yaml
 
 ExclusiveArch:  x86_64
 
@@ -54,8 +55,9 @@ Requires(postun): systemd policycoreutils
 Maknae is a security-first, local AI-agent platform. This package installs the
 privileged trust-plane daemon (maknaed) and the non-privileged operator CLI
 (maknae), a hardened systemd unit with TPM2-sealed credential loading, an
-SELinux Type Enforcement policy, a fapolicyd trust fragment, and the shipped
-RBAC authorization policy — for deployment on hardened RHEL/Rocky systems.
+SELinux Type Enforcement policy, a fapolicyd trust fragment, the shipped
+RBAC authorization policy and its role-bindings file — for deployment on
+hardened RHEL/Rocky systems.
 
 A fresh install is not runnable until `sudo maknae enroll` provisions the
 daemon credential and the operator principal (the daemon refuses to start
@@ -94,6 +96,7 @@ install -D -m 0644 %{SOURCE6} %{buildroot}%{_sysconfdir}/fapolicyd/trust.d/makna
 
 # Config tree (final ownership set via %attr in %files)
 install -D -m 0640 %{SOURCE8} %{buildroot}%{_sysconfdir}/maknae/authz.yaml
+install -D -m 0640 %{SOURCE13} %{buildroot}%{_sysconfdir}/maknae/bindings.yaml
 install -D -m 0640 %{SOURCE9} %{buildroot}%{_sysconfdir}/maknae/maknae.yaml
 install -d -m 0750 %{buildroot}%{_sysconfdir}/maknae/private
 # #240b: the deputy's credential set dir (files written by `maknae enroll`).
@@ -185,6 +188,7 @@ fi
 %config(noreplace) %{_sysconfdir}/fapolicyd/trust.d/maknae
 %dir %attr(0750,root,_maknae) %{_sysconfdir}/maknae
 %config(noreplace) %attr(0640,root,_maknae) %{_sysconfdir}/maknae/authz.yaml
+%config(noreplace) %attr(0640,root,_maknae) %{_sysconfdir}/maknae/bindings.yaml
 %config(noreplace) %attr(0640,root,_maknae) %{_sysconfdir}/maknae/maknae.yaml
 %dir %attr(0750,root,_maknae) %{_sysconfdir}/maknae/private
 %dir %attr(0750,root,_maknae-egress) %{_sysconfdir}/maknae/egress

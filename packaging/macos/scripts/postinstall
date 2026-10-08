@@ -91,7 +91,7 @@ fi
 [ "$DISABLE_EGRESS" = false ] || verify "launchctl disable $EGRESS_LABEL" disabled "$(disabled_state "$EGRESS_LABEL")"
 
 install -d -m 0750 -o 0 -g "$MGID" "$ETC"
-for f in authz.yaml maknae.yaml; do
+for f in authz.yaml bindings.yaml maknae.yaml; do
     if [ ! -e "$ETC/$f" ]; then
         install -m 0640 -o 0 -g "$MGID" "$DEFAULTS/$f" "$ETC/$f"
     fi
@@ -101,15 +101,15 @@ done
 # §4.6 — the rpm gets this from %attr).
 chown "0:$MGID" "$ETC" "$ETC/private" 2>/dev/null || :
 chmod 0750      "$ETC" "$ETC/private" 2>/dev/null || :
-chown "0:$MGID" "$ETC/authz.yaml" "$ETC/maknae.yaml" 2>/dev/null || :
-chmod 0640      "$ETC/authz.yaml" "$ETC/maknae.yaml" 2>/dev/null || :
+chown "0:$MGID" "$ETC/authz.yaml" "$ETC/bindings.yaml" "$ETC/maknae.yaml" 2>/dev/null || :
+chmod 0640      "$ETC/authz.yaml" "$ETC/bindings.yaml" "$ETC/maknae.yaml" 2>/dev/null || :
 # VERIFY the end state rather than trusting the calls. If the daemon cannot read
 # its own config it fails closed at boot with no useful diagnostic, so a wrong
 # mode here surfaces as a mysterious runtime refusal rather than an install error.
 for d in "$ETC" "$ETC/private"; do
     verify "$d ownership/mode" "0 $MGID 750" "$(stat -f '%u %g %Lp' "$d")"
 done
-for f in "$ETC/authz.yaml" "$ETC/maknae.yaml"; do
+for f in "$ETC/authz.yaml" "$ETC/bindings.yaml" "$ETC/maknae.yaml"; do
     verify "$f ownership/mode" "0 $MGID 640" "$(stat -f '%u %g %Lp' "$f")"
 done
 

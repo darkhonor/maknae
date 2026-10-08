@@ -495,6 +495,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    #[test]
+    fn the_shipped_file_is_bindings_absent() {
+        let shipped = include_str!("../../../packaging/common/bindings.yaml");
+        assert_eq!(parse_bindings(shipped), Ok(Bindings::absent()));
+        let d = dir("shipped");
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o750)).unwrap();
+        let p = d.join(BINDINGS_FILE);
+        std::fs::write(&p, shipped).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let through_reader = load_required(&p, own());
+        let production = load_bindings(&p);
+        let root = runs_as_root(&d);
+        let _ = std::fs::remove_dir_all(&d);
+        assert_eq!(through_reader, Ok(Bindings::absent()));
+        if root {
+            assert_eq!(production, Ok(Bindings::absent()));
+        } else {
+            assert_eq!(production, Err(BindingsError::NotRootOwned));
+        }
+    }
+
     #[cfg(feature = "hermetic-test-seam")]
     #[test]
     fn the_seam_reads_under_the_requirement_it_is_given() {

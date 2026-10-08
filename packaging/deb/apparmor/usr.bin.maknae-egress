@@ -83,4 +83,5 @@ profile maknae-egress /usr/bin/maknae-egress {
   deny /var/lib/maknae/** rwklx,
   deny /etc/maknae/private/** rwklx,
   deny /etc/maknae/authz.yaml rwklx,
+  deny /etc/maknae/bindings.yaml rwklx,
 }

@@ -199,6 +199,7 @@ for job in io.maknae.maknaed io.maknae.maknae-egress; do
     plutil -convert binary1 "$D/Library/LaunchDaemons/$job.plist"
 done
 install -m 0644 "$REPO/packaging/common/authz.yaml"  "$D/usr/local/share/maknae/defaults/authz.yaml"
+install -m 0644 "$REPO/packaging/common/bindings.yaml" "$D/usr/local/share/maknae/defaults/bindings.yaml"
 install -m 0644 "$REPO/packaging/common/maknae.yaml" "$D/usr/local/share/maknae/defaults/maknae.yaml"
 # The shipped skeleton is LINUX-SHAPED and would be wrong here if left alone:
 # maknae.yaml carries no `transport:` section, and maknae-config's compiled default

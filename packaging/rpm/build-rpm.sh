@@ -59,6 +59,7 @@ install -m 0644 "$COMMON/maknae.yaml"             "$TOP/SOURCES/"
 # rpmbuild fails on a missing source rather than silently shipping without it.
 install -m 0644 "$COMMON/maknae-egress.service"   "$TOP/SOURCES/"
 install -m 0644 "$COMMON/maknae-egress.socket"    "$TOP/SOURCES/"
+install -m 0644 "$COMMON/bindings.yaml"           "$TOP/SOURCES/"
 
 # --- Spec %files vs manifest: what the rpm SHIPS is what was declared --------
 # The rpm's equivalent of the deb payload check. rpmbuild builds the payload
