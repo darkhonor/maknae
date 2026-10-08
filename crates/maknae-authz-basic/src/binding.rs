@@ -150,16 +150,8 @@ impl ResolvedBindings {
     /// name is an input resolved once per policy load, and the account may since
     /// have been renamed.
     pub(crate) fn as_subject_bindings(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
-        // NO `bindings:` KEY -> `None`, not an empty list.
-        //
-        // The shipped `packaging/common/authz.yaml` has no `bindings:` key, so
-        // the default deployment took this path and rendered `Some(vec![])` --
-        // "these are the bindings, and there are none" -- while the DEFAULT
-        // ROLE FALLBACK was live and the enrolled uid was resolving to admin.
-        // Materially different states (`bindings: {}` and
-        // no-key-with-fallback-active) would otherwise read identically as
-        // "nobody is bound", which is exactly the claim the `Option` on this
-        // seam exists to refuse. Only an EXPLICIT block can report a set.
+        // No `bindings:` key (the shipped `bindings.yaml`) means the role
+        // fallback is live, so it reports `None`, never an empty set.
         if !self.explicit {
             return None;
         }

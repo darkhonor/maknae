@@ -19,19 +19,12 @@
 //! `maknae-security` seam, and the shipped deny list is enforced on the `Read`
 //! verb's PEP.)*
 //!
-//! *(Corrected 2026-08-31: the header above describes `authz.yaml` as the
-//! capability grammar alone, which has been incomplete since #85. The file now
-//! carries **three independent surfaces**, and each answers a different
-//! question: `permissions:` decides PATHS by capability pattern; `bindings:`
-//! decides IDENTITY→role (#85); `roles:` decides ACTIONS per role, per term
-//! (#162, [ADR-0010]). They do not compose with one another here — each is
-//! parsed structurally and handed to `maknae-authz-basic` to decide. Prose
-//! elsewhere that treats `authz.yaml` as "the capability grammar" is describing
-//! one of the three.)*
-//!
-//! *(Corrected 2026-10-08, #496: `bindings:` moved to its own root-owned file,
-//! `bindings.yaml` ([`crate::parse_bindings`]); `authz.yaml` refuses the key.
-//! The surfaces here are `permissions:`, `roles:` and `destinations:`.)*
+//! `authz.yaml` carries three independent surfaces: `permissions:` decides
+//! PATHS by capability pattern; `roles:` decides ACTIONS per role, per term
+//! (#162, [ADR-0010]); `destinations:` allowlists egress per role (#172).
+//! Each is parsed structurally and handed to `maknae-authz-basic` to decide.
+//! Identity→role bindings live in `bindings.yaml` ([`crate::parse_bindings`]);
+//! this file refuses a `bindings:` key.
 //!
 //! **The grammar is a durable contract:** operators write policy files against
 //! it and it is hard to change once shipped, so parse/match semantics are
@@ -2142,6 +2135,8 @@ mod tests {
         for body in [
             "schema_version: 1\nbindings:\n  admin: [\"alex\"]\n",
             "schema_version: 1\nbindings: {}\n",
+            "schema_version: 1\nbindings:\n",
+            "schema_version: 1\nbindings: []\n",
             "schema_version: 1\npermissions:\n  allow: []\nbindings:\n  adversary: []\n",
         ] {
             let e = parse_authz(body).unwrap_err();
