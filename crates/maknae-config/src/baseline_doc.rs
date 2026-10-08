@@ -37,7 +37,7 @@ fn convert(j: &serde_json::Value) -> Result<Value, String> {
             } else if let (true, Some(f)) = (n.is_f64(), n.as_f64()) {
                 Value::Float(f)
             } else {
-                return Err(format!("number {n} is out of range"));
+                return Err("a number is out of range".to_string());
             }
         }
         serde_json::Value::String(s) => Value::Str(s.clone()),
@@ -187,7 +187,7 @@ mod tests {
         let e = value_from_canonical_json("[18446744073709551615]").unwrap_err();
         assert_eq!(
             e,
-            ConfigError::BaselineValue("number 18446744073709551615 is out of range".into())
+            ConfigError::BaselineValue("a number is out of range".into())
         );
     }
 
@@ -233,6 +233,29 @@ mod tests {
         s.insert("core".into(), "{\"b\":1,\"a\":2}".into());
         assert!(
             matches!(Document::from_baseline(&s), Err(ConfigError::BaselineValue(ref m)) if m.contains("core"))
+        );
+    }
+
+    #[test]
+    fn the_deepest_section_the_loader_accepts_decodes_back() {
+        let nested = |n: usize| format!("s: {}1{}", "{a: ".repeat(n), "}".repeat(n));
+        let deepest = (1..512)
+            .take_while(|n| crate::load_str(&nested(*n)).is_ok())
+            .last()
+            .unwrap();
+        assert!(deepest > 100, "{deepest}");
+        let Value::Map(top) = crate::load_str(&nested(deepest)).unwrap() else {
+            panic!("not a map")
+        };
+        let doc = Document::new(
+            top.into_iter().map(|(n, v)| (n, v, Source::Base)).collect(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let sections = document_sections(&doc);
+        assert_eq!(
+            document_sections(&Document::from_baseline(&sections).unwrap()),
+            sections
         );
     }
 }
