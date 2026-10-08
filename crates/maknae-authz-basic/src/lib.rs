@@ -31,8 +31,8 @@ pub mod snapshot;
 mod vocabulary;
 pub use vocabulary::{class_name, compiled_set, ACTION_TERMS, CLASSES, KERNEL_TERMS};
 
+pub use binding::IdentityProblem;
 use binding::UidMap;
-use decide::LoadedPolicy;
 use snapshot::Snapshot;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError, RwLock};
@@ -52,8 +52,8 @@ pub enum AuthzBasicError {
     /// The policy file failed the hardened load (ownership/mode/symlink/
     /// grammar) — the message is `AuthzError`'s rendering.
     Load(String),
-    /// `bindings.yaml` is semantically invalid (unknown role, dual
-    /// membership, duplicate, unresolvable username).
+    /// `bindings.yaml` is refused as a whole (unknown role, an entry twice in
+    /// one list, a `uid:` entry outside `adversary`, a failed account lookup).
     Bindings(String),
     /// A `roles:` key names something that is not a role in the closed
     /// vocabulary (#162). Carries the offending key.
@@ -188,7 +188,7 @@ impl BasicAuthorizer {
         source: &PolicySource,
         req: &maknae_security::Request,
     ) -> (maknae_security::Verdict, Option<&'static str>) {
-        match assemble(source.policy().clone(), source.legacy(), source.uid_map()) {
+        match tests::oracle::assemble(source) {
             Ok(lp) => decide::decide_loaded_with_role(&lp, &self.principal, req),
             Err(()) => (maknae_security::Verdict::Indeterminate, None),
         }
@@ -218,17 +218,15 @@ fn utf8(p: &Path) -> Result<String, AuthzBasicError> {
         .ok_or_else(|| AuthzBasicError::Load(format!("policy path {} is not UTF-8", p.display())))
 }
 
-type LegacyBindings = Option<std::collections::BTreeMap<String, Vec<String>>>;
-
 /// A loaded, validated `authz.yaml` and `bindings.yaml` with the bound usernames
 /// resolved to uids: the policy input the snapshot compiler takes.
 #[derive(Debug, Clone)]
 pub struct PolicySource {
     policy: maknae_config::AuthzPolicy,
     bindings: maknae_config::Bindings,
-    legacy: LegacyBindings,
+    #[cfg(test)]
     uid_map: UidMap,
-    resolved: binding::ResolvedBindings,
+    resolved: binding::Resolved,
     principal: maknae_config::Principal,
     paths: PolicyPaths,
     policy_source: String,
@@ -273,15 +271,14 @@ impl PolicySource {
     ) -> Result<Self, AuthzBasicError> {
         let policy_source = utf8(&paths.authz)?;
         let identity_source = utf8(&paths.bindings)?;
-        let (legacy, uid_map) = legacy_bindings(&bindings, uid_map)?;
-        let resolved = binding::resolve(&legacy, &uid_map)
+        let resolved = binding::resolve_subjects(&bindings, &uid_map)
             .map_err(|e| AuthzBasicError::Bindings(e.to_string()))?;
         validate_grants(&policy.action_grants)?;
         validate_destinations(&policy.destinations)?;
         Ok(Self {
             policy,
             bindings,
-            legacy,
+            #[cfg(test)]
             uid_map,
             resolved,
             principal,
@@ -311,12 +308,14 @@ impl PolicySource {
         &self.policy_source
     }
 
-    pub(crate) fn legacy(&self) -> &LegacyBindings {
-        &self.legacy
-    }
-
+    #[cfg(test)]
     pub(crate) fn uid_map(&self) -> &UidMap {
         &self.uid_map
+    }
+
+    /// The subjects this load could not bind as written; each is decided alone.
+    pub fn identity_problems(&self) -> &[IdentityProblem] {
+        &self.resolved.problems
     }
 
     /// The identity layer `bindings.yaml` declares; `source` is its path and
@@ -334,10 +333,11 @@ impl PolicySource {
             bindings_sha256,
             subjects: self
                 .resolved
-                .subjects()
+                .subjects
+                .iter()
                 .map(|(uid, role, name)| maknae_graph::identity::SubjectEntry {
-                    uid,
-                    name: name.into(),
+                    uid: *uid,
+                    name: name.clone(),
                     role: role.key().into(),
                 })
                 .collect(),
@@ -360,52 +360,6 @@ impl PolicySource {
         }
         out
     }
-}
-
-/// The file's entries as the name-keyed resolver reads them: a `uid:` entry becomes
-/// the name `uid:N` mapped to N. `uid:` entries are accepted under `adversary` only.
-fn legacy_bindings(
-    bindings: &maknae_config::Bindings,
-    mut uid_map: UidMap,
-) -> Result<(LegacyBindings, UidMap), AuthzBasicError> {
-    let Some(roles) = &bindings.roles else {
-        return Ok((None, uid_map));
-    };
-    let mut out = std::collections::BTreeMap::new();
-    for (role, entries) in roles {
-        let mut names = Vec::new();
-        for e in entries {
-            if let maknae_config::BindingEntry::Uid(u) = e {
-                if role != "adversary" {
-                    return Err(AuthzBasicError::Bindings(format!(
-                        "role '{role}' lists a uid entry; `uid:` entries are accepted under adversary only"
-                    )));
-                }
-                uid_map.insert(e.render(), *u);
-            }
-            names.push(e.render());
-        }
-        out.insert(role.clone(), names);
-    }
-    Ok((Some(out), uid_map))
-}
-
-/// policy → LoadedPolicy under a uid map; any invalidity → Err. Anonymous by
-/// design: `PolicySource::from_parts` has already named the offending token.
-fn assemble(
-    policy: maknae_config::AuthzPolicy,
-    legacy: &LegacyBindings,
-    uid_map: &UidMap,
-) -> Result<LoadedPolicy, ()> {
-    let roles = binding::Roles::File(binding::resolve(legacy, uid_map).map_err(|_| ())?);
-    let action_grants = validate_grants(&policy.action_grants).map_err(|_| ())?;
-    let destinations = validate_destinations(&policy.destinations).map_err(|_| ())?;
-    Ok(LoadedPolicy {
-        policy,
-        roles,
-        action_grants,
-        destinations,
-    })
 }
 
 /// `destinations:` keys must be roles that can hold a prompt grant (#172):
@@ -469,52 +423,76 @@ fn validate_grants(
     Ok(decide::ActionGrants::from_validated(out))
 }
 
-/// getpwnam every bound username once per load; a `uid:` entry needs no lookup.
-/// Unresolvable → the load refuses. `cfg(unix)` is the only lane — the
-/// workspace's non-unix story is fail-closed refusal upstream in
-/// `maknae-config` (`load_authz` refuses off-unix before we are reached).
-fn resolve_uid_map(bindings: &maknae_config::Bindings) -> Result<UidMap, AuthzBasicError> {
+/// What one account lookup said. `Absent` is decided per subject; `Failed`
+/// refuses the whole load.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Lookup {
+    Found(u32),
+    Absent,
+    Failed(i32),
+}
+
+/// getpwnam(3)'s "not found" spellings are `Ok(None)`, `ENOENT`, `ESRCH`, `EBADF`
+/// and `EPERM`; every other errno is a failed lookup.
+#[cfg(unix)]
+pub(crate) fn classify_lookup(r: Result<Option<u32>, nix::errno::Errno>) -> Lookup {
+    use nix::errno::Errno;
+    match r {
+        Ok(Some(uid)) => Lookup::Found(uid),
+        Ok(None) | Err(Errno::ENOENT | Errno::ESRCH | Errno::EBADF | Errno::EPERM) => {
+            Lookup::Absent
+        }
+        Err(e) => Lookup::Failed(e as i32),
+    }
+}
+
+/// One lookup per distinct bound username; a `uid:` entry needs none.
+fn resolve_uid_map_with(
+    bindings: &maknae_config::Bindings,
+    lookup: impl Fn(&str) -> Lookup,
+) -> Result<UidMap, AuthzBasicError> {
     let mut map = UidMap::new();
-    let Some(roles) = &bindings.roles else {
-        return Ok(map);
-    };
-    for entries in roles.values() {
-        for entry in entries {
-            let maknae_config::BindingEntry::Name(name) = entry else {
+    let mut asked = std::collections::BTreeSet::new();
+    for entries in bindings.roles.iter().flat_map(|r| r.values()) {
+        for e in entries {
+            let maknae_config::BindingEntry::Name(name) = e else {
                 continue;
             };
-            if map.contains_key(name) {
+            if !asked.insert(name.as_str()) {
                 continue;
             }
-            let uid = lookup_uid(name).ok_or_else(|| {
-                AuthzBasicError::Bindings(format!(
-                    "identity '{name}' has no resolvable uid on this host"
-                ))
-            })?;
-            map.insert(name.clone(), uid);
+            match lookup(name) {
+                Lookup::Found(uid) => {
+                    map.insert(name.clone(), uid);
+                }
+                Lookup::Absent => {}
+                Lookup::Failed(errno) => {
+                    return Err(AuthzBasicError::Bindings(format!(
+                        "looking up '{name}' failed (errno {errno}); nothing was changed"
+                    )))
+                }
+            }
         }
     }
     Ok(map)
 }
 
+fn resolve_uid_map(bindings: &maknae_config::Bindings) -> Result<UidMap, AuthzBasicError> {
+    resolve_uid_map_with(bindings, lookup_uid)
+}
+
 /// One function with an INLINE `#[cfg(unix)]`/`#[cfg(not(unix))]` split
 /// (the `security_load` idiom): a standalone `#[cfg(not(unix))] fn` would be
-/// its own mutation target whose body never compiles on a unix runner — a
-/// permanently-missed mutant for dead code.
-fn lookup_uid(name: &str) -> Option<u32> {
+/// its own mutation target whose body never compiles on a unix runner.
+fn lookup_uid(name: &str) -> Lookup {
     #[cfg(not(unix))]
     {
-        // Unreachable in practice: `load_authz` refuses off-unix before any
-        // lookup. Fail closed regardless.
         let _ = name;
-        None
+        Lookup::Failed(0)
     }
     #[cfg(unix)]
     {
-        match nix::unistd::User::from_name(name) {
-            Ok(Some(user)) => Some(user.uid.as_raw()),
-            _ => None,
-        }
+        classify_lookup(nix::unistd::User::from_name(name).map(|u| u.map(|u| u.uid.as_raw())))
     }
 }
 
@@ -862,6 +840,380 @@ mod tests {
         Action, AttrValue, Attributes, Authorizer, Context, Resource, Subject, Verdict,
     };
 
+    /// The resolution `maknaed` used before #496 — whole-policy refusals — kept
+    /// as the equivalence oracle. Production never reaches it.
+    pub(crate) mod oracle {
+        use crate::binding::{Resolution, UidMap};
+        use crate::role::Role;
+        use crate::AuthzBasicError;
+        use std::collections::btree_map::Entry;
+        use std::collections::BTreeMap;
+
+        pub(crate) type LegacyBindings = Option<BTreeMap<String, Vec<String>>>;
+
+        /// The file's entries as the name-keyed resolver reads them: a `uid:` entry becomes
+        /// the name `uid:N` mapped to N. `uid:` entries are accepted under `adversary` only.
+        pub(crate) fn legacy_bindings(
+            bindings: &maknae_config::Bindings,
+            mut uid_map: UidMap,
+        ) -> Result<(LegacyBindings, UidMap), AuthzBasicError> {
+            let Some(roles) = &bindings.roles else {
+                return Ok((None, uid_map));
+            };
+            let mut out = std::collections::BTreeMap::new();
+            for (role, entries) in roles {
+                let mut names = Vec::new();
+                for e in entries {
+                    if let maknae_config::BindingEntry::Uid(u) = e {
+                        if role != "adversary" {
+                            return Err(AuthzBasicError::Bindings(format!(
+                        "role '{role}' lists a uid entry; `uid:` entries are accepted under adversary only"
+                    )));
+                        }
+                        uid_map.insert(e.render(), *u);
+                    }
+                    names.push(e.render());
+                }
+                out.insert(role.clone(), names);
+            }
+            Ok((Some(out), uid_map))
+        }
+
+        /// Validated, uid-keyed bindings for one loaded policy snapshot.
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        pub(crate) struct ResolvedBindings {
+            by_uid: BTreeMap<u32, (Role, String)>,
+            /// The `bindings:` key was PRESENT in the file → defaults suppressed
+            /// entirely (spec §3 precedence; what makes `admin: []` mean "no admin").
+            explicit: bool,
+        }
+
+        /// Why a `bindings:` block is invalid (spec §3a). Every variant names the
+        /// offending token so the boot refusal / audit record is actionable.
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        pub(crate) enum BindingError {
+            UnknownRole(String),
+            DualMembership(String),
+            Duplicate(String),
+            Unresolvable(String),
+            DuplicateUid { uid: u32, names: (String, String) },
+        }
+
+        impl std::fmt::Display for BindingError {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                match self {
+                    BindingError::UnknownRole(k) => write!(f, "bindings names unknown role '{k}'"),
+                    BindingError::DualMembership(n) => {
+                        write!(f, "identity '{n}' appears in more than one role")
+                    }
+                    BindingError::Duplicate(n) => {
+                        write!(f, "identity '{n}' listed twice in one role")
+                    }
+                    BindingError::Unresolvable(n) => {
+                        write!(f, "identity '{n}' has no resolved uid")
+                    }
+                    BindingError::DuplicateUid { uid, names: (a, b) } => write!(
+                f,
+                "identities '{a}' and '{b}' resolve to the same uid {uid}; bind one of them"
+            ),
+                }
+            }
+        }
+
+        /// Validate a parsed `bindings` value against the closed role vocabulary and
+        /// the construction-time `UidMap`.
+        pub(crate) fn resolve(
+            bindings: &Option<BTreeMap<String, Vec<String>>>,
+            lookup: &UidMap,
+        ) -> Result<ResolvedBindings, BindingError> {
+            let Some(map) = bindings else {
+                return Ok(ResolvedBindings {
+                    by_uid: BTreeMap::new(),
+                    explicit: false,
+                });
+            };
+            let mut by_uid: BTreeMap<u32, (Role, String)> = BTreeMap::new();
+            let mut seen: BTreeMap<&str, ()> = BTreeMap::new();
+            for (key, members) in map {
+                let role =
+                    Role::from_key(key).ok_or_else(|| BindingError::UnknownRole(key.clone()))?;
+                for name in members {
+                    if seen.insert(name.as_str(), ()).is_some() {
+                        // Same name earlier — in this role (Duplicate) or another
+                        // (DualMembership). Distinguish for the error message only;
+                        // both refuse.
+                        let dup_in_this_role = members
+                            .iter()
+                            .filter(|m| m.as_str() == name.as_str())
+                            .count()
+                            > 1;
+                        return Err(if dup_in_this_role {
+                            BindingError::Duplicate(name.clone())
+                        } else {
+                            BindingError::DualMembership(name.clone())
+                        });
+                    }
+                    let uid = lookup
+                        .get(name)
+                        .copied()
+                        .ok_or_else(|| BindingError::Unresolvable(name.clone()))?;
+                    match by_uid.entry(uid) {
+                        Entry::Vacant(v) => {
+                            v.insert((role, name.clone()));
+                        }
+                        Entry::Occupied(o) if o.get().0 == role => {}
+                        Entry::Occupied(o) => {
+                            return Err(BindingError::DuplicateUid {
+                                uid,
+                                names: (o.get().1.clone(), name.clone()),
+                            })
+                        }
+                    }
+                }
+            }
+            Ok(ResolvedBindings {
+                by_uid,
+                explicit: true,
+            })
+        }
+
+        impl ResolvedBindings {
+            /// Render as seam-level bindings for `admin.subject.list`.
+            ///
+            /// Reports what the POLICY FILE binds -- the explicit `bindings:` block --
+            /// and nothing else. The default-role fallback (an enrolled uid resolving
+            /// to admin when no bindings key is present) is a decision rule, not a
+            /// binding, and listing it as one would tell an operator a binding exists
+            /// that they could then look for in the file and not find.
+            /// MEMBERS ARE REPORTED BY UID -- every binding has one since #276.
+            ///
+            /// Worth naming, because the sibling rationale on `Role::key` argues the
+            /// opposite direction for roles ("the token an operator would grep for in
+            /// `authz.yaml`"). `root` reports as `uid:0`, which appears in no policy
+            /// file. The uid IS the authenticated datum (ADR-0018) and the thing
+            /// `role_for` keys on, so it is the honest answer to "who is bound"; a
+            /// name is an input resolved once per policy load, and the account may since
+            /// have been renamed.
+            pub(crate) fn as_subject_bindings(
+                &self,
+            ) -> Option<Vec<maknae_security::SubjectBinding>> {
+                // No `bindings:` key (the shipped `bindings.yaml`) means the role
+                // fallback is live, so it reports `None`, never an empty set.
+                if !self.explicit {
+                    return None;
+                }
+                let mut out: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+                for (uid, (role, _)) in self.by_uid.iter() {
+                    out.entry(role.key().to_string())
+                        .or_default()
+                        .push(format!("uid:{uid}"));
+                }
+                Some(
+                    out.into_iter()
+                        .map(|(role, mut members)| {
+                            members.sort();
+                            maknae_security::SubjectBinding { role, members }
+                        })
+                        .collect(),
+                )
+            }
+
+            /// Subject → role, on the uid alone.
+            ///
+            /// A reserved-subject-name arm used to run FIRST, never through uid
+            /// (spec §3b's fixed order). [ADR-0024](../../../design/adr/ADR-0024-tenancy-model-and-agent-identity.md)
+            /// decision 3 struck the reserved token, so there is no longer an ordering
+            /// to state: there is one lookup (#276).
+            ///
+            /// `uid` is `u32`, not `Option<u32>`: the caller
+            /// ([`crate::decide::decide_loaded_with_role`]) returns `Indeterminate`
+            /// before reaching here when the subject carries no uid. An arm for the
+            /// absent case would be production-unreachable, and in a `[t1]`
+            /// zero-missed-mutant file an unreachable arm's mutants are unkillable.
+            ///
+            /// Defaults apply only when the file had no `bindings:` key.
+            pub(crate) fn role_for(&self, uid: u32, principal_uid: u32) -> Resolution {
+                if self.explicit {
+                    match self.by_uid.get(&uid) {
+                        Some((r, _)) => Resolution::Role(*r),
+                        None => Resolution::NoRole,
+                    }
+                } else if uid == principal_uid {
+                    Resolution::Role(Role::Admin)
+                } else {
+                    Resolution::NoRole
+                }
+            }
+        }
+
+        impl ResolvedBindings {
+            /// Every bound uid in uid order, with its role and the name it was bound under.
+            pub(crate) fn subjects(&self) -> impl Iterator<Item = (u32, Role, &str)> {
+                self.by_uid
+                    .iter()
+                    .map(|(uid, (role, name))| (*uid, *role, name.as_str()))
+            }
+        }
+
+        pub(crate) fn assemble(
+            src: &crate::PolicySource,
+        ) -> Result<crate::decide::LoadedPolicy, ()> {
+            let (legacy, uid_map) =
+                legacy_bindings(src.bindings(), src.uid_map().clone()).map_err(|_| ())?;
+            Ok(crate::decide::LoadedPolicy {
+                policy: src.policy().clone(),
+                roles: crate::binding::Roles::File(resolve(&legacy, &uid_map).map_err(|_| ())?),
+                action_grants: crate::validate_grants(&src.policy().action_grants)
+                    .map_err(|_| ())?,
+                destinations: crate::validate_destinations(&src.policy().destinations)
+                    .map_err(|_| ())?,
+            })
+        }
+
+        mod pinned {
+            use super::*;
+
+            fn b(pairs: &[(&str, &[&str])]) -> Option<BTreeMap<String, Vec<String>>> {
+                Some(
+                    pairs
+                        .iter()
+                        .map(|(k, v)| (k.to_string(), v.iter().map(|s| s.to_string()).collect()))
+                        .collect(),
+                )
+            }
+
+            fn uids(pairs: &[(&str, u32)]) -> UidMap {
+                pairs.iter().map(|(n, u)| (n.to_string(), *u)).collect()
+            }
+
+            const PRINCIPAL_UID: u32 = 501;
+
+            #[test]
+            fn unknown_role_key_is_refused_never_defaulted() {
+                let got = resolve(&b(&[("advesary", &["alex"])]), &uids(&[("alex", 501)]));
+                assert_eq!(got, Err(BindingError::UnknownRole("advesary".into())));
+            }
+
+            #[test]
+            fn a_name_in_two_role_sets_is_dual_membership() {
+                let got = resolve(
+                    &b(&[("admin", &["alex"]), ("user", &["alex"])]),
+                    &uids(&[("alex", 501)]),
+                );
+                assert_eq!(got, Err(BindingError::DualMembership("alex".into())));
+            }
+
+            #[test]
+            fn a_name_twice_in_one_list_is_duplicate() {
+                let got = resolve(&b(&[("user", &["alex", "alex"])]), &uids(&[("alex", 501)]));
+                assert_eq!(got, Err(BindingError::Duplicate("alex".into())));
+            }
+
+            #[test]
+            fn a_name_missing_from_the_uid_map_is_unresolvable() {
+                let got = resolve(&b(&[("user", &["nobody-new"])]), &UidMap::new());
+                assert_eq!(got, Err(BindingError::Unresolvable("nobody-new".into())));
+            }
+
+            /// #276: `agent` is an ordinary username now. It resolves through NSS like
+            /// any other bound name and fails closed when no such account exists --
+            /// which is the behaviour change an operator could actually notice, so it
+            /// gets a test. Replaces `agent_token_is_never_looked_up`, whose subject
+            /// (a name that bypasses the uid map) no longer exists.
+            #[test]
+            fn agent_is_an_ordinary_name_and_fails_closed_when_unresolvable() {
+                let got = resolve(&b(&[("adversary", &["agent"])]), &UidMap::new());
+                assert_eq!(got, Err(BindingError::Unresolvable("agent".into())));
+                // And when it DOES resolve, it binds like any other name.
+                let r =
+                    resolve(&b(&[("adversary", &["agent"])]), &uids(&[("agent", 4242)])).unwrap();
+                assert_eq!(
+                    r.role_for(4242, PRINCIPAL_UID),
+                    Resolution::Role(Role::Adversary)
+                );
+            }
+
+            #[test]
+            fn present_but_empty_bindings_suppress_defaults_entirely() {
+                // The no-discretionary-admin posture (spec §3): with an explicit
+                // empty map, even the enrolled principal has NO role.
+                let r = resolve(&Some(BTreeMap::new()), &UidMap::new()).unwrap();
+                assert_eq!(r.role_for(PRINCIPAL_UID, PRINCIPAL_UID), Resolution::NoRole);
+            }
+
+            #[test]
+            fn absent_bindings_apply_defaults() {
+                let r = resolve(&None, &UidMap::new()).unwrap();
+                assert_eq!(
+                    r.role_for(PRINCIPAL_UID, PRINCIPAL_UID),
+                    Resolution::Role(Role::Admin)
+                );
+                assert_eq!(r.role_for(999, PRINCIPAL_UID), Resolution::NoRole);
+            }
+
+            #[test]
+            fn explicit_bindings_bind_by_resolved_uid() {
+                let r = resolve(
+                    &b(&[("admin", &["alex"]), ("adversary", &["mallory"])]),
+                    &uids(&[("alex", 501), ("mallory", 666)]),
+                )
+                .unwrap();
+                assert_eq!(r.role_for(501, 501), Resolution::Role(Role::Admin));
+                assert_eq!(r.role_for(666, 501), Resolution::Role(Role::Adversary));
+                assert_eq!(r.role_for(1000, 501), Resolution::NoRole);
+            }
+
+            // `missing_uid_with_no_reserved_name_is_no_role` retired with its subject
+            // (#276): `role_for` now takes `u32`, so "no uid" is not expressible here.
+            // The property moved UP to `decide_loaded_with_role`'s guard, which returns
+            // Indeterminate before reaching this function -- see
+            // `decide::tests::missing_identity_is_indeterminate_distinct_from_unbound`.
+
+            #[test]
+            fn one_uid_under_two_roles_refuses_naming_both_names() {
+                let got = resolve(
+                    &b(&[("admin", &["root"]), ("adversary", &["toor"])]),
+                    &uids(&[("root", 0), ("toor", 0)]),
+                );
+                let want = BindingError::DuplicateUid {
+                    uid: 0,
+                    names: ("root".into(), "toor".into()),
+                };
+                assert_eq!(got, Err(want.clone()));
+                assert_eq!(
+                    want.to_string(),
+                    "identities 'root' and 'toor' resolve to the same uid 0; bind one of them"
+                );
+            }
+
+            #[test]
+            fn one_uid_twice_under_one_role_keeps_the_first_name() {
+                let r = resolve(
+                    &b(&[("admin", &["root", "toor"])]),
+                    &uids(&[("root", 0), ("toor", 0)]),
+                )
+                .unwrap();
+                let got: Vec<(u32, Role, &str)> = r.subjects().collect();
+                assert_eq!(got, vec![(0, Role::Admin, "root")]);
+                assert_eq!(r.role_for(0, PRINCIPAL_UID), Resolution::Role(Role::Admin));
+            }
+
+            #[test]
+            fn subjects_lists_every_binding_in_uid_order() {
+                let r = resolve(
+                    &b(&[("user", &["ursula"]), ("admin", &["alex"])]),
+                    &uids(&[("alex", 1000), ("ursula", 7)]),
+                )
+                .unwrap();
+                let got: Vec<(u32, Role, &str)> = r.subjects().collect();
+                assert_eq!(
+                    got,
+                    vec![(7, Role::User, "ursula"), (1000, Role::Admin, "alex")]
+                );
+            }
+        }
+    }
+
     const LABEL: &str = "UNCLASSIFIED";
     const DIR: &str = "/etc/maknae";
     const PATH: &str = "/etc/maknae/authz.yaml";
@@ -997,7 +1349,7 @@ mod tests {
         let policy = maknae_config::parse_authz(SHIPPED).expect("shipped authz.yaml parses");
         let lp = decide::LoadedPolicy {
             policy,
-            roles: binding::Roles::File(binding::resolve(&None, &UidMap::new()).unwrap()),
+            roles: binding::Roles::File(tests::oracle::resolve(&None, &UidMap::new()).unwrap()),
             action_grants: decide::ActionGrants::default(),
             destinations: decide::DestinationGrants::default(),
         };
@@ -1481,7 +1833,7 @@ mod tests {
     /// The post-load half (one getpwnam per name, eager validation) over a
     /// host-independent identity (`root` — uid 0 exists everywhere).
     #[test]
-    fn finish_resolves_root_validates_eagerly_and_refuses_bad_bindings() {
+    fn finish_resolves_root_validates_eagerly_and_reports_an_unresolvable_name() {
         let src = finish_with(parse(EMPTY), bound(ADMIN_ROOT)).unwrap();
         assert_eq!(
             src.uid_map().get("root"),
@@ -1501,9 +1853,18 @@ mod tests {
         let ghost = finish_with(
             parse(EMPTY),
             bound("schema_version: 1\nbindings:\n  user: [\"no-such-user-maknae-85\"]\n"),
+        )
+        .expect("an unresolvable name leaves only that subject unbound");
+        assert_eq!(
+            ghost.identity_problems(),
+            [IdentityProblem::Unresolved {
+                role: "user",
+                name: "no-such-user-maknae-85".into()
+            }]
         );
         assert!(
-            matches!(ghost, Err(AuthzBasicError::Bindings(ref m)) if m.contains("no-such-user-maknae-85"))
+            tests::oracle::assemble(&ghost).is_err(),
+            "before #496 the whole file refused"
         );
     }
 
@@ -1671,12 +2032,11 @@ mod tests {
         use crate::binding::BindingError;
         for (e, needle) in [
             (BindingError::UnknownRole("r".into()), "unknown role"),
-            (
-                BindingError::DualMembership("n".into()),
-                "more than one role",
-            ),
             (BindingError::Duplicate("n".into()), "twice"),
-            (BindingError::Unresolvable("n".into()), "no resolved uid"),
+            (
+                BindingError::UidOutsideAdversary("r".into()),
+                "adversary only",
+            ),
         ] {
             assert!(e.to_string().contains(needle), "{e:?}");
         }
@@ -1801,6 +2161,128 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_account_is_per_subject_and_a_failed_lookup_refuses() {
+        use nix::errno::Errno;
+        assert_eq!(classify_lookup(Ok(Some(7))), Lookup::Found(7));
+        for absent in [
+            Ok(None),
+            Err(Errno::ENOENT),
+            Err(Errno::ESRCH),
+            Err(Errno::EBADF),
+            Err(Errno::EPERM),
+        ] {
+            assert_eq!(classify_lookup(absent), Lookup::Absent, "{absent:?}");
+        }
+        for failed in [
+            Errno::EIO,
+            Errno::EMFILE,
+            Errno::ENFILE,
+            Errno::ENOMEM,
+            Errno::EINTR,
+        ] {
+            assert_eq!(
+                classify_lookup(Err(failed)),
+                Lookup::Failed(failed as i32),
+                "{failed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_lookup_refuses_and_a_missing_account_does_not() {
+        let b = maknae_config::parse_bindings(
+            "schema_version: 1\nbindings:\n  admin: [alex]\n  user: [ghost, alex]\n  adversary: [mallory, {uid: 9}]\n",
+        )
+        .unwrap();
+        let calls = std::cell::RefCell::new(Vec::new());
+        let map = resolve_uid_map_with(&b, |n| {
+            calls.borrow_mut().push(n.to_string());
+            match n {
+                "alex" => Lookup::Found(1000),
+                "mallory" => Lookup::Found(666),
+                _ => Lookup::Absent,
+            }
+        })
+        .unwrap();
+        assert_eq!(
+            map,
+            [("alex".to_string(), 1000), ("mallory".to_string(), 666)]
+                .into_iter()
+                .collect()
+        );
+        assert_eq!(
+            *calls.borrow(),
+            ["alex", "mallory", "ghost"],
+            "each name once; uid entries are never looked up"
+        );
+        let e = resolve_uid_map_with(&b, |n| {
+            if n == "mallory" {
+                Lookup::Failed(5)
+            } else {
+                Lookup::Absent
+            }
+        })
+        .unwrap_err();
+        assert_eq!(
+            e,
+            AuthzBasicError::Bindings(
+                "looking up 'mallory' failed (errno 5); nothing was changed".into()
+            )
+        );
+        assert_eq!(
+            resolve_uid_map_with(&maknae_config::Bindings::missing(), |_| {
+                Lookup::Failed(5)
+            }),
+            Ok(UidMap::new())
+        );
+    }
+
+    #[test]
+    fn the_host_lookup_resolves_root_and_reports_a_missing_name_as_absent() {
+        assert_eq!(lookup_uid("root"), Lookup::Found(0));
+        assert_eq!(lookup_uid("no-such-user-maknae-496"), Lookup::Absent);
+    }
+
+    #[test]
+    #[ignore = "measurement: run with --ignored on each platform and record the output"]
+    fn measure_the_lookup_of_a_name_with_no_account() {
+        let raw = nix::unistd::User::from_name("no-such-user-maknae-496")
+            .map(|u| u.map(|u| u.uid.as_raw()));
+        println!(
+            "from_name -> {raw:?}; classified {:?}",
+            classify_lookup(raw)
+        );
+    }
+
+    #[test]
+    fn an_unresolvable_name_leaves_only_that_subject_unbound() {
+        let s = source_with(
+            SHIPPED,
+            Some("schema_version: 1\nbindings:\n  admin: [alex]\n  user: [ghost]\n"),
+            &[("alex", 1000)],
+        );
+        assert_eq!(
+            s.identity_problems(),
+            [IdentityProblem::Unresolved {
+                role: "user",
+                name: "ghost".into()
+            }]
+        );
+        let snap = compiled(&s);
+        assert_eq!(snap.identity_problems().as_ref(), s.identity_problems());
+        let a = BasicAuthorizer::from_snapshot(principal(), paths(), test_digest, snap);
+        assert_eq!(
+            a.decide_reporting_role(&liveness_req(Some(1000))).1,
+            Some("admin")
+        );
+        assert_eq!(
+            a.decide_oracle(&s, &liveness_req(Some(1000))),
+            (Verdict::Indeterminate, None),
+            "before #496 the whole file refused"
+        );
+    }
+
+    #[test]
     fn policy_source_keeps_its_parts_and_declares_its_identity_layer() {
         let policy = parse("schema_version: 1\n");
         let bindings = bound(
@@ -1889,10 +2371,18 @@ mod tests {
             UidMap::new(),
             principal(),
             paths(),
-        );
+        )
+        .unwrap();
+        assert_eq!(ghost.identity_problems()[0].names(), ["ghost"]);
         assert!(matches!(
-            ghost,
-            Err(AuthzBasicError::Bindings(ref m)) if m.contains("ghost")
+            PolicySource::from_parts(
+                parse("schema_version: 1\n"),
+                bound("schema_version: 1\nbindings:\n  gest: [\"ghost\"]\n"),
+                UidMap::new(),
+                principal(),
+                paths(),
+            ),
+            Err(AuthzBasicError::Bindings(ref m)) if m.contains("'gest'")
         ));
         assert_eq!(
             parts(
@@ -2030,8 +2520,12 @@ mod tests {
             let src = got.unwrap();
             assert_eq!(src.uid_map().get("root"), Some(&0));
             assert_eq!(src.paths(), &fx.paths());
-            assert!(
-                matches!(unresolvable, Err(AuthzBasicError::Bindings(ref m)) if m.contains("no-such-user-maknae-489"))
+            assert_eq!(
+                unresolvable.unwrap().identity_problems(),
+                [IdentityProblem::Unresolved {
+                    role: "user",
+                    name: "no-such-user-maknae-489".into()
+                }]
             );
             assert!(matches!(missing_authz, Err(AuthzBasicError::Load(_))));
             let absent = missing_bindings.expect("a missing bindings.yaml is bindings absent");
@@ -2039,18 +2533,20 @@ mod tests {
         }
 
         #[test]
-        fn constructor_refuses_unresolvable_binding() {
+        fn constructor_loads_and_reports_an_unresolvable_binding() {
             let fx = Fixture::new("bindfail");
             write(&fx.policy(), EMPTY);
             write(
                 &fx.bindings(),
                 "schema_version: 1\nbindings:\n  user: [\"no-such-user-maknae-77\"]\n",
             );
-            let got = HermeticAuthorizer::new(fx.paths(), principal(), fixture_req(), test_digest);
-            assert!(
-                matches!(got, Err(AuthzBasicError::Bindings(ref m)) if m.contains("no-such-user-maknae-77")),
-                "{got:?}"
+            let got = HermeticAuthorizer::new(fx.paths(), principal(), fixture_req(), test_digest)
+                .unwrap();
+            assert_eq!(
+                got.snapshot().identity_problems()[0].names(),
+                ["no-such-user-maknae-77"]
             );
+            assert_eq!(got.decide_reporting_role(&whoami(501)).1, None);
         }
 
         /// #275: the decision reports the role it was MADE ON. All four shipped
@@ -2153,12 +2649,16 @@ mod tests {
             write(&fx.policy(), EMPTY);
             write(
                 &fx.bindings(),
-                "schema_version: 1\nbindings:\n  user: [\"nobody-new-maknae-489\"]\n",
+                "schema_version: 1\nbindings:\n  adversary: [\"root\"]\n  user: [\"nobody-new-maknae-489\"]\n",
             );
-            assert!(
-                matches!(auth.reload_from_file(), Err(AuthzBasicError::Bindings(ref m)) if m.contains("nobody-new-maknae-489"))
+            let principal_before = auth.decide_reporting_role(&whoami(501));
+            auth.reload_from_file().unwrap();
+            assert_eq!(
+                auth.snapshot().identity_problems()[0].names(),
+                ["nobody-new-maknae-489"]
             );
             assert_eq!(auth.decide(&whoami(0)), contained());
+            assert_eq!(auth.decide_reporting_role(&whoami(501)), principal_before);
         }
 
         #[test]
@@ -2719,7 +3219,7 @@ mod tests {
         fn subjects_agree_between_the_file_oracle_and_the_snapshot() {
             let mut seen = Vec::new();
             for (variant, src) in policies() {
-                let oracle = assemble(src.policy().clone(), src.legacy(), src.uid_map())
+                let oracle = tests::oracle::assemble(&src)
                     .unwrap()
                     .roles
                     .as_subject_bindings();

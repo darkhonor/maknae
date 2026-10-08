@@ -700,7 +700,8 @@ fn decide_fs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::binding::{resolve, UidMap};
+    use crate::binding::UidMap;
+    use crate::tests::oracle::resolve;
     use maknae_security::{Action, Context, Resource, Subject};
     use std::collections::BTreeMap;
 

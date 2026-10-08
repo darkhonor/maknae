@@ -5585,6 +5585,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             }],
         };
         assert!(old.bindings_sha256.is_some());
+        assert_ne!(old.source, inputs.identity.source);
         let seq = Seq::new();
         let au3_1 = serde_json::Value::Null;
         let ctx = BootCtx {

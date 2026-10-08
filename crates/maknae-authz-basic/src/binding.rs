@@ -1,72 +1,207 @@
-//! Subject → role binding resolution (#85, spec §3/§3a/§3b).
+//! Subject → role binding resolution (#85, #496; spec §3/§3a/§3b).
 //!
 //! Identity semantics (ADR-0018: the per-request authorization principal is
-//! the **uid**): `bindings:` entries are operator-facing usernames, resolved
-//! to uids ONCE at [`crate::BasicAuthorizer`] construction (the `UidMap`);
-//! **matching is uid vs uid, with no exception.**
+//! the **uid**): `bindings.yaml` entries are usernames resolved to uids once per
+//! policy load (the `UidMap`), or `uid:` entries under `adversary`; **matching
+//! is uid vs uid, with no exception.** `agent` is an ordinary username
+//! ([ADR-0024](../../../design/adr/ADR-0024-tenancy-model-and-agent-identity.md)
+//! decision 3, #276).
 //!
-//! A reserved `agent` token used to sit beside the uid map, meaning the runtime
-//! subject and never looked up. [ADR-0024](../../../design/adr/ADR-0024-tenancy-model-and-agent-identity.md)
-//! decision 3 struck it: Maknae is multi-tenant, and one reserved runtime token
-//! cannot express two agent personas. An agent holds no identity of its own —
-//! it acts within a delegation from the human who invoked it — so ADR-0018's
-//! uid principal now applies uniformly. `agent` is an ordinary username: if a
-//! deployer creates such an account and binds it, it resolves through NSS like
-//! any other, which is their call to make and not this crate's (#276).
-//!
-//! Fail-closed everywhere: unknown role key, dual membership, a duplicate
-//! name, or a name absent from the `UidMap` (the map is resolved at each load,
-//! so only a name with no uid on the host is absent) all make the policy
-//! invalid.
+//! A file-level defect (unknown role key, one entry twice in one list, a `uid:`
+//! entry outside `adversary`) refuses the whole file. Resolution outcomes are
+//! per subject and reported as [`IdentityProblem`]s: a name with no account
+//! holds no role, a uid under `adversary` and another role is contained, and a
+//! uid under two other roles holds none.
 
 use crate::role::Role;
 use maknae_graph::graph::Graph;
 use maknae_graph::identity::{bindings_section_key, subject_key};
 use maknae_graph::kernel::{ADVERSARY, BINDS, CONTAINED, SECTION, SUBJECT};
-use std::collections::btree_map::Entry;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 /// username → uid, built once per policy load (start or reload) via getpwnam.
 pub(crate) type UidMap = BTreeMap<String, u32>;
 
-/// Validated, uid-keyed bindings for one loaded policy snapshot.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ResolvedBindings {
-    by_uid: BTreeMap<u32, (Role, String)>,
-    /// The `bindings:` key was PRESENT in the file → defaults suppressed
-    /// entirely (spec §3 precedence; what makes `admin: []` mean "no admin").
-    explicit: bool,
-}
-
-/// Why a `bindings:` block is invalid (spec §3a). Every variant names the
-/// offending token so the boot refusal / audit record is actionable.
+/// Why `bindings.yaml` is refused as a whole. Every variant names the offending
+/// token so the refusal is actionable.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum BindingError {
     UnknownRole(String),
-    DualMembership(String),
     Duplicate(String),
-    Unresolvable(String),
-    DuplicateUid { uid: u32, names: (String, String) },
+    UidOutsideAdversary(String),
 }
 
 impl std::fmt::Display for BindingError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             BindingError::UnknownRole(k) => write!(f, "bindings names unknown role '{k}'"),
-            BindingError::DualMembership(n) => {
-                write!(f, "identity '{n}' appears in more than one role")
-            }
             BindingError::Duplicate(n) => write!(f, "identity '{n}' listed twice in one role"),
-            BindingError::Unresolvable(n) => {
-                write!(f, "identity '{n}' has no resolved uid")
-            }
-            BindingError::DuplicateUid { uid, names: (a, b) } => write!(
+            BindingError::UidOutsideAdversary(k) => write!(
                 f,
-                "identities '{a}' and '{b}' resolve to the same uid {uid}; bind one of them"
+                "role '{k}' lists a uid entry; `uid:` entries are accepted under adversary only"
             ),
         }
     }
+}
+
+/// A subject `bindings.yaml` names that could not be bound as written. Each is
+/// decided for that subject alone; the rest of the policy loads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IdentityProblem {
+    Unresolved {
+        role: &'static str,
+        name: String,
+    },
+    UnresolvedAdversary {
+        name: String,
+    },
+    Contained {
+        uid: u32,
+        names: Vec<String>,
+        roles: Vec<&'static str>,
+    },
+    Unbound {
+        uid: u32,
+        names: Vec<String>,
+        roles: Vec<&'static str>,
+    },
+}
+
+impl IdentityProblem {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Unresolved { .. } => "unresolved",
+            Self::UnresolvedAdversary { .. } => "unresolved-adversary",
+            Self::Contained { .. } => "contained",
+            Self::Unbound { .. } => "unbound",
+        }
+    }
+
+    pub fn uid(&self) -> Option<u32> {
+        match self {
+            Self::Unresolved { .. } | Self::UnresolvedAdversary { .. } => None,
+            Self::Contained { uid, .. } | Self::Unbound { uid, .. } => Some(*uid),
+        }
+    }
+
+    pub fn names(&self) -> Vec<String> {
+        match self {
+            Self::Unresolved { name, .. } | Self::UnresolvedAdversary { name } => {
+                vec![name.clone()]
+            }
+            Self::Contained { names, .. } | Self::Unbound { names, .. } => names.clone(),
+        }
+    }
+
+    pub fn roles(&self) -> Vec<&'static str> {
+        match self {
+            Self::Unresolved { role, .. } => vec![*role],
+            Self::UnresolvedAdversary { .. } => vec![ADVERSARY],
+            Self::Contained { roles, .. } | Self::Unbound { roles, .. } => roles.clone(),
+        }
+    }
+}
+
+impl std::fmt::Display for IdentityProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unresolved { role, name } => write!(
+                f,
+                "'{name}' under {role} has no account on this host; it holds no role"
+            ),
+            Self::UnresolvedAdversary { name } => write!(
+                f,
+                "'{name}' under adversary has no account on this host; nothing is contained for it (write \"- uid: <n>\" to contain an id that has no account)"
+            ),
+            Self::Contained { uid, names, roles } => write!(
+                f,
+                "uid {uid} ({}) is under {}; containment wins and it is contained",
+                names.join(", "),
+                roles.join(", ")
+            ),
+            Self::Unbound { uid, names, roles } => write!(
+                f,
+                "uid {uid} ({}) is under {}; it holds no role",
+                names.join(", "),
+                roles.join(", ")
+            ),
+        }
+    }
+}
+
+/// The subjects one load binds, in uid order, and the problems it reported.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Resolved {
+    pub(crate) subjects: Vec<(u32, Role, String)>,
+    pub(crate) problems: Vec<IdentityProblem>,
+}
+
+/// Resolve `bindings.yaml` against the load's `UidMap`, one subject at a time.
+pub(crate) fn resolve_subjects(
+    bindings: &maknae_config::Bindings,
+    lookup: &UidMap,
+) -> Result<Resolved, BindingError> {
+    use maknae_config::BindingEntry;
+    let mut out = Resolved {
+        subjects: Vec::new(),
+        problems: Vec::new(),
+    };
+    let Some(map) = &bindings.roles else {
+        return Ok(out);
+    };
+    let mut by_uid: BTreeMap<u32, Vec<(Role, String)>> = BTreeMap::new();
+    for (key, entries) in map {
+        let role = Role::from_key(key).ok_or_else(|| BindingError::UnknownRole(key.clone()))?;
+        let mut seen = BTreeSet::new();
+        for e in entries {
+            let name = e.render();
+            if !seen.insert(name.clone()) {
+                return Err(BindingError::Duplicate(name));
+            }
+            let uid = match e {
+                BindingEntry::Uid(_) if role != Role::Adversary => {
+                    return Err(BindingError::UidOutsideAdversary(key.clone()))
+                }
+                BindingEntry::Uid(u) => Some(*u),
+                BindingEntry::Name(n) => lookup.get(n).copied(),
+            };
+            match uid {
+                Some(u) => by_uid.entry(u).or_default().push((role, name)),
+                None if role == Role::Adversary => out
+                    .problems
+                    .push(IdentityProblem::UnresolvedAdversary { name }),
+                None => out.problems.push(IdentityProblem::Unresolved {
+                    role: role.key(),
+                    name,
+                }),
+            }
+        }
+    }
+    for (uid, held) in by_uid {
+        let mut roles: Vec<&'static str> = held.iter().map(|(r, _)| r.key()).collect();
+        roles.sort_unstable();
+        roles.dedup();
+        let mut names: Vec<String> = Vec::new();
+        for (_, n) in &held {
+            if !names.contains(n) {
+                names.push(n.clone());
+            }
+        }
+        if let Some((_, first)) = held.iter().find(|(r, _)| *r == Role::Adversary) {
+            out.subjects.push((uid, Role::Adversary, first.clone()));
+            if roles.len() > 1 {
+                out.problems
+                    .push(IdentityProblem::Contained { uid, names, roles });
+            }
+        } else if roles.len() == 1 {
+            out.subjects.push((uid, held[0].0, held[0].1.clone()));
+        } else {
+            out.problems
+                .push(IdentityProblem::Unbound { uid, names, roles });
+        }
+    }
+    Ok(out)
 }
 
 /// The outcome of subject resolution.
@@ -74,138 +209,6 @@ impl std::fmt::Display for BindingError {
 pub(crate) enum Resolution {
     Role(Role),
     NoRole,
-}
-
-/// Validate a parsed `bindings` value against the closed role vocabulary and
-/// the construction-time `UidMap`.
-pub(crate) fn resolve(
-    bindings: &Option<BTreeMap<String, Vec<String>>>,
-    lookup: &UidMap,
-) -> Result<ResolvedBindings, BindingError> {
-    let Some(map) = bindings else {
-        return Ok(ResolvedBindings {
-            by_uid: BTreeMap::new(),
-            explicit: false,
-        });
-    };
-    let mut by_uid: BTreeMap<u32, (Role, String)> = BTreeMap::new();
-    let mut seen: BTreeMap<&str, ()> = BTreeMap::new();
-    for (key, members) in map {
-        let role = Role::from_key(key).ok_or_else(|| BindingError::UnknownRole(key.clone()))?;
-        for name in members {
-            if seen.insert(name.as_str(), ()).is_some() {
-                // Same name earlier — in this role (Duplicate) or another
-                // (DualMembership). Distinguish for the error message only;
-                // both refuse.
-                let dup_in_this_role = members
-                    .iter()
-                    .filter(|m| m.as_str() == name.as_str())
-                    .count()
-                    > 1;
-                return Err(if dup_in_this_role {
-                    BindingError::Duplicate(name.clone())
-                } else {
-                    BindingError::DualMembership(name.clone())
-                });
-            }
-            let uid = lookup
-                .get(name)
-                .copied()
-                .ok_or_else(|| BindingError::Unresolvable(name.clone()))?;
-            match by_uid.entry(uid) {
-                Entry::Vacant(v) => {
-                    v.insert((role, name.clone()));
-                }
-                Entry::Occupied(o) if o.get().0 == role => {}
-                Entry::Occupied(o) => {
-                    return Err(BindingError::DuplicateUid {
-                        uid,
-                        names: (o.get().1.clone(), name.clone()),
-                    })
-                }
-            }
-        }
-    }
-    Ok(ResolvedBindings {
-        by_uid,
-        explicit: true,
-    })
-}
-
-impl ResolvedBindings {
-    /// Render as seam-level bindings for `admin.subject.list`.
-    ///
-    /// Reports what the POLICY FILE binds -- the explicit `bindings:` block --
-    /// and nothing else. The default-role fallback (an enrolled uid resolving
-    /// to admin when no bindings key is present) is a decision rule, not a
-    /// binding, and listing it as one would tell an operator a binding exists
-    /// that they could then look for in the file and not find.
-    /// MEMBERS ARE REPORTED BY UID -- every binding has one since #276.
-    ///
-    /// Worth naming, because the sibling rationale on `Role::key` argues the
-    /// opposite direction for roles ("the token an operator would grep for in
-    /// `authz.yaml`"). `root` reports as `uid:0`, which appears in no policy
-    /// file. The uid IS the authenticated datum (ADR-0018) and the thing
-    /// `role_for` keys on, so it is the honest answer to "who is bound"; a
-    /// name is an input resolved once per policy load, and the account may since
-    /// have been renamed.
-    pub(crate) fn as_subject_bindings(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
-        // No `bindings:` key (the shipped `bindings.yaml`) means the role
-        // fallback is live, so it reports `None`, never an empty set.
-        if !self.explicit {
-            return None;
-        }
-        let mut out: std::collections::BTreeMap<String, Vec<String>> = Default::default();
-        for (uid, (role, _)) in self.by_uid.iter() {
-            out.entry(role.key().to_string())
-                .or_default()
-                .push(format!("uid:{uid}"));
-        }
-        Some(
-            out.into_iter()
-                .map(|(role, mut members)| {
-                    members.sort();
-                    maknae_security::SubjectBinding { role, members }
-                })
-                .collect(),
-        )
-    }
-
-    /// Subject → role, on the uid alone.
-    ///
-    /// A reserved-subject-name arm used to run FIRST, never through uid
-    /// (spec §3b's fixed order). [ADR-0024](../../../design/adr/ADR-0024-tenancy-model-and-agent-identity.md)
-    /// decision 3 struck the reserved token, so there is no longer an ordering
-    /// to state: there is one lookup (#276).
-    ///
-    /// `uid` is `u32`, not `Option<u32>`: the caller
-    /// ([`crate::decide::decide_loaded_with_role`]) returns `Indeterminate`
-    /// before reaching here when the subject carries no uid. An arm for the
-    /// absent case would be production-unreachable, and in a `[t1]`
-    /// zero-missed-mutant file an unreachable arm's mutants are unkillable.
-    ///
-    /// Defaults apply only when the file had no `bindings:` key.
-    pub(crate) fn role_for(&self, uid: u32, principal_uid: u32) -> Resolution {
-        if self.explicit {
-            match self.by_uid.get(&uid) {
-                Some((r, _)) => Resolution::Role(*r),
-                None => Resolution::NoRole,
-            }
-        } else if uid == principal_uid {
-            Resolution::Role(Role::Admin)
-        } else {
-            Resolution::NoRole
-        }
-    }
-}
-
-impl ResolvedBindings {
-    /// Every bound uid in uid order, with its role and the name it was bound under.
-    pub(crate) fn subjects(&self) -> impl Iterator<Item = (u32, Role, &str)> {
-        self.by_uid
-            .iter()
-            .map(|(uid, (role, name))| (*uid, *role, name.as_str()))
-    }
 }
 
 /// Subject resolution by graph hops over a compiled snapshot's identity layer.
@@ -280,13 +283,15 @@ impl GraphBindings {
 /// Where a loaded policy resolves subjects: the file's bindings, or a compiled snapshot's graph.
 #[derive(Clone, Debug)]
 pub(crate) enum Roles {
-    File(ResolvedBindings),
+    #[cfg(test)]
+    File(crate::tests::oracle::ResolvedBindings),
     Graph(GraphBindings),
 }
 
 impl Roles {
     pub(crate) fn role_for(&self, uid: u32, principal_uid: u32) -> Resolution {
         match self {
+            #[cfg(test)]
             Roles::File(r) => r.role_for(uid, principal_uid),
             Roles::Graph(g) => g.role_for(uid, principal_uid),
         }
@@ -294,6 +299,7 @@ impl Roles {
 
     pub(crate) fn as_subject_bindings(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
         match self {
+            #[cfg(test)]
             Roles::File(r) => r.as_subject_bindings(),
             Roles::Graph(g) => g.as_subject_bindings(),
         }
@@ -303,6 +309,9 @@ impl Roles {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tests::oracle::resolve;
+
+    use maknae_config::parse_bindings;
 
     fn b(pairs: &[(&str, &[&str])]) -> Option<BTreeMap<String, Vec<String>>> {
         Some(
@@ -319,127 +328,311 @@ mod tests {
 
     const PRINCIPAL_UID: u32 = 501;
 
-    #[test]
-    fn unknown_role_key_is_refused_never_defaulted() {
-        let got = resolve(&b(&[("advesary", &["alex"])]), &uids(&[("alex", 501)]));
-        assert_eq!(got, Err(BindingError::UnknownRole("advesary".into())));
+    fn file(body: &str) -> maknae_config::Bindings {
+        parse_bindings(&format!("schema_version: 1\nbindings:\n{body}")).unwrap()
+    }
+
+    fn subjects(r: &Resolved) -> Vec<(u32, &'static str, &str)> {
+        r.subjects
+            .iter()
+            .map(|(u, role, n)| (*u, role.key(), n.as_str()))
+            .collect()
     }
 
     #[test]
-    fn a_name_in_two_role_sets_is_dual_membership() {
-        let got = resolve(
-            &b(&[("admin", &["alex"]), ("user", &["alex"])]),
-            &uids(&[("alex", 501)]),
-        );
-        assert_eq!(got, Err(BindingError::DualMembership("alex".into())));
-    }
-
-    #[test]
-    fn a_name_twice_in_one_list_is_duplicate() {
-        let got = resolve(&b(&[("user", &["alex", "alex"])]), &uids(&[("alex", 501)]));
-        assert_eq!(got, Err(BindingError::Duplicate("alex".into())));
-    }
-
-    #[test]
-    fn a_name_missing_from_the_uid_map_is_unresolvable() {
-        let got = resolve(&b(&[("user", &["nobody-new"])]), &UidMap::new());
-        assert_eq!(got, Err(BindingError::Unresolvable("nobody-new".into())));
-    }
-
-    /// #276: `agent` is an ordinary username now. It resolves through NSS like
-    /// any other bound name and fails closed when no such account exists --
-    /// which is the behaviour change an operator could actually notice, so it
-    /// gets a test. Replaces `agent_token_is_never_looked_up`, whose subject
-    /// (a name that bypasses the uid map) no longer exists.
-    #[test]
-    fn agent_is_an_ordinary_name_and_fails_closed_when_unresolvable() {
-        let got = resolve(&b(&[("adversary", &["agent"])]), &UidMap::new());
-        assert_eq!(got, Err(BindingError::Unresolvable("agent".into())));
-        // And when it DOES resolve, it binds like any other name.
-        let r = resolve(&b(&[("adversary", &["agent"])]), &uids(&[("agent", 4242)])).unwrap();
-        assert_eq!(
-            r.role_for(4242, PRINCIPAL_UID),
-            Resolution::Role(Role::Adversary)
-        );
-    }
-
-    #[test]
-    fn present_but_empty_bindings_suppress_defaults_entirely() {
-        // The no-discretionary-admin posture (spec §3): with an explicit
-        // empty map, even the enrolled principal has NO role.
-        let r = resolve(&Some(BTreeMap::new()), &UidMap::new()).unwrap();
-        assert_eq!(r.role_for(PRINCIPAL_UID, PRINCIPAL_UID), Resolution::NoRole);
-    }
-
-    #[test]
-    fn absent_bindings_apply_defaults() {
-        let r = resolve(&None, &UidMap::new()).unwrap();
-        assert_eq!(
-            r.role_for(PRINCIPAL_UID, PRINCIPAL_UID),
-            Resolution::Role(Role::Admin)
-        );
-        assert_eq!(r.role_for(999, PRINCIPAL_UID), Resolution::NoRole);
-    }
-
-    #[test]
-    fn explicit_bindings_bind_by_resolved_uid() {
-        let r = resolve(
-            &b(&[("admin", &["alex"]), ("adversary", &["mallory"])]),
-            &uids(&[("alex", 501), ("mallory", 666)]),
+    fn an_unresolvable_name_drops_only_that_name() {
+        let r = resolve_subjects(
+            &file("  admin: [alex]\n  user: [ursula, ghost]\n"),
+            &uids(&[("alex", 1000), ("ursula", 1001)]),
         )
         .unwrap();
-        assert_eq!(r.role_for(501, 501), Resolution::Role(Role::Admin));
-        assert_eq!(r.role_for(666, 501), Resolution::Role(Role::Adversary));
-        assert_eq!(r.role_for(1000, 501), Resolution::NoRole);
+        assert_eq!(
+            subjects(&r),
+            [(1000, "admin", "alex"), (1001, "user", "ursula")]
+        );
+        assert_eq!(
+            r.problems,
+            [IdentityProblem::Unresolved {
+                role: "user",
+                name: "ghost".into()
+            }]
+        );
     }
 
-    // `missing_uid_with_no_reserved_name_is_no_role` retired with its subject
-    // (#276): `role_for` now takes `u32`, so "no uid" is not expressible here.
-    // The property moved UP to `decide_loaded_with_role`'s guard, which returns
-    // Indeterminate before reaching this function -- see
-    // `decide::tests::missing_identity_is_indeterminate_distinct_from_unbound`.
+    #[test]
+    fn an_unresolvable_adversary_name_is_its_own_problem() {
+        let r = resolve_subjects(
+            &file("  adversary: [mallory, ghost]\n"),
+            &uids(&[("mallory", 666)]),
+        )
+        .unwrap();
+        assert_eq!(subjects(&r), [(666, "adversary", "mallory")]);
+        assert_eq!(
+            r.problems,
+            [IdentityProblem::UnresolvedAdversary {
+                name: "ghost".into()
+            }]
+        );
+    }
 
     #[test]
-    fn one_uid_under_two_roles_refuses_naming_both_names() {
-        let got = resolve(
-            &b(&[("admin", &["root"]), ("adversary", &["toor"])]),
+    fn an_overlap_by_name_alias_or_uid_is_contained() {
+        let map = uids(&[("mallory", 666), ("root", 0), ("toor", 0), ("alex", 1000)]);
+        for (body, uid, name, names, roles) in [
+            (
+                "  admin: [mallory]\n  adversary: [mallory]\n",
+                666,
+                "mallory",
+                vec!["mallory"],
+                vec!["admin", "adversary"],
+            ),
+            (
+                "  admin: [root]\n  adversary: [toor]\n",
+                0,
+                "toor",
+                vec!["root", "toor"],
+                vec!["admin", "adversary"],
+            ),
+            (
+                "  user: [alex]\n  adversary: [{uid: 1000}]\n",
+                1000,
+                "uid:1000",
+                vec!["uid:1000", "alex"],
+                vec!["adversary", "user"],
+            ),
+            (
+                "  admin: [root]\n  user: [toor]\n  adversary: [{uid: 0}]\n",
+                0,
+                "uid:0",
+                vec!["root", "uid:0", "toor"],
+                vec!["admin", "adversary", "user"],
+            ),
+        ] {
+            let r = resolve_subjects(&file(body), &map).unwrap();
+            assert_eq!(subjects(&r), [(uid, "adversary", name)], "{body}");
+            assert_eq!(
+                r.problems,
+                [IdentityProblem::Contained {
+                    uid,
+                    names: names.into_iter().map(String::from).collect(),
+                    roles
+                }],
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn one_uid_in_two_roles_without_adversary_is_unbound() {
+        let map = uids(&[("gus", 1002), ("root", 0), ("toor", 0), ("alex", 1000)]);
+        for (body, uid, names, roles) in [
+            (
+                "  admin: [alex]\n  guest: [gus]\n  user: [gus]\n",
+                1002,
+                vec!["gus"],
+                vec!["guest", "user"],
+            ),
+            (
+                "  admin: [root, alex]\n  user: [toor]\n",
+                0,
+                vec!["root", "toor"],
+                vec!["admin", "user"],
+            ),
+        ] {
+            let r = resolve_subjects(&file(body), &map).unwrap();
+            assert!(r.subjects.iter().all(|(u, ..)| *u != uid), "{body}");
+            assert!(
+                r.subjects.iter().any(|(u, ..)| *u == 1000),
+                "the rest loads"
+            );
+            assert!(
+                r.problems.contains(&IdentityProblem::Unbound {
+                    uid,
+                    names: names.into_iter().map(String::from).collect(),
+                    roles
+                }),
+                "{body}: {:?}",
+                r.problems
+            );
+        }
+    }
+
+    #[test]
+    fn two_names_for_one_uid_in_one_role_deduplicate_to_the_first() {
+        let r = resolve_subjects(
+            &file("  admin: [root, toor]\n"),
             &uids(&[("root", 0), ("toor", 0)]),
+        )
+        .unwrap();
+        assert_eq!(subjects(&r), [(0, "admin", "root")]);
+        assert!(r.problems.is_empty());
+        let a = resolve_subjects(
+            &file("  adversary: [mallory, {uid: 666}]\n"),
+            &uids(&[("mallory", 666)]),
+        )
+        .unwrap();
+        assert_eq!(subjects(&a), [(666, "adversary", "mallory")]);
+        assert!(
+            a.problems.is_empty(),
+            "a name and a uid for one adversary is not an overlap: {:?}",
+            a.problems
         );
-        let want = BindingError::DuplicateUid {
-            uid: 0,
-            names: ("root".into(), "toor".into()),
+    }
+
+    #[test]
+    fn file_level_defects_refuse_the_whole_file() {
+        let map = uids(&[("a", 1)]);
+        assert_eq!(
+            resolve_subjects(&file("  advesary: [a]\n"), &map),
+            Err(BindingError::UnknownRole("advesary".into()))
+        );
+        assert_eq!(
+            resolve_subjects(&file("  user: [a, a]\n"), &map),
+            Err(BindingError::Duplicate("a".into()))
+        );
+        assert_eq!(
+            resolve_subjects(&file("  adversary: [{uid: 5}, {uid: 5}]\n"), &map),
+            Err(BindingError::Duplicate("uid:5".into()))
+        );
+        assert_eq!(
+            resolve_subjects(&file("  guest: [{uid: 5}]\n"), &map),
+            Err(BindingError::UidOutsideAdversary("guest".into()))
+        );
+        for (e, text) in [
+            (
+                BindingError::UnknownRole("x".into()),
+                "bindings names unknown role 'x'",
+            ),
+            (
+                BindingError::Duplicate("y".into()),
+                "identity 'y' listed twice in one role",
+            ),
+            (
+                BindingError::UidOutsideAdversary("z".into()),
+                "role 'z' lists a uid entry; `uid:` entries are accepted under adversary only",
+            ),
+        ] {
+            assert_eq!(e.to_string(), text);
+        }
+    }
+
+    #[test]
+    fn absent_and_empty_resolve_to_nothing() {
+        let nothing = Resolved {
+            subjects: vec![],
+            problems: vec![],
         };
-        assert_eq!(got, Err(want.clone()));
+        for b in [
+            maknae_config::Bindings::missing(),
+            maknae_config::Bindings::absent(),
+            parse_bindings("schema_version: 1\nbindings: {}\n").unwrap(),
+        ] {
+            assert_eq!(resolve_subjects(&b, &UidMap::new()), Ok(nothing.clone()));
+        }
+    }
+
+    #[test]
+    fn problems_come_in_a_fixed_order() {
+        let body =
+            "  admin: [ghost1, root]\n  adversary: [ghost2, toor]\n  guest: [gus]\n  user: [gus]\n";
+        let map = uids(&[("root", 0), ("toor", 0), ("gus", 1002)]);
+        let kinds: Vec<&str> = resolve_subjects(&file(body), &map)
+            .unwrap()
+            .problems
+            .iter()
+            .map(IdentityProblem::kind)
+            .collect();
         assert_eq!(
-            want.to_string(),
-            "identities 'root' and 'toor' resolve to the same uid 0; bind one of them"
+            kinds,
+            ["unresolved", "unresolved-adversary", "contained", "unbound"]
         );
     }
 
     #[test]
-    fn one_uid_twice_under_one_role_keeps_the_first_name() {
-        let r = resolve(
-            &b(&[("admin", &["root", "toor"])]),
+    fn every_problem_reports_its_kind_uid_names_roles_and_text() {
+        let cases = [
+            (
+                IdentityProblem::Unresolved {
+                    role: "user",
+                    name: "ghost".into(),
+                },
+                "unresolved",
+                None,
+                vec!["ghost"],
+                vec!["user"],
+                "'ghost' under user has no account on this host; it holds no role",
+            ),
+            (
+                IdentityProblem::UnresolvedAdversary {
+                    name: "ghost".into(),
+                },
+                "unresolved-adversary",
+                None,
+                vec!["ghost"],
+                vec!["adversary"],
+                "'ghost' under adversary has no account on this host; nothing is contained for it (write \"- uid: <n>\" to contain an id that has no account)",
+            ),
+            (
+                IdentityProblem::Contained {
+                    uid: 0,
+                    names: vec!["root".into(), "toor".into()],
+                    roles: vec!["admin", "adversary"],
+                },
+                "contained",
+                Some(0),
+                vec!["root", "toor"],
+                vec!["admin", "adversary"],
+                "uid 0 (root, toor) is under admin, adversary; containment wins and it is contained",
+            ),
+            (
+                IdentityProblem::Unbound {
+                    uid: 1002,
+                    names: vec!["gus".into()],
+                    roles: vec!["guest", "user"],
+                },
+                "unbound",
+                Some(1002),
+                vec!["gus"],
+                vec!["guest", "user"],
+                "uid 1002 (gus) is under guest, user; it holds no role",
+            ),
+        ];
+        for (p, kind, uid, names, roles, text) in cases {
+            assert_eq!(p.kind(), kind);
+            assert_eq!(p.uid(), uid);
+            assert_eq!(p.names(), names);
+            assert_eq!(p.roles(), roles);
+            assert_eq!(p.to_string(), text);
+        }
+    }
+
+    #[test]
+    fn a_contained_subject_never_carries_a_binds_edge() {
+        let r = resolve_subjects(
+            &file("  admin: [root]\n  adversary: [toor]\n"),
             &uids(&[("root", 0), ("toor", 0)]),
         )
         .unwrap();
-        let got: Vec<(u32, Role, &str)> = r.subjects().collect();
-        assert_eq!(got, vec![(0, Role::Admin, "root")]);
-        assert_eq!(r.role_for(0, PRINCIPAL_UID), Resolution::Role(Role::Admin));
-    }
-
-    #[test]
-    fn subjects_lists_every_binding_in_uid_order() {
-        let r = resolve(
-            &b(&[("user", &["ursula"]), ("admin", &["alex"])]),
-            &uids(&[("alex", 1000), ("ursula", 7)]),
-        )
-        .unwrap();
-        let got: Vec<(u32, Role, &str)> = r.subjects().collect();
-        assert_eq!(
-            got,
-            vec![(7, Role::User, "ursula"), (1000, Role::Admin, "alex")]
-        );
+        let layer = maknae_graph::identity::IdentityLayer {
+            source: SOURCE.into(),
+            label: "UNCLASSIFIED".into(),
+            bindings_sha256: Some([3; 32]),
+            subjects: r
+                .subjects
+                .iter()
+                .map(|(uid, role, name)| SubjectEntry {
+                    uid: *uid,
+                    name: name.clone(),
+                    role: role.key().into(),
+                })
+                .collect(),
+        };
+        let g = graph(&layer);
+        let s = g.lookup(SUBJECT, "uid:0").unwrap().id;
+        assert_eq!(g.out_edges(s, CONTAINED).count(), 1);
+        assert_eq!(g.out_edges(s, BINDS).count(), 0);
+        let gb = GraphBindings::new(g, SOURCE);
+        assert_eq!(gb.role_for(0, 0), Resolution::Role(Role::Adversary));
     }
 
     use maknae_graph::graph::GraphBuilder;

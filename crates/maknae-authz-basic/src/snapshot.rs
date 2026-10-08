@@ -3,7 +3,7 @@
 
 use crate::binding::{GraphBindings, Roles};
 use crate::decide::{Cited, Effect, LoadedPolicy};
-use crate::PolicySource;
+use crate::{IdentityProblem, PolicySource};
 use maknae_graph::graph::{Graph, GraphBuilder};
 use maknae_graph::identity::{extract, hex};
 use maknae_graph::kernel::{
@@ -51,6 +51,7 @@ pub struct Snapshot {
     loaded: LoadedPolicy,
     index: BTreeMap<Cited, RuleCitation>,
     sections: BTreeMap<String, [u8; 32]>,
+    problems: Arc<[IdentityProblem]>,
 }
 
 impl fmt::Debug for Snapshot {
@@ -78,6 +79,11 @@ impl Snapshot {
 
     pub fn subjects(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
         self.loaded.roles.as_subject_bindings()
+    }
+
+    /// The subjects the load this snapshot was compiled from could not bind as written.
+    pub fn identity_problems(&self) -> &Arc<[IdentityProblem]> {
+        &self.problems
     }
 
     pub(crate) fn loaded(&self) -> &LoadedPolicy {
@@ -242,9 +248,10 @@ pub fn compile(
             declared.source
         )));
     }
-    let mut loaded: LoadedPolicy =
-        crate::assemble(source.policy().clone(), source.legacy(), source.uid_map())
-            .map_err(|()| CompileError::Policy("the policy does not validate".into()))?;
+    let action_grants = crate::validate_grants(&source.policy().action_grants)
+        .map_err(|e| CompileError::Policy(e.to_string()))?;
+    let destinations = crate::validate_destinations(&source.policy().destinations)
+        .map_err(|e| CompileError::Policy(e.to_string()))?;
 
     let revision = persisted.revision();
     let mut ids = BTreeMap::new();
@@ -333,7 +340,7 @@ pub fn compile(
             }
         }
     }
-    for (role, (allow, deny)) in &loaded.action_grants.0 {
+    for (role, (allow, deny)) in &action_grants.0 {
         let role_key = static_role(role)?;
         let role_id = c.id_of(ROLE, role_key)?;
         let sec = c.section(&format!("roles.{role}"), section_sha256, "roles")?;
@@ -359,7 +366,7 @@ pub fn compile(
             }
         }
     }
-    for (role, destinations) in &loaded.destinations.0 {
+    for (role, allowed) in &destinations.0 {
         let role_key = static_role(role)?;
         let role_id = c.id_of(ROLE, role_key)?;
         let sec = c.section(
@@ -367,7 +374,7 @@ pub fn compile(
             section_sha256,
             "destinations",
         )?;
-        for (i, d) in destinations.iter().enumerate() {
+        for (i, d) in allowed.iter().enumerate() {
             let mut attrs = Attrs::new();
             attrs.insert(ATTR_DESTINATION.into(), AttrValue::Str(d.clone()));
             let id = c.rule(
@@ -393,20 +400,26 @@ pub fn compile(
             .build(&SCHEMA, vocabulary)
             .map_err(|e| CompileError::Graph(e.to_string()))?,
     );
-    loaded.roles = Roles::Graph(GraphBindings::new(graph.clone(), &declared.source));
+    let loaded = LoadedPolicy {
+        policy: source.policy().clone(),
+        roles: Roles::Graph(GraphBindings::new(graph.clone(), &declared.source)),
+        action_grants,
+        destinations,
+    };
     Ok(Snapshot {
         graph,
         persisted,
         loaded,
         index: c.index,
         sections: section_sha256.clone(),
+        problems: source.identity_problems().into(),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{compiled_set, test_digest, AuthzBasicError};
+    use crate::{compiled_set, test_digest};
     use maknae_graph::format::encode;
     use maknae_graph::identity::build;
     use maknae_graph::kernel::{persisted_compiled_set, SUBJECT};
@@ -937,34 +950,88 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn an_alias_uid_under_two_roles_refuses_at_load_naming_both_names() {
-        let paths = || crate::PolicyPaths::in_dir(std::path::Path::new(DIR));
-        let got = PolicySource::from_parts(
+    fn alias_source(body: &str) -> PolicySource {
+        PolicySource::from_parts(
             parse("schema_version: 1\n"),
-            maknae_config::parse_bindings(
-                "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary: [\"toor\"]\n",
-            )
-            .unwrap(),
-            uids(&[("root", 0), ("toor", 0)]),
+            maknae_config::parse_bindings(&format!("schema_version: 1\nbindings:\n{body}"))
+                .unwrap(),
+            uids(&[("root", 0), ("toor", 0), ("alex", 1000)]),
             principal(),
-            paths(),
-        );
-        assert!(
-            matches!(got, Err(AuthzBasicError::Bindings(ref m)) if m.contains("'root'") && m.contains("'toor'") && m.contains("uid 0")),
-            "{got:?}"
-        );
-        let same_role = PolicySource::from_parts(
-            parse("schema_version: 1\n"),
-            maknae_config::parse_bindings(
-                "schema_version: 1\nbindings:\n  admin: [\"root\", \"toor\"]\n",
-            )
-            .unwrap(),
-            uids(&[("root", 0), ("toor", 0)]),
-            principal(),
-            paths(),
+            crate::PolicyPaths::in_dir(std::path::Path::new(DIR)),
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    fn alias_snap(s: &PolicySource) -> Snapshot {
+        let d = digests(s);
+        compile(
+            persisted_layer(&s.identity_layer(LABEL, d.get("bindings").copied())),
+            s,
+            &compiled_set(LABEL),
+            &d,
+        )
+        .unwrap()
+    }
+
+    fn edges_of(snap: &Snapshot, uid: u32) -> Option<(usize, usize)> {
+        let g = snap.graph();
+        let s = g.lookup(SUBJECT, &format!("uid:{uid}"))?.id;
+        Some((
+            g.out_edges(s, maknae_graph::kernel::CONTAINED).count(),
+            g.out_edges(s, maknae_graph::kernel::BINDS).count(),
+        ))
+    }
+
+    #[test]
+    fn an_alias_uid_under_two_roles_is_unbound_and_reported() {
+        let s = alias_source("  admin: [\"root\", \"alex\"]\n  user: [\"toor\"]\n");
+        assert!(
+            crate::tests::oracle::assemble(&s).is_err(),
+            "before #496 this file refused as a whole"
+        );
+        let snap = alias_snap(&s);
+        assert_eq!(edges_of(&snap, 0), None, "uid 0 has no Subject node");
+        assert_eq!(edges_of(&snap, 1000), Some((0, 1)), "the rest loads");
+        assert_eq!(
+            snap.loaded.roles.role_for(0, 501),
+            crate::binding::Resolution::NoRole
+        );
+        assert_eq!(
+            snap.identity_problems().as_ref(),
+            [IdentityProblem::Unbound {
+                uid: 0,
+                names: vec!["root".into(), "toor".into()],
+                roles: vec!["admin", "user"],
+            }]
+        );
+    }
+
+    #[test]
+    fn an_alias_uid_under_a_role_and_adversary_is_contained() {
+        let s = alias_source("  admin: [\"root\"]\n  adversary: [\"toor\"]\n");
+        assert!(
+            crate::tests::oracle::assemble(&s).is_err(),
+            "before #496 this file refused as a whole"
+        );
+        let snap = alias_snap(&s);
+        assert_eq!(edges_of(&snap, 0), Some((1, 0)));
+        assert_eq!(
+            snap.loaded.roles.role_for(0, 501),
+            crate::binding::Resolution::Role(crate::role::Role::Adversary)
+        );
+        assert_eq!(
+            snap.identity_problems().as_ref(),
+            [IdentityProblem::Contained {
+                uid: 0,
+                names: vec!["root".into(), "toor".into()],
+                roles: vec!["admin", "adversary"],
+            }]
+        );
+    }
+
+    #[test]
+    fn an_alias_uid_twice_under_one_role_keeps_the_first_name() {
+        let same_role = alias_source("  admin: [\"root\", \"toor\"]\n");
         let layer = same_role.identity_layer(LABEL, Some([1; 32]));
         assert_eq!(layer.subjects.len(), 1);
         assert_eq!(
@@ -975,20 +1042,8 @@ mod tests {
             ),
             (0, "admin", "root")
         );
-        let d = digests(&same_role);
-        let snap = compile(
-            persisted_layer(&same_role.identity_layer(LABEL, d.get("bindings").copied())),
-            &same_role,
-            &compiled_set(LABEL),
-            &d,
-        )
-        .unwrap();
-        let file = crate::assemble(
-            same_role.policy().clone(),
-            same_role.legacy(),
-            same_role.uid_map(),
-        )
-        .unwrap();
+        let snap = alias_snap(&same_role);
+        let file = crate::tests::oracle::assemble(&same_role).unwrap();
         assert_eq!(
             snap.loaded.roles.role_for(0, 501),
             file.roles.role_for(0, 501)
@@ -997,6 +1052,7 @@ mod tests {
             snap.loaded.roles.role_for(0, 501),
             crate::binding::Resolution::Role(crate::role::Role::Admin)
         );
+        assert!(snap.identity_problems().is_empty());
     }
 
     #[test]
@@ -1004,7 +1060,7 @@ mod tests {
         let s = shipped_with_bindings();
         let snap = snap(&s);
         assert!(matches!(snap.loaded.roles, Roles::Graph(_)));
-        let file = crate::assemble(s.policy().clone(), s.legacy(), s.uid_map()).unwrap();
+        let file = crate::tests::oracle::assemble(&s).unwrap();
         assert_eq!(snap.subjects(), file.roles.as_subject_bindings());
         assert!(snap.subjects().is_some());
         let none = source(SHIPPED);
@@ -1123,7 +1179,7 @@ mod tests {
             "{SHIPPED}roles:\n  admin:\n    allow: [\"admin.status\", \"session.prompt\"]\n    deny: [\"admin.config.show\"]\n  user:\n    allow: [\"session.prompt\"]\n    deny: [\"session.prompt\"]\ndestinations:\n  admin:\n    allow: [\"provider:openai\"]\n"
         ), Some(BINDINGS));
         let snap = snap(&s);
-        let oracle = crate::assemble(s.policy().clone(), s.legacy(), s.uid_map()).unwrap();
+        let oracle = crate::tests::oracle::assemble(&s).unwrap();
         let cases = [
             sec_request(
                 1000,
