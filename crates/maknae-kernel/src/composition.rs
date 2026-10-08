@@ -31,11 +31,13 @@
 //!
 //! [`ConjunctionAuthorizer`]: maknae_security::ConjunctionAuthorizer
 
-use std::sync::{PoisonError, RwLock};
+use std::sync::{PoisonError, RwLock, TryLockError};
+use std::time::{Duration, Instant};
+
+use crate::blocking_guard::BLOCKING_OPERATION_TIMEOUT;
 
 use crate::ceiling_authz::CeilingAuthorizer;
 use maknae_authz_basic::Baseline;
-use maknae_config::Ceiling;
 use maknae_security::{
     compose_backend_name, compose_decide_cited, compose_decide_cited_all, compose_subjects,
     Authorizer, Decided, Request, SubjectBinding, Verdict,
@@ -71,20 +73,42 @@ impl<B: Baseline> Composition<B> {
         &self.ceiling
     }
 
-    /// An accepted baseline's ceiling level and principal, installed together: a
-    /// decision is made wholly under the values before or after. A ceiling the
-    /// booted system does not rank is refused and neither operand changes.
+    /// An accepted live baseline, installed in one exclusive turn: a decision is made
+    /// wholly under the values before or after, and the providers' generation moves.
+    /// A ceiling the booted system does not rank is refused and nothing changes.
     pub fn install_live(
         &self,
-        ceiling: Ceiling,
-        principal: maknae_config::Principal,
+        live: &crate::live::LiveConfig,
+        values: crate::live::LiveValues,
     ) -> Result<(), String> {
-        let _turn = self
-            .live_turn
-            .write()
-            .unwrap_or_else(PoisonError::into_inner);
-        self.ceiling.install(ceiling)?;
-        self.baseline.install_principal(principal);
+        self.install_live_within(live, values, BLOCKING_OPERATION_TIMEOUT)
+    }
+
+    /// Polls for the turn rather than queueing on it, so an install that times out
+    /// has changed nothing and cannot land later.
+    pub(crate) fn install_live_within(
+        &self,
+        live: &crate::live::LiveConfig,
+        values: crate::live::LiveValues,
+        bound: Duration,
+    ) -> Result<(), String> {
+        let deadline = Instant::now() + bound;
+        let _turn = loop {
+            match self.live_turn.try_write() {
+                Ok(turn) => break turn,
+                Err(TryLockError::Poisoned(p)) => break p.into_inner(),
+                Err(TryLockError::WouldBlock) if Instant::now() >= deadline => {
+                    return Err(format!(
+                        "in-flight decisions held the live turn past {}s; nothing was installed",
+                        bound.as_secs()
+                    ));
+                }
+                Err(TryLockError::WouldBlock) => std::thread::sleep(Duration::from_millis(1)),
+            }
+        };
+        self.ceiling.install(values.ceiling)?;
+        self.baseline.install_principal(values.principal);
+        live.install(values.view, values.providers);
         Ok(())
     }
 
@@ -565,6 +589,22 @@ pub(crate) mod tests {
         }
     }
 
+    pub(crate) fn install<B: Baseline>(
+        c: &Composition<B>,
+        ceiling: Ceiling,
+        principal: Principal,
+    ) -> Result<(), String> {
+        c.install_live(
+            &crate::live::LiveConfig::new(Default::default(), None),
+            crate::live::LiveValues {
+                ceiling,
+                principal,
+                view: Default::default(),
+                providers: None,
+            },
+        )
+    }
+
     fn enrolled(uid: u32) -> Principal {
         Principal {
             name: "operator".into(),
@@ -583,14 +623,13 @@ pub(crate) mod tests {
         let marked = permitted_read_marked(&g.0, Some("SECRET"));
         assert!(matches!(c.decide(&marked), Verdict::Deny { .. }));
         let euid = nix::unistd::geteuid().as_raw();
-        c.install_live(secret(), enrolled(euid)).unwrap();
+        install(&c, secret(), enrolled(euid)).unwrap();
         assert!(matches!(c.decide(&marked), Verdict::Permit { .. }));
         assert_eq!(c.ceiling().ceiling().classification.name, "SECRET");
-        c.install_live(secret(), enrolled(other_uid())).unwrap();
+        install(&c, secret(), enrolled(other_uid())).unwrap();
         assert!(!matches!(c.decide(&marked), Verdict::Permit { .. }));
         assert_eq!(c.baseline().principal(), enrolled(other_uid()));
-        c.install_live(Ceiling::baseline_for(US), enrolled(euid))
-            .unwrap();
+        install(&c, Ceiling::baseline_for(US), enrolled(euid)).unwrap();
         assert!(matches!(c.decide(&marked), Verdict::Deny { .. }));
         assert!(matches!(
             c.decide(&permitted_read(&g.0)),
@@ -606,7 +645,7 @@ pub(crate) mod tests {
         let c = Composition::new(basic, ceiling(Ceiling::baseline_for(US)));
         let mut aus = Ceiling::baseline_for(&AusPspf);
         aus.classification = AusPspf.level_of("PROTECTED").unwrap();
-        let err = c.install_live(aus, enrolled(other_uid())).unwrap_err();
+        let err = install(&c, aus, enrolled(other_uid())).unwrap_err();
         assert_eq!(err, "PROTECTED is not a level of the US system");
         assert_eq!(c.baseline().principal(), enrolled(euid));
         assert_eq!(c.ceiling().ceiling().classification, US.unmarked());
@@ -652,7 +691,7 @@ pub(crate) mod tests {
         {
             let c = c.clone();
             std::thread::spawn(move || {
-                let _ = installed_tx.send(c.install_live(secret(), enrolled(other_uid())));
+                let _ = installed_tx.send(install(&c, secret(), enrolled(other_uid())));
             });
         }
         assert!(
@@ -673,6 +712,47 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(c.ceiling().ceiling().classification.name, "SECRET");
         assert_eq!(c.baseline().principal(), enrolled(other_uid()));
+    }
+
+    #[test]
+    fn an_install_that_cannot_take_the_turn_in_time_changes_nothing() {
+        use std::sync::mpsc::channel;
+        let (_g, basic) = fixture("live-bound", READ_POLICY, None);
+        let c = std::sync::Arc::new(Composition::new(basic, ceiling(Ceiling::baseline_for(US))));
+        let live = crate::live::LiveConfig::new(Default::default(), None);
+        let before = c.baseline().principal();
+        let (held_tx, held) = channel();
+        let (release_tx, release) = channel::<()>();
+        let holder = {
+            let c = c.clone();
+            std::thread::spawn(move || {
+                let _decision = c.live_turn.read().unwrap();
+                let _ = held_tx.send(());
+                let _ = release.recv_timeout(Duration::from_secs(5));
+            })
+        };
+        held.recv_timeout(Duration::from_secs(5))
+            .expect("the turn is held");
+        let values = crate::live::LiveValues {
+            ceiling: secret(),
+            principal: enrolled(other_uid()),
+            view: std::collections::BTreeMap::from([("core".into(), Default::default())]),
+            providers: None,
+        };
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            let _ = release_tx.send(());
+        });
+        let err = c
+            .install_live_within(&live, values, Duration::from_millis(50))
+            .unwrap_err();
+        assert!(err.contains("nothing was installed"), "{err}");
+        releaser.join().unwrap();
+        holder.join().unwrap();
+        assert_eq!(c.baseline().principal(), before);
+        assert_eq!(c.ceiling().ceiling().classification, US.unmarked());
+        assert_eq!(live.generation(), 0);
+        assert!(live.view().is_empty());
     }
 
     #[test]

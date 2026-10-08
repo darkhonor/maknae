@@ -535,6 +535,40 @@ impl Fixture {
     where
         P: maknae_security::Authorizer + Send + Sync + 'static,
     {
+        self.start_with_live(
+            authz,
+            Arc::new(maknae_kernel::LiveConfig::new(
+                Default::default(),
+                authority(provider),
+            )),
+            verb,
+            fd,
+            records,
+            config,
+            egress,
+            attempt_caps,
+        )
+    }
+    /// The starter with the live config supplied too, for tests that install into it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_with_live<P>(
+        &self,
+        authz: Arc<P>,
+        live: Arc<maknae_kernel::LiveConfig>,
+        verb: Verb,
+        fd: Option<OwnedFd>,
+        records: Arc<impl AuditEmit + Send + Sync + 'static>,
+        config: maknae_config::TransportConfig,
+        egress: Arc<dyn maknae_kernel::Egress>,
+        attempt_caps: maknae_kernel::AttemptCaps,
+    ) -> (
+        tokio::io::DuplexStream,
+        tokio::task::JoinHandle<()>,
+        Vec<u8>,
+    )
+    where
+        P: maknae_security::Authorizer + Send + Sync + 'static,
+    {
         let (client, server) = tokio::io::duplex(65536);
         let fds = maknae_io::DelegatedFds::new(4);
         if let Some(fd) = fd {
@@ -553,10 +587,7 @@ impl Fixture {
             config,
             serde_json::json!({"mutation": "untrusted extension"}),
             authz,
-            std::sync::Arc::new(maknae_kernel::LiveConfig::new(
-                Default::default(),
-                authority(provider),
-            )),
+            live,
             Arc::new("basic+ceiling".into()),
             Arc::new("US".into()),
             std::sync::Arc::new(None),

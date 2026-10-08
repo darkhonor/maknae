@@ -8,16 +8,35 @@ use crate::baseline_check::Validated;
 use crate::provider_choice::ProviderAuthority;
 use crate::run::ConfigView;
 
-type Served = (Arc<ConfigView>, Arc<Option<ProviderAuthority>>);
+type Served = (Arc<ConfigView>, Arc<Option<ProviderAuthority>>, u64);
 
 pub struct LiveConfig {
     served: RwLock<Arc<Served>>,
 }
 
+/// One accepted live baseline: what [`crate::Composition::install_live`] installs.
+pub struct LiveValues {
+    pub ceiling: maknae_config::Ceiling,
+    pub principal: maknae_config::Principal,
+    pub view: ConfigView,
+    pub providers: Option<ProviderAuthority>,
+}
+
+impl LiveValues {
+    pub fn of(v: &Validated) -> Self {
+        Self {
+            ceiling: v.boot.ceiling().clone(),
+            principal: v.principal.clone(),
+            view: config_view_of(v),
+            providers: providers_of(v),
+        }
+    }
+}
+
 impl LiveConfig {
     pub fn new(view: ConfigView, providers: Option<ProviderAuthority>) -> Self {
         Self {
-            served: RwLock::new(Arc::new((Arc::new(view), Arc::new(providers)))),
+            served: RwLock::new(Arc::new((Arc::new(view), Arc::new(providers), 0))),
         }
     }
 
@@ -40,11 +59,21 @@ impl LiveConfig {
         Arc::clone(&self.served().1)
     }
 
-    /// Both values are replaced together; a request holding the previous ones
-    /// finishes on them.
-    pub fn install(&self, view: ConfigView, providers: Option<ProviderAuthority>) {
-        *self.served.write().unwrap_or_else(PoisonError::into_inner) =
-            Arc::new((Arc::new(view), Arc::new(providers)));
+    /// The providers a request is admitted on, and the install generation they belong to.
+    pub fn admission(&self) -> (Arc<Option<ProviderAuthority>>, u64) {
+        let served = self.served();
+        (Arc::clone(&served.1), served.2)
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.served().2
+    }
+
+    /// Only `Composition::install_live` calls this, inside its exclusive turn.
+    pub(crate) fn install(&self, view: ConfigView, providers: Option<ProviderAuthority>) {
+        let mut slot = self.served.write().unwrap_or_else(PoisonError::into_inner);
+        let generation = slot.2.wrapping_add(1);
+        *slot = Arc::new((Arc::new(view), Arc::new(providers), generation));
     }
 }
 
@@ -69,18 +98,15 @@ pub fn providers_of(v: &Validated) -> Option<ProviderAuthority> {
     crate::provider_choice::provider_authority(v.boot.providers(), v.egress_bounds.as_ref())
 }
 
-/// Installs a validated live baseline: the ceiling level and the principal first
-/// (refused whole when the booted system does not rank the ceiling), then the view
-/// and the providers. The validator requires a principal, so a baseline without
-/// one never reaches here; an absent ceiling is the system's lowest level.
+/// Installs a validated live baseline: the ceiling, principal, view and providers in
+/// one turn of the composition, refused whole when the booted system does not rank
+/// the ceiling or in-flight decisions hold the turn past the bound.
 pub fn install<B: maknae_authz_basic::Baseline>(
     pdp: &crate::Composition<B>,
     live: &LiveConfig,
     v: &Validated,
 ) -> Result<(), String> {
-    pdp.install_live(v.boot.ceiling().clone(), v.principal.clone())?;
-    live.install(config_view_of(v), providers_of(v));
-    Ok(())
+    pdp.install_live(live, LiveValues::of(v))
 }
 
 #[cfg(test)]
@@ -194,7 +220,9 @@ mod tests {
             &env,
         )
         .unwrap();
+        assert_eq!(live.generation(), 0);
         install(&pdp, &live, &next).unwrap();
+        assert_eq!(live.generation(), 1);
         assert_eq!(pdp.ceiling().ceiling().classification.name, "SECRET");
         assert_eq!(pdp.baseline().principal(), next.principal);
         assert_eq!(*live.view(), config_view_of(&next));
@@ -255,5 +283,6 @@ mod tests {
         assert_eq!(pdp.baseline().principal(), before);
         assert_eq!(pdp.ceiling().ceiling().classification, US.unmarked());
         assert_eq!(*live.view(), config_view_of(&first));
+        assert_eq!(live.generation(), 0);
     }
 }

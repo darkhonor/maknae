@@ -396,7 +396,7 @@ pub(crate) mod tests {
         assert_eq!(classification_of(&v).1, "SECRET");
         let accepted = sections(&minimal());
         let invalid = InvalidFile {
-            cause: "refused".into(),
+            cause: "CAUSE-SENTINEL".into(),
             proposed: Some(proposed.clone()),
         };
         let valid_set = crate::baseline::pending(&accepted, &Ok(proposed.clone())).unwrap();
@@ -405,7 +405,24 @@ pub(crate) mod tests {
             accepted: proposed.clone(),
             pending: Some(valid_set.clone()),
         };
+        for set in [&valid_set, &invalid_set] {
+            for shown in [
+                format!("{set:?}"),
+                format!("{:?}", set.state),
+                format!(
+                    "{:?}",
+                    crate::baseline::BaselineState {
+                        accepted: accepted.clone(),
+                        pending: Some(set.clone()),
+                    }
+                ),
+            ] {
+                assert!(!shown.contains(&set.hash), "{shown}");
+                assert!(!shown.contains("CAUSE-SENTINEL"), "{shown}");
+            }
+        }
         for shown in [
+            format!("{:?}", v.boot.ceiling()),
             format!("{proposed:?}"),
             format!("{v:?}"),
             format!("{:?}", v.boot.document()),

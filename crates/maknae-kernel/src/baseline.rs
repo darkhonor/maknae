@@ -29,7 +29,7 @@ pub enum Apply {
     Restart,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum PendingState {
     Valid {
         proposed: BaselineSections,
@@ -40,6 +40,28 @@ pub enum PendingState {
         cause: String,
         proposed: Option<BaselineSections>,
     },
+}
+
+/// The cause is withheld: validator text can quote a value.
+impl std::fmt::Debug for PendingState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Valid {
+                proposed,
+                apply,
+                sections,
+            } => f
+                .debug_struct("Valid")
+                .field("proposed", proposed)
+                .field("apply", apply)
+                .field("sections", sections)
+                .finish(),
+            Self::Invalid { proposed, .. } => f
+                .debug_struct("Invalid")
+                .field("proposed", proposed)
+                .finish_non_exhaustive(),
+        }
+    }
 }
 
 /// A file that did not parse (`proposed: None`) or parsed and did not validate.
@@ -64,11 +86,22 @@ impl From<&str> for InvalidFile {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PendingSet {
     pub source: &'static str,
     pub hash: String,
     pub state: PendingState,
+}
+
+/// The full hash appears only in the `admin.baseline.show` reply.
+impl std::fmt::Debug for PendingSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingSet")
+            .field("source", &self.source)
+            .field("hash", &format_args!("sha256:{}", short(&self.hash)))
+            .field("state", &self.state)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

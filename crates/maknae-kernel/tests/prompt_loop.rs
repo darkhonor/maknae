@@ -1454,3 +1454,122 @@ async fn an_oversize_reply_is_refused_as_too_large_never_truncated() {
         "the refused reply must not reach the trail"
     );
 }
+
+/// Installs a live baseline at its first decision, before the composition takes
+/// its turn: the window between a request's admission and its decision.
+struct InstallsAtTheFirstDecision<B: maknae_authz_basic::Baseline> {
+    pdp: Arc<maknae_kernel::Composition<B>>,
+    live: Arc<maknae_kernel::LiveConfig>,
+    next: Mutex<Option<maknae_kernel::LiveValues>>,
+}
+impl<B: maknae_authz_basic::Baseline + Send + Sync> maknae_security::Authorizer
+    for InstallsAtTheFirstDecision<B>
+{
+    fn decide(&self, req: &maknae_security::Request) -> maknae_security::Verdict {
+        self.decide_cited(req).verdict
+    }
+    fn decide_reporting_role(
+        &self,
+        req: &maknae_security::Request,
+    ) -> (maknae_security::Verdict, Option<&'static str>) {
+        self.decide_cited(req).into()
+    }
+    fn decide_cited(&self, req: &maknae_security::Request) -> maknae_security::Decided {
+        if let Some(values) = self.next.lock().unwrap().take() {
+            self.pdp.install_live(&self.live, values).unwrap();
+        }
+        self.pdp.decide_cited(req)
+    }
+    fn decide_cited_all(&self, reqs: &[maknae_security::Request]) -> Vec<maknae_security::Decided> {
+        reqs.iter().map(|r| self.decide_cited(r)).collect()
+    }
+    fn subjects(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
+        self.pdp.subjects()
+    }
+    fn backend_name(&self) -> String {
+        self.pdp.backend_name()
+    }
+}
+
+fn providers_named(names: &[&str]) -> Option<maknae_kernel::ProviderAuthority> {
+    use maknae_config::Value;
+    let entries = names
+        .iter()
+        .map(|n| {
+            Value::Map(vec![
+                ("name".into(), Value::Str((*n).into())),
+                (
+                    "endpoint".into(),
+                    Value::Str("http://127.0.0.1:1/v1".into()),
+                ),
+                (
+                    "models".into(),
+                    Value::Seq(vec![Value::Str(common::TEST_MODEL.into())]),
+                ),
+            ])
+        })
+        .collect();
+    Some(maknae_kernel::ProviderAuthority {
+        set: maknae_config::providers_from_section(Some(&Value::Seq(entries))).unwrap(),
+        user_prefix: common::TEST_USER_PREFIX.into(),
+    })
+}
+
+/// Bindings are absent, so the enrolled principal is the admin. The accepted
+/// baseline names another principal and providers {openai, anthropic}; the accept
+/// makes the peer the principal and drops openai. A prompt to openai admitted
+/// before the install and decided after it is refused: neither baseline permits it.
+#[tokio::test]
+async fn a_prompt_admitted_before_a_live_install_and_decided_after_it_is_refused() {
+    let mut fx = Fixture::with_policy(
+        "prompt-live-race",
+        "Read",
+        "roles:\n  admin:\n    allow: [\"session.prompt\"]\ndestinations:\n  admin:\n    allow: [\"provider:openai\", \"provider:anthropic\"]\n",
+    );
+    std::fs::remove_file(fx.paths().bindings).unwrap();
+    let peer = fx.principal.clone();
+    fx.principal.uid = peer.uid.wrapping_add(1);
+    let live = Arc::new(maknae_kernel::LiveConfig::new(
+        Default::default(),
+        providers_named(&["openai", "anthropic"]),
+    ));
+    let pdp = InstallsAtTheFirstDecision {
+        pdp: fx.authorizer(),
+        live: Arc::clone(&live),
+        next: Mutex::new(Some(maknae_kernel::LiveValues {
+            ceiling: maknae_config::Ceiling::baseline_for(&maknae_config::BasicPolicy),
+            principal: peer,
+            view: Default::default(),
+            providers: providers_named(&["anthropic"]),
+        })),
+    };
+    let records = Records::new(0);
+    let eg = Arc::new(Recording::default());
+    let (client, task, body) = fx.start_with_live(
+        Arc::new(pdp),
+        Arc::clone(&live),
+        prompt("hello"),
+        None,
+        Arc::clone(&records),
+        maknae_config::transport_from_section(None).unwrap(),
+        eg.clone(),
+        maknae_kernel::AttemptCaps::default(),
+    );
+    let resp = Fixture::exchange(client, task, &body)
+        .await
+        .expect("a refusal frame");
+    assert!(
+        matches!(resp.result, RespResult::Err(ref e) if e.code == ProtoErrCode::Unauthorized),
+        "{resp:?}"
+    );
+    assert_eq!(live.generation(), 1, "the install landed");
+    assert!(eg.calls().is_empty(), "nothing left: {:?}", eg.calls());
+    let rec = last_prompt_record(&records);
+    assert_eq!(
+        (rec.outcome.result.as_str(), rec.outcome.reason.as_str()),
+        (
+            "deny",
+            "the live baseline changed between admission and decision"
+        )
+    );
+}

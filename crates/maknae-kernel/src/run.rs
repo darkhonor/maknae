@@ -888,7 +888,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     }
 
     let no_providers = maknae_config::ProviderSet::empty();
-    let providers = live.providers();
+    let (providers, admitted_generation) = live.admission();
     let admitted = match &request.verb {
         Verb::SessionPrompt { choice, .. } => {
             let (set, user_prefix) = match &*providers {
@@ -966,18 +966,27 @@ pub async fn handle_with_attempt_caps<S, E, P>(
         },
         BreakerAdmission::Admit => {
             let decided = {
-                let a = Arc::clone(&authorizer);
+                let (a, live) = (Arc::clone(&authorizer), Arc::clone(&live));
                 tokio::time::timeout(
                     authz_decide_timeout,
                     tokio::task::spawn_blocking(move || {
                         let d = guarded_decide_cited(&*a, &sec_req);
-                        (combine(vec![d.verdict]), d.role, d.rule)
+                        (combine(vec![d.verdict]), d.role, d.rule, live.generation())
                     }),
                 )
                 .await
             };
             match decided {
-                Ok(Ok((v, role, rule))) => {
+                // A live install landed between admission and the decision: the
+                // request was admitted on values the decision did not see.
+                Ok(Ok((_, role, _, generation))) if generation != admitted_generation => {
+                    authz_breaker.lock().await.record_success();
+                    decided_role = role;
+                    maknae_security::Verdict::Deny {
+                        reason: "the live baseline changed between admission and decision".into(),
+                    }
+                }
+                Ok(Ok((v, role, rule, _))) => {
                     authz_breaker.lock().await.record_success();
                     decided_role = role;
                     decided_rule = rule;
