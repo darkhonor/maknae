@@ -178,6 +178,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn debug_of_the_graph_its_builder_and_its_records_never_prints_a_baseline_value() {
+        let mut b = baseline();
+        b.sections
+            .insert("audit".into(), r#"{"au3_1":{"enclave":"SCIF-B7"}}"#.into());
+        b.ceiling = "SECRET".into();
+        let g = graph(Some(&b));
+        let mut shown = vec![format!("{g:?}")];
+        shown.extend(g.nodes().iter().map(|n| format!("{n:?}")));
+        shown.extend(g.edges().iter().map(|e| format!("{e:?}")));
+        let mut builder = GraphBuilder::new(g.space(), g.revision());
+        for n in g.nodes() {
+            builder = builder.node(n.clone());
+        }
+        for e in g.edges() {
+            builder = builder.edge(e.clone());
+        }
+        shown.push(format!("{builder:?}"));
+        assert!(shown[0].contains("value"), "{}", shown[0]);
+        for s in &shown {
+            for value in ["SCIF-B7", "SECRET", "jsonl_path"] {
+                assert!(!s.contains(value), "{value} in {s}");
+            }
+        }
+    }
+
     fn baseline() -> BaselineLayer {
         BaselineLayer {
             sections: [

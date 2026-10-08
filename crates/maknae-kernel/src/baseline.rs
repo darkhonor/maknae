@@ -139,7 +139,7 @@ pub fn changed_sections(a: &BaselineSections, b: &BaselineSections) -> Vec<Strin
     let names: std::collections::BTreeSet<&String> = a.keys().chain(b.keys()).collect();
     names
         .into_iter()
-        .filter(|n| a.get(*n) != b.get(*n))
+        .filter(|n| a.get(n) != b.get(n))
         .cloned()
         .collect()
 }
@@ -281,7 +281,7 @@ pub fn at_boot(
     }
     let events = FOLLOWED_AT_BOOT
         .iter()
-        .filter(|n| acc.get(**n) != mix.get(**n))
+        .filter(|n| acc.get(n) != mix.get(n))
         .map(|n| format!("{n} follows maknae.yaml at start"))
         .collect();
     let pending = pending(&mix, &Ok(f));

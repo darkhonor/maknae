@@ -17,24 +17,43 @@ impl BaselineSections {
     pub fn into_inner(self) -> BTreeMap<String, String> {
         self.0
     }
+
+    pub fn get(&self, section: &str) -> Option<&String> {
+        self.0.get(section)
+    }
+
+    pub fn contains_key(&self, section: &str) -> bool {
+        self.0.contains_key(section)
+    }
+
+    pub fn insert(&mut self, section: String, json: String) -> Option<String> {
+        self.0.insert(section, json)
+    }
+
+    pub fn remove(&mut self, section: &str) -> Option<String> {
+        self.0.remove(section)
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &String> {
+        self.0.keys()
+    }
+
+    pub fn iter(&self) -> std::collections::btree_map::Iter<'_, String, String> {
+        self.0.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 impl std::fmt::Debug for BaselineSections {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_set().entries(self.0.keys()).finish()
-    }
-}
-
-impl std::ops::Deref for BaselineSections {
-    type Target = BTreeMap<String, String>;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl std::ops::DerefMut for BaselineSections {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
     }
 }
 
@@ -319,7 +338,30 @@ mod tests {
             }
         }
         assert!(format!("{s:?}").contains("core"));
-        assert_eq!(s.clone().into_inner(), *s);
+        assert_eq!(BaselineSections::from(s.clone().into_inner()), s);
+    }
+
+    #[test]
+    fn the_sections_answer_by_name_without_exposing_the_map() {
+        let mut s = BaselineSections::new();
+        assert!(s.is_empty());
+        assert_eq!(s.insert("core".into(), "{}".into()), None);
+        assert_eq!(s.insert("audit".into(), "1".into()), None);
+        assert_eq!(s.insert("audit".into(), "2".into()), Some("1".into()));
+        assert_eq!(s.len(), 2);
+        assert!(!s.is_empty());
+        assert!(s.contains_key("audit") && !s.contains_key("vault"));
+        assert_eq!(s.get("audit"), Some(&"2".to_string()));
+        assert_eq!(s.keys().collect::<Vec<_>>(), ["audit", "core"]);
+        assert_eq!(
+            s.iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>(),
+            ["audit=2", "core={}"]
+        );
+        assert_eq!(s.remove("audit"), Some("2".into()));
+        assert_eq!(s.remove("audit"), None);
+        assert_eq!(s.len(), 1);
     }
 
     #[test]

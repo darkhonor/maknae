@@ -940,6 +940,50 @@ mod tests {
     }
 
     #[test]
+    fn a_boot_reports_debug_never_prints_a_baseline_value() {
+        let baseline = BaselineLayer {
+            sections: [
+                ("audit", r#"{"au3_1":{"enclave":"SCIF-B7"}}"#),
+                ("core", r#"{"deployment_id":"d"}"#),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+            system: "US".into(),
+            ceiling: "SECRET".into(),
+            sha256: [7; 32],
+            moved_from: None,
+        };
+        let graph = identity::build(
+            &file(),
+            Some(&baseline),
+            &persisted_compiled_set("UNOFFICIAL"),
+            [9; 32],
+            1,
+            ProvenanceKind::RootFile,
+        )
+        .unwrap();
+        let report = BootReport {
+            revision: 1,
+            digest: [0; 32],
+            outcome: BootOutcome::Loaded(crate::anchor::AnchorState::Verified),
+            graph,
+            marker_ignored: None,
+            migration: None,
+            identity_transition: false,
+            baseline_transition: false,
+            released: Vec::new(),
+            principal_admin: None,
+            durability_error: None,
+        };
+        let shown = format!("{report:?}");
+        assert!(shown.contains("BootReport"), "{shown}");
+        for value in ["SCIF-B7", "SECRET"] {
+            assert!(!shown.contains(value), "{value} in {shown}");
+        }
+    }
+
+    #[test]
     fn an_empty_stored_layer_takes_the_files_source_and_label_and_nothing_else() {
         let (l, unbound) = migrated_layer(
             &IdentityLayer::default(),

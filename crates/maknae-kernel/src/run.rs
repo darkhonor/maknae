@@ -105,7 +105,8 @@ fn egress_send_breaker() -> Arc<tokio::sync::Mutex<BlockingBreaker>> {
 
 /// The listener-level `where` facts (AU-3c) shared by every record a connection emits.
 /// Exposed so the accept-loop integration tests can build one directly.
-#[derive(Clone, Debug)]
+/// `Debug` withholds `au3_1`.
+#[derive(Clone)]
 pub struct WhereCtx {
     pub host: String,
     pub socket: String,
@@ -115,6 +116,15 @@ pub struct WhereCtx {
     /// cloned into each spawned [`handle`] call, instead of `make_record` hardcoding
     /// it to an empty object.
     pub au3_1: serde_json::Value,
+}
+
+impl std::fmt::Debug for WhereCtx {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WhereCtx")
+            .field("host", &self.host)
+            .field("socket", &self.socket)
+            .finish_non_exhaustive()
+    }
 }
 
 /// The effective configuration as `admin.config.show` may disclose it:

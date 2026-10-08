@@ -68,7 +68,8 @@ pub enum AttrValue {
 
 pub type Attrs = BTreeMap<String, AttrValue>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `Debug` withholds the key, the label and every attribute value.
+#[derive(Clone, PartialEq, Eq)]
 pub struct NodeRecord {
     pub id: NodeId,
     pub space: GraphSpace,
@@ -80,7 +81,8 @@ pub struct NodeRecord {
     pub attrs: Attrs,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `Debug` withholds the label and every attribute value.
+#[derive(Clone, PartialEq, Eq)]
 pub struct EdgeRecord {
     pub id: EdgeId,
     pub space: GraphSpace,
@@ -91,6 +93,34 @@ pub struct EdgeRecord {
     pub provenance: Provenance,
     pub revision: u64,
     pub attrs: Attrs,
+}
+
+impl std::fmt::Debug for NodeRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NodeRecord")
+            .field("id", &self.id)
+            .field("space", &self.space)
+            .field("kind", &self.kind)
+            .field("provenance", &self.provenance)
+            .field("revision", &self.revision)
+            .field("attrs", &self.attrs.keys().collect::<Vec<_>>())
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for EdgeRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EdgeRecord")
+            .field("id", &self.id)
+            .field("space", &self.space)
+            .field("from", &self.from)
+            .field("to", &self.to)
+            .field("kind", &self.kind)
+            .field("provenance", &self.provenance)
+            .field("revision", &self.revision)
+            .field("attrs", &self.attrs.keys().collect::<Vec<_>>())
+            .finish_non_exhaustive()
+    }
 }
 
 #[cfg(test)]

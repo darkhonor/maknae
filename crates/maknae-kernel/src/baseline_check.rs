@@ -415,6 +415,14 @@ pub(crate) mod tests {
             format!("{:?}", valid_set.state),
             format!("{invalid_set:?}"),
             format!("{state:?}"),
+            format!(
+                "{:?}",
+                crate::run::WhereCtx {
+                    host: "h".into(),
+                    socket: "/s".into(),
+                    au3_1: v.audit.au3_1.clone(),
+                }
+            ),
         ] {
             for value in ["SECRET", "ACCRED-7Q", "SCIF-B7"] {
                 assert!(!shown.contains(value), "{value} in {shown}");
