@@ -431,6 +431,7 @@ mod tests {
         std::fs::write(&path, bytes).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
         let cfg = maknae_config::AuditConfig {
+            readers: Vec::new(),
             jsonl_path: path.clone(),
             siem: None,
             au3_1: serde_json::json!({}),
@@ -447,6 +448,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("audit.jsonl");
         let cfg = maknae_config::AuditConfig {
+            readers: Vec::new(),
             jsonl_path: path.clone(),
             siem: None,
             au3_1: serde_json::json!({}),
@@ -471,6 +473,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("audit.jsonl");
         let cfg = maknae_config::AuditConfig {
+            readers: Vec::new(),
             jsonl_path: path.clone(),
             siem: None,
             au3_1: serde_json::json!({}),
@@ -507,6 +510,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("audit.jsonl");
         let cfg = maknae_config::AuditConfig {
+            readers: Vec::new(),
             jsonl_path: path.clone(),
             siem: None,
             au3_1: serde_json::json!({}),
@@ -545,6 +549,7 @@ mod tests {
     async fn append_multiple_records_writes_multiple_well_formed_lines() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = maknae_config::AuditConfig {
+            readers: Vec::new(),
             jsonl_path: dir.path().join("audit.jsonl"),
             siem: None,
             au3_1: serde_json::json!({}),
@@ -573,6 +578,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("audit.jsonl");
         let cfg = maknae_config::AuditConfig {
+            readers: Vec::new(),
             jsonl_path: path.clone(),
             siem: None,
             au3_1: serde_json::json!({}),
@@ -593,6 +599,7 @@ mod tests {
     async fn open_fails_closed_when_path_is_a_directory() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = maknae_config::AuditConfig {
+            readers: Vec::new(),
             jsonl_path: dir.path().to_path_buf(), // a directory, not a file
             siem: None,
             au3_1: serde_json::json!({}),
@@ -616,6 +623,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("audit.jsonl");
         let cfg = maknae_config::AuditConfig {
+            readers: Vec::new(),
             jsonl_path: path.clone(),
             siem: None,
             au3_1: serde_json::json!({}),
@@ -638,6 +646,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("audit.jsonl");
         let left_cfg = maknae_config::AuditConfig {
+            readers: Vec::new(),
             jsonl_path: path.clone(),
             siem: None,
             au3_1: serde_json::json!({}),
@@ -671,6 +680,7 @@ mod tests {
         std::fs::write(&path, b"").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
         let cfg = maknae_config::AuditConfig {
+            readers: Vec::new(),
             jsonl_path: path,
             siem: None,
             au3_1: serde_json::json!({}),
@@ -693,6 +703,7 @@ mod tests {
         let link = dir.path().join("audit.jsonl");
         std::os::unix::fs::symlink(&target, &link).unwrap();
         let cfg = maknae_config::AuditConfig {
+            readers: Vec::new(),
             jsonl_path: link,
             siem: None,
             au3_1: serde_json::json!({}),
@@ -708,6 +719,7 @@ mod tests {
     async fn emit_trait_method_delegates_to_append() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = maknae_config::AuditConfig {
+            readers: Vec::new(),
             jsonl_path: dir.path().join("audit.jsonl"),
             siem: None,
             au3_1: serde_json::json!({}),
@@ -728,6 +740,7 @@ mod tests {
     /// and this task must not change its shape.
     fn cfg_at(dir: &std::path::Path) -> maknae_config::AuditConfig {
         maknae_config::AuditConfig {
+            readers: Vec::new(),
             jsonl_path: dir.join("audit.jsonl"),
             siem: None,
             au3_1: serde_json::json!({}),
@@ -741,6 +754,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("audit.jsonl");
         let cfg = maknae_config::AuditConfig {
+            readers: Vec::new(),
             jsonl_path: path.clone(),
             siem: None,
             au3_1: serde_json::json!({}),
@@ -789,6 +803,7 @@ mod tests {
     async fn repeated_timeouts_under_a_wedge_do_not_exhaust_the_breaker_after_recovery() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = maknae_config::AuditConfig {
+            readers: Vec::new(),
             jsonl_path: dir.path().join("audit.jsonl"),
             siem: None,
             au3_1: serde_json::json!({}),

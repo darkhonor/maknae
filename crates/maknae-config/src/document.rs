@@ -995,6 +995,7 @@ mod tests {
         );
         let transport = crate::TransportConfig::default();
         let audit = crate::AuditConfig {
+            readers: Vec::new(),
             jsonl_path: "/var/log/maknae/audit.jsonl".into(),
             siem: None, // the shipped skeleton
             au3_1: serde_json::json!({}),
@@ -1019,6 +1020,7 @@ mod tests {
         // A SET one is still withheld -- absence handling must not become a
         // disclosure route for the value.
         let audit_set = crate::AuditConfig {
+            readers: Vec::new(),
             siem: Some("https://splunk:8088?token=SECRET".into()),
             ..audit
         };
@@ -1045,6 +1047,7 @@ mod tests {
         let doc = Document::new(Vec::new(), Vec::new(), Vec::new()); // an empty file
         let transport = crate::TransportConfig::default();
         let audit = crate::AuditConfig {
+            readers: Vec::new(),
             jsonl_path: "/var/log/maknae/audit.jsonl".into(),
             siem: None,
             au3_1: serde_json::json!({}),

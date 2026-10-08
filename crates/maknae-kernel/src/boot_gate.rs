@@ -598,6 +598,7 @@ mod tests {
 
     fn audit_cfg(siem: Option<&str>) -> maknae_config::AuditConfig {
         maknae_config::AuditConfig {
+            readers: Vec::new(),
             jsonl_path: std::path::PathBuf::from("/var/log/maknae/audit.jsonl"),
             siem: siem.map(String::from),
             au3_1: serde_json::Value::Null,

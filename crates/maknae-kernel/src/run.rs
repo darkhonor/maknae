@@ -5430,6 +5430,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         let state = state_dir(&dir.0);
         let sink = Arc::new(
             maknae_audit_append::AuditSink::open(&maknae_config::AuditConfig {
+                readers: Vec::new(),
                 jsonl_path: dir.0.join("audit.jsonl"),
                 siem: None,
                 au3_1: serde_json::Value::Null,
@@ -7374,6 +7375,7 @@ mod reload_tests {
         }
         let sink = Arc::new(
             maknae_audit_append::AuditSink::open(&maknae_config::AuditConfig {
+                readers: Vec::new(),
                 jsonl_path: dir.join("audit.jsonl"),
                 siem: None,
                 au3_1: serde_json::Value::Null,
@@ -8095,6 +8097,7 @@ mod reload_tests {
         drop(reloader);
         let sink = Arc::new(
             maknae_audit_append::AuditSink::open(&maknae_config::AuditConfig {
+                readers: Vec::new(),
                 jsonl_path: dir.join("audit.jsonl"),
                 siem: None,
                 au3_1: serde_json::Value::Null,

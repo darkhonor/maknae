@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 pub const AUDIT_SECTION: &str = "audit";
 
 /// #210: the keys this section's parser reads — the closed vocabulary.
-pub(crate) const AUDIT_KEYS: [&str; 3] = ["jsonl_path", "siem", "au3_1"];
+pub(crate) const AUDIT_KEYS: [&str; 4] = ["jsonl_path", "siem", "au3_1", "readers"];
 
 /// The audit-sink configuration (ADR-0019).
 #[derive(Clone, Debug)]
@@ -19,7 +19,34 @@ pub struct AuditConfig {
     pub jsonl_path: PathBuf,
     pub siem: Option<String>,
     pub au3_1: serde_json::Value,
+    pub readers: Vec<String>,
 }
+
+/// One `audit.readers` account as the account database reports it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReaderAccount {
+    pub name: String,
+    pub uid: u32,
+    pub gid: u32,
+    /// Supplementary group ids, as the account database lists them.
+    pub groups: Vec<u32>,
+}
+
+/// The account database [`resolve_readers`] consults.
+pub trait ReaderLookup {
+    /// `Ok(None)` when no such account exists.
+    fn account(&self, name: &str) -> Result<Option<ReaderAccount>, String>;
+    /// The daemon account's primary gid, `Ok(None)` when it does not exist.
+    fn daemon_gid(&self) -> Result<Option<u32>, String>;
+}
+
+/// The lowest uid an `audit.readers` account may have.
+pub const READER_UID_FLOOR: u32 = 100;
+
+/// Accounts refused as readers by name, before any lookup.
+pub const REFUSED_READER_NAMES: [&str; 3] = ["root", "_maknae", "_maknae-egress"];
+
+const NOBODY_UID: u32 = 65534;
 
 fn get<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
     match v {
@@ -108,11 +135,100 @@ pub fn audit_from_section(
         .map(to_json)
         .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
 
+    let readers = match get(section, "readers") {
+        None => Vec::new(),
+        Some(v) => readers_from(v)?,
+    };
+
     Ok(AuditConfig {
         jsonl_path,
         siem,
         au3_1,
+        readers,
     })
+}
+
+fn readers_from(v: &Value) -> Result<Vec<String>, ConfigError> {
+    let not_a_list =
+        || ConfigError::InvalidAudit("audit.readers must be a list of account names".into());
+    let Value::Seq(items) = v else {
+        return Err(not_a_list());
+    };
+    let mut readers: Vec<String> = Vec::with_capacity(items.len());
+    for item in items {
+        let name = as_str(item).ok_or_else(not_a_list)?;
+        if !portable_name(name) {
+            return Err(ConfigError::InvalidAudit(format!(
+                "audit.readers entry {name:?} is not a portable account name"
+            )));
+        }
+        if readers.iter().any(|r| r == name) {
+            return Err(ConfigError::InvalidAudit(format!(
+                "audit.readers names {name} twice"
+            )));
+        }
+        readers.push(name.to_string());
+    }
+    Ok(readers)
+}
+
+/// `^[a-z_][a-z0-9_-]{0,30}[$]?$`
+fn portable_name(s: &str) -> bool {
+    let b = s.as_bytes();
+    let body = b.strip_suffix(b"$").unwrap_or(b);
+    let Some((first, rest)) = body.split_first() else {
+        return false;
+    };
+    (first.is_ascii_lowercase() || *first == b'_')
+        && rest.len() <= 30
+        && rest
+            .iter()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'_' || *c == b'-')
+}
+
+/// Resolve `audit.readers` through `lookup`, refusing any account that must not read the trail (#500).
+pub fn resolve_readers(
+    readers: &[String],
+    lookup: &dyn ReaderLookup,
+) -> Result<Vec<ReaderAccount>, ConfigError> {
+    let refuse =
+        |name: &str, why: &str| ConfigError::InvalidAudit(format!("audit.readers {name}: {why}"));
+    let mut resolved = Vec::with_capacity(readers.len());
+    for name in readers {
+        if REFUSED_READER_NAMES.contains(&name.as_str()) {
+            return Err(refuse(name, "this account may not be a trail reader"));
+        }
+        let account = match lookup.account(name) {
+            Err(e) => return Err(refuse(name, &format!("account lookup failed: {e}"))),
+            Ok(None) => return Err(refuse(name, "no such account")),
+            Ok(Some(a)) => a,
+        };
+        if account.uid < READER_UID_FLOOR || account.uid == NOBODY_UID {
+            return Err(refuse(
+                name,
+                &format!(
+                    "uid {} is root, a system account below {READER_UID_FLOOR}, or nobody",
+                    account.uid
+                ),
+            ));
+        }
+        let daemon_gid =
+            match lookup.daemon_gid() {
+                Ok(Some(g)) => g,
+                Ok(None) | Err(_) => return Err(refuse(
+                    name,
+                    "the daemon account _maknae does not resolve, so its group cannot be excluded",
+                )),
+            };
+        if account.gid == daemon_gid || account.groups.contains(&daemon_gid) {
+            return Err(refuse(
+                name,
+                "a member of _maknae's group may not read the trail",
+            ));
+        }
+        resolved.push(account);
+    }
+    Ok(resolved)
 }
 
 #[cfg(test)]
@@ -176,6 +292,7 @@ mod tests {
             ),
             ("siem".into(), Value::Str("udp://127.0.0.1:514".into())),
             ("au3_1".into(), Value::Map(vec![])),
+            ("readers".into(), Value::Seq(vec![])),
         ]);
         assert!(audit_from_section(Some(&v), &rt()).is_ok());
     }
@@ -286,6 +403,176 @@ mod tests {
         assert_eq!(
             c.au3_1,
             serde_json::json!({"actor": "cn=svc-maknae", "tags": ["AU-3(1)", 1]})
+        );
+    }
+
+    struct Accounts(Vec<ReaderAccount>, Option<u32>);
+    impl ReaderLookup for Accounts {
+        fn account(&self, name: &str) -> Result<Option<ReaderAccount>, String> {
+            if name == "flaky" {
+                return Err("EIO".into());
+            }
+            Ok(self.0.iter().find(|a| a.name == name).cloned())
+        }
+        fn daemon_gid(&self) -> Result<Option<u32>, String> {
+            Ok(self.1)
+        }
+    }
+
+    struct BrokenDaemon;
+    impl ReaderLookup for BrokenDaemon {
+        fn account(&self, name: &str) -> Result<Option<ReaderAccount>, String> {
+            Ok(Some(acct(name, 991, 991, &[])))
+        }
+        fn daemon_gid(&self) -> Result<Option<u32>, String> {
+            Err("ENOENT".into())
+        }
+    }
+
+    fn acct(name: &str, uid: u32, gid: u32, groups: &[u32]) -> ReaderAccount {
+        ReaderAccount {
+            name: name.into(),
+            uid,
+            gid,
+            groups: groups.to_vec(),
+        }
+    }
+
+    fn readers_section(list: &str) -> Value {
+        crate::load_str(&format!("readers: {list}\n")).unwrap()
+    }
+
+    #[test]
+    fn readers_parse_as_a_list_of_names_and_default_empty() {
+        let cfg = audit_from_section(Some(&Value::Map(vec![])), &rt()).unwrap();
+        assert!(cfg.readers.is_empty());
+        let cfg =
+            audit_from_section(Some(&readers_section("[vector, \"fluent-bit\"]")), &rt()).unwrap();
+        assert_eq!(cfg.readers, ["vector", "fluent-bit"]);
+    }
+
+    #[test]
+    fn a_reader_that_is_not_a_portable_account_name_refuses_at_parse() {
+        for bad in [
+            "[\"Vector\"]",
+            "[\"a b\"]",
+            "[\"u:x\"]",
+            "[\"\"]",
+            "[1001]",
+            "vector",
+            "[\"a/b\"]",
+            "[\"-x\"]",
+            "[\"1a\"]",
+            "[\"$\"]",
+            "[\"a$$\"]",
+            "[\"a$b\"]",
+            "[\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"]",
+        ] {
+            let got = audit_from_section(Some(&readers_section(bad)), &rt());
+            assert!(
+                matches!(got, Err(ConfigError::InvalidAudit(_))),
+                "{bad}: {got:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_portable_shape_is_admitted() {
+        let longest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        assert_eq!(longest.len(), 31);
+        let list = format!("[_svc, a, a-b_9, \"host$\", {longest}, \"{longest}$\"]");
+        let cfg = audit_from_section(Some(&readers_section(&list)), &rt()).unwrap();
+        assert_eq!(cfg.readers.len(), 6);
+    }
+
+    #[test]
+    fn the_same_reader_twice_refuses() {
+        let got = audit_from_section(Some(&readers_section("[vector, vector]")), &rt());
+        assert!(
+            matches!(got, Err(ConfigError::InvalidAudit(ref m)) if m.contains("vector")),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_readers_admits_an_ordinary_service_account() {
+        let l = Accounts(vec![acct("vector", 991, 991, &[4])], Some(980));
+        assert_eq!(
+            resolve_readers(&["vector".into()], &l).unwrap(),
+            vec![acct("vector", 991, 991, &[4])]
+        );
+        assert_eq!(resolve_readers(&[], &l).unwrap(), vec![]);
+    }
+
+    #[test]
+    fn resolve_readers_refuses_every_forbidden_reader() {
+        let l = Accounts(
+            vec![
+                acct("root", 0, 0, &[]),
+                acct("zero", 0, 5, &[]),
+                acct("bin", 1, 1, &[]),
+                acct("ninetynine", 99, 99, &[]),
+                acct("nobody", 65534, 65534, &[]),
+                acct("_maknae", 980, 980, &[]),
+                acct("_maknae-egress", 981, 981, &[]),
+                acct("primary", 990, 980, &[]),
+                acct("member", 992, 992, &[980]),
+            ],
+            Some(980),
+        );
+        for name in [
+            "root",
+            "zero",
+            "bin",
+            "ninetynine",
+            "nobody",
+            "_maknae",
+            "_maknae-egress",
+            "primary",
+            "member",
+            "ghost",
+            "flaky",
+        ] {
+            let got = resolve_readers(&[name.to_string()], &l);
+            assert!(
+                matches!(got, Err(ConfigError::InvalidAudit(ref m)) if m.contains(name)),
+                "{name}: {got:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn one_refused_reader_refuses_the_whole_list() {
+        let l = Accounts(
+            vec![acct("vector", 991, 991, &[]), acct("bin", 1, 1, &[])],
+            Some(980),
+        );
+        let got = resolve_readers(&["vector".into(), "bin".into()], &l);
+        assert!(
+            matches!(got, Err(ConfigError::InvalidAudit(ref m)) if m.contains("bin")),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn the_uid_floor_is_inclusive_of_one_hundred() {
+        let l = Accounts(vec![acct("edge", READER_UID_FLOOR, 500, &[])], Some(980));
+        assert!(resolve_readers(&["edge".into()], &l).is_ok());
+        let l = Accounts(
+            vec![acct("edge", READER_UID_FLOOR - 1, 500, &[])],
+            Some(980),
+        );
+        assert!(resolve_readers(&["edge".into()], &l).is_err());
+    }
+
+    #[test]
+    fn a_missing_daemon_account_refuses_rather_than_skipping_the_group_check() {
+        let l = Accounts(vec![acct("vector", 991, 991, &[])], None);
+        assert!(resolve_readers(&["vector".into()], &l).is_err());
+        let got = resolve_readers(&["vector".into()], &BrokenDaemon);
+        assert!(
+            matches!(got, Err(ConfigError::InvalidAudit(ref m)) if m.contains("vector")),
+            "{got:?}"
         );
     }
 }

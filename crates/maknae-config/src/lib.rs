@@ -55,7 +55,10 @@ pub use loader::{load_config, load_config_root_owned, load_config_rooted};
 #[cfg(all(unix, feature = "hermetic-test-seam"))]
 pub use loader::{load_config_root_owned_with_requirement, load_config_rooted_with_requirement};
 
-pub use audit_cfg::{audit_from_section, AuditConfig, AUDIT_SECTION};
+pub use audit_cfg::{
+    audit_from_section, resolve_readers, AuditConfig, ReaderAccount, ReaderLookup, AUDIT_SECTION,
+    READER_UID_FLOOR, REFUSED_READER_NAMES,
+};
 #[cfg(all(unix, feature = "hermetic-test-seam"))]
 pub use authz::load_authz_with_requirement;
 #[cfg(all(unix, feature = "hermetic-test-seam"))]

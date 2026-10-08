@@ -45,7 +45,7 @@ SURFACE=(
   "crates/maknae-config/src/transport.rs|TransportConfig|transport|5|config"
   # The `egress` section (#240): the deputy's socket and the provider deadline.
   "crates/maknae-config/src/egress_cfg.rs|EgressConfig|egress|2|config"
-  "crates/maknae-config/src/audit_cfg.rs|AuditConfig|audit|3|config"
+  "crates/maknae-config/src/audit_cfg.rs|AuditConfig|audit|4|config"
   "crates/maknae-config/src/principal.rs|Principal|principal|2|config"
   # The `providers` section (#153): five disclosed leaves per authorized provider; keys are per user, never here.
   "crates/maknae-config/src/providers.rs|AuthorizedProvider|providers[]|5|config"

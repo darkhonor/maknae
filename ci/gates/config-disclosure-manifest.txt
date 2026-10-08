@@ -51,6 +51,7 @@ omit	vault.insecure_plaintext_secret_path	PRESENCE says this host keeps an AppRo
 omit	core.handling	PRESENCE says this deployment configured an above-baseline classification ceiling (prefix)
 omit	audit.au3_1	deployer-authored sub-key NAMES with no schema; a path allowlist cannot classify what it cannot enumerate (prefix)
 mask	audit.siem	an offload endpoint with no schema, no validator and no consumer; common shapes embed a credential in the URL
+mask	audit.readers	the accounts granted read access to the trail; naming them names who to target for it (#500)
 omit	lake	registered but INERT (docs/configuration.md §5): keys and shape unvalidated, deployer-authored, unenumerable — same condition as audit.au3_1 (prefix)
 always	status.version	the daemon's own version; an operator debugging needs it and any peer that handshook knows the protocol already
 always	status.protocol_version	every peer that completed a handshake already has it
