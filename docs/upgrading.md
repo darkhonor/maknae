@@ -4,20 +4,62 @@ Each release that needs an action from you lists it here, newest first. Read eve
 
 ---
 
+## Bindings move to `bindings.yaml` (#496)
+
+Who holds which role, and who is contained, now lives in its own file, `/etc/maknae/bindings.yaml` ([configuration §2.3](configuration.md#23-bindingsyaml)). `authz.yaml` keeps the grants, the denies and the roles, and no longer accepts a `bindings:` key. The package installs `/etc/maknae/bindings.yaml`, `root:_maknae 0640`, holding `schema_version: 1` and commented examples only.
+
+**If your `authz.yaml` has no `bindings:` block,** there is nothing to do. The first start records one `graph.transition` (`root-file`) and a `graph.checkpoint` (`transitioned`) at the next store revision, because the store now names `bindings.yaml` as the source of its bindings. Every host writes this pair once.
+
+**If your `authz.yaml` has a `bindings:` block, move it right after upgrading.** The package restarts `maknaed` (RPM `%systemd_postun_with_restart`, the deb's `postinst` `try-restart`, `launchctl kickstart -k` on macOS), and while the block is still in `authz.yaml` the new daemon refuses to start with exit 3:
+
+```text
+maknaed: refusing to start: authz policy load refused: authz.yaml no longer carries `bindings:`; move the block unchanged to bindings.yaml in the same directory (docs/upgrading.md)
+```
+
+systemd and launchd retry every 5 seconds, and each attempt writes a denied `authz` record to the audit trail, until you move the block. A reload of a daemon that is already running the new release refuses with the same cause, and the running policy stands. To move it:
+
+1. Open both files: `sudoedit /etc/maknae/authz.yaml /etc/maknae/bindings.yaml`.
+2. Cut the whole `bindings:` block from `authz.yaml` and paste it, unchanged, under `schema_version: 1` in `bindings.yaml`. Save both.
+3. Restart: `sudo systemctl restart maknaed` (Linux) or `sudo launchctl kickstart -k system/io.maknae.maknaed` (macOS).
+
+The first start then records one `graph.transition` (`root-file`) and a `graph.checkpoint` (`transitioned`) at the next store revision. Every containment stays, and nothing is released. `policy_sha256` is unchanged, because the block's canonical form is the same in either file.
+
+**Do not delete the block without pasting it.** If you remove it from `authz.yaml` and `bindings.yaml` still has no `bindings:` key, the new daemon refuses to start (exit 3) rather than release every containment and make the enrolled principal admin:
+
+```text
+maknaed: refusing to start: the store holds explicit bindings from authz.yaml; paste the bindings: block into /etc/maknae/bindings.yaml
+```
+
+Paste the block and start again. Once the store's bindings come from `bindings.yaml`, an edit that leaves `bindings.yaml` without a `bindings:` key is allowed: the enrolled principal becomes admin, and each containment that edit ends is recorded as a `graph.identity` release. A `bindings.yaml` deleted over explicit bindings refuses instead ([configuration §2.3](configuration.md#23-bindingsyaml)).
+
+**Do not remove the block from `authz.yaml` and reload the old daemon before upgrading.** To the old daemon that means no bindings: the enrolled principal becomes admin and every containment is released.
+
+**A `bindings.yaml` you created before this release is kept.** dpkg asks whether to keep it, and keeping it is the default; RPM keeps it and writes the packaged file as `bindings.yaml.rpmnew`; macOS keeps it without asking. Check that it has `schema_version: 1` and is `root:_maknae 0640`.
+
+**What changes in behaviour.** Three cases that refused the whole policy now affect only one subject. Each is recorded as a `graph.identity` record, counted in `maknae status` and listed in `maknae subject-list`, and the rest of the policy loads:
+
+- a name with no account on the host holds no role (under `adversary`, nothing is contained for it);
+- a subject listed under a role and under `adversary` is contained;
+- one uid under two names in two roles holds no role, unless one of them is `adversary`, when it is contained.
+
+A failed account lookup, as distinct from one that finds no such user, still refuses the whole load. `adversary:` also accepts a numeric id, `- uid: <n>`, which contains that id whether or not an account has it. A reload now reads `authz.yaml` and `bindings.yaml` together, and an invalid `bindings.yaml` refuses the whole reload, including an `authz.yaml` edit made with it. On Linux `maknaed` now starts after `nss-user-lookup.target`.
+
+**Downgrading** to a release before this one: that release reads `bindings:` only from `authz.yaml`. Move the block back into `authz.yaml` before you downgrade, or the downgraded daemon starts with no bindings, makes the enrolled principal admin and releases every containment.
+
+---
+
 ## Policy edits apply at reload (#489)
 
-Edits to `/etc/maknae/authz.yaml` no longer take effect on the next request. `maknaed` now decides from a snapshot of the file compiled when it starts, and an edit applies when you reload or restart it:
+Edits to the policy no longer take effect on the next request. `maknaed` now decides from a snapshot of `/etc/maknae/authz.yaml` and `/etc/maknae/bindings.yaml` compiled when it starts, and an edit applies when you reload or restart it:
 
 ```bash
 sudo systemctl reload maknaed                          # Linux
 sudo launchctl kill SIGHUP system/io.maknae.maknaed    # macOS
 ```
 
-A reload re-reads `authz.yaml` only, and resolves every username in `bindings:`, so adding a user needs no restart. A reload of a file that does not validate is refused, and the running policy stands; the journal and the audit trail name the cause. An invalid `authz.yaml` at start still refuses to start, with exit 3. The [runbook](runbook.md#reload-the-policy) has the details.
+A reload re-reads `authz.yaml` and `bindings.yaml`, and resolves every username in `bindings.yaml`, so adding a user needs no restart. A reload of a file that does not validate is refused, and the running policy stands; the journal and the audit trail name the cause. An invalid policy file at start refuses to start, with exit 3. The [runbook](runbook.md#reload-the-policy) has the details.
 
-The first start after this upgrade migrates the kernel graph store, with no action from you. The trail shows a `graph.migrate` record, the store at its revision + 1, and a `graph.checkpoint`. If your `authz.yaml` has a `bindings:` block, a second transition follows: a `graph.transition` record that seeds those bindings into the store, at revision + 2, and another `graph.checkpoint` ([upgrades migrate the store](runbook.md#upgrades-migrate-the-store)).
-
-**One uid under two names in two roles now refuses.** If `bindings:` lists two usernames that resolve to the same uid under different roles (for example `root` under `admin` and `toor` under `adversary`), the policy is refused, at start and at reload, with `identities '<a>' and '<b>' resolve to the same uid <uid>; bind one of them`. Before this release one of the two roles was silently chosen. Keep one of the names. Two such names under the same role are still accepted.
+The first start after this upgrade migrates the kernel graph store, with no action from you. The trail shows a `graph.migrate` record, the store at its revision + 1, and a `graph.checkpoint`. If you have a `bindings:` block (in `bindings.yaml` since #496), a second transition follows: a `graph.transition` record that seeds those bindings into the store, at revision + 2, and another `graph.checkpoint` ([upgrades migrate the store](runbook.md#upgrades-migrate-the-store)).
 
 ---
 
@@ -56,7 +98,7 @@ Until you enroll, the daemon does not start, and each platform says so different
 | Key | `/etc/maknae/private/maknaed-graph-key.cred`, a systemd encrypted credential sealed to the TPM2 | System-keychain item `io.maknae.maknaed.graph`, readable only by `/usr/local/bin/maknaed` |
 | Store | `/var/lib/maknae/kernel.graph` | `/usr/local/var/db/maknae/state/kernel.graph` |
 
-The first start after enrolling seeds the store from the bindings in `/etc/maknae/authz.yaml` and records it on the audit trail. If the daemon refuses to start for any other graph-store reason, see [the kernel graph store refuses to start](runbook.md#the-kernel-graph-store-refuses-to-start).
+The first start after enrolling seeds the store from the bindings in `/etc/maknae/bindings.yaml` and records it on the audit trail. If the daemon refuses to start for any other graph-store reason, see [the kernel graph store refuses to start](runbook.md#the-kernel-graph-store-refuses-to-start).
 
 Uninstalling on macOS keeps the store and its keychain item, as it keeps `/etc/maknae` and the audit trail. A Debian purge removes `/var/lib/maknae`.
 

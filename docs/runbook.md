@@ -308,8 +308,9 @@ maknae://<deployment_id>/plane/cli uid=<your uid>
 The three `admin.*` subcommands are reachable from the same CLI —
 `maknae status` (daemon version, protocol version, listener, deciding backend),
 `maknae config-show` (the effective configuration, secrets rendered
-`<value set>`), and `maknae subject-list` (the role bindings the PDP is using
-right now, read live rather than from a boot snapshot). All three ship
+`<value set>`), and `maknae subject-list` (one row per subject `bindings.yaml`
+names: its uid, a label and its state, from the snapshot the PDP decides from
+now, as of the last applied reload). All three ship
 **ungranted**: nothing in the packaged `authz.yaml` names them, so each answers
 `not authorized` until a site adds a `roles:` grant. A refusal here is the
 default posture, not a fault to debug — check the grant before the daemon.
@@ -636,7 +637,7 @@ It refuses while any file carries the key, whether `maknae.yaml` or a `config.d/
 
 ### 3c. More than one user
 
-Enroll writes `~/.maknae` only for the account that ran it. To give another local account the agent, follow [first-provider step 4a](first-provider.md#4a-add-another-local-user): it adds the account to the `maknae` group, copies your CLI configuration to it, binds it in `authz.yaml` and creates its Vault user. The consequence for you: once `authz.yaml` has a `bindings:` block, only the names it lists have a role, so the enrolled administrator must be listed under `admin` too, and step 7's grant then belongs under each bound role; [reload](#reload-the-policy) `maknaed` after adding a name. A second user's file actions are confined to their own home, resolved per request.
+Enroll writes `~/.maknae` only for the account that ran it. To give another local account the agent, follow [first-provider step 4a](first-provider.md#4a-add-another-local-user): it adds the account to the `maknae` group, copies your CLI configuration to it, binds it in `bindings.yaml` and creates its Vault user. The consequence for you: once `bindings.yaml` has a `bindings:` block, only the names it lists have a role, so the enrolled administrator must be listed under `admin` too, and step 7's grant then belongs under each bound role; [reload](#reload-the-policy) `maknaed` after adding a name. A second user's file actions are confined to their own home, resolved per request.
 
 ### 4. Check the deputy's bounds
 
@@ -701,7 +702,7 @@ EOF
 sudo stat -c '%U:%G %a %C %n' /etc/maknae/authz.yaml   # root:_maknae 640
 ```
 
-**Grant `admin`, not `user`.** The shipped policy has no `bindings:` key, and without one the enrolled principal resolves to **`admin`** (`crates/maknae-authz-basic/src/binding.rs`). If you add `bindings:`, that default stops applying and the grants belong under whichever role you bind.
+**Grant `admin`, not `user`.** The shipped `bindings.yaml` has no `bindings:` key, and without one the enrolled principal resolves to **`admin`** (`crates/maknae-authz-basic/src/binding.rs`). If you add `bindings:`, that default stops applying and the grants belong under whichever role you bind ([Bind a user, contain a subject](#bind-a-user-contain-a-subject)).
 
 The shipped path rules already allow `Read(~/**)` and `Write(~/projects/**)`, so the write target must be under `~/projects/`.
 
@@ -907,7 +908,7 @@ With enroll's defaults and the subpath `openai`, the path is `maknae-kv/metadata
 
 ## Reload the policy
 
-`maknaed` decides every request from a snapshot of `/etc/maknae/authz.yaml` compiled when it starts. An edit to the file changes nothing until you reload the daemon or restart it:
+`maknaed` decides every request from a snapshot of `/etc/maknae/authz.yaml` and `/etc/maknae/bindings.yaml` compiled when it starts. An edit to either file changes nothing until you reload the daemon or restart it:
 
 ```bash
 sudo systemctl reload maknaed                          # Linux
@@ -916,8 +917,8 @@ sudo launchctl kill SIGHUP system/io.maknae.maknaed    # macOS
 
 Both send `SIGHUP`, as does `kill -HUP <pid>` for a daemon started by hand. The command returns before the reload finishes, so read the result in the trail.
 
-- **What a reload reads.** `authz.yaml` only. The principal, the classification system and ceiling, the transport, the audit configuration and the providers are read at start, and a change to any of them needs a restart.
-- **All or nothing.** A reload loads and validates the whole file and resolves every username in `bindings:` on the host, as a start does, so a new username needs only a reload. If anything fails (the file does not parse or validate, or a name has no account on the host), the reload is refused before it touches the store, and the running policy stands. A reload refused while writing the store also keeps the running policy; see the first case under "Records that look out of order" below. The journal (`journalctl -u maknaed`; on macOS `/usr/local/var/log/maknae/maknaed.err`) says `maknaed: reload refused: <cause>; the previous policy stands`. An invalid `authz.yaml` at start still refuses to start, with exit 3.
+- **What a reload reads.** `authz.yaml` and `bindings.yaml`, together, as one policy. The principal, the classification system and ceiling, the transport, the audit configuration and the providers are read at start, and a change to any of them needs a restart.
+- **All or nothing.** A reload loads and validates both files and resolves every username in `bindings.yaml` on the host, as a start does, so a new username needs only a reload. If either file fails (it does not parse or validate, `authz.yaml` still carries `bindings:`, or an account lookup fails rather than finding no such user), the reload is refused before it touches the store, and the running policy stands; an `authz.yaml` edit made at the same time as a refused `bindings.yaml` edit does not apply either. A name with no account on the host does not refuse the reload: that name alone is affected, and a `graph.identity` record reports it ([Bind a user, contain a subject](#bind-a-user-contain-a-subject); configuration §2.3 lists what refuses the whole file and what is decided per subject). A reload refused while writing the store also keeps the running policy; see the first case under "Records that look out of order" below. The journal (`journalctl -u maknaed`; on macOS `/usr/local/var/log/maknae/maknaed.err`) says `maknaed: reload refused: <cause>; the previous policy stands`. An invalid `authz.yaml` at start still refuses to start, with exit 3.
 - **One at a time.** Reloads run in turn. Signals that arrive while one runs produce one more reload, and a `SIGHUP` sent while the daemon is starting is applied once it serves. One that lands in the first milliseconds of the process, before its handler exists, ends it; systemd (`RestartForceExitStatus=SIGHUP`) and launchd (`KeepAlive`) start it again, after `RestartSec` (5 seconds) on Linux.
 - **Stopping.** A graceful stop abandons a reload that is still loading the file, recorded as `reload refused: shutdown`. It waits up to 5 seconds for a reload that already holds its turn (writing the store or its audit records), then stops without it, so the stop record and the token revoke never wait on a reload for longer than that.
 
@@ -926,11 +927,13 @@ Both send `SIGHUP`, as does `kill -HUP <pid>` for a daemon started by hand. The 
 | Record | Shape |
 |---|---|
 | Intent | `action:"graph.reload"`, `result:"permit"`, reason `intent recorded (SIGHUP)`, `graph.anchor:"reloading"` |
+| Release (only when a containment ends) | `action:"graph.identity"`, `result:"permit"`, posture `authorized`, `graph.anchor:"releasing"`, reason `uid <n> ('<name>') is no longer contained: <cause>`, one per containment the new bindings end, at the next store revision and written ahead of the store transition. The cause is `its name is no longer listed under adversary`, `its name now resolves to uid <m>`, `it is now listed under <role>`, `bindings.yaml now binds nobody` or `bindings.yaml has no bindings: key, so the enrolled principal is admin and nobody else holds a role`. A release counts only when a `graph.checkpoint` with reason `transitioned` follows at the same revision. |
 | Store transition (only when the bindings changed) | `action:"graph.transition"`, reason `intent recorded (root-file)`, at the next store revision; then `action:"graph.checkpoint"`, reason `transitioned`, with that revision and the new store's `ciphertext_sha256` |
 | Outcome, applied | `action:"graph.reload"`, `result:"permit"`, posture `authorized`, reason `reload applied: revision <n>; identity persisted` (or `identity unchanged`), followed by `; store not durable: <cause>` and `; checkpoint append failed: <cause>` when those happened, `graph.anchor:"reloaded"`, and `policy_sha256` of the policy now in force |
-| Outcome, refused | `action:"graph.reload"`, `result:"deny"`, posture `unavailable`, reason `reload refused: <cause>`, where the cause starts `policy load:`, `compile:` or `persist:`, or is `shutdown`; `graph.anchor:"reload-refused"`, and `policy_sha256` of the policy that stands |
+| Outcome, refused | `action:"graph.reload"`, `result:"deny"`, posture `unavailable`, reason `reload refused: <cause>`, where the cause starts `policy load:`, `compile:` or `persist:`, or is `shutdown`; `graph.anchor:"reload-refused"`, and `policy_sha256` of the policy that stands. A missing `bindings.yaml` over explicit bindings is `reload refused: policy load: bindings.yaml is missing but the store holds explicit bindings; …`, and a store whose bindings still come from `authz.yaml` is `reload refused: policy load: the store holds explicit bindings from authz.yaml; paste the bindings: block into /etc/maknae/bindings.yaml` ([upgrading](upgrading.md#bindings-move-to-bindingsyaml-496)) |
+| Identity problem (applied reloads only) | `action:"graph.identity"`, `result:"deny"`, posture `unauthorized`, or `unavailable` for a name under `adversary` that has no account; reason as in [Bind a user, contain a subject](#bind-a-user-contain-a-subject); after the applied outcome, one per problem the previous load did not have, so an unchanged reload writes none. A refused reload writes none |
 
-`policy_sha256` is the SHA-256 of one `<section>=<sha256 of the section's canonical JSON>` line per top-level section of `authz.yaml`, in section-name order. Two loads of the same policy carry the same value, and a reload that changed only `permissions:`, which leaves the store as it was, still carries a new one. It covers the text of `authz.yaml` only, not the uids its names resolve to: a reload after only a bound account's uid changed carries the same `policy_sha256` and a new `graph.revision`, which tells the two apart.
+`policy_sha256` is the SHA-256 of one `<section>=<sha256 of the section's canonical JSON>` line per top-level section of `authz.yaml`, plus a `bindings=` line for `bindings.yaml`'s `bindings:` section when it has one, in section-name order. Moving a `bindings:` block unchanged from `authz.yaml` to `bindings.yaml` keeps the value. Two loads of the same policy carry the same value, and a reload that changed only `permissions:`, which leaves the store as it was, still carries a new one. It covers the text of the two files only, not the uids their names resolve to: a reload after only a bound account's uid changed carries the same `policy_sha256` and a new `graph.revision`, which tells the two apart.
 
 ```bash
 sudo jq -c 'select(.action=="graph.reload") | {ts, session_id, result: .outcome.result, reason: .outcome.reason, policy: .policy_sha256}' /var/log/maknae/audit.jsonl | tail -n 2
@@ -938,15 +941,73 @@ sudo jq -c 'select(.action=="graph.reload") | {ts, session_id, result: .outcome.
 
 If the intent itself cannot be appended, nothing is loaded and no outcome is written; the journal says `reload refused: audit append failed: <cause>`.
 
-**`maknae status`** prints `kernel graph: revision <n> (<state>)`. The revision follows every reload that changed the bindings. The state is the result of this start's rollback check (`seeded`, `reseeded`, `verified`, `advanced` or `rollback-anchor-unavailable`) and stays the same until the next restart.
+**At boot** the trail carries the same `graph.identity` records: each release ahead of the store transition that makes it, as above, and each identity problem after the `authz` composition record. A problem record that cannot be appended at boot refuses the start, like every boot record.
 
-**Records that look out of order.** Five cases leave the trail looking unusual. In each, the store and the trail agree once the next start has checked them, or that start refuses.
+**`maknae status`** prints `kernel graph: revision <n> (<state>)`. The revision follows every reload that changed the bindings. The state is the result of this start's rollback check (`seeded`, `reseeded`, `verified`, `advanced` or `rollback-anchor-unavailable`) and stays the same until the next restart. When the last applied load had identity problems it also prints their counts by kind, such as `identity problems: 1 unresolved, 1 carried forward`; the kinds are `unresolved`, `unresolved adversary`, `contained`, `unbound conflict`, `carried forward` and `released`, and a release is counted until the next applied load. The problem list and the subject list are published just after the new snapshot is installed, so for an instant `maknae status` and `maknae subject-list` can still describe the previous load.
+
+**Records that look out of order.** Seven cases leave the trail looking unusual. In each, the store and the trail agree once the next start has checked them, or that start refuses.
 
 - **A `graph.transition` with no `graph.checkpoint` after it, then `reload refused: persist: …`.** The store write failed after its intent was recorded, and the running policy is the previous one. Nothing reached disk: sealing the store failed, or writing or renaming its temporary file failed (a full or failing disk). Any later reload that changes the bindings rewrites that revision and checkpoints it. Otherwise the next start loads the store and applies `authz.yaml` as a new transition if the file differs from it.
 - **`reload applied: …; store not durable: <cause>`.** The new store was renamed into place, then the directory `fsync` failed. The new policy is in force and the store holds it, with its checkpoint, but a crash before the file system flushes the directory can bring back the previous store, and the next start then refuses it as rolled back against that checkpoint ([The kernel graph store refuses to start](#the-kernel-graph-store-refuses-to-start)). Check the file system. At start, the same failure on a seed, migration or transition is not a refusal: `maknaed` starts and the journal says `kernel graph store revision <n> is in place but may not survive a crash: <cause>`.
 - **`reload applied: …; checkpoint append failed: <cause>`.** The new policy is in force and the store holds it, but the trail has no checkpoint for it; the next start reports `advanced`.
 - **Reload records after the stop record.** A reload in flight can append its records after the stop record, `reload refused: shutdown` included, in two cases: when `maknaed` exits because its credential supervisor stopped, and when a graceful stop gives up its 5-second wait for a reload that is writing the store. They carry their own session id and match the store.
 - **A reload intent with no outcome record.** The daemon exited while a reload was still writing; a `graph.transition` may follow the intent with no checkpoint. The next start checks the store as above and reports what it found.
+- **A `graph.identity` release (`graph.anchor:"releasing"`) with no `transitioned` checkpoint at its revision.** Release records are written ahead of the store write, at boot and at reload. A failure after they are appended (the transition intent, the store write, an abort) leaves them with nothing after them, and the containment they name was not released: the store and the running policy still hold it. Only a release followed by a `transitioned` checkpoint at the same revision happened.
+- **An applied reload with no `graph.identity` record for a problem it reports.** An identity problem record that cannot be appended after an applied reload goes to the journal only (`maknaed: AUDIT WRITE FAILED on an identity record (<reason>): <cause>`) and is not retried; the policy is applied, and `maknae status` and `maknae subject-list` show the problem.
+
+---
+
+## Bind a user, contain a subject
+
+Who holds which role on this host, and who is contained, is `/etc/maknae/bindings.yaml` (configuration §2.3). `authz.yaml` holds what each role may do. Edit `bindings.yaml` in place, then reload:
+
+```bash
+sudoedit /etc/maknae/bindings.yaml
+sudo systemctl reload maknaed                          # Linux
+sudo launchctl kill SIGHUP system/io.maknae.maknaed    # macOS
+```
+
+```yaml
+schema_version: 1
+bindings:
+  admin: ["alice"]
+  user: ["bob"]
+  adversary:
+    - "mallory"
+    - uid: 4242
+```
+
+- **Once a `bindings:` key exists, only the entries it lists hold a role.** List yourself under `admin`. With no `bindings:` key, as shipped, the enrolled principal holds `admin`. Do not delete the file to return to that default: over explicit bindings a missing file refuses the start and the reload. Remove the `bindings:` key instead.
+- **Contain a subject** by listing its username under `adversary`, or its id as `- uid: <n>`. A `uid:` entry contains the id whether or not an account has it, and does not depend on the user directory.
+- **Containment wins.** A uid listed under `adversary` and under another role is contained, and a `graph.identity` record says so: `uid 1003 (mallory) is under adversary, user; containment wins and it is contained`.
+- **One uid under two other roles holds no role**, whether by one name or two: `uid 1002 (gus, gustav) is under guest, user; it holds no role`. Keep one of them.
+- **A name with no account holds no role**, and the rest of the file loads: `'bob' under user has no account on this host; it holds no role`. Under `adversary`, nothing is contained for it: `'trudy' under adversary has no account on this host; nothing is contained for it (write "- uid: <n>" to contain an id that has no account)`.
+- **Release a containment** by deleting its entry and reloading. The reload records one release per containment it ends, ahead of the store write: `uid 1003 ('mallory') is no longer contained: its name is no longer listed under adversary`. A typo in a contained name (`Mallory` for `mallory`) also ends that containment, and the release record shows it.
+
+Read the result:
+
+```bash
+maknae subject-list
+maknae status
+sudo jq -c 'select(.action=="graph.identity") | {ts, event, result: .outcome.result, posture: .outcome.posture, reason: .outcome.reason}' /var/log/maknae/audit.jsonl | tail -n 20
+```
+
+`maknae subject-list` prints one row per subject the file names, with its uid, the role it is listed under, a label and its state. The labels come from the last applied load, never from a live account lookup:
+
+```text
+UID   ROLE       SUBJECT                 STATE
+0     admin      root (uid 0)            bound admin
+666   adversary  uid 666 (mallory)       contained (carried forward)
+1002             uid 1002 (gus, gustav)  unbound (conflict: guest, user)
+-     user       ghost (no account)      unresolved (no account)
+-     adversary  trudy (no account)      unresolved adversary (no account, not contained)
+```
+
+`maknae status` prints only the counts by kind, with no names or uids. Each is a separate grant: `admin.subject.list` discloses who holds what, and `admin.status` does not.
+
+A subject that holds no role is decided like any uid the file does not list, which denies in the default build. A contained subject is denied by a mandatory decision that nothing overrides.
+
+**When the user directory is down.** sssd or LDAP being unavailable usually reads as "no such user", the same as a deleted account, and on macOS a failed lookup cannot be told from a missing account at all. A contained name that stops resolving stays contained under its stored uid (carried forward) until you remove it from `adversary:`. The record says `'mallory' under adversary no longer resolves; uid 666 stays contained (carried forward)`, followed by `; this overrides <name> (<role>)` if another name in the file now has that uid. A name that never resolved is not contained, and a role binding to a directory name holds no role until the directory is back. After an outage during a reload, or at boot on macOS, where launchd cannot order `maknaed` after the directory, reload once the directory is back. A lookup that fails with an error other than "no such user" refuses the whole load (`looking up '<name>' failed (errno <n>); nothing was changed`). On macOS that includes an account whose passwd record is larger than 4 KiB, which refuses every load while the file names it (#501).
 
 ---
 
@@ -1151,9 +1212,14 @@ In the table, `<dir>` is the state directory. Each first line starts `maknaed: r
 | Audit append failure | `the boot graph record was not durably appended: <cause>`, or the same with `graph reseed` or `graph rejected-store` for `graph` | none | 1 | A boot record could not be written to the audit trail. Check the audit file and its file system. |
 | No key | `` kernel graph key: no kernel graph key (<detail>): run `sudo maknae enroll` `` | `` run `sudo maknae enroll` to create the kernel graph key `` | 5 | Run `sudo maknae enroll` ([upgrading](upgrading.md#kernel-graph-store-488)), then restart. On Linux systemd refuses the unit first, with `status=243/CREDENTIALS`. |
 | Forged vocabulary | `kernel graph store: graph store vocabulary refused: <cause>`, where `<cause>` is, for example, `compiled nodes differ from the digest they claim` or `the stored digest does not cover the stored compiled nodes` | as for rolled back | 5 | The store's role vocabulary does not match the digest it records, which an upgrade never produces. Investigate, then reseed. A store from an older binary is [migrated](#upgrades-migrate-the-store), not refused. |
-| Identity layer does not build | `kernel graph store: the kernel identity layer does not build: <cause>` | `the identity layer is built from the bindings section of authz.yaml in the configuration directory (/etc/maknae/authz.yaml by default); correct it, then restart; do not reseed` | 5 | Correct `bindings:` in `authz.yaml` and restart. |
+| Identity layer does not build | `kernel graph store: the kernel identity layer does not build: <cause>` | `the identity layer is built from bindings.yaml in the configuration directory (/etc/maknae/bindings.yaml by default); correct it, then restart; do not reseed` | 5 | Correct `bindings:` in `bindings.yaml` and restart. |
 | Malformed key | `kernel graph key: the kernel graph key is malformed (<why>)` | `` replace the key as the runbook's "Replace a malformed key" says: remove it, run `sudo maknae enroll`, then `sudo maknae reseed` `` | 5 | [Replace the key](#replace-a-malformed-key). |
 | Key unreadable | `kernel graph key: <cause>` | `` the kernel graph key could not be read; check the credential `sudo maknae enroll` created (enroll never replaces an existing key) `` | 5 | Check the credential's ownership and mode, or the keychain item. |
+
+Two refusals about the bindings come from the store check but are not graph-store refusals. Each exits 3, has no second line, and is recorded as a denied boot `authz` record with the same reason; nothing is written to the store:
+
+- `the store holds explicit bindings from authz.yaml; paste the bindings: block into /etc/maknae/bindings.yaml`: the store's bindings were seeded from `authz.yaml` by an earlier release, and `bindings.yaml` has no `bindings:` key. Move the block ([upgrading](upgrading.md#bindings-move-to-bindingsyaml-496)) and restart.
+- ``bindings.yaml is missing but the store holds explicit bindings; to return to principal-as-admin write bindings.yaml without a `bindings:` key``: put the file back, or write it with `schema_version: 1` and no `bindings:` key, and restart.
 
 ### Upgrades migrate the store
 
@@ -1161,13 +1227,13 @@ The store records a digest of the role vocabulary it was written with. A start t
 
 - a `graph.migrate` record, reason `intent recorded (vocabulary <old digest, or none> -> <new digest>; unbound: [<uids>])`, at the next revision. `unbound` lists the uids of bindings to a role the new binary no longer has; those bindings are dropped;
 - a `graph.checkpoint`, reason `migrated`, at that revision;
-- if `authz.yaml`'s bindings differ from the migrated store, a `graph.transition` (`root-file`) and a `graph.checkpoint` (`transitioned`) at the revision after.
+- if `bindings.yaml`'s bindings differ from the migrated store, a `graph.transition` (`root-file`) and a `graph.checkpoint` (`transitioned`) at the revision after.
 
 No action is needed. `maknae status` reports the new revision.
 
 ### Reseed
 
-A reseed replaces the store with a fresh one, seeded from the bindings in `/etc/maknae/authz.yaml`. Every containment comes from `authz.yaml` today, so the reseed restores it. Once live containment (#165) exists, a reseed will drop any containment not yet synced back to the policy files (#491).
+A reseed replaces the store with a fresh one, seeded from `/etc/maknae/bindings.yaml`. Every containment comes from `bindings.yaml` today, so the reseed restores it, except a carried-forward containment whose name no longer resolves: a reseed has no stored uid to carry, so list such an id as `- uid: <n>` before you reseed. A reseed is recorded by its own `graph.seed` records, not as releases. Once live containment (#165) exists, a reseed will drop any containment not yet synced back to the policy files (#491).
 
 ```bash
 sudo maknae reseed

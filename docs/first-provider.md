@@ -131,7 +131,7 @@ destinations:
 EOF
 ```
 
-The enrolled administrator resolves to the `admin` role when the policy has no `bindings:`. `provider:openai` is `provider:` followed by the `name` from step 3. An edit to the policy applies when `maknaed` reloads it (`sudo systemctl reload maknaed`; on macOS, `sudo launchctl kill SIGHUP system/io.maknae.maknaed`) or restarts; step 5's start reads it too. A reload that does not validate is refused and the running policy stands, with the cause in the journal and the audit trail ([runbook](runbook.md#reload-the-policy)).
+The enrolled administrator resolves to the `admin` role while `/etc/maknae/bindings.yaml` has no `bindings:` key, as shipped. `provider:openai` is `provider:` followed by the `name` from step 3. An edit to the policy (`authz.yaml` or `bindings.yaml`) applies when `maknaed` reloads it (`sudo systemctl reload maknaed`; on macOS, `sudo launchctl kill SIGHUP system/io.maknae.maknaed`) or restarts; step 5's start reads it too. A reload that does not validate is refused and the running policy stands, with the cause in the journal and the audit trail ([runbook](runbook.md#reload-the-policy)).
 
 ### 4a. Add another local user
 
@@ -176,7 +176,16 @@ Enroll writes `~/.maknae` only for the account that ran it. Each further local u
 
    Create each directory with `install -d` as shown. Do not use `install -D` to create the parents: it makes them `root`-owned and `0755`.
 
-3. **Bind the user to the `user` role.** Edit `/etc/maknae/authz.yaml` in place (`sudoedit /etc/maknae/authz.yaml`); do not append with `tee -a`, because a second `roles:` key refuses the whole document. Once a `bindings:` block exists, only the names it lists have a role, so list yourself under `admin` too. `user` is the only other role that may be granted `session.prompt`, and each role needs its own action grant and its own destination; without them the user's prompts are denied with `role user: no rule for session.prompt` in the trail, and the user sees only the generic refusal (`PROMPT_REFUSED`, below). The complete file, with the shipped `permissions:` unchanged and the administrator `alice` and the user `bob`:
+3. **Bind the user to the `user` role and grant it.** Two files change, and both are edited in place (`sudoedit /etc/maknae/bindings.yaml /etc/maknae/authz.yaml`); do not append with `tee -a`, because a second `roles:` key refuses the whole document. `bindings.yaml` says who holds which role: once its `bindings:` block exists, only the names it lists have a role, so list yourself under `admin` too. `authz.yaml` says what each role may do: `user` is the only other role that may be granted `session.prompt`, and each role needs its own action grant and its own destination; without them the user's prompts are denied with `role user: no rule for session.prompt` in the trail, and the user sees only the generic refusal (`PROMPT_REFUSED`, below). With the administrator `alice` and the user `bob`, the complete `bindings.yaml` is:
+
+   ```yaml
+   schema_version: 1
+   bindings:
+     admin: ["alice"]
+     user: ["bob"]
+   ```
+
+   and the complete `authz.yaml`, with the shipped `permissions:` unchanged, is:
 
    ```yaml
    schema_version: 1
@@ -203,9 +212,6 @@ Enroll writes `~/.maknae` only for the account that ran it. Each further local u
        - "Write(~/.kube/**)"
        - "Write(~/.docker/config.json)"
        - "Write(~/.maknae/**)"
-   bindings:
-     admin: ["alice"]
-     user: ["bob"]
    roles:
      admin:
        allow: ["session.prompt"]
@@ -218,7 +224,7 @@ Enroll writes `~/.maknae` only for the account that ran it. Each further local u
        allow: ["provider:openai"]
    ```
 
-   **Reload `maknaed` after saving** (`sudo systemctl reload maknaed`; on macOS, `sudo launchctl kill SIGHUP system/io.maknae.maknaed`). Until the reload the daemon keeps deciding from the policy it already had, so the new user has no role yet. The reload resolves every name in `bindings:` on the host; no restart is needed. A name with no account on the host refuses the reload, and the running policy stands: the journal says `maknaed: reload refused: policy load: authz bindings invalid: identity '<name>' has no resolvable uid on this host; the previous policy stands`, and the audit trail records the same cause on a `graph.reload` record ([runbook](runbook.md#reload-the-policy)).
+   **Reload `maknaed` after saving** (`sudo systemctl reload maknaed`; on macOS, `sudo launchctl kill SIGHUP system/io.maknae.maknaed`). Until the reload the daemon keeps deciding from the policy it already had, so the new user has no role yet. The reload reads both files and resolves every name in `bindings.yaml` on the host; no restart is needed. If either file does not validate, the reload is refused and the running policy stands, with the cause in the journal (`maknaed: reload refused: <cause>; the previous policy stands`) and on a `graph.reload` record. A name with no account on the host does not refuse the reload: that name holds no role, the rest loads, and the journal says `maknaed: identity: 'bob' under user has no account on this host; it holds no role`. The audit trail records the same on a `graph.identity` record, `maknae status` counts it, and `maknae subject-list` shows `bob (no account)` as `unresolved (no account)` ([runbook](runbook.md#bind-a-user-contain-a-subject)). Create the account, then reload again.
 
 4. **Add the user to `maknae_users`** and set their password (step 1).
 

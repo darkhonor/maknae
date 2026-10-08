@@ -576,7 +576,9 @@ mod tests {
     /// converts to the `Construct` arm and its rendering passes through.
     #[test]
     fn bindings_error_maps_through_construct_arm_verbatim() {
-        let e = AuthzBasicError::Bindings("identity 'ghost' has no resolvable uid".into());
+        let e = AuthzBasicError::Bindings(
+            "looking up 'ghost' failed (errno 5); nothing was changed".into(),
+        );
         let refusal: AuthzBootRefusal = e.into();
         match &refusal {
             AuthzBootRefusal::Construct(AuthzBasicError::Bindings(m)) => {

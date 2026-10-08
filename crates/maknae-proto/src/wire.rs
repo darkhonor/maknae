@@ -291,12 +291,12 @@ pub enum Verb {
     /// paths that ADR-0019 makes audit-only — the one term whose grant re-exports
     /// the trail over the wire. Recipient scoping is an open constraint.
     AdminAuditTail,
-    /// Reload the policy over the wire: re-read `authz.yaml`, re-resolve its
-    /// usernames and install the compiled snapshot, as the daemon's `SIGHUP`
-    /// reload does. Permitting it lets the holder make a policy edit or a
+    /// Reload the policy over the wire: re-read `authz.yaml` and `bindings.yaml`,
+    /// re-resolve the bindings and install the compiled snapshot, as the daemon's
+    /// `SIGHUP` reload does. Permitting it lets the holder make a policy edit or a
     /// newly-added host principal effective without root's signal — lifting the
-    /// root-paced boundary #85 §3 relies on. The file itself is root-owned, so
-    /// this term confers no ability to write it.
+    /// root-paced boundary #85 §3 relies on. Both files are root-owned, so this
+    /// term confers no ability to write them.
     AdminPolicyReload,
     /// Enumerate role bindings. Discloses who holds what.
     AdminSubjectList,

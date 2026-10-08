@@ -37,7 +37,7 @@ The admin role governs Maknae management, not filesystem privilege (operator rul
 
 ## Context
 
-`authz.yaml`'s grammar is a durable operator-facing contract — `maknae-config/src/authz.rs` treats it as one, and the `verb-vocabulary-drift` gate inventories every term it can name — yet no ADR governed it. Two surfaces already lived there: `permissions:`, which decides **path** access by capability pattern, and `bindings:` (#85), which maps identities to roles. Neither decides an **action**.
+`authz.yaml`'s grammar is a durable operator-facing contract — `maknae-config/src/authz.rs` treats it as one, and the `verb-vocabulary-drift` gate inventories every term it can name — yet no ADR governed it. Two surfaces already lived there: `permissions:`, which decides **path** access by capability pattern, and `bindings:` (#85), which maps identities to roles. Neither decides an **action**. *(Amended 2026-10-08, #496: `bindings:` moved to its own file, `/etc/maknae/bindings.yaml`; `authz.yaml` refuses the key. The grammar contract now spans both files.)*
 
 That gap had a concrete cost. `maknae-authz-basic`'s admin arm was keyed to the single built term `admin.whoami`, with the rest of `Class::Admin` answering `NotApplicable`. The comment on that arm named the problem precisely: a class-granular permit would grant `admin.contain`, `admin.credential.broker` and `admin.policy.reload` off an arm that keys nothing. So the vocabulary could grow, but nothing could be granted without granting everything — and the alternative, hard-wiring each term into the arm, makes every new term a code change and gives the operator no say at all.
 
@@ -54,7 +54,7 @@ roles:
     deny:  ["admin.config.show"]
 ```
 
-`permissions:` keeps deciding paths and `bindings:` keeps deciding identity→role. An operator asking "who may do what" now has one place to look per question, and the three questions stay separable. Merging actions into `permissions:` was rejected: its entries are capability-over-glob patterns (`Read(~/**)`), and an action term is neither a capability nor a glob. It would have meant either a `Pattern` variant that matches no path, or overloading the existing ones — and `Pattern` is the type the path matcher exhausts.
+`permissions:` keeps deciding paths and `bindings:` keeps deciding identity→role. An operator asking "who may do what" now has one place to look per question, and the three questions stay separable. *(Amended 2026-10-08, #496: `bindings:` moved to its own file, `/etc/maknae/bindings.yaml`; `authz.yaml` refuses the key. The grammar contract now spans both files.)* Merging actions into `permissions:` was rejected: its entries are capability-over-glob patterns (`Read(~/**)`), and an action term is neither a capability nor a glob. It would have meant either a `Pattern` variant that matches no path, or overloading the existing ones — and `Pattern` is the type the path matcher exhausts.
 
 **2. `Pattern` gains no variant.** Action terms are a separate closed vocabulary with a separate matcher (`ActionGrants::evaluate3_action`). Adding a non-path variant to the path pattern type would put a value into `decide_fs`'s reach that it cannot meaningfully answer.
 
@@ -149,7 +149,7 @@ This is the ruling Phase 2 was blocked on. It settles `admin.config.show`. *(Cor
 
 So `Authorizer` gains two defaulted, object-safe methods — `subjects()` and `backend_name()` — rather than the kernel reading policy itself, which would put policy parsing back inside the TCB the seam exists to keep it out of ([ADR-0004](ADR-0004-modular-authorization-architecture.md)). `subjects()` returns `Option`: `None` means *this backend cannot enumerate*, which the kernel reports as unavailable and **never as an empty list** — "no bindings exist" is a different and dangerous claim. `-basic` returns `None` on any failure to read or validate, for the same reason.
 
-It reports what the **policy file binds**. The default-role fallback — an enrolled uid resolving to admin when no `bindings:` key is present — is a decision rule, not a binding, and listing it as one would tell an operator a binding exists that they could then look for in the file and fail to find.
+It reports what the **policy file binds**. The default-role fallback — an enrolled uid resolving to admin when no `bindings:` key is present — is a decision rule, not a binding, and listing it as one would tell an operator a binding exists that they could then look for in the file and fail to find. *(Amended 2026-10-08, #496: the list now has one entry per subject `bindings.yaml` names, not one per role. Each entry carries the subject's uid, an escaped label and its state, taken from the last applied load and never from a live account lookup. Names that bind nothing are listed too: a name with no account, and a uid in two roles. The default-role fallback is still not listed, and a backend that cannot enumerate still answers `None`.)*
 
 ## Consequences
 

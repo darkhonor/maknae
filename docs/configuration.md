@@ -36,14 +36,15 @@ system `core.handling.policy` names from the ones compiled into the build (§4.1
 unknown name is `UnknownClassificationPolicy`), reads `core.handling.ceiling` through
 that system into the runtime **ingest posture**, and **refuses to start (exit 1)** on
 any config error. After the config is read the
-daemon loads `authz.yaml`, boots its kernel graph store from it, builds its
+daemon loads `authz.yaml` and `bindings.yaml` (§2.3), boots its kernel graph store
+from `bindings.yaml`'s identity layer, builds its
 authorization composition — the RBAC baseline, compiled from the store and
 `authz.yaml` into a snapshot, and the classification ceiling, both non-removable
 (ADR-0008 decision 1; §4.1) — records the composition, the selected system and the
 ceiling level in the audit trail, mints its plane credential, binds the client socket
 and **serves**: every request is decided through that composition until a shutdown
 signal, and the process exits with the outcome the accept loop stopped on. A `SIGHUP`
-recompiles the snapshot from `authz.yaml` alone; `maknae.yaml` and `config.d/` are
+re-reads `authz.yaml` and `bindings.yaml` together and recompiles the snapshot; `maknae.yaml` and `config.d/` are
 read at start only (runbook, "Reload the policy"). A boot that fails any of those
 steps exits non-zero, and a step after the credential mint retires the credential on
 the way out.
@@ -129,6 +130,7 @@ The host side, `<config-dir>` (`/etc/maknae` when packaged):
 <config-dir>/
 ├── maknae.yaml           # the base file (required)
 ├── authz.yaml            # the authorization policy — a SEPARATE document, not a section
+├── bindings.yaml         # who holds which role, and who is contained — a SEPARATE document (§2.3)
 ├── egress-bounds.yaml    # required WHEN any provider is authorized (§6.1.3); written by `maknae enroll`, 0644 root:root
 ├── egress/               # 0750 root:_maknae-egress, created by the package; files written by `maknae enroll`
 │   ├── vault-ca.crt      # 0640 root:_maknae-egress — the deputy's Vault TLS anchor
@@ -164,7 +166,7 @@ The user side, `~/.maknae` (or `$MAKNAE_CONFIG_DIR`):
 
 On macOS `maknae login` keeps the token in the default keychain instead (service `maknae-cli`, account `maknae-vault-token`), and neither token file exists (`crates/maknae-vault/src/token_record.rs`, `keychain_policy.rs`).
 
-**Sections versus standalone documents.** `maknae.yaml` and `config.d/*.yaml` contribute **registered sections** and are merged section-by-section by this loader. `authz.yaml` and `egress-bounds.yaml` are **standalone documents with their own readers**: each is opened by path (`<config-dir>/authz.yaml`, `<config-dir>/egress-bounds.yaml`), never merged, never shadowed, and putting either inside `config.d/` does not work. `providers.yaml` is likewise a standalone document, read by the CLI from its own directory.
+**Sections versus standalone documents.** `maknae.yaml` and `config.d/*.yaml` contribute **registered sections** and are merged section-by-section by this loader. `authz.yaml`, `bindings.yaml` and `egress-bounds.yaml` are **standalone documents with their own readers**: each is opened by path (`<config-dir>/authz.yaml`, `<config-dir>/bindings.yaml`, `<config-dir>/egress-bounds.yaml`), never merged, never shadowed, and putting any of them inside `config.d/` does not work. `providers.yaml` is likewise a standalone document, read by the CLI from its own directory.
 
 - **`maknae.yaml`** — the **base** file. Required: it is the deployment's anchor, the
   one file that must exist even if empty. A missing base is an error. An empty base is
@@ -221,6 +223,50 @@ Additional file rules:
 > **Honest limits.** POSIX ACLs are invisible to the mode bits, and the integrity of
 > the *ancestor* directories (e.g. `/etc`) is an assumed-trusted precondition. Keep the
 > config tree free of world ACLs and on a trusted path.
+
+### 2.3 `bindings.yaml`
+
+`<config-dir>/bindings.yaml` says who holds which role on this host and who is contained (#496). `authz.yaml` holds the grants, the denies and the roles, and refuses a `bindings:` key with ``authz.yaml no longer carries `bindings:`; move the block unchanged to bindings.yaml in the same directory`` (exit 3 at start, a refused reload; see [upgrading](upgrading.md#bindings-move-to-bindingsyaml-496)). The package installs `bindings.yaml` `root:_maknae 0640`, holding `schema_version: 1` and commented examples only.
+
+```yaml
+schema_version: 1
+bindings:
+  admin: ["alice"]
+  user: ["bob"]
+  guest: []
+  adversary:
+    - "mallory"     # an account on this host
+    - uid: 4242     # an id, contained even before an account has it
+```
+
+- **Keys.** The top level holds `schema_version`, which must be `1`, and `bindings`, and nothing else. `bindings:` maps the roles `admin`, `user`, `guest` and `adversary` to lists. An entry is a quoted username. Under `adversary` only, an entry may also be `uid: <n>`, with `n` from 0 to 4294967294, which contains that id whether or not an account has it.
+- **Absent versus empty.** With no `bindings:` key, as shipped, bindings are absent: the enrolled principal holds `admin` and nobody else holds a role. A missing `bindings.yaml` means the same, unless the store holds explicit bindings (below). Once a `bindings:` key exists, only the entries it lists hold a role, so list yourself under `admin`. `bindings: {}` binds nobody, the enrolled principal included.
+- **Ownership and mode.** As for `authz.yaml`: a regular file, not a symlink, owned by root, with `mode & 0o027 == 0` (no world access and no group write; `0640` as shipped). `<config-dir>` itself must be owned by root and not group- or other-writable, or both policy files are refused. Only a missing file inside such a directory reads as absent; a missing directory, a symlink, the wrong owner or mode, an empty file and a read error each refuse.
+- **Deleting the file over explicit bindings refuses.** When the store holds bindings from a `bindings:` key and `bindings.yaml` is then missing, the start refuses (exit 3) and a reload is refused, with ``bindings.yaml is missing but the store holds explicit bindings; to return to principal-as-admin write bindings.yaml without a `bindings:` key``. To return to principal-as-admin, keep the file and remove its `bindings:` key. Each containment that edit ends is recorded (`graph.identity`, `is no longer contained`).
+
+**What refuses the whole file.** A defect in the file itself refuses the whole load: the start refuses with exit 3, and a reload is refused with the running policy left as it was. The defects are: YAML that does not parse or has the wrong shape, a missing or unknown `schema_version`, an unknown top-level key, an unknown role key (`bindings names unknown role '<key>'`), the same entry twice in one list (`identity '<name>' listed twice in one role`), a `uid:` entry outside `adversary`, an unquoted number in a list, a name that is empty or contains `:`, `,` or a control character, and the ownership and mode failures above. An account lookup that fails, as distinct from one that finds no such user, also refuses the whole load: `looking up '<name>' failed (errno <n>); nothing was changed`. On macOS this includes an account whose passwd record is larger than 4 KiB, which refuses every load while it is named in the file (#501).
+
+**What is decided per subject.** The outcome of resolving a name affects only that subject, and the rest of the policy loads:
+
+| The file says | Result |
+|---|---|
+| A name under `admin`, `user` or `guest` with no account on this host | That name holds no role. |
+| A name under `adversary` with no account on this host | Nothing is contained for it. Use `- uid: <n>` to contain an id that has no account. |
+| One uid under `adversary` and under another role, by the same name, by two names, or by a `uid:` entry | The uid is contained. Containment wins. |
+| One uid under two of `admin`, `user` and `guest`, by the same name or by two names | That uid holds no role. |
+| A name under `adversary` that the store holds as contained and that no longer resolves | The subject stays contained under its stored uid (carried forward) until you remove the name from `adversary:`. If that uid now belongs to another name in the file, it stays contained, and the record says which binding it overrides. |
+
+Each of these is one `graph.identity` audit record and one journal line, such as `maknaed: identity: 'bob' under user has no account on this host; it holds no role`. `maknae status` prints the counts by kind, and `maknae subject-list` lists each subject with its uid, a label and its state ([runbook](runbook.md#bind-a-user-contain-a-subject)). Two names with one uid under the same role are one subject. A subject that holds no role is decided like any uid the file does not list: the RBAC baseline has no rule for it, which denies in the default build (an ABAC operand may still permit on its own predicate, ADR-0008). A contained subject is denied by a mandatory decision that nothing overrides.
+
+**When the user directory is unavailable.** When sssd or LDAP is down, the C library usually reports a directory account as "no such user", which Maknae cannot tell from a deleted account. On macOS a failed lookup cannot be told from a missing account at all. So, during an outage:
+
+- a name already contained stays contained (carried forward, as above, until you remove it from `adversary:`);
+- a name that never resolved is not contained;
+- a role binding to a directory name holds no role until the directory returns and you reload.
+
+To contain an id independently of the directory, list it as `- uid: <n>`. On Linux `maknaed.service` starts after `nss-user-lookup.target`, so a boot does not race the directory. launchd has no such ordering, so on macOS carry-forward and `uid:` entries are the only controls for an outage at boot. After any outage, reload once the directory is back.
+
+**When an edit applies.** At the next reload or restart (runbook, "Reload the policy"). A reload reads `authz.yaml` and `bindings.yaml` together as one policy: if either is refused, neither edit applies and the running policy stands.
 
 ---
 
@@ -465,7 +511,7 @@ A section the daemon does not register is `ConfigError::UnknownSection`, which *
 
 | Section | Owner | Status |
 |---|---|---|
-| `authz` | authorization policy *(the config-section registration; the `/etc/maknae/authz.yaml` policy FILE is separate and is enforced per request from a snapshot compiled at start and at `SIGHUP` reload — see the runbook)* | Forthcoming |
+| `authz` | authorization policy *(the config-section registration; the policy FILES `/etc/maknae/authz.yaml` and `/etc/maknae/bindings.yaml` (§2.3) are separate and are enforced per request from a snapshot compiled at start and at `SIGHUP` reload — see the runbook)* | Forthcoming |
 | `providers` | the model providers this host authorizes (ADR-0028 decision 1) — **see §6.1** | **Shipped** |
 | `egress` | where `maknaed` finds the egress deputy, and the outer bound on one provider call (#240) — **see §6.2** | **Shipped** |
 | `provider` | the single registered provider, replaced by `providers` (#153) | Withdrawn — **writing it refuses boot** |

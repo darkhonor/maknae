@@ -59,7 +59,7 @@ install -m 0755 "$HERE/postinst" "$PKG_ROOT/DEBIAN/postinst"
 install -m 0755 "$HERE/prerm"    "$PKG_ROOT/DEBIAN/prerm"
 install -m 0755 "$HERE/postrm"   "$PKG_ROOT/DEBIAN/postrm"
 
-# conffiles — the three shipped YAML defaults dpkg must preserve across upgrades.
+# conffiles — the shipped YAML defaults dpkg must preserve across upgrades.
 # (Their ownership is re-asserted root:_maknae 0640 in postinst on every configure;
 # dpkg records conffiles root:root and tracks CONTENT only.)
 cat > "$PKG_ROOT/DEBIAN/conffiles" <<'CONF'

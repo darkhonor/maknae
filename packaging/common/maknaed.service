@@ -6,7 +6,8 @@ Documentation=https://github.com/darkhonor/maknae
 # daemon's handler drain (TimeoutStopSec below): a deputy killed mid-provider-
 # call would cut the very exchange the drain waits for. Ordering only, no
 # dependency: a host with no provider registered need not have the deputy
-# enabled, and an inactive unit imposes no ordering.
+# enabled, and an inactive unit imposes no ordering. #496: nss-user-lookup.target
+# orders the start after the user directory that resolves bindings.yaml's names.
 After=network-online.target maknae-egress.socket maknae-egress.service nss-user-lookup.target
 Wants=network-online.target
 
