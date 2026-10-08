@@ -76,6 +76,10 @@ pub enum IdentityProblem {
         name: String,
         cause: String,
     },
+    /// Explicit bindings ended, so the enrolled principal `uid` holds admin.
+    PrincipalAdmin {
+        uid: u32,
+    },
 }
 
 /// A name as a problem's text prints it: `escape_default`, then `,` as `\,`. A name
@@ -111,6 +115,7 @@ impl IdentityProblem {
             Self::Unbound { .. } => "unbound_conflict",
             Self::CarriedForward { .. } => "carried_forward",
             Self::Released { .. } => "released",
+            Self::PrincipalAdmin { .. } => "principal_admin",
         }
     }
 
@@ -120,7 +125,8 @@ impl IdentityProblem {
             Self::Contained { uid, .. }
             | Self::Unbound { uid, .. }
             | Self::CarriedForward { uid, .. }
-            | Self::Released { uid, .. } => Some(*uid),
+            | Self::Released { uid, .. }
+            | Self::PrincipalAdmin { uid } => Some(*uid),
         }
     }
 
@@ -136,6 +142,7 @@ impl IdentityProblem {
                 .chain(overrides.iter().map(|(n, _)| n.clone()))
                 .collect(),
             Self::Released { name, .. } => vec![name.clone()],
+            Self::PrincipalAdmin { .. } => Vec::new(),
         }
     }
 
@@ -148,6 +155,7 @@ impl IdentityProblem {
                 .chain(overrides.iter().map(|(_, r)| *r))
                 .collect(),
             Self::Released { .. } => vec![ADVERSARY],
+            Self::PrincipalAdmin { .. } => vec![Role::Admin.key()],
         }
     }
 }
@@ -162,7 +170,7 @@ impl std::fmt::Display for IdentityProblem {
             ),
             Self::UnresolvedAdversary { name } => write!(
                 f,
-                "'{}' under adversary has no account on this host; nothing is contained for it (write \"- uid: <n>\" to contain an id that has no account)",
+                "'{}' under adversary has no account on this host, so the name contains nothing; a \"- uid: <n>\" entry contains an id whether or not it has an account",
                 shown(name)
             ),
             Self::Contained { uid, names, roles } => write!(
@@ -200,6 +208,10 @@ impl std::fmt::Display for IdentityProblem {
                 f,
                 "uid {uid} ('{}') is no longer contained: {cause}",
                 shown(name)
+            ),
+            Self::PrincipalAdmin { uid } => write!(
+                f,
+                "uid {uid}, the enrolled principal, now holds admin: bindings.yaml has no bindings: key"
             ),
         }
     }
@@ -373,16 +385,13 @@ impl GraphBindings {
                 }
                 _ => Vec::new(),
             };
-            let carried = problems.iter().find_map(|p| match p {
-                IdentityProblem::CarriedForward { uid: u, name, .. } if *u == uid => {
-                    Some(name.clone())
-                }
-                _ => None,
-            });
-            let entry = if let Some(n) = carried {
+            let carried = problems
+                .iter()
+                .find(|p| matches!(p, IdentityProblem::CarriedForward { uid: u, .. } if *u == uid));
+            let entry = if let Some(p) = carried {
                 ListedSubject {
                     uid: Some(uid),
-                    names: vec![n],
+                    names: p.names(),
                     state: SubjectState::CarriedForward,
                 }
             } else if self.graph.out_edges(s.id, CONTAINED).next().is_some() {
@@ -428,7 +437,8 @@ impl GraphBindings {
                 },
                 IdentityProblem::Contained { .. }
                 | IdentityProblem::CarriedForward { .. }
-                | IdentityProblem::Released { .. } => continue,
+                | IdentityProblem::Released { .. }
+                | IdentityProblem::PrincipalAdmin { .. } => continue,
             });
         }
         out.sort_by(|a, b| {
@@ -761,7 +771,7 @@ mod tests {
                 None,
                 vec!["ghost"],
                 vec!["adversary"],
-                "'ghost' under adversary has no account on this host; nothing is contained for it (write \"- uid: <n>\" to contain an id that has no account)",
+                "'ghost' under adversary has no account on this host, so the name contains nothing; a \"- uid: <n>\" entry contains an id whether or not it has an account",
             ),
             (
                 IdentityProblem::Contained {
@@ -822,6 +832,14 @@ mod tests {
                 vec!["mallory"],
                 vec!["adversary"],
                 "uid 666 ('mallory') is no longer contained: its name is no longer listed under adversary",
+            ),
+            (
+                IdentityProblem::PrincipalAdmin { uid: 501 },
+                "principal_admin",
+                Some(501),
+                vec![],
+                vec!["admin"],
+                "uid 501, the enrolled principal, now holds admin: bindings.yaml has no bindings: key",
             ),
         ];
         for (p, kind, uid, names, roles, text) in cases {

@@ -3125,6 +3125,17 @@ impl<E: AuditEmit + Send + Sync> BootAudit for GraphBootAudit<'_, E> {
             Ok(())
         }
     }
+
+    fn principal_admin(
+        &mut self,
+        revision: u64,
+        uid: u32,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send {
+        let reason = maknae_authz_basic::IdentityProblem::PrincipalAdmin { uid }.to_string();
+        let rec = self.intent(GRAPH_IDENTITY_ACTION, &reason, revision, "promoting");
+        eprintln!("maknaed: identity: {reason} (pending the store commit of revision {revision})");
+        self.append(rec)
+    }
 }
 
 impl<E> GraphBootAudit<'_, E> {
@@ -3152,6 +3163,8 @@ struct GraphInputs {
     identity: maknae_graph::identity::IdentityLayer,
     unresolved: Vec<String>,
     bindings_missing: bool,
+    bindings_lists_nobody: bool,
+    principal_uid: u32,
 }
 
 impl GraphInputs {
@@ -3165,6 +3178,8 @@ impl GraphInputs {
             identity,
             unresolved: source.unresolved_adversaries(),
             bindings_missing: source.bindings().is_missing(),
+            bindings_lists_nobody: source.bindings().lists_nobody(),
+            principal_uid: source.principal().uid,
         })
     }
 
@@ -3175,6 +3190,8 @@ impl GraphInputs {
             identity: &self.identity,
             unresolved_adversaries: &self.unresolved,
             bindings_missing: self.bindings_missing,
+            bindings_lists_nobody: self.bindings_lists_nobody,
+            principal_uid: self.principal_uid,
         }
     }
 }
@@ -3304,12 +3321,13 @@ fn unix_now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-/// Publishes the boot load's problems and releases; records its problems after the
-/// composition record. The store already recorded the releases.
+/// Publishes the boot load's problems, releases and principal promotion; records its
+/// problems after the composition record. The store already recorded the rest.
 async fn publish_boot_identity<E: AuditEmit + Send + Sync>(
     status: &crate::identity_report::IdentityStatus,
     snapshot: &maknae_authz_basic::snapshot::Snapshot,
     released: &[maknae_graph::identity::Released],
+    principal_admin: Option<u32>,
     sink: &Arc<E>,
     ctx: &BootCtx<'_>,
 ) -> Result<(), RunError> {
@@ -3317,9 +3335,7 @@ async fn publish_boot_identity<E: AuditEmit + Send + Sync>(
         status,
         crate::identity_report::Published::of(
             snapshot,
-            released
-                .iter()
-                .map(maknae_authz_basic::IdentityProblem::from),
+            crate::identity_report::transition_problems(released, principal_admin),
         ),
         snapshot.identity_problems(),
         |result, reason, posture| {
@@ -3339,6 +3355,7 @@ struct BootedGraph {
     status: KernelGraphStatus,
     graph: maknae_graph::graph::Graph,
     released: Vec<maknae_graph::identity::Released>,
+    principal_admin: Option<u32>,
 }
 
 /// Runs before the accept loop, so the blocking audit scan contends with no append.
@@ -3375,6 +3392,7 @@ async fn boot_kernel_graph(
         status: kernel_graph_status(&report),
         graph: report.graph,
         released: report.released,
+        principal_admin: report.principal_admin,
         dir,
         key,
     })
@@ -3446,6 +3464,7 @@ type ReloadCandidate = (
     Arc<maknae_graph::graph::Graph>,
     Arc<maknae_authz_basic::snapshot::Snapshot>,
     Arc<[maknae_graph::identity::Released]>,
+    Option<u32>,
 );
 
 impl<B, E> Reloader<B, E>
@@ -3528,7 +3547,10 @@ fn load_candidate<B: maknae_authz_basic::Baseline>(
         &source.unresolved_adversaries(),
         &persisted.layer,
         source.bindings().is_missing(),
+        source.bindings().lists_nobody(),
     )?;
+    let principal_admin = maknae_graph::identity::promotes_principal(&persisted.layer, &next)
+        .then_some(source.principal().uid);
     let (plan, graph) = crate::reload::plan_candidate(
         &persisted.layer,
         &next,
@@ -3553,7 +3575,10 @@ fn load_candidate<B: maknae_authz_basic::Baseline>(
         &digests,
     )
     .map_err(|e| compile_refused(e.to_string()))?;
-    Ok((plan, (graph, Arc::new(snapshot), released.into())))
+    Ok((
+        plan,
+        (graph, Arc::new(snapshot), released.into(), principal_admin),
+    ))
 }
 
 impl<B, E> crate::reload::Load for ReloadIo<'_, B, E>
@@ -3601,6 +3626,7 @@ where
     ) -> impl Future<Output = Result<crate::reload::Committed, crate::reload::Refusal>> + Send {
         let graph = Arc::clone(&candidate.0);
         let released = Arc::clone(&candidate.2);
+        let principal_admin = candidate.3;
         async move {
             let mut audit = GraphBootAudit {
                 sink: self.reloader.sink.as_ref(),
@@ -3612,6 +3638,7 @@ where
                 &self.reloader.key,
                 &graph,
                 &released,
+                principal_admin,
                 &mut audit,
                 maknae_state::store::INITIATOR_ROOT_FILE,
             )
@@ -3643,10 +3670,7 @@ where
     fn install(&self, candidate: ReloadCandidate) {
         let published = crate::identity_report::Published::of(
             &candidate.1,
-            candidate
-                .2
-                .iter()
-                .map(maknae_authz_basic::IdentityProblem::from),
+            crate::identity_report::transition_problems(&candidate.2, candidate.3),
         );
         self.reloader.authorizer.baseline().install(candidate.1);
         *self
@@ -4151,6 +4175,7 @@ async fn boot_after_sink(
         &booted.status.identity,
         &maknae_authz_basic::Baseline::snapshot(authorizer.baseline()),
         &booted.released,
+        booted.principal_admin,
         sink,
         &identity_ctx,
     )
@@ -5025,7 +5050,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
     fn config_without_principal_refuses_boot() {
         let _g = ENV_LOCK.lock().unwrap();
         std::env::remove_var("CREDENTIALS_DIRECTORY");
-        let d = Dir::new("no_principal_gate");
+        let d = Dir::new("no_enrolled_gate");
         write_common_fixture(&d, ""); // no `principal:` section at all
         put(
             &d.0,
@@ -5047,7 +5072,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
     fn a_shadowed_principal_carrying_home_refuses_boot() {
         let _g = ENV_LOCK.lock().unwrap();
         std::env::remove_var("CREDENTIALS_DIRECTORY");
-        let d = Dir::new("shadowed_principal_home");
+        let d = Dir::new("shadowed_home");
         write_common_fixture(
             &d,
             "principal:\n  name: op\n  uid: 1000\n  home: /home/op\n",
@@ -5082,7 +5107,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
     fn a_partial_principal_shadowed_by_a_complete_member_still_boots() {
         let _g = ENV_LOCK.lock().unwrap();
         std::env::remove_var("CREDENTIALS_DIRECTORY");
-        let d = Dir::new("shadowed_principal_partial");
+        let d = Dir::new("shadowed_partial");
         write_common_fixture(&d, "principal: {}\n");
         let cd = d.0.join("config.d");
         std::fs::create_dir(&cd).unwrap();
@@ -5987,18 +6012,22 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
                 ),
             ]
         );
-        assert_eq!(after[3].0, "graph.transition");
-        assert_eq!(after.len(), 5);
+        assert_eq!(after[3].3, PRINCIPAL_ADMIN_1000);
+        assert_eq!(after[4].0, "graph.transition");
+        assert_eq!(after.len(), 6);
         for (r, _) in &trail(&fx)[seeded + 1..seeded + 3] {
             let g = r.graph.as_ref().unwrap();
             assert_eq!((g.revision, g.anchor.as_str()), (2, "releasing"));
         }
+        let g = trail(&fx)[seeded + 3].0.graph.clone().unwrap();
+        assert_eq!((g.revision, g.anchor.as_str()), (2, "promoting"));
+        assert_eq!(booted.principal_admin, Some(1000));
         let stored = maknae_graph::identity::extract(&booted.graph).unwrap();
         assert!(stored.layer.subjects.is_empty());
     }
 
     #[test]
-    fn a_boot_that_releases_nothing_writes_no_identity_record() {
+    fn a_boot_that_releases_nothing_writes_no_release_record() {
         let fx = graph_fixture("graph_no_release");
         let inputs = bare_inputs(&fx.dir.0);
         boot_graph(&fx, key()).unwrap();
@@ -6014,10 +6043,49 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             }],
             ..explicit(&inputs, &paths.bindings, &[])
         };
-        let (_, booted) = boot_over_seed(&fx, &inputs, &bound);
-        assert!(booted.unwrap().released.is_empty());
-        assert!(!trail(&fx).iter().any(|(r, _)| r.action == "graph.identity"));
+        let (seeded, booted) = boot_over_seed(&fx, &inputs, &bound);
+        let booted = booted.unwrap();
+        assert!(booted.released.is_empty());
+        assert_eq!(booted.principal_admin, Some(1000));
+        let after: Vec<(String, String, String, String)> = trail(&fx)[seeded..]
+            .iter()
+            .map(|(r, _)| {
+                (
+                    r.action.clone(),
+                    r.outcome.result.clone(),
+                    r.outcome.posture.clone(),
+                    r.graph
+                        .as_ref()
+                        .map_or_else(String::new, |g| g.anchor.clone()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            after[1..3],
+            [
+                (
+                    "graph.identity".to_string(),
+                    "permit".to_string(),
+                    "authorized".to_string(),
+                    "promoting".to_string()
+                ),
+                (
+                    "graph.transition".to_string(),
+                    "permit".to_string(),
+                    "authorized".to_string(),
+                    "transitioning".to_string()
+                ),
+            ],
+            "explicit bindings ending is recorded ahead of the transition"
+        );
+        assert_eq!(
+            trail(&fx)[seeded + 1].0.outcome.reason,
+            PRINCIPAL_ADMIN_1000
+        );
     }
+
+    const PRINCIPAL_ADMIN_1000: &str =
+        "uid 1000, the enrolled principal, now holds admin: bindings.yaml has no bindings: key";
 
     #[test]
     fn an_upgrade_without_the_pasted_block_exits_3() {
@@ -7373,6 +7441,7 @@ mod reload_tests {
             &booted.status.identity,
             &baseline.snapshot(),
             &booted.released,
+            booted.principal_admin,
             &sink,
             &ctx,
         )
@@ -7660,6 +7729,69 @@ mod reload_tests {
             [
                 "graph.reload",
                 "graph.identity",
+                "graph.identity",
+                "graph.transition",
+                "graph.checkpoint",
+                "graph.reload"
+            ]
+        );
+        assert_eq!(
+            identity_records(&recs),
+            [
+                (
+                    "permit".to_string(),
+                    "authorized".to_string(),
+                    "uid 0 ('root') is no longer contained: bindings.yaml has no bindings: key, so the enrolled principal is admin and nobody else holds a role".to_string()
+                ),
+                (
+                    "permit".to_string(),
+                    "authorized".to_string(),
+                    principal_admin_reason()
+                )
+            ]
+        );
+        let g = recs[1].graph.as_ref().unwrap();
+        assert_eq!((g.revision, g.anchor.as_str()), (2, "releasing"));
+        let g = recs[2].graph.as_ref().unwrap();
+        assert_eq!((g.revision, g.anchor.as_str()), (2, "promoting"));
+        assert_eq!(recs[3].graph.as_ref().unwrap().revision, 2);
+        assert!(recs.iter().all(|r| r.session_id == recs[0].session_id));
+        assert_eq!(
+            fx.status.identity.counts(),
+            ["principal_admin=1", "released=1"]
+        );
+        bounded(fx.reloader.run()).await.unwrap();
+        assert_eq!(
+            identity_records(&fx.reload_records()).len(),
+            2,
+            "an unchanged reload releases nothing"
+        );
+        assert!(
+            fx.status.identity.counts().is_empty(),
+            "a release is reported by the load that made it"
+        );
+    }
+
+    fn principal_admin_reason() -> String {
+        format!(
+            "uid {}, the enrolled principal, now holds admin: bindings.yaml has no bindings: key",
+            principal().uid
+        )
+    }
+
+    #[tokio::test]
+    async fn a_keyless_reload_over_explicit_bindings_records_the_principal_admin() {
+        let fx = fixture("keyless_promote", AUTHZ, Some(ROOT_ADMIN)).await;
+        fx.write_bindings("schema_version: 1\n");
+        let applied = bounded(fx.reloader.run()).await.unwrap();
+        assert!(applied.persisted);
+        let recs = fx.reload_records();
+        let actions: Vec<&str> = recs.iter().map(|r| r.action.as_str()).collect();
+        assert_eq!(
+            actions,
+            [
+                "graph.reload",
+                "graph.identity",
                 "graph.transition",
                 "graph.checkpoint",
                 "graph.reload"
@@ -7670,23 +7802,21 @@ mod reload_tests {
             [(
                 "permit".to_string(),
                 "authorized".to_string(),
-                "uid 0 ('root') is no longer contained: bindings.yaml has no bindings: key, so the enrolled principal is admin and nobody else holds a role".to_string()
+                principal_admin_reason()
             )]
         );
         let g = recs[1].graph.as_ref().unwrap();
-        assert_eq!((g.revision, g.anchor.as_str()), (2, "releasing"));
-        assert_eq!(recs[2].graph.as_ref().unwrap().revision, 2);
-        assert!(recs.iter().all(|r| r.session_id == recs[0].session_id));
-        assert_eq!(fx.status.identity.counts(), ["released=1"]);
+        assert_eq!((g.revision, g.anchor.as_str()), (2, "promoting"));
+        assert_eq!(fx.status.identity.counts(), ["principal_admin=1"]);
+        bounded(fx.reloader.run()).await.unwrap();
+        assert_eq!(identity_records(&fx.reload_records()).len(), 1, "once");
+        assert!(fx.status.identity.counts().is_empty());
+        fx.write_bindings(ROOT_ADMIN);
         bounded(fx.reloader.run()).await.unwrap();
         assert_eq!(
             identity_records(&fx.reload_records()).len(),
             1,
-            "an unchanged reload releases nothing"
-        );
-        assert!(
-            fx.status.identity.counts().is_empty(),
-            "a release is reported by the load that made it"
+            "keyless to explicit promotes nobody"
         );
     }
 
@@ -7854,7 +7984,7 @@ mod reload_tests {
         .await
         .unwrap();
         let status = crate::identity_report::IdentityStatus::default();
-        publish_boot_identity(&status, &snapshot, &[], sink, &ctx)
+        publish_boot_identity(&status, &snapshot, &[], None, sink, &ctx)
             .await
             .unwrap();
         let recs: Vec<AuditRecord> = std::fs::read_to_string(fx.dir.join("audit.jsonl"))
@@ -7881,7 +8011,7 @@ mod reload_tests {
         assert_eq!(status.counts(), ["unresolved=1", "unresolved_adversary=1"]);
         sink.fail_identity
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        let refused = publish_boot_identity(&status, &snapshot, &[], sink, &ctx).await;
+        let refused = publish_boot_identity(&status, &snapshot, &[], None, sink, &ctx).await;
         assert!(
             matches!(&refused, Err(e) if e.to_string().contains("identity append refused")),
             "{refused:?}"
@@ -8032,7 +8162,7 @@ mod reload_tests {
 
     #[tokio::test]
     async fn an_authz_yaml_edit_that_adds_bindings_is_a_refused_reload() {
-        let fx = fixture("r30", AUTHZ, Some(ROOT_ADMIN)).await;
+        let fx = fixture("authz_adds_bindings", AUTHZ, Some(ROOT_ADMIN)).await;
         let store = fx.store_bytes();
         fx.write_policy("schema_version: 1\nbindings:\n  adversary: [\"root\"]\n");
         let got = bounded(fx.reloader.run()).await;

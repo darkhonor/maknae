@@ -51,13 +51,14 @@ pub fn next_layer(
     unresolved_adversaries: &[String],
     persisted: &IdentityLayer,
     file_missing: bool,
+    file_lists_nobody: bool,
 ) -> Result<(IdentityLayer, Vec<maknae_graph::identity::Released>), Refusal> {
     if let Some(m) = maknae_graph::identity::drops_explicit_bindings(persisted, file, file_missing)
     {
         return Err(Refusal::Load(m.into()));
     }
     let next = maknae_graph::identity::carry_forward(file, unresolved_adversaries, persisted).0;
-    let released = maknae_graph::identity::released(persisted, &next);
+    let released = maknae_graph::identity::released(persisted, &next, file_lists_nobody);
     Ok((next, released))
 }
 
@@ -306,7 +307,7 @@ mod tests {
             ..persisted.clone()
         };
         assert_eq!(
-            next_layer(&file, &[], &persisted, true),
+            next_layer(&file, &[], &persisted, true, false),
             Err(Refusal::Load(BINDINGS_MISSING.into()))
         );
         let moved = IdentityLayer {
@@ -318,16 +319,16 @@ mod tests {
             ..file.clone()
         };
         assert_eq!(
-            next_layer(&keyless, &[], &moved, false),
+            next_layer(&keyless, &[], &moved, false, false),
             Err(Refusal::Load(BINDINGS_NOT_MOVED.into()))
         );
         let (carried, released) =
-            next_layer(&file, &["mallory".into()], &persisted, false).unwrap();
+            next_layer(&file, &["mallory".into()], &persisted, false, false).unwrap();
         assert_eq!(
             (carried.subjects, released.len()),
             (persisted.subjects.clone(), 0)
         );
-        let (plain, released) = next_layer(&file, &[], &persisted, false).unwrap();
+        let (plain, released) = next_layer(&file, &[], &persisted, false, true).unwrap();
         assert_eq!(plain, file);
         assert_eq!(
             released,
@@ -337,9 +338,15 @@ mod tests {
                 cause: ReleaseCause::BindingsEmpty
             }]
         );
-        let (_, released) = next_layer(&keyless, &[], &persisted, false).unwrap();
+        let (_, released) = next_layer(&keyless, &[], &persisted, false, false).unwrap();
         assert_eq!(released[0].cause, ReleaseCause::BindingsAbsent);
-        let (same, released) = next_layer(&persisted, &[], &persisted, false).unwrap();
+        let (_, released) = next_layer(&file, &[], &persisted, false, false).unwrap();
+        assert_eq!(
+            released[0].cause,
+            ReleaseCause::NotListed,
+            "a file whose names did not resolve still lists them"
+        );
+        let (same, released) = next_layer(&persisted, &[], &persisted, false, false).unwrap();
         assert_eq!((same, released), (persisted.clone(), vec![]));
     }
 

@@ -393,7 +393,12 @@ pub struct Released {
 }
 
 /// Every subject contained in `persisted` and not contained in `next`, in uid order.
-pub fn released(persisted: &IdentityLayer, next: &IdentityLayer) -> Vec<Released> {
+/// `file_lists_nobody`: the file's `bindings:` key lists no entry at all.
+pub fn released(
+    persisted: &IdentityLayer,
+    next: &IdentityLayer,
+    file_lists_nobody: bool,
+) -> Vec<Released> {
     let contained = |uid: u32| {
         next.subjects
             .iter()
@@ -406,7 +411,7 @@ pub fn released(persisted: &IdentityLayer, next: &IdentityLayer) -> Vec<Released
         .map(|s| {
             let cause = if next.bindings_sha256.is_none() {
                 ReleaseCause::BindingsAbsent
-            } else if next.subjects.is_empty() {
+            } else if file_lists_nobody {
                 ReleaseCause::BindingsEmpty
             } else if let Some(moved) = next
                 .subjects
@@ -428,6 +433,12 @@ pub fn released(persisted: &IdentityLayer, next: &IdentityLayer) -> Vec<Released
         .collect();
     out.sort_by_key(|r| r.uid);
     out
+}
+
+/// Whether moving from `persisted` to `next` ends explicit bindings, which makes the
+/// enrolled principal admin.
+pub fn promotes_principal(persisted: &IdentityLayer, next: &IdentityLayer) -> bool {
+    persisted.bindings_sha256.is_some() && next.bindings_sha256.is_none()
 }
 
 /// The refusal, if `file` would drop explicit bindings that root has not written into
@@ -1047,7 +1058,7 @@ mod tests {
             carried,
             "idempotent"
         );
-        assert!(released(&persisted, &carried).is_empty());
+        assert!(released(&persisted, &carried, false).is_empty());
     }
 
     #[test]
@@ -1062,7 +1073,7 @@ mod tests {
             (file.clone(), vec![])
         );
         assert_eq!(
-            released(&persisted, &file),
+            released(&persisted, &file, false),
             [Released {
                 uid: 666,
                 name: "mallory".into(),
@@ -1078,17 +1089,18 @@ mod tests {
         let (next, carried) = carry_forward(&file, &["Mallory".into()], &persisted);
         assert!(carried.is_empty(), "a different name carries nothing");
         assert_eq!(
-            released(&persisted, &next),
+            released(&persisted, &next, false),
             [Released {
                 uid: 666,
                 name: "mallory".into(),
-                cause: ReleaseCause::BindingsEmpty
-            }]
+                cause: ReleaseCause::NotListed
+            }],
+            "the file lists a name, so it does not bind nobody"
         );
         let other = layer(Some("y"), &[(1, "a", "user")]);
         let (next, _) = carry_forward(&other, &["Mallory".into()], &persisted);
         assert_eq!(
-            released(&persisted, &next),
+            released(&persisted, &next, false),
             [Released {
                 uid: 666,
                 name: "mallory".into(),
@@ -1112,7 +1124,7 @@ mod tests {
                 layer(Some("y"), &[(666, "mallory", "user")]),
                 ReleaseCause::BoundAs("user".into()),
             ),
-            (layer(Some("y"), &[]), ReleaseCause::BindingsEmpty),
+            (layer(Some("y"), &[]), ReleaseCause::NotListed),
             (layer(None, &[]), ReleaseCause::BindingsAbsent),
             (
                 layer(None, &[(1, "a", "user")]),
@@ -1127,9 +1139,21 @@ mod tests {
                 ReleaseCause::NotListed,
             ),
         ];
+        assert_eq!(
+            released(&persisted, &layer(Some("y"), &[]), true),
+            [Released {
+                uid: 666,
+                name: "mallory".into(),
+                cause: ReleaseCause::BindingsEmpty
+            }]
+        );
+        assert_eq!(
+            released(&persisted, &layer(None, &[]), true)[0].cause,
+            ReleaseCause::BindingsAbsent
+        );
         for (next, cause) in cases {
             assert_eq!(
-                released(&persisted, &next),
+                released(&persisted, &next, false),
                 [Released {
                     uid: 666,
                     name: "mallory".into(),
@@ -1172,20 +1196,23 @@ mod tests {
             ],
         );
         let next = layer(Some("y"), &[(1000, "alex", "user")]);
-        let r = released(&persisted, &next);
+        let r = released(&persisted, &next, false);
         assert_eq!(
             r.iter()
                 .map(|r| (r.uid, r.name.as_str()))
                 .collect::<Vec<_>>(),
             [(666, "mallory"), (700, "trudy")]
         );
-        assert!(released(&persisted, &persisted).is_empty(), "unchanged");
+        assert!(
+            released(&persisted, &persisted, false).is_empty(),
+            "unchanged"
+        );
         let still = layer(
             Some("y"),
             &[(700, "trudy", "adversary"), (666, "renamed", "adversary")],
         );
         assert!(
-            released(&persisted, &still).is_empty(),
+            released(&persisted, &still, false).is_empty(),
             "a uid still contained is not released whatever its name"
         );
     }
@@ -1332,7 +1359,19 @@ mod tests {
         let (next, carried) = carry_forward(&file, &["mallory".into()], &persisted);
         assert_eq!(next, file, "the file already contains the uid");
         assert!(carried.is_empty());
-        assert!(released(&persisted, &next).is_empty());
+        assert!(released(&persisted, &next, false).is_empty());
+    }
+
+    #[test]
+    fn only_explicit_to_keyless_promotes_the_principal() {
+        let explicit = layer(Some("x"), &[(666, "mallory", "adversary")]);
+        let empty = layer(Some("y"), &[]);
+        let keyless = layer(None, &[]);
+        assert!(promotes_principal(&explicit, &keyless));
+        assert!(promotes_principal(&empty, &keyless));
+        assert!(!promotes_principal(&explicit, &empty));
+        assert!(!promotes_principal(&keyless, &keyless));
+        assert!(!promotes_principal(&keyless, &explicit));
     }
 
     #[test]

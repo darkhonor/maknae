@@ -345,19 +345,24 @@ pub struct BootReport {
     pub migration: Option<Migration>,
     pub identity_transition: bool,
     pub released: Vec<identity::Released>,
+    /// The enrolled principal's uid, when this boot's transition ended explicit bindings.
+    pub principal_admin: Option<u32>,
     /// The last store write's failed directory sync: it is in place, perhaps not durable.
     pub durability_error: Option<String>,
 }
 
 /// What the binary brings to boot: its persisted compiled set, that set's
 /// `vocabulary::digest`, the identity layer resolved from `bindings.yaml`, the
-/// `adversary:` names that did not resolve, and whether the file is missing.
+/// `adversary:` names that did not resolve, whether the file is missing, whether its
+/// `bindings:` key lists nobody, and the enrolled principal's uid.
 pub struct BootInputs<'a> {
     pub compiled: &'a CompiledSet,
     pub vocabulary_sha256: [u8; 32],
     pub identity: &'a IdentityLayer,
     pub unresolved_adversaries: &'a [String],
     pub bindings_missing: bool,
+    pub bindings_lists_nobody: bool,
+    pub principal_uid: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -398,6 +403,13 @@ pub trait BootAudit {
         &mut self,
         revision: u64,
         released: &[identity::Released],
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+    /// Written ahead of the persist of a transition that ends explicit bindings, which
+    /// makes the principal `uid` admin; an append failure refuses as `released`'s does.
+    fn principal_admin(
+        &mut self,
+        revision: u64,
+        uid: u32,
     ) -> impl Future<Output = Result<(), StoreError>> + Send;
 }
 
@@ -641,6 +653,7 @@ async fn load(
         migration: None,
         identity_transition: false,
         released: Vec::new(),
+        principal_admin: None,
         durability_error: None,
     };
     if let Some((m, next)) = migration {
@@ -658,9 +671,14 @@ async fn load(
         report.migration = Some(m);
     }
     if let Some(next) = transition {
-        let released = identity::released(&layer, &file);
+        let released = identity::released(&layer, &file, inputs.bindings_lists_nobody);
         if !released.is_empty() {
             audit.released(next.revision(), &released).await?;
+        }
+        let principal_admin =
+            identity::promotes_principal(&layer, &file).then_some(inputs.principal_uid);
+        if let Some(uid) = principal_admin {
+            audit.principal_admin(next.revision(), uid).await?;
         }
         audit
             .intent_transition(next.revision(), INITIATOR_ROOT_FILE)
@@ -675,18 +693,20 @@ async fn load(
         report.graph = next;
         report.identity_transition = true;
         report.released = released;
+        report.principal_admin = principal_admin;
     }
     Ok(report)
 }
 
-/// Persists a validated identity transition: the containments it ends, intent, publish,
-/// checkpoint. The publish's rename is the point of no return, so a failure after it is
+/// Persists a validated identity transition: the containments it ends and, when it ends
+/// explicit bindings, the principal it makes admin; intent, publish, checkpoint. The publish's rename is the point of no return, so a failure after it is
 /// reported, not raised. Callers serialize commits; the floor is re-checked at publish.
 pub async fn commit(
     dir: &StateDir,
     key: &WrappingKey,
     next: &Graph,
     released: &[identity::Released],
+    principal_admin: Option<u32>,
     audit: &mut impl BootAudit,
     initiator: &'static str,
 ) -> Result<Committed, StoreError> {
@@ -700,6 +720,9 @@ pub async fn commit(
     }
     if !released.is_empty() {
         audit.released(revision, released).await?;
+    }
+    if let Some(uid) = principal_admin {
+        audit.principal_admin(revision, uid).await?;
     }
     audit.intent_transition(revision, initiator).await?;
     let persisted = dir.persist(key, next)?;
@@ -766,6 +789,7 @@ async fn seed(
         migration: None,
         identity_transition: false,
         released: Vec::new(),
+        principal_admin: None,
         durability_error: persisted.durability_error,
     })
 }

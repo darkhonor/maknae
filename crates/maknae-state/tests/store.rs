@@ -33,6 +33,7 @@ enum Event {
     Migrate(u64, Option<[u8; 32]>, [u8; 32], Vec<u32>),
     Transition(u64, String),
     Released(u64, Vec<Released>),
+    PrincipalAdmin(u64, u32),
 }
 
 #[derive(Default)]
@@ -44,8 +45,10 @@ struct Recorder {
     fail_migrate: bool,
     fail_transition: bool,
     fail_released: bool,
+    fail_principal_admin: bool,
     store_at_released: Option<PathBuf>,
     store_bytes_at_released: Option<Vec<u8>>,
+    store_bytes_at_principal_admin: Option<Vec<u8>>,
 }
 
 fn refuse(fail: bool, what: &str) -> Result<(), StoreError> {
@@ -116,9 +119,22 @@ impl BootAudit for Recorder {
         }
         ready(refuse(self.fail_released, "released"))
     }
+
+    fn principal_admin(
+        &mut self,
+        revision: u64,
+        uid: u32,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send {
+        self.events.push(Event::PrincipalAdmin(revision, uid));
+        if let Some(p) = &self.store_at_released {
+            self.store_bytes_at_principal_admin = Some(fs::read(p).unwrap());
+        }
+        ready(refuse(self.fail_principal_admin, "principal admin"))
+    }
 }
 
 const SOURCE: &str = "/etc/maknae/bindings.yaml";
+const PRINCIPAL_UID: u32 = 501;
 const MOVED_FROM: &str = "/etc/maknae/authz.yaml";
 
 struct Inputs {
@@ -127,6 +143,7 @@ struct Inputs {
     layer: IdentityLayer,
     unresolved: Vec<String>,
     missing: bool,
+    lists_nobody: bool,
 }
 
 impl Inputs {
@@ -137,6 +154,8 @@ impl Inputs {
             identity: &self.layer,
             unresolved_adversaries: &self.unresolved,
             bindings_missing: self.missing,
+            bindings_lists_nobody: self.lists_nobody,
+            principal_uid: PRINCIPAL_UID,
         }
     }
 }
@@ -170,6 +189,7 @@ fn inputs_with(layer: IdentityLayer) -> Inputs {
         layer,
         unresolved: Vec::new(),
         missing: false,
+        lists_nobody: false,
     }
 }
 
@@ -1941,6 +1961,7 @@ async fn commit_persists_at_the_next_revision_and_checkpoints() {
         &k,
         &next_graph(2, &e),
         &[],
+        None,
         &mut audit,
         INITIATOR_ROOT_FILE,
     )
@@ -1973,6 +1994,7 @@ async fn commit_persists_at_the_next_revision_and_checkpoints() {
             &k,
             &next_graph(stale, &e),
             &[],
+            None,
             &mut audit,
             INITIATOR_ROOT_FILE,
         )
@@ -2006,6 +2028,7 @@ async fn commit_names_its_initiator() {
         &k,
         &next_graph(2, &edited()),
         &[],
+        None,
         &mut audit,
         INITIATOR_SEED,
     )
@@ -2030,6 +2053,7 @@ async fn commit_with_a_failing_checkpoint_still_publishes_and_reports_it() {
         &k,
         &next_graph(2, &e),
         &[],
+        None,
         &mut audit,
         INITIATOR_ROOT_FILE,
     )
@@ -2050,6 +2074,7 @@ async fn commit_with_a_failing_checkpoint_still_publishes_and_reports_it() {
         &k,
         &next_graph(3, &e),
         &[],
+        None,
         &mut audit,
         INITIATOR_ROOT_FILE,
     )
@@ -2080,6 +2105,7 @@ async fn a_commit_whose_directory_sync_fails_is_committed_and_advances_the_floor
         &k,
         &next_graph(2, &e),
         &[],
+        None,
         &mut audit,
         INITIATOR_ROOT_FILE,
     )
@@ -2109,6 +2135,7 @@ async fn a_commit_whose_directory_sync_fails_is_committed_and_advances_the_floor
         &k,
         &next_graph(2, &e),
         &[],
+        None,
         &mut Recorder::default(),
         INITIATOR_ROOT_FILE,
     )
@@ -2125,6 +2152,7 @@ async fn a_commit_whose_directory_sync_fails_is_committed_and_advances_the_floor
         &k,
         &next_graph(3, &e),
         &[],
+        None,
         &mut Recorder::default(),
         INITIATOR_ROOT_FILE,
     )
@@ -2208,6 +2236,7 @@ async fn commit_with_a_failing_intent_writes_nothing() {
         &k,
         &next_graph(2, &edited()),
         &[],
+        None,
         &mut audit,
         INITIATOR_ROOT_FILE,
     )
@@ -2242,6 +2271,7 @@ async fn a_plain_load_sets_the_store_revision_floor() {
         &k,
         &next_graph(7, &e),
         &[],
+        None,
         &mut Recorder::default(),
         INITIATOR_ROOT_FILE,
     )
@@ -2259,6 +2289,7 @@ async fn a_plain_load_sets_the_store_revision_floor() {
         &k,
         &next_graph(8, &e),
         &[],
+        None,
         &mut Recorder::default(),
         INITIATOR_ROOT_FILE,
     )
@@ -2281,6 +2312,7 @@ async fn restoring_the_pre_reload_store_after_a_reload_refuses_as_rolled_back() 
         &k,
         &next,
         &[],
+        None,
         &mut Recorder::default(),
         INITIATOR_ROOT_FILE,
     )
@@ -2406,6 +2438,14 @@ impl BootAudit for Racer<'_> {
         self.inner.released(revision, released)
     }
 
+    fn principal_admin(
+        &mut self,
+        revision: u64,
+        uid: u32,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send {
+        self.inner.principal_admin(revision, uid)
+    }
+
     fn intent_transition(
         &mut self,
         _revision: u64,
@@ -2418,6 +2458,7 @@ impl BootAudit for Racer<'_> {
                 key,
                 &rival,
                 &[],
+                None,
                 &mut Recorder::default(),
                 INITIATOR_ROOT_FILE,
             )
@@ -2445,6 +2486,7 @@ async fn a_commit_raced_past_its_check_refuses_at_publish() {
         &k,
         &next_graph(2, &edited()),
         &[],
+        None,
         &mut racer,
         INITIATOR_ROOT_FILE,
     )
@@ -2659,10 +2701,12 @@ async fn a_keyless_edit_releases_and_reports_each_containment() {
             cause: ReleaseCause::BindingsAbsent
         }]
     );
+    assert_eq!(r.principal_admin, Some(PRINCIPAL_UID));
     assert!(!is_contained(&graph_of(&fx.store(), &k), 666));
     let (again, events) = run_with(&fx.dir(), &k, checkpoint_of(&r), &keyless).await;
     let again = again.unwrap();
     assert!(again.released.is_empty(), "released once, never again");
+    assert_eq!(again.principal_admin, None);
     assert_eq!(events.len(), 1);
 }
 
@@ -2726,11 +2770,166 @@ async fn a_keyless_boot_writes_its_release_records_before_the_persist() {
         vec![
             Event::Checkpoint(1, first.digest, "verified".into()),
             Event::Released(2, mallory),
+            Event::PrincipalAdmin(2, PRINCIPAL_UID),
             Event::Transition(2, "root-file".into()),
             Event::Checkpoint(2, r.digest, "transitioned".into()),
         ]
     );
     assert_eq!(audit.store_bytes_at_released, Some(before.clone()));
+    assert_ne!(fx.store(), before);
+}
+
+const ALICE_AND_BOB: &[(u32, &str, &str)] = &[(1000, "alice", "admin"), (1001, "bob", "user")];
+
+#[tokio::test]
+async fn a_keyless_boot_over_explicit_bindings_records_the_principal_admin_before_the_persist() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let first = seeded_with(&fx, &k, bindings_layer(SOURCE, Some(BLOCK), ALICE_AND_BOB)).await;
+    let before = fx.store();
+    let keyless = inputs_with(bindings_layer(SOURCE, None, &[]));
+
+    let mut failing = Recorder {
+        fail_principal_admin: true,
+        ..Recorder::default()
+    };
+    let r = boot(
+        &fx.dir(),
+        &k,
+        checkpoint_of(&first),
+        &mut failing,
+        NOW,
+        &keyless.boot(),
+    )
+    .await;
+    assert_eq!(
+        r.unwrap_err(),
+        StoreError::Audit("principal admin refused".into())
+    );
+    assert_eq!(fx.store(), before);
+    assert_eq!(
+        failing.events,
+        vec![
+            Event::Checkpoint(1, first.digest, "verified".into()),
+            Event::PrincipalAdmin(2, PRINCIPAL_UID),
+        ]
+    );
+
+    let mut audit = Recorder {
+        store_at_released: Some(fx.file(STORE_FILE)),
+        ..Recorder::default()
+    };
+    let r = boot(
+        &fx.dir(),
+        &k,
+        checkpoint_of(&first),
+        &mut audit,
+        NOW,
+        &keyless.boot(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        audit.events,
+        vec![
+            Event::Checkpoint(1, first.digest, "verified".into()),
+            Event::PrincipalAdmin(2, PRINCIPAL_UID),
+            Event::Transition(2, "root-file".into()),
+            Event::Checkpoint(2, r.digest, "transitioned".into()),
+        ]
+    );
+    assert_eq!(audit.store_bytes_at_principal_admin, Some(before.clone()));
+    assert_ne!(fx.store(), before);
+    assert_eq!(
+        (r.principal_admin, r.released.len()),
+        (Some(PRINCIPAL_UID), 0)
+    );
+    let (again, events) = run_with(&fx.dir(), &k, checkpoint_of(&r), &keyless).await;
+    assert_eq!(again.unwrap().principal_admin, None, "recorded once");
+    assert_eq!(events.len(), 1);
+}
+
+#[tokio::test]
+async fn only_a_transition_that_ends_explicit_bindings_records_the_principal_admin() {
+    for (from, to) in [
+        (Some(BLOCK), Some(&br#"{"user":["bob"]}"#[..])),
+        (Some(BLOCK), Some(&b"{}"[..])),
+        (None, Some(BLOCK)),
+    ] {
+        let fx = Fixture::new();
+        let k = key(1);
+        let first = seeded_with(&fx, &k, bindings_layer(SOURCE, from, ALICE_AND_BOB)).await;
+        let next = inputs_with(bindings_layer(SOURCE, to, &[(1001, "bob", "user")]));
+        let (r, events) = run_with(&fx.dir(), &k, checkpoint_of(&first), &next).await;
+        let r = r.unwrap();
+        assert!(r.identity_transition);
+        assert_eq!(r.principal_admin, None);
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, Event::PrincipalAdmin(..))),
+            "{events:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_commit_writes_its_principal_admin_record_before_the_persist() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let dir = fx.dir();
+    run(&dir, &k, None).await.0.unwrap();
+    let before = fx.store();
+
+    let mut failing = Recorder {
+        fail_principal_admin: true,
+        ..Recorder::default()
+    };
+    let r = commit(
+        &dir,
+        &k,
+        &next_graph(2, &edited()),
+        &[],
+        Some(PRINCIPAL_UID),
+        &mut failing,
+        INITIATOR_ROOT_FILE,
+    )
+    .await;
+    assert_eq!(
+        r.unwrap_err(),
+        StoreError::Audit("principal admin refused".into())
+    );
+    assert_eq!(fx.store(), before);
+    assert_eq!(dir.store_revision(), 1);
+    assert_eq!(
+        failing.events,
+        vec![Event::PrincipalAdmin(2, PRINCIPAL_UID)]
+    );
+
+    let mut audit = Recorder {
+        store_at_released: Some(fx.file(STORE_FILE)),
+        ..Recorder::default()
+    };
+    let c = commit(
+        &dir,
+        &k,
+        &next_graph(2, &edited()),
+        &[],
+        Some(PRINCIPAL_UID),
+        &mut audit,
+        INITIATOR_ROOT_FILE,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        audit.events,
+        vec![
+            Event::PrincipalAdmin(2, PRINCIPAL_UID),
+            Event::Transition(2, "root-file".into()),
+            Event::Checkpoint(2, c.digest, "transitioned".into()),
+        ]
+    );
+    assert_eq!(audit.store_bytes_at_principal_admin, Some(before.clone()));
     assert_ne!(fx.store(), before);
 }
 
@@ -2756,6 +2955,7 @@ async fn a_commit_writes_its_release_records_before_the_persist() {
         &k,
         &next_graph(2, &edited()),
         &released,
+        None,
         &mut failing,
         INITIATOR_ROOT_FILE,
     )
@@ -2774,6 +2974,7 @@ async fn a_commit_writes_its_release_records_before_the_persist() {
         &k,
         &next_graph(2, &edited()),
         &released,
+        None,
         &mut audit,
         INITIATOR_ROOT_FILE,
     )

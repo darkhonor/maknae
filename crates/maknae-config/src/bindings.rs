@@ -51,6 +51,13 @@ impl Bindings {
     pub fn section_canonical(&self) -> Option<&str> {
         self.section.as_deref()
     }
+
+    /// The `bindings:` key is present and lists no entry under any role.
+    pub fn lists_nobody(&self) -> bool {
+        self.roles
+            .as_ref()
+            .is_some_and(|m| m.values().all(Vec::is_empty))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -370,6 +377,29 @@ mod tests {
             moved.section_canonical().unwrap().to_string(),
         );
         assert_eq!(after, before);
+    }
+
+    #[test]
+    fn only_a_present_key_with_no_entry_lists_nobody() {
+        for (body, nobody) in [
+            ("schema_version: 1\nbindings: {}\n", true),
+            (
+                "schema_version: 1\nbindings:\n  admin: []\n  user: []\n",
+                true,
+            ),
+            (
+                "schema_version: 1\nbindings:\n  admin: []\n  user: [\"bob\"]\n",
+                false,
+            ),
+            ("schema_version: 1\n", false),
+        ] {
+            assert_eq!(
+                parse_bindings(body).unwrap().lists_nobody(),
+                nobody,
+                "{body}"
+            );
+        }
+        assert!(!Bindings::missing().lists_nobody());
     }
 
     #[test]

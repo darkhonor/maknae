@@ -16,16 +16,33 @@ const ADVERSARY: &str = "adversary";
 /// `(result, reason, posture)` of one problem's audit record.
 pub fn record_fields(p: &IdentityProblem) -> (&'static str, String, &'static str) {
     match p {
-        IdentityProblem::Released { .. } => ("permit", p.to_string(), "authorized"),
+        IdentityProblem::Released { .. } | IdentityProblem::PrincipalAdmin { .. } => {
+            ("permit", p.to_string(), "authorized")
+        }
         IdentityProblem::UnresolvedAdversary { .. } => ("deny", p.to_string(), "unavailable"),
         _ => ("deny", p.to_string(), "unauthorized"),
     }
 }
 
-/// The store writes each release ahead of the persist that makes it, so no release
-/// is recorded here.
+/// The store writes each release and principal promotion ahead of the persist that
+/// makes it, so neither is recorded here.
 fn recordable(p: &&IdentityProblem) -> bool {
-    !matches!(p, IdentityProblem::Released { .. })
+    !matches!(
+        p,
+        IdentityProblem::Released { .. } | IdentityProblem::PrincipalAdmin { .. }
+    )
+}
+
+/// What a store transition ended: each release, then the principal it made admin.
+pub fn transition_problems(
+    released: &[maknae_graph::identity::Released],
+    principal_admin: Option<u32>,
+) -> Vec<IdentityProblem> {
+    released
+        .iter()
+        .map(IdentityProblem::from)
+        .chain(principal_admin.map(|uid| IdentityProblem::PrincipalAdmin { uid }))
+        .collect()
 }
 
 /// `<kind>=<count>` per kind present, in kind order.
@@ -348,6 +365,41 @@ mod tests {
             "an unchanged load records nothing"
         );
         assert!(recorded_after(&Err(crate::reload::Refusal::Load("x".into())), &[], &p).is_empty());
+    }
+
+    #[test]
+    fn a_principal_promotion_is_a_permit_counted_but_never_recorded_here() {
+        let released = maknae_graph::identity::Released {
+            uid: 666,
+            name: "mallory".into(),
+            cause: maknae_graph::identity::ReleaseCause::BindingsAbsent,
+        };
+        let p = transition_problems(std::slice::from_ref(&released), Some(501));
+        assert_eq!(
+            p,
+            [
+                IdentityProblem::from(&released),
+                IdentityProblem::PrincipalAdmin { uid: 501 }
+            ]
+        );
+        assert!(transition_problems(&[], None).is_empty());
+        assert_eq!(
+            record_fields(&p[1]),
+            (
+                "permit",
+                "uid 501, the enrolled principal, now holds admin: bindings.yaml has no bindings: key"
+                    .to_string(),
+                "authorized"
+            )
+        );
+        assert_eq!(counts(&p), ["principal_admin=1", "released=1"]);
+        let ok = Ok(crate::reload::Applied {
+            revision: 3,
+            persisted: true,
+            durability_error: None,
+            checkpoint_error: None,
+        });
+        assert!(recorded_after(&ok, &[], &p).is_empty());
     }
 
     #[test]
