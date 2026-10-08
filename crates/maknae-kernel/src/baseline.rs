@@ -37,7 +37,30 @@ pub enum PendingState {
     },
     Invalid {
         cause: String,
+        proposed: Option<BaselineSections>,
     },
+}
+
+/// A file that did not parse (`proposed: None`) or parsed and did not validate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidFile {
+    pub cause: String,
+    pub proposed: Option<BaselineSections>,
+}
+
+impl From<String> for InvalidFile {
+    fn from(cause: String) -> Self {
+        Self {
+            cause,
+            proposed: None,
+        }
+    }
+}
+
+impl From<&str> for InvalidFile {
+    fn from(cause: &str) -> Self {
+        cause.to_string().into()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,18 +113,24 @@ pub fn accepted_digest(s: &BaselineSections) -> [u8; 32] {
 }
 
 pub fn change_set_hash(accepted: &BaselineSections, state: &PendingState) -> String {
-    let change = match state {
-        PendingState::Valid { proposed, .. } => ("proposed".to_string(), sections_value(proposed)),
-        PendingState::Invalid { cause } => ("invalid".to_string(), Value::Str(cause.clone())),
-    };
-    let doc = Value::Map(vec![
+    let mut doc = vec![
         (
             "accepted".to_string(),
             Value::Str(hex(&accepted_digest(accepted))),
         ),
         ("source".to_string(), Value::Str(ROOT_FILE.to_string())),
-        change,
-    ]);
+    ];
+    let proposed = match state {
+        PendingState::Valid { proposed, .. } => Some(proposed),
+        PendingState::Invalid { cause, proposed } => {
+            doc.push(("invalid".to_string(), Value::Str(cause.clone())));
+            proposed.as_ref()
+        }
+    };
+    if let Some(p) = proposed {
+        doc.push(("proposed".to_string(), sections_value(p)));
+    }
+    let doc = Value::Map(doc);
     hex(&sha256(canonical_json(&doc).as_bytes()))
 }
 
@@ -174,7 +203,7 @@ fn remove_path(v: &mut Value, path: &[&str]) -> bool {
 
 pub fn pending(
     accepted: &BaselineSections,
-    file: &Result<BaselineSections, String>,
+    file: &Result<BaselineSections, InvalidFile>,
 ) -> Option<PendingSet> {
     let state = match file {
         Ok(f) if f == accepted => return None,
@@ -183,8 +212,9 @@ pub fn pending(
             apply: apply_of(accepted, f),
             sections: changed_sections(accepted, f),
         },
-        Err(cause) => PendingState::Invalid {
-            cause: cause.clone(),
+        Err(invalid) => PendingState::Invalid {
+            cause: invalid.cause.clone(),
+            proposed: invalid.proposed.clone(),
         },
     };
     Some(PendingSet {
@@ -197,23 +227,25 @@ pub fn pending(
 /// `Err(cause)` only when there is no accepted baseline and the file is invalid.
 pub fn at_boot(
     accepted: Option<&BaselineSections>,
-    file: Result<BaselineSections, String>,
+    file: Result<BaselineSections, InvalidFile>,
     mix_valid: impl Fn(&BaselineSections) -> Result<(), String>,
 ) -> Result<Start, String> {
     let Some(acc) = accepted else {
-        return file.map(|f| Start {
-            run: f,
-            events: vec![SEEDED_EVENT.into()],
-            pending: None,
-        });
+        return file
+            .map(|f| Start {
+                run: f,
+                events: vec![SEEDED_EVENT.into()],
+                pending: None,
+            })
+            .map_err(|invalid| invalid.cause);
     };
     let f = match file {
         Ok(f) => f,
-        Err(cause) => {
+        Err(invalid) => {
             return Ok(Start {
                 run: acc.clone(),
                 events: vec![],
-                pending: pending(acc, &Err(cause)),
+                pending: pending(acc, &Err(invalid)),
             })
         }
     };
@@ -229,14 +261,20 @@ pub fn at_boot(
         }
     }
     if let Err(cause) = mix_valid(&mix) {
+        let cause = if mix == *acc {
+            format!("the accepted baseline no longer validates: {cause}")
+        } else {
+            format!("the file's vault and audit sections cannot start: {cause}")
+        };
         return Ok(Start {
             run: acc.clone(),
             events: vec![],
             pending: pending(
                 acc,
-                &Err(format!(
-                    "the file's vault and audit sections cannot start: {cause}"
-                )),
+                &Err(InvalidFile {
+                    cause,
+                    proposed: Some(f),
+                }),
             ),
         });
     }
@@ -333,7 +371,7 @@ pub fn record_fields(p: &PendingSet) -> (&'static str, String, &'static str) {
             ),
             "unauthorized",
         ),
-        PendingState::Invalid { cause } => (
+        PendingState::Invalid { cause, .. } => (
             "deny",
             format!("baseline change refused: invalid: {cause}"),
             "unavailable",
@@ -349,7 +387,7 @@ pub fn journal_line(p: &PendingSet) -> String {
             p.source,
             class(p)
         ),
-        PendingState::Invalid { cause } => {
+        PendingState::Invalid { cause, .. } => {
             format!("baseline change refused: {} invalid: {cause}", p.source)
         }
     }
@@ -533,7 +571,9 @@ mod tests {
         assert_eq!(st.run, acc);
         assert!(st.events.is_empty());
         let p = st.pending.unwrap();
-        assert!(matches!(p.state, PendingState::Invalid { ref cause } if cause == "unknown key"));
+        assert!(
+            matches!(p.state, PendingState::Invalid { ref cause, .. } if cause == "unknown key")
+        );
         assert_eq!(p, pending(&acc, &Err("unknown key".into())).unwrap());
     }
 
@@ -548,7 +588,8 @@ mod tests {
         assert_eq!(
             p.state,
             PendingState::Invalid {
-                cause: "the file's vault and audit sections cannot start: not prepared".into()
+                cause: "the file's vault and audit sections cannot start: not prepared".into(),
+                proposed: Some(s(&[("core", CORE), ("audit", AUDIT_B)]))
             }
         );
         assert_eq!(
@@ -594,6 +635,88 @@ mod tests {
         let invalid = pending(&a, &Err("bad".into())).unwrap();
         let doc = format!(r#"{{"accepted":"{acc}","invalid":"bad","source":"root-file"}}"#);
         assert_eq!(invalid.hash, hex(&sha256(doc.as_bytes())));
+    }
+
+    #[test]
+    fn two_invalid_files_failing_for_the_same_cause_hash_apart() {
+        let a = s(&[("core", CORE)]);
+        let invalid = |f: BaselineSections| {
+            pending(
+                &a,
+                &Err(InvalidFile {
+                    cause: "same".into(),
+                    proposed: Some(f),
+                }),
+            )
+            .unwrap()
+            .hash
+        };
+        let one = invalid(s(&[("core", CORE_SECRET)]));
+        let two = invalid(s(&[("core", CORE_AUS)]));
+        assert_ne!(one, two);
+        assert_ne!(one, pending(&a, &Err("same".into())).unwrap().hash);
+        let acc = hex(&accepted_digest(&a));
+        let doc = format!(
+            r#"{{"accepted":"{acc}","invalid":"same","proposed":{{"core":"{}"}},"source":"root-file"}}"#,
+            CORE_SECRET.replace('"', "\\\"")
+        );
+        assert_eq!(one, hex(&sha256(doc.as_bytes())));
+    }
+
+    #[test]
+    fn a_file_that_did_not_parse_hashes_by_its_cause_alone() {
+        let a = s(&[("core", CORE)]);
+        let once = pending(&a, &Err("bad yaml".into())).unwrap();
+        assert_eq!(once, pending(&a, &Err("bad yaml".into())).unwrap());
+        assert_eq!(
+            once.state,
+            PendingState::Invalid {
+                cause: "bad yaml".into(),
+                proposed: None
+            }
+        );
+    }
+
+    #[test]
+    fn every_edit_of_a_file_whose_mix_fails_is_a_new_set() {
+        let acc = s(&[("core", CORE), ("audit", AUDIT_A)]);
+        let fail = |_: &BaselineSections| Err("not prepared".to_string());
+        let hash = |f: BaselineSections| {
+            at_boot(Some(&acc), Ok(f), fail)
+                .unwrap()
+                .pending
+                .unwrap()
+                .hash
+        };
+        assert_ne!(
+            hash(s(&[("core", CORE), ("audit", AUDIT_B)])),
+            hash(s(&[("core", CORE_SECRET), ("audit", AUDIT_B)]))
+        );
+    }
+
+    #[test]
+    fn a_failing_mix_equal_to_the_accepted_baseline_names_the_accepted_baseline() {
+        let acc = s(&[("core", CORE), ("audit", AUDIT_A)]);
+        let f = s(&[("core", CORE_SECRET), ("audit", AUDIT_A)]);
+        let st = at_boot(Some(&acc), Ok(f.clone()), |_| Err("gone".into())).unwrap();
+        assert_eq!(st.run, acc);
+        assert!(st.events.is_empty());
+        assert_eq!(
+            st.pending.unwrap().state,
+            PendingState::Invalid {
+                cause: "the accepted baseline no longer validates: gone".into(),
+                proposed: Some(f)
+            }
+        );
+    }
+
+    #[test]
+    fn a_valid_set_hash_is_pinned() {
+        let p = pending(&s(&[("core", CORE)]), &Ok(s(&[("core", CORE_SECRET)]))).unwrap();
+        assert_eq!(
+            p.hash,
+            "900f017f9f6980cec7e8331657da437eb8d72ded7fc6cd2fd14833db89b3c07f"
+        );
     }
 
     #[test]
