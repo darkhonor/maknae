@@ -3577,6 +3577,12 @@ struct Reloader<B: maknae_authz_basic::Baseline, E> {
     identity: crate::identity_report::IdentityStatus,
     stopping: tokio::sync::watch::Sender<bool>,
     append_bound: Duration,
+    /// The stored graph: replaced by every commit, the base every reload extracts and plans from.
+    persisted: std::sync::RwLock<Arc<maknae_graph::graph::Graph>>,
+    config_dir: PathBuf,
+    files: FileReader,
+    env: Arc<dyn crate::baseline_check::Env>,
+    baseline: crate::baseline::BaselineStatus,
     #[cfg(test)]
     load_gate: Option<Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>>,
 }
@@ -3586,6 +3592,7 @@ type ReloadCandidate = (
     Arc<maknae_authz_basic::snapshot::Snapshot>,
     Arc<[maknae_graph::identity::Released]>,
     Option<u32>,
+    Option<crate::baseline::PendingSet>,
 );
 
 impl<B, E> Reloader<B, E>
@@ -3613,6 +3620,7 @@ where
                 store_revision,
                 committed: std::sync::Mutex::new(None),
                 replaced: std::sync::Mutex::default(),
+                newly_pending: std::sync::Mutex::default(),
             };
             let mut stopping = self.stopping.subscribe();
             let stopped = async move {
@@ -3645,24 +3653,74 @@ struct ReloadIo<'a, B: maknae_authz_basic::Baseline, E> {
     store_revision: u64,
     committed: std::sync::Mutex<Option<[u8; 32]>>,
     replaced: std::sync::Mutex<Arc<[maknae_authz_basic::IdentityProblem]>>,
+    /// The pending set an install published with a new hash, to be recorded.
+    newly_pending: std::sync::Mutex<Option<crate::baseline::PendingSet>>,
 }
 
-/// Blocking: the policy load resolves usernames.
-fn load_candidate<B: maknae_authz_basic::Baseline>(
-    baseline: &B,
-    vocabulary: &crate::vocabulary::Vocabulary,
-    label: &str,
+/// The files read and validated as a start reads them: the sections, or why they
+/// cannot start and, when they parsed, the sections refused.
+fn read_file_baseline(
+    config_dir: &Path,
+    files: FileReader,
+    env: &dyn crate::baseline_check::Env,
+) -> Result<
+    (
+        crate::baseline_check::Validated,
+        maknae_config::BaselineSections,
+    ),
+    (Invalid, Option<maknae_config::BaselineSections>),
+> {
+    let doc = files(config_dir).map_err(|e| (Invalid::Document(e.to_string()), None))?;
+    let sections = maknae_config::document_sections(&doc);
+    match crate::baseline_check::validate_file(doc, Mode::Boot, config_dir, env) {
+        Ok(v) => Ok((v, sections)),
+        Err(e) => Err((e, Some(sections))),
+    }
+}
+
+/// Blocking: reads `maknae.yaml`/`config.d` and validates them as boot does.
+fn baseline_file(
+    config_dir: &Path,
+    files: FileReader,
+    env: &dyn crate::baseline_check::Env,
+    accepted_trail: Option<&Path>,
+) -> Result<maknae_config::BaselineSections, crate::baseline::InvalidFile> {
+    let (v, sections) =
+        read_file_baseline(config_dir, files, env).map_err(|(e, s)| e.into_file(s))?;
+    match crate::baseline_check::check_move(accepted_trail, &v.audit.jsonl_path, env) {
+        Ok(()) => Ok(sections),
+        Err(cause) => Err(crate::baseline::InvalidFile {
+            cause,
+            proposed: Some(sections),
+        }),
+    }
+}
+
+/// Blocking: the policy load resolves usernames, and the baseline files are read
+/// only to compute the pending set.
+fn load_candidate<B: maknae_authz_basic::Baseline, E>(
+    reloader: &Reloader<B, E>,
+    persisted_graph: &Arc<maknae_graph::graph::Graph>,
     store_revision: u64,
 ) -> Result<(crate::reload::Plan, ReloadCandidate), crate::reload::Refusal> {
     use crate::reload::Refusal;
+    let (baseline, vocabulary, label) = (
+        reloader.authorizer.baseline(),
+        &reloader.vocabulary,
+        reloader.label.as_str(),
+    );
     let compile_refused = |m: String| Refusal::Compile(m);
+    let persisted = maknae_graph::identity::extract(persisted_graph)
+        .map_err(|e| compile_refused(e.to_string()))?;
+    let Some(stored_baseline) = persisted.baseline.as_ref() else {
+        return Err(compile_refused(
+            "the running graph carries no baseline".into(),
+        ));
+    };
     let source = baseline
         .load_source()
         .map_err(|e| Refusal::Load(e.to_string()))?;
     let digests = source.section_digests(baseline.digest());
-    let current = baseline.snapshot();
-    let persisted = maknae_graph::identity::extract(current.persisted())
-        .map_err(|e| compile_refused(e.to_string()))?;
     let (next, released) = crate::reload::next_layer(
         &source.identity_layer(label, digests.get("bindings").copied()),
         &source.unresolved_adversaries(),
@@ -3676,11 +3734,11 @@ fn load_candidate<B: maknae_authz_basic::Baseline>(
         &persisted.layer,
         &next,
         store_revision,
-        current.persisted(),
+        persisted_graph,
         |revision| {
             maknae_graph::identity::build(
                 &next,
-                persisted.baseline.as_ref(),
+                Some(stored_baseline),
                 &vocabulary.persisted,
                 vocabulary.digest,
                 revision,
@@ -3697,9 +3755,24 @@ fn load_candidate<B: maknae_authz_basic::Baseline>(
         &digests,
     )
     .map_err(|e| compile_refused(e.to_string()))?;
+    let accepted = reloader.baseline.current();
+    let trail = accepted_trail(&accepted.accepted, &reloader.config_dir);
+    let file = baseline_file(
+        &reloader.config_dir,
+        reloader.files,
+        reloader.env.as_ref(),
+        trail.as_deref(),
+    );
+    let pending = crate::baseline::pending(&accepted.accepted, &file);
     Ok((
         plan,
-        (graph, Arc::new(snapshot), released.into(), principal_admin),
+        (
+            graph,
+            Arc::new(snapshot),
+            released.into(),
+            principal_admin,
+            pending,
+        ),
     ))
 }
 
@@ -3717,17 +3790,18 @@ where
            + Send {
         let reloader = Arc::clone(self.reloader);
         async move {
+            let persisted = Arc::clone(
+                &reloader
+                    .persisted
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            );
             tokio::task::spawn_blocking(move || {
                 #[cfg(test)]
                 if let Some(gate) = &reloader.load_gate {
                     let _ = gate.lock().unwrap().recv();
                 }
-                load_candidate(
-                    reloader.authorizer.baseline(),
-                    &reloader.vocabulary,
-                    &reloader.label,
-                    store_revision,
-                )
+                load_candidate(&reloader, &persisted, store_revision)
             })
             .await
             .map_err(|e| crate::reload::Refusal::Load(format!("load task: {e}")))?
@@ -3766,7 +3840,15 @@ where
                 maknae_state::store::INITIATOR_ROOT_FILE,
             )
             .await
-            .map_err(|e| crate::reload::Refusal::Persist(e.to_string()))?;
+            .map_err(|e| match e {
+                StoreError::BaselineUnrecorded => crate::reload::Refusal::BaselineChanged,
+                e => crate::reload::Refusal::Persist(e.to_string()),
+            })?;
+            *self
+                .reloader
+                .persisted
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::clone(&graph);
             *self
                 .committed
                 .lock()
@@ -3796,6 +3878,21 @@ where
             crate::identity_report::transition_problems(&candidate.2, candidate.3),
         );
         self.reloader.authorizer.baseline().install(candidate.1);
+        let accepted = self.reloader.baseline.current().accepted.clone();
+        let pending = candidate.4;
+        if self
+            .reloader
+            .baseline
+            .publish(crate::baseline::BaselineState {
+                accepted,
+                pending: pending.clone(),
+            })
+        {
+            *self
+                .newly_pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = pending;
+        }
         *self
             .replaced
             .lock()
@@ -3878,17 +3975,37 @@ where
                     (reason, rec)
                 })
                 .collect();
+        let pending = self
+            .newly_pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .map(|p| {
+                let (result, reason, posture) = crate::baseline::record_fields(&p);
+                let rec = self
+                    .ctx
+                    .record(GRAPH_BASELINE_ACTION, result, &reason, posture, None);
+                (crate::baseline::journal_line(&p), rec)
+            });
         let sink = Arc::clone(&self.reloader.sink);
         let bound = self.reloader.append_bound;
         async move {
             if let Err(e) = sink.emit_within(&rec, bound).await {
                 eprintln!("maknaed: AUDIT WRITE FAILED on the reload outcome ({reason}): {e}");
             }
+            let mut appending = true;
             for (reason, rec) in problems {
                 eprintln!("maknaed: identity: {reason}");
                 if let Err(e) = sink.emit_within(&rec, bound).await {
                     eprintln!("maknaed: AUDIT WRITE FAILED on an identity record ({reason}): {e}");
+                    appending = false;
                     break;
+                }
+            }
+            if let Some((line, rec)) = pending.filter(|_| appending) {
+                eprintln!("maknaed: baseline: {line}");
+                if let Err(e) = sink.emit_within(&rec, bound).await {
+                    eprintln!("maknaed: AUDIT WRITE FAILED on the baseline pending record: {e}");
                 }
             }
         }
@@ -4065,14 +4182,9 @@ async fn run_inner(
 
     let env = &*seams.env;
     let euid = nix::unistd::geteuid().as_raw();
-    let (candidate, file_sections) = match (seams.files)(config_dir) {
-        Ok(doc) => {
-            let sections = maknae_config::document_sections(&doc);
-            let checked = crate::baseline_check::validate_file(doc, Mode::Boot, config_dir, env)
-                .map(|_| sections.clone());
-            (checked, Some(sections))
-        }
-        Err(e) => (Err(Invalid::Document(e.to_string())), None),
+    let (candidate, file_sections) = match read_file_baseline(config_dir, seams.files, env) {
+        Ok((_, sections)) => (Ok(sections.clone()), Some(sections)),
+        Err((refused, sections)) => (Err(refused), sections),
     };
 
     // The accepted baseline is read before anything is appended; the store is booted later.
@@ -4572,9 +4684,10 @@ async fn boot_after_sink(
         accepted: run,
         pending: pending.clone(),
     });
+    let persisted_graph = Arc::new(booted.graph);
     let authorizer = match authz_boot_gate(
         source,
-        Arc::new(booted.graph),
+        Arc::clone(&persisted_graph),
         &graph_inputs.vocabulary.full,
     ) {
         Ok(authorizer) => authorizer,
@@ -4655,6 +4768,7 @@ async fn boot_after_sink(
     let authorizer = Arc::new(authorizer);
     let identity = booted.status.identity.clone();
     let graph_revision = Arc::clone(&booted.status.revision);
+    let baseline_status = booted.status.baseline.clone();
     let kernel_graph = Arc::new(Some(booted.status));
 
     // Plane credential: resolve + read this plane's SecretID source (spec §5.1),
@@ -4797,6 +4911,11 @@ async fn boot_after_sink(
         identity,
         stopping: tokio::sync::watch::channel(false).0,
         append_bound: AUDIT_APPEND_TIMEOUT,
+        persisted: std::sync::RwLock::new(persisted_graph),
+        config_dir: config_dir.to_path_buf(),
+        files: seams.files,
+        env: Arc::clone(&seams.env),
+        baseline: baseline_status,
         #[cfg(test)]
         load_gate: None,
     };
@@ -7459,7 +7578,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
     }
 
     #[derive(Clone)]
-    struct TestEnv {
+    pub(super) struct TestEnv {
         prepared: Result<(), String>,
         bounds: Option<maknae_config::EgressBounds>,
     }
@@ -9139,55 +9258,71 @@ mod graph_audit_bound_tests {
 
 #[cfg(unix)]
 #[cfg(test)]
-mod reload_tests {
-    use super::boot_gate_tests::{boot_graph_at, test_baseline};
+mod reload_fixture {
+    use super::boot_gate_tests::{boot_graph_at, TestEnv};
     use super::*;
     use maknae_authz_basic::{Baseline, HermeticAuthorizer};
     use std::os::unix::fs::PermissionsExt;
 
-    const AUTHZ: &str = "schema_version: 1\n";
-    const ROOT_ADMIN: &str = "schema_version: 1\nbindings:\n  admin: [\"root\"]\n";
-    const ROOT_ADVERSARY: &str = "schema_version: 1\nbindings:\n  adversary: [\"root\"]\n";
+    pub(super) const AUTHZ: &str = "schema_version: 1\n";
+    pub(super) const ROOT_ADMIN: &str = "schema_version: 1\nbindings:\n  admin: [\"root\"]\n";
+    const VAULT_ADDR_MARKER: &str = "vault_addr_marker: ";
 
-    struct Fx {
-        dir: PathBuf,
-        reloader: Arc<Reloader<HermeticAuthorizer, ReloadSink>>,
-        status: KernelGraphStatus,
-        booted_released: usize,
-        _guard: Guard,
+    pub(super) struct Fx {
+        pub(super) dir: PathBuf,
+        pub(super) reloader: Arc<Reloader<HermeticAuthorizer, ReloadSink>>,
+        pub(super) status: KernelGraphStatus,
+        pub(super) booted_released: usize,
+        pub(super) _guard: Guard,
     }
 
-    struct ReloadSink {
-        inner: Arc<maknae_audit_append::AuditSink>,
-        fail_identity: std::sync::atomic::AtomicBool,
-        stall: std::sync::Mutex<fn(&AuditRecord) -> bool>,
-        stalled: std::sync::atomic::AtomicUsize,
+    /// A record the reload forwarded, with the store file's sha256 at that moment.
+    #[derive(Debug, Clone)]
+    pub(super) struct Seen {
+        pub(super) action: String,
+        pub(super) reason: String,
+        pub(super) store: String,
+    }
+
+    pub(super) struct ReloadSink {
+        pub(super) inner: Arc<maknae_audit_append::AuditSink>,
+        pub(super) fail_identity: std::sync::atomic::AtomicBool,
+        pub(super) stall: std::sync::Mutex<fn(&AuditRecord) -> bool>,
+        pub(super) stalled: std::sync::atomic::AtomicUsize,
+        store: PathBuf,
+        seen: std::sync::Mutex<Vec<Seen>>,
     }
 
     impl ReloadSink {
-        fn stall_when(&self, when: fn(&AuditRecord) -> bool) {
+        pub(super) fn stall_when(&self, when: fn(&AuditRecord) -> bool) {
             *self.stall.lock().unwrap() = when;
         }
     }
 
-    fn never(_: &AuditRecord) -> bool {
+    pub(super) fn never(_: &AuditRecord) -> bool {
         false
     }
 
-    fn is_reload(r: &AuditRecord) -> bool {
+    pub(super) fn is_reload(r: &AuditRecord) -> bool {
         r.action == GRAPH_RELOAD_ACTION
     }
 
-    fn is_reload_outcome(r: &AuditRecord) -> bool {
+    pub(super) fn is_reload_outcome(r: &AuditRecord) -> bool {
         r.action == GRAPH_RELOAD_ACTION && r.graph.as_ref().is_some_and(|g| g.anchor != "reloading")
     }
 
-    fn is_transition(r: &AuditRecord) -> bool {
+    pub(super) fn is_transition(r: &AuditRecord) -> bool {
         r.action == GRAPH_TRANSITION_ACTION
     }
 
-    fn is_identity(r: &AuditRecord) -> bool {
+    pub(super) fn is_identity(r: &AuditRecord) -> bool {
         r.action == GRAPH_IDENTITY_ACTION
+    }
+
+    fn file_sha(path: &Path) -> String {
+        std::fs::read(path)
+            .map(|b| lower_hex(&maknae_state::envelope::sha256(&b)))
+            .unwrap_or_default()
     }
 
     impl AuditEmit for ReloadSink {
@@ -9202,6 +9337,13 @@ mod reload_tests {
             if stall {
                 self.stalled
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            if !stall && !fail {
+                self.seen.lock().unwrap().push(Seen {
+                    action: rec.action.clone(),
+                    reason: rec.outcome.reason.clone(),
+                    store: file_sha(&self.store),
+                });
             }
             let inner = Arc::clone(&self.inner);
             let rec = rec.clone();
@@ -9219,7 +9361,7 @@ mod reload_tests {
         }
     }
 
-    struct Guard(PathBuf);
+    pub(super) struct Guard(PathBuf);
 
     impl Drop for Guard {
         fn drop(&mut self) {
@@ -9227,7 +9369,7 @@ mod reload_tests {
         }
     }
 
-    fn requirement() -> maknae_config::TargetRequired {
+    pub(super) fn requirement() -> maknae_config::TargetRequired {
         maknae_config::TargetRequired {
             owner: None,
             mode_mask: Some(0o022),
@@ -9237,35 +9379,88 @@ mod reload_tests {
         }
     }
 
-    fn principal() -> maknae_config::Principal {
+    pub(super) fn principal() -> maknae_config::Principal {
         maknae_config::Principal {
             name: "op".into(),
             uid: nix::unistd::geteuid().as_raw(),
         }
     }
 
+    /// The fixture's `maknae.yaml`: `core_extra` under `core:`, then `tail`, whose
+    /// `vault_addr_marker: <url>` line sets `vault.addr` instead of being appended.
+    fn yaml(dir: &Path, core_extra: &str, tail: &str) -> String {
+        let mut vault_addr = "https://v.example:8200".to_string();
+        let mut rest = String::new();
+        for line in tail.lines() {
+            match line.strip_prefix(VAULT_ADDR_MARKER) {
+                Some(addr) => vault_addr = addr.to_string(),
+                None => {
+                    rest.push_str(line);
+                    rest.push('\n');
+                }
+            }
+        }
+        format!(
+            "core:\n  deployment_id: dev-01\n{core_extra}vault:\n  addr: {vault_addr}\ntransport:\n  socket_path: {}\naudit:\n  jsonl_path: {}\nprincipal:\n  name: op\n  uid: {}\n{rest}",
+            dir.join("maknaed.sock").display(),
+            dir.join("audit.jsonl").display(),
+            nix::unistd::geteuid().as_raw(),
+        )
+    }
+
     impl Fx {
-        fn policy(&self) -> PathBuf {
+        pub(super) async fn with_baseline(tag: &str) -> Fx {
+            fixture(tag, AUTHZ, Some(ROOT_ADMIN)).await
+        }
+
+        pub(super) fn policy(&self) -> PathBuf {
             self.dir.join("authz.yaml")
         }
 
-        fn bindings(&self) -> PathBuf {
+        pub(super) fn bindings(&self) -> PathBuf {
             self.dir.join("bindings.yaml")
         }
 
-        fn write_policy(&self, body: &str) {
+        pub(super) fn write_policy(&self, body: &str) {
             write_0640(&self.policy(), body);
         }
 
-        fn write_bindings(&self, body: &str) {
+        pub(super) fn write_bindings(&self, body: &str) {
             write_0640(&self.bindings(), body);
         }
 
-        fn store_bytes(&self) -> Vec<u8> {
+        pub(super) fn write_yaml(&self, core_extra: &str, tail: &str) {
+            write_0640(
+                &self.dir.join("maknae.yaml"),
+                &yaml(&self.dir, core_extra, tail),
+            );
+        }
+
+        pub(super) fn store_bytes(&self) -> Vec<u8> {
             std::fs::read(self.dir.join("state").join(STORE_FILE)).unwrap()
         }
 
-        fn reload_records(&self) -> Vec<AuditRecord> {
+        pub(super) fn store_sha(&self) -> String {
+            file_sha(&self.dir.join("state").join(STORE_FILE))
+        }
+
+        pub(super) fn stored(&self) -> Option<BaselineLayer> {
+            maknae_state::store::peek_baseline(&self.reloader.dir, &self.reloader.key).unwrap()
+        }
+
+        pub(super) fn seen(&self) -> Vec<Seen> {
+            self.reloader.sink.seen.lock().unwrap().clone()
+        }
+
+        pub(super) fn status_lines(&self) -> Vec<String> {
+            self.reloader.baseline.lines()
+        }
+
+        pub(super) fn set_persisted(&self, graph: Arc<maknae_graph::graph::Graph>) {
+            *self.reloader.persisted.write().unwrap() = graph;
+        }
+
+        pub(super) fn reload_records(&self) -> Vec<AuditRecord> {
             std::fs::read_to_string(self.dir.join("audit.jsonl"))
                 .unwrap()
                 .lines()
@@ -9274,11 +9469,11 @@ mod reload_tests {
                 .collect()
         }
 
-        fn baseline(&self) -> &HermeticAuthorizer {
+        pub(super) fn baseline(&self) -> &HermeticAuthorizer {
             self.reloader.authorizer.baseline()
         }
 
-        fn root_whoami(&self) -> maknae_security::Verdict {
+        pub(super) fn root_whoami(&self) -> maknae_security::Verdict {
             self.reloader
                 .authorizer
                 .decide(&crate::handler::build_authz_request(
@@ -9291,16 +9486,16 @@ mod reload_tests {
         }
     }
 
-    fn write_0640(path: &Path, body: &str) {
+    pub(super) fn write_0640(path: &Path, body: &str) {
         std::fs::write(path, body).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640)).unwrap();
     }
 
-    async fn fixture(tag: &str, authz: &str, bindings: Option<&str>) -> Fx {
+    pub(super) async fn fixture(tag: &str, authz: &str, bindings: Option<&str>) -> Fx {
         fixture_gated(tag, authz, bindings, None).await
     }
 
-    async fn fixture_gated(
+    pub(super) async fn fixture_gated(
         tag: &str,
         authz: &str,
         bindings: Option<&str>,
@@ -9309,10 +9504,24 @@ mod reload_tests {
         fixture_seeded(tag, authz, bindings, load_gate, None).await
     }
 
-    type Seed = fn(&maknae_graph::identity::IdentityLayer) -> maknae_graph::identity::IdentityLayer;
+    pub(super) type Seed =
+        fn(&maknae_graph::identity::IdentityLayer) -> maknae_graph::identity::IdentityLayer;
+
+    /// The baseline a start over the fixture's files would seed.
+    pub(super) fn files_baseline(
+        dir: &Path,
+        env: &dyn crate::baseline_check::Env,
+    ) -> BaselineLayer {
+        let file = baseline_file(dir, crate::boot::read_files_as_owner, env, None).unwrap();
+        let start = crate::baseline::at_boot(None, Ok(file), |_| Ok(())).unwrap();
+        let doc = maknae_config::Document::from_baseline(&start.run).unwrap();
+        let v = crate::baseline_check::validate(doc, crate::baseline_check::Mode::Boot, dir, env)
+            .unwrap();
+        run_baseline(&start.run, crate::baseline_check::classification_of(&v))
+    }
 
     /// `seed` first boots the store with the layer it returns for the file's own.
-    async fn fixture_seeded(
+    pub(super) async fn fixture_seeded(
         tag: &str,
         authz: &str,
         bindings: Option<&str>,
@@ -9335,6 +9544,9 @@ mod reload_tests {
             })
             .unwrap(),
         );
+        write_0640(&dir.join("maknae.yaml"), &yaml(&dir, "", ""));
+        let env: Arc<dyn crate::baseline_check::Env> = Arc::new(TestEnv::default());
+        let layer = files_baseline(&dir, env.as_ref());
         let paths = maknae_authz_basic::PolicyPaths::in_dir(&dir);
         write_0640(&paths.authz, authz);
         if let Some(b) = bindings {
@@ -9346,7 +9558,7 @@ mod reload_tests {
             requirement(),
         )
         .unwrap();
-        let inputs = GraphInputs::new(&source, "UNCLASSIFIED", test_baseline()).unwrap();
+        let inputs = GraphInputs::new(&source, "UNCLASSIFIED", layer.clone()).unwrap();
         let seq = Seq::new();
         let au3_1 = serde_json::Value::Null;
         let euid = nix::unistd::geteuid().as_raw();
@@ -9386,12 +9598,13 @@ mod reload_tests {
         .await
         .unwrap();
         let booted_released = booted.released.len();
+        let graph = Arc::new(booted.graph);
         let baseline = HermeticAuthorizer::new_over_graph(
             paths,
             principal(),
             requirement(),
             maknae_state::envelope::sha256,
-            Arc::new(booted.graph),
+            Arc::clone(&graph),
         )
         .unwrap();
         publish_boot_identity(
@@ -9409,7 +9622,11 @@ mod reload_tests {
             baseline,
             crate::CeilingAuthorizer::new(maknae_config::Ceiling::baseline_for(us), us),
         ));
-        let status = booted.status;
+        let mut status = booted.status;
+        status.baseline = crate::baseline::BaselineStatus::new(crate::baseline::BaselineState {
+            accepted: layer.sections.clone().into(),
+            pending: None,
+        });
         let reloader = Arc::new(Reloader {
             dir: booted.dir,
             key: booted.key,
@@ -9423,6 +9640,8 @@ mod reload_tests {
                 fail_identity: std::sync::atomic::AtomicBool::new(false),
                 stall: std::sync::Mutex::new(never),
                 stalled: std::sync::atomic::AtomicUsize::new(0),
+                store: dir.join("state").join(STORE_FILE),
+                seen: std::sync::Mutex::default(),
             }),
             session_ids: Arc::new(SessionIds::new()),
             host: "h".into(),
@@ -9432,6 +9651,11 @@ mod reload_tests {
             identity: status.identity.clone(),
             stopping: tokio::sync::watch::channel(false).0,
             append_bound: Duration::from_millis(200),
+            persisted: std::sync::RwLock::new(graph),
+            config_dir: dir.clone(),
+            files: crate::boot::read_files_as_owner,
+            env,
+            baseline: status.baseline.clone(),
             load_gate: load_gate.map(|g| Arc::new(std::sync::Mutex::new(g))),
         });
         Fx {
@@ -9442,6 +9666,227 @@ mod reload_tests {
             booted_released,
         }
     }
+}
+
+#[cfg(unix)]
+#[cfg(test)]
+mod reload_tests {
+    use super::boot_gate_tests::boot_graph_at;
+    use super::reload_fixture::*;
+    use super::*;
+    use maknae_authz_basic::Baseline;
+    use maknae_graph::record::ProvenanceKind;
+
+    const ROOT_ADMIN_OTHER: &str =
+        "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  guest: []\n";
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reload_carries_the_persisted_baseline_unchanged() {
+        let fx = Fx::with_baseline("carry").await;
+        let before = fx.stored();
+        assert!(before.is_some());
+        fx.write_bindings(ROOT_ADMIN_OTHER);
+        let applied = fx.reloader.run().await.unwrap();
+        assert!(applied.persisted);
+        assert_eq!(fx.stored(), before);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reload_never_applies_a_baseline_change_and_records_the_set_once() {
+        let fx = Fx::with_baseline("vault-at-reload").await;
+        let before = fx.stored();
+        fx.write_yaml("", "vault_addr_marker: https://w.example:8200\n");
+        fx.reloader.run().await.unwrap();
+        assert_eq!(fx.stored(), before, "a reload does not move vault");
+        let pending: Vec<_> = fx
+            .seen()
+            .into_iter()
+            .filter(|s| s.action == GRAPH_BASELINE_ACTION)
+            .collect();
+        assert_eq!(pending.len(), 1, "{pending:?}");
+        assert!(pending[0]
+            .reason
+            .starts_with("baseline change pending acceptance: root-file "));
+        assert!(
+            pending[0]
+                .reason
+                .ends_with("(apply: restart; sections: vault)"),
+            "{}",
+            pending[0].reason
+        );
+        assert_eq!(
+            fx.status_lines(),
+            vec!["baseline: 1 pending (restart)".to_string()]
+        );
+        fx.reloader.run().await.unwrap();
+        assert_eq!(
+            fx.seen()
+                .iter()
+                .filter(|s| s.action == GRAPH_BASELINE_ACTION)
+                .count(),
+            1,
+            "an unchanged set is not recorded again"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_pending_record_follows_the_reload_outcome() {
+        let fx = Fx::with_baseline("pending-order").await;
+        fx.write_yaml("", "vault_addr_marker: https://w.example:8200\n");
+        fx.reloader.run().await.unwrap();
+        let actions: Vec<String> = fx.seen().into_iter().map(|s| s.action).collect();
+        assert_eq!(
+            actions,
+            [
+                GRAPH_RELOAD_ACTION,
+                GRAPH_RELOAD_ACTION,
+                GRAPH_BASELINE_ACTION
+            ]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_invalid_baseline_file_does_not_refuse_the_reload() {
+        let fx = Fx::with_baseline("invalid-at-reload").await;
+        fx.write_yaml("  unknown_key: 1\n", "");
+        fx.write_bindings(ROOT_ADMIN_OTHER);
+        let applied = fx.reloader.run().await.unwrap();
+        assert!(applied.persisted, "the policy edit applied");
+        let rec = fx
+            .seen()
+            .into_iter()
+            .find(|s| s.action == GRAPH_BASELINE_ACTION)
+            .unwrap();
+        assert!(
+            rec.reason.starts_with("baseline change refused: invalid: "),
+            "{}",
+            rec.reason
+        );
+        assert_eq!(
+            fx.status_lines(),
+            vec!["baseline: 1 pending (invalid)".to_string()]
+        );
+        assert_eq!(rec.store, fx.store_sha(), "recorded after the commit");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_edit_of_an_invalid_file_that_parses_is_a_new_set() {
+        let fx = Fx::with_baseline("invalid-edits").await;
+        let providers = |model: &str| {
+            format!("providers:\n  - name: openai\n    endpoint: https://api.example.test/v1\n    models: [{model}]\n")
+        };
+        let mut hashes = Vec::new();
+        for model in ["m", "n"] {
+            fx.write_yaml("", &providers(model));
+            fx.reloader.run().await.unwrap();
+            let p = fx.reloader.baseline.current().pending.clone().unwrap();
+            let crate::baseline::PendingState::Invalid { proposed, .. } = &p.state else {
+                panic!("{p:?}")
+            };
+            assert!(proposed.as_ref().unwrap().contains_key("providers"));
+            hashes.push(p.hash.clone());
+        }
+        assert_ne!(hashes[0], hashes[1], "the proposal is bound into the hash");
+        let refused = fx
+            .seen()
+            .iter()
+            .filter(|s| s.action == GRAPH_BASELINE_ACTION)
+            .count();
+        assert_eq!(refused, 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reload_over_a_graph_without_a_baseline_is_refused() {
+        let fx = Fx::with_baseline("no-baseline").await;
+        let current = fx.reloader.persisted.read().unwrap().clone();
+        let e = maknae_graph::identity::extract(&current).unwrap();
+        let vocab = &fx.reloader.vocabulary;
+        let bare = maknae_graph::identity::build(
+            &e.layer,
+            None,
+            &vocab.persisted,
+            vocab.digest,
+            current.revision(),
+            ProvenanceKind::RootFile,
+        )
+        .unwrap();
+        fx.set_persisted(Arc::new(bare));
+        let before = fx.store_sha();
+        let r = fx.reloader.run().await;
+        assert!(
+            matches!(r, Err(crate::reload::Refusal::Compile(ref m)) if m.contains("carries no baseline")),
+            "{r:?}"
+        );
+        assert_eq!(fx.store_sha(), before);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_commit_whose_baseline_differs_from_the_store_is_refused_as_a_baseline_change() {
+        let fx = Fx::with_baseline("baseline-mismatch").await;
+        let current = fx.reloader.persisted.read().unwrap().clone();
+        let e = maknae_graph::identity::extract(&current).unwrap();
+        let mut other = e.baseline.clone().unwrap();
+        other.sections.insert("lake".into(), "{}".into());
+        let vocab = &fx.reloader.vocabulary;
+        let forged = maknae_graph::identity::build(
+            &e.layer,
+            Some(&other),
+            &vocab.persisted,
+            vocab.digest,
+            current.revision(),
+            ProvenanceKind::RootFile,
+        )
+        .unwrap();
+        fx.set_persisted(Arc::new(forged));
+        fx.write_bindings(ROOT_ADMIN_OTHER);
+        let before = fx.store_sha();
+        let r = fx.reloader.run().await;
+        assert_eq!(r, Err(crate::reload::Refusal::BaselineChanged), "{r:?}");
+        assert_eq!(fx.store_sha(), before);
+        let outcome = fx.reload_records().pop().unwrap().outcome.reason;
+        assert!(
+            outcome.contains("only an accept changes the accepted baseline"),
+            "{outcome}"
+        );
+        assert!(!outcome.contains("persist:"), "{outcome}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_commit_replaces_the_graph_the_next_reload_plans_from() {
+        let fx = Fx::with_baseline("replaced-graph").await;
+        fx.write_bindings(ROOT_ADMIN_OTHER);
+        assert!(fx.reloader.run().await.unwrap().persisted);
+        assert_eq!(fx.reloader.persisted.read().unwrap().revision(), 2);
+        let again = fx.reloader.run().await.unwrap();
+        assert!(!again.persisted, "{again:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_file_reverted_to_the_baseline_clears_the_pending_set() {
+        let fx = Fx::with_baseline("revert").await;
+        fx.write_yaml("", "vault_addr_marker: https://w.example:8200\n");
+        fx.reloader.run().await.unwrap();
+        assert_eq!(fx.status_lines().len(), 1);
+        fx.write_yaml("", "");
+        let records_before = fx.seen().len();
+        fx.reloader.run().await.unwrap();
+        assert!(fx.status_lines().is_empty());
+        assert!(!fx.seen()[records_before..]
+            .iter()
+            .any(|s| s.action == GRAPH_BASELINE_ACTION));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refused_reload_publishes_no_pending_set() {
+        let fx = Fx::with_baseline("refused-publishes-nothing").await;
+        fx.write_yaml("", "vault_addr_marker: https://w.example:8200\n");
+        fx.write_bindings("schema_version: [\n");
+        assert!(fx.reloader.run().await.is_err());
+        assert!(fx.status_lines().is_empty());
+        assert!(!fx.seen().iter().any(|s| s.action == GRAPH_BASELINE_ACTION));
+    }
+
+    const ROOT_ADVERSARY: &str = "schema_version: 1\nbindings:\n  adversary: [\"root\"]\n";
 
     fn outcomes(recs: &[AuditRecord]) -> Vec<(String, String, String)> {
         recs.iter()
@@ -10158,6 +10603,7 @@ mod reload_tests {
         let fx = fixture("reboot", AUTHZ, Some(ROOT_ADMIN)).await;
         fx.write_bindings(ROOT_ADVERSARY);
         fx.reloader.run().await.unwrap();
+        let accepted = fx.stored().unwrap();
         let before = fx.dir.join("audit.jsonl");
         let reloaded = std::fs::read_to_string(&before).unwrap().lines().count();
         let Fx {
@@ -10182,7 +10628,7 @@ mod reload_tests {
             requirement(),
         )
         .unwrap();
-        let inputs = GraphInputs::new(&source, "UNCLASSIFIED", test_baseline()).unwrap();
+        let inputs = GraphInputs::new(&source, "UNCLASSIFIED", accepted.clone()).unwrap();
         let seq = Seq::new();
         let au3_1 = serde_json::Value::Null;
         let booted = boot_graph_at(
@@ -10210,7 +10656,7 @@ mod reload_tests {
             maknae_graph::identity::extract(&booted.graph)
                 .unwrap()
                 .baseline,
-            Some(test_baseline())
+            Some(accepted)
         );
         let after: Vec<String> = std::fs::read_to_string(&before)
             .unwrap()
