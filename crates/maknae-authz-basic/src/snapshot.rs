@@ -1017,8 +1017,14 @@ mod tests {
     #[test]
     fn an_alias_uid_under_two_roles_is_unbound_and_reported() {
         let s = alias_source("  admin: [\"root\", \"alex\"]\n  user: [\"toor\"]\n");
-        assert!(
-            crate::tests::oracle::assemble(&s).is_err(),
+        assert_eq!(
+            crate::tests::oracle::assemble(&s).err(),
+            Some(crate::tests::oracle::Refused::Bindings(
+                crate::tests::oracle::BindingError::DuplicateUid {
+                    uid: 0,
+                    names: ("root".into(), "toor".into())
+                }
+            )),
             "before #496 this file refused as a whole"
         );
         let snap = alias_snap(&s);
@@ -1041,8 +1047,14 @@ mod tests {
     #[test]
     fn an_alias_uid_under_a_role_and_adversary_is_contained() {
         let s = alias_source("  admin: [\"root\"]\n  adversary: [\"toor\"]\n");
-        assert!(
-            crate::tests::oracle::assemble(&s).is_err(),
+        assert_eq!(
+            crate::tests::oracle::assemble(&s).err(),
+            Some(crate::tests::oracle::Refused::Bindings(
+                crate::tests::oracle::BindingError::DuplicateUid {
+                    uid: 0,
+                    names: ("root".into(), "toor".into())
+                }
+            )),
             "before #496 this file refused as a whole"
         );
         let snap = alias_snap(&s);

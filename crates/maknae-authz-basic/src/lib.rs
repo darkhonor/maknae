@@ -190,7 +190,7 @@ impl BasicAuthorizer {
     ) -> (maknae_security::Verdict, Option<&'static str>) {
         match tests::oracle::assemble(source) {
             Ok(lp) => decide::decide_loaded_with_role(&lp, &self.principal, req),
-            Err(()) => (maknae_security::Verdict::Indeterminate, None),
+            Err(_) => (maknae_security::Verdict::Indeterminate, None),
         }
     }
 }
@@ -1055,18 +1055,27 @@ mod tests {
             }
         }
 
+        #[derive(Debug, PartialEq, Eq)]
+        pub(crate) enum Refused {
+            Bindings(BindingError),
+            Other(String),
+        }
+
         pub(crate) fn assemble(
             src: &crate::PolicySource,
-        ) -> Result<crate::decide::LoadedPolicy, ()> {
+        ) -> Result<crate::decide::LoadedPolicy, Refused> {
+            let other = |e: AuthzBasicError| Refused::Other(e.to_string());
             let (legacy, uid_map) =
-                legacy_bindings(src.bindings(), src.uid_map().clone()).map_err(|_| ())?;
+                legacy_bindings(src.bindings(), src.uid_map().clone()).map_err(other)?;
             Ok(crate::decide::LoadedPolicy {
                 policy: src.policy().clone(),
-                roles: crate::binding::Roles::File(resolve(&legacy, &uid_map).map_err(|_| ())?),
+                roles: crate::binding::Roles::File(
+                    resolve(&legacy, &uid_map).map_err(Refused::Bindings)?,
+                ),
                 action_grants: crate::validate_grants(&src.policy().action_grants)
-                    .map_err(|_| ())?,
+                    .map_err(other)?,
                 destinations: crate::validate_destinations(&src.policy().destinations)
-                    .map_err(|_| ())?,
+                    .map_err(other)?,
             })
         }
 
@@ -1414,8 +1423,12 @@ mod tests {
             ),
             &[("ursula", 1001), ("mallory", 666)],
         );
-        let auth =
-            BasicAuthorizer::from_snapshot(principal(), paths(), test_digest, compiled(&src));
+        let auth = BasicAuthorizer::from_snapshot(
+            principal(),
+            src.paths().clone(),
+            test_digest,
+            compiled(&src),
+        );
         for req in [
             whoami(501),
             whoami(1001),
@@ -2060,8 +2073,11 @@ mod tests {
                 name: "no-such-user-maknae-85".into()
             }]
         );
-        assert!(
-            tests::oracle::assemble(&ghost).is_err(),
+        assert_eq!(
+            tests::oracle::assemble(&ghost).err(),
+            Some(tests::oracle::Refused::Bindings(
+                tests::oracle::BindingError::Unresolvable("no-such-user-maknae-85".into())
+            )),
             "before #496 the whole file refused"
         );
     }
@@ -3106,18 +3122,76 @@ mod tests {
         const EXPLICIT: &str = "schema_version: 1\nbindings: { admin: [alex], user: [ursula], guest: [gus], adversary: [mallory] }\n";
         const GRANTS: &str = "roles: { admin: { allow: [admin.status, admin.subject.list, session.prompt], deny: [admin.config.show] }, user: { allow: [session.prompt] } }\ndestinations: { user: { allow: [\"provider:openai\"] }, admin: { allow: [\"provider:anthropic\"] } }\n";
 
-        fn policies() -> Vec<(&'static str, PolicySource)> {
+        fn explicit_with(admin: &str, user: &str, guest: &str, adversary: &str) -> String {
+            format!("schema_version: 1\nbindings: {{ admin: [{admin}], user: [{user}], guest: [{guest}], adversary: [{adversary}] }}\n")
+        }
+
+        /// `(variant, subject source, oracle source)`: each per-subject case is
+        /// compared with the oracle over the file it is equivalent to.
+        fn policies() -> Vec<(&'static str, PolicySource, PolicySource)> {
             let uids: &[(&str, u32)] = BASE_UIDS;
+            let same = |v: &'static str, src: PolicySource| (v, src.clone(), src);
             vec![
-                ("absent", source_with(SHIPPED, None, &[])),
-                (
+                same("absent", source_with(SHIPPED, None, &[])),
+                same(
+                    "absent-key",
+                    source_with(SHIPPED, Some("schema_version: 1\n"), &[]),
+                ),
+                same(
                     "empty",
                     source_with(SHIPPED, Some("schema_version: 1\nbindings: {}\n"), &[]),
                 ),
-                ("explicit", source_with(SHIPPED, Some(EXPLICIT), uids)),
-                (
+                same("explicit", source_with(SHIPPED, Some(EXPLICIT), uids)),
+                same(
                     "explicit+grants",
                     source_with(&format!("{SHIPPED}{GRANTS}"), Some(EXPLICIT), uids),
+                ),
+                same(
+                    "explicit-no-match",
+                    source_with(
+                        SHIPPED,
+                        Some("schema_version: 1\nbindings: { admin: [alex] }\n"),
+                        uids,
+                    ),
+                ),
+                same(
+                    "adversary-by-uid",
+                    source_with(
+                        SHIPPED,
+                        Some(&explicit_with("alex", "ursula", "gus", "{uid: 666}")),
+                        uids,
+                    ),
+                ),
+                (
+                    "unresolved-name",
+                    source_with(
+                        SHIPPED,
+                        Some(&explicit_with("alex", "ursula, ghost", "gus", "mallory")),
+                        uids,
+                    ),
+                    source_with(SHIPPED, Some(EXPLICIT), uids),
+                ),
+                (
+                    "overlap",
+                    source_with(
+                        SHIPPED,
+                        Some(&explicit_with("alex, mallory", "ursula", "gus", "mallory")),
+                        uids,
+                    ),
+                    source_with(SHIPPED, Some(EXPLICIT), uids),
+                ),
+                (
+                    "conflict",
+                    source_with(
+                        SHIPPED,
+                        Some(&explicit_with("alex", "ursula, gus", "gus", "mallory")),
+                        uids,
+                    ),
+                    source_with(
+                        SHIPPED,
+                        Some(&explicit_with("alex", "ursula", "", "mallory")),
+                        uids,
+                    ),
                 ),
             ]
         }
@@ -3281,7 +3355,7 @@ mod tests {
             let mut roles_seen = std::collections::BTreeSet::new();
             let mut arms: std::collections::BTreeMap<&'static str, Arms> = Default::default();
             let mut grant_arms = (false, false, false);
-            for (variant, src) in policies() {
+            for (variant, src, oracle_src) in policies() {
                 let auth = BasicAuthorizer::from_snapshot(
                     principal(),
                     src.paths().clone(),
@@ -3290,7 +3364,7 @@ mod tests {
                 );
                 let mut check = |req: maknae_security::Request, cell: &dyn Fn() -> String| {
                     cells += 1;
-                    let oracle = auth.decide_oracle(&src, &req);
+                    let oracle = auth.decide_oracle(&oracle_src, &req);
                     let snap = auth.decide_reporting_role(&req);
                     roles_seen.insert(oracle.1);
                     match (&oracle.0, req.action.0.as_str()) {
@@ -3388,7 +3462,7 @@ mod tests {
             );
             let fs_cells = 4 * 7 * 22 * 5 + 7 * 22 * 5;
             let other_cells = 54 + 4;
-            assert_eq!(cells, 4 * 9 * (fs_cells + other_cells));
+            assert_eq!(cells, 10 * 9 * (fs_cells + other_cells));
             assert_eq!(
                 roles_seen,
                 [
@@ -3418,8 +3492,8 @@ mod tests {
         #[test]
         fn subjects_agree_between_the_file_oracle_and_the_snapshot() {
             let mut seen = Vec::new();
-            for (variant, src) in policies() {
-                let oracle = tests::oracle::assemble(&src)
+            for (variant, src, oracle_src) in policies() {
+                let oracle = tests::oracle::assemble(&oracle_src)
                     .unwrap()
                     .roles
                     .as_subject_bindings();
@@ -3427,7 +3501,93 @@ mod tests {
                 assert_eq!(oracle, snap, "{variant}");
                 seen.push(oracle.map(|v| v.len()));
             }
-            assert_eq!(seen, [None, Some(0), Some(4), Some(4)]);
+            assert_eq!(
+                seen,
+                [
+                    None,
+                    None,
+                    Some(0),
+                    Some(4),
+                    Some(4),
+                    Some(1),
+                    Some(4),
+                    Some(4),
+                    Some(4),
+                    Some(3)
+                ]
+            );
+        }
+
+        #[test]
+        fn each_per_subject_case_is_a_verdict_change_from_the_whole_policy_refusal() {
+            use tests::oracle::{BindingError, Refused};
+            let uids: &[(&str, u32)] = &[BASE_UIDS, &[("gustav", 1002)]].concat();
+            for (variant, body, subject_uid, new_subject, refused) in [
+                (
+                    "unresolved-name",
+                    "admin: [alex]\n  user: [ursula, ghost]\n  adversary: [mallory]",
+                    1001_i64,
+                    Some("user"),
+                    BindingError::Unresolvable("ghost".into()),
+                ),
+                (
+                    "overlap",
+                    "admin: [alex, mallory]\n  adversary: [mallory]",
+                    666,
+                    Some("adversary"),
+                    BindingError::DualMembership("mallory".into()),
+                ),
+                (
+                    "conflict",
+                    "admin: [alex]\n  guest: [gus]\n  user: [gus]",
+                    1002,
+                    None,
+                    BindingError::DualMembership("gus".into()),
+                ),
+                (
+                    "alias",
+                    "admin: [alex]\n  guest: [gus]\n  user: [gustav]",
+                    1002,
+                    None,
+                    BindingError::DuplicateUid {
+                        uid: 1002,
+                        names: ("gus".into(), "gustav".into()),
+                    },
+                ),
+            ] {
+                let src = source_with(
+                    SHIPPED,
+                    Some(&format!("schema_version: 1\nbindings:\n  {body}\n")),
+                    uids,
+                );
+                let auth = BasicAuthorizer::from_snapshot(
+                    principal(),
+                    src.paths().clone(),
+                    test_digest,
+                    compiled(&src),
+                );
+                assert_eq!(
+                    tests::oracle::assemble(&src).err(),
+                    Some(Refused::Bindings(refused)),
+                    "{variant}: before #496 the whole file refused"
+                );
+                assert_eq!(
+                    auth.decide_oracle(&src, &whoami(1000)),
+                    (Verdict::Indeterminate, None),
+                    "{variant}"
+                );
+                assert_eq!(
+                    auth.decide_reporting_role(&whoami(1000)).1,
+                    Some("admin"),
+                    "{variant}: the rest loads"
+                );
+                assert_eq!(
+                    auth.decide_reporting_role(&whoami(subject_uid)).1,
+                    new_subject,
+                    "{variant}"
+                );
+                assert_eq!(src.identity_problems().len(), 1, "{variant}");
+            }
         }
     }
 }
