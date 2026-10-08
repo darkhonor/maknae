@@ -475,7 +475,7 @@ mod tests {
         )
         .expect("gate success arm");
         assert!(Arc::ptr_eq(auth.snapshot().persisted(), &graph));
-        assert_eq!(Baseline::principal(&auth), &principal());
+        assert_eq!(Baseline::principal(&auth), principal());
         assert_eq!(
             Baseline::digest(&auth)(b"x"),
             maknae_state::envelope::sha256(b"x")

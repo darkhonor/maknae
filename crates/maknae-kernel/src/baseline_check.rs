@@ -253,13 +253,13 @@ pub fn audit_of(doc: &Document, config_dir: &Path) -> Result<maknae_config::Audi
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use maknae_config::{BaselineSections, Document, ReaderAccount, ReaderLookup};
     use std::path::Path;
     use std::sync::Mutex;
 
-    struct FakeEnv {
+    pub(crate) struct FakeEnv {
         bounds: Option<maknae_config::EgressBounds>,
         egress_uid: Result<Option<u32>, String>,
         prepared: Result<(), String>,
@@ -284,7 +284,7 @@ mod tests {
     }
 
     impl FakeEnv {
-        fn with_bounds() -> Self {
+        pub(crate) fn with_bounds() -> Self {
             FakeEnv {
                 bounds: Some(maknae_config::EgressBounds {
                     kv_mount: "kv".into(),
@@ -345,7 +345,7 @@ mod tests {
         }
     }
 
-    fn doc(pairs: &[(&str, &str)]) -> Document {
+    pub(crate) fn doc(pairs: &[(&str, &str)]) -> Document {
         let s: BaselineSections = pairs
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -354,10 +354,10 @@ mod tests {
     }
     const AUDIT: &str = r#"{"jsonl_path":"/var/log/maknae/audit.jsonl"}"#;
     const PRINCIPAL: &str = r#"{"name":"op","uid":1000}"#;
-    const PROVIDERS: &str =
+    pub(crate) const PROVIDERS: &str =
         r#"[{"endpoint":"https://api.example.test/v1","models":["m"],"name":"openai"}]"#;
     const VAULT: &str = r#"{"addr":"https://v:8200"}"#;
-    fn minimal() -> Vec<(&'static str, &'static str)> {
+    pub(crate) fn minimal() -> Vec<(&'static str, &'static str)> {
         vec![
             ("core", r#"{"deployment_id":"d"}"#),
             ("audit", AUDIT),

@@ -19,6 +19,7 @@ mod groupres;
 mod handler;
 mod host_env;
 pub mod identity_report;
+pub mod live;
 mod mutation;
 mod mutation_exchange;
 mod posture;
@@ -50,6 +51,7 @@ pub use handler::{
     admitted_user_for_test, build_authz_request, build_whoami, dispatch_verb, is_filesystem_verb,
     may_respond, serve_outcome_to_exit_code, Dispatch, ServeOutcome, KERNEL_ACTIONS,
 };
+pub use live::LiveConfig;
 pub use mutation::AttemptCaps;
 pub use mutation_exchange::{MutationExchange, PendingReport, ReportError};
 pub use posture::{

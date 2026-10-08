@@ -138,8 +138,8 @@ pub struct WhereCtx {
 /// further arm that reaches for one of those owes the same argument** -- the boot-time redaction protects
 /// the `Document`, not the request path in general.
 ///
-/// It is also a BOOT SNAPSHOT. A reload replaces the authz policy; it does not
-/// replace this, which reports the boot's settings until restart.
+/// It is the accepted baseline's view: an accept of a live change replaces it
+/// (`crate::live`); a reload does not.
 pub type ConfigView =
     std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>;
 
@@ -420,11 +420,10 @@ pub async fn handle<S, E, P>(
     cfg: TransportConfig,
     au3_1: serde_json::Value,
     authorizer: Arc<P>,
-    config_view: Arc<ConfigView>,
+    live: Arc<crate::live::LiveConfig>,
     authz_backend_name: Arc<String>,
     classification_policy_name: Arc<String>,
     kernel_graph: Arc<Option<KernelGraphStatus>>,
-    providers: Arc<Option<crate::provider_choice::ProviderAuthority>>,
     egress: Arc<dyn crate::egress::Egress>,
     authz_decide_timeout: Duration,
     lane: maknae_security::Lane,
@@ -446,11 +445,10 @@ pub async fn handle<S, E, P>(
         cfg,
         au3_1,
         authorizer,
-        config_view,
+        live,
         authz_backend_name,
         classification_policy_name,
         kernel_graph,
-        providers,
         egress,
         authz_decide_timeout,
         lane,
@@ -499,7 +497,8 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     cfg: TransportConfig,
     au3_1: serde_json::Value,
     authorizer: Arc<P>,
-    config_view: Arc<ConfigView>,
+    // The accepted baseline's view and providers authority, read per request.
+    live: Arc<crate::live::LiveConfig>,
     // Captured ONCE at boot from the same authorizer (static TCB: the backend
     // set cannot change in-process, so per-request asking could only repeat
     // this string while running operand code inline on the worker).
@@ -508,7 +507,6 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     // `core.handling.policy` selected, by name.
     classification_policy_name: Arc<String>,
     kernel_graph: Arc<Option<KernelGraphStatus>>,
-    providers: Arc<Option<crate::provider_choice::ProviderAuthority>>,
     // #172: the egress backend behind the seam. `Unavailable` in Cooky.
     egress: Arc<dyn crate::egress::Egress>,
     authz_decide_timeout: Duration,
@@ -880,6 +878,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     }
 
     let no_providers = maknae_config::ProviderSet::empty();
+    let providers = live.providers();
     let admitted = match &request.verb {
         Verb::SessionPrompt { choice, .. } => {
             let (set, user_prefix) = match &*providers {
@@ -1199,7 +1198,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 Dispatch::WhoamiRequested => build_whoami(&peer_uri, peer_uid),
                 // Already redacted at boot; this arm only hands it over. No
                 // redaction happens here, deliberately -- see `ConfigView`.
-                Dispatch::ConfigShowRequested => Payload::ConfigView((*config_view).clone()),
+                Dispatch::ConfigShowRequested => Payload::ConfigView((*live.view()).clone()),
                 Dispatch::StatusRequested => Payload::Status(maknae_proto::StatusView {
                     version: env!("CARGO_PKG_VERSION").to_string(),
                     protocol_version: PROTOCOL_VERSION,
@@ -2330,11 +2329,10 @@ pub async fn accept_loop<A, E, P>(
     shutdown: impl Future<Output = ()> + Send,
     supervisor: tokio::task::JoinHandle<maknae_vault::VaultError>,
     authorizer: Arc<P>,
-    config_view: Arc<ConfigView>,
+    live: Arc<crate::live::LiveConfig>,
     authz_backend_name: Arc<String>,
     classification_policy_name: Arc<String>,
     kernel_graph: Arc<Option<KernelGraphStatus>>,
-    providers: Arc<Option<crate::provider_choice::ProviderAuthority>>,
     egress: Arc<dyn crate::egress::Egress>,
 ) -> ServeOutcome
 where
@@ -2437,12 +2435,11 @@ where
                                 let cfg = cfg.clone();
                                 let wctx = wctx.clone();
                                 let authorizer = Arc::clone(&authorizer);
-                                let config_view = Arc::clone(&config_view);
+                                let live = Arc::clone(&live);
                                 let authz_backend_name = Arc::clone(&authz_backend_name);
                                 let classification_policy_name =
                                     Arc::clone(&classification_policy_name);
                                 let kernel_graph = Arc::clone(&kernel_graph);
-                                let providers = Arc::clone(&providers);
                                 let egress = Arc::clone(&egress);
                                 handlers.spawn(async move {
                                     let _permit = permit; // held for the connection's life
@@ -2540,11 +2537,10 @@ where
                                                 peer_dir,
                                                 emit, session_id, cfg, wctx.au3_1,
                                                 authorizer,
-                                                config_view,
+                                                live,
                                                 authz_backend_name,
                                                 classification_policy_name,
                                                 kernel_graph,
-                                                providers,
                                                 egress,
                                                 AUTHZ_DECIDE_TIMEOUT,
                                                 // THIS accept loop owns the on-host
@@ -4643,6 +4639,7 @@ async fn boot_after_sink(
     hup: tokio::signal::unix::Signal,
 ) -> Result<ServeOutcome, RunError> {
     let classification = crate::baseline_check::classification_of(&started.validated);
+    let live = Arc::new(crate::live::LiveConfig::of(&started.validated));
     let Started {
         validated,
         run,
@@ -4660,7 +4657,6 @@ async fn boot_after_sink(
         egress: egress_cfg,
         audit,
         principal,
-        egress_bounds,
         ..
     } = validated;
     if let Some(why) = inconsistent {
@@ -4903,25 +4899,6 @@ async fn boot_after_sink(
     // serve loop) must revoke it on failure, or the token leaks. Capture the whole
     // post-mint outcome, revoke UNCONDITIONALLY, THEN propagate. (A pre-mint failure
     // above skips revoke — there is nothing minted to revoke. Mirrors `cli.rs::execute`.)
-    // The fold lives in `maknae-config::effective_view`, not here: this file is
-    // T3 and mutation-excluded, and "which fields to fold, and what to present
-    // for an absent one" is a disclosure decision that earns a gated crate.
-    // Built before `transport` is moved.
-    let config_view = {
-        let vc = maknae_vault::vault_config_from_document(boot.document()).ok();
-        Arc::new(maknae_config::effective_view(
-            boot.document(),
-            &maknae_config::ResolvedSettings {
-                transport: &transport,
-                audit: audit_cfg,
-                vault_approle_mount: vc.as_ref().map(|c| c.approle_mount.clone()),
-                vault_pki_int_mount: vc.as_ref().map(|c| c.pki_int_mount.clone()),
-                vault_user_auth_type: vc.as_ref().map(|c| c.user_auth.r#type.clone()),
-                vault_user_auth_mount: vc.as_ref().map(|c| c.user_auth.mount.clone()),
-                egress: &egress_cfg,
-            },
-        ))
-    };
     // Asked of the PDP ONCE, at boot -- not per request. The backend set is
     // fixed for the life of the process (static TCB, ADR-0002: no hot-swap),
     // so a per-request call could only ever return the same string, while
@@ -4934,10 +4911,6 @@ async fn boot_after_sink(
     // from `core.handling.policy` (ADR-0022) -- captured here for the same
     // reason as the backend name: fixed for the life of the process.
     let classification_policy_name = Arc::new(boot.classification_policy_name().to_string());
-    let providers = Arc::new(crate::provider_choice::provider_authority(
-        boot.providers(),
-        egress_bounds.as_ref(),
-    ));
     // Holds the one-maknaed state-dir lock for the serve's lifetime.
     let reloader = Reloader {
         dir: booted.dir,
@@ -4973,13 +4946,12 @@ async fn boot_after_sink(
         Arc::clone(session_ids),
         supervisor,
         Arc::clone(&authorizer),
-        // Redact ONCE, here, at boot. The run loop receives only the view;
-        // the unredacted Document does not travel with it.
-        config_view,
+        // Redacted from the validated baseline; the unredacted Document does not
+        // travel with it.
+        live,
         authz_backend_name,
         classification_policy_name,
         kernel_graph,
-        providers,
         egress,
         hup,
         Arc::new(reloader),
@@ -5018,13 +4990,12 @@ async fn serve_after_mint<B>(
     // the baseline alone would pass every gate (critical-review round 3). This
     // signature is the type-level pin: what is served is what was composed.
     authorizer: Arc<crate::composition::Composition<B>>,
-    // Already redacted at boot — the raw Document never reaches the run loop.
-    config_view: Arc<ConfigView>,
-    // Captured at boot, same discipline as `config_view` (see run_inner).
+    // Already redacted — the raw Document never reaches the run loop.
+    live: Arc<crate::live::LiveConfig>,
+    // Captured at boot (see run_inner).
     authz_backend_name: Arc<String>,
     classification_policy_name: Arc<String>,
     kernel_graph: Arc<Option<KernelGraphStatus>>,
-    providers: Arc<Option<crate::provider_choice::ProviderAuthority>>,
     egress: Arc<dyn crate::egress::Egress>,
     hup: tokio::signal::unix::Signal,
     reloader: Arc<Reloader<B, maknae_audit_append::AuditSink>>,
@@ -5078,11 +5049,10 @@ where
         shutdown,
         supervisor,
         authorizer,
-        config_view,
+        live,
         authz_backend_name,
         classification_policy_name,
         kernel_graph,
-        providers,
         egress,
     )
     .await;
@@ -8689,10 +8659,9 @@ mod home_resolution_tests {
             maknae_config::transport_from_section(None).unwrap(),
             serde_json::json!({}),
             authorizer,
-            Arc::new(ConfigView::default()),
+            std::sync::Arc::new(crate::live::LiveConfig::new(ConfigView::default(), None)),
             backend_name,
             Arc::new("US".to_string()),
-            Arc::new(None),
             Arc::new(None),
             crate::egress::unavailable_egress(),
             Duration::from_secs(10),
@@ -8911,10 +8880,9 @@ mod admission_bound_tests {
                 maknae_config::transport_from_section(None).unwrap(),
                 serde_json::json!({}),
                 authorizer,
-                Arc::new(ConfigView::default()),
+                std::sync::Arc::new(crate::live::LiveConfig::new(ConfigView::default(), None)),
                 backend_name,
                 Arc::new("US".to_string()),
-                Arc::new(None),
                 Arc::new(None),
                 crate::egress::unavailable_egress(),
                 Duration::from_secs(10),
@@ -11184,10 +11152,9 @@ mod reload_tests {
                 shutdown,
                 tokio::spawn(std::future::pending()),
                 Arc::clone(&fx.reloader.authorizer),
-                Arc::new(ConfigView::default()),
+                std::sync::Arc::new(crate::live::LiveConfig::new(ConfigView::default(), None)),
                 Arc::new("b".into()),
                 Arc::new("US".into()),
-                Arc::new(None),
                 Arc::new(None),
                 crate::egress::unavailable_egress(),
             ),
@@ -11277,10 +11244,9 @@ mod reload_tests {
                 shutdown,
                 tokio::spawn(std::future::pending()),
                 Arc::clone(&fx.reloader.authorizer),
-                Arc::new(ConfigView::default()),
+                std::sync::Arc::new(crate::live::LiveConfig::new(ConfigView::default(), None)),
                 Arc::new("b".into()),
                 Arc::new("US".into()),
-                Arc::new(None),
                 Arc::new(None),
                 crate::egress::unavailable_egress(),
             ),

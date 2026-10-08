@@ -31,8 +31,11 @@
 //!
 //! [`ConjunctionAuthorizer`]: maknae_security::ConjunctionAuthorizer
 
+use std::sync::{PoisonError, RwLock};
+
 use crate::ceiling_authz::CeilingAuthorizer;
 use maknae_authz_basic::Baseline;
+use maknae_config::Ceiling;
 use maknae_security::{
     compose_backend_name, compose_decide_cited, compose_decide_cited_all, compose_subjects,
     Authorizer, Decided, Request, SubjectBinding, Verdict,
@@ -43,19 +46,46 @@ pub struct Composition<B: Baseline> {
     /// The non-removable discretionary floor. A named field, not a vector
     /// element: there is no way to build this type without one.
     baseline: B,
-    /// The non-removable mandatory floor: the booted classification ceiling,
+    /// The non-removable mandatory floor: the installed classification ceiling,
     /// evaluated on every request.
     ceiling: CeilingAuthorizer,
+    /// Held shared by every decision and exclusively by [`Self::install_live`].
+    live_turn: RwLock<()>,
 }
 
 impl<B: Baseline> Composition<B> {
     pub fn new(baseline: B, ceiling: CeilingAuthorizer) -> Self {
-        Self { baseline, ceiling }
+        Self {
+            baseline,
+            ceiling,
+            live_turn: RwLock::new(()),
+        }
     }
 
     /// The baseline operand, for the reload's snapshot swap.
     pub fn baseline(&self) -> &B {
         &self.baseline
+    }
+
+    pub fn ceiling(&self) -> &CeilingAuthorizer {
+        &self.ceiling
+    }
+
+    /// An accepted baseline's ceiling level and principal, installed together: a
+    /// decision is made wholly under the values before or after. A ceiling the
+    /// booted system does not rank is refused and neither operand changes.
+    pub fn install_live(
+        &self,
+        ceiling: Ceiling,
+        principal: maknae_config::Principal,
+    ) -> Result<(), String> {
+        let _turn = self
+            .live_turn
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        self.ceiling.install(ceiling)?;
+        self.baseline.install_principal(principal);
+        Ok(())
     }
 
     /// Baseline FIRST — see the module doc.
@@ -97,10 +127,18 @@ impl<B: Baseline> Authorizer for Composition<B> {
     /// projections, so every existing composition test covers what production
     /// runs.
     fn decide_cited(&self, req: &Request) -> Decided {
+        let _turn = self
+            .live_turn
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
         compose_decide_cited(&self.operands(), req)
     }
 
     fn decide_cited_all(&self, reqs: &[Request]) -> Vec<Decided> {
+        let _turn = self
+            .live_turn
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
         compose_decide_cited_all(&self.operands(), reqs)
     }
 
@@ -114,7 +152,7 @@ impl<B: Baseline> Authorizer for Composition<B> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use maknae_authz_basic::HermeticAuthorizer;
     use maknae_config::{BasicPolicy, Ceiling, ClassificationPolicy, Principal};
@@ -124,7 +162,7 @@ mod tests {
     /// A real `-basic` through the hermetic door: the production load, compile
     /// and decide sequence, with only the loader's ownership requirement
     /// relaxed so an unprivileged test can construct it.
-    struct DirGuard(PathBuf);
+    pub(crate) struct DirGuard(pub(crate) PathBuf);
 
     impl Drop for DirGuard {
         fn drop(&mut self) {
@@ -138,7 +176,11 @@ mod tests {
     /// (#216 -- `$TMPDIR` is under the `/var` symlink on macOS), the enrolled
     /// principal IS the test euid, and bindings name `root` so the enrolled-
     /// principal default role resolution is what grants (boot_gate.rs).
-    fn fixture(tag: &str, policy: &str, bindings: Option<&str>) -> (DirGuard, HermeticAuthorizer) {
+    pub(crate) fn fixture(
+        tag: &str,
+        policy: &str,
+        bindings: Option<&str>,
+    ) -> (DirGuard, HermeticAuthorizer) {
         use std::os::unix::fs::PermissionsExt;
         let dir =
             std::env::temp_dir().join(format!("maknae_composition_{tag}_{}", std::process::id()));
@@ -177,7 +219,7 @@ mod tests {
 
     const US: &BasicPolicy = &BasicPolicy;
 
-    fn secret() -> Ceiling {
+    pub(crate) fn secret() -> Ceiling {
         let mut c = Ceiling::baseline_for(US);
         c.classification = US.level_of("SECRET").unwrap();
         c
@@ -238,7 +280,7 @@ mod tests {
 
     /// The same read, with a classification MARKING stamped the way a future
     /// labeler would (trust-plane side, never client-supplied).
-    fn permitted_read_marked(home: &std::path::Path, marking: Option<&str>) -> Request {
+    pub(crate) fn permitted_read_marked(home: &std::path::Path, marking: Option<&str>) -> Request {
         let mut subject = Attributes::new();
         subject.insert(
             "uid",
@@ -276,7 +318,7 @@ mod tests {
         }
     }
 
-    const READ_POLICY: &str =
+    pub(crate) const READ_POLICY: &str =
         "schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/**)\"\n  deny: []\n";
 
     #[test]
@@ -521,6 +563,116 @@ mod tests {
             }
             other => panic!("expected the cross-system refusal, got {other:?}"),
         }
+    }
+
+    fn enrolled(uid: u32) -> Principal {
+        Principal {
+            name: "operator".into(),
+            uid,
+        }
+    }
+
+    fn other_uid() -> u32 {
+        nix::unistd::geteuid().as_raw().wrapping_add(1)
+    }
+
+    #[test]
+    fn an_installed_live_baseline_governs_the_next_decision_through_both_operands() {
+        let (g, basic) = fixture("live-install", READ_POLICY, None);
+        let c = Composition::new(basic, ceiling(Ceiling::baseline_for(US)));
+        let marked = permitted_read_marked(&g.0, Some("SECRET"));
+        assert!(matches!(c.decide(&marked), Verdict::Deny { .. }));
+        let euid = nix::unistd::geteuid().as_raw();
+        c.install_live(secret(), enrolled(euid)).unwrap();
+        assert!(matches!(c.decide(&marked), Verdict::Permit { .. }));
+        assert_eq!(c.ceiling().ceiling().classification.name, "SECRET");
+        c.install_live(secret(), enrolled(other_uid())).unwrap();
+        assert!(!matches!(c.decide(&marked), Verdict::Permit { .. }));
+        assert_eq!(c.baseline().principal(), enrolled(other_uid()));
+        c.install_live(Ceiling::baseline_for(US), enrolled(euid))
+            .unwrap();
+        assert!(matches!(c.decide(&marked), Verdict::Deny { .. }));
+        assert!(matches!(
+            c.decide(&permitted_read(&g.0)),
+            Verdict::Permit { .. }
+        ));
+    }
+
+    #[test]
+    fn a_refused_ceiling_installs_neither_operand() {
+        use maknae_classification_aus::AusPspf;
+        let (_g, basic) = fixture("live-refused", READ_POLICY, None);
+        let euid = nix::unistd::geteuid().as_raw();
+        let c = Composition::new(basic, ceiling(Ceiling::baseline_for(US)));
+        let mut aus = Ceiling::baseline_for(&AusPspf);
+        aus.classification = AusPspf.level_of("PROTECTED").unwrap();
+        let err = c.install_live(aus, enrolled(other_uid())).unwrap_err();
+        assert_eq!(err, "PROTECTED is not a level of the US system");
+        assert_eq!(c.baseline().principal(), enrolled(euid));
+        assert_eq!(c.ceiling().ceiling().classification, US.unmarked());
+    }
+
+    /// The old baseline grants the principal and refuses SECRET content; the new one
+    /// admits SECRET content and grants someone else. Only a decision that mixed the
+    /// old principal with the new ceiling would permit.
+    #[test]
+    fn a_decision_in_flight_during_an_install_sees_one_baseline_wholly() {
+        use maknae_authz_basic::EvaluationGate;
+        use std::sync::mpsc::channel;
+        use std::time::Duration;
+        let (g, mut basic) = fixture("live-race", READ_POLICY, None);
+        let gate = std::sync::Arc::new(EvaluationGate {
+            arrived: std::sync::Barrier::new(2),
+            release: std::sync::Barrier::new(2),
+        });
+        basic.park_evaluations(gate.clone());
+        let c = std::sync::Arc::new(Composition::new(basic, ceiling(Ceiling::baseline_for(US))));
+        let marked = permitted_read_marked(&g.0, Some("SECRET"));
+        let (decided_tx, decided) = channel();
+        {
+            let (c, marked) = (c.clone(), marked.clone());
+            std::thread::spawn(move || {
+                let _ = decided_tx.send(c.decide(&marked));
+            });
+        }
+        let barrier = |which: fn(&EvaluationGate) -> &std::sync::Barrier| {
+            let (tx, rx) = channel();
+            let gate = gate.clone();
+            std::thread::spawn(move || {
+                which(&gate).wait();
+                let _ = tx.send(());
+            });
+            rx.recv_timeout(Duration::from_secs(5)).is_ok()
+        };
+        assert!(
+            barrier(|g| &g.arrived),
+            "the decision never reached evaluation"
+        );
+        let (installed_tx, installed) = channel();
+        {
+            let c = c.clone();
+            std::thread::spawn(move || {
+                let _ = installed_tx.send(c.install_live(secret(), enrolled(other_uid())));
+            });
+        }
+        assert!(
+            installed.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the install landed while a decision was in flight"
+        );
+        assert!(barrier(|g| &g.release), "the decision was never released");
+        let verdict = decided
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the decision finishes");
+        assert!(
+            matches!(verdict, Verdict::Deny { ref reason } if reason.starts_with("ceiling: ")),
+            "{verdict:?}"
+        );
+        installed
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the install finishes")
+            .unwrap();
+        assert_eq!(c.ceiling().ceiling().classification.name, "SECRET");
+        assert_eq!(c.baseline().principal(), enrolled(other_uid()));
     }
 
     #[test]

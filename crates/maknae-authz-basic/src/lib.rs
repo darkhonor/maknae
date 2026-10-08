@@ -111,7 +111,7 @@ impl std::error::Error for AuthzBasicError {}
 /// and compiles with; nothing reads the files per request.
 #[derive(Debug)]
 pub struct BasicAuthorizer {
-    principal: maknae_config::Principal,
+    principal: RwLock<Arc<maknae_config::Principal>>,
     paths: PolicyPaths,
     digest: fn(&[u8]) -> [u8; 32],
     snapshot: RwLock<Arc<Snapshot>>,
@@ -136,7 +136,7 @@ impl BasicAuthorizer {
         snapshot: Arc<Snapshot>,
     ) -> Self {
         Self {
-            principal,
+            principal: RwLock::new(Arc::new(principal)),
             paths,
             digest,
             snapshot: RwLock::new(snapshot),
@@ -163,12 +163,30 @@ impl BasicAuthorizer {
             .unwrap_or_else(PoisonError::into_inner) = snapshot;
     }
 
+    /// The installed principal; the read guard is released before this returns.
+    fn current_principal(&self) -> Arc<maknae_config::Principal> {
+        self.principal
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The next decision reads `principal`; a decision holding the previous one
+    /// finishes on it.
+    fn install_principal(&self, principal: maknae_config::Principal) {
+        *self
+            .principal
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Arc::new(principal);
+    }
+
     fn decide_on(
         &self,
         snap: &Snapshot,
+        principal: &maknae_config::Principal,
         req: &maknae_security::Request,
     ) -> maknae_security::Decided {
-        let d = decide::decide_loaded_cited(snap.loaded(), &self.principal, req);
+        let d = decide::decide_loaded_cited(snap.loaded(), principal, req);
         #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
         if let Some(gate) = &self.evaluation_gate {
             gate.arrived.wait();
@@ -189,7 +207,7 @@ impl BasicAuthorizer {
         req: &maknae_security::Request,
     ) -> (maknae_security::Verdict, Option<&'static str>) {
         match tests::oracle::assemble(source) {
-            Ok(lp) => decide::decide_loaded_with_role(&lp, &self.principal, req),
+            Ok(lp) => decide::decide_loaded_with_role(&lp, &self.current_principal(), req),
             Err(_) => (maknae_security::Verdict::Indeterminate, None),
         }
     }
@@ -528,12 +546,14 @@ impl maknae_security::Authorizer for BasicAuthorizer {
     /// One decision from one snapshot: the verdict, the role and the cited
     /// rule all come from the `Arc` cloned out here.
     fn decide_cited(&self, req: &maknae_security::Request) -> maknae_security::Decided {
-        self.decide_on(&self.snapshot(), req)
+        self.decide_on(&self.snapshot(), &self.current_principal(), req)
     }
 
     fn decide_cited_all(&self, reqs: &[maknae_security::Request]) -> Vec<maknae_security::Decided> {
-        let snap = self.snapshot();
-        reqs.iter().map(|r| self.decide_on(&snap, r)).collect()
+        let (snap, principal) = (self.snapshot(), self.current_principal());
+        reqs.iter()
+            .map(|r| self.decide_on(&snap, &principal, r))
+            .collect()
     }
 
     fn subjects(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
@@ -565,7 +585,9 @@ impl maknae_security::Authorizer for BasicAuthorizer {
 pub trait Baseline: maknae_security::Authorizer + sealed::Sealed + Send + Sync + 'static {
     fn snapshot(&self) -> Arc<Snapshot>;
     fn install(&self, snapshot: Arc<Snapshot>);
-    fn principal(&self) -> &maknae_config::Principal;
+    fn principal(&self) -> maknae_config::Principal;
+    /// The next decision resolves the enrolled principal to `principal`.
+    fn install_principal(&self, principal: maknae_config::Principal);
     /// Load and validate the policy file through this baseline's own loader.
     /// Blocking I/O, including getpwnam: call it off the async workers.
     fn load_source(&self) -> Result<PolicySource, AuthzBasicError>;
@@ -592,12 +614,16 @@ impl Baseline for BasicAuthorizer {
         BasicAuthorizer::install(self, snapshot)
     }
 
-    fn principal(&self) -> &maknae_config::Principal {
-        &self.principal
+    fn principal(&self) -> maknae_config::Principal {
+        (*self.current_principal()).clone()
+    }
+
+    fn install_principal(&self, principal: maknae_config::Principal) {
+        BasicAuthorizer::install_principal(self, principal)
     }
 
     fn load_source(&self) -> Result<PolicySource, AuthzBasicError> {
-        PolicySource::load(self.paths.clone(), self.principal.clone())
+        PolicySource::load(self.paths.clone(), Baseline::principal(self))
     }
 
     fn digest(&self) -> fn(&[u8]) -> [u8; 32] {
@@ -617,14 +643,18 @@ impl Baseline for HermeticAuthorizer {
         self.inner.install(snapshot)
     }
 
-    fn principal(&self) -> &maknae_config::Principal {
-        &self.inner.principal
+    fn principal(&self) -> maknae_config::Principal {
+        Baseline::principal(&self.inner)
+    }
+
+    fn install_principal(&self, principal: maknae_config::Principal) {
+        self.inner.install_principal(principal)
     }
 
     fn load_source(&self) -> Result<PolicySource, AuthzBasicError> {
         PolicySource::load_with_requirement(
             self.inner.paths.clone(),
-            self.inner.principal.clone(),
+            Baseline::principal(&self.inner),
             self.req.clone(),
         )
     }
@@ -1518,10 +1548,57 @@ mod tests {
         );
     }
 
+    fn no_role() -> Verdict {
+        Verdict::NotApplicable {
+            note: Some("subject resolves to no role".into()),
+        }
+    }
+
+    #[test]
+    fn an_installed_principal_is_admin_on_the_next_decision_when_bindings_are_absent() {
+        let auth = authorizer_over(EMPTY, None, &[]);
+        assert_eq!(auth.decide(&whoami(501)), audit_permit());
+        let held = Baseline::principal(&auth);
+        let next = maknae_config::Principal {
+            name: "b".into(),
+            uid: 777,
+        };
+        Baseline::install_principal(&auth, next.clone());
+        assert_eq!(auth.decide(&whoami(501)), no_role());
+        assert_eq!(auth.decide(&whoami(777)), audit_permit());
+        assert_eq!(Baseline::principal(&auth), next);
+        assert_eq!(held, principal());
+        let all = auth.decide_cited_all(&[whoami(501), whoami(777)]);
+        assert_eq!(all[0].verdict, no_role());
+        assert_eq!(all[1].verdict, audit_permit());
+    }
+
+    #[test]
+    fn a_poisoned_principal_holder_still_decides_and_installs() {
+        let auth = Arc::new(authorizer_over(EMPTY, None, &[]));
+        let poisoner = Arc::clone(&auth);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.principal.write().unwrap();
+            panic!("poison the holder");
+        })
+        .join();
+        assert!(auth.principal.is_poisoned());
+        assert_eq!(auth.decide(&whoami(501)), audit_permit());
+        Baseline::install_principal(
+            &*auth,
+            maknae_config::Principal {
+                name: "b".into(),
+                uid: 777,
+            },
+        );
+        assert_eq!(auth.decide(&whoami(777)), audit_permit());
+        assert_eq!(auth.decide(&whoami(501)), no_role());
+    }
+
     #[test]
     fn the_baseline_trait_reports_this_authorizers_parts() {
         let auth = authorizer_over(EMPTY, Some(ADMIN_ROOT), &[("root", 0)]);
-        assert_eq!(Baseline::principal(&auth), &principal());
+        assert_eq!(Baseline::principal(&auth), principal());
         assert_eq!(Baseline::digest(&auth)(b"maknae"), test_digest(b"maknae"));
         let held = Baseline::snapshot(&auth);
         assert!(Arc::ptr_eq(&held, &auth.snapshot()));
@@ -2935,7 +3012,9 @@ mod tests {
     #[cfg(all(unix, feature = "hermetic-test-seam"))]
     mod hermetic {
         use super::super::*;
-        use super::{arrives, audit_permit, contained, principal, whoami, CONTAINED, EMPTY};
+        use super::{
+            arrives, audit_permit, contained, no_role, principal, whoami, CONTAINED, EMPTY,
+        };
         use maknae_security::{Authorizer, Verdict};
         use std::os::unix::fs::PermissionsExt;
 
@@ -3236,10 +3315,37 @@ mod tests {
         }
 
         #[test]
+        fn an_installed_principal_is_admin_on_the_next_hermetic_decision_when_bindings_are_absent()
+        {
+            let fx = Fixture::new("principal");
+            write(&fx.policy(), EMPTY);
+            write(&fx.bindings(), "schema_version: 1\n");
+            let auth = HermeticAuthorizer::new(fx.paths(), principal(), fixture_req(), test_digest)
+                .unwrap();
+            assert_eq!(auth.decide(&whoami(501)), audit_permit());
+            let next = maknae_config::Principal {
+                name: "b".into(),
+                uid: 777,
+            };
+            Baseline::install_principal(&auth, next.clone());
+            assert_eq!(auth.decide(&whoami(501)), no_role());
+            assert_eq!(auth.decide(&whoami(777)), audit_permit());
+            assert_eq!(Baseline::principal(&auth), next);
+            assert_eq!(
+                Baseline::load_source(&auth).unwrap().principal(),
+                &next,
+                "a reload loads with the installed principal"
+            );
+            auth.reload_from_file().unwrap();
+            assert_eq!(auth.decide(&whoami(777)), audit_permit());
+            assert_eq!(auth.decide(&whoami(501)), no_role());
+        }
+
+        #[test]
         fn the_hermetic_baseline_delegates_to_its_inner_authorizer() {
             let fx = Fixture::new("baseline");
             let auth = fx.authorizer("admin");
-            assert_eq!(Baseline::principal(&auth), &principal());
+            assert_eq!(Baseline::principal(&auth), principal());
             assert!(Arc::ptr_eq(
                 &Baseline::snapshot(&auth),
                 &auth.inner.snapshot()
