@@ -86,6 +86,8 @@ pub enum IdentityError {
     BadAttr { node: u64, attr: &'static str },
     UnknownRole(String),
     Ambiguous { node: u64, what: &'static str },
+    BaselineAttr { node: u64, attr: &'static str },
+    BaselineAmbiguous { node: u64, what: &'static str },
     LabelMismatch(String),
     Alias(String),
 }
@@ -98,6 +100,12 @@ impl fmt::Display for IdentityError {
                 f,
                 "identity layer: node {node} lacks a valid `{attr}` attribute"
             ),
+            Self::BaselineAttr { node, attr } => {
+                write!(f, "baseline: node {node} lacks a valid `{attr}` attribute")
+            }
+            Self::BaselineAmbiguous { node, what } => {
+                write!(f, "baseline: node {node} is ambiguous: {what}")
+            }
             Self::UnknownRole(r) => write!(f, "identity layer: role `{r}` is not compiled in"),
             Self::Ambiguous { node, what } => {
                 write!(f, "identity layer: node {node} is ambiguous: {what}")
@@ -350,17 +358,14 @@ fn build_baseline(mut b: GraphBuilder, a: &mut Alloc, bl: &BaselineLayer) -> Gra
     b
 }
 
-pub(crate) fn str_attr<'a>(
-    n: &'a NodeRecord,
-    attr: &'static str,
-) -> Result<&'a str, IdentityError> {
+fn str_attr<'a>(n: &'a NodeRecord, attr: &'static str) -> Result<&'a str, IdentityError> {
     match n.attrs.get(attr) {
         Some(AttrValue::Str(s)) => Ok(s),
         _ => Err(IdentityError::BadAttr { node: n.id.0, attr }),
     }
 }
 
-pub(crate) fn digest_attr(n: &NodeRecord) -> Result<[u8; 32], IdentityError> {
+fn digest_attr(n: &NodeRecord) -> Result<[u8; 32], IdentityError> {
     unhex(str_attr(n, ATTR_SHA256)?).ok_or(IdentityError::BadAttr {
         node: n.id.0,
         attr: ATTR_SHA256,
@@ -1597,6 +1602,20 @@ mod tests {
             (
                 IdentityError::LabelMismatch("admin".into()),
                 "identity layer: compiled node `admin` is labelled differently from the layer",
+            ),
+            (
+                IdentityError::BaselineAttr {
+                    node: 5,
+                    attr: "value",
+                },
+                "baseline: node 5 lacks a valid `value` attribute",
+            ),
+            (
+                IdentityError::BaselineAmbiguous {
+                    node: 6,
+                    what: "no level",
+                },
+                "baseline: node 6 is ambiguous: no level",
             ),
         ];
         for (e, want) in cases {

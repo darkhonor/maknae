@@ -805,7 +805,7 @@ fn snapshot_over(
     let build = |revision: u64, initiator: ProvenanceKind| {
         maknae_graph::identity::build(
             &layer,
-            None,
+            stored.as_ref().and_then(|s| s.baseline.as_ref()),
             &persisted_set,
             vocabulary,
             revision,
@@ -2208,6 +2208,42 @@ mod tests {
             a.decide_reporting_role(&liveness_req(Some(666))).1,
             Some("adversary")
         );
+    }
+
+    #[test]
+    fn a_rebuild_over_a_graph_carrying_a_baseline_keeps_it() {
+        let set = maknae_graph::kernel::persisted_compiled_set(LABEL);
+        let baseline = maknae_graph::baseline::BaselineLayer {
+            sections: [("core".to_string(), r#"{"deployment_id":"d"}"#.to_string())]
+                .into_iter()
+                .collect(),
+            system: "US".into(),
+            ceiling: "UNCLASSIFIED".into(),
+            sha256: [3; 32],
+            moved_from: Some("/var/log/maknae/old.jsonl".into()),
+        };
+        let old = Arc::new(
+            maknae_graph::identity::build(
+                &maknae_graph::identity::IdentityLayer {
+                    aliases: Default::default(),
+                    source: PATH.into(),
+                    label: LABEL.into(),
+                    bindings_sha256: Some([7; 32]),
+                    subjects: vec![],
+                },
+                Some(&baseline),
+                &set,
+                test_digest(&set.canonical_bytes().unwrap()),
+                1,
+                maknae_graph::record::ProvenanceKind::Seed,
+            )
+            .unwrap(),
+        );
+        let edited = source_with(SHIPPED, Some("schema_version: 1\nbindings: {}\n"), &[]);
+        let next = snapshot_over(&edited, LABEL, test_digest, Some(&old)).unwrap();
+        assert_eq!(next.revision(), 2);
+        let kept = maknae_graph::identity::extract(next.persisted()).unwrap();
+        assert_eq!(kept.baseline, Some(baseline));
     }
 
     #[test]

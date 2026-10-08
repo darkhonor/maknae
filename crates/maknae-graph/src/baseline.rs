@@ -1,8 +1,8 @@
 use crate::graph::Graph;
-use crate::identity::{digest_attr, str_attr, IdentityError};
+use crate::identity::{unhex, IdentityError};
 use crate::kernel::{
-    ATTR_VALUE, CLASSIFICATION_SYSTEM, CONFIG_SOURCE, DECLARES, INSTANCE, LEVEL, LEVEL_OF, PART_OF,
-    SECTION,
+    ATTR_SHA256, ATTR_VALUE, CLASSIFICATION_SYSTEM, CONFIG_SOURCE, DECLARES, INSTANCE, LEVEL,
+    LEVEL_OF, PART_OF, SECTION,
 };
 use crate::record::{AttrValue, NodeKind, NodeRecord};
 use std::collections::BTreeMap;
@@ -39,7 +39,18 @@ fn section_name(n: &NodeRecord) -> Option<&str> {
 }
 
 fn ambiguous(n: &NodeRecord, what: &'static str) -> IdentityError {
-    IdentityError::Ambiguous { node: n.id.0, what }
+    IdentityError::BaselineAmbiguous { node: n.id.0, what }
+}
+
+fn bad(n: &NodeRecord, attr: &'static str) -> IdentityError {
+    IdentityError::BaselineAttr { node: n.id.0, attr }
+}
+
+fn str_attr<'a>(n: &'a NodeRecord, attr: &'static str) -> Result<&'a str, IdentityError> {
+    match n.attrs.get(attr) {
+        Some(AttrValue::Str(s)) => Ok(s),
+        _ => Err(bad(n, attr)),
+    }
 }
 
 fn only<'a>(
@@ -65,27 +76,28 @@ pub fn extract(g: &Graph) -> Result<Option<BaselineLayer>, IdentityError> {
             None => Ok(None),
         };
     };
-    let sha256 = digest_attr(src)?;
+    let sha256 = unhex(str_attr(src, ATTR_SHA256)?).ok_or_else(|| bad(src, ATTR_SHA256))?;
     let moved_from = match src.attrs.get(ATTR_MOVED_FROM) {
         None => None,
         Some(AttrValue::Str(s)) => Some(s.clone()),
-        Some(_) => {
-            return Err(IdentityError::BadAttr {
-                node: src.id.0,
-                attr: ATTR_MOVED_FROM,
-            })
-        }
+        Some(_) => return Err(bad(src, ATTR_MOVED_FROM)),
     };
     let mut sections = BTreeMap::new();
     for n in g.nodes().iter().filter(|n| n.kind == SECTION) {
         let Some(name) = section_name(n) else {
             continue;
         };
+        if name.is_empty() {
+            return Err(ambiguous(n, "baseline section without a name"));
+        }
         let mut parts = g.out_edges(n.id, PART_OF);
         if parts.next().map(|e| e.to) != Some(src.id) || parts.next().is_some() {
             return Err(ambiguous(n, "baseline section outside the baseline source"));
         }
         sections.insert(name.to_string(), str_attr(n, ATTR_VALUE)?.to_string());
+    }
+    if sections.is_empty() {
+        return Err(ambiguous(src, "baseline without a section"));
     }
     let inst = match only(g, INSTANCE, "more than one instance")? {
         Some(n) if n.key == INSTANCE_KEY => n,
@@ -106,6 +118,7 @@ pub fn extract(g: &Graph) -> Result<Option<BaselineLayer>, IdentityError> {
         .key
         .strip_prefix(&sys.key)
         .and_then(|k| k.strip_prefix(':'))
+        .filter(|c| !c.is_empty())
         .filter(|_| g.out_edges(lvl.id, LEVEL_OF).count() == 1)
         .ok_or_else(|| ambiguous(lvl, "level outside the declared system"))?;
     Ok(Some(BaselineLayer {
@@ -412,7 +425,7 @@ mod tests {
 
     fn refusal(g: &Graph) -> (u64, &'static str) {
         match extract(g) {
-            Err(IdentityError::Ambiguous { node, what }) => (node, what),
+            Err(IdentityError::BaselineAmbiguous { node, what }) => (node, what),
             other => panic!("expected an ambiguity, got {other:?}"),
         }
     }
@@ -510,7 +523,11 @@ mod tests {
     fn a_level_keyed_under_another_system_is_refused() {
         let g = graph(Some(&baseline()));
         let lvl = id(&g, LEVEL, &level_key("US", "UNCLASSIFIED"));
-        for key in [level_key("AUS", "OFFICIAL"), "USUNCLASSIFIED".into()] {
+        for key in [
+            level_key("AUS", "OFFICIAL"),
+            "USUNCLASSIFIED".into(),
+            level_key("US", ""),
+        ] {
             let g = rebuilt(
                 &g,
                 |n| {
@@ -653,12 +670,40 @@ mod tests {
         ] {
             assert_eq!(
                 extract(&with_attr(&g, at, attr, v)),
-                Err(IdentityError::BadAttr {
+                Err(IdentityError::BaselineAttr {
                     node: at.0,
                     attr: want
                 }),
                 "{attr}"
             );
         }
+    }
+
+    #[test]
+    fn a_baseline_needs_a_named_section() {
+        let mut b = baseline();
+        b.sections.clear();
+        let g = graph(Some(&b));
+        let src = id(&g, CONFIG_SOURCE, BASELINE_SOURCE_KEY);
+        assert_eq!(refusal(&g), (src.0, "baseline without a section"));
+        let mut b = baseline();
+        b.sections.insert(String::new(), "{}".into());
+        let g = graph(Some(&b));
+        let unnamed = id(&g, SECTION, &section_key(""));
+        assert_eq!(refusal(&g), (unnamed.0, "baseline section without a name"));
+    }
+
+    #[test]
+    fn declares_and_level_of_can_only_reach_a_classification_system() {
+        let triples = |kind| {
+            SCHEMA
+                .triples
+                .iter()
+                .filter(|(_, e, _)| *e == kind)
+                .map(|(f, _, t)| (*f, *t))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(triples(DECLARES), [(INSTANCE, CLASSIFICATION_SYSTEM)]);
+        assert_eq!(triples(LEVEL_OF), [(LEVEL, CLASSIFICATION_SYSTEM)]);
     }
 }
