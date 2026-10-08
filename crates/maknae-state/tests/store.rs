@@ -323,6 +323,7 @@ fn sealed_graph(revision: u64, k: &WrappingKey) -> Vec<u8> {
     let i = inputs();
     let g = identity::build(
         &i.layer,
+        None,
         &i.compiled,
         i.digest,
         revision,
@@ -1780,14 +1781,17 @@ async fn forged_vocabulary_refuses() {
     let k = key(1);
     let i = inputs();
     let l = layer(None, &[]);
-    let claims_binary = identity::build(&l, &wider(), i.digest, 1, ProvenanceKind::Seed).unwrap();
-    let roles_only = identity::build(&l, &i.compiled, i.digest, 1, ProvenanceKind::Seed).unwrap();
+    let claims_binary =
+        identity::build(&l, None, &wider(), i.digest, 1, ProvenanceKind::Seed).unwrap();
+    let roles_only =
+        identity::build(&l, None, &i.compiled, i.digest, 1, ProvenanceKind::Seed).unwrap();
     let no_digest = rebuild(
         &roles_only,
         |n| (n.key != VOCABULARY_SOURCE_KEY).then(|| n.clone()),
         &i.compiled,
     );
-    let stale_claim = identity::build(&l, &wider(), [7; 32], 1, ProvenanceKind::Seed).unwrap();
+    let stale_claim =
+        identity::build(&l, None, &wider(), [7; 32], 1, ProvenanceKind::Seed).unwrap();
     for forged in [claims_binary, no_digest, stale_claim] {
         let fx = Fixture::new();
         let file = seal_graph(&forged, &k);
@@ -1833,7 +1837,7 @@ async fn a_binds_to_a_vanished_role_is_dropped_and_reported() {
         ],
     );
     let wide = vocabulary::digest(&wider()).unwrap();
-    let g = identity::build(&stored, &wider(), wide, 1, ProvenanceKind::Seed).unwrap();
+    let g = identity::build(&stored, None, &wider(), wide, 1, ProvenanceKind::Seed).unwrap();
     let file = seal_graph(&g, &k);
 
     let kept = inputs_with(layer(
@@ -1941,6 +1945,7 @@ async fn an_identity_layer_that_does_not_build_refuses_before_any_intent() {
 fn next_graph(revision: u64, i: &Inputs) -> Graph {
     identity::build(
         &i.layer,
+        None,
         &i.compiled,
         i.digest,
         revision,
@@ -2351,7 +2356,15 @@ async fn a_stored_node_the_identity_layer_does_not_project_is_rewritten() {
     let fx = Fixture::new();
     let k = key(1);
     let i = inputs();
-    let clean = identity::build(&i.layer, &i.compiled, i.digest, 1, ProvenanceKind::Seed).unwrap();
+    let clean = identity::build(
+        &i.layer,
+        None,
+        &i.compiled,
+        i.digest,
+        1,
+        ProvenanceKind::Seed,
+    )
+    .unwrap();
     let mut stray = clean
         .nodes()
         .iter()

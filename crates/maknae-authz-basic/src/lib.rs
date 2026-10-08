@@ -803,9 +803,16 @@ fn snapshot_over(
             .map_err(|e| refused(e.to_string()))?,
     );
     let build = |revision: u64, initiator: ProvenanceKind| {
-        maknae_graph::identity::build(&layer, &persisted_set, vocabulary, revision, initiator)
-            .map(Arc::new)
-            .map_err(|e| refused(e.to_string()))
+        maknae_graph::identity::build(
+            &layer,
+            None,
+            &persisted_set,
+            vocabulary,
+            revision,
+            initiator,
+        )
+        .map(Arc::new)
+        .map_err(|e| refused(e.to_string()))
     };
     let persisted = match (base, &stored) {
         (Some(g), Some(stored)) if stored.layer == layer => g.clone(),
@@ -2173,6 +2180,7 @@ mod tests {
                         role: "adversary".into(),
                     }],
                 },
+                None,
                 &set,
                 test_digest(&set.canonical_bytes().unwrap()),
                 1,

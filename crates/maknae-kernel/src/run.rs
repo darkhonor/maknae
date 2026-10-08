@@ -3559,6 +3559,7 @@ fn load_candidate<B: maknae_authz_basic::Baseline>(
         |revision| {
             maknae_graph::identity::build(
                 &next,
+                None,
                 &vocabulary.persisted,
                 vocabulary.digest,
                 revision,
@@ -5364,6 +5365,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
                     role: "adversary".into(),
                 }],
             },
+            None,
             &vocabulary.persisted,
             vocabulary.digest,
             1,

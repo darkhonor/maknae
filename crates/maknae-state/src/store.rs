@@ -490,6 +490,7 @@ fn build(
 ) -> Result<Graph, StoreError> {
     identity::build(
         layer,
+        None,
         inputs.compiled,
         inputs.vocabulary_sha256,
         revision,

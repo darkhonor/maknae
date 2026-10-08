@@ -444,6 +444,7 @@ mod tests {
         Arc::new(
             maknae_graph::identity::build(
                 layer,
+                None,
                 &persisted,
                 vocab,
                 1,

@@ -550,6 +550,7 @@ mod tests {
         Arc::new(
             build(
                 l,
+                None,
                 &persisted_compiled_set(LABEL),
                 [1; 32],
                 5,
