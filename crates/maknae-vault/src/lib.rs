@@ -6,6 +6,8 @@
 //! vaultrs's reqwest on the FIPS provider (spec §6.1).
 #![forbid(unsafe_code)]
 
+#[cfg(unix)]
+mod accounts;
 mod api_request;
 mod api_shape;
 mod auth;
@@ -54,6 +56,8 @@ mod stream;
 mod token_record;
 #[cfg(unix)]
 mod token_store;
+#[cfg(unix)]
+pub use accounts::NssAccounts;
 pub use api_shape::{WrapMismatch, MAX_TOKEN_BYTES, MAX_VAULT_BODY_BYTES};
 pub use auth::{AppRoleAuth, AuthMethod, VaultToken};
 pub use ca::{load_ca_pin, CaBundle};
@@ -97,6 +101,8 @@ pub use secret_source::{
 };
 #[cfg(unix)]
 pub use socket::bind_listener as bind_group_gated_uds;
+#[cfg(unix)]
+pub use socket::probe_bindable;
 #[cfg(unix)]
 pub use stream::{
     AcceptRejection, AuthenticatedStream, PlaneConnector, PlaneListener, RawAcceptError,

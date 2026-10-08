@@ -53,6 +53,40 @@ pub fn bind_listener(
     group: Option<nix::unistd::Gid>,
 ) -> Result<tokio::net::UnixListener, VaultError> {
     verify_parent_dir(path)?;
+    reclaim_stale(path)?;
+    let listener =
+        tokio::net::UnixListener::bind(path).map_err(|e| VaultError::SocketBind(e.to_string()))?;
+    // Group-own immediately after bind, before the chmod below — minimizes the insecure
+    // window (the parent dir is already owner-only, so nothing outside us can race the
+    // path in between regardless). Path-based `chown`, not `fchown` on the bound fd: a
+    // bound `UnixListener`'s fd is a socket, not a regular-file fd, and `fchown` on it
+    // returns `EINVAL` on at least macOS/BSD — `chown` on the pathname is the portable
+    // way to set ownership on a UDS's filesystem entry.
+    // On any post-bind setup failure below, unlink the pathname we just created before
+    // erroring: dropping a `UnixListener` does NOT unlink its filesystem entry, and a
+    // failed startup must not leave a stale socket behind (the next bind's liveness
+    // probe would reclaim it, but tooling/clients in between would see a dead socket).
+    let cleanup = |e: VaultError| {
+        let _ = std::fs::remove_file(path);
+        e
+    };
+    if let Some(gid) = group {
+        nix::unistd::chown(path, None, Some(gid)).map_err(|e| {
+            cleanup(VaultError::SocketGroupOwn(format!(
+                "chown group {gid}: {e}"
+            )))
+        })?;
+    }
+    // Atomic-enough: set 0660 immediately after bind (the parent dir is already owner-only,
+    // so there is no window a non-group process could connect through).
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))
+        .map_err(|e| cleanup(VaultError::SocketBind(format!("chmod 0660: {e}"))))?;
+    Ok(listener)
+}
+
+/// The existing entry at `path`: absent is fine, a stale socket is removed, a live
+/// one or anything that is not a socket refuses. The parent must already be verified.
+fn reclaim_stale(path: &Path) -> Result<(), VaultError> {
     match std::fs::symlink_metadata(path) {
         Ok(m) if m.file_type().is_socket() => {
             // Probe liveness before unlinking: a STABLE successful connect means a daemon
@@ -91,34 +125,45 @@ pub fn bind_listener(
         }
         Err(_) => {} // absent — normal
     }
-    let listener =
-        tokio::net::UnixListener::bind(path).map_err(|e| VaultError::SocketBind(e.to_string()))?;
-    // Group-own immediately after bind, before the chmod below — minimizes the insecure
-    // window (the parent dir is already owner-only, so nothing outside us can race the
-    // path in between regardless). Path-based `chown`, not `fchown` on the bound fd: a
-    // bound `UnixListener`'s fd is a socket, not a regular-file fd, and `fchown` on it
-    // returns `EINVAL` on at least macOS/BSD — `chown` on the pathname is the portable
-    // way to set ownership on a UDS's filesystem entry.
-    // On any post-bind setup failure below, unlink the pathname we just created before
-    // erroring: dropping a `UnixListener` does NOT unlink its filesystem entry, and a
-    // failed startup must not leave a stale socket behind (the next bind's liveness
-    // probe would reclaim it, but tooling/clients in between would see a dead socket).
-    let cleanup = |e: VaultError| {
-        let _ = std::fs::remove_file(path);
-        e
+    Ok(())
+}
+
+/// Whether a listener could be bound at `path` now: the same parent check and
+/// existing-entry classification as [`bind_listener`], then a bind whose own entry
+/// is removed only while it is still that entry.
+pub fn probe_bindable(path: &Path) -> Result<(), VaultError> {
+    verify_parent_dir(path)?;
+    let refused = |e: String| VaultError::SocketBind(format!("probing {}: {e}", path.display()));
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return Err(refused("no file name".into()));
     };
-    if let Some(gid) = group {
-        nix::unistd::chown(path, None, Some(gid)).map_err(|e| {
-            cleanup(VaultError::SocketGroupOwn(format!(
-                "chown group {gid}: {e}"
-            )))
-        })?;
+    let anchor = maknae_io::open_anchor(
+        parent,
+        maknae_io::AnchorRequired {
+            owner: Some(nix::unistd::geteuid().as_raw()),
+            mode_mask: Some(0o022),
+        },
+        maknae_io::StrategyPref::Auto,
+    )
+    .map_err(|e| refused(e.to_string()))?;
+    reclaim_stale(path)?;
+    let listener = std::os::unix::net::UnixListener::bind(path)
+        .map_err(|e| VaultError::SocketBind(e.to_string()))?;
+    let bound = anchor.entry_identity(name);
+    drop(listener);
+    let removed = match bound {
+        Ok(Some(id)) => anchor.remove_socket_if(name, id),
+        Ok(None) => Ok(false),
+        Err(e) => Err(e),
     }
-    // Atomic-enough: set 0660 immediately after bind (the parent dir is already owner-only,
-    // so there is no window a non-group process could connect through).
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))
-        .map_err(|e| cleanup(VaultError::SocketBind(format!("chmod 0660: {e}"))))?;
-    Ok(listener)
+    .map_err(|e| refused(e.to_string()))?;
+    if removed {
+        Ok(())
+    } else {
+        Err(refused(
+            "the probe's socket entry changed before it could be removed".into(),
+        ))
+    }
 }
 
 /// How long a first successful probe must remain answerable before it counts as a live
@@ -348,5 +393,74 @@ mod tests {
         let _l =
             bind_listener(&sock, None).expect("stale socket detected + removed, bind succeeds");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- #490: the accept's bind probe ----
+
+    #[test]
+    fn a_probe_of_an_absent_path_binds_and_leaves_nothing_behind() {
+        let dir = tmpdir("probe-absent", 0o700);
+        let sock = dir.join("s.sock");
+        probe_bindable(&sock).expect("an absent path in an owner-only dir is bindable");
+        assert!(
+            std::fs::symlink_metadata(&sock).is_err(),
+            "nothing left behind"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_probe_refuses_a_regular_file_and_leaves_it() {
+        let dir = tmpdir("probe-file", 0o700);
+        let sock = dir.join("s.sock");
+        std::fs::write(&sock, "keep").unwrap();
+        assert!(
+            matches!(probe_bindable(&sock), Err(VaultError::SocketBind(ref m)) if m.contains("not a socket"))
+        );
+        assert_eq!(std::fs::read_to_string(&sock).unwrap(), "keep");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_probe_refuses_a_live_listener_and_leaves_it_serving() {
+        let dir = tmpdir("probe-live", 0o700);
+        let sock = dir.join("s.sock");
+        let _live = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        assert!(
+            matches!(probe_bindable(&sock), Err(VaultError::SocketBind(ref m)) if m.contains("live listener"))
+        );
+        assert!(std::os::unix::net::UnixStream::connect(&sock).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_probe_reclaims_a_stale_socket_and_leaves_nothing_behind() {
+        let dir = tmpdir("probe-stale", 0o700);
+        let sock = dir.join("s.sock");
+        drop(std::os::unix::net::UnixListener::bind(&sock).unwrap());
+        assert!(sock.exists());
+        probe_bindable(&sock).expect("a stale socket is reclaimed, then the bind probes");
+        assert!(
+            std::fs::symlink_metadata(&sock).is_err(),
+            "nothing left behind"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_probe_refuses_a_parent_that_is_not_owner_only() {
+        let dir = tmpdir("probe-open", 0o770);
+        let sock = dir.join("s.sock");
+        assert!(matches!(
+            probe_bindable(&sock),
+            Err(VaultError::InsecureSocketDir { .. })
+        ));
+        assert!(std::fs::symlink_metadata(&sock).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_probe_refuses_a_relative_path() {
+        assert!(probe_bindable(Path::new("s.sock")).is_err());
     }
 }

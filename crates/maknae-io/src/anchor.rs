@@ -25,6 +25,14 @@ pub enum Strategy {
     Portable,
 }
 
+/// What [`Anchor::entry_identity`] reports about one directory entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EntryId {
+    pub dev: u64,
+    pub ino: u64,
+    pub socket: bool,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct Outcome<T> {
     pub value: T,
@@ -685,6 +693,52 @@ impl Anchor {
             value: removed,
             effective_strategy: Strategy::Portable,
         })
+    }
+
+    /// The identity of the entry `name` names in this directory, never following
+    /// a symlink; `None` when there is no such entry.
+    // The stat field types differ on macOS, where these casts are not no-ops.
+    #[allow(clippy::unnecessary_cast)]
+    pub fn entry_identity(&self, name: &std::ffi::OsStr) -> Result<Option<EntryId>, IoError> {
+        let name = self.one_component(name)?;
+        match syscall::fstatat_nofollow(&self.fd, name) {
+            Ok(st) => Ok(Some(EntryId {
+                dev: st.st_dev as u64,
+                ino: st.st_ino as u64,
+                socket: st.st_mode & nix::libc::S_IFMT == nix::libc::S_IFSOCK,
+            })),
+            Err(nix::errno::Errno::ENOENT) => Ok(None),
+            Err(e) => Err(crate::checks::map_errno_no_disambiguation(
+                e,
+                &self.path.join(name),
+            )),
+        }
+    }
+
+    /// Remove the socket `name` only while it is still the entry `expected`
+    /// identified; `Ok(false)` removes nothing.
+    pub fn remove_socket_if(
+        &self,
+        name: &std::ffi::OsStr,
+        expected: EntryId,
+    ) -> Result<bool, IoError> {
+        let name = self.one_component(name)?;
+        if !expected.socket || self.entry_identity(name)? != Some(expected) {
+            return Ok(false);
+        }
+        nix::unistd::unlinkat(&self.fd, name, nix::unistd::UnlinkatFlags::NoRemoveDir)
+            .map(|()| true)
+            .map_err(|e| crate::checks::map_errno_no_disambiguation(e, &self.path.join(name)))
+    }
+
+    fn one_component<'a>(&self, name: &'a std::ffi::OsStr) -> Result<&'a std::ffi::OsStr, IoError> {
+        let mut parts = Path::new(name).components();
+        match (parts.next(), parts.next()) {
+            (Some(std::path::Component::Normal(n)), None) if n == name => Ok(n),
+            _ => Err(IoError::EscapesAnchor {
+                path: self.path.join(name),
+            }),
+        }
     }
 
     /// Shared prologue for the file verbs: normalize, run the dominating pre-check,
@@ -3014,5 +3068,146 @@ mod tests {
         second
             .try_lock_exclusive()
             .expect("the lock is free once its guard drops");
+    }
+
+    // --- #490: the socket probe's own entry ----------------------------------
+    fn bound(a: &Anchor, name: &str) -> std::os::unix::net::UnixListener {
+        std::os::unix::net::UnixListener::bind(a.path.join(name)).unwrap()
+    }
+
+    #[test]
+    fn a_bound_socket_is_identified_and_removed() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "s");
+        let name = std::ffi::OsStr::new("p.sock");
+        assert_eq!(a.entry_identity(name).unwrap(), None);
+        let l = bound(&a, "p.sock");
+        let id = a.entry_identity(name).unwrap().expect("the bound entry");
+        assert!(id.socket);
+        let st = std::fs::symlink_metadata(a.path.join("p.sock")).unwrap();
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!((id.dev, id.ino), (st.dev(), st.ino()));
+        drop(l);
+        assert!(a.remove_socket_if(name, id).unwrap());
+        assert!(!a.path.join("p.sock").exists());
+        assert!(!a.remove_socket_if(name, id).unwrap(), "already gone");
+    }
+
+    #[test]
+    fn a_regular_file_is_never_removed_as_a_socket() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "s");
+        std::fs::write(a.path.join("f"), "x").unwrap();
+        let name = std::ffi::OsStr::new("f");
+        let id = a.entry_identity(name).unwrap().unwrap();
+        assert!(!id.socket);
+        assert!(!a.remove_socket_if(name, id).unwrap());
+        assert!(!a
+            .remove_socket_if(name, EntryId { socket: true, ..id })
+            .unwrap());
+        assert!(a.path.join("f").exists());
+    }
+
+    #[test]
+    fn a_socket_replaced_after_it_was_identified_is_not_removed() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "s");
+        let name = std::ffi::OsStr::new("p.sock");
+        let first = bound(&a, "p.sock");
+        let id = a.entry_identity(name).unwrap().unwrap();
+        drop(first);
+        std::fs::remove_file(a.path.join("p.sock")).unwrap();
+        let _keep = std::fs::File::create(a.path.join("pad")).unwrap();
+        let _second = bound(&a, "p.sock");
+        let now = a.entry_identity(name).unwrap().unwrap();
+        assert_ne!(now.ino, id.ino, "the replacement is a new inode");
+        assert!(!a.remove_socket_if(name, id).unwrap());
+        assert!(a.path.join("p.sock").exists());
+        assert!(!a
+            .remove_socket_if(
+                name,
+                EntryId {
+                    dev: now.dev.wrapping_add(1),
+                    ..now
+                }
+            )
+            .unwrap());
+        assert!(a.remove_socket_if(name, now).unwrap());
+    }
+
+    #[test]
+    fn a_symlink_is_identified_as_itself_and_not_followed() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "s");
+        let _l = bound(&a, "real.sock");
+        std::os::unix::fs::symlink(a.path.join("real.sock"), a.path.join("link")).unwrap();
+        let name = std::ffi::OsStr::new("link");
+        let id = a.entry_identity(name).unwrap().unwrap();
+        assert!(!id.socket, "the link, not its target");
+        assert!(!a.remove_socket_if(name, id).unwrap());
+    }
+
+    #[test]
+    fn an_entry_name_is_one_component() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "s");
+        std::fs::create_dir(a.path.join("sub")).unwrap();
+        let _l = bound(&a, "sub/p.sock");
+        for bad in ["sub/p.sock", "../s", ".", "..", "", "./p.sock", "p.sock/"] {
+            let name = std::ffi::OsStr::new(bad);
+            assert!(
+                matches!(a.entry_identity(name), Err(IoError::EscapesAnchor { .. })),
+                "{bad}"
+            );
+            let any = EntryId {
+                dev: 0,
+                ino: 0,
+                socket: true,
+            };
+            assert!(
+                matches!(
+                    a.remove_socket_if(name, any),
+                    Err(IoError::EscapesAnchor { .. })
+                ),
+                "{bad}"
+            );
+        }
+        assert!(a.path.join("sub/p.sock").exists());
+    }
+
+    #[test]
+    fn an_entry_that_cannot_be_examined_is_an_error_not_an_absence() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "s");
+        let long = "n".repeat(300);
+        let name = std::ffi::OsStr::new(&long);
+        assert!(matches!(a.entry_identity(name), Err(IoError::Io { .. })));
+        let any = EntryId {
+            dev: 0,
+            ino: 0,
+            socket: true,
+        };
+        assert!(matches!(
+            a.remove_socket_if(name, any),
+            Err(IoError::Io { .. })
+        ));
+    }
+
+    #[test]
+    fn a_socket_the_directory_forbids_removing_is_an_error() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "s");
+        let name = std::ffi::OsStr::new("p.sock");
+        drop(bound(&a, "p.sock"));
+        let id = a.entry_identity(name).unwrap().unwrap();
+        std::fs::set_permissions(&a.path, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let removed = a.remove_socket_if(name, id);
+        std::fs::set_permissions(&a.path, std::fs::Permissions::from_mode(0o750)).unwrap();
+        if nix::unistd::geteuid().is_root() {
+            assert_eq!(removed, Ok(true), "root's DAC override removes it");
+        } else {
+            assert!(matches!(removed, Err(IoError::Io { .. })), "{removed:?}");
+            assert!(a.path.join("p.sock").exists());
+        }
     }
 }

@@ -1762,7 +1762,9 @@ async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
     )
     .unwrap();
     std::fs::set_permissions(&cfg, std::fs::Permissions::from_mode(0o640)).unwrap();
-    let booted = maknae_kernel::boot(&fx.dir).expect("the AUS fixture boots");
+    let booted = maknae_config::load_config(&fx.dir, &[])
+        .and_then(maknae_kernel::assemble)
+        .expect("the AUS fixture boots");
     assert_eq!(booted.ceiling().classification.name, "PROTECTED");
     let emit = RecEmit::new();
     let authorizer = fx.authorizer();

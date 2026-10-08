@@ -427,7 +427,7 @@ mod tests {
     }
 
     /// THE wiring test. A minimal config directory whose `core.handling`
-    /// declares SECRET is booted for real through `crate::boot::boot`, and the
+    /// declares SECRET is booted for real through `crate::boot::assemble`, and the
     /// PDP built from it must refuse an unlabeled content read -- while the
     /// same build over a baseline config must be the identity. Round 4 of
     /// review showed that without this, `Ceiling::baseline()` in place of the
@@ -450,7 +450,9 @@ mod tests {
                 std::fs::Permissions::from_mode(0o640),
             )
             .unwrap();
-            let b = crate::boot::boot(&dir).expect("minimal config boots");
+            let b = crate::boot::read_files_as_owner(&dir)
+                .and_then(crate::boot::assemble)
+                .expect("minimal config boots");
             let _ = std::fs::remove_dir_all(&dir);
             b
         }

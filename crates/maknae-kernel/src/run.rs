@@ -2771,6 +2771,7 @@ pub fn run(config_dir: &Path) -> ExitCode {
             config_dir,
             Path::new(maknae_state::store::STATE_DIR),
             production_graph_key,
+            crate::boot::read_files,
         )
         .await
         {
@@ -4012,6 +4013,7 @@ fn parse_posture_marker(value: &maknae_config::Value) -> Option<crate::posture::
 /// Where the kernel graph key comes from. Production reads the enrolled credential;
 /// the boot tests inject a fixed key.
 type GraphKeyReader = fn(&Path) -> Result<maknae_vault::GraphKey, maknae_vault::VaultError>;
+type FileReader = fn(&Path) -> Result<maknae_config::Document, maknae_config::ConfigError>;
 
 fn production_graph_key(
     config_dir: &Path,
@@ -4024,6 +4026,7 @@ async fn run_inner(
     config_dir: &Path,
     state_dir: &Path,
     graph_key: GraphKeyReader,
+    files: FileReader,
 ) -> Result<ServeOutcome, RunError> {
     // An unregistered SIGHUP terminates the process; registered, one pending signal
     // is buffered until the reload task drains it after mint.
@@ -4039,7 +4042,9 @@ async fn run_inner(
     // lake + vault + transport + audit + principal — see boot.rs). The booted document
     // backs the plane client below, so no incompatible per-call reload rejects a
     // combined config.
-    let boot = crate::boot(config_dir).map_err(|e| RunError::Other(e.to_string()))?;
+    let boot = files(config_dir)
+        .and_then(crate::boot::assemble)
+        .map_err(|e| RunError::Other(e.to_string()))?;
     let transport = maknae_config::transport_from_section(boot.section("transport"))
         .map_err(|e| RunError::Other(e.to_string()))?;
     // #240: where the deputy is, and the outer bound on one send.
@@ -5006,6 +5011,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             dir,
             &state_dir(dir),
             test_graph_key,
+            crate::boot::read_files_as_owner,
         ))
     }
 
@@ -6576,7 +6582,11 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         let dir = Dir::new("file_baseline");
         std::fs::set_permissions(&dir.0, std::fs::Permissions::from_mode(0o700)).unwrap();
         put(&dir.0, "maknae.yaml", "core: {}\n", 0o640);
-        let b = file_baseline(&crate::boot::boot(&dir.0).unwrap());
+        let b = file_baseline(
+            &crate::boot::read_files_as_owner(&dir.0)
+                .and_then(crate::boot::assemble)
+                .unwrap(),
+        );
         assert_eq!(
             b,
             BaselineLayer {

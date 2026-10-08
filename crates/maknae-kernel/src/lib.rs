@@ -5,6 +5,7 @@
 //! and writes are subject-side attempts); KLC hooks/egress remain gated on ADR-0005/0007/0008.
 mod authz;
 pub mod baseline;
+pub mod baseline_check;
 mod blocking_guard;
 mod boot;
 mod boot_gate;
@@ -27,7 +28,7 @@ mod uid_gate;
 pub mod vocabulary;
 pub use authz::*;
 pub use blocking_guard::BLOCKING_BREAKER_MAX_IN_FLIGHT;
-pub use boot::{boot, BootConfig};
+pub use boot::{assemble, boot, read_files, BootConfig};
 pub use boot_gate::{
     authz_boot_gate, authz_policy_source, classify_bounds_load_error, egress_bounds_boot_gate,
     AuthzBootRefusal, EgressBoundsRefusal,

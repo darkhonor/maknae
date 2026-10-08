@@ -303,6 +303,8 @@ files = [
   "crates/maknae-graph/src/baseline.rs",
   # #490: which baseline runs, what is pending and what an accept names; a wrong arm runs or accepts what nobody saw.
   "crates/maknae-kernel/src/baseline.rs",
+  # #490: the one validator boot and accept share; a gap here accepts a baseline that cannot start.
+  "crates/maknae-kernel/src/baseline_check.rs",
   # The kernel graph store at rest (#488): a wrong check loads a forged, rolled-back or undecryptable enforcement state.
   "crates/maknae-state/src/anchor.rs",
   "crates/maknae-state/src/envelope.rs",
@@ -593,6 +595,10 @@ why = "asymmetric rustls verifier adapter (Stage 2); delegates chain/PoP to WebP
 [[t3]]
 path = "crates/maknae-vault/src/resolver.rs"
 why = "ArcSwapOption<CertifiedKey> ResolvesServerCert (Stage 2); TLS handshake hot path"
+
+[[t3]]
+path = "crates/maknae-vault/src/accounts.rs"
+why = "NSS lookups; the rules they feed are maknae-config's T1 resolve_readers"
 
 [[t3]]
 path = "crates/maknae-vault/src/socket.rs"
