@@ -41,7 +41,7 @@ Paste the block and start again. Once the store's bindings come from `bindings.y
 **`/etc/maknae` itself is now checked.** Both policy files are read through their directory, which must be owned by root and not group- or other-writable. The packages create it `root:_maknae 0750`, and earlier releases did not check it. A directory changed since then refuses to start (exit 3), naming the directory:
 
 ```text
-authz policy load refused: the directory /etc/maknae holding authz.yaml must be owned by root (uid 0) and not group- or other-writable
+maknaed: refusing to start: maknae daemon refused to start: the authorization policy could not be loaded: authz policy load refused: the directory /etc/maknae holding authz.yaml must be owned by root (uid 0) and not group- or other-writable
 ```
 
 Restore it with `sudo chown root:_maknae /etc/maknae && sudo chmod 0750 /etc/maknae`, then start again.

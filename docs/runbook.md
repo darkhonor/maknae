@@ -1236,7 +1236,7 @@ No action is needed. `maknae status` reports the new revision.
 
 ### Reseed
 
-A reseed replaces the store with a fresh one, seeded from `/etc/maknae/bindings.yaml`. Every containment comes from `bindings.yaml` today, so the reseed restores it, except a carried-forward containment whose name no longer resolves: a reseed has no stored uid to carry, so list such an id as `- uid: <n>` before you reseed. A reseed is recorded by its own `graph.seed` records, not as releases. Once live containment (#165) exists, a reseed will drop any containment not yet synced back to the policy files (#491).
+A reseed replaces the store with a fresh one, seeded from `/etc/maknae/bindings.yaml`. Every containment comes from `bindings.yaml` today, so the reseed restores it, except a carried-forward containment whose name no longer resolves: a reseed has no stored uid to carry, so list such an id as `- uid: <n>` before you reseed. A reseed is recorded by its own `graph.seed` records, not as releases, and a reseed over a formerly explicit store with a keyless `bindings.yaml` writes no principal-admin record. Once live containment (#165) exists, a reseed will drop any containment not yet synced back to the policy files (#491).
 
 ```bash
 sudo maknae reseed

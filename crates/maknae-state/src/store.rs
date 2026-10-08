@@ -699,8 +699,9 @@ async fn load(
 }
 
 /// Persists a validated identity transition: the containments it ends and, when it ends
-/// explicit bindings, the principal it makes admin; intent, publish, checkpoint. The publish's rename is the point of no return, so a failure after it is
-/// reported, not raised. Callers serialize commits; the floor is re-checked at publish.
+/// explicit bindings, the principal it makes admin; intent, publish, checkpoint. The
+/// publish's rename is the point of no return, so a failure after it is reported, not
+/// raised. Callers serialize commits; the floor is re-checked at publish.
 pub async fn commit(
     dir: &StateDir,
     key: &WrappingKey,
