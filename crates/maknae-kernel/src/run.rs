@@ -1231,6 +1231,11 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                         .as_ref()
                         .map(|k| k.identity.counts())
                         .unwrap_or_default(),
+                    baseline_pending: kernel_graph
+                        .as_ref()
+                        .as_ref()
+                        .map(|k| k.baseline.lines())
+                        .unwrap_or_default(),
                 }),
                 // The current snapshot, via the seam. `None` means the backend cannot
                 // enumerate, and that is reported as unavailable below --
@@ -1370,7 +1375,11 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                         }
                     }
                 }
-                Dispatch::NoBehaviour | Dispatch::MutationRequested | Dispatch::PromptRequested => {
+                Dispatch::NoBehaviour
+                | Dispatch::MutationRequested
+                | Dispatch::PromptRequested
+                | Dispatch::BaselineShowRequested
+                | Dispatch::BaselineAcceptRequested => {
                     unreachable!("outer match routes unprepared operations")
                 }
             };
@@ -1426,6 +1435,43 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                     .await
                 }
             }
+        }
+        Dispatch::BaselineShowRequested | Dispatch::BaselineAcceptRequested => {
+            let outcome = |posture: &'static str, reason: &'static str, result: &'static str| {
+                emit_request_outcome(
+                    &emit,
+                    &host,
+                    &socket,
+                    peer_uid,
+                    &peer_uri,
+                    peer_user.as_deref(),
+                    decided_role,
+                    decided_rule.as_ref(),
+                    session_id,
+                    seq.next(),
+                    verb_to_action(&request.verb),
+                    None,
+                    None,
+                    posture,
+                    reason,
+                    result,
+                    &au3_1,
+                )
+            };
+            if may_respond(outcome("permit", "authorized", "authorized").await)
+                && may_respond(outcome("deny", "baseline service not wired", "unavailable").await)
+            {
+                write_error_bounded(
+                    &mut stream,
+                    &cfg,
+                    class,
+                    ProtoErrCode::Internal,
+                    "baseline service not wired",
+                )
+                .await;
+            }
+            close_bounded(&mut stream).await;
+            return;
         }
         Dispatch::PromptRequested => {
             let Verb::SessionPrompt {

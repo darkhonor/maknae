@@ -1764,6 +1764,25 @@ async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
     assert_eq!(booted.ceiling().classification.name, "PROTECTED");
     let emit = RecEmit::new();
     let authorizer = fx.authorizer();
+    let pending_hash_status = {
+        let status = published_status(&authorizer, 41, "advanced");
+        let pending = maknae_kernel::baseline::pending(
+            &Default::default(),
+            &Err(maknae_kernel::baseline::InvalidFile {
+                cause: "a cause the status never carries".into(),
+                proposed: None,
+            }),
+        )
+        .expect("an invalid file is a pending set");
+        let hash = pending.hash.clone();
+        status
+            .baseline
+            .publish(maknae_kernel::baseline::BaselineState {
+                accepted: Default::default(),
+                pending: Some(pending),
+            });
+        (status, hash)
+    };
     let frame = drive_with(
         Some(&fx.dir),
         Arc::clone(&authorizer),
@@ -1775,7 +1794,7 @@ async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
         Arc::new(Default::default()),
         nondefault_transport(),
         Arc::new(booted.classification_policy_name().to_string()),
-        Arc::new(Some(published_status(&authorizer, 41, "advanced"))),
+        Arc::new(Some(pending_hash_status.0)),
     )
     .await
     .expect("a frame");
@@ -1800,6 +1819,8 @@ async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
                 ["unresolved=1"],
                 "#496: counts by kind, never the name"
             );
+            assert_eq!(s.baseline_pending, ["baseline: 1 pending (invalid)"]);
+            assert!(!format!("{s:?}").contains(&pending_hash_status.1[..12]));
             // The VALUE, not merely non-empty: wiring `listener` to any other
             // non-empty config string -- the audit path, the plane socket --
             // passed the emptiness check.
@@ -2054,6 +2075,101 @@ async fn the_new_terms_disclose_nothing_without_a_grant() {
         }
         assert_eq!(request_record(&emit.records()).outcome.result, "deny");
     }
+}
+
+/// The shipped `authz.yaml` grants the enrolled principal (bindings absent: the
+/// admin) exactly status, subject listing and the two baseline terms (#490).
+#[tokio::test]
+async fn the_shipped_policy_grants_the_principal_its_four_admin_terms_and_no_other_subject() {
+    let me = nix::unistd::geteuid().as_raw();
+    let hash = "a".repeat(64);
+    let granted = [
+        maknae_proto::Verb::AdminStatus,
+        maknae_proto::Verb::AdminSubjectList,
+        maknae_proto::Verb::AdminBaselineShow,
+        maknae_proto::Verb::AdminBaselineAccept { hash: hash.clone() },
+    ];
+    for (i, verb) in granted.iter().enumerate() {
+        for uid in [me, me.wrapping_add(7919)] {
+            let fx = Fixture::new(&format!("shipped-admin-{i}-{uid}"));
+            fx.write_policy(SHIPPED_POLICY);
+            let emit = RecEmit::new();
+            let frame = drive(
+                &fx.dir,
+                fx.authorizer(),
+                emit.clone(),
+                uid,
+                verb.clone(),
+                Duration::from_secs(5),
+            )
+            .await
+            .expect("a frame");
+            let result = maknae_proto::decode_response(&frame).unwrap().result;
+            let first = request_record(&emit.records()).outcome.result.clone();
+            if uid != me {
+                assert!(
+                    matches!(&result, RespResult::Err(e) if e.code == ProtoErrCode::Unauthorized),
+                    "{verb:?} uid {uid}: {result:?}"
+                );
+                assert_eq!(first, "deny", "{verb:?} uid {uid}");
+                continue;
+            }
+            assert_eq!(first, "permit", "{verb:?}");
+            match (verb, &result) {
+                (
+                    maknae_proto::Verb::AdminStatus,
+                    RespResult::Ok(maknae_proto::Payload::Status(s)),
+                ) => {
+                    assert!(s.baseline_pending.is_empty());
+                }
+                (maknae_proto::Verb::AdminSubjectList, RespResult::Err(e)) => {
+                    assert_eq!(
+                        e.code,
+                        ProtoErrCode::Internal,
+                        "no bindings file: cannot enumerate"
+                    );
+                }
+                (
+                    maknae_proto::Verb::AdminBaselineShow
+                    | maknae_proto::Verb::AdminBaselineAccept { .. },
+                    RespResult::Err(e),
+                ) => {
+                    assert_eq!(
+                        (e.code.clone(), e.message.as_str()),
+                        (ProtoErrCode::Internal, "baseline service not wired")
+                    );
+                    let records = emit.records();
+                    let last = records.last().unwrap();
+                    assert_eq!(
+                        (last.outcome.result.as_str(), last.outcome.posture.as_str()),
+                        ("deny", "unavailable")
+                    );
+                    assert!(
+                        !format!("{records:?}").contains(&hash),
+                        "the operand is never recorded"
+                    );
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+    let fx = Fixture::new("shipped-admin-configshow");
+    fx.write_policy(SHIPPED_POLICY);
+    let emit = RecEmit::new();
+    let frame = drive(
+        &fx.dir,
+        fx.authorizer(),
+        emit.clone(),
+        me,
+        maknae_proto::Verb::AdminConfigShow,
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("a frame");
+    assert!(matches!(
+        maknae_proto::decode_response(&frame).unwrap().result,
+        RespResult::Err(e) if e.code == ProtoErrCode::Unauthorized
+    ));
 }
 
 /// An oversized `ConfigView` is refused EXPLICITLY, not written oversized.

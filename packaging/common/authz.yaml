@@ -22,3 +22,14 @@ permissions:
     - "Write(~/.kube/**)"
     - "Write(~/.docker/config.json)"
     - "Write(~/.maknae/**)"
+
+# The administrative terms the enrolled administrator (`admin`) holds on a fresh
+# install: the basic operation of a single-user host (#490). Edit the list to
+# grant fewer or more; `admin.config.show` is grantable the same way.
+roles:
+  admin:
+    allow:
+      - "admin.status"
+      - "admin.subject.list"
+      - "admin.baseline.show"
+      - "admin.baseline.accept"

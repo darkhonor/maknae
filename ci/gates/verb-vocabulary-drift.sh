@@ -109,6 +109,8 @@ bad_clause=$(awk -F'	' '
     clause["kernel-action|not-granted"] = "no Verb variant"
     clause["action|not-granted-but-grantable"]  = "Ungranted by default; operator MAY grant per-role"
     clause["grantable|grantable-not-granted"]   = "operator MAY grant per-role via `roles:`"
+    clause["action|granted-in-shipped-file"]      = "granted to admin by the shipped authz.yaml; an install'\''s own authz.yaml decides"
+    clause["grantable|grantable-shipped-granted"] = "operator MAY grant per-role via `roles:`; the shipped authz.yaml grants it to admin"
   }
   /^#/ || !NF { next }
   {
@@ -126,4 +128,34 @@ if [ -n "$bad_clause" ]; then
   exit 1
 fi
 
-echo "verb-vocabulary-drift: $(wc -l < "$tmp/code" | tr -d ' ') terms, manifest exact"
+# The shipped grants (#490): the terms the shipped authz.yaml grants must be
+# exactly the manifest's shipped-file dispositions, both directions, and only
+# `roles.admin.allow` may carry them.
+SHIPPED_AUTHZ=packaging/common/authz.yaml
+[ -f "$SHIPPED_AUTHZ" ] || { echo "FAIL: missing $SHIPPED_AUTHZ"; exit 1; }
+roles_block() { awk '/^roles:/{r=1; print; next} r && /^[^ #]/{r=0} r' "$SHIPPED_AUTHZ"; }
+if roles_block | grep -Eq '^roles:[[:space:]]*[^[:space:]#]|(allow|deny):[[:space:]]*\['; then
+  echo "FAIL: $SHIPPED_AUTHZ writes a roles list inline; write one term per line"; exit 1
+fi
+unparsed=$(roles_block | grep -Ev '^roles:[[:space:]]*$|^[[:space:]]*(#.*)?$|^  [a-z_]+:[[:space:]]*$|^    (allow|deny):[[:space:]]*$|^      - "[a-z0-9_.]+"[[:space:]]*$' || true)
+if [ -n "$unparsed" ]; then
+  echo "FAIL: $SHIPPED_AUTHZ has a roles line this gate cannot read:"; printf '%s\n' "$unparsed" | sed 's/^/  /'; exit 1
+fi
+roles_block | awk '
+     /^  [a-z_]+:/{ role=$1; sub(/:$/, "", role) }
+     /^    [a-z_]+:/{ list=$1; sub(/:$/, "", list) }
+     /^      - "/{ if (match($0, /"[a-z0-9_.]+"/)) print role "\t" list "\t" substr($0, RSTART+1, RLENGTH-2) }' \
+  | sort -u > "$tmp/shipped"
+if awk -F'\t' '$1 != "admin" || $2 != "allow"' "$tmp/shipped" | grep -q .; then
+  echo "FAIL: $SHIPPED_AUTHZ may grant only roles.admin.allow:"; awk -F'\t' '$1 != "admin" || $2 != "allow"' "$tmp/shipped" | sed 's/^/  /'; exit 1
+fi
+cut -f3 "$tmp/shipped" | sort -u > "$tmp/shipped_terms"
+grep -v '^#' "$MANIFEST" | awk -F'\t' '$1 == "action" && $3 == "granted-in-shipped-file" { print $2 }' | sort -u > "$tmp/m_action"
+grep -v '^#' "$MANIFEST" | awk -F'\t' '$1 == "grantable" && $3 == "grantable-shipped-granted" { print $2 }' | sort -u > "$tmp/m_grantable"
+for m in m_action m_grantable; do
+  if ! diff -u "$tmp/$m" "$tmp/shipped_terms" > "$tmp/d_$m"; then
+    echo "FAIL: the shipped authz.yaml grants and the manifest's shipped-file dispositions disagree ($m):"; sed -n '3,$p' "$tmp/d_$m" | sed 's/^/  /'; exit 1
+  fi
+done
+
+echo "verb-vocabulary-drift: $(wc -l < "$tmp/code" | tr -d ' ') terms, manifest exact, $(wc -l < "$tmp/shipped_terms" | tr -d ' ') shipped grants"

@@ -900,6 +900,8 @@ mod tests {
                 "admin.status",
                 "admin.config.show",
                 "admin.subject.list",
+                "admin.baseline.show",
+                "admin.baseline.accept",
                 "session.prompt"
             ]
         );
@@ -1389,18 +1391,48 @@ mod tests {
 
     const SHIPPED: &str = include_str!("../../../packaging/common/authz.yaml");
 
+    /// The shipped file with its `roles:` block cut, for tests that write their own.
+    pub(crate) fn shipped_without_roles() -> &'static str {
+        let cut = SHIPPED
+            .find("\nroles:")
+            .expect("the shipped file has a roles block");
+        &SHIPPED[..=cut]
+    }
+
     /// Proof (a): the REAL shipped authz.yaml (byte-identical, via
     /// include_str!) parses, and with bindings absent the defaults branch
     /// decides: enrolled uid → admin rows; agent name → user rows.
     #[test]
     fn shipped_content_defaults_proof() {
         let policy = maknae_config::parse_authz(SHIPPED).expect("shipped authz.yaml parses");
+        let action_grants = validate_grants(&policy.action_grants).expect("shipped grants");
         let lp = decide::LoadedPolicy {
             policy,
             roles: binding::Roles::File(tests::oracle::resolve(&None, &UidMap::new()).unwrap()),
-            action_grants: decide::ActionGrants::default(),
+            action_grants,
             destinations: decide::DestinationGrants::default(),
         };
+        let ask = |uid: i64, action: &str| {
+            let mut r = liveness_req(Some(uid));
+            r.action = Action(action.into());
+            decide::decide_loaded(&lp, &principal(), &r)
+        };
+        for term in SHIPPED_ADMIN_TERMS {
+            assert_eq!(ask(501, term), audit_permit(), "{term} for the principal");
+            assert_eq!(
+                ask(4242, term),
+                Verdict::NotApplicable {
+                    note: Some("subject resolves to no role".into())
+                },
+                "{term} for an unbound uid"
+            );
+        }
+        assert_eq!(
+            ask(501, "admin.config.show"),
+            Verdict::NotApplicable {
+                note: Some("role admin: no rule for admin.config.show".into())
+            }
+        );
         let admin_whoami = decide::decide_loaded(&lp, &principal(), &whoami(501));
         assert!(matches!(admin_whoami, Verdict::Permit { .. }));
         assert!(matches!(
@@ -1415,6 +1447,24 @@ mod tests {
                 note: Some("subject resolves to no role".into())
             }
         );
+    }
+
+    const SHIPPED_ADMIN_TERMS: [&str; 4] = [
+        "admin.status",
+        "admin.subject.list",
+        "admin.baseline.show",
+        "admin.baseline.accept",
+    ];
+
+    #[test]
+    fn the_shipped_file_grants_admin_exactly_the_four_terms() {
+        let policy = maknae_config::parse_authz(SHIPPED).expect("shipped authz.yaml parses");
+        let roles: Vec<&String> = policy.action_grants.keys().collect();
+        assert_eq!(roles, ["admin"]);
+        let admin = &policy.action_grants["admin"];
+        assert_eq!(admin.allow, SHIPPED_ADMIN_TERMS);
+        assert!(admin.deny.is_empty());
+        assert!(policy.destinations.is_empty());
     }
 
     /// The decision names its rule, from the snapshot it was made on.
@@ -2535,6 +2585,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_baseline_terms_are_not_grantable_to_user() {
+        for term in ["admin.baseline.show", "admin.baseline.accept"] {
+            let got = finish(parse_with_roles(&format!(
+                "roles:\n  user:\n    allow: [\"{term}\"]\n"
+            )));
+            assert!(
+                matches!(got, Err(AuthzBasicError::TermNotGrantableForRole { ref role, term: ref t }) if role == "user" && t == term),
+                "{term}: {got:?}"
+            );
+        }
+        assert!(finish(parse_with_roles(
+            "roles:\n  admin:\n    allow: [\"admin.baseline.show\", \"admin.baseline.accept\"]\n"
+        ))
+        .is_ok());
+    }
+
     /// Validation gates the DENY list too: a typo'd deny would read as a
     /// denial in force while denying nothing.
     #[test]
@@ -2646,7 +2713,7 @@ mod tests {
             )
         );
         let keys: Vec<&str> = d.keys().map(String::as_str).collect();
-        assert_eq!(keys, ["bindings", "permissions", "schema_version"]);
+        assert_eq!(keys, ["bindings", "permissions", "roles", "schema_version"]);
         let empty = source_with(SHIPPED, Some("schema_version: 1\nbindings: {}\n"), &[])
             .section_digests(stand_in_digest);
         assert_eq!(empty["bindings"], stand_in_digest(b"{}"));
@@ -3537,7 +3604,11 @@ mod tests {
                 same("explicit", source_with(SHIPPED, Some(EXPLICIT), uids)),
                 same(
                     "explicit+grants",
-                    source_with(&format!("{SHIPPED}{GRANTS}"), Some(EXPLICIT), uids),
+                    source_with(
+                        &format!("{}{GRANTS}", super::shipped_without_roles()),
+                        Some(EXPLICIT),
+                        uids,
+                    ),
                 ),
                 same(
                     "explicit-no-match",
@@ -3735,7 +3806,7 @@ mod tests {
                 .chain(KERNEL_TERMS.iter())
                 .copied()
                 .collect();
-            assert_eq!(terms.len(), 59);
+            assert_eq!(terms.len(), 61);
             let (uids, paths, homes, ops) = (uids(), paths(), homes(), operations());
             assert_eq!(
                 (uids.len(), paths.len(), homes.len(), ops.len()),
@@ -3763,7 +3834,7 @@ mod tests {
                     distinct(&ops),
                     distinct(&destinations),
                 ),
-                (59, 9, 22, 5, 7, 4)
+                (61, 9, 22, 5, 7, 4)
             );
             let mut cells = 0usize;
             let mut mismatches: Vec<String> = Vec::new();
@@ -3876,7 +3947,7 @@ mod tests {
                 &mismatches[..mismatches.len().min(10)]
             );
             let fs_cells = 4 * 7 * 22 * 5 + 7 * 22 * 5;
-            let other_cells = 54 + 4;
+            let other_cells = 56 + 4;
             assert_eq!(cells, 11 * 9 * (fs_cells + other_cells));
             assert_eq!(
                 roles_seen,

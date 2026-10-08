@@ -819,7 +819,8 @@ fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
         | (v, p @ Payload::Status(_))
         | (v, p @ Payload::MutationAttempt(_))
         | (v, p @ Payload::SubjectList(_))
-        | (v, p @ Payload::PromptReply(_)) => Err(format!(
+        | (v, p @ Payload::PromptReply(_))
+        | (v, p @ Payload::Baseline(_)) => Err(format!(
             "protocol error: daemon returned a {p:?} payload for a {v:?} request"
         )),
     }
@@ -1612,6 +1613,7 @@ mod tests {
             kernel_graph_revision: Some(3),
             kernel_graph_anchor: Some("verified".into()),
             identity_problem_counts: vec![],
+            baseline_pending: vec![],
         };
         let base = status_lines(&s);
         assert_eq!(

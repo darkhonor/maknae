@@ -64,7 +64,7 @@ SURFACE=(
   # discloses it anyway" does not cover this path. Adding `au3_1`,
   # `vault.addr` or `principal.home` to this struct later would otherwise pass
   # every gate here. Prefix `status.` so its fields carry their own decisions.
-  "crates/maknae-proto/src/wire.rs|StatusView|status|8|wire"
+  "crates/maknae-proto/src/wire.rs|StatusView|status|9|wire"
   # The SIBLING disclosure struct, added in the same commit for the same
   # feature. Inventorying one of a matched pair is how the pair's second member
   # ships unreviewed: adding `home` or `clearance` to this struct changes no
@@ -81,6 +81,8 @@ SURFACE=(
   # payload reachable with NO `roles:` grant at all. Inventorying two of three
   # is how the third ships unreviewed, which is this table's own argument.
   "crates/maknae-proto/src/wire.rs|WhoamiView|whoami|2|wire"
+  # `admin.baseline.show`/`.accept` (#490): `changes` arrives already rendered by the config.show classifier.
+  "crates/maknae-proto/src/wire.rs|BaselineView|baseline|5|wire"
   "crates/maknae-vault/src/config.rs|VaultConfig|vault|8|config"
   "crates/maknae-vault/src/config.rs|UserAuthConfig|vault.user_auth|2|config"
 )
@@ -154,6 +156,7 @@ PAYLOAD_DISPOSITIONS=(
   "Status|struct:StatusView"
   "SubjectList|struct:RoleBindingView"
   "MutationAttempt|authorized-attempt"
+  "Baseline|struct:BaselineView"
   "PromptReply|bytes"   # #172: the provider's reply, released only on the session.prompt Permit (its own PEP)
 )
 payload_variants="$(awk '
