@@ -30,15 +30,25 @@ The first start then records one `graph.transition` (`root-file`) and a `graph.c
 maknaed: refusing to start: maknae daemon refused to start: the authorization policy could not be loaded: the store holds explicit bindings from authz.yaml; paste the bindings: block into /etc/maknae/bindings.yaml
 ```
 
-Paste the block and start again. Once the store's bindings come from `bindings.yaml`, an edit that leaves `bindings.yaml` without a `bindings:` key is allowed: the enrolled principal becomes admin, and each containment that edit ends is recorded as a `graph.identity` release. A `bindings.yaml` deleted over explicit bindings refuses instead ([configuration §2.3](configuration.md#23-bindingsyaml)).
+Paste the block and start again. Once the store's bindings come from `bindings.yaml`, an edit that leaves `bindings.yaml` without a `bindings:` key is allowed: every binding is dropped and the enrolled principal becomes admin. The edit is recorded as a `graph.identity` record, `uid <n>, the enrolled principal, now holds admin: bindings.yaml has no bindings: key`, plus one release per containment it ends. A `bindings.yaml` deleted over explicit bindings refuses instead ([configuration §2.3](configuration.md#23-bindingsyaml)).
 
 **Do not remove the block from `authz.yaml` and reload the old daemon before upgrading.** To the old daemon that means no bindings: the enrolled principal becomes admin and every containment is released.
 
 **A `bindings.yaml` you created before this release is kept.** dpkg asks whether to keep it, and keeping it is the default; RPM keeps it and writes the packaged file as `bindings.yaml.rpmnew`; macOS keeps it without asking. Check that it has `schema_version: 1` and is `root:_maknae 0640`.
 
+**Keep your `bindings.yaml` when dpkg asks, on this and every later upgrade.** Answering "install the package maintainer's version" replaces your file with the shipped one, which has no `bindings:` key, and the package then restarts `maknaed`. That is the keyless edit described above: every binding is dropped, the enrolled principal becomes admin, and every containment is released. The start records it (`now holds admin`, and `is no longer contained` for each containment). If it happens, restore your file from dpkg's `bindings.yaml.dpkg-old` and reload.
+
+**`/etc/maknae` itself is now checked.** Both policy files are read through their directory, which must be owned by root and not group- or other-writable. The packages create it `root:_maknae 0750`, and earlier releases did not check it. A directory changed since then refuses to start (exit 3), naming the directory:
+
+```text
+authz policy load refused: the directory /etc/maknae holding authz.yaml must be owned by root (uid 0) and not group- or other-writable
+```
+
+Restore it with `sudo chown root:_maknae /etc/maknae && sudo chmod 0750 /etc/maknae`, then start again.
+
 **What changes in behaviour.** Three cases that refused the whole policy now affect only one subject. Each is recorded as a `graph.identity` record, counted in `maknae status` and listed in `maknae subject-list`, and the rest of the policy loads:
 
-- a name with no account on the host holds no role (under `adversary`, nothing is contained for it);
+- a name with no account on the host holds no role (under `adversary`, the name contains nothing);
 - a subject listed under a role and under `adversary` is contained;
 - one uid under two names in two roles holds no role, unless one of them is `adversary`, when it is contained.
 
