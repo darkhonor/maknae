@@ -1212,7 +1212,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                         .as_ref()
                         .map(KernelGraphStatus::revision),
                     kernel_graph_anchor: kernel_graph.as_ref().as_ref().map(|k| k.anchor.clone()),
-                    identity_problems: Vec::new(),
+                    identity_problem_counts: Vec::new(),
                 }),
                 // The current snapshot, via the seam. `None` means the backend cannot
                 // enumerate, and that is reported as unavailable below --

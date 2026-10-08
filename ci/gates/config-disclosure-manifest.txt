@@ -59,7 +59,7 @@ always	status.authz_backend	which PDP produced a verdict; the point of the field
 always	status.classification_policy	which classification SYSTEM ranked a ceiling (ADR-0022); a name from the build's registry, never a level or a marking
 always	status.kernel_graph_revision	the kernel graph store's revision counter; no key, digest or content
 always	status.kernel_graph_anchor	the rollback-anchor state at boot (seeded, reseeded, verified, advanced, rollback-anchor-unavailable)
-always	status.identity_problems	per-subject problems in bindings.yaml at the last applied load (#496), each "kind=… uid=… names=… roles=…": the uid and the bindings.yaml entries involved (names with no account on the host included) and their roles — a narrower set than admin.subject.list discloses, through an independent grant
+always	status.identity_problem_counts	how many per-subject problems of each kind bindings.yaml had at the last applied load (#496), as fixed "<kind>=<count>" entries: counts only, never a name, uid or role; which subjects are affected is admin.subject.list's to disclose
 always	binding.role	the policy-file role token an operator would grep for
 always	binding.members	the identities bound to it; the answer admin.subject.list exists to give
 always	whoami.peer_plane_uri_san	the caller's own verified plane identity; it is who they already are

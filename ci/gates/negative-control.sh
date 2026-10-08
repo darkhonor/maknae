@@ -950,7 +950,7 @@ pub struct StatusView {
     pub classification_policy: String,
     pub kernel_graph_revision: Option<u64>,
     pub kernel_graph_anchor: Option<String>,
-    pub identity_problems: Vec<String>,
+    pub identity_problem_counts: Vec<String>,
 }
 
 pub struct RoleBindingView {
@@ -1136,7 +1136,7 @@ always	status.authz_backend	ships by construction
 always	status.classification_policy	ships by construction
 always	status.kernel_graph_revision	ships by construction
 always	status.kernel_graph_anchor	ships by construction
-always	status.identity_problems	ships by construction
+always	status.identity_problem_counts	ships by construction
 always	binding.role	ships by construction
 always	binding.members	ships by construction
 always	whoami.peer_plane_uri_san	ships by construction

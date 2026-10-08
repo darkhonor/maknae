@@ -693,12 +693,26 @@ fn status_lines(s: &maknae_proto::StatusView) -> Vec<String> {
         s.kernel_graph_revision,
         s.kernel_graph_anchor.as_deref(),
     ));
-    lines.extend(
-        s.identity_problems
-            .iter()
-            .map(|p| format!("identity problem      {p}")),
-    );
+    lines.extend(identity_problems_line(&s.identity_problem_counts));
     lines
+}
+
+fn identity_problems_line(counts: &[String]) -> Option<String> {
+    let parts: Vec<String> = counts
+        .iter()
+        .filter_map(|entry| match entry.split_once('=') {
+            Some((kind, n)) => match n.parse::<u64>() {
+                Ok(0) => None,
+                Ok(n) => Some(format!(
+                    "{n} {}",
+                    kind.replace(['-', '_'], " ").escape_default()
+                )),
+                Err(_) => Some(entry.escape_default().to_string()),
+            },
+            None => Some(entry.escape_default().to_string()),
+        })
+        .collect();
+    (!parts.is_empty()).then(|| format!("identity problems: {}", parts.join(", ")))
 }
 
 /// Print the successful `payload` IFF its variant matches the requested `verb`
@@ -1542,7 +1556,7 @@ mod tests {
             classification_policy: "US".into(),
             kernel_graph_revision: Some(3),
             kernel_graph_anchor: Some("verified".into()),
-            identity_problems: vec![],
+            identity_problem_counts: vec![],
         };
         let base = status_lines(&s);
         assert_eq!(
@@ -1550,18 +1564,28 @@ mod tests {
             Some("kernel graph: revision 3 (verified)")
         );
         assert!(!base.iter().any(|l| l.starts_with("identity problem")));
-        s.identity_problems = vec![
-            "kind=unbound uid=1002 names=gus roles=guest,user".into(),
-            "kind=unresolved uid=- names=ghost roles=user".into(),
+        s.identity_problem_counts = vec!["unbound=0".into(), "released=0".into()];
+        assert_eq!(status_lines(&s), base, "all-zero counts print nothing");
+        s.identity_problem_counts = vec![
+            "unresolved=1".into(),
+            "unbound=0".into(),
+            "carried-forward=1".into(),
+            "unresolved_adversary=2".into(),
         ];
         let lines = status_lines(&s);
         assert_eq!(&lines[..base.len()], &base[..]);
         assert_eq!(
             &lines[base.len()..],
-            [
-                "identity problem      kind=unbound uid=1002 names=gus roles=guest,user",
-                "identity problem      kind=unresolved uid=- names=ghost roles=user",
-            ]
+            ["identity problems: 1 unresolved, 1 carried forward, 2 unresolved adversary"]
+        );
+    }
+
+    #[test]
+    fn a_malformed_count_entry_is_shown_escaped_not_dropped() {
+        assert_eq!(
+            identity_problems_line(&["bad\u{1b}[2J".into(), "x=y".into(), "u\u{7}=1".into()])
+                .as_deref(),
+            Some("identity problems: bad\\u{1b}[2J, x=y, 1 u\\u{7}")
         );
     }
 

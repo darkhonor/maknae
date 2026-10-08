@@ -634,9 +634,10 @@ pub struct StatusView {
     /// `advanced` or `rollback-anchor-unavailable`.
     #[serde(default)]
     pub kernel_graph_anchor: Option<String>,
-    /// Per-subject problems in `bindings.yaml` at the last applied load (#496), one rendered line each.
+    /// How many per-subject problems of each kind `bindings.yaml` had at the last
+    /// applied load (#496), one `<kind>=<count>` entry per kind; never a name or uid.
     #[serde(default)]
-    pub identity_problems: Vec<String>,
+    pub identity_problem_counts: Vec<String>,
 }
 
 /// One role and the identities bound to it.
@@ -944,7 +945,7 @@ mod tests {
                 classification_policy: "US".into(),
                 kernel_graph_revision: kernel_graph.as_ref().map(|k| k.0),
                 kernel_graph_anchor: kernel_graph.map(|k| k.1),
-                identity_problems: vec![],
+                identity_problem_counts: vec![],
             })),
         }
     }
@@ -967,10 +968,10 @@ mod tests {
     }
 
     #[test]
-    fn a_status_with_identity_problems_round_trips() {
+    fn a_status_with_identity_problem_counts_round_trips() {
         let mut r = status(Some((7, "verified".into())));
         if let RespResult::Ok(Payload::Status(s)) = &mut r.result {
-            s.identity_problems = vec!["kind=unbound uid=1002 names=gus roles=guest,user".into()];
+            s.identity_problem_counts = vec!["unbound=2".into(), "released=1".into()];
         }
         assert_eq!(decode_response(&encode_response(&r).unwrap()).unwrap(), r);
     }
@@ -990,11 +991,11 @@ mod tests {
         )
         .unwrap();
         let view: StatusView = ciborium::from_reader(bytes.as_slice()).unwrap();
-        assert!(view.identity_problems.is_empty());
+        assert!(view.identity_problem_counts.is_empty());
         let mut new = Vec::new();
         ciborium::into_writer(
             &StatusView {
-                identity_problems: vec!["kind=unresolved uid=- names=ghost roles=user".into()],
+                identity_problem_counts: vec!["unresolved=1".into()],
                 ..view
             },
             &mut new,
