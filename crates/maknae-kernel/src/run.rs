@@ -3203,22 +3203,12 @@ struct GraphInputs {
 fn file_baseline(boot: &crate::BootConfig) -> BaselineLayer {
     let sections = maknae_config::document_sections(boot.document());
     BaselineLayer {
-        sha256: sections_digest(&sections),
+        sha256: crate::baseline::accepted_digest(&sections),
         sections,
         system: boot.classification_policy_name().to_string(),
         ceiling: boot.ceiling().classification.name.clone(),
         moved_from: None,
     }
-}
-
-fn sections_digest(sections: &maknae_config::BaselineSections) -> [u8; 32] {
-    let map = maknae_config::Value::Map(
-        sections
-            .iter()
-            .map(|(k, v)| (k.clone(), maknae_config::Value::Str(v.clone())))
-            .collect(),
-    );
-    maknae_state::envelope::sha256(maknae_config::canonical_json(&map).as_bytes())
 }
 
 #[cfg(test)]
@@ -3229,7 +3219,7 @@ fn test_baseline() -> BaselineLayer {
     )]
     .into();
     BaselineLayer {
-        sha256: sections_digest(&sections),
+        sha256: crate::baseline::accepted_digest(&sections),
         sections,
         system: "US".into(),
         ceiling: "UNCLASSIFIED".into(),
@@ -6503,7 +6493,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         )]
         .into();
         BaselineLayer {
-            sha256: sections_digest(&sections),
+            sha256: crate::baseline::accepted_digest(&sections),
             sections,
             ..test_baseline()
         }

@@ -301,6 +301,8 @@ files = [
   "crates/maknae-graph/src/schema.rs",
   # #490: the accepted baseline as the store holds it; a mis-read section runs what nobody accepted.
   "crates/maknae-graph/src/baseline.rs",
+  # #490: which baseline runs, what is pending and what an accept names; a wrong arm runs or accepts what nobody saw.
+  "crates/maknae-kernel/src/baseline.rs",
   # The kernel graph store at rest (#488): a wrong check loads a forged, rolled-back or undecryptable enforcement state.
   "crates/maknae-state/src/anchor.rs",
   "crates/maknae-state/src/envelope.rs",

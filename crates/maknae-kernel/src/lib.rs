@@ -4,6 +4,7 @@
 //! (boot_gate constructs it; handle() decides every request through the seam; reads
 //! and writes are subject-side attempts); KLC hooks/egress remain gated on ADR-0005/0007/0008.
 mod authz;
+pub mod baseline;
 mod blocking_guard;
 mod boot;
 mod boot_gate;
