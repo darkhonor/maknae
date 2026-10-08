@@ -5556,6 +5556,97 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
     }
 
     #[test]
+    fn a_store_whose_identity_came_from_authz_yaml_moves_to_bindings_yaml_in_one_transition() {
+        let fx = graph_fixture("graph_moved_source");
+        let paths = maknae_authz_basic::PolicyPaths::in_dir(&fx.dir.0);
+        let source = maknae_authz_basic::PolicySource::from_parts(
+            maknae_config::parse_authz("schema_version: 1\n").unwrap(),
+            maknae_config::parse_bindings(
+                "schema_version: 1\nbindings:\n  adversary: [\"root\"]\n",
+            )
+            .unwrap(),
+            [("root".to_string(), 0)].into_iter().collect(),
+            maknae_config::Principal {
+                name: "op".into(),
+                uid: 1000,
+            },
+            paths.clone(),
+        )
+        .unwrap();
+        let inputs = GraphInputs::new(&source, "UNCLASSIFIED").unwrap();
+        let old = maknae_graph::identity::IdentityLayer {
+            source: paths.authz.to_str().unwrap().to_string(),
+            label: "UNCLASSIFIED".into(),
+            bindings_sha256: inputs.identity.bindings_sha256,
+            subjects: vec![maknae_graph::identity::SubjectEntry {
+                uid: 0,
+                name: "root".into(),
+                role: "adversary".into(),
+            }],
+        };
+        assert!(old.bindings_sha256.is_some());
+        let seq = Seq::new();
+        let au3_1 = serde_json::Value::Null;
+        let ctx = BootCtx {
+            event: "boot",
+            host: "h",
+            socket: "s",
+            euid: nix::unistd::geteuid().as_raw(),
+            session_id: 9 << 32,
+            seq: &seq,
+            au3_1: &au3_1,
+        };
+        let boot = |identity: &maknae_graph::identity::IdentityLayer| {
+            block_on(boot_kernel_graph(
+                &fx.state,
+                key(),
+                &fx.sink,
+                &ctx,
+                &BootInputs {
+                    identity,
+                    ..inputs.boot()
+                },
+            ))
+            .unwrap()
+        };
+        let first = boot(&old);
+        assert_eq!(first.status.revision(), 1);
+        drop(first);
+        let seeded = trail(&fx).len();
+        let second = boot(&inputs.identity);
+        assert_eq!(
+            (second.status.revision(), second.status.anchor.as_str()),
+            (2, "verified")
+        );
+        let recs = trail(&fx);
+        let after: Vec<(&str, &str)> = recs[seeded..]
+            .iter()
+            .map(|(r, _)| {
+                (
+                    r.action.as_str(),
+                    r.graph.as_ref().map_or("", |g| g.anchor.as_str()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            after,
+            [
+                ("graph.checkpoint", "verified"),
+                ("graph.transition", "transitioning"),
+                ("graph.checkpoint", "transitioned")
+            ]
+        );
+        assert_eq!(
+            recs[seeded + 1].0.outcome.reason,
+            "intent recorded (root-file)"
+        );
+        assert!(!recs.iter().any(|(r, _)| r.action == "graph.migrate"));
+        let stored = maknae_graph::identity::extract(&second.graph).unwrap();
+        assert_eq!(stored.layer.source, paths.bindings.to_str().unwrap());
+        assert_eq!(stored.layer.subjects, old.subjects);
+    }
+
+    #[test]
     fn first_boot_seeds_then_checkpoints_and_a_restart_verifies() {
         let fx = graph_fixture("graph_first_boot");
         let status = boot_graph(&fx, key()).unwrap();
@@ -5796,6 +5887,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         assert!(
             identity.contains("built from bindings.yaml")
                 && identity.contains("/etc/maknae/bindings.yaml")
+                && !identity.contains("authz.yaml")
                 && !identity.contains("/var/lib/maknae")
                 && !identity.contains(reseed),
             "{identity}"
@@ -6810,6 +6902,12 @@ mod reload_tests {
             .collect()
     }
 
+    async fn bounded<T>(f: impl std::future::Future<Output = T>) -> T {
+        tokio::time::timeout(std::time::Duration::from_secs(60), f)
+            .await
+            .expect("the reload finished within its bound")
+    }
+
     fn adversary() -> maknae_security::Verdict {
         maknae_security::Verdict::Deny {
             reason: "subject contained: role=adversary".into(),
@@ -6943,6 +7041,84 @@ mod reload_tests {
         fx.reloader.run().await.unwrap();
         assert_eq!(fx.status.revision(), 2);
         assert_eq!(fx.reloader.dir.store_revision(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_bindings_yaml_edit_applies_at_reload() {
+        let fx = fixture("bedit", AUTHZ, Some(ROOT_ADMIN)).await;
+        assert!(matches!(
+            fx.root_whoami(),
+            maknae_security::Verdict::Permit { .. }
+        ));
+        let before = fx.status.revision();
+        fx.write_bindings(ROOT_ADVERSARY);
+        assert!(
+            matches!(fx.root_whoami(), maknae_security::Verdict::Permit { .. }),
+            "nothing re-reads the file per request"
+        );
+        let applied = bounded(fx.reloader.run()).await.unwrap();
+        assert!(applied.persisted);
+        assert_eq!(fx.root_whoami(), adversary());
+        assert_eq!(fx.status.revision(), before + 1);
+    }
+
+    #[tokio::test]
+    async fn an_authz_yaml_edit_that_adds_bindings_is_a_refused_reload() {
+        let fx = fixture("r30", AUTHZ, Some(ROOT_ADMIN)).await;
+        let store = fx.store_bytes();
+        fx.write_policy("schema_version: 1\nbindings:\n  adversary: [\"root\"]\n");
+        let got = bounded(fx.reloader.run()).await;
+        assert!(
+            matches!(&got, Err(crate::reload::Refusal::Load(m)) if m.contains("bindings.yaml")),
+            "{got:?}"
+        );
+        assert!(matches!(
+            fx.root_whoami(),
+            maknae_security::Verdict::Permit { .. }
+        ));
+        assert_eq!(fx.store_bytes(), store);
+        let last = outcomes(&fx.reload_records()).pop().unwrap();
+        assert_eq!((last.0.as_str(), last.1.as_str()), ("graph.reload", "deny"));
+        assert!(
+            last.2.starts_with("reload refused: policy load:") && last.2.contains("bindings.yaml"),
+            "{}",
+            last.2
+        );
+    }
+
+    #[tokio::test]
+    async fn an_invalid_bindings_yaml_refuses_the_whole_reload() {
+        let fx = fixture("bbad", AUTHZ, Some(ROOT_ADMIN)).await;
+        let store = fx.store_bytes();
+        let digest = fx
+            .baseline()
+            .snapshot()
+            .policy_sha256(maknae_state::envelope::sha256);
+        fx.write_policy("schema_version: 1\nroles:\n  admin:\n    allow: [admin.status]\n");
+        fx.write_bindings("schema_version: 1\nbindings: [\n");
+        let got = bounded(fx.reloader.run()).await;
+        assert!(
+            matches!(&got, Err(crate::reload::Refusal::Load(m)) if m.contains("bindings.yaml")),
+            "{got:?}"
+        );
+        assert_eq!(fx.store_bytes(), store);
+        assert_eq!(
+            fx.baseline()
+                .snapshot()
+                .policy_sha256(maknae_state::envelope::sha256),
+            digest,
+            "the authz.yaml edit made with it is not applied either"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bindings_yaml_without_the_key_is_bindings_absent_at_reload() {
+        let fx = fixture("brm", AUTHZ, Some("schema_version: 1\nbindings: {}\n")).await;
+        assert_eq!(fx.baseline().snapshot().subjects(), Some(vec![]));
+        fx.write_bindings("schema_version: 1\n");
+        let applied = bounded(fx.reloader.run()).await.unwrap();
+        assert!(applied.persisted, "the bindings Section node goes away");
+        assert_eq!(fx.baseline().snapshot().subjects(), None);
     }
 
     #[tokio::test]

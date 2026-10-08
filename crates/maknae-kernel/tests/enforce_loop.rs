@@ -528,7 +528,6 @@ async fn containment_flips_only_at_reload_and_reason_stays_off_the_wire() {
         RespResult::Ok(_)
     ));
 
-    fx.write_policy(EMPTY_AUTHZ);
     fx.write_bindings(BINDINGS_ROOT_ADVERSARY);
     let unreloaded = whoami_on(&fx, authorizer.clone(), RecEmit::new()).await;
     assert!(

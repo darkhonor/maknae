@@ -527,6 +527,50 @@ mod tests {
         assert_eq!(*seen.borrow(), Some(sent));
     }
 
+    #[test]
+    fn an_authz_yaml_that_still_carries_bindings_refuses_naming_bindings_yaml() {
+        let d = policy_dir(
+            "moved",
+            "schema_version: 1\nbindings:\n  admin: [\"root\"]\n",
+            None,
+        );
+        let got = authz_policy_source_with(&d, Some(principal()), hermetic_load);
+        let _ = std::fs::remove_dir_all(&d);
+        match got {
+            Err(AuthzBootRefusal::Construct(AuthzBasicError::Load(ref m))) => {
+                assert!(
+                    m.contains("bindings.yaml") && m.contains("authz.yaml"),
+                    "{m}"
+                )
+            }
+            other => panic!("expected Construct(Load), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_invalid_bindings_yaml_refuses_boot_and_a_missing_one_is_absent() {
+        let bad = policy_dir(
+            "badb",
+            EMPTY_POLICY,
+            Some("schema_version: 1\nbindings: [\n"),
+        );
+        let got = authz_policy_source_with(&bad, Some(principal()), hermetic_load);
+        assert!(
+            matches!(
+                &got,
+                Err(AuthzBootRefusal::Construct(AuthzBasicError::Load(m))) if m.contains("bindings.yaml")
+            ),
+            "{got:?}"
+        );
+        let missing = policy_dir("nob", EMPTY_POLICY, None);
+        let s = authz_policy_source_with(&missing, Some(principal()), hermetic_load).unwrap();
+        assert_eq!(s.bindings().roles, None);
+        assert!(s.bindings().is_missing());
+        for d in [bad, missing] {
+            let _ = std::fs::remove_dir_all(&d);
+        }
+    }
+
     /// Trigger 2, bindings half — the filesystem-free mapping killer that
     /// holds on EVERY lane (root included): a constructed `Bindings` error
     /// converts to the `Construct` arm and its rendering passes through.
