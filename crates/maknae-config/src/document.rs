@@ -70,6 +70,10 @@ impl Document {
         }
     }
 
+    pub(crate) fn winners(&self) -> impl Iterator<Item = (&str, &Value)> {
+        self.sections.iter().map(|(n, v, _)| (n.as_str(), v))
+    }
+
     /// Every value a section was given that precedence discarded — the base
     /// block a `config.d/` member replaced. Empty for a section written once.
     pub fn shadowed_sections<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a Value> + 'a {
@@ -495,59 +499,152 @@ fn flatten(
     v: &Value,
     out: &mut BTreeMap<String, String>,
 ) {
-    flatten_at(disclosable, section, prefix, prefix, v, out);
+    let mut found = Vec::new();
+    Walk {
+        disclosable,
+        section,
+        empty_is_leaf: false,
+    }
+    .walk(prefix, prefix, "", v, &mut found);
+    for leaf in found {
+        let (cpath, key) = leaf.paths(section);
+        if classify(section, cpath, disclosable) == Disclosure::Omit {
+            continue;
+        }
+        out.insert(
+            key.to_string(),
+            render(disclosable, section, cpath, leaf.value),
+        );
+    }
 }
 
-fn flatten_at(
-    disclosable: &[&str],
-    section: &str,
-    cpath: &str,
-    dpath: &str,
-    v: &Value,
-    out: &mut BTreeMap<String, String>,
-) {
-    match v {
-        Value::Map(entries) => {
-            for (k, sub) in entries {
-                flatten_at(
-                    disclosable,
-                    section,
-                    &join_path(cpath, k),
-                    &join_path(dpath, k),
-                    sub,
-                    out,
-                );
-            }
+struct Leaf<'a> {
+    cpath: String,
+    dpath: String,
+    /// Unambiguous where `dpath` is not: a key containing `.` cannot alias a nested one.
+    id: String,
+    value: &'a Value,
+}
+
+impl Leaf<'_> {
+    /// A section whose value is itself the leaf is classified and keyed by its own name.
+    fn paths<'s>(&'s self, section: &'s str) -> (&'s str, &'s str) {
+        if self.dpath.is_empty() {
+            (section, section)
+        } else {
+            (&self.cpath, &self.dpath)
         }
-        Value::Seq(items) if is_declared_sequence(disclosable, section, cpath) => {
-            let elements = format!("{cpath}[]");
-            for (i, item) in items.iter().enumerate() {
-                flatten_at(
-                    disclosable,
-                    section,
-                    &elements,
-                    &join_path(dpath, &i.to_string()),
-                    item,
-                    out,
-                );
-            }
-        }
-        _ => {
-            if dpath.is_empty() {
-                if classify(section, section, disclosable) == Disclosure::Omit {
-                    return;
+    }
+}
+
+fn leaves<'a>(disclosable: &[&str], section: &str, v: &'a Value) -> Vec<Leaf<'a>> {
+    let mut out = Vec::new();
+    Walk {
+        disclosable,
+        section,
+        empty_is_leaf: true,
+    }
+    .walk("", "", "", v, &mut out);
+    out
+}
+
+struct Walk<'d> {
+    disclosable: &'d [&'d str],
+    section: &'d str,
+    empty_is_leaf: bool,
+}
+
+impl Walk<'_> {
+    fn walk<'a>(&self, cpath: &str, dpath: &str, id: &str, v: &'a Value, out: &mut Vec<Leaf<'a>>) {
+        match v {
+            Value::Map(entries) if !(self.empty_is_leaf && entries.is_empty()) => {
+                for (k, sub) in entries {
+                    let kid = format!("{id}{}", crate::canonical_json(&Value::Str(k.clone())));
+                    self.walk(&join_path(cpath, k), &join_path(dpath, k), &kid, sub, out);
                 }
-                out.insert(
-                    section.to_string(),
-                    render(disclosable, section, section, v),
-                );
-                return;
             }
-            if classify(section, cpath, disclosable) == Disclosure::Omit {
-                return;
+            Value::Seq(items)
+                if is_declared_sequence(self.disclosable, self.section, cpath)
+                    && !(self.empty_is_leaf && items.is_empty()) =>
+            {
+                let elements = format!("{cpath}[]");
+                for (i, item) in items.iter().enumerate() {
+                    let dp = join_path(dpath, &i.to_string());
+                    self.walk(&elements, &dp, &format!("{id}[{i}]"), item, out);
+                }
             }
-            out.insert(dpath.to_string(), render(disclosable, section, cpath, v));
+            _ => out.push(Leaf {
+                cpath: cpath.to_string(),
+                dpath: dpath.to_string(),
+                id: id.to_string(),
+                value: v,
+            }),
         }
+    }
+}
+
+/// Rendered for the side of a baseline change on which a setting does not exist.
+pub const ABSENT: &str = "<absent>";
+
+/// The one line every change under a suppressed path collapses into.
+pub const SUPPRESSED_CHANGED: &str = "a suppressed setting changed (not disclosed)";
+
+/// The difference between two baselines, one line per changed setting, through
+/// the same classifier as `admin.config.show`: a masked value renders [`MASK`]
+/// on both sides, and every suppressed change collapses into one anonymous
+/// [`SUPPRESSED_CHANGED`] line that names no path.
+pub fn baseline_change_lines(old: &Document, new: &Document) -> Vec<String> {
+    let names: std::collections::BTreeSet<&str> =
+        old.winners().chain(new.winners()).map(|(n, _)| n).collect();
+    let mut lines = Vec::new();
+    let mut suppressed_changed = false;
+    for section in names {
+        let (before, after) = (leaves_by_id(old, section), leaves_by_id(new, section));
+        let ids: std::collections::BTreeSet<&String> = before.keys().chain(after.keys()).collect();
+        for id in ids {
+            let (b, a) = (before.get(id), after.get(id));
+            if b.map(|l| crate::canonical_json(l.value))
+                == a.map(|l| crate::canonical_json(l.value))
+            {
+                continue;
+            }
+            let Some(leaf) = b.or(a) else { continue };
+            if classify(section, leaf.paths(section).0, DISCLOSABLE) == Disclosure::Omit {
+                suppressed_changed = true;
+                continue;
+            }
+            let shown = |l: Option<&Leaf<'_>>| match l {
+                None => ABSENT.to_string(),
+                Some(l) => render_change_side(section, l),
+            };
+            let label = if leaf.dpath.is_empty() {
+                section.to_string()
+            } else {
+                format!("{section}.{}", leaf.dpath)
+            };
+            lines.push(format!("{label}: {} -> {}", shown(b), shown(a)));
+        }
+    }
+    lines.sort();
+    if suppressed_changed {
+        lines.push(SUPPRESSED_CHANGED.to_string());
+    }
+    lines
+}
+
+fn leaves_by_id<'a>(d: &'a Document, section: &str) -> BTreeMap<String, Leaf<'a>> {
+    d.section(section)
+        .map(|v| leaves(DISCLOSABLE, section, v))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|l| (l.id.clone(), l))
+        .collect()
+}
+
+fn render_change_side(section: &str, l: &Leaf<'_>) -> String {
+    match l.value {
+        Value::Map(_) => MASK.to_string(),
+        v => render(DISCLOSABLE, section, l.paths(section).0, v),
     }
 }
 
@@ -1546,5 +1643,171 @@ mod tests {
         );
         assert_eq!(scalar_declared["t"], MASK);
         assert!(!format!("{scalar_declared:?}").contains("hidden"));
+    }
+
+    fn bdoc(sections: &[(&str, &str)]) -> Document {
+        let s: crate::BaselineSections = sections
+            .iter()
+            .map(|(n, j)| (n.to_string(), j.to_string()))
+            .collect();
+        Document::from_baseline(&s).unwrap()
+    }
+
+    #[test]
+    fn baseline_change_lines_render_through_the_config_show_classifier() {
+        let old = bdoc(&[
+            (
+                "vault",
+                r#"{"addr":"https://a:8200","approle_mount":"approle"}"#,
+            ),
+            (
+                "core",
+                r#"{"deployment_id":"d","handling":{"ceiling":{"classification":"UNCLASSIFIED"}}}"#,
+            ),
+        ]);
+        let new = bdoc(&[
+            (
+                "vault",
+                r#"{"addr":"https://b:8200","approle_mount":"approle","insecure_plaintext_secret_path":"/x","token_ttl":"1h"}"#,
+            ),
+            (
+                "core",
+                r#"{"deployment_id":"d","handling":{"ceiling":{"classification":"SECRET"}}}"#,
+            ),
+            ("principal", r#"{"name":"op","uid":1000}"#),
+        ]);
+        let lines = baseline_change_lines(&old, &new);
+        assert!(
+            lines.contains(&"vault.addr: https://a:8200 -> https://b:8200".to_string()),
+            "{lines:?}"
+        );
+        assert!(
+            lines.contains(&format!("vault.token_ttl: {ABSENT} -> {MASK}")),
+            "{lines:?}"
+        );
+        assert_eq!(
+            lines.iter().filter(|l| *l == SUPPRESSED_CHANGED).count(),
+            1,
+            "{lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("handling")
+                || l.contains("insecure_plaintext")
+                || l.contains("SECRET")
+                || l.contains("UNCLASSIFIED")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.starts_with("principal.")),
+            "{lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("approle_mount")),
+            "an unchanged leaf is not listed: {lines:?}"
+        );
+        assert_eq!(
+            lines,
+            vec![
+                format!("principal.name: {ABSENT} -> op"),
+                format!("principal.uid: {ABSENT} -> 1000"),
+                "vault.addr: https://a:8200 -> https://b:8200".to_string(),
+                format!("vault.token_ttl: {ABSENT} -> {MASK}"),
+                SUPPRESSED_CHANGED.to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_masked_value_that_changed_is_listed_with_both_sides_masked() {
+        let old = bdoc(&[("audit", r#"{"siem":"https://u:p@a"}"#)]);
+        let new = bdoc(&[("audit", r#"{"siem":"https://u:q@a"}"#)]);
+        assert_eq!(
+            baseline_change_lines(&old, &new),
+            vec![format!("audit.siem: {MASK} -> {MASK}")]
+        );
+    }
+
+    #[test]
+    fn identical_documents_have_no_change_lines() {
+        let d = bdoc(&[("core", r#"{"deployment_id":"d"}"#)]);
+        assert!(baseline_change_lines(&d, &d).is_empty());
+    }
+
+    #[test]
+    fn a_removed_section_lists_each_leaf_as_absent_and_a_removed_suppressed_one_names_nothing() {
+        let old = bdoc(&[
+            ("principal", r#"{"name":"op","uid":1000}"#),
+            ("lake", r#"{"corpus":{"topology":"x"}}"#),
+        ]);
+        let new = bdoc(&[]);
+        assert_eq!(
+            baseline_change_lines(&old, &new),
+            vec![
+                format!("principal.name: op -> {ABSENT}"),
+                format!("principal.uid: 1000 -> {ABSENT}"),
+                SUPPRESSED_CHANGED.to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_scalar_section_is_labelled_by_its_name_and_classified_like_config_show() {
+        let old = bdoc(&[("x", "1"), ("lake", "1")]);
+        let new = bdoc(&[("x", "null"), ("lake", "2")]);
+        assert_eq!(
+            baseline_change_lines(&old, &new),
+            vec![
+                format!("x: {MASK} -> {NOT_SET}"),
+                SUPPRESSED_CHANGED.to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn an_emptied_container_is_a_change_and_is_classified_at_its_own_path() {
+        let old = bdoc(&[
+            ("core", r#"{"deployment_id":"d"}"#),
+            ("vault", r#"{"n":{"a":1}}"#),
+        ]);
+        let new = bdoc(&[
+            ("core", r#"{"deployment_id":"d","handling":{}}"#),
+            ("vault", r#"{"n":{}}"#),
+        ]);
+        assert_eq!(
+            baseline_change_lines(&old, &new),
+            vec![
+                format!("vault.n.a: {MASK} -> {ABSENT}"),
+                format!("vault.n: {ABSENT} -> {MASK}"),
+                SUPPRESSED_CHANGED.to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_dotted_key_cannot_hide_a_change_to_the_nested_key_it_spells() {
+        let old = bdoc(&[("vault", r#"{"a":{"b":2},"a.b":1}"#)]);
+        let new = bdoc(&[("vault", r#"{"a":{"b":2},"a.b":3}"#)]);
+        assert_eq!(
+            baseline_change_lines(&old, &new),
+            vec![format!("vault.a.b: {MASK} -> {MASK}")]
+        );
+    }
+
+    #[test]
+    fn a_declared_sequence_is_compared_element_by_element() {
+        let old = bdoc(&[("providers", r#"[{"models":[],"name":"a"}]"#)]);
+        let new = bdoc(&[(
+            "providers",
+            r#"[{"models":["m"],"name":"a"},{"models":[],"name":"b"}]"#,
+        )]);
+        assert_eq!(
+            baseline_change_lines(&old, &new),
+            vec![
+                format!("providers.0.models.0: {ABSENT} -> m"),
+                format!("providers.0.models: {MASK} -> {ABSENT}"),
+                format!("providers.1.models: {ABSENT} -> {MASK}"),
+                format!("providers.1.name: {ABSENT} -> b"),
+            ]
+        );
     }
 }

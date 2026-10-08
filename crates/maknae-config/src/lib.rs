@@ -32,6 +32,7 @@
 
 mod audit_cfg;
 mod authz;
+mod baseline_doc;
 mod bindings;
 mod bounds;
 mod bounds_io;
@@ -73,6 +74,7 @@ pub use authz::{
     destination_entry_is_acceptable, load_authz, parse_authz, AuthzError, AuthzPolicy, HomeUnbound,
     Match3, PathGlob, Pattern, RawActionGrants, RawDestinations, Request,
 };
+pub use baseline_doc::{document_sections, value_from_canonical_json, BaselineSections};
 pub use bounds::{
     bounds_from_document, kv_fragment_is_acceptable, mount_path_is_acceptable,
     path_is_within_prefix, vault_path_is_safe, EgressBounds, EGRESS_BOUNDS_FILE,
@@ -81,7 +83,8 @@ pub use bounds::{
 pub use bounds_io::load_egress_bounds;
 pub use ceiling::{ceiling_from_core, policy_name_from_core, Ceiling, IngestPosture};
 pub use document::{
-    effective_view, Document, Override, ResolvedSettings, SectionSpec, Source, MASK, NOT_SET,
+    baseline_change_lines, effective_view, Document, Override, ResolvedSettings, SectionSpec,
+    Source, ABSENT, MASK, NOT_SET, SUPPRESSED_CHANGED,
 };
 pub use egress_cfg::{
     egress_from_section, EgressConfig, EGRESS_DEADLINE_MS_MAX, EGRESS_SECTION,

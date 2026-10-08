@@ -111,6 +111,8 @@ pub enum ConfigError {
     InvalidPrincipal(String),
     /// `~/.maknae/providers.yaml` was refused, or names no entry that can be selected.
     UserProviders(String),
+    /// A persisted baseline section is not the canonical JSON this crate writes (#490).
+    BaselineValue(String),
 }
 
 impl std::fmt::Display for ConfigError {
@@ -209,6 +211,9 @@ impl std::fmt::Display for ConfigError {
             }
             ConfigError::UserProviders(reason) => {
                 write!(f, "providers.yaml: {reason}")
+            }
+            ConfigError::BaselineValue(reason) => {
+                write!(f, "baseline value refused: {reason}")
             }
         }
     }
@@ -423,6 +428,17 @@ mod tests {
         assert_eq!(
             s,
             "providers.yaml: no model access: no providers are defined"
+        );
+    }
+
+    #[test]
+    fn display_covers_baseline_value() {
+        assert_eq!(
+            format!(
+                "{}",
+                ConfigError::BaselineValue("baseline section core: x".into())
+            ),
+            "baseline value refused: baseline section core: x"
         );
     }
 }

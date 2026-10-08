@@ -213,6 +213,8 @@ files = [
   # #489: the canonical JSON each authz.yaml section's digest is taken over; a wrong
   # byte makes an unchanged section look edited, or an edited one look unchanged.
   "crates/maknae-config/src/value.rs",
+  # #490: the persisted baseline's form; a mis-decoded section runs a configuration nobody accepted.
+  "crates/maknae-config/src/baseline_doc.rs",
   "crates/maknae-audit-append/src/record.rs",
   # #172: the Egress seam — the DurableEgressIntent type gate, the reply admission, the
   # outcome record derivation. The write-ahead order is a type here, so this file is T1.

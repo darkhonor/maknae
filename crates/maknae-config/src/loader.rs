@@ -105,12 +105,11 @@ fn read_from_anchor(
     anchor: &maknae_io::Anchor,
     rel: &Path,
     desc: Option<maknae_io::DescendantRequired>,
-) -> Result<String, ConfigError> {
-    let bytes = anchor
+) -> Result<RawSource, ConfigError> {
+    Ok(anchor
         .read(rel, desc, CONFIG_ARTIFACT)
         .map_err(map_io)?
-        .value;
-    decode_utf8(&bytes)
+        .value)
 }
 
 #[cfg(unix)]
@@ -189,6 +188,23 @@ pub(crate) fn scan_dir(dir: &Path) -> Result<Vec<(Source, String)>, ConfigError>
 pub(crate) fn scan_dir_anchored(
     dir: &Path,
 ) -> Result<(maknae_io::Anchor, Vec<(Source, String)>), ConfigError> {
+    let (anchor, raw) = scan_dir_raw(dir)?;
+    Ok((anchor, decode_all(raw)?))
+}
+
+#[cfg(unix)]
+type RawSource = maknae_io::Zeroizing<Vec<u8>>;
+
+#[cfg(unix)]
+fn decode_all(raw: Vec<(Source, RawSource)>) -> Result<Vec<(Source, String)>, ConfigError> {
+    raw.into_iter()
+        .map(|(source, bytes)| Ok((source, decode_utf8(&bytes)?)))
+        .collect()
+}
+
+/// The scan's bytes, undecoded, so a source can be judged before anything is made of them.
+#[cfg(unix)]
+fn scan_dir_raw(dir: &Path) -> Result<(maknae_io::Anchor, Vec<(Source, RawSource)>), ConfigError> {
     let root = std::path::absolute(dir).map_err(io_err)?;
     let anchor = maknae_io::open_anchor_resolved(
         &root,
@@ -270,7 +286,7 @@ pub(crate) fn scan_dir_anchored(
 
     // Now read contents in one buffer-before-parse pass: base (required — missing
     // → Io) first, then each config.d file in lexical order. First violation aborts.
-    let mut out: Vec<(Source, String)> = Vec::new();
+    let mut out: Vec<(Source, RawSource)> = Vec::new();
     out.push((
         Source::Base,
         read_from_anchor(&anchor, Path::new("maknae.yaml"), None)?,
@@ -507,7 +523,7 @@ fn load_config_rooted_with(
 ) -> Result<Document, ConfigError> {
     validate_specs(specs)?;
     // The anchor the scan read through is the one every later check asks.
-    let (anchor, buffers) = scan_dir_anchored(dir)?;
+    let (anchor, raw) = scan_dir_raw(dir)?;
     let root = std::path::absolute(dir).map_err(io_err)?;
     let root_sections = match scope {
         RootScope::Sections(s) => s,
@@ -517,16 +533,17 @@ fn load_config_rooted_with(
                     path: failed.display().to_string(),
                 }
             })?;
-            for (source, body) in &buffers {
-                verify_root_source(&anchor, &root, source, body.as_bytes(), &requirement).map_err(
-                    |()| ConfigError::SourceNotRootOwned {
+            for (source, body) in &raw {
+                verify_root_source(&anchor, &root, source, body, &requirement).map_err(|()| {
+                    ConfigError::SourceNotRootOwned {
                         path: source_label(source),
-                    },
-                )?;
+                    }
+                })?;
             }
-            return assemble(buffers, &Registry { specs });
+            return assemble(decode_all(raw)?, &Registry { specs });
         }
     };
+    let buffers = decode_all(raw)?;
     // Keep the buffers: the re-read below must equal what was assembled.
     let doc = assemble(buffers.clone(), &Registry { specs })?;
     // The directories that decide WHICH candidate wins are verified once, as
@@ -1817,6 +1834,33 @@ mod tests {
             every(&d.0, &[], me()),
             Err(ConfigError::UnknownSection { .. })
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_source_is_judged_before_its_bytes_are_decoded() {
+        let d = new_dir("every-before-decode");
+        put(&d.0, "maknae.yaml", "core:\n  deployment_id: d\n", 0o640);
+        let cd = config_d(&d.0, 0o750);
+        let member = cd.join("10-a.yaml");
+        std::fs::write(&member, [0xff, 0xfe, 0x00]).unwrap();
+        std::fs::set_permissions(&member, std::fs::Permissions::from_mode(0o660)).unwrap();
+        let invalid_utf8 = |r: Result<Document, ConfigError>| matches!(r, Err(ConfigError::Io(ref m)) if m.contains("invalid UTF-8"));
+        assert!(invalid_utf8(load_config(&d.0, &[])));
+        match every(&d.0, &[], me()) {
+            Err(ConfigError::SourceNotRootOwned { path }) => {
+                assert!(path.ends_with("config.d/10-a.yaml"), "{path}")
+            }
+            other => panic!("expected the ownership refusal, got {other:?}"),
+        }
+        std::fs::set_permissions(&member, std::fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(invalid_utf8(every(&d.0, &[], me())));
+        assert!(invalid_utf8(load_config_rooted_with(
+            &d.0,
+            &[],
+            RootScope::Sections(&[]),
+            me()
+        )));
     }
 
     #[cfg(unix)]
