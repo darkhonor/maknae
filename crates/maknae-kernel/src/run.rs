@@ -2771,6 +2771,7 @@ pub fn run(config_dir: &Path) -> ExitCode {
             config_dir: config_dir.to_path_buf(),
         }),
         open_prepared: maknae_audit_append::AuditSink::open_prepared,
+        scan: production_scan,
         policy_load: maknae_authz_basic::PolicySource::load,
     };
     let code = runtime.block_on(async move {
@@ -3455,16 +3456,21 @@ async fn scan_anchor(
 }
 
 /// The latest checkpoint in `sink`'s trail and the bytes scanned to find it, bounded.
+fn production_scan(
+    sink: &maknae_audit_append::AuditSink,
+) -> Result<maknae_audit_append::ScanResult, maknae_audit_append::AuditError> {
+    sink.scan_back(maknae_state::anchor::is_checkpoint)
+}
+
 async fn last_checkpoint(
     sink: &Arc<maknae_audit_append::AuditSink>,
     state_dir: &Path,
+    scan: TrailScanner,
 ) -> Result<(Option<maknae_state::anchor::Checkpoint>, u64), RunError> {
     let scan_sink = Arc::clone(sink);
-    let scan = scan_anchor(SCAN_BACK_TIMEOUT, move || {
-        scan_sink.scan_back(maknae_state::anchor::is_checkpoint)
-    })
-    .await
-    .map_err(|e| graph_refusal(e, state_dir))?;
+    let scan = scan_anchor(SCAN_BACK_TIMEOUT, move || scan(&scan_sink))
+        .await
+        .map_err(|e| graph_refusal(e, state_dir))?;
     Ok((
         scan.line.as_deref().and_then(parse_checkpoint),
         scan.scanned_bytes,
@@ -3486,7 +3492,7 @@ async fn boot_kernel_graph(
     let dir = dir.map_err(|e| graph_refusal(GraphFailure::Store(e), state_dir))?;
     let (checkpoint, scanned_bytes) = match scanned {
         Some(found) => found,
-        None => last_checkpoint(sink, state_dir).await?,
+        None => last_checkpoint(sink, state_dir, production_scan).await?,
     };
     let mut audit = GraphBootAudit {
         sink: sink.as_ref(),
@@ -4137,6 +4143,9 @@ type FileReader = fn(&Path) -> Result<maknae_config::Document, maknae_config::Co
 type TrailOpener = fn(
     &maknae_config::AuditConfig,
 ) -> Result<maknae_audit_append::AuditSink, maknae_audit_append::AuditError>;
+type TrailScanner = fn(
+    &maknae_audit_append::AuditSink,
+) -> Result<maknae_audit_append::ScanResult, maknae_audit_append::AuditError>;
 type PolicyLoader =
     fn(
         maknae_authz_basic::PolicyPaths,
@@ -4151,6 +4160,7 @@ struct BootSeams {
     files: FileReader,
     env: Arc<dyn crate::baseline_check::Env>,
     open_prepared: TrailOpener,
+    scan: TrailScanner,
     policy_load: PolicyLoader,
 }
 
@@ -4282,10 +4292,24 @@ async fn run_inner(
         }
     };
     if reseeding {
-        crate::baseline_check::check_move(prior_trail.as_deref(), &validated.audit.jsonl_path, env)
-            .map_err(|e| {
-                RunError::Other(format!("{e}; see the runbook's \"Move the audit trail\""))
-            })?;
+        if let Err(e) = crate::baseline_check::check_move(
+            prior_trail.as_deref(),
+            &validated.audit.jsonl_path,
+            env,
+        ) {
+            let cause = format!("{e}; see the runbook's \"Move the audit trail\"");
+            return Err(refuse_start(
+                Invalid::Environment(cause.clone()),
+                cause,
+                Some(&start.run),
+                prior_trail.as_deref(),
+                create,
+                config_dir,
+                seams,
+                &ids,
+            )
+            .await);
+        }
     }
 
     let socket = validated.transport.socket_path.display().to_string();
@@ -4305,6 +4329,7 @@ async fn run_inner(
         &validated.audit,
         create,
         seams.open_prepared,
+        seams.scan,
         state_dir,
         &ctx,
     )
@@ -4556,6 +4581,7 @@ async fn open_trail(
     cfg: &maknae_config::AuditConfig,
     create: bool,
     open_prepared: TrailOpener,
+    scan: TrailScanner,
     state_dir: &Path,
     ctx: &BootCtx<'_>,
 ) -> Result<OpenedTrail, RunError> {
@@ -4585,11 +4611,11 @@ async fn open_trail(
         Err(e) => return Err(refused_before_move(&old, ctx, RunError::Other(e.to_string())).await),
     };
     let scanned = match &old {
-        Ok(old) => last_checkpoint(old, state_dir).await,
+        Ok(old) => last_checkpoint(old, state_dir, scan).await,
         Err(_) => Ok((None, 0)),
     };
     let ((old_checkpoint, old_bytes), (new_checkpoint, new_bytes)) = match scanned {
-        Ok(o) => match last_checkpoint(&new, state_dir).await {
+        Ok(o) => match last_checkpoint(&new, state_dir, scan).await {
             Ok(n) => (o, n),
             Err(e) => return Err(refused_before_move(&old, ctx, e).await),
         },
@@ -7648,6 +7674,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             files: crate::boot::read_files_as_owner,
             env: Arc::new(TestEnv::default()),
             open_prepared: maknae_audit_append::AuditSink::open_existing,
+            scan: production_scan,
             policy_load: maknae_authz_basic::PolicySource::load,
         }
     }
@@ -8164,6 +8191,54 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         assert!(old[0].outcome.reason.contains("not append-only"));
     }
 
+    static SCANS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    static FAIL_SCAN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    fn failing_scan(
+        sink: &maknae_audit_append::AuditSink,
+    ) -> Result<maknae_audit_append::ScanResult, maknae_audit_append::AuditError> {
+        use std::sync::atomic::Ordering::SeqCst;
+        if SCANS.fetch_add(1, SeqCst) + 1 == FAIL_SCAN.load(SeqCst) {
+            return Err(maknae_audit_append::AuditError::ReadPrimary(
+                "injected scan failure".into(),
+            ));
+        }
+        production_scan(sink)
+    }
+
+    #[test]
+    fn a_trail_scan_that_fails_during_a_move_is_refused_in_the_old_trail_only() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let _g = env_lock();
+        for (nth, which) in [(1, "old"), (2, "new")] {
+            let d = fixture(&format!("scan-fails-{which}"));
+            let _ = boot(&d);
+            let new = prepare_trail(&d, "audit-2.jsonl");
+            write_yaml(&d, "", "https://v.example:8200", &new, "");
+            let before = trail_of(&d, "audit.jsonl").len();
+            SCANS.store(0, SeqCst);
+            FAIL_SCAN.store(nth, SeqCst);
+            let r = block_on_run_inner_with(
+                &d.0,
+                BootSeams {
+                    scan: failing_scan,
+                    ..seams_with(TestEnv::default())
+                },
+            );
+            FAIL_SCAN.store(0, SeqCst);
+            assert!(matches!(r, Err(RunError::Graph { .. })), "{which}: {r:?}");
+            assert!(trail_of(&d, "audit-2.jsonl").is_empty(), "{which}");
+            let old = trail_of(&d, "audit.jsonl")[before..].to_vec();
+            assert_eq!(old.len(), 1, "{which}: {old:?}");
+            assert_eq!(old[0].action, GRAPH_LOAD_ACTION, "{which}");
+            assert!(
+                old[0].outcome.reason.contains("injected scan failure"),
+                "{which}: {}",
+                old[0].outcome.reason
+            );
+        }
+    }
+
     fn yaml_with_offload(d: &Dir, trail: &Path) {
         let yaml = format!(
             "core:\n  deployment_id: dev-01\nvault:\n  addr: https://v.example:8200\ntransport:\n  socket_path: {}\naudit:\n  jsonl_path: {}\n  siem: https://siem.example:6514\n{PRINCIPAL_BLOCK}",
@@ -8398,11 +8473,14 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             "{r:?}"
         );
         assert!(!sibling.exists(), "nothing created");
+        let stored = trail_of(&e, "audit.jsonl")[before..].to_vec();
         assert_eq!(
-            trail_of(&e, "audit.jsonl").len(),
-            before,
-            "nothing appended"
+            stored.len(),
+            1,
+            "the refusal is recorded in the stored trail"
         );
+        assert_eq!(stored[0].action, "start");
+        assert!(stored[0].outcome.reason.contains("no such file"));
     }
 
     #[test]
