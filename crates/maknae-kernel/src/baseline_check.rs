@@ -23,6 +23,8 @@ pub struct Validated {
 pub enum Invalid {
     /// Exit 1; at a first start, before the audit sink opens, with no record.
     Document(String),
+    /// Exit 1, audited: what today's boot refuses after the audit sink opens.
+    Environment(String),
     /// Exit 4, audited (#189).
     Offload(String),
     /// Exit 3, audited (#77).
@@ -32,13 +34,16 @@ pub enum Invalid {
 impl Invalid {
     pub fn cause(&self) -> &str {
         match self {
-            Invalid::Document(m) | Invalid::Offload(m) | Invalid::Principal(m) => m,
+            Invalid::Document(m)
+            | Invalid::Environment(m)
+            | Invalid::Offload(m)
+            | Invalid::Principal(m) => m,
         }
     }
 
     pub fn exit_code(&self) -> u8 {
         match self {
-            Invalid::Document(_) => 1,
+            Invalid::Document(_) | Invalid::Environment(_) => 1,
             Invalid::Principal(_) => 3,
             Invalid::Offload(_) => 4,
         }
@@ -78,9 +83,25 @@ fn document(e: impl std::fmt::Display) -> Invalid {
     Invalid::Document(e.to_string())
 }
 
-/// Today's boot order: the document, transport, egress, audit, the offload gate,
-/// the principal, the egress bounds and account, the root vault keys, the vault
-/// block.
+fn environment(e: impl std::fmt::Display) -> Invalid {
+    Invalid::Environment(e.to_string())
+}
+
+/// The entry point for a document read from the files.
+pub fn validate_file(
+    doc: Document,
+    mode: Mode,
+    config_dir: &Path,
+    env: &dyn Env,
+) -> Result<Validated, Invalid> {
+    validate(doc, mode, config_dir, env)
+}
+
+/// Today's boot order and exit codes: the document, transport, egress and audit
+/// sections (1, before the sink opens); the offload gate (4); a present principal
+/// and what `config.d` shadowed of it (3); the egress bounds, the egress account
+/// and the root vault keys, shadowed ones included (1); an absent principal (3);
+/// the vault block (1); at accept, the readers.
 pub fn validate(
     doc: Document,
     mode: Mode,
@@ -96,36 +117,38 @@ pub fn validate(
     let audit = audit_of(boot.document(), config_dir)?;
     crate::boot_gate::audit_offload_boot_gate(&audit)
         .map_err(|e| Invalid::Offload(e.to_string()))?;
+    shadowed_principals(boot.document())?;
     let principal =
         maknae_config::principal_from_section(boot.section(maknae_config::PRINCIPAL_SECTION))
-            .map_err(|e| Invalid::Principal(e.to_string()))?
-            .ok_or_else(|| {
-                Invalid::Principal(crate::boot_gate::AuthzBootRefusal::MissingPrincipal.to_string())
-            })?;
+            .map_err(|e| Invalid::Principal(e.to_string()))?;
     let egress_bounds = if boot.providers().is_empty() {
         None
     } else {
         let bounds = env
             .egress_bounds()
-            .map_err(|e| document(crate::boot_gate::classify_bounds_load_error(e)))?;
+            .map_err(|e| environment(crate::boot_gate::classify_bounds_load_error(e)))?;
         crate::boot_gate::egress_bounds_boot_gate(boot.providers(), Some(&bounds))
-            .map_err(document)?;
+            .map_err(environment)?;
         match env.egress_account() {
             Ok(Some(_)) => {}
             Ok(None) => {
-                return Err(document(crate::egress::EgressBootRefusal::NoSuchAccount(
-                    crate::egress::EGRESS_USER.to_string(),
-                )))
+                return Err(environment(
+                    crate::egress::EgressBootRefusal::NoSuchAccount(
+                        crate::egress::EGRESS_USER.to_string(),
+                    ),
+                ))
             }
-            Err(e) => return Err(document(crate::egress::EgressBootRefusal::Resolve(e))),
+            Err(e) => return Err(environment(crate::egress::EgressBootRefusal::Resolve(e))),
         }
         Some(bounds)
     };
     crate::boot_gate::root_vault_boot_gate(boot.section(maknae_vault::VAULT_SECTION))
-        .map_err(document)?;
-    if boot.section(maknae_vault::VAULT_SECTION).is_some() {
-        maknae_vault::vault_config_from_document(boot.document()).map_err(document)?;
-    }
+        .map_err(environment)?;
+    shadowed_vaults(boot.document())?;
+    let principal = principal.ok_or_else(|| {
+        Invalid::Principal(crate::boot_gate::AuthzBootRefusal::MissingPrincipal.to_string())
+    })?;
+    maknae_vault::vault_config_from_document(boot.document()).map_err(environment)?;
     let readers = match mode {
         Mode::Boot => Vec::new(),
         Mode::Accept => maknae_config::resolve_readers(&audit.readers, env).map_err(document)?,
@@ -141,19 +164,28 @@ pub fn validate(
     })
 }
 
-/// The checks only a file can fail: what `config.d` shadowed.
-pub fn check_sources(file: &Document) -> Result<(), Invalid> {
+fn shadowed_principals(file: &Document) -> Result<(), Invalid> {
     for shadowed in file.shadowed_sections(maknae_config::PRINCIPAL_SECTION) {
         maknae_config::principal_keys_known(shadowed)
             .map_err(|e| Invalid::Principal(e.to_string()))?;
     }
+    Ok(())
+}
+
+fn shadowed_vaults(file: &Document) -> Result<(), Invalid> {
+    for shadowed in file.shadowed_sections(maknae_vault::VAULT_SECTION) {
+        crate::boot_gate::root_vault_boot_gate(Some(shadowed)).map_err(environment)?;
+    }
+    Ok(())
+}
+
+/// The checks only a file can fail: what `config.d` shadowed.
+pub fn check_sources(file: &Document) -> Result<(), Invalid> {
+    shadowed_principals(file)?;
     for shadowed in file.shadowed_sections(maknae_config::PROVIDERS_SECTION) {
         maknae_config::refuse_plaintext_keys(shadowed).map_err(document)?;
     }
-    for shadowed in file.shadowed_sections(maknae_vault::VAULT_SECTION) {
-        crate::boot_gate::root_vault_boot_gate(Some(shadowed)).map_err(document)?;
-    }
-    Ok(())
+    shadowed_vaults(file)
 }
 
 /// The move rules: a sibling, prepared by root.
@@ -308,11 +340,13 @@ mod tests {
     const PRINCIPAL: &str = r#"{"name":"op","uid":1000}"#;
     const PROVIDERS: &str =
         r#"[{"endpoint":"https://api.example.test/v1","models":["m"],"name":"openai"}]"#;
+    const VAULT: &str = r#"{"addr":"https://v:8200"}"#;
     fn minimal() -> Vec<(&'static str, &'static str)> {
         vec![
             ("core", r#"{"deployment_id":"d"}"#),
             ("audit", AUDIT),
             ("principal", PRINCIPAL),
+            ("vault", VAULT),
         ]
     }
     fn sections(pairs: &[(&str, &str)]) -> BaselineSections {
@@ -401,6 +435,7 @@ mod tests {
             Err(Invalid::Document(_))
         ));
         assert_eq!(Invalid::Document(String::new()).exit_code(), 1);
+        assert_eq!(Invalid::Environment(String::new()).exit_code(), 1);
         assert_eq!(Invalid::Principal(String::new()).exit_code(), 3);
         assert_eq!(Invalid::Offload(String::new()).exit_code(), 4);
     }
@@ -439,6 +474,7 @@ mod tests {
         );
         for (invalid, text) in [
             (Invalid::Document("d".into()), "d"),
+            (Invalid::Environment("e".into()), "e"),
             (Invalid::Offload("o".into()), "o"),
             (Invalid::Principal("p".into()), "p"),
         ] {
@@ -512,21 +548,21 @@ mod tests {
             ..FakeEnv::default()
         };
         assert!(
-            matches!(validate(doc(&p), Mode::Boot, Path::new("/e"), &env), Err(Invalid::Document(ref m)) if m.contains("egress-bounds"))
+            matches!(validate(doc(&p), Mode::Boot, Path::new("/e"), &env), Err(Invalid::Environment(ref m)) if m.contains("egress-bounds"))
         );
         let env = FakeEnv {
             egress_uid: Ok(None),
             ..FakeEnv::with_bounds()
         };
         assert!(
-            matches!(validate(doc(&p), Mode::Boot, Path::new("/e"), &env), Err(Invalid::Document(ref m)) if m.contains("_maknae-egress"))
+            matches!(validate(doc(&p), Mode::Boot, Path::new("/e"), &env), Err(Invalid::Environment(ref m)) if m.contains("_maknae-egress"))
         );
         let env = FakeEnv {
             egress_uid: Err("nss down".into()),
             ..FakeEnv::with_bounds()
         };
         assert!(
-            matches!(validate(doc(&p), Mode::Boot, Path::new("/e"), &env), Err(Invalid::Document(ref m)) if m.contains("nss down"))
+            matches!(validate(doc(&p), Mode::Boot, Path::new("/e"), &env), Err(Invalid::Environment(ref m)) if m.contains("nss down"))
         );
         let v = validate(
             doc(&p),
@@ -545,7 +581,7 @@ mod tests {
         let mut env = FakeEnv::with_bounds();
         env.bounds.as_mut().unwrap().user_prefix = "a b".into();
         assert!(
-            matches!(validate(doc(&p), Mode::Boot, Path::new("/e"), &env), Err(Invalid::Document(ref m)) if m.contains("user_prefix"))
+            matches!(validate(doc(&p), Mode::Boot, Path::new("/e"), &env), Err(Invalid::Environment(ref m)) if m.contains("user_prefix"))
         );
     }
 
@@ -603,7 +639,7 @@ mod tests {
             ..FakeEnv::default()
         };
         assert!(
-            matches!(validate(doc(&p), Mode::Boot, Path::new("/e"), &env), Err(Invalid::Document(ref m)) if m.contains("egress-bounds"))
+            matches!(validate(doc(&p), Mode::Boot, Path::new("/e"), &env), Err(Invalid::Environment(ref m)) if m.contains("egress-bounds"))
         );
     }
 
@@ -612,7 +648,7 @@ mod tests {
         let mut v = minimal();
         v.push(("vault", r#"{"addr":"https://v:8200","kv_mount":"kv"}"#));
         assert!(
-            matches!(validate(doc(&v), Mode::Boot, Path::new("/e"), &FakeEnv::default()), Err(Invalid::Document(ref m)) if m.contains("kv_mount"))
+            matches!(validate(doc(&v), Mode::Boot, Path::new("/e"), &FakeEnv::default()), Err(Invalid::Environment(ref m)) if m.contains("kv_mount"))
         );
     }
 
@@ -621,7 +657,7 @@ mod tests {
         let mut v = minimal();
         v.push(("vault", r#"{"addr":"https://v:8200","colour":"red"}"#));
         assert!(
-            matches!(validate(doc(&v), Mode::Boot, Path::new("/e"), &FakeEnv::default()), Err(Invalid::Document(ref m)) if m.contains("colour"))
+            matches!(validate(doc(&v), Mode::Boot, Path::new("/e"), &FakeEnv::default()), Err(Invalid::Environment(ref m)) if m.contains("colour"))
         );
         let mut v = minimal();
         v.push(("vault", r#"{"addr":"https://v:8200"}"#));
@@ -708,7 +744,7 @@ mod tests {
             &[("10-vault.yaml", "vault:\n  addr: https://v:8200\n")],
         );
         assert!(
-            matches!(check_sources(&vault), Err(Invalid::Document(ref m)) if m.contains("kv_mount"))
+            matches!(check_sources(&vault), Err(Invalid::Environment(ref m)) if m.contains("kv_mount"))
         );
     }
 
@@ -913,5 +949,102 @@ mod tests {
             production.matches("baseline_check::validate(").count() >= 3,
             "boot, the boot mix and accept each call the validator"
         );
+    }
+
+    #[test]
+    fn a_baseline_without_vault_is_refused_as_today_after_the_sink_opens() {
+        let mut no_vault = minimal();
+        no_vault.retain(|(k, _)| *k != "vault");
+        let refused = validate(
+            doc(&no_vault),
+            Mode::Accept,
+            Path::new("/e"),
+            &FakeEnv::default(),
+        )
+        .err()
+        .unwrap();
+        assert!(
+            matches!(refused, Invalid::Environment(ref m) if m.contains("vault")),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn an_absent_principal_is_refused_after_the_environment_checks_as_today() {
+        let mut p = minimal();
+        p.retain(|(k, _)| *k != "principal");
+        p.push(("vault", r#"{"addr":"https://v:8200","kv_mount":"kv"}"#));
+        let refused = validate(doc(&p), Mode::Boot, Path::new("/e"), &FakeEnv::default()).err();
+        assert!(
+            matches!(refused, Some(Invalid::Environment(ref m)) if m.contains("kv_mount")),
+            "{refused:?}"
+        );
+        assert_eq!(refused.unwrap().exit_code(), 1);
+        let mut p = minimal();
+        p.retain(|(k, _)| *k != "principal");
+        p.push(("providers", PROVIDERS));
+        assert!(matches!(
+            validate(doc(&p), Mode::Boot, Path::new("/e"), &FakeEnv::default()),
+            Err(Invalid::Environment(_))
+        ));
+        let mut p = minimal();
+        p.retain(|(k, _)| *k != "principal");
+        p.push(("vault", r#"{"addr":"https://v:8200","colour":"red"}"#));
+        assert!(
+            matches!(
+                validate(doc(&p), Mode::Boot, Path::new("/e"), &FakeEnv::default()),
+                Err(Invalid::Principal(_))
+            ),
+            "the vault block is parsed after the principal, as today"
+        );
+    }
+
+    #[test]
+    fn a_malformed_principal_is_refused_before_the_environment_checks_as_today() {
+        let mut p = minimal();
+        p[2] = ("principal", r#"{"home":"/h","name":"op","uid":1000}"#);
+        p.push(("providers", PROVIDERS));
+        assert!(matches!(
+            validate(doc(&p), Mode::Boot, Path::new("/e"), &FakeEnv::default()),
+            Err(Invalid::Principal(_))
+        ));
+    }
+
+    #[test]
+    fn validate_file_refuses_what_config_d_shadowed_in_todays_order() {
+        let vault = file_with(
+            "core:\n  deployment_id: d\naudit:\n  jsonl_path: /x\nprincipal:\n  name: op\n  uid: 1000\nvault:\n  addr: https://v:8200\n  kv_mount: kv\n",
+            &[("10-vault.yaml", "vault:\n  addr: https://v:8200\n")],
+        );
+        let refused =
+            validate_file(vault, Mode::Accept, Path::new("/e"), &FakeEnv::default()).err();
+        assert!(
+            matches!(refused, Some(Invalid::Environment(ref m)) if m.contains("kv_mount")),
+            "{refused:?}"
+        );
+        let both = file_with(
+            "core:\n  deployment_id: d\naudit:\n  jsonl_path: /x\n  siem: https://s\nprincipal:\n  name: op\n  uid: 1000\n  home: /h\nvault:\n  addr: https://v:8200\n",
+            &[("10-both.yaml", "principal:\n  name: op\n  uid: 1000\n")],
+        );
+        assert!(matches!(
+            validate_file(both, Mode::Boot, Path::new("/e"), &FakeEnv::default()),
+            Err(Invalid::Offload(_))
+        ));
+        let principal_first = file_with(
+            "core:\n  deployment_id: d\naudit:\n  jsonl_path: /x\nprincipal:\n  name: op\n  uid: 1000\n  home: /h\nvault:\n  addr: https://v:8200\n  kv_mount: kv\n",
+            &[
+                ("10-principal.yaml", "principal:\n  name: op\n  uid: 1000\n"),
+                ("20-vault.yaml", "vault:\n  addr: https://v:8200\n"),
+            ],
+        );
+        assert!(matches!(
+            validate_file(
+                principal_first,
+                Mode::Boot,
+                Path::new("/e"),
+                &FakeEnv::default()
+            ),
+            Err(Invalid::Principal(_))
+        ));
     }
 }

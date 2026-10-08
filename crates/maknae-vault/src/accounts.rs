@@ -31,16 +31,42 @@ fn group(gid: nix::unistd::Gid) -> Result<Option<Group>, String> {
     found(Group::from_gid(gid))
 }
 
+fn daemon_membership(
+    resolved: &str,
+    daemon_gid: u32,
+    members: &[String],
+    listed: &[u32],
+) -> Vec<u32> {
+    if members.iter().any(|m| m == resolved) || listed.contains(&daemon_gid) {
+        vec![daemon_gid]
+    } else {
+        Vec::new()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn listed_groups(u: &User) -> Result<Vec<u32>, String> {
+    let name = std::ffi::CString::new(u.name.as_bytes()).map_err(|e| e.to_string())?;
+    nix::unistd::getgrouplist(&name, u.gid)
+        .map(|gids| gids.into_iter().map(|g| g.as_raw()).collect())
+        .map_err(|e| format!("group list lookup failed (errno {})", e as i32))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn listed_groups(_: &User) -> Result<Vec<u32>, String> {
+    Ok(Vec::new())
+}
+
 impl ReaderLookup for NssAccounts {
     fn account(&self, name: &str) -> Result<Option<ReaderAccount>, String> {
         let Some(u) = user(name)? else {
             return Ok(None);
         };
         let groups = match user(DAEMON_ACCOUNT)? {
-            Some(daemon) => match group(daemon.gid)? {
-                Some(g) if g.mem.iter().any(|m| m == name) => vec![g.gid.as_raw()],
-                _ => Vec::new(),
-            },
+            Some(daemon) => {
+                let members = group(daemon.gid)?.map(|g| g.mem).unwrap_or_default();
+                daemon_membership(&u.name, daemon.gid.as_raw(), &members, &listed_groups(&u)?)
+            }
             None => Vec::new(),
         };
         Ok(Some(ReaderAccount {
@@ -103,5 +129,27 @@ mod tests {
                 Err(format!("account lookup failed (errno {})", e as i32))
             );
         }
+    }
+
+    #[test]
+    fn membership_is_judged_on_the_resolved_name_and_the_host_group_list() {
+        let members = ["realname".to_string()];
+        assert_eq!(daemon_membership("realname", 970, &members, &[]), vec![970]);
+        assert_eq!(
+            daemon_membership("alias", 970, &members, &[]),
+            Vec::<u32>::new()
+        );
+        assert_eq!(daemon_membership("other", 970, &[], &[20, 970]), vec![970]);
+        assert_eq!(
+            daemon_membership("other", 970, &[], &[20]),
+            Vec::<u32>::new()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_host_group_list_includes_the_primary_group() {
+        let root = User::from_name("root").unwrap().unwrap();
+        assert!(listed_groups(&root).unwrap().contains(&0));
     }
 }

@@ -3212,22 +3212,6 @@ fn file_baseline(boot: &crate::BootConfig) -> BaselineLayer {
     }
 }
 
-#[cfg(test)]
-fn test_baseline() -> BaselineLayer {
-    let sections: maknae_config::BaselineSections = [(
-        "core".to_string(),
-        r#"{"deployment_id":"test"}"#.to_string(),
-    )]
-    .into();
-    BaselineLayer {
-        sha256: crate::baseline::accepted_digest(&sections),
-        sections,
-        system: "US".into(),
-        ceiling: "UNCLASSIFIED".into(),
-        moved_from: None,
-    }
-}
-
 impl GraphInputs {
     fn new(
         source: &maknae_authz_basic::PolicySource,
@@ -4918,6 +4902,21 @@ mod subject_list_offload_tripwire {
 #[cfg(test)]
 mod boot_gate_tests {
     use super::*;
+
+    pub(super) fn test_baseline() -> BaselineLayer {
+        let sections: maknae_config::BaselineSections = [(
+            "core".to_string(),
+            r#"{"deployment_id":"test"}"#.to_string(),
+        )]
+        .into();
+        BaselineLayer {
+            sha256: crate::baseline::accepted_digest(&sections),
+            sections,
+            system: "US".into(),
+            ceiling: "UNCLASSIFIED".into(),
+            moved_from: None,
+        }
+    }
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Mutex;
 
@@ -7864,6 +7863,7 @@ mod graph_audit_bound_tests {
 #[cfg(unix)]
 #[cfg(test)]
 mod reload_tests {
+    use super::boot_gate_tests::test_baseline;
     use super::*;
     use maknae_authz_basic::{Baseline, HermeticAuthorizer};
     use std::os::unix::fs::PermissionsExt;

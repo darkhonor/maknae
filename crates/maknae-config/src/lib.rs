@@ -52,9 +52,9 @@ mod user_providers;
 mod user_providers_io;
 mod value;
 
-pub use loader::{load_config, load_config_root_owned, load_config_rooted};
 #[cfg(all(unix, feature = "hermetic-test-seam"))]
-pub use loader::{load_config_root_owned_with_requirement, load_config_rooted_with_requirement};
+pub use loader::load_config_root_owned_with_requirement;
+pub use loader::{load_config, load_config_root_owned};
 
 pub use audit_cfg::{
     audit_from_section, resolve_readers, AuditConfig, ReaderAccount, ReaderLookup, AUDIT_SECTION,

@@ -98,8 +98,8 @@ pub fn read_files(config_dir: &Path) -> Result<Document, ConfigError> {
 }
 
 /// The hermetic door: [`read_files`] with every source owned by the test's euid.
-#[cfg(test)]
-pub(crate) fn read_files_as_owner(config_dir: &Path) -> Result<Document, ConfigError> {
+#[cfg(any(test, feature = "hermetic-test-seam"))]
+pub fn read_files_as_owner(config_dir: &Path) -> Result<Document, ConfigError> {
     maknae_config::load_config_root_owned_with_requirement(
         config_dir,
         &boot_specs(),
@@ -149,9 +149,15 @@ fn boot_specs() -> [SectionSpec; 7] {
     ]
 }
 
+/// [`boot`] through the hermetic door.
+#[cfg(feature = "hermetic-test-seam")]
+pub fn boot_as_owner(config_dir: &Path) -> Result<BootConfig, ConfigError> {
+    read_files_as_owner(config_dir).and_then(assemble)
+}
+
 /// Everything after the load: the classification system, the ceiling through
 /// it, the provider.
-pub fn assemble(document: Document) -> Result<BootConfig, ConfigError> {
+pub(crate) fn assemble(document: Document) -> Result<BootConfig, ConfigError> {
     // The SYSTEM first, then the ceiling THROUGH it (ADR-0022): a name this
     // build does not carry refuses boot before any level is read, and a
     // level the selected system does not rank refuses it in the reader.
@@ -199,7 +205,7 @@ mod tests {
     use super::*;
 
     fn owned(config_dir: &Path) -> Result<BootConfig, ConfigError> {
-        read_files_as_owner(config_dir).and_then(assemble)
+        boot_as_owner(config_dir)
     }
 
     #[cfg(unix)]
