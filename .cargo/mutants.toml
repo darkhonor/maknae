@@ -189,5 +189,6 @@ exclude_globs = [
   "crates/maknae-audit-append/src/sink.rs", # file-open + blocking-write I/O
   "crates/maknae-audit-append/src/error.rs", # Display/Error declarations only
   "crates/maknae-kernel/src/groupres.rs",   # nix Group/User/getgrouplist — syscall I/O
+  "crates/maknae-kernel/src/host_env.rs",   # the validator's host reads (bounds file, NSS, trail, sockets) — I/O
   "crates/maknae-kernel/src/run.rs",        # run-loop orchestration + process entrypoint — I/O/control-flow driver
 ]

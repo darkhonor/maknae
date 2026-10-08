@@ -61,11 +61,12 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::authz::{admission_facts, authorize_connection, ConnDecision, HOME_RESOLVE_TIMEOUT};
+use crate::baseline_check::{Invalid, Mode};
 use crate::blocking_guard::{
     within_blocking, BlockingBreaker, BreakerAdmission, BreakerTransition, AUDIT_APPEND_TIMEOUT,
     SCAN_BACK_TIMEOUT,
 };
-use crate::boot_gate::{authz_boot_gate, authz_policy_source};
+use crate::boot_gate::authz_boot_gate;
 use crate::groupres::{maknae_gid, uid_in_maknae_group};
 use crate::handler::{
     build_authz_request, build_whoami, discharge_plan, dispatch_verb, lexical_pregate, may_respond,
@@ -2766,12 +2767,21 @@ pub fn run(config_dir: &Path) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let seams = BootSeams {
+        graph_key: production_graph_key,
+        state_dir_open: StateDir::open,
+        files: crate::boot::read_files,
+        env: Arc::new(crate::host_env::HostEnv {
+            config_dir: config_dir.to_path_buf(),
+        }),
+        open_prepared: maknae_audit_append::AuditSink::open_prepared,
+        policy_load: maknae_authz_basic::PolicySource::load,
+    };
     let code = runtime.block_on(async move {
         match run_inner(
             config_dir,
             Path::new(maknae_state::store::STATE_DIR),
-            production_graph_key,
-            crate::boot::read_files,
+            &seams,
         )
         .await
         {
@@ -2952,7 +2962,6 @@ const GRAPH_MIGRATE_ACTION: &str = "graph.migrate";
 const GRAPH_TRANSITION_ACTION: &str = "graph.transition";
 const GRAPH_RELOAD_ACTION: &str = "graph.reload";
 const GRAPH_BASELINE_ACTION: &str = "graph.baseline";
-const BASELINE_SEEDED_EVENT: &str = "baseline seeded from maknae.yaml and config.d";
 use crate::identity_report::GRAPH_IDENTITY_ACTION;
 
 /// Every `graph.*` pseudo-action this file emits; no verb's action string may equal one.
@@ -3198,16 +3207,20 @@ struct GraphInputs {
     bindings_lists_nobody: bool,
     principal_uid: u32,
     baseline: BaselineLayer,
+    accepted_seen: Option<[u8; 32]>,
+    baseline_events: Vec<String>,
 }
 
-/// The baseline the files declare: what a store holding none is seeded with.
-fn file_baseline(boot: &crate::BootConfig) -> BaselineLayer {
-    let sections = maknae_config::document_sections(boot.document());
+/// The baseline this start runs, as the store records it: a performed move is cleared.
+fn run_baseline(
+    run: &maknae_config::BaselineSections,
+    (system, ceiling): (String, String),
+) -> BaselineLayer {
     BaselineLayer {
-        sha256: crate::baseline::accepted_digest(&sections),
-        sections,
-        system: boot.classification_policy_name().to_string(),
-        ceiling: boot.ceiling().classification.name.clone(),
+        sha256: crate::baseline::accepted_digest(run),
+        sections: run.clone(),
+        system,
+        ceiling,
         moved_from: None,
     }
 }
@@ -3230,6 +3243,8 @@ impl GraphInputs {
             bindings_lists_nobody: source.bindings().lists_nobody(),
             principal_uid: source.principal().uid,
             baseline,
+            accepted_seen: None,
+            baseline_events: Vec::new(),
         })
     }
 
@@ -3243,8 +3258,8 @@ impl GraphInputs {
             bindings_lists_nobody: self.bindings_lists_nobody,
             principal_uid: self.principal_uid,
             baseline: &self.baseline,
-            accepted_seen: None,
-            baseline_events: &[],
+            accepted_seen: self.accepted_seen,
+            baseline_events: &self.baseline_events,
         }
     }
 }
@@ -3254,6 +3269,7 @@ enum GraphFailure {
     Key(maknae_vault::VaultError),
     Store(StoreError),
     ScanElapsed(String),
+    Inconsistent(String),
 }
 
 /// The refusal for a graph-store boot failure, with the operator's next step for its
@@ -3272,6 +3288,10 @@ fn graph_refusal(failure: GraphFailure, state_dir: &Path) -> RunError {
             "the trail after its last {CHECKPOINT_ACTION} did not scan within {}s; rotate it as \
              the runbook's \"Rotate, restore or recreate the trail\" says, then restart",
             SCAN_BACK_TIMEOUT.as_secs()
+        ),
+        GraphFailure::Inconsistent(_) => format!(
+            "no automatic remedy; keep {} as it is and investigate",
+            state_dir.display()
         ),
         GraphFailure::Key(_) => "the kernel graph key could not be read; check the credential \
              `sudo maknae enroll` created (enroll never replaces an existing key)"
@@ -3327,7 +3347,9 @@ fn graph_refusal(failure: GraphFailure, state_dir: &Path) -> RunError {
     let reason = match failure {
         GraphFailure::Key(e) => format!("kernel graph key: {e}"),
         GraphFailure::Store(e) => format!("kernel graph store: {e}"),
-        GraphFailure::ScanElapsed(e) => format!("kernel graph store: {e}"),
+        GraphFailure::ScanElapsed(e) | GraphFailure::Inconsistent(e) => {
+            format!("kernel graph store: {e}")
+        }
     };
     RunError::Graph { reason, hint }
 }
@@ -3347,6 +3369,7 @@ pub struct KernelGraphStatus {
     revision: Arc<AtomicU64>,
     pub anchor: String,
     pub identity: crate::identity_report::IdentityStatus,
+    pub baseline: crate::baseline::BaselineStatus,
 }
 
 impl KernelGraphStatus {
@@ -3355,6 +3378,10 @@ impl KernelGraphStatus {
             revision: Arc::new(AtomicU64::new(revision)),
             anchor: anchor.into(),
             identity: crate::identity_report::IdentityStatus::default(),
+            baseline: crate::baseline::BaselineStatus::new(crate::baseline::BaselineState {
+                accepted: Default::default(),
+                pending: None,
+            }),
         }
     }
 
@@ -3431,51 +3458,47 @@ async fn scan_anchor(
         .map_err(|e| GraphFailure::Store(StoreError::Audit(e.to_string())))
 }
 
-/// Runs before the accept loop, so the blocking audit scan contends with no append.
-async fn boot_kernel_graph(
-    state_dir: &Path,
-    key: Result<maknae_vault::GraphKey, maknae_vault::VaultError>,
+/// The latest checkpoint in `sink`'s trail and the bytes scanned to find it, bounded.
+async fn last_checkpoint(
     sink: &Arc<maknae_audit_append::AuditSink>,
-    ctx: &BootCtx<'_>,
-    inputs: &BootInputs<'_>,
-) -> Result<BootedGraph, RunError> {
-    let key = key.map_err(|e| graph_refusal(GraphFailure::Key(e), state_dir))?;
-    let dir = StateDir::open(state_dir, ctx.euid)
-        .map_err(|e| graph_refusal(GraphFailure::Store(e), state_dir))?;
+    state_dir: &Path,
+) -> Result<(Option<maknae_state::anchor::Checkpoint>, u64), RunError> {
     let scan_sink = Arc::clone(sink);
     let scan = scan_anchor(SCAN_BACK_TIMEOUT, move || {
         scan_sink.scan_back(maknae_state::anchor::is_checkpoint)
     })
     .await
     .map_err(|e| graph_refusal(e, state_dir))?;
-    let checkpoint = scan.line.as_deref().and_then(parse_checkpoint);
+    Ok((
+        scan.line.as_deref().and_then(parse_checkpoint),
+        scan.scanned_bytes,
+    ))
+}
+
+/// Runs before the accept loop, so the blocking audit scan contends with no append.
+/// `scanned` is the anchor a trail move already found; `None` scans `sink`.
+async fn boot_kernel_graph(
+    state_dir: &Path,
+    dir: Result<StateDir, StoreError>,
+    key: Result<WrappingKey, maknae_vault::VaultError>,
+    sink: &Arc<maknae_audit_append::AuditSink>,
+    ctx: &BootCtx<'_>,
+    inputs: &BootInputs<'_>,
+    scanned: Option<(Option<maknae_state::anchor::Checkpoint>, u64)>,
+) -> Result<BootedGraph, RunError> {
+    let key = key.map_err(|e| graph_refusal(GraphFailure::Key(e), state_dir))?;
+    let dir = dir.map_err(|e| graph_refusal(GraphFailure::Store(e), state_dir))?;
+    let (checkpoint, scanned_bytes) = match scanned {
+        Some(found) => found,
+        None => last_checkpoint(sink, state_dir).await?,
+    };
     let mut audit = GraphBootAudit {
         sink: sink.as_ref(),
         ctx,
-        scanned_bytes: scan.scanned_bytes,
+        scanned_bytes,
         bound: AUDIT_APPEND_TIMEOUT,
     };
-    let key = WrappingKey::new(key.into_bytes());
-    let stored = if dir.reseed_authorized() {
-        None
-    } else {
-        maknae_state::store::peek_baseline(&dir, &key).map_err(|e| store_refusal(e, state_dir))?
-    };
-    let seeded = [BASELINE_SEEDED_EVENT.to_string()];
-    let inputs = match &stored {
-        Some(accepted) => BootInputs {
-            baseline: accepted,
-            accepted_seen: Some(accepted.sha256),
-            baseline_events: &[],
-            ..*inputs
-        },
-        None => BootInputs {
-            accepted_seen: None,
-            baseline_events: &seeded,
-            ..*inputs
-        },
-    };
-    let report = maknae_state::store::boot(&dir, &key, checkpoint, &mut audit, unix_now(), &inputs)
+    let report = maknae_state::store::boot(&dir, &key, checkpoint, &mut audit, unix_now(), inputs)
         .await
         .map_err(|e| store_refusal(e, state_dir))?;
     report_graph_boot(sink.as_ref(), ctx, state_dir, &report).await?;
@@ -3998,6 +4021,25 @@ fn parse_posture_marker(value: &maknae_config::Value) -> Option<crate::posture::
 /// the boot tests inject a fixed key.
 type GraphKeyReader = fn(&Path) -> Result<maknae_vault::GraphKey, maknae_vault::VaultError>;
 type FileReader = fn(&Path) -> Result<maknae_config::Document, maknae_config::ConfigError>;
+type TrailOpener = fn(
+    &maknae_config::AuditConfig,
+) -> Result<maknae_audit_append::AuditSink, maknae_audit_append::AuditError>;
+type PolicyLoader =
+    fn(
+        maknae_authz_basic::PolicyPaths,
+        maknae_config::Principal,
+    ) -> Result<maknae_authz_basic::PolicySource, maknae_authz_basic::AuthzBasicError>;
+
+/// What boot reads from the host. Production passes the real readers; the boot
+/// tests pass their own.
+struct BootSeams {
+    graph_key: GraphKeyReader,
+    state_dir_open: fn(&Path, u32) -> Result<StateDir, StoreError>,
+    files: FileReader,
+    env: Arc<dyn crate::baseline_check::Env>,
+    open_prepared: TrailOpener,
+    policy_load: PolicyLoader,
+}
 
 fn production_graph_key(
     config_dir: &Path,
@@ -4009,8 +4051,7 @@ fn production_graph_key(
 async fn run_inner(
     config_dir: &Path,
     state_dir: &Path,
-    graph_key: GraphKeyReader,
-    files: FileReader,
+    seams: &BootSeams,
 ) -> Result<ServeOutcome, RunError> {
     // An unregistered SIGHUP terminates the process; registered, one pending signal
     // is buffered until the reload task drains it after mint.
@@ -4022,50 +4063,161 @@ async fn run_inner(
     maknae_vault::install_default_crypto_provider();
     maknae_vault::assert_fips_provider().map_err(|e| RunError::Other(e.to_string()))?;
 
-    // Boot Maknae's own config ONCE, registering every section the daemon uses (core +
-    // lake + vault + transport + audit + principal — see boot.rs). The booted document
-    // backs the plane client below, so no incompatible per-call reload rejects a
-    // combined config.
-    let boot = files(config_dir)
-        .and_then(crate::boot::assemble)
-        .map_err(|e| RunError::Other(e.to_string()))?;
-    let transport = maknae_config::transport_from_section(boot.section("transport"))
-        .map_err(|e| RunError::Other(e.to_string()))?;
-    // #240: where the deputy is, and the outer bound on one send.
-    let egress_cfg =
-        maknae_config::egress_from_section(boot.section(maknae_config::EGRESS_SECTION))
-            .map_err(|e| RunError::Other(e.to_string()))?;
-    let audit_cfg = maknae_config::audit_from_section(boot.section("audit"), config_dir)
-        .map_err(|e| RunError::Other(e.to_string()))?;
+    let env = &*seams.env;
+    let euid = nix::unistd::geteuid().as_raw();
+    let (candidate, file_sections) = match (seams.files)(config_dir) {
+        Ok(doc) => {
+            let sections = maknae_config::document_sections(&doc);
+            let checked = crate::baseline_check::validate_file(doc, Mode::Boot, config_dir, env)
+                .map(|_| sections.clone());
+            (checked, Some(sections))
+        }
+        Err(e) => (Err(Invalid::Document(e.to_string())), None),
+    };
 
-    // Fail-closed audit sink: no durable audit path → do not start (AU-5).
-    let sink = Arc::new(
-        maknae_audit_append::AuditSink::open(&audit_cfg)
-            .map_err(|e| RunError::Other(e.to_string()))?,
-    );
+    // The accepted baseline is read before anything is appended; the store is booted later.
+    let key = (seams.graph_key)(config_dir).map(|k| WrappingKey::new(k.into_bytes()));
+    let dir = (seams.state_dir_open)(state_dir, euid);
+    let reseeding = matches!(&dir, Ok(d) if d.reseed_authorized());
+    let peeked = match (&dir, &key) {
+        (Ok(d), Ok(k)) => maknae_state::store::peek_baseline(d, k).map_err(|e| e.to_string()),
+        (Err(e), _) => Err(e.to_string()),
+        (_, Err(e)) => Err(e.to_string()),
+    };
+    let inconsistent = match &peeked {
+        Ok(Some(b)) => inconsistency(b),
+        _ => None,
+    };
+    let stored = match &peeked {
+        Ok(Some(b)) if inconsistent.is_none() => Some(b),
+        _ => None,
+    };
+    // Only a store that holds no baseline may have its trail created on first open.
+    let create = matches!(peeked, Ok(None));
+    let store_unread = peeked
+        .as_ref()
+        .err()
+        .cloned()
+        .or_else(|| inconsistent.clone());
+    let prior_trail = stored.and_then(|b| {
+        b.moved_from
+            .as_ref()
+            .map(PathBuf::from)
+            .or_else(|| accepted_trail(&b.sections, config_dir))
+    });
+    let accepted = if reseeding { None } else { stored };
 
-    // The boot-level session id (spec §5.3) — shared by every AU-3 record this boot
-    // emits BEFORE any connection (the authz refusal, the posture record) and by every
-    // real connection's `next_session()` afterward, so they all derive from the SAME
-    // per-boot nonce.
     let session_ids = Arc::new(SessionIds::new());
     let host = hostname();
-    let socket = transport.socket_path.display().to_string();
-    let euid = nix::unistd::geteuid().as_raw();
-
     // ONE sequence for every boot-session record (#154 review): the boot
     // session id is a constant per boot, so two records minted from separate
     // `Seq::new()`s would both carry seq 1 and collide on (session_id, seq).
-    // Every boot-time emitter below draws from this counter.
     let boot_seq = Seq::new();
+    let ids = BootIds {
+        host: &host,
+        session_ids: &session_ids,
+        seq: &boot_seq,
+        euid,
+    };
+
+    let first_refusal = candidate.as_ref().err().cloned();
+    let file = candidate.map_err(|e| e.into_file(file_sections.clone()));
+    let start = crate::baseline::at_boot(accepted.map(|b| &b.sections), file, |mix| {
+        let doc = maknae_config::Document::from_baseline(mix).map_err(|e| e.to_string())?;
+        let v = crate::baseline_check::validate(doc, Mode::Boot, config_dir, env)
+            .map_err(|e| e.cause().to_string())?;
+        crate::baseline_check::check_move(prior_trail.as_deref(), &v.audit.jsonl_path, env)
+    });
+    let start = match start {
+        Ok(start) => start,
+        Err(cause) => {
+            let cause = match &store_unread {
+                Some(e) => format!("{cause}; and the kernel graph store could not be read: {e}"),
+                None => cause,
+            };
+            let refused = first_refusal.unwrap_or_else(|| Invalid::Document(cause.clone()));
+            let sections = file_sections.as_ref();
+            return Err(refuse_start(
+                refused, cause, sections, None, create, config_dir, seams, &ids,
+            )
+            .await);
+        }
+    };
+    let run_doc = maknae_config::Document::from_baseline(&start.run)
+        .map_err(|e| RunError::Other(e.to_string()))?;
+    let validated = match crate::baseline_check::validate(run_doc, Mode::Boot, config_dir, env) {
+        Ok(v) => v,
+        Err(refused) => {
+            let cause = match accepted {
+                Some(_) => format!("accepted baseline cannot start: {}", refused.cause()),
+                None => refused.cause().to_string(),
+            };
+            let trail = prior_trail.as_deref();
+            return Err(refuse_start(
+                refused,
+                cause,
+                Some(&start.run),
+                trail,
+                create,
+                config_dir,
+                seams,
+                &ids,
+            )
+            .await);
+        }
+    };
+    if reseeding {
+        crate::baseline_check::check_move(prior_trail.as_deref(), &validated.audit.jsonl_path, env)
+            .map_err(|e| {
+                RunError::Other(format!("{e}; see the runbook's \"Move the audit trail\""))
+            })?;
+    }
+
+    let socket = validated.transport.socket_path.display().to_string();
+    let au3_1 = validated.audit.au3_1.clone();
+    let ctx = BootCtx {
+        event: "boot",
+        host: &host,
+        socket: &socket,
+        euid,
+        session_id: boot_session_id(&session_ids),
+        seq: &boot_seq,
+        au3_1: &au3_1,
+    };
+    // Fail-closed audit sink: no durable audit path → do not start (AU-5).
+    let trail = open_trail(
+        prior_trail.as_deref(),
+        &validated.audit,
+        create,
+        seams.open_prepared,
+        state_dir,
+        &ctx,
+    )
+    .await?;
+    let sink = trail.sink;
+    let mut events = match (reseeding, stored) {
+        (true, Some(replaced)) => vec![crate::baseline::reseeded_event(&replaced.sha256)],
+        _ => start.events,
+    };
+    if let Some(m) = &trail.moved {
+        events.push(crate::baseline::moved_event(&m.from, &m.to));
+    }
+    let started = Started {
+        validated,
+        run: start.run,
+        pending: start.pending,
+        accepted_seen: accepted.map(|b| b.sha256),
+        events,
+        inconsistent: inconsistent.filter(|_| !reseeding),
+        dir,
+        key,
+        scanned: trail.scanned,
+    };
     let result = boot_after_sink(
         config_dir,
         state_dir,
-        graph_key,
-        boot,
-        transport,
-        egress_cfg,
-        &audit_cfg,
+        seams,
+        started,
         &sink,
         &session_ids,
         &host,
@@ -4082,11 +4234,233 @@ async fn run_inner(
         euid,
         boot_session_id(&session_ids),
         boot_seq.next(),
-        &audit_cfg.au3_1,
+        &au3_1,
         &result,
     )
     .await;
     result
+}
+
+/// What the boot decided before the sink opened, for the steps after it.
+struct Started {
+    validated: crate::baseline_check::Validated,
+    run: maknae_config::BaselineSections,
+    pending: Option<crate::baseline::PendingSet>,
+    accepted_seen: Option<[u8; 32]>,
+    events: Vec<String>,
+    inconsistent: Option<String>,
+    dir: Result<StateDir, StoreError>,
+    key: Result<WrappingKey, maknae_vault::VaultError>,
+    scanned: Option<(Option<maknae_state::anchor::Checkpoint>, u64)>,
+}
+
+struct BootIds<'a> {
+    host: &'a str,
+    session_ids: &'a Arc<SessionIds>,
+    seq: &'a Seq,
+    euid: u32,
+}
+
+/// Why a stored baseline does not match its own record: the digest it carries, or
+/// the system and ceiling its sections declare.
+fn inconsistency(b: &BaselineLayer) -> Option<String> {
+    if b.sha256 != crate::baseline::accepted_digest(&b.sections) {
+        return Some(
+            "the accepted baseline's recorded digest does not match its sections".to_string(),
+        );
+    }
+    let declared = maknae_config::Document::from_baseline(&b.sections)
+        .and_then(crate::boot::assemble)
+        .ok()?;
+    let (system, ceiling) = (
+        declared.classification_policy_name(),
+        &declared.ceiling().classification.name,
+    );
+    (system != b.system || *ceiling != b.ceiling).then(|| {
+        format!(
+            "the accepted baseline records {}:{} but its sections declare {system}:{ceiling}; \
+             it does not match its own record",
+            b.system, b.ceiling
+        )
+    })
+}
+
+fn accepted_trail(
+    sections: &maknae_config::BaselineSections,
+    config_dir: &Path,
+) -> Option<PathBuf> {
+    let doc = maknae_config::Document::from_baseline(sections).ok()?;
+    crate::baseline_check::audit_of(&doc, config_dir)
+        .ok()
+        .map(|a| a.jsonl_path)
+}
+
+fn open_or_create(
+    cfg: &maknae_config::AuditConfig,
+    create: bool,
+) -> Result<maknae_audit_append::AuditSink, RunError> {
+    let opened = if create {
+        maknae_audit_append::AuditSink::open(cfg)
+    } else {
+        maknae_audit_append::AuditSink::open_existing(cfg)
+    };
+    opened.map_err(|e| match e {
+        maknae_audit_append::AuditError::Missing(path) => RunError::Other(format!(
+            "the audit trail {} is missing; prepare it as the runbook's \"Move the audit trail\" \
+             step does, then start",
+            path.display()
+        )),
+        e => RunError::Other(e.to_string()),
+    })
+}
+
+/// A start the validator refused: a document refusal before any trail opens; every
+/// other refusal recorded in `trail` (or the document's own) with today's exit code.
+#[allow(clippy::too_many_arguments)]
+async fn refuse_start(
+    refused: Invalid,
+    cause: String,
+    sections: Option<&maknae_config::BaselineSections>,
+    trail: Option<&Path>,
+    create: bool,
+    config_dir: &Path,
+    seams: &BootSeams,
+    ids: &BootIds<'_>,
+) -> RunError {
+    if let Invalid::Document(_) = refused {
+        return RunError::Other(cause);
+    }
+    let located = sections
+        .ok_or_else(|| "nothing was read to record it in".to_string())
+        .and_then(|s| {
+            let doc = maknae_config::Document::from_baseline(s).map_err(|e| e.to_string())?;
+            let audit = crate::baseline_check::audit_of(&doc, config_dir)
+                .map_err(|e| e.cause().to_string())?;
+            let transport =
+                crate::baseline_check::transport_of(&doc).map_err(|e| e.cause().to_string())?;
+            Ok((audit, transport))
+        });
+    let (audit, transport) = match located {
+        Ok(found) => found,
+        Err(e) => return RunError::Other(format!("{cause}; {e}")),
+    };
+    let audit = maknae_config::AuditConfig {
+        jsonl_path: trail.map_or_else(|| audit.jsonl_path.clone(), Path::to_path_buf),
+        ..audit
+    };
+    let sink = match open_or_create(&audit, create) {
+        Ok(sink) => sink,
+        Err(e) => return e,
+    };
+    let socket = transport.socket_path.display().to_string();
+    let (session, seq) = (boot_session_id(ids.session_ids), ids.seq.next());
+    let (host, euid, au3_1) = (ids.host, ids.euid, &audit.au3_1);
+    let reason = match refused {
+        Invalid::Offload(_) => {
+            return refuse_audit_offload_boot(
+                &sink, host, &socket, euid, session, seq, au3_1, cause,
+            )
+            .await
+        }
+        Invalid::Principal(_) => {
+            return refuse_authz_boot(&sink, host, &socket, euid, session, seq, au3_1, cause).await
+        }
+        Invalid::Vault { principal, .. } => match crate::boot_gate::authz_policy_source_with(
+            config_dir,
+            Some(principal),
+            seams.policy_load,
+        ) {
+            Err(e) => {
+                return refuse_authz_boot(
+                    &sink,
+                    host,
+                    &socket,
+                    euid,
+                    session,
+                    seq,
+                    au3_1,
+                    e.to_string(),
+                )
+                .await
+            }
+            Ok(_) => cause,
+        },
+        Invalid::Environment(_) | Invalid::Document(_) => cause,
+    };
+    let refused = Err(RunError::Other(reason.clone()));
+    record_start_refusal(&sink, host, &socket, euid, session, seq, au3_1, &refused).await;
+    RunError::Other(reason)
+}
+
+struct OpenedTrail {
+    sink: Arc<maknae_audit_append::AuditSink>,
+    scanned: Option<(Option<maknae_state::anchor::Checkpoint>, u64)>,
+    moved: Option<crate::baseline::Move>,
+}
+
+/// The trail this start appends to, with the move from `prior` performed when the
+/// path changed: the old trail records the move first, the new one links back, and
+/// the anchor is the newer of the two trails' checkpoints.
+async fn open_trail(
+    prior: Option<&Path>,
+    cfg: &maknae_config::AuditConfig,
+    create: bool,
+    open_prepared: TrailOpener,
+    state_dir: &Path,
+    ctx: &BootCtx<'_>,
+) -> Result<OpenedTrail, RunError> {
+    let m = match crate::baseline::move_of(prior, &cfg.jsonl_path) {
+        Err(e) => {
+            return Err(RunError::Other(format!(
+                "{e}; see the runbook's \"Move the audit trail\""
+            )))
+        }
+        Ok(None) => {
+            return Ok(OpenedTrail {
+                sink: Arc::new(open_or_create(cfg, create)?),
+                scanned: None,
+                moved: None,
+            })
+        }
+        Ok(Some(m)) => m,
+    };
+    let old = maknae_audit_append::AuditSink::open_existing(&maknae_config::AuditConfig {
+        jsonl_path: m.from.clone(),
+        ..cfg.clone()
+    })
+    .map(Arc::new)
+    .map_err(|e| e.to_string());
+    let new = Arc::new(open_prepared(cfg).map_err(|e| RunError::Other(e.to_string()))?);
+    let (old_checkpoint, old_bytes) = match &old {
+        Ok(old) => last_checkpoint(old, state_dir).await?,
+        Err(_) => (None, 0),
+    };
+    let (new_checkpoint, new_bytes) = last_checkpoint(&new, state_dir).await?;
+    let carried = maknae_state::anchor::newer(old_checkpoint, new_checkpoint);
+    let record =
+        |reason: &str| ctx.record(GRAPH_BASELINE_ACTION, "permit", reason, "authorized", None);
+    if let Ok(old) = &old {
+        old.emit_within(
+            &record(&crate::baseline::move_record(&m.to)),
+            AUDIT_APPEND_TIMEOUT,
+        )
+        .await
+        .map_err(|e| boot_evidence_refused("audit move", e))?;
+    }
+    let old_unopened = old.err();
+    let link = crate::baseline::back_link_record(
+        &m.from,
+        carried.map(|c| c.revision),
+        old_unopened.as_deref(),
+    );
+    new.emit_within(&record(&link), AUDIT_APPEND_TIMEOUT)
+        .await
+        .map_err(|e| boot_evidence_refused("audit move", e))?;
+    Ok(OpenedTrail {
+        sink: new,
+        scanned: Some((carried, old_bytes + new_bytes)),
+        moved: Some(m),
+    })
 }
 
 /// Everything `run_inner` does once the audit sink is open, so that a startup
@@ -4095,11 +4469,8 @@ async fn run_inner(
 async fn boot_after_sink(
     config_dir: &Path,
     state_dir: &Path,
-    graph_key: GraphKeyReader,
-    boot: crate::BootConfig,
-    transport: maknae_config::TransportConfig,
-    egress_cfg: maknae_config::EgressConfig,
-    audit_cfg: &maknae_config::AuditConfig,
+    seams: &BootSeams,
+    started: Started,
     sink: &Arc<maknae_audit_append::AuditSink>,
     session_ids: &Arc<SessionIds>,
     host: &str,
@@ -4108,74 +4479,37 @@ async fn boot_after_sink(
     boot_seq: &Seq,
     hup: tokio::signal::unix::Signal,
 ) -> Result<ServeOutcome, RunError> {
-    // #189: a configured `audit.siem` promises off-host offload that does not
-    // exist until #223. Fail closed -- and audit the refusal, per the ordering
-    // rule stated for the authz gate below.
-    if let Err(e) = crate::boot_gate::audit_offload_boot_gate(audit_cfg) {
-        return Err(refuse_audit_offload_boot(
-            sink.as_ref(),
-            host,
-            socket,
-            euid,
-            boot_session_id(session_ids),
-            boot_seq.next(),
-            &audit_cfg.au3_1,
-            e.to_string(),
-        )
-        .await);
-    }
+    let classification = crate::baseline_check::classification_of(&started.validated);
+    let Started {
+        validated,
+        run,
+        pending,
+        accepted_seen,
+        events,
+        inconsistent,
+        dir,
+        key,
+        scanned,
+    } = started;
+    let crate::baseline_check::Validated {
+        boot,
+        transport,
+        egress: egress_cfg,
+        audit,
+        principal,
+        egress_bounds,
+        ..
+    } = validated;
+    let audit_cfg = &audit;
+    let egress = crate::egress::production_egress_with(boot.providers(), &egress_cfg, |_| {
+        seams.env.egress_account()
+    })
+    .map_err(|e| RunError::Other(e.to_string()))?;
 
     // --- AUTHZ GATE (#77, spec D1): the daemon constructs its PDP at boot or
-    // refuses to start. Ordering: audit sink first (above), so the refusal is
-    // itself auditable. Refusal triggers (exactly two — boot_gate.rs is the
-    // T1 authority): a malformed OR ABSENT `principal` section (a daemon with
-    // no principal can authorize no one — operator ruling 2026-08-28), or any
-    // PDP construction refusal (hardened policy load, bindings semantics).
-    // Each → peer-less AU-3 refusal record → RunError::Authz → exit code 3.
-    let principal_opt = match boot
-        .shadowed_sections("principal")
-        .try_for_each(maknae_config::principal_keys_known)
-        .and_then(|()| maknae_config::principal_from_section(boot.section("principal")))
-    {
-        Ok(p) => p,
-        Err(e) => {
-            return Err(refuse_authz_boot(
-                sink.as_ref(),
-                host,
-                socket,
-                euid,
-                boot_session_id(session_ids),
-                boot_seq.next(),
-                &audit_cfg.au3_1,
-                e.to_string(),
-            )
-            .await);
-        }
-    };
-    let egress_bounds = if boot.providers().is_empty() {
-        None
-    } else {
-        Some(
-            maknae_config::load_egress_bounds(&config_dir.join(maknae_config::EGRESS_BOUNDS_FILE))
-                .map_err(|e| {
-                    RunError::Other(crate::boot_gate::classify_bounds_load_error(e).to_string())
-                })?,
-        )
-    };
-    if let Err(e) =
-        crate::boot_gate::egress_bounds_boot_gate(boot.providers(), egress_bounds.as_ref())
-    {
-        return Err(RunError::Other(e.to_string()));
-    }
-    let egress = crate::egress::production_egress(boot.providers(), &egress_cfg)
-        .map_err(|e| RunError::Other(e.to_string()))?;
-    crate::boot_gate::root_vault_boot_gate(boot.section(maknae_vault::VAULT_SECTION))
-        .map_err(|e| RunError::Other(e.to_string()))?;
-    for shadowed in boot.shadowed_sections(maknae_vault::VAULT_SECTION) {
-        crate::boot_gate::root_vault_boot_gate(Some(shadowed))
-            .map_err(|e| RunError::Other(e.to_string()))?;
-    }
-
+    // refuses to start, after the validator passed the principal. Any PDP
+    // construction refusal (hardened policy load, bindings semantics) →
+    // peer-less AU-3 refusal record → RunError::Authz → exit code 3.
     let refuse = |reason: String| {
         refuse_authz_boot(
             sink.as_ref(),
@@ -4188,17 +4522,27 @@ async fn boot_after_sink(
             reason,
         )
     };
-    let source = match authz_policy_source(config_dir, principal_opt) {
+    let source = match crate::boot_gate::authz_policy_source_with(
+        config_dir,
+        Some(principal),
+        seams.policy_load,
+    ) {
         Ok(source) => source,
         Err(e) => return Err(refuse(e.to_string()).await),
     };
     let label = boot.policy().unmarked().name.clone();
-    let graph_inputs = GraphInputs::new(&source, &label, file_baseline(&boot))
+    let mut graph_inputs = GraphInputs::new(&source, &label, run_baseline(&run, classification))
         .map_err(|e| graph_refusal(GraphFailure::Store(e), state_dir))?;
+    graph_inputs.accepted_seen = accepted_seen;
+    graph_inputs.baseline_events = events;
+    if let Some(why) = inconsistent {
+        return Err(graph_refusal(GraphFailure::Inconsistent(why), state_dir));
+    }
     // The kernel graph boots before the PDP is built from it.
-    let booted = match boot_kernel_graph(
+    let mut booted = match boot_kernel_graph(
         state_dir,
-        graph_key(config_dir),
+        dir,
+        key,
         sink,
         &BootCtx {
             event: "boot",
@@ -4210,6 +4554,7 @@ async fn boot_after_sink(
             au3_1: &audit_cfg.au3_1,
         },
         &graph_inputs.boot(),
+        scanned,
     )
     .await
     {
@@ -4217,6 +4562,10 @@ async fn boot_after_sink(
         Err(RunError::Authz(reason)) => return Err(refuse(reason).await),
         Err(e) => return Err(e),
     };
+    booted.status.baseline = crate::baseline::BaselineStatus::new(crate::baseline::BaselineState {
+        accepted: run,
+        pending: pending.clone(),
+    });
     let authorizer = match authz_boot_gate(
         source,
         Arc::new(booted.graph),
@@ -4287,6 +4636,16 @@ async fn boot_after_sink(
         &identity_ctx,
     )
     .await?;
+    if let Some(p) = &pending {
+        let (result, reason, posture) = crate::baseline::record_fields(p);
+        sink.emit_within(
+            &identity_ctx.record(GRAPH_BASELINE_ACTION, result, &reason, posture, None),
+            AUDIT_APPEND_TIMEOUT,
+        )
+        .await
+        .map_err(|e| boot_evidence_refused("baseline pending", e))?;
+        eprintln!("maknaed: baseline: {}", crate::baseline::journal_line(p));
+    }
     let authorizer = Arc::new(authorizer);
     let identity = booted.status.identity.clone();
     let graph_revision = Arc::clone(&booted.status.revision);
@@ -5006,12 +5365,41 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
     /// frame, so the guard is just an ordinary stack value — matches `run()`'s
     /// own runtime-construction pattern.
     fn block_on_run_inner(dir: &Path) -> Result<ServeOutcome, RunError> {
-        tokio::runtime::Runtime::new().unwrap().block_on(run_inner(
-            dir,
-            &state_dir(dir),
-            test_graph_key,
-            crate::boot::read_files_as_owner,
-        ))
+        block_on_run_inner_with(dir, test_seams())
+    }
+
+    /// The graph boot as a start decides it: a stored baseline is passed back with
+    /// nothing to record; with none, the given one is seeded.
+    pub(super) async fn boot_graph_at(
+        state_dir: &Path,
+        key: Result<maknae_vault::GraphKey, maknae_vault::VaultError>,
+        sink: &Arc<maknae_audit_append::AuditSink>,
+        ctx: &BootCtx<'_>,
+        inputs: &BootInputs<'_>,
+    ) -> Result<BootedGraph, RunError> {
+        let key = key.map(|k| WrappingKey::new(k.into_bytes()));
+        let dir = StateDir::open(state_dir, ctx.euid);
+        let stored = match (&dir, &key) {
+            (Ok(d), Ok(k)) if !d.reseed_authorized() => {
+                maknae_state::store::peek_baseline(d, k).ok().flatten()
+            }
+            _ => None,
+        };
+        let seeded = [crate::baseline::SEEDED_EVENT.to_string()];
+        let inputs = match &stored {
+            Some(accepted) => BootInputs {
+                baseline: accepted,
+                accepted_seen: Some(accepted.sha256),
+                baseline_events: &[],
+                ..*inputs
+            },
+            None => BootInputs {
+                accepted_seen: None,
+                baseline_events: &seeded,
+                ..*inputs
+            },
+        };
+        boot_kernel_graph(state_dir, dir, key, sink, ctx, &inputs, None).await
     }
 
     fn test_graph_key(_: &Path) -> Result<maknae_vault::GraphKey, maknae_vault::VaultError> {
@@ -5440,6 +5828,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             0o640,
         );
         put(&state_dir(&d.0), "kernel.graph", "not an envelope", 0o600);
+        put(&d.0, "audit.jsonl", "", 0o640);
 
         let result = block_on_run_inner(&d.0);
 
@@ -5612,7 +6001,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             au3_1: &au3_1,
         };
         let inputs = bare_inputs(config_dir);
-        block_on(boot_kernel_graph(
+        block_on(boot_graph_at(
             &fx.state,
             key,
             &fx.sink,
@@ -5672,7 +6061,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             status,
             graph,
             ..
-        } = block_on(boot_kernel_graph(
+        } = block_on(boot_graph_at(
             &fx.state,
             key(),
             &fx.sink,
@@ -5745,7 +6134,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             status,
             graph,
             ..
-        } = block_on(boot_kernel_graph(
+        } = block_on(boot_graph_at(
             &fx.state,
             key(),
             &fx.sink,
@@ -5995,7 +6384,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             au3_1: &au3_1,
         };
         let boot = |identity: &maknae_graph::identity::IdentityLayer| {
-            block_on(boot_kernel_graph(
+            block_on(boot_graph_at(
                 &fx.state,
                 key(),
                 &fx.sink,
@@ -6062,7 +6451,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             au3_1: &au3_1,
         };
         drop(
-            block_on(boot_kernel_graph(
+            block_on(boot_graph_at(
                 &fx.state,
                 key(),
                 &fx.sink,
@@ -6075,7 +6464,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             .unwrap(),
         );
         let seeded = trail(fx).len();
-        let booted = block_on(boot_kernel_graph(
+        let booted = block_on(boot_graph_at(
             &fx.state,
             key(),
             &fx.sink,
@@ -6246,7 +6635,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             source: inputs.identity.source.clone(),
             ..seed.clone()
         };
-        let booted = block_on(boot_kernel_graph(
+        let booted = block_on(boot_graph_at(
             &fx.state,
             key(),
             &fx.sink,
@@ -6345,7 +6734,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
                 baseline.outcome.reason.as_str(),
                 baseline.outcome.posture.as_str()
             ),
-            ("permit", BASELINE_SEEDED_EVENT, "authorized")
+            ("permit", crate::baseline::SEEDED_EVENT, "authorized")
         );
         assert_eq!(
             baseline.graph,
@@ -6473,7 +6862,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
     fn boot_with_baseline(fx: &GraphFixture, baseline: BaselineLayer) -> BootedGraph {
         let mut inputs = bare_inputs(&fx.dir.0);
         inputs.baseline = baseline;
-        block_on(boot_kernel_graph(
+        block_on(boot_graph_at(
             &fx.state,
             key(),
             &fx.sink,
@@ -6560,7 +6949,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
                 "graph.checkpoint"
             ]
         );
-        assert_eq!(recs[1].0.outcome.reason, BASELINE_SEEDED_EVENT);
+        assert_eq!(recs[1].0.outcome.reason, crate::baseline::SEEDED_EVENT);
     }
 
     #[test]
@@ -6574,28 +6963,6 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         let booted = boot_with_baseline(&fx, edited_baseline());
         assert_eq!(booted.status.anchor, "reseeded");
         assert_eq!(stored_baseline(&booted.graph), Some(edited_baseline()));
-    }
-
-    #[test]
-    fn the_files_baseline_is_the_loaded_sections_under_the_selected_system() {
-        let dir = Dir::new("file_baseline");
-        std::fs::set_permissions(&dir.0, std::fs::Permissions::from_mode(0o700)).unwrap();
-        put(&dir.0, "maknae.yaml", "core: {}\n", 0o640);
-        let b = file_baseline(
-            &crate::boot::read_files_as_owner(&dir.0)
-                .and_then(crate::boot::assemble)
-                .unwrap(),
-        );
-        assert_eq!(
-            b,
-            BaselineLayer {
-                sections: [("core".to_string(), "{}".to_string())].into(),
-                system: "US".into(),
-                ceiling: "UNCLASSIFIED".into(),
-                sha256: maknae_state::envelope::sha256(br#"{"core":"{}"}"#),
-                moved_from: None,
-            }
-        );
     }
 
     #[test]
@@ -7075,6 +7442,910 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             crate::posture::Posture::Unverified,
             "a marker with the right mechanism but the wrong target must not \
              determine HrotSealed"
+        );
+    }
+    // ---- #490: the boot starts from the accepted baseline ----
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[derive(Clone)]
+    struct TestEnv {
+        prepared: Result<(), String>,
+        bounds: Option<maknae_config::EgressBounds>,
+    }
+
+    impl Default for TestEnv {
+        fn default() -> Self {
+            TestEnv {
+                prepared: Ok(()),
+                bounds: None,
+            }
+        }
+    }
+
+    impl maknae_config::ReaderLookup for TestEnv {
+        fn account(&self, name: &str) -> Result<Option<maknae_config::ReaderAccount>, String> {
+            maknae_vault::NssAccounts.account(name)
+        }
+        fn daemon_gid(&self) -> Result<Option<u32>, String> {
+            maknae_vault::NssAccounts.daemon_gid()
+        }
+        fn service_uids(&self) -> Result<Vec<u32>, String> {
+            maknae_vault::NssAccounts.service_uids()
+        }
+    }
+
+    impl crate::baseline_check::Env for TestEnv {
+        fn egress_bounds(&self) -> Result<maknae_config::EgressBounds, maknae_config::ConfigError> {
+            self.bounds
+                .clone()
+                .ok_or_else(|| maknae_config::ConfigError::NotFound {
+                    path: maknae_config::EGRESS_BOUNDS_FILE.into(),
+                })
+        }
+        fn egress_account(&self) -> Result<Option<u32>, String> {
+            Ok(Some(65534))
+        }
+        fn trail_prepared(&self, _: &Path) -> Result<(), String> {
+            self.prepared.clone()
+        }
+        fn listener_bindable(&self, _: &Path) -> Result<(), String> {
+            Ok(())
+        }
+        fn deputy_reachable(&self, _: &Path) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn test_seams() -> BootSeams {
+        BootSeams {
+            graph_key: test_graph_key,
+            state_dir_open: StateDir::open,
+            files: crate::boot::read_files_as_owner,
+            env: Arc::new(TestEnv::default()),
+            open_prepared: maknae_audit_append::AuditSink::open_existing,
+            policy_load: maknae_authz_basic::PolicySource::load,
+        }
+    }
+
+    fn euid_owned_policy(
+        paths: maknae_authz_basic::PolicyPaths,
+        principal: maknae_config::Principal,
+    ) -> Result<maknae_authz_basic::PolicySource, maknae_authz_basic::AuthzBasicError> {
+        maknae_authz_basic::PolicySource::load_with_requirement(
+            paths,
+            principal,
+            maknae_config::TargetRequired {
+                owner: None,
+                mode_mask: Some(0o022),
+                nlink_exactly_one: false,
+                regular_file: true,
+                max_bytes: None,
+            },
+        )
+    }
+
+    fn own_marker(path: &Path, owner: u32) -> Result<StateDir, StoreError> {
+        StateDir::open_with_marker_owner(path, owner, nix::unistd::geteuid().as_raw())
+    }
+
+    /// The test seams with the policy files read under the test's own ownership.
+    fn seams_with(env: TestEnv) -> BootSeams {
+        BootSeams {
+            env: Arc::new(env),
+            policy_load: euid_owned_policy,
+            ..test_seams()
+        }
+    }
+
+    /// As [`seams_with`], with the test playing root's reseed marker.
+    fn seams_with_own_marker(env: TestEnv) -> BootSeams {
+        BootSeams {
+            state_dir_open: own_marker,
+            ..seams_with(env)
+        }
+    }
+
+    fn refusing_prepared(
+        _: &maknae_config::AuditConfig,
+    ) -> Result<maknae_audit_append::AuditSink, maknae_audit_append::AuditError> {
+        Err(maknae_audit_append::AuditError::OpenPrimary {
+            path: PathBuf::from("/prepared"),
+            detail: "not append-only".into(),
+        })
+    }
+
+    fn block_on_run_inner_with(dir: &Path, seams: BootSeams) -> Result<ServeOutcome, RunError> {
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(run_inner(dir, &state_dir(dir), &seams))
+    }
+
+    fn trail_of(d: &Dir, name: &str) -> Vec<AuditRecord> {
+        std::fs::read_to_string(d.0.join(name))
+            .unwrap_or_default()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    fn baseline_records(recs: &[AuditRecord]) -> Vec<(String, String)> {
+        recs.iter()
+            .filter(|r| r.action == GRAPH_BASELINE_ACTION)
+            .map(|r| (r.outcome.result.clone(), r.outcome.reason.clone()))
+            .collect()
+    }
+
+    fn composition(recs: &[AuditRecord]) -> String {
+        recs.iter()
+            .rev()
+            .find(|r| r.action == "authz" && r.outcome.result == "permit")
+            .unwrap_or_else(|| panic!("no composition record in {recs:?}"))
+            .outcome
+            .reason
+            .clone()
+    }
+
+    const PRINCIPAL_BLOCK: &str = "principal:\n  name: op\n  uid: 1000\n";
+    const UNCLASSIFIED_CEILING: &str = "  handling:\n    ceiling:\n      classification: UNCLASSIFIED\n      sci: false\n      releasable_to: []\n      cui_permitted: false\n      cui_categories_permitted: []\n      dissemination_permitted: [\"Distribution Statement A\"]\n    accreditation_ref: null\n";
+    const SECRET_CEILING: &str = "  handling:\n    ceiling:\n      classification: SECRET\n      sci: false\n      releasable_to: []\n      cui_permitted: false\n      cui_categories_permitted: []\n      dissemination_permitted: [\"Distribution Statement A\"]\n    accreditation_ref: null\n";
+    const PROVIDERS_BLOCK: &str = "providers:\n  - name: openai\n    endpoint: https://api.example.test/v1\n    models: [m]\n";
+
+    /// The common fixture's maknae.yaml with `core_extra` under `core:`, the trail at `audit`, and `tail` appended.
+    fn write_yaml(d: &Dir, core_extra: &str, vault_addr: &str, audit: &Path, tail: &str) {
+        let yaml = format!(
+            "core:\n  deployment_id: dev-01\n{core_extra}vault:\n  addr: {vault_addr}\ntransport:\n  socket_path: {}\naudit:\n  jsonl_path: {}\n{PRINCIPAL_BLOCK}{tail}",
+            d.0.join("maknaed.sock").display(),
+            audit.display(),
+        );
+        put(&d.0, "maknae.yaml", &yaml, 0o640);
+    }
+
+    fn fixture(tag: &str) -> Dir {
+        let d = Dir::new(tag);
+        write_common_fixture(&d, PRINCIPAL_BLOCK);
+        put(
+            &d.0,
+            "authz.yaml",
+            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n",
+            0o640,
+        );
+        d
+    }
+
+    fn boot(d: &Dir) -> Result<ServeOutcome, RunError> {
+        block_on_run_inner_with(&d.0, seams_with(TestEnv::default()))
+    }
+
+    fn store_graph(d: &Dir) -> maknae_graph::graph::Graph {
+        let key = WrappingKey::new(test_graph_key(&d.0).unwrap().into_bytes());
+        maknae_graph::format::decode_stored_compiled(
+            &maknae_state::envelope::open(&store_bytes(d), &key).unwrap(),
+            maknae_graph::record::GraphSpace::Kernel,
+            &maknae_graph::kernel::SCHEMA,
+        )
+        .unwrap()
+        .0
+    }
+
+    fn accepted(d: &Dir) -> BaselineLayer {
+        maknae_graph::identity::extract(&store_graph(d))
+            .unwrap()
+            .baseline
+            .unwrap()
+    }
+
+    fn revision_of_store(d: &Dir) -> u64 {
+        store_graph(d).revision()
+    }
+
+    fn store_bytes(d: &Dir) -> Vec<u8> {
+        std::fs::read(state_dir(&d.0).join(STORE_FILE)).unwrap()
+    }
+
+    fn write_store(d: &Dir, graph: &maknae_graph::graph::Graph) -> Vec<u8> {
+        let key = WrappingKey::new(test_graph_key(&d.0).unwrap().into_bytes());
+        let sealed =
+            maknae_state::envelope::seal(&maknae_graph::format::encode(graph), &key).unwrap();
+        put(&state_dir(&d.0), STORE_FILE, "", 0o600);
+        std::fs::write(state_dir(&d.0).join(STORE_FILE), &sealed).unwrap();
+        sealed
+    }
+
+    fn append_checkpoint(d: &Dir, revision: u64, sealed: &[u8]) {
+        let mut rec = make_record(
+            "boot",
+            "h",
+            "s",
+            0,
+            None,
+            None,
+            None,
+            1,
+            1,
+            CHECKPOINT_ACTION,
+            None,
+            "permit",
+            "transitioned",
+            "authorized",
+            &serde_json::Value::Null,
+        );
+        rec.graph = Some(GraphAudit {
+            revision,
+            ciphertext_sha256: lower_hex(&maknae_state::envelope::ciphertext_digest(sealed)),
+            anchor: "transitioned".into(),
+            scanned_bytes: 0,
+        });
+        let line = format!("{}\n", serde_json::to_string(&rec).unwrap());
+        assert!(maknae_state::anchor::is_checkpoint(
+            line.trim_end().as_bytes()
+        ));
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(d.0.join("audit.jsonl"))
+            .unwrap()
+            .write_all(line.as_bytes())
+            .unwrap();
+    }
+
+    /// The seeded store rewritten one revision on with `baseline` in place of its own.
+    fn rewrite_baseline(d: &Dir, baseline: Option<&BaselineLayer>) {
+        let graph = store_graph(d);
+        let e = maknae_graph::identity::extract(&graph).unwrap();
+        let vocab = crate::vocabulary::kernel_vocabulary(&e.layer.label).unwrap();
+        let next = maknae_graph::identity::build(
+            &e.layer,
+            baseline,
+            &vocab.persisted,
+            vocab.digest,
+            graph.revision() + 1,
+            maknae_graph::record::ProvenanceKind::Seed,
+        )
+        .unwrap();
+        let sealed = write_store(d, &next);
+        append_checkpoint(d, next.revision(), &sealed);
+    }
+
+    fn audit_section(b: &BaselineLayer) -> String {
+        b.sections["audit"].clone()
+    }
+
+    fn prepare_trail(d: &Dir, name: &str) -> PathBuf {
+        put(&d.0, name, "", 0o640);
+        d.0.join(name)
+    }
+
+    #[test]
+    fn a_first_start_seeds_the_baseline_with_no_accept() {
+        let _g = env_lock();
+        let d = fixture("seed");
+        let _ = boot(&d);
+        let recs = trail_of(&d, "audit.jsonl");
+        let seeded = recs
+            .iter()
+            .position(|r| r.action == GRAPH_BASELINE_ACTION)
+            .expect("a seed record");
+        assert_eq!(recs[seeded].outcome.reason, crate::baseline::SEEDED_EVENT);
+        let checkpoint = recs
+            .iter()
+            .position(|r| r.action == CHECKPOINT_ACTION)
+            .unwrap();
+        assert!(
+            seeded < checkpoint,
+            "the seed record is written ahead of the persist's checkpoint"
+        );
+        assert_eq!(
+            accepted(&d).sections["core"],
+            r#"{"deployment_id":"dev-01"}"#
+        );
+    }
+
+    #[test]
+    fn an_upgrade_seeds_the_baseline_from_the_files() {
+        let _g = env_lock();
+        let d = fixture("upgrade");
+        let _ = boot(&d);
+        rewrite_baseline(&d, None);
+        let before = trail_of(&d, "audit.jsonl").len();
+        let _ = boot(&d);
+        let recs = trail_of(&d, "audit.jsonl");
+        let new: Vec<(&str, &str)> = recs[before..]
+            .iter()
+            .map(|r| (r.action.as_str(), r.outcome.reason.as_str()))
+            .collect();
+        let seeded = new
+            .iter()
+            .position(|(a, r)| *a == GRAPH_BASELINE_ACTION && *r == crate::baseline::SEEDED_EVENT)
+            .expect("seeded");
+        let transition = new
+            .iter()
+            .position(|(a, r)| *a == GRAPH_TRANSITION_ACTION && r.contains("root-file"))
+            .expect("transition");
+        assert!(seeded < transition, "{new:?}");
+        assert!(
+            !new.iter().any(|(a, _)| *a == GRAPH_MIGRATE_ACTION),
+            "{new:?}"
+        );
+        assert_eq!(
+            accepted(&d).sections["core"],
+            r#"{"deployment_id":"dev-01"}"#
+        );
+    }
+
+    #[test]
+    fn a_pending_change_survives_a_restart_unapplied() {
+        let _g = env_lock();
+        let d = fixture("pending");
+        write_yaml(
+            &d,
+            UNCLASSIFIED_CEILING,
+            "https://v.example:8200",
+            &d.0.join("audit.jsonl"),
+            "",
+        );
+        let _ = boot(&d);
+        let revision_after_seed = revision_of_store(&d);
+        write_yaml(
+            &d,
+            SECRET_CEILING,
+            "https://v.example:8200",
+            &d.0.join("audit.jsonl"),
+            "",
+        );
+        let mut hashes = Vec::new();
+        for _ in 0..2 {
+            let before = trail_of(&d, "audit.jsonl").len();
+            let _ = boot(&d);
+            let recs = trail_of(&d, "audit.jsonl")[before..].to_vec();
+            assert!(
+                composition(&recs).contains("ceiling: UNCLASSIFIED"),
+                "{}",
+                composition(&recs)
+            );
+            let pending = baseline_records(&recs);
+            assert_eq!(pending.len(), 1, "{pending:?}");
+            assert_eq!(pending[0].0, "deny");
+            assert!(
+                pending[0]
+                    .1
+                    .starts_with("baseline change pending acceptance: root-file "),
+                "{}",
+                pending[0].1
+            );
+            assert!(
+                pending[0].1.ends_with("(apply: live; sections: core)"),
+                "{}",
+                pending[0].1
+            );
+            hashes.push(pending[0].1.clone());
+        }
+        assert_eq!(hashes[0], hashes[1]);
+        assert_eq!(revision_of_store(&d), revision_after_seed);
+    }
+
+    #[test]
+    fn an_invalid_file_without_a_baseline_exits_one_and_appends_nothing() {
+        let _g = env_lock();
+        let d = fixture("invalid-first");
+        put(&d.0, "maknae.yaml", "core:\n  deployment_id: [\n", 0o640);
+        let r = boot(&d);
+        assert!(matches!(r, Err(RunError::Other(_))), "{r:?}");
+        assert_eq!(refusal_exit_code(&r.unwrap_err()), 1);
+        assert!(trail_of(&d, "audit.jsonl").is_empty());
+        assert!(!d.0.join("audit.jsonl").exists());
+    }
+
+    #[test]
+    fn an_invalid_file_with_a_baseline_keeps_running_it_and_records_why() {
+        let _g = env_lock();
+        let d = fixture("invalid-later");
+        let _ = boot(&d);
+        let revision = revision_of_store(&d);
+        write_yaml(
+            &d,
+            "  unknown_key: 1\n",
+            "https://v.example:8200",
+            &d.0.join("audit.jsonl"),
+            "",
+        );
+        let before = trail_of(&d, "audit.jsonl").len();
+        let _ = boot(&d);
+        let recs = trail_of(&d, "audit.jsonl")[before..].to_vec();
+        assert!(composition(&recs).contains("ceiling: UNCLASSIFIED"));
+        let b = baseline_records(&recs);
+        assert_eq!(b.len(), 1, "{b:?}");
+        assert!(
+            b[0].1.starts_with("baseline change refused: invalid: ")
+                && b[0].1.contains("unknown_key"),
+            "{}",
+            b[0].1
+        );
+        assert_eq!(
+            recs.iter()
+                .find(|r| r.action == GRAPH_BASELINE_ACTION)
+                .unwrap()
+                .outcome
+                .posture,
+            "unavailable"
+        );
+        assert_eq!(revision_of_store(&d), revision);
+    }
+
+    #[test]
+    fn vault_follows_the_file_at_start_and_is_recorded() {
+        let _g = env_lock();
+        let d = fixture("vault-follows");
+        let _ = boot(&d);
+        write_yaml(
+            &d,
+            "",
+            "https://w.example:8200",
+            &d.0.join("audit.jsonl"),
+            "",
+        );
+        let before = trail_of(&d, "audit.jsonl").len();
+        let _ = boot(&d);
+        let recs = trail_of(&d, "audit.jsonl")[before..].to_vec();
+        let follow = recs
+            .iter()
+            .position(|r| {
+                r.action == GRAPH_BASELINE_ACTION
+                    && r.outcome.reason == "vault follows maknae.yaml at start"
+            })
+            .expect("follow record");
+        let transition = recs
+            .iter()
+            .position(|r| r.action == GRAPH_TRANSITION_ACTION)
+            .expect("transition");
+        assert!(follow < transition);
+        assert!(accepted(&d).sections["vault"].contains("w.example"));
+        assert!(
+            baseline_records(&recs)
+                .iter()
+                .all(|(result, _)| result == "permit"),
+            "no pending record"
+        );
+    }
+
+    #[test]
+    fn a_move_records_in_the_old_trail_first_and_links_back() {
+        let _g = env_lock();
+        let d = fixture("move");
+        let _ = boot(&d);
+        let new = prepare_trail(&d, "audit-2.jsonl");
+        write_yaml(&d, "", "https://v.example:8200", &new, "");
+        let old_before = trail_of(&d, "audit.jsonl").len();
+        let _ = boot(&d);
+        let old = trail_of(&d, "audit.jsonl");
+        assert_eq!(
+            old.len(),
+            old_before + 1,
+            "exactly one record is added to the old trail"
+        );
+        assert_eq!(
+            old.last().unwrap().outcome.reason,
+            format!("audit trail moves to {} at start", new.display())
+        );
+        let moved = trail_of(&d, "audit-2.jsonl");
+        assert_eq!(moved[0].action, GRAPH_BASELINE_ACTION);
+        assert_eq!(
+            moved[0].outcome.reason,
+            format!(
+                "audit trail continues from {}; last checkpoint revision 1",
+                d.0.join("audit.jsonl").display()
+            )
+        );
+        let (moving, linked) = (old.last().unwrap(), &moved[0]);
+        assert_eq!(moving.session_id, linked.session_id);
+        assert!(
+            moving.seq < linked.seq,
+            "the old trail records the move before the new trail's first record"
+        );
+        assert!(moved.iter().any(|r| r.action == CHECKPOINT_ACTION));
+        assert!(baseline_records(&moved)
+            .iter()
+            .any(|(_, why)| *why == crate::baseline::moved_event(&d.0.join("audit.jsonl"), &new)));
+        assert!(audit_section(&accepted(&d)).contains("audit-2.jsonl"));
+    }
+
+    #[test]
+    fn an_unprepared_target_keeps_the_old_trail() {
+        let _g = env_lock();
+        let d = fixture("unprepared");
+        let _ = boot(&d);
+        let new = prepare_trail(&d, "audit-2.jsonl");
+        write_yaml(&d, "", "https://v.example:8200", &new, "");
+        let before = trail_of(&d, "audit.jsonl").len();
+        let _ = block_on_run_inner_with(
+            &d.0,
+            seams_with(TestEnv {
+                prepared: Err("not append-only".into()),
+                ..TestEnv::default()
+            }),
+        );
+        assert!(trail_of(&d, "audit-2.jsonl").is_empty());
+        let b = baseline_records(&trail_of(&d, "audit.jsonl")[before..]);
+        assert!(
+            b.iter()
+                .any(|(r, why)| r == "deny" && why.contains("not append-only")),
+            "{b:?}"
+        );
+        assert!(!audit_section(&accepted(&d)).contains("audit-2.jsonl"));
+    }
+
+    #[test]
+    fn a_move_outside_the_trail_directory_is_refused_as_invalid() {
+        let _g = env_lock();
+        let d = fixture("outside");
+        let other = Dir::new("outside-other");
+        let _ = boot(&d);
+        let elsewhere = other.0.join("audit.jsonl");
+        put(&other.0, "audit.jsonl", "", 0o640);
+        write_yaml(&d, "", "https://v.example:8200", &elsewhere, "");
+        let before = trail_of(&d, "audit.jsonl").len();
+        let _ = boot(&d);
+        let b = baseline_records(&trail_of(&d, "audit.jsonl")[before..]);
+        assert!(
+            b.iter()
+                .any(|(r, why)| r == "deny" && why.contains("may move only within")),
+            "{b:?}"
+        );
+        assert!(std::fs::read_to_string(&elsewhere).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_target_that_does_not_open_prepared_refuses_with_nothing_on_it() {
+        let _g = env_lock();
+        let d = fixture("prepared-race");
+        let _ = boot(&d);
+        let new = prepare_trail(&d, "audit-2.jsonl");
+        write_yaml(&d, "", "https://v.example:8200", &new, "");
+        let before = trail_of(&d, "audit.jsonl").len();
+        let r = block_on_run_inner_with(
+            &d.0,
+            BootSeams {
+                open_prepared: refusing_prepared,
+                ..seams_with(TestEnv::default())
+            },
+        );
+        assert!(
+            matches!(r, Err(RunError::Other(ref m)) if m.contains("not append-only")),
+            "{r:?}"
+        );
+        assert!(trail_of(&d, "audit-2.jsonl").is_empty());
+        assert_eq!(trail_of(&d, "audit.jsonl").len(), before);
+    }
+
+    #[test]
+    fn a_rolled_back_store_naming_the_old_trail_is_refused_across_a_move() {
+        let _g = env_lock();
+        let d = fixture("rollback-move");
+        let _ = boot(&d);
+        let me = nix::unistd::User::from_uid(nix::unistd::geteuid())
+            .unwrap()
+            .unwrap()
+            .name;
+        put(
+            &d.0,
+            "bindings.yaml",
+            &format!("schema_version: 1\nbindings:\n  admin: [\"{me}\"]\n"),
+            0o640,
+        );
+        let _ = boot(&d);
+        assert_eq!(revision_of_store(&d), 2);
+        let s2 = store_bytes(&d);
+        let new = prepare_trail(&d, "audit-2.jsonl");
+        write_yaml(&d, "", "https://v.example:8200", &new, "");
+        let _ = boot(&d);
+        assert_eq!(revision_of_store(&d), 3);
+        std::fs::write(state_dir(&d.0).join(STORE_FILE), &s2).unwrap();
+        match boot(&d) {
+            Err(RunError::Graph { reason, .. }) => {
+                assert!(reason.contains('2') && reason.contains('3'), "{reason}")
+            }
+            other => panic!("expected the rollback refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn once_a_baseline_exists_a_missing_trail_refuses_and_is_not_created() {
+        let _g = env_lock();
+        let d = fixture("no-recreate");
+        let _ = boot(&d);
+        std::fs::remove_file(d.0.join("audit.jsonl")).unwrap();
+        let r = boot(&d);
+        assert!(
+            matches!(r, Err(RunError::Other(ref m)) if m.contains("is missing") && m.contains("Move the audit trail")),
+            "{r:?}"
+        );
+        assert!(!d.0.join("audit.jsonl").exists());
+    }
+
+    #[test]
+    fn a_reseed_replaces_an_accepted_baseline_from_the_files() {
+        let _g = env_lock();
+        let d = fixture("reseed");
+        let _ = boot(&d);
+        let accepted_before = accepted(&d);
+        write_yaml(
+            &d,
+            SECRET_CEILING,
+            "https://w.example:8200",
+            &d.0.join("audit.jsonl"),
+            "",
+        );
+        put(&state_dir(&d.0), MARKER_FILE, "", 0o644);
+        let before = trail_of(&d, "audit.jsonl").len();
+        let _ = block_on_run_inner_with(&d.0, seams_with_own_marker(TestEnv::default()));
+        let recs = trail_of(&d, "audit.jsonl")[before..].to_vec();
+        assert!(
+            recs.iter()
+                .any(|r| r.action == GRAPH_SEED_ACTION
+                    && r.outcome.reason.contains("reseed-authorized")),
+            "{:?}",
+            recs.iter().map(|r| &r.outcome.reason).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            baseline_records(&recs),
+            vec![(
+                "permit".to_string(),
+                crate::baseline::reseeded_event(&accepted_before.sha256)
+            )]
+        );
+        assert!(accepted(&d).sections["vault"].contains("w.example"));
+        assert_eq!(
+            accepted(&d).ceiling,
+            "SECRET",
+            "the files replaced the accepted ceiling without an accept"
+        );
+    }
+
+    #[test]
+    fn a_reseed_still_moves_the_trail_through_the_one_seam() {
+        let _g = env_lock();
+        let d = fixture("reseed-move");
+        let _ = boot(&d);
+        let new = prepare_trail(&d, "audit-2.jsonl");
+        write_yaml(&d, "", "https://v.example:8200", &new, "");
+        put(&state_dir(&d.0), MARKER_FILE, "", 0o644);
+        let old_before = trail_of(&d, "audit.jsonl").len();
+        let _ = block_on_run_inner_with(&d.0, seams_with_own_marker(TestEnv::default()));
+        let old = trail_of(&d, "audit.jsonl");
+        assert_eq!(old.len(), old_before + 1);
+        assert_eq!(
+            old.last().unwrap().outcome.reason,
+            format!("audit trail moves to {} at start", new.display())
+        );
+        assert!(trail_of(&d, "audit-2.jsonl")[0]
+            .outcome
+            .reason
+            .starts_with("audit trail continues from "));
+
+        let e = fixture("reseed-unprepared");
+        let _ = boot(&e);
+        let sibling = e.0.join("audit-3.jsonl");
+        write_yaml(&e, "", "https://v.example:8200", &sibling, "");
+        put(&state_dir(&e.0), MARKER_FILE, "", 0o644);
+        let before = trail_of(&e, "audit.jsonl").len();
+        let r = block_on_run_inner_with(
+            &e.0,
+            seams_with_own_marker(TestEnv {
+                prepared: Err("no such file".into()),
+                ..TestEnv::default()
+            }),
+        );
+        assert!(
+            matches!(r, Err(RunError::Other(ref m)) if m.contains("Move the audit trail")),
+            "{r:?}"
+        );
+        assert!(!sibling.exists(), "nothing created");
+        assert_eq!(
+            trail_of(&e, "audit.jsonl").len(),
+            before,
+            "nothing appended"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_store_with_an_invalid_file_names_both() {
+        let _g = env_lock();
+        let d = fixture("unreadable");
+        let _ = boot(&d);
+        put(&state_dir(&d.0), STORE_FILE, "not a store", 0o600);
+        put(&d.0, "maknae.yaml", "core:\n  deployment_id: [\n", 0o640);
+        match boot(&d) {
+            Err(RunError::Other(m)) => assert!(m.contains("could not be read"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unreadable_store_opens_the_files_trail_existing_only_and_refuses_audited() {
+        let _g = env_lock();
+        let d = fixture("unreadable-valid");
+        let _ = boot(&d);
+        put(&state_dir(&d.0), STORE_FILE, "not a store", 0o600);
+        let before = trail_of(&d, "audit.jsonl").len();
+        let r = boot(&d);
+        assert!(matches!(r, Err(RunError::Graph { .. })), "{r:?}");
+        let recs = trail_of(&d, "audit.jsonl")[before..].to_vec();
+        assert_eq!(recs.last().unwrap().action, GRAPH_LOAD_ACTION);
+        std::fs::remove_file(d.0.join("audit.jsonl")).unwrap();
+        let r = boot(&d);
+        assert!(
+            matches!(r, Err(RunError::Other(ref m)) if m.contains("is missing")),
+            "{r:?}"
+        );
+        assert!(!d.0.join("audit.jsonl").exists(), "never created");
+    }
+
+    #[test]
+    fn a_stored_baseline_that_does_not_match_its_own_record_refuses() {
+        let _g = env_lock();
+        for (tag, forge) in [
+            (
+                "forged-digest",
+                (|b: &mut BaselineLayer| b.sha256 = [7; 32]) as fn(&mut BaselineLayer),
+            ),
+            ("forged-system", |b: &mut BaselineLayer| {
+                b.system = "AUS".into()
+            }),
+            ("forged-ceiling", |b: &mut BaselineLayer| {
+                b.ceiling = "SECRET".into()
+            }),
+        ] {
+            let d = fixture(tag);
+            let _ = boot(&d);
+            let mut forged = accepted(&d);
+            forge(&mut forged);
+            rewrite_baseline(&d, Some(&forged));
+            let revision = revision_of_store(&d);
+            let before = trail_of(&d, "audit.jsonl").len();
+            match boot(&d) {
+                Err(e @ RunError::Graph { .. }) => {
+                    assert!(e.to_string().contains("does not match"), "{tag}: {e}");
+                    assert_eq!(refusal_exit_code(&e), GRAPH_REFUSAL_EXIT_CODE);
+                }
+                other => panic!("{tag}: expected the store refusal, got {other:?}"),
+            }
+            let recs = trail_of(&d, "audit.jsonl")[before..].to_vec();
+            assert!(!recs.iter().any(|r| r.action == "authz"), "{tag}: {recs:?}");
+            assert_eq!(recs.last().unwrap().action, GRAPH_LOAD_ACTION, "{tag}");
+            assert_eq!(revision_of_store(&d), revision, "{tag}");
+        }
+    }
+
+    #[test]
+    fn an_accepted_baseline_that_no_longer_validates_refuses_to_start() {
+        let _g = env_lock();
+        let d = fixture("drift");
+        write_yaml(
+            &d,
+            "",
+            "https://v.example:8200",
+            &d.0.join("audit.jsonl"),
+            PROVIDERS_BLOCK,
+        );
+        let bounds = TestEnv {
+            bounds: Some(maknae_config::EgressBounds {
+                kv_mount: "kv".into(),
+                user_prefix: "users".into(),
+                vault_addr: "https://v.example:8200".into(),
+            }),
+            ..TestEnv::default()
+        };
+        let _ = block_on_run_inner_with(&d.0, seams_with(bounds));
+        assert!(accepted(&d).sections.contains_key("providers"));
+        let revision = revision_of_store(&d);
+        let before = trail_of(&d, "audit.jsonl").len();
+        let r = boot(&d);
+        let Err(e @ RunError::Other(m)) = &r else {
+            panic!("expected the start refusal, got {r:?}");
+        };
+        assert!(
+            m.starts_with("accepted baseline cannot start: ") && m.contains("egress-bounds"),
+            "{m}"
+        );
+        assert_eq!(refusal_exit_code(e), 1);
+        let recs = trail_of(&d, "audit.jsonl")[before..].to_vec();
+        assert_eq!(recs.len(), 1, "{recs:?}");
+        assert_eq!(
+            (recs[0].action.as_str(), recs[0].outcome.reason.as_str()),
+            ("start", m.as_str())
+        );
+        assert_eq!(revision_of_store(&d), revision);
+    }
+
+    #[test]
+    fn an_environment_refusal_at_a_first_start_is_audited() {
+        let _g = env_lock();
+        let d = fixture("first-env");
+        write_yaml(
+            &d,
+            "",
+            "https://v.example:8200",
+            &d.0.join("audit.jsonl"),
+            PROVIDERS_BLOCK,
+        );
+        let r = boot(&d);
+        let Err(e @ RunError::Other(m)) = &r else {
+            panic!("expected the start refusal, got {r:?}");
+        };
+        assert_eq!(refusal_exit_code(e), 1);
+        let recs = trail_of(&d, "audit.jsonl");
+        assert_eq!(recs.len(), 1, "{recs:?}");
+        assert_eq!(
+            (recs[0].action.as_str(), recs[0].outcome.reason.as_str()),
+            ("start", m.as_str())
+        );
+        assert!(!state_dir(&d.0).join(STORE_FILE).exists());
+    }
+
+    #[test]
+    fn a_vault_block_that_does_not_parse_refuses_after_the_policy_loads() {
+        let _g = env_lock();
+        let d = fixture("vault-after-policy");
+        write_yaml(
+            &d,
+            "",
+            "https://v.example:8200\n  colour: red",
+            &d.0.join("audit.jsonl"),
+            "",
+        );
+        let r = boot(&d);
+        let Err(e @ RunError::Other(m)) = &r else {
+            panic!("expected the start refusal, got {r:?}");
+        };
+        assert!(m.contains("colour"), "{m}");
+        assert_eq!(refusal_exit_code(e), 1);
+        assert_eq!(trail_of(&d, "audit.jsonl").last().unwrap().action, "start");
+        put(&d.0, "authz.yaml", "schema_version: [\n", 0o640);
+        let r = boot(&d);
+        assert!(matches!(r, Err(RunError::Authz(_))), "{r:?}");
+        assert_eq!(trail_of(&d, "audit.jsonl").last().unwrap().action, "authz");
+    }
+
+    #[test]
+    fn a_first_start_offload_or_principal_refusal_is_audited_as_today() {
+        let _g = env_lock();
+        let d = fixture("first-offload");
+        write_yaml(
+            &d,
+            "",
+            "https://v.example:8200",
+            &d.0.join("audit.jsonl"),
+            "",
+        );
+        let yaml = std::fs::read_to_string(d.0.join("maknae.yaml"))
+            .unwrap()
+            .replace("audit:\n", "audit:\n  siem: https://siem.example\n");
+        put(&d.0, "maknae.yaml", &yaml, 0o640);
+        let r = boot(&d);
+        assert!(matches!(r, Err(RunError::AuditOffload(_))), "{r:?}");
+        assert_eq!(
+            trail_of(&d, "audit.jsonl").last().unwrap().action,
+            "audit.offload"
+        );
+    }
+
+    #[test]
+    fn the_run_baseline_records_the_declared_system_and_ceiling() {
+        let sections: maknae_config::BaselineSections =
+            [("core".to_string(), "{}".to_string())].into();
+        assert_eq!(
+            run_baseline(&sections, ("US".into(), "UNCLASSIFIED".into())),
+            BaselineLayer {
+                sections: sections.clone(),
+                system: "US".into(),
+                ceiling: "UNCLASSIFIED".into(),
+                sha256: maknae_state::envelope::sha256(br#"{"core":"{}"}"#),
+                moved_from: None,
+            }
         );
     }
 }
@@ -7863,7 +9134,7 @@ mod graph_audit_bound_tests {
 #[cfg(unix)]
 #[cfg(test)]
 mod reload_tests {
-    use super::boot_gate_tests::test_baseline;
+    use super::boot_gate_tests::{boot_graph_at, test_baseline};
     use super::*;
     use maknae_authz_basic::{Baseline, HermeticAuthorizer};
     use std::os::unix::fs::PermissionsExt;
@@ -8085,7 +9356,7 @@ mod reload_tests {
         if let Some(seed) = seed {
             let seeded = seed(&inputs.identity);
             drop(
-                boot_kernel_graph(
+                boot_graph_at(
                     &dir.join("state"),
                     maknae_vault::graph_key_from_bytes(&[0x5a; 32]),
                     &sink,
@@ -8099,7 +9370,7 @@ mod reload_tests {
                 .unwrap(),
             );
         }
-        let booted = boot_kernel_graph(
+        let booted = boot_graph_at(
             &dir.join("state"),
             maknae_vault::graph_key_from_bytes(&[0x5a; 32]),
             &sink,
@@ -8908,7 +10179,7 @@ mod reload_tests {
         let inputs = GraphInputs::new(&source, "UNCLASSIFIED", test_baseline()).unwrap();
         let seq = Seq::new();
         let au3_1 = serde_json::Value::Null;
-        let booted = boot_kernel_graph(
+        let booted = boot_graph_at(
             &dir.join("state"),
             maknae_vault::graph_key_from_bytes(&[0x5a; 32]),
             &sink,

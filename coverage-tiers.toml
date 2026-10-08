@@ -639,6 +639,10 @@ path = "crates/maknae-audit-append/src/error.rs"
 why = "AuditError enum + Display/Error declarations only; no decision logic"
 
 [[t3]]
+path = "crates/maknae-kernel/src/host_env.rs"
+why = "#490: the validator's host environment — the egress bounds file, NSS, the prepared-trail open and the socket probes; the rules they feed are baseline_check.rs (T1). Mutation-excluded (mutants.toml)"
+
+[[t3]]
 path = "crates/maknae-kernel/src/groupres.rs"
 why = "nix Group/User/getgrouplist resolution — syscall I/O, cross-platform; the pure admission decision it feeds is authz.rs (T1). Mutation-excluded (mutants.toml)"
 

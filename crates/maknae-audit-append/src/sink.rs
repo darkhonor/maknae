@@ -44,6 +44,7 @@ enum Trail {
 }
 
 fn open_audit_file(path: &Path, trail: Trail) -> Result<File, AuditError> {
+    let creates = matches!(trail, Trail::CreateIfMissing);
     open_trail_under(
         path,
         // Preserve the configured audit parent's OS DAC authority; the opened
@@ -51,9 +52,12 @@ fn open_audit_file(path: &Path, trail: Trail) -> Result<File, AuditError> {
         &maknae_io::AnchorRequired::OS_DAC,
         trail,
     )
-    .map_err(|e| AuditError::OpenPrimary {
-        path: path.to_path_buf(),
-        detail: e.to_string(),
+    .map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound if !creates => AuditError::Missing(path.to_path_buf()),
+        _ => AuditError::OpenPrimary {
+            path: path.to_path_buf(),
+            detail: e.to_string(),
+        },
     })
 }
 
@@ -729,9 +733,27 @@ mod tests {
     fn open_existing_refuses_a_missing_trail() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("audit.jsonl");
-        open_detail(AuditSink::open_existing(&audit_cfg(&path)));
-        open_detail(AuditSink::open_prepared(&audit_cfg(&path)));
+        for opened in [
+            AuditSink::open_existing(&audit_cfg(&path)),
+            AuditSink::open_prepared(&audit_cfg(&path)),
+        ] {
+            match opened {
+                Err(e @ AuditError::Missing(_)) => {
+                    assert_eq!(
+                        e.to_string(),
+                        format!("the audit trail {} is missing", path.display())
+                    )
+                }
+                Err(other) => panic!("expected Missing, got {other}"),
+                Ok(_) => panic!("expected Missing, the trail opened"),
+            }
+        }
         assert!(!path.exists(), "neither open creates the trail");
+        let parent = dir.path().join("absent").join("audit.jsonl");
+        assert!(matches!(
+            AuditSink::open_existing(&audit_cfg(&parent)),
+            Err(AuditError::Missing(_))
+        ));
     }
 
     #[tokio::test]

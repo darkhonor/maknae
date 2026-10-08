@@ -17,6 +17,7 @@ mod egress;
 mod egress_socket;
 mod groupres;
 mod handler;
+mod host_env;
 pub mod identity_report;
 mod mutation;
 mod mutation_exchange;

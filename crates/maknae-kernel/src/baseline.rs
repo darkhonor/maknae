@@ -2,6 +2,7 @@
 //! change set and its hash, the apply class of a change, and the accept decision.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, PoisonError, RwLock};
 
 use maknae_config::{canonical_json, value_from_canonical_json, BaselineSections, Value};
 use maknae_graph::identity::hex;
@@ -396,6 +397,66 @@ pub fn journal_line(p: &PendingSet) -> String {
 /// The 12-hex correlation prefix the audit trail carries.
 pub fn short(hash: &str) -> &str {
     hash.get(..SHORT_HEX).unwrap_or(hash)
+}
+
+/// The accepted baseline this process runs and the set pending against it, as last published.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaselineState {
+    pub accepted: BaselineSections,
+    pub pending: Option<PendingSet>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BaselineStatus(Arc<RwLock<Arc<BaselineState>>>);
+
+impl BaselineStatus {
+    pub fn new(state: BaselineState) -> Self {
+        Self(Arc::new(RwLock::new(Arc::new(state))))
+    }
+
+    pub fn current(&self) -> Arc<BaselineState> {
+        Arc::clone(&self.0.read().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    /// Replaces the state; returns whether the pending set's hash changed.
+    pub fn publish(&self, state: BaselineState) -> bool {
+        let mut slot = self.0.write().unwrap_or_else(PoisonError::into_inner);
+        let hash = |s: &BaselineState| s.pending.as_ref().map(|p| p.hash.clone());
+        let changed = hash(&slot) != hash(&state);
+        *slot = Arc::new(state);
+        changed
+    }
+
+    pub fn lines(&self) -> Vec<String> {
+        self.current().pending.iter().map(status_line).collect()
+    }
+}
+
+/// The old trail's last record before a move.
+pub fn move_record(to: &Path) -> String {
+    format!("audit trail moves to {} at start", to.display())
+}
+
+/// The new trail's first record after a move.
+pub fn back_link_record(from: &Path, carried: Option<u64>, old_open: Option<&str>) -> String {
+    let revision = carried.map_or_else(|| "none".to_string(), |r| r.to_string());
+    let link = format!(
+        "audit trail continues from {}; last checkpoint revision {revision}",
+        from.display()
+    );
+    match old_open {
+        Some(e) => format!("{link}; the previous trail could not be opened: {e}"),
+        None => link,
+    }
+}
+
+/// The store transition's record of a move the boot performed.
+pub fn moved_event(from: &Path, to: &Path) -> String {
+    format!(
+        "audit trail moved from {} to {}",
+        from.display(),
+        to.display()
+    )
 }
 
 #[cfg(test)]
@@ -1067,6 +1128,82 @@ mod tests {
         assert_eq!(
             journal_line(&p),
             "baseline change pending acceptance: root-file (apply: restart)"
+        );
+    }
+
+    fn state(pending_on: Option<&BaselineSections>, accepted: &BaselineSections) -> BaselineState {
+        BaselineState {
+            accepted: accepted.clone(),
+            pending: pending_on.and_then(|f| pending(accepted, &Ok(f.clone()))),
+        }
+    }
+
+    #[test]
+    fn publishing_reports_only_a_changed_pending_hash() {
+        let a = s(&[("core", CORE)]);
+        let b = s(&[("core", CORE_SECRET)]);
+        let c = s(&[("core", CORE_AUS)]);
+        let status = BaselineStatus::new(state(None, &a));
+        assert!(
+            !status.publish(state(None, &b)),
+            "only the accepted baseline changed"
+        );
+        assert!(status.publish(state(Some(&c), &b)), "None -> Some");
+        assert!(!status.publish(state(Some(&c), &b)), "the same set again");
+        assert!(status.publish(state(Some(&a), &b)), "another set");
+        assert!(status.publish(state(None, &b)), "Some -> None");
+        assert_eq!(*status.current(), state(None, &b));
+    }
+
+    #[test]
+    fn the_status_lines_are_the_pending_sets_line_or_nothing() {
+        let a = s(&[("core", CORE)]);
+        let status = BaselineStatus::new(state(None, &a));
+        assert!(status.lines().is_empty());
+        let next = state(Some(&s(&[("core", CORE_SECRET)])), &a);
+        let line = status_line(next.pending.as_ref().unwrap());
+        status.publish(next);
+        assert_eq!(status.lines(), vec![line]);
+    }
+
+    #[test]
+    fn a_poisoned_status_still_answers() {
+        let a = s(&[("core", CORE)]);
+        let status = BaselineStatus::new(state(None, &a));
+        let held = status.clone();
+        let joined = std::thread::spawn(move || {
+            let _guard = held.0.write().unwrap();
+            panic!("poison the lock");
+        })
+        .join();
+        assert!(joined.is_err());
+        assert!(status.0.is_poisoned());
+        assert_eq!(status.current().accepted, a);
+        let b = s(&[("core", CORE_AUS)]);
+        assert!(status.publish(state(Some(&b), &a)));
+        assert_eq!(status.lines().len(), 1);
+    }
+
+    #[test]
+    fn the_move_records_name_both_trails() {
+        let from = Path::new("/var/log/maknae/audit.jsonl");
+        let to = Path::new("/var/log/maknae/audit-2.jsonl");
+        assert_eq!(
+            move_record(to),
+            "audit trail moves to /var/log/maknae/audit-2.jsonl at start"
+        );
+        assert_eq!(
+            back_link_record(from, Some(7), None),
+            "audit trail continues from /var/log/maknae/audit.jsonl; last checkpoint revision 7"
+        );
+        assert_eq!(
+            back_link_record(from, None, Some("EACCES")),
+            "audit trail continues from /var/log/maknae/audit.jsonl; last checkpoint revision none; \
+             the previous trail could not be opened: EACCES"
+        );
+        assert_eq!(
+            moved_event(from, to),
+            "audit trail moved from /var/log/maknae/audit.jsonl to /var/log/maknae/audit-2.jsonl"
         );
     }
 }

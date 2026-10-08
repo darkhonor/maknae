@@ -57,7 +57,7 @@ mod token_record;
 #[cfg(unix)]
 mod token_store;
 #[cfg(unix)]
-pub use accounts::NssAccounts;
+pub use accounts::{account_uid, NssAccounts};
 pub use api_shape::{WrapMismatch, MAX_TOKEN_BYTES, MAX_VAULT_BODY_BYTES};
 pub use auth::{AppRoleAuth, AuthMethod, VaultToken};
 pub use ca::{load_ca_pin, CaBundle};

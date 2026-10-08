@@ -26,6 +26,11 @@ fn user(name: &str) -> Result<Option<User>, String> {
     found(User::from_name(name))
 }
 
+/// An account's uid, `Ok(None)` when it does not exist, classified as every lookup here is.
+pub fn account_uid(name: &str) -> Result<Option<u32>, String> {
+    Ok(user(name)?.map(|u| u.uid.as_raw()))
+}
+
 fn group(gid: nix::unistd::Gid) -> Result<Option<Group>, String> {
     Errno::clear();
     found(Group::from_gid(gid))
@@ -100,6 +105,12 @@ mod tests {
     fn root_resolves_to_uid_zero() {
         let root = NssAccounts.account("root").unwrap().expect("root exists");
         assert_eq!((root.name.as_str(), root.uid), ("root", 0));
+    }
+
+    #[test]
+    fn an_account_uid_is_classified_like_every_other_lookup() {
+        assert_eq!(account_uid("root"), Ok(Some(0)));
+        assert_eq!(account_uid("no-such-user-maknae-490"), Ok(None));
     }
 
     #[test]

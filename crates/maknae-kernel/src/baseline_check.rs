@@ -29,6 +29,12 @@ pub enum Invalid {
     Offload(String),
     /// Exit 3, audited (#77).
     Principal(String),
+    /// Exit 1, audited, refused after the policy loads as today's plane client
+    /// refuses it; `principal` is the one the policy load needs.
+    Vault {
+        cause: String,
+        principal: maknae_config::Principal,
+    },
 }
 
 impl Invalid {
@@ -37,13 +43,14 @@ impl Invalid {
             Invalid::Document(m)
             | Invalid::Environment(m)
             | Invalid::Offload(m)
-            | Invalid::Principal(m) => m,
+            | Invalid::Principal(m)
+            | Invalid::Vault { cause: m, .. } => m,
         }
     }
 
     pub fn exit_code(&self) -> u8 {
         match self {
-            Invalid::Document(_) | Invalid::Environment(_) => 1,
+            Invalid::Document(_) | Invalid::Environment(_) | Invalid::Vault { .. } => 1,
             Invalid::Principal(_) => 3,
             Invalid::Offload(_) => 4,
         }
@@ -146,7 +153,12 @@ pub fn validate(
     let principal = principal.ok_or_else(|| {
         Invalid::Principal(crate::boot_gate::AuthzBootRefusal::MissingPrincipal.to_string())
     })?;
-    maknae_vault::vault_config_from_document(boot.document()).map_err(environment)?;
+    if let Err(e) = maknae_vault::vault_config_from_document(boot.document()) {
+        return Err(Invalid::Vault {
+            cause: e.to_string(),
+            principal,
+        });
+    }
     let readers = match mode {
         Mode::Boot => Vec::new(),
         Mode::Accept => maknae_config::resolve_readers(&audit.readers, env).map_err(document)?,
@@ -226,6 +238,12 @@ pub fn check_sockets(
         probe(deputy, env.deputy_reachable(deputy))?;
     }
     Ok(())
+}
+
+/// The `transport` section alone: the listener a refusal record names.
+pub fn transport_of(doc: &Document) -> Result<maknae_config::TransportConfig, Invalid> {
+    maknae_config::transport_from_section(doc.section(maknae_config::TRANSPORT_SECTION))
+        .map_err(document)
 }
 
 /// The `audit` section alone: where the trail is, for the sink a refusal is recorded in.
@@ -436,6 +454,34 @@ mod tests {
         assert_eq!(Invalid::Environment(String::new()).exit_code(), 1);
         assert_eq!(Invalid::Principal(String::new()).exit_code(), 3);
         assert_eq!(Invalid::Offload(String::new()).exit_code(), 4);
+        assert_eq!(vault_invalid("v").exit_code(), 1);
+    }
+
+    fn vault_invalid(cause: &str) -> Invalid {
+        Invalid::Vault {
+            cause: cause.into(),
+            principal: maknae_config::Principal {
+                name: "op".into(),
+                uid: 1000,
+            },
+        }
+    }
+
+    #[test]
+    fn the_transport_of_a_document_is_its_section_or_the_default() {
+        assert_eq!(
+            transport_of(&doc(&minimal())).unwrap().socket_path,
+            maknae_config::TransportConfig::default().socket_path
+        );
+        let mut t = minimal();
+        t.push(("transport", r#"{"socket_path":"/run/x.sock"}"#));
+        assert_eq!(
+            transport_of(&doc(&t)).unwrap().socket_path,
+            Path::new("/run/x.sock")
+        );
+        t.pop();
+        t.push(("transport", r#"{"colour":1,"socket_path":"/run/x.sock"}"#));
+        assert!(matches!(transport_of(&doc(&t)), Err(Invalid::Document(_))));
     }
 
     #[test]
@@ -475,6 +521,7 @@ mod tests {
             (Invalid::Environment("e".into()), "e"),
             (Invalid::Offload("o".into()), "o"),
             (Invalid::Principal("p".into()), "p"),
+            (vault_invalid("v"), "v"),
         ] {
             assert_eq!(invalid.cause(), text);
         }
@@ -655,7 +702,7 @@ mod tests {
         let mut v = minimal();
         v.push(("vault", r#"{"addr":"https://v:8200","colour":"red"}"#));
         assert!(
-            matches!(validate(doc(&v), Mode::Boot, Path::new("/e"), &FakeEnv::default()), Err(Invalid::Environment(ref m)) if m.contains("colour"))
+            matches!(validate(doc(&v), Mode::Boot, Path::new("/e"), &FakeEnv::default()), Err(Invalid::Vault { ref cause, ref principal }) if cause.contains("colour") && principal.uid == 1000)
         );
         let mut v = minimal();
         v.push(("vault", r#"{"addr":"https://v:8200"}"#));
@@ -924,10 +971,9 @@ mod tests {
 
     /// Boot and accept are the same function: no section parser is called from run.rs.
     #[test]
-    #[ignore = "enabled when boot uses the validator"]
     fn the_accept_and_the_boot_share_one_validator() {
         let run = include_str!("run.rs");
-        let production = &run[..run.find("#[cfg(test)]").unwrap()];
+        let production = &run[..run.find("\n#[cfg(test)]").unwrap()];
         for parser in [
             "transport_from_section(",
             "egress_from_section(",
@@ -943,9 +989,14 @@ mod tests {
                 "run.rs parses outside the validator: {parser}"
             );
         }
+        assert_eq!(
+            production.matches("baseline_check::validate_file(").count(),
+            1,
+            "the files are read through the file entry point"
+        );
         assert!(
-            production.matches("baseline_check::validate(").count() >= 3,
-            "boot, the boot mix and accept each call the validator"
+            production.matches("baseline_check::validate(").count() >= 2,
+            "the boot mix and the run baseline each call the validator"
         );
     }
 
@@ -962,7 +1013,7 @@ mod tests {
         .err()
         .unwrap();
         assert!(
-            matches!(refused, Invalid::Environment(ref m) if m.contains("vault")),
+            matches!(refused, Invalid::Vault { ref cause, .. } if cause.contains("vault")),
             "{refused:?}"
         );
     }

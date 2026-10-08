@@ -69,7 +69,7 @@ pub fn authz_policy_source(
 /// The load with its loader injected: production passes [`PolicySource::load`]
 /// (root-owned door), whose success arm is unconstructible off-root. Ordering
 /// and mapping are this fn's own, tested logic.
-fn authz_policy_source_with(
+pub(crate) fn authz_policy_source_with(
     config_dir: &Path,
     principal: Option<Principal>,
     load: impl FnOnce(PolicyPaths, Principal) -> Result<PolicySource, AuthzBasicError>,
@@ -723,14 +723,24 @@ mod tests {
     /// a missing `_maknae-egress` account must refuse before anything is
     /// minted — and after the bounds gate, so the refusals come in the order
     /// an operator fixes them.
+    const RUN_VALIDATES: &str = "crate::baseline_check::validate(run_doc, Mode::Boot";
+
     #[test]
     fn the_egress_backend_is_selected_after_the_bounds_gate_and_before_the_vault_mint() {
+        let validator = include_str!("baseline_check.rs");
+        assert_eq!(
+            validator
+                .matches("egress_bounds_boot_gate(boot.providers(), Some(&bounds))")
+                .count(),
+            1,
+            "the validator's egress-bounds gate call moved or was renamed"
+        );
         let run_rs = include_str!("run.rs");
         let gate = run_rs
-            .find("egress_bounds_boot_gate(boot.providers()")
-            .expect("the egress-bounds gate call moved or was renamed");
+            .find(RUN_VALIDATES)
+            .expect("boot no longer validates the baseline it runs");
         let select = run_rs
-            .find("production_egress(boot.providers(), &egress_cfg)")
+            .find("production_egress_with(boot.providers(), &egress_cfg")
             .expect("the egress backend selection moved or was renamed");
         let mint = run_rs
             .find(".mint()")
@@ -746,8 +756,8 @@ mod tests {
     fn the_egress_bounds_gate_is_called_before_the_vault_mint() {
         let run_rs = include_str!("run.rs");
         let gate = run_rs
-            .find("egress_bounds_boot_gate(boot.providers()")
-            .expect("the egress-bounds gate call moved or was renamed");
+            .find(RUN_VALIDATES)
+            .expect("boot no longer validates the baseline it runs");
         let mint = run_rs
             .find(".mint()")
             .expect("the vault mint call moved or was renamed");
@@ -792,24 +802,28 @@ mod tests {
 
     #[test]
     fn the_root_vault_gate_runs_before_the_vault_mint() {
-        let run_rs = include_str!("run.rs");
+        let validator = include_str!("baseline_check.rs");
         const GATE: &str = "root_vault_boot_gate(boot.section(maknae_vault::VAULT_SECTION))";
-        const SHADOWED: &str = "for shadowed in boot.shadowed_sections(maknae_vault::VAULT_SECTION) {\n        crate::boot_gate::root_vault_boot_gate(Some(shadowed))";
-        const MINT: &str = "    client\n        .mint()\n        .await\n";
-        assert_eq!(run_rs.matches(GATE).count(), 1, "the root vault gate call");
+        const SHADOWED: &str = "for shadowed in file.shadowed_sections(maknae_vault::VAULT_SECTION) {\n        crate::boot_gate::root_vault_boot_gate(Some(shadowed))";
         assert_eq!(
-            run_rs.matches(SHADOWED).count(),
+            validator.matches(GATE).count(),
+            1,
+            "the root vault gate call"
+        );
+        assert_eq!(
+            validator.matches(SHADOWED).count(),
             1,
             "the shadowed vault gate loop"
         );
+        let run_rs = include_str!("run.rs");
+        const MINT: &str = "    client\n        .mint()\n        .await\n";
         assert_eq!(run_rs.matches(MINT).count(), 1, "the vault mint call");
-        let gate = run_rs.find(GATE).unwrap();
-        let shadowed = run_rs.find(SHADOWED).unwrap();
-        let mint = run_rs.find(MINT).unwrap();
-        assert!(gate < mint, "the root vault gate must run before mint()");
+        let validated = run_rs
+            .find(RUN_VALIDATES)
+            .expect("boot no longer validates the baseline it runs");
         assert!(
-            shadowed < mint,
-            "the shadowed vault gate must run before mint()"
+            validated < run_rs.find(MINT).unwrap(),
+            "the root vault gates must run before mint()"
         );
     }
 }

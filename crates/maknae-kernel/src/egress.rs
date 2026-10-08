@@ -295,9 +295,7 @@ pub fn production_egress_with(
 /// The real resolver over NSS: the account's uid, `None` when no such
 /// account exists, and the library's error text when NSS itself fails.
 pub(crate) fn resolve_account_uid(name: &str) -> Result<Option<u32>, String> {
-    nix::unistd::User::from_name(name)
-        .map(|u| u.map(|u| u.uid.as_raw()))
-        .map_err(|e| e.to_string())
+    maknae_vault::account_uid(name)
 }
 
 /// The one production choice, in one place: the real resolver over NSS.
@@ -1323,6 +1321,14 @@ mod tests {
         assert!(m.contains("_maknae-egress"), "{m}");
         let m = EgressBootRefusal::Resolve("nss down".into()).to_string();
         assert!(m.contains("nss down"), "{m}");
+    }
+
+    #[test]
+    fn the_egress_account_lookup_is_the_classified_one() {
+        let src = include_str!("egress.rs");
+        let production = &src[..src.find("\n#[cfg(test)]").unwrap()];
+        assert!(!production.contains("User::from_name("));
+        assert!(production.contains("maknae_vault::account_uid("));
     }
 
     /// The real resolver, over NSS, with values this host actually has: the
