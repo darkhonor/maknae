@@ -196,7 +196,7 @@ impl std::fmt::Display for ConfigError {
                 write!(f, "section '{section}' must come from a root-owned, non-group/other-writable source; {path} is not")
             }
             ConfigError::SourceNotRootOwned { path } => {
-                write!(f, "{path}: every maknae.yaml and config.d source must be owned by root and not group- or world-writable")
+                write!(f, "{path} must be owned by root and not group- or world-writable, as must every maknae.yaml and config.d source and the directories that hold them")
             }
             ConfigError::InvalidTransport(reason) => {
                 write!(f, "invalid transport config: {reason}")
@@ -281,7 +281,7 @@ mod tests {
                 path: "config.d/10.yaml".into()
             }
             .to_string(),
-            "config.d/10.yaml: every maknae.yaml and config.d source must be owned by root and not group- or world-writable"
+            "config.d/10.yaml must be owned by root and not group- or world-writable, as must every maknae.yaml and config.d source and the directories that hold them"
         );
     }
 

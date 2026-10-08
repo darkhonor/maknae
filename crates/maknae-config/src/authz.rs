@@ -1840,11 +1840,7 @@ mod tests {
     fn non_root_owned_authz_refused() {
         let p = tmp("nonroot");
         write_mode(&p, SHIPPED_DEFAULT, 0o640);
-        // Best-effort: if this test process happens to run as root (uid 0),
-        // chown the file away from 0 (root may chown to any uid) so the
-        // scenario — an authz.yaml NOT owned by root — is reproduced either
-        // way, without requiring a #[ignore]-gated privileged test.
-        let _ = std::os::unix::fs::chown(&p, Some(65_534), None);
+        crate::tests::test_owner::hand_to_nobody_when_root(&[&p]);
         let got = load_authz(&p);
         let _ = std::fs::remove_file(&p);
         if mine().owner == Some(0) {

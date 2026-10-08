@@ -508,8 +508,6 @@ fn load_config_rooted_with(
     validate_specs(specs)?;
     // The anchor the scan read through is the one every later check asks.
     let (anchor, buffers) = scan_dir_anchored(dir)?;
-    // Keep the buffers: the re-read below must equal what was assembled.
-    let doc = assemble(buffers.clone(), &Registry { specs })?;
     let root = std::path::absolute(dir).map_err(io_err)?;
     let root_sections = match scope {
         RootScope::Sections(s) => s,
@@ -526,9 +524,11 @@ fn load_config_rooted_with(
                     },
                 )?;
             }
-            return Ok(doc);
+            return assemble(buffers, &Registry { specs });
         }
     };
+    // Keep the buffers: the re-read below must equal what was assembled.
+    let doc = assemble(buffers.clone(), &Registry { specs })?;
     // The directories that decide WHICH candidate wins are verified once, as
     // soon as any root-required section is present -- whichever source won.
     // A base winner with a subject-writable `config.d/` is the case codex
@@ -1635,8 +1635,6 @@ mod tests {
         assert!(load_config_rooted(&d.0, &specs, &["provider"]).is_ok());
     }
 
-    // ---- #490: every baseline source and both selection directories are held
-    // to the root requirement, not only the sources of root-required sections.
     #[cfg(unix)]
     fn every(
         d: &std::path::Path,
@@ -1775,10 +1773,77 @@ mod tests {
             Err(ConfigError::NotFound { .. })
         ));
         put(&d.0, "maknae.yaml", "unregistered: {}\n", 0o640);
+        let got = load_config_root_owned(&d.0, &[]);
+        if my_uid() == 0 {
+            assert!(
+                matches!(got, Err(ConfigError::UnknownSection { .. })),
+                "{got:?}"
+            );
+        } else {
+            assert!(
+                matches!(got, Err(ConfigError::SourceNotRootOwned { .. })),
+                "{got:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_source_is_judged_before_its_bytes_are_parsed() {
+        let d = new_dir("every-before-parse");
+        put(&d.0, "maknae.yaml", "core:\n  deployment_id: d\n", 0o640);
+        let cd = config_d(&d.0, 0o750);
+        put(&cd, "10-a.yaml", "secret-marker: [unclosed\n", 0o660);
         assert!(matches!(
-            load_config_root_owned(&d.0, &[]),
+            load_config(&d.0, &[]),
+            Err(ConfigError::Parse { .. })
+        ));
+        let got = every(&d.0, &[], me());
+        match &got {
+            Err(ConfigError::SourceNotRootOwned { path }) => {
+                assert!(path.ends_with("config.d/10-a.yaml"), "{path}")
+            }
+            other => panic!("expected the ownership refusal, got {other:?}"),
+        }
+        assert!(!format!("{got:?}").contains("secret-marker"));
+        std::fs::set_permissions(cd.join("10-a.yaml"), std::fs::Permissions::from_mode(0o640))
+            .unwrap();
+        assert!(matches!(
+            every(&d.0, &[], me()),
+            Err(ConfigError::Parse { .. })
+        ));
+        put(&cd, "10-a.yaml", "unregistered: {}\n", 0o640);
+        assert!(matches!(
+            every(&d.0, &[], me()),
             Err(ConfigError::UnknownSection { .. })
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_config_d_member_owned_by_another_uid_refuses_before_its_bytes_are_parsed() {
+        if my_uid() != 0 {
+            eprintln!("skipped: needs root to hand a fixture to another uid");
+            return;
+        }
+        let d = new_dir("every-member-owner");
+        put(&d.0, "maknae.yaml", "core:\n  deployment_id: d\n", 0o640);
+        let cd = config_d(&d.0, 0o750);
+        put(&cd, "10-a.yaml", "transport: {}\n", 0o640);
+        let specs = [spec("transport", false)];
+        assert!(every(&d.0, &specs, me()).is_ok());
+        crate::tests::test_owner::hand_to_nobody_when_root(&[&cd.join("10-a.yaml")]);
+        for body in ["transport: {}\n", "secret-marker: [unclosed\n"] {
+            std::fs::write(cd.join("10-a.yaml"), body).unwrap();
+            let got = every(&d.0, &specs, me());
+            match &got {
+                Err(ConfigError::SourceNotRootOwned { path }) => {
+                    assert!(path.ends_with("config.d/10-a.yaml"), "{path}")
+                }
+                other => panic!("expected the member owner refusal, got {other:?}"),
+            }
+            assert!(!format!("{got:?}").contains("secret-marker"));
+        }
     }
 
     #[cfg(all(unix, feature = "hermetic-test-seam"))]
