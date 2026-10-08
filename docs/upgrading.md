@@ -13,7 +13,7 @@ Who holds which role, and who is contained, now lives in its own file, `/etc/mak
 **If your `authz.yaml` has a `bindings:` block, move it right after upgrading.** The package restarts `maknaed` (RPM `%systemd_postun_with_restart`, the deb's `postinst` `try-restart`, `launchctl kickstart -k` on macOS), and while the block is still in `authz.yaml` the new daemon refuses to start with exit 3:
 
 ```text
-maknaed: refusing to start: authz policy load refused: authz.yaml no longer carries `bindings:`; move the block unchanged to bindings.yaml in the same directory (docs/upgrading.md)
+maknaed: refusing to start: maknae daemon refused to start: the authorization policy could not be loaded: authz policy load refused: authz.yaml no longer carries `bindings:`; move the block unchanged to bindings.yaml in the same directory (docs/upgrading.md)
 ```
 
 systemd and launchd retry every 5 seconds, and each attempt writes a denied `authz` record to the audit trail, until you move the block. A reload of a daemon that is already running the new release refuses with the same cause, and the running policy stands. To move it:
@@ -27,7 +27,7 @@ The first start then records one `graph.transition` (`root-file`) and a `graph.c
 **Do not delete the block without pasting it.** If you remove it from `authz.yaml` and `bindings.yaml` still has no `bindings:` key, the new daemon refuses to start (exit 3) rather than release every containment and make the enrolled principal admin:
 
 ```text
-maknaed: refusing to start: the store holds explicit bindings from authz.yaml; paste the bindings: block into /etc/maknae/bindings.yaml
+maknaed: refusing to start: maknae daemon refused to start: the authorization policy could not be loaded: the store holds explicit bindings from authz.yaml; paste the bindings: block into /etc/maknae/bindings.yaml
 ```
 
 Paste the block and start again. Once the store's bindings come from `bindings.yaml`, an edit that leaves `bindings.yaml` without a `bindings:` key is allowed: the enrolled principal becomes admin, and each containment that edit ends is recorded as a `graph.identity` release. A `bindings.yaml` deleted over explicit bindings refuses instead ([configuration §2.3](configuration.md#23-bindingsyaml)).
@@ -44,7 +44,7 @@ Paste the block and start again. Once the store's bindings come from `bindings.y
 
 A failed account lookup, as distinct from one that finds no such user, still refuses the whole load. `adversary:` also accepts a numeric id, `- uid: <n>`, which contains that id whether or not an account has it. A reload now reads `authz.yaml` and `bindings.yaml` together, and an invalid `bindings.yaml` refuses the whole reload, including an `authz.yaml` edit made with it. On Linux `maknaed` now starts after `nss-user-lookup.target`.
 
-**Downgrading** to a release before this one: that release reads `bindings:` only from `authz.yaml`. Move the block back into `authz.yaml` before you downgrade, or the downgraded daemon starts with no bindings, makes the enrolled principal admin and releases every containment.
+**Downgrading** to a release before this one: that release reads `bindings:` only from `authz.yaml`. Move the block back into `authz.yaml` before you downgrade, or the downgraded daemon starts with no bindings, makes the enrolled principal admin and releases every containment. That release also refuses the whole policy (exit 3) on what this one decides per subject, so before moving the block back remove every `- uid: <n>` entry, every name with no account on the host, every name listed under a role and under `adversary`, and every uid reached by names in two roles.
 
 ---
 

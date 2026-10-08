@@ -281,7 +281,8 @@ pub enum Verb {
     /// entitlement.
     Whoami,
     /// Runtime posture: version, protocol version, listener, policy load time,
-    /// active authz backend. A disclosure of trust-plane state — useful to an
+    /// active authz backend, and the identity problems of the last applied load as
+    /// counts by kind, with no names or uids. A disclosure of trust-plane state — useful to an
     /// operator, and useful to an attacker fingerprinting the deployment.
     AdminStatus,
     /// The effective composed configuration. Discloses deployment shape,
@@ -298,7 +299,9 @@ pub enum Verb {
     /// root-paced boundary #85 §3 relies on. Both files are root-owned, so this
     /// term confers no ability to write them.
     AdminPolicyReload,
-    /// Enumerate role bindings. Discloses who holds what.
+    /// Enumerate the subjects `bindings.yaml` names, one entry per subject with its
+    /// uid, label and state, unbound and unresolved names included. Discloses who
+    /// holds what.
     AdminSubjectList,
     /// Bind a subject to a role. A policy mutation — write-ahead audit applies.
     /// MUST refuse the `adversary` role: containment has its own sanctioned

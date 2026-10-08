@@ -44,8 +44,9 @@ authorization composition — the RBAC baseline, compiled from the store and
 ceiling level in the audit trail, mints its plane credential, binds the client socket
 and **serves**: every request is decided through that composition until a shutdown
 signal, and the process exits with the outcome the accept loop stopped on. A `SIGHUP`
-re-reads `authz.yaml` and `bindings.yaml` together and recompiles the snapshot; `maknae.yaml` and `config.d/` are
-read at start only (runbook, "Reload the policy"). A boot that fails any of those
+re-reads `authz.yaml` and `bindings.yaml` together and recompiles the snapshot;
+`maknae.yaml` and `config.d/` are read at start only (runbook, "Reload the
+policy"). A boot that fails any of those
 steps exits non-zero, and a step after the credential mint retires the credential on
 the way out.
 
@@ -239,7 +240,7 @@ bindings:
     - uid: 4242     # an id, contained even before an account has it
 ```
 
-- **Keys.** The top level holds `schema_version`, which must be `1`, and `bindings`, and nothing else. `bindings:` maps the roles `admin`, `user`, `guest` and `adversary` to lists. An entry is a quoted username. Under `adversary` only, an entry may also be `uid: <n>`, with `n` from 0 to 4294967294, which contains that id whether or not an account has it.
+- **Keys.** The top level holds `schema_version`, which must be `1`, and `bindings`, and nothing else. `bindings:` maps the roles `admin`, `user`, `guest` and `adversary` to lists. An entry is a username; quote it, because an unquoted number is refused. Under `adversary` only, an entry may also be `uid: <n>`, with `n` from 0 to 4294967294, which contains that id whether or not an account has it.
 - **Absent versus empty.** With no `bindings:` key, as shipped, bindings are absent: the enrolled principal holds `admin` and nobody else holds a role. A missing `bindings.yaml` means the same, unless the store holds explicit bindings (below). Once a `bindings:` key exists, only the entries it lists hold a role, so list yourself under `admin`. `bindings: {}` binds nobody, the enrolled principal included.
 - **Ownership and mode.** As for `authz.yaml`: a regular file, not a symlink, owned by root, with `mode & 0o027 == 0` (no world access and no group write; `0640` as shipped). `<config-dir>` itself must be owned by root and not group- or other-writable, or both policy files are refused. Only a missing file inside such a directory reads as absent; a missing directory, a symlink, the wrong owner or mode, an empty file and a read error each refuse.
 - **Deleting the file over explicit bindings refuses.** When the store holds bindings from a `bindings:` key and `bindings.yaml` is then missing, the start refuses (exit 3) and a reload is refused, with ``bindings.yaml is missing but the store holds explicit bindings; to return to principal-as-admin write bindings.yaml without a `bindings:` key``. To return to principal-as-admin, keep the file and remove its `bindings:` key. Each containment that edit ends is recorded (`graph.identity`, `is no longer contained`).
@@ -256,7 +257,7 @@ bindings:
 | One uid under two of `admin`, `user` and `guest`, by the same name or by two names | That uid holds no role. |
 | A name under `adversary` that the store holds as contained and that no longer resolves | The subject stays contained under its stored uid (carried forward) until you remove the name from `adversary:`. If that uid now belongs to another name in the file, it stays contained, and the record says which binding it overrides. |
 
-Each of these is one `graph.identity` audit record and one journal line, such as `maknaed: identity: 'bob' under user has no account on this host; it holds no role`. `maknae status` prints the counts by kind, and `maknae subject-list` lists each subject with its uid, a label and its state ([runbook](runbook.md#bind-a-user-contain-a-subject)). Two names with one uid under the same role are one subject. A subject that holds no role is decided like any uid the file does not list: the RBAC baseline has no rule for it, which denies in the default build (an ABAC operand may still permit on its own predicate, ADR-0008). A contained subject is denied by a mandatory decision that nothing overrides.
+Each of these is a `graph.identity` audit record and a journal line, such as `maknaed: identity: 'bob' under user has no account on this host; it holds no role`. A start records every problem; a reload records only the problems the previous load did not have. `maknae status` prints the counts by kind, and `maknae subject-list` lists each subject with its uid, a label and its state ([runbook](runbook.md#bind-a-user-contain-a-subject)). Two names with one uid under the same role are one subject. A subject that holds no role is decided like any uid the file does not list: the RBAC baseline has no rule for it, which denies in the default build (an ABAC operand may still permit on its own predicate, ADR-0008). A contained subject is denied by a mandatory decision that nothing overrides.
 
 **When the user directory is unavailable.** When sssd or LDAP is down, the C library usually reports a directory account as "no such user", which Maknae cannot tell from a deleted account. On macOS a failed lookup cannot be told from a missing account at all. So, during an outage:
 
@@ -264,7 +265,7 @@ Each of these is one `graph.identity` audit record and one journal line, such as
 - a name that never resolved is not contained;
 - a role binding to a directory name holds no role until the directory returns and you reload.
 
-To contain an id independently of the directory, list it as `- uid: <n>`. On Linux `maknaed.service` starts after `nss-user-lookup.target`, so a boot does not race the directory. launchd has no such ordering, so on macOS carry-forward and `uid:` entries are the only controls for an outage at boot. After any outage, reload once the directory is back.
+To contain an id independently of the directory, list it as `- uid: <n>`. On Linux `maknaed.service` is ordered after `nss-user-lookup.target`, so it starts after the local lookup services that pull the target in (such as sssd) have started; it does not wait for the directory server to be reachable, and on a host with no such service the ordering does nothing. launchd has no such ordering. So on both platforms carry-forward and `uid:` entries are the controls for an outage, and after an outage at boot or at a reload, reload once the directory is back.
 
 **When an edit applies.** At the next reload or restart (runbook, "Reload the policy"). A reload reads `authz.yaml` and `bindings.yaml` together as one policy: if either is refused, neither edit applies and the running policy stands.
 
