@@ -4,6 +4,7 @@ use crate::envelope::{
     WRAP_AES_256_GCM,
 };
 use crate::vocabulary::{self, Assessment};
+use maknae_graph::baseline::BaselineLayer;
 use maknae_graph::format::{self, FormatError, FORMAT_VERSION};
 use maknae_graph::graph::Graph;
 use maknae_graph::identity::{self, Extracted, IdentityLayer};
@@ -32,6 +33,7 @@ pub const ANCHOR_MIGRATED: &str = "migrated";
 pub const ANCHOR_TRANSITIONED: &str = "transitioned";
 pub const INITIATOR_ROOT_FILE: &str = "root-file";
 pub const INITIATOR_SEED: &str = "seed";
+pub const INITIATOR_OPERATOR: &str = "operator";
 
 const STORE_MODE: Mode = Mode(0o600);
 
@@ -46,11 +48,22 @@ pub enum StoreError {
     Refused(Refusal),
     Audit(String),
     NewerStore(String),
-    RejectedNameInUse { name: String, cause: String },
+    RejectedNameInUse {
+        name: String,
+        cause: String,
+    },
     Vocabulary(&'static str),
     Identity(String),
-    StaleRevision { store: u64, attempted: u64 },
+    StaleRevision {
+        store: u64,
+        attempted: u64,
+    },
     BindingsRefused(&'static str),
+    BaselineUnseen {
+        stored: Option<String>,
+        seen: Option<String>,
+    },
+    BaselineUnrecorded,
 }
 
 impl fmt::Display for StoreError {
@@ -83,6 +96,15 @@ impl fmt::Display for StoreError {
                 "graph store commit at revision {attempted} does not advance the store's revision {store}"
             ),
             Self::BindingsRefused(m) => f.write_str(m),
+            Self::BaselineUnseen { stored, seen } => write!(
+                f,
+                "the store's accepted baseline ({}) is not the one this start read ({}); nothing was applied",
+                stored.as_deref().unwrap_or("none"),
+                seen.as_deref().unwrap_or("none")
+            ),
+            Self::BaselineUnrecorded => f.write_str(
+                "the baseline would change with no recorded cause; nothing was applied",
+            ),
         }
     }
 }
@@ -124,7 +146,9 @@ pub fn remedy(e: &StoreError) -> Remedy {
         StoreError::Audit(_) => Remedy::CheckAudit,
         StoreError::Identity(_)
         | StoreError::StaleRevision { .. }
-        | StoreError::BindingsRefused(_) => Remedy::Investigate,
+        | StoreError::BindingsRefused(_)
+        | StoreError::BaselineUnseen { .. }
+        | StoreError::BaselineUnrecorded => Remedy::Investigate,
     }
 }
 
@@ -241,6 +265,11 @@ impl StateDir {
         })
     }
 
+    /// Whether root's reseed marker authorizes a seed at this start (the same check `boot` makes).
+    pub fn reseed_authorized(&self) -> bool {
+        matches!(self.reseed_marker(), Ok(true))
+    }
+
     fn reseed_marker(&self) -> Result<bool, IoError> {
         let marker = TargetRequired {
             owner: Some(self.marker_owner),
@@ -344,6 +373,7 @@ pub struct BootReport {
     pub marker_ignored: Option<String>,
     pub migration: Option<Migration>,
     pub identity_transition: bool,
+    pub baseline_transition: bool,
     pub released: Vec<identity::Released>,
     /// The enrolled principal's uid, when this boot's transition ended explicit bindings.
     pub principal_admin: Option<u32>,
@@ -363,6 +393,12 @@ pub struct BootInputs<'a> {
     pub bindings_missing: bool,
     pub bindings_lists_nobody: bool,
     pub principal_uid: u32,
+    /// The baseline this boot runs and persists.
+    pub baseline: &'a BaselineLayer,
+    /// The digest of the accepted baseline the caller read before deciding, `None` when it read none.
+    pub accepted_seen: Option<[u8; 32]>,
+    /// Written ahead of a persist that changes the baseline, one record each.
+    pub baseline_events: &'a [String],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -410,6 +446,13 @@ pub trait BootAudit {
         &mut self,
         revision: u64,
         uid: u32,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+    /// Written ahead of a persist that changes the baseline; an append failure refuses
+    /// as `released`'s does.
+    fn baseline(
+        &mut self,
+        revision: u64,
+        events: &[String],
     ) -> impl Future<Output = Result<(), StoreError>> + Send;
 }
 
@@ -484,13 +527,14 @@ fn decode_store(file: &[u8], key: &WrappingKey) -> Result<Decoded, StoreError> {
 
 fn build(
     layer: &IdentityLayer,
+    baseline: Option<&BaselineLayer>,
     inputs: &BootInputs<'_>,
     revision: u64,
     initiator: ProvenanceKind,
 ) -> Result<Graph, StoreError> {
     identity::build(
         layer,
-        None,
+        baseline,
         inputs.compiled,
         inputs.vocabulary_sha256,
         revision,
@@ -592,10 +636,27 @@ pub async fn boot(
     Ok(report)
 }
 
-fn is_canonical(graph: &Graph, layer: &IdentityLayer, inputs: &BootInputs<'_>) -> bool {
+/// Reads the accepted baseline before anything is appended; writes nothing.
+pub fn peek_baseline(
+    dir: &StateDir,
+    key: &WrappingKey,
+) -> Result<Option<BaselineLayer>, StoreError> {
+    match dir.read_store() {
+        Ok(None) => Ok(None),
+        Ok(Some(file)) => decode_store(&file, key).map(|d| d.extracted.baseline),
+        Err(e) => Err(StoreError::StoreFileRefused(e.to_string())),
+    }
+}
+
+fn is_canonical(
+    graph: &Graph,
+    layer: &IdentityLayer,
+    baseline: Option<&BaselineLayer>,
+    inputs: &BootInputs<'_>,
+) -> bool {
     graph
         .lookup(CONFIG_SOURCE, &layer.source)
-        .and_then(|n| build(layer, inputs, graph.revision(), n.provenance.kind).ok())
+        .and_then(|n| build(layer, baseline, inputs, graph.revision(), n.provenance.kind).ok())
         .is_some_and(|rebuilt| rebuilt == *graph)
 }
 
@@ -620,6 +681,13 @@ async fn load(
     ) {
         return Err(StoreError::BindingsRefused(m));
     }
+    let stored_baseline = extracted.baseline;
+    if stored_baseline.as_ref().map(|b| b.sha256) != inputs.accepted_seen {
+        return Err(StoreError::BaselineUnseen {
+            stored: stored_baseline.as_ref().map(|b| identity::hex(&b.sha256)),
+            seen: inputs.accepted_seen.map(|d| identity::hex(&d)),
+        });
+    }
     let to = inputs.vocabulary_sha256;
     let mut layer = extracted.layer;
     let mut revision = facts.revision;
@@ -631,16 +699,34 @@ async fn load(
             unbound.extend(extracted.unbound);
             unbound.sort_unstable();
             revision = next_revision(revision)?;
-            let next = build(&migrated, inputs, revision, ProvenanceKind::Kernel)?;
+            let next = build(
+                &migrated,
+                stored_baseline.as_ref(),
+                inputs,
+                revision,
+                ProvenanceKind::Kernel,
+            )?;
             layer = migrated;
             Some((Migration { from, to, unbound }, next))
         }
     };
     let file = identity::carry_forward(inputs.identity, inputs.unresolved_adversaries, &layer).0;
-    let stale = migration.is_none() && !is_canonical(&graph, &layer, inputs);
-    let transition = if stale || sorted(&layer) != sorted(&file) {
+    let stale =
+        migration.is_none() && !is_canonical(&graph, &layer, stored_baseline.as_ref(), inputs);
+    let identity_changed = stale || sorted(&layer) != sorted(&file);
+    let baseline_changed = stored_baseline.as_ref() != Some(inputs.baseline);
+    if baseline_changed && inputs.baseline_events.is_empty() {
+        return Err(StoreError::BaselineUnrecorded);
+    }
+    let transition = if identity_changed || baseline_changed {
         revision = next_revision(revision)?;
-        Some(build(&file, inputs, revision, ProvenanceKind::RootFile)?)
+        Some(build(
+            &file,
+            Some(inputs.baseline),
+            inputs,
+            revision,
+            ProvenanceKind::RootFile,
+        )?)
     } else {
         None
     };
@@ -657,6 +743,7 @@ async fn load(
         marker_ignored: None,
         migration: None,
         identity_transition: false,
+        baseline_transition: false,
         released: Vec::new(),
         principal_admin: None,
         durability_error: None,
@@ -685,6 +772,11 @@ async fn load(
         if let Some(uid) = principal_admin {
             audit.principal_admin(next.revision(), uid).await?;
         }
+        if baseline_changed {
+            audit
+                .baseline(next.revision(), inputs.baseline_events)
+                .await?;
+        }
         audit
             .intent_transition(next.revision(), INITIATOR_ROOT_FILE)
             .await?;
@@ -696,7 +788,8 @@ async fn load(
         report.digest = persisted.digest;
         report.durability_error = persisted.durability_error;
         report.graph = next;
-        report.identity_transition = true;
+        report.identity_transition = identity_changed;
+        report.baseline_transition = baseline_changed;
         report.released = released;
         report.principal_admin = principal_admin;
     }
@@ -759,8 +852,18 @@ async fn seed(
     prior: Prior,
     inputs: &BootInputs<'_>,
 ) -> Result<BootReport, StoreError> {
-    let graph = build(inputs.identity, inputs, revision, ProvenanceKind::Seed)?;
+    if inputs.baseline_events.is_empty() {
+        return Err(StoreError::BaselineUnrecorded);
+    }
+    let graph = build(
+        inputs.identity,
+        Some(inputs.baseline),
+        inputs,
+        revision,
+        ProvenanceKind::Seed,
+    )?;
     audit.intent_seed(revision, authorized).await?;
+    audit.baseline(revision, inputs.baseline_events).await?;
     let rejected = match prior {
         Prior::Absent => None,
         Prior::Readable(bytes, now_unix) => {
@@ -794,6 +897,7 @@ async fn seed(
         marker_ignored: None,
         migration: None,
         identity_transition: false,
+        baseline_transition: false,
         released: Vec::new(),
         principal_admin: None,
         durability_error: persisted.durability_error,

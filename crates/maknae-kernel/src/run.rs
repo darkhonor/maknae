@@ -40,6 +40,7 @@ use maknae_audit_append::{
     SessionIds, Source, Subject, Where,
 };
 use maknae_config::TransportConfig;
+use maknae_graph::baseline::BaselineLayer;
 use maknae_proto::{
     admits, class_of, decode_request, encode_response, read_frame_zeroizing, write_frame,
     FrameCaps, FrameClass, Payload, RespResult, Response, Verb, CONTROL_REQUEST_MAX,
@@ -2946,11 +2947,13 @@ const GRAPH_REJECTED_ACTION: &str = "graph.rejected";
 const GRAPH_MIGRATE_ACTION: &str = "graph.migrate";
 const GRAPH_TRANSITION_ACTION: &str = "graph.transition";
 const GRAPH_RELOAD_ACTION: &str = "graph.reload";
+const GRAPH_BASELINE_ACTION: &str = "graph.baseline";
+const BASELINE_SEEDED_EVENT: &str = "baseline seeded from maknae.yaml and config.d";
 use crate::identity_report::GRAPH_IDENTITY_ACTION;
 
 /// Every `graph.*` pseudo-action this file emits; no verb's action string may equal one.
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) const GRAPH_PSEUDO_ACTIONS: [&str; 9] = [
+pub(crate) const GRAPH_PSEUDO_ACTIONS: [&str; 10] = [
     GRAPH_SEED_ACTION,
     GRAPH_RESEED_ACTION,
     GRAPH_REJECTED_ACTION,
@@ -2960,6 +2963,7 @@ pub(crate) const GRAPH_PSEUDO_ACTIONS: [&str; 9] = [
     GRAPH_TRANSITION_ACTION,
     GRAPH_RELOAD_ACTION,
     GRAPH_IDENTITY_ACTION,
+    GRAPH_BASELINE_ACTION,
 ];
 
 /// The fields every peer-less boot record shares (spec §5.3).
@@ -3136,6 +3140,26 @@ impl<E: AuditEmit + Send + Sync> BootAudit for GraphBootAudit<'_, E> {
         eprintln!("maknaed: identity: {reason} (pending the store commit of revision {revision})");
         self.append(rec)
     }
+
+    fn baseline(
+        &mut self,
+        revision: u64,
+        events: &[String],
+    ) -> impl Future<Output = Result<(), StoreError>> + Send {
+        let recs: Vec<AuditRecord> = events
+            .iter()
+            .map(|e| self.intent(GRAPH_BASELINE_ACTION, e, revision, "baselining"))
+            .collect();
+        let sink = self.sink;
+        async move {
+            for rec in recs {
+                sink.emit(&rec)
+                    .await
+                    .map_err(|e| StoreError::Audit(e.to_string()))?;
+            }
+            Ok(())
+        }
+    }
 }
 
 impl<E> GraphBootAudit<'_, E> {
@@ -3165,10 +3189,53 @@ struct GraphInputs {
     bindings_missing: bool,
     bindings_lists_nobody: bool,
     principal_uid: u32,
+    baseline: BaselineLayer,
+}
+
+/// The baseline the files declare: what a store holding none is seeded with.
+fn file_baseline(boot: &crate::BootConfig) -> BaselineLayer {
+    let sections = maknae_config::document_sections(boot.document());
+    BaselineLayer {
+        sha256: sections_digest(&sections),
+        sections,
+        system: boot.classification_policy_name().to_string(),
+        ceiling: boot.ceiling().classification.name.clone(),
+        moved_from: None,
+    }
+}
+
+fn sections_digest(sections: &maknae_config::BaselineSections) -> [u8; 32] {
+    let map = maknae_config::Value::Map(
+        sections
+            .iter()
+            .map(|(k, v)| (k.clone(), maknae_config::Value::Str(v.clone())))
+            .collect(),
+    );
+    maknae_state::envelope::sha256(maknae_config::canonical_json(&map).as_bytes())
+}
+
+#[cfg(test)]
+fn test_baseline() -> BaselineLayer {
+    let sections: maknae_config::BaselineSections = [(
+        "core".to_string(),
+        r#"{"deployment_id":"test"}"#.to_string(),
+    )]
+    .into();
+    BaselineLayer {
+        sha256: sections_digest(&sections),
+        sections,
+        system: "US".into(),
+        ceiling: "UNCLASSIFIED".into(),
+        moved_from: None,
+    }
 }
 
 impl GraphInputs {
-    fn new(source: &maknae_authz_basic::PolicySource, label: &str) -> Result<Self, StoreError> {
+    fn new(
+        source: &maknae_authz_basic::PolicySource,
+        label: &str,
+        baseline: BaselineLayer,
+    ) -> Result<Self, StoreError> {
         let vocabulary = crate::vocabulary::kernel_vocabulary(label)
             .map_err(|e| StoreError::Identity(e.to_string()))?;
         let sections = source.section_digests(maknae_state::envelope::sha256);
@@ -3180,6 +3247,7 @@ impl GraphInputs {
             bindings_missing: source.bindings().is_missing(),
             bindings_lists_nobody: source.bindings().lists_nobody(),
             principal_uid: source.principal().uid,
+            baseline,
         })
     }
 
@@ -3192,6 +3260,9 @@ impl GraphInputs {
             bindings_missing: self.bindings_missing,
             bindings_lists_nobody: self.bindings_lists_nobody,
             principal_uid: self.principal_uid,
+            baseline: &self.baseline,
+            accepted_seen: None,
+            baseline_events: &[],
         }
     }
 }
@@ -3384,7 +3455,26 @@ async fn boot_kernel_graph(
         scanned_bytes: scan.scanned_bytes,
     };
     let key = WrappingKey::new(key.into_bytes());
-    let report = maknae_state::store::boot(&dir, &key, checkpoint, &mut audit, unix_now(), inputs)
+    let stored = if dir.reseed_authorized() {
+        None
+    } else {
+        maknae_state::store::peek_baseline(&dir, &key).map_err(|e| store_refusal(e, state_dir))?
+    };
+    let seeded = [BASELINE_SEEDED_EVENT.to_string()];
+    let inputs = match &stored {
+        Some(accepted) => BootInputs {
+            baseline: accepted,
+            accepted_seen: Some(accepted.sha256),
+            baseline_events: &[],
+            ..*inputs
+        },
+        None => BootInputs {
+            accepted_seen: None,
+            baseline_events: &seeded,
+            ..*inputs
+        },
+    };
+    let report = maknae_state::store::boot(&dir, &key, checkpoint, &mut audit, unix_now(), &inputs)
         .await
         .map_err(|e| store_refusal(e, state_dir))?;
     report_graph_boot(sink.as_ref(), ctx, state_dir, &report).await?;
@@ -4087,7 +4177,7 @@ async fn boot_after_sink(
         Err(e) => return Err(refuse(e.to_string()).await),
     };
     let label = boot.policy().unmarked().name.clone();
-    let graph_inputs = GraphInputs::new(&source, &label)
+    let graph_inputs = GraphInputs::new(&source, &label, file_baseline(&boot))
         .map_err(|e| graph_refusal(GraphFailure::Store(e), state_dir))?;
     // The kernel graph boots before the PDP is built from it.
     let booted = match boot_kernel_graph(
@@ -5469,7 +5559,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             maknae_authz_basic::PolicyPaths::in_dir(config_dir),
         )
         .unwrap();
-        GraphInputs::new(&source, "UNCLASSIFIED").unwrap()
+        GraphInputs::new(&source, "UNCLASSIFIED", test_baseline()).unwrap()
     }
 
     fn boot_graph_from(
@@ -5531,7 +5621,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             maknae_authz_basic::PolicyPaths::in_dir(&fx.dir.0),
         )
         .unwrap();
-        let inputs = GraphInputs::new(&source, "UNCLASSIFIED").unwrap();
+        let inputs = GraphInputs::new(&source, "UNCLASSIFIED", test_baseline()).unwrap();
         assert!(inputs.identity.bindings_sha256.is_some());
         let seq = Seq::new();
         let au3_1 = serde_json::Value::Null;
@@ -5605,7 +5695,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         KernelGraphStatus,
         crate::composition::Composition<maknae_authz_basic::BasicAuthorizer>,
     ) {
-        let inputs = GraphInputs::new(&source, "UNCLASSIFIED").unwrap();
+        let inputs = GraphInputs::new(&source, "UNCLASSIFIED", test_baseline()).unwrap();
         let seq = Seq::new();
         let au3_1 = serde_json::Value::Null;
         let ctx = BootCtx {
@@ -5687,6 +5777,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
                 "graph.checkpoint",
                 "graph.migrate",
                 "graph.checkpoint",
+                "graph.baseline",
                 "graph.transition",
                 "graph.checkpoint"
             ]
@@ -5758,13 +5849,20 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         let status = boot_graph(&fx, key()).unwrap();
         assert_eq!(
             (status.revision(), status.anchor.as_str()),
-            (5, "rollback-anchor-unavailable")
+            (6, "rollback-anchor-unavailable")
         );
         let recs = trail(&fx);
         let actions: Vec<&str> = recs.iter().map(|(r, _)| r.action.as_str()).collect();
         assert_eq!(
             actions,
-            ["graph.checkpoint", "graph.migrate", "graph.checkpoint"]
+            [
+                "graph.checkpoint",
+                "graph.migrate",
+                "graph.checkpoint",
+                "graph.baseline",
+                "graph.transition",
+                "graph.checkpoint"
+            ]
         );
         let to = bare_inputs(&fx.dir.0).vocabulary.digest;
         let (m, _) = &recs[1];
@@ -5803,20 +5901,21 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             actions,
             [
                 "graph.seed",
+                "graph.baseline",
                 "graph.checkpoint",
                 "graph.checkpoint",
                 "graph.transition",
                 "graph.checkpoint"
             ]
         );
-        let (t, _) = &recs[3];
+        let (t, _) = &recs[4];
         assert_eq!(
             (t.outcome.result.as_str(), t.outcome.reason.as_str()),
             ("permit", "intent recorded (root-file)")
         );
         let g = t.graph.as_ref().unwrap();
         assert_eq!((g.revision, g.anchor.as_str()), (2, "transitioning"));
-        assert_eq!(recs[4].0.graph.as_ref().unwrap().anchor, "transitioned");
+        assert_eq!(recs[5].0.graph.as_ref().unwrap().anchor, "transitioned");
     }
 
     #[test]
@@ -5837,7 +5936,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             paths.clone(),
         )
         .unwrap();
-        let inputs = GraphInputs::new(&source, "UNCLASSIFIED").unwrap();
+        let inputs = GraphInputs::new(&source, "UNCLASSIFIED", test_baseline()).unwrap();
         let old = maknae_graph::identity::IdentityLayer {
             aliases: Default::default(),
             source: paths.authz.to_str().unwrap().to_string(),
@@ -6155,7 +6254,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             paths.clone(),
         )
         .unwrap();
-        let inputs = GraphInputs::new(&source, "UNCLASSIFIED").unwrap();
+        let inputs = GraphInputs::new(&source, "UNCLASSIFIED", test_baseline()).unwrap();
         assert!(inputs.bindings_missing);
         let seed = explicit(&inputs, &paths.bindings, &[]);
         let (seeded, booted) = boot_over_seed(&fx, &inputs, &seed);
@@ -6178,7 +6277,10 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
 
         let recs = trail(&fx);
         let actions: Vec<&str> = recs.iter().map(|(r, _)| r.action.as_str()).collect();
-        assert_eq!(actions, ["graph.seed", "graph.checkpoint"]);
+        assert_eq!(
+            actions,
+            ["graph.seed", "graph.baseline", "graph.checkpoint"]
+        );
         let (seed, _) = &recs[0];
         assert_eq!(
             (
@@ -6203,7 +6305,25 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
                 scanned_bytes: 0,
             })
         );
-        let (ckpt, line) = &recs[1];
+        let (baseline, _) = &recs[1];
+        assert_eq!(
+            (
+                baseline.outcome.result.as_str(),
+                baseline.outcome.reason.as_str(),
+                baseline.outcome.posture.as_str()
+            ),
+            ("permit", BASELINE_SEEDED_EVENT, "authorized")
+        );
+        assert_eq!(
+            baseline.graph,
+            Some(GraphAudit {
+                revision: 1,
+                ciphertext_sha256: String::new(),
+                anchor: "baselining".into(),
+                scanned_bytes: 0,
+            })
+        );
+        let (ckpt, line) = &recs[2];
         assert_eq!(
             (ckpt.outcome.result.as_str(), ckpt.outcome.reason.as_str()),
             ("permit", "seeded")
@@ -6217,12 +6337,12 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         let status = boot_graph(&fx, key()).unwrap();
         assert_eq!((status.revision(), status.anchor.as_str()), (1, "verified"));
         let recs = trail(&fx);
-        assert_eq!(recs.len(), 3);
-        let g = recs[2].0.graph.as_ref().unwrap();
+        assert_eq!(recs.len(), 4);
+        let g = recs[3].0.graph.as_ref().unwrap();
         assert_eq!((g.revision, g.anchor.as_str()), (1, "verified"));
         assert_eq!(
             g.ciphertext_sha256,
-            recs[1].0.graph.as_ref().unwrap().ciphertext_sha256
+            recs[2].0.graph.as_ref().unwrap().ciphertext_sha256
         );
         assert!(g.scanned_bytes > 0, "the restart scanned the trail");
     }
@@ -6248,7 +6368,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             )
         );
         assert_eq!(refusal_exit_code(e), GRAPH_REFUSAL_EXIT_CODE);
-        assert_eq!(trail(&fx).len(), 2, "the refused boot appended nothing");
+        assert_eq!(trail(&fx).len(), 3, "the refused boot appended nothing");
     }
 
     #[test]
@@ -6317,6 +6437,130 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         assert!(trail(&fx).is_empty());
     }
 
+    fn boot_with_baseline(fx: &GraphFixture, baseline: BaselineLayer) -> BootedGraph {
+        let mut inputs = bare_inputs(&fx.dir.0);
+        inputs.baseline = baseline;
+        block_on(boot_kernel_graph(
+            &fx.state,
+            key(),
+            &fx.sink,
+            &BootCtx {
+                event: "boot",
+                host: "h",
+                socket: "s",
+                euid: nix::unistd::geteuid().as_raw(),
+                session_id: 9 << 32,
+                seq: &Seq::new(),
+                au3_1: &serde_json::Value::Null,
+            },
+            &inputs.boot(),
+        ))
+        .unwrap()
+    }
+
+    fn edited_baseline() -> BaselineLayer {
+        let sections: maknae_config::BaselineSections = [(
+            "core".to_string(),
+            r#"{"deployment_id":"edited"}"#.to_string(),
+        )]
+        .into();
+        BaselineLayer {
+            sha256: sections_digest(&sections),
+            sections,
+            ..test_baseline()
+        }
+    }
+
+    fn stored_baseline(g: &maknae_graph::graph::Graph) -> Option<BaselineLayer> {
+        maknae_graph::identity::extract(g).unwrap().baseline
+    }
+
+    #[test]
+    fn a_first_boot_stores_the_files_baseline_and_a_restart_holds_a_file_edit() {
+        let fx = graph_fixture("graph_baseline_held");
+        let first = boot_with_baseline(&fx, test_baseline());
+        assert_eq!(stored_baseline(&first.graph), Some(test_baseline()));
+        drop(first);
+        let seeded = trail(&fx).len();
+        let again = boot_with_baseline(&fx, edited_baseline());
+        assert_eq!(
+            (again.status.revision(), again.status.anchor.as_str()),
+            (1, "verified")
+        );
+        assert_eq!(stored_baseline(&again.graph), Some(test_baseline()));
+        let actions: Vec<String> = trail(&fx)[seeded..]
+            .iter()
+            .map(|(r, _)| r.action.clone())
+            .collect();
+        assert_eq!(actions, ["graph.checkpoint"]);
+    }
+
+    #[test]
+    fn an_upgrade_store_gains_the_files_baseline_in_a_recorded_transition() {
+        let fx = graph_fixture("graph_baseline_upgrade");
+        let inputs = bare_inputs(&fx.dir.0);
+        let old = maknae_graph::identity::build(
+            &inputs.identity,
+            None,
+            &inputs.vocabulary.persisted,
+            inputs.vocabulary.digest,
+            3,
+            maknae_graph::record::ProvenanceKind::Seed,
+        )
+        .unwrap();
+        let k = WrappingKey::new(key().unwrap().into_bytes());
+        let file = maknae_state::envelope::seal(&maknae_graph::format::encode(&old), &k).unwrap();
+        let path = fx.state.join(STORE_FILE);
+        std::fs::write(&path, file).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let booted = boot_with_baseline(&fx, edited_baseline());
+        assert_eq!(booted.status.revision(), 4);
+        assert_eq!(stored_baseline(&booted.graph), Some(edited_baseline()));
+        let recs = trail(&fx);
+        let actions: Vec<&str> = recs.iter().map(|(r, _)| r.action.as_str()).collect();
+        assert_eq!(
+            actions,
+            [
+                "graph.checkpoint",
+                "graph.baseline",
+                "graph.transition",
+                "graph.checkpoint"
+            ]
+        );
+        assert_eq!(recs[1].0.outcome.reason, BASELINE_SEEDED_EVENT);
+    }
+
+    #[test]
+    fn an_authorized_reseed_takes_the_files_baseline() {
+        if !nix::unistd::geteuid().is_root() {
+            return;
+        }
+        let fx = graph_fixture("graph_baseline_reseed");
+        drop(boot_with_baseline(&fx, test_baseline()));
+        put(&fx.state, MARKER_FILE, "", 0o644);
+        let booted = boot_with_baseline(&fx, edited_baseline());
+        assert_eq!(booted.status.anchor, "reseeded");
+        assert_eq!(stored_baseline(&booted.graph), Some(edited_baseline()));
+    }
+
+    #[test]
+    fn the_files_baseline_is_the_loaded_sections_under_the_selected_system() {
+        let dir = Dir::new("file_baseline");
+        std::fs::set_permissions(&dir.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+        put(&dir.0, "maknae.yaml", "core: {}\n", 0o640);
+        let b = file_baseline(&crate::boot::boot(&dir.0).unwrap());
+        assert_eq!(
+            b,
+            BaselineLayer {
+                sections: [("core".to_string(), "{}".to_string())].into(),
+                system: "US".into(),
+                ceiling: "UNCLASSIFIED".into(),
+                sha256: maknae_state::envelope::sha256(br#"{"core":"{}"}"#),
+                moved_from: None,
+            }
+        );
+    }
+
     #[test]
     fn a_marker_not_owned_by_root_is_ignored_and_audited() {
         if nix::unistd::geteuid().is_root() {
@@ -6331,9 +6575,17 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         );
         let recs = trail(&fx);
         let actions: Vec<&str> = recs.iter().map(|(r, _)| r.action.as_str()).collect();
-        assert_eq!(actions, ["graph.seed", "graph.checkpoint", "graph.reseed"]);
+        assert_eq!(
+            actions,
+            [
+                "graph.seed",
+                "graph.baseline",
+                "graph.checkpoint",
+                "graph.reseed"
+            ]
+        );
         assert_eq!(recs[0].0.outcome.reason, "intent recorded (first-boot)");
-        let ignored = &recs[2].0;
+        let ignored = &recs[3].0;
         assert_eq!(ignored.outcome.result, "deny");
         assert!(
             ignored
@@ -7395,7 +7647,7 @@ mod reload_tests {
             requirement(),
         )
         .unwrap();
-        let inputs = GraphInputs::new(&source, "UNCLASSIFIED").unwrap();
+        let inputs = GraphInputs::new(&source, "UNCLASSIFIED", test_baseline()).unwrap();
         let seq = Seq::new();
         let au3_1 = serde_json::Value::Null;
         let euid = nix::unistd::geteuid().as_raw();
@@ -8112,7 +8364,7 @@ mod reload_tests {
             requirement(),
         )
         .unwrap();
-        let inputs = GraphInputs::new(&source, "UNCLASSIFIED").unwrap();
+        let inputs = GraphInputs::new(&source, "UNCLASSIFIED", test_baseline()).unwrap();
         let seq = Seq::new();
         let au3_1 = serde_json::Value::Null;
         let booted = boot_kernel_graph(
@@ -8134,7 +8386,7 @@ mod reload_tests {
         .unwrap();
         assert_eq!(
             (booted.status.revision(), booted.status.anchor.as_str()),
-            (2, "verified")
+            (3, "verified")
         );
     }
 

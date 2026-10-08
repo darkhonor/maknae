@@ -8,6 +8,15 @@ pub struct Checkpoint {
     pub digest: [u8; 32],
 }
 
+/// The checkpoint with the higher revision; on a tie, `b`'s.
+pub fn newer(a: Option<Checkpoint>, b: Option<Checkpoint>) -> Option<Checkpoint> {
+    match (a, b) {
+        (Some(x), Some(y)) if x.revision > y.revision => Some(x),
+        (x, None) => x,
+        (_, y) => y,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StoreFacts {
     pub revision: u64,
@@ -128,6 +137,20 @@ pub fn parse_checkpoint(line: &[u8]) -> Option<Checkpoint> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn newer_takes_the_higher_revision_and_the_second_on_a_tie() {
+        let c = |r: u64, d: u8| Checkpoint {
+            revision: r,
+            digest: [d; 32],
+        };
+        assert_eq!(newer(None, None), None);
+        assert_eq!(newer(Some(c(3, 1)), None), Some(c(3, 1)));
+        assert_eq!(newer(None, Some(c(2, 2))), Some(c(2, 2)));
+        assert_eq!(newer(Some(c(3, 1)), Some(c(2, 2))), Some(c(3, 1)));
+        assert_eq!(newer(Some(c(2, 1)), Some(c(3, 2))), Some(c(3, 2)));
+        assert_eq!(newer(Some(c(3, 1)), Some(c(3, 2))), Some(c(3, 2)));
+    }
 
     const D1: [u8; 32] = [1; 32];
     const D2: [u8; 32] = [2; 32];
