@@ -940,7 +940,7 @@ Both send `SIGHUP`, as does `kill -HUP <pid>` for a daemon started by hand. The 
 sudo jq -c 'select(.action=="graph.reload") | {ts, session_id, result: .outcome.result, reason: .outcome.reason, policy: .policy_sha256}' /var/log/maknae/audit.jsonl | tail -n 2
 ```
 
-If the intent itself cannot be appended, nothing is loaded and no outcome is written; the journal says `reload refused: audit append failed: <cause>`.
+If the intent itself cannot be appended, nothing is loaded and no outcome is written; the journal says `reload refused: audit append failed: <cause>`. Each reload audit record is given 5 seconds. An intent or store record that cannot be appended in that time refuses the reload, the running policy stands, and the next `SIGHUP` runs; an outcome or identity record that cannot is reported in the journal, and the reload it describes stands.
 
 **At boot** the trail carries the same `graph.identity` records: each release and the principal-admin record ahead of the store transition that makes them, as above, and each identity problem after the `authz` composition record. A problem record that cannot be appended at boot refuses the start, like every boot record.
 

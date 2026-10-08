@@ -31,6 +31,25 @@ const _: () = assert!(BLOCKING_BREAKER_MAX_IN_FLIGHT > BLOCKING_BREAKER_TRIP_AFT
 /// lookup is far below this, while wedged infrastructure fails closed promptly.
 pub const BLOCKING_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Bound on each boot and reload audit append; an elapse refuses that boot or reload.
+pub const AUDIT_APPEND_TIMEOUT: Duration = BLOCKING_OPERATION_TIMEOUT;
+
+/// Bound on the boot's backward scan of the trail for the rollback anchor.
+pub const SCAN_BACK_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Runs `f` on the blocking pool and gives up waiting after `bound`; the thread is
+/// left to finish on its own.
+pub async fn within_blocking<T: Send + 'static>(
+    bound: Duration,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    match tokio::time::timeout(bound, tokio::task::spawn_blocking(f)).await {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(join)) => Err(format!("blocking task failed: {join}")),
+        Err(_) => Err(format!("did not complete within {}ms", bound.as_millis())),
+    }
+}
+
 /// Fixed recovery delay before one half-open probe may be admitted. This is not
 /// configurable: policy, read, and NSS blocking guards must not be operator-
 /// weakenable at runtime.
@@ -178,6 +197,32 @@ mod tests {
         assert!(!BLOCKING_BREAKER_RESET_AFTER.is_zero());
         assert_eq!(BLOCKING_BREAKER_REFUSAL_LOG_EVERY, Duration::from_secs(30));
         assert!(!BLOCKING_BREAKER_REFUSAL_LOG_EVERY.is_zero());
+    }
+
+    #[tokio::test]
+    async fn within_blocking_gives_up_after_the_bound() {
+        let got = within_blocking(Duration::from_millis(50), || {
+            std::thread::sleep(Duration::from_millis(500))
+        })
+        .await;
+        assert_eq!(got, Err("did not complete within 50ms".to_string()));
+        assert_eq!(within_blocking(Duration::from_secs(1), || 7).await, Ok(7));
+    }
+
+    #[tokio::test]
+    async fn within_blocking_reports_a_task_that_panicked() {
+        let got = within_blocking(Duration::from_secs(5), || -> u8 { panic!("boom") }).await;
+        assert!(
+            got.as_ref()
+                .is_err_and(|e| e.starts_with("blocking task failed: ")),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn the_audit_and_scan_bounds_are_pinned() {
+        assert_eq!(AUDIT_APPEND_TIMEOUT, Duration::from_secs(5));
+        assert_eq!(SCAN_BACK_TIMEOUT, Duration::from_secs(30));
     }
 
     #[test]

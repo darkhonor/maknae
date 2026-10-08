@@ -61,7 +61,10 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::authz::{admission_facts, authorize_connection, ConnDecision, HOME_RESOLVE_TIMEOUT};
-use crate::blocking_guard::{BlockingBreaker, BreakerAdmission, BreakerTransition};
+use crate::blocking_guard::{
+    within_blocking, BlockingBreaker, BreakerAdmission, BreakerTransition, AUDIT_APPEND_TIMEOUT,
+    SCAN_BACK_TIMEOUT,
+};
 use crate::boot_gate::{authz_boot_gate, authz_policy_source};
 use crate::groupres::{maknae_gid, uid_in_maknae_group};
 use crate::handler::{
@@ -2835,7 +2838,7 @@ async fn refuse_authz_boot<E: AuditEmit + Send + Sync>(
         "unauthorized",
         au3_1,
     );
-    if let Err(e) = sink.emit(&rec).await {
+    if let Err(e) = sink.emit_within(&rec, AUDIT_APPEND_TIMEOUT).await {
         eprintln!(
             "maknaed: AUDIT WRITE FAILED on boot authz refusal — refusal proceeded without a durable record: {e}"
         );
@@ -2881,7 +2884,7 @@ async fn refuse_audit_offload_boot<E: AuditEmit + Send + Sync>(
         "unauthorized",
         au3_1,
     );
-    if let Err(e) = sink.emit(&rec).await {
+    if let Err(e) = sink.emit_within(&rec, AUDIT_APPEND_TIMEOUT).await {
         eprintln!(
             "maknaed: AUDIT WRITE FAILED on boot audit-offload refusal — refusal proceeded without a durable record: {e}"
         );
@@ -2935,7 +2938,7 @@ async fn record_start_refusal<E: AuditEmit + Send + Sync>(
         "unauthorized",
         au3_1,
     );
-    if let Err(e) = sink.emit(&rec).await {
+    if let Err(e) = sink.emit_within(&rec, AUDIT_APPEND_TIMEOUT).await {
         eprintln!("maknaed: AUDIT WRITE FAILED on the boot start refusal: {e}");
     }
 }
@@ -3017,13 +3020,14 @@ struct GraphBootAudit<'a, E> {
     sink: &'a E,
     ctx: &'a BootCtx<'a>,
     scanned_bytes: u64,
+    bound: Duration,
 }
 
 impl<'a, E: AuditEmit + Send + Sync> GraphBootAudit<'a, E> {
     fn append(&self, rec: AuditRecord) -> impl Future<Output = Result<(), StoreError>> + Send + 'a {
-        let sink = self.sink;
+        let (sink, bound) = (self.sink, self.bound);
         async move {
-            sink.emit(&rec)
+            sink.emit_within(&rec, bound)
                 .await
                 .map_err(|e| StoreError::Audit(e.to_string()))
         }
@@ -3116,13 +3120,13 @@ impl<E: AuditEmit + Send + Sync> BootAudit for GraphBootAudit<'_, E> {
                 (reason, rec)
             })
             .collect();
-        let sink = self.sink;
+        let (sink, bound) = (self.sink, self.bound);
         async move {
             for (reason, rec) in recs {
                 eprintln!(
                     "maknaed: identity: {reason} (pending the store commit of revision {revision})"
                 );
-                sink.emit(&rec)
+                sink.emit_within(&rec, bound)
                     .await
                     .map_err(|e| StoreError::Audit(e.to_string()))?;
             }
@@ -3150,10 +3154,10 @@ impl<E: AuditEmit + Send + Sync> BootAudit for GraphBootAudit<'_, E> {
             .iter()
             .map(|e| self.intent(GRAPH_BASELINE_ACTION, e, revision, "baselining"))
             .collect();
-        let sink = self.sink;
+        let (sink, bound) = (self.sink, self.bound);
         async move {
             for rec in recs {
-                sink.emit(&rec)
+                sink.emit_within(&rec, bound)
                     .await
                     .map_err(|e| StoreError::Audit(e.to_string()))?;
             }
@@ -3411,7 +3415,7 @@ async fn publish_boot_identity<E: AuditEmit + Send + Sync>(
         snapshot.identity_problems(),
         |result, reason, posture| {
             let rec = ctx.record(GRAPH_IDENTITY_ACTION, result, &reason, posture, None);
-            async move { sink.emit(&rec).await }
+            async move { sink.emit_within(&rec, AUDIT_APPEND_TIMEOUT).await }
         },
     )
     .await
@@ -3429,6 +3433,18 @@ struct BootedGraph {
     principal_admin: Option<u32>,
 }
 
+async fn scan_anchor(
+    bound: Duration,
+    scan: impl FnOnce() -> Result<maknae_audit_append::ScanResult, maknae_audit_append::AuditError>
+        + Send
+        + 'static,
+) -> Result<maknae_audit_append::ScanResult, StoreError> {
+    within_blocking(bound, scan)
+        .await
+        .map_err(|e| StoreError::Audit(format!("rollback anchor scan {e}")))?
+        .map_err(|e| StoreError::Audit(e.to_string()))
+}
+
 /// Runs before the accept loop, so the blocking audit scan contends with no append.
 async fn boot_kernel_graph(
     state_dir: &Path,
@@ -3441,18 +3457,17 @@ async fn boot_kernel_graph(
     let dir = StateDir::open(state_dir, ctx.euid)
         .map_err(|e| graph_refusal(GraphFailure::Store(e), state_dir))?;
     let scan_sink = Arc::clone(sink);
-    let scan = tokio::task::spawn_blocking(move || {
+    let scan = scan_anchor(SCAN_BACK_TIMEOUT, move || {
         scan_sink.scan_back(|line| parse_checkpoint(line).is_some())
     })
     .await
-    .map_err(|e| e.to_string())
-    .and_then(|r| r.map_err(|e| e.to_string()))
-    .map_err(|e| graph_refusal(GraphFailure::Store(StoreError::Audit(e)), state_dir))?;
+    .map_err(|e| graph_refusal(GraphFailure::Store(e), state_dir))?;
     let checkpoint = scan.line.as_deref().and_then(parse_checkpoint);
     let mut audit = GraphBootAudit {
         sink: sink.as_ref(),
         ctx,
         scanned_bytes: scan.scanned_bytes,
+        bound: AUDIT_APPEND_TIMEOUT,
     };
     let key = WrappingKey::new(key.into_bytes());
     let stored = if dir.reseed_authorized() {
@@ -3504,9 +3519,12 @@ async fn report_graph_boot<E: AuditEmit + Send + Sync>(
             MARKER_FILE,
             state_dir.display()
         );
-        sink.emit(&ctx.record(GRAPH_RESEED_ACTION, "deny", &reason, "unauthorized", None))
-            .await
-            .map_err(|e| boot_evidence_refused("graph reseed", e))?;
+        sink.emit_within(
+            &ctx.record(GRAPH_RESEED_ACTION, "deny", &reason, "unauthorized", None),
+            AUDIT_APPEND_TIMEOUT,
+        )
+        .await
+        .map_err(|e| boot_evidence_refused("graph reseed", e))?;
     }
     if let Some(cause) = &report.durability_error {
         eprintln!(
@@ -3521,9 +3539,12 @@ async fn report_graph_boot<E: AuditEmit + Send + Sync>(
     {
         let reason = format!("previous kernel graph store: {previous}");
         eprintln!("maknaed: {reason}");
-        sink.emit(&ctx.record(GRAPH_REJECTED_ACTION, "permit", &reason, "authorized", None))
-            .await
-            .map_err(|e| boot_evidence_refused("graph rejected-store", e))?;
+        sink.emit_within(
+            &ctx.record(GRAPH_REJECTED_ACTION, "permit", &reason, "authorized", None),
+            AUDIT_APPEND_TIMEOUT,
+        )
+        .await
+        .map_err(|e| boot_evidence_refused("graph rejected-store", e))?;
     }
     Ok(())
 }
@@ -3546,6 +3567,7 @@ struct Reloader<B: maknae_authz_basic::Baseline, E> {
     au3_1: serde_json::Value,
     identity: crate::identity_report::IdentityStatus,
     stopping: tokio::sync::watch::Sender<bool>,
+    append_bound: Duration,
     #[cfg(test)]
     load_gate: Option<Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>>,
 }
@@ -3723,6 +3745,7 @@ where
                 sink: self.reloader.sink.as_ref(),
                 ctx: self.ctx,
                 scanned_bytes: 0,
+                bound: self.reloader.append_bound,
             };
             let committed = maknae_state::store::commit(
                 &self.reloader.dir,
@@ -3794,8 +3817,9 @@ where
             }),
         );
         let sink = Arc::clone(&self.reloader.sink);
+        let bound = self.reloader.append_bound;
         async move {
-            sink.emit(&rec).await.map_err(|e| {
+            sink.emit_within(&rec, bound).await.map_err(|e| {
                 eprintln!("maknaed: AUDIT WRITE FAILED on the reload intent: {e}");
                 crate::reload::Refusal::Audit(e.to_string())
             })
@@ -3846,13 +3870,14 @@ where
                 })
                 .collect();
         let sink = Arc::clone(&self.reloader.sink);
+        let bound = self.reloader.append_bound;
         async move {
-            if let Err(e) = sink.emit(&rec).await {
+            if let Err(e) = sink.emit_within(&rec, bound).await {
                 eprintln!("maknaed: AUDIT WRITE FAILED on the reload outcome ({reason}): {e}");
             }
             for (reason, rec) in problems {
                 eprintln!("maknaed: identity: {reason}");
-                if let Err(e) = sink.emit(&rec).await {
+                if let Err(e) = sink.emit_within(&rec, bound).await {
                     eprintln!("maknaed: AUDIT WRITE FAILED on an identity record ({reason}): {e}");
                 }
             }
@@ -4250,7 +4275,7 @@ async fn boot_after_sink(
     composition_rec.policy_sha256 = Some(maknae_authz_basic::Baseline::policy_sha256(
         authorizer.baseline(),
     ));
-    sink.emit(&composition_rec)
+    sink.emit_within(&composition_rec, AUDIT_APPEND_TIMEOUT)
         .await
         .map_err(|e| boot_evidence_refused("composition", e))?;
     let identity_ctx = BootCtx {
@@ -4329,7 +4354,7 @@ async fn boot_after_sink(
         posture.as_str(),
         &audit_cfg.au3_1,
     );
-    sink.emit(&posture_rec)
+    sink.emit_within(&posture_rec, AUDIT_APPEND_TIMEOUT)
         .await
         .map_err(|e| boot_evidence_refused("posture", e))?;
     if posture != crate::posture::Posture::HrotSealed {
@@ -4415,6 +4440,7 @@ async fn boot_after_sink(
         au3_1: audit_cfg.au3_1.clone(),
         identity,
         stopping: tokio::sync::watch::channel(false).0,
+        append_bound: AUDIT_APPEND_TIMEOUT,
         #[cfg(test)]
         load_gate: None,
     };
@@ -7475,6 +7501,209 @@ mod admission_bound_tests {
     }
 }
 
+#[cfg(test)]
+mod graph_audit_bound_tests {
+    use super::*;
+    use maknae_audit_append::AuditError;
+
+    struct Stall;
+
+    impl AuditEmit for Stall {
+        fn emit(&self, _: &AuditRecord) -> impl Future<Output = Result<(), AuditError>> + Send {
+            std::future::pending()
+        }
+    }
+
+    const OUTER: Duration = Duration::from_secs(60);
+
+    fn audit<'a>(ctx: &'a BootCtx<'a>) -> GraphBootAudit<'a, Stall> {
+        GraphBootAudit {
+            sink: &Stall,
+            ctx,
+            scanned_bytes: 0,
+            bound: Duration::from_millis(100),
+        }
+    }
+
+    /// Every unbounded append left in this file is on the request path or the
+    /// shutdown record, which bounds its own.
+    #[test]
+    fn only_the_request_path_and_the_shutdown_record_call_an_unbounded_emit() {
+        let src = include_str!("run.rs");
+        let prod = &src[..src.find("\nmod tests {").expect("a test module")];
+        let mut enclosing = "";
+        let mut callers = Vec::new();
+        for line in prod.lines() {
+            let head = line
+                .trim_start_matches("pub ")
+                .trim_start_matches("pub(crate) ")
+                .trim_start_matches("async ");
+            if let Some(rest) = head.strip_prefix("fn ") {
+                enclosing = rest.split(['<', '(']).next().unwrap_or(rest);
+            }
+            if line.contains(".emit(") {
+                callers.push(enclosing);
+            }
+        }
+        assert_eq!(
+            callers,
+            [
+                "emit_or_report",
+                "emit_request_outcome",
+                "emit_request_deny",
+                "accept_loop"
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_boot_record_refuses_within_the_bound() {
+        let seq = Seq::new();
+        let au3 = serde_json::json!({});
+        let ctx = BootCtx {
+            event: "boot",
+            host: "h",
+            socket: "s",
+            euid: 0,
+            session_id: 1,
+            seq: &seq,
+            au3_1: &au3,
+        };
+        let released = [maknae_graph::identity::Released {
+            uid: 7,
+            name: "mallory".into(),
+            cause: maknae_graph::identity::ReleaseCause::NotListed,
+        }];
+        let events = ["baseline seeded".to_string()];
+        let mut a = audit(&ctx);
+        let got = tokio::time::timeout(OUTER, a.checkpoint(1, [0; 32], "seeded")).await;
+        assert!(matches!(got, Ok(Err(StoreError::Audit(_)))), "{got:?}");
+        let got = tokio::time::timeout(OUTER, a.released(1, &released)).await;
+        assert!(matches!(got, Ok(Err(StoreError::Audit(_)))), "{got:?}");
+        let got = tokio::time::timeout(OUTER, a.baseline(1, &events)).await;
+        assert!(matches!(got, Ok(Err(StoreError::Audit(_)))), "{got:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn every_boot_refusal_record_gives_up_after_the_append_bound() {
+        let au3 = serde_json::json!({});
+        let authz = tokio::time::timeout(
+            OUTER,
+            refuse_authz_boot(&Stall, "h", "s", 0, 1, 1, &au3, "no principal".into()),
+        )
+        .await;
+        assert!(matches!(authz, Ok(RunError::Authz(_))), "{authz:?}");
+        let offload = tokio::time::timeout(
+            OUTER,
+            refuse_audit_offload_boot(&Stall, "h", "s", 0, 1, 2, &au3, "siem".into()),
+        )
+        .await;
+        assert!(
+            matches!(offload, Ok(RunError::AuditOffload(_))),
+            "{offload:?}"
+        );
+        let failed: Result<ServeOutcome, RunError> = Err(RunError::Other("bind".into()));
+        let start = tokio::time::timeout(
+            OUTER,
+            record_start_refusal(&Stall, "h", "s", 0, 1, 3, &au3, &failed),
+        )
+        .await;
+        assert!(start.is_ok(), "the start refusal waited past its bound");
+    }
+
+    fn report(marker_ignored: Option<String>, rejected: Option<String>) -> BootReport {
+        BootReport {
+            revision: 1,
+            digest: [0; 32],
+            outcome: BootOutcome::Seeded {
+                authorized: false,
+                rejected,
+            },
+            graph: maknae_graph::graph::GraphBuilder::new(
+                maknae_graph::record::GraphSpace::Kernel,
+                1,
+            )
+            .build(
+                &maknae_graph::kernel::SCHEMA,
+                &maknae_graph::schema::CompiledSet::default(),
+            )
+            .unwrap(),
+            marker_ignored,
+            migration: None,
+            identity_transition: false,
+            baseline_transition: false,
+            released: Vec::new(),
+            principal_admin: None,
+            durability_error: None,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_boot_reseed_and_rejected_store_records_give_up_after_the_append_bound() {
+        let seq = Seq::new();
+        let au3 = serde_json::json!({});
+        let ctx = BootCtx {
+            event: "boot",
+            host: "h",
+            socket: "s",
+            euid: 0,
+            session_id: 1,
+            seq: &seq,
+            au3_1: &au3,
+        };
+        for r in [
+            report(Some("not root-owned".into()), None),
+            report(None, Some("moved aside".into())),
+        ] {
+            let got =
+                tokio::time::timeout(OUTER, report_graph_boot(&Stall, &ctx, Path::new("/s"), &r))
+                    .await;
+            assert!(matches!(got, Ok(Err(RunError::Other(_)))), "{got:?}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stalled_rollback_anchor_scan_refuses_within_the_bound() {
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let got = tokio::time::timeout(
+            Duration::from_secs(2),
+            scan_anchor(Duration::from_millis(50), move || {
+                let _ = rx.recv_timeout(Duration::from_secs(5));
+                Err(AuditError::ReadPrimary("released".into()))
+            }),
+        )
+        .await;
+        drop(tx);
+        let refused = got.expect("the scan must give up within its bound");
+        assert!(
+            matches!(&refused, Err(StoreError::Audit(m)) if m.starts_with("rollback anchor scan")),
+            "{refused:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_completed_scan_passes_its_result_and_its_error_through() {
+        let ok = scan_anchor(Duration::from_secs(5), || {
+            Ok(maknae_audit_append::ScanResult {
+                line: None,
+                scanned_bytes: 9,
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(ok.scanned_bytes, 9);
+        let err = scan_anchor(Duration::from_secs(5), || {
+            Err(AuditError::ReadPrimary("eio".into()))
+        })
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&err, StoreError::Audit(m) if m.contains("eio")),
+            "{err:?}"
+        );
+    }
+}
+
 #[cfg(unix)]
 #[cfg(test)]
 mod reload_tests {
@@ -7497,6 +7726,33 @@ mod reload_tests {
     struct ReloadSink {
         inner: Arc<maknae_audit_append::AuditSink>,
         fail_identity: std::sync::atomic::AtomicBool,
+        stall: std::sync::Mutex<fn(&AuditRecord) -> bool>,
+    }
+
+    impl ReloadSink {
+        fn stall_when(&self, when: fn(&AuditRecord) -> bool) {
+            *self.stall.lock().unwrap() = when;
+        }
+    }
+
+    fn never(_: &AuditRecord) -> bool {
+        false
+    }
+
+    fn is_reload(r: &AuditRecord) -> bool {
+        r.action == GRAPH_RELOAD_ACTION
+    }
+
+    fn is_reload_outcome(r: &AuditRecord) -> bool {
+        r.action == GRAPH_RELOAD_ACTION && r.graph.as_ref().is_some_and(|g| g.anchor != "reloading")
+    }
+
+    fn is_transition(r: &AuditRecord) -> bool {
+        r.action == GRAPH_TRANSITION_ACTION
+    }
+
+    fn is_identity(r: &AuditRecord) -> bool {
+        r.action == GRAPH_IDENTITY_ACTION
     }
 
     impl AuditEmit for ReloadSink {
@@ -7507,9 +7763,13 @@ mod reload_tests {
         {
             let fail = rec.action == GRAPH_IDENTITY_ACTION
                 && self.fail_identity.load(std::sync::atomic::Ordering::SeqCst);
+            let stall = (*self.stall.lock().unwrap())(rec);
             let inner = Arc::clone(&self.inner);
             let rec = rec.clone();
             async move {
+                if stall {
+                    std::future::pending::<()>().await;
+                }
                 if fail {
                     return Err(maknae_audit_append::AuditError::WritePrimary(
                         "identity append refused".into(),
@@ -7722,6 +7982,7 @@ mod reload_tests {
             sink: Arc::new(ReloadSink {
                 inner: sink,
                 fail_identity: std::sync::atomic::AtomicBool::new(false),
+                stall: std::sync::Mutex::new(never),
             }),
             session_ids: Arc::new(SessionIds::new()),
             host: "h".into(),
@@ -7730,6 +7991,7 @@ mod reload_tests {
             au3_1,
             identity: status.identity.clone(),
             stopping: tokio::sync::watch::channel(false).0,
+            append_bound: Duration::from_millis(200),
             load_gate: load_gate.map(|g| Arc::new(std::sync::Mutex::new(g))),
         });
         Fx {
@@ -7763,6 +8025,67 @@ mod reload_tests {
         maknae_security::Verdict::Deny {
             reason: "subject contained: role=adversary".into(),
         }
+    }
+
+    async fn within(
+        f: impl std::future::Future<Output = Result<crate::reload::Applied, crate::reload::Refusal>>,
+    ) -> Result<crate::reload::Applied, crate::reload::Refusal> {
+        tokio::time::timeout(Duration::from_secs(3), f)
+            .await
+            .expect("the reload must return within its bound, not hold the turn")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stalled_sink_refuses_the_reload_within_the_bound_and_a_second_reload_runs() {
+        let fx = fixture("stalled-reload", AUTHZ, Some(ROOT_ADMIN)).await;
+        fx.reloader.sink.stall_when(is_reload);
+        let refused = within(fx.reloader.run()).await;
+        assert!(
+            matches!(refused, Err(crate::reload::Refusal::Audit(_))),
+            "{refused:?}"
+        );
+        fx.reloader.sink.stall_when(never);
+        let second = tokio::time::timeout(Duration::from_secs(3), fx.reloader.run()).await;
+        assert!(second.expect("the turn lock was released").is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stalled_transition_record_refuses_the_commit_within_the_bound() {
+        let fx = fixture("stalled-commit", AUTHZ, Some(ROOT_ADMIN)).await;
+        let before = fx.store_bytes();
+        fx.reloader.sink.stall_when(is_transition);
+        fx.write_bindings(ROOT_ADVERSARY);
+        let refused = within(fx.reloader.run()).await;
+        assert!(
+            matches!(&refused, Err(crate::reload::Refusal::Persist(_))),
+            "{refused:?}"
+        );
+        assert_eq!(fx.store_bytes(), before);
+        fx.reloader.sink.stall_when(never);
+        assert!(within(fx.reloader.run()).await.unwrap().persisted);
+        assert_eq!(fx.root_whoami(), adversary());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stalled_outcome_record_lets_the_applied_reload_return_within_the_bound() {
+        let fx = fixture("stalled-outcome", AUTHZ, Some(ROOT_ADMIN)).await;
+        fx.reloader.sink.stall_when(is_reload_outcome);
+        fx.write_bindings(ROOT_ADVERSARY);
+        assert!(within(fx.reloader.run()).await.unwrap().persisted);
+        assert_eq!(fx.root_whoami(), adversary());
+        fx.reloader.sink.stall_when(never);
+        assert!(within(fx.reloader.run()).await.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stalled_identity_record_after_a_reload_returns_within_the_bound() {
+        let fx = fixture("stalled-identity", AUTHZ, Some(ROOT_ADMIN)).await;
+        fx.reloader.sink.stall_when(is_identity);
+        fx.write_bindings(GHOST_USER);
+        assert!(within(fx.reloader.run()).await.unwrap().persisted);
+        assert_eq!(fx.status.identity.counts(), ["unresolved=1"]);
+        fx.reloader.sink.stall_when(never);
+        assert!(within(fx.reloader.run()).await.is_ok());
     }
 
     #[tokio::test]
@@ -8208,6 +8531,41 @@ mod reload_tests {
                     "unresolved adversary (no account, not contained)"
                 ),
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stalled_boot_identity_record_refuses_the_boot_after_the_append_bound() {
+        let fx = fixture(
+            "boot_probs_stalled",
+            AUTHZ,
+            Some("schema_version: 1\nbindings:\n  user: [\"no-such-user-maknae-496\"]\n"),
+        )
+        .await;
+        let snapshot = fx.baseline().snapshot();
+        let seq = Seq::new();
+        let au3_1 = serde_json::Value::Null;
+        let ctx = BootCtx {
+            event: "boot",
+            host: "h",
+            socket: "s",
+            euid: 0,
+            session_id: 7 << 32,
+            seq: &seq,
+            au3_1: &au3_1,
+        };
+        fx.reloader.sink.stall_when(is_identity);
+        tokio::time::pause();
+        let status = crate::identity_report::IdentityStatus::default();
+        let refused = tokio::time::timeout(
+            Duration::from_secs(60),
+            publish_boot_identity(&status, &snapshot, &[], None, &fx.reloader.sink, &ctx),
+        )
+        .await
+        .expect("the identity record must give up within its bound");
+        assert!(
+            matches!(&refused, Err(RunError::Other(m)) if m.contains("identity")),
+            "{refused:?}"
         );
     }
 
