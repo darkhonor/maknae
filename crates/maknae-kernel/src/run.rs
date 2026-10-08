@@ -5354,6 +5354,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         let vocabulary = crate::vocabulary::kernel_vocabulary("UNCLASSIFIED").unwrap();
         let old = maknae_graph::identity::build(
             &maknae_graph::identity::IdentityLayer {
+                aliases: Default::default(),
                 source: d.0.join("authz.yaml").to_str().unwrap().to_string(),
                 label: "UNCLASSIFIED".into(),
                 bindings_sha256: Some([1; 32]),
@@ -5835,6 +5836,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         .unwrap();
         let inputs = GraphInputs::new(&source, "UNCLASSIFIED").unwrap();
         let old = maknae_graph::identity::IdentityLayer {
+            aliases: Default::default(),
             source: paths.authz.to_str().unwrap().to_string(),
             label: "UNCLASSIFIED".into(),
             bindings_sha256: inputs.identity.bindings_sha256,

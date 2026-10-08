@@ -353,7 +353,9 @@ impl PolicySource {
                     role: role.key().into(),
                 })
                 .collect(),
+            aliases: std::collections::BTreeMap::new(),
         }
+        .with_claims(self.resolved.adversary_names.clone())
     }
 
     /// `authz.yaml`'s top-level sections, plus `"bindings"` from `bindings.yaml` when it
@@ -1988,7 +1990,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unresolved_adversary_whose_uid_a_uid_entry_contains_is_not_carried() {
+    fn an_unresolved_adversary_keeps_its_claim_while_a_uid_entry_contains_the_uid() {
         let first = compiled(&source_with(
             SHIPPED,
             Some("schema_version: 1\nbindings:\n  adversary: [mallory]\n"),
@@ -2004,18 +2006,128 @@ mod tests {
         .unwrap();
         assert_eq!(
             next.identity_problems().as_ref(),
-            [IdentityProblem::UnresolvedAdversary {
-                name: "mallory".into()
+            [IdentityProblem::CarriedForward {
+                uid: 666,
+                name: "mallory".into(),
+                overrides: vec![]
             }]
         );
-        assert!(next.identity_problems()[0]
-            .to_string()
-            .contains("so the name contains nothing"));
-        let a = BasicAuthorizer::from_snapshot(principal(), paths(), test_digest, next);
+        let dropped = source_with(
+            SHIPPED,
+            Some("schema_version: 1\nbindings:\n  adversary: [mallory]\n"),
+            &[],
+        );
+        let after = snapshot_over(&dropped, LABEL, test_digest, Some(next.persisted())).unwrap();
+        let a = BasicAuthorizer::from_snapshot(principal(), paths(), test_digest, after);
         assert_eq!(
             a.decide_reporting_role(&liveness_req(Some(666))).1,
             Some("adversary"),
-            "the uid entry contains it"
+            "dropping the uid entry leaves the name's claim"
+        );
+    }
+
+    #[test]
+    fn an_alias_that_stops_resolving_keeps_its_uid_contained_after_the_other_alias_moves() {
+        let file = Some(
+            "schema_version: 1\nbindings:\n  admin: [operator]\n  adversary: [alice, alicia]\n",
+        );
+        let first = compiled(&source_with(
+            SHIPPED,
+            file,
+            &[("alice", 1001), ("alicia", 1001), ("operator", 1001)],
+        ));
+        let moved = source_with(SHIPPED, file, &[("alice", 1002), ("operator", 1001)]);
+        assert_eq!(moved.unresolved_adversaries(), ["alicia"]);
+        let next = snapshot_over(&moved, LABEL, test_digest, Some(first.persisted())).unwrap();
+        let a =
+            BasicAuthorizer::from_snapshot(principal(), paths(), test_digest, Arc::clone(&next));
+        for uid in [1001, 1002] {
+            assert_eq!(
+                a.decide_reporting_role(&liveness_req(Some(uid))),
+                (
+                    Verdict::Deny {
+                        reason: CONTAINED.into()
+                    },
+                    Some("adversary")
+                ),
+                "uid {uid}"
+            );
+        }
+        assert_eq!(
+            next.identity_problems().as_ref(),
+            [IdentityProblem::CarriedForward {
+                uid: 1001,
+                name: "alicia".into(),
+                overrides: vec![("operator".into(), "admin")]
+            }]
+        );
+        assert_eq!(
+            next.subject_entries().unwrap(),
+            [
+                crate::ListedSubject {
+                    uid: Some(1001),
+                    names: vec!["alicia".into(), "operator".into()],
+                    state: crate::SubjectState::CarriedForward,
+                },
+                crate::ListedSubject {
+                    uid: Some(1002),
+                    names: vec!["alice".into()],
+                    state: crate::SubjectState::Contained,
+                },
+            ]
+        );
+        let again = snapshot_over(&moved, LABEL, test_digest, Some(next.persisted())).unwrap();
+        assert!(
+            Arc::ptr_eq(again.persisted(), next.persisted()),
+            "idempotent"
+        );
+    }
+
+    #[test]
+    fn a_uid_two_aliases_claim_is_released_only_when_neither_claims_it() {
+        let both = Some("schema_version: 1\nbindings:\n  adversary: [alice, alicia]\n");
+        let first = compiled(&source_with(
+            SHIPPED,
+            both,
+            &[("alice", 1001), ("alicia", 1001)],
+        ));
+        assert_eq!(
+            first.subject_entries().unwrap(),
+            [crate::ListedSubject {
+                uid: Some(1001),
+                names: vec!["alice".into(), "alicia".into()],
+                state: crate::SubjectState::Contained,
+            }]
+        );
+        let held = source_with(SHIPPED, both, &[("alice", 1001)]);
+        let next = snapshot_over(&held, LABEL, test_digest, Some(first.persisted())).unwrap();
+        assert_eq!(
+            next.identity_problems().as_ref(),
+            [IdentityProblem::CarriedForward {
+                uid: 1001,
+                name: "alicia".into(),
+                overrides: vec![]
+            }]
+        );
+        let alice_gone = source_with(
+            SHIPPED,
+            Some("schema_version: 1\nbindings:\n  adversary: [alicia]\n"),
+            &[],
+        );
+        let still = snapshot_over(&alice_gone, LABEL, test_digest, Some(next.persisted())).unwrap();
+        let a = BasicAuthorizer::from_snapshot(principal(), paths(), test_digest, still);
+        assert_eq!(
+            a.decide_reporting_role(&liveness_req(Some(1001))).1,
+            Some("adversary"),
+            "alicia still claims 1001"
+        );
+        let elsewhere = source_with(SHIPPED, both, &[("alice", 1002), ("alicia", 1003)]);
+        let after = snapshot_over(&elsewhere, LABEL, test_digest, Some(next.persisted())).unwrap();
+        let b = BasicAuthorizer::from_snapshot(principal(), paths(), test_digest, after);
+        assert_eq!(
+            b.decide_reporting_role(&liveness_req(Some(1001))).1,
+            None,
+            "no listed name claims 1001"
         );
     }
 
@@ -2051,6 +2163,7 @@ mod tests {
         let old = Arc::new(
             maknae_graph::identity::build(
                 &maknae_graph::identity::IdentityLayer {
+                    aliases: Default::default(),
                     source: PATH.into(),
                     label: LABEL.into(),
                     bindings_sha256: Some([7; 32]),
@@ -2660,6 +2773,7 @@ mod tests {
         assert_eq!(
             layer,
             maknae_graph::identity::IdentityLayer {
+                aliases: Default::default(),
                 source: "/etc/maknae/bindings.yaml".into(),
                 label: "UNCLASSIFIED".into(),
                 bindings_sha256: Some([4; 32]),

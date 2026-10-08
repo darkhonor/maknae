@@ -162,6 +162,7 @@ impl Inputs {
 
 fn layer_at(label: &str, bindings: Option<&[u8]>, subjects: &[(u32, &str, &str)]) -> IdentityLayer {
     IdentityLayer {
+        aliases: Default::default(),
         source: SOURCE.into(),
         label: label.into(),
         bindings_sha256: bindings.map(envelope::sha256),
@@ -2648,6 +2649,30 @@ async fn a_carried_containment_survives_a_transition_that_releases_another() {
     let stored = graph_of(&fx.store(), &k);
     assert!(is_contained(&stored, 666));
     assert!(!is_contained(&stored, 700));
+}
+
+#[tokio::test]
+async fn an_alias_that_stops_resolving_keeps_its_uid_contained_through_boot() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let mut seed = bindings_layer(SOURCE, Some(BLOCK), &[(1001, "alice", "adversary")]);
+    seed.aliases.insert("alicia".into(), 1001);
+    let first = seeded_with(&fx, &k, seed).await;
+    let i = Inputs {
+        unresolved: vec!["alicia".into()],
+        ..inputs_with(bindings_layer(
+            SOURCE,
+            Some(BLOCK),
+            &[(1001, "operator", "admin"), (1002, "alice", "adversary")],
+        ))
+    };
+    let (r, _) = run_with(&fx.dir(), &k, checkpoint_of(&first), &i).await;
+    let r = r.unwrap();
+    assert!(r.identity_transition);
+    assert!(r.released.is_empty());
+    let stored = graph_of(&fx.store(), &k);
+    assert!(is_contained(&stored, 1001));
+    assert!(is_contained(&stored, 1002));
 }
 
 #[tokio::test]

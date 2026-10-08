@@ -15,7 +15,7 @@
 
 use crate::role::Role;
 use maknae_graph::graph::Graph;
-use maknae_graph::identity::{bindings_section_key, subject_key};
+use maknae_graph::identity::{bindings_section_key, claim_names, subject_key};
 use maknae_graph::kernel::{ADVERSARY, ATTR_NAME, ATTR_UID, BINDS, CONTAINED, SECTION, SUBJECT};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -222,6 +222,8 @@ impl std::fmt::Display for IdentityProblem {
 pub(crate) struct Resolved {
     pub(crate) subjects: Vec<(u32, Role, String)>,
     pub(crate) problems: Vec<IdentityProblem>,
+    /// Every `adversary:` name that resolved, with its uid.
+    pub(crate) adversary_names: BTreeMap<String, u32>,
 }
 
 /// Resolve `bindings.yaml` against the load's `UidMap`, one subject at a time.
@@ -233,6 +235,7 @@ pub(crate) fn resolve_subjects(
     let mut out = Resolved {
         subjects: Vec::new(),
         problems: Vec::new(),
+        adversary_names: BTreeMap::new(),
     };
     let Some(map) = &bindings.roles else {
         return Ok(out);
@@ -253,6 +256,9 @@ pub(crate) fn resolve_subjects(
                 BindingEntry::Uid(u) => Some(*u),
                 BindingEntry::Name(n) => lookup.get(n).copied(),
             };
+            if let (Some(u), BindingEntry::Name(_), Role::Adversary) = (uid, e, role) {
+                out.adversary_names.insert(name.clone(), u);
+            }
             match uid {
                 Some(u) => by_uid.entry(u).or_default().push((role, name)),
                 None if role == Role::Adversary => out
@@ -385,19 +391,30 @@ impl GraphBindings {
                 }
                 _ => Vec::new(),
             };
-            let carried = problems
-                .iter()
-                .find(|p| matches!(p, IdentityProblem::CarriedForward { uid: u, .. } if *u == uid));
-            let entry = if let Some(p) = carried {
+            let mut claimed = claim_names(s);
+            claimed.sort();
+            let mut carried = problems.iter().filter(
+                |p| matches!(p, IdentityProblem::CarriedForward { uid: u, .. } if *u == uid),
+            );
+            let entry = if let Some(first) = carried.next() {
+                let mut names = claimed;
+                for n in std::iter::once(first)
+                    .chain(carried)
+                    .flat_map(|p| p.names())
+                {
+                    if !names.contains(&n) {
+                        names.push(n);
+                    }
+                }
                 ListedSubject {
                     uid: Some(uid),
-                    names: p.names(),
+                    names,
                     state: SubjectState::CarriedForward,
                 }
             } else if self.graph.out_edges(s.id, CONTAINED).next().is_some() {
                 ListedSubject {
                     uid: Some(uid),
-                    names: name,
+                    names: claimed,
                     state: SubjectState::Contained,
                 }
             } else {
@@ -717,6 +734,7 @@ mod tests {
         let nothing = Resolved {
             subjects: vec![],
             problems: vec![],
+            adversary_names: BTreeMap::new(),
         };
         for b in [
             maknae_config::Bindings::missing(),
@@ -919,6 +937,7 @@ mod tests {
         )
         .unwrap();
         let layer = maknae_graph::identity::IdentityLayer {
+            aliases: Default::default(),
             source: SOURCE.into(),
             label: "UNCLASSIFIED".into(),
             bindings_sha256: Some([3; 32]),
@@ -950,6 +969,7 @@ mod tests {
 
     fn layer(explicit: bool, subjects: &[(u32, &str, &str)]) -> IdentityLayer {
         IdentityLayer {
+            aliases: Default::default(),
             source: SOURCE.into(),
             label: "UNCLASSIFIED".into(),
             bindings_sha256: explicit.then_some([3; 32]),

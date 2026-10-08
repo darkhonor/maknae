@@ -271,6 +271,7 @@ mod tests {
 
     fn layer(subjects: &[(u32, &str)]) -> IdentityLayer {
         IdentityLayer {
+            aliases: Default::default(),
             source: "/etc/maknae/authz.yaml".into(),
             label: "UNCLASSIFIED".into(),
             bindings_sha256: Some([7; 32]),
@@ -296,6 +297,7 @@ mod tests {
             role: "adversary".into(),
         };
         let persisted = IdentityLayer {
+            aliases: Default::default(),
             source: "/etc/maknae/bindings.yaml".into(),
             label: "U".into(),
             bindings_sha256: Some([1; 32]),

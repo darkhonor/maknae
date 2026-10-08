@@ -7,7 +7,7 @@ use crate::vocabulary::{self, Assessment};
 use maknae_graph::format::{self, FormatError, FORMAT_VERSION};
 use maknae_graph::graph::Graph;
 use maknae_graph::identity::{self, Extracted, IdentityLayer};
-use maknae_graph::kernel::{CONFIG_SOURCE, ROLE, SCHEMA};
+use maknae_graph::kernel::{ADVERSARY, CONFIG_SOURCE, ROLE, SCHEMA};
 use maknae_graph::record::{GraphSpace, ProvenanceKind};
 use maknae_graph::schema::CompiledSet;
 use maknae_io::{
@@ -516,6 +516,10 @@ fn drop_vanished(layer: &mut IdentityLayer, compiled: &CompiledSet) -> Vec<u32> 
         .drain(..)
         .partition(|s| compiled.get(ROLE, &s.role).is_some());
     layer.subjects = keep;
+    let subjects = &layer.subjects;
+    layer
+        .aliases
+        .retain(|_, u| subjects.iter().any(|s| s.uid == *u && s.role == ADVERSARY));
     drop.into_iter().map(|s| s.uid).collect()
 }
 
@@ -811,6 +815,7 @@ mod tests {
 
     fn file() -> IdentityLayer {
         IdentityLayer {
+            aliases: Default::default(),
             source: "/etc/maknae/authz.yaml".into(),
             label: "UNOFFICIAL".into(),
             bindings_sha256: Some([1; 32]),
@@ -828,6 +833,7 @@ mod tests {
         assert_eq!(
             l,
             IdentityLayer {
+                aliases: Default::default(),
                 source: "/etc/maknae/authz.yaml".into(),
                 label: "UNOFFICIAL".into(),
                 bindings_sha256: None,
@@ -840,6 +846,7 @@ mod tests {
     #[test]
     fn a_populated_layer_keeps_its_source_bindings_and_subjects_under_the_binarys_label() {
         let stored = IdentityLayer {
+            aliases: Default::default(),
             source: "/old/authz.yaml".into(),
             label: "UNCLASSIFIED".into(),
             bindings_sha256: Some([2; 32]),
@@ -873,6 +880,23 @@ mod tests {
         let (l, unbound) = migrated_layer(&stored, &file(), &persisted_compiled_set("UNOFFICIAL"));
         assert_eq!(l.subjects, vec![subject(0, "admin")]);
         assert_eq!(unbound, vec![3, 4]);
+    }
+
+    #[test]
+    fn a_vanished_subject_takes_its_aliases_with_it() {
+        let stored = IdentityLayer {
+            subjects: vec![
+                subject(0, "admin"),
+                subject(5, ADVERSARY),
+                subject(4, "gone"),
+            ],
+            aliases: [("keep", 5), ("bound", 0), ("gone", 4)]
+                .map(|(n, u)| (n.to_string(), u))
+                .into(),
+            ..file()
+        };
+        let (l, _) = migrated_layer(&stored, &file(), &persisted_compiled_set("UNOFFICIAL"));
+        assert_eq!(l.aliases, [("keep".to_string(), 5)].into());
     }
 
     #[test]

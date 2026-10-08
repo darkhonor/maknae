@@ -463,19 +463,23 @@ fn carried_problems(
         .map(|p| match p {
             IdentityProblem::UnresolvedAdversary { name } => {
                 match carried.iter().find(|c| c.name == *name) {
-                    Some(c) => IdentityProblem::CarriedForward {
-                        uid: c.uid,
-                        name: c.name.clone(),
-                        overrides: c
-                            .overrides
-                            .iter()
-                            .filter_map(|e| {
-                                crate::role::Role::from_key(&e.role)
-                                    .map(|r| (e.name.clone(), r.key()))
-                            })
-                            .chain(folded(c.uid).into_iter().flatten())
-                            .collect(),
-                    },
+                    Some(c) => {
+                        let first = carried.iter().find(|f| f.uid == c.uid).map(|f| &f.name);
+                        let fold = (first == Some(&c.name)).then(|| folded(c.uid)).flatten();
+                        IdentityProblem::CarriedForward {
+                            uid: c.uid,
+                            name: c.name.clone(),
+                            overrides: c
+                                .overrides
+                                .iter()
+                                .filter_map(|e| {
+                                    crate::role::Role::from_key(&e.role)
+                                        .map(|r| (e.name.clone(), r.key()))
+                                })
+                                .chain(fold.into_iter().flatten())
+                                .collect(),
+                        }
+                    }
                     None => p.clone(),
                 }
             }

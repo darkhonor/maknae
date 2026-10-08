@@ -1,7 +1,7 @@
 use crate::graph::{Graph, GraphBuilder, GraphError};
 use crate::kernel::{
-    ADVERSARY, ATTR_NAME, ATTR_SHA256, ATTR_UID, BINDS, CONFIG_SOURCE, CONTAINED, CONTAINMENT,
-    DECLARED_BY, PART_OF, ROLE, SCHEMA, SECTION, SUBJECT, VOCABULARY_SOURCE_KEY,
+    ADVERSARY, ATTR_ALIASES, ATTR_NAME, ATTR_SHA256, ATTR_UID, BINDS, CONFIG_SOURCE, CONTAINED,
+    CONTAINMENT, DECLARED_BY, PART_OF, ROLE, SCHEMA, SECTION, SUBJECT, VOCABULARY_SOURCE_KEY,
 };
 use crate::record::{
     AttrValue, Attrs, EdgeId, EdgeKind, EdgeRecord, GraphSpace, NodeId, NodeKind, NodeRecord,
@@ -24,6 +24,50 @@ pub struct IdentityLayer {
     pub label: String,
     pub bindings_sha256: Option<[u8; 32]>,
     pub subjects: Vec<SubjectEntry>,
+    /// Adversary names, with the contained uid each last resolved to, other than the
+    /// name a contained subject carries itself.
+    pub aliases: BTreeMap<String, u32>,
+}
+
+impl IdentityLayer {
+    /// Every `adversary:` name with the uid it last resolved to.
+    pub fn claims(&self) -> BTreeMap<String, u32> {
+        let mut out = self.aliases.clone();
+        for s in &self.subjects {
+            if s.role == ADVERSARY && s.name != subject_key(s.uid) {
+                out.entry(s.name.clone()).or_insert(s.uid);
+            }
+        }
+        out
+    }
+
+    /// `self` holding exactly `claims`.
+    pub fn with_claims(mut self, claims: BTreeMap<String, u32>) -> Self {
+        self.aliases = claims
+            .into_iter()
+            .filter(|(n, u)| {
+                !self
+                    .subjects
+                    .iter()
+                    .any(|s| s.uid == *u && s.role == ADVERSARY && s.name == *n)
+            })
+            .collect();
+        self
+    }
+}
+
+/// The adversary names a contained subject node records: its own name, unless it is a
+/// `uid:` entry, then its aliases.
+pub fn claim_names(n: &NodeRecord) -> Vec<String> {
+    let own = match n.attrs.get(ATTR_NAME) {
+        Some(AttrValue::Str(s)) if *s != n.key => Some(s.clone()),
+        _ => None,
+    };
+    let aliases = match n.attrs.get(ATTR_ALIASES) {
+        Some(AttrValue::Str(s)) => s.split(',').map(str::to_string).collect(),
+        _ => Vec::new(),
+    };
+    own.into_iter().chain(aliases).collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +84,7 @@ pub enum IdentityError {
     UnknownRole(String),
     Ambiguous { node: u64, what: &'static str },
     LabelMismatch(String),
+    Alias(String),
 }
 
 impl fmt::Display for IdentityError {
@@ -57,6 +102,10 @@ impl fmt::Display for IdentityError {
             Self::LabelMismatch(key) => write!(
                 f,
                 "identity layer: compiled node `{key}` is labelled differently from the layer"
+            ),
+            Self::Alias(name) => write!(
+                f,
+                "identity layer: adversary name `{name}` does not name one contained subject"
             ),
         }
     }
@@ -191,6 +240,22 @@ pub fn build(
         section_id = Some(id);
     }
 
+    let mut aliases: BTreeMap<u32, Vec<&str>> = BTreeMap::new();
+    for (name, uid) in &layer.aliases {
+        let contained = layer
+            .subjects
+            .iter()
+            .any(|s| s.uid == *uid && s.role == ADVERSARY);
+        let own = layer
+            .subjects
+            .iter()
+            .any(|s| s.role == ADVERSARY && s.name == *name);
+        if !contained || own || name.is_empty() || name.contains(',') {
+            return Err(IdentityError::Alias(name.clone()));
+        }
+        aliases.entry(*uid).or_default().push(name);
+    }
+
     let mut containment_id = None;
     let mut subjects: Vec<&SubjectEntry> = layer.subjects.iter().collect();
     subjects.sort_by_key(|s| s.uid);
@@ -201,6 +266,9 @@ pub fn build(
         let mut attrs = Attrs::new();
         attrs.insert(ATTR_NAME.into(), AttrValue::Str(s.name.clone()));
         attrs.insert(ATTR_UID.into(), AttrValue::U64(u64::from(s.uid)));
+        if let Some(a) = aliases.get(&s.uid).filter(|_| s.role == ADVERSARY) {
+            attrs.insert(ATTR_ALIASES.into(), AttrValue::Str(a.join(",")));
+        }
         let n = a.node(SUBJECT, subject_key(s.uid), attrs);
         let sid = n.id;
         b = b.node(n);
@@ -292,7 +360,25 @@ pub fn extract(g: &Graph) -> Result<Extracted, IdentityError> {
             });
         }
         let name = str_attr(n, ATTR_NAME)?.to_string();
-        let role = if g.out_edges(n.id, CONTAINED).next().is_some() {
+        let contained = g.out_edges(n.id, CONTAINED).next().is_some();
+        if n.attrs.contains_key(ATTR_ALIASES) {
+            let names = str_attr(n, ATTR_ALIASES)?;
+            if !contained {
+                return Err(IdentityError::Ambiguous {
+                    node: n.id.0,
+                    what: "aliases on a subject that is not contained",
+                });
+            }
+            for alias in names.split(',') {
+                if alias.is_empty()
+                    || alias == name
+                    || layer.aliases.insert(alias.to_string(), uid).is_some()
+                {
+                    return Err(IdentityError::Alias(alias.to_string()));
+                }
+            }
+        }
+        let role = if contained {
             Some(ADVERSARY.to_string())
         } else {
             g.out_edges(n.id, BINDS)
@@ -306,6 +392,11 @@ pub fn extract(g: &Graph) -> Result<Extracted, IdentityError> {
         }
     }
     layer.subjects.sort_by_key(|s| s.uid);
+    if let Some(s) = layer.subjects.iter().find(|s| {
+        s.role == ADVERSARY && layer.aliases.contains_key(&s.name) && s.name != subject_key(s.uid)
+    }) {
+        return Err(IdentityError::Alias(s.name.clone()));
+    }
     unbound.sort_unstable();
     Ok(Extracted {
         layer,
@@ -325,41 +416,49 @@ pub struct Carried {
     pub overrides: Vec<SubjectEntry>,
 }
 
-/// `file` plus every persisted contained subject whose name is in `unresolved_adversaries`,
-/// contained under its persisted uid unless the file already lists that uid under
-/// adversary; any other file entry for that uid is replaced and returned in `overrides`.
-/// Idempotent.
+/// `file` plus every persisted adversary name in `unresolved_adversaries`, still
+/// claiming its persisted uid: that uid is contained unless the file already contains
+/// it, and any other file entry for it is replaced and returned in the first
+/// `overrides` for that uid. Idempotent.
 pub fn carry_forward(
     file: &IdentityLayer,
     unresolved_adversaries: &[String],
     persisted: &IdentityLayer,
 ) -> (IdentityLayer, Vec<Carried>) {
     let mut out = file.clone();
+    let mut claims = file.claims();
     let mut carried = Vec::new();
-    for s in persisted
-        .subjects
-        .iter()
-        .filter(|s| s.role == ADVERSARY && unresolved_adversaries.contains(&s.name))
+    for (name, uid) in persisted
+        .claims()
+        .into_iter()
+        .filter(|(n, _)| unresolved_adversaries.contains(n))
     {
-        if out
+        claims.insert(name.clone(), uid);
+        let overrides = if out
             .subjects
             .iter()
-            .any(|e| e.uid == s.uid && e.role == ADVERSARY)
+            .any(|e| e.uid == uid && e.role == ADVERSARY)
         {
-            continue;
-        }
-        let (overrides, keep): (Vec<SubjectEntry>, Vec<SubjectEntry>) =
-            out.subjects.drain(..).partition(|e| e.uid == s.uid);
-        out.subjects = keep;
-        out.subjects.push(s.clone());
+            Vec::new()
+        } else {
+            let (overrides, keep): (Vec<SubjectEntry>, Vec<SubjectEntry>) =
+                out.subjects.drain(..).partition(|e| e.uid == uid);
+            out.subjects = keep;
+            out.subjects.push(SubjectEntry {
+                uid,
+                name: name.clone(),
+                role: ADVERSARY.into(),
+            });
+            overrides
+        };
         carried.push(Carried {
-            uid: s.uid,
-            name: s.name.clone(),
+            uid,
+            name,
             overrides,
         });
     }
     out.subjects.sort_by_key(|e| e.uid);
-    (out, carried)
+    (out.with_claims(claims), carried)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -404,21 +503,24 @@ pub fn released(
             .iter()
             .any(|e| e.uid == uid && e.role == ADVERSARY)
     };
+    let (was, now) = (persisted.claims(), next.claims());
     let mut out: Vec<Released> = persisted
         .subjects
         .iter()
         .filter(|s| s.role == ADVERSARY && !contained(s.uid))
         .map(|s| {
+            let moved = was
+                .iter()
+                .filter(|(_, u)| **u == s.uid)
+                .find_map(|(n, _)| now.get(n).map(|u| (n, *u)));
+            let mut name = s.name.clone();
             let cause = if next.bindings_sha256.is_none() {
                 ReleaseCause::BindingsAbsent
             } else if file_lists_nobody {
                 ReleaseCause::BindingsEmpty
-            } else if let Some(moved) = next
-                .subjects
-                .iter()
-                .find(|e| e.name == s.name && e.role == ADVERSARY)
-            {
-                ReleaseCause::NameNowResolvesTo(moved.uid)
+            } else if let Some((n, uid)) = moved {
+                name.clone_from(n);
+                ReleaseCause::NameNowResolvesTo(uid)
             } else if let Some(bound) = next.subjects.iter().find(|e| e.uid == s.uid) {
                 ReleaseCause::BoundAs(bound.role.clone())
             } else {
@@ -426,7 +528,7 @@ pub fn released(
             };
             Released {
                 uid: s.uid,
-                name: s.name.clone(),
+                name,
                 cause,
             }
         })
@@ -470,6 +572,7 @@ mod tests {
 
     fn layer(bindings: Option<&str>, subjects: &[(u32, &str, &str)]) -> IdentityLayer {
         IdentityLayer {
+            aliases: Default::default(),
             source: "/etc/maknae/authz.yaml".into(),
             label: "UNCLASSIFIED".into(),
             bindings_sha256: bindings.map(|s| {
@@ -1000,6 +1103,7 @@ mod tests {
             Err(IdentityError::Graph(GraphError::EmptyKey(_)))
         ));
         let no_label = IdentityLayer {
+            aliases: Default::default(),
             source: "p".into(),
             label: String::new(),
             bindings_sha256: None,
@@ -1357,8 +1461,19 @@ mod tests {
             &[(666, "uid:666", "adversary"), (1000, "alex", "admin")],
         );
         let (next, carried) = carry_forward(&file, &["mallory".into()], &persisted);
-        assert_eq!(next, file, "the file already contains the uid");
-        assert!(carried.is_empty());
+        assert_eq!(
+            next,
+            aliased(file, &[("mallory", 666)]),
+            "the file already contains the uid; the name keeps its claim"
+        );
+        assert_eq!(
+            carried,
+            [Carried {
+                uid: 666,
+                name: "mallory".into(),
+                overrides: vec![]
+            }]
+        );
         assert!(released(&persisted, &next, false).is_empty());
     }
 
@@ -1408,5 +1523,191 @@ mod tests {
             assert_eq!(e.to_string(), want);
         }
         let _: &dyn std::error::Error = &IdentityError::UnknownRole("x".into());
+    }
+
+    fn aliased(mut l: IdentityLayer, aliases: &[(&str, u32)]) -> IdentityLayer {
+        l.aliases = aliases.iter().map(|(n, u)| ((*n).into(), *u)).collect();
+        l
+    }
+
+    #[test]
+    fn every_adversary_name_round_trips_and_a_single_name_writes_no_aliases() {
+        let one = layer(Some("x"), &[(666, "mallory", "adversary")]);
+        let g = build(&one, &roles(), VOCAB, 1, ProvenanceKind::Seed).unwrap();
+        let s = g.lookup(SUBJECT, "uid:666").unwrap();
+        assert!(
+            !s.attrs.contains_key(ATTR_ALIASES),
+            "a store from the previous build is canonical"
+        );
+        assert_eq!(claim_names(s), ["mallory"]);
+        let two = aliased(
+            layer(
+                Some("x"),
+                &[(7, "uid:7", "adversary"), (666, "mallory", "adversary")],
+            ),
+            &[("mal", 666), ("eve", 7), ("trudy", 666)],
+        );
+        let g = build(&two, &roles(), VOCAB, 1, ProvenanceKind::Seed).unwrap();
+        let s = g.lookup(SUBJECT, "uid:666").unwrap();
+        assert_eq!(
+            s.attrs.get(ATTR_ALIASES),
+            Some(&AttrValue::Str("mal,trudy".into()))
+        );
+        assert_eq!(claim_names(s), ["mallory", "mal", "trudy"]);
+        assert_eq!(claim_names(g.lookup(SUBJECT, "uid:7").unwrap()), ["eve"]);
+        assert_eq!(extract(&g).unwrap().layer, two);
+        assert_eq!(
+            two.claims(),
+            [("eve", 7), ("mal", 666), ("mallory", 666), ("trudy", 666)]
+                .map(|(n, u)| (n.to_string(), u))
+                .into()
+        );
+        assert_eq!(two.clone().with_claims(two.claims()), two);
+    }
+
+    #[test]
+    fn an_alias_that_names_no_contained_subject_refuses_to_build_and_extract() {
+        for bad in [
+            aliased(
+                layer(
+                    Some("x"),
+                    &[(1, "bob", "user"), (666, "mallory", "adversary")],
+                ),
+                &[("eve", 1)],
+            ),
+            aliased(
+                layer(Some("x"), &[(666, "mallory", "adversary")]),
+                &[("mallory", 666)],
+            ),
+            aliased(
+                layer(
+                    Some("x"),
+                    &[(7, "uid:7", "adversary"), (666, "mallory", "adversary")],
+                ),
+                &[("mallory", 7)],
+            ),
+            aliased(
+                layer(Some("x"), &[(666, "mallory", "adversary")]),
+                &[("a,b", 666)],
+            ),
+            aliased(
+                layer(Some("x"), &[(666, "mallory", "adversary")]),
+                &[("", 666)],
+            ),
+        ] {
+            assert!(matches!(
+                build(&bad, &roles(), VOCAB, 1, ProvenanceKind::Seed),
+                Err(IdentityError::Alias(_))
+            ));
+        }
+        let g = build(
+            &layer(
+                Some("x"),
+                &[
+                    (1, "bob", "user"),
+                    (666, "mallory", "adversary"),
+                    (7, "eve", "adversary"),
+                ],
+            ),
+            &roles(),
+            VOCAB,
+            1,
+            ProvenanceKind::Seed,
+        )
+        .unwrap();
+        let with = |id: u64, v: &str| {
+            rebuild(
+                &g,
+                |_| true,
+                vec![],
+                |mut n| {
+                    if n.id.0 == id {
+                        n.attrs
+                            .insert(ATTR_ALIASES.into(), AttrValue::Str(v.into()));
+                    }
+                    n
+                },
+            )
+            .unwrap()
+        };
+        let id = |key: &str| g.lookup(SUBJECT, key).unwrap().id.0;
+        assert!(matches!(
+            extract(&with(id("uid:1"), "eve2")),
+            Err(IdentityError::Ambiguous { .. })
+        ));
+        for v in ["mallory", "a,,b", "eve", "x,x"] {
+            assert!(
+                matches!(
+                    extract(&with(id("uid:666"), v)),
+                    Err(IdentityError::Alias(_))
+                ),
+                "{v}"
+            );
+        }
+        assert_eq!(
+            IdentityError::Alias("eve".into()).to_string(),
+            "identity layer: adversary name `eve` does not name one contained subject"
+        );
+    }
+
+    #[test]
+    fn each_unresolved_alias_is_carried_even_where_another_alias_contains_the_uid() {
+        let persisted = aliased(
+            layer(Some("x"), &[(1001, "alice", "adversary")]),
+            &[("alicia", 1001)],
+        );
+        let file = layer(
+            Some("y"),
+            &[(1001, "operator", "admin"), (1002, "alice", "adversary")],
+        );
+        let (next, which) = carry_forward(&file, &["alicia".into()], &persisted);
+        assert_eq!(
+            which,
+            [Carried {
+                uid: 1001,
+                name: "alicia".into(),
+                overrides: vec![entry(1001, "operator", "admin")]
+            }]
+        );
+        assert_eq!(
+            next.subjects,
+            [
+                entry(1001, "alicia", "adversary"),
+                entry(1002, "alice", "adversary")
+            ]
+        );
+        assert!(next.aliases.is_empty());
+        assert_eq!(carry_forward(&next, &["alicia".into()], &persisted).0, next);
+        assert!(released(&persisted, &next, false).is_empty());
+
+        let held = layer(Some("y"), &[(1001, "alice", "adversary")]);
+        let (kept, which) = carry_forward(&held, &["alicia".into()], &persisted);
+        assert_eq!(kept, aliased(held.clone(), &[("alicia", 1001)]));
+        assert_eq!(which[0].overrides, vec![]);
+
+        let both = layer(Some("y"), &[(1001, "operator", "admin")]);
+        let (next, which) = carry_forward(&both, &["alice".into(), "alicia".into()], &persisted);
+        assert_eq!(next.subjects, [entry(1001, "alice", "adversary")]);
+        assert_eq!(next.aliases, [("alicia".to_string(), 1001)].into());
+        assert_eq!(which.len(), 2);
+        assert_eq!(which[0].overrides, vec![entry(1001, "operator", "admin")]);
+        assert!(which[1].overrides.is_empty());
+    }
+
+    #[test]
+    fn a_release_names_the_alias_that_moved() {
+        let persisted = aliased(
+            layer(Some("x"), &[(1001, "alice", "adversary")]),
+            &[("alicia", 1001)],
+        );
+        let next = layer(Some("y"), &[(1003, "alicia", "adversary")]);
+        assert_eq!(
+            released(&persisted, &next, false),
+            [Released {
+                uid: 1001,
+                name: "alicia".into(),
+                cause: ReleaseCause::NameNowResolvesTo(1003)
+            }]
+        );
     }
 }
