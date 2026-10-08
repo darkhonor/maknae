@@ -634,6 +634,9 @@ pub struct StatusView {
     /// `advanced` or `rollback-anchor-unavailable`.
     #[serde(default)]
     pub kernel_graph_anchor: Option<String>,
+    /// Per-subject problems in `bindings.yaml` at the last applied load (#496), one rendered line each.
+    #[serde(default)]
+    pub identity_problems: Vec<String>,
 }
 
 /// One role and the identities bound to it.
@@ -941,6 +944,7 @@ mod tests {
                 classification_policy: "US".into(),
                 kernel_graph_revision: kernel_graph.as_ref().map(|k| k.0),
                 kernel_graph_anchor: kernel_graph.map(|k| k.1),
+                identity_problems: vec![],
             })),
         }
     }
@@ -953,16 +957,55 @@ mod tests {
         }
     }
 
+    #[derive(Serialize, Deserialize)]
+    struct OldStatusView {
+        version: String,
+        protocol_version: u16,
+        listener: String,
+        authz_backend: String,
+        classification_policy: String,
+    }
+
+    #[test]
+    fn a_status_with_identity_problems_round_trips() {
+        let mut r = status(Some((7, "verified".into())));
+        if let RespResult::Ok(Payload::Status(s)) = &mut r.result {
+            s.identity_problems = vec!["kind=unbound uid=1002 names=gus roles=guest,user".into()];
+        }
+        assert_eq!(decode_response(&encode_response(&r).unwrap()).unwrap(), r);
+    }
+
+    #[test]
+    fn a_status_without_the_problems_key_decodes_empty_and_an_older_reader_ignores_it() {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(
+            &OldStatusView {
+                version: "v".into(),
+                protocol_version: PROTOCOL_VERSION,
+                listener: "l".into(),
+                authz_backend: "b".into(),
+                classification_policy: "US".into(),
+            },
+            &mut bytes,
+        )
+        .unwrap();
+        let view: StatusView = ciborium::from_reader(bytes.as_slice()).unwrap();
+        assert!(view.identity_problems.is_empty());
+        let mut new = Vec::new();
+        ciborium::into_writer(
+            &StatusView {
+                identity_problems: vec!["kind=unresolved uid=- names=ghost roles=user".into()],
+                ..view
+            },
+            &mut new,
+        )
+        .unwrap();
+        let old: OldStatusView = ciborium::from_reader(new.as_slice()).unwrap();
+        assert_eq!(old.classification_policy, "US");
+    }
+
     #[test]
     fn a_status_from_a_daemon_without_the_kernel_graph_key_decodes_as_none() {
-        #[derive(Serialize)]
-        struct OldStatusView {
-            version: String,
-            protocol_version: u16,
-            listener: String,
-            authz_backend: String,
-            classification_policy: String,
-        }
         let mut bytes = Vec::new();
         ciborium::into_writer(
             &OldStatusView {

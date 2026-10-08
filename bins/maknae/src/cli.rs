@@ -678,6 +678,29 @@ fn kernel_graph_line(revision: Option<u64>, anchor: Option<&str>) -> Option<Stri
     }
 }
 
+fn status_lines(s: &maknae_proto::StatusView) -> Vec<String> {
+    // Labels live in the format strings, not as bare literals: the
+    // authz-composition drift gate's vocabulary net rejects a bare
+    // PDP-naming literal in production code (ADR-0008 decision 1).
+    let mut lines = vec![
+        format!("version               {}", s.version),
+        format!("protocol_version      {}", s.protocol_version),
+        format!("listener              {}", s.listener),
+        format!("authz_backend         {}", s.authz_backend),
+        format!("classification_policy {}", s.classification_policy),
+    ];
+    lines.extend(kernel_graph_line(
+        s.kernel_graph_revision,
+        s.kernel_graph_anchor.as_deref(),
+    ));
+    lines.extend(
+        s.identity_problems
+            .iter()
+            .map(|p| format!("identity problem      {p}")),
+    );
+    lines
+}
+
 /// Print the successful `payload` IFF its variant matches the requested `verb`
 /// (`Ping`→`Pong`, `Whoami`→`Whoami(_)`). A mismatched variant means the daemon
 /// answered a different question than we asked — a protocol error: return `Err`
@@ -693,17 +716,7 @@ fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
             Ok(())
         }
         (Verb::AdminStatus, Payload::Status(s)) => {
-            // Labels live in the format strings, not as bare literals: the
-            // authz-composition drift gate's vocabulary net rejects a bare
-            // PDP-naming literal in production code (ADR-0008 decision 1).
-            println!("version               {}", s.version);
-            println!("protocol_version      {}", s.protocol_version);
-            println!("listener              {}", s.listener);
-            println!("authz_backend         {}", s.authz_backend);
-            println!("classification_policy {}", s.classification_policy);
-            if let Some(line) =
-                kernel_graph_line(s.kernel_graph_revision, s.kernel_graph_anchor.as_deref())
-            {
+            for line in status_lines(&s) {
                 println!("{line}");
             }
             Ok(())
@@ -1516,6 +1529,39 @@ mod tests {
         assert_eq!(
             kernel_graph_line(Some(12), Some("verified")).as_deref(),
             Some("kernel graph: revision 12 (verified)")
+        );
+    }
+
+    #[test]
+    fn the_status_lists_each_identity_problem_after_the_kernel_graph_line() {
+        let mut s = maknae_proto::StatusView {
+            version: "v".into(),
+            protocol_version: 1,
+            listener: "l".into(),
+            authz_backend: "b".into(),
+            classification_policy: "US".into(),
+            kernel_graph_revision: Some(3),
+            kernel_graph_anchor: Some("verified".into()),
+            identity_problems: vec![],
+        };
+        let base = status_lines(&s);
+        assert_eq!(
+            base.last().map(String::as_str),
+            Some("kernel graph: revision 3 (verified)")
+        );
+        assert!(!base.iter().any(|l| l.starts_with("identity problem")));
+        s.identity_problems = vec![
+            "kind=unbound uid=1002 names=gus roles=guest,user".into(),
+            "kind=unresolved uid=- names=ghost roles=user".into(),
+        ];
+        let lines = status_lines(&s);
+        assert_eq!(&lines[..base.len()], &base[..]);
+        assert_eq!(
+            &lines[base.len()..],
+            [
+                "identity problem      kind=unbound uid=1002 names=gus roles=guest,user",
+                "identity problem      kind=unresolved uid=- names=ghost roles=user",
+            ]
         );
     }
 
