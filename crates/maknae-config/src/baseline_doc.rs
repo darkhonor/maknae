@@ -3,7 +3,66 @@
 
 use crate::{canonical_json, ConfigError, Document, Source, Value};
 
-pub type BaselineSections = std::collections::BTreeMap<String, String>;
+use std::collections::BTreeMap;
+
+/// Section name to canonical JSON. `Debug` prints the section names only.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct BaselineSections(BTreeMap<String, String>);
+
+impl BaselineSections {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn into_inner(self) -> BTreeMap<String, String> {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for BaselineSections {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_set().entries(self.0.keys()).finish()
+    }
+}
+
+impl std::ops::Deref for BaselineSections {
+    type Target = BTreeMap<String, String>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for BaselineSections {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl From<BTreeMap<String, String>> for BaselineSections {
+    fn from(m: BTreeMap<String, String>) -> Self {
+        Self(m)
+    }
+}
+
+impl<const N: usize> From<[(String, String); N]> for BaselineSections {
+    fn from(pairs: [(String, String); N]) -> Self {
+        Self(pairs.into())
+    }
+}
+
+impl FromIterator<(String, String)> for BaselineSections {
+    fn from_iter<I: IntoIterator<Item = (String, String)>>(iter: I) -> Self {
+        Self(iter.into_iter().collect())
+    }
+}
+
+impl<'a> IntoIterator for &'a BaselineSections {
+    type Item = (&'a String, &'a String);
+    type IntoIter = std::collections::btree_map::Iter<'a, String, String>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
 
 /// The winning value of every section, as canonical JSON.
 pub fn document_sections(doc: &Document) -> BaselineSections {
@@ -225,6 +284,42 @@ mod tests {
         let mut want = BaselineSections::new();
         want.insert("audit".into(), "{\"jsonl_path\":\"/w\"}".into());
         assert_eq!(document_sections(&doc), want);
+    }
+
+    #[test]
+    fn debug_names_the_sections_and_never_prints_a_value() {
+        let mut s = BaselineSections::new();
+        s.insert(
+            "core".into(),
+            r#"{"handling":{"ceiling":{"classification":"SECRET"}}}"#.into(),
+        );
+        s.insert("audit".into(), r#"{"au3_1":{"enclave":"SCIF-B7"}}"#.into());
+        let base = Document::from_baseline(&s).unwrap();
+        let shadowing = Document::new(
+            vec![(
+                "audit".into(),
+                Value::Map(vec![("au3_1".into(), Value::Str("SCIF-B7".into()))]),
+                Source::ConfigD("a.yaml".into()),
+            )],
+            Vec::new(),
+            vec![(
+                "audit".into(),
+                Value::Map(vec![("au3_1".into(), Value::Str("SCIF-B7".into()))]),
+                Source::Base,
+            )],
+        );
+        for shown in [
+            format!("{s:?}"),
+            format!("{base:?}"),
+            format!("{shadowing:?}"),
+        ] {
+            assert!(shown.contains("audit"), "{shown}");
+            for value in ["SECRET", "SCIF-B7", "enclave", "au3_1"] {
+                assert!(!shown.contains(value), "{shown}");
+            }
+        }
+        assert!(format!("{s:?}").contains("core"));
+        assert_eq!(s.clone().into_inner(), *s);
     }
 
     #[test]

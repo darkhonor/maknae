@@ -31,10 +31,9 @@ impl std::fmt::Debug for BootConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BootConfig")
             .field("document", &self.document)
-            .field("ceiling", &self.ceiling)
             .field("policy", &self.policy.name())
             .field("providers", &self.providers)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 

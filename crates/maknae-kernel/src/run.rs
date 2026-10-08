@@ -3218,7 +3218,7 @@ fn run_baseline(
 ) -> BaselineLayer {
     BaselineLayer {
         sha256: crate::baseline::accepted_digest(run),
-        sections: run.clone(),
+        sections: run.clone().into_inner(),
         system,
         ceiling,
         moved_from: None,
@@ -4103,9 +4103,10 @@ async fn run_inner(
         b.moved_from
             .as_ref()
             .map(PathBuf::from)
-            .or_else(|| accepted_trail(&b.sections, config_dir))
+            .or_else(|| accepted_trail(&sections_of(b), config_dir))
     });
     let accepted = if reseeding { None } else { stored };
+    let accepted_sections = accepted.map(sections_of);
 
     let session_ids = Arc::new(SessionIds::new());
     let host = hostname();
@@ -4122,7 +4123,7 @@ async fn run_inner(
 
     let first_refusal = candidate.as_ref().err().cloned();
     let file = candidate.map_err(|e| e.into_file(file_sections.clone()));
-    let start = crate::baseline::at_boot(accepted.map(|b| &b.sections), file, |mix| {
+    let start = crate::baseline::at_boot(accepted_sections.as_ref(), file, |mix| {
         let doc = maknae_config::Document::from_baseline(mix).map_err(|e| e.to_string())?;
         let v = crate::baseline_check::validate(doc, Mode::Boot, config_dir, env)
             .map_err(|e| e.cause().to_string())?;
@@ -4264,12 +4265,13 @@ struct BootIds<'a> {
 /// Why a stored baseline does not match its own record: the digest it carries, or
 /// the system and ceiling its sections declare.
 fn inconsistency(b: &BaselineLayer) -> Option<String> {
-    if b.sha256 != crate::baseline::accepted_digest(&b.sections) {
+    let sections = sections_of(b);
+    if b.sha256 != crate::baseline::accepted_digest(&sections) {
         return Some(
             "the accepted baseline's recorded digest does not match its sections".to_string(),
         );
     }
-    let declared = maknae_config::Document::from_baseline(&b.sections)
+    let declared = maknae_config::Document::from_baseline(&sections)
         .and_then(crate::boot::assemble)
         .ok()?;
     let (system, ceiling) = (
@@ -4283,6 +4285,10 @@ fn inconsistency(b: &BaselineLayer) -> Option<String> {
             b.system, b.ceiling
         )
     })
+}
+
+fn sections_of(b: &BaselineLayer) -> maknae_config::BaselineSections {
+    b.sections.clone().into()
 }
 
 fn accepted_trail(
@@ -5270,7 +5276,7 @@ mod boot_gate_tests {
         .into();
         BaselineLayer {
             sha256: crate::baseline::accepted_digest(&sections),
-            sections,
+            sections: sections.into_inner(),
             system: "US".into(),
             ceiling: "UNCLASSIFIED".into(),
             moved_from: None,
@@ -6888,7 +6894,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         .into();
         BaselineLayer {
             sha256: crate::baseline::accepted_digest(&sections),
-            sections,
+            sections: sections.into_inner(),
             ..test_baseline()
         }
     }
@@ -8340,7 +8346,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         assert_eq!(
             run_baseline(&sections, ("US".into(), "UNCLASSIFIED".into())),
             BaselineLayer {
-                sections: sections.clone(),
+                sections: sections.clone().into_inner(),
                 system: "US".into(),
                 ceiling: "UNCLASSIFIED".into(),
                 sha256: maknae_state::envelope::sha256(br#"{"core":"{}"}"#),

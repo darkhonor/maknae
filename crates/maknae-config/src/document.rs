@@ -29,7 +29,7 @@ pub struct Override {
 }
 
 /// The assembled document: named sections + the audit trail of overrides.
-#[derive(Debug)]
+/// `Debug` prints where each section came from, never a value.
 pub struct Document {
     sections: Vec<(String, Value, Source)>,
     overrides: Vec<Override>,
@@ -37,6 +37,19 @@ pub struct Document {
     /// see EVERY contribution to a section (#243: a pasted key in a shadowed
     /// provider block) is not blinded by precedence.
     shadowed: Vec<(String, Value, Source)>,
+}
+
+impl std::fmt::Debug for Document {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let names = |v: &[(String, Value, Source)]| -> Vec<(String, Source)> {
+            v.iter().map(|(n, _, s)| (n.clone(), s.clone())).collect()
+        };
+        f.debug_struct("Document")
+            .field("sections", &names(&self.sections))
+            .field("overrides", &self.overrides)
+            .field("shadowed", &names(&self.shadowed))
+            .finish()
+    }
 }
 
 impl Document {

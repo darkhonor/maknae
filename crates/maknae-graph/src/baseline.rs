@@ -11,7 +11,8 @@ pub const BASELINE_SOURCE_KEY: &str = "baseline:maknae.yaml";
 pub const INSTANCE_KEY: &str = "instance";
 pub const ATTR_MOVED_FROM: &str = "moved_from";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `Debug` prints the section names and the trail move only.
+#[derive(Clone, PartialEq, Eq)]
 pub struct BaselineLayer {
     /// Section name → its canonical JSON, as accepted.
     pub sections: BTreeMap<String, String>,
@@ -130,6 +131,15 @@ pub fn extract(g: &Graph) -> Result<Option<BaselineLayer>, IdentityError> {
     }))
 }
 
+impl std::fmt::Debug for BaselineLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BaselineLayer")
+            .field("sections", &self.sections.keys().collect::<Vec<_>>())
+            .field("moved_from", &self.moved_from)
+            .finish_non_exhaustive()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,6 +161,20 @@ mod tests {
                 role: "admin".into(),
             }],
             aliases: Default::default(),
+        }
+    }
+
+    #[test]
+    fn debug_names_the_sections_and_never_prints_a_value_or_the_classification() {
+        let mut b = baseline();
+        b.sections
+            .insert("audit".into(), r#"{"au3_1":{"enclave":"SCIF-B7"}}"#.into());
+        b.system = "AUS".into();
+        b.ceiling = "PROTECTED".into();
+        let shown = format!("{b:?}");
+        assert!(shown.contains("audit") && shown.contains("core"), "{shown}");
+        for value in ["SCIF-B7", "AUS", "PROTECTED"] {
+            assert!(!shown.contains(value), "{value} in {shown}");
         }
     }
 

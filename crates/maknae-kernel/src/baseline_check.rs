@@ -381,6 +381,48 @@ mod tests {
     }
 
     #[test]
+    fn no_debug_form_prints_a_suppressed_setting() {
+        let mut file = minimal();
+        file[0] = (
+            "core",
+            r#"{"deployment_id":"d","handling":{"accreditation_ref":"ACCRED-7Q","ceiling":{"classification":"SECRET","cui_categories_permitted":[],"cui_permitted":false,"dissemination_permitted":["Distribution Statement A"],"releasable_to":[],"sci":false}}}"#,
+        );
+        file[1] = (
+            "audit",
+            r#"{"au3_1":{"enclave":"SCIF-B7"},"jsonl_path":"/var/log/maknae/audit.jsonl"}"#,
+        );
+        let proposed = sections(&file);
+        let v = validate(doc(&file), Mode::Boot, Path::new("/e"), &FakeEnv::default()).unwrap();
+        assert_eq!(classification_of(&v).1, "SECRET");
+        let accepted = sections(&minimal());
+        let invalid = InvalidFile {
+            cause: "refused".into(),
+            proposed: Some(proposed.clone()),
+        };
+        let valid_set = crate::baseline::pending(&accepted, &Ok(proposed.clone())).unwrap();
+        let invalid_set = crate::baseline::pending(&accepted, &Err(invalid.clone())).unwrap();
+        let state = crate::baseline::BaselineState {
+            accepted: proposed.clone(),
+            pending: Some(valid_set.clone()),
+        };
+        for shown in [
+            format!("{proposed:?}"),
+            format!("{v:?}"),
+            format!("{:?}", v.boot.document()),
+            format!("{:?}", v.audit),
+            format!("{invalid:?}"),
+            format!("{valid_set:?}"),
+            format!("{:?}", valid_set.state),
+            format!("{invalid_set:?}"),
+            format!("{state:?}"),
+        ] {
+            for value in ["SECRET", "ACCRED-7Q", "SCIF-B7"] {
+                assert!(!shown.contains(value), "{value} in {shown}");
+            }
+        }
+    }
+
+    #[test]
     fn a_minimal_baseline_validates() {
         let v = validate(
             doc(&minimal()),

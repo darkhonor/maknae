@@ -13,13 +13,21 @@ pub const AUDIT_SECTION: &str = "audit";
 /// #210: the keys this section's parser reads — the closed vocabulary.
 pub(crate) const AUDIT_KEYS: [&str; 4] = ["jsonl_path", "siem", "au3_1", "readers"];
 
-/// The audit-sink configuration (ADR-0019).
-#[derive(Clone, Debug)]
+/// The audit-sink configuration (ADR-0019). `Debug` prints the trail path only.
+#[derive(Clone)]
 pub struct AuditConfig {
     pub jsonl_path: PathBuf,
     pub siem: Option<String>,
     pub au3_1: serde_json::Value,
     pub readers: Vec<String>,
+}
+
+impl std::fmt::Debug for AuditConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuditConfig")
+            .field("jsonl_path", &self.jsonl_path)
+            .finish_non_exhaustive()
+    }
 }
 
 /// One `audit.readers` account as the account database reports it.
@@ -252,6 +260,21 @@ mod tests {
 
     fn rt() -> PathBuf {
         PathBuf::from("/var/lib/maknae")
+    }
+
+    #[test]
+    fn debug_prints_the_trail_and_withholds_every_other_setting() {
+        let cfg = AuditConfig {
+            jsonl_path: PathBuf::from("/var/log/maknae/audit.jsonl"),
+            siem: Some("https://siem.example:6514".into()),
+            au3_1: serde_json::json!({"enclave": "SCIF-B7"}),
+            readers: vec!["alice".into()],
+        };
+        let shown = format!("{cfg:?}");
+        assert!(shown.contains("/var/log/maknae/audit.jsonl"), "{shown}");
+        for withheld in ["siem.example", "SCIF-B7", "enclave", "alice"] {
+            assert!(!shown.contains(withheld), "{shown}");
+        }
     }
 
     #[test]
