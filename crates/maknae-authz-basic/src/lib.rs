@@ -1951,6 +1951,75 @@ mod tests {
     }
 
     #[test]
+    fn a_carried_uid_that_the_file_also_binds_twice_is_one_carried_subject() {
+        let first = compiled(&source_with(
+            SHIPPED,
+            Some("schema_version: 1\nbindings:\n  adversary: [mallory]\n"),
+            &[("mallory", 666)],
+        ));
+        let file = "schema_version: 1\nbindings:\n  admin: [bob]\n  user: [bobby]\n  adversary: [mallory]\n";
+        let reused = source_with(SHIPPED, Some(file), &[("bob", 666), ("bobby", 666)]);
+        let next = snapshot_over(&reused, LABEL, test_digest, Some(first.persisted())).unwrap();
+        assert_eq!(
+            next.identity_problems().as_ref(),
+            [IdentityProblem::CarriedForward {
+                uid: 666,
+                name: "mallory".into(),
+                overrides: vec![("bob".into(), "admin"), ("bobby".into(), "user")]
+            }]
+        );
+        assert_eq!(
+            next.identity_problems()[0].to_string(),
+            "'mallory' under adversary no longer resolves; uid 666 stays contained (carried forward); this overrides bob (admin), bobby (user)"
+        );
+        assert_eq!(
+            next.subject_entries().unwrap(),
+            [crate::ListedSubject {
+                uid: Some(666),
+                names: vec!["mallory".into(), "bob".into(), "bobby".into()],
+                state: crate::SubjectState::CarriedForward,
+            }]
+        );
+        let a = BasicAuthorizer::from_snapshot(principal(), paths(), test_digest, next);
+        assert_eq!(
+            a.decide_reporting_role(&liveness_req(Some(666))).1,
+            Some("adversary")
+        );
+    }
+
+    #[test]
+    fn an_unresolved_adversary_whose_uid_a_uid_entry_contains_is_not_carried() {
+        let first = compiled(&source_with(
+            SHIPPED,
+            Some("schema_version: 1\nbindings:\n  adversary: [mallory]\n"),
+            &[("mallory", 666)],
+        ));
+        let file = "schema_version: 1\nbindings:\n  adversary: [mallory, {uid: 666}]\n";
+        let next = snapshot_over(
+            &source_with(SHIPPED, Some(file), &[]),
+            LABEL,
+            test_digest,
+            Some(first.persisted()),
+        )
+        .unwrap();
+        assert_eq!(
+            next.identity_problems().as_ref(),
+            [IdentityProblem::UnresolvedAdversary {
+                name: "mallory".into()
+            }]
+        );
+        assert!(next.identity_problems()[0]
+            .to_string()
+            .contains("so the name contains nothing"));
+        let a = BasicAuthorizer::from_snapshot(principal(), paths(), test_digest, next);
+        assert_eq!(
+            a.decide_reporting_role(&liveness_req(Some(666))).1,
+            Some("adversary"),
+            "the uid entry contains it"
+        );
+    }
+
+    #[test]
     fn a_missing_file_over_explicit_bindings_refuses_the_hermetic_reload() {
         let explicit = compiled(&source_with(
             SHIPPED,

@@ -421,21 +421,49 @@ pub fn compile(
         loaded,
         index: c.index,
         sections: section_sha256.clone(),
-        problems: carried_problems(source.identity_problems(), &carried).into(),
+        problems: carried_problems(source.identity_problems(), &carried, source.bindings()).into(),
     })
 }
 
+/// The load's problems with each carried-forward adversary name said so; an unbound
+/// conflict on a carried uid is folded into that uid's carried record, so each uid is
+/// reported once.
 fn carried_problems(
     problems: &[IdentityProblem],
     carried: &[maknae_graph::identity::Carried],
+    bindings: &maknae_config::Bindings,
 ) -> Vec<IdentityProblem> {
+    let listed_under = |name: &str| -> Vec<(String, &'static str)> {
+        bindings
+            .roles
+            .iter()
+            .flatten()
+            .filter(|(_, entries)| entries.iter().any(|e| e.render() == name))
+            .filter_map(|(role, _)| crate::role::Role::from_key(role))
+            .map(|r| (name.to_string(), r.key()))
+            .collect()
+    };
+    let folded = |uid: u32| {
+        problems.iter().find_map(|p| match p {
+            IdentityProblem::Unbound { uid: u, names, .. } if *u == uid => Some(
+                names
+                    .iter()
+                    .flat_map(|n| listed_under(n))
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        })
+    };
     problems
         .iter()
+        .filter(|p| {
+            !matches!(p, IdentityProblem::Unbound { uid, .. }
+                if carried.iter().any(|c| c.uid == *uid))
+        })
         .map(|p| match p {
             IdentityProblem::UnresolvedAdversary { name } => {
-                carried.iter().find(|c| c.name == *name).map_or_else(
-                    || p.clone(),
-                    |c| IdentityProblem::CarriedForward {
+                match carried.iter().find(|c| c.name == *name) {
+                    Some(c) => IdentityProblem::CarriedForward {
                         uid: c.uid,
                         name: c.name.clone(),
                         overrides: c
@@ -445,9 +473,11 @@ fn carried_problems(
                                 crate::role::Role::from_key(&e.role)
                                     .map(|r| (e.name.clone(), r.key()))
                             })
+                            .chain(folded(c.uid).into_iter().flatten())
                             .collect(),
                     },
-                )
+                    None => p.clone(),
+                }
             }
             _ => p.clone(),
         })
