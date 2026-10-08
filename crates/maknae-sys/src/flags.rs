@@ -11,7 +11,7 @@ const UNSUPPORTED: [libc::c_int; 4] = [libc::ENOTTY, libc::ENOTSUP, libc::EOPNOT
 /// (`FS_APPEND_FL`; macOS `SF_APPEND`). A filesystem that cannot report flags answers `Ok(false)`.
 pub fn is_append_only(file: &File) -> io::Result<bool> {
     #[cfg(target_os = "linux")]
-    return crate::linux::inode_flags(file)
+    return crate::linux::inode_flags(std::os::fd::AsFd::as_fd(file))
         .map_or_else(unsupported_is_false, |f| Ok(append_bit(f)));
     #[cfg(target_os = "macos")]
     return file.metadata().map(|m| system_append_bit(m.st_flags()));
