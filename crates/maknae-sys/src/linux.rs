@@ -4,15 +4,16 @@ use std::os::fd::{AsRawFd, BorrowedFd};
 /// The inode flags `lsattr` reads, from `ioctl(FS_IOC_GETFLAGS)` on the open file.
 #[allow(unsafe_code)]
 pub(crate) fn inode_flags(fd: BorrowedFd<'_>) -> io::Result<libc::c_int> {
-    let mut flags: libc::c_long = 0;
-    // SAFETY: the descriptor is borrowed, so it stays open for the whole call. The
-    // request encodes an 8-byte (`long`) argument, so no handler copies out more than 8 bytes,
-    // and the pointer is to `flags`, a zeroed local `c_long` that outlives the call.
-    let rc = unsafe { libc::ioctl(fd.as_raw_fd(), libc::FS_IOC_GETFLAGS, &raw mut flags) };
+    let mut buf = [0u8; 8];
+    // SAFETY: the descriptor is borrowed, so it stays open for the whole call. The request
+    // encodes an 8-byte (`long`) argument, so no handler copies out more than 8 bytes, and the
+    // pointer is to `buf`, a zeroed local 8-byte array that outlives the call.
+    let rc = unsafe { libc::ioctl(fd.as_raw_fd(), libc::FS_IOC_GETFLAGS, buf.as_mut_ptr()) };
     if rc == -1 {
         return Err(io::Error::last_os_error());
     }
-    Ok(flags as libc::c_int)
+    let [a, b, c, d, ..] = buf;
+    Ok(libc::c_int::from_ne_bytes([a, b, c, d]))
 }
 
 #[cfg(test)]
