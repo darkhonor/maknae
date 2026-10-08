@@ -3199,9 +3199,9 @@ fn graph_refusal(failure: GraphFailure, state_dir: &Path) -> RunError {
                  audit file is readable"
                 .to_string(),
             Remedy::Investigate if matches!(e, StoreError::Identity(_)) => {
-                "the identity layer is built from the bindings section of authz.yaml in the \
-                 configuration directory (/etc/maknae/authz.yaml by default); correct it, then \
-                 restart; do not reseed"
+                "the identity layer is built from bindings.yaml in the configuration \
+                 directory (/etc/maknae/bindings.yaml by default); correct it, then restart; do \
+                 not reseed"
                     .to_string()
             }
             Remedy::Investigate => format!(
@@ -5192,16 +5192,17 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         boot_graph_from(fx, key, &fx.dir.0)
     }
 
-    /// The identity layer of a policy file with no `bindings:` key, at `config_dir`.
+    /// The identity layer of a `bindings.yaml` with no `bindings:` key, at `config_dir`.
     fn bare_inputs(config_dir: &Path) -> GraphInputs {
         let source = maknae_authz_basic::PolicySource::from_parts(
             maknae_config::parse_authz("schema_version: 1\n").unwrap(),
+            maknae_config::parse_bindings("schema_version: 1\n").unwrap(),
             Default::default(),
             maknae_config::Principal {
                 name: "op".into(),
                 uid: 1000,
             },
-            config_dir.join("authz.yaml"),
+            maknae_authz_basic::PolicyPaths::in_dir(config_dir),
         )
         .unwrap();
         GraphInputs::new(&source, "UNCLASSIFIED").unwrap()
@@ -5253,14 +5254,17 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         use maknae_security::Authorizer;
         let fx = graph_fixture("graph_real_layer");
         let source = maknae_authz_basic::PolicySource::from_parts(
-            maknae_config::parse_authz("schema_version: 1\nbindings:\n  adversary: [\"root\"]\n")
-                .unwrap(),
+            maknae_config::parse_authz("schema_version: 1\n").unwrap(),
+            maknae_config::parse_bindings(
+                "schema_version: 1\nbindings:\n  adversary: [\"root\"]\n",
+            )
+            .unwrap(),
             [("root".to_string(), 0)].into_iter().collect(),
             maknae_config::Principal {
                 name: "op".into(),
                 uid: 1000,
             },
-            fx.dir.0.join("authz.yaml"),
+            maknae_authz_basic::PolicyPaths::in_dir(&fx.dir.0),
         )
         .unwrap();
         let inputs = GraphInputs::new(&source, "UNCLASSIFIED").unwrap();
@@ -5309,9 +5313,13 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         );
     }
 
-    fn bound_source(config_dir: &Path, body: &str) -> maknae_authz_basic::PolicySource {
+    fn bound_source(config_dir: &Path, bindings: &str) -> maknae_authz_basic::PolicySource {
         maknae_authz_basic::PolicySource::from_parts(
-            maknae_config::parse_authz(body).unwrap(),
+            maknae_config::parse_authz(
+                "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n",
+            )
+            .unwrap(),
+            maknae_config::parse_bindings(bindings).unwrap(),
             [("root".to_string(), 0), ("seven".to_string(), 7)]
                 .into_iter()
                 .collect(),
@@ -5319,7 +5327,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
                 name: "op".into(),
                 uid: 1000,
             },
-            config_dir.join("authz.yaml"),
+            maknae_authz_basic::PolicyPaths::in_dir(config_dir),
         )
         .unwrap()
     }
@@ -5404,7 +5412,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
 
         let source = bound_source(
             &fx.dir.0,
-            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\n  adversary: [\"seven\"]\n",
+            "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary: [\"seven\"]\n",
         );
         let (status, pdp) = boot_and_compose(&fx, source);
         assert_eq!(status.revision(), 6);
@@ -5443,7 +5451,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
     #[test]
     fn a_rebinding_between_boots_transitions_and_the_pdp_compiles_over_it() {
         let fx = graph_fixture("graph_rebind");
-        let admin = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\n";
+        let admin = "schema_version: 1\nbindings:\n  admin: [\"root\"]\n";
         let (first, pdp) = boot_and_compose(&fx, bound_source(&fx.dir.0, admin));
         assert_eq!(first.revision(), 1);
         assert!(matches!(
@@ -5786,8 +5794,8 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             "role `superadmin` is not compiled in".into(),
         )));
         assert!(
-            identity.contains("bindings section of authz.yaml")
-                && identity.contains("/etc/maknae/authz.yaml")
+            identity.contains("built from bindings.yaml")
+                && identity.contains("/etc/maknae/bindings.yaml")
                 && !identity.contains("/var/lib/maknae")
                 && !identity.contains(reseed),
             "{identity}"
@@ -6273,7 +6281,7 @@ mod home_resolution_tests {
         let us = &maknae_config::BasicPolicy;
         let authorizer = Arc::new(crate::Composition::new(
             maknae_authz_basic::HermeticAuthorizer::new(
-                policy,
+                maknae_authz_basic::PolicyPaths::in_dir(&dir.0),
                 maknae_config::Principal {
                     name: "operator".into(),
                     uid,
@@ -6396,7 +6404,7 @@ mod admission_bound_tests {
         let us = &maknae_config::BasicPolicy;
         let authorizer = Arc::new(crate::Composition::new(
             maknae_authz_basic::HermeticAuthorizer::new(
-                policy,
+                maknae_authz_basic::PolicyPaths::in_dir(&root),
                 maknae_config::Principal {
                     name: "operator".into(),
                     uid,
@@ -6606,6 +6614,7 @@ mod reload_tests {
     use maknae_authz_basic::{Baseline, HermeticAuthorizer};
     use std::os::unix::fs::PermissionsExt;
 
+    const AUTHZ: &str = "schema_version: 1\n";
     const ROOT_ADMIN: &str = "schema_version: 1\nbindings:\n  admin: [\"root\"]\n";
     const ROOT_ADVERSARY: &str = "schema_version: 1\nbindings:\n  adversary: [\"root\"]\n";
 
@@ -6646,10 +6655,16 @@ mod reload_tests {
             self.dir.join("authz.yaml")
         }
 
+        fn bindings(&self) -> PathBuf {
+            self.dir.join("bindings.yaml")
+        }
+
         fn write_policy(&self, body: &str) {
-            std::fs::write(self.policy(), body).unwrap();
-            std::fs::set_permissions(self.policy(), std::fs::Permissions::from_mode(0o640))
-                .unwrap();
+            write_0640(&self.policy(), body);
+        }
+
+        fn write_bindings(&self, body: &str) {
+            write_0640(&self.bindings(), body);
         }
 
         fn store_bytes(&self) -> Vec<u8> {
@@ -6682,13 +6697,19 @@ mod reload_tests {
         }
     }
 
-    async fn fixture(tag: &str, policy: &str) -> Fx {
-        fixture_gated(tag, policy, None).await
+    fn write_0640(path: &Path, body: &str) {
+        std::fs::write(path, body).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640)).unwrap();
+    }
+
+    async fn fixture(tag: &str, authz: &str, bindings: Option<&str>) -> Fx {
+        fixture_gated(tag, authz, bindings, None).await
     }
 
     async fn fixture_gated(
         tag: &str,
-        policy: &str,
+        authz: &str,
+        bindings: Option<&str>,
         load_gate: Option<std::sync::mpsc::Receiver<()>>,
     ) -> Fx {
         let raw = std::env::temp_dir().join(format!("maknae_reload_{tag}_{}", std::process::id()));
@@ -6706,11 +6727,13 @@ mod reload_tests {
             })
             .unwrap(),
         );
-        let path = dir.join("authz.yaml");
-        std::fs::write(&path, policy).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let paths = maknae_authz_basic::PolicyPaths::in_dir(&dir);
+        write_0640(&paths.authz, authz);
+        if let Some(b) = bindings {
+            write_0640(&paths.bindings, b);
+        }
         let source = maknae_authz_basic::PolicySource::load_with_requirement(
-            path.clone(),
+            paths.clone(),
             principal(),
             requirement(),
         )
@@ -6737,7 +6760,7 @@ mod reload_tests {
         .await
         .unwrap();
         let baseline = HermeticAuthorizer::new_over_graph(
-            path,
+            paths,
             principal(),
             requirement(),
             maknae_state::envelope::sha256,
@@ -6795,12 +6818,12 @@ mod reload_tests {
 
     #[tokio::test]
     async fn a_reload_applies_a_file_edit_and_records_intent_then_outcome() {
-        let fx = fixture("apply", ROOT_ADMIN).await;
+        let fx = fixture("apply", AUTHZ, Some(ROOT_ADMIN)).await;
         assert!(matches!(
             fx.root_whoami(),
             maknae_security::Verdict::Permit { .. }
         ));
-        fx.write_policy(ROOT_ADVERSARY);
+        fx.write_bindings(ROOT_ADVERSARY);
         let applied = fx.reloader.run().await.unwrap();
         assert_eq!(
             applied,
@@ -6862,8 +6885,8 @@ mod reload_tests {
 
     #[tokio::test]
     async fn the_next_boot_verifies_a_reloaded_store_against_its_checkpoint() {
-        let fx = fixture("reboot", ROOT_ADMIN).await;
-        fx.write_policy(ROOT_ADVERSARY);
+        let fx = fixture("reboot", AUTHZ, Some(ROOT_ADMIN)).await;
+        fx.write_bindings(ROOT_ADVERSARY);
         fx.reloader.run().await.unwrap();
         let Fx {
             dir,
@@ -6881,7 +6904,7 @@ mod reload_tests {
             .unwrap(),
         );
         let source = maknae_authz_basic::PolicySource::load_with_requirement(
-            dir.join("authz.yaml"),
+            maknae_authz_basic::PolicyPaths::in_dir(&dir),
             principal(),
             requirement(),
         )
@@ -6914,9 +6937,9 @@ mod reload_tests {
 
     #[tokio::test]
     async fn kernel_graph_revision_follows_a_reload() {
-        let fx = fixture("status", ROOT_ADMIN).await;
+        let fx = fixture("status", AUTHZ, Some(ROOT_ADMIN)).await;
         assert_eq!(fx.status.revision(), 1);
-        fx.write_policy(ROOT_ADVERSARY);
+        fx.write_bindings(ROOT_ADVERSARY);
         fx.reloader.run().await.unwrap();
         assert_eq!(fx.status.revision(), 2);
         assert_eq!(fx.reloader.dir.store_revision(), 2);
@@ -6924,7 +6947,7 @@ mod reload_tests {
 
     #[tokio::test]
     async fn invalid_reload_keeps_old_snapshot_and_store() {
-        let fx = fixture("invalid", ROOT_ADMIN).await;
+        let fx = fixture("invalid", AUTHZ, Some(ROOT_ADMIN)).await;
         let before = fx.baseline().snapshot();
         let bytes = fx.store_bytes();
         fx.write_policy("not: [valid");
@@ -6969,10 +6992,10 @@ mod reload_tests {
 
     #[tokio::test]
     async fn a_refused_persist_installs_nothing() {
-        let fx = fixture("persist", ROOT_ADMIN).await;
+        let fx = fixture("persist", AUTHZ, Some(ROOT_ADMIN)).await;
         let before = fx.baseline().snapshot();
         let bytes = fx.store_bytes();
-        fx.write_policy(ROOT_ADVERSARY);
+        fx.write_bindings(ROOT_ADVERSARY);
         fx.reloader.revision.store(0, AtomicOrdering::Release);
         let refused = fx.reloader.run().await.unwrap_err();
         assert!(
@@ -6996,8 +7019,8 @@ mod reload_tests {
 
     #[tokio::test]
     async fn a_reload_whose_store_sync_fails_is_applied_and_says_so() {
-        let fx = fixture("unsynced", ROOT_ADMIN).await;
-        fx.write_policy(ROOT_ADVERSARY);
+        let fx = fixture("unsynced", AUTHZ, Some(ROOT_ADMIN)).await;
+        fx.write_bindings(ROOT_ADVERSARY);
         fx.reloader.dir.fail_next_directory_sync();
         let cause = "published, but the directory sync failed (Other { raw: 5 }): kernel.graph";
         let applied = fx.reloader.run().await.unwrap();
@@ -7030,19 +7053,17 @@ mod reload_tests {
                 "authorized"
             )
         );
-        fx.write_policy(ROOT_ADMIN);
+        fx.write_bindings(ROOT_ADMIN);
         let next = fx.reloader.run().await.unwrap();
         assert_eq!((next.revision, next.durability_error), (3, None));
     }
 
     #[tokio::test]
     async fn an_unchanged_file_reloads_without_a_persist() {
-        let fx = fixture("unchanged", ROOT_ADMIN).await;
+        let fx = fixture("unchanged", AUTHZ, Some(ROOT_ADMIN)).await;
         let before = fx.baseline().snapshot();
         let bytes = fx.store_bytes();
-        fx.write_policy(&format!(
-            "{ROOT_ADMIN}permissions:\n  allow: [\"Read(~/**)\"]\n  deny: []\n"
-        ));
+        fx.write_policy("schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\n  deny: []\n");
         let applied = fx.reloader.run().await.unwrap();
         assert_eq!(
             applied,
@@ -7078,8 +7099,8 @@ mod reload_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn two_hups_in_flight_run_in_turn() {
-        let fx = fixture("turns", ROOT_ADMIN).await;
-        fx.write_policy(ROOT_ADVERSARY);
+        let fx = fixture("turns", AUTHZ, Some(ROOT_ADMIN)).await;
+        fx.write_bindings(ROOT_ADVERSARY);
         let (a, b) = tokio::join!(fx.reloader.run(), fx.reloader.run());
         let mut revisions = [a.unwrap().revision, b.unwrap().revision];
         revisions.sort_unstable();
@@ -7163,8 +7184,8 @@ mod reload_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_reload_stuck_loading_does_not_hold_up_shutdown() {
         let (_release, gate) = std::sync::mpsc::channel::<()>();
-        let fx = fixture_gated("stuck", ROOT_ADMIN, Some(gate)).await;
-        fx.write_policy(ROOT_ADVERSARY);
+        let fx = fixture_gated("stuck", AUTHZ, Some(ROOT_ADMIN), Some(gate)).await;
+        fx.write_bindings(ROOT_ADVERSARY);
         let before = fx.baseline().snapshot();
         let bytes = fx.store_bytes();
         let reload = tokio::spawn({
@@ -7236,7 +7257,7 @@ mod reload_tests {
 
     #[tokio::test]
     async fn shutdown_waits_for_a_reload_holding_the_turn() {
-        let fx = fixture("turn", ROOT_ADMIN).await;
+        let fx = fixture("turn", AUTHZ, Some(ROOT_ADMIN)).await;
         let reloads = tokio::spawn(std::future::pending::<()>());
         let turn = fx.reloader.lock.lock().await;
         let mut shutdown = Box::pin(shutdown_after_reloads(
@@ -7260,7 +7281,7 @@ mod reload_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_reload_that_never_releases_its_turn_does_not_hold_up_the_stop_record() {
-        let fx = fixture("wedged", ROOT_ADMIN).await;
+        let fx = fixture("wedged", AUTHZ, Some(ROOT_ADMIN)).await;
         let reloads = tokio::spawn(std::future::pending::<()>());
         let reloader = Arc::clone(&fx.reloader);
         let (held, turn_held) = tokio::sync::oneshot::channel();
@@ -7319,7 +7340,7 @@ mod reload_tests {
 
     #[tokio::test]
     async fn a_reload_queued_behind_shutdown_records_nothing() {
-        let fx = fixture("queued", ROOT_ADMIN).await;
+        let fx = fixture("queued", AUTHZ, Some(ROOT_ADMIN)).await;
         fx.reloader.stopping.send_replace(true);
         assert_eq!(
             fx.reloader.run().await,

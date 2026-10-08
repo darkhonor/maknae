@@ -245,9 +245,9 @@ pub async fn fs_turn(verb: &Verb) -> Option<tokio::sync::MutexGuard<'static, ()>
     }
 }
 
-/// A temp root with a real `authz.yaml` (binding the test euid's username to
-/// `user`, so the fixture's peer uid is the `user` role) and a real composed
-/// PDP over it.
+/// A temp root with a real `authz.yaml` and `bindings.yaml` (binding the test
+/// euid's username to `user`, so the fixture's peer uid is the `user` role) and
+/// a real composed PDP over them.
 pub struct Fixture {
     pub root: PathBuf,
     pub principal: maknae_config::Principal,
@@ -263,6 +263,11 @@ pub fn euid_name() -> String {
         .expect("NSS")
         .expect("the test euid has a passwd entry")
         .name
+}
+
+pub fn write_0640(path: &std::path::Path, body: &str) {
+    std::fs::write(path, body).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640)).unwrap();
 }
 
 pub struct DirGuard(pub PathBuf);
@@ -300,22 +305,21 @@ impl Fixture {
     pub fn with_policy_bound_to(tag: &str, allow: &str, role: &str, policy_tail: &str) -> Self {
         let f = Self::with_policy(tag, allow, policy_tail);
         let name = euid_name();
-        let policy = std::fs::read_to_string(f.root.join("authz.yaml")).unwrap();
-        let rebound = policy.replace(
+        let bindings = std::fs::read_to_string(f.paths().bindings).unwrap();
+        let rebound = bindings.replace(
             &format!("bindings:\n  user: [\"{name}\"]"),
             &format!("bindings:\n  {role}: [\"{name}\"]"),
         );
         assert!(
-            role == "user" || rebound != policy,
+            role == "user" || rebound != bindings,
             "the binding must actually change for {role}"
         );
-        std::fs::write(f.root.join("authz.yaml"), rebound).unwrap();
-        std::fs::set_permissions(
-            f.root.join("authz.yaml"),
-            std::fs::Permissions::from_mode(0o640),
-        )
-        .unwrap();
+        write_0640(&f.paths().bindings, &rebound);
         f
+    }
+
+    pub fn paths(&self) -> maknae_authz_basic::PolicyPaths {
+        maknae_authz_basic::PolicyPaths::in_dir(&self.root)
     }
 
     pub fn with_policy(tag: &str, allow: &str, policy_tail: &str) -> Self {
@@ -351,13 +355,17 @@ impl Fixture {
             )
         };
         let name = euid_name();
-        let policy = format!("schema_version: 1\npermissions:\n  allow:\n{allow_lines}{deny_block}bindings:\n  user: [\"{name}\"]\n{policy_tail}");
-        std::fs::write(root.join("authz.yaml"), policy).unwrap();
-        std::fs::set_permissions(
-            root.join("authz.yaml"),
-            std::fs::Permissions::from_mode(0o640),
-        )
-        .unwrap();
+        let paths = maknae_authz_basic::PolicyPaths::in_dir(&root);
+        write_0640(
+            &paths.authz,
+            &format!(
+                "schema_version: 1\npermissions:\n  allow:\n{allow_lines}{deny_block}{policy_tail}"
+            ),
+        );
+        write_0640(
+            &paths.bindings,
+            &format!("schema_version: 1\nbindings:\n  user: [\"{name}\"]\n"),
+        );
         Self {
             peer_uid: nix::unistd::geteuid().as_raw(),
             peer_user: Some(name),
@@ -374,7 +382,7 @@ impl Fixture {
         &self,
     ) -> Arc<maknae_kernel::Composition<maknae_authz_basic::HermeticAuthorizer>> {
         let basic = maknae_authz_basic::HermeticAuthorizer::new(
-            self.root.join("authz.yaml"),
+            self.paths(),
             self.principal.clone(),
             maknae_config::TargetRequired {
                 owner: None,

@@ -109,16 +109,22 @@ impl Fixture {
         Fixture { dir, principal }
     }
 
+    fn paths(&self) -> maknae_authz_basic::PolicyPaths {
+        maknae_authz_basic::PolicyPaths::in_dir(&self.dir)
+    }
+
     fn write_policy(&self, body: &str) {
-        let p = self.dir.join("authz.yaml");
-        std::fs::write(&p, body).unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
+        common::write_0640(&self.paths().authz, body);
+    }
+
+    fn write_bindings(&self, body: &str) {
+        common::write_0640(&self.paths().bindings, body);
     }
 
     fn authorizer(&self) -> Arc<HermeticAuthorizer> {
         Arc::new(
             HermeticAuthorizer::new(
-                self.dir.join("authz.yaml"),
+                self.paths(),
                 self.principal.clone(),
                 seam_req(),
                 maknae_state::envelope::sha256,
@@ -134,12 +140,10 @@ impl Drop for Fixture {
     }
 }
 
-const BINDINGS_ROOT_ADMIN: &str =
-    "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\n";
-const BINDINGS_ROOT_USER: &str =
-    "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  user: [\"root\"]\n";
-const BINDINGS_ROOT_ADVERSARY: &str =
-    "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  adversary: [\"root\"]\n";
+const EMPTY_AUTHZ: &str = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n";
+const BINDINGS_ROOT_ADMIN: &str = "schema_version: 1\nbindings:\n  admin: [\"root\"]\n";
+const BINDINGS_ROOT_USER: &str = "schema_version: 1\nbindings:\n  user: [\"root\"]\n";
+const BINDINGS_ROOT_ADVERSARY: &str = "schema_version: 1\nbindings:\n  adversary: [\"root\"]\n";
 
 fn request_frame(verb: maknae_proto::Verb) -> Vec<u8> {
     maknae_proto::encode_request(&maknae_proto::Request {
@@ -462,7 +466,8 @@ fn assert_denied_with_prefix(emit: &RecEmit, prefix: &str) {
 #[tokio::test]
 async fn admin_whoami_permits_with_both_records() {
     let fx = Fixture::new("permit");
-    fx.write_policy(BINDINGS_ROOT_ADMIN);
+    fx.write_policy(EMPTY_AUTHZ);
+    fx.write_bindings(BINDINGS_ROOT_ADMIN);
     let emit = RecEmit::new();
     let frame = drive(
         &fx.dir,
@@ -513,7 +518,8 @@ async fn containment_flips_only_at_reload_and_reason_stays_off_the_wire() {
     // permits, the file is rewritten, and only a reload flips it to deny. The
     // deny reason reaches the trail and NEVER the frame bytes.
     let fx = Fixture::new("flip");
-    fx.write_policy(BINDINGS_ROOT_ADMIN);
+    fx.write_policy(EMPTY_AUTHZ);
+    fx.write_bindings(BINDINGS_ROOT_ADMIN);
     let authorizer = fx.authorizer();
 
     let first = whoami_on(&fx, authorizer.clone(), RecEmit::new()).await;
@@ -522,7 +528,8 @@ async fn containment_flips_only_at_reload_and_reason_stays_off_the_wire() {
         RespResult::Ok(_)
     ));
 
-    fx.write_policy(BINDINGS_ROOT_ADVERSARY);
+    fx.write_policy(EMPTY_AUTHZ);
+    fx.write_bindings(BINDINGS_ROOT_ADVERSARY);
     let unreloaded = whoami_on(&fx, authorizer.clone(), RecEmit::new()).await;
     assert!(
         matches!(
@@ -564,7 +571,8 @@ async fn containment_flips_only_at_reload_and_reason_stays_off_the_wire() {
 async fn an_invalid_policy_at_reload_keeps_the_old_snapshot() {
     use maknae_authz_basic::Baseline;
     let fx = Fixture::new("badreload");
-    fx.write_policy(BINDINGS_ROOT_ADMIN);
+    fx.write_policy(EMPTY_AUTHZ);
+    fx.write_bindings(BINDINGS_ROOT_ADMIN);
     let authorizer = fx.authorizer();
     let before = authorizer.snapshot();
     fx.write_policy("not: [valid");
@@ -587,7 +595,8 @@ async fn an_invalid_policy_at_reload_keeps_the_old_snapshot() {
 #[tokio::test]
 async fn unbound_uid_is_denied_everything_including_ping() {
     let fx = Fixture::new("norole");
-    fx.write_policy(BINDINGS_ROOT_ADMIN); // bindings PRESENT, uid 42424 unbound
+    fx.write_policy(EMPTY_AUTHZ);
+    fx.write_bindings(BINDINGS_ROOT_ADMIN); // bindings PRESENT, uid 42424 unbound
     let emit = RecEmit::new();
     let frame = drive(
         &fx.dir,
@@ -622,7 +631,8 @@ async fn unbound_uid_is_denied_everything_including_ping() {
 #[tokio::test]
 async fn user_role_pings_but_cannot_whoami() {
     let fx = Fixture::new("narrow");
-    fx.write_policy(BINDINGS_ROOT_USER);
+    fx.write_policy(EMPTY_AUTHZ);
+    fx.write_bindings(BINDINGS_ROOT_USER);
     let authorizer = fx.authorizer();
 
     let emit = RecEmit::new();
@@ -809,8 +819,9 @@ async fn ordinary_user_reads_approved_content_through_the_composed_pdp() {
     let fx = Fixture::new("ordinary-user-development");
     let me = nix::unistd::geteuid();
     let user_name = common::euid_name();
-    fx.write_policy(&format!(
-        "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\n  deny: []\nbindings:\n  user: [{:?}]\n",
+    fx.write_policy("schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\n  deny: []\n");
+    fx.write_bindings(&format!(
+        "schema_version: 1\nbindings:\n  user: [{:?}]\n",
         user_name
     ));
     let target = fx.dir.join("development-sentinel.txt");
@@ -861,8 +872,8 @@ async fn ordinary_user_reads_approved_content_through_the_composed_pdp() {
 
     // Reuse the same PDP: a reloaded containment edit must bite on the next
     // read, even though the subject can still open and delegate the same object.
-    fx.write_policy(&format!(
-        "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\n  deny: []\nbindings:\n  adversary: [{:?}]\n",
+    fx.write_bindings(&format!(
+        "schema_version: 1\nbindings:\n  adversary: [{:?}]\n",
         user_name,
     ));
     authorizer.baseline().reload_from_file().unwrap();
@@ -904,8 +915,11 @@ async fn filesystem_access_for_users_and_admins_keeps_path_refusals_and_the_os_a
     let sentinel = b"158: never disclose this denied development file";
     std::fs::write(&target, sentinel).unwrap();
     for role in ["user", "admin"] {
-        fx.write_policy(&format!(
-            "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\n  deny: [\"Read(~/denied-development-sentinel.txt)\"]\nbindings:\n  {role}: [{:?}]\n",
+        fx.write_policy(
+            "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\n  deny: [\"Read(~/denied-development-sentinel.txt)\"]\n",
+        );
+        fx.write_bindings(&format!(
+            "schema_version: 1\nbindings:\n  {role}: [{:?}]\n",
             user_name,
         ));
         // The descriptor really arrives: this must reach the path deny,
@@ -1354,7 +1368,8 @@ async fn an_unpaged_read_of_a_large_file_releases_the_first_page_after_a_real_pe
 #[tokio::test]
 async fn a_failed_deny_record_append_withholds_the_error_frame() {
     let fx = Fixture::new("withhold");
-    fx.write_policy(BINDINGS_ROOT_USER); // whoami under user → deny path
+    fx.write_policy(EMPTY_AUTHZ);
+    fx.write_bindings(BINDINGS_ROOT_USER); // whoami under user → deny path
     let emit = FailNthEmit::new(2); // admission (1) succeeds; the deny record (2) fails
     let frame = drive(
         &fx.dir,
@@ -1653,7 +1668,8 @@ async fn a_malformed_read_path_is_bad_request_before_the_pdp() {
 #[tokio::test]
 async fn an_unentitled_caller_gets_unauthorized_never_notimplemented() {
     let fx = Fixture::new("noop-unauth");
-    fx.write_policy(BINDINGS_ROOT_USER); // root -> user: no management grant
+    fx.write_policy(EMPTY_AUTHZ);
+    fx.write_bindings(BINDINGS_ROOT_USER); // root -> user: no management grant
     for verb in [
         maknae_proto::Verb::AdminStatus,
         maknae_proto::Verb::SessionNew,
@@ -1713,8 +1729,9 @@ fn nondefault_transport() -> maknae_config::TransportConfig {
 async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
     let fx = Fixture::new("status-grant");
     fx.write_policy(
-        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\nroles:\n  admin:\n    allow: [\"admin.status\"]\n",
+        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nroles:\n  admin:\n    allow: [\"admin.status\"]\n",
     );
+    fx.write_bindings(BINDINGS_ROOT_ADMIN);
     // The classification system is DERIVED from a real `boot()` of a config that
     // declares the NON-default one (ADR-0022): `policy: aus` with a PSPF ceiling.
     // A literal `"US"` here matched the production default and could not tell
@@ -1848,8 +1865,9 @@ async fn a_panicking_backend_name_is_contained_on_the_production_path() {
 async fn a_granted_subject_list_reports_the_policy_file_bindings() {
     let fx = Fixture::new("subjlist-grant");
     fx.write_policy(
-        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\nroles:\n  admin:\n    allow: [\"admin.subject.list\"]\n",
+        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nroles:\n  admin:\n    allow: [\"admin.subject.list\"]\n",
     );
+    fx.write_bindings(BINDINGS_ROOT_ADMIN);
     let emit = RecEmit::new();
     let frame = drive(
         &fx.dir,
@@ -1884,7 +1902,7 @@ async fn a_granted_subject_list_reports_the_policy_file_bindings() {
 ///
 /// `AlwaysPermit` does not implement `subjects()`, so it takes the seam
 /// default of `None` -- exactly what a backend that cannot enumerate returns,
-/// and what the shipped `authz.yaml` (no `bindings:` key) produces through
+/// and what bindings absent (no `bindings:` key in `bindings.yaml`) produces through
 /// `-basic`. Replacing the kernel's `None` arm with
 /// `Payload::SubjectList(vec![])` left every other test on this branch green,
 /// and would tell an operator "nobody is bound" while the default-role
@@ -1974,7 +1992,8 @@ async fn the_new_terms_disclose_nothing_without_a_grant() {
         ("subjlist-nogrant", maknae_proto::Verb::AdminSubjectList),
     ] {
         let fx = Fixture::new(tag);
-        fx.write_policy(BINDINGS_ROOT_ADMIN); // admin binding, no `roles:` key
+        fx.write_policy(EMPTY_AUTHZ);
+        fx.write_bindings(BINDINGS_ROOT_ADMIN); // admin binding, no `roles:` key
         let emit = RecEmit::new();
         let frame = drive(
             &fx.dir,
@@ -2013,8 +2032,9 @@ async fn the_new_terms_disclose_nothing_without_a_grant() {
 async fn an_oversized_config_view_is_refused_explicitly_not_written_oversized() {
     let fx = Fixture::new("cfgshow-toolarge");
     fx.write_policy(
-        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\nroles:\n  admin:\n    allow: [\"admin.config.show\"]\n",
+        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nroles:\n  admin:\n    allow: [\"admin.config.show\"]\n",
     );
+    fx.write_bindings(BINDINGS_ROOT_ADMIN);
     // Enough leaves to exceed the default frame cap. Values are already
     // redacted; it is the KEY COUNT that grows the frame.
     let mut section = std::collections::BTreeMap::new();
@@ -2077,8 +2097,9 @@ async fn an_oversized_config_view_is_refused_explicitly_not_written_oversized() 
 async fn a_granted_config_show_discloses_the_redacted_view_and_nothing_else() {
     let fx = Fixture::new("cfgshow-grant");
     fx.write_policy(
-        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\nroles:\n  admin:\n    allow: [\"admin.config.show\"]\n",
+        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nroles:\n  admin:\n    allow: [\"admin.config.show\"]\n",
     );
+    fx.write_bindings(BINDINGS_ROOT_ADMIN);
     // The view is produced by the REAL redaction over a REAL Document holding a
     // REAL secret -- not hand-written to look redacted.
     //
@@ -2152,7 +2173,8 @@ async fn a_granted_config_show_discloses_the_redacted_view_and_nothing_else() {
 #[tokio::test]
 async fn config_show_without_a_grant_discloses_nothing() {
     let fx = Fixture::new("cfgshow-nogrant");
-    fx.write_policy(BINDINGS_ROOT_ADMIN); // admin binding, no `roles:` key
+    fx.write_policy(EMPTY_AUTHZ);
+    fx.write_bindings(BINDINGS_ROOT_ADMIN); // admin binding, no `roles:` key
     let mut vault = std::collections::BTreeMap::new();
     vault.insert("addr".to_string(), maknae_config::MASK.to_string());
     let mut view = maknae_kernel::ConfigView::new();
@@ -2211,7 +2233,8 @@ async fn config_show_without_a_grant_discloses_nothing() {
 #[tokio::test]
 async fn the_same_policy_without_the_grant_does_not_permit() {
     let fx = Fixture::new("roles-nogrant");
-    fx.write_policy(BINDINGS_ROOT_ADMIN); // admin binding, no `roles:` key
+    fx.write_policy(EMPTY_AUTHZ);
+    fx.write_bindings(BINDINGS_ROOT_ADMIN); // admin binding, no `roles:` key
     let emit = RecEmit::new();
     let frame = drive(
         &fx.dir,
@@ -2248,8 +2271,9 @@ async fn the_same_policy_without_the_grant_does_not_permit() {
 async fn a_roles_denied_term_names_the_term_in_audit_but_not_on_the_wire() {
     let fx = Fixture::new("roles-deny");
     fx.write_policy(
-        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\nroles:\n  admin:\n    allow: [\"admin.status\"]\n    deny: [\"admin.status\"]\n",
+        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nroles:\n  admin:\n    allow: [\"admin.status\"]\n    deny: [\"admin.status\"]\n",
     );
+    fx.write_bindings(BINDINGS_ROOT_ADMIN);
     let emit = RecEmit::new();
     let frame = drive(
         &fx.dir,
@@ -2405,7 +2429,8 @@ async fn a_corrective_record_that_cannot_append_withholds_its_frame() {
 #[tokio::test]
 async fn an_unbuilt_term_tells_the_admin_trail_the_roadmap_fact() {
     let fx = Fixture::new("note-unbuilt-admin");
-    fx.write_policy(BINDINGS_ROOT_ADMIN);
+    fx.write_policy(EMPTY_AUTHZ);
+    fx.write_bindings(BINDINGS_ROOT_ADMIN);
     let emit = RecEmit::new();
     let frame = drive(
         &fx.dir,
@@ -2438,7 +2463,8 @@ async fn an_unbuilt_term_tells_the_admin_trail_the_roadmap_fact() {
 #[tokio::test]
 async fn an_unbuilt_term_tells_a_user_trail_their_reach() {
     let fx = Fixture::new("note-unbuilt-user");
-    fx.write_policy(BINDINGS_ROOT_USER);
+    fx.write_policy(EMPTY_AUTHZ);
+    fx.write_bindings(BINDINGS_ROOT_USER);
     let emit = RecEmit::new();
     let frame = drive(
         &fx.dir,
@@ -2470,7 +2496,8 @@ async fn an_unbuilt_term_tells_a_user_trail_their_reach() {
 #[tokio::test]
 async fn a_grantable_term_with_no_grant_names_the_absent_rule() {
     let fx = Fixture::new("note-nogrant");
-    fx.write_policy(BINDINGS_ROOT_ADMIN); // bindings, but NO `roles:` key
+    fx.write_policy(EMPTY_AUTHZ);
+    fx.write_bindings(BINDINGS_ROOT_ADMIN); // bindings, but NO `roles:` key
     let emit = RecEmit::new();
     let frame = drive(
         &fx.dir,
@@ -2506,8 +2533,11 @@ async fn an_unmatched_read_names_the_missing_capability_entry() {
     let fx = Fixture::new("note-nocap");
     let me = nix::unistd::geteuid();
     let name = common::euid_name();
-    fx.write_policy(&format!(
-        "schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/allowed/**)\"\n  deny: []\nbindings:\n  admin: [\"{name}\"]\n",
+    fx.write_policy(
+        "schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/allowed/**)\"\n  deny: []\n",
+    );
+    fx.write_bindings(&format!(
+        "schema_version: 1\nbindings:\n  admin: [\"{name}\"]\n",
     ));
     std::fs::write(fx.dir.join("outside.txt"), b"not under any entry").unwrap();
     let target = fx.dir.join("outside.txt").to_string_lossy().into_owned();
@@ -2555,7 +2585,7 @@ fn composed(fx: &Fixture, level: &str) -> Arc<maknae_kernel::Composition<Hermeti
     let mut ceiling = maknae_config::Ceiling::baseline_for(US);
     ceiling.classification = US.level_of(level).expect("a US level");
     let basic = HermeticAuthorizer::new(
-        fx.dir.join("authz.yaml"),
+        fx.paths(),
         fx.principal.clone(),
         seam_req(),
         maknae_state::envelope::sha256,
@@ -2575,8 +2605,9 @@ fn composed(fx: &Fixture, level: &str) -> Arc<maknae_kernel::Composition<Hermeti
 async fn under_a_secret_ceiling_status_still_answers_and_names_both_operands() {
     let fx = Fixture::new("composed-status");
     fx.write_policy(
-        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\nroles:\n  admin:\n    allow: [\"admin.status\"]\n",
+        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nroles:\n  admin:\n    allow: [\"admin.status\"]\n",
     );
+    fx.write_bindings(BINDINGS_ROOT_ADMIN);
     let emit = RecEmit::new();
     let frame = drive_with(
         Some(&fx.dir),

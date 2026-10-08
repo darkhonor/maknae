@@ -1,7 +1,6 @@
 //! maknae-authz-basic — the RBAC PDP backend behind the `maknae-security`
 //! seam (#85). Four code-defined roles (`admin`/`user`/`guest`/`adversary`)
-//! decide four-valued verdicts from `authz.yaml` (+ the additive `bindings:`
-//! key), per request, deny-by-default, fail-closed. Spec:
+//! decide four-valued verdicts from `authz.yaml` and `bindings.yaml`, per request, deny-by-default, fail-closed. Spec:
 //! `2026-08-26-maknae-authz-basic-design.md` (out-of-repo design spec; specs never live in this repository).
 //!
 //! Composition: `maknaed` compiles the policy into a [`snapshot::Snapshot`] at
@@ -51,7 +50,7 @@ pub enum AuthzBasicError {
     /// The policy file failed the hardened load (ownership/mode/symlink/
     /// grammar) — the message is `AuthzError`'s rendering.
     Load(String),
-    /// The `bindings:` block is semantically invalid (unknown role, dual
+    /// `bindings.yaml` is semantically invalid (unknown role, dual
     /// membership, duplicate, unresolvable username).
     Bindings(String),
     /// A `roles:` key names something that is not a role in the closed
@@ -106,12 +105,12 @@ impl std::fmt::Display for AuthzBasicError {
 impl std::error::Error for AuthzBasicError {}
 
 /// The RBAC PDP backend: the enrolled principal and the compiled policy
-/// snapshot every decision reads. `path` and `digest` are what a reload loads
-/// and compiles with; nothing reads the file per request.
+/// snapshot every decision reads. `paths` and `digest` are what a reload loads
+/// and compiles with; nothing reads the files per request.
 #[derive(Debug)]
 pub struct BasicAuthorizer {
     principal: maknae_config::Principal,
-    path: PathBuf,
+    paths: PolicyPaths,
     digest: fn(&[u8]) -> [u8; 32],
     snapshot: RwLock<Arc<Snapshot>>,
     #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
@@ -130,13 +129,13 @@ pub struct EvaluationGate {
 impl BasicAuthorizer {
     pub fn from_snapshot(
         principal: maknae_config::Principal,
-        path: PathBuf,
+        paths: PolicyPaths,
         digest: fn(&[u8]) -> [u8; 32],
         snapshot: Arc<Snapshot>,
     ) -> Self {
         Self {
             principal,
-            path,
+            paths,
             digest,
             snapshot: RwLock::new(snapshot),
             #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
@@ -187,83 +186,106 @@ impl BasicAuthorizer {
         source: &PolicySource,
         req: &maknae_security::Request,
     ) -> (maknae_security::Verdict, Option<&'static str>) {
-        match assemble(source.policy().clone(), source.uid_map()) {
+        match assemble(source.policy().clone(), source.legacy(), source.uid_map()) {
             Ok(lp) => decide::decide_loaded_with_role(&lp, &self.principal, req),
             Err(()) => (maknae_security::Verdict::Indeterminate, None),
         }
     }
 }
 
-/// Eager semantic validation, so an invalid file refuses at load with the
-/// offending token named.
-fn validate(
-    policy: &maknae_config::AuthzPolicy,
-    uid_map: &UidMap,
-) -> Result<binding::ResolvedBindings, AuthzBasicError> {
-    let resolved = binding::resolve(&policy.bindings, uid_map)
-        .map_err(|e| AuthzBasicError::Bindings(e.to_string()))?;
-    validate_grants(&policy.action_grants)?;
-    validate_destinations(&policy.destinations)?;
-    Ok(resolved)
+/// Where the two policy files live: `authz.yaml` (grants, denies, roles) and
+/// `bindings.yaml` (identity).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyPaths {
+    pub authz: PathBuf,
+    pub bindings: PathBuf,
 }
 
-/// A loaded, validated `authz.yaml` with its bound usernames resolved to uids: the
-/// policy input the snapshot compiler takes.
+impl PolicyPaths {
+    pub fn in_dir(dir: &Path) -> Self {
+        Self {
+            authz: dir.join("authz.yaml"),
+            bindings: dir.join(maknae_config::BINDINGS_FILE),
+        }
+    }
+}
+
+fn utf8(p: &Path) -> Result<String, AuthzBasicError> {
+    p.to_str()
+        .map(str::to_string)
+        .ok_or_else(|| AuthzBasicError::Load(format!("policy path {} is not UTF-8", p.display())))
+}
+
+type LegacyBindings = Option<std::collections::BTreeMap<String, Vec<String>>>;
+
+/// A loaded, validated `authz.yaml` and `bindings.yaml` with the bound usernames
+/// resolved to uids: the policy input the snapshot compiler takes.
 #[derive(Debug, Clone)]
 pub struct PolicySource {
     policy: maknae_config::AuthzPolicy,
+    bindings: maknae_config::Bindings,
+    legacy: LegacyBindings,
     uid_map: UidMap,
-    bindings: binding::ResolvedBindings,
+    resolved: binding::ResolvedBindings,
     principal: maknae_config::Principal,
-    path: PathBuf,
-    source: String,
+    paths: PolicyPaths,
+    policy_source: String,
+    identity_source: String,
 }
 
 impl PolicySource {
-    /// The production loader (root-owned, `mode & 0o027 == 0`, symlink-refused), then
-    /// one getpwnam per bound username and eager validation.
+    /// The production loaders (root-owned, `mode & 0o027 == 0`, symlink-refused) for
+    /// both files, then one getpwnam per bound username and eager validation.
     pub fn load(
-        path: PathBuf,
+        paths: PolicyPaths,
         principal: maknae_config::Principal,
     ) -> Result<Self, AuthzBasicError> {
-        let policy =
-            maknae_config::load_authz(&path).map_err(|e| AuthzBasicError::Load(e.to_string()))?;
-        let uid_map = resolve_uid_map(&policy)?;
-        Self::from_parts(policy, uid_map, principal, path)
+        let policy = maknae_config::load_authz(&paths.authz)
+            .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
+        let bindings = maknae_config::load_bindings(&paths.bindings)
+            .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
+        let uid_map = resolve_uid_map(&bindings)?;
+        Self::from_parts(policy, bindings, uid_map, principal, paths)
     }
 
     #[cfg(all(unix, feature = "hermetic-test-seam"))]
     pub fn load_with_requirement(
-        path: PathBuf,
+        paths: PolicyPaths,
         principal: maknae_config::Principal,
         req: maknae_config::TargetRequired,
     ) -> Result<Self, AuthzBasicError> {
-        let policy = maknae_config::load_authz_with_requirement(&path, req)
+        let policy = maknae_config::load_authz_with_requirement(&paths.authz, req.clone())
             .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
-        let uid_map = resolve_uid_map(&policy)?;
-        Self::from_parts(policy, uid_map, principal, path)
+        let bindings = maknae_config::load_bindings_with_requirement(&paths.bindings, req)
+            .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
+        let uid_map = resolve_uid_map(&bindings)?;
+        Self::from_parts(policy, bindings, uid_map, principal, paths)
     }
 
     pub fn from_parts(
         policy: maknae_config::AuthzPolicy,
+        bindings: maknae_config::Bindings,
         uid_map: std::collections::BTreeMap<String, u32>,
         principal: maknae_config::Principal,
-        path: PathBuf,
+        paths: PolicyPaths,
     ) -> Result<Self, AuthzBasicError> {
-        let source = path
-            .to_str()
-            .ok_or_else(|| {
-                AuthzBasicError::Load(format!("policy path {} is not UTF-8", path.display()))
-            })?
-            .to_string();
-        let bindings = validate(&policy, &uid_map)?;
+        let policy_source = utf8(&paths.authz)?;
+        let identity_source = utf8(&paths.bindings)?;
+        let (legacy, uid_map) = legacy_bindings(&bindings, uid_map)?;
+        let resolved = binding::resolve(&legacy, &uid_map)
+            .map_err(|e| AuthzBasicError::Bindings(e.to_string()))?;
+        validate_grants(&policy.action_grants)?;
+        validate_destinations(&policy.destinations)?;
         Ok(Self {
             policy,
-            uid_map,
             bindings,
+            legacy,
+            uid_map,
+            resolved,
             principal,
-            path,
-            source,
+            paths,
+            policy_source,
+            identity_source,
         })
     }
 
@@ -271,32 +293,45 @@ impl PolicySource {
         &self.policy
     }
 
+    pub fn bindings(&self) -> &maknae_config::Bindings {
+        &self.bindings
+    }
+
     pub fn principal(&self) -> &maknae_config::Principal {
         &self.principal
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
+    pub fn paths(&self) -> &PolicyPaths {
+        &self.paths
+    }
+
+    pub(crate) fn policy_source(&self) -> &str {
+        &self.policy_source
+    }
+
+    pub(crate) fn legacy(&self) -> &LegacyBindings {
+        &self.legacy
     }
 
     pub(crate) fn uid_map(&self) -> &UidMap {
         &self.uid_map
     }
 
-    /// The identity layer this file declares; `bindings_sha256` is `None` iff the file
-    /// has no `bindings:` key. Subjects are in uid order, the order `identity::extract`
-    /// produces, so an unchanged file compares equal to its persisted layer.
+    /// The identity layer `bindings.yaml` declares; `source` is its path and
+    /// `bindings_sha256` is `None` iff the file has no `bindings:` key. Subjects are in
+    /// uid order, the order `identity::extract` produces, so an unchanged file compares
+    /// equal to its persisted layer.
     pub fn identity_layer(
         &self,
         label: &str,
         bindings_sha256: Option<[u8; 32]>,
     ) -> maknae_graph::identity::IdentityLayer {
         maknae_graph::identity::IdentityLayer {
-            source: self.source.clone(),
+            source: self.identity_source.clone(),
             label: label.into(),
             bindings_sha256,
             subjects: self
-                .bindings
+                .resolved
                 .subjects()
                 .map(|(uid, role, name)| maknae_graph::identity::SubjectEntry {
                     uid,
@@ -307,22 +342,60 @@ impl PolicySource {
         }
     }
 
-    /// Each top-level section's canonical JSON through the caller's digest, by key.
+    /// `authz.yaml`'s top-level sections, plus `"bindings"` from `bindings.yaml` when it
+    /// has the key, each canonical JSON through the caller's digest, by key.
     pub fn section_digests(
         &self,
         digest: fn(&[u8]) -> [u8; 32],
     ) -> std::collections::BTreeMap<String, [u8; 32]> {
-        self.policy
+        let mut out: std::collections::BTreeMap<String, [u8; 32]> = self
+            .policy
             .sections()
             .map(|(k, v)| (k.to_string(), digest(v.as_bytes())))
-            .collect()
+            .collect();
+        if let Some(b) = self.bindings.section_canonical() {
+            out.insert("bindings".into(), digest(b.as_bytes()));
+        }
+        out
     }
+}
+
+/// The file's entries as the name-keyed resolver reads them: a `uid:` entry becomes
+/// the name `uid:N` mapped to N. `uid:` entries are accepted under `adversary` only.
+fn legacy_bindings(
+    bindings: &maknae_config::Bindings,
+    mut uid_map: UidMap,
+) -> Result<(LegacyBindings, UidMap), AuthzBasicError> {
+    let Some(roles) = &bindings.roles else {
+        return Ok((None, uid_map));
+    };
+    let mut out = std::collections::BTreeMap::new();
+    for (role, entries) in roles {
+        let mut names = Vec::new();
+        for e in entries {
+            if let maknae_config::BindingEntry::Uid(u) = e {
+                if role != "adversary" {
+                    return Err(AuthzBasicError::Bindings(format!(
+                        "role '{role}' lists a uid entry; `uid:` entries are accepted under adversary only"
+                    )));
+                }
+                uid_map.insert(e.render(), *u);
+            }
+            names.push(e.render());
+        }
+        out.insert(role.clone(), names);
+    }
+    Ok((Some(out), uid_map))
 }
 
 /// policy → LoadedPolicy under a uid map; any invalidity → Err. Anonymous by
 /// design: `PolicySource::from_parts` has already named the offending token.
-fn assemble(policy: maknae_config::AuthzPolicy, uid_map: &UidMap) -> Result<LoadedPolicy, ()> {
-    let roles = binding::Roles::File(binding::resolve(&policy.bindings, uid_map).map_err(|_| ())?);
+fn assemble(
+    policy: maknae_config::AuthzPolicy,
+    legacy: &LegacyBindings,
+    uid_map: &UidMap,
+) -> Result<LoadedPolicy, ()> {
+    let roles = binding::Roles::File(binding::resolve(legacy, uid_map).map_err(|_| ())?);
     let action_grants = validate_grants(&policy.action_grants).map_err(|_| ())?;
     let destinations = validate_destinations(&policy.destinations).map_err(|_| ())?;
     Ok(LoadedPolicy {
@@ -394,17 +467,20 @@ fn validate_grants(
     Ok(decide::ActionGrants::from_validated(out))
 }
 
-/// getpwnam every bound username once per load. No name is excluded since #276.
+/// getpwnam every bound username once per load; a `uid:` entry needs no lookup.
 /// Unresolvable → the load refuses. `cfg(unix)` is the only lane — the
 /// workspace's non-unix story is fail-closed refusal upstream in
 /// `maknae-config` (`load_authz` refuses off-unix before we are reached).
-fn resolve_uid_map(policy: &maknae_config::AuthzPolicy) -> Result<UidMap, AuthzBasicError> {
+fn resolve_uid_map(bindings: &maknae_config::Bindings) -> Result<UidMap, AuthzBasicError> {
     let mut map = UidMap::new();
-    let Some(bindings) = &policy.bindings else {
+    let Some(roles) = &bindings.roles else {
         return Ok(map);
     };
-    for members in bindings.values() {
-        for name in members {
+    for entries in roles.values() {
+        for entry in entries {
+            let maknae_config::BindingEntry::Name(name) = entry else {
+                continue;
+            };
             if map.contains_key(name) {
                 continue;
             }
@@ -524,7 +600,7 @@ impl Baseline for BasicAuthorizer {
     }
 
     fn load_source(&self) -> Result<PolicySource, AuthzBasicError> {
-        PolicySource::load(self.path.clone(), self.principal.clone())
+        PolicySource::load(self.paths.clone(), self.principal.clone())
     }
 
     fn digest(&self) -> fn(&[u8]) -> [u8; 32] {
@@ -550,7 +626,7 @@ impl Baseline for HermeticAuthorizer {
 
     fn load_source(&self) -> Result<PolicySource, AuthzBasicError> {
         PolicySource::load_with_requirement(
-            self.inner.path.clone(),
+            self.inner.paths.clone(),
             self.inner.principal.clone(),
             self.req.clone(),
         )
@@ -580,7 +656,7 @@ impl HermeticAuthorizer {
     /// Compiles the first snapshot over an identity graph built in memory at
     /// revision 1, labelled with the US system's lowest level.
     pub fn new(
-        path: PathBuf,
+        paths: PolicyPaths,
         principal: maknae_config::Principal,
         req: maknae_config::TargetRequired,
         digest: fn(&[u8]) -> [u8; 32],
@@ -588,10 +664,10 @@ impl HermeticAuthorizer {
         let label =
             maknae_security::ClassificationPolicy::unmarked(&maknae_config::BasicPolicy).name;
         let source =
-            PolicySource::load_with_requirement(path.clone(), principal.clone(), req.clone())?;
+            PolicySource::load_with_requirement(paths.clone(), principal.clone(), req.clone())?;
         let snapshot = snapshot_over(&source, &label, digest, None)?;
         Ok(Self {
-            inner: BasicAuthorizer::from_snapshot(principal, path, digest, snapshot),
+            inner: BasicAuthorizer::from_snapshot(principal, paths, digest, snapshot),
             req,
             label,
         })
@@ -600,7 +676,7 @@ impl HermeticAuthorizer {
     /// Compiles the first snapshot against `persisted`, which must carry the
     /// identity layer the file declares.
     pub fn new_over_graph(
-        path: PathBuf,
+        paths: PolicyPaths,
         principal: maknae_config::Principal,
         req: maknae_config::TargetRequired,
         digest: fn(&[u8]) -> [u8; 32],
@@ -611,7 +687,7 @@ impl HermeticAuthorizer {
             .layer
             .label;
         let source =
-            PolicySource::load_with_requirement(path.clone(), principal.clone(), req.clone())?;
+            PolicySource::load_with_requirement(paths.clone(), principal.clone(), req.clone())?;
         let snapshot = snapshot::compile(
             persisted,
             &source,
@@ -620,7 +696,7 @@ impl HermeticAuthorizer {
         )
         .map_err(AuthzBasicError::Compile)?;
         Ok(Self {
-            inner: BasicAuthorizer::from_snapshot(principal, path, digest, Arc::new(snapshot)),
+            inner: BasicAuthorizer::from_snapshot(principal, paths, digest, Arc::new(snapshot)),
             req,
             label,
         })
@@ -785,9 +861,11 @@ mod tests {
     };
 
     const LABEL: &str = "UNCLASSIFIED";
+    const DIR: &str = "/etc/maknae";
     const PATH: &str = "/etc/maknae/authz.yaml";
-    const ADMIN_ROOT: &str = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\n";
-    const ADVERSARY_ROOT: &str = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  adversary: [\"root\"]\n";
+    const EMPTY: &str = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n";
+    const ADMIN_ROOT: &str = "schema_version: 1\nbindings:\n  admin: [\"root\"]\n";
+    const ADVERSARY_ROOT: &str = "schema_version: 1\nbindings:\n  adversary: [\"root\"]\n";
     const CONTAINED: &str = "subject contained: role=adversary";
 
     fn principal() -> maknae_config::Principal {
@@ -804,16 +882,32 @@ mod tests {
     /// The production post-load half: one getpwnam per bound name, then eager
     /// validation.
     fn finish(policy: maknae_config::AuthzPolicy) -> Result<PolicySource, AuthzBasicError> {
-        let uid_map = resolve_uid_map(&policy)?;
-        PolicySource::from_parts(policy, uid_map, principal(), "/nonexistent".into())
+        finish_with(policy, maknae_config::Bindings::missing())
     }
 
-    fn source_with(body: &str, uids: &[(&str, u32)]) -> PolicySource {
+    fn finish_with(
+        policy: maknae_config::AuthzPolicy,
+        bindings: maknae_config::Bindings,
+    ) -> Result<PolicySource, AuthzBasicError> {
+        let uid_map = resolve_uid_map(&bindings)?;
+        PolicySource::from_parts(policy, bindings, uid_map, principal(), paths())
+    }
+
+    fn bound(body: &str) -> maknae_config::Bindings {
+        maknae_config::parse_bindings(body).expect("bindings grammar is valid")
+    }
+
+    fn paths() -> PolicyPaths {
+        PolicyPaths::in_dir(Path::new(DIR))
+    }
+
+    fn source_with(authz: &str, bindings: Option<&str>, uids: &[(&str, u32)]) -> PolicySource {
         PolicySource::from_parts(
-            parse(body),
+            parse(authz),
+            bindings.map_or_else(maknae_config::Bindings::missing, bound),
             uids.iter().map(|(n, u)| (n.to_string(), *u)).collect(),
             principal(),
-            PATH.into(),
+            paths(),
         )
         .unwrap()
     }
@@ -822,12 +916,16 @@ mod tests {
         snapshot_over(src, LABEL, test_digest, None).unwrap()
     }
 
-    fn authorizer_over(body: &str, uids: &[(&str, u32)]) -> BasicAuthorizer {
+    fn authorizer_over(
+        authz: &str,
+        bindings: Option<&str>,
+        uids: &[(&str, u32)],
+    ) -> BasicAuthorizer {
         BasicAuthorizer::from_snapshot(
             principal(),
-            "/nonexistent".into(),
+            paths(),
             test_digest,
-            compiled(&source_with(body, uids)),
+            compiled(&source_with(authz, bindings, uids)),
         )
     }
 
@@ -890,15 +988,11 @@ mod tests {
     const SHIPPED: &str = include_str!("../../../packaging/common/authz.yaml");
 
     /// Proof (a): the REAL shipped authz.yaml (byte-identical, via
-    /// include_str!) parses, has no bindings key, and the defaults branch
+    /// include_str!) parses, and with bindings absent the defaults branch
     /// decides: enrolled uid → admin rows; agent name → user rows.
     #[test]
     fn shipped_content_defaults_proof() {
         let policy = maknae_config::parse_authz(SHIPPED).expect("shipped authz.yaml parses");
-        assert!(
-            policy.bindings.is_none(),
-            "shipped file has no bindings key"
-        );
         let lp = decide::LoadedPolicy {
             policy,
             roles: binding::Roles::File(binding::resolve(&None, &UidMap::new()).unwrap()),
@@ -926,9 +1020,9 @@ mod tests {
     fn decide_cited_names_the_rule_from_the_same_snapshot() {
         let auth = BasicAuthorizer::from_snapshot(
             principal(),
-            "/nonexistent".into(),
+            paths(),
             test_digest,
-            compiled(&source_with(SHIPPED, &[])),
+            compiled(&source_with(SHIPPED, None, &[])),
         );
         let d = auth.decide_cited(&ssh_read(501));
         assert!(
@@ -960,11 +1054,14 @@ mod tests {
     #[test]
     fn the_oracle_and_the_snapshot_agree() {
         let src = source_with(
-            &format!("{SHIPPED}bindings:\n  user: [\"ursula\"]\n  adversary: [\"mallory\"]\n"),
+            SHIPPED,
+            Some(
+                "schema_version: 1\nbindings:\n  user: [\"ursula\"]\n  adversary: [\"mallory\"]\n",
+            ),
             &[("ursula", 1001), ("mallory", 666)],
         );
         let auth =
-            BasicAuthorizer::from_snapshot(principal(), PATH.into(), test_digest, compiled(&src));
+            BasicAuthorizer::from_snapshot(principal(), paths(), test_digest, compiled(&src));
         for req in [
             whoami(501),
             whoami(1001),
@@ -990,15 +1087,19 @@ mod tests {
 
     #[test]
     fn subjects_reports_none_without_a_bindings_section_and_an_empty_set_with_one() {
-        let none = authorizer_over("schema_version: 1\n", &[]);
+        let none = authorizer_over("schema_version: 1\n", None, &[]);
         assert_eq!(
             none.subjects(),
             None,
             "no bindings key means CANNOT ENUMERATE, not `nobody is bound`"
         );
-        let empty = authorizer_over("schema_version: 1\nbindings:\n  admin: []\n", &[]);
+        let empty = authorizer_over(
+            "schema_version: 1\n",
+            Some("schema_version: 1\nbindings:\n  admin: []\n"),
+            &[],
+        );
         assert_eq!(empty.subjects(), Some(vec![]));
-        let one = authorizer_over(ADMIN_ROOT, &[("root", 0)]);
+        let one = authorizer_over(EMPTY, Some(ADMIN_ROOT), &[("root", 0)]);
         assert_eq!(
             one.subjects(),
             Some(vec![maknae_security::SubjectBinding {
@@ -1010,10 +1111,7 @@ mod tests {
 
     #[test]
     fn subjects_on_the_shipped_tilde_policy_needs_no_home() {
-        let auth = authorizer_over(
-            &format!("{SHIPPED}bindings:\n  admin: [\"root\"]\n"),
-            &[("root", 0)],
-        );
+        let auth = authorizer_over(SHIPPED, Some(ADMIN_ROOT), &[("root", 0)]);
         assert!(auth.subjects().is_some());
     }
 
@@ -1023,7 +1121,8 @@ mod tests {
     #[test]
     fn subjects_reports_every_member_of_a_role_sorted() {
         let auth = authorizer_over(
-            "schema_version: 1\nbindings:\n  admin: [\"ten\", \"two\"]\n",
+            "schema_version: 1\n",
+            Some("schema_version: 1\nbindings:\n  admin: [\"ten\", \"two\"]\n"),
             &[("two", 2), ("ten", 10)],
         );
         let got = auth.subjects().expect("an explicit block");
@@ -1038,20 +1137,20 @@ mod tests {
     #[test]
     fn backend_name_identifies_this_backend() {
         assert_eq!(
-            authorizer_over("schema_version: 1\n", &[]).backend_name(),
+            authorizer_over("schema_version: 1\n", None, &[]).backend_name(),
             "maknae-authz-basic"
         );
     }
 
     #[test]
     fn the_baseline_trait_reports_this_authorizers_parts() {
-        let auth = authorizer_over(ADMIN_ROOT, &[("root", 0)]);
+        let auth = authorizer_over(EMPTY, Some(ADMIN_ROOT), &[("root", 0)]);
         assert_eq!(Baseline::principal(&auth), &principal());
         assert_eq!(Baseline::digest(&auth)(b"maknae"), test_digest(b"maknae"));
         let held = Baseline::snapshot(&auth);
         assert!(Arc::ptr_eq(&held, &auth.snapshot()));
         let folded = |body: &str| {
-            let lines: String = source_with(body, &[("root", 0)])
+            let lines: String = source_with(EMPTY, Some(body), &[("root", 0)])
                 .section_digests(test_digest)
                 .iter()
                 .map(|(k, d)| format!("{k}={}\n", maknae_graph::identity::hex(d)))
@@ -1059,7 +1158,7 @@ mod tests {
             maknae_graph::identity::hex(&test_digest(lines.as_bytes()))
         };
         assert_eq!(Baseline::policy_sha256(&auth), folded(ADMIN_ROOT));
-        let next = compiled(&source_with(ADVERSARY_ROOT, &[("root", 0)]));
+        let next = compiled(&source_with(EMPTY, Some(ADVERSARY_ROOT), &[("root", 0)]));
         Baseline::install(&auth, next.clone());
         assert!(Arc::ptr_eq(&auth.snapshot(), &next));
         assert_eq!(auth.decide(&whoami(0)), contained());
@@ -1075,14 +1174,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let p = dir.join("authz.yaml");
-        std::fs::write(&p, ADMIN_ROOT).unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
+        for (name, body) in [("authz.yaml", EMPTY), ("bindings.yaml", ADMIN_ROOT)] {
+            let p = dir.join(name);
+            std::fs::write(&p, body).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
+        }
         let auth = BasicAuthorizer::from_snapshot(
             principal(),
-            p,
+            PolicyPaths::in_dir(&dir),
             test_digest,
-            compiled(&source_with("schema_version: 1\n", &[])),
+            compiled(&source_with("schema_version: 1\n", None, &[])),
         );
         let got = Baseline::load_source(&auth);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1099,11 +1200,11 @@ mod tests {
 
     #[test]
     fn concurrent_decisions_see_whole_snapshots() {
-        let admin = compiled(&source_with(ADMIN_ROOT, &[("root", 0)]));
-        let adversary = compiled(&source_with(ADVERSARY_ROOT, &[("root", 0)]));
+        let admin = compiled(&source_with(EMPTY, Some(ADMIN_ROOT), &[("root", 0)]));
+        let adversary = compiled(&source_with(EMPTY, Some(ADVERSARY_ROOT), &[("root", 0)]));
         let auth = Arc::new(BasicAuthorizer::from_snapshot(
             principal(),
-            "/nonexistent".into(),
+            paths(),
             test_digest,
             admin.clone(),
         ));
@@ -1150,7 +1251,7 @@ mod tests {
 
     #[test]
     fn a_poisoned_lock_is_recovered_not_propagated() {
-        let auth = authorizer_over(ADMIN_ROOT, &[("root", 0)]);
+        let auth = authorizer_over(EMPTY, Some(ADMIN_ROOT), &[("root", 0)]);
         std::thread::scope(|s| {
             let _ = s
                 .spawn(|| {
@@ -1161,15 +1262,23 @@ mod tests {
         });
         assert!(auth.snapshot.is_poisoned());
         assert_eq!(auth.decide(&whoami(0)), audit_permit());
-        auth.install(compiled(&source_with(ADVERSARY_ROOT, &[("root", 0)])));
+        auth.install(compiled(&source_with(
+            EMPTY,
+            Some(ADVERSARY_ROOT),
+            &[("root", 0)],
+        )));
         assert_eq!(auth.decide(&whoami(0)), contained());
     }
 
     #[test]
     fn install_is_visible_to_the_next_decide_only() {
-        let auth = authorizer_over(ADMIN_ROOT, &[("root", 0)]);
+        let auth = authorizer_over(EMPTY, Some(ADMIN_ROOT), &[("root", 0)]);
         let held = auth.snapshot();
-        auth.install(compiled(&source_with(ADVERSARY_ROOT, &[("root", 0)])));
+        auth.install(compiled(&source_with(
+            EMPTY,
+            Some(ADVERSARY_ROOT),
+            &[("root", 0)],
+        )));
         let d = decide::decide_loaded_cited(held.loaded(), &principal(), &whoami(0));
         assert_eq!(
             d.verdict,
@@ -1195,9 +1304,9 @@ mod tests {
     fn decide_never_holds_the_lock_while_evaluating() {
         let mut auth = BasicAuthorizer::from_snapshot(
             principal(),
-            PATH.into(),
+            paths(),
             test_digest,
-            compiled(&source_with(SHIPPED, &[])),
+            compiled(&source_with(SHIPPED, None, &[])),
         );
         let before = auth.decide_cited(&ssh_read(501));
         assert_eq!(
@@ -1206,11 +1315,11 @@ mod tests {
         );
         let next = compiled(&source_with(
             &SHIPPED.replacen("  deny:\n", "  deny:\n    - \"Read(~/.cache/**)\"\n", 1),
+            None,
             &[],
         ));
-        let after =
-            BasicAuthorizer::from_snapshot(principal(), PATH.into(), test_digest, next.clone())
-                .decide_cited(&ssh_read(501));
+        let after = BasicAuthorizer::from_snapshot(principal(), paths(), test_digest, next.clone())
+            .decide_cited(&ssh_read(501));
         assert_eq!(after.verdict, before.verdict);
         let (old, new) = (before.rule.clone().unwrap(), after.rule.unwrap());
         assert_ne!(old.key, new.key);
@@ -1251,14 +1360,14 @@ mod tests {
     /// reach the rest of the batch.
     #[test]
     fn decide_cited_all_reads_one_snapshot_for_the_whole_batch() {
-        let mut auth = authorizer_over(ADMIN_ROOT, &[("root", 0)]);
+        let mut auth = authorizer_over(EMPTY, Some(ADMIN_ROOT), &[("root", 0)]);
         let gate = Arc::new(EvaluationGate {
             arrived: std::sync::Barrier::new(2),
             release: std::sync::Barrier::new(2),
         });
         auth.evaluation_gate = Some(gate.clone());
         let auth = Arc::new(auth);
-        let next = compiled(&source_with(ADVERSARY_ROOT, &[("root", 0)]));
+        let next = compiled(&source_with(EMPTY, Some(ADVERSARY_ROOT), &[("root", 0)]));
         let installed = next.clone();
         let batch = {
             let auth = auth.clone();
@@ -1302,10 +1411,10 @@ mod tests {
 
     #[test]
     fn snapshot_over_carries_an_unchanged_layer_and_advances_a_changed_one() {
-        let first = compiled(&source_with(ADMIN_ROOT, &[("root", 0)]));
+        let first = compiled(&source_with(EMPTY, Some(ADMIN_ROOT), &[("root", 0)]));
         assert_eq!(first.revision(), 1);
         let same = snapshot_over(
-            &source_with(ADMIN_ROOT, &[("root", 0)]),
+            &source_with(EMPTY, Some(ADMIN_ROOT), &[("root", 0)]),
             LABEL,
             test_digest,
             Some(first.persisted()),
@@ -1313,7 +1422,7 @@ mod tests {
         .unwrap();
         assert!(Arc::ptr_eq(same.persisted(), first.persisted()));
         let moved = snapshot_over(
-            &source_with(ADVERSARY_ROOT, &[("root", 0)]),
+            &source_with(EMPTY, Some(ADVERSARY_ROOT), &[("root", 0)]),
             LABEL,
             test_digest,
             Some(first.persisted()),
@@ -1351,7 +1460,7 @@ mod tests {
                 .unwrap(),
         );
         let unreadable = snapshot_over(
-            &source_with(ADMIN_ROOT, &[("root", 0)]),
+            &source_with(EMPTY, Some(ADMIN_ROOT), &[("root", 0)]),
             LABEL,
             test_digest,
             Some(&bad),
@@ -1371,7 +1480,7 @@ mod tests {
     /// host-independent identity (`root` — uid 0 exists everywhere).
     #[test]
     fn finish_resolves_root_validates_eagerly_and_refuses_bad_bindings() {
-        let src = finish(parse(ADMIN_ROOT)).unwrap();
+        let src = finish_with(parse(EMPTY), bound(ADMIN_ROOT)).unwrap();
         assert_eq!(
             src.uid_map().get("root"),
             Some(&0),
@@ -1382,9 +1491,15 @@ mod tests {
             1,
             "every bound name resolves, no exception"
         );
-        let typo = finish(parse("schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  advesary: [\"root\"]\n"));
+        let typo = finish_with(
+            parse(EMPTY),
+            bound("schema_version: 1\nbindings:\n  advesary: [\"root\"]\n"),
+        );
         assert!(matches!(typo, Err(AuthzBasicError::Bindings(ref m)) if m.contains("advesary")));
-        let ghost = finish(parse("schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  user: [\"no-such-user-maknae-85\"]\n"));
+        let ghost = finish_with(
+            parse(EMPTY),
+            bound("schema_version: 1\nbindings:\n  user: [\"no-such-user-maknae-85\"]\n"),
+        );
         assert!(
             matches!(ghost, Err(AuthzBasicError::Bindings(ref m)) if m.contains("no-such-user-maknae-85"))
         );
@@ -1575,49 +1690,136 @@ mod tests {
     }
 
     #[test]
-    fn section_digests_hashes_each_present_section() {
-        let policy = maknae_config::parse_authz(
-            "schema_version: 1\npermissions:\n  allow: [\"Read(/a)\"]\nbindings: {}\n",
-        )
-        .unwrap();
-        let src = PolicySource::from_parts(
-            policy.clone(),
-            Default::default(),
-            principal(),
-            "/etc/maknae/authz.yaml".into(),
-        )
-        .unwrap();
-        let d = src.section_digests(stand_in_digest);
-        let keys: Vec<&str> = d.keys().map(String::as_str).collect();
-        assert_eq!(keys, ["bindings", "permissions", "schema_version"]);
-        assert_eq!(d["bindings"], stand_in_digest(b"{}"));
+    fn the_bindings_digest_is_the_section_of_bindings_yaml_under_the_same_key() {
+        let s = source_with(
+            SHIPPED,
+            Some("schema_version: 1\nbindings:\n  admin: [\"alex\"]\n"),
+            &[("alex", 1000)],
+        );
+        let d = s.section_digests(stand_in_digest);
+        assert_eq!(d["bindings"], stand_in_digest(br#"{"admin":["alex"]}"#));
         assert_eq!(
             d["permissions"],
-            stand_in_digest(policy.section_canonical("permissions").unwrap().as_bytes())
+            stand_in_digest(
+                s.policy()
+                    .section_canonical("permissions")
+                    .unwrap()
+                    .as_bytes()
+            )
         );
-        assert_ne!(d["permissions"], d["bindings"]);
+        let keys: Vec<&str> = d.keys().map(String::as_str).collect();
+        assert_eq!(keys, ["bindings", "permissions", "schema_version"]);
+        let empty = source_with(SHIPPED, Some("schema_version: 1\nbindings: {}\n"), &[])
+            .section_digests(stand_in_digest);
+        assert_eq!(empty["bindings"], stand_in_digest(b"{}"));
+        let none = source_with(SHIPPED, None, &[]).section_digests(stand_in_digest);
+        assert!(!none.contains_key("bindings"));
+        let no_key = source_with(SHIPPED, Some("schema_version: 1\n"), &[]);
+        assert!(!no_key
+            .section_digests(stand_in_digest)
+            .contains_key("bindings"));
+    }
+
+    #[test]
+    fn policy_paths_in_dir_names_both_files() {
+        assert_eq!(
+            PolicyPaths::in_dir(Path::new("/x")),
+            PolicyPaths {
+                authz: "/x/authz.yaml".into(),
+                bindings: "/x/bindings.yaml".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn the_identity_layer_comes_from_bindings_yaml() {
+        let s = source_with(
+            SHIPPED,
+            Some("schema_version: 1\nbindings:\n  admin: [alex]\n  adversary: [mallory, {uid: 4242}]\n"),
+            &[("alex", 1000), ("mallory", 666)],
+        );
+        let layer = s.identity_layer(LABEL, Some([7; 32]));
+        assert_eq!(layer.source, "/etc/maknae/bindings.yaml");
+        let got: Vec<(u32, &str, &str)> = layer
+            .subjects
+            .iter()
+            .map(|e| (e.uid, e.name.as_str(), e.role.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (666, "mallory", "adversary"),
+                (1000, "alex", "admin"),
+                (4242, "uid:4242", "adversary")
+            ]
+        );
+        assert_eq!(s.paths(), &paths());
+        assert!(s.bindings().roles.is_some());
+        assert_eq!(s.policy_source(), PATH);
+    }
+
+    #[test]
+    fn absent_and_empty_bindings_differ_across_both_spellings_of_absent() {
+        let missing = compiled(&source_with(SHIPPED, None, &[]));
+        let no_key = compiled(&source_with(SHIPPED, Some("schema_version: 1\n"), &[]));
+        let empty = compiled(&source_with(
+            SHIPPED,
+            Some("schema_version: 1\nbindings: {}\n"),
+            &[],
+        ));
+        let principal_req = liveness_req(Some(501));
+        for absent in [&missing, &no_key] {
+            assert_eq!(absent.subjects(), None);
+            let a = BasicAuthorizer::from_snapshot(
+                principal(),
+                paths(),
+                test_digest,
+                Arc::clone(absent),
+            );
+            assert_eq!(a.decide_reporting_role(&principal_req).1, Some("admin"));
+        }
+        assert_eq!(empty.subjects(), Some(vec![]));
+        let e = BasicAuthorizer::from_snapshot(principal(), paths(), test_digest, empty);
+        assert_eq!(e.decide_reporting_role(&principal_req).1, None);
+    }
+
+    #[test]
+    fn a_uid_entry_outside_adversary_refuses_the_file() {
+        let got = PolicySource::from_parts(
+            parse(SHIPPED),
+            bound("schema_version: 1\nbindings:\n  user: [{uid: 7}]\n"),
+            UidMap::new(),
+            principal(),
+            paths(),
+        );
+        assert!(
+            matches!(got, Err(AuthzBasicError::Bindings(ref m)) if m.contains("adversary")),
+            "{got:?}"
+        );
     }
 
     #[test]
     fn policy_source_keeps_its_parts_and_declares_its_identity_layer() {
-        let policy = maknae_config::parse_authz(
+        let policy = parse("schema_version: 1\n");
+        let bindings = bound(
             "schema_version: 1\nbindings:\n  user: [\"ursula\"]\n  admin: [\"alex\"]\n  adversary: [\"mallory\"]\n",
-        )
-        .unwrap();
+        );
         let uid_map: UidMap = [("alex", 1000), ("ursula", 7), ("mallory", 666)]
             .iter()
             .map(|(n, u)| (n.to_string(), *u))
             .collect();
         let src = PolicySource::from_parts(
             policy.clone(),
+            bindings.clone(),
             uid_map.clone(),
             principal(),
-            "/etc/maknae/authz.yaml".into(),
+            paths(),
         )
         .unwrap();
         assert_eq!(src.policy(), &policy);
+        assert_eq!(src.bindings(), &bindings);
         assert_eq!(src.principal(), &principal());
-        assert_eq!(src.path(), Path::new("/etc/maknae/authz.yaml"));
+        assert_eq!(src.paths(), &paths());
         assert_eq!(src.uid_map(), &uid_map);
         let layer = src.identity_layer("UNCLASSIFIED", Some([4; 32]));
         let entry = |uid: u32, name: &str, role: &str| maknae_graph::identity::SubjectEntry {
@@ -1628,7 +1830,7 @@ mod tests {
         assert_eq!(
             layer,
             maknae_graph::identity::IdentityLayer {
-                source: "/etc/maknae/authz.yaml".into(),
+                source: "/etc/maknae/bindings.yaml".into(),
                 label: "UNCLASSIFIED".into(),
                 bindings_sha256: Some([4; 32]),
                 subjects: vec![
@@ -1643,17 +1845,29 @@ mod tests {
     #[test]
     fn policy_source_refuses_a_non_utf8_policy_path() {
         use std::os::unix::ffi::OsStrExt;
-        let path = PathBuf::from(std::ffi::OsStr::from_bytes(b"/etc/maknae/auth\xffz.yaml"));
-        let got = PolicySource::from_parts(
-            maknae_config::parse_authz("schema_version: 1\n").unwrap(),
-            Default::default(),
-            principal(),
-            path,
-        );
-        assert!(
-            matches!(got, Err(AuthzBasicError::Load(ref m)) if m.contains("is not UTF-8")),
-            "{got:?}"
-        );
+        let bad = PathBuf::from(std::ffi::OsStr::from_bytes(b"/etc/maknae/auth\xffz.yaml"));
+        for paths in [
+            PolicyPaths {
+                authz: bad.clone(),
+                ..paths()
+            },
+            PolicyPaths {
+                bindings: bad.clone(),
+                ..paths()
+            },
+        ] {
+            let got = PolicySource::from_parts(
+                parse("schema_version: 1\n"),
+                maknae_config::Bindings::missing(),
+                UidMap::new(),
+                principal(),
+                paths,
+            );
+            assert!(
+                matches!(got, Err(AuthzBasicError::Load(ref m)) if m.contains("is not UTF-8")),
+                "{got:?}"
+            );
+        }
     }
 
     #[test]
@@ -1661,13 +1875,21 @@ mod tests {
         let parts = |body: &str, uids: &[(&str, u32)]| {
             PolicySource::from_parts(
                 maknae_config::parse_authz(body).unwrap(),
+                maknae_config::Bindings::missing(),
                 uids.iter().map(|(n, u)| (n.to_string(), *u)).collect(),
                 principal(),
-                "/etc/maknae/authz.yaml".into(),
+                paths(),
             )
         };
+        let ghost = PolicySource::from_parts(
+            parse("schema_version: 1\n"),
+            bound("schema_version: 1\nbindings:\n  user: [\"ghost\"]\n"),
+            UidMap::new(),
+            principal(),
+            paths(),
+        );
         assert!(matches!(
-            parts("schema_version: 1\nbindings:\n  user: [\"ghost\"]\n", &[]),
+            ghost,
             Err(AuthzBasicError::Bindings(ref m)) if m.contains("ghost")
         ));
         assert_eq!(
@@ -1694,10 +1916,12 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("mab_src_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let p = dir.join("authz.yaml");
-        std::fs::write(&p, "schema_version: 1\n").unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
-        let got = PolicySource::load(p, principal());
+        for name in ["authz.yaml", "bindings.yaml"] {
+            let p = dir.join(name);
+            std::fs::write(&p, "schema_version: 1\n").unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
+        }
+        let got = PolicySource::load(PolicyPaths::in_dir(&dir), principal());
         let _ = std::fs::remove_dir_all(&dir);
         if nix::unistd::geteuid().is_root() {
             assert!(got.is_ok(), "{got:?}");
@@ -1715,7 +1939,7 @@ mod tests {
     #[cfg(all(unix, feature = "hermetic-test-seam"))]
     mod hermetic {
         use super::super::*;
-        use super::{arrives, audit_permit, contained, principal, whoami, ADMIN_ROOT, CONTAINED};
+        use super::{arrives, audit_permit, contained, principal, whoami, CONTAINED, EMPTY};
         use maknae_security::{Authorizer, Verdict};
         use std::os::unix::fs::PermissionsExt;
 
@@ -1732,15 +1956,6 @@ mod tests {
         fn write(p: &std::path::Path, body: &str) {
             std::fs::write(p, body).unwrap();
             std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o640)).unwrap();
-        }
-
-        fn write_policy(p: &std::path::Path, bindings_role: &str) {
-            write(
-                p,
-                &format!(
-                    "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  {bindings_role}: [\"root\"]\n"
-                ),
-            );
         }
 
         struct Fixture(std::path::PathBuf);
@@ -1761,12 +1976,28 @@ mod tests {
             }
 
             fn policy(&self) -> std::path::PathBuf {
-                self.0.join("authz.yaml")
+                self.paths().authz
+            }
+
+            fn bindings(&self) -> std::path::PathBuf {
+                self.paths().bindings
+            }
+
+            fn paths(&self) -> PolicyPaths {
+                PolicyPaths::in_dir(&self.0)
+            }
+
+            fn bind(&self, role: &str) {
+                write(
+                    &self.bindings(),
+                    &format!("schema_version: 1\nbindings:\n  {role}: [\"root\"]\n"),
+                );
             }
 
             fn authorizer(&self, role: &str) -> HermeticAuthorizer {
-                write_policy(&self.policy(), role);
-                HermeticAuthorizer::new(self.policy(), principal(), fixture_req(), test_digest)
+                write(&self.policy(), EMPTY);
+                self.bind(role);
+                HermeticAuthorizer::new(self.paths(), principal(), fixture_req(), test_digest)
                     .unwrap()
             }
         }
@@ -1774,37 +2005,46 @@ mod tests {
         #[test]
         fn policy_source_loads_through_the_hermetic_door_resolving_uids() {
             let fx = Fixture::new("source");
-            let p = fx.policy();
-            write_policy(&p, "admin");
-            let got = PolicySource::load_with_requirement(p.clone(), principal(), fixture_req());
+            write(&fx.policy(), EMPTY);
+            fx.bind("admin");
+            let got = PolicySource::load_with_requirement(fx.paths(), principal(), fixture_req());
             write(
-                &p,
+                &fx.bindings(),
                 "schema_version: 1\nbindings:\n  user: [\"no-such-user-maknae-489\"]\n",
             );
             let unresolvable =
-                PolicySource::load_with_requirement(p.clone(), principal(), fixture_req());
-            let missing = PolicySource::load_with_requirement(
-                fx.0.join("absent.yaml"),
+                PolicySource::load_with_requirement(fx.paths(), principal(), fixture_req());
+            let missing_authz = PolicySource::load_with_requirement(
+                PolicyPaths {
+                    authz: fx.0.join("absent.yaml"),
+                    ..fx.paths()
+                },
                 principal(),
                 fixture_req(),
             );
+            std::fs::remove_file(fx.bindings()).unwrap();
+            let missing_bindings =
+                PolicySource::load_with_requirement(fx.paths(), principal(), fixture_req());
             let src = got.unwrap();
             assert_eq!(src.uid_map().get("root"), Some(&0));
-            assert_eq!(src.path(), p.as_path());
+            assert_eq!(src.paths(), &fx.paths());
             assert!(
                 matches!(unresolvable, Err(AuthzBasicError::Bindings(ref m)) if m.contains("no-such-user-maknae-489"))
             );
-            assert!(matches!(missing, Err(AuthzBasicError::Load(_))));
+            assert!(matches!(missing_authz, Err(AuthzBasicError::Load(_))));
+            let absent = missing_bindings.expect("a missing bindings.yaml is bindings absent");
+            assert!(absent.bindings().is_missing());
         }
 
         #[test]
         fn constructor_refuses_unresolvable_binding() {
             let fx = Fixture::new("bindfail");
+            write(&fx.policy(), EMPTY);
             write(
-                &fx.policy(),
-                "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  user: [\"no-such-user-maknae-77\"]\n",
+                &fx.bindings(),
+                "schema_version: 1\nbindings:\n  user: [\"no-such-user-maknae-77\"]\n",
             );
-            let got = HermeticAuthorizer::new(fx.policy(), principal(), fixture_req(), test_digest);
+            let got = HermeticAuthorizer::new(fx.paths(), principal(), fixture_req(), test_digest);
             assert!(
                 matches!(got, Err(AuthzBasicError::Bindings(ref m)) if m.contains("no-such-user-maknae-77")),
                 "{got:?}"
@@ -1842,14 +2082,11 @@ mod tests {
             let fx = Fixture::new("delegate");
             write(
                 &fx.policy(),
-                &format!(
-                    "{}bindings:\n  admin: [\"root\"]\n",
-                    include_str!("../../../packaging/common/authz.yaml")
-                ),
+                include_str!("../../../packaging/common/authz.yaml"),
             );
-            let auth =
-                HermeticAuthorizer::new(fx.policy(), principal(), fixture_req(), test_digest)
-                    .unwrap();
+            fx.bind("admin");
+            let auth = HermeticAuthorizer::new(fx.paths(), principal(), fixture_req(), test_digest)
+                .unwrap();
             let (v, got) = auth.decide_reporting_role(&whoami(0));
             assert_eq!((v, got), (audit_permit(), Some("admin")));
             assert_eq!(auth.decide(&whoami(0)), audit_permit());
@@ -1895,7 +2132,7 @@ mod tests {
             let ping = super::liveness_req(Some(0));
             assert_eq!(auth.decide(&ping), audit_permit());
 
-            write_policy(&fx.policy(), "adversary");
+            fx.bind("adversary");
             assert_eq!(
                 auth.decide(&ping),
                 audit_permit(),
@@ -1911,9 +2148,10 @@ mod tests {
             ));
             assert_eq!(auth.decide(&whoami(0)), contained());
 
+            write(&fx.policy(), EMPTY);
             write(
-                &fx.policy(),
-                "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  user: [\"nobody-new-maknae-489\"]\n",
+                &fx.bindings(),
+                "schema_version: 1\nbindings:\n  user: [\"nobody-new-maknae-489\"]\n",
             );
             assert!(
                 matches!(auth.reload_from_file(), Err(AuthzBasicError::Bindings(ref m)) if m.contains("nobody-new-maknae-489"))
@@ -1928,7 +2166,7 @@ mod tests {
             let before = auth.snapshot();
             write(
                 &fx.policy(),
-                &format!("{ADMIN_ROOT}roles:\n  admin:\n    allow: [\"admin.contain\"]\n"),
+                &format!("{EMPTY}roles:\n  admin:\n    allow: [\"admin.contain\"]\n"),
             );
             assert_eq!(
                 auth.reload_from_file(),
@@ -1942,7 +2180,7 @@ mod tests {
             let fx = Fixture::new("flip");
             let auth = fx.authorizer("admin");
             assert_eq!(auth.decide(&whoami(0)), audit_permit());
-            write_policy(&fx.policy(), "adversary");
+            fx.bind("adversary");
             assert_eq!(auth.decide(&whoami(0)), audit_permit());
             auth.reload_from_file().unwrap();
             assert_eq!(
@@ -1958,7 +2196,7 @@ mod tests {
             let fx = Fixture::new("subjects");
             let auth = fx.authorizer("admin");
             assert_eq!(auth.subjects().unwrap()[0].role, "admin");
-            write_policy(&fx.policy(), "adversary");
+            fx.bind("adversary");
             assert_eq!(auth.subjects().unwrap()[0].role, "admin");
             auth.reload_from_file().unwrap();
             assert_eq!(auth.subjects().unwrap()[0].role, "adversary");
@@ -1985,7 +2223,7 @@ mod tests {
             assert_eq!(auth.snapshot().revision(), 1);
             let same = auth.compile_from_file().unwrap();
             assert!(Arc::ptr_eq(same.persisted(), auth.snapshot().persisted()));
-            write_policy(&fx.policy(), "adversary");
+            fx.bind("adversary");
             let next = auth.compile_from_file().unwrap();
             assert_eq!(next.revision(), 2);
             assert_eq!(auth.snapshot().revision(), 1, "compile does not install");
@@ -2004,7 +2242,7 @@ mod tests {
             ));
             let src = Baseline::load_source(&auth).expect("the hermetic loader");
             assert_eq!(src.uid_map().get("root"), Some(&0));
-            write_policy(&fx.policy(), "adversary");
+            fx.bind("adversary");
             let next = auth.compile_from_file().unwrap();
             Baseline::install(&auth, next.clone());
             assert!(Arc::ptr_eq(&auth.inner.snapshot(), &next));
@@ -2039,7 +2277,7 @@ mod tests {
                 release: std::sync::Barrier::new(2),
             });
             auth.park_evaluations(gate.clone());
-            write_policy(&fx.policy(), "adversary");
+            fx.bind("adversary");
             let next = auth.compile_from_file().unwrap();
             let auth = Arc::new(auth);
             let batch = {
@@ -2071,7 +2309,7 @@ mod tests {
             let first = fx.authorizer("admin");
             let persisted = first.snapshot().persisted().clone();
             let over = HermeticAuthorizer::new_over_graph(
-                fx.policy(),
+                fx.paths(),
                 principal(),
                 fixture_req(),
                 test_digest,
@@ -2080,9 +2318,9 @@ mod tests {
             .unwrap();
             assert!(Arc::ptr_eq(over.snapshot().persisted(), &persisted));
             assert_eq!(over.decide(&whoami(0)), audit_permit());
-            write_policy(&fx.policy(), "adversary");
+            fx.bind("adversary");
             let refused = HermeticAuthorizer::new_over_graph(
-                fx.policy(),
+                fx.paths(),
                 principal(),
                 fixture_req(),
                 test_digest,
@@ -2106,7 +2344,7 @@ mod tests {
                     .unwrap(),
             );
             let no_source = HermeticAuthorizer::new_over_graph(
-                fx.policy(),
+                fx.paths(),
                 principal(),
                 fixture_req(),
                 test_digest,
@@ -2137,10 +2375,17 @@ mod tests {
         #[test]
         fn constructor_honors_the_declared_requirement() {
             let fx = Fixture::new("mode");
-            write_policy(&fx.policy(), "admin");
-            std::fs::set_permissions(fx.policy(), std::fs::Permissions::from_mode(0o666)).unwrap();
-            let got = HermeticAuthorizer::new(fx.policy(), principal(), fixture_req(), test_digest);
-            assert!(matches!(got, Err(AuthzBasicError::Load(_))), "{got:?}");
+            for loose in [fx.policy(), fx.bindings()] {
+                write(&fx.policy(), EMPTY);
+                fx.bind("admin");
+                std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o666)).unwrap();
+                let got =
+                    HermeticAuthorizer::new(fx.paths(), principal(), fixture_req(), test_digest);
+                assert!(
+                    matches!(got, Err(AuthzBasicError::Load(_))),
+                    "{loose:?}: {got:?}"
+                );
+            }
         }
     }
 
@@ -2156,25 +2401,21 @@ mod tests {
             ("gus", 1002),
             ("mallory", 666),
         ];
-        const EXPLICIT: &str =
-            "bindings: { admin: [alex], user: [ursula], guest: [gus], adversary: [mallory] }\n";
+        const EXPLICIT: &str = "schema_version: 1\nbindings: { admin: [alex], user: [ursula], guest: [gus], adversary: [mallory] }\n";
         const GRANTS: &str = "roles: { admin: { allow: [admin.status, admin.subject.list, session.prompt], deny: [admin.config.show] }, user: { allow: [session.prompt] } }\ndestinations: { user: { allow: [\"provider:openai\"] }, admin: { allow: [\"provider:anthropic\"] } }\n";
 
         fn policies() -> Vec<(&'static str, PolicySource)> {
             let uids: &[(&str, u32)] = BASE_UIDS;
             vec![
-                ("absent", source_with(SHIPPED, &[])),
+                ("absent", source_with(SHIPPED, None, &[])),
                 (
                     "empty",
-                    source_with(&format!("{SHIPPED}bindings: {{}}\n"), &[]),
+                    source_with(SHIPPED, Some("schema_version: 1\nbindings: {}\n"), &[]),
                 ),
-                (
-                    "explicit",
-                    source_with(&format!("{SHIPPED}{EXPLICIT}"), uids),
-                ),
+                ("explicit", source_with(SHIPPED, Some(EXPLICIT), uids)),
                 (
                     "explicit+grants",
-                    source_with(&format!("{SHIPPED}{EXPLICIT}{GRANTS}"), uids),
+                    source_with(&format!("{SHIPPED}{GRANTS}"), Some(EXPLICIT), uids),
                 ),
             ]
         }
@@ -2341,7 +2582,7 @@ mod tests {
             for (variant, src) in policies() {
                 let auth = BasicAuthorizer::from_snapshot(
                     principal(),
-                    PATH.into(),
+                    src.paths().clone(),
                     test_digest,
                     compiled(&src),
                 );
@@ -2476,7 +2717,7 @@ mod tests {
         fn subjects_agree_between_the_file_oracle_and_the_snapshot() {
             let mut seen = Vec::new();
             for (variant, src) in policies() {
-                let oracle = assemble(src.policy().clone(), src.uid_map())
+                let oracle = assemble(src.policy().clone(), src.legacy(), src.uid_map())
                     .unwrap()
                     .roles
                     .as_subject_bindings();

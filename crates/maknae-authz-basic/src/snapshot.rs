@@ -242,18 +242,18 @@ pub fn compile(
             declared.source
         )));
     }
-    let mut loaded: LoadedPolicy = crate::assemble(source.policy().clone(), source.uid_map())
-        .map_err(|()| CompileError::Policy("the policy does not validate".into()))?;
+    let mut loaded: LoadedPolicy =
+        crate::assemble(source.policy().clone(), source.legacy(), source.uid_map())
+            .map_err(|()| CompileError::Policy("the policy does not validate".into()))?;
 
     let revision = persisted.revision();
     let mut ids = BTreeMap::new();
     for n in persisted.nodes() {
         ids.insert((n.kind, n.key.clone()), n.id);
     }
-    let source_id = ids
-        .get(&(CONFIG_SOURCE, declared.source.clone()))
-        .copied()
-        .ok_or_else(|| CompileError::Identity("no policy source node".into()))?;
+    if !ids.contains_key(&(CONFIG_SOURCE, declared.source.clone())) {
+        return Err(CompileError::Identity("no bindings source node".into()));
+    }
     let mut c = Compiler {
         nodes: persisted.nodes().to_vec(),
         edges: persisted.edges().to_vec(),
@@ -261,11 +261,12 @@ pub fn compile(
         edge: persisted.edges().iter().map(|e| e.id.0).max().unwrap_or(0),
         label: stored.layer.label.clone(),
         revision,
-        source_id,
-        source: declared.source.clone(),
+        source_id: NodeId(0),
+        source: source.policy_source().to_string(),
         ids,
         index: BTreeMap::new(),
     };
+    c.source_id = c.add_node(CONFIG_SOURCE, c.source.clone(), Attrs::new());
 
     for cn in vocabulary.iter() {
         if c.ids.contains_key(&(cn.kind, cn.key.clone())) {
@@ -412,9 +413,10 @@ mod tests {
     use maknae_graph::schema::CompiledNode;
 
     const SHIPPED: &str = include_str!("../../../packaging/common/authz.yaml");
-    const BINDINGS: &str = "bindings:\n  admin: [\"alex\"]\n  user: [\"ursula\"]\n  guest: [\"gus\"]\n  adversary: [\"mallory\"]\n";
+    const BINDINGS: &str = "schema_version: 1\nbindings:\n  admin: [\"alex\"]\n  user: [\"ursula\"]\n  guest: [\"gus\"]\n  adversary: [\"mallory\"]\n";
     const WITH_GRANTS_AND_DESTS: &str = "schema_version: 1\nroles:\n  admin:\n    allow: [\"admin.status\"]\n    deny: [\"admin.config.show\"]\n  user:\n    allow: [\"session.prompt\"]\ndestinations:\n  user:\n    allow: [\"provider:openai\"]\n";
     const PATH: &str = "/etc/maknae/authz.yaml";
+    const DIR: &str = "/etc/maknae";
     const LABEL: &str = "UNCLASSIFIED";
 
     fn uids(pairs: &[(&str, u32)]) -> BTreeMap<String, u32> {
@@ -432,9 +434,16 @@ mod tests {
         maknae_config::parse_authz(body).unwrap()
     }
 
-    fn source(body: &str) -> PolicySource {
+    fn source(authz: &str) -> PolicySource {
+        source_with(authz, None)
+    }
+
+    fn source_with(authz: &str, bindings: Option<&str>) -> PolicySource {
         PolicySource::from_parts(
-            parse(body),
+            parse(authz),
+            bindings.map_or_else(maknae_config::Bindings::missing, |b| {
+                maknae_config::parse_bindings(b).unwrap()
+            }),
             uids(&[
                 ("alex", 1000),
                 ("ursula", 1001),
@@ -443,7 +452,7 @@ mod tests {
                 ("root", 0),
             ]),
             principal(),
-            PATH.into(),
+            crate::PolicyPaths::in_dir(std::path::Path::new(DIR)),
         )
         .unwrap()
     }
@@ -474,7 +483,7 @@ mod tests {
     }
 
     fn shipped_with_bindings() -> PolicySource {
-        source(&format!("{SHIPPED}{BINDINGS}"))
+        source_with(SHIPPED, Some(BINDINGS))
     }
 
     fn str_attr<'a>(n: &'a NodeRecord, k: &str) -> Option<&'a str> {
@@ -497,7 +506,7 @@ mod tests {
             snap(&s).policy_sha256(test_digest),
             hex(&test_digest(lines.as_bytes()))
         );
-        let edited = source(&format!("{SHIPPED}{BINDINGS}").replacen("Read(", "Write(", 1));
+        let edited = source_with(&SHIPPED.replacen("Read(", "Write(", 1), Some(BINDINGS));
         assert_ne!(
             snap(&edited).policy_sha256(test_digest),
             snap(&s).policy_sha256(test_digest)
@@ -600,6 +609,34 @@ mod tests {
             g.lookup(SUBJECT, "uid:666").map(|n| n.id),
             snap.persisted().lookup(SUBJECT, "uid:666").map(|n| n.id)
         );
+    }
+
+    #[test]
+    fn rule_citations_still_name_authz_yaml_sections() {
+        let s = shipped_with_bindings();
+        let snap = snap(&s);
+        let deny = snap
+            .cite(&Cited::Path {
+                effect: Effect::Deny,
+                source: "Read(~/.ssh/**)".into(),
+            })
+            .unwrap();
+        assert_eq!(deny.section, "/etc/maknae/authz.yaml#permissions");
+        let g = snap.graph();
+        let authz = g
+            .lookup(CONFIG_SOURCE, "/etc/maknae/authz.yaml")
+            .expect("in-memory policy source");
+        let bindings = g
+            .lookup(CONFIG_SOURCE, "/etc/maknae/bindings.yaml")
+            .expect("persisted identity source");
+        assert_ne!(authz.id, bindings.id);
+        assert!(g
+            .lookup(SECTION, "/etc/maknae/bindings.yaml#bindings")
+            .is_some());
+        assert!(snap
+            .persisted()
+            .lookup(CONFIG_SOURCE, "/etc/maknae/authz.yaml")
+            .is_none());
     }
 
     #[test]
@@ -788,7 +825,7 @@ mod tests {
         let vocab = compiled_set(LABEL);
         let good = s.identity_layer(LABEL, d.get("bindings").copied());
         let mut other_source = good.clone();
-        other_source.source = "/other/authz.yaml".into();
+        other_source.source = "/other/bindings.yaml".into();
         let mut other_subjects = good.clone();
         other_subjects
             .subjects
@@ -902,21 +939,30 @@ mod tests {
 
     #[test]
     fn an_alias_uid_under_two_roles_refuses_at_load_naming_both_names() {
+        let paths = || crate::PolicyPaths::in_dir(std::path::Path::new(DIR));
         let got = PolicySource::from_parts(
-            parse("schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary: [\"toor\"]\n"),
+            parse("schema_version: 1\n"),
+            maknae_config::parse_bindings(
+                "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary: [\"toor\"]\n",
+            )
+            .unwrap(),
             uids(&[("root", 0), ("toor", 0)]),
             principal(),
-            PATH.into(),
+            paths(),
         );
         assert!(
             matches!(got, Err(AuthzBasicError::Bindings(ref m)) if m.contains("'root'") && m.contains("'toor'") && m.contains("uid 0")),
             "{got:?}"
         );
         let same_role = PolicySource::from_parts(
-            parse("schema_version: 1\nbindings:\n  admin: [\"root\", \"toor\"]\n"),
+            parse("schema_version: 1\n"),
+            maknae_config::parse_bindings(
+                "schema_version: 1\nbindings:\n  admin: [\"root\", \"toor\"]\n",
+            )
+            .unwrap(),
             uids(&[("root", 0), ("toor", 0)]),
             principal(),
-            PATH.into(),
+            paths(),
         )
         .unwrap();
         let layer = same_role.identity_layer(LABEL, Some([1; 32]));
@@ -937,7 +983,12 @@ mod tests {
             &d,
         )
         .unwrap();
-        let file = crate::assemble(same_role.policy().clone(), same_role.uid_map()).unwrap();
+        let file = crate::assemble(
+            same_role.policy().clone(),
+            same_role.legacy(),
+            same_role.uid_map(),
+        )
+        .unwrap();
         assert_eq!(
             snap.loaded.roles.role_for(0, 501),
             file.roles.role_for(0, 501)
@@ -953,7 +1004,7 @@ mod tests {
         let s = shipped_with_bindings();
         let snap = snap(&s);
         assert!(matches!(snap.loaded.roles, Roles::Graph(_)));
-        let file = crate::assemble(s.policy().clone(), s.uid_map()).unwrap();
+        let file = crate::assemble(s.policy().clone(), s.legacy(), s.uid_map()).unwrap();
         assert_eq!(snap.subjects(), file.roles.as_subject_bindings());
         assert!(snap.subjects().is_some());
         let none = source(SHIPPED);
@@ -965,7 +1016,7 @@ mod tests {
 
     #[test]
     fn compile_is_deterministic() {
-        let s = source(&format!("{WITH_GRANTS_AND_DESTS}{BINDINGS}"));
+        let s = source_with(WITH_GRANTS_AND_DESTS, Some(BINDINGS));
         let a = snap(&s);
         let b = snap(&s);
         assert_eq!(encode(a.graph()), encode(b.graph()));
@@ -1068,11 +1119,11 @@ mod tests {
 
     #[test]
     fn every_citation_the_decision_core_emits_resolves_in_the_index() {
-        let s = source(&format!(
-            "{SHIPPED}{BINDINGS}roles:\n  admin:\n    allow: [\"admin.status\", \"session.prompt\"]\n    deny: [\"admin.config.show\"]\n  user:\n    allow: [\"session.prompt\"]\n    deny: [\"session.prompt\"]\ndestinations:\n  admin:\n    allow: [\"provider:openai\"]\n"
-        ));
+        let s = source_with(&format!(
+            "{SHIPPED}roles:\n  admin:\n    allow: [\"admin.status\", \"session.prompt\"]\n    deny: [\"admin.config.show\"]\n  user:\n    allow: [\"session.prompt\"]\n    deny: [\"session.prompt\"]\ndestinations:\n  admin:\n    allow: [\"provider:openai\"]\n"
+        ), Some(BINDINGS));
         let snap = snap(&s);
-        let oracle = crate::assemble(s.policy().clone(), s.uid_map()).unwrap();
+        let oracle = crate::assemble(s.policy().clone(), s.legacy(), s.uid_map()).unwrap();
         let cases = [
             sec_request(
                 1000,

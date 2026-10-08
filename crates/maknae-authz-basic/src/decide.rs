@@ -1759,16 +1759,25 @@ mod tests {
     /// would prove the arm and hide the parse-and-validate path feeding it.
     fn lp_with_grants(roles_block: &str, uid_map: &[(&str, u32)]) -> LoadedPolicy {
         let body = format!(
-            "schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/**)\"\n  deny:\n    - \"Read(~/.ssh/**)\"\nbindings:\n  admin: [\"alex\"]\n  user: [\"ursula\"]\n  guest: [\"gwen\"]\n  adversary: [\"adam\"]\n{roles_block}"
+            "schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/**)\"\n  deny:\n    - \"Read(~/.ssh/**)\"\n{roles_block}"
         );
         let policy = maknae_config::parse_authz(&body).unwrap();
         let lookup: UidMap = uid_map.iter().map(|(n, u)| (n.to_string(), *u)).collect();
+        let bindings = [
+            ("admin", "alex"),
+            ("user", "ursula"),
+            ("guest", "gwen"),
+            ("adversary", "adam"),
+        ]
+        .into_iter()
+        .map(|(r, n)| (r.to_string(), vec![n.to_string()]))
+        .collect();
         // Bound BEFORE the literal: `policy` is moved into it. This is also the
         // killer for the `Ok(DestinationGrants::default())` mutant on
         // `validate_destinations`: every permit test builds its allowlist here.
         let destinations = crate::validate_destinations(&policy.destinations).unwrap();
         LoadedPolicy {
-            roles: Roles::File(resolve(&policy.bindings, &lookup).unwrap()),
+            roles: Roles::File(resolve(&Some(bindings), &lookup).unwrap()),
             action_grants: crate::validate_grants(&policy.action_grants).unwrap(),
             destinations,
             policy,

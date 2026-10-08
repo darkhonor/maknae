@@ -29,6 +29,10 @@
 //! elsewhere that treats `authz.yaml` as "the capability grammar" is describing
 //! one of the three.)*
 //!
+//! *(Corrected 2026-10-08, #496: `bindings:` moved to its own root-owned file,
+//! `bindings.yaml` ([`crate::parse_bindings`]); `authz.yaml` refuses the key.
+//! The surfaces here are `permissions:`, `roles:` and `destinations:`.)*
+//!
 //! **The grammar is a durable contract:** operators write policy files against
 //! it and it is hard to change once shipped, so parse/match semantics are
 //! specified precisely (spec §7) and pinned exhaustively by test.
@@ -85,14 +89,8 @@ pub struct RawActionGrants {
 pub struct AuthzPolicy {
     pub allow: Vec<Pattern>,
     pub deny: Vec<Pattern>,
-    /// Role → member-identity lists from the additive `bindings:` key (#85).
-    /// `None` = key ABSENT (defaults apply); `Some` — even empty — = key
-    /// PRESENT (defaults suppressed entirely; spec §3 precedence). Raw strings:
-    /// role-name semantics belong to `maknae-authz-basic`, never this crate
-    /// (grammar, not decision).
-    pub bindings: Option<std::collections::BTreeMap<String, Vec<String>>>,
     /// Role → action-term grants from the additive `roles:` key (#162).
-    /// **A plain map, NOT an `Option`** — unlike `bindings`, an absent `roles:`
+    /// **A plain map, NOT an `Option`**: an absent `roles:`
     /// and an empty one behave identically under the additivity ruling, so an
     /// `Option` would make the `None`↔`Some(empty)` mutant undetectable by
     /// construction: reported MISSED with no killable test available, and the
@@ -533,6 +531,8 @@ pub enum AuthzError {
     /// (root not a mapping, `permissions` not a mapping, an `allow`/`deny`
     /// entry not a string, …).
     Yaml(String),
+    /// `bindings:` moved to bindings.yaml (#496).
+    BindingsMoved,
 }
 
 impl std::fmt::Display for AuthzError {
@@ -553,6 +553,9 @@ impl std::fmt::Display for AuthzError {
             AuthzError::NotRootOwned => write!(f, "authz.yaml is not owned by root (uid 0)"),
             AuthzError::Io(m) => write!(f, "authz i/o error: {m}"),
             AuthzError::Yaml(m) => write!(f, "authz yaml error: {m}"),
+            AuthzError::BindingsMoved => f.write_str(
+                "authz.yaml no longer carries `bindings:`; move the block unchanged to bindings.yaml in the same directory (docs/upgrading.md)",
+            ),
         }
     }
 }
@@ -615,33 +618,12 @@ fn parse_pattern(spec: &str) -> Result<Pattern, AuthzError> {
     }
 }
 
-/// A `bindings:` member list: a sequence of strings, refused otherwise with a
-/// bindings-specific message (NOT `str_seq`'s "permissions list…" text — an
-/// operator debugging a bindings typo must not be sent to the wrong section).
-fn bindings_member_list(v: &Value) -> Result<Vec<String>, AuthzError> {
-    match v {
-        Value::Seq(items) => items
-            .iter()
-            .map(|item| match item {
-                Value::Str(s) => Ok(s.clone()),
-                _ => Err(AuthzError::Yaml(
-                    "bindings member entries must be strings (quote every name; spec §3)".into(),
-                )),
-            })
-            .collect(),
-        _ => Err(AuthzError::Yaml(
-            "bindings member list must be a sequence (write `role: []` for empty)".into(),
-        )),
-    }
-}
-
 /// A `roles.<name>.{allow,deny}` term list: a sequence of strings,
 /// refused otherwise with a roles-specific message. **Not `str_seq`** — whose
 /// text reads "permissions list entries must be strings" and would send an
-/// operator debugging a `roles:` typo to the wrong section of the file. Same
-/// reasoning as [`bindings_member_list`], and the same reason it is a third
-/// function rather than a shared one with a passed-in noun: the message is the
-/// diagnostic, so it is written out where a reader can see it.
+/// operator debugging a `roles:` typo to the wrong section of the file. It is
+/// a separate function rather than a shared one with a passed-in noun: the
+/// message is the diagnostic, so it is written out where a reader can see it.
 /// `destinations:` allow lists: the same YAML-shape checks as `roles_term_list`;
 /// the entry grammar is `destination_entry_is_acceptable`'s, applied by the caller.
 fn destination_list(v: &Value) -> Result<Vec<String>, AuthzError> {
@@ -696,16 +678,13 @@ fn parse_policy(body: &str) -> Result<AuthzPolicy, AuthzError> {
         Value::Map(m) => m,
         _ => return Err(AuthzError::Yaml("authz root must be a mapping".into())),
     };
+    if get(&map, "bindings").is_some() {
+        return Err(AuthzError::BindingsMoved);
+    }
     check_known_keys(
         "authz",
         &map,
-        &[
-            "schema_version",
-            "permissions",
-            "bindings",
-            "roles",
-            "destinations",
-        ],
+        &["schema_version", "permissions", "roles", "destinations"],
     )?;
     let sections = map
         .iter()
@@ -748,30 +727,13 @@ fn parse_policy(body: &str) -> Result<AuthzPolicy, AuthzError> {
         .map(|s| parse_pattern(s))
         .collect::<Result<Vec<_>, _>>()?;
 
-    let bindings = match get(&map, "bindings") {
-        None => None,
-        Some(Value::Map(bm)) => {
-            let mut out = std::collections::BTreeMap::new();
-            for (role, members) in bm {
-                out.insert(role.clone(), bindings_member_list(members)?);
-            }
-            Some(out)
-        }
-        Some(_) => {
-            return Err(AuthzError::Yaml(
-                "bindings section must be a map of role to member list".into(),
-            ))
-        }
-    };
-
     let action_grants = match get(&map, "roles") {
         None => std::collections::BTreeMap::new(),
         Some(Value::Map(rm)) => {
             let mut out = std::collections::BTreeMap::new();
             for (role, body) in rm {
                 // A bare `admin:` parses Null, not an empty map. Refuse rather
-                // than silently treating it as "no grants" — fail-closed, and
-                // the same stance `bindings` takes on a bare member list.
+                // than silently treating it as "no grants" — fail-closed.
                 let rb = match body {
                     Value::Map(m) => m,
                     _ => {
@@ -844,7 +806,6 @@ fn parse_policy(body: &str) -> Result<AuthzPolicy, AuthzError> {
     Ok(AuthzPolicy {
         allow,
         deny,
-        bindings,
         action_grants,
         destinations,
         allow_sources: allow_raw,
@@ -1013,7 +974,7 @@ pub fn load_authz(path: &Path) -> Result<AuthzPolicy, AuthzError> {
 mod tests {
     use super::*;
 
-    const DEST_BASE: &str = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"alex\"]\n  user: [\"ursula\"]\n";
+    const DEST_BASE: &str = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n";
     fn parse_dest(body: &str) -> Result<AuthzPolicy, AuthzError> {
         parse_authz(body)
     }
@@ -2073,32 +2034,26 @@ mod tests {
 
     #[test]
     fn section_canonical_ignores_comments_whitespace_and_key_order_but_not_values() {
-        let a = parse_authz("schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\n  deny: []\nbindings:\n  admin: [\"alex\"]\n  user: []\n").unwrap();
-        let b = parse_authz("# comment\nschema_version: 1\n\nbindings:\n  user: []\n  admin:\n    - \"alex\"   # trailing\npermissions:\n  deny: []\n  allow:\n    - \"Read(~/**)\"\n").unwrap();
-        assert_eq!(
-            a.section_canonical("bindings"),
-            b.section_canonical("bindings")
-        );
+        let a = parse_authz("schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\n  deny: []\nroles:\n  admin:\n    allow: [\"admin.status\"]\n  user: {}\n").unwrap();
+        let b = parse_authz("# comment\nschema_version: 1\n\nroles:\n  user: {}\n  admin:\n    allow:\n      - \"admin.status\"   # trailing\npermissions:\n  deny: []\n  allow:\n    - \"Read(~/**)\"\n").unwrap();
+        assert_eq!(a.section_canonical("roles"), b.section_canonical("roles"));
         assert_eq!(
             a.section_canonical("permissions"),
             b.section_canonical("permissions")
         );
         assert_eq!(
-            a.section_canonical("bindings"),
-            Some(r#"{"admin":["alex"],"user":[]}"#)
+            a.section_canonical("roles"),
+            Some(r#"{"admin":{"allow":["admin.status"]},"user":{}}"#)
         );
-        let c = parse_authz("schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"alex\"]\n  user: [\"u\"]\n").unwrap();
-        assert_ne!(
-            a.section_canonical("bindings"),
-            c.section_canonical("bindings")
-        );
-        assert_eq!(a.section_canonical("roles"), None);
+        let c = parse_authz("schema_version: 1\npermissions:\n  allow: []\n  deny: []\nroles:\n  admin:\n    allow: [\"admin.status\"]\n  user:\n    allow: [\"admin.status\"]\n").unwrap();
+        assert_ne!(a.section_canonical("roles"), c.section_canonical("roles"));
+        assert_eq!(a.section_canonical("destinations"), None);
         let empty =
-            parse_authz("schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings: {}\n")
+            parse_authz("schema_version: 1\npermissions:\n  allow: []\n  deny: []\nroles: {}\n")
                 .unwrap();
-        assert_eq!(empty.section_canonical("bindings"), Some("{}"));
+        assert_eq!(empty.section_canonical("roles"), Some("{}"));
         let keys: Vec<&str> = a.sections().map(|(k, _)| k).collect();
-        assert_eq!(keys, ["bindings", "permissions", "schema_version"]);
+        assert_eq!(keys, ["permissions", "roles", "schema_version"]);
         let values: Vec<&str> = a.sections().map(|(_, v)| v).collect();
         assert_eq!(values[2], "1");
     }
@@ -2182,58 +2137,18 @@ mod tests {
         );
     }
 
-    // ---- bindings grammar (#85): additive, role-agnostic, fail-closed ----
-
     #[test]
-    fn bindings_key_absent_is_none() {
-        // Absent vs present-empty is load-bearing (spec §3 defaults precedence):
-        // an absent key means defaults apply; a present key suppresses them.
-        let p = parse_authz(SHIPPED_DEFAULT).unwrap();
-        assert!(p.bindings.is_none());
-    }
-
-    #[test]
-    fn bindings_parse_role_to_string_lists() {
-        let body = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"alex\"]\n  guest: []\n";
-        let p = parse_authz(body).unwrap();
-        let b = p.bindings.unwrap();
-        assert_eq!(b["admin"], vec!["alex".to_string()]);
-        assert!(b["guest"].is_empty());
-    }
-
-    #[test]
-    fn bindings_present_but_empty_map_is_some_empty() {
-        let body = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings: {}\n";
-        let p = parse_authz(body).unwrap();
-        assert_eq!(p.bindings, Some(std::collections::BTreeMap::new()));
-    }
-
-    #[test]
-    fn bindings_non_string_member_refused_with_bindings_message() {
-        let body =
-            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [1001]\n";
-        let e = parse_authz(body).unwrap_err();
-        assert!(
-            matches!(&e, AuthzError::Yaml(m) if m.contains("bindings")),
-            "error must name bindings, not permissions: {e:?}"
-        );
-    }
-
-    #[test]
-    fn bindings_null_member_list_refused_with_bindings_message() {
-        // A bare `guest:` parses as Null, not an empty sequence — refuse, do
-        // not silently treat as empty (fail-closed; spec §3 says write `[]`).
-        let body =
-            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  guest:\n";
-        let e = parse_authz(body).unwrap_err();
-        assert!(matches!(&e, AuthzError::Yaml(m) if m.contains("bindings")));
-    }
-
-    #[test]
-    fn bindings_non_map_refused() {
-        let body = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings: [admin]\n";
-        let e = parse_authz(body).unwrap_err();
-        assert!(matches!(&e, AuthzError::Yaml(m) if m.contains("bindings")));
+    fn a_bindings_key_refuses_and_names_bindings_yaml() {
+        for body in [
+            "schema_version: 1\nbindings:\n  admin: [\"alex\"]\n",
+            "schema_version: 1\nbindings: {}\n",
+            "schema_version: 1\npermissions:\n  allow: []\nbindings:\n  adversary: []\n",
+        ] {
+            let e = parse_authz(body).unwrap_err();
+            assert_eq!(e, AuthzError::BindingsMoved, "{body:?}");
+            assert!(e.to_string().contains("bindings.yaml"));
+            assert!(e.to_string().contains("authz.yaml"));
+        }
     }
 
     // ---- `roles:` action grants — STRUCTURAL parse only (#162) ----
@@ -2316,7 +2231,7 @@ mod tests {
     #[test]
     fn roles_null_term_list_refused_with_roles_message() {
         // A bare `allow:` parses Null, not an empty sequence. Refuse; do not
-        // silently treat as empty — same fail-closed stance as bindings.
+        // silently treat as empty.
         let body = format!("{PREAMBLE}roles:\n  admin:\n    allow:\n");
         let e = parse_authz(&body).unwrap_err();
         assert!(
@@ -2395,16 +2310,10 @@ mod tests {
     }
 
     #[test]
-    fn roles_does_not_disturb_bindings_or_permissions() {
-        // The two additive surfaces are independent; parsing one must not
-        // suppress or alter the other.
-        let body = "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\n  deny: []\nbindings:\n  admin: [\"alex\"]\nroles:\n  admin:\n    allow: [\"admin.status\"]\n";
+    fn roles_does_not_disturb_permissions() {
+        let body = "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\n  deny: []\nroles:\n  admin:\n    allow: [\"admin.status\"]\n";
         let p = parse_authz(body).unwrap();
         assert_eq!(p.allow.len(), 1);
-        assert_eq!(
-            p.bindings.as_ref().and_then(|b| b.get("admin")),
-            Some(&vec!["alex".to_string()])
-        );
         assert_eq!(
             p.action_grants["admin"].allow,
             vec!["admin.status".to_string()]

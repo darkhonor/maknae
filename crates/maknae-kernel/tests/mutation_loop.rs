@@ -679,8 +679,11 @@ async fn a_replacement_grant_waits_for_durable_intent_and_the_daemon_never_write
 #[tokio::test]
 async fn mkdir_every_prefix_is_decided_and_alias_deny_uses_verified_path() {
     let fx = Fixture::new("mkdir_prefix_deny", "Write");
-    let policy = format!("schema_version: 1\npermissions:\n  allow:\n    - \"Write(~/**)\"\n  deny:\n    - \"Write(~/blocked)\"\nbindings:\n  user: [\"{}\"]\n", common::euid_name());
-    std::fs::write(fx.root.join("authz.yaml"), policy).unwrap();
+    std::fs::write(
+        fx.paths().authz,
+        "schema_version: 1\npermissions:\n  allow:\n    - \"Write(~/**)\"\n  deny:\n    - \"Write(~/blocked)\"\n",
+    )
+    .unwrap();
     let records = Records::new(0);
     let (mut client, task) = namespace_start(
         &fx,
@@ -737,10 +740,10 @@ async fn mkdir_every_prefix_is_decided_and_alias_deny_uses_verified_path() {
 async fn user_and_admin_share_write_policy_and_bad_mkdir_suffix_cannot_grant() {
     for role in ["user", "admin"] {
         let fx = Fixture::new(&format!("same_policy_{role}"), "Write");
-        let policy = std::fs::read_to_string(fx.root.join("authz.yaml"))
+        let bindings = std::fs::read_to_string(fx.paths().bindings)
             .unwrap()
             .replace("  user:", &format!("  {role}:"));
-        std::fs::write(fx.root.join("authz.yaml"), policy).unwrap();
+        std::fs::write(fx.paths().bindings, bindings).unwrap();
         let target = fx.root.join("unique-existing-write-sentinel");
         std::fs::write(&target, b"before").unwrap();
         let response = drive(&fx, b"same-rule", Records::new(0), true)
@@ -1715,11 +1718,11 @@ async fn a_second_user_cannot_delete_in_the_enrolled_home() {
 async fn a_requester_cannot_delete_their_own_home() {
     let b = common::second_home("mutation_delete_home");
     let fx = Fixture::new("delete_home", "Write").with_requester_home(Some(b.0.clone()));
-    let policy = format!(
-        "schema_version: 1\npermissions:\n  allow:\n    - \"Write(/**)\"\n  deny: []\nbindings:\n  user: [\"{}\"]\n",
-        common::euid_name()
-    );
-    std::fs::write(fx.root.join("authz.yaml"), policy).unwrap();
+    std::fs::write(
+        fx.paths().authz,
+        "schema_version: 1\npermissions:\n  allow:\n    - \"Write(/**)\"\n  deny: []\n",
+    )
+    .unwrap();
     let (result, record) = second_subject_attempt(
         &fx,
         Verb::FsDelete {

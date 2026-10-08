@@ -968,15 +968,28 @@ mod tests {
         assert_eq!(std::fs::read(target).unwrap(), b"sentinel");
     }
     fn fixture_pdp(fx: &Fixture) -> crate::Composition<maknae_authz_basic::HermeticAuthorizer> {
-        let path = fx.root.join("authz.yaml");
+        let paths = maknae_authz_basic::PolicyPaths::in_dir(&fx.root);
         let name = nix::unistd::User::from_uid(nix::unistd::geteuid())
             .expect("NSS")
             .expect("the test euid has a passwd entry")
             .name;
-        std::fs::write(&path, format!("schema_version: 1\npermissions:\n  allow:\n    - \"Write(~/**)\"\n  deny: []\nbindings:\n  user: [\"{name}\"]\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let files = [
+            (
+                &paths.authz,
+                "schema_version: 1\npermissions:\n  allow:\n    - \"Write(~/**)\"\n  deny: []\n"
+                    .to_string(),
+            ),
+            (
+                &paths.bindings,
+                format!("schema_version: 1\nbindings:\n  user: [\"{name}\"]\n"),
+            ),
+        ];
+        for (path, body) in files {
+            std::fs::write(path, body).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        }
         let baseline = maknae_authz_basic::HermeticAuthorizer::new(
-            path,
+            paths,
             fx.principal.clone(),
             maknae_config::TargetRequired {
                 owner: None,
