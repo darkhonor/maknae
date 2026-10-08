@@ -1234,6 +1234,7 @@ async fn a_group_writable_home_disables_reads_at_the_anchor_boundary() {
     fx.write_policy(SHIPPED_POLICY);
     std::fs::write(fx.dir.join("notes.txt"), b"x").unwrap();
     let target = fx.dir.join("notes.txt").to_string_lossy().into_owned();
+    let authorizer = fx.authorizer();
     // 2770-style home: a maknae-group member could plant aliases — refused.
     std::fs::set_permissions(&fx.dir, std::fs::Permissions::from_mode(0o770)).unwrap();
 
@@ -1241,7 +1242,7 @@ async fn a_group_writable_home_disables_reads_at_the_anchor_boundary() {
     let me = nix::unistd::geteuid().as_raw();
     let frame = read_attempt(
         &fx.dir,
-        fx.authorizer(),
+        authorizer,
         emit.clone(),
         me,
         maknae_proto::Verb::Read {

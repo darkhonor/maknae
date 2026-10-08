@@ -204,6 +204,8 @@ files = [
   # can read/exec — exactly the T1 line-drawing rule. In [t1].files ONLY (own
   # 95% floor; NOT ratchet_cohort).
   "crates/maknae-config/src/authz.rs",
+  # #496: the identity file's grammar and hardened read; a mis-parsed entry binds or contains the wrong subject.
+  "crates/maknae-config/src/bindings.rs",
   # #489: the canonical JSON each authz.yaml section's digest is taken over; a wrong
   # byte makes an unchanged section look edited, or an edited one look unchanged.
   "crates/maknae-config/src/value.rs",
