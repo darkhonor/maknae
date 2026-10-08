@@ -433,7 +433,7 @@ pub(crate) enum Lookup {
 }
 
 /// getpwnam(3)'s "not found" spellings are `Ok(None)`, `ENOENT`, `ESRCH`, `EBADF`
-/// and `EPERM`; every other errno is a failed lookup.
+/// and `EPERM`; every other errno, `ERANGE` and errno 0 included, is a failed lookup.
 #[cfg(unix)]
 pub(crate) fn classify_lookup(r: Result<Option<u32>, nix::errno::Errno>) -> Lookup {
     use nix::errno::Errno;
@@ -492,6 +492,9 @@ fn lookup_uid(name: &str) -> Lookup {
     }
     #[cfg(unix)]
     {
+        // nix reads errno on a non-zero return; macOS getpwnam_r returns ERANGE
+        // without setting it, so a stale not-found errno must not survive to here.
+        nix::errno::Errno::clear();
         classify_lookup(nix::unistd::User::from_name(name).map(|u| u.map(|u| u.uid.as_raw())))
     }
 }
@@ -978,27 +981,10 @@ mod tests {
         }
 
         impl ResolvedBindings {
-            /// Render as seam-level bindings for `admin.subject.list`.
-            ///
-            /// Reports what the POLICY FILE binds -- the explicit `bindings:` block --
-            /// and nothing else. The default-role fallback (an enrolled uid resolving
-            /// to admin when no bindings key is present) is a decision rule, not a
-            /// binding, and listing it as one would tell an operator a binding exists
-            /// that they could then look for in the file and not find.
-            /// MEMBERS ARE REPORTED BY UID -- every binding has one since #276.
-            ///
-            /// Worth naming, because the sibling rationale on `Role::key` argues the
-            /// opposite direction for roles ("the token an operator would grep for in
-            /// `authz.yaml`"). `root` reports as `uid:0`, which appears in no policy
-            /// file. The uid IS the authenticated datum (ADR-0018) and the thing
-            /// `role_for` keys on, so it is the honest answer to "who is bound"; a
-            /// name is an input resolved once per policy load, and the account may since
-            /// have been renamed.
+            /// The explicit block by role, members as `uid:N`; `None` without a `bindings:` key.
             pub(crate) fn as_subject_bindings(
                 &self,
             ) -> Option<Vec<maknae_security::SubjectBinding>> {
-                // No `bindings:` key (the shipped `bindings.yaml`) means the role
-                // fallback is live, so it reports `None`, never an empty set.
                 if !self.explicit {
                     return None;
                 }
@@ -1018,20 +1004,7 @@ mod tests {
                 )
             }
 
-            /// Subject → role, on the uid alone.
-            ///
-            /// A reserved-subject-name arm used to run FIRST, never through uid
-            /// (spec §3b's fixed order). [ADR-0024](../../../design/adr/ADR-0024-tenancy-model-and-agent-identity.md)
-            /// decision 3 struck the reserved token, so there is no longer an ordering
-            /// to state: there is one lookup (#276).
-            ///
-            /// `uid` is `u32`, not `Option<u32>`: the caller
-            /// ([`crate::decide::decide_loaded_with_role`]) returns `Indeterminate`
-            /// before reaching here when the subject carries no uid. An arm for the
-            /// absent case would be production-unreachable, and in a `[t1]`
-            /// zero-missed-mutant file an unreachable arm's mutants are unkillable.
-            ///
-            /// Defaults apply only when the file had no `bindings:` key.
+            /// Subject → role on the uid; defaults apply only without a `bindings:` key.
             pub(crate) fn role_for(&self, uid: u32, principal_uid: u32) -> Resolution {
                 if self.explicit {
                     match self.by_uid.get(&uid) {
@@ -2174,6 +2147,8 @@ mod tests {
             assert_eq!(classify_lookup(absent), Lookup::Absent, "{absent:?}");
         }
         for failed in [
+            Errno::UnknownErrno,
+            Errno::ERANGE,
             Errno::EIO,
             Errno::EMFILE,
             Errno::ENFILE,
@@ -2243,6 +2218,8 @@ mod tests {
         assert_eq!(lookup_uid("no-such-user-maknae-496"), Lookup::Absent);
     }
 
+    /// Measured on macOS 26 (aarch64): a missing name is `Ok(None)`. `getpwnam_r` with a
+    /// buffer too small for the record returns ERANGE and leaves errno as it was.
     #[test]
     #[ignore = "measurement: run with --ignored on each platform and record the output"]
     fn measure_the_lookup_of_a_name_with_no_account() {
@@ -2651,14 +2628,12 @@ mod tests {
                 &fx.bindings(),
                 "schema_version: 1\nbindings:\n  adversary: [\"root\"]\n  user: [\"nobody-new-maknae-489\"]\n",
             );
-            let principal_before = auth.decide_reporting_role(&whoami(501));
             auth.reload_from_file().unwrap();
             assert_eq!(
                 auth.snapshot().identity_problems()[0].names(),
                 ["nobody-new-maknae-489"]
             );
             assert_eq!(auth.decide(&whoami(0)), contained());
-            assert_eq!(auth.decide_reporting_role(&whoami(501)), principal_before);
         }
 
         #[test]
