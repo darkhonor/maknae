@@ -96,8 +96,8 @@ install -D -m 0644 %{SOURCE6} %{buildroot}%{_sysconfdir}/fapolicyd/trust.d/makna
 
 # Config tree (final ownership set via %attr in %files)
 install -D -m 0640 %{SOURCE8} %{buildroot}%{_sysconfdir}/maknae/authz.yaml
-install -D -m 0640 %{SOURCE13} %{buildroot}%{_sysconfdir}/maknae/bindings.yaml
 install -D -m 0640 %{SOURCE9} %{buildroot}%{_sysconfdir}/maknae/maknae.yaml
+install -D -m 0644 %{SOURCE13} %{buildroot}%{_datadir}/maknae/bindings.yaml
 install -d -m 0750 %{buildroot}%{_sysconfdir}/maknae/private
 # #240b: the deputy's credential set dir (files written by `maknae enroll`).
 install -d -m 0750 %{buildroot}%{_sysconfdir}/maknae/egress
@@ -123,6 +123,15 @@ if [ ! -d "$d" ] || [ -h "$d" ] || ! chown 0:0 "$d" || ! setfacl -P -b "$d" || !
 fi
 # SELinux module + contexts
 semodule -i %{_datadir}/selinux/packages/maknae.pp 2>/dev/null || :
+# Fresh install only (no store yet): a bindings.yaml root removed stays removed, so
+# maknaed's missing-file check still applies.
+B=%{_sysconfdir}/maknae/bindings.yaml
+if [ ! -e "$B" ] && [ ! -h "$B" ] && [ ! -e %{_localstatedir}/lib/maknae/kernel.graph ]; then
+    if ! install -m 0640 -o root -g _maknae %{_datadir}/maknae/bindings.yaml "$B"; then
+        echo "maknae: cannot create $B" >&2
+        exit 1
+    fi
+fi
 restorecon -Rv %{_bindir}/maknaed %{_bindir}/maknae-egress %{_sysconfdir}/maknae %{_sysconfdir}/pki/maknae %{_localstatedir}/log/maknae %{_localstatedir}/lib/maknae 2>/dev/null || :
 # #240b (D3): the egress deputy is in neither root nor _maknae, and the config
 # loader refuses any world bit on /etc/maknae, so it reaches the dir by a user
@@ -185,10 +194,11 @@ fi
 %{_sysusersdir}/maknae.conf
 %{_datadir}/selinux/packages/maknae.pp
 %{_libexecdir}/maknae/maknae-selinux-ports.sh
+%dir %{_datadir}/maknae
+%{_datadir}/maknae/bindings.yaml
 %config(noreplace) %{_sysconfdir}/fapolicyd/trust.d/maknae
 %dir %attr(0750,root,_maknae) %{_sysconfdir}/maknae
 %config(noreplace) %attr(0640,root,_maknae) %{_sysconfdir}/maknae/authz.yaml
-%config(noreplace) %attr(0640,root,_maknae) %{_sysconfdir}/maknae/bindings.yaml
 %config(noreplace) %attr(0640,root,_maknae) %{_sysconfdir}/maknae/maknae.yaml
 %dir %attr(0750,root,_maknae) %{_sysconfdir}/maknae/private
 %dir %attr(0750,root,_maknae-egress) %{_sysconfdir}/maknae/egress

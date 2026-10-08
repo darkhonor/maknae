@@ -6,7 +6,17 @@ Each release that needs an action from you lists it here, newest first. Read eve
 
 ## Bindings move to `bindings.yaml` (#496)
 
-Who holds which role, and who is contained, now lives in its own file, `/etc/maknae/bindings.yaml` ([configuration §2.3](configuration.md#23-bindingsyaml)). `authz.yaml` keeps the grants, the denies and the roles, and no longer accepts a `bindings:` key. The package installs `/etc/maknae/bindings.yaml`, `root:_maknae 0640`, holding `schema_version: 1` and commented examples only.
+Who holds which role, and who is contained, now lives in its own file, `/etc/maknae/bindings.yaml` ([configuration §2.3](configuration.md#23-bindingsyaml)). `authz.yaml` keeps the grants, the denies and the roles, and no longer accepts a `bindings:` key. The deb installs `/etc/maknae/bindings.yaml`, `root:_maknae 0640`, holding `schema_version: 1` and commented examples only. The RPM and the macOS package install that file only on a host with no kernel graph store yet, so **an upgrade of a host that has a store leaves `/etc/maknae/bindings.yaml` absent on RPM and macOS**. Create it before you restart or reload (`/etc/maknae` is root-owned, so nothing else needs holding while you do):
+
+```bash
+# RHEL / Rocky
+sudo install -m 0640 -o root -g _maknae /usr/share/maknae/bindings.yaml /etc/maknae/bindings.yaml
+sudo restorecon /etc/maknae/bindings.yaml
+# macOS
+sudo install -m 0640 -o root -g _maknae /usr/local/share/maknae/defaults/bindings.yaml /etc/maknae/bindings.yaml
+```
+
+While it is absent and the store holds bindings from `authz.yaml`, the daemon refuses to start (exit 3) with `the store holds explicit bindings from authz.yaml; paste the bindings: block into /etc/maknae/bindings.yaml`, once `authz.yaml` no longer carries the block. With no explicit bindings in the store, an absent file is bindings absent and the daemon starts.
 
 **If your `authz.yaml` has no `bindings:` block,** there is nothing to do. The first start records one `graph.transition` (`root-file`) and a `graph.checkpoint` (`transitioned`) at the next store revision, because the store now names `bindings.yaml` as the source of its bindings. Every host writes this pair once.
 
@@ -18,7 +28,7 @@ maknaed: refusing to start: maknae daemon refused to start: the authorization po
 
 systemd and launchd retry every 5 seconds, and each attempt writes a denied `authz` record to the audit trail, until you move the block. A reload of a daemon that is already running the new release refuses with the same cause, and the running policy stands. To move it:
 
-1. Open both files: `sudoedit /etc/maknae/authz.yaml /etc/maknae/bindings.yaml`.
+1. On RPM and macOS, create `/etc/maknae/bindings.yaml` with the commands above if it is absent. Open both files: `sudoedit /etc/maknae/authz.yaml /etc/maknae/bindings.yaml`.
 2. Cut the whole `bindings:` block from `authz.yaml` and paste it, unchanged, under `schema_version: 1` in `bindings.yaml`. Save both.
 3. Restart: `sudo systemctl restart maknaed` (Linux) or `sudo launchctl kickstart -k system/io.maknae.maknaed` (macOS).
 
@@ -34,9 +44,11 @@ Paste the block and start again. Once the store's bindings come from `bindings.y
 
 **Do not remove the block from `authz.yaml` and reload the old daemon before upgrading.** To the old daemon that means no bindings: the enrolled principal becomes admin and every containment is released.
 
-**A `bindings.yaml` you created before this release is kept.** dpkg asks whether to keep it, and keeping it is the default; RPM keeps it and writes the packaged file as `bindings.yaml.rpmnew`; macOS keeps it without asking. Check that it has `schema_version: 1` and is `root:_maknae 0640`.
+**A `bindings.yaml` you created before this release is kept.** dpkg asks whether to keep it, and keeping it is the default; RPM and macOS keep it without asking. Check that it has `schema_version: 1` and is `root:_maknae 0640`.
 
 **Keep your `bindings.yaml` when dpkg asks, on this and every later upgrade.** Answering "install the package maintainer's version" replaces your file with the shipped one, which has no `bindings:` key, and the package then restarts `maknaed`. That is the keyless edit described above: every binding is dropped, the enrolled principal becomes admin, and every containment is released. The start records it (`now holds admin`, and `is no longer contained` for each containment). If it happens, restore your file from dpkg's `bindings.yaml.dpkg-old` and reload.
+
+**A `bindings.yaml` you delete stays deleted across upgrades.** dpkg does not reinstall a conffile you removed, and the RPM and macOS packages create the file only on a host with no kernel graph store. Over explicit bindings the daemon then keeps refusing until you restore the file ([configuration §2.3](configuration.md#23-bindingsyaml)).
 
 **`/etc/maknae` itself is now checked.** Both policy files are read through their directory, which must be owned by root and not group- or other-writable. The packages create it `root:_maknae 0750`, and earlier releases did not check it. A directory changed since then refuses to start (exit 3), naming the directory:
 

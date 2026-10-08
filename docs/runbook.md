@@ -1004,7 +1004,7 @@ UID   ROLE       SUBJECT                 STATE
 -     adversary  trudy (no account)      unresolved adversary (no account, not contained)
 ```
 
-A contained subject that the file also lists under another role is one row, labelled with the name it has under `adversary`; the `containment wins` record names the others. A carried-forward row also lists the names whose bindings it overrides.
+A contained subject is one row, labelled with every name under `adversary` that claims it; the `containment wins` record names any other role it is also listed under. A carried-forward row also lists the names whose bindings it overrides.
 
 `maknae status` prints only the counts by kind, with no names or uids. Each is a separate grant: `admin.subject.list` discloses who holds what, and `admin.status` does not.
 

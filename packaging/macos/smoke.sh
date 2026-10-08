@@ -93,6 +93,9 @@ phase1() {
     grep -qF 'verify "$STATE ownership/mode" "$MUID $MGID 700"' "$HERE/scripts/postinstall" \
         && ok "postinstall verifies the kernel graph state dir" \
         || fail "postinstall does not verify the kernel graph state dir"
+    grep -qxF 'elif [ ! -e "/usr/local/var/db/maknae/state/kernel.graph" ]; then' "$HERE/scripts/postinstall" \
+        && ok "postinstall installs the default bindings.yaml only when no kernel graph store exists" \
+        || fail "postinstall can recreate a bindings.yaml root removed over an existing store"
     local pi="$HERE/scripts/postinstall" hold first last back hfn
     hfn="$(sed -n '/^hold_dir() {$/,/^}$/p' "$pi")"
     case "$hfn" in
