@@ -681,16 +681,54 @@ mod tests {
 
     #[test]
     fn a_baseline_needs_a_named_section() {
+        let g = graph(Some(&baseline()));
+        let audit = id(&g, SECTION, &section_key("audit"));
+        let core = id(&g, SECTION, &section_key("core"));
+        let src = id(&g, CONFIG_SOURCE, BASELINE_SOURCE_KEY);
+        assert_eq!(
+            refusal(&without(&g, &[audit, core])),
+            (src.0, "baseline without a section")
+        );
+        let unnamed = rebuilt(
+            &g,
+            |n| {
+                let mut n = n.clone();
+                if n.id == audit {
+                    n.key = section_key("");
+                }
+                Some(n)
+            },
+            |_| true,
+            vec![],
+        );
+        assert_eq!(
+            refusal(&unnamed),
+            (audit.0, "baseline section without a name")
+        );
+    }
+
+    fn build_refusal(b: &BaselineLayer) -> &'static str {
+        match build(
+            &layer(),
+            Some(b),
+            &persisted_compiled_set("UNCLASSIFIED"),
+            [9; 32],
+            3,
+            ProvenanceKind::RootFile,
+        ) {
+            Err(IdentityError::BaselineAmbiguous { what, .. }) => what,
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_baseline_without_a_named_section_does_not_build() {
         let mut b = baseline();
         b.sections.clear();
-        let g = graph(Some(&b));
-        let src = id(&g, CONFIG_SOURCE, BASELINE_SOURCE_KEY);
-        assert_eq!(refusal(&g), (src.0, "baseline without a section"));
+        assert_eq!(build_refusal(&b), "baseline without a section");
         let mut b = baseline();
         b.sections.insert(String::new(), "{}".into());
-        let g = graph(Some(&b));
-        let unnamed = id(&g, SECTION, &section_key(""));
-        assert_eq!(refusal(&g), (unnamed.0, "baseline section without a name"));
+        assert_eq!(build_refusal(&b), "baseline section without a name");
     }
 
     #[test]

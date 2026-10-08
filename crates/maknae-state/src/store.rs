@@ -817,6 +817,11 @@ pub async fn commit(
             attempted: revision,
         });
     }
+    let proposed =
+        maknae_graph::baseline::extract(next).map_err(|e| StoreError::Identity(e.to_string()))?;
+    if proposed != peek_baseline(dir, key)? {
+        return Err(StoreError::BaselineUnrecorded);
+    }
     if !released.is_empty() {
         audit.released(revision, released).await?;
     }
@@ -852,6 +857,12 @@ async fn seed(
     prior: Prior,
     inputs: &BootInputs<'_>,
 ) -> Result<BootReport, StoreError> {
+    if !authorized && inputs.accepted_seen.is_some() {
+        return Err(StoreError::BaselineUnseen {
+            stored: None,
+            seen: inputs.accepted_seen.map(|d| identity::hex(&d)),
+        });
+    }
     if inputs.baseline_events.is_empty() {
         return Err(StoreError::BaselineUnrecorded);
     }

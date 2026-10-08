@@ -3649,7 +3649,7 @@ fn load_candidate<B: maknae_authz_basic::Baseline>(
         |revision| {
             maknae_graph::identity::build(
                 &next,
-                None,
+                persisted.baseline.as_ref(),
                 &vocabulary.persisted,
                 vocabulary.digest,
                 revision,
@@ -8342,6 +8342,8 @@ mod reload_tests {
         let fx = fixture("reboot", AUTHZ, Some(ROOT_ADMIN)).await;
         fx.write_bindings(ROOT_ADVERSARY);
         fx.reloader.run().await.unwrap();
+        let before = fx.dir.join("audit.jsonl");
+        let reloaded = std::fs::read_to_string(&before).unwrap().lines().count();
         let Fx {
             dir,
             reloader,
@@ -8386,8 +8388,21 @@ mod reload_tests {
         .unwrap();
         assert_eq!(
             (booted.status.revision(), booted.status.anchor.as_str()),
-            (3, "verified")
+            (2, "verified")
         );
+        assert_eq!(
+            maknae_graph::identity::extract(&booted.graph)
+                .unwrap()
+                .baseline,
+            Some(test_baseline())
+        );
+        let after: Vec<String> = std::fs::read_to_string(&before)
+            .unwrap()
+            .lines()
+            .skip(reloaded)
+            .map(|l| serde_json::from_str::<AuditRecord>(l).unwrap().action)
+            .collect();
+        assert_eq!(after, ["graph.checkpoint"]);
     }
 
     #[tokio::test]

@@ -307,7 +307,7 @@ pub fn build(
         }
     }
     if let Some(bl) = baseline {
-        b = build_baseline(b, &mut a, bl);
+        b = build_baseline(b, &mut a, bl)?;
     }
     let g = b.build(&SCHEMA, compiled).map_err(IdentityError::Graph)?;
     if let Some(c) = compiled.iter().find(|c| c.label != layer.label) {
@@ -316,7 +316,11 @@ pub fn build(
     Ok(g)
 }
 
-fn build_baseline(mut b: GraphBuilder, a: &mut Alloc, bl: &BaselineLayer) -> GraphBuilder {
+fn build_baseline(
+    mut b: GraphBuilder,
+    a: &mut Alloc,
+    bl: &BaselineLayer,
+) -> Result<GraphBuilder, IdentityError> {
     let mut attrs = Attrs::new();
     attrs.insert(ATTR_SHA256.into(), AttrValue::Str(hex(&bl.sha256)));
     if let Some(from) = &bl.moved_from {
@@ -324,6 +328,12 @@ fn build_baseline(mut b: GraphBuilder, a: &mut Alloc, bl: &BaselineLayer) -> Gra
     }
     let src = a.node(CONFIG_SOURCE, BASELINE_SOURCE_KEY.into(), attrs);
     let src_id = src.id;
+    if bl.sections.is_empty() {
+        return Err(IdentityError::BaselineAmbiguous {
+            node: src_id.0,
+            what: "baseline without a section",
+        });
+    }
     b = b.node(src);
     let mut core = None;
     for (name, value) in &bl.sections {
@@ -331,6 +341,12 @@ fn build_baseline(mut b: GraphBuilder, a: &mut Alloc, bl: &BaselineLayer) -> Gra
         attrs.insert(ATTR_VALUE.into(), AttrValue::Str(value.clone()));
         let s = a.node(SECTION, crate::baseline::section_key(name), attrs);
         let id = s.id;
+        if name.is_empty() {
+            return Err(IdentityError::BaselineAmbiguous {
+                node: id.0,
+                what: "baseline section without a name",
+            });
+        }
         b = b.node(s).edge(a.edge(id, PART_OF, src_id));
         if name == "core" {
             core = Some(id);
@@ -355,7 +371,7 @@ fn build_baseline(mut b: GraphBuilder, a: &mut Alloc, bl: &BaselineLayer) -> Gra
             b = b.edge(a.edge(id, DECLARED_BY, core));
         }
     }
-    b
+    Ok(b)
 }
 
 fn str_attr<'a>(n: &'a NodeRecord, attr: &'static str) -> Result<&'a str, IdentityError> {
