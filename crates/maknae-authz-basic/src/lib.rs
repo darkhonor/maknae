@@ -3130,6 +3130,7 @@ mod tests {
         /// compared with the oracle over the file it is equivalent to.
         fn policies() -> Vec<(&'static str, PolicySource, PolicySource)> {
             let uids: &[(&str, u32)] = BASE_UIDS;
+            let alias_uids: &[(&str, u32)] = &[BASE_UIDS, &[("gustav", 1002)]].concat();
             let same = |v: &'static str, src: PolicySource| (v, src.clone(), src);
             vec![
                 same("absent", source_with(SHIPPED, None, &[])),
@@ -3193,7 +3194,29 @@ mod tests {
                         uids,
                     ),
                 ),
+                (
+                    "alias",
+                    source_with(
+                        SHIPPED,
+                        Some(&explicit_with("alex", "ursula, gustav", "gus", "mallory")),
+                        alias_uids,
+                    ),
+                    source_with(
+                        SHIPPED,
+                        Some(&explicit_with("alex", "ursula", "", "mallory")),
+                        alias_uids,
+                    ),
+                ),
             ]
+        }
+
+        #[test]
+        fn the_policy_variants_are_pairwise_distinct() {
+            let all = policies();
+            let names: std::collections::BTreeSet<_> = all.iter().map(|p| p.0).collect();
+            let sources: std::collections::BTreeSet<_> =
+                all.iter().map(|p| format!("{:?}", p.1)).collect();
+            assert_eq!((names.len(), sources.len()), (all.len(), all.len()));
         }
 
         fn uids() -> Vec<Option<AttrValue>> {
@@ -3462,7 +3485,7 @@ mod tests {
             );
             let fs_cells = 4 * 7 * 22 * 5 + 7 * 22 * 5;
             let other_cells = 54 + 4;
-            assert_eq!(cells, 10 * 9 * (fs_cells + other_cells));
+            assert_eq!(cells, 11 * 9 * (fs_cells + other_cells));
             assert_eq!(
                 roles_seen,
                 [
@@ -3513,6 +3536,7 @@ mod tests {
                     Some(4),
                     Some(4),
                     Some(4),
+                    Some(3),
                     Some(3)
                 ]
             );
@@ -3522,13 +3546,18 @@ mod tests {
         fn each_per_subject_case_is_a_verdict_change_from_the_whole_policy_refusal() {
             use tests::oracle::{BindingError, Refused};
             let uids: &[(&str, u32)] = &[BASE_UIDS, &[("gustav", 1002)]].concat();
-            for (variant, body, subject_uid, new_subject, refused) in [
+            let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+            for (variant, body, subject_uid, new_subject, refused, problem) in [
                 (
                     "unresolved-name",
                     "admin: [alex]\n  user: [ursula, ghost]\n  adversary: [mallory]",
                     1001_i64,
                     Some("user"),
                     BindingError::Unresolvable("ghost".into()),
+                    IdentityProblem::Unresolved {
+                        role: "user",
+                        name: "ghost".into(),
+                    },
                 ),
                 (
                     "overlap",
@@ -3536,6 +3565,11 @@ mod tests {
                     666,
                     Some("adversary"),
                     BindingError::DualMembership("mallory".into()),
+                    IdentityProblem::Contained {
+                        uid: 666,
+                        names: names(&["mallory"]),
+                        roles: vec!["admin", "adversary"],
+                    },
                 ),
                 (
                     "conflict",
@@ -3543,6 +3577,11 @@ mod tests {
                     1002,
                     None,
                     BindingError::DualMembership("gus".into()),
+                    IdentityProblem::Unbound {
+                        uid: 1002,
+                        names: names(&["gus"]),
+                        roles: vec!["guest", "user"],
+                    },
                 ),
                 (
                     "alias",
@@ -3552,6 +3591,11 @@ mod tests {
                     BindingError::DuplicateUid {
                         uid: 1002,
                         names: ("gus".into(), "gustav".into()),
+                    },
+                    IdentityProblem::Unbound {
+                        uid: 1002,
+                        names: names(&["gus", "gustav"]),
+                        roles: vec!["guest", "user"],
                     },
                 ),
             ] {
@@ -3586,7 +3630,7 @@ mod tests {
                     new_subject,
                     "{variant}"
                 );
-                assert_eq!(src.identity_problems().len(), 1, "{variant}");
+                assert_eq!(src.identity_problems(), [problem], "{variant}");
             }
         }
     }
