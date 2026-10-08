@@ -81,6 +81,12 @@ impl Snapshot {
         self.loaded.roles.as_subject_bindings()
     }
 
+    /// Every subject the load named, with what that load made of it; `None` when
+    /// bindings are absent.
+    pub fn subject_entries(&self) -> Option<Vec<crate::ListedSubject>> {
+        self.loaded.roles.entries(&self.problems)
+    }
+
     /// The subjects the load this snapshot was compiled from could not bind as written.
     pub fn identity_problems(&self) -> &Arc<[IdentityProblem]> {
         &self.problems

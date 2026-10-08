@@ -32,7 +32,7 @@ mod vocabulary;
 pub use vocabulary::{class_name, compiled_set, ACTION_TERMS, CLASSES, KERNEL_TERMS};
 
 use binding::UidMap;
-pub use binding::{shown, IdentityProblem};
+pub use binding::{shown, IdentityProblem, ListedSubject, SubjectState};
 use snapshot::Snapshot;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError, RwLock};
@@ -1774,6 +1774,65 @@ mod tests {
             &0xaf63_dc4c_8601_ec8c_u64.to_le_bytes()
         );
         assert_ne!(test_digest(b"ab"), test_digest(b"ba"));
+    }
+
+    #[test]
+    fn every_subject_the_load_named_is_one_entry_with_its_state() {
+        let file = Some(
+            "schema_version: 1\nbindings:\n  admin: [alex]\n  user: [ursula, ghost, gus, eve]\n  guest: [gustav]\n  adversary: [mallory, nobody, eve, {uid: 4242}]\n",
+        );
+        let uids = vec![
+            ("alex", 1000),
+            ("ursula", 1001),
+            ("gus", 1002),
+            ("gustav", 1002),
+            ("eve", 1003),
+        ];
+        let resolving = [uids.clone(), vec![("mallory", 666)]].concat();
+        let first = compiled(&source_with(SHIPPED, file, &resolving));
+        let next = snapshot_over(
+            &source_with(SHIPPED, file, &uids),
+            LABEL,
+            test_digest,
+            Some(first.persisted()),
+        )
+        .unwrap();
+        let e = |uid: Option<u32>, names: &[&str], state| ListedSubject {
+            uid,
+            names: names.iter().map(|n| n.to_string()).collect(),
+            state,
+        };
+        assert_eq!(
+            next.subject_entries().unwrap(),
+            [
+                e(Some(666), &["mallory"], SubjectState::CarriedForward),
+                e(Some(1000), &["alex"], SubjectState::Bound("admin")),
+                e(Some(1001), &["ursula"], SubjectState::Bound("user")),
+                e(
+                    Some(1002),
+                    &["gustav", "gus"],
+                    SubjectState::Unbound(vec!["guest", "user"])
+                ),
+                e(Some(1003), &["eve"], SubjectState::Contained),
+                e(Some(4242), &[], SubjectState::Contained),
+                e(None, &["ghost"], SubjectState::Unresolved("user")),
+                e(None, &["nobody"], SubjectState::Unresolved("adversary")),
+            ]
+        );
+        assert_eq!(
+            compiled(&source_with(SHIPPED, None, &resolving)).subject_entries(),
+            None,
+            "absent bindings enumerate nothing"
+        );
+        assert_eq!(
+            compiled(&source_with(
+                SHIPPED,
+                Some("schema_version: 1\nbindings: {}\n"),
+                &resolving
+            ))
+            .subject_entries(),
+            Some(vec![])
+        );
     }
 
     #[test]

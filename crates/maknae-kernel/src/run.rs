@@ -1212,7 +1212,11 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                         .as_ref()
                         .map(KernelGraphStatus::revision),
                     kernel_graph_anchor: kernel_graph.as_ref().as_ref().map(|k| k.anchor.clone()),
-                    identity_problem_counts: Vec::new(),
+                    identity_problem_counts: kernel_graph
+                        .as_ref()
+                        .as_ref()
+                        .map(|k| k.identity.counts())
+                        .unwrap_or_default(),
                 }),
                 // The current snapshot, via the seam. `None` means the backend cannot
                 // enumerate, and that is reported as unavailable below --
@@ -1281,17 +1285,14 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                         }
                     };
                     match enumerated {
-                        Ok(mut b) => {
-                            b.sort_by(|x, y| x.role.cmp(&y.role));
-                            Payload::SubjectList(
-                                b.into_iter()
-                                    .map(|s| maknae_proto::RoleBindingView {
-                                        role: s.role,
-                                        members: s.members,
-                                    })
-                                    .collect(),
-                            )
-                        }
+                        Ok(b) => Payload::SubjectList(crate::identity_report::subject_views(
+                            b,
+                            &kernel_graph
+                                .as_ref()
+                                .as_ref()
+                                .map(|k| k.identity.subjects())
+                                .unwrap_or_default(),
+                        )),
                         Err(why) => {
                             // A SECOND record, correcting the posture.
                             //
@@ -2945,7 +2946,7 @@ const GRAPH_REJECTED_ACTION: &str = "graph.rejected";
 const GRAPH_MIGRATE_ACTION: &str = "graph.migrate";
 const GRAPH_TRANSITION_ACTION: &str = "graph.transition";
 const GRAPH_RELOAD_ACTION: &str = "graph.reload";
-const GRAPH_IDENTITY_ACTION: &str = "graph.identity";
+use crate::identity_report::GRAPH_IDENTITY_ACTION;
 
 /// Every `graph.*` pseudo-action this file emits; no verb's action string may equal one.
 #[cfg_attr(not(test), allow(dead_code))]
@@ -3114,7 +3115,9 @@ impl<E: AuditEmit + Send + Sync> BootAudit for GraphBootAudit<'_, E> {
         let sink = self.sink;
         async move {
             for (reason, rec) in recs {
-                eprintln!("maknaed: identity: {reason}");
+                eprintln!(
+                    "maknaed: identity: {reason} (pending the store commit of revision {revision})"
+                );
                 sink.emit(&rec)
                     .await
                     .map_err(|e| StoreError::Audit(e.to_string()))?;
@@ -3265,6 +3268,7 @@ fn store_refusal(e: StoreError, state_dir: &Path) -> RunError {
 pub struct KernelGraphStatus {
     revision: Arc<AtomicU64>,
     pub anchor: String,
+    pub identity: crate::identity_report::IdentityStatus,
 }
 
 impl KernelGraphStatus {
@@ -3272,6 +3276,7 @@ impl KernelGraphStatus {
         Self {
             revision: Arc::new(AtomicU64::new(revision)),
             anchor: anchor.into(),
+            identity: crate::identity_report::IdentityStatus::default(),
         }
     }
 
@@ -3299,6 +3304,33 @@ fn unix_now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
+/// Publishes the boot load's problems and releases; records its problems after the
+/// composition record. The store already recorded the releases.
+async fn publish_boot_identity<E: AuditEmit + Send + Sync>(
+    status: &crate::identity_report::IdentityStatus,
+    snapshot: &maknae_authz_basic::snapshot::Snapshot,
+    released: &[maknae_graph::identity::Released],
+    sink: &Arc<E>,
+    ctx: &BootCtx<'_>,
+) -> Result<(), RunError> {
+    crate::identity_report::publish_and_record(
+        status,
+        crate::identity_report::Published::of(
+            snapshot,
+            released
+                .iter()
+                .map(maknae_authz_basic::IdentityProblem::from),
+        ),
+        snapshot.identity_problems(),
+        |result, reason, posture| {
+            let rec = ctx.record(GRAPH_IDENTITY_ACTION, result, &reason, posture, None);
+            async move { sink.emit(&rec).await }
+        },
+    )
+    .await
+    .map_err(|e| boot_evidence_refused("identity", e))
+}
+
 /// The booted store: the directory holds the one-maknaed state-dir lock and, with the
 /// key, is what a reload commits through.
 struct BootedGraph {
@@ -3306,7 +3338,6 @@ struct BootedGraph {
     key: WrappingKey,
     status: KernelGraphStatus,
     graph: maknae_graph::graph::Graph,
-    #[cfg_attr(not(test), allow(dead_code))]
     released: Vec<maknae_graph::identity::Released>,
 }
 
@@ -3405,6 +3436,7 @@ struct Reloader<B: maknae_authz_basic::Baseline, E> {
     socket: String,
     euid: u32,
     au3_1: serde_json::Value,
+    identity: crate::identity_report::IdentityStatus,
     stopping: tokio::sync::watch::Sender<bool>,
     #[cfg(test)]
     load_gate: Option<Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>>,
@@ -3440,6 +3472,7 @@ where
                 ctx: &ctx,
                 store_revision,
                 committed: std::sync::Mutex::new(None),
+                replaced: std::sync::Mutex::default(),
             };
             let mut stopping = self.stopping.subscribe();
             let stopped = async move {
@@ -3471,6 +3504,7 @@ struct ReloadIo<'a, B: maknae_authz_basic::Baseline, E> {
     ctx: &'a BootCtx<'a>,
     store_revision: u64,
     committed: std::sync::Mutex<Option<[u8; 32]>>,
+    replaced: std::sync::Mutex<Arc<[maknae_authz_basic::IdentityProblem]>>,
 }
 
 /// Blocking: the policy load resolves usernames.
@@ -3603,8 +3637,22 @@ where
 {
     type Candidate = ReloadCandidate;
 
+    /// The published set follows the snapshot, not atomically with it: for that
+    /// instant `admin.status` reports the previous load's counts.
     fn install(&self, candidate: ReloadCandidate) {
+        let published = crate::identity_report::Published::of(
+            &candidate.1,
+            candidate
+                .2
+                .iter()
+                .map(maknae_authz_basic::IdentityProblem::from),
+        );
         self.reloader.authorizer.baseline().install(candidate.1);
+        *self
+            .replaced
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            self.reloader.identity.publish(published);
     }
 }
 
@@ -3664,10 +3712,33 @@ where
             }),
         );
         rec.policy_sha256 = Some(self.reloader.authorizer.baseline().policy_sha256());
+        let replaced = Arc::clone(
+            &self
+                .replaced
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        let problems: Vec<(String, AuditRecord)> =
+            crate::identity_report::recorded_after(r, &replaced, &self.reloader.identity.current())
+                .iter()
+                .map(|p| {
+                    let (result, reason, posture) = crate::identity_report::record_fields(p);
+                    let rec =
+                        self.ctx
+                            .record(GRAPH_IDENTITY_ACTION, result, &reason, posture, None);
+                    (reason, rec)
+                })
+                .collect();
         let sink = Arc::clone(&self.reloader.sink);
         async move {
             if let Err(e) = sink.emit(&rec).await {
                 eprintln!("maknaed: AUDIT WRITE FAILED on the reload outcome ({reason}): {e}");
+            }
+            for (reason, rec) in problems {
+                eprintln!("maknaed: identity: {reason}");
+                if let Err(e) = sink.emit(&rec).await {
+                    eprintln!("maknaed: AUDIT WRITE FAILED on an identity record ({reason}): {e}");
+                }
             }
         }
     }
@@ -4066,7 +4137,25 @@ async fn boot_after_sink(
     sink.emit(&composition_rec)
         .await
         .map_err(|e| boot_evidence_refused("composition", e))?;
+    let identity_ctx = BootCtx {
+        event: "boot",
+        host,
+        socket,
+        euid,
+        session_id: boot_session_id(session_ids),
+        seq: boot_seq,
+        au3_1: &audit_cfg.au3_1,
+    };
+    publish_boot_identity(
+        &booted.status.identity,
+        &maknae_authz_basic::Baseline::snapshot(authorizer.baseline()),
+        &booted.released,
+        sink,
+        &identity_ctx,
+    )
+    .await?;
     let authorizer = Arc::new(authorizer);
+    let identity = booted.status.identity.clone();
     let graph_revision = Arc::clone(&booted.status.revision);
     let kernel_graph = Arc::new(Some(booted.status));
 
@@ -4207,6 +4296,7 @@ async fn boot_after_sink(
         socket: socket.to_string(),
         euid,
         au3_1: audit_cfg.au3_1.clone(),
+        identity,
         stopping: tokio::sync::watch::channel(false).0,
         #[cfg(test)]
         load_gate: None,
@@ -5057,6 +5147,12 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             "schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/**)\"\n",
             0o640,
         );
+        put(
+            &d.0,
+            "bindings.yaml",
+            "schema_version: 1\nbindings:\n  user: [\"no-such-user-maknae-496\"]\n",
+            0o640,
+        );
         let creds_dir = std::env::temp_dir().join(format!(
             "maknae_kernel_rungate_creds_{}",
             std::process::id()
@@ -5120,6 +5216,25 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             };
             let (seed, ckpt) = (at("graph.seed"), at("graph.checkpoint"));
             assert!(seed < ckpt && ckpt < at("authz") && at("authz") < at("posture"));
+            let identity = at("graph.identity");
+            assert_eq!(
+                identity,
+                at("authz") + 1,
+                "#496: after the composition record"
+            );
+            assert!(identity < at("posture"));
+            assert_eq!(
+                (
+                    recs[identity].event.as_str(),
+                    recs[identity].outcome.result.as_str(),
+                    recs[identity].outcome.reason.as_str()
+                ),
+                (
+                    "boot",
+                    "deny",
+                    "'no-such-user-maknae-496' under user has no account on this host; it holds no role"
+                )
+            );
             assert_eq!(recs[seed].outcome.posture, "authorized");
             assert_eq!(recs[seed].graph.as_ref().unwrap().revision, 1);
             let g = recs[ckpt].graph.as_ref().unwrap();
@@ -7057,7 +7172,6 @@ mod reload_tests {
         _guard: Guard,
     }
 
-    /// The fixture's audit sink; `fail_identity` refuses every `graph.identity` append.
     struct ReloadSink {
         inner: Arc<maknae_audit_append::AuditSink>,
         fail_identity: std::sync::atomic::AtomicBool,
@@ -7258,6 +7372,15 @@ mod reload_tests {
             Arc::new(booted.graph),
         )
         .unwrap();
+        publish_boot_identity(
+            &booted.status.identity,
+            &baseline.snapshot(),
+            &booted.released,
+            &sink,
+            &ctx,
+        )
+        .await
+        .unwrap();
         let us = &maknae_config::BasicPolicy;
         let authorizer = Arc::new(crate::Composition::new(
             baseline,
@@ -7281,6 +7404,7 @@ mod reload_tests {
             socket: "s".into(),
             euid,
             au3_1,
+            identity: status.identity.clone(),
             stopping: tokio::sync::watch::channel(false).0,
             load_gate: load_gate.map(|g| Arc::new(std::sync::Mutex::new(g))),
         });
@@ -7556,11 +7680,214 @@ mod reload_tests {
         assert_eq!((g.revision, g.anchor.as_str()), (2, "releasing"));
         assert_eq!(recs[2].graph.as_ref().unwrap().revision, 2);
         assert!(recs.iter().all(|r| r.session_id == recs[0].session_id));
+        assert_eq!(fx.status.identity.counts(), ["released=1"]);
         bounded(fx.reloader.run()).await.unwrap();
         assert_eq!(
             identity_records(&fx.reload_records()).len(),
             1,
             "an unchanged reload releases nothing"
+        );
+        assert!(
+            fx.status.identity.counts().is_empty(),
+            "a release is reported by the load that made it"
+        );
+    }
+
+    const GHOST_USER: &str =
+        "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"no-such-user-maknae-496\"]\n";
+
+    #[tokio::test]
+    async fn an_applied_reload_records_and_publishes_its_identity_problems() {
+        let fx = fixture("probs", AUTHZ, Some(ROOT_ADMIN)).await;
+        assert!(fx.status.identity.current().is_empty());
+        fx.write_bindings(GHOST_USER);
+        bounded(fx.reloader.run()).await.unwrap();
+        let recs = fx.reload_records();
+        let n = recs.len();
+        assert_eq!(recs[n - 2].action, "graph.reload");
+        assert_eq!(
+            (
+                recs[n - 1].action.as_str(),
+                recs[n - 1].outcome.result.as_str(),
+                recs[n - 1].outcome.posture.as_str(),
+                recs[n - 1].outcome.reason.as_str()
+            ),
+            (
+                "graph.identity",
+                "deny",
+                "unauthorized",
+                "'no-such-user-maknae-496' under user has no account on this host; it holds no role"
+            )
+        );
+        assert_eq!(recs[n - 1].seq, recs[n - 2].seq + 1);
+        assert_eq!(recs[n - 1].session_id, recs[n - 2].session_id);
+        assert_eq!(fx.status.identity.counts(), ["unresolved=1"]);
+        let listed = fx.status.identity.subjects();
+        assert_eq!(
+            listed
+                .iter()
+                .map(crate::identity_report::label)
+                .collect::<Vec<_>>(),
+            ["root (uid 0)", "no-such-user-maknae-496 (no account)"]
+        );
+        assert!(
+            matches!(fx.root_whoami(), maknae_security::Verdict::Permit { .. }),
+            "the rest loads"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_problem_is_recorded_once_across_boot_and_reloads() {
+        let fx = fixture("probs_once", AUTHZ, Some(GHOST_USER)).await;
+        let boot: Vec<AuditRecord> = std::fs::read_to_string(fx.dir.join("audit.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str::<AuditRecord>(l).unwrap())
+            .filter(|r| r.action == "graph.identity")
+            .collect();
+        assert_eq!(boot.len(), 1);
+        assert_eq!(boot[0].event, "boot");
+        assert_eq!(fx.status.identity.counts(), ["unresolved=1"]);
+        bounded(fx.reloader.run()).await.unwrap();
+        bounded(fx.reloader.run()).await.unwrap();
+        assert!(
+            identity_records(&fx.reload_records()).is_empty(),
+            "the boot's problem is not recorded again by an unchanged reload, nor by the next"
+        );
+        fx.write_bindings(
+            "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"no-such-user-maknae-496\", \"no-such-user-maknae-496b\"]\n",
+        );
+        bounded(fx.reloader.run()).await.unwrap();
+        let added = identity_records(&fx.reload_records());
+        assert_eq!(added.len(), 1, "{added:?}");
+        assert!(added[0].2.contains("no-such-user-maknae-496b"));
+        assert_eq!(fx.status.identity.counts(), ["unresolved=2"]);
+    }
+
+    #[tokio::test]
+    async fn a_refused_reload_records_no_identity_problems_and_keeps_the_published_set() {
+        let fx = fixture("probs2", AUTHZ, Some(ROOT_ADMIN)).await;
+        fx.write_bindings(GHOST_USER);
+        bounded(fx.reloader.run()).await.unwrap();
+        let before = fx.reload_records().len();
+        let published = fx.status.identity.current();
+        fx.write_bindings(
+            "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"no-such-user-maknae-496c\"]\n  nosuchrole: []\n",
+        );
+        assert!(bounded(fx.reloader.run()).await.is_err());
+        let after = fx.reload_records();
+        assert_eq!(
+            after[before..]
+                .iter()
+                .map(|r| r.action.as_str())
+                .collect::<Vec<_>>(),
+            ["graph.reload", "graph.reload"]
+        );
+        assert_eq!(fx.status.identity.current(), published);
+        assert_eq!(fx.status.identity.counts(), ["unresolved=1"]);
+    }
+
+    #[tokio::test]
+    async fn an_unresolved_adversary_is_recorded_unavailable() {
+        let fx = fixture("adv", AUTHZ, Some(ROOT_ADMIN)).await;
+        fx.write_bindings(
+            "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary: [\"no-such-user-maknae-496\", {uid: 4242}]\n",
+        );
+        bounded(fx.reloader.run()).await.unwrap();
+        let last = fx.reload_records().pop().unwrap();
+        assert_eq!(
+            (
+                last.action.as_str(),
+                last.outcome.result.as_str(),
+                last.outcome.posture.as_str()
+            ),
+            ("graph.identity", "deny", "unavailable")
+        );
+        assert_eq!(fx.status.identity.counts(), ["unresolved_adversary=1"]);
+        let subjects = fx.baseline().snapshot().subjects().unwrap();
+        assert!(subjects
+            .iter()
+            .any(|b| b.role == "adversary" && b.members == ["uid:4242"]));
+        let views = crate::identity_report::subject_views(subjects, &fx.status.identity.subjects());
+        assert_eq!(
+            views
+                .iter()
+                .map(|v| (v.uid, v.label.as_str(), v.state.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (Some(0), "root (uid 0)", "bound admin"),
+                (Some(4242), "uid 4242", "contained"),
+                (
+                    None,
+                    "no-such-user-maknae-496 (no account)",
+                    "unresolved (no account)"
+                ),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn boot_identity_records_follow_the_composition_record_and_a_failed_append_refuses() {
+        let fx = fixture(
+            "boot_probs",
+            AUTHZ,
+            Some("schema_version: 1\nbindings:\n  user: [\"no-such-user-maknae-496\"]\n  adversary: [\"no-such-user-maknae-496b\"]\n"),
+        )
+        .await;
+        let snapshot = fx.baseline().snapshot();
+        let seq = Seq::new();
+        let au3_1 = serde_json::Value::Null;
+        let ctx = BootCtx {
+            event: "boot",
+            host: "h",
+            socket: "s",
+            euid: 0,
+            session_id: 7 << 32,
+            seq: &seq,
+            au3_1: &au3_1,
+        };
+        let sink = &fx.reloader.sink;
+        sink.emit(&ctx.record(
+            "authz",
+            "permit",
+            "authorization composition: x",
+            "authorized",
+            None,
+        ))
+        .await
+        .unwrap();
+        let status = crate::identity_report::IdentityStatus::default();
+        publish_boot_identity(&status, &snapshot, &[], sink, &ctx)
+            .await
+            .unwrap();
+        let recs: Vec<AuditRecord> = std::fs::read_to_string(fx.dir.join("audit.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str::<AuditRecord>(l).unwrap())
+            .filter(|r| r.session_id == 7 << 32)
+            .collect();
+        assert_eq!(
+            recs.iter()
+                .map(|r| (
+                    r.action.as_str(),
+                    r.event.as_str(),
+                    r.outcome.posture.as_str(),
+                    r.seq
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("authz", "boot", "authorized", recs[0].seq),
+                ("graph.identity", "boot", "unavailable", recs[0].seq + 1),
+                ("graph.identity", "boot", "unauthorized", recs[0].seq + 2),
+            ]
+        );
+        assert_eq!(status.counts(), ["unresolved=1", "unresolved_adversary=1"]);
+        sink.fail_identity
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let refused = publish_boot_identity(&status, &snapshot, &[], sink, &ctx).await;
+        assert!(
+            matches!(&refused, Err(e) if e.to_string().contains("identity append refused")),
+            "{refused:?}"
         );
     }
 

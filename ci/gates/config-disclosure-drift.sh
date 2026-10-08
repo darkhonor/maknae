@@ -73,7 +73,7 @@ SURFACE=(
   # grant. (This note used to cite the reserved `agent` binding; ADR-0024
   # struck that token, #276. The argument is unchanged: bindings are disclosed
   # policy state, and a field added to their view ships unreviewed.)
-  "crates/maknae-proto/src/wire.rs|RoleBindingView|binding|2|wire"
+  "crates/maknae-proto/src/wire.rs|RoleBindingView|binding|5|wire"
   # The THIRD wire disclosure struct. Its two fields are the caller's OWN peer
   # facts rather than deployment config, which is a defensible reason to scope
   # it out -- but that rule was nowhere written, `RoleBindingView` (policy-file

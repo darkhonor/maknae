@@ -326,8 +326,9 @@ pub struct Carried {
 }
 
 /// `file` plus every persisted contained subject whose name is in `unresolved_adversaries`,
-/// contained under its persisted uid unless the file already contains that uid; any other file
-/// entry for that uid is replaced and returned in `overrides`. Idempotent.
+/// contained under its persisted uid unless the file already lists that uid under
+/// adversary; any other file entry for that uid is replaced and returned in `overrides`.
+/// Idempotent.
 pub fn carry_forward(
     file: &IdentityLayer,
     unresolved_adversaries: &[String],

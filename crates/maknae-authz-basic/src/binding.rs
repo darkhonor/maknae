@@ -16,7 +16,7 @@
 use crate::role::Role;
 use maknae_graph::graph::Graph;
 use maknae_graph::identity::{bindings_section_key, subject_key};
-use maknae_graph::kernel::{ADVERSARY, BINDS, CONTAINED, SECTION, SUBJECT};
+use maknae_graph::kernel::{ADVERSARY, ATTR_NAME, ATTR_UID, BINDS, CONTAINED, SECTION, SUBJECT};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -106,10 +106,10 @@ impl IdentityProblem {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Unresolved { .. } => "unresolved",
-            Self::UnresolvedAdversary { .. } => "unresolved-adversary",
+            Self::UnresolvedAdversary { .. } => "unresolved_adversary",
             Self::Contained { .. } => "contained",
-            Self::Unbound { .. } => "unbound",
-            Self::CarriedForward { .. } => "carried-forward",
+            Self::Unbound { .. } => "unbound_conflict",
+            Self::CarriedForward { .. } => "carried_forward",
             Self::Released { .. } => "released",
         }
     }
@@ -353,6 +353,109 @@ impl GraphBindings {
                 .collect(),
         )
     }
+
+    /// Every subject the load named, bound or not; `None` when bindings are absent.
+    pub(crate) fn entries(&self, problems: &[IdentityProblem]) -> Option<Vec<ListedSubject>> {
+        if !self.explicit {
+            return None;
+        }
+        let mut out = Vec::new();
+        for s in self.graph.nodes().iter().filter(|n| n.kind == SUBJECT) {
+            let Some(maknae_graph::record::AttrValue::U64(uid)) = s.attrs.get(ATTR_UID) else {
+                continue;
+            };
+            let Ok(uid) = u32::try_from(*uid) else {
+                continue;
+            };
+            let name = match s.attrs.get(ATTR_NAME) {
+                Some(maknae_graph::record::AttrValue::Str(n)) if *n != subject_key(uid) => {
+                    vec![n.clone()]
+                }
+                _ => Vec::new(),
+            };
+            let carried = problems.iter().find_map(|p| match p {
+                IdentityProblem::CarriedForward { uid: u, name, .. } if *u == uid => {
+                    Some(name.clone())
+                }
+                _ => None,
+            });
+            let entry = if let Some(n) = carried {
+                ListedSubject {
+                    uid: Some(uid),
+                    names: vec![n],
+                    state: SubjectState::CarriedForward,
+                }
+            } else if self.graph.out_edges(s.id, CONTAINED).next().is_some() {
+                ListedSubject {
+                    uid: Some(uid),
+                    names: name,
+                    state: SubjectState::Contained,
+                }
+            } else {
+                let Some(role) = self
+                    .graph
+                    .out_edges(s.id, BINDS)
+                    .next()
+                    .and_then(|e| self.graph.node(e.to))
+                    .and_then(|r| Role::from_key(&r.key))
+                else {
+                    continue;
+                };
+                ListedSubject {
+                    uid: Some(uid),
+                    names: name,
+                    state: SubjectState::Bound(role.key()),
+                }
+            };
+            out.push(entry);
+        }
+        for p in problems {
+            out.push(match p {
+                IdentityProblem::Unresolved { role, name } => ListedSubject {
+                    uid: None,
+                    names: vec![name.clone()],
+                    state: SubjectState::Unresolved(role),
+                },
+                IdentityProblem::UnresolvedAdversary { name } => ListedSubject {
+                    uid: None,
+                    names: vec![name.clone()],
+                    state: SubjectState::Unresolved(ADVERSARY),
+                },
+                IdentityProblem::Unbound { uid, names, roles } => ListedSubject {
+                    uid: Some(*uid),
+                    names: names.clone(),
+                    state: SubjectState::Unbound(roles.clone()),
+                },
+                IdentityProblem::Contained { .. }
+                | IdentityProblem::CarriedForward { .. }
+                | IdentityProblem::Released { .. } => continue,
+            });
+        }
+        out.sort_by(|a, b| {
+            (a.uid.is_none(), a.uid, &a.names).cmp(&(b.uid.is_none(), b.uid, &b.names))
+        });
+        Some(out)
+    }
+}
+
+/// One subject `bindings.yaml` named, as the load that produced a snapshot left it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListedSubject {
+    pub uid: Option<u32>,
+    /// The file's names for it; empty for a `uid:` entry.
+    pub names: Vec<String>,
+    pub state: SubjectState,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SubjectState {
+    Bound(&'static str),
+    Contained,
+    CarriedForward,
+    /// The roles its names are listed under; it holds none of them.
+    Unbound(Vec<&'static str>),
+    /// The role its name is listed under; the name has no account.
+    Unresolved(&'static str),
 }
 
 /// Where a loaded policy resolves subjects: the file's bindings, or a compiled snapshot's graph.
@@ -377,6 +480,14 @@ impl Roles {
             #[cfg(test)]
             Roles::File(r) => r.as_subject_bindings(),
             Roles::Graph(g) => g.as_subject_bindings(),
+        }
+    }
+
+    pub(crate) fn entries(&self, problems: &[IdentityProblem]) -> Option<Vec<ListedSubject>> {
+        match self {
+            #[cfg(test)]
+            Roles::File(_) => None,
+            Roles::Graph(g) => g.entries(problems),
         }
     }
 }
@@ -619,7 +730,12 @@ mod tests {
             .collect();
         assert_eq!(
             kinds,
-            ["unresolved", "unresolved-adversary", "contained", "unbound"]
+            [
+                "unresolved",
+                "unresolved_adversary",
+                "contained",
+                "unbound_conflict"
+            ]
         );
     }
 
@@ -641,7 +757,7 @@ mod tests {
                 IdentityProblem::UnresolvedAdversary {
                     name: "ghost".into(),
                 },
-                "unresolved-adversary",
+                "unresolved_adversary",
                 None,
                 vec!["ghost"],
                 vec!["adversary"],
@@ -665,7 +781,7 @@ mod tests {
                     names: vec!["gus".into()],
                     roles: vec!["guest", "user"],
                 },
-                "unbound",
+                "unbound_conflict",
                 Some(1002),
                 vec!["gus"],
                 vec!["guest", "user"],
@@ -677,7 +793,7 @@ mod tests {
                     name: "mallory".into(),
                     overrides: vec![],
                 },
-                "carried-forward",
+                "carried_forward",
                 Some(666),
                 vec!["mallory"],
                 vec!["adversary"],
@@ -689,7 +805,7 @@ mod tests {
                     name: "mallory".into(),
                     overrides: vec![("bob".into(), "user"), ("carol".into(), "admin")],
                 },
-                "carried-forward",
+                "carried_forward",
                 Some(666),
                 vec!["mallory", "bob", "carol"],
                 vec!["adversary", "user", "admin"],

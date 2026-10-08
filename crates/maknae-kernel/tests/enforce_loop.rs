@@ -144,6 +144,25 @@ const EMPTY_AUTHZ: &str = "schema_version: 1\npermissions:\n  allow: []\n  deny:
 const BINDINGS_ROOT_ADMIN: &str = "schema_version: 1\nbindings:\n  admin: [\"root\"]\n";
 const BINDINGS_ROOT_USER: &str = "schema_version: 1\nbindings:\n  user: [\"root\"]\n";
 const BINDINGS_ROOT_ADVERSARY: &str = "schema_version: 1\nbindings:\n  adversary: [\"root\"]\n";
+const BINDINGS_ROOT_ADMIN_AND_A_GHOST: &str =
+    "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"no-such-user-maknae-496\"]\n";
+
+/// The kernel graph status as boot leaves it: the identity set published from the
+/// snapshot `authorizer` serves.
+fn published_status(
+    authorizer: &HermeticAuthorizer,
+    revision: u64,
+    anchor: &str,
+) -> maknae_kernel::KernelGraphStatus {
+    let status = maknae_kernel::KernelGraphStatus::new(revision, anchor);
+    let _ = status
+        .identity
+        .publish(maknae_kernel::identity_report::Published::of(
+            &maknae_authz_basic::Baseline::snapshot(authorizer),
+            [],
+        ));
+    status
+}
 
 fn request_frame(verb: maknae_proto::Verb) -> Vec<u8> {
     maknae_proto::encode_request(&maknae_proto::Request {
@@ -1730,7 +1749,7 @@ async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
     fx.write_policy(
         "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nroles:\n  admin:\n    allow: [\"admin.status\"]\n",
     );
-    fx.write_bindings(BINDINGS_ROOT_ADMIN);
+    fx.write_bindings(BINDINGS_ROOT_ADMIN_AND_A_GHOST);
     // The classification system is DERIVED from a real `boot()` of a config that
     // declares the NON-default one (ADR-0022): `policy: aus` with a PSPF ceiling.
     // A literal `"US"` here matched the production default and could not tell
@@ -1746,9 +1765,10 @@ async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
     let booted = maknae_kernel::boot(&fx.dir).expect("the AUS fixture boots");
     assert_eq!(booted.ceiling().classification.name, "PROTECTED");
     let emit = RecEmit::new();
+    let authorizer = fx.authorizer();
     let frame = drive_with(
         Some(&fx.dir),
-        fx.authorizer(),
+        Arc::clone(&authorizer),
         emit.clone(),
         0,
         maknae_proto::Verb::AdminStatus,
@@ -1757,7 +1777,7 @@ async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
         Arc::new(Default::default()),
         nondefault_transport(),
         Arc::new(booted.classification_policy_name().to_string()),
-        Arc::new(Some(maknae_kernel::KernelGraphStatus::new(41, "advanced"))),
+        Arc::new(Some(published_status(&authorizer, 41, "advanced"))),
     )
     .await
     .expect("a frame");
@@ -1777,6 +1797,11 @@ async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
             assert_eq!(s.version, env!("CARGO_PKG_VERSION"));
             assert_eq!(s.kernel_graph_revision, Some(41));
             assert_eq!(s.kernel_graph_anchor.as_deref(), Some("advanced"));
+            assert_eq!(
+                s.identity_problem_counts,
+                ["unresolved=1"],
+                "#496: counts by kind, never the name"
+            );
             // The VALUE, not merely non-empty: wiring `listener` to any other
             // non-empty config string -- the audit path, the plane socket --
             // passed the emptiness check.
@@ -1866,28 +1891,46 @@ async fn a_granted_subject_list_reports_the_policy_file_bindings() {
     fx.write_policy(
         "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nroles:\n  admin:\n    allow: [\"admin.subject.list\"]\n",
     );
-    fx.write_bindings(BINDINGS_ROOT_ADMIN);
+    fx.write_bindings(BINDINGS_ROOT_ADMIN_AND_A_GHOST);
     let emit = RecEmit::new();
-    let frame = drive(
-        &fx.dir,
-        fx.authorizer(),
+    let authorizer = fx.authorizer();
+    let frame = drive_with(
+        Some(&fx.dir),
+        Arc::clone(&authorizer),
         emit.clone(),
         0,
         maknae_proto::Verb::AdminSubjectList,
         Duration::from_secs(5),
+        maknae_io::DelegatedFds::new(0),
+        Arc::new(Default::default()),
+        maknae_config::transport_from_section(None).unwrap(),
+        Arc::new("US".to_string()),
+        Arc::new(Some(published_status(&authorizer, 1, "seeded"))),
     )
     .await
     .expect("a frame");
     match maknae_proto::decode_response(&frame).unwrap().result {
         RespResult::Ok(maknae_proto::Payload::SubjectList(b)) => {
-            let admin = b
-                .iter()
-                .find(|r| r.role == "admin")
-                .expect("the admin binding the fixture wrote");
             assert_eq!(
-                admin.members,
-                vec!["uid:0".to_string()],
-                "root resolves to uid 0, and members are reported by uid"
+                b,
+                [
+                    maknae_proto::RoleBindingView {
+                        role: "admin".into(),
+                        members: vec!["uid:0".into()],
+                        uid: Some(0),
+                        label: "root (uid 0)".into(),
+                        state: "bound admin".into(),
+                    },
+                    maknae_proto::RoleBindingView {
+                        role: "user".into(),
+                        members: vec![],
+                        uid: None,
+                        label: "no-such-user-maknae-496 (no account)".into(),
+                        state: "unresolved (no account)".into(),
+                    },
+                ],
+                "root resolves to uid 0 and is reported by uid; the name with no \
+                 account is listed beside it, holding nothing"
             );
         }
         other => panic!("expected a SubjectList payload, got {other:?}"),

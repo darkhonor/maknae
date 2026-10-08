@@ -580,7 +580,7 @@ pub enum Payload {
     ConfigView(std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>),
     /// Runtime posture for a permitted `admin.status`.
     Status(StatusView),
-    /// Role bindings for a permitted `admin.subject.list`: role → members, as
+    /// Role bindings for a permitted `admin.subject.list`, one entry per subject, as
     /// the PDP resolves them RIGHT NOW. Never a boot copy -- a reload replaces
     /// the bindings, so a boot copy would report authorization state the PDP is
     /// no longer using, and disclosing stale authz is worse than none.
@@ -640,11 +640,22 @@ pub struct StatusView {
     pub identity_problem_counts: Vec<String>,
 }
 
-/// One role and the identities bound to it.
+/// One subject `bindings.yaml` names (#496). `members` holds its binding (`uid:N`),
+/// empty for a subject that holds none; a daemon that predates #496 sent one entry
+/// per role and none of the defaulted fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoleBindingView {
     pub role: String,
     pub members: Vec<String>,
+    #[serde(default)]
+    pub uid: Option<u32>,
+    /// Escaped, from the last applied policy load; never a live account lookup.
+    #[serde(default)]
+    pub label: String,
+    /// `bound <role>`, `contained`, `contained (carried forward)`,
+    /// `unbound (conflict: <roles>)` or `unresolved (no account)`.
+    #[serde(default)]
+    pub state: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -965,6 +976,55 @@ mod tests {
         listener: String,
         authz_backend: String,
         classification_policy: String,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct OldRoleBinding {
+        role: String,
+        members: Vec<String>,
+    }
+
+    #[test]
+    fn a_subject_entry_decodes_across_old_and_new_readers() {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(
+            &OldRoleBinding {
+                role: "user".into(),
+                members: vec!["uid:1001".into(), "uid:1002".into()],
+            },
+            &mut bytes,
+        )
+        .unwrap();
+        let new: RoleBindingView = ciborium::from_reader(bytes.as_slice()).unwrap();
+        assert_eq!(
+            new,
+            RoleBindingView {
+                role: "user".into(),
+                members: vec!["uid:1001".into(), "uid:1002".into()],
+                uid: None,
+                label: String::new(),
+                state: String::new(),
+            }
+        );
+        let entry = RoleBindingView {
+            role: "adversary".into(),
+            members: vec!["uid:666".into()],
+            uid: Some(666),
+            label: "uid 666 (mallory)".into(),
+            state: "contained (carried forward)".into(),
+        };
+        let mut new_bytes = Vec::new();
+        ciborium::into_writer(&entry, &mut new_bytes).unwrap();
+        let old: OldRoleBinding = ciborium::from_reader(new_bytes.as_slice()).unwrap();
+        assert_eq!(
+            (old.role.as_str(), old.members),
+            ("adversary", vec!["uid:666".to_string()])
+        );
+        let r = Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Ok(Payload::SubjectList(vec![entry])),
+        };
+        assert_eq!(decode_response(&encode_response(&r).unwrap()).unwrap(), r);
     }
 
     #[test]

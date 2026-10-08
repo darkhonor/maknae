@@ -715,6 +715,63 @@ fn identity_problems_line(counts: &[String]) -> Option<String> {
     (!parts.is_empty()).then(|| format!("identity problems: {}", parts.join(", ")))
 }
 
+/// Anything but printable ASCII is escaped: the daemon escapes its labels, and a
+/// daemon that did not cannot reach the terminal with a control character.
+fn terminal_safe(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c == ' ' || c.is_ascii_graphic() {
+                c.to_string()
+            } else {
+                c.escape_default().to_string()
+            }
+        })
+        .collect()
+}
+
+/// One row per subject. A daemon that predates #496 sends one entry per role and
+/// no label or state; its members and role stand in for them.
+fn subject_table(entries: &[maknae_proto::RoleBindingView]) -> Vec<String> {
+    if entries.is_empty() {
+        return Vec::new();
+    }
+    let rows: Vec<[String; 3]> = entries
+        .iter()
+        .map(|e| {
+            [
+                e.uid.map_or_else(|| "-".to_string(), |u| u.to_string()),
+                terminal_safe(&if e.label.is_empty() {
+                    e.members.join(", ")
+                } else {
+                    e.label.clone()
+                }),
+                terminal_safe(if e.state.is_empty() {
+                    &e.role
+                } else {
+                    &e.state
+                }),
+            ]
+        })
+        .collect();
+    let header = [
+        "UID".to_string(),
+        "SUBJECT".to_string(),
+        "STATE".to_string(),
+    ];
+    let w = |i: usize| {
+        rows.iter()
+            .chain(std::iter::once(&header))
+            .map(|r| r[i].chars().count())
+            .max()
+            .unwrap_or(0)
+    };
+    let (w0, w1) = (w(0), w(1));
+    std::iter::once(&header)
+        .chain(rows.iter())
+        .map(|r| format!("{:<w0$}  {:<w1$}  {}", r[0], r[1], r[2]))
+        .collect()
+}
+
 /// Print the successful `payload` IFF its variant matches the requested `verb`
 /// (`Ping`→`Pong`, `Whoami`→`Whoami(_)`). A mismatched variant means the daemon
 /// answered a different question than we asked — a protocol error: return `Err`
@@ -744,8 +801,8 @@ fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
             Ok(())
         }
         (Verb::AdminSubjectList, Payload::SubjectList(bindings)) => {
-            for b in &bindings {
-                println!("{}: {}", b.role, b.members.join(", "));
+            for line in subject_table(&bindings) {
+                println!("{line}");
             }
             Ok(())
         }
@@ -1569,7 +1626,7 @@ mod tests {
         s.identity_problem_counts = vec![
             "unresolved=1".into(),
             "unbound=0".into(),
-            "carried-forward=1".into(),
+            "carried_forward=1".into(),
             "unresolved_adversary=2".into(),
         ];
         let lines = status_lines(&s);
@@ -1578,6 +1635,83 @@ mod tests {
             &lines[base.len()..],
             ["identity problems: 1 unresolved, 1 carried forward, 2 unresolved adversary"]
         );
+    }
+
+    fn entry(
+        role: &str,
+        members: &[&str],
+        uid: Option<u32>,
+        label: &str,
+        state: &str,
+    ) -> maknae_proto::RoleBindingView {
+        maknae_proto::RoleBindingView {
+            role: role.into(),
+            members: members.iter().map(|m| m.to_string()).collect(),
+            uid,
+            label: label.into(),
+            state: state.into(),
+        }
+    }
+
+    #[test]
+    fn the_subject_list_is_a_table_one_row_per_subject() {
+        assert_eq!(
+            subject_table(&[
+                entry("admin", &["uid:0"], Some(0), "root (uid 0)", "bound admin"),
+                entry(
+                    "adversary",
+                    &["uid:666"],
+                    Some(666),
+                    "uid 666 (mallory)",
+                    "contained (carried forward)"
+                ),
+                entry(
+                    "user",
+                    &[],
+                    None,
+                    "ghost (no account)",
+                    "unresolved (no account)"
+                ),
+            ]),
+            [
+                "UID  SUBJECT             STATE",
+                "0    root (uid 0)        bound admin",
+                "666  uid 666 (mallory)   contained (carried forward)",
+                "-    ghost (no account)  unresolved (no account)",
+            ]
+        );
+        assert!(subject_table(&[]).is_empty());
+        assert_eq!(
+            subject_table(&[entry("user", &["uid:1", "uid:2"], None, "", "")]),
+            ["UID  SUBJECT       STATE", "-    uid:1, uid:2  user"],
+            "an older daemon's per-role entry"
+        );
+    }
+
+    #[test]
+    fn a_subject_label_reaches_the_terminal_escaped() {
+        let kernel_escaped = entry(
+            "user",
+            &[],
+            Some(7),
+            "\\u{e9}\\u{7f}\\,x (uid 7)",
+            "bound user",
+        );
+        assert_eq!(
+            subject_table(&[kernel_escaped])[1],
+            "7    \\u{e9}\\u{7f}\\,x (uid 7)  bound user",
+            "an already-escaped label passes unchanged"
+        );
+        let raw = entry(
+            "user\u{1b}[2J",
+            &[],
+            Some(7),
+            "a\u{7}b,\u{202e}c\nd",
+            "bound\tx",
+        );
+        let row = &subject_table(&[raw])[1];
+        assert_eq!(row, "7    a\\u{7}b,\\u{202e}c\\nd  bound\\tx");
+        assert!(row.chars().all(|c| c == ' ' || c.is_ascii_graphic()));
     }
 
     #[test]
