@@ -3099,16 +3099,14 @@ impl<E: AuditEmit + Send + Sync> BootAudit for GraphBootAudit<'_, E> {
 
     fn released(
         &mut self,
-        _revision: u64,
+        revision: u64,
         released: &[maknae_graph::identity::Released],
     ) -> impl Future<Output = Result<(), StoreError>> + Send {
         let recs: Vec<(String, AuditRecord)> = released
             .iter()
             .map(|r| {
                 let reason = maknae_authz_basic::IdentityProblem::from(r).to_string();
-                let rec =
-                    self.ctx
-                        .record(GRAPH_IDENTITY_ACTION, "permit", &reason, "authorized", None);
+                let rec = self.intent(GRAPH_IDENTITY_ACTION, &reason, revision, "releasing");
                 (reason, rec)
             })
             .collect();
@@ -3150,7 +3148,6 @@ struct GraphInputs {
     identity: maknae_graph::identity::IdentityLayer,
     unresolved: Vec<String>,
     bindings_missing: bool,
-    moved_from: String,
 }
 
 impl GraphInputs {
@@ -3164,7 +3161,6 @@ impl GraphInputs {
             identity,
             unresolved: source.unresolved_adversaries(),
             bindings_missing: source.bindings().is_missing(),
-            moved_from: source.policy_source().to_string(),
         })
     }
 
@@ -3175,7 +3171,6 @@ impl GraphInputs {
             identity: &self.identity,
             unresolved_adversaries: &self.unresolved,
             bindings_missing: self.bindings_missing,
-            moved_from: &self.moved_from,
         }
     }
 }
@@ -3417,7 +3412,7 @@ struct Reloader<B: maknae_authz_basic::Baseline, E> {
 type ReloadCandidate = (
     Arc<maknae_graph::graph::Graph>,
     Arc<maknae_authz_basic::snapshot::Snapshot>,
-    Arc<[maknae_authz_basic::IdentityProblem]>,
+    Arc<[maknae_graph::identity::Released]>,
 );
 
 impl<B, E> Reloader<B, E>
@@ -3444,7 +3439,6 @@ where
                 ctx: &ctx,
                 store_revision,
                 committed: std::sync::Mutex::new(None),
-                released: std::sync::Mutex::new(Arc::from(Vec::new())),
             };
             let mut stopping = self.stopping.subscribe();
             let stopped = async move {
@@ -3476,8 +3470,6 @@ struct ReloadIo<'a, B: maknae_authz_basic::Baseline, E> {
     ctx: &'a BootCtx<'a>,
     store_revision: u64,
     committed: std::sync::Mutex<Option<[u8; 32]>>,
-    /// Set by `install`, so empty unless this reload applied.
-    released: std::sync::Mutex<Arc<[maknae_authz_basic::IdentityProblem]>>,
 }
 
 /// Blocking: the policy load resolves usernames.
@@ -3501,7 +3493,6 @@ fn load_candidate<B: maknae_authz_basic::Baseline>(
         &source.unresolved_adversaries(),
         &persisted.layer,
         source.bindings().is_missing(),
-        source.policy_source(),
     )?;
     let (plan, graph) = crate::reload::plan_candidate(
         &persisted.layer,
@@ -3527,11 +3518,7 @@ fn load_candidate<B: maknae_authz_basic::Baseline>(
         &digests,
     )
     .map_err(|e| compile_refused(e.to_string()))?;
-    let released = released
-        .iter()
-        .map(maknae_authz_basic::IdentityProblem::from)
-        .collect();
-    Ok((plan, (graph, Arc::new(snapshot), released)))
+    Ok((plan, (graph, Arc::new(snapshot), released.into())))
 }
 
 impl<B, E> crate::reload::Load for ReloadIo<'_, B, E>
@@ -3578,6 +3565,7 @@ where
         candidate: &ReloadCandidate,
     ) -> impl Future<Output = Result<crate::reload::Committed, crate::reload::Refusal>> + Send {
         let graph = Arc::clone(&candidate.0);
+        let released = Arc::clone(&candidate.2);
         async move {
             let mut audit = GraphBootAudit {
                 sink: self.reloader.sink.as_ref(),
@@ -3588,6 +3576,7 @@ where
                 &self.reloader.dir,
                 &self.reloader.key,
                 &graph,
+                &released,
                 &mut audit,
                 maknae_state::store::INITIATOR_ROOT_FILE,
             )
@@ -3615,10 +3604,6 @@ where
 
     fn install(&self, candidate: ReloadCandidate) {
         self.reloader.authorizer.baseline().install(candidate.1);
-        *self
-            .released
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = candidate.2;
     }
 }
 
@@ -3678,29 +3663,10 @@ where
             }),
         );
         rec.policy_sha256 = Some(self.reloader.authorizer.baseline().policy_sha256());
-        let released: Vec<(String, AuditRecord)> = self
-            .released
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .iter()
-            .map(|p| {
-                let reason = p.to_string();
-                let rec =
-                    self.ctx
-                        .record(GRAPH_IDENTITY_ACTION, "permit", &reason, "authorized", None);
-                (reason, rec)
-            })
-            .collect();
         let sink = Arc::clone(&self.reloader.sink);
         async move {
             if let Err(e) = sink.emit(&rec).await {
                 eprintln!("maknaed: AUDIT WRITE FAILED on the reload outcome ({reason}): {e}");
-            }
-            for (reason, rec) in released {
-                eprintln!("maknaed: identity: {reason}");
-                if let Err(e) = sink.emit(&rec).await {
-                    eprintln!("maknaed: AUDIT WRITE FAILED on an identity record ({reason}): {e}");
-                }
             }
         }
     }
@@ -5239,9 +5205,6 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             .any(|r| r.action == "start" || r.action == "posture" || r.action == "authz"));
     }
 
-    // #496, root-gated like the test above: a store whose explicit bindings came from
-    // authz.yaml, over the shipped keyless bindings.yaml, refuses boot with exit 3 and
-    // the authz deny record, and the store is untouched.
     #[test]
     fn an_upgrade_without_the_pasted_block_refuses_boot_with_the_authz_record() {
         let _g = ENV_LOCK.lock().unwrap();
@@ -5276,7 +5239,13 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         let result = block_on_run_inner(&d.0);
 
         if nix::unistd::geteuid().as_raw() != 0 {
-            assert!(matches!(result, Err(RunError::Authz(_))), "{result:?}");
+            match &result {
+                Err(RunError::Authz(msg)) => assert!(
+                    msg.contains("not owned by root"),
+                    "root-only: off root the policy read refuses first, got: {msg}"
+                ),
+                other => panic!("expected Err(RunError::Authz), got {other:?}"),
+            }
             return;
         }
         let Err(e @ RunError::Authz(msg)) = &result else {
@@ -5907,6 +5876,10 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         );
         assert_eq!(after[3].0, "graph.transition");
         assert_eq!(after.len(), 5);
+        for (r, _) in &trail(&fx)[seeded + 1..seeded + 3] {
+            let g = r.graph.as_ref().unwrap();
+            assert_eq!((g.revision, g.anchor.as_str()), (2, "releasing"));
+        }
         let stored = maknae_graph::identity::extract(&booted.graph).unwrap();
         assert!(stored.layer.subjects.is_empty());
     }
@@ -5998,7 +5971,6 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         .unwrap();
         let inputs = GraphInputs::new(&source, "UNCLASSIFIED").unwrap();
         assert!(inputs.bindings_missing);
-        assert_eq!(inputs.moved_from, paths.authz.to_str().unwrap());
         let seed = explicit(&inputs, &paths.bindings, &[]);
         let (seeded, booted) = boot_over_seed(&fx, &inputs, &seed);
         let Err(e) = booted else {
@@ -7078,10 +7050,37 @@ mod reload_tests {
 
     struct Fx {
         dir: PathBuf,
-        reloader: Arc<Reloader<HermeticAuthorizer, maknae_audit_append::AuditSink>>,
+        reloader: Arc<Reloader<HermeticAuthorizer, ReloadSink>>,
         status: KernelGraphStatus,
         booted_released: usize,
         _guard: Guard,
+    }
+
+    /// The fixture's audit sink; `fail_identity` refuses every `graph.identity` append.
+    struct ReloadSink {
+        inner: Arc<maknae_audit_append::AuditSink>,
+        fail_identity: std::sync::atomic::AtomicBool,
+    }
+
+    impl AuditEmit for ReloadSink {
+        fn emit(
+            &self,
+            rec: &AuditRecord,
+        ) -> impl std::future::Future<Output = Result<(), maknae_audit_append::AuditError>> + Send
+        {
+            let fail = rec.action == GRAPH_IDENTITY_ACTION
+                && self.fail_identity.load(std::sync::atomic::Ordering::SeqCst);
+            let inner = Arc::clone(&self.inner);
+            let rec = rec.clone();
+            async move {
+                if fail {
+                    return Err(maknae_audit_append::AuditError::WritePrimary(
+                        "identity append refused".into(),
+                    ));
+                }
+                inner.emit(&rec).await
+            }
+        }
     }
 
     struct Guard(PathBuf);
@@ -7272,7 +7271,10 @@ mod reload_tests {
             vocabulary: inputs.vocabulary,
             revision: Arc::clone(&status.revision),
             lock: tokio::sync::Mutex::new(()),
-            sink,
+            sink: Arc::new(ReloadSink {
+                inner: sink,
+                fail_identity: std::sync::atomic::AtomicBool::new(false),
+            }),
             session_ids: Arc::new(SessionIds::new()),
             host: "h".into(),
             socket: "s".into(),
@@ -7472,8 +7474,19 @@ mod reload_tests {
                 )
             )]
         );
-        assert_eq!(recs.last().unwrap().action, "graph.identity");
-        assert_eq!(recs[recs.len() - 2].action, "graph.reload");
+        let tail: Vec<&str> = recs[recs.len() - 4..]
+            .iter()
+            .map(|r| r.action.as_str())
+            .collect();
+        assert_eq!(
+            tail,
+            [
+                "graph.identity",
+                "graph.transition",
+                "graph.checkpoint",
+                "graph.reload"
+            ]
+        );
     }
 
     #[tokio::test]
@@ -7524,10 +7537,10 @@ mod reload_tests {
             actions,
             [
                 "graph.reload",
+                "graph.identity",
                 "graph.transition",
                 "graph.checkpoint",
-                "graph.reload",
-                "graph.identity"
+                "graph.reload"
             ]
         );
         assert_eq!(
@@ -7538,14 +7551,51 @@ mod reload_tests {
                 "uid 0 ('root') is no longer contained: bindings.yaml has no bindings: key, so the enrolled principal is admin and nobody else holds a role".to_string()
             )]
         );
-        assert_eq!(recs[4].session_id, recs[3].session_id);
-        assert_eq!(recs[4].seq, recs[3].seq + 1);
+        let g = recs[1].graph.as_ref().unwrap();
+        assert_eq!((g.revision, g.anchor.as_str()), (2, "releasing"));
+        assert_eq!(recs[2].graph.as_ref().unwrap().revision, 2);
+        assert!(recs.iter().all(|r| r.session_id == recs[0].session_id));
         bounded(fx.reloader.run()).await.unwrap();
         assert_eq!(
             identity_records(&fx.reload_records()).len(),
             1,
             "an unchanged reload releases nothing"
         );
+    }
+
+    #[tokio::test]
+    async fn a_reload_whose_release_record_does_not_append_persists_nothing() {
+        let fx = fixture("release_append_fails", AUTHZ, Some(ROOT_ADVERSARY)).await;
+        let before = fx.store_bytes();
+        let policy = fx
+            .baseline()
+            .snapshot()
+            .policy_sha256(maknae_state::envelope::sha256);
+        fx.reloader
+            .sink
+            .fail_identity
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        fx.write_bindings("schema_version: 1\n");
+        let refused = bounded(fx.reloader.run()).await.unwrap_err();
+        assert!(
+            matches!(&refused, crate::reload::Refusal::Persist(m) if m.contains("identity append refused")),
+            "{refused:?}"
+        );
+        assert_eq!(fx.store_bytes(), before);
+        assert_eq!(fx.status.revision(), 1);
+        assert_eq!(
+            fx.baseline()
+                .snapshot()
+                .policy_sha256(maknae_state::envelope::sha256),
+            policy
+        );
+        assert_eq!(
+            whoami_as(&fx, 0).1,
+            Some("adversary"),
+            "the old snapshot stands"
+        );
+        let actions: Vec<String> = fx.reload_records().into_iter().map(|r| r.action).collect();
+        assert_eq!(actions, ["graph.reload", "graph.reload"]);
     }
 
     #[tokio::test]

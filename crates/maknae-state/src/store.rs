@@ -351,15 +351,13 @@ pub struct BootReport {
 
 /// What the binary brings to boot: its persisted compiled set, that set's
 /// `vocabulary::digest`, the identity layer resolved from `bindings.yaml`, the
-/// `adversary:` names that did not resolve, whether the file is missing, and the
-/// `authz.yaml` path a layer written before #496 names as its source.
+/// `adversary:` names that did not resolve, and whether the file is missing.
 pub struct BootInputs<'a> {
     pub compiled: &'a CompiledSet,
     pub vocabulary_sha256: [u8; 32],
     pub identity: &'a IdentityLayer,
     pub unresolved_adversaries: &'a [String],
     pub bindings_missing: bool,
-    pub moved_from: &'a str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -602,7 +600,6 @@ async fn load(
         &extracted.layer,
         inputs.identity,
         inputs.bindings_missing,
-        inputs.moved_from,
     ) {
         return Err(StoreError::BindingsRefused(m));
     }
@@ -682,13 +679,14 @@ async fn load(
     Ok(report)
 }
 
-/// Persists a validated identity transition: intent, then publish, then checkpoint. The
-/// publish's rename is the point of no return, so a failure after it is reported, not raised.
-/// Callers serialize commits; the floor is re-checked under a lock at publish regardless.
+/// Persists a validated identity transition: the containments it ends, intent, publish,
+/// checkpoint. The publish's rename is the point of no return, so a failure after it is
+/// reported, not raised. Callers serialize commits; the floor is re-checked at publish.
 pub async fn commit(
     dir: &StateDir,
     key: &WrappingKey,
     next: &Graph,
+    released: &[identity::Released],
     audit: &mut impl BootAudit,
     initiator: &'static str,
 ) -> Result<Committed, StoreError> {
@@ -699,6 +697,9 @@ pub async fn commit(
             store,
             attempted: revision,
         });
+    }
+    if !released.is_empty() {
+        audit.released(revision, released).await?;
     }
     audit.intent_transition(revision, initiator).await?;
     let persisted = dir.persist(key, next)?;

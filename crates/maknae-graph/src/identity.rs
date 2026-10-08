@@ -315,6 +315,7 @@ pub fn extract(g: &Graph) -> Result<Extracted, IdentityError> {
 }
 
 pub const BINDINGS_MISSING: &str = "bindings.yaml is missing but the store holds explicit bindings; to return to principal-as-admin write bindings.yaml without a `bindings:` key";
+const BINDINGS_YAML: &str = "bindings.yaml";
 pub const BINDINGS_NOT_MOVED: &str = "the store holds explicit bindings from authz.yaml; paste the bindings: block into /etc/maknae/bindings.yaml";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -325,8 +326,8 @@ pub struct Carried {
 }
 
 /// `file` plus every persisted contained subject whose name is in `unresolved_adversaries`,
-/// contained under its persisted uid; any file entry for that uid is replaced and returned in
-/// `overrides`. Idempotent.
+/// contained under its persisted uid unless the file already contains that uid; any other file
+/// entry for that uid is replaced and returned in `overrides`. Idempotent.
 pub fn carry_forward(
     file: &IdentityLayer,
     unresolved_adversaries: &[String],
@@ -339,14 +340,17 @@ pub fn carry_forward(
         .iter()
         .filter(|s| s.role == ADVERSARY && unresolved_adversaries.contains(&s.name))
     {
-        let (overrides, keep): (Vec<SubjectEntry>, Vec<SubjectEntry>) = out
+        if out
             .subjects
-            .drain(..)
-            .partition(|e| e.uid == s.uid && e != s);
-        out.subjects = keep;
-        if !out.subjects.contains(s) {
-            out.subjects.push(s.clone());
+            .iter()
+            .any(|e| e.uid == s.uid && e.role == ADVERSARY)
+        {
+            continue;
         }
+        let (overrides, keep): (Vec<SubjectEntry>, Vec<SubjectEntry>) =
+            out.subjects.drain(..).partition(|e| e.uid == s.uid);
+        out.subjects = keep;
+        out.subjects.push(s.clone());
         carried.push(Carried {
             uid: s.uid,
             name: s.name.clone(),
@@ -426,15 +430,16 @@ pub fn released(persisted: &IdentityLayer, next: &IdentityLayer) -> Vec<Released
 }
 
 /// The refusal, if `file` would drop explicit bindings that root has not written into
-/// `bindings.yaml`: the one-time move from `moved_from` (`authz.yaml`), or a vanished file.
+/// `bindings.yaml`: explicit bindings persisted from any other file, or a vanished file.
 pub fn drops_explicit_bindings(
     persisted: &IdentityLayer,
     file: &IdentityLayer,
     file_missing: bool,
-    moved_from: &str,
 ) -> Option<&'static str> {
     persisted.bindings_sha256?;
-    if persisted.source == moved_from && file.bindings_sha256.is_none() {
+    let from_bindings_yaml = std::path::Path::new(&persisted.source).file_name()
+        == Some(std::ffi::OsStr::new(BINDINGS_YAML));
+    if !from_bindings_yaml && file.bindings_sha256.is_none() {
         return Some(BINDINGS_NOT_MOVED);
     }
     if file_missing {
@@ -1234,73 +1239,99 @@ mod tests {
         let old_absent = at(a, None, &[]);
         let new_absent = at(b, None, &[]);
         let new_explicit = at(b, Some("x"), &[(666, "mallory", "adversary")]);
+        let guard = |p: &IdentityLayer, f: &IdentityLayer, missing: bool| {
+            drops_explicit_bindings(p, f, missing)
+        };
         assert_eq!(
-            drops_explicit_bindings(&old_explicit, &new_absent, false, a),
+            guard(&old_explicit, &new_absent, false),
             Some(BINDINGS_NOT_MOVED)
         );
         assert_eq!(
-            drops_explicit_bindings(&old_explicit, &new_absent, true, a),
+            guard(&old_explicit, &new_absent, true),
             Some(BINDINGS_NOT_MOVED)
         );
         assert_eq!(
-            drops_explicit_bindings(&old_empty, &new_absent, false, a),
+            guard(&old_empty, &new_absent, false),
             Some(BINDINGS_NOT_MOVED),
             "an explicit `bindings: {{}}` is explicit"
         );
         assert_eq!(
-            drops_explicit_bindings(&old_absent, &new_absent, false, a),
+            guard(&old_absent, &new_absent, false),
             None,
             "the shipped default upgrades in one transition"
         );
         assert_eq!(
-            drops_explicit_bindings(&old_absent, &new_absent, true, a),
+            guard(&old_absent, &new_absent, true),
             None,
             "nothing explicit to drop"
         );
         assert_eq!(
-            drops_explicit_bindings(&old_explicit, &new_explicit, false, a),
+            guard(&old_explicit, &new_explicit, false),
             None,
             "the block was pasted"
         );
         let steady = at(b, Some("x"), &[]);
+        assert_eq!(guard(&steady, &new_absent, true), Some(BINDINGS_MISSING));
         assert_eq!(
-            drops_explicit_bindings(&steady, &new_absent, true, a),
-            Some(BINDINGS_MISSING)
-        );
-        assert_eq!(
-            drops_explicit_bindings(&steady, &new_absent, false, a),
+            guard(&steady, &new_absent, false),
             None,
             "root's keyless edit is allowed, and recorded as releases"
         );
+        assert_eq!(guard(&steady, &steady, false), None, "an unchanged reboot");
+        assert_eq!(guard(&new_absent, &new_absent, true), None);
         assert_eq!(
-            drops_explicit_bindings(&steady, &steady, false, a),
-            None,
-            "an unchanged reboot"
-        );
-        assert_eq!(
-            drops_explicit_bindings(&new_absent, &new_absent, true, a),
-            None
-        );
-        assert_eq!(
-            drops_explicit_bindings(&IdentityLayer::default(), &new_absent, true, a),
+            guard(&IdentityLayer::default(), &new_absent, true),
             None,
             "a store from before the identity layer"
         );
-        let respelled = at("/private/etc/maknae/authz.yaml", Some("x"), &[]);
-        assert_eq!(
-            drops_explicit_bindings(&respelled, &new_absent, false, a),
-            None,
-            "a respelled config dir is not the move"
-        );
-        assert_eq!(
-            drops_explicit_bindings(&old_explicit, &at(a, None, &[]), false, a),
-            Some(BINDINGS_NOT_MOVED),
-            "compared with the authz.yaml path, never with the file's own source"
-        );
+        for other in [
+            "/private/etc/maknae/authz.yaml",
+            "/etc//maknae/authz.yaml",
+            "/opt/x/authz.yaml",
+            "/etc/maknae/policy.yaml",
+            "/etc/maknae/bindings.yaml.bak",
+            "/etc/maknae/",
+        ] {
+            assert_eq!(
+                guard(&at(other, Some("x"), &[]), &new_absent, false),
+                Some(BINDINGS_NOT_MOVED),
+                "{other}"
+            );
+            assert_eq!(
+                guard(&at(other, Some("x"), &[]), &new_explicit, false),
+                None,
+                "{other}, pasted"
+            );
+        }
+        for respelled in [
+            "/private/etc/maknae/bindings.yaml",
+            "/etc/maknae/./bindings.yaml",
+        ] {
+            let p = at(respelled, Some("x"), &[]);
+            assert_eq!(guard(&p, &new_absent, false), None, "{respelled}");
+            assert_eq!(
+                guard(&p, &new_absent, true),
+                Some(BINDINGS_MISSING),
+                "{respelled}"
+            );
+        }
         assert!(
             BINDINGS_NOT_MOVED.contains("/etc/maknae/bindings.yaml")
                 && BINDINGS_MISSING.contains("without a `bindings:` key")
         );
+    }
+
+    #[test]
+    fn an_adversary_entry_on_the_carried_uid_is_kept_and_overrides_nothing() {
+        let persisted = layer(Some("x"), &[(666, "mallory", "adversary")]);
+        let file = layer(
+            Some("y"),
+            &[(666, "uid:666", "adversary"), (1000, "alex", "admin")],
+        );
+        let (next, carried) = carry_forward(&file, &["mallory".into()], &persisted);
+        assert_eq!(next, file, "the file already contains the uid");
+        assert!(carried.is_empty());
+        assert!(released(&persisted, &next).is_empty());
     }
 
     #[test]

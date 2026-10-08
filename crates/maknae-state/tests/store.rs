@@ -137,7 +137,6 @@ impl Inputs {
             identity: &self.layer,
             unresolved_adversaries: &self.unresolved,
             bindings_missing: self.missing,
-            moved_from: MOVED_FROM,
         }
     }
 }
@@ -1941,6 +1940,7 @@ async fn commit_persists_at_the_next_revision_and_checkpoints() {
         &dir,
         &k,
         &next_graph(2, &e),
+        &[],
         &mut audit,
         INITIATOR_ROOT_FILE,
     )
@@ -1972,6 +1972,7 @@ async fn commit_persists_at_the_next_revision_and_checkpoints() {
             &dir,
             &k,
             &next_graph(stale, &e),
+            &[],
             &mut audit,
             INITIATOR_ROOT_FILE,
         )
@@ -2004,6 +2005,7 @@ async fn commit_names_its_initiator() {
         &dir,
         &k,
         &next_graph(2, &edited()),
+        &[],
         &mut audit,
         INITIATOR_SEED,
     )
@@ -2027,6 +2029,7 @@ async fn commit_with_a_failing_checkpoint_still_publishes_and_reports_it() {
         &dir,
         &k,
         &next_graph(2, &e),
+        &[],
         &mut audit,
         INITIATOR_ROOT_FILE,
     )
@@ -2046,6 +2049,7 @@ async fn commit_with_a_failing_checkpoint_still_publishes_and_reports_it() {
         &dir,
         &k,
         &next_graph(3, &e),
+        &[],
         &mut audit,
         INITIATOR_ROOT_FILE,
     )
@@ -2075,6 +2079,7 @@ async fn a_commit_whose_directory_sync_fails_is_committed_and_advances_the_floor
         &dir,
         &k,
         &next_graph(2, &e),
+        &[],
         &mut audit,
         INITIATOR_ROOT_FILE,
     )
@@ -2103,6 +2108,7 @@ async fn a_commit_whose_directory_sync_fails_is_committed_and_advances_the_floor
         &dir,
         &k,
         &next_graph(2, &e),
+        &[],
         &mut Recorder::default(),
         INITIATOR_ROOT_FILE,
     )
@@ -2118,6 +2124,7 @@ async fn a_commit_whose_directory_sync_fails_is_committed_and_advances_the_floor
         &dir,
         &k,
         &next_graph(3, &e),
+        &[],
         &mut Recorder::default(),
         INITIATOR_ROOT_FILE,
     )
@@ -2200,6 +2207,7 @@ async fn commit_with_a_failing_intent_writes_nothing() {
         &dir,
         &k,
         &next_graph(2, &edited()),
+        &[],
         &mut audit,
         INITIATOR_ROOT_FILE,
     )
@@ -2233,6 +2241,7 @@ async fn a_plain_load_sets_the_store_revision_floor() {
         &dir,
         &k,
         &next_graph(7, &e),
+        &[],
         &mut Recorder::default(),
         INITIATOR_ROOT_FILE,
     )
@@ -2249,6 +2258,7 @@ async fn a_plain_load_sets_the_store_revision_floor() {
         &dir,
         &k,
         &next_graph(8, &e),
+        &[],
         &mut Recorder::default(),
         INITIATOR_ROOT_FILE,
     )
@@ -2270,6 +2280,7 @@ async fn restoring_the_pre_reload_store_after_a_reload_refuses_as_rolled_back() 
         &dir,
         &k,
         &next,
+        &[],
         &mut Recorder::default(),
         INITIATOR_ROOT_FILE,
     )
@@ -2406,6 +2417,7 @@ impl BootAudit for Racer<'_> {
                 dir,
                 key,
                 &rival,
+                &[],
                 &mut Recorder::default(),
                 INITIATOR_ROOT_FILE,
             )
@@ -2432,6 +2444,7 @@ async fn a_commit_raced_past_its_check_refuses_at_publish() {
         &dir,
         &k,
         &next_graph(2, &edited()),
+        &[],
         &mut racer,
         INITIATOR_ROOT_FILE,
     )
@@ -2719,4 +2732,80 @@ async fn a_keyless_boot_writes_its_release_records_before_the_persist() {
     );
     assert_eq!(audit.store_bytes_at_released, Some(before.clone()));
     assert_ne!(fx.store(), before);
+}
+
+#[tokio::test]
+async fn a_commit_writes_its_release_records_before_the_persist() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let dir = fx.dir();
+    run(&dir, &k, None).await.0.unwrap();
+    let before = fx.store();
+    let released = vec![Released {
+        uid: 0,
+        name: "root".into(),
+        cause: ReleaseCause::BoundAs("user".into()),
+    }];
+
+    let mut failing = Recorder {
+        fail_released: true,
+        ..Recorder::default()
+    };
+    let r = commit(
+        &dir,
+        &k,
+        &next_graph(2, &edited()),
+        &released,
+        &mut failing,
+        INITIATOR_ROOT_FILE,
+    )
+    .await;
+    assert_eq!(r.unwrap_err(), StoreError::Audit("released refused".into()));
+    assert_eq!(fx.store(), before);
+    assert_eq!(dir.store_revision(), 1);
+    assert_eq!(failing.events, vec![Event::Released(2, released.clone())]);
+
+    let mut audit = Recorder {
+        store_at_released: Some(fx.file(STORE_FILE)),
+        ..Recorder::default()
+    };
+    let c = commit(
+        &dir,
+        &k,
+        &next_graph(2, &edited()),
+        &released,
+        &mut audit,
+        INITIATOR_ROOT_FILE,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        audit.events,
+        vec![
+            Event::Released(2, released),
+            Event::Transition(2, "root-file".into()),
+            Event::Checkpoint(2, c.digest, "transitioned".into()),
+        ]
+    );
+    assert_eq!(audit.store_bytes_at_released, Some(before.clone()));
+    assert_ne!(fx.store(), before);
+}
+
+#[tokio::test]
+async fn an_upgrade_from_any_other_spelling_of_authz_yaml_refuses() {
+    for old in ["/private/etc/maknae/authz.yaml", "/opt/x/authz.yaml"] {
+        let fx = Fixture::new();
+        let k = key(1);
+        let first = seeded_with(&fx, &k, bindings_layer(old, Some(BLOCK), MALLORY_AND_OP)).await;
+        let before = fx.store();
+        let shipped = inputs_with(bindings_layer(SOURCE, None, &[]));
+        let (r, events) = run_with(&fx.dir(), &k, checkpoint_of(&first), &shipped).await;
+        assert_eq!(
+            r.unwrap_err(),
+            StoreError::BindingsRefused(BINDINGS_NOT_MOVED),
+            "{old}"
+        );
+        assert!(events.is_empty());
+        assert_eq!(fx.store(), before);
+    }
 }

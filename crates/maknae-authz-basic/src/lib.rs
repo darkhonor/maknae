@@ -304,8 +304,7 @@ impl PolicySource {
         &self.paths
     }
 
-    /// `authz.yaml`'s path, the source a persisted identity layer written before #496 names.
-    pub fn policy_source(&self) -> &str {
+    pub(crate) fn policy_source(&self) -> &str {
         &self.policy_source
     }
 
@@ -784,7 +783,6 @@ fn snapshot_over(
                 &stored.layer,
                 &file,
                 source.bindings().is_missing(),
-                source.policy_source(),
             ) {
                 return Err(refused(m.into()));
             }

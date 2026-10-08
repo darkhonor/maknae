@@ -51,10 +51,8 @@ pub fn next_layer(
     unresolved_adversaries: &[String],
     persisted: &IdentityLayer,
     file_missing: bool,
-    moved_from: &str,
 ) -> Result<(IdentityLayer, Vec<maknae_graph::identity::Released>), Refusal> {
-    if let Some(m) =
-        maknae_graph::identity::drops_explicit_bindings(persisted, file, file_missing, moved_from)
+    if let Some(m) = maknae_graph::identity::drops_explicit_bindings(persisted, file, file_missing)
     {
         return Err(Refusal::Load(m.into()));
     }
@@ -297,7 +295,7 @@ mod tests {
             role: "adversary".into(),
         };
         let persisted = IdentityLayer {
-            source: "/b".into(),
+            source: "/etc/maknae/bindings.yaml".into(),
             label: "U".into(),
             bindings_sha256: Some([1; 32]),
             subjects: vec![mallory.clone()],
@@ -308,11 +306,11 @@ mod tests {
             ..persisted.clone()
         };
         assert_eq!(
-            next_layer(&file, &[], &persisted, true, "/a"),
+            next_layer(&file, &[], &persisted, true),
             Err(Refusal::Load(BINDINGS_MISSING.into()))
         );
         let moved = IdentityLayer {
-            source: "/a".into(),
+            source: "/etc/maknae/authz.yaml".into(),
             ..persisted.clone()
         };
         let keyless = IdentityLayer {
@@ -320,16 +318,16 @@ mod tests {
             ..file.clone()
         };
         assert_eq!(
-            next_layer(&keyless, &[], &moved, false, "/a"),
+            next_layer(&keyless, &[], &moved, false),
             Err(Refusal::Load(BINDINGS_NOT_MOVED.into()))
         );
         let (carried, released) =
-            next_layer(&file, &["mallory".into()], &persisted, false, "/a").unwrap();
+            next_layer(&file, &["mallory".into()], &persisted, false).unwrap();
         assert_eq!(
             (carried.subjects, released.len()),
             (persisted.subjects.clone(), 0)
         );
-        let (plain, released) = next_layer(&file, &[], &persisted, false, "/a").unwrap();
+        let (plain, released) = next_layer(&file, &[], &persisted, false).unwrap();
         assert_eq!(plain, file);
         assert_eq!(
             released,
@@ -339,9 +337,9 @@ mod tests {
                 cause: ReleaseCause::BindingsEmpty
             }]
         );
-        let (_, released) = next_layer(&keyless, &[], &persisted, false, "/a").unwrap();
+        let (_, released) = next_layer(&keyless, &[], &persisted, false).unwrap();
         assert_eq!(released[0].cause, ReleaseCause::BindingsAbsent);
-        let (same, released) = next_layer(&persisted, &[], &persisted, false, "/a").unwrap();
+        let (same, released) = next_layer(&persisted, &[], &persisted, false).unwrap();
         assert_eq!((same, released), (persisted.clone(), vec![]));
     }
 
