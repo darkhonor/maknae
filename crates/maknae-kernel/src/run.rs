@@ -3880,20 +3880,22 @@ where
             crate::identity_report::transition_problems(&candidate.2, candidate.3),
         );
         self.reloader.authorizer.baseline().install(candidate.1);
-        let accepted = self.reloader.baseline.current().accepted.clone();
+        let current = self.reloader.baseline.current();
         let pending = candidate.4;
-        if self
-            .reloader
-            .baseline
-            .publish(crate::baseline::BaselineState {
-                accepted,
-                pending: pending.clone(),
-            })
-        {
+        let hash = |p: &Option<crate::baseline::PendingSet>| p.as_ref().map(|p| p.hash.clone());
+        // A new set is published by `outcome` once its record is appended.
+        if pending.is_some() && hash(&pending) != hash(&current.pending) {
             *self
                 .newly_pending
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = pending;
+        } else {
+            self.reloader
+                .baseline
+                .publish(crate::baseline::BaselineState {
+                    accepted: current.accepted.clone(),
+                    pending,
+                });
         }
         *self
             .replaced
@@ -3987,10 +3989,11 @@ where
                 let rec = self
                     .ctx
                     .record(GRAPH_BASELINE_ACTION, result, &reason, posture, None);
-                (crate::baseline::journal_line(&p), rec)
+                (p.clone(), crate::baseline::journal_line(&p), rec)
             });
         let sink = Arc::clone(&self.reloader.sink);
         let bound = self.reloader.append_bound;
+        let status = self.reloader.baseline.clone();
         async move {
             if let Err(e) = sink.emit_within(&rec, bound).await {
                 eprintln!("maknaed: AUDIT WRITE FAILED on the reload outcome ({reason}): {e}");
@@ -4004,10 +4007,18 @@ where
                     break;
                 }
             }
-            if let Some((line, rec)) = pending.filter(|_| appending) {
+            if let Some((set, line, rec)) = pending.filter(|_| appending) {
                 eprintln!("maknaed: baseline: {line}");
-                if let Err(e) = sink.emit_within(&rec, bound).await {
-                    eprintln!("maknaed: AUDIT WRITE FAILED on the baseline pending record: {e}");
+                match sink.emit_within(&rec, bound).await {
+                    Ok(()) => {
+                        status.publish(crate::baseline::BaselineState {
+                            accepted: status.current().accepted.clone(),
+                            pending: Some(set),
+                        });
+                    }
+                    Err(e) => {
+                        eprintln!("maknaed: AUDIT WRITE FAILED on the baseline pending record: {e}")
+                    }
                 }
             }
         }
@@ -9492,6 +9503,7 @@ mod reload_fixture {
     pub(super) struct ReloadSink {
         pub(super) inner: Arc<maknae_audit_append::AuditSink>,
         pub(super) fail_identity: std::sync::atomic::AtomicBool,
+        pub(super) fail_baseline: std::sync::atomic::AtomicBool,
         pub(super) stall: std::sync::Mutex<fn(&AuditRecord) -> bool>,
         pub(super) stalled: std::sync::atomic::AtomicUsize,
         store: PathBuf,
@@ -9536,8 +9548,10 @@ mod reload_fixture {
             rec: &AuditRecord,
         ) -> impl std::future::Future<Output = Result<(), maknae_audit_append::AuditError>> + Send
         {
-            let fail = rec.action == GRAPH_IDENTITY_ACTION
-                && self.fail_identity.load(std::sync::atomic::Ordering::SeqCst);
+            let fail = (rec.action == GRAPH_IDENTITY_ACTION
+                && self.fail_identity.load(std::sync::atomic::Ordering::SeqCst))
+                || (rec.action == GRAPH_BASELINE_ACTION
+                    && self.fail_baseline.load(std::sync::atomic::Ordering::SeqCst));
             let stall = (*self.stall.lock().unwrap())(rec);
             if stall {
                 self.stalled
@@ -9843,6 +9857,7 @@ mod reload_fixture {
             sink: Arc::new(ReloadSink {
                 inner: sink,
                 fail_identity: std::sync::atomic::AtomicBool::new(false),
+                fail_baseline: std::sync::atomic::AtomicBool::new(false),
                 stall: std::sync::Mutex::new(never),
                 stalled: std::sync::atomic::AtomicUsize::new(0),
                 store: dir.join("state").join(STORE_FILE),
@@ -9932,6 +9947,35 @@ mod reload_tests {
             1,
             "an unchanged set is not recorded again"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pending_set_whose_record_failed_is_recorded_by_the_next_reload() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let fx = Fx::with_baseline("pending-retry").await;
+        fx.write_yaml("", "vault_addr_marker: https://w.example:8200\n");
+        fx.reloader.sink.fail_baseline.store(true, SeqCst);
+        fx.reloader.run().await.unwrap();
+        let recorded = |fx: &Fx| {
+            fx.seen()
+                .iter()
+                .filter(|s| s.action == GRAPH_BASELINE_ACTION)
+                .count()
+        };
+        assert_eq!(recorded(&fx), 0);
+        assert!(
+            fx.status_lines().is_empty(),
+            "an unrecorded set is not published"
+        );
+        fx.reloader.sink.fail_baseline.store(false, SeqCst);
+        fx.reloader.run().await.unwrap();
+        assert_eq!(recorded(&fx), 1, "the next reload records it");
+        assert_eq!(
+            fx.status_lines(),
+            vec!["baseline: 1 pending (restart)".to_string()]
+        );
+        fx.reloader.run().await.unwrap();
+        assert_eq!(recorded(&fx), 1, "and only once");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
