@@ -940,7 +940,7 @@ Both send `SIGHUP`, as does `kill -HUP <pid>` for a daemon started by hand. The 
 sudo jq -c 'select(.action=="graph.reload") | {ts, session_id, result: .outcome.result, reason: .outcome.reason, policy: .policy_sha256}' /var/log/maknae/audit.jsonl | tail -n 2
 ```
 
-If the intent itself cannot be appended, nothing is loaded and no outcome is written; the journal says `reload refused: audit append failed: <cause>`. Each reload audit record is given 5 seconds. An intent or store record that cannot be appended in that time refuses the reload, the running policy stands, and the next `SIGHUP` runs; an outcome or identity record that cannot is reported in the journal, and the reload it describes stands.
+If the intent itself cannot be appended, nothing is loaded and no outcome is written; the journal says `reload refused: audit append failed: <cause>`. Each reload audit record is given 5 seconds. An intent or store record that cannot be appended in that time refuses the reload, the running policy stands, and the next `SIGHUP` runs; an outcome or identity record that cannot is reported in the journal, the reload it describes stands, and no identity record after it is attempted. A record that timed out is unconfirmed, not discarded: it may still land in the trail later, so an intent can appear with no outcome after it. The journal's `reload refused` line is authoritative.
 
 **At boot** the trail carries the same `graph.identity` records: each release and the principal-admin record ahead of the store transition that makes them, as above, and each identity problem after the `authz` composition record. A problem record that cannot be appended at boot refuses the start, like every boot record.
 
@@ -1017,6 +1017,8 @@ A subject that holds no role is decided like any uid the file does not list, whi
 ## The audit trail
 
 The trail is `/var/log/maknae/audit.jsonl`, `_maknae:_maknae 0640` in a `0700 _maknae` directory. On Linux the file carries the append-only attribute (`chattr +a`), set by the package on every install and upgrade: writes only append, and truncating, unlinking or opening the file for writing without `O_APPEND` is refused, root included. On Debian the attribute is the trail's only append-only control, because AppArmor cannot express append; on the Red Hat family SELinux enforces it as well. Check it with `lsattr /var/log/maknae/audit.jsonl`, which shows `a`. On macOS the file carries `uappnd` (`ls -lO`).
+
+**Time bounds.** Every record `maknaed` writes is given 5 seconds. A record that is not appended in that time is unconfirmed: it may still land in the trail later, and it is handled as a failed append. A request whose record fails this way gets no answer, a mutation or prompt whose intent record fails is refused before it acts, and a start whose boot record fails is refused (exit 1). While one write has held the trail for more than 5 seconds, every other append is refused at once, without waiting, until that write completes. At start, the scan back through the trail to the latest `graph.checkpoint` is given 30 seconds ([The kernel graph store refuses to start](#the-kernel-graph-store-refuses-to-start)).
 
 ### Rotate, restore or recreate the trail
 
@@ -1187,7 +1189,7 @@ maknaed: refusing to start: kernel graph store: graph store revision 3 is older 
 maknaed: if this is expected, run `sudo maknae reseed` and restart; a readable current kernel.graph is kept for forensics
 ```
 
-**Exit codes:** a boot record that cannot be appended to the audit trail exits 1, graph records included; every other graph refusal exits 5.
+**Exit codes:** a boot record that cannot be appended to the audit trail within 5 seconds exits 1, graph records included; every other graph refusal exits 5.
 
 `maknae status` prints the store's state once the daemon runs, as `kernel graph: revision <n> (<state>)`.
 
@@ -1212,6 +1214,7 @@ In the table, `<dir>` is the state directory. Each first line starts `maknaed: r
 | Another maknaed running | `kernel graph store: another maknaed holds the kernel graph state directory` | `another maknaed is already running against <dir>; stop it before starting this one` | 5 | A second `maknaed` was started while one already holds the state directory. Stop the other instance, or leave it running and do not start this one. Do not reseed: the store is not at fault. |
 | I/O failure while seeding | `kernel graph store: graph store I/O failed: <cause>` | as for the state directory | 5 | Writing the new store, its rejected copy or removing the marker failed. Check the directory and its file system. |
 | Audit trail unreadable | `kernel graph store: graph store audit failed: <cause>` | `the audit trail anchors the graph store; check that the audit file is readable` | 5 | Check `/var/log/maknae/audit.jsonl`. |
+| Audit trail scan timed out | `kernel graph store: rollback anchor scan did not complete within 30000ms` | `` the trail after its last graph.checkpoint did not scan within 30s; rotate it as the runbook's "Rotate, restore or recreate the trail" says, then restart `` | 5 | The trail written since the latest checkpoint is too long, or its file system too slow, to read back in 30 seconds. [Rotate the trail](#rotate-restore-or-recreate-the-trail) and restart; the start then reports [`rollback-anchor-unavailable`](#rollback-anchor-unavailable). |
 | Audit append failure | `the boot graph record was not durably appended: <cause>`, or the same with `graph reseed` or `graph rejected-store` for `graph` | none | 1 | A boot record could not be written to the audit trail. Check the audit file and its file system. |
 | No key | `` kernel graph key: no kernel graph key (<detail>): run `sudo maknae enroll` `` | `` run `sudo maknae enroll` to create the kernel graph key `` | 5 | Run `sudo maknae enroll` ([upgrading](upgrading.md#kernel-graph-store-488)), then restart. On Linux systemd refuses the unit first, with `status=243/CREDENTIALS`. |
 | Forged vocabulary | `kernel graph store: graph store vocabulary refused: <cause>`, where `<cause>` is, for example, `compiled nodes differ from the digest they claim` or `the stored digest does not cover the stored compiled nodes` | as for rolled back | 5 | The store's role vocabulary does not match the digest it records, which an upgrade never produces. Investigate, then reseed. A store from an older binary is [migrated](#upgrades-migrate-the-store), not refused. |

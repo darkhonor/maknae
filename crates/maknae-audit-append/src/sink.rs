@@ -10,7 +10,9 @@
 //!
 //! T3 (`coverage-tiers.toml`): I/O-bound, report-only coverage; the
 //! `tests/fail_closed.rs` integration test is the primary evidence.
-use crate::blocking_guard::{AuditAttempt, BlockingBreaker, BreakerAdmission};
+use crate::blocking_guard::{
+    AuditAttempt, BlockingBreaker, BreakerAdmission, WriterBusy, AUDIT_WRITER_BUSY_REFUSE_AFTER,
+};
 use crate::error::AuditError;
 use crate::journal::PrimaryOutcome;
 // ONE name for the platform mirror, chosen here at the module boundary, so the
@@ -88,6 +90,8 @@ fn open_trail_under(
 pub struct AuditSink {
     primary: Arc<Mutex<Primary>>,
     breaker: Arc<Mutex<BlockingBreaker>>,
+    busy: Arc<WriterBusy>,
+    busy_limit: Duration,
     #[allow(dead_code)] // surfaced for future error context / re-open on failure
     path: PathBuf,
     /// Best-effort system-log mirror (ADR-0019 D3): journald on Linux
@@ -105,6 +109,8 @@ struct Primary {
     // Protected by the writer mutex: no queued writer can acknowledge a later
     // line after a failed/partial write or uncertain synchronization.
     failed: bool,
+    #[cfg(test)]
+    stall: Option<std::sync::mpsc::Receiver<()>>,
 }
 
 impl Primary {
@@ -112,6 +118,8 @@ impl Primary {
         Self {
             file,
             failed: false,
+            #[cfg(test)]
+            stall: None,
         }
     }
 }
@@ -171,6 +179,8 @@ impl AuditSink {
         AuditSink {
             primary: Arc::new(Mutex::new(Primary::new(file))),
             breaker: Arc::new(Mutex::new(BlockingBreaker::default())),
+            busy: Arc::new(WriterBusy::default()),
+            busy_limit: AUDIT_WRITER_BUSY_REFUSE_AFTER,
             path: cfg.jsonl_path.clone(),
             mirror: Mirror::open(journal),
         }
@@ -209,6 +219,24 @@ impl AuditSink {
         let mut line = canonical_json(rec)?;
         line.push('\n');
         let now = Instant::now();
+        if self.busy.busy_longer_than(self.busy_limit, now) {
+            let should_log = self
+                .breaker
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .should_log_refusal_at(now);
+            if should_log {
+                eprintln!(
+                    "maknaed: AUDIT WRITER BUSY for event={} action={} session_id={} — refusing append before spawning blocking audit work",
+                    rec.event, rec.action, rec.session_id
+                );
+            }
+            self.mirror_journald(rec, PrimaryOutcome::RefusedBreakerOpen);
+            return Err(AuditError::WritePrimary(format!(
+                "audit writer busy for more than {}ms",
+                self.busy_limit.as_millis()
+            )));
+        }
         let admitted = {
             let mut breaker = self
                 .breaker
@@ -254,13 +282,14 @@ impl AuditSink {
             }
         };
         let primary = Arc::clone(&self.primary);
+        let busy = Arc::clone(&self.busy);
         let release = SlotRelease {
             breaker: Arc::clone(&self.breaker),
             attempt,
         };
         let worker = tokio::task::spawn_blocking(move || {
             let _release = release;
-            write_line(&primary, &line)
+            write_line(&primary, &line, &busy)
         });
         let joined = match bound {
             None => worker.await,
@@ -349,7 +378,7 @@ fn unconfirmed(bound: Duration) -> AuditError {
     ))
 }
 
-fn write_line(file: &Mutex<Primary>, line: &str) -> Result<(), AuditError> {
+fn write_line(file: &Mutex<Primary>, line: &str, busy: &WriterBusy) -> Result<(), AuditError> {
     // A writer panic may leave a partial JSONL line. Appending after it would
     // acknowledge a record spliced into that line, not a durable valid record.
     let mut guard = file.lock().map_err(|_| {
@@ -361,6 +390,11 @@ fn write_line(file: &Mutex<Primary>, line: &str) -> Result<(), AuditError> {
         ));
     }
     guard.failed = true;
+    let _busy = busy.hold_from(Instant::now());
+    #[cfg(test)]
+    if let Some(stall) = guard.stall.take() {
+        let _ = stall.recv_timeout(Duration::from_secs(10));
+    }
     guard
         .file
         .write_all(line.as_bytes())
@@ -1675,6 +1709,48 @@ mod tests {
                 .map(|r| r.action == action)
                 .unwrap_or(false)
         }
+    }
+
+    #[tokio::test]
+    async fn a_writer_busy_past_its_limit_refuses_later_appends_fast_and_recovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sink = quiet_sink(dir.path());
+        sink.busy_limit = Duration::from_millis(50);
+        let (release, stall) = std::sync::mpsc::channel();
+        sink.primary.lock().unwrap().stall = Some(stall);
+        let rec = scan_record("a", 1, 0);
+        let first = sink.append_within(&rec, Duration::from_millis(100)).await;
+        assert!(
+            matches!(&first, Err(AuditError::WritePrimary(m)) if m.contains("unconfirmed")),
+            "{first:?}"
+        );
+        let second = tokio::time::timeout(Duration::from_secs(1), sink.append(&rec))
+            .await
+            .expect("a busy writer must refuse without waiting for it");
+        assert!(
+            matches!(&second, Err(AuditError::WritePrimary(m)) if m == "audit writer busy for more than 50ms"),
+            "{second:?}"
+        );
+        release.send(()).unwrap();
+        let mut recovered = false;
+        for _ in 0..250 {
+            if sink.busy.busy_longer_than(Duration::ZERO, Instant::now()) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                continue;
+            }
+            recovered = true;
+            break;
+        }
+        assert!(
+            recovered,
+            "the writer stayed busy after its write was released"
+        );
+        tokio::time::timeout(Duration::from_secs(5), sink.append(&rec))
+            .await
+            .expect("bounded")
+            .unwrap();
+        let lines = std::fs::read_to_string(dir.path().join("audit.jsonl")).unwrap();
+        assert_eq!(lines.lines().count(), 2);
     }
 
     #[tokio::test]

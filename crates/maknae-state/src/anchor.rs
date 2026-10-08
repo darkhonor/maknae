@@ -112,6 +112,19 @@ pub fn assess(
     }
 }
 
+const CHECKPOINT_NEEDLE: &[u8] = b"\"graph.checkpoint\"";
+
+/// False for a line without the action spelled as the sink writes it; no JSON parse.
+pub fn may_be_checkpoint(line: &[u8]) -> bool {
+    line.windows(CHECKPOINT_NEEDLE.len())
+        .any(|w| w == CHECKPOINT_NEEDLE)
+}
+
+/// The rollback scan's predicate: the byte prefilter, then the parse.
+pub fn is_checkpoint(line: &[u8]) -> bool {
+    may_be_checkpoint(line) && parse_checkpoint(line).is_some()
+}
+
 pub fn parse_checkpoint(line: &[u8]) -> Option<Checkpoint> {
     let v: serde_json::Value = serde_json::from_slice(line).ok()?;
     if v.get("action")?.as_str()? != CHECKPOINT_ACTION {
@@ -249,6 +262,61 @@ mod tests {
 
     fn line(action: &str, graph: &str) -> Vec<u8> {
         format!(r#"{{"action":"{action}","graph":{graph},"seq":1}}"#).into_bytes()
+    }
+
+    #[test]
+    fn the_prefilter_needle_is_the_checkpoint_action() {
+        assert_eq!(
+            CHECKPOINT_NEEDLE,
+            format!("\"{CHECKPOINT_ACTION}\"").as_bytes()
+        );
+    }
+
+    #[test]
+    fn only_the_spelling_the_sink_writes_passes_the_prefilter() {
+        let hex = "01".repeat(32);
+        let graph = format!(r#"{{"revision":7,"ciphertext_sha256":"{hex}"}}"#);
+        let canonical = line(CHECKPOINT_ACTION, &graph);
+        assert!(may_be_checkpoint(&canonical));
+        assert!(is_checkpoint(&canonical));
+        let escaped = line(r"graph\u002echeckpoint", &graph);
+        assert!(parse_checkpoint(&escaped).is_some());
+        assert!(!may_be_checkpoint(&escaped));
+        assert!(!is_checkpoint(&escaped));
+        let malformed = line(CHECKPOINT_ACTION, r#"{"revision":7}"#);
+        assert!(may_be_checkpoint(&malformed));
+        assert!(!is_checkpoint(&malformed));
+        assert!(!may_be_checkpoint(br#""graph.checkpoin""#));
+        assert!(!may_be_checkpoint(b""));
+    }
+
+    #[test]
+    fn a_large_trail_of_other_records_is_scanned_without_parsing_them() {
+        let hex = "01".repeat(32);
+        let mut trail = line(
+            CHECKPOINT_ACTION,
+            &format!(r#"{{"revision":7,"ciphertext_sha256":"{hex}"}}"#),
+        );
+        trail.push(b'\n');
+        for seq in 0..100_000u64 {
+            trail.extend_from_slice(
+                format!(
+                    r#"{{"action":"fs.read","event":"request","outcome":{{"reason":"permitted after graph.checkpoint {seq}","result":"permit"}},"seq":{seq}}}"#
+                )
+                .as_bytes(),
+            );
+            trail.push(b'\n');
+        }
+        let mut parsed = 0;
+        let newest = trail.rsplit(|b| *b == b'\n').find(|l| {
+            if !may_be_checkpoint(l) {
+                return false;
+            }
+            parsed += 1;
+            parse_checkpoint(l).is_some()
+        });
+        assert_eq!(parsed, 1);
+        assert!(newest.is_some_and(is_checkpoint));
     }
 
     #[test]

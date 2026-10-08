@@ -31,7 +31,8 @@ const _: () = assert!(BLOCKING_BREAKER_MAX_IN_FLIGHT > BLOCKING_BREAKER_TRIP_AFT
 /// lookup is far below this, while wedged infrastructure fails closed promptly.
 pub const BLOCKING_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Bound on each boot and reload audit append; an elapse refuses that boot or reload.
+/// Bound on each boot, reload and request audit append; one that elapses is
+/// unconfirmed and handled as a failed append.
 pub const AUDIT_APPEND_TIMEOUT: Duration = BLOCKING_OPERATION_TIMEOUT;
 
 /// Bound on the boot's backward scan of the trail for the rollback anchor.

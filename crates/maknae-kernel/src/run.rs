@@ -1815,7 +1815,7 @@ async fn emit_or_report<E: AuditEmit + Send + Sync>(
     peer_uid: u32,
     session_id: u64,
 ) -> bool {
-    match emit.emit(rec).await {
+    match emit.emit_within(rec, AUDIT_APPEND_TIMEOUT).await {
         Ok(()) => true,
         Err(e) => {
             eprintln!(
@@ -2083,7 +2083,7 @@ async fn emit_request_outcome<E: AuditEmit + Send + Sync>(
     rec.subject.role = role.map(str::to_string);
     rec.rule = rule.map(rule_audit);
     rec.object_requested = object_requested.map(str::to_string);
-    match emit.emit(&rec).await {
+    match emit.emit_within(&rec, AUDIT_APPEND_TIMEOUT).await {
         Ok(()) => true,
         Err(e) => {
             eprintln!(
@@ -2132,7 +2132,7 @@ async fn emit_request_deny<E: AuditEmit + Send + Sync>(
     // #275: the peer identity, bounded and audit-only.
     rec.subject.user = admitted_user(peer_user);
     rec.subject.role = role.map(str::to_string);
-    if let Err(e) = emit.emit(&rec).await {
+    if let Err(e) = emit.emit_within(&rec, AUDIT_APPEND_TIMEOUT).await {
         // See the group-check deny above: logged, not control-flow-changing — the
         // caller already closes the connection regardless.
         eprintln!(
@@ -3024,7 +3024,10 @@ struct GraphBootAudit<'a, E> {
 }
 
 impl<'a, E: AuditEmit + Send + Sync> GraphBootAudit<'a, E> {
-    fn append(&self, rec: AuditRecord) -> impl Future<Output = Result<(), StoreError>> + Send + 'a {
+    fn write_ahead(
+        &self,
+        rec: AuditRecord,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send + 'a {
         let (sink, bound) = (self.sink, self.bound);
         async move {
             sink.emit_within(&rec, bound)
@@ -3057,7 +3060,7 @@ impl<E: AuditEmit + Send + Sync> BootAudit for GraphBootAudit<'_, E> {
                 scanned_bytes: self.scanned_bytes,
             }),
         );
-        self.append(rec)
+        self.write_ahead(rec)
     }
 
     fn checkpoint(
@@ -3078,7 +3081,7 @@ impl<E: AuditEmit + Send + Sync> BootAudit for GraphBootAudit<'_, E> {
                 scanned_bytes: self.scanned_bytes,
             }),
         );
-        self.append(rec)
+        self.write_ahead(rec)
     }
 
     fn intent_migrate(
@@ -3094,7 +3097,7 @@ impl<E: AuditEmit + Send + Sync> BootAudit for GraphBootAudit<'_, E> {
             lower_hex(&to)
         );
         let rec = self.intent(GRAPH_MIGRATE_ACTION, &reason, revision, "migrating");
-        self.append(rec)
+        self.write_ahead(rec)
     }
 
     fn intent_transition(
@@ -3104,7 +3107,7 @@ impl<E: AuditEmit + Send + Sync> BootAudit for GraphBootAudit<'_, E> {
     ) -> impl Future<Output = Result<(), StoreError>> + Send {
         let reason = format!("intent recorded ({initiator})");
         let rec = self.intent(GRAPH_TRANSITION_ACTION, &reason, revision, "transitioning");
-        self.append(rec)
+        self.write_ahead(rec)
     }
 
     fn released(
@@ -3142,7 +3145,7 @@ impl<E: AuditEmit + Send + Sync> BootAudit for GraphBootAudit<'_, E> {
         let reason = maknae_authz_basic::IdentityProblem::PrincipalAdmin { uid }.to_string();
         let rec = self.intent(GRAPH_IDENTITY_ACTION, &reason, revision, "promoting");
         eprintln!("maknaed: identity: {reason} (pending the store commit of revision {revision})");
-        self.append(rec)
+        self.write_ahead(rec)
     }
 
     fn baseline(
@@ -3271,9 +3274,11 @@ impl GraphInputs {
     }
 }
 
+#[derive(Debug)]
 enum GraphFailure {
     Key(maknae_vault::VaultError),
     Store(StoreError),
+    ScanElapsed(String),
 }
 
 /// The refusal for a graph-store boot failure, with the operator's next step for its
@@ -3288,6 +3293,11 @@ fn graph_refusal(failure: GraphFailure, state_dir: &Path) -> RunError {
              `sudo maknae enroll`, then `sudo maknae reseed`"
                 .to_string()
         }
+        GraphFailure::ScanElapsed(_) => format!(
+            "the trail after its last {CHECKPOINT_ACTION} did not scan within {}s; rotate it as \
+             the runbook's \"Rotate, restore or recreate the trail\" says, then restart",
+            SCAN_BACK_TIMEOUT.as_secs()
+        ),
         GraphFailure::Key(_) => "the kernel graph key could not be read; check the credential \
              `sudo maknae enroll` created (enroll never replaces an existing key)"
             .to_string(),
@@ -3342,6 +3352,7 @@ fn graph_refusal(failure: GraphFailure, state_dir: &Path) -> RunError {
     let reason = match failure {
         GraphFailure::Key(e) => format!("kernel graph key: {e}"),
         GraphFailure::Store(e) => format!("kernel graph store: {e}"),
+        GraphFailure::ScanElapsed(e) => format!("kernel graph store: {e}"),
     };
     RunError::Graph { reason, hint }
 }
@@ -3438,11 +3449,11 @@ async fn scan_anchor(
     scan: impl FnOnce() -> Result<maknae_audit_append::ScanResult, maknae_audit_append::AuditError>
         + Send
         + 'static,
-) -> Result<maknae_audit_append::ScanResult, StoreError> {
+) -> Result<maknae_audit_append::ScanResult, GraphFailure> {
     within_blocking(bound, scan)
         .await
-        .map_err(|e| StoreError::Audit(format!("rollback anchor scan {e}")))?
-        .map_err(|e| StoreError::Audit(e.to_string()))
+        .map_err(|e| GraphFailure::ScanElapsed(format!("rollback anchor scan {e}")))?
+        .map_err(|e| GraphFailure::Store(StoreError::Audit(e.to_string())))
 }
 
 /// Runs before the accept loop, so the blocking audit scan contends with no append.
@@ -3458,10 +3469,10 @@ async fn boot_kernel_graph(
         .map_err(|e| graph_refusal(GraphFailure::Store(e), state_dir))?;
     let scan_sink = Arc::clone(sink);
     let scan = scan_anchor(SCAN_BACK_TIMEOUT, move || {
-        scan_sink.scan_back(|line| parse_checkpoint(line).is_some())
+        scan_sink.scan_back(maknae_state::anchor::is_checkpoint)
     })
     .await
-    .map_err(|e| graph_refusal(GraphFailure::Store(e), state_dir))?;
+    .map_err(|e| graph_refusal(e, state_dir))?;
     let checkpoint = scan.line.as_deref().and_then(parse_checkpoint);
     let mut audit = GraphBootAudit {
         sink: sink.as_ref(),
@@ -3879,6 +3890,7 @@ where
                 eprintln!("maknaed: identity: {reason}");
                 if let Err(e) = sink.emit_within(&rec, bound).await {
                     eprintln!("maknaed: AUDIT WRITE FAILED on an identity record ({reason}): {e}");
+                    break;
                 }
             }
         }
@@ -7525,33 +7537,107 @@ mod graph_audit_bound_tests {
         }
     }
 
-    /// Every unbounded append left in this file is on the request path or the
-    /// shutdown record, which bounds its own.
-    #[test]
-    fn only_the_request_path_and_the_shutdown_record_call_an_unbounded_emit() {
-        let src = include_str!("run.rs");
-        let prod = &src[..src.find("\nmod tests {").expect("a test module")];
-        let mut enclosing = "";
-        let mut callers = Vec::new();
-        for line in prod.lines() {
-            let head = line
-                .trim_start_matches("pub ")
-                .trim_start_matches("pub(crate) ")
-                .trim_start_matches("async ");
-            if let Some(rest) = head.strip_prefix("fn ") {
-                enclosing = rest.split(['<', '(']).next().unwrap_or(rest);
-            }
-            if line.contains(".emit(") {
-                callers.push(enclosing);
+    /// Production lines of `files` that call `.emit(`, `::emit(` or `.append(`;
+    /// column-0 `#[cfg(test)]` modules and comment lines are skipped.
+    fn unbounded_appends(files: &[(String, String)]) -> Vec<(String, String)> {
+        let mut found = Vec::new();
+        for (name, src) in files {
+            let lines: Vec<&str> = src.lines().collect();
+            let mut i = 0;
+            while i < lines.len() {
+                let mut j = i;
+                while j < lines.len() && lines[j].starts_with("#[") {
+                    j += 1;
+                }
+                let test_mod = j > i
+                    && lines[i..j].contains(&"#[cfg(test)]")
+                    && lines
+                        .get(j)
+                        .is_some_and(|l| l.starts_with("mod ") && l.ends_with('{'));
+                if test_mod {
+                    i = j + lines[j..]
+                        .iter()
+                        .position(|l| *l == "}")
+                        .map_or(lines.len(), |k| k + 1);
+                    continue;
+                }
+                let line = lines[i].trim();
+                if !line.starts_with("//")
+                    && [".emit(", "::emit(", ".append("]
+                        .iter()
+                        .any(|p| line.contains(p))
+                {
+                    found.push((name.clone(), line.to_string()));
+                }
+                i += 1;
             }
         }
+        found
+    }
+
+    fn kernel_sources(dir: &Path, out: &mut Vec<(String, String)>) {
+        let mut entries: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        entries.sort();
+        for path in entries {
+            if path.is_dir() {
+                kernel_sources(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push((
+                    path.strip_prefix(env!("CARGO_MANIFEST_DIR"))
+                        .unwrap()
+                        .display()
+                        .to_string(),
+                    std::fs::read_to_string(&path).unwrap(),
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn every_unbounded_append_in_the_kernel_is_one_bounded_by_its_caller() {
+        let mut files = Vec::new();
+        kernel_sources(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
+        assert!(files.len() > 10, "{files:?}");
+        let found = unbounded_appends(&files);
+        let found: Vec<(&str, &str)> = found
+            .iter()
+            .map(|(f, l)| (f.as_str(), l.as_str()))
+            .collect();
         assert_eq!(
-            callers,
+            found,
             [
-                "emit_or_report",
-                "emit_request_outcome",
-                "emit_request_deny",
-                "accept_loop"
+                ("src/mutation.rs", "tokio::time::timeout_at(deadline, emit.emit(&record)).await,"),
+                ("src/mutation.rs", "emit.emit(&record),"),
+                (
+                    "src/run.rs",
+                    "match tokio::time::timeout(AUDIT_DRAIN_SHUTDOWN_TIMEOUT, emit.emit(&stop)).await {"
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_append_scan_sees_every_spelling_in_any_file_and_skips_test_modules() {
+        let files = [
+            (
+                "src/other.rs".to_string(),
+                "fn f() {\n    AuditEmit::emit(&*sink, &rec).await;\n    sink.append(&rec).await?;\n    // sink.emit(&rec)\n    sink.emit_within(&rec, b).await?;\n}\n#[cfg(unix)]\n#[cfg(test)]\nmod tests {\n    fn t() { sink.emit(&rec); }\n}\nfn g() { s.emit(&r); }\n".to_string(),
+            ),
+        ];
+        let found = unbounded_appends(&files);
+        let found: Vec<&str> = found.iter().map(|(_, l)| l.as_str()).collect();
+        assert_eq!(
+            found,
+            [
+                "AuditEmit::emit(&*sink, &rec).await;",
+                "sink.append(&rec).await?;",
+                "fn g() { s.emit(&r); }"
             ]
         );
     }
@@ -7609,6 +7695,64 @@ mod graph_audit_bound_tests {
         )
         .await;
         assert!(start.is_ok(), "the start refusal waited past its bound");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn every_request_record_gives_up_after_the_append_bound_and_withholds_the_frame() {
+        let au3 = serde_json::json!({});
+        let stall = Arc::new(Stall);
+        let rec = make_record(
+            "request",
+            "h",
+            "s",
+            7,
+            None,
+            None,
+            Some("uri"),
+            1,
+            1,
+            "whoami",
+            None,
+            "permit",
+            "ok",
+            "authorized",
+            &au3,
+        );
+        let reported =
+            tokio::time::timeout(OUTER, emit_or_report(&stall, &rec, "a response", 7, 1)).await;
+        assert_eq!(reported, Ok(false));
+        let outcome = tokio::time::timeout(
+            OUTER,
+            emit_request_outcome(
+                &stall,
+                "h",
+                "s",
+                7,
+                "uri",
+                None,
+                None,
+                None,
+                1,
+                2,
+                "whoami",
+                None,
+                None,
+                "permit",
+                "ok",
+                "authorized",
+                &au3,
+            ),
+        )
+        .await;
+        assert_eq!(outcome, Ok(false));
+        let deny = tokio::time::timeout(
+            OUTER,
+            emit_request_deny(
+                &stall, "h", "s", 7, "uri", None, None, 1, 3, "whoami", "no", &au3,
+            ),
+        )
+        .await;
+        assert!(deny.is_ok(), "the deny record waited past its bound");
     }
 
     fn report(marker_ignored: Option<String>, rejected: Option<String>) -> BootReport {
@@ -7676,8 +7820,21 @@ mod graph_audit_bound_tests {
         drop(tx);
         let refused = got.expect("the scan must give up within its bound");
         assert!(
-            matches!(&refused, Err(StoreError::Audit(m)) if m.starts_with("rollback anchor scan")),
+            matches!(&refused, Err(GraphFailure::ScanElapsed(m)) if m.starts_with("rollback anchor scan")),
             "{refused:?}"
+        );
+        let RunError::Graph { reason, hint } = graph_refusal(refused.unwrap_err(), Path::new("/s"))
+        else {
+            panic!("a scan elapse is a graph refusal");
+        };
+        assert!(
+            reason.starts_with("kernel graph store: rollback anchor scan"),
+            "{reason}"
+        );
+        assert!(
+            hint.contains("did not scan within 30s")
+                && hint.contains("Rotate, restore or recreate the trail"),
+            "{hint}"
         );
     }
 
@@ -7698,7 +7855,7 @@ mod graph_audit_bound_tests {
         .await
         .unwrap_err();
         assert!(
-            matches!(&err, StoreError::Audit(m) if m.contains("eio")),
+            matches!(&err, GraphFailure::Store(StoreError::Audit(m)) if m.contains("eio")),
             "{err:?}"
         );
     }
@@ -7727,6 +7884,7 @@ mod reload_tests {
         inner: Arc<maknae_audit_append::AuditSink>,
         fail_identity: std::sync::atomic::AtomicBool,
         stall: std::sync::Mutex<fn(&AuditRecord) -> bool>,
+        stalled: std::sync::atomic::AtomicUsize,
     }
 
     impl ReloadSink {
@@ -7764,6 +7922,10 @@ mod reload_tests {
             let fail = rec.action == GRAPH_IDENTITY_ACTION
                 && self.fail_identity.load(std::sync::atomic::Ordering::SeqCst);
             let stall = (*self.stall.lock().unwrap())(rec);
+            if stall {
+                self.stalled
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
             let inner = Arc::clone(&self.inner);
             let rec = rec.clone();
             async move {
@@ -7983,6 +8145,7 @@ mod reload_tests {
                 inner: sink,
                 fail_identity: std::sync::atomic::AtomicBool::new(false),
                 stall: std::sync::Mutex::new(never),
+                stalled: std::sync::atomic::AtomicUsize::new(0),
             }),
             session_ids: Arc::new(SessionIds::new()),
             host: "h".into(),
@@ -8075,6 +8238,24 @@ mod reload_tests {
         assert_eq!(fx.root_whoami(), adversary());
         fx.reloader.sink.stall_when(never);
         assert!(within(fx.reloader.run()).await.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_identity_records_after_a_reload_stop_at_the_first_that_elapses() {
+        let fx = fixture("stalled-identities", AUTHZ, Some(ROOT_ADMIN)).await;
+        fx.reloader.sink.stall_when(is_identity);
+        fx.write_bindings(
+            "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"no-such-user-maknae-497\"]\n  adversary: [\"no-such-user-maknae-497b\"]\n",
+        );
+        assert!(within(fx.reloader.run()).await.unwrap().persisted);
+        assert_eq!(fx.status.identity.counts().len(), 2);
+        assert_eq!(
+            fx.reloader
+                .sink
+                .stalled
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

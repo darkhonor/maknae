@@ -5,6 +5,7 @@
 //! consume the fixed in-flight append budget.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Threshold the breaker is constructed with; timed-out appends are not
@@ -29,6 +30,56 @@ pub const AUDIT_APPEND_MAX_STALE_RECLAIMS: u8 = 3;
 /// Fixed per-breaker interval for open/refusal diagnostics so a wedged primary
 /// audit sink cannot turn fail-closed refusals into an unbounded journal flood.
 pub const AUDIT_APPEND_BREAKER_REFUSAL_LOG_EVERY: Duration = Duration::from_secs(30);
+
+/// How long one write may hold the primary writer before later appends refuse
+/// without spawning.
+pub const AUDIT_WRITER_BUSY_REFUSE_AFTER: Duration = Duration::from_secs(5);
+
+/// When the primary writer began the write it is in; zero while idle.
+#[derive(Debug)]
+pub struct WriterBusy {
+    epoch: Instant,
+    since: AtomicU64,
+}
+
+impl Default for WriterBusy {
+    fn default() -> Self {
+        Self {
+            epoch: Instant::now(),
+            since: AtomicU64::new(0),
+        }
+    }
+}
+
+impl WriterBusy {
+    /// Marks the writer busy from `now` until the returned guard drops.
+    pub fn hold_from(&self, now: Instant) -> BusyHold<'_> {
+        let offset = now.saturating_duration_since(self.epoch).as_nanos();
+        self.since.store(
+            u64::try_from(offset).unwrap_or(u64::MAX).saturating_add(1),
+            Ordering::SeqCst,
+        );
+        BusyHold(self)
+    }
+
+    pub fn busy_longer_than(&self, limit: Duration, now: Instant) -> bool {
+        match self.since.load(Ordering::SeqCst) {
+            0 => false,
+            since => {
+                let began = self.epoch + Duration::from_nanos(since - 1);
+                now.saturating_duration_since(began) > limit
+            }
+        }
+    }
+}
+
+pub struct BusyHold<'a>(&'a WriterBusy);
+
+impl Drop for BusyHold<'_> {
+    fn drop(&mut self) {
+        self.0.since.store(0, Ordering::SeqCst);
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BreakerAdmission {
@@ -141,6 +192,25 @@ impl BlockingBreaker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_writer_is_busy_only_while_held_and_only_past_the_limit() {
+        assert_eq!(AUDIT_WRITER_BUSY_REFUSE_AFTER, Duration::from_secs(5));
+        let busy = WriterBusy::default();
+        let t0 = busy.epoch + Duration::from_secs(1);
+        let limit = Duration::from_millis(50);
+        assert!(!busy.busy_longer_than(Duration::ZERO, t0 + Duration::from_secs(9)));
+        {
+            let _hold = busy.hold_from(t0);
+            assert!(!busy.busy_longer_than(limit, t0 + limit));
+            assert!(busy.busy_longer_than(limit, t0 + limit + Duration::from_nanos(1)));
+            assert!(!busy.busy_longer_than(limit, t0));
+        }
+        assert!(!busy.busy_longer_than(limit, t0 + Duration::from_secs(9)));
+        let _hold = busy.hold_from(busy.epoch);
+        assert!(busy.busy_longer_than(Duration::ZERO, busy.epoch + Duration::from_nanos(1)));
+        assert!(!busy.busy_longer_than(Duration::ZERO, busy.epoch));
+    }
 
     /// `new()` must delegate with the SHIPPED constant. Without this a mutant
     /// that swaps the second argument (e.g. to 0 or 1) survives, because every
