@@ -32,6 +32,7 @@
 
 mod audit_cfg;
 mod authz;
+mod bindings;
 mod bounds;
 mod bounds_io;
 mod builder;
@@ -57,6 +58,11 @@ pub use loader::{load_config, load_config_rooted};
 pub use audit_cfg::{audit_from_section, AuditConfig, AUDIT_SECTION};
 #[cfg(all(unix, feature = "hermetic-test-seam"))]
 pub use authz::load_authz_with_requirement;
+#[cfg(all(unix, feature = "hermetic-test-seam"))]
+pub use bindings::load_bindings_with_requirement;
+pub use bindings::{
+    load_bindings, parse_bindings, BindingEntry, Bindings, BindingsError, BINDINGS_FILE,
+};
 // Re-exported so downstream seam constructors (maknae-authz-basic's
 // HermeticAuthorizer, #77) can NAME the requirement type without a maknae-io
 // dependency of their own; unix-gated like the fn whose signature carries it.

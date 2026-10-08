@@ -59,11 +59,12 @@ install -m 0755 "$HERE/postinst" "$PKG_ROOT/DEBIAN/postinst"
 install -m 0755 "$HERE/prerm"    "$PKG_ROOT/DEBIAN/prerm"
 install -m 0755 "$HERE/postrm"   "$PKG_ROOT/DEBIAN/postrm"
 
-# conffiles — the two shipped YAML defaults dpkg must preserve across upgrades.
+# conffiles — the shipped YAML defaults dpkg must preserve across upgrades.
 # (Their ownership is re-asserted root:_maknae 0640 in postinst on every configure;
 # dpkg records conffiles root:root and tracks CONTENT only.)
 cat > "$PKG_ROOT/DEBIAN/conffiles" <<'CONF'
 /etc/maknae/authz.yaml
+/etc/maknae/bindings.yaml
 /etc/maknae/maknae.yaml
 /etc/apparmor.d/usr.bin.maknaed
 /etc/apparmor.d/usr.bin.maknae-egress
@@ -108,6 +109,7 @@ install -D -m 0750 "$COMMON/maknae-selinux-ports.sh" \
 # Payload mode 0640; final ownership (root:_maknae) is set in postinst since
 # dpkg-deb --root-owner-group records root:root.
 install -D -m 0640 "$COMMON/authz.yaml"  "$PKG_ROOT/etc/maknae/authz.yaml"
+install -D -m 0640 "$COMMON/bindings.yaml" "$PKG_ROOT/etc/maknae/bindings.yaml"
 install -D -m 0640 "$COMMON/maknae.yaml" "$PKG_ROOT/etc/maknae/maknae.yaml"
 
 # NOTE: /var/log/maknae/audit.jsonl is NOT a payload file — postinst creates it

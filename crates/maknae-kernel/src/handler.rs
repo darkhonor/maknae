@@ -1237,6 +1237,7 @@ mod tests {
             .chain(crate::run::GRAPH_PSEUDO_ACTIONS)
             .collect();
         assert!(pseudo.contains(&"graph.reload") && pseudo.contains(&"graph.migrate"));
+        assert!(pseudo.contains(&"graph.identity"));
         for v in all_verbs() {
             let a = verb_to_action(&v);
             assert!(

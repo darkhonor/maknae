@@ -93,6 +93,9 @@ phase1() {
     grep -qF 'verify "$STATE ownership/mode" "$MUID $MGID 700"' "$HERE/scripts/postinstall" \
         && ok "postinstall verifies the kernel graph state dir" \
         || fail "postinstall does not verify the kernel graph state dir"
+    grep -qxF 'elif [ ! -e "/usr/local/var/db/maknae/state/kernel.graph" ]; then' "$HERE/scripts/postinstall" \
+        && ok "postinstall installs the default bindings.yaml only when no kernel graph store exists" \
+        || fail "postinstall can recreate a bindings.yaml root removed over an existing store"
     local pi="$HERE/scripts/postinstall" hold first last back hfn
     hfn="$(sed -n '/^hold_dir() {$/,/^}$/p' "$pi")"
     case "$hfn" in
@@ -292,6 +295,7 @@ phase1() {
                 "./usr/local/share" "./usr/local/share/maknae" \
                 "./usr/local/share/maknae/defaults" \
                 "./usr/local/share/maknae/defaults/authz.yaml" \
+                "./usr/local/share/maknae/defaults/bindings.yaml" \
                 "./usr/local/share/maknae/defaults/maknae.yaml" | sort > "$x/want"
             lsbom -s "$bom" \
               | sed -e 's|^\.$||' -e 's|libaws_lc_fips_.*_crypto\.dylib|FIPSDYLIB|' \
@@ -461,6 +465,7 @@ REFUSE
         [ "$got" = "$want" ] && ok "$path = $got" || fail "$path = $got (want $want)"
     }
     check_mode "drwxr-x--- root _maknae"    /etc/maknae
+    check_mode "-rw-r----- root _maknae"    /etc/maknae/bindings.yaml
     check_mode "drwx------ _maknae _maknae" /var/log/maknae
     check_mode "drwxr-x--- _maknae maknae"  /usr/local/var/run/maknae
     check_mode "drwxr-x--- _maknae-egress _maknae" /usr/local/var/run/maknae-egress

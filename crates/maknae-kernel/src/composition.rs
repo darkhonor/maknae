@@ -138,7 +138,7 @@ mod tests {
     /// (#216 -- `$TMPDIR` is under the `/var` symlink on macOS), the enrolled
     /// principal IS the test euid, and bindings name `root` so the enrolled-
     /// principal default role resolution is what grants (boot_gate.rs).
-    fn fixture(tag: &str, policy: &str) -> (DirGuard, HermeticAuthorizer) {
+    fn fixture(tag: &str, policy: &str, bindings: Option<&str>) -> (DirGuard, HermeticAuthorizer) {
         use std::os::unix::fs::PermissionsExt;
         let dir =
             std::env::temp_dir().join(format!("maknae_composition_{tag}_{}", std::process::id()));
@@ -146,9 +146,12 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
         let dir = dir.canonicalize().expect("canonicalize the fixture home");
-        let policy_path = dir.join("authz.yaml");
-        std::fs::write(&policy_path, policy).unwrap();
-        std::fs::set_permissions(&policy_path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let paths = maknae_authz_basic::PolicyPaths::in_dir(&dir);
+        for (path, body) in [(&paths.authz, Some(policy)), (&paths.bindings, bindings)] {
+            let Some(body) = body else { continue };
+            std::fs::write(path, body).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        }
         let principal = Principal {
             name: "operator".into(),
             uid: nix::unistd::geteuid().as_raw(),
@@ -160,16 +163,17 @@ mod tests {
             regular_file: true,
             max_bytes: None,
         };
-        let basic =
-            HermeticAuthorizer::new(policy_path, principal, req, maknae_state::envelope::sha256)
-                .expect("fixture constructs");
+        let basic = HermeticAuthorizer::new(paths, principal, req, maknae_state::envelope::sha256)
+            .expect("fixture constructs");
         (DirGuard(dir), basic)
     }
 
     /// A policy that grants `admin.status` to the admin role.
     fn status_policy() -> String {
-        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"root\"]\nroles:\n  admin:\n    allow: [\"admin.status\"]\n".to_string()
+        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nroles:\n  admin:\n    allow: [\"admin.status\"]\n".to_string()
     }
+
+    const ADMIN_ROOT: &str = "schema_version: 1\nbindings:\n  admin: [\"root\"]\n";
 
     const US: &BasicPolicy = &BasicPolicy;
 
@@ -204,7 +208,7 @@ mod tests {
 
     #[test]
     fn the_composed_name_lists_baseline_then_ceiling() {
-        let (_g, basic) = fixture("name", &status_policy());
+        let (_g, basic) = fixture("name", &status_policy(), Some(ADMIN_ROOT));
         let c = Composition::new(basic, ceiling(Ceiling::baseline_for(US)));
         assert_eq!(c.backend_name(), "maknae-authz-basic+maknae-ceiling");
         // And through the kernel's choke point, sanitized once.
@@ -217,7 +221,7 @@ mod tests {
     #[test]
     fn a_control_plane_grant_survives_an_above_baseline_ceiling() {
         // Diagnosability: admin.status still answers under SECRET.
-        let (_g, basic) = fixture("status-secret", &status_policy());
+        let (_g, basic) = fixture("status-secret", &status_policy(), Some(ADMIN_ROOT));
         let c = Composition::new(basic, ceiling(secret()));
         let v = c.decide(&request("admin.status"));
         assert!(
@@ -281,7 +285,7 @@ mod tests {
         // GRANTS this read (proved alone first), the content is marked ABOVE
         // the declared ceiling, and the ceiling's Deny wins the fold. No role,
         // no grant, lifts a mandatory refusal.
-        let (g, basic) = fixture("mac-wins", READ_POLICY);
+        let (g, basic) = fixture("mac-wins", READ_POLICY, None);
         let req = permitted_read_marked(&g.0, Some("TOP SECRET"));
         assert!(
             matches!(basic.decide(&req), Verdict::Permit { .. }),
@@ -301,7 +305,7 @@ mod tests {
     #[test]
     fn the_composition_cites_the_baselines_rule_only_when_its_verdict_stands() {
         use maknae_authz_basic::Baseline;
-        let (g, basic) = fixture("cite", READ_POLICY);
+        let (g, basic) = fixture("cite", READ_POLICY, None);
         let held = basic.snapshot();
         let c = Composition::new(basic, ceiling(secret()));
         assert!(std::sync::Arc::ptr_eq(&c.baseline().snapshot(), &held));
@@ -332,7 +336,7 @@ mod tests {
     #[test]
     fn the_composed_batch_decides_from_one_snapshot() {
         use maknae_authz_basic::{Baseline, EvaluationGate};
-        let (g, mut basic) = fixture("batch", READ_POLICY);
+        let (g, mut basic) = fixture("batch", READ_POLICY, None);
         let gate = std::sync::Arc::new(EvaluationGate {
             arrived: std::sync::Barrier::new(2),
             release: std::sync::Barrier::new(2),
@@ -386,7 +390,7 @@ mod tests {
         // The operator's ruling, at the composition: unmarked is the system's lowest level,
         // so a SECRET deployment serves it -- the composed verdict is the
         // baseline's, note and all.
-        let (g, basic) = fixture("secret-identity", READ_POLICY);
+        let (g, basic) = fixture("secret-identity", READ_POLICY, None);
         let req = permitted_read(&g.0);
         let alone = basic.decide(&req);
         assert!(matches!(alone, Verdict::Permit { .. }));
@@ -399,7 +403,7 @@ mod tests {
         // The other fold shape: -basic has no rule for `session.prompt`
         // (NotApplicable, with testimony), the content is marked above the
         // ceiling, and the ceiling denies. Rule 1 takes the Deny.
-        let (_g, basic) = fixture("abstain-deny", &status_policy());
+        let (_g, basic) = fixture("abstain-deny", &status_policy(), Some(ADMIN_ROOT));
         let c = Composition::new(basic, ceiling(secret()));
         let mut r = request("session.prompt");
         r.resource.0.insert(
@@ -416,7 +420,7 @@ mod tests {
     fn at_baseline_the_ceiling_changes_nothing_the_baseline_decided() {
         // The identity property: with the ceiling abstaining, the composed
         // verdict IS the baseline's verdict, note and all.
-        let (_g, basic) = fixture("identity", &status_policy());
+        let (_g, basic) = fixture("identity", &status_policy(), Some(ADMIN_ROOT));
         let alone = basic.decide(&request("fs.read"));
         let c = Composition::new(basic, ceiling(Ceiling::baseline_for(US)));
         assert_eq!(c.decide(&request("fs.read")), alone);
@@ -455,7 +459,7 @@ mod tests {
 
         // A CONFIDENTIAL boot: SECRET-marked content is refused naming the
         // BOOTED ceiling; unmarked content flows exactly as the baseline says.
-        let (g, basic) = fixture("build-pdp-confidential", READ_POLICY);
+        let (g, basic) = fixture("build-pdp-confidential", READ_POLICY, None);
         let marked = permitted_read_marked(&g.0, Some("SECRET"));
         let unmarked = permitted_read(&g.0);
         assert!(
@@ -474,7 +478,7 @@ mod tests {
         assert_eq!(pdp.decide(&unmarked), alone_unmarked, "unmarked flows");
 
         // A baseline boot: even CONFIDENTIAL-marked content is spillage.
-        let (g2, basic2) = fixture("build-pdp-baseline", READ_POLICY);
+        let (g2, basic2) = fixture("build-pdp-baseline", READ_POLICY, None);
         let marked2 = permitted_read_marked(&g2.0, Some("CONFIDENTIAL"));
         let pdp2 = build_pdp(&booted("baseline", BASELINE_CORE), basic2);
         assert!(
@@ -486,7 +490,7 @@ mod tests {
         // flows under PROTECTED; SECRET is spillage; a US-only level is refused
         // BY NAME, never mapped.
         const AUS_PROTECTED_CORE: &str = "core:\n  handling:\n    ceiling:\n      classification: PROTECTED\n      sci: false\n      releasable_to: []\n      cui_permitted: false\n      cui_categories_permitted: []\n      dissemination_permitted: [\"Distribution Statement A\"]\n    accreditation_ref: null\n    policy: AUS\n";
-        let (g3, basic3) = fixture("build-pdp-aus", READ_POLICY);
+        let (g3, basic3) = fixture("build-pdp-aus", READ_POLICY, None);
         let pdp3 = build_pdp(&booted("aus", AUS_PROTECTED_CORE), basic3);
         assert_eq!(pdp3.backend_name(), "maknae-authz-basic+maknae-ceiling");
         assert!(
@@ -519,7 +523,7 @@ mod tests {
 
     #[test]
     fn subjects_are_the_baselines_because_only_it_enumerates() {
-        let (_g, basic) = fixture("subjects", &status_policy());
+        let (_g, basic) = fixture("subjects", &status_policy(), Some(ADMIN_ROOT));
         let alone = basic.subjects();
         assert!(alone.is_some(), "the hermetic baseline enumerates");
         let c = Composition::new(basic, ceiling(secret()));

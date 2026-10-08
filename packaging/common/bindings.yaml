@@ -1,0 +1,18 @@
+# Who holds which role on this host, and who is contained (#496).
+#
+# With no `bindings:` key, as shipped, the enrolled administrator holds `admin`
+# and nobody else holds a role. Once a `bindings:` key exists, only the entries
+# it lists hold a role, so list yourself under `admin`. `bindings: {}` means
+# nobody holds a role.
+#
+# Apply an edit with `sudo systemctl reload maknaed` (Linux) or
+# `sudo launchctl kill SIGHUP system/io.maknae.maknaed` (macOS).
+#
+# bindings:
+#   admin: ["alice"]
+#   user: ["bob"]
+#   guest: []
+#   adversary:
+#     - "mallory"     # an account on this host
+#     - uid: 4242     # an id, contained even before an account has it
+schema_version: 1

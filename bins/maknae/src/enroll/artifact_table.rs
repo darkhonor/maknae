@@ -5,9 +5,10 @@
 //! adds the host-wide `seal.pub`. It does NOT
 //! include packaging-created rows (`/var/log/maknae`, `/var/log/maknae/audit.jsonl`,
 //! `/run/maknae`, `/usr/local/var/run/maknae`) — those ship with PR-J2's package
-//! scriptlets (spec §9.2), never touched here — nor `authz.yaml` (also packaging's:
-//! spec §7/§9 ships the default capability-grant policy; §4.1's step list never has enroll write
-//! it). `config.d/` is likewise excluded: enroll never creates it ("if present").
+//! scriptlets (spec §9.2), never touched here — nor `authz.yaml` or `bindings.yaml`
+//! (also packaging's: spec §7/§9 ships the default capability-grant policy; §4.1's
+//! step list never has enroll write it). `config.d/` is likewise excluded: enroll
+//! never creates it ("if present").
 //!
 //! Each row is symbolic on purpose: [`Owner`] names a *class* of owner (resolved to
 //! a real uid/gid by `artifact_write.rs` at write time, via passwd/group lookups or
@@ -521,6 +522,19 @@ mod tests {
         // by enroll (absent from spec §4.1's step-4 write list).
         let got = artifact_table(Path::new("/home/op/.maknae"), false, false);
         assert!(!got.iter().any(|a| a.path.ends_with("authz.yaml")));
+    }
+
+    #[test]
+    fn bindings_yaml_is_absent() {
+        for macos in [false, true] {
+            for insecure_plaintext in [false, true] {
+                let got = artifact_table(Path::new("/home/op/.maknae"), macos, insecure_plaintext);
+                assert!(
+                    !got.iter().any(|a| a.path.ends_with("bindings.yaml")),
+                    "macos={macos} insecure_plaintext={insecure_plaintext}"
+                );
+            }
+        }
     }
 
     #[test]

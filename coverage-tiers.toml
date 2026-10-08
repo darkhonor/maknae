@@ -61,6 +61,10 @@ files = [
   # recorded, or keeps serving a refused one. Unit-tested and coverage-gated.
   "crates/maknae-kernel/src/reload.rs",
   "crates/maknae-kernel/src/vocabulary.rs",
+  # #496: what each identity problem's audit record says, which problems a reload
+  # records, and what admin.status and admin.subject.list report for each subject;
+  # a wrong arm hides a released containment or mislabels a contained subject.
+  "crates/maknae-kernel/src/identity_report.rs",
   # The CBOR byte-string content codec (#77): a wrong major type halves the
   # read ceiling and mis-routes oversize; the visitor is a refusal surface.
   "crates/maknae-proto/src/bytes.rs",
@@ -204,6 +208,8 @@ files = [
   # can read/exec — exactly the T1 line-drawing rule. In [t1].files ONLY (own
   # 95% floor; NOT ratchet_cohort).
   "crates/maknae-config/src/authz.rs",
+  # #496: the identity file's grammar and hardened read; a mis-parsed entry binds or contains the wrong subject.
+  "crates/maknae-config/src/bindings.rs",
   # #489: the canonical JSON each authz.yaml section's digest is taken over; a wrong
   # byte makes an unchanged section look edited, or an edited one look unchanged.
   "crates/maknae-config/src/value.rs",
@@ -623,7 +629,7 @@ why = "nix Group/User/getgrouplist resolution — syscall I/O, cross-platform; t
 
 [[t3]]
 path = "crates/maknae-kernel/src/run.rs"
-why = "run-loop orchestration (accept/read/audit/respond driver) + process entrypoint (boot: FIPS, config, audit sink, authz gate, kernel graph store, posture record, mint, bind, serve) — I/O and control-flow; the mutation-gated decisions it consults live in handler.rs/authz.rs/boot_gate.rs/posture.rs (T1 — incl. READ_PAGE_MAX_BYTES) and maknae-proto (T1 — admits, FrameCaps::responses, read_frame_of_class, page_request_is_acceptable); the graph store's boot decisions are maknae-state (T1); the SIGHUP reload's decisions (its ordering, the plan and the graph it calls for, refusing a turn once shutdown began, advancing the revision only on success, and the stop's wait-then-abort-or-leave) are in reload.rs, unit-tested and coverage-gated (T1), so the reload code here is I/O glue; and the records and refusal hints built here are tested against a real sink and state directory. Mutation-excluded (mutants.toml)"
+why = "run-loop orchestration (accept/read/audit/respond driver) + process entrypoint (boot: FIPS, config, audit sink, authz gate, kernel graph store, posture record, mint, bind, serve) — I/O and control-flow; the mutation-gated decisions it consults live in handler.rs/authz.rs/boot_gate.rs/posture.rs (T1 — incl. READ_PAGE_MAX_BYTES) and maknae-proto (T1 — admits, FrameCaps::responses, read_frame_of_class, page_request_is_acceptable); the graph store's boot decisions are maknae-state (T1); the SIGHUP reload's decisions (its ordering, the plan and the graph it calls for, refusing a turn once shutdown began, advancing the revision only on success, and the stop's wait-then-abort-or-leave) are in reload.rs, and the identity problems' records, counts and subject list are in identity_report.rs, both unit-tested and coverage-gated (T1), so the reload and identity code here is I/O glue; and the records and refusal hints built here are tested against a real sink and state directory. Mutation-excluded (mutants.toml)"
 
 [[t3]]
 path = "crates/maknae-vault/src/supervisor_run.rs"

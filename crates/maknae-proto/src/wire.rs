@@ -281,7 +281,8 @@ pub enum Verb {
     /// entitlement.
     Whoami,
     /// Runtime posture: version, protocol version, listener, policy load time,
-    /// active authz backend. A disclosure of trust-plane state — useful to an
+    /// active authz backend, and the identity problems of the last applied load as
+    /// counts by kind, with no names or uids. A disclosure of trust-plane state — useful to an
     /// operator, and useful to an attacker fingerprinting the deployment.
     AdminStatus,
     /// The effective composed configuration. Discloses deployment shape,
@@ -291,14 +292,16 @@ pub enum Verb {
     /// paths that ADR-0019 makes audit-only — the one term whose grant re-exports
     /// the trail over the wire. Recipient scoping is an open constraint.
     AdminAuditTail,
-    /// Reload the policy over the wire: re-read `authz.yaml`, re-resolve its
-    /// usernames and install the compiled snapshot, as the daemon's `SIGHUP`
-    /// reload does. Permitting it lets the holder make a policy edit or a
+    /// Reload the policy over the wire: re-read `authz.yaml` and `bindings.yaml`,
+    /// re-resolve the bindings and install the compiled snapshot, as the daemon's
+    /// `SIGHUP` reload does. Permitting it lets the holder make a policy edit or a
     /// newly-added host principal effective without root's signal — lifting the
-    /// root-paced boundary #85 §3 relies on. The file itself is root-owned, so
-    /// this term confers no ability to write it.
+    /// root-paced boundary #85 §3 relies on. Both files are root-owned, so this
+    /// term confers no ability to write them.
     AdminPolicyReload,
-    /// Enumerate role bindings. Discloses who holds what.
+    /// Enumerate the subjects `bindings.yaml` names, one entry per subject with its
+    /// uid, label and state, unbound and unresolved names included. Discloses who
+    /// holds what.
     AdminSubjectList,
     /// Bind a subject to a role. A policy mutation — write-ahead audit applies.
     /// MUST refuse the `adversary` role: containment has its own sanctioned
@@ -580,10 +583,10 @@ pub enum Payload {
     ConfigView(std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>),
     /// Runtime posture for a permitted `admin.status`.
     Status(StatusView),
-    /// Role bindings for a permitted `admin.subject.list`: role → members, as
-    /// the PDP resolves them RIGHT NOW. Never a boot copy -- a reload replaces
-    /// the bindings, so a boot copy would report authorization state the PDP is
-    /// no longer using, and disclosing stale authz is worse than none.
+    /// Role bindings for a permitted `admin.subject.list`, one entry per subject.
+    /// Each binding is the PDP's RIGHT NOW, never a boot copy -- a reload replaces
+    /// the bindings, and disclosing stale authz is worse than none. Labels, and the
+    /// subjects that hold no binding, come from the last applied policy load.
     SubjectList(Vec<RoleBindingView>),
     /// Durable policy authorization for a subject-side attempt, never OS approval.
     MutationAttempt(crate::MutationGrant),
@@ -634,13 +637,29 @@ pub struct StatusView {
     /// `advanced` or `rollback-anchor-unavailable`.
     #[serde(default)]
     pub kernel_graph_anchor: Option<String>,
+    /// How many per-subject problems of each kind `bindings.yaml` had at the last
+    /// applied load (#496), one `<kind>=<count>` entry per kind; never a name or uid.
+    #[serde(default)]
+    pub identity_problem_counts: Vec<String>,
 }
 
-/// One role and the identities bound to it.
+/// One subject `bindings.yaml` names (#496). `members` holds its binding (`uid:N`),
+/// empty for a subject that holds none; a daemon that predates #496 sent one entry
+/// per role and none of the defaulted fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoleBindingView {
     pub role: String,
     pub members: Vec<String>,
+    #[serde(default)]
+    pub uid: Option<u32>,
+    /// Escaped, from the last applied policy load; never a live account lookup.
+    #[serde(default)]
+    pub label: String,
+    /// `bound <role>`, `contained`, `contained (carried forward)`,
+    /// `unbound (conflict: <roles>)`, `unresolved (no account)` or
+    /// `unresolved adversary (no account, not contained)`.
+    #[serde(default)]
+    pub state: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -941,6 +960,7 @@ mod tests {
                 classification_policy: "US".into(),
                 kernel_graph_revision: kernel_graph.as_ref().map(|k| k.0),
                 kernel_graph_anchor: kernel_graph.map(|k| k.1),
+                identity_problem_counts: vec![],
             })),
         }
     }
@@ -953,16 +973,104 @@ mod tests {
         }
     }
 
+    #[derive(Serialize, Deserialize)]
+    struct OldStatusView {
+        version: String,
+        protocol_version: u16,
+        listener: String,
+        authz_backend: String,
+        classification_policy: String,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct OldRoleBinding {
+        role: String,
+        members: Vec<String>,
+    }
+
+    #[test]
+    fn a_subject_entry_decodes_across_old_and_new_readers() {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(
+            &OldRoleBinding {
+                role: "user".into(),
+                members: vec!["uid:1001".into(), "uid:1002".into()],
+            },
+            &mut bytes,
+        )
+        .unwrap();
+        let new: RoleBindingView = ciborium::from_reader(bytes.as_slice()).unwrap();
+        assert_eq!(
+            new,
+            RoleBindingView {
+                role: "user".into(),
+                members: vec!["uid:1001".into(), "uid:1002".into()],
+                uid: None,
+                label: String::new(),
+                state: String::new(),
+            }
+        );
+        let entry = RoleBindingView {
+            role: "adversary".into(),
+            members: vec!["uid:666".into()],
+            uid: Some(666),
+            label: "uid 666 (mallory)".into(),
+            state: "contained (carried forward)".into(),
+        };
+        let mut new_bytes = Vec::new();
+        ciborium::into_writer(&entry, &mut new_bytes).unwrap();
+        let old: OldRoleBinding = ciborium::from_reader(new_bytes.as_slice()).unwrap();
+        assert_eq!(
+            (old.role.as_str(), old.members),
+            ("adversary", vec!["uid:666".to_string()])
+        );
+        let r = Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Ok(Payload::SubjectList(vec![entry])),
+        };
+        assert_eq!(decode_response(&encode_response(&r).unwrap()).unwrap(), r);
+    }
+
+    #[test]
+    fn a_status_with_identity_problem_counts_round_trips() {
+        let mut r = status(Some((7, "verified".into())));
+        if let RespResult::Ok(Payload::Status(s)) = &mut r.result {
+            s.identity_problem_counts = vec!["unbound_conflict=2".into(), "released=1".into()];
+        }
+        assert_eq!(decode_response(&encode_response(&r).unwrap()).unwrap(), r);
+    }
+
+    #[test]
+    fn a_status_without_the_problems_key_decodes_empty_and_an_older_reader_ignores_it() {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(
+            &OldStatusView {
+                version: "v".into(),
+                protocol_version: PROTOCOL_VERSION,
+                listener: "l".into(),
+                authz_backend: "b".into(),
+                classification_policy: "US".into(),
+            },
+            &mut bytes,
+        )
+        .unwrap();
+        let view: StatusView = ciborium::from_reader(bytes.as_slice()).unwrap();
+        assert!(view.identity_problem_counts.is_empty());
+        let mut new = Vec::new();
+        ciborium::into_writer(
+            &StatusView {
+                identity_problem_counts: vec!["unresolved=1".into()],
+                ..view
+            },
+            &mut new,
+        )
+        .unwrap();
+        let old: OldStatusView = ciborium::from_reader(new.as_slice()).unwrap();
+        assert_eq!(old.classification_policy, "US");
+    }
+
     #[test]
     fn a_status_from_a_daemon_without_the_kernel_graph_key_decodes_as_none() {
-        #[derive(Serialize)]
-        struct OldStatusView {
-            version: String,
-            protocol_version: u16,
-            listener: String,
-            authz_backend: String,
-            classification_policy: String,
-        }
         let mut bytes = Vec::new();
         ciborium::into_writer(
             &OldStatusView {

@@ -19,15 +19,12 @@
 //! `maknae-security` seam, and the shipped deny list is enforced on the `Read`
 //! verb's PEP.)*
 //!
-//! *(Corrected 2026-08-31: the header above describes `authz.yaml` as the
-//! capability grammar alone, which has been incomplete since #85. The file now
-//! carries **three independent surfaces**, and each answers a different
-//! question: `permissions:` decides PATHS by capability pattern; `bindings:`
-//! decides IDENTITY→role (#85); `roles:` decides ACTIONS per role, per term
-//! (#162, [ADR-0010]). They do not compose with one another here — each is
-//! parsed structurally and handed to `maknae-authz-basic` to decide. Prose
-//! elsewhere that treats `authz.yaml` as "the capability grammar" is describing
-//! one of the three.)*
+//! `authz.yaml` carries three independent surfaces: `permissions:` decides
+//! PATHS by capability pattern; `roles:` decides ACTIONS per role, per term
+//! (#162, [ADR-0010]); `destinations:` allowlists egress per role (#172).
+//! Each is parsed structurally and handed to `maknae-authz-basic` to decide.
+//! Identity→role bindings live in `bindings.yaml` ([`crate::parse_bindings`]);
+//! this file refuses a `bindings:` key.
 //!
 //! **The grammar is a durable contract:** operators write policy files against
 //! it and it is hard to change once shipped, so parse/match semantics are
@@ -85,14 +82,8 @@ pub struct RawActionGrants {
 pub struct AuthzPolicy {
     pub allow: Vec<Pattern>,
     pub deny: Vec<Pattern>,
-    /// Role → member-identity lists from the additive `bindings:` key (#85).
-    /// `None` = key ABSENT (defaults apply); `Some` — even empty — = key
-    /// PRESENT (defaults suppressed entirely; spec §3 precedence). Raw strings:
-    /// role-name semantics belong to `maknae-authz-basic`, never this crate
-    /// (grammar, not decision).
-    pub bindings: Option<std::collections::BTreeMap<String, Vec<String>>>,
     /// Role → action-term grants from the additive `roles:` key (#162).
-    /// **A plain map, NOT an `Option`** — unlike `bindings`, an absent `roles:`
+    /// **A plain map, NOT an `Option`**: an absent `roles:`
     /// and an empty one behave identically under the additivity ruling, so an
     /// `Option` would make the `None`↔`Some(empty)` mutant undetectable by
     /// construction: reported MISSED with no killable test available, and the
@@ -527,12 +518,17 @@ pub enum AuthzError {
     /// ownership is the control that stops a compromised `_maknae` from
     /// widening its own grants by editing this file.
     NotRootOwned,
+    /// The directory holding `authz.yaml` is not root-owned, or is group- or
+    /// other-writable; carries the directory.
+    InsecureDirectory(String),
     /// File I/O failure (missing file, unreadable, non-UTF-8, …).
     Io(String),
     /// The document is not well-formed YAML, or a section has the wrong shape
     /// (root not a mapping, `permissions` not a mapping, an `allow`/`deny`
     /// entry not a string, …).
     Yaml(String),
+    /// `bindings:` moved to bindings.yaml (#496).
+    BindingsMoved,
 }
 
 impl std::fmt::Display for AuthzError {
@@ -551,8 +547,12 @@ impl std::fmt::Display for AuthzError {
             }
             AuthzError::Symlink => write!(f, "authz.yaml path is a symlink (refused)"),
             AuthzError::NotRootOwned => write!(f, "authz.yaml is not owned by root (uid 0)"),
+            AuthzError::InsecureDirectory(d) => write!(f, "{}", insecure_directory(d, "authz.yaml")),
             AuthzError::Io(m) => write!(f, "authz i/o error: {m}"),
             AuthzError::Yaml(m) => write!(f, "authz yaml error: {m}"),
+            AuthzError::BindingsMoved => f.write_str(
+                "authz.yaml no longer carries `bindings:`; move the block unchanged to bindings.yaml in the same directory (docs/upgrading.md)",
+            ),
         }
     }
 }
@@ -615,33 +615,12 @@ fn parse_pattern(spec: &str) -> Result<Pattern, AuthzError> {
     }
 }
 
-/// A `bindings:` member list: a sequence of strings, refused otherwise with a
-/// bindings-specific message (NOT `str_seq`'s "permissions list…" text — an
-/// operator debugging a bindings typo must not be sent to the wrong section).
-fn bindings_member_list(v: &Value) -> Result<Vec<String>, AuthzError> {
-    match v {
-        Value::Seq(items) => items
-            .iter()
-            .map(|item| match item {
-                Value::Str(s) => Ok(s.clone()),
-                _ => Err(AuthzError::Yaml(
-                    "bindings member entries must be strings (quote every name; spec §3)".into(),
-                )),
-            })
-            .collect(),
-        _ => Err(AuthzError::Yaml(
-            "bindings member list must be a sequence (write `role: []` for empty)".into(),
-        )),
-    }
-}
-
 /// A `roles.<name>.{allow,deny}` term list: a sequence of strings,
 /// refused otherwise with a roles-specific message. **Not `str_seq`** — whose
 /// text reads "permissions list entries must be strings" and would send an
-/// operator debugging a `roles:` typo to the wrong section of the file. Same
-/// reasoning as [`bindings_member_list`], and the same reason it is a third
-/// function rather than a shared one with a passed-in noun: the message is the
-/// diagnostic, so it is written out where a reader can see it.
+/// operator debugging a `roles:` typo to the wrong section of the file. It is
+/// a separate function rather than a shared one with a passed-in noun: the
+/// message is the diagnostic, so it is written out where a reader can see it.
 /// `destinations:` allow lists: the same YAML-shape checks as `roles_term_list`;
 /// the entry grammar is `destination_entry_is_acceptable`'s, applied by the caller.
 fn destination_list(v: &Value) -> Result<Vec<String>, AuthzError> {
@@ -696,16 +675,13 @@ fn parse_policy(body: &str) -> Result<AuthzPolicy, AuthzError> {
         Value::Map(m) => m,
         _ => return Err(AuthzError::Yaml("authz root must be a mapping".into())),
     };
+    if get(&map, "bindings").is_some() {
+        return Err(AuthzError::BindingsMoved);
+    }
     check_known_keys(
         "authz",
         &map,
-        &[
-            "schema_version",
-            "permissions",
-            "bindings",
-            "roles",
-            "destinations",
-        ],
+        &["schema_version", "permissions", "roles", "destinations"],
     )?;
     let sections = map
         .iter()
@@ -748,30 +724,13 @@ fn parse_policy(body: &str) -> Result<AuthzPolicy, AuthzError> {
         .map(|s| parse_pattern(s))
         .collect::<Result<Vec<_>, _>>()?;
 
-    let bindings = match get(&map, "bindings") {
-        None => None,
-        Some(Value::Map(bm)) => {
-            let mut out = std::collections::BTreeMap::new();
-            for (role, members) in bm {
-                out.insert(role.clone(), bindings_member_list(members)?);
-            }
-            Some(out)
-        }
-        Some(_) => {
-            return Err(AuthzError::Yaml(
-                "bindings section must be a map of role to member list".into(),
-            ))
-        }
-    };
-
     let action_grants = match get(&map, "roles") {
         None => std::collections::BTreeMap::new(),
         Some(Value::Map(rm)) => {
             let mut out = std::collections::BTreeMap::new();
             for (role, body) in rm {
                 // A bare `admin:` parses Null, not an empty map. Refuse rather
-                // than silently treating it as "no grants" — fail-closed, and
-                // the same stance `bindings` takes on a bare member list.
+                // than silently treating it as "no grants" — fail-closed.
                 let rb = match body {
                     Value::Map(m) => m,
                     _ => {
@@ -844,7 +803,6 @@ fn parse_policy(body: &str) -> Result<AuthzPolicy, AuthzError> {
     Ok(AuthzPolicy {
         allow,
         deny,
-        bindings,
         action_grants,
         destinations,
         allow_sources: allow_raw,
@@ -861,7 +819,7 @@ fn parse_policy(body: &str) -> Result<AuthzPolicy, AuthzError> {
 /// filesystem access or root privilege (mirrors the mode-mask precedent in
 /// `loader.rs::mode_is_secure`).
 #[cfg(unix)]
-fn authz_target_required() -> maknae_io::TargetRequired {
+pub(crate) fn root_policy_file_required() -> maknae_io::TargetRequired {
     maknae_io::TargetRequired {
         owner: Some(0),
         // 0o027 = 0o007 (ANY other/world access: read, write, or execute)
@@ -917,32 +875,72 @@ fn security_load(path: &Path) -> Result<String, AuthzError> {
     }
     #[cfg(unix)]
     {
-        // Absolutization, parent pinning and the anchor-relative open all live in
-        // `maknae_io::read_absolute` (issue #137). The copy that stood here was one
-        // of three identical hand-rolled adapters; what remains is this module's
-        // error mapping and UTF-8 decode. Directory traversal and replacement
-        // authority come from the current process's OS DAC rights — named inside
-        // the adapter — while the opened policy inode is separately required to
-        // remain root-owned by `authz_target_required()`.
-        security_load_required(path, authz_target_required())
+        security_load_required(path, root_policy_file_required())
     }
 }
 
 /// [`security_load`]'s unix body with the artifact requirement supplied by the
-/// caller instead of fixed at [`authz_target_required`]. Crate-private (the
+/// caller instead of fixed at [`root_policy_file_required`]. Crate-private (the
 /// `load_required_file` property, issue #138/PR #139: nothing outside this
 /// crate can choose a weaker requirement) — the ONLY external door is the
 /// non-default `hermetic-test-seam` feature below, which production consumers
 /// never enable.
 #[cfg(unix)]
-fn security_load_required(
+pub(crate) fn security_load_required(
     path: &Path,
     target: maknae_io::TargetRequired,
 ) -> Result<String, AuthzError> {
-    let bytes = maknae_io::read_absolute(path, target, maknae_io::StrategyPref::Auto)
-        .map_err(map_authz_io)?
-        .value;
+    let absolute = std::path::absolute(path).map_err(|e| AuthzError::Io(e.to_string()))?;
+    let bytes = read_in_root_dir(&absolute, target).map_err(map_authz_io)?;
     decode_policy_utf8(&bytes)
+}
+
+/// The refusal for a policy file's directory that fails its owner or mode check.
+pub(crate) fn insecure_directory(dir: &str, file: &str) -> String {
+    format!(
+        "the directory {dir} holding {file} must be owned by root (uid 0) and not group- or other-writable"
+    )
+}
+
+/// Why [`read_in_root_dir`] refused.
+#[cfg(unix)]
+#[derive(Debug)]
+pub(crate) enum RootReadError {
+    /// The directory failed its owner or mode check.
+    Directory(std::path::PathBuf),
+    Io(maknae_io::IoError),
+}
+
+/// Read a root policy file through an anchor on its directory that requires the
+/// file's owner and no group or other write, so only that owner can add, replace
+/// or remove the file. `path` is absolute.
+#[cfg(unix)]
+pub(crate) fn read_in_root_dir(
+    path: &Path,
+    target: maknae_io::TargetRequired,
+) -> Result<maknae_io::Zeroizing<Vec<u8>>, RootReadError> {
+    let parent = path
+        .parent()
+        .ok_or(RootReadError::Io(maknae_io::IoError::RootAnchor))?;
+    let name = path.file_name().ok_or_else(|| {
+        RootReadError::Io(maknae_io::IoError::AnchorEndsInDotDot {
+            path: path.to_path_buf(),
+        })
+    })?;
+    let dir = maknae_io::AnchorRequired {
+        owner: target.owner,
+        mode_mask: Some(0o022),
+    };
+    let anchor = maknae_io::open_anchor_resolved(parent, dir, maknae_io::StrategyPref::Auto)
+        .map_err(|e| match e {
+            maknae_io::IoError::InsecurePermissions { .. }
+            | maknae_io::IoError::NotOwned { .. } => RootReadError::Directory(parent.to_path_buf()),
+            other => RootReadError::Io(other),
+        })?;
+    Ok(anchor
+        .read(Path::new(name), None, target)
+        .map_err(RootReadError::Io)?
+        .value)
 }
 
 /// Hermetic-test seam (#85 spec §6a.4): [`load_authz`] with a caller-supplied
@@ -977,12 +975,15 @@ fn decode_policy_utf8(bytes: &[u8]) -> Result<String, AuthzError> {
 }
 
 #[cfg(unix)]
-fn map_authz_io(e: maknae_io::IoError) -> AuthzError {
+fn map_authz_io(e: RootReadError) -> AuthzError {
     match e {
-        maknae_io::IoError::Symlink { .. } => AuthzError::Symlink,
-        maknae_io::IoError::InsecurePermissions { .. } => AuthzError::InsecurePermissions,
-        maknae_io::IoError::NotOwned { .. } => AuthzError::NotRootOwned,
-        other => AuthzError::Io(other.to_string()),
+        RootReadError::Directory(d) => AuthzError::InsecureDirectory(d.display().to_string()),
+        RootReadError::Io(maknae_io::IoError::Symlink { .. }) => AuthzError::Symlink,
+        RootReadError::Io(maknae_io::IoError::InsecurePermissions { .. }) => {
+            AuthzError::InsecurePermissions
+        }
+        RootReadError::Io(maknae_io::IoError::NotOwned { .. }) => AuthzError::NotRootOwned,
+        RootReadError::Io(other) => AuthzError::Io(other.to_string()),
     }
 }
 
@@ -999,7 +1000,7 @@ pub fn load_authz(path: &Path) -> Result<AuthzPolicy, AuthzError> {
 mod tests {
     use super::*;
 
-    const DEST_BASE: &str = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"alex\"]\n  user: [\"ursula\"]\n";
+    const DEST_BASE: &str = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n";
     fn parse_dest(body: &str) -> Result<AuthzPolicy, AuthzError> {
         parse_authz(body)
     }
@@ -1742,6 +1743,7 @@ mod tests {
             AuthzError::InsecurePermissions,
             AuthzError::Symlink,
             AuthzError::NotRootOwned,
+            AuthzError::InsecureDirectory("/etc/maknae".into()),
             AuthzError::Io("boom".into()),
             AuthzError::Yaml("bad shape".into()),
         ];
@@ -1755,15 +1757,17 @@ mod tests {
     // ---- owner-check pure helper (no filesystem / root needed) ----
 
     #[test]
-    fn authz_target_contract_is_root_owned_not_world_accessible_not_group_writable() {
-        let req = authz_target_required();
-        assert_eq!(req.owner, Some(0));
-        // 0o027 = 0o007 (ANY world/other access) | 0o022 (group/other write).
-        // PR #128 named only 0o022 here, which let a root-owned WORLD-READABLE
-        // authz.yaml (0644, 0604) load where it was refused at boot before.
-        assert_eq!(req.mode_mask, Some(0o027));
-        assert!(req.regular_file);
-        assert!(!req.nlink_exactly_one);
+    fn root_policy_file_required_is_root_owned_and_masks_0o027() {
+        assert_eq!(
+            root_policy_file_required(),
+            maknae_io::TargetRequired {
+                owner: Some(0),
+                mode_mask: Some(0o027),
+                nlink_exactly_one: false,
+                regular_file: true,
+                max_bytes: None
+            }
+        );
     }
 
     #[test]
@@ -1773,7 +1777,7 @@ mod tests {
         // must still satisfy the mask, while every world-accessible and
         // group/other-writable mode must violate it. Pinned against the mask
         // itself because a root-owned fixture cannot be created unprivileged.
-        let mask = authz_target_required().mode_mask.unwrap();
+        let mask = root_policy_file_required().mode_mask.unwrap();
         assert_eq!(0o640 & mask, 0, "shipped 0640 must remain loadable");
         assert_eq!(0o600 & mask, 0, "0600 must remain loadable");
         for refused in [0o644, 0o604, 0o641, 0o660, 0o620, 0o666] {
@@ -1792,6 +1796,16 @@ mod tests {
         dir.join(name)
     }
 
+    fn mine() -> maknae_io::TargetRequired {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tmp("x").parent().unwrap().to_path_buf();
+        let uid = std::fs::metadata(dir).unwrap().uid();
+        maknae_io::TargetRequired {
+            owner: Some(uid),
+            ..root_policy_file_required()
+        }
+    }
+
     fn write_mode(path: &Path, body: &str, mode: u32) {
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
@@ -1807,7 +1821,7 @@ mod tests {
         write_mode(&target, SHIPPED_DEFAULT, 0o640);
         let _ = std::fs::remove_file(&link);
         std::os::unix::fs::symlink(&target, &link).unwrap();
-        let got = load_authz(&link);
+        let got = security_load_required(&link, mine());
         let _ = std::fs::remove_file(&link);
         let _ = std::fs::remove_file(&target);
         assert!(matches!(got, Err(AuthzError::Symlink)));
@@ -1817,7 +1831,7 @@ mod tests {
     fn world_accessible_authz_refused() {
         let p = tmp("world");
         write_mode(&p, SHIPPED_DEFAULT, 0o666);
-        let got = load_authz(&p);
+        let got = security_load_required(&p, mine());
         let _ = std::fs::remove_file(&p);
         assert!(matches!(got, Err(AuthzError::InsecurePermissions)));
     }
@@ -1833,7 +1847,59 @@ mod tests {
         let _ = std::os::unix::fs::chown(&p, Some(65_534), None);
         let got = load_authz(&p);
         let _ = std::fs::remove_file(&p);
-        assert!(matches!(got, Err(AuthzError::NotRootOwned)));
+        if mine().owner == Some(0) {
+            assert_eq!(got, Err(AuthzError::NotRootOwned));
+        } else {
+            let dir = p.parent().unwrap().display().to_string();
+            assert_eq!(got, Err(AuthzError::InsecureDirectory(dir)));
+        }
+    }
+
+    fn in_dir(tag: &str, dir_mode: u32) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("maknae_authz_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let d = d.canonicalize().unwrap();
+        write_mode(&d.join("authz.yaml"), SHIPPED_DEFAULT, 0o640);
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(dir_mode)).unwrap();
+        d
+    }
+
+    #[test]
+    fn a_writable_directory_is_refused_naming_the_directory() {
+        for mode in [0o770, 0o757] {
+            let d = in_dir(&format!("dir_{mode:o}"), mode);
+            let got = security_load_required(&d.join("authz.yaml"), mine());
+            let _ = std::fs::remove_dir_all(&d);
+            let want = d.display().to_string();
+            assert_eq!(
+                got,
+                Err(AuthzError::InsecureDirectory(want.clone())),
+                "{mode:o}"
+            );
+            assert_eq!(
+                got.unwrap_err().to_string(),
+                format!("the directory {want} holding authz.yaml must be owned by root (uid 0) and not group- or other-writable")
+            );
+        }
+    }
+
+    #[test]
+    fn a_directory_owned_by_another_uid_is_refused_naming_the_directory() {
+        let d = in_dir("dir_owner", 0o750);
+        let other = maknae_io::TargetRequired {
+            owner: mine().owner.map(|u| u.wrapping_add(1)),
+            ..mine()
+        };
+        let got = security_load_required(&d.join("authz.yaml"), other);
+        let ok = security_load_required(&d.join("authz.yaml"), mine());
+        let _ = std::fs::remove_dir_all(&d);
+        assert_eq!(
+            got,
+            Err(AuthzError::InsecureDirectory(d.display().to_string()))
+        );
+        assert_eq!(ok.as_deref(), Ok(SHIPPED_DEFAULT));
     }
 
     #[test]
@@ -1859,67 +1925,34 @@ mod tests {
 
     #[test]
     fn missing_authz_file_is_io() {
-        let got = load_authz(&tmp("nope_never_created"));
-        assert!(matches!(got, Err(AuthzError::Io(_))));
+        let got = security_load_required(&tmp("nope_never_created"), mine());
+        assert!(matches!(got, Err(AuthzError::Io(_))), "{got:?}");
     }
 
     #[test]
-    fn shipped_0640_mode_passes_the_mask_and_is_refused_only_for_ownership() {
-        // End-to-end shipped-mode compatibility (spec §4.6 `root:_maknae
-        // 0640`): an unprivileged test cannot create a root-owned fixture, so
-        // the strongest available pin is that a 0640 file gets PAST the mode
-        // gate and is refused by the OWNER check instead. `maknae-io`'s
-        // `check_target` runs mode BEFORE owner (checks.rs), so `NotRootOwned`
-        // here proves the mask admitted 0640 — a mask that wrongly refused
-        // group-read (e.g. 0o077, or 0o027|0o040) would surface
-        // `InsecurePermissions` and fail this test, which is how the daemon
-        // keeps being able to read its own policy.
+    fn shipped_0640_mode_passes_the_mask() {
         let p = tmp("shipped_0640");
         write_mode(&p, SHIPPED_DEFAULT, 0o640);
-        let _ = std::os::unix::fs::chown(&p, Some(65_534), None); // no-op unless root
-        let got = security_load(&p);
+        let got = security_load_required(&p, mine());
         let _ = std::fs::remove_file(&p);
-        assert!(
-            matches!(got, Err(AuthzError::NotRootOwned)),
-            "0640 must clear the mode mask and stop at the owner check, got {got:?}"
-        );
+        assert_eq!(got.as_deref(), Ok(SHIPPED_DEFAULT));
     }
 
     #[test]
     fn group_writable_root_owned_authz_refused() {
-        // The finding this test pins: `root:_maknae 0660` is root-owned and
-        // has no world bits, but the daemon's group can rewrite it. The
-        // group-write bit must reject it.
         let p = tmp("group_writable");
         write_mode(&p, SHIPPED_DEFAULT, 0o660);
-        let got = security_load(&p);
+        let got = security_load_required(&p, mine());
         let _ = std::fs::remove_file(&p);
         assert!(matches!(got, Err(AuthzError::InsecurePermissions)));
     }
 
     #[test]
     fn world_readable_non_writable_authz_refused() {
-        // THIS is the hermetic form of the issue-#129 regression pin, and since
-        // issue #138 it is the only one. A sibling test reproduced the same verdict
-        // against a real `/etc/hosts` — root-owned `0644` on a stock host — which
-        // made a security control depend on host state: a runner shipping a
-        // different mode or owner (a hardened image, a container with a rewritten
-        // hosts file) either failed for a reason unrelated to the control or passed
-        // without exercising it. Neither outcome says anything about the mask. The
-        // fixture below refuses for exactly the same reason, from bytes this test
-        // wrote itself.
-        //
-        // Issue #129: `0644` is NOT group/other-writable, so a 0o022-only mask
-        // admits it — a world-readable capability-grant policy loaded at boot where the
-        // pre-PR-#128 gate (world-any + group/other-write) refused it. The
-        // fixture is owned by the test user, not root, so this test can only
-        // discriminate because `maknae-io`'s `check_target` pins the order
-        // symlink -> regular-file -> MODE -> owner -> nlink (checks.rs): mode
-        // fires before ownership, so a too-permissive mask surfaces as
-        // `NotRootOwned` and a correct 0o027 mask as `InsecurePermissions`.
+        // Issue #129: 0644 is not group/other-writable, so a 0o022-only mask admits it.
         let p = tmp("world_readable");
         write_mode(&p, SHIPPED_DEFAULT, 0o644);
-        let got = security_load(&p);
+        let got = security_load_required(&p, mine());
         let _ = std::fs::remove_file(&p);
         assert!(
             matches!(got, Err(AuthzError::InsecurePermissions)),
@@ -2071,7 +2104,7 @@ mod tests {
         // The PRODUCTION door on the same fixture must still demand root
         // ownership — proves adding the seam weakened nothing.
         assert!(
-            matches!(via_door, Err(AuthzError::NotRootOwned)),
+            matches!(via_door, Err(AuthzError::InsecureDirectory(_))),
             "production load_authz must refuse a non-root fixture: {via_door:?}"
         );
     }
@@ -2080,32 +2113,26 @@ mod tests {
 
     #[test]
     fn section_canonical_ignores_comments_whitespace_and_key_order_but_not_values() {
-        let a = parse_authz("schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\n  deny: []\nbindings:\n  admin: [\"alex\"]\n  user: []\n").unwrap();
-        let b = parse_authz("# comment\nschema_version: 1\n\nbindings:\n  user: []\n  admin:\n    - \"alex\"   # trailing\npermissions:\n  deny: []\n  allow:\n    - \"Read(~/**)\"\n").unwrap();
-        assert_eq!(
-            a.section_canonical("bindings"),
-            b.section_canonical("bindings")
-        );
+        let a = parse_authz("schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\n  deny: []\nroles:\n  admin:\n    allow: [\"admin.status\"]\n  user: {}\n").unwrap();
+        let b = parse_authz("# comment\nschema_version: 1\n\nroles:\n  user: {}\n  admin:\n    allow:\n      - \"admin.status\"   # trailing\npermissions:\n  deny: []\n  allow:\n    - \"Read(~/**)\"\n").unwrap();
+        assert_eq!(a.section_canonical("roles"), b.section_canonical("roles"));
         assert_eq!(
             a.section_canonical("permissions"),
             b.section_canonical("permissions")
         );
         assert_eq!(
-            a.section_canonical("bindings"),
-            Some(r#"{"admin":["alex"],"user":[]}"#)
+            a.section_canonical("roles"),
+            Some(r#"{"admin":{"allow":["admin.status"]},"user":{}}"#)
         );
-        let c = parse_authz("schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"alex\"]\n  user: [\"u\"]\n").unwrap();
-        assert_ne!(
-            a.section_canonical("bindings"),
-            c.section_canonical("bindings")
-        );
-        assert_eq!(a.section_canonical("roles"), None);
+        let c = parse_authz("schema_version: 1\npermissions:\n  allow: []\n  deny: []\nroles:\n  admin:\n    allow: [\"admin.status\"]\n  user:\n    allow: [\"admin.status\"]\n").unwrap();
+        assert_ne!(a.section_canonical("roles"), c.section_canonical("roles"));
+        assert_eq!(a.section_canonical("destinations"), None);
         let empty =
-            parse_authz("schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings: {}\n")
+            parse_authz("schema_version: 1\npermissions:\n  allow: []\n  deny: []\nroles: {}\n")
                 .unwrap();
-        assert_eq!(empty.section_canonical("bindings"), Some("{}"));
+        assert_eq!(empty.section_canonical("roles"), Some("{}"));
         let keys: Vec<&str> = a.sections().map(|(k, _)| k).collect();
-        assert_eq!(keys, ["bindings", "permissions", "schema_version"]);
+        assert_eq!(keys, ["permissions", "roles", "schema_version"]);
         let values: Vec<&str> = a.sections().map(|(_, v)| v).collect();
         assert_eq!(values[2], "1");
     }
@@ -2189,58 +2216,20 @@ mod tests {
         );
     }
 
-    // ---- bindings grammar (#85): additive, role-agnostic, fail-closed ----
-
     #[test]
-    fn bindings_key_absent_is_none() {
-        // Absent vs present-empty is load-bearing (spec §3 defaults precedence):
-        // an absent key means defaults apply; a present key suppresses them.
-        let p = parse_authz(SHIPPED_DEFAULT).unwrap();
-        assert!(p.bindings.is_none());
-    }
-
-    #[test]
-    fn bindings_parse_role_to_string_lists() {
-        let body = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [\"alex\"]\n  guest: []\n";
-        let p = parse_authz(body).unwrap();
-        let b = p.bindings.unwrap();
-        assert_eq!(b["admin"], vec!["alex".to_string()]);
-        assert!(b["guest"].is_empty());
-    }
-
-    #[test]
-    fn bindings_present_but_empty_map_is_some_empty() {
-        let body = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings: {}\n";
-        let p = parse_authz(body).unwrap();
-        assert_eq!(p.bindings, Some(std::collections::BTreeMap::new()));
-    }
-
-    #[test]
-    fn bindings_non_string_member_refused_with_bindings_message() {
-        let body =
-            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  admin: [1001]\n";
-        let e = parse_authz(body).unwrap_err();
-        assert!(
-            matches!(&e, AuthzError::Yaml(m) if m.contains("bindings")),
-            "error must name bindings, not permissions: {e:?}"
-        );
-    }
-
-    #[test]
-    fn bindings_null_member_list_refused_with_bindings_message() {
-        // A bare `guest:` parses as Null, not an empty sequence — refuse, do
-        // not silently treat as empty (fail-closed; spec §3 says write `[]`).
-        let body =
-            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings:\n  guest:\n";
-        let e = parse_authz(body).unwrap_err();
-        assert!(matches!(&e, AuthzError::Yaml(m) if m.contains("bindings")));
-    }
-
-    #[test]
-    fn bindings_non_map_refused() {
-        let body = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nbindings: [admin]\n";
-        let e = parse_authz(body).unwrap_err();
-        assert!(matches!(&e, AuthzError::Yaml(m) if m.contains("bindings")));
+    fn a_bindings_key_refuses_and_names_bindings_yaml() {
+        for body in [
+            "schema_version: 1\nbindings:\n  admin: [\"alex\"]\n",
+            "schema_version: 1\nbindings: {}\n",
+            "schema_version: 1\nbindings:\n",
+            "schema_version: 1\nbindings: []\n",
+            "schema_version: 1\npermissions:\n  allow: []\nbindings:\n  adversary: []\n",
+        ] {
+            let e = parse_authz(body).unwrap_err();
+            assert_eq!(e, AuthzError::BindingsMoved, "{body:?}");
+            assert!(e.to_string().contains("bindings.yaml"));
+            assert!(e.to_string().contains("authz.yaml"));
+        }
     }
 
     // ---- `roles:` action grants — STRUCTURAL parse only (#162) ----
@@ -2323,7 +2312,7 @@ mod tests {
     #[test]
     fn roles_null_term_list_refused_with_roles_message() {
         // A bare `allow:` parses Null, not an empty sequence. Refuse; do not
-        // silently treat as empty — same fail-closed stance as bindings.
+        // silently treat as empty.
         let body = format!("{PREAMBLE}roles:\n  admin:\n    allow:\n");
         let e = parse_authz(&body).unwrap_err();
         assert!(
@@ -2402,16 +2391,10 @@ mod tests {
     }
 
     #[test]
-    fn roles_does_not_disturb_bindings_or_permissions() {
-        // The two additive surfaces are independent; parsing one must not
-        // suppress or alter the other.
-        let body = "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\n  deny: []\nbindings:\n  admin: [\"alex\"]\nroles:\n  admin:\n    allow: [\"admin.status\"]\n";
+    fn roles_does_not_disturb_permissions() {
+        let body = "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\n  deny: []\nroles:\n  admin:\n    allow: [\"admin.status\"]\n";
         let p = parse_authz(body).unwrap();
         assert_eq!(p.allow.len(), 1);
-        assert_eq!(
-            p.bindings.as_ref().and_then(|b| b.get("admin")),
-            Some(&vec!["alex".to_string()])
-        );
         assert_eq!(
             p.action_grants["admin"].allow,
             vec!["admin.status".to_string()]

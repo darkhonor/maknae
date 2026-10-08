@@ -12,7 +12,7 @@ defaults first-install-only, both jobs ship `launchctl disable`d, and the operat
 
 | Layout | Purpose |
 |---|---|
-| `common/` | Shared assets both formats install (units, sysusers, SELinux `.te`/`.fc`, fapolicyd trust, shipped `authz.yaml`/`maknae.yaml`, `maknae-selinux-ports.sh`). |
+| `common/` | Shared assets both formats install (units, sysusers, SELinux `.te`/`.fc`, fapolicyd trust, shipped `authz.yaml`/`bindings.yaml`/`maknae.yaml`, `maknae-selinux-ports.sh`). |
 | `rpm/` | `maknae.spec` + `build-rpm.sh` → `dist/maknae-<ver>-1.<dist>.x86_64.rpm` (RHEL/Rocky). |
 | `deb/` | `control` + maintainer scripts + AppArmor profile + `build-deb.sh` → `dist/maknae_<ver>-1_amd64.deb` (Debian). |
 | `sign.sh` | Checksums (`SHA256SUMS`) + optional GPG signing (see [Verifying artifacts](#verifying-artifacts)). |

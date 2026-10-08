@@ -678,6 +678,98 @@ fn kernel_graph_line(revision: Option<u64>, anchor: Option<&str>) -> Option<Stri
     }
 }
 
+fn status_lines(s: &maknae_proto::StatusView) -> Vec<String> {
+    // Labels live in the format strings, not as bare literals: the
+    // authz-composition drift gate's vocabulary net rejects a bare
+    // PDP-naming literal in production code (ADR-0008 decision 1).
+    let mut lines = vec![
+        format!("version               {}", s.version),
+        format!("protocol_version      {}", s.protocol_version),
+        format!("listener              {}", s.listener),
+        format!("authz_backend         {}", s.authz_backend),
+        format!("classification_policy {}", s.classification_policy),
+    ];
+    lines.extend(kernel_graph_line(
+        s.kernel_graph_revision,
+        s.kernel_graph_anchor.as_deref(),
+    ));
+    lines.extend(identity_problems_line(&s.identity_problem_counts));
+    lines
+}
+
+fn identity_problems_line(counts: &[String]) -> Option<String> {
+    let parts: Vec<String> = counts
+        .iter()
+        .filter_map(|entry| match entry.split_once('=') {
+            Some((kind, n)) => match n.parse::<u64>() {
+                Ok(0) => None,
+                Ok(n) => Some(format!(
+                    "{n} {}",
+                    kind.replace(['-', '_'], " ").escape_default()
+                )),
+                Err(_) => Some(entry.escape_default().to_string()),
+            },
+            None => Some(entry.escape_default().to_string()),
+        })
+        .collect();
+    (!parts.is_empty()).then(|| format!("identity problems: {}", parts.join(", ")))
+}
+
+/// Anything but printable ASCII is escaped: the daemon escapes its labels, and a
+/// daemon that did not cannot reach the terminal with a control character.
+fn terminal_safe(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c == ' ' || c.is_ascii_graphic() {
+                c.to_string()
+            } else {
+                c.escape_default().to_string()
+            }
+        })
+        .collect()
+}
+
+/// One row per subject, with the role it is bound or listed under (empty for an
+/// unbound subject). A daemon that predates #496 sends one entry per role and no
+/// label or state; its members stand in for the label.
+fn subject_table(entries: &[maknae_proto::RoleBindingView]) -> Vec<String> {
+    if entries.is_empty() {
+        return Vec::new();
+    }
+    let header = ["UID", "ROLE", "SUBJECT", "STATE"].map(String::from);
+    let rows: Vec<[String; 4]> = entries
+        .iter()
+        .map(|e| {
+            [
+                e.uid.map_or_else(|| "-".to_string(), |u| u.to_string()),
+                terminal_safe(&e.role),
+                terminal_safe(&if e.label.is_empty() {
+                    e.members.join(", ")
+                } else {
+                    e.label.clone()
+                }),
+                terminal_safe(&e.state),
+            ]
+        })
+        .collect();
+    let w = |i: usize| {
+        rows.iter()
+            .chain(std::iter::once(&header))
+            .map(|r| r[i].chars().count())
+            .max()
+            .unwrap_or(0)
+    };
+    let (w0, w1, w2) = (w(0), w(1), w(2));
+    std::iter::once(&header)
+        .chain(rows.iter())
+        .map(|r| {
+            format!("{:<w0$}  {:<w1$}  {:<w2$}  {}", r[0], r[1], r[2], r[3])
+                .trim_end()
+                .to_string()
+        })
+        .collect()
+}
+
 /// Print the successful `payload` IFF its variant matches the requested `verb`
 /// (`Ping`→`Pong`, `Whoami`→`Whoami(_)`). A mismatched variant means the daemon
 /// answered a different question than we asked — a protocol error: return `Err`
@@ -693,17 +785,7 @@ fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
             Ok(())
         }
         (Verb::AdminStatus, Payload::Status(s)) => {
-            // Labels live in the format strings, not as bare literals: the
-            // authz-composition drift gate's vocabulary net rejects a bare
-            // PDP-naming literal in production code (ADR-0008 decision 1).
-            println!("version               {}", s.version);
-            println!("protocol_version      {}", s.protocol_version);
-            println!("listener              {}", s.listener);
-            println!("authz_backend         {}", s.authz_backend);
-            println!("classification_policy {}", s.classification_policy);
-            if let Some(line) =
-                kernel_graph_line(s.kernel_graph_revision, s.kernel_graph_anchor.as_deref())
-            {
+            for line in status_lines(&s) {
                 println!("{line}");
             }
             Ok(())
@@ -717,8 +799,8 @@ fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
             Ok(())
         }
         (Verb::AdminSubjectList, Payload::SubjectList(bindings)) => {
-            for b in &bindings {
-                println!("{}: {}", b.role, b.members.join(", "));
+            for line in subject_table(&bindings) {
+                println!("{line}");
             }
             Ok(())
         }
@@ -1516,6 +1598,145 @@ mod tests {
         assert_eq!(
             kernel_graph_line(Some(12), Some("verified")).as_deref(),
             Some("kernel graph: revision 12 (verified)")
+        );
+    }
+
+    #[test]
+    fn the_status_lists_each_identity_problem_after_the_kernel_graph_line() {
+        let mut s = maknae_proto::StatusView {
+            version: "v".into(),
+            protocol_version: 1,
+            listener: "l".into(),
+            authz_backend: "b".into(),
+            classification_policy: "US".into(),
+            kernel_graph_revision: Some(3),
+            kernel_graph_anchor: Some("verified".into()),
+            identity_problem_counts: vec![],
+        };
+        let base = status_lines(&s);
+        assert_eq!(
+            base.last().map(String::as_str),
+            Some("kernel graph: revision 3 (verified)")
+        );
+        assert!(!base.iter().any(|l| l.starts_with("identity problem")));
+        s.identity_problem_counts = vec!["unbound_conflict=0".into(), "released=0".into()];
+        assert_eq!(status_lines(&s), base, "all-zero counts print nothing");
+        s.identity_problem_counts = vec![
+            "unresolved=1".into(),
+            "unbound_conflict=0".into(),
+            "carried_forward=1".into(),
+            "unresolved_adversary=2".into(),
+        ];
+        let lines = status_lines(&s);
+        assert_eq!(&lines[..base.len()], &base[..]);
+        assert_eq!(
+            &lines[base.len()..],
+            ["identity problems: 1 unresolved, 1 carried forward, 2 unresolved adversary"]
+        );
+    }
+
+    fn entry(
+        role: &str,
+        members: &[&str],
+        uid: Option<u32>,
+        label: &str,
+        state: &str,
+    ) -> maknae_proto::RoleBindingView {
+        maknae_proto::RoleBindingView {
+            role: role.into(),
+            members: members.iter().map(|m| m.to_string()).collect(),
+            uid,
+            label: label.into(),
+            state: state.into(),
+        }
+    }
+
+    #[test]
+    fn the_subject_list_is_a_table_one_row_per_subject() {
+        assert_eq!(
+            subject_table(&[
+                entry("admin", &["uid:0"], Some(0), "root (uid 0)", "bound admin"),
+                entry(
+                    "adversary",
+                    &["uid:666"],
+                    Some(666),
+                    "uid 666 (mallory)",
+                    "contained (carried forward)"
+                ),
+                entry(
+                    "",
+                    &[],
+                    Some(1002),
+                    "uid 1002 (gus, gustav)",
+                    "unbound (conflict: guest, user)"
+                ),
+                entry(
+                    "user",
+                    &[],
+                    None,
+                    "ghost (no account)",
+                    "unresolved (no account)"
+                ),
+                entry(
+                    "adversary",
+                    &[],
+                    None,
+                    "trudy (no account)",
+                    "unresolved adversary (no account, not contained)"
+                ),
+            ]),
+            [
+                "UID   ROLE       SUBJECT                 STATE",
+                "0     admin      root (uid 0)            bound admin",
+                "666   adversary  uid 666 (mallory)       contained (carried forward)",
+                "1002             uid 1002 (gus, gustav)  unbound (conflict: guest, user)",
+                "-     user       ghost (no account)      unresolved (no account)",
+                "-     adversary  trudy (no account)      unresolved adversary (no account, not contained)",
+            ]
+        );
+        assert!(subject_table(&[]).is_empty());
+        assert_eq!(
+            subject_table(&[entry("user", &["uid:1", "uid:2"], None, "", "")]),
+            ["UID  ROLE  SUBJECT       STATE", "-    user  uid:1, uid:2"],
+            "an older daemon's per-role entry"
+        );
+    }
+
+    #[test]
+    fn a_subject_label_reaches_the_terminal_escaped() {
+        let kernel_escaped = entry(
+            "user",
+            &[],
+            Some(7),
+            "\\u{e9}\\u{7f}\\,x (uid 7)",
+            "bound user",
+        );
+        assert_eq!(
+            subject_table(&[kernel_escaped])[1],
+            "7    user  \\u{e9}\\u{7f}\\,x (uid 7)  bound user",
+            "an already-escaped label passes unchanged"
+        );
+        let raw = entry(
+            "user\u{1b}[2J",
+            &[],
+            Some(7),
+            "a\u{7}b,\u{202e}c\nd",
+            "bound\tx",
+        );
+        let row = &subject_table(&[raw])[1];
+        assert_eq!(
+            row,
+            "7    user\\u{1b}[2J  a\\u{7}b,\\u{202e}c\\nd  bound\\tx"
+        );
+        assert!(row.chars().all(|c| c == ' ' || c.is_ascii_graphic()));
+    }
+
+    #[test]
+    fn a_malformed_count_entry_is_shown_escaped_not_dropped() {
+        assert_eq!(
+            identity_problems_line(&["bad\u{1b}[2J".into(), "x=y".into(), "u\u{7}=1".into()])
+                .as_deref(),
+            Some("identity problems: bad\\u{1b}[2J, x=y, 1 u\\u{7}")
         );
     }
 

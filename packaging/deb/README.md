@@ -19,7 +19,7 @@ maintainer scripts (`postinst`/`prerm`/`postrm`).
 | `/usr/lib/sysusers.d/maknae.conf` | `common/maknae.sysusers` | `0644` |
 | `/etc/apparmor.d/usr.bin.maknaed` | `deb/apparmor/usr.bin.maknaed` | `0644` |
 | `/usr/libexec/maknae/maknae-selinux-ports.sh` | `common/maknae-selinux-ports.sh` | `0750` |
-| `/etc/maknae/authz.yaml`, `/etc/maknae/maknae.yaml` | `common/` (conffiles) | `root:_maknae 0640` (set in postinst) |
+| `/etc/maknae/authz.yaml`, `/etc/maknae/bindings.yaml`, `/etc/maknae/maknae.yaml` | `common/` (conffiles) | `root:_maknae 0640` (set in postinst) |
 | `/var/log/maknae/audit.jsonl` | created in postinst, not payload | `_maknae:_maknae 0640`, `chattr +a` |
 
 Directories created by `postinst` at their §4.6 modes: `/etc/maknae`

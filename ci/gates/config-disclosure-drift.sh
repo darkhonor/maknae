@@ -64,7 +64,7 @@ SURFACE=(
   # discloses it anyway" does not cover this path. Adding `au3_1`,
   # `vault.addr` or `principal.home` to this struct later would otherwise pass
   # every gate here. Prefix `status.` so its fields carry their own decisions.
-  "crates/maknae-proto/src/wire.rs|StatusView|status|7|wire"
+  "crates/maknae-proto/src/wire.rs|StatusView|status|8|wire"
   # The SIBLING disclosure struct, added in the same commit for the same
   # feature. Inventorying one of a matched pair is how the pair's second member
   # ships unreviewed: adding `home` or `clearance` to this struct changes no
@@ -73,7 +73,7 @@ SURFACE=(
   # grant. (This note used to cite the reserved `agent` binding; ADR-0024
   # struck that token, #276. The argument is unchanged: bindings are disclosed
   # policy state, and a field added to their view ships unreviewed.)
-  "crates/maknae-proto/src/wire.rs|RoleBindingView|binding|2|wire"
+  "crates/maknae-proto/src/wire.rs|RoleBindingView|binding|5|wire"
   # The THIRD wire disclosure struct. Its two fields are the caller's OWN peer
   # facts rather than deployment config, which is a defensible reason to scope
   # it out -- but that rule was nowhere written, `RoleBindingView` (policy-file

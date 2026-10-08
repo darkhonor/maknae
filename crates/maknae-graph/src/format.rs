@@ -579,6 +579,7 @@ mod tests {
         let roles = persisted_compiled_set("UNCLASSIFIED");
         let g = build(
             &IdentityLayer {
+                aliases: Default::default(),
                 source: "p".into(),
                 label: "UNCLASSIFIED".into(),
                 bindings_sha256: None,
@@ -612,6 +613,7 @@ mod tests {
     fn decode_stored_compiled_still_judges_compiled_revision_and_transition() {
         let roles = persisted_compiled_set("UNCLASSIFIED");
         let layer = IdentityLayer {
+            aliases: Default::default(),
             source: "p".into(),
             label: "UNCLASSIFIED".into(),
             bindings_sha256: None,
@@ -644,6 +646,7 @@ mod tests {
         let roles = persisted_compiled_set("UNCLASSIFIED");
         let g = build(
             &IdentityLayer {
+                aliases: Default::default(),
                 source: "p".into(),
                 label: "UNCLASSIFIED".into(),
                 bindings_sha256: Some([3; 32]),
