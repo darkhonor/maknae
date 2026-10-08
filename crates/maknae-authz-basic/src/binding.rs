@@ -1103,6 +1103,39 @@ mod tests {
     }
 
     #[test]
+    fn a_uid_only_subject_lists_no_name() {
+        let l = layer(
+            true,
+            &[
+                (4242, "uid:4242", "adversary"),
+                (4243, "uid:4243", "user"),
+                (1001, "ursula", "user"),
+            ],
+        );
+        let g = GraphBindings::new(graph(&l), SOURCE);
+        assert_eq!(
+            g.entries(&[]),
+            Some(vec![
+                ListedSubject {
+                    uid: Some(1001),
+                    names: vec!["ursula".into()],
+                    state: SubjectState::Bound("user"),
+                },
+                ListedSubject {
+                    uid: Some(4242),
+                    names: vec![],
+                    state: SubjectState::Contained,
+                },
+                ListedSubject {
+                    uid: Some(4243),
+                    names: vec![],
+                    state: SubjectState::Bound("user"),
+                },
+            ])
+        );
+    }
+
+    #[test]
     fn contained_outranks_binds() {
         let g = graph(&layer(true, &[(7, "mallory", "adversary")]));
         let both = with_extra_edge(
