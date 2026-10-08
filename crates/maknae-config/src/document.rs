@@ -1020,7 +1020,6 @@ mod tests {
         // A SET one is still withheld -- absence handling must not become a
         // disclosure route for the value.
         let audit_set = crate::AuditConfig {
-            readers: Vec::new(),
             siem: Some("https://splunk:8088?token=SECRET".into()),
             ..audit
         };

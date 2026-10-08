@@ -38,15 +38,18 @@ pub trait ReaderLookup {
     fn account(&self, name: &str) -> Result<Option<ReaderAccount>, String>;
     /// The daemon account's primary gid, `Ok(None)` when it does not exist.
     fn daemon_gid(&self) -> Result<Option<u32>, String>;
+    /// The uids of `_maknae` and `_maknae-egress`, each listed only when it exists.
+    fn service_uids(&self) -> Result<Vec<u32>, String>;
 }
 
 /// The lowest uid an `audit.readers` account may have.
 pub const READER_UID_FLOOR: u32 = 100;
 
 /// Accounts refused as readers by name, before any lookup.
-pub const REFUSED_READER_NAMES: [&str; 3] = ["root", "_maknae", "_maknae-egress"];
+pub const REFUSED_READER_NAMES: [&str; 4] = ["root", "nobody", "_maknae", "_maknae-egress"];
 
-const NOBODY_UID: u32 = 65534;
+/// `nobody` on Linux (65534) and macOS (-2), and `(uid_t)-1`.
+pub const REFUSED_READER_UIDS: [u32; 3] = [65534, 4_294_967_294, u32::MAX];
 
 fn get<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
     match v {
@@ -195,6 +198,11 @@ pub fn resolve_readers(
         |name: &str, why: &str| ConfigError::InvalidAudit(format!("audit.readers {name}: {why}"));
     let mut resolved = Vec::with_capacity(readers.len());
     for name in readers {
+        if !portable_name(name) {
+            return Err(ConfigError::InvalidAudit(format!(
+                "audit.readers entry {name:?} is not a portable account name"
+            )));
+        }
         if REFUSED_READER_NAMES.contains(&name.as_str()) {
             return Err(refuse(name, "this account may not be a trail reader"));
         }
@@ -203,7 +211,7 @@ pub fn resolve_readers(
             Ok(None) => return Err(refuse(name, "no such account")),
             Ok(Some(a)) => a,
         };
-        if account.uid < READER_UID_FLOOR || account.uid == NOBODY_UID {
+        if account.uid < READER_UID_FLOOR || REFUSED_READER_UIDS.contains(&account.uid) {
             return Err(refuse(
                 name,
                 &format!(
@@ -211,6 +219,13 @@ pub fn resolve_readers(
                     account.uid
                 ),
             ));
+        }
+        match lookup.service_uids() {
+            Err(e) => return Err(refuse(name, &format!("service account lookup failed: {e}"))),
+            Ok(uids) if uids.contains(&account.uid) => {
+                return Err(refuse(name, "shares a uid with a Maknae service account"))
+            }
+            Ok(_) => {}
         }
         let daemon_gid =
             match lookup.daemon_gid() {
@@ -417,6 +432,9 @@ mod tests {
         fn daemon_gid(&self) -> Result<Option<u32>, String> {
             Ok(self.1)
         }
+        fn service_uids(&self) -> Result<Vec<u32>, String> {
+            Ok(vec![980, 981])
+        }
     }
 
     struct BrokenDaemon;
@@ -426,6 +444,22 @@ mod tests {
         }
         fn daemon_gid(&self) -> Result<Option<u32>, String> {
             Err("ENOENT".into())
+        }
+        fn service_uids(&self) -> Result<Vec<u32>, String> {
+            Ok(vec![])
+        }
+    }
+
+    struct BrokenServiceUids;
+    impl ReaderLookup for BrokenServiceUids {
+        fn account(&self, name: &str) -> Result<Option<ReaderAccount>, String> {
+            Ok(Some(acct(name, 991, 991, &[])))
+        }
+        fn daemon_gid(&self) -> Result<Option<u32>, String> {
+            Ok(Some(980))
+        }
+        fn service_uids(&self) -> Result<Vec<u32>, String> {
+            Err("EIO".into())
         }
     }
 
@@ -513,6 +547,10 @@ mod tests {
                 acct("bin", 1, 1, &[]),
                 acct("ninetynine", 99, 99, &[]),
                 acct("nobody", 65534, 65534, &[]),
+                acct("linuxnobody", 65534, 65534, &[]),
+                acct("macnobody", 4_294_967_294, 4_294_967_294, &[]),
+                acct("minusone", u32::MAX, 500, &[]),
+                acct("egressalias", 981, 500, &[]),
                 acct("_maknae", 980, 980, &[]),
                 acct("_maknae-egress", 981, 981, &[]),
                 acct("primary", 990, 980, &[]),
@@ -526,6 +564,10 @@ mod tests {
             "bin",
             "ninetynine",
             "nobody",
+            "linuxnobody",
+            "macnobody",
+            "minusone",
+            "egressalias",
             "_maknae",
             "_maknae-egress",
             "primary",
@@ -572,6 +614,25 @@ mod tests {
         let got = resolve_readers(&["vector".into()], &BrokenDaemon);
         assert!(
             matches!(got, Err(ConfigError::InvalidAudit(ref m)) if m.contains("vector")),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_readers_rechecks_the_grammar_before_any_lookup() {
+        let l = Accounts(vec![acct("Vector\nx", 991, 991, &[])], Some(980));
+        let got = resolve_readers(&["Vector\nx".into()], &l);
+        assert!(
+            matches!(got, Err(ConfigError::InvalidAudit(ref m)) if m.contains("\"Vector\\nx\"")),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_service_uid_lookup_refuses() {
+        let got = resolve_readers(&["vector".into()], &BrokenServiceUids);
+        assert!(
+            matches!(got, Err(ConfigError::InvalidAudit(ref m)) if m.contains("vector") && m.contains("EIO")),
             "{got:?}"
         );
     }
