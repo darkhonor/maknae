@@ -43,6 +43,26 @@ pub fn plan_candidate<G: Clone, E>(
     Ok((plan, graph))
 }
 
+/// The layer a reload persists, with every persisted containment whose name no longer
+/// resolves carried forward, and the containments it ends; refused if it would drop
+/// explicit bindings root has not written into `bindings.yaml`.
+pub fn next_layer(
+    file: &IdentityLayer,
+    unresolved_adversaries: &[String],
+    persisted: &IdentityLayer,
+    file_missing: bool,
+    moved_from: &str,
+) -> Result<(IdentityLayer, Vec<maknae_graph::identity::Released>), Refusal> {
+    if let Some(m) =
+        maknae_graph::identity::drops_explicit_bindings(persisted, file, file_missing, moved_from)
+    {
+        return Err(Refusal::Load(m.into()));
+    }
+    let next = maknae_graph::identity::carry_forward(file, unresolved_adversaries, persisted).0;
+    let released = maknae_graph::identity::released(persisted, &next);
+    Ok((next, released))
+}
+
 /// One reload's turn: refused once shutdown has begun, otherwise run from the
 /// shared store revision, which advances only on `Ok`.
 pub async fn turn<F, Fut>(
@@ -264,6 +284,65 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn the_next_layer_guards_carries_and_reports_releases() {
+        use maknae_graph::identity::{
+            ReleaseCause, Released, SubjectEntry, BINDINGS_MISSING, BINDINGS_NOT_MOVED,
+        };
+        let mallory = SubjectEntry {
+            uid: 666,
+            name: "mallory".into(),
+            role: "adversary".into(),
+        };
+        let persisted = IdentityLayer {
+            source: "/b".into(),
+            label: "U".into(),
+            bindings_sha256: Some([1; 32]),
+            subjects: vec![mallory.clone()],
+        };
+        let file = IdentityLayer {
+            subjects: vec![],
+            bindings_sha256: Some([2; 32]),
+            ..persisted.clone()
+        };
+        assert_eq!(
+            next_layer(&file, &[], &persisted, true, "/a"),
+            Err(Refusal::Load(BINDINGS_MISSING.into()))
+        );
+        let moved = IdentityLayer {
+            source: "/a".into(),
+            ..persisted.clone()
+        };
+        let keyless = IdentityLayer {
+            bindings_sha256: None,
+            ..file.clone()
+        };
+        assert_eq!(
+            next_layer(&keyless, &[], &moved, false, "/a"),
+            Err(Refusal::Load(BINDINGS_NOT_MOVED.into()))
+        );
+        let (carried, released) =
+            next_layer(&file, &["mallory".into()], &persisted, false, "/a").unwrap();
+        assert_eq!(
+            (carried.subjects, released.len()),
+            (persisted.subjects.clone(), 0)
+        );
+        let (plain, released) = next_layer(&file, &[], &persisted, false, "/a").unwrap();
+        assert_eq!(plain, file);
+        assert_eq!(
+            released,
+            [Released {
+                uid: 666,
+                name: "mallory".into(),
+                cause: ReleaseCause::BindingsEmpty
+            }]
+        );
+        let (_, released) = next_layer(&keyless, &[], &persisted, false, "/a").unwrap();
+        assert_eq!(released[0].cause, ReleaseCause::BindingsAbsent);
+        let (same, released) = next_layer(&persisted, &[], &persisted, false, "/a").unwrap();
+        assert_eq!((same, released), (persisted.clone(), vec![]));
     }
 
     #[test]

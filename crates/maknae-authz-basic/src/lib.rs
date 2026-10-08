@@ -31,8 +31,8 @@ pub mod snapshot;
 mod vocabulary;
 pub use vocabulary::{class_name, compiled_set, ACTION_TERMS, CLASSES, KERNEL_TERMS};
 
-pub use binding::IdentityProblem;
 use binding::UidMap;
+pub use binding::{shown, IdentityProblem};
 use snapshot::Snapshot;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError, RwLock};
@@ -304,7 +304,8 @@ impl PolicySource {
         &self.paths
     }
 
-    pub(crate) fn policy_source(&self) -> &str {
+    /// `authz.yaml`'s path, the source a persisted identity layer written before #496 names.
+    pub fn policy_source(&self) -> &str {
         &self.policy_source
     }
 
@@ -316,6 +317,18 @@ impl PolicySource {
     /// The subjects this load could not bind as written; each is decided alone.
     pub fn identity_problems(&self) -> &[IdentityProblem] {
         &self.resolved.problems
+    }
+
+    /// The `adversary:` names this load could not resolve, in problem order.
+    pub fn unresolved_adversaries(&self) -> Vec<String> {
+        self.resolved
+            .problems
+            .iter()
+            .filter_map(|p| match p {
+                IdentityProblem::UnresolvedAdversary { name } => Some(name.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     /// The identity layer `bindings.yaml` declares; `source` is its path and
@@ -760,7 +773,29 @@ fn snapshot_over(
     use maknae_graph::record::ProvenanceKind;
     let refused = |m: String| AuthzBasicError::Compile(snapshot::CompileError::Identity(m));
     let digests = source.section_digests(digest);
-    let layer = source.identity_layer(label, digests.get("bindings").copied());
+    let file = source.identity_layer(label, digests.get("bindings").copied());
+    let stored = base
+        .map(|g| maknae_graph::identity::extract(g).map_err(|e| refused(e.to_string())))
+        .transpose()?;
+    let layer = match &stored {
+        None => file,
+        Some(stored) => {
+            if let Some(m) = maknae_graph::identity::drops_explicit_bindings(
+                &stored.layer,
+                &file,
+                source.bindings().is_missing(),
+                source.policy_source(),
+            ) {
+                return Err(refused(m.into()));
+            }
+            maknae_graph::identity::carry_forward(
+                &file,
+                &source.unresolved_adversaries(),
+                &stored.layer,
+            )
+            .0
+        }
+    };
     let persisted_set = maknae_graph::kernel::persisted_compiled_set(label);
     let vocabulary = digest(
         &persisted_set
@@ -772,16 +807,10 @@ fn snapshot_over(
             .map(Arc::new)
             .map_err(|e| refused(e.to_string()))
     };
-    let persisted = match base {
-        None => build(1, ProvenanceKind::Seed)?,
-        Some(g) => {
-            let stored = maknae_graph::identity::extract(g).map_err(|e| refused(e.to_string()))?;
-            if stored.layer == layer {
-                g.clone()
-            } else {
-                build(g.revision() + 1, ProvenanceKind::RootFile)?
-            }
-        }
+    let persisted = match (base, &stored) {
+        (Some(g), Some(stored)) if stored.layer == layer => g.clone(),
+        (Some(g), _) => build(g.revision() + 1, ProvenanceKind::RootFile)?,
+        (None, _) => build(1, ProvenanceKind::Seed)?,
     };
     snapshot::compile(persisted, source, &compiled_set(label), &digests)
         .map(Arc::new)
@@ -1734,6 +1763,204 @@ mod tests {
             &0xaf63_dc4c_8601_ec8c_u64.to_le_bytes()
         );
         assert_ne!(test_digest(b"ab"), test_digest(b"ba"));
+    }
+
+    #[test]
+    fn a_contained_name_that_stops_resolving_stays_contained_across_a_recompile() {
+        let file = Some("schema_version: 1\nbindings:\n  admin: [alex]\n  adversary: [mallory]\n");
+        let first = compiled(&source_with(
+            SHIPPED,
+            file,
+            &[("alex", 1000), ("mallory", 666)],
+        ));
+        assert!(first.identity_problems().is_empty());
+        let gone = source_with(SHIPPED, file, &[("alex", 1000)]);
+        assert_eq!(gone.unresolved_adversaries(), ["mallory"]);
+        let next = snapshot_over(&gone, LABEL, test_digest, Some(first.persisted())).unwrap();
+        assert!(
+            Arc::ptr_eq(next.persisted(), first.persisted()),
+            "the carried layer compares equal"
+        );
+        let a =
+            BasicAuthorizer::from_snapshot(principal(), paths(), test_digest, Arc::clone(&next));
+        assert_eq!(
+            a.decide_reporting_role(&liveness_req(Some(666))),
+            (
+                Verdict::Deny {
+                    reason: CONTAINED.into()
+                },
+                Some("adversary")
+            )
+        );
+        assert_eq!(
+            next.identity_problems().as_ref(),
+            [IdentityProblem::CarriedForward {
+                uid: 666,
+                name: "mallory".into(),
+                overrides: vec![]
+            }]
+        );
+        let again = snapshot_over(&gone, LABEL, test_digest, Some(next.persisted())).unwrap();
+        assert!(
+            Arc::ptr_eq(again.persisted(), first.persisted()),
+            "idempotent"
+        );
+        let released = source_with(
+            SHIPPED,
+            Some("schema_version: 1\nbindings:\n  admin: [alex]\n"),
+            &[("alex", 1000)],
+        );
+        let after = snapshot_over(&released, LABEL, test_digest, Some(next.persisted())).unwrap();
+        let b = BasicAuthorizer::from_snapshot(principal(), paths(), test_digest, after);
+        assert_eq!(
+            b.decide_reporting_role(&liveness_req(Some(666))).1,
+            None,
+            "removing the name releases it"
+        );
+    }
+
+    #[test]
+    fn a_never_contained_unresolved_adversary_is_not_carried() {
+        let first = compiled(&source_with(
+            SHIPPED,
+            Some("schema_version: 1\nbindings:\n  user: [mallory]\n"),
+            &[("mallory", 666)],
+        ));
+        let file = "schema_version: 1\nbindings:\n  adversary: [mallory]\n";
+        let next = snapshot_over(
+            &source_with(SHIPPED, Some(file), &[]),
+            LABEL,
+            test_digest,
+            Some(first.persisted()),
+        )
+        .unwrap();
+        assert_eq!(
+            next.identity_problems().as_ref(),
+            [IdentityProblem::UnresolvedAdversary {
+                name: "mallory".into()
+            }]
+        );
+        let a = BasicAuthorizer::from_snapshot(principal(), paths(), test_digest, next);
+        assert_eq!(a.decide_reporting_role(&liveness_req(Some(666))).1, None);
+    }
+
+    #[test]
+    fn a_reused_uid_stays_contained_and_the_problem_names_the_overridden_binding() {
+        let file = "schema_version: 1\nbindings:\n  user: [bob]\n  adversary: [mallory]\n";
+        let first = compiled(&source_with(
+            SHIPPED,
+            Some("schema_version: 1\nbindings:\n  adversary: [mallory]\n"),
+            &[("mallory", 666)],
+        ));
+        let reused = source_with(SHIPPED, Some(file), &[("bob", 666)]);
+        let next = snapshot_over(&reused, LABEL, test_digest, Some(first.persisted())).unwrap();
+        assert_eq!(
+            next.identity_problems().as_ref(),
+            [IdentityProblem::CarriedForward {
+                uid: 666,
+                name: "mallory".into(),
+                overrides: vec![("bob".into(), "user")]
+            }]
+        );
+        assert_eq!(
+            next.identity_problems()[0].to_string(),
+            "'mallory' under adversary no longer resolves; uid 666 stays contained (carried forward); this overrides bob (user)"
+        );
+        let a =
+            BasicAuthorizer::from_snapshot(principal(), paths(), test_digest, Arc::clone(&next));
+        assert_eq!(
+            a.decide_reporting_role(&liveness_req(Some(666))),
+            (
+                Verdict::Deny {
+                    reason: CONTAINED.into()
+                },
+                Some("adversary")
+            ),
+            "bob's uid is contained"
+        );
+    }
+
+    #[test]
+    fn a_missing_file_over_explicit_bindings_refuses_the_hermetic_reload() {
+        let explicit = compiled(&source_with(
+            SHIPPED,
+            Some("schema_version: 1\nbindings: {}\n"),
+            &[],
+        ));
+        let gone = source_with(SHIPPED, None, &[]);
+        match snapshot_over(&gone, LABEL, test_digest, Some(explicit.persisted())) {
+            Err(AuthzBasicError::Compile(snapshot::CompileError::Identity(m))) => {
+                assert_eq!(m, maknae_graph::identity::BINDINGS_MISSING)
+            }
+            other => panic!("expected the missing-file refusal, got {other:?}"),
+        }
+        let absent = source_with(SHIPPED, Some("schema_version: 1\n"), &[]);
+        assert!(
+            snapshot_over(&absent, LABEL, test_digest, Some(explicit.persisted())).is_ok(),
+            "root's keyless edit is allowed"
+        );
+        let bare = compiled(&source_with(SHIPPED, Some("schema_version: 1\n"), &[]));
+        assert!(
+            snapshot_over(&gone, LABEL, test_digest, Some(bare.persisted())).is_ok(),
+            "nothing explicit to drop"
+        );
+    }
+
+    #[test]
+    fn a_layer_from_authz_yaml_refuses_until_the_block_is_pasted() {
+        let set = maknae_graph::kernel::persisted_compiled_set(LABEL);
+        let old = Arc::new(
+            maknae_graph::identity::build(
+                &maknae_graph::identity::IdentityLayer {
+                    source: PATH.into(),
+                    label: LABEL.into(),
+                    bindings_sha256: Some([7; 32]),
+                    subjects: vec![maknae_graph::identity::SubjectEntry {
+                        uid: 666,
+                        name: "mallory".into(),
+                        role: "adversary".into(),
+                    }],
+                },
+                &set,
+                test_digest(&set.canonical_bytes().unwrap()),
+                1,
+                maknae_graph::record::ProvenanceKind::Seed,
+            )
+            .unwrap(),
+        );
+        let shipped = source_with(SHIPPED, Some("schema_version: 1\n"), &[]);
+        assert_eq!(shipped.policy_source(), PATH);
+        match snapshot_over(&shipped, LABEL, test_digest, Some(&old)) {
+            Err(AuthzBasicError::Compile(snapshot::CompileError::Identity(m))) => {
+                assert_eq!(m, maknae_graph::identity::BINDINGS_NOT_MOVED)
+            }
+            other => panic!("expected the not-moved refusal, got {other:?}"),
+        }
+        let pasted = source_with(
+            SHIPPED,
+            Some("schema_version: 1\nbindings:\n  adversary: [mallory]\n"),
+            &[("mallory", 666)],
+        );
+        let next = snapshot_over(&pasted, LABEL, test_digest, Some(&old)).unwrap();
+        assert_eq!(next.revision(), 2);
+        let a = BasicAuthorizer::from_snapshot(principal(), paths(), test_digest, next);
+        assert_eq!(
+            a.decide_reporting_role(&liveness_req(Some(666))).1,
+            Some("adversary")
+        );
+    }
+
+    #[test]
+    fn unresolved_adversaries_are_the_adversary_names_that_did_not_resolve() {
+        let src = source_with(
+            SHIPPED,
+            Some("schema_version: 1\nbindings:\n  user: [ghost]\n  adversary: [eve, mallory, trudy]\n"),
+            &[("mallory", 666)],
+        );
+        assert_eq!(src.unresolved_adversaries(), ["eve", "trudy"]);
+        assert!(source_with(SHIPPED, None, &[])
+            .unresolved_adversaries()
+            .is_empty());
     }
 
     #[test]

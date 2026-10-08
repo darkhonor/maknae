@@ -1,6 +1,8 @@
 use maknae_graph::format;
 use maknae_graph::graph::{Graph, GraphBuilder};
-use maknae_graph::identity::{self, IdentityLayer, SubjectEntry};
+use maknae_graph::identity::{
+    self, IdentityLayer, ReleaseCause, Released, SubjectEntry, BINDINGS_MISSING, BINDINGS_NOT_MOVED,
+};
 use maknae_graph::kernel::{
     persisted_compiled_set, ATTR_SHA256, ROLE, SCHEMA, SUBJECT, VOCABULARY_SOURCE_KEY,
 };
@@ -30,6 +32,7 @@ enum Event {
     Checkpoint(u64, [u8; 32], String),
     Migrate(u64, Option<[u8; 32]>, [u8; 32], Vec<u32>),
     Transition(u64, String),
+    Released(u64, Vec<Released>),
 }
 
 #[derive(Default)]
@@ -40,6 +43,9 @@ struct Recorder {
     fail_checkpoint_anchor: Option<&'static str>,
     fail_migrate: bool,
     fail_transition: bool,
+    fail_released: bool,
+    store_at_released: Option<PathBuf>,
+    store_bytes_at_released: Option<Vec<u8>>,
 }
 
 fn refuse(fail: bool, what: &str) -> Result<(), StoreError> {
@@ -97,14 +103,30 @@ impl BootAudit for Recorder {
             .push(Event::Transition(revision, initiator.to_owned()));
         ready(refuse(self.fail_transition, "transition"))
     }
+
+    fn released(
+        &mut self,
+        revision: u64,
+        released: &[Released],
+    ) -> impl Future<Output = Result<(), StoreError>> + Send {
+        self.events
+            .push(Event::Released(revision, released.to_vec()));
+        if let Some(p) = &self.store_at_released {
+            self.store_bytes_at_released = Some(fs::read(p).unwrap());
+        }
+        ready(refuse(self.fail_released, "released"))
+    }
 }
 
-const SOURCE: &str = "/etc/maknae/authz.yaml";
+const SOURCE: &str = "/etc/maknae/bindings.yaml";
+const MOVED_FROM: &str = "/etc/maknae/authz.yaml";
 
 struct Inputs {
     compiled: CompiledSet,
     digest: [u8; 32],
     layer: IdentityLayer,
+    unresolved: Vec<String>,
+    missing: bool,
 }
 
 impl Inputs {
@@ -113,6 +135,9 @@ impl Inputs {
             compiled: &self.compiled,
             vocabulary_sha256: self.digest,
             identity: &self.layer,
+            unresolved_adversaries: &self.unresolved,
+            bindings_missing: self.missing,
+            moved_from: MOVED_FROM,
         }
     }
 }
@@ -144,6 +169,8 @@ fn inputs_with(layer: IdentityLayer) -> Inputs {
         compiled,
         digest,
         layer,
+        unresolved: Vec::new(),
+        missing: false,
     }
 }
 
@@ -1034,6 +1061,10 @@ fn store_error_display() {
         "graph store commit at revision 2 does not advance the store's revision 3"
     );
     assert_eq!(
+        StoreError::BindingsRefused(BINDINGS_MISSING).to_string(),
+        BINDINGS_MISSING
+    );
+    assert_eq!(
         StoreError::RejectedNameInUse {
             name: "kernel.graph.rejected.1.00".into(),
             cause: "it holds other bytes".into(),
@@ -1406,6 +1437,10 @@ fn each_store_error_has_its_remedy() {
                 store: 2,
                 attempted: 2,
             },
+            Remedy::Investigate,
+        ),
+        (
+            StoreError::BindingsRefused(BINDINGS_MISSING),
             Remedy::Investigate,
         ),
     ];
@@ -2352,6 +2387,14 @@ impl BootAudit for Racer<'_> {
         self.inner.intent_migrate(revision, from, to, unbound)
     }
 
+    fn released(
+        &mut self,
+        revision: u64,
+        released: &[Released],
+    ) -> impl Future<Output = Result<(), StoreError>> + Send {
+        self.inner.released(revision, released)
+    }
+
     fn intent_transition(
         &mut self,
         _revision: u64,
@@ -2402,4 +2445,278 @@ async fn a_commit_raced_past_its_check_refuses_at_publish() {
     );
     assert_eq!(graph_of(&fx.store(), &k), next_graph(2, &inputs()));
     assert_eq!(dir.store_revision(), 2);
+}
+
+fn bindings_layer(
+    source: &str,
+    bindings: Option<&[u8]>,
+    subjects: &[(u32, &str, &str)],
+) -> IdentityLayer {
+    IdentityLayer {
+        source: source.into(),
+        ..layer(bindings, subjects)
+    }
+}
+
+const MALLORY_AND_OP: &[(u32, &str, &str)] = &[(666, "mallory", "adversary"), (501, "op", "user")];
+const BLOCK: &[u8] = br#"{"adversary":["mallory"],"user":["op"]}"#;
+
+fn is_contained(g: &Graph, uid: u32) -> bool {
+    g.lookup(SUBJECT, &identity::subject_key(uid))
+        .is_some_and(|s| g.out_edges(s.id, maknae_graph::kernel::CONTAINED).count() == 1)
+}
+
+async fn seeded_with(fx: &Fixture, k: &WrappingKey, l: IdentityLayer) -> BootReport {
+    run_with(&fx.dir(), k, None, &inputs_with(l))
+        .await
+        .0
+        .unwrap()
+}
+
+#[tokio::test]
+async fn an_upgrade_without_the_pasted_block_refuses_before_any_record() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let first = seeded_with(
+        &fx,
+        &k,
+        bindings_layer(MOVED_FROM, Some(BLOCK), MALLORY_AND_OP),
+    )
+    .await;
+    let before = fx.store();
+    for missing in [false, true] {
+        let shipped = Inputs {
+            missing,
+            ..inputs_with(bindings_layer(SOURCE, None, &[]))
+        };
+        let (r, events) = run_with(&fx.dir(), &k, checkpoint_of(&first), &shipped).await;
+        assert_eq!(
+            r.unwrap_err(),
+            StoreError::BindingsRefused(BINDINGS_NOT_MOVED),
+            "missing: {missing}"
+        );
+        assert!(events.is_empty(), "nothing recorded: {events:?}");
+        assert_eq!(fx.store(), before);
+    }
+    assert_eq!(
+        StoreError::BindingsRefused(BINDINGS_NOT_MOVED).to_string(),
+        BINDINGS_NOT_MOVED
+    );
+}
+
+#[tokio::test]
+async fn an_upgrade_with_the_pasted_block_keeps_containment_and_releases_nothing() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let first = seeded_with(
+        &fx,
+        &k,
+        bindings_layer(MOVED_FROM, Some(BLOCK), MALLORY_AND_OP),
+    )
+    .await;
+    assert!(is_contained(&first.graph, 666));
+    let pasted = inputs_with(bindings_layer(SOURCE, Some(BLOCK), MALLORY_AND_OP));
+    let (r, events) = run_with(&fx.dir(), &k, checkpoint_of(&first), &pasted).await;
+    let r = r.unwrap();
+    assert!(r.identity_transition);
+    assert!(r.released.is_empty());
+    assert!(is_contained(&r.graph, 666));
+    assert!(is_contained(&graph_of(&fx.store(), &k), 666));
+    assert_eq!(
+        events,
+        vec![
+            Event::Checkpoint(1, first.digest, "verified".into()),
+            Event::Transition(2, "root-file".into()),
+            Event::Checkpoint(2, r.digest, "transitioned".into()),
+        ]
+    );
+    assert_eq!(extracted(&r.graph).layer.source, SOURCE);
+}
+
+#[tokio::test]
+async fn a_persisted_containment_whose_name_stops_resolving_boots_without_a_transition() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let first = seeded_with(&fx, &k, bindings_layer(SOURCE, Some(BLOCK), MALLORY_AND_OP)).await;
+    let before = fx.store();
+    for gone in [
+        bindings_layer(SOURCE, Some(BLOCK), &[(501, "op", "user")]),
+        bindings_layer(
+            SOURCE,
+            Some(BLOCK),
+            &[(666, "bob", "user"), (501, "op", "user")],
+        ),
+    ] {
+        let i = Inputs {
+            unresolved: vec!["mallory".into()],
+            ..inputs_with(gone)
+        };
+        let (r, events) = run_with(&fx.dir(), &k, checkpoint_of(&first), &i).await;
+        let r = r.unwrap();
+        assert!(!r.identity_transition);
+        assert!(r.released.is_empty());
+        assert!(is_contained(&r.graph, 666));
+        assert_eq!(events.len(), 1);
+        assert_eq!(fx.store(), before);
+    }
+}
+
+#[tokio::test]
+async fn a_carried_containment_survives_a_transition_that_releases_another() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let both = [
+        (666, "mallory", "adversary"),
+        (700, "trudy", "adversary"),
+        (501, "op", "user"),
+    ];
+    let first = seeded_with(&fx, &k, bindings_layer(SOURCE, Some(BLOCK), &both)).await;
+    let i = Inputs {
+        unresolved: vec!["mallory".into()],
+        ..inputs_with(bindings_layer(
+            SOURCE,
+            Some(br#"{"adversary":["mallory"],"user":["op"]}"#),
+            &[(501, "op", "user")],
+        ))
+    };
+    let (r, _) = run_with(&fx.dir(), &k, checkpoint_of(&first), &i).await;
+    let r = r.unwrap();
+    assert!(r.identity_transition);
+    assert_eq!(
+        r.released,
+        [Released {
+            uid: 700,
+            name: "trudy".into(),
+            cause: ReleaseCause::NotListed
+        }]
+    );
+    let stored = graph_of(&fx.store(), &k);
+    assert!(is_contained(&stored, 666));
+    assert!(!is_contained(&stored, 700));
+}
+
+#[tokio::test]
+async fn a_missing_file_over_explicit_bindings_refuses_before_any_record() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let first = seeded_with(&fx, &k, bindings_layer(SOURCE, Some(b"{}"), &[])).await;
+    let before = fx.store();
+    let gone = Inputs {
+        missing: true,
+        ..inputs_with(bindings_layer(SOURCE, None, &[]))
+    };
+    let (r, events) = run_with(&fx.dir(), &k, checkpoint_of(&first), &gone).await;
+    assert_eq!(
+        r.unwrap_err(),
+        StoreError::BindingsRefused(BINDINGS_MISSING)
+    );
+    assert!(events.is_empty());
+    assert_eq!(fx.store(), before);
+    assert_eq!(
+        remedy(&StoreError::BindingsRefused(BINDINGS_MISSING)),
+        Remedy::Investigate
+    );
+
+    let fx = Fixture::new();
+    let first = seeded_with(&fx, &k, bindings_layer(SOURCE, None, &[])).await;
+    let (r, events) = run_with(&fx.dir(), &k, checkpoint_of(&first), &gone).await;
+    assert!(!r.unwrap().identity_transition, "nothing explicit to drop");
+    assert_eq!(events.len(), 1);
+}
+
+#[tokio::test]
+async fn a_keyless_edit_releases_and_reports_each_containment() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let first = seeded_with(
+        &fx,
+        &k,
+        bindings_layer(SOURCE, Some(BLOCK), &[(666, "mallory", "adversary")]),
+    )
+    .await;
+    let keyless = inputs_with(bindings_layer(SOURCE, None, &[]));
+    let (r, _) = run_with(&fx.dir(), &k, checkpoint_of(&first), &keyless).await;
+    let r = r.unwrap();
+    assert!(r.identity_transition);
+    assert_eq!(
+        r.released,
+        [Released {
+            uid: 666,
+            name: "mallory".into(),
+            cause: ReleaseCause::BindingsAbsent
+        }]
+    );
+    assert!(!is_contained(&graph_of(&fx.store(), &k), 666));
+    let (again, events) = run_with(&fx.dir(), &k, checkpoint_of(&r), &keyless).await;
+    let again = again.unwrap();
+    assert!(again.released.is_empty(), "released once, never again");
+    assert_eq!(events.len(), 1);
+}
+
+#[tokio::test]
+async fn a_keyless_boot_writes_its_release_records_before_the_persist() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let first = seeded_with(
+        &fx,
+        &k,
+        bindings_layer(SOURCE, Some(BLOCK), &[(666, "mallory", "adversary")]),
+    )
+    .await;
+    let before = fx.store();
+    let keyless = inputs_with(bindings_layer(SOURCE, None, &[]));
+    let mallory = vec![Released {
+        uid: 666,
+        name: "mallory".into(),
+        cause: ReleaseCause::BindingsAbsent,
+    }];
+
+    let mut failing = Recorder {
+        fail_released: true,
+        ..Recorder::default()
+    };
+    let r = boot(
+        &fx.dir(),
+        &k,
+        checkpoint_of(&first),
+        &mut failing,
+        NOW,
+        &keyless.boot(),
+    )
+    .await;
+    assert_eq!(r.unwrap_err(), StoreError::Audit("released refused".into()));
+    assert_eq!(fx.store(), before);
+    assert_eq!(
+        failing.events,
+        vec![
+            Event::Checkpoint(1, first.digest, "verified".into()),
+            Event::Released(2, mallory.clone()),
+        ]
+    );
+
+    let mut audit = Recorder {
+        store_at_released: Some(fx.file(STORE_FILE)),
+        ..Recorder::default()
+    };
+    let r = boot(
+        &fx.dir(),
+        &k,
+        checkpoint_of(&first),
+        &mut audit,
+        NOW,
+        &keyless.boot(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        audit.events,
+        vec![
+            Event::Checkpoint(1, first.digest, "verified".into()),
+            Event::Released(2, mallory),
+            Event::Transition(2, "root-file".into()),
+            Event::Checkpoint(2, r.digest, "transitioned".into()),
+        ]
+    );
+    assert_eq!(audit.store_bytes_at_released, Some(before.clone()));
+    assert_ne!(fx.store(), before);
 }

@@ -314,6 +314,135 @@ pub fn extract(g: &Graph) -> Result<Extracted, IdentityError> {
     })
 }
 
+pub const BINDINGS_MISSING: &str = "bindings.yaml is missing but the store holds explicit bindings; to return to principal-as-admin write bindings.yaml without a `bindings:` key";
+pub const BINDINGS_NOT_MOVED: &str = "the store holds explicit bindings from authz.yaml; paste the bindings: block into /etc/maknae/bindings.yaml";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Carried {
+    pub uid: u32,
+    pub name: String,
+    pub overrides: Vec<SubjectEntry>,
+}
+
+/// `file` plus every persisted contained subject whose name is in `unresolved_adversaries`,
+/// contained under its persisted uid; any file entry for that uid is replaced and returned in
+/// `overrides`. Idempotent.
+pub fn carry_forward(
+    file: &IdentityLayer,
+    unresolved_adversaries: &[String],
+    persisted: &IdentityLayer,
+) -> (IdentityLayer, Vec<Carried>) {
+    let mut out = file.clone();
+    let mut carried = Vec::new();
+    for s in persisted
+        .subjects
+        .iter()
+        .filter(|s| s.role == ADVERSARY && unresolved_adversaries.contains(&s.name))
+    {
+        let (overrides, keep): (Vec<SubjectEntry>, Vec<SubjectEntry>) = out
+            .subjects
+            .drain(..)
+            .partition(|e| e.uid == s.uid && e != s);
+        out.subjects = keep;
+        if !out.subjects.contains(s) {
+            out.subjects.push(s.clone());
+        }
+        carried.push(Carried {
+            uid: s.uid,
+            name: s.name.clone(),
+            overrides,
+        });
+    }
+    out.subjects.sort_by_key(|e| e.uid);
+    (out, carried)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReleaseCause {
+    NotListed,
+    NameNowResolvesTo(u32),
+    BoundAs(String),
+    BindingsEmpty,
+    BindingsAbsent,
+}
+
+impl fmt::Display for ReleaseCause {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotListed => f.write_str("its name is no longer listed under adversary"),
+            Self::NameNowResolvesTo(uid) => write!(f, "its name now resolves to uid {uid}"),
+            Self::BoundAs(role) => write!(f, "it is now listed under {role}"),
+            Self::BindingsEmpty => f.write_str("bindings.yaml now binds nobody"),
+            Self::BindingsAbsent => f.write_str(
+                "bindings.yaml has no bindings: key, so the enrolled principal is admin and nobody else holds a role",
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Released {
+    pub uid: u32,
+    pub name: String,
+    pub cause: ReleaseCause,
+}
+
+/// Every subject contained in `persisted` and not contained in `next`, in uid order.
+pub fn released(persisted: &IdentityLayer, next: &IdentityLayer) -> Vec<Released> {
+    let contained = |uid: u32| {
+        next.subjects
+            .iter()
+            .any(|e| e.uid == uid && e.role == ADVERSARY)
+    };
+    let mut out: Vec<Released> = persisted
+        .subjects
+        .iter()
+        .filter(|s| s.role == ADVERSARY && !contained(s.uid))
+        .map(|s| {
+            let cause = if next.bindings_sha256.is_none() {
+                ReleaseCause::BindingsAbsent
+            } else if next.subjects.is_empty() {
+                ReleaseCause::BindingsEmpty
+            } else if let Some(moved) = next
+                .subjects
+                .iter()
+                .find(|e| e.name == s.name && e.role == ADVERSARY)
+            {
+                ReleaseCause::NameNowResolvesTo(moved.uid)
+            } else if let Some(bound) = next.subjects.iter().find(|e| e.uid == s.uid) {
+                ReleaseCause::BoundAs(bound.role.clone())
+            } else {
+                ReleaseCause::NotListed
+            };
+            Released {
+                uid: s.uid,
+                name: s.name.clone(),
+                cause,
+            }
+        })
+        .collect();
+    out.sort_by_key(|r| r.uid);
+    out
+}
+
+/// The refusal, if `file` would drop explicit bindings that root has not written into
+/// `bindings.yaml`: the one-time move from `moved_from` (`authz.yaml`), or a vanished file.
+pub fn drops_explicit_bindings(
+    persisted: &IdentityLayer,
+    file: &IdentityLayer,
+    file_missing: bool,
+    moved_from: &str,
+) -> Option<&'static str> {
+    persisted.bindings_sha256?;
+    if persisted.source == moved_from && file.bindings_sha256.is_none() {
+        return Some(BINDINGS_NOT_MOVED);
+    }
+    if file_missing {
+        return Some(BINDINGS_MISSING);
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -863,6 +992,315 @@ mod tests {
             build(&no_label, &roles(), [1; 32], 1, ProvenanceKind::Seed),
             Err(IdentityError::Graph(GraphError::EmptyLabel))
         ));
+    }
+
+    fn entry(uid: u32, name: &str, role: &str) -> SubjectEntry {
+        SubjectEntry {
+            uid,
+            name: name.into(),
+            role: role.into(),
+        }
+    }
+
+    fn at(source: &str, bindings: Option<&str>, subjects: &[(u32, &str, &str)]) -> IdentityLayer {
+        IdentityLayer {
+            source: source.into(),
+            ..layer(bindings, subjects)
+        }
+    }
+
+    #[test]
+    fn a_contained_name_that_stops_resolving_stays_contained() {
+        let persisted = layer(
+            Some("x"),
+            &[(1000, "alex", "admin"), (666, "mallory", "adversary")],
+        );
+        let file = layer(Some("y"), &[(1000, "alex", "admin")]);
+        let (carried, which) = carry_forward(&file, &["mallory".into()], &persisted);
+        assert_eq!(
+            which,
+            [Carried {
+                uid: 666,
+                name: "mallory".into(),
+                overrides: vec![]
+            }]
+        );
+        assert_eq!(
+            carried.subjects,
+            [
+                entry(666, "mallory", "adversary"),
+                entry(1000, "alex", "admin")
+            ]
+        );
+        assert_eq!(
+            carried.bindings_sha256, file.bindings_sha256,
+            "only subjects are carried"
+        );
+        assert_eq!(
+            carry_forward(&carried, &["mallory".into()], &persisted).0,
+            carried,
+            "idempotent"
+        );
+        assert!(released(&persisted, &carried).is_empty());
+    }
+
+    #[test]
+    fn removing_the_name_releases_it_and_says_so() {
+        let persisted = layer(
+            Some("x"),
+            &[(666, "mallory", "adversary"), (1000, "alex", "admin")],
+        );
+        let file = layer(Some("y"), &[(1000, "alex", "admin")]);
+        assert_eq!(
+            carry_forward(&file, &[], &persisted),
+            (file.clone(), vec![])
+        );
+        assert_eq!(
+            released(&persisted, &file),
+            [Released {
+                uid: 666,
+                name: "mallory".into(),
+                cause: ReleaseCause::NotListed
+            }]
+        );
+    }
+
+    #[test]
+    fn a_typo_in_the_name_releases_and_is_recorded() {
+        let persisted = layer(Some("x"), &[(666, "mallory", "adversary")]);
+        let file = layer(Some("y"), &[]);
+        let (next, carried) = carry_forward(&file, &["Mallory".into()], &persisted);
+        assert!(carried.is_empty(), "a different name carries nothing");
+        assert_eq!(
+            released(&persisted, &next),
+            [Released {
+                uid: 666,
+                name: "mallory".into(),
+                cause: ReleaseCause::BindingsEmpty
+            }]
+        );
+        let other = layer(Some("y"), &[(1, "a", "user")]);
+        let (next, _) = carry_forward(&other, &["Mallory".into()], &persisted);
+        assert_eq!(
+            released(&persisted, &next),
+            [Released {
+                uid: 666,
+                name: "mallory".into(),
+                cause: ReleaseCause::NotListed
+            }]
+        );
+    }
+
+    #[test]
+    fn every_release_cause_is_named() {
+        let persisted = layer(Some("x"), &[(666, "mallory", "adversary")]);
+        let cases = [
+            (
+                layer(
+                    Some("y"),
+                    &[(777, "mallory", "adversary"), (1, "a", "user")],
+                ),
+                ReleaseCause::NameNowResolvesTo(777),
+            ),
+            (
+                layer(Some("y"), &[(666, "mallory", "user")]),
+                ReleaseCause::BoundAs("user".into()),
+            ),
+            (layer(Some("y"), &[]), ReleaseCause::BindingsEmpty),
+            (layer(None, &[]), ReleaseCause::BindingsAbsent),
+            (
+                layer(None, &[(1, "a", "user")]),
+                ReleaseCause::BindingsAbsent,
+            ),
+            (
+                layer(Some("y"), &[(1, "a", "user")]),
+                ReleaseCause::NotListed,
+            ),
+            (
+                layer(Some("y"), &[(1, "mallory", "user")]),
+                ReleaseCause::NotListed,
+            ),
+        ];
+        for (next, cause) in cases {
+            assert_eq!(
+                released(&persisted, &next),
+                [Released {
+                    uid: 666,
+                    name: "mallory".into(),
+                    cause: cause.clone()
+                }],
+                "{cause:?}"
+            );
+        }
+        let texts: Vec<String> = [
+            ReleaseCause::NotListed,
+            ReleaseCause::NameNowResolvesTo(777),
+            ReleaseCause::BoundAs("user".into()),
+            ReleaseCause::BindingsEmpty,
+            ReleaseCause::BindingsAbsent,
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+        assert_eq!(
+            texts,
+            [
+                "its name is no longer listed under adversary",
+                "its name now resolves to uid 777",
+                "it is now listed under user",
+                "bindings.yaml now binds nobody",
+                "bindings.yaml has no bindings: key, so the enrolled principal is admin and nobody else holds a role",
+            ]
+        );
+    }
+
+    #[test]
+    fn only_contained_subjects_are_released_one_record_each_in_uid_order() {
+        let persisted = layer(
+            Some("x"),
+            &[
+                (700, "trudy", "adversary"),
+                (1000, "alex", "admin"),
+                (666, "mallory", "adversary"),
+                (1001, "ursula", "user"),
+            ],
+        );
+        let next = layer(Some("y"), &[(1000, "alex", "user")]);
+        let r = released(&persisted, &next);
+        assert_eq!(
+            r.iter()
+                .map(|r| (r.uid, r.name.as_str()))
+                .collect::<Vec<_>>(),
+            [(666, "mallory"), (700, "trudy")]
+        );
+        assert!(released(&persisted, &persisted).is_empty(), "unchanged");
+        let still = layer(
+            Some("y"),
+            &[(700, "trudy", "adversary"), (666, "renamed", "adversary")],
+        );
+        assert!(
+            released(&persisted, &still).is_empty(),
+            "a uid still contained is not released whatever its name"
+        );
+    }
+
+    #[test]
+    fn carry_forward_over_a_reused_uid_stays_contained_and_names_what_it_overrides() {
+        let persisted = layer(Some("x"), &[(666, "mallory", "adversary")]);
+        let file = layer(Some("y"), &[(666, "bob", "user"), (1000, "alex", "admin")]);
+        let (next, carried) = carry_forward(&file, &["mallory".into()], &persisted);
+        assert_eq!(
+            next.subjects,
+            [
+                entry(666, "mallory", "adversary"),
+                entry(1000, "alex", "admin")
+            ],
+            "fail closed"
+        );
+        assert_eq!(
+            carried,
+            [Carried {
+                uid: 666,
+                name: "mallory".into(),
+                overrides: vec![entry(666, "bob", "user")]
+            }]
+        );
+        assert_eq!(
+            carry_forward(&next, &["mallory".into()], &persisted).0,
+            next,
+            "idempotent over an override"
+        );
+        let bound = layer(Some("x"), &[(666, "mallory", "user")]);
+        assert!(
+            carry_forward(&file, &["mallory".into()], &bound)
+                .1
+                .is_empty(),
+            "bound, never contained"
+        );
+        let unlisted = layer(Some("x"), &[(666, "mallory", "adversary")]);
+        assert_eq!(
+            carry_forward(&file, &["eve".into()], &unlisted),
+            (file.clone(), vec![]),
+            "only the names that no longer resolve"
+        );
+    }
+
+    #[test]
+    fn the_guard_refuses_the_upgrade_without_the_block_and_a_vanished_file() {
+        let a = "/etc/maknae/authz.yaml";
+        let b = "/etc/maknae/bindings.yaml";
+        let old_explicit = at(a, Some("x"), &[(666, "mallory", "adversary")]);
+        let old_empty = at(a, Some("e"), &[]);
+        let old_absent = at(a, None, &[]);
+        let new_absent = at(b, None, &[]);
+        let new_explicit = at(b, Some("x"), &[(666, "mallory", "adversary")]);
+        assert_eq!(
+            drops_explicit_bindings(&old_explicit, &new_absent, false, a),
+            Some(BINDINGS_NOT_MOVED)
+        );
+        assert_eq!(
+            drops_explicit_bindings(&old_explicit, &new_absent, true, a),
+            Some(BINDINGS_NOT_MOVED)
+        );
+        assert_eq!(
+            drops_explicit_bindings(&old_empty, &new_absent, false, a),
+            Some(BINDINGS_NOT_MOVED),
+            "an explicit `bindings: {{}}` is explicit"
+        );
+        assert_eq!(
+            drops_explicit_bindings(&old_absent, &new_absent, false, a),
+            None,
+            "the shipped default upgrades in one transition"
+        );
+        assert_eq!(
+            drops_explicit_bindings(&old_absent, &new_absent, true, a),
+            None,
+            "nothing explicit to drop"
+        );
+        assert_eq!(
+            drops_explicit_bindings(&old_explicit, &new_explicit, false, a),
+            None,
+            "the block was pasted"
+        );
+        let steady = at(b, Some("x"), &[]);
+        assert_eq!(
+            drops_explicit_bindings(&steady, &new_absent, true, a),
+            Some(BINDINGS_MISSING)
+        );
+        assert_eq!(
+            drops_explicit_bindings(&steady, &new_absent, false, a),
+            None,
+            "root's keyless edit is allowed, and recorded as releases"
+        );
+        assert_eq!(
+            drops_explicit_bindings(&steady, &steady, false, a),
+            None,
+            "an unchanged reboot"
+        );
+        assert_eq!(
+            drops_explicit_bindings(&new_absent, &new_absent, true, a),
+            None
+        );
+        assert_eq!(
+            drops_explicit_bindings(&IdentityLayer::default(), &new_absent, true, a),
+            None,
+            "a store from before the identity layer"
+        );
+        let respelled = at("/private/etc/maknae/authz.yaml", Some("x"), &[]);
+        assert_eq!(
+            drops_explicit_bindings(&respelled, &new_absent, false, a),
+            None,
+            "a respelled config dir is not the move"
+        );
+        assert_eq!(
+            drops_explicit_bindings(&old_explicit, &at(a, None, &[]), false, a),
+            Some(BINDINGS_NOT_MOVED),
+            "compared with the authz.yaml path, never with the file's own source"
+        );
+        assert!(
+            BINDINGS_NOT_MOVED.contains("/etc/maknae/bindings.yaml")
+                && BINDINGS_MISSING.contains("without a `bindings:` key")
+        );
     }
 
     #[test]

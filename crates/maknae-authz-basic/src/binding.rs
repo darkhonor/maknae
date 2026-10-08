@@ -66,6 +66,40 @@ pub enum IdentityProblem {
         names: Vec<String>,
         roles: Vec<&'static str>,
     },
+    CarriedForward {
+        uid: u32,
+        name: String,
+        overrides: Vec<(String, &'static str)>,
+    },
+    Released {
+        uid: u32,
+        name: String,
+        cause: String,
+    },
+}
+
+/// A name as a problem's text prints it: `escape_default`, then `,` as `\,`. A name
+/// persisted before #496 was never validated.
+pub fn shown(name: &str) -> String {
+    name.escape_default().to_string().replace(',', "\\,")
+}
+
+fn joined(names: &[String]) -> String {
+    names
+        .iter()
+        .map(|n| shown(n))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+impl From<&maknae_graph::identity::Released> for IdentityProblem {
+    fn from(r: &maknae_graph::identity::Released) -> Self {
+        Self::Released {
+            uid: r.uid,
+            name: r.name.clone(),
+            cause: r.cause.to_string(),
+        }
+    }
 }
 
 impl IdentityProblem {
@@ -75,13 +109,18 @@ impl IdentityProblem {
             Self::UnresolvedAdversary { .. } => "unresolved-adversary",
             Self::Contained { .. } => "contained",
             Self::Unbound { .. } => "unbound",
+            Self::CarriedForward { .. } => "carried-forward",
+            Self::Released { .. } => "released",
         }
     }
 
     pub fn uid(&self) -> Option<u32> {
         match self {
             Self::Unresolved { .. } | Self::UnresolvedAdversary { .. } => None,
-            Self::Contained { uid, .. } | Self::Unbound { uid, .. } => Some(*uid),
+            Self::Contained { uid, .. }
+            | Self::Unbound { uid, .. }
+            | Self::CarriedForward { uid, .. }
+            | Self::Released { uid, .. } => Some(*uid),
         }
     }
 
@@ -91,6 +130,12 @@ impl IdentityProblem {
                 vec![name.clone()]
             }
             Self::Contained { names, .. } | Self::Unbound { names, .. } => names.clone(),
+            Self::CarriedForward {
+                name, overrides, ..
+            } => std::iter::once(name.clone())
+                .chain(overrides.iter().map(|(n, _)| n.clone()))
+                .collect(),
+            Self::Released { name, .. } => vec![name.clone()],
         }
     }
 
@@ -99,6 +144,10 @@ impl IdentityProblem {
             Self::Unresolved { role, .. } => vec![*role],
             Self::UnresolvedAdversary { .. } => vec![ADVERSARY],
             Self::Contained { roles, .. } | Self::Unbound { roles, .. } => roles.clone(),
+            Self::CarriedForward { overrides, .. } => std::iter::once(ADVERSARY)
+                .chain(overrides.iter().map(|(_, r)| *r))
+                .collect(),
+            Self::Released { .. } => vec![ADVERSARY],
         }
     }
 }
@@ -108,23 +157,49 @@ impl std::fmt::Display for IdentityProblem {
         match self {
             Self::Unresolved { role, name } => write!(
                 f,
-                "'{name}' under {role} has no account on this host; it holds no role"
+                "'{}' under {role} has no account on this host; it holds no role",
+                shown(name)
             ),
             Self::UnresolvedAdversary { name } => write!(
                 f,
-                "'{name}' under adversary has no account on this host; nothing is contained for it (write \"- uid: <n>\" to contain an id that has no account)"
+                "'{}' under adversary has no account on this host; nothing is contained for it (write \"- uid: <n>\" to contain an id that has no account)",
+                shown(name)
             ),
             Self::Contained { uid, names, roles } => write!(
                 f,
                 "uid {uid} ({}) is under {}; containment wins and it is contained",
-                names.join(", "),
+                joined(names),
                 roles.join(", ")
             ),
             Self::Unbound { uid, names, roles } => write!(
                 f,
                 "uid {uid} ({}) is under {}; it holds no role",
-                names.join(", "),
+                joined(names),
                 roles.join(", ")
+            ),
+            Self::CarriedForward {
+                uid,
+                name,
+                overrides,
+            } => {
+                write!(
+                    f,
+                    "'{}' under adversary no longer resolves; uid {uid} stays contained (carried forward)",
+                    shown(name)
+                )?;
+                if !overrides.is_empty() {
+                    let o: Vec<String> = overrides
+                        .iter()
+                        .map(|(n, r)| format!("{} ({r})", shown(n)))
+                        .collect();
+                    write!(f, "; this overrides {}", o.join(", "))?;
+                }
+                Ok(())
+            }
+            Self::Released { uid, name, cause } => write!(
+                f,
+                "uid {uid} ('{}') is no longer contained: {cause}",
+                shown(name)
             ),
         }
     }
@@ -596,6 +671,42 @@ mod tests {
                 vec!["guest", "user"],
                 "uid 1002 (gus) is under guest, user; it holds no role",
             ),
+            (
+                IdentityProblem::CarriedForward {
+                    uid: 666,
+                    name: "mallory".into(),
+                    overrides: vec![],
+                },
+                "carried-forward",
+                Some(666),
+                vec!["mallory"],
+                vec!["adversary"],
+                "'mallory' under adversary no longer resolves; uid 666 stays contained (carried forward)",
+            ),
+            (
+                IdentityProblem::CarriedForward {
+                    uid: 666,
+                    name: "mallory".into(),
+                    overrides: vec![("bob".into(), "user"), ("carol".into(), "admin")],
+                },
+                "carried-forward",
+                Some(666),
+                vec!["mallory", "bob", "carol"],
+                vec!["adversary", "user", "admin"],
+                "'mallory' under adversary no longer resolves; uid 666 stays contained (carried forward); this overrides bob (user), carol (admin)",
+            ),
+            (
+                IdentityProblem::Released {
+                    uid: 666,
+                    name: "mallory".into(),
+                    cause: "its name is no longer listed under adversary".into(),
+                },
+                "released",
+                Some(666),
+                vec!["mallory"],
+                vec!["adversary"],
+                "uid 666 ('mallory') is no longer contained: its name is no longer listed under adversary",
+            ),
         ];
         for (p, kind, uid, names, roles, text) in cases {
             assert_eq!(p.kind(), kind);
@@ -603,6 +714,66 @@ mod tests {
             assert_eq!(p.names(), names);
             assert_eq!(p.roles(), roles);
             assert_eq!(p.to_string(), text);
+        }
+    }
+
+    #[test]
+    fn a_release_becomes_a_released_problem_naming_its_cause() {
+        let r = maknae_graph::identity::Released {
+            uid: 666,
+            name: "mallory".into(),
+            cause: maknae_graph::identity::ReleaseCause::NameNowResolvesTo(777),
+        };
+        assert_eq!(
+            IdentityProblem::from(&r),
+            IdentityProblem::Released {
+                uid: 666,
+                name: "mallory".into(),
+                cause: "its name now resolves to uid 777".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn every_printed_name_is_escaped_and_its_commas_marked() {
+        assert_eq!(shown("é\u{7f},x"), "\\u{e9}\\u{7f}\\,x");
+        assert_eq!(shown("mallory"), "mallory");
+        let odd = "a,b\n".to_string();
+        let texts = [
+            IdentityProblem::Unresolved {
+                role: "user",
+                name: odd.clone(),
+            },
+            IdentityProblem::UnresolvedAdversary { name: odd.clone() },
+            IdentityProblem::Contained {
+                uid: 1,
+                names: vec![odd.clone()],
+                roles: vec!["adversary"],
+            },
+            IdentityProblem::Unbound {
+                uid: 1,
+                names: vec![odd.clone()],
+                roles: vec!["user"],
+            },
+            IdentityProblem::CarriedForward {
+                uid: 1,
+                name: odd.clone(),
+                overrides: vec![],
+            },
+            IdentityProblem::CarriedForward {
+                uid: 1,
+                name: "m".into(),
+                overrides: vec![(odd.clone(), "user")],
+            },
+            IdentityProblem::Released {
+                uid: 1,
+                name: odd.clone(),
+                cause: "c".into(),
+            },
+        ]
+        .map(|p| p.to_string());
+        for t in texts {
+            assert!(t.contains("a\\,b\\n") && !t.contains('\n'), "{t}");
         }
     }
 

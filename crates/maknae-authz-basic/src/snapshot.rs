@@ -240,8 +240,11 @@ pub fn compile(
     section_sha256: &BTreeMap<String, [u8; 32]>,
 ) -> Result<Snapshot, CompileError> {
     let stored = extract(&persisted).map_err(|e| CompileError::Identity(e.to_string()))?;
-    let declared =
-        source.identity_layer(&stored.layer.label, section_sha256.get("bindings").copied());
+    let (declared, carried) = maknae_graph::identity::carry_forward(
+        &source.identity_layer(&stored.layer.label, section_sha256.get("bindings").copied()),
+        &source.unresolved_adversaries(),
+        &stored.layer,
+    );
     if stored.layer != declared {
         return Err(CompileError::Identity(format!(
             "the persisted identity layer differs from the one {} declares",
@@ -412,8 +415,37 @@ pub fn compile(
         loaded,
         index: c.index,
         sections: section_sha256.clone(),
-        problems: source.identity_problems().into(),
+        problems: carried_problems(source.identity_problems(), &carried).into(),
     })
+}
+
+fn carried_problems(
+    problems: &[IdentityProblem],
+    carried: &[maknae_graph::identity::Carried],
+) -> Vec<IdentityProblem> {
+    problems
+        .iter()
+        .map(|p| match p {
+            IdentityProblem::UnresolvedAdversary { name } => {
+                carried.iter().find(|c| c.name == *name).map_or_else(
+                    || p.clone(),
+                    |c| IdentityProblem::CarriedForward {
+                        uid: c.uid,
+                        name: c.name.clone(),
+                        overrides: c
+                            .overrides
+                            .iter()
+                            .filter_map(|e| {
+                                crate::role::Role::from_key(&e.role)
+                                    .map(|r| (e.name.clone(), r.key()))
+                            })
+                            .collect(),
+                    },
+                )
+            }
+            _ => p.clone(),
+        })
+        .collect()
 }
 
 #[cfg(test)]

@@ -50,6 +50,7 @@ pub enum StoreError {
     Vocabulary(&'static str),
     Identity(String),
     StaleRevision { store: u64, attempted: u64 },
+    BindingsRefused(&'static str),
 }
 
 impl fmt::Display for StoreError {
@@ -81,6 +82,7 @@ impl fmt::Display for StoreError {
                 f,
                 "graph store commit at revision {attempted} does not advance the store's revision {store}"
             ),
+            Self::BindingsRefused(m) => f.write_str(m),
         }
     }
 }
@@ -120,7 +122,9 @@ pub fn remedy(e: &StoreError) -> Remedy {
         StoreError::StateDir(_) | StoreError::Io(_) => Remedy::CheckStateDir,
         StoreError::InUse => Remedy::StopOtherInstance,
         StoreError::Audit(_) => Remedy::CheckAudit,
-        StoreError::Identity(_) | StoreError::StaleRevision { .. } => Remedy::Investigate,
+        StoreError::Identity(_)
+        | StoreError::StaleRevision { .. }
+        | StoreError::BindingsRefused(_) => Remedy::Investigate,
     }
 }
 
@@ -340,16 +344,22 @@ pub struct BootReport {
     pub marker_ignored: Option<String>,
     pub migration: Option<Migration>,
     pub identity_transition: bool,
+    pub released: Vec<identity::Released>,
     /// The last store write's failed directory sync: it is in place, perhaps not durable.
     pub durability_error: Option<String>,
 }
 
 /// What the binary brings to boot: its persisted compiled set, that set's
-/// `vocabulary::digest`, and the identity layer resolved from the policy file.
+/// `vocabulary::digest`, the identity layer resolved from `bindings.yaml`, the
+/// `adversary:` names that did not resolve, whether the file is missing, and the
+/// `authz.yaml` path a layer written before #496 names as its source.
 pub struct BootInputs<'a> {
     pub compiled: &'a CompiledSet,
     pub vocabulary_sha256: [u8; 32],
     pub identity: &'a IdentityLayer,
+    pub unresolved_adversaries: &'a [String],
+    pub bindings_missing: bool,
+    pub moved_from: &'a str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -383,6 +393,13 @@ pub trait BootAudit {
         &mut self,
         revision: u64,
         initiator: &'static str,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+    /// Written ahead of the persist of a transition that ends these containments; an append
+    /// failure refuses boot (as `intent_transition`'s does) and nothing is persisted.
+    fn released(
+        &mut self,
+        revision: u64,
+        released: &[identity::Released],
     ) -> impl Future<Output = Result<(), StoreError>> + Send;
 }
 
@@ -581,6 +598,14 @@ async fn load(
         extracted,
         facts,
     } = decoded;
+    if let Some(m) = identity::drops_explicit_bindings(
+        &extracted.layer,
+        inputs.identity,
+        inputs.bindings_missing,
+        inputs.moved_from,
+    ) {
+        return Err(StoreError::BindingsRefused(m));
+    }
     let to = inputs.vocabulary_sha256;
     let mut layer = extracted.layer;
     let mut revision = facts.revision;
@@ -597,15 +622,11 @@ async fn load(
             Some((Migration { from, to, unbound }, next))
         }
     };
+    let file = identity::carry_forward(inputs.identity, inputs.unresolved_adversaries, &layer).0;
     let stale = migration.is_none() && !is_canonical(&graph, &layer, inputs);
-    let transition = if stale || sorted(&layer) != sorted(inputs.identity) {
+    let transition = if stale || sorted(&layer) != sorted(&file) {
         revision = next_revision(revision)?;
-        Some(build(
-            inputs.identity,
-            inputs,
-            revision,
-            ProvenanceKind::RootFile,
-        )?)
+        Some(build(&file, inputs, revision, ProvenanceKind::RootFile)?)
     } else {
         None
     };
@@ -622,6 +643,7 @@ async fn load(
         marker_ignored: None,
         migration: None,
         identity_transition: false,
+        released: Vec::new(),
         durability_error: None,
     };
     if let Some((m, next)) = migration {
@@ -639,6 +661,10 @@ async fn load(
         report.migration = Some(m);
     }
     if let Some(next) = transition {
+        let released = identity::released(&layer, &file);
+        if !released.is_empty() {
+            audit.released(next.revision(), &released).await?;
+        }
         audit
             .intent_transition(next.revision(), INITIATOR_ROOT_FILE)
             .await?;
@@ -651,6 +677,7 @@ async fn load(
         report.durability_error = persisted.durability_error;
         report.graph = next;
         report.identity_transition = true;
+        report.released = released;
     }
     Ok(report)
 }
@@ -737,6 +764,7 @@ async fn seed(
         marker_ignored: None,
         migration: None,
         identity_transition: false,
+        released: Vec::new(),
         durability_error: persisted.durability_error,
     })
 }

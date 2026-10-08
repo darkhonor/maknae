@@ -2944,10 +2944,11 @@ const GRAPH_REJECTED_ACTION: &str = "graph.rejected";
 const GRAPH_MIGRATE_ACTION: &str = "graph.migrate";
 const GRAPH_TRANSITION_ACTION: &str = "graph.transition";
 const GRAPH_RELOAD_ACTION: &str = "graph.reload";
+const GRAPH_IDENTITY_ACTION: &str = "graph.identity";
 
 /// Every `graph.*` pseudo-action this file emits; no verb's action string may equal one.
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) const GRAPH_PSEUDO_ACTIONS: [&str; 8] = [
+pub(crate) const GRAPH_PSEUDO_ACTIONS: [&str; 9] = [
     GRAPH_SEED_ACTION,
     GRAPH_RESEED_ACTION,
     GRAPH_REJECTED_ACTION,
@@ -2956,6 +2957,7 @@ pub(crate) const GRAPH_PSEUDO_ACTIONS: [&str; 8] = [
     GRAPH_MIGRATE_ACTION,
     GRAPH_TRANSITION_ACTION,
     GRAPH_RELOAD_ACTION,
+    GRAPH_IDENTITY_ACTION,
 ];
 
 /// The fields every peer-less boot record shares (spec §5.3).
@@ -3094,6 +3096,33 @@ impl<E: AuditEmit + Send + Sync> BootAudit for GraphBootAudit<'_, E> {
         let rec = self.intent(GRAPH_TRANSITION_ACTION, &reason, revision, "transitioning");
         self.append(rec)
     }
+
+    fn released(
+        &mut self,
+        _revision: u64,
+        released: &[maknae_graph::identity::Released],
+    ) -> impl Future<Output = Result<(), StoreError>> + Send {
+        let recs: Vec<(String, AuditRecord)> = released
+            .iter()
+            .map(|r| {
+                let reason = maknae_authz_basic::IdentityProblem::from(r).to_string();
+                let rec =
+                    self.ctx
+                        .record(GRAPH_IDENTITY_ACTION, "permit", &reason, "authorized", None);
+                (reason, rec)
+            })
+            .collect();
+        let sink = self.sink;
+        async move {
+            for (reason, rec) in recs {
+                eprintln!("maknaed: identity: {reason}");
+                sink.emit(&rec)
+                    .await
+                    .map_err(|e| StoreError::Audit(e.to_string()))?;
+            }
+            Ok(())
+        }
+    }
 }
 
 impl<E> GraphBootAudit<'_, E> {
@@ -3119,6 +3148,9 @@ impl<E> GraphBootAudit<'_, E> {
 struct GraphInputs {
     vocabulary: crate::vocabulary::Vocabulary,
     identity: maknae_graph::identity::IdentityLayer,
+    unresolved: Vec<String>,
+    bindings_missing: bool,
+    moved_from: String,
 }
 
 impl GraphInputs {
@@ -3130,6 +3162,9 @@ impl GraphInputs {
         Ok(GraphInputs {
             vocabulary,
             identity,
+            unresolved: source.unresolved_adversaries(),
+            bindings_missing: source.bindings().is_missing(),
+            moved_from: source.policy_source().to_string(),
         })
     }
 
@@ -3138,6 +3173,9 @@ impl GraphInputs {
             compiled: &self.vocabulary.persisted,
             vocabulary_sha256: self.vocabulary.digest,
             identity: &self.identity,
+            unresolved_adversaries: &self.unresolved,
+            bindings_missing: self.bindings_missing,
+            moved_from: &self.moved_from,
         }
     }
 }
@@ -3220,6 +3258,7 @@ fn graph_refusal(failure: GraphFailure, state_dir: &Path) -> RunError {
 fn store_refusal(e: StoreError, state_dir: &Path) -> RunError {
     match e {
         StoreError::Audit(cause) => boot_evidence_refused("graph", cause),
+        StoreError::BindingsRefused(m) => RunError::Authz(m.into()),
         e => graph_refusal(GraphFailure::Store(e), state_dir),
     }
 }
@@ -3271,6 +3310,8 @@ struct BootedGraph {
     key: WrappingKey,
     status: KernelGraphStatus,
     graph: maknae_graph::graph::Graph,
+    #[cfg_attr(not(test), allow(dead_code))]
+    released: Vec<maknae_graph::identity::Released>,
 }
 
 /// Runs before the accept loop, so the blocking audit scan contends with no append.
@@ -3306,6 +3347,7 @@ async fn boot_kernel_graph(
     Ok(BootedGraph {
         status: kernel_graph_status(&report),
         graph: report.graph,
+        released: report.released,
         dir,
         key,
     })
@@ -3375,6 +3417,7 @@ struct Reloader<B: maknae_authz_basic::Baseline, E> {
 type ReloadCandidate = (
     Arc<maknae_graph::graph::Graph>,
     Arc<maknae_authz_basic::snapshot::Snapshot>,
+    Arc<[maknae_authz_basic::IdentityProblem]>,
 );
 
 impl<B, E> Reloader<B, E>
@@ -3401,6 +3444,7 @@ where
                 ctx: &ctx,
                 store_revision,
                 committed: std::sync::Mutex::new(None),
+                released: std::sync::Mutex::new(Arc::from(Vec::new())),
             };
             let mut stopping = self.stopping.subscribe();
             let stopped = async move {
@@ -3432,6 +3476,8 @@ struct ReloadIo<'a, B: maknae_authz_basic::Baseline, E> {
     ctx: &'a BootCtx<'a>,
     store_revision: u64,
     committed: std::sync::Mutex<Option<[u8; 32]>>,
+    /// Set by `install`, so empty unless this reload applied.
+    released: std::sync::Mutex<Arc<[maknae_authz_basic::IdentityProblem]>>,
 }
 
 /// Blocking: the policy load resolves usernames.
@@ -3447,10 +3493,16 @@ fn load_candidate<B: maknae_authz_basic::Baseline>(
         .load_source()
         .map_err(|e| Refusal::Load(e.to_string()))?;
     let digests = source.section_digests(baseline.digest());
-    let next = source.identity_layer(label, digests.get("bindings").copied());
     let current = baseline.snapshot();
     let persisted = maknae_graph::identity::extract(current.persisted())
         .map_err(|e| compile_refused(e.to_string()))?;
+    let (next, released) = crate::reload::next_layer(
+        &source.identity_layer(label, digests.get("bindings").copied()),
+        &source.unresolved_adversaries(),
+        &persisted.layer,
+        source.bindings().is_missing(),
+        source.policy_source(),
+    )?;
     let (plan, graph) = crate::reload::plan_candidate(
         &persisted.layer,
         &next,
@@ -3475,7 +3527,11 @@ fn load_candidate<B: maknae_authz_basic::Baseline>(
         &digests,
     )
     .map_err(|e| compile_refused(e.to_string()))?;
-    Ok((plan, (graph, Arc::new(snapshot))))
+    let released = released
+        .iter()
+        .map(maknae_authz_basic::IdentityProblem::from)
+        .collect();
+    Ok((plan, (graph, Arc::new(snapshot), released)))
 }
 
 impl<B, E> crate::reload::Load for ReloadIo<'_, B, E>
@@ -3559,6 +3615,10 @@ where
 
     fn install(&self, candidate: ReloadCandidate) {
         self.reloader.authorizer.baseline().install(candidate.1);
+        *self
+            .released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = candidate.2;
     }
 }
 
@@ -3618,10 +3678,29 @@ where
             }),
         );
         rec.policy_sha256 = Some(self.reloader.authorizer.baseline().policy_sha256());
+        let released: Vec<(String, AuditRecord)> = self
+            .released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(|p| {
+                let reason = p.to_string();
+                let rec =
+                    self.ctx
+                        .record(GRAPH_IDENTITY_ACTION, "permit", &reason, "authorized", None);
+                (reason, rec)
+            })
+            .collect();
         let sink = Arc::clone(&self.reloader.sink);
         async move {
             if let Err(e) = sink.emit(&rec).await {
                 eprintln!("maknaed: AUDIT WRITE FAILED on the reload outcome ({reason}): {e}");
+            }
+            for (reason, rec) in released {
+                eprintln!("maknaed: identity: {reason}");
+                if let Err(e) = sink.emit(&rec).await {
+                    eprintln!("maknaed: AUDIT WRITE FAILED on an identity record ({reason}): {e}");
+                }
             }
         }
     }
@@ -3947,7 +4026,7 @@ async fn boot_after_sink(
     let graph_inputs = GraphInputs::new(&source, &label)
         .map_err(|e| graph_refusal(GraphFailure::Store(e), state_dir))?;
     // The kernel graph boots before the PDP is built from it.
-    let booted = boot_kernel_graph(
+    let booted = match boot_kernel_graph(
         state_dir,
         graph_key(config_dir),
         sink,
@@ -3962,7 +4041,12 @@ async fn boot_after_sink(
         },
         &graph_inputs.boot(),
     )
-    .await?;
+    .await
+    {
+        Ok(booted) => booted,
+        Err(RunError::Authz(reason)) => return Err(refuse(reason).await),
+        Err(e) => return Err(e),
+    };
     let authorizer = match authz_boot_gate(
         source,
         Arc::new(booted.graph),
@@ -5155,6 +5239,75 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             .any(|r| r.action == "start" || r.action == "posture" || r.action == "authz"));
     }
 
+    // #496, root-gated like the test above: a store whose explicit bindings came from
+    // authz.yaml, over the shipped keyless bindings.yaml, refuses boot with exit 3 and
+    // the authz deny record, and the store is untouched.
+    #[test]
+    fn an_upgrade_without_the_pasted_block_refuses_boot_with_the_authz_record() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("CREDENTIALS_DIRECTORY");
+        let d = Dir::new("not_moved");
+        write_common_fixture(&d, "principal:\n  name: op\n  uid: 1000\n");
+        put(&d.0, "authz.yaml", "schema_version: 1\n", 0o640);
+        put(&d.0, "bindings.yaml", "schema_version: 1\n", 0o640);
+        let vocabulary = crate::vocabulary::kernel_vocabulary("UNCLASSIFIED").unwrap();
+        let old = maknae_graph::identity::build(
+            &maknae_graph::identity::IdentityLayer {
+                source: d.0.join("authz.yaml").to_str().unwrap().to_string(),
+                label: "UNCLASSIFIED".into(),
+                bindings_sha256: Some([1; 32]),
+                subjects: vec![maknae_graph::identity::SubjectEntry {
+                    uid: 4242,
+                    name: "mallory".into(),
+                    role: "adversary".into(),
+                }],
+            },
+            &vocabulary.persisted,
+            vocabulary.digest,
+            1,
+            maknae_graph::record::ProvenanceKind::Seed,
+        )
+        .unwrap();
+        let k = WrappingKey::new(test_graph_key(&d.0).unwrap().into_bytes());
+        let sealed = maknae_state::envelope::seal(&maknae_graph::format::encode(&old), &k).unwrap();
+        put(&state_dir(&d.0), STORE_FILE, "", 0o600);
+        std::fs::write(state_dir(&d.0).join(STORE_FILE), &sealed).unwrap();
+
+        let result = block_on_run_inner(&d.0);
+
+        if nix::unistd::geteuid().as_raw() != 0 {
+            assert!(matches!(result, Err(RunError::Authz(_))), "{result:?}");
+            return;
+        }
+        let Err(e @ RunError::Authz(msg)) = &result else {
+            panic!("expected Err(RunError::Authz), got {result:?}");
+        };
+        assert_eq!(refusal_exit_code(e), 3);
+        assert!(
+            msg.ends_with(maknae_graph::identity::BINDINGS_NOT_MOVED),
+            "{msg}"
+        );
+        assert_eq!(
+            std::fs::read(state_dir(&d.0).join(STORE_FILE)).unwrap(),
+            sealed
+        );
+        let recs: Vec<AuditRecord> = std::fs::read_to_string(d.0.join("audit.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let last = recs.last().unwrap();
+        assert_eq!(
+            (
+                last.action.as_str(),
+                last.outcome.result.as_str(),
+                last.outcome.reason.as_str()
+            ),
+            ("authz", "deny", maknae_graph::identity::BINDINGS_NOT_MOVED)
+        );
+        assert!(!recs.iter().any(|r| r.action.starts_with("graph.")));
+    }
+
     // ---- #488: the graph boot step over a real audit sink and a real state
     // directory, unprivileged ----
 
@@ -5645,6 +5798,218 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         let stored = maknae_graph::identity::extract(&second.graph).unwrap();
         assert_eq!(stored.layer.source, paths.bindings.to_str().unwrap());
         assert_eq!(stored.layer.subjects, old.subjects);
+    }
+
+    /// Boots `seed` into a fresh store, then boots `inputs` over it.
+    fn boot_over_seed(
+        fx: &GraphFixture,
+        inputs: &GraphInputs,
+        seed: &maknae_graph::identity::IdentityLayer,
+    ) -> (usize, Result<BootedGraph, RunError>) {
+        let seq = Seq::new();
+        let au3_1 = serde_json::Value::Null;
+        let ctx = BootCtx {
+            event: "boot",
+            host: "h",
+            socket: "s",
+            euid: nix::unistd::geteuid().as_raw(),
+            session_id: 9 << 32,
+            seq: &seq,
+            au3_1: &au3_1,
+        };
+        drop(
+            block_on(boot_kernel_graph(
+                &fx.state,
+                key(),
+                &fx.sink,
+                &ctx,
+                &BootInputs {
+                    identity: seed,
+                    ..inputs.boot()
+                },
+            ))
+            .unwrap(),
+        );
+        let seeded = trail(fx).len();
+        let booted = block_on(boot_kernel_graph(
+            &fx.state,
+            key(),
+            &fx.sink,
+            &ctx,
+            &inputs.boot(),
+        ));
+        (seeded, booted)
+    }
+
+    fn explicit(
+        inputs: &GraphInputs,
+        source: &Path,
+        subjects: &[(u32, &str)],
+    ) -> maknae_graph::identity::IdentityLayer {
+        maknae_graph::identity::IdentityLayer {
+            source: source.to_str().unwrap().to_string(),
+            bindings_sha256: Some([1; 32]),
+            subjects: subjects
+                .iter()
+                .map(|(uid, name)| maknae_graph::identity::SubjectEntry {
+                    uid: *uid,
+                    name: (*name).into(),
+                    role: "adversary".into(),
+                })
+                .collect(),
+            ..inputs.identity.clone()
+        }
+    }
+
+    #[test]
+    fn a_keyless_boot_records_each_released_containment() {
+        let fx = graph_fixture("graph_keyless_release");
+        let paths = maknae_authz_basic::PolicyPaths::in_dir(&fx.dir.0);
+        let inputs = bare_inputs(&fx.dir.0);
+        let seed = explicit(&inputs, &paths.bindings, &[(0, "root"), (7, "seven")]);
+        let (seeded, booted) = boot_over_seed(&fx, &inputs, &seed);
+        let booted = booted.unwrap();
+        assert_eq!(booted.released.len(), 2);
+        let after: Vec<(String, String, String, String)> = trail(&fx)[seeded..]
+            .iter()
+            .map(|(r, _)| {
+                (
+                    r.action.clone(),
+                    r.outcome.result.clone(),
+                    r.outcome.posture.clone(),
+                    r.outcome.reason.clone(),
+                )
+            })
+            .collect();
+        let why = "bindings.yaml has no bindings: key, so the enrolled principal is admin and nobody else holds a role";
+        assert_eq!(
+            after[..3],
+            [
+                (
+                    "graph.checkpoint".to_string(),
+                    "permit".to_string(),
+                    "authorized".to_string(),
+                    "verified".to_string()
+                ),
+                (
+                    "graph.identity".to_string(),
+                    "permit".to_string(),
+                    "authorized".to_string(),
+                    format!("uid 0 ('root') is no longer contained: {why}")
+                ),
+                (
+                    "graph.identity".to_string(),
+                    "permit".to_string(),
+                    "authorized".to_string(),
+                    format!("uid 7 ('seven') is no longer contained: {why}")
+                ),
+            ]
+        );
+        assert_eq!(after[3].0, "graph.transition");
+        assert_eq!(after.len(), 5);
+        let stored = maknae_graph::identity::extract(&booted.graph).unwrap();
+        assert!(stored.layer.subjects.is_empty());
+    }
+
+    #[test]
+    fn a_boot_that_releases_nothing_writes_no_identity_record() {
+        let fx = graph_fixture("graph_no_release");
+        let inputs = bare_inputs(&fx.dir.0);
+        boot_graph(&fx, key()).unwrap();
+        boot_graph(&fx, key()).unwrap();
+        assert!(!trail(&fx).iter().any(|(r, _)| r.action == "graph.identity"));
+        let paths = maknae_authz_basic::PolicyPaths::in_dir(&fx.dir.0);
+        let fx = graph_fixture("graph_no_release_bound");
+        let bound = maknae_graph::identity::IdentityLayer {
+            subjects: vec![maknae_graph::identity::SubjectEntry {
+                uid: 7,
+                name: "seven".into(),
+                role: "user".into(),
+            }],
+            ..explicit(&inputs, &paths.bindings, &[])
+        };
+        let (_, booted) = boot_over_seed(&fx, &inputs, &bound);
+        assert!(booted.unwrap().released.is_empty());
+        assert!(!trail(&fx).iter().any(|(r, _)| r.action == "graph.identity"));
+    }
+
+    #[test]
+    fn an_upgrade_without_the_pasted_block_exits_3() {
+        let fx = graph_fixture("graph_not_moved");
+        let paths = maknae_authz_basic::PolicyPaths::in_dir(&fx.dir.0);
+        let inputs = bare_inputs(&fx.dir.0);
+        let seed = explicit(&inputs, &paths.authz, &[(0, "root")]);
+        let store = || std::fs::read(fx.state.join(STORE_FILE)).unwrap();
+        let (seeded, booted) = boot_over_seed(&fx, &inputs, &seed);
+        let Err(e) = booted else {
+            panic!("the upgrade without the block booted");
+        };
+        assert_eq!(refusal_exit_code(&e), 3);
+        assert!(
+            matches!(&e, RunError::Authz(m) if m == maknae_graph::identity::BINDINGS_NOT_MOVED),
+            "{e:?}"
+        );
+        assert_eq!(trail(&fx).len(), seeded, "nothing recorded");
+        let before = store();
+        let pasted = maknae_graph::identity::IdentityLayer {
+            source: inputs.identity.source.clone(),
+            ..seed.clone()
+        };
+        let booted = block_on(boot_kernel_graph(
+            &fx.state,
+            key(),
+            &fx.sink,
+            &BootCtx {
+                event: "boot",
+                host: "h",
+                socket: "s",
+                euid: nix::unistd::geteuid().as_raw(),
+                session_id: 9 << 32,
+                seq: &Seq::new(),
+                au3_1: &serde_json::Value::Null,
+            },
+            &BootInputs {
+                identity: &pasted,
+                ..inputs.boot()
+            },
+        ))
+        .unwrap();
+        assert!(booted.released.is_empty());
+        assert_ne!(store(), before);
+        let stored = maknae_graph::identity::extract(&booted.graph).unwrap();
+        assert_eq!(stored.layer.subjects, seed.subjects, "still contained");
+        assert!(!trail(&fx).iter().any(|(r, _)| r.action == "graph.identity"));
+    }
+
+    #[test]
+    fn a_missing_bindings_file_over_explicit_bindings_exits_3() {
+        let fx = graph_fixture("graph_bindings_missing");
+        let paths = maknae_authz_basic::PolicyPaths::in_dir(&fx.dir.0);
+        let source = maknae_authz_basic::PolicySource::from_parts(
+            maknae_config::parse_authz("schema_version: 1\n").unwrap(),
+            maknae_config::Bindings::missing(),
+            Default::default(),
+            maknae_config::Principal {
+                name: "op".into(),
+                uid: 1000,
+            },
+            paths.clone(),
+        )
+        .unwrap();
+        let inputs = GraphInputs::new(&source, "UNCLASSIFIED").unwrap();
+        assert!(inputs.bindings_missing);
+        assert_eq!(inputs.moved_from, paths.authz.to_str().unwrap());
+        let seed = explicit(&inputs, &paths.bindings, &[]);
+        let (seeded, booted) = boot_over_seed(&fx, &inputs, &seed);
+        let Err(e) = booted else {
+            panic!("a missing file over explicit bindings booted");
+        };
+        assert_eq!(refusal_exit_code(&e), 3);
+        assert!(
+            matches!(&e, RunError::Authz(m) if m == maknae_graph::identity::BINDINGS_MISSING),
+            "{e:?}"
+        );
+        assert_eq!(trail(&fx).len(), seeded);
     }
 
     #[test]
@@ -6715,6 +7080,7 @@ mod reload_tests {
         dir: PathBuf,
         reloader: Arc<Reloader<HermeticAuthorizer, maknae_audit_append::AuditSink>>,
         status: KernelGraphStatus,
+        booted_released: usize,
         _guard: Guard,
     }
 
@@ -6805,6 +7171,19 @@ mod reload_tests {
         bindings: Option<&str>,
         load_gate: Option<std::sync::mpsc::Receiver<()>>,
     ) -> Fx {
+        fixture_seeded(tag, authz, bindings, load_gate, None).await
+    }
+
+    type Seed = fn(&maknae_graph::identity::IdentityLayer) -> maknae_graph::identity::IdentityLayer;
+
+    /// `seed` first boots the store with the layer it returns for the file's own.
+    async fn fixture_seeded(
+        tag: &str,
+        authz: &str,
+        bindings: Option<&str>,
+        load_gate: Option<std::sync::mpsc::Receiver<()>>,
+        seed: Option<Seed>,
+    ) -> Fx {
         let raw = std::env::temp_dir().join(format!("maknae_reload_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&raw);
         std::fs::create_dir_all(raw.join("state")).unwrap();
@@ -6835,23 +7214,42 @@ mod reload_tests {
         let seq = Seq::new();
         let au3_1 = serde_json::Value::Null;
         let euid = nix::unistd::geteuid().as_raw();
+        let ctx = BootCtx {
+            event: "boot",
+            host: "h",
+            socket: "s",
+            euid,
+            session_id: 9 << 32,
+            seq: &seq,
+            au3_1: &au3_1,
+        };
+        if let Some(seed) = seed {
+            let seeded = seed(&inputs.identity);
+            drop(
+                boot_kernel_graph(
+                    &dir.join("state"),
+                    maknae_vault::graph_key_from_bytes(&[0x5a; 32]),
+                    &sink,
+                    &ctx,
+                    &BootInputs {
+                        identity: &seeded,
+                        ..inputs.boot()
+                    },
+                )
+                .await
+                .unwrap(),
+            );
+        }
         let booted = boot_kernel_graph(
             &dir.join("state"),
             maknae_vault::graph_key_from_bytes(&[0x5a; 32]),
             &sink,
-            &BootCtx {
-                event: "boot",
-                host: "h",
-                socket: "s",
-                euid,
-                session_id: 9 << 32,
-                seq: &seq,
-                au3_1: &au3_1,
-            },
+            &ctx,
             &inputs.boot(),
         )
         .await
         .unwrap();
+        let booted_released = booted.released.len();
         let baseline = HermeticAuthorizer::new_over_graph(
             paths,
             principal(),
@@ -6888,6 +7286,7 @@ mod reload_tests {
             dir,
             reloader,
             status,
+            booted_released,
         }
     }
 
@@ -6980,6 +7379,173 @@ mod reload_tests {
         assert!(recs.iter().all(|r| r.session_id == recs[0].session_id));
         let seqs: Vec<u64> = recs.iter().map(|r| r.seq).collect();
         assert_eq!(seqs, [1, 2, 3, 4]);
+    }
+
+    const GHOST: &str = "no-such-user-maknae-496c";
+    const GHOST_ADVERSARY: &str =
+        "schema_version: 1\nbindings:\n  adversary: [\"no-such-user-maknae-496c\"]\n";
+
+    fn ghost_contained(
+        file: &maknae_graph::identity::IdentityLayer,
+    ) -> maknae_graph::identity::IdentityLayer {
+        let mut l = file.clone();
+        l.subjects.push(maknae_graph::identity::SubjectEntry {
+            uid: 4242,
+            name: GHOST.into(),
+            role: "adversary".into(),
+        });
+        l
+    }
+
+    fn whoami_as(fx: &Fx, uid: u32) -> (maknae_security::Verdict, Option<&'static str>) {
+        fx.reloader
+            .authorizer
+            .decide_reporting_role(&crate::handler::build_authz_request(
+                &Verb::Whoami,
+                uid,
+                None,
+                maknae_security::Lane::Local,
+                None,
+            ))
+    }
+
+    fn identity_records(recs: &[AuditRecord]) -> Vec<(String, String, String)> {
+        recs.iter()
+            .filter(|r| r.action == "graph.identity")
+            .map(|r| {
+                (
+                    r.outcome.result.clone(),
+                    r.outcome.posture.clone(),
+                    r.outcome.reason.clone(),
+                )
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_contained_name_that_stops_resolving_is_carried_through_boot_and_reload() {
+        let fx = fixture_seeded(
+            "carried",
+            AUTHZ,
+            Some(GHOST_ADVERSARY),
+            None,
+            Some(ghost_contained),
+        )
+        .await;
+        assert_eq!(fx.booted_released, 0);
+        assert_eq!(
+            fx.status.revision(),
+            1,
+            "the carried layer is the stored one"
+        );
+        assert_eq!(whoami_as(&fx, 4242).1, Some("adversary"));
+        assert_eq!(
+            fx.baseline().snapshot().identity_problems().as_ref(),
+            [maknae_authz_basic::IdentityProblem::CarriedForward {
+                uid: 4242,
+                name: GHOST.into(),
+                overrides: vec![],
+            }]
+        );
+        let before = fx.store_bytes();
+        let applied = bounded(fx.reloader.run()).await.unwrap();
+        assert!(!applied.persisted);
+        assert_eq!(fx.store_bytes(), before);
+        assert_eq!(whoami_as(&fx, 4242).1, Some("adversary"));
+        assert!(identity_records(&fx.reload_records()).is_empty());
+
+        fx.write_bindings("schema_version: 1\nbindings:\n  admin: [\"root\"]\n");
+        bounded(fx.reloader.run()).await.unwrap();
+        assert_eq!(
+            whoami_as(&fx, 4242).1,
+            None,
+            "removing the name releases it"
+        );
+        let recs = fx.reload_records();
+        assert_eq!(
+            identity_records(&recs),
+            [(
+                "permit".to_string(),
+                "authorized".to_string(),
+                format!(
+                    "uid 4242 ('{GHOST}') is no longer contained: its name is no longer listed under adversary"
+                )
+            )]
+        );
+        assert_eq!(recs.last().unwrap().action, "graph.identity");
+        assert_eq!(recs[recs.len() - 2].action, "graph.reload");
+    }
+
+    #[tokio::test]
+    async fn removing_bindings_yaml_over_explicit_bindings_is_a_refused_reload() {
+        let fx = fixture("rm_bindings", AUTHZ, Some(ROOT_ADVERSARY)).await;
+        let before = fx.store_bytes();
+        std::fs::remove_file(fx.bindings()).unwrap();
+        let refused = bounded(fx.reloader.run()).await.unwrap_err();
+        assert_eq!(
+            refused,
+            crate::reload::Refusal::Load(maknae_graph::identity::BINDINGS_MISSING.into())
+        );
+        assert_eq!(fx.store_bytes(), before);
+        assert_eq!(whoami_as(&fx, 0).1, Some("adversary"));
+        let recs = fx.reload_records();
+        let last = recs.last().unwrap();
+        assert_eq!(
+            (
+                last.action.as_str(),
+                last.outcome.result.as_str(),
+                last.outcome.reason.clone()
+            ),
+            (
+                "graph.reload",
+                "deny",
+                format!(
+                    "reload refused: policy load: {}",
+                    maknae_graph::identity::BINDINGS_MISSING
+                )
+            )
+        );
+        assert!(identity_records(&recs).is_empty());
+        fx.write_bindings("schema_version: 1\n");
+        let applied = bounded(fx.reloader.run()).await.unwrap();
+        assert!(applied.persisted, "root's keyless file applies");
+    }
+
+    #[tokio::test]
+    async fn a_keyless_reload_records_each_released_containment() {
+        let fx = fixture("keyless_release", AUTHZ, Some(ROOT_ADVERSARY)).await;
+        assert_eq!(whoami_as(&fx, 0).1, Some("adversary"));
+        fx.write_bindings("schema_version: 1\n");
+        bounded(fx.reloader.run()).await.unwrap();
+        assert_ne!(whoami_as(&fx, 0).1, Some("adversary"));
+        let recs = fx.reload_records();
+        let actions: Vec<&str> = recs.iter().map(|r| r.action.as_str()).collect();
+        assert_eq!(
+            actions,
+            [
+                "graph.reload",
+                "graph.transition",
+                "graph.checkpoint",
+                "graph.reload",
+                "graph.identity"
+            ]
+        );
+        assert_eq!(
+            identity_records(&recs),
+            [(
+                "permit".to_string(),
+                "authorized".to_string(),
+                "uid 0 ('root') is no longer contained: bindings.yaml has no bindings: key, so the enrolled principal is admin and nobody else holds a role".to_string()
+            )]
+        );
+        assert_eq!(recs[4].session_id, recs[3].session_id);
+        assert_eq!(recs[4].seq, recs[3].seq + 1);
+        bounded(fx.reloader.run()).await.unwrap();
+        assert_eq!(
+            identity_records(&fx.reload_records()).len(),
+            1,
+            "an unchanged reload releases nothing"
+        );
     }
 
     #[tokio::test]
