@@ -2087,6 +2087,7 @@ mod tests {
         let p = dir.join("authz.yaml");
         std::fs::write(&p, SHIPPED_DEFAULT).unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
+        crate::tests::test_owner::hand_to_nobody_when_root(&[&dir, &p]);
 
         let relaxed = maknae_io::TargetRequired {
             owner: None,

@@ -93,6 +93,9 @@ pub enum ConfigError {
     /// `config.d/` member alike. The subject the loop runs as must not be able to
     /// authorize a destination; a source it could have written is refused at boot.
     SectionNotRootOwned { section: String, path: String },
+    /// A `maknae.yaml` or `config.d/` source -- or a directory that selects
+    /// among them -- is not root-owned or is group/other-writable (#490).
+    SourceNotRootOwned { path: String },
     /// The `transport` section is present but a field is malformed or out of
     /// its fail-closed range (Stage-3a task-2).
     InvalidTransport(String),
@@ -192,6 +195,9 @@ impl std::fmt::Display for ConfigError {
             ConfigError::SectionNotRootOwned { section, path } => {
                 write!(f, "section '{section}' must come from a root-owned, non-group/other-writable source; {path} is not")
             }
+            ConfigError::SourceNotRootOwned { path } => {
+                write!(f, "{path}: every maknae.yaml and config.d source must be owned by root and not group- or world-writable")
+            }
             ConfigError::InvalidTransport(reason) => {
                 write!(f, "invalid transport config: {reason}")
             }
@@ -269,6 +275,13 @@ mod tests {
                 && c.contains("/x/config.d/10.yaml")
                 && c.contains("root-owned"),
             "{c}"
+        );
+        assert_eq!(
+            ConfigError::SourceNotRootOwned {
+                path: "config.d/10.yaml".into()
+            }
+            .to_string(),
+            "config.d/10.yaml: every maknae.yaml and config.d source must be owned by root and not group- or world-writable"
         );
     }
 

@@ -51,9 +51,9 @@ mod user_providers;
 mod user_providers_io;
 mod value;
 
+pub use loader::{load_config, load_config_root_owned, load_config_rooted};
 #[cfg(all(unix, feature = "hermetic-test-seam"))]
-pub use loader::load_config_rooted_with_requirement;
-pub use loader::{load_config, load_config_rooted};
+pub use loader::{load_config_root_owned_with_requirement, load_config_rooted_with_requirement};
 
 pub use audit_cfg::{audit_from_section, AuditConfig, AUDIT_SECTION};
 #[cfg(all(unix, feature = "hermetic-test-seam"))]
@@ -242,6 +242,20 @@ fn load_required_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    pub(crate) mod test_owner {
+        /// Under root a fresh fixture is root-owned and passes an owner-0 door, so
+        /// the refusal under test is exercised by handing the fixture to `nobody`.
+        pub(crate) fn hand_to_nobody_when_root(paths: &[&std::path::Path]) {
+            use std::os::unix::fs::MetadataExt;
+            for p in paths {
+                if std::fs::metadata(p).unwrap().uid() == 0 {
+                    std::os::unix::fs::chown(p, Some(65534), Some(65534)).unwrap();
+                }
+            }
+        }
+    }
 
     #[test]
     fn dup_key_rejected_not_lastwin() {
@@ -445,9 +459,11 @@ mod tests {
     #[test]
     fn load_root_file_refuses_non_root_owned_artifact() {
         use std::os::unix::fs::PermissionsExt;
-        let path = std::env::temp_dir().join("maknae_config_nonroot.yaml");
+        let path =
+            std::env::temp_dir().join(format!("maknae_config_nonroot_{}.yaml", std::process::id()));
         std::fs::write(&path, "x: 1\n").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        crate::tests::test_owner::hand_to_nobody_when_root(&[&path]);
         let got = load_root_file(&path);
         let _ = std::fs::remove_file(&path);
         assert!(matches!(got, Err(ConfigError::Io(message)) if message.contains("require 0")));
