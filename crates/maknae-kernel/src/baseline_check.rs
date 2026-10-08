@@ -97,11 +97,9 @@ pub fn validate_file(
     validate(doc, mode, config_dir, env)
 }
 
-/// Today's boot order and exit codes: the document, transport, egress and audit
-/// sections (1, before the sink opens); the offload gate (4); a present principal
-/// and what `config.d` shadowed of it (3); the egress bounds, the egress account
-/// and the root vault keys, shadowed ones included (1); an absent principal (3);
-/// the vault block (1); at accept, the readers.
+/// Today's boot order and exit codes: sections (1, pre-sink); offload (4); a present
+/// principal, shadowed ones included (3); egress bounds, egress account, root vault
+/// keys (1); an absent principal (3); the vault block (1); at accept, the readers.
 pub fn validate(
     doc: Document,
     mode: Mode,

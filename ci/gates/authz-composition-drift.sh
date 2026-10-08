@@ -191,7 +191,8 @@ if run:
             fail("run.rs: the boot composition evidence record's reason must carry '; system: {..}; ceiling: {..}' -- the values the operand enforces")
     if len(evidence) != 1:
         fail(f"run.rs: expected exactly ONE boot composition evidence record (make_record with \"boot\", \"authz\", \"permit\" and an 'authorization composition: ' reason), found {len(evidence)}")
-    if not re.search(r"\bsink\s*\.\s*emit_within\s*\(\s*&composition_rec\s*,\s*[^)\s]", run):
+    emit_code = re.sub(r"//[^\n]*", "", re.sub(r"/\*.*?\*/", "", run, flags=re.S))
+    if not re.search(r"\bsink\s*\.\s*emit_within\s*\(\s*&composition_rec\s*,\s*[^)\s]", emit_code):
         fail("run.rs: the boot composition evidence record is constructed but never EMITTED within a bound (no `sink.emit_within(&composition_rec, <bound>)`)")
 
 # 6. The constructors are called only where they are defined.

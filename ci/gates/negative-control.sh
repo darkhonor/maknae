@@ -1906,7 +1906,7 @@ fi
 # removing it. One minimal fixture, at least one corruption per `fail(` CALL
 # SITE the gate has, and two clean accepts. DERIVED, not counted by hand (round
 # 4 found the hand count wrong twice): the gate has 21 `fail(` sites; the
-# 30 probes below map onto every one of them by their `why` substring
+# 31 probes below map onto every one of them by their `why` substring
 # (a probe's `why` is a literal substring of exactly the message it targets),
 # and the two parameterized sites -- `missing <file>` and `missing <base>/` --
 # are probed once per parameter value (3 files, 2 bases). A probe whose `why`
@@ -2017,6 +2017,8 @@ composition_reject "evidence-emit-removed" "constructed but never EMITTED" \
   'p=root/"crates/maknae-kernel/src/run.rs"; p.write_text(p.read_text().replace("    if let Err(e) = sink.emit_within(&composition_rec, AUDIT_APPEND_TIMEOUT).await { eprintln!(\"{e}\"); }\n", ""))'
 composition_reject "evidence-emit-unbounded" "never EMITTED within a bound" \
   'p=root/"crates/maknae-kernel/src/run.rs"; p.write_text(p.read_text().replace("sink.emit_within(&composition_rec, AUDIT_APPEND_TIMEOUT)", "sink.emit(&composition_rec)"))'
+composition_reject "evidence-emit-commented-out" "never EMITTED within a bound" \
+  'p=root/"crates/maknae-kernel/src/run.rs"; p.write_text(p.read_text().replace("    if let Err(e) = sink.emit_within(&composition_rec, AUDIT_APPEND_TIMEOUT).await { eprintln!(\"{e}\"); }\n", "    // sink.emit_within(&composition_rec, AUDIT_APPEND_TIMEOUT).await;\n"))'
 composition_reject "run-file-missing" "missing crates/maknae-kernel/src/run.rs" \
   '(root/"crates/maknae-kernel/src/run.rs").unlink()'
 composition_reject "basic-lib-missing" "missing crates/maknae-authz-basic/src/lib.rs" \

@@ -192,18 +192,14 @@ The configuration can carry policy, so it must not be world-accessible. On Unix,
 path involved is checked: **no world/other permission bits at all** (`mode & 0o007 == 0`
 — no world read, write, *or* execute).
 
-For a file carrying no root-required section the **only** check is
-`mode & 0o007 == 0` — *any* mode with no world/other bit is valid (`600`, `640`, `660`,
-`440`, `750`, `770`, `700`, …); the modes below are **recommended examples**, not an
-exhaustive allowlist.
-
-**`maknaed` holds every source to more.** `maknae.yaml`, every `config.d/` member (a shadowed one included), and `<config-dir>` and `config.d/` themselves must additionally be **root-owned** and **not group-writable** (`mode & 0o022 == 0`), so **`660` and `770` are refused** even though they pass the universal rule — `loader.rs`'s `ROOT_ARTIFACT` versus `CONFIG_ARTIFACT`. The refusal is `SourceNotRootOwned`, naming the path that failed: `<path> must be owned by root and not group- or world-writable, as must every maknae.yaml and config.d source and the directories that hold them`. See §9.3 for the worked example and the full table.
+**`maknaed` holds every source to more.** `maknae.yaml`, every `config.d/` member (a shadowed one included), and `<config-dir>` and `config.d/` themselves must be **root-owned** and **not writable by group or other** (`mode & 0o022 == 0`, on top of the no-world-bits rule), so **`660` and `770` are refused** — `loader.rs`'s `ROOT_ARTIFACT`. Valid examples: `640`, `600`, `440` for a file, `750`, `700` for a directory. The refusal is `SourceNotRootOwned`, naming the path that failed: `<path> must be owned by root and not group- or world-writable, as must every maknae.yaml and config.d source and the directories that hold them`. See §9.3 for the worked example and the full table.
 
 | Path | Recommended modes | Rejected |
 |---|---|---|
-| Config files (`maknae.yaml`, `config.d/*.yaml`, `~/.maknae/providers.yaml`) | `640`, `660`, `600` (`640` or `600`, root-owned, for the file carrying `providers`) | anything with a world/other bit (e.g. `644`) — **except `egress-bounds.yaml`, a root artifact that is `0644` by design (§6.1.3)** |
-| `<config-dir>` | `750`, owned by root (`root:_maknae 0750` as packaged) | not owned by root, or group- or other-writable (e.g. `770`, `775`), because `authz.yaml` and `bindings.yaml` are read through it (§2.3) |
-| `config.d/` | `750`, `770`, `700` | anything with a world/other bit (e.g. `775`, world-writable `0o772`) |
+| `maknae.yaml`, `config.d/*.yaml` | `640`, `600`, root-owned | not owned by root, or group- or other-writable (e.g. `660`), or any world/other bit (e.g. `644`) |
+| `~/.maknae/providers.yaml` | `600`, `640`, the user's own | anything with a world/other bit — **`egress-bounds.yaml` is a root artifact that is `0644` by design (§6.1.3)** |
+| `<config-dir>` | `750`, owned by root (`root:_maknae 0750` as packaged) | not owned by root, or group- or other-writable (e.g. `770`, `775`) |
+| `config.d/` | `750`, `700`, owned by root | not owned by root, or group- or other-writable (e.g. `770`, `775`) |
 
 Additional file rules:
 
@@ -214,8 +210,8 @@ Additional file rules:
   *contents* (the injection surface), not to the operator-chosen root path.
 - A config file that is **not a regular file** (FIFO, socket, device, directory) is
   refused *before* it is opened.
-- The group is a **trusted boundary** (group-readable/writable `660`/`770` are valid) —
-  only *world* access is refused. **Not covered by this rule at all:** `egress-bounds.yaml`
+- The group may **read** the config tree; it may not write it, and *world* access is
+  refused. **Not covered by this rule at all:** `egress-bounds.yaml`
   is read through the root-artifact requirement (root-owned, not group- or other-
   writable — no world-read rule), is read by two accounts, and is `0644` by design —
   see §6.1.3 before "fixing" its mode.
@@ -931,9 +927,9 @@ providers:
 
 #### Permissions — stricter than §2.2 for this section
 
-§2.2's universal rule is "no world/other bits" (`mode & 0o007 == 0`), which admits `660` and `770`. **A root-required section is held to more than that.** `providers` is one, so the file that contributes it **and** `<config-dir>` **and** `config.d/` must each be **root-owned** and **not writable by group or other** (`mode & 0o022 == 0`) — `loader.rs`'s `ROOT_ARTIFACT` (`owner: Some(0)`, `mode_mask: 0o022`) rather than `CONFIG_ARTIFACT` (`owner: None`, `mode_mask: 0o007`).
+As §2.2 states for every section, `maknae.yaml`, every `config.d/` member **and** `<config-dir>` **and** `config.d/` must each be **root-owned** and **not writable by group or other** (`mode & 0o022 == 0`) — `loader.rs`'s `ROOT_ARTIFACT` (`owner: Some(0)`, `mode_mask: 0o022`). The file carrying `providers` is held to exactly that rule.
 
-| Path | Valid with a `providers` section | Refused |
+| Path | Valid | Refused |
 |---|---|---|
 | The file carrying `providers` | `640`, `600`, `440` — root-owned | **`660`** (group-writable), any world bit, any non-root owner |
 | `<config-dir>`, `config.d/` | `750`, `700` — root-owned | **`770`** (group-writable), any world bit, any non-root owner |
