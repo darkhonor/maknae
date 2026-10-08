@@ -34,25 +34,54 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-fn open_audit_file(path: &Path) -> Result<File, AuditError> {
-    maknae_io::open_audit_append(
+#[derive(Clone, Copy)]
+enum Trail {
+    CreateIfMissing,
+    Existing,
+    Prepared,
+}
+
+fn open_audit_file(path: &Path, trail: Trail) -> Result<File, AuditError> {
+    open_trail_under(
         path,
         // Preserve the configured audit parent's OS DAC authority; the opened
         // leaf must satisfy the stronger artifact requirements below.
         &maknae_io::AnchorRequired::OS_DAC,
-        &maknae_io::TargetRequired {
-            owner: Some(nix::unistd::geteuid().as_raw()),
-            mode_mask: Some(0o037),
-            nlink_exactly_one: false,
-            regular_file: true,
-            max_bytes: None,
-        },
-        maknae_io::Mode(0o640),
+        trail,
     )
     .map_err(|e| AuditError::OpenPrimary {
         path: path.to_path_buf(),
         detail: e.to_string(),
     })
+}
+
+fn open_trail_under(
+    path: &Path,
+    parent: &maknae_io::AnchorRequired,
+    trail: Trail,
+) -> std::io::Result<File> {
+    let target = maknae_io::TargetRequired {
+        owner: Some(nix::unistd::geteuid().as_raw()),
+        mode_mask: Some(0o037),
+        nlink_exactly_one: false,
+        regular_file: true,
+        max_bytes: None,
+    };
+    match trail {
+        Trail::CreateIfMissing => {
+            maknae_io::open_audit_append(path, parent, &target, maknae_io::Mode(0o640))
+        }
+        Trail::Existing => maknae_io::open_existing_audit_append(path, parent, &target, false),
+        Trail::Prepared => maknae_io::open_existing_audit_append(
+            path,
+            parent,
+            &maknae_io::TargetRequired {
+                nlink_exactly_one: true,
+                ..target
+            },
+            true,
+        ),
+    }
 }
 
 /// The append-only JSONL audit sink: single-writer, off-runtime blocking I/O.
@@ -110,13 +139,41 @@ impl AuditSink {
         cfg: &maknae_config::AuditConfig,
         journal: &Path,
     ) -> Result<Self, AuditError> {
-        let file = open_audit_file(&cfg.jsonl_path)?;
-        Ok(AuditSink {
+        Ok(Self::from_file(
+            cfg,
+            journal,
+            open_audit_file(&cfg.jsonl_path, Trail::CreateIfMissing)?,
+        ))
+    }
+
+    /// As [`open`](Self::open), for a trail that must already exist; never creates one.
+    pub fn open_existing(cfg: &maknae_config::AuditConfig) -> Result<Self, AuditError> {
+        let file = open_audit_file(&cfg.jsonl_path, Trail::Existing)?;
+        Ok(Self::from_file(
+            cfg,
+            Path::new(DEFAULT_JOURNAL_SOCKET),
+            file,
+        ))
+    }
+
+    /// As [`open_existing`](Self::open_existing), for a trail root prepared: a single
+    /// link carrying the append-only flag only root can clear. Never creates one.
+    pub fn open_prepared(cfg: &maknae_config::AuditConfig) -> Result<Self, AuditError> {
+        let file = open_audit_file(&cfg.jsonl_path, Trail::Prepared)?;
+        Ok(Self::from_file(
+            cfg,
+            Path::new(DEFAULT_JOURNAL_SOCKET),
+            file,
+        ))
+    }
+
+    fn from_file(cfg: &maknae_config::AuditConfig, journal: &Path, file: File) -> Self {
+        AuditSink {
             primary: Arc::new(Mutex::new(Primary::new(file))),
             breaker: Arc::new(Mutex::new(BlockingBreaker::default())),
             path: cfg.jsonl_path.clone(),
             mirror: Mirror::open(journal),
-        })
+        }
     }
 
     /// Canonicalize `rec`, append it as one JSONL line, and durably flush
@@ -609,6 +666,70 @@ mod tests {
             std::path::Path::new("/nonexistent/maknae-test-no-journal.sock")
         )
         .is_err());
+    }
+
+    fn audit_cfg(path: &Path) -> maknae_config::AuditConfig {
+        maknae_config::AuditConfig {
+            readers: Vec::new(),
+            jsonl_path: path.to_path_buf(),
+            siem: None,
+            au3_1: serde_json::json!({}),
+        }
+    }
+
+    fn seed_trail(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, b"").unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640)).unwrap();
+    }
+
+    fn open_detail(result: Result<AuditSink, AuditError>) -> String {
+        match result {
+            Err(AuditError::OpenPrimary { detail, .. }) => detail,
+            Err(other) => panic!("expected OpenPrimary, got {other}"),
+            Ok(_) => panic!("expected OpenPrimary, the trail opened"),
+        }
+    }
+
+    #[test]
+    fn open_existing_refuses_a_missing_trail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        open_detail(AuditSink::open_existing(&audit_cfg(&path)));
+        open_detail(AuditSink::open_prepared(&audit_cfg(&path)));
+        assert!(!path.exists(), "neither open creates the trail");
+    }
+
+    #[tokio::test]
+    async fn open_existing_appends_to_an_existing_trail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        seed_trail(&path);
+        let sink = AuditSink::open_existing(&audit_cfg(&path)).unwrap();
+        sink.append(&sample_record()).await.unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(contents.lines().count(), 1);
+        assert!(contents.contains("connection.accept"));
+    }
+
+    #[test]
+    fn open_prepared_refuses_a_trail_without_the_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        seed_trail(&path);
+        let detail = open_detail(AuditSink::open_prepared(&audit_cfg(&path)));
+        assert!(detail.contains("not append-only"), "{detail}");
+    }
+
+    #[test]
+    fn open_prepared_refuses_a_hard_linked_trail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        seed_trail(&path);
+        std::fs::hard_link(&path, dir.path().join("other")).unwrap();
+        let detail = open_detail(AuditSink::open_prepared(&audit_cfg(&path)));
+        assert!(detail.contains("hard-linked"), "{detail}");
+        assert!(AuditSink::open_existing(&audit_cfg(&path)).is_ok());
     }
 
     // ---- fail-closed audit-file integrity (O_NOFOLLOW + fstat) --------------

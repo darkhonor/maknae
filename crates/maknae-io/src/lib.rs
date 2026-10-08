@@ -63,7 +63,7 @@ pub use anchor::{
     open_anchor, open_anchor_resolved, read_absolute, resolve_dir, Anchor, AnchorLock, Entry, Kind,
     Mode, Outcome, Strategy, StrategyPref,
 };
-pub use audit_append::open_audit_append;
+pub use audit_append::{open_audit_append, open_existing_audit_append};
 pub use checks::{AnchorRequired, DescendantRequired, TargetRequired};
 pub use delegated::{
     open_directory_for_delegation, open_path_for_delegation, recv_delegated, refuse_access_bearing,

@@ -85,14 +85,21 @@ class PlatformSelection(unittest.TestCase):
     def test_maknae_sys_platform_file_is_excluded_only_where_inactive(self):
         linux, darwin = self.exclusion("Linux"), self.exclusion("Darwin")
         macos_file = [m for m in SYS_INVENTORY if m.startswith("crates/maknae-sys/src/macos.rs:")]
-        portable = [m for m in SYS_INVENTORY if m.startswith("crates/maknae-sys/src/reply.rs:")]
+        linux_file = [m for m in SYS_INVENTORY if m.startswith("crates/maknae-sys/src/linux.rs:")]
+        portable = [m for m in SYS_INVENTORY
+                    if m.startswith(("crates/maknae-sys/src/reply.rs:", "crates/maknae-sys/src/flags.rs:"))]
         self.assertTrue(macos_file)
+        self.assertTrue(linux_file)
         self.assertTrue(portable)
-        self.assertEqual(len(macos_file) + len(portable), len(SYS_INVENTORY))
+        self.assertEqual(len(macos_file) + len(linux_file) + len(portable), len(SYS_INVENTORY))
         for mutant in macos_file:
             self.assertRegex(mutant, linux)
             self.assertNotRegex(mutant, darwin)
             self.assertNotRegex(mutant.replace("src/macos.rs:", "src/other.rs:"), linux)
+        for mutant in linux_file:
+            self.assertRegex(mutant, darwin)
+            self.assertNotRegex(mutant, linux)
+            self.assertNotRegex(mutant.replace("src/linux.rs:", "src/other.rs:"), darwin)
         for mutant in portable:
             self.assertNotRegex(mutant, linux)
             self.assertNotRegex(mutant, darwin)

@@ -288,6 +288,9 @@ files = [
   "crates/maknae-agent/src/budget.rs",
   "crates/maknae-sys/src/reply.rs",
   "crates/maknae-sys/src/macos.rs",
+  # #490: whether a prepared audit trail carries the append-only flag; a false "yes" moves the trail to a file the daemon can rewrite.
+  "crates/maknae-sys/src/flags.rs",
+  "crates/maknae-sys/src/linux.rs",
   # The kernel graph's schema and codec (#485): a wrong check loads a forged enforcement state.
   "crates/maknae-graph/src/bytes.rs",
   "crates/maknae-graph/src/format.rs",
@@ -811,6 +814,11 @@ path = "crates/maknae-sys/src/macos.rs"
 env_bound = "target_os:macos"
 why = "the getattrlist FFI call (ADR-0027) compiles only on macOS, so the Linux CI lane has no regions for it. Its floor is enforced where coverage-tiers.sh runs on a macOS host (the opt-in pre-push hook and local runs); no CI lane enforces it. The parser it calls, reply.rs, is plain T1 and CI-enforced"
 
+[[env_bound_override]]
+path = "crates/maknae-sys/src/linux.rs"
+env_bound = "target_os:linux"
+why = "the FS_IOC_GETFLAGS ioctl (ADR-0027) compiles only on Linux, so a macOS coverage run has no regions for it. The Linux CI lane enforces its floor; the flag parsers it feeds, flags.rs, are plain T1 on both platforms"
+
 [[t3]]
 path = "crates/maknae-io/src/testutil.rs"
 why = "test-only helper shared between module test suites (it exists because the gate requires `#[cfg(test)]` to be followed by a line beginning `mod `, which rules out `pub(crate) mod tests`). Report-only rather than [t1] because its production split — skip_or_fail and opted_out — measures 63.64%, below the 95% floor: the opt-out branch is only reachable by mutating MAKNAE_IO_ALLOW_SKIPPED_LANES for the whole process, which is not safe under the parallel harness. The FAIL-CLOSED branch, which is the one that matters, IS controlled by skip_or_fail_panics_when_the_opt_out_is_absent"
@@ -837,7 +845,7 @@ why = "IoError/IoKind enums with Display only (there is no From impl, despite wh
 
 [[t3]]
 path = "crates/maknae-sys/src/lib.rs"
-why = "module declarations and the macOS re-export only; no executable production regions — same treatment as maknae-io/src/lib.rs"
+why = "module declarations and re-exports only; no executable production regions — same treatment as maknae-io/src/lib.rs"
 
 # KNOWN IMPRECISION in the exceptions below, no floor impact.
 #

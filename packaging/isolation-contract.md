@@ -73,7 +73,7 @@ looks like.)*
 | maknae-subject-ctx-mint (priv) | via kernel | forbidden | — |
 | maknae-audit-append (priv) | via kernel | forbidden | — |
 | maknae-io | via kernel, maknae-config, maknae-vault | via maknae-config, maknae-vault | — |
-| maknae-sys | via maknae-io (macOS only) | via maknae-io (macOS only) | — |
+| maknae-sys | via maknae-io | via maknae-io | — |
 | maknae-spif-compile (priv) | — | forbidden | linked |
 | maknae-authz-basic (priv) | via kernel | forbidden | — |
 | maknae-security | via kernel | via maknae-config | — |

@@ -10,7 +10,7 @@ use nix::fcntl::OFlag;
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy)]
 enum AuditOpenKind {
@@ -59,10 +59,56 @@ pub fn open_audit_append(
     target_required: &TargetRequired,
     create_mode: Mode,
 ) -> io::Result<File> {
+    let (parent, absolute) = pin_parent(path, parent_required)?;
+    open_pinned(
+        parent,
+        leaf_name(&absolute)?,
+        &absolute,
+        target_required,
+        Some(create_mode),
+        sync_file,
+    )
+}
+
+/// As [`open_audit_append`], but the file must already exist: a missing name is
+/// `NotFound` and is never created. With `require_append_only`, the opened
+/// descriptor must carry the append-only flag only root can clear.
+pub fn open_existing_audit_append(
+    path: &Path,
+    parent_required: &AnchorRequired,
+    target_required: &TargetRequired,
+    require_append_only: bool,
+) -> io::Result<File> {
+    let (parent, absolute) = pin_parent(path, parent_required)?;
+    let file = open_pinned(
+        parent,
+        leaf_name(&absolute)?,
+        &absolute,
+        target_required,
+        None,
+        sync_file,
+    )?;
+    if require_append_only && !maknae_sys::is_append_only(&file)? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "{} is not append-only; prepare it with chattr +a (Linux) or chflags sappnd (macOS) as root",
+                absolute.display()
+            ),
+        ));
+    }
+    Ok(file)
+}
+
+fn leaf_name(absolute: &Path) -> io::Result<&OsStr> {
+    absolute
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "audit path has no file name"))
+}
+
+fn pin_parent(path: &Path, parent_required: &AnchorRequired) -> io::Result<(File, PathBuf)> {
     let absolute = std::path::absolute(path)?;
-    let name = absolute.file_name().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "audit path has no file name")
-    })?;
+    leaf_name(&absolute)?;
     // A file name was established above, so removing it leaves its absolute parent.
     let parent_path = absolute.with_file_name("");
     let parent = File::from(syscall::open_parent_by_path(&parent_path).map_err(io::Error::from)?);
@@ -74,14 +120,7 @@ pub fn open_audit_append(
         parent_required.mode_mask,
     )
     .map_err(io::Error::other)?;
-    open_pinned(
-        parent,
-        name,
-        &absolute,
-        target_required,
-        create_mode,
-        sync_file,
-    )
+    Ok((parent, absolute))
 }
 
 fn open_pinned(
@@ -89,7 +128,7 @@ fn open_pinned(
     name: &OsStr,
     path: &Path,
     required: &TargetRequired,
-    create_mode: Mode,
+    create_mode: Option<Mode>,
     mut synchronize: impl FnMut(&File) -> io::Result<()>,
 ) -> io::Result<File> {
     open_pinned_with(
@@ -110,13 +149,17 @@ fn open_pinned_with(
     name: &OsStr,
     path: &Path,
     required: &TargetRequired,
-    create_mode: Mode,
+    create_mode: Option<Mode>,
     mut synchronize: impl FnMut(&File) -> io::Result<()>,
     mut open: impl FnMut(&File, &OsStr, Mode, AuditOpenKind) -> io::Result<File>,
 ) -> io::Result<File> {
-    let mut file = match open(&parent, name, create_mode, AuditOpenKind::Existing) {
+    let existing_mode = create_mode.unwrap_or(Mode(0));
+    let mut file = match open(&parent, name, existing_mode, AuditOpenKind::Existing) {
         Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            let Some(create_mode) = create_mode else {
+                return Err(e);
+            };
             match open(&parent, name, create_mode, AuditOpenKind::CreateExclusive) {
                 Ok(file) => file,
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
@@ -267,7 +310,7 @@ mod tests {
             OsStr::new("winner"),
             &path,
             &required(),
-            Mode(0o640),
+            Some(Mode(0o640)),
             sync_file,
             |parent, name, mode, kind| {
                 if matches!(kind, AuditOpenKind::CreateExclusive) {
@@ -298,7 +341,7 @@ mod tests {
             OsStr::new("entry"),
             &path,
             &required(),
-            Mode(0o640),
+            Some(Mode(0o640)),
             sync_file,
             |parent, name, mode, kind| {
                 calls += 1;
@@ -328,7 +371,7 @@ mod tests {
             OsStr::new("entry"),
             &path,
             &required(),
-            Mode(0o640),
+            Some(Mode(0o640)),
             sync_file,
             |parent, name, mode, kind| {
                 calls += 1;
@@ -364,7 +407,7 @@ mod tests {
             std::ffi::OsStr::new("audit.jsonl"),
             &dir.path().join("audit.jsonl"),
             &required(),
-            Mode(0o640),
+            Some(Mode(0o640)),
             |file| {
                 let st = file.metadata()?;
                 seen.push((st.is_dir(), st.ino()));
@@ -397,7 +440,7 @@ mod tests {
             std::ffi::OsStr::new("audit.jsonl"),
             &path.join("audit.jsonl"),
             &required(),
-            Mode(0o640),
+            Some(Mode(0o640)),
             |file| {
                 let st = file.metadata()?;
                 if st.is_dir() {
@@ -426,7 +469,7 @@ mod tests {
                 std::ffi::OsStr::new("audit.jsonl"),
                 &dir.path().join("audit.jsonl"),
                 &required(),
-                Mode(0o640),
+                Some(Mode(0o640)),
                 |file| {
                     calls += 1;
                     sync_file(if calls == fail_on { &fault } else { file })
@@ -443,6 +486,98 @@ mod tests {
                 "later synchronization must not mask a failure"
             );
         }
+    }
+
+    #[test]
+    fn an_existing_open_never_creates() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("audit.jsonl");
+        for require in [false, true] {
+            assert_eq!(
+                open_existing_audit_append(&path, &AnchorRequired::OS_DAC, &required(), require)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::NotFound
+            );
+            assert!(!path.exists());
+        }
+    }
+
+    #[test]
+    fn an_existing_open_of_a_plain_file_succeeds_without_the_flag_requirement() {
+        use std::io::Write;
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("audit.jsonl");
+        seed(&path, b"first\n");
+        let mut file =
+            open_existing_audit_append(&path, &AnchorRequired::OS_DAC, &required(), false).unwrap();
+        file.write_all(b"second\n").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"first\nsecond\n");
+    }
+
+    #[test]
+    fn an_existing_open_holds_the_parent_and_target_requirements() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("audit.jsonl");
+        seed(&path, b"complete\npartial");
+        assert_eq!(
+            open_existing_audit_append(&path, &AnchorRequired::OS_DAC, &required(), false)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        seed(&path, b"complete\n");
+        let parent_required = AnchorRequired {
+            owner: Some(nix::unistd::geteuid().as_raw().wrapping_add(1)),
+            mode_mask: None,
+        };
+        assert!(open_existing_audit_append(&path, &parent_required, &required(), false).is_err());
+        let mut target = required();
+        target.owner = parent_required.owner;
+        assert!(
+            open_existing_audit_append(&path, &AnchorRequired::OS_DAC, &target, false).is_err()
+        );
+        assert_eq!(
+            open_existing_audit_append(Path::new("/"), &AnchorRequired::OS_DAC, &required(), false)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"complete\n");
+    }
+
+    #[test]
+    fn a_prepared_open_of_a_plain_file_is_refused_as_not_append_only() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("audit.jsonl");
+        seed(&path, b"sentinel\n");
+        let e = open_existing_audit_append(&path, &AnchorRequired::OS_DAC, &required(), true)
+            .unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::PermissionDenied);
+        assert!(e.to_string().contains("not append-only"), "{e}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"sentinel\n");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_prepared_open_of_a_uappnd_file_is_refused() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("audit.jsonl");
+        seed(&path, b"sentinel\n");
+        let chflags = |flag: &str| {
+            assert!(std::process::Command::new("chflags")
+                .arg(flag)
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success());
+        };
+        chflags("uappnd");
+        let result = open_existing_audit_append(&path, &AnchorRequired::OS_DAC, &required(), true);
+        chflags("nouappnd");
+        let e = result.unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::PermissionDenied);
+        assert!(e.to_string().contains("not append-only"), "{e}");
     }
 
     #[test]
