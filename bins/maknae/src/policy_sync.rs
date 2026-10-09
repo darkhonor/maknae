@@ -1156,27 +1156,50 @@ mod tests {
             !read("deb/postinst").contains("policy-sync"),
             "the deb postinst never names the sync units"
         );
-        let mut section = "";
-        for l in spec.lines() {
-            let head = l.split_whitespace().next().unwrap_or("");
-            if [
-                "%description",
-                "%prep",
-                "%build",
-                "%install",
-                "%check",
-                "%pretrans",
+        let scriptlet = |h: &str| {
+            [
                 "%pre",
                 "%post",
                 "%preun",
                 "%postun",
+                "%pretrans",
                 "%posttrans",
-                "%files",
-                "%changelog",
+                "%preuntrans",
+                "%postuntrans",
             ]
-            .contains(&head)
+            .contains(&h)
+                || h.starts_with("%trigger")
+                || h.starts_with("%filetrigger")
+                || h.starts_with("%transfiletrigger")
+        };
+        let mut section = "";
+        for l in spec.lines() {
+            let head = l.split_whitespace().next().unwrap_or("");
+            if scriptlet(head)
+                || [
+                    "%description",
+                    "%prep",
+                    "%build",
+                    "%install",
+                    "%check",
+                    "%files",
+                    "%changelog",
+                ]
+                .contains(&head)
             {
                 section = head;
+            }
+            if l.starts_with("%systemd_post ") {
+                assert_eq!(
+                    l, "%systemd_post maknaed.service maknae-egress.service maknae-egress.socket",
+                    "maknae.spec {section}"
+                );
+            }
+            if scriptlet(section) {
+                assert!(
+                    !(l.contains("systemctl") && (l.contains("enable") || l.contains("preset"))),
+                    "maknae.spec {section}: {l}"
+                );
             }
             if !l.contains("policy-sync") {
                 continue;
@@ -1192,7 +1215,9 @@ mod tests {
                 "%preun" => l.starts_with("%systemd_preun "),
                 "%postun" => l.starts_with("%systemd_postun "),
                 _ => false,
-            };
+            } && ![";", "&&", "||", "|", "`", "$("]
+                .iter()
+                .any(|c| l.contains(c));
             assert!(allowed, "maknae.spec {section}: {l}");
         }
         let postinstall = read("macos/scripts/postinstall");
