@@ -100,20 +100,17 @@ pub fn providers_of(v: &Validated) -> Option<ProviderAuthority> {
     crate::provider_choice::provider_authority(v.boot.providers(), v.egress_bounds.as_ref())
 }
 
-/// Installs a validated live baseline: the principal, view and providers in one turn
-/// of the composition, refused whole when in-flight decisions hold the turn past the bound.
-#[cfg(test)]
-pub fn install<B: maknae_authz_basic::Baseline>(
-    pdp: &crate::Composition<B>,
-    v: &Validated,
-    deadline: std::time::Instant,
-) -> Result<(), String> {
-    pdp.install_live_within(LiveValues::of(v), deadline)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn install<B: maknae_authz_basic::Baseline>(
+        pdp: &crate::Composition<B>,
+        v: &Validated,
+        deadline: std::time::Instant,
+    ) -> Result<(), String> {
+        pdp.install_live_within(LiveValues::of(v), deadline)
+    }
 
     fn soon() -> std::time::Instant {
         std::time::Instant::now() + std::time::Duration::from_secs(5)
