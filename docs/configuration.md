@@ -44,15 +44,24 @@ authorization composition — the RBAC baseline, compiled from the store and
 ceiling level in the audit trail, mints its plane credential, binds the client socket
 and **serves**: every request is decided through that composition until a shutdown
 signal, and the process exits with the outcome the accept loop stopped on. A `SIGHUP`
-re-reads `authz.yaml` and `bindings.yaml` together and recompiles the snapshot;
-`maknae.yaml` and `config.d/` are read at start only (runbook, "Reload the
-policy"). A boot that fails any of those
+re-reads `authz.yaml` and `bindings.yaml` together and recompiles the snapshot
+(runbook, "Reload the policy"). A boot that fails any of those
 steps exits non-zero, and a step after the credential mint retires the credential on
 the way out.
 
+What a start runs is the **accepted baseline** (§3.2), not the files as they stand.
+`maknaed` reads `maknae.yaml` and `config.d/`, then the accepted baseline from its
+kernel graph store, and runs the accepted baseline with the files' `vault` and
+`audit` sections in place of its own. Any other difference between the files and
+the accepted baseline is a pending change that waits for `maknae baseline-accept`;
+a restart never applies it. The first start of this version, and the first start of
+a fresh install, takes the files as the accepted baseline with no accept.
+
 - An **empty or `core`-less `maknae.yaml`** boots at the **Public baseline** (§4.1).
-- An **absent config directory or a missing `maknae.yaml`** **fails closed** (exit 1) —
-  a fresh install with no `/etc/maknae` does not come up.
+- An **absent config directory or a missing `maknae.yaml`** **fails closed** (exit 1)
+  when there is no accepted baseline yet — a fresh install with no `/etc/maknae` does
+  not come up. Over an accepted baseline, the start keeps the accepted baseline and
+  records the files as an invalid change (§3.2).
 - **Migration note:** the ceiling is read **only** from `core.handling.ceiling`. A
   `handling` block placed under `lake` (as one might do migrating from an older
   external-lake model) is **ignored** — the instance boots at Public. Put the ceiling
@@ -277,7 +286,7 @@ To contain an id independently of the directory, list it as `- uid: <n>`. On Lin
 > | `core` (own level) | `schema_version`, `deployment_id`, `identity`, `handling` |
 > | `core.handling` | `ceiling`, `accreditation_ref`, `policy` |
 > | `transport` | `socket_path`, `max_connections`, `prompt_max_bytes`, `handshake_timeout_ms`, `read_timeout_ms` |
-> | `audit` | `jsonl_path`, `siem`, `au3_1` |
+> | `audit` | `jsonl_path`, `siem`, `au3_1`, `readers` (§6.3) |
 > | `principal` | `name`, `uid` |
 > | `vault` | `addr`, `approle_mount`, `pki_int_mount`, `deployment_id`, `insecure_plaintext_secret_path`, `user_auth`, `kv_mount`, `user_prefix` (`crates/maknae-vault/src/config.rs`). In the **root** `maknae.yaml`, `kv_mount` and `user_prefix` refuse boot — `vault.kv_mount in the root maknae.yaml is not read by maknaed: set kv_mount in egress-bounds.yaml` (likewise `user_prefix`), shadowed `config.d/` blocks included — because the host's copy lives in `egress-bounds.yaml` (§6.1.3); they belong in each user's `maknae.yaml` (§6.1.2) |
 > | `vault.user_auth` | `type`, `mount` |
@@ -317,6 +326,38 @@ baseline — only when its consumer reads it.
   overlay file can never lower the ingest ceiling.
 - Overrides are **recorded** (available to the caller for auditing which source won
   each section).
+
+### 3.2 The baseline
+
+Everything in `maknae.yaml` and `config.d/` is the **baseline**: every section, `core` included. `maknaed` keeps the accepted baseline in its kernel graph store, one canonical-JSON value per section with a digest over all of them, and compares the files with it at every start, every applied reload, every `maknae baseline-show` and every `maknae baseline-accept`. A start runs the accepted baseline, never the files as they stand.
+
+**The first start takes the files.** On a fresh install, and on the first start of this version over an existing store, there is no accepted baseline yet: the start takes the files as the accepted baseline with no accept, and records it (`graph.baseline`, reason `baseline seeded from maknae.yaml and config.d (no accepted baseline yet)`). A file that does not validate then refuses to start, as it always has: exit 1 with nothing written to the audit trail, or exit 3 for a `principal` defect and exit 4 for an audit offload refusal, each recorded.
+
+**`vault` and `audit` follow the file at start.** The start runs the accepted baseline with the files' `vault` and `audit` sections in their place, and records each that changed (`graph.baseline`, `vault follows maknae.yaml at start`, `audit follows maknae.yaml at start`). That combination is validated as a whole first; if it does not validate, or it moves the audit trail to a file that is not prepared (§6.3), the start runs the accepted baseline unchanged and the files are an invalid change. A reload never applies either section.
+
+**Every other difference is a pending change set.** There is one set per source, and today the only source is the files (`root-file`). The set is the whole difference between the files and the accepted baseline, recomputed every time it is read, so a further edit changes the same set rather than adding another; it is never persisted, and a restart never applies it. It applies only when a granted operator accepts it:
+
+```bash
+maknae baseline-show                 # the changed settings, how they apply, and the set's hash
+maknae baseline-accept <hash>        # the 64-character hash baseline-show printed
+```
+
+`admin.baseline.show` renders each changed setting as `<section>.<path>: <old> -> <new>`, through the same rules as `maknae config-show`: a masked value renders `<value set>`, a missing side `<absent>`, and every change under a withheld setting (`core.handling`, `audit.au3_1`, `lake`, `vault.insecure_plaintext_secret_path`) collapses into one line, `a suppressed setting changed (not disclosed)`. The hash binds the accepted baseline and the proposed one, so an accept names exactly the set that was shown: after any edit, or any other accept, the old hash is refused (`baseline accept refused: stale; run maknae baseline-show`) and nothing changes. The full hash appears only in `maknae baseline-show`'s reply; the audit trail carries its first 12 hex digits, and `maknae status` prints only `baseline: 1 pending (live)`, `(restart)` or `(invalid)`, as of the last start, applied reload or accept. `maknae baseline-show` always reads the files afresh.
+
+**An accept runs the start's checks.** The proposed baseline is validated as a start validates it, and in addition each account in `audit.readers` is resolved in the account database (§6.3), a changed `transport.socket_path` is bound and removed again, and, when providers are authorized, a changed `egress.socket_path` is connected to and closed. Any failure refuses the accept, and nothing is written. An accept is refused while a reload holds its turn for more than 5 seconds (`busy; a reload holds the turn`) and while the daemon is stopping or already restarting into an earlier accept.
+
+**What applies live, and what applies by restart.**
+
+| Changed | Applies |
+|---|---|
+| `core.handling.ceiling` (the whole block; only its level is read per decision), `principal`, `audit.readers`, and `providers` while it stays non-empty | **live**: the next decision uses it |
+| everything else, including `core.handling.policy` (the classification system), every other `core` key, `vault`, `transport`, `egress`, `lake`, the other `audit` keys, `providers` going from empty to non-empty or back, and a section added or removed | **by restart** |
+
+A set that contains any restart change applies by restart as a whole. A live accept is persisted, then installed in one step once the decisions in flight have finished; no decision sees part of it. A restart accept is persisted and checkpointed, then `maknaed` stops admitting connections (each is closed unserved, recorded as `connect` denied `draining to apply an accepted baseline`), lets the requests in flight finish under the old baseline, and exits **6**. systemd (`Restart=on-failure`) and launchd (`KeepAlive` with `SuccessfulExit` false) start it again, and the new process runs the accepted baseline. A live accept whose install fails after the persist applies by restart in the same way. A restart accept whose persist fails after admission stopped exits 1, and the supervisor restarts the daemon on the unchanged baseline, with the set still pending.
+
+**An invalid file over an accepted baseline.** The daemon keeps running the accepted baseline, records the files as an invalid change (`graph.baseline`, deny, `baseline change refused: invalid: <cause>`, also in the journal), and refuses to accept it. `maknae baseline-show` prints `state invalid` and does not repeat the cause, which can quote a value. Fix the files; the next start, applied reload or `maknae baseline-show` sees the change.
+
+**An accepted baseline that no longer starts.** If the accepted baseline itself stops validating on this host (an account, a socket directory or `egress-bounds.yaml` changed under it), the start refuses with `accepted baseline cannot start: <cause>`. Root replaces the accepted baseline from the files with a reseed: runbook, "The accepted baseline cannot start".
 
 ---
 
@@ -505,7 +546,7 @@ an `UnknownSection` error.
 
 ## 6. Extension sections
 
-A section the daemon does not register is `ConfigError::UnknownSection`, which **refuses boot** and names the file it came from: `unknown config section '<section>' in '<path>' (no registered spec)`. The registered set is `crates/maknae-kernel/src/boot.rs`'s `boot_specs()` — `lake`, `vault`, `transport`, `audit`, `principal`, `providers`, `egress`, plus `core` — so every row below marked Forthcoming or Withdrawn stops the daemon if written, rather than being ignored. Of the extension sections, `providers` (§6.1) and `egress` (§6.2) can be configured today.
+A section the daemon does not register is `ConfigError::UnknownSection`, which **refuses boot** and names the file it came from: `unknown config section '<section>' in '<path>' (no registered spec)`. The registered set is `crates/maknae-kernel/src/boot.rs`'s `boot_specs()` — `lake`, `vault`, `transport`, `audit`, `principal`, `providers`, `egress`, plus `core` — so every row below marked Forthcoming or Withdrawn stops the daemon if written, rather than being ignored. Of the extension sections, `providers` (§6.1), `egress` (§6.2) and `audit` (§6.3) can be configured today.
 
 | Section | Owner | Status |
 |---|---|---|
@@ -746,6 +787,22 @@ egress:
   first and restarts a loaded job instead.
 - Both keys are disclosed by `admin.config.show`; neither is a credential.
 
+### 6.3 The `audit` section
+
+```yaml
+audit:
+  jsonl_path: /var/log/maknae/audit.jsonl   # as packaged
+  readers: [vector]                          # accounts that may read the trail (#500)
+```
+
+`maknaed` refuses to start without an `audit:` section. Its keys are `jsonl_path`, the trail `maknaed` appends to; `siem` and `au3_1` (ADR-0019); and `readers`. Like `vault`, the section follows the file at start (§3.2), and an accept that changes anything in it other than `readers` applies by restart.
+
+**`readers`** lists the accounts that may read the trail, by account name only, never a group. Each name must match `^[a-z_][a-z0-9_-]{0,30}[$]?$` and appear once (`audit.readers entry "<name>" is not a portable account name`, `audit.readers names <name> twice`); that is checked at every load. `maknaed` never reads the list to decide anything: the packages and the runbook's "Grant the declared readers" block apply it as ACL entries, through `sudo maknae audit-readers`, which prints the validated names one per line. That helper, and an accept that changes `audit.readers`, also resolve each name in the account database and refuse the whole list, naming the account (`audit.readers <name>: <why>`), when the account does not exist or the lookup fails, is `root`, `nobody`, `_maknae` or `_maknae-egress`, has a uid below 100 or uid 65534 (or -2 on macOS), shares a uid with a Maknae service account, has `_maknae`'s group as its primary or a supplementary group, or is returned by the directory under any other spelling. A start checks the grammar only, so an account-directory outage does not stop the daemon over a list it never reads. `maknae config-show` renders the list `<value set>`: naming the readers names who to target for the trail.
+
+**Moving the trail.** A start that finds a different `jsonl_path` in the file moves the trail to it, as does the restart after an accepted change to it. The new path must name a file in the same directory as the current trail, and that file must already exist, prepared by root: a regular file with one link, owned by the daemon account, not group-writable and with no world access, carrying the append-only flag only root can clear (`chattr +a` on Linux, `chflags sappnd` on macOS; `uappnd` is refused). `maknaed` never creates it. The move records the new path as the last record of the old trail (`audit trail moves to <path> at start`), opens the new trail with a back-link (`audit trail continues from <old path>; last checkpoint revision <n>`), checks the kernel graph store against the newer checkpoint of the two trails, and records `audit trail moved from <old> to <new>` with the start's store transition. A target that is not a sibling (`the audit trail may move only within <directory>`) or is not prepared (`<path> is not append-only; prepare it with chattr +a (Linux) or chflags sappnd (macOS) as root`) leaves the current trail in use and makes the files an invalid change. The runbook's "Move the audit trail" prepares the file. Once an accepted baseline exists, `maknaed` never creates any trail: a missing one refuses to start, naming that runbook section.
+
+---
+
 ## 7. Accepted YAML
 
 Maknae parses a **restricted, reject-exotic** subset of YAML. The intent is that a
@@ -814,6 +871,10 @@ boot gate (`crates/maknae-kernel/src/boot_gate.rs`).
 | `core.handling.policy` names a system the build does not carry: `core.handling.policy names a classification system this build does not carry: '<name>'` | `UnknownClassificationPolicy` |
 | `providers.yaml` (§6.1.1) malformed, or no entry selectable: `providers.yaml: <reason>` | `UserProviders` |
 | `vault.kv_mount` or `vault.user_prefix` in the root `maknae.yaml`, shadowed `config.d/` blocks included: `vault.kv_mount in the root maknae.yaml is not read by maknaed: set kv_mount in egress-bounds.yaml` | `RootVaultKeyRefused` (kernel) |
+| `audit.readers` not a list of strings, an entry outside `^[a-z_][a-z0-9_-]{0,30}[$]?$`, or a name listed twice (§6.3) | `InvalidAudit` |
+| At an accept or in `sudo maknae audit-readers`: an `audit.readers` account that is missing or refused (§6.3): `audit.readers <name>: <why>` | `InvalidAudit` |
+
+The baseline (§3.2) adds refusals of its own. At a start over an accepted baseline, a file that fails any row above is not a refusal: the daemon keeps the accepted baseline and records the files as an invalid change. A trail move (§6.3) to a file outside the current trail's directory is `the audit trail may move only within <directory>`, and to a file root has not prepared, the open's own refusal, for example `<path> is not append-only; prepare it with chattr +a (Linux) or chflags sappnd (macOS) as root`; at a start either leaves the current trail in use. Once an accepted baseline exists, a missing trail refuses to start (exit 1): `the audit trail <path> is missing; prepare it as the runbook's "Move the audit trail" step does, then start`. An accepted baseline that no longer validates refuses to start with `accepted baseline cannot start: <cause>`, at the exit code of the row that failed.
 
 ---
 

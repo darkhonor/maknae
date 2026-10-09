@@ -250,7 +250,7 @@ impl Anchor {
     /// Re-judge the PINNED directory -- the fd this anchor holds -- against a
     /// requirement stricter than the one it was opened under. `fstat` on the held
     /// fd, never a path: a caller that learns mid-load it needs a stronger
-    /// guarantee (`maknae-config`'s root-required sections, #243) asks the same
+    /// guarantee (`maknae-config`'s root-owned sources, #243) asks the same
     /// inode rather than re-opening the path, which a replaceable top-level
     /// symlink could point at a different tree between the two opens (codex
     /// review round 3, 2026-09-07). The error names the anchor's path.

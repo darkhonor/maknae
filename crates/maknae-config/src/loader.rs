@@ -20,10 +20,9 @@ pub(crate) fn io_err(e: impl std::fmt::Display) -> ConfigError {
     ConfigError::Io(e.to_string())
 }
 
-/// The requirement a `maknae.yaml` / `config.d` member carries: a regular file with NO
-/// other-class access (`mode & 0o007 == 0`). Ownership is left to OS DAC — the config
-/// tree is the operator's own, and the root-controlled artifacts state their owner
-/// requirement in [`ROOT_ARTIFACT`] instead.
+/// The floor every scanned `maknae.yaml` / `config.d` member carries: a regular file
+/// with NO other-class access (`mode & 0o007 == 0`). [`load_config_root_owned`] then
+/// holds every source and both directories to [`ROOT_ARTIFACT`].
 ///
 /// A named const, not a positional pair, per issue #132: `read_secure_required(path,
 /// None, Some(0o007))` passed a requirement the `std-fs-drift` inventory could not see,
@@ -541,7 +540,7 @@ pub(crate) fn verify_selection_dirs(
 /// root directory must satisfy `requirement`'s owner and not be group/other-
 /// writable; a `config.d/` source additionally requires `config.d/` itself to;
 /// the file is re-read under `requirement`; and the bytes must equal `expected`.
-/// Any failure is `Err(())` — the caller names the section and the path. Kept
+/// Any failure is `Err(())` — the caller names the path. Kept
 /// as its own function so the byte-equality half can be tested with bytes that
 /// DIFFER, which no single load can produce deterministically. `anchor` is the
 /// directory the scan read through; the source is re-read through it, never
@@ -1112,8 +1111,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&p);
         assert!(matches!(scan_dir(&p), Err(ConfigError::NotFound { .. })));
     }
-    // ---- #243: a root-required section's SOURCE is re-verified under the
-    // caller's requirement, whichever file contributed it.
+    // ---- #243, #490: every scanned SOURCE is re-verified under the caller's
+    // requirement, winners and shadowed `config.d/` members alike.
     #[cfg(unix)]
     fn my_uid() -> u32 {
         use std::os::unix::fs::MetadataExt;
@@ -1209,7 +1208,7 @@ mod tests {
             0o640,
         );
         // Group-writable: passes the scan's other-class mask, fails the
-        // root-required 0o022 mask.
+        // root-owned 0o022 mask.
         std::fs::set_permissions(&bad.0, std::fs::Permissions::from_mode(0o770)).unwrap();
         let holder = new_dir("rooted-swap-holder");
         let link = holder.0.join("config");

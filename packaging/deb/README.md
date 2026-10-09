@@ -94,10 +94,11 @@ maknae ping     # -> pong
 maknae whoami   # -> maknae://<id>/plane/cli
 ```
 
-The three `admin.*` subcommands — `maknae status`, `maknae config-show`, and
-`maknae subject-list` — ship **ungranted**: the packaged `authz.yaml` has no
-`roles:` key, so each returns `not authorized` until a site grants it. That is
-deliberate (ADR-0010), not a packaging omission.
+The packaged `authz.yaml` grants the `admin` role `admin.status`,
+`admin.subject.list`, `admin.baseline.show` and `admin.baseline.accept`, so the
+enrolled administrator can run `maknae status`, `maknae subject-list`,
+`maknae baseline-show` and `maknae baseline-accept`. `maknae config-show` ships
+**ungranted** and returns `not authorized` until a site grants it (ADR-0010).
 
 On **upgrade**, re-run `maknae enroll` before restarting the daemon if the
 shipped `maknae.yaml`/`authz.yaml` changed — the same install→enroll→(re)start

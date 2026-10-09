@@ -106,9 +106,7 @@ impl Document {
     }
 
     /// Which source supplied a present section — `maknae.yaml` or a `config.d/`
-    /// member. The loader uses it to re-verify a root-required section's source
-    /// under the stricter requirement (#243), so the check covers every input
-    /// path, not only the base file.
+    /// member.
     pub fn source_of(&self, name: &str) -> Option<&Source> {
         self.sections
             .iter()

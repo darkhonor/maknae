@@ -67,7 +67,7 @@ If **enforcement stays with the PDP** — which every consideration above says i
 ## What this would NOT do
 
 - **It would not make a database row an authorization.** The authorized set is the file's; a row outside it is inert, and the kernel must validate a user's selection against the **file** rather than against the projection — otherwise a direct `UPDATE` becomes privilege escalation.
-- **It would not remove `/etc/maknae`.** Ownership and permission rules, the root-required sections, the classification ceiling and the audit sink stay file-resident.
+- **It would not remove `/etc/maknae`.** Ownership and permission rules, the root-owned `maknae.yaml` and `config.d/`, the classification ceiling and the audit sink stay file-resident.
 - **It would not give users an endpoint of their own choosing.** `endpoint` is the release decision (`model-conduit-policy.md`); a user selects among authorized destinations and never defines one.
 - **It would not make the store's availability a decision input.** A projection that is stale, empty or unreachable must degrade to "this user has selected nothing", never to "this user may use anything".
 

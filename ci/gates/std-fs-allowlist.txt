@@ -69,7 +69,7 @@ crates/maknae-config/src/loader.rs|owner: None,
 crates/maknae-config/src/loader.rs|owner: None,
 crates/maknae-config/src/loader.rs|owner: None,
 crates/maknae-config/src/loader.rs|owner: None,
-# #243 `verify_root_source`: the re-read of a root-required section's SOURCE names its
+# #243 `verify_root_source`: the re-read of every scanned SOURCE (#490) names its
 # owner requirement on the anchor, the descendant and the target alike (`requirement.owner`),
 # so it carries no requirement-free `owner: None` line and needs no entry here.
 crates/maknae-vault/src/client.rs|owner: None,
