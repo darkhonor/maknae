@@ -1355,6 +1355,11 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                         .as_ref()
                         .map(|k| k.baseline.lines())
                         .unwrap_or_default(),
+                    identity_sync: kernel_graph
+                        .as_ref()
+                        .as_ref()
+                        .map(|k| k.sync.lines())
+                        .unwrap_or_default(),
                 }),
                 // The current snapshot, via the seam. `None` means the backend cannot
                 // enumerate, and that is reported as unavailable below --

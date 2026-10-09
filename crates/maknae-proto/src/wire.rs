@@ -658,6 +658,11 @@ pub struct StatusView {
     /// never a section name, a hash or a value.
     #[serde(default)]
     pub baseline_pending: Vec<String>,
+    /// Counts only (#491): `unsynced=<n>`, `conflict=<n>`, `file=lost` while bindings.yaml is
+    /// missing or keyless over explicit bindings, and `mirror=stale` while the last mirror
+    /// render failed.
+    #[serde(default)]
+    pub identity_sync: Vec<String>,
 }
 
 /// One subject `bindings.yaml` names (#496). `members` holds its binding (`uid:N`),
@@ -981,6 +986,7 @@ mod tests {
                 kernel_graph_anchor: kernel_graph.map(|k| k.1),
                 identity_problem_counts: vec![],
                 baseline_pending: vec![],
+                identity_sync: vec![],
             })),
         }
     }
@@ -1105,10 +1111,12 @@ mod tests {
         .unwrap();
         let view: StatusView = ciborium::from_reader(bytes.as_slice()).unwrap();
         assert_eq!(view.baseline_pending, Vec::<String>::new());
+        assert_eq!(view.identity_sync, Vec::<String>::new());
         let mut new = Vec::new();
         ciborium::into_writer(
             &StatusView {
                 baseline_pending: vec!["baseline: 1 pending (restart)".into()],
+                identity_sync: vec!["unsynced=1".into(), "conflict=0".into()],
                 ..view
             },
             &mut new,
@@ -1118,6 +1126,7 @@ mod tests {
         assert_eq!(old.listener, "l");
         let back: StatusView = ciborium::from_reader(new.as_slice()).unwrap();
         assert_eq!(back.baseline_pending, vec!["baseline: 1 pending (restart)"]);
+        assert_eq!(back.identity_sync, vec!["unsynced=1", "conflict=0"]);
     }
 
     #[test]

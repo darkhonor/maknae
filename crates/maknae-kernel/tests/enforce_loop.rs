@@ -1776,6 +1776,10 @@ async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
     let authorizer = fx.authorizer();
     let pending_hash_status = {
         let status = published_status(&authorizer, 41, "advanced");
+        status.sync.set_counts(maknae_kernel::sync::SyncCounts {
+            unsynced: 1,
+            conflicts: 0,
+        });
         let pending = maknae_kernel::baseline::pending(
             &Default::default(),
             &Err(maknae_kernel::baseline::InvalidFile {
@@ -1830,6 +1834,8 @@ async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
                 "#496: counts by kind, never the name"
             );
             assert_eq!(s.baseline_pending, ["baseline: 1 pending (invalid)"]);
+            assert_eq!(s.identity_sync, ["unsynced=1", "conflict=0"]);
+            assert!(!format!("{:?}", s.identity_sync).contains("adversary"));
             assert!(!format!("{s:?}").contains(&pending_hash_status.1[..12]));
             // The VALUE, not merely non-empty: wiring `listener` to any other
             // non-empty config string -- the audit path, the plane socket --

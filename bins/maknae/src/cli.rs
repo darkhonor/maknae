@@ -753,7 +753,41 @@ fn status_lines(s: &maknae_proto::StatusView) -> Vec<String> {
     ));
     lines.extend(identity_problems_line(&s.identity_problem_counts));
     lines.extend(s.baseline_pending.iter().map(|l| terminal_safe(l)));
+    lines.extend(identity_sync_line(&s.identity_sync));
     lines
+}
+
+fn identity_sync_line(entries: &[String]) -> Option<String> {
+    if entries.is_empty() {
+        return None;
+    }
+    let count = |key: &str| {
+        entries
+            .iter()
+            .find_map(|e| e.strip_prefix(key)?.strip_prefix('=')?.parse::<u64>().ok())
+    };
+    let known = |e: &str| matches!(e, "file=lost" | "mirror=stale");
+    let (Some(unsynced), Some(conflicts)) = (count("unsynced"), count("conflict")) else {
+        return Some(format!(
+            "identity sync: {}",
+            entries
+                .iter()
+                .map(|e| terminal_safe(e))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    };
+    let mut parts = vec![
+        format!("{unsynced} unsynced"),
+        format!("{conflicts} conflicts"),
+    ];
+    for e in entries.iter().filter(|e| known(e)) {
+        parts.push(match e.as_str() {
+            "file=lost" => "bindings.yaml lost".into(),
+            _ => "mirror stale".into(),
+        });
+    }
+    Some(format!("identity sync: {}", parts.join(", ")))
 }
 
 fn baseline_lines(v: &maknae_proto::BaselineView) -> Vec<String> {
@@ -1093,6 +1127,38 @@ mod tests {
                 .await
                 .unwrap_err(),
             "frame class unexpected: Control, expected Prompt"
+        );
+    }
+
+    #[test]
+    fn the_identity_sync_line_prints_counts_and_the_stale_flag() {
+        assert_eq!(identity_sync_line(&[]), None);
+        assert_eq!(
+            identity_sync_line(&["unsynced=0".into(), "conflict=0".into()]).as_deref(),
+            Some("identity sync: 0 unsynced, 0 conflicts")
+        );
+        assert_eq!(
+            identity_sync_line(&[
+                "unsynced=2".into(),
+                "conflict=1".into(),
+                "mirror=stale".into()
+            ])
+            .as_deref(),
+            Some("identity sync: 2 unsynced, 1 conflicts, mirror stale")
+        );
+        assert_eq!(
+            identity_sync_line(&[
+                "unsynced=0".into(),
+                "conflict=0".into(),
+                "file=lost".into(),
+                "mirror=stale".into()
+            ])
+            .as_deref(),
+            Some("identity sync: 0 unsynced, 0 conflicts, bindings.yaml lost, mirror stale")
+        );
+        assert_eq!(
+            identity_sync_line(&["unsynced=x\u{1b}".into()]).as_deref(),
+            Some("identity sync: unsynced=x\\u{1b}")
         );
     }
 
@@ -1744,6 +1810,7 @@ mod tests {
             kernel_graph_anchor: Some("verified".into()),
             identity_problem_counts: vec![],
             baseline_pending: vec![],
+            identity_sync: vec![],
         };
         let base = status_lines(&s);
         assert_eq!(
@@ -2290,6 +2357,7 @@ mod tests {
             kernel_graph_anchor: Some("verified".into()),
             identity_problem_counts: vec!["unresolved=1".into()],
             baseline_pending: vec!["baseline: 1 pending (live)".into()],
+            identity_sync: vec![],
         };
         let lines = status_lines(&s);
         assert_eq!(
