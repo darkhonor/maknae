@@ -182,6 +182,8 @@ phase1() {
         || fail "postinstall does NOT disable the deputy — an unenrolled install will respawn-loop it"
     grep -qxF 'SYNC_LABEL="io.maknae.policy-sync"' "$HERE/scripts/postinstall" \
         && grep -qF 'launchctl disable "system/$SYNC_LABEL"' "$HERE/scripts/postinstall" \
+        && grep -A1 -xF 'if [ "$KIND" = "fresh" ] || [ "$SYNC_PLIST_EXISTED" != "true" ]; then' "$HERE/scripts/postinstall" \
+            | grep -qxF '    DISABLE_SYNC=true' \
         && ok "postinstall disables the policy-sync job by default" \
         || fail "postinstall does NOT disable the policy-sync job — the opt-in would be on by default"
     grep -q 'usr/local/share/maknae/defaults' "$HERE/build-pkg.sh" \

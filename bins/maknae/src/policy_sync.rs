@@ -1153,8 +1153,72 @@ mod tests {
             }
         }
         assert!(
-            read("macos/scripts/postinstall").contains("launchctl disable \"system/$SYNC_LABEL\"")
+            !read("deb/postinst").contains("policy-sync"),
+            "the deb postinst never names the sync units"
         );
+        let mut section = "";
+        for l in spec.lines() {
+            let head = l.split_whitespace().next().unwrap_or("");
+            if [
+                "%description",
+                "%prep",
+                "%build",
+                "%install",
+                "%check",
+                "%pretrans",
+                "%pre",
+                "%post",
+                "%preun",
+                "%postun",
+                "%posttrans",
+                "%files",
+                "%changelog",
+            ]
+            .contains(&head)
+            {
+                section = head;
+            }
+            if !l.contains("policy-sync") {
+                continue;
+            }
+            let allowed = match section {
+                "" => {
+                    l.starts_with("Source1")
+                        && l.as_bytes().get(7).is_some_and(|b| b.is_ascii_digit())
+                        && l.as_bytes().get(8) == Some(&b':')
+                }
+                "%install" => l.starts_with("install "),
+                "%files" => l.starts_with("%{_unitdir}/maknae-policy-sync."),
+                "%preun" => l.starts_with("%systemd_preun "),
+                "%postun" => l.starts_with("%systemd_postun "),
+                _ => false,
+            };
+            assert!(allowed, "maknae.spec {section}: {l}");
+        }
+        let postinstall = read("macos/scripts/postinstall");
+        assert!(postinstall.contains("DISABLE_SYNC=false\n"));
+        assert!(postinstall.contains(
+            "SYNC_LABEL=\"io.maknae.policy-sync\"\nif [ \"$KIND\" = \"fresh\" ] || [ \"$SYNC_PLIST_EXISTED\" != \"true\" ]; then\n    DISABLE_SYNC=true\nfi\n"
+        ));
+        assert!(postinstall.contains(
+            "SYNC_PLIST_EXISTED=\"$(sed -n 5p \"$KIND_FILE\" 2>/dev/null || echo false)\""
+        ));
+        assert!(postinstall
+            .contains("[ \"$DISABLE_SYNC\" = false ] || launchctl disable \"system/$SYNC_LABEL\""));
+        assert!(postinstall.contains(
+            "[ \"$DISABLE_SYNC\" = false ] || verify \"launchctl disable $SYNC_LABEL\" disabled \"$(disabled_state \"$SYNC_LABEL\")\""
+        ));
+        let preinstall = read("macos/scripts/preinstall");
+        assert!(preinstall.contains(
+            "[ -e /Library/LaunchDaemons/io.maknae.policy-sync.plist ] && SYNC_PLIST_EXISTED=true"
+        ));
+        assert!(preinstall.contains(
+            "\"$EGRESS_PLIST_EXISTED\" \"$SYNC_PLIST_EXISTED\" \\\n    > \"$RECEIPT_DIR/.install-kind\""
+        ));
+        let smoke = read("macos/smoke.sh");
+        assert!(smoke.contains(
+            "grep -A1 -xF 'if [ \"$KIND\" = \"fresh\" ] || [ \"$SYNC_PLIST_EXISTED\" != \"true\" ]; then'"
+        ));
         assert!(read("deb/prerm")
             .contains("systemctl disable maknae-policy-sync.path maknae-policy-sync.service"));
         let unit = read("common/maknae-policy-sync.service");
