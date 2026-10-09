@@ -365,7 +365,7 @@ mod tests {
         let released = maknae_graph::identity::Released {
             uid: 666,
             name: "mallory".into(),
-            cause: maknae_graph::identity::ReleaseCause::BindingsAbsent,
+            cause: maknae_graph::identity::ReleaseCause::NotListed,
         };
         assert_eq!(
             transition_problems(std::slice::from_ref(&released)),

@@ -317,23 +317,18 @@ mod tests {
             source: "/etc/maknae/authz.yaml".into(),
             ..persisted.clone()
         };
-        let keyless = IdentityLayer {
-            bindings_sha256: None,
-            ..file.clone()
-        };
-        let absent = [Released {
+        let unlisted = [Released {
             uid: 666,
             name: "mallory".into(),
-            cause: ReleaseCause::BindingsAbsent,
+            cause: ReleaseCause::NotListed,
         }];
         assert_eq!(
-            next_layer(&keyless, &[], &moved, false),
-            (keyless.clone(), absent.to_vec()),
-            "a keyless layer is a release here; a reload resolves from live, so it never gets one"
+            next_layer(&file, &[], &moved, false),
+            (file.clone(), unlisted.to_vec())
         );
         assert_eq!(
-            next_layer(&keyless, &[], &persisted, false),
-            (keyless.clone(), absent.to_vec())
+            next_layer(&file, &[], &persisted, false),
+            (file.clone(), unlisted.to_vec())
         );
         let (carried, released) = next_layer(&file, &["mallory".into()], &persisted, false);
         assert_eq!(

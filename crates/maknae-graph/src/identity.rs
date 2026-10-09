@@ -576,7 +576,6 @@ pub enum ReleaseCause {
     NameNowResolvesTo(u32),
     BoundAs(String),
     BindingsEmpty,
-    BindingsAbsent,
 }
 
 impl fmt::Display for ReleaseCause {
@@ -586,9 +585,6 @@ impl fmt::Display for ReleaseCause {
             Self::NameNowResolvesTo(uid) => write!(f, "its name now resolves to uid {uid}"),
             Self::BoundAs(role) => write!(f, "it is now listed under {role}"),
             Self::BindingsEmpty => f.write_str("bindings.yaml now binds nobody"),
-            Self::BindingsAbsent => f.write_str(
-                "bindings.yaml has no bindings: key, so the enrolled principal is admin and nobody else holds a role",
-            ),
         }
     }
 }
@@ -623,9 +619,7 @@ pub fn released(
                 .filter(|(_, u)| **u == s.uid)
                 .find_map(|(n, _)| now.get(n).map(|u| (n, *u)));
             let mut name = s.name.clone();
-            let cause = if next.bindings_sha256.is_none() {
-                ReleaseCause::BindingsAbsent
-            } else if file_lists_nobody {
+            let cause = if file_lists_nobody {
                 ReleaseCause::BindingsEmpty
             } else if let Some((n, uid)) = moved {
                 name.clone_from(n);
@@ -1385,11 +1379,6 @@ mod tests {
                 ReleaseCause::BoundAs("user".into()),
             ),
             (layer(Some("y"), &[]), ReleaseCause::NotListed),
-            (layer(None, &[]), ReleaseCause::BindingsAbsent),
-            (
-                layer(None, &[(1, "a", "user")]),
-                ReleaseCause::BindingsAbsent,
-            ),
             (
                 layer(Some("y"), &[(1, "a", "user")]),
                 ReleaseCause::NotListed,
@@ -1407,10 +1396,6 @@ mod tests {
                 cause: ReleaseCause::BindingsEmpty
             }]
         );
-        assert_eq!(
-            released(&persisted, &layer(None, &[]), true)[0].cause,
-            ReleaseCause::BindingsAbsent
-        );
         for (next, cause) in cases {
             assert_eq!(
                 released(&persisted, &next, false),
@@ -1427,7 +1412,6 @@ mod tests {
             ReleaseCause::NameNowResolvesTo(777),
             ReleaseCause::BoundAs("user".into()),
             ReleaseCause::BindingsEmpty,
-            ReleaseCause::BindingsAbsent,
         ]
         .iter()
         .map(ToString::to_string)
@@ -1439,7 +1423,6 @@ mod tests {
                 "its name now resolves to uid 777",
                 "it is now listed under user",
                 "bindings.yaml now binds nobody",
-                "bindings.yaml has no bindings: key, so the enrolled principal is admin and nobody else holds a role",
             ]
         );
     }
