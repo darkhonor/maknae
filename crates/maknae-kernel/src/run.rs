@@ -4194,9 +4194,10 @@ where
             Some(held) => {
                 let before = self.authorizer.baseline().principal().uid;
                 let principal = v.principal.uid;
-                let installed = match &committed.checkpoint_error {
-                    Some(e) => Err(format!("the checkpoint was not recorded: {e}")),
-                    None => held.install(crate::live::LiveValues::of(&v)).await,
+                let installed = match (&committed.durability_error, &committed.checkpoint_error) {
+                    (Some(e), _) => Err(format!("the store was not durable: {e}")),
+                    (None, Some(e)) => Err(format!("the checkpoint was not recorded: {e}")),
+                    (None, None) => held.install(crate::live::LiveValues::of(&v)).await,
                 };
                 match installed {
                     Ok(()) => {
@@ -12026,6 +12027,35 @@ mod baseline_accept_tests {
             .unwrap();
         assert!(
             outcome.reason.ends_with("restarting to apply")
+                && !outcome.reason.contains("applied live"),
+            "{outcome:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_live_accept_whose_store_sync_fails_applies_by_restart() {
+        let fx = Fx::with_baseline("sync-fails").await;
+        write_live(&fx);
+        let shown = fx.show().await;
+        fx.reloader.dir.fail_next_directory_sync();
+        let view = accepted(fx.accept(&shown.hash).await);
+        assert_eq!(view.apply, "restart");
+        assert_eq!(fx.drain(), Drain::Applied);
+        assert!(matches!(
+            crate::handler::after_drain(ServeOutcome::GracefulShutdown, fx.drain()),
+            ServeOutcome::ApplyByRestart
+        ));
+        assert_eq!(principal_uid(&fx), nix::unistd::geteuid().as_raw());
+        let outcome = fx
+            .seen()
+            .into_iter()
+            .rfind(|s| s.action == GRAPH_BASELINE_ACTION)
+            .unwrap();
+        assert!(
+            outcome
+                .reason
+                .contains("not installed live: the store was not durable")
+                && outcome.reason.ends_with("restarting to apply")
                 && !outcome.reason.contains("applied live"),
             "{outcome:?}"
         );
