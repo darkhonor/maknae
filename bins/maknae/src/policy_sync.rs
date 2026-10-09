@@ -284,19 +284,22 @@ fn kernel_gid() -> Result<u32, String> {
         .ok_or_else(|| "no such group: _maknae; is maknae installed?".to_string())
 }
 
-fn production(euid: u32, check: bool) -> Result<Outcome, String> {
-    preflight(euid)?;
-    let kernel = crate::reseed::kernel_uid()?;
-    let owners = Owners {
-        state_dir: kernel,
-        mirror: kernel,
+fn production_owners(kernel_uid: u32, kernel_gid: u32) -> Owners {
+    Owners {
+        state_dir: kernel_uid,
+        mirror: kernel_uid,
         config_dir: 0,
         bindings: 0,
         file: FileOwner {
             uid: 0,
-            gid: kernel_gid()?,
+            gid: kernel_gid,
         },
-    };
+    }
+}
+
+fn production(euid: u32, check: bool) -> Result<Outcome, String> {
+    preflight(euid)?;
+    let owners = production_owners(crate::reseed::kernel_uid()?, kernel_gid()?);
     let stdin = std::io::stdin();
     sync(
         Path::new(STATE_DIR),
@@ -1058,17 +1061,35 @@ mod tests {
             .unwrap()
             .split_whitespace()
             .filter_map(|g| g.parse::<u32>().ok())
-            .find(|g| *g != egid && *g != uid)
-            .unwrap_or(egid);
+            .find(|g| *g != egid && *g != uid);
         let fx = Fx::new();
         fx.config("bindings.yaml", BASE);
         fx.mirror(&mirror_over(BASE, LIVE, &[]));
         let mut owners = me();
-        owners.file = FileOwner { uid, gid };
+        owners.file = FileOwner {
+            uid,
+            gid: gid.unwrap_or(egid),
+        };
         let r = fx.sync_with(owners, false, "", false, &mut Vec::new());
         assert!(matches!(r, Ok(Outcome::Installed)), "{r:?}");
         let md = std::fs::symlink_metadata(fx.config_dir().join("bindings.yaml")).unwrap();
-        assert_eq!((md.uid(), md.gid()), (uid, gid));
+        assert_eq!(md.uid(), uid);
+        match gid {
+            Some(gid) => assert_eq!(md.gid(), gid),
+            None => eprintln!(
+                "skipped the gid leg: no supplementary group distinct from the egid and uid; the root run on the Linux hosts covers it"
+            ),
+        }
+    }
+
+    #[test]
+    fn production_owns_the_state_side_by_maknae_and_the_config_side_by_root() {
+        let o = production_owners(4101, 4202);
+        assert_eq!(
+            (o.state_dir, o.mirror, o.config_dir, o.bindings),
+            (4101, 4101, 0, 0)
+        );
+        assert_eq!((o.file.uid, o.file.gid), (0, 4202));
     }
 
     #[test]
