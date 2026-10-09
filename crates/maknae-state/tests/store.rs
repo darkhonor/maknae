@@ -4152,6 +4152,66 @@ async fn a_live_commit_keeps_the_base_the_conflicts_and_the_baseline() {
 }
 
 #[tokio::test]
+async fn a_live_commit_may_drop_only_the_listed_entry_it_edited() {
+    let (fx, k) = (Fixture::new(), key(1));
+    let listed = SyncBase {
+        base: r#"{"user":["alice","bob"]}"#.into(),
+        live: r#"{"user":[]}"#.into(),
+        conflicts: r#"["alice","bob"]"#.into(),
+    };
+    fx.write(STORE_FILE, &sealed_with_sync(4, &k, Some(&listed)), 0o600);
+    let before = fx.store();
+    let dir = fx.dir();
+    let g = graph_of(&before, &k);
+    let alice_contained = r#"{"adversary":["alice"],"user":[]}"#;
+    let with = |live: &str, conflicts: &str| SyncBase {
+        live: live.into(),
+        conflicts: conflicts.into(),
+        ..listed.clone()
+    };
+    for refused in [
+        with(alice_contained, "[]"),
+        with(alice_contained, r#"["alice"]"#),
+        with(alice_contained, r#"["alice","bob","carol"]"#),
+        with(alice_contained, r#"["bob","carol"]"#),
+        with(r#"{"user":[]}"#, r#"["bob"]"#),
+        with(r#"{"adversary":["alice","bob"],"user":[]}"#, r#"["bob"]"#),
+        with(r#"{"adversary":["alice","carol"],"user":[]}"#, r#"["bob"]"#),
+        with(alice_contained, "not a list"),
+        with("not a section", r#"["bob"]"#),
+    ] {
+        let mut audit = Recorder::default();
+        let r = commit_live(
+            &dir,
+            &k,
+            &live_next(&g, 5, Some(&bl(A)), Some(&refused)),
+            &[],
+            &["live".into()],
+            &mut audit,
+            LiveInitiator::Operator,
+        )
+        .await;
+        assert_eq!(r.unwrap_err(), StoreError::SyncBaseChanged, "{refused:?}");
+        assert!(audit.events.is_empty(), "{:?}", audit.events);
+        assert_eq!(fx.store(), before);
+    }
+    let shrunk = with(alice_contained, r#"["bob"]"#);
+    let mut audit = Recorder::default();
+    commit_live(
+        &dir,
+        &k,
+        &live_next(&g, 5, Some(&bl(A)), Some(&shrunk)),
+        &[],
+        &["live".into()],
+        &mut audit,
+        LiveInitiator::Operator,
+    )
+    .await
+    .unwrap();
+    assert_eq!(extracted(&graph_of(&fx.store(), &k)).sync, Some(shrunk));
+}
+
+#[tokio::test]
 async fn a_live_commit_over_a_store_without_a_sync_base_is_refused() {
     let (fx, k) = (Fixture::new(), key(1));
     fx.write(STORE_FILE, &sealed_unsynced(4, &k), 0o600);

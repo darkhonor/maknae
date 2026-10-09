@@ -4154,12 +4154,13 @@ where
             .sync
             .as_ref()
             .ok_or("the running graph carries no sync base")?;
-        let (base, live, _) = crate::sync::stored_sections(sync)?;
-        let Some(next_live) =
-            maknae_config::apply_edit(&base, &live, &edit).map_err(|e| e.to_string())?
+        let (base, live, conflicts) = crate::sync::stored_sections(sync)?;
+        let Some(edited) = maknae_config::apply_edit(&base, &live, &conflicts, &edit)
+            .map_err(|e| e.to_string())?
         else {
             return Ok(LiveApplied::Unchanged);
         };
+        let next_live = edited.live;
         let applied = Arc::clone(
             &self
                 .applied_source
@@ -4180,9 +4181,13 @@ where
             source.bindings().lists_nobody(),
         );
         let next_sync = maknae_graph::sync::SyncBase {
+            base: sync.base.clone(),
             live: next_live.canonical(),
-            ..sync.clone()
+            conflicts: maknae_config::conflicts_canonical(&edited.conflicts),
         };
+        let events: Vec<String> = std::iter::once(crate::sync::live_reason(&edit, who))
+            .chain(edited.events.iter().map(crate::sync::event_reason))
+            .collect();
         let counts = crate::sync::counts(&next_sync)?;
         let revision = self
             .revision
@@ -4225,13 +4230,7 @@ where
             drain: None,
         };
         let committed = maknae_state::store::commit_live(
-            &self.dir,
-            &self.key,
-            &graph,
-            &released,
-            &[crate::sync::live_reason(&edit, who)],
-            &mut audit,
-            who,
+            &self.dir, &self.key, &graph, &released, &events, &mut audit, who,
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -15487,6 +15486,46 @@ mod reload_tests {
         assert_eq!(transitions_seen(&fx, from), ["intent recorded (kernel)"]);
         assert_eq!(fx.sync_lines(), ["unsynced=0", "conflict=0"]);
         assert_eq!(whoami_as(&fx, daemon_uid()).1, Some("adversary"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_live_edit_to_a_listed_conflict_takes_it_off_the_list_so_root_cannot_release_it_unseen(
+    ) {
+        let fx = Fx::with_baseline("listed-live-edit").await;
+        let daemon = || BindingEntry::Name("daemon".into());
+        fx.write_bindings(DAEMON_ADMIN);
+        bounded(fx.reloader.run()).await.unwrap();
+        fx.live_edit(LiveEdit::Unbind("daemon".into())).await;
+        fx.write_bindings(DAEMON_USER);
+        bounded(fx.reloader.run()).await.unwrap();
+        assert_eq!(fx.sync_lines(), ["unsynced=1", "conflict=1"]);
+
+        let from = fx.seen().len();
+        fx.live_edit(live_contain(daemon())).await;
+        assert_eq!(
+            sync_seen(&fx, from),
+            [
+                "live (operator): contain daemon",
+                "conflict resolved: daemon: a live edit changed it",
+                &format!(
+                    "live applied: revision {}",
+                    fx.reloader.revision.load(AtomicOrdering::Acquire)
+                ),
+            ]
+        );
+        assert_eq!(fx.sync_lines(), ["unsynced=1", "conflict=0"]);
+        assert!(!fx.mirror().contains("# conflict: "), "{}", fx.mirror());
+
+        fx.write_bindings(DAEMON_ADMIN);
+        let from = fx.seen().len();
+        bounded(fx.reloader.run()).await.unwrap();
+        assert_eq!(sync_seen(&fx, from), [CONTAINED_CONFLICT]);
+        assert_eq!(
+            whoami_as(&fx, daemon_uid()),
+            (adversary(), Some("adversary")),
+            "root's edit never saw the containment, so it cannot release it"
+        );
+        assert_eq!(fx.sync_lines(), ["unsynced=1", "conflict=1"]);
     }
 
     fn config_show(fx: &Fx) -> maknae_security::Verdict {

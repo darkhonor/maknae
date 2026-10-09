@@ -112,6 +112,7 @@ pub enum SyncKind {
 pub enum ResolvedBy {
     RootEdit,
     Sync,
+    LiveEdit,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -349,7 +350,49 @@ impl BoundRole {
     }
 }
 
+impl LiveEdit {
+    fn target(&self) -> BindingEntry {
+        match self {
+            Self::Contain(e) | Self::Release(e) => e.clone(),
+            Self::Bind { name, .. } | Self::Unbind(name) => BindingEntry::Name(name.clone()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Edited {
+    pub live: Section,
+    pub conflicts: BTreeSet<BindingEntry>,
+    pub events: Vec<MergeEvent>,
+}
+
 pub fn apply_edit(
+    base: &Section,
+    live: &Section,
+    conflicts: &BTreeSet<BindingEntry>,
+    edit: &LiveEdit,
+) -> Result<Option<Edited>, EditError> {
+    let Some(next) = edit_section(base, live, edit)? else {
+        return Ok(None);
+    };
+    let entry = edit.target();
+    let mut conflicts = conflicts.clone();
+    let events = if conflicts.remove(&entry) {
+        vec![MergeEvent::Resolved {
+            entry,
+            by: ResolvedBy::LiveEdit,
+        }]
+    } else {
+        Vec::new()
+    };
+    Ok(Some(Edited {
+        live: next,
+        conflicts,
+        events,
+    }))
+}
+
+fn edit_section(
     base: &Section,
     live: &Section,
     edit: &LiveEdit,
@@ -357,14 +400,7 @@ pub fn apply_edit(
     if !matches!(base, Section::Present(_)) || !matches!(live, Section::Present(_)) {
         return Err(EditError::NoExplicitBindings);
     }
-    let named;
-    let target = match edit {
-        LiveEdit::Contain(e) | LiveEdit::Release(e) => e,
-        LiveEdit::Bind { name, .. } | LiveEdit::Unbind(name) => {
-            named = BindingEntry::Name(name.clone());
-            &named
-        }
-    };
+    let target = &edit.target();
     let old = live.roles_of(target);
     let mut new = old.clone();
     match edit {
@@ -599,6 +635,22 @@ mod tests {
                             let (want, conflict) = oracle(base, live, file, listed);
                             assert_eq!(m.live.roles_of(&e), want, "{at}");
                             assert_eq!(m.conflicts.contains(&e), conflict, "{at}");
+                            let events = match (listed, conflict) {
+                                (true, false) => vec![MergeEvent::Resolved {
+                                    entry: e.clone(),
+                                    by: if file == live {
+                                        ResolvedBy::Sync
+                                    } else {
+                                        ResolvedBy::RootEdit
+                                    },
+                                }],
+                                (false, true) => vec![MergeEvent::Conflict {
+                                    entry: e.clone(),
+                                    contained: want.contains(ADVERSARY),
+                                }],
+                                _ => vec![],
+                            };
+                            assert_eq!(m.events, events, "one event per entry at most: {at}");
                             assert_eq!(&m.base, f, "base := the file: {at}");
                         }
                         assert_eq!(
@@ -1180,7 +1232,7 @@ mod tests {
                     for e3 in &edits {
                         let mut live = base.clone();
                         for e in [e1, e2, e3] {
-                            if let Some(next) = apply_edit(base, &live, e).unwrap() {
+                            if let Some(next) = edit_section(base, &live, e).unwrap() {
                                 live = next;
                             }
                         }
@@ -1209,7 +1261,7 @@ mod tests {
             LiveEdit::Contain(seven.clone()),
             LiveEdit::Contain(a.clone()),
         ] {
-            live = apply_edit(base, &live, &e).unwrap().unwrap();
+            live = edit_section(base, &live, &e).unwrap().unwrap();
         }
         assert!(
             live.canonical().contains(r#""adversary":[{"uid":7},"a"]"#),
@@ -1242,8 +1294,8 @@ mod tests {
                 LiveEdit::Unbind("z".into()),
             ),
         ] {
-            let up = apply_edit(base, base, &on).unwrap().unwrap();
-            let down = apply_edit(base, &up, &off).unwrap().unwrap();
+            let up = edit_section(base, base, &on).unwrap().unwrap();
+            let down = edit_section(base, &up, &off).unwrap().unwrap();
             assert_eq!(
                 down.canonical(),
                 base.canonical(),
@@ -1286,7 +1338,7 @@ mod tests {
         let s = |b: &str| Section::of(&crate::parse_bindings(b).unwrap());
         let live = s("schema_version: 1\nbindings:\n  user: [\"eve\"]\n");
         let eve = BindingEntry::Name("eve".into());
-        let contained = apply_edit(&live, &live, &LiveEdit::Contain(eve.clone()))
+        let contained = edit_section(&live, &live, &LiveEdit::Contain(eve.clone()))
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1294,33 +1346,33 @@ mod tests {
             s("schema_version: 1\nbindings:\n  user: [\"eve\"]\n  adversary: [\"eve\"]\n")
         );
         assert_eq!(
-            apply_edit(&live, &contained, &LiveEdit::Contain(eve.clone())),
+            edit_section(&live, &contained, &LiveEdit::Contain(eve.clone())),
             Ok(None)
         );
         assert_eq!(
-            apply_edit(&live, &contained, &LiveEdit::Release(eve.clone()))
+            edit_section(&live, &contained, &LiveEdit::Release(eve.clone()))
                 .unwrap()
                 .unwrap(),
             s("schema_version: 1\nbindings:\n  user: [\"eve\"]\n"),
             "base has no adversary key, so the emptied key goes"
         );
         let keyed = s("schema_version: 1\nbindings:\n  user: [\"eve\"]\n  adversary: []\n");
-        let kc = apply_edit(&keyed, &keyed, &LiveEdit::Contain(eve.clone()))
+        let kc = edit_section(&keyed, &keyed, &LiveEdit::Contain(eve.clone()))
             .unwrap()
             .unwrap();
         assert_eq!(
-            apply_edit(&keyed, &kc, &LiveEdit::Release(eve.clone()))
+            edit_section(&keyed, &kc, &LiveEdit::Release(eve.clone()))
                 .unwrap()
                 .unwrap(),
             keyed,
             "base's empty key is kept"
         );
         assert_eq!(
-            apply_edit(&live, &live, &LiveEdit::Release(eve.clone())),
+            edit_section(&live, &live, &LiveEdit::Release(eve.clone())),
             Ok(None)
         );
         assert_eq!(
-            apply_edit(
+            edit_section(
                 &live,
                 &live,
                 &LiveEdit::Bind {
@@ -1333,13 +1385,13 @@ mod tests {
             s("schema_version: 1\nbindings:\n  user: []\n  admin: [\"eve\"]\n")
         );
         assert_eq!(
-            apply_edit(&live, &live, &LiveEdit::Unbind("eve".into()))
+            edit_section(&live, &live, &LiveEdit::Unbind("eve".into()))
                 .unwrap()
                 .unwrap(),
             s("schema_version: 1\nbindings:\n  user: []\n")
         );
         assert_eq!(
-            apply_edit(&live, &live, &LiveEdit::Contain(BindingEntry::Uid(7)))
+            edit_section(&live, &live, &LiveEdit::Contain(BindingEntry::Uid(7)))
                 .unwrap()
                 .unwrap(),
             s("schema_version: 1\nbindings:\n  user: [\"eve\"]\n  adversary:\n    - uid: 7\n")
@@ -1347,7 +1399,7 @@ mod tests {
         for absent in [Section::Absent, Section::Missing] {
             for (b, l) in [(&absent, &absent), (&absent, &live)] {
                 assert_eq!(
-                    apply_edit(b, l, &LiveEdit::Contain(eve.clone())),
+                    edit_section(b, l, &LiveEdit::Contain(eve.clone())),
                     Err(EditError::NoExplicitBindings),
                     "base {b:?} live {l:?}"
                 );
@@ -1360,11 +1412,76 @@ mod tests {
     }
 
     #[test]
+    fn a_live_edit_takes_its_own_entry_off_the_conflict_list_and_says_so() {
+        let s = |b: &str| Section::of(&crate::parse_bindings(b).unwrap());
+        let (alice, bob) = (
+            BindingEntry::Name("alice".into()),
+            BindingEntry::Name("bob".into()),
+        );
+        let base = s("schema_version: 1\nbindings:\n  user: [\"alice\", \"bob\"]\n");
+        let live = s("schema_version: 1\nbindings:\n  user: []\n");
+        let listed: BTreeSet<_> = [alice.clone(), bob.clone()].into();
+        let got = apply_edit(&base, &live, &listed, &LiveEdit::Contain(alice.clone()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            got,
+            Edited {
+                live: s("schema_version: 1\nbindings:\n  user: []\n  adversary: [\"alice\"]\n"),
+                conflicts: [bob.clone()].into(),
+                events: vec![MergeEvent::Resolved {
+                    entry: alice.clone(),
+                    by: ResolvedBy::LiveEdit
+                }],
+            }
+        );
+        let carol = apply_edit(
+            &base,
+            &live,
+            &listed,
+            &LiveEdit::Contain(BindingEntry::Uid(7)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!((carol.conflicts, carol.events), (listed.clone(), vec![]));
+        assert_eq!(
+            apply_edit(&base, &live, &listed, &LiveEdit::Unbind("alice".into())),
+            Ok(None),
+            "a no-op leaves the entry listed"
+        );
+        assert_eq!(
+            apply_edit(
+                &Section::Absent,
+                &Section::Absent,
+                &listed,
+                &LiveEdit::Contain(alice.clone())
+            ),
+            Err(EditError::NoExplicitBindings)
+        );
+
+        let file = s("schema_version: 1\nbindings:\n  admin: [\"alice\"]\n");
+        let m = merge(
+            Some(Stored {
+                base: &base,
+                live: &got.live,
+                conflicts: &got.conflicts,
+            }),
+            &file,
+        );
+        assert_eq!(m.live.roles_of(&alice), [ADVERSARY].into());
+        assert!(m.conflicts.contains(&alice));
+        assert!(m.events.contains(&MergeEvent::Conflict {
+            entry: alice,
+            contained: true
+        }));
+    }
+
+    #[test]
     fn an_edit_over_a_live_section_breaking_the_role_rules_is_refused() {
         let mut m: BTreeMap<String, Vec<BindingEntry>> = BTreeMap::new();
         m.insert("user".into(), vec![BindingEntry::Uid(7)]);
         let live = Section::Present(m);
-        let err = apply_edit(
+        let err = edit_section(
             &live,
             &live,
             &LiveEdit::Contain(BindingEntry::Name("a".into())),

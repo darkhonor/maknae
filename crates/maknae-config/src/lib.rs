@@ -72,7 +72,8 @@ pub use bindings::{
 };
 pub use bindings_sync::{
     apply_edit, conflicts_canonical, conflicts_from_canonical, equivalent, merge, unsynced,
-    BoundRole, EditError, LiveEdit, MergeEvent, Merged, ResolvedBy, Section, Stored, SyncKind,
+    BoundRole, EditError, Edited, LiveEdit, MergeEvent, Merged, ResolvedBy, Section, Stored,
+    SyncKind,
 };
 // Re-exported so downstream seam constructors (maknae-authz-basic's
 // HermeticAuthorizer, #77) can NAME the requirement type without a maknae-io

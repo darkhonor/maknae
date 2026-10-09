@@ -145,6 +145,7 @@ pub fn event_reason(e: &MergeEvent) -> String {
             match by {
                 ResolvedBy::RootEdit => "bindings.yaml changed it again",
                 ResolvedBy::Sync => "bindings.yaml holds the fail-closed value",
+                ResolvedBy::LiveEdit => "a live edit changed it",
             }
         ),
         MergeEvent::Lost { missing } => format!(
@@ -685,7 +686,7 @@ mod tests {
 
     #[test]
     fn every_event_has_its_reason_and_entries_are_escaped() {
-        use maknae_config::{BindingEntry::*, MergeEvent::*, ResolvedBy::*};
+        use maknae_config::{BindingEntry::*, MergeEvent::*, ResolvedBy::RootEdit};
         assert_eq!(event_reason(&Conflict { entry: Name("a,b\u{1b}".into()), contained: true }),
             "conflict: a\\,b\\u{1b} changed in bindings.yaml and by an unsynced live transition; failed closed: contained");
         assert_eq!(event_reason(&Conflict { entry: Uid(7), contained: false }),
@@ -703,6 +704,13 @@ mod tests {
                 by: ResolvedBy::Sync
             }),
             "conflict resolved: x\\n: bindings.yaml holds the fail-closed value"
+        );
+        assert_eq!(
+            event_reason(&Resolved {
+                entry: Name("a,b".into()),
+                by: ResolvedBy::LiveEdit
+            }),
+            "conflict resolved: a\\,b: a live edit changed it"
         );
         assert_eq!(event_reason(&Lost { missing: true }), "lost: bindings.yaml is missing; the enforced bindings stand; restore them with sudo maknae policy sync, or run sudo maknae reseed to return to principal-as-admin");
         assert_eq!(event_reason(&Lost { missing: false }), "lost: bindings.yaml has no bindings: key; the enforced bindings stand; restore them with sudo maknae policy sync, or run sudo maknae reseed to return to principal-as-admin");

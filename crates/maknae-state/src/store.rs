@@ -973,8 +973,9 @@ pub async fn commit_accept(
     transition(dir, key, next, t, audit).await
 }
 
-/// A live identity edit: only the sync base's `live` may change; its base, its conflicts
-/// and the baseline are the stored ones, and `events` records it ahead of the intent.
+/// A live identity edit: the sync base's `live` changes, and its conflicts may lose only the
+/// one entry the edit changed; its base and the baseline are the stored ones, and `events`
+/// records it ahead of the intent.
 pub async fn commit_live(
     dir: &StateDir,
     key: &WrappingKey,
@@ -1020,9 +1021,35 @@ fn check_sync(
         SyncRule::BaseKept if t.sync_events.is_empty() => Err(StoreError::SyncUnrecorded),
         SyncRule::BaseKept => match (stored, proposed) {
             (Some(s), Some(p)) if s.base == p.base && s.conflicts == p.conflicts => Ok(()),
+            (Some(s), Some(p)) if s.base == p.base && drops_only_the_edited_entry(s, p) => Ok(()),
             (None, _) | (_, None) => Err(StoreError::SyncAbsent),
             _ => Err(StoreError::SyncBaseChanged),
         },
+    }
+}
+
+fn drops_only_the_edited_entry(
+    stored: &maknae_graph::sync::SyncBase,
+    proposed: &maknae_graph::sync::SyncBase,
+) -> bool {
+    use maknae_config::{conflicts_from_canonical, Section};
+    let (Ok(was), Ok(now), Ok(old), Ok(new)) = (
+        conflicts_from_canonical(&stored.conflicts),
+        conflicts_from_canonical(&proposed.conflicts),
+        Section::from_canonical(&stored.live),
+        Section::from_canonical(&proposed.live),
+    ) else {
+        return false;
+    };
+    let dropped: Vec<_> = was.difference(&now).collect();
+    let mut changed = old
+        .entries()
+        .into_iter()
+        .chain(new.entries())
+        .filter(|e| old.roles_of(e) != new.roles_of(e));
+    match (now.is_subset(&was), dropped.as_slice(), changed.next()) {
+        (true, [entry], Some(edited)) => *entry == edited && changed.all(|e| e == edited),
+        _ => false,
     }
 }
 
