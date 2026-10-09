@@ -25,7 +25,9 @@ const ANSWER_MAX_BYTES: u64 = 64;
 
 pub(crate) struct Owners {
     pub state_dir: u32,
+    pub mirror: u32,
     pub config_dir: u32,
+    pub bindings: u32,
     pub file: FileOwner,
 }
 
@@ -54,12 +56,12 @@ fn say(out: &mut dyn Write, line: &str) -> Result<(), String> {
     writeln!(out, "{line}").map_err(|e| format!("cannot write to standard output: {e}"))
 }
 
-fn read_mirror(state_dir: &Path, owner: u32) -> Result<Mirror, String> {
+fn read_mirror(state_dir: &Path, dir_owner: u32, owner: u32) -> Result<Mirror, String> {
     let at = state_dir.join(MIRROR_FILE);
     let anchor = open_anchor(
         state_dir,
         AnchorRequired {
-            owner: Some(owner),
+            owner: Some(dir_owner),
             mode_mask: Some(0o077),
         },
         StrategyPref::Auto,
@@ -118,6 +120,13 @@ fn read_bindings(etc: &Anchor, config_dir: &Path, owner: u32) -> Result<Bindings
     Ok(bindings)
 }
 
+fn other_config_dir(found: &str) -> String {
+    format!(
+        "maknaed reads its configuration from {}, not {CONFIG_DIR}; policy sync installs only {CONFIG_DIR}/{BINDINGS_FILE}",
+        terminal_safe(found)
+    )
+}
+
 fn install(etc: &Anchor, config_dir: &Path, bytes: &[u8], owner: FileOwner) -> Result<(), String> {
     etc.publish_owned(Path::new(BINDINGS_FILE), None, bytes, Mode(0o640), owner)
         .map(|_| ())
@@ -168,7 +177,10 @@ pub(crate) fn sync(
     terminal: bool,
     out: &mut dyn Write,
 ) -> Result<Outcome, String> {
-    let mirror = read_mirror(state_dir, owners.state_dir)?;
+    let mirror = read_mirror(state_dir, owners.state_dir, owners.mirror)?;
+    if mirror.header.config_dir != CONFIG_DIR {
+        return Err(other_config_dir(&mirror.header.config_dir));
+    }
     let etc = open_anchor_resolved(
         config_dir,
         AnchorRequired {
@@ -178,13 +190,10 @@ pub(crate) fn sync(
         StrategyPref::Auto,
     )
     .map_err(|e| format!("cannot use {}: {e}", config_dir.display()))?;
-    let file = read_bindings(&etc, config_dir, owners.config_dir)?;
+    let file = read_bindings(&etc, config_dir, owners.bindings)?;
     let revision = mirror.header.revision;
     match plan_sync(&mirror, &Section::of(&file), sha256, CONFIG_DIR) {
-        SyncPlan::OtherConfigDir { found } => Err(format!(
-            "maknaed reads its configuration from {}, not {CONFIG_DIR}; policy sync installs only {CONFIG_DIR}/{BINDINGS_FILE}",
-            terminal_safe(&found)
-        )),
+        SyncPlan::OtherConfigDir { found } => Err(other_config_dir(&found)),
         SyncPlan::NothingToInstall => {
             say(out, "bindings.yaml already holds the mirror; nothing to install")?;
             Ok(Outcome::NothingToInstall)
@@ -218,13 +227,11 @@ pub(crate) fn sync(
                 return Ok(Outcome::WouldInstall);
             }
             install(&etc, config_dir, bytes.as_bytes(), owners.file)?;
-            say(
+            let _ = writeln!(
                 out,
-                &format!(
-                    "restored {}/{BINDINGS_FILE} from the mirror at revision {revision}; {RELOAD}",
-                    config_dir.display()
-                ),
-            )?;
+                "restored {}/{BINDINGS_FILE} from the mirror at revision {revision}; {RELOAD}",
+                config_dir.display()
+            );
             Ok(Outcome::Installed)
         }
         SyncPlan::Install {
@@ -251,13 +258,11 @@ pub(crate) fn sync(
                 confirm(conflicts.len(), answer, terminal, out)?;
             }
             install(&etc, config_dir, bytes.as_bytes(), owners.file)?;
-            say(
+            let _ = writeln!(
                 out,
-                &format!(
-                    "installed {}/{BINDINGS_FILE} from the mirror at revision {revision}; {RELOAD}",
-                    config_dir.display()
-                ),
-            )?;
+                "installed {}/{BINDINGS_FILE} from the mirror at revision {revision}; {RELOAD}",
+                config_dir.display()
+            );
             Ok(Outcome::Installed)
         }
     }
@@ -281,9 +286,12 @@ fn kernel_gid() -> Result<u32, String> {
 
 fn production(euid: u32, check: bool) -> Result<Outcome, String> {
     preflight(euid)?;
+    let kernel = crate::reseed::kernel_uid()?;
     let owners = Owners {
-        state_dir: crate::reseed::kernel_uid()?,
+        state_dir: kernel,
+        mirror: kernel,
         config_dir: 0,
+        bindings: 0,
         file: FileOwner {
             uid: 0,
             gid: kernel_gid()?,
@@ -301,12 +309,15 @@ fn production(euid: u32, check: bool) -> Result<Outcome, String> {
     )
 }
 
-pub(crate) fn run(euid: u32, check: bool) -> ExitCode {
-    let r = production(euid, check);
-    if let Err(e) = &r {
-        eprintln!("maknae: {e}");
+fn finish(r: &Result<Outcome, String>, err: &mut dyn Write) -> u8 {
+    if let Err(e) = r {
+        let _ = writeln!(err, "maknae: {}", terminal_safe(e));
     }
-    ExitCode::from(exit_code(&r))
+    exit_code(r)
+}
+
+pub(crate) fn run(euid: u32, check: bool) -> ExitCode {
+    ExitCode::from(finish(&production(euid, check), &mut std::io::stderr()))
 }
 
 #[cfg(test)]
@@ -342,6 +353,23 @@ mod tests {
 
     fn mirror_over(base: &str, live: &str, conflicts: &[BindingEntry]) -> String {
         mirror_in("/etc/maknae", base, live, conflicts)
+    }
+
+    fn own(uid: u32, gid: u32) -> Owners {
+        Owners {
+            state_dir: uid,
+            mirror: uid,
+            config_dir: uid,
+            bindings: uid,
+            file: FileOwner { uid, gid },
+        }
+    }
+
+    fn me() -> Owners {
+        own(
+            nix::unistd::geteuid().as_raw(),
+            nix::unistd::getegid().as_raw(),
+        )
     }
 
     static NEXT: AtomicUsize = AtomicUsize::new(0);
@@ -396,25 +424,28 @@ mod tests {
             answer: &str,
             terminal: bool,
         ) -> (Result<Outcome, String>, String) {
-            let (uid, gid) = (
-                nix::unistd::geteuid().as_raw(),
-                nix::unistd::getegid().as_raw(),
-            );
             let mut out = Vec::new();
-            let r = sync(
+            let r = self.sync_with(me(), check, answer, terminal, &mut out);
+            (r, String::from_utf8(out).unwrap())
+        }
+
+        fn sync_with(
+            &self,
+            owners: Owners,
+            check: bool,
+            answer: &str,
+            terminal: bool,
+            out: &mut dyn std::io::Write,
+        ) -> Result<Outcome, String> {
+            sync(
                 &self.state_dir(),
                 &self.config_dir(),
-                Owners {
-                    state_dir: uid,
-                    config_dir: uid,
-                    file: FileOwner { uid, gid },
-                },
+                owners,
                 check,
                 &mut answer.as_bytes(),
                 terminal,
-                &mut out,
-            );
-            (r, String::from_utf8(out).unwrap())
+                out,
+            )
         }
 
         fn sync(&self, check: bool, answer: &str, terminal: bool) -> Result<Outcome, String> {
@@ -711,11 +742,7 @@ mod tests {
         let r = sync(
             &fx.state_dir(),
             &fx.config_dir(),
-            Owners {
-                state_dir: uid,
-                config_dir: uid,
-                file: FileOwner { uid, gid },
-            },
+            own(uid, gid),
             false,
             &mut answer,
             false,
@@ -902,9 +929,6 @@ mod tests {
 
     #[test]
     fn run_as_a_non_root_caller_exits_refused() {
-        if nix::unistd::geteuid().is_root() {
-            return;
-        }
         assert_eq!(run(1000, false), ExitCode::from(2));
         assert_eq!(run(1000, true), ExitCode::from(2));
     }
@@ -920,5 +944,164 @@ mod tests {
         let e = fx.sync(false, "", false).unwrap_err();
         assert!(e.starts_with("cannot read "), "{e}");
         assert_eq!(fx.read_config("bindings.yaml"), big);
+    }
+
+    struct FailsOnceInstalled(PathBuf, Option<String>);
+
+    impl std::io::Write for FailsOnceInstalled {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            if std::fs::read_to_string(&self.0).ok() != self.1 {
+                return Err(std::io::ErrorKind::BrokenPipe.into());
+            }
+            Ok(b.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_closed_output_after_the_install_still_reports_it_installed() {
+        for before in [Some(BASE), None] {
+            let fx = Fx::new();
+            if let Some(body) = before {
+                fx.config("bindings.yaml", body);
+            }
+            fx.mirror(&mirror_over(BASE, LIVE, &[]));
+            let mut out = FailsOnceInstalled(
+                fx.config_dir().join("bindings.yaml"),
+                before.map(str::to_string),
+            );
+            let r = fx.sync_with(me(), false, "", false, &mut out);
+            assert_eq!(exit_code(&r), 0, "{before:?}: {r:?}");
+            assert!(fx
+                .read_config("bindings.yaml")
+                .contains("    - uid: 4242\n"));
+        }
+    }
+
+    #[test]
+    fn every_owner_requirement_refuses_a_stranger() {
+        type Pick = fn(&mut Owners, u32);
+        type Expect = fn(&Fx) -> String;
+        let cases: [(&str, Pick, Expect); 4] = [
+            (
+                "state_dir",
+                |o, u| o.state_dir = u,
+                |fx| {
+                    format!(
+                        "cannot use the state directory {}: ",
+                        fx.state_dir().display()
+                    )
+                },
+            ),
+            (
+                "mirror",
+                |o, u| o.mirror = u,
+                |fx| {
+                    format!(
+                        "cannot read the mirror {}: ",
+                        fx.state_dir().join(MIRROR_FILE).display()
+                    )
+                },
+            ),
+            (
+                "config_dir",
+                |o, u| o.config_dir = u,
+                |fx| format!("cannot use {}: ", fx.config_dir().display()),
+            ),
+            (
+                "bindings",
+                |o, u| o.bindings = u,
+                |fx| {
+                    format!(
+                        "cannot read {}: ",
+                        fx.config_dir().join("bindings.yaml").display()
+                    )
+                },
+            ),
+        ];
+        for (what, pick, want) in cases {
+            for present in [true, false] {
+                if what == "bindings" && !present {
+                    continue;
+                }
+                let fx = Fx::new();
+                if present {
+                    fx.config("bindings.yaml", BASE);
+                }
+                fx.mirror(&mirror_over(BASE, LIVE, &[]));
+                let mut owners = me();
+                pick(&mut owners, nix::unistd::geteuid().as_raw() + 1);
+                let r = fx.sync_with(owners, false, "", false, &mut Vec::new());
+                assert_eq!(exit_code(&r), 2, "{what} {present}: {r:?}");
+                let e = r.unwrap_err();
+                assert!(e.starts_with(&want(&fx)), "{what} {present}: {e}");
+                let p = fx.config_dir().join("bindings.yaml");
+                assert_eq!(p.exists(), present, "{what}");
+                if present {
+                    assert_eq!(fx.read_config("bindings.yaml"), BASE, "{what}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_installed_file_takes_the_given_owner_and_group() {
+        let (uid, egid) = (
+            nix::unistd::geteuid().as_raw(),
+            nix::unistd::getegid().as_raw(),
+        );
+        let groups = std::process::Command::new("id").arg("-G").output().unwrap();
+        let gid = String::from_utf8(groups.stdout)
+            .unwrap()
+            .split_whitespace()
+            .filter_map(|g| g.parse::<u32>().ok())
+            .find(|g| *g != egid && *g != uid)
+            .unwrap_or(egid);
+        let fx = Fx::new();
+        fx.config("bindings.yaml", BASE);
+        fx.mirror(&mirror_over(BASE, LIVE, &[]));
+        let mut owners = me();
+        owners.file = FileOwner { uid, gid };
+        let r = fx.sync_with(owners, false, "", false, &mut Vec::new());
+        assert!(matches!(r, Ok(Outcome::Installed)), "{r:?}");
+        let md = std::fs::symlink_metadata(fx.config_dir().join("bindings.yaml")).unwrap();
+        assert_eq!((md.uid(), md.gid()), (uid, gid));
+    }
+
+    #[test]
+    fn errors_reach_the_terminal_escaped() {
+        let fx = Fx::new();
+        fx.config("bindings.yaml", BASE);
+        fx.mirror(&mirror_over(BASE, LIVE, &[]).replace("  adversary:", "  \"x\\ey\":"));
+        let r = fx.sync(false, "", false);
+        assert!(r.as_ref().unwrap_err().contains('\u{1b}'), "{r:?}");
+        let mut err = Vec::new();
+        assert_eq!(finish(&r, &mut err), 2);
+        let err = String::from_utf8(err).unwrap();
+        assert!(
+            err.starts_with("maknae: the mirror is not valid: "),
+            "{err}"
+        );
+        assert!(err.contains("x\\u{1b}y"), "{err}");
+        assert!(!err.contains('\u{1b}'), "{err}");
+        assert_eq!(finish(&Ok(Outcome::Installed), &mut Vec::new()), 0);
+        let mut quiet = Vec::new();
+        finish(&Ok(Outcome::NothingToInstall), &mut quiet);
+        assert!(quiet.is_empty());
+    }
+
+    #[test]
+    fn another_configuration_directory_is_refused_before_etc_is_opened() {
+        let fx = Fx::new();
+        std::fs::remove_dir(fx.config_dir()).unwrap();
+        fx.mirror(&mirror_in("/opt/maknae/etc", BASE, LIVE, &[]));
+        assert_eq!(
+            fx.sync(false, "", false).unwrap_err(),
+            "maknaed reads its configuration from /opt/maknae/etc, not /etc/maknae; policy sync installs only /etc/maknae/bindings.yaml"
+        );
+        assert!(!fx.config_dir().exists());
     }
 }
