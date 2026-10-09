@@ -105,7 +105,7 @@ Paste the block and start again. Once the store's bindings come from `bindings.y
 
 **A `bindings.yaml` you created before this release is kept.** dpkg asks whether to keep it, and keeping it is the default; RPM and macOS keep it without asking. Check that it has `schema_version: 1` and is `root:_maknae 0640`.
 
-**Keep your `bindings.yaml` when dpkg asks, on this and every later upgrade.** Answering "install the package maintainer's version" replaces your file with the shipped one, which has no `bindings:` key, and the package then restarts `maknaed`. The enforced bindings stand and the start records the file as lost ([Sync back (#491)](#sync-back-491)); restore your file from dpkg's `bindings.yaml.dpkg-old`, or run `sudo maknae policy sync`, and reload.
+**Keep your `bindings.yaml` when dpkg asks, on this and every later upgrade.** Answering "install the package maintainer's version" replaces your file with the shipped one, which has no `bindings:` key, and the package then restarts `maknaed`. The enforced bindings stand and the start records the file as lost ([Sync back (#491)](#sync-back-491)); restore your file from dpkg's `bindings.yaml.dpkg-old`, or run `sudo maknae policy sync`, and reload. That holds after the first start of this version; on that start a missing or keyless file over explicit bindings refuses.
 
 **A `bindings.yaml` you delete stays deleted across upgrades.** dpkg does not reinstall a conffile you removed, and the RPM and macOS packages create the file only on a host with no kernel graph store. Over explicit bindings the daemon keeps enforcing them and reports the file lost until you restore it with `sudo maknae policy sync` ([configuration §2.3](configuration.md#23-bindingsyaml)).
 

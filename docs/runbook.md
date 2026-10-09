@@ -1155,11 +1155,13 @@ bindings:
 
 The store keeps three values: the **base**, the `bindings:` section of the last `bindings.yaml` `maknaed` loaded; the **live** section, the base with every live edit applied, which is what `maknaed` enforces; and the **conflicts**. At every start and reload, `maknaed` compares `bindings.yaml` with them entry by entry. An entry is a username, or a `uid: <n>` under `adversary`, and its value is the roles that list it.
 
+**A live edit needs explicit bindings.** While no `bindings:` key is enforced, a live edit is refused with `bindings.yaml has no bindings: key; a live identity edit needs explicit bindings`, and nothing changes; a daemon whose running graph holds no merge state refuses one with `the running graph carries no sync base`.
+
 | The entry | Result |
 |---|---|
 | is unchanged in `bindings.yaml` since the base | The live value stands, live edits included. |
 | was changed by root and by no live edit | `bindings.yaml`'s value. |
-| was changed by root to the value a live edit gave it | That value. This is how a synced file is recognised: the reload records `adopted`, and no root edit. |
+| was changed by root to the value a live edit gave it | That value. This is how a synced file is recognised: a load whose only changes are such entries records `adopted`, with no root edit. |
 | was changed by root and, differently, by a live edit | A **conflict**. The entry fails closed: contained if either side contains it, and otherwise listed under no role, which denies. It is recorded, and counted in `maknae status`, until it clears. If `bindings.yaml` already holds the fail-closed value, there is no conflict. |
 
 A conflict clears when root edits that entry again, and root's new value wins, or when `bindings.yaml` comes to hold the fail-closed value, which a sync does. After the merge the base is `bindings.yaml`'s section and the live section is the merged one. An entry is **unsynced** while its live value differs from the base.
