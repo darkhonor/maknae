@@ -213,6 +213,8 @@ files = [
   # #489: the canonical JSON each authz.yaml section's digest is taken over; a wrong
   # byte makes an unchanged section look edited, or an edited one look unchanged.
   "crates/maknae-config/src/value.rs",
+  # #490: the persisted baseline's form; a mis-decoded section runs a configuration nobody accepted.
+  "crates/maknae-config/src/baseline_doc.rs",
   "crates/maknae-audit-append/src/record.rs",
   # #172: the Egress seam — the DurableEgressIntent type gate, the reply admission, the
   # outcome record derivation. The write-ahead order is a type here, so this file is T1.
@@ -286,6 +288,9 @@ files = [
   "crates/maknae-agent/src/budget.rs",
   "crates/maknae-sys/src/reply.rs",
   "crates/maknae-sys/src/macos.rs",
+  # #490: whether a prepared audit trail carries the append-only flag; a false "yes" moves the trail to a file the daemon can rewrite.
+  "crates/maknae-sys/src/flags.rs",
+  "crates/maknae-sys/src/linux.rs",
   # The kernel graph's schema and codec (#485): a wrong check loads a forged enforcement state.
   "crates/maknae-graph/src/bytes.rs",
   "crates/maknae-graph/src/format.rs",
@@ -294,6 +299,14 @@ files = [
   "crates/maknae-graph/src/kernel.rs",
   "crates/maknae-graph/src/record.rs",
   "crates/maknae-graph/src/schema.rs",
+  # #490: the accepted baseline as the store holds it; a mis-read section runs what nobody accepted.
+  "crates/maknae-graph/src/baseline.rs",
+  # #490: which baseline runs, what is pending and what an accept names; a wrong arm runs or accepts what nobody saw.
+  "crates/maknae-kernel/src/baseline.rs",
+  # #490: the one validator boot and accept share; a gap here accepts a baseline that cannot start.
+  "crates/maknae-kernel/src/baseline_check.rs",
+  # #490: what an accept swaps in for the next request; a stale copy serves a baseline that is no longer accepted.
+  "crates/maknae-kernel/src/live.rs",
   # The kernel graph store at rest (#488): a wrong check loads a forged, rolled-back or undecryptable enforcement state.
   "crates/maknae-state/src/anchor.rs",
   "crates/maknae-state/src/envelope.rs",
@@ -449,6 +462,10 @@ path = "crates/maknae-security/src/request.rs"
 why = "type declarations (subject/resource/action/context/request) + derives; no hand-written executable logic that could turn a deny into a permit"
 
 [[t3]]
+path = "crates/maknae-kernel/src/test_fixtures.rs"
+why = "test-only fixtures shared by the kernel's module test suites (the gate requires `#[cfg(test)]` to be followed by a line beginning `mod `, which rules out `pub(crate) mod tests`); declared under `#[cfg(test)]` in lib.rs, so it has no production regions"
+
+[[t3]]
 path = "crates/maknae-kernel/src/lib.rs"
 why = "module declarations + re-exports + PRIVILEGED_MARKER; the boot logic is boot.rs (T1)"
 
@@ -586,6 +603,10 @@ path = "crates/maknae-vault/src/resolver.rs"
 why = "ArcSwapOption<CertifiedKey> ResolvesServerCert (Stage 2); TLS handshake hot path"
 
 [[t3]]
+path = "crates/maknae-vault/src/accounts.rs"
+why = "NSS lookups; the rules they feed are maknae-config's T1 resolve_readers"
+
+[[t3]]
 path = "crates/maknae-vault/src/socket.rs"
 why = "pathname-UDS bind/accept/connect + fs hardening (Stage 2); I/O"
 
@@ -622,6 +643,10 @@ why = "AuditSink open/append — file-open + blocking-write I/O; the record shap
 [[t3]]
 path = "crates/maknae-audit-append/src/error.rs"
 why = "AuditError enum + Display/Error declarations only; no decision logic"
+
+[[t3]]
+path = "crates/maknae-kernel/src/host_env.rs"
+why = "#490: the validator's host environment — the egress bounds file, NSS, the prepared-trail open and the socket probes; the rules they feed are baseline_check.rs (T1). Mutation-excluded (mutants.toml)"
 
 [[t3]]
 path = "crates/maknae-kernel/src/groupres.rs"
@@ -681,6 +706,10 @@ why = "the operator-context helper — self-verification and the CLI configurati
 [[t3]]
 path = "bins/maknae/src/reseed.rs"
 why = "#488: sudo maknae reseed — bin code, T3 per the tiering constraint. It writes one marker through maknae-io's anchored publish (T1 in maknae-io), refusing anything already at the marker path; the marker's authority is decided by the daemon in maknae-state store.rs (T1). The pieces carry real-file unit tests: the umask-077 mode in a child process, a planted symlink left untouched, a pending marker left as is, the root preflight and the directory requirement"
+
+[[t3]]
+path = "bins/maknae/src/audit_readers.rs"
+why = "#500: sudo maknae audit-readers — bin code, T3 per the tiering constraint. It loads maknae.yaml and config.d through maknae-config's root-owned loader and validates audit.readers through resolve_readers (both T1 in maknae-config) over maknae-vault's NssAccounts. The pieces carry unit tests: the root preflight, the validation over a fake account database, the one-name-per-line output contract, a refused non-root-owned file, and the --stopped check against a real held directory lock"
 
 [[t3]]
 path = "bins/maknae/src/enroll/keychain_write.rs"
@@ -807,6 +836,11 @@ path = "crates/maknae-sys/src/macos.rs"
 env_bound = "target_os:macos"
 why = "the getattrlist FFI call (ADR-0027) compiles only on macOS, so the Linux CI lane has no regions for it. Its floor is enforced where coverage-tiers.sh runs on a macOS host (the opt-in pre-push hook and local runs); no CI lane enforces it. The parser it calls, reply.rs, is plain T1 and CI-enforced"
 
+[[env_bound_override]]
+path = "crates/maknae-sys/src/linux.rs"
+env_bound = "target_os:linux"
+why = "the FS_IOC_GETFLAGS ioctl (ADR-0027) compiles only on Linux, so a macOS coverage run has no regions for it. The Linux CI lane enforces its floor; the flag parsers it feeds, flags.rs, are plain T1 on both platforms"
+
 [[t3]]
 path = "crates/maknae-io/src/testutil.rs"
 why = "test-only helper shared between module test suites (it exists because the gate requires `#[cfg(test)]` to be followed by a line beginning `mod `, which rules out `pub(crate) mod tests`). Report-only rather than [t1] because its production split — skip_or_fail and opted_out — measures 63.64%, below the 95% floor: the opt-out branch is only reachable by mutating MAKNAE_IO_ALLOW_SKIPPED_LANES for the whole process, which is not safe under the parallel harness. The FAIL-CLOSED branch, which is the one that matters, IS controlled by skip_or_fail_panics_when_the_opt_out_is_absent"
@@ -833,7 +867,7 @@ why = "IoError/IoKind enums with Display only (there is no From impl, despite wh
 
 [[t3]]
 path = "crates/maknae-sys/src/lib.rs"
-why = "module declarations and the macOS re-export only; no executable production regions — same treatment as maknae-io/src/lib.rs"
+why = "module declarations and re-exports only; no executable production regions — same treatment as maknae-io/src/lib.rs"
 
 # KNOWN IMPRECISION in the exceptions below, no floor impact.
 #

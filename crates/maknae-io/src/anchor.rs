@@ -25,6 +25,14 @@ pub enum Strategy {
     Portable,
 }
 
+/// What [`Anchor::entry_identity`] reports about one directory entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EntryId {
+    pub dev: u64,
+    pub ino: u64,
+    pub socket: bool,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct Outcome<T> {
     pub value: T,
@@ -242,7 +250,7 @@ impl Anchor {
     /// Re-judge the PINNED directory -- the fd this anchor holds -- against a
     /// requirement stricter than the one it was opened under. `fstat` on the held
     /// fd, never a path: a caller that learns mid-load it needs a stronger
-    /// guarantee (`maknae-config`'s root-required sections, #243) asks the same
+    /// guarantee (`maknae-config`'s root-owned sources, #243) asks the same
     /// inode rather than re-opening the path, which a replaceable top-level
     /// symlink could point at a different tree between the two opens (codex
     /// review round 3, 2026-09-07). The error names the anchor's path.
@@ -687,6 +695,52 @@ impl Anchor {
         })
     }
 
+    /// The identity of the entry `name` names in this directory, never following
+    /// a symlink; `None` when there is no such entry.
+    // The stat field types differ on macOS, where these casts are not no-ops.
+    #[allow(clippy::unnecessary_cast)]
+    pub fn entry_identity(&self, name: &std::ffi::OsStr) -> Result<Option<EntryId>, IoError> {
+        let name = self.one_component(name)?;
+        match syscall::fstatat_nofollow(&self.fd, name) {
+            Ok(st) => Ok(Some(EntryId {
+                dev: st.st_dev as u64,
+                ino: st.st_ino as u64,
+                socket: st.st_mode & nix::libc::S_IFMT == nix::libc::S_IFSOCK,
+            })),
+            Err(nix::errno::Errno::ENOENT) => Ok(None),
+            Err(e) => Err(crate::checks::map_errno_no_disambiguation(
+                e,
+                &self.path.join(name),
+            )),
+        }
+    }
+
+    /// Remove the socket `name` only while it is still the entry `expected`
+    /// identified; `Ok(false)` removes nothing.
+    pub fn remove_socket_if(
+        &self,
+        name: &std::ffi::OsStr,
+        expected: EntryId,
+    ) -> Result<bool, IoError> {
+        let name = self.one_component(name)?;
+        if !expected.socket || self.entry_identity(name)? != Some(expected) {
+            return Ok(false);
+        }
+        nix::unistd::unlinkat(&self.fd, name, nix::unistd::UnlinkatFlags::NoRemoveDir)
+            .map(|()| true)
+            .map_err(|e| crate::checks::map_errno_no_disambiguation(e, &self.path.join(name)))
+    }
+
+    fn one_component<'a>(&self, name: &'a std::ffi::OsStr) -> Result<&'a std::ffi::OsStr, IoError> {
+        let mut parts = Path::new(name).components();
+        match (parts.next(), parts.next()) {
+            (Some(std::path::Component::Normal(n)), None) if n == name => Ok(n),
+            _ => Err(IoError::EscapesAnchor {
+                path: self.path.join(name),
+            }),
+        }
+    }
+
     /// Shared prologue for the file verbs: normalize, run the dominating pre-check,
     /// and split off the final component. A zero-component remainder is refused here —
     /// only `enumerate` treats it as the anchor itself.
@@ -760,31 +814,28 @@ mod tests {
 
     #[test]
     fn resolve_dir_needs_no_read_permission_on_the_directory() {
-        use std::os::unix::fs::PermissionsExt;
-        if nix::unistd::Uid::effective().is_root() {
-            crate::testutil::skip_or_fail(
-                "resolve_dir_needs_no_read_permission_on_the_directory",
-                "running as root, which ignores the 0o100 permission bits the \
-                 fixture depends on",
-            );
-            return;
-        }
-        let base = std::env::temp_dir().join(format!("rd_search_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        let dir = base.join("searchonly");
-        std::fs::create_dir_all(&dir).unwrap();
-        let readable = super::resolve_dir(&dir).expect("a readable dir resolves");
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o100)).unwrap();
-        let readable_open = crate::syscall::open_parent_by_path(&dir);
-        let search_only = super::resolve_dir(&dir);
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let _ = std::fs::remove_dir_all(&base);
+        crate::testutil::unprivileged(
+            "anchor::tests::resolve_dir_needs_no_read_permission_on_the_directory",
+            || {
+                use std::os::unix::fs::PermissionsExt;
+                let base = std::env::temp_dir().join(format!("rd_search_{}", std::process::id()));
+                let _ = std::fs::remove_dir_all(&base);
+                let dir = base.join("searchonly");
+                std::fs::create_dir_all(&dir).unwrap();
+                let readable = super::resolve_dir(&dir).expect("a readable dir resolves");
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o100)).unwrap();
+                let readable_open = crate::syscall::open_parent_by_path(&dir);
+                let search_only = super::resolve_dir(&dir);
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+                let _ = std::fs::remove_dir_all(&base);
 
-        assert!(
-            readable_open.is_err(),
-            "the fixture must refuse a read open"
+                assert!(
+                    readable_open.is_err(),
+                    "the fixture must refuse a read open"
+                );
+                assert_eq!(search_only.expect("a search-only dir resolves"), readable);
+            },
         );
-        assert_eq!(search_only.expect("a search-only dir resolves"), readable);
     }
 
     /// Fail-closed: a path with no directory behind it is an error, never a
@@ -808,28 +859,26 @@ mod tests {
 
     #[test]
     fn resolve_dir_needs_no_permission_on_the_directory_itself() {
-        if nix::unistd::Uid::effective().is_root() {
-            crate::testutil::skip_or_fail(
-                "resolve_dir_needs_no_permission_on_the_directory_itself",
-                "running as root, which ignores the 0o000 permission bits the fixture depends on",
-            );
-            return;
-        }
-        let base = std::env::temp_dir().join(format!("rd_noperm_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        let dir = base.join("noperm");
-        std::fs::create_dir_all(&dir).unwrap();
-        let open = super::resolve_dir(&dir).expect("an open directory resolves");
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let refused = crate::syscall::open_parent_by_path(&dir);
-        let closed = super::resolve_dir(&dir);
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let _ = std::fs::remove_dir_all(&base);
+        crate::testutil::unprivileged(
+            "anchor::tests::resolve_dir_needs_no_permission_on_the_directory_itself",
+            || {
+                let base = std::env::temp_dir().join(format!("rd_noperm_{}", std::process::id()));
+                let _ = std::fs::remove_dir_all(&base);
+                let dir = base.join("noperm");
+                std::fs::create_dir_all(&dir).unwrap();
+                let open = super::resolve_dir(&dir).expect("an open directory resolves");
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+                let refused = crate::syscall::open_parent_by_path(&dir);
+                let closed = super::resolve_dir(&dir);
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+                let _ = std::fs::remove_dir_all(&base);
 
-        assert!(refused.is_err(), "the fixture must refuse a read open");
-        assert_eq!(
-            closed.expect("a directory with no permission bits resolves"),
-            open
+                assert!(refused.is_err(), "the fixture must refuse a read open");
+                assert_eq!(
+                    closed.expect("a directory with no permission bits resolves"),
+                    open
+                );
+            },
         );
     }
 
@@ -997,11 +1046,6 @@ mod tests {
     /// the only way to observe this arm without root.
     #[test]
     fn read_absolute_refuses_a_target_owned_by_another_uid() {
-        assert_ne!(
-            nix::unistd::geteuid().as_raw(),
-            0,
-            "fixture requires a non-root test user"
-        );
         let d = dir(0o750);
         let f = d.path().join("owned.yaml");
         std::fs::write(&f, b"core:\n  a: 1\n").unwrap();
@@ -1247,11 +1291,6 @@ mod tests {
 
     #[test]
     fn anchor_required_owner_refused() {
-        assert_ne!(
-            nix::unistd::geteuid().as_raw(),
-            0,
-            "fixture requires a non-root test user"
-        );
         let d = dir(0o750);
         let a = d.path().join("cfg");
         std::fs::create_dir(&a).unwrap();
@@ -2244,49 +2283,45 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn execute_only_descendant_separates_the_two_lanes() {
-        // root ignores permission bits, so the discriminator disappears under it.
-        if nix::unistd::Uid::effective().is_root() {
-            crate::testutil::skip_or_fail(
-                "execute_only_descendant_separates_the_two_lanes",
-                "running as root, which ignores the 0o311 permission bits the \
-                 fixture depends on",
-            );
-            return;
-        }
-        let d = dir(0o750);
-        let a = anchor_pref(d.path(), "cfg", StrategyPref::Auto);
-        let sub = a.path.join("config.d");
-        std::fs::create_dir(&sub).unwrap();
-        std::fs::write(sub.join("10-x.yaml"), b"lane").unwrap();
-        // Execute-only: traversable, not readable.
-        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o311)).unwrap();
+        crate::testutil::unprivileged(
+            "anchor::tests::execute_only_descendant_separates_the_two_lanes",
+            || {
+                let d = dir(0o750);
+                let a = anchor_pref(d.path(), "cfg", StrategyPref::Auto);
+                let sub = a.path.join("config.d");
+                std::fs::create_dir(&sub).unwrap();
+                std::fs::write(sub.join("10-x.yaml"), b"lane").unwrap();
+                // Execute-only: traversable, not readable.
+                std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o311)).unwrap();
 
-        if a.probed_capability() != Strategy::Openat2 {
-            crate::testutil::skip_or_fail(
-                "execute_only_descendant_separates_the_two_lanes",
-                "openat2 is not available, so the two lanes are not discriminated",
-            );
-            return;
-        }
+                if a.probed_capability() != Strategy::Openat2 {
+                    crate::testutil::skip_or_fail(
+                        "execute_only_descendant_separates_the_two_lanes",
+                        "openat2 is not available, so the two lanes are not discriminated",
+                    );
+                    return;
+                }
 
-        let out = a
-            .read(Path::new("config.d/10-x.yaml"), None, t_req())
-            .expect("openat2 traverses an execute-only directory");
-        assert_eq!(out.effective_strategy, Strategy::Openat2);
-        assert_eq!(&out.value[..], b"lane");
+                let out = a
+                    .read(Path::new("config.d/10-x.yaml"), None, t_req())
+                    .expect("openat2 traverses an execute-only directory");
+                assert_eq!(out.effective_strategy, Strategy::Openat2);
+                assert_eq!(&out.value[..], b"lane");
 
-        // Same anchor, same path, portable lane forced: the walk must open the
-        // directory for reading and cannot.
-        let p = anchor_pref(d.path(), "cfg", StrategyPref::ForcePortable);
-        let err = p
-            .read(Path::new("config.d/10-x.yaml"), None, t_req())
-            .expect_err("portable walk must be refused by an execute-only directory");
-        assert!(
-            matches!(err, IoError::Io { .. }),
-            "expected EACCES-backed refusal, got {err:?}"
+                // Same anchor, same path, portable lane forced: the walk must open the
+                // directory for reading and cannot.
+                let p = anchor_pref(d.path(), "cfg", StrategyPref::ForcePortable);
+                let err = p
+                    .read(Path::new("config.d/10-x.yaml"), None, t_req())
+                    .expect_err("portable walk must be refused by an execute-only directory");
+                assert!(
+                    matches!(err, IoError::Io { .. }),
+                    "expected EACCES-backed refusal, got {err:?}"
+                );
+
+                std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o750)).unwrap();
+            },
         );
-
-        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o750)).unwrap();
     }
 
     /// ForcePortable must win over an available capability, on every platform.
@@ -3014,5 +3049,145 @@ mod tests {
         second
             .try_lock_exclusive()
             .expect("the lock is free once its guard drops");
+    }
+
+    // --- #490: the socket probe's own entry ----------------------------------
+    fn bound(a: &Anchor, name: &str) -> std::os::unix::net::UnixListener {
+        std::os::unix::net::UnixListener::bind(a.path.join(name)).unwrap()
+    }
+
+    #[test]
+    fn a_bound_socket_is_identified_and_removed() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "s");
+        let name = std::ffi::OsStr::new("p.sock");
+        assert_eq!(a.entry_identity(name).unwrap(), None);
+        let l = bound(&a, "p.sock");
+        let id = a.entry_identity(name).unwrap().expect("the bound entry");
+        assert!(id.socket);
+        let st = std::fs::symlink_metadata(a.path.join("p.sock")).unwrap();
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!((id.dev, id.ino), (st.dev(), st.ino()));
+        drop(l);
+        assert!(a.remove_socket_if(name, id).unwrap());
+        assert!(!a.path.join("p.sock").exists());
+        assert!(!a.remove_socket_if(name, id).unwrap(), "already gone");
+    }
+
+    #[test]
+    fn a_regular_file_is_never_removed_as_a_socket() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "s");
+        std::fs::write(a.path.join("f"), "x").unwrap();
+        let name = std::ffi::OsStr::new("f");
+        let id = a.entry_identity(name).unwrap().unwrap();
+        assert!(!id.socket);
+        assert!(!a.remove_socket_if(name, id).unwrap());
+        assert!(!a
+            .remove_socket_if(name, EntryId { socket: true, ..id })
+            .unwrap());
+        assert!(a.path.join("f").exists());
+    }
+
+    #[test]
+    fn a_socket_replaced_after_it_was_identified_is_not_removed() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "s");
+        let name = std::ffi::OsStr::new("p.sock");
+        let first = bound(&a, "p.sock");
+        let id = a.entry_identity(name).unwrap().unwrap();
+        drop(first);
+        std::fs::rename(a.path.join("p.sock"), a.path.join("held.sock")).unwrap();
+        let _second = bound(&a, "p.sock");
+        let now = a.entry_identity(name).unwrap().unwrap();
+        assert_ne!(now.ino, id.ino, "the replacement is a new inode");
+        assert!(!a.remove_socket_if(name, id).unwrap());
+        assert!(a.path.join("p.sock").exists());
+        assert!(!a
+            .remove_socket_if(
+                name,
+                EntryId {
+                    dev: now.dev.wrapping_add(1),
+                    ..now
+                }
+            )
+            .unwrap());
+        assert!(a.remove_socket_if(name, now).unwrap());
+    }
+
+    #[test]
+    fn a_symlink_is_identified_as_itself_and_not_followed() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "s");
+        let _l = bound(&a, "real.sock");
+        std::os::unix::fs::symlink(a.path.join("real.sock"), a.path.join("link")).unwrap();
+        let name = std::ffi::OsStr::new("link");
+        let id = a.entry_identity(name).unwrap().unwrap();
+        assert!(!id.socket, "the link, not its target");
+        assert!(!a.remove_socket_if(name, id).unwrap());
+    }
+
+    #[test]
+    fn an_entry_name_is_one_component() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "s");
+        std::fs::create_dir(a.path.join("sub")).unwrap();
+        let _l = bound(&a, "sub/p.sock");
+        for bad in ["sub/p.sock", "../s", ".", "..", "", "./p.sock", "p.sock/"] {
+            let name = std::ffi::OsStr::new(bad);
+            assert!(
+                matches!(a.entry_identity(name), Err(IoError::EscapesAnchor { .. })),
+                "{bad}"
+            );
+            let any = EntryId {
+                dev: 0,
+                ino: 0,
+                socket: true,
+            };
+            assert!(
+                matches!(
+                    a.remove_socket_if(name, any),
+                    Err(IoError::EscapesAnchor { .. })
+                ),
+                "{bad}"
+            );
+        }
+        assert!(a.path.join("sub/p.sock").exists());
+    }
+
+    #[test]
+    fn an_entry_that_cannot_be_examined_is_an_error_not_an_absence() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "s");
+        let long = "n".repeat(300);
+        let name = std::ffi::OsStr::new(&long);
+        assert!(matches!(a.entry_identity(name), Err(IoError::Io { .. })));
+        let any = EntryId {
+            dev: 0,
+            ino: 0,
+            socket: true,
+        };
+        assert!(matches!(
+            a.remove_socket_if(name, any),
+            Err(IoError::Io { .. })
+        ));
+    }
+
+    #[test]
+    fn a_socket_the_directory_forbids_removing_is_an_error() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "s");
+        let name = std::ffi::OsStr::new("p.sock");
+        drop(bound(&a, "p.sock"));
+        let id = a.entry_identity(name).unwrap().unwrap();
+        std::fs::set_permissions(&a.path, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let removed = a.remove_socket_if(name, id);
+        std::fs::set_permissions(&a.path, std::fs::Permissions::from_mode(0o750)).unwrap();
+        if nix::unistd::geteuid().is_root() {
+            assert_eq!(removed, Ok(true), "root's DAC override removes it");
+        } else {
+            assert!(matches!(removed, Err(IoError::Io { .. })), "{removed:?}");
+            assert!(a.path.join("p.sock").exists());
+        }
     }
 }

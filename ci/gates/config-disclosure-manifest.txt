@@ -51,6 +51,7 @@ omit	vault.insecure_plaintext_secret_path	PRESENCE says this host keeps an AppRo
 omit	core.handling	PRESENCE says this deployment configured an above-baseline classification ceiling (prefix)
 omit	audit.au3_1	deployer-authored sub-key NAMES with no schema; a path allowlist cannot classify what it cannot enumerate (prefix)
 mask	audit.siem	an offload endpoint with no schema, no validator and no consumer; common shapes embed a credential in the URL
+mask	audit.readers	the accounts granted read access to the trail; naming them names who to target for it (#500)
 omit	lake	registered but INERT (docs/configuration.md §5): keys and shape unvalidated, deployer-authored, unenumerable — same condition as audit.au3_1 (prefix)
 always	status.version	the daemon's own version; an operator debugging needs it and any peer that handshook knows the protocol already
 always	status.protocol_version	every peer that completed a handshake already has it
@@ -60,6 +61,12 @@ always	status.classification_policy	which classification SYSTEM ranked a ceiling
 always	status.kernel_graph_revision	the kernel graph store's revision counter; no key, digest or content
 always	status.kernel_graph_anchor	the rollback-anchor state at boot (seeded, reseeded, verified, advanced, rollback-anchor-unavailable)
 always	status.identity_problem_counts	how many identity events of each kind the last applied load produced (#496): per-subject problems, releases of a containment, and a promotion of the enrolled principal, as fixed "<kind>=<count>" entries: counts only, never a name, uid or role; which subjects are affected is admin.subject.list's to disclose
+always	status.baseline_pending	how many baseline change sets are pending and their class (live, restart or invalid) (#490): never a section name, a hash or a value; which sections changed is admin.baseline.show's to disclose
+always	baseline.source	which source proposed the change set (#490): a fixed token
+always	baseline.hash	the change set's sha256 (#490): what an accept must name; derived from the values, discloses none of them; this reply is the only place the full hash appears (never status, the journal or the trail)
+always	baseline.state	none, pending, invalid, accepted or stale (#490): fixed kernel vocabulary
+always	baseline.apply	live or restart (#490): fixed kernel vocabulary
+always	baseline.changes	one line per changed leaf rendered through effective_view's classifier (disclose, mask as <value set>, any suppressed change as one anonymous "a suppressed setting changed (not disclosed)" line); never a raw value the classifier did not clear
 always	binding.role	the policy-file role token an operator would grep for
 always	binding.members	the identities bound to it; the answer admin.subject.list exists to give
 always	binding.uid	the subject's uid when the last applied load knew one (#496); the same id members spells as uid:N, and also given for a subject that holds no role

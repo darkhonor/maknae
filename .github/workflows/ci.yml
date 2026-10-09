@@ -184,6 +184,8 @@ jobs:
         run: python3 ci/gates/platform-gated.py check . && python3 ci/gates/tests/platform-gated/run.py
       - name: Gate — mutation gate wiring fixtures (#443)
         run: python3 ci/gates/tests/mutation-gate/run.py
+      - name: Gate — the packages' audit.readers grant refuses hostile helper output (#500)
+        run: bash ci/gates/tests/reader-grant/run.sh
       - name: Gate — every mktemp in the gates names its parent (macOS ignores TMPDIR otherwise)
         run: ci/gates/scratch-lint.sh
       - name: Gate — verb-vocabulary drift (#67)

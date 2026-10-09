@@ -119,15 +119,15 @@ async fn audit_failure_withholds_response() {
         default_cfg(),
         serde_json::json!({}),
         authz.0.clone(),
-        std::sync::Arc::new(Default::default()),
+        std::sync::Arc::new(maknae_kernel::LiveConfig::new(Default::default(), None)),
         std::sync::Arc::new("test-backend".to_string()),
         std::sync::Arc::new("US".to_string()),
-        std::sync::Arc::new(None),
         std::sync::Arc::new(None),
         maknae_kernel::unavailable_egress(),
         authz.1,
         maknae_security::Lane::Local,
         maknae_io::DelegatedFds::new(0),
+        common::no_baseline(),
     )
     .await;
 
@@ -175,15 +175,15 @@ async fn admission_audit_failure_withholds_response_without_reading_request() {
         default_cfg(),
         serde_json::json!({}),
         authz.0.clone(),
-        std::sync::Arc::new(Default::default()),
+        std::sync::Arc::new(maknae_kernel::LiveConfig::new(Default::default(), None)),
         std::sync::Arc::new("test-backend".to_string()),
         std::sync::Arc::new("US".to_string()),
-        std::sync::Arc::new(None),
         std::sync::Arc::new(None),
         maknae_kernel::unavailable_egress(),
         authz.1,
         maknae_security::Lane::Local,
         maknae_io::DelegatedFds::new(0),
+        common::no_baseline(),
     )
     .await;
 
@@ -235,15 +235,15 @@ async fn deny_audits_then_closes() {
         default_cfg(),
         serde_json::json!({}),
         authz.0.clone(),
-        std::sync::Arc::new(Default::default()),
+        std::sync::Arc::new(maknae_kernel::LiveConfig::new(Default::default(), None)),
         std::sync::Arc::new("test-backend".to_string()),
         std::sync::Arc::new("US".to_string()),
-        std::sync::Arc::new(None),
         std::sync::Arc::new(None),
         maknae_kernel::unavailable_egress(),
         authz.1,
         maknae_security::Lane::Local,
         maknae_io::DelegatedFds::new(0),
+        common::no_baseline(),
     )
     .await;
 
@@ -292,15 +292,15 @@ async fn happy_ping_responds() {
         default_cfg(),
         serde_json::json!({}),
         authz.0.clone(),
-        std::sync::Arc::new(Default::default()),
+        std::sync::Arc::new(maknae_kernel::LiveConfig::new(Default::default(), None)),
         std::sync::Arc::new("test-backend".to_string()),
         std::sync::Arc::new("US".to_string()),
-        std::sync::Arc::new(None),
         std::sync::Arc::new(None),
         maknae_kernel::unavailable_egress(),
         authz.1,
         maknae_security::Lane::Local,
         maknae_io::DelegatedFds::new(0),
+        common::no_baseline(),
     )
     .await;
 
@@ -346,15 +346,15 @@ async fn permit_admission_precedes_request_record() {
         default_cfg(),
         serde_json::json!({}),
         authz.0.clone(),
-        std::sync::Arc::new(Default::default()),
+        std::sync::Arc::new(maknae_kernel::LiveConfig::new(Default::default(), None)),
         std::sync::Arc::new("test-backend".to_string()),
         std::sync::Arc::new("US".to_string()),
-        std::sync::Arc::new(None),
         std::sync::Arc::new(None),
         maknae_kernel::unavailable_egress(),
         authz.1,
         maknae_security::Lane::Local,
         maknae_io::DelegatedFds::new(0),
+        common::no_baseline(),
     )
     .await;
 
@@ -409,15 +409,15 @@ async fn happy_whoami_carries_peer_facts() {
         default_cfg(),
         serde_json::json!({}),
         authz.0.clone(),
-        std::sync::Arc::new(Default::default()),
+        std::sync::Arc::new(maknae_kernel::LiveConfig::new(Default::default(), None)),
         std::sync::Arc::new("test-backend".to_string()),
         std::sync::Arc::new("US".to_string()),
-        std::sync::Arc::new(None),
         std::sync::Arc::new(None),
         maknae_kernel::unavailable_egress(),
         authz.1,
         maknae_security::Lane::Local,
         maknae_io::DelegatedFds::new(0),
+        common::no_baseline(),
     )
     .await;
 
@@ -453,15 +453,15 @@ async fn read_timeout_closes() {
         cfg,
         serde_json::json!({}),
         authz.0.clone(),
-        std::sync::Arc::new(Default::default()),
+        std::sync::Arc::new(maknae_kernel::LiveConfig::new(Default::default(), None)),
         std::sync::Arc::new("test-backend".to_string()),
         std::sync::Arc::new("US".to_string()),
-        std::sync::Arc::new(None),
         std::sync::Arc::new(None),
         maknae_kernel::unavailable_egress(),
         authz.1,
         maknae_security::Lane::Local,
         maknae_io::DelegatedFds::new(0),
+        common::no_baseline(),
     )
     .await;
     let elapsed = start.elapsed();
@@ -515,15 +515,15 @@ async fn configured_au3_1_is_stamped_onto_every_record() {
         default_cfg(),
         au3_1.clone(),
         authz.0.clone(),
-        std::sync::Arc::new(Default::default()),
+        std::sync::Arc::new(maknae_kernel::LiveConfig::new(Default::default(), None)),
         std::sync::Arc::new("test-backend".to_string()),
         std::sync::Arc::new("US".to_string()),
-        std::sync::Arc::new(None),
         std::sync::Arc::new(None),
         maknae_kernel::unavailable_egress(),
         authz.1,
         maknae_security::Lane::Local,
         maknae_io::DelegatedFds::new(0),
+        common::no_baseline(),
     )
     .await;
     let recs = emit.records();
@@ -553,15 +553,15 @@ async fn configured_au3_1_is_stamped_onto_every_record() {
         default_cfg(),
         au3_1.clone(),
         authz.0.clone(),
-        std::sync::Arc::new(Default::default()),
+        std::sync::Arc::new(maknae_kernel::LiveConfig::new(Default::default(), None)),
         std::sync::Arc::new("test-backend".to_string()),
         std::sync::Arc::new("US".to_string()),
-        std::sync::Arc::new(None),
         std::sync::Arc::new(None),
         maknae_kernel::unavailable_egress(),
         authz.1,
         maknae_security::Lane::Local,
         maknae_io::DelegatedFds::new(0),
+        common::no_baseline(),
     )
     .await;
     let recs2 = emit2.records();
@@ -619,15 +619,15 @@ async fn unread_response_does_not_hang_the_handler() {
             cfg,
             serde_json::json!({}),
             authz.0.clone(),
-            std::sync::Arc::new(Default::default()),
+            std::sync::Arc::new(maknae_kernel::LiveConfig::new(Default::default(), None)),
             std::sync::Arc::new("test-backend".to_string()),
             std::sync::Arc::new("US".to_string()),
-            std::sync::Arc::new(None),
             std::sync::Arc::new(None),
             maknae_kernel::unavailable_egress(),
             authz.1,
             maknae_security::Lane::Local,
             maknae_io::DelegatedFds::new(0),
+            common::no_baseline(),
         ),
     )
     .await;
@@ -680,15 +680,15 @@ async fn serve_raw(
         cfg,
         serde_json::json!({}),
         authz.0.clone(),
-        std::sync::Arc::new(Default::default()),
+        std::sync::Arc::new(maknae_kernel::LiveConfig::new(Default::default(), None)),
         std::sync::Arc::new("test-backend".to_string()),
         std::sync::Arc::new("US".to_string()),
-        std::sync::Arc::new(None),
         std::sync::Arc::new(None),
         maknae_kernel::unavailable_egress(),
         authz.1,
         maknae_security::Lane::Local,
         maknae_io::DelegatedFds::new(0),
+        common::no_baseline(),
     )
     .await;
     let caps = maknae_proto::FrameCaps {

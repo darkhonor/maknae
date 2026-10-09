@@ -12,6 +12,28 @@ hold_audit_dir() {
     acl="$(getfacl -P -s -p "$d")" && [ -z "$acl" ]
 }
 
+# The traverse entry for each reader maknae.yaml declares (#500), restored after the
+# hold strips the directory's ACL. The trail files' own entries are never touched here.
+grant_reader_traverse() {
+    local d=/var/log/maknae readers r errf rc=0
+    errf="$(mktemp)" || return 1
+    readers="$(timeout 60 /usr/bin/maknae audit-readers 2>"$errf")" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        [ "$rc" -ne 124 ] || echo "the account lookup did not finish within 60s" >>"$errf"
+        echo "maknae: audit.readers not applied: $(cat "$errf")" >&2
+        rm -f "$errf"
+        return 0
+    fi
+    rm -f "$errf"
+    [ -n "$readers" ] || return 0
+    printf '%s\n' "$readers" | LC_ALL=C grep -Evx '[a-z_][a-z0-9_-]{0,30}[$]?' >/dev/null || rc=$?
+    if [ "$rc" -ne 1 ]; then
+        echo "maknae: audit.readers printed an unexpected name; not applied" >&2
+        return 0
+    fi
+    for r in $readers; do setfacl -P -m "u:$r:x" "$d" || return 1; done
+}
+
 case "$1" in
     configure)
         # --- Users/groups (Jackrabbit §4.6 / §9.1) ------------------------------
@@ -53,6 +75,16 @@ case "$1" in
         # modes are load-bearing. Set them explicitly, not via umask.
         install -d -m 0750 -o root    -g _maknae /etc/maknae
         install -d -m 0750 -o root    -g _maknae /etc/maknae/private
+
+        # --- Conffile-ownership convergence (EVERY configure) -------------------
+        # dpkg records conffiles as root:root; the daemon runs as `_maknae` and the
+        # loader needs group-read (root:_maknae 0640, §4.6). The rpm gets this from
+        # %attr; on deb we re-assert it idempotently on fresh install AND upgrade.
+        # dpkg tracks conffile CONTENT, not ownership, so conffile semantics stay
+        # intact.
+        chown root:_maknae /etc/maknae/authz.yaml /etc/maknae/bindings.yaml /etc/maknae/maknae.yaml 2>/dev/null || :
+        chmod 0640         /etc/maknae/authz.yaml /etc/maknae/bindings.yaml /etc/maknae/maknae.yaml 2>/dev/null || :
+
         # Root-held until the audit block below hands it to _maknae.
         install -d -m 0700 -o root    -g root    /var/log/maknae
         hold_audit_dir || {
@@ -91,16 +123,11 @@ case "$1" in
             echo "  AppArmor cannot make the audit trail append-only; the inode attribute is the control. Put /var/log/maknae on a filesystem that supports chattr +a." >&2
             exit 1
         fi
+        if ! grant_reader_traverse; then
+            echo "maknae: cannot apply audit.readers to /var/log/maknae; it is left root-owned" >&2
+            exit 1
+        fi
         chown -h _maknae:_maknae /var/log/maknae
-
-        # --- Conffile-ownership convergence (EVERY configure) -------------------
-        # dpkg records conffiles as root:root; the daemon runs as `_maknae` and the
-        # loader needs group-read (root:_maknae 0640, §4.6). The rpm gets this from
-        # %attr; on deb we re-assert it idempotently on fresh install AND upgrade.
-        # dpkg tracks conffile CONTENT, not ownership, so conffile semantics stay
-        # intact.
-        chown root:_maknae /etc/maknae/authz.yaml /etc/maknae/bindings.yaml /etc/maknae/maknae.yaml 2>/dev/null || :
-        chmod 0640         /etc/maknae/authz.yaml /etc/maknae/bindings.yaml /etc/maknae/maknae.yaml 2>/dev/null || :
 
         # --- AppArmor profile ----------------------------------------------------
         if command -v apparmor_parser >/dev/null 2>&1; then

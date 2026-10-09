@@ -87,12 +87,9 @@ pub enum ConfigError {
     /// never plaintext (ADR-0005 decision 8); refused by the field's name so the
     /// operator hears about THIS before any other defect in the block.
     ProviderPlaintextKey { field: String },
-    /// A section the caller required to come from a root-controlled source
-    /// (ADR-0023 decision 3: the `providers` set) was contributed by a file
-    /// that is not root-owned or is group/other-writable — `maknae.yaml` or a
-    /// `config.d/` member alike. The subject the loop runs as must not be able to
-    /// authorize a destination; a source it could have written is refused at boot.
-    SectionNotRootOwned { section: String, path: String },
+    /// A `maknae.yaml` or `config.d/` source -- or a directory that selects
+    /// among them -- is not root-owned or is group/other-writable (#490).
+    SourceNotRootOwned { path: String },
     /// The `transport` section is present but a field is malformed or out of
     /// its fail-closed range (Stage-3a task-2).
     InvalidTransport(String),
@@ -108,6 +105,8 @@ pub enum ConfigError {
     InvalidPrincipal(String),
     /// `~/.maknae/providers.yaml` was refused, or names no entry that can be selected.
     UserProviders(String),
+    /// A persisted baseline section is not the canonical JSON this crate writes (#490).
+    BaselineValue(String),
 }
 
 impl std::fmt::Display for ConfigError {
@@ -189,8 +188,8 @@ impl std::fmt::Display for ConfigError {
             ConfigError::ProviderPlaintextKey { field } => {
                 write!(f, "provider config carries a plaintext credential under '{field}': each user's key lives in Vault under their own login, never in the config")
             }
-            ConfigError::SectionNotRootOwned { section, path } => {
-                write!(f, "section '{section}' must come from a root-owned, non-group/other-writable source; {path} is not")
+            ConfigError::SourceNotRootOwned { path } => {
+                write!(f, "{path} must be owned by root and not group- or world-writable, as must every maknae.yaml and config.d source and the directories that hold them")
             }
             ConfigError::InvalidTransport(reason) => {
                 write!(f, "invalid transport config: {reason}")
@@ -203,6 +202,9 @@ impl std::fmt::Display for ConfigError {
             }
             ConfigError::UserProviders(reason) => {
                 write!(f, "providers.yaml: {reason}")
+            }
+            ConfigError::BaselineValue(reason) => {
+                write!(f, "baseline value refused: {reason}")
             }
         }
     }
@@ -257,18 +259,12 @@ mod tests {
             "{b}"
         );
         assert!(!b.contains("key_vault_path"), "{b}");
-        let c = format!(
-            "{}",
-            ConfigError::SectionNotRootOwned {
-                section: "provider".into(),
-                path: "/x/config.d/10.yaml".into()
+        assert_eq!(
+            ConfigError::SourceNotRootOwned {
+                path: "config.d/10.yaml".into()
             }
-        );
-        assert!(
-            c.contains("'provider'")
-                && c.contains("/x/config.d/10.yaml")
-                && c.contains("root-owned"),
-            "{c}"
+            .to_string(),
+            "config.d/10.yaml must be owned by root and not group- or world-writable, as must every maknae.yaml and config.d source and the directories that hold them"
         );
     }
 
@@ -410,6 +406,17 @@ mod tests {
         assert_eq!(
             s,
             "providers.yaml: no model access: no providers are defined"
+        );
+    }
+
+    #[test]
+    fn display_covers_baseline_value() {
+        assert_eq!(
+            format!(
+                "{}",
+                ConfigError::BaselineValue("baseline section core: x".into())
+            ),
+            "baseline value refused: baseline section core: x"
         );
     }
 }

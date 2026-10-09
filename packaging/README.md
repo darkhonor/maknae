@@ -213,34 +213,79 @@ This satisfies AU-9(2), which requires audit storage on a physically separate sy
 
 The audit directory is **`0700 _maknae:_maknae`** and the file is `0640 _maknae:_maknae`. **No group membership grants access** — no group can traverse a `0700` directory — and `maknae` is the *operator* group for the daemon's UDS, not a log-reader group. [`maknae.sysusers`](common/maknae.sysusers) forbids on-disk cross-membership between the two identities, so do **not** add your agent to `maknae`.
 
-The lockdown is deliberate. Grant your agent exactly what it needs, with a POSIX ACL. **The file is append-only (`chattr +a`), and the kernel refuses any write-xattr operation on an append-only inode** — `setfacl` returns `Operation not permitted`, and `CAP_LINUX_IMMUTABLE` does not bypass it. So the flag must be lifted for the duration of the grant, and on Debian nothing else keeps the trail append-only while it is lifted. Stop `maknaed` first, so nothing holds the file open for writing while it is unprotected, and hold the directory as root, so the daemon account cannot swap `audit.jsonl` for a link to another file while root acts on it. Holding it means taking it to `root:root`, removing every ACL entry and setting `0700`, and checking all three before acting: ownership alone keeps any ACL entry or write bit the daemon account left. The block then grants the agent its entry:
+The lockdown is deliberate. Your agent is granted exactly what it needs, with POSIX ACL entries, and the accounts that get them are declared by root in `maknae.yaml`, never chosen by the package:
+
+```yaml
+audit:
+  readers: [vector]
+```
+
+`audit.readers` names accounts only, never groups. `sudo maknae audit-readers` reads `/etc/maknae/maknae.yaml`, not the accepted baseline, and prints the validated list, one name per line; the grant therefore follows the file, and a reader added there is granted by the next package hold or the runbook block before any `maknae baseline-accept`, which records the list and runs the same account check. It refuses the whole list, naming the account, if any entry is missing from the directory, is `root` or uid 0, has a uid below 100, is `nobody` (65534, or -2 on macOS), is `_maknae` or `_maknae-egress`, or has `_maknae`'s group as a primary or supplementary group.
+
+Each reader needs two entries: `x` on the directory and `r` on each trail file.
+
+- **The directory entry** is applied by the package on every install, configure and upgrade. The package holds the directory as root, which removes every ACL entry on it, and then restores `u:<reader>:x` for each declared reader before it hands the directory back. It does this with `maknaed` still running. If `maknae audit-readers` refuses, the package grants no one, prints the reason, and the install still succeeds. On Debian and the Red Hat family the package gives the helper 60 seconds (`timeout`), so an account directory that does not answer cannot hold the install, and the directory, indefinitely; an elapsed helper is handled as a refusal. macOS has no `timeout` by default, so there the helper is not bounded. On the Red Hat family, a granted reader makes the directory's group bits show the ACL mask, so `rpm -V maknae` reports `M` on `/var/log/maknae` for as long as a reader is granted; that is expected. `rpm -V maknae` also reports `M` on `/etc/maknae`, because the package grants the egress account read on it. Do not "fix" it with `rpm --setperms` or `rpm --restore`: either resets the mode to `0700`, which leaves the reader's entry listed but ineffective until the next package `%post` restores it.
+- **The file entry** is applied by the block below, with `maknaed` stopped. The package never touches it. A trail file is append-only (`chattr +a`), and the kernel refuses any write-xattr operation on an append-only inode: `setfacl` returns `Operation not permitted`, and `CAP_LINUX_IMMUTABLE` does not bypass it. So the flag must be lifted while the entry is granted. On Debian nothing else keeps the trail append-only while the flag is lifted, and a running daemon holds the file open for writing.
+
+So stop `maknaed` first. Then hold the directory as root, so that the daemon account cannot swap a trail for a link to another file while root acts on it, and so that `maknaed` cannot start and open a trail until the block hands the directory back. Holding it means taking it to `root:root`, removing every ACL entry and setting `0700`, and checking all three before acting: ownership alone keeps any ACL entry or write bit the daemon account left. `maknae audit-readers --stopped` refuses while `maknaed` runs. The block grants every declared reader read access to every regular, single-link `*.jsonl` in the directory, which covers a moved trail as well as `audit.jsonl`:
 
 ```bash
 sudo systemctl stop maknaed.service
 sudo bash -eu <<'GRANT'
-d=/var/log/maknae f=/var/log/maknae/audit.jsonl agents="vector"
+d=/var/log/maknae
 [ -d "$d" ] && [ ! -h "$d" ] || { echo "$d is not a directory" >&2; exit 1; }
 chown root:root "$d"
 setfacl -P -b "$d"
 chmod 0700 "$d"
 acl="$(getfacl -P -s -p "$d")"
 [ "$(stat -c '%u %g %a' "$d")" = "0 0 700" ] && [ -z "$acl" ] || { echo "$d is not root:root 0700 with no ACL; it is left root-owned" >&2; exit 1; }
-if [ -h "$f" ] || [ ! -f "$f" ] || [ "$(stat -c %h "$f")" != 1 ]; then
-    echo "$f is not a regular, single-link file; $d is left root-owned" >&2; exit 1
-fi
-for a in $agents; do setfacl -P -m "u:$a:x" "$d"; done
-chattr -a "$f"
-for a in $agents; do setfacl -P -m "u:$a:r" "$f" || { chattr +a "$f"; exit 1; }; done
-chattr +a "$f"
-lsattr -d "$f" | cut -c6 | grep -qx a || { echo "$f is not append-only; $d is left root-owned" >&2; exit 1; }
+readers="$(/usr/bin/maknae audit-readers --stopped)" || { echo "audit.readers not applied; $d is left root-owned" >&2; exit 1; }
+for f in "$d"/*.jsonl; do
+    [ -f "$f" ] && [ ! -h "$f" ] && [ "$(stat -c %h "$f")" = 1 ] || continue
+    chattr -a "$f"
+    for r in $readers; do setfacl -P -m "u:$r:r" "$f" || { chattr +a "$f"; exit 1; }; done
+    chattr +a "$f"
+    lsattr -d "$f" | cut -c6 | grep -qx a || { echo "$f is not append-only; $d is left root-owned" >&2; exit 1; }
+done
+for r in $readers; do setfacl -P -m "u:$r:x" "$d"; done
 chown -h _maknae:_maknae "$d"
 GRANT
 sudo systemctl start maknaed.service
 ```
 
-`setfacl -P` never follows a symbolic link, and the block refuses unless the file carries `a` again. If the block refuses, the directory stays root-owned; do not start `maknaed` until you have worked through [The package refuses the audit trail](../docs/runbook.md#the-package-refuses-the-audit-trail).
+On macOS the block clears and restores the flag the trail carries: `sappnd` on a moved trail, `uappnd` on the default `audit.jsonl` (#414):
 
-Substitute your agent's service user (`fluent-bit`, `promtail`, `splunk`, …), and list every agent that reads the trail: the hold removes the directory entries of any agent the block does not name. This grants read and nothing else: no write, no directory listing beyond traversal, and the `0700` default stays in place for everyone else.
+```bash
+sudo launchctl bootout system/io.maknae.maknaed
+sudo bash -eu <<'GRANT'
+d=/var/log/maknae
+[ -d "$d" ] && [ ! -L "$d" ] || { echo "$d is not a directory" >&2; exit 1; }
+chown 0:0 "$d"
+chmod -N "$d"
+chmod 0700 "$d"
+[ "$(stat -f '%u %g %Lp' "$d")" = "0 0 700" ] && [ "$(ls -led "$d" | wc -l)" -eq 1 ] || { echo "$d is not root 0700 with no ACL; it is left root-owned" >&2; exit 1; }
+readers="$(/usr/local/bin/maknae audit-readers --stopped)" || { echo "audit.readers not applied; $d is left root-owned" >&2; exit 1; }
+for f in "$d"/*.jsonl; do
+    [ -f "$f" ] && [ ! -L "$f" ] && [ "$(stat -f %l "$f")" = 1 ] || continue
+    case "$(stat -f %Sf "$f")" in
+        *sappnd*) flag=sappnd ;;
+        *uappnd*) flag=uappnd ;;
+        *) echo "$f is not append-only; $d is left root-owned" >&2; exit 1 ;;
+    esac
+    chflags "no$flag" "$f"
+    for r in $readers; do chmod +a "user:$r allow read" "$f" || { chflags "$flag" "$f"; exit 1; }; done
+    chflags "$flag" "$f"
+    stat -f %Sf "$f" | grep -q "$flag" || { echo "$f is not flagged $flag; $d is left root-owned" >&2; exit 1; }
+done
+for r in $readers; do chmod +a "user:$r allow search" "$d"; done
+chown -h _maknae:_maknae "$d"
+GRANT
+sudo launchctl bootstrap system /Library/LaunchDaemons/io.maknae.maknaed.plist
+```
+
+`setfacl -P` never follows a symbolic link, and the block refuses unless each trail carries its append-only flag again. If the block refuses, the directory stays root-owned and `maknaed` cannot open its trail; do not start it until you have worked through [The package refuses the audit trail](../docs/runbook.md#the-package-refuses-the-audit-trail).
+
+This grants read and nothing else: no write, no directory listing beyond traversal, and the `0700` default stays in place for everyone else. Run the block again after you add a reader to `audit.readers`.
 
 **Verify access, not the ACL entry:**
 
@@ -248,16 +293,17 @@ Substitute your agent's service user (`fluent-bit`, `promtail`, `splunk`, …), 
 sudo -u vector test -r /var/log/maknae/audit.jsonl && echo "agent can read"
 ```
 
-That distinction is not pedantry — see the first bullet below.
+That distinction is not pedantry. The package restores the directory entry on every upgrade, but if `maknae audit-readers` refused, the directory has no entry for the reader. The entry on the file is still there, but the reader cannot reach the file:
 
-**Three things that will bite you if you skip them:**
+```
+after the grant           : /var/log/maknae  user:vector:--x   -> test -r  READ OK
+after a refused re-grant  : /var/log/maknae  (no ACL entries)  -> test -r  READ DENIED
+```
 
-- **Re-run the grant after every package upgrade.** The packages hold the directory as root on *every* install, which removes every ACL entry on the directory, the agent's `x` included. The entry on `audit.jsonl` **survives while its effect does not**: the agent can no longer reach the file.
-  ```
-  after the grant : /var/log/maknae  user:vector:--x     -> test -r  READ OK
-  after upgrade   : /var/log/maknae  (no ACL entries)    -> test -r  READ DENIED
-  ```
-  So `getfacl` on the file looks correct on a grant that no longer works. **Troubleshoot with `getfacl … | grep effective` and the `test -r` probe above** — never with "the entry is there, so DAC is fine."
+So `getfacl` on the file looks correct on a grant that no longer works. **Troubleshoot with `getfacl … | grep effective` and the `test -r` probe above**, never with "the entry is there, so DAC is fine."
+
+**Two things that will bite you if you skip them:**
+
 - **The ACL does not survive the file being recreated.** The package creates `audit.jsonl` only when it is absent. A restore or manual rotation that recreates it drops the ACL — re-apply it with the same procedure.
 - **On an SELinux host, DAC is necessary but not sufficient.** The sink is typed `maknae_audit_t` via `logging_log_file()` ([`maknae.te`](common/maknae.te)), i.e. a generic log-file type. A *confined* agent domain reads it only if its own policy calls `logging_read_generic_logs()`; an unconfined agent is unaffected. Check `ausearch -m AVC` **only after** `test -r` confirms DAC is granted.
 

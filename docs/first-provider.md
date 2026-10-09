@@ -118,18 +118,23 @@ sudo chmod 0640 /etc/maknae/config.d/10-provider.yaml
 
 ### 4. Allow the prompt
 
-Nothing may reach a model until policy says so. Append a grant to the policy:
+Nothing may reach a model until policy says so. The packaged `authz.yaml` already has a `roles:` key granting `admin` its four administrative terms, and a second `roles:` key refuses the whole file, so edit it in place (`sudoedit /etc/maknae/authz.yaml`): add `session.prompt` to `admin`'s list and add a `destinations:` key. The end of the file then reads:
 
-```bash
-sudo tee -a /etc/maknae/authz.yaml >/dev/null <<'EOF'
+```yaml
 roles:
   admin:
-    allow: ["session.prompt"]
+    allow:
+      - "admin.status"
+      - "admin.subject.list"
+      - "admin.baseline.show"
+      - "admin.baseline.accept"
+      - "session.prompt"
 destinations:
   admin:
     allow: ["provider:openai"]
-EOF
 ```
+
+An `authz.yaml` kept from before #490 has no `roles:` key ([upgrading](upgrading.md#baseline-layer-490)); write the whole block above into it.
 
 The enrolled administrator resolves to the `admin` role while `/etc/maknae/bindings.yaml` has no `bindings:` key, as shipped. `provider:openai` is `provider:` followed by the `name` from step 3. An edit to the policy (`authz.yaml` or `bindings.yaml`) applies when `maknaed` reloads it (`sudo systemctl reload maknaed`; on macOS, `sudo launchctl kill SIGHUP system/io.maknae.maknaed`) or restarts; step 5's start reads it too. A reload that does not validate is refused and the running policy stands, with the cause in the journal and the audit trail ([runbook](runbook.md#reload-the-policy)).
 
@@ -214,7 +219,12 @@ Enroll writes `~/.maknae` only for the account that ran it. Each further local u
        - "Write(~/.maknae/**)"
    roles:
      admin:
-       allow: ["session.prompt"]
+       allow:
+         - "admin.status"
+         - "admin.subject.list"
+         - "admin.baseline.show"
+         - "admin.baseline.accept"
+         - "session.prompt"
      user:
        allow: ["session.prompt"]
    destinations:
@@ -239,7 +249,9 @@ maknae login         # see step U1
 maknae ping          # pong
 ```
 
-These are the units enroll's closing hints name. Restart the daemon as well as enabling it: `enable --now` does not restart a daemon that is already running, and the authorized provider set is read at boot. Every CLI verb, `maknae ping` included, needs a stored login; without one it fails with `` no Vault token is stored: run `maknae login` ``.
+These are the units enroll's closing hints name. Restart the daemon as well as enabling it: `enable --now` does not restart a daemon that is already running.
+
+**If `maknaed` has started on this host before**, it already has an accepted baseline, and a restart does not apply step 3's file: the provider list is a pending change until you accept it ([runbook](runbook.md#change-the-configuration)). After `maknae login`, run `maknae baseline-show` and then `maknae baseline-accept <hash>` with the hash it printed. Authorizing the first provider applies by restart, so `maknaed` restarts itself (`accepted sha256:<12 hex>; maknaed is restarting to apply it`); adding a provider to a list that already has one applies at once. On the first start of a fresh install there is nothing to accept: the start takes the files as they are. Every CLI verb, `maknae ping` included, needs a stored login; without one it fails with `` no Vault token is stored: run `maknae login` ``.
 
 On macOS, both jobs ship `launchctl disable`d. This start works whether or not you already followed the hints enroll printed:
 
@@ -258,7 +270,7 @@ maknae login         # see step U1
 maknae ping          # pong
 ```
 
-- **Why the loop checks first.** `launchctl print` exits 0 for a loaded job and 113 for an unknown one; the package's own uninstall and install scripts rely on that convention, and it was not re-measured for this page. A second `bootstrap` of a loaded job errors: that is known launchctl behaviour, not measured here. `kickstart -k` restarts a loaded job, which is how the daemon picks up the provider.
+- **Why the loop checks first.** `launchctl print` exits 0 for a loaded job and 113 for an unknown one; the package's own uninstall and install scripts rely on that convention, and it was not re-measured for this page. A second `bootstrap` of a loaded job errors: that is known launchctl behaviour, not measured here. `kickstart -k` restarts a loaded job; on a host where `maknaed` has started before, accept the provider list as above.
 - **`pong`.** `maknae ping` uses the Vault token `maknae login` stored to obtain its client certificate, then reaches the daemon's socket.
 - **The posture record.** The boot's posture record reads `code_bound`:
   ```bash
@@ -427,7 +439,7 @@ A kernel refusal reaches you only as one line, `PROMPT_REFUSED` below; the reaso
 | Your administrator's audit shows | Why | Fix |
 |---|---|---|
 | `session.prompt carries no provider choice` | the request named no provider; the shipped CLI always names one, so another client sent it | use the shipped `maknae agent` |
-| `no model access: no providers are authorized on this host` | the host authorizes no provider, or the daemon booted before step 3's file existed | step 3, then restart: `sudo systemctl restart maknaed`; on macOS, `sudo launchctl kickstart -k system/io.maknae.maknaed` |
+| `no model access: no providers are authorized on this host` | the host authorizes no provider, or the daemon booted before step 3's file existed | step 3, then `maknae baseline-show` and `maknae baseline-accept <hash>` (step 5) |
 | `provider not in the authorized set` | your entry's `provider` is not a `name` in step 3's list | correct `provider` in `providers.yaml`, or ask for it to be authorized |
 | `model not on the authorized provider's list` | your entry's `model` is not on that provider's `models` | correct `model`, or ask for it to be added |
 | `local account has no name usable as a key path segment` | your account name is not 1 to 32 bytes of `[a-z0-9._-]` starting and ending with `[a-z0-9_]`, or it is `data` | use an account with such a name |
@@ -474,7 +486,7 @@ A kernel refusal reaches you only as one line, `PROMPT_REFUSED` below; the reaso
 
 | What you see | Why | Fix |
 |---|---|---|
-| `maknaed` will not start: `section 'providers' must come from a root-owned, non-group/other-writable source; <path> is not` | the provider file or its directory is writable by someone other than root | step 3's owner and mode |
+| `maknaed` will not start: `<path> must be owned by root and not group- or world-writable, as must every maknae.yaml and config.d source and the directories that hold them` | `maknae.yaml`, a `config.d/` member or one of their directories is not root-owned, or is writable by group or other | step 3's owner and mode |
 | The agent stops; `journalctl -u maknae-egress` (on macOS, `sudo tail /usr/local/var/log/maknae-egress/maknae-egress.err`) shows `provider answered 400 (conversation …): …` | the provider rejected the request's shape | the text after the colon is the provider's own reason, with the key masked. For `gpt-5.6-luna` it is the missing `reasoning_effort: none`; a server that names `max_completion_tokens` as unsupported needs `output_tokens_field: max_tokens` in step 3's entry |
 | `maknae agent: stopped: the conversation has reached the declared context budget; compaction arrives with #171` | the next turn would exceed the window you declared | start a new conversation, or declare the larger window your model has |
 | `maknae agent: stopped:` with a connection error, on a long conversation | the daemon's prompt cap is below your loop's, so the daemon refused the frame and closed the connection | raise the daemon's `transport.prompt_max_bytes` (step 3; on macOS, under the existing `transport:` block — a second `transport:` key refuses the file with `duplicate config key 'transport' at LINE:COL`) |

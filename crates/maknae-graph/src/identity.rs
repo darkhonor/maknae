@@ -1,7 +1,9 @@
+use crate::baseline::{BaselineLayer, ATTR_MOVED_FROM, BASELINE_SOURCE_KEY, INSTANCE_KEY};
 use crate::graph::{Graph, GraphBuilder, GraphError};
 use crate::kernel::{
-    ADVERSARY, ATTR_ALIASES, ATTR_NAME, ATTR_SHA256, ATTR_UID, BINDS, CONFIG_SOURCE, CONTAINED,
-    CONTAINMENT, DECLARED_BY, PART_OF, ROLE, SCHEMA, SECTION, SUBJECT, VOCABULARY_SOURCE_KEY,
+    ADVERSARY, ATTR_ALIASES, ATTR_NAME, ATTR_SHA256, ATTR_UID, ATTR_VALUE, BINDS,
+    CLASSIFICATION_SYSTEM, CONFIG_SOURCE, CONTAINED, CONTAINMENT, DECLARED_BY, DECLARES, INSTANCE,
+    LEVEL, LEVEL_OF, PART_OF, ROLE, SCHEMA, SECTION, SUBJECT, VOCABULARY_SOURCE_KEY,
 };
 use crate::record::{
     AttrValue, Attrs, EdgeId, EdgeKind, EdgeRecord, GraphSpace, NodeId, NodeKind, NodeRecord,
@@ -75,6 +77,7 @@ pub struct Extracted {
     pub layer: IdentityLayer,
     pub vocabulary_sha256: Option<[u8; 32]>,
     pub unbound: Vec<u32>,
+    pub baseline: Option<BaselineLayer>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +86,8 @@ pub enum IdentityError {
     BadAttr { node: u64, attr: &'static str },
     UnknownRole(String),
     Ambiguous { node: u64, what: &'static str },
+    BaselineAttr { node: u64, attr: &'static str },
+    BaselineAmbiguous { node: u64, what: &'static str },
     LabelMismatch(String),
     Alias(String),
 }
@@ -95,6 +100,12 @@ impl fmt::Display for IdentityError {
                 f,
                 "identity layer: node {node} lacks a valid `{attr}` attribute"
             ),
+            Self::BaselineAttr { node, attr } => {
+                write!(f, "baseline: node {node} lacks a valid `{attr}` attribute")
+            }
+            Self::BaselineAmbiguous { node, what } => {
+                write!(f, "baseline: node {node} is ambiguous: {what}")
+            }
             Self::UnknownRole(r) => write!(f, "identity layer: role `{r}` is not compiled in"),
             Self::Ambiguous { node, what } => {
                 write!(f, "identity layer: node {node} is ambiguous: {what}")
@@ -188,6 +199,7 @@ impl Alloc {
 
 pub fn build(
     layer: &IdentityLayer,
+    baseline: Option<&BaselineLayer>,
     compiled: &CompiledSet,
     vocabulary_sha256: [u8; 32],
     revision: u64,
@@ -294,11 +306,72 @@ pub fn build(
             b = b.edge(a.edge(sid, DECLARED_BY, sec));
         }
     }
+    if let Some(bl) = baseline {
+        b = build_baseline(b, &mut a, bl)?;
+    }
     let g = b.build(&SCHEMA, compiled).map_err(IdentityError::Graph)?;
     if let Some(c) = compiled.iter().find(|c| c.label != layer.label) {
         return Err(IdentityError::LabelMismatch(c.key.clone()));
     }
     Ok(g)
+}
+
+fn build_baseline(
+    mut b: GraphBuilder,
+    a: &mut Alloc,
+    bl: &BaselineLayer,
+) -> Result<GraphBuilder, IdentityError> {
+    let mut attrs = Attrs::new();
+    attrs.insert(ATTR_SHA256.into(), AttrValue::Str(hex(&bl.sha256)));
+    if let Some(from) = &bl.moved_from {
+        attrs.insert(ATTR_MOVED_FROM.into(), AttrValue::Str(from.clone()));
+    }
+    let src = a.node(CONFIG_SOURCE, BASELINE_SOURCE_KEY.into(), attrs);
+    let src_id = src.id;
+    if bl.sections.is_empty() {
+        return Err(IdentityError::BaselineAmbiguous {
+            node: src_id.0,
+            what: "baseline without a section",
+        });
+    }
+    b = b.node(src);
+    let mut core = None;
+    for (name, value) in &bl.sections {
+        let mut attrs = Attrs::new();
+        attrs.insert(ATTR_VALUE.into(), AttrValue::Str(value.clone()));
+        let s = a.node(SECTION, crate::baseline::section_key(name), attrs);
+        let id = s.id;
+        if name.is_empty() {
+            return Err(IdentityError::BaselineAmbiguous {
+                node: id.0,
+                what: "baseline section without a name",
+            });
+        }
+        b = b.node(s).edge(a.edge(id, PART_OF, src_id));
+        if name == "core" {
+            core = Some(id);
+        }
+    }
+    let inst = a.node(INSTANCE, INSTANCE_KEY.into(), Attrs::new());
+    let sys = a.node(CLASSIFICATION_SYSTEM, bl.system.clone(), Attrs::new());
+    let lvl = a.node(
+        LEVEL,
+        crate::baseline::level_key(&bl.system, &bl.ceiling),
+        Attrs::new(),
+    );
+    let (inst_id, sys_id, lvl_id) = (inst.id, sys.id, lvl.id);
+    b = b
+        .node(inst)
+        .node(sys)
+        .node(lvl)
+        .edge(a.edge(inst_id, DECLARES, sys_id))
+        .edge(a.edge(lvl_id, LEVEL_OF, sys_id));
+    if let Some(core) = core {
+        for id in [inst_id, sys_id, lvl_id] {
+            b = b.edge(a.edge(id, DECLARED_BY, core));
+        }
+    }
+    Ok(b)
 }
 
 fn str_attr<'a>(n: &'a NodeRecord, attr: &'static str) -> Result<&'a str, IdentityError> {
@@ -323,6 +396,8 @@ pub fn extract(g: &Graph) -> Result<Extracted, IdentityError> {
     for n in g.nodes().iter().filter(|n| n.kind == CONFIG_SOURCE) {
         if n.key == VOCABULARY_SOURCE_KEY {
             vocabulary_sha256 = Some(digest_attr(n)?);
+        } else if n.key == BASELINE_SOURCE_KEY {
+            continue;
         } else if has_source {
             return Err(IdentityError::Ambiguous {
                 node: n.id.0,
@@ -402,6 +477,7 @@ pub fn extract(g: &Graph) -> Result<Extracted, IdentityError> {
         layer,
         vocabulary_sha256,
         unbound,
+        baseline: crate::baseline::extract(g)?,
     })
 }
 
@@ -635,7 +711,7 @@ mod tests {
                 ],
             ),
         ] {
-            let g = build(&l, &roles(), VOCAB, 7, ProvenanceKind::Seed).unwrap();
+            let g = build(&l, None, &roles(), VOCAB, 7, ProvenanceKind::Seed).unwrap();
             let e = extract(&g).unwrap();
             let mut want = l.clone();
             want.subjects.sort_by_key(|s| s.uid);
@@ -652,6 +728,7 @@ mod tests {
     fn records_carry_the_initiator_revision_and_label() {
         let g = build(
             &layer(Some("x"), &[(1000, "alex", "admin")]),
+            None,
             &roles(),
             VOCAB,
             7,
@@ -693,6 +770,7 @@ mod tests {
     fn adversary_is_a_contained_edge_never_a_binds_edge() {
         let g = build(
             &layer(Some("x"), &[(666, "mallory", "adversary")]),
+            None,
             &roles(),
             VOCAB,
             1,
@@ -715,6 +793,7 @@ mod tests {
                 Some("x"),
                 &[(666, "mallory", "adversary"), (667, "eve", "adversary")],
             ),
+            None,
             &roles(),
             VOCAB,
             1,
@@ -735,6 +814,7 @@ mod tests {
     fn contained_outranks_binds_on_extract() {
         let g = build(
             &layer(Some("x"), &[(666, "mallory", "adversary")]),
+            None,
             &roles(),
             VOCAB,
             1,
@@ -756,12 +836,21 @@ mod tests {
 
     #[test]
     fn absent_bindings_has_no_section_node_and_empty_bindings_has_one() {
-        let none = build(&layer(None, &[]), &roles(), VOCAB, 1, ProvenanceKind::Seed).unwrap();
+        let none = build(
+            &layer(None, &[]),
+            None,
+            &roles(),
+            VOCAB,
+            1,
+            ProvenanceKind::Seed,
+        )
+        .unwrap();
         assert!(none
             .lookup(SECTION, "/etc/maknae/authz.yaml#bindings")
             .is_none());
         let empty = build(
             &layer(Some("e"), &[]),
+            None,
             &roles(),
             VOCAB,
             1,
@@ -782,6 +871,7 @@ mod tests {
                 None,
                 &[(1000, "alex", "admin"), (666, "mallory", "adversary")],
             ),
+            None,
             &roles(),
             VOCAB,
             1,
@@ -799,6 +889,7 @@ mod tests {
     fn a_role_outside_the_compiled_set_refuses_and_a_vanished_role_is_reported_on_extract() {
         let bad = build(
             &layer(Some("x"), &[(1, "a", "superadmin")]),
+            None,
             &roles(),
             VOCAB,
             1,
@@ -807,6 +898,7 @@ mod tests {
         assert_eq!(bad, Err(IdentityError::UnknownRole("superadmin".into())));
         let adversary = build(
             &layer(Some("x"), &[(1, "a", "adversary")]),
+            None,
             &CompiledSet::default(),
             VOCAB,
             1,
@@ -817,7 +909,7 @@ mod tests {
             Err(IdentityError::UnknownRole("adversary".into()))
         );
         let mut l = layer(Some("x"), &[(1000, "alex", "admin")]);
-        let g = build(&l, &roles(), VOCAB, 1, ProvenanceKind::Seed).unwrap();
+        let g = build(&l, None, &roles(), VOCAB, 1, ProvenanceKind::Seed).unwrap();
         let g2 = rebuild(&g, |e| e.kind != BINDS, vec![], |n| n).unwrap();
         let e = extract(&g2).unwrap();
         assert_eq!(e.unbound, vec![1000]);
@@ -836,6 +928,7 @@ mod tests {
                     (1001, "b", "guest"),
                 ],
             ),
+            None,
             &roles(),
             VOCAB,
             1,
@@ -857,7 +950,8 @@ mod tests {
             Extracted {
                 layer: IdentityLayer::default(),
                 vocabulary_sha256: None,
-                unbound: vec![]
+                unbound: vec![],
+                baseline: None,
             }
         );
     }
@@ -888,6 +982,7 @@ mod tests {
     fn extract_refuses_a_malformed_attribute_naming_the_node() {
         let g = build(
             &layer(Some("x"), &[(1000, "alex", "admin")]),
+            None,
             &roles(),
             VOCAB,
             1,
@@ -930,6 +1025,7 @@ mod tests {
         }
         let max = build(
             &layer(Some("x"), &[(u32::MAX, "max", "admin")]),
+            None,
             &roles(),
             VOCAB,
             1,
@@ -972,6 +1068,7 @@ mod tests {
     fn one_admin() -> Graph {
         build(
             &layer(Some("x"), &[(1000, "alex", "admin")]),
+            None,
             &roles(),
             VOCAB,
             1,
@@ -1044,6 +1141,7 @@ mod tests {
         assert_eq!(
             build(
                 &l,
+                None,
                 &crate::kernel::persisted_compiled_set("SECRET"),
                 VOCAB,
                 1,
@@ -1083,10 +1181,12 @@ mod tests {
         let a = layer(Some("x"), &[(1, "a", "admin"), (2, "b", "user")]);
         let mut b = a.clone();
         b.subjects.reverse();
-        let ga =
-            crate::format::encode(&build(&a, &roles(), VOCAB, 1, ProvenanceKind::Seed).unwrap());
-        let gb =
-            crate::format::encode(&build(&b, &roles(), VOCAB, 1, ProvenanceKind::Seed).unwrap());
+        let ga = crate::format::encode(
+            &build(&a, None, &roles(), VOCAB, 1, ProvenanceKind::Seed).unwrap(),
+        );
+        let gb = crate::format::encode(
+            &build(&b, None, &roles(), VOCAB, 1, ProvenanceKind::Seed).unwrap(),
+        );
         assert_eq!(ga, gb);
     }
 
@@ -1095,6 +1195,7 @@ mod tests {
         assert!(matches!(
             build(
                 &IdentityLayer::default(),
+                None,
                 &roles(),
                 [1; 32],
                 1,
@@ -1110,7 +1211,7 @@ mod tests {
             subjects: vec![],
         };
         assert!(matches!(
-            build(&no_label, &roles(), [1; 32], 1, ProvenanceKind::Seed),
+            build(&no_label, None, &roles(), [1; 32], 1, ProvenanceKind::Seed),
             Err(IdentityError::Graph(GraphError::EmptyLabel))
         ));
     }
@@ -1518,6 +1619,20 @@ mod tests {
                 IdentityError::LabelMismatch("admin".into()),
                 "identity layer: compiled node `admin` is labelled differently from the layer",
             ),
+            (
+                IdentityError::BaselineAttr {
+                    node: 5,
+                    attr: "value",
+                },
+                "baseline: node 5 lacks a valid `value` attribute",
+            ),
+            (
+                IdentityError::BaselineAmbiguous {
+                    node: 6,
+                    what: "no level",
+                },
+                "baseline: node 6 is ambiguous: no level",
+            ),
         ];
         for (e, want) in cases {
             assert_eq!(e.to_string(), want);
@@ -1533,7 +1648,7 @@ mod tests {
     #[test]
     fn every_adversary_name_round_trips_and_a_single_name_writes_no_aliases() {
         let one = layer(Some("x"), &[(666, "mallory", "adversary")]);
-        let g = build(&one, &roles(), VOCAB, 1, ProvenanceKind::Seed).unwrap();
+        let g = build(&one, None, &roles(), VOCAB, 1, ProvenanceKind::Seed).unwrap();
         let s = g.lookup(SUBJECT, "uid:666").unwrap();
         assert!(
             !s.attrs.contains_key(ATTR_ALIASES),
@@ -1547,7 +1662,7 @@ mod tests {
             ),
             &[("mal", 666), ("eve", 7), ("trudy", 666)],
         );
-        let g = build(&two, &roles(), VOCAB, 1, ProvenanceKind::Seed).unwrap();
+        let g = build(&two, None, &roles(), VOCAB, 1, ProvenanceKind::Seed).unwrap();
         let s = g.lookup(SUBJECT, "uid:666").unwrap();
         assert_eq!(
             s.attrs.get(ATTR_ALIASES),
@@ -1596,7 +1711,7 @@ mod tests {
             ),
         ] {
             assert!(matches!(
-                build(&bad, &roles(), VOCAB, 1, ProvenanceKind::Seed),
+                build(&bad, None, &roles(), VOCAB, 1, ProvenanceKind::Seed),
                 Err(IdentityError::Alias(_))
             ));
         }
@@ -1609,6 +1724,7 @@ mod tests {
                     (7, "eve", "adversary"),
                 ],
             ),
+            None,
             &roles(),
             VOCAB,
             1,

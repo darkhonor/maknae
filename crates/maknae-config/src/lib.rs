@@ -32,6 +32,7 @@
 
 mod audit_cfg;
 mod authz;
+mod baseline_doc;
 mod bindings;
 mod bounds;
 mod bounds_io;
@@ -52,10 +53,13 @@ mod user_providers_io;
 mod value;
 
 #[cfg(all(unix, feature = "hermetic-test-seam"))]
-pub use loader::load_config_rooted_with_requirement;
-pub use loader::{load_config, load_config_rooted};
+pub use loader::load_config_root_owned_with_requirement;
+pub use loader::{load_config, load_config_root_owned};
 
-pub use audit_cfg::{audit_from_section, AuditConfig, AUDIT_SECTION};
+pub use audit_cfg::{
+    audit_from_section, resolve_readers, AuditConfig, ReaderAccount, ReaderLookup, AUDIT_SECTION,
+    READER_UID_FLOOR, REFUSED_READER_NAMES, REFUSED_READER_UIDS,
+};
 #[cfg(all(unix, feature = "hermetic-test-seam"))]
 pub use authz::load_authz_with_requirement;
 #[cfg(all(unix, feature = "hermetic-test-seam"))]
@@ -70,6 +74,7 @@ pub use authz::{
     destination_entry_is_acceptable, load_authz, parse_authz, AuthzError, AuthzPolicy, HomeUnbound,
     Match3, PathGlob, Pattern, RawActionGrants, RawDestinations, Request,
 };
+pub use baseline_doc::{document_sections, value_from_canonical_json, BaselineSections};
 pub use bounds::{
     bounds_from_document, kv_fragment_is_acceptable, mount_path_is_acceptable,
     path_is_within_prefix, vault_path_is_safe, EgressBounds, EGRESS_BOUNDS_FILE,
@@ -78,7 +83,8 @@ pub use bounds::{
 pub use bounds_io::load_egress_bounds;
 pub use ceiling::{ceiling_from_core, policy_name_from_core, Ceiling, IngestPosture};
 pub use document::{
-    effective_view, Document, Override, ResolvedSettings, SectionSpec, Source, MASK, NOT_SET,
+    baseline_change_lines, effective_view, Document, Override, ResolvedSettings, SectionSpec,
+    Source, ABSENT, MASK, NOT_SET, SUPPRESSED_CHANGED,
 };
 pub use egress_cfg::{
     egress_from_section, EgressConfig, EGRESS_DEADLINE_MS_MAX, EGRESS_SECTION,
@@ -111,6 +117,17 @@ pub use user_providers_io::load_user_providers;
 pub use value::{canonical_json, Value};
 
 use builder::Builder;
+
+/// The sections `maknaed` reads from `maknae.yaml` and `config.d`.
+pub const DAEMON_SECTIONS: [&str; 7] = [
+    "lake",
+    "vault",
+    "transport",
+    "audit",
+    "principal",
+    "providers",
+    "egress",
+];
 
 /// Refuse a key the section's parser does not read (#210).
 ///
@@ -242,6 +259,33 @@ fn load_required_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_daemon_sections_name_this_crates_section_parsers() {
+        for name in [
+            TRANSPORT_SECTION,
+            AUDIT_SECTION,
+            PRINCIPAL_SECTION,
+            PROVIDERS_SECTION,
+            EGRESS_SECTION,
+        ] {
+            assert!(DAEMON_SECTIONS.contains(&name), "{name}");
+        }
+    }
+
+    #[cfg(unix)]
+    pub(crate) mod test_owner {
+        /// Under root a fresh fixture is root-owned and passes an owner-0 door, so
+        /// the refusal under test is exercised by handing the fixture to `nobody`.
+        pub(crate) fn hand_to_nobody_when_root(paths: &[&std::path::Path]) {
+            use std::os::unix::fs::MetadataExt;
+            for p in paths {
+                if std::fs::metadata(p).unwrap().uid() == 0 {
+                    std::os::unix::fs::chown(p, Some(65534), Some(65534)).unwrap();
+                }
+            }
+        }
+    }
 
     #[test]
     fn dup_key_rejected_not_lastwin() {
@@ -445,9 +489,11 @@ mod tests {
     #[test]
     fn load_root_file_refuses_non_root_owned_artifact() {
         use std::os::unix::fs::PermissionsExt;
-        let path = std::env::temp_dir().join("maknae_config_nonroot.yaml");
+        let path =
+            std::env::temp_dir().join(format!("maknae_config_nonroot_{}.yaml", std::process::id()));
         std::fs::write(&path, "x: 1\n").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        crate::tests::test_owner::hand_to_nobody_when_root(&[&path]);
         let got = load_root_file(&path);
         let _ = std::fs::remove_file(&path);
         assert!(matches!(got, Err(ConfigError::Io(message)) if message.contains("require 0")));

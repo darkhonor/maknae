@@ -69,7 +69,7 @@ crates/maknae-config/src/loader.rs|owner: None,
 crates/maknae-config/src/loader.rs|owner: None,
 crates/maknae-config/src/loader.rs|owner: None,
 crates/maknae-config/src/loader.rs|owner: None,
-# #243 `verify_root_source`: the re-read of a root-required section's SOURCE names its
+# #243 `verify_root_source`: the re-read of every scanned SOURCE (#490) names its
 # owner requirement on the anchor, the descendant and the target alike (`requirement.owner`),
 # so it carries no requirement-free `owner: None` line and needs no entry here.
 crates/maknae-vault/src/client.rs|owner: None,
@@ -109,5 +109,8 @@ bins/maknae/src/mutation.rs|root_required: AnchorRequired::OS_DAC,
 # #158: maknae-io's audit appender converts already checked owned descriptors to
 # persistent File handles for the primary writer and same-parent fsync.
 crates/maknae-io/src/audit_append.rs|use std::fs::File;
+# #490: maknae-sys's append-only flag query takes the opened File it reads the flag from;
+# a type-only import, no filesystem call.
+crates/maknae-sys/src/flags.rs|use std::fs::File;
 crates/maknae-io/src/audit_append.rs|let parent = File::from(syscall::open_parent_by_path(&parent_path).map_err(io::Error::from)?);
 crates/maknae-io/src/audit_append.rs|.map(File::from)

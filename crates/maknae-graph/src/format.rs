@@ -585,6 +585,7 @@ mod tests {
                 bindings_sha256: None,
                 subjects: vec![],
             },
+            None,
             &roles,
             [1; 32],
             3,
@@ -619,7 +620,7 @@ mod tests {
             bindings_sha256: None,
             subjects: vec![],
         };
-        let g = build(&layer, &roles, [1; 32], 3, ProvenanceKind::Seed).unwrap();
+        let g = build(&layer, None, &roles, [1; 32], 3, ProvenanceKind::Seed).unwrap();
         let admin = g.lookup(crate::kernel::ROLE, "admin").unwrap().id;
         let bytes = encode(&g);
         let at = {
@@ -656,6 +657,7 @@ mod tests {
                     role: "user".into(),
                 }],
             },
+            None,
             &roles,
             [1; 32],
             3,

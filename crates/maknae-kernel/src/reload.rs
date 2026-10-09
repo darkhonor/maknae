@@ -118,6 +118,8 @@ pub enum Refusal {
     Load(String),
     Compile(String),
     Persist(String),
+    /// The candidate carries a baseline other than the stored one; nothing was applied.
+    BaselineChanged,
     Shutdown,
 }
 
@@ -128,6 +130,10 @@ impl fmt::Display for Refusal {
             Self::Load(m) => write!(f, "policy load: {m}"),
             Self::Compile(m) => write!(f, "compile: {m}"),
             Self::Persist(m) => write!(f, "persist: {m}"),
+            Self::BaselineChanged => f.write_str(
+                "the stored baseline differs from the one this reload carries; \
+                 only an accept changes the accepted baseline",
+            ),
             Self::Shutdown => f.write_str("shutdown"),
         }
     }

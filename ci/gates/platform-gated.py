@@ -535,16 +535,21 @@ def filter_lists(root):
     script = (Path(root) / "ci/gates/mutation-platform.sh").read_text()
     lists = {}
     for platform, uname in UNAME.items():
-        m = re.search(uname + r"\)\s*absent='([^']*)'\s*inactive_files='([^']*)';;", script)
+        m = re.search(uname + r"\)\s*absent='([^']*)'\s*inactive_files='([^']*)'\s*(?:#[^\n]*\n\s*)*"
+                      r"root_only='([^']*)';;", script)
         if not m:
-            raise GateError(f"mutation-platform.sh: no {uname} absent/inactive_files arm")
+            raise GateError(f"mutation-platform.sh: no {uname} absent/inactive_files/root_only arm")
         files = set()
         for alt in filter(None, m.group(2).split("|")):
             path = re.fullmatch(r"\^(.+):", alt)
             if not path:
                 raise GateError(f"mutation-platform.sh: unrecognised inactive_files entry {alt!r}")
             files.add(path.group(1).replace("\\.", "."))
-        lists[platform] = (set(filter(None, m.group(1).split("|"))), files)
+        root_only = set(filter(None, m.group(3).split("|")))
+        for alt in root_only:
+            if not re.fullmatch(r"\^crates/[^:]+\\\.rs:\[0-9\]\+:\[0-9\]\+: replace [A-Za-z_][A-Za-z0-9_]* -> .+\$", alt):
+                raise GateError(f"mutation-platform.sh: root_only entry {alt!r} is not one anchored mutant")
+        lists[platform] = (set(filter(None, m.group(1).split("|"))), files, root_only)
     return lists
 
 

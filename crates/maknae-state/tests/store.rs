@@ -1,3 +1,4 @@
+use maknae_graph::baseline::BaselineLayer;
 use maknae_graph::format;
 use maknae_graph::graph::{Graph, GraphBuilder};
 use maknae_graph::identity::{
@@ -13,9 +14,9 @@ use maknae_state::envelope::{
     self, ciphertext_digest, EnvelopeError, WrappingKey, ENVELOPE_VERSION, KEY_LEN,
 };
 use maknae_state::store::{
-    boot, commit, remedy, BootAudit, BootInputs, BootOutcome, BootReport, Committed, Migration,
-    Remedy, StateDir, StoreError, INITIATOR_ROOT_FILE, INITIATOR_SEED, MARKER_FILE,
-    MAX_STORE_BYTES, REJECTED_PREFIX, STORE_FILE,
+    boot, commit, commit_accept, remedy, BootAudit, BootInputs, BootOutcome, BootReport, Committed,
+    Migration, Remedy, StateDir, StoreError, INITIATOR_OPERATOR, INITIATOR_ROOT_FILE,
+    INITIATOR_SEED, MARKER_FILE, MAX_STORE_BYTES, REJECTED_PREFIX, STORE_FILE,
 };
 use maknae_state::vocabulary;
 use std::fs;
@@ -34,6 +35,7 @@ enum Event {
     Transition(u64, String),
     Released(u64, Vec<Released>),
     PrincipalAdmin(u64, u32),
+    Baseline(u64, Vec<String>),
 }
 
 #[derive(Default)]
@@ -46,6 +48,7 @@ struct Recorder {
     fail_transition: bool,
     fail_released: bool,
     fail_principal_admin: bool,
+    fail_baseline: bool,
     store_at_released: Option<PathBuf>,
     store_bytes_at_released: Option<Vec<u8>>,
     store_bytes_at_principal_admin: Option<Vec<u8>>,
@@ -131,6 +134,15 @@ impl BootAudit for Recorder {
         }
         ready(refuse(self.fail_principal_admin, "principal admin"))
     }
+
+    fn baseline(
+        &mut self,
+        revision: u64,
+        events: &[String],
+    ) -> impl Future<Output = Result<(), StoreError>> + Send {
+        self.events.push(Event::Baseline(revision, events.to_vec()));
+        ready(refuse(self.fail_baseline, "baseline"))
+    }
 }
 
 const SOURCE: &str = "/etc/maknae/bindings.yaml";
@@ -144,10 +156,36 @@ struct Inputs {
     unresolved: Vec<String>,
     missing: bool,
     lists_nobody: bool,
+    baseline: BaselineLayer,
+    seen: Seen,
+    events: Vec<String>,
 }
 
+enum Seen {
+    /// What the kernel does: read the store's baseline first.
+    Peek,
+    Exactly(Option<[u8; 32]>),
+}
+
+const SEEDED: &str = "baseline seeded from maknae.yaml and config.d (no accepted baseline yet)";
+
+fn bl(core: &str) -> BaselineLayer {
+    BaselineLayer {
+        sections: [("core".to_string(), core.to_string())]
+            .into_iter()
+            .collect(),
+        system: "US".into(),
+        ceiling: "UNCLASSIFIED".into(),
+        sha256: envelope::sha256(core.as_bytes()),
+        moved_from: None,
+    }
+}
+
+const A: &str = r#"{"deployment_id":"a"}"#;
+const B: &str = r#"{"deployment_id":"b"}"#;
+
 impl Inputs {
-    fn boot(&self) -> BootInputs<'_> {
+    fn boot(&self, seen: Option<[u8; 32]>) -> BootInputs<'_> {
         BootInputs {
             compiled: &self.compiled,
             vocabulary_sha256: self.digest,
@@ -156,6 +194,9 @@ impl Inputs {
             bindings_missing: self.missing,
             bindings_lists_nobody: self.lists_nobody,
             principal_uid: PRINCIPAL_UID,
+            baseline: &self.baseline,
+            accepted_seen: seen,
+            baseline_events: &self.events,
         }
     }
 }
@@ -191,6 +232,9 @@ fn inputs_with(layer: IdentityLayer) -> Inputs {
         unresolved: Vec::new(),
         missing: false,
         lists_nobody: false,
+        baseline: bl(A),
+        seen: Seen::Peek,
+        events: vec![SEEDED.into()],
     }
 }
 
@@ -323,6 +367,7 @@ fn sealed_graph(revision: u64, k: &WrappingKey) -> Vec<u8> {
     let i = inputs();
     let g = identity::build(
         &i.layer,
+        Some(&bl(A)),
         &i.compiled,
         i.digest,
         revision,
@@ -373,8 +418,32 @@ async fn run_with(
     i: &Inputs,
 ) -> (Result<BootReport, StoreError>, Vec<Event>) {
     let mut audit = Recorder::default();
-    let r = boot(dir, k, checkpoint, &mut audit, NOW, &i.boot()).await;
+    let r = boot(
+        dir,
+        k,
+        checkpoint,
+        &mut audit,
+        NOW,
+        &i.boot(seen(dir, k, i)),
+    )
+    .await;
     (r, audit.events)
+}
+
+fn peeked(fx: &Fixture, k: &WrappingKey) -> Option<[u8; 32]> {
+    maknae_state::store::peek_baseline(&fx.dir(), k)
+        .unwrap()
+        .map(|b| b.sha256)
+}
+
+fn seen(dir: &StateDir, k: &WrappingKey, i: &Inputs) -> Option<[u8; 32]> {
+    match i.seen {
+        Seen::Peek => maknae_state::store::peek_baseline(dir, k)
+            .ok()
+            .flatten()
+            .map(|b| b.sha256),
+        Seen::Exactly(d) => d,
+    }
 }
 
 #[tokio::test]
@@ -399,6 +468,7 @@ async fn first_boot_seeds_revision_1_and_checkpoints_seeded() {
         events,
         vec![
             Event::Intent(1, false),
+            Event::Baseline(1, vec![SEEDED.into()]),
             Event::Checkpoint(1, r.digest, "seeded".into())
         ]
     );
@@ -475,6 +545,7 @@ async fn reseed_then_restart_verifies() {
         events,
         vec![
             Event::Intent(2, true),
+            Event::Baseline(2, vec![SEEDED.into()]),
             Event::Checkpoint(2, r.digest, "reseeded".into())
         ]
     );
@@ -928,7 +999,16 @@ async fn seed_audits_intent_before_persist() {
         fail_intent: true,
         ..Recorder::default()
     };
-    let r = boot(&fx.dir(), &key(1), None, &mut audit, NOW, &inputs().boot()).await;
+    let seen = peeked(&fx, &key(1));
+    let r = boot(
+        &fx.dir(),
+        &key(1),
+        None,
+        &mut audit,
+        NOW,
+        &inputs().boot(seen),
+    )
+    .await;
     assert_eq!(r.unwrap_err(), StoreError::Audit("intent refused".into()));
     assert!(!fx.exists(STORE_FILE));
     assert_eq!(audit.events, vec![Event::Intent(1, false)]);
@@ -945,7 +1025,8 @@ async fn reseed_intent_failure_writes_nothing() {
         fail_intent: true,
         ..Recorder::default()
     };
-    let r = boot(&fx.dir(), &k, None, &mut audit, NOW, &inputs().boot()).await;
+    let seen = peeked(&fx, &k);
+    let r = boot(&fx.dir(), &k, None, &mut audit, NOW, &inputs().boot(seen)).await;
     assert!(matches!(r.unwrap_err(), StoreError::Audit(_)));
     assert_eq!(fx.store(), old);
     assert!(fx.rejected().is_empty());
@@ -960,7 +1041,8 @@ async fn checkpoint_failure_fails_the_seed_and_the_load() {
         fail_checkpoint: true,
         ..Recorder::default()
     };
-    let r = boot(&fx.dir(), &k, None, &mut audit, NOW, &inputs().boot()).await;
+    let seen = peeked(&fx, &k);
+    let r = boot(&fx.dir(), &k, None, &mut audit, NOW, &inputs().boot(seen)).await;
     assert_eq!(
         r.unwrap_err(),
         StoreError::Audit("checkpoint refused".into())
@@ -969,7 +1051,8 @@ async fn checkpoint_failure_fails_the_seed_and_the_load() {
         fail_checkpoint: true,
         ..Recorder::default()
     };
-    let r = boot(&fx.dir(), &k, None, &mut audit, NOW, &inputs().boot()).await;
+    let seen = peeked(&fx, &k);
+    let r = boot(&fx.dir(), &k, None, &mut audit, NOW, &inputs().boot(seen)).await;
     assert_eq!(
         r.unwrap_err(),
         StoreError::Audit("checkpoint refused".into())
@@ -1588,13 +1671,14 @@ async fn a_failed_transition_intent_persists_nothing() {
         fail_transition: true,
         ..Recorder::default()
     };
+    let seen = peeked(&fx, &k);
     let r = boot(
         &fx.dir(),
         &k,
         checkpoint_of(&first),
         &mut audit,
         NOW,
-        &edited().boot(),
+        &edited().boot(seen),
     )
     .await;
     assert_eq!(
@@ -1613,13 +1697,14 @@ async fn a_transition_persists_before_its_checkpoint() {
         fail_checkpoint_anchor: Some("transitioned"),
         ..Recorder::default()
     };
+    let seen = peeked(&fx, &k);
     let r = boot(
         &fx.dir(),
         &k,
         checkpoint_of(&first),
         &mut audit,
         NOW,
-        &edited().boot(),
+        &edited().boot(seen),
     )
     .await;
     assert_eq!(
@@ -1681,28 +1766,35 @@ async fn a_store_from_before_identity_migrates_then_seeds_identity() {
             Event::Checkpoint(1, old, "verified".into()),
             Event::Migrate(2, None, i.digest, vec![]),
             Event::Checkpoint(2, m, "migrated".into()),
+            Event::Baseline(3, vec![SEEDED.into()]),
             Event::Transition(3, "root-file".into()),
             Event::Checkpoint(3, r.digest, "transitioned".into()),
         ]
     );
+    assert!(r.baseline_transition);
     assert_eq!(extracted(&r.graph).layer, i.layer);
     assert_eq!(r.digest, ciphertext_digest(&fx.store()));
 }
 
 #[tokio::test]
-async fn a_store_from_before_identity_without_bindings_migrates_in_one_persist() {
+async fn a_store_from_before_identity_without_bindings_migrates_then_gains_the_baseline() {
     let i = inputs_with(layer(None, &[]));
     let (fx, r, events, old) = boot_over_a_store_from_before_identity(1, &i).await;
     let r = r.unwrap();
     assert!(r.migration.is_some());
     assert!(!r.identity_transition);
-    assert_eq!(r.revision, 2);
+    assert!(r.baseline_transition);
+    assert_eq!(r.revision, 3);
+    let m = migrated_digest(&events);
     assert_eq!(
         events,
         vec![
             Event::Checkpoint(1, old, "verified".into()),
             Event::Migrate(2, None, i.digest, vec![]),
-            Event::Checkpoint(2, r.digest, "migrated".into()),
+            Event::Checkpoint(2, m, "migrated".into()),
+            Event::Baseline(3, vec![SEEDED.into()]),
+            Event::Transition(3, "root-file".into()),
+            Event::Checkpoint(3, r.digest, "transitioned".into()),
         ]
     );
     let e = extracted(&graph_of(&fx.store(), &key(1)));
@@ -1718,7 +1810,8 @@ async fn a_pre_identity_store_checkpointed_at_its_revision_is_verified_then_migr
     assert_eq!(r.outcome, BootOutcome::Loaded(AnchorState::Verified));
     assert_eq!(r.revision, 9);
     assert_eq!(events[1], Event::Migrate(8, None, i.digest, vec![]));
-    assert_eq!(events[3], Event::Transition(9, "root-file".into()));
+    assert_eq!(events[3], Event::Baseline(9, vec![SEEDED.into()]));
+    assert_eq!(events[4], Event::Transition(9, "root-file".into()));
 }
 
 #[tokio::test]
@@ -1741,13 +1834,14 @@ async fn migration_persists_before_its_checkpoint_and_a_failed_intent_persists_n
         fail_migrate: true,
         ..Recorder::default()
     };
+    let seen = peeked(&fx, &k);
     let r = boot(
         &fx.dir(),
         &k,
         cp(1, &old),
         &mut audit,
         NOW,
-        &inputs().boot(),
+        &inputs().boot(seen),
     )
     .await;
     assert_eq!(r.unwrap_err(), StoreError::Audit("migrate refused".into()));
@@ -1758,13 +1852,14 @@ async fn migration_persists_before_its_checkpoint_and_a_failed_intent_persists_n
         fail_checkpoint_anchor: Some("migrated"),
         ..Recorder::default()
     };
+    let seen = peeked(&fx, &k);
     let r = boot(
         &fx.dir(),
         &k,
         cp(1, &old),
         &mut audit,
         NOW,
-        &inputs().boot(),
+        &inputs().boot(seen),
     )
     .await;
     assert_eq!(
@@ -1780,14 +1875,17 @@ async fn forged_vocabulary_refuses() {
     let k = key(1);
     let i = inputs();
     let l = layer(None, &[]);
-    let claims_binary = identity::build(&l, &wider(), i.digest, 1, ProvenanceKind::Seed).unwrap();
-    let roles_only = identity::build(&l, &i.compiled, i.digest, 1, ProvenanceKind::Seed).unwrap();
+    let claims_binary =
+        identity::build(&l, None, &wider(), i.digest, 1, ProvenanceKind::Seed).unwrap();
+    let roles_only =
+        identity::build(&l, None, &i.compiled, i.digest, 1, ProvenanceKind::Seed).unwrap();
     let no_digest = rebuild(
         &roles_only,
         |n| (n.key != VOCABULARY_SOURCE_KEY).then(|| n.clone()),
         &i.compiled,
     );
-    let stale_claim = identity::build(&l, &wider(), [7; 32], 1, ProvenanceKind::Seed).unwrap();
+    let stale_claim =
+        identity::build(&l, None, &wider(), [7; 32], 1, ProvenanceKind::Seed).unwrap();
     for forged in [claims_binary, no_digest, stale_claim] {
         let fx = Fixture::new();
         let file = seal_graph(&forged, &k);
@@ -1833,7 +1931,15 @@ async fn a_binds_to_a_vanished_role_is_dropped_and_reported() {
         ],
     );
     let wide = vocabulary::digest(&wider()).unwrap();
-    let g = identity::build(&stored, &wider(), wide, 1, ProvenanceKind::Seed).unwrap();
+    let g = identity::build(
+        &stored,
+        Some(&bl(A)),
+        &wider(),
+        wide,
+        1,
+        ProvenanceKind::Seed,
+    )
+    .unwrap();
     let file = seal_graph(&g, &k);
 
     let kept = inputs_with(layer(
@@ -1941,6 +2047,7 @@ async fn an_identity_layer_that_does_not_build_refuses_before_any_intent() {
 fn next_graph(revision: u64, i: &Inputs) -> Graph {
     identity::build(
         &i.layer,
+        Some(&bl(A)),
         &i.compiled,
         i.digest,
         revision,
@@ -2205,14 +2312,15 @@ async fn a_boot_transition_whose_directory_sync_fails_boots_and_reports_it() {
 async fn a_boot_migration_whose_directory_sync_fails_boots_and_reports_it() {
     let fx = Fixture::new();
     let k = key(1);
-    let old = sealed_before_identity(1, &k);
-    fx.write(STORE_FILE, &old, 0o600);
-    let i = inputs_with(layer(None, &[]));
+    let mut i = inputs_with(layer(None, &[]));
+    let first = run_with(&fx.dir(), &k, None, &i).await.0.unwrap();
+    i.compiled = wider();
+    i.digest = vocabulary::digest(&i.compiled).unwrap();
     let dir = fx.dir();
     dir.fail_next_directory_sync();
-    let (r, events) = run_with(&dir, &k, cp(1, &old), &i).await;
+    let (r, events) = run_with(&dir, &k, checkpoint_of(&first), &i).await;
     let r = r.unwrap();
-    assert!(r.migration.is_some() && !r.identity_transition);
+    assert!(r.migration.is_some() && !r.identity_transition && !r.baseline_transition);
     assert_eq!(r.durability_error.as_deref(), Some(NOT_DURABLE));
     assert_eq!(
         events.last(),
@@ -2351,7 +2459,15 @@ async fn a_stored_node_the_identity_layer_does_not_project_is_rewritten() {
     let fx = Fixture::new();
     let k = key(1);
     let i = inputs();
-    let clean = identity::build(&i.layer, &i.compiled, i.digest, 1, ProvenanceKind::Seed).unwrap();
+    let clean = identity::build(
+        &i.layer,
+        Some(&bl(A)),
+        &i.compiled,
+        i.digest,
+        1,
+        ProvenanceKind::Seed,
+    )
+    .unwrap();
     let mut stray = clean
         .nodes()
         .iter()
@@ -2391,7 +2507,7 @@ async fn a_migrated_store_reloads_without_churn() {
     let r = r.unwrap();
     let (again, events) = run_with(&fx.dir(), &key(1), checkpoint_of(&r), &i).await;
     let again = again.unwrap();
-    assert_eq!((again.revision, again.identity_transition), (2, false));
+    assert_eq!((again.revision, again.identity_transition), (3, false));
     assert_eq!(again.migration, None);
     assert_eq!(events.len(), 1);
 }
@@ -2445,6 +2561,14 @@ impl BootAudit for Racer<'_> {
         uid: u32,
     ) -> impl Future<Output = Result<(), StoreError>> + Send {
         self.inner.principal_admin(revision, uid)
+    }
+
+    fn baseline(
+        &mut self,
+        revision: u64,
+        events: &[String],
+    ) -> impl Future<Output = Result<(), StoreError>> + Send {
+        self.inner.baseline(revision, events)
     }
 
     fn intent_transition(
@@ -2757,13 +2881,14 @@ async fn a_keyless_boot_writes_its_release_records_before_the_persist() {
         fail_released: true,
         ..Recorder::default()
     };
+    let seen = peeked(&fx, &k);
     let r = boot(
         &fx.dir(),
         &k,
         checkpoint_of(&first),
         &mut failing,
         NOW,
-        &keyless.boot(),
+        &keyless.boot(seen),
     )
     .await;
     assert_eq!(r.unwrap_err(), StoreError::Audit("released refused".into()));
@@ -2780,13 +2905,14 @@ async fn a_keyless_boot_writes_its_release_records_before_the_persist() {
         store_at_released: Some(fx.file(STORE_FILE)),
         ..Recorder::default()
     };
+    let seen = peeked(&fx, &k);
     let r = boot(
         &fx.dir(),
         &k,
         checkpoint_of(&first),
         &mut audit,
         NOW,
-        &keyless.boot(),
+        &keyless.boot(seen),
     )
     .await
     .unwrap();
@@ -2818,13 +2944,14 @@ async fn a_keyless_boot_over_explicit_bindings_records_the_principal_admin_befor
         fail_principal_admin: true,
         ..Recorder::default()
     };
+    let seen = peeked(&fx, &k);
     let r = boot(
         &fx.dir(),
         &k,
         checkpoint_of(&first),
         &mut failing,
         NOW,
-        &keyless.boot(),
+        &keyless.boot(seen),
     )
     .await;
     assert_eq!(
@@ -2844,13 +2971,14 @@ async fn a_keyless_boot_over_explicit_bindings_records_the_principal_admin_befor
         store_at_released: Some(fx.file(STORE_FILE)),
         ..Recorder::default()
     };
+    let seen = peeked(&fx, &k);
     let r = boot(
         &fx.dir(),
         &k,
         checkpoint_of(&first),
         &mut audit,
         NOW,
-        &keyless.boot(),
+        &keyless.boot(seen),
     )
     .await
     .unwrap();
@@ -3033,5 +3161,615 @@ async fn an_upgrade_from_any_other_spelling_of_authz_yaml_refuses() {
         );
         assert!(events.is_empty());
         assert_eq!(fx.store(), before);
+    }
+}
+
+fn with_baseline(i: Inputs, b: BaselineLayer, seen: Seen, events: &[&str]) -> Inputs {
+    Inputs {
+        baseline: b,
+        seen,
+        events: events.iter().map(|e| e.to_string()).collect(),
+        ..i
+    }
+}
+
+fn stored_baseline(fx: &Fixture, k: &WrappingKey) -> Option<BaselineLayer> {
+    identity::extract(&graph_of(&fx.store(), k))
+        .unwrap()
+        .baseline
+}
+
+#[tokio::test]
+async fn a_first_boot_seeds_the_baseline_with_its_events_written_ahead() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let (r, events) = run(&fx.dir(), &k, None).await;
+    let r = r.unwrap();
+    assert_eq!(
+        events,
+        vec![
+            Event::Intent(1, false),
+            Event::Baseline(1, vec![SEEDED.into()]),
+            Event::Checkpoint(1, r.digest, "seeded".into())
+        ]
+    );
+    assert_eq!(stored_baseline(&fx, &k), Some(bl(A)));
+}
+
+#[tokio::test]
+async fn a_seed_without_a_baseline_record_persists_nothing() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let i = with_baseline(inputs(), bl(A), Seen::Exactly(None), &[]);
+    let (r, events) = run_with(&fx.dir(), &k, None, &i).await;
+    assert!(matches!(r, Err(StoreError::BaselineUnrecorded)), "{r:?}");
+    assert!(events.is_empty(), "{events:?}");
+    assert!(!fx.exists(STORE_FILE));
+}
+
+#[tokio::test]
+async fn a_first_boot_decided_from_an_accepted_baseline_is_refused() {
+    let fx = Fixture::new();
+    let i = with_baseline(inputs(), bl(A), Seen::Exactly(Some(bl(A).sha256)), &["x"]);
+    let (r, events) = run_with(&fx.dir(), &key(1), None, &i).await;
+    assert_eq!(
+        r.unwrap_err(),
+        StoreError::BaselineUnseen {
+            stored: None,
+            seen: Some(identity::hex(&bl(A).sha256)),
+        }
+    );
+    assert!(events.is_empty(), "{events:?}");
+    assert!(!fx.exists(STORE_FILE));
+}
+
+#[tokio::test]
+async fn a_failed_seed_baseline_record_persists_nothing() {
+    let fx = Fixture::new();
+    let mut audit = Recorder {
+        fail_baseline: true,
+        ..Recorder::default()
+    };
+    let i = inputs();
+    let r = boot(&fx.dir(), &key(1), None, &mut audit, NOW, &i.boot(None)).await;
+    assert_eq!(r.unwrap_err(), StoreError::Audit("baseline refused".into()));
+    assert!(!fx.exists(STORE_FILE));
+    assert_eq!(
+        audit.events,
+        vec![
+            Event::Intent(1, false),
+            Event::Baseline(1, vec![SEEDED.into()])
+        ]
+    );
+}
+
+#[tokio::test]
+async fn an_authorized_reseed_persists_the_given_baseline() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let first = run(&fx.dir(), &k, None).await.0.unwrap();
+    fx.mark(0o644);
+    let i = with_baseline(inputs(), bl(B), Seen::Exactly(None), &["reseeded"]);
+    let (r, events) = run_with(&fx.dir(), &k, checkpoint_of(&first), &i).await;
+    let r = r.unwrap();
+    assert_eq!(
+        events,
+        vec![
+            Event::Intent(2, true),
+            Event::Baseline(2, vec!["reseeded".into()]),
+            Event::Checkpoint(2, r.digest, "reseeded".into())
+        ]
+    );
+    assert_eq!(stored_baseline(&fx, &k), Some(bl(B)));
+}
+
+#[tokio::test]
+async fn an_upgrade_store_without_a_baseline_gains_one_in_one_recorded_transition() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let i = inputs();
+    let old = identity::build(
+        &i.layer,
+        None,
+        &i.compiled,
+        i.digest,
+        4,
+        ProvenanceKind::Seed,
+    )
+    .unwrap();
+    fx.write(STORE_FILE, &seal_graph(&old, &k), 0o600);
+    let cp = Some(Checkpoint {
+        revision: 4,
+        digest: ciphertext_digest(&fx.store()),
+    });
+    let (r, events) = run(&fx.dir(), &k, cp).await;
+    let r = r.unwrap();
+    assert_eq!(
+        &events[1..],
+        &[
+            Event::Baseline(5, vec![SEEDED.into()]),
+            Event::Transition(5, INITIATOR_ROOT_FILE.into()),
+            Event::Checkpoint(5, r.digest, "transitioned".into()),
+        ]
+    );
+    assert!(r.baseline_transition);
+    assert!(!r.identity_transition);
+    assert_eq!(stored_baseline(&fx, &k), Some(bl(A)));
+}
+
+#[tokio::test]
+async fn an_identity_transition_carries_the_stored_baseline() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let first = run(&fx.dir(), &k, None).await.0.unwrap();
+    let (r, events) = run_with(&fx.dir(), &k, checkpoint_of(&first), &edited()).await;
+    let r = r.unwrap();
+    assert!(r.identity_transition);
+    assert!(!r.baseline_transition);
+    assert!(!events.iter().any(|e| matches!(e, Event::Baseline(..))));
+    assert_eq!(stored_baseline(&fx, &k), Some(bl(A)));
+    let (again, events) = run_with(&fx.dir(), &k, checkpoint_of(&r), &edited()).await;
+    assert_eq!(again.unwrap().revision, 2);
+    assert_eq!(
+        events,
+        vec![Event::Checkpoint(2, r.digest, "verified".into())]
+    );
+}
+
+#[tokio::test]
+async fn a_recorded_baseline_change_persists_the_new_baseline_once() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let first = run(&fx.dir(), &k, None).await.0.unwrap();
+    let i = with_baseline(
+        inputs(),
+        bl(B),
+        Seen::Exactly(Some(bl(A).sha256)),
+        &["core follows"],
+    );
+    let (r, events) = run_with(&fx.dir(), &k, checkpoint_of(&first), &i).await;
+    let r = r.unwrap();
+    assert_eq!(
+        events,
+        vec![
+            Event::Checkpoint(1, first.digest, "verified".into()),
+            Event::Baseline(2, vec!["core follows".into()]),
+            Event::Transition(2, INITIATOR_ROOT_FILE.into()),
+            Event::Checkpoint(2, r.digest, "transitioned".into()),
+        ]
+    );
+    assert!(r.baseline_transition && !r.identity_transition);
+    assert_eq!(stored_baseline(&fx, &k), Some(bl(B)));
+    let again = with_baseline(inputs(), bl(B), Seen::Peek, &[]);
+    let (r2, events) = run_with(&fx.dir(), &k, checkpoint_of(&r), &again).await;
+    assert_eq!(r2.unwrap().revision, 2);
+    assert_eq!(
+        events,
+        vec![Event::Checkpoint(2, r.digest, "verified".into())]
+    );
+}
+
+#[tokio::test]
+async fn a_baseline_record_follows_the_principal_record_and_precedes_the_transition() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let first = seeded_with(&fx, &k, bindings_layer(SOURCE, Some(BLOCK), ALICE_AND_BOB)).await;
+    let keyless = inputs_with(bindings_layer(SOURCE, None, &[]));
+    let i = with_baseline(
+        keyless,
+        bl(B),
+        Seen::Exactly(Some(bl(A).sha256)),
+        &["one", "two"],
+    );
+    let (r, events) = run_with(&fx.dir(), &k, checkpoint_of(&first), &i).await;
+    let r = r.unwrap();
+    assert_eq!(
+        &events[1..],
+        &[
+            Event::PrincipalAdmin(2, PRINCIPAL_UID),
+            Event::Baseline(2, vec!["one".into(), "two".into()]),
+            Event::Transition(2, INITIATOR_ROOT_FILE.into()),
+            Event::Checkpoint(2, r.digest, "transitioned".into()),
+        ]
+    );
+    assert!(r.baseline_transition && r.identity_transition);
+    let stored = identity::extract(&graph_of(&fx.store(), &k)).unwrap();
+    assert_eq!(stored.baseline, Some(bl(B)));
+    assert_eq!(sorted_subjects(&stored.layer), sorted_subjects(&i.layer));
+}
+
+fn sorted_subjects(l: &IdentityLayer) -> Vec<(u32, String)> {
+    let mut v: Vec<_> = l.subjects.iter().map(|s| (s.uid, s.role.clone())).collect();
+    v.sort();
+    v
+}
+
+#[tokio::test]
+async fn an_unchanged_baseline_writes_nothing() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let first = run(&fx.dir(), &k, None).await.0.unwrap();
+    let (r, events) = run(&fx.dir(), &k, checkpoint_of(&first)).await;
+    let r = r.unwrap();
+    assert_eq!(r.revision, 1);
+    assert!(!r.baseline_transition);
+    assert_eq!(
+        events,
+        vec![Event::Checkpoint(1, first.digest, "verified".into())]
+    );
+}
+
+#[tokio::test]
+async fn a_baseline_change_without_its_record_persists_nothing() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let first = run(&fx.dir(), &k, None).await.0.unwrap();
+    let before = fx.store();
+    let i = with_baseline(inputs(), bl(B), Seen::Exactly(Some(bl(A).sha256)), &[]);
+    let (r, events) = run_with(&fx.dir(), &k, checkpoint_of(&first), &i).await;
+    assert!(matches!(r, Err(StoreError::BaselineUnrecorded)), "{r:?}");
+    assert!(!events.iter().any(|e| matches!(e, Event::Transition(..))));
+    assert_eq!(fx.store(), before);
+}
+
+#[tokio::test]
+async fn a_failed_baseline_record_persists_nothing() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let first = run(&fx.dir(), &k, None).await.0.unwrap();
+    let before = fx.store();
+    let i = with_baseline(
+        inputs(),
+        bl(B),
+        Seen::Exactly(Some(bl(A).sha256)),
+        &["vault follows maknae.yaml at start"],
+    );
+    let mut audit = Recorder {
+        fail_baseline: true,
+        ..Recorder::default()
+    };
+    let r = boot(
+        &fx.dir(),
+        &k,
+        checkpoint_of(&first),
+        &mut audit,
+        NOW,
+        &i.boot(Some(bl(A).sha256)),
+    )
+    .await;
+    assert!(matches!(r, Err(StoreError::Audit(_))), "{r:?}");
+    assert!(!audit
+        .events
+        .iter()
+        .any(|e| matches!(e, Event::Transition(..))));
+    assert_eq!(fx.store(), before);
+}
+
+#[tokio::test]
+async fn a_boot_decided_from_another_baseline_is_refused() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let first = run(&fx.dir(), &k, None).await.0.unwrap();
+    let before = fx.store();
+    for seen in [None, Some(bl(r#"{"deployment_id":"c"}"#).sha256)] {
+        let i = with_baseline(inputs(), bl(B), Seen::Exactly(seen), &["x"]);
+        let (r, events) = run_with(&fx.dir(), &k, checkpoint_of(&first), &i).await;
+        let e = r.unwrap_err();
+        assert!(matches!(e, StoreError::BaselineUnseen { .. }), "{e:?}");
+        assert_eq!(remedy(&e), Remedy::Investigate);
+        assert!(events.is_empty(), "{events:?}");
+        assert_eq!(fx.store(), before);
+    }
+}
+
+#[tokio::test]
+async fn an_upgrade_store_read_as_having_a_baseline_is_refused() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let i = inputs();
+    let old = identity::build(
+        &i.layer,
+        None,
+        &i.compiled,
+        i.digest,
+        1,
+        ProvenanceKind::Seed,
+    )
+    .unwrap();
+    fx.write(STORE_FILE, &seal_graph(&old, &k), 0o600);
+    let before = fx.store();
+    let i = with_baseline(inputs(), bl(A), Seen::Exactly(Some(bl(A).sha256)), &["x"]);
+    let (r, _) = run_with(&fx.dir(), &k, None, &i).await;
+    assert_eq!(
+        r.unwrap_err(),
+        StoreError::BaselineUnseen {
+            stored: None,
+            seen: Some(identity::hex(&bl(A).sha256)),
+        }
+    );
+    assert_eq!(fx.store(), before);
+}
+
+#[test]
+fn baseline_refusals_name_their_cause() {
+    let e = StoreError::BaselineUnseen {
+        stored: Some("aa".into()),
+        seen: None,
+    };
+    assert_eq!(
+        e.to_string(),
+        "the store's accepted baseline (aa) is not the one this start read (none); nothing was applied"
+    );
+    assert_eq!(
+        StoreError::BaselineUnrecorded.to_string(),
+        "the baseline would change with no recorded cause; nothing was applied"
+    );
+    assert_eq!(remedy(&StoreError::BaselineUnrecorded), Remedy::Investigate);
+}
+
+#[tokio::test]
+async fn a_vocabulary_migration_carries_the_stored_baseline_unchanged() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let first = run(&fx.dir(), &k, None).await.0.unwrap();
+    let mut i = inputs();
+    i.compiled = wider();
+    i.digest = vocabulary::digest(&i.compiled).unwrap();
+    let (r, events) = run_with(&fx.dir(), &k, checkpoint_of(&first), &i).await;
+    r.unwrap();
+    assert!(events.iter().any(|e| matches!(e, Event::Migrate(..))));
+    assert!(!events.iter().any(|e| matches!(e, Event::Baseline(..))));
+    assert_eq!(stored_baseline(&fx, &k), Some(bl(A)));
+}
+
+#[tokio::test]
+async fn a_migration_carries_the_stored_baseline_not_the_input() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let first = run(&fx.dir(), &k, None).await.0.unwrap();
+    let mut i = with_baseline(
+        inputs(),
+        bl(B),
+        Seen::Exactly(Some(bl(A).sha256)),
+        &["core follows"],
+    );
+    i.compiled = wider();
+    i.digest = vocabulary::digest(&i.compiled).unwrap();
+    let mut audit = Recorder {
+        fail_baseline: true,
+        ..Recorder::default()
+    };
+    let r = boot(
+        &fx.dir(),
+        &k,
+        checkpoint_of(&first),
+        &mut audit,
+        NOW,
+        &i.boot(Some(bl(A).sha256)),
+    )
+    .await;
+    assert_eq!(r.unwrap_err(), StoreError::Audit("baseline refused".into()));
+    assert!(audit.events.iter().any(|e| matches!(e, Event::Migrate(..))));
+    assert_eq!(revision_of(&fx.store(), &k), 2);
+    assert_eq!(stored_baseline(&fx, &k), Some(bl(A)));
+}
+
+#[tokio::test]
+async fn a_store_with_a_baseline_is_canonical() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let i = inputs();
+    let g = identity::build(
+        &i.layer,
+        Some(&bl(B)),
+        &i.compiled,
+        i.digest,
+        3,
+        ProvenanceKind::RootFile,
+    )
+    .unwrap();
+    fx.write(STORE_FILE, &seal_graph(&g, &k), 0o600);
+    let before = fx.store();
+    let i = with_baseline(inputs(), bl(B), Seen::Peek, &[]);
+    let (r, events) = run_with(&fx.dir(), &k, None, &i).await;
+    let r = r.unwrap();
+    assert_eq!((r.revision, r.identity_transition), (3, false));
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(fx.store(), before);
+}
+
+#[tokio::test]
+async fn a_non_canonical_store_is_rebuilt_with_its_baseline() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let i = inputs();
+    let g = identity::build(
+        &i.layer,
+        Some(&bl(B)),
+        &i.compiled,
+        i.digest,
+        3,
+        ProvenanceKind::RootFile,
+    )
+    .unwrap();
+    let skewed = rebuild(
+        &g,
+        |n| {
+            let mut n = n.clone();
+            if n.kind == SUBJECT {
+                n.provenance.kind = ProvenanceKind::Seed;
+            }
+            Some(n)
+        },
+        &i.compiled,
+    );
+    assert_ne!(skewed, g);
+    fx.write(STORE_FILE, &seal_graph(&skewed, &k), 0o600);
+    let i = with_baseline(inputs(), bl(B), Seen::Peek, &[]);
+    let (r, events) = run_with(&fx.dir(), &k, None, &i).await;
+    let r = r.unwrap();
+    assert_eq!((r.revision, r.identity_transition), (4, true));
+    assert!(!events.iter().any(|e| matches!(e, Event::Baseline(..))));
+    assert_eq!(stored_baseline(&fx, &k), Some(bl(B)));
+}
+
+#[test]
+fn peek_reads_the_accepted_baseline_and_writes_nothing() {
+    let fx = Fixture::new();
+    let k = key(1);
+    assert_eq!(
+        maknae_state::store::peek_baseline(&fx.dir(), &k).unwrap(),
+        None
+    );
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(run(&fx.dir(), &k, None))
+        .0
+        .unwrap();
+    let before = (
+        fx.store(),
+        fs::metadata(fx.file(STORE_FILE)).unwrap().mtime(),
+    );
+    assert_eq!(
+        maknae_state::store::peek_baseline(&fx.dir(), &k).unwrap(),
+        Some(bl(A))
+    );
+    assert_eq!(
+        (
+            fx.store(),
+            fs::metadata(fx.file(STORE_FILE)).unwrap().mtime()
+        ),
+        before
+    );
+    assert!(matches!(
+        maknae_state::store::peek_baseline(&fx.dir(), &key(2)),
+        Err(StoreError::Envelope(_))
+    ));
+}
+
+#[test]
+fn peek_refuses_a_store_file_it_may_not_read() {
+    let fx = Fixture::new();
+    fx.write(STORE_FILE, b"x", 0o644);
+    assert!(matches!(
+        maknae_state::store::peek_baseline(&fx.dir(), &key(1)),
+        Err(StoreError::StoreFileRefused(_))
+    ));
+}
+
+#[test]
+fn a_root_marker_authorizes_and_a_daemon_marker_does_not() {
+    let fx = Fixture::new();
+    assert!(!fx.dir().reseed_authorized());
+    fx.mark(0o644);
+    assert!(fx.dir().reseed_authorized());
+    assert!(!fx
+        .dir_with_marker_owner(fx.uid.wrapping_add(1))
+        .reseed_authorized());
+}
+
+#[tokio::test]
+async fn an_operator_commit_records_the_operator_initiator() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let dir = fx.dir();
+    run(&dir, &k, None).await.0.unwrap();
+    let i = inputs();
+    let next = identity::build(
+        &i.layer,
+        Some(&bl(A)),
+        &i.compiled,
+        i.digest,
+        2,
+        ProvenanceKind::Operator,
+    )
+    .unwrap();
+    let mut audit = Recorder::default();
+    let c = commit(&dir, &k, &next, &[], None, &mut audit, INITIATOR_OPERATOR)
+        .await
+        .unwrap();
+    assert_eq!(INITIATOR_OPERATOR, "operator");
+    assert_eq!(audit.events[0], Event::Transition(2, "operator".into()));
+    assert_eq!(c.revision, 2);
+    assert_eq!(stored_baseline(&fx, &k), Some(bl(A)));
+}
+
+#[tokio::test]
+async fn an_accept_changes_the_baseline_after_recording_why_and_nothing_else_does() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let dir = fx.dir();
+    run(&dir, &k, None).await.0.unwrap();
+    let before = fx.store();
+    let i = inputs();
+    let build = |b: Option<&BaselineLayer>| {
+        identity::build(
+            &i.layer,
+            b,
+            &i.compiled,
+            i.digest,
+            2,
+            ProvenanceKind::Operator,
+        )
+        .unwrap()
+    };
+    for (next, events) in [
+        (build(Some(&bl(B))), vec![]),
+        (build(None), vec!["why".to_string()]),
+    ] {
+        let mut audit = Recorder::default();
+        let r = commit_accept(&dir, &k, &next, &events, &mut audit).await;
+        assert_eq!(r.unwrap_err(), StoreError::BaselineUnrecorded);
+        assert!(audit.events.is_empty(), "{:?}", audit.events);
+        assert_eq!(fx.store(), before);
+    }
+    let mut audit = Recorder {
+        fail_baseline: true,
+        ..Recorder::default()
+    };
+    let r = commit_accept(&dir, &k, &build(Some(&bl(B))), &["why".into()], &mut audit).await;
+    assert!(matches!(r, Err(StoreError::Audit(_))), "{r:?}");
+    assert_eq!(fx.store(), before);
+    let mut audit = Recorder::default();
+    let c = commit_accept(&dir, &k, &build(Some(&bl(B))), &["why".into()], &mut audit)
+        .await
+        .unwrap();
+    assert_eq!(
+        audit.events[..2],
+        [
+            Event::Baseline(2, vec!["why".into()]),
+            Event::Transition(2, INITIATOR_OPERATOR.into())
+        ]
+    );
+    assert!(matches!(audit.events[2], Event::Checkpoint(2, ..)));
+    assert_eq!(c.revision, 2);
+    assert_eq!(stored_baseline(&fx, &k), Some(bl(B)));
+}
+
+#[tokio::test]
+async fn a_commit_that_changes_or_drops_the_baseline_is_refused() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let dir = fx.dir();
+    run(&dir, &k, None).await.0.unwrap();
+    let before = fx.store();
+    let i = edited();
+    for baseline in [Some(bl(B)), None] {
+        let next = identity::build(
+            &i.layer,
+            baseline.as_ref(),
+            &i.compiled,
+            i.digest,
+            2,
+            ProvenanceKind::RootFile,
+        )
+        .unwrap();
+        let mut audit = Recorder::default();
+        let r = commit(&dir, &k, &next, &[], None, &mut audit, INITIATOR_ROOT_FILE).await;
+        assert_eq!(r.unwrap_err(), StoreError::BaselineUnrecorded);
+        assert!(audit.events.is_empty(), "{:?}", audit.events);
+        assert_eq!(fx.store(), before);
+        assert_eq!(dir.store_revision(), 1);
     }
 }

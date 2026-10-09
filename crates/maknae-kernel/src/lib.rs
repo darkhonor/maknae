@@ -4,6 +4,8 @@
 //! (boot_gate constructs it; handle() decides every request through the seam; reads
 //! and writes are subject-side attempts); KLC hooks/egress remain gated on ADR-0005/0007/0008.
 mod authz;
+pub mod baseline;
+pub mod baseline_check;
 mod blocking_guard;
 mod boot;
 mod boot_gate;
@@ -15,7 +17,9 @@ mod egress;
 mod egress_socket;
 mod groupres;
 mod handler;
+mod host_env;
 pub mod identity_report;
+pub mod live;
 mod mutation;
 mod mutation_exchange;
 mod posture;
@@ -26,7 +30,9 @@ mod uid_gate;
 pub mod vocabulary;
 pub use authz::*;
 pub use blocking_guard::BLOCKING_BREAKER_MAX_IN_FLIGHT;
-pub use boot::{boot, BootConfig};
+pub use boot::{boot, read_files, BootConfig};
+#[cfg(any(test, feature = "hermetic-test-seam"))]
+pub use boot::{boot_as_owner, read_files_as_owner};
 pub use boot_gate::{
     authz_boot_gate, authz_policy_source, classify_bounds_load_error, egress_bounds_boot_gate,
     AuthzBootRefusal, EgressBoundsRefusal,
@@ -42,9 +48,11 @@ pub use egress::{
 pub use egress_socket::SocketEgress;
 pub use groupres::*;
 pub use handler::{
-    admitted_user_for_test, build_authz_request, build_whoami, dispatch_verb, is_filesystem_verb,
-    may_respond, serve_outcome_to_exit_code, Dispatch, ServeOutcome, KERNEL_ACTIONS,
+    admits, admitted_user_for_test, after_drain, build_authz_request, build_whoami, dispatch_verb,
+    is_filesystem_verb, may_respond, may_stop, serve_outcome_to_exit_code, Dispatch, Drain,
+    ServeOutcome, APPLY_BY_RESTART_EXIT_CODE, KERNEL_ACTIONS,
 };
+pub use live::{LiveConfig, LiveValues};
 pub use mutation::AttemptCaps;
 pub use mutation_exchange::{MutationExchange, PendingReport, ReportError};
 pub use posture::{
@@ -54,9 +62,12 @@ pub use provider_choice::{
     admit_choice, provider_authority, AdmittedChoice, ChoiceRefusal, ProviderAuthority,
 };
 pub use run::{
-    accept_loop, handle, handle_with_attempt_caps, run, ConfigView, Conn, KernelGraphStatus,
-    PlaneAccept, WhereCtx, MAX_SUBJECT_USER_BYTES,
+    accept_loop, handle, handle_with_attempt_caps, run, AcceptAnswer, BaselineOps, BoxFuture,
+    ConfigView, Conn, KernelGraphStatus, PlaneAccept, WhereCtx, MAX_SUBJECT_USER_BYTES,
 };
 
 #[used]
 pub static PRIVILEGED_MARKER: &[u8] = b"PRIVILEGED_MAKNAE_KERNEL";
+
+#[cfg(test)]
+mod test_fixtures;

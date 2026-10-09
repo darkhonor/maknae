@@ -111,12 +111,58 @@ impl std::error::Error for AuthzBasicError {}
 /// and compiles with; nothing reads the files per request.
 #[derive(Debug)]
 pub struct BasicAuthorizer {
-    principal: maknae_config::Principal,
+    principal: RwLock<Arc<maknae_config::Principal>>,
     paths: PolicyPaths,
     digest: fn(&[u8]) -> [u8; 32],
     snapshot: RwLock<Arc<Snapshot>>,
+    live_turn: LiveTurnLock,
     #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
     evaluation_gate: Option<Arc<EvaluationGate>>,
+}
+
+/// A baseline's live turn: every composed decision shares it, and a live install
+/// takes it alone. Only a baseline owns one, so a [`LiveTurn`] is always a baseline's.
+#[derive(Debug)]
+pub struct LiveTurnLock(RwLock<()>);
+
+/// The live turn, held exclusively; every live install requires one.
+pub struct LiveTurn<'a> {
+    _held: std::sync::RwLockWriteGuard<'a, ()>,
+    of: &'a LiveTurnLock,
+}
+
+impl LiveTurnLock {
+    fn new() -> Self {
+        Self(RwLock::new(()))
+    }
+
+    /// A lock owned by no baseline, for unit tests of the other live holders.
+    #[cfg(all(unix, feature = "hermetic-test-seam"))]
+    pub fn hermetic() -> Self {
+        Self::new()
+    }
+
+    /// Held for the length of one decision.
+    pub fn share(&self) -> std::sync::RwLockReadGuard<'_, ()> {
+        self.0.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// `None` while any decision or another install holds the turn.
+    pub fn try_take(&self) -> Option<LiveTurn<'_>> {
+        let held = match self.0.try_write() {
+            Ok(held) => held,
+            Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        };
+        Some(LiveTurn {
+            _held: held,
+            of: self,
+        })
+    }
+
+    pub fn holds(&self, turn: &LiveTurn<'_>) -> bool {
+        std::ptr::eq(self, turn.of)
+    }
 }
 
 /// Parks each evaluation after it has decided on its snapshot and before it
@@ -136,10 +182,11 @@ impl BasicAuthorizer {
         snapshot: Arc<Snapshot>,
     ) -> Self {
         Self {
-            principal,
+            principal: RwLock::new(Arc::new(principal)),
             paths,
             digest,
             snapshot: RwLock::new(snapshot),
+            live_turn: LiveTurnLock::new(),
             #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
             evaluation_gate: None,
         }
@@ -163,12 +210,30 @@ impl BasicAuthorizer {
             .unwrap_or_else(PoisonError::into_inner) = snapshot;
     }
 
+    /// The installed principal; the read guard is released before this returns.
+    fn current_principal(&self) -> Arc<maknae_config::Principal> {
+        self.principal
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The next decision reads `principal`; a decision holding the previous one
+    /// finishes on it.
+    fn install_principal(&self, principal: maknae_config::Principal) {
+        *self
+            .principal
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Arc::new(principal);
+    }
+
     fn decide_on(
         &self,
         snap: &Snapshot,
+        principal: &maknae_config::Principal,
         req: &maknae_security::Request,
     ) -> maknae_security::Decided {
-        let d = decide::decide_loaded_cited(snap.loaded(), &self.principal, req);
+        let d = decide::decide_loaded_cited(snap.loaded(), principal, req);
         #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
         if let Some(gate) = &self.evaluation_gate {
             gate.arrived.wait();
@@ -189,7 +254,7 @@ impl BasicAuthorizer {
         req: &maknae_security::Request,
     ) -> (maknae_security::Verdict, Option<&'static str>) {
         match tests::oracle::assemble(source) {
-            Ok(lp) => decide::decide_loaded_with_role(&lp, &self.principal, req),
+            Ok(lp) => decide::decide_loaded_with_role(&lp, &self.current_principal(), req),
             Err(_) => (maknae_security::Verdict::Indeterminate, None),
         }
     }
@@ -528,12 +593,14 @@ impl maknae_security::Authorizer for BasicAuthorizer {
     /// One decision from one snapshot: the verdict, the role and the cited
     /// rule all come from the `Arc` cloned out here.
     fn decide_cited(&self, req: &maknae_security::Request) -> maknae_security::Decided {
-        self.decide_on(&self.snapshot(), req)
+        self.decide_on(&self.snapshot(), &self.current_principal(), req)
     }
 
     fn decide_cited_all(&self, reqs: &[maknae_security::Request]) -> Vec<maknae_security::Decided> {
-        let snap = self.snapshot();
-        reqs.iter().map(|r| self.decide_on(&snap, r)).collect()
+        let (snap, principal) = (self.snapshot(), self.current_principal());
+        reqs.iter()
+            .map(|r| self.decide_on(&snap, &principal, r))
+            .collect()
     }
 
     fn subjects(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
@@ -565,7 +632,15 @@ impl maknae_security::Authorizer for BasicAuthorizer {
 pub trait Baseline: maknae_security::Authorizer + sealed::Sealed + Send + Sync + 'static {
     fn snapshot(&self) -> Arc<Snapshot>;
     fn install(&self, snapshot: Arc<Snapshot>);
-    fn principal(&self) -> &maknae_config::Principal;
+    fn principal(&self) -> maknae_config::Principal;
+    fn live_turn(&self) -> &LiveTurnLock;
+    /// The next decision resolves the enrolled principal to `principal`; refused
+    /// unless `turn` is this baseline's own.
+    fn install_principal(
+        &self,
+        turn: &LiveTurn<'_>,
+        principal: maknae_config::Principal,
+    ) -> Result<(), String>;
     /// Load and validate the policy file through this baseline's own loader.
     /// Blocking I/O, including getpwnam: call it off the async workers.
     fn load_source(&self) -> Result<PolicySource, AuthzBasicError>;
@@ -592,12 +667,28 @@ impl Baseline for BasicAuthorizer {
         BasicAuthorizer::install(self, snapshot)
     }
 
-    fn principal(&self) -> &maknae_config::Principal {
-        &self.principal
+    fn principal(&self) -> maknae_config::Principal {
+        (*self.current_principal()).clone()
+    }
+
+    fn live_turn(&self) -> &LiveTurnLock {
+        &self.live_turn
+    }
+
+    fn install_principal(
+        &self,
+        turn: &LiveTurn<'_>,
+        principal: maknae_config::Principal,
+    ) -> Result<(), String> {
+        if !self.live_turn.holds(turn) {
+            return Err("the principal is installed only in this baseline's live turn".into());
+        }
+        BasicAuthorizer::install_principal(self, principal);
+        Ok(())
     }
 
     fn load_source(&self) -> Result<PolicySource, AuthzBasicError> {
-        PolicySource::load(self.paths.clone(), self.principal.clone())
+        PolicySource::load(self.paths.clone(), Baseline::principal(self))
     }
 
     fn digest(&self) -> fn(&[u8]) -> [u8; 32] {
@@ -617,14 +708,26 @@ impl Baseline for HermeticAuthorizer {
         self.inner.install(snapshot)
     }
 
-    fn principal(&self) -> &maknae_config::Principal {
-        &self.inner.principal
+    fn principal(&self) -> maknae_config::Principal {
+        Baseline::principal(&self.inner)
+    }
+
+    fn live_turn(&self) -> &LiveTurnLock {
+        Baseline::live_turn(&self.inner)
+    }
+
+    fn install_principal(
+        &self,
+        turn: &LiveTurn<'_>,
+        principal: maknae_config::Principal,
+    ) -> Result<(), String> {
+        Baseline::install_principal(&self.inner, turn, principal)
     }
 
     fn load_source(&self) -> Result<PolicySource, AuthzBasicError> {
         PolicySource::load_with_requirement(
             self.inner.paths.clone(),
-            self.inner.principal.clone(),
+            Baseline::principal(&self.inner),
             self.req.clone(),
         )
     }
@@ -803,9 +906,16 @@ fn snapshot_over(
             .map_err(|e| refused(e.to_string()))?,
     );
     let build = |revision: u64, initiator: ProvenanceKind| {
-        maknae_graph::identity::build(&layer, &persisted_set, vocabulary, revision, initiator)
-            .map(Arc::new)
-            .map_err(|e| refused(e.to_string()))
+        maknae_graph::identity::build(
+            &layer,
+            stored.as_ref().and_then(|s| s.baseline.as_ref()),
+            &persisted_set,
+            vocabulary,
+            revision,
+            initiator,
+        )
+        .map(Arc::new)
+        .map_err(|e| refused(e.to_string()))
     };
     let persisted = match (base, &stored) {
         (Some(g), Some(stored)) if stored.layer == layer => g.clone(),
@@ -863,6 +973,8 @@ mod tests {
                 "admin.status",
                 "admin.config.show",
                 "admin.subject.list",
+                "admin.baseline.show",
+                "admin.baseline.accept",
                 "session.prompt"
             ]
         );
@@ -1352,18 +1464,48 @@ mod tests {
 
     const SHIPPED: &str = include_str!("../../../packaging/common/authz.yaml");
 
+    /// The shipped file with its `roles:` block cut, for tests that write their own.
+    pub(crate) fn shipped_without_roles() -> &'static str {
+        let cut = SHIPPED
+            .find("\nroles:")
+            .expect("the shipped file has a roles block");
+        &SHIPPED[..=cut]
+    }
+
     /// Proof (a): the REAL shipped authz.yaml (byte-identical, via
     /// include_str!) parses, and with bindings absent the defaults branch
     /// decides: enrolled uid → admin rows; agent name → user rows.
     #[test]
     fn shipped_content_defaults_proof() {
         let policy = maknae_config::parse_authz(SHIPPED).expect("shipped authz.yaml parses");
+        let action_grants = validate_grants(&policy.action_grants).expect("shipped grants");
         let lp = decide::LoadedPolicy {
             policy,
             roles: binding::Roles::File(tests::oracle::resolve(&None, &UidMap::new()).unwrap()),
-            action_grants: decide::ActionGrants::default(),
+            action_grants,
             destinations: decide::DestinationGrants::default(),
         };
+        let ask = |uid: i64, action: &str| {
+            let mut r = liveness_req(Some(uid));
+            r.action = Action(action.into());
+            decide::decide_loaded(&lp, &principal(), &r)
+        };
+        for term in SHIPPED_ADMIN_TERMS {
+            assert_eq!(ask(501, term), audit_permit(), "{term} for the principal");
+            assert_eq!(
+                ask(4242, term),
+                Verdict::NotApplicable {
+                    note: Some("subject resolves to no role".into())
+                },
+                "{term} for an unbound uid"
+            );
+        }
+        assert_eq!(
+            ask(501, "admin.config.show"),
+            Verdict::NotApplicable {
+                note: Some("role admin: no rule for admin.config.show".into())
+            }
+        );
         let admin_whoami = decide::decide_loaded(&lp, &principal(), &whoami(501));
         assert!(matches!(admin_whoami, Verdict::Permit { .. }));
         assert!(matches!(
@@ -1378,6 +1520,24 @@ mod tests {
                 note: Some("subject resolves to no role".into())
             }
         );
+    }
+
+    const SHIPPED_ADMIN_TERMS: [&str; 4] = [
+        "admin.status",
+        "admin.subject.list",
+        "admin.baseline.show",
+        "admin.baseline.accept",
+    ];
+
+    #[test]
+    fn the_shipped_file_grants_admin_exactly_the_four_terms() {
+        let policy = maknae_config::parse_authz(SHIPPED).expect("shipped authz.yaml parses");
+        let roles: Vec<&String> = policy.action_grants.keys().collect();
+        assert_eq!(roles, ["admin"]);
+        let admin = &policy.action_grants["admin"];
+        assert_eq!(admin.allow, SHIPPED_ADMIN_TERMS);
+        assert!(admin.deny.is_empty());
+        assert!(policy.destinations.is_empty());
     }
 
     /// The decision names its rule, from the snapshot it was made on.
@@ -1511,10 +1671,100 @@ mod tests {
         );
     }
 
+    fn no_role() -> Verdict {
+        Verdict::NotApplicable {
+            note: Some("subject resolves to no role".into()),
+        }
+    }
+
+    #[test]
+    fn an_installed_principal_is_admin_on_the_next_decision_when_bindings_are_absent() {
+        let auth = authorizer_over(EMPTY, None, &[]);
+        assert_eq!(auth.decide(&whoami(501)), audit_permit());
+        let held = Baseline::principal(&auth);
+        let next = maknae_config::Principal {
+            name: "b".into(),
+            uid: 777,
+        };
+        let turn = auth.live_turn().try_take().unwrap();
+        Baseline::install_principal(&auth, &turn, next.clone()).unwrap();
+        drop(turn);
+        assert_eq!(auth.decide(&whoami(501)), no_role());
+        assert_eq!(auth.decide(&whoami(777)), audit_permit());
+        assert_eq!(Baseline::principal(&auth), next);
+        assert_eq!(held, principal());
+        let all = auth.decide_cited_all(&[whoami(501), whoami(777)]);
+        assert_eq!(all[0].verdict, no_role());
+        assert_eq!(all[1].verdict, audit_permit());
+    }
+
+    #[test]
+    fn the_live_turn_is_taken_alone_and_installs_only_into_its_own_baseline() {
+        let auth = authorizer_over(EMPTY, None, &[]);
+        let other = authorizer_over(EMPTY, None, &[]);
+        let next = maknae_config::Principal {
+            name: "b".into(),
+            uid: 777,
+        };
+        let decision = auth.live_turn().share();
+        assert!(auth.live_turn().try_take().is_none());
+        drop(decision);
+        let foreign = other.live_turn().try_take().unwrap();
+        assert!(!auth.live_turn().holds(&foreign));
+        let err = Baseline::install_principal(&auth, &foreign, next.clone()).unwrap_err();
+        assert!(err.contains("live turn"), "{err}");
+        assert_eq!(Baseline::principal(&auth), principal());
+        drop(foreign);
+        let turn = auth.live_turn().try_take().unwrap();
+        assert!(auth.live_turn().holds(&turn));
+        assert!(auth.live_turn().try_take().is_none());
+        Baseline::install_principal(&auth, &turn, next.clone()).unwrap();
+        assert_eq!(Baseline::principal(&auth), next);
+    }
+
+    #[test]
+    fn a_poisoned_live_turn_is_still_taken() {
+        let auth = Arc::new(authorizer_over(EMPTY, None, &[]));
+        let poisoner = Arc::clone(&auth);
+        let _ = std::thread::spawn(move || {
+            let _turn = poisoner.live_turn().try_take().unwrap();
+            panic!("poison the turn");
+        })
+        .join();
+        drop(auth.live_turn().share());
+        assert!(auth.live_turn().try_take().is_some());
+    }
+
+    #[test]
+    fn a_poisoned_principal_holder_still_decides_and_installs() {
+        let auth = Arc::new(authorizer_over(EMPTY, None, &[]));
+        let poisoner = Arc::clone(&auth);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.principal.write().unwrap();
+            panic!("poison the holder");
+        })
+        .join();
+        assert!(auth.principal.is_poisoned());
+        assert_eq!(auth.decide(&whoami(501)), audit_permit());
+        let turn = auth.live_turn().try_take().unwrap();
+        Baseline::install_principal(
+            &*auth,
+            &turn,
+            maknae_config::Principal {
+                name: "b".into(),
+                uid: 777,
+            },
+        )
+        .unwrap();
+        drop(turn);
+        assert_eq!(auth.decide(&whoami(777)), audit_permit());
+        assert_eq!(auth.decide(&whoami(501)), no_role());
+    }
+
     #[test]
     fn the_baseline_trait_reports_this_authorizers_parts() {
         let auth = authorizer_over(EMPTY, Some(ADMIN_ROOT), &[("root", 0)]);
-        assert_eq!(Baseline::principal(&auth), &principal());
+        assert_eq!(Baseline::principal(&auth), principal());
         assert_eq!(Baseline::digest(&auth)(b"maknae"), test_digest(b"maknae"));
         let held = Baseline::snapshot(&auth);
         assert!(Arc::ptr_eq(&held, &auth.snapshot()));
@@ -2173,6 +2423,7 @@ mod tests {
                         role: "adversary".into(),
                     }],
                 },
+                None,
                 &set,
                 test_digest(&set.canonical_bytes().unwrap()),
                 1,
@@ -2200,6 +2451,42 @@ mod tests {
             a.decide_reporting_role(&liveness_req(Some(666))).1,
             Some("adversary")
         );
+    }
+
+    #[test]
+    fn a_rebuild_over_a_graph_carrying_a_baseline_keeps_it() {
+        let set = maknae_graph::kernel::persisted_compiled_set(LABEL);
+        let baseline = maknae_graph::baseline::BaselineLayer {
+            sections: [("core".to_string(), r#"{"deployment_id":"d"}"#.to_string())]
+                .into_iter()
+                .collect(),
+            system: "US".into(),
+            ceiling: "UNCLASSIFIED".into(),
+            sha256: [3; 32],
+            moved_from: Some("/var/log/maknae/old.jsonl".into()),
+        };
+        let old = Arc::new(
+            maknae_graph::identity::build(
+                &maknae_graph::identity::IdentityLayer {
+                    aliases: Default::default(),
+                    source: PATH.into(),
+                    label: LABEL.into(),
+                    bindings_sha256: Some([7; 32]),
+                    subjects: vec![],
+                },
+                Some(&baseline),
+                &set,
+                test_digest(&set.canonical_bytes().unwrap()),
+                1,
+                maknae_graph::record::ProvenanceKind::Seed,
+            )
+            .unwrap(),
+        );
+        let edited = source_with(SHIPPED, Some("schema_version: 1\nbindings: {}\n"), &[]);
+        let next = snapshot_over(&edited, LABEL, test_digest, Some(&old)).unwrap();
+        assert_eq!(next.revision(), 2);
+        let kept = maknae_graph::identity::extract(next.persisted()).unwrap();
+        assert_eq!(kept.baseline, Some(baseline));
     }
 
     #[test]
@@ -2414,6 +2701,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_baseline_terms_are_not_grantable_to_user() {
+        for term in ["admin.baseline.show", "admin.baseline.accept"] {
+            let got = finish(parse_with_roles(&format!(
+                "roles:\n  user:\n    allow: [\"{term}\"]\n"
+            )));
+            assert!(
+                matches!(got, Err(AuthzBasicError::TermNotGrantableForRole { ref role, term: ref t }) if role == "user" && t == term),
+                "{term}: {got:?}"
+            );
+        }
+        assert!(finish(parse_with_roles(
+            "roles:\n  admin:\n    allow: [\"admin.baseline.show\", \"admin.baseline.accept\"]\n"
+        ))
+        .is_ok());
+    }
+
     /// Validation gates the DENY list too: a typo'd deny would read as a
     /// denial in force while denying nothing.
     #[test]
@@ -2525,7 +2829,7 @@ mod tests {
             )
         );
         let keys: Vec<&str> = d.keys().map(String::as_str).collect();
-        assert_eq!(keys, ["bindings", "permissions", "schema_version"]);
+        assert_eq!(keys, ["bindings", "permissions", "roles", "schema_version"]);
         let empty = source_with(SHIPPED, Some("schema_version: 1\nbindings: {}\n"), &[])
             .section_digests(stand_in_digest);
         assert_eq!(empty["bindings"], stand_in_digest(b"{}"));
@@ -2891,7 +3195,9 @@ mod tests {
     #[cfg(all(unix, feature = "hermetic-test-seam"))]
     mod hermetic {
         use super::super::*;
-        use super::{arrives, audit_permit, contained, principal, whoami, CONTAINED, EMPTY};
+        use super::{
+            arrives, audit_permit, contained, no_role, principal, whoami, CONTAINED, EMPTY,
+        };
         use maknae_security::{Authorizer, Verdict};
         use std::os::unix::fs::PermissionsExt;
 
@@ -3192,10 +3498,39 @@ mod tests {
         }
 
         #[test]
+        fn an_installed_principal_is_admin_on_the_next_hermetic_decision_when_bindings_are_absent()
+        {
+            let fx = Fixture::new("principal");
+            write(&fx.policy(), EMPTY);
+            write(&fx.bindings(), "schema_version: 1\n");
+            let auth = HermeticAuthorizer::new(fx.paths(), principal(), fixture_req(), test_digest)
+                .unwrap();
+            assert_eq!(auth.decide(&whoami(501)), audit_permit());
+            let next = maknae_config::Principal {
+                name: "b".into(),
+                uid: 777,
+            };
+            let turn = auth.live_turn().try_take().unwrap();
+            Baseline::install_principal(&auth, &turn, next.clone()).unwrap();
+            drop(turn);
+            assert_eq!(auth.decide(&whoami(501)), no_role());
+            assert_eq!(auth.decide(&whoami(777)), audit_permit());
+            assert_eq!(Baseline::principal(&auth), next);
+            assert_eq!(
+                Baseline::load_source(&auth).unwrap().principal(),
+                &next,
+                "a reload loads with the installed principal"
+            );
+            auth.reload_from_file().unwrap();
+            assert_eq!(auth.decide(&whoami(777)), audit_permit());
+            assert_eq!(auth.decide(&whoami(501)), no_role());
+        }
+
+        #[test]
         fn the_hermetic_baseline_delegates_to_its_inner_authorizer() {
             let fx = Fixture::new("baseline");
             let auth = fx.authorizer("admin");
-            assert_eq!(Baseline::principal(&auth), &principal());
+            assert_eq!(Baseline::principal(&auth), principal());
             assert!(Arc::ptr_eq(
                 &Baseline::snapshot(&auth),
                 &auth.inner.snapshot()
@@ -3387,7 +3722,11 @@ mod tests {
                 same("explicit", source_with(SHIPPED, Some(EXPLICIT), uids)),
                 same(
                     "explicit+grants",
-                    source_with(&format!("{SHIPPED}{GRANTS}"), Some(EXPLICIT), uids),
+                    source_with(
+                        &format!("{}{GRANTS}", super::shipped_without_roles()),
+                        Some(EXPLICIT),
+                        uids,
+                    ),
                 ),
                 same(
                     "explicit-no-match",
@@ -3585,7 +3924,7 @@ mod tests {
                 .chain(KERNEL_TERMS.iter())
                 .copied()
                 .collect();
-            assert_eq!(terms.len(), 59);
+            assert_eq!(terms.len(), 61);
             let (uids, paths, homes, ops) = (uids(), paths(), homes(), operations());
             assert_eq!(
                 (uids.len(), paths.len(), homes.len(), ops.len()),
@@ -3613,7 +3952,7 @@ mod tests {
                     distinct(&ops),
                     distinct(&destinations),
                 ),
-                (59, 9, 22, 5, 7, 4)
+                (61, 9, 22, 5, 7, 4)
             );
             let mut cells = 0usize;
             let mut mismatches: Vec<String> = Vec::new();
@@ -3726,7 +4065,7 @@ mod tests {
                 &mismatches[..mismatches.len().min(10)]
             );
             let fs_cells = 4 * 7 * 22 * 5 + 7 * 22 * 5;
-            let other_cells = 54 + 4;
+            let other_cells = 56 + 4;
             assert_eq!(cells, 11 * 9 * (fs_cells + other_cells));
             assert_eq!(
                 roles_seen,

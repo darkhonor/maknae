@@ -310,7 +310,8 @@ pub(crate) fn index_u32(i: usize) -> u32 {
     u32::try_from(i).expect("graph record counts fit in u32")
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `Debug` prints the records, redacted, and never the key index.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Graph {
     space: GraphSpace,
     revision: u64,
@@ -321,6 +322,18 @@ pub struct Graph {
     in_offsets: Vec<u32>,
     in_edges: Vec<u32>,
     keys: Vec<(NodeKind, String, u32)>,
+}
+
+impl std::fmt::Debug for Graph {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Graph")
+            .field("space", &self.space)
+            .field("revision", &self.revision)
+            .field("schema_version", &self.schema_version)
+            .field("nodes", &self.nodes)
+            .field("edges", &self.edges)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Graph {

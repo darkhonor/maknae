@@ -62,8 +62,6 @@ rustix = { version = "=1.1.4", default-features = false, features = ["std", "net
 # Credential reads return Zeroizing<..> so the buffer is wiped on drop rather than left
 # in freed heap. Re-exported from lib.rs so consumers need no zeroize pin of their own.
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
-
-[target.'cfg(target_os = "macos")'.dependencies]
 maknae-sys = { path = "../maknae-sys" }
 
 [dev-dependencies]

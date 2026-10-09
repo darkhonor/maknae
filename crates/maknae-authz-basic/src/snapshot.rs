@@ -550,6 +550,7 @@ mod tests {
         Arc::new(
             build(
                 l,
+                None,
                 &persisted_compiled_set(LABEL),
                 [1; 32],
                 5,
@@ -603,13 +604,17 @@ mod tests {
         let s = shipped_with_bindings();
         let snap = snap(&s);
         let g = snap.graph();
-        assert_eq!(g.nodes().iter().filter(|n| n.kind == TERM).count(), 59);
+        assert_eq!(g.nodes().iter().filter(|n| n.kind == TERM).count(), 61);
         assert_eq!(g.nodes().iter().filter(|n| n.kind == CLASS).count(), 7);
         let rules: Vec<_> = g.nodes().iter().filter(|n| n.kind == RULE).collect();
-        assert_eq!(rules.len(), 20);
+        assert_eq!(rules.len(), 24);
         let admin = g.lookup(ROLE, "admin").unwrap();
         assert_eq!(g.out_edges(admin.id, DENIES).count(), 18);
-        assert_eq!(g.out_edges(admin.id, PERMITS).count(), 2);
+        assert_eq!(g.out_edges(admin.id, PERMITS).count(), 6);
+        let grants = g
+            .lookup(SECTION, "/etc/maknae/authz.yaml#roles.admin")
+            .unwrap();
+        assert_eq!(g.in_edges(grants.id, DECLARED_BY).count(), 4);
         let user = g.lookup(ROLE, "user").unwrap();
         assert_eq!(g.out_edges(user.id, DENIES).count(), 18);
         assert_eq!(g.out_edges(user.id, PERMITS).count(), 2);
@@ -643,7 +648,7 @@ mod tests {
         }
         assert_eq!(
             g.edges().len() - snap.persisted().edges().len(),
-            59 + 1 + 20 * 3
+            61 + 1 + 20 * 3 + 1 + 4 * 3
         );
 
         let deny0 = g.lookup(RULE, "rule:permissions:deny:0").unwrap();
@@ -1182,7 +1187,7 @@ mod tests {
             shown.starts_with("Snapshot { revision: 5, nodes: "),
             "{shown}"
         );
-        assert!(shown.ends_with(", rules: 20 }"), "{shown}");
+        assert!(shown.ends_with(", rules: 24 }"), "{shown}");
     }
 
     #[test]
@@ -1260,7 +1265,8 @@ mod tests {
     #[test]
     fn every_citation_the_decision_core_emits_resolves_in_the_index() {
         let s = source_with(&format!(
-            "{SHIPPED}roles:\n  admin:\n    allow: [\"admin.status\", \"session.prompt\"]\n    deny: [\"admin.config.show\"]\n  user:\n    allow: [\"session.prompt\"]\n    deny: [\"session.prompt\"]\ndestinations:\n  admin:\n    allow: [\"provider:openai\"]\n"
+            "{}roles:\n  admin:\n    allow: [\"admin.status\", \"session.prompt\"]\n    deny: [\"admin.config.show\"]\n  user:\n    allow: [\"session.prompt\"]\n    deny: [\"session.prompt\"]\ndestinations:\n  admin:\n    allow: [\"provider:openai\"]\n",
+            crate::tests::shipped_without_roles()
         ), Some(BINDINGS));
         let snap = snap(&s);
         let oracle = crate::tests::oracle::assemble(&s).unwrap();

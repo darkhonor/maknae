@@ -18,7 +18,7 @@ use maknae_security::{first_token, ClassificationPolicy, Level};
 
 /// The classification ceiling — mirrors the lake's `handling` block field-for-field.
 /// `classification` is a [`Level`] in the system `core.handling.policy` selected.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Ceiling {
     pub classification: Level,
     pub sci: bool,
@@ -27,6 +27,13 @@ pub struct Ceiling {
     pub cui_categories_permitted: Vec<String>,
     pub dissemination_permitted: Vec<String>,
     pub accreditation_ref: Option<String>,
+}
+
+/// Every field is `core.handling`, which the config view suppresses.
+impl std::fmt::Debug for Ceiling {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Ceiling").finish_non_exhaustive()
+    }
 }
 
 /// The coarse ingest gate (the "bludgeon") — one derived bit, no lattice math.
@@ -254,6 +261,16 @@ mod tests {
 
     fn us(name: &str) -> Level {
         US.level_of(name).unwrap()
+    }
+
+    #[test]
+    fn debug_withholds_every_handling_field() {
+        let mut c = base();
+        c.classification = us("TOP SECRET");
+        c.accreditation_ref = Some("ACCRED-7Q".into());
+        c.releasable_to = vec!["FVEY".into()];
+        let shown = format!("{c:?}");
+        assert_eq!(shown, "Ceiling { .. }");
     }
 
     // Parse a YAML snippet representing the `core` section's VALUE (a map).

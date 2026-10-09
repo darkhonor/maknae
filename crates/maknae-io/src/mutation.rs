@@ -931,55 +931,54 @@ mod tests {
     }
     #[test]
     fn held_replacement_is_refused_by_the_subjects_own_permissions() {
-        if nix::unistd::geteuid().is_root() {
-            crate::testutil::skip_or_fail(
-                "held_replacement_is_refused_by_the_subjects_own_permissions",
-                "running as root, which writes a 0444 file and voids the premise",
-            );
-            return;
-        }
-        let d = tempfile::tempdir().unwrap();
-        let p = root(&d).join("read-only-sentinel");
-        std::fs::write(&p, b"untouched").unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o444)).unwrap();
-        let e = replace_held_file(held(&p).as_fd(), &p, b"bad", WriteBase::Any).unwrap_err();
-        assert_eq!(e.state, EffectState::NoEffect);
-        assert!(
-            matches!(
-                e.source,
-                IoError::Io {
-                    kind: crate::IoKind::PermissionDenied,
-                    ..
-                }
-            ),
-            "{e:?}"
+        crate::testutil::unprivileged(
+            "mutation::tests::held_replacement_is_refused_by_the_subjects_own_permissions",
+            || {
+                let d = tempfile::tempdir().unwrap();
+                let p = root(&d).join("read-only-sentinel");
+                std::fs::write(&p, b"untouched").unwrap();
+                std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o444)).unwrap();
+                let e =
+                    replace_held_file(held(&p).as_fd(), &p, b"bad", WriteBase::Any).unwrap_err();
+                assert_eq!(e.state, EffectState::NoEffect);
+                assert!(
+                    matches!(
+                        e.source,
+                        IoError::Io {
+                            kind: crate::IoKind::PermissionDenied,
+                            ..
+                        }
+                    ),
+                    "{e:?}"
+                );
+                assert_eq!(std::fs::read(&p).unwrap(), b"untouched");
+            },
         );
-        assert_eq!(std::fs::read(&p).unwrap(), b"untouched");
     }
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_reopen_reaches_the_held_inode_without_walking_its_path() {
-        if nix::unistd::geteuid().is_root() {
-            crate::testutil::skip_or_fail(
-                "linux_reopen_reaches_the_held_inode_without_walking_its_path",
-                "running as root, which traverses a 0600 directory and voids the premise",
-            );
-            return;
-        }
-        crate::testutil::isolated(
+        crate::testutil::unprivileged(
             "mutation::tests::linux_reopen_reaches_the_held_inode_without_walking_its_path",
             || {
-                let d = tempfile::tempdir().unwrap();
-                let dir = root(&d).join("sub");
-                std::fs::create_dir(&dir).unwrap();
-                let p = dir.join("held-sentinel");
-                std::fs::write(&p, b"old").unwrap();
-                let fd = held(&p);
-                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o600)).unwrap();
-                let result = replace_held_file(fd.as_fd(), &p, b"new", WriteBase::Any);
-                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-                result.unwrap();
-                assert_eq!(std::fs::read(&p).unwrap(), b"new");
+                crate::testutil::isolated(
+                    "mutation::tests::linux_reopen_reaches_the_held_inode_without_walking_its_path",
+                    || {
+                        let d = tempfile::tempdir().unwrap();
+                        let dir = root(&d).join("sub");
+                        std::fs::create_dir(&dir).unwrap();
+                        let p = dir.join("held-sentinel");
+                        std::fs::write(&p, b"old").unwrap();
+                        let fd = held(&p);
+                        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o600))
+                            .unwrap();
+                        let result = replace_held_file(fd.as_fd(), &p, b"new", WriteBase::Any);
+                        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+                            .unwrap();
+                        result.unwrap();
+                        assert_eq!(std::fs::read(&p).unwrap(), b"new");
+                    },
+                );
             },
         );
     }
@@ -1193,38 +1192,38 @@ mod tests {
     }
     #[test]
     fn held_read_is_refused_by_the_subjects_own_permissions() {
-        if nix::unistd::geteuid().is_root() {
-            crate::testutil::skip_or_fail(
-                "held_read_is_refused_by_the_subjects_own_permissions",
-                "running as root, which reads a 0000 file and voids the premise",
-            );
-            return;
-        }
-        crate::testutil::isolated(
+        crate::testutil::unprivileged(
             "mutation::tests::held_read_is_refused_by_the_subjects_own_permissions",
             || {
-                let d = tempfile::tempdir().unwrap();
-                let p = root(&d).join("unreadable-sentinel");
-                std::fs::write(&p, b"secret").unwrap();
-                let fd = held(&p);
-                std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o000)).unwrap();
-                let e = read_held_file(fd.as_fd(), &p, 64).unwrap_err();
-                let oversize = read_held_file(fd.as_fd(), &p, 5).unwrap_err();
-                std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
-                assert_eq!(e.state, EffectState::NoEffect);
-                assert!(
-                    matches!(
-                        e.source,
-                        IoError::Io {
-                            kind: crate::IoKind::PermissionDenied,
-                            ..
-                        }
-                    ),
-                    "{e:?}"
-                );
-                assert!(
-                    matches!(oversize.source, IoError::TargetTooLarge { .. }),
-                    "{oversize:?}"
+                crate::testutil::isolated(
+                    "mutation::tests::held_read_is_refused_by_the_subjects_own_permissions",
+                    || {
+                        let d = tempfile::tempdir().unwrap();
+                        let p = root(&d).join("unreadable-sentinel");
+                        std::fs::write(&p, b"secret").unwrap();
+                        let fd = held(&p);
+                        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o000))
+                            .unwrap();
+                        let e = read_held_file(fd.as_fd(), &p, 64).unwrap_err();
+                        let oversize = read_held_file(fd.as_fd(), &p, 5).unwrap_err();
+                        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600))
+                            .unwrap();
+                        assert_eq!(e.state, EffectState::NoEffect);
+                        assert!(
+                            matches!(
+                                e.source,
+                                IoError::Io {
+                                    kind: crate::IoKind::PermissionDenied,
+                                    ..
+                                }
+                            ),
+                            "{e:?}"
+                        );
+                        assert!(
+                            matches!(oversize.source, IoError::TargetTooLarge { .. }),
+                            "{oversize:?}"
+                        );
+                    },
                 );
             },
         );
@@ -1232,14 +1231,10 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_read_reopen_reaches_the_held_inode_without_walking_its_path() {
-        if nix::unistd::geteuid().is_root() {
-            crate::testutil::skip_or_fail(
-                "linux_read_reopen_reaches_the_held_inode_without_walking_its_path",
-                "running as root, which traverses a 0600 directory and voids the premise",
-            );
-            return;
-        }
-        crate::testutil::isolated(
+        crate::testutil::unprivileged(
+            "mutation::tests::linux_read_reopen_reaches_the_held_inode_without_walking_its_path",
+            || {
+                crate::testutil::isolated(
             "mutation::tests::linux_read_reopen_reaches_the_held_inode_without_walking_its_path",
             || {
                 let d = tempfile::tempdir().unwrap();
@@ -1252,6 +1247,8 @@ mod tests {
                 let result = read_held_file(fd.as_fd(), &p, 64);
                 std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
                 assert_eq!(&*result.unwrap(), b"old");
+            },
+        );
             },
         );
     }
@@ -1712,8 +1709,11 @@ mod tests {
 
     #[test]
     fn wx_only_parent_supports_namespace_effects_without_read_permission() {
-        // A mutated nonadvancing write loop must be killed and reaped, not hang the suite.
-        crate::testutil::isolated(
+        crate::testutil::unprivileged(
+            "mutation::tests::wx_only_parent_supports_namespace_effects_without_read_permission",
+            || {
+                // A mutated nonadvancing write loop must be killed and reaped, not hang the suite.
+                crate::testutil::isolated(
             "mutation::tests::wx_only_parent_supports_namespace_effects_without_read_permission",
             || {
                 let d = tempfile::tempdir().unwrap();
@@ -1768,6 +1768,8 @@ mod tests {
                     directory.remove_entry(leaf).unwrap();
                     assert!(!path.join(leaf).exists());
                 }
+            },
+        );
             },
         );
     }

@@ -79,25 +79,11 @@ impl DestinationGrants {
     }
 }
 
-/// The terms an operator may grant or deny per-role: three `admin.*`
-/// disclosure terms (#162 Phase 1: status, config display, subject listing)
-/// and, since 2026-09-09 (#172), the content-plane egress term
-/// `session.prompt`, grantable to `admin` and `user` (the `user` key holds
-/// that one term only, ADR-0010 decision 4 as superseded). *(Corrected
-/// 2026-09-09: this said "the `admin.*` terms" and "these three are
-/// disclosure-only"; the fourth is neither.)*
-///
-/// Code-defined and unconfigurable: a term absent from this list is refused at
-/// load, so `roles:` can never reach a verb the arms below do not consult.
-/// Deliberately NOT `admin.contain`, `admin.credential.broker` or
-/// `admin.policy.reload`, which change state and are Phase 2's question.
-//
-// ONE LINE, deliberately: the drift gate's extractor scans only the matched
-// line, and this declaration is 108 chars against rustfmt's default
-// max_width=100, so without the skip rustfmt wraps it and the gate extracts
-// ZERO terms -- green, inventorying nothing.
+/// The terms `roles:` may grant or deny; a term absent here is refused at load. Only
+/// `session.prompt` may be granted to `user`; `admin.baseline.accept` changes state.
+// One line: the drift gate's extractor reads only the matched line.
 #[rustfmt::skip]
-pub(crate) const GRANTABLE_ACTIONS: [&str; 4] = ["admin.status", "admin.config.show", "admin.subject.list", "session.prompt"];
+pub(crate) const GRANTABLE_ACTIONS: [&str; 6] = ["admin.status", "admin.config.show", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "session.prompt"];
 
 /// Byte-wise `&str` equality usable in a `const` context.
 ///
@@ -138,12 +124,14 @@ const fn str_eq(a: &str, b: &str) -> bool {
 /// demands the fourth assertion, which is the failure mode an unrolled check
 /// would otherwise have had.
 const _: () = {
-    let [a, b, c, d] = GRANTABLE_ACTIONS;
+    let [a, b, c, d, e, f] = GRANTABLE_ACTIONS;
     const WHY: &str = "admin.whoami is unconditional for admins and must not be grantable";
     assert!(!str_eq(a, "admin.whoami"), "{}", WHY);
     assert!(!str_eq(b, "admin.whoami"), "{}", WHY);
     assert!(!str_eq(c, "admin.whoami"), "{}", WHY);
     assert!(!str_eq(d, "admin.whoami"), "{}", WHY);
+    assert!(!str_eq(e, "admin.whoami"), "{}", WHY);
+    assert!(!str_eq(f, "admin.whoami"), "{}", WHY);
 };
 
 /// A validated action term: it appeared in [`GRANTABLE_ACTIONS`] at load time.
@@ -1171,6 +1159,8 @@ mod tests {
         "admin.status",
         "admin.config.show",
         "admin.subject.list",
+        "admin.baseline.show",
+        "admin.baseline.accept",
         "session.prompt",
         "fs.read",
         "terminal.create",
@@ -1540,7 +1530,7 @@ mod tests {
         // Granted in full to admin, with the prompt term's second condition
         // (the destination attribute) satisfied for that term only.
         let lp = lp_with_grants(
-            "roles:\n  admin:\n    allow: [\"admin.status\", \"admin.config.show\", \"admin.subject.list\", \"session.prompt\"]\ndestinations:\n  admin:\n    allow: [\"provider:openai\"]\n",
+            "roles:\n  admin:\n    allow: [\"admin.status\", \"admin.config.show\", \"admin.subject.list\", \"admin.baseline.show\", \"admin.baseline.accept\", \"session.prompt\"]\ndestinations:\n  admin:\n    allow: [\"provider:openai\"]\n",
             GRANT_UIDS,
         );
         for t in GRANTABLE_ACTIONS {
@@ -1909,6 +1899,41 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_baseline_terms_permit_only_a_granted_admin() {
+        let lp = lp_with_grants(
+            "roles:\n  admin:\n    allow: [\"admin.status\", \"admin.config.show\", \"admin.subject.list\", \"admin.baseline.show\", \"admin.baseline.accept\", \"session.prompt\"]\n",
+            GRANT_UIDS,
+        );
+        for term in ["admin.baseline.show", "admin.baseline.accept"] {
+            let at = |uid: i64| decide_loaded(&lp, &principal(), &request(Some(uid), term, None));
+            assert_eq!(at(1001), permit_with_audit(), "admin {term}");
+            for (uid, role) in [(1002, "user"), (1003, "guest")] {
+                assert_eq!(
+                    at(uid),
+                    Verdict::NotApplicable {
+                        note: Some(format!("role {role}: no rule for {term}"))
+                    },
+                    "{role} {term}"
+                );
+            }
+            assert_eq!(
+                at(1099),
+                Verdict::NotApplicable {
+                    note: Some("subject resolves to no role".into())
+                },
+                "unbound {term}"
+            );
+            assert_eq!(
+                at(1004),
+                Verdict::Deny {
+                    reason: "subject contained: role=adversary".into()
+                },
+                "contained {term}"
+            );
+        }
+    }
+
     /// The end-to-end companion. It pins that the Guest/User arms abstain and
     /// that containment precedes the class match -- NOT that `evaluate3_action`
     /// keys on the role, which it never reaches. See the test above for that.
@@ -2053,6 +2078,22 @@ mod tests {
                 na("role admin: no rule for admin.subject.list"),
                 na("role user: no rule for admin.subject.list"),
                 na("role guest: no rule for admin.subject.list"),
+                contained(),
+            ),
+            (
+                "admin.baseline.show",
+                None,
+                na("role admin: no rule for admin.baseline.show"),
+                na("role user: no rule for admin.baseline.show"),
+                na("role guest: no rule for admin.baseline.show"),
+                contained(),
+            ),
+            (
+                "admin.baseline.accept",
+                None,
+                na("role admin: no rule for admin.baseline.accept"),
+                na("role user: no rule for admin.baseline.accept"),
+                na("role guest: no rule for admin.baseline.accept"),
                 contained(),
             ),
             (

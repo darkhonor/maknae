@@ -40,6 +40,7 @@ use maknae_audit_append::{
     SessionIds, Source, Subject, Where,
 };
 use maknae_config::TransportConfig;
+use maknae_graph::baseline::BaselineLayer;
 use maknae_proto::{
     admits, class_of, decode_request, encode_response, read_frame_zeroizing, write_frame,
     FrameCaps, FrameClass, Payload, RespResult, Response, Verb, CONTROL_REQUEST_MAX,
@@ -60,12 +61,16 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::authz::{admission_facts, authorize_connection, ConnDecision, HOME_RESOLVE_TIMEOUT};
-use crate::blocking_guard::{BlockingBreaker, BreakerAdmission, BreakerTransition};
-use crate::boot_gate::{authz_boot_gate, authz_policy_source};
+use crate::baseline_check::{Invalid, Mode};
+use crate::blocking_guard::{
+    within_blocking, BlockingBreaker, BreakerAdmission, BreakerTransition, AUDIT_APPEND_TIMEOUT,
+    BLOCKING_OPERATION_TIMEOUT, SCAN_BACK_TIMEOUT,
+};
+use crate::boot_gate::authz_boot_gate;
 use crate::groupres::{maknae_gid, uid_in_maknae_group};
 use crate::handler::{
     build_authz_request, build_whoami, discharge_plan, dispatch_verb, lexical_pregate, may_respond,
-    verb_to_action, Dispatch, ServeOutcome, AUTHZ_DECIDE_TIMEOUT,
+    verb_to_action, Dispatch, Drain, ServeOutcome, AUTHZ_DECIDE_TIMEOUT,
 };
 use maknae_proto::{encode_response_zeroizing, ProtoErrCode, ProtoError};
 use maknae_security::{
@@ -93,6 +98,110 @@ fn egress_send_breaker() -> Arc<tokio::sync::Mutex<BlockingBreaker>> {
     Arc::clone(EGRESS_SEND_BREAKER.get_or_init(|| Arc::new(Default::default())))
 }
 
+static BASELINE_BREAKER: OnceLock<Arc<tokio::sync::Mutex<BlockingBreaker>>> = OnceLock::new();
+
+fn baseline_breaker() -> Arc<tokio::sync::Mutex<BlockingBreaker>> {
+    Arc::clone(BASELINE_BREAKER.get_or_init(|| Arc::new(Default::default())))
+}
+
+pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+#[derive(Debug)]
+pub enum AcceptAnswer {
+    /// Respond with this view; `corrective` is the deny record's reason when the accept was refused.
+    View {
+        view: maknae_proto::BaselineView,
+        corrective: Option<String>,
+    },
+    /// Answer Internal with `reply` after a `deny`/`unavailable` corrective record
+    /// carrying `why`, which never reaches the requester.
+    Unavailable { reply: &'static str, why: String },
+}
+
+const ACCEPT_BUSY: &str = "baseline accept refused: busy; a reload holds the turn";
+const ACCEPT_DECIDING: &str =
+    "baseline accept refused: busy; decisions in flight held the live turn";
+const ACCEPT_STOPPING: &str = "baseline accept refused: shutting down";
+const ACCEPT_UNAVAILABLE: &str = "baseline accept unavailable";
+const ACCEPT_INVALID: &str = "baseline accept refused: invalid (cause in the journal)";
+const ACCEPTED_CANNOT_START_RECORDED: &str =
+    "accepted baseline cannot start (cause in the journal)";
+
+fn accept_unavailable(reply: &'static str, why: String) -> AcceptAnswer {
+    eprintln!("maknaed: {why}");
+    AcceptAnswer::Unavailable { reply, why }
+}
+
+/// Turns a drain an accept left at `Begun` (a panic or an abort before its persist
+/// landed) into `Failed`, so the daemon stops with exit 1 instead of refusing forever.
+/// Dropped while the accept still holds the reload turn. `live_unsettled`: a live
+/// baseline is persisted and its install has not reported.
+struct DrainGuard<'a> {
+    drain: &'a tokio::sync::watch::Sender<Drain>,
+    live_unsettled: bool,
+}
+
+impl Drop for DrainGuard<'_> {
+    fn drop(&mut self) {
+        if *self.drain.borrow() == Drain::Begun {
+            self.drain.send_replace(Drain::Failed);
+            eprintln!("maknaed: a baseline accept ended without its persist; exiting on the unchanged baseline");
+        } else if self.live_unsettled && *self.drain.borrow() == Drain::Serving {
+            self.drain.send_replace(Drain::Applied);
+            eprintln!(
+                "maknaed: a live baseline accept ended without its install; restarting to apply it"
+            );
+        }
+    }
+}
+
+/// `admin.baseline.show` and `admin.baseline.accept`, as a request reaches them.
+pub trait BaselineOps: Send + Sync {
+    fn show(&self) -> BoxFuture<'_, Result<maknae_proto::BaselineView, String>>;
+    fn accept<'a>(&'a self, hash: &'a str) -> BoxFuture<'a, AcceptAnswer>;
+}
+
+/// Blocking baseline work: admitted by the baseline breaker, bounded, a timeout counted.
+async fn baseline_blocking<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    let breaker = baseline_breaker();
+    let admission = { breaker.lock().await.begin_attempt_at(Instant::now()) };
+    match admission {
+        BreakerAdmission::RefuseOpen => Err("the baseline circuit breaker is open".into()),
+        BreakerAdmission::RefuseAtCapacity => {
+            Err("the baseline blocking worker budget is exhausted".into())
+        }
+        BreakerAdmission::Admit => {
+            match tokio::time::timeout(
+                BLOCKING_OPERATION_TIMEOUT,
+                tokio::task::spawn_blocking(work),
+            )
+            .await
+            {
+                Ok(joined) => {
+                    breaker.lock().await.record_success();
+                    joined.map_err(|e| format!("the baseline check failed: {e}"))
+                }
+                Err(_elapsed) => {
+                    if breaker.lock().await.record_timeout_at(Instant::now())
+                        == BreakerTransition::Tripped
+                    {
+                        eprintln!(
+                            "maknaed: baseline circuit breaker tripped after repeated {}s blocking timeouts",
+                            BLOCKING_OPERATION_TIMEOUT.as_secs()
+                        );
+                    }
+                    Err(format!(
+                        "the baseline check did not finish within {}s",
+                        BLOCKING_OPERATION_TIMEOUT.as_secs()
+                    ))
+                }
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Audit-record construction (AU-3, ADR-0019). These stamp the run-loop's own
 // `where`/outcome facts onto the schema owned by `maknae-audit-append`.
@@ -100,7 +209,8 @@ fn egress_send_breaker() -> Arc<tokio::sync::Mutex<BlockingBreaker>> {
 
 /// The listener-level `where` facts (AU-3c) shared by every record a connection emits.
 /// Exposed so the accept-loop integration tests can build one directly.
-#[derive(Clone, Debug)]
+/// `Debug` withholds `au3_1`.
+#[derive(Clone)]
 pub struct WhereCtx {
     pub host: String,
     pub socket: String,
@@ -110,6 +220,15 @@ pub struct WhereCtx {
     /// cloned into each spawned [`handle`] call, instead of `make_record` hardcoding
     /// it to an empty object.
     pub au3_1: serde_json::Value,
+}
+
+impl std::fmt::Debug for WhereCtx {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WhereCtx")
+            .field("host", &self.host)
+            .field("socket", &self.socket)
+            .finish_non_exhaustive()
+    }
 }
 
 /// The effective configuration as `admin.config.show` may disclose it:
@@ -133,8 +252,8 @@ pub struct WhereCtx {
 /// further arm that reaches for one of those owes the same argument** -- the boot-time redaction protects
 /// the `Document`, not the request path in general.
 ///
-/// It is also a BOOT SNAPSHOT. A reload replaces the authz policy; it does not
-/// replace this, which reports the boot's settings until restart.
+/// It is the accepted baseline's view: an accept of a live change replaces it
+/// (`crate::live`); a reload does not.
 pub type ConfigView =
     std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>;
 
@@ -415,15 +534,15 @@ pub async fn handle<S, E, P>(
     cfg: TransportConfig,
     au3_1: serde_json::Value,
     authorizer: Arc<P>,
-    config_view: Arc<ConfigView>,
+    live: Arc<crate::live::LiveConfig>,
     authz_backend_name: Arc<String>,
     classification_policy_name: Arc<String>,
     kernel_graph: Arc<Option<KernelGraphStatus>>,
-    providers: Arc<Option<crate::provider_choice::ProviderAuthority>>,
     egress: Arc<dyn crate::egress::Egress>,
     authz_decide_timeout: Duration,
     lane: maknae_security::Lane,
     delegated: maknae_io::DelegatedFds,
+    baseline: Arc<dyn BaselineOps>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     E: AuditEmit + Send + Sync + 'static,
@@ -441,15 +560,15 @@ pub async fn handle<S, E, P>(
         cfg,
         au3_1,
         authorizer,
-        config_view,
+        live,
         authz_backend_name,
         classification_policy_name,
         kernel_graph,
-        providers,
         egress,
         authz_decide_timeout,
         lane,
         delegated,
+        baseline,
         crate::mutation::AttemptCaps::default(),
     )
     .await
@@ -494,7 +613,8 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     cfg: TransportConfig,
     au3_1: serde_json::Value,
     authorizer: Arc<P>,
-    config_view: Arc<ConfigView>,
+    // The accepted baseline's view and providers authority, read per request.
+    live: Arc<crate::live::LiveConfig>,
     // Captured ONCE at boot from the same authorizer (static TCB: the backend
     // set cannot change in-process, so per-request asking could only repeat
     // this string while running operand code inline on the worker).
@@ -503,7 +623,6 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     // `core.handling.policy` selected, by name.
     classification_policy_name: Arc<String>,
     kernel_graph: Arc<Option<KernelGraphStatus>>,
-    providers: Arc<Option<crate::provider_choice::ProviderAuthority>>,
     // #172: the egress backend behind the seam. `Unavailable` in Cooky.
     egress: Arc<dyn crate::egress::Egress>,
     authz_decide_timeout: Duration,
@@ -517,6 +636,8 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     // request per connection, which is what today's per-invocation CLI sends;
     // pipelining on macOS is uncharacterised (ADR-0009).
     delegated: maknae_io::DelegatedFds,
+    // `admin.baseline.show` and `admin.baseline.accept`.
+    baseline: Arc<dyn BaselineOps>,
     attempt_caps: crate::mutation::AttemptCaps,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -875,6 +996,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     }
 
     let no_providers = maknae_config::ProviderSet::empty();
+    let (admitted_view, providers, admitted_generation) = live.admission();
     let admitted = match &request.verb {
         Verb::SessionPrompt { choice, .. } => {
             let (set, user_prefix) = match &*providers {
@@ -952,18 +1074,27 @@ pub async fn handle_with_attempt_caps<S, E, P>(
         },
         BreakerAdmission::Admit => {
             let decided = {
-                let a = Arc::clone(&authorizer);
+                let (a, live) = (Arc::clone(&authorizer), Arc::clone(&live));
                 tokio::time::timeout(
                     authz_decide_timeout,
                     tokio::task::spawn_blocking(move || {
                         let d = guarded_decide_cited(&*a, &sec_req);
-                        (combine(vec![d.verdict]), d.role, d.rule)
+                        (combine(vec![d.verdict]), d.role, d.rule, live.generation())
                     }),
                 )
                 .await
             };
             match decided {
-                Ok(Ok((v, role, rule))) => {
+                // A live install landed between admission and the decision: the
+                // request was admitted on values the decision did not see.
+                Ok(Ok((_, role, _, generation))) if generation != admitted_generation => {
+                    authz_breaker.lock().await.record_success();
+                    decided_role = role;
+                    maknae_security::Verdict::Deny {
+                        reason: "the live baseline changed between admission and decision".into(),
+                    }
+                }
+                Ok(Ok((v, role, rule, _))) => {
                     authz_breaker.lock().await.record_success();
                     decided_role = role;
                     decided_rule = rule;
@@ -1164,7 +1295,9 @@ pub async fn handle_with_attempt_caps<S, E, P>(
         | Dispatch::WhoamiRequested
         | Dispatch::ConfigShowRequested
         | Dispatch::StatusRequested
-        | Dispatch::SubjectListRequested => {
+        | Dispatch::SubjectListRequested
+        | Dispatch::BaselineShowRequested
+        | Dispatch::BaselineAcceptRequested => {
             let appended = emit_request_outcome(
                 &emit,
                 &host,
@@ -1192,9 +1325,9 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             let payload = match dispatch_verb(&request.verb) {
                 Dispatch::Pong => Payload::Pong,
                 Dispatch::WhoamiRequested => build_whoami(&peer_uri, peer_uid),
-                // Already redacted at boot; this arm only hands it over. No
-                // redaction happens here, deliberately -- see `ConfigView`.
-                Dispatch::ConfigShowRequested => Payload::ConfigView((*config_view).clone()),
+                // Redacted when installed, and taken at admission with the
+                // providers the decision was generation-checked against.
+                Dispatch::ConfigShowRequested => Payload::ConfigView((*admitted_view).clone()),
                 Dispatch::StatusRequested => Payload::Status(maknae_proto::StatusView {
                     version: env!("CARGO_PKG_VERSION").to_string(),
                     protocol_version: PROTOCOL_VERSION,
@@ -1216,6 +1349,11 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                         .as_ref()
                         .as_ref()
                         .map(|k| k.identity.counts())
+                        .unwrap_or_default(),
+                    baseline_pending: kernel_graph
+                        .as_ref()
+                        .as_ref()
+                        .map(|k| k.baseline.lines())
                         .unwrap_or_default(),
                 }),
                 // The current snapshot, via the seam. `None` means the backend cannot
@@ -1348,6 +1486,118 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                                     class,
                                     ProtoErrCode::Internal,
                                     "binding enumeration unavailable",
+                                )
+                                .await;
+                            }
+                            close_bounded(&mut stream).await;
+                            return;
+                        }
+                    }
+                }
+                Dispatch::BaselineShowRequested => match baseline.show().await {
+                    Ok(view) => Payload::Baseline(view),
+                    Err(why) => {
+                        let corrected = emit_request_outcome(
+                            &emit,
+                            &host,
+                            &socket,
+                            peer_uid,
+                            &peer_uri,
+                            peer_user.as_deref(),
+                            decided_role,
+                            decided_rule.as_ref(),
+                            session_id,
+                            seq.next(),
+                            verb_to_action(&request.verb),
+                            None,
+                            None,
+                            "deny",
+                            &format!("baseline show unavailable: {why}"),
+                            "unavailable",
+                            &au3_1,
+                        )
+                        .await;
+                        if may_respond(corrected) {
+                            write_error_bounded(
+                                &mut stream,
+                                &cfg,
+                                class,
+                                ProtoErrCode::Internal,
+                                "baseline show unavailable",
+                            )
+                            .await;
+                        }
+                        close_bounded(&mut stream).await;
+                        return;
+                    }
+                },
+                Dispatch::BaselineAcceptRequested => {
+                    let Verb::AdminBaselineAccept { hash } = &request.verb else {
+                        unreachable!("dispatch keyed on the verb")
+                    };
+                    match baseline.accept(hash).await {
+                        AcceptAnswer::View {
+                            view,
+                            corrective: None,
+                        } => Payload::Baseline(view),
+                        AcceptAnswer::View {
+                            view,
+                            corrective: Some(why),
+                        } => {
+                            let corrected = emit_request_outcome(
+                                &emit,
+                                &host,
+                                &socket,
+                                peer_uid,
+                                &peer_uri,
+                                peer_user.as_deref(),
+                                decided_role,
+                                decided_rule.as_ref(),
+                                session_id,
+                                seq.next(),
+                                verb_to_action(&request.verb),
+                                None,
+                                None,
+                                "deny",
+                                &why,
+                                "unauthorized",
+                                &au3_1,
+                            )
+                            .await;
+                            if !may_respond(corrected) {
+                                close_bounded(&mut stream).await;
+                                return;
+                            }
+                            Payload::Baseline(view)
+                        }
+                        AcceptAnswer::Unavailable { reply, why } => {
+                            let corrected = emit_request_outcome(
+                                &emit,
+                                &host,
+                                &socket,
+                                peer_uid,
+                                &peer_uri,
+                                peer_user.as_deref(),
+                                decided_role,
+                                decided_rule.as_ref(),
+                                session_id,
+                                seq.next(),
+                                verb_to_action(&request.verb),
+                                None,
+                                None,
+                                "deny",
+                                &why,
+                                "unavailable",
+                                &au3_1,
+                            )
+                            .await;
+                            if may_respond(corrected) {
+                                write_error_bounded(
+                                    &mut stream,
+                                    &cfg,
+                                    class,
+                                    ProtoErrCode::Internal,
+                                    reply,
                                 )
                                 .await;
                             }
@@ -1811,7 +2061,7 @@ async fn emit_or_report<E: AuditEmit + Send + Sync>(
     peer_uid: u32,
     session_id: u64,
 ) -> bool {
-    match emit.emit(rec).await {
+    match emit.emit_within(rec, AUDIT_APPEND_TIMEOUT).await {
         Ok(()) => true,
         Err(e) => {
             eprintln!(
@@ -2079,7 +2329,7 @@ async fn emit_request_outcome<E: AuditEmit + Send + Sync>(
     rec.subject.role = role.map(str::to_string);
     rec.rule = rule.map(rule_audit);
     rec.object_requested = object_requested.map(str::to_string);
-    match emit.emit(&rec).await {
+    match emit.emit_within(&rec, AUDIT_APPEND_TIMEOUT).await {
         Ok(()) => true,
         Err(e) => {
             eprintln!(
@@ -2128,7 +2378,7 @@ async fn emit_request_deny<E: AuditEmit + Send + Sync>(
     // #275: the peer identity, bounded and audit-only.
     rec.subject.user = admitted_user(peer_user);
     rec.subject.role = role.map(str::to_string);
-    if let Err(e) = emit.emit(&rec).await {
+    if let Err(e) = emit.emit_within(&rec, AUDIT_APPEND_TIMEOUT).await {
         // See the group-check deny above: logged, not control-flow-changing — the
         // caller already closes the connection regardless.
         eprintln!(
@@ -2325,12 +2575,13 @@ pub async fn accept_loop<A, E, P>(
     shutdown: impl Future<Output = ()> + Send,
     supervisor: tokio::task::JoinHandle<maknae_vault::VaultError>,
     authorizer: Arc<P>,
-    config_view: Arc<ConfigView>,
+    live: Arc<crate::live::LiveConfig>,
     authz_backend_name: Arc<String>,
     classification_policy_name: Arc<String>,
     kernel_graph: Arc<Option<KernelGraphStatus>>,
-    providers: Arc<Option<crate::provider_choice::ProviderAuthority>>,
     egress: Arc<dyn crate::egress::Egress>,
+    baseline: Arc<dyn BaselineOps>,
+    drain: tokio::sync::watch::Receiver<Drain>,
 ) -> ServeOutcome
 where
     A: PlaneAccept + Send + Sync + 'static,
@@ -2407,6 +2658,17 @@ where
                     }
                     Ok((raw, peer_creds)) => {
                         let session_id = session_ids.next_session();
+                        if !crate::handler::admits(*drain.borrow()) {
+                            drop(raw);
+                            let rec = make_record(
+                                "connection", &wctx.host, &wctx.socket, peer_creds.uid,
+                                peer_creds.gid, peer_creds.pid, None, session_id, 1,
+                                "connect", None, "deny", "draining to apply an accepted baseline",
+                                "unavailable", &wctx.au3_1,
+                            );
+                            offload_refusal(&atcap_audit_tx, rec, &atcap_audit_dropped);
+                            continue;
+                        }
                         match Arc::clone(&sem).try_acquire_owned() {
                             // At capacity: fast-close + audit from the captured peer-creds
                             // (no handshake ran, so there is no verified URI-SAN yet). Do NOT
@@ -2432,13 +2694,13 @@ where
                                 let cfg = cfg.clone();
                                 let wctx = wctx.clone();
                                 let authorizer = Arc::clone(&authorizer);
-                                let config_view = Arc::clone(&config_view);
+                                let live = Arc::clone(&live);
                                 let authz_backend_name = Arc::clone(&authz_backend_name);
                                 let classification_policy_name =
                                     Arc::clone(&classification_policy_name);
                                 let kernel_graph = Arc::clone(&kernel_graph);
-                                let providers = Arc::clone(&providers);
                                 let egress = Arc::clone(&egress);
+                                let baseline = Arc::clone(&baseline);
                                 handlers.spawn(async move {
                                     let _permit = permit; // held for the connection's life
                                     // The bounded TLS handshake runs HERE, under the permit —
@@ -2535,11 +2797,10 @@ where
                                                 peer_dir,
                                                 emit, session_id, cfg, wctx.au3_1,
                                                 authorizer,
-                                                config_view,
+                                                live,
                                                 authz_backend_name,
                                                 classification_policy_name,
                                                 kernel_graph,
-                                                providers,
                                                 egress,
                                                 AUTHZ_DECIDE_TIMEOUT,
                                                 // THIS accept loop owns the on-host
@@ -2551,6 +2812,7 @@ where
                                                 // not of anything read off the wire.
                                                 maknae_security::Lane::Local,
                                                 conn.delegated,
+                                                baseline,
                                             )
                                             .await;
                                         }
@@ -2581,15 +2843,23 @@ where
     };
 
     // #265 A1 (AU-2): the stop, with its reason. Bounded like the drains below.
-    let (result, reason, posture) = match &outcome {
-        ServeOutcome::GracefulShutdown => {
-            ("permit", "shutdown: signal received".to_string(), "stopped")
-        }
-        ServeOutcome::SupervisorExited(e) => (
+    let (result, reason, posture) = match (&outcome, *drain.borrow()) {
+        (ServeOutcome::SupervisorExited(e), _) => (
             "deny",
             format!("shutdown: credential supervisor exited: {e}"),
             "unavailable",
         ),
+        (_, Drain::Applied) => (
+            "permit",
+            "shutdown: restarting to apply an accepted baseline".to_string(),
+            "stopped",
+        ),
+        (_, Drain::Begun | Drain::Failed) => (
+            "deny",
+            "shutdown: an accepted baseline was not applied".to_string(),
+            "unavailable",
+        ),
+        _ => ("permit", "shutdown: signal received".to_string(), "stopped"),
     };
     let stop = make_record(
         "shutdown",
@@ -2762,11 +3032,22 @@ pub fn run(config_dir: &Path) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let seams = BootSeams {
+        graph_key: production_graph_key,
+        state_dir_open: StateDir::open,
+        files: crate::boot::read_files,
+        env: Arc::new(crate::host_env::HostEnv {
+            config_dir: config_dir.to_path_buf(),
+        }),
+        open_prepared: maknae_audit_append::AuditSink::open_prepared,
+        scan: production_scan,
+        policy_load: maknae_authz_basic::PolicySource::load,
+    };
     let code = runtime.block_on(async move {
         match run_inner(
             config_dir,
             Path::new(maknae_state::store::STATE_DIR),
-            production_graph_key,
+            &seams,
         )
         .await
         {
@@ -2816,6 +3097,7 @@ async fn refuse_authz_boot<E: AuditEmit + Send + Sync>(
     seq: u64,
     au3_1: &serde_json::Value,
     reason: String,
+    recorded: Option<&str>,
 ) -> RunError {
     let rec = make_record(
         "boot",
@@ -2830,11 +3112,11 @@ async fn refuse_authz_boot<E: AuditEmit + Send + Sync>(
         "authz",
         None,
         "deny",
-        &reason,
+        recorded.unwrap_or(&reason),
         "unauthorized",
         au3_1,
     );
-    if let Err(e) = sink.emit(&rec).await {
+    if let Err(e) = sink.emit_within(&rec, AUDIT_APPEND_TIMEOUT).await {
         eprintln!(
             "maknaed: AUDIT WRITE FAILED on boot authz refusal — refusal proceeded without a durable record: {e}"
         );
@@ -2862,6 +3144,7 @@ async fn refuse_audit_offload_boot<E: AuditEmit + Send + Sync>(
     seq: u64,
     au3_1: &serde_json::Value,
     reason: String,
+    recorded: Option<&str>,
 ) -> RunError {
     let rec = make_record(
         "boot",
@@ -2876,11 +3159,11 @@ async fn refuse_audit_offload_boot<E: AuditEmit + Send + Sync>(
         "audit.offload",
         None,
         "deny",
-        &reason,
+        recorded.unwrap_or(&reason),
         "unauthorized",
         au3_1,
     );
-    if let Err(e) = sink.emit(&rec).await {
+    if let Err(e) = sink.emit_within(&rec, AUDIT_APPEND_TIMEOUT).await {
         eprintln!(
             "maknaed: AUDIT WRITE FAILED on boot audit-offload refusal — refusal proceeded without a durable record: {e}"
         );
@@ -2890,6 +3173,27 @@ async fn refuse_audit_offload_boot<E: AuditEmit + Send + Sync>(
         maknae_msgs::MsgId::AuditOffloadUnsupported,
     );
     RunError::AuditOffload(format!("{catalog}: {reason}"))
+}
+
+/// A journal line; tests read the lines back through `journal_capture`.
+fn journal(line: String) {
+    #[cfg(test)]
+    journal_capture::push(&line);
+    eprintln!("{line}");
+}
+
+fn accept_journal(
+    short: &str,
+    revision: u64,
+    reason: &str,
+    emitted: &Result<(), String>,
+) -> String {
+    match emitted {
+        Ok(()) => format!("maknaed: baseline: {}", reason.replace(&format!("sha256:{short} "), "")),
+        Err(e) => format!(
+            "maknaed: AUDIT WRITE FAILED on the baseline accept outcome: {e}; accepted at revision {revision}; restarting to apply"
+        ),
+    }
 }
 
 /// #265 C2: boot evidence that cannot be durably appended refuses boot.
@@ -2934,7 +3238,7 @@ async fn record_start_refusal<E: AuditEmit + Send + Sync>(
         "unauthorized",
         au3_1,
     );
-    if let Err(e) = sink.emit(&rec).await {
+    if let Err(e) = sink.emit_within(&rec, AUDIT_APPEND_TIMEOUT).await {
         eprintln!("maknaed: AUDIT WRITE FAILED on the boot start refusal: {e}");
     }
 }
@@ -2946,11 +3250,12 @@ const GRAPH_REJECTED_ACTION: &str = "graph.rejected";
 const GRAPH_MIGRATE_ACTION: &str = "graph.migrate";
 const GRAPH_TRANSITION_ACTION: &str = "graph.transition";
 const GRAPH_RELOAD_ACTION: &str = "graph.reload";
+const GRAPH_BASELINE_ACTION: &str = "graph.baseline";
 use crate::identity_report::GRAPH_IDENTITY_ACTION;
 
 /// Every `graph.*` pseudo-action this file emits; no verb's action string may equal one.
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) const GRAPH_PSEUDO_ACTIONS: [&str; 9] = [
+pub(crate) const GRAPH_PSEUDO_ACTIONS: [&str; 10] = [
     GRAPH_SEED_ACTION,
     GRAPH_RESEED_ACTION,
     GRAPH_REJECTED_ACTION,
@@ -2960,6 +3265,7 @@ pub(crate) const GRAPH_PSEUDO_ACTIONS: [&str; 9] = [
     GRAPH_TRANSITION_ACTION,
     GRAPH_RELOAD_ACTION,
     GRAPH_IDENTITY_ACTION,
+    GRAPH_BASELINE_ACTION,
 ];
 
 /// The fields every peer-less boot record shares (spec §5.3).
@@ -3013,13 +3319,19 @@ struct GraphBootAudit<'a, E> {
     sink: &'a E,
     ctx: &'a BootCtx<'a>,
     scanned_bytes: u64,
+    bound: Duration,
+    /// A restart-class accept: the drain begins once its transition intent is recorded.
+    drain: Option<&'a tokio::sync::watch::Sender<Drain>>,
 }
 
 impl<'a, E: AuditEmit + Send + Sync> GraphBootAudit<'a, E> {
-    fn append(&self, rec: AuditRecord) -> impl Future<Output = Result<(), StoreError>> + Send + 'a {
-        let sink = self.sink;
+    fn write_ahead(
+        &self,
+        rec: AuditRecord,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send + 'a {
+        let (sink, bound) = (self.sink, self.bound);
         async move {
-            sink.emit(&rec)
+            sink.emit_within(&rec, bound)
                 .await
                 .map_err(|e| StoreError::Audit(e.to_string()))
         }
@@ -3049,7 +3361,7 @@ impl<E: AuditEmit + Send + Sync> BootAudit for GraphBootAudit<'_, E> {
                 scanned_bytes: self.scanned_bytes,
             }),
         );
-        self.append(rec)
+        self.write_ahead(rec)
     }
 
     fn checkpoint(
@@ -3070,7 +3382,10 @@ impl<E: AuditEmit + Send + Sync> BootAudit for GraphBootAudit<'_, E> {
                 scanned_bytes: self.scanned_bytes,
             }),
         );
-        self.append(rec)
+        if let Some(drain) = self.drain {
+            drain.send_replace(Drain::Applied);
+        }
+        self.write_ahead(rec)
     }
 
     fn intent_migrate(
@@ -3086,7 +3401,7 @@ impl<E: AuditEmit + Send + Sync> BootAudit for GraphBootAudit<'_, E> {
             lower_hex(&to)
         );
         let rec = self.intent(GRAPH_MIGRATE_ACTION, &reason, revision, "migrating");
-        self.append(rec)
+        self.write_ahead(rec)
     }
 
     fn intent_transition(
@@ -3096,7 +3411,14 @@ impl<E: AuditEmit + Send + Sync> BootAudit for GraphBootAudit<'_, E> {
     ) -> impl Future<Output = Result<(), StoreError>> + Send {
         let reason = format!("intent recorded ({initiator})");
         let rec = self.intent(GRAPH_TRANSITION_ACTION, &reason, revision, "transitioning");
-        self.append(rec)
+        let (recorded, drain) = (self.write_ahead(rec), self.drain);
+        async move {
+            recorded.await?;
+            if let Some(drain) = drain {
+                drain.send_replace(Drain::Begun);
+            }
+            Ok(())
+        }
     }
 
     fn released(
@@ -3112,13 +3434,13 @@ impl<E: AuditEmit + Send + Sync> BootAudit for GraphBootAudit<'_, E> {
                 (reason, rec)
             })
             .collect();
-        let sink = self.sink;
+        let (sink, bound) = (self.sink, self.bound);
         async move {
             for (reason, rec) in recs {
                 eprintln!(
                     "maknaed: identity: {reason} (pending the store commit of revision {revision})"
                 );
-                sink.emit(&rec)
+                sink.emit_within(&rec, bound)
                     .await
                     .map_err(|e| StoreError::Audit(e.to_string()))?;
             }
@@ -3134,7 +3456,27 @@ impl<E: AuditEmit + Send + Sync> BootAudit for GraphBootAudit<'_, E> {
         let reason = maknae_authz_basic::IdentityProblem::PrincipalAdmin { uid }.to_string();
         let rec = self.intent(GRAPH_IDENTITY_ACTION, &reason, revision, "promoting");
         eprintln!("maknaed: identity: {reason} (pending the store commit of revision {revision})");
-        self.append(rec)
+        self.write_ahead(rec)
+    }
+
+    fn baseline(
+        &mut self,
+        revision: u64,
+        events: &[String],
+    ) -> impl Future<Output = Result<(), StoreError>> + Send {
+        let recs: Vec<AuditRecord> = events
+            .iter()
+            .map(|e| self.intent(GRAPH_BASELINE_ACTION, e, revision, "baselining"))
+            .collect();
+        let (sink, bound) = (self.sink, self.bound);
+        async move {
+            for rec in recs {
+                sink.emit_within(&rec, bound)
+                    .await
+                    .map_err(|e| StoreError::Audit(e.to_string()))?;
+            }
+            Ok(())
+        }
     }
 }
 
@@ -3165,10 +3507,31 @@ struct GraphInputs {
     bindings_missing: bool,
     bindings_lists_nobody: bool,
     principal_uid: u32,
+    baseline: BaselineLayer,
+    accepted_seen: Option<[u8; 32]>,
+    baseline_events: Vec<String>,
+}
+
+/// The baseline this start runs, as the store records it: a performed move is cleared.
+fn run_baseline(
+    run: &maknae_config::BaselineSections,
+    (system, ceiling): (String, String),
+) -> BaselineLayer {
+    BaselineLayer {
+        sha256: crate::baseline::accepted_digest(run),
+        sections: run.clone().into_inner(),
+        system,
+        ceiling,
+        moved_from: None,
+    }
 }
 
 impl GraphInputs {
-    fn new(source: &maknae_authz_basic::PolicySource, label: &str) -> Result<Self, StoreError> {
+    fn new(
+        source: &maknae_authz_basic::PolicySource,
+        label: &str,
+        baseline: BaselineLayer,
+    ) -> Result<Self, StoreError> {
         let vocabulary = crate::vocabulary::kernel_vocabulary(label)
             .map_err(|e| StoreError::Identity(e.to_string()))?;
         let sections = source.section_digests(maknae_state::envelope::sha256);
@@ -3180,6 +3543,9 @@ impl GraphInputs {
             bindings_missing: source.bindings().is_missing(),
             bindings_lists_nobody: source.bindings().lists_nobody(),
             principal_uid: source.principal().uid,
+            baseline,
+            accepted_seen: None,
+            baseline_events: Vec::new(),
         })
     }
 
@@ -3192,13 +3558,19 @@ impl GraphInputs {
             bindings_missing: self.bindings_missing,
             bindings_lists_nobody: self.bindings_lists_nobody,
             principal_uid: self.principal_uid,
+            baseline: &self.baseline,
+            accepted_seen: self.accepted_seen,
+            baseline_events: &self.baseline_events,
         }
     }
 }
 
+#[derive(Debug)]
 enum GraphFailure {
     Key(maknae_vault::VaultError),
     Store(StoreError),
+    ScanElapsed(String),
+    Inconsistent(String),
 }
 
 /// The refusal for a graph-store boot failure, with the operator's next step for its
@@ -3213,6 +3585,15 @@ fn graph_refusal(failure: GraphFailure, state_dir: &Path) -> RunError {
              `sudo maknae enroll`, then `sudo maknae reseed`"
                 .to_string()
         }
+        GraphFailure::ScanElapsed(_) => format!(
+            "the trail after its last {CHECKPOINT_ACTION} did not scan within {}s; rotate it as \
+             the runbook's \"Rotate, restore or recreate the trail\" says, then restart",
+            SCAN_BACK_TIMEOUT.as_secs()
+        ),
+        GraphFailure::Inconsistent(_) => format!(
+            "no automatic remedy; keep {} as it is and investigate",
+            state_dir.display()
+        ),
         GraphFailure::Key(_) => "the kernel graph key could not be read; check the credential \
              `sudo maknae enroll` created (enroll never replaces an existing key)"
             .to_string(),
@@ -3267,6 +3648,9 @@ fn graph_refusal(failure: GraphFailure, state_dir: &Path) -> RunError {
     let reason = match failure {
         GraphFailure::Key(e) => format!("kernel graph key: {e}"),
         GraphFailure::Store(e) => format!("kernel graph store: {e}"),
+        GraphFailure::ScanElapsed(e) | GraphFailure::Inconsistent(e) => {
+            format!("kernel graph store: {e}")
+        }
     };
     RunError::Graph { reason, hint }
 }
@@ -3286,6 +3670,7 @@ pub struct KernelGraphStatus {
     revision: Arc<AtomicU64>,
     pub anchor: String,
     pub identity: crate::identity_report::IdentityStatus,
+    pub baseline: crate::baseline::BaselineStatus,
 }
 
 impl KernelGraphStatus {
@@ -3294,6 +3679,10 @@ impl KernelGraphStatus {
             revision: Arc::new(AtomicU64::new(revision)),
             anchor: anchor.into(),
             identity: crate::identity_report::IdentityStatus::default(),
+            baseline: crate::baseline::BaselineStatus::new(crate::baseline::BaselineState {
+                accepted: Default::default(),
+                pending: None,
+            }),
         }
     }
 
@@ -3340,7 +3729,7 @@ async fn publish_boot_identity<E: AuditEmit + Send + Sync>(
         snapshot.identity_problems(),
         |result, reason, posture| {
             let rec = ctx.record(GRAPH_IDENTITY_ACTION, result, &reason, posture, None);
-            async move { sink.emit(&rec).await }
+            async move { sink.emit_within(&rec, AUDIT_APPEND_TIMEOUT).await }
         },
     )
     .await
@@ -3358,32 +3747,64 @@ struct BootedGraph {
     principal_admin: Option<u32>,
 }
 
+async fn scan_anchor(
+    bound: Duration,
+    scan: impl FnOnce() -> Result<maknae_audit_append::ScanResult, maknae_audit_append::AuditError>
+        + Send
+        + 'static,
+) -> Result<maknae_audit_append::ScanResult, GraphFailure> {
+    within_blocking(bound, scan)
+        .await
+        .map_err(|e| GraphFailure::ScanElapsed(format!("rollback anchor scan {e}")))?
+        .map_err(|e| GraphFailure::Store(StoreError::Audit(e.to_string())))
+}
+
+/// The latest checkpoint in `sink`'s trail and the bytes scanned to find it, bounded.
+fn production_scan(
+    sink: &maknae_audit_append::AuditSink,
+) -> Result<maknae_audit_append::ScanResult, maknae_audit_append::AuditError> {
+    sink.scan_back(maknae_state::anchor::is_checkpoint)
+}
+
+async fn last_checkpoint(
+    sink: &Arc<maknae_audit_append::AuditSink>,
+    state_dir: &Path,
+    scan: TrailScanner,
+) -> Result<(Option<maknae_state::anchor::Checkpoint>, u64), RunError> {
+    let scan_sink = Arc::clone(sink);
+    let scan = scan_anchor(SCAN_BACK_TIMEOUT, move || scan(&scan_sink))
+        .await
+        .map_err(|e| graph_refusal(e, state_dir))?;
+    Ok((
+        scan.line.as_deref().and_then(parse_checkpoint),
+        scan.scanned_bytes,
+    ))
+}
+
 /// Runs before the accept loop, so the blocking audit scan contends with no append.
+/// `scanned` is the anchor a trail move already found; `None` scans `sink`.
 async fn boot_kernel_graph(
     state_dir: &Path,
-    key: Result<maknae_vault::GraphKey, maknae_vault::VaultError>,
+    dir: Result<StateDir, StoreError>,
+    key: Result<WrappingKey, maknae_vault::VaultError>,
     sink: &Arc<maknae_audit_append::AuditSink>,
     ctx: &BootCtx<'_>,
     inputs: &BootInputs<'_>,
+    scanned: Option<(Option<maknae_state::anchor::Checkpoint>, u64)>,
 ) -> Result<BootedGraph, RunError> {
     let key = key.map_err(|e| graph_refusal(GraphFailure::Key(e), state_dir))?;
-    let dir = StateDir::open(state_dir, ctx.euid)
-        .map_err(|e| graph_refusal(GraphFailure::Store(e), state_dir))?;
-    let scan_sink = Arc::clone(sink);
-    let scan = tokio::task::spawn_blocking(move || {
-        scan_sink.scan_back(|line| parse_checkpoint(line).is_some())
-    })
-    .await
-    .map_err(|e| e.to_string())
-    .and_then(|r| r.map_err(|e| e.to_string()))
-    .map_err(|e| graph_refusal(GraphFailure::Store(StoreError::Audit(e)), state_dir))?;
-    let checkpoint = scan.line.as_deref().and_then(parse_checkpoint);
+    let dir = dir.map_err(|e| graph_refusal(GraphFailure::Store(e), state_dir))?;
+    let (checkpoint, scanned_bytes) = match scanned {
+        Some(found) => found,
+        None => last_checkpoint(sink, state_dir, production_scan).await?,
+    };
     let mut audit = GraphBootAudit {
         sink: sink.as_ref(),
         ctx,
-        scanned_bytes: scan.scanned_bytes,
+        scanned_bytes,
+        bound: AUDIT_APPEND_TIMEOUT,
+        drain: None,
     };
-    let key = WrappingKey::new(key.into_bytes());
     let report = maknae_state::store::boot(&dir, &key, checkpoint, &mut audit, unix_now(), inputs)
         .await
         .map_err(|e| store_refusal(e, state_dir))?;
@@ -3414,9 +3835,12 @@ async fn report_graph_boot<E: AuditEmit + Send + Sync>(
             MARKER_FILE,
             state_dir.display()
         );
-        sink.emit(&ctx.record(GRAPH_RESEED_ACTION, "deny", &reason, "unauthorized", None))
-            .await
-            .map_err(|e| boot_evidence_refused("graph reseed", e))?;
+        sink.emit_within(
+            &ctx.record(GRAPH_RESEED_ACTION, "deny", &reason, "unauthorized", None),
+            AUDIT_APPEND_TIMEOUT,
+        )
+        .await
+        .map_err(|e| boot_evidence_refused("graph reseed", e))?;
     }
     if let Some(cause) = &report.durability_error {
         eprintln!(
@@ -3431,9 +3855,12 @@ async fn report_graph_boot<E: AuditEmit + Send + Sync>(
     {
         let reason = format!("previous kernel graph store: {previous}");
         eprintln!("maknaed: {reason}");
-        sink.emit(&ctx.record(GRAPH_REJECTED_ACTION, "permit", &reason, "authorized", None))
-            .await
-            .map_err(|e| boot_evidence_refused("graph rejected-store", e))?;
+        sink.emit_within(
+            &ctx.record(GRAPH_REJECTED_ACTION, "permit", &reason, "authorized", None),
+            AUDIT_APPEND_TIMEOUT,
+        )
+        .await
+        .map_err(|e| boot_evidence_refused("graph rejected-store", e))?;
     }
     Ok(())
 }
@@ -3456,6 +3883,17 @@ struct Reloader<B: maknae_authz_basic::Baseline, E> {
     au3_1: serde_json::Value,
     identity: crate::identity_report::IdentityStatus,
     stopping: tokio::sync::watch::Sender<bool>,
+    append_bound: Duration,
+    /// The stored graph: replaced by every commit, the base every reload extracts and plans from.
+    persisted: std::sync::RwLock<Arc<maknae_graph::graph::Graph>>,
+    config_dir: PathBuf,
+    files: FileReader,
+    env: Arc<dyn crate::baseline_check::Env>,
+    baseline: crate::baseline::BaselineStatus,
+    /// Where a restart-class accept stands; the serve stops once it is applied or failed.
+    drain: tokio::sync::watch::Sender<Drain>,
+    /// How long an accept waits for a reload holding the turn.
+    turn_wait: Duration,
     #[cfg(test)]
     load_gate: Option<Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>>,
 }
@@ -3465,6 +3903,7 @@ type ReloadCandidate = (
     Arc<maknae_authz_basic::snapshot::Snapshot>,
     Arc<[maknae_graph::identity::Released]>,
     Option<u32>,
+    Option<crate::baseline::PendingSet>,
 );
 
 impl<B, E> Reloader<B, E>
@@ -3474,7 +3913,7 @@ where
 {
     async fn run(self: &Arc<Self>) -> Result<crate::reload::Applied, crate::reload::Refusal> {
         let _turn = self.lock.lock().await;
-        let stopping = *self.stopping.borrow();
+        let stopping = *self.stopping.borrow() || *self.drain.borrow() != Drain::Serving;
         crate::reload::turn(stopping, &self.revision, |store_revision| async move {
             let seq = Seq::new();
             let ctx = BootCtx {
@@ -3492,6 +3931,7 @@ where
                 store_revision,
                 committed: std::sync::Mutex::new(None),
                 replaced: std::sync::Mutex::default(),
+                newly_pending: std::sync::Mutex::default(),
             };
             let mut stopping = self.stopping.subscribe();
             let stopped = async move {
@@ -3518,30 +3958,424 @@ where
     }
 }
 
+impl<B, E> Reloader<B, E>
+where
+    B: maknae_authz_basic::Baseline,
+    E: AuditEmit + Send + Sync + 'static,
+{
+    /// The published accepted baseline and the set the files hold against it, read now.
+    async fn read_pending(
+        &self,
+    ) -> Result<
+        (
+            Arc<crate::baseline::BaselineState>,
+            Option<crate::baseline::PendingSet>,
+        ),
+        String,
+    > {
+        let state = self.baseline.current();
+        let trail = accepted_trail(&state.accepted, &self.config_dir);
+        let (dir, files, env) = (self.config_dir.clone(), self.files, Arc::clone(&self.env));
+        let file =
+            baseline_blocking(move || baseline_file(&dir, files, env.as_ref(), trail.as_deref()))
+                .await?;
+        let set = crate::baseline::pending(&state.accepted, &file);
+        Ok((state, set))
+    }
+
+    async fn accept_named(&self, hash: &str) -> AcceptAnswer {
+        let Ok(turn) = tokio::time::timeout(self.turn_wait, self.lock.lock()).await else {
+            return accept_unavailable(ACCEPT_BUSY, ACCEPT_BUSY.into());
+        };
+        if *self.stopping.borrow() || *self.drain.borrow() != Drain::Serving {
+            return accept_unavailable(ACCEPT_STOPPING, ACCEPT_STOPPING.into());
+        }
+        let mut guard = DrainGuard {
+            drain: &self.drain,
+            live_unsettled: false,
+        };
+        let (state, current) = match self.read_pending().await {
+            Ok(read) => read,
+            Err(why) => {
+                return accept_unavailable(
+                    ACCEPT_UNAVAILABLE,
+                    format!("baseline accept refused: {why}"),
+                )
+            }
+        };
+        let (plan, set) = match (
+            crate::baseline::decide_accept(current.as_ref(), hash),
+            current,
+        ) {
+            (Ok(plan), Some(set)) => (plan, set),
+            (Err(r), current) => {
+                let (view, reason) = crate::baseline::refused_view(&r, current.as_ref());
+                return AcceptAnswer::View {
+                    view,
+                    corrective: Some(reason),
+                };
+            }
+            (Ok(_), None) => {
+                return accept_unavailable(
+                    ACCEPT_UNAVAILABLE,
+                    "baseline accept refused: nothing is pending".into(),
+                )
+            }
+        };
+        let (accepted, proposed) = (state.accepted.clone(), plan.proposed.clone());
+        let (dir, env) = (self.config_dir.clone(), Arc::clone(&self.env));
+        let checked = baseline_blocking(move || {
+            let doc =
+                maknae_config::Document::from_baseline(&proposed).map_err(|e| e.to_string())?;
+            let v = crate::baseline_check::validate(doc, Mode::Accept, &dir, env.as_ref())
+                .map_err(|e| e.cause().to_string())?;
+            crate::baseline_check::check_sockets(&accepted, &v, env.as_ref())
+                .map_err(|e| e.cause().to_string())?;
+            Ok::<_, String>(v)
+        })
+        .await;
+        let v = match checked {
+            Err(why) => {
+                return accept_unavailable(
+                    ACCEPT_UNAVAILABLE,
+                    format!("baseline accept refused: {why}"),
+                )
+            }
+            Ok(Err(cause)) => {
+                journal(format!(
+                    "maknaed: baseline accept refused: {} {cause}",
+                    set.source
+                ));
+                let (view, _) = crate::baseline::refused_view(
+                    &crate::baseline::AcceptRefusal::Invalid,
+                    Some(&set),
+                );
+                return AcceptAnswer::View {
+                    view,
+                    corrective: Some(ACCEPT_INVALID.into()),
+                };
+            }
+            Ok(Ok(v)) => v,
+        };
+        let persisted = Arc::clone(
+            &self
+                .persisted
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        let stored = match maknae_graph::identity::extract(&persisted) {
+            Ok(stored) => stored,
+            Err(e) => {
+                return accept_unavailable(
+                    ACCEPT_UNAVAILABLE,
+                    format!("baseline accept refused: {e}"),
+                )
+            }
+        };
+        let (system, ceiling) = crate::baseline_check::classification_of(&v);
+        let moved_from = accepted_trail(&state.accepted, &self.config_dir)
+            .filter(|running| *running != v.audit.jsonl_path)
+            .map(|running| running.display().to_string());
+        let next_baseline = BaselineLayer {
+            sha256: crate::baseline::accepted_digest(&plan.proposed),
+            sections: plan.proposed.clone().into_inner(),
+            system,
+            ceiling,
+            moved_from,
+        };
+        let store_revision = self.revision.load(AtomicOrdering::Acquire);
+        let next = match maknae_graph::identity::build(
+            &stored.layer,
+            Some(&next_baseline),
+            &self.vocabulary.persisted,
+            self.vocabulary.digest,
+            store_revision.saturating_add(1),
+            maknae_graph::record::ProvenanceKind::Operator,
+        ) {
+            Ok(next) => next,
+            Err(e) => {
+                return accept_unavailable(
+                    ACCEPT_UNAVAILABLE,
+                    format!("baseline accept refused: {e}"),
+                )
+            }
+        };
+        let restart = plan.apply == crate::baseline::Apply::Restart;
+        let class = if restart { "restart" } else { "live" };
+        let short = crate::baseline::short(&set.hash);
+        let intent = format!(
+            "accept intent recorded (operator): sha256:{short}; apply: {class}; sections: {}",
+            plan.sections.join(",")
+        );
+        let seq = Seq::new();
+        let ctx = BootCtx {
+            event: "accept",
+            host: &self.host,
+            socket: &self.socket,
+            euid: self.euid,
+            session_id: self.session_ids.next_session(),
+            seq: &seq,
+            au3_1: &self.au3_1,
+        };
+        let mut audit = GraphBootAudit {
+            sink: self.sink.as_ref(),
+            ctx: &ctx,
+            scanned_bytes: 0,
+            bound: self.append_bound,
+            drain: restart.then_some(&self.drain),
+        };
+        let held = if restart {
+            None
+        } else {
+            let deadline = Instant::now() + self.turn_wait;
+            match crate::composition::HeldLiveTurn::take(Arc::clone(&self.authorizer), deadline)
+                .await
+            {
+                Some(held) => Some(held),
+                None => return accept_unavailable(ACCEPT_DECIDING, ACCEPT_DECIDING.into()),
+            }
+        };
+        eprintln!(
+            "maknaed: baseline: accepting the {} change set (apply: {class})",
+            set.source
+        );
+        let committed = match maknae_state::store::commit_accept(
+            &self.dir,
+            &self.key,
+            &next,
+            &[intent],
+            &mut audit,
+        )
+        .await
+        {
+            Ok(committed) => committed,
+            Err(e) if *self.drain.borrow() == Drain::Begun => {
+                self.drain.send_replace(Drain::Failed);
+                return accept_unavailable(
+                    ACCEPT_UNAVAILABLE,
+                    format!(
+                        "baseline accept failed: persist: {e}; exiting on the unchanged baseline"
+                    ),
+                );
+            }
+            Err(e) => {
+                let why = match e {
+                    StoreError::Audit(m) => format!("the intent was not recorded: {m}"),
+                    e => format!("persist: {e}"),
+                };
+                return accept_unavailable(
+                    ACCEPT_UNAVAILABLE,
+                    format!("baseline accept refused: {why}"),
+                );
+            }
+        };
+        for e in [&committed.durability_error, &committed.checkpoint_error]
+            .into_iter()
+            .flatten()
+        {
+            eprintln!(
+                "maknaed: baseline accept at revision {}: {e}",
+                committed.revision
+            );
+        }
+        *self
+            .persisted
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(next);
+        guard.live_unsettled = !restart;
+        self.revision
+            .store(committed.revision, AtomicOrdering::Release);
+        self.baseline.publish(crate::baseline::BaselineState {
+            accepted: plan.proposed.clone(),
+            pending: None,
+        });
+        let applied = match held {
+            None => Ok("restarting to apply"),
+            Some(held) => {
+                let before = self.authorizer.baseline().principal().uid;
+                let principal = v.principal.uid;
+                let installed = match (&committed.durability_error, &committed.checkpoint_error) {
+                    (Some(e), _) => Err(format!("the store was not durable: {e}")),
+                    (None, Some(e)) => Err(format!("the checkpoint was not recorded: {e}")),
+                    (None, None) => held.install(crate::live::LiveValues::of(&v)).await,
+                };
+                match installed {
+                    Ok(()) => {
+                        if principal != before {
+                            self.republish_principal_admin(&ctx, principal).await;
+                        }
+                        Ok("applied live")
+                    }
+                    Err(e) => {
+                        self.drain.send_replace(Drain::Applied);
+                        Err(e)
+                    }
+                }
+            }
+        };
+        guard.live_unsettled = false;
+        drop(guard);
+        drop(turn);
+        let revision = committed.revision;
+        let (result, reason, posture) = match &applied {
+            Ok(how) => (
+                "permit",
+                format!("accepted sha256:{short} at revision {revision}; {how}"),
+                "authorized",
+            ),
+            Err(e) => (
+                "deny",
+                format!(
+                    "accepted sha256:{short} at revision {revision}; not installed live: {e}; restarting to apply"
+                ),
+                "unavailable",
+            ),
+        };
+        let rec = ctx.record(GRAPH_BASELINE_ACTION, result, &reason, posture, None);
+        let emitted = self
+            .sink
+            .emit_within(&rec, self.append_bound)
+            .await
+            .map_err(|e| e.to_string());
+        eprintln!("{}", accept_journal(short, revision, &reason, &emitted));
+        let recorded = emitted.is_ok();
+        if !recorded {
+            self.drain.send_if_modified(|d| {
+                let serving = *d == Drain::Serving;
+                if serving {
+                    *d = Drain::Applied;
+                }
+                serving
+            });
+        }
+        let mut view = crate::baseline::accepted_view(&set, &state.accepted);
+        if applied.is_err() || !recorded {
+            view.apply = "restart".into();
+        }
+        AcceptAnswer::View {
+            view,
+            corrective: None,
+        }
+    }
+
+    /// With no explicit bindings the principal holds admin, so a new principal is
+    /// published and recorded as the identity it now is.
+    async fn republish_principal_admin(&self, ctx: &BootCtx<'_>, uid: u32) {
+        let snapshot = self.authorizer.baseline().snapshot();
+        if snapshot.subjects().is_some() {
+            return;
+        }
+        let promoted = maknae_authz_basic::IdentityProblem::PrincipalAdmin { uid };
+        let carried: Vec<_> = self
+            .identity
+            .current()
+            .iter()
+            .filter(|p| matches!(p, maknae_authz_basic::IdentityProblem::Released { .. }))
+            .cloned()
+            .chain([promoted.clone()])
+            .collect();
+        self.identity
+            .publish(crate::identity_report::Published::of(&snapshot, carried));
+        let (result, reason, posture) = crate::identity_report::record_fields(&promoted);
+        eprintln!("maknaed: identity: {reason}");
+        let rec = ctx.record(GRAPH_IDENTITY_ACTION, result, &reason, posture, None);
+        if let Err(e) = self.sink.emit_within(&rec, self.append_bound).await {
+            eprintln!("maknaed: AUDIT WRITE FAILED on an identity record ({reason}): {e}");
+        }
+    }
+}
+
+impl<B, E> BaselineOps for Reloader<B, E>
+where
+    B: maknae_authz_basic::Baseline,
+    E: AuditEmit + Send + Sync + 'static,
+{
+    fn show(&self) -> BoxFuture<'_, Result<maknae_proto::BaselineView, String>> {
+        Box::pin(async move {
+            let (state, set) = self.read_pending().await?;
+            crate::baseline::show_view(set.as_ref(), &state.accepted)
+        })
+    }
+
+    fn accept<'a>(&'a self, hash: &'a str) -> BoxFuture<'a, AcceptAnswer> {
+        Box::pin(self.accept_named(hash))
+    }
+}
+
 struct ReloadIo<'a, B: maknae_authz_basic::Baseline, E> {
     reloader: &'a Arc<Reloader<B, E>>,
     ctx: &'a BootCtx<'a>,
     store_revision: u64,
     committed: std::sync::Mutex<Option<[u8; 32]>>,
     replaced: std::sync::Mutex<Arc<[maknae_authz_basic::IdentityProblem]>>,
+    /// The pending set an install published with a new hash, to be recorded.
+    newly_pending: std::sync::Mutex<Option<crate::baseline::PendingSet>>,
 }
 
-/// Blocking: the policy load resolves usernames.
-fn load_candidate<B: maknae_authz_basic::Baseline>(
-    baseline: &B,
-    vocabulary: &crate::vocabulary::Vocabulary,
-    label: &str,
+/// The files read and validated as a start reads them: the sections, or why they
+/// cannot start and, when they parsed, the sections refused.
+fn read_file_baseline(
+    config_dir: &Path,
+    files: FileReader,
+    env: &dyn crate::baseline_check::Env,
+) -> Result<
+    (
+        crate::baseline_check::Validated,
+        maknae_config::BaselineSections,
+    ),
+    (Invalid, Option<maknae_config::BaselineSections>),
+> {
+    let doc = files(config_dir).map_err(|e| (Invalid::Document(e.to_string()), None))?;
+    let sections = maknae_config::document_sections(&doc);
+    match crate::baseline_check::validate_file(doc, Mode::Boot, config_dir, env) {
+        Ok(v) => Ok((v, sections)),
+        Err(e) => Err((e, Some(sections))),
+    }
+}
+
+/// Blocking: reads `maknae.yaml`/`config.d` and validates them as boot does.
+fn baseline_file(
+    config_dir: &Path,
+    files: FileReader,
+    env: &dyn crate::baseline_check::Env,
+    accepted_trail: Option<&Path>,
+) -> Result<maknae_config::BaselineSections, crate::baseline::InvalidFile> {
+    let (v, sections) =
+        read_file_baseline(config_dir, files, env).map_err(|(e, s)| e.into_file(s))?;
+    match crate::baseline_check::check_move(accepted_trail, &v.audit.jsonl_path, env) {
+        Ok(()) => Ok(sections),
+        Err(cause) => Err(crate::baseline::InvalidFile {
+            cause,
+            proposed: Some(sections),
+        }),
+    }
+}
+
+/// Blocking: the policy load resolves usernames, and the baseline files are read
+/// only to compute the pending set.
+fn load_candidate<B: maknae_authz_basic::Baseline, E>(
+    reloader: &Reloader<B, E>,
+    persisted_graph: &Arc<maknae_graph::graph::Graph>,
     store_revision: u64,
 ) -> Result<(crate::reload::Plan, ReloadCandidate), crate::reload::Refusal> {
     use crate::reload::Refusal;
+    let (baseline, vocabulary, label) = (
+        reloader.authorizer.baseline(),
+        &reloader.vocabulary,
+        reloader.label.as_str(),
+    );
     let compile_refused = |m: String| Refusal::Compile(m);
+    let persisted = maknae_graph::identity::extract(persisted_graph)
+        .map_err(|e| compile_refused(e.to_string()))?;
+    let Some(stored_baseline) = persisted.baseline.as_ref() else {
+        return Err(compile_refused(
+            "the running graph carries no baseline".into(),
+        ));
+    };
     let source = baseline
         .load_source()
         .map_err(|e| Refusal::Load(e.to_string()))?;
     let digests = source.section_digests(baseline.digest());
-    let current = baseline.snapshot();
-    let persisted = maknae_graph::identity::extract(current.persisted())
-        .map_err(|e| compile_refused(e.to_string()))?;
     let (next, released) = crate::reload::next_layer(
         &source.identity_layer(label, digests.get("bindings").copied()),
         &source.unresolved_adversaries(),
@@ -3555,10 +4389,11 @@ fn load_candidate<B: maknae_authz_basic::Baseline>(
         &persisted.layer,
         &next,
         store_revision,
-        current.persisted(),
+        persisted_graph,
         |revision| {
             maknae_graph::identity::build(
                 &next,
+                Some(stored_baseline),
                 &vocabulary.persisted,
                 vocabulary.digest,
                 revision,
@@ -3575,9 +4410,24 @@ fn load_candidate<B: maknae_authz_basic::Baseline>(
         &digests,
     )
     .map_err(|e| compile_refused(e.to_string()))?;
+    let accepted = reloader.baseline.current();
+    let trail = accepted_trail(&accepted.accepted, &reloader.config_dir);
+    let file = baseline_file(
+        &reloader.config_dir,
+        reloader.files,
+        reloader.env.as_ref(),
+        trail.as_deref(),
+    );
+    let pending = crate::baseline::pending(&accepted.accepted, &file);
     Ok((
         plan,
-        (graph, Arc::new(snapshot), released.into(), principal_admin),
+        (
+            graph,
+            Arc::new(snapshot),
+            released.into(),
+            principal_admin,
+            pending,
+        ),
     ))
 }
 
@@ -3595,17 +4445,18 @@ where
            + Send {
         let reloader = Arc::clone(self.reloader);
         async move {
+            let persisted = Arc::clone(
+                &reloader
+                    .persisted
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            );
             tokio::task::spawn_blocking(move || {
                 #[cfg(test)]
                 if let Some(gate) = &reloader.load_gate {
                     let _ = gate.lock().unwrap().recv();
                 }
-                load_candidate(
-                    reloader.authorizer.baseline(),
-                    &reloader.vocabulary,
-                    &reloader.label,
-                    store_revision,
-                )
+                load_candidate(&reloader, &persisted, store_revision)
             })
             .await
             .map_err(|e| crate::reload::Refusal::Load(format!("load task: {e}")))?
@@ -3632,6 +4483,8 @@ where
                 sink: self.reloader.sink.as_ref(),
                 ctx: self.ctx,
                 scanned_bytes: 0,
+                bound: self.reloader.append_bound,
+                drain: None,
             };
             let committed = maknae_state::store::commit(
                 &self.reloader.dir,
@@ -3643,7 +4496,15 @@ where
                 maknae_state::store::INITIATOR_ROOT_FILE,
             )
             .await
-            .map_err(|e| crate::reload::Refusal::Persist(e.to_string()))?;
+            .map_err(|e| match e {
+                StoreError::BaselineUnrecorded => crate::reload::Refusal::BaselineChanged,
+                e => crate::reload::Refusal::Persist(e.to_string()),
+            })?;
+            *self
+                .reloader
+                .persisted
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::clone(&graph);
             *self
                 .committed
                 .lock()
@@ -3673,6 +4534,23 @@ where
             crate::identity_report::transition_problems(&candidate.2, candidate.3),
         );
         self.reloader.authorizer.baseline().install(candidate.1);
+        let current = self.reloader.baseline.current();
+        let pending = candidate.4;
+        let hash = |p: &Option<crate::baseline::PendingSet>| p.as_ref().map(|p| p.hash.clone());
+        // A new set is published by `outcome` once its record is appended.
+        if pending.is_some() && hash(&pending) != hash(&current.pending) {
+            *self
+                .newly_pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = pending;
+        } else {
+            self.reloader
+                .baseline
+                .publish(crate::baseline::BaselineState {
+                    accepted: current.accepted.clone(),
+                    pending,
+                });
+        }
         *self
             .replaced
             .lock()
@@ -3703,8 +4581,9 @@ where
             }),
         );
         let sink = Arc::clone(&self.reloader.sink);
+        let bound = self.reloader.append_bound;
         async move {
-            sink.emit(&rec).await.map_err(|e| {
+            sink.emit_within(&rec, bound).await.map_err(|e| {
                 eprintln!("maknaed: AUDIT WRITE FAILED on the reload intent: {e}");
                 crate::reload::Refusal::Audit(e.to_string())
             })
@@ -3754,15 +4633,46 @@ where
                     (reason, rec)
                 })
                 .collect();
+        let pending = self
+            .newly_pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .map(|p| {
+                let (result, reason, posture) = crate::baseline::record_fields(&p);
+                let rec = self
+                    .ctx
+                    .record(GRAPH_BASELINE_ACTION, result, &reason, posture, None);
+                (p.clone(), crate::baseline::journal_line(&p), rec)
+            });
         let sink = Arc::clone(&self.reloader.sink);
+        let bound = self.reloader.append_bound;
+        let status = self.reloader.baseline.clone();
         async move {
-            if let Err(e) = sink.emit(&rec).await {
+            if let Err(e) = sink.emit_within(&rec, bound).await {
                 eprintln!("maknaed: AUDIT WRITE FAILED on the reload outcome ({reason}): {e}");
             }
+            let mut appending = true;
             for (reason, rec) in problems {
                 eprintln!("maknaed: identity: {reason}");
-                if let Err(e) = sink.emit(&rec).await {
+                if let Err(e) = sink.emit_within(&rec, bound).await {
                     eprintln!("maknaed: AUDIT WRITE FAILED on an identity record ({reason}): {e}");
+                    appending = false;
+                    break;
+                }
+            }
+            if let Some((set, line, rec)) = pending.filter(|_| appending) {
+                eprintln!("maknaed: baseline: {line}");
+                match sink.emit_within(&rec, bound).await {
+                    Ok(()) => {
+                        status.publish(crate::baseline::BaselineState {
+                            accepted: status.current().accepted.clone(),
+                            pending: Some(set),
+                        });
+                    }
+                    Err(e) => {
+                        eprintln!("maknaed: AUDIT WRITE FAILED on the baseline pending record: {e}")
+                    }
                 }
             }
         }
@@ -3894,6 +4804,30 @@ fn parse_posture_marker(value: &maknae_config::Value) -> Option<crate::posture::
 /// Where the kernel graph key comes from. Production reads the enrolled credential;
 /// the boot tests inject a fixed key.
 type GraphKeyReader = fn(&Path) -> Result<maknae_vault::GraphKey, maknae_vault::VaultError>;
+type FileReader = fn(&Path) -> Result<maknae_config::Document, maknae_config::ConfigError>;
+type TrailOpener = fn(
+    &maknae_config::AuditConfig,
+) -> Result<maknae_audit_append::AuditSink, maknae_audit_append::AuditError>;
+type TrailScanner = fn(
+    &maknae_audit_append::AuditSink,
+) -> Result<maknae_audit_append::ScanResult, maknae_audit_append::AuditError>;
+type PolicyLoader =
+    fn(
+        maknae_authz_basic::PolicyPaths,
+        maknae_config::Principal,
+    ) -> Result<maknae_authz_basic::PolicySource, maknae_authz_basic::AuthzBasicError>;
+
+/// What boot reads from the host. Production passes the real readers; the boot
+/// tests pass their own.
+struct BootSeams {
+    graph_key: GraphKeyReader,
+    state_dir_open: fn(&Path, u32) -> Result<StateDir, StoreError>,
+    files: FileReader,
+    env: Arc<dyn crate::baseline_check::Env>,
+    open_prepared: TrailOpener,
+    scan: TrailScanner,
+    policy_load: PolicyLoader,
+}
 
 fn production_graph_key(
     config_dir: &Path,
@@ -3905,7 +4839,7 @@ fn production_graph_key(
 async fn run_inner(
     config_dir: &Path,
     state_dir: &Path,
-    graph_key: GraphKeyReader,
+    seams: &BootSeams,
 ) -> Result<ServeOutcome, RunError> {
     // An unregistered SIGHUP terminates the process; registered, one pending signal
     // is buffered until the reload task drains it after mint.
@@ -3917,48 +4851,183 @@ async fn run_inner(
     maknae_vault::install_default_crypto_provider();
     maknae_vault::assert_fips_provider().map_err(|e| RunError::Other(e.to_string()))?;
 
-    // Boot Maknae's own config ONCE, registering every section the daemon uses (core +
-    // lake + vault + transport + audit + principal — see boot.rs). The booted document
-    // backs the plane client below, so no incompatible per-call reload rejects a
-    // combined config.
-    let boot = crate::boot(config_dir).map_err(|e| RunError::Other(e.to_string()))?;
-    let transport = maknae_config::transport_from_section(boot.section("transport"))
-        .map_err(|e| RunError::Other(e.to_string()))?;
-    // #240: where the deputy is, and the outer bound on one send.
-    let egress_cfg =
-        maknae_config::egress_from_section(boot.section(maknae_config::EGRESS_SECTION))
-            .map_err(|e| RunError::Other(e.to_string()))?;
-    let audit_cfg = maknae_config::audit_from_section(boot.section("audit"), config_dir)
-        .map_err(|e| RunError::Other(e.to_string()))?;
+    let env = &*seams.env;
+    let euid = nix::unistd::geteuid().as_raw();
+    let (candidate, file_sections) = match read_file_baseline(config_dir, seams.files, env) {
+        Ok((_, sections)) => (Ok(sections.clone()), Some(sections)),
+        Err((refused, sections)) => (Err(refused), sections),
+    };
 
-    // Fail-closed audit sink: no durable audit path → do not start (AU-5).
-    let sink = Arc::new(
-        maknae_audit_append::AuditSink::open(&audit_cfg)
-            .map_err(|e| RunError::Other(e.to_string()))?,
-    );
+    // The accepted baseline is read before anything is appended; the store is booted later.
+    let key = (seams.graph_key)(config_dir).map(|k| WrappingKey::new(k.into_bytes()));
+    let dir = (seams.state_dir_open)(state_dir, euid);
+    let reseeding = matches!(&dir, Ok(d) if d.reseed_authorized());
+    let peeked = match (&dir, &key) {
+        (Ok(d), Ok(k)) => maknae_state::store::peek_baseline(d, k).map_err(|e| e.to_string()),
+        (Err(e), _) => Err(e.to_string()),
+        (_, Err(e)) => Err(e.to_string()),
+    };
+    let inconsistent = match &peeked {
+        Ok(Some(b)) => inconsistency(b),
+        _ => None,
+    };
+    let stored = match &peeked {
+        Ok(Some(b)) if inconsistent.is_none() => Some(b),
+        _ => None,
+    };
+    // Only a store that holds no baseline may have its trail created on first open.
+    let create = matches!(peeked, Ok(None));
+    let store_unread = peeked
+        .as_ref()
+        .err()
+        .cloned()
+        .or_else(|| inconsistent.clone());
+    // Untrusted when inconsistent: used only to locate the trail and name what a reseed sets aside.
+    let peeked_layer = match &peeked {
+        Ok(Some(b)) => Some(b),
+        _ => None,
+    };
+    let prior_trail = peeked_layer.and_then(|b| {
+        b.moved_from
+            .as_ref()
+            .map(PathBuf::from)
+            .or_else(|| accepted_trail(&sections_of(b), config_dir))
+    });
+    let accepted = if reseeding { None } else { stored };
+    let accepted_sections = accepted.map(sections_of);
 
-    // The boot-level session id (spec §5.3) — shared by every AU-3 record this boot
-    // emits BEFORE any connection (the authz refusal, the posture record) and by every
-    // real connection's `next_session()` afterward, so they all derive from the SAME
-    // per-boot nonce.
     let session_ids = Arc::new(SessionIds::new());
     let host = hostname();
-    let socket = transport.socket_path.display().to_string();
-    let euid = nix::unistd::geteuid().as_raw();
-
     // ONE sequence for every boot-session record (#154 review): the boot
     // session id is a constant per boot, so two records minted from separate
     // `Seq::new()`s would both carry seq 1 and collide on (session_id, seq).
-    // Every boot-time emitter below draws from this counter.
     let boot_seq = Seq::new();
+    let ids = BootIds {
+        host: &host,
+        session_ids: &session_ids,
+        seq: &boot_seq,
+        euid,
+    };
+
+    let first_refusal = candidate.as_ref().err().cloned();
+    let file = candidate.map_err(|e| e.into_file(file_sections.clone()));
+    let start = crate::baseline::at_boot(accepted_sections.as_ref(), file, |mix| {
+        let doc = maknae_config::Document::from_baseline(mix).map_err(|e| e.to_string())?;
+        let v = crate::baseline_check::validate(doc, Mode::Boot, config_dir, env)
+            .map_err(|e| e.cause().to_string())?;
+        crate::baseline_check::check_move(prior_trail.as_deref(), &v.audit.jsonl_path, env)
+    });
+    let start = match start {
+        Ok(start) => start,
+        Err(cause) => {
+            let cause = match &store_unread {
+                Some(e) => format!("{cause}; and the kernel graph store could not be read: {e}"),
+                None => cause,
+            };
+            let refused = first_refusal.unwrap_or_else(|| Invalid::Document(cause.clone()));
+            let sections = file_sections.as_ref();
+            let trail = prior_trail.as_deref();
+            return Err(refuse_start(
+                refused, cause, None, sections, trail, create, config_dir, seams, &ids,
+            )
+            .await);
+        }
+    };
+    let run_doc = maknae_config::Document::from_baseline(&start.run)
+        .map_err(|e| RunError::Other(e.to_string()))?;
+    let validated = match crate::baseline_check::validate(run_doc, Mode::Boot, config_dir, env) {
+        Ok(v) => v,
+        Err(refused) => {
+            let (cause, recorded) = match accepted {
+                Some(_) => (
+                    format!("accepted baseline cannot start: {}", refused.cause()),
+                    Some(ACCEPTED_CANNOT_START_RECORDED),
+                ),
+                None => (refused.cause().to_string(), None),
+            };
+            let trail = prior_trail.as_deref();
+            return Err(refuse_start(
+                refused,
+                cause,
+                recorded,
+                Some(&start.run),
+                trail,
+                create,
+                config_dir,
+                seams,
+                &ids,
+            )
+            .await);
+        }
+    };
+    if reseeding {
+        if let Err(e) = crate::baseline_check::check_move(
+            prior_trail.as_deref(),
+            &validated.audit.jsonl_path,
+            env,
+        ) {
+            let cause = format!("{e}; see the runbook's \"Move the audit trail\"");
+            return Err(refuse_start(
+                Invalid::Environment(cause.clone()),
+                cause,
+                None,
+                Some(&start.run),
+                prior_trail.as_deref(),
+                create,
+                config_dir,
+                seams,
+                &ids,
+            )
+            .await);
+        }
+    }
+
+    let socket = validated.transport.socket_path.display().to_string();
+    let au3_1 = validated.audit.au3_1.clone();
+    let ctx = BootCtx {
+        event: "boot",
+        host: &host,
+        socket: &socket,
+        euid,
+        session_id: boot_session_id(&session_ids),
+        seq: &boot_seq,
+        au3_1: &au3_1,
+    };
+    // Fail-closed audit sink: no durable audit path → do not start (AU-5).
+    let trail = open_trail(
+        prior_trail.as_deref(),
+        &validated.audit,
+        create,
+        seams.open_prepared,
+        seams.scan,
+        state_dir,
+        &ctx,
+    )
+    .await?;
+    let sink = trail.sink;
+    let mut events = match (reseeding, peeked_layer) {
+        (true, Some(replaced)) => vec![crate::baseline::reseeded_event(&replaced.sha256)],
+        _ => start.events,
+    };
+    if let Some(m) = &trail.moved {
+        events.push(crate::baseline::moved_event(&m.from, &m.to));
+    }
+    let started = Started {
+        validated,
+        run: start.run,
+        pending: start.pending,
+        accepted_seen: accepted.map(|b| b.sha256),
+        events,
+        inconsistent: inconsistent.filter(|_| !reseeding),
+        dir,
+        key,
+        scanned: trail.scanned,
+    };
     let result = boot_after_sink(
         config_dir,
         state_dir,
-        graph_key,
-        boot,
-        transport,
-        egress_cfg,
-        &audit_cfg,
+        seams,
+        started,
         &sink,
         &session_ids,
         &host,
@@ -3975,11 +5044,296 @@ async fn run_inner(
         euid,
         boot_session_id(&session_ids),
         boot_seq.next(),
-        &audit_cfg.au3_1,
+        &au3_1,
         &result,
     )
     .await;
     result
+}
+
+/// What the boot decided before the sink opened, for the steps after it.
+struct Started {
+    validated: crate::baseline_check::Validated,
+    run: maknae_config::BaselineSections,
+    pending: Option<crate::baseline::PendingSet>,
+    accepted_seen: Option<[u8; 32]>,
+    events: Vec<String>,
+    inconsistent: Option<String>,
+    dir: Result<StateDir, StoreError>,
+    key: Result<WrappingKey, maknae_vault::VaultError>,
+    scanned: Option<(Option<maknae_state::anchor::Checkpoint>, u64)>,
+}
+
+struct BootIds<'a> {
+    host: &'a str,
+    session_ids: &'a Arc<SessionIds>,
+    seq: &'a Seq,
+    euid: u32,
+}
+
+/// Why a stored baseline does not match its own record: the digest it carries, or
+/// the system and ceiling its sections declare.
+fn inconsistency(b: &BaselineLayer) -> Option<String> {
+    let sections = sections_of(b);
+    if b.sha256 != crate::baseline::accepted_digest(&sections) {
+        return Some(
+            "the accepted baseline's recorded digest does not match its sections".to_string(),
+        );
+    }
+    let declared =
+        match maknae_config::Document::from_baseline(&sections).and_then(crate::boot::assemble) {
+            Ok(declared) => declared,
+            Err(e) => {
+                return Some(format!(
+                    "the accepted baseline's sections do not assemble: {e}"
+                ))
+            }
+        };
+    let (system, ceiling) = (
+        declared.classification_policy_name(),
+        &declared.ceiling().classification.name,
+    );
+    (system != b.system || *ceiling != b.ceiling).then(|| {
+        format!(
+            "the accepted baseline records {}:{} but its sections declare {system}:{ceiling}; \
+             it does not match its own record",
+            b.system, b.ceiling
+        )
+    })
+}
+
+fn sections_of(b: &BaselineLayer) -> maknae_config::BaselineSections {
+    b.sections.clone().into()
+}
+
+fn accepted_trail(
+    sections: &maknae_config::BaselineSections,
+    config_dir: &Path,
+) -> Option<PathBuf> {
+    let doc = maknae_config::Document::from_baseline(sections).ok()?;
+    crate::baseline_check::audit_of(&doc, config_dir)
+        .ok()
+        .map(|a| a.jsonl_path)
+}
+
+fn open_or_create(
+    cfg: &maknae_config::AuditConfig,
+    create: bool,
+) -> Result<maknae_audit_append::AuditSink, RunError> {
+    let opened = if create {
+        maknae_audit_append::AuditSink::open(cfg)
+    } else {
+        maknae_audit_append::AuditSink::open_existing(cfg)
+    };
+    opened.map_err(|e| match e {
+        maknae_audit_append::AuditError::Missing(path) => RunError::Other(format!(
+            "the audit trail {} is missing; prepare it as the runbook's \"Move the audit trail\" \
+             step does, then start",
+            path.display()
+        )),
+        e => RunError::Other(e.to_string()),
+    })
+}
+
+/// A start the validator refused, recorded in `trail` (or the document's own) with
+/// today's exit code; a document refusal is recorded only in a known `trail`. The
+/// record carries `recorded` in place of `cause` when given; the journal, `cause`.
+#[allow(clippy::too_many_arguments)]
+async fn refuse_start(
+    refused: Invalid,
+    cause: String,
+    recorded: Option<&str>,
+    sections: Option<&maknae_config::BaselineSections>,
+    trail: Option<&Path>,
+    create: bool,
+    config_dir: &Path,
+    seams: &BootSeams,
+    ids: &BootIds<'_>,
+) -> RunError {
+    let document = matches!(refused, Invalid::Document(_));
+    if document && trail.is_none() {
+        return RunError::Other(cause);
+    }
+    let located = sections
+        .ok_or_else(|| "nothing was read to record it in".to_string())
+        .and_then(|s| {
+            let doc = maknae_config::Document::from_baseline(s).map_err(|e| e.to_string())?;
+            let audit = crate::baseline_check::audit_of(&doc, config_dir)
+                .map_err(|e| e.cause().to_string())?;
+            let transport =
+                crate::baseline_check::transport_of(&doc).map_err(|e| e.cause().to_string())?;
+            Ok((audit, transport))
+        });
+    let (audit, socket) = match (located, trail) {
+        (Ok((audit, transport)), _) => (audit, transport.socket_path.display().to_string()),
+        (Err(_), Some(trail)) if document => (
+            maknae_config::AuditConfig {
+                readers: Vec::new(),
+                jsonl_path: trail.to_path_buf(),
+                siem: None,
+                au3_1: serde_json::Value::Null,
+            },
+            String::new(),
+        ),
+        (Err(e), _) => return RunError::Other(format!("{cause}; {e}")),
+    };
+    let audit = maknae_config::AuditConfig {
+        jsonl_path: trail.map_or_else(|| audit.jsonl_path.clone(), Path::to_path_buf),
+        ..audit
+    };
+    let sink = match open_or_create(&audit, create) {
+        Ok(sink) => sink,
+        Err(_) if document => return RunError::Other(cause),
+        Err(e) => return e,
+    };
+    let (session, seq) = (boot_session_id(ids.session_ids), ids.seq.next());
+    let (host, euid, au3_1) = (ids.host, ids.euid, &audit.au3_1);
+    let reason = match refused {
+        Invalid::Offload(_) => {
+            return refuse_audit_offload_boot(
+                &sink, host, &socket, euid, session, seq, au3_1, cause, recorded,
+            )
+            .await
+        }
+        Invalid::Principal(_) => {
+            return refuse_authz_boot(
+                &sink, host, &socket, euid, session, seq, au3_1, cause, recorded,
+            )
+            .await
+        }
+        Invalid::Vault { principal, .. } => match crate::boot_gate::authz_policy_source_with(
+            config_dir,
+            Some(principal),
+            seams.policy_load,
+        ) {
+            Err(e) => {
+                return refuse_authz_boot(
+                    &sink,
+                    host,
+                    &socket,
+                    euid,
+                    session,
+                    seq,
+                    au3_1,
+                    e.to_string(),
+                    None,
+                )
+                .await
+            }
+            Ok(_) => cause,
+        },
+        Invalid::Environment(_) | Invalid::Document(_) => cause,
+    };
+    let refused = Err(RunError::Other(
+        recorded.map_or_else(|| reason.clone(), str::to_string),
+    ));
+    record_start_refusal(&sink, host, &socket, euid, session, seq, au3_1, &refused).await;
+    RunError::Other(reason)
+}
+
+struct OpenedTrail {
+    sink: Arc<maknae_audit_append::AuditSink>,
+    scanned: Option<(Option<maknae_state::anchor::Checkpoint>, u64)>,
+    moved: Option<crate::baseline::Move>,
+}
+
+/// A start refused before the move record is written is no part of the move: it is
+/// recorded in the old trail, the one still live.
+async fn refused_before_move(
+    old: &Result<Arc<maknae_audit_append::AuditSink>, String>,
+    ctx: &BootCtx<'_>,
+    e: RunError,
+) -> RunError {
+    let refused = Err(e);
+    if let Ok(old) = old {
+        record_start_refusal(
+            old.as_ref(),
+            ctx.host,
+            ctx.socket,
+            ctx.euid,
+            ctx.session_id,
+            ctx.seq.next(),
+            ctx.au3_1,
+            &refused,
+        )
+        .await;
+    }
+    refused.map(drop).unwrap_err()
+}
+
+/// The trail this start appends to, with the move from `prior` performed when the
+/// path changed: the old trail records the move first, the new one links back, and
+/// the anchor is the newer of the two trails' checkpoints.
+async fn open_trail(
+    prior: Option<&Path>,
+    cfg: &maknae_config::AuditConfig,
+    create: bool,
+    open_prepared: TrailOpener,
+    scan: TrailScanner,
+    state_dir: &Path,
+    ctx: &BootCtx<'_>,
+) -> Result<OpenedTrail, RunError> {
+    let m = match crate::baseline::move_of(prior, &cfg.jsonl_path) {
+        Err(e) => {
+            return Err(RunError::Other(format!(
+                "{e}; see the runbook's \"Move the audit trail\""
+            )))
+        }
+        Ok(None) => {
+            return Ok(OpenedTrail {
+                sink: Arc::new(open_or_create(cfg, create)?),
+                scanned: None,
+                moved: None,
+            })
+        }
+        Ok(Some(m)) => m,
+    };
+    let old = maknae_audit_append::AuditSink::open_existing(&maknae_config::AuditConfig {
+        jsonl_path: m.from.clone(),
+        ..cfg.clone()
+    })
+    .map(Arc::new)
+    .map_err(|e| e.to_string());
+    let new = match open_prepared(cfg) {
+        Ok(new) => Arc::new(new),
+        Err(e) => return Err(refused_before_move(&old, ctx, RunError::Other(e.to_string())).await),
+    };
+    let scanned = match &old {
+        Ok(old) => last_checkpoint(old, state_dir, scan).await,
+        Err(_) => Ok((None, 0)),
+    };
+    let ((old_checkpoint, old_bytes), (new_checkpoint, new_bytes)) = match scanned {
+        Ok(o) => match last_checkpoint(&new, state_dir, scan).await {
+            Ok(n) => (o, n),
+            Err(e) => return Err(refused_before_move(&old, ctx, e).await),
+        },
+        Err(e) => return Err(refused_before_move(&old, ctx, e).await),
+    };
+    let carried = maknae_state::anchor::newer(old_checkpoint, new_checkpoint);
+    let record =
+        |reason: &str| ctx.record(GRAPH_BASELINE_ACTION, "permit", reason, "authorized", None);
+    if let Ok(old) = &old {
+        old.emit_within(
+            &record(&crate::baseline::move_record(&m.to)),
+            AUDIT_APPEND_TIMEOUT,
+        )
+        .await
+        .map_err(|e| boot_evidence_refused("audit move", e))?;
+    }
+    let old_unopened = old.err();
+    let link = crate::baseline::back_link_record(
+        &m.from,
+        carried.map(|c| c.revision),
+        old_unopened.as_deref(),
+    );
+    new.emit_within(&record(&link), AUDIT_APPEND_TIMEOUT)
+        .await
+        .map_err(|e| boot_evidence_refused("audit move", e))?;
+    Ok(OpenedTrail {
+        sink: new,
+        scanned: Some((carried, old_bytes + new_bytes)),
+        moved: Some(m),
+    })
 }
 
 /// Everything `run_inner` does once the audit sink is open, so that a startup
@@ -3988,11 +5342,8 @@ async fn run_inner(
 async fn boot_after_sink(
     config_dir: &Path,
     state_dir: &Path,
-    graph_key: GraphKeyReader,
-    boot: crate::BootConfig,
-    transport: maknae_config::TransportConfig,
-    egress_cfg: maknae_config::EgressConfig,
-    audit_cfg: &maknae_config::AuditConfig,
+    seams: &BootSeams,
+    started: Started,
     sink: &Arc<maknae_audit_append::AuditSink>,
     session_ids: &Arc<SessionIds>,
     host: &str,
@@ -4001,74 +5352,40 @@ async fn boot_after_sink(
     boot_seq: &Seq,
     hup: tokio::signal::unix::Signal,
 ) -> Result<ServeOutcome, RunError> {
-    // #189: a configured `audit.siem` promises off-host offload that does not
-    // exist until #223. Fail closed -- and audit the refusal, per the ordering
-    // rule stated for the authz gate below.
-    if let Err(e) = crate::boot_gate::audit_offload_boot_gate(audit_cfg) {
-        return Err(refuse_audit_offload_boot(
-            sink.as_ref(),
-            host,
-            socket,
-            euid,
-            boot_session_id(session_ids),
-            boot_seq.next(),
-            &audit_cfg.au3_1,
-            e.to_string(),
-        )
-        .await);
+    let classification = crate::baseline_check::classification_of(&started.validated);
+    let live = crate::live::LiveConfig::of(&started.validated);
+    let Started {
+        validated,
+        run,
+        pending,
+        accepted_seen,
+        events,
+        inconsistent,
+        dir,
+        key,
+        scanned,
+    } = started;
+    let crate::baseline_check::Validated {
+        boot,
+        transport,
+        egress: egress_cfg,
+        audit,
+        principal,
+        ..
+    } = validated;
+    if let Some(why) = inconsistent {
+        return Err(graph_refusal(GraphFailure::Inconsistent(why), state_dir));
     }
+    let audit_cfg = &audit;
+    let egress = crate::egress::production_egress_with(boot.providers(), &egress_cfg, |_| {
+        seams.env.egress_account()
+    })
+    .map_err(|e| RunError::Other(e.to_string()))?;
 
     // --- AUTHZ GATE (#77, spec D1): the daemon constructs its PDP at boot or
-    // refuses to start. Ordering: audit sink first (above), so the refusal is
-    // itself auditable. Refusal triggers (exactly two — boot_gate.rs is the
-    // T1 authority): a malformed OR ABSENT `principal` section (a daemon with
-    // no principal can authorize no one — operator ruling 2026-08-28), or any
-    // PDP construction refusal (hardened policy load, bindings semantics).
-    // Each → peer-less AU-3 refusal record → RunError::Authz → exit code 3.
-    let principal_opt = match boot
-        .shadowed_sections("principal")
-        .try_for_each(maknae_config::principal_keys_known)
-        .and_then(|()| maknae_config::principal_from_section(boot.section("principal")))
-    {
-        Ok(p) => p,
-        Err(e) => {
-            return Err(refuse_authz_boot(
-                sink.as_ref(),
-                host,
-                socket,
-                euid,
-                boot_session_id(session_ids),
-                boot_seq.next(),
-                &audit_cfg.au3_1,
-                e.to_string(),
-            )
-            .await);
-        }
-    };
-    let egress_bounds = if boot.providers().is_empty() {
-        None
-    } else {
-        Some(
-            maknae_config::load_egress_bounds(&config_dir.join(maknae_config::EGRESS_BOUNDS_FILE))
-                .map_err(|e| {
-                    RunError::Other(crate::boot_gate::classify_bounds_load_error(e).to_string())
-                })?,
-        )
-    };
-    if let Err(e) =
-        crate::boot_gate::egress_bounds_boot_gate(boot.providers(), egress_bounds.as_ref())
-    {
-        return Err(RunError::Other(e.to_string()));
-    }
-    let egress = crate::egress::production_egress(boot.providers(), &egress_cfg)
-        .map_err(|e| RunError::Other(e.to_string()))?;
-    crate::boot_gate::root_vault_boot_gate(boot.section(maknae_vault::VAULT_SECTION))
-        .map_err(|e| RunError::Other(e.to_string()))?;
-    for shadowed in boot.shadowed_sections(maknae_vault::VAULT_SECTION) {
-        crate::boot_gate::root_vault_boot_gate(Some(shadowed))
-            .map_err(|e| RunError::Other(e.to_string()))?;
-    }
-
+    // refuses to start, after the validator passed the principal. Any PDP
+    // construction refusal (hardened policy load, bindings semantics) →
+    // peer-less AU-3 refusal record → RunError::Authz → exit code 3.
     let refuse = |reason: String| {
         refuse_authz_boot(
             sink.as_ref(),
@@ -4079,19 +5396,27 @@ async fn boot_after_sink(
             boot_seq.next(),
             &audit_cfg.au3_1,
             reason,
+            None,
         )
     };
-    let source = match authz_policy_source(config_dir, principal_opt) {
+    let source = match crate::boot_gate::authz_policy_source_with(
+        config_dir,
+        Some(principal),
+        seams.policy_load,
+    ) {
         Ok(source) => source,
         Err(e) => return Err(refuse(e.to_string()).await),
     };
     let label = boot.policy().unmarked().name.clone();
-    let graph_inputs = GraphInputs::new(&source, &label)
+    let mut graph_inputs = GraphInputs::new(&source, &label, run_baseline(&run, classification))
         .map_err(|e| graph_refusal(GraphFailure::Store(e), state_dir))?;
+    graph_inputs.accepted_seen = accepted_seen;
+    graph_inputs.baseline_events = events;
     // The kernel graph boots before the PDP is built from it.
-    let booted = match boot_kernel_graph(
+    let mut booted = match boot_kernel_graph(
         state_dir,
-        graph_key(config_dir),
+        dir,
+        key,
         sink,
         &BootCtx {
             event: "boot",
@@ -4103,6 +5428,7 @@ async fn boot_after_sink(
             au3_1: &audit_cfg.au3_1,
         },
         &graph_inputs.boot(),
+        scanned,
     )
     .await
     {
@@ -4110,9 +5436,14 @@ async fn boot_after_sink(
         Err(RunError::Authz(reason)) => return Err(refuse(reason).await),
         Err(e) => return Err(e),
     };
+    booted.status.baseline = crate::baseline::BaselineStatus::new(crate::baseline::BaselineState {
+        accepted: run,
+        pending: pending.clone(),
+    });
+    let persisted_graph = Arc::new(booted.graph);
     let authorizer = match authz_boot_gate(
         source,
-        Arc::new(booted.graph),
+        Arc::clone(&persisted_graph),
         &graph_inputs.vocabulary.full,
     ) {
         Ok(authorizer) => authorizer,
@@ -4126,6 +5457,7 @@ async fn boot_after_sink(
     // from the gate's own return value; `ci/gates/authz-composition-drift.sh`
     // pins this call site so a future selection key fails CI.
     let authorizer = crate::composition::build_pdp(&boot, authorizer);
+    let authorizer = authorizer.with_live(live);
     // Boot-time EVIDENCE (ADR-0008 decision 1, fourth layer): the trail
     // records which operands this process composes, so the property is
     // auditable at runtime and not only at build time. Same record shape as
@@ -4159,7 +5491,7 @@ async fn boot_after_sink(
     composition_rec.policy_sha256 = Some(maknae_authz_basic::Baseline::policy_sha256(
         authorizer.baseline(),
     ));
-    sink.emit(&composition_rec)
+    sink.emit_within(&composition_rec, AUDIT_APPEND_TIMEOUT)
         .await
         .map_err(|e| boot_evidence_refused("composition", e))?;
     let identity_ctx = BootCtx {
@@ -4180,9 +5512,23 @@ async fn boot_after_sink(
         &identity_ctx,
     )
     .await?;
+    if let Some(p) = &pending {
+        let (result, reason, posture) = crate::baseline::record_fields(p);
+        sink.emit_within(
+            &identity_ctx.record(GRAPH_BASELINE_ACTION, result, &reason, posture, None),
+            AUDIT_APPEND_TIMEOUT,
+        )
+        .await
+        .map_err(|e| boot_evidence_refused("baseline pending", e))?;
+        journal(format!(
+            "maknaed: baseline: {}",
+            crate::baseline::journal_line(p)
+        ));
+    }
     let authorizer = Arc::new(authorizer);
     let identity = booted.status.identity.clone();
     let graph_revision = Arc::clone(&booted.status.revision);
+    let baseline_status = booted.status.baseline.clone();
     let kernel_graph = Arc::new(Some(booted.status));
 
     // Plane credential: resolve + read this plane's SecretID source (spec §5.1),
@@ -4238,7 +5584,7 @@ async fn boot_after_sink(
         posture.as_str(),
         &audit_cfg.au3_1,
     );
-    sink.emit(&posture_rec)
+    sink.emit_within(&posture_rec, AUDIT_APPEND_TIMEOUT)
         .await
         .map_err(|e| boot_evidence_refused("posture", e))?;
     if posture != crate::posture::Posture::HrotSealed {
@@ -4272,25 +5618,6 @@ async fn boot_after_sink(
     // serve loop) must revoke it on failure, or the token leaks. Capture the whole
     // post-mint outcome, revoke UNCONDITIONALLY, THEN propagate. (A pre-mint failure
     // above skips revoke — there is nothing minted to revoke. Mirrors `cli.rs::execute`.)
-    // The fold lives in `maknae-config::effective_view`, not here: this file is
-    // T3 and mutation-excluded, and "which fields to fold, and what to present
-    // for an absent one" is a disclosure decision that earns a gated crate.
-    // Built before `transport` is moved.
-    let config_view = {
-        let vc = maknae_vault::vault_config_from_document(boot.document()).ok();
-        Arc::new(maknae_config::effective_view(
-            boot.document(),
-            &maknae_config::ResolvedSettings {
-                transport: &transport,
-                audit: audit_cfg,
-                vault_approle_mount: vc.as_ref().map(|c| c.approle_mount.clone()),
-                vault_pki_int_mount: vc.as_ref().map(|c| c.pki_int_mount.clone()),
-                vault_user_auth_type: vc.as_ref().map(|c| c.user_auth.r#type.clone()),
-                vault_user_auth_mount: vc.as_ref().map(|c| c.user_auth.mount.clone()),
-                egress: &egress_cfg,
-            },
-        ))
-    };
     // Asked of the PDP ONCE, at boot -- not per request. The backend set is
     // fixed for the life of the process (static TCB, ADR-0002: no hot-swap),
     // so a per-request call could only ever return the same string, while
@@ -4303,10 +5630,6 @@ async fn boot_after_sink(
     // from `core.handling.policy` (ADR-0022) -- captured here for the same
     // reason as the backend name: fixed for the life of the process.
     let classification_policy_name = Arc::new(boot.classification_policy_name().to_string());
-    let providers = Arc::new(crate::provider_choice::provider_authority(
-        boot.providers(),
-        egress_bounds.as_ref(),
-    ));
     // Holds the one-maknaed state-dir lock for the serve's lifetime.
     let reloader = Reloader {
         dir: booted.dir,
@@ -4324,6 +5647,14 @@ async fn boot_after_sink(
         au3_1: audit_cfg.au3_1.clone(),
         identity,
         stopping: tokio::sync::watch::channel(false).0,
+        append_bound: AUDIT_APPEND_TIMEOUT,
+        persisted: std::sync::RwLock::new(persisted_graph),
+        config_dir: config_dir.to_path_buf(),
+        files: seams.files,
+        env: Arc::clone(&seams.env),
+        baseline: baseline_status,
+        drain: tokio::sync::watch::channel(Drain::Serving).0,
+        turn_wait: BLOCKING_OPERATION_TIMEOUT,
         #[cfg(test)]
         load_gate: None,
     };
@@ -4336,13 +5667,9 @@ async fn boot_after_sink(
         Arc::clone(session_ids),
         supervisor,
         Arc::clone(&authorizer),
-        // Redact ONCE, here, at boot. The run loop receives only the view;
-        // the unredacted Document does not travel with it.
-        config_view,
         authz_backend_name,
         classification_policy_name,
         kernel_graph,
-        providers,
         egress,
         hup,
         Arc::new(reloader),
@@ -4381,13 +5708,10 @@ async fn serve_after_mint<B>(
     // the baseline alone would pass every gate (critical-review round 3). This
     // signature is the type-level pin: what is served is what was composed.
     authorizer: Arc<crate::composition::Composition<B>>,
-    // Already redacted at boot — the raw Document never reaches the run loop.
-    config_view: Arc<ConfigView>,
-    // Captured at boot, same discipline as `config_view` (see run_inner).
+    // Captured at boot (see run_inner).
     authz_backend_name: Arc<String>,
     classification_policy_name: Arc<String>,
     kernel_graph: Arc<Option<KernelGraphStatus>>,
-    providers: Arc<Option<crate::provider_choice::ProviderAuthority>>,
     egress: Arc<dyn crate::egress::Egress>,
     hup: tokio::signal::unix::Signal,
     reloader: Arc<Reloader<B, maknae_audit_append::AuditSink>>,
@@ -4431,7 +5755,14 @@ where
         }
     }));
     let reloads = reloads.abort_handle();
-    let shutdown = shutdown_after_reloads(signalled, Arc::clone(&reloader), reloads.clone());
+    let drain = reloader.drain.subscribe();
+    let shutdown = shutdown_after_reloads(
+        shutdown_on(signalled, drain.clone()),
+        Arc::clone(&reloader),
+        reloads.clone(),
+    );
+    let live = Arc::clone(authorizer.live());
+    let baseline: Arc<dyn BaselineOps> = Arc::clone(&reloader) as _;
     let outcome = accept_loop(
         listener,
         Arc::clone(sink),
@@ -4441,16 +5772,30 @@ where
         shutdown,
         supervisor,
         authorizer,
-        config_view,
+        live,
         authz_backend_name,
         classification_policy_name,
         kernel_graph,
-        providers,
         egress,
+        baseline,
+        drain.clone(),
     )
     .await;
     reloader.stop(&reloads).await;
-    Ok(outcome)
+    let drained = *drain.borrow();
+    Ok(crate::handler::after_drain(outcome, drained))
+}
+
+/// Resolves on a signal, or once a restart-class accept has persisted or failed; a
+/// dropped drain sender never resolves it.
+async fn shutdown_on(
+    signalled: impl Future<Output = ()>,
+    mut drain: tokio::sync::watch::Receiver<Drain>,
+) {
+    tokio::select! {
+        _ = signalled => {}
+        Ok(_) = drain.wait_for(|d| crate::handler::may_stop(*d)) => {}
+    }
 }
 
 /// Install the SIGTERM/SIGINT handlers EAGERLY and return the future that resolves on
@@ -4514,8 +5859,50 @@ fn epoch_to_rfc3339(secs: u64, millis: u32) -> String {
 }
 
 #[cfg(test)]
+pub(crate) mod baseline_stub {
+    use super::*;
+
+    pub(crate) struct NoBaseline;
+
+    impl BaselineOps for NoBaseline {
+        fn show(&self) -> BoxFuture<'_, Result<maknae_proto::BaselineView, String>> {
+            Box::pin(async { Err("no baseline service".to_string()) })
+        }
+        fn accept<'a>(&'a self, _: &'a str) -> BoxFuture<'a, AcceptAnswer> {
+            Box::pin(async {
+                AcceptAnswer::Unavailable {
+                    reply: "no baseline service",
+                    why: "no baseline service".into(),
+                }
+            })
+        }
+    }
+
+    pub(crate) fn no_baseline() -> Arc<dyn BaselineOps> {
+        Arc::new(NoBaseline)
+    }
+
+    pub(crate) fn serving() -> tokio::sync::watch::Receiver<Drain> {
+        tokio::sync::watch::channel(Drain::Serving).1
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_accept_journal_says_applied_only_once_its_outcome_is_recorded() {
+        let reason = "accepted sha256:0123456789ab at revision 7; applied live";
+        assert_eq!(
+            accept_journal("0123456789ab", 7, reason, &Ok(())),
+            "maknaed: baseline: accepted at revision 7; applied live"
+        );
+        assert_eq!(
+            accept_journal("0123456789ab", 7, reason, &Err("disk full".into())),
+            "maknaed: AUDIT WRITE FAILED on the baseline accept outcome: disk full; accepted at revision 7; restarting to apply"
+        );
+    }
 
     #[test]
     fn epoch_zero_is_unix_epoch() {
@@ -4625,6 +6012,62 @@ mod tests {
     /// was dropped from the chain expression while the unit kept the old
     /// sum — the failure four review rounds found in a row.
     const STOP_TIMEOUT_SLACK: Duration = Duration::from_secs(10);
+
+    /// Once the drain is applied an accept still appends the checkpoint and its
+    /// outcome, writes the reply and closes the stream.
+    #[test]
+    fn the_accept_worst_case_fits_the_handler_drain() {
+        let cfg = maknae_config::transport_from_section(None).unwrap();
+        let egress = maknae_config::egress_from_section(None).unwrap();
+        let remaining = 2 * AUDIT_APPEND_TIMEOUT
+            + Duration::from_millis(cfg.read_timeout_ms)
+            + STREAM_CLOSE_TIMEOUT;
+        for deadline in [Duration::from_millis(egress.deadline_ms), Duration::ZERO] {
+            let bound = handler_drain_bound(&cfg, deadline);
+            assert!(remaining < bound, "{remaining:?} {bound:?}");
+        }
+    }
+
+    #[test]
+    fn the_supervisors_restart_on_the_apply_by_restart_exit_code() {
+        let unit = include_str!("../../../packaging/common/maknaed.service");
+        let lines: Vec<&str> = unit.lines().map(str::trim).collect();
+        assert!(lines.contains(&"Restart=on-failure"));
+        for key in ["RestartPreventExitStatus=", "SuccessExitStatus="] {
+            assert!(
+                !lines
+                    .iter()
+                    .any(|l| l.starts_with(key) && l.split(['=', ' ']).any(|t| t == "6")),
+                "{key} must not name 6"
+            );
+        }
+        for l in lines.iter().filter(|l| l.starts_with("StartLimitBurst=")) {
+            assert!(
+                l["StartLimitBurst=".len()..].parse::<u32>().unwrap() >= 2,
+                "{l}"
+            );
+        }
+        let plist = include_str!("../../../packaging/macos/io.maknae.maknaed.plist");
+        let keep = plist.split("<key>KeepAlive</key>").nth(1).unwrap();
+        let dict = &keep[..keep.find("</dict>").unwrap()];
+        assert!(
+            dict.contains("<key>SuccessfulExit</key>") && dict.contains("<false/>"),
+            "{dict}"
+        );
+        let throttle = plist.split("<key>ThrottleInterval</key>").nth(1).unwrap();
+        let secs: u32 = throttle
+            .split("<integer>")
+            .nth(1)
+            .unwrap()
+            .split("</integer>")
+            .next()
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(secs <= 10, "launchd restarts within {secs} s");
+        assert_eq!(crate::handler::APPLY_BY_RESTART_EXIT_CODE, 6);
+    }
 
     /// #240 (review rounds 2–4): the shipped units' stop timeouts are held to
     /// the shutdown chain at the deadline CEILING, term by term and in the
@@ -4794,6 +6237,67 @@ mod subject_list_offload_tripwire {
 #[cfg(test)]
 mod boot_gate_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_document_refusal_is_recorded_only_in_a_known_trail() {
+        let d = Dir::new("document-refusal");
+        let trail = d.0.join("audit.jsonl");
+        let (session_ids, seq) = (Arc::new(SessionIds::new()), Seq::new());
+        let ids = BootIds {
+            host: "h",
+            session_ids: &session_ids,
+            seq: &seq,
+            euid: 0,
+        };
+        let refuse = |trail: Option<PathBuf>| {
+            let (d, ids) = (&d, &ids);
+            async move {
+                refuse_start(
+                    Invalid::Document("document-refusal-sentinel".into()),
+                    "document-refusal-sentinel".into(),
+                    None,
+                    None,
+                    trail.as_deref(),
+                    true,
+                    &d.0,
+                    &test_seams(),
+                    ids,
+                )
+                .await
+            }
+        };
+        let none = refuse(None).await;
+        assert!(matches!(&none, RunError::Other(c) if c == "document-refusal-sentinel"));
+        assert!(!trail.exists(), "no trail is opened when none is known");
+        let known = refuse(Some(trail.clone())).await;
+        assert!(matches!(&known, RunError::Other(c) if c == "document-refusal-sentinel"));
+        let recs = trail_of(&d, "audit.jsonl");
+        assert_eq!(recs.len(), 1);
+        assert_eq!(
+            (
+                recs[0].action.as_str(),
+                recs[0].outcome.result.as_str(),
+                recs[0].outcome.reason.as_str()
+            ),
+            ("start", "deny", "document-refusal-sentinel")
+        );
+    }
+
+    pub(super) fn test_baseline() -> BaselineLayer {
+        let sections: maknae_config::BaselineSections = [(
+            "core".to_string(),
+            r#"{"deployment_id":"test"}"#.to_string(),
+        )]
+        .into_iter()
+        .collect();
+        BaselineLayer {
+            sha256: crate::baseline::accepted_digest(&sections),
+            sections: sections.into_inner(),
+            system: "US".into(),
+            ceiling: "UNCLASSIFIED".into(),
+            moved_from: None,
+        }
+    }
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Mutex;
 
@@ -4883,11 +6387,41 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
     /// frame, so the guard is just an ordinary stack value — matches `run()`'s
     /// own runtime-construction pattern.
     fn block_on_run_inner(dir: &Path) -> Result<ServeOutcome, RunError> {
-        tokio::runtime::Runtime::new().unwrap().block_on(run_inner(
-            dir,
-            &state_dir(dir),
-            test_graph_key,
-        ))
+        block_on_run_inner_with(dir, test_seams())
+    }
+
+    /// The graph boot as a start decides it: a stored baseline is passed back with
+    /// nothing to record; with none, the given one is seeded.
+    pub(super) async fn boot_graph_at(
+        state_dir: &Path,
+        key: Result<maknae_vault::GraphKey, maknae_vault::VaultError>,
+        sink: &Arc<maknae_audit_append::AuditSink>,
+        ctx: &BootCtx<'_>,
+        inputs: &BootInputs<'_>,
+    ) -> Result<BootedGraph, RunError> {
+        let key = key.map(|k| WrappingKey::new(k.into_bytes()));
+        let dir = StateDir::open(state_dir, ctx.euid);
+        let stored = match (&dir, &key) {
+            (Ok(d), Ok(k)) if !d.reseed_authorized() => {
+                maknae_state::store::peek_baseline(d, k).ok().flatten()
+            }
+            _ => None,
+        };
+        let seeded = [crate::baseline::SEEDED_EVENT.to_string()];
+        let inputs = match &stored {
+            Some(accepted) => BootInputs {
+                baseline: accepted,
+                accepted_seen: Some(accepted.sha256),
+                baseline_events: &[],
+                ..*inputs
+            },
+            None => BootInputs {
+                accepted_seen: None,
+                baseline_events: &seeded,
+                ..*inputs
+            },
+        };
+        boot_kernel_graph(state_dir, dir, key, sink, ctx, &inputs, None).await
     }
 
     fn test_graph_key(_: &Path) -> Result<maknae_vault::GraphKey, maknae_vault::VaultError> {
@@ -5316,6 +6850,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             0o640,
         );
         put(&state_dir(&d.0), "kernel.graph", "not an envelope", 0o600);
+        put(&d.0, "audit.jsonl", "", 0o640);
 
         let result = block_on_run_inner(&d.0);
 
@@ -5364,6 +6899,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
                     role: "adversary".into(),
                 }],
             },
+            None,
             &vocabulary.persisted,
             vocabulary.digest,
             1,
@@ -5430,6 +6966,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         let state = state_dir(&dir.0);
         let sink = Arc::new(
             maknae_audit_append::AuditSink::open(&maknae_config::AuditConfig {
+                readers: Vec::new(),
                 jsonl_path: dir.0.join("audit.jsonl"),
                 siem: None,
                 au3_1: serde_json::Value::Null,
@@ -5466,7 +7003,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             maknae_authz_basic::PolicyPaths::in_dir(config_dir),
         )
         .unwrap();
-        GraphInputs::new(&source, "UNCLASSIFIED").unwrap()
+        GraphInputs::new(&source, "UNCLASSIFIED", test_baseline()).unwrap()
     }
 
     fn boot_graph_from(
@@ -5486,7 +7023,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             au3_1: &au3_1,
         };
         let inputs = bare_inputs(config_dir);
-        block_on(boot_kernel_graph(
+        block_on(boot_graph_at(
             &fx.state,
             key,
             &fx.sink,
@@ -5528,7 +7065,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             maknae_authz_basic::PolicyPaths::in_dir(&fx.dir.0),
         )
         .unwrap();
-        let inputs = GraphInputs::new(&source, "UNCLASSIFIED").unwrap();
+        let inputs = GraphInputs::new(&source, "UNCLASSIFIED", test_baseline()).unwrap();
         assert!(inputs.identity.bindings_sha256.is_some());
         let seq = Seq::new();
         let au3_1 = serde_json::Value::Null;
@@ -5546,7 +7083,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             status,
             graph,
             ..
-        } = block_on(boot_kernel_graph(
+        } = block_on(boot_graph_at(
             &fx.state,
             key(),
             &fx.sink,
@@ -5602,7 +7139,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         KernelGraphStatus,
         crate::composition::Composition<maknae_authz_basic::BasicAuthorizer>,
     ) {
-        let inputs = GraphInputs::new(&source, "UNCLASSIFIED").unwrap();
+        let inputs = GraphInputs::new(&source, "UNCLASSIFIED", test_baseline()).unwrap();
         let seq = Seq::new();
         let au3_1 = serde_json::Value::Null;
         let ctx = BootCtx {
@@ -5619,7 +7156,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             status,
             graph,
             ..
-        } = block_on(boot_kernel_graph(
+        } = block_on(boot_graph_at(
             &fx.state,
             key(),
             &fx.sink,
@@ -5684,6 +7221,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
                 "graph.checkpoint",
                 "graph.migrate",
                 "graph.checkpoint",
+                "graph.baseline",
                 "graph.transition",
                 "graph.checkpoint"
             ]
@@ -5755,13 +7293,20 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         let status = boot_graph(&fx, key()).unwrap();
         assert_eq!(
             (status.revision(), status.anchor.as_str()),
-            (5, "rollback-anchor-unavailable")
+            (6, "rollback-anchor-unavailable")
         );
         let recs = trail(&fx);
         let actions: Vec<&str> = recs.iter().map(|(r, _)| r.action.as_str()).collect();
         assert_eq!(
             actions,
-            ["graph.checkpoint", "graph.migrate", "graph.checkpoint"]
+            [
+                "graph.checkpoint",
+                "graph.migrate",
+                "graph.checkpoint",
+                "graph.baseline",
+                "graph.transition",
+                "graph.checkpoint"
+            ]
         );
         let to = bare_inputs(&fx.dir.0).vocabulary.digest;
         let (m, _) = &recs[1];
@@ -5800,20 +7345,21 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             actions,
             [
                 "graph.seed",
+                "graph.baseline",
                 "graph.checkpoint",
                 "graph.checkpoint",
                 "graph.transition",
                 "graph.checkpoint"
             ]
         );
-        let (t, _) = &recs[3];
+        let (t, _) = &recs[4];
         assert_eq!(
             (t.outcome.result.as_str(), t.outcome.reason.as_str()),
             ("permit", "intent recorded (root-file)")
         );
         let g = t.graph.as_ref().unwrap();
         assert_eq!((g.revision, g.anchor.as_str()), (2, "transitioning"));
-        assert_eq!(recs[4].0.graph.as_ref().unwrap().anchor, "transitioned");
+        assert_eq!(recs[5].0.graph.as_ref().unwrap().anchor, "transitioned");
     }
 
     #[test]
@@ -5834,7 +7380,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             paths.clone(),
         )
         .unwrap();
-        let inputs = GraphInputs::new(&source, "UNCLASSIFIED").unwrap();
+        let inputs = GraphInputs::new(&source, "UNCLASSIFIED", test_baseline()).unwrap();
         let old = maknae_graph::identity::IdentityLayer {
             aliases: Default::default(),
             source: paths.authz.to_str().unwrap().to_string(),
@@ -5860,7 +7406,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             au3_1: &au3_1,
         };
         let boot = |identity: &maknae_graph::identity::IdentityLayer| {
-            block_on(boot_kernel_graph(
+            block_on(boot_graph_at(
                 &fx.state,
                 key(),
                 &fx.sink,
@@ -5927,7 +7473,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             au3_1: &au3_1,
         };
         drop(
-            block_on(boot_kernel_graph(
+            block_on(boot_graph_at(
                 &fx.state,
                 key(),
                 &fx.sink,
@@ -5940,7 +7486,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             .unwrap(),
         );
         let seeded = trail(fx).len();
-        let booted = block_on(boot_kernel_graph(
+        let booted = block_on(boot_graph_at(
             &fx.state,
             key(),
             &fx.sink,
@@ -6111,7 +7657,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             source: inputs.identity.source.clone(),
             ..seed.clone()
         };
-        let booted = block_on(boot_kernel_graph(
+        let booted = block_on(boot_graph_at(
             &fx.state,
             key(),
             &fx.sink,
@@ -6152,7 +7698,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             paths.clone(),
         )
         .unwrap();
-        let inputs = GraphInputs::new(&source, "UNCLASSIFIED").unwrap();
+        let inputs = GraphInputs::new(&source, "UNCLASSIFIED", test_baseline()).unwrap();
         assert!(inputs.bindings_missing);
         let seed = explicit(&inputs, &paths.bindings, &[]);
         let (seeded, booted) = boot_over_seed(&fx, &inputs, &seed);
@@ -6175,7 +7721,10 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
 
         let recs = trail(&fx);
         let actions: Vec<&str> = recs.iter().map(|(r, _)| r.action.as_str()).collect();
-        assert_eq!(actions, ["graph.seed", "graph.checkpoint"]);
+        assert_eq!(
+            actions,
+            ["graph.seed", "graph.baseline", "graph.checkpoint"]
+        );
         let (seed, _) = &recs[0];
         assert_eq!(
             (
@@ -6200,7 +7749,25 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
                 scanned_bytes: 0,
             })
         );
-        let (ckpt, line) = &recs[1];
+        let (baseline, _) = &recs[1];
+        assert_eq!(
+            (
+                baseline.outcome.result.as_str(),
+                baseline.outcome.reason.as_str(),
+                baseline.outcome.posture.as_str()
+            ),
+            ("permit", crate::baseline::SEEDED_EVENT, "authorized")
+        );
+        assert_eq!(
+            baseline.graph,
+            Some(GraphAudit {
+                revision: 1,
+                ciphertext_sha256: String::new(),
+                anchor: "baselining".into(),
+                scanned_bytes: 0,
+            })
+        );
+        let (ckpt, line) = &recs[2];
         assert_eq!(
             (ckpt.outcome.result.as_str(), ckpt.outcome.reason.as_str()),
             ("permit", "seeded")
@@ -6214,12 +7781,12 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         let status = boot_graph(&fx, key()).unwrap();
         assert_eq!((status.revision(), status.anchor.as_str()), (1, "verified"));
         let recs = trail(&fx);
-        assert_eq!(recs.len(), 3);
-        let g = recs[2].0.graph.as_ref().unwrap();
+        assert_eq!(recs.len(), 4);
+        let g = recs[3].0.graph.as_ref().unwrap();
         assert_eq!((g.revision, g.anchor.as_str()), (1, "verified"));
         assert_eq!(
             g.ciphertext_sha256,
-            recs[1].0.graph.as_ref().unwrap().ciphertext_sha256
+            recs[2].0.graph.as_ref().unwrap().ciphertext_sha256
         );
         assert!(g.scanned_bytes > 0, "the restart scanned the trail");
     }
@@ -6245,7 +7812,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             )
         );
         assert_eq!(refusal_exit_code(e), GRAPH_REFUSAL_EXIT_CODE);
-        assert_eq!(trail(&fx).len(), 2, "the refused boot appended nothing");
+        assert_eq!(trail(&fx).len(), 3, "the refused boot appended nothing");
     }
 
     #[test]
@@ -6314,6 +7881,113 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         assert!(trail(&fx).is_empty());
     }
 
+    fn boot_with_baseline(fx: &GraphFixture, baseline: BaselineLayer) -> BootedGraph {
+        let mut inputs = bare_inputs(&fx.dir.0);
+        inputs.baseline = baseline;
+        block_on(boot_graph_at(
+            &fx.state,
+            key(),
+            &fx.sink,
+            &BootCtx {
+                event: "boot",
+                host: "h",
+                socket: "s",
+                euid: nix::unistd::geteuid().as_raw(),
+                session_id: 9 << 32,
+                seq: &Seq::new(),
+                au3_1: &serde_json::Value::Null,
+            },
+            &inputs.boot(),
+        ))
+        .unwrap()
+    }
+
+    fn edited_baseline() -> BaselineLayer {
+        let sections: maknae_config::BaselineSections = [(
+            "core".to_string(),
+            r#"{"deployment_id":"edited"}"#.to_string(),
+        )]
+        .into_iter()
+        .collect();
+        BaselineLayer {
+            sha256: crate::baseline::accepted_digest(&sections),
+            sections: sections.into_inner(),
+            ..test_baseline()
+        }
+    }
+
+    fn stored_baseline(g: &maknae_graph::graph::Graph) -> Option<BaselineLayer> {
+        maknae_graph::identity::extract(g).unwrap().baseline
+    }
+
+    #[test]
+    fn a_first_boot_stores_the_files_baseline_and_a_restart_holds_a_file_edit() {
+        let fx = graph_fixture("graph_baseline_held");
+        let first = boot_with_baseline(&fx, test_baseline());
+        assert_eq!(stored_baseline(&first.graph), Some(test_baseline()));
+        drop(first);
+        let seeded = trail(&fx).len();
+        let again = boot_with_baseline(&fx, edited_baseline());
+        assert_eq!(
+            (again.status.revision(), again.status.anchor.as_str()),
+            (1, "verified")
+        );
+        assert_eq!(stored_baseline(&again.graph), Some(test_baseline()));
+        let actions: Vec<String> = trail(&fx)[seeded..]
+            .iter()
+            .map(|(r, _)| r.action.clone())
+            .collect();
+        assert_eq!(actions, ["graph.checkpoint"]);
+    }
+
+    #[test]
+    fn an_upgrade_store_gains_the_files_baseline_in_a_recorded_transition() {
+        let fx = graph_fixture("graph_baseline_upgrade");
+        let inputs = bare_inputs(&fx.dir.0);
+        let old = maknae_graph::identity::build(
+            &inputs.identity,
+            None,
+            &inputs.vocabulary.persisted,
+            inputs.vocabulary.digest,
+            3,
+            maknae_graph::record::ProvenanceKind::Seed,
+        )
+        .unwrap();
+        let k = WrappingKey::new(key().unwrap().into_bytes());
+        let file = maknae_state::envelope::seal(&maknae_graph::format::encode(&old), &k).unwrap();
+        let path = fx.state.join(STORE_FILE);
+        std::fs::write(&path, file).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let booted = boot_with_baseline(&fx, edited_baseline());
+        assert_eq!(booted.status.revision(), 4);
+        assert_eq!(stored_baseline(&booted.graph), Some(edited_baseline()));
+        let recs = trail(&fx);
+        let actions: Vec<&str> = recs.iter().map(|(r, _)| r.action.as_str()).collect();
+        assert_eq!(
+            actions,
+            [
+                "graph.checkpoint",
+                "graph.baseline",
+                "graph.transition",
+                "graph.checkpoint"
+            ]
+        );
+        assert_eq!(recs[1].0.outcome.reason, crate::baseline::SEEDED_EVENT);
+    }
+
+    #[test]
+    fn an_authorized_reseed_takes_the_files_baseline() {
+        if !nix::unistd::geteuid().is_root() {
+            return;
+        }
+        let fx = graph_fixture("graph_baseline_reseed");
+        drop(boot_with_baseline(&fx, test_baseline()));
+        put(&fx.state, MARKER_FILE, "", 0o644);
+        let booted = boot_with_baseline(&fx, edited_baseline());
+        assert_eq!(booted.status.anchor, "reseeded");
+        assert_eq!(stored_baseline(&booted.graph), Some(edited_baseline()));
+    }
+
     #[test]
     fn a_marker_not_owned_by_root_is_ignored_and_audited() {
         if nix::unistd::geteuid().is_root() {
@@ -6328,9 +8002,17 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         );
         let recs = trail(&fx);
         let actions: Vec<&str> = recs.iter().map(|(r, _)| r.action.as_str()).collect();
-        assert_eq!(actions, ["graph.seed", "graph.checkpoint", "graph.reseed"]);
+        assert_eq!(
+            actions,
+            [
+                "graph.seed",
+                "graph.baseline",
+                "graph.checkpoint",
+                "graph.reseed"
+            ]
+        );
         assert_eq!(recs[0].0.outcome.reason, "intent recorded (first-boot)");
-        let ignored = &recs[2].0;
+        let ignored = &recs[3].0;
         assert_eq!(ignored.outcome.result, "deny");
         assert!(
             ignored
@@ -6785,6 +8467,1396 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
              determine HrotSealed"
         );
     }
+    // ---- #490: the boot starts from the accepted baseline ----
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[derive(Default)]
+    pub(super) struct Counts {
+        binds: std::sync::atomic::AtomicUsize,
+        connects: std::sync::atomic::AtomicUsize,
+        lookups: std::sync::atomic::AtomicUsize,
+    }
+
+    #[derive(Clone)]
+    pub(super) struct TestEnv {
+        pub(super) prepared: Result<(), String>,
+        pub(super) bounds: Option<maknae_config::EgressBounds>,
+        pub(super) bindable: Result<(), String>,
+        /// Answers every reader name with an unprivileged account instead of asking NSS.
+        pub(super) any_reader: bool,
+        pub(super) counts: Arc<Counts>,
+    }
+
+    impl Default for TestEnv {
+        fn default() -> Self {
+            TestEnv {
+                prepared: Ok(()),
+                bounds: None,
+                bindable: Ok(()),
+                any_reader: false,
+                counts: Arc::default(),
+            }
+        }
+    }
+
+    impl TestEnv {
+        pub(super) fn counting() -> Self {
+            TestEnv {
+                any_reader: true,
+                ..TestEnv::default()
+            }
+        }
+        pub(super) fn with_bounds() -> Self {
+            TestEnv {
+                bounds: Some(maknae_config::EgressBounds {
+                    kv_mount: "kv".into(),
+                    user_prefix: "users".into(),
+                    vault_addr: "https://v.example:8200".into(),
+                }),
+                ..TestEnv::default()
+            }
+        }
+        fn count(n: &std::sync::atomic::AtomicUsize) -> usize {
+            n.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        pub(super) fn binds(&self) -> usize {
+            Self::count(&self.counts.binds)
+        }
+        pub(super) fn connects(&self) -> usize {
+            Self::count(&self.counts.connects)
+        }
+        pub(super) fn reader_lookups(&self) -> usize {
+            Self::count(&self.counts.lookups)
+        }
+    }
+
+    impl maknae_config::ReaderLookup for TestEnv {
+        fn account(&self, name: &str) -> Result<Option<maknae_config::ReaderAccount>, String> {
+            self.counts
+                .lookups
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.any_reader {
+                return Ok(Some(maknae_config::ReaderAccount {
+                    name: name.into(),
+                    uid: 4100,
+                    gid: 4100,
+                    groups: Vec::new(),
+                }));
+            }
+            maknae_vault::NssAccounts::HOST.account(name)
+        }
+        fn daemon_gid(&self) -> Result<Option<u32>, String> {
+            if self.any_reader {
+                return Ok(Some(4200));
+            }
+            maknae_vault::NssAccounts::HOST.daemon_gid()
+        }
+        fn service_uids(&self) -> Result<Vec<u32>, String> {
+            if self.any_reader {
+                return Ok(vec![4201, 4202]);
+            }
+            maknae_vault::NssAccounts::HOST.service_uids()
+        }
+    }
+
+    impl crate::baseline_check::Env for TestEnv {
+        fn egress_bounds(&self) -> Result<maknae_config::EgressBounds, maknae_config::ConfigError> {
+            self.bounds
+                .clone()
+                .ok_or_else(|| maknae_config::ConfigError::NotFound {
+                    path: maknae_config::EGRESS_BOUNDS_FILE.into(),
+                })
+        }
+        fn egress_account(&self) -> Result<Option<u32>, String> {
+            Ok(Some(65534))
+        }
+        fn trail_prepared(&self, _: &Path) -> Result<(), String> {
+            self.prepared.clone()
+        }
+        fn listener_bindable(&self, _: &Path) -> Result<(), String> {
+            self.counts
+                .binds
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.bindable.clone()
+        }
+        fn deputy_reachable(&self, _: &Path) -> Result<(), String> {
+            self.counts
+                .connects
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn test_seams() -> BootSeams {
+        BootSeams {
+            graph_key: test_graph_key,
+            state_dir_open: StateDir::open,
+            files: crate::boot::read_files_as_owner,
+            env: Arc::new(TestEnv::default()),
+            open_prepared: maknae_audit_append::AuditSink::open_existing,
+            scan: production_scan,
+            policy_load: maknae_authz_basic::PolicySource::load,
+        }
+    }
+
+    fn euid_owned_policy(
+        paths: maknae_authz_basic::PolicyPaths,
+        principal: maknae_config::Principal,
+    ) -> Result<maknae_authz_basic::PolicySource, maknae_authz_basic::AuthzBasicError> {
+        maknae_authz_basic::PolicySource::load_with_requirement(
+            paths,
+            principal,
+            maknae_config::TargetRequired {
+                owner: None,
+                mode_mask: Some(0o022),
+                nlink_exactly_one: false,
+                regular_file: true,
+                max_bytes: None,
+            },
+        )
+    }
+
+    fn own_marker(path: &Path, owner: u32) -> Result<StateDir, StoreError> {
+        StateDir::open_with_marker_owner(path, owner, nix::unistd::geteuid().as_raw())
+    }
+
+    /// The test seams with the policy files read under the test's own ownership.
+    fn seams_with(env: TestEnv) -> BootSeams {
+        BootSeams {
+            env: Arc::new(env),
+            policy_load: euid_owned_policy,
+            ..test_seams()
+        }
+    }
+
+    /// As [`seams_with`], with the test playing root's reseed marker.
+    fn seams_with_own_marker(env: TestEnv) -> BootSeams {
+        BootSeams {
+            state_dir_open: own_marker,
+            ..seams_with(env)
+        }
+    }
+
+    fn refusing_prepared(
+        _: &maknae_config::AuditConfig,
+    ) -> Result<maknae_audit_append::AuditSink, maknae_audit_append::AuditError> {
+        Err(maknae_audit_append::AuditError::OpenPrimary {
+            path: PathBuf::from("/prepared"),
+            detail: "not append-only".into(),
+        })
+    }
+
+    fn block_on_run_inner_with(dir: &Path, seams: BootSeams) -> Result<ServeOutcome, RunError> {
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(run_inner(dir, &state_dir(dir), &seams))
+    }
+
+    fn trail_of(d: &Dir, name: &str) -> Vec<AuditRecord> {
+        std::fs::read_to_string(d.0.join(name))
+            .unwrap_or_default()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    const INVALID_JOURNAL: &str = "maknaed: baseline: baseline change refused: root-file invalid: ";
+
+    fn baseline_records(recs: &[AuditRecord]) -> Vec<(String, String)> {
+        recs.iter()
+            .filter(|r| r.action == GRAPH_BASELINE_ACTION)
+            .map(|r| (r.outcome.result.clone(), r.outcome.reason.clone()))
+            .collect()
+    }
+
+    fn composition(recs: &[AuditRecord]) -> String {
+        recs.iter()
+            .rev()
+            .find(|r| r.action == "authz" && r.outcome.result == "permit")
+            .unwrap_or_else(|| panic!("no composition record in {recs:?}"))
+            .outcome
+            .reason
+            .clone()
+    }
+
+    const PRINCIPAL_BLOCK: &str = "principal:\n  name: op\n  uid: 1000\n";
+    const UNCLASSIFIED_CEILING: &str = "  handling:\n    ceiling:\n      classification: UNCLASSIFIED\n      sci: false\n      releasable_to: []\n      cui_permitted: false\n      cui_categories_permitted: []\n      dissemination_permitted: [\"Distribution Statement A\"]\n    accreditation_ref: null\n";
+    const SECRET_CEILING: &str = "  handling:\n    ceiling:\n      classification: SECRET\n      sci: false\n      releasable_to: []\n      cui_permitted: false\n      cui_categories_permitted: []\n      dissemination_permitted: [\"Distribution Statement A\"]\n    accreditation_ref: null\n";
+    const PROVIDERS_BLOCK: &str = "providers:\n  - name: openai\n    endpoint: https://api.example.test/v1\n    models: [m]\n";
+
+    /// The common fixture's maknae.yaml with `core_extra` under `core:`, the trail at `audit`, and `tail` appended.
+    fn write_yaml(d: &Dir, core_extra: &str, vault_addr: &str, audit: &Path, tail: &str) {
+        let yaml = format!(
+            "core:\n  deployment_id: dev-01\n{core_extra}vault:\n  addr: {vault_addr}\ntransport:\n  socket_path: {}\naudit:\n  jsonl_path: {}\n{PRINCIPAL_BLOCK}{tail}",
+            d.0.join("maknaed.sock").display(),
+            audit.display(),
+        );
+        put(&d.0, "maknae.yaml", &yaml, 0o640);
+    }
+
+    fn fixture(tag: &str) -> Dir {
+        let d = Dir::new(tag);
+        write_common_fixture(&d, PRINCIPAL_BLOCK);
+        put(
+            &d.0,
+            "authz.yaml",
+            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n",
+            0o640,
+        );
+        d
+    }
+
+    fn boot(d: &Dir) -> Result<ServeOutcome, RunError> {
+        block_on_run_inner_with(&d.0, seams_with(TestEnv::default()))
+    }
+
+    fn store_graph(d: &Dir) -> maknae_graph::graph::Graph {
+        let key = WrappingKey::new(test_graph_key(&d.0).unwrap().into_bytes());
+        maknae_graph::format::decode_stored_compiled(
+            &maknae_state::envelope::open(&store_bytes(d), &key).unwrap(),
+            maknae_graph::record::GraphSpace::Kernel,
+            &maknae_graph::kernel::SCHEMA,
+        )
+        .unwrap()
+        .0
+    }
+
+    fn accepted(d: &Dir) -> BaselineLayer {
+        maknae_graph::identity::extract(&store_graph(d))
+            .unwrap()
+            .baseline
+            .unwrap()
+    }
+
+    fn revision_of_store(d: &Dir) -> u64 {
+        store_graph(d).revision()
+    }
+
+    fn store_bytes(d: &Dir) -> Vec<u8> {
+        std::fs::read(state_dir(&d.0).join(STORE_FILE)).unwrap()
+    }
+
+    fn write_store(d: &Dir, graph: &maknae_graph::graph::Graph) -> Vec<u8> {
+        let key = WrappingKey::new(test_graph_key(&d.0).unwrap().into_bytes());
+        let sealed =
+            maknae_state::envelope::seal(&maknae_graph::format::encode(graph), &key).unwrap();
+        put(&state_dir(&d.0), STORE_FILE, "", 0o600);
+        std::fs::write(state_dir(&d.0).join(STORE_FILE), &sealed).unwrap();
+        sealed
+    }
+
+    fn append_checkpoint(d: &Dir, revision: u64, sealed: &[u8]) {
+        let mut rec = make_record(
+            "boot",
+            "h",
+            "s",
+            0,
+            None,
+            None,
+            None,
+            1,
+            1,
+            CHECKPOINT_ACTION,
+            None,
+            "permit",
+            "transitioned",
+            "authorized",
+            &serde_json::Value::Null,
+        );
+        rec.graph = Some(GraphAudit {
+            revision,
+            ciphertext_sha256: lower_hex(&maknae_state::envelope::ciphertext_digest(sealed)),
+            anchor: "transitioned".into(),
+            scanned_bytes: 0,
+        });
+        let line = format!("{}\n", serde_json::to_string(&rec).unwrap());
+        assert!(maknae_state::anchor::is_checkpoint(
+            line.trim_end().as_bytes()
+        ));
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(d.0.join("audit.jsonl"))
+            .unwrap()
+            .write_all(line.as_bytes())
+            .unwrap();
+    }
+
+    /// The seeded store rewritten one revision on with `baseline` in place of its own.
+    fn rewrite_baseline(d: &Dir, baseline: Option<&BaselineLayer>) {
+        let graph = store_graph(d);
+        let e = maknae_graph::identity::extract(&graph).unwrap();
+        let vocab = crate::vocabulary::kernel_vocabulary(&e.layer.label).unwrap();
+        let next = maknae_graph::identity::build(
+            &e.layer,
+            baseline,
+            &vocab.persisted,
+            vocab.digest,
+            graph.revision() + 1,
+            maknae_graph::record::ProvenanceKind::Seed,
+        )
+        .unwrap();
+        let sealed = write_store(d, &next);
+        append_checkpoint(d, next.revision(), &sealed);
+    }
+
+    fn audit_section(b: &BaselineLayer) -> String {
+        b.sections["audit"].clone()
+    }
+
+    fn prepare_trail(d: &Dir, name: &str) -> PathBuf {
+        put(&d.0, name, "", 0o640);
+        d.0.join(name)
+    }
+
+    #[test]
+    fn a_first_start_seeds_the_baseline_with_no_accept() {
+        let _g = env_lock();
+        let d = fixture("seed");
+        let _ = boot(&d);
+        let recs = trail_of(&d, "audit.jsonl");
+        let seeded = recs
+            .iter()
+            .position(|r| r.action == GRAPH_BASELINE_ACTION)
+            .expect("a seed record");
+        assert_eq!(recs[seeded].outcome.reason, crate::baseline::SEEDED_EVENT);
+        let checkpoint = recs
+            .iter()
+            .position(|r| r.action == CHECKPOINT_ACTION)
+            .unwrap();
+        assert!(
+            seeded < checkpoint,
+            "the seed record is written ahead of the persist's checkpoint"
+        );
+        assert_eq!(
+            accepted(&d).sections["core"],
+            r#"{"deployment_id":"dev-01"}"#
+        );
+    }
+
+    #[test]
+    fn an_upgrade_seeds_the_baseline_from_the_files() {
+        let _g = env_lock();
+        let d = fixture("upgrade");
+        let _ = boot(&d);
+        rewrite_baseline(&d, None);
+        let before = trail_of(&d, "audit.jsonl").len();
+        let _ = boot(&d);
+        let recs = trail_of(&d, "audit.jsonl");
+        let new: Vec<(&str, &str)> = recs[before..]
+            .iter()
+            .map(|r| (r.action.as_str(), r.outcome.reason.as_str()))
+            .collect();
+        let seeded = new
+            .iter()
+            .position(|(a, r)| *a == GRAPH_BASELINE_ACTION && *r == crate::baseline::SEEDED_EVENT)
+            .expect("seeded");
+        let transition = new
+            .iter()
+            .position(|(a, r)| *a == GRAPH_TRANSITION_ACTION && r.contains("root-file"))
+            .expect("transition");
+        assert!(seeded < transition, "{new:?}");
+        assert!(
+            !new.iter().any(|(a, _)| *a == GRAPH_MIGRATE_ACTION),
+            "{new:?}"
+        );
+        assert_eq!(
+            accepted(&d).sections["core"],
+            r#"{"deployment_id":"dev-01"}"#
+        );
+    }
+
+    #[test]
+    fn a_ceiling_edit_survives_a_restart_unapplied_and_pending_restart() {
+        let _g = env_lock();
+        let d = fixture("pending");
+        write_yaml(
+            &d,
+            UNCLASSIFIED_CEILING,
+            "https://v.example:8200",
+            &d.0.join("audit.jsonl"),
+            "",
+        );
+        let _ = boot(&d);
+        let revision_after_seed = revision_of_store(&d);
+        write_yaml(
+            &d,
+            SECRET_CEILING,
+            "https://v.example:8200",
+            &d.0.join("audit.jsonl"),
+            "",
+        );
+        let mut hashes = Vec::new();
+        for _ in 0..2 {
+            let before = trail_of(&d, "audit.jsonl").len();
+            let _ = boot(&d);
+            let recs = trail_of(&d, "audit.jsonl")[before..].to_vec();
+            assert!(
+                composition(&recs).contains("ceiling: UNCLASSIFIED"),
+                "{}",
+                composition(&recs)
+            );
+            let pending = baseline_records(&recs);
+            assert_eq!(pending.len(), 1, "{pending:?}");
+            assert_eq!(pending[0].0, "deny");
+            assert!(
+                pending[0]
+                    .1
+                    .starts_with("baseline change pending acceptance: root-file "),
+                "{}",
+                pending[0].1
+            );
+            assert!(
+                pending[0].1.ends_with("(apply: restart; sections: core)"),
+                "{}",
+                pending[0].1
+            );
+            hashes.push(pending[0].1.clone());
+        }
+        assert_eq!(hashes[0], hashes[1]);
+        assert_eq!(revision_of_store(&d), revision_after_seed);
+    }
+
+    /// The store as a ceiling accept leaves it: the next start runs the accepted
+    /// ceiling whatever the file says, and a file that differs is pending restart.
+    #[test]
+    fn the_start_after_a_ceiling_accept_runs_the_accepted_ceiling() {
+        let _g = env_lock();
+        let high = fixture("ceiling-accepted-src");
+        let at = |d: &Dir, core: &str| {
+            write_yaml(
+                d,
+                core,
+                "https://v.example:8200",
+                &d.0.join("audit.jsonl"),
+                "",
+            )
+        };
+        at(&high, SECRET_CEILING);
+        let _ = boot(&high);
+        let d = fixture("ceiling-accepted");
+        at(&d, UNCLASSIFIED_CEILING);
+        let _ = boot(&d);
+        let mut acc = accepted(&d);
+        acc.sections
+            .insert("core".into(), accepted(&high).sections["core"].clone());
+        acc.sha256 = crate::baseline::accepted_digest(&acc.sections.clone().into());
+        acc.ceiling = "SECRET".into();
+        rewrite_baseline(&d, Some(&acc));
+        for (file, pending) in [(UNCLASSIFIED_CEILING, 1), (SECRET_CEILING, 0)] {
+            at(&d, file);
+            let before = trail_of(&d, "audit.jsonl").len();
+            let _ = boot(&d);
+            let recs = trail_of(&d, "audit.jsonl")[before..].to_vec();
+            assert!(
+                composition(&recs).contains("ceiling: SECRET"),
+                "{}",
+                composition(&recs)
+            );
+            let b = baseline_records(&recs);
+            assert_eq!(b.len(), pending, "{b:?}");
+            assert!(
+                b.iter()
+                    .all(|(_, why)| why.ends_with("(apply: restart; sections: core)")),
+                "{b:?}"
+            );
+            assert_eq!(accepted(&d).ceiling, "SECRET");
+        }
+    }
+
+    #[test]
+    fn an_invalid_file_without_a_baseline_exits_one_and_appends_nothing() {
+        let _g = env_lock();
+        let d = fixture("invalid-first");
+        put(&d.0, "maknae.yaml", "core:\n  deployment_id: [\n", 0o640);
+        let r = boot(&d);
+        assert!(matches!(r, Err(RunError::Other(_))), "{r:?}");
+        assert_eq!(refusal_exit_code(&r.unwrap_err()), 1);
+        assert!(trail_of(&d, "audit.jsonl").is_empty());
+        assert!(!d.0.join("audit.jsonl").exists());
+    }
+
+    #[test]
+    fn an_invalid_file_with_a_baseline_keeps_running_it_and_records_why() {
+        let _g = env_lock();
+        let d = fixture("invalid-later");
+        let _ = boot(&d);
+        let revision = revision_of_store(&d);
+        write_yaml(
+            &d,
+            "  unknown_key: 1\n",
+            "https://v.example:8200",
+            &d.0.join("audit.jsonl"),
+            "",
+        );
+        let before = trail_of(&d, "audit.jsonl").len();
+        let (_, from) = journal_capture::since(usize::MAX, "");
+        let _ = boot(&d);
+        let recs = trail_of(&d, "audit.jsonl")[before..].to_vec();
+        assert!(composition(&recs).contains("ceiling: UNCLASSIFIED"));
+        let b = baseline_records(&recs);
+        assert_eq!(b.len(), 1, "{b:?}");
+        assert_eq!(b[0].1, crate::baseline::INVALID_RECORDED);
+        let (lines, _) = journal_capture::since(from, INVALID_JOURNAL);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with(INVALID_JOURNAL) && l.contains("unknown_key")),
+            "{lines:?}"
+        );
+        assert_eq!(
+            recs.iter()
+                .find(|r| r.action == GRAPH_BASELINE_ACTION)
+                .unwrap()
+                .outcome
+                .posture,
+            "unavailable"
+        );
+        assert_eq!(revision_of_store(&d), revision);
+    }
+
+    #[test]
+    fn vault_follows_the_file_at_start_and_is_recorded() {
+        let _g = env_lock();
+        let d = fixture("vault-follows");
+        let _ = boot(&d);
+        write_yaml(
+            &d,
+            "",
+            "https://w.example:8200",
+            &d.0.join("audit.jsonl"),
+            "",
+        );
+        let before = trail_of(&d, "audit.jsonl").len();
+        let _ = boot(&d);
+        let recs = trail_of(&d, "audit.jsonl")[before..].to_vec();
+        let follow = recs
+            .iter()
+            .position(|r| {
+                r.action == GRAPH_BASELINE_ACTION
+                    && r.outcome.reason == "vault follows maknae.yaml at start"
+            })
+            .expect("follow record");
+        let transition = recs
+            .iter()
+            .position(|r| r.action == GRAPH_TRANSITION_ACTION)
+            .expect("transition");
+        assert!(follow < transition);
+        assert!(accepted(&d).sections["vault"].contains("w.example"));
+        assert!(
+            baseline_records(&recs)
+                .iter()
+                .all(|(result, _)| result == "permit"),
+            "no pending record"
+        );
+    }
+
+    #[test]
+    fn a_move_records_in_the_old_trail_first_and_links_back() {
+        let _g = env_lock();
+        let d = fixture("move");
+        let _ = boot(&d);
+        let new = prepare_trail(&d, "audit-2.jsonl");
+        write_yaml(&d, "", "https://v.example:8200", &new, "");
+        let old_before = trail_of(&d, "audit.jsonl").len();
+        let _ = boot(&d);
+        let old = trail_of(&d, "audit.jsonl");
+        assert_eq!(
+            old.len(),
+            old_before + 1,
+            "exactly one record is added to the old trail"
+        );
+        assert_eq!(
+            old.last().unwrap().outcome.reason,
+            format!("audit trail moves to {} at start", new.display())
+        );
+        let moved = trail_of(&d, "audit-2.jsonl");
+        assert_eq!(moved[0].action, GRAPH_BASELINE_ACTION);
+        assert_eq!(
+            moved[0].outcome.reason,
+            format!(
+                "audit trail continues from {}; last checkpoint revision 1",
+                d.0.join("audit.jsonl").display()
+            )
+        );
+        let (moving, linked) = (old.last().unwrap(), &moved[0]);
+        assert_eq!(moving.session_id, linked.session_id);
+        assert!(
+            moving.seq < linked.seq,
+            "the old trail records the move before the new trail's first record"
+        );
+        assert!(moved.iter().any(|r| r.action == CHECKPOINT_ACTION));
+        assert!(baseline_records(&moved)
+            .iter()
+            .any(|(_, why)| *why == crate::baseline::moved_event(&d.0.join("audit.jsonl"), &new)));
+        assert!(audit_section(&accepted(&d)).contains("audit-2.jsonl"));
+    }
+
+    #[test]
+    fn a_move_from_a_trail_that_cannot_be_opened_links_back_why_and_loads_without_an_anchor() {
+        let _g = env_lock();
+        let root = nix::unistd::geteuid().is_root();
+        for tag in ["missing", "unreadable"] {
+            if root && tag == "unreadable" {
+                eprintln!("skipped: root opens a 0000 trail");
+                continue;
+            }
+            let d = fixture(&format!("move-{tag}"));
+            let _ = boot(&d);
+            let new = prepare_trail(&d, "audit-2.jsonl");
+            write_yaml(&d, "", "https://v.example:8200", &new, "");
+            let old = d.0.join("audit.jsonl");
+            match tag {
+                "missing" => std::fs::remove_file(&old).unwrap(),
+                _ => {
+                    std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o000)).unwrap()
+                }
+            }
+            let _ = boot(&d);
+            let moved = trail_of(&d, "audit-2.jsonl");
+            assert_eq!(moved[0].action, GRAPH_BASELINE_ACTION, "{tag}");
+            assert!(
+                moved[0]
+                    .outcome
+                    .reason
+                    .contains("; the previous trail could not be opened: "),
+                "{tag}: {}",
+                moved[0].outcome.reason
+            );
+            let anchored = moved
+                .iter()
+                .find(|r| r.action == CHECKPOINT_ACTION)
+                .expect("the boot's checkpoint");
+            assert_eq!(
+                (
+                    anchored.outcome.reason.as_str(),
+                    anchored.graph.as_ref().map(|g| g.anchor.as_str())
+                ),
+                (
+                    "rollback-anchor-unavailable",
+                    Some("rollback-anchor-unavailable")
+                ),
+                "{tag}"
+            );
+            assert!(
+                audit_section(&accepted(&d)).contains("audit-2.jsonl"),
+                "{tag}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_restart_keeps_the_accepted_readers_and_leaves_the_files_pending_live() {
+        let _g = env_lock();
+        for moved in [false, true] {
+            let d = fixture(&format!("readers-wait-{moved}"));
+            let _ = boot(&d);
+            let trail = if moved {
+                prepare_trail(&d, "audit-2.jsonl")
+            } else {
+                d.0.join("audit.jsonl")
+            };
+            let with_readers = PathBuf::from(format!("{}\n  readers: [root]", trail.display()));
+            write_yaml(&d, "", "https://v.example:8200", &with_readers, "");
+            let before = trail_of(&d, "audit.jsonl").len();
+            let _ = boot(&d);
+            let audit = audit_section(&accepted(&d));
+            assert!(!audit.contains("\"readers\""), "{moved}: {audit}");
+            assert_eq!(audit.contains("audit-2.jsonl"), moved, "{audit}");
+            let recs = if moved {
+                trail_of(&d, "audit-2.jsonl")
+            } else {
+                trail_of(&d, "audit.jsonl")[before..].to_vec()
+            };
+            let b = baseline_records(&recs);
+            assert!(
+                b.iter().any(|(r, why)| r == "deny"
+                    && why.starts_with("baseline change pending acceptance: ")
+                    && why.ends_with("(apply: live; sections: audit)")),
+                "{moved}: {b:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unprepared_target_keeps_the_old_trail() {
+        let _g = env_lock();
+        let d = fixture("unprepared");
+        let _ = boot(&d);
+        let new = prepare_trail(&d, "audit-2.jsonl");
+        write_yaml(&d, "", "https://v.example:8200", &new, "");
+        let before = trail_of(&d, "audit.jsonl").len();
+        let (_, from) = journal_capture::since(usize::MAX, "");
+        let _ = block_on_run_inner_with(
+            &d.0,
+            seams_with(TestEnv {
+                prepared: Err("not append-only".into()),
+                ..TestEnv::default()
+            }),
+        );
+        let (lines, _) = journal_capture::since(from, INVALID_JOURNAL);
+        assert!(
+            lines.iter().any(|l| l.contains("not append-only")),
+            "{lines:?}"
+        );
+        assert!(trail_of(&d, "audit-2.jsonl").is_empty());
+        let b = baseline_records(&trail_of(&d, "audit.jsonl")[before..]);
+        assert!(
+            b.iter()
+                .any(|(r, why)| r == "deny" && why == crate::baseline::INVALID_RECORDED),
+            "{b:?}"
+        );
+        assert!(!audit_section(&accepted(&d)).contains("audit-2.jsonl"));
+    }
+
+    #[test]
+    fn a_move_outside_the_trail_directory_is_refused_as_invalid() {
+        let _g = env_lock();
+        let d = fixture("outside");
+        let other = Dir::new("outside-other");
+        let _ = boot(&d);
+        let elsewhere = other.0.join("audit.jsonl");
+        put(&other.0, "audit.jsonl", "", 0o640);
+        write_yaml(&d, "", "https://v.example:8200", &elsewhere, "");
+        let before = trail_of(&d, "audit.jsonl").len();
+        let (_, from) = journal_capture::since(usize::MAX, "");
+        let _ = boot(&d);
+        let b = baseline_records(&trail_of(&d, "audit.jsonl")[before..]);
+        assert!(
+            b.iter()
+                .any(|(r, why)| r == "deny" && why == crate::baseline::INVALID_RECORDED),
+            "{b:?}"
+        );
+        let (lines, _) = journal_capture::since(from, INVALID_JOURNAL);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with(INVALID_JOURNAL) && l.contains("may move only within")),
+            "{lines:?}"
+        );
+        assert!(std::fs::read_to_string(&elsewhere).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_target_that_does_not_open_prepared_is_refused_in_the_old_trail_only() {
+        let _g = env_lock();
+        let d = fixture("prepared-race");
+        let _ = boot(&d);
+        let new = prepare_trail(&d, "audit-2.jsonl");
+        write_yaml(&d, "", "https://v.example:8200", &new, "");
+        let before = trail_of(&d, "audit.jsonl").len();
+        let r = block_on_run_inner_with(
+            &d.0,
+            BootSeams {
+                open_prepared: refusing_prepared,
+                ..seams_with(TestEnv::default())
+            },
+        );
+        assert!(
+            matches!(r, Err(RunError::Other(ref m)) if m.contains("not append-only")),
+            "{r:?}"
+        );
+        assert!(trail_of(&d, "audit-2.jsonl").is_empty());
+        let old = trail_of(&d, "audit.jsonl")[before..].to_vec();
+        assert_eq!(old.len(), 1, "{old:?}");
+        assert_eq!(old[0].action, "start");
+        assert!(old[0].outcome.reason.contains("not append-only"));
+    }
+
+    static SCANS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    static FAIL_SCAN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    fn failing_scan(
+        sink: &maknae_audit_append::AuditSink,
+    ) -> Result<maknae_audit_append::ScanResult, maknae_audit_append::AuditError> {
+        use std::sync::atomic::Ordering::SeqCst;
+        if SCANS.fetch_add(1, SeqCst) + 1 == FAIL_SCAN.load(SeqCst) {
+            return Err(maknae_audit_append::AuditError::ReadPrimary(
+                "injected scan failure".into(),
+            ));
+        }
+        production_scan(sink)
+    }
+
+    #[test]
+    fn a_trail_scan_that_fails_during_a_move_is_refused_in_the_old_trail_only() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let _g = env_lock();
+        for (nth, which) in [(1, "old"), (2, "new")] {
+            let d = fixture(&format!("scan-fails-{which}"));
+            let _ = boot(&d);
+            let new = prepare_trail(&d, "audit-2.jsonl");
+            write_yaml(&d, "", "https://v.example:8200", &new, "");
+            let before = trail_of(&d, "audit.jsonl").len();
+            SCANS.store(0, SeqCst);
+            FAIL_SCAN.store(nth, SeqCst);
+            let r = block_on_run_inner_with(
+                &d.0,
+                BootSeams {
+                    scan: failing_scan,
+                    ..seams_with(TestEnv::default())
+                },
+            );
+            FAIL_SCAN.store(0, SeqCst);
+            assert!(matches!(r, Err(RunError::Graph { .. })), "{which}: {r:?}");
+            assert!(trail_of(&d, "audit-2.jsonl").is_empty(), "{which}");
+            let old = trail_of(&d, "audit.jsonl")[before..].to_vec();
+            assert_eq!(old.len(), 1, "{which}: {old:?}");
+            assert_eq!(old[0].action, GRAPH_LOAD_ACTION, "{which}");
+            assert!(
+                old[0].outcome.reason.contains("injected scan failure"),
+                "{which}: {}",
+                old[0].outcome.reason
+            );
+        }
+    }
+
+    fn yaml_with_offload(d: &Dir, trail: &Path) {
+        let yaml = format!(
+            "core:\n  deployment_id: dev-01\nvault:\n  addr: https://v.example:8200\ntransport:\n  socket_path: {}\naudit:\n  jsonl_path: {}\n  siem: https://siem.example:6514\n{PRINCIPAL_BLOCK}",
+            d.0.join("maknaed.sock").display(),
+            trail.display(),
+        );
+        put(&d.0, "maknae.yaml", &yaml, 0o640);
+    }
+
+    #[test]
+    fn a_reseed_refused_at_start_is_recorded_in_the_stored_trail() {
+        let _g = env_lock();
+        let d = fixture("reseed-refused");
+        let _ = boot(&d);
+        let new = prepare_trail(&d, "audit-2.jsonl");
+        yaml_with_offload(&d, &new);
+        put(&state_dir(&d.0), MARKER_FILE, "", 0o644);
+        let before = trail_of(&d, "audit.jsonl").len();
+        let r = block_on_run_inner_with(&d.0, seams_with_own_marker(TestEnv::default()));
+        assert!(r.is_err(), "{r:?}");
+        assert!(
+            trail_of(&d, "audit-2.jsonl").is_empty(),
+            "the new trail is unverified"
+        );
+        assert_eq!(trail_of(&d, "audit.jsonl").len(), before + 1);
+    }
+
+    fn forge_digest(d: &Dir) -> BaselineLayer {
+        let mut forged = accepted(d);
+        forged.sha256 = [7; 32];
+        rewrite_baseline(d, Some(&forged));
+        forged
+    }
+
+    #[test]
+    fn an_inconsistent_store_is_refused_where_its_trail_is() {
+        let _g = env_lock();
+        let d = fixture("inconsistent-trail");
+        let _ = boot(&d);
+        forge_digest(&d);
+        let new = prepare_trail(&d, "audit-2.jsonl");
+        write_yaml(&d, "", "https://v.example:8200", &new, "");
+        let before = trail_of(&d, "audit.jsonl").len();
+        let r = boot(&d);
+        assert!(matches!(r, Err(RunError::Graph { .. })), "{r:?}");
+        let old = trail_of(&d, "audit.jsonl")[before..].to_vec();
+        assert_eq!(
+            old.last().unwrap().outcome.reason,
+            format!("audit trail moves to {} at start", new.display())
+        );
+        let moved = trail_of(&d, "audit-2.jsonl");
+        assert!(moved[0]
+            .outcome
+            .reason
+            .starts_with("audit trail continues from "));
+        assert_eq!(moved.last().unwrap().action, GRAPH_LOAD_ACTION);
+    }
+
+    #[test]
+    fn a_reseed_over_an_inconsistent_store_records_what_it_set_aside() {
+        let _g = env_lock();
+        let d = fixture("reseed-inconsistent");
+        let _ = boot(&d);
+        let forged = forge_digest(&d);
+        put(&state_dir(&d.0), MARKER_FILE, "", 0o644);
+        let before = trail_of(&d, "audit.jsonl").len();
+        let _ = block_on_run_inner_with(&d.0, seams_with_own_marker(TestEnv::default()));
+        let recs = trail_of(&d, "audit.jsonl")[before..].to_vec();
+        assert_eq!(
+            baseline_records(&recs),
+            vec![(
+                "permit".to_string(),
+                crate::baseline::reseeded_event(&forged.sha256)
+            )]
+        );
+    }
+
+    #[test]
+    fn stored_sections_that_do_not_assemble_are_an_inconsistent_store() {
+        let _g = env_lock();
+        let d = fixture("unassembled");
+        let _ = boot(&d);
+        let mut forged = accepted(&d);
+        forged.sections.insert(
+            "core".into(),
+            r#"{"deployment_id":"dev-01","handling":{"policy":"nope"}}"#.into(),
+        );
+        forged.sha256 = crate::baseline::accepted_digest(&forged.sections.clone().into());
+        rewrite_baseline(&d, Some(&forged));
+        let before = trail_of(&d, "audit.jsonl").len();
+        let r = boot(&d);
+        let Err(e @ RunError::Graph { .. }) = &r else {
+            panic!("expected the store refusal, got {r:?}");
+        };
+        assert_eq!(refusal_exit_code(e), GRAPH_REFUSAL_EXIT_CODE);
+        let recs = trail_of(&d, "audit.jsonl")[before..].to_vec();
+        assert_eq!(recs.last().unwrap().action, GRAPH_LOAD_ACTION);
+    }
+
+    #[test]
+    fn an_inconsistent_store_is_refused_before_the_policy_loads() {
+        let _g = env_lock();
+        let d = fixture("inconsistent-policy");
+        let _ = boot(&d);
+        forge_digest(&d);
+        put(&d.0, "authz.yaml", "schema_version: [\n", 0o640);
+        let r = boot(&d);
+        let Err(e) = &r else { panic!("{r:?}") };
+        assert_eq!(refusal_exit_code(e), GRAPH_REFUSAL_EXIT_CODE, "{e}");
+    }
+
+    #[test]
+    fn a_rolled_back_store_naming_the_old_trail_is_refused_across_a_move() {
+        let _g = env_lock();
+        let d = fixture("rollback-move");
+        let _ = boot(&d);
+        let me = nix::unistd::User::from_uid(nix::unistd::geteuid())
+            .unwrap()
+            .unwrap()
+            .name;
+        put(
+            &d.0,
+            "bindings.yaml",
+            &format!("schema_version: 1\nbindings:\n  admin: [\"{me}\"]\n"),
+            0o640,
+        );
+        let _ = boot(&d);
+        assert_eq!(revision_of_store(&d), 2);
+        let s2 = store_bytes(&d);
+        let new = prepare_trail(&d, "audit-2.jsonl");
+        write_yaml(&d, "", "https://v.example:8200", &new, "");
+        let _ = boot(&d);
+        assert_eq!(revision_of_store(&d), 3);
+        std::fs::write(state_dir(&d.0).join(STORE_FILE), &s2).unwrap();
+        match boot(&d) {
+            Err(RunError::Graph { reason, .. }) => {
+                assert!(reason.contains('2') && reason.contains('3'), "{reason}")
+            }
+            other => panic!("expected the rollback refusal, got {other:?}"),
+        }
+    }
+
+    /// Accepts the set `admin.baseline.show` shows for `d`'s files, from a fixture over its directories.
+    fn accept_shown(d: &Dir) -> String {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let principal = maknae_config::Principal {
+                name: "op".into(),
+                uid: 1000,
+            };
+            let fx = super::reload_fixture::over(&d.0, principal).await;
+            let shown = BaselineOps::show(fx.reloader.as_ref()).await.unwrap();
+            assert_eq!(
+                (shown.state.as_str(), shown.apply.as_str()),
+                ("pending", "restart")
+            );
+            match BaselineOps::accept(fx.reloader.as_ref(), &shown.hash).await {
+                AcceptAnswer::View {
+                    corrective: None, ..
+                } => {}
+                other => panic!("{other:?}"),
+            }
+            assert_eq!(*fx.reloader.drain.borrow(), Drain::Applied);
+            shown.hash
+        })
+    }
+
+    #[test]
+    fn an_accepted_move_is_performed_by_the_restart_boot_through_the_one_seam() {
+        let _g = env_lock();
+        let d = fixture("accepted-move");
+        let _ = boot(&d);
+        let (old, new) = (d.0.join("audit.jsonl"), prepare_trail(&d, "audit-2.jsonl"));
+        write_yaml(&d, "", "https://v.example:8200", &new, "");
+        accept_shown(&d);
+        assert_eq!(accepted(&d).moved_from.as_deref(), old.to_str());
+
+        let refused = block_on_run_inner_with(
+            &d.0,
+            BootSeams {
+                open_prepared: refusing_prepared,
+                ..seams_with(TestEnv::default())
+            },
+        );
+        let Err(e) = &refused else {
+            panic!("{refused:?}")
+        };
+        assert_eq!(refusal_exit_code(e), 1, "{e}");
+        assert!(
+            trail_of(&d, "audit-2.jsonl").is_empty(),
+            "the prepared open is the only open of a moved trail"
+        );
+
+        let _ = boot(&d);
+        assert_eq!(
+            trail_of(&d, "audit.jsonl").last().unwrap().outcome.reason,
+            crate::baseline::move_record(&new)
+        );
+        let moved = trail_of(&d, "audit-2.jsonl");
+        assert!(moved[0].outcome.reason.starts_with(&format!(
+            "audit trail continues from {}; last checkpoint revision ",
+            old.display()
+        )));
+        assert!(moved.iter().any(|r| r.action == CHECKPOINT_ACTION));
+        let stored = accepted(&d);
+        assert_eq!(stored.moved_from, None);
+        assert!(audit_section(&stored).contains("audit-2.jsonl"));
+    }
+
+    #[test]
+    fn an_accepted_restart_baseline_boots_and_applies() {
+        let _g = env_lock();
+        let d = fixture("accepted-restart");
+        let _ = boot(&d);
+        let yaml = format!(
+            "core:\n  deployment_id: dev-01\nvault:\n  addr: https://v.example:8200\ntransport:\n  socket_path: {}\n  max_connections: 7\naudit:\n  jsonl_path: {}\n{PRINCIPAL_BLOCK}",
+            d.0.join("maknaed.sock").display(),
+            d.0.join("audit.jsonl").display(),
+        );
+        put(&d.0, "maknae.yaml", &yaml, 0o640);
+        accept_shown(&d);
+        let revision = revision_of_store(&d);
+        let before = trail_of(&d, "audit.jsonl").len();
+        let _ = boot(&d);
+        let this_boot = &trail_of(&d, "audit.jsonl")[before..];
+        assert!(
+            this_boot.iter().any(|r| r.action == CHECKPOINT_ACTION),
+            "{this_boot:?}"
+        );
+        assert!(
+            !baseline_records(this_boot)
+                .iter()
+                .any(|(result, _)| result == "deny"),
+            "nothing is pending: {this_boot:?}"
+        );
+        assert!(!this_boot
+            .iter()
+            .any(|r| r.action == GRAPH_TRANSITION_ACTION));
+        assert_eq!(revision_of_store(&d), revision);
+        assert!(accepted(&d).sections["transport"].contains("\"max_connections\":7"));
+    }
+
+    #[test]
+    fn once_a_baseline_exists_a_missing_trail_refuses_and_is_not_created() {
+        let _g = env_lock();
+        let d = fixture("no-recreate");
+        let _ = boot(&d);
+        std::fs::remove_file(d.0.join("audit.jsonl")).unwrap();
+        let r = boot(&d);
+        assert!(
+            matches!(r, Err(RunError::Other(ref m)) if m.contains("is missing") && m.contains("Move the audit trail")),
+            "{r:?}"
+        );
+        assert!(!d.0.join("audit.jsonl").exists());
+    }
+
+    #[test]
+    fn a_reseed_replaces_an_accepted_baseline_from_the_files() {
+        let _g = env_lock();
+        let d = fixture("reseed");
+        let _ = boot(&d);
+        let accepted_before = accepted(&d);
+        write_yaml(
+            &d,
+            SECRET_CEILING,
+            "https://w.example:8200",
+            &d.0.join("audit.jsonl"),
+            "",
+        );
+        put(&state_dir(&d.0), MARKER_FILE, "", 0o644);
+        let before = trail_of(&d, "audit.jsonl").len();
+        let _ = block_on_run_inner_with(&d.0, seams_with_own_marker(TestEnv::default()));
+        let recs = trail_of(&d, "audit.jsonl")[before..].to_vec();
+        assert!(
+            recs.iter()
+                .any(|r| r.action == GRAPH_SEED_ACTION
+                    && r.outcome.reason.contains("reseed-authorized")),
+            "{:?}",
+            recs.iter().map(|r| &r.outcome.reason).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            baseline_records(&recs),
+            vec![(
+                "permit".to_string(),
+                crate::baseline::reseeded_event(&accepted_before.sha256)
+            )]
+        );
+        assert!(accepted(&d).sections["vault"].contains("w.example"));
+        assert_eq!(
+            accepted(&d).ceiling,
+            "SECRET",
+            "the files replaced the accepted ceiling without an accept"
+        );
+    }
+
+    #[test]
+    fn a_reseed_still_moves_the_trail_through_the_one_seam() {
+        let _g = env_lock();
+        let d = fixture("reseed-move");
+        let _ = boot(&d);
+        let new = prepare_trail(&d, "audit-2.jsonl");
+        write_yaml(&d, "", "https://v.example:8200", &new, "");
+        put(&state_dir(&d.0), MARKER_FILE, "", 0o644);
+        let old_before = trail_of(&d, "audit.jsonl").len();
+        let _ = block_on_run_inner_with(&d.0, seams_with_own_marker(TestEnv::default()));
+        let old = trail_of(&d, "audit.jsonl");
+        assert_eq!(old.len(), old_before + 1);
+        assert_eq!(
+            old.last().unwrap().outcome.reason,
+            format!("audit trail moves to {} at start", new.display())
+        );
+        assert!(trail_of(&d, "audit-2.jsonl")[0]
+            .outcome
+            .reason
+            .starts_with("audit trail continues from "));
+
+        let e = fixture("reseed-unprepared");
+        let _ = boot(&e);
+        let sibling = e.0.join("audit-3.jsonl");
+        write_yaml(&e, "", "https://v.example:8200", &sibling, "");
+        put(&state_dir(&e.0), MARKER_FILE, "", 0o644);
+        let before = trail_of(&e, "audit.jsonl").len();
+        let r = block_on_run_inner_with(
+            &e.0,
+            seams_with_own_marker(TestEnv {
+                prepared: Err("no such file".into()),
+                ..TestEnv::default()
+            }),
+        );
+        assert!(
+            matches!(r, Err(RunError::Other(ref m)) if m.contains("Move the audit trail")),
+            "{r:?}"
+        );
+        assert!(!sibling.exists(), "nothing created");
+        let stored = trail_of(&e, "audit.jsonl")[before..].to_vec();
+        assert_eq!(
+            stored.len(),
+            1,
+            "the refusal is recorded in the stored trail"
+        );
+        assert_eq!(stored[0].action, "start");
+        assert!(stored[0].outcome.reason.contains("no such file"));
+    }
+
+    #[test]
+    fn an_unreadable_store_with_an_invalid_file_names_both() {
+        let _g = env_lock();
+        let d = fixture("unreadable");
+        let _ = boot(&d);
+        put(&state_dir(&d.0), STORE_FILE, "not a store", 0o600);
+        put(&d.0, "maknae.yaml", "core:\n  deployment_id: [\n", 0o640);
+        match boot(&d) {
+            Err(RunError::Other(m)) => assert!(m.contains("could not be read"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unreadable_store_opens_the_files_trail_existing_only_and_refuses_audited() {
+        let _g = env_lock();
+        let d = fixture("unreadable-valid");
+        let _ = boot(&d);
+        put(&state_dir(&d.0), STORE_FILE, "not a store", 0o600);
+        let before = trail_of(&d, "audit.jsonl").len();
+        let r = boot(&d);
+        assert!(matches!(r, Err(RunError::Graph { .. })), "{r:?}");
+        let recs = trail_of(&d, "audit.jsonl")[before..].to_vec();
+        assert_eq!(recs.last().unwrap().action, GRAPH_LOAD_ACTION);
+        std::fs::remove_file(d.0.join("audit.jsonl")).unwrap();
+        let r = boot(&d);
+        assert!(
+            matches!(r, Err(RunError::Other(ref m)) if m.contains("is missing")),
+            "{r:?}"
+        );
+        assert!(!d.0.join("audit.jsonl").exists(), "never created");
+    }
+
+    #[test]
+    fn a_stored_baseline_that_does_not_match_its_own_record_refuses() {
+        let _g = env_lock();
+        for (tag, forge) in [
+            (
+                "forged-digest",
+                (|b: &mut BaselineLayer| b.sha256 = [7; 32]) as fn(&mut BaselineLayer),
+            ),
+            ("forged-system", |b: &mut BaselineLayer| {
+                b.system = "AUS".into()
+            }),
+            ("forged-ceiling", |b: &mut BaselineLayer| {
+                b.ceiling = "SECRET".into()
+            }),
+        ] {
+            let d = fixture(tag);
+            let _ = boot(&d);
+            let mut forged = accepted(&d);
+            forge(&mut forged);
+            rewrite_baseline(&d, Some(&forged));
+            let revision = revision_of_store(&d);
+            let before = trail_of(&d, "audit.jsonl").len();
+            match boot(&d) {
+                Err(e @ RunError::Graph { .. }) => {
+                    assert!(e.to_string().contains("does not match"), "{tag}: {e}");
+                    assert_eq!(refusal_exit_code(&e), GRAPH_REFUSAL_EXIT_CODE);
+                }
+                other => panic!("{tag}: expected the store refusal, got {other:?}"),
+            }
+            let recs = trail_of(&d, "audit.jsonl")[before..].to_vec();
+            assert!(!recs.iter().any(|r| r.action == "authz"), "{tag}: {recs:?}");
+            assert_eq!(recs.last().unwrap().action, GRAPH_LOAD_ACTION, "{tag}");
+            assert_eq!(revision_of_store(&d), revision, "{tag}");
+        }
+    }
+
+    #[test]
+    fn an_accepted_baseline_that_no_longer_validates_refuses_to_start() {
+        let _g = env_lock();
+        let d = fixture("drift");
+        write_yaml(
+            &d,
+            "",
+            "https://v.example:8200",
+            &d.0.join("audit.jsonl"),
+            PROVIDERS_BLOCK,
+        );
+        let bounds = TestEnv {
+            bounds: Some(maknae_config::EgressBounds {
+                kv_mount: "kv".into(),
+                user_prefix: "users".into(),
+                vault_addr: "https://v.example:8200".into(),
+            }),
+            ..TestEnv::default()
+        };
+        let _ = block_on_run_inner_with(&d.0, seams_with(bounds));
+        assert!(accepted(&d).sections.contains_key("providers"));
+        let revision = revision_of_store(&d);
+        let before = trail_of(&d, "audit.jsonl").len();
+        let r = boot(&d);
+        let Err(e @ RunError::Other(m)) = &r else {
+            panic!("expected the start refusal, got {r:?}");
+        };
+        assert!(
+            m.starts_with("accepted baseline cannot start: ") && m.contains("egress-bounds"),
+            "{m}"
+        );
+        assert_eq!(refusal_exit_code(e), 1);
+        let recs = trail_of(&d, "audit.jsonl")[before..].to_vec();
+        assert_eq!(recs.len(), 1, "{recs:?}");
+        assert_eq!(
+            (recs[0].action.as_str(), recs[0].outcome.reason.as_str()),
+            ("start", ACCEPTED_CANNOT_START_RECORDED)
+        );
+        assert_eq!(revision_of_store(&d), revision);
+    }
+
+    #[test]
+    fn an_environment_refusal_at_a_first_start_is_audited() {
+        let _g = env_lock();
+        let d = fixture("first-env");
+        write_yaml(
+            &d,
+            "",
+            "https://v.example:8200",
+            &d.0.join("audit.jsonl"),
+            PROVIDERS_BLOCK,
+        );
+        let r = boot(&d);
+        let Err(e @ RunError::Other(m)) = &r else {
+            panic!("expected the start refusal, got {r:?}");
+        };
+        assert_eq!(refusal_exit_code(e), 1);
+        let recs = trail_of(&d, "audit.jsonl");
+        assert_eq!(recs.len(), 1, "{recs:?}");
+        assert_eq!(
+            (recs[0].action.as_str(), recs[0].outcome.reason.as_str()),
+            ("start", m.as_str())
+        );
+        assert!(!state_dir(&d.0).join(STORE_FILE).exists());
+    }
+
+    #[test]
+    fn a_vault_block_that_does_not_parse_refuses_after_the_policy_loads() {
+        let _g = env_lock();
+        let d = fixture("vault-after-policy");
+        write_yaml(
+            &d,
+            "",
+            "https://v.example:8200\n  colour: red",
+            &d.0.join("audit.jsonl"),
+            "",
+        );
+        let r = boot(&d);
+        let Err(e @ RunError::Other(m)) = &r else {
+            panic!("expected the start refusal, got {r:?}");
+        };
+        assert!(m.contains("colour"), "{m}");
+        assert_eq!(refusal_exit_code(e), 1);
+        assert_eq!(trail_of(&d, "audit.jsonl").last().unwrap().action, "start");
+        put(&d.0, "authz.yaml", "schema_version: [\n", 0o640);
+        let r = boot(&d);
+        assert!(matches!(r, Err(RunError::Authz(_))), "{r:?}");
+        assert_eq!(trail_of(&d, "audit.jsonl").last().unwrap().action, "authz");
+    }
+
+    #[test]
+    fn a_first_start_offload_or_principal_refusal_is_audited_as_today() {
+        let _g = env_lock();
+        let d = fixture("first-offload");
+        write_yaml(
+            &d,
+            "",
+            "https://v.example:8200",
+            &d.0.join("audit.jsonl"),
+            "",
+        );
+        let yaml = std::fs::read_to_string(d.0.join("maknae.yaml"))
+            .unwrap()
+            .replace("audit:\n", "audit:\n  siem: https://siem.example\n");
+        put(&d.0, "maknae.yaml", &yaml, 0o640);
+        let r = boot(&d);
+        assert!(matches!(r, Err(RunError::AuditOffload(_))), "{r:?}");
+        assert_eq!(
+            trail_of(&d, "audit.jsonl").last().unwrap().action,
+            "audit.offload"
+        );
+    }
+
+    #[test]
+    fn the_run_baseline_records_the_declared_system_and_ceiling() {
+        let sections: maknae_config::BaselineSections = [("core".to_string(), "{}".to_string())]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            run_baseline(&sections, ("US".into(), "UNCLASSIFIED".into())),
+            BaselineLayer {
+                sections: sections.clone().into_inner(),
+                system: "US".into(),
+                ceiling: "UNCLASSIFIED".into(),
+                sha256: maknae_state::envelope::sha256(br#"{"core":"{}"}"#),
+                moved_from: None,
+            }
+        );
+    }
 }
 
 #[cfg(test)]
@@ -6842,15 +9914,15 @@ mod home_resolution_tests {
             maknae_config::transport_from_section(None).unwrap(),
             serde_json::json!({}),
             authorizer,
-            Arc::new(ConfigView::default()),
+            std::sync::Arc::new(crate::live::LiveConfig::new(ConfigView::default(), None)),
             backend_name,
             Arc::new("US".to_string()),
-            Arc::new(None),
             Arc::new(None),
             crate::egress::unavailable_egress(),
             Duration::from_secs(10),
             maknae_security::Lane::Local,
             maknae_io::DelegatedFds::new(1),
+            baseline_stub::no_baseline(),
         )
         .await;
         let caps = maknae_proto::FrameCaps {
@@ -7064,15 +10136,15 @@ mod admission_bound_tests {
                 maknae_config::transport_from_section(None).unwrap(),
                 serde_json::json!({}),
                 authorizer,
-                Arc::new(ConfigView::default()),
+                std::sync::Arc::new(crate::live::LiveConfig::new(ConfigView::default(), None)),
                 backend_name,
                 Arc::new("US".to_string()),
-                Arc::new(None),
                 Arc::new(None),
                 crate::egress::unavailable_egress(),
                 Duration::from_secs(10),
                 maknae_security::Lane::Local,
                 maknae_io::DelegatedFds::new(1),
+                baseline_stub::no_baseline(),
             ),
         )
         .await
@@ -7220,28 +10292,429 @@ mod admission_bound_tests {
     }
 }
 
+#[cfg(test)]
+mod graph_audit_bound_tests {
+    use super::*;
+    use maknae_audit_append::AuditError;
+
+    struct Stall;
+
+    impl AuditEmit for Stall {
+        fn emit(&self, _: &AuditRecord) -> impl Future<Output = Result<(), AuditError>> + Send {
+            std::future::pending()
+        }
+    }
+
+    const OUTER: Duration = Duration::from_secs(60);
+
+    fn audit<'a>(ctx: &'a BootCtx<'a>) -> GraphBootAudit<'a, Stall> {
+        GraphBootAudit {
+            sink: &Stall,
+            ctx,
+            scanned_bytes: 0,
+            bound: Duration::from_millis(100),
+            drain: None,
+        }
+    }
+
+    /// Production lines of `files` that call `.emit(`, `::emit(` or `.append(`;
+    /// column-0 `#[cfg(test)]` modules and comment lines are skipped.
+    fn unbounded_appends(files: &[(String, String)]) -> Vec<(String, String)> {
+        let mut found = Vec::new();
+        for (name, src) in files {
+            let lines: Vec<&str> = src.lines().collect();
+            let mut i = 0;
+            while i < lines.len() {
+                let mut j = i;
+                while j < lines.len() && lines[j].starts_with("#[") {
+                    j += 1;
+                }
+                let test_mod = j > i
+                    && lines[i..j].contains(&"#[cfg(test)]")
+                    && lines
+                        .get(j)
+                        .is_some_and(|l| l.starts_with("mod ") && l.ends_with('{'));
+                if test_mod {
+                    i = j + lines[j..]
+                        .iter()
+                        .position(|l| *l == "}")
+                        .map_or(lines.len(), |k| k + 1);
+                    continue;
+                }
+                let line = lines[i].trim();
+                if !line.starts_with("//")
+                    && [".emit(", "::emit(", ".append("]
+                        .iter()
+                        .any(|p| line.contains(p))
+                {
+                    found.push((name.clone(), line.to_string()));
+                }
+                i += 1;
+            }
+        }
+        found
+    }
+
+    fn kernel_sources(dir: &Path, out: &mut Vec<(String, String)>) {
+        let mut entries: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        entries.sort();
+        for path in entries {
+            if path.is_dir() {
+                kernel_sources(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push((
+                    path.strip_prefix(env!("CARGO_MANIFEST_DIR"))
+                        .unwrap()
+                        .display()
+                        .to_string(),
+                    std::fs::read_to_string(&path).unwrap(),
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn every_unbounded_append_in_the_kernel_is_one_bounded_by_its_caller() {
+        let mut files = Vec::new();
+        kernel_sources(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
+        assert!(files.len() > 10, "{files:?}");
+        let found = unbounded_appends(&files);
+        let found: Vec<(&str, &str)> = found
+            .iter()
+            .map(|(f, l)| (f.as_str(), l.as_str()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("src/mutation.rs", "tokio::time::timeout_at(deadline, emit.emit(&record)).await,"),
+                ("src/mutation.rs", "emit.emit(&record),"),
+                (
+                    "src/run.rs",
+                    "match tokio::time::timeout(AUDIT_DRAIN_SHUTDOWN_TIMEOUT, emit.emit(&stop)).await {"
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_append_scan_sees_every_spelling_in_any_file_and_skips_test_modules() {
+        let files = [
+            (
+                "src/other.rs".to_string(),
+                "fn f() {\n    AuditEmit::emit(&*sink, &rec).await;\n    sink.append(&rec).await?;\n    // sink.emit(&rec)\n    sink.emit_within(&rec, b).await?;\n}\n#[cfg(unix)]\n#[cfg(test)]\nmod tests {\n    fn t() { sink.emit(&rec); }\n}\nfn g() { s.emit(&r); }\n".to_string(),
+            ),
+        ];
+        let found = unbounded_appends(&files);
+        let found: Vec<&str> = found.iter().map(|(_, l)| l.as_str()).collect();
+        assert_eq!(
+            found,
+            [
+                "AuditEmit::emit(&*sink, &rec).await;",
+                "sink.append(&rec).await?;",
+                "fn g() { s.emit(&r); }"
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_boot_record_refuses_within_the_bound() {
+        let seq = Seq::new();
+        let au3 = serde_json::json!({});
+        let ctx = BootCtx {
+            event: "boot",
+            host: "h",
+            socket: "s",
+            euid: 0,
+            session_id: 1,
+            seq: &seq,
+            au3_1: &au3,
+        };
+        let released = [maknae_graph::identity::Released {
+            uid: 7,
+            name: "mallory".into(),
+            cause: maknae_graph::identity::ReleaseCause::NotListed,
+        }];
+        let events = ["baseline seeded".to_string()];
+        let mut a = audit(&ctx);
+        let got = tokio::time::timeout(OUTER, a.checkpoint(1, [0; 32], "seeded")).await;
+        assert!(matches!(got, Ok(Err(StoreError::Audit(_)))), "{got:?}");
+        let got = tokio::time::timeout(OUTER, a.released(1, &released)).await;
+        assert!(matches!(got, Ok(Err(StoreError::Audit(_)))), "{got:?}");
+        let got = tokio::time::timeout(OUTER, a.baseline(1, &events)).await;
+        assert!(matches!(got, Ok(Err(StoreError::Audit(_)))), "{got:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn every_boot_refusal_record_gives_up_after_the_append_bound() {
+        let au3 = serde_json::json!({});
+        let authz = tokio::time::timeout(
+            OUTER,
+            refuse_authz_boot(&Stall, "h", "s", 0, 1, 1, &au3, "no principal".into(), None),
+        )
+        .await;
+        assert!(matches!(authz, Ok(RunError::Authz(_))), "{authz:?}");
+        let offload = tokio::time::timeout(
+            OUTER,
+            refuse_audit_offload_boot(&Stall, "h", "s", 0, 1, 2, &au3, "siem".into(), None),
+        )
+        .await;
+        assert!(
+            matches!(offload, Ok(RunError::AuditOffload(_))),
+            "{offload:?}"
+        );
+        let failed: Result<ServeOutcome, RunError> = Err(RunError::Other("bind".into()));
+        let start = tokio::time::timeout(
+            OUTER,
+            record_start_refusal(&Stall, "h", "s", 0, 1, 3, &au3, &failed),
+        )
+        .await;
+        assert!(start.is_ok(), "the start refusal waited past its bound");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn every_request_record_gives_up_after_the_append_bound_and_withholds_the_frame() {
+        let au3 = serde_json::json!({});
+        let stall = Arc::new(Stall);
+        let rec = make_record(
+            "request",
+            "h",
+            "s",
+            7,
+            None,
+            None,
+            Some("uri"),
+            1,
+            1,
+            "whoami",
+            None,
+            "permit",
+            "ok",
+            "authorized",
+            &au3,
+        );
+        let reported =
+            tokio::time::timeout(OUTER, emit_or_report(&stall, &rec, "a response", 7, 1)).await;
+        assert_eq!(reported, Ok(false));
+        let outcome = tokio::time::timeout(
+            OUTER,
+            emit_request_outcome(
+                &stall,
+                "h",
+                "s",
+                7,
+                "uri",
+                None,
+                None,
+                None,
+                1,
+                2,
+                "whoami",
+                None,
+                None,
+                "permit",
+                "ok",
+                "authorized",
+                &au3,
+            ),
+        )
+        .await;
+        assert_eq!(outcome, Ok(false));
+        let deny = tokio::time::timeout(
+            OUTER,
+            emit_request_deny(
+                &stall, "h", "s", 7, "uri", None, None, 1, 3, "whoami", "no", &au3,
+            ),
+        )
+        .await;
+        assert!(deny.is_ok(), "the deny record waited past its bound");
+    }
+
+    fn report(marker_ignored: Option<String>, rejected: Option<String>) -> BootReport {
+        BootReport {
+            revision: 1,
+            digest: [0; 32],
+            outcome: BootOutcome::Seeded {
+                authorized: false,
+                rejected,
+            },
+            graph: maknae_graph::graph::GraphBuilder::new(
+                maknae_graph::record::GraphSpace::Kernel,
+                1,
+            )
+            .build(
+                &maknae_graph::kernel::SCHEMA,
+                &maknae_graph::schema::CompiledSet::default(),
+            )
+            .unwrap(),
+            marker_ignored,
+            migration: None,
+            identity_transition: false,
+            baseline_transition: false,
+            released: Vec::new(),
+            principal_admin: None,
+            durability_error: None,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_boot_reseed_and_rejected_store_records_give_up_after_the_append_bound() {
+        let seq = Seq::new();
+        let au3 = serde_json::json!({});
+        let ctx = BootCtx {
+            event: "boot",
+            host: "h",
+            socket: "s",
+            euid: 0,
+            session_id: 1,
+            seq: &seq,
+            au3_1: &au3,
+        };
+        for r in [
+            report(Some("not root-owned".into()), None),
+            report(None, Some("moved aside".into())),
+        ] {
+            let got =
+                tokio::time::timeout(OUTER, report_graph_boot(&Stall, &ctx, Path::new("/s"), &r))
+                    .await;
+            assert!(matches!(got, Ok(Err(RunError::Other(_)))), "{got:?}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stalled_rollback_anchor_scan_refuses_within_the_bound() {
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let got = tokio::time::timeout(
+            Duration::from_secs(2),
+            scan_anchor(Duration::from_millis(50), move || {
+                let _ = rx.recv_timeout(Duration::from_secs(5));
+                Err(AuditError::ReadPrimary("released".into()))
+            }),
+        )
+        .await;
+        drop(tx);
+        let refused = got.expect("the scan must give up within its bound");
+        assert!(
+            matches!(&refused, Err(GraphFailure::ScanElapsed(m)) if m.starts_with("rollback anchor scan")),
+            "{refused:?}"
+        );
+        let RunError::Graph { reason, hint } = graph_refusal(refused.unwrap_err(), Path::new("/s"))
+        else {
+            panic!("a scan elapse is a graph refusal");
+        };
+        assert!(
+            reason.starts_with("kernel graph store: rollback anchor scan"),
+            "{reason}"
+        );
+        assert!(
+            hint.contains("did not scan within 30s")
+                && hint.contains("Rotate, restore or recreate the trail"),
+            "{hint}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_completed_scan_passes_its_result_and_its_error_through() {
+        let ok = scan_anchor(Duration::from_secs(5), || {
+            Ok(maknae_audit_append::ScanResult {
+                line: None,
+                scanned_bytes: 9,
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(ok.scanned_bytes, 9);
+        let err = scan_anchor(Duration::from_secs(5), || {
+            Err(AuditError::ReadPrimary("eio".into()))
+        })
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&err, GraphFailure::Store(StoreError::Audit(m)) if m.contains("eio")),
+            "{err:?}"
+        );
+    }
+}
+
 #[cfg(unix)]
 #[cfg(test)]
-mod reload_tests {
+mod reload_fixture {
+    use super::boot_gate_tests::{boot_graph_at, TestEnv};
     use super::*;
     use maknae_authz_basic::{Baseline, HermeticAuthorizer};
     use std::os::unix::fs::PermissionsExt;
 
-    const AUTHZ: &str = "schema_version: 1\n";
-    const ROOT_ADMIN: &str = "schema_version: 1\nbindings:\n  admin: [\"root\"]\n";
-    const ROOT_ADVERSARY: &str = "schema_version: 1\nbindings:\n  adversary: [\"root\"]\n";
+    pub(super) const AUTHZ: &str = "schema_version: 1\n";
+    pub(super) const ROOT_ADMIN: &str = "schema_version: 1\nbindings:\n  admin: [\"root\"]\n";
+    const VAULT_ADDR_MARKER: &str = "vault_addr_marker: ";
 
-    struct Fx {
-        dir: PathBuf,
-        reloader: Arc<Reloader<HermeticAuthorizer, ReloadSink>>,
-        status: KernelGraphStatus,
-        booted_released: usize,
-        _guard: Guard,
+    pub(super) struct Fx {
+        pub(super) dir: PathBuf,
+        pub(super) reloader: Arc<Reloader<HermeticAuthorizer, ReloadSink>>,
+        pub(super) status: KernelGraphStatus,
+        pub(super) booted_released: usize,
+        pub(super) _guard: Guard,
     }
 
-    struct ReloadSink {
-        inner: Arc<maknae_audit_append::AuditSink>,
-        fail_identity: std::sync::atomic::AtomicBool,
+    /// A record the reload forwarded, with the store file's sha256 at that moment.
+    #[derive(Debug, Clone)]
+    pub(super) struct Seen {
+        pub(super) action: String,
+        pub(super) reason: String,
+        pub(super) drain: Drain,
+        pub(super) store: String,
+    }
+
+    pub(super) struct ReloadSink {
+        pub(super) inner: Arc<maknae_audit_append::AuditSink>,
+        pub(super) fail_identity: std::sync::atomic::AtomicBool,
+        pub(super) fail_baseline: std::sync::atomic::AtomicBool,
+        pub(super) stall: std::sync::Mutex<fn(&AuditRecord) -> bool>,
+        pub(super) stalled: std::sync::atomic::AtomicUsize,
+        store: PathBuf,
+        seen: std::sync::Mutex<Vec<Seen>>,
+        /// Refuses every record of this action.
+        pub(super) refuse: std::sync::Mutex<Option<&'static str>>,
+        /// Each record waits this long before it is appended.
+        pub(super) delay: Duration,
+        drain: std::sync::Mutex<Option<tokio::sync::watch::Receiver<Drain>>>,
+    }
+
+    impl ReloadSink {
+        pub(super) fn stall_when(&self, when: fn(&AuditRecord) -> bool) {
+            *self.stall.lock().unwrap() = when;
+        }
+    }
+
+    pub(super) fn never(_: &AuditRecord) -> bool {
+        false
+    }
+
+    pub(super) fn is_reload(r: &AuditRecord) -> bool {
+        r.action == GRAPH_RELOAD_ACTION
+    }
+
+    pub(super) fn is_reload_outcome(r: &AuditRecord) -> bool {
+        r.action == GRAPH_RELOAD_ACTION && r.graph.as_ref().is_some_and(|g| g.anchor != "reloading")
+    }
+
+    pub(super) fn is_transition(r: &AuditRecord) -> bool {
+        r.action == GRAPH_TRANSITION_ACTION
+    }
+
+    pub(super) fn is_identity(r: &AuditRecord) -> bool {
+        r.action == GRAPH_IDENTITY_ACTION
+    }
+
+    fn file_sha(path: &Path) -> String {
+        std::fs::read(path)
+            .map(|b| lower_hex(&maknae_state::envelope::sha256(&b)))
+            .unwrap_or_default()
     }
 
     impl AuditEmit for ReloadSink {
@@ -7250,11 +10723,37 @@ mod reload_tests {
             rec: &AuditRecord,
         ) -> impl std::future::Future<Output = Result<(), maknae_audit_append::AuditError>> + Send
         {
-            let fail = rec.action == GRAPH_IDENTITY_ACTION
-                && self.fail_identity.load(std::sync::atomic::Ordering::SeqCst);
+            let fail = (rec.action == GRAPH_IDENTITY_ACTION
+                && self.fail_identity.load(std::sync::atomic::Ordering::SeqCst))
+                || (rec.action == GRAPH_BASELINE_ACTION
+                    && self.fail_baseline.load(std::sync::atomic::Ordering::SeqCst))
+                || *self.refuse.lock().unwrap() == Some(rec.action.as_str());
+            let stall = (*self.stall.lock().unwrap())(rec);
+            if stall {
+                self.stalled
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            if !stall && !fail {
+                self.seen.lock().unwrap().push(Seen {
+                    action: rec.action.clone(),
+                    reason: rec.outcome.reason.clone(),
+                    drain: self
+                        .drain
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .map_or(Drain::Serving, |d| *d.borrow()),
+                    store: file_sha(&self.store),
+                });
+            }
             let inner = Arc::clone(&self.inner);
             let rec = rec.clone();
+            let delay = self.delay;
             async move {
+                tokio::time::sleep(delay).await;
+                if stall {
+                    std::future::pending::<()>().await;
+                }
                 if fail {
                     return Err(maknae_audit_append::AuditError::WritePrimary(
                         "identity append refused".into(),
@@ -7265,15 +10764,18 @@ mod reload_tests {
         }
     }
 
-    struct Guard(PathBuf);
+    /// Removes the fixture's directory, unless it belongs to another fixture.
+    pub(super) struct Guard(Option<PathBuf>);
 
     impl Drop for Guard {
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
+            if let Some(dir) = &self.0 {
+                let _ = std::fs::remove_dir_all(dir);
+            }
         }
     }
 
-    fn requirement() -> maknae_config::TargetRequired {
+    pub(super) fn requirement() -> maknae_config::TargetRequired {
         maknae_config::TargetRequired {
             owner: None,
             mode_mask: Some(0o022),
@@ -7283,35 +10785,193 @@ mod reload_tests {
         }
     }
 
-    fn principal() -> maknae_config::Principal {
+    pub(super) fn principal() -> maknae_config::Principal {
         maknae_config::Principal {
             name: "op".into(),
             uid: nix::unistd::geteuid().as_raw(),
         }
     }
 
+    /// The fixture's `maknae.yaml`: `core_extra` under `core:`, then `tail`, whose lines
+    /// named by a marker (`vault_addr_marker: `, `socket_path_marker: `, ...) set that
+    /// value instead of being appended.
+    fn yaml(dir: &Path, core_extra: &str, tail: &str) -> String {
+        yaml_for(dir, core_extra, tail, nix::unistd::geteuid().as_raw())
+    }
+
+    fn yaml_for(dir: &Path, core_extra: &str, tail: &str, uid: u32) -> String {
+        let mut vault_addr = "https://v.example:8200".to_string();
+        let mut socket = dir.join("maknaed.sock").display().to_string();
+        let mut trail = dir.join("audit.jsonl").display().to_string();
+        let (mut transport, mut audit, mut rest) = (String::new(), String::new(), String::new());
+        for line in tail.lines() {
+            if let Some(v) = line.strip_prefix(VAULT_ADDR_MARKER) {
+                vault_addr = v.to_string();
+            } else if let Some(v) = line.strip_prefix("transport_tail_max_connections: ") {
+                transport.push_str(&format!("  max_connections: {v}\n"));
+            } else if let Some(v) = line.strip_prefix("socket_path_marker: ") {
+                socket = v.to_string();
+            } else if let Some(v) = line.strip_prefix("audit_path_marker: ") {
+                trail = v.to_string();
+            } else if let Some(v) = line.strip_prefix("audit_readers_marker: ") {
+                audit.push_str(&format!("  readers: {v}\n"));
+            } else {
+                rest.push_str(line);
+                rest.push('\n');
+            }
+        }
+        format!(
+            "core:\n  deployment_id: dev-01\n{core_extra}vault:\n  addr: {vault_addr}\ntransport:\n  socket_path: {socket}\n{transport}audit:\n  jsonl_path: {trail}\n{audit}principal:\n  name: op\n  uid: {uid}\n{rest}",
+        )
+    }
+
     impl Fx {
-        fn policy(&self) -> PathBuf {
+        pub(super) async fn with_baseline(tag: &str) -> Fx {
+            fixture(tag, AUTHZ, Some(ROOT_ADMIN)).await
+        }
+
+        /// Boots with `core_extra` (a full `handling:` block) already accepted.
+        pub(super) async fn with_core(tag: &str, core_extra: &str) -> Fx {
+            let opts = Opts {
+                core: core_extra,
+                ..Opts::default()
+            };
+            fixture_with(tag, opts).await
+        }
+
+        pub(super) async fn with_baseline_env(tag: &str, env: TestEnv) -> Fx {
+            let opts = Opts {
+                env,
+                ..Opts::default()
+            };
+            fixture_with(tag, opts).await
+        }
+
+        /// Boots with `tail` already in the file, the egress bounds in place.
+        pub(super) async fn with_baseline_yaml(tag: &str, tail: &str) -> Fx {
+            let opts = Opts {
+                env: TestEnv::with_bounds(),
+                tail,
+                ..Opts::default()
+            };
+            fixture_with(tag, opts).await
+        }
+
+        /// Every record waits `delay` before it appends, bounded by `bound`.
+        pub(super) async fn with_baseline_and_delay(
+            tag: &str,
+            delay: Duration,
+            bound: Duration,
+        ) -> Fx {
+            let opts = Opts {
+                delay,
+                bound,
+                ..Opts::default()
+            };
+            fixture_with(tag, opts).await
+        }
+
+        pub(super) async fn show(&self) -> maknae_proto::BaselineView {
+            tokio::time::timeout(
+                Duration::from_secs(30),
+                BaselineOps::show(self.reloader.as_ref()),
+            )
+            .await
+            .expect("the show returns")
+            .unwrap()
+        }
+
+        pub(super) async fn accept(&self, hash: &str) -> AcceptAnswer {
+            tokio::time::timeout(
+                Duration::from_secs(30),
+                BaselineOps::accept(self.reloader.as_ref(), hash),
+            )
+            .await
+            .expect("the accept returns")
+        }
+
+        pub(super) fn drain(&self) -> Drain {
+            *self.reloader.drain.borrow()
+        }
+
+        pub(super) fn refuse(&self, action: &'static str) {
+            *self.reloader.sink.refuse.lock().unwrap() = Some(action);
+        }
+
+        pub(super) fn composition(&self) -> &crate::Composition<HermeticAuthorizer> {
+            &self.reloader.authorizer
+        }
+
+        pub(super) fn live(&self) -> &Arc<crate::live::LiveConfig> {
+            self.reloader.authorizer.live()
+        }
+
+        pub(super) fn write_yaml_principal(&self, uid: u32, tail: &str) {
+            write_0640(
+                &self.dir.join("maknae.yaml"),
+                &yaml_for(&self.dir, "", tail, uid),
+            );
+        }
+
+        /// An empty, 0640 trail beside the fixture's own; the test env reports it prepared.
+        pub(super) fn prepare_trail(&self, name: &str) -> PathBuf {
+            let path = self.dir.join(name);
+            write_0640(&path, "");
+            path
+        }
+
+        pub(super) fn state_dir(&self) -> PathBuf {
+            self.dir.join("state")
+        }
+
+        pub(super) fn policy(&self) -> PathBuf {
             self.dir.join("authz.yaml")
         }
 
-        fn bindings(&self) -> PathBuf {
+        pub(super) fn bindings(&self) -> PathBuf {
             self.dir.join("bindings.yaml")
         }
 
-        fn write_policy(&self, body: &str) {
+        pub(super) fn write_policy(&self, body: &str) {
             write_0640(&self.policy(), body);
         }
 
-        fn write_bindings(&self, body: &str) {
+        pub(super) fn write_bindings(&self, body: &str) {
             write_0640(&self.bindings(), body);
         }
 
-        fn store_bytes(&self) -> Vec<u8> {
+        pub(super) fn write_yaml(&self, core_extra: &str, tail: &str) {
+            write_0640(
+                &self.dir.join("maknae.yaml"),
+                &yaml(&self.dir, core_extra, tail),
+            );
+        }
+
+        pub(super) fn store_bytes(&self) -> Vec<u8> {
             std::fs::read(self.dir.join("state").join(STORE_FILE)).unwrap()
         }
 
-        fn reload_records(&self) -> Vec<AuditRecord> {
+        pub(super) fn store_sha(&self) -> String {
+            file_sha(&self.dir.join("state").join(STORE_FILE))
+        }
+
+        pub(super) fn stored(&self) -> Option<BaselineLayer> {
+            maknae_state::store::peek_baseline(&self.reloader.dir, &self.reloader.key).unwrap()
+        }
+
+        pub(super) fn seen(&self) -> Vec<Seen> {
+            self.reloader.sink.seen.lock().unwrap().clone()
+        }
+
+        pub(super) fn status_lines(&self) -> Vec<String> {
+            self.reloader.baseline.lines()
+        }
+
+        pub(super) fn set_persisted(&self, graph: Arc<maknae_graph::graph::Graph>) {
+            *self.reloader.persisted.write().unwrap() = graph;
+        }
+
+        pub(super) fn reload_records(&self) -> Vec<AuditRecord> {
             std::fs::read_to_string(self.dir.join("audit.jsonl"))
                 .unwrap()
                 .lines()
@@ -7320,11 +10980,11 @@ mod reload_tests {
                 .collect()
         }
 
-        fn baseline(&self) -> &HermeticAuthorizer {
+        pub(super) fn baseline(&self) -> &HermeticAuthorizer {
             self.reloader.authorizer.baseline()
         }
 
-        fn root_whoami(&self) -> maknae_security::Verdict {
+        pub(super) fn root_whoami(&self) -> maknae_security::Verdict {
             self.reloader
                 .authorizer
                 .decide(&crate::handler::build_authz_request(
@@ -7337,16 +10997,16 @@ mod reload_tests {
         }
     }
 
-    fn write_0640(path: &Path, body: &str) {
+    pub(super) fn write_0640(path: &Path, body: &str) {
         std::fs::write(path, body).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640)).unwrap();
     }
 
-    async fn fixture(tag: &str, authz: &str, bindings: Option<&str>) -> Fx {
+    pub(super) async fn fixture(tag: &str, authz: &str, bindings: Option<&str>) -> Fx {
         fixture_gated(tag, authz, bindings, None).await
     }
 
-    async fn fixture_gated(
+    pub(super) async fn fixture_gated(
         tag: &str,
         authz: &str,
         bindings: Option<&str>,
@@ -7355,16 +11015,71 @@ mod reload_tests {
         fixture_seeded(tag, authz, bindings, load_gate, None).await
     }
 
-    type Seed = fn(&maknae_graph::identity::IdentityLayer) -> maknae_graph::identity::IdentityLayer;
+    pub(super) type Seed =
+        fn(&maknae_graph::identity::IdentityLayer) -> maknae_graph::identity::IdentityLayer;
+
+    /// The baseline a start over the fixture's files would seed.
+    pub(super) fn files_baseline(
+        dir: &Path,
+        env: &dyn crate::baseline_check::Env,
+    ) -> BaselineLayer {
+        let file = baseline_file(dir, crate::boot::read_files_as_owner, env, None).unwrap();
+        let start = crate::baseline::at_boot(None, Ok(file), |_| Ok(())).unwrap();
+        let doc = maknae_config::Document::from_baseline(&start.run).unwrap();
+        let v = crate::baseline_check::validate(doc, crate::baseline_check::Mode::Boot, dir, env)
+            .unwrap();
+        run_baseline(&start.run, crate::baseline_check::classification_of(&v))
+    }
 
     /// `seed` first boots the store with the layer it returns for the file's own.
-    async fn fixture_seeded(
+    pub(super) async fn fixture_seeded(
         tag: &str,
         authz: &str,
         bindings: Option<&str>,
         load_gate: Option<std::sync::mpsc::Receiver<()>>,
         seed: Option<Seed>,
     ) -> Fx {
+        let opts = Opts {
+            authz,
+            bindings,
+            load_gate,
+            seed,
+            ..Opts::default()
+        };
+        fixture_with(tag, opts).await
+    }
+
+    pub(super) struct Opts<'a> {
+        pub(super) authz: &'a str,
+        pub(super) bindings: Option<&'a str>,
+        pub(super) load_gate: Option<std::sync::mpsc::Receiver<()>>,
+        pub(super) seed: Option<Seed>,
+        pub(super) env: TestEnv,
+        pub(super) core: &'a str,
+        pub(super) tail: &'a str,
+        pub(super) delay: Duration,
+        pub(super) bound: Duration,
+        pub(super) turn_wait: Duration,
+    }
+
+    impl Default for Opts<'_> {
+        fn default() -> Self {
+            Opts {
+                authz: AUTHZ,
+                bindings: Some(ROOT_ADMIN),
+                load_gate: None,
+                seed: None,
+                env: TestEnv::default(),
+                core: "",
+                tail: "",
+                delay: Duration::ZERO,
+                bound: Duration::from_millis(200),
+                turn_wait: Duration::from_millis(200),
+            }
+        }
+    }
+
+    pub(super) async fn fixture_with(tag: &str, opts: Opts<'_>) -> Fx {
         let raw = std::env::temp_dir().join(format!("maknae_reload_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&raw);
         std::fs::create_dir_all(raw.join("state")).unwrap();
@@ -7374,24 +11089,68 @@ mod reload_tests {
         }
         let sink = Arc::new(
             maknae_audit_append::AuditSink::open(&maknae_config::AuditConfig {
+                readers: Vec::new(),
                 jsonl_path: dir.join("audit.jsonl"),
                 siem: None,
                 au3_1: serde_json::Value::Null,
             })
             .unwrap(),
         );
+        write_0640(&dir.join("maknae.yaml"), &yaml(&dir, opts.core, opts.tail));
+        let layer = files_baseline(&dir, &opts.env);
         let paths = maknae_authz_basic::PolicyPaths::in_dir(&dir);
-        write_0640(&paths.authz, authz);
-        if let Some(b) = bindings {
+        write_0640(&paths.authz, opts.authz);
+        if let Some(b) = opts.bindings {
             write_0640(&paths.bindings, b);
         }
+        assemble(dir.clone(), Some(dir), sink, layer, principal(), opts).await
+    }
+
+    /// A fixture over a start's existing configuration and state directories, running
+    /// the baseline its store holds.
+    pub(super) async fn over(dir: &Path, principal: maknae_config::Principal) -> Fx {
+        let sink = Arc::new(
+            maknae_audit_append::AuditSink::open_existing(&maknae_config::AuditConfig {
+                readers: Vec::new(),
+                jsonl_path: dir.join("audit.jsonl"),
+                siem: None,
+                au3_1: serde_json::Value::Null,
+            })
+            .unwrap(),
+        );
+        let state = StateDir::open(&dir.join("state"), nix::unistd::geteuid().as_raw()).unwrap();
+        let key = WrappingKey::new(
+            maknae_vault::graph_key_from_bytes(&[0x5a; 32])
+                .unwrap()
+                .into_bytes(),
+        );
+        let layer = maknae_state::store::peek_baseline(&state, &key)
+            .unwrap()
+            .unwrap();
+        drop(state);
+        let opts = Opts {
+            bindings: None,
+            ..Opts::default()
+        };
+        assemble(dir.to_path_buf(), None, sink, layer, principal, opts).await
+    }
+
+    async fn assemble(
+        dir: PathBuf,
+        owned: Option<PathBuf>,
+        sink: Arc<maknae_audit_append::AuditSink>,
+        layer: BaselineLayer,
+        principal: maknae_config::Principal,
+        opts: Opts<'_>,
+    ) -> Fx {
+        let paths = maknae_authz_basic::PolicyPaths::in_dir(&dir);
         let source = maknae_authz_basic::PolicySource::load_with_requirement(
             paths.clone(),
-            principal(),
+            principal.clone(),
             requirement(),
         )
         .unwrap();
-        let inputs = GraphInputs::new(&source, "UNCLASSIFIED").unwrap();
+        let inputs = GraphInputs::new(&source, "UNCLASSIFIED", layer.clone()).unwrap();
         let seq = Seq::new();
         let au3_1 = serde_json::Value::Null;
         let euid = nix::unistd::geteuid().as_raw();
@@ -7404,10 +11163,10 @@ mod reload_tests {
             seq: &seq,
             au3_1: &au3_1,
         };
-        if let Some(seed) = seed {
+        if let Some(seed) = opts.seed {
             let seeded = seed(&inputs.identity);
             drop(
-                boot_kernel_graph(
+                boot_graph_at(
                     &dir.join("state"),
                     maknae_vault::graph_key_from_bytes(&[0x5a; 32]),
                     &sink,
@@ -7421,7 +11180,7 @@ mod reload_tests {
                 .unwrap(),
             );
         }
-        let booted = boot_kernel_graph(
+        let booted = boot_graph_at(
             &dir.join("state"),
             maknae_vault::graph_key_from_bytes(&[0x5a; 32]),
             &sink,
@@ -7431,12 +11190,13 @@ mod reload_tests {
         .await
         .unwrap();
         let booted_released = booted.released.len();
+        let graph = Arc::new(booted.graph);
         let baseline = HermeticAuthorizer::new_over_graph(
             paths,
-            principal(),
+            principal,
             requirement(),
             maknae_state::envelope::sha256,
-            Arc::new(booted.graph),
+            Arc::clone(&graph),
         )
         .unwrap();
         publish_boot_identity(
@@ -7454,7 +11214,12 @@ mod reload_tests {
             baseline,
             crate::CeilingAuthorizer::new(maknae_config::Ceiling::baseline_for(us), us),
         ));
-        let status = booted.status;
+        let mut status = booted.status;
+        status.baseline = crate::baseline::BaselineStatus::new(crate::baseline::BaselineState {
+            accepted: layer.sections.clone().into(),
+            pending: None,
+        });
+        let drain = tokio::sync::watch::channel(Drain::Serving).0;
         let reloader = Arc::new(Reloader {
             dir: booted.dir,
             key: booted.key,
@@ -7466,6 +11231,14 @@ mod reload_tests {
             sink: Arc::new(ReloadSink {
                 inner: sink,
                 fail_identity: std::sync::atomic::AtomicBool::new(false),
+                fail_baseline: std::sync::atomic::AtomicBool::new(false),
+                stall: std::sync::Mutex::new(never),
+                stalled: std::sync::atomic::AtomicUsize::new(0),
+                store: dir.join("state").join(STORE_FILE),
+                seen: std::sync::Mutex::default(),
+                refuse: std::sync::Mutex::new(None),
+                delay: opts.delay,
+                drain: std::sync::Mutex::new(Some(drain.subscribe())),
             }),
             session_ids: Arc::new(SessionIds::new()),
             host: "h".into(),
@@ -7474,16 +11247,1241 @@ mod reload_tests {
             au3_1,
             identity: status.identity.clone(),
             stopping: tokio::sync::watch::channel(false).0,
-            load_gate: load_gate.map(|g| Arc::new(std::sync::Mutex::new(g))),
+            append_bound: opts.bound,
+            persisted: std::sync::RwLock::new(graph),
+            config_dir: dir.clone(),
+            files: crate::boot::read_files_as_owner,
+            env: Arc::new(opts.env),
+            baseline: status.baseline.clone(),
+            drain,
+            turn_wait: opts.turn_wait,
+            load_gate: opts.load_gate.map(|g| Arc::new(std::sync::Mutex::new(g))),
         });
         Fx {
-            _guard: Guard(dir.clone()),
+            _guard: Guard(owned),
             dir,
             reloader,
             status,
             booted_released,
         }
     }
+}
+
+#[cfg(unix)]
+#[cfg(test)]
+mod baseline_accept_tests {
+    use super::boot_gate_tests::TestEnv;
+    use super::reload_fixture::*;
+    use super::*;
+    use maknae_authz_basic::Baseline;
+    use std::os::unix::fs::PermissionsExt;
+
+    const SECRET: &str = "  handling:\n    ceiling:\n      classification: SECRET\n      sci: false\n      releasable_to: []\n      cui_permitted: false\n      cui_categories_permitted: []\n      dissemination_permitted: [\"Distribution Statement A\"]\n    accreditation_ref: null\n";
+    const ROOT_ADMIN_OTHER: &str =
+        "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  guest: []\n";
+    const RESTART: &str = "transport_tail_max_connections: 7\n";
+
+    fn unclassified() -> String {
+        SECRET.replace("SECRET", "UNCLASSIFIED")
+    }
+
+    fn accepted(a: AcceptAnswer) -> maknae_proto::BaselineView {
+        match a {
+            AcceptAnswer::View {
+                view,
+                corrective: None,
+            } => view,
+            other => panic!("expected an accepted view, got {other:?}"),
+        }
+    }
+
+    fn secret_read() -> maknae_security::Request {
+        let mut resource = maknae_security::Attributes::new();
+        resource.insert(
+            maknae_security::RESOURCE_CLASSIFICATION,
+            maknae_security::AttrValue::Str("SECRET".into()),
+        );
+        maknae_security::Request {
+            subject: maknae_security::Subject(maknae_security::Attributes::new()),
+            resource: maknae_security::Resource(resource),
+            action: maknae_security::Action("fs.read".into()),
+            context: maknae_security::Context(maknae_security::Attributes::new()),
+        }
+    }
+
+    fn other_uid() -> u32 {
+        nix::unistd::geteuid().as_raw().wrapping_add(1)
+    }
+
+    /// A live change: the principal moves to another uid.
+    fn write_live(fx: &Fx) {
+        fx.write_yaml_principal(other_uid(), "");
+    }
+
+    fn principal_uid(fx: &Fx) -> u32 {
+        fx.composition().baseline().principal().uid
+    }
+
+    fn ceiling_name(fx: &Fx) -> String {
+        fx.composition()
+            .ceiling()
+            .ceiling()
+            .classification
+            .name
+            .clone()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_ceiling_accept_applies_by_restart_and_installs_nothing_live() {
+        let unclassified = unclassified();
+        for (tag, core) in [
+            ("add-ceiling", ""),
+            ("raise-ceiling", unclassified.as_str()),
+        ] {
+            let opts = Opts {
+                core,
+                ..Opts::default()
+            };
+            let fx = fixture_with(tag, opts).await;
+            fx.write_yaml(SECRET, "");
+            let shown = fx.show().await;
+            assert_eq!(
+                (shown.state.as_str(), shown.apply.as_str()),
+                ("pending", "restart"),
+                "{tag}"
+            );
+            let view = accepted(fx.accept(&shown.hash).await);
+            assert_eq!(
+                (view.state.as_str(), view.apply.as_str()),
+                ("accepted", "restart"),
+                "{tag}"
+            );
+            assert_eq!(fx.drain(), Drain::Applied, "{tag}");
+            assert!(matches!(
+                crate::handler::after_drain(ServeOutcome::GracefulShutdown, fx.drain()),
+                ServeOutcome::ApplyByRestart
+            ));
+            assert_eq!(ceiling_name(&fx), "UNCLASSIFIED", "{tag}");
+            assert!(
+                matches!(
+                    maknae_security::Authorizer::decide(fx.composition().ceiling(), &secret_read()),
+                    maknae_security::Verdict::Deny { .. }
+                ),
+                "{tag}: the running ceiling still refuses SECRET content"
+            );
+            assert_eq!(fx.stored().unwrap().ceiling, "SECRET", "{tag}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_live_principal_and_providers_accept_swaps_both() {
+        let one = "providers:\n  - name: openai\n    endpoint: https://api.example.test/v1\n    models: [m]\n";
+        let two = "providers:\n  - name: openai\n    endpoint: https://api.example.test/v1\n    models: [m]\n  - name: other\n    endpoint: https://other.example.test/v1\n    models: [n]\n";
+        let fx = Fx::with_baseline_yaml("live-principal", one).await;
+        let generation = fx.live().generation();
+        fx.write_yaml_principal(4242, two);
+        let shown = fx.show().await;
+        assert_eq!(shown.apply, "live");
+        accepted(fx.accept(&shown.hash).await);
+        assert_eq!(fx.composition().baseline().principal().uid, 4242);
+        assert_eq!(
+            fx.live().generation(),
+            generation + 1,
+            "the request path's holder moved"
+        );
+        let names: Vec<String> = fx
+            .live()
+            .providers()
+            .as_ref()
+            .as_ref()
+            .unwrap()
+            .set
+            .iter()
+            .map(|p| p.name.clone())
+            .collect();
+        assert_eq!(names, ["openai", "other"]);
+        assert_eq!(fx.live().view()["principal"]["uid"], "4242");
+        fx.write_yaml_principal(4242, "");
+        assert_eq!(
+            fx.show().await.apply,
+            "restart",
+            "non-empty to empty providers applies by restart"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_live_principal_accept_republishes_the_principal_admin() {
+        let opts = Opts {
+            bindings: None,
+            ..Opts::default()
+        };
+        let fx = fixture_with("principal-admin", opts).await;
+        let uid = nix::unistd::geteuid().as_raw().wrapping_add(1);
+        fx.write_yaml_principal(uid, "");
+        let shown = fx.show().await;
+        accepted(fx.accept(&shown.hash).await);
+        let promoted = maknae_authz_basic::IdentityProblem::PrincipalAdmin { uid };
+        assert!(fx.status.identity.current().contains(&promoted));
+        assert!(fx
+            .seen()
+            .iter()
+            .any(|s| s.action == GRAPH_IDENTITY_ACTION && s.reason == promoted.to_string()));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_accept_is_written_ahead() {
+        let fx = Fx::with_baseline("ahead").await;
+        write_live(&fx);
+        let shown = fx.show().await;
+        let before = fx.store_sha();
+        accepted(fx.accept(&shown.hash).await);
+        let seen = fx.seen();
+        let at = |action: &str, prefix: &str| {
+            seen.iter()
+                .position(|s| s.action == action && s.reason.starts_with(prefix))
+                .unwrap_or_else(|| panic!("{action} {prefix}: {seen:?}"))
+        };
+        let short = crate::baseline::short(&shown.hash);
+        let intent = at(
+            GRAPH_BASELINE_ACTION,
+            &format!(
+                "accept intent recorded (operator): sha256:{short}; apply: live; sections: principal"
+            ),
+        );
+        let transition = at(GRAPH_TRANSITION_ACTION, "intent recorded (operator)");
+        let checkpoint = at(CHECKPOINT_ACTION, "transitioned");
+        let outcome = at(
+            GRAPH_BASELINE_ACTION,
+            &format!("accepted sha256:{short} at revision "),
+        );
+        assert!(
+            !seen.iter().any(|s| s.reason.contains(&shown.hash)),
+            "no record carries the full hash"
+        );
+        assert!(intent < transition && transition < checkpoint && checkpoint < outcome);
+        assert_eq!(seen[intent].store, before);
+        assert_eq!(seen[transition].store, before);
+        assert_ne!(seen[checkpoint].store, before);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_intent_persists_nothing() {
+        let fx = Fx::with_baseline("failed-intent").await;
+        write_live(&fx);
+        let shown = fx.show().await;
+        let before = fx.store_sha();
+        fx.refuse(GRAPH_BASELINE_ACTION);
+        let got = fx.accept(&shown.hash).await;
+        assert!(
+            matches!(got, AcceptAnswer::Unavailable { reply: ACCEPT_UNAVAILABLE, ref why } if why.contains("intent")),
+            "{got:?}"
+        );
+        assert_eq!(fx.store_sha(), before);
+        assert_eq!(fx.drain(), Drain::Serving);
+        assert_eq!(principal_uid(&fx), nix::unistd::geteuid().as_raw());
+        assert_eq!(fx.status_lines().len(), 0, "status was not published");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stale_hash_is_refused_and_the_store_is_unchanged() {
+        let fx = Fx::with_core("stale", &unclassified()).await;
+        fx.write_yaml(SECRET, "");
+        let shown = fx.show().await;
+        fx.write_yaml(&SECRET.replace("SECRET", "CONFIDENTIAL"), "");
+        let before = fx.store_sha();
+        match fx.accept(&shown.hash).await {
+            AcceptAnswer::View {
+                view,
+                corrective: Some(why),
+            } => {
+                assert_eq!(view.state, "stale");
+                assert!(view.hash.is_empty());
+                assert!(why.contains("show it again"), "{why}");
+            }
+            other => panic!("{other:?}"),
+        }
+        match fx.accept("nope").await {
+            AcceptAnswer::View {
+                view,
+                corrective: Some(_),
+            } => assert_eq!(view.state, "stale"),
+            other => panic!("{other:?}"),
+        }
+        assert!(!fx
+            .seen()
+            .iter()
+            .any(|s| s.action == GRAPH_TRANSITION_ACTION));
+        assert_eq!(fx.store_sha(), before);
+        fx.write_yaml(&unclassified(), "");
+        match fx.accept(&shown.hash).await {
+            AcceptAnswer::View { view, .. } => assert_eq!(view.state, "none"),
+            other => panic!("{other:?}"),
+        }
+        fx.write_yaml(&format!("{}  unknown_key: 1\n", unclassified()), "");
+        let invalid = fx.show().await;
+        assert_eq!(invalid.state, "invalid");
+        match fx.accept(&invalid.hash).await {
+            AcceptAnswer::View { view, .. } => assert_eq!(view.state, "invalid"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(fx.store_sha(), before);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn nothing_is_admitted_after_a_restart_accept_begins_its_drain() {
+        let fx = Fx::with_baseline("restart").await;
+        fx.write_yaml("", RESTART);
+        let shown = fx.show().await;
+        assert_eq!(shown.apply, "restart");
+        let before = fx.store_sha();
+        let view = accepted(fx.accept(&shown.hash).await);
+        assert_eq!(
+            (view.state.as_str(), view.apply.as_str()),
+            ("accepted", "restart")
+        );
+        let seen = fx.seen();
+        let transition = seen
+            .iter()
+            .find(|s| s.action == GRAPH_TRANSITION_ACTION && s.reason.contains("operator"))
+            .unwrap();
+        assert_eq!(
+            transition.store, before,
+            "nothing was persisted before the transition intent"
+        );
+        let checkpoint = seen
+            .iter()
+            .find(|s| s.action == CHECKPOINT_ACTION && s.reason == "transitioned")
+            .unwrap();
+        assert_eq!(transition.drain, Drain::Serving);
+        assert_eq!(
+            checkpoint.drain,
+            Drain::Applied,
+            "the drain is applied as soon as the persist has landed"
+        );
+        assert_ne!(checkpoint.store, before);
+        assert_eq!(fx.drain(), Drain::Applied);
+        assert!(!crate::handler::admits(fx.drain()));
+        assert_eq!(ceiling_name(&fx), "UNCLASSIFIED");
+        assert!(fx.stored().unwrap().sections["transport"].contains("\"max_connections\":7"));
+    }
+
+    fn is_checkpoint(r: &AuditRecord) -> bool {
+        r.action == CHECKPOINT_ACTION
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_restart_accepts_stop_record_can_precede_its_checkpoint_and_outcome() {
+        let opts = Opts {
+            bound: Duration::from_secs(2),
+            ..Opts::default()
+        };
+        let fx = Arc::new(fixture_with("restart-order", opts).await);
+        fx.write_yaml("", RESTART);
+        let shown = fx.show().await;
+        assert_eq!(shown.apply, "restart");
+        fx.reloader.sink.stall_when(is_checkpoint);
+        let stopper = {
+            let fx = Arc::clone(&fx);
+            let rx = fx.reloader.drain.subscribe();
+            tokio::spawn(async move {
+                shutdown_on(std::future::pending::<()>(), rx).await;
+                let stop = make_record(
+                    "shutdown",
+                    "h",
+                    "s",
+                    0,
+                    None,
+                    None,
+                    None,
+                    0,
+                    1,
+                    "serve",
+                    None,
+                    "permit",
+                    "shutdown: restarting to apply an accepted baseline",
+                    "stopped",
+                    &serde_json::Value::Null,
+                );
+                fx.reloader.sink.emit(&stop).await.unwrap();
+            })
+        };
+        let accept = {
+            let fx = Arc::clone(&fx);
+            tokio::spawn(async move { fx.accept(&shown.hash).await })
+        };
+        tokio::time::timeout(Duration::from_secs(1), stopper)
+            .await
+            .expect("the stop is released while the checkpoint append is still pending")
+            .unwrap();
+        assert!(!accept.is_finished());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while fx
+                .reloader
+                .sink
+                .stalled
+                .load(std::sync::atomic::Ordering::SeqCst)
+                == 0
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the checkpoint append is the one held");
+        let view = accepted(
+            tokio::time::timeout(Duration::from_secs(30), accept)
+                .await
+                .expect("the accept finishes")
+                .unwrap(),
+        );
+        assert_eq!(view.apply, "restart");
+        let seen = fx.seen();
+        let at = |pred: &dyn Fn(&Seen) -> bool| seen.iter().position(pred).unwrap();
+        let transition =
+            at(&|s| s.action == GRAPH_TRANSITION_ACTION && s.reason.contains("operator"));
+        let stop = at(&|s| s.action == "serve");
+        let outcome =
+            at(&|s| s.action == GRAPH_BASELINE_ACTION && s.reason.starts_with("accepted sha256:"));
+        assert!(
+            transition < stop && stop < outcome,
+            "transition, then the stop, then the outcome: {seen:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_restart_accept_whose_persist_fails_is_abandoned() {
+        if nix::unistd::geteuid().is_root() {
+            eprintln!("skipped: root writes through a 0500 directory");
+            return;
+        }
+        let fx = Fx::with_baseline("abandoned").await;
+        fx.write_yaml("", RESTART);
+        let shown = fx.show().await;
+        std::fs::set_permissions(fx.state_dir(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        let got = fx.accept(&shown.hash).await;
+        std::fs::set_permissions(fx.state_dir(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            matches!(got, AcceptAnswer::Unavailable { reply: ACCEPT_UNAVAILABLE, ref why } if why.contains("persist")),
+            "{got:?}"
+        );
+        assert_eq!(fx.drain(), Drain::Failed);
+        assert!(matches!(
+            crate::handler::after_drain(ServeOutcome::GracefulShutdown, fx.drain()),
+            ServeOutcome::AcceptAbandoned
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reload_after_a_live_accept_keeps_the_accepted_baseline() {
+        let fx = Fx::with_baseline("reload-after-accept").await;
+        write_live(&fx);
+        let shown = fx.show().await;
+        accepted(fx.accept(&shown.hash).await);
+        fx.write_bindings(ROOT_ADMIN_OTHER);
+        let before = fx.stored().unwrap().sha256;
+        tokio::time::timeout(Duration::from_secs(30), fx.reloader.run())
+            .await
+            .expect("the reload finishes")
+            .unwrap();
+        assert_ne!(fx.store_sha(), "", "the reload persisted");
+        let stored = fx.stored().unwrap();
+        assert_eq!(stored.sha256, before);
+        assert!(stored.sections["principal"].contains(&other_uid().to_string()));
+        assert!(fx.status_lines().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_accepted_trail_move_is_recorded_for_the_restart_boot_to_perform() {
+        let fx = Fx::with_baseline("accept-move").await;
+        let old = fx.dir.join("audit.jsonl");
+        let new = fx.prepare_trail("audit-2.jsonl");
+        fx.write_yaml("", &format!("audit_path_marker: {}\n", new.display()));
+        let shown = fx.show().await;
+        assert_eq!(shown.apply, "restart");
+        accepted(fx.accept(&shown.hash).await);
+        let stored = fx.stored().unwrap();
+        assert_eq!(stored.moved_from.as_deref(), Some(old.to_str().unwrap()));
+        assert!(stored.sections["audit"].contains("audit-2.jsonl"));
+        assert!(
+            std::fs::read_to_string(&new).unwrap().is_empty(),
+            "the accept itself appends nothing to the new trail"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_accept_of_root_as_a_reader_is_refused_naming_it() {
+        let fx = Fx::with_baseline("readers-root").await;
+        fx.write_yaml("", "audit_readers_marker: [root]\n");
+        let shown = fx.show().await;
+        assert_eq!(
+            (shown.state.as_str(), shown.apply.as_str()),
+            ("pending", "live")
+        );
+        let before = fx.store_sha();
+        let (_, from) = journal_capture::since(usize::MAX, "");
+        match fx.accept(&shown.hash).await {
+            AcceptAnswer::View {
+                view,
+                corrective: Some(why),
+            } => {
+                assert_eq!(
+                    (view.state.as_str(), why.as_str()),
+                    ("invalid", ACCEPT_INVALID)
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        let (lines, _) =
+            journal_capture::since(from, "maknaed: baseline accept refused: root-file ");
+        assert!(
+            lines.iter().any(|l| l.contains("audit.readers root")),
+            "{lines:?}"
+        );
+        assert_eq!(fx.store_sha(), before);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_accept_whose_new_socket_cannot_bind_is_refused() {
+        let env = TestEnv {
+            bindable: Err("EACCES".into()),
+            ..TestEnv::default()
+        };
+        let fx = Fx::with_baseline_env("bind-probe", env).await;
+        let other = fx.dir.join("other.sock");
+        fx.write_yaml("", &format!("socket_path_marker: {}\n", other.display()));
+        let shown = fx.show().await;
+        let before = fx.store_sha();
+        let (_, from) = journal_capture::since(usize::MAX, "");
+        match fx.accept(&shown.hash).await {
+            AcceptAnswer::View {
+                view,
+                corrective: Some(why),
+            } => {
+                assert_eq!(
+                    (view.state.as_str(), why.as_str()),
+                    ("invalid", ACCEPT_INVALID)
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        let (lines, _) = journal_capture::since(from, &other.display().to_string());
+        assert!(
+            lines.iter().any(
+                |l| l.starts_with("maknaed: baseline accept refused: ") && l.contains("EACCES")
+            ),
+            "{lines:?}"
+        );
+        assert_eq!(fx.store_sha(), before);
+        assert_eq!(fx.drain(), Drain::Serving);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stale_or_garbage_hash_never_resolves_or_probes() {
+        let env = TestEnv::counting();
+        let fx = Fx::with_baseline_env("no-probe", env.clone()).await;
+        let other = fx.dir.join("other.sock");
+        fx.write_yaml(
+            "",
+            &format!(
+                "socket_path_marker: {}\naudit_readers_marker: [vector]\n",
+                other.display()
+            ),
+        );
+        let shown = fx.show().await;
+        for named in ["0".repeat(64), "garbage".to_string()] {
+            assert!(matches!(
+                fx.accept(&named).await,
+                AcceptAnswer::View {
+                    corrective: Some(_),
+                    ..
+                }
+            ));
+        }
+        assert_eq!(
+            (env.binds(), env.connects(), env.reader_lookups()),
+            (0, 0, 0)
+        );
+        accepted(fx.accept(&shown.hash).await);
+        assert_eq!(env.binds(), 1, "the valid hash is the first to probe");
+        assert_eq!(
+            env.reader_lookups(),
+            1,
+            "and the first to resolve the readers"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_restart_accept_with_slow_appends_still_applies() {
+        let fx = Fx::with_baseline_and_delay(
+            "slow-accept",
+            Duration::from_millis(500),
+            Duration::from_secs(1),
+        )
+        .await;
+        fx.write_yaml("", RESTART);
+        let shown = fx.show().await;
+        accepted(fx.accept(&shown.hash).await);
+        assert_eq!(fx.drain(), Drain::Applied);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_accept_waits_for_a_reload_and_gives_up_after_the_bound() {
+        let fx = Fx::with_baseline("busy").await;
+        write_live(&fx);
+        let shown = fx.show().await;
+        let held = fx.reloader.lock.lock().await;
+        let got = tokio::time::timeout(Duration::from_secs(3), fx.accept(&shown.hash))
+            .await
+            .expect("bounded");
+        drop(held);
+        assert!(
+            matches!(
+                got,
+                AcceptAnswer::Unavailable {
+                    reply: ACCEPT_BUSY,
+                    ..
+                }
+            ),
+            "{got:?}"
+        );
+        assert_eq!(principal_uid(&fx), nix::unistd::geteuid().as_raw());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_accept_is_refused_once_shutdown_has_begun() {
+        let fx = Fx::with_core("stopping", &unclassified()).await;
+        fx.write_yaml(SECRET, "");
+        let shown = fx.show().await;
+        fx.reloader.stopping.send_replace(true);
+        let got = fx.accept(&shown.hash).await;
+        assert!(
+            matches!(
+                got,
+                AcceptAnswer::Unavailable {
+                    reply: ACCEPT_STOPPING,
+                    ..
+                }
+            ),
+            "{got:?}"
+        );
+        assert!(!fx.seen().iter().any(|s| s.action == GRAPH_BASELINE_ACTION));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_accept_is_refused_unless_the_drain_is_serving() {
+        for drain in [Drain::Begun, Drain::Applied, Drain::Failed] {
+            let fx = Fx::with_core(&format!("draining-{drain:?}"), &unclassified()).await;
+            fx.write_yaml(SECRET, "");
+            let shown = fx.show().await;
+            let before = fx.store_sha();
+            fx.reloader.drain.send_replace(drain);
+            let got = fx.accept(&shown.hash).await;
+            assert!(
+                matches!(
+                    got,
+                    AcceptAnswer::Unavailable {
+                        reply: ACCEPT_STOPPING,
+                        ..
+                    }
+                ),
+                "{drain:?}: {got:?}"
+            );
+            assert_eq!(fx.drain(), drain);
+            assert_eq!(fx.store_sha(), before, "{drain:?}");
+            assert_eq!(ceiling_name(&fx), "UNCLASSIFIED");
+            assert!(!fx.seen().iter().any(|s| s.action == GRAPH_BASELINE_ACTION));
+        }
+    }
+
+    #[test]
+    fn a_drain_left_begun_by_an_accept_becomes_failed() {
+        for (at, live_unsettled, after) in [
+            (Drain::Begun, false, Drain::Failed),
+            (Drain::Serving, false, Drain::Serving),
+            (Drain::Applied, false, Drain::Applied),
+            (Drain::Failed, false, Drain::Failed),
+            (Drain::Serving, true, Drain::Applied),
+            (Drain::Applied, true, Drain::Applied),
+            (Drain::Failed, true, Drain::Failed),
+        ] {
+            let (tx, rx) = tokio::sync::watch::channel(Drain::Serving);
+            let guard = DrainGuard {
+                drain: &tx,
+                live_unsettled,
+            };
+            tx.send_replace(at);
+            drop(guard);
+            assert_eq!(*rx.borrow(), after, "{at:?} {live_unsettled}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_live_accept_refused_the_turn_by_a_decision_persists_nothing() {
+        let fx = Fx::with_baseline("turn-busy").await;
+        write_live(&fx);
+        let shown = fx.show().await;
+        assert_eq!(shown.apply, "live");
+        let before = fx.store_sha();
+        let (held_tx, held) = std::sync::mpsc::channel();
+        let (release_tx, release) = std::sync::mpsc::channel::<()>();
+        let holder = {
+            let pdp = Arc::clone(&fx.reloader.authorizer);
+            std::thread::spawn(move || {
+                let _decision = pdp.hold_live_turn();
+                let _ = held_tx.send(());
+                let _ = release.recv_timeout(Duration::from_secs(20));
+            })
+        };
+        held.recv_timeout(Duration::from_secs(5))
+            .expect("the turn is held");
+        let got = tokio::time::timeout(Duration::from_secs(3), fx.accept(&shown.hash))
+            .await
+            .expect("bounded");
+        let _ = release_tx.send(());
+        holder.join().unwrap();
+        assert!(
+            matches!(
+                got,
+                AcceptAnswer::Unavailable {
+                    reply: ACCEPT_DECIDING,
+                    ..
+                }
+            ),
+            "{got:?}"
+        );
+        assert_eq!(fx.store_sha(), before);
+        assert_eq!(fx.drain(), Drain::Serving);
+        assert_eq!(principal_uid(&fx), nix::unistd::geteuid().as_raw());
+        assert!(!fx
+            .seen()
+            .iter()
+            .any(|s| s.action == GRAPH_TRANSITION_ACTION || s.action == GRAPH_BASELINE_ACTION));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn no_decision_sees_the_old_principal_once_a_live_accept_has_persisted() {
+        let opts = Opts {
+            delay: Duration::from_millis(30),
+            bound: Duration::from_secs(1),
+            turn_wait: Duration::from_secs(5),
+            ..Opts::default()
+        };
+        let fx = Arc::new(fixture_with("turn-held", opts).await);
+        write_live(&fx);
+        let shown = fx.show().await;
+        let before = fx.store_sha();
+        let (held_tx, held) = std::sync::mpsc::channel();
+        let holder = {
+            let pdp = Arc::clone(&fx.reloader.authorizer);
+            std::thread::spawn(move || {
+                let _decision = pdp.hold_live_turn();
+                let _ = held_tx.send(());
+                std::thread::sleep(Duration::from_millis(50));
+            })
+        };
+        held.recv_timeout(Duration::from_secs(5))
+            .expect("the turn is held");
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let probe = {
+            let (fx, stop, before) = (Arc::clone(&fx), Arc::clone(&stop), before.clone());
+            std::thread::spawn(move || {
+                let (mut stale, mut decided) = (0, 0);
+                while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    let persisted = fx.store_sha() != before;
+                    let turn = fx.composition().hold_live_turn();
+                    let uid = principal_uid(&fx);
+                    drop(turn);
+                    decided += 1;
+                    if persisted && uid != other_uid() {
+                        stale += 1;
+                    }
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                (stale, decided)
+            })
+        };
+        let view = accepted(fx.accept(&shown.hash).await);
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        holder.join().unwrap();
+        let (stale, decided) = probe.join().unwrap();
+        assert_eq!(view.apply, "live");
+        assert!(decided > 0);
+        assert_eq!(
+            stale, 0,
+            "a decision ran on the old principal after the persist"
+        );
+        assert_eq!(principal_uid(&fx), other_uid());
+        assert_eq!(fx.drain(), Drain::Serving);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_live_accept_whose_checkpoint_fails_applies_by_restart() {
+        let fx = Fx::with_baseline("checkpoint-fails").await;
+        write_live(&fx);
+        let shown = fx.show().await;
+        fx.refuse(CHECKPOINT_ACTION);
+        let view = accepted(fx.accept(&shown.hash).await);
+        assert_eq!(view.apply, "restart");
+        assert_eq!(fx.drain(), Drain::Applied);
+        assert!(matches!(
+            crate::handler::after_drain(ServeOutcome::GracefulShutdown, fx.drain()),
+            ServeOutcome::ApplyByRestart
+        ));
+        assert_eq!(
+            principal_uid(&fx),
+            nix::unistd::geteuid().as_raw(),
+            "nothing installed live"
+        );
+        assert!(fx.stored().unwrap().sections["principal"].contains(&other_uid().to_string()));
+        let outcome = fx
+            .seen()
+            .into_iter()
+            .rfind(|s| s.action == GRAPH_BASELINE_ACTION)
+            .unwrap();
+        assert!(
+            outcome.reason.ends_with("restarting to apply")
+                && !outcome.reason.contains("applied live"),
+            "{outcome:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_live_accept_whose_store_sync_fails_applies_by_restart() {
+        let fx = Fx::with_baseline("sync-fails").await;
+        write_live(&fx);
+        let shown = fx.show().await;
+        fx.reloader.dir.fail_next_directory_sync();
+        let view = accepted(fx.accept(&shown.hash).await);
+        assert_eq!(view.apply, "restart");
+        assert_eq!(fx.drain(), Drain::Applied);
+        assert!(matches!(
+            crate::handler::after_drain(ServeOutcome::GracefulShutdown, fx.drain()),
+            ServeOutcome::ApplyByRestart
+        ));
+        assert_eq!(principal_uid(&fx), nix::unistd::geteuid().as_raw());
+        let outcome = fx
+            .seen()
+            .into_iter()
+            .rfind(|s| s.action == GRAPH_BASELINE_ACTION)
+            .unwrap();
+        assert!(
+            outcome
+                .reason
+                .contains("not installed live: the store was not durable")
+                && outcome.reason.ends_with("restarting to apply")
+                && !outcome.reason.contains("applied live"),
+            "{outcome:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_live_install_that_panics_applies_by_restart() {
+        let fx = Fx::with_baseline("install-panics").await;
+        write_live(&fx);
+        let shown = fx.show().await;
+        fx.composition()
+            .panic_on_install
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let view = accepted(fx.accept(&shown.hash).await);
+        assert_eq!(view.apply, "restart");
+        assert_eq!(fx.drain(), Drain::Applied);
+        assert!(matches!(
+            crate::handler::after_drain(ServeOutcome::GracefulShutdown, fx.drain()),
+            ServeOutcome::ApplyByRestart
+        ));
+        assert_eq!(principal_uid(&fx), nix::unistd::geteuid().as_raw());
+        let outcome = fx
+            .seen()
+            .into_iter()
+            .rfind(|s| s.action == GRAPH_BASELINE_ACTION)
+            .unwrap();
+        assert!(
+            outcome.reason.contains("not installed live: ")
+                && outcome.reason.ends_with("restarting to apply"),
+            "{outcome:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_live_accept_whose_outcome_is_not_recorded_applies_by_restart() {
+        let fx = Fx::with_baseline("outcome-fails").await;
+        write_live(&fx);
+        let shown = fx.show().await;
+        fx.reloader.sink.stall_when(is_accept_outcome);
+        let view = accepted(fx.accept(&shown.hash).await);
+        assert_eq!(view.apply, "restart");
+        assert_eq!(fx.drain(), Drain::Applied);
+        assert!(matches!(
+            crate::handler::after_drain(ServeOutcome::GracefulShutdown, fx.drain()),
+            ServeOutcome::ApplyByRestart
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reload_is_refused_unless_the_drain_is_serving() {
+        let fx = Fx::with_core("reload-drain", &unclassified()).await;
+        let revision = fx.reloader.revision.load(AtomicOrdering::Acquire);
+        for state in [Drain::Begun, Drain::Applied, Drain::Failed] {
+            fx.reloader.drain.send_replace(state);
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(30), fx.reloader.run())
+                    .await
+                    .expect("the reload returns")
+                    .err(),
+                Some(crate::reload::Refusal::Shutdown),
+                "{state:?}"
+            );
+            assert_eq!(fx.reloader.revision.load(AtomicOrdering::Acquire), revision);
+        }
+        fx.reloader.drain.send_replace(Drain::Serving);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(30), fx.reloader.run())
+                .await
+                .expect("the reload returns")
+                .is_ok()
+        );
+    }
+
+    fn is_accept_outcome(r: &AuditRecord) -> bool {
+        r.action == GRAPH_BASELINE_ACTION && r.outcome.reason.starts_with("accepted sha256:")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_finished_live_accept_leaves_the_next_accepts_drain_alone() {
+        let fx = Arc::new(Fx::with_baseline("guard-turn").await);
+        write_live(&fx);
+        let shown = fx.show().await;
+        assert_eq!(shown.apply, "live");
+        fx.reloader.sink.stall_when(is_accept_outcome);
+        let first = {
+            let fx = Arc::clone(&fx);
+            tokio::spawn(async move { fx.accept(&shown.hash).await })
+        };
+        let next = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if fx
+                    .reloader
+                    .sink
+                    .stalled
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                    > 0
+                {
+                    if let Ok(turn) = fx.reloader.lock.try_lock() {
+                        break turn;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the live accept releases the turn while its outcome is appended");
+        fx.reloader.drain.send_replace(Drain::Begun);
+        accepted(
+            tokio::time::timeout(Duration::from_secs(5), first)
+                .await
+                .expect("the live accept finishes")
+                .unwrap(),
+        );
+        assert_eq!(
+            fx.drain(),
+            Drain::Begun,
+            "the finished accept rewrote the drain the turn's holder began"
+        );
+        fx.reloader.drain.send_replace(Drain::Serving);
+        drop(next);
+    }
+
+    #[tokio::test]
+    async fn the_shutdown_future_waits_for_the_accept_to_finish() {
+        let (tx, rx) = tokio::sync::watch::channel(Drain::Serving);
+        let fut = shutdown_on(std::future::pending::<()>(), rx);
+        tokio::pin!(fut);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut fut)
+                .await
+                .is_err(),
+            "not before the drain"
+        );
+        tx.send_replace(Drain::Begun);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut fut)
+                .await
+                .is_err(),
+            "not while the accept is still committing"
+        );
+        tx.send_replace(Drain::Applied);
+        tokio::time::timeout(Duration::from_secs(1), fut)
+            .await
+            .expect("resolves once the accept has persisted");
+    }
+
+    #[tokio::test]
+    async fn a_dropped_drain_sender_never_resolves_shutdown() {
+        let (tx, rx) = tokio::sync::watch::channel(Drain::Serving);
+        drop(tx);
+        let fut = shutdown_on(std::future::pending::<()>(), rx);
+        assert!(tokio::time::timeout(Duration::from_millis(200), fut)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn a_signal_resolves_shutdown_while_serving() {
+        let (_tx, rx) = tokio::sync::watch::channel(Drain::Serving);
+        tokio::time::timeout(Duration::from_secs(1), shutdown_on(async {}, rx))
+            .await
+            .expect("a signal stops the serve");
+    }
+}
+
+#[cfg(unix)]
+#[cfg(test)]
+mod reload_tests {
+    use super::boot_gate_tests::boot_graph_at;
+    use super::reload_fixture::*;
+    use super::*;
+    use maknae_authz_basic::Baseline;
+    use maknae_graph::record::ProvenanceKind;
+
+    const ROOT_ADMIN_OTHER: &str =
+        "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  guest: []\n";
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reload_carries_the_persisted_baseline_unchanged() {
+        let fx = Fx::with_baseline("carry").await;
+        let before = fx.stored();
+        assert!(before.is_some());
+        fx.write_bindings(ROOT_ADMIN_OTHER);
+        let applied = bounded(fx.reloader.run()).await.unwrap();
+        assert!(applied.persisted);
+        assert_eq!(fx.stored(), before);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reload_never_applies_a_baseline_change_and_records_the_set_once() {
+        let fx = Fx::with_baseline("vault-at-reload").await;
+        let before = fx.stored();
+        fx.write_yaml("", "vault_addr_marker: https://w.example:8200\n");
+        bounded(fx.reloader.run()).await.unwrap();
+        assert_eq!(fx.stored(), before, "a reload does not move vault");
+        let pending: Vec<_> = fx
+            .seen()
+            .into_iter()
+            .filter(|s| s.action == GRAPH_BASELINE_ACTION)
+            .collect();
+        assert_eq!(pending.len(), 1, "{pending:?}");
+        assert!(pending[0]
+            .reason
+            .starts_with("baseline change pending acceptance: root-file "));
+        assert!(
+            pending[0]
+                .reason
+                .ends_with("(apply: restart; sections: vault)"),
+            "{}",
+            pending[0].reason
+        );
+        assert_eq!(
+            fx.status_lines(),
+            vec!["baseline: 1 pending (restart)".to_string()]
+        );
+        bounded(fx.reloader.run()).await.unwrap();
+        assert_eq!(
+            fx.seen()
+                .iter()
+                .filter(|s| s.action == GRAPH_BASELINE_ACTION)
+                .count(),
+            1,
+            "an unchanged set is not recorded again"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pending_set_whose_record_failed_is_recorded_by_the_next_reload() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let fx = Fx::with_baseline("pending-retry").await;
+        fx.write_yaml("", "vault_addr_marker: https://w.example:8200\n");
+        fx.reloader.sink.fail_baseline.store(true, SeqCst);
+        bounded(fx.reloader.run()).await.unwrap();
+        let recorded = |fx: &Fx| {
+            fx.seen()
+                .iter()
+                .filter(|s| s.action == GRAPH_BASELINE_ACTION)
+                .count()
+        };
+        assert_eq!(recorded(&fx), 0);
+        assert!(
+            fx.status_lines().is_empty(),
+            "an unrecorded set is not published"
+        );
+        fx.reloader.sink.fail_baseline.store(false, SeqCst);
+        bounded(fx.reloader.run()).await.unwrap();
+        assert_eq!(recorded(&fx), 1, "the next reload records it");
+        assert_eq!(
+            fx.status_lines(),
+            vec!["baseline: 1 pending (restart)".to_string()]
+        );
+        bounded(fx.reloader.run()).await.unwrap();
+        assert_eq!(recorded(&fx), 1, "and only once");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_pending_record_follows_the_reload_outcome() {
+        let fx = Fx::with_baseline("pending-order").await;
+        fx.write_yaml("", "vault_addr_marker: https://w.example:8200\n");
+        bounded(fx.reloader.run()).await.unwrap();
+        let actions: Vec<String> = fx.seen().into_iter().map(|s| s.action).collect();
+        assert_eq!(
+            actions,
+            [
+                GRAPH_RELOAD_ACTION,
+                GRAPH_RELOAD_ACTION,
+                GRAPH_BASELINE_ACTION
+            ]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_invalid_baseline_file_does_not_refuse_the_reload() {
+        let fx = Fx::with_baseline("invalid-at-reload").await;
+        fx.write_yaml("  unknown_key: 1\n", "");
+        fx.write_bindings(ROOT_ADMIN_OTHER);
+        let applied = bounded(fx.reloader.run()).await.unwrap();
+        assert!(applied.persisted, "the policy edit applied");
+        let rec = fx
+            .seen()
+            .into_iter()
+            .find(|s| s.action == GRAPH_BASELINE_ACTION)
+            .unwrap();
+        assert_eq!(rec.reason, crate::baseline::INVALID_RECORDED);
+        let pending = fx.reloader.baseline.current().pending.clone().unwrap();
+        assert!(
+            matches!(&pending.state, crate::baseline::PendingState::Invalid { cause, .. } if cause.contains("unknown_key")),
+            "{pending:?}"
+        );
+        assert_eq!(
+            fx.status_lines(),
+            vec!["baseline: 1 pending (invalid)".to_string()]
+        );
+        assert_eq!(rec.store, fx.store_sha(), "recorded after the commit");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_edit_of_an_invalid_file_that_parses_is_a_new_set() {
+        let fx = Fx::with_baseline("invalid-edits").await;
+        let providers = |model: &str| {
+            format!("providers:\n  - name: openai\n    endpoint: https://api.example.test/v1\n    models: [{model}]\n")
+        };
+        let mut hashes = Vec::new();
+        for model in ["m", "n"] {
+            fx.write_yaml("", &providers(model));
+            bounded(fx.reloader.run()).await.unwrap();
+            let p = fx.reloader.baseline.current().pending.clone().unwrap();
+            let crate::baseline::PendingState::Invalid { proposed, .. } = &p.state else {
+                panic!("{p:?}")
+            };
+            assert!(proposed.as_ref().unwrap().contains_key("providers"));
+            hashes.push(p.hash.clone());
+        }
+        assert_ne!(hashes[0], hashes[1], "the proposal is bound into the hash");
+        let refused = fx
+            .seen()
+            .iter()
+            .filter(|s| s.action == GRAPH_BASELINE_ACTION)
+            .count();
+        assert_eq!(refused, 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reload_over_a_graph_without_a_baseline_is_refused() {
+        let fx = Fx::with_baseline("no-baseline").await;
+        let current = fx.reloader.persisted.read().unwrap().clone();
+        let e = maknae_graph::identity::extract(&current).unwrap();
+        let vocab = &fx.reloader.vocabulary;
+        let bare = maknae_graph::identity::build(
+            &e.layer,
+            None,
+            &vocab.persisted,
+            vocab.digest,
+            current.revision(),
+            ProvenanceKind::RootFile,
+        )
+        .unwrap();
+        fx.set_persisted(Arc::new(bare));
+        let before = fx.store_sha();
+        let r = bounded(fx.reloader.run()).await;
+        assert!(
+            matches!(r, Err(crate::reload::Refusal::Compile(ref m)) if m.contains("carries no baseline")),
+            "{r:?}"
+        );
+        assert_eq!(fx.store_sha(), before);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_commit_whose_baseline_differs_from_the_store_is_refused_as_a_baseline_change() {
+        let fx = Fx::with_baseline("baseline-mismatch").await;
+        let current = fx.reloader.persisted.read().unwrap().clone();
+        let e = maknae_graph::identity::extract(&current).unwrap();
+        let mut other = e.baseline.clone().unwrap();
+        other.sections.insert("lake".into(), "{}".into());
+        let vocab = &fx.reloader.vocabulary;
+        let forged = maknae_graph::identity::build(
+            &e.layer,
+            Some(&other),
+            &vocab.persisted,
+            vocab.digest,
+            current.revision(),
+            ProvenanceKind::RootFile,
+        )
+        .unwrap();
+        fx.set_persisted(Arc::new(forged));
+        fx.write_bindings(ROOT_ADMIN_OTHER);
+        let before = fx.store_sha();
+        let r = bounded(fx.reloader.run()).await;
+        assert_eq!(r, Err(crate::reload::Refusal::BaselineChanged), "{r:?}");
+        assert_eq!(fx.store_sha(), before);
+        let outcome = fx.reload_records().pop().unwrap().outcome.reason;
+        assert!(
+            outcome.contains("only an accept changes the accepted baseline"),
+            "{outcome}"
+        );
+        assert!(!outcome.contains("persist:"), "{outcome}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_commit_replaces_the_graph_the_next_reload_plans_from() {
+        let fx = Fx::with_baseline("replaced-graph").await;
+        fx.write_bindings(ROOT_ADMIN_OTHER);
+        assert!(bounded(fx.reloader.run()).await.unwrap().persisted);
+        assert_eq!(fx.reloader.persisted.read().unwrap().revision(), 2);
+        let again = bounded(fx.reloader.run()).await.unwrap();
+        assert!(!again.persisted, "{again:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_file_reverted_to_the_baseline_clears_the_pending_set() {
+        let fx = Fx::with_baseline("revert").await;
+        fx.write_yaml("", "vault_addr_marker: https://w.example:8200\n");
+        bounded(fx.reloader.run()).await.unwrap();
+        assert_eq!(fx.status_lines().len(), 1);
+        fx.write_yaml("", "");
+        let records_before = fx.seen().len();
+        bounded(fx.reloader.run()).await.unwrap();
+        assert!(fx.status_lines().is_empty());
+        assert!(!fx.seen()[records_before..]
+            .iter()
+            .any(|s| s.action == GRAPH_BASELINE_ACTION));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refused_reload_publishes_no_pending_set() {
+        let fx = Fx::with_baseline("refused-publishes-nothing").await;
+        fx.write_yaml("", "vault_addr_marker: https://w.example:8200\n");
+        fx.write_bindings("schema_version: [\n");
+        assert!(bounded(fx.reloader.run()).await.is_err());
+        assert!(fx.status_lines().is_empty());
+        assert!(!fx.seen().iter().any(|s| s.action == GRAPH_BASELINE_ACTION));
+    }
+
+    const ROOT_ADVERSARY: &str = "schema_version: 1\nbindings:\n  adversary: [\"root\"]\n";
 
     fn outcomes(recs: &[AuditRecord]) -> Vec<(String, String, String)> {
         recs.iter()
@@ -7509,6 +12507,85 @@ mod reload_tests {
         }
     }
 
+    async fn within(
+        f: impl std::future::Future<Output = Result<crate::reload::Applied, crate::reload::Refusal>>,
+    ) -> Result<crate::reload::Applied, crate::reload::Refusal> {
+        tokio::time::timeout(Duration::from_secs(3), f)
+            .await
+            .expect("the reload must return within its bound, not hold the turn")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stalled_sink_refuses_the_reload_within_the_bound_and_a_second_reload_runs() {
+        let fx = fixture("stalled-reload", AUTHZ, Some(ROOT_ADMIN)).await;
+        fx.reloader.sink.stall_when(is_reload);
+        let refused = within(fx.reloader.run()).await;
+        assert!(
+            matches!(refused, Err(crate::reload::Refusal::Audit(_))),
+            "{refused:?}"
+        );
+        fx.reloader.sink.stall_when(never);
+        let second = tokio::time::timeout(Duration::from_secs(3), fx.reloader.run()).await;
+        assert!(second.expect("the turn lock was released").is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stalled_transition_record_refuses_the_commit_within_the_bound() {
+        let fx = fixture("stalled-commit", AUTHZ, Some(ROOT_ADMIN)).await;
+        let before = fx.store_bytes();
+        fx.reloader.sink.stall_when(is_transition);
+        fx.write_bindings(ROOT_ADVERSARY);
+        let refused = within(fx.reloader.run()).await;
+        assert!(
+            matches!(&refused, Err(crate::reload::Refusal::Persist(_))),
+            "{refused:?}"
+        );
+        assert_eq!(fx.store_bytes(), before);
+        fx.reloader.sink.stall_when(never);
+        assert!(within(fx.reloader.run()).await.unwrap().persisted);
+        assert_eq!(fx.root_whoami(), adversary());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stalled_outcome_record_lets_the_applied_reload_return_within_the_bound() {
+        let fx = fixture("stalled-outcome", AUTHZ, Some(ROOT_ADMIN)).await;
+        fx.reloader.sink.stall_when(is_reload_outcome);
+        fx.write_bindings(ROOT_ADVERSARY);
+        assert!(within(fx.reloader.run()).await.unwrap().persisted);
+        assert_eq!(fx.root_whoami(), adversary());
+        fx.reloader.sink.stall_when(never);
+        assert!(within(fx.reloader.run()).await.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_identity_records_after_a_reload_stop_at_the_first_that_elapses() {
+        let fx = fixture("stalled-identities", AUTHZ, Some(ROOT_ADMIN)).await;
+        fx.reloader.sink.stall_when(is_identity);
+        fx.write_bindings(
+            "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"no-such-user-maknae-497\"]\n  adversary: [\"no-such-user-maknae-497b\"]\n",
+        );
+        assert!(within(fx.reloader.run()).await.unwrap().persisted);
+        assert_eq!(fx.status.identity.counts().len(), 2);
+        assert_eq!(
+            fx.reloader
+                .sink
+                .stalled
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stalled_identity_record_after_a_reload_returns_within_the_bound() {
+        let fx = fixture("stalled-identity", AUTHZ, Some(ROOT_ADMIN)).await;
+        fx.reloader.sink.stall_when(is_identity);
+        fx.write_bindings(GHOST_USER);
+        assert!(within(fx.reloader.run()).await.unwrap().persisted);
+        assert_eq!(fx.status.identity.counts(), ["unresolved=1"]);
+        fx.reloader.sink.stall_when(never);
+        assert!(within(fx.reloader.run()).await.is_ok());
+    }
+
     #[tokio::test]
     async fn a_reload_applies_a_file_edit_and_records_intent_then_outcome() {
         let fx = fixture("apply", AUTHZ, Some(ROOT_ADMIN)).await;
@@ -7517,7 +12594,7 @@ mod reload_tests {
             maknae_security::Verdict::Permit { .. }
         ));
         fx.write_bindings(ROOT_ADVERSARY);
-        let applied = fx.reloader.run().await.unwrap();
+        let applied = bounded(fx.reloader.run()).await.unwrap();
         assert_eq!(
             applied,
             crate::reload::Applied {
@@ -7956,6 +13033,41 @@ mod reload_tests {
     }
 
     #[tokio::test]
+    async fn a_stalled_boot_identity_record_refuses_the_boot_after_the_append_bound() {
+        let fx = fixture(
+            "boot_probs_stalled",
+            AUTHZ,
+            Some("schema_version: 1\nbindings:\n  user: [\"no-such-user-maknae-496\"]\n"),
+        )
+        .await;
+        let snapshot = fx.baseline().snapshot();
+        let seq = Seq::new();
+        let au3_1 = serde_json::Value::Null;
+        let ctx = BootCtx {
+            event: "boot",
+            host: "h",
+            socket: "s",
+            euid: 0,
+            session_id: 7 << 32,
+            seq: &seq,
+            au3_1: &au3_1,
+        };
+        fx.reloader.sink.stall_when(is_identity);
+        tokio::time::pause();
+        let status = crate::identity_report::IdentityStatus::default();
+        let refused = tokio::time::timeout(
+            Duration::from_secs(60),
+            publish_boot_identity(&status, &snapshot, &[], None, &fx.reloader.sink, &ctx),
+        )
+        .await
+        .expect("the identity record must give up within its bound");
+        assert!(
+            matches!(&refused, Err(RunError::Other(m)) if m.contains("identity")),
+            "{refused:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn boot_identity_records_follow_the_composition_record_and_a_failed_append_refuses() {
         let fx = fixture(
             "boot_probs",
@@ -8085,7 +13197,10 @@ mod reload_tests {
     async fn the_next_boot_verifies_a_reloaded_store_against_its_checkpoint() {
         let fx = fixture("reboot", AUTHZ, Some(ROOT_ADMIN)).await;
         fx.write_bindings(ROOT_ADVERSARY);
-        fx.reloader.run().await.unwrap();
+        bounded(fx.reloader.run()).await.unwrap();
+        let accepted = fx.stored().unwrap();
+        let before = fx.dir.join("audit.jsonl");
+        let reloaded = std::fs::read_to_string(&before).unwrap().lines().count();
         let Fx {
             dir,
             reloader,
@@ -8095,6 +13210,7 @@ mod reload_tests {
         drop(reloader);
         let sink = Arc::new(
             maknae_audit_append::AuditSink::open(&maknae_config::AuditConfig {
+                readers: Vec::new(),
                 jsonl_path: dir.join("audit.jsonl"),
                 siem: None,
                 au3_1: serde_json::Value::Null,
@@ -8107,10 +13223,10 @@ mod reload_tests {
             requirement(),
         )
         .unwrap();
-        let inputs = GraphInputs::new(&source, "UNCLASSIFIED").unwrap();
+        let inputs = GraphInputs::new(&source, "UNCLASSIFIED", accepted.clone()).unwrap();
         let seq = Seq::new();
         let au3_1 = serde_json::Value::Null;
-        let booted = boot_kernel_graph(
+        let booted = boot_graph_at(
             &dir.join("state"),
             maknae_vault::graph_key_from_bytes(&[0x5a; 32]),
             &sink,
@@ -8131,6 +13247,19 @@ mod reload_tests {
             (booted.status.revision(), booted.status.anchor.as_str()),
             (2, "verified")
         );
+        assert_eq!(
+            maknae_graph::identity::extract(&booted.graph)
+                .unwrap()
+                .baseline,
+            Some(accepted)
+        );
+        let after: Vec<String> = std::fs::read_to_string(&before)
+            .unwrap()
+            .lines()
+            .skip(reloaded)
+            .map(|l| serde_json::from_str::<AuditRecord>(l).unwrap().action)
+            .collect();
+        assert_eq!(after, ["graph.checkpoint"]);
     }
 
     #[tokio::test]
@@ -8138,7 +13267,7 @@ mod reload_tests {
         let fx = fixture("status", AUTHZ, Some(ROOT_ADMIN)).await;
         assert_eq!(fx.status.revision(), 1);
         fx.write_bindings(ROOT_ADVERSARY);
-        fx.reloader.run().await.unwrap();
+        bounded(fx.reloader.run()).await.unwrap();
         assert_eq!(fx.status.revision(), 2);
         assert_eq!(fx.reloader.dir.store_revision(), 2);
     }
@@ -8227,7 +13356,7 @@ mod reload_tests {
         let before = fx.baseline().snapshot();
         let bytes = fx.store_bytes();
         fx.write_policy("not: [valid");
-        let refused = fx.reloader.run().await.unwrap_err();
+        let refused = bounded(fx.reloader.run()).await.unwrap_err();
         assert!(
             matches!(refused, crate::reload::Refusal::Load(_)),
             "{refused:?}"
@@ -8273,7 +13402,7 @@ mod reload_tests {
         let bytes = fx.store_bytes();
         fx.write_bindings(ROOT_ADVERSARY);
         fx.reloader.revision.store(0, AtomicOrdering::Release);
-        let refused = fx.reloader.run().await.unwrap_err();
+        let refused = bounded(fx.reloader.run()).await.unwrap_err();
         assert!(
             matches!(refused, crate::reload::Refusal::Persist(_)),
             "{refused:?}"
@@ -8299,7 +13428,7 @@ mod reload_tests {
         fx.write_bindings(ROOT_ADVERSARY);
         fx.reloader.dir.fail_next_directory_sync();
         let cause = "published, but the directory sync failed (Other { raw: 5 }): kernel.graph";
-        let applied = fx.reloader.run().await.unwrap();
+        let applied = bounded(fx.reloader.run()).await.unwrap();
         assert_eq!(
             applied,
             crate::reload::Applied {
@@ -8330,7 +13459,7 @@ mod reload_tests {
             )
         );
         fx.write_bindings(ROOT_ADMIN);
-        let next = fx.reloader.run().await.unwrap();
+        let next = bounded(fx.reloader.run()).await.unwrap();
         assert_eq!((next.revision, next.durability_error), (3, None));
     }
 
@@ -8340,7 +13469,7 @@ mod reload_tests {
         let before = fx.baseline().snapshot();
         let bytes = fx.store_bytes();
         fx.write_policy("schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\n  deny: []\n");
-        let applied = fx.reloader.run().await.unwrap();
+        let applied = bounded(fx.reloader.run()).await.unwrap();
         assert_eq!(
             applied,
             crate::reload::Applied {
@@ -8377,7 +13506,7 @@ mod reload_tests {
     async fn two_hups_in_flight_run_in_turn() {
         let fx = fixture("turns", AUTHZ, Some(ROOT_ADMIN)).await;
         fx.write_bindings(ROOT_ADVERSARY);
-        let (a, b) = tokio::join!(fx.reloader.run(), fx.reloader.run());
+        let (a, b) = bounded(async { tokio::join!(fx.reloader.run(), fx.reloader.run()) }).await;
         let mut revisions = [a.unwrap().revision, b.unwrap().revision];
         revisions.sort_unstable();
         assert_eq!(revisions, [2, 2]);
@@ -8491,12 +13620,13 @@ mod reload_tests {
                 shutdown,
                 tokio::spawn(std::future::pending()),
                 Arc::clone(&fx.reloader.authorizer),
-                Arc::new(ConfigView::default()),
+                std::sync::Arc::new(crate::live::LiveConfig::new(ConfigView::default(), None)),
                 Arc::new("b".into()),
                 Arc::new("US".into()),
                 Arc::new(None),
-                Arc::new(None),
                 crate::egress::unavailable_egress(),
+                baseline_stub::no_baseline(),
+                baseline_stub::serving(),
             ),
         )
         .await
@@ -8526,7 +13656,9 @@ mod reload_tests {
         assert!(Arc::ptr_eq(&before, &fx.baseline().snapshot()));
         assert_eq!(fx.store_bytes(), bytes);
         assert!(matches!(
-            reload.await,
+            tokio::time::timeout(Duration::from_secs(30), reload)
+                .await
+                .expect("the reload task ends"),
             Ok(Err(crate::reload::Refusal::Shutdown))
         ));
     }
@@ -8584,12 +13716,13 @@ mod reload_tests {
                 shutdown,
                 tokio::spawn(std::future::pending()),
                 Arc::clone(&fx.reloader.authorizer),
-                Arc::new(ConfigView::default()),
+                std::sync::Arc::new(crate::live::LiveConfig::new(ConfigView::default(), None)),
                 Arc::new("b".into()),
                 Arc::new("US".into()),
                 Arc::new(None),
-                Arc::new(None),
                 crate::egress::unavailable_egress(),
+                baseline_stub::no_baseline(),
+                baseline_stub::serving(),
             ),
         )
         .await
@@ -8619,7 +13752,7 @@ mod reload_tests {
         let fx = fixture("queued", AUTHZ, Some(ROOT_ADMIN)).await;
         fx.reloader.stopping.send_replace(true);
         assert_eq!(
-            fx.reloader.run().await,
+            bounded(fx.reloader.run()).await,
             Err(crate::reload::Refusal::Shutdown)
         );
         assert!(fx.reload_records().is_empty());
@@ -8715,5 +13848,31 @@ mod unencodable_tests {
             maknae_proto::decode_response(&reply).unwrap().result,
             RespResult::Err(_)
         ));
+    }
+}
+
+#[cfg(test)]
+mod journal_capture {
+    static JOURNAL: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+    fn lines() -> std::sync::MutexGuard<'static, Vec<String>> {
+        JOURNAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub(super) fn push(line: &str) {
+        lines().push(line.to_string());
+    }
+
+    /// The lines written since `from` that contain `needle`, and the count now.
+    pub(super) fn since(from: usize, needle: &str) -> (Vec<String>, usize) {
+        let all = lines();
+        let found = all[from.min(all.len())..]
+            .iter()
+            .filter(|l| l.contains(needle))
+            .cloned()
+            .collect();
+        (found, all.len())
     }
 }

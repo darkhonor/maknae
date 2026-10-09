@@ -11,6 +11,10 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Test-only doors over euid-owned fixtures; enabled from [dev-dependencies] alone.
+hermetic-test-seam = ["maknae-config/hermetic-test-seam"]
+
 [dependencies]
 maknae-proto = { path = "../maknae-proto" }
 maknae-spif = { path = "../maknae-spif" }
@@ -34,6 +38,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "ti
 serde_json = "1"
 
 [dev-dependencies]
+maknae-kernel = { path = ".", features = ["hermetic-test-seam"] }
 # #240a: the egress-socket tests bind a real UDS under a temp dir.
 tempfile = "3"
 # The Document test seam: the e2e config.show test must drive the REAL

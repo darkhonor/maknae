@@ -38,6 +38,7 @@ pub const ATTR_SHA256: &str = "sha256";
 pub const ATTR_NAME: &str = "name";
 pub const ATTR_UID: &str = "uid";
 pub const ATTR_ALIASES: &str = "aliases";
+pub const ATTR_VALUE: &str = "value";
 
 pub fn persisted_compiled_set(label: &str) -> CompiledSet {
     CompiledSet::new(

@@ -1,6 +1,6 @@
 <svg width="1548" height="1038" viewBox="0 0 1548 1038" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="t d">
-  <title id="t">Maknae action vocabulary: the complete 60-term map and the dependencies between them</title>
-  <desc id="d">Left-to-right dependency map of the complete action vocabulary, all sixty terms. Ten built terms appear at the top: liveness.ping, admin.whoami, fs.read, issue 158&#x27;s fs.write, fs.delete and fs.mkdir, issue 162&#x27;s admin.status, admin.config.show and admin.subject.list, and session.prompt from issue 172; the issue 162 terms and session.prompt ship ungranted and are granted per role. Below, twenty-two issues holding the fifty unbuilt terms are arranged by dependency depth: column 1, shown across two columns, has no open blocker in this map (issue 166 still waits on issue 115, outside it); each later column is blocked by work to its left. Issue 170 unblocks four slices; issue 177 unblocks the MCP chain. Two terms marked K, kernel.contain and kernel.session.terminate, are kernel action strings with no wire verb and are not reachable by any client.</desc>
+  <title id="t">Maknae action vocabulary: the complete 62-term map and the dependencies between them</title>
+  <desc id="d">Left-to-right dependency map of the complete action vocabulary, all sixty-two terms. Twelve built terms appear at the top: liveness.ping, admin.whoami, fs.read, issue 158&#x27;s fs.write, fs.delete and fs.mkdir, issue 162&#x27;s admin.status, admin.config.show and admin.subject.list, session.prompt from issue 172, and issue 490&#x27;s admin.baseline.show and admin.baseline.accept; the shipped authz.yaml grants admin.status, admin.subject.list and the two issue 490 terms to the admin role, and admin.config.show and session.prompt ship ungranted and are granted per role. Below, twenty-two issues holding the fifty unbuilt terms are arranged by dependency depth: column 1, shown across two columns, has no open blocker in this map (issue 166 still waits on issue 115, outside it); each later column is blocked by work to its left. Issue 170 unblocks four slices; issue 177 unblocks the MCP chain. Two terms marked K, kernel.contain and kernel.session.terminate, are kernel action strings with no wire verb and are not reachable by any client.</desc>
   <defs>
     <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
       <path d="M2 1L8 5L2 9" fill="none" stroke="#5F5E5A" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
@@ -8,7 +8,7 @@
   </defs>
   <rect x="0" y="0" width="1548" height="1038" fill="#FFFFFF"/>
   <text x="30" y="34" font-family="Helvetica, Arial, sans-serif" font-size="19" font-weight="700" fill="#2C2C2A">The action vocabulary — 60 terms and what blocks what</text>
-  <text x="30" y="55" font-family="Helvetica, Arial, sans-serif" font-size="12.5" fill="#5F5E5A">10 built, 50 enumerated-but-unbuilt across 22 issues. Tracked in epic #182; enumerated by #67, with fs.search added by #373. Columns run left to right by dependency depth.</text>
+  <text x="30" y="55" font-family="Helvetica, Arial, sans-serif" font-size="12.5" fill="#5F5E5A">12 built, 50 enumerated-but-unbuilt across 22 issues. Tracked in epic #182; enumerated by #67, with fs.search added by #373. Columns run left to right by dependency depth.</text>
   <text x="30" y="80" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="700" fill="#2C2C2A">Class</text>
   <rect x="74" y="70" width="12" height="12" rx="3" fill="#E4F0F2" stroke="#3A6E78" stroke-width="1"/>
   <text x="91" y="80" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" fill="#2C2C2A">liveness</text>
@@ -27,7 +27,7 @@
   <line x1="883" y1="76" x2="905" y2="76" stroke="#5F5E5A" stroke-width="1.6" marker-end="url(#ar)"/>
   <text x="911" y="80" font-family="Helvetica, Arial, sans-serif" font-size="10.5" fill="#2C2C2A">blocks (previous column only; other blockers are named in each box)</text>
   <text x="30" y="106" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#2C2C2A">BUILT — decided, dispatched and serving today</text>
-  <text x="30" y="121" font-family="Helvetica, Arial, sans-serif" font-size="10.5" fill="#5F5E5A">10 terms. The #162 terms and session.prompt ship UNGRANTED: an operator grants them per role (roles:). Every other term is enumerated and decided, and denies.</text>
+  <text x="30" y="121" font-family="Helvetica, Arial, sans-serif" font-size="10.5" fill="#5F5E5A">12 terms. The shipped authz.yaml grants admin four (roles:); admin.config.show and session.prompt ship UNGRANTED. Every other term is enumerated and decided, and denies.</text>
   <line x1="30" y1="130" x2="1518" y2="130" stroke="#5F5E5A" stroke-width="0.75"/>
   <g><title>liveness.ping — built</title>
   <rect x="30" y="140" width="280" height="92" rx="9" fill="#E4F0F2" stroke="#3A6E78" stroke-width="2.2"/>
@@ -66,7 +66,15 @@
   <text x="48" y="282" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="700" fill="#4A3618">admin.status</text>
   <text x="48" y="297" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="700" fill="#4A3618">admin.config.show</text>
   <text x="48" y="312" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="700" fill="#4A3618">admin.subject.list</text>
-  <text x="42" y="327" font-family="Helvetica, Arial, sans-serif" font-size="9.5" fill="#8A6A3A">shipped UNGRANTED; an operator grants per role (roles:)</text>
+  <text x="42" y="327" font-family="Helvetica, Arial, sans-serif" font-size="9.5" fill="#8A6A3A">shipped; config.show UNGRANTED, others to admin</text>
+  </g>
+  <g><title>admin.baseline.show, admin.baseline.accept — built</title>
+  <rect x="634" y="244" width="280" height="92" rx="9" fill="#F7EEDF" stroke="#8A6A3A" stroke-width="2.2"/>
+  <text x="646" y="263" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="700" fill="#8A6A3A">BUILT</text>
+  <text x="696" y="263" font-family="Helvetica, Arial, sans-serif" font-size="10.5" fill="#4A3618">#490 — Accept a baseline change</text>
+  <text x="652" y="282" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="700" fill="#4A3618">admin.baseline.show</text>
+  <text x="652" y="297" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="700" fill="#4A3618">admin.baseline.accept</text>
+  <text x="646" y="327" font-family="Helvetica, Arial, sans-serif" font-size="9.5" fill="#8A6A3A">shipped; granted to admin by the shipped authz.yaml</text>
   </g>
   <g><title>session.prompt — built</title>
   <rect x="332" y="244" width="280" height="92" rx="9" fill="#E6F1E5" stroke="#3E7A44" stroke-width="2.2"/>

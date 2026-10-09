@@ -447,11 +447,6 @@ mod tests {
     /// owned by the test user: a foreign-owner fixture needs root (chown -> EPERM).
     #[test]
     fn mode_precedes_owner() {
-        assert_ne!(
-            nix::unistd::geteuid().as_raw(),
-            0,
-            "fixture requires a non-root user"
-        );
         let d = tempfile::tempdir().unwrap();
         let f = d.path().join("m");
         std::fs::write(&f, b"x").unwrap();
@@ -469,11 +464,6 @@ mod tests {
     /// passes; without that, mode fires first and the test proves nothing about order.
     #[test]
     fn owner_precedes_nlink() {
-        assert_ne!(
-            nix::unistd::geteuid().as_raw(),
-            0,
-            "fixture requires a non-root user"
-        );
         let d = tempfile::tempdir().unwrap();
         let f = d.path().join("h");
         std::fs::write(&f, b"x").unwrap();

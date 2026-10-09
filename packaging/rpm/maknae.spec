@@ -42,9 +42,9 @@ Requires:       selinux-policy-targeted
 # enroll re-asserts the deputy's /etc/maknae ACL and removes the legacy
 # _maknae home ACL (#365) with setfacl/getfacl.
 Requires:       acl
-# #240b: %post runs setfacl, so acl must be installed BEFORE this package's
+# #240b, #500: %post runs setfacl and timeout, so acl and coreutils must be installed BEFORE this package's
 # scriptlet, which a plain Requires does not order.
-Requires(post): acl
+Requires(post): acl coreutils
 Requires:       fapolicyd
 Requires(pre):  systemd
 Requires(post): systemd policycoreutils selinux-policy-targeted e2fsprogs
@@ -160,6 +160,31 @@ if [ -h "$AUDIT" ] || [ ! -f "$AUDIT" ] || [ "$(stat -c %%h "$AUDIT")" != 1 ] \
 fi
 if ! chattr +a "$AUDIT" || ! lsattr -d "$AUDIT" | cut -d' ' -f1 | grep -q a; then
     echo "maknae: cannot set the append-only attribute on $AUDIT (filesystem: $(stat -f -c %%T "$AUDIT" 2>/dev/null || echo unknown)); %{_localstatedir}/log/maknae is left root-owned" >&2
+    exit 1
+fi
+# The traverse entry for each reader maknae.yaml declares (#500), restored after the
+# hold strips the directory's ACL. The trail files' own entries are never touched here.
+grant_reader_traverse() {
+    rc=0
+    errf="$(mktemp)" || return 1
+    readers="$(timeout 60 %{_bindir}/maknae audit-readers 2>"$errf")" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        [ "$rc" -ne 124 ] || echo "the account lookup did not finish within 60s" >>"$errf"
+        echo "maknae: audit.readers not applied: $(cat "$errf")" >&2
+        rm -f "$errf"
+        return 0
+    fi
+    rm -f "$errf"
+    [ -n "$readers" ] || return 0
+    printf '%%s\n' "$readers" | LC_ALL=C grep -Evx '[a-z_][a-z0-9_-]{0,30}[$]?' >/dev/null || rc=$?
+    if [ "$rc" -ne 1 ]; then
+        echo "maknae: audit.readers printed an unexpected name; not applied" >&2
+        return 0
+    fi
+    for r in $readers; do setfacl -P -m "u:$r:x" %{_localstatedir}/log/maknae || return 1; done
+}
+if ! grant_reader_traverse; then
+    echo "maknae: cannot apply audit.readers to %{_localstatedir}/log/maknae; it is left root-owned" >&2
     exit 1
 fi
 chown -h _maknae:_maknae %{_localstatedir}/log/maknae

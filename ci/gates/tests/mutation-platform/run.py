@@ -30,6 +30,7 @@ SYS_INVENTORY = subprocess.check_output([
     "cargo", "mutants", "--no-config", "-p", "maknae-sys", "--list",
 ], cwd=ROOT, text=True).splitlines()
 assert SYS_INVENTORY, "empty maknae-sys mutation inventory is not assurance"
+PLATFORMS_ROOT_ONLY = {p: lists[2] for p, lists in platform_gated.filter_lists(ROOT).items()}
 
 
 class PlatformSelection(unittest.TestCase):
@@ -60,8 +61,10 @@ class PlatformSelection(unittest.TestCase):
                     else:
                         self.assertRegex(mutant, pattern, f"inactive on {platform}")
         self.assertEqual(sorted(empty), sorted(NO_MUTANTS), "a derived item without mutants must be reviewed into NO_MUTANTS")
+        root_only = {m for lines in CRATE_INVENTORY.values() for m in lines
+                     if any(re.search(alt, m) for p in PLATFORMS_ROOT_ONLY.values() for alt in p)}
         for crate, lines in CRATE_INVENTORY.items():
-            for mutant in set(lines) - covered:
+            for mutant in set(lines) - covered - root_only:
                 for pattern in regex.values():
                     self.assertNotRegex(mutant, pattern, "excluded but not derived as platform-gated")
 
@@ -85,17 +88,37 @@ class PlatformSelection(unittest.TestCase):
     def test_maknae_sys_platform_file_is_excluded_only_where_inactive(self):
         linux, darwin = self.exclusion("Linux"), self.exclusion("Darwin")
         macos_file = [m for m in SYS_INVENTORY if m.startswith("crates/maknae-sys/src/macos.rs:")]
-        portable = [m for m in SYS_INVENTORY if m.startswith("crates/maknae-sys/src/reply.rs:")]
+        linux_file = [m for m in SYS_INVENTORY if m.startswith("crates/maknae-sys/src/linux.rs:")]
+        portable = [m for m in SYS_INVENTORY
+                    if m.startswith(("crates/maknae-sys/src/reply.rs:", "crates/maknae-sys/src/flags.rs:"))]
         self.assertTrue(macos_file)
+        self.assertTrue(linux_file)
         self.assertTrue(portable)
-        self.assertEqual(len(macos_file) + len(portable), len(SYS_INVENTORY))
+        self.assertEqual(len(macos_file) + len(linux_file) + len(portable), len(SYS_INVENTORY))
         for mutant in macos_file:
             self.assertRegex(mutant, linux)
             self.assertNotRegex(mutant, darwin)
             self.assertNotRegex(mutant.replace("src/macos.rs:", "src/other.rs:"), linux)
-        for mutant in portable:
+        for mutant in linux_file:
+            self.assertRegex(mutant, darwin)
+            self.assertNotRegex(mutant, linux)
+            self.assertNotRegex(mutant.replace("src/linux.rs:", "src/other.rs:"), darwin)
+        root_only = [m for m in portable if any(re.search(alt, m) for alt in PLATFORMS_ROOT_ONLY["macos"])]
+        self.assertEqual([m.split(": ", 1)[1] for m in root_only],
+                         ["replace is_append_only -> io::Result<bool> with Ok(false)"])
+        for mutant in root_only:
+            self.assertRegex(mutant, darwin)
+            self.assertNotRegex(mutant, linux)
+        for mutant in set(portable) - set(root_only):
             self.assertNotRegex(mutant, linux)
             self.assertNotRegex(mutant, darwin)
+
+    def test_root_only_exclusions_name_one_mutant_each_and_only_on_their_platform(self):
+        self.assertEqual(PLATFORMS_ROOT_ONLY["linux"], set())
+        for alt in PLATFORMS_ROOT_ONLY["macos"]:
+            matched = [m for lines in CRATE_INVENTORY.values() for m in lines if re.search(alt, m)]
+            self.assertEqual(len(matched), 1, alt)
+            self.assertNotRegex(matched[0], self.exclusion("Linux"))
 
     def test_unknown_fails(self):
         result = subprocess.run(["bash", str(SCRIPT), "Plan9"], text=True, capture_output=True)

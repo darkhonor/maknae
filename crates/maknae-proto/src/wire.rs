@@ -303,6 +303,14 @@ pub enum Verb {
     /// uid, label and state, unbound and unresolved names included. Discloses who
     /// holds what.
     AdminSubjectList,
+    /// The pending baseline change set, as a diff through the `admin.config.show`
+    /// disclosure rules, with the hash an accept must name. A disclosure of what root
+    /// changed and whether it applies live or by restart.
+    AdminBaselineShow,
+    /// Accept the pending baseline change set whose hash is `hash`. A change to the
+    /// running configuration: written ahead, recorded as an `operator` transition;
+    /// a hash that is not the current pending set's is refused.
+    AdminBaselineAccept { hash: String },
     /// Bind a subject to a role. A policy mutation — write-ahead audit applies.
     /// MUST refuse the `adversary` role: containment has its own sanctioned
     /// spelling below, and admitting it here would grant containment to anyone
@@ -594,23 +602,28 @@ pub enum Payload {
     /// the requesting loop only on the PDP's Permit and after the outcome record
     /// landed. Text only in Cooky; `Unavailable` never produces one.
     PromptReply(PromptReply),
+    /// A permitted `admin.baseline.show` or `admin.baseline.accept`. `changes` is
+    /// already rendered through the config.show classifier; never construct it from raw configuration.
+    Baseline(BaselineView),
 }
 
-/// What `admin.status` discloses. Every field is deployment SHAPE the operator
-/// needs to debug with, and none is a credential.
-///
-/// The wire doc for this verb warns it is "useful to an operator, and useful to
-/// an attacker fingerprinting the deployment" -- true, and it is why the term
-/// ships UNGRANTED and admin-only. Once an operator has granted it to an admin
-/// role, withholding the daemon's own version from them protects nobody: any
-/// peer that completed a handshake already knows the protocol version, and the
-/// socket path is the one the caller is already connected to.
-///
-/// NOT "config.show discloses it anyway" — the grants are INDEPENDENT, so a
-/// role granted only `admin.status` never gets `config.show` and that argument
-/// cannot carry this field. (An earlier note here went further and said
-/// `config.show` discloses nothing of the sort on a default deployment. False:
-/// `effective_view` folds the RESOLVED default in regardless of the file.)
+/// The pending baseline change set (#490), or the outcome of accepting it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BaselineView {
+    /// `root-file`, or empty when nothing is pending.
+    pub source: String,
+    /// The change set's hash (64 lowercase hex), or empty.
+    pub hash: String,
+    /// `none`, `pending`, `invalid`, `accepted`, `stale`.
+    pub state: String,
+    /// `live`, `restart`, or empty.
+    pub apply: String,
+    pub changes: Vec<String>,
+}
+
+/// What `admin.status` discloses: deployment shape an operator debugs with, never a
+/// credential. The term is admin-only (the shipped `authz.yaml` grants it to `admin`),
+/// and its grant is independent of `admin.config.show`'s.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusView {
     /// The daemon's crate version.
@@ -641,6 +654,10 @@ pub struct StatusView {
     /// applied load (#496), one `<kind>=<count>` entry per kind; never a name or uid.
     #[serde(default)]
     pub identity_problem_counts: Vec<String>,
+    /// `baseline: <n> pending (live|restart|invalid)` per pending set: a count and a class,
+    /// never a section name, a hash or a value.
+    #[serde(default)]
+    pub baseline_pending: Vec<String>,
 }
 
 /// One subject `bindings.yaml` names (#496). `members` holds its binding (`uid:N`),
@@ -724,6 +741,8 @@ pub fn class_of(verb: &Verb) -> FrameClass {
         | Verb::AdminAuditTail
         | Verb::AdminPolicyReload
         | Verb::AdminSubjectList
+        | Verb::AdminBaselineShow
+        | Verb::AdminBaselineAccept { .. }
         | Verb::AdminSubjectBind
         | Verb::AdminSubjectUnbind
         | Verb::AdminContain
@@ -961,6 +980,7 @@ mod tests {
                 kernel_graph_revision: kernel_graph.as_ref().map(|k| k.0),
                 kernel_graph_anchor: kernel_graph.map(|k| k.1),
                 identity_problem_counts: vec![],
+                baseline_pending: vec![],
             })),
         }
     }
@@ -1067,6 +1087,52 @@ mod tests {
         .unwrap();
         let old: OldStatusView = ciborium::from_reader(new.as_slice()).unwrap();
         assert_eq!(old.classification_policy, "US");
+    }
+
+    #[test]
+    fn status_view_baseline_pending_is_additive() {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(
+            &OldStatusView {
+                version: "v".into(),
+                protocol_version: PROTOCOL_VERSION,
+                listener: "l".into(),
+                authz_backend: "b".into(),
+                classification_policy: "US".into(),
+            },
+            &mut bytes,
+        )
+        .unwrap();
+        let view: StatusView = ciborium::from_reader(bytes.as_slice()).unwrap();
+        assert_eq!(view.baseline_pending, Vec::<String>::new());
+        let mut new = Vec::new();
+        ciborium::into_writer(
+            &StatusView {
+                baseline_pending: vec!["baseline: 1 pending (restart)".into()],
+                ..view
+            },
+            &mut new,
+        )
+        .unwrap();
+        let old: OldStatusView = ciborium::from_reader(new.as_slice()).unwrap();
+        assert_eq!(old.listener, "l");
+        let back: StatusView = ciborium::from_reader(new.as_slice()).unwrap();
+        assert_eq!(back.baseline_pending, vec!["baseline: 1 pending (restart)"]);
+    }
+
+    #[test]
+    fn a_baseline_payload_round_trips() {
+        let r = Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Ok(Payload::Baseline(BaselineView {
+                source: "root-file".into(),
+                hash: "ab".repeat(32),
+                state: "pending".into(),
+                apply: "live".into(),
+                changes: vec!["principal.uid: 1000 -> 1001".into()],
+            })),
+        };
+        assert_eq!(decode_response(&encode_response(&r).unwrap()).unwrap(), r);
     }
 
     #[test]
@@ -1737,6 +1803,37 @@ mod tests {
         }
 
         #[test]
+        fn new_baseline_verbs_are_additive_no_version_bump() {
+            assert_eq!(PROTOCOL_VERSION, 1, "no unauthorized wire bump");
+            for verb in [Verb::Ping, Verb::AdminStatus, Verb::AdminSubjectList] {
+                let mut b = Vec::new();
+                ciborium::into_writer(
+                    &Request {
+                        protocol_version: 1,
+                        verb: verb.clone(),
+                    },
+                    &mut b,
+                )
+                .unwrap();
+                assert_eq!(decode_request(&b).unwrap().verb, verb);
+            }
+            for verb in [
+                Verb::AdminBaselineShow,
+                Verb::AdminBaselineAccept {
+                    hash: "f".repeat(64),
+                },
+            ] {
+                let b = encode_request(&Request {
+                    protocol_version: 1,
+                    verb: verb.clone(),
+                })
+                .unwrap();
+                assert!(b.len() <= crate::frame::CONTROL_REQUEST_MAX);
+                assert_eq!(decode_request(&b).unwrap().verb, verb);
+            }
+        }
+
+        #[test]
         fn a_genuinely_wrong_version_still_refuses_cleanly() {
             // The version guard still exists for a real mismatch (a future
             // deliberate bump, or garbage) — typed, never a panic.
@@ -1966,6 +2063,13 @@ mod tests {
                 (Verb::AdminAuditTail, FrameClass::Control),
                 (Verb::AdminPolicyReload, FrameClass::Control),
                 (Verb::AdminSubjectList, FrameClass::Control),
+                (Verb::AdminBaselineShow, FrameClass::Control),
+                (
+                    Verb::AdminBaselineAccept {
+                        hash: "0".repeat(64),
+                    },
+                    FrameClass::Control,
+                ),
                 (Verb::AdminSubjectBind, FrameClass::Control),
                 (Verb::AdminSubjectUnbind, FrameClass::Control),
                 (Verb::AdminContain, FrameClass::Control),
@@ -2058,7 +2162,7 @@ mod tests {
         #[test]
         fn class_of_pins_every_verb() {
             let all = every_verb();
-            assert_eq!(all.len(), 57);
+            assert_eq!(all.len(), 59);
             for (verb, class) in all {
                 assert_eq!(class_of(&verb), class, "{verb:?}");
             }

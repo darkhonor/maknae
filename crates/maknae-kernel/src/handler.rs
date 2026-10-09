@@ -43,6 +43,12 @@ pub enum Dispatch {
     SubjectListRequested,
     /// The peer asked to send content to the provider its admitted choice names.
     PromptRequested,
+    /// The peer asked for the pending baseline change set. No datum: the set is
+    /// recomputed from the files and the accepted baseline.
+    BaselineShowRequested,
+    /// The peer asked to accept the pending set its operand names; the hash is
+    /// read from the verb by the arm, never passed to the PDP.
+    BaselineAcceptRequested,
 }
 
 /// The verbs routed to `mutation::handle`; only these resolve the requester's home.
@@ -63,6 +69,8 @@ pub fn dispatch_verb(verb: &Verb) -> Dispatch {
         Verb::AdminConfigShow => Dispatch::ConfigShowRequested,
         Verb::AdminStatus => Dispatch::StatusRequested,
         Verb::AdminSubjectList => Dispatch::SubjectListRequested,
+        Verb::AdminBaselineShow => Dispatch::BaselineShowRequested,
+        Verb::AdminBaselineAccept { .. } => Dispatch::BaselineAcceptRequested,
         Verb::SessionPrompt { .. } => Dispatch::PromptRequested,
         Verb::AdminAuditTail
         | Verb::AdminPolicyReload
@@ -146,7 +154,16 @@ pub enum ServeOutcome {
     /// exhausted (or it panicked/was cancelled) and the listener can no longer serve.
     /// The accept loop stopped BEFORE this variant is constructed.
     SupervisorExited(VaultError),
+    /// An accepted baseline that applies only at start was persisted; exit so the
+    /// supervisor restarts into it.
+    ApplyByRestart,
+    /// The drain for a restart-class accept began and the accept did not persist;
+    /// exit non-zero on the unchanged baseline.
+    AcceptAbandoned,
 }
+
+/// The exit status that asks the supervisor to restart into an accepted baseline.
+pub const APPLY_BY_RESTART_EXIT_CODE: u8 = 6;
 
 /// The pure `ServeOutcome` → process `ExitCode` mapping (codex round-5 P1). A
 /// graceful shutdown is `SUCCESS`; ANY supervisor exit is `FAILURE` — there is no
@@ -155,8 +172,39 @@ pub enum ServeOutcome {
 pub fn serve_outcome_to_exit_code(outcome: &ServeOutcome) -> ExitCode {
     match outcome {
         ServeOutcome::GracefulShutdown => ExitCode::SUCCESS,
-        ServeOutcome::SupervisorExited(_) => ExitCode::FAILURE,
+        ServeOutcome::SupervisorExited(_) | ServeOutcome::AcceptAbandoned => ExitCode::FAILURE,
+        ServeOutcome::ApplyByRestart => ExitCode::from(APPLY_BY_RESTART_EXIT_CODE),
     }
+}
+
+/// Where a restart-class accept stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Drain {
+    Serving,
+    Begun,
+    Applied,
+    Failed,
+}
+
+/// A stop the drain caused reports what the accept did; any other stop is unchanged.
+pub fn after_drain(outcome: ServeOutcome, drain: Drain) -> ServeOutcome {
+    match (outcome, drain) {
+        (ServeOutcome::GracefulShutdown, Drain::Applied) => ServeOutcome::ApplyByRestart,
+        (ServeOutcome::GracefulShutdown, Drain::Begun | Drain::Failed) => {
+            ServeOutcome::AcceptAbandoned
+        }
+        (outcome, _) => outcome,
+    }
+}
+
+/// A new connection is served only while serving; from `Begun` it is closed unserved.
+pub fn admits(drain: Drain) -> bool {
+    drain == Drain::Serving
+}
+
+/// The process may stop once the accept has persisted or failed, never mid-commit.
+pub fn may_stop(drain: Drain) -> bool {
+    matches!(drain, Drain::Applied | Drain::Failed)
 }
 
 use std::time::Duration;
@@ -167,7 +215,7 @@ use std::time::Duration;
 /// The actions the KERNEL initiates on its own behalf, which have no client
 /// request and therefore no `Verb` variant (#67 D2). They are still PDP-decided
 /// and audited, so they need action strings — and the drift gate needs a source
-/// to diff the manifest against, or two of the vocabulary's 59 terms would carry
+/// to diff the manifest against, or two of the vocabulary's 61 terms would carry
 /// no recorded disposition (spec R7).
 pub const KERNEL_ACTIONS: [&str; 2] = ["kernel.contain", "kernel.session.terminate"];
 
@@ -180,6 +228,8 @@ pub fn verb_to_action(verb: &Verb) -> &'static str {
         Verb::AdminAuditTail => "admin.audit.tail",
         Verb::AdminPolicyReload => "admin.policy.reload",
         Verb::AdminSubjectList => "admin.subject.list",
+        Verb::AdminBaselineShow => "admin.baseline.show",
+        Verb::AdminBaselineAccept { .. } => "admin.baseline.accept",
         Verb::AdminSubjectBind => "admin.subject.bind",
         Verb::AdminSubjectUnbind => "admin.subject.unbind",
         Verb::AdminContain => "admin.contain",
@@ -528,6 +578,16 @@ mod tests {
             dispatch_verb(&Verb::AdminSubjectList),
             Dispatch::SubjectListRequested
         );
+        assert_eq!(
+            dispatch_verb(&Verb::AdminBaselineShow),
+            Dispatch::BaselineShowRequested
+        );
+        assert_eq!(
+            dispatch_verb(&Verb::AdminBaselineAccept {
+                hash: "a".repeat(64)
+            }),
+            Dispatch::BaselineAcceptRequested
+        );
         // And EVERY term that is not grantable still has no behaviour --
         // DERIVED, not hand-typed.
         //
@@ -599,6 +659,8 @@ mod tests {
                 "admin.status",
                 "admin.config.show",
                 "admin.subject.list",
+                "admin.baseline.show",
+                "admin.baseline.accept",
                 "session.prompt"
             ],
             "the hand-copied list in the class test above must match the constant"
@@ -662,6 +724,62 @@ mod tests {
             ))),
             ExitCode::FAILURE
         );
+    }
+
+    #[test]
+    fn after_drain_maps_each_state() {
+        assert!(matches!(
+            after_drain(ServeOutcome::GracefulShutdown, Drain::Serving),
+            ServeOutcome::GracefulShutdown
+        ));
+        assert!(matches!(
+            after_drain(ServeOutcome::GracefulShutdown, Drain::Applied),
+            ServeOutcome::ApplyByRestart
+        ));
+        assert!(matches!(
+            after_drain(ServeOutcome::GracefulShutdown, Drain::Begun),
+            ServeOutcome::AcceptAbandoned
+        ));
+        assert!(matches!(
+            after_drain(ServeOutcome::GracefulShutdown, Drain::Failed),
+            ServeOutcome::AcceptAbandoned
+        ));
+        assert!(matches!(
+            after_drain(
+                ServeOutcome::SupervisorExited(VaultError::RenewalExpired),
+                Drain::Applied
+            ),
+            ServeOutcome::SupervisorExited(_)
+        ));
+        assert!(matches!(
+            after_drain(ServeOutcome::AcceptAbandoned, Drain::Applied),
+            ServeOutcome::AcceptAbandoned
+        ));
+    }
+
+    #[test]
+    fn admission_stops_at_begun_and_stopping_waits_for_the_outcome() {
+        assert!(admits(Drain::Serving));
+        for d in [Drain::Begun, Drain::Applied, Drain::Failed] {
+            assert!(!admits(d), "{d:?}");
+        }
+        assert!(!may_stop(Drain::Serving));
+        assert!(!may_stop(Drain::Begun));
+        assert!(may_stop(Drain::Applied));
+        assert!(may_stop(Drain::Failed));
+    }
+
+    #[test]
+    fn apply_by_restart_exits_six_and_an_abandoned_accept_fails() {
+        assert_eq!(
+            serve_outcome_to_exit_code(&ServeOutcome::ApplyByRestart),
+            ExitCode::from(6)
+        );
+        assert_eq!(
+            serve_outcome_to_exit_code(&ServeOutcome::AcceptAbandoned),
+            ExitCode::FAILURE
+        );
+        assert_eq!(APPLY_BY_RESTART_EXIT_CODE, 6);
     }
 
     #[test]
@@ -1022,6 +1140,10 @@ mod tests {
             Verb::AdminAuditTail,
             Verb::AdminPolicyReload,
             Verb::AdminSubjectList,
+            Verb::AdminBaselineShow,
+            Verb::AdminBaselineAccept {
+                hash: "0".repeat(64),
+            },
             Verb::AdminSubjectBind,
             Verb::AdminSubjectUnbind,
             Verb::AdminContain,
@@ -1098,7 +1220,7 @@ mod tests {
 
     /// #148: every term is EXACTLY one of control plane or content-bearing, and
     /// the split is what the vocabulary says it is. Pinned over `all_verbs()`
-    /// (57 client action terms) + the two `kernel.*` pseudo-actions, AND
+    /// (59 client action terms) + the two `kernel.*` pseudo-actions, AND
     /// `all_verbs()` is cross-checked against `ci/gates/verb-manifest.txt`'s
     /// `action` rows (critical-review round 1 of PR B: the manifest is
     /// extracted from `verb_to_action`, which the compiler forces a new
@@ -1209,10 +1331,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_baseline_terms_are_control_plane_and_the_hash_never_reaches_the_pdp() {
+        use crate::ceiling_authz::is_control_plane;
+        assert!(is_control_plane("admin.baseline.show"));
+        assert!(is_control_plane("admin.baseline.accept"));
+        let hash = "c".repeat(64);
+        let r = build_authz_request(
+            &Verb::AdminBaselineAccept { hash: hash.clone() },
+            501,
+            None,
+            maknae_security::Lane::Local,
+            None,
+        );
+        assert!(!format!("{r:?}").contains(&hash));
+        assert_eq!(
+            verb_to_action(&Verb::AdminBaselineAccept { hash }),
+            "admin.baseline.accept"
+        );
+        assert_eq!(
+            verb_to_action(&Verb::AdminBaselineShow),
+            "admin.baseline.show"
+        );
+    }
+
     /// #67 D4: the vocabulary is the size the spec says.
     #[test]
-    fn the_vocabulary_is_fifty_seven_client_reachable_terms() {
-        assert_eq!(all_verbs().len(), 57);
+    fn the_vocabulary_is_fifty_nine_client_reachable_terms() {
+        assert_eq!(all_verbs().len(), 59);
     }
 
     /// Two terms sharing an action string would be decided as one another —

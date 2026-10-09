@@ -10,7 +10,9 @@
 //!
 //! T3 (`coverage-tiers.toml`): I/O-bound, report-only coverage; the
 //! `tests/fail_closed.rs` integration test is the primary evidence.
-use crate::blocking_guard::{AuditAttempt, BlockingBreaker, BreakerAdmission};
+use crate::blocking_guard::{
+    AuditAttempt, BlockingBreaker, BreakerAdmission, WriterBusy, AUDIT_WRITER_BUSY_REFUSE_AFTER,
+};
 use crate::error::AuditError;
 use crate::journal::PrimaryOutcome;
 // ONE name for the platform mirror, chosen here at the module boundary, so the
@@ -34,31 +36,66 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-fn open_audit_file(path: &Path) -> Result<File, AuditError> {
-    maknae_io::open_audit_append(
+#[derive(Clone, Copy)]
+enum Trail {
+    CreateIfMissing,
+    Existing,
+    Prepared,
+}
+
+fn open_audit_file(path: &Path, trail: Trail) -> Result<File, AuditError> {
+    let creates = matches!(trail, Trail::CreateIfMissing);
+    open_trail_under(
         path,
         // Preserve the configured audit parent's OS DAC authority; the opened
         // leaf must satisfy the stronger artifact requirements below.
         &maknae_io::AnchorRequired::OS_DAC,
-        &maknae_io::TargetRequired {
-            owner: Some(nix::unistd::geteuid().as_raw()),
-            mode_mask: Some(0o037),
-            nlink_exactly_one: false,
-            regular_file: true,
-            max_bytes: None,
-        },
-        maknae_io::Mode(0o640),
+        trail,
     )
-    .map_err(|e| AuditError::OpenPrimary {
-        path: path.to_path_buf(),
-        detail: e.to_string(),
+    .map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound if !creates => AuditError::Missing(path.to_path_buf()),
+        _ => AuditError::OpenPrimary {
+            path: path.to_path_buf(),
+            detail: e.to_string(),
+        },
     })
+}
+
+fn open_trail_under(
+    path: &Path,
+    parent: &maknae_io::AnchorRequired,
+    trail: Trail,
+) -> std::io::Result<File> {
+    let target = maknae_io::TargetRequired {
+        owner: Some(nix::unistd::geteuid().as_raw()),
+        mode_mask: Some(0o037),
+        nlink_exactly_one: false,
+        regular_file: true,
+        max_bytes: None,
+    };
+    match trail {
+        Trail::CreateIfMissing => {
+            maknae_io::open_audit_append(path, parent, &target, maknae_io::Mode(0o640))
+        }
+        Trail::Existing => maknae_io::open_existing_audit_append(path, parent, &target, false),
+        Trail::Prepared => maknae_io::open_existing_audit_append(
+            path,
+            parent,
+            &maknae_io::TargetRequired {
+                nlink_exactly_one: true,
+                ..target
+            },
+            true,
+        ),
+    }
 }
 
 /// The append-only JSONL audit sink: single-writer, off-runtime blocking I/O.
 pub struct AuditSink {
     primary: Arc<Mutex<Primary>>,
     breaker: Arc<Mutex<BlockingBreaker>>,
+    busy: Arc<WriterBusy>,
+    busy_limit: Duration,
     #[allow(dead_code)] // surfaced for future error context / re-open on failure
     path: PathBuf,
     /// Best-effort system-log mirror (ADR-0019 D3): journald on Linux
@@ -76,6 +113,8 @@ struct Primary {
     // Protected by the writer mutex: no queued writer can acknowledge a later
     // line after a failed/partial write or uncertain synchronization.
     failed: bool,
+    #[cfg(test)]
+    stall: Option<std::sync::mpsc::Receiver<()>>,
 }
 
 impl Primary {
@@ -83,6 +122,8 @@ impl Primary {
         Self {
             file,
             failed: false,
+            #[cfg(test)]
+            stall: None,
         }
     }
 }
@@ -110,13 +151,43 @@ impl AuditSink {
         cfg: &maknae_config::AuditConfig,
         journal: &Path,
     ) -> Result<Self, AuditError> {
-        let file = open_audit_file(&cfg.jsonl_path)?;
-        Ok(AuditSink {
+        Ok(Self::from_file(
+            cfg,
+            journal,
+            open_audit_file(&cfg.jsonl_path, Trail::CreateIfMissing)?,
+        ))
+    }
+
+    /// As [`open`](Self::open), for a trail that must already exist; never creates one.
+    pub fn open_existing(cfg: &maknae_config::AuditConfig) -> Result<Self, AuditError> {
+        let file = open_audit_file(&cfg.jsonl_path, Trail::Existing)?;
+        Ok(Self::from_file(
+            cfg,
+            Path::new(DEFAULT_JOURNAL_SOCKET),
+            file,
+        ))
+    }
+
+    /// As [`open_existing`](Self::open_existing), for a trail root prepared: a single
+    /// link carrying the append-only flag only root can clear. Never creates one.
+    pub fn open_prepared(cfg: &maknae_config::AuditConfig) -> Result<Self, AuditError> {
+        let file = open_audit_file(&cfg.jsonl_path, Trail::Prepared)?;
+        Ok(Self::from_file(
+            cfg,
+            Path::new(DEFAULT_JOURNAL_SOCKET),
+            file,
+        ))
+    }
+
+    fn from_file(cfg: &maknae_config::AuditConfig, journal: &Path, file: File) -> Self {
+        AuditSink {
             primary: Arc::new(Mutex::new(Primary::new(file))),
             breaker: Arc::new(Mutex::new(BlockingBreaker::default())),
+            busy: Arc::new(WriterBusy::default()),
+            busy_limit: AUDIT_WRITER_BUSY_REFUSE_AFTER,
             path: cfg.jsonl_path.clone(),
             mirror: Mirror::open(journal),
-        })
+        }
     }
 
     /// Canonicalize `rec`, append it as one JSONL line, and durably flush
@@ -152,6 +223,24 @@ impl AuditSink {
         let mut line = canonical_json(rec)?;
         line.push('\n');
         let now = Instant::now();
+        if self.busy.busy_longer_than(self.busy_limit, now) {
+            let should_log = self
+                .breaker
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .should_log_refusal_at(now);
+            if should_log {
+                eprintln!(
+                    "maknaed: AUDIT WRITER BUSY for event={} action={} session_id={} — refusing append before spawning blocking audit work",
+                    rec.event, rec.action, rec.session_id
+                );
+            }
+            self.mirror_journald(rec, PrimaryOutcome::RefusedBreakerOpen);
+            return Err(AuditError::WritePrimary(format!(
+                "audit writer busy for more than {}ms",
+                self.busy_limit.as_millis()
+            )));
+        }
         let admitted = {
             let mut breaker = self
                 .breaker
@@ -197,13 +286,14 @@ impl AuditSink {
             }
         };
         let primary = Arc::clone(&self.primary);
+        let busy = Arc::clone(&self.busy);
         let release = SlotRelease {
             breaker: Arc::clone(&self.breaker),
             attempt,
         };
         let worker = tokio::task::spawn_blocking(move || {
             let _release = release;
-            write_line(&primary, &line)
+            write_line(&primary, &line, &busy)
         });
         let joined = match bound {
             None => worker.await,
@@ -292,7 +382,7 @@ fn unconfirmed(bound: Duration) -> AuditError {
     ))
 }
 
-fn write_line(file: &Mutex<Primary>, line: &str) -> Result<(), AuditError> {
+fn write_line(file: &Mutex<Primary>, line: &str, busy: &WriterBusy) -> Result<(), AuditError> {
     // A writer panic may leave a partial JSONL line. Appending after it would
     // acknowledge a record spliced into that line, not a durable valid record.
     let mut guard = file.lock().map_err(|_| {
@@ -304,6 +394,11 @@ fn write_line(file: &Mutex<Primary>, line: &str) -> Result<(), AuditError> {
         ));
     }
     guard.failed = true;
+    let _busy = busy.hold_from(Instant::now());
+    #[cfg(test)]
+    if let Some(stall) = guard.stall.take() {
+        let _ = stall.recv_timeout(Duration::from_secs(10));
+    }
     guard
         .file
         .write_all(line.as_bytes())
@@ -431,6 +526,7 @@ mod tests {
         std::fs::write(&path, bytes).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
         let cfg = maknae_config::AuditConfig {
+            readers: Vec::new(),
             jsonl_path: path.clone(),
             siem: None,
             au3_1: serde_json::json!({}),
@@ -447,6 +543,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("audit.jsonl");
         let cfg = maknae_config::AuditConfig {
+            readers: Vec::new(),
             jsonl_path: path.clone(),
             siem: None,
             au3_1: serde_json::json!({}),
@@ -471,6 +568,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("audit.jsonl");
         let cfg = maknae_config::AuditConfig {
+            readers: Vec::new(),
             jsonl_path: path.clone(),
             siem: None,
             au3_1: serde_json::json!({}),
@@ -507,6 +605,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("audit.jsonl");
         let cfg = maknae_config::AuditConfig {
+            readers: Vec::new(),
             jsonl_path: path.clone(),
             siem: None,
             au3_1: serde_json::json!({}),
@@ -545,6 +644,7 @@ mod tests {
     async fn append_multiple_records_writes_multiple_well_formed_lines() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = maknae_config::AuditConfig {
+            readers: Vec::new(),
             jsonl_path: dir.path().join("audit.jsonl"),
             siem: None,
             au3_1: serde_json::json!({}),
@@ -573,6 +673,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("audit.jsonl");
         let cfg = maknae_config::AuditConfig {
+            readers: Vec::new(),
             jsonl_path: path.clone(),
             siem: None,
             au3_1: serde_json::json!({}),
@@ -593,6 +694,7 @@ mod tests {
     async fn open_fails_closed_when_path_is_a_directory() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = maknae_config::AuditConfig {
+            readers: Vec::new(),
             jsonl_path: dir.path().to_path_buf(), // a directory, not a file
             siem: None,
             au3_1: serde_json::json!({}),
@@ -602,6 +704,88 @@ mod tests {
             std::path::Path::new("/nonexistent/maknae-test-no-journal.sock")
         )
         .is_err());
+    }
+
+    fn audit_cfg(path: &Path) -> maknae_config::AuditConfig {
+        maknae_config::AuditConfig {
+            readers: Vec::new(),
+            jsonl_path: path.to_path_buf(),
+            siem: None,
+            au3_1: serde_json::json!({}),
+        }
+    }
+
+    fn seed_trail(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, b"").unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640)).unwrap();
+    }
+
+    fn open_detail(result: Result<AuditSink, AuditError>) -> String {
+        match result {
+            Err(AuditError::OpenPrimary { detail, .. }) => detail,
+            Err(other) => panic!("expected OpenPrimary, got {other}"),
+            Ok(_) => panic!("expected OpenPrimary, the trail opened"),
+        }
+    }
+
+    #[test]
+    fn open_existing_refuses_a_missing_trail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        for opened in [
+            AuditSink::open_existing(&audit_cfg(&path)),
+            AuditSink::open_prepared(&audit_cfg(&path)),
+        ] {
+            match opened {
+                Err(e @ AuditError::Missing(_)) => {
+                    assert_eq!(
+                        e.to_string(),
+                        format!("the audit trail {} is missing", path.display())
+                    )
+                }
+                Err(other) => panic!("expected Missing, got {other}"),
+                Ok(_) => panic!("expected Missing, the trail opened"),
+            }
+        }
+        assert!(!path.exists(), "neither open creates the trail");
+        let parent = dir.path().join("absent").join("audit.jsonl");
+        assert!(matches!(
+            AuditSink::open_existing(&audit_cfg(&parent)),
+            Err(AuditError::Missing(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn open_existing_appends_to_an_existing_trail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        seed_trail(&path);
+        let sink = AuditSink::open_existing(&audit_cfg(&path)).unwrap();
+        sink.append(&sample_record()).await.unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(contents.lines().count(), 1);
+        assert!(contents.contains("connection.accept"));
+    }
+
+    #[test]
+    fn open_prepared_refuses_a_trail_without_the_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        seed_trail(&path);
+        let detail = open_detail(AuditSink::open_prepared(&audit_cfg(&path)));
+        assert!(detail.contains("not append-only"), "{detail}");
+    }
+
+    #[test]
+    fn open_prepared_refuses_a_hard_linked_trail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        seed_trail(&path);
+        std::fs::hard_link(&path, dir.path().join("other")).unwrap();
+        let detail = open_detail(AuditSink::open_prepared(&audit_cfg(&path)));
+        assert!(detail.contains("hard-linked"), "{detail}");
+        assert!(AuditSink::open_existing(&audit_cfg(&path)).is_ok());
     }
 
     // ---- fail-closed audit-file integrity (O_NOFOLLOW + fstat) --------------
@@ -616,6 +800,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("audit.jsonl");
         let cfg = maknae_config::AuditConfig {
+            readers: Vec::new(),
             jsonl_path: path.clone(),
             siem: None,
             au3_1: serde_json::json!({}),
@@ -638,6 +823,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("audit.jsonl");
         let left_cfg = maknae_config::AuditConfig {
+            readers: Vec::new(),
             jsonl_path: path.clone(),
             siem: None,
             au3_1: serde_json::json!({}),
@@ -671,6 +857,7 @@ mod tests {
         std::fs::write(&path, b"").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
         let cfg = maknae_config::AuditConfig {
+            readers: Vec::new(),
             jsonl_path: path,
             siem: None,
             au3_1: serde_json::json!({}),
@@ -693,6 +880,7 @@ mod tests {
         let link = dir.path().join("audit.jsonl");
         std::os::unix::fs::symlink(&target, &link).unwrap();
         let cfg = maknae_config::AuditConfig {
+            readers: Vec::new(),
             jsonl_path: link,
             siem: None,
             au3_1: serde_json::json!({}),
@@ -708,6 +896,7 @@ mod tests {
     async fn emit_trait_method_delegates_to_append() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = maknae_config::AuditConfig {
+            readers: Vec::new(),
             jsonl_path: dir.path().join("audit.jsonl"),
             siem: None,
             au3_1: serde_json::json!({}),
@@ -728,6 +917,7 @@ mod tests {
     /// and this task must not change its shape.
     fn cfg_at(dir: &std::path::Path) -> maknae_config::AuditConfig {
         maknae_config::AuditConfig {
+            readers: Vec::new(),
             jsonl_path: dir.join("audit.jsonl"),
             siem: None,
             au3_1: serde_json::json!({}),
@@ -741,6 +931,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("audit.jsonl");
         let cfg = maknae_config::AuditConfig {
+            readers: Vec::new(),
             jsonl_path: path.clone(),
             siem: None,
             au3_1: serde_json::json!({}),
@@ -789,6 +980,7 @@ mod tests {
     async fn repeated_timeouts_under_a_wedge_do_not_exhaust_the_breaker_after_recovery() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = maknae_config::AuditConfig {
+            readers: Vec::new(),
             jsonl_path: dir.path().join("audit.jsonl"),
             siem: None,
             au3_1: serde_json::json!({}),
@@ -1539,6 +1731,48 @@ mod tests {
                 .map(|r| r.action == action)
                 .unwrap_or(false)
         }
+    }
+
+    #[tokio::test]
+    async fn a_writer_busy_past_its_limit_refuses_later_appends_fast_and_recovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sink = quiet_sink(dir.path());
+        sink.busy_limit = Duration::from_millis(50);
+        let (release, stall) = std::sync::mpsc::channel();
+        sink.primary.lock().unwrap().stall = Some(stall);
+        let rec = scan_record("a", 1, 0);
+        let first = sink.append_within(&rec, Duration::from_millis(100)).await;
+        assert!(
+            matches!(&first, Err(AuditError::WritePrimary(m)) if m.contains("unconfirmed")),
+            "{first:?}"
+        );
+        let second = tokio::time::timeout(Duration::from_secs(1), sink.append(&rec))
+            .await
+            .expect("a busy writer must refuse without waiting for it");
+        assert!(
+            matches!(&second, Err(AuditError::WritePrimary(m)) if m == "audit writer busy for more than 50ms"),
+            "{second:?}"
+        );
+        release.send(()).unwrap();
+        let mut recovered = false;
+        for _ in 0..250 {
+            if sink.busy.busy_longer_than(Duration::ZERO, Instant::now()) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                continue;
+            }
+            recovered = true;
+            break;
+        }
+        assert!(
+            recovered,
+            "the writer stayed busy after its write was released"
+        );
+        tokio::time::timeout(Duration::from_secs(5), sink.append(&rec))
+            .await
+            .expect("bounded")
+            .unwrap();
+        let lines = std::fs::read_to_string(dir.path().join("audit.jsonl")).unwrap();
+        assert_eq!(lines.lines().count(), 2);
     }
 
     #[tokio::test]

@@ -32,7 +32,7 @@ Debian confinement is **AppArmor** (`Depends: apparmor, apparmor-utils`), not
 SELinux. The rpm's SELinux `.pp` and fapolicyd trust fragment are **not** shipped
 in the deb — both are SELinux-N/A here. The path-attached profile
 (`apparmor/usr.bin.maknaed`) mirrors the `.te`: read-only `/etc/maknae/**`,
-`rwk` on `/var/log/maknae/audit.jsonl`, `rw` on the
+`rwk` on every `/var/log/maknae/*.jsonl` trail, `rw` on the
 `/run/maknae` UDS, read of the systemd-decrypted credential under
 `/run/credentials/maknaed.service/`, and TCP for Vault egress. A discrete
 `maknae_tool` profile is declared (structure-now, near-empty) as the `px`
@@ -94,10 +94,11 @@ maknae ping     # -> pong
 maknae whoami   # -> maknae://<id>/plane/cli
 ```
 
-The three `admin.*` subcommands — `maknae status`, `maknae config-show`, and
-`maknae subject-list` — ship **ungranted**: the packaged `authz.yaml` has no
-`roles:` key, so each returns `not authorized` until a site grants it. That is
-deliberate (ADR-0010), not a packaging omission.
+The packaged `authz.yaml` grants the `admin` role `admin.status`,
+`admin.subject.list`, `admin.baseline.show` and `admin.baseline.accept`, so the
+enrolled administrator can run `maknae status`, `maknae subject-list`,
+`maknae baseline-show` and `maknae baseline-accept`. `maknae config-show` ships
+**ungranted** and returns `not authorized` until a site grants it (ADR-0010).
 
 On **upgrade**, re-run `maknae enroll` before restarting the daemon if the
 shipped `maknae.yaml`/`authz.yaml` changed — the same install→enroll→(re)start

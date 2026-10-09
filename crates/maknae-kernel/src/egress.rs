@@ -8,6 +8,7 @@
 //! is [`Unavailable`]; it fails `ready()` BEFORE any intent exists, so a
 //! refusal is never recorded as a send. #240 supplies the real backend.
 
+use crate::blocking_guard::AUDIT_APPEND_TIMEOUT;
 use maknae_audit_append::{AuditEmit, AuditError, AuditRecord, EgressStatus};
 use maknae_proto::{ContentBlock, PromptReply, Turn};
 use std::sync::Arc;
@@ -146,7 +147,7 @@ pub async fn commit_intent<E: AuditEmit>(
     emit: &E,
     record: AuditRecord,
 ) -> Result<DurableEgressIntent, AuditError> {
-    emit.emit(&record).await?;
+    emit.emit_within(&record, AUDIT_APPEND_TIMEOUT).await?;
     Ok(DurableEgressIntent { record })
 }
 
@@ -294,9 +295,7 @@ pub fn production_egress_with(
 /// The real resolver over NSS: the account's uid, `None` when no such
 /// account exists, and the library's error text when NSS itself fails.
 pub(crate) fn resolve_account_uid(name: &str) -> Result<Option<u32>, String> {
-    nix::unistd::User::from_name(name)
-        .map(|u| u.map(|u| u.uid.as_raw()))
-        .map_err(|e| e.to_string())
+    maknae_vault::account_uid(name)
 }
 
 /// The one production choice, in one place: the real resolver over NSS.
@@ -1324,6 +1323,14 @@ mod tests {
         assert!(m.contains("nss down"), "{m}");
     }
 
+    #[test]
+    fn the_egress_account_lookup_is_the_classified_one() {
+        let src = include_str!("egress.rs");
+        let production = &src[..src.find("\n#[cfg(test)]").unwrap()];
+        assert!(!production.contains("User::from_name("));
+        assert!(production.contains("maknae_vault::account_uid("));
+    }
+
     /// The real resolver, over NSS, with values this host actually has: the
     /// running account resolves to the running uid, and a name no host has
     /// resolves to `None` — the arm `production_egress` refuses on by name.
@@ -1390,6 +1397,28 @@ mod tests {
         );
         assert!(
             format!("{:?}", EgressFailure::Transport("peer reset".into())).contains("peer reset")
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_egress_intent_record_gives_up_and_no_intent_is_durable() {
+        struct Stall;
+        impl AuditEmit for Stall {
+            fn emit(
+                &self,
+                _: &AuditRecord,
+            ) -> impl std::future::Future<Output = Result<(), AuditError>> + Send {
+                std::future::pending()
+            }
+        }
+        let got = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            commit_intent(&Stall, intent_record()),
+        )
+        .await;
+        assert!(
+            matches!(got, Ok(Err(_))),
+            "the intent append must give up within its bound"
         );
     }
 

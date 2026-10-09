@@ -5,7 +5,7 @@
 //! Maknae reads only its own config; nothing external is read at boot.
 
 use maknae_config::{
-    ceiling_from_core, load_config_rooted, policy_name_from_core, providers_from_section,
+    ceiling_from_core, load_config_root_owned, policy_name_from_core, providers_from_section,
     refuse_plaintext_keys, Ceiling, ClassificationPolicy, ConfigError, Document, IngestPosture,
     ProviderSet, SectionSpec, Value, AUDIT_SECTION, EGRESS_SECTION, PRINCIPAL_SECTION,
     PROVIDERS_SECTION, TRANSPORT_SECTION,
@@ -27,16 +27,13 @@ pub struct BootConfig {
     providers: ProviderSet,
 }
 
-const ROOT_REQUIRED_SECTIONS: [&str; 1] = [PROVIDERS_SECTION];
-
 impl std::fmt::Debug for BootConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BootConfig")
             .field("document", &self.document)
-            .field("ceiling", &self.ceiling)
             .field("policy", &self.policy.name())
             .field("providers", &self.providers)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -86,25 +83,33 @@ impl BootConfig {
     }
 }
 
-/// Boot the kernel over Maknae's config directory: load the config ONCE with every
-/// section the daemon uses registered (`core` is auto-registered; `lake`+`vault`+
-/// `transport`+`audit`+`principal` as optional extensions), select the classification
-/// system and read the `core` ceiling through it,
-/// and return the assembled `BootConfig`. The `vault` block is registered here —
-/// rather than re-loaded later under a `vault`-only registry — so the SAME document
-/// boots the kernel AND backs `PlaneClient::from_document`; a realistic combined
-/// config loads coherently while a genuinely-unknown section still fails closed
-/// with `UnknownSection` (P1-A). Fail-closed: any `ConfigError` short-circuits.
+/// Boot the kernel over Maknae's config directory: [`read_files`], then [`assemble`].
 pub fn boot(config_dir: &Path) -> Result<BootConfig, ConfigError> {
-    // `vault` and `principal` are registered optional (not required) so the existing
-    // minimal-config boot tests — and any pre-Jackrabbit deployment written before
-    // `maknae enroll` started emitting a `principal` block — still load. The daemon's
-    // actual dependence on a vault block fails closed later at `from_document`/`mint`
-    // (MissingKey); the authorization layer's dependence on a principal (#77) fails
-    // closed there, not here.
-    let specs = boot_specs();
-    let document = load_config_rooted(config_dir, &specs, &ROOT_REQUIRED_SECTIONS)?;
-    assemble_boot(document)
+    read_files(config_dir).and_then(assemble)
+}
+
+/// Load the config ONCE with every section the daemon uses registered, every
+/// source and the directories that select among them held to root ownership
+/// (#490). `vault` and `principal` are optional here; their absence fails closed
+/// where they are consumed.
+pub fn read_files(config_dir: &Path) -> Result<Document, ConfigError> {
+    load_config_root_owned(config_dir, &boot_specs())
+}
+
+/// The hermetic door: [`read_files`] with every source owned by the test's euid.
+#[cfg(any(test, feature = "hermetic-test-seam"))]
+pub fn read_files_as_owner(config_dir: &Path) -> Result<Document, ConfigError> {
+    maknae_config::load_config_root_owned_with_requirement(
+        config_dir,
+        &boot_specs(),
+        maknae_io::TargetRequired {
+            owner: Some(nix::unistd::geteuid().as_raw()),
+            mode_mask: Some(0o022),
+            nlink_exactly_one: false,
+            regular_file: true,
+            max_bytes: None,
+        },
+    )
 }
 
 /// The sections the daemon registers, as literal blocks: the disclosure drift
@@ -143,9 +148,15 @@ fn boot_specs() -> [SectionSpec; 7] {
     ]
 }
 
+/// [`boot`] through the hermetic door.
+#[cfg(any(test, feature = "hermetic-test-seam"))]
+pub fn boot_as_owner(config_dir: &Path) -> Result<BootConfig, ConfigError> {
+    read_files_as_owner(config_dir).and_then(assemble)
+}
+
 /// Everything after the load: the classification system, the ceiling through
 /// it, the provider.
-fn assemble_boot(document: Document) -> Result<BootConfig, ConfigError> {
+pub(crate) fn assemble(document: Document) -> Result<BootConfig, ConfigError> {
     // The SYSTEM first, then the ceiling THROUGH it (ADR-0022): a name this
     // build does not carry refuses boot before any level is read, and a
     // level the selected system does not rank refuses it in the reader.
@@ -192,21 +203,29 @@ fn assemble_boot(document: Document) -> Result<BootConfig, ConfigError> {
 mod tests {
     use super::*;
 
-    /// The hermetic door: the same assembly over a document loaded with the
-    /// caller's root requirement, so unprivileged tests can prove the provider
-    /// wiring end to end. Test-only; production is [`boot`].
+    #[test]
+    fn boot_specs_names_are_the_daemon_sections() {
+        assert_eq!(
+            boot_specs().map(|s| s.name),
+            maknae_config::DAEMON_SECTIONS.map(String::from)
+        );
+    }
+
+    fn owned(config_dir: &Path) -> Result<BootConfig, ConfigError> {
+        boot_as_owner(config_dir)
+    }
+
+    #[cfg(unix)]
     fn boot_with_requirement(
         config_dir: &Path,
         requirement: maknae_io::TargetRequired,
     ) -> Result<BootConfig, ConfigError> {
-        let specs = boot_specs();
-        let document = maknae_config::load_config_rooted_with_requirement(
+        maknae_config::load_config_root_owned_with_requirement(
             config_dir,
-            &specs,
-            &ROOT_REQUIRED_SECTIONS,
+            &boot_specs(),
             requirement,
-        )?;
-        assemble_boot(document)
+        )
+        .and_then(assemble)
     }
 
     // Platform-agnostic: a nonexistent dir fails on every platform (unix → Io from
@@ -263,7 +282,7 @@ mod tests {
             "core:\n  handlng:\n    accreditation_ref: null\n",
             0o640,
         );
-        match boot(&d.0) {
+        match owned(&d.0) {
             Err(ConfigError::UnknownKey { section, key }) => {
                 assert_eq!(section, "core");
                 assert_eq!(key, "handlng");
@@ -292,7 +311,7 @@ mod tests {
              dissemination_permitted: [\"Distribution Statement A\"]\n",
             0o640,
         );
-        match boot(&d.0) {
+        match owned(&d.0) {
             Err(ConfigError::UnknownKey { section, key }) => {
                 panic!("a key core accepts was refused: '{key}' in '{section}'")
             }
@@ -312,7 +331,7 @@ mod tests {
             "core:\n  identity:\n    name: test\n",
             0o640,
         );
-        let cfg = boot(&d.0).expect("boots");
+        let cfg = owned(&d.0).expect("boots");
         assert_eq!(
             cfg.ceiling(),
             &maknae_config::Ceiling::baseline_for(&maknae_config::BasicPolicy)
@@ -329,7 +348,7 @@ mod tests {
     fn empty_base_boots_public() {
         let d = new_dir("empty");
         put(&d.0, "maknae.yaml", "", 0o640);
-        let cfg = boot(&d.0).expect("boots");
+        let cfg = owned(&d.0).expect("boots");
         assert_eq!(cfg.ingest_posture(), maknae_config::IngestPosture::Public);
     }
 
@@ -338,7 +357,7 @@ mod tests {
     fn above_baseline_core_boots_gated() {
         let d = new_dir("secret");
         put(&d.0, "maknae.yaml", SECRET_CORE, 0o640);
-        let cfg = boot(&d.0).expect("boots");
+        let cfg = owned(&d.0).expect("boots");
         assert_eq!(cfg.ingest_posture(), maknae_config::IngestPosture::Gated);
         let level = &cfg.ceiling().classification;
         assert_eq!(
@@ -355,7 +374,7 @@ mod tests {
         let d = new_dir("caseok");
         let y = SECRET_CORE.replace("classification: SECRET", "classification: Unclassified");
         put(&d.0, "maknae.yaml", &y, 0o640);
-        let cfg = boot(&d.0).expect("boots");
+        let cfg = owned(&d.0).expect("boots");
         assert_eq!(cfg.ceiling().classification.name, "UNCLASSIFIED");
         assert_eq!(cfg.ingest_posture(), maknae_config::IngestPosture::Public);
     }
@@ -373,7 +392,7 @@ mod tests {
                 "    accreditation_ref: null\n    policy: aus\n",
             );
         put(&d.0, "maknae.yaml", &y, 0o640);
-        let cfg = boot(&d.0).expect("boots");
+        let cfg = owned(&d.0).expect("boots");
         assert_eq!(cfg.classification_policy_name(), "AUS");
         let level = &cfg.ceiling().classification;
         assert_eq!(
@@ -400,7 +419,7 @@ mod tests {
                 "    accreditation_ref: null\n    policy: AUS\n",
             );
         put(&d.0, "maknae.yaml", &y, 0o640);
-        let cfg = boot(&d.0).expect("boots");
+        let cfg = owned(&d.0).expect("boots");
         let level = &cfg.ceiling().classification;
         assert_eq!(
             (level.name.as_str(), level.rank),
@@ -410,9 +429,9 @@ mod tests {
         let y = y.replace("\"Official: Sensitive\"", "Official: Sensitive");
         put(&d.0, "maknae.yaml", &y, 0o640);
         assert!(
-            matches!(boot(&d.0), Err(maknae_config::ConfigError::Parse { .. })),
+            matches!(owned(&d.0), Err(maknae_config::ConfigError::Parse { .. })),
             "{:?}",
-            boot(&d.0)
+            owned(&d.0)
         );
     }
 
@@ -424,7 +443,7 @@ mod tests {
         let d = new_dir("usprot");
         let y = SECRET_CORE.replace("classification: SECRET", "classification: PROTECTED");
         put(&d.0, "maknae.yaml", &y, 0o640);
-        match boot(&d.0) {
+        match owned(&d.0) {
             Err(maknae_config::ConfigError::InvalidCeiling { reason }) => {
                 assert!(reason.contains("not a level of the US system"), "{reason}")
             }
@@ -443,7 +462,7 @@ mod tests {
             "    accreditation_ref: null\n    policy: ROK\n",
         );
         put(&d.0, "maknae.yaml", &y, 0o640);
-        match boot(&d.0) {
+        match owned(&d.0) {
             Err(maknae_config::ConfigError::UnknownClassificationPolicy { name }) => {
                 assert_eq!(name, "ROK")
             }
@@ -456,7 +475,7 @@ mod tests {
         );
         put(&d.0, "maknae.yaml", &y, 0o640);
         assert!(matches!(
-            boot(&d.0),
+            owned(&d.0),
             Err(maknae_config::ConfigError::InvalidCeiling { .. })
         ));
     }
@@ -471,7 +490,7 @@ mod tests {
             "core:\n  identity:\n    name: t\nlake:\n  in_scope_domains: [a]\n",
             0o640,
         );
-        let cfg = boot(&d.0).expect("boots");
+        let cfg = owned(&d.0).expect("boots");
         assert!(cfg.section("lake").is_some());
     }
 
@@ -488,7 +507,7 @@ mod tests {
              principal:\n  name: alice\n  uid: 1000\n",
             0o640,
         );
-        let cfg = boot(&d.0).expect("boots with a principal block");
+        let cfg = owned(&d.0).expect("boots with a principal block");
         assert!(cfg.section("principal").is_some());
         let p = maknae_config::principal_from_section(cfg.section("principal"))
             .expect("principal parses from the booted document")
@@ -512,7 +531,7 @@ mod tests {
             "core:\n  identity:\n    name: t\n",
             0o640,
         );
-        let cfg = boot(&d.0).expect("pre-Jackrabbit config without principal still boots");
+        let cfg = owned(&d.0).expect("pre-Jackrabbit config without principal still boots");
         assert!(cfg.section("principal").is_none());
         assert_eq!(
             maknae_config::principal_from_section(cfg.section("principal")),
@@ -526,7 +545,7 @@ mod tests {
         let d = new_dir("unknown");
         put(&d.0, "maknae.yaml", "mystery:\n  a: 1\n", 0o640);
         assert!(matches!(
-            boot(&d.0),
+            owned(&d.0),
             Err(maknae_config::ConfigError::UnknownSection { .. })
         ));
     }
@@ -549,7 +568,7 @@ mod tests {
              audit:\n  jsonl_path: /var/log/maknae/audit.jsonl\n",
             0o640,
         );
-        let cfg = boot(&d.0).expect("combined config boots");
+        let cfg = owned(&d.0).expect("combined config boots");
         assert!(cfg.section("vault").is_some());
         assert!(cfg.section("transport").is_some());
         assert!(cfg.section("audit").is_some());
@@ -572,7 +591,7 @@ mod tests {
              vault:\n  addr: https://v.example:8200\n  user_auth:\n    type: ldap\n",
             0o640,
         );
-        let cfg = boot(&d.0).expect("the document loads; the vault parse is what refuses");
+        let cfg = owned(&d.0).expect("the document loads; the vault parse is what refuses");
         assert!(matches!(
             maknae_vault::vault_config_from_document(cfg.document()),
             Err(maknae_vault::VaultError::UnknownUserAuth(t)) if t == "ldap"
@@ -595,7 +614,7 @@ mod tests {
             0o640,
         );
         assert!(matches!(
-            boot(&d.0),
+            owned(&d.0),
             Err(maknae_config::ConfigError::UnknownSection { .. })
         ));
     }
@@ -607,7 +626,7 @@ mod tests {
         let bad = SECRET_CORE.replace("classification: SECRET", "classification: SEKRET");
         put(&d.0, "maknae.yaml", &bad, 0o640);
         assert!(matches!(
-            boot(&d.0),
+            owned(&d.0),
             Err(maknae_config::ConfigError::InvalidCeiling { .. })
         ));
     }
@@ -617,7 +636,7 @@ mod tests {
     fn missing_base_is_not_found() {
         let d = new_dir("nobase"); // no maknae.yaml
         assert!(matches!(
-            boot(&d.0),
+            owned(&d.0),
             Err(maknae_config::ConfigError::NotFound { .. })
         ));
     }
@@ -628,7 +647,7 @@ mod tests {
         let d = new_dir("644");
         put(&d.0, "maknae.yaml", "core: {}\n", 0o644);
         assert!(matches!(
-            boot(&d.0),
+            owned(&d.0),
             Err(maknae_config::ConfigError::InsecurePermissions { .. })
         ));
     }
@@ -644,7 +663,7 @@ mod tests {
         put(&d.0, "outside.yaml", "core: {}\n", 0o640);
         std::os::unix::fs::symlink(d.0.join("outside.yaml"), cd.join("evil.yaml")).unwrap();
         assert!(matches!(
-            boot(&d.0),
+            owned(&d.0),
             Err(maknae_config::ConfigError::Symlink { .. })
         ));
     }
@@ -671,17 +690,14 @@ mod tests {
             "core:\n  identity:\n    name: t\n",
             0o640,
         );
-        assert!(boot_with_requirement(&d.0, me())
-            .unwrap()
-            .providers()
-            .is_empty());
+        assert!(owned(&d.0).unwrap().providers().is_empty());
         put(
             &d.0,
             "maknae.yaml",
             &format!("core:\n  identity:\n    name: t\n{PROVIDERS_BLOCK}"),
             0o640,
         );
-        let cfg = boot_with_requirement(&d.0, me()).unwrap();
+        let cfg = owned(&d.0).unwrap();
         let p = cfg.providers().get("openai").expect("authorized");
         assert_eq!(
             (p.endpoint.as_str(), p.models.clone()),
@@ -704,7 +720,7 @@ mod tests {
             "core: {}\nprovider:\n  name: openai\n  endpoint: https://api.openai.com/v1\n",
             0o640,
         );
-        match boot_with_requirement(&d.0, me()) {
+        match owned(&d.0) {
             Err(maknae_config::ConfigError::UnknownSection { section, .. }) => {
                 assert_eq!(section, "provider")
             }
@@ -722,7 +738,7 @@ mod tests {
             &format!("core: {{}}\n{PROVIDERS_BLOCK}    api_key: sk-live\n"),
             0o640,
         );
-        match boot_with_requirement(&d.0, me()) {
+        match owned(&d.0) {
             Err(maknae_config::ConfigError::ProviderPlaintextKey { field }) => {
                 assert_eq!(field, "api_key")
             }
@@ -739,17 +755,13 @@ mod tests {
         std::fs::create_dir(&cd).unwrap();
         std::fs::set_permissions(&cd, std::fs::Permissions::from_mode(0o750)).unwrap();
         put(&cd, "10-providers.yaml", PROVIDERS_BLOCK, 0o640);
-        assert!(!boot_with_requirement(&d.0, me())
-            .unwrap()
-            .providers()
-            .is_empty());
+        assert!(!owned(&d.0).unwrap().providers().is_empty());
         put(&cd, "10-providers.yaml", PROVIDERS_BLOCK, 0o660);
-        match boot_with_requirement(&d.0, me()) {
-            Err(maknae_config::ConfigError::SectionNotRootOwned { section, path }) => {
-                assert_eq!(section, "providers");
+        match owned(&d.0) {
+            Err(maknae_config::ConfigError::SourceNotRootOwned { path }) => {
                 assert!(path.ends_with("config.d/10-providers.yaml"), "{path}");
             }
-            other => panic!("expected SectionNotRootOwned naming the member, got {other:?}"),
+            other => panic!("expected SourceNotRootOwned naming the member, got {other:?}"),
         }
         let wrong = maknae_io::TargetRequired {
             owner: Some(nix::unistd::geteuid().as_raw().wrapping_add(1)),
@@ -757,14 +769,13 @@ mod tests {
         };
         put(&cd, "10-providers.yaml", PROVIDERS_BLOCK, 0o640);
         match boot_with_requirement(&d.0, wrong) {
-            Err(maknae_config::ConfigError::SectionNotRootOwned { section, path }) => {
-                assert_eq!(section, "providers");
+            Err(maknae_config::ConfigError::SourceNotRootOwned { path }) => {
                 assert!(
                     path.ends_with("providers-cd"),
                     "the root directory is named: {path}"
                 );
             }
-            other => panic!("expected SectionNotRootOwned, got {other:?}"),
+            other => panic!("expected SourceNotRootOwned, got {other:?}"),
         }
     }
 
@@ -782,7 +793,7 @@ mod tests {
         std::fs::create_dir(&cd).unwrap();
         std::fs::set_permissions(&cd, std::fs::Permissions::from_mode(0o750)).unwrap();
         put(&cd, "10-providers.yaml", PROVIDERS_BLOCK, 0o640);
-        match boot_with_requirement(&d.0, me()) {
+        match owned(&d.0) {
             Err(maknae_config::ConfigError::ProviderPlaintextKey { field }) => {
                 assert_eq!(field, "api_key")
             }
@@ -804,7 +815,7 @@ mod tests {
         std::fs::create_dir(&cd).unwrap();
         std::fs::set_permissions(&cd, std::fs::Permissions::from_mode(0o750)).unwrap();
         put(&cd, "10-providers.yaml", PROVIDERS_BLOCK, 0o640);
-        match boot_with_requirement(&d.0, me()) {
+        match owned(&d.0) {
             Err(maknae_config::ConfigError::ProviderPlaintextKey { field }) => {
                 assert_eq!(field, "token")
             }
@@ -827,8 +838,55 @@ mod tests {
         );
         assert!(matches!(
             boot(&d.0),
-            Err(maknae_config::ConfigError::SectionNotRootOwned { .. })
+            Err(maknae_config::ConfigError::SourceNotRootOwned { .. })
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn production_boot_holds_every_source_to_root() {
+        let d = new_dir("every-source-prod");
+        put(&d.0, "maknae.yaml", "core: {}\n", 0o640);
+        let cd = d.0.join("config.d");
+        std::fs::create_dir(&cd).unwrap();
+        std::fs::set_permissions(&cd, std::fs::Permissions::from_mode(0o750)).unwrap();
+        put(&cd, "10-lake.yaml", "lake: {}\n", 0o640);
+        if nix::unistd::geteuid().is_root() {
+            let cfg = boot(&d.0).expect("a root-owned config boots through the production door");
+            assert!(cfg.section("lake").is_some());
+            put(&cd, "10-lake.yaml", "lake: {}\n", 0o660);
+            match read_files(&d.0) {
+                Err(maknae_config::ConfigError::SourceNotRootOwned { path }) => {
+                    assert!(path.ends_with("config.d/10-lake.yaml"), "{path}")
+                }
+                other => panic!("expected SourceNotRootOwned naming the member, got {other:?}"),
+            }
+        } else {
+            assert!(matches!(
+                read_files(&d.0),
+                Err(maknae_config::ConfigError::SourceNotRootOwned { .. })
+            ));
+            assert!(
+                owned(&d.0).is_ok(),
+                "the same files load through the hermetic door"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_files_refuses_a_group_writable_member() {
+        let d = new_dir("group-writable");
+        put(&d.0, "maknae.yaml", "core: {}\n", 0o660);
+        assert!(
+            matches!(
+                read_files_as_owner(&d.0),
+                Err(maknae_config::ConfigError::InsecurePermissions { .. }
+                    | maknae_config::ConfigError::SourceNotRootOwned { .. })
+            ),
+            "{:?}",
+            read_files_as_owner(&d.0)
+        );
     }
 
     #[cfg(unix)]
@@ -850,7 +908,7 @@ mod tests {
             "vault:\n  addr: https://vault.example:8200\n",
             0o640,
         );
-        let boot = boot_with_requirement(&d.0, me()).unwrap();
+        let boot = owned(&d.0).unwrap();
         assert_eq!(
             crate::boot_gate::root_vault_boot_gate(boot.section(VAULT_SECTION)),
             Ok(())

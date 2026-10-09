@@ -1,6 +1,7 @@
 //! Mutation preparation and the durable-intent gate. Every effect is a subject-side
 //! attempt; its progress and completion are client reported.
 use crate::{
+    blocking_guard::AUDIT_APPEND_TIMEOUT,
     handler::{build_authz_request, delegated_plan, discharge_plan, lexical_pregate},
     uid_gate::{Busy, UidGate},
     MutationExchange,
@@ -376,7 +377,9 @@ async fn commit_intent<E: AuditEmit>(
         column: p.column,
     });
     record.mutation = Some(meta);
-    emit.emit(&record).await.map_err(|_| ())?;
+    emit.emit_within(&record, AUDIT_APPEND_TIMEOUT)
+        .await
+        .map_err(|_| ())?;
     Ok(DurableIntent { record })
 }
 fn completion(intent: &DurableIntent, seq: u64, status: MutationStatus) -> AuditRecord {
@@ -414,7 +417,11 @@ async fn refuse<S: AsyncWrite + Unpin, E: AuditEmit>(
     record.outcome.result = "deny".into();
     record.outcome.reason = reason;
     record.outcome.posture = "unauthorized".into();
-    if emit.emit(&record).await.is_ok() {
+    if emit
+        .emit_within(&record, AUDIT_APPEND_TIMEOUT)
+        .await
+        .is_ok()
+    {
         send(
             stream,
             cfg,
@@ -1026,6 +1033,63 @@ mod tests {
             self.0.lock().unwrap().push(record.clone());
             async { Ok(()) }
         }
+    }
+    struct Stall;
+    impl AuditEmit for Stall {
+        fn emit(
+            &self,
+            _: &AuditRecord,
+        ) -> impl std::future::Future<Output = Result<(), maknae_audit_append::AuditError>> + Send
+        {
+            std::future::pending()
+        }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_intent_record_gives_up_and_no_intent_is_durable() {
+        let label = maknae_proto::ObjectLabel {
+            level: "UNCLASSIFIED".into(),
+            categories: Vec::new(),
+        };
+        let got = tokio::time::timeout(
+            Duration::from_secs(60),
+            commit_intent(
+                &Stall,
+                record(),
+                None,
+                FsOperation::Mkdir,
+                Vec::new(),
+                &label,
+                None,
+            ),
+        )
+        .await;
+        assert!(
+            matches!(got, Ok(Err(()))),
+            "the intent append must give up within its bound"
+        );
+    }
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_refusal_record_gives_up_and_answers_nothing() {
+        let mut stream: Vec<u8> = Vec::new();
+        let got = tokio::time::timeout(
+            Duration::from_secs(60),
+            refuse(
+                &mut stream,
+                &TransportConfig::default(),
+                &Stall,
+                record(),
+                "denied".into(),
+            ),
+        )
+        .await;
+        assert!(
+            got.is_ok(),
+            "the refusal append must give up within its bound"
+        );
+        assert!(
+            stream.is_empty(),
+            "a refusal without its record answers nothing"
+        );
     }
     struct Delayed<P> {
         pdp: P,

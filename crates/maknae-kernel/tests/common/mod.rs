@@ -381,6 +381,12 @@ impl Fixture {
     pub fn authorizer(
         &self,
     ) -> Arc<maknae_kernel::Composition<maknae_authz_basic::HermeticAuthorizer>> {
+        self.authorizer_with_live(maknae_kernel::LiveConfig::new(Default::default(), None))
+    }
+    pub fn authorizer_with_live(
+        &self,
+        live: maknae_kernel::LiveConfig,
+    ) -> Arc<maknae_kernel::Composition<maknae_authz_basic::HermeticAuthorizer>> {
         let basic = maknae_authz_basic::HermeticAuthorizer::new(
             self.paths(),
             self.principal.clone(),
@@ -395,10 +401,13 @@ impl Fixture {
         )
         .unwrap();
         let us = &maknae_config::BasicPolicy;
-        Arc::new(maknae_kernel::Composition::new(
-            basic,
-            maknae_kernel::CeilingAuthorizer::new(maknae_config::Ceiling::baseline_for(us), us),
-        ))
+        Arc::new(
+            maknae_kernel::Composition::new(
+                basic,
+                maknae_kernel::CeilingAuthorizer::new(maknae_config::Ceiling::baseline_for(us), us),
+            )
+            .with_live(live),
+        )
     }
     pub fn start(
         &self,
@@ -535,6 +544,40 @@ impl Fixture {
     where
         P: maknae_security::Authorizer + Send + Sync + 'static,
     {
+        self.start_with_live(
+            authz,
+            Arc::new(maknae_kernel::LiveConfig::new(
+                Default::default(),
+                authority(provider),
+            )),
+            verb,
+            fd,
+            records,
+            config,
+            egress,
+            attempt_caps,
+        )
+    }
+    /// The starter with the live config supplied too, for tests that install into it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_with_live<P>(
+        &self,
+        authz: Arc<P>,
+        live: Arc<maknae_kernel::LiveConfig>,
+        verb: Verb,
+        fd: Option<OwnedFd>,
+        records: Arc<impl AuditEmit + Send + Sync + 'static>,
+        config: maknae_config::TransportConfig,
+        egress: Arc<dyn maknae_kernel::Egress>,
+        attempt_caps: maknae_kernel::AttemptCaps,
+    ) -> (
+        tokio::io::DuplexStream,
+        tokio::task::JoinHandle<()>,
+        Vec<u8>,
+    )
+    where
+        P: maknae_security::Authorizer + Send + Sync + 'static,
+    {
         let (client, server) = tokio::io::duplex(65536);
         let fds = maknae_io::DelegatedFds::new(4);
         if let Some(fd) = fd {
@@ -553,15 +596,15 @@ impl Fixture {
             config,
             serde_json::json!({"mutation": "untrusted extension"}),
             authz,
-            Arc::new(Default::default()),
+            live,
             Arc::new("basic+ceiling".into()),
             Arc::new("US".into()),
             std::sync::Arc::new(None),
-            Arc::new(authority(provider)),
             egress,
             Duration::from_secs(2),
             maknae_security::Lane::Local,
             fds,
+            no_baseline(),
             attempt_caps,
         );
         let task = tokio::spawn(async move {
@@ -918,4 +961,32 @@ pub async fn read_frame<R: tokio::io::AsyncRead + Unpin>(
     };
     let (_, mut body) = maknae_proto::read_frame_zeroizing(r, &caps).await?;
     Ok(std::mem::take(&mut *body))
+}
+
+/// The baseline service for tests that never call it.
+pub struct NoBaseline;
+
+impl maknae_kernel::BaselineOps for NoBaseline {
+    fn show(&self) -> maknae_kernel::BoxFuture<'_, Result<maknae_proto::BaselineView, String>> {
+        Box::pin(async { Err("no baseline service".to_string()) })
+    }
+    fn accept<'a>(
+        &'a self,
+        _: &'a str,
+    ) -> maknae_kernel::BoxFuture<'a, maknae_kernel::AcceptAnswer> {
+        Box::pin(async {
+            maknae_kernel::AcceptAnswer::Unavailable {
+                reply: "no baseline service",
+                why: "no baseline service".into(),
+            }
+        })
+    }
+}
+
+pub fn no_baseline() -> Arc<dyn maknae_kernel::BaselineOps> {
+    Arc::new(NoBaseline)
+}
+
+pub fn serving() -> tokio::sync::watch::Receiver<maknae_kernel::Drain> {
+    tokio::sync::watch::channel(maknae_kernel::Drain::Serving).1
 }

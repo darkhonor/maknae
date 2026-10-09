@@ -133,16 +133,29 @@ enum Command {
         parents: bool,
     },
     /// Report daemon runtime posture: version, protocol version, listener,
-    /// active authorization backend. Ungranted by default — the operator must
-    /// grant `admin.status` to a role in `authz.yaml`'s `roles:` block.
+    /// active authorization backend, and any pending baseline change by count and
+    /// class. The shipped `authz.yaml` grants `admin.status` to the `admin` role.
     Status,
     /// Show the effective configuration as the daemon resolved it. Secret
     /// values render `<value set>`; some keys are withheld entirely because
     /// their mere presence is a disclosure. Ungranted by default.
     ConfigShow,
     /// Enumerate role bindings as the daemon resolves them right now.
-    /// Ungranted by default.
+    /// The shipped `authz.yaml` grants `admin.subject.list` to the `admin` role.
     SubjectList,
+    /// Show the pending baseline change set: what changed in maknae.yaml or config.d,
+    /// rendered as `maknae config-show` renders it, whether it applies live or by a
+    /// restart, and the hash `baseline-accept` needs.
+    BaselineShow,
+    /// Accept the pending baseline change set named by HASH (from `maknae baseline-show`).
+    BaselineAccept { hash: String },
+    /// Print the accounts `audit.readers` grants read on the audit trail, validated, one
+    /// per line. Run as root; the packages call it after every hold of /var/log/maknae.
+    /// With --stopped it refuses unless maknaed is stopped (the runbook's file grant).
+    AuditReaders {
+        #[arg(long)]
+        stopped: bool,
+    },
     /// Run the agent loop on one prompt (ADR-0023).
     Agent {
         /// The providers.yaml entry to use instead of the default.
@@ -193,6 +206,32 @@ enum Verb {
     AdminStatus,
     AdminConfigShow,
     AdminSubjectList,
+    AdminBaselineShow,
+    AdminBaselineAccept {
+        hash: AcceptHash,
+    },
+}
+
+/// The accept operand; Debug shows only the prefix the trail carries.
+#[derive(Clone, PartialEq, Eq)]
+struct AcceptHash(String);
+
+impl AcceptHash {
+    fn short(&self) -> &str {
+        self.0.get(..12).unwrap_or("")
+    }
+}
+
+impl From<String> for AcceptHash {
+    fn from(hash: String) -> Self {
+        Self(hash)
+    }
+}
+
+impl std::fmt::Debug for AcceptHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "sha256:{}", self.short())
+    }
 }
 
 impl From<Verb> for maknae_proto::Verb {
@@ -220,6 +259,10 @@ impl From<Verb> for maknae_proto::Verb {
             Verb::AdminStatus => maknae_proto::Verb::AdminStatus,
             Verb::AdminConfigShow => maknae_proto::Verb::AdminConfigShow,
             Verb::AdminSubjectList => maknae_proto::Verb::AdminSubjectList,
+            Verb::AdminBaselineShow => maknae_proto::Verb::AdminBaselineShow,
+            Verb::AdminBaselineAccept { hash } => {
+                maknae_proto::Verb::AdminBaselineAccept { hash: hash.0 }
+            }
         }
     }
 }
@@ -694,7 +737,58 @@ fn status_lines(s: &maknae_proto::StatusView) -> Vec<String> {
         s.kernel_graph_anchor.as_deref(),
     ));
     lines.extend(identity_problems_line(&s.identity_problem_counts));
+    lines.extend(s.baseline_pending.iter().map(|l| terminal_safe(l)));
     lines
+}
+
+fn baseline_lines(v: &maknae_proto::BaselineView) -> Vec<String> {
+    if v.state == "none" {
+        return vec!["no baseline change is pending".into()];
+    }
+    let hash = terminal_safe(&v.hash);
+    let apply = if v.apply.is_empty() { "-" } else { &v.apply };
+    let mut lines = vec![
+        format!("state      {}", terminal_safe(&v.state)),
+        format!("source     {}", terminal_safe(&v.source)),
+        format!("apply      {}", terminal_safe(apply)),
+        format!("hash       {hash}"),
+    ];
+    lines.extend(v.changes.iter().map(|c| format!("  {}", terminal_safe(c))));
+    match v.state.as_str() {
+        "pending" => lines.push(format!("accept with: maknae baseline-accept {hash}")),
+        "invalid" => lines.push("this change set does not validate and cannot be accepted".into()),
+        _ => {}
+    }
+    lines
+}
+
+fn accepted_line(hash: &AcceptHash, v: &maknae_proto::BaselineView) -> Result<String, String> {
+    let short = terminal_safe(hash.short());
+    match (v.state.as_str(), v.apply.as_str()) {
+        ("accepted", "live") => Ok(format!("accepted sha256:{short}; applied live")),
+        ("accepted", "restart") => Ok(format!(
+            "accepted sha256:{short}; maknaed is restarting to apply it"
+        )),
+        ("accepted", apply) => Err(format!(
+            "protocol error: an accepted baseline with apply {:?}",
+            terminal_safe(apply)
+        )),
+        (state, _) => Err(format!(
+            "baseline accept refused: {}; run maknae baseline-show",
+            terminal_safe(state)
+        )),
+    }
+}
+
+fn accept_hash(hash: String) -> Result<String, String> {
+    if hash.len() == 64 && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        Ok(hash)
+    } else {
+        Err(
+            "baseline-accept takes the 64-character lowercase hex hash `maknae baseline-show` prints"
+                .into(),
+        )
+    }
 }
 
 fn identity_problems_line(counts: &[String]) -> Option<String> {
@@ -804,6 +898,16 @@ fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
             }
             Ok(())
         }
+        (Verb::AdminBaselineShow, Payload::Baseline(v)) => {
+            for line in baseline_lines(&v) {
+                println!("{line}");
+            }
+            Ok(())
+        }
+        (Verb::AdminBaselineAccept { hash }, Payload::Baseline(v)) => {
+            println!("{}", accepted_line(&hash, &v)?);
+            Ok(())
+        }
         // A payload for a DIFFERENT verb than we sent — a protocol error.
         //
         // Written as an explicit list of the wrong-payload cases rather than a
@@ -819,7 +923,8 @@ fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
         | (v, p @ Payload::Status(_))
         | (v, p @ Payload::MutationAttempt(_))
         | (v, p @ Payload::SubjectList(_))
-        | (v, p @ Payload::PromptReply(_)) => Err(format!(
+        | (v, p @ Payload::PromptReply(_))
+        | (v, p @ Payload::Baseline(_)) => Err(format!(
             "protocol error: daemon returned a {p:?} payload for a {v:?} request"
         )),
     }
@@ -836,6 +941,14 @@ pub async fn run_cli() -> ExitCode {
         Command::Status => wire_exit_code(execute(Verb::AdminStatus).await),
         Command::ConfigShow => wire_exit_code(execute(Verb::AdminConfigShow).await),
         Command::SubjectList => wire_exit_code(execute(Verb::AdminSubjectList).await),
+        Command::BaselineShow => wire_exit_code(execute(Verb::AdminBaselineShow).await),
+        Command::BaselineAccept { hash } => wire_exit_code(match accept_hash(hash) {
+            Ok(hash) => execute(Verb::AdminBaselineAccept { hash: hash.into() }).await,
+            Err(e) => Err(e),
+        }),
+        Command::AuditReaders { stopped } => {
+            crate::audit_readers::run(nix::unistd::geteuid().as_raw(), stopped)
+        }
         Command::Write { path } => wire_exit_code(match absolute_path(path) {
             Ok(path) => execute(Verb::Write { path }).await,
             Err(e) => Err(e),
@@ -1612,6 +1725,7 @@ mod tests {
             kernel_graph_revision: Some(3),
             kernel_graph_anchor: Some("verified".into()),
             identity_problem_counts: vec![],
+            baseline_pending: vec![],
         };
         let base = status_lines(&s);
         assert_eq!(
@@ -1952,6 +2066,231 @@ mod tests {
                 page: None,
             }
         );
+    }
+
+    fn bview(state: &str, apply: &str, hash: &str, changes: &[&str]) -> maknae_proto::BaselineView {
+        maknae_proto::BaselineView {
+            source: if state == "none" { "" } else { "root-file" }.into(),
+            hash: hash.into(),
+            state: state.into(),
+            apply: apply.into(),
+            changes: changes.iter().map(|c| c.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn baseline_show_prints_the_set_and_the_command_that_accepts_it() {
+        let h = "ab".repeat(32);
+        let v = bview(
+            "pending",
+            "restart",
+            &h,
+            &["vault.addr: <value changed>", "principal.uid: 1000 -> 1001"],
+        );
+        assert_eq!(
+            baseline_lines(&v),
+            [
+                "state      pending".to_string(),
+                "source     root-file".into(),
+                "apply      restart".into(),
+                format!("hash       {h}"),
+                "  vault.addr: <value changed>".into(),
+                "  principal.uid: 1000 -> 1001".into(),
+                format!("accept with: maknae baseline-accept {h}"),
+            ]
+        );
+        assert_eq!(
+            baseline_lines(&bview("none", "", "", &[])),
+            ["no baseline change is pending"]
+        );
+        assert!(print_payload_for_verb(Verb::AdminBaselineShow, Payload::Baseline(v)).is_ok());
+    }
+
+    #[test]
+    fn an_invalid_set_is_shown_without_an_accept_command() {
+        let h = "cd".repeat(32);
+        let lines = baseline_lines(&bview("invalid", "", &h, &["the file does not validate"]));
+        assert_eq!(
+            lines,
+            [
+                "state      invalid".to_string(),
+                "source     root-file".into(),
+                "apply      -".into(),
+                format!("hash       {h}"),
+                "  the file does not validate".into(),
+                "this change set does not validate and cannot be accepted".into(),
+            ]
+        );
+    }
+
+    #[test]
+    fn baseline_lines_escape_what_the_daemon_sends() {
+        let v = bview("pending\u{7}", "live", "h\u{1b}", &["a\u{1b}[2Jb"]);
+        let lines = baseline_lines(&v);
+        assert!(
+            lines
+                .iter()
+                .all(|l| !l.contains('\u{1b}') && !l.contains('\u{7}')),
+            "{lines:?}"
+        );
+        assert!(lines.contains(&"  a\\u{1b}[2Jb".to_string()), "{lines:?}");
+    }
+
+    #[test]
+    fn the_accept_verbs_debug_carries_only_the_hash_prefix() {
+        let h = "0123456789ab".to_string() + &"cd".repeat(26);
+        let shown = format!(
+            "{:?}",
+            Verb::AdminBaselineAccept {
+                hash: h.clone().into()
+            }
+        );
+        assert!(!shown.contains(&h[..13]), "{shown}");
+        assert!(shown.contains("sha256:0123456789ab"), "{shown}");
+    }
+
+    #[test]
+    fn baseline_accept_reports_how_the_accepted_set_applies() {
+        let h = "ef".repeat(32);
+        let accept = || Verb::AdminBaselineAccept {
+            hash: h.clone().into(),
+        };
+        assert_eq!(
+            accepted_line(
+                &h.clone().into(),
+                &bview("accepted", "live", "", &[maknae_config::SUPPRESSED_CHANGED])
+            ),
+            Ok(format!("accepted sha256:{}; applied live", &h[..12]))
+        );
+        assert_eq!(
+            accepted_line(
+                &h.clone().into(),
+                &bview(
+                    "accepted",
+                    "restart",
+                    "",
+                    &["vault.addr: https://v:8200 -> https://w:8200"]
+                )
+            ),
+            Ok(format!(
+                "accepted sha256:{}; maknaed is restarting to apply it",
+                &h[..12]
+            ))
+        );
+        for state in ["stale", "none", "invalid", "pending"] {
+            assert_eq!(
+                print_payload_for_verb(accept(), Payload::Baseline(bview(state, "", "", &[]))),
+                Err(format!(
+                    "baseline accept refused: {state}; run maknae baseline-show"
+                ))
+            );
+        }
+        assert!(accepted_line(&h.clone().into(), &bview("accepted", "", "", &[])).is_err());
+        assert!(print_payload_for_verb(
+            accept(),
+            Payload::Baseline(bview("accepted", "live", "", &[]))
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn baseline_accept_takes_exactly_a_shown_hash() {
+        let h = "0123456789abcdef".repeat(4);
+        assert_eq!(accept_hash(h.clone()), Ok(h.clone()));
+        for bad in [
+            String::new(),
+            h[..63].to_string(),
+            format!("{h}0"),
+            h.to_uppercase(),
+            format!("{}g", &h[..63]),
+            format!("sha256:{}", &h[..57]),
+        ] {
+            assert_eq!(
+                accept_hash(bad.clone()),
+                Err(
+                    "baseline-accept takes the 64-character lowercase hex hash `maknae baseline-show` prints"
+                        .into()
+                ),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_baseline_commands_parse_and_reach_the_wire_verbs() {
+        let cli = Cli::try_parse_from(["maknae", "baseline-show"]).expect("parses");
+        assert!(matches!(cli.command, Command::BaselineShow));
+        let h = "ab".repeat(32);
+        let cli = Cli::try_parse_from(["maknae", "baseline-accept", &h]).expect("parses");
+        assert!(matches!(&cli.command, Command::BaselineAccept { hash } if *hash == h));
+        assert!(Cli::try_parse_from(["maknae", "baseline-accept"]).is_err());
+        assert_eq!(
+            maknae_proto::Verb::from(Verb::AdminBaselineShow),
+            maknae_proto::Verb::AdminBaselineShow
+        );
+        assert_eq!(
+            maknae_proto::Verb::from(Verb::AdminBaselineAccept {
+                hash: h.clone().into()
+            }),
+            maknae_proto::Verb::AdminBaselineAccept { hash: h }
+        );
+        let cli = Cli::try_parse_from(["maknae", "audit-readers"]).expect("parses");
+        assert!(matches!(
+            cli.command,
+            Command::AuditReaders { stopped: false }
+        ));
+        let cli = Cli::try_parse_from(["maknae", "audit-readers", "--stopped"]).expect("parses");
+        assert!(matches!(
+            cli.command,
+            Command::AuditReaders { stopped: true }
+        ));
+    }
+
+    #[test]
+    fn the_status_ends_with_the_pending_baseline_lines() {
+        let s = maknae_proto::StatusView {
+            version: "v".into(),
+            protocol_version: 1,
+            listener: "l".into(),
+            authz_backend: "b".into(),
+            classification_policy: "US".into(),
+            kernel_graph_revision: Some(3),
+            kernel_graph_anchor: Some("verified".into()),
+            identity_problem_counts: vec!["unresolved=1".into()],
+            baseline_pending: vec!["baseline: 1 pending (live)".into()],
+        };
+        let lines = status_lines(&s);
+        assert_eq!(
+            lines.last().map(String::as_str),
+            Some("baseline: 1 pending (live)")
+        );
+        assert_eq!(lines[lines.len() - 2], "identity problems: 1 unresolved");
+    }
+
+    #[test]
+    fn a_baseline_payload_for_any_other_verb_is_a_protocol_error() {
+        let p = || Payload::Baseline(bview("none", "", "", &[]));
+        for verb in [
+            Verb::Ping,
+            Verb::Whoami,
+            Verb::AdminStatus,
+            Verb::AdminConfigShow,
+            Verb::AdminSubjectList,
+            Verb::Read {
+                path: "/a".into(),
+                page: None,
+            },
+        ] {
+            assert!(print_payload_for_verb(verb, p()).is_err());
+        }
+        assert!(print_payload_for_verb(Verb::AdminBaselineShow, Payload::Pong).is_err());
+        assert!(print_payload_for_verb(
+            Verb::AdminBaselineAccept {
+                hash: "ab".repeat(32).into()
+            },
+            Payload::Pong
+        )
+        .is_err());
     }
 
     #[test]

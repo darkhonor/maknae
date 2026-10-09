@@ -15,6 +15,8 @@ pub enum AuditError {
     ReadPrimary(String),
     /// The record could not be canonicalized to JSON.
     Serialize(String),
+    /// A trail that must already exist does not.
+    Missing(PathBuf),
 }
 
 impl std::fmt::Display for AuditError {
@@ -33,6 +35,9 @@ impl std::fmt::Display for AuditError {
             }
             AuditError::Serialize(msg) => {
                 write!(f, "audit record canonicalization failed: {msg}")
+            }
+            AuditError::Missing(path) => {
+                write!(f, "the audit trail {} is missing", path.display())
             }
         }
     }
@@ -54,6 +59,7 @@ mod tests {
             AuditError::WritePrimary("disk full".into()),
             AuditError::ReadPrimary("short read".into()),
             AuditError::Serialize("bad utf8".into()),
+            AuditError::Missing(PathBuf::from("/var/log/maknae/audit.jsonl")),
         ];
         for e in cases {
             assert!(!format!("{e}").is_empty());

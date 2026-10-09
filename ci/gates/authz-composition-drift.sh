@@ -38,7 +38,8 @@
 #      one `make_record(` call carrying "boot", "authz", "permit" and a reason
 #      that starts "authorization composition: " and carries the SYSTEM and
 #      the ceiling LEVEL (`; system: {..}; ceiling: {..}`) -- AND EMITS it
-#      (`sink.emit(&composition_rec)`), both in the production half. Its VALUE is
+#      within a bound (`sink.emit_within(&composition_rec, <bound>)`, #497), both
+#      in the production half. Its VALUE is
 #      asserted by the root-only boot test on a test host.
 #   6. (type-level, whole tree) `Composition::new(` and `CeilingAuthorizer::new(`
 #      are called NOWHERE in production code except the two files that define
@@ -190,8 +191,9 @@ if run:
             fail("run.rs: the boot composition evidence record's reason must carry '; system: {..}; ceiling: {..}' -- the values the operand enforces")
     if len(evidence) != 1:
         fail(f"run.rs: expected exactly ONE boot composition evidence record (make_record with \"boot\", \"authz\", \"permit\" and an 'authorization composition: ' reason), found {len(evidence)}")
-    if "sink.emit(&composition_rec)" not in run:
-        fail("run.rs: the boot composition evidence record is constructed but never EMITTED (no `sink.emit(&composition_rec)`)")
+    emit_code = re.sub(r"//[^\n]*", "", re.sub(r"/\*.*?\*/", "", run, flags=re.S))
+    if not re.search(r"\bsink\s*\.\s*emit_within\s*\(\s*&composition_rec\s*,\s*[^)\s]", emit_code):
+        fail("run.rs: the boot composition evidence record is constructed but never EMITTED within a bound (no `sink.emit_within(&composition_rec, <bound>)`)")
 
 # 6. The constructors are called only where they are defined.
 def strip_comments(src: str) -> str:

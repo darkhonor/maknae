@@ -1342,15 +1342,15 @@ async fn failed_grant_or_ack_write_stops_before_accepting_more_client_reports() 
             maknae_config::transport_from_section(None).unwrap(),
             serde_json::json!({}),
             fx.authorizer(),
-            Arc::new(Default::default()),
+            std::sync::Arc::new(maknae_kernel::LiveConfig::new(Default::default(), None)),
             Arc::new("basic+ceiling".into()),
             Arc::new("US".into()),
-            std::sync::Arc::new(None),
             std::sync::Arc::new(None),
             maknae_kernel::unavailable_egress(),
             Duration::from_secs(2),
             maknae_security::Lane::Local,
             fds,
+            common::no_baseline(),
         ));
         let request = maknae_proto::encode_request(&maknae_proto::Request {
             protocol_version: maknae_proto::PROTOCOL_VERSION,

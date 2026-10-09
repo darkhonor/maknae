@@ -1051,7 +1051,7 @@ mod tests {
             .collect();
         // The derivation itself must not silently yield nothing -- an
         // ok-on-nothing floor would make this whole test vacuous.
-        // 59 today (57 `action` + 2 `kernel-action`); the floor leaves
+        // 61 today (59 `action` + 2 `kernel-action`); the floor leaves
         // headroom for retirement while refusing an ok-on-nothing derivation,
         // which would make this whole test vacuous.
         assert!(

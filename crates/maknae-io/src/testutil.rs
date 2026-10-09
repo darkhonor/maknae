@@ -43,10 +43,57 @@ pub(crate) fn skip_or_fail(what: &str, why: &str) {
     }
 }
 
-pub(crate) use tests::isolated;
+pub(crate) use tests::{isolated, unprivileged};
 
 #[cfg(test)]
 mod tests {
+    /// Runs `case` as an unprivileged uid. Non-root runs it inline; root re-execs a copy
+    /// of this test binary as `nobody` and fails unless the child ran `case` to the end.
+    pub(crate) fn unprivileged(name: &str, case: impl FnOnce()) {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::process::CommandExt;
+        const PROOF: &str = "MAKNAE_IO_UNPRIVILEGED_PROOF";
+        const NOBODY: u32 = 65534;
+        if !nix::unistd::geteuid().is_root() {
+            case();
+            if let Some(proof) = std::env::var_os(PROOF) {
+                std::fs::write(proof, name).expect("record completed witness");
+            }
+            return;
+        }
+        let scratch = tempfile::tempdir().unwrap();
+        let tmp = scratch.path().join("tmp");
+        std::fs::create_dir(&tmp).unwrap();
+        for dir in [scratch.path(), tmp.as_path()] {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::os::unix::fs::chown(dir, Some(NOBODY), Some(NOBODY)).unwrap();
+        }
+        let exe = scratch.path().join("test-binary");
+        std::fs::copy(std::env::current_exe().unwrap(), &exe).unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let proof = tmp.join("complete");
+        let out = std::process::Command::new(&exe)
+            .args(["--exact", name, "--nocapture", "--test-threads=1"])
+            .env(PROOF, &proof)
+            .env("TMPDIR", &tmp)
+            .current_dir(&tmp)
+            .uid(NOBODY)
+            .gid(NOBODY)
+            .output()
+            .expect("spawn the unprivileged child");
+        let log = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success(), "unprivileged {name} failed: {log}");
+        assert_eq!(
+            std::fs::read_to_string(proof).ok().as_deref(),
+            Some(name),
+            "unprivileged test body did not complete: {log}"
+        );
+    }
+
     /// Re-exec one test so an intentionally broken blocking syscall can be killed
     /// and reaped. A completion file proves the exact test body actually ran; an
     /// empty libtest selection exits zero and is not a passing witness.

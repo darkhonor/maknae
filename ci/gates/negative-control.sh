@@ -759,9 +759,13 @@ FIX
   # The spelling here must MATCH production exactly -- `pub(crate)`, one line --
   # or the control exercises a different anchor than the one that ships.
   # $2 overrides the grantable constant, for the subset control below.
-  printf '%s\n' "${2:-pub(crate) const GRANTABLE_ACTIONS: [&str; 4] = [\"admin.status\", \"admin.config.show\", \"admin.subject.list\", \"session.prompt\"];}" \
+  printf '%s\n' "${2:-pub(crate) const GRANTABLE_ACTIONS: [&str; 6] = [\"admin.status\", \"admin.config.show\", \"admin.subject.list\", \"admin.baseline.show\", \"admin.baseline.accept\", \"session.prompt\"];}" \
     > "$fixture/crates/maknae-authz-basic/src/decide.rs"
   printf '%s' "$1" > "$fixture/ci/gates/verb-manifest.txt"
+  # $4 is the shipped authz.yaml (#490); the default grants nothing.
+  mkdir -p "$fixture/packaging/common"
+  printf '%s' "${4:-schema_version: 1
+}" > "$fixture/packaging/common/authz.yaml"
   echo "$fixture"
 }
 
@@ -907,6 +911,72 @@ expect_reject_because "verb-vocabulary-drift/grantable-not-a-real-action" \
   "no matching action term" "$fx/ci/gates/verb-vocabulary-drift.sh"
 
 
+# The shipped grants (#490): the terms the shipped authz.yaml grants must be the
+# manifest's shipped-file dispositions exactly, and only under roles.admin.allow.
+SHIPPED_VOCAB='action	liveness.ping	granted	shipped; the fixture liveness term
+action	admin.status	granted-in-shipped-file	granted to admin by the shipped authz.yaml; an install'\''s own authz.yaml decides
+kernel-action	kernel.contain	not-granted	no Verb variant
+capability	Read	granted	the only grammar capability
+grantable	admin.status	grantable-shipped-granted	operator MAY grant per-role via `roles:`; the shipped authz.yaml grants it to admin
+'
+SHIPPED_CONST='pub(crate) const GRANTABLE_ACTIONS: [&str; 1] = ["admin.status"];'
+SHIPPED_FILE='schema_version: 1
+# the grants
+roles:
+  admin:
+    allow:
+      - "admin.status"
+'
+fx="$(vocab_fixture "$SHIPPED_VOCAB" "$SHIPPED_CONST" "" "$SHIPPED_FILE")"
+expect_accept "verb-vocab/shipped-grants-match" ": 5 terms, manifest exact, 1 shipped grants" "$fx/ci/gates/verb-vocabulary-drift.sh"
+
+fx="$(vocab_fixture "$SHIPPED_VOCAB" "$SHIPPED_CONST" "" "${SHIPPED_FILE}      - \"admin.config.show\"
+")"
+expect_reject_because "verb-vocab/shipped-grant-without-disposition" \
+  "shipped-file dispositions disagree" "$fx/ci/gates/verb-vocabulary-drift.sh"
+
+fx="$(vocab_fixture "$SHIPPED_VOCAB" "$SHIPPED_CONST" "" "$SHIPPED_FILE")"
+rm "$fx/packaging/common/authz.yaml"
+expect_reject_because "verb-vocab/shipped-file-missing" \
+  "missing packaging/common/authz.yaml" "$fx/ci/gates/verb-vocabulary-drift.sh"
+
+fx="$(vocab_fixture "$SHIPPED_VOCAB" "$SHIPPED_CONST" "" "${SHIPPED_FILE}  user:
+    allow:
+      - \"session.prompt\"
+")"
+expect_reject_because "verb-vocab/shipped-grant-to-another-role" \
+  "may grant only roles.admin.allow" "$fx/ci/gates/verb-vocabulary-drift.sh"
+
+fx="$(vocab_fixture "$SHIPPED_VOCAB" "$SHIPPED_CONST" "" 'schema_version: 1
+roles:
+  admin:
+    allow: ["admin.status", "admin.config.show"]
+')"
+expect_reject_because "verb-vocab/inline-shipped-list" \
+  "inline" "$fx/ci/gates/verb-vocabulary-drift.sh"
+
+fx="$(vocab_fixture "$SHIPPED_VOCAB" "$SHIPPED_CONST" "" "${SHIPPED_FILE}      - admin.config.show
+")"
+expect_reject_because "verb-vocab/unquoted-shipped-term" \
+  "a roles line this gate cannot read" "$fx/ci/gates/verb-vocabulary-drift.sh"
+
+# The loader reads each of these spellings as the roles key; the block reader does not.
+ROLES_BODY='
+  admin:
+    allow:
+      - "admin.status"
+      - "admin.config.show"'
+for spelling in 'quoted:"roles":'"$ROLES_BODY" "single-quoted:'roles':$ROLES_BODY" "explicit-key:? roles
+:$ROLES_BODY" "spaced:roles :$ROLES_BODY" 'flow:{roles: {admin: {allow: ["admin.status", "admin.config.show"]}}}'; do
+  name=${spelling%%:*}; key=${spelling#*:}
+  fx="$(vocab_fixture "$SHIPPED_VOCAB" "$SHIPPED_CONST" "" "schema_version: 1
+${key}
+")"
+  expect_reject_because "verb-vocab/${name}-roles-key" \
+    "spells the roles key in a form this gate cannot read" "$fx/ci/gates/verb-vocabulary-drift.sh"
+done
+
+
 # ---- config-disclosure-drift (#162): the admin.config.show surface ----
 # Five review rounds found this control's completeness resting on prose, and
 # found the prose wrong twice. The gate replaced it -- and then the FIRST gate
@@ -951,6 +1021,15 @@ pub struct StatusView {
     pub kernel_graph_revision: Option<u64>,
     pub kernel_graph_anchor: Option<String>,
     pub identity_problem_counts: Vec<String>,
+    pub baseline_pending: Vec<String>,
+}
+
+pub struct BaselineView {
+    pub source: String,
+    pub hash: String,
+    pub state: String,
+    pub apply: String,
+    pub changes: Vec<String>,
 }
 
 pub struct RoleBindingView {
@@ -975,6 +1054,7 @@ pub enum Payload {
     SubjectList(Vec<RoleBindingView>),
     MutationAttempt(crate::MutationGrant),
     PromptReply(PromptReply),
+    Baseline(BaselineView),
 }
 FIX
   cp "$here/mutation-disclosure.py" "$fixture/ci/gates/"
@@ -1050,6 +1130,7 @@ pub struct AuditConfig {
     pub jsonl_path: PathBuf,
     pub siem: Option<String>,
     pub au3_1: serde_json::Value,
+    pub readers: Vec<String>,
 }
 FIX
   cat > "$fixture/crates/maknae-config/src/principal.rs" <<'FIX'
@@ -1111,6 +1192,7 @@ TABCH="$(printf '\t')"
 CFG_OK='disclose	transport	transport shape, all fields
 disclose	vault.addr	where vault is
 mask	audit.siem	endpoint, no schema
+mask	audit.readers	the accounts that read the trail
 omit	audit.au3_1	deployer-authored, unenumerable
 disclose	vault.approle_mount	mount name
 disclose	vault.pki_int_mount	mount name
@@ -1140,6 +1222,12 @@ always	status.classification_policy	ships by construction
 always	status.kernel_graph_revision	ships by construction
 always	status.kernel_graph_anchor	ships by construction
 always	status.identity_problem_counts	ships by construction
+always	status.baseline_pending	ships by construction
+always	baseline.source	ships by construction
+always	baseline.hash	ships by construction
+always	baseline.state	ships by construction
+always	baseline.apply	ships by construction
+always	baseline.changes	ships by construction
 always	binding.role	ships by construction
 always	binding.members	ships by construction
 always	binding.uid	ships by construction
@@ -1226,7 +1314,7 @@ cat > "$fx/crates/maknae-config/src/document.rs" <<'FIX'
 const DISCLOSABLE: &[&str] = &["transport", "providers[].name", "providers[].endpoint", "providers[].models", "providers[].models[]", "providers[].reasoning_effort", "providers[].output_tokens_field", "vault.addr", "vault.approle_mount", "vault.pki_int_mount", "vault.deployment_id", "vault.user_auth", "vault.user_auth.type", "vault.user_auth.mount", "vault.kv_mount", "vault.user_prefix", "audit.jsonl_path", "principal", "egress.socket_path", "egress.deadline_ms"];
 const SUPPRESSED: &[&str] = &["vault.insecure_plaintext_secret_path", "core.handling", "audit.au3_1"];
 FIX
-expect_accept "config-disclosure-drift/rustfmt-collapsed-array-still-read" ": 40 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_accept "config-disclosure-drift/rustfmt-collapsed-array-still-read" ": 47 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: a section registered in boot.rs with no SURFACE entry. THE THIRD
 # fail-open, and the one that closes the PROPERTY rather than an instance: the
@@ -1441,9 +1529,9 @@ python3 - "$fx" <<'PY'
 import pathlib, sys
 p = pathlib.Path(sys.argv[1]) / "ci/gates/config-disclosure-drift.sh"
 s = p.read_text()
-old = "|StatusView|status|8|wire"
+old = "|StatusView|status|9|wire"
 assert s.count(old) == 1, "fixture prefix anchor moved"
-p.write_text(s.replace(old, "|StatusView|status view|8|wire"))
+p.write_text(s.replace(old, "|StatusView|status view|9|wire"))
 PY
 expect_reject_because "config-disclosure-drift/whitespace-bearing-surface-prefix" \
   "whitespace-bearing prefix" "$fx/ci/gates/config-disclosure-drift.sh"
@@ -1576,7 +1664,7 @@ expect_reject_because "config-disclosure-drift/dead-wrapper-strip-is-refused" \
 # sort -u'd, so the probe above always trips on `audit.siem` (config) and the
 # `(Option|Box|Arc|Vec)` spelling of the post-condition -- the one that needs
 # `Vec` present -- is never evaluated. Retyping `siem` to a scalar makes every
-# config row scalar, so the first offender becomes `binding.members`
+# config row scalar, so the first offender becomes `baseline.changes`
 # (`Vec<String>`, wire) and the wire arm is the one under test.
 fx="$(cfg_fixture "$CFG_OK")"
 python3 - "$fx" <<'PY'
@@ -1594,7 +1682,7 @@ assert t.count("pub siem: Option<String>,") == 1, "the siem anchor moved"
 a.write_text(t.replace("pub siem: Option<String>,", "pub siem: String,"))
 PY
 expect_reject_because "config-disclosure-drift/dead-wrapper-strip-is-refused-on-the-wire-arm" \
-  "'binding.members' has type 'Vec<String>', which reduced to 'Vec<String'" \
+  "'baseline.changes' has type 'Vec<String>', which reduced to 'Vec<String'" \
   "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: a field declaration the extractor cannot read. The awk emits a row
@@ -1682,7 +1770,7 @@ fi
 # go check a sed flag. This probe pins the corrected order.
 fx="$(cfg_fixture "$CFG_OK" '' '' '' 'std::sync::Arc<String>')"
 expect_accept "config-disclosure-drift/qualified-wrapper-is-a-leaf" \
-  ": 40 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+  ": 47 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # ACCEPT: the config-surface `Vec` exemption holds for the QUALIFIED spelling
 # too. Under the old post-loop `s/.*:://`, `Vec<crate::Principal>` reduced to
@@ -1691,7 +1779,7 @@ expect_accept "config-disclosure-drift/qualified-wrapper-is-a-leaf" \
 # the unqualified `config-vec-of-struct-is-a-leaf` probe below cannot see.
 fx="$(cfg_fixture "$CFG_OK" '' '' '' 'Vec<crate::Principal>')"
 expect_accept "config-disclosure-drift/qualified-config-vec-is-still-a-leaf" \
-  ": 40 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+  ": 47 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # ACCEPT: the mirror image. `Vec<WorkspaceStruct>` on a CONFIG surface is a
 # LEAF -- only a sequence whose element paths are declared is walked;
@@ -1700,12 +1788,12 @@ expect_accept "config-disclosure-drift/qualified-config-vec-is-still-a-leaf" \
 # did not, and every config row was silently held to the wire rule.
 fx="$(cfg_fixture "$CFG_OK" '' '' '' 'Vec<Principal>')"
 expect_accept "config-disclosure-drift/config-vec-of-struct-is-a-leaf" \
-  ": 40 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+  ": 47 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # ACCEPT: the clean fixture passes and reports both counts. Without this every
 # rejection above would stay green against a gate that refuses everything.
 fx="$(cfg_fixture "$CFG_OK")"
-expect_accept "config-disclosure-drift/clean-fixture-passes" ": 40 paths decided, 49 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_accept "config-disclosure-drift/clean-fixture-passes" ": 47 paths decided, 56 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
 
 
 # ACCEPT, against the REAL repo: each gate's reported examined-set is
@@ -1768,7 +1856,7 @@ expect_reported_count "p1-manifest/packages-match-the-workspace" "ok (" "$exp_p1
 # control; asserting it here means any future silent shrink is a red build.
 
 expect_accept "config-disclosure-drift/real-repo-counts-pinned" \
-  ": 51 paths decided, 49 struct fields covered" "$here/config-disclosure-drift.sh"
+  ": 58 paths decided, 56 struct fields covered" "$here/config-disclosure-drift.sh"
 
 
 # #158: a grant's own disclosure inventory must reject new data and type changes.
@@ -1904,7 +1992,7 @@ fi
 # removing it. One minimal fixture, at least one corruption per `fail(` CALL
 # SITE the gate has, and two clean accepts. DERIVED, not counted by hand (round
 # 4 found the hand count wrong twice): the gate has 21 `fail(` sites; the
-# 29 probes below map onto every one of them by their `why` substring
+# 31 probes below map onto every one of them by their `why` substring
 # (a probe's `why` is a literal substring of exactly the message it targets),
 # and the two parameterized sites -- `missing <file>` and `missing <base>/` --
 # are probed once per parameter value (3 files, 2 bases). A probe whose `why`
@@ -1928,7 +2016,7 @@ fn boot() {
         &format!("authorization composition: {name}; system: {sys}; ceiling: {lvl}"),
         "authorized",
     );
-    if let Err(e) = sink.emit(&composition_rec).await { eprintln!("{e}"); }
+    if let Err(e) = sink.emit_within(&composition_rec, AUDIT_APPEND_TIMEOUT).await { eprintln!("{e}"); }
 }
 #[cfg(test)]
 mod tests {}
@@ -2012,7 +2100,11 @@ composition_reject "section-const-outside-config-crate" "configuration expresses
   'p=root/"crates/maknae-kernel/src/boot.rs"; p.write_text(p.read_text()+"const AUTHZ_BACKEND_SECTION: &str = \"backend\";\n")'
 # check 5 -- boot-time evidence
 composition_reject "evidence-emit-removed" "constructed but never EMITTED" \
-  'p=root/"crates/maknae-kernel/src/run.rs"; p.write_text(p.read_text().replace("    if let Err(e) = sink.emit(&composition_rec).await { eprintln!(\"{e}\"); }\n", ""))'
+  'p=root/"crates/maknae-kernel/src/run.rs"; p.write_text(p.read_text().replace("    if let Err(e) = sink.emit_within(&composition_rec, AUDIT_APPEND_TIMEOUT).await { eprintln!(\"{e}\"); }\n", ""))'
+composition_reject "evidence-emit-unbounded" "never EMITTED within a bound" \
+  'p=root/"crates/maknae-kernel/src/run.rs"; p.write_text(p.read_text().replace("sink.emit_within(&composition_rec, AUDIT_APPEND_TIMEOUT)", "sink.emit(&composition_rec)"))'
+composition_reject "evidence-emit-commented-out" "never EMITTED within a bound" \
+  'p=root/"crates/maknae-kernel/src/run.rs"; p.write_text(p.read_text().replace("    if let Err(e) = sink.emit_within(&composition_rec, AUDIT_APPEND_TIMEOUT).await { eprintln!(\"{e}\"); }\n", "    // sink.emit_within(&composition_rec, AUDIT_APPEND_TIMEOUT).await;\n"))'
 composition_reject "run-file-missing" "missing crates/maknae-kernel/src/run.rs" \
   '(root/"crates/maknae-kernel/src/run.rs").unlink()'
 composition_reject "basic-lib-missing" "missing crates/maknae-authz-basic/src/lib.rs" \

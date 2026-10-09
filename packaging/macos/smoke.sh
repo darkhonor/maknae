@@ -17,6 +17,45 @@ fails=0
 ok()   { echo "  ok   — $1"; }
 fail() { echo "  FAIL — $1"; fails=$((fails+1)); }
 
+# Drives postinstall's grant_reader_traverse with a stub helper and a recording chmod.
+reader_grant_cases() {
+    local fn="$1" t out rc
+    t="$(mktemp -d)"
+    run_grant() {   # $1=helper stdout  $2=helper exit  $3=chmod exit
+        printf '#!/bin/sh\nprintf "%%s" "$MK_OUT"\necho helper-said-no >&2\nexit "$MK_RC"\n' >"$t/maknae"
+        chmod 0755 "$t/maknae"
+        (
+            # shellcheck disable=SC2329
+            chmod() { echo "$*" >>"$t/granted"; return "$MK_CHMOD"; }
+            eval "${fn//\/usr\/local\/bin\/maknae/$t/maknae}"
+            MK_OUT="$1" MK_RC="$2" MK_CHMOD="$3"
+            export MK_OUT MK_RC
+            grant_reader_traverse
+        ) 2>"$t/err"
+    }
+    rm -f "$t/granted"; run_grant $'alice\n_vector' 0 0; rc=$?
+    out="$(cat "$t/granted" 2>/dev/null)"
+    [ "$rc" -eq 0 ] && [ "$out" = $'+a user:alice allow search /var/log/maknae\n+a user:_vector allow search /var/log/maknae' ] \
+        && ok "grant: each declared reader gets one search entry on the directory" \
+        || fail "grant: valid readers -> rc=$rc granted='$out'"
+    for bad in '*' 'Alice' 'a b' 'x$y' 'abcdefghijklmnopqrstuvwxyzabcdefg' $'alice\n-r'; do
+        rm -f "$t/granted"; run_grant "$bad" 0 0; rc=$?
+        [ "$rc" -eq 0 ] && [ ! -e "$t/granted" ] && grep -q 'unexpected name' "$t/err" \
+            && ok "grant: helper output '${bad//$'\n'/\\n}' grants no one" \
+            || fail "grant: helper output '${bad//$'\n'/\\n}' -> rc=$rc granted='$(cat "$t/granted" 2>/dev/null)'"
+    done
+    rm -f "$t/granted"; run_grant 'alice' 1 0; rc=$?
+    [ "$rc" -eq 0 ] && [ ! -e "$t/granted" ] && grep -q 'not applied: helper-said-no' "$t/err" \
+        && ok "grant: a refusing helper grants no one, reports its error and does not fail the install" \
+        || fail "grant: a refusing helper -> rc=$rc granted='$(cat "$t/granted" 2>/dev/null)'"
+    rm -f "$t/granted"; run_grant '' 0 0; rc=$?
+    [ "$rc" -eq 0 ] && [ ! -e "$t/granted" ] \
+        && ok "grant: no declared reader grants no one" || fail "grant: empty helper output -> rc=$rc"
+    rm -f "$t/granted"; run_grant 'alice' 0 1; rc=$?
+    [ "$rc" -ne 0 ] && ok "grant: a failed chmod fails the grant" || fail "grant: a failed chmod returned 0"
+    rm -rf "$t"
+}
+
 phase1() {
     echo "== phase 1 (no root) =="
 
@@ -46,6 +85,9 @@ phase1() {
         && ok "arm64-only constraint" || fail "arm64 constraint MISSING"
     grep -q '<os-version min="26.0"/>' "$HERE/distribution.xml" \
         && ok "macOS 26 floor" || fail "macOS 26 floor MISSING"
+    [ "$(grep -o 'choice="io.maknae.[a-z]*"' "$HERE/distribution.xml" | tr '\n' ' ')" \
+        = 'choice="io.maknae.cli" choice="io.maknae.daemon" ' ] \
+        && ok "the CLI installs before the daemon" || fail "the daemon installs before the CLI"
 
     for s in "$HERE/scripts/preinstall" "$HERE/scripts/postinstall" \
              "$HERE/uninstall.sh" "$HERE/build-pkg.sh" "$HERE/smoke.sh" \
@@ -114,6 +156,18 @@ phase1() {
     else
         fail "postinstall does not hold the audit dir as root around every act on audit.jsonl (hold=$hold first=$first last=$last back=$back)"
     fi
+    local grant gfn
+    grant="$(grep -nxF 'if ! grant_reader_traverse; then' "$pi" | cut -d: -f1)"
+    gfn="$(sed -n '/^grant_reader_traverse() {$/,/^}$/p' "$pi")"
+    if [ -n "$grant" ] && [ -n "$last" ] && [ -n "$back" ] && [ "$last" -lt "$grant" ] && [ "$grant" -lt "$back" ] \
+        && [ "$(grep -c 'chmod +a' <<<"$gfn")" -eq 1 ] \
+        && grep -qF 'chmod +a "user:$r allow search" /var/log/maknae || return 1' <<<"$gfn" \
+        && ! grep -qE 'AUDIT|jsonl|chflags' <<<"$gfn"; then
+        ok "postinstall grants the readers' directory search inside the hold and never touches a trail file"
+    else
+        fail "postinstall's reader grant is outside the hold or touches more than the directory (grant=$grant)"
+    fi
+    reader_grant_cases "$gfn"
 
     "$REPO/ci/gates/entitlements-empty.sh" "$HERE"/*.entitlements >/dev/null \
         && ok "every entitlements file is empty" \
@@ -467,6 +521,9 @@ REFUSE
     check_mode "drwxr-x--- root _maknae"    /etc/maknae
     check_mode "-rw-r----- root _maknae"    /etc/maknae/bindings.yaml
     check_mode "drwx------ _maknae _maknae" /var/log/maknae
+    [ "$(ls -led /var/log/maknae | wc -l)" -eq 1 ] \
+        && ok "a reader-free install leaves no ACE on /var/log/maknae" \
+        || fail "/var/log/maknae carries an ACE after a reader-free install"
     check_mode "drwxr-x--- _maknae maknae"  /usr/local/var/run/maknae
     check_mode "drwxr-x--- _maknae-egress _maknae" /usr/local/var/run/maknae-egress
     check_mode "drwxr-x--- _maknae _maknae"  /usr/local/var/log/maknae

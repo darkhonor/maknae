@@ -31,6 +31,9 @@
 //!
 //! [`ConjunctionAuthorizer`]: maknae_security::ConjunctionAuthorizer
 
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
 use crate::ceiling_authz::CeilingAuthorizer;
 use maknae_authz_basic::Baseline;
 use maknae_security::{
@@ -46,11 +49,32 @@ pub struct Composition<B: Baseline> {
     /// The non-removable mandatory floor: the booted classification ceiling,
     /// evaluated on every request.
     ceiling: CeilingAuthorizer,
+    /// The view and providers the request path serves; installed only in the live turn.
+    live: Arc<crate::live::LiveConfig>,
+    #[cfg(test)]
+    pub(crate) panic_on_install: std::sync::atomic::AtomicBool,
 }
 
 impl<B: Baseline> Composition<B> {
     pub fn new(baseline: B, ceiling: CeilingAuthorizer) -> Self {
-        Self { baseline, ceiling }
+        Self {
+            baseline,
+            ceiling,
+            live: Arc::new(crate::live::LiveConfig::new(Default::default(), None)),
+            #[cfg(test)]
+            panic_on_install: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// The booted view and providers, set before the composition is shared.
+    pub fn with_live(mut self, live: crate::live::LiveConfig) -> Self {
+        self.live = Arc::new(live);
+        self
+    }
+
+    /// What the request path serves: the one `LiveConfig` the live turn installs into.
+    pub fn live(&self) -> &Arc<crate::live::LiveConfig> {
+        &self.live
     }
 
     /// The baseline operand, for the reload's snapshot swap.
@@ -58,9 +82,108 @@ impl<B: Baseline> Composition<B> {
         &self.baseline
     }
 
+    pub fn ceiling(&self) -> &CeilingAuthorizer {
+        &self.ceiling
+    }
+
+    #[cfg(any(test, feature = "hermetic-test-seam"))]
+    pub fn install_live(&self, values: crate::live::LiveValues) -> Result<(), String> {
+        self.install_live_within(
+            values,
+            Instant::now() + crate::blocking_guard::BLOCKING_OPERATION_TIMEOUT,
+        )
+    }
+
+    /// Polls for the turn rather than queueing on it, and never takes it at or after
+    /// `deadline`, so an install that timed out has changed nothing and cannot land later.
+    #[cfg(any(test, feature = "hermetic-test-seam"))]
+    pub(crate) fn install_live_within(
+        &self,
+        values: crate::live::LiveValues,
+        deadline: Instant,
+    ) -> Result<(), String> {
+        let turn = self.take_turn_by(deadline).ok_or_else(|| {
+            "in-flight decisions held the live turn past the install deadline; nothing was installed"
+                .to_string()
+        })?;
+        self.install_in(&turn, values)
+    }
+
+    fn take_turn_by(&self, deadline: Instant) -> Option<maknae_authz_basic::LiveTurn<'_>> {
+        loop {
+            if Instant::now() >= deadline {
+                return None;
+            }
+            match self.baseline.live_turn().try_take() {
+                Some(turn) => return Some(turn),
+                None => std::thread::sleep(Duration::from_millis(1)),
+            }
+        }
+    }
+
+    fn install_in(
+        &self,
+        turn: &maknae_authz_basic::LiveTurn<'_>,
+        values: crate::live::LiveValues,
+    ) -> Result<(), String> {
+        if !self.baseline.live_turn().holds(turn) {
+            return Err("the live values are installed only in this composition's own turn".into());
+        }
+        #[cfg(test)]
+        assert!(!self
+            .panic_on_install
+            .load(std::sync::atomic::Ordering::SeqCst));
+        self.baseline.install_principal(turn, values.principal)?;
+        self.live.install(turn, values.view, values.providers);
+        Ok(())
+    }
+
+    /// Holds the turn as a decision in flight does.
+    #[cfg(test)]
+    pub(crate) fn hold_live_turn(&self) -> std::sync::RwLockReadGuard<'_, ()> {
+        self.baseline.live_turn().share()
+    }
+
     /// Baseline FIRST — see the module doc.
     fn operands(&self) -> [&dyn Authorizer; 2] {
         [&self.baseline, &self.ceiling]
+    }
+}
+
+/// The live turn, taken by a deadline and held on a blocking thread across an async
+/// persist: no decision runs until [`HeldLiveTurn::install`] or a drop releases it.
+pub(crate) struct HeldLiveTurn {
+    values: std::sync::mpsc::SyncSender<crate::live::LiveValues>,
+    installed: tokio::sync::oneshot::Receiver<Result<(), String>>,
+}
+
+impl HeldLiveTurn {
+    /// `None` when decisions in flight held the turn past `deadline`.
+    pub(crate) async fn take<B: Baseline>(
+        pdp: Arc<Composition<B>>,
+        deadline: Instant,
+    ) -> Option<Self> {
+        let (taken_tx, taken) = tokio::sync::oneshot::channel();
+        let (values, values_rx) = std::sync::mpsc::sync_channel(1);
+        let (installed_tx, installed) = tokio::sync::oneshot::channel();
+        tokio::task::spawn_blocking(move || {
+            let Some(turn) = pdp.take_turn_by(deadline) else {
+                return;
+            };
+            if taken_tx.send(()).is_err() {
+                return;
+            }
+            if let Ok(v) = values_rx.recv() {
+                let _ = installed_tx.send(pdp.install_in(&turn, v));
+            }
+        });
+        taken.await.ok().map(|()| Self { values, installed })
+    }
+
+    pub(crate) async fn install(self, values: crate::live::LiveValues) -> Result<(), String> {
+        let released = || "the live turn was released before the install".to_string();
+        self.values.send(values).map_err(|_| released())?;
+        self.installed.await.map_err(|_| released())?
     }
 }
 
@@ -97,10 +220,12 @@ impl<B: Baseline> Authorizer for Composition<B> {
     /// projections, so every existing composition test covers what production
     /// runs.
     fn decide_cited(&self, req: &Request) -> Decided {
+        let _turn = self.baseline.live_turn().share();
         compose_decide_cited(&self.operands(), req)
     }
 
     fn decide_cited_all(&self, reqs: &[Request]) -> Vec<Decided> {
+        let _turn = self.baseline.live_turn().share();
         compose_decide_cited_all(&self.operands(), reqs)
     }
 
@@ -116,57 +241,9 @@ impl<B: Baseline> Authorizer for Composition<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use maknae_authz_basic::HermeticAuthorizer;
+    use crate::test_fixtures::{fixture, permitted_read_marked, secret, READ_POLICY};
     use maknae_config::{BasicPolicy, Ceiling, ClassificationPolicy, Principal};
     use maknae_security::{Action, AttrValue, Attributes, Context, Resource, Subject};
-    use std::path::PathBuf;
-
-    /// A real `-basic` through the hermetic door: the production load, compile
-    /// and decide sequence, with only the loader's ownership requirement
-    /// relaxed so an unprivileged test can construct it.
-    struct DirGuard(PathBuf);
-
-    impl Drop for DirGuard {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    /// Returns the guard SEPARATELY from the authorizer so the authorizer can
-    /// be moved into a `Composition` while the guard still owns the cleanup.
-    /// Mirrors `tests/enforce_loop.rs`'s `Fixture`: a CANONICAL 0700 home
-    /// (#216 -- `$TMPDIR` is under the `/var` symlink on macOS), the enrolled
-    /// principal IS the test euid, and bindings name `root` so the enrolled-
-    /// principal default role resolution is what grants (boot_gate.rs).
-    fn fixture(tag: &str, policy: &str, bindings: Option<&str>) -> (DirGuard, HermeticAuthorizer) {
-        use std::os::unix::fs::PermissionsExt;
-        let dir =
-            std::env::temp_dir().join(format!("maknae_composition_{tag}_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let dir = dir.canonicalize().expect("canonicalize the fixture home");
-        let paths = maknae_authz_basic::PolicyPaths::in_dir(&dir);
-        for (path, body) in [(&paths.authz, Some(policy)), (&paths.bindings, bindings)] {
-            let Some(body) = body else { continue };
-            std::fs::write(path, body).unwrap();
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640)).unwrap();
-        }
-        let principal = Principal {
-            name: "operator".into(),
-            uid: nix::unistd::geteuid().as_raw(),
-        };
-        let req = maknae_config::TargetRequired {
-            owner: None,
-            mode_mask: Some(0o022),
-            nlink_exactly_one: false,
-            regular_file: true,
-            max_bytes: None,
-        };
-        let basic = HermeticAuthorizer::new(paths, principal, req, maknae_state::envelope::sha256)
-            .expect("fixture constructs");
-        (DirGuard(dir), basic)
-    }
 
     /// A policy that grants `admin.status` to the admin role.
     fn status_policy() -> String {
@@ -176,12 +253,6 @@ mod tests {
     const ADMIN_ROOT: &str = "schema_version: 1\nbindings:\n  admin: [\"root\"]\n";
 
     const US: &BasicPolicy = &BasicPolicy;
-
-    fn secret() -> Ceiling {
-        let mut c = Ceiling::baseline_for(US);
-        c.classification = US.level_of("SECRET").unwrap();
-        c
-    }
 
     fn ceiling(c: Ceiling) -> CeilingAuthorizer {
         CeilingAuthorizer::new(c, US)
@@ -235,49 +306,6 @@ mod tests {
     fn permitted_read(home: &std::path::Path) -> Request {
         permitted_read_marked(home, None)
     }
-
-    /// The same read, with a classification MARKING stamped the way a future
-    /// labeler would (trust-plane side, never client-supplied).
-    fn permitted_read_marked(home: &std::path::Path, marking: Option<&str>) -> Request {
-        let mut subject = Attributes::new();
-        subject.insert(
-            "uid",
-            AttrValue::Int(i64::from(nix::unistd::geteuid().as_raw())),
-        );
-        subject.insert(
-            maknae_security::SUBJECT_HOME,
-            AttrValue::Str(home.display().to_string()),
-        );
-        let mut resource = Attributes::new();
-        resource.insert(
-            "path",
-            AttrValue::Str(home.join("notes.txt").display().to_string()),
-        );
-        if let Some(m) = marking {
-            resource.insert(
-                maknae_security::RESOURCE_CLASSIFICATION,
-                AttrValue::Str(m.into()),
-            );
-        }
-        let mut context = Attributes::new();
-        context.insert(
-            maknae_security::CONTEXT_DAC_LANE,
-            AttrValue::Str(maknae_security::Lane::Local.as_str().to_string()),
-        );
-        context.insert(
-            maknae_security::CONTEXT_FS_OPERATION,
-            AttrValue::Str("read".into()),
-        );
-        Request {
-            subject: Subject(subject),
-            resource: Resource(resource),
-            action: Action("fs.read".into()),
-            context: Context(context),
-        }
-    }
-
-    const READ_POLICY: &str =
-        "schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/**)\"\n  deny: []\n";
 
     #[test]
     fn a_mandatory_deny_is_not_waivable_by_a_baseline_permit() {
@@ -358,6 +386,18 @@ mod tests {
             });
             rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok()
         };
+        let releases = || {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let gate = gate.clone();
+            std::thread::spawn(move || {
+                gate.release.wait();
+                let _ = tx.send(());
+            });
+            assert!(
+                rx.recv_timeout(std::time::Duration::from_secs(30)).is_ok(),
+                "the evaluation never reached its release"
+            );
+        };
         let batch = {
             let (c, home) = (c.clone(), g.0.clone());
             std::thread::spawn(move || {
@@ -366,9 +406,9 @@ mod tests {
         };
         assert!(arrives(), "the batch never reached evaluation");
         c.baseline().install(next.clone());
-        gate.release.wait();
+        releases();
         assert!(arrives(), "the batch stopped after one evaluation");
-        gate.release.wait();
+        releases();
         let all = batch.join().unwrap();
         assert_eq!(all.len(), 2);
         for d in all {
@@ -380,7 +420,7 @@ mod tests {
             std::thread::spawn(move || c.decide(&permitted_read(&home)))
         };
         assert!(arrives(), "the probe never reached evaluation");
-        gate.release.wait();
+        releases();
         let probed = probe.join().unwrap();
         assert!(matches!(probed, Verdict::Deny { .. }), "{probed:?}");
     }
@@ -427,7 +467,7 @@ mod tests {
     }
 
     /// THE wiring test. A minimal config directory whose `core.handling`
-    /// declares SECRET is booted for real through `crate::boot::boot`, and the
+    /// declares SECRET is booted for real through `crate::boot::assemble`, and the
     /// PDP built from it must refuse an unlabeled content read -- while the
     /// same build over a baseline config must be the identity. Round 4 of
     /// review showed that without this, `Ceiling::baseline()` in place of the
@@ -450,7 +490,9 @@ mod tests {
                 std::fs::Permissions::from_mode(0o640),
             )
             .unwrap();
-            let b = crate::boot::boot(&dir).expect("minimal config boots");
+            let b = crate::boot::read_files_as_owner(&dir)
+                .and_then(crate::boot::assemble)
+                .expect("minimal config boots");
             let _ = std::fs::remove_dir_all(&dir);
             b
         }
@@ -519,6 +561,185 @@ mod tests {
             }
             other => panic!("expected the cross-system refusal, got {other:?}"),
         }
+    }
+
+    pub(crate) fn install<B: Baseline>(
+        c: &Composition<B>,
+        principal: Principal,
+    ) -> Result<(), String> {
+        c.install_live_within(
+            crate::live::LiveValues {
+                principal,
+                view: Default::default(),
+                providers: None,
+            },
+            Instant::now() + crate::blocking_guard::BLOCKING_OPERATION_TIMEOUT,
+        )
+    }
+
+    fn enrolled(uid: u32) -> Principal {
+        Principal {
+            name: "operator".into(),
+            uid,
+        }
+    }
+
+    fn other_uid() -> u32 {
+        nix::unistd::geteuid().as_raw().wrapping_add(1)
+    }
+
+    #[test]
+    fn an_installed_principal_governs_the_next_decision_and_the_ceiling_stands() {
+        let (g, basic) = fixture("live-install", READ_POLICY, None);
+        let c = Composition::new(basic, ceiling(secret()));
+        let marked = permitted_read_marked(&g.0, Some("SECRET"));
+        let euid = nix::unistd::geteuid().as_raw();
+        assert!(matches!(c.decide(&marked), Verdict::Permit { .. }));
+        install(&c, enrolled(other_uid())).unwrap();
+        assert!(!matches!(c.decide(&marked), Verdict::Permit { .. }));
+        assert_eq!(c.baseline().principal(), enrolled(other_uid()));
+        install(&c, enrolled(euid)).unwrap();
+        assert!(matches!(c.decide(&marked), Verdict::Permit { .. }));
+        assert_eq!(c.ceiling().ceiling().classification.name, "SECRET");
+        let (g2, basic) = fixture("live-install-low", READ_POLICY, None);
+        let low = Composition::new(basic, ceiling(Ceiling::baseline_for(US)));
+        install(&low, enrolled(euid)).unwrap();
+        assert!(matches!(
+            low.decide(&permitted_read_marked(&g2.0, Some("SECRET"))),
+            Verdict::Deny { ref reason } if reason.starts_with("ceiling: ")
+        ));
+    }
+
+    /// The old baseline grants the principal; the new one grants someone else. A
+    /// decision in flight finishes on the old principal, and the install waits for it.
+    #[test]
+    fn a_decision_in_flight_during_an_install_sees_one_baseline_wholly() {
+        use maknae_authz_basic::EvaluationGate;
+        use std::sync::mpsc::channel;
+        use std::time::Duration;
+        let (g, mut basic) = fixture("live-race", READ_POLICY, None);
+        let gate = std::sync::Arc::new(EvaluationGate {
+            arrived: std::sync::Barrier::new(2),
+            release: std::sync::Barrier::new(2),
+        });
+        basic.park_evaluations(gate.clone());
+        let c = std::sync::Arc::new(Composition::new(basic, ceiling(secret())));
+        let marked = permitted_read_marked(&g.0, Some("SECRET"));
+        let (decided_tx, decided) = channel();
+        {
+            let (c, marked) = (c.clone(), marked.clone());
+            std::thread::spawn(move || {
+                let _ = decided_tx.send(c.decide(&marked));
+            });
+        }
+        let barrier = |which: fn(&EvaluationGate) -> &std::sync::Barrier| {
+            let (tx, rx) = channel();
+            let gate = gate.clone();
+            std::thread::spawn(move || {
+                which(&gate).wait();
+                let _ = tx.send(());
+            });
+            rx.recv_timeout(Duration::from_secs(5)).is_ok()
+        };
+        assert!(
+            barrier(|g| &g.arrived),
+            "the decision never reached evaluation"
+        );
+        let (installed_tx, installed) = channel();
+        {
+            let c = c.clone();
+            std::thread::spawn(move || {
+                let _ = installed_tx.send(install(&c, enrolled(other_uid())));
+            });
+        }
+        assert!(
+            installed.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the install landed while a decision was in flight"
+        );
+        assert!(barrier(|g| &g.release), "the decision was never released");
+        let verdict = decided
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the decision finishes");
+        assert!(matches!(verdict, Verdict::Permit { .. }), "{verdict:?}");
+        installed
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the install finishes")
+            .unwrap();
+        assert_eq!(c.baseline().principal(), enrolled(other_uid()));
+    }
+
+    #[test]
+    fn an_install_in_a_foreign_turn_installs_nothing() {
+        let (_g, basic) = fixture("live-whole", READ_POLICY, None);
+        let c = Composition::new(basic, ceiling(Ceiling::baseline_for(US)));
+        let before = (c.baseline().principal(), c.live().generation());
+        let foreign = maknae_authz_basic::LiveTurnLock::hermetic();
+        let turn = foreign.try_take().unwrap();
+        let values = crate::live::LiveValues {
+            principal: enrolled(other_uid()),
+            view: std::collections::BTreeMap::from([("core".into(), Default::default())]),
+            providers: None,
+        };
+        assert!(c.install_in(&turn, values).is_err());
+        assert_eq!(c.baseline().principal(), before.0);
+        assert_eq!(c.live().generation(), before.1);
+    }
+
+    #[test]
+    fn an_install_that_cannot_take_the_turn_in_time_changes_nothing() {
+        use std::sync::mpsc::channel;
+        let (_g, basic) = fixture("live-bound", READ_POLICY, None);
+        let c = std::sync::Arc::new(Composition::new(basic, ceiling(Ceiling::baseline_for(US))));
+        let live = std::sync::Arc::clone(c.live());
+        let before = c.baseline().principal();
+        let (held_tx, held) = channel();
+        let (release_tx, release) = channel::<()>();
+        let holder = {
+            let c = c.clone();
+            std::thread::spawn(move || {
+                let _decision = c.baseline().live_turn().share();
+                let _ = held_tx.send(());
+                let _ = release.recv_timeout(Duration::from_secs(5));
+            })
+        };
+        held.recv_timeout(Duration::from_secs(5))
+            .expect("the turn is held");
+        let values = crate::live::LiveValues {
+            principal: enrolled(other_uid()),
+            view: std::collections::BTreeMap::from([("core".into(), Default::default())]),
+            providers: None,
+        };
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            let _ = release_tx.send(());
+        });
+        let err = c
+            .install_live_within(values, Instant::now() + Duration::from_millis(50))
+            .unwrap_err();
+        assert!(err.contains("nothing was installed"), "{err}");
+        releaser.join().unwrap();
+        holder.join().unwrap();
+        assert_eq!(c.baseline().principal(), before);
+        assert_eq!(c.ceiling().ceiling().classification, US.unmarked());
+        assert_eq!(live.generation(), 0);
+        assert!(live.view().is_empty());
+    }
+
+    #[test]
+    fn an_install_that_starts_after_its_deadline_changes_nothing() {
+        let (_g, basic) = fixture("live-late", READ_POLICY, None);
+        let c = Composition::new(basic, ceiling(Ceiling::baseline_for(US)));
+        let before = c.baseline().principal();
+        let values = crate::live::LiveValues {
+            principal: enrolled(other_uid()),
+            view: std::collections::BTreeMap::from([("core".into(), Default::default())]),
+            providers: None,
+        };
+        let err = c.install_live_within(values, Instant::now()).unwrap_err();
+        assert!(err.contains("nothing was installed"), "{err}");
+        assert_eq!(c.baseline().principal(), before);
+        assert_eq!(c.ceiling().ceiling().classification, US.unmarked());
+        assert_eq!(c.live().generation(), 0);
     }
 
     #[test]

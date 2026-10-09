@@ -4,11 +4,13 @@
 # grant exists. 'not-granted' is valid and is correct for most terms.
 action	liveness.ping	granted	shipped; permitted to every bound role
 action	admin.whoami	granted	shipped; the ONE admin term the class arm keys on
-action	admin.status	not-granted-but-grantable	BUILT (#162 Phase 3): returns runtime posture — version, protocol version, listener, active authz backend. CLI: `maknae status`. Ungranted by default; operator MAY grant per-role — see the grantable row
+action	admin.status	granted-in-shipped-file	BUILT (#162 Phase 3): returns runtime posture — version, protocol version, listener, active authz backend, pending baseline change sets by count and class. CLI: `maknae status`. granted to admin by the shipped authz.yaml; an install's own authz.yaml decides
 action	admin.config.show	not-granted-but-grantable	BUILT (#162 Phase 2): returns the boot-redacted ConfigView — deny-by-default allowlist; values masked to <value set>, presence-signal keys omitted entirely. CLI: `maknae config-show`. Ungranted by default; operator MAY grant per-role — see the grantable row
 action	admin.audit.tail	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
 action	admin.policy.reload	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
-action	admin.subject.list	not-granted-but-grantable	BUILT (#162 Phase 3): enumerates role bindings from the PDP's current snapshot (never a boot copy — a reload or restart changes it). CLI: `maknae subject-list`. Ungranted by default; operator MAY grant per-role — see the grantable row
+action	admin.subject.list	granted-in-shipped-file	BUILT (#162 Phase 3): enumerates role bindings from the PDP's current snapshot (never a boot copy — a reload or restart changes it). CLI: `maknae subject-list`. granted to admin by the shipped authz.yaml; an install's own authz.yaml decides
+action	admin.baseline.show	granted-in-shipped-file	BUILT (#490): the pending baseline change set through the config.show disclosure rules, with its hash. CLI: `maknae baseline-show`. granted to admin by the shipped authz.yaml; an install's own authz.yaml decides
+action	admin.baseline.accept	granted-in-shipped-file	BUILT (#490): accept the pending baseline change set named by its hash; written ahead; live or by supervised restart. CLI: `maknae baseline-accept <hash>`. granted to admin by the shipped authz.yaml; an install's own authz.yaml decides
 action	admin.subject.bind	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
 action	admin.subject.unbind	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
 action	admin.contain	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
@@ -62,8 +64,10 @@ action	mcp.sampling.create	not-granted	enumerated, decided, unbuilt — answers 
 kernel-action	kernel.contain	not-granted	no Verb variant (D2); reachable by no client
 kernel-action	kernel.session.terminate	not-granted	no Verb variant (D2); reachable by no client
 capability	Read	granted	grammar capability; shipped Read allow; Bash retired by #67
-grantable	admin.status	grantable-not-granted	operator MAY grant per-role via `roles:` (#162); ships ungranted
+grantable	admin.status	grantable-shipped-granted	operator MAY grant per-role via `roles:`; the shipped authz.yaml grants it to admin (#162, #490)
 grantable	admin.config.show	grantable-not-granted	operator MAY grant per-role via `roles:` (#162); ships ungranted
-grantable	admin.subject.list	grantable-not-granted	operator MAY grant per-role via `roles:` (#162); ships ungranted
+grantable	admin.subject.list	grantable-shipped-granted	operator MAY grant per-role via `roles:`; the shipped authz.yaml grants it to admin (#162, #490)
+grantable	admin.baseline.show	grantable-shipped-granted	operator MAY grant per-role via `roles:`; the shipped authz.yaml grants it to admin (#490)
+grantable	admin.baseline.accept	grantable-shipped-granted	operator MAY grant per-role via `roles:`; the shipped authz.yaml grants it to admin (#490)
 grantable	session.prompt	grantable-not-granted	operator MAY grant per-role via `roles:` (#162), admin or user, with a destination via destinations: (#172); ships ungranted and unlisted
 capability	Write	granted	grammar capability; shipped Write(~/projects/**) allow, independent of Read; paired sensitive-path denies (#158)

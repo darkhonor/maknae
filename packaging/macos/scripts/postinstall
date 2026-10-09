@@ -44,6 +44,26 @@ hold_dir() {
     [ "$(stat -f '%u %g %Lp' "$1")" = "0 0 700" ] && [ "$(ls -led "$1" | wc -l)" -eq 1 ]
 }
 
+# The search entry for each reader maknae.yaml declares (#500), restored after the
+# hold strips the directory's ACL. The trail files' own entries are never touched here.
+grant_reader_traverse() {
+    local readers r errf rc=0
+    errf="$(mktemp)" || return 1
+    if ! readers="$(/usr/local/bin/maknae audit-readers 2>"$errf")"; then
+        echo "maknae: audit.readers not applied: $(cat "$errf")" >&2
+        rm -f "$errf"
+        return 0
+    fi
+    rm -f "$errf"
+    [ -n "$readers" ] || return 0
+    printf '%s\n' "$readers" | LC_ALL=C grep -Evx '[a-z_][a-z0-9_-]{0,30}[$]?' >/dev/null || rc=$?
+    if [ "$rc" -ne 1 ]; then
+        echo "maknae: audit.readers printed an unexpected name; not applied" >&2
+        return 0
+    fi
+    for r in $readers; do chmod +a "user:$r allow search" /var/log/maknae || return 1; done
+}
+
 # --- DISABLED by default, on a FRESH INSTALL ONLY ---------------------------
 # `man launchd` FILES: /Library/LaunchDaemons = "System-wide daemons provided by
 # the administrator" — it is SCANNED AT BOOT. Merely declining to `bootstrap` is
@@ -164,6 +184,10 @@ case "$(stat -f '%Sf' "$AUDIT")" in
        echo "  control. Refusing to report a successful install without it." >&2
        exit 1 ;;
 esac
+if ! grant_reader_traverse; then
+    echo "maknae: cannot apply audit.readers to /var/log/maknae; it is left root-owned" >&2
+    exit 1
+fi
 chown -h "$MUID:$MGID" /var/log/maknae
 verify "/var/log/maknae ownership/mode" "$MUID $MGID 700" "$(stat -f '%u %g %Lp' /var/log/maknae)"
 

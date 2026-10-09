@@ -88,8 +88,8 @@ def platform_script(linux, linux_files, darwin, darwin_files):
 
     def arm(match):
         absent, files = next(arms)
-        return f"{match.group(1)}absent='{absent}'{match.group(2)}inactive_files='{files}';;"
-    script, count = re.subn(r"((?:Linux|Darwin)\)\s*)absent='[^']*'(\s*)inactive_files='[^']*';;", arm, script)
+        return f"{match.group(1)}absent='{absent}'{match.group(2)}inactive_files='{files}'"
+    script, count = re.subn(r"((?:Linux|Darwin)\)\s*)absent='[^']*'(\s*)inactive_files='[^']*'", arm, script)
     assert count == 2
     return script
 
@@ -340,6 +340,18 @@ class Derivation(unittest.TestCase):
     def test_unsupported_target_kind_fails(self):
         self.tree.files["crates/other/Cargo.toml"] += '\n[lib]\ncrate-type = ["cdylib"]\n'
         self.assertFails("other: target other has kind cdylib")
+
+    def test_a_root_only_entry_wider_than_one_mutant_fails(self):
+        script = self.tree.files["ci/gates/mutation-platform.sh"]
+        wide, count = re.subn(r"root_only='\|[^']*'", "root_only='|^crates/maknae-sys/src/flags\\.rs:'", script)
+        self.assertEqual(count, 1)
+        self.tree.files["ci/gates/mutation-platform.sh"] = wide
+        self.assertFails("is not one anchored mutant")
+
+    def test_an_arm_without_root_only_fails(self):
+        script = self.tree.files["ci/gates/mutation-platform.sh"]
+        self.tree.files["ci/gates/mutation-platform.sh"] = script.replace("\n         root_only='';;", ";;", 1)
+        self.assertFails("no Linux absent/inactive_files/root_only arm")
 
     def test_match_guard_near_miss_is_not_excluded(self):
         script = self.tree.files["ci/gates/mutation-platform.sh"]

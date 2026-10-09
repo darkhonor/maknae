@@ -12,19 +12,20 @@
     <os-version min="26.0"/>
   </allowed-os-versions>
 
+  <!-- The CLI installs first: the daemon's postinstall runs /usr/local/bin/maknae audit-readers. -->
   <choices-outline>
     <line choice="default">
-      <line choice="io.maknae.daemon"/>
       <line choice="io.maknae.cli"/>
+      <line choice="io.maknae.daemon"/>
     </line>
   </choices-outline>
 
   <choice id="default"/>
-  <choice id="io.maknae.daemon" visible="false"><pkg-ref id="io.maknae.daemon"/></choice>
   <choice id="io.maknae.cli" visible="false"><pkg-ref id="io.maknae.cli"/></choice>
+  <choice id="io.maknae.daemon" visible="false"><pkg-ref id="io.maknae.daemon"/></choice>
 
   <!-- version="0" is rewritten by productbuild from each component's real version,
        and the emitted filename is prefixed with '#'. Verified; do not "fix" it. -->
-  <pkg-ref id="io.maknae.daemon" version="0" onConclusion="none">maknae-daemon.pkg</pkg-ref>
   <pkg-ref id="io.maknae.cli" version="0" onConclusion="none">maknae-cli.pkg</pkg-ref>
+  <pkg-ref id="io.maknae.daemon" version="0" onConclusion="none">maknae-daemon.pkg</pkg-ref>
 </installer-gui-script>

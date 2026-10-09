@@ -211,6 +211,10 @@ impl CeilingAuthorizer {
     pub fn new(ceiling: Ceiling, policy: &'static dyn ClassificationPolicy) -> Self {
         Self { ceiling, policy }
     }
+
+    pub fn ceiling(&self) -> &Ceiling {
+        &self.ceiling
+    }
 }
 
 impl Authorizer for CeilingAuthorizer {

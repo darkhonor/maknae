@@ -51,6 +51,7 @@ fn sample_record() -> AuditRecord {
 #[tokio::test]
 async fn open_fails_closed_on_unwritable_dir() {
     let cfg = maknae_config::AuditConfig {
+        readers: Vec::new(),
         jsonl_path: "/nonexistent-root-xyz/audit.jsonl".into(),
         siem: None,
         au3_1: serde_json::json!({}),
@@ -62,6 +63,7 @@ async fn open_fails_closed_on_unwritable_dir() {
 async fn append_writes_one_jsonl_line_then_flushes() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = maknae_config::AuditConfig {
+        readers: Vec::new(),
         jsonl_path: dir.path().join("audit.jsonl"),
         siem: None,
         au3_1: serde_json::json!({}),

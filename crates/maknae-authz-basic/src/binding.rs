@@ -985,7 +985,7 @@ mod tests {
     }
 
     fn graph_with(l: &IdentityLayer, compiled: &CompiledSet) -> Arc<Graph> {
-        Arc::new(build(l, compiled, [1; 32], 5, ProvenanceKind::Seed).unwrap())
+        Arc::new(build(l, None, compiled, [1; 32], 5, ProvenanceKind::Seed).unwrap())
     }
 
     fn graph(l: &IdentityLayer) -> Arc<Graph> {
