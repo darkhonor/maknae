@@ -353,6 +353,29 @@ impl PolicySource {
         })
     }
 
+    /// Blocking: one getpwnam per bound username.
+    pub fn with_bindings(
+        &self,
+        bindings: maknae_config::Bindings,
+    ) -> Result<Self, AuthzBasicError> {
+        let uid_map = resolve_uid_map(&bindings)?;
+        self.with_bindings_resolved(bindings, uid_map)
+    }
+
+    fn with_bindings_resolved(
+        &self,
+        bindings: maknae_config::Bindings,
+        uid_map: UidMap,
+    ) -> Result<Self, AuthzBasicError> {
+        Self::from_parts(
+            self.policy.clone(),
+            bindings,
+            uid_map,
+            self.principal.clone(),
+            self.paths.clone(),
+        )
+    }
+
     pub fn policy(&self) -> &maknae_config::AuthzPolicy {
         &self.policy
     }
@@ -1387,6 +1410,58 @@ mod tests {
             paths(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn a_replacement_section_is_resolved_and_hashed_as_the_enforced_section() {
+        let src = source_with(EMPTY, Some(ADMIN_ROOT), &[("root", 0), ("mallory", 4242)]);
+        let live = maknae_config::parse_bindings(
+            "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary: [\"mallory\"]\n",
+        )
+        .unwrap();
+        let next = src
+            .with_bindings_resolved(
+                live.clone(),
+                [("root".into(), 0), ("mallory".into(), 4242)].into(),
+            )
+            .unwrap();
+        assert_eq!(next.bindings(), &live);
+        let layer = next.identity_layer("UNCLASSIFIED", None);
+        assert!(layer
+            .subjects
+            .iter()
+            .any(|s| s.uid == 4242 && s.role == "adversary"));
+        let d = |b: &[u8]| {
+            let mut o = [0u8; 32];
+            o[0] = b.len() as u8;
+            o
+        };
+        assert_eq!(
+            next.section_digests(d)["bindings"],
+            d(live.section_canonical().unwrap().as_bytes())
+        );
+        assert_eq!(next.policy(), src.policy(), "authz.yaml is not re-read");
+        let refused =
+            maknae_config::parse_bindings("schema_version: 1\nbindings:\n  root: [\"x\"]\n")
+                .unwrap();
+        assert!(src
+            .with_bindings_resolved(refused, Default::default())
+            .is_err());
+    }
+
+    #[test]
+    fn with_bindings_resolves_uid_entries_without_a_lookup() {
+        let src = source_with(EMPTY, Some(ADMIN_ROOT), &[("root", 0)]);
+        let live = maknae_config::parse_bindings(
+            "schema_version: 1\nbindings:\n  adversary:\n    - uid: 4242\n",
+        )
+        .unwrap();
+        let next = src.with_bindings(live).unwrap();
+        assert!(next
+            .identity_layer("UNCLASSIFIED", Some([0; 32]))
+            .subjects
+            .iter()
+            .any(|s| s.uid == 4242));
     }
 
     fn compiled(src: &PolicySource) -> Arc<Snapshot> {
