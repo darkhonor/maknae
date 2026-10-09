@@ -2,6 +2,7 @@
 //! all logic lives in `cli::run_cli` (T3 — arg parse + orchestration, no
 //! decision logic of its own).
 mod agent;
+mod audit_readers;
 mod cli;
 mod enroll;
 mod login;

@@ -203,6 +203,14 @@ pub(crate) fn assemble(document: Document) -> Result<BootConfig, ConfigError> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn boot_specs_names_are_the_daemon_sections() {
+        assert_eq!(
+            boot_specs().map(|s| s.name),
+            maknae_config::DAEMON_SECTIONS.map(String::from)
+        );
+    }
+
     fn owned(config_dir: &Path) -> Result<BootConfig, ConfigError> {
         boot_as_owner(config_dir)
     }

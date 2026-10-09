@@ -118,6 +118,17 @@ pub use value::{canonical_json, Value};
 
 use builder::Builder;
 
+/// The sections `maknaed` reads from `maknae.yaml` and `config.d`.
+pub const DAEMON_SECTIONS: [&str; 7] = [
+    "lake",
+    "vault",
+    "transport",
+    "audit",
+    "principal",
+    "providers",
+    "egress",
+];
+
 /// Refuse a key the section's parser does not read (#210).
 ///
 /// **The fail-closed half of a section parse.** A parser pulls the fields it
@@ -248,6 +259,19 @@ fn load_required_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_daemon_sections_name_this_crates_section_parsers() {
+        for name in [
+            TRANSPORT_SECTION,
+            AUDIT_SECTION,
+            PRINCIPAL_SECTION,
+            PROVIDERS_SECTION,
+            EGRESS_SECTION,
+        ] {
+            assert!(DAEMON_SECTIONS.contains(&name), "{name}");
+        }
+    }
 
     #[cfg(unix)]
     pub(crate) mod test_owner {

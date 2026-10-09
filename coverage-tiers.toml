@@ -704,6 +704,10 @@ path = "bins/maknae/src/reseed.rs"
 why = "#488: sudo maknae reseed — bin code, T3 per the tiering constraint. It writes one marker through maknae-io's anchored publish (T1 in maknae-io), refusing anything already at the marker path; the marker's authority is decided by the daemon in maknae-state store.rs (T1). The pieces carry real-file unit tests: the umask-077 mode in a child process, a planted symlink left untouched, a pending marker left as is, the root preflight and the directory requirement"
 
 [[t3]]
+path = "bins/maknae/src/audit_readers.rs"
+why = "#500: sudo maknae audit-readers — bin code, T3 per the tiering constraint. It loads maknae.yaml and config.d through maknae-config's root-owned loader and validates audit.readers through resolve_readers (both T1 in maknae-config) over maknae-vault's NssAccounts. The pieces carry unit tests: the root preflight, the validation over a fake account database, the one-name-per-line output contract, a refused non-root-owned file, and the --stopped check against a real held directory lock"
+
+[[t3]]
 path = "bins/maknae/src/enroll/keychain_write.rs"
 why = "#76: enroll's keychain write and release-build checks — the pure builders and parsers (SecretID shape, the per-plane content check that routes the egress item to maknae-vault's seal_key_from_hex, verification_plane, classify_find, the stdin add command, delete/find argv, keychain-line parse, the codesign requirement strings and team pin, Hardened Runtime/entitlement/ad-hoc refusal, embedded-requirement equality) carry unit tests on every target; on macOS, darwin tests prove that check_install_path accepts a hard-linked file, maps a missing binary to NotInstalled, and maps a non-root-owned install path to NotRootInstalled (not NotInstalled). The runners that call codesign/security remain operator-verified, not unit-tested"
 
