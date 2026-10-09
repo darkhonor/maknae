@@ -1,6 +1,6 @@
 //! What an accepted baseline swaps in for the next request (#490): the redacted
 //! config view and the providers authority. The ceiling level and the principal
-//! are the composition's own holders, installed by [`install`].
+//! are the composition's own holders, installed in its live turn.
 
 use std::sync::{Arc, PoisonError, RwLock};
 
@@ -14,7 +14,7 @@ pub struct LiveConfig {
     served: RwLock<Arc<Served>>,
 }
 
-/// One accepted live baseline: what [`install`] installs.
+/// One accepted live baseline, installed whole in the composition's live turn.
 pub struct LiveValues {
     pub ceiling: maknae_config::Ceiling,
     pub principal: maknae_config::Principal,
@@ -105,6 +105,7 @@ pub fn providers_of(v: &Validated) -> Option<ProviderAuthority> {
 /// Installs a validated live baseline: the ceiling, principal, view and providers in
 /// one turn of the composition, refused whole when the booted system does not rank
 /// the ceiling or in-flight decisions hold the turn past the bound.
+#[cfg(test)]
 pub fn install<B: maknae_authz_basic::Baseline>(
     pdp: &crate::Composition<B>,
     v: &Validated,

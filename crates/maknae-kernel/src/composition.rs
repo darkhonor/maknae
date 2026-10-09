@@ -51,6 +51,8 @@ pub struct Composition<B: Baseline> {
     ceiling: CeilingAuthorizer,
     /// The view and providers the request path serves; installed only in the live turn.
     live: Arc<crate::live::LiveConfig>,
+    #[cfg(test)]
+    pub(crate) panic_on_install: std::sync::atomic::AtomicBool,
 }
 
 impl<B: Baseline> Composition<B> {
@@ -59,6 +61,8 @@ impl<B: Baseline> Composition<B> {
             baseline,
             ceiling,
             live: Arc::new(crate::live::LiveConfig::new(Default::default(), None)),
+            #[cfg(test)]
+            panic_on_install: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -68,7 +72,7 @@ impl<B: Baseline> Composition<B> {
         self
     }
 
-    /// What the request path serves: the one `LiveConfig` [`crate::live::install`] installs into.
+    /// What the request path serves: the one `LiveConfig` the live turn installs into.
     pub fn live(&self) -> &Arc<crate::live::LiveConfig> {
         &self.live
     }
@@ -92,24 +96,29 @@ impl<B: Baseline> Composition<B> {
 
     /// Polls for the turn rather than queueing on it, and never takes it at or after
     /// `deadline`, so an install that timed out has changed nothing and cannot land later.
+    #[cfg(any(test, feature = "hermetic-test-seam"))]
     pub(crate) fn install_live_within(
         &self,
         values: crate::live::LiveValues,
         deadline: Instant,
     ) -> Result<(), String> {
-        let turn = loop {
+        let turn = self.take_turn_by(deadline).ok_or_else(|| {
+            "in-flight decisions held the live turn past the install deadline; nothing was installed"
+                .to_string()
+        })?;
+        self.install_in(&turn, values)
+    }
+
+    fn take_turn_by(&self, deadline: Instant) -> Option<maknae_authz_basic::LiveTurn<'_>> {
+        loop {
             if Instant::now() >= deadline {
-                return Err(
-                    "in-flight decisions held the live turn past the install deadline; nothing was installed"
-                        .into(),
-                );
+                return None;
             }
             match self.baseline.live_turn().try_take() {
-                Some(turn) => break turn,
+                Some(turn) => return Some(turn),
                 None => std::thread::sleep(Duration::from_millis(1)),
             }
-        };
-        self.install_in(&turn, values)
+        }
     }
 
     fn install_in(
@@ -121,6 +130,10 @@ impl<B: Baseline> Composition<B> {
             return Err("the live values are installed only in this composition's own turn".into());
         }
         self.ceiling.admits(&values.ceiling)?;
+        #[cfg(test)]
+        assert!(!self
+            .panic_on_install
+            .load(std::sync::atomic::Ordering::SeqCst));
         self.baseline.install_principal(turn, values.principal)?;
         self.ceiling.install(turn, values.ceiling)?;
         self.live.install(turn, values.view, values.providers);
@@ -136,6 +149,43 @@ impl<B: Baseline> Composition<B> {
     /// Baseline FIRST — see the module doc.
     fn operands(&self) -> [&dyn Authorizer; 2] {
         [&self.baseline, &self.ceiling]
+    }
+}
+
+/// The live turn, taken by a deadline and held on a blocking thread across an async
+/// persist: no decision runs until [`HeldLiveTurn::install`] or a drop releases it.
+pub(crate) struct HeldLiveTurn {
+    values: std::sync::mpsc::SyncSender<crate::live::LiveValues>,
+    installed: tokio::sync::oneshot::Receiver<Result<(), String>>,
+}
+
+impl HeldLiveTurn {
+    /// `None` when decisions in flight held the turn past `deadline`.
+    pub(crate) async fn take<B: Baseline>(
+        pdp: Arc<Composition<B>>,
+        deadline: Instant,
+    ) -> Option<Self> {
+        let (taken_tx, taken) = tokio::sync::oneshot::channel();
+        let (values, values_rx) = std::sync::mpsc::sync_channel(1);
+        let (installed_tx, installed) = tokio::sync::oneshot::channel();
+        tokio::task::spawn_blocking(move || {
+            let Some(turn) = pdp.take_turn_by(deadline) else {
+                return;
+            };
+            if taken_tx.send(()).is_err() {
+                return;
+            }
+            if let Ok(v) = values_rx.recv() {
+                let _ = installed_tx.send(pdp.install_in(&turn, v));
+            }
+        });
+        taken.await.ok().map(|()| Self { values, installed })
+    }
+
+    pub(crate) async fn install(self, values: crate::live::LiveValues) -> Result<(), String> {
+        let released = || "the live turn was released before the install".to_string();
+        self.values.send(values).map_err(|_| released())?;
+        self.installed.await.map_err(|_| released())?
     }
 }
 

@@ -119,6 +119,8 @@ pub enum AcceptAnswer {
 }
 
 const ACCEPT_BUSY: &str = "baseline accept refused: busy; a reload holds the turn";
+const ACCEPT_DECIDING: &str =
+    "baseline accept refused: busy; decisions in flight held the live turn";
 const ACCEPT_STOPPING: &str = "baseline accept refused: shutting down";
 const ACCEPT_UNAVAILABLE: &str = "baseline accept unavailable";
 
@@ -4093,6 +4095,17 @@ where
             bound: self.append_bound,
             drain: restart.then_some(&self.drain),
         };
+        let held = if restart {
+            None
+        } else {
+            let deadline = Instant::now() + self.turn_wait;
+            match crate::composition::HeldLiveTurn::take(Arc::clone(&self.authorizer), deadline)
+                .await
+            {
+                Some(held) => Some(held),
+                None => return accept_unavailable(ACCEPT_DECIDING, ACCEPT_DECIDING.into()),
+            }
+        };
         eprintln!(
             "maknaed: baseline: accepting the {} change set (apply: {class})",
             set.source
@@ -4147,28 +4160,26 @@ where
             accepted: plan.proposed.clone(),
             pending: None,
         });
-        let applied = if restart {
-            Ok("restarting to apply")
-        } else {
-            let before = self.authorizer.baseline().principal().uid;
-            let principal = v.principal.uid;
-            let pdp = Arc::clone(&self.authorizer);
-            let deadline = std::time::Instant::now() + BLOCKING_OPERATION_TIMEOUT;
-            match within_blocking(2 * BLOCKING_OPERATION_TIMEOUT, move || {
-                crate::live::install(&pdp, &v, deadline)
-            })
-            .await
-            .and_then(|installed| installed)
-            {
-                Ok(()) => {
-                    if principal != before {
-                        self.republish_principal_admin(&ctx, principal).await;
+        let applied = match held {
+            None => Ok("restarting to apply"),
+            Some(held) => {
+                let before = self.authorizer.baseline().principal().uid;
+                let principal = v.principal.uid;
+                let installed = match &committed.checkpoint_error {
+                    Some(e) => Err(format!("the checkpoint was not recorded: {e}")),
+                    None => held.install(crate::live::LiveValues::of(&v)).await,
+                };
+                match installed {
+                    Ok(()) => {
+                        if principal != before {
+                            self.republish_principal_admin(&ctx, principal).await;
+                        }
+                        Ok("applied live")
                     }
-                    Ok("applied live")
-                }
-                Err(e) => {
-                    self.drain.send_replace(Drain::Applied);
-                    Err(e)
+                    Err(e) => {
+                        self.drain.send_replace(Drain::Applied);
+                        Err(e)
+                    }
                 }
             }
         };
@@ -4195,11 +4206,22 @@ where
             reason.replace(&format!("sha256:{short} "), "")
         );
         let rec = ctx.record(GRAPH_BASELINE_ACTION, result, &reason, posture, None);
-        if let Err(e) = self.sink.emit_within(&rec, self.append_bound).await {
-            eprintln!("maknaed: AUDIT WRITE FAILED on the baseline accept outcome: {e}");
-        }
+        let recorded = match self.sink.emit_within(&rec, self.append_bound).await {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("maknaed: AUDIT WRITE FAILED on the baseline accept outcome: {e}; restarting to apply");
+                self.drain.send_if_modified(|d| {
+                    let serving = *d == Drain::Serving;
+                    if serving {
+                        *d = Drain::Applied;
+                    }
+                    serving
+                });
+                false
+            }
+        };
         let mut view = crate::baseline::accepted_view(&set, &state.accepted);
-        if applied.is_err() {
+        if applied.is_err() || !recorded {
             view.apply = "restart".into();
         }
         AcceptAnswer::View {
@@ -11588,11 +11610,12 @@ mod baseline_accept_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_lowered_ceiling_whose_install_times_out_is_applied_by_restart() {
-        let fx = Fx::with_core("install-fails", SECRET).await;
-        fx.write_yaml(&unclassified(), "");
+    async fn a_live_accept_refused_the_turn_by_a_decision_persists_nothing() {
+        let fx = Fx::with_core("turn-busy", &unclassified()).await;
+        fx.write_yaml(SECRET, "");
         let shown = fx.show().await;
         assert_eq!(shown.apply, "live");
+        let before = fx.store_sha();
         let (held_tx, held) = std::sync::mpsc::channel();
         let (release_tx, release) = std::sync::mpsc::channel::<()>();
         let holder = {
@@ -11605,20 +11628,129 @@ mod baseline_accept_tests {
         };
         held.recv_timeout(Duration::from_secs(5))
             .expect("the turn is held");
-        let got = fx.accept(&shown.hash).await;
+        let got = tokio::time::timeout(Duration::from_secs(3), fx.accept(&shown.hash))
+            .await
+            .expect("bounded");
         let _ = release_tx.send(());
         holder.join().unwrap();
-        let view = accepted(got);
-        assert_eq!(
-            (view.state.as_str(), view.apply.as_str()),
-            ("accepted", "restart")
+        assert!(
+            matches!(
+                got,
+                AcceptAnswer::Unavailable {
+                    reply: ACCEPT_DECIDING,
+                    ..
+                }
+            ),
+            "{got:?}"
         );
+        assert_eq!(fx.store_sha(), before);
+        assert_eq!(fx.drain(), Drain::Serving);
+        assert_eq!(ceiling_name(&fx), "UNCLASSIFIED");
+        assert!(!fx
+            .seen()
+            .iter()
+            .any(|s| s.action == GRAPH_TRANSITION_ACTION || s.action == GRAPH_BASELINE_ACTION));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn no_decision_sees_the_old_ceiling_once_a_live_accept_has_persisted() {
+        let opts = Opts {
+            core: &unclassified(),
+            delay: Duration::from_millis(30),
+            bound: Duration::from_secs(1),
+            ..Opts::default()
+        };
+        let fx = Arc::new(fixture_with("turn-held", opts).await);
+        fx.write_yaml(SECRET, "");
+        let shown = fx.show().await;
+        let before = fx.store_sha();
+        let (held_tx, held) = std::sync::mpsc::channel();
+        let holder = {
+            let pdp = Arc::clone(&fx.reloader.authorizer);
+            std::thread::spawn(move || {
+                let _decision = pdp.hold_live_turn();
+                let _ = held_tx.send(());
+                std::thread::sleep(Duration::from_millis(50));
+            })
+        };
+        held.recv_timeout(Duration::from_secs(5))
+            .expect("the turn is held");
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let probe = {
+            let (fx, stop, before) = (Arc::clone(&fx), Arc::clone(&stop), before.clone());
+            std::thread::spawn(move || {
+                let (mut stale, mut decided) = (0, 0);
+                while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    let persisted = fx.store_sha() != before;
+                    let turn = fx.composition().hold_live_turn();
+                    let name = ceiling_name(&fx);
+                    drop(turn);
+                    decided += 1;
+                    if persisted && name == "UNCLASSIFIED" {
+                        stale += 1;
+                    }
+                    std::thread::sleep(Duration::from_micros(200));
+                }
+                (stale, decided)
+            })
+        };
+        let view = accepted(fx.accept(&shown.hash).await);
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        holder.join().unwrap();
+        let (stale, decided) = probe.join().unwrap();
+        assert_eq!(view.apply, "live");
+        assert!(decided > 0);
+        assert_eq!(
+            stale, 0,
+            "a decision ran on the old ceiling after the persist"
+        );
+        assert_eq!(ceiling_name(&fx), "SECRET");
+        assert_eq!(fx.drain(), Drain::Serving);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_live_accept_whose_checkpoint_fails_applies_by_restart() {
+        let fx = Fx::with_core("checkpoint-fails", &unclassified()).await;
+        fx.write_yaml(SECRET, "");
+        let shown = fx.show().await;
+        fx.refuse(CHECKPOINT_ACTION);
+        let view = accepted(fx.accept(&shown.hash).await);
+        assert_eq!(view.apply, "restart");
         assert_eq!(fx.drain(), Drain::Applied);
-        assert!(!crate::handler::admits(fx.drain()));
         assert!(matches!(
             crate::handler::after_drain(ServeOutcome::GracefulShutdown, fx.drain()),
             ServeOutcome::ApplyByRestart
         ));
+        assert_eq!(ceiling_name(&fx), "UNCLASSIFIED", "nothing installed live");
+        assert_eq!(fx.stored().unwrap().ceiling, "SECRET");
+        let outcome = fx
+            .seen()
+            .into_iter()
+            .rfind(|s| s.action == GRAPH_BASELINE_ACTION)
+            .unwrap();
+        assert!(
+            outcome.reason.ends_with("restarting to apply")
+                && !outcome.reason.contains("applied live"),
+            "{outcome:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_live_install_that_panics_applies_by_restart() {
+        let fx = Fx::with_core("install-panics", &unclassified()).await;
+        fx.write_yaml(SECRET, "");
+        let shown = fx.show().await;
+        fx.composition()
+            .panic_on_install
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let view = accepted(fx.accept(&shown.hash).await);
+        assert_eq!(view.apply, "restart");
+        assert_eq!(fx.drain(), Drain::Applied);
+        assert!(matches!(
+            crate::handler::after_drain(ServeOutcome::GracefulShutdown, fx.drain()),
+            ServeOutcome::ApplyByRestart
+        ));
+        assert_eq!(ceiling_name(&fx), "UNCLASSIFIED");
         let outcome = fx
             .seen()
             .into_iter()
@@ -11626,16 +11758,24 @@ mod baseline_accept_tests {
             .unwrap();
         assert!(
             outcome.reason.contains("not installed live: ")
-                && outcome.reason.contains("live turn")
                 && outcome.reason.ends_with("restarting to apply"),
             "{outcome:?}"
         );
-        assert!(!view.changes.iter().any(|c| c.contains("live turn")));
-        assert_eq!(
-            fx.stored().unwrap().ceiling,
-            "UNCLASSIFIED",
-            "the store holds the accepted baseline the restart applies"
-        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_live_accept_whose_outcome_is_not_recorded_applies_by_restart() {
+        let fx = Fx::with_core("outcome-fails", &unclassified()).await;
+        fx.write_yaml(SECRET, "");
+        let shown = fx.show().await;
+        fx.reloader.sink.stall_when(is_accept_outcome);
+        let view = accepted(fx.accept(&shown.hash).await);
+        assert_eq!(view.apply, "restart");
+        assert_eq!(fx.drain(), Drain::Applied);
+        assert!(matches!(
+            crate::handler::after_drain(ServeOutcome::GracefulShutdown, fx.drain()),
+            ServeOutcome::ApplyByRestart
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
