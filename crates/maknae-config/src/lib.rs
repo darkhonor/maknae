@@ -69,7 +69,10 @@ pub use bindings::{
     check_roles, checked_roles, load_bindings, parse_bindings, BindingEntry, Bindings,
     BindingsError, RoleRuleError, BINDINGS_FILE, BINDING_ROLES,
 };
-pub use bindings_sync::{conflicts_canonical, conflicts_from_canonical, Section};
+pub use bindings_sync::{
+    apply_edit, conflicts_canonical, conflicts_from_canonical, equivalent, merge, unsynced,
+    BoundRole, EditError, LiveEdit, MergeEvent, Merged, ResolvedBy, Section, Stored, SyncKind,
+};
 // Re-exported so downstream seam constructors (maknae-authz-basic's
 // HermeticAuthorizer, #77) can NAME the requirement type without a maknae-io
 // dependency of their own; unix-gated like the fn whose signature carries it.
