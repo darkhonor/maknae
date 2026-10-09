@@ -1129,7 +1129,7 @@ A subject that holds no role is decided like any uid the file does not list, whi
 
 ### The mirror
 
-After every change to the bindings it enforces (a start, a reload or an accept that changed them, an adoption, a live edit), `maknaed` writes the mirror: `/var/lib/maknae/bindings.mirror.yaml` on Linux, `/usr/local/var/db/maknae/state/bindings.mirror.yaml` on macOS, `_maknae`, mode `0600`. It holds usernames, roles and the contained list, never a reason. Do not edit it. The journal says `maknaed: sync: mirror revision <n> published (sha256:<12 hex>)`.
+After every change to the bindings it enforces (a start, a reload or an accept that changed them, an adoption, a live edit), `maknaed` writes the mirror: `/var/lib/maknae/bindings.mirror.yaml` on Linux, `/usr/local/var/db/maknae/state/bindings.mirror.yaml` on macOS, `_maknae`, mode `0600`. It holds usernames, roles and the contained list, never a reason. Do not edit it. The journal says `maknaed: sync: mirror revision <n> published (sha256:<12 hex>)`. The daemon removes the old mirror before it stores a change and writes the new one after, so a crash between the two leaves no mirror, never an older one, until the next start publishes it. If the old mirror cannot be removed, the change is refused: `the previous bindings mirror could not be removed before the commit: <cause>; nothing was applied`.
 
 ```yaml
 # maknae bindings mirror v1: install it with sudo maknae policy sync; do not edit
@@ -1149,7 +1149,7 @@ bindings:
 
 `revision` is the store revision it was rendered at, `config` the configuration directory the daemon reads, `base` the hash of the `bindings:` section of the last `bindings.yaml` the daemon loaded (`absent` or `missing` when there was none), and each `conflict` line one entry the merge failed closed.
 
-**A mirror that cannot be published.** If the render or the write fails, the change it describes stands; the daemon removes the old mirror, records `graph.sync` `mirror render failed: <cause>; the transition at revision <n> stands; the stale mirror was removed`, and `maknae status` shows `mirror stale` until a later reload publishes it. Do not sync while `maknae status` shows `mirror stale`. If removing the old mirror also failed, the record ends `the stale mirror could not be removed: <cause>`, and that mirror, from an earlier revision, is still in the state directory, where a sync would install it. Fix the cause the record names, reload, and sync once `mirror stale` is gone.
+**A mirror that cannot be published.** If the render or the write fails, the change it describes stands; the daemon removes the old mirror, records `graph.sync` `mirror render failed: <cause>; the transition at revision <n> stands; the stale mirror was removed`, and `maknae status` shows `mirror stale` until a later reload publishes it. Do not sync while `maknae status` shows `mirror stale`. If removing the mirror also failed, the record ends `the stale mirror could not be removed: <cause>`. Fix the cause the record names, reload, and sync once `mirror stale` is gone.
 
 ### How bindings.yaml and live state merge
 
@@ -1198,7 +1198,7 @@ sudo launchctl kill SIGHUP system/io.maknae.maknaed    # macOS
 |---|---|
 | ``maknae policy sync must run as root: run `sudo maknae policy sync` `` | Run it with `sudo`. |
 | `bindings.yaml changed since maknaed last loaded it; reload maknaed so it merges, then sync again` | Reload `maknaed`, check `maknae status` for conflicts, then sync again. |
-| `maknaed has published no mirror (its last render failed: see maknae status); nothing was installed` | Read the `mirror render failed` record, fix its cause and reload. |
+| `maknaed has published no mirror (its last render failed, or it stopped before publishing one: see maknae status); nothing was installed` | Read the `mirror render failed` record, fix its cause and reload. With no such record, restart `maknaed`: a start publishes the mirror. |
 | `the mirror lists <n> conflicts; run sudo maknae policy sync on a terminal to review them`, `not installed: the conflicts were not accepted` | Run it on a terminal, review the conflicts and answer `y`, or edit those entries in `bindings.yaml` and reload. |
 | `maknaed reads its configuration from <dir>, not /etc/maknae; policy sync installs only /etc/maknae/bindings.yaml` | The daemon runs with another configuration directory. Copy the entries into its `bindings.yaml` by hand. |
 | `the mirror is not valid: <cause>`, `cannot read the mirror <path>: <cause>`, `cannot use the state directory <dir>: <cause>` | Do not edit the mirror. Check the state directory's owner and mode, then reload so the daemon writes the mirror again. |

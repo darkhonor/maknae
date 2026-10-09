@@ -1631,6 +1631,10 @@ fn each_store_error_has_its_remedy() {
             StoreError::BindingsRefused(BINDINGS_MISSING),
             Remedy::Investigate,
         ),
+        (
+            StoreError::MirrorNotRemoved("EISDIR".into()),
+            Remedy::CheckStateDir,
+        ),
     ];
     for (e, want) in cases {
         assert_eq!(remedy(&e), want, "{e:?}");
@@ -4345,6 +4349,80 @@ fn the_mirror_is_published_daemon_owned_0600() {
         .contains(".tmp.")));
     d.publish_mirror(b"n").unwrap();
     assert_eq!(fs::read(fx.file(MIRROR_FILE)).unwrap(), b"n");
+    d.skip_next_mirror_publish();
+    d.publish_mirror(b"skipped").unwrap();
+    assert_eq!(fs::read(fx.file(MIRROR_FILE)).unwrap(), b"n");
+    d.publish_mirror(b"after").unwrap();
+    assert_eq!(fs::read(fx.file(MIRROR_FILE)).unwrap(), b"after");
+}
+
+#[tokio::test]
+async fn every_persist_removes_the_mirror_first_and_a_load_that_commits_nothing_keeps_it() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let stale = || fx.write(MIRROR_FILE, b"stale", 0o600);
+    stale();
+    let first = run(&fx.dir(), &k, None).await.0.unwrap();
+    assert!(!fx.exists(MIRROR_FILE), "seed");
+    stale();
+    let loaded = run(&fx.dir(), &k, checkpoint_of(&first)).await.0.unwrap();
+    assert!(!loaded.identity_transition);
+    assert_eq!(fs::read(fx.file(MIRROR_FILE)).unwrap(), b"stale", "load");
+    let dir = fx.dir();
+    let e = edited();
+    let moved = run_with(&dir, &k, checkpoint_of(&loaded), &e)
+        .await
+        .0
+        .unwrap();
+    assert!(moved.identity_transition);
+    assert!(!fx.exists(MIRROR_FILE), "boot transition");
+    stale();
+    commit(
+        &dir,
+        &k,
+        &next_graph(3, &e),
+        &[],
+        &[],
+        &mut Recorder::default(),
+        INITIATOR_ROOT_FILE,
+    )
+    .await
+    .unwrap();
+    assert!(!fx.exists(MIRROR_FILE), "commit");
+}
+
+#[tokio::test]
+async fn a_mirror_that_cannot_be_removed_refuses_the_commit_and_persists_nothing() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let dir = fx.dir();
+    run(&dir, &k, None).await.0.unwrap();
+    let before = fx.store();
+    fs::create_dir(fx.file(MIRROR_FILE)).unwrap();
+    fs::write(fx.file(MIRROR_FILE).join("x"), b"").unwrap();
+    let mut audit = Recorder::default();
+    let e = commit(
+        &dir,
+        &k,
+        &next_graph(2, &edited()),
+        &[],
+        &[],
+        &mut audit,
+        INITIATOR_ROOT_FILE,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(e, StoreError::MirrorNotRemoved(_)), "{e:?}");
+    let text = e.to_string();
+    assert!(
+        text.starts_with("the previous bindings mirror could not be removed before the commit: ")
+            && text.ends_with("; nothing was applied"),
+        "{text}"
+    );
+    assert_eq!(fx.store(), before);
+    assert_eq!(dir.store_revision(), 1);
+    assert!(fx.file(MIRROR_FILE).join("x").exists());
+    assert_eq!(audit.events, [Event::Transition(2, "root-file".into())]);
 }
 
 #[test]

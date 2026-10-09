@@ -70,6 +70,7 @@ pub enum StoreError {
     SyncBaseChanged,
     SyncAbsent,
     SyncUnrecorded,
+    MirrorNotRemoved(String),
 }
 
 impl fmt::Display for StoreError {
@@ -121,6 +122,10 @@ impl fmt::Display for StoreError {
             Self::SyncUnrecorded => {
                 f.write_str("a live identity edit was not recorded; nothing was applied")
             }
+            Self::MirrorNotRemoved(cause) => write!(
+                f,
+                "the previous bindings mirror could not be removed before the commit: {cause}; nothing was applied"
+            ),
         }
     }
 }
@@ -157,7 +162,9 @@ pub fn remedy(e: &StoreError) -> Remedy {
         | StoreError::Vocabulary(_) => Remedy::Reseed,
         StoreError::StoreFileRefused(_) => Remedy::CheckStoreFile,
         StoreError::RejectedNameInUse { .. } => Remedy::ClearRejectedName,
-        StoreError::StateDir(_) | StoreError::Io(_) => Remedy::CheckStateDir,
+        StoreError::StateDir(_) | StoreError::Io(_) | StoreError::MirrorNotRemoved(_) => {
+            Remedy::CheckStateDir
+        }
         StoreError::InUse => Remedy::StopOtherInstance,
         StoreError::Audit(_) => Remedy::CheckAudit,
         StoreError::Identity(_)
@@ -189,6 +196,8 @@ pub struct StateDir {
     fail_next_sync: AtomicBool,
     #[cfg(feature = "hermetic-test-seam")]
     fail_next_mirror: AtomicBool,
+    #[cfg(feature = "hermetic-test-seam")]
+    skip_next_mirror: AtomicBool,
 }
 
 struct Persisted {
@@ -226,7 +235,18 @@ impl StateDir {
         self.fail_next_mirror.store(true, Ordering::SeqCst);
     }
 
+    /// Test seam: the next mirror publish writes nothing and succeeds, as a crash after the commit.
+    #[cfg(feature = "hermetic-test-seam")]
+    #[doc(hidden)]
+    pub fn skip_next_mirror_publish(&self) {
+        self.skip_next_mirror.store(true, Ordering::SeqCst);
+    }
+
     pub fn publish_mirror(&self, bytes: &[u8]) -> Result<(), IoError> {
+        #[cfg(feature = "hermetic-test-seam")]
+        if self.skip_next_mirror.swap(false, Ordering::SeqCst) {
+            return Ok(());
+        }
         #[cfg(feature = "hermetic-test-seam")]
         if self.fail_next_mirror.swap(false, Ordering::SeqCst) {
             return Err(IoError::Io {
@@ -268,6 +288,8 @@ impl StateDir {
             fail_next_sync: AtomicBool::new(false),
             #[cfg(feature = "hermetic-test-seam")]
             fail_next_mirror: AtomicBool::new(false),
+            #[cfg(feature = "hermetic-test-seam")]
+            skip_next_mirror: AtomicBool::new(false),
         })
     }
 
@@ -290,6 +312,7 @@ impl StateDir {
         *self.floor() = revision;
     }
 
+    /// The mirror goes first, so a crash before the next publish leaves none to install.
     /// A publish that renamed but did not sync is committed: the store holds the new
     /// revision, so the floor advances and the failure is returned with the digest.
     fn persist(&self, key: &WrappingKey, graph: &Graph) -> Result<Persisted, StoreError> {
@@ -301,6 +324,8 @@ impl StateDir {
                 attempted,
             });
         }
+        self.remove_mirror()
+            .map_err(|e| StoreError::MirrorNotRemoved(e.to_string()))?;
         let file = seal(&format::encode(graph), key)?;
         let durability_error = match self.publish(STORE_FILE, &file) {
             Ok(()) => None,

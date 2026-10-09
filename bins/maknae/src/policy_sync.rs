@@ -13,7 +13,7 @@ use std::process::ExitCode;
 
 pub(crate) const CONFIG_DIR: &str = "/etc/maknae";
 
-const NO_MIRROR: &str = "maknaed has published no mirror (its last render failed: see maknae status); nothing was installed";
+const NO_MIRROR: &str = "maknaed has published no mirror (its last render failed, or it stopped before publishing one: see maknae status); nothing was installed";
 
 #[cfg(target_os = "macos")]
 const RELOAD: &str =
@@ -850,7 +850,7 @@ mod tests {
     fn no_mirror_refuses_even_when_the_file_is_lost() {
         let fx = Fx::new();
         let e = fx.sync(false, "", false).unwrap_err();
-        assert_eq!(e, "maknaed has published no mirror (its last render failed: see maknae status); nothing was installed");
+        assert_eq!(e, "maknaed has published no mirror (its last render failed, or it stopped before publishing one: see maknae status); nothing was installed");
         assert!(!fx.config_dir().join("bindings.yaml").exists());
     }
 

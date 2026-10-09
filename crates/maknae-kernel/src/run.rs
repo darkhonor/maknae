@@ -8382,6 +8382,31 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
     }
 
     #[test]
+    fn a_crash_between_a_commit_and_its_mirror_leaves_none_until_the_next_boot() {
+        let fx = graph_fixture("sync_crash_window");
+        let m = boot_merged(
+            &fx,
+            policy(&fx.dir.0, Some(super::reload_fixture::ROOT_ADMIN)),
+        )
+        .unwrap();
+        assert_eq!(mirror_of(&fx).section.canonical(), ROOT_SECTION);
+        let next = contain_4242_live(&fx, &m);
+        assert!(
+            !fx.state.join(maknae_config::MIRROR_FILE).exists(),
+            "the committed transition left no mirror for policy sync to install"
+        );
+        drop(m);
+        let m = boot_merged(
+            &fx,
+            policy(&fx.dir.0, Some(super::reload_fixture::ROOT_ADMIN)),
+        )
+        .unwrap();
+        assert_eq!(m.booted.graph.revision(), next.revision());
+        assert_eq!(mirror_of(&fx).header.revision, next.revision());
+        assert_eq!(mirror_of(&fx).section.canonical(), ROOT_AND_4242_SECTION);
+    }
+
+    #[test]
     fn a_synced_write_is_adopted_at_restart() {
         let fx = graph_fixture("sync_adopted");
         let m = boot_merged(
@@ -8542,9 +8567,18 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
     #[test]
     fn a_mirror_that_cannot_be_published_is_recorded_and_the_boot_stands() {
         let fx = graph_fixture("sync_render_failed");
+        drop(
+            boot_merged(
+                &fx,
+                policy(&fx.dir.0, Some(super::reload_fixture::ROOT_ADMIN)),
+            )
+            .unwrap(),
+        );
         let mirror = fx.state.join(maknae_config::MIRROR_FILE);
+        std::fs::remove_file(&mirror).unwrap();
         std::fs::create_dir(&mirror).unwrap();
         std::fs::write(mirror.join("x"), b"").unwrap();
+        let from = trail(&fx).len();
         let m = boot_merged(
             &fx,
             policy(&fx.dir.0, Some(super::reload_fixture::ROOT_ADMIN)),
@@ -8552,6 +8586,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         .unwrap();
         let failed: Vec<(String, String, String, bool)> = trail(&fx)
             .into_iter()
+            .skip(from)
             .filter(|(r, _)| r.action == GRAPH_SYNC_ACTION)
             .map(|(r, _)| {
                 (
@@ -8582,6 +8617,27 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             m.booted.status.sync.lines(),
             ["unsynced=0", "conflict=0", "mirror=stale"]
         );
+    }
+
+    #[test]
+    fn a_boot_commit_over_a_mirror_it_cannot_remove_is_refused() {
+        let fx = graph_fixture("sync_mirror_unremovable");
+        let mirror = fx.state.join(maknae_config::MIRROR_FILE);
+        std::fs::create_dir(&mirror).unwrap();
+        std::fs::write(mirror.join("x"), b"").unwrap();
+        let e = boot_merged(
+            &fx,
+            policy(&fx.dir.0, Some(super::reload_fixture::ROOT_ADMIN)),
+        )
+        .err()
+        .unwrap();
+        assert!(
+            e.to_string()
+                .contains("the previous bindings mirror could not be removed before the commit: "),
+            "{e}"
+        );
+        assert!(!fx.state.join(STORE_FILE).exists());
+        assert!(mirror.join("x").exists());
     }
 
     #[test]
@@ -15367,6 +15423,45 @@ mod reload_tests {
         .await
         .unwrap();
         assert_eq!(fx.sync_lines(), ["unsynced=0", "conflict=0"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_identity_commit_removes_the_old_mirror_before_it_persists() {
+        let fx = Fx::with_baseline("mirror-crash-window").await;
+        fx.write_bindings(ROOT_ADMIN_OTHER);
+        assert!(bounded(fx.reloader.run()).await.unwrap().persisted);
+        let mirror = fx.state_dir().join(MIRROR_FILE);
+        let crash_after_the_commit = || {
+            std::fs::write(&mirror, "old").unwrap();
+            fx.reloader.dir.skip_next_mirror_publish();
+        };
+
+        crash_after_the_commit();
+        bounded(fx.reloader.live_edit(
+            live_contain(BindingEntry::Uid(4242)),
+            LiveInitiator::Operator,
+        ))
+        .await
+        .unwrap();
+        assert!(!mirror.exists(), "live edit");
+
+        crash_after_the_commit();
+        fx.write_bindings(ROOT_ADMIN);
+        assert!(bounded(fx.reloader.run()).await.unwrap().persisted);
+        assert!(!mirror.exists(), "reload");
+
+        let uid = nix::unistd::geteuid().as_raw().wrapping_add(1);
+        fx.write_yaml_principal(uid, "");
+        let shown = fx.show().await;
+        assert_eq!(shown.apply, "live");
+        crash_after_the_commit();
+        match fx.accept(&shown.hash).await {
+            AcceptAnswer::View {
+                corrective: None, ..
+            } => {}
+            other => panic!("expected an accepted view, got {other:?}"),
+        }
+        assert!(!mirror.exists(), "accept");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
