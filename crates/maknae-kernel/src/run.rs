@@ -8549,9 +8549,15 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             maknae_vault::NssAccounts::HOST.account(name)
         }
         fn daemon_gid(&self) -> Result<Option<u32>, String> {
+            if self.any_reader {
+                return Ok(Some(4200));
+            }
             maknae_vault::NssAccounts::HOST.daemon_gid()
         }
         fn service_uids(&self) -> Result<Vec<u32>, String> {
+            if self.any_reader {
+                return Ok(vec![4201, 4202]);
+            }
             maknae_vault::NssAccounts::HOST.service_uids()
         }
     }
