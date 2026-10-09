@@ -354,7 +354,7 @@ pub fn apply_edit(
     live: &Section,
     edit: &LiveEdit,
 ) -> Result<Option<Section>, EditError> {
-    if !matches!(live, Section::Present(_)) {
+    if !matches!(base, Section::Present(_)) || !matches!(live, Section::Present(_)) {
         return Err(EditError::NoExplicitBindings);
     }
     let named;
@@ -1323,10 +1323,13 @@ mod tests {
             s("schema_version: 1\nbindings:\n  user: [\"eve\"]\n  adversary:\n    - uid: 7\n")
         );
         for absent in [Section::Absent, Section::Missing] {
-            assert_eq!(
-                apply_edit(&absent, &absent, &LiveEdit::Contain(eve.clone())),
-                Err(EditError::NoExplicitBindings)
-            );
+            for (b, l) in [(&absent, &absent), (&absent, &live)] {
+                assert_eq!(
+                    apply_edit(b, l, &LiveEdit::Contain(eve.clone())),
+                    Err(EditError::NoExplicitBindings),
+                    "base {b:?} live {l:?}"
+                );
+            }
         }
         assert_eq!(
             EditError::NoExplicitBindings.to_string(),
