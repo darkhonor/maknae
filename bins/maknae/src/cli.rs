@@ -208,8 +208,30 @@ enum Verb {
     AdminSubjectList,
     AdminBaselineShow,
     AdminBaselineAccept {
-        hash: String,
+        hash: AcceptHash,
     },
+}
+
+/// The accept operand; Debug shows only the prefix the trail carries.
+#[derive(Clone, PartialEq, Eq)]
+struct AcceptHash(String);
+
+impl AcceptHash {
+    fn short(&self) -> &str {
+        self.0.get(..12).unwrap_or("")
+    }
+}
+
+impl From<String> for AcceptHash {
+    fn from(hash: String) -> Self {
+        Self(hash)
+    }
+}
+
+impl std::fmt::Debug for AcceptHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "sha256:{}", self.short())
+    }
 }
 
 impl From<Verb> for maknae_proto::Verb {
@@ -238,7 +260,9 @@ impl From<Verb> for maknae_proto::Verb {
             Verb::AdminConfigShow => maknae_proto::Verb::AdminConfigShow,
             Verb::AdminSubjectList => maknae_proto::Verb::AdminSubjectList,
             Verb::AdminBaselineShow => maknae_proto::Verb::AdminBaselineShow,
-            Verb::AdminBaselineAccept { hash } => maknae_proto::Verb::AdminBaselineAccept { hash },
+            Verb::AdminBaselineAccept { hash } => {
+                maknae_proto::Verb::AdminBaselineAccept { hash: hash.0 }
+            }
         }
     }
 }
@@ -738,11 +762,12 @@ fn baseline_lines(v: &maknae_proto::BaselineView) -> Vec<String> {
     lines
 }
 
-fn accepted_line(hash: &str, v: &maknae_proto::BaselineView) -> Result<String, String> {
+fn accepted_line(hash: &AcceptHash, v: &maknae_proto::BaselineView) -> Result<String, String> {
+    let short = terminal_safe(hash.short());
     match (v.state.as_str(), v.apply.as_str()) {
-        ("accepted", "live") => Ok(format!("accepted {hash}; applied live")),
+        ("accepted", "live") => Ok(format!("accepted sha256:{short}; applied live")),
         ("accepted", "restart") => Ok(format!(
-            "accepted {hash}; maknaed is restarting to apply it"
+            "accepted sha256:{short}; maknaed is restarting to apply it"
         )),
         ("accepted", apply) => Err(format!(
             "protocol error: an accepted baseline with apply {:?}",
@@ -918,7 +943,7 @@ pub async fn run_cli() -> ExitCode {
         Command::SubjectList => wire_exit_code(execute(Verb::AdminSubjectList).await),
         Command::BaselineShow => wire_exit_code(execute(Verb::AdminBaselineShow).await),
         Command::BaselineAccept { hash } => wire_exit_code(match accept_hash(hash) {
-            Ok(hash) => execute(Verb::AdminBaselineAccept { hash }).await,
+            Ok(hash) => execute(Verb::AdminBaselineAccept { hash: hash.into() }).await,
             Err(e) => Err(e),
         }),
         Command::AuditReaders { stopped } => {
@@ -2112,19 +2137,34 @@ mod tests {
     }
 
     #[test]
+    fn the_accept_verbs_debug_carries_only_the_hash_prefix() {
+        let h = "0123456789ab".to_string() + &"cd".repeat(26);
+        let shown = format!(
+            "{:?}",
+            Verb::AdminBaselineAccept {
+                hash: h.clone().into()
+            }
+        );
+        assert!(!shown.contains(&h[..13]), "{shown}");
+        assert!(shown.contains("sha256:0123456789ab"), "{shown}");
+    }
+
+    #[test]
     fn baseline_accept_reports_how_the_accepted_set_applies() {
         let h = "ef".repeat(32);
-        let accept = || Verb::AdminBaselineAccept { hash: h.clone() };
+        let accept = || Verb::AdminBaselineAccept {
+            hash: h.clone().into(),
+        };
         assert_eq!(
             accepted_line(
-                &h,
+                &h.clone().into(),
                 &bview("accepted", "live", "", &[maknae_config::SUPPRESSED_CHANGED])
             ),
-            Ok(format!("accepted {h}; applied live"))
+            Ok(format!("accepted sha256:{}; applied live", &h[..12]))
         );
         assert_eq!(
             accepted_line(
-                &h,
+                &h.clone().into(),
                 &bview(
                     "accepted",
                     "restart",
@@ -2132,7 +2172,10 @@ mod tests {
                     &["vault.addr: https://v:8200 -> https://w:8200"]
                 )
             ),
-            Ok(format!("accepted {h}; maknaed is restarting to apply it"))
+            Ok(format!(
+                "accepted sha256:{}; maknaed is restarting to apply it",
+                &h[..12]
+            ))
         );
         for state in ["stale", "none", "invalid", "pending"] {
             assert_eq!(
@@ -2142,7 +2185,7 @@ mod tests {
                 ))
             );
         }
-        assert!(accepted_line(&h, &bview("accepted", "", "", &[])).is_err());
+        assert!(accepted_line(&h.clone().into(), &bview("accepted", "", "", &[])).is_err());
         assert!(print_payload_for_verb(
             accept(),
             Payload::Baseline(bview("accepted", "live", "", &[]))
@@ -2186,7 +2229,9 @@ mod tests {
             maknae_proto::Verb::AdminBaselineShow
         );
         assert_eq!(
-            maknae_proto::Verb::from(Verb::AdminBaselineAccept { hash: h.clone() }),
+            maknae_proto::Verb::from(Verb::AdminBaselineAccept {
+                hash: h.clone().into()
+            }),
             maknae_proto::Verb::AdminBaselineAccept { hash: h }
         );
         let cli = Cli::try_parse_from(["maknae", "audit-readers"]).expect("parses");
@@ -2241,7 +2286,7 @@ mod tests {
         assert!(print_payload_for_verb(Verb::AdminBaselineShow, Payload::Pong).is_err());
         assert!(print_payload_for_verb(
             Verb::AdminBaselineAccept {
-                hash: "ab".repeat(32)
+                hash: "ab".repeat(32).into()
             },
             Payload::Pong
         )
