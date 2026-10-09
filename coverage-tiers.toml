@@ -210,6 +210,8 @@ files = [
   "crates/maknae-config/src/authz.rs",
   # #496: the identity file's grammar and hardened read; a mis-parsed entry binds or contains the wrong subject.
   "crates/maknae-config/src/bindings.rs",
+  # #491: the bindings section the daemon enforces and the merge that decides it; a wrong arm releases a contained subject or overwrites root.
+  "crates/maknae-config/src/bindings_sync.rs",
   # #489: the canonical JSON each authz.yaml section's digest is taken over; a wrong
   # byte makes an unchanged section look edited, or an edited one look unchanged.
   "crates/maknae-config/src/value.rs",

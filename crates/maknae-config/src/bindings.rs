@@ -1,11 +1,13 @@
 use crate::value::{canonical_json, Value};
 use crate::ConfigError;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 pub const BINDINGS_FILE: &str = "bindings.yaml";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+pub const BINDING_ROLES: [&str; 4] = ["admin", "user", "guest", "adversary"];
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum BindingEntry {
     Name(String),
     Uid(u32),
@@ -41,6 +43,19 @@ impl Bindings {
             roles: None,
             section: None,
             missing: true,
+        }
+    }
+
+    pub fn from_section(s: &crate::bindings_sync::Section) -> Self {
+        use crate::bindings_sync::Section;
+        match s {
+            Section::Missing => Self::missing(),
+            Section::Absent => Self::absent(),
+            Section::Present(m) => Self {
+                roles: Some(m.clone()),
+                section: Some(s.canonical()),
+                missing: false,
+            },
         }
     }
 
@@ -100,7 +115,7 @@ fn yaml(m: &str) -> BindingsError {
     BindingsError::Yaml(m.into())
 }
 
-fn entry(v: &Value) -> Result<BindingEntry, BindingsError> {
+pub(crate) fn entry(v: &Value) -> Result<BindingEntry, BindingsError> {
     match v {
         Value::Str(s) if s.is_empty() => Err(yaml("an empty name binds nobody; remove it")),
         Value::Str(s) if s.contains(':') => Err(yaml(
@@ -124,22 +139,9 @@ fn entry(v: &Value) -> Result<BindingEntry, BindingsError> {
     }
 }
 
-pub fn parse_bindings(body: &str) -> Result<Bindings, BindingsError> {
-    let root = crate::load_str(body).map_err(|e| BindingsError::Yaml(e.to_string()))?;
-    let Value::Map(map) = root else {
-        return Err(yaml("the bindings.yaml root must be a mapping"));
-    };
-    crate::reject_unknown_keys("bindings.yaml", &map, &["schema_version", "bindings"])
-        .map_err(BindingsError::Config)?;
-    let get = |k: &str| map.iter().find(|(key, _)| key == k).map(|(_, v)| v);
-    match get("schema_version") {
-        Some(Value::Int(1)) => {}
-        Some(Value::Int(n)) => return Err(BindingsError::UnknownSchemaVersion(*n)),
-        _ => return Err(BindingsError::UnknownSchemaVersion(0)),
-    }
-    let Some(section) = get("bindings") else {
-        return Ok(Bindings::absent());
-    };
+pub(crate) fn section_roles(
+    section: &Value,
+) -> Result<BTreeMap<String, Vec<BindingEntry>>, BindingsError> {
     let Value::Map(by_role) = section else {
         return Err(yaml(
             "the bindings section must be a map of role to member list",
@@ -157,6 +159,77 @@ pub fn parse_bindings(body: &str) -> Result<Bindings, BindingsError> {
             items.iter().map(entry).collect::<Result<_, _>>()?,
         );
     }
+    Ok(roles)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RoleRuleError {
+    UnknownRole(String),
+    Duplicate(String),
+    UidOutsideAdversary(String),
+}
+
+impl std::fmt::Display for RoleRuleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownRole(k) => write!(f, "bindings names unknown role '{k}'"),
+            Self::Duplicate(n) => write!(f, "identity '{n}' listed twice in one role"),
+            Self::UidOutsideAdversary(k) => write!(
+                f,
+                "role '{k}' lists a uid entry; `uid:` entries are accepted under adversary only"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RoleRuleError {}
+
+pub fn checked_roles(b: &Bindings) -> Result<Vec<(usize, &[BindingEntry])>, RoleRuleError> {
+    let Some(map) = &b.roles else {
+        return Ok(Vec::new());
+    };
+    let adversary = BINDING_ROLES.len() - 1;
+    let mut out = Vec::with_capacity(map.len());
+    for (key, entries) in map {
+        let idx = BINDING_ROLES
+            .iter()
+            .position(|r| r == key)
+            .ok_or_else(|| RoleRuleError::UnknownRole(key.clone()))?;
+        let mut seen = BTreeSet::new();
+        for e in entries {
+            if !seen.insert(e.render()) {
+                return Err(RoleRuleError::Duplicate(e.render()));
+            }
+            if matches!(e, BindingEntry::Uid(_)) && idx != adversary {
+                return Err(RoleRuleError::UidOutsideAdversary(key.clone()));
+            }
+        }
+        out.push((idx, entries.as_slice()));
+    }
+    Ok(out)
+}
+
+pub fn check_roles(b: &Bindings) -> Result<(), RoleRuleError> {
+    checked_roles(b).map(|_| ())
+}
+
+pub fn parse_bindings(body: &str) -> Result<Bindings, BindingsError> {
+    let root = crate::load_str(body).map_err(|e| BindingsError::Yaml(e.to_string()))?;
+    let Value::Map(map) = root else {
+        return Err(yaml("the bindings.yaml root must be a mapping"));
+    };
+    crate::reject_unknown_keys("bindings.yaml", &map, &["schema_version", "bindings"])
+        .map_err(BindingsError::Config)?;
+    let get = |k: &str| map.iter().find(|(key, _)| key == k).map(|(_, v)| v);
+    match get("schema_version") {
+        Some(Value::Int(1)) => {}
+        Some(Value::Int(n)) => return Err(BindingsError::UnknownSchemaVersion(*n)),
+        _ => return Err(BindingsError::UnknownSchemaVersion(0)),
+    }
+    let Some(section) = get("bindings") else {
+        return Ok(Bindings::absent());
+    };
+    let roles = section_roles(section)?;
     Ok(Bindings {
         roles: Some(roles),
         section: Some(canonical_json(section)),
@@ -289,6 +362,32 @@ mod tests {
         )
         .unwrap();
         assert_ne!(a.section_canonical(), c.section_canonical());
+    }
+
+    #[test]
+    fn the_role_rules_refuse_the_whole_file_naming_the_token() {
+        let rules = |body: &str| check_roles(&parse_bindings(body).unwrap());
+        assert_eq!(
+            rules("schema_version: 1\nbindings:\n  root: [\"a\"]\n"),
+            Err(RoleRuleError::UnknownRole("root".into()))
+        );
+        assert_eq!(
+            rules("schema_version: 1\nbindings:\n  user: [\"a\", \"a\"]\n"),
+            Err(RoleRuleError::Duplicate("a".into()))
+        );
+        assert_eq!(
+            rules("schema_version: 1\nbindings:\n  user:\n    - uid: 7\n"),
+            Err(RoleRuleError::UidOutsideAdversary("user".into()))
+        );
+        assert_eq!(
+            rules("schema_version: 1\nbindings:\n  user: [\"a\"]\n  adversary: [\"a\"]\n"),
+            Ok(())
+        );
+        assert_eq!(rules("schema_version: 1\n"), Ok(()));
+        assert_eq!(
+            RoleRuleError::Duplicate("a".into()).to_string(),
+            "identity 'a' listed twice in one role"
+        );
     }
 
     #[test]

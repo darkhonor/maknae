@@ -17,33 +17,15 @@ use crate::role::Role;
 use maknae_graph::graph::Graph;
 use maknae_graph::identity::{bindings_section_key, claim_names, subject_key};
 use maknae_graph::kernel::{ADVERSARY, ATTR_NAME, ATTR_UID, BINDS, CONTAINED, SECTION, SUBJECT};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// username → uid, built once per policy load (start or reload) via getpwnam.
 pub(crate) type UidMap = BTreeMap<String, u32>;
 
-/// Why `bindings.yaml` is refused as a whole. Every variant names the offending
-/// token so the refusal is actionable.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum BindingError {
-    UnknownRole(String),
-    Duplicate(String),
-    UidOutsideAdversary(String),
-}
+pub(crate) use maknae_config::RoleRuleError as BindingError;
 
-impl std::fmt::Display for BindingError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            BindingError::UnknownRole(k) => write!(f, "bindings names unknown role '{k}'"),
-            BindingError::Duplicate(n) => write!(f, "identity '{n}' listed twice in one role"),
-            BindingError::UidOutsideAdversary(k) => write!(
-                f,
-                "role '{k}' lists a uid entry; `uid:` entries are accepted under adversary only"
-            ),
-        }
-    }
-}
+const ROLE_ORDER: [Role; 4] = [Role::Admin, Role::User, Role::Guest, Role::Adversary];
 
 /// A subject `bindings.yaml` names that could not be bound as written. Each is
 /// decided for that subject alone; the rest of the policy loads.
@@ -237,22 +219,12 @@ pub(crate) fn resolve_subjects(
         problems: Vec::new(),
         adversary_names: BTreeMap::new(),
     };
-    let Some(map) = &bindings.roles else {
-        return Ok(out);
-    };
     let mut by_uid: BTreeMap<u32, Vec<(Role, String)>> = BTreeMap::new();
-    for (key, entries) in map {
-        let role = Role::from_key(key).ok_or_else(|| BindingError::UnknownRole(key.clone()))?;
-        let mut seen = BTreeSet::new();
+    for (idx, entries) in maknae_config::checked_roles(bindings)? {
+        let role = ROLE_ORDER[idx];
         for e in entries {
             let name = e.render();
-            if !seen.insert(name.clone()) {
-                return Err(BindingError::Duplicate(name));
-            }
             let uid = match e {
-                BindingEntry::Uid(_) if role != Role::Adversary => {
-                    return Err(BindingError::UidOutsideAdversary(key.clone()))
-                }
                 BindingEntry::Uid(u) => Some(*u),
                 BindingEntry::Name(n) => lookup.get(n).copied(),
             };
@@ -690,6 +662,16 @@ mod tests {
             "a name and a uid for one adversary is not an overlap: {:?}",
             a.problems
         );
+    }
+
+    #[test]
+    fn the_config_role_list_is_the_compiled_role_set() {
+        let keys: Vec<&str> = maknae_config::BINDING_ROLES.to_vec();
+        assert_eq!(keys, maknae_graph::kernel::ROLES);
+        for (i, k) in keys.into_iter().enumerate() {
+            assert_eq!(crate::role::Role::from_key(k).map(|r| r.key()), Some(k));
+            assert_eq!(crate::binding::ROLE_ORDER[i].key(), k);
+        }
     }
 
     #[test]
