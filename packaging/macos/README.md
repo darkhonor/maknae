@@ -27,7 +27,7 @@ normative statement; this directory holds the packaging that follows from it.
 >
 > **Install is not enable, and on macOS that takes an explicit step.** `/Library/LaunchDaemons` is scanned at boot (`man launchd`), so `scripts/postinstall` runs `launchctl disable` on every job on a fresh install, and on the deputy or the sync-back job on an upgrade from a package that did not ship it (`scripts/postinstall:100-118`). The flow is: install → `sudo maknae enroll` (which writes `/etc/maknae/egress-bounds.yaml`) → start both jobs → each user runs `maknae login`.
 >
-> **The sync-back job is opt-in.** `io.maknae.policy-sync` watches `/usr/local/var/db/maknae/state/bindings.mirror.yaml`, runs `maknae policy sync` as root, and after an install sends `maknaed` `SIGHUP`. `scripts/postinstall` disables it on a fresh install and on an upgrade that adds it; `uninstall.sh` boots it out and removes it. Opt in with `sudo launchctl enable system/io.maknae.policy-sync && sudo launchctl bootstrap system /Library/LaunchDaemons/io.maknae.policy-sync.plist` (see [Sync back](../README.md#sync-back-opt-in)).
+> **The sync-back job is opt-in.** `io.maknae.policy-sync` watches `/usr/local/var/db/maknae/state/bindings.mirror.yaml`, runs `maknae policy sync` as root, and after an install sends `maknaed` `SIGHUP`; its output goes to `/Library/Logs/maknae-policy-sync.log`, which is root-owned. `scripts/postinstall` disables it on a fresh install and on an upgrade that adds it; `uninstall.sh` boots it out and removes it. Opt in with `sudo launchctl enable system/io.maknae.policy-sync && sudo launchctl bootstrap system /Library/LaunchDaemons/io.maknae.policy-sync.plist` (see [Sync back](../README.md#sync-back-opt-in)).
 
 ## Plane secrets: the System keychain
 

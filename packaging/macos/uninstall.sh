@@ -46,6 +46,7 @@ done
 rm -f /usr/local/bin/maknaed /usr/local/bin/maknae /usr/local/bin/maknae-egress
 rm -rf /usr/local/var/run/maknae /usr/local/var/log/maknae /usr/local/share/maknae
 rm -rf /usr/local/var/run/maknae-egress /usr/local/var/log/maknae-egress
+rm -f /Library/Logs/maknae-policy-sync.log
 rm -rf /usr/local/lib/maknae
 
 # Before the accounts go: the ACE names _maknae-egress and must still resolve.

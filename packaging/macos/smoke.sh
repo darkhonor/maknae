@@ -694,7 +694,7 @@ PROBE
     fi
     local gone
     for gone in /usr/local/bin/maknae-egress /Library/LaunchDaemons/io.maknae.maknae-egress.plist \
-                /Library/LaunchDaemons/io.maknae.policy-sync.plist \
+                /Library/LaunchDaemons/io.maknae.policy-sync.plist /Library/Logs/maknae-policy-sync.log \
                 /usr/local/var/run/maknae-egress /usr/local/var/log/maknae-egress \
                 /usr/local/var/run/maknae /usr/local/var/log/maknae \
                 "/Library/Application Support/Maknae/pki"; do

@@ -1171,6 +1171,27 @@ mod tests {
                 "disable maknae-policy-sync.service"
             ]
         );
+        let plist = read("macos/io.maknae.policy-sync.plist");
+        assert!(plist.contains(
+            "<key>StandardOutPath</key>\n  <string>/Library/Logs/maknae-policy-sync.log</string>"
+        ));
+        assert!(plist.contains(
+            "<key>StandardErrorPath</key>\n  <string>/Library/Logs/maknae-policy-sync.log</string>"
+        ));
+        assert!(
+            !plist.contains("/usr/local/var/log/"),
+            "a root job writes no log where _maknae owns the directory"
+        );
+        for f in [
+            "common/maknae-policy-sync.path",
+            "common/maknae-policy-sync.service",
+        ] {
+            let t = read(f);
+            assert!(
+                !t.contains("StandardOutput=") && !t.contains("StandardError="),
+                "{f}"
+            );
+        }
         assert!(read("deb/build-deb.sh").contains("usr/lib/systemd/system-preset/80-maknae.preset"));
         assert!(spec.contains("%{_presetdir}/80-maknae.preset"));
     }

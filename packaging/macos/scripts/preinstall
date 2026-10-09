@@ -235,8 +235,7 @@ for pair in "/usr/local/var/run/maknae-egress:$EGRESS_UID $MAKNAE_GID 750" \
 done
 
 for pair in "/usr/local/var/log/maknae/maknaed.err:$MAKNAE_UID" \
-            "/usr/local/var/log/maknae-egress/maknae-egress.err:$EGRESS_UID" \
-            "/usr/local/var/log/maknae/policy-sync.err:0"; do
+            "/usr/local/var/log/maknae-egress/maknae-egress.err:$EGRESS_UID"; do
     f="${pair%%:*}"; u="${pair#*:}"
     if [ -L "$f" ] || { [ -e "$f" ] && [ "$(stat -f %u "$f")" != "$u" ]; }; then
         rm -f "$f"

@@ -14,7 +14,9 @@
   <array>
     <string>/usr/local/var/db/maknae/state/bindings.mirror.yaml</string>
   </array>
+  <key>StandardOutPath</key>
+  <string>/Library/Logs/maknae-policy-sync.log</string>
   <key>StandardErrorPath</key>
-  <string>/usr/local/var/log/maknae/policy-sync.err</string>
+  <string>/Library/Logs/maknae-policy-sync.log</string>
 </dict>
 </plist>
