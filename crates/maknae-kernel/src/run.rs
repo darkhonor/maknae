@@ -4510,10 +4510,11 @@ where
                 committed.revision
             );
         }
+        let next = Arc::new(next);
         *self
             .persisted
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(next);
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::clone(&next);
         guard.live_unsettled = !restart;
         self.revision
             .store(committed.revision, AtomicOrdering::Release);
@@ -4546,6 +4547,7 @@ where
             }
         };
         guard.live_unsettled = false;
+        self.publish_mirror(&next, &ctx).await;
         drop(guard);
         drop(turn);
         let revision = committed.revision;
@@ -15244,6 +15246,119 @@ mod reload_tests {
         let store = fx.store_sha();
         assert!(!bounded(fx.reloader.run()).await.unwrap().persisted);
         assert_eq!(fx.store_sha(), store, "an adopted file is the base");
+    }
+
+    fn mirror_revision(fx: &Fx) -> u64 {
+        maknae_config::parse_mirror(&fx.mirror())
+            .unwrap()
+            .header
+            .revision
+    }
+
+    fn running_revision(fx: &Fx) -> u64 {
+        fx.reloader.revision.load(AtomicOrdering::Acquire)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unresolved_root_entry_survives_a_live_edit_and_the_mirror() {
+        let fx = Fx::with_baseline("unresolved-kept").await;
+        fx.write_bindings(
+            "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"maknae-no-such-user-491\"]\n",
+        );
+        bounded(fx.reloader.run()).await.unwrap();
+        bounded(fx.reloader.live_edit(
+            live_contain(BindingEntry::Uid(4242)),
+            LiveInitiator::Operator,
+        ))
+        .await
+        .unwrap();
+        let m = fx.mirror();
+        assert!(
+            m.contains("  user:\n    - \"maknae-no-such-user-491\"\n"),
+            "{m}"
+        );
+        fx.install_mirror();
+        bounded(fx.reloader.run()).await.unwrap();
+        assert!(std::fs::read_to_string(fx.bindings())
+            .unwrap()
+            .contains("maknae-no-such-user-491"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_mirror_publish_leaves_the_live_edit_committed_and_marks_it_stale() {
+        let fx = Fx::with_baseline("render-failed").await;
+        fx.write_bindings(ROOT_ADMIN);
+        bounded(fx.reloader.run()).await.unwrap();
+        fx.reloader.dir.fail_next_mirror_publish();
+        let before = fx.store_sha();
+        let r = bounded(fx.reloader.live_edit(
+            live_contain(BindingEntry::Uid(4242)),
+            LiveInitiator::Operator,
+        ))
+        .await;
+        assert!(matches!(r, Ok(LiveApplied::Committed { .. })), "{r:?}");
+        assert_ne!(fx.store_sha(), before, "the transition stands");
+        assert_eq!(fx.decide_uid(4242), adversary());
+        assert_eq!(
+            fx.sync_lines(),
+            ["unsynced=1", "conflict=0", "mirror=stale"]
+        );
+        let revision = running_revision(&fx);
+        assert!(
+            fx.seen().iter().any(|s| s.action == GRAPH_SYNC_ACTION
+                && s.reason.starts_with("mirror render failed: publish: ")
+                && s.reason.ends_with(&format!(
+                    "; the transition at revision {revision} stands; the stale mirror was removed"
+                ))),
+            "{:?}",
+            fx.seen()
+        );
+        assert!(!fx.state_dir().join(MIRROR_FILE).exists());
+        bounded(fx.reloader.live_edit(
+            LiveEdit::Release(BindingEntry::Uid(4242)),
+            LiveInitiator::Operator,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(fx.sync_lines(), ["unsynced=0", "conflict=0"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_identity_commit_rewrites_the_mirror_at_its_revision() {
+        let fx = Fx::with_baseline("mirror-every-commit").await;
+        fx.write_bindings(ROOT_ADMIN_OTHER);
+        assert!(bounded(fx.reloader.run()).await.unwrap().persisted);
+        assert_eq!(mirror_revision(&fx), running_revision(&fx), "reload");
+
+        bounded(fx.reloader.live_edit(
+            live_contain(BindingEntry::Uid(4242)),
+            LiveInitiator::Operator,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(mirror_revision(&fx), running_revision(&fx), "live edit");
+
+        fx.install_mirror();
+        assert!(bounded(fx.reloader.run()).await.unwrap().persisted);
+        assert_eq!(mirror_revision(&fx), running_revision(&fx), "adoption");
+
+        let bytes = fx.mirror();
+        assert!(!bounded(fx.reloader.run()).await.unwrap().persisted);
+        assert_eq!(fx.mirror(), bytes, "a load that commits nothing");
+
+        let uid = nix::unistd::geteuid().as_raw().wrapping_add(1);
+        fx.write_yaml_principal(uid, "");
+        let shown = fx.show().await;
+        assert_eq!(shown.apply, "live");
+        let before = running_revision(&fx);
+        match fx.accept(&shown.hash).await {
+            AcceptAnswer::View {
+                corrective: None, ..
+            } => {}
+            other => panic!("expected an accepted view, got {other:?}"),
+        }
+        assert!(running_revision(&fx) > before);
+        assert_eq!(mirror_revision(&fx), running_revision(&fx), "accept");
     }
 
     async fn contained_collision(tag: &str) -> Fx {
