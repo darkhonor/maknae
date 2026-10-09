@@ -1084,7 +1084,69 @@ ROTATE
 sudo launchctl bootstrap system /Library/LaunchDaemons/io.maknae.maknaed.plist
 ```
 
-The block refuses unless both files carry `a` (Linux) or `uappnd` (macOS). On macOS, `_maknae` owns the live file and can clear `uappnd` on it; it cannot clear the flag on the root-owned archive. To restore a copy instead of starting an empty trail, give the copy's path in place of `/dev/null`. If the block refuses or stops with an error, leave the daemon stopped and work through [The package refuses the audit trail](#the-package-refuses-the-audit-trail). A recreated file loses any ACL granted to a log agent; re-apply it ([Granting the agent read access](../packaging/README.md#granting-the-agent-read-access)). A trail without a `graph.checkpoint` record starts with [`rollback-anchor-unavailable`](#rollback-anchor-unavailable).
+The block refuses unless both files carry `a` (Linux) or `uappnd` (macOS). On macOS, `_maknae` owns the live file and can clear `uappnd` on it; it cannot clear the flag on the root-owned archive. To restore a copy instead of starting an empty trail, give the copy's path in place of `/dev/null`. If the block refuses or stops with an error, leave the daemon stopped and work through [The package refuses the audit trail](#the-package-refuses-the-audit-trail). A recreated file carries no reader's read entry; run [Grant the declared readers](#grant-the-declared-readers) after the block. A trail without a `graph.checkpoint` record starts with [`rollback-anchor-unavailable`](#rollback-anchor-unavailable).
+
+### Grant the declared readers
+
+The accounts `audit.readers` names in `maknae.yaml` ([configuration §6.3](configuration.md#63-the-audit-section)) may read the trail. Each needs two ACL entries: `x` on `/var/log/maknae` and `r` on each trail file. The packages restore the directory entry on every install, configure and upgrade ([Granting the agent read access](../packaging/README.md#granting-the-agent-read-access)). The file entry is this block, run with `maknaed` stopped: a trail file is append-only, an ACL change on an append-only file is refused, and lifting the flag while a running daemon holds the file open would let the daemon truncate the trail. `sudo maknae audit-readers --stopped` refuses while `maknaed` runs (`` maknaed is running: stop it first, then run `sudo maknae audit-readers --stopped` ``), and the block holds the directory as the rotate block does, so `maknaed` cannot start and open a trail until the block hands the directory back. It grants every declared reader read access to every regular, single-link `*.jsonl` in the directory, a moved trail included. Run it after you add a reader, and after you rotate, restore, recreate or move a trail.
+
+On Linux:
+
+```bash
+sudo systemctl stop maknaed.service
+sudo bash -eu <<'GRANT'
+d=/var/log/maknae
+[ -d "$d" ] && [ ! -h "$d" ] || { echo "$d is not a directory" >&2; exit 1; }
+chown root:root "$d"
+setfacl -P -b "$d"
+chmod 0700 "$d"
+acl="$(getfacl -P -s -p "$d")"
+[ "$(stat -c '%u %g %a' "$d")" = "0 0 700" ] && [ -z "$acl" ] || { echo "$d is not root:root 0700 with no ACL; it is left root-owned" >&2; exit 1; }
+readers="$(maknae audit-readers --stopped)" || { echo "audit.readers not applied; $d is left root-owned" >&2; exit 1; }
+for f in "$d"/*.jsonl; do
+    [ -f "$f" ] && [ ! -h "$f" ] && [ "$(stat -c %h "$f")" = 1 ] || continue
+    chattr -a "$f"
+    for r in $readers; do setfacl -P -m "u:$r:r" "$f" || { chattr +a "$f"; exit 1; }; done
+    chattr +a "$f"
+    lsattr -d "$f" | cut -c6 | grep -qx a || { echo "$f is not append-only; $d is left root-owned" >&2; exit 1; }
+done
+for r in $readers; do setfacl -P -m "u:$r:x" "$d"; done
+chown -h _maknae:_maknae "$d"
+GRANT
+sudo systemctl start maknaed.service
+```
+
+On macOS the block clears and restores the flag each trail carries: `sappnd` on a moved trail, `uappnd` on the default `audit.jsonl` (#414):
+
+```bash
+sudo launchctl bootout system/io.maknae.maknaed
+sudo bash -eu <<'GRANT'
+d=/var/log/maknae
+[ -d "$d" ] && [ ! -L "$d" ] || { echo "$d is not a directory" >&2; exit 1; }
+chown 0:0 "$d"
+chmod -N "$d"
+chmod 0700 "$d"
+[ "$(stat -f '%u %g %Lp' "$d")" = "0 0 700" ] && [ "$(ls -led "$d" | wc -l)" -eq 1 ] || { echo "$d is not root 0700 with no ACL; it is left root-owned" >&2; exit 1; }
+readers="$(maknae audit-readers --stopped)" || { echo "audit.readers not applied; $d is left root-owned" >&2; exit 1; }
+for f in "$d"/*.jsonl; do
+    [ -f "$f" ] && [ ! -L "$f" ] && [ "$(stat -f %l "$f")" = 1 ] || continue
+    case "$(stat -f %Sf "$f")" in
+        *sappnd*) flag=sappnd ;;
+        *uappnd*) flag=uappnd ;;
+        *) echo "$f is not append-only; $d is left root-owned" >&2; exit 1 ;;
+    esac
+    chflags "no$flag" "$f"
+    for r in $readers; do chmod +a "user:$r allow read" "$f" || { chflags "$flag" "$f"; exit 1; }; done
+    chflags "$flag" "$f"
+    stat -f %Sf "$f" | grep -q "$flag" || { echo "$f is not flagged $flag; $d is left root-owned" >&2; exit 1; }
+done
+for r in $readers; do chmod +a "user:$r allow search" "$d"; done
+chown -h _maknae:_maknae "$d"
+GRANT
+sudo launchctl bootstrap system /Library/LaunchDaemons/io.maknae.maknaed.plist
+```
+
+If the block refuses, the directory stays root-owned and `maknaed` cannot open its trail; do not start it until you have worked through [The package refuses the audit trail](#the-package-refuses-the-audit-trail). Check the result as the reader: `sudo -u <reader> test -r /var/log/maknae/audit.jsonl && echo readable`.
 
 ### The package refuses the audit trail
 

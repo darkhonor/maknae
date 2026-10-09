@@ -120,8 +120,9 @@ impl<B: Baseline> Composition<B> {
         if !self.baseline.live_turn().holds(turn) {
             return Err("the live values are installed only in this composition's own turn".into());
         }
-        self.ceiling.install(turn, values.ceiling)?;
+        self.ceiling.admits(&values.ceiling)?;
         self.baseline.install_principal(turn, values.principal)?;
+        self.ceiling.install(turn, values.ceiling)?;
         self.live.install(turn, values.view, values.providers);
         Ok(())
     }
@@ -651,6 +652,32 @@ mod tests {
         );
         assert_eq!(c.baseline().principal(), before.1);
         assert_eq!(c.live().generation(), before.2);
+    }
+
+    #[test]
+    fn a_ceiling_the_system_does_not_rank_installs_no_principal() {
+        let (_g, basic) = fixture("live-unranked", READ_POLICY, None);
+        let c = Composition::new(basic, ceiling(Ceiling::baseline_for(US)));
+        let before = (c.baseline().principal(), c.live().generation());
+        let mut unranked = Ceiling::baseline_for(US);
+        unranked.classification = maknae_classification_aus::AusPspf
+            .level_of("PROTECTED")
+            .unwrap();
+        let values = crate::live::LiveValues {
+            ceiling: unranked,
+            principal: enrolled(other_uid()),
+            view: std::collections::BTreeMap::from([("core".into(), Default::default())]),
+            providers: None,
+        };
+        let turn = c.baseline().live_turn().try_take().unwrap();
+        assert!(c.install_in(&turn, values).is_err());
+        assert_eq!(
+            c.baseline().principal(),
+            before.0,
+            "the principal was installed"
+        );
+        assert_eq!(c.live().generation(), before.1);
+        assert_eq!(*c.ceiling().ceiling(), Ceiling::baseline_for(US));
     }
 
     #[test]

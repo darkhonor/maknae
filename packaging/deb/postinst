@@ -17,7 +17,9 @@ hold_audit_dir() {
 grant_reader_traverse() {
     local d=/var/log/maknae readers r errf rc=0
     errf="$(mktemp)" || return 1
-    if ! readers="$(/usr/bin/maknae audit-readers 2>"$errf")"; then
+    readers="$(timeout 60 /usr/bin/maknae audit-readers 2>"$errf")" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        [ "$rc" -ne 124 ] || echo "the account lookup did not finish within 60s" >>"$errf"
         echo "maknae: audit.readers not applied: $(cat "$errf")" >&2
         rm -f "$errf"
         return 0

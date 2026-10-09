@@ -42,9 +42,9 @@ Requires:       selinux-policy-targeted
 # enroll re-asserts the deputy's /etc/maknae ACL and removes the legacy
 # _maknae home ACL (#365) with setfacl/getfacl.
 Requires:       acl
-# #240b: %post runs setfacl, so acl must be installed BEFORE this package's
+# #240b, #500: %post runs setfacl and timeout, so acl and coreutils must be installed BEFORE this package's
 # scriptlet, which a plain Requires does not order.
-Requires(post): acl
+Requires(post): acl coreutils
 Requires:       fapolicyd
 Requires(pre):  systemd
 Requires(post): systemd policycoreutils selinux-policy-targeted e2fsprogs
@@ -167,7 +167,9 @@ fi
 grant_reader_traverse() {
     rc=0
     errf="$(mktemp)" || return 1
-    if ! readers="$(%{_bindir}/maknae audit-readers 2>"$errf")"; then
+    readers="$(timeout 60 %{_bindir}/maknae audit-readers 2>"$errf")" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        [ "$rc" -ne 124 ] || echo "the account lookup did not finish within 60s" >>"$errf"
         echo "maknae: audit.readers not applied: $(cat "$errf")" >&2
         rm -f "$errf"
         return 0

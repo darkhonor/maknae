@@ -227,11 +227,7 @@ impl CeilingAuthorizer {
 
     /// The next decision reads `ceiling`; a level the booted system does not rank is
     /// refused and the installed ceiling stands.
-    pub(crate) fn install(
-        &self,
-        _turn: &maknae_authz_basic::LiveTurn<'_>,
-        ceiling: Ceiling,
-    ) -> Result<(), String> {
+    pub(crate) fn admits(&self, ceiling: &Ceiling) -> Result<(), String> {
         if self.policy.level_of(&ceiling.classification.name).as_ref()
             != Some(&ceiling.classification)
         {
@@ -241,6 +237,15 @@ impl CeilingAuthorizer {
                 self.policy.name()
             ));
         }
+        Ok(())
+    }
+
+    pub(crate) fn install(
+        &self,
+        _turn: &maknae_authz_basic::LiveTurn<'_>,
+        ceiling: Ceiling,
+    ) -> Result<(), String> {
+        self.admits(&ceiling)?;
         *self.ceiling.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(ceiling);
         Ok(())
     }
