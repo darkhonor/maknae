@@ -6288,7 +6288,8 @@ mod boot_gate_tests {
             "core".to_string(),
             r#"{"deployment_id":"test"}"#.to_string(),
         )]
-        .into();
+        .into_iter()
+        .collect();
         BaselineLayer {
             sha256: crate::baseline::accepted_digest(&sections),
             sections: sections.into_inner(),
@@ -7906,7 +7907,8 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             "core".to_string(),
             r#"{"deployment_id":"edited"}"#.to_string(),
         )]
-        .into();
+        .into_iter()
+        .collect();
         BaselineLayer {
             sha256: crate::baseline::accepted_digest(&sections),
             sections: sections.into_inner(),
@@ -9841,8 +9843,9 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
 
     #[test]
     fn the_run_baseline_records_the_declared_system_and_ceiling() {
-        let sections: maknae_config::BaselineSections =
-            [("core".to_string(), "{}".to_string())].into();
+        let sections: maknae_config::BaselineSections = [("core".to_string(), "{}".to_string())]
+            .into_iter()
+            .collect();
         assert_eq!(
             run_baseline(&sections, ("US".into(), "UNCLASSIFIED".into())),
             BaselineLayer {

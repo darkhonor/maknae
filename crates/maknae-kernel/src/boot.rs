@@ -149,7 +149,7 @@ fn boot_specs() -> [SectionSpec; 7] {
 }
 
 /// [`boot`] through the hermetic door.
-#[cfg(feature = "hermetic-test-seam")]
+#[cfg(any(test, feature = "hermetic-test-seam"))]
 pub fn boot_as_owner(config_dir: &Path) -> Result<BootConfig, ConfigError> {
     read_files_as_owner(config_dir).and_then(assemble)
 }

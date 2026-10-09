@@ -63,12 +63,6 @@ impl From<BTreeMap<String, String>> for BaselineSections {
     }
 }
 
-impl<const N: usize> From<[(String, String); N]> for BaselineSections {
-    fn from(pairs: [(String, String); N]) -> Self {
-        Self(pairs.into())
-    }
-}
-
 impl FromIterator<(String, String)> for BaselineSections {
     fn from_iter<I: IntoIterator<Item = (String, String)>>(iter: I) -> Self {
         Self(iter.into_iter().collect())
@@ -150,11 +144,13 @@ mod tests {
     use crate::{canonical_json, Value};
 
     #[test]
-    fn sections_from_an_array_hold_every_pair() {
-        let s = BaselineSections::from([
+    fn sections_collected_from_pairs_hold_every_pair() {
+        let s: BaselineSections = [
             ("core".to_string(), "{}".to_string()),
             ("audit".to_string(), "[]".to_string()),
-        ]);
+        ]
+        .into_iter()
+        .collect();
         assert_eq!(
             s.into_inner(),
             BTreeMap::from([

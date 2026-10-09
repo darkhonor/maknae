@@ -171,7 +171,9 @@ const SEEDED: &str = "baseline seeded from maknae.yaml and config.d (no accepted
 
 fn bl(core: &str) -> BaselineLayer {
     BaselineLayer {
-        sections: [("core".to_string(), core.to_string())].into(),
+        sections: [("core".to_string(), core.to_string())]
+            .into_iter()
+            .collect(),
         system: "US".into(),
         ceiling: "UNCLASSIFIED".into(),
         sha256: envelope::sha256(core.as_bytes()),

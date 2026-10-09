@@ -31,7 +31,7 @@ pub mod vocabulary;
 pub use authz::*;
 pub use blocking_guard::BLOCKING_BREAKER_MAX_IN_FLIGHT;
 pub use boot::{boot, read_files, BootConfig};
-#[cfg(feature = "hermetic-test-seam")]
+#[cfg(any(test, feature = "hermetic-test-seam"))]
 pub use boot::{boot_as_owner, read_files_as_owner};
 pub use boot_gate::{
     authz_boot_gate, authz_policy_source, classify_bounds_load_error, egress_bounds_boot_gate,

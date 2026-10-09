@@ -86,7 +86,7 @@ impl<B: Baseline> Composition<B> {
         &self.ceiling
     }
 
-    #[cfg(feature = "hermetic-test-seam")]
+    #[cfg(any(test, feature = "hermetic-test-seam"))]
     pub fn install_live(&self, values: crate::live::LiveValues) -> Result<(), String> {
         self.install_live_within(
             values,
