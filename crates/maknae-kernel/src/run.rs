@@ -11059,6 +11059,7 @@ mod reload_fixture {
         pub(super) tail: &'a str,
         pub(super) delay: Duration,
         pub(super) bound: Duration,
+        pub(super) turn_wait: Duration,
     }
 
     impl Default for Opts<'_> {
@@ -11073,6 +11074,7 @@ mod reload_fixture {
                 tail: "",
                 delay: Duration::ZERO,
                 bound: Duration::from_millis(200),
+                turn_wait: Duration::from_millis(200),
             }
         }
     }
@@ -11252,7 +11254,7 @@ mod reload_fixture {
             env: Arc::new(opts.env),
             baseline: status.baseline.clone(),
             drain,
-            turn_wait: Duration::from_millis(200),
+            turn_wait: opts.turn_wait,
             load_gate: opts.load_gate.map(|g| Arc::new(std::sync::Mutex::new(g))),
         });
         Fx {
@@ -11960,6 +11962,7 @@ mod baseline_accept_tests {
         let opts = Opts {
             delay: Duration::from_millis(30),
             bound: Duration::from_secs(1),
+            turn_wait: Duration::from_secs(5),
             ..Opts::default()
         };
         let fx = Arc::new(fixture_with("turn-held", opts).await);
@@ -11991,7 +11994,7 @@ mod baseline_accept_tests {
                     if persisted && uid != other_uid() {
                         stale += 1;
                     }
-                    std::thread::sleep(Duration::from_micros(200));
+                    std::thread::sleep(Duration::from_millis(2));
                 }
                 (stale, decided)
             })
