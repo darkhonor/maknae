@@ -194,7 +194,7 @@ install -m 0755 "$BIN/maknae-egress" "$D/usr/local/bin/maknae-egress"
 install -m 0755 "$STAGE/$FIPS_BASE" "$D$FIPS_LIBDIR/$FIPS_BASE"
 # Apple ships plists in binary1. Convert the INSTALLED copy; the repo keeps XML so
 # the unit stays reviewable in a diff.
-for job in io.maknae.maknaed io.maknae.maknae-egress; do
+for job in io.maknae.maknaed io.maknae.maknae-egress io.maknae.policy-sync; do
     install -m 0644 "$HERE/$job.plist" "$D/Library/LaunchDaemons/$job.plist"
     plutil -convert binary1 "$D/Library/LaunchDaemons/$job.plist"
 done

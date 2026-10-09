@@ -1125,4 +1125,53 @@ mod tests {
         );
         assert!(!fx.config_dir().exists());
     }
+
+    #[test]
+    fn the_sync_units_ship_disabled() {
+        let pkg = concat!(env!("CARGO_MANIFEST_DIR"), "/../../packaging");
+        let read = |p: &str| std::fs::read_to_string(format!("{pkg}/{p}")).unwrap();
+        let spec = read("rpm/maknae.spec");
+        let post = &spec[spec.find("\n%post\n").unwrap()..spec.find("\n%preun").unwrap()];
+        assert!(
+            !post.contains("maknae-policy-sync"),
+            "%post never touches the sync units"
+        );
+        assert!(spec.contains("%systemd_preun maknaed.service maknae-egress.service maknae-egress.socket maknae-policy-sync.path maknae-policy-sync.service"));
+        for f in [
+            "deb/postinst",
+            "rpm/maknae.spec",
+            "macos/scripts/postinstall",
+        ] {
+            let t = read(f);
+            for l in t.lines().filter(|l| l.contains("policy-sync")) {
+                assert!(
+                    !l.contains("systemctl enable")
+                        && !l.contains("launchctl enable")
+                        && !l.contains("bootstrap"),
+                    "{f}: {l}"
+                );
+            }
+        }
+        assert!(
+            read("macos/scripts/postinstall").contains("launchctl disable \"system/$SYNC_LABEL\"")
+        );
+        assert!(read("deb/prerm")
+            .contains("systemctl disable maknae-policy-sync.path maknae-policy-sync.service"));
+        let unit = read("common/maknae-policy-sync.service");
+        assert!(unit.contains("ExecStart=/bin/sh -c '/usr/bin/maknae policy sync; rc=$$?; case $$rc in 0) exec /usr/bin/systemctl reload maknaed.service ;; 3) exit 0 ;; *) exit $$rc ;; esac'"));
+        assert!(!unit.contains("ExecStartPost"));
+        assert!(read("macos/io.maknae.policy-sync.plist").contains("<string>/usr/local/bin/maknae policy sync; rc=$?; case $rc in 0) exec /bin/launchctl kill SIGHUP system/io.maknae.maknaed ;; 3) exit 0 ;; *) exit $rc ;; esac</string>"));
+        assert_eq!(
+            read("common/80-maknae.preset")
+                .lines()
+                .filter(|l| !l.starts_with('#') && !l.is_empty())
+                .collect::<Vec<_>>(),
+            [
+                "disable maknae-policy-sync.path",
+                "disable maknae-policy-sync.service"
+            ]
+        );
+        assert!(read("deb/build-deb.sh").contains("usr/lib/systemd/system-preset/80-maknae.preset"));
+        assert!(spec.contains("%{_presetdir}/80-maknae.preset"));
+    }
 }

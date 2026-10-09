@@ -180,6 +180,10 @@ phase1() {
         && grep -qF 'launchctl disable "system/$EGRESS_LABEL"' "$HERE/scripts/postinstall" \
         && ok "postinstall disables the deputy job by default" \
         || fail "postinstall does NOT disable the deputy — an unenrolled install will respawn-loop it"
+    grep -qxF 'SYNC_LABEL="io.maknae.policy-sync"' "$HERE/scripts/postinstall" \
+        && grep -qF 'launchctl disable "system/$SYNC_LABEL"' "$HERE/scripts/postinstall" \
+        && ok "postinstall disables the policy-sync job by default" \
+        || fail "postinstall does NOT disable the policy-sync job — the opt-in would be on by default"
     grep -q 'usr/local/share/maknae/defaults' "$HERE/build-pkg.sh" \
         && ok "config defaults staged outside /etc" \
         || fail "config staged into /etc — upgrades would clobber enrollment"
@@ -342,6 +346,7 @@ phase1() {
                 "./Library" "./Library/LaunchDaemons" \
                 "./Library/LaunchDaemons/${LABEL}.plist" \
                 "./Library/LaunchDaemons/io.maknae.maknae-egress.plist" \
+                "./Library/LaunchDaemons/io.maknae.policy-sync.plist" \
                 "./usr" "./usr/local" "./usr/local/bin" "./usr/local/bin/maknaed" \
                 "./usr/local/bin/maknae-egress" \
                 "./usr/local/lib" "./usr/local/lib/maknae" \
@@ -545,6 +550,10 @@ REFUSE
         *'"io.maknae.maknae-egress" => disabled'*) ok "deputy job is disabled by default" ;;
         *) fail "deputy job is NOT disabled — boot would respawn-loop it" ;;
     esac
+    case "$dis" in
+        *'"io.maknae.policy-sync" => disabled'*) ok "policy-sync job is disabled by default" ;;
+        *) fail "policy-sync job is NOT disabled — the opt-in would be on by default" ;;
+    esac
 
     echo "  -- chflags: uappnd is set; probing whether sappnd is survivable --"
     local adir=/var/log/maknae afile=/var/log/maknae/audit.jsonl aown
@@ -685,13 +694,14 @@ PROBE
     fi
     local gone
     for gone in /usr/local/bin/maknae-egress /Library/LaunchDaemons/io.maknae.maknae-egress.plist \
+                /Library/LaunchDaemons/io.maknae.policy-sync.plist \
                 /usr/local/var/run/maknae-egress /usr/local/var/log/maknae-egress \
                 /usr/local/var/run/maknae /usr/local/var/log/maknae \
                 "/Library/Application Support/Maknae/pki"; do
         [ ! -e "$gone" ] && ok "removed $gone" || fail "still present: $gone"
     done
     local dis3; dis3="$(launchctl print-disabled system 2>/dev/null)"
-    for svc in "$LABEL" io.maknae.maknae-egress; do
+    for svc in "$LABEL" io.maknae.maknae-egress io.maknae.policy-sync; do
         case "$dis3" in
             *"\"$svc\" => disabled"*) fail "$svc left disabled in the launchd database" ;;
             *) ok "$svc has no stale disable" ;;

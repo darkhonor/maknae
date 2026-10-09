@@ -60,6 +60,9 @@ install -m 0644 "$COMMON/maknae.yaml"             "$TOP/SOURCES/"
 install -m 0644 "$COMMON/maknae-egress.service"   "$TOP/SOURCES/"
 install -m 0644 "$COMMON/maknae-egress.socket"    "$TOP/SOURCES/"
 install -m 0644 "$COMMON/bindings.yaml"           "$TOP/SOURCES/"
+install -m 0644 "$COMMON/maknae-policy-sync.path"    "$TOP/SOURCES/"
+install -m 0644 "$COMMON/maknae-policy-sync.service" "$TOP/SOURCES/"
+install -m 0644 "$COMMON/80-maknae.preset"        "$TOP/SOURCES/"
 
 # --- Spec %files vs manifest: what the rpm SHIPS is what was declared --------
 # The rpm's equivalent of the deb payload check. rpmbuild builds the payload

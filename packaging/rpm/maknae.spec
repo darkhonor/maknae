@@ -26,6 +26,9 @@ Source10:       maknae-egress
 Source11:       maknae-egress.service
 Source12:       maknae-egress.socket
 Source13:       bindings.yaml
+Source14:       maknae-policy-sync.path
+Source15:       maknae-policy-sync.service
+Source16:       80-maknae.preset
 
 ExclusiveArch:  x86_64
 
@@ -81,6 +84,9 @@ install -D -m 0755 %{SOURCE10} %{buildroot}%{_bindir}/maknae-egress
 install -D -m 0644 %{SOURCE2} %{buildroot}%{_unitdir}/maknaed.service
 install -D -m 0644 %{SOURCE11} %{buildroot}%{_unitdir}/maknae-egress.service
 install -D -m 0644 %{SOURCE12} %{buildroot}%{_unitdir}/maknae-egress.socket
+install -D -m 0644 %{SOURCE14} %{buildroot}%{_unitdir}/maknae-policy-sync.path
+install -D -m 0644 %{SOURCE15} %{buildroot}%{_unitdir}/maknae-policy-sync.service
+install -D -m 0644 %{SOURCE16} %{buildroot}%{_presetdir}/80-maknae.preset
 
 # sysusers.d
 install -D -m 0644 %{SOURCE3} %{buildroot}%{_sysusersdir}/maknae.conf
@@ -123,8 +129,8 @@ if [ ! -d "$d" ] || [ -h "$d" ] || ! chown 0:0 "$d" || ! setfacl -P -b "$d" || !
 fi
 # SELinux module + contexts
 semodule -i %{_datadir}/selinux/packages/maknae.pp 2>/dev/null || :
-# Fresh install only (no store yet): a bindings.yaml root removed stays removed, so
-# maknaed's missing-file check still applies.
+# Fresh install only (no store yet): a bindings.yaml root removed stays removed;
+# maknaed keeps enforcing the bindings it holds and `maknae policy sync` restores the file.
 B=%{_sysconfdir}/maknae/bindings.yaml
 if [ ! -e "$B" ] && [ ! -h "$B" ] && [ ! -e %{_localstatedir}/lib/maknae/kernel.graph ]; then
     if ! install -m 0640 -o root -g _maknae %{_datadir}/maknae/bindings.yaml "$B"; then
@@ -190,7 +196,7 @@ fi
 chown -h _maknae:_maknae %{_localstatedir}/log/maknae
 
 %preun
-%systemd_preun maknaed.service maknae-egress.service maknae-egress.socket
+%systemd_preun maknaed.service maknae-egress.service maknae-egress.socket maknae-policy-sync.path maknae-policy-sync.service
 if [ $1 -eq 0 ]; then
     # Full removal only. The audit trail and its append-only attribute are kept.
     semodule -r maknae 2>/dev/null || :
@@ -205,6 +211,7 @@ fi
 # in %post too. One transaction: systemd orders the socket before its service
 # from maknae-egress.service's Requires=/After=, not from this argv.
 %systemd_postun_with_restart maknaed.service maknae-egress.socket maknae-egress.service
+%systemd_postun maknae-policy-sync.path maknae-policy-sync.service
 if [ $1 -eq 0 ]; then
     fapolicyd-cli --update 2>/dev/null || :
 fi
@@ -216,6 +223,9 @@ fi
 %{_unitdir}/maknaed.service
 %{_unitdir}/maknae-egress.service
 %{_unitdir}/maknae-egress.socket
+%{_unitdir}/maknae-policy-sync.path
+%{_unitdir}/maknae-policy-sync.service
+%{_presetdir}/80-maknae.preset
 %{_sysusersdir}/maknae.conf
 %{_datadir}/selinux/packages/maknae.pp
 %{_libexecdir}/maknae/maknae-selinux-ports.sh
