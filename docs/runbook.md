@@ -976,7 +976,7 @@ If the intent itself cannot be appended, nothing is loaded and no outcome is wri
 
 **`maknae status`** prints `kernel graph: revision <n> (<state>)`. The revision follows every reload that changed the bindings. The state is the result of this start's rollback check (`seeded`, `reseeded`, `verified`, `advanced` or `rollback-anchor-unavailable`) and stays the same until the next restart. When the last applied load had identity problems it also prints their counts by kind, such as `identity problems: 1 unresolved, 1 carried forward`; the kinds are `unresolved`, `unresolved adversary`, `contained`, `unbound conflict`, `carried forward`, `released` and `principal admin`, and a release or a principal admin is counted until the next applied load. The problem list and the subject list are published just after the new snapshot is installed, so for an instant `maknae status` and `maknae subject-list` can still describe the previous load.
 
-**Records that look out of order.** Seven cases leave the trail looking unusual. In each, the store and the trail agree once the next start has checked them, or that start refuses.
+**Records that look out of order.** Eight cases leave the trail looking unusual. In each, the store and the trail agree once the next start has checked them, or that start refuses.
 
 - **A `graph.transition` with no `graph.checkpoint` after it, then `reload refused: persist: …`.** The store write failed after its intent was recorded, and the running policy is the previous one. Nothing reached disk: sealing the store failed, or writing or renaming its temporary file failed (a full or failing disk). Any later reload that changes the bindings rewrites that revision and checkpoints it. Otherwise the next start loads the store and applies `authz.yaml` as a new transition if the file differs from it.
 - **`reload applied: …; store not durable: <cause>`.** The new store was renamed into place, then the directory `fsync` failed. The new policy is in force and the store holds it, with its checkpoint, but a crash before the file system flushes the directory can bring back the previous store, and the next start then refuses it as rolled back against that checkpoint ([The kernel graph store refuses to start](#the-kernel-graph-store-refuses-to-start)). Check the file system. At start, the same failure on a seed, migration or transition is not a refusal: `maknaed` starts and the journal says `kernel graph store revision <n> is in place but may not survive a crash: <cause>`.
@@ -985,6 +985,7 @@ If the intent itself cannot be appended, nothing is loaded and no outcome is wri
 - **A reload intent with no outcome record.** The daemon exited while a reload was still writing; a `graph.transition` may follow the intent with no checkpoint. The next start checks the store as above and reports what it found.
 - **A `graph.identity` release or principal-admin record (`graph.anchor:"releasing"` or `"promoting"`) with no `transitioned` checkpoint at its revision.** These records are written ahead of the store write, at boot and at reload. A failure after they are appended (the transition intent, the store write, an abort) leaves them with nothing after them, and what they name did not happen: the store and the running policy still hold the containment and the explicit bindings. Only a record followed by a `transitioned` checkpoint at the same revision happened.
 - **An applied reload with no `graph.identity` record for a problem it reports.** An identity problem record that cannot be appended after an applied reload goes to the journal only (`maknaed: AUDIT WRITE FAILED on an identity record (<reason>): <cause>`) and is not retried; the policy is applied, and `maknae status` and `maknae subject-list` show the problem.
+- **A `shutdown` record between an accept's `graph.transition` and its outcome.** An accept that applies by restart starts the drain once the store holds the accepted baseline, before its `graph.checkpoint` is appended, and the listener then writes the stop record while the accept is still writing its own. The trail shows the `graph.transition`, then the `shutdown` record and the `graph.checkpoint` in either order, then the `graph.baseline` outcome. A live change that could not be installed and restarts instead has the same shape after its checkpoint: the `shutdown` record can precede the outcome. The accept stands in each case; the next start reports what it found.
 
 ---
 
@@ -1009,16 +1010,16 @@ If the intent itself cannot be appended, nothing is loaded and no outcome is wri
    source     root-file
    apply      live
    hash       <64 hex digits>
-     core.handling.ceiling.classification: UNCLASSIFIED -> SECRET
+     a suppressed setting changed (not disclosed)
    accept with: maknae baseline-accept <64 hex digits>
    ```
 
    Each changed setting is one line, rendered as `maknae config-show` renders it; a withheld setting appears only as `a suppressed setting changed (not disclosed)`. A set that does not validate shows `state invalid` and `this change set does not validate and cannot be accepted`; its cause is in the journal and the trail.
 4. **Accept it** by the hash it showed: `maknae baseline-accept <hash>`. If the files changed in between, or another accept ran, the hash is refused (`baseline accept refused: stale; run maknae baseline-show`) and nothing changes; show it again.
 
-**A live change** (the ceiling level, `principal`, `audit.readers`, or a `providers` list that stays non-empty) prints `accepted <hash>; applied live`, and the next decision uses it. **Any other change** prints `accepted <hash>; maknaed is restarting to apply it`: the daemon persists the accepted baseline, stops admitting connections, lets the requests in flight finish, and exits 6. systemd shows `code=exited, status=6/NOTCONFIGURED` and starts it again after `RestartSec` (5 seconds); launchd (`KeepAlive`, `ThrottleInterval` 5) does the same. A new connection made while it drains is closed unserved, and recorded as `connect` denied `draining to apply an accepted baseline`.
+**A live change** (the ceiling level, `principal`, `audit.readers`, or a `providers` list that stays non-empty) prints `accepted <hash>; applied live`; the next decision uses a new ceiling, principal or provider list. `maknaed` reads nothing from `audit.readers`: the accept records it, and the package and the [Grant the declared readers](#grant-the-declared-readers) block apply the list in `maknae.yaml`. A ceiling level is live only on a host whose accepted baseline already declares `core.handling`: a first `core.handling` declaration also adds `accreditation_ref`, which `handling` requires, and `policy` when it is written, so it applies by restart. Later changes to the level apply live. **Any other change** prints `accepted <hash>; maknaed is restarting to apply it`: the daemon persists the accepted baseline, stops admitting connections, lets the requests in flight finish, and exits 6. systemd shows `code=exited, status=6/NOTCONFIGURED` and starts it again after `RestartSec` (5 seconds); launchd (`KeepAlive`, `ThrottleInterval` 5) does the same. A new connection made while it drains is closed unserved, and recorded as `connect` denied `draining to apply an accepted baseline`.
 
-**What the trail shows,** in order; the records after the request carry `event:"accept"`:
+**What the trail shows,** in this order, except the stop record of a restart (below); the records after the request carry `event:"accept"`:
 
 | Record | Shape |
 |---|---|
@@ -1026,12 +1027,12 @@ If the intent itself cannot be appended, nothing is loaded and no outcome is wri
 | Accept intent | `action:"graph.baseline"`, `result:"permit"`, `graph.anchor:"baselining"`, reason `accept intent recorded (operator): sha256:<12 hex>; apply: live\|restart; sections: <names>` |
 | Store transition | `action:"graph.transition"`, reason `intent recorded (operator)`, at the next store revision; then `action:"graph.checkpoint"`, reason `transitioned` |
 | Outcome | `action:"graph.baseline"`, `result:"permit"`, reason `accepted sha256:<12 hex> at revision <n>; applied live` or `…; restarting to apply`; or `result:"deny"`, posture `unavailable`, reason `accepted sha256:<12 hex> at revision <n>; not installed live: <cause>; restarting to apply` when a live change could not be installed and is applied by restart instead |
-| Stop (restart only) | `action:"shutdown"`, reason `shutdown: restarting to apply an accepted baseline` |
+| Stop (restart only) | `action:"shutdown"`, reason `shutdown: restarting to apply an accepted baseline`. It is written by the listener as soon as the store holds the accepted baseline, so it can land before the `graph.checkpoint` and before the outcome; see the eighth case under "Records that look out of order" |
 
 The next start then records its usual records under the accepted baseline; when the accepted change moved the audit trail, the move records come first ([Move the audit trail](#move-the-audit-trail)).
 
 - **Written ahead.** If the accept intent cannot be appended within 5 seconds, the accept is refused and nothing is persisted. If the persist fails after admission stopped, the daemon exits 1 on the unchanged baseline (`shutdown: an accepted baseline was not applied`), the supervisor starts it again, and the set is still pending.
-- **The checkpoint after an accept** is appended before the reply. If that append fails, the journal says `maknaed: baseline accept at revision <n>: <cause>` and the accept stands; the next start then reports the store as `advanced` rather than `verified`, which clears at the next checkpoint.
+- **The checkpoint after an accept** is appended before the outcome record and the reply. A restart's drain begins before that append is awaited, so a checkpoint append that does not finish cannot hold the restart. If that append fails, the journal says `maknaed: baseline accept at revision <n>: <cause>` and the accept stands; the next start then reports the store as `advanced` rather than `verified`, which clears at the next checkpoint.
 - **One at a time.** An accept takes the same turn as a reload, and waits up to 5 seconds for it (`baseline accept refused: busy; a reload holds the turn`). Reading the files for a show or an accept is given 5 seconds (`the baseline check did not finish within 5s`). An accept is refused while the daemon is stopping or restarting into an earlier accept.
 - **`vault` and `audit` need no accept.** They follow the files at every start, so `sudo systemctl restart maknaed` (macOS: `sudo launchctl kickstart -k system/io.maknae.maknaed`) applies them, recorded as `vault follows maknae.yaml at start` or `audit follows maknae.yaml at start`. Accepting them also works, and applies them by the same restart.
 
@@ -1256,7 +1257,7 @@ setfacl -P -b "$d"
 chmod 0700 "$d"
 acl="$(getfacl -P -s -p "$d")"
 [ "$(stat -c '%u %g %a' "$d")" = "0 0 700" ] && [ -z "$acl" ] || { echo "$d is not root:root 0700 with no ACL; it is left root-owned" >&2; exit 1; }
-readers="$(maknae audit-readers --stopped)" || { echo "audit.readers not applied; $d is left root-owned" >&2; exit 1; }
+readers="$(/usr/bin/maknae audit-readers --stopped)" || { echo "audit.readers not applied; $d is left root-owned" >&2; exit 1; }
 for f in "$d"/*.jsonl; do
     [ -f "$f" ] && [ ! -h "$f" ] && [ "$(stat -c %h "$f")" = 1 ] || continue
     chattr -a "$f"
@@ -1281,7 +1282,7 @@ chown 0:0 "$d"
 chmod -N "$d"
 chmod 0700 "$d"
 [ "$(stat -f '%u %g %Lp' "$d")" = "0 0 700" ] && [ "$(ls -led "$d" | wc -l)" -eq 1 ] || { echo "$d is not root 0700 with no ACL; it is left root-owned" >&2; exit 1; }
-readers="$(maknae audit-readers --stopped)" || { echo "audit.readers not applied; $d is left root-owned" >&2; exit 1; }
+readers="$(/usr/local/bin/maknae audit-readers --stopped)" || { echo "audit.readers not applied; $d is left root-owned" >&2; exit 1; }
 for f in "$d"/*.jsonl; do
     [ -f "$f" ] && [ ! -L "$f" ] && [ "$(stat -f %l "$f")" = 1 ] || continue
     case "$(stat -f %Sf "$f")" in

@@ -239,7 +239,7 @@ setfacl -P -b "$d"
 chmod 0700 "$d"
 acl="$(getfacl -P -s -p "$d")"
 [ "$(stat -c '%u %g %a' "$d")" = "0 0 700" ] && [ -z "$acl" ] || { echo "$d is not root:root 0700 with no ACL; it is left root-owned" >&2; exit 1; }
-readers="$(maknae audit-readers --stopped)" || { echo "audit.readers not applied; $d is left root-owned" >&2; exit 1; }
+readers="$(/usr/bin/maknae audit-readers --stopped)" || { echo "audit.readers not applied; $d is left root-owned" >&2; exit 1; }
 for f in "$d"/*.jsonl; do
     [ -f "$f" ] && [ ! -h "$f" ] && [ "$(stat -c %h "$f")" = 1 ] || continue
     chattr -a "$f"
@@ -264,7 +264,7 @@ chown 0:0 "$d"
 chmod -N "$d"
 chmod 0700 "$d"
 [ "$(stat -f '%u %g %Lp' "$d")" = "0 0 700" ] && [ "$(ls -led "$d" | wc -l)" -eq 1 ] || { echo "$d is not root 0700 with no ACL; it is left root-owned" >&2; exit 1; }
-readers="$(maknae audit-readers --stopped)" || { echo "audit.readers not applied; $d is left root-owned" >&2; exit 1; }
+readers="$(/usr/local/bin/maknae audit-readers --stopped)" || { echo "audit.readers not applied; $d is left root-owned" >&2; exit 1; }
 for f in "$d"/*.jsonl; do
     [ -f "$f" ] && [ ! -L "$f" ] && [ "$(stat -f %l "$f")" = 1 ] || continue
     case "$(stat -f %Sf "$f")" in

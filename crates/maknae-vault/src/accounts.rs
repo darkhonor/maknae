@@ -36,6 +36,11 @@ fn group(gid: nix::unistd::Gid) -> Result<Option<Group>, String> {
     found(Group::from_gid(gid))
 }
 
+fn daemon_members(g: Option<Group>) -> Result<Vec<String>, String> {
+    g.map(|g| g.mem)
+        .ok_or_else(|| format!("{DAEMON_ACCOUNT}'s primary group has no group entry"))
+}
+
 fn daemon_membership(
     resolved: &str,
     daemon_gid: u32,
@@ -69,7 +74,7 @@ impl ReaderLookup for NssAccounts {
         };
         let groups = match user(DAEMON_ACCOUNT)? {
             Some(daemon) => {
-                let members = group(daemon.gid)?.map(|g| g.mem).unwrap_or_default();
+                let members = daemon_members(group(daemon.gid)?)?;
                 daemon_membership(&u.name, daemon.gid.as_raw(), &members, &listed_groups(&u)?)
             }
             None => Vec::new(),
@@ -111,6 +116,21 @@ mod tests {
     fn an_account_uid_is_classified_like_every_other_lookup() {
         assert_eq!(account_uid("root"), Ok(Some(0)));
         assert_eq!(account_uid("no-such-user-maknae-490"), Ok(None));
+    }
+
+    #[test]
+    fn a_daemon_group_with_no_entry_refuses() {
+        assert_eq!(
+            daemon_members(None),
+            Err("_maknae's primary group has no group entry".to_string())
+        );
+        let g = Group {
+            name: "_maknae".into(),
+            passwd: std::ffi::CString::default(),
+            gid: nix::unistd::Gid::from_raw(7),
+            mem: vec!["alice".into()],
+        };
+        assert_eq!(daemon_members(Some(g)), Ok(vec!["alice".to_string()]));
     }
 
     #[test]

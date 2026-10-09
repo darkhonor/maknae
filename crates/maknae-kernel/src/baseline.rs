@@ -43,7 +43,8 @@ pub enum PendingState {
     },
 }
 
-/// The cause is withheld: validator text can quote a value.
+/// The cause can quote a configured value. The trail and journal carry it verbatim;
+/// Debug output has no audience control, so it is withheld here.
 impl std::fmt::Debug for PendingState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -72,7 +73,8 @@ pub struct InvalidFile {
     pub proposed: Option<BaselineSections>,
 }
 
-/// The cause is withheld: validator text can quote a value.
+/// The cause can quote a configured value. The trail and journal carry it verbatim;
+/// Debug output has no audience control, so it is withheld here.
 impl std::fmt::Debug for InvalidFile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InvalidFile")

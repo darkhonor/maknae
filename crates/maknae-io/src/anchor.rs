@@ -3097,8 +3097,7 @@ mod tests {
         let first = bound(&a, "p.sock");
         let id = a.entry_identity(name).unwrap().unwrap();
         drop(first);
-        std::fs::remove_file(a.path.join("p.sock")).unwrap();
-        let _keep = std::fs::File::create(a.path.join("pad")).unwrap();
+        std::fs::rename(a.path.join("p.sock"), a.path.join("held.sock")).unwrap();
         let _second = bound(&a, "p.sock");
         let now = a.entry_identity(name).unwrap().unwrap();
         assert_ne!(now.ino, id.ino, "the replacement is a new inode");

@@ -5080,8 +5080,8 @@ fn open_or_create(
     })
 }
 
-/// A start the validator refused: a document refusal before any trail opens; every
-/// other refusal recorded in `trail` (or the document's own) with today's exit code.
+/// A start the validator refused, recorded in `trail` (or the document's own) with
+/// today's exit code; a document refusal is recorded only in a known `trail`.
 #[allow(clippy::too_many_arguments)]
 async fn refuse_start(
     refused: Invalid,
@@ -5093,7 +5093,8 @@ async fn refuse_start(
     seams: &BootSeams,
     ids: &BootIds<'_>,
 ) -> RunError {
-    if let Invalid::Document(_) = refused {
+    let document = matches!(refused, Invalid::Document(_));
+    if document && trail.is_none() {
         return RunError::Other(cause);
     }
     let located = sections
@@ -5106,9 +5107,18 @@ async fn refuse_start(
                 crate::baseline_check::transport_of(&doc).map_err(|e| e.cause().to_string())?;
             Ok((audit, transport))
         });
-    let (audit, transport) = match located {
-        Ok(found) => found,
-        Err(e) => return RunError::Other(format!("{cause}; {e}")),
+    let (audit, socket) = match (located, trail) {
+        (Ok((audit, transport)), _) => (audit, transport.socket_path.display().to_string()),
+        (Err(_), Some(trail)) if document => (
+            maknae_config::AuditConfig {
+                readers: Vec::new(),
+                jsonl_path: trail.to_path_buf(),
+                siem: None,
+                au3_1: serde_json::Value::Null,
+            },
+            String::new(),
+        ),
+        (Err(e), _) => return RunError::Other(format!("{cause}; {e}")),
     };
     let audit = maknae_config::AuditConfig {
         jsonl_path: trail.map_or_else(|| audit.jsonl_path.clone(), Path::to_path_buf),
@@ -5116,9 +5126,9 @@ async fn refuse_start(
     };
     let sink = match open_or_create(&audit, create) {
         Ok(sink) => sink,
+        Err(_) if document => return RunError::Other(cause),
         Err(e) => return e,
     };
-    let socket = transport.socket_path.display().to_string();
     let (session, seq) = (boot_session_id(ids.session_ids), ids.seq.next());
     let (host, euid, au3_1) = (ids.host, ids.euid, &audit.au3_1);
     let reason = match refused {
@@ -6147,6 +6157,50 @@ mod subject_list_offload_tripwire {
 #[cfg(test)]
 mod boot_gate_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_document_refusal_is_recorded_only_in_a_known_trail() {
+        let d = Dir::new("document-refusal");
+        let trail = d.0.join("audit.jsonl");
+        let (session_ids, seq) = (Arc::new(SessionIds::new()), Seq::new());
+        let ids = BootIds {
+            host: "h",
+            session_ids: &session_ids,
+            seq: &seq,
+            euid: 0,
+        };
+        let refuse = |trail: Option<PathBuf>| {
+            let (d, ids) = (&d, &ids);
+            async move {
+                refuse_start(
+                    Invalid::Document("document-refusal-sentinel".into()),
+                    "document-refusal-sentinel".into(),
+                    None,
+                    trail.as_deref(),
+                    true,
+                    &d.0,
+                    &test_seams(),
+                    ids,
+                )
+                .await
+            }
+        };
+        let none = refuse(None).await;
+        assert!(matches!(&none, RunError::Other(c) if c == "document-refusal-sentinel"));
+        assert!(!trail.exists(), "no trail is opened when none is known");
+        let known = refuse(Some(trail.clone())).await;
+        assert!(matches!(&known, RunError::Other(c) if c == "document-refusal-sentinel"));
+        let recs = trail_of(&d, "audit.jsonl");
+        assert_eq!(recs.len(), 1);
+        assert_eq!(
+            (
+                recs[0].action.as_str(),
+                recs[0].outcome.result.as_str(),
+                recs[0].outcome.reason.as_str()
+            ),
+            ("start", "deny", "document-refusal-sentinel")
+        );
+    }
 
     pub(super) fn test_baseline() -> BaselineLayer {
         let sections: maknae_config::BaselineSections = [(
@@ -11230,6 +11284,83 @@ mod baseline_accept_tests {
         assert!(!crate::handler::admits(fx.drain()));
         assert_eq!(ceiling_name(&fx), "UNCLASSIFIED");
         assert!(fx.stored().unwrap().sections["transport"].contains("\"max_connections\":7"));
+    }
+
+    fn is_checkpoint(r: &AuditRecord) -> bool {
+        r.action == CHECKPOINT_ACTION
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_restart_accepts_stop_record_can_precede_its_checkpoint_and_outcome() {
+        let opts = Opts {
+            bound: Duration::from_secs(2),
+            ..Opts::default()
+        };
+        let fx = Arc::new(fixture_with("restart-order", opts).await);
+        fx.write_yaml("", RESTART);
+        let shown = fx.show().await;
+        assert_eq!(shown.apply, "restart");
+        fx.reloader.sink.stall_when(is_checkpoint);
+        let stopper = {
+            let fx = Arc::clone(&fx);
+            let rx = fx.reloader.drain.subscribe();
+            tokio::spawn(async move {
+                shutdown_on(std::future::pending::<()>(), rx).await;
+                let stop = make_record(
+                    "shutdown",
+                    "h",
+                    "s",
+                    0,
+                    None,
+                    None,
+                    None,
+                    0,
+                    1,
+                    "serve",
+                    None,
+                    "permit",
+                    "shutdown: restarting to apply an accepted baseline",
+                    "stopped",
+                    &serde_json::Value::Null,
+                );
+                fx.reloader.sink.emit(&stop).await.unwrap();
+            })
+        };
+        let accept = {
+            let fx = Arc::clone(&fx);
+            tokio::spawn(async move { fx.accept(&shown.hash).await })
+        };
+        tokio::time::timeout(Duration::from_secs(1), stopper)
+            .await
+            .expect("the stop is released while the checkpoint append is still pending")
+            .unwrap();
+        assert!(!accept.is_finished());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while fx
+                .reloader
+                .sink
+                .stalled
+                .load(std::sync::atomic::Ordering::SeqCst)
+                == 0
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the checkpoint append is the one held");
+        let view = accepted(accept.await.unwrap());
+        assert_eq!(view.apply, "restart");
+        let seen = fx.seen();
+        let at = |pred: &dyn Fn(&Seen) -> bool| seen.iter().position(pred).unwrap();
+        let transition =
+            at(&|s| s.action == GRAPH_TRANSITION_ACTION && s.reason.contains("operator"));
+        let stop = at(&|s| s.action == "serve");
+        let outcome =
+            at(&|s| s.action == GRAPH_BASELINE_ACTION && s.reason.starts_with("accepted sha256:"));
+        assert!(
+            transition < stop && stop < outcome,
+            "transition, then the stop, then the outcome: {seen:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
