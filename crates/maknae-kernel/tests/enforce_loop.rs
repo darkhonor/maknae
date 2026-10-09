@@ -299,6 +299,7 @@ where
         timeout,
         maknae_security::Lane::Local,
         fds,
+        common::no_baseline(),
     ));
     common::write_frame(&mut client, &request_frame(verb))
         .await
@@ -398,6 +399,7 @@ where
         timeout,
         maknae_security::Lane::Local,
         delegated,
+        common::no_baseline(),
     )
     .await;
     match tokio::time::timeout(
@@ -2134,9 +2136,13 @@ async fn the_shipped_policy_grants_the_principal_its_four_admin_terms_and_no_oth
                     | maknae_proto::Verb::AdminBaselineAccept { .. },
                     RespResult::Err(e),
                 ) => {
+                    let message = match verb {
+                        maknae_proto::Verb::AdminBaselineShow => "baseline show unavailable",
+                        _ => "no baseline service",
+                    };
                     assert_eq!(
                         (e.code.clone(), e.message.as_str()),
-                        (ProtoErrCode::Internal, "baseline service not wired")
+                        (ProtoErrCode::Internal, message)
                     );
                     let records = emit.records();
                     let last = records.last().unwrap();
@@ -3439,4 +3445,178 @@ async fn a_grant_written_before_its_folder_exists_serves_once_the_folder_is_crea
     let req = request_record(&emit.records()).clone();
     assert_eq!(req.outcome.result, "permit");
     assert_eq!(req.outcome.reason, READ_PERMIT_REASON);
+}
+
+/// Answers each baseline verb as the daemon's service would, by `mode`.
+struct ScriptedBaseline {
+    hash: String,
+    mode: &'static str,
+}
+
+impl maknae_kernel::BaselineOps for ScriptedBaseline {
+    fn show(&self) -> maknae_kernel::BoxFuture<'_, Result<maknae_proto::BaselineView, String>> {
+        Box::pin(async move {
+            Ok(maknae_proto::BaselineView {
+                source: "root-file".into(),
+                hash: self.hash.clone(),
+                state: "pending".into(),
+                apply: "live".into(),
+                changes: vec!["a suppressed setting changed (not disclosed)".into()],
+            })
+        })
+    }
+    fn accept<'a>(
+        &'a self,
+        _: &'a str,
+    ) -> maknae_kernel::BoxFuture<'a, maknae_kernel::AcceptAnswer> {
+        let view = |state: &str| maknae_proto::BaselineView {
+            source: "root-file".into(),
+            hash: String::new(),
+            state: state.into(),
+            apply: String::new(),
+            changes: Vec::new(),
+        };
+        let answer = match self.mode {
+            "accepted" => maknae_kernel::AcceptAnswer::View {
+                view: view("accepted"),
+                corrective: None,
+            },
+            "stale" => maknae_kernel::AcceptAnswer::View {
+                view: view("stale"),
+                corrective: Some(
+                    "baseline accept refused: the named change set is not the pending one; show it again"
+                        .into(),
+                ),
+            },
+            _ => maknae_kernel::AcceptAnswer::Unavailable(
+                "baseline accept refused: busy; a reload holds the turn".into(),
+            ),
+        };
+        Box::pin(async move { answer })
+    }
+}
+
+async fn drive_baseline(
+    fx: &Fixture,
+    emit: Arc<RecEmit>,
+    verb: maknae_proto::Verb,
+    baseline: ScriptedBaseline,
+) -> RespResult {
+    let (mut client, server) = tokio::io::duplex(256 * 1024);
+    common::write_frame(&mut client, &request_frame(verb))
+        .await
+        .unwrap();
+    let authorizer = fx.authorizer();
+    let backend_name = Arc::new(maknae_security::guarded_backend_name(&*authorizer));
+    maknae_kernel::handle(
+        server,
+        "maknae://d/plane/cli".to_string(),
+        nix::unistd::geteuid().as_raw(),
+        true,
+        None,
+        Some(fx.dir.clone()),
+        emit,
+        1,
+        maknae_config::transport_from_section(None).unwrap(),
+        serde_json::json!({}),
+        authorizer,
+        Arc::new(maknae_kernel::LiveConfig::new(Default::default(), None)),
+        backend_name,
+        Arc::new("US".to_string()),
+        std::sync::Arc::new(None),
+        maknae_kernel::unavailable_egress(),
+        Duration::from_secs(5),
+        maknae_security::Lane::Local,
+        maknae_io::DelegatedFds::new(0),
+        Arc::new(baseline),
+    )
+    .await;
+    let frame = tokio::time::timeout(
+        Duration::from_secs(1),
+        common::read_frame(&mut client, 1024 * 1024),
+    )
+    .await
+    .expect("bounded")
+    .expect("a frame");
+    maknae_proto::decode_response(&frame).unwrap().result
+}
+
+#[tokio::test]
+async fn an_accept_request_record_carries_neither_the_hash_nor_the_operand() {
+    let hash = "0123456789abcdef".repeat(4);
+    let windows: Vec<&str> = (0..=hash.len() - 12).map(|i| &hash[i..i + 12]).collect();
+    for (mode, expect) in [
+        ("accepted", ("accepted", vec![("permit", "authorized")])),
+        (
+            "stale",
+            (
+                "stale",
+                vec![("permit", "authorized"), ("deny", "unauthorized")],
+            ),
+        ),
+        (
+            "busy",
+            ("", vec![("permit", "authorized"), ("deny", "unavailable")]),
+        ),
+    ] {
+        let fx = Fixture::new(&format!("baseline-accept-{mode}"));
+        fx.write_policy(SHIPPED_POLICY);
+        let emit = RecEmit::new();
+        let result = drive_baseline(
+            &fx,
+            emit.clone(),
+            maknae_proto::Verb::AdminBaselineAccept { hash: hash.clone() },
+            ScriptedBaseline {
+                hash: hash.clone(),
+                mode,
+            },
+        )
+        .await;
+        match (&result, expect.0) {
+            (RespResult::Ok(maknae_proto::Payload::Baseline(v)), state) => {
+                assert_eq!(v.state, state, "{mode}");
+                assert!(v.hash.is_empty());
+            }
+            (RespResult::Err(e), "") => {
+                assert_eq!(e.code, ProtoErrCode::Internal);
+                assert_eq!(
+                    e.message,
+                    "baseline accept refused: busy; a reload holds the turn"
+                );
+            }
+            other => panic!("{mode}: {other:?}"),
+        }
+        let records = emit.records();
+        let requests: Vec<(&str, &str)> = records
+            .iter()
+            .filter(|r| r.event == "request")
+            .map(|r| (r.outcome.result.as_str(), r.outcome.posture.as_str()))
+            .collect();
+        assert_eq!(requests, expect.1, "{mode}");
+        for r in &records {
+            let text = serde_json::to_string(r).unwrap();
+            for w in &windows {
+                assert!(!text.contains(w), "{mode}: {w} in {text}");
+            }
+        }
+    }
+    let fx = Fixture::new("baseline-show-hash");
+    fx.write_policy(SHIPPED_POLICY);
+    let emit = RecEmit::new();
+    let shown = drive_baseline(
+        &fx,
+        emit.clone(),
+        maknae_proto::Verb::AdminBaselineShow,
+        ScriptedBaseline {
+            hash: hash.clone(),
+            mode: "accepted",
+        },
+    )
+    .await;
+    assert!(
+        matches!(shown, RespResult::Ok(maknae_proto::Payload::Baseline(ref v)) if v.hash == hash)
+    );
+    for r in emit.records() {
+        assert!(!serde_json::to_string(&r).unwrap().contains(&hash[..12]));
+    }
 }

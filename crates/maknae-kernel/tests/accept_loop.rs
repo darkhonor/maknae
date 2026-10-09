@@ -183,6 +183,14 @@ fn ok_conn(uri: &str, uid: u32) -> Scripted {
 /// Run the loop over a script until it drains, then fire shutdown and join. Returns the
 /// recorded audit records.
 async fn drive(script: Vec<Scripted>, cfg: maknae_config::TransportConfig) -> Vec<AuditRecord> {
+    drive_with(script, cfg, common::serving()).await
+}
+
+async fn drive_with(
+    script: Vec<Scripted>,
+    cfg: maknae_config::TransportConfig,
+    drain: tokio::sync::watch::Receiver<maknae_kernel::Drain>,
+) -> Vec<AuditRecord> {
     let emit = RecEmit::new();
     let acceptor = FakeAccept::new(script);
     let session_ids = Arc::new(SessionIds::with_nonce(1));
@@ -207,6 +215,8 @@ async fn drive(script: Vec<Scripted>, cfg: maknae_config::TransportConfig) -> Ve
             std::sync::Arc::new("US".to_string()),
             std::sync::Arc::new(None),
             maknae_kernel::unavailable_egress(),
+            common::no_baseline(),
+            drain,
         )
         .await;
     });
@@ -347,6 +357,8 @@ async fn stalled_handshake_does_not_block_next_connection() {
             std::sync::Arc::new("US".to_string()),
             std::sync::Arc::new(None),
             maknae_kernel::unavailable_egress(),
+            common::no_baseline(),
+            common::serving(),
         )
         .await;
     });
@@ -443,6 +455,8 @@ async fn at_capacity_audit_does_not_block_accept_loop() {
             std::sync::Arc::new("US".to_string()),
             std::sync::Arc::new(None),
             maknae_kernel::unavailable_egress(),
+            common::no_baseline(),
+            common::serving(),
         )
         .await;
     });
@@ -535,6 +549,8 @@ async fn every_at_capacity_refusal_is_recorded_or_counted() {
             std::sync::Arc::new("US".to_string()),
             std::sync::Arc::new(None),
             maknae_kernel::unavailable_egress(),
+            common::no_baseline(),
+            common::serving(),
         )
         .await;
     });
@@ -595,6 +611,8 @@ async fn supervisor_exit_stops_the_loop_and_reports_failure() {
             std::sync::Arc::new("US".to_string()),
             std::sync::Arc::new(None),
             maknae_kernel::unavailable_egress(),
+            common::no_baseline(),
+            common::serving(),
         ),
     )
     .await
@@ -657,6 +675,8 @@ async fn shutdown_signal_yields_graceful_outcome() {
         std::sync::Arc::new("US".to_string()),
         std::sync::Arc::new(None),
         maknae_kernel::unavailable_egress(),
+        common::no_baseline(),
+        common::serving(),
     ));
     tx.send(()).expect("shutdown receiver must still be alive");
     let outcome = tokio::time::timeout(Duration::from_secs(5), loop_task)
@@ -741,4 +761,42 @@ async fn an_unresolvable_uid_carries_no_username_and_no_role() {
         .expect("a connection record");
     assert_eq!(conn.subject.user, None, "no user resolves for this uid");
     assert_eq!(conn.subject.role, None, "a connection is not a decision");
+}
+
+const DRAINING: &str = "draining to apply an accepted baseline";
+
+#[tokio::test]
+async fn a_connection_during_the_drain_is_closed_unserved() {
+    let (_tx, begun) = tokio::sync::watch::channel(maknae_kernel::Drain::Begun);
+    let recs = drive_with(
+        vec![ok_conn("maknae://d/plane/cli", 1002)],
+        cfg_with(64, 150),
+        begun,
+    )
+    .await;
+    let refused: Vec<&AuditRecord> = recs.iter().filter(|r| r.source.uid == 1002).collect();
+    assert_eq!(refused.len(), 1, "no handler ran: {recs:?}");
+    assert_eq!(
+        (
+            refused[0].event.as_str(),
+            refused[0].action.as_str(),
+            refused[0].outcome.result.as_str(),
+            refused[0].outcome.reason.as_str(),
+            refused[0].outcome.posture.as_str(),
+        ),
+        ("connection", "connect", "deny", DRAINING, "unavailable")
+    );
+    let stop = recs.iter().rfind(|r| r.action == "serve").unwrap();
+    assert_eq!(
+        stop.outcome.reason,
+        "shutdown: an accepted baseline was not applied"
+    );
+
+    let served = drive(
+        vec![ok_conn("maknae://d/plane/cli", 1002)],
+        cfg_with(64, 150),
+    )
+    .await;
+    assert!(served.iter().any(|r| r.source.uid == 1002));
+    assert!(!served.iter().any(|r| r.outcome.reason == DRAINING));
 }

@@ -604,6 +604,7 @@ impl Fixture {
             Duration::from_secs(2),
             maknae_security::Lane::Local,
             fds,
+            no_baseline(),
             attempt_caps,
         );
         let task = tokio::spawn(async move {
@@ -960,4 +961,27 @@ pub async fn read_frame<R: tokio::io::AsyncRead + Unpin>(
     };
     let (_, mut body) = maknae_proto::read_frame_zeroizing(r, &caps).await?;
     Ok(std::mem::take(&mut *body))
+}
+
+/// The baseline service for tests that never call it.
+pub struct NoBaseline;
+
+impl maknae_kernel::BaselineOps for NoBaseline {
+    fn show(&self) -> maknae_kernel::BoxFuture<'_, Result<maknae_proto::BaselineView, String>> {
+        Box::pin(async { Err("no baseline service".to_string()) })
+    }
+    fn accept<'a>(
+        &'a self,
+        _: &'a str,
+    ) -> maknae_kernel::BoxFuture<'a, maknae_kernel::AcceptAnswer> {
+        Box::pin(async { maknae_kernel::AcceptAnswer::Unavailable("no baseline service".into()) })
+    }
+}
+
+pub fn no_baseline() -> Arc<dyn maknae_kernel::BaselineOps> {
+    Arc::new(NoBaseline)
+}
+
+pub fn serving() -> tokio::sync::watch::Receiver<maknae_kernel::Drain> {
+    tokio::sync::watch::channel(maknae_kernel::Drain::Serving).1
 }

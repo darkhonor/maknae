@@ -154,7 +154,16 @@ pub enum ServeOutcome {
     /// exhausted (or it panicked/was cancelled) and the listener can no longer serve.
     /// The accept loop stopped BEFORE this variant is constructed.
     SupervisorExited(VaultError),
+    /// An accepted baseline that applies only at start was persisted; exit so the
+    /// supervisor restarts into it.
+    ApplyByRestart,
+    /// The drain for a restart-class accept began and the accept did not persist;
+    /// exit non-zero on the unchanged baseline.
+    AcceptAbandoned,
 }
+
+/// The exit status that asks the supervisor to restart into an accepted baseline.
+pub const APPLY_BY_RESTART_EXIT_CODE: u8 = 6;
 
 /// The pure `ServeOutcome` → process `ExitCode` mapping (codex round-5 P1). A
 /// graceful shutdown is `SUCCESS`; ANY supervisor exit is `FAILURE` — there is no
@@ -163,8 +172,39 @@ pub enum ServeOutcome {
 pub fn serve_outcome_to_exit_code(outcome: &ServeOutcome) -> ExitCode {
     match outcome {
         ServeOutcome::GracefulShutdown => ExitCode::SUCCESS,
-        ServeOutcome::SupervisorExited(_) => ExitCode::FAILURE,
+        ServeOutcome::SupervisorExited(_) | ServeOutcome::AcceptAbandoned => ExitCode::FAILURE,
+        ServeOutcome::ApplyByRestart => ExitCode::from(APPLY_BY_RESTART_EXIT_CODE),
     }
+}
+
+/// Where a restart-class accept stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Drain {
+    Serving,
+    Begun,
+    Applied,
+    Failed,
+}
+
+/// A stop the drain caused reports what the accept did; any other stop is unchanged.
+pub fn after_drain(outcome: ServeOutcome, drain: Drain) -> ServeOutcome {
+    match (outcome, drain) {
+        (ServeOutcome::GracefulShutdown, Drain::Applied) => ServeOutcome::ApplyByRestart,
+        (ServeOutcome::GracefulShutdown, Drain::Begun | Drain::Failed) => {
+            ServeOutcome::AcceptAbandoned
+        }
+        (outcome, _) => outcome,
+    }
+}
+
+/// A new connection is served only while serving; from `Begun` it is closed unserved.
+pub fn admits(drain: Drain) -> bool {
+    drain == Drain::Serving
+}
+
+/// The process may stop once the accept has persisted or failed, never mid-commit.
+pub fn may_stop(drain: Drain) -> bool {
+    matches!(drain, Drain::Applied | Drain::Failed)
 }
 
 use std::time::Duration;
@@ -684,6 +724,62 @@ mod tests {
             ))),
             ExitCode::FAILURE
         );
+    }
+
+    #[test]
+    fn after_drain_maps_each_state() {
+        assert!(matches!(
+            after_drain(ServeOutcome::GracefulShutdown, Drain::Serving),
+            ServeOutcome::GracefulShutdown
+        ));
+        assert!(matches!(
+            after_drain(ServeOutcome::GracefulShutdown, Drain::Applied),
+            ServeOutcome::ApplyByRestart
+        ));
+        assert!(matches!(
+            after_drain(ServeOutcome::GracefulShutdown, Drain::Begun),
+            ServeOutcome::AcceptAbandoned
+        ));
+        assert!(matches!(
+            after_drain(ServeOutcome::GracefulShutdown, Drain::Failed),
+            ServeOutcome::AcceptAbandoned
+        ));
+        assert!(matches!(
+            after_drain(
+                ServeOutcome::SupervisorExited(VaultError::RenewalExpired),
+                Drain::Applied
+            ),
+            ServeOutcome::SupervisorExited(_)
+        ));
+        assert!(matches!(
+            after_drain(ServeOutcome::AcceptAbandoned, Drain::Applied),
+            ServeOutcome::AcceptAbandoned
+        ));
+    }
+
+    #[test]
+    fn admission_stops_at_begun_and_stopping_waits_for_the_outcome() {
+        assert!(admits(Drain::Serving));
+        for d in [Drain::Begun, Drain::Applied, Drain::Failed] {
+            assert!(!admits(d), "{d:?}");
+        }
+        assert!(!may_stop(Drain::Serving));
+        assert!(!may_stop(Drain::Begun));
+        assert!(may_stop(Drain::Applied));
+        assert!(may_stop(Drain::Failed));
+    }
+
+    #[test]
+    fn apply_by_restart_exits_six_and_an_abandoned_accept_fails() {
+        assert_eq!(
+            serve_outcome_to_exit_code(&ServeOutcome::ApplyByRestart),
+            ExitCode::from(6)
+        );
+        assert_eq!(
+            serve_outcome_to_exit_code(&ServeOutcome::AcceptAbandoned),
+            ExitCode::FAILURE
+        );
+        assert_eq!(APPLY_BY_RESTART_EXIT_CODE, 6);
     }
 
     #[test]

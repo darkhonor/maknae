@@ -121,6 +121,14 @@ impl<B: Baseline> Composition<B> {
         Ok(())
     }
 
+    /// Holds the turn as a decision in flight does.
+    #[cfg(test)]
+    pub(crate) fn hold_live_turn(&self) -> std::sync::RwLockReadGuard<'_, ()> {
+        self.live_turn
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Baseline FIRST — see the module doc.
     fn operands(&self) -> [&dyn Authorizer; 2] {
         [&self.baseline, &self.ceiling]

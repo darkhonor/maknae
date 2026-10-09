@@ -6,6 +6,7 @@ use std::sync::{Arc, PoisonError, RwLock};
 
 use maknae_config::{canonical_json, value_from_canonical_json, BaselineSections, Value};
 use maknae_graph::identity::hex;
+use maknae_proto::BaselineView;
 use maknae_state::envelope::sha256;
 
 pub const ROOT_FILE: &str = "root-file";
@@ -439,6 +440,77 @@ pub fn journal_line(p: &PendingSet) -> String {
 /// The 12-hex correlation prefix the audit trail carries.
 pub fn short(hash: &str) -> &str {
     hash.get(..SHORT_HEX).unwrap_or(hash)
+}
+
+/// What `admin.baseline.show` says of an invalid set in place of its cause.
+pub const INVALID_SHOWN: &str =
+    "the file does not validate; the cause is in the audit trail and the daemon's journal";
+
+fn view(source: &str, hash: &str, state: &str, apply: &str, changes: Vec<String>) -> BaselineView {
+    BaselineView {
+        source: source.into(),
+        hash: hash.into(),
+        state: state.into(),
+        apply: apply.into(),
+        changes,
+    }
+}
+
+fn apply_name(p: &PendingSet) -> &'static str {
+    match class(p) {
+        "invalid" => "",
+        c => c,
+    }
+}
+
+/// The only reply that carries the full hash: the operand an accept must name.
+pub fn show_view(
+    p: Option<&PendingSet>,
+    accepted: &BaselineSections,
+) -> Result<BaselineView, String> {
+    let Some(p) = p else {
+        return Ok(view("", "", "none", "", Vec::new()));
+    };
+    match &p.state {
+        PendingState::Valid { proposed, .. } => {
+            let doc = |s| maknae_config::Document::from_baseline(s).map_err(|e| e.to_string());
+            let changes = maknae_config::baseline_change_lines(&doc(accepted)?, &doc(proposed)?);
+            Ok(view(p.source, &p.hash, "pending", apply_name(p), changes))
+        }
+        PendingState::Invalid { .. } => Ok(view(
+            p.source,
+            &p.hash,
+            "invalid",
+            "",
+            vec![INVALID_SHOWN.into()],
+        )),
+    }
+}
+
+pub fn accepted_view(p: &PendingSet) -> BaselineView {
+    let sections = match &p.state {
+        PendingState::Valid { sections, .. } => sections.clone(),
+        PendingState::Invalid { .. } => Vec::new(),
+    };
+    view(p.source, "", "accepted", apply_name(p), sections)
+}
+
+/// The view and the corrective record's reason for a refused accept; neither names a hash.
+pub fn refused_view(r: &AcceptRefusal, current: Option<&PendingSet>) -> (BaselineView, String) {
+    let source = current.map_or("", |p| p.source);
+    let (state, why) = match r {
+        AcceptRefusal::Stale => (
+            "stale",
+            "the named change set is not the pending one; show it again",
+        ),
+        AcceptRefusal::Malformed => ("stale", "the hash is not 64 lowercase hex characters"),
+        AcceptRefusal::NothingPending => ("none", "nothing is pending"),
+        AcceptRefusal::Invalid => ("invalid", "the pending change set does not validate"),
+    };
+    (
+        view(source, "", state, "", Vec::new()),
+        format!("baseline accept refused: {why}"),
+    )
 }
 
 /// The accepted baseline this process runs and the set pending against it, as last published.
@@ -1247,5 +1319,95 @@ mod tests {
             moved_event(from, to),
             "audit trail moved from /var/log/maknae/audit.jsonl to /var/log/maknae/audit-2.jsonl"
         );
+    }
+
+    #[test]
+    fn show_view_renders_through_the_classifier() {
+        let acc = s(&[("core", CORE), ("vault", VAULT_A)]);
+        let none = show_view(None, &acc).unwrap();
+        assert_eq!(
+            (none.state.as_str(), none.hash.as_str(), none.apply.as_str()),
+            ("none", "", "")
+        );
+        assert!(none.source.is_empty() && none.changes.is_empty());
+
+        let ceiling = pending(&acc, &Ok(s(&[("core", CORE_SECRET), ("vault", VAULT_A)]))).unwrap();
+        let v = show_view(Some(&ceiling), &acc).unwrap();
+        assert_eq!(
+            (
+                v.source.as_str(),
+                v.hash.as_str(),
+                v.state.as_str(),
+                v.apply.as_str()
+            ),
+            (ROOT_FILE, ceiling.hash.as_str(), "pending", "live")
+        );
+        assert_eq!(v.changes, [maknae_config::SUPPRESSED_CHANGED]);
+        assert!(!v
+            .changes
+            .iter()
+            .any(|l| l.starts_with("core.handling") || l.contains("SECRET")));
+
+        let vault = pending(&acc, &Ok(s(&[("core", CORE), ("vault", VAULT_B)]))).unwrap();
+        let v = show_view(Some(&vault), &acc).unwrap();
+        assert_eq!(v.apply, "restart");
+        assert!(
+            v.changes
+                .iter()
+                .any(|l| l.starts_with("vault.addr: ") && l.contains("https://b:8200")),
+            "{:?}",
+            v.changes
+        );
+
+        let invalid = pending(&acc, &Err("CAUSE-SENTINEL".into())).unwrap();
+        let v = show_view(Some(&invalid), &acc).unwrap();
+        assert_eq!(
+            (v.state.as_str(), v.hash.as_str(), v.apply.as_str()),
+            ("invalid", invalid.hash.as_str(), "")
+        );
+        assert_eq!(v.changes, [INVALID_SHOWN]);
+    }
+
+    #[test]
+    fn refused_views_never_carry_the_current_hash() {
+        let acc = s(&[("core", CORE)]);
+        let current = pending(&acc, &Ok(s(&[("core", CORE_SECRET)]))).unwrap();
+        for (r, state, why) in [
+            (AcceptRefusal::Stale, "stale", "show it again"),
+            (AcceptRefusal::Malformed, "stale", "64 lowercase hex"),
+            (AcceptRefusal::NothingPending, "none", "nothing is pending"),
+            (AcceptRefusal::Invalid, "invalid", "does not validate"),
+        ] {
+            let (view, reason) = refused_view(&r, Some(&current));
+            assert_eq!(view.state, state, "{r:?}");
+            assert!(view.hash.is_empty() && view.apply.is_empty() && view.changes.is_empty());
+            assert!(
+                reason.starts_with("baseline accept refused: ") && reason.contains(why),
+                "{reason}"
+            );
+            assert!(!reason.contains(&current.hash[..SHORT_HEX]), "{reason}");
+        }
+        assert_eq!(refused_view(&AcceptRefusal::Stale, None).0.source, "");
+        assert_eq!(
+            refused_view(&AcceptRefusal::Stale, Some(&current)).0.source,
+            ROOT_FILE
+        );
+    }
+
+    #[test]
+    fn an_accepted_view_names_the_class_and_never_the_hash() {
+        let acc = s(&[("core", CORE)]);
+        let set = pending(&acc, &Ok(s(&[("core", CORE_SECRET)]))).unwrap();
+        let v = accepted_view(&set);
+        assert_eq!(
+            (
+                v.source.as_str(),
+                v.state.as_str(),
+                v.apply.as_str(),
+                v.hash.as_str()
+            ),
+            (ROOT_FILE, "accepted", "live", "")
+        );
+        assert_eq!(v.changes, ["core"]);
     }
 }

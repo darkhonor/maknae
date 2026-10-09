@@ -1350,6 +1350,7 @@ async fn failed_grant_or_ack_write_stops_before_accepting_more_client_reports() 
             Duration::from_secs(2),
             maknae_security::Lane::Local,
             fds,
+            common::no_baseline(),
         ));
         let request = maknae_proto::encode_request(&maknae_proto::Request {
             protocol_version: maknae_proto::PROTOCOL_VERSION,

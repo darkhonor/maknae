@@ -14,9 +14,9 @@ use maknae_state::envelope::{
     self, ciphertext_digest, EnvelopeError, WrappingKey, ENVELOPE_VERSION, KEY_LEN,
 };
 use maknae_state::store::{
-    boot, commit, remedy, BootAudit, BootInputs, BootOutcome, BootReport, Committed, Migration,
-    Remedy, StateDir, StoreError, INITIATOR_OPERATOR, INITIATOR_ROOT_FILE, INITIATOR_SEED,
-    MARKER_FILE, MAX_STORE_BYTES, REJECTED_PREFIX, STORE_FILE,
+    boot, commit, commit_accept, remedy, BootAudit, BootInputs, BootOutcome, BootReport, Committed,
+    Migration, Remedy, StateDir, StoreError, INITIATOR_OPERATOR, INITIATOR_ROOT_FILE,
+    INITIATOR_SEED, MARKER_FILE, MAX_STORE_BYTES, REJECTED_PREFIX, STORE_FILE,
 };
 use maknae_state::vocabulary;
 use std::fs;
@@ -3691,6 +3691,58 @@ async fn an_operator_commit_records_the_operator_initiator() {
     assert_eq!(audit.events[0], Event::Transition(2, "operator".into()));
     assert_eq!(c.revision, 2);
     assert_eq!(stored_baseline(&fx, &k), Some(bl(A)));
+}
+
+#[tokio::test]
+async fn an_accept_changes_the_baseline_after_recording_why_and_nothing_else_does() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let dir = fx.dir();
+    run(&dir, &k, None).await.0.unwrap();
+    let before = fx.store();
+    let i = inputs();
+    let build = |b: Option<&BaselineLayer>| {
+        identity::build(
+            &i.layer,
+            b,
+            &i.compiled,
+            i.digest,
+            2,
+            ProvenanceKind::Operator,
+        )
+        .unwrap()
+    };
+    for (next, events) in [
+        (build(Some(&bl(B))), vec![]),
+        (build(None), vec!["why".to_string()]),
+    ] {
+        let mut audit = Recorder::default();
+        let r = commit_accept(&dir, &k, &next, &events, &mut audit).await;
+        assert_eq!(r.unwrap_err(), StoreError::BaselineUnrecorded);
+        assert!(audit.events.is_empty(), "{:?}", audit.events);
+        assert_eq!(fx.store(), before);
+    }
+    let mut audit = Recorder {
+        fail_baseline: true,
+        ..Recorder::default()
+    };
+    let r = commit_accept(&dir, &k, &build(Some(&bl(B))), &["why".into()], &mut audit).await;
+    assert!(matches!(r, Err(StoreError::Audit(_))), "{r:?}");
+    assert_eq!(fx.store(), before);
+    let mut audit = Recorder::default();
+    let c = commit_accept(&dir, &k, &build(Some(&bl(B))), &["why".into()], &mut audit)
+        .await
+        .unwrap();
+    assert_eq!(
+        audit.events[..2],
+        [
+            Event::Baseline(2, vec!["why".into()]),
+            Event::Transition(2, INITIATOR_OPERATOR.into())
+        ]
+    );
+    assert!(matches!(audit.events[2], Event::Checkpoint(2, ..)));
+    assert_eq!(c.revision, 2);
+    assert_eq!(stored_baseline(&fx, &k), Some(bl(B)));
 }
 
 #[tokio::test]

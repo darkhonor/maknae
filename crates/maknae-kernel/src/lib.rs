@@ -48,8 +48,9 @@ pub use egress::{
 pub use egress_socket::SocketEgress;
 pub use groupres::*;
 pub use handler::{
-    admitted_user_for_test, build_authz_request, build_whoami, dispatch_verb, is_filesystem_verb,
-    may_respond, serve_outcome_to_exit_code, Dispatch, ServeOutcome, KERNEL_ACTIONS,
+    admits, admitted_user_for_test, after_drain, build_authz_request, build_whoami, dispatch_verb,
+    is_filesystem_verb, may_respond, may_stop, serve_outcome_to_exit_code, Dispatch, Drain,
+    ServeOutcome, APPLY_BY_RESTART_EXIT_CODE, KERNEL_ACTIONS,
 };
 pub use live::{LiveConfig, LiveValues};
 pub use mutation::AttemptCaps;
@@ -61,8 +62,8 @@ pub use provider_choice::{
     admit_choice, provider_authority, AdmittedChoice, ChoiceRefusal, ProviderAuthority,
 };
 pub use run::{
-    accept_loop, handle, handle_with_attempt_caps, run, ConfigView, Conn, KernelGraphStatus,
-    PlaneAccept, WhereCtx, MAX_SUBJECT_USER_BYTES,
+    accept_loop, handle, handle_with_attempt_caps, run, AcceptAnswer, BaselineOps, BoxFuture,
+    ConfigView, Conn, KernelGraphStatus, PlaneAccept, WhereCtx, MAX_SUBJECT_USER_BYTES,
 };
 
 #[used]

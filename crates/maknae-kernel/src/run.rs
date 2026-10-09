@@ -64,13 +64,13 @@ use crate::authz::{admission_facts, authorize_connection, ConnDecision, HOME_RES
 use crate::baseline_check::{Invalid, Mode};
 use crate::blocking_guard::{
     within_blocking, BlockingBreaker, BreakerAdmission, BreakerTransition, AUDIT_APPEND_TIMEOUT,
-    SCAN_BACK_TIMEOUT,
+    BLOCKING_OPERATION_TIMEOUT, SCAN_BACK_TIMEOUT,
 };
 use crate::boot_gate::authz_boot_gate;
 use crate::groupres::{maknae_gid, uid_in_maknae_group};
 use crate::handler::{
     build_authz_request, build_whoami, discharge_plan, dispatch_verb, lexical_pregate, may_respond,
-    verb_to_action, Dispatch, ServeOutcome, AUTHZ_DECIDE_TIMEOUT,
+    verb_to_action, Dispatch, Drain, ServeOutcome, AUTHZ_DECIDE_TIMEOUT,
 };
 use maknae_proto::{encode_response_zeroizing, ProtoErrCode, ProtoError};
 use maknae_security::{
@@ -96,6 +96,72 @@ fn group_lookup_breaker() -> Arc<tokio::sync::Mutex<BlockingBreaker>> {
 
 fn egress_send_breaker() -> Arc<tokio::sync::Mutex<BlockingBreaker>> {
     Arc::clone(EGRESS_SEND_BREAKER.get_or_init(|| Arc::new(Default::default())))
+}
+
+static BASELINE_BREAKER: OnceLock<Arc<tokio::sync::Mutex<BlockingBreaker>>> = OnceLock::new();
+
+fn baseline_breaker() -> Arc<tokio::sync::Mutex<BlockingBreaker>> {
+    Arc::clone(BASELINE_BREAKER.get_or_init(|| Arc::new(Default::default())))
+}
+
+pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+#[derive(Debug)]
+pub enum AcceptAnswer {
+    /// Respond with this view; `corrective` is the deny record's reason when the accept was refused.
+    View {
+        view: maknae_proto::BaselineView,
+        corrective: Option<String>,
+    },
+    /// Answer Internal after a `deny`/`unavailable` corrective record with this reason.
+    Unavailable(String),
+}
+
+/// `admin.baseline.show` and `admin.baseline.accept`, as a request reaches them.
+pub trait BaselineOps: Send + Sync {
+    fn show(&self) -> BoxFuture<'_, Result<maknae_proto::BaselineView, String>>;
+    fn accept<'a>(&'a self, hash: &'a str) -> BoxFuture<'a, AcceptAnswer>;
+}
+
+/// Blocking baseline work: admitted by the baseline breaker, bounded, a timeout counted.
+async fn baseline_blocking<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    let breaker = baseline_breaker();
+    let admission = { breaker.lock().await.begin_attempt_at(Instant::now()) };
+    match admission {
+        BreakerAdmission::RefuseOpen => Err("the baseline circuit breaker is open".into()),
+        BreakerAdmission::RefuseAtCapacity => {
+            Err("the baseline blocking worker budget is exhausted".into())
+        }
+        BreakerAdmission::Admit => {
+            match tokio::time::timeout(
+                BLOCKING_OPERATION_TIMEOUT,
+                tokio::task::spawn_blocking(work),
+            )
+            .await
+            {
+                Ok(joined) => {
+                    breaker.lock().await.record_success();
+                    joined.map_err(|e| format!("the baseline check failed: {e}"))
+                }
+                Err(_elapsed) => {
+                    if breaker.lock().await.record_timeout_at(Instant::now())
+                        == BreakerTransition::Tripped
+                    {
+                        eprintln!(
+                            "maknaed: baseline circuit breaker tripped after repeated {}s blocking timeouts",
+                            BLOCKING_OPERATION_TIMEOUT.as_secs()
+                        );
+                    }
+                    Err(format!(
+                        "the baseline check did not finish within {}s",
+                        BLOCKING_OPERATION_TIMEOUT.as_secs()
+                    ))
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -438,6 +504,7 @@ pub async fn handle<S, E, P>(
     authz_decide_timeout: Duration,
     lane: maknae_security::Lane,
     delegated: maknae_io::DelegatedFds,
+    baseline: Arc<dyn BaselineOps>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     E: AuditEmit + Send + Sync + 'static,
@@ -463,6 +530,7 @@ pub async fn handle<S, E, P>(
         authz_decide_timeout,
         lane,
         delegated,
+        baseline,
         crate::mutation::AttemptCaps::default(),
     )
     .await
@@ -530,6 +598,8 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     // request per connection, which is what today's per-invocation CLI sends;
     // pipelining on macOS is uncharacterised (ADR-0009).
     delegated: maknae_io::DelegatedFds,
+    // `admin.baseline.show` and `admin.baseline.accept`.
+    baseline: Arc<dyn BaselineOps>,
     attempt_caps: crate::mutation::AttemptCaps,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -1187,7 +1257,9 @@ pub async fn handle_with_attempt_caps<S, E, P>(
         | Dispatch::WhoamiRequested
         | Dispatch::ConfigShowRequested
         | Dispatch::StatusRequested
-        | Dispatch::SubjectListRequested => {
+        | Dispatch::SubjectListRequested
+        | Dispatch::BaselineShowRequested
+        | Dispatch::BaselineAcceptRequested => {
             let appended = emit_request_outcome(
                 &emit,
                 &host,
@@ -1384,11 +1456,119 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                         }
                     }
                 }
-                Dispatch::NoBehaviour
-                | Dispatch::MutationRequested
-                | Dispatch::PromptRequested
-                | Dispatch::BaselineShowRequested
-                | Dispatch::BaselineAcceptRequested => {
+                Dispatch::BaselineShowRequested => match baseline.show().await {
+                    Ok(view) => Payload::Baseline(view),
+                    Err(why) => {
+                        let corrected = emit_request_outcome(
+                            &emit,
+                            &host,
+                            &socket,
+                            peer_uid,
+                            &peer_uri,
+                            peer_user.as_deref(),
+                            decided_role,
+                            decided_rule.as_ref(),
+                            session_id,
+                            seq.next(),
+                            verb_to_action(&request.verb),
+                            None,
+                            None,
+                            "deny",
+                            &format!("baseline show unavailable: {why}"),
+                            "unavailable",
+                            &au3_1,
+                        )
+                        .await;
+                        if may_respond(corrected) {
+                            write_error_bounded(
+                                &mut stream,
+                                &cfg,
+                                class,
+                                ProtoErrCode::Internal,
+                                "baseline show unavailable",
+                            )
+                            .await;
+                        }
+                        close_bounded(&mut stream).await;
+                        return;
+                    }
+                },
+                Dispatch::BaselineAcceptRequested => {
+                    let Verb::AdminBaselineAccept { hash } = &request.verb else {
+                        unreachable!("dispatch keyed on the verb")
+                    };
+                    match baseline.accept(hash).await {
+                        AcceptAnswer::View {
+                            view,
+                            corrective: None,
+                        } => Payload::Baseline(view),
+                        AcceptAnswer::View {
+                            view,
+                            corrective: Some(why),
+                        } => {
+                            let corrected = emit_request_outcome(
+                                &emit,
+                                &host,
+                                &socket,
+                                peer_uid,
+                                &peer_uri,
+                                peer_user.as_deref(),
+                                decided_role,
+                                decided_rule.as_ref(),
+                                session_id,
+                                seq.next(),
+                                verb_to_action(&request.verb),
+                                None,
+                                None,
+                                "deny",
+                                &why,
+                                "unauthorized",
+                                &au3_1,
+                            )
+                            .await;
+                            if !may_respond(corrected) {
+                                close_bounded(&mut stream).await;
+                                return;
+                            }
+                            Payload::Baseline(view)
+                        }
+                        AcceptAnswer::Unavailable(why) => {
+                            let corrected = emit_request_outcome(
+                                &emit,
+                                &host,
+                                &socket,
+                                peer_uid,
+                                &peer_uri,
+                                peer_user.as_deref(),
+                                decided_role,
+                                decided_rule.as_ref(),
+                                session_id,
+                                seq.next(),
+                                verb_to_action(&request.verb),
+                                None,
+                                None,
+                                "deny",
+                                &why,
+                                "unavailable",
+                                &au3_1,
+                            )
+                            .await;
+                            if may_respond(corrected) {
+                                write_error_bounded(
+                                    &mut stream,
+                                    &cfg,
+                                    class,
+                                    ProtoErrCode::Internal,
+                                    &why,
+                                )
+                                .await;
+                            }
+                            close_bounded(&mut stream).await;
+                            return;
+                        }
+                    }
+                }
+                Dispatch::NoBehaviour | Dispatch::MutationRequested | Dispatch::PromptRequested => {
                     unreachable!("outer match routes unprepared operations")
                 }
             };
@@ -1444,43 +1624,6 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                     .await
                 }
             }
-        }
-        Dispatch::BaselineShowRequested | Dispatch::BaselineAcceptRequested => {
-            let outcome = |posture: &'static str, reason: &'static str, result: &'static str| {
-                emit_request_outcome(
-                    &emit,
-                    &host,
-                    &socket,
-                    peer_uid,
-                    &peer_uri,
-                    peer_user.as_deref(),
-                    decided_role,
-                    decided_rule.as_ref(),
-                    session_id,
-                    seq.next(),
-                    verb_to_action(&request.verb),
-                    None,
-                    None,
-                    posture,
-                    reason,
-                    result,
-                    &au3_1,
-                )
-            };
-            if may_respond(outcome("permit", "authorized", "authorized").await)
-                && may_respond(outcome("deny", "baseline service not wired", "unavailable").await)
-            {
-                write_error_bounded(
-                    &mut stream,
-                    &cfg,
-                    class,
-                    ProtoErrCode::Internal,
-                    "baseline service not wired",
-                )
-                .await;
-            }
-            close_bounded(&mut stream).await;
-            return;
         }
         Dispatch::PromptRequested => {
             let Verb::SessionPrompt {
@@ -2399,6 +2542,8 @@ pub async fn accept_loop<A, E, P>(
     classification_policy_name: Arc<String>,
     kernel_graph: Arc<Option<KernelGraphStatus>>,
     egress: Arc<dyn crate::egress::Egress>,
+    baseline: Arc<dyn BaselineOps>,
+    drain: tokio::sync::watch::Receiver<Drain>,
 ) -> ServeOutcome
 where
     A: PlaneAccept + Send + Sync + 'static,
@@ -2475,6 +2620,17 @@ where
                     }
                     Ok((raw, peer_creds)) => {
                         let session_id = session_ids.next_session();
+                        if !crate::handler::admits(*drain.borrow()) {
+                            drop(raw);
+                            let rec = make_record(
+                                "connection", &wctx.host, &wctx.socket, peer_creds.uid,
+                                peer_creds.gid, peer_creds.pid, None, session_id, 1,
+                                "connect", None, "deny", "draining to apply an accepted baseline",
+                                "unavailable", &wctx.au3_1,
+                            );
+                            offload_refusal(&atcap_audit_tx, rec, &atcap_audit_dropped);
+                            continue;
+                        }
                         match Arc::clone(&sem).try_acquire_owned() {
                             // At capacity: fast-close + audit from the captured peer-creds
                             // (no handshake ran, so there is no verified URI-SAN yet). Do NOT
@@ -2506,6 +2662,7 @@ where
                                     Arc::clone(&classification_policy_name);
                                 let kernel_graph = Arc::clone(&kernel_graph);
                                 let egress = Arc::clone(&egress);
+                                let baseline = Arc::clone(&baseline);
                                 handlers.spawn(async move {
                                     let _permit = permit; // held for the connection's life
                                     // The bounded TLS handshake runs HERE, under the permit —
@@ -2617,6 +2774,7 @@ where
                                                 // not of anything read off the wire.
                                                 maknae_security::Lane::Local,
                                                 conn.delegated,
+                                                baseline,
                                             )
                                             .await;
                                         }
@@ -2647,15 +2805,23 @@ where
     };
 
     // #265 A1 (AU-2): the stop, with its reason. Bounded like the drains below.
-    let (result, reason, posture) = match &outcome {
-        ServeOutcome::GracefulShutdown => {
-            ("permit", "shutdown: signal received".to_string(), "stopped")
-        }
-        ServeOutcome::SupervisorExited(e) => (
+    let (result, reason, posture) = match (&outcome, *drain.borrow()) {
+        (ServeOutcome::SupervisorExited(e), _) => (
             "deny",
             format!("shutdown: credential supervisor exited: {e}"),
             "unavailable",
         ),
+        (_, Drain::Applied) => (
+            "permit",
+            "shutdown: restarting to apply an accepted baseline".to_string(),
+            "stopped",
+        ),
+        (_, Drain::Begun | Drain::Failed) => (
+            "deny",
+            "shutdown: an accepted baseline was not applied".to_string(),
+            "unavailable",
+        ),
+        _ => ("permit", "shutdown: signal received".to_string(), "stopped"),
     };
     let stop = make_record(
         "shutdown",
@@ -3093,6 +3259,8 @@ struct GraphBootAudit<'a, E> {
     ctx: &'a BootCtx<'a>,
     scanned_bytes: u64,
     bound: Duration,
+    /// A restart-class accept: the drain begins once its transition intent is recorded.
+    drain: Option<&'a tokio::sync::watch::Sender<Drain>>,
 }
 
 impl<'a, E: AuditEmit + Send + Sync> GraphBootAudit<'a, E> {
@@ -3179,7 +3347,14 @@ impl<E: AuditEmit + Send + Sync> BootAudit for GraphBootAudit<'_, E> {
     ) -> impl Future<Output = Result<(), StoreError>> + Send {
         let reason = format!("intent recorded ({initiator})");
         let rec = self.intent(GRAPH_TRANSITION_ACTION, &reason, revision, "transitioning");
-        self.write_ahead(rec)
+        let (recorded, drain) = (self.write_ahead(rec), self.drain);
+        async move {
+            recorded.await?;
+            if let Some(drain) = drain {
+                drain.send_replace(Drain::Begun);
+            }
+            Ok(())
+        }
     }
 
     fn released(
@@ -3564,6 +3739,7 @@ async fn boot_kernel_graph(
         ctx,
         scanned_bytes,
         bound: AUDIT_APPEND_TIMEOUT,
+        drain: None,
     };
     let report = maknae_state::store::boot(&dir, &key, checkpoint, &mut audit, unix_now(), inputs)
         .await
@@ -3650,6 +3826,10 @@ struct Reloader<B: maknae_authz_basic::Baseline, E> {
     files: FileReader,
     env: Arc<dyn crate::baseline_check::Env>,
     baseline: crate::baseline::BaselineStatus,
+    /// Where a restart-class accept stands; the serve stops once it is applied or failed.
+    drain: tokio::sync::watch::Sender<Drain>,
+    /// How long an accept waits for a reload holding the turn.
+    turn_wait: Duration,
     #[cfg(test)]
     load_gate: Option<Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>>,
 }
@@ -3711,6 +3891,301 @@ where
             ),
             crate::reload::Stop::Repeated => {}
         }
+    }
+}
+
+impl<B, E> Reloader<B, E>
+where
+    B: maknae_authz_basic::Baseline,
+    E: AuditEmit + Send + Sync + 'static,
+{
+    /// The published accepted baseline and the set the files hold against it, read now.
+    async fn read_pending(
+        &self,
+    ) -> Result<
+        (
+            Arc<crate::baseline::BaselineState>,
+            Option<crate::baseline::PendingSet>,
+        ),
+        String,
+    > {
+        let state = self.baseline.current();
+        let trail = accepted_trail(&state.accepted, &self.config_dir);
+        let (dir, files, env) = (self.config_dir.clone(), self.files, Arc::clone(&self.env));
+        let file =
+            baseline_blocking(move || baseline_file(&dir, files, env.as_ref(), trail.as_deref()))
+                .await?;
+        let set = crate::baseline::pending(&state.accepted, &file);
+        Ok((state, set))
+    }
+
+    async fn accept_named(&self, hash: &str) -> AcceptAnswer {
+        let Ok(turn) = tokio::time::timeout(self.turn_wait, self.lock.lock()).await else {
+            return AcceptAnswer::Unavailable(
+                "baseline accept refused: busy; a reload holds the turn".into(),
+            );
+        };
+        if *self.stopping.borrow() {
+            return AcceptAnswer::Unavailable("baseline accept refused: shutting down".into());
+        }
+        let (state, current) = match self.read_pending().await {
+            Ok(read) => read,
+            Err(why) => {
+                return AcceptAnswer::Unavailable(format!("baseline accept refused: {why}"))
+            }
+        };
+        let (plan, set) = match (
+            crate::baseline::decide_accept(current.as_ref(), hash),
+            current,
+        ) {
+            (Ok(plan), Some(set)) => (plan, set),
+            (Err(r), current) => {
+                let (view, reason) = crate::baseline::refused_view(&r, current.as_ref());
+                return AcceptAnswer::View {
+                    view,
+                    corrective: Some(reason),
+                };
+            }
+            (Ok(_), None) => {
+                return AcceptAnswer::Unavailable(
+                    "baseline accept refused: nothing is pending".into(),
+                )
+            }
+        };
+        let (accepted, proposed) = (state.accepted.clone(), plan.proposed.clone());
+        let (dir, env) = (self.config_dir.clone(), Arc::clone(&self.env));
+        let checked = baseline_blocking(move || {
+            let doc =
+                maknae_config::Document::from_baseline(&proposed).map_err(|e| e.to_string())?;
+            let v = crate::baseline_check::validate(doc, Mode::Accept, &dir, env.as_ref())
+                .map_err(|e| e.cause().to_string())?;
+            crate::baseline_check::check_sockets(&accepted, &v, env.as_ref())
+                .map_err(|e| e.cause().to_string())?;
+            Ok::<_, String>(v)
+        })
+        .await;
+        let v = match checked {
+            Err(why) => {
+                return AcceptAnswer::Unavailable(format!("baseline accept refused: {why}"))
+            }
+            Ok(Err(cause)) => {
+                eprintln!("maknaed: baseline accept refused: {} {cause}", set.source);
+                let (view, _) = crate::baseline::refused_view(
+                    &crate::baseline::AcceptRefusal::Invalid,
+                    Some(&set),
+                );
+                return AcceptAnswer::View {
+                    view,
+                    corrective: Some(format!("baseline accept refused: {cause}")),
+                };
+            }
+            Ok(Ok(v)) => v,
+        };
+        let persisted = Arc::clone(
+            &self
+                .persisted
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        let stored = match maknae_graph::identity::extract(&persisted) {
+            Ok(stored) => stored,
+            Err(e) => return AcceptAnswer::Unavailable(format!("baseline accept refused: {e}")),
+        };
+        let (system, ceiling) = crate::baseline_check::classification_of(&v);
+        let moved_from = accepted_trail(&state.accepted, &self.config_dir)
+            .filter(|running| *running != v.audit.jsonl_path)
+            .map(|running| running.display().to_string());
+        let next_baseline = BaselineLayer {
+            sha256: crate::baseline::accepted_digest(&plan.proposed),
+            sections: plan.proposed.clone().into_inner(),
+            system,
+            ceiling,
+            moved_from,
+        };
+        let store_revision = self.revision.load(AtomicOrdering::Acquire);
+        let next = match maknae_graph::identity::build(
+            &stored.layer,
+            Some(&next_baseline),
+            &self.vocabulary.persisted,
+            self.vocabulary.digest,
+            store_revision.saturating_add(1),
+            maknae_graph::record::ProvenanceKind::Operator,
+        ) {
+            Ok(next) => next,
+            Err(e) => return AcceptAnswer::Unavailable(format!("baseline accept refused: {e}")),
+        };
+        let restart = plan.apply == crate::baseline::Apply::Restart;
+        let class = if restart { "restart" } else { "live" };
+        let short = crate::baseline::short(&set.hash);
+        let intent = format!(
+            "accept intent recorded (operator): sha256:{short}; apply: {class}; sections: {}",
+            plan.sections.join(",")
+        );
+        let seq = Seq::new();
+        let ctx = BootCtx {
+            event: "accept",
+            host: &self.host,
+            socket: &self.socket,
+            euid: self.euid,
+            session_id: self.session_ids.next_session(),
+            seq: &seq,
+            au3_1: &self.au3_1,
+        };
+        let mut audit = GraphBootAudit {
+            sink: self.sink.as_ref(),
+            ctx: &ctx,
+            scanned_bytes: 0,
+            bound: self.append_bound,
+            drain: restart.then_some(&self.drain),
+        };
+        eprintln!(
+            "maknaed: baseline: accepting the {} change set (apply: {class})",
+            set.source
+        );
+        let committed = match maknae_state::store::commit_accept(
+            &self.dir,
+            &self.key,
+            &next,
+            &[intent],
+            &mut audit,
+        )
+        .await
+        {
+            Ok(committed) => committed,
+            Err(e) if *self.drain.borrow() == Drain::Begun => {
+                self.drain.send_replace(Drain::Failed);
+                eprintln!(
+                    "maknaed: baseline accept failed after the drain began: {e}; exiting on the unchanged baseline"
+                );
+                return AcceptAnswer::Unavailable(format!("baseline accept failed: persist: {e}"));
+            }
+            Err(e) => {
+                let why = match e {
+                    StoreError::Audit(m) => format!("the intent was not recorded: {m}"),
+                    e => format!("persist: {e}"),
+                };
+                eprintln!("maknaed: baseline accept refused: {why}");
+                return AcceptAnswer::Unavailable(format!("baseline accept refused: {why}"));
+            }
+        };
+        for e in [&committed.durability_error, &committed.checkpoint_error]
+            .into_iter()
+            .flatten()
+        {
+            eprintln!(
+                "maknaed: baseline accept at revision {}: {e}",
+                committed.revision
+            );
+        }
+        *self
+            .persisted
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(next);
+        self.revision
+            .store(committed.revision, AtomicOrdering::Release);
+        self.baseline.publish(crate::baseline::BaselineState {
+            accepted: plan.proposed.clone(),
+            pending: None,
+        });
+        let applied = if restart {
+            self.drain.send_replace(Drain::Applied);
+            Ok("restarting to apply")
+        } else {
+            let before = self.authorizer.baseline().principal().uid;
+            let principal = v.principal.uid;
+            let pdp = Arc::clone(&self.authorizer);
+            match within_blocking(2 * BLOCKING_OPERATION_TIMEOUT, move || {
+                crate::live::install(&pdp, &v)
+            })
+            .await
+            .and_then(|installed| installed)
+            {
+                Ok(()) => {
+                    if principal != before {
+                        self.republish_principal_admin(&ctx, principal).await;
+                    }
+                    Ok("applied live")
+                }
+                Err(e) => Err(e),
+            }
+        };
+        drop(turn);
+        let revision = committed.revision;
+        let (result, reason, posture) = match &applied {
+            Ok(how) => (
+                "permit",
+                format!("accepted sha256:{short} at revision {revision}; {how}"),
+                "authorized",
+            ),
+            Err(e) => (
+                "deny",
+                format!(
+                    "accepted sha256:{short} at revision {revision}; not installed: {e}; the next start applies it"
+                ),
+                "unavailable",
+            ),
+        };
+        eprintln!(
+            "maknaed: baseline: {}",
+            reason.replace(&format!("sha256:{short} "), "")
+        );
+        let rec = ctx.record(GRAPH_BASELINE_ACTION, result, &reason, posture, None);
+        if let Err(e) = self.sink.emit_within(&rec, self.append_bound).await {
+            eprintln!("maknaed: AUDIT WRITE FAILED on the baseline accept outcome: {e}");
+        }
+        match applied {
+            Ok(_) => AcceptAnswer::View {
+                view: crate::baseline::accepted_view(&set),
+                corrective: None,
+            },
+            Err(_) => AcceptAnswer::Unavailable(
+                "baseline accept failed: the accepted baseline was persisted and could not be installed; the next start applies it"
+                    .into(),
+            ),
+        }
+    }
+
+    /// With no explicit bindings the principal holds admin, so a new principal is
+    /// published and recorded as the identity it now is.
+    async fn republish_principal_admin(&self, ctx: &BootCtx<'_>, uid: u32) {
+        let snapshot = self.authorizer.baseline().snapshot();
+        if snapshot.subjects().is_some() {
+            return;
+        }
+        let promoted = maknae_authz_basic::IdentityProblem::PrincipalAdmin { uid };
+        let carried: Vec<_> = self
+            .identity
+            .current()
+            .iter()
+            .filter(|p| matches!(p, maknae_authz_basic::IdentityProblem::Released { .. }))
+            .cloned()
+            .chain([promoted.clone()])
+            .collect();
+        self.identity
+            .publish(crate::identity_report::Published::of(&snapshot, carried));
+        let (result, reason, posture) = crate::identity_report::record_fields(&promoted);
+        eprintln!("maknaed: identity: {reason}");
+        let rec = ctx.record(GRAPH_IDENTITY_ACTION, result, &reason, posture, None);
+        if let Err(e) = self.sink.emit_within(&rec, self.append_bound).await {
+            eprintln!("maknaed: AUDIT WRITE FAILED on an identity record ({reason}): {e}");
+        }
+    }
+}
+
+impl<B, E> BaselineOps for Reloader<B, E>
+where
+    B: maknae_authz_basic::Baseline,
+    E: AuditEmit + Send + Sync + 'static,
+{
+    fn show(&self) -> BoxFuture<'_, Result<maknae_proto::BaselineView, String>> {
+        Box::pin(async move {
+            let (state, set) = self.read_pending().await?;
+            crate::baseline::show_view(set.as_ref(), &state.accepted)
+        })
+    }
+
+    fn accept<'a>(&'a self, hash: &'a str) -> BoxFuture<'a, AcceptAnswer> {
+        Box::pin(self.accept_named(hash))
     }
 }
 
@@ -3896,6 +4371,7 @@ where
                 ctx: self.ctx,
                 scanned_bytes: 0,
                 bound: self.reloader.append_bound,
+                drain: None,
             };
             let committed = maknae_state::store::commit(
                 &self.reloader.dir,
@@ -5037,6 +5513,8 @@ async fn boot_after_sink(
         files: seams.files,
         env: Arc::clone(&seams.env),
         baseline: baseline_status,
+        drain: tokio::sync::watch::channel(Drain::Serving).0,
+        turn_wait: BLOCKING_OPERATION_TIMEOUT,
         #[cfg(test)]
         load_gate: None,
     };
@@ -5137,8 +5615,14 @@ where
         }
     }));
     let reloads = reloads.abort_handle();
-    let shutdown = shutdown_after_reloads(signalled, Arc::clone(&reloader), reloads.clone());
+    let drain = reloader.drain.subscribe();
+    let shutdown = shutdown_after_reloads(
+        shutdown_on(signalled, drain.clone()),
+        Arc::clone(&reloader),
+        reloads.clone(),
+    );
     let live = Arc::clone(authorizer.live());
+    let baseline: Arc<dyn BaselineOps> = Arc::clone(&reloader) as _;
     let outcome = accept_loop(
         listener,
         Arc::clone(sink),
@@ -5153,10 +5637,25 @@ where
         classification_policy_name,
         kernel_graph,
         egress,
+        baseline,
+        drain.clone(),
     )
     .await;
     reloader.stop(&reloads).await;
-    Ok(outcome)
+    let drained = *drain.borrow();
+    Ok(crate::handler::after_drain(outcome, drained))
+}
+
+/// Resolves on a signal, or once a restart-class accept has persisted or failed; a
+/// dropped drain sender never resolves it.
+async fn shutdown_on(
+    signalled: impl Future<Output = ()>,
+    mut drain: tokio::sync::watch::Receiver<Drain>,
+) {
+    tokio::select! {
+        _ = signalled => {}
+        Ok(_) = drain.wait_for(|d| crate::handler::may_stop(*d)) => {}
+    }
 }
 
 /// Install the SIGTERM/SIGINT handlers EAGERLY and return the future that resolves on
@@ -5217,6 +5716,30 @@ fn epoch_to_rfc3339(secs: u64, millis: u32) -> String {
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = if month <= 2 { year + 1 } else { year };
     format!("{year:04}-{month:02}-{day:02}T{hh:02}:{mm:02}:{ss:02}.{millis:03}Z")
+}
+
+#[cfg(test)]
+pub(crate) mod baseline_stub {
+    use super::*;
+
+    pub(crate) struct NoBaseline;
+
+    impl BaselineOps for NoBaseline {
+        fn show(&self) -> BoxFuture<'_, Result<maknae_proto::BaselineView, String>> {
+            Box::pin(async { Err("no baseline service".to_string()) })
+        }
+        fn accept<'a>(&'a self, _: &'a str) -> BoxFuture<'a, AcceptAnswer> {
+            Box::pin(async { AcceptAnswer::Unavailable("no baseline service".into()) })
+        }
+    }
+
+    pub(crate) fn no_baseline() -> Arc<dyn BaselineOps> {
+        Arc::new(NoBaseline)
+    }
+
+    pub(crate) fn serving() -> tokio::sync::watch::Receiver<Drain> {
+        tokio::sync::watch::channel(Drain::Serving).1
+    }
 }
 
 #[cfg(test)]
@@ -5342,6 +5865,56 @@ mod tests {
     /// four rounds each found a term the expression had skipped while the
     /// unit kept the old sum, so a unit more than `STOP_TIMEOUT_SLACK` above
     /// the chain is as red as one below it.
+    #[test]
+    fn the_accept_worst_case_fits_the_handler_drain() {
+        let cfg = maknae_config::transport_from_section(None).unwrap();
+        let egress = maknae_config::egress_from_section(None).unwrap();
+        let bound = handler_drain_bound(&cfg, Duration::from_millis(egress.deadline_ms));
+        assert!(3 * AUDIT_APPEND_TIMEOUT < bound, "{bound:?}");
+        assert!(3 * AUDIT_APPEND_TIMEOUT < handler_drain_bound(&cfg, Duration::ZERO));
+    }
+
+    #[test]
+    fn the_supervisors_restart_on_the_apply_by_restart_exit_code() {
+        let unit = include_str!("../../../packaging/common/maknaed.service");
+        let lines: Vec<&str> = unit.lines().map(str::trim).collect();
+        assert!(lines.contains(&"Restart=on-failure"));
+        for key in ["RestartPreventExitStatus=", "SuccessExitStatus="] {
+            assert!(
+                !lines
+                    .iter()
+                    .any(|l| l.starts_with(key) && l.split(['=', ' ']).any(|t| t == "6")),
+                "{key} must not name 6"
+            );
+        }
+        for l in lines.iter().filter(|l| l.starts_with("StartLimitBurst=")) {
+            assert!(
+                l["StartLimitBurst=".len()..].parse::<u32>().unwrap() >= 2,
+                "{l}"
+            );
+        }
+        let plist = include_str!("../../../packaging/macos/io.maknae.maknaed.plist");
+        let keep = plist.split("<key>KeepAlive</key>").nth(1).unwrap();
+        let dict = &keep[..keep.find("</dict>").unwrap()];
+        assert!(
+            dict.contains("<key>SuccessfulExit</key>") && dict.contains("<false/>"),
+            "{dict}"
+        );
+        let throttle = plist.split("<key>ThrottleInterval</key>").nth(1).unwrap();
+        let secs: u32 = throttle
+            .split("<integer>")
+            .nth(1)
+            .unwrap()
+            .split("</integer>")
+            .next()
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(secs <= 10, "launchd restarts within {secs} s");
+        assert_eq!(crate::handler::APPLY_BY_RESTART_EXIT_CODE, 6);
+    }
+
     #[test]
     fn the_units_stop_timeouts_cover_the_shutdown_chain_at_the_deadline_ceiling() {
         // BOTH ceilings: the transport timeouts at their maximum and the
@@ -7691,10 +8264,21 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    #[derive(Default)]
+    pub(super) struct Counts {
+        binds: std::sync::atomic::AtomicUsize,
+        connects: std::sync::atomic::AtomicUsize,
+        lookups: std::sync::atomic::AtomicUsize,
+    }
+
     #[derive(Clone)]
     pub(super) struct TestEnv {
-        prepared: Result<(), String>,
-        bounds: Option<maknae_config::EgressBounds>,
+        pub(super) prepared: Result<(), String>,
+        pub(super) bounds: Option<maknae_config::EgressBounds>,
+        pub(super) bindable: Result<(), String>,
+        /// Answers every reader name with an unprivileged account instead of asking NSS.
+        pub(super) any_reader: bool,
+        pub(super) counts: Arc<Counts>,
     }
 
     impl Default for TestEnv {
@@ -7702,12 +8286,57 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             TestEnv {
                 prepared: Ok(()),
                 bounds: None,
+                bindable: Ok(()),
+                any_reader: false,
+                counts: Arc::default(),
             }
+        }
+    }
+
+    impl TestEnv {
+        pub(super) fn counting() -> Self {
+            TestEnv {
+                any_reader: true,
+                ..TestEnv::default()
+            }
+        }
+        pub(super) fn with_bounds() -> Self {
+            TestEnv {
+                bounds: Some(maknae_config::EgressBounds {
+                    kv_mount: "kv".into(),
+                    user_prefix: "users".into(),
+                    vault_addr: "https://v.example:8200".into(),
+                }),
+                ..TestEnv::default()
+            }
+        }
+        fn count(n: &std::sync::atomic::AtomicUsize) -> usize {
+            n.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        pub(super) fn binds(&self) -> usize {
+            Self::count(&self.counts.binds)
+        }
+        pub(super) fn connects(&self) -> usize {
+            Self::count(&self.counts.connects)
+        }
+        pub(super) fn reader_lookups(&self) -> usize {
+            Self::count(&self.counts.lookups)
         }
     }
 
     impl maknae_config::ReaderLookup for TestEnv {
         fn account(&self, name: &str) -> Result<Option<maknae_config::ReaderAccount>, String> {
+            self.counts
+                .lookups
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.any_reader {
+                return Ok(Some(maknae_config::ReaderAccount {
+                    name: name.into(),
+                    uid: 4100,
+                    gid: 4100,
+                    groups: Vec::new(),
+                }));
+            }
             maknae_vault::NssAccounts.account(name)
         }
         fn daemon_gid(&self) -> Result<Option<u32>, String> {
@@ -7733,9 +8362,15 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             self.prepared.clone()
         }
         fn listener_bindable(&self, _: &Path) -> Result<(), String> {
-            Ok(())
+            self.counts
+                .binds
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.bindable.clone()
         }
         fn deputy_reachable(&self, _: &Path) -> Result<(), String> {
+            self.counts
+                .connects
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }
     }
@@ -8454,6 +9089,105 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         }
     }
 
+    /// Accepts the set `admin.baseline.show` shows for `d`'s files, from a fixture over its directories.
+    fn accept_shown(d: &Dir) -> String {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let principal = maknae_config::Principal {
+                name: "op".into(),
+                uid: 1000,
+            };
+            let fx = super::reload_fixture::over(&d.0, principal).await;
+            let shown = BaselineOps::show(fx.reloader.as_ref()).await.unwrap();
+            assert_eq!(
+                (shown.state.as_str(), shown.apply.as_str()),
+                ("pending", "restart")
+            );
+            match BaselineOps::accept(fx.reloader.as_ref(), &shown.hash).await {
+                AcceptAnswer::View {
+                    corrective: None, ..
+                } => {}
+                other => panic!("{other:?}"),
+            }
+            assert_eq!(*fx.reloader.drain.borrow(), Drain::Applied);
+            shown.hash
+        })
+    }
+
+    #[test]
+    fn an_accepted_move_is_performed_by_the_restart_boot_through_the_one_seam() {
+        let _g = env_lock();
+        let d = fixture("accepted-move");
+        let _ = boot(&d);
+        let (old, new) = (d.0.join("audit.jsonl"), prepare_trail(&d, "audit-2.jsonl"));
+        write_yaml(&d, "", "https://v.example:8200", &new, "");
+        accept_shown(&d);
+        assert_eq!(accepted(&d).moved_from.as_deref(), old.to_str());
+
+        let refused = block_on_run_inner_with(
+            &d.0,
+            BootSeams {
+                open_prepared: refusing_prepared,
+                ..seams_with(TestEnv::default())
+            },
+        );
+        let Err(e) = &refused else {
+            panic!("{refused:?}")
+        };
+        assert_eq!(refusal_exit_code(e), 1, "{e}");
+        assert!(
+            trail_of(&d, "audit-2.jsonl").is_empty(),
+            "the prepared open is the only open of a moved trail"
+        );
+
+        let _ = boot(&d);
+        assert_eq!(
+            trail_of(&d, "audit.jsonl").last().unwrap().outcome.reason,
+            crate::baseline::move_record(&new)
+        );
+        let moved = trail_of(&d, "audit-2.jsonl");
+        assert!(moved[0].outcome.reason.starts_with(&format!(
+            "audit trail continues from {}; last checkpoint revision ",
+            old.display()
+        )));
+        assert!(moved.iter().any(|r| r.action == CHECKPOINT_ACTION));
+        let stored = accepted(&d);
+        assert_eq!(stored.moved_from, None);
+        assert!(audit_section(&stored).contains("audit-2.jsonl"));
+    }
+
+    #[test]
+    fn an_accepted_restart_baseline_boots_and_applies() {
+        let _g = env_lock();
+        let d = fixture("accepted-restart");
+        let _ = boot(&d);
+        let yaml = format!(
+            "core:\n  deployment_id: dev-01\nvault:\n  addr: https://v.example:8200\ntransport:\n  socket_path: {}\n  max_connections: 7\naudit:\n  jsonl_path: {}\n{PRINCIPAL_BLOCK}",
+            d.0.join("maknaed.sock").display(),
+            d.0.join("audit.jsonl").display(),
+        );
+        put(&d.0, "maknae.yaml", &yaml, 0o640);
+        accept_shown(&d);
+        let revision = revision_of_store(&d);
+        let before = trail_of(&d, "audit.jsonl").len();
+        let _ = boot(&d);
+        let this_boot = &trail_of(&d, "audit.jsonl")[before..];
+        assert!(
+            this_boot.iter().any(|r| r.action == CHECKPOINT_ACTION),
+            "{this_boot:?}"
+        );
+        assert!(
+            !baseline_records(this_boot)
+                .iter()
+                .any(|(result, _)| result == "deny"),
+            "nothing is pending: {this_boot:?}"
+        );
+        assert!(!this_boot
+            .iter()
+            .any(|r| r.action == GRAPH_TRANSITION_ACTION));
+        assert_eq!(revision_of_store(&d), revision);
+        assert!(accepted(&d).sections["transport"].contains("\"max_connections\":7"));
+    }
+
     #[test]
     fn once_a_baseline_exists_a_missing_trail_refuses_and_is_not_created() {
         let _g = env_lock();
@@ -8818,6 +9552,7 @@ mod home_resolution_tests {
             Duration::from_secs(10),
             maknae_security::Lane::Local,
             maknae_io::DelegatedFds::new(1),
+            baseline_stub::no_baseline(),
         )
         .await;
         let caps = maknae_proto::FrameCaps {
@@ -9039,6 +9774,7 @@ mod admission_bound_tests {
                 Duration::from_secs(10),
                 maknae_security::Lane::Local,
                 maknae_io::DelegatedFds::new(1),
+                baseline_stub::no_baseline(),
             ),
         )
         .await
@@ -9207,6 +9943,7 @@ mod graph_audit_bound_tests {
             ctx,
             scanned_bytes: 0,
             bound: Duration::from_millis(100),
+            drain: None,
         }
     }
 
@@ -9559,6 +10296,7 @@ mod reload_fixture {
     pub(super) struct Seen {
         pub(super) action: String,
         pub(super) reason: String,
+        pub(super) drain: Drain,
         pub(super) store: String,
     }
 
@@ -9570,6 +10308,11 @@ mod reload_fixture {
         pub(super) stalled: std::sync::atomic::AtomicUsize,
         store: PathBuf,
         seen: std::sync::Mutex<Vec<Seen>>,
+        /// Refuses every record of this action.
+        pub(super) refuse: std::sync::Mutex<Option<&'static str>>,
+        /// Each record waits this long before it is appended.
+        pub(super) delay: Duration,
+        drain: std::sync::Mutex<Option<tokio::sync::watch::Receiver<Drain>>>,
     }
 
     impl ReloadSink {
@@ -9613,7 +10356,8 @@ mod reload_fixture {
             let fail = (rec.action == GRAPH_IDENTITY_ACTION
                 && self.fail_identity.load(std::sync::atomic::Ordering::SeqCst))
                 || (rec.action == GRAPH_BASELINE_ACTION
-                    && self.fail_baseline.load(std::sync::atomic::Ordering::SeqCst));
+                    && self.fail_baseline.load(std::sync::atomic::Ordering::SeqCst))
+                || *self.refuse.lock().unwrap() == Some(rec.action.as_str());
             let stall = (*self.stall.lock().unwrap())(rec);
             if stall {
                 self.stalled
@@ -9623,12 +10367,20 @@ mod reload_fixture {
                 self.seen.lock().unwrap().push(Seen {
                     action: rec.action.clone(),
                     reason: rec.outcome.reason.clone(),
+                    drain: self
+                        .drain
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .map_or(Drain::Serving, |d| *d.borrow()),
                     store: file_sha(&self.store),
                 });
             }
             let inner = Arc::clone(&self.inner);
             let rec = rec.clone();
+            let delay = self.delay;
             async move {
+                tokio::time::sleep(delay).await;
                 if stall {
                     std::future::pending::<()>().await;
                 }
@@ -9642,11 +10394,14 @@ mod reload_fixture {
         }
     }
 
-    pub(super) struct Guard(PathBuf);
+    /// Removes the fixture's directory, unless it belongs to another fixture.
+    pub(super) struct Guard(Option<PathBuf>);
 
     impl Drop for Guard {
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
+            if let Some(dir) = &self.0 {
+                let _ = std::fs::remove_dir_all(dir);
+            }
         }
     }
 
@@ -9667,31 +10422,126 @@ mod reload_fixture {
         }
     }
 
-    /// The fixture's `maknae.yaml`: `core_extra` under `core:`, then `tail`, whose
-    /// `vault_addr_marker: <url>` line sets `vault.addr` instead of being appended.
+    /// The fixture's `maknae.yaml`: `core_extra` under `core:`, then `tail`, whose marker
+    /// lines set a value instead of being appended: `vault_addr_marker: <url>`,
+    /// `transport_tail_max_connections: <n>`, `socket_path_marker: <path>`,
+    /// `audit_path_marker: <path>`, `audit_readers_marker: <list>`.
     fn yaml(dir: &Path, core_extra: &str, tail: &str) -> String {
+        yaml_for(dir, core_extra, tail, nix::unistd::geteuid().as_raw())
+    }
+
+    fn yaml_for(dir: &Path, core_extra: &str, tail: &str, uid: u32) -> String {
         let mut vault_addr = "https://v.example:8200".to_string();
-        let mut rest = String::new();
+        let mut socket = dir.join("maknaed.sock").display().to_string();
+        let mut trail = dir.join("audit.jsonl").display().to_string();
+        let (mut transport, mut audit, mut rest) = (String::new(), String::new(), String::new());
         for line in tail.lines() {
-            match line.strip_prefix(VAULT_ADDR_MARKER) {
-                Some(addr) => vault_addr = addr.to_string(),
-                None => {
-                    rest.push_str(line);
-                    rest.push('\n');
-                }
+            if let Some(v) = line.strip_prefix(VAULT_ADDR_MARKER) {
+                vault_addr = v.to_string();
+            } else if let Some(v) = line.strip_prefix("transport_tail_max_connections: ") {
+                transport.push_str(&format!("  max_connections: {v}\n"));
+            } else if let Some(v) = line.strip_prefix("socket_path_marker: ") {
+                socket = v.to_string();
+            } else if let Some(v) = line.strip_prefix("audit_path_marker: ") {
+                trail = v.to_string();
+            } else if let Some(v) = line.strip_prefix("audit_readers_marker: ") {
+                audit.push_str(&format!("  readers: {v}\n"));
+            } else {
+                rest.push_str(line);
+                rest.push('\n');
             }
         }
         format!(
-            "core:\n  deployment_id: dev-01\n{core_extra}vault:\n  addr: {vault_addr}\ntransport:\n  socket_path: {}\naudit:\n  jsonl_path: {}\nprincipal:\n  name: op\n  uid: {}\n{rest}",
-            dir.join("maknaed.sock").display(),
-            dir.join("audit.jsonl").display(),
-            nix::unistd::geteuid().as_raw(),
+            "core:\n  deployment_id: dev-01\n{core_extra}vault:\n  addr: {vault_addr}\ntransport:\n  socket_path: {socket}\n{transport}audit:\n  jsonl_path: {trail}\n{audit}principal:\n  name: op\n  uid: {uid}\n{rest}",
         )
     }
 
     impl Fx {
         pub(super) async fn with_baseline(tag: &str) -> Fx {
             fixture(tag, AUTHZ, Some(ROOT_ADMIN)).await
+        }
+
+        /// Boots with `core_extra` (a full `handling:` block) already accepted.
+        pub(super) async fn with_core(tag: &str, core_extra: &str) -> Fx {
+            let opts = Opts {
+                core: core_extra,
+                ..Opts::default()
+            };
+            fixture_with(tag, opts).await
+        }
+
+        pub(super) async fn with_baseline_env(tag: &str, env: TestEnv) -> Fx {
+            let opts = Opts {
+                env,
+                ..Opts::default()
+            };
+            fixture_with(tag, opts).await
+        }
+
+        /// Boots with `tail` already in the file, the egress bounds in place.
+        pub(super) async fn with_baseline_yaml(tag: &str, tail: &str) -> Fx {
+            let opts = Opts {
+                env: TestEnv::with_bounds(),
+                tail,
+                ..Opts::default()
+            };
+            fixture_with(tag, opts).await
+        }
+
+        /// Every record waits `delay` before it appends, bounded by `bound`.
+        pub(super) async fn with_baseline_and_delay(
+            tag: &str,
+            delay: Duration,
+            bound: Duration,
+        ) -> Fx {
+            let opts = Opts {
+                delay,
+                bound,
+                ..Opts::default()
+            };
+            fixture_with(tag, opts).await
+        }
+
+        pub(super) async fn show(&self) -> maknae_proto::BaselineView {
+            BaselineOps::show(self.reloader.as_ref()).await.unwrap()
+        }
+
+        pub(super) async fn accept(&self, hash: &str) -> AcceptAnswer {
+            BaselineOps::accept(self.reloader.as_ref(), hash).await
+        }
+
+        pub(super) fn drain(&self) -> Drain {
+            *self.reloader.drain.borrow()
+        }
+
+        pub(super) fn refuse(&self, action: &'static str) {
+            *self.reloader.sink.refuse.lock().unwrap() = Some(action);
+        }
+
+        pub(super) fn composition(&self) -> &crate::Composition<HermeticAuthorizer> {
+            &self.reloader.authorizer
+        }
+
+        pub(super) fn live(&self) -> &Arc<crate::live::LiveConfig> {
+            self.reloader.authorizer.live()
+        }
+
+        pub(super) fn write_yaml_principal(&self, uid: u32, tail: &str) {
+            write_0640(
+                &self.dir.join("maknae.yaml"),
+                &yaml_for(&self.dir, "", tail, uid),
+            );
+        }
+
+        /// An empty, 0640 trail beside the fixture's own; the test env reports it prepared.
+        pub(super) fn prepare_trail(&self, name: &str) -> PathBuf {
+            let path = self.dir.join(name);
+            write_0640(&path, "");
+            path
+        }
+
+        pub(super) fn state_dir(&self) -> PathBuf {
+            self.dir.join("state")
         }
 
         pub(super) fn policy(&self) -> PathBuf {
@@ -9809,6 +10659,45 @@ mod reload_fixture {
         load_gate: Option<std::sync::mpsc::Receiver<()>>,
         seed: Option<Seed>,
     ) -> Fx {
+        let opts = Opts {
+            authz,
+            bindings,
+            load_gate,
+            seed,
+            ..Opts::default()
+        };
+        fixture_with(tag, opts).await
+    }
+
+    pub(super) struct Opts<'a> {
+        pub(super) authz: &'a str,
+        pub(super) bindings: Option<&'a str>,
+        pub(super) load_gate: Option<std::sync::mpsc::Receiver<()>>,
+        pub(super) seed: Option<Seed>,
+        pub(super) env: TestEnv,
+        pub(super) core: &'a str,
+        pub(super) tail: &'a str,
+        pub(super) delay: Duration,
+        pub(super) bound: Duration,
+    }
+
+    impl Default for Opts<'_> {
+        fn default() -> Self {
+            Opts {
+                authz: AUTHZ,
+                bindings: Some(ROOT_ADMIN),
+                load_gate: None,
+                seed: None,
+                env: TestEnv::default(),
+                core: "",
+                tail: "",
+                delay: Duration::ZERO,
+                bound: Duration::from_millis(200),
+            }
+        }
+    }
+
+    pub(super) async fn fixture_with(tag: &str, opts: Opts<'_>) -> Fx {
         let raw = std::env::temp_dir().join(format!("maknae_reload_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&raw);
         std::fs::create_dir_all(raw.join("state")).unwrap();
@@ -9825,17 +10714,57 @@ mod reload_fixture {
             })
             .unwrap(),
         );
-        write_0640(&dir.join("maknae.yaml"), &yaml(&dir, "", ""));
-        let env: Arc<dyn crate::baseline_check::Env> = Arc::new(TestEnv::default());
-        let layer = files_baseline(&dir, env.as_ref());
+        write_0640(&dir.join("maknae.yaml"), &yaml(&dir, opts.core, opts.tail));
+        let layer = files_baseline(&dir, &opts.env);
         let paths = maknae_authz_basic::PolicyPaths::in_dir(&dir);
-        write_0640(&paths.authz, authz);
-        if let Some(b) = bindings {
+        write_0640(&paths.authz, opts.authz);
+        if let Some(b) = opts.bindings {
             write_0640(&paths.bindings, b);
         }
+        assemble(dir.clone(), Some(dir), sink, layer, principal(), opts).await
+    }
+
+    /// A fixture over a start's existing configuration and state directories, running
+    /// the baseline its store holds.
+    pub(super) async fn over(dir: &Path, principal: maknae_config::Principal) -> Fx {
+        let sink = Arc::new(
+            maknae_audit_append::AuditSink::open_existing(&maknae_config::AuditConfig {
+                readers: Vec::new(),
+                jsonl_path: dir.join("audit.jsonl"),
+                siem: None,
+                au3_1: serde_json::Value::Null,
+            })
+            .unwrap(),
+        );
+        let state = StateDir::open(&dir.join("state"), nix::unistd::geteuid().as_raw()).unwrap();
+        let key = WrappingKey::new(
+            maknae_vault::graph_key_from_bytes(&[0x5a; 32])
+                .unwrap()
+                .into_bytes(),
+        );
+        let layer = maknae_state::store::peek_baseline(&state, &key)
+            .unwrap()
+            .unwrap();
+        drop(state);
+        let opts = Opts {
+            bindings: None,
+            ..Opts::default()
+        };
+        assemble(dir.to_path_buf(), None, sink, layer, principal, opts).await
+    }
+
+    async fn assemble(
+        dir: PathBuf,
+        owned: Option<PathBuf>,
+        sink: Arc<maknae_audit_append::AuditSink>,
+        layer: BaselineLayer,
+        principal: maknae_config::Principal,
+        opts: Opts<'_>,
+    ) -> Fx {
+        let paths = maknae_authz_basic::PolicyPaths::in_dir(&dir);
         let source = maknae_authz_basic::PolicySource::load_with_requirement(
             paths.clone(),
-            principal(),
+            principal.clone(),
             requirement(),
         )
         .unwrap();
@@ -9852,7 +10781,7 @@ mod reload_fixture {
             seq: &seq,
             au3_1: &au3_1,
         };
-        if let Some(seed) = seed {
+        if let Some(seed) = opts.seed {
             let seeded = seed(&inputs.identity);
             drop(
                 boot_graph_at(
@@ -9882,7 +10811,7 @@ mod reload_fixture {
         let graph = Arc::new(booted.graph);
         let baseline = HermeticAuthorizer::new_over_graph(
             paths,
-            principal(),
+            principal,
             requirement(),
             maknae_state::envelope::sha256,
             Arc::clone(&graph),
@@ -9908,6 +10837,7 @@ mod reload_fixture {
             accepted: layer.sections.clone().into(),
             pending: None,
         });
+        let drain = tokio::sync::watch::channel(Drain::Serving).0;
         let reloader = Arc::new(Reloader {
             dir: booted.dir,
             key: booted.key,
@@ -9924,6 +10854,9 @@ mod reload_fixture {
                 stalled: std::sync::atomic::AtomicUsize::new(0),
                 store: dir.join("state").join(STORE_FILE),
                 seen: std::sync::Mutex::default(),
+                refuse: std::sync::Mutex::new(None),
+                delay: opts.delay,
+                drain: std::sync::Mutex::new(Some(drain.subscribe())),
             }),
             session_ids: Arc::new(SessionIds::new()),
             host: "h".into(),
@@ -9932,21 +10865,548 @@ mod reload_fixture {
             au3_1,
             identity: status.identity.clone(),
             stopping: tokio::sync::watch::channel(false).0,
-            append_bound: Duration::from_millis(200),
+            append_bound: opts.bound,
             persisted: std::sync::RwLock::new(graph),
             config_dir: dir.clone(),
             files: crate::boot::read_files_as_owner,
-            env,
+            env: Arc::new(opts.env),
             baseline: status.baseline.clone(),
-            load_gate: load_gate.map(|g| Arc::new(std::sync::Mutex::new(g))),
+            drain,
+            turn_wait: Duration::from_millis(200),
+            load_gate: opts.load_gate.map(|g| Arc::new(std::sync::Mutex::new(g))),
         });
         Fx {
-            _guard: Guard(dir.clone()),
+            _guard: Guard(owned),
             dir,
             reloader,
             status,
             booted_released,
         }
+    }
+}
+
+#[cfg(unix)]
+#[cfg(test)]
+mod baseline_accept_tests {
+    use super::boot_gate_tests::TestEnv;
+    use super::reload_fixture::*;
+    use super::*;
+    use maknae_authz_basic::Baseline;
+    use std::os::unix::fs::PermissionsExt;
+
+    const SECRET: &str = "  handling:\n    ceiling:\n      classification: SECRET\n      sci: false\n      releasable_to: []\n      cui_permitted: false\n      cui_categories_permitted: []\n      dissemination_permitted: [\"Distribution Statement A\"]\n    accreditation_ref: null\n";
+    const ROOT_ADMIN_OTHER: &str =
+        "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  guest: []\n";
+    const RESTART: &str = "transport_tail_max_connections: 7\n";
+
+    fn unclassified() -> String {
+        SECRET.replace("SECRET", "UNCLASSIFIED")
+    }
+
+    fn accepted(a: AcceptAnswer) -> maknae_proto::BaselineView {
+        match a {
+            AcceptAnswer::View {
+                view,
+                corrective: None,
+            } => view,
+            other => panic!("expected an accepted view, got {other:?}"),
+        }
+    }
+
+    fn secret_read() -> maknae_security::Request {
+        let mut resource = maknae_security::Attributes::new();
+        resource.insert(
+            maknae_security::RESOURCE_CLASSIFICATION,
+            maknae_security::AttrValue::Str("SECRET".into()),
+        );
+        maknae_security::Request {
+            subject: maknae_security::Subject(maknae_security::Attributes::new()),
+            resource: maknae_security::Resource(resource),
+            action: maknae_security::Action("fs.read".into()),
+            context: maknae_security::Context(maknae_security::Attributes::new()),
+        }
+    }
+
+    fn ceiling_name(fx: &Fx) -> String {
+        fx.composition()
+            .ceiling()
+            .ceiling()
+            .classification
+            .name
+            .clone()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_live_ceiling_accept_governs_the_next_decision() {
+        let fx = Fx::with_core("live-ceiling", &unclassified()).await;
+        let refused =
+            maknae_security::Authorizer::decide(fx.composition().ceiling(), &secret_read());
+        assert!(
+            matches!(refused, maknae_security::Verdict::Deny { .. }),
+            "{refused:?}"
+        );
+        fx.write_yaml(SECRET, "");
+        let shown = fx.show().await;
+        assert_eq!(
+            (shown.state.as_str(), shown.apply.as_str()),
+            ("pending", "live")
+        );
+        let view = accepted(fx.accept(&shown.hash).await);
+        assert_eq!(
+            (view.state.as_str(), view.apply.as_str()),
+            ("accepted", "live")
+        );
+        assert_eq!(ceiling_name(&fx), "SECRET");
+        assert_eq!(
+            maknae_security::Authorizer::decide(fx.composition().ceiling(), &secret_read()),
+            maknae_security::Verdict::NotApplicable { note: None }
+        );
+        assert_eq!(fx.drain(), Drain::Serving);
+        assert_eq!(fx.stored().unwrap().ceiling, "SECRET");
+        assert!(fx.status_lines().is_empty());
+        assert_eq!(fx.show().await.state, "none");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_live_principal_and_providers_accept_swaps_both() {
+        let one = "providers:\n  - name: openai\n    endpoint: https://api.example.test/v1\n    models: [m]\n";
+        let two = "providers:\n  - name: openai\n    endpoint: https://api.example.test/v1\n    models: [m]\n  - name: other\n    endpoint: https://other.example.test/v1\n    models: [n]\n";
+        let fx = Fx::with_baseline_yaml("live-principal", one).await;
+        let generation = fx.live().generation();
+        fx.write_yaml_principal(4242, two);
+        let shown = fx.show().await;
+        assert_eq!(shown.apply, "live");
+        accepted(fx.accept(&shown.hash).await);
+        assert_eq!(fx.composition().baseline().principal().uid, 4242);
+        assert_eq!(
+            fx.live().generation(),
+            generation + 1,
+            "the request path's holder moved"
+        );
+        let names: Vec<String> = fx
+            .live()
+            .providers()
+            .as_ref()
+            .as_ref()
+            .unwrap()
+            .set
+            .iter()
+            .map(|p| p.name.clone())
+            .collect();
+        assert_eq!(names, ["openai", "other"]);
+        assert_eq!(fx.live().view()["principal"]["uid"], "4242");
+        fx.write_yaml_principal(4242, "");
+        assert_eq!(
+            fx.show().await.apply,
+            "restart",
+            "non-empty to empty providers applies by restart"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_live_principal_accept_republishes_the_principal_admin() {
+        let opts = Opts {
+            bindings: None,
+            ..Opts::default()
+        };
+        let fx = fixture_with("principal-admin", opts).await;
+        let uid = nix::unistd::geteuid().as_raw().wrapping_add(1);
+        fx.write_yaml_principal(uid, "");
+        let shown = fx.show().await;
+        accepted(fx.accept(&shown.hash).await);
+        let promoted = maknae_authz_basic::IdentityProblem::PrincipalAdmin { uid };
+        assert!(fx.status.identity.current().contains(&promoted));
+        assert!(fx
+            .seen()
+            .iter()
+            .any(|s| s.action == GRAPH_IDENTITY_ACTION && s.reason == promoted.to_string()));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_accept_is_written_ahead() {
+        let fx = Fx::with_core("ahead", &unclassified()).await;
+        fx.write_yaml(SECRET, "");
+        let shown = fx.show().await;
+        let before = fx.store_sha();
+        accepted(fx.accept(&shown.hash).await);
+        let seen = fx.seen();
+        let at = |action: &str, prefix: &str| {
+            seen.iter()
+                .position(|s| s.action == action && s.reason.starts_with(prefix))
+                .unwrap_or_else(|| panic!("{action} {prefix}: {seen:?}"))
+        };
+        let short = crate::baseline::short(&shown.hash);
+        let intent = at(
+            GRAPH_BASELINE_ACTION,
+            &format!(
+                "accept intent recorded (operator): sha256:{short}; apply: live; sections: core"
+            ),
+        );
+        let transition = at(GRAPH_TRANSITION_ACTION, "intent recorded (operator)");
+        let checkpoint = at(CHECKPOINT_ACTION, "transitioned");
+        let outcome = at(
+            GRAPH_BASELINE_ACTION,
+            &format!("accepted sha256:{short} at revision "),
+        );
+        assert!(
+            !seen.iter().any(|s| s.reason.contains(&shown.hash)),
+            "no record carries the full hash"
+        );
+        assert!(intent < transition && transition < checkpoint && checkpoint < outcome);
+        assert_eq!(seen[intent].store, before);
+        assert_eq!(seen[transition].store, before);
+        assert_ne!(seen[checkpoint].store, before);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_intent_persists_nothing() {
+        let fx = Fx::with_core("failed-intent", &unclassified()).await;
+        fx.write_yaml(SECRET, "");
+        let shown = fx.show().await;
+        let before = fx.store_sha();
+        fx.refuse(GRAPH_BASELINE_ACTION);
+        let got = fx.accept(&shown.hash).await;
+        assert!(
+            matches!(got, AcceptAnswer::Unavailable(ref r) if r.contains("intent")),
+            "{got:?}"
+        );
+        assert_eq!(fx.store_sha(), before);
+        assert_eq!(fx.drain(), Drain::Serving);
+        assert_eq!(ceiling_name(&fx), "UNCLASSIFIED");
+        assert_eq!(fx.status_lines().len(), 0, "status was not published");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stale_hash_is_refused_and_the_store_is_unchanged() {
+        let fx = Fx::with_core("stale", &unclassified()).await;
+        fx.write_yaml(SECRET, "");
+        let shown = fx.show().await;
+        fx.write_yaml(&SECRET.replace("SECRET", "CONFIDENTIAL"), "");
+        let before = fx.store_sha();
+        match fx.accept(&shown.hash).await {
+            AcceptAnswer::View {
+                view,
+                corrective: Some(why),
+            } => {
+                assert_eq!(view.state, "stale");
+                assert!(view.hash.is_empty());
+                assert!(why.contains("show it again"), "{why}");
+            }
+            other => panic!("{other:?}"),
+        }
+        match fx.accept("nope").await {
+            AcceptAnswer::View {
+                view,
+                corrective: Some(_),
+            } => assert_eq!(view.state, "stale"),
+            other => panic!("{other:?}"),
+        }
+        assert!(!fx
+            .seen()
+            .iter()
+            .any(|s| s.action == GRAPH_TRANSITION_ACTION));
+        assert_eq!(fx.store_sha(), before);
+        fx.write_yaml(&unclassified(), "");
+        match fx.accept(&shown.hash).await {
+            AcceptAnswer::View { view, .. } => assert_eq!(view.state, "none"),
+            other => panic!("{other:?}"),
+        }
+        fx.write_yaml(&format!("{}  unknown_key: 1\n", unclassified()), "");
+        let invalid = fx.show().await;
+        assert_eq!(invalid.state, "invalid");
+        match fx.accept(&invalid.hash).await {
+            AcceptAnswer::View { view, .. } => assert_eq!(view.state, "invalid"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(fx.store_sha(), before);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn nothing_is_admitted_after_a_restart_accept_begins_its_drain() {
+        let fx = Fx::with_baseline("restart").await;
+        fx.write_yaml("", RESTART);
+        let shown = fx.show().await;
+        assert_eq!(shown.apply, "restart");
+        let before = fx.store_sha();
+        let view = accepted(fx.accept(&shown.hash).await);
+        assert_eq!(
+            (view.state.as_str(), view.apply.as_str()),
+            ("accepted", "restart")
+        );
+        let seen = fx.seen();
+        let transition = seen
+            .iter()
+            .find(|s| s.action == GRAPH_TRANSITION_ACTION && s.reason.contains("operator"))
+            .unwrap();
+        assert_eq!(
+            transition.store, before,
+            "nothing was persisted before the transition intent"
+        );
+        let checkpoint = seen
+            .iter()
+            .find(|s| s.action == CHECKPOINT_ACTION && s.reason == "transitioned")
+            .unwrap();
+        assert_eq!(
+            checkpoint.drain,
+            Drain::Begun,
+            "the drain began before the persist"
+        );
+        assert_ne!(checkpoint.store, before);
+        assert_eq!(fx.drain(), Drain::Applied);
+        assert!(!crate::handler::admits(fx.drain()));
+        assert_eq!(ceiling_name(&fx), "UNCLASSIFIED");
+        assert!(fx.stored().unwrap().sections["transport"].contains("\"max_connections\":7"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_restart_accept_whose_persist_fails_is_abandoned() {
+        if nix::unistd::geteuid().is_root() {
+            eprintln!("skipped: root writes through a 0500 directory");
+            return;
+        }
+        let fx = Fx::with_baseline("abandoned").await;
+        fx.write_yaml("", RESTART);
+        let shown = fx.show().await;
+        std::fs::set_permissions(fx.state_dir(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        let got = fx.accept(&shown.hash).await;
+        std::fs::set_permissions(fx.state_dir(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            matches!(got, AcceptAnswer::Unavailable(ref r) if r.contains("persist")),
+            "{got:?}"
+        );
+        assert_eq!(fx.drain(), Drain::Failed);
+        assert!(matches!(
+            crate::handler::after_drain(ServeOutcome::GracefulShutdown, fx.drain()),
+            ServeOutcome::AcceptAbandoned
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reload_after_a_live_accept_keeps_the_accepted_baseline() {
+        let fx = Fx::with_core("reload-after-accept", &unclassified()).await;
+        fx.write_yaml(SECRET, "");
+        let shown = fx.show().await;
+        accepted(fx.accept(&shown.hash).await);
+        fx.write_bindings(ROOT_ADMIN_OTHER);
+        let before = fx.stored().unwrap().sha256;
+        fx.reloader.run().await.unwrap();
+        assert_ne!(fx.store_sha(), "", "the reload persisted");
+        let stored = fx.stored().unwrap();
+        assert_eq!((stored.ceiling.as_str(), stored.sha256), ("SECRET", before));
+        assert!(fx.status_lines().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_accepted_trail_move_is_recorded_for_the_restart_boot_to_perform() {
+        let fx = Fx::with_baseline("accept-move").await;
+        let old = fx.dir.join("audit.jsonl");
+        let new = fx.prepare_trail("audit-2.jsonl");
+        fx.write_yaml("", &format!("audit_path_marker: {}\n", new.display()));
+        let shown = fx.show().await;
+        assert_eq!(shown.apply, "restart");
+        accepted(fx.accept(&shown.hash).await);
+        let stored = fx.stored().unwrap();
+        assert_eq!(stored.moved_from.as_deref(), Some(old.to_str().unwrap()));
+        assert!(stored.sections["audit"].contains("audit-2.jsonl"));
+        assert!(
+            std::fs::read_to_string(&new).unwrap().is_empty(),
+            "the accept itself appends nothing to the new trail"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_accept_whose_new_socket_cannot_bind_is_refused() {
+        let env = TestEnv {
+            bindable: Err("EACCES".into()),
+            ..TestEnv::default()
+        };
+        let fx = Fx::with_baseline_env("bind-probe", env).await;
+        let other = fx.dir.join("other.sock");
+        fx.write_yaml("", &format!("socket_path_marker: {}\n", other.display()));
+        let shown = fx.show().await;
+        let before = fx.store_sha();
+        match fx.accept(&shown.hash).await {
+            AcceptAnswer::View {
+                view,
+                corrective: Some(why),
+            } => {
+                assert_eq!(view.state, "invalid");
+                assert!(
+                    why.contains("other.sock") && why.contains("EACCES"),
+                    "{why}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(fx.store_sha(), before);
+        assert_eq!(fx.drain(), Drain::Serving);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stale_or_garbage_hash_never_resolves_or_probes() {
+        let env = TestEnv::counting();
+        let fx = Fx::with_baseline_env("no-probe", env.clone()).await;
+        let other = fx.dir.join("other.sock");
+        fx.write_yaml(
+            "",
+            &format!(
+                "socket_path_marker: {}\naudit_readers_marker: [vector]\n",
+                other.display()
+            ),
+        );
+        let shown = fx.show().await;
+        for named in ["0".repeat(64), "garbage".to_string()] {
+            assert!(matches!(
+                fx.accept(&named).await,
+                AcceptAnswer::View {
+                    corrective: Some(_),
+                    ..
+                }
+            ));
+        }
+        assert_eq!(
+            (env.binds(), env.connects(), env.reader_lookups()),
+            (0, 0, 0)
+        );
+        accepted(fx.accept(&shown.hash).await);
+        assert_eq!(env.binds(), 1, "the valid hash is the first to probe");
+        assert_eq!(
+            env.reader_lookups(),
+            1,
+            "and the first to resolve the readers"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_restart_accept_with_slow_appends_still_applies() {
+        let fx = Fx::with_baseline_and_delay(
+            "slow-accept",
+            Duration::from_millis(500),
+            Duration::from_secs(1),
+        )
+        .await;
+        fx.write_yaml("", RESTART);
+        let shown = fx.show().await;
+        accepted(fx.accept(&shown.hash).await);
+        assert_eq!(fx.drain(), Drain::Applied);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_accept_waits_for_a_reload_and_gives_up_after_the_bound() {
+        let fx = Fx::with_core("busy", &unclassified()).await;
+        fx.write_yaml(SECRET, "");
+        let shown = fx.show().await;
+        let held = fx.reloader.lock.lock().await;
+        let got = tokio::time::timeout(Duration::from_secs(3), fx.accept(&shown.hash))
+            .await
+            .expect("bounded");
+        drop(held);
+        assert!(
+            matches!(got, AcceptAnswer::Unavailable(ref r) if r.contains("busy")),
+            "{got:?}"
+        );
+        assert_eq!(ceiling_name(&fx), "UNCLASSIFIED");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_accept_is_refused_once_shutdown_has_begun() {
+        let fx = Fx::with_core("stopping", &unclassified()).await;
+        fx.write_yaml(SECRET, "");
+        let shown = fx.show().await;
+        fx.reloader.stopping.send_replace(true);
+        let got = fx.accept(&shown.hash).await;
+        assert!(
+            matches!(got, AcceptAnswer::Unavailable(ref r) if r.contains("shutting down")),
+            "{got:?}"
+        );
+        assert!(!fx.seen().iter().any(|s| s.action == GRAPH_BASELINE_ACTION));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_install_that_fails_is_recorded_and_never_named_in_the_reply() {
+        let fx = Fx::with_core("install-fails", &unclassified()).await;
+        fx.write_yaml(SECRET, "");
+        let shown = fx.show().await;
+        let (held_tx, held) = std::sync::mpsc::channel();
+        let (release_tx, release) = std::sync::mpsc::channel::<()>();
+        let holder = {
+            let pdp = Arc::clone(&fx.reloader.authorizer);
+            std::thread::spawn(move || {
+                let _decision = pdp.hold_live_turn();
+                let _ = held_tx.send(());
+                let _ = release.recv_timeout(Duration::from_secs(20));
+            })
+        };
+        held.recv_timeout(Duration::from_secs(5))
+            .expect("the turn is held");
+        let got = fx.accept(&shown.hash).await;
+        let _ = release_tx.send(());
+        holder.join().unwrap();
+        let AcceptAnswer::Unavailable(reply) = got else {
+            panic!("{got:?}")
+        };
+        assert!(reply.contains("the next start applies it"), "{reply}");
+        assert!(
+            !reply.contains("SECRET") && !reply.contains("live turn"),
+            "{reply}"
+        );
+        let outcome = fx
+            .seen()
+            .into_iter()
+            .rfind(|s| s.action == GRAPH_BASELINE_ACTION)
+            .unwrap();
+        assert!(
+            outcome.reason.contains("not installed: ") && outcome.reason.contains("live turn"),
+            "{outcome:?}"
+        );
+        assert_eq!(ceiling_name(&fx), "UNCLASSIFIED");
+        assert_eq!(
+            fx.stored().unwrap().ceiling,
+            "SECRET",
+            "the store holds the accepted baseline"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_shutdown_future_waits_for_the_accept_to_finish() {
+        let (tx, rx) = tokio::sync::watch::channel(Drain::Serving);
+        let fut = shutdown_on(std::future::pending::<()>(), rx);
+        tokio::pin!(fut);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut fut)
+                .await
+                .is_err(),
+            "not before the drain"
+        );
+        tx.send_replace(Drain::Begun);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut fut)
+                .await
+                .is_err(),
+            "not while the accept is still committing"
+        );
+        tx.send_replace(Drain::Applied);
+        tokio::time::timeout(Duration::from_secs(1), fut)
+            .await
+            .expect("resolves once the accept has persisted");
+    }
+
+    #[tokio::test]
+    async fn a_dropped_drain_sender_never_resolves_shutdown() {
+        let (tx, rx) = tokio::sync::watch::channel(Drain::Serving);
+        drop(tx);
+        let fut = shutdown_on(std::future::pending::<()>(), rx);
+        assert!(tokio::time::timeout(Duration::from_millis(200), fut)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn a_signal_resolves_shutdown_while_serving() {
+        let (_tx, rx) = tokio::sync::watch::channel(Drain::Serving);
+        tokio::time::timeout(Duration::from_secs(1), shutdown_on(async {}, rx))
+            .await
+            .expect("a signal stops the serve");
     }
 }
 
@@ -11341,6 +12801,8 @@ mod reload_tests {
                 Arc::new("US".into()),
                 Arc::new(None),
                 crate::egress::unavailable_egress(),
+                baseline_stub::no_baseline(),
+                baseline_stub::serving(),
             ),
         )
         .await
@@ -11433,6 +12895,8 @@ mod reload_tests {
                 Arc::new("US".into()),
                 Arc::new(None),
                 crate::egress::unavailable_egress(),
+                baseline_stub::no_baseline(),
+                baseline_stub::serving(),
             ),
         )
         .await

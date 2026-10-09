@@ -809,6 +809,42 @@ pub async fn commit(
     audit: &mut impl BootAudit,
     initiator: &'static str,
 ) -> Result<Committed, StoreError> {
+    transition(
+        dir,
+        key,
+        next,
+        released,
+        principal_admin,
+        &[],
+        audit,
+        initiator,
+    )
+    .await
+}
+
+/// An operator's accept: the one commit that may change the accepted baseline, with
+/// `events` written ahead of the transition intent. Dropping the baseline is refused.
+pub async fn commit_accept(
+    dir: &StateDir,
+    key: &WrappingKey,
+    next: &Graph,
+    events: &[String],
+    audit: &mut impl BootAudit,
+) -> Result<Committed, StoreError> {
+    transition(dir, key, next, &[], None, events, audit, INITIATOR_OPERATOR).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn transition(
+    dir: &StateDir,
+    key: &WrappingKey,
+    next: &Graph,
+    released: &[identity::Released],
+    principal_admin: Option<u32>,
+    events: &[String],
+    audit: &mut impl BootAudit,
+    initiator: &'static str,
+) -> Result<Committed, StoreError> {
     let revision = next.revision();
     let store = dir.store_revision();
     if revision <= store {
@@ -819,7 +855,12 @@ pub async fn commit(
     }
     let proposed =
         maknae_graph::baseline::extract(next).map_err(|e| StoreError::Identity(e.to_string()))?;
-    if proposed != peek_baseline(dir, key)? {
+    let unrecorded = if events.is_empty() {
+        proposed != peek_baseline(dir, key)?
+    } else {
+        proposed.is_none()
+    };
+    if unrecorded {
         return Err(StoreError::BaselineUnrecorded);
     }
     if !released.is_empty() {
@@ -827,6 +868,9 @@ pub async fn commit(
     }
     if let Some(uid) = principal_admin {
         audit.principal_admin(revision, uid).await?;
+    }
+    if !events.is_empty() {
+        audit.baseline(revision, events).await?;
     }
     audit.intent_transition(revision, initiator).await?;
     let persisted = dir.persist(key, next)?;
