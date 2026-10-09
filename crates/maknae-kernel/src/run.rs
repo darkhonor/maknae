@@ -3175,6 +3175,13 @@ async fn refuse_audit_offload_boot<E: AuditEmit + Send + Sync>(
     RunError::AuditOffload(format!("{catalog}: {reason}"))
 }
 
+/// A journal line; tests read the lines back through `journal_capture`.
+fn journal(line: String) {
+    #[cfg(test)]
+    journal_capture::push(&line);
+    eprintln!("{line}");
+}
+
 fn accept_journal(
     short: &str,
     revision: u64,
@@ -4035,7 +4042,10 @@ where
                 )
             }
             Ok(Err(cause)) => {
-                eprintln!("maknaed: baseline accept refused: {} {cause}", set.source);
+                journal(format!(
+                    "maknaed: baseline accept refused: {} {cause}",
+                    set.source
+                ));
                 let (view, _) = crate::baseline::refused_view(
                     &crate::baseline::AcceptRefusal::Invalid,
                     Some(&set),
@@ -5509,7 +5519,10 @@ async fn boot_after_sink(
         )
         .await
         .map_err(|e| boot_evidence_refused("baseline pending", e))?;
-        eprintln!("maknaed: baseline: {}", crate::baseline::journal_line(p));
+        journal(format!(
+            "maknaed: baseline: {}",
+            crate::baseline::journal_line(p)
+        ));
     }
     let authorizer = Arc::new(authorizer);
     let identity = booted.status.identity.clone();
@@ -8643,6 +8656,8 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             .collect()
     }
 
+    const INVALID_JOURNAL: &str = "maknaed: baseline: baseline change refused: root-file invalid: ";
+
     fn baseline_records(recs: &[AuditRecord]) -> Vec<(String, String)> {
         recs.iter()
             .filter(|r| r.action == GRAPH_BASELINE_ACTION)
@@ -8971,12 +8986,20 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             "",
         );
         let before = trail_of(&d, "audit.jsonl").len();
+        let (_, from) = journal_capture::since(usize::MAX, "");
         let _ = boot(&d);
         let recs = trail_of(&d, "audit.jsonl")[before..].to_vec();
         assert!(composition(&recs).contains("ceiling: UNCLASSIFIED"));
         let b = baseline_records(&recs);
         assert_eq!(b.len(), 1, "{b:?}");
         assert_eq!(b[0].1, crate::baseline::INVALID_RECORDED);
+        let (lines, _) = journal_capture::since(from, INVALID_JOURNAL);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with(INVALID_JOURNAL) && l.contains("unknown_key")),
+            "{lines:?}"
+        );
         assert_eq!(
             recs.iter()
                 .find(|r| r.action == GRAPH_BASELINE_ACTION)
@@ -9159,12 +9182,18 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         let new = prepare_trail(&d, "audit-2.jsonl");
         write_yaml(&d, "", "https://v.example:8200", &new, "");
         let before = trail_of(&d, "audit.jsonl").len();
+        let (_, from) = journal_capture::since(usize::MAX, "");
         let _ = block_on_run_inner_with(
             &d.0,
             seams_with(TestEnv {
                 prepared: Err("not append-only".into()),
                 ..TestEnv::default()
             }),
+        );
+        let (lines, _) = journal_capture::since(from, INVALID_JOURNAL);
+        assert!(
+            lines.iter().any(|l| l.contains("not append-only")),
+            "{lines:?}"
         );
         assert!(trail_of(&d, "audit-2.jsonl").is_empty());
         let b = baseline_records(&trail_of(&d, "audit.jsonl")[before..]);
@@ -9186,12 +9215,20 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         put(&other.0, "audit.jsonl", "", 0o640);
         write_yaml(&d, "", "https://v.example:8200", &elsewhere, "");
         let before = trail_of(&d, "audit.jsonl").len();
+        let (_, from) = journal_capture::since(usize::MAX, "");
         let _ = boot(&d);
         let b = baseline_records(&trail_of(&d, "audit.jsonl")[before..]);
         assert!(
             b.iter()
                 .any(|(r, why)| r == "deny" && why == crate::baseline::INVALID_RECORDED),
             "{b:?}"
+        );
+        let (lines, _) = journal_capture::since(from, INVALID_JOURNAL);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with(INVALID_JOURNAL) && l.contains("may move only within")),
+            "{lines:?}"
         );
         assert!(std::fs::read_to_string(&elsewhere).unwrap().is_empty());
     }
@@ -11649,6 +11686,7 @@ mod baseline_accept_tests {
             ("pending", "live")
         );
         let before = fx.store_sha();
+        let (_, from) = journal_capture::since(usize::MAX, "");
         match fx.accept(&shown.hash).await {
             AcceptAnswer::View {
                 view,
@@ -11661,6 +11699,12 @@ mod baseline_accept_tests {
             }
             other => panic!("{other:?}"),
         }
+        let (lines, _) =
+            journal_capture::since(from, "maknaed: baseline accept refused: root-file ");
+        assert!(
+            lines.iter().any(|l| l.contains("audit.readers root")),
+            "{lines:?}"
+        );
         assert_eq!(fx.store_sha(), before);
     }
 
@@ -11675,6 +11719,7 @@ mod baseline_accept_tests {
         fx.write_yaml("", &format!("socket_path_marker: {}\n", other.display()));
         let shown = fx.show().await;
         let before = fx.store_sha();
+        let (_, from) = journal_capture::since(usize::MAX, "");
         match fx.accept(&shown.hash).await {
             AcceptAnswer::View {
                 view,
@@ -11687,6 +11732,13 @@ mod baseline_accept_tests {
             }
             other => panic!("{other:?}"),
         }
+        let (lines, _) = journal_capture::since(from, &other.display().to_string());
+        assert!(
+            lines.iter().any(
+                |l| l.starts_with("maknaed: baseline accept refused: ") && l.contains("EACCES")
+            ),
+            "{lines:?}"
+        );
         assert_eq!(fx.store_sha(), before);
         assert_eq!(fx.drain(), Drain::Serving);
     }
@@ -12231,6 +12283,11 @@ mod reload_tests {
             .find(|s| s.action == GRAPH_BASELINE_ACTION)
             .unwrap();
         assert_eq!(rec.reason, crate::baseline::INVALID_RECORDED);
+        let pending = fx.reloader.baseline.current().pending.clone().unwrap();
+        assert!(
+            matches!(&pending.state, crate::baseline::PendingState::Invalid { cause, .. } if cause.contains("unknown_key")),
+            "{pending:?}"
+        );
         assert_eq!(
             fx.status_lines(),
             vec!["baseline: 1 pending (invalid)".to_string()]
@@ -13720,5 +13777,31 @@ mod unencodable_tests {
             maknae_proto::decode_response(&reply).unwrap().result,
             RespResult::Err(_)
         ));
+    }
+}
+
+#[cfg(test)]
+mod journal_capture {
+    static JOURNAL: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+    fn lines() -> std::sync::MutexGuard<'static, Vec<String>> {
+        JOURNAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub(super) fn push(line: &str) {
+        lines().push(line.to_string());
+    }
+
+    /// The lines written since `from` that contain `needle`, and the count now.
+    pub(super) fn since(from: usize, needle: &str) -> (Vec<String>, usize) {
+        let all = lines();
+        let found = all[from.min(all.len())..]
+            .iter()
+            .filter(|l| l.contains(needle))
+            .cloned()
+            .collect();
+        (found, all.len())
     }
 }
