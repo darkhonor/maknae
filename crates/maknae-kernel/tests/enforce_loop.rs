@@ -1835,7 +1835,14 @@ async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
             );
             assert_eq!(s.baseline_pending, ["baseline: 1 pending (invalid)"]);
             assert_eq!(s.identity_sync, ["unsynced=1", "conflict=0"]);
-            assert!(!format!("{:?}", s.identity_sync).contains("adversary"));
+            for line in &s.identity_sync {
+                let count = |v: &str| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit());
+                let shaped = match line.split_once('=') {
+                    Some(("unsynced" | "conflict", v)) => count(v),
+                    _ => line == "file=lost" || line == "mirror=stale",
+                };
+                assert!(shaped, "a count or a flag, never a name: {line:?}");
+            }
             assert!(!format!("{s:?}").contains(&pending_hash_status.1[..12]));
             // The VALUE, not merely non-empty: wiring `listener` to any other
             // non-empty config string -- the audit path, the plane socket --

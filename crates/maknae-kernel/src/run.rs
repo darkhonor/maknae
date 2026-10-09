@@ -4052,6 +4052,8 @@ struct Reloader<B: maknae_authz_basic::Baseline, E> {
     sync: crate::sync::SyncStatus,
     #[cfg(test)]
     load_gate: Option<Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>>,
+    #[cfg(test)]
+    load_entered: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4811,6 +4813,9 @@ where
             tokio::task::spawn_blocking(move || {
                 #[cfg(test)]
                 if let Some(gate) = &reloader.load_gate {
+                    if let Some(entered) = reloader.load_entered.lock().unwrap().as_ref() {
+                        let _ = entered.send(());
+                    }
                     let _ = gate.lock().unwrap().recv();
                 }
                 load_candidate(&reloader, &persisted, store_revision)
@@ -6068,6 +6073,8 @@ async fn boot_after_sink(
         sync: sync_status,
         #[cfg(test)]
         load_gate: None,
+        #[cfg(test)]
+        load_entered: std::sync::Mutex::new(None),
     };
     let outcome = serve_after_mint(
         &client,
@@ -12364,6 +12371,7 @@ mod reload_fixture {
             applied_source: std::sync::RwLock::new(Arc::new(source)),
             sync: status.sync.clone(),
             load_gate: opts.load_gate.map(|g| Arc::new(std::sync::Mutex::new(g))),
+            load_entered: std::sync::Mutex::new(None),
         });
         Fx {
             _guard: Guard(owned),
@@ -12479,6 +12487,40 @@ mod baseline_accept_tests {
             );
             assert_eq!(fx.stored().unwrap().ceiling, "SECRET", "{tag}");
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_restart_accept_whose_mirror_cannot_be_published_still_applies_and_is_stale() {
+        let fx = fixture_with("accept-render-failed", Opts::default()).await;
+        fx.write_yaml(SECRET, "");
+        let shown = fx.show().await;
+        assert_eq!(shown.apply, "restart");
+        fx.reloader.dir.fail_next_mirror_publish();
+        let view = accepted(fx.accept(&shown.hash).await);
+        assert_eq!(
+            (view.state.as_str(), view.apply.as_str()),
+            ("accepted", "restart")
+        );
+        assert_eq!(fx.drain(), Drain::Applied);
+        assert_eq!(fx.stored().unwrap().ceiling, "SECRET");
+        assert_eq!(
+            fx.reloader.sync.lines(),
+            ["unsynced=0", "conflict=0", "mirror=stale"]
+        );
+        let revision = fx.reloader.revision.load(AtomicOrdering::Acquire);
+        assert!(
+            fx.seen().iter().any(|s| s.action == GRAPH_SYNC_ACTION
+                && s.reason.starts_with("mirror render failed: publish: ")
+                && s.reason.ends_with(&format!(
+                    "; the transition at revision {revision} stands; the stale mirror was removed"
+                ))),
+            "{:?}",
+            fx.seen()
+                .iter()
+                .map(|s| (&s.action, &s.reason))
+                .collect::<Vec<_>>()
+        );
+        assert!(!fx.state_dir().join(maknae_config::MIRROR_FILE).exists());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -15674,14 +15716,20 @@ mod reload_tests {
         let (release, gate) = std::sync::mpsc::channel::<()>();
         let fx = fixture_gated("live-turn", AUTHZ, Some(ROOT_ADMIN), Some(gate)).await;
         let store = fx.store_sha();
+        let (entered_tx, entered) = std::sync::mpsc::channel::<()>();
+        *fx.reloader.load_entered.lock().unwrap() = Some(entered_tx);
         let reload = tokio::spawn({
             let reloader = Arc::clone(&fx.reloader);
             async move { reloader.run().await }
         });
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while fx.reloader.lock.try_lock().is_ok() && Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        bounded(tokio::task::spawn_blocking(move || entered.recv()))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            fx.reloader.lock.try_lock().is_err(),
+            "the reload holds the turn"
+        );
         let started = Instant::now();
         let got = tokio::time::timeout(
             Duration::from_secs(5),
