@@ -126,9 +126,10 @@ mod tests {
         let turn = lock.try_take().unwrap();
         live.install(&turn, view, providers)
     }
-    use crate::baseline_check::tests::{doc, minimal, FakeEnv, PROVIDERS};
     use crate::baseline_check::{validate, Invalid, Mode};
-    use crate::composition::tests::{fixture, permitted_read_marked, READ_POLICY};
+    use crate::test_fixtures::{
+        doc, fixture, minimal, permitted_read_marked, FakeEnv, PROVIDERS, READ_POLICY,
+    };
     use maknae_authz_basic::Baseline;
     use maknae_config::{BasicPolicy, Ceiling, ClassificationPolicy, ProviderSet};
     use maknae_security::{Authorizer, Verdict};
@@ -265,7 +266,7 @@ mod tests {
         let (g, basic) = fixture("live-no-ceiling", READ_POLICY, None);
         let pdp = crate::Composition::new(
             basic,
-            crate::CeilingAuthorizer::new(crate::composition::tests::secret(), US),
+            crate::CeilingAuthorizer::new(crate::test_fixtures::secret(), US),
         );
         let mut accepted = validated(&with(&[("core", SECRET_CORE)]), &FakeEnv::default()).unwrap();
         accepted.principal.uid = nix::unistd::geteuid().as_raw();

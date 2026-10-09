@@ -462,6 +462,10 @@ path = "crates/maknae-security/src/request.rs"
 why = "type declarations (subject/resource/action/context/request) + derives; no hand-written executable logic that could turn a deny into a permit"
 
 [[t3]]
+path = "crates/maknae-kernel/src/test_fixtures.rs"
+why = "test-only fixtures shared by the kernel's module test suites (the gate requires `#[cfg(test)]` to be followed by a line beginning `mod `, which rules out `pub(crate) mod tests`); declared under `#[cfg(test)]` in lib.rs, so it has no production regions"
+
+[[t3]]
 path = "crates/maknae-kernel/src/lib.rs"
 why = "module declarations + re-exports + PRIVILEGED_MARKER; the boot logic is boot.rs (T1)"
 

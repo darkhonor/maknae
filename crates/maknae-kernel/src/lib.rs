@@ -68,3 +68,6 @@ pub use run::{
 
 #[used]
 pub static PRIVILEGED_MARKER: &[u8] = b"PRIVILEGED_MAKNAE_KERNEL";
+
+#[cfg(test)]
+mod test_fixtures;

@@ -253,118 +253,12 @@ pub fn audit_of(doc: &Document, config_dir: &Path) -> Result<maknae_config::Audi
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
-    use maknae_config::{BaselineSections, Document, ReaderAccount, ReaderLookup};
+    use crate::test_fixtures::{doc, minimal, FakeEnv, PROVIDERS};
+    use maknae_config::{BaselineSections, ReaderAccount};
     use std::path::Path;
-    use std::sync::Mutex;
 
-    pub(crate) struct FakeEnv {
-        bounds: Option<maknae_config::EgressBounds>,
-        egress_uid: Result<Option<u32>, String>,
-        prepared: Result<(), String>,
-        bindable: Result<(), String>,
-        reachable: Result<(), String>,
-        accounts: Vec<ReaderAccount>,
-        probed: Mutex<Vec<String>>,
-    }
-
-    impl Default for FakeEnv {
-        fn default() -> Self {
-            FakeEnv {
-                bounds: None,
-                egress_uid: Ok(Some(981)),
-                prepared: Ok(()),
-                bindable: Ok(()),
-                reachable: Ok(()),
-                accounts: Vec::new(),
-                probed: Mutex::new(Vec::new()),
-            }
-        }
-    }
-
-    impl FakeEnv {
-        pub(crate) fn with_bounds() -> Self {
-            FakeEnv {
-                bounds: Some(maknae_config::EgressBounds {
-                    kv_mount: "kv".into(),
-                    user_prefix: "users".into(),
-                    vault_addr: "https://v:8200".into(),
-                }),
-                ..FakeEnv::default()
-            }
-        }
-        fn probed(&self) -> Vec<String> {
-            self.probed.lock().unwrap().clone()
-        }
-    }
-
-    impl ReaderLookup for FakeEnv {
-        fn account(&self, name: &str) -> Result<Option<ReaderAccount>, String> {
-            Ok(self.accounts.iter().find(|a| a.name == name).cloned())
-        }
-        fn daemon_gid(&self) -> Result<Option<u32>, String> {
-            Ok(Some(970))
-        }
-        fn service_uids(&self) -> Result<Vec<u32>, String> {
-            Ok(vec![970, 981])
-        }
-    }
-
-    impl Env for FakeEnv {
-        fn egress_bounds(&self) -> Result<maknae_config::EgressBounds, maknae_config::ConfigError> {
-            self.bounds
-                .clone()
-                .ok_or_else(|| maknae_config::ConfigError::NotFound {
-                    path: maknae_config::EGRESS_BOUNDS_FILE.into(),
-                })
-        }
-        fn egress_account(&self) -> Result<Option<u32>, String> {
-            self.egress_uid.clone()
-        }
-        fn trail_prepared(&self, path: &Path) -> Result<(), String> {
-            self.probed
-                .lock()
-                .unwrap()
-                .push(format!("prepared {}", path.display()));
-            self.prepared.clone()
-        }
-        fn listener_bindable(&self, path: &Path) -> Result<(), String> {
-            self.probed
-                .lock()
-                .unwrap()
-                .push(format!("bind {}", path.display()));
-            self.bindable.clone()
-        }
-        fn deputy_reachable(&self, path: &Path) -> Result<(), String> {
-            self.probed
-                .lock()
-                .unwrap()
-                .push(format!("connect {}", path.display()));
-            self.reachable.clone()
-        }
-    }
-
-    pub(crate) fn doc(pairs: &[(&str, &str)]) -> Document {
-        let s: BaselineSections = pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-        Document::from_baseline(&s).unwrap()
-    }
-    const AUDIT: &str = r#"{"jsonl_path":"/var/log/maknae/audit.jsonl"}"#;
-    const PRINCIPAL: &str = r#"{"name":"op","uid":1000}"#;
-    pub(crate) const PROVIDERS: &str =
-        r#"[{"endpoint":"https://api.example.test/v1","models":["m"],"name":"openai"}]"#;
-    const VAULT: &str = r#"{"addr":"https://v:8200"}"#;
-    pub(crate) fn minimal() -> Vec<(&'static str, &'static str)> {
-        vec![
-            ("core", r#"{"deployment_id":"d"}"#),
-            ("audit", AUDIT),
-            ("principal", PRINCIPAL),
-            ("vault", VAULT),
-        ]
-    }
     fn sections(pairs: &[(&str, &str)]) -> BaselineSections {
         pairs
             .iter()
