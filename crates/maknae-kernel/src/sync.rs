@@ -265,6 +265,10 @@ impl SyncStatus {
         lost && !was
     }
 
+    pub fn stale(&self) -> bool {
+        self.0.read().unwrap_or_else(|p| p.into_inner()).2
+    }
+
     pub fn lines(&self) -> Vec<String> {
         let (c, lost, stale) = *self.0.read().unwrap_or_else(|p| p.into_inner());
         let mut out = vec![
@@ -889,7 +893,9 @@ mod tests {
         assert_eq!(s.lines(), ["unsynced=3", "conflict=4"]);
         assert!(s.became_lost(true), "lost again after a restore");
         let shared = s.clone();
+        assert!(!s.stale());
         shared.set_stale(true);
+        assert!(s.stale());
         assert_eq!(
             s.lines(),
             ["unsynced=3", "conflict=4", "file=lost", "mirror=stale"]

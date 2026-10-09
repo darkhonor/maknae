@@ -3733,12 +3733,13 @@ async fn record_sync_unavailable<E: AuditEmit + Send + Sync>(
     ctx: &BootCtx<'_>,
     reason: &str,
     what: &str,
+    bound: Duration,
 ) {
     journal(format!("maknaed: sync: {reason}"));
     if let Err(e) = sink
         .emit_within(
             &ctx.record(GRAPH_SYNC_ACTION, "deny", reason, "unavailable", None),
-            AUDIT_APPEND_TIMEOUT,
+            bound,
         )
         .await
     {
@@ -3793,7 +3794,16 @@ async fn boot_merged_graph(
             "maknaed: sync: mirror revision {} published ({short})",
             booted.graph.revision()
         )),
-        Err(reason) => record_sync_unavailable(sink.as_ref(), ctx, &reason, "mirror render").await,
+        Err(reason) => {
+            record_sync_unavailable(
+                sink.as_ref(),
+                ctx,
+                &reason,
+                "mirror render",
+                AUDIT_APPEND_TIMEOUT,
+            )
+            .await
+        }
     }
     Ok(MergedBoot {
         booted,
@@ -4033,16 +4043,24 @@ struct Reloader<B: maknae_authz_basic::Baseline, E> {
     drain: tokio::sync::watch::Sender<Drain>,
     /// How long an accept waits for a reload holding the turn.
     turn_wait: Duration,
+    #[cfg_attr(not(test), allow(dead_code))]
+    applied_source: std::sync::RwLock<Arc<maknae_authz_basic::PolicySource>>,
+    sync: crate::sync::SyncStatus,
     #[cfg(test)]
     load_gate: Option<Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>>,
 }
 
-type ReloadCandidate = (
-    Arc<maknae_graph::graph::Graph>,
-    Arc<maknae_authz_basic::snapshot::Snapshot>,
-    Arc<[maknae_graph::identity::Released]>,
-    Option<crate::baseline::PendingSet>,
-);
+struct ReloadCandidate {
+    graph: Arc<maknae_graph::graph::Graph>,
+    snapshot: Arc<maknae_authz_basic::snapshot::Snapshot>,
+    released: Arc<[maknae_graph::identity::Released]>,
+    pending: Option<crate::baseline::PendingSet>,
+    source: Arc<maknae_authz_basic::PolicySource>,
+    sync_events: Arc<[String]>,
+    initiator: &'static str,
+    counts: crate::sync::SyncCounts,
+    lost: Option<String>,
+}
 
 impl<B, E> Reloader<B, E>
 where
@@ -4070,6 +4088,7 @@ where
                 committed: std::sync::Mutex::new(None),
                 replaced: std::sync::Mutex::default(),
                 newly_pending: std::sync::Mutex::default(),
+                newly_lost: std::sync::Mutex::default(),
             };
             let mut stopping = self.stopping.subscribe();
             let stopped = async move {
@@ -4101,6 +4120,25 @@ where
     B: maknae_authz_basic::Baseline,
     E: AuditEmit + Send + Sync + 'static,
 {
+    async fn publish_mirror(&self, graph: &maknae_graph::graph::Graph, ctx: &BootCtx<'_>) {
+        match crate::sync::publish_or_remove(&self.dir, &self.sync, graph, &self.config_dir) {
+            Ok(short) => journal(format!(
+                "maknaed: sync: mirror revision {} published ({short})",
+                graph.revision()
+            )),
+            Err(reason) => {
+                record_sync_unavailable(
+                    self.sink.as_ref(),
+                    ctx,
+                    &reason,
+                    "mirror render",
+                    self.append_bound,
+                )
+                .await
+            }
+        }
+    }
+
     /// The published accepted baseline and the set the files hold against it, read now.
     async fn read_pending(
         &self,
@@ -4449,6 +4487,7 @@ struct ReloadIo<'a, B: maknae_authz_basic::Baseline, E> {
     replaced: std::sync::Mutex<Arc<[maknae_authz_basic::IdentityProblem]>>,
     /// The pending set an install published with a new hash, to be recorded.
     newly_pending: std::sync::Mutex<Option<crate::baseline::PendingSet>>,
+    newly_lost: std::sync::Mutex<Option<String>>,
 }
 
 /// The files read and validated as a start reads them: the sections, or why they
@@ -4506,36 +4545,51 @@ fn load_candidate<B: maknae_authz_basic::Baseline, E>(
     let compile_refused = |m: String| Refusal::Compile(m);
     let persisted = maknae_graph::identity::extract(persisted_graph)
         .map_err(|e| compile_refused(e.to_string()))?;
+    if persisted.sync.is_none() {
+        return Err(compile_refused(
+            "the running graph carries no sync base".into(),
+        ));
+    }
     let Some(stored_baseline) = persisted.baseline.as_ref() else {
         return Err(compile_refused(
             "the running graph carries no baseline".into(),
         ));
     };
-    let source = baseline
+    let file = baseline
         .load_source()
         .map_err(|e| Refusal::Load(e.to_string()))?;
+    let merged = crate::sync::merge_source(file, persisted.sync.as_ref()).map_err(|e| match e {
+        crate::sync::MergeError::Stored(m) => Refusal::Compile(m),
+        crate::sync::MergeError::Policy(m) => Refusal::Load(m),
+    })?;
+    let source = &merged.source;
     let digests = source.section_digests(baseline.digest());
     let (next, released) = crate::reload::next_layer(
         &source.identity_layer(label, digests.get("bindings").copied()),
         &source.unresolved_adversaries(),
         &persisted.layer,
-        source.bindings().is_missing(),
         source.bindings().lists_nobody(),
-    )?;
+    );
+    let provenance = maknae_state::store::transition_initiator(
+        merged.kind,
+        crate::reload::layers_differ(&persisted.layer, &next),
+        false,
+        false,
+    );
     let (plan, graph) = crate::reload::plan_candidate(
-        &persisted.layer,
-        &next,
+        (&persisted.layer, persisted.sync.as_ref()),
+        (&next, &merged.sync),
         store_revision,
         persisted_graph,
         |revision| {
             maknae_graph::identity::build(
                 &next,
                 Some(stored_baseline),
-                persisted.sync.as_ref(),
+                Some(&merged.sync),
                 &vocabulary.persisted,
                 vocabulary.digest,
                 revision,
-                maknae_graph::record::ProvenanceKind::RootFile,
+                provenance,
             )
             .map(Arc::new)
             .map_err(|e| compile_refused(e.to_string()))
@@ -4543,7 +4597,7 @@ fn load_candidate<B: maknae_authz_basic::Baseline, E>(
     )?;
     let snapshot = maknae_authz_basic::snapshot::compile(
         Arc::clone(&graph),
-        &source,
+        source,
         &vocabulary.full,
         &digests,
     )
@@ -4557,7 +4611,20 @@ fn load_candidate<B: maknae_authz_basic::Baseline, E>(
         trail.as_deref(),
     );
     let pending = crate::baseline::pending(&accepted.accepted, &file);
-    Ok((plan, (graph, Arc::new(snapshot), released.into(), pending)))
+    Ok((
+        plan,
+        ReloadCandidate {
+            graph,
+            snapshot: Arc::new(snapshot),
+            released: released.into(),
+            pending,
+            initiator: maknae_state::store::initiator_name(provenance),
+            sync_events: merged.events.into(),
+            counts: merged.counts,
+            lost: merged.lost,
+            source: Arc::new(merged.source),
+        },
+    ))
 }
 
 impl<B, E> crate::reload::Load for ReloadIo<'_, B, E>
@@ -4604,8 +4671,10 @@ where
         &self,
         candidate: &ReloadCandidate,
     ) -> impl Future<Output = Result<crate::reload::Committed, crate::reload::Refusal>> + Send {
-        let graph = Arc::clone(&candidate.0);
-        let released = Arc::clone(&candidate.2);
+        let graph = Arc::clone(&candidate.graph);
+        let released = Arc::clone(&candidate.released);
+        let sync_events = Arc::clone(&candidate.sync_events);
+        let initiator = candidate.initiator;
         async move {
             let mut audit = GraphBootAudit {
                 sink: self.reloader.sink.as_ref(),
@@ -4619,9 +4688,9 @@ where
                 &self.reloader.key,
                 &graph,
                 &released,
-                &[],
+                &sync_events,
                 &mut audit,
-                maknae_state::store::INITIATOR_ROOT_FILE,
+                initiator,
             )
             .await
             .map_err(|e| match e {
@@ -4637,6 +4706,7 @@ where
                 .committed
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(committed.digest);
+            self.reloader.publish_mirror(&graph, self.ctx).await;
             Ok(crate::reload::Committed {
                 revision: committed.revision,
                 durability_error: committed.durability_error,
@@ -4658,12 +4728,27 @@ where
     /// report the previous load.
     fn install(&self, candidate: ReloadCandidate) {
         let published = crate::identity_report::Published::of(
-            &candidate.1,
-            crate::identity_report::transition_problems(&candidate.2),
+            &candidate.snapshot,
+            crate::identity_report::transition_problems(&candidate.released),
         );
-        self.reloader.authorizer.baseline().install(candidate.1);
+        self.reloader
+            .authorizer
+            .baseline()
+            .install(candidate.snapshot);
+        *self
+            .reloader
+            .applied_source
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = candidate.source;
+        self.reloader.sync.set_counts(candidate.counts);
+        if self.reloader.sync.became_lost(candidate.lost.is_some()) {
+            *self
+                .newly_lost
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = candidate.lost;
+        }
         let current = self.reloader.baseline.current();
-        let pending = candidate.3;
+        let pending = candidate.pending;
         let hash = |p: &Option<crate::baseline::PendingSet>| p.as_ref().map(|p| p.hash.clone());
         // A new set is published by `outcome` once its record is appended.
         if pending.is_some() && hash(&pending) != hash(&current.pending) {
@@ -4776,6 +4861,14 @@ where
         let sink = Arc::clone(&self.reloader.sink);
         let bound = self.reloader.append_bound;
         let status = self.reloader.baseline.clone();
+        let lost = self
+            .newly_lost
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let republish =
+            matches!(r, Ok(a) if !a.persisted) && (self.reloader.sync.stale() || lost.is_some());
+        let (reloader, ctx) = (self.reloader, self.ctx);
         async move {
             if let Err(e) = sink.emit_within(&rec, bound).await {
                 eprintln!("maknaed: AUDIT WRITE FAILED on the reload outcome ({reason}): {e}");
@@ -4802,6 +4895,18 @@ where
                         eprintln!("maknaed: AUDIT WRITE FAILED on the baseline pending record: {e}")
                     }
                 }
+            }
+            if republish {
+                let graph = Arc::clone(
+                    &reloader
+                        .persisted
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                );
+                reloader.publish_mirror(&graph, ctx).await;
+            }
+            if let Some(reason) = lost {
+                record_sync_unavailable(sink.as_ref(), ctx, &reason, "sync lost", bound).await;
             }
         }
     }
@@ -5582,6 +5687,7 @@ async fn boot_after_sink(
         pending: pending.clone(),
     });
     let persisted_graph = Arc::new(booted.graph);
+    let applied_source = Arc::new(source.clone());
     let authorizer = match authz_boot_gate(
         source,
         Arc::clone(&persisted_graph),
@@ -5657,12 +5763,20 @@ async fn boot_after_sink(
         ));
     }
     if let Some(reason) = &lost {
-        record_sync_unavailable(sink.as_ref(), &graph_ctx, reason, "sync lost").await;
+        record_sync_unavailable(
+            sink.as_ref(),
+            &graph_ctx,
+            reason,
+            "sync lost",
+            AUDIT_APPEND_TIMEOUT,
+        )
+        .await;
     }
     let authorizer = Arc::new(authorizer);
     let identity = booted.status.identity.clone();
     let graph_revision = Arc::clone(&booted.status.revision);
     let baseline_status = booted.status.baseline.clone();
+    let sync_status = booted.status.sync.clone();
     let kernel_graph = Arc::new(Some(booted.status));
 
     // Plane credential: resolve + read this plane's SecretID source (spec §5.1),
@@ -5789,6 +5903,8 @@ async fn boot_after_sink(
         baseline: baseline_status,
         drain: tokio::sync::watch::channel(Drain::Serving).0,
         turn_wait: BLOCKING_OPERATION_TIMEOUT,
+        applied_source: std::sync::RwLock::new(applied_source),
+        sync: sync_status,
         #[cfg(test)]
         load_gate: None,
     };
@@ -11695,6 +11811,19 @@ mod reload_fixture {
             write_0640(&self.bindings(), body);
         }
 
+        pub(super) fn mirror(&self) -> String {
+            std::fs::read_to_string(self.state_dir().join(maknae_config::MIRROR_FILE)).unwrap()
+        }
+
+        pub(super) fn install_mirror(&self) {
+            let m = maknae_config::parse_mirror(&self.mirror()).unwrap();
+            self.write_bindings(&maknae_config::installable(&m));
+        }
+
+        pub(super) fn sync_lines(&self) -> Vec<String> {
+            self.reloader.sync.lines()
+        }
+
         pub(super) fn write_yaml(&self, core_extra: &str, tail: &str) {
             write_0640(
                 &self.dir.join("maknae.yaml"),
@@ -11935,12 +12064,47 @@ mod reload_fixture {
                 .unwrap(),
             );
         }
-        let booted = boot_graph_at(
+        let key = WrappingKey::new(
+            maknae_vault::graph_key_from_bytes(&[0x5a; 32])
+                .unwrap()
+                .into_bytes(),
+        );
+        let state = StateDir::open(&dir.join("state"), euid);
+        let stored = match &state {
+            Ok(d) if !d.reseed_authorized() => {
+                maknae_state::store::peek_baseline(d, &key).ok().flatten()
+            }
+            _ => None,
+        };
+        let MergedBoot {
+            booted,
+            inputs,
+            source,
+            lost,
+        } = boot_merged_graph(
             &dir.join("state"),
-            maknae_vault::graph_key_from_bytes(&[0x5a; 32]),
+            &dir,
+            state,
+            Ok(key),
             &sink,
             &ctx,
-            &inputs.boot(),
+            source,
+            |merged, seen| {
+                let merged_inputs =
+                    GraphInputs::merged(merged, seen, "UNCLASSIFIED", layer.clone()).unwrap();
+                Ok(match &stored {
+                    Some(b) => GraphInputs {
+                        baseline: b.clone(),
+                        accepted_seen: Some(b.sha256),
+                        ..merged_inputs
+                    },
+                    None => GraphInputs {
+                        baseline_events: vec![crate::baseline::SEEDED_EVENT.into()],
+                        ..merged_inputs
+                    },
+                })
+            },
+            None,
         )
         .await
         .unwrap();
@@ -11954,6 +12118,15 @@ mod reload_fixture {
             Arc::clone(&graph),
         )
         .unwrap();
+        baseline.install(Arc::new(
+            maknae_authz_basic::snapshot::compile(
+                Arc::clone(&graph),
+                &source,
+                &inputs.vocabulary.full,
+                &source.section_digests(maknae_state::envelope::sha256),
+            )
+            .unwrap(),
+        ));
         publish_boot_identity(
             &booted.status.identity,
             &baseline.snapshot(),
@@ -11963,6 +12136,9 @@ mod reload_fixture {
         )
         .await
         .unwrap();
+        if let Some(reason) = &lost {
+            record_sync_unavailable(sink.as_ref(), &ctx, reason, "sync lost", opts.bound).await;
+        }
         let us = &maknae_config::BasicPolicy;
         let authorizer = Arc::new(crate::Composition::new(
             baseline,
@@ -12009,6 +12185,8 @@ mod reload_fixture {
             baseline: status.baseline.clone(),
             drain,
             turn_wait: opts.turn_wait,
+            applied_source: std::sync::RwLock::new(Arc::new(source)),
+            sync: status.sync.clone(),
             load_gate: opts.load_gate.map(|g| Arc::new(std::sync::Mutex::new(g))),
         });
         Fx {
@@ -12994,6 +13172,7 @@ mod reload_tests {
     use super::reload_fixture::*;
     use super::*;
     use maknae_authz_basic::Baseline;
+    use maknae_config::MIRROR_FILE;
     use maknae_graph::record::ProvenanceKind;
 
     const ROOT_ADMIN_OTHER: &str =
@@ -13153,7 +13332,7 @@ mod reload_tests {
         let bare = maknae_graph::identity::build(
             &e.layer,
             None,
-            None,
+            e.sync.as_ref(),
             &vocab.persisted,
             vocab.digest,
             current.revision(),
@@ -13171,6 +13350,34 @@ mod reload_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reload_over_a_graph_without_a_sync_base_is_refused() {
+        let fx = Fx::with_baseline("no-sync-base").await;
+        let current = fx.reloader.persisted.read().unwrap().clone();
+        let e = maknae_graph::identity::extract(&current).unwrap();
+        let vocab = &fx.reloader.vocabulary;
+        let bare = maknae_graph::identity::build(
+            &e.layer,
+            e.baseline.as_ref(),
+            None,
+            &vocab.persisted,
+            vocab.digest,
+            current.revision(),
+            ProvenanceKind::RootFile,
+        )
+        .unwrap();
+        fx.set_persisted(Arc::new(bare));
+        let before = fx.store_sha();
+        let r = bounded(fx.reloader.run()).await;
+        assert_eq!(
+            r,
+            Err(crate::reload::Refusal::Compile(
+                "the running graph carries no sync base".into()
+            ))
+        );
+        assert_eq!(fx.store_sha(), before);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_commit_whose_baseline_differs_from_the_store_is_refused_as_a_baseline_change() {
         let fx = Fx::with_baseline("baseline-mismatch").await;
         let current = fx.reloader.persisted.read().unwrap().clone();
@@ -13181,7 +13388,7 @@ mod reload_tests {
         let forged = maknae_graph::identity::build(
             &e.layer,
             Some(&other),
-            None,
+            e.sync.as_ref(),
             &vocab.persisted,
             vocab.digest,
             current.revision(),
@@ -13515,96 +13722,67 @@ mod reload_tests {
         );
     }
 
+    fn sync_reasons(fx: &Fx) -> Vec<String> {
+        fx.reload_records()
+            .into_iter()
+            .filter(|r| r.action == GRAPH_SYNC_ACTION)
+            .map(|r| r.outcome.reason)
+            .collect()
+    }
+
+    const LOST_MISSING: &str = "lost: bindings.yaml is missing; ";
+    const LOST_KEYLESS: &str = "lost: bindings.yaml has no bindings: key; ";
+
     #[tokio::test]
-    async fn removing_bindings_yaml_over_explicit_bindings_is_a_refused_reload() {
+    async fn removing_bindings_yaml_over_explicit_bindings_keeps_them() {
         let fx = fixture("rm_bindings", AUTHZ, Some(ROOT_ADVERSARY)).await;
         let before = fx.store_bytes();
         std::fs::remove_file(fx.bindings()).unwrap();
-        let refused = bounded(fx.reloader.run()).await.unwrap_err();
-        assert_eq!(
-            refused,
-            crate::reload::Refusal::Load(maknae_graph::identity::BINDINGS_MISSING.into())
-        );
+        let applied = bounded(fx.reloader.run()).await.unwrap();
+        assert!(!applied.persisted);
         assert_eq!(fx.store_bytes(), before);
         assert_eq!(whoami_as(&fx, 0).1, Some("adversary"));
         let recs = fx.reload_records();
-        let last = recs.last().unwrap();
+        let tail: Vec<(&str, &str)> = recs
+            .iter()
+            .map(|r| (r.action.as_str(), r.outcome.result.as_str()))
+            .collect();
         assert_eq!(
-            (
-                last.action.as_str(),
-                last.outcome.result.as_str(),
-                last.outcome.reason.clone()
-            ),
-            (
-                "graph.reload",
-                "deny",
-                format!(
-                    "reload refused: policy load: {}",
-                    maknae_graph::identity::BINDINGS_MISSING
-                )
-            )
+            tail,
+            [
+                ("graph.reload", "permit"),
+                ("graph.reload", "permit"),
+                ("graph.sync", "deny")
+            ]
         );
+        assert!(recs[2].outcome.reason.starts_with(LOST_MISSING), "{recs:?}");
         assert!(identity_records(&recs).is_empty());
         fx.write_bindings("schema_version: 1\n");
         let applied = bounded(fx.reloader.run()).await.unwrap();
-        assert!(applied.persisted, "root's keyless file applies");
+        assert!(!applied.persisted, "a keyless file is still lost");
+        assert_eq!(whoami_as(&fx, 0).1, Some("adversary"));
+        assert_eq!(sync_reasons(&fx).len(), 1, "still lost: recorded once");
     }
 
     #[tokio::test]
-    async fn a_keyless_reload_records_each_released_containment() {
+    async fn a_keyless_reload_releases_no_containment() {
         let fx = fixture("keyless_release", AUTHZ, Some(ROOT_ADVERSARY)).await;
         assert_eq!(whoami_as(&fx, 0).1, Some("adversary"));
+        let before = fx.store_bytes();
         fx.write_bindings("schema_version: 1\n");
-        bounded(fx.reloader.run()).await.unwrap();
-        assert_ne!(whoami_as(&fx, 0).1, Some("adversary"));
+        let applied = bounded(fx.reloader.run()).await.unwrap();
+        assert!(!applied.persisted);
+        assert_eq!(fx.store_bytes(), before);
+        assert_eq!(whoami_as(&fx, 0).1, Some("adversary"));
         let recs = fx.reload_records();
         let actions: Vec<&str> = recs.iter().map(|r| r.action.as_str()).collect();
-        assert_eq!(
-            actions,
-            [
-                "graph.reload",
-                "graph.identity",
-                "graph.identity",
-                "graph.transition",
-                "graph.checkpoint",
-                "graph.reload"
-            ]
-        );
-        assert_eq!(
-            identity_records(&recs),
-            [
-                (
-                    "permit".to_string(),
-                    "authorized".to_string(),
-                    "uid 0 ('root') is no longer contained: bindings.yaml has no bindings: key, so the enrolled principal is admin and nobody else holds a role".to_string()
-                ),
-                (
-                    "permit".to_string(),
-                    "authorized".to_string(),
-                    principal_admin_reason()
-                )
-            ]
-        );
-        let g = recs[1].graph.as_ref().unwrap();
-        assert_eq!((g.revision, g.anchor.as_str()), (2, "releasing"));
-        let g = recs[2].graph.as_ref().unwrap();
-        assert_eq!((g.revision, g.anchor.as_str()), (2, "promoting"));
-        assert_eq!(recs[3].graph.as_ref().unwrap().revision, 2);
-        assert!(recs.iter().all(|r| r.session_id == recs[0].session_id));
-        assert_eq!(
-            fx.status.identity.counts(),
-            ["principal_admin=1", "released=1"]
-        );
+        assert_eq!(actions, ["graph.reload", "graph.reload", "graph.sync"]);
+        assert!(recs[2].outcome.reason.starts_with(LOST_KEYLESS), "{recs:?}");
+        assert!(identity_records(&recs).is_empty());
+        assert!(fx.status.identity.counts().is_empty());
         bounded(fx.reloader.run()).await.unwrap();
-        assert_eq!(
-            identity_records(&fx.reload_records()).len(),
-            2,
-            "an unchanged reload releases nothing"
-        );
-        assert!(
-            fx.status.identity.counts().is_empty(),
-            "a release is reported by the load that made it"
-        );
+        assert!(identity_records(&fx.reload_records()).is_empty());
+        assert_eq!(sync_reasons(&fx).len(), 1);
     }
 
     fn principal_admin_reason() -> String {
@@ -13615,44 +13793,187 @@ mod reload_tests {
     }
 
     #[tokio::test]
-    async fn a_keyless_reload_over_explicit_bindings_records_the_principal_admin() {
+    async fn a_keyless_reload_over_explicit_bindings_promotes_nobody() {
         let fx = fixture("keyless_promote", AUTHZ, Some(ROOT_ADMIN)).await;
         fx.write_bindings("schema_version: 1\n");
         let applied = bounded(fx.reloader.run()).await.unwrap();
-        assert!(applied.persisted);
+        assert!(!applied.persisted);
+        assert_eq!(whoami_as(&fx, 0).1, Some("admin"));
+        if principal().uid != 0 {
+            assert_eq!(whoami_as(&fx, principal().uid).1, None);
+        }
         let recs = fx.reload_records();
         let actions: Vec<&str> = recs.iter().map(|r| r.action.as_str()).collect();
-        assert_eq!(
-            actions,
-            [
-                "graph.reload",
-                "graph.identity",
-                "graph.transition",
-                "graph.checkpoint",
-                "graph.reload"
-            ]
-        );
-        assert_eq!(
-            identity_records(&recs),
-            [(
-                "permit".to_string(),
-                "authorized".to_string(),
-                principal_admin_reason()
-            )]
-        );
-        let g = recs[1].graph.as_ref().unwrap();
-        assert_eq!((g.revision, g.anchor.as_str()), (2, "promoting"));
-        assert_eq!(fx.status.identity.counts(), ["principal_admin=1"]);
-        bounded(fx.reloader.run()).await.unwrap();
-        assert_eq!(identity_records(&fx.reload_records()).len(), 1, "once");
+        assert_eq!(actions, ["graph.reload", "graph.reload", "graph.sync"]);
+        assert!(!recs
+            .iter()
+            .any(|r| r.outcome.reason == principal_admin_reason()));
         assert!(fx.status.identity.counts().is_empty());
         fx.write_bindings(ROOT_ADMIN);
-        bounded(fx.reloader.run()).await.unwrap();
+        let restored = bounded(fx.reloader.run()).await.unwrap();
+        assert!(!restored.persisted, "the file is the base again");
+        assert_eq!(fx.sync_lines(), ["unsynced=0", "conflict=0"]);
+        assert!(identity_records(&fx.reload_records()).is_empty());
+        assert_eq!(sync_reasons(&fx).len(), 1);
+    }
+
+    const ROOT_AND_4242: &str =
+        "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary: [{uid: 4242}]\n";
+
+    fn mirror_inode(fx: &Fx) -> u64 {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(fx.state_dir().join(MIRROR_FILE))
+            .unwrap()
+            .ino()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_deleted_bindings_yaml_releases_nothing_and_is_reported_lost() {
+        let fx = Fx::with_baseline("deleted-lost").await;
+        fx.write_bindings(ROOT_AND_4242);
+        assert!(bounded(fx.reloader.run()).await.unwrap().persisted);
+        let live = maknae_config::parse_mirror(&fx.mirror())
+            .unwrap()
+            .section
+            .canonical();
+        std::fs::remove_file(fx.bindings()).unwrap();
+        let from = fx.reload_records().len();
+        let applied = bounded(fx.reloader.run()).await.unwrap();
+        assert!(!applied.persisted);
+        assert_eq!(whoami_as(&fx, 4242), (adversary(), Some("adversary")));
+        assert_eq!(whoami_as(&fx, 0).1, Some("admin"));
+        assert_eq!(fx.sync_lines(), ["unsynced=0", "conflict=0", "file=lost"]);
         assert_eq!(
-            identity_records(&fx.reload_records()).len(),
-            1,
-            "keyless to explicit promotes nobody"
+            maknae_config::Section::of(fx.reloader.applied_source.read().unwrap().bindings())
+                .canonical(),
+            live,
+            "the applied source holds the live section"
         );
+        let recs = fx.reload_records()[from..].to_vec();
+        let actions: Vec<&str> = recs.iter().map(|r| r.action.as_str()).collect();
+        assert_eq!(actions, ["graph.reload", "graph.reload", "graph.sync"]);
+        assert!(recs[1].graph.as_ref().unwrap().anchor == "reloaded");
+        assert!(recs[2].outcome.reason.starts_with(LOST_MISSING), "{recs:?}");
+        fx.install_mirror();
+        let store = fx.store_bytes();
+        let restored = bounded(fx.reloader.run()).await.unwrap();
+        assert!(!restored.persisted, "the restored file is the base");
+        assert_eq!(fx.store_bytes(), store);
+        assert_eq!(fx.sync_lines(), ["unsynced=0", "conflict=0"]);
+        assert_eq!(sync_reasons(&fx).len(), 1);
+        assert_eq!(whoami_as(&fx, 4242).1, Some("adversary"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_removed_bindings_key_releases_nothing_and_the_principal_stays_unbound() {
+        let fx = Fx::with_baseline("removed-key").await;
+        fx.write_bindings(
+            "schema_version: 1\nbindings:\n  user: [\"root\"]\n  adversary: [{uid: 4242}]\n",
+        );
+        assert!(bounded(fx.reloader.run()).await.unwrap().persisted);
+        fx.write_bindings("schema_version: 1\n");
+        let applied = bounded(fx.reloader.run()).await.unwrap();
+        assert!(!applied.persisted);
+        assert_eq!(whoami_as(&fx, 0).1, Some("user"));
+        if principal().uid != 0 {
+            assert_eq!(whoami_as(&fx, principal().uid).1, None);
+        }
+        assert_eq!(whoami_as(&fx, 4242).1, Some("adversary"));
+        let reasons = sync_reasons(&fx);
+        assert_eq!(reasons.len(), 1);
+        assert!(reasons[0].starts_with(LOST_KEYLESS), "{reasons:?}");
+        assert!(identity_records(&fx.reload_records()).is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn becoming_lost_republishes_and_records_once() {
+        let fx = Fx::with_baseline("lost-once").await;
+        fx.write_bindings(ROOT_AND_4242);
+        bounded(fx.reloader.run()).await.unwrap();
+        let (body, inode) = (fx.mirror(), mirror_inode(&fx));
+        std::fs::remove_file(fx.bindings()).unwrap();
+        bounded(fx.reloader.run()).await.unwrap();
+        let republished = mirror_inode(&fx);
+        assert_ne!(republished, inode, "renamed into place");
+        assert_eq!(fx.mirror(), body);
+        assert_eq!(sync_reasons(&fx).len(), 1);
+        for _ in 0..2 {
+            bounded(fx.reloader.run()).await.unwrap();
+            assert_eq!(mirror_inode(&fx), republished);
+            assert_eq!(sync_reasons(&fx).len(), 1);
+        }
+        fx.install_mirror();
+        bounded(fx.reloader.run()).await.unwrap();
+        let restored = mirror_inode(&fx);
+        assert_eq!(
+            restored, republished,
+            "a restore commits and publishes nothing"
+        );
+        std::fs::remove_file(fx.bindings()).unwrap();
+        bounded(fx.reloader.run()).await.unwrap();
+        assert_ne!(mirror_inode(&fx), restored);
+        assert_eq!(sync_reasons(&fx).len(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stale_mirror_is_republished_by_the_next_load_that_commits_nothing() {
+        let fx = Fx::with_baseline("stale-republish").await;
+        fx.write_bindings(ROOT_AND_4242);
+        fx.reloader.dir.fail_next_mirror_publish();
+        assert!(bounded(fx.reloader.run()).await.unwrap().persisted);
+        assert!(!fx.state_dir().join(MIRROR_FILE).exists());
+        assert_eq!(
+            fx.sync_lines(),
+            ["unsynced=0", "conflict=0", "mirror=stale"]
+        );
+        let render_failed = sync_reasons(&fx);
+        assert_eq!(render_failed.len(), 1);
+        assert!(
+            render_failed[0].starts_with("mirror render failed: "),
+            "{render_failed:?}"
+        );
+        let from = fx.reload_records().len();
+        let applied = bounded(fx.reloader.run()).await.unwrap();
+        assert!(!applied.persisted);
+        assert_eq!(fx.sync_lines(), ["unsynced=0", "conflict=0"]);
+        assert_eq!(
+            maknae_config::parse_mirror(&fx.mirror())
+                .unwrap()
+                .section
+                .canonical(),
+            r#"{"admin":["root"],"adversary":[{"uid":4242}]}"#
+        );
+        let actions: Vec<String> = fx.reload_records()[from..]
+            .iter()
+            .map(|r| r.action.clone())
+            .collect();
+        assert_eq!(actions, ["graph.reload", "graph.reload"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn after_a_failed_render_a_deleted_file_is_never_restored_from_a_stale_mirror() {
+        let fx = Fx::with_baseline("stale-restore").await;
+        fx.write_bindings("schema_version: 1\nbindings:\n  admin: [\"root\"]\n");
+        bounded(fx.reloader.run()).await.unwrap();
+        let stale = fx.mirror();
+        fx.write_bindings(
+            "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  guest: [\"daemon\"]\n",
+        );
+        fx.reloader.dir.fail_next_mirror_publish();
+        bounded(fx.reloader.run()).await.unwrap();
+        assert!(
+            !fx.state_dir().join(MIRROR_FILE).exists(),
+            "the pre-edit mirror is gone"
+        );
+        std::fs::remove_file(fx.bindings()).unwrap();
+        bounded(fx.reloader.run()).await.unwrap();
+        let now = fx.mirror();
+        assert_ne!(now, stale);
+        assert!(
+            now.contains("  guest:\n    - \"daemon\"\n"),
+            "the lost load republished the current live section: {now}"
+        );
+        assert_eq!(fx.sync_lines(), ["unsynced=0", "conflict=0", "file=lost"]);
     }
 
     const GHOST_USER: &str =
@@ -14097,13 +14418,14 @@ mod reload_tests {
     }
 
     #[tokio::test]
-    async fn a_bindings_yaml_without_the_key_is_bindings_absent_at_reload() {
+    async fn a_bindings_yaml_without_the_key_keeps_empty_bindings_at_reload() {
         let fx = fixture("brm", AUTHZ, Some("schema_version: 1\nbindings: {}\n")).await;
         assert_eq!(fx.baseline().snapshot().subjects(), Some(vec![]));
         fx.write_bindings("schema_version: 1\n");
         let applied = bounded(fx.reloader.run()).await.unwrap();
-        assert!(applied.persisted, "the bindings Section node goes away");
-        assert_eq!(fx.baseline().snapshot().subjects(), None);
+        assert!(!applied.persisted, "the bindings Section node stays");
+        assert_eq!(fx.baseline().snapshot().subjects(), Some(vec![]));
+        assert_eq!(fx.sync_lines(), ["unsynced=0", "conflict=0", "file=lost"]);
     }
 
     #[tokio::test]

@@ -3,6 +3,7 @@
 //! candidate is installed whatever the directory sync or the checkpoint append does.
 
 use maknae_graph::identity::IdentityLayer;
+use maknae_graph::sync::SyncBase;
 use std::fmt;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,10 +15,16 @@ pub enum Plan {
     Persist { revision: u64 },
 }
 
-/// Persist iff the file's identity layer differs from the persisted one; the next
-/// revision is `store_revision + 1`.
-pub fn plan(persisted: &IdentityLayer, next: &IdentityLayer, store_revision: u64) -> Plan {
-    if sorted(persisted) == sorted(next) {
+pub fn layers_differ(a: &IdentityLayer, b: &IdentityLayer) -> bool {
+    sorted(a) != sorted(b)
+}
+
+pub fn plan(
+    persisted: (&IdentityLayer, Option<&SyncBase>),
+    next: (&IdentityLayer, &SyncBase),
+    store_revision: u64,
+) -> Plan {
+    if !layers_differ(persisted.0, next.0) && persisted.1 == Some(next.1) {
         Plan::Unchanged
     } else {
         Plan::Persist {
@@ -29,8 +36,8 @@ pub fn plan(persisted: &IdentityLayer, next: &IdentityLayer, store_revision: u64
 /// The [`plan`] and the identity graph it calls for: `current` itself when
 /// unchanged, else what `build` makes at the plan's revision.
 pub fn plan_candidate<G: Clone, E>(
-    persisted: &IdentityLayer,
-    next: &IdentityLayer,
+    persisted: (&IdentityLayer, Option<&SyncBase>),
+    next: (&IdentityLayer, &SyncBase),
     store_revision: u64,
     current: &G,
     build: impl FnOnce(u64) -> Result<G, E>,
@@ -44,22 +51,16 @@ pub fn plan_candidate<G: Clone, E>(
 }
 
 /// The layer a reload persists, with every persisted containment whose name no longer
-/// resolves carried forward, and the containments it ends; refused if it would drop
-/// explicit bindings root has not written into `bindings.yaml`.
+/// resolves carried forward, and the containments it ends.
 pub fn next_layer(
     file: &IdentityLayer,
     unresolved_adversaries: &[String],
     persisted: &IdentityLayer,
-    file_missing: bool,
     file_lists_nobody: bool,
-) -> Result<(IdentityLayer, Vec<maknae_graph::identity::Released>), Refusal> {
-    if let Some(m) = maknae_graph::identity::drops_explicit_bindings(persisted, file, file_missing)
-    {
-        return Err(Refusal::Load(m.into()));
-    }
+) -> (IdentityLayer, Vec<maknae_graph::identity::Released>) {
     let next = maknae_graph::identity::carry_forward(file, unresolved_adversaries, persisted).0;
     let released = maknae_graph::identity::released(persisted, &next, file_lists_nobody);
-    Ok((next, released))
+    (next, released)
 }
 
 /// One reload's turn: refused once shutdown has begun, otherwise run from the
@@ -293,11 +294,8 @@ mod tests {
     }
 
     #[test]
-    fn the_next_layer_guards_carries_and_reports_releases() {
-        use maknae_graph::identity::{
-            ReleaseCause, Released, SubjectEntry, BINDINGS_KEY_DROPPED, BINDINGS_MISSING,
-            BINDINGS_NOT_MOVED,
-        };
+    fn the_next_layer_carries_and_reports_releases() {
+        use maknae_graph::identity::{ReleaseCause, Released, SubjectEntry};
         let mallory = SubjectEntry {
             uid: 666,
             name: "mallory".into(),
@@ -315,10 +313,6 @@ mod tests {
             bindings_sha256: Some([2; 32]),
             ..persisted.clone()
         };
-        assert_eq!(
-            next_layer(&file, &[], &persisted, true, false),
-            Err(Refusal::Load(BINDINGS_MISSING.into()))
-        );
         let moved = IdentityLayer {
             source: "/etc/maknae/authz.yaml".into(),
             ..persisted.clone()
@@ -327,17 +321,26 @@ mod tests {
             bindings_sha256: None,
             ..file.clone()
         };
+        let absent = [Released {
+            uid: 666,
+            name: "mallory".into(),
+            cause: ReleaseCause::BindingsAbsent,
+        }];
         assert_eq!(
-            next_layer(&keyless, &[], &moved, false, false),
-            Err(Refusal::Load(BINDINGS_NOT_MOVED.into()))
+            next_layer(&keyless, &[], &moved, false),
+            (keyless.clone(), absent.to_vec()),
+            "a keyless layer is a release here; a reload resolves from live, so it never gets one"
         );
-        let (carried, released) =
-            next_layer(&file, &["mallory".into()], &persisted, false, false).unwrap();
+        assert_eq!(
+            next_layer(&keyless, &[], &persisted, false),
+            (keyless.clone(), absent.to_vec())
+        );
+        let (carried, released) = next_layer(&file, &["mallory".into()], &persisted, false);
         assert_eq!(
             (carried.subjects, released.len()),
             (persisted.subjects.clone(), 0)
         );
-        let (plain, released) = next_layer(&file, &[], &persisted, false, true).unwrap();
+        let (plain, released) = next_layer(&file, &[], &persisted, true);
         assert_eq!(plain, file);
         assert_eq!(
             released,
@@ -347,32 +350,58 @@ mod tests {
                 cause: ReleaseCause::BindingsEmpty
             }]
         );
-        assert_eq!(
-            next_layer(&keyless, &[], &persisted, false, false),
-            Err(Refusal::Load(BINDINGS_KEY_DROPPED.into()))
-        );
-        let (_, released) = next_layer(&file, &[], &persisted, false, false).unwrap();
+        let (_, released) = next_layer(&file, &[], &persisted, false);
         assert_eq!(
             released[0].cause,
             ReleaseCause::NotListed,
             "a file whose names did not resolve still lists them"
         );
-        let (same, released) = next_layer(&persisted, &[], &persisted, false, false).unwrap();
+        let (same, released) = next_layer(&persisted, &[], &persisted, false);
         assert_eq!((same, released), (persisted.clone(), vec![]));
+    }
+
+    fn sync() -> SyncBase {
+        SyncBase {
+            base: "null".into(),
+            live: "null".into(),
+            conflicts: "[]".into(),
+        }
+    }
+
+    #[test]
+    fn a_changed_sync_base_alone_persists() {
+        let a = layer(&[(0, "root")]);
+        let s = |base: &str| SyncBase {
+            base: base.into(),
+            live: r#"{"admin":["root"]}"#.into(),
+            conflicts: "[]".into(),
+        };
+        assert_eq!(plan((&a, Some(&s("x"))), (&a, &s("x")), 4), Plan::Unchanged);
+        assert_eq!(
+            plan((&a, Some(&s("x"))), (&a, &s("y")), 4),
+            Plan::Persist { revision: 5 }
+        );
+        assert_eq!(
+            plan((&a, None), (&a, &s("x")), 4),
+            Plan::Persist { revision: 5 }
+        );
     }
 
     #[test]
     fn the_same_layer_in_any_subject_order_is_unchanged() {
         let a = layer(&[(0, "admin"), (7, "user")]);
         let b = layer(&[(7, "user"), (0, "admin")]);
-        assert_eq!(plan(&a, &b, 4), Plan::Unchanged);
+        assert_eq!(plan((&a, Some(&sync())), (&b, &sync()), 4), Plan::Unchanged);
     }
 
     #[test]
     fn different_subjects_persist_at_the_next_store_revision() {
         let a = layer(&[(0, "admin")]);
         let b = layer(&[(0, "adversary")]);
-        assert_eq!(plan(&a, &b, 4), Plan::Persist { revision: 5 });
+        assert_eq!(
+            plan((&a, Some(&sync())), (&b, &sync()), 4),
+            Plan::Persist { revision: 5 }
+        );
     }
 
     #[test]
@@ -380,7 +409,10 @@ mod tests {
         let a = layer(&[(0, "admin")]);
         let mut b = a.clone();
         b.bindings_sha256 = None;
-        assert_eq!(plan(&a, &b, 9), Plan::Persist { revision: 10 });
+        assert_eq!(
+            plan((&a, Some(&sync())), (&b, &sync()), 9),
+            Plan::Persist { revision: 10 }
+        );
     }
 
     #[test]
@@ -388,22 +420,32 @@ mod tests {
         let a = layer(&[]);
         let mut b = a.clone();
         b.source = "/opt/maknae/authz.yaml".into();
-        assert_eq!(plan(&a, &b, 1), Plan::Persist { revision: 2 });
+        assert_eq!(
+            plan((&a, Some(&sync())), (&b, &sync()), 1),
+            Plan::Persist { revision: 2 }
+        );
     }
 
     #[test]
     fn an_exhausted_revision_plans_a_revision_the_store_refuses() {
         let a = layer(&[]);
         let b = layer(&[(0, "admin")]);
-        assert_eq!(plan(&a, &b, u64::MAX), Plan::Persist { revision: u64::MAX });
+        assert_eq!(
+            plan((&a, Some(&sync())), (&b, &sync()), u64::MAX),
+            Plan::Persist { revision: u64::MAX }
+        );
     }
 
     #[test]
     fn an_unchanged_plan_reuses_the_current_graph_and_builds_nothing() {
         let a = layer(&[(0, "admin")]);
-        let r: Result<_, ()> = plan_candidate(&a, &a.clone(), 4, &"current", |_| {
-            panic!("an unchanged layer builds nothing")
-        });
+        let r: Result<_, ()> = plan_candidate(
+            (&a, Some(&sync())),
+            (&a.clone(), &sync()),
+            4,
+            &"current",
+            |_| panic!("an unchanged layer builds nothing"),
+        );
         assert_eq!(r, Ok((Plan::Unchanged, "current")));
     }
 
@@ -411,10 +453,19 @@ mod tests {
     fn a_changed_layer_builds_at_the_planned_revision_or_refuses() {
         let a = layer(&[(0, "admin")]);
         let b = layer(&[(0, "adversary")]);
-        let built: Result<_, ()> = plan_candidate(&a, &b, 4, &0, |revision| Ok(revision * 10));
+        let built: Result<_, ()> =
+            plan_candidate((&a, Some(&sync())), (&b, &sync()), 4, &0, |revision| {
+                Ok(revision * 10)
+            });
         assert_eq!(built, Ok((Plan::Persist { revision: 5 }, 50)));
         assert_eq!(
-            plan_candidate(&a, &b, 4, &0, |_| Err::<u64, _>("build refused")),
+            plan_candidate(
+                (&a, Some(&sync())),
+                (&b, &sync()),
+                4,
+                &0,
+                |_| Err::<u64, _>("build refused")
+            ),
             Err("build refused")
         );
     }
