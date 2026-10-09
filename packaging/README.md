@@ -162,7 +162,19 @@ When the mirror changes, the watcher runs `maknae policy sync` as root and, afte
 an install, reloads `maknaed` (`systemctl reload maknaed.service`; on macOS
 `launchctl kill SIGHUP system/io.maknae.maknaed`) so the daemon adopts the file.
 That reload also applies any `authz.yaml` edit not yet reloaded. A sync with
-nothing to install does not reload. The CLI runs unconfined, as `reseed` does.
+nothing to install does not reload, and a refused sync (a conflict included, since
+the watcher has no terminal to prompt on) fails the run without reloading. The CLI
+runs unconfined, as `reseed` does (a dedicated confinement policy is #510).
+
+The shipped preset disables both units, so `systemctl preset-all` or
+`systemctl preset maknae-policy-sync.path` turns a Linux opt-in back off. To keep
+it, add a preset that sorts earlier, for example
+`/etc/systemd/system-preset/50-maknae-local.preset` holding
+`enable maknae-policy-sync.path`. The macOS job logs to
+`/Library/Logs/maknae-policy-sync.log` and runs `/usr/local/bin/maknae`; without
+the CLI each run exits 127 and installs nothing. See the
+[runbook](../docs/runbook.md#sync-live-identity-changes-back-to-bindingsyaml) for
+the merge, the exit codes and the refusals.
 
 Removing `/etc/maknae/bindings.yaml`, or its `bindings:` key, does not reset the
 bindings: `maknaed` keeps enforcing the bindings it holds, and `maknae policy sync`

@@ -4,6 +4,20 @@ Each release that needs an action from you lists it here, newest first. Read eve
 
 ---
 
+## Sync back (#491)
+
+`maknaed` now keeps, beside the bindings it enforces, the `bindings:` section of the last `bindings.yaml` it loaded, merges every later `bindings.yaml` with them entry by entry, and publishes a mirror that `sudo maknae policy sync` installs as `bindings.yaml` ([runbook](runbook.md#sync-live-identity-changes-back-to-bindingsyaml)). Nothing is required of you, except on the first start in the case below.
+
+**The first start of this version** adds that merge state to the store. It records a `graph.sync` record, reason `sync base created from bindings.yaml (the store had none)`, then a `graph.transition` (`kernel`) and a `graph.checkpoint` (`transitioned`) at the next store revision; when `bindings.yaml` was also edited since the last load, the transition is `root-file`. Over a store that holds explicit bindings, that start refuses (exit 3) when `bindings.yaml` is missing (`bindings.yaml is missing but the store holds explicit bindings; restore it, or run sudo maknae reseed to return to principal-as-admin`) or has no `bindings:` key (`bindings.yaml has no bindings: key but the store holds explicit bindings; restore the bindings: block, or run sudo maknae reseed to return to principal-as-admin`). Restore the file before you upgrade.
+
+**Deleting is no longer resetting.** Removing the `bindings:` key from `bindings.yaml` no longer releases every containment or makes the enrolled principal admin, and a missing `bindings.yaml` no longer refuses once the store holds the merge state. Both now change nothing: the enforced bindings stand, the loss is recorded (`graph.sync`, `lost: …`), `maknae status` shows `bindings.yaml lost`, and `sudo maknae policy sync` restores the file. To return to principal-as-admin, run `sudo maknae reseed` over a `bindings.yaml` with no `bindings:` key and restart ([runbook](runbook.md#reseed)).
+
+**`maknae status` prints a new line,** `identity sync: <n> unsynced, <m> conflicts`. The automatic sync units ship installed and disabled on every package; nothing is enabled by the upgrade ([runbook](runbook.md#sync-automatically-opt-in)).
+
+**Downgrading is not supported.** A `maknaed` older than this version refuses to start on a store that holds the merge state.
+
+---
+
 ## Baseline layer (#490)
 
 `maknae.yaml` and `config.d/` are now the **baseline**: `maknaed` keeps the accepted copy in its kernel graph store and runs it, and an edit to the files applies only when an administrator accepts it with `maknae baseline-show` and `maknae baseline-accept <hash>`. A restart no longer applies an edit, except to `vault` and `audit` other than `audit.readers`, which follow the files at every start ([configuration §3.2](configuration.md#32-the-baseline); [runbook](runbook.md#change-the-configuration)).
@@ -85,15 +99,15 @@ The first start then records one `graph.transition` (`root-file`) and a `graph.c
 maknaed: refusing to start: maknae daemon refused to start: the authorization policy could not be loaded: the store holds explicit bindings from authz.yaml; paste the bindings: block into /etc/maknae/bindings.yaml
 ```
 
-Paste the block and start again. Once the store's bindings come from `bindings.yaml`, an edit that leaves `bindings.yaml` without a `bindings:` key is allowed: every binding is dropped and the enrolled principal becomes admin. The edit is recorded as a `graph.identity` record, `uid <n>, the enrolled principal, now holds admin: bindings.yaml has no bindings: key`, plus one release per containment it ends. A `bindings.yaml` deleted over explicit bindings refuses instead ([configuration §2.3](configuration.md#23-bindingsyaml)).
+Paste the block and start again. Once the store's bindings come from `bindings.yaml`, a `bindings.yaml` without a `bindings:` key, or a missing one, changes nothing; see [Sync back (#491)](#sync-back-491) and [configuration §2.3](configuration.md#23-bindingsyaml).
 
 **Do not remove the block from `authz.yaml` and reload the old daemon before upgrading.** To the old daemon that means no bindings: the enrolled principal becomes admin and every containment is released.
 
 **A `bindings.yaml` you created before this release is kept.** dpkg asks whether to keep it, and keeping it is the default; RPM and macOS keep it without asking. Check that it has `schema_version: 1` and is `root:_maknae 0640`.
 
-**Keep your `bindings.yaml` when dpkg asks, on this and every later upgrade.** Answering "install the package maintainer's version" replaces your file with the shipped one, which has no `bindings:` key, and the package then restarts `maknaed`. That is the keyless edit described above: every binding is dropped, the enrolled principal becomes admin, and every containment is released. The start records it (`now holds admin`, and `is no longer contained` for each containment). If it happens, restore your file from dpkg's `bindings.yaml.dpkg-old` and reload.
+**Keep your `bindings.yaml` when dpkg asks, on this and every later upgrade.** Answering "install the package maintainer's version" replaces your file with the shipped one, which has no `bindings:` key, and the package then restarts `maknaed`. The enforced bindings stand and the start records the file as lost ([Sync back (#491)](#sync-back-491)); restore your file from dpkg's `bindings.yaml.dpkg-old`, or run `sudo maknae policy sync`, and reload.
 
-**A `bindings.yaml` you delete stays deleted across upgrades.** dpkg does not reinstall a conffile you removed, and the RPM and macOS packages create the file only on a host with no kernel graph store. Over explicit bindings the daemon then keeps refusing until you restore the file ([configuration §2.3](configuration.md#23-bindingsyaml)).
+**A `bindings.yaml` you delete stays deleted across upgrades.** dpkg does not reinstall a conffile you removed, and the RPM and macOS packages create the file only on a host with no kernel graph store. Over explicit bindings the daemon keeps enforcing them and reports the file lost until you restore it with `sudo maknae policy sync` ([configuration §2.3](configuration.md#23-bindingsyaml)).
 
 **`/etc/maknae` itself is now checked.** Both policy files are read through their directory, which must be owned by root and not group- or other-writable. The packages create it `root:_maknae 0750`, and earlier releases did not check it. A directory changed since then refuses to start (exit 3), naming the directory:
 

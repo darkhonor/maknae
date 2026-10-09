@@ -946,6 +946,7 @@ sudo launchctl kill SIGHUP system/io.maknae.maknaed    # macOS
 Both send `SIGHUP`, as does `kill -HUP <pid>` for a daemon started by hand. The command returns before the reload finishes, so read the result in the trail.
 
 - **What a reload reads.** `authz.yaml` and `bindings.yaml`, together, as one policy. It also reads `maknae.yaml` and `config.d/`, only to refresh the pending baseline change that `maknae status` reports; a reload never applies a baseline change, and a `maknae.yaml` that does not validate never refuses a reload. A baseline change applies only through `maknae baseline-accept` ([Change the configuration](#change-the-configuration)).
+- **The bindings are merged, not replaced.** A reload merges `bindings.yaml` with the bindings `maknaed` enforces, entry by entry, against the file it last loaded ([How bindings.yaml and live state merge](#how-bindingsyaml-and-live-state-merge)). An entry root changed takes the file's value; an entry only a live edit changed keeps the live value; an entry both changed fails closed and is counted as a conflict. A file that now holds what `maknaed` already enforces, as after `sudo maknae policy sync`, is adopted with no root edit recorded. A `bindings.yaml` that is missing, or has lost its `bindings:` key, changes nothing once the store holds explicit bindings: the reload is applied, every binding stands, and the loss is recorded.
 - **All or nothing.** A reload loads and validates both files and resolves every username in `bindings.yaml` on the host, as a start does, so a new username needs only a reload. If either file fails (it does not parse or validate, `authz.yaml` still carries `bindings:`, or an account lookup fails rather than finding no such user), the reload is refused before it touches the store, and the running policy stands; an `authz.yaml` edit made at the same time as a refused `bindings.yaml` edit does not apply either. A name with no account on the host does not refuse the reload: that name alone is affected, and a `graph.identity` record reports it ([Bind a user, contain a subject](#bind-a-user-contain-a-subject); configuration §2.3 lists what refuses the whole file and what is decided per subject). A reload refused while writing the store also keeps the running policy; see the first case under "Records that look out of order" below. The journal (`journalctl -u maknaed`; on macOS `/usr/local/var/log/maknae/maknaed.err`) says `maknaed: reload refused: <cause>; the previous policy stands`. An invalid `authz.yaml` or `bindings.yaml` at start refuses to start, with exit 3.
 - **One at a time.** Reloads run in turn. Signals that arrive while one runs produce one more reload, and a `SIGHUP` sent while the daemon is starting is applied once it serves. One that lands in the first milliseconds of the process, before its handler exists, ends it; systemd (`RestartForceExitStatus=SIGHUP`) and launchd (`KeepAlive`) start it again, after `RestartSec` (5 seconds) on Linux.
 - **Restarting into an accepted baseline.** Once an accept that applies by restart has begun, a reload is refused (`reload refused: shutdown`).
@@ -956,15 +957,17 @@ Both send `SIGHUP`, as does `kill -HUP <pid>` for a daemon started by hand. The 
 | Record | Shape |
 |---|---|
 | Intent | `action:"graph.reload"`, `result:"permit"`, reason `intent recorded (SIGHUP)`, `graph.anchor:"reloading"` |
-| Release (only when a containment ends) | `action:"graph.identity"`, `result:"permit"`, posture `authorized`, `graph.anchor:"releasing"`, reason `uid <n> ('<name>') is no longer contained: <cause>`, one per containment the new bindings end, at the next store revision and written ahead of the store transition. The cause is `its name is no longer listed under adversary`, `its name now resolves to uid <m>`, `it is now listed under <role>`, `bindings.yaml now binds nobody` (its `bindings:` key lists no entry) or `bindings.yaml has no bindings: key, so the enrolled principal is admin and nobody else holds a role`. A release counts only when a `graph.checkpoint` with reason `transitioned` follows at the same revision. |
-| Principal admin (only when explicit bindings end) | `action:"graph.identity"`, `result:"permit"`, posture `authorized`, `graph.anchor:"promoting"`, reason `uid <n>, the enrolled principal, now holds admin: bindings.yaml has no bindings: key`, once, when the store held a `bindings:` key and the new `bindings.yaml` has none, whether or not anything was contained. It is at the next store revision, after any releases and ahead of the store transition, and like a release it counts only when a `transitioned` checkpoint follows at the same revision. |
-| Store transition (only when the bindings changed) | `action:"graph.transition"`, reason `intent recorded (root-file)`, at the next store revision; then `action:"graph.checkpoint"`, reason `transitioned`, with that revision and the new store's `ciphertext_sha256` |
+| Release (only when a containment ends) | `action:"graph.identity"`, `result:"permit"`, posture `authorized`, `graph.anchor:"releasing"`, reason `uid <n> ('<name>') is no longer contained: <cause>`, one per containment the new bindings end, at the next store revision and written ahead of the store transition. The cause is `its name is no longer listed under adversary`, `its name now resolves to uid <m>`, `it is now listed under <role>` or `bindings.yaml now binds nobody` (its `bindings:` key lists no entry). A release counts only when a `graph.checkpoint` with reason `transitioned` follows at the same revision. |
+| Merge (only when the merge has something to record) | `action:"graph.sync"`, `result:"permit"`, posture `authorized`, `graph.anchor:"syncing"`, one per event: the file adopted, a conflict, a conflict resolved ([The `graph.sync` records](#the-graphsync-records)). At the next store revision, after any releases and ahead of the store transition; like a release, it counts only when a `transitioned` checkpoint follows at the same revision. |
+| Store transition (only when the bindings or the merge state changed) | `action:"graph.transition"`, reason `intent recorded (root-file)`, or `intent recorded (kernel)` when the only change is an adoption, at the next store revision; then `action:"graph.checkpoint"`, reason `transitioned`, with that revision and the new store's `ciphertext_sha256` |
 | Outcome, applied | `action:"graph.reload"`, `result:"permit"`, posture `authorized`, reason `reload applied: revision <n>; identity persisted` (or `identity unchanged`), followed by `; store not durable: <cause>` and `; checkpoint append failed: <cause>` when those happened, `graph.anchor:"reloaded"`, and `policy_sha256` of the policy now in force |
-| Outcome, refused | `action:"graph.reload"`, `result:"deny"`, posture `unavailable`, reason `reload refused: <cause>`, where the cause starts `policy load:`, `compile:` or `persist:`, or is `shutdown`; `graph.anchor:"reload-refused"`, and `policy_sha256` of the policy that stands. A missing `bindings.yaml` over explicit bindings is `reload refused: policy load: bindings.yaml is missing but the store holds explicit bindings; …`, and a store whose bindings still come from `authz.yaml` is `reload refused: policy load: the store holds explicit bindings from authz.yaml; paste the bindings: block into /etc/maknae/bindings.yaml` ([upgrading](upgrading.md#bindings-move-to-bindingsyaml-496)) |
+| Outcome, refused | `action:"graph.reload"`, `result:"deny"`, posture `unavailable`, reason `reload refused: <cause>`, where the cause starts `policy load:`, `compile:` or `persist:`, or is `shutdown`; `graph.anchor:"reload-refused"`, and `policy_sha256` of the policy that stands |
 | Identity problem (applied reloads only) | `action:"graph.identity"`, `result:"deny"`, posture `unauthorized`, or `unavailable` for a name under `adversary` that has no account; reason as in [Bind a user, contain a subject](#bind-a-user-contain-a-subject); after the applied outcome, one per problem the previous load did not have, so an unchanged reload writes none. A refused reload writes none |
 | Baseline change (applied reloads only, when the pending set changed) | `action:"graph.baseline"`, `result:"deny"`, posture `unauthorized` with reason `baseline change pending acceptance: root-file sha256:<12 hex> (apply: live\|restart; sections: <names>)`, or posture `unavailable` with reason `baseline change refused: invalid (cause in the journal)`; after the identity records. A set that has not changed since the last record writes none ([Change the configuration](#change-the-configuration)) |
+| Mirror not published (applied reloads only) | `action:"graph.sync"`, `result:"deny"`, posture `unavailable`, reason `mirror render failed: <cause>; the transition at revision <n> stands; the stale mirror was removed` (or `; the stale mirror could not be removed: <cause>`), no `graph.anchor`. A reload that changed the store writes it right after the store's `graph.checkpoint`, ahead of the outcome; a reload that changed nothing tries again only while the mirror is stale or the file is newly lost, and writes it here. The reload stands; `maknae status` shows `mirror stale` |
+| Bindings lost (applied reloads only, when the loss is new) | `action:"graph.sync"`, `result:"deny"`, posture `unavailable`, reason `lost: bindings.yaml is missing; …` or `lost: bindings.yaml has no bindings: key; …`, no `graph.anchor`, once when `bindings.yaml` goes missing or loses its key over explicit bindings; a later reload that finds it still lost writes none |
 
-`policy_sha256` is the SHA-256 of one `<section>=<sha256 of the section's canonical JSON>` line per top-level section of `authz.yaml`, plus a `bindings=` line for `bindings.yaml`'s `bindings:` section when it has one, in section-name order. Moving a `bindings:` block unchanged from `authz.yaml` to `bindings.yaml` keeps the value. Two loads of the same policy carry the same value, and a reload that changed only `permissions:`, which leaves the store as it was, still carries a new one. It covers the text of the two files only, not the uids their names resolve to: a reload after only a bound account's uid changed carries the same `policy_sha256` and a new `graph.revision`, which tells the two apart.
+`policy_sha256` is the SHA-256 of one `<section>=<sha256 of the section's canonical JSON>` line per top-level section of `authz.yaml`, plus a `bindings=` line for the `bindings:` section `maknaed` enforces when there is one, in section-name order. The enforced section is the merged one: it is `bindings.yaml`'s own when nothing is unsynced, and includes the live edits when something is, so the same file over different live state carries a different value. Moving a `bindings:` block unchanged from `authz.yaml` to `bindings.yaml` keeps the value. Two loads of the same policy carry the same value, and a reload that changed only `permissions:`, which leaves the store as it was, still carries a new one. It covers the policy text only, not the uids its names resolve to: a reload after only a bound account's uid changed carries the same `policy_sha256` and a new `graph.revision`, which tells the two apart.
 
 ```bash
 sudo jq -c 'select(.action=="graph.reload") | {ts, session_id, result: .outcome.result, reason: .outcome.reason, policy: .policy_sha256}' /var/log/maknae/audit.jsonl | tail -n 2
@@ -972,9 +975,9 @@ sudo jq -c 'select(.action=="graph.reload") | {ts, session_id, result: .outcome.
 
 If the intent itself cannot be appended, nothing is loaded and no outcome is written; the journal says `reload refused: audit append failed: <cause>`. Each reload audit record is given 5 seconds. An intent or store record that cannot be appended in that time refuses the reload, the running policy stands, and the next `SIGHUP` runs; an outcome or identity record that cannot is reported in the journal, the reload it describes stands, and no identity record after it is attempted. A record that timed out is unconfirmed, not discarded: it may still land in the trail later, so an intent can appear with no outcome after it. The journal's `reload refused` line is authoritative.
 
-**At boot** the trail carries the same `graph.identity` records: each release and the principal-admin record ahead of the store transition that makes them, as above, and each identity problem after the `authz` composition record. A problem record that cannot be appended at boot refuses the start, like every boot record.
+**At boot** the trail carries the same `graph.identity` and `graph.sync` records: each release and each merge record ahead of the store transition that makes them, as above, and each identity problem after the `authz` composition record. A boot over a store that holds no merge state yet records `sync base created from bindings.yaml (the store had none)` first ([upgrading](upgrading.md#sync-back-491)). A boot also records a lost `bindings.yaml` and a mirror that could not be published, as the two `graph.sync` rows above do; a boot records the loss every time it finds it. A problem record that cannot be appended at boot refuses the start, like every boot record.
 
-**`maknae status`** prints `kernel graph: revision <n> (<state>)`. The revision follows every reload that changed the bindings. The state is the result of this start's rollback check (`seeded`, `reseeded`, `verified`, `advanced` or `rollback-anchor-unavailable`) and stays the same until the next restart. When the last applied load had identity problems it also prints their counts by kind, such as `identity problems: 1 unresolved, 1 carried forward`; the kinds are `unresolved`, `unresolved adversary`, `contained`, `unbound conflict`, `carried forward`, `released` and `principal admin`, and a release or a principal admin is counted until the next applied load. The problem list and the subject list are published just after the new snapshot is installed, so for an instant `maknae status` and `maknae subject-list` can still describe the previous load.
+**`maknae status`** prints `kernel graph: revision <n> (<state>)`. The revision follows every reload that changed the bindings. The state is the result of this start's rollback check (`seeded`, `reseeded`, `verified`, `advanced` or `rollback-anchor-unavailable`) and stays the same until the next restart. It prints `identity sync: <n> unsynced, <m> conflicts`, followed by `, bindings.yaml lost` and `, mirror stale` when they apply ([Sync live identity changes back to bindings.yaml](#sync-live-identity-changes-back-to-bindingsyaml)). When the last applied load had identity problems it also prints their counts by kind, such as `identity problems: 1 unresolved, 1 carried forward`; the kinds are `unresolved`, `unresolved adversary`, `contained`, `unbound conflict`, `carried forward`, `released` and `principal admin`, and a release or a principal admin is counted until the next applied load. The problem list and the subject list are published just after the new snapshot is installed, so for an instant `maknae status` and `maknae subject-list` can still describe the previous load.
 
 **Records that look out of order.** Eight cases leave the trail looking unusual. In each, the store and the trail agree once the next start has checked them, or that start refuses.
 
@@ -983,7 +986,7 @@ If the intent itself cannot be appended, nothing is loaded and no outcome is wri
 - **`reload applied: …; checkpoint append failed: <cause>`.** The new policy is in force and the store holds it, but the trail has no checkpoint for it; the next start reports `advanced`.
 - **Reload records after the stop record.** A reload in flight can append its records after the stop record, `reload refused: shutdown` included, in two cases: when `maknaed` exits because its credential supervisor stopped, and when a graceful stop gives up its 5-second wait for a reload that is writing the store. They carry their own session id and match the store.
 - **A reload intent with no outcome record.** The daemon exited while a reload was still writing; a `graph.transition` may follow the intent with no checkpoint. The next start checks the store as above and reports what it found.
-- **A `graph.identity` release or principal-admin record (`graph.anchor:"releasing"` or `"promoting"`) with no `transitioned` checkpoint at its revision.** These records are written ahead of the store write, at boot and at reload. A failure after they are appended (the transition intent, the store write, an abort) leaves them with nothing after them, and what they name did not happen: the store and the running policy still hold the containment and the explicit bindings. Only a record followed by a `transitioned` checkpoint at the same revision happened.
+- **A `graph.identity` release record or a `graph.sync` merge record (`graph.anchor:"releasing"` or `"syncing"`) with no `transitioned` checkpoint at its revision.** These records are written ahead of the store write, at boot, at reload and for a live edit. A failure after they are appended (the transition intent, the store write, an abort) leaves them with nothing after them, and what they name did not happen: the store and the running policy still hold the containment, the bindings and the merge state they held before. Only a record followed by a `transitioned` checkpoint at the same revision happened.
 - **An applied reload with no `graph.identity` record for a problem it reports.** An identity problem record that cannot be appended after an applied reload goes to the journal only (`maknaed: AUDIT WRITE FAILED on an identity record (<reason>): <cause>`) and is not retried; the policy is applied, and `maknae status` and `maknae subject-list` show the problem.
 - **A `shutdown` record between an accept's `graph.transition` and its outcome.** An accept that applies by restart starts the drain once the store holds the accepted baseline, before its `graph.checkpoint` is appended, and the listener then writes the stop record while the accept is still writing its own. The trail shows the `graph.transition`, then the `shutdown` record and the `graph.checkpoint` in either order, then the `graph.baseline` outcome. A live change that could not be installed and restarts instead has the same shape after its checkpoint: the `shutdown` record can precede the outcome. The accept stands in each case; the next start reports what it found.
 
@@ -1083,7 +1086,8 @@ bindings:
     - uid: 4242
 ```
 
-- **Once a `bindings:` key exists, only the entries it lists hold a role.** List yourself under `admin`. With no `bindings:` key, as shipped, the enrolled principal holds `admin`. Do not delete the file to return to that default: over explicit bindings a missing file refuses the start and the reload. Remove the `bindings:` key instead.
+- **Once a `bindings:` key exists, only the entries it lists hold a role.** List yourself under `admin`. With no `bindings:` key, as shipped, the enrolled principal holds `admin`.
+- **Deleting is not resetting.** Once `maknaed` enforces a `bindings:` key, deleting `bindings.yaml` or removing its `bindings:` key changes nothing: every binding and containment stands, the loss is recorded (`graph.sync`, `lost: …`) and `maknae status` shows `bindings.yaml lost`. `sudo maknae policy sync` puts the file back. Returning to the shipped default, the enrolled principal as the only `admin`, takes `sudo maknae reseed` with a `bindings.yaml` that has no `bindings:` key ([Reseed](#reseed)).
 - **Contain a subject** by listing its username under `adversary`, or its id as `- uid: <n>`. A `uid:` entry contains the id whether or not an account has it, and does not depend on the user directory.
 - **Containment wins.** A uid listed under `adversary` and under another role is contained, and a `graph.identity` record says so: `uid 1003 (mallory) is under adversary, user; containment wins and it is contained`.
 - **One uid under two other roles holds no role**, whether by one name or two: `uid 1002 (gus, gustav) is under guest, user; it holds no role`. Keep one of them.
@@ -1116,6 +1120,135 @@ A contained subject is one row, labelled with every name under `adversary` that 
 A subject that holds no role is decided like any uid the file does not list, which denies in the default build. A contained subject is denied by a mandatory decision that nothing overrides.
 
 **When the user directory is down.** sssd or LDAP being unavailable usually reads as "no such user", the same as a deleted account, and on macOS a failed lookup cannot be told from a missing account at all. A contained name that stops resolving stays contained under its stored uid (carried forward) until you remove it from `adversary:`. The record says `'mallory' under adversary no longer resolves; uid 666 stays contained (carried forward)`, followed by `; this overrides <name> (<role>)` if another name in the file now has that uid. A name that never resolved is not contained, and a role binding to a directory name holds no role until the directory is back. After an outage at a reload or at boot, reload once the directory is back. On Linux the unit's ordering after `nss-user-lookup.target` waits only for the local lookup services (such as sssd) to start, not for the directory server; launchd has no such ordering. A lookup that fails with an error other than "no such user" refuses the whole load (`looking up '<name>' failed (errno <n>); nothing was changed`). On macOS that includes an account whose passwd record is larger than 4 KiB, which refuses every load while the file names it (#501).
+
+---
+
+## Sync live identity changes back to bindings.yaml
+
+`maknaed` keeps the bindings it enforces in its kernel graph store. Root changes them by editing `bindings.yaml` and reloading. A live edit, made by a verb or by the kernel itself, changes them in the store directly; #165 adds the verbs that make one, and none exists yet. A live edit is not in `bindings.yaml` until it is synced back, so until then a reseed drops it and a reader of `/etc/maknae` does not see it. Sync back writes the enforced bindings into `bindings.yaml`. The daemon never writes `/etc/maknae`: it publishes a mirror, and root installs it.
+
+### The mirror
+
+After every change to the bindings it enforces (a start, a reload or an accept that changed them, an adoption, a live edit), `maknaed` writes the mirror: `/var/lib/maknae/bindings.mirror.yaml` on Linux, `/usr/local/var/db/maknae/state/bindings.mirror.yaml` on macOS, `_maknae`, mode `0600`. It holds usernames, roles and the contained list, never a reason. Do not edit it. The journal says `maknaed: sync: mirror revision <n> published (sha256:<12 hex>)`.
+
+```yaml
+# maknae bindings mirror v1: install it with sudo maknae policy sync; do not edit
+# revision: 7
+# config: "/etc/maknae"
+# base: sha256:<64 hex digits>
+# conflicts: 1
+# conflict: "eve"
+schema_version: 1
+bindings:
+  admin:
+    - "root"
+  adversary:
+    - "eve"
+    - uid: 4242
+```
+
+`revision` is the store revision it was rendered at, `config` the configuration directory the daemon reads, `base` the hash of the `bindings:` section of the last `bindings.yaml` the daemon loaded (`absent` or `missing` when there was none), and each `conflict` line one entry the merge failed closed.
+
+**A mirror that cannot be published.** If the render or the write fails, the change it describes stands; the daemon removes the old mirror, records `graph.sync` `mirror render failed: <cause>; the transition at revision <n> stands; the stale mirror was removed`, and `maknae status` shows `mirror stale` until a later reload publishes it. Do not sync while `maknae status` shows `mirror stale`. If removing the old mirror also failed, the record ends `the stale mirror could not be removed: <cause>`, and that mirror, from an earlier revision, is still in the state directory, where a sync would install it. Fix the cause the record names, reload, and sync once `mirror stale` is gone.
+
+### How bindings.yaml and live state merge
+
+The store keeps three values: the **base**, the `bindings:` section of the last `bindings.yaml` `maknaed` loaded; the **live** section, the base with every live edit applied, which is what `maknaed` enforces; and the **conflicts**. At every start and reload, `maknaed` compares `bindings.yaml` with them entry by entry. An entry is a username, or a `uid: <n>` under `adversary`, and its value is the roles that list it.
+
+| The entry | Result |
+|---|---|
+| is unchanged in `bindings.yaml` since the base | The live value stands, live edits included. |
+| was changed by root and by no live edit | `bindings.yaml`'s value. |
+| was changed by root to the value a live edit gave it | That value. This is how a synced file is recognised: the reload records `adopted`, and no root edit. |
+| was changed by root and, differently, by a live edit | A **conflict**. The entry fails closed: contained if either side contains it, and otherwise listed under no role, which denies. It is recorded, and counted in `maknae status`, until it clears. If `bindings.yaml` already holds the fail-closed value, there is no conflict. |
+
+A conflict clears when root edits that entry again, and root's new value wins, or when `bindings.yaml` comes to hold the fail-closed value, which a sync does. After the merge the base is `bindings.yaml`'s section and the live section is the merged one. An entry is **unsynced** while its live value differs from the base.
+
+**Deleting is not resetting.** Once the base holds a `bindings:` key, a `bindings.yaml` that goes missing, or loses its `bindings:` key, is not a root edit. Nothing changes: no binding ends, no containment is released, the loss is recorded (`graph.sync`, `lost: bindings.yaml is missing; …` or `lost: bindings.yaml has no bindings: key; …`), and `maknae status` shows `bindings.yaml lost`. `sudo maknae policy sync` restores the file with no prompt. Returning to principal-as-admin, where the enrolled principal is the only `admin`, takes `sudo maknae reseed` over a `bindings.yaml` with no `bindings:` key ([Reseed](#reseed)).
+
+**The first start of this version** finds a store with no merge state, takes `bindings.yaml` as both base and live, and records `sync base created from bindings.yaml (the store had none)` with a `kernel` transition. If the store holds explicit bindings and `bindings.yaml` is missing or has no `bindings:` key at that start, the start refuses (exit 3; [The kernel graph store refuses to start](#the-kernel-graph-store-refuses-to-start)).
+
+### Install the mirror: `sudo maknae policy sync`
+
+```bash
+sudo maknae policy sync --check                        # show what it would change
+sudo maknae policy sync
+sudo systemctl reload maknaed                          # Linux
+sudo launchctl kill SIGHUP system/io.maknae.maknaed    # macOS
+```
+
+`maknae policy sync` runs as root. It reads the mirror (owned by `_maknae`, no group or other access, a regular file with one link, at most 1 MiB) and validates it with the daemon's own grammar and role rules. It reads `/etc/maknae/bindings.yaml` through its root-owned directory, and refuses if the file's `bindings:` section is not the mirror's base, because then root has edited it since `maknaed` loaded it. It prints the difference one entry per line, such as `adversary: +uid:4242` or `user: -bob` (and `bindings: absent -> present` when the key appears), then installs `/etc/maknae/bindings.yaml` atomically, `root:_maknae 0640`, and prints `installed /etc/maknae/bindings.yaml from the mirror at revision <n>; reload maknaed to adopt it: sudo systemctl reload maknaed` (`sudo launchctl kill SIGHUP system/io.maknae.maknaed` on macOS). It writes no other path, never signals `maknaed` and never writes the audit trail. The reload adopts the file and records `adopted: bindings.yaml holds the live section (<n> unsynced entries)` with a `kernel` transition. `--check` stops after printing the difference.
+
+- **Conflicts.** When the mirror lists conflicts, it prints `the mirror fails these entries closed (contained, or unbound when neither side contained them):` and `  conflict: <entry>` for each, then asks `install bindings.yaml with these entries as the mirror holds them? [y/N] `. Only `y` or `yes` installs; any other answer is `not installed: the conflicts were not accepted`. With no terminal it refuses with `the mirror lists <n> conflicts; run sudo maknae policy sync on a terminal to review them`, so the automatic sync never installs a conflict.
+- **A lost file.** When `bindings.yaml` is missing or has no `bindings:` key, it prints `restoring bindings.yaml, which is missing or has no bindings: key, from the bindings maknaed enforces`, lists any conflict as `  conflict (installed as maknaed enforces it): <entry>`, restores the file with no prompt, and prints `restored /etc/maknae/bindings.yaml from the mirror at revision <n>; …`.
+- **Nothing to do.** When `bindings.yaml` already holds the mirror's section it prints `bindings.yaml already holds the mirror; nothing to install`. Comments and layout do not count.
+- **The installed file** starts with one line, `# installed by sudo maknae policy sync from maknaed's mirror at revision <n>`, followed by the bindings in the mirror's layout. It replaces any comment root wrote in `bindings.yaml`; keep notes elsewhere.
+- **One writer at a time.** `policy sync` checks `bindings.yaml`, then renames the new file over it; a root edit that lands between the two is overwritten. Edit `bindings.yaml` or run the sync, not both at once. With the automatic sync enabled, that window opens at every mirror change.
+
+| Exit | Meaning |
+|---|---|
+| 0 | Installed or restored. |
+| 1 | `--check` found something to install or restore. |
+| 2 | Refused; the cause is on standard error as `maknae: <cause>`. Nothing was installed. |
+| 3 | Nothing to install. |
+
+| Refusal | What to do |
+|---|---|
+| ``maknae policy sync must run as root: run `sudo maknae policy sync` `` | Run it with `sudo`. |
+| `bindings.yaml changed since maknaed last loaded it; reload maknaed so it merges, then sync again` | Reload `maknaed`, check `maknae status` for conflicts, then sync again. |
+| `maknaed has published no mirror (its last render failed: see maknae status); nothing was installed` | Read the `mirror render failed` record, fix its cause and reload. |
+| `the mirror lists <n> conflicts; run sudo maknae policy sync on a terminal to review them`, `not installed: the conflicts were not accepted` | Run it on a terminal, review the conflicts and answer `y`, or edit those entries in `bindings.yaml` and reload. |
+| `maknaed reads its configuration from <dir>, not /etc/maknae; policy sync installs only /etc/maknae/bindings.yaml` | The daemon runs with another configuration directory. Copy the entries into its `bindings.yaml` by hand. |
+| `the mirror is not valid: <cause>`, `cannot read the mirror <path>: <cause>`, `cannot use the state directory <dir>: <cause>` | Do not edit the mirror. Check the state directory's owner and mode, then reload so the daemon writes the mirror again. |
+| `bindings.yaml is not valid: <cause>`, `cannot read /etc/maknae/bindings.yaml: <cause>`, `cannot use /etc/maknae: <cause>` | Fix the file or the directory (configuration §2.3), then reload. |
+| `cannot install /etc/maknae/bindings.yaml: <cause>` | Check the directory and its file system. |
+| `no such group: _maknae; is maknae installed?` | Install the package. |
+
+### Sync automatically (opt-in)
+
+The packages install a watcher that runs `maknae policy sync` as root each time the mirror changes, and ship it disabled. When the sync installs, the watcher reloads `maknaed` so the daemon adopts the file. That reload, like any `SIGHUP`, also applies an `authz.yaml` edit not yet reloaded. A sync with nothing to install reloads nothing, and a refused sync (exit 2, a conflict included) fails the run and reloads nothing; run the sync by hand on a terminal to see why.
+
+On Linux, opt in, check and opt out with:
+
+```bash
+sudo systemctl enable --now maknae-policy-sync.path
+systemctl status maknae-policy-sync.service; journalctl -u maknae-policy-sync.service
+sudo systemctl disable --now maknae-policy-sync.path
+```
+
+The packages ship `/usr/lib/systemd/system-preset/80-maknae.preset`, which disables both units, so `systemctl preset-all` or `systemctl preset maknae-policy-sync.path` turns an opt-in back off. To keep it, add a preset of your own that sorts earlier, for example `/etc/systemd/system-preset/50-maknae-local.preset` holding `enable maknae-policy-sync.path`.
+
+On macOS, opt in and out with:
+
+```bash
+sudo launchctl enable system/io.maknae.policy-sync
+sudo launchctl bootstrap system /Library/LaunchDaemons/io.maknae.policy-sync.plist
+sudo launchctl bootout system/io.maknae.policy-sync
+sudo launchctl disable system/io.maknae.policy-sync
+```
+
+The job writes to `/Library/Logs/maknae-policy-sync.log`. It runs `/usr/local/bin/maknae`; if the CLI is not installed, each run exits 127 and installs nothing.
+
+**Debian conffile.** `bindings.yaml` is a conffile, and a synced one is locally modified, so an upgrade whose package ships a changed default asks whether to keep it. Keep yours, which is the default.
+
+### The `graph.sync` records
+
+Every merge and sync event is an audit record with `action:"graph.sync"`. An entry is shown as its username, escaped, or as `uid:<n>`.
+
+| When | Result | `graph.anchor` | Reason |
+|---|---|---|---|
+| The first start over a store with no merge state | `permit` | `syncing` | `sync base created from bindings.yaml (the store had none)` |
+| A load that adopts a file holding the live section | `permit` | `syncing` | `adopted: bindings.yaml holds the live section (<n> unsynced entries)` |
+| A load that finds a conflict | `permit` | `syncing` | `conflict: <entry> changed in bindings.yaml and by an unsynced live transition; failed closed: contained` (or `unbound`) |
+| A load that clears a conflict | `permit` | `syncing` | `conflict resolved: <entry>: bindings.yaml changed it again`, or `…: bindings.yaml holds the fail-closed value` |
+| A live edit, written ahead | `permit` | `syncing` | `live (<operator\|kernel>): contain <entry>`, `release <entry>`, `bind <role> <name>` or `unbind <name>` |
+| A live edit, applied | `permit` | `live-applied` | `live applied: revision <n>`, followed by `; store not durable: <cause>` and `; checkpoint append failed: <cause>` when those happened; the record carries `policy_sha256` |
+| `bindings.yaml` lost | `deny`, posture `unavailable` | none | `lost: bindings.yaml is missing; the enforced bindings stand; restore them with sudo maknae policy sync, or run sudo maknae reseed to return to principal-as-admin` (or `has no bindings: key` for `is missing`) |
+| The mirror not published | `deny`, posture `unavailable` | none | `mirror render failed: <cause>; the transition at revision <n> stands; the stale mirror was removed` (or `; the stale mirror could not be removed: <cause>`) |
+
+The `syncing` records are written ahead of the store transition at their revision, which is `intent recorded (kernel)` for a first sync base or an adoption alone, `intent recorded (root-file)` when root's edits changed the bindings, and `intent recorded (operator)` or `(kernel)` for a live edit. Like a release, each happened only if a `graph.checkpoint` with reason `transitioned` follows at that revision. A start records a lost file every time it finds it, and a reload only when the loss is new.
+
+**`maknae status`** prints `identity sync: <n> unsynced, <m> conflicts`, followed by `, bindings.yaml lost` and `, mirror stale` when they apply. It never prints a name, a uid or a hash.
 
 ---
 
@@ -1438,14 +1571,16 @@ In the table, `<dir>` is the state directory. Each first line starts `maknaed: r
 | Accepted baseline inconsistent | `kernel graph store: <cause>`, where `<cause>` is `the accepted baseline's recorded digest does not match its sections`, `the accepted baseline's sections do not assemble: …` or `the accepted baseline records <system>:<level> but its sections declare <system>:<level>; it does not match its own record` | `no automatic remedy; keep <dir> as it is and investigate` | 5 | The stored baseline does not match its own record, which no write by `maknaed` produces. Investigate; a [reseed](#reseed) replaces it from the files. |
 | Accepted baseline cannot start | `accepted baseline cannot start: <cause>` | none | 1, 3 or 4, as the failing check | The host changed under the accepted baseline. See [The accepted baseline cannot start](#the-accepted-baseline-cannot-start). |
 | Audit trail missing | `the audit trail <path> is missing; prepare it as the runbook's "Move the audit trail" step does, then start` | none | 1 | Once an accepted baseline exists, `maknaed` never creates a trail. Restore the file, or [prepare](#move-the-audit-trail) it. |
+| Merge state does not parse | `kernel graph store: the store's sync base does not parse: <cause>` | `no automatic remedy; keep <dir> as it is and investigate` | 5 | The store's merge state ([How bindings.yaml and live state merge](#how-bindingsyaml-and-live-state-merge)) does not parse, which no write by `maknaed` produces. Investigate; a [reseed](#reseed) replaces it from `bindings.yaml` and drops live edits not synced back. |
 | Identity layer does not build | `kernel graph store: the kernel identity layer does not build: <cause>` | `the identity layer is built from bindings.yaml in the configuration directory (/etc/maknae/bindings.yaml by default); correct it, then restart; do not reseed` | 5 | Correct `bindings:` in `bindings.yaml` and restart. |
 | Malformed key | `kernel graph key: the kernel graph key is malformed (<why>)` | `` replace the key as the runbook's "Replace a malformed key" says: remove it, run `sudo maknae enroll`, then `sudo maknae reseed` `` | 5 | [Replace the key](#replace-a-malformed-key). |
 | Key unreadable | `kernel graph key: <cause>` | `` the kernel graph key could not be read; check the credential `sudo maknae enroll` created (enroll never replaces an existing key) `` | 5 | Check the credential's ownership and mode, or the keychain item. |
 
-Two refusals about the bindings come from the store check but are not graph-store refusals. Each exits 3, has no second line, and is recorded as a denied boot `authz` record with the same reason; nothing is written to the store:
+Three refusals about the bindings come from the store check but are not graph-store refusals. They happen only at the first start of this version, over a store that holds explicit bindings and no merge state yet; once that start has created the merge state, a missing or keyless `bindings.yaml` is recorded as lost instead ([How bindings.yaml and live state merge](#how-bindingsyaml-and-live-state-merge)). Each exits 3, has no second line, and is recorded as a denied boot `authz` record with the same reason; nothing is written to the store:
 
 - `the store holds explicit bindings from authz.yaml; paste the bindings: block into /etc/maknae/bindings.yaml`: the store's bindings were seeded from `authz.yaml` by an earlier release, and `bindings.yaml` has no `bindings:` key. Move the block ([upgrading](upgrading.md#bindings-move-to-bindingsyaml-496)) and restart.
-- ``bindings.yaml is missing but the store holds explicit bindings; to return to principal-as-admin write bindings.yaml without a `bindings:` key``: put the file back, or write it with `schema_version: 1` and no `bindings:` key, and restart.
+- `bindings.yaml is missing but the store holds explicit bindings; restore it, or run sudo maknae reseed to return to principal-as-admin`: put the file back and restart, or run `sudo maknae reseed` over a `bindings.yaml` with no `bindings:` key and restart ([Reseed](#reseed)).
+- `bindings.yaml has no bindings: key but the store holds explicit bindings; restore the bindings: block, or run sudo maknae reseed to return to principal-as-admin`: put the block back and restart, or reseed as above.
 
 ### Upgrades migrate the store
 
@@ -1459,7 +1594,7 @@ No action is needed. `maknae status` reports the new revision.
 
 ### Reseed
 
-A reseed replaces the store with a fresh one, seeded from `/etc/maknae/bindings.yaml`, and takes `maknae.yaml` and `config.d/` as the accepted baseline, setting aside the one the store held ([The accepted baseline cannot start](#the-accepted-baseline-cannot-start)). Every containment comes from `bindings.yaml` today, so the reseed restores it, except a carried-forward containment whose name no longer resolves: a reseed has no stored uid to carry, so list such an id as `- uid: <n>` before you reseed. A reseed is recorded by its own `graph.seed` records, not as releases, and a reseed over a formerly explicit store with a keyless `bindings.yaml` writes no principal-admin record. Once live containment (#165) exists, a reseed will drop any containment not yet synced back to the policy files (#491).
+A reseed replaces the store with a fresh one, seeded from `/etc/maknae/bindings.yaml`, and takes `maknae.yaml` and `config.d/` as the accepted baseline, setting aside the one the store held ([The accepted baseline cannot start](#the-accepted-baseline-cannot-start)). Every containment comes from `bindings.yaml` today, so the reseed restores it, except a carried-forward containment whose name no longer resolves: a reseed has no stored uid to carry, so list such an id as `- uid: <n>` before you reseed. A reseed is recorded by its own `graph.seed` records, not as releases, and a reseed over a formerly explicit store with a keyless `bindings.yaml` writes no principal-admin record. A reseed is also the way back to principal-as-admin: over a `bindings.yaml` with no `bindings:` key it seeds absent bindings, where deleting the file or the key alone changes nothing ([How bindings.yaml and live state merge](#how-bindingsyaml-and-live-state-merge)). **A reseed drops every live edit not yet synced back**, containment included, because it seeds base and live from `bindings.yaml` alone. If `maknae status` shows any `unsynced` entry, run `sudo maknae policy sync` first.
 
 ```bash
 sudo maknae reseed
