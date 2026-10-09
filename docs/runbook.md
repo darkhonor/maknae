@@ -1185,7 +1185,7 @@ sudo launchctl kill SIGHUP system/io.maknae.maknaed    # macOS
 - **A lost file.** When `bindings.yaml` is missing or has no `bindings:` key, it prints `restoring bindings.yaml, which is missing or has no bindings: key, from the bindings maknaed enforces`, lists any conflict as `  conflict (installed as maknaed enforces it): <entry>`, restores the file with no prompt, and prints `restored /etc/maknae/bindings.yaml from the mirror at revision <n>; …`.
 - **Nothing to do.** When `bindings.yaml` already holds the mirror's section it prints `bindings.yaml already holds the mirror; nothing to install`. Comments and layout do not count.
 - **The installed file** starts with one line, `# installed by sudo maknae policy sync from maknaed's mirror at revision <n>`, followed by the bindings in the mirror's layout. It replaces any comment root wrote in `bindings.yaml`; keep notes elsewhere.
-- **One writer at a time.** `policy sync` checks `bindings.yaml`, then renames the new file over it; a root edit that lands between the two is overwritten. Edit `bindings.yaml` or run the sync, not both at once. With the automatic sync enabled, that window opens at every mirror change.
+- **One writer at a time.** `policy sync` checks `bindings.yaml` again just before it renames the new file over it, after any prompt, and refuses with `bindings.yaml changed during the sync; …` if root changed it in the meantime. A root edit that lands between that last check and the rename is still overwritten. Edit `bindings.yaml` or run the sync, not both at once. With the automatic sync enabled, that window opens at every mirror change.
 
 | Exit | Meaning |
 |---|---|
@@ -1197,7 +1197,7 @@ sudo launchctl kill SIGHUP system/io.maknae.maknaed    # macOS
 | Refusal | What to do |
 |---|---|
 | ``maknae policy sync must run as root: run `sudo maknae policy sync` `` | Run it with `sudo`. |
-| `bindings.yaml changed since maknaed last loaded it; reload maknaed so it merges, then sync again` | Reload `maknaed`, check `maknae status` for conflicts, then sync again. |
+| `bindings.yaml changed since maknaed last loaded it; reload maknaed so it merges, then sync again`, `bindings.yaml changed during the sync; nothing was installed; reload maknaed so it merges, then sync again` | Reload `maknaed`, check `maknae status` for conflicts, then sync again. |
 | `maknaed has published no mirror (its last render failed, or it stopped before publishing one: see maknae status); nothing was installed` | Read the `mirror render failed` record, fix its cause and reload. With no such record, restart `maknaed`: a start publishes the mirror. |
 | `the mirror lists <n> conflicts; run sudo maknae policy sync on a terminal to review them`, `not installed: the conflicts were not accepted` | Run it on a terminal, review the conflicts and answer `y`, or edit those entries in `bindings.yaml` and reload. |
 | `maknaed reads its configuration from <dir>, not /etc/maknae; policy sync installs only /etc/maknae/bindings.yaml` | The daemon runs with another configuration directory. Copy the entries into its `bindings.yaml` by hand. |

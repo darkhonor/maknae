@@ -23,6 +23,8 @@ const RELOAD: &str = "reload maknaed to adopt it: sudo systemctl reload maknaed"
 
 const ANSWER_MAX_BYTES: u64 = 64;
 
+const CHANGED_DURING: &str = "bindings.yaml changed during the sync; nothing was installed; reload maknaed so it merges, then sync again";
+
 pub(crate) struct Owners {
     pub state_dir: u32,
     pub mirror: u32,
@@ -138,6 +140,21 @@ fn install(etc: &Anchor, config_dir: &Path, bytes: &[u8], owner: FileOwner) -> R
         })
 }
 
+fn still_as_planned(
+    etc: &Anchor,
+    config_dir: &Path,
+    owner: u32,
+    mirror: &Mirror,
+    restore: bool,
+) -> Result<(), String> {
+    let file = read_bindings(etc, config_dir, owner)?;
+    match plan_sync(mirror, &Section::of(&file), sha256, CONFIG_DIR) {
+        SyncPlan::Restore { .. } if restore => Ok(()),
+        SyncPlan::Install { .. } if !restore => Ok(()),
+        _ => Err(CHANGED_DURING.into()),
+    }
+}
+
 fn confirm(
     conflicts: usize,
     answer: &mut dyn BufRead,
@@ -226,6 +243,7 @@ pub(crate) fn sync(
             if check {
                 return Ok(Outcome::WouldInstall);
             }
+            still_as_planned(&etc, config_dir, owners.bindings, &mirror, true)?;
             install(&etc, config_dir, bytes.as_bytes(), owners.file)?;
             let _ = writeln!(
                 out,
@@ -257,6 +275,7 @@ pub(crate) fn sync(
             if !conflicts.is_empty() {
                 confirm(conflicts.len(), answer, terminal, out)?;
             }
+            still_as_planned(&etc, config_dir, owners.bindings, &mirror, false)?;
             install(&etc, config_dir, bytes.as_bytes(), owners.file)?;
             let _ = writeln!(
                 out,
@@ -571,6 +590,109 @@ mod tests {
             "bindings.yaml changed since maknaed last loaded it; reload maknaed so it merges, then sync again"
         );
         assert!(fx.read_config("bindings.yaml").contains("someone"));
+    }
+
+    const ROOT_EDIT: &str =
+        "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary: [{uid: 5151}]\n";
+
+    struct RootEdits<'a, T> {
+        path: PathBuf,
+        body: Option<&'static str>,
+        edited: bool,
+        inner: &'a mut T,
+    }
+
+    impl<T> RootEdits<'_, T> {
+        fn edit(&mut self) {
+            if !std::mem::replace(&mut self.edited, true) {
+                match self.body {
+                    Some(body) => Fx::write(&self.path, body, 0o640),
+                    None => std::fs::remove_file(&self.path).unwrap(),
+                }
+            }
+        }
+    }
+
+    impl<T: std::io::Read> std::io::Read for RootEdits<'_, T> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.edit();
+            self.inner.read(buf)
+        }
+    }
+
+    impl<T: BufRead> BufRead for RootEdits<'_, T> {
+        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+            self.edit();
+            self.inner.fill_buf()
+        }
+
+        fn consume(&mut self, n: usize) {
+            self.inner.consume(n)
+        }
+    }
+
+    impl<T: Write> Write for RootEdits<'_, T> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.edit();
+            self.inner.write(buf)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.inner.flush()
+        }
+    }
+
+    #[test]
+    fn a_root_edit_while_the_prompt_waits_is_kept_and_nothing_is_installed() {
+        for body in [Some(ROOT_EDIT), Some("schema_version: 1\n"), None] {
+            let fx = Fx::new();
+            fx.config("bindings.yaml", BASE);
+            fx.mirror(&mirror_over(BASE, LIVE, &[BindingEntry::Uid(4242)]));
+            let mut answer: &[u8] = b"y\n";
+            let mut prompt = RootEdits {
+                path: fx.config_dir().join("bindings.yaml"),
+                body,
+                edited: false,
+                inner: &mut answer,
+            };
+            let mut out = Vec::new();
+            let r = sync(
+                &fx.state_dir(),
+                &fx.config_dir(),
+                me(),
+                false,
+                &mut prompt,
+                true,
+                &mut out,
+            );
+            assert!(prompt.edited);
+            assert_eq!(exit_code(&r), 2, "{body:?}");
+            assert_eq!(r.unwrap_err(), CHANGED_DURING, "{body:?}");
+            let kept = std::fs::read_to_string(fx.config_dir().join("bindings.yaml")).ok();
+            assert_eq!(kept.as_deref(), body);
+            assert!(!String::from_utf8(out).unwrap().contains("installed"));
+        }
+    }
+
+    #[test]
+    fn a_file_that_appears_during_a_restore_is_kept_and_nothing_is_restored() {
+        for body in [ROOT_EDIT, BASE] {
+            let fx = Fx::new();
+            fx.mirror(&mirror_over(BASE, LIVE, &[]));
+            let mut sink = Vec::new();
+            let mut out = RootEdits {
+                path: fx.config_dir().join("bindings.yaml"),
+                body: Some(body),
+                edited: false,
+                inner: &mut sink,
+            };
+            let r = fx.sync_with(me(), false, "", false, &mut out);
+            assert!(out.edited);
+            assert_eq!(exit_code(&r), 2, "{body}");
+            assert_eq!(r.unwrap_err(), CHANGED_DURING, "{body}");
+            assert_eq!(fx.read_config("bindings.yaml"), body);
+            assert!(!String::from_utf8(sink).unwrap().contains("restored"));
+        }
     }
 
     #[test]
