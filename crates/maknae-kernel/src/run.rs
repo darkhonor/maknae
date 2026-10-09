@@ -4016,6 +4016,8 @@ where
                 )
             }
             Ok(Err(cause)) => {
+                let cause =
+                    crate::baseline::withheld_cause(&cause, &state.accepted, Some(&plan.proposed));
                 eprintln!("maknaed: baseline accept refused: {} {cause}", set.source);
                 let (view, _) = crate::baseline::refused_view(
                     &crate::baseline::AcceptRefusal::Invalid,
@@ -4911,7 +4913,10 @@ async fn run_inner(
         Ok(v) => v,
         Err(refused) => {
             let cause = match accepted {
-                Some(_) => format!("accepted baseline cannot start: {}", refused.cause()),
+                Some(_) => format!(
+                    "accepted baseline cannot start: {}",
+                    crate::baseline::withheld_cause(refused.cause(), &start.run, None)
+                ),
                 None => refused.cause().to_string(),
             };
             let trail = prior_trail.as_deref();
