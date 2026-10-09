@@ -1,4 +1,4 @@
-policy_module(maknae, 1.0.0)
+policy_module(maknae, 1.0.1)
 
 ########################################
 # Type declarations
@@ -232,6 +232,8 @@ allow maknaed_t maknae_audit_t:file { read append open getattr lock };
 files_search_var_lib(maknaed_t)
 allow maknaed_t maknae_state_t:dir { search getattr read open write add_name remove_name lock };
 allow maknaed_t maknae_state_t:file { create read write open getattr rename unlink setattr };
+# #491
+allow init_t maknae_state_t:file read;
 
 # UDS bind + chgrp in /run/maknae.
 # el10's systemd 257 labels the RuntimeDirectory=maknae dir `maknae_runtime_t`

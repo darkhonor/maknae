@@ -1284,4 +1284,22 @@ mod tests {
         assert!(read("deb/build-deb.sh").contains("usr/lib/systemd/system-preset/80-maknae.preset"));
         assert!(spec.contains("%{_presetdir}/80-maknae.preset"));
     }
+
+    #[test]
+    fn systemd_may_read_the_mirror_it_watches_and_nothing_else_in_state() {
+        let te = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../packaging/common/maknae.te"
+        ))
+        .unwrap();
+        let init_on_state: Vec<_> = te
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("allow init_t") && l.contains("maknae_state_t"))
+            .collect();
+        assert_eq!(init_on_state, ["allow init_t maknae_state_t:file read;"]);
+        assert!(te
+            .lines()
+            .any(|l| l == "neverallow maknae_egress_t maknae_state_t:{ dir file } *;"));
+    }
 }
