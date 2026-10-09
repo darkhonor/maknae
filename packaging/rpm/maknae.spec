@@ -162,6 +162,29 @@ if ! chattr +a "$AUDIT" || ! lsattr -d "$AUDIT" | cut -d' ' -f1 | grep -q a; the
     echo "maknae: cannot set the append-only attribute on $AUDIT (filesystem: $(stat -f -c %%T "$AUDIT" 2>/dev/null || echo unknown)); %{_localstatedir}/log/maknae is left root-owned" >&2
     exit 1
 fi
+# The traverse entry for each reader maknae.yaml declares (#500), restored after the
+# hold strips the directory's ACL. The trail files' own entries are never touched here.
+grant_reader_traverse() {
+    rc=0
+    errf="$(mktemp)" || return 1
+    if ! readers="$(%{_bindir}/maknae audit-readers 2>"$errf")"; then
+        echo "maknae: audit.readers not applied: $(cat "$errf")" >&2
+        rm -f "$errf"
+        return 0
+    fi
+    rm -f "$errf"
+    [ -n "$readers" ] || return 0
+    printf '%%s\n' "$readers" | LC_ALL=C grep -Evx '[a-z_][a-z0-9_-]{0,30}[$]?' >/dev/null || rc=$?
+    if [ "$rc" -ne 1 ]; then
+        echo "maknae: audit.readers printed an unexpected name; not applied" >&2
+        return 0
+    fi
+    for r in $readers; do setfacl -P -m "u:$r:x" %{_localstatedir}/log/maknae || return 1; done
+}
+if ! grant_reader_traverse; then
+    echo "maknae: cannot apply audit.readers to %{_localstatedir}/log/maknae; it is left root-owned" >&2
+    exit 1
+fi
 chown -h _maknae:_maknae %{_localstatedir}/log/maknae
 
 %preun
