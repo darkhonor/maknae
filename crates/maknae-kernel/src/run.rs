@@ -4230,15 +4230,6 @@ where
         )
         .await
         .map_err(|e| e.to_string())?;
-        for e in [&committed.durability_error, &committed.checkpoint_error]
-            .into_iter()
-            .flatten()
-        {
-            eprintln!(
-                "maknaed: live identity edit at revision {}: {e}",
-                committed.revision
-            );
-        }
         *self
             .persisted
             .write()
@@ -4258,6 +4249,27 @@ where
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(source);
         self.sync.set_counts(counts);
         self.publish_mirror(&graph, &ctx).await;
+        let reason = crate::sync::live_outcome(
+            committed.revision,
+            committed.durability_error.as_deref(),
+            committed.checkpoint_error.as_deref(),
+        );
+        let mut rec = ctx.record(
+            GRAPH_SYNC_ACTION,
+            "permit",
+            &reason,
+            "authorized",
+            Some(GraphAudit {
+                revision: committed.revision,
+                ciphertext_sha256: lower_hex(&committed.digest),
+                anchor: "live-applied".to_string(),
+                scanned_bytes: 0,
+            }),
+        );
+        rec.policy_sha256 = Some(self.authorizer.baseline().policy_sha256());
+        if let Err(e) = self.sink.emit_within(&rec, self.append_bound).await {
+            eprintln!("maknaed: AUDIT WRITE FAILED on the live edit outcome ({reason}): {e}");
+        }
         Ok(LiveApplied::Committed {
             revision: committed.revision,
         })
@@ -15072,7 +15084,10 @@ mod reload_tests {
         );
         assert_eq!(whoami_as(&fx, 0).1, Some("adversary"));
         assert_eq!(fx.sync_lines(), ["unsynced=1", "conflict=0"]);
-        assert_eq!(sync_seen(&fx, from), ["live (operator): contain uid:0"]);
+        assert_eq!(
+            sync_seen(&fx, from),
+            ["live (operator): contain uid:0", "live applied: revision 2"]
+        );
         assert_eq!(transitions_seen(&fx, from), ["intent recorded (operator)"]);
         assert!(
             fx.mirror().contains("  adversary:\n    - uid: 0\n"),
@@ -15111,7 +15126,13 @@ mod reload_tests {
             .await;
         assert_eq!(whoami_as(&fx, 4242).1, None);
         assert_eq!(fx.status.identity.counts(), ["released=1"]);
-        assert_eq!(sync_seen(&fx, from), ["live (operator): release uid:4242"]);
+        assert_eq!(
+            sync_seen(&fx, from),
+            [
+                "live (operator): release uid:4242",
+                "live applied: revision 3"
+            ]
+        );
         assert_eq!(fx.sync_lines(), ["unsynced=1", "conflict=0"]);
     }
 
@@ -15400,6 +15421,123 @@ mod reload_tests {
         assert_eq!(fx.store_sha(), store);
         assert_eq!(fx.seen().len(), from);
         assert_ne!(whoami_as(&fx, 0).1, Some("adversary"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_root_containment_over_an_unsynced_live_binding_contains_the_subject() {
+        let fx = Fx::with_baseline("collide-root-contains").await;
+        fx.write_bindings(DAEMON_USER);
+        bounded(fx.reloader.run()).await.unwrap();
+        fx.live_edit(LiveEdit::Bind {
+            name: "daemon".into(),
+            role: maknae_config::BoundRole::Guest,
+        })
+        .await;
+        fx.write_bindings(
+            "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary: [\"daemon\"]\n",
+        );
+        bounded(fx.reloader.run()).await.unwrap();
+        assert_eq!(
+            whoami_as(&fx, daemon_uid()),
+            (adversary(), Some("adversary")),
+            "root's containment wins over the live guest binding"
+        );
+        assert_eq!(fx.sync_lines(), ["unsynced=0", "conflict=0"]);
+    }
+
+    fn live_records(fx: &Fx) -> Vec<AuditRecord> {
+        std::fs::read_to_string(fx.dir.join("audit.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str::<AuditRecord>(l).unwrap())
+            .filter(|r| r.event == "live")
+            .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_live_edit_records_its_outcome_after_the_intent() {
+        let fx = Fx::with_baseline("live-outcome").await;
+        let LiveApplied::Committed { revision } =
+            fx.live_edit(live_contain(BindingEntry::Uid(4242))).await
+        else {
+            panic!("committed");
+        };
+        let recs = live_records(&fx);
+        let intent = recs
+            .iter()
+            .position(|r| r.action == GRAPH_TRANSITION_ACTION)
+            .expect("an intent");
+        let last = recs.last().unwrap();
+        assert!(intent < recs.len() - 1, "{recs:?}");
+        assert_eq!(
+            (
+                last.action.as_str(),
+                last.outcome.result.as_str(),
+                last.outcome.posture.as_str(),
+                last.outcome.reason.clone()
+            ),
+            (
+                GRAPH_SYNC_ACTION,
+                "permit",
+                "authorized",
+                format!("live applied: revision {revision}")
+            )
+        );
+        let graph = last.graph.as_ref().unwrap();
+        assert_eq!(
+            (graph.revision, graph.anchor.as_str()),
+            (revision, "live-applied")
+        );
+        assert_eq!(graph.ciphertext_sha256, fx.store_sha());
+        assert_eq!(
+            last.policy_sha256.as_deref(),
+            Some(fx.baseline().policy_sha256().as_str())
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_live_edit_is_refused_while_draining() {
+        let fx = Fx::with_baseline("live-draining").await;
+        let store = fx.store_sha();
+        fx.reloader.drain.send_replace(Drain::Begun);
+        let got = bounded(fx.reloader.live_edit(
+            live_contain(BindingEntry::Uid(4242)),
+            LiveInitiator::Operator,
+        ))
+        .await;
+        assert_eq!(got, Err("maknaed is stopping".into()));
+        assert_eq!(fx.store_sha(), store);
+        assert_ne!(whoami_as(&fx, 4242).1, Some("adversary"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_live_edit_gives_up_on_a_reload_holding_the_turn() {
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let fx = fixture_gated("live-turn", AUTHZ, Some(ROOT_ADMIN), Some(gate)).await;
+        let store = fx.store_sha();
+        let reload = tokio::spawn({
+            let reloader = Arc::clone(&fx.reloader);
+            async move { reloader.run().await }
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while fx.reloader.lock.try_lock().is_ok() && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let started = Instant::now();
+        let got = tokio::time::timeout(
+            Duration::from_secs(5),
+            fx.reloader.live_edit(
+                live_contain(BindingEntry::Uid(4242)),
+                LiveInitiator::Operator,
+            ),
+        )
+        .await
+        .expect("the live edit gives up within its bound");
+        assert_eq!(got, Err("a reload holds the turn".into()));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(fx.store_sha(), store);
+        release.send(()).unwrap();
+        bounded(reload).await.unwrap().unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -175,6 +175,17 @@ pub fn live_reason(edit: &LiveEdit, who: LiveInitiator) -> String {
     format!("live ({who}): {what}")
 }
 
+pub fn live_outcome(revision: u64, durability: Option<&str>, checkpoint: Option<&str>) -> String {
+    let mut reason = format!("live applied: revision {revision}");
+    if let Some(e) = durability {
+        reason.push_str(&format!("; store not durable: {e}"));
+    }
+    if let Some(e) = checkpoint {
+        reason.push_str(&format!("; checkpoint append failed: {e}"));
+    }
+    reason
+}
+
 pub fn counts(s: &SyncBase) -> Result<SyncCounts, String> {
     let (base, live, conflicts) = stored_sections(s)?;
     Ok(SyncCounts {
@@ -288,6 +299,19 @@ impl SyncStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_live_outcome_names_the_revision_and_each_failure() {
+        assert_eq!(live_outcome(3, None, None), "live applied: revision 3");
+        assert_eq!(
+            live_outcome(4, Some("fsync"), Some("full")),
+            "live applied: revision 4; store not durable: fsync; checkpoint append failed: full"
+        );
+        assert_eq!(
+            live_outcome(5, None, Some("full")),
+            "live applied: revision 5; checkpoint append failed: full"
+        );
+    }
     use maknae_authz_basic::PolicyPaths;
     use maknae_graph::identity::{build, extract, IdentityLayer, SubjectEntry};
     use maknae_graph::kernel::persisted_compiled_set;

@@ -753,6 +753,28 @@ mod tests {
     }
 
     #[test]
+    fn a_root_containment_over_an_unsynced_live_binding_is_taken_without_a_conflict() {
+        let e = BindingEntry::Name("e".into());
+        let (b, l, f) = (
+            section_with(&e, &[]),
+            section_with(&e, &["guest"]),
+            section_with(&e, &["adversary"]),
+        );
+        let m = merge(
+            Some(Stored {
+                base: &b,
+                live: &l,
+                conflicts: &BTreeSet::new(),
+            }),
+            &f,
+        );
+        assert_eq!(m.live.roles_of(&e), BTreeSet::from(["adversary"]));
+        assert!(m.conflicts.is_empty());
+        assert!(m.events.is_empty(), "{:?}", m.events);
+        assert_eq!(m.kind, SyncKind::RootFile);
+    }
+
+    #[test]
     fn the_kind_is_created_unchanged_adopted_or_root_file() {
         let s = |b: &str| Section::of(&crate::parse_bindings(b).unwrap());
         let (a, c) = (
