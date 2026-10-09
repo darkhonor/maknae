@@ -43,8 +43,8 @@ pub enum PendingState {
     },
 }
 
-/// The cause carries no suppressed value; Debug output has no audience control,
-/// so the rest of it is withheld here too.
+/// The cause may quote a suppressed value and Debug output has no audience
+/// control, so the cause is withheld.
 impl std::fmt::Debug for PendingState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -73,8 +73,8 @@ pub struct InvalidFile {
     pub proposed: Option<BaselineSections>,
 }
 
-/// The cause carries no suppressed value; Debug output has no audience control,
-/// so the rest of it is withheld here too.
+/// The cause may quote a suppressed value and Debug output has no audience
+/// control, so the cause is withheld.
 impl std::fmt::Debug for InvalidFile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InvalidFile")
@@ -258,7 +258,7 @@ pub fn pending(
             sections: changed_sections(accepted, f),
         },
         Err(invalid) => PendingState::Invalid {
-            cause: withheld_cause(&invalid.cause, accepted, invalid.proposed.as_ref()),
+            cause: invalid.cause.clone(),
             proposed: invalid.proposed.clone(),
         },
     };
@@ -267,16 +267,6 @@ pub fn pending(
         hash: change_set_hash(accepted, &state),
         state,
     })
-}
-
-/// A validator's cause with every suppressed value of either side withheld.
-pub fn withheld_cause(
-    cause: &str,
-    accepted: &BaselineSections,
-    proposed: Option<&BaselineSections>,
-) -> String {
-    let sides: Vec<&BaselineSections> = std::iter::once(accepted).chain(proposed).collect();
-    maknae_config::withhold_suppressed(cause, &sides)
 }
 
 /// `Err(cause)` only when there is no accepted baseline and the file is invalid.
@@ -350,8 +340,8 @@ pub fn at_boot(
     })
 }
 
-/// The file's `audit` section with the accepted `readers`: the accept is where the
-/// readers' account check runs, so they never follow the file at start.
+/// The file's `audit` section with the accepted `readers`, or the accepted section when
+/// the file's is not a map: the accept is where the readers' account check runs.
 fn audit_followed(file: Option<&String>, accepted: Option<&String>) -> Option<String> {
     let readers = accepted
         .and_then(|a| value_from_canonical_json(a).ok())
@@ -361,12 +351,12 @@ fn audit_followed(file: Option<&String>, accepted: Option<&String>) -> Option<St
         });
     let mut audit = match file.map(|f| value_from_canonical_json(f)) {
         Some(Ok(v)) => v,
-        Some(Err(_)) => return file.cloned(),
+        Some(Err(_)) => return accepted.cloned(),
         None if readers.is_none() => return None,
         None => Value::Map(Vec::new()),
     };
     let Value::Map(entries) = &mut audit else {
-        return file.cloned();
+        return accepted.cloned();
     };
     entries.retain(|(k, _)| k != "readers");
     entries.extend(readers);
@@ -453,11 +443,7 @@ pub fn record_fields(p: &PendingSet) -> (&'static str, String, &'static str) {
             ),
             "unauthorized",
         ),
-        PendingState::Invalid { cause, .. } => (
-            "deny",
-            format!("baseline change refused: invalid: {cause}"),
-            "unavailable",
-        ),
+        PendingState::Invalid { .. } => ("deny", INVALID_RECORDED.into(), "unavailable"),
     }
 }
 
@@ -480,9 +466,11 @@ pub fn short(hash: &str) -> &str {
     hash.get(..SHORT_HEX).unwrap_or(hash)
 }
 
+/// The trail's reason for an invalid set: the validator may quote a suppressed value.
+pub const INVALID_RECORDED: &str = "baseline change refused: invalid (cause in the journal)";
+
 /// What `admin.baseline.show` says of an invalid set in place of its cause.
-pub const INVALID_SHOWN: &str =
-    "the file does not validate; the cause is in the audit trail and the daemon's journal";
+pub const INVALID_SHOWN: &str = "the file does not validate; the cause is in the daemon's journal";
 
 fn view(source: &str, hash: &str, state: &str, apply: &str, changes: Vec<String>) -> BaselineView {
     BaselineView {
@@ -642,12 +630,14 @@ mod tests {
     }
 
     #[test]
-    fn an_invalid_sets_cause_never_carries_a_suppressed_value() {
+    fn an_invalid_sets_record_carries_no_cause_and_its_journal_line_carries_it_verbatim() {
         use crate::test_fixtures::{doc, minimal, FakeEnv};
-        const CORE_REL: &str = r#"{"deployment_id":"d","handling":{"accreditation_ref":null,"ceiling":{"classification":"SECRET//REL USA","cui_categories_permitted":[],"cui_permitted":false,"dissemination_permitted":["Distribution Statement A"],"releasable_to":[],"sci":false}}}"#;
+        const CORE_REL_SCI: &str = r#"{"deployment_id":"d","handling":{"accreditation_ref":null,"ceiling":{"classification":"SECRET//REL USA","cui_categories_permitted":[],"cui_permitted":false,"dissemination_permitted":["Distribution Statement A"],"releasable_to":[],"sci":true}}}"#;
+        const AUDIT_SITE: &str =
+            r#"{"au3_1":{"site":"7"},"jsonl_path":"/var/log/maknae/audit.jsonl"}"#;
         let mut pairs = minimal();
-        pairs.retain(|(k, _)| *k != "core");
-        pairs.push(("core", CORE_REL));
+        pairs.retain(|(k, _)| !matches!(*k, "core" | "audit"));
+        pairs.extend([("core", CORE_REL_SCI), ("audit", AUDIT_SITE)]);
         let proposed = s(&pairs);
         let invalid = crate::baseline_check::validate(
             doc(&pairs),
@@ -656,33 +646,27 @@ mod tests {
             &FakeEnv::default(),
         )
         .expect_err("the ceiling does not parse");
-        assert!(
-            invalid.cause().contains("SECRET//REL USA"),
-            "premise: the validator quotes the value: {}",
-            invalid.cause()
-        );
-        let accepted = s(&[
-            ("core", CORE_SECRET),
-            ("lake", r#"{"topology":"LAKE-SENTINEL"}"#),
-        ]);
-        let quoting_accepted = InvalidFile {
-            cause: "was LAKE-SENTINEL under SECRET".into(),
-            proposed: None,
+        let quoting = InvalidFile {
+            cause: "audit.au3_1.site is 7 while core.handling.ceiling.sci is true".into(),
+            proposed: Some(proposed.clone()),
         };
-        for (file, values) in [
-            (invalid.into_file(Some(proposed)), &["SECRET//REL USA"][..]),
-            (quoting_accepted, &["LAKE-SENTINEL", "SECRET"][..]),
-        ] {
+        let accepted = s(&[("core", CORE_SECRET), ("audit", AUDIT_SITE)]);
+        for file in [invalid.into_file(Some(proposed)), quoting] {
+            let cause = file.cause.clone();
             let p = pending(&accepted, &Err(file)).unwrap();
-            let (_, record, _) = record_fields(&p);
-            let journal = journal_line(&p);
-            assert!(record.contains(maknae_config::NOT_DISCLOSED), "{record}");
-            assert!(journal.contains(maknae_config::NOT_DISCLOSED), "{journal}");
-            for text in [record, journal, format!("{p:?}")] {
-                for v in values {
-                    assert!(!text.contains(v), "{v} in {text}");
-                }
+            let (result, record, posture) = record_fields(&p);
+            assert_eq!(
+                (result, record.as_str(), posture),
+                ("deny", INVALID_RECORDED, "unavailable")
+            );
+            for trace in ["7", "true", cause.as_str()] {
+                assert!(!record.contains(trace), "{trace} in {record}");
             }
+            assert_eq!(
+                journal_line(&p),
+                format!("baseline change refused: root-file invalid: {cause}")
+            );
+            assert!(!format!("{p:?}").contains(&cause), "{p:?}");
         }
     }
 
@@ -805,6 +789,16 @@ mod tests {
                 "{file_audit}: {:?}",
                 st.pending
             );
+        }
+    }
+
+    #[test]
+    fn a_files_audit_that_is_not_a_map_follows_the_accepted_audit_readers_included() {
+        for file in ["not json", "[]", r#"["eve"]"#] {
+            let file = file.to_string();
+            for acc in [Some(AUDIT_A_READERS.to_string()), None] {
+                assert_eq!(audit_followed(Some(&file), acc.as_ref()), acc, "{file}");
+            }
         }
     }
 
@@ -1343,11 +1337,7 @@ mod tests {
         let inv = pending(&a, &Err("bad".into())).unwrap();
         assert_eq!(
             record_fields(&inv),
-            (
-                "deny",
-                "baseline change refused: invalid: bad".to_string(),
-                "unavailable"
-            )
+            ("deny", INVALID_RECORDED.to_string(), "unavailable")
         );
         assert_eq!(
             journal_line(&inv),

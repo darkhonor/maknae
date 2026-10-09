@@ -83,9 +83,8 @@ pub use bounds::{
 pub use bounds_io::load_egress_bounds;
 pub use ceiling::{ceiling_from_core, policy_name_from_core, Ceiling, IngestPosture};
 pub use document::{
-    baseline_change_lines, effective_view, withhold_suppressed, Document, Override,
-    ResolvedSettings, SectionSpec, Source, ABSENT, MASK, NOT_DISCLOSED, NOT_SET,
-    SUPPRESSED_CHANGED,
+    baseline_change_lines, effective_view, Document, Override, ResolvedSettings, SectionSpec,
+    Source, ABSENT, MASK, NOT_SET, SUPPRESSED_CHANGED,
 };
 pub use egress_cfg::{
     egress_from_section, EgressConfig, EGRESS_DEADLINE_MS_MAX, EGRESS_SECTION,

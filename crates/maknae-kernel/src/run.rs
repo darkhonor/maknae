@@ -123,6 +123,9 @@ const ACCEPT_DECIDING: &str =
     "baseline accept refused: busy; decisions in flight held the live turn";
 const ACCEPT_STOPPING: &str = "baseline accept refused: shutting down";
 const ACCEPT_UNAVAILABLE: &str = "baseline accept unavailable";
+const ACCEPT_INVALID: &str = "baseline accept refused: invalid (cause in the journal)";
+const ACCEPTED_CANNOT_START_RECORDED: &str =
+    "accepted baseline cannot start (cause in the journal)";
 
 fn accept_unavailable(reply: &'static str, why: String) -> AcceptAnswer {
     eprintln!("maknaed: {why}");
@@ -3094,6 +3097,7 @@ async fn refuse_authz_boot<E: AuditEmit + Send + Sync>(
     seq: u64,
     au3_1: &serde_json::Value,
     reason: String,
+    recorded: Option<&str>,
 ) -> RunError {
     let rec = make_record(
         "boot",
@@ -3108,7 +3112,7 @@ async fn refuse_authz_boot<E: AuditEmit + Send + Sync>(
         "authz",
         None,
         "deny",
-        &reason,
+        recorded.unwrap_or(&reason),
         "unauthorized",
         au3_1,
     );
@@ -3140,6 +3144,7 @@ async fn refuse_audit_offload_boot<E: AuditEmit + Send + Sync>(
     seq: u64,
     au3_1: &serde_json::Value,
     reason: String,
+    recorded: Option<&str>,
 ) -> RunError {
     let rec = make_record(
         "boot",
@@ -3154,7 +3159,7 @@ async fn refuse_audit_offload_boot<E: AuditEmit + Send + Sync>(
         "audit.offload",
         None,
         "deny",
-        &reason,
+        recorded.unwrap_or(&reason),
         "unauthorized",
         au3_1,
     );
@@ -3168,6 +3173,20 @@ async fn refuse_audit_offload_boot<E: AuditEmit + Send + Sync>(
         maknae_msgs::MsgId::AuditOffloadUnsupported,
     );
     RunError::AuditOffload(format!("{catalog}: {reason}"))
+}
+
+fn accept_journal(
+    short: &str,
+    revision: u64,
+    reason: &str,
+    emitted: &Result<(), String>,
+) -> String {
+    match emitted {
+        Ok(()) => format!("maknaed: baseline: {}", reason.replace(&format!("sha256:{short} "), "")),
+        Err(e) => format!(
+            "maknaed: AUDIT WRITE FAILED on the baseline accept outcome: {e}; accepted at revision {revision}; restarting to apply"
+        ),
+    }
 }
 
 /// #265 C2: boot evidence that cannot be durably appended refuses boot.
@@ -4016,8 +4035,6 @@ where
                 )
             }
             Ok(Err(cause)) => {
-                let cause =
-                    crate::baseline::withheld_cause(&cause, &state.accepted, Some(&plan.proposed));
                 eprintln!("maknaed: baseline accept refused: {} {cause}", set.source);
                 let (view, _) = crate::baseline::refused_view(
                     &crate::baseline::AcceptRefusal::Invalid,
@@ -4025,7 +4042,7 @@ where
                 );
                 return AcceptAnswer::View {
                     view,
-                    corrective: Some(format!("baseline accept refused: {cause}")),
+                    corrective: Some(ACCEPT_INVALID.into()),
                 };
             }
             Ok(Ok(v)) => v,
@@ -4203,25 +4220,23 @@ where
                 "unavailable",
             ),
         };
-        eprintln!(
-            "maknaed: baseline: {}",
-            reason.replace(&format!("sha256:{short} "), "")
-        );
         let rec = ctx.record(GRAPH_BASELINE_ACTION, result, &reason, posture, None);
-        let recorded = match self.sink.emit_within(&rec, self.append_bound).await {
-            Ok(()) => true,
-            Err(e) => {
-                eprintln!("maknaed: AUDIT WRITE FAILED on the baseline accept outcome: {e}; restarting to apply");
-                self.drain.send_if_modified(|d| {
-                    let serving = *d == Drain::Serving;
-                    if serving {
-                        *d = Drain::Applied;
-                    }
-                    serving
-                });
-                false
-            }
-        };
+        let emitted = self
+            .sink
+            .emit_within(&rec, self.append_bound)
+            .await
+            .map_err(|e| e.to_string());
+        eprintln!("{}", accept_journal(short, revision, &reason, &emitted));
+        let recorded = emitted.is_ok();
+        if !recorded {
+            self.drain.send_if_modified(|d| {
+                let serving = *d == Drain::Serving;
+                if serving {
+                    *d = Drain::Applied;
+                }
+                serving
+            });
+        }
         let mut view = crate::baseline::accepted_view(&set, &state.accepted);
         if applied.is_err() || !recorded {
             view.apply = "restart".into();
@@ -4902,7 +4917,7 @@ async fn run_inner(
             let sections = file_sections.as_ref();
             let trail = prior_trail.as_deref();
             return Err(refuse_start(
-                refused, cause, sections, trail, create, config_dir, seams, &ids,
+                refused, cause, None, sections, trail, create, config_dir, seams, &ids,
             )
             .await);
         }
@@ -4912,17 +4927,18 @@ async fn run_inner(
     let validated = match crate::baseline_check::validate(run_doc, Mode::Boot, config_dir, env) {
         Ok(v) => v,
         Err(refused) => {
-            let cause = match accepted {
-                Some(_) => format!(
-                    "accepted baseline cannot start: {}",
-                    crate::baseline::withheld_cause(refused.cause(), &start.run, None)
+            let (cause, recorded) = match accepted {
+                Some(_) => (
+                    format!("accepted baseline cannot start: {}", refused.cause()),
+                    Some(ACCEPTED_CANNOT_START_RECORDED),
                 ),
-                None => refused.cause().to_string(),
+                None => (refused.cause().to_string(), None),
             };
             let trail = prior_trail.as_deref();
             return Err(refuse_start(
                 refused,
                 cause,
+                recorded,
                 Some(&start.run),
                 trail,
                 create,
@@ -4943,6 +4959,7 @@ async fn run_inner(
             return Err(refuse_start(
                 Invalid::Environment(cause.clone()),
                 cause,
+                None,
                 Some(&start.run),
                 prior_trail.as_deref(),
                 create,
@@ -5108,11 +5125,13 @@ fn open_or_create(
 }
 
 /// A start the validator refused, recorded in `trail` (or the document's own) with
-/// today's exit code; a document refusal is recorded only in a known `trail`.
+/// today's exit code; a document refusal is recorded only in a known `trail`. The
+/// record carries `recorded` in place of `cause` when given; the journal, `cause`.
 #[allow(clippy::too_many_arguments)]
 async fn refuse_start(
     refused: Invalid,
     cause: String,
+    recorded: Option<&str>,
     sections: Option<&maknae_config::BaselineSections>,
     trail: Option<&Path>,
     create: bool,
@@ -5161,12 +5180,15 @@ async fn refuse_start(
     let reason = match refused {
         Invalid::Offload(_) => {
             return refuse_audit_offload_boot(
-                &sink, host, &socket, euid, session, seq, au3_1, cause,
+                &sink, host, &socket, euid, session, seq, au3_1, cause, recorded,
             )
             .await
         }
         Invalid::Principal(_) => {
-            return refuse_authz_boot(&sink, host, &socket, euid, session, seq, au3_1, cause).await
+            return refuse_authz_boot(
+                &sink, host, &socket, euid, session, seq, au3_1, cause, recorded,
+            )
+            .await
         }
         Invalid::Vault { principal, .. } => match crate::boot_gate::authz_policy_source_with(
             config_dir,
@@ -5183,6 +5205,7 @@ async fn refuse_start(
                     seq,
                     au3_1,
                     e.to_string(),
+                    None,
                 )
                 .await
             }
@@ -5190,7 +5213,9 @@ async fn refuse_start(
         },
         Invalid::Environment(_) | Invalid::Document(_) => cause,
     };
-    let refused = Err(RunError::Other(reason.clone()));
+    let refused = Err(RunError::Other(
+        recorded.map_or_else(|| reason.clone(), str::to_string),
+    ));
     record_start_refusal(&sink, host, &socket, euid, session, seq, au3_1, &refused).await;
     RunError::Other(reason)
 }
@@ -5360,6 +5385,7 @@ async fn boot_after_sink(
             boot_seq.next(),
             &audit_cfg.au3_1,
             reason,
+            None,
         )
     };
     let source = match crate::boot_gate::authz_policy_source_with(
@@ -5852,6 +5878,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_accept_journal_says_applied_only_once_its_outcome_is_recorded() {
+        let reason = "accepted sha256:0123456789ab at revision 7; applied live";
+        assert_eq!(
+            accept_journal("0123456789ab", 7, reason, &Ok(())),
+            "maknaed: baseline: accepted at revision 7; applied live"
+        );
+        assert_eq!(
+            accept_journal("0123456789ab", 7, reason, &Err("disk full".into())),
+            "maknaed: AUDIT WRITE FAILED on the baseline accept outcome: disk full; accepted at revision 7; restarting to apply"
+        );
+    }
+
+    #[test]
     fn epoch_zero_is_unix_epoch() {
         assert_eq!(epoch_to_rfc3339(0, 0), "1970-01-01T00:00:00.000Z");
     }
@@ -6202,6 +6241,7 @@ mod boot_gate_tests {
                 refuse_start(
                     Invalid::Document("document-refusal-sentinel".into()),
                     "document-refusal-sentinel".into(),
+                    None,
                     None,
                     trail.as_deref(),
                     true,
@@ -8936,12 +8976,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         assert!(composition(&recs).contains("ceiling: UNCLASSIFIED"));
         let b = baseline_records(&recs);
         assert_eq!(b.len(), 1, "{b:?}");
-        assert!(
-            b[0].1.starts_with("baseline change refused: invalid: ")
-                && b[0].1.contains("unknown_key"),
-            "{}",
-            b[0].1
-        );
+        assert_eq!(b[0].1, crate::baseline::INVALID_RECORDED);
         assert_eq!(
             recs.iter()
                 .find(|r| r.action == GRAPH_BASELINE_ACTION)
@@ -9135,7 +9170,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         let b = baseline_records(&trail_of(&d, "audit.jsonl")[before..]);
         assert!(
             b.iter()
-                .any(|(r, why)| r == "deny" && why.contains("not append-only")),
+                .any(|(r, why)| r == "deny" && why == crate::baseline::INVALID_RECORDED),
             "{b:?}"
         );
         assert!(!audit_section(&accepted(&d)).contains("audit-2.jsonl"));
@@ -9155,7 +9190,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         let b = baseline_records(&trail_of(&d, "audit.jsonl")[before..]);
         assert!(
             b.iter()
-                .any(|(r, why)| r == "deny" && why.contains("may move only within")),
+                .any(|(r, why)| r == "deny" && why == crate::baseline::INVALID_RECORDED),
             "{b:?}"
         );
         assert!(std::fs::read_to_string(&elsewhere).unwrap().is_empty());
@@ -9683,7 +9718,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         assert_eq!(recs.len(), 1, "{recs:?}");
         assert_eq!(
             (recs[0].action.as_str(), recs[0].outcome.reason.as_str()),
-            ("start", m.as_str())
+            ("start", ACCEPTED_CANNOT_START_RECORDED)
         );
         assert_eq!(revision_of_store(&d), revision);
     }
@@ -10373,13 +10408,13 @@ mod graph_audit_bound_tests {
         let au3 = serde_json::json!({});
         let authz = tokio::time::timeout(
             OUTER,
-            refuse_authz_boot(&Stall, "h", "s", 0, 1, 1, &au3, "no principal".into()),
+            refuse_authz_boot(&Stall, "h", "s", 0, 1, 1, &au3, "no principal".into(), None),
         )
         .await;
         assert!(matches!(authz, Ok(RunError::Authz(_))), "{authz:?}");
         let offload = tokio::time::timeout(
             OUTER,
-            refuse_audit_offload_boot(&Stall, "h", "s", 0, 1, 2, &au3, "siem".into()),
+            refuse_audit_offload_boot(&Stall, "h", "s", 0, 1, 2, &au3, "siem".into(), None),
         )
         .await;
         assert!(
@@ -11619,8 +11654,10 @@ mod baseline_accept_tests {
                 view,
                 corrective: Some(why),
             } => {
-                assert_eq!(view.state, "invalid");
-                assert!(why.contains("root"), "{why}");
+                assert_eq!(
+                    (view.state.as_str(), why.as_str()),
+                    ("invalid", ACCEPT_INVALID)
+                );
             }
             other => panic!("{other:?}"),
         }
@@ -11643,10 +11680,9 @@ mod baseline_accept_tests {
                 view,
                 corrective: Some(why),
             } => {
-                assert_eq!(view.state, "invalid");
-                assert!(
-                    why.contains("other.sock") && why.contains("EACCES"),
-                    "{why}"
+                assert_eq!(
+                    (view.state.as_str(), why.as_str()),
+                    ("invalid", ACCEPT_INVALID)
                 );
             }
             other => panic!("{other:?}"),
@@ -12194,11 +12230,7 @@ mod reload_tests {
             .into_iter()
             .find(|s| s.action == GRAPH_BASELINE_ACTION)
             .unwrap();
-        assert!(
-            rec.reason.starts_with("baseline change refused: invalid: "),
-            "{}",
-            rec.reason
-        );
+        assert_eq!(rec.reason, crate::baseline::INVALID_RECORDED);
         assert_eq!(
             fx.status_lines(),
             vec!["baseline: 1 pending (invalid)".to_string()]

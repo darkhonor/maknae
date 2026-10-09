@@ -602,42 +602,6 @@ impl Walk<'_> {
     }
 }
 
-/// What a suppressed value is replaced by in a diagnostic.
-pub const NOT_DISCLOSED: &str = "<not disclosed>";
-
-/// `text` with every value under a suppressed path in `sections` replaced by
-/// [`NOT_DISCLOSED`], longest first; withheld whole when a section does not parse.
-pub fn withhold_suppressed(text: &str, sections: &[&crate::BaselineSections]) -> String {
-    let mut values = Vec::new();
-    for (name, json) in sections.iter().flat_map(|s| s.iter()) {
-        let Ok(v) = crate::value_from_canonical_json(json) else {
-            return NOT_DISCLOSED.to_string();
-        };
-        for leaf in leaves(DISCLOSABLE, name, &v) {
-            if leaf.is_suppressed(name) {
-                scalars(leaf.value, &mut values);
-            }
-        }
-    }
-    values.retain(|v| !v.is_empty());
-    values.sort_by_key(|v| std::cmp::Reverse(v.len()));
-    values.iter().fold(text.to_string(), |t, v| {
-        t.replace(v.as_str(), NOT_DISCLOSED)
-    })
-}
-
-fn scalars(v: &Value, out: &mut Vec<String>) {
-    match v {
-        Value::Null => {}
-        Value::Bool(b) => out.push(b.to_string()),
-        Value::Int(n) => out.push(n.to_string()),
-        Value::Float(f) => out.push(f.to_string()),
-        Value::Str(s) => out.push(s.clone()),
-        Value::Seq(items) => items.iter().for_each(|i| scalars(i, out)),
-        Value::Map(entries) => entries.iter().for_each(|(_, i)| scalars(i, out)),
-    }
-}
-
 /// Rendered for the side of a baseline change on which a setting does not exist.
 pub const ABSENT: &str = "<absent>";
 
