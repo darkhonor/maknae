@@ -8546,13 +8546,13 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
                     groups: Vec::new(),
                 }));
             }
-            maknae_vault::NssAccounts.account(name)
+            maknae_vault::NssAccounts::HOST.account(name)
         }
         fn daemon_gid(&self) -> Result<Option<u32>, String> {
-            maknae_vault::NssAccounts.daemon_gid()
+            maknae_vault::NssAccounts::HOST.daemon_gid()
         }
         fn service_uids(&self) -> Result<Vec<u32>, String> {
-            maknae_vault::NssAccounts.service_uids()
+            maknae_vault::NssAccounts::HOST.service_uids()
         }
     }
 

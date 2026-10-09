@@ -128,6 +128,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn edge_debug_names_its_fields_and_withholds_the_label_and_values() {
+        let e = EdgeRecord {
+            id: EdgeId(11),
+            space: GraphSpace::Kernel,
+            from: NodeId(12),
+            to: NodeId(13),
+            kind: EdgeKind(14),
+            label: "label-sentinel".into(),
+            provenance: Provenance {
+                kind: ProvenanceKind::Seed,
+                transition: 15,
+            },
+            revision: 16,
+            attrs: Attrs::from([("attr-key".into(), AttrValue::Str("value-sentinel".into()))]),
+        };
+        let shown = format!("{e:?}");
+        for part in [
+            "EdgeRecord",
+            "EdgeId(11)",
+            "Kernel",
+            "NodeId(12)",
+            "NodeId(13)",
+            "EdgeKind(14)",
+            "Seed",
+            "16",
+            "attr-key",
+            "..",
+        ] {
+            assert!(shown.contains(part), "{part} not in {shown}");
+        }
+        for secret in ["label-sentinel", "value-sentinel"] {
+            assert!(!shown.contains(secret), "{secret} in {shown}");
+        }
+    }
+
+    #[test]
     fn provenance_codes_round_trip_and_are_pinned() {
         let all = [
             (ProvenanceKind::Compiled, 1),

@@ -89,7 +89,7 @@ fn collect(euid: u32, stopped: bool) -> Result<Vec<String>, String> {
     if stopped {
         daemon_stopped(Path::new(STATE_DIR), crate::reseed::kernel_uid()?)?;
     }
-    readers(Path::new(CONFIG_DIR), &maknae_vault::NssAccounts)
+    readers(Path::new(CONFIG_DIR), &maknae_vault::NssAccounts::HOST)
 }
 
 pub(crate) fn run(euid: u32, stopped: bool) -> ExitCode {

@@ -149,6 +149,21 @@ mod tests {
     use super::*;
     use crate::{canonical_json, Value};
 
+    #[test]
+    fn sections_from_an_array_hold_every_pair() {
+        let s = BaselineSections::from([
+            ("core".to_string(), "{}".to_string()),
+            ("audit".to_string(), "[]".to_string()),
+        ]);
+        assert_eq!(
+            s.into_inner(),
+            BTreeMap::from([
+                ("audit".to_string(), "[]".to_string()),
+                ("core".to_string(), "{}".to_string()),
+            ])
+        );
+    }
+
     fn every_shape() -> Value {
         Value::Map(vec![
             ("z".into(), Value::Null),

@@ -630,6 +630,93 @@ mod tests {
     }
 
     #[test]
+    fn pending_debug_names_the_state_and_withholds_only_the_cause() {
+        let proposed = s(&[("core", CORE)]);
+        let valid = PendingState::Valid {
+            proposed: proposed.clone(),
+            apply: Apply::Live,
+            sections: vec!["principal".into()],
+        };
+        assert_eq!(
+            format!("{valid:?}"),
+            r#"Valid { proposed: {"core"}, apply: Live, sections: ["principal"] }"#
+        );
+        let set = PendingSet {
+            source: ROOT_FILE,
+            hash: "ab".repeat(32),
+            state: valid.clone(),
+        };
+        assert_eq!(
+            format!("{set:?}"),
+            format!(
+                r#"PendingSet {{ source: "root-file", hash: sha256:{}, state: {valid:?} }}"#,
+                "ab".repeat(6)
+            )
+        );
+        let invalid = PendingState::Invalid {
+            cause: "cause-sentinel".into(),
+            proposed: Some(proposed.clone()),
+        };
+        assert_eq!(
+            format!("{invalid:?}"),
+            r#"Invalid { proposed: Some({"core"}), .. }"#
+        );
+        let file = InvalidFile {
+            cause: "cause-sentinel".into(),
+            proposed: Some(proposed),
+        };
+        assert_eq!(
+            format!("{file:?}"),
+            r#"InvalidFile { proposed: Some({"core"}), .. }"#
+        );
+    }
+
+    #[test]
+    fn removing_a_nested_key_drops_only_the_map_it_empties() {
+        let parse = |j: &str| value_from_canonical_json(j).unwrap();
+        for (doc, path, removed, left) in [
+            (
+                r#"{"a":{"b":1},"c":2}"#,
+                &["a", "b"][..],
+                true,
+                r#"{"c":2}"#,
+            ),
+            (
+                r#"{"a":{"b":1,"d":3}}"#,
+                &["a", "b"][..],
+                true,
+                r#"{"a":{"d":3}}"#,
+            ),
+            (
+                r#"{"a":{},"c":2}"#,
+                &["a", "b"][..],
+                false,
+                r#"{"a":{},"c":2}"#,
+            ),
+            (
+                r#"{"a":{"d":{}}}"#,
+                &["a", "b"][..],
+                false,
+                r#"{"a":{"d":{}}}"#,
+            ),
+        ] {
+            let mut v = parse(doc);
+            assert_eq!(remove_path(&mut v, path), removed, "{doc}");
+            assert_eq!(canonical_json(&v), left, "{doc}");
+        }
+    }
+
+    #[test]
+    fn a_file_without_audit_keeps_the_accepted_readers_alone() {
+        assert_eq!(
+            audit_followed(None, Some(&AUDIT_A_READERS.to_string())),
+            Some(r#"{"readers":["vector"]}"#.to_string())
+        );
+        assert_eq!(audit_followed(None, Some(&AUDIT_A.to_string())), None);
+        assert_eq!(audit_followed(None, None), None);
+    }
+
+    #[test]
     fn an_invalid_sets_record_carries_no_cause_and_its_journal_line_carries_it_verbatim() {
         use crate::test_fixtures::{doc, minimal, FakeEnv};
         const CORE_REL_SCI: &str = r#"{"deployment_id":"d","handling":{"accreditation_ref":null,"ceiling":{"classification":"SECRET//REL USA","cui_categories_permitted":[],"cui_permitted":false,"dissemination_permitted":["Distribution Statement A"],"releasable_to":[],"sci":true}}}"#;

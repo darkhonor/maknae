@@ -7,7 +7,17 @@ use nix::unistd::{Group, User};
 const DAEMON_ACCOUNT: &str = "_maknae";
 const EGRESS_ACCOUNT: &str = "_maknae-egress";
 
-pub struct NssAccounts;
+pub struct NssAccounts {
+    daemon: &'static str,
+    egress: &'static str,
+}
+
+impl NssAccounts {
+    pub const HOST: Self = Self {
+        daemon: DAEMON_ACCOUNT,
+        egress: EGRESS_ACCOUNT,
+    };
+}
 
 /// getpwnam(3)'s "not found" spellings are `Ok(None)`, `ENOENT`, `ESRCH`, `EBADF`
 /// and `EPERM`; every other errno, `ERANGE` and errno 0 included, is a failed lookup.
@@ -36,9 +46,9 @@ fn group(gid: nix::unistd::Gid) -> Result<Option<Group>, String> {
     found(Group::from_gid(gid))
 }
 
-fn daemon_members(g: Option<Group>) -> Result<Vec<String>, String> {
+fn daemon_members(daemon: &str, g: Option<Group>) -> Result<Vec<String>, String> {
     g.map(|g| g.mem)
-        .ok_or_else(|| format!("{DAEMON_ACCOUNT}'s primary group has no group entry"))
+        .ok_or_else(|| format!("{daemon}'s primary group has no group entry"))
 }
 
 fn daemon_membership(
@@ -54,17 +64,19 @@ fn daemon_membership(
     }
 }
 
-#[cfg(target_os = "linux")]
 fn listed_groups(u: &User) -> Result<Vec<u32>, String> {
-    let name = std::ffi::CString::new(u.name.as_bytes()).map_err(|e| e.to_string())?;
-    nix::unistd::getgrouplist(&name, u.gid)
-        .map(|gids| gids.into_iter().map(|g| g.as_raw()).collect())
-        .map_err(|e| format!("group list lookup failed (errno {})", e as i32))
-}
-
-#[cfg(not(target_os = "linux"))]
-fn listed_groups(_: &User) -> Result<Vec<u32>, String> {
-    Ok(Vec::new())
+    #[cfg(target_os = "linux")]
+    {
+        let name = std::ffi::CString::new(u.name.as_bytes()).map_err(|e| e.to_string())?;
+        nix::unistd::getgrouplist(&name, u.gid)
+            .map(|gids| gids.into_iter().map(|g| g.as_raw()).collect())
+            .map_err(|e| format!("group list lookup failed (errno {})", e as i32))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = u;
+        Ok(Vec::new())
+    }
 }
 
 impl ReaderLookup for NssAccounts {
@@ -72,9 +84,9 @@ impl ReaderLookup for NssAccounts {
         let Some(u) = user(name)? else {
             return Ok(None);
         };
-        let groups = match user(DAEMON_ACCOUNT)? {
+        let groups = match user(self.daemon)? {
             Some(daemon) => {
-                let members = daemon_members(group(daemon.gid)?)?;
+                let members = daemon_members(self.daemon, group(daemon.gid)?)?;
                 daemon_membership(&u.name, daemon.gid.as_raw(), &members, &listed_groups(&u)?)
             }
             None => Vec::new(),
@@ -88,12 +100,12 @@ impl ReaderLookup for NssAccounts {
     }
 
     fn daemon_gid(&self) -> Result<Option<u32>, String> {
-        Ok(user(DAEMON_ACCOUNT)?.map(|u| u.gid.as_raw()))
+        Ok(user(self.daemon)?.map(|u| u.gid.as_raw()))
     }
 
     fn service_uids(&self) -> Result<Vec<u32>, String> {
         let mut uids = Vec::new();
-        for name in [DAEMON_ACCOUNT, EGRESS_ACCOUNT] {
+        for name in [self.daemon, self.egress] {
             if let Some(u) = user(name)? {
                 uids.push(u.uid.as_raw());
             }
@@ -108,7 +120,10 @@ mod tests {
 
     #[test]
     fn root_resolves_to_uid_zero() {
-        let root = NssAccounts.account("root").unwrap().expect("root exists");
+        let root = NssAccounts::HOST
+            .account("root")
+            .unwrap()
+            .expect("root exists");
         assert_eq!((root.name.as_str(), root.uid), ("root", 0));
     }
 
@@ -121,7 +136,7 @@ mod tests {
     #[test]
     fn a_daemon_group_with_no_entry_refuses() {
         assert_eq!(
-            daemon_members(None),
+            daemon_members(DAEMON_ACCOUNT, None),
             Err("_maknae's primary group has no group entry".to_string())
         );
         let g = Group {
@@ -130,21 +145,65 @@ mod tests {
             gid: nix::unistd::Gid::from_raw(7),
             mem: vec!["alice".into()],
         };
-        assert_eq!(daemon_members(Some(g)), Ok(vec!["alice".to_string()]));
+        assert_eq!(
+            daemon_members(DAEMON_ACCOUNT, Some(g)),
+            Ok(vec!["alice".to_string()])
+        );
     }
 
     #[test]
     fn a_missing_account_is_none() {
         assert_eq!(
-            NssAccounts.account("no-such-user-maknae-490").unwrap(),
+            NssAccounts::HOST
+                .account("no-such-user-maknae-490")
+                .unwrap(),
             None
         );
     }
 
+    const MISSING: &str = "no-such-user-maknae-490";
+
+    fn host(name: &str) -> Option<User> {
+        User::from_name(name).unwrap()
+    }
+
     #[test]
-    fn the_service_lookups_answer() {
-        assert!(NssAccounts.daemon_gid().is_ok());
-        assert!(NssAccounts.service_uids().is_ok());
+    fn the_service_lookups_are_the_named_accounts_ids() {
+        let nobody = host("nobody").expect("nobody exists");
+        let (uid, gid) = (nobody.uid.as_raw(), nobody.gid.as_raw());
+        assert!(uid > 1 && gid > 1, "{uid} {gid}");
+        let present = NssAccounts {
+            daemon: "nobody",
+            egress: "root",
+        };
+        assert_eq!(present.daemon_gid(), Ok(Some(gid)));
+        assert_eq!(present.service_uids(), Ok(vec![uid, 0]));
+        let absent = NssAccounts {
+            daemon: MISSING,
+            egress: MISSING,
+        };
+        assert_eq!(absent.daemon_gid(), Ok(None));
+        assert_eq!(absent.service_uids(), Ok(Vec::new()));
+        assert_eq!(
+            absent.account("root").unwrap().unwrap().groups,
+            Vec::<u32>::new()
+        );
+    }
+
+    #[test]
+    fn the_production_lookups_name_the_maknae_accounts() {
+        let accounts = NssAccounts::HOST;
+        let daemon = host(DAEMON_ACCOUNT);
+        assert_eq!(
+            accounts.daemon_gid(),
+            Ok(daemon.as_ref().map(|u| u.gid.as_raw()))
+        );
+        let uids: Vec<u32> = [daemon, host(EGRESS_ACCOUNT)]
+            .into_iter()
+            .flatten()
+            .map(|u| u.uid.as_raw())
+            .collect();
+        assert_eq!(accounts.service_uids(), Ok(uids));
     }
 
     #[test]
@@ -180,7 +239,17 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn the_host_group_list_includes_the_primary_group() {
-        let root = User::from_name("root").unwrap().unwrap();
+        let root = host("root").unwrap();
         assert!(listed_groups(&root).unwrap().contains(&0));
+        let nobody = host("nobody").unwrap();
+        let listed = listed_groups(&nobody).unwrap();
+        assert!(listed.contains(&nobody.gid.as_raw()), "{listed:?}");
+        assert!(!listed.contains(&0) && !listed.contains(&1), "{listed:?}");
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn the_host_group_list_is_empty_off_linux() {
+        assert_eq!(listed_groups(&host("root").unwrap()), Ok(Vec::new()));
     }
 }

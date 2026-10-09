@@ -11,15 +11,15 @@ pub(crate) struct HostEnv {
 
 impl ReaderLookup for HostEnv {
     fn account(&self, name: &str) -> Result<Option<ReaderAccount>, String> {
-        maknae_vault::NssAccounts.account(name)
+        maknae_vault::NssAccounts::HOST.account(name)
     }
 
     fn daemon_gid(&self) -> Result<Option<u32>, String> {
-        maknae_vault::NssAccounts.daemon_gid()
+        maknae_vault::NssAccounts::HOST.daemon_gid()
     }
 
     fn service_uids(&self) -> Result<Vec<u32>, String> {
-        maknae_vault::NssAccounts.service_uids()
+        maknae_vault::NssAccounts::HOST.service_uids()
     }
 }
 
@@ -78,8 +78,14 @@ mod tests {
             Some(0),
             "readers resolve through NSS"
         );
-        assert_eq!(env.daemon_gid(), maknae_vault::NssAccounts.daemon_gid());
-        assert_eq!(env.service_uids(), maknae_vault::NssAccounts.service_uids());
+        assert_eq!(
+            env.daemon_gid(),
+            maknae_vault::NssAccounts::HOST.daemon_gid()
+        );
+        assert_eq!(
+            env.service_uids(),
+            maknae_vault::NssAccounts::HOST.service_uids()
+        );
         let trail = dir.path().join("audit.jsonl");
         assert!(env
             .trail_prepared(&trail)
