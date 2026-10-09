@@ -196,7 +196,6 @@ pub fn apply_of(a: &BaselineSections, b: &BaselineSections) -> Apply {
             "principal" => true,
             "providers" => non_empty_seq(old) && non_empty_seq(new),
             "audit" => equal_without(old, new, &["readers"]),
-            "core" => equal_without(old, new, &["handling", "ceiling"]),
             _ => false,
         }
     });
@@ -724,7 +723,7 @@ mod tests {
             p.state,
             PendingState::Valid {
                 proposed: f,
-                apply: Apply::Live,
+                apply: Apply::Restart,
                 sections: vec!["core".into()]
             }
         );
@@ -1067,7 +1066,7 @@ mod tests {
             b
         };
         assert_eq!(apply_of(&base, &base), Apply::Live);
-        assert_eq!(apply_of(&base, &with("core", CORE_SECRET)), Apply::Live);
+        assert_eq!(apply_of(&base, &with("core", CORE_SECRET)), Apply::Restart);
         assert_eq!(apply_of(&base, &with("core", CORE_AUS)), Apply::Restart);
         assert_eq!(
             apply_of(&base, &with("core", r#"{"deployment_id":"e"}"#)),
@@ -1117,24 +1116,27 @@ mod tests {
     }
 
     #[test]
-    fn only_the_ceiling_subtree_of_core_is_live() {
+    fn every_core_change_is_restart_class_the_ceiling_level_included() {
         let us = r#"{"deployment_id":"d","handling":{"policy":"US"}}"#;
         let us_secret = r#"{"deployment_id":"d","handling":{"ceiling":{"classification":"SECRET"},"policy":"US"}}"#;
+        let us_confidential = r#"{"deployment_id":"d","handling":{"ceiling":{"classification":"CONFIDENTIAL"},"policy":"US"}}"#;
         let aus_secret = r#"{"deployment_id":"d","handling":{"ceiling":{"classification":"SECRET"},"policy":"AUS"}}"#;
         let empty_handling = r#"{"deployment_id":"d","handling":{}}"#;
         let a = |v: &str, w: &str| apply_of(&s(&[("core", v)]), &s(&[("core", w)]));
-        assert_eq!(a(us, us_secret), Apply::Live);
-        assert_eq!(a(us_secret, us), Apply::Live);
-        assert_eq!(a(CORE_SECRET, us_secret), Apply::Restart);
-        assert_eq!(a(us, aus_secret), Apply::Restart);
-        assert_eq!(a(CORE, empty_handling), Apply::Restart);
-        assert_eq!(a(CORE_SECRET, CORE), Apply::Live);
-        assert_eq!(a(r#"{"ceiling":1}"#, r#"{"ceiling":2}"#), Apply::Restart);
-        assert_eq!(
-            a(r#"{"handling":"x"}"#, r#"{"handling":"y"}"#),
-            Apply::Restart
-        );
-        assert_eq!(a(r#"[1]"#, r#"[2]"#), Apply::Restart);
+        for (v, w) in [
+            (us_secret, us_confidential),
+            (us, us_secret),
+            (us_secret, us),
+            (CORE_SECRET, us_secret),
+            (us, aus_secret),
+            (CORE, empty_handling),
+            (CORE, CORE_SECRET),
+            (CORE_SECRET, CORE),
+            (r#"{"ceiling":1}"#, r#"{"ceiling":2}"#),
+            (r#"[1]"#, r#"[2]"#),
+        ] {
+            assert_eq!(a(v, w), Apply::Restart, "{v} -> {w}");
+        }
     }
 
     #[test]
@@ -1199,14 +1201,14 @@ mod tests {
             plan,
             AcceptPlan {
                 proposed: s(&[("core", CORE_SECRET)]),
-                apply: Apply::Live,
+                apply: Apply::Restart,
                 sections: vec!["core".to_string()]
             }
         );
-        let restart = pending(&a, &Ok(s(&[("core", CORE_AUS)]))).unwrap();
+        let live = pending(&a, &Ok(s(&[("core", CORE), ("principal", PRINCIPAL_A)]))).unwrap();
         assert_eq!(
-            decide_accept(Some(&restart), &restart.hash).unwrap().apply,
-            Apply::Restart
+            decide_accept(Some(&live), &live.hash).unwrap().apply,
+            Apply::Live
         );
     }
 
@@ -1292,7 +1294,7 @@ mod tests {
         let a = s(&[("core", CORE)]);
         let p = pending(&a, &Ok(s(&[("core", CORE), ("vault", VAULT_A)]))).unwrap();
         assert_eq!(status_line(&p), "baseline: 1 pending (restart)");
-        let live = pending(&a, &Ok(s(&[("core", CORE_SECRET)]))).unwrap();
+        let live = pending(&a, &Ok(s(&[("core", CORE), ("principal", PRINCIPAL_A)]))).unwrap();
         assert_eq!(status_line(&live), "baseline: 1 pending (live)");
         let inv = pending(&a, &Err("x".into())).unwrap();
         assert_eq!(status_line(&inv), "baseline: 1 pending (invalid)");
@@ -1300,7 +1302,7 @@ mod tests {
             assert!(
                 !line.contains(&p.hash[..12])
                     && !line.contains(&live.hash[..12])
-                    && !line.contains("core")
+                    && !line.contains("principal")
                     && !line.contains("vault"),
                 "{line}"
             );
@@ -1329,14 +1331,14 @@ mod tests {
         assert_eq!(
             reason,
             format!(
-                "baseline change pending acceptance: root-file sha256:{} (apply: live; sections: core)",
+                "baseline change pending acceptance: root-file sha256:{} (apply: restart; sections: core)",
                 &p.hash[..12]
             )
         );
         assert!(!reason.contains(&p.hash));
         assert_eq!(
             journal_line(&p),
-            "baseline change pending acceptance: root-file (apply: live)"
+            "baseline change pending acceptance: root-file (apply: restart)"
         );
         let inv = pending(&a, &Err("bad".into())).unwrap();
         assert_eq!(
@@ -1465,7 +1467,7 @@ mod tests {
                 v.state.as_str(),
                 v.apply.as_str()
             ),
-            (ROOT_FILE, ceiling.hash.as_str(), "pending", "live")
+            (ROOT_FILE, ceiling.hash.as_str(), "pending", "restart")
         );
         assert_eq!(v.changes, [maknae_config::SUPPRESSED_CHANGED]);
         assert!(!v
@@ -1531,7 +1533,7 @@ mod tests {
                 v.apply.as_str(),
                 v.hash.as_str()
             ),
-            (ROOT_FILE, "accepted", "live", "")
+            (ROOT_FILE, "accepted", "restart", "")
         );
         assert_eq!(v.changes, [maknae_config::SUPPRESSED_CHANGED]);
         assert!(!v.changes.iter().any(|l| l.contains("core")), "{v:?}");

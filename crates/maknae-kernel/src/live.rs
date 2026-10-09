@@ -1,6 +1,6 @@
 //! What an accepted baseline swaps in for the next request (#490): the redacted
-//! config view and the providers authority. The ceiling level and the principal
-//! are the composition's own holders, installed in its live turn.
+//! config view and the providers authority. The principal is the baseline
+//! operand's own holder, installed in the same live turn; the ceiling is not live.
 
 use std::sync::{Arc, PoisonError, RwLock};
 
@@ -16,7 +16,6 @@ pub struct LiveConfig {
 
 /// One accepted live baseline, installed whole in the composition's live turn.
 pub struct LiveValues {
-    pub ceiling: maknae_config::Ceiling,
     pub principal: maknae_config::Principal,
     pub view: ConfigView,
     pub providers: Option<ProviderAuthority>,
@@ -25,7 +24,6 @@ pub struct LiveValues {
 impl LiveValues {
     pub fn of(v: &Validated) -> Self {
         Self {
-            ceiling: v.boot.ceiling().clone(),
             principal: v.principal.clone(),
             view: config_view_of(v),
             providers: providers_of(v),
@@ -102,9 +100,8 @@ pub fn providers_of(v: &Validated) -> Option<ProviderAuthority> {
     crate::provider_choice::provider_authority(v.boot.providers(), v.egress_bounds.as_ref())
 }
 
-/// Installs a validated live baseline: the ceiling, principal, view and providers in
-/// one turn of the composition, refused whole when the booted system does not rank
-/// the ceiling or in-flight decisions hold the turn past the bound.
+/// Installs a validated live baseline: the principal, view and providers in one turn
+/// of the composition, refused whole when in-flight decisions hold the turn past the bound.
 #[cfg(test)]
 pub fn install<B: maknae_authz_basic::Baseline>(
     pdp: &crate::Composition<B>,
@@ -171,7 +168,6 @@ mod tests {
     }
 
     const SECRET_CORE: &str = r#"{"deployment_id":"d","handling":{"accreditation_ref":null,"ceiling":{"classification":"SECRET","cui_categories_permitted":[],"cui_permitted":false,"dissemination_permitted":["Distribution Statement A"],"releasable_to":[],"sci":false}}}"#;
-    const AUS_CORE: &str = r#"{"deployment_id":"d","handling":{"accreditation_ref":null,"ceiling":{"classification":"PROTECTED","cui_categories_permitted":[],"cui_permitted":false,"dissemination_permitted":["Distribution Statement A"],"releasable_to":[],"sci":false},"policy":"aus"}}"#;
 
     #[test]
     fn install_replaces_both_and_a_held_copy_is_unchanged() {
@@ -233,7 +229,7 @@ mod tests {
     }
 
     #[test]
-    fn install_serves_the_accepted_ceiling_principal_view_and_providers() {
+    fn install_serves_the_accepted_principal_view_and_providers_and_never_a_ceiling() {
         let (g, basic) = fixture("live-accepted", READ_POLICY, None);
         let pdp = crate::Composition::new(
             basic,
@@ -243,44 +239,24 @@ mod tests {
         let pdp = pdp.with_live(LiveConfig::of(&first));
         let live = pdp.live();
         let env = FakeEnv::with_bounds();
-        let next = validated(
+        let mut next = validated(
             &with(&[("core", SECRET_CORE), ("providers", PROVIDERS)]),
             &env,
         )
         .unwrap();
+        next.principal.uid = nix::unistd::geteuid().as_raw();
         assert_eq!(live.generation(), 0);
         install(&pdp, &next, soon()).unwrap();
         assert_eq!(live.generation(), 1);
-        assert_eq!(pdp.ceiling().ceiling().classification.name, "SECRET");
+        assert_eq!(pdp.ceiling().ceiling().classification, US.unmarked());
         assert_eq!(pdp.baseline().principal(), next.principal);
         assert_eq!(*live.view(), config_view_of(&next));
         assert_eq!(prefix(&live.providers()), Some("users"));
         let marked = permitted_read_marked(&g.0, Some("SECRET"));
         assert!(
-            !matches!(pdp.decide(&marked), Verdict::Permit { .. }),
-            "uid 1000 is the principal now, not the test's euid"
+            matches!(pdp.decide(&marked), Verdict::Deny { ref reason } if reason.starts_with("ceiling: ")),
+            "the booted ceiling still refuses SECRET content"
         );
-    }
-
-    #[test]
-    fn a_ceiling_removed_from_the_file_serves_the_systems_lowest_level() {
-        let (g, basic) = fixture("live-no-ceiling", READ_POLICY, None);
-        let pdp = crate::Composition::new(
-            basic,
-            crate::CeilingAuthorizer::new(crate::test_fixtures::secret(), US),
-        );
-        let mut accepted = validated(&with(&[("core", SECRET_CORE)]), &FakeEnv::default()).unwrap();
-        accepted.principal.uid = nix::unistd::geteuid().as_raw();
-        let pdp = pdp.with_live(LiveConfig::of(&accepted));
-        install(&pdp, &accepted, soon()).unwrap();
-        let marked = permitted_read_marked(&g.0, Some("CONFIDENTIAL"));
-        assert!(matches!(pdp.decide(&marked), Verdict::Permit { .. }));
-        let mut removed = validated(&minimal(), &FakeEnv::default()).unwrap();
-        removed.principal.uid = accepted.principal.uid;
-        assert_eq!(removed.boot.ceiling(), &Ceiling::baseline_for(US));
-        install(&pdp, &removed, soon()).unwrap();
-        assert_eq!(pdp.ceiling().ceiling().classification, US.unmarked());
-        assert!(matches!(pdp.decide(&marked), Verdict::Deny { .. }));
     }
 
     #[test]
@@ -291,27 +267,5 @@ mod tests {
             validated(&no_principal, &FakeEnv::default()),
             Err(Invalid::Principal(_))
         ));
-    }
-
-    #[test]
-    fn a_ceiling_the_booted_system_does_not_rank_changes_no_holder() {
-        let (_g, basic) = fixture("live-foreign", READ_POLICY, None);
-        let pdp = crate::Composition::new(
-            basic,
-            crate::CeilingAuthorizer::new(Ceiling::baseline_for(US), US),
-        );
-        let before = pdp.baseline().principal();
-        let first = validated(&minimal(), &FakeEnv::default()).unwrap();
-        let pdp = pdp.with_live(LiveConfig::of(&first));
-        let live = pdp.live();
-        let aus = validated(&with(&[("core", AUS_CORE)]), &FakeEnv::default()).unwrap();
-        assert_eq!(
-            install(&pdp, &aus, soon()).unwrap_err(),
-            "PROTECTED is not a level of the US system"
-        );
-        assert_eq!(pdp.baseline().principal(), before);
-        assert_eq!(pdp.ceiling().ceiling().classification, US.unmarked());
-        assert_eq!(*live.view(), config_view_of(&first));
-        assert_eq!(live.generation(), 0);
     }
 }

@@ -350,9 +350,9 @@ maknae baseline-accept <hash>        # the 64-character hash baseline-show print
 
 | Changed | Applies |
 |---|---|
-| `core.handling.ceiling` (the whole block; only its level is read per decision) when `core.handling` is already accepted, `principal`, and `providers` while it stays non-empty | **live**: the next decision uses it |
+| `principal`, and `providers` while it stays non-empty | **live**: the next decision uses it |
 | `audit.readers` | **live**: no restart; `maknaed` reads nothing from it, and the packages and the runbook's "Grant the declared readers" block apply the list in `maknae.yaml` (§6.3) |
-| everything else, including a first `core.handling` declaration (it adds the required `accreditation_ref`), `core.handling.policy` (the classification system), every other `core` key, `vault`, `transport`, `egress`, `lake`, the other `audit` keys, `providers` going from empty to non-empty or back, and a section added or removed | **by restart** |
+| everything else, including all of `core.handling`: adding the block, the ceiling and its level, `accreditation_ref` and `policy` (the classification system); every other `core` key, `vault`, `transport`, `egress`, `lake`, the other `audit` keys, `providers` going from empty to non-empty or back, and a section added or removed | **by restart** |
 
 A set that contains any restart change applies by restart as a whole. A live accept is persisted, then installed in one step once the decisions in flight have finished; no decision sees part of it. A restart accept is persisted and checkpointed, then `maknaed` stops admitting connections (each is closed unserved, recorded as `connect` denied `draining to apply an accepted baseline`), lets the requests in flight finish under the old baseline, and exits **6**. systemd (`Restart=on-failure`) and launchd (`KeepAlive` with `SuccessfulExit` false) start it again, and the new process runs the accepted baseline. A live accept whose install fails after the persist applies by restart in the same way. A restart accept whose persist fails after admission stopped exits 1, and the supervisor restarts the daemon on the unchanged baseline, with the set still pending.
 

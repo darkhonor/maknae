@@ -62,19 +62,17 @@
 //! NAMES from the registry; a raw marking is request content and is never
 //! echoed.
 //!
-//! **The system is fixed at boot; the ceiling level is data.** The `'static`
-//! policy the registry selected never changes in-process. An accepted baseline
-//! may install a new ceiling level, which the next decision reads; the code
-//! does not change (ADR-0002's static TCB), and a level the booted system does
-//! not rank is refused. A decision reads the holder once and keeps that value.
+//! **The ceiling and the system are frozen at boot; the baseline is not.**
+//! `-basic`'s policy snapshot is replaced by a reload; the ceiling is the static
+//! TCB's own declaration (ADR-0002: no hot-swap) and is cloned once from
+//! `BootConfig`, with the `'static` policy the registry selected. "Per-request
+//! enforcement" means the DECISION is re-made per request.
 //!
 //! **Abstentions carry no note, deliberately.** `combine` rule 4 keeps the
 //! FIRST annotated absence; the baseline is passed first, but where `-basic`
 //! abstains bare a note here would replace the historical
 //! `no applicable authorizer (fail-closed)` reason. This operand changes no
 //! existing audit string.
-
-use std::sync::{Arc, PoisonError, RwLock};
 
 use maknae_config::Ceiling;
 use maknae_security::{
@@ -202,52 +200,20 @@ pub fn decide_ceiling(
     }
 }
 
-/// The operand: the installed ceiling, in the booted system, evaluated on every
+/// The operand: the booted ceiling, in the booted system, evaluated on every
 /// request.
 pub struct CeilingAuthorizer {
-    ceiling: RwLock<Arc<Ceiling>>,
+    ceiling: Ceiling,
     policy: &'static dyn ClassificationPolicy,
 }
 
 impl CeilingAuthorizer {
     pub fn new(ceiling: Ceiling, policy: &'static dyn ClassificationPolicy) -> Self {
-        Self {
-            ceiling: RwLock::new(Arc::new(ceiling)),
-            policy,
-        }
+        Self { ceiling, policy }
     }
 
-    /// The installed ceiling; the read guard is released before this returns.
-    pub fn ceiling(&self) -> Arc<Ceiling> {
-        self.ceiling
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
-    }
-
-    /// The next decision reads `ceiling`; a level the booted system does not rank is
-    /// refused and the installed ceiling stands.
-    pub(crate) fn admits(&self, ceiling: &Ceiling) -> Result<(), String> {
-        if self.policy.level_of(&ceiling.classification.name).as_ref()
-            != Some(&ceiling.classification)
-        {
-            return Err(format!(
-                "{} is not a level of the {} system",
-                ceiling.classification.name,
-                self.policy.name()
-            ));
-        }
-        Ok(())
-    }
-
-    pub(crate) fn install(
-        &self,
-        _turn: &maknae_authz_basic::LiveTurn<'_>,
-        ceiling: Ceiling,
-    ) -> Result<(), String> {
-        self.admits(&ceiling)?;
-        *self.ceiling.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(ceiling);
-        Ok(())
+    pub fn ceiling(&self) -> &Ceiling {
+        &self.ceiling
     }
 }
 
@@ -257,7 +223,7 @@ impl Authorizer for CeilingAuthorizer {
     }
 
     fn decide(&self, req: &Request) -> Verdict {
-        decide_ceiling(self.policy, &self.ceiling(), &req.action.0, label_of(req))
+        decide_ceiling(self.policy, &self.ceiling, &req.action.0, label_of(req))
     }
 
     fn backend_name(&self) -> String {
@@ -268,12 +234,6 @@ impl Authorizer for CeilingAuthorizer {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn install(op: &CeilingAuthorizer, c: Ceiling) -> Result<(), String> {
-        let lock = maknae_authz_basic::LiveTurnLock::hermetic();
-        let turn = lock.try_take().unwrap();
-        op.install(&turn, c)
-    }
     use maknae_classification_aus::AusPspf;
     use maknae_config::{BasicPolicy, Level};
     use maknae_security::{Action, Attributes, Context, Resource, Subject};
@@ -680,84 +640,6 @@ mod tests {
             aus.decide(&req("fs.read", Some(AttrValue::Str("SECRET".into())))),
             Verdict::Deny { .. }
         ));
-    }
-
-    #[test]
-    fn an_installed_ceiling_governs_the_next_decision() {
-        let op = CeilingAuthorizer::new(us_at("UNCLASSIFIED"), US);
-        let secret = req("fs.read", Some(AttrValue::Str("SECRET".into())));
-        assert!(matches!(op.decide(&secret), Verdict::Deny { .. }));
-        install(&op, us_at("SECRET")).unwrap();
-        assert_eq!(op.decide(&secret), Verdict::NotApplicable { note: None });
-        assert_eq!(op.ceiling().classification.name, "SECRET");
-    }
-
-    #[test]
-    fn a_level_of_another_system_is_refused_and_the_ceiling_stands() {
-        let op = CeilingAuthorizer::new(us_at("UNCLASSIFIED"), US);
-        let aus = at(AUS, &AUS.level_of("PROTECTED").unwrap());
-        let err = install(&op, aus).unwrap_err();
-        assert_eq!(err, "PROTECTED is not a level of the US system");
-        assert_eq!(op.ceiling().classification.name, "UNCLASSIFIED");
-    }
-
-    #[test]
-    fn a_level_whose_rank_the_system_does_not_give_it_is_refused() {
-        let op = CeilingAuthorizer::new(us_at("CONFIDENTIAL"), US);
-        let mut forged = us_at("UNCLASSIFIED");
-        forged.classification.rank = US.level_of("TOP SECRET").unwrap().rank;
-        assert!(install(&op, forged).is_err());
-        let mut renamed = us_at("TOP SECRET");
-        renamed.classification.name = "TOP-SECRET".into();
-        assert!(install(&op, renamed).is_err());
-        assert_eq!(op.ceiling().classification.name, "CONFIDENTIAL");
-    }
-
-    #[test]
-    fn a_ceiling_removed_from_the_file_falls_back_to_the_systems_lowest_level() {
-        for (p, top) in [
-            (US as &'static dyn ClassificationPolicy, "TOP SECRET"),
-            (AUS as &'static dyn ClassificationPolicy, "TOP SECRET"),
-        ] {
-            let op = CeilingAuthorizer::new(at(p, &p.level_of(top).unwrap()), p);
-            install(&op, Ceiling::baseline_for(p)).unwrap();
-            assert_eq!(op.ceiling().classification, p.unmarked());
-            assert!(matches!(
-                op.decide(&req("fs.read", Some(AttrValue::Str("SECRET".into())))),
-                Verdict::Deny { .. }
-            ));
-            assert_eq!(
-                op.decide(&req("fs.read", None)),
-                Verdict::NotApplicable { note: None }
-            );
-        }
-    }
-
-    #[test]
-    fn a_decision_in_flight_keeps_the_ceiling_it_read() {
-        let op = CeilingAuthorizer::new(us_at("UNCLASSIFIED"), US);
-        let held = op.ceiling();
-        install(&op, us_at("TOP SECRET")).unwrap();
-        assert_eq!(held.classification.name, "UNCLASSIFIED");
-        assert_eq!(op.ceiling().classification.name, "TOP SECRET");
-    }
-
-    #[test]
-    fn a_poisoned_holder_still_decides_and_installs() {
-        let op = std::sync::Arc::new(CeilingAuthorizer::new(us_at("UNCLASSIFIED"), US));
-        let poisoner = std::sync::Arc::clone(&op);
-        let _ = std::thread::spawn(move || {
-            let _guard = poisoner.ceiling.write().unwrap();
-            panic!("poison the holder");
-        })
-        .join();
-        assert!(op.ceiling.is_poisoned());
-        assert_eq!(op.ceiling().classification.name, "UNCLASSIFIED");
-        install(&op, us_at("SECRET")).unwrap();
-        assert_eq!(
-            op.decide(&req("fs.read", Some(AttrValue::Str("SECRET".into())))),
-            Verdict::NotApplicable { note: None }
-        );
     }
 
     /// #172: the egress verb is CONTENT-plane, so the ceiling operand decides

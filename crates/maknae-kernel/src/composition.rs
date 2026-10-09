@@ -46,7 +46,7 @@ pub struct Composition<B: Baseline> {
     /// The non-removable discretionary floor. A named field, not a vector
     /// element: there is no way to build this type without one.
     baseline: B,
-    /// The non-removable mandatory floor: the installed classification ceiling,
+    /// The non-removable mandatory floor: the booted classification ceiling,
     /// evaluated on every request.
     ceiling: CeilingAuthorizer,
     /// The view and providers the request path serves; installed only in the live turn.
@@ -129,13 +129,11 @@ impl<B: Baseline> Composition<B> {
         if !self.baseline.live_turn().holds(turn) {
             return Err("the live values are installed only in this composition's own turn".into());
         }
-        self.ceiling.admits(&values.ceiling)?;
         #[cfg(test)]
         assert!(!self
             .panic_on_install
             .load(std::sync::atomic::Ordering::SeqCst));
         self.baseline.install_principal(turn, values.principal)?;
-        self.ceiling.install(turn, values.ceiling)?;
         self.live.install(turn, values.view, values.providers);
         Ok(())
     }
@@ -555,12 +553,10 @@ mod tests {
 
     pub(crate) fn install<B: Baseline>(
         c: &Composition<B>,
-        ceiling: Ceiling,
         principal: Principal,
     ) -> Result<(), String> {
         c.install_live_within(
             crate::live::LiveValues {
-                ceiling,
                 principal,
                 view: Default::default(),
                 providers: None,
@@ -581,43 +577,29 @@ mod tests {
     }
 
     #[test]
-    fn an_installed_live_baseline_governs_the_next_decision_through_both_operands() {
+    fn an_installed_principal_governs_the_next_decision_and_the_ceiling_stands() {
         let (g, basic) = fixture("live-install", READ_POLICY, None);
-        let c = Composition::new(basic, ceiling(Ceiling::baseline_for(US)));
+        let c = Composition::new(basic, ceiling(secret()));
         let marked = permitted_read_marked(&g.0, Some("SECRET"));
-        assert!(matches!(c.decide(&marked), Verdict::Deny { .. }));
         let euid = nix::unistd::geteuid().as_raw();
-        install(&c, secret(), enrolled(euid)).unwrap();
         assert!(matches!(c.decide(&marked), Verdict::Permit { .. }));
-        assert_eq!(c.ceiling().ceiling().classification.name, "SECRET");
-        install(&c, secret(), enrolled(other_uid())).unwrap();
+        install(&c, enrolled(other_uid())).unwrap();
         assert!(!matches!(c.decide(&marked), Verdict::Permit { .. }));
         assert_eq!(c.baseline().principal(), enrolled(other_uid()));
-        install(&c, Ceiling::baseline_for(US), enrolled(euid)).unwrap();
-        assert!(matches!(c.decide(&marked), Verdict::Deny { .. }));
+        install(&c, enrolled(euid)).unwrap();
+        assert!(matches!(c.decide(&marked), Verdict::Permit { .. }));
+        assert_eq!(c.ceiling().ceiling().classification.name, "SECRET");
+        let (g2, basic) = fixture("live-install-low", READ_POLICY, None);
+        let low = Composition::new(basic, ceiling(Ceiling::baseline_for(US)));
+        install(&low, enrolled(euid)).unwrap();
         assert!(matches!(
-            c.decide(&permitted_read(&g.0)),
-            Verdict::Permit { .. }
+            low.decide(&permitted_read_marked(&g2.0, Some("SECRET"))),
+            Verdict::Deny { ref reason } if reason.starts_with("ceiling: ")
         ));
     }
 
-    #[test]
-    fn a_refused_ceiling_installs_neither_operand() {
-        use maknae_classification_aus::AusPspf;
-        let (_g, basic) = fixture("live-refused", READ_POLICY, None);
-        let euid = nix::unistd::geteuid().as_raw();
-        let c = Composition::new(basic, ceiling(Ceiling::baseline_for(US)));
-        let mut aus = Ceiling::baseline_for(&AusPspf);
-        aus.classification = AusPspf.level_of("PROTECTED").unwrap();
-        let err = install(&c, aus, enrolled(other_uid())).unwrap_err();
-        assert_eq!(err, "PROTECTED is not a level of the US system");
-        assert_eq!(c.baseline().principal(), enrolled(euid));
-        assert_eq!(c.ceiling().ceiling().classification, US.unmarked());
-    }
-
-    /// The old baseline grants the principal and refuses SECRET content; the new one
-    /// admits SECRET content and grants someone else. Only a decision that mixed the
-    /// old principal with the new ceiling would permit.
+    /// The old baseline grants the principal; the new one grants someone else. A
+    /// decision in flight finishes on the old principal, and the install waits for it.
     #[test]
     fn a_decision_in_flight_during_an_install_sees_one_baseline_wholly() {
         use maknae_authz_basic::EvaluationGate;
@@ -629,7 +611,7 @@ mod tests {
             release: std::sync::Barrier::new(2),
         });
         basic.park_evaluations(gate.clone());
-        let c = std::sync::Arc::new(Composition::new(basic, ceiling(Ceiling::baseline_for(US))));
+        let c = std::sync::Arc::new(Composition::new(basic, ceiling(secret())));
         let marked = permitted_read_marked(&g.0, Some("SECRET"));
         let (decided_tx, decided) = channel();
         {
@@ -655,7 +637,7 @@ mod tests {
         {
             let c = c.clone();
             std::thread::spawn(move || {
-                let _ = installed_tx.send(install(&c, secret(), enrolled(other_uid())));
+                let _ = installed_tx.send(install(&c, enrolled(other_uid())));
             });
         }
         assert!(
@@ -666,68 +648,29 @@ mod tests {
         let verdict = decided
             .recv_timeout(Duration::from_secs(5))
             .expect("the decision finishes");
-        assert!(
-            matches!(verdict, Verdict::Deny { ref reason } if reason.starts_with("ceiling: ")),
-            "{verdict:?}"
-        );
+        assert!(matches!(verdict, Verdict::Permit { .. }), "{verdict:?}");
         installed
             .recv_timeout(Duration::from_secs(5))
             .expect("the install finishes")
             .unwrap();
-        assert_eq!(c.ceiling().ceiling().classification.name, "SECRET");
         assert_eq!(c.baseline().principal(), enrolled(other_uid()));
     }
 
     #[test]
-    fn an_install_refused_on_any_value_installs_none() {
+    fn an_install_in_a_foreign_turn_installs_nothing() {
         let (_g, basic) = fixture("live-whole", READ_POLICY, None);
         let c = Composition::new(basic, ceiling(Ceiling::baseline_for(US)));
-        let before = (
-            c.ceiling().ceiling(),
-            c.baseline().principal(),
-            c.live().generation(),
-        );
+        let before = (c.baseline().principal(), c.live().generation());
         let foreign = maknae_authz_basic::LiveTurnLock::hermetic();
         let turn = foreign.try_take().unwrap();
         let values = crate::live::LiveValues {
-            ceiling: secret(),
             principal: enrolled(other_uid()),
             view: std::collections::BTreeMap::from([("core".into(), Default::default())]),
             providers: None,
         };
         assert!(c.install_in(&turn, values).is_err());
-        assert!(
-            *c.ceiling().ceiling() == *before.0,
-            "the ceiling was installed"
-        );
-        assert_eq!(c.baseline().principal(), before.1);
-        assert_eq!(c.live().generation(), before.2);
-    }
-
-    #[test]
-    fn a_ceiling_the_system_does_not_rank_installs_no_principal() {
-        let (_g, basic) = fixture("live-unranked", READ_POLICY, None);
-        let c = Composition::new(basic, ceiling(Ceiling::baseline_for(US)));
-        let before = (c.baseline().principal(), c.live().generation());
-        let mut unranked = Ceiling::baseline_for(US);
-        unranked.classification = maknae_classification_aus::AusPspf
-            .level_of("PROTECTED")
-            .unwrap();
-        let values = crate::live::LiveValues {
-            ceiling: unranked,
-            principal: enrolled(other_uid()),
-            view: std::collections::BTreeMap::from([("core".into(), Default::default())]),
-            providers: None,
-        };
-        let turn = c.baseline().live_turn().try_take().unwrap();
-        assert!(c.install_in(&turn, values).is_err());
-        assert_eq!(
-            c.baseline().principal(),
-            before.0,
-            "the principal was installed"
-        );
+        assert_eq!(c.baseline().principal(), before.0);
         assert_eq!(c.live().generation(), before.1);
-        assert_eq!(*c.ceiling().ceiling(), Ceiling::baseline_for(US));
     }
 
     #[test]
@@ -750,7 +693,6 @@ mod tests {
         held.recv_timeout(Duration::from_secs(5))
             .expect("the turn is held");
         let values = crate::live::LiveValues {
-            ceiling: secret(),
             principal: enrolled(other_uid()),
             view: std::collections::BTreeMap::from([("core".into(), Default::default())]),
             providers: None,
@@ -777,7 +719,6 @@ mod tests {
         let c = Composition::new(basic, ceiling(Ceiling::baseline_for(US)));
         let before = c.baseline().principal();
         let values = crate::live::LiveValues {
-            ceiling: secret(),
             principal: enrolled(other_uid()),
             view: std::collections::BTreeMap::from([("core".into(), Default::default())]),
             providers: None,

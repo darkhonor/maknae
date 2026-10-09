@@ -1535,7 +1535,6 @@ async fn a_prompt_admitted_before_a_live_install_and_decided_after_it_is_refused
     let pdp = InstallsAtTheFirstDecision {
         pdp: composition,
         next: Mutex::new(Some(maknae_kernel::LiveValues {
-            ceiling: maknae_config::Ceiling::baseline_for(&maknae_config::BasicPolicy),
             principal: peer,
             view: Default::default(),
             providers: providers_named(&["anthropic"]),

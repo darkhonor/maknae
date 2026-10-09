@@ -8808,7 +8808,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
     }
 
     #[test]
-    fn a_pending_change_survives_a_restart_unapplied() {
+    fn a_ceiling_edit_survives_a_restart_unapplied_and_pending_restart() {
         let _g = env_lock();
         let d = fixture("pending");
         write_yaml(
@@ -8848,7 +8848,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
                 pending[0].1
             );
             assert!(
-                pending[0].1.ends_with("(apply: live; sections: core)"),
+                pending[0].1.ends_with("(apply: restart; sections: core)"),
                 "{}",
                 pending[0].1
             );
@@ -8856,6 +8856,53 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         }
         assert_eq!(hashes[0], hashes[1]);
         assert_eq!(revision_of_store(&d), revision_after_seed);
+    }
+
+    /// The store as a ceiling accept leaves it: the next start runs the accepted
+    /// ceiling whatever the file says, and a file that differs is pending restart.
+    #[test]
+    fn the_start_after_a_ceiling_accept_runs_the_accepted_ceiling() {
+        let _g = env_lock();
+        let high = fixture("ceiling-accepted-src");
+        let at = |d: &Dir, core: &str| {
+            write_yaml(
+                d,
+                core,
+                "https://v.example:8200",
+                &d.0.join("audit.jsonl"),
+                "",
+            )
+        };
+        at(&high, SECRET_CEILING);
+        let _ = boot(&high);
+        let d = fixture("ceiling-accepted");
+        at(&d, UNCLASSIFIED_CEILING);
+        let _ = boot(&d);
+        let mut acc = accepted(&d);
+        acc.sections
+            .insert("core".into(), accepted(&high).sections["core"].clone());
+        acc.sha256 = crate::baseline::accepted_digest(&acc.sections.clone().into());
+        acc.ceiling = "SECRET".into();
+        rewrite_baseline(&d, Some(&acc));
+        for (file, pending) in [(UNCLASSIFIED_CEILING, 1), (SECRET_CEILING, 0)] {
+            at(&d, file);
+            let before = trail_of(&d, "audit.jsonl").len();
+            let _ = boot(&d);
+            let recs = trail_of(&d, "audit.jsonl")[before..].to_vec();
+            assert!(
+                composition(&recs).contains("ceiling: SECRET"),
+                "{}",
+                composition(&recs)
+            );
+            let b = baseline_records(&recs);
+            assert_eq!(b.len(), pending, "{b:?}");
+            assert!(
+                b.iter()
+                    .all(|(_, why)| why.ends_with("(apply: restart; sections: core)")),
+                "{b:?}"
+            );
+            assert_eq!(accepted(&d).ceiling, "SECRET");
+        }
     }
 
     #[test]
@@ -11167,6 +11214,19 @@ mod baseline_accept_tests {
         }
     }
 
+    fn other_uid() -> u32 {
+        nix::unistd::geteuid().as_raw().wrapping_add(1)
+    }
+
+    /// A live change: the principal moves to another uid.
+    fn write_live(fx: &Fx) {
+        fx.write_yaml_principal(other_uid(), "");
+    }
+
+    fn principal_uid(fx: &Fx) -> u32 {
+        fx.composition().baseline().principal().uid
+    }
+
     fn ceiling_name(fx: &Fx) -> String {
         fx.composition()
             .ceiling()
@@ -11177,34 +11237,45 @@ mod baseline_accept_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_live_ceiling_accept_governs_the_next_decision() {
-        let fx = Fx::with_core("live-ceiling", &unclassified()).await;
-        let refused =
-            maknae_security::Authorizer::decide(fx.composition().ceiling(), &secret_read());
-        assert!(
-            matches!(refused, maknae_security::Verdict::Deny { .. }),
-            "{refused:?}"
-        );
-        fx.write_yaml(SECRET, "");
-        let shown = fx.show().await;
-        assert_eq!(
-            (shown.state.as_str(), shown.apply.as_str()),
-            ("pending", "live")
-        );
-        let view = accepted(fx.accept(&shown.hash).await);
-        assert_eq!(
-            (view.state.as_str(), view.apply.as_str()),
-            ("accepted", "live")
-        );
-        assert_eq!(ceiling_name(&fx), "SECRET");
-        assert_eq!(
-            maknae_security::Authorizer::decide(fx.composition().ceiling(), &secret_read()),
-            maknae_security::Verdict::NotApplicable { note: None }
-        );
-        assert_eq!(fx.drain(), Drain::Serving);
-        assert_eq!(fx.stored().unwrap().ceiling, "SECRET");
-        assert!(fx.status_lines().is_empty());
-        assert_eq!(fx.show().await.state, "none");
+    async fn a_ceiling_accept_applies_by_restart_and_installs_nothing_live() {
+        let unclassified = unclassified();
+        for (tag, core) in [
+            ("add-ceiling", ""),
+            ("raise-ceiling", unclassified.as_str()),
+        ] {
+            let opts = Opts {
+                core,
+                ..Opts::default()
+            };
+            let fx = fixture_with(tag, opts).await;
+            fx.write_yaml(SECRET, "");
+            let shown = fx.show().await;
+            assert_eq!(
+                (shown.state.as_str(), shown.apply.as_str()),
+                ("pending", "restart"),
+                "{tag}"
+            );
+            let view = accepted(fx.accept(&shown.hash).await);
+            assert_eq!(
+                (view.state.as_str(), view.apply.as_str()),
+                ("accepted", "restart"),
+                "{tag}"
+            );
+            assert_eq!(fx.drain(), Drain::Applied, "{tag}");
+            assert!(matches!(
+                crate::handler::after_drain(ServeOutcome::GracefulShutdown, fx.drain()),
+                ServeOutcome::ApplyByRestart
+            ));
+            assert_eq!(ceiling_name(&fx), "UNCLASSIFIED", "{tag}");
+            assert!(
+                matches!(
+                    maknae_security::Authorizer::decide(fx.composition().ceiling(), &secret_read()),
+                    maknae_security::Verdict::Deny { .. }
+                ),
+                "{tag}: the running ceiling still refuses SECRET content"
+            );
+            assert_eq!(fx.stored().unwrap().ceiling, "SECRET", "{tag}");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11264,8 +11335,8 @@ mod baseline_accept_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_accept_is_written_ahead() {
-        let fx = Fx::with_core("ahead", &unclassified()).await;
-        fx.write_yaml(SECRET, "");
+        let fx = Fx::with_baseline("ahead").await;
+        write_live(&fx);
         let shown = fx.show().await;
         let before = fx.store_sha();
         accepted(fx.accept(&shown.hash).await);
@@ -11279,7 +11350,7 @@ mod baseline_accept_tests {
         let intent = at(
             GRAPH_BASELINE_ACTION,
             &format!(
-                "accept intent recorded (operator): sha256:{short}; apply: live; sections: core"
+                "accept intent recorded (operator): sha256:{short}; apply: live; sections: principal"
             ),
         );
         let transition = at(GRAPH_TRANSITION_ACTION, "intent recorded (operator)");
@@ -11300,8 +11371,8 @@ mod baseline_accept_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_failed_intent_persists_nothing() {
-        let fx = Fx::with_core("failed-intent", &unclassified()).await;
-        fx.write_yaml(SECRET, "");
+        let fx = Fx::with_baseline("failed-intent").await;
+        write_live(&fx);
         let shown = fx.show().await;
         let before = fx.store_sha();
         fx.refuse(GRAPH_BASELINE_ACTION);
@@ -11312,7 +11383,7 @@ mod baseline_accept_tests {
         );
         assert_eq!(fx.store_sha(), before);
         assert_eq!(fx.drain(), Drain::Serving);
-        assert_eq!(ceiling_name(&fx), "UNCLASSIFIED");
+        assert_eq!(principal_uid(&fx), nix::unistd::geteuid().as_raw());
         assert_eq!(fx.status_lines().len(), 0, "status was not published");
     }
 
@@ -11501,8 +11572,8 @@ mod baseline_accept_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_reload_after_a_live_accept_keeps_the_accepted_baseline() {
-        let fx = Fx::with_core("reload-after-accept", &unclassified()).await;
-        fx.write_yaml(SECRET, "");
+        let fx = Fx::with_baseline("reload-after-accept").await;
+        write_live(&fx);
         let shown = fx.show().await;
         accepted(fx.accept(&shown.hash).await);
         fx.write_bindings(ROOT_ADMIN_OTHER);
@@ -11510,7 +11581,8 @@ mod baseline_accept_tests {
         fx.reloader.run().await.unwrap();
         assert_ne!(fx.store_sha(), "", "the reload persisted");
         let stored = fx.stored().unwrap();
-        assert_eq!((stored.ceiling.as_str(), stored.sha256), ("SECRET", before));
+        assert_eq!(stored.sha256, before);
+        assert!(stored.sections["principal"].contains(&other_uid().to_string()));
         assert!(fx.status_lines().is_empty());
     }
 
@@ -11634,8 +11706,8 @@ mod baseline_accept_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_accept_waits_for_a_reload_and_gives_up_after_the_bound() {
-        let fx = Fx::with_core("busy", &unclassified()).await;
-        fx.write_yaml(SECRET, "");
+        let fx = Fx::with_baseline("busy").await;
+        write_live(&fx);
         let shown = fx.show().await;
         let held = fx.reloader.lock.lock().await;
         let got = tokio::time::timeout(Duration::from_secs(3), fx.accept(&shown.hash))
@@ -11652,7 +11724,7 @@ mod baseline_accept_tests {
             ),
             "{got:?}"
         );
-        assert_eq!(ceiling_name(&fx), "UNCLASSIFIED");
+        assert_eq!(principal_uid(&fx), nix::unistd::geteuid().as_raw());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11725,8 +11797,8 @@ mod baseline_accept_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_live_accept_refused_the_turn_by_a_decision_persists_nothing() {
-        let fx = Fx::with_core("turn-busy", &unclassified()).await;
-        fx.write_yaml(SECRET, "");
+        let fx = Fx::with_baseline("turn-busy").await;
+        write_live(&fx);
         let shown = fx.show().await;
         assert_eq!(shown.apply, "live");
         let before = fx.store_sha();
@@ -11759,7 +11831,7 @@ mod baseline_accept_tests {
         );
         assert_eq!(fx.store_sha(), before);
         assert_eq!(fx.drain(), Drain::Serving);
-        assert_eq!(ceiling_name(&fx), "UNCLASSIFIED");
+        assert_eq!(principal_uid(&fx), nix::unistd::geteuid().as_raw());
         assert!(!fx
             .seen()
             .iter()
@@ -11767,15 +11839,14 @@ mod baseline_accept_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn no_decision_sees_the_old_ceiling_once_a_live_accept_has_persisted() {
+    async fn no_decision_sees_the_old_principal_once_a_live_accept_has_persisted() {
         let opts = Opts {
-            core: &unclassified(),
             delay: Duration::from_millis(30),
             bound: Duration::from_secs(1),
             ..Opts::default()
         };
         let fx = Arc::new(fixture_with("turn-held", opts).await);
-        fx.write_yaml(SECRET, "");
+        write_live(&fx);
         let shown = fx.show().await;
         let before = fx.store_sha();
         let (held_tx, held) = std::sync::mpsc::channel();
@@ -11797,10 +11868,10 @@ mod baseline_accept_tests {
                 while !stop.load(std::sync::atomic::Ordering::SeqCst) {
                     let persisted = fx.store_sha() != before;
                     let turn = fx.composition().hold_live_turn();
-                    let name = ceiling_name(&fx);
+                    let uid = principal_uid(&fx);
                     drop(turn);
                     decided += 1;
-                    if persisted && name == "UNCLASSIFIED" {
+                    if persisted && uid != other_uid() {
                         stale += 1;
                     }
                     std::thread::sleep(Duration::from_micros(200));
@@ -11816,16 +11887,16 @@ mod baseline_accept_tests {
         assert!(decided > 0);
         assert_eq!(
             stale, 0,
-            "a decision ran on the old ceiling after the persist"
+            "a decision ran on the old principal after the persist"
         );
-        assert_eq!(ceiling_name(&fx), "SECRET");
+        assert_eq!(principal_uid(&fx), other_uid());
         assert_eq!(fx.drain(), Drain::Serving);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_live_accept_whose_checkpoint_fails_applies_by_restart() {
-        let fx = Fx::with_core("checkpoint-fails", &unclassified()).await;
-        fx.write_yaml(SECRET, "");
+        let fx = Fx::with_baseline("checkpoint-fails").await;
+        write_live(&fx);
         let shown = fx.show().await;
         fx.refuse(CHECKPOINT_ACTION);
         let view = accepted(fx.accept(&shown.hash).await);
@@ -11835,8 +11906,12 @@ mod baseline_accept_tests {
             crate::handler::after_drain(ServeOutcome::GracefulShutdown, fx.drain()),
             ServeOutcome::ApplyByRestart
         ));
-        assert_eq!(ceiling_name(&fx), "UNCLASSIFIED", "nothing installed live");
-        assert_eq!(fx.stored().unwrap().ceiling, "SECRET");
+        assert_eq!(
+            principal_uid(&fx),
+            nix::unistd::geteuid().as_raw(),
+            "nothing installed live"
+        );
+        assert!(fx.stored().unwrap().sections["principal"].contains(&other_uid().to_string()));
         let outcome = fx
             .seen()
             .into_iter()
@@ -11851,8 +11926,8 @@ mod baseline_accept_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_live_install_that_panics_applies_by_restart() {
-        let fx = Fx::with_core("install-panics", &unclassified()).await;
-        fx.write_yaml(SECRET, "");
+        let fx = Fx::with_baseline("install-panics").await;
+        write_live(&fx);
         let shown = fx.show().await;
         fx.composition()
             .panic_on_install
@@ -11864,7 +11939,7 @@ mod baseline_accept_tests {
             crate::handler::after_drain(ServeOutcome::GracefulShutdown, fx.drain()),
             ServeOutcome::ApplyByRestart
         ));
-        assert_eq!(ceiling_name(&fx), "UNCLASSIFIED");
+        assert_eq!(principal_uid(&fx), nix::unistd::geteuid().as_raw());
         let outcome = fx
             .seen()
             .into_iter()
@@ -11879,8 +11954,8 @@ mod baseline_accept_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_live_accept_whose_outcome_is_not_recorded_applies_by_restart() {
-        let fx = Fx::with_core("outcome-fails", &unclassified()).await;
-        fx.write_yaml(SECRET, "");
+        let fx = Fx::with_baseline("outcome-fails").await;
+        write_live(&fx);
         let shown = fx.show().await;
         fx.reloader.sink.stall_when(is_accept_outcome);
         let view = accepted(fx.accept(&shown.hash).await);
@@ -11915,8 +11990,8 @@ mod baseline_accept_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_finished_live_accept_leaves_the_next_accepts_drain_alone() {
-        let fx = Arc::new(Fx::with_core("guard-turn", &unclassified()).await);
-        fx.write_yaml(SECRET, "");
+        let fx = Arc::new(Fx::with_baseline("guard-turn").await);
+        write_live(&fx);
         let shown = fx.show().await;
         assert_eq!(shown.apply, "live");
         fx.reloader.sink.stall_when(is_accept_outcome);
