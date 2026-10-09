@@ -2753,7 +2753,18 @@ mod tests {
         let _g = PUBLISH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let d = dir(0o750);
         let a = anchor_at(d.path(), "cfg");
-        let (uid, gid) = ids();
+        let (uid, egid) = ids();
+        let inherited = std::fs::metadata(&a.path).unwrap().gid();
+        let groups = std::process::Command::new("id").arg("-G").output().unwrap();
+        let other = String::from_utf8(groups.stdout)
+            .unwrap()
+            .split_whitespace()
+            .map(|g| g.parse::<u32>().unwrap())
+            .find(|g| *g != egid && *g != inherited);
+        let gid = other.unwrap_or_else(|| {
+            println!("gid leg skipped: no supplementary group differs from the egid and the directory's gid");
+            egid
+        });
         let prior = nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o077));
         let r = a.publish_owned(Path::new("f"), None, b"x", m(0o640), FileOwner { uid, gid });
         nix::sys::stat::umask(prior);
