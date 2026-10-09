@@ -3256,7 +3256,7 @@ use crate::identity_report::GRAPH_IDENTITY_ACTION;
 
 /// Every `graph.*` pseudo-action this file emits; no verb's action string may equal one.
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) const GRAPH_PSEUDO_ACTIONS: [&str; 10] = [
+pub(crate) const GRAPH_PSEUDO_ACTIONS: [&str; 11] = [
     GRAPH_SEED_ACTION,
     GRAPH_RESEED_ACTION,
     GRAPH_REJECTED_ACTION,
@@ -3267,6 +3267,7 @@ pub(crate) const GRAPH_PSEUDO_ACTIONS: [&str; 10] = [
     GRAPH_RELOAD_ACTION,
     GRAPH_IDENTITY_ACTION,
     GRAPH_BASELINE_ACTION,
+    GRAPH_SYNC_ACTION,
 ];
 
 /// The fields every peer-less boot record shares (spec §5.3).
@@ -5903,6 +5904,11 @@ pub(crate) mod baseline_stub {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_sync_records_are_a_graph_pseudo_action() {
+        assert!(GRAPH_PSEUDO_ACTIONS.contains(&"graph.sync"));
+    }
 
     #[test]
     fn the_accept_journal_says_applied_only_once_its_outcome_is_recorded() {
