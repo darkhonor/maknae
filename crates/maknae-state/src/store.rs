@@ -11,6 +11,7 @@ use maknae_graph::identity::{self, Extracted, IdentityLayer};
 use maknae_graph::kernel::{ADVERSARY, CONFIG_SOURCE, ROLE, SCHEMA};
 use maknae_graph::record::{GraphSpace, ProvenanceKind};
 use maknae_graph::schema::CompiledSet;
+use maknae_graph::sync::SyncBase;
 use maknae_io::{
     open_anchor, Anchor, AnchorLock, AnchorRequired, IoError, IoKind, Mode, StrategyPref,
     TargetRequired, Zeroizing,
@@ -22,7 +23,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-pub use maknae_config::state::{MARKER_FILE, MARKER_MAX_BYTES, STATE_DIR, STORE_FILE};
+pub use maknae_config::state::{MARKER_FILE, MARKER_MAX_BYTES, MIRROR_FILE, STATE_DIR, STORE_FILE};
 
 pub const REJECTED_PREFIX: &str = "kernel.graph.rejected.";
 pub const MAX_STORE_BYTES: u64 = 64 << 20;
@@ -34,6 +35,7 @@ pub const ANCHOR_TRANSITIONED: &str = "transitioned";
 pub const INITIATOR_ROOT_FILE: &str = "root-file";
 pub const INITIATOR_SEED: &str = "seed";
 pub const INITIATOR_OPERATOR: &str = "operator";
+pub const INITIATOR_KERNEL: &str = "kernel";
 
 const STORE_MODE: Mode = Mode(0o600);
 
@@ -64,6 +66,10 @@ pub enum StoreError {
         seen: Option<String>,
     },
     BaselineUnrecorded,
+    SyncUnseen,
+    SyncBaseChanged,
+    SyncAbsent,
+    SyncUnrecorded,
 }
 
 impl fmt::Display for StoreError {
@@ -105,6 +111,16 @@ impl fmt::Display for StoreError {
             Self::BaselineUnrecorded => f.write_str(
                 "the baseline would change with no recorded cause; nothing was applied",
             ),
+            Self::SyncUnseen => f.write_str(
+                "the store's sync base is not the one this start merged against; nothing was applied",
+            ),
+            Self::SyncBaseChanged => f.write_str(
+                "a live identity edit would change the sync base; nothing was applied",
+            ),
+            Self::SyncAbsent => f.write_str("the store holds no sync base; nothing was applied"),
+            Self::SyncUnrecorded => {
+                f.write_str("a live identity edit was not recorded; nothing was applied")
+            }
         }
     }
 }
@@ -148,7 +164,11 @@ pub fn remedy(e: &StoreError) -> Remedy {
         | StoreError::StaleRevision { .. }
         | StoreError::BindingsRefused(_)
         | StoreError::BaselineUnseen { .. }
-        | StoreError::BaselineUnrecorded => Remedy::Investigate,
+        | StoreError::BaselineUnrecorded
+        | StoreError::SyncUnseen
+        | StoreError::SyncBaseChanged
+        | StoreError::SyncAbsent
+        | StoreError::SyncUnrecorded => Remedy::Investigate,
     }
 }
 
@@ -167,6 +187,8 @@ pub struct StateDir {
     store_revision: Mutex<u64>,
     #[cfg(feature = "hermetic-test-seam")]
     fail_next_sync: AtomicBool,
+    #[cfg(feature = "hermetic-test-seam")]
+    fail_next_mirror: AtomicBool,
 }
 
 struct Persisted {
@@ -197,6 +219,31 @@ impl StateDir {
         self.fail_next_sync.store(true, Ordering::SeqCst);
     }
 
+    /// Test seam: the next mirror publish fails before anything is written.
+    #[cfg(feature = "hermetic-test-seam")]
+    #[doc(hidden)]
+    pub fn fail_next_mirror_publish(&self) {
+        self.fail_next_mirror.store(true, Ordering::SeqCst);
+    }
+
+    pub fn publish_mirror(&self, bytes: &[u8]) -> Result<(), IoError> {
+        #[cfg(feature = "hermetic-test-seam")]
+        if self.fail_next_mirror.swap(false, Ordering::SeqCst) {
+            return Err(IoError::Io {
+                path: Path::new(MIRROR_FILE).to_path_buf(),
+                kind: IoKind::Other { raw: 5 },
+            });
+        }
+        self.anchor
+            .publish(Path::new(MIRROR_FILE), None, bytes, STORE_MODE)
+            .map(|_| ())
+    }
+
+    /// Not found is success.
+    pub fn remove_mirror(&self) -> Result<(), IoError> {
+        self.anchor.remove(Path::new(MIRROR_FILE), None).map(|_| ())
+    }
+
     fn open_as(path: &Path, owner: u32, marker_owner: u32) -> Result<StateDir, StoreError> {
         let anchor = open_anchor(
             path,
@@ -219,6 +266,8 @@ impl StateDir {
             store_revision: Mutex::new(0),
             #[cfg(feature = "hermetic-test-seam")]
             fail_next_sync: AtomicBool::new(false),
+            #[cfg(feature = "hermetic-test-seam")]
+            fail_next_mirror: AtomicBool::new(false),
         })
     }
 
@@ -375,8 +424,6 @@ pub struct BootReport {
     pub identity_transition: bool,
     pub baseline_transition: bool,
     pub released: Vec<identity::Released>,
-    /// The enrolled principal's uid, when this boot's transition ended explicit bindings.
-    pub principal_admin: Option<u32>,
     /// The last store write's failed directory sync: it is in place, perhaps not durable.
     pub durability_error: Option<String>,
 }
@@ -399,6 +446,13 @@ pub struct BootInputs<'a> {
     pub accepted_seen: Option<[u8; 32]>,
     /// Written ahead of a persist that changes the baseline, one record each.
     pub baseline_events: &'a [String],
+    /// The merged identity sync state this boot persists.
+    pub sync: &'a SyncBase,
+    /// The `SyncBase` the caller merged against; `None` when it read none.
+    pub sync_seen: Option<&'a SyncBase>,
+    /// Written ahead of a persist that changes the sync base, one record each.
+    pub sync_events: &'a [String],
+    pub sync_kind: maknae_config::SyncKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -440,13 +494,6 @@ pub trait BootAudit {
         revision: u64,
         released: &[identity::Released],
     ) -> impl Future<Output = Result<(), StoreError>> + Send;
-    /// Written ahead of the persist of a transition that ends explicit bindings, which
-    /// makes the principal `uid` admin; an append failure refuses as `released`'s does.
-    fn principal_admin(
-        &mut self,
-        revision: u64,
-        uid: u32,
-    ) -> impl Future<Output = Result<(), StoreError>> + Send;
     /// Written ahead of a persist that changes the baseline; an append failure refuses
     /// as `released`'s does.
     fn baseline(
@@ -454,6 +501,55 @@ pub trait BootAudit {
         revision: u64,
         events: &[String],
     ) -> impl Future<Output = Result<(), StoreError>> + Send;
+    /// Written ahead of a transition that changes the sync base; an append failure
+    /// refuses as `baseline`'s does.
+    fn sync(
+        &mut self,
+        revision: u64,
+        events: &[String],
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+}
+
+/// Who a boot transition is attributed to: the kernel when it only creates or adopts
+/// the sync base, root's file otherwise.
+pub fn transition_initiator(
+    kind: maknae_config::SyncKind,
+    identity_changed: bool,
+    baseline_changed: bool,
+    stale: bool,
+) -> ProvenanceKind {
+    use maknae_config::SyncKind::{Adopted, Created};
+    let pure = !(identity_changed || baseline_changed || stale);
+    if pure && matches!(kind, Created | Adopted) {
+        ProvenanceKind::Kernel
+    } else {
+        ProvenanceKind::RootFile
+    }
+}
+
+pub fn initiator_name(p: ProvenanceKind) -> &'static str {
+    match p {
+        ProvenanceKind::Compiled => "compiled",
+        ProvenanceKind::Seed => INITIATOR_SEED,
+        ProvenanceKind::RootFile => INITIATOR_ROOT_FILE,
+        ProvenanceKind::Operator => INITIATOR_OPERATOR,
+        ProvenanceKind::Kernel => INITIATOR_KERNEL,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveInitiator {
+    Operator,
+    Kernel,
+}
+
+impl LiveInitiator {
+    pub fn provenance(self) -> ProvenanceKind {
+        match self {
+            Self::Operator => ProvenanceKind::Operator,
+            Self::Kernel => ProvenanceKind::Kernel,
+        }
+    }
 }
 
 fn newer_envelope(v: u16) -> bool {
@@ -528,6 +624,7 @@ fn decode_store(file: &[u8], key: &WrappingKey) -> Result<Decoded, StoreError> {
 fn build(
     layer: &IdentityLayer,
     baseline: Option<&BaselineLayer>,
+    sync: Option<&SyncBase>,
     inputs: &BootInputs<'_>,
     revision: u64,
     initiator: ProvenanceKind,
@@ -535,7 +632,7 @@ fn build(
     identity::build(
         layer,
         baseline,
-        None,
+        sync,
         inputs.compiled,
         inputs.vocabulary_sha256,
         revision,
@@ -649,15 +746,35 @@ pub fn peek_baseline(
     }
 }
 
+/// Reads the stored sync base before anything is appended; writes nothing.
+pub fn peek_sync(dir: &StateDir, key: &WrappingKey) -> Result<Option<SyncBase>, StoreError> {
+    match dir.read_store() {
+        Ok(None) => Ok(None),
+        Ok(Some(file)) => decode_store(&file, key).map(|d| d.extracted.sync),
+        Err(e) => Err(StoreError::StoreFileRefused(e.to_string())),
+    }
+}
+
 fn is_canonical(
     graph: &Graph,
     layer: &IdentityLayer,
     baseline: Option<&BaselineLayer>,
+    sync: Option<&SyncBase>,
     inputs: &BootInputs<'_>,
 ) -> bool {
     graph
         .lookup(CONFIG_SOURCE, &layer.source)
-        .and_then(|n| build(layer, baseline, inputs, graph.revision(), n.provenance.kind).ok())
+        .and_then(|n| {
+            build(
+                layer,
+                baseline,
+                sync,
+                inputs,
+                graph.revision(),
+                n.provenance.kind,
+            )
+            .ok()
+        })
         .is_some_and(|rebuilt| rebuilt == *graph)
 }
 
@@ -675,12 +792,15 @@ async fn load(
         extracted,
         facts,
     } = decoded;
-    if let Some(m) = identity::drops_explicit_bindings(
-        &extracted.layer,
-        inputs.identity,
-        inputs.bindings_missing,
-    ) {
-        return Err(StoreError::BindingsRefused(m));
+    let stored_sync = extracted.sync;
+    if stored_sync.is_none() {
+        if let Some(m) = identity::drops_explicit_bindings(
+            &extracted.layer,
+            inputs.identity,
+            inputs.bindings_missing,
+        ) {
+            return Err(StoreError::BindingsRefused(m));
+        }
     }
     let stored_baseline = extracted.baseline;
     if stored_baseline.as_ref().map(|b| b.sha256) != inputs.accepted_seen {
@@ -688,6 +808,9 @@ async fn load(
             stored: stored_baseline.as_ref().map(|b| identity::hex(&b.sha256)),
             seen: inputs.accepted_seen.map(|d| identity::hex(&d)),
         });
+    }
+    if stored_sync.as_ref() != inputs.sync_seen {
+        return Err(StoreError::SyncUnseen);
     }
     let to = inputs.vocabulary_sha256;
     let mut layer = extracted.layer;
@@ -703,6 +826,7 @@ async fn load(
             let next = build(
                 &migrated,
                 stored_baseline.as_ref(),
+                stored_sync.as_ref(),
                 inputs,
                 revision,
                 ProvenanceKind::Kernel,
@@ -712,21 +836,35 @@ async fn load(
         }
     };
     let file = identity::carry_forward(inputs.identity, inputs.unresolved_adversaries, &layer).0;
-    let stale =
-        migration.is_none() && !is_canonical(&graph, &layer, stored_baseline.as_ref(), inputs);
+    let stale = migration.is_none()
+        && !is_canonical(
+            &graph,
+            &layer,
+            stored_baseline.as_ref(),
+            stored_sync.as_ref(),
+            inputs,
+        );
     let identity_changed = stale || sorted(&layer) != sorted(&file);
     let baseline_changed = stored_baseline.as_ref() != Some(inputs.baseline);
     if baseline_changed && inputs.baseline_events.is_empty() {
         return Err(StoreError::BaselineUnrecorded);
     }
-    let transition = if identity_changed || baseline_changed {
+    let sync_changed = stored_sync.as_ref() != Some(inputs.sync);
+    let initiator = transition_initiator(
+        inputs.sync_kind,
+        identity_changed && !stale,
+        baseline_changed,
+        stale,
+    );
+    let transition = if identity_changed || baseline_changed || sync_changed {
         revision = next_revision(revision)?;
         Some(build(
             &file,
             Some(inputs.baseline),
+            Some(inputs.sync),
             inputs,
             revision,
-            ProvenanceKind::RootFile,
+            initiator,
         )?)
     } else {
         None
@@ -746,7 +884,6 @@ async fn load(
         identity_transition: false,
         baseline_transition: false,
         released: Vec::new(),
-        principal_admin: None,
         durability_error: None,
     };
     if let Some((m, next)) = migration {
@@ -768,18 +905,16 @@ async fn load(
         if !released.is_empty() {
             audit.released(next.revision(), &released).await?;
         }
-        let principal_admin =
-            identity::promotes_principal(&layer, &file).then_some(inputs.principal_uid);
-        if let Some(uid) = principal_admin {
-            audit.principal_admin(next.revision(), uid).await?;
-        }
         if baseline_changed {
             audit
                 .baseline(next.revision(), inputs.baseline_events)
                 .await?;
         }
+        if sync_changed && !inputs.sync_events.is_empty() {
+            audit.sync(next.revision(), inputs.sync_events).await?;
+        }
         audit
-            .intent_transition(next.revision(), INITIATOR_ROOT_FILE)
+            .intent_transition(next.revision(), initiator_name(initiator))
             .await?;
         let persisted = dir.persist(key, &next)?;
         audit
@@ -792,39 +927,36 @@ async fn load(
         report.identity_transition = identity_changed;
         report.baseline_transition = baseline_changed;
         report.released = released;
-        report.principal_admin = principal_admin;
     }
     Ok(report)
 }
 
-/// Persists a validated identity transition: the containments it ends and, when it ends
-/// explicit bindings, the principal it makes admin; intent, publish, checkpoint. The
-/// publish's rename is the point of no return, so a failure after it is reported, not
-/// raised. Callers serialize commits; the floor is re-checked at publish.
+/// Persists a validated identity transition: the containments it ends, then `sync_events`;
+/// intent, publish, checkpoint. The publish's rename is the point of no return, so a
+/// failure after it is reported, not raised. Callers serialize commits; the floor is
+/// re-checked at publish.
 pub async fn commit(
     dir: &StateDir,
     key: &WrappingKey,
     next: &Graph,
     released: &[identity::Released],
-    principal_admin: Option<u32>,
+    sync_events: &[String],
     audit: &mut impl BootAudit,
     initiator: &'static str,
 ) -> Result<Committed, StoreError> {
-    transition(
-        dir,
-        key,
-        next,
+    let t = Transition {
         released,
-        principal_admin,
-        &[],
-        audit,
+        baseline_events: &[],
+        sync_events,
         initiator,
-    )
-    .await
+        rule: SyncRule::Free,
+    };
+    transition(dir, key, next, t, audit).await
 }
 
 /// An operator's accept: the one commit that may change the accepted baseline, with
-/// `events` written ahead of the transition intent. Dropping the baseline is refused.
+/// `events` written ahead of the transition intent. Dropping the baseline is refused,
+/// and so is any change to the sync base.
 pub async fn commit_accept(
     dir: &StateDir,
     key: &WrappingKey,
@@ -832,19 +964,75 @@ pub async fn commit_accept(
     events: &[String],
     audit: &mut impl BootAudit,
 ) -> Result<Committed, StoreError> {
-    transition(dir, key, next, &[], None, events, audit, INITIATOR_OPERATOR).await
+    let t = Transition {
+        released: &[],
+        baseline_events: events,
+        sync_events: &[],
+        initiator: INITIATOR_OPERATOR,
+        rule: SyncRule::Unchanged,
+    };
+    transition(dir, key, next, t, audit).await
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn transition(
+/// A live identity edit: only the sync base's `live` may change; its base, its conflicts
+/// and the baseline are the stored ones, and `events` records it ahead of the intent.
+pub async fn commit_live(
     dir: &StateDir,
     key: &WrappingKey,
     next: &Graph,
     released: &[identity::Released],
-    principal_admin: Option<u32>,
     events: &[String],
     audit: &mut impl BootAudit,
+    initiator: LiveInitiator,
+) -> Result<Committed, StoreError> {
+    let t = Transition {
+        released,
+        baseline_events: &[],
+        sync_events: events,
+        initiator: initiator_name(initiator.provenance()),
+        rule: SyncRule::BaseKept,
+    };
+    transition(dir, key, next, t, audit).await
+}
+
+enum SyncRule {
+    Free,
+    Unchanged,
+    BaseKept,
+}
+
+struct Transition<'a> {
+    released: &'a [identity::Released],
+    baseline_events: &'a [String],
+    sync_events: &'a [String],
     initiator: &'static str,
+    rule: SyncRule,
+}
+
+fn check_sync(
+    t: &Transition<'_>,
+    stored: Option<&SyncBase>,
+    proposed: Option<&SyncBase>,
+) -> Result<(), StoreError> {
+    match t.rule {
+        SyncRule::Free => Ok(()),
+        SyncRule::Unchanged if proposed != stored => Err(StoreError::SyncBaseChanged),
+        SyncRule::Unchanged => Ok(()),
+        SyncRule::BaseKept if t.sync_events.is_empty() => Err(StoreError::SyncUnrecorded),
+        SyncRule::BaseKept => match (stored, proposed) {
+            (Some(s), Some(p)) if s.base == p.base && s.conflicts == p.conflicts => Ok(()),
+            (None, _) | (_, None) => Err(StoreError::SyncAbsent),
+            _ => Err(StoreError::SyncBaseChanged),
+        },
+    }
+}
+
+async fn transition(
+    dir: &StateDir,
+    key: &WrappingKey,
+    next: &Graph,
+    t: Transition<'_>,
+    audit: &mut impl BootAudit,
 ) -> Result<Committed, StoreError> {
     let revision = next.revision();
     let store = dir.store_revision();
@@ -854,26 +1042,35 @@ async fn transition(
             attempted: revision,
         });
     }
-    let proposed =
-        maknae_graph::baseline::extract(next).map_err(|e| StoreError::Identity(e.to_string()))?;
-    let unrecorded = if events.is_empty() {
-        proposed != peek_baseline(dir, key)?
+    let proposed = identity::extract(next).map_err(|e| StoreError::Identity(e.to_string()))?;
+    let stored = match dir.read_store() {
+        Ok(None) => None,
+        Ok(Some(file)) => Some(decode_store(&file, key)?.extracted),
+        Err(e) => return Err(StoreError::StoreFileRefused(e.to_string())),
+    };
+    let (stored_baseline, stored_sync) = match stored {
+        Some(e) => (e.baseline, e.sync),
+        None => (None, None),
+    };
+    let unrecorded = if t.baseline_events.is_empty() {
+        proposed.baseline != stored_baseline
     } else {
-        proposed.is_none()
+        proposed.baseline.is_none()
     };
     if unrecorded {
         return Err(StoreError::BaselineUnrecorded);
     }
-    if !released.is_empty() {
-        audit.released(revision, released).await?;
+    check_sync(&t, stored_sync.as_ref(), proposed.sync.as_ref())?;
+    if !t.released.is_empty() {
+        audit.released(revision, t.released).await?;
     }
-    if let Some(uid) = principal_admin {
-        audit.principal_admin(revision, uid).await?;
+    if !t.baseline_events.is_empty() {
+        audit.baseline(revision, t.baseline_events).await?;
     }
-    if !events.is_empty() {
-        audit.baseline(revision, events).await?;
+    if !t.sync_events.is_empty() {
+        audit.sync(revision, t.sync_events).await?;
     }
-    audit.intent_transition(revision, initiator).await?;
+    audit.intent_transition(revision, t.initiator).await?;
     let persisted = dir.persist(key, next)?;
     let checkpoint_error = audit
         .checkpoint(revision, persisted.digest, ANCHOR_TRANSITIONED)
@@ -914,6 +1111,7 @@ async fn seed(
     let graph = build(
         inputs.identity,
         Some(inputs.baseline),
+        Some(inputs.sync),
         inputs,
         revision,
         ProvenanceKind::Seed,
@@ -955,7 +1153,6 @@ async fn seed(
         identity_transition: false,
         baseline_transition: false,
         released: Vec::new(),
-        principal_admin: None,
         durability_error: persisted.durability_error,
     })
 }
@@ -1019,7 +1216,6 @@ mod tests {
             identity_transition: false,
             baseline_transition: false,
             released: Vec::new(),
-            principal_admin: None,
             durability_error: None,
         };
         let shown = format!("{report:?}");

@@ -295,7 +295,8 @@ mod tests {
     #[test]
     fn the_next_layer_guards_carries_and_reports_releases() {
         use maknae_graph::identity::{
-            ReleaseCause, Released, SubjectEntry, BINDINGS_MISSING, BINDINGS_NOT_MOVED,
+            ReleaseCause, Released, SubjectEntry, BINDINGS_KEY_DROPPED, BINDINGS_MISSING,
+            BINDINGS_NOT_MOVED,
         };
         let mallory = SubjectEntry {
             uid: 666,
@@ -346,8 +347,10 @@ mod tests {
                 cause: ReleaseCause::BindingsEmpty
             }]
         );
-        let (_, released) = next_layer(&keyless, &[], &persisted, false, false).unwrap();
-        assert_eq!(released[0].cause, ReleaseCause::BindingsAbsent);
+        assert_eq!(
+            next_layer(&keyless, &[], &persisted, false, false),
+            Err(Refusal::Load(BINDINGS_KEY_DROPPED.into()))
+        );
         let (_, released) = next_layer(&file, &[], &persisted, false, false).unwrap();
         assert_eq!(
             released[0].cause,

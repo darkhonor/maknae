@@ -3251,6 +3251,7 @@ const GRAPH_MIGRATE_ACTION: &str = "graph.migrate";
 const GRAPH_TRANSITION_ACTION: &str = "graph.transition";
 const GRAPH_RELOAD_ACTION: &str = "graph.reload";
 const GRAPH_BASELINE_ACTION: &str = "graph.baseline";
+const GRAPH_SYNC_ACTION: &str = "graph.sync";
 use crate::identity_report::GRAPH_IDENTITY_ACTION;
 
 /// Every `graph.*` pseudo-action this file emits; no verb's action string may equal one.
@@ -3334,6 +3335,30 @@ impl<'a, E: AuditEmit + Send + Sync> GraphBootAudit<'a, E> {
             sink.emit_within(&rec, bound)
                 .await
                 .map_err(|e| StoreError::Audit(e.to_string()))
+        }
+    }
+}
+
+impl<'a, E: AuditEmit + Send + Sync> GraphBootAudit<'a, E> {
+    fn write_ahead_each(
+        &self,
+        action: &'static str,
+        reasons: &[String],
+        revision: u64,
+        anchor: &'static str,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send + 'a {
+        let recs: Vec<AuditRecord> = reasons
+            .iter()
+            .map(|r| self.intent(action, r, revision, anchor))
+            .collect();
+        let (sink, bound) = (self.sink, self.bound);
+        async move {
+            for rec in recs {
+                sink.emit_within(&rec, bound)
+                    .await
+                    .map_err(|e| StoreError::Audit(e.to_string()))?;
+            }
+            Ok(())
         }
     }
 }
@@ -3448,35 +3473,20 @@ impl<E: AuditEmit + Send + Sync> BootAudit for GraphBootAudit<'_, E> {
         }
     }
 
-    fn principal_admin(
-        &mut self,
-        revision: u64,
-        uid: u32,
-    ) -> impl Future<Output = Result<(), StoreError>> + Send {
-        let reason = maknae_authz_basic::IdentityProblem::PrincipalAdmin { uid }.to_string();
-        let rec = self.intent(GRAPH_IDENTITY_ACTION, &reason, revision, "promoting");
-        eprintln!("maknaed: identity: {reason} (pending the store commit of revision {revision})");
-        self.write_ahead(rec)
-    }
-
     fn baseline(
         &mut self,
         revision: u64,
         events: &[String],
     ) -> impl Future<Output = Result<(), StoreError>> + Send {
-        let recs: Vec<AuditRecord> = events
-            .iter()
-            .map(|e| self.intent(GRAPH_BASELINE_ACTION, e, revision, "baselining"))
-            .collect();
-        let (sink, bound) = (self.sink, self.bound);
-        async move {
-            for rec in recs {
-                sink.emit_within(&rec, bound)
-                    .await
-                    .map_err(|e| StoreError::Audit(e.to_string()))?;
-            }
-            Ok(())
-        }
+        self.write_ahead_each(GRAPH_BASELINE_ACTION, events, revision, "baselining")
+    }
+
+    fn sync(
+        &mut self,
+        revision: u64,
+        events: &[String],
+    ) -> impl Future<Output = Result<(), StoreError>> + Send {
+        self.write_ahead_each(GRAPH_SYNC_ACTION, events, revision, "syncing")
     }
 }
 
@@ -3510,6 +3520,10 @@ struct GraphInputs {
     baseline: BaselineLayer,
     accepted_seen: Option<[u8; 32]>,
     baseline_events: Vec<String>,
+    sync: maknae_graph::sync::SyncBase,
+    sync_seen: Option<maknae_graph::sync::SyncBase>,
+    sync_events: Vec<String>,
+    sync_kind: maknae_config::SyncKind,
 }
 
 /// The baseline this start runs, as the store records it: a performed move is cleared.
@@ -3536,6 +3550,7 @@ impl GraphInputs {
             .map_err(|e| StoreError::Identity(e.to_string()))?;
         let sections = source.section_digests(maknae_state::envelope::sha256);
         let identity = source.identity_layer(label, sections.get("bindings").copied());
+        let section = maknae_config::Section::of(source.bindings()).canonical();
         Ok(GraphInputs {
             vocabulary,
             identity,
@@ -3546,6 +3561,14 @@ impl GraphInputs {
             baseline,
             accepted_seen: None,
             baseline_events: Vec::new(),
+            sync: maknae_graph::sync::SyncBase {
+                base: section.clone(),
+                live: section,
+                conflicts: "[]".into(),
+            },
+            sync_seen: None,
+            sync_events: Vec::new(),
+            sync_kind: maknae_config::SyncKind::Created,
         })
     }
 
@@ -3561,6 +3584,10 @@ impl GraphInputs {
             baseline: &self.baseline,
             accepted_seen: self.accepted_seen,
             baseline_events: &self.baseline_events,
+            sync: &self.sync,
+            sync_seen: self.sync_seen.as_ref(),
+            sync_events: &self.sync_events,
+            sync_kind: self.sync_kind,
         }
     }
 }
@@ -3716,7 +3743,6 @@ async fn publish_boot_identity<E: AuditEmit + Send + Sync>(
     status: &crate::identity_report::IdentityStatus,
     snapshot: &maknae_authz_basic::snapshot::Snapshot,
     released: &[maknae_graph::identity::Released],
-    principal_admin: Option<u32>,
     sink: &Arc<E>,
     ctx: &BootCtx<'_>,
 ) -> Result<(), RunError> {
@@ -3724,7 +3750,7 @@ async fn publish_boot_identity<E: AuditEmit + Send + Sync>(
         status,
         crate::identity_report::Published::of(
             snapshot,
-            crate::identity_report::transition_problems(released, principal_admin),
+            crate::identity_report::transition_problems(released),
         ),
         snapshot.identity_problems(),
         |result, reason, posture| {
@@ -3744,7 +3770,6 @@ struct BootedGraph {
     status: KernelGraphStatus,
     graph: maknae_graph::graph::Graph,
     released: Vec<maknae_graph::identity::Released>,
-    principal_admin: Option<u32>,
 }
 
 async fn scan_anchor(
@@ -3813,7 +3838,6 @@ async fn boot_kernel_graph(
         status: kernel_graph_status(&report),
         graph: report.graph,
         released: report.released,
-        principal_admin: report.principal_admin,
         dir,
         key,
     })
@@ -3902,7 +3926,6 @@ type ReloadCandidate = (
     Arc<maknae_graph::graph::Graph>,
     Arc<maknae_authz_basic::snapshot::Snapshot>,
     Arc<[maknae_graph::identity::Released]>,
-    Option<u32>,
     Option<crate::baseline::PendingSet>,
 );
 
@@ -4087,7 +4110,7 @@ where
         let next = match maknae_graph::identity::build(
             &stored.layer,
             Some(&next_baseline),
-            None,
+            stored.sync.as_ref(),
             &self.vocabulary.persisted,
             self.vocabulary.digest,
             store_revision.saturating_add(1),
@@ -4384,8 +4407,6 @@ fn load_candidate<B: maknae_authz_basic::Baseline, E>(
         source.bindings().is_missing(),
         source.bindings().lists_nobody(),
     )?;
-    let principal_admin = maknae_graph::identity::promotes_principal(&persisted.layer, &next)
-        .then_some(source.principal().uid);
     let (plan, graph) = crate::reload::plan_candidate(
         &persisted.layer,
         &next,
@@ -4395,7 +4416,7 @@ fn load_candidate<B: maknae_authz_basic::Baseline, E>(
             maknae_graph::identity::build(
                 &next,
                 Some(stored_baseline),
-                None,
+                persisted.sync.as_ref(),
                 &vocabulary.persisted,
                 vocabulary.digest,
                 revision,
@@ -4421,16 +4442,7 @@ fn load_candidate<B: maknae_authz_basic::Baseline, E>(
         trail.as_deref(),
     );
     let pending = crate::baseline::pending(&accepted.accepted, &file);
-    Ok((
-        plan,
-        (
-            graph,
-            Arc::new(snapshot),
-            released.into(),
-            principal_admin,
-            pending,
-        ),
-    ))
+    Ok((plan, (graph, Arc::new(snapshot), released.into(), pending)))
 }
 
 impl<B, E> crate::reload::Load for ReloadIo<'_, B, E>
@@ -4479,7 +4491,6 @@ where
     ) -> impl Future<Output = Result<crate::reload::Committed, crate::reload::Refusal>> + Send {
         let graph = Arc::clone(&candidate.0);
         let released = Arc::clone(&candidate.2);
-        let principal_admin = candidate.3;
         async move {
             let mut audit = GraphBootAudit {
                 sink: self.reloader.sink.as_ref(),
@@ -4493,7 +4504,7 @@ where
                 &self.reloader.key,
                 &graph,
                 &released,
-                principal_admin,
+                &[],
                 &mut audit,
                 maknae_state::store::INITIATOR_ROOT_FILE,
             )
@@ -4533,11 +4544,11 @@ where
     fn install(&self, candidate: ReloadCandidate) {
         let published = crate::identity_report::Published::of(
             &candidate.1,
-            crate::identity_report::transition_problems(&candidate.2, candidate.3),
+            crate::identity_report::transition_problems(&candidate.2),
         );
         self.reloader.authorizer.baseline().install(candidate.1);
         let current = self.reloader.baseline.current();
-        let pending = candidate.4;
+        let pending = candidate.3;
         let hash = |p: &Option<crate::baseline::PendingSet>| p.as_ref().map(|p| p.hash.clone());
         // A new set is published by `outcome` once its record is appended.
         if pending.is_some() && hash(&pending) != hash(&current.pending) {
@@ -5414,6 +5425,10 @@ async fn boot_after_sink(
         .map_err(|e| graph_refusal(GraphFailure::Store(e), state_dir))?;
     graph_inputs.accepted_seen = accepted_seen;
     graph_inputs.baseline_events = events;
+    graph_inputs.sync_seen = match (&dir, &key) {
+        (Ok(d), Ok(k)) => maknae_state::store::peek_sync(d, k).ok().flatten(),
+        _ => None,
+    };
     // The kernel graph boots before the PDP is built from it.
     let mut booted = match boot_kernel_graph(
         state_dir,
@@ -5509,7 +5524,6 @@ async fn boot_after_sink(
         &booted.status.identity,
         &maknae_authz_basic::Baseline::snapshot(authorizer.baseline()),
         &booted.released,
-        booted.principal_admin,
         sink,
         &identity_ctx,
     )
@@ -6409,17 +6423,23 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             }
             _ => None,
         };
+        let sync_seen = match (&dir, &key) {
+            (Ok(d), Ok(k)) => maknae_state::store::peek_sync(d, k).ok().flatten(),
+            _ => None,
+        };
         let seeded = [crate::baseline::SEEDED_EVENT.to_string()];
         let inputs = match &stored {
             Some(accepted) => BootInputs {
                 baseline: accepted,
                 accepted_seen: Some(accepted.sha256),
                 baseline_events: &[],
+                sync_seen: sync_seen.as_ref(),
                 ..*inputs
             },
             None => BootInputs {
                 accepted_seen: None,
                 baseline_events: &seeded,
+                sync_seen: sync_seen.as_ref(),
                 ..*inputs
             },
         };
@@ -7458,7 +7478,21 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         assert_eq!(stored.layer.subjects, old.subjects);
     }
 
-    /// Boots `seed` into a fresh store, then boots `inputs` over it.
+    fn sync_for(layer: &maknae_graph::identity::IdentityLayer) -> maknae_graph::sync::SyncBase {
+        let token = if layer.bindings_sha256.is_some() {
+            "{}"
+        } else {
+            "null"
+        };
+        maknae_graph::sync::SyncBase {
+            base: token.into(),
+            live: token.into(),
+            conflicts: "[]".into(),
+        }
+    }
+
+    /// Boots `seed` into a fresh store, commits it once more without a sync base (a store
+    /// written before #491), then boots `inputs` over it.
     fn boot_over_seed(
         fx: &GraphFixture,
         inputs: &GraphInputs,
@@ -7475,19 +7509,47 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             seq: &seq,
             au3_1: &au3_1,
         };
-        drop(
-            block_on(boot_graph_at(
-                &fx.state,
-                key(),
-                &fx.sink,
-                &ctx,
-                &BootInputs {
-                    identity: seed,
-                    ..inputs.boot()
-                },
-            ))
-            .unwrap(),
-        );
+        let sync = sync_for(seed);
+        let booted = block_on(boot_graph_at(
+            &fx.state,
+            key(),
+            &fx.sink,
+            &ctx,
+            &BootInputs {
+                identity: seed,
+                sync: &sync,
+                ..inputs.boot()
+            },
+        ))
+        .unwrap();
+        let unsynced = maknae_graph::identity::build(
+            seed,
+            Some(&inputs.baseline),
+            None,
+            &inputs.vocabulary.persisted,
+            inputs.vocabulary.digest,
+            booted.graph.revision() + 1,
+            maknae_graph::record::ProvenanceKind::Seed,
+        )
+        .unwrap();
+        let mut audit = GraphBootAudit {
+            sink: fx.sink.as_ref(),
+            ctx: &ctx,
+            scanned_bytes: 0,
+            bound: AUDIT_APPEND_TIMEOUT,
+            drain: None,
+        };
+        block_on(maknae_state::store::commit(
+            &booted.dir,
+            &booted.key,
+            &unsynced,
+            &[],
+            &[],
+            &mut audit,
+            maknae_state::store::INITIATOR_SEED,
+        ))
+        .unwrap();
+        drop(booted);
         let seeded = trail(fx).len();
         let booted = block_on(boot_graph_at(
             &fx.state,
@@ -7572,7 +7634,6 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         }
         let g = trail(&fx)[seeded + 3].0.graph.clone().unwrap();
         assert_eq!((g.revision, g.anchor.as_str()), (2, "promoting"));
-        assert_eq!(booted.principal_admin, Some(1000));
         let stored = maknae_graph::identity::extract(&booted.graph).unwrap();
         assert!(stored.layer.subjects.is_empty());
     }
@@ -7597,7 +7658,6 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         let (seeded, booted) = boot_over_seed(&fx, &inputs, &bound);
         let booted = booted.unwrap();
         assert!(booted.released.is_empty());
-        assert_eq!(booted.principal_admin, Some(1000));
         let after: Vec<(String, String, String, String)> = trail(&fx)[seeded..]
             .iter()
             .map(|(r, _)| {
@@ -7660,6 +7720,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             source: inputs.identity.source.clone(),
             ..seed.clone()
         };
+        let sync = sync_for(&pasted);
         let booted = block_on(boot_graph_at(
             &fx.state,
             key(),
@@ -7675,6 +7736,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             },
             &BootInputs {
                 identity: &pasted,
+                sync: &sync,
                 ..inputs.boot()
             },
         ))
@@ -10562,7 +10624,6 @@ mod graph_audit_bound_tests {
             identity_transition: false,
             baseline_transition: false,
             released: Vec::new(),
-            principal_admin: None,
             durability_error: None,
         }
     }
@@ -11208,7 +11269,6 @@ mod reload_fixture {
             &booted.status.identity,
             &baseline.snapshot(),
             &booted.released,
-            booted.principal_admin,
             &sink,
             &ctx,
         )
@@ -13064,7 +13124,7 @@ mod reload_tests {
         let status = crate::identity_report::IdentityStatus::default();
         let refused = tokio::time::timeout(
             Duration::from_secs(60),
-            publish_boot_identity(&status, &snapshot, &[], None, &fx.reloader.sink, &ctx),
+            publish_boot_identity(&status, &snapshot, &[], &fx.reloader.sink, &ctx),
         )
         .await
         .expect("the identity record must give up within its bound");
@@ -13105,7 +13165,7 @@ mod reload_tests {
         .await
         .unwrap();
         let status = crate::identity_report::IdentityStatus::default();
-        publish_boot_identity(&status, &snapshot, &[], None, sink, &ctx)
+        publish_boot_identity(&status, &snapshot, &[], sink, &ctx)
             .await
             .unwrap();
         let recs: Vec<AuditRecord> = std::fs::read_to_string(fx.dir.join("audit.jsonl"))
@@ -13132,7 +13192,7 @@ mod reload_tests {
         assert_eq!(status.counts(), ["unresolved=1", "unresolved_adversary=1"]);
         sink.fail_identity
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        let refused = publish_boot_identity(&status, &snapshot, &[], None, sink, &ctx).await;
+        let refused = publish_boot_identity(&status, &snapshot, &[], sink, &ctx).await;
         assert!(
             matches!(&refused, Err(e) if e.to_string().contains("identity append refused")),
             "{refused:?}"
@@ -13177,7 +13237,7 @@ mod reload_tests {
             .sink
             .fail_identity
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        fx.write_bindings("schema_version: 1\n");
+        fx.write_bindings(ROOT_ADMIN);
         let refused = bounded(fx.reloader.run()).await.unwrap_err();
         assert!(
             matches!(&refused, crate::reload::Refusal::Persist(m) if m.contains("identity append refused")),

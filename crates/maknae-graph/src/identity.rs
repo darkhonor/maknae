@@ -513,7 +513,8 @@ pub fn extract(g: &Graph) -> Result<Extracted, IdentityError> {
     })
 }
 
-pub const BINDINGS_MISSING: &str = "bindings.yaml is missing but the store holds explicit bindings; to return to principal-as-admin write bindings.yaml without a `bindings:` key";
+pub const BINDINGS_MISSING: &str = "bindings.yaml is missing but the store holds explicit bindings; restore it, or run sudo maknae reseed to return to principal-as-admin";
+pub const BINDINGS_KEY_DROPPED: &str = "bindings.yaml has no bindings: key but the store holds explicit bindings; restore the bindings: block, or run sudo maknae reseed to return to principal-as-admin";
 const BINDINGS_YAML: &str = "bindings.yaml";
 pub const BINDINGS_NOT_MOVED: &str = "the store holds explicit bindings from authz.yaml; paste the bindings: block into /etc/maknae/bindings.yaml";
 
@@ -645,14 +646,9 @@ pub fn released(
     out
 }
 
-/// Whether moving from `persisted` to `next` ends explicit bindings, which makes the
-/// enrolled principal admin.
-pub fn promotes_principal(persisted: &IdentityLayer, next: &IdentityLayer) -> bool {
-    persisted.bindings_sha256.is_some() && next.bindings_sha256.is_none()
-}
-
 /// The refusal, if `file` would drop explicit bindings that root has not written into
-/// `bindings.yaml`: explicit bindings persisted from any other file, or a vanished file.
+/// `bindings.yaml`: explicit bindings persisted from any other file, a vanished file, or
+/// a file without a `bindings:` key.
 pub fn drops_explicit_bindings(
     persisted: &IdentityLayer,
     file: &IdentityLayer,
@@ -666,6 +662,9 @@ pub fn drops_explicit_bindings(
     }
     if file_missing {
         return Some(BINDINGS_MISSING);
+    }
+    if file.bindings_sha256.is_none() {
+        return Some(BINDINGS_KEY_DROPPED);
     }
     None
 }
@@ -1563,8 +1562,13 @@ mod tests {
         assert_eq!(guard(&steady, &new_absent, true), Some(BINDINGS_MISSING));
         assert_eq!(
             guard(&steady, &new_absent, false),
-            None,
-            "root's keyless edit is allowed, and recorded as releases"
+            Some(BINDINGS_KEY_DROPPED),
+            "a dropped bindings: key is not a reset"
+        );
+        assert_eq!(
+            guard(&at(b, Some("e"), &[]), &new_absent, false),
+            Some(BINDINGS_KEY_DROPPED),
+            "an explicit `bindings: {{}}` is explicit"
         );
         assert_eq!(guard(&steady, &steady, false), None, "an unchanged reboot");
         assert_eq!(guard(&new_absent, &new_absent, true), None);
@@ -1597,17 +1601,22 @@ mod tests {
             "/etc/maknae/./bindings.yaml",
         ] {
             let p = at(respelled, Some("x"), &[]);
-            assert_eq!(guard(&p, &new_absent, false), None, "{respelled}");
+            assert_eq!(
+                guard(&p, &new_absent, false),
+                Some(BINDINGS_KEY_DROPPED),
+                "{respelled}"
+            );
+            assert_eq!(guard(&p, &new_explicit, false), None, "{respelled}");
             assert_eq!(
                 guard(&p, &new_absent, true),
                 Some(BINDINGS_MISSING),
                 "{respelled}"
             );
         }
-        assert!(
-            BINDINGS_NOT_MOVED.contains("/etc/maknae/bindings.yaml")
-                && BINDINGS_MISSING.contains("without a `bindings:` key")
-        );
+        assert!(BINDINGS_NOT_MOVED.contains("/etc/maknae/bindings.yaml"));
+        for m in [BINDINGS_MISSING, BINDINGS_KEY_DROPPED] {
+            assert!(m.contains("sudo maknae reseed"), "{m}");
+        }
     }
 
     #[test]
@@ -1632,18 +1641,6 @@ mod tests {
             }]
         );
         assert!(released(&persisted, &next, false).is_empty());
-    }
-
-    #[test]
-    fn only_explicit_to_keyless_promotes_the_principal() {
-        let explicit = layer(Some("x"), &[(666, "mallory", "adversary")]);
-        let empty = layer(Some("y"), &[]);
-        let keyless = layer(None, &[]);
-        assert!(promotes_principal(&explicit, &keyless));
-        assert!(promotes_principal(&empty, &keyless));
-        assert!(!promotes_principal(&explicit, &empty));
-        assert!(!promotes_principal(&keyless, &keyless));
-        assert!(!promotes_principal(&keyless, &explicit));
     }
 
     #[test]

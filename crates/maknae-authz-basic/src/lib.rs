@@ -887,6 +887,9 @@ impl maknae_security::Authorizer for HermeticAuthorizer {
     }
 }
 
+#[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
+const SYNCED_GRAPH: &str = "a graph with a sync base reloads through maknaed, not the file seam";
+
 /// Builds the identity graph `source` declares — fresh at revision 1, or `base`
 /// carried forward (unchanged, or at its revision + 1 when the layer differs) —
 /// and compiles the snapshot over it.
@@ -904,6 +907,9 @@ fn snapshot_over(
     let stored = base
         .map(|g| maknae_graph::identity::extract(g).map_err(|e| refused(e.to_string())))
         .transpose()?;
+    if stored.as_ref().is_some_and(|s| s.sync.is_some()) {
+        return Err(refused(SYNCED_GRAPH.into()));
+    }
     let layer = match &stored {
         None => file,
         Some(stored) => {
@@ -2488,10 +2494,12 @@ mod tests {
             other => panic!("expected the missing-file refusal, got {other:?}"),
         }
         let absent = source_with(SHIPPED, Some("schema_version: 1\n"), &[]);
-        assert!(
-            snapshot_over(&absent, LABEL, test_digest, Some(explicit.persisted())).is_ok(),
-            "root's keyless edit is allowed"
-        );
+        match snapshot_over(&absent, LABEL, test_digest, Some(explicit.persisted())) {
+            Err(AuthzBasicError::Compile(snapshot::CompileError::Identity(m))) => {
+                assert_eq!(m, maknae_graph::identity::BINDINGS_KEY_DROPPED)
+            }
+            other => panic!("expected the dropped-key refusal, got {other:?}"),
+        }
         let bare = compiled(&source_with(SHIPPED, Some("schema_version: 1\n"), &[]));
         assert!(
             snapshot_over(&gone, LABEL, test_digest, Some(bare.persisted())).is_ok(),
@@ -3290,7 +3298,7 @@ mod tests {
     mod hermetic {
         use super::super::*;
         use super::{
-            arrives, audit_permit, contained, no_role, principal, whoami, CONTAINED, EMPTY,
+            arrives, audit_permit, contained, no_role, principal, whoami, CONTAINED, EMPTY, LABEL,
         };
         use maknae_security::{Authorizer, Verdict};
         use std::os::unix::fs::PermissionsExt;
@@ -3560,6 +3568,50 @@ mod tests {
             assert_eq!(auth.subjects().unwrap()[0].role, "admin");
             auth.reload_from_file().unwrap();
             assert_eq!(auth.subjects().unwrap()[0].role, "adversary");
+        }
+
+        #[test]
+        fn a_graph_with_a_sync_base_does_not_reload_through_the_file_seam() {
+            let fx = Fixture::new("synced");
+            let auth = fx.authorizer("admin");
+            let current = auth.snapshot();
+            let e = maknae_graph::identity::extract(current.persisted()).unwrap();
+            let token = if e.layer.bindings_sha256.is_some() {
+                r#"{"admin":["root"]}"#
+            } else {
+                "null"
+            };
+            let sync = maknae_graph::sync::SyncBase {
+                base: token.into(),
+                live: token.into(),
+                conflicts: "[]".into(),
+            };
+            let synced = maknae_graph::identity::build(
+                &e.layer,
+                e.baseline.as_ref(),
+                Some(&sync),
+                &maknae_graph::kernel::persisted_compiled_set(LABEL),
+                e.vocabulary_sha256.unwrap(),
+                current.revision(),
+                maknae_graph::record::ProvenanceKind::Seed,
+            )
+            .unwrap();
+            let source = Baseline::load_source(&auth).unwrap();
+            let snap = snapshot::compile(
+                Arc::new(synced),
+                &source,
+                &compiled_set(LABEL),
+                &source.section_digests(test_digest),
+            )
+            .unwrap();
+            Baseline::install(&auth, Arc::new(snap));
+            match auth.reload_from_file() {
+                Err(AuthzBasicError::Compile(snapshot::CompileError::Identity(m))) => {
+                    assert_eq!(m, SYNCED_GRAPH);
+                    assert!(m.contains("sync base"), "{m}");
+                }
+                other => panic!("expected the sync-base refusal, got {other:?}"),
+            }
         }
 
         #[test]
