@@ -6,7 +6,7 @@ Each release that needs an action from you lists it here, newest first. Read eve
 
 ## Baseline layer (#490)
 
-`maknae.yaml` and `config.d/` are now the **baseline**: `maknaed` keeps the accepted copy in its kernel graph store and runs it, and an edit to the files applies only when an administrator accepts it with `maknae baseline-show` and `maknae baseline-accept <hash>`. A restart no longer applies an edit, except to `vault` and `audit`, which follow the files at every start ([configuration §3.2](configuration.md#32-the-baseline); [runbook](runbook.md#change-the-configuration)).
+`maknae.yaml` and `config.d/` are now the **baseline**: `maknaed` keeps the accepted copy in its kernel graph store and runs it, and an edit to the files applies only when an administrator accepts it with `maknae baseline-show` and `maknae baseline-accept <hash>`. A restart no longer applies an edit, except to `vault` and `audit` other than `audit.readers`, which follow the files at every start ([configuration §3.2](configuration.md#32-the-baseline); [runbook](runbook.md#change-the-configuration)).
 
 **Check ownership before you upgrade.** `maknae.yaml`, every `config.d/` member and both directories must be owned by root and not group- or world-writable, whatever section they carry; earlier releases required this only of the file carrying `providers`. This prints nothing on a host that is ready:
 
@@ -41,7 +41,7 @@ Without `admin.baseline.show` and `admin.baseline.accept` nobody can accept a ch
 
 **A deleted `authz.yaml` is not restored by a plain reinstall** on Debian or the Red Hat family, and without it `maknaed` refuses to start with exit 3. On Debian, reinstall with `sudo apt install --reinstall -o Dpkg::Options::=--force-confmiss ./maknae_<version>_<arch>.deb`; on the Red Hat family, `sudo rpm -Uvh --replacepkgs maknae-<version>.rpm` reinstalls a missing `%config` file. The macOS installer installs `authz.yaml` whenever it is absent.
 
-**`audit.readers` replaces the hand-run read grant.** Declare your log agent's account in `maknae.yaml` ([configuration §6.3](configuration.md#63-the-audit-section)); the package restores its directory entry on every upgrade, and the runbook's [Grant the declared readers](runbook.md#grant-the-declared-readers) grants the file entry.
+**`audit.readers` replaces the hand-run read grant.** Declare your log agent's account in `maknae.yaml` ([configuration §6.3](configuration.md#63-the-audit-section)); the package restores its directory entry on every upgrade, and the runbook's [Grant the declared readers](runbook.md#grant-the-declared-readers) grants the file entry. An upgrade, like any restart, never changes the accepted `audit.readers`: a change to it waits for `maknae baseline-accept`, which resolves each account.
 
 **`maknaed` no longer creates the audit trail once a baseline is accepted.** A missing `/var/log/maknae/audit.jsonl` refuses to start; the package recreates it on every upgrade. A trail moves only to a file root prepared ([runbook](runbook.md#move-the-audit-trail)). On Debian the AppArmor profile now grants `rwk` on `/var/log/maknae/*.jsonl` instead of `audit.jsonl` alone.
 

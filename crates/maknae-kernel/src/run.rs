@@ -9037,6 +9037,39 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
     }
 
     #[test]
+    fn a_restart_keeps_the_accepted_readers_and_leaves_the_files_pending_live() {
+        let _g = env_lock();
+        for moved in [false, true] {
+            let d = fixture(&format!("readers-wait-{moved}"));
+            let _ = boot(&d);
+            let trail = if moved {
+                prepare_trail(&d, "audit-2.jsonl")
+            } else {
+                d.0.join("audit.jsonl")
+            };
+            let with_readers = PathBuf::from(format!("{}\n  readers: [root]", trail.display()));
+            write_yaml(&d, "", "https://v.example:8200", &with_readers, "");
+            let before = trail_of(&d, "audit.jsonl").len();
+            let _ = boot(&d);
+            let audit = audit_section(&accepted(&d));
+            assert!(!audit.contains("\"readers\""), "{moved}: {audit}");
+            assert_eq!(audit.contains("audit-2.jsonl"), moved, "{audit}");
+            let recs = if moved {
+                trail_of(&d, "audit-2.jsonl")
+            } else {
+                trail_of(&d, "audit.jsonl")[before..].to_vec()
+            };
+            let b = baseline_records(&recs);
+            assert!(
+                b.iter().any(|(r, why)| r == "deny"
+                    && why.starts_with("baseline change pending acceptance: ")
+                    && why.ends_with("(apply: live; sections: audit)")),
+                "{moved}: {b:?}"
+            );
+        }
+    }
+
+    #[test]
     fn an_unprepared_target_keeps_the_old_trail() {
         let _g = env_lock();
         let d = fixture("unprepared");
@@ -11497,6 +11530,29 @@ mod baseline_accept_tests {
             std::fs::read_to_string(&new).unwrap().is_empty(),
             "the accept itself appends nothing to the new trail"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_accept_of_root_as_a_reader_is_refused_naming_it() {
+        let fx = Fx::with_baseline("readers-root").await;
+        fx.write_yaml("", "audit_readers_marker: [root]\n");
+        let shown = fx.show().await;
+        assert_eq!(
+            (shown.state.as_str(), shown.apply.as_str()),
+            ("pending", "live")
+        );
+        let before = fx.store_sha();
+        match fx.accept(&shown.hash).await {
+            AcceptAnswer::View {
+                view,
+                corrective: Some(why),
+            } => {
+                assert_eq!(view.state, "invalid");
+                assert!(why.contains("root"), "{why}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(fx.store_sha(), before);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -307,9 +307,13 @@ pub fn at_boot(
     };
     let mut mix = acc.clone();
     for name in FOLLOWED_AT_BOOT {
-        match f.get(name) {
+        let followed = match name {
+            "audit" => audit_followed(f.get(name), acc.get(name)),
+            _ => f.get(name).cloned(),
+        };
+        match followed {
             Some(v) => {
-                mix.insert(name.into(), v.clone());
+                mix.insert(name.into(), v);
             }
             None => {
                 mix.remove(name);
@@ -345,6 +349,29 @@ pub fn at_boot(
         events,
         pending,
     })
+}
+
+/// The file's `audit` section with the accepted `readers`: the accept is where the
+/// readers' account check runs, so they never follow the file at start.
+fn audit_followed(file: Option<&String>, accepted: Option<&String>) -> Option<String> {
+    let readers = accepted
+        .and_then(|a| value_from_canonical_json(a).ok())
+        .and_then(|v| match v {
+            Value::Map(entries) => entries.into_iter().find(|(k, _)| k == "readers"),
+            _ => None,
+        });
+    let mut audit = match file.map(|f| value_from_canonical_json(f)) {
+        Some(Ok(v)) => v,
+        Some(Err(_)) => return file.cloned(),
+        None if readers.is_none() => return None,
+        None => Value::Map(Vec::new()),
+    };
+    let Value::Map(entries) = &mut audit else {
+        return file.cloned();
+    };
+    entries.retain(|(k, _)| k != "readers");
+    entries.extend(readers);
+    Some(canonical_json(&audit))
 }
 
 /// `accepted` is the trail the store last ran: its `moved_from` when an accept moved it, else the accepted path.
@@ -740,6 +767,46 @@ mod tests {
         assert!(
             matches!(st.pending.unwrap().state, PendingState::Valid { ref sections, .. } if sections == &vec!["core".to_string()])
         );
+    }
+
+    #[test]
+    fn the_files_readers_wait_for_an_accept_while_the_rest_of_audit_follows() {
+        const AUDIT_B_ROOT: &str =
+            r#"{"jsonl_path":"/var/log/maknae/audit-2.jsonl","readers":["root"]}"#;
+        const AUDIT_B_VECTOR: &str =
+            r#"{"jsonl_path":"/var/log/maknae/audit-2.jsonl","readers":["vector"]}"#;
+        const AUDIT_A_ROOT: &str =
+            r#"{"jsonl_path":"/var/log/maknae/audit.jsonl","readers":["root"]}"#;
+        for (acc_audit, file_audit, run_audit, events) in [
+            (AUDIT_A, AUDIT_A_READERS, AUDIT_A, &[][..]),
+            (AUDIT_A_READERS, AUDIT_A, AUDIT_A_READERS, &[][..]),
+            (AUDIT_A_READERS, AUDIT_A_ROOT, AUDIT_A_READERS, &[][..]),
+            (
+                AUDIT_A_READERS,
+                AUDIT_B_ROOT,
+                AUDIT_B_VECTOR,
+                &["audit follows maknae.yaml at start"][..],
+            ),
+        ] {
+            let acc = s(&[("core", CORE), ("audit", acc_audit)]);
+            let f = s(&[("core", CORE), ("audit", file_audit)]);
+            let st = at_boot(Some(&acc), Ok(f), ok).unwrap();
+            assert_eq!(
+                st.run,
+                s(&[("core", CORE), ("audit", run_audit)]),
+                "{file_audit}"
+            );
+            assert_eq!(st.events, events, "{file_audit}");
+            assert!(
+                matches!(
+                    st.pending.as_ref().map(|p| &p.state),
+                    Some(PendingState::Valid { apply: Apply::Live, sections, .. })
+                        if sections == &vec!["audit".to_string()]
+                ),
+                "{file_audit}: {:?}",
+                st.pending
+            );
+        }
     }
 
     #[test]
