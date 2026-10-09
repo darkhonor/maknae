@@ -430,8 +430,8 @@ pub struct BootReport {
 
 /// What the binary brings to boot: its persisted compiled set, that set's
 /// `vocabulary::digest`, the identity layer resolved from `bindings.yaml`, the
-/// `adversary:` names that did not resolve, whether the file is missing, whether its
-/// `bindings:` key lists nobody, and the enrolled principal's uid.
+/// `adversary:` names that did not resolve, whether the file is missing, and whether
+/// its `bindings:` key lists nobody.
 pub struct BootInputs<'a> {
     pub compiled: &'a CompiledSet,
     pub vocabulary_sha256: [u8; 32],
@@ -439,7 +439,6 @@ pub struct BootInputs<'a> {
     pub unresolved_adversaries: &'a [String],
     pub bindings_missing: bool,
     pub bindings_lists_nobody: bool,
-    pub principal_uid: u32,
     /// The baseline this boot runs and persists.
     pub baseline: &'a BaselineLayer,
     /// The digest of the accepted baseline the caller read before deciding, `None` when it read none.
@@ -450,7 +449,7 @@ pub struct BootInputs<'a> {
     pub sync: &'a SyncBase,
     /// The `SyncBase` the caller merged against; `None` when it read none.
     pub sync_seen: Option<&'a SyncBase>,
-    /// Written ahead of a persist that changes the sync base, one record each.
+    /// Written ahead of this boot's transition, if it makes one, one record each.
     pub sync_events: &'a [String],
     pub sync_kind: maknae_config::SyncKind,
 }
@@ -501,7 +500,7 @@ pub trait BootAudit {
         revision: u64,
         events: &[String],
     ) -> impl Future<Output = Result<(), StoreError>> + Send;
-    /// Written ahead of a transition that changes the sync base; an append failure
+    /// Written ahead of a transition that carries sync events; an append failure
     /// refuses as `baseline`'s does.
     fn sync(
         &mut self,
@@ -910,7 +909,7 @@ async fn load(
                 .baseline(next.revision(), inputs.baseline_events)
                 .await?;
         }
-        if sync_changed && !inputs.sync_events.is_empty() {
+        if !inputs.sync_events.is_empty() {
             audit.sync(next.revision(), inputs.sync_events).await?;
         }
         audit

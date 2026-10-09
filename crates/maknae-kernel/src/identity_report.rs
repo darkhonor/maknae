@@ -24,8 +24,8 @@ pub fn record_fields(p: &IdentityProblem) -> (&'static str, String, &'static str
     }
 }
 
-/// The store writes each release and principal promotion ahead of the persist that
-/// makes it, so neither is recorded here.
+/// The store writes each release ahead of the persist that makes it, and an accept
+/// records the principal it promotes itself, so neither is recorded here.
 fn recordable(p: &&IdentityProblem) -> bool {
     !matches!(
         p,

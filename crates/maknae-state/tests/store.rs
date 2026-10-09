@@ -145,7 +145,6 @@ impl BootAudit for Recorder {
 }
 
 const SOURCE: &str = "/etc/maknae/bindings.yaml";
-const PRINCIPAL_UID: u32 = 501;
 const MOVED_FROM: &str = "/etc/maknae/authz.yaml";
 
 struct Inputs {
@@ -216,7 +215,6 @@ impl Inputs {
             unresolved_adversaries: &self.unresolved,
             bindings_missing: self.missing,
             bindings_lists_nobody: self.lists_nobody,
-            principal_uid: PRINCIPAL_UID,
             baseline: &self.baseline,
             accepted_seen: seen,
             baseline_events: &self.events,
@@ -269,8 +267,15 @@ fn inputs_with(layer: IdentityLayer) -> Inputs {
         events: vec![SEEDED.into()],
         sync: synced(section),
         sync_seen: SyncSeen::Peek,
-        sync_events: vec![CREATED.into()],
+        sync_events: vec![],
         sync_kind: maknae_config::SyncKind::Created,
+    }
+}
+
+fn creating(i: Inputs) -> Inputs {
+    Inputs {
+        sync_events: vec![CREATED.into()],
+        ..i
     }
 }
 
@@ -1824,7 +1829,7 @@ fn migrated_digest(events: &[Event]) -> [u8; 32] {
 
 #[tokio::test]
 async fn a_store_from_before_identity_migrates_then_seeds_identity() {
-    let i = inputs();
+    let i = creating(inputs());
     let (fx, r, events, old) = boot_over_a_store_from_before_identity(1, &i).await;
     let r = r.unwrap();
     assert_eq!(
@@ -1859,7 +1864,7 @@ async fn a_store_from_before_identity_migrates_then_seeds_identity() {
 
 #[tokio::test]
 async fn a_store_from_before_identity_without_bindings_migrates_then_gains_the_baseline() {
-    let i = inputs_with(layer(None, &[]));
+    let i = creating(inputs_with(layer(None, &[])));
     let (fx, r, events, old) = boot_over_a_store_from_before_identity(1, &i).await;
     let r = r.unwrap();
     assert!(r.migration.is_some());
@@ -1886,7 +1891,7 @@ async fn a_store_from_before_identity_without_bindings_migrates_then_gains_the_b
 
 #[tokio::test]
 async fn a_pre_identity_store_checkpointed_at_its_revision_is_verified_then_migrated() {
-    let i = inputs();
+    let i = creating(inputs());
     let (_fx, r, events, _) = boot_over_a_store_from_before_identity(7, &i).await;
     let r = r.unwrap();
     assert_eq!(r.outcome, BootOutcome::Loaded(AnchorState::Verified));
@@ -3189,7 +3194,7 @@ async fn an_upgrade_store_without_a_baseline_gains_one_in_one_recorded_transitio
         revision: 4,
         digest: ciphertext_digest(&fx.store()),
     });
-    let (r, events) = run(&fx.dir(), &k, cp).await;
+    let (r, events) = run_with(&fx.dir(), &k, cp, &creating(inputs())).await;
     let r = r.unwrap();
     assert_eq!(
         &events[1..],
@@ -3719,7 +3724,7 @@ async fn a_commit_that_changes_or_drops_the_baseline_is_refused() {
 async fn a_store_without_a_sync_base_adopts_the_file_as_a_kernel_transition() {
     let (fx, k) = (Fixture::new(), key(1));
     fx.write(STORE_FILE, &sealed_unsynced(4, &k), 0o600);
-    let i = inputs();
+    let i = creating(inputs());
     let (r, events) = run_with(&fx.dir(), &k, None, &i).await;
     let r = r.unwrap();
     assert_eq!(r.revision, 5);
@@ -3793,24 +3798,36 @@ async fn an_unchanged_sync_base_and_layer_commit_nothing() {
 }
 
 #[tokio::test]
-async fn an_identity_transition_records_no_sync_event_when_the_sync_base_is_unchanged() {
+async fn a_supplied_sync_event_is_written_ahead_even_when_the_sync_base_is_unchanged() {
     let (fx, k) = (Fixture::new(), key(1));
     let (first, _) = run_with(&fx.dir(), &k, None, &inputs()).await;
     let first = first.unwrap();
-    let i = edited();
-    assert!(!i.sync_events.is_empty());
+    let lost = vec!["lost: bindings.yaml is missing".to_string()];
+    let i = Inputs {
+        sync_kind: maknae_config::SyncKind::Lost,
+        sync_events: lost.clone(),
+        ..with_baseline(
+            inputs(),
+            bl(B),
+            Seen::Exactly(Some(bl(A).sha256)),
+            &["baseline changed"],
+        )
+    };
+    assert_eq!(extracted(&first.graph).sync, Some(i.sync.clone()));
     let (r, events) = run_with(&fx.dir(), &k, checkpoint_of(&first), &i).await;
     let r = r.unwrap();
     assert_eq!(
         events,
         vec![
             Event::Checkpoint(1, first.digest, "verified".into()),
+            Event::Baseline(2, vec!["baseline changed".into()]),
+            Event::Sync(2, lost),
             Event::Transition(2, "root-file".into()),
             Event::Checkpoint(2, r.digest, "transitioned".into()),
         ]
     );
+    assert_eq!(extracted(&r.graph).sync, Some(i.sync.clone()));
 }
-
 #[tokio::test]
 async fn a_store_whose_sync_base_is_not_the_one_merged_against_refuses() {
     let (fx, k) = (Fixture::new(), key(1));

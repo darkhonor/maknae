@@ -3516,7 +3516,6 @@ struct GraphInputs {
     unresolved: Vec<String>,
     bindings_missing: bool,
     bindings_lists_nobody: bool,
-    principal_uid: u32,
     baseline: BaselineLayer,
     accepted_seen: Option<[u8; 32]>,
     baseline_events: Vec<String>,
@@ -3557,7 +3556,6 @@ impl GraphInputs {
             unresolved: source.unresolved_adversaries(),
             bindings_missing: source.bindings().is_missing(),
             bindings_lists_nobody: source.bindings().lists_nobody(),
-            principal_uid: source.principal().uid,
             baseline,
             accepted_seen: None,
             baseline_events: Vec::new(),
@@ -3580,7 +3578,6 @@ impl GraphInputs {
             unresolved_adversaries: &self.unresolved,
             bindings_missing: self.bindings_missing,
             bindings_lists_nobody: self.bindings_lists_nobody,
-            principal_uid: self.principal_uid,
             baseline: &self.baseline,
             accepted_seen: self.accepted_seen,
             baseline_events: &self.baseline_events,
@@ -3737,7 +3734,7 @@ fn unix_now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-/// Publishes the boot load's problems, releases and principal promotion; records its
+/// Publishes the boot load's problems and releases; records its
 /// problems after the composition record. The store already recorded the rest.
 async fn publish_boot_identity<E: AuditEmit + Send + Sync>(
     status: &crate::identity_report::IdentityStatus,
