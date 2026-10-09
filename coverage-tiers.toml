@@ -212,6 +212,8 @@ files = [
   "crates/maknae-config/src/bindings.rs",
   # #491: the bindings section the daemon enforces and the merge that decides it; a wrong arm releases a contained subject or overwrites root.
   "crates/maknae-config/src/bindings_sync.rs",
+  # #491: the only file the installer reads before writing /etc/maknae/bindings.yaml; a lax parse installs what the daemon never proposed.
+  "crates/maknae-config/src/mirror.rs",
   # #489: the canonical JSON each authz.yaml section's digest is taken over; a wrong
   # byte makes an unchanged section look edited, or an edited one look unchanged.
   "crates/maknae-config/src/value.rs",

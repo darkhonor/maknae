@@ -43,6 +43,7 @@ mod document;
 mod egress_cfg;
 mod error;
 mod loader;
+pub mod mirror;
 mod policy;
 mod principal;
 mod providers;
@@ -100,6 +101,10 @@ pub use error::ConfigError;
 #[cfg(all(unix, feature = "hermetic-test-seam"))]
 pub use maknae_io::TargetRequired;
 pub use maknae_security::{ClassificationPolicy, Level};
+pub use mirror::{
+    base_token, diff_lines, installable, parse_mirror, plan_sync, render_mirror, Mirror,
+    MirrorError, MirrorHeader, SyncPlan, MIRROR_BANNER, MIRROR_MAX_BYTES,
+};
 pub use policy::{BasicPolicy, LEVELS as US_LEVELS};
 pub use principal::{principal_from_section, principal_keys_known, Principal, PRINCIPAL_SECTION};
 pub use providers::{
@@ -110,7 +115,7 @@ pub use providers::{
     MAX_MODEL_BYTES, MAX_PROVIDERS, MAX_PROVIDER_NAME_BYTES, MAX_REASONING_EFFORT_BYTES,
     PROVIDERS_SECTION,
 };
-pub use state::{MARKER_FILE, STATE_DIR, STORE_FILE};
+pub use state::{MARKER_FILE, MIRROR_FILE, STATE_DIR, STORE_FILE};
 pub use transport::{
     content_write_bound, transport_from_section, TransportConfig, ADMISSION_AUDIT_TIMEOUT_MS,
     GROUP_LOOKUP_TIMEOUT_MS, HOME_RESOLVE_TIMEOUT_MS, MACOS_DAEMON_SOCKET_PATH,
