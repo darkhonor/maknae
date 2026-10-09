@@ -198,6 +198,8 @@ pub struct StateDir {
     fail_next_mirror: AtomicBool,
     #[cfg(feature = "hermetic-test-seam")]
     skip_next_mirror: AtomicBool,
+    #[cfg(feature = "hermetic-test-seam")]
+    fail_next_store: AtomicBool,
 }
 
 struct Persisted {
@@ -233,6 +235,13 @@ impl StateDir {
     #[doc(hidden)]
     pub fn fail_next_mirror_publish(&self) {
         self.fail_next_mirror.store(true, Ordering::SeqCst);
+    }
+
+    /// Test seam: the next store publish fails before anything is written.
+    #[cfg(feature = "hermetic-test-seam")]
+    #[doc(hidden)]
+    pub fn fail_next_store_publish(&self) {
+        self.fail_next_store.store(true, Ordering::SeqCst);
     }
 
     /// Test seam: the next mirror publish writes nothing and succeeds, as a crash after the commit.
@@ -290,6 +299,8 @@ impl StateDir {
             fail_next_mirror: AtomicBool::new(false),
             #[cfg(feature = "hermetic-test-seam")]
             skip_next_mirror: AtomicBool::new(false),
+            #[cfg(feature = "hermetic-test-seam")]
+            fail_next_store: AtomicBool::new(false),
         })
     }
 
@@ -409,6 +420,13 @@ impl StateDir {
     }
 
     fn publish(&self, name: &str, bytes: &[u8]) -> Result<(), IoError> {
+        #[cfg(feature = "hermetic-test-seam")]
+        if self.fail_next_store.swap(false, Ordering::SeqCst) {
+            return Err(IoError::Io {
+                path: Path::new(name).to_path_buf(),
+                kind: IoKind::Other { raw: 5 },
+            });
+        }
         self.anchor
             .publish(Path::new(name), None, bytes, STORE_MODE)?;
         #[cfg(feature = "hermetic-test-seam")]

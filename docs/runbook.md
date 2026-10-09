@@ -1129,7 +1129,7 @@ A subject that holds no role is decided like any uid the file does not list, whi
 
 ### The mirror
 
-After every change to the bindings it enforces (a start, a reload or an accept that changed them, an adoption, a live edit), `maknaed` writes the mirror: `/var/lib/maknae/bindings.mirror.yaml` on Linux, `/usr/local/var/db/maknae/state/bindings.mirror.yaml` on macOS, `_maknae`, mode `0600`. It holds usernames, roles and the contained list, never a reason. Do not edit it. The journal says `maknaed: sync: mirror revision <n> published (sha256:<12 hex>)`. The daemon removes the old mirror before it stores a change and writes the new one after, so a crash between the two leaves no mirror, never an older one, until the next start publishes it. If the old mirror cannot be removed, the change is refused: `the previous bindings mirror could not be removed before the commit: <cause>; nothing was applied`.
+After every change to the bindings it enforces (a start, a reload or an accept that changed them, an adoption, a live edit), `maknaed` writes the mirror: `/var/lib/maknae/bindings.mirror.yaml` on Linux, `/usr/local/var/db/maknae/state/bindings.mirror.yaml` on macOS, `_maknae`, mode `0600`. It holds usernames, roles and the contained list, never a reason. Do not edit it. The journal says `maknaed: sync: mirror revision <n> published (sha256:<12 hex>)`. The daemon removes the old mirror before it stores a change and writes the new one after, so a crash between the two leaves no mirror, never an older one, until the next start publishes it. If the old mirror cannot be removed, the change is refused: `the previous bindings mirror could not be removed before the commit: <cause>; nothing was applied`. A change refused for any reason marks the mirror stale (`maknae status` shows `mirror stale`), and the next reload publishes it again.
 
 ```yaml
 # maknae bindings mirror v1: install it with sudo maknae policy sync; do not edit
@@ -1193,12 +1193,14 @@ sudo launchctl kill SIGHUP system/io.maknae.maknaed    # macOS
 | 1 | `--check` found something to install or restore. |
 | 2 | Refused; the cause is on standard error as `maknae: <cause>`. Nothing was installed. |
 | 3 | Nothing to install. |
+| 4 | No mirror to install: `maknae: maknaed has published no mirror (…)` on standard error. Nothing was installed. Without a terminal the sync first waits up to 2 seconds for the mirror to appear, because `maknaed` removes the old mirror before each change and publishes the new one after it. |
 
 | Refusal | What to do |
 |---|---|
 | ``maknae policy sync must run as root: run `sudo maknae policy sync` `` | Run it with `sudo`. |
 | `bindings.yaml changed since maknaed last loaded it; reload maknaed so it merges, then sync again`, `bindings.yaml changed during the sync; nothing was installed; reload maknaed so it merges, then sync again` | Reload `maknaed`, check `maknae status` for conflicts, then sync again. |
-| `maknaed has published no mirror (its last render failed, or it stopped before publishing one: see maknae status); nothing was installed` | Read the `mirror render failed` record, fix its cause and reload. With no such record, restart `maknaed`: a start publishes the mirror. |
+| `the mirror changed during the sync; nothing was installed; run sudo maknae policy sync again` | `maknaed` published a new mirror while the sync ran. Run it again. |
+| Exit 4, `maknaed has published no mirror (it replaces the mirror after each change; if this persists, see maknae status); nothing was installed` | Usually a change is being published: run it again. If it persists and `maknae status` shows `mirror stale`, read the `mirror render failed` record, fix its cause and reload. |
 | `the mirror lists <n> conflicts; run sudo maknae policy sync on a terminal to review them`, `not installed: the conflicts were not accepted` | Run it on a terminal, review the conflicts and answer `y`, or edit those entries in `bindings.yaml` and reload. |
 | `maknaed reads its configuration from <dir>, not /etc/maknae; policy sync installs only /etc/maknae/bindings.yaml` | The daemon runs with another configuration directory. Copy the entries into its `bindings.yaml` by hand. |
 | `the mirror is not valid: <cause>`, `cannot read the mirror <path>: <cause>`, `cannot use the state directory <dir>: <cause>` | Do not edit the mirror. Check the state directory's owner and mode, then reload so the daemon writes the mirror again. |
@@ -1208,7 +1210,7 @@ sudo launchctl kill SIGHUP system/io.maknae.maknaed    # macOS
 
 ### Sync automatically (opt-in)
 
-The packages install a watcher that runs `maknae policy sync` as root each time the mirror changes, and ship it disabled. When the sync installs, the watcher reloads `maknaed` so the daemon adopts the file. That reload, like any `SIGHUP`, also applies an `authz.yaml` edit not yet reloaded. A sync with nothing to install reloads nothing, and a refused sync (exit 2, a conflict included) fails the run and reloads nothing; run the sync by hand on a terminal to see why.
+The packages install a watcher that runs `maknae policy sync` as root each time the mirror changes, and ship it disabled. When the sync installs, the watcher reloads `maknaed` so the daemon adopts the file. That reload, like any `SIGHUP`, also applies an `authz.yaml` edit not yet reloaded. A sync with nothing to install or no mirror to install (exit 3 or 4) reloads nothing and succeeds, and a refused sync (exit 2, a conflict included) fails the run and reloads nothing; run the sync by hand on a terminal to see why.
 
 On Linux, opt in, check and opt out with:
 

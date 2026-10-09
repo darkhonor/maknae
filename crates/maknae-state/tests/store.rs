@@ -4425,6 +4425,32 @@ async fn a_mirror_that_cannot_be_removed_refuses_the_commit_and_persists_nothing
     assert_eq!(audit.events, [Event::Transition(2, "root-file".into())]);
 }
 
+#[tokio::test]
+async fn a_commit_that_fails_after_the_removal_leaves_no_mirror_and_no_change() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let dir = fx.dir();
+    run(&dir, &k, None).await.0.unwrap();
+    let before = fx.store();
+    fx.write(MIRROR_FILE, b"old", 0o600);
+    dir.fail_next_store_publish();
+    let e = commit(
+        &dir,
+        &k,
+        &next_graph(2, &edited()),
+        &[],
+        &[],
+        &mut Recorder::default(),
+        INITIATOR_ROOT_FILE,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(e, StoreError::Io(_)), "{e:?}");
+    assert_eq!(fx.store(), before);
+    assert_eq!(dir.store_revision(), 1);
+    assert!(!fx.exists(MIRROR_FILE));
+}
+
 #[test]
 fn removing_the_mirror_reports_a_failure_other_than_absence() {
     let fx = Fixture::new();

@@ -5,4 +5,4 @@ After=maknaed.service
 
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c '/usr/bin/maknae policy sync; rc=$$?; case $$rc in 0) exec /usr/bin/systemctl reload maknaed.service ;; 3) exit 0 ;; *) exit $$rc ;; esac'
+ExecStart=/bin/sh -c '/usr/bin/maknae policy sync; rc=$$?; case $$rc in 0) exec /usr/bin/systemctl reload maknaed.service ;; 3|4) exit 0 ;; *) exit $$rc ;; esac'

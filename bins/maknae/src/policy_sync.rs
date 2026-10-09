@@ -10,10 +10,17 @@ use maknae_io::{
 use std::io::{BufRead, Read, Write};
 use std::path::Path;
 use std::process::ExitCode;
+use std::time::Duration;
 
 pub(crate) const CONFIG_DIR: &str = "/etc/maknae";
 
-const NO_MIRROR: &str = "maknaed has published no mirror (its last render failed, or it stopped before publishing one: see maknae status); nothing was installed";
+const NO_MIRROR: &str = "maknaed has published no mirror (it replaces the mirror after each change; if this persists, see maknae status); nothing was installed";
+
+const MIRROR_CHANGED: &str =
+    "the mirror changed during the sync; nothing was installed; run sudo maknae policy sync again";
+
+const MIRROR_POLL: Duration = Duration::from_millis(100);
+const MIRROR_POLLS: u32 = 20;
 
 #[cfg(target_os = "macos")]
 const RELOAD: &str =
@@ -38,6 +45,7 @@ pub(crate) enum Outcome {
     Installed,
     NothingToInstall,
     WouldInstall,
+    NoMirror,
 }
 
 fn preflight(euid: u32) -> Result<(), String> {
@@ -58,7 +66,7 @@ fn say(out: &mut dyn Write, line: &str) -> Result<(), String> {
     writeln!(out, "{line}").map_err(|e| format!("cannot write to standard output: {e}"))
 }
 
-fn read_mirror(state_dir: &Path, dir_owner: u32, owner: u32) -> Result<Mirror, String> {
+fn read_mirror(state_dir: &Path, dir_owner: u32, owner: u32) -> Result<Option<Mirror>, String> {
     let at = state_dir.join(MIRROR_FILE);
     let anchor = open_anchor(
         state_dir,
@@ -86,12 +94,30 @@ fn read_mirror(state_dir: &Path, dir_owner: u32, owner: u32) -> Result<Mirror, S
         Err(IoError::Io {
             kind: IoKind::NotFound,
             ..
-        }) => return Err(NO_MIRROR.into()),
+        }) => return Ok(None),
         Err(e) => return Err(format!("cannot read the mirror {}: {e}", at.display())),
     };
     let text = std::str::from_utf8(&bytes)
         .map_err(|_| "the mirror is not valid: not UTF-8".to_string())?;
-    parse_mirror(text).map_err(|e| format!("the mirror is not valid: {e}"))
+    parse_mirror(text)
+        .map(Some)
+        .map_err(|e| format!("the mirror is not valid: {e}"))
+}
+
+fn await_mirror(
+    state_dir: &Path,
+    owners: &Owners,
+    terminal: bool,
+    pause: &mut dyn FnMut(Duration),
+) -> Result<Option<Mirror>, String> {
+    let polls = if terminal { 0 } else { MIRROR_POLLS };
+    for _ in 0..polls {
+        if let Some(m) = read_mirror(state_dir, owners.state_dir, owners.mirror)? {
+            return Ok(Some(m));
+        }
+        pause(MIRROR_POLL);
+    }
+    read_mirror(state_dir, owners.state_dir, owners.mirror)
 }
 
 fn read_bindings(etc: &Anchor, config_dir: &Path, owner: u32) -> Result<Bindings, String> {
@@ -140,13 +166,20 @@ fn install(etc: &Anchor, config_dir: &Path, bytes: &[u8], owner: FileOwner) -> R
         })
 }
 
-fn still_as_planned(
-    etc: &Anchor,
-    config_dir: &Path,
-    owner: u32,
-    mirror: &Mirror,
-    restore: bool,
-) -> Result<(), String> {
+struct Planned<'a> {
+    etc: &'a Anchor,
+    state_dir: &'a Path,
+    config_dir: &'a Path,
+    owners: &'a Owners,
+    mirror: &'a Mirror,
+}
+
+fn still_as_planned(p: &Planned<'_>, restore: bool) -> Result<(), String> {
+    let (etc, config_dir, owner, mirror) = (p.etc, p.config_dir, p.owners.bindings, p.mirror);
+    match read_mirror(p.state_dir, p.owners.state_dir, p.owners.mirror)? {
+        Some(now) if now.header.revision == mirror.header.revision => {}
+        _ => return Err(MIRROR_CHANGED.into()),
+    }
     let file = read_bindings(etc, config_dir, owner)?;
     match plan_sync(mirror, &Section::of(&file), sha256, CONFIG_DIR) {
         SyncPlan::Restore { .. } if restore => Ok(()),
@@ -185,16 +218,29 @@ fn confirm(
     }
 }
 
+pub(crate) struct Console<'a> {
+    answer: &'a mut dyn BufRead,
+    terminal: bool,
+    out: &'a mut dyn Write,
+    pause: &'a mut dyn FnMut(Duration),
+}
+
 pub(crate) fn sync(
     state_dir: &Path,
     config_dir: &Path,
     owners: Owners,
     check: bool,
-    answer: &mut dyn BufRead,
-    terminal: bool,
-    out: &mut dyn Write,
+    console: Console<'_>,
 ) -> Result<Outcome, String> {
-    let mirror = read_mirror(state_dir, owners.state_dir, owners.mirror)?;
+    let Console {
+        answer,
+        terminal,
+        out,
+        pause,
+    } = console;
+    let Some(mirror) = await_mirror(state_dir, &owners, terminal, pause)? else {
+        return Ok(Outcome::NoMirror);
+    };
     if mirror.header.config_dir != CONFIG_DIR {
         return Err(other_config_dir(&mirror.header.config_dir));
     }
@@ -209,6 +255,13 @@ pub(crate) fn sync(
     .map_err(|e| format!("cannot use {}: {e}", config_dir.display()))?;
     let file = read_bindings(&etc, config_dir, owners.bindings)?;
     let revision = mirror.header.revision;
+    let planned = Planned {
+        etc: &etc,
+        state_dir,
+        config_dir,
+        owners: &owners,
+        mirror: &mirror,
+    };
     match plan_sync(&mirror, &Section::of(&file), sha256, CONFIG_DIR) {
         SyncPlan::OtherConfigDir { found } => Err(other_config_dir(&found)),
         SyncPlan::NothingToInstall => {
@@ -243,7 +296,7 @@ pub(crate) fn sync(
             if check {
                 return Ok(Outcome::WouldInstall);
             }
-            still_as_planned(&etc, config_dir, owners.bindings, &mirror, true)?;
+            still_as_planned(&planned, true)?;
             install(&etc, config_dir, bytes.as_bytes(), owners.file)?;
             let _ = writeln!(
                 out,
@@ -275,7 +328,7 @@ pub(crate) fn sync(
             if !conflicts.is_empty() {
                 confirm(conflicts.len(), answer, terminal, out)?;
             }
-            still_as_planned(&etc, config_dir, owners.bindings, &mirror, false)?;
+            still_as_planned(&planned, false)?;
             install(&etc, config_dir, bytes.as_bytes(), owners.file)?;
             let _ = writeln!(
                 out,
@@ -293,6 +346,7 @@ fn exit_code(r: &Result<Outcome, String>) -> u8 {
         Ok(Outcome::WouldInstall) => 1,
         Err(_) => 2,
         Ok(Outcome::NothingToInstall) => 3,
+        Ok(Outcome::NoMirror) => 4,
     }
 }
 
@@ -325,15 +379,24 @@ fn production(euid: u32, check: bool) -> Result<Outcome, String> {
         Path::new(CONFIG_DIR),
         owners,
         check,
-        &mut stdin.lock(),
-        crate::tty::stdin_is_terminal(),
-        &mut std::io::stdout(),
+        Console {
+            answer: &mut stdin.lock(),
+            terminal: crate::tty::stdin_is_terminal(),
+            out: &mut std::io::stdout(),
+            pause: &mut std::thread::sleep,
+        },
     )
 }
 
 fn finish(r: &Result<Outcome, String>, err: &mut dyn Write) -> u8 {
-    if let Err(e) = r {
-        let _ = writeln!(err, "maknae: {}", terminal_safe(e));
+    match r {
+        Err(e) => {
+            let _ = writeln!(err, "maknae: {}", terminal_safe(e));
+        }
+        Ok(Outcome::NoMirror) => {
+            let _ = writeln!(err, "maknae: {NO_MIRROR}");
+        }
+        Ok(_) => {}
     }
     exit_code(r)
 }
@@ -464,9 +527,12 @@ mod tests {
                 &self.config_dir(),
                 owners,
                 check,
-                &mut answer.as_bytes(),
-                terminal,
-                out,
+                Console {
+                    answer: &mut answer.as_bytes(),
+                    terminal,
+                    out,
+                    pause: &mut |_| {},
+                },
             )
         }
 
@@ -597,7 +663,8 @@ mod tests {
 
     struct RootEdits<'a, T> {
         path: PathBuf,
-        body: Option<&'static str>,
+        body: Option<String>,
+        mode: u32,
         edited: bool,
         inner: &'a mut T,
     }
@@ -605,8 +672,8 @@ mod tests {
     impl<T> RootEdits<'_, T> {
         fn edit(&mut self) {
             if !std::mem::replace(&mut self.edited, true) {
-                match self.body {
-                    Some(body) => Fx::write(&self.path, body, 0o640),
+                match &self.body {
+                    Some(body) => Fx::write(&self.path, body, self.mode),
                     None => std::fs::remove_file(&self.path).unwrap(),
                 }
             }
@@ -645,13 +712,15 @@ mod tests {
     #[test]
     fn a_root_edit_while_the_prompt_waits_is_kept_and_nothing_is_installed() {
         for body in [Some(ROOT_EDIT), Some("schema_version: 1\n"), None] {
+            let body = body.map(str::to_string);
             let fx = Fx::new();
             fx.config("bindings.yaml", BASE);
             fx.mirror(&mirror_over(BASE, LIVE, &[BindingEntry::Uid(4242)]));
             let mut answer: &[u8] = b"y\n";
             let mut prompt = RootEdits {
                 path: fx.config_dir().join("bindings.yaml"),
-                body,
+                body: body.clone(),
+                mode: 0o640,
                 edited: false,
                 inner: &mut answer,
             };
@@ -661,15 +730,18 @@ mod tests {
                 &fx.config_dir(),
                 me(),
                 false,
-                &mut prompt,
-                true,
-                &mut out,
+                Console {
+                    answer: &mut prompt,
+                    terminal: true,
+                    out: &mut out,
+                    pause: &mut |_| {},
+                },
             );
             assert!(prompt.edited);
             assert_eq!(exit_code(&r), 2, "{body:?}");
             assert_eq!(r.unwrap_err(), CHANGED_DURING, "{body:?}");
             let kept = std::fs::read_to_string(fx.config_dir().join("bindings.yaml")).ok();
-            assert_eq!(kept.as_deref(), body);
+            assert_eq!(kept, body);
             assert!(!String::from_utf8(out).unwrap().contains("installed"));
         }
     }
@@ -682,7 +754,8 @@ mod tests {
             let mut sink = Vec::new();
             let mut out = RootEdits {
                 path: fx.config_dir().join("bindings.yaml"),
-                body: Some(body),
+                body: Some(body.into()),
+                mode: 0o640,
                 edited: false,
                 inner: &mut sink,
             };
@@ -869,9 +942,12 @@ mod tests {
             &fx.config_dir(),
             own(uid, gid),
             false,
-            &mut answer,
-            false,
-            &mut Vec::new(),
+            Console {
+                answer: &mut answer,
+                terminal: false,
+                out: &mut Vec::new(),
+                pause: &mut |_| {},
+            },
         );
         assert!(r.is_err());
         assert_eq!(answer, b"y\n");
@@ -965,15 +1041,105 @@ mod tests {
         assert_eq!(exit_code(&Ok(Outcome::Installed)), 0);
         assert_eq!(exit_code(&Ok(Outcome::NothingToInstall)), 3);
         assert_eq!(exit_code(&Ok(Outcome::WouldInstall)), 1);
+        assert_eq!(exit_code(&Ok(Outcome::NoMirror)), 4);
         assert_eq!(exit_code(&Err("x".into())), 2);
     }
 
     #[test]
-    fn no_mirror_refuses_even_when_the_file_is_lost() {
+    fn no_mirror_is_its_own_outcome_even_when_the_file_is_lost() {
+        assert_eq!(NO_MIRROR, "maknaed has published no mirror (it replaces the mirror after each change; if this persists, see maknae status); nothing was installed");
+        for terminal in [true, false] {
+            let fx = Fx::new();
+            let r = fx.sync(false, "", terminal);
+            assert!(matches!(r, Ok(Outcome::NoMirror)), "{r:?}");
+            assert!(!fx.config_dir().join("bindings.yaml").exists());
+        }
+    }
+
+    fn sync_pausing(
+        fx: &Fx,
+        terminal: bool,
+        pause: &mut dyn FnMut(Duration),
+    ) -> Result<Outcome, String> {
+        sync(
+            &fx.state_dir(),
+            &fx.config_dir(),
+            me(),
+            false,
+            Console {
+                answer: &mut "".as_bytes(),
+                terminal,
+                out: &mut Vec::new(),
+                pause,
+            },
+        )
+    }
+
+    #[test]
+    fn without_a_terminal_a_missing_mirror_is_awaited_for_two_seconds() {
         let fx = Fx::new();
-        let e = fx.sync(false, "", false).unwrap_err();
-        assert_eq!(e, "maknaed has published no mirror (its last render failed, or it stopped before publishing one: see maknae status); nothing was installed");
-        assert!(!fx.config_dir().join("bindings.yaml").exists());
+        let mut paused = Vec::new();
+        let r = sync_pausing(&fx, false, &mut |d| paused.push(d));
+        assert!(matches!(r, Ok(Outcome::NoMirror)), "{r:?}");
+        assert_eq!(paused, vec![Duration::from_millis(100); 20]);
+
+        let mut paused = 0;
+        let r = sync_pausing(&fx, true, &mut |_| paused += 1);
+        assert!(matches!(r, Ok(Outcome::NoMirror)), "{r:?}");
+        assert_eq!(paused, 0, "a terminal run does not wait");
+    }
+
+    #[test]
+    fn a_mirror_published_during_the_wait_is_installed() {
+        let fx = Fx::new();
+        fx.config("bindings.yaml", BASE);
+        let mut paused = 0;
+        let r = sync_pausing(&fx, false, &mut |_| {
+            paused += 1;
+            if paused == 3 {
+                fx.mirror(&mirror_over(BASE, LIVE, &[]));
+            }
+        });
+        assert!(matches!(r, Ok(Outcome::Installed)), "{r:?}");
+        assert_eq!(paused, 3);
+        assert!(fx
+            .read_config("bindings.yaml")
+            .contains("    - uid: 4242\n"));
+    }
+
+    #[test]
+    fn a_mirror_that_changes_while_the_prompt_waits_is_not_installed() {
+        let next = mirror_over(BASE, LIVE, &[BindingEntry::Uid(4242)])
+            .replace("# revision: 7", "# revision: 8");
+        for body in [Some(next), None] {
+            let fx = Fx::new();
+            fx.config("bindings.yaml", BASE);
+            fx.mirror(&mirror_over(BASE, LIVE, &[BindingEntry::Uid(4242)]));
+            let mut answer: &[u8] = b"y\n";
+            let mut prompt = RootEdits {
+                path: fx.state_dir().join(MIRROR_FILE),
+                body: body.clone(),
+                mode: 0o600,
+                edited: false,
+                inner: &mut answer,
+            };
+            let r = sync(
+                &fx.state_dir(),
+                &fx.config_dir(),
+                me(),
+                false,
+                Console {
+                    answer: &mut prompt,
+                    terminal: true,
+                    out: &mut Vec::new(),
+                    pause: &mut |_| {},
+                },
+            );
+            assert!(prompt.edited);
+            assert_eq!(exit_code(&r), 2, "{body:?}");
+            assert_eq!(r.unwrap_err(), MIRROR_CHANGED, "{body:?}");
+            assert_eq!(fx.read_config("bindings.yaml"), BASE);
+        }
     }
 
     #[test]
@@ -983,6 +1149,11 @@ mod tests {
         assert!(
             prod.contains("sync(\n        Path::new(STATE_DIR),\n        Path::new(CONFIG_DIR),")
                 || prod.contains("sync(Path::new(STATE_DIR), Path::new(CONFIG_DIR),")
+        );
+        assert!(prod.contains("pause: &mut std::thread::sleep,"));
+        assert_eq!(
+            (MIRROR_POLL, MIRROR_POLLS),
+            (Duration::from_millis(100), 20)
         );
         assert_eq!(CONFIG_DIR, "/etc/maknae");
     }
@@ -1234,6 +1405,12 @@ mod tests {
         let mut quiet = Vec::new();
         finish(&Ok(Outcome::NothingToInstall), &mut quiet);
         assert!(quiet.is_empty());
+        let mut said = Vec::new();
+        assert_eq!(finish(&Ok(Outcome::NoMirror), &mut said), 4);
+        assert_eq!(
+            String::from_utf8(said).unwrap(),
+            format!("maknae: {NO_MIRROR}\n")
+        );
     }
 
     #[test]
@@ -1369,9 +1546,9 @@ mod tests {
         assert!(read("deb/prerm")
             .contains("systemctl disable maknae-policy-sync.path maknae-policy-sync.service"));
         let unit = read("common/maknae-policy-sync.service");
-        assert!(unit.contains("ExecStart=/bin/sh -c '/usr/bin/maknae policy sync; rc=$$?; case $$rc in 0) exec /usr/bin/systemctl reload maknaed.service ;; 3) exit 0 ;; *) exit $$rc ;; esac'"));
+        assert!(unit.contains("ExecStart=/bin/sh -c '/usr/bin/maknae policy sync; rc=$$?; case $$rc in 0) exec /usr/bin/systemctl reload maknaed.service ;; 3|4) exit 0 ;; *) exit $$rc ;; esac'"));
         assert!(!unit.contains("ExecStartPost"));
-        assert!(read("macos/io.maknae.policy-sync.plist").contains("<string>/usr/local/bin/maknae policy sync; rc=$?; case $rc in 0) exec /bin/launchctl kill SIGHUP system/io.maknae.maknaed ;; 3) exit 0 ;; *) exit $rc ;; esac</string>"));
+        assert!(read("macos/io.maknae.policy-sync.plist").contains("<string>/usr/local/bin/maknae policy sync; rc=$?; case $rc in 0) exec /bin/launchctl kill SIGHUP system/io.maknae.maknaed ;; 3|4) exit 0 ;; *) exit $rc ;; esac</string>"));
         assert_eq!(
             read("common/80-maknae.preset")
                 .lines()

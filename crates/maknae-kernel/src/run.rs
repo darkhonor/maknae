@@ -3667,6 +3667,12 @@ fn graph_refusal(failure: GraphFailure, state_dir: &Path) -> RunError {
                     state_dir.display()
                 )
             }
+            Remedy::CheckStateDir if matches!(e, StoreError::MirrorNotRemoved(_)) => format!(
+                "remove {0}/{MIRROR}, which maknaed could not remove, and check the ownership \
+                 and mode of {0}: it must be owned by the maknaed user, mode 0700",
+                state_dir.display(),
+                MIRROR = maknae_config::MIRROR_FILE
+            ),
             Remedy::CheckStateDir => format!(
                 "check the ownership and mode of {}: it must be owned by the maknaed user, \
                  mode 0700",
@@ -4235,6 +4241,7 @@ where
             &self.dir, &self.key, &graph, &released, &events, &mut audit, who,
         )
         .await
+        .inspect_err(|_| self.sync.set_stale(true))
         .map_err(|e| e.to_string())?;
         *self
             .persisted
@@ -4485,6 +4492,7 @@ where
             &mut audit,
         )
         .await
+        .inspect_err(|_| self.sync.set_stale(true))
         {
             Ok(committed) => committed,
             Err(e) if *self.drain.borrow() == Drain::Begun => {
@@ -4859,6 +4867,7 @@ where
                 initiator,
             )
             .await
+            .inspect_err(|_| self.reloader.sync.set_stale(true))
             .map_err(|e| match e {
                 StoreError::BaselineUnrecorded => crate::reload::Refusal::BaselineChanged,
                 e => crate::reload::Refusal::Persist(e.to_string()),
@@ -8635,6 +8644,16 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             e.to_string()
                 .contains("the previous bindings mirror could not be removed before the commit: "),
             "{e}"
+        );
+        let RunError::Graph { hint, .. } = &e else {
+            panic!("{e:?}")
+        };
+        assert!(
+            hint.starts_with(&format!(
+                "remove {}/bindings.mirror.yaml, which maknaed could not remove, and check the ownership and mode of ",
+                fx.state.display()
+            )),
+            "{hint}"
         );
         assert!(!fx.state.join(STORE_FILE).exists());
         assert!(mirror.join("x").exists());
@@ -15462,6 +15481,60 @@ mod reload_tests {
             other => panic!("expected an accepted view, got {other:?}"),
         }
         assert!(!mirror.exists(), "accept");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_commit_refused_after_the_mirror_went_marks_it_stale_and_a_load_republishes_it() {
+        let fx = Fx::with_baseline("mirror-commit-refused").await;
+        fx.write_bindings(ROOT_ADMIN_OTHER);
+        assert!(bounded(fx.reloader.run()).await.unwrap().persisted);
+        let mirror = fx.state_dir().join(MIRROR_FILE);
+        let stale = ["unsynced=0", "conflict=0", "mirror=stale"];
+        let healed = |what: &str| {
+            assert_eq!(mirror_revision(&fx), running_revision(&fx), "{what}");
+            assert_eq!(fx.sync_lines(), ["unsynced=0", "conflict=0"], "{what}");
+        };
+
+        fx.reloader.dir.fail_next_store_publish();
+        let r = bounded(fx.reloader.live_edit(
+            live_contain(BindingEntry::Uid(4242)),
+            LiveInitiator::Operator,
+        ))
+        .await;
+        assert!(r.is_err(), "{r:?}");
+        assert!(!mirror.exists(), "live edit");
+        assert_eq!(fx.sync_lines(), stale, "live edit");
+        assert!(!bounded(fx.reloader.run()).await.unwrap().persisted);
+        healed("live edit");
+
+        fx.write_bindings(ROOT_ADMIN);
+        fx.reloader.dir.fail_next_store_publish();
+        let _ = bounded(fx.reloader.run()).await;
+        assert!(!mirror.exists(), "reload");
+        assert_eq!(fx.sync_lines(), stale, "reload");
+        fx.write_bindings(ROOT_ADMIN_OTHER);
+        assert!(!bounded(fx.reloader.run()).await.unwrap().persisted);
+        healed("reload");
+
+        let uid = nix::unistd::geteuid().as_raw().wrapping_add(1);
+        fx.write_yaml_principal(uid, "");
+        let shown = fx.show().await;
+        fx.reloader.dir.fail_next_store_publish();
+        let answer = fx.accept(&shown.hash).await;
+        assert!(
+            !matches!(
+                answer,
+                AcceptAnswer::View {
+                    corrective: None,
+                    ..
+                }
+            ),
+            "{answer:?}"
+        );
+        assert!(!mirror.exists(), "accept");
+        assert_eq!(fx.sync_lines(), stale, "accept");
+        assert!(!bounded(fx.reloader.run()).await.unwrap().persisted);
+        healed("accept");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
