@@ -85,6 +85,9 @@ phase1() {
         && ok "arm64-only constraint" || fail "arm64 constraint MISSING"
     grep -q '<os-version min="26.0"/>' "$HERE/distribution.xml" \
         && ok "macOS 26 floor" || fail "macOS 26 floor MISSING"
+    [ "$(grep -o 'choice="io.maknae.[a-z]*"' "$HERE/distribution.xml" | tr '\n' ' ')" \
+        = 'choice="io.maknae.cli" choice="io.maknae.daemon" ' ] \
+        && ok "the CLI installs before the daemon" || fail "the daemon installs before the CLI"
 
     for s in "$HERE/scripts/preinstall" "$HERE/scripts/postinstall" \
              "$HERE/uninstall.sh" "$HERE/build-pkg.sh" "$HERE/smoke.sh" \
