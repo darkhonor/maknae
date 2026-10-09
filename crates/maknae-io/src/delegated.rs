@@ -815,13 +815,9 @@ mod tests {
     /// EACCES -- which is the whole reason ADR-0009 decision 4 exists.
     #[test]
     fn the_kernel_reported_path_survives_a_directory_the_reader_cannot_traverse() {
-        if nix::unistd::geteuid().is_root() {
-            crate::testutil::skip_or_fail(
-                "the_kernel_reported_path_survives_a_directory_the_reader_cannot_traverse",
-                "running as root, which traverses a 0000 directory and voids the premise",
-            );
-            return;
-        }
+        crate::testutil::unprivileged(
+            "delegated::tests::the_kernel_reported_path_survives_a_directory_the_reader_cannot_traverse",
+            || {
         let root = tempfile::tempdir().expect("tempdir");
         let home = root.path().join("home");
         std::fs::create_dir_all(&home).expect("mkdir home");
@@ -855,6 +851,8 @@ mod tests {
             got.expect("the fd table needs NO permission on the object's directory")
                 .path,
             secret_c,
+        );
+            },
         );
     }
 

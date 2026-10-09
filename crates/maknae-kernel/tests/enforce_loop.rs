@@ -1022,26 +1022,34 @@ async fn filesystem_access_for_users_and_admins_keeps_path_refusals_and_the_os_a
             None,
             || {
                 std::fs::set_permissions(&allowed, std::fs::Permissions::from_mode(0o000)).unwrap();
-                if std::fs::read(&allowed).is_ok() {
-                    panic!("premise void: this process reads a 0000 file (root?)")
-                }
+                assert_eq!(
+                    std::fs::read(&allowed).is_ok(),
+                    me.is_root(),
+                    "only root reads a 0000 file"
+                );
             },
         )
         .await;
         std::fs::remove_file(&allowed).unwrap();
-        assert_eq!(
-            run.finish,
-            Some(maknae_proto::ReportedFinish::OsRefused),
-            "{role}"
-        );
-        assert_eq!(read_content(&run), None);
+        let (finish, content, status) = if me.is_root() {
+            (
+                maknae_proto::ReportedFinish::Success,
+                Some(&b"os-refused-sentinel"[..]),
+                maknae_audit_append::MutationStatus::ReportedSuccess,
+            )
+        } else {
+            (
+                maknae_proto::ReportedFinish::OsRefused,
+                None,
+                maknae_audit_append::MutationStatus::ReportedOsRefused,
+            )
+        };
+        assert_eq!(run.finish, Some(finish), "{role}");
+        assert_eq!(read_content(&run), content);
         let records = emit.records();
         assert_eq!(request_record(&records).outcome.result, "permit");
         let last = mutation_of(records.last().unwrap());
-        assert_eq!(
-            last.status,
-            maknae_audit_append::MutationStatus::ReportedOsRefused
-        );
+        assert_eq!(last.status, status);
         assert_eq!(
             last.origin,
             maknae_audit_append::MutationOrigin::ClientReported

@@ -361,6 +361,9 @@ mod tests {
 
     #[test]
     fn unexpected_exclusive_create_error_cannot_be_retried_after_permission_change() {
+        crate::testutil::unprivileged(
+            "audit_append::tests::unexpected_exclusive_create_error_cannot_be_retried_after_permission_change",
+            || {
         use std::os::unix::fs::PermissionsExt;
         let d = tempfile::tempdir().unwrap();
         let path = d.path().join("entry");
@@ -394,6 +397,8 @@ mod tests {
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
         assert_eq!(calls, 2);
         assert_eq!(std::fs::read(path).unwrap(), b"later winner\n");
+            },
+        );
     }
 
     #[test]

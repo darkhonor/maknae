@@ -814,31 +814,28 @@ mod tests {
 
     #[test]
     fn resolve_dir_needs_no_read_permission_on_the_directory() {
-        use std::os::unix::fs::PermissionsExt;
-        if nix::unistd::Uid::effective().is_root() {
-            crate::testutil::skip_or_fail(
-                "resolve_dir_needs_no_read_permission_on_the_directory",
-                "running as root, which ignores the 0o100 permission bits the \
-                 fixture depends on",
-            );
-            return;
-        }
-        let base = std::env::temp_dir().join(format!("rd_search_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        let dir = base.join("searchonly");
-        std::fs::create_dir_all(&dir).unwrap();
-        let readable = super::resolve_dir(&dir).expect("a readable dir resolves");
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o100)).unwrap();
-        let readable_open = crate::syscall::open_parent_by_path(&dir);
-        let search_only = super::resolve_dir(&dir);
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let _ = std::fs::remove_dir_all(&base);
+        crate::testutil::unprivileged(
+            "anchor::tests::resolve_dir_needs_no_read_permission_on_the_directory",
+            || {
+                use std::os::unix::fs::PermissionsExt;
+                let base = std::env::temp_dir().join(format!("rd_search_{}", std::process::id()));
+                let _ = std::fs::remove_dir_all(&base);
+                let dir = base.join("searchonly");
+                std::fs::create_dir_all(&dir).unwrap();
+                let readable = super::resolve_dir(&dir).expect("a readable dir resolves");
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o100)).unwrap();
+                let readable_open = crate::syscall::open_parent_by_path(&dir);
+                let search_only = super::resolve_dir(&dir);
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+                let _ = std::fs::remove_dir_all(&base);
 
-        assert!(
-            readable_open.is_err(),
-            "the fixture must refuse a read open"
+                assert!(
+                    readable_open.is_err(),
+                    "the fixture must refuse a read open"
+                );
+                assert_eq!(search_only.expect("a search-only dir resolves"), readable);
+            },
         );
-        assert_eq!(search_only.expect("a search-only dir resolves"), readable);
     }
 
     /// Fail-closed: a path with no directory behind it is an error, never a
@@ -862,28 +859,26 @@ mod tests {
 
     #[test]
     fn resolve_dir_needs_no_permission_on_the_directory_itself() {
-        if nix::unistd::Uid::effective().is_root() {
-            crate::testutil::skip_or_fail(
-                "resolve_dir_needs_no_permission_on_the_directory_itself",
-                "running as root, which ignores the 0o000 permission bits the fixture depends on",
-            );
-            return;
-        }
-        let base = std::env::temp_dir().join(format!("rd_noperm_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        let dir = base.join("noperm");
-        std::fs::create_dir_all(&dir).unwrap();
-        let open = super::resolve_dir(&dir).expect("an open directory resolves");
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let refused = crate::syscall::open_parent_by_path(&dir);
-        let closed = super::resolve_dir(&dir);
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let _ = std::fs::remove_dir_all(&base);
+        crate::testutil::unprivileged(
+            "anchor::tests::resolve_dir_needs_no_permission_on_the_directory_itself",
+            || {
+                let base = std::env::temp_dir().join(format!("rd_noperm_{}", std::process::id()));
+                let _ = std::fs::remove_dir_all(&base);
+                let dir = base.join("noperm");
+                std::fs::create_dir_all(&dir).unwrap();
+                let open = super::resolve_dir(&dir).expect("an open directory resolves");
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+                let refused = crate::syscall::open_parent_by_path(&dir);
+                let closed = super::resolve_dir(&dir);
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+                let _ = std::fs::remove_dir_all(&base);
 
-        assert!(refused.is_err(), "the fixture must refuse a read open");
-        assert_eq!(
-            closed.expect("a directory with no permission bits resolves"),
-            open
+                assert!(refused.is_err(), "the fixture must refuse a read open");
+                assert_eq!(
+                    closed.expect("a directory with no permission bits resolves"),
+                    open
+                );
+            },
         );
     }
 
@@ -1051,11 +1046,6 @@ mod tests {
     /// the only way to observe this arm without root.
     #[test]
     fn read_absolute_refuses_a_target_owned_by_another_uid() {
-        assert_ne!(
-            nix::unistd::geteuid().as_raw(),
-            0,
-            "fixture requires a non-root test user"
-        );
         let d = dir(0o750);
         let f = d.path().join("owned.yaml");
         std::fs::write(&f, b"core:\n  a: 1\n").unwrap();
@@ -1301,11 +1291,6 @@ mod tests {
 
     #[test]
     fn anchor_required_owner_refused() {
-        assert_ne!(
-            nix::unistd::geteuid().as_raw(),
-            0,
-            "fixture requires a non-root test user"
-        );
         let d = dir(0o750);
         let a = d.path().join("cfg");
         std::fs::create_dir(&a).unwrap();
@@ -2298,49 +2283,45 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn execute_only_descendant_separates_the_two_lanes() {
-        // root ignores permission bits, so the discriminator disappears under it.
-        if nix::unistd::Uid::effective().is_root() {
-            crate::testutil::skip_or_fail(
-                "execute_only_descendant_separates_the_two_lanes",
-                "running as root, which ignores the 0o311 permission bits the \
-                 fixture depends on",
-            );
-            return;
-        }
-        let d = dir(0o750);
-        let a = anchor_pref(d.path(), "cfg", StrategyPref::Auto);
-        let sub = a.path.join("config.d");
-        std::fs::create_dir(&sub).unwrap();
-        std::fs::write(sub.join("10-x.yaml"), b"lane").unwrap();
-        // Execute-only: traversable, not readable.
-        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o311)).unwrap();
+        crate::testutil::unprivileged(
+            "anchor::tests::execute_only_descendant_separates_the_two_lanes",
+            || {
+                let d = dir(0o750);
+                let a = anchor_pref(d.path(), "cfg", StrategyPref::Auto);
+                let sub = a.path.join("config.d");
+                std::fs::create_dir(&sub).unwrap();
+                std::fs::write(sub.join("10-x.yaml"), b"lane").unwrap();
+                // Execute-only: traversable, not readable.
+                std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o311)).unwrap();
 
-        if a.probed_capability() != Strategy::Openat2 {
-            crate::testutil::skip_or_fail(
-                "execute_only_descendant_separates_the_two_lanes",
-                "openat2 is not available, so the two lanes are not discriminated",
-            );
-            return;
-        }
+                if a.probed_capability() != Strategy::Openat2 {
+                    crate::testutil::skip_or_fail(
+                        "execute_only_descendant_separates_the_two_lanes",
+                        "openat2 is not available, so the two lanes are not discriminated",
+                    );
+                    return;
+                }
 
-        let out = a
-            .read(Path::new("config.d/10-x.yaml"), None, t_req())
-            .expect("openat2 traverses an execute-only directory");
-        assert_eq!(out.effective_strategy, Strategy::Openat2);
-        assert_eq!(&out.value[..], b"lane");
+                let out = a
+                    .read(Path::new("config.d/10-x.yaml"), None, t_req())
+                    .expect("openat2 traverses an execute-only directory");
+                assert_eq!(out.effective_strategy, Strategy::Openat2);
+                assert_eq!(&out.value[..], b"lane");
 
-        // Same anchor, same path, portable lane forced: the walk must open the
-        // directory for reading and cannot.
-        let p = anchor_pref(d.path(), "cfg", StrategyPref::ForcePortable);
-        let err = p
-            .read(Path::new("config.d/10-x.yaml"), None, t_req())
-            .expect_err("portable walk must be refused by an execute-only directory");
-        assert!(
-            matches!(err, IoError::Io { .. }),
-            "expected EACCES-backed refusal, got {err:?}"
+                // Same anchor, same path, portable lane forced: the walk must open the
+                // directory for reading and cannot.
+                let p = anchor_pref(d.path(), "cfg", StrategyPref::ForcePortable);
+                let err = p
+                    .read(Path::new("config.d/10-x.yaml"), None, t_req())
+                    .expect_err("portable walk must be refused by an execute-only directory");
+                assert!(
+                    matches!(err, IoError::Io { .. }),
+                    "expected EACCES-backed refusal, got {err:?}"
+                );
+
+                std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o750)).unwrap();
+            },
         );
-
-        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o750)).unwrap();
     }
 
     /// ForcePortable must win over an available capability, on every platform.
