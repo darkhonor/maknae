@@ -4087,6 +4087,7 @@ where
         let next = match maknae_graph::identity::build(
             &stored.layer,
             Some(&next_baseline),
+            None,
             &self.vocabulary.persisted,
             self.vocabulary.digest,
             store_revision.saturating_add(1),
@@ -4394,6 +4395,7 @@ fn load_candidate<B: maknae_authz_basic::Baseline, E>(
             maknae_graph::identity::build(
                 &next,
                 Some(stored_baseline),
+                None,
                 &vocabulary.persisted,
                 vocabulary.digest,
                 revision,
@@ -6900,6 +6902,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
                 }],
             },
             None,
+            None,
             &vocabulary.persisted,
             vocabulary.digest,
             1,
@@ -7947,6 +7950,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         let old = maknae_graph::identity::build(
             &inputs.identity,
             None,
+            None,
             &inputs.vocabulary.persisted,
             inputs.vocabulary.digest,
             3,
@@ -8795,6 +8799,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         let next = maknae_graph::identity::build(
             &e.layer,
             baseline,
+            None,
             &vocab.persisted,
             vocab.digest,
             graph.revision() + 1,
@@ -12399,6 +12404,7 @@ mod reload_tests {
         let bare = maknae_graph::identity::build(
             &e.layer,
             None,
+            None,
             &vocab.persisted,
             vocab.digest,
             current.revision(),
@@ -12426,6 +12432,7 @@ mod reload_tests {
         let forged = maknae_graph::identity::build(
             &e.layer,
             Some(&other),
+            None,
             &vocab.persisted,
             vocab.digest,
             current.revision(),

@@ -368,6 +368,7 @@ fn sealed_graph(revision: u64, k: &WrappingKey) -> Vec<u8> {
     let g = identity::build(
         &i.layer,
         Some(&bl(A)),
+        None,
         &i.compiled,
         i.digest,
         revision,
@@ -1876,16 +1877,24 @@ async fn forged_vocabulary_refuses() {
     let i = inputs();
     let l = layer(None, &[]);
     let claims_binary =
-        identity::build(&l, None, &wider(), i.digest, 1, ProvenanceKind::Seed).unwrap();
-    let roles_only =
-        identity::build(&l, None, &i.compiled, i.digest, 1, ProvenanceKind::Seed).unwrap();
+        identity::build(&l, None, None, &wider(), i.digest, 1, ProvenanceKind::Seed).unwrap();
+    let roles_only = identity::build(
+        &l,
+        None,
+        None,
+        &i.compiled,
+        i.digest,
+        1,
+        ProvenanceKind::Seed,
+    )
+    .unwrap();
     let no_digest = rebuild(
         &roles_only,
         |n| (n.key != VOCABULARY_SOURCE_KEY).then(|| n.clone()),
         &i.compiled,
     );
     let stale_claim =
-        identity::build(&l, None, &wider(), [7; 32], 1, ProvenanceKind::Seed).unwrap();
+        identity::build(&l, None, None, &wider(), [7; 32], 1, ProvenanceKind::Seed).unwrap();
     for forged in [claims_binary, no_digest, stale_claim] {
         let fx = Fixture::new();
         let file = seal_graph(&forged, &k);
@@ -1934,6 +1943,7 @@ async fn a_binds_to_a_vanished_role_is_dropped_and_reported() {
     let g = identity::build(
         &stored,
         Some(&bl(A)),
+        None,
         &wider(),
         wide,
         1,
@@ -2048,6 +2058,7 @@ fn next_graph(revision: u64, i: &Inputs) -> Graph {
     identity::build(
         &i.layer,
         Some(&bl(A)),
+        None,
         &i.compiled,
         i.digest,
         revision,
@@ -2462,6 +2473,7 @@ async fn a_stored_node_the_identity_layer_does_not_project_is_rewritten() {
     let clean = identity::build(
         &i.layer,
         Some(&bl(A)),
+        None,
         &i.compiled,
         i.digest,
         1,
@@ -3271,6 +3283,7 @@ async fn an_upgrade_store_without_a_baseline_gains_one_in_one_recorded_transitio
     let old = identity::build(
         &i.layer,
         None,
+        None,
         &i.compiled,
         i.digest,
         4,
@@ -3470,6 +3483,7 @@ async fn an_upgrade_store_read_as_having_a_baseline_is_refused() {
     let old = identity::build(
         &i.layer,
         None,
+        None,
         &i.compiled,
         i.digest,
         1,
@@ -3562,6 +3576,7 @@ async fn a_store_with_a_baseline_is_canonical() {
     let g = identity::build(
         &i.layer,
         Some(&bl(B)),
+        None,
         &i.compiled,
         i.digest,
         3,
@@ -3586,6 +3601,7 @@ async fn a_non_canonical_store_is_rebuilt_with_its_baseline() {
     let g = identity::build(
         &i.layer,
         Some(&bl(B)),
+        None,
         &i.compiled,
         i.digest,
         3,
@@ -3679,6 +3695,7 @@ async fn an_operator_commit_records_the_operator_initiator() {
     let next = identity::build(
         &i.layer,
         Some(&bl(A)),
+        None,
         &i.compiled,
         i.digest,
         2,
@@ -3707,6 +3724,7 @@ async fn an_accept_changes_the_baseline_after_recording_why_and_nothing_else_doe
         identity::build(
             &i.layer,
             b,
+            None,
             &i.compiled,
             i.digest,
             2,
@@ -3759,6 +3777,7 @@ async fn a_commit_that_changes_or_drops_the_baseline_is_refused() {
         let next = identity::build(
             &i.layer,
             baseline.as_ref(),
+            None,
             &i.compiled,
             i.digest,
             2,

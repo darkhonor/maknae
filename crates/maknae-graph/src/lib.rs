@@ -8,3 +8,4 @@ pub mod identity;
 pub mod kernel;
 pub mod record;
 pub mod schema;
+pub mod sync;

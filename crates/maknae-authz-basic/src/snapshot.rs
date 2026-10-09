@@ -551,6 +551,7 @@ mod tests {
             build(
                 l,
                 None,
+                None,
                 &persisted_compiled_set(LABEL),
                 [1; 32],
                 5,

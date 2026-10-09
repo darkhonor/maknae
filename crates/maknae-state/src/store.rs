@@ -535,6 +535,7 @@ fn build(
     identity::build(
         layer,
         baseline,
+        None,
         inputs.compiled,
         inputs.vocabulary_sha256,
         revision,
@@ -1001,6 +1002,7 @@ mod tests {
         let graph = identity::build(
             &file(),
             Some(&baseline),
+            None,
             &persisted_compiled_set("UNOFFICIAL"),
             [9; 32],
             1,

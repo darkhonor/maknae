@@ -305,6 +305,8 @@ files = [
   "crates/maknae-graph/src/schema.rs",
   # #490: the accepted baseline as the store holds it; a mis-read section runs what nobody accepted.
   "crates/maknae-graph/src/baseline.rs",
+  # #491: what the daemon enforces against what root last wrote; a mis-read value merges against the wrong base.
+  "crates/maknae-graph/src/sync.rs",
   # #490: which baseline runs, what is pending and what an accept names; a wrong arm runs or accepts what nobody saw.
   "crates/maknae-kernel/src/baseline.rs",
   # #490: the one validator boot and accept share; a gap here accepts a baseline that cannot start.

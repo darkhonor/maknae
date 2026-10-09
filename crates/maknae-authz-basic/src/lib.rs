@@ -932,6 +932,7 @@ fn snapshot_over(
         maknae_graph::identity::build(
             &layer,
             stored.as_ref().and_then(|s| s.baseline.as_ref()),
+            None,
             &persisted_set,
             vocabulary,
             revision,
@@ -2515,6 +2516,7 @@ mod tests {
                     }],
                 },
                 None,
+                None,
                 &set,
                 test_digest(&set.canonical_bytes().unwrap()),
                 1,
@@ -2566,6 +2568,7 @@ mod tests {
                     subjects: vec![],
                 },
                 Some(&baseline),
+                None,
                 &set,
                 test_digest(&set.canonical_bytes().unwrap()),
                 1,

@@ -445,6 +445,7 @@ mod tests {
             maknae_graph::identity::build(
                 layer,
                 None,
+                None,
                 &persisted,
                 vocab,
                 1,
