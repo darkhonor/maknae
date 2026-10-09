@@ -1431,14 +1431,14 @@ mod tests {
             .subjects
             .iter()
             .any(|s| s.uid == 4242 && s.role == "adversary"));
-        let d = |b: &[u8]| {
-            let mut o = [0u8; 32];
-            o[0] = b.len() as u8;
-            o
-        };
+        let d = test_digest;
         assert_eq!(
             next.section_digests(d)["bindings"],
             d(live.section_canonical().unwrap().as_bytes())
+        );
+        assert_ne!(
+            next.section_digests(d)["bindings"],
+            src.section_digests(d)["bindings"]
         );
         assert_eq!(next.policy(), src.policy(), "authz.yaml is not re-read");
         let refused =
@@ -1461,7 +1461,23 @@ mod tests {
             .identity_layer("UNCLASSIFIED", Some([0; 32]))
             .subjects
             .iter()
-            .any(|s| s.uid == 4242));
+            .any(|s| s.uid == 4242 && s.role == "adversary"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn with_bindings_resolves_a_named_entry_through_the_account_lookup() {
+        let src = source_with(EMPTY, Some(ADMIN_ROOT), &[]);
+        let live = maknae_config::parse_bindings(
+            "schema_version: 1\nbindings:\n  adversary: [\"root\"]\n",
+        )
+        .unwrap();
+        let next = src.with_bindings(live).unwrap();
+        assert!(next
+            .identity_layer("UNCLASSIFIED", Some([0; 32]))
+            .subjects
+            .iter()
+            .any(|s| s.uid == 0 && s.role == "adversary"));
     }
 
     fn compiled(src: &PolicySource) -> Arc<Snapshot> {
