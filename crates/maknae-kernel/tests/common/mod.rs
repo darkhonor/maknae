@@ -381,6 +381,12 @@ impl Fixture {
     pub fn authorizer(
         &self,
     ) -> Arc<maknae_kernel::Composition<maknae_authz_basic::HermeticAuthorizer>> {
+        self.authorizer_with_live(maknae_kernel::LiveConfig::new(Default::default(), None))
+    }
+    pub fn authorizer_with_live(
+        &self,
+        live: maknae_kernel::LiveConfig,
+    ) -> Arc<maknae_kernel::Composition<maknae_authz_basic::HermeticAuthorizer>> {
         let basic = maknae_authz_basic::HermeticAuthorizer::new(
             self.paths(),
             self.principal.clone(),
@@ -395,10 +401,13 @@ impl Fixture {
         )
         .unwrap();
         let us = &maknae_config::BasicPolicy;
-        Arc::new(maknae_kernel::Composition::new(
-            basic,
-            maknae_kernel::CeilingAuthorizer::new(maknae_config::Ceiling::baseline_for(us), us),
-        ))
+        Arc::new(
+            maknae_kernel::Composition::new(
+                basic,
+                maknae_kernel::CeilingAuthorizer::new(maknae_config::Ceiling::baseline_for(us), us),
+            )
+            .with_live(live),
+        )
     }
     pub fn start(
         &self,

@@ -59,10 +59,10 @@ impl LiveConfig {
         Arc::clone(&self.served().1)
     }
 
-    /// The providers a request is admitted on, and the install generation they belong to.
-    pub fn admission(&self) -> (Arc<Option<ProviderAuthority>>, u64) {
+    /// The view and providers a request is admitted on, and the install generation they belong to.
+    pub fn admission(&self) -> (Arc<ConfigView>, Arc<Option<ProviderAuthority>>, u64) {
         let served = self.served();
-        (Arc::clone(&served.1), served.2)
+        (Arc::clone(&served.0), Arc::clone(&served.1), served.2)
     }
 
     pub fn generation(&self) -> u64 {
@@ -103,10 +103,9 @@ pub fn providers_of(v: &Validated) -> Option<ProviderAuthority> {
 /// the ceiling or in-flight decisions hold the turn past the bound.
 pub fn install<B: maknae_authz_basic::Baseline>(
     pdp: &crate::Composition<B>,
-    live: &LiveConfig,
     v: &Validated,
 ) -> Result<(), String> {
-    pdp.install_live(live, LiveValues::of(v))
+    pdp.install_live(LiveValues::of(v))
 }
 
 #[cfg(test)]
@@ -172,6 +171,17 @@ mod tests {
     }
 
     #[test]
+    fn an_admission_holds_the_view_and_providers_of_its_generation() {
+        let live = LiveConfig::new(view("a", "1"), authority("old"));
+        let (view_then, providers_then, generation) = live.admission();
+        live.install(view("a", "2"), None);
+        assert_eq!(generation, 0);
+        assert_eq!(*view_then, view("a", "1"));
+        assert_eq!(prefix(&providers_then), Some("old"));
+        assert_eq!(live.generation(), 1);
+    }
+
+    #[test]
     fn a_poisoned_lock_still_answers() {
         let live = Arc::new(LiveConfig::new(view("a", "1"), authority("old")));
         let poisoner = Arc::clone(&live);
@@ -213,7 +223,8 @@ mod tests {
             crate::CeilingAuthorizer::new(Ceiling::baseline_for(US), US),
         );
         let first = validated(&minimal(), &FakeEnv::default()).unwrap();
-        let live = LiveConfig::of(&first);
+        let pdp = pdp.with_live(LiveConfig::of(&first));
+        let live = pdp.live();
         let env = FakeEnv::with_bounds();
         let next = validated(
             &with(&[("core", SECRET_CORE), ("providers", PROVIDERS)]),
@@ -221,7 +232,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(live.generation(), 0);
-        install(&pdp, &live, &next).unwrap();
+        install(&pdp, &next).unwrap();
         assert_eq!(live.generation(), 1);
         assert_eq!(pdp.ceiling().ceiling().classification.name, "SECRET");
         assert_eq!(pdp.baseline().principal(), next.principal);
@@ -243,14 +254,14 @@ mod tests {
         );
         let mut accepted = validated(&with(&[("core", SECRET_CORE)]), &FakeEnv::default()).unwrap();
         accepted.principal.uid = nix::unistd::geteuid().as_raw();
-        let live = LiveConfig::of(&accepted);
-        install(&pdp, &live, &accepted).unwrap();
+        let pdp = pdp.with_live(LiveConfig::of(&accepted));
+        install(&pdp, &accepted).unwrap();
         let marked = permitted_read_marked(&g.0, Some("CONFIDENTIAL"));
         assert!(matches!(pdp.decide(&marked), Verdict::Permit { .. }));
         let mut removed = validated(&minimal(), &FakeEnv::default()).unwrap();
         removed.principal.uid = accepted.principal.uid;
         assert_eq!(removed.boot.ceiling(), &Ceiling::baseline_for(US));
-        install(&pdp, &live, &removed).unwrap();
+        install(&pdp, &removed).unwrap();
         assert_eq!(pdp.ceiling().ceiling().classification, US.unmarked());
         assert!(matches!(pdp.decide(&marked), Verdict::Deny { .. }));
     }
@@ -274,10 +285,11 @@ mod tests {
         );
         let before = pdp.baseline().principal();
         let first = validated(&minimal(), &FakeEnv::default()).unwrap();
-        let live = LiveConfig::of(&first);
+        let pdp = pdp.with_live(LiveConfig::of(&first));
+        let live = pdp.live();
         let aus = validated(&with(&[("core", AUS_CORE)]), &FakeEnv::default()).unwrap();
         assert_eq!(
-            install(&pdp, &live, &aus).unwrap_err(),
+            install(&pdp, &aus).unwrap_err(),
             "PROTECTED is not a level of the US system"
         );
         assert_eq!(pdp.baseline().principal(), before);

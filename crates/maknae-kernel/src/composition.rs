@@ -31,7 +31,7 @@
 //!
 //! [`ConjunctionAuthorizer`]: maknae_security::ConjunctionAuthorizer
 
-use std::sync::{PoisonError, RwLock, TryLockError};
+use std::sync::{Arc, PoisonError, RwLock, TryLockError};
 use std::time::{Duration, Instant};
 
 use crate::blocking_guard::BLOCKING_OPERATION_TIMEOUT;
@@ -53,6 +53,8 @@ pub struct Composition<B: Baseline> {
     ceiling: CeilingAuthorizer,
     /// Held shared by every decision and exclusively by [`Self::install_live`].
     live_turn: RwLock<()>,
+    /// The view and providers the request path serves; installed only in the live turn.
+    live: Arc<crate::live::LiveConfig>,
 }
 
 impl<B: Baseline> Composition<B> {
@@ -61,7 +63,19 @@ impl<B: Baseline> Composition<B> {
             baseline,
             ceiling,
             live_turn: RwLock::new(()),
+            live: Arc::new(crate::live::LiveConfig::new(Default::default(), None)),
         }
+    }
+
+    /// The booted view and providers, set before the composition is shared.
+    pub fn with_live(mut self, live: crate::live::LiveConfig) -> Self {
+        self.live = Arc::new(live);
+        self
+    }
+
+    /// What the request path serves: the one `LiveConfig` [`Self::install_live`] installs into.
+    pub fn live(&self) -> &Arc<crate::live::LiveConfig> {
+        &self.live
     }
 
     /// The baseline operand, for the reload's snapshot swap.
@@ -76,19 +90,14 @@ impl<B: Baseline> Composition<B> {
     /// An accepted live baseline, installed in one exclusive turn: a decision is made
     /// wholly under the values before or after, and the providers' generation moves.
     /// A ceiling the booted system does not rank is refused and nothing changes.
-    pub fn install_live(
-        &self,
-        live: &crate::live::LiveConfig,
-        values: crate::live::LiveValues,
-    ) -> Result<(), String> {
-        self.install_live_within(live, values, BLOCKING_OPERATION_TIMEOUT)
+    pub fn install_live(&self, values: crate::live::LiveValues) -> Result<(), String> {
+        self.install_live_within(values, BLOCKING_OPERATION_TIMEOUT)
     }
 
     /// Polls for the turn rather than queueing on it, so an install that times out
     /// has changed nothing and cannot land later.
     pub(crate) fn install_live_within(
         &self,
-        live: &crate::live::LiveConfig,
         values: crate::live::LiveValues,
         bound: Duration,
     ) -> Result<(), String> {
@@ -108,7 +117,7 @@ impl<B: Baseline> Composition<B> {
         };
         self.ceiling.install(values.ceiling)?;
         self.baseline.install_principal(values.principal);
-        live.install(values.view, values.providers);
+        self.live.install(values.view, values.providers);
         Ok(())
     }
 
@@ -594,15 +603,12 @@ pub(crate) mod tests {
         ceiling: Ceiling,
         principal: Principal,
     ) -> Result<(), String> {
-        c.install_live(
-            &crate::live::LiveConfig::new(Default::default(), None),
-            crate::live::LiveValues {
-                ceiling,
-                principal,
-                view: Default::default(),
-                providers: None,
-            },
-        )
+        c.install_live(crate::live::LiveValues {
+            ceiling,
+            principal,
+            view: Default::default(),
+            providers: None,
+        })
     }
 
     fn enrolled(uid: u32) -> Principal {
@@ -719,7 +725,7 @@ pub(crate) mod tests {
         use std::sync::mpsc::channel;
         let (_g, basic) = fixture("live-bound", READ_POLICY, None);
         let c = std::sync::Arc::new(Composition::new(basic, ceiling(Ceiling::baseline_for(US))));
-        let live = crate::live::LiveConfig::new(Default::default(), None);
+        let live = std::sync::Arc::clone(c.live());
         let before = c.baseline().principal();
         let (held_tx, held) = channel();
         let (release_tx, release) = channel::<()>();
@@ -744,7 +750,7 @@ pub(crate) mod tests {
             let _ = release_tx.send(());
         });
         let err = c
-            .install_live_within(&live, values, Duration::from_millis(50))
+            .install_live_within(values, Duration::from_millis(50))
             .unwrap_err();
         assert!(err.contains("nothing was installed"), "{err}");
         releaser.join().unwrap();
@@ -753,6 +759,44 @@ pub(crate) mod tests {
         assert_eq!(c.ceiling().ceiling().classification, US.unmarked());
         assert_eq!(live.generation(), 0);
         assert!(live.view().is_empty());
+    }
+
+    #[test]
+    fn only_the_live_turn_installs_a_live_value() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let calls = [
+            "install_principal(",
+            "ceiling.install(",
+            "ceiling().install(",
+            "live.install(",
+            "live().install(",
+        ];
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            let text = std::fs::read_to_string(&path).unwrap();
+            let production = text.split("\n#[cfg(test)]").next().unwrap();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            for call in calls {
+                for (n, line) in production.lines().enumerate() {
+                    if line.contains(call) && !line.trim_start().starts_with("//") {
+                        found.push(format!("{name}:{}: {}", n + 1, line.trim()));
+                    }
+                }
+            }
+        }
+        let turn = include_str!("composition.rs");
+        let within = &turn[turn.find("fn install_live_within(").unwrap()..];
+        let within = &within[..within.find("\n    }\n").unwrap()];
+        assert_eq!(found.len(), 3, "{found:#?}");
+        for f in &found {
+            assert!(
+                f.starts_with("composition.rs:"),
+                "an install outside the live turn: {f}"
+            );
+            let line = f.split_once(": ").unwrap().1;
+            assert!(within.contains(line), "not inside install_live_within: {f}");
+        }
     }
 
     #[test]

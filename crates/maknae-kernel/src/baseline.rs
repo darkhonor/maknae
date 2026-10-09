@@ -65,10 +65,19 @@ impl std::fmt::Debug for PendingState {
 }
 
 /// A file that did not parse (`proposed: None`) or parsed and did not validate.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct InvalidFile {
     pub cause: String,
     pub proposed: Option<BaselineSections>,
+}
+
+/// The cause is withheld: validator text can quote a value.
+impl std::fmt::Debug for InvalidFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InvalidFile")
+            .field("proposed", &self.proposed)
+            .finish_non_exhaustive()
+    }
 }
 
 impl From<String> for InvalidFile {

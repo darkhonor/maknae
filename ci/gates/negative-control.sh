@@ -960,6 +960,22 @@ fx="$(vocab_fixture "$SHIPPED_VOCAB" "$SHIPPED_CONST" "" "${SHIPPED_FILE}      -
 expect_reject_because "verb-vocab/unquoted-shipped-term" \
   "a roles line this gate cannot read" "$fx/ci/gates/verb-vocabulary-drift.sh"
 
+# The loader reads each of these spellings as the roles key; the block reader does not.
+ROLES_BODY='
+  admin:
+    allow:
+      - "admin.status"
+      - "admin.config.show"'
+for spelling in 'quoted:"roles":'"$ROLES_BODY" "single-quoted:'roles':$ROLES_BODY" "explicit-key:? roles
+:$ROLES_BODY" "spaced:roles :$ROLES_BODY" 'flow:{roles: {admin: {allow: ["admin.status", "admin.config.show"]}}}'; do
+  name=${spelling%%:*}; key=${spelling#*:}
+  fx="$(vocab_fixture "$SHIPPED_VOCAB" "$SHIPPED_CONST" "" "schema_version: 1
+${key}
+")"
+  expect_reject_because "verb-vocab/${name}-roles-key" \
+    "spells the roles key in a form this gate cannot read" "$fx/ci/gates/verb-vocabulary-drift.sh"
+done
+
 
 # ---- config-disclosure-drift (#162): the admin.config.show surface ----
 # Five review rounds found this control's completeness resting on prose, and

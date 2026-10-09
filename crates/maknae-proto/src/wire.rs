@@ -621,21 +621,9 @@ pub struct BaselineView {
     pub changes: Vec<String>,
 }
 
-/// What `admin.status` discloses. Every field is deployment SHAPE the operator
-/// needs to debug with, and none is a credential.
-///
-/// The wire doc for this verb warns it is "useful to an operator, and useful to
-/// an attacker fingerprinting the deployment" -- true, and it is why the term
-/// is admin-only: the shipped `authz.yaml` grants it to `admin` alone, and an
-/// install's own file decides. Once it is granted to an admin role, withholding the daemon's own version from them protects nobody: any
-/// peer that completed a handshake already knows the protocol version, and the
-/// socket path is the one the caller is already connected to.
-///
-/// NOT "config.show discloses it anyway" — the grants are INDEPENDENT, so a
-/// role granted only `admin.status` never gets `config.show` and that argument
-/// cannot carry this field. (An earlier note here went further and said
-/// `config.show` discloses nothing of the sort on a default deployment. False:
-/// `effective_view` folds the RESOLVED default in regardless of the file.)
+/// What `admin.status` discloses: deployment shape an operator debugs with, never a
+/// credential. The term is admin-only (the shipped `authz.yaml` grants it to `admin`),
+/// and its grant is independent of `admin.config.show`'s.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusView {
     /// The daemon's crate version.

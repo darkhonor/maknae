@@ -421,6 +421,8 @@ pub(crate) mod tests {
                 assert!(!shown.contains("CAUSE-SENTINEL"), "{shown}");
             }
         }
+        let shown = format!("{invalid:?}");
+        assert!(!shown.contains("CAUSE-SENTINEL"), "{shown}");
         for shown in [
             format!("{:?}", v.boot.ceiling()),
             format!("{proposed:?}"),

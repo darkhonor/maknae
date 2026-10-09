@@ -1459,7 +1459,6 @@ async fn an_oversize_reply_is_refused_as_too_large_never_truncated() {
 /// its turn: the window between a request's admission and its decision.
 struct InstallsAtTheFirstDecision<B: maknae_authz_basic::Baseline> {
     pdp: Arc<maknae_kernel::Composition<B>>,
-    live: Arc<maknae_kernel::LiveConfig>,
     next: Mutex<Option<maknae_kernel::LiveValues>>,
 }
 impl<B: maknae_authz_basic::Baseline + Send + Sync> maknae_security::Authorizer
@@ -1476,7 +1475,7 @@ impl<B: maknae_authz_basic::Baseline + Send + Sync> maknae_security::Authorizer
     }
     fn decide_cited(&self, req: &maknae_security::Request) -> maknae_security::Decided {
         if let Some(values) = self.next.lock().unwrap().take() {
-            self.pdp.install_live(&self.live, values).unwrap();
+            self.pdp.install_live(values).unwrap();
         }
         self.pdp.decide_cited(req)
     }
@@ -1515,10 +1514,9 @@ fn providers_named(names: &[&str]) -> Option<maknae_kernel::ProviderAuthority> {
     })
 }
 
-/// Bindings are absent, so the enrolled principal is the admin. The accepted
-/// baseline names another principal and providers {openai, anthropic}; the accept
-/// makes the peer the principal and drops openai. A prompt to openai admitted
-/// before the install and decided after it is refused: neither baseline permits it.
+/// Principal A with providers {openai, anthropic}, then an install making the peer the
+/// principal and dropping openai: a prompt to openai admitted before the install and
+/// decided after it is refused, since neither baseline permits it.
 #[tokio::test]
 async fn a_prompt_admitted_before_a_live_install_and_decided_after_it_is_refused() {
     let mut fx = Fixture::with_policy(
@@ -1529,13 +1527,13 @@ async fn a_prompt_admitted_before_a_live_install_and_decided_after_it_is_refused
     std::fs::remove_file(fx.paths().bindings).unwrap();
     let peer = fx.principal.clone();
     fx.principal.uid = peer.uid.wrapping_add(1);
-    let live = Arc::new(maknae_kernel::LiveConfig::new(
+    let composition = fx.authorizer_with_live(maknae_kernel::LiveConfig::new(
         Default::default(),
         providers_named(&["openai", "anthropic"]),
     ));
+    let live = Arc::clone(composition.live());
     let pdp = InstallsAtTheFirstDecision {
-        pdp: fx.authorizer(),
-        live: Arc::clone(&live),
+        pdp: composition,
         next: Mutex::new(Some(maknae_kernel::LiveValues {
             ceiling: maknae_config::Ceiling::baseline_for(&maknae_config::BasicPolicy),
             principal: peer,

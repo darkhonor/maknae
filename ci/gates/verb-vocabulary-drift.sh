@@ -133,6 +133,12 @@ fi
 # `roles.admin.allow` may carry them.
 SHIPPED_AUTHZ=packaging/common/authz.yaml
 [ -f "$SHIPPED_AUTHZ" ] || { echo "FAIL: missing $SHIPPED_AUTHZ"; exit 1; }
+other_roles_key=$(grep -nEv '^[[:space:]]*(#.*)?$' "$SHIPPED_AUTHZ" | grep -Ev '^[0-9]+:roles:' \
+  | grep -E "[\"']roles[\"'][[:space:]]*:|\\?[[:space:]]*[\"']?roles([^a-z_.]|$)|(^[0-9]+:|[^a-z_.\"'])roles[[:space:]]+:|^[0-9]+:[[:space:]]*\\{" || true)
+if [ -n "$other_roles_key" ]; then
+  echo "FAIL: $SHIPPED_AUTHZ spells the roles key in a form this gate cannot read; write it as a bare roles: block:"
+  printf '%s\n' "$other_roles_key" | sed 's/^/  /'; exit 1
+fi
 roles_block() { awk '/^roles:/{r=1; print; next} r && /^[^ #]/{r=0} r' "$SHIPPED_AUTHZ"; }
 if roles_block | grep -Eq '^roles:[[:space:]]*[^[:space:]#]|(allow|deny):[[:space:]]*\['; then
   echo "FAIL: $SHIPPED_AUTHZ writes a roles list inline; write one term per line"; exit 1

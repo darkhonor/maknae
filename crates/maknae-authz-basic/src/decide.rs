@@ -79,21 +79,9 @@ impl DestinationGrants {
     }
 }
 
-/// The terms an operator may grant or deny per-role: three `admin.*`
-/// disclosure terms (#162: status, config display, subject listing), the
-/// baseline show and accept terms (#490), and the content-plane egress term
-/// `session.prompt` (#172), the one term the `user` key may hold (ADR-0010
-/// decision 4 as superseded); every other term is `admin`'s only.
-///
-/// Code-defined and unconfigurable: a term absent from this list is refused at
-/// load, so `roles:` can never reach a verb the arms below do not consult.
-/// Deliberately NOT `admin.contain`, `admin.credential.broker` or
-/// `admin.policy.reload`, which change state and are Phase 2's question.
-//
-// ONE LINE, deliberately: the drift gate's extractor scans only the matched
-// line, and this declaration is 108 chars against rustfmt's default
-// max_width=100, so without the skip rustfmt wraps it and the gate extracts
-// ZERO terms -- green, inventorying nothing.
+/// The terms `roles:` may grant or deny; a term absent here is refused at load. Only
+/// `session.prompt` may be granted to `user`; `admin.baseline.accept` changes state.
+// One line: the drift gate's extractor reads only the matched line.
 #[rustfmt::skip]
 pub(crate) const GRANTABLE_ACTIONS: [&str; 6] = ["admin.status", "admin.config.show", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "session.prompt"];
 

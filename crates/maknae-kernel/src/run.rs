@@ -888,7 +888,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     }
 
     let no_providers = maknae_config::ProviderSet::empty();
-    let (providers, admitted_generation) = live.admission();
+    let (admitted_view, providers, admitted_generation) = live.admission();
     let admitted = match &request.verb {
         Verb::SessionPrompt { choice, .. } => {
             let (set, user_prefix) = match &*providers {
@@ -1215,9 +1215,9 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             let payload = match dispatch_verb(&request.verb) {
                 Dispatch::Pong => Payload::Pong,
                 Dispatch::WhoamiRequested => build_whoami(&peer_uri, peer_uid),
-                // Already redacted at boot; this arm only hands it over. No
-                // redaction happens here, deliberately -- see `ConfigView`.
-                Dispatch::ConfigShowRequested => Payload::ConfigView((*live.view()).clone()),
+                // Redacted when installed, and taken at admission with the
+                // providers the decision was generation-checked against.
+                Dispatch::ConfigShowRequested => Payload::ConfigView((*admitted_view).clone()),
                 Dispatch::StatusRequested => Payload::Status(maknae_proto::StatusView {
                     version: env!("CARGO_PKG_VERSION").to_string(),
                     protocol_version: PROTOCOL_VERSION,
@@ -4741,7 +4741,7 @@ async fn boot_after_sink(
     hup: tokio::signal::unix::Signal,
 ) -> Result<ServeOutcome, RunError> {
     let classification = crate::baseline_check::classification_of(&started.validated);
-    let live = Arc::new(crate::live::LiveConfig::of(&started.validated));
+    let live = crate::live::LiveConfig::of(&started.validated);
     let Started {
         validated,
         run,
@@ -4844,6 +4844,7 @@ async fn boot_after_sink(
     // from the gate's own return value; `ci/gates/authz-composition-drift.sh`
     // pins this call site so a future selection key fails CI.
     let authorizer = crate::composition::build_pdp(&boot, authorizer);
+    let authorizer = authorizer.with_live(live);
     // Boot-time EVIDENCE (ADR-0008 decision 1, fourth layer): the trail
     // records which operands this process composes, so the property is
     // auditable at runtime and not only at build time. Same record shape as
@@ -5048,9 +5049,6 @@ async fn boot_after_sink(
         Arc::clone(session_ids),
         supervisor,
         Arc::clone(&authorizer),
-        // Redacted from the validated baseline; the unredacted Document does not
-        // travel with it.
-        live,
         authz_backend_name,
         classification_policy_name,
         kernel_graph,
@@ -5092,8 +5090,6 @@ async fn serve_after_mint<B>(
     // the baseline alone would pass every gate (critical-review round 3). This
     // signature is the type-level pin: what is served is what was composed.
     authorizer: Arc<crate::composition::Composition<B>>,
-    // Already redacted — the raw Document never reaches the run loop.
-    live: Arc<crate::live::LiveConfig>,
     // Captured at boot (see run_inner).
     authz_backend_name: Arc<String>,
     classification_policy_name: Arc<String>,
@@ -5142,6 +5138,7 @@ where
     }));
     let reloads = reloads.abort_handle();
     let shutdown = shutdown_after_reloads(signalled, Arc::clone(&reloader), reloads.clone());
+    let live = Arc::clone(authorizer.live());
     let outcome = accept_loop(
         listener,
         Arc::clone(sink),

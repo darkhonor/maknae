@@ -227,7 +227,7 @@ impl CeilingAuthorizer {
 
     /// The next decision reads `ceiling`; a level the booted system does not rank is
     /// refused and the installed ceiling stands.
-    pub fn install(&self, ceiling: Ceiling) -> Result<(), String> {
+    pub(crate) fn install(&self, ceiling: Ceiling) -> Result<(), String> {
         if self.policy.level_of(&ceiling.classification.name).as_ref()
             != Some(&ceiling.classification)
         {
