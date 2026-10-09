@@ -8984,6 +8984,59 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
     }
 
     #[test]
+    fn a_move_from_a_trail_that_cannot_be_opened_links_back_why_and_loads_without_an_anchor() {
+        let _g = env_lock();
+        let root = nix::unistd::geteuid().is_root();
+        for tag in ["missing", "unreadable"] {
+            if root && tag == "unreadable" {
+                eprintln!("skipped: root opens a 0000 trail");
+                continue;
+            }
+            let d = fixture(&format!("move-{tag}"));
+            let _ = boot(&d);
+            let new = prepare_trail(&d, "audit-2.jsonl");
+            write_yaml(&d, "", "https://v.example:8200", &new, "");
+            let old = d.0.join("audit.jsonl");
+            match tag {
+                "missing" => std::fs::remove_file(&old).unwrap(),
+                _ => {
+                    std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o000)).unwrap()
+                }
+            }
+            let _ = boot(&d);
+            let moved = trail_of(&d, "audit-2.jsonl");
+            assert_eq!(moved[0].action, GRAPH_BASELINE_ACTION, "{tag}");
+            assert!(
+                moved[0]
+                    .outcome
+                    .reason
+                    .contains("; the previous trail could not be opened: "),
+                "{tag}: {}",
+                moved[0].outcome.reason
+            );
+            let anchored = moved
+                .iter()
+                .find(|r| r.action == CHECKPOINT_ACTION)
+                .expect("the boot's checkpoint");
+            assert_eq!(
+                (
+                    anchored.outcome.reason.as_str(),
+                    anchored.graph.as_ref().map(|g| g.anchor.as_str())
+                ),
+                (
+                    "rollback-anchor-unavailable",
+                    Some("rollback-anchor-unavailable")
+                ),
+                "{tag}"
+            );
+            assert!(
+                audit_section(&accepted(&d)).contains("audit-2.jsonl"),
+                "{tag}"
+            );
+        }
+    }
+
+    #[test]
     fn an_unprepared_target_keeps_the_old_trail() {
         let _g = env_lock();
         let d = fixture("unprepared");
