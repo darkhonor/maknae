@@ -69,8 +69,12 @@ impl LiveConfig {
         self.served().2
     }
 
-    /// Only `Composition::install_live` calls this, inside its exclusive turn.
-    pub(crate) fn install(&self, view: ConfigView, providers: Option<ProviderAuthority>) {
+    pub(crate) fn install(
+        &self,
+        _turn: &maknae_authz_basic::LiveTurn<'_>,
+        view: ConfigView,
+        providers: Option<ProviderAuthority>,
+    ) {
         let mut slot = self.served.write().unwrap_or_else(PoisonError::into_inner);
         let generation = slot.2.wrapping_add(1);
         *slot = Arc::new((Arc::new(view), Arc::new(providers), generation));
@@ -104,13 +108,24 @@ pub fn providers_of(v: &Validated) -> Option<ProviderAuthority> {
 pub fn install<B: maknae_authz_basic::Baseline>(
     pdp: &crate::Composition<B>,
     v: &Validated,
+    deadline: std::time::Instant,
 ) -> Result<(), String> {
-    pdp.install_live(LiveValues::of(v))
+    pdp.install_live_within(LiveValues::of(v), deadline)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn soon() -> std::time::Instant {
+        std::time::Instant::now() + std::time::Duration::from_secs(5)
+    }
+
+    fn install_view(live: &LiveConfig, view: ConfigView, providers: Option<ProviderAuthority>) {
+        let lock = maknae_authz_basic::LiveTurnLock::hermetic();
+        let turn = lock.try_take().unwrap();
+        live.install(&turn, view, providers)
+    }
     use crate::baseline_check::tests::{doc, minimal, FakeEnv, PROVIDERS};
     use crate::baseline_check::{validate, Invalid, Mode};
     use crate::composition::tests::{fixture, permitted_read_marked, READ_POLICY};
@@ -160,12 +175,12 @@ mod tests {
     fn install_replaces_both_and_a_held_copy_is_unchanged() {
         let live = LiveConfig::new(view("a", "1"), authority("old"));
         let (held_view, held_providers) = (live.view(), live.providers());
-        live.install(view("a", "2"), None);
+        install_view(&live, view("a", "2"), None);
         assert_eq!(*held_view, view("a", "1"));
         assert_eq!(prefix(&held_providers), Some("old"));
         assert_eq!(*live.view(), view("a", "2"));
         assert!(live.providers().is_none());
-        live.install(view("b", "3"), authority("new"));
+        install_view(&live, view("b", "3"), authority("new"));
         assert_eq!(*live.view(), view("b", "3"));
         assert_eq!(prefix(&live.providers()), Some("new"));
     }
@@ -174,7 +189,7 @@ mod tests {
     fn an_admission_holds_the_view_and_providers_of_its_generation() {
         let live = LiveConfig::new(view("a", "1"), authority("old"));
         let (view_then, providers_then, generation) = live.admission();
-        live.install(view("a", "2"), None);
+        install_view(&live, view("a", "2"), None);
         assert_eq!(generation, 0);
         assert_eq!(*view_then, view("a", "1"));
         assert_eq!(prefix(&providers_then), Some("old"));
@@ -192,7 +207,7 @@ mod tests {
         .join();
         assert!(live.served.is_poisoned());
         assert_eq!(*live.view(), view("a", "1"));
-        live.install(view("a", "2"), None);
+        install_view(&live, view("a", "2"), None);
         assert_eq!(*live.view(), view("a", "2"));
         assert!(live.providers().is_none());
     }
@@ -232,7 +247,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(live.generation(), 0);
-        install(&pdp, &next).unwrap();
+        install(&pdp, &next, soon()).unwrap();
         assert_eq!(live.generation(), 1);
         assert_eq!(pdp.ceiling().ceiling().classification.name, "SECRET");
         assert_eq!(pdp.baseline().principal(), next.principal);
@@ -255,13 +270,13 @@ mod tests {
         let mut accepted = validated(&with(&[("core", SECRET_CORE)]), &FakeEnv::default()).unwrap();
         accepted.principal.uid = nix::unistd::geteuid().as_raw();
         let pdp = pdp.with_live(LiveConfig::of(&accepted));
-        install(&pdp, &accepted).unwrap();
+        install(&pdp, &accepted, soon()).unwrap();
         let marked = permitted_read_marked(&g.0, Some("CONFIDENTIAL"));
         assert!(matches!(pdp.decide(&marked), Verdict::Permit { .. }));
         let mut removed = validated(&minimal(), &FakeEnv::default()).unwrap();
         removed.principal.uid = accepted.principal.uid;
         assert_eq!(removed.boot.ceiling(), &Ceiling::baseline_for(US));
-        install(&pdp, &removed).unwrap();
+        install(&pdp, &removed, soon()).unwrap();
         assert_eq!(pdp.ceiling().ceiling().classification, US.unmarked());
         assert!(matches!(pdp.decide(&marked), Verdict::Deny { .. }));
     }
@@ -289,7 +304,7 @@ mod tests {
         let live = pdp.live();
         let aus = validated(&with(&[("core", AUS_CORE)]), &FakeEnv::default()).unwrap();
         assert_eq!(
-            install(&pdp, &aus).unwrap_err(),
+            install(&pdp, &aus, soon()).unwrap_err(),
             "PROTECTED is not a level of the US system"
         );
         assert_eq!(pdp.baseline().principal(), before);

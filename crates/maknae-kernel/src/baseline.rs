@@ -487,12 +487,13 @@ pub fn show_view(
     }
 }
 
-pub fn accepted_view(p: &PendingSet) -> BaselineView {
-    let sections = match &p.state {
-        PendingState::Valid { sections, .. } => sections.clone(),
-        PendingState::Invalid { .. } => Vec::new(),
-    };
-    view(p.source, "", "accepted", apply_name(p), sections)
+/// The accepted set's changes, rendered as [`show_view`] rendered them against `accepted`;
+/// none when that rendering fails.
+pub fn accepted_view(p: &PendingSet, accepted: &BaselineSections) -> BaselineView {
+    let changes = show_view(Some(p), accepted)
+        .map(|v| v.changes)
+        .unwrap_or_default();
+    view(p.source, "", "accepted", apply_name(p), changes)
 }
 
 /// The view and the corrective record's reason for a refused accept; neither names a hash.
@@ -1398,7 +1399,7 @@ mod tests {
     fn an_accepted_view_names_the_class_and_never_the_hash() {
         let acc = s(&[("core", CORE)]);
         let set = pending(&acc, &Ok(s(&[("core", CORE_SECRET)]))).unwrap();
-        let v = accepted_view(&set);
+        let v = accepted_view(&set, &acc);
         assert_eq!(
             (
                 v.source.as_str(),
@@ -1408,6 +1409,14 @@ mod tests {
             ),
             (ROOT_FILE, "accepted", "live", "")
         );
-        assert_eq!(v.changes, ["core"]);
+        assert_eq!(v.changes, [maknae_config::SUPPRESSED_CHANGED]);
+        assert!(!v.changes.iter().any(|l| l.contains("core")), "{v:?}");
+        assert_eq!(
+            v.changes,
+            show_view(Some(&set), &acc).unwrap().changes,
+            "the reply discloses what the show did and no more"
+        );
+        let unreadable = s(&[("core", "not json")]);
+        assert!(accepted_view(&set, &unreadable).changes.is_empty());
     }
 }

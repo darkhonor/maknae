@@ -31,7 +31,7 @@
 //!
 //! [`ConjunctionAuthorizer`]: maknae_security::ConjunctionAuthorizer
 
-use std::sync::{Arc, PoisonError, RwLock, TryLockError};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::blocking_guard::BLOCKING_OPERATION_TIMEOUT;
@@ -51,8 +51,6 @@ pub struct Composition<B: Baseline> {
     /// The non-removable mandatory floor: the installed classification ceiling,
     /// evaluated on every request.
     ceiling: CeilingAuthorizer,
-    /// Held shared by every decision and exclusively by [`Self::install_live`].
-    live_turn: RwLock<()>,
     /// The view and providers the request path serves; installed only in the live turn.
     live: Arc<crate::live::LiveConfig>,
 }
@@ -62,7 +60,6 @@ impl<B: Baseline> Composition<B> {
         Self {
             baseline,
             ceiling,
-            live_turn: RwLock::new(()),
             live: Arc::new(crate::live::LiveConfig::new(Default::default(), None)),
         }
     }
@@ -91,42 +88,38 @@ impl<B: Baseline> Composition<B> {
     /// wholly under the values before or after, and the providers' generation moves.
     /// A ceiling the booted system does not rank is refused and nothing changes.
     pub fn install_live(&self, values: crate::live::LiveValues) -> Result<(), String> {
-        self.install_live_within(values, BLOCKING_OPERATION_TIMEOUT)
+        self.install_live_within(values, Instant::now() + BLOCKING_OPERATION_TIMEOUT)
     }
 
-    /// Polls for the turn rather than queueing on it, so an install that times out
-    /// has changed nothing and cannot land later.
+    /// Polls for the turn rather than queueing on it, and never takes it at or after
+    /// `deadline`, so an install that timed out has changed nothing and cannot land later.
     pub(crate) fn install_live_within(
         &self,
         values: crate::live::LiveValues,
-        bound: Duration,
+        deadline: Instant,
     ) -> Result<(), String> {
-        let deadline = Instant::now() + bound;
-        let _turn = loop {
-            match self.live_turn.try_write() {
-                Ok(turn) => break turn,
-                Err(TryLockError::Poisoned(p)) => break p.into_inner(),
-                Err(TryLockError::WouldBlock) if Instant::now() >= deadline => {
-                    return Err(format!(
-                        "in-flight decisions held the live turn past {}s; nothing was installed",
-                        bound.as_secs()
-                    ));
-                }
-                Err(TryLockError::WouldBlock) => std::thread::sleep(Duration::from_millis(1)),
+        let turn = loop {
+            if Instant::now() >= deadline {
+                return Err(
+                    "in-flight decisions held the live turn past the install deadline; nothing was installed"
+                        .into(),
+                );
+            }
+            match self.baseline.live_turn().try_take() {
+                Some(turn) => break turn,
+                None => std::thread::sleep(Duration::from_millis(1)),
             }
         };
-        self.ceiling.install(values.ceiling)?;
-        self.baseline.install_principal(values.principal);
-        self.live.install(values.view, values.providers);
+        self.ceiling.install(&turn, values.ceiling)?;
+        self.baseline.install_principal(&turn, values.principal)?;
+        self.live.install(&turn, values.view, values.providers);
         Ok(())
     }
 
     /// Holds the turn as a decision in flight does.
     #[cfg(test)]
     pub(crate) fn hold_live_turn(&self) -> std::sync::RwLockReadGuard<'_, ()> {
-        self.live_turn
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
+        self.baseline.live_turn().share()
     }
 
     /// Baseline FIRST — see the module doc.
@@ -168,18 +161,12 @@ impl<B: Baseline> Authorizer for Composition<B> {
     /// projections, so every existing composition test covers what production
     /// runs.
     fn decide_cited(&self, req: &Request) -> Decided {
-        let _turn = self
-            .live_turn
-            .read()
-            .unwrap_or_else(PoisonError::into_inner);
+        let _turn = self.baseline.live_turn().share();
         compose_decide_cited(&self.operands(), req)
     }
 
     fn decide_cited_all(&self, reqs: &[Request]) -> Vec<Decided> {
-        let _turn = self
-            .live_turn
-            .read()
-            .unwrap_or_else(PoisonError::into_inner);
+        let _turn = self.baseline.live_turn().share();
         compose_decide_cited_all(&self.operands(), reqs)
     }
 
@@ -740,7 +727,7 @@ pub(crate) mod tests {
         let holder = {
             let c = c.clone();
             std::thread::spawn(move || {
-                let _decision = c.live_turn.read().unwrap();
+                let _decision = c.baseline().live_turn().share();
                 let _ = held_tx.send(());
                 let _ = release.recv_timeout(Duration::from_secs(5));
             })
@@ -758,7 +745,7 @@ pub(crate) mod tests {
             let _ = release_tx.send(());
         });
         let err = c
-            .install_live_within(values, Duration::from_millis(50))
+            .install_live_within(values, Instant::now() + Duration::from_millis(50))
             .unwrap_err();
         assert!(err.contains("nothing was installed"), "{err}");
         releaser.join().unwrap();
@@ -770,41 +757,21 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn only_the_live_turn_installs_a_live_value() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let calls = [
-            "install_principal(",
-            "ceiling.install(",
-            "ceiling().install(",
-            "live.install(",
-            "live().install(",
-        ];
-        let mut found = Vec::new();
-        for entry in std::fs::read_dir(&dir).unwrap() {
-            let path = entry.unwrap().path();
-            let text = std::fs::read_to_string(&path).unwrap();
-            let production = text.split("\n#[cfg(test)]").next().unwrap();
-            let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            for call in calls {
-                for (n, line) in production.lines().enumerate() {
-                    if line.contains(call) && !line.trim_start().starts_with("//") {
-                        found.push(format!("{name}:{}: {}", n + 1, line.trim()));
-                    }
-                }
-            }
-        }
-        let turn = include_str!("composition.rs");
-        let within = &turn[turn.find("fn install_live_within(").unwrap()..];
-        let within = &within[..within.find("\n    }\n").unwrap()];
-        assert_eq!(found.len(), 3, "{found:#?}");
-        for f in &found {
-            assert!(
-                f.starts_with("composition.rs:"),
-                "an install outside the live turn: {f}"
-            );
-            let line = f.split_once(": ").unwrap().1;
-            assert!(within.contains(line), "not inside install_live_within: {f}");
-        }
+    fn an_install_that_starts_after_its_deadline_changes_nothing() {
+        let (_g, basic) = fixture("live-late", READ_POLICY, None);
+        let c = Composition::new(basic, ceiling(Ceiling::baseline_for(US)));
+        let before = c.baseline().principal();
+        let values = crate::live::LiveValues {
+            ceiling: secret(),
+            principal: enrolled(other_uid()),
+            view: std::collections::BTreeMap::from([("core".into(), Default::default())]),
+            providers: None,
+        };
+        let err = c.install_live_within(values, Instant::now()).unwrap_err();
+        assert!(err.contains("nothing was installed"), "{err}");
+        assert_eq!(c.baseline().principal(), before);
+        assert_eq!(c.ceiling().ceiling().classification, US.unmarked());
+        assert_eq!(c.live().generation(), 0);
     }
 
     #[test]

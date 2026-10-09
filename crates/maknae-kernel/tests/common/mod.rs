@@ -974,7 +974,12 @@ impl maknae_kernel::BaselineOps for NoBaseline {
         &'a self,
         _: &'a str,
     ) -> maknae_kernel::BoxFuture<'a, maknae_kernel::AcceptAnswer> {
-        Box::pin(async { maknae_kernel::AcceptAnswer::Unavailable("no baseline service".into()) })
+        Box::pin(async {
+            maknae_kernel::AcceptAnswer::Unavailable {
+                reply: "no baseline service",
+                why: "no baseline service".into(),
+            }
+        })
     }
 }
 

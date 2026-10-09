@@ -227,7 +227,11 @@ impl CeilingAuthorizer {
 
     /// The next decision reads `ceiling`; a level the booted system does not rank is
     /// refused and the installed ceiling stands.
-    pub(crate) fn install(&self, ceiling: Ceiling) -> Result<(), String> {
+    pub(crate) fn install(
+        &self,
+        _turn: &maknae_authz_basic::LiveTurn<'_>,
+        ceiling: Ceiling,
+    ) -> Result<(), String> {
         if self.policy.level_of(&ceiling.classification.name).as_ref()
             != Some(&ceiling.classification)
         {
@@ -259,6 +263,12 @@ impl Authorizer for CeilingAuthorizer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn install(op: &CeilingAuthorizer, c: Ceiling) -> Result<(), String> {
+        let lock = maknae_authz_basic::LiveTurnLock::hermetic();
+        let turn = lock.try_take().unwrap();
+        op.install(&turn, c)
+    }
     use maknae_classification_aus::AusPspf;
     use maknae_config::{BasicPolicy, Level};
     use maknae_security::{Action, Attributes, Context, Resource, Subject};
@@ -672,7 +682,7 @@ mod tests {
         let op = CeilingAuthorizer::new(us_at("UNCLASSIFIED"), US);
         let secret = req("fs.read", Some(AttrValue::Str("SECRET".into())));
         assert!(matches!(op.decide(&secret), Verdict::Deny { .. }));
-        op.install(us_at("SECRET")).unwrap();
+        install(&op, us_at("SECRET")).unwrap();
         assert_eq!(op.decide(&secret), Verdict::NotApplicable { note: None });
         assert_eq!(op.ceiling().classification.name, "SECRET");
     }
@@ -681,7 +691,7 @@ mod tests {
     fn a_level_of_another_system_is_refused_and_the_ceiling_stands() {
         let op = CeilingAuthorizer::new(us_at("UNCLASSIFIED"), US);
         let aus = at(AUS, &AUS.level_of("PROTECTED").unwrap());
-        let err = op.install(aus).unwrap_err();
+        let err = install(&op, aus).unwrap_err();
         assert_eq!(err, "PROTECTED is not a level of the US system");
         assert_eq!(op.ceiling().classification.name, "UNCLASSIFIED");
     }
@@ -691,10 +701,10 @@ mod tests {
         let op = CeilingAuthorizer::new(us_at("CONFIDENTIAL"), US);
         let mut forged = us_at("UNCLASSIFIED");
         forged.classification.rank = US.level_of("TOP SECRET").unwrap().rank;
-        assert!(op.install(forged).is_err());
+        assert!(install(&op, forged).is_err());
         let mut renamed = us_at("TOP SECRET");
         renamed.classification.name = "TOP-SECRET".into();
-        assert!(op.install(renamed).is_err());
+        assert!(install(&op, renamed).is_err());
         assert_eq!(op.ceiling().classification.name, "CONFIDENTIAL");
     }
 
@@ -705,7 +715,7 @@ mod tests {
             (AUS as &'static dyn ClassificationPolicy, "TOP SECRET"),
         ] {
             let op = CeilingAuthorizer::new(at(p, &p.level_of(top).unwrap()), p);
-            op.install(Ceiling::baseline_for(p)).unwrap();
+            install(&op, Ceiling::baseline_for(p)).unwrap();
             assert_eq!(op.ceiling().classification, p.unmarked());
             assert!(matches!(
                 op.decide(&req("fs.read", Some(AttrValue::Str("SECRET".into())))),
@@ -722,7 +732,7 @@ mod tests {
     fn a_decision_in_flight_keeps_the_ceiling_it_read() {
         let op = CeilingAuthorizer::new(us_at("UNCLASSIFIED"), US);
         let held = op.ceiling();
-        op.install(us_at("TOP SECRET")).unwrap();
+        install(&op, us_at("TOP SECRET")).unwrap();
         assert_eq!(held.classification.name, "UNCLASSIFIED");
         assert_eq!(op.ceiling().classification.name, "TOP SECRET");
     }
@@ -738,7 +748,7 @@ mod tests {
         .join();
         assert!(op.ceiling.is_poisoned());
         assert_eq!(op.ceiling().classification.name, "UNCLASSIFIED");
-        op.install(us_at("SECRET")).unwrap();
+        install(&op, us_at("SECRET")).unwrap();
         assert_eq!(
             op.decide(&req("fs.read", Some(AttrValue::Str("SECRET".into())))),
             Verdict::NotApplicable { note: None }

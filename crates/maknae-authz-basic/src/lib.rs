@@ -115,8 +115,54 @@ pub struct BasicAuthorizer {
     paths: PolicyPaths,
     digest: fn(&[u8]) -> [u8; 32],
     snapshot: RwLock<Arc<Snapshot>>,
+    live_turn: LiveTurnLock,
     #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
     evaluation_gate: Option<Arc<EvaluationGate>>,
+}
+
+/// A baseline's live turn: every composed decision shares it, and a live install
+/// takes it alone. Only a baseline owns one, so a [`LiveTurn`] is always a baseline's.
+#[derive(Debug)]
+pub struct LiveTurnLock(RwLock<()>);
+
+/// The live turn, held exclusively; every live install requires one.
+pub struct LiveTurn<'a> {
+    _held: std::sync::RwLockWriteGuard<'a, ()>,
+    of: &'a LiveTurnLock,
+}
+
+impl LiveTurnLock {
+    fn new() -> Self {
+        Self(RwLock::new(()))
+    }
+
+    /// A lock owned by no baseline, for unit tests of the other live holders.
+    #[cfg(all(unix, feature = "hermetic-test-seam"))]
+    pub fn hermetic() -> Self {
+        Self::new()
+    }
+
+    /// Held for the length of one decision.
+    pub fn share(&self) -> std::sync::RwLockReadGuard<'_, ()> {
+        self.0.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// `None` while any decision or another install holds the turn.
+    pub fn try_take(&self) -> Option<LiveTurn<'_>> {
+        let held = match self.0.try_write() {
+            Ok(held) => held,
+            Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        };
+        Some(LiveTurn {
+            _held: held,
+            of: self,
+        })
+    }
+
+    pub fn holds(&self, turn: &LiveTurn<'_>) -> bool {
+        std::ptr::eq(self, turn.of)
+    }
 }
 
 /// Parks each evaluation after it has decided on its snapshot and before it
@@ -140,6 +186,7 @@ impl BasicAuthorizer {
             paths,
             digest,
             snapshot: RwLock::new(snapshot),
+            live_turn: LiveTurnLock::new(),
             #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
             evaluation_gate: None,
         }
@@ -586,8 +633,14 @@ pub trait Baseline: maknae_security::Authorizer + sealed::Sealed + Send + Sync +
     fn snapshot(&self) -> Arc<Snapshot>;
     fn install(&self, snapshot: Arc<Snapshot>);
     fn principal(&self) -> maknae_config::Principal;
-    /// The next decision resolves the enrolled principal to `principal`.
-    fn install_principal(&self, principal: maknae_config::Principal);
+    fn live_turn(&self) -> &LiveTurnLock;
+    /// The next decision resolves the enrolled principal to `principal`; refused
+    /// unless `turn` is this baseline's own.
+    fn install_principal(
+        &self,
+        turn: &LiveTurn<'_>,
+        principal: maknae_config::Principal,
+    ) -> Result<(), String>;
     /// Load and validate the policy file through this baseline's own loader.
     /// Blocking I/O, including getpwnam: call it off the async workers.
     fn load_source(&self) -> Result<PolicySource, AuthzBasicError>;
@@ -618,8 +671,20 @@ impl Baseline for BasicAuthorizer {
         (*self.current_principal()).clone()
     }
 
-    fn install_principal(&self, principal: maknae_config::Principal) {
-        BasicAuthorizer::install_principal(self, principal)
+    fn live_turn(&self) -> &LiveTurnLock {
+        &self.live_turn
+    }
+
+    fn install_principal(
+        &self,
+        turn: &LiveTurn<'_>,
+        principal: maknae_config::Principal,
+    ) -> Result<(), String> {
+        if !self.live_turn.holds(turn) {
+            return Err("the principal is installed only in this baseline's live turn".into());
+        }
+        BasicAuthorizer::install_principal(self, principal);
+        Ok(())
     }
 
     fn load_source(&self) -> Result<PolicySource, AuthzBasicError> {
@@ -647,8 +712,16 @@ impl Baseline for HermeticAuthorizer {
         Baseline::principal(&self.inner)
     }
 
-    fn install_principal(&self, principal: maknae_config::Principal) {
-        self.inner.install_principal(principal)
+    fn live_turn(&self) -> &LiveTurnLock {
+        Baseline::live_turn(&self.inner)
+    }
+
+    fn install_principal(
+        &self,
+        turn: &LiveTurn<'_>,
+        principal: maknae_config::Principal,
+    ) -> Result<(), String> {
+        Baseline::install_principal(&self.inner, turn, principal)
     }
 
     fn load_source(&self) -> Result<PolicySource, AuthzBasicError> {
@@ -1613,7 +1686,9 @@ mod tests {
             name: "b".into(),
             uid: 777,
         };
-        Baseline::install_principal(&auth, next.clone());
+        let turn = auth.live_turn().try_take().unwrap();
+        Baseline::install_principal(&auth, &turn, next.clone()).unwrap();
+        drop(turn);
         assert_eq!(auth.decide(&whoami(501)), no_role());
         assert_eq!(auth.decide(&whoami(777)), audit_permit());
         assert_eq!(Baseline::principal(&auth), next);
@@ -1621,6 +1696,43 @@ mod tests {
         let all = auth.decide_cited_all(&[whoami(501), whoami(777)]);
         assert_eq!(all[0].verdict, no_role());
         assert_eq!(all[1].verdict, audit_permit());
+    }
+
+    #[test]
+    fn the_live_turn_is_taken_alone_and_installs_only_into_its_own_baseline() {
+        let auth = authorizer_over(EMPTY, None, &[]);
+        let other = authorizer_over(EMPTY, None, &[]);
+        let next = maknae_config::Principal {
+            name: "b".into(),
+            uid: 777,
+        };
+        let decision = auth.live_turn().share();
+        assert!(auth.live_turn().try_take().is_none());
+        drop(decision);
+        let foreign = other.live_turn().try_take().unwrap();
+        assert!(!auth.live_turn().holds(&foreign));
+        let err = Baseline::install_principal(&auth, &foreign, next.clone()).unwrap_err();
+        assert!(err.contains("live turn"), "{err}");
+        assert_eq!(Baseline::principal(&auth), principal());
+        drop(foreign);
+        let turn = auth.live_turn().try_take().unwrap();
+        assert!(auth.live_turn().holds(&turn));
+        assert!(auth.live_turn().try_take().is_none());
+        Baseline::install_principal(&auth, &turn, next.clone()).unwrap();
+        assert_eq!(Baseline::principal(&auth), next);
+    }
+
+    #[test]
+    fn a_poisoned_live_turn_is_still_taken() {
+        let auth = Arc::new(authorizer_over(EMPTY, None, &[]));
+        let poisoner = Arc::clone(&auth);
+        let _ = std::thread::spawn(move || {
+            let _turn = poisoner.live_turn().try_take().unwrap();
+            panic!("poison the turn");
+        })
+        .join();
+        drop(auth.live_turn().share());
+        assert!(auth.live_turn().try_take().is_some());
     }
 
     #[test]
@@ -1634,13 +1746,17 @@ mod tests {
         .join();
         assert!(auth.principal.is_poisoned());
         assert_eq!(auth.decide(&whoami(501)), audit_permit());
+        let turn = auth.live_turn().try_take().unwrap();
         Baseline::install_principal(
             &*auth,
+            &turn,
             maknae_config::Principal {
                 name: "b".into(),
                 uid: 777,
             },
-        );
+        )
+        .unwrap();
+        drop(turn);
         assert_eq!(auth.decide(&whoami(777)), audit_permit());
         assert_eq!(auth.decide(&whoami(501)), no_role());
     }
@@ -3394,7 +3510,9 @@ mod tests {
                 name: "b".into(),
                 uid: 777,
             };
-            Baseline::install_principal(&auth, next.clone());
+            let turn = auth.live_turn().try_take().unwrap();
+            Baseline::install_principal(&auth, &turn, next.clone()).unwrap();
+            drop(turn);
             assert_eq!(auth.decide(&whoami(501)), no_role());
             assert_eq!(auth.decide(&whoami(777)), audit_permit());
             assert_eq!(Baseline::principal(&auth), next);

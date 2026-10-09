@@ -113,8 +113,31 @@ pub enum AcceptAnswer {
         view: maknae_proto::BaselineView,
         corrective: Option<String>,
     },
-    /// Answer Internal after a `deny`/`unavailable` corrective record with this reason.
-    Unavailable(String),
+    /// Answer Internal with `reply` after a `deny`/`unavailable` corrective record
+    /// carrying `why`, which never reaches the requester.
+    Unavailable { reply: &'static str, why: String },
+}
+
+const ACCEPT_BUSY: &str = "baseline accept refused: busy; a reload holds the turn";
+const ACCEPT_STOPPING: &str = "baseline accept refused: shutting down";
+const ACCEPT_UNAVAILABLE: &str = "baseline accept unavailable";
+
+fn accept_unavailable(reply: &'static str, why: String) -> AcceptAnswer {
+    eprintln!("maknaed: {why}");
+    AcceptAnswer::Unavailable { reply, why }
+}
+
+/// Turns a drain an accept left at `Begun` (a panic or an abort before its persist
+/// landed) into `Failed`, so the daemon stops with exit 1 instead of refusing forever.
+struct DrainGuard<'a>(&'a tokio::sync::watch::Sender<Drain>);
+
+impl Drop for DrainGuard<'_> {
+    fn drop(&mut self) {
+        if *self.0.borrow() == Drain::Begun {
+            self.0.send_replace(Drain::Failed);
+            eprintln!("maknaed: a baseline accept ended without its persist; exiting on the unchanged baseline");
+        }
+    }
 }
 
 /// `admin.baseline.show` and `admin.baseline.accept`, as a request reaches them.
@@ -1532,7 +1555,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                             }
                             Payload::Baseline(view)
                         }
-                        AcceptAnswer::Unavailable(why) => {
+                        AcceptAnswer::Unavailable { reply, why } => {
                             let corrected = emit_request_outcome(
                                 &emit,
                                 &host,
@@ -1559,7 +1582,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                                     &cfg,
                                     class,
                                     ProtoErrCode::Internal,
-                                    &why,
+                                    reply,
                                 )
                                 .await;
                             }
@@ -3321,6 +3344,9 @@ impl<E: AuditEmit + Send + Sync> BootAudit for GraphBootAudit<'_, E> {
                 scanned_bytes: self.scanned_bytes,
             }),
         );
+        if let Some(drain) = self.drain {
+            drain.send_replace(Drain::Applied);
+        }
         self.write_ahead(rec)
     }
 
@@ -3921,17 +3947,19 @@ where
 
     async fn accept_named(&self, hash: &str) -> AcceptAnswer {
         let Ok(turn) = tokio::time::timeout(self.turn_wait, self.lock.lock()).await else {
-            return AcceptAnswer::Unavailable(
-                "baseline accept refused: busy; a reload holds the turn".into(),
-            );
+            return accept_unavailable(ACCEPT_BUSY, ACCEPT_BUSY.into());
         };
-        if *self.stopping.borrow() {
-            return AcceptAnswer::Unavailable("baseline accept refused: shutting down".into());
+        if *self.stopping.borrow() || *self.drain.borrow() != Drain::Serving {
+            return accept_unavailable(ACCEPT_STOPPING, ACCEPT_STOPPING.into());
         }
+        let _drain = DrainGuard(&self.drain);
         let (state, current) = match self.read_pending().await {
             Ok(read) => read,
             Err(why) => {
-                return AcceptAnswer::Unavailable(format!("baseline accept refused: {why}"))
+                return accept_unavailable(
+                    ACCEPT_UNAVAILABLE,
+                    format!("baseline accept refused: {why}"),
+                )
             }
         };
         let (plan, set) = match (
@@ -3947,7 +3975,8 @@ where
                 };
             }
             (Ok(_), None) => {
-                return AcceptAnswer::Unavailable(
+                return accept_unavailable(
+                    ACCEPT_UNAVAILABLE,
                     "baseline accept refused: nothing is pending".into(),
                 )
             }
@@ -3966,7 +3995,10 @@ where
         .await;
         let v = match checked {
             Err(why) => {
-                return AcceptAnswer::Unavailable(format!("baseline accept refused: {why}"))
+                return accept_unavailable(
+                    ACCEPT_UNAVAILABLE,
+                    format!("baseline accept refused: {why}"),
+                )
             }
             Ok(Err(cause)) => {
                 eprintln!("maknaed: baseline accept refused: {} {cause}", set.source);
@@ -3989,7 +4021,12 @@ where
         );
         let stored = match maknae_graph::identity::extract(&persisted) {
             Ok(stored) => stored,
-            Err(e) => return AcceptAnswer::Unavailable(format!("baseline accept refused: {e}")),
+            Err(e) => {
+                return accept_unavailable(
+                    ACCEPT_UNAVAILABLE,
+                    format!("baseline accept refused: {e}"),
+                )
+            }
         };
         let (system, ceiling) = crate::baseline_check::classification_of(&v);
         let moved_from = accepted_trail(&state.accepted, &self.config_dir)
@@ -4012,7 +4049,12 @@ where
             maknae_graph::record::ProvenanceKind::Operator,
         ) {
             Ok(next) => next,
-            Err(e) => return AcceptAnswer::Unavailable(format!("baseline accept refused: {e}")),
+            Err(e) => {
+                return accept_unavailable(
+                    ACCEPT_UNAVAILABLE,
+                    format!("baseline accept refused: {e}"),
+                )
+            }
         };
         let restart = plan.apply == crate::baseline::Apply::Restart;
         let class = if restart { "restart" } else { "live" };
@@ -4054,18 +4096,22 @@ where
             Ok(committed) => committed,
             Err(e) if *self.drain.borrow() == Drain::Begun => {
                 self.drain.send_replace(Drain::Failed);
-                eprintln!(
-                    "maknaed: baseline accept failed after the drain began: {e}; exiting on the unchanged baseline"
+                return accept_unavailable(
+                    ACCEPT_UNAVAILABLE,
+                    format!(
+                        "baseline accept failed: persist: {e}; exiting on the unchanged baseline"
+                    ),
                 );
-                return AcceptAnswer::Unavailable(format!("baseline accept failed: persist: {e}"));
             }
             Err(e) => {
                 let why = match e {
                     StoreError::Audit(m) => format!("the intent was not recorded: {m}"),
                     e => format!("persist: {e}"),
                 };
-                eprintln!("maknaed: baseline accept refused: {why}");
-                return AcceptAnswer::Unavailable(format!("baseline accept refused: {why}"));
+                return accept_unavailable(
+                    ACCEPT_UNAVAILABLE,
+                    format!("baseline accept refused: {why}"),
+                );
             }
         };
         for e in [&committed.durability_error, &committed.checkpoint_error]
@@ -4088,14 +4134,14 @@ where
             pending: None,
         });
         let applied = if restart {
-            self.drain.send_replace(Drain::Applied);
             Ok("restarting to apply")
         } else {
             let before = self.authorizer.baseline().principal().uid;
             let principal = v.principal.uid;
             let pdp = Arc::clone(&self.authorizer);
+            let deadline = std::time::Instant::now() + BLOCKING_OPERATION_TIMEOUT;
             match within_blocking(2 * BLOCKING_OPERATION_TIMEOUT, move || {
-                crate::live::install(&pdp, &v)
+                crate::live::install(&pdp, &v, deadline)
             })
             .await
             .and_then(|installed| installed)
@@ -4106,7 +4152,10 @@ where
                     }
                     Ok("applied live")
                 }
-                Err(e) => Err(e),
+                Err(e) => {
+                    self.drain.send_replace(Drain::Applied);
+                    Err(e)
+                }
             }
         };
         drop(turn);
@@ -4120,7 +4169,7 @@ where
             Err(e) => (
                 "deny",
                 format!(
-                    "accepted sha256:{short} at revision {revision}; not installed: {e}; the next start applies it"
+                    "accepted sha256:{short} at revision {revision}; not installed live: {e}; restarting to apply"
                 ),
                 "unavailable",
             ),
@@ -4133,15 +4182,13 @@ where
         if let Err(e) = self.sink.emit_within(&rec, self.append_bound).await {
             eprintln!("maknaed: AUDIT WRITE FAILED on the baseline accept outcome: {e}");
         }
-        match applied {
-            Ok(_) => AcceptAnswer::View {
-                view: crate::baseline::accepted_view(&set),
-                corrective: None,
-            },
-            Err(_) => AcceptAnswer::Unavailable(
-                "baseline accept failed: the accepted baseline was persisted and could not be installed; the next start applies it"
-                    .into(),
-            ),
+        let mut view = crate::baseline::accepted_view(&set, &state.accepted);
+        if applied.is_err() {
+            view.apply = "restart".into();
+        }
+        AcceptAnswer::View {
+            view,
+            corrective: None,
         }
     }
 
@@ -5729,7 +5776,12 @@ pub(crate) mod baseline_stub {
             Box::pin(async { Err("no baseline service".to_string()) })
         }
         fn accept<'a>(&'a self, _: &'a str) -> BoxFuture<'a, AcceptAnswer> {
-            Box::pin(async { AcceptAnswer::Unavailable("no baseline service".into()) })
+            Box::pin(async {
+                AcceptAnswer::Unavailable {
+                    reply: "no baseline service",
+                    why: "no baseline service".into(),
+                }
+            })
         }
     }
 
@@ -5855,23 +5907,19 @@ mod tests {
     /// sum — the failure four review rounds found in a row.
     const STOP_TIMEOUT_SLACK: Duration = Duration::from_secs(10);
 
-    /// #240 (review rounds 2–4): the shipped units' stop timeouts are held to
-    /// the shutdown chain at the deadline CEILING, term by term and in the
-    /// order `accept_loop` and `run_inner` execute them — the reload wait, the stop record's
-    /// append (#265), the supervisor abort-reap, the handler drain (deadline + its own bound) and the reap
-    /// of what it aborts, the audit drain, the plane client's shutdown (a
-    /// bounded lock wait, then revoke-self), the runtime teardown and the diagnostics
-    /// flush. TWO-SIDED:
-    /// four rounds each found a term the expression had skipped while the
-    /// unit kept the old sum, so a unit more than `STOP_TIMEOUT_SLACK` above
-    /// the chain is as red as one below it.
+    /// Once the drain is applied an accept still appends the checkpoint and its
+    /// outcome, writes the reply and closes the stream.
     #[test]
     fn the_accept_worst_case_fits_the_handler_drain() {
         let cfg = maknae_config::transport_from_section(None).unwrap();
         let egress = maknae_config::egress_from_section(None).unwrap();
-        let bound = handler_drain_bound(&cfg, Duration::from_millis(egress.deadline_ms));
-        assert!(3 * AUDIT_APPEND_TIMEOUT < bound, "{bound:?}");
-        assert!(3 * AUDIT_APPEND_TIMEOUT < handler_drain_bound(&cfg, Duration::ZERO));
+        let remaining = 2 * AUDIT_APPEND_TIMEOUT
+            + Duration::from_millis(cfg.read_timeout_ms)
+            + STREAM_CLOSE_TIMEOUT;
+        for deadline in [Duration::from_millis(egress.deadline_ms), Duration::ZERO] {
+            let bound = handler_drain_bound(&cfg, deadline);
+            assert!(remaining < bound, "{remaining:?} {bound:?}");
+        }
     }
 
     #[test]
@@ -5915,6 +5963,16 @@ mod tests {
         assert_eq!(crate::handler::APPLY_BY_RESTART_EXIT_CODE, 6);
     }
 
+    /// #240 (review rounds 2–4): the shipped units' stop timeouts are held to
+    /// the shutdown chain at the deadline CEILING, term by term and in the
+    /// order `accept_loop` and `run_inner` execute them — the reload wait, the stop record's
+    /// append (#265), the supervisor abort-reap, the handler drain (deadline + its own bound) and the reap
+    /// of what it aborts, the audit drain, the plane client's shutdown (a
+    /// bounded lock wait, then revoke-self), the runtime teardown and the diagnostics
+    /// flush. TWO-SIDED:
+    /// four rounds each found a term the expression had skipped while the
+    /// unit kept the old sum, so a unit more than `STOP_TIMEOUT_SLACK` above
+    /// the chain is as red as one below it.
     #[test]
     fn the_units_stop_timeouts_cover_the_shutdown_chain_at_the_deadline_ceiling() {
         // BOTH ceilings: the transport timeouts at their maximum and the
@@ -10422,10 +10480,9 @@ mod reload_fixture {
         }
     }
 
-    /// The fixture's `maknae.yaml`: `core_extra` under `core:`, then `tail`, whose marker
-    /// lines set a value instead of being appended: `vault_addr_marker: <url>`,
-    /// `transport_tail_max_connections: <n>`, `socket_path_marker: <path>`,
-    /// `audit_path_marker: <path>`, `audit_readers_marker: <list>`.
+    /// The fixture's `maknae.yaml`: `core_extra` under `core:`, then `tail`, whose lines
+    /// named by a marker (`vault_addr_marker: `, `socket_path_marker: `, ...) set that
+    /// value instead of being appended.
     fn yaml(dir: &Path, core_extra: &str, tail: &str) -> String {
         yaml_for(dir, core_extra, tail, nix::unistd::geteuid().as_raw())
     }
@@ -11067,7 +11124,7 @@ mod baseline_accept_tests {
         fx.refuse(GRAPH_BASELINE_ACTION);
         let got = fx.accept(&shown.hash).await;
         assert!(
-            matches!(got, AcceptAnswer::Unavailable(ref r) if r.contains("intent")),
+            matches!(got, AcceptAnswer::Unavailable { reply: ACCEPT_UNAVAILABLE, ref why } if why.contains("intent")),
             "{got:?}"
         );
         assert_eq!(fx.store_sha(), before);
@@ -11146,10 +11203,11 @@ mod baseline_accept_tests {
             .iter()
             .find(|s| s.action == CHECKPOINT_ACTION && s.reason == "transitioned")
             .unwrap();
+        assert_eq!(transition.drain, Drain::Serving);
         assert_eq!(
             checkpoint.drain,
-            Drain::Begun,
-            "the drain began before the persist"
+            Drain::Applied,
+            "the drain is applied as soon as the persist has landed"
         );
         assert_ne!(checkpoint.store, before);
         assert_eq!(fx.drain(), Drain::Applied);
@@ -11171,7 +11229,7 @@ mod baseline_accept_tests {
         let got = fx.accept(&shown.hash).await;
         std::fs::set_permissions(fx.state_dir(), std::fs::Permissions::from_mode(0o700)).unwrap();
         assert!(
-            matches!(got, AcceptAnswer::Unavailable(ref r) if r.contains("persist")),
+            matches!(got, AcceptAnswer::Unavailable { reply: ACCEPT_UNAVAILABLE, ref why } if why.contains("persist")),
             "{got:?}"
         );
         assert_eq!(fx.drain(), Drain::Failed);
@@ -11302,7 +11360,13 @@ mod baseline_accept_tests {
             .expect("bounded");
         drop(held);
         assert!(
-            matches!(got, AcceptAnswer::Unavailable(ref r) if r.contains("busy")),
+            matches!(
+                got,
+                AcceptAnswer::Unavailable {
+                    reply: ACCEPT_BUSY,
+                    ..
+                }
+            ),
             "{got:?}"
         );
         assert_eq!(ceiling_name(&fx), "UNCLASSIFIED");
@@ -11316,17 +11380,66 @@ mod baseline_accept_tests {
         fx.reloader.stopping.send_replace(true);
         let got = fx.accept(&shown.hash).await;
         assert!(
-            matches!(got, AcceptAnswer::Unavailable(ref r) if r.contains("shutting down")),
+            matches!(
+                got,
+                AcceptAnswer::Unavailable {
+                    reply: ACCEPT_STOPPING,
+                    ..
+                }
+            ),
             "{got:?}"
         );
         assert!(!fx.seen().iter().any(|s| s.action == GRAPH_BASELINE_ACTION));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn an_install_that_fails_is_recorded_and_never_named_in_the_reply() {
-        let fx = Fx::with_core("install-fails", &unclassified()).await;
-        fx.write_yaml(SECRET, "");
+    async fn an_accept_is_refused_unless_the_drain_is_serving() {
+        for drain in [Drain::Begun, Drain::Applied, Drain::Failed] {
+            let fx = Fx::with_core(&format!("draining-{drain:?}"), &unclassified()).await;
+            fx.write_yaml(SECRET, "");
+            let shown = fx.show().await;
+            let before = fx.store_sha();
+            fx.reloader.drain.send_replace(drain);
+            let got = fx.accept(&shown.hash).await;
+            assert!(
+                matches!(
+                    got,
+                    AcceptAnswer::Unavailable {
+                        reply: ACCEPT_STOPPING,
+                        ..
+                    }
+                ),
+                "{drain:?}: {got:?}"
+            );
+            assert_eq!(fx.drain(), drain);
+            assert_eq!(fx.store_sha(), before, "{drain:?}");
+            assert_eq!(ceiling_name(&fx), "UNCLASSIFIED");
+            assert!(!fx.seen().iter().any(|s| s.action == GRAPH_BASELINE_ACTION));
+        }
+    }
+
+    #[test]
+    fn a_drain_left_begun_by_an_accept_becomes_failed() {
+        for (at, after) in [
+            (Drain::Begun, Drain::Failed),
+            (Drain::Serving, Drain::Serving),
+            (Drain::Applied, Drain::Applied),
+            (Drain::Failed, Drain::Failed),
+        ] {
+            let (tx, rx) = tokio::sync::watch::channel(Drain::Serving);
+            let guard = DrainGuard(&tx);
+            tx.send_replace(at);
+            drop(guard);
+            assert_eq!(*rx.borrow(), after, "{at:?}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_lowered_ceiling_whose_install_times_out_is_applied_by_restart() {
+        let fx = Fx::with_core("install-fails", SECRET).await;
+        fx.write_yaml(&unclassified(), "");
         let shown = fx.show().await;
+        assert_eq!(shown.apply, "live");
         let (held_tx, held) = std::sync::mpsc::channel();
         let (release_tx, release) = std::sync::mpsc::channel::<()>();
         let holder = {
@@ -11342,28 +11455,33 @@ mod baseline_accept_tests {
         let got = fx.accept(&shown.hash).await;
         let _ = release_tx.send(());
         holder.join().unwrap();
-        let AcceptAnswer::Unavailable(reply) = got else {
-            panic!("{got:?}")
-        };
-        assert!(reply.contains("the next start applies it"), "{reply}");
-        assert!(
-            !reply.contains("SECRET") && !reply.contains("live turn"),
-            "{reply}"
+        let view = accepted(got);
+        assert_eq!(
+            (view.state.as_str(), view.apply.as_str()),
+            ("accepted", "restart")
         );
+        assert_eq!(fx.drain(), Drain::Applied);
+        assert!(!crate::handler::admits(fx.drain()));
+        assert!(matches!(
+            crate::handler::after_drain(ServeOutcome::GracefulShutdown, fx.drain()),
+            ServeOutcome::ApplyByRestart
+        ));
         let outcome = fx
             .seen()
             .into_iter()
             .rfind(|s| s.action == GRAPH_BASELINE_ACTION)
             .unwrap();
         assert!(
-            outcome.reason.contains("not installed: ") && outcome.reason.contains("live turn"),
+            outcome.reason.contains("not installed live: ")
+                && outcome.reason.contains("live turn")
+                && outcome.reason.ends_with("restarting to apply"),
             "{outcome:?}"
         );
-        assert_eq!(ceiling_name(&fx), "UNCLASSIFIED");
+        assert!(!view.changes.iter().any(|c| c.contains("live turn")));
         assert_eq!(
             fx.stored().unwrap().ceiling,
-            "SECRET",
-            "the store holds the accepted baseline"
+            "UNCLASSIFIED",
+            "the store holds the accepted baseline the restart applies"
         );
     }
 

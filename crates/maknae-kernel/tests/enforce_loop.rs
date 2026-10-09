@@ -3488,13 +3488,16 @@ impl maknae_kernel::BaselineOps for ScriptedBaseline {
                         .into(),
                 ),
             },
-            _ => maknae_kernel::AcceptAnswer::Unavailable(
-                "baseline accept refused: busy; a reload holds the turn".into(),
-            ),
+            _ => maknae_kernel::AcceptAnswer::Unavailable {
+                reply: "baseline accept unavailable",
+                why: format!("baseline accept refused: the baseline check failed: {CHECK_SENTINEL}"),
+            },
         };
         Box::pin(async move { answer })
     }
 }
+
+const CHECK_SENTINEL: &str = "panicked at ceiling-value-7f3a";
 
 async fn drive_baseline(
     fx: &Fixture,
@@ -3579,9 +3582,12 @@ async fn an_accept_request_record_carries_neither_the_hash_nor_the_operand() {
             }
             (RespResult::Err(e), "") => {
                 assert_eq!(e.code, ProtoErrCode::Internal);
-                assert_eq!(
-                    e.message,
-                    "baseline accept refused: busy; a reload holds the turn"
+                assert_eq!(e.message, "baseline accept unavailable");
+                assert!(
+                    emit.records()
+                        .iter()
+                        .any(|r| r.outcome.reason.contains(CHECK_SENTINEL)),
+                    "the cause is recorded"
                 );
             }
             other => panic!("{mode}: {other:?}"),
