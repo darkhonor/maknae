@@ -85,7 +85,7 @@ pub(crate) fn cli_config_specs() -> [SectionSpec; 3] {
     name = "maknae",
     about = "CLI for maknaed: filesystem operations, daemon queries, and enrollment"
 )]
-struct Cli {
+pub(crate) struct Cli {
     #[command(subcommand)]
     command: Command,
 }
@@ -173,10 +173,25 @@ enum Command {
     /// Authorize maknaed to seed a fresh kernel graph at its next start, keeping a
     /// readable current store aside. Requires `sudo`.
     Reseed,
+    /// Root-only bindings maintenance.
+    Policy {
+        #[command(subcommand)]
+        action: PolicyCommand,
+    },
     /// Hidden operator-context helper `enroll` re-execs via `sudo -u` — not a
     /// user-facing verb.
     #[command(hide = true, name = "enroll-helper")]
     EnrollHelper(crate::enroll::HelperArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum PolicyCommand {
+    /// Install maknaed's bindings mirror as /etc/maknae/bindings.yaml. Requires `sudo`.
+    Sync {
+        /// Print what would change and install nothing.
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 /// The verbs the wire path can issue (mirrors `maknae_proto::Verb`).
@@ -811,7 +826,7 @@ fn identity_problems_line(counts: &[String]) -> Option<String> {
 
 /// Anything but printable ASCII is escaped: the daemon escapes its labels, and a
 /// daemon that did not cannot reach the terminal with a control character.
-fn terminal_safe(s: &str) -> String {
+pub(crate) fn terminal_safe(s: &str) -> String {
     s.chars()
         .map(|c| {
             if c == ' ' || c.is_ascii_graphic() {
@@ -996,6 +1011,9 @@ pub async fn run_cli() -> ExitCode {
         Command::Logout => crate::login::run_logout().await,
         Command::Enroll(args) => crate::enroll::run_enroll(*args).await,
         Command::Reseed => crate::reseed::run_reseed(),
+        Command::Policy {
+            action: PolicyCommand::Sync { check },
+        } => crate::policy_sync::run(nix::unistd::geteuid().as_raw(), check),
         Command::EnrollHelper(args) => crate::enroll::run_enroll_helper(args).await,
     }
 }
@@ -2244,6 +2262,20 @@ mod tests {
             cli.command,
             Command::AuditReaders { stopped: true }
         ));
+    }
+
+    #[test]
+    fn policy_sync_parses_with_and_without_check() {
+        for (argv, want) in [
+            (&["maknae", "policy", "sync"][..], false),
+            (&["maknae", "policy", "sync", "--check"][..], true),
+        ] {
+            let cli = Cli::try_parse_from(argv).expect("parses");
+            assert!(
+                matches!(cli.command, Command::Policy { action: PolicyCommand::Sync { check } } if check == want),
+                "{argv:?}"
+            );
+        }
     }
 
     #[test]

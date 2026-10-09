@@ -716,6 +716,10 @@ path = "bins/maknae/src/reseed.rs"
 why = "#488: sudo maknae reseed — bin code, T3 per the tiering constraint. It writes one marker through maknae-io's anchored publish (T1 in maknae-io), refusing anything already at the marker path; the marker's authority is decided by the daemon in maknae-state store.rs (T1). The pieces carry real-file unit tests: the umask-077 mode in a child process, a planted symlink left untouched, a pending marker left as is, the root preflight and the directory requirement"
 
 [[t3]]
+path = "bins/maknae/src/policy_sync.rs"
+why = "#491: sudo maknae policy sync — bin code, T3 per the tiering constraint. Every decision (the mirror's validity, the base check, nothing-to-install, the diff, the bytes installed) is maknae-config mirror.rs (T1); the write is maknae-io's owner-setting publish (T1). This file reads and writes through those, and its unit tests cover the one-path pin, the root preflight, the refusals with nothing written, the prompt and its no-terminal refusal, the four exit codes (0 installed or restored, 1 --check found something to install, 2 refused, 3 nothing to install), and (added in the packaging task) the shipped-disabled packaging pin"
+
+[[t3]]
 path = "bins/maknae/src/audit_readers.rs"
 why = "#500: sudo maknae audit-readers — bin code, T3 per the tiering constraint. It loads maknae.yaml and config.d through maknae-config's root-owned loader and validates audit.readers through resolve_readers (both T1 in maknae-config) over maknae-vault's NssAccounts. The pieces carry unit tests: the root preflight, the validation over a fake account database, the one-name-per-line output contract, a refused non-root-owned file, and the --stopped check against a real held directory lock"
 
