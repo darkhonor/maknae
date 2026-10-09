@@ -386,6 +386,18 @@ mod tests {
             });
             rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok()
         };
+        let releases = || {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let gate = gate.clone();
+            std::thread::spawn(move || {
+                gate.release.wait();
+                let _ = tx.send(());
+            });
+            assert!(
+                rx.recv_timeout(std::time::Duration::from_secs(30)).is_ok(),
+                "the evaluation never reached its release"
+            );
+        };
         let batch = {
             let (c, home) = (c.clone(), g.0.clone());
             std::thread::spawn(move || {
@@ -394,9 +406,9 @@ mod tests {
         };
         assert!(arrives(), "the batch never reached evaluation");
         c.baseline().install(next.clone());
-        gate.release.wait();
+        releases();
         assert!(arrives(), "the batch stopped after one evaluation");
-        gate.release.wait();
+        releases();
         let all = batch.join().unwrap();
         assert_eq!(all.len(), 2);
         for d in all {
@@ -408,7 +420,7 @@ mod tests {
             std::thread::spawn(move || c.decide(&permitted_read(&home)))
         };
         assert!(arrives(), "the probe never reached evaluation");
-        gate.release.wait();
+        releases();
         let probed = probe.join().unwrap();
         assert!(matches!(probed, Verdict::Deny { .. }), "{probed:?}");
     }

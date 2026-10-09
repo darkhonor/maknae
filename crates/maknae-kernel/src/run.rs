@@ -10862,11 +10862,22 @@ mod reload_fixture {
         }
 
         pub(super) async fn show(&self) -> maknae_proto::BaselineView {
-            BaselineOps::show(self.reloader.as_ref()).await.unwrap()
+            tokio::time::timeout(
+                Duration::from_secs(30),
+                BaselineOps::show(self.reloader.as_ref()),
+            )
+            .await
+            .expect("the show returns")
+            .unwrap()
         }
 
         pub(super) async fn accept(&self, hash: &str) -> AcceptAnswer {
-            BaselineOps::accept(self.reloader.as_ref(), hash).await
+            tokio::time::timeout(
+                Duration::from_secs(30),
+                BaselineOps::accept(self.reloader.as_ref(), hash),
+            )
+            .await
+            .expect("the accept returns")
         }
 
         pub(super) fn drain(&self) -> Drain {
@@ -11604,7 +11615,12 @@ mod baseline_accept_tests {
         })
         .await
         .expect("the checkpoint append is the one held");
-        let view = accepted(accept.await.unwrap());
+        let view = accepted(
+            tokio::time::timeout(Duration::from_secs(30), accept)
+                .await
+                .expect("the accept finishes")
+                .unwrap(),
+        );
         assert_eq!(view.apply, "restart");
         let seen = fx.seen();
         let at = |pred: &dyn Fn(&Seen) -> bool| seen.iter().position(pred).unwrap();
@@ -11650,7 +11666,10 @@ mod baseline_accept_tests {
         accepted(fx.accept(&shown.hash).await);
         fx.write_bindings(ROOT_ADMIN_OTHER);
         let before = fx.stored().unwrap().sha256;
-        fx.reloader.run().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(30), fx.reloader.run())
+            .await
+            .expect("the reload finishes")
+            .unwrap();
         assert_ne!(fx.store_sha(), "", "the reload persisted");
         let stored = fx.stored().unwrap();
         assert_eq!(stored.sha256, before);
@@ -12062,14 +12081,22 @@ mod baseline_accept_tests {
         for state in [Drain::Begun, Drain::Applied, Drain::Failed] {
             fx.reloader.drain.send_replace(state);
             assert_eq!(
-                fx.reloader.run().await.err(),
+                tokio::time::timeout(Duration::from_secs(30), fx.reloader.run())
+                    .await
+                    .expect("the reload returns")
+                    .err(),
                 Some(crate::reload::Refusal::Shutdown),
                 "{state:?}"
             );
             assert_eq!(fx.reloader.revision.load(AtomicOrdering::Acquire), revision);
         }
         fx.reloader.drain.send_replace(Drain::Serving);
-        assert!(fx.reloader.run().await.is_ok());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(30), fx.reloader.run())
+                .await
+                .expect("the reload returns")
+                .is_ok()
+        );
     }
 
     fn is_accept_outcome(r: &AuditRecord) -> bool {
@@ -12182,7 +12209,7 @@ mod reload_tests {
         let before = fx.stored();
         assert!(before.is_some());
         fx.write_bindings(ROOT_ADMIN_OTHER);
-        let applied = fx.reloader.run().await.unwrap();
+        let applied = bounded(fx.reloader.run()).await.unwrap();
         assert!(applied.persisted);
         assert_eq!(fx.stored(), before);
     }
@@ -12192,7 +12219,7 @@ mod reload_tests {
         let fx = Fx::with_baseline("vault-at-reload").await;
         let before = fx.stored();
         fx.write_yaml("", "vault_addr_marker: https://w.example:8200\n");
-        fx.reloader.run().await.unwrap();
+        bounded(fx.reloader.run()).await.unwrap();
         assert_eq!(fx.stored(), before, "a reload does not move vault");
         let pending: Vec<_> = fx
             .seen()
@@ -12214,7 +12241,7 @@ mod reload_tests {
             fx.status_lines(),
             vec!["baseline: 1 pending (restart)".to_string()]
         );
-        fx.reloader.run().await.unwrap();
+        bounded(fx.reloader.run()).await.unwrap();
         assert_eq!(
             fx.seen()
                 .iter()
@@ -12231,7 +12258,7 @@ mod reload_tests {
         let fx = Fx::with_baseline("pending-retry").await;
         fx.write_yaml("", "vault_addr_marker: https://w.example:8200\n");
         fx.reloader.sink.fail_baseline.store(true, SeqCst);
-        fx.reloader.run().await.unwrap();
+        bounded(fx.reloader.run()).await.unwrap();
         let recorded = |fx: &Fx| {
             fx.seen()
                 .iter()
@@ -12244,13 +12271,13 @@ mod reload_tests {
             "an unrecorded set is not published"
         );
         fx.reloader.sink.fail_baseline.store(false, SeqCst);
-        fx.reloader.run().await.unwrap();
+        bounded(fx.reloader.run()).await.unwrap();
         assert_eq!(recorded(&fx), 1, "the next reload records it");
         assert_eq!(
             fx.status_lines(),
             vec!["baseline: 1 pending (restart)".to_string()]
         );
-        fx.reloader.run().await.unwrap();
+        bounded(fx.reloader.run()).await.unwrap();
         assert_eq!(recorded(&fx), 1, "and only once");
     }
 
@@ -12258,7 +12285,7 @@ mod reload_tests {
     async fn the_pending_record_follows_the_reload_outcome() {
         let fx = Fx::with_baseline("pending-order").await;
         fx.write_yaml("", "vault_addr_marker: https://w.example:8200\n");
-        fx.reloader.run().await.unwrap();
+        bounded(fx.reloader.run()).await.unwrap();
         let actions: Vec<String> = fx.seen().into_iter().map(|s| s.action).collect();
         assert_eq!(
             actions,
@@ -12275,7 +12302,7 @@ mod reload_tests {
         let fx = Fx::with_baseline("invalid-at-reload").await;
         fx.write_yaml("  unknown_key: 1\n", "");
         fx.write_bindings(ROOT_ADMIN_OTHER);
-        let applied = fx.reloader.run().await.unwrap();
+        let applied = bounded(fx.reloader.run()).await.unwrap();
         assert!(applied.persisted, "the policy edit applied");
         let rec = fx
             .seen()
@@ -12304,7 +12331,7 @@ mod reload_tests {
         let mut hashes = Vec::new();
         for model in ["m", "n"] {
             fx.write_yaml("", &providers(model));
-            fx.reloader.run().await.unwrap();
+            bounded(fx.reloader.run()).await.unwrap();
             let p = fx.reloader.baseline.current().pending.clone().unwrap();
             let crate::baseline::PendingState::Invalid { proposed, .. } = &p.state else {
                 panic!("{p:?}")
@@ -12338,7 +12365,7 @@ mod reload_tests {
         .unwrap();
         fx.set_persisted(Arc::new(bare));
         let before = fx.store_sha();
-        let r = fx.reloader.run().await;
+        let r = bounded(fx.reloader.run()).await;
         assert!(
             matches!(r, Err(crate::reload::Refusal::Compile(ref m)) if m.contains("carries no baseline")),
             "{r:?}"
@@ -12366,7 +12393,7 @@ mod reload_tests {
         fx.set_persisted(Arc::new(forged));
         fx.write_bindings(ROOT_ADMIN_OTHER);
         let before = fx.store_sha();
-        let r = fx.reloader.run().await;
+        let r = bounded(fx.reloader.run()).await;
         assert_eq!(r, Err(crate::reload::Refusal::BaselineChanged), "{r:?}");
         assert_eq!(fx.store_sha(), before);
         let outcome = fx.reload_records().pop().unwrap().outcome.reason;
@@ -12381,9 +12408,9 @@ mod reload_tests {
     async fn a_commit_replaces_the_graph_the_next_reload_plans_from() {
         let fx = Fx::with_baseline("replaced-graph").await;
         fx.write_bindings(ROOT_ADMIN_OTHER);
-        assert!(fx.reloader.run().await.unwrap().persisted);
+        assert!(bounded(fx.reloader.run()).await.unwrap().persisted);
         assert_eq!(fx.reloader.persisted.read().unwrap().revision(), 2);
-        let again = fx.reloader.run().await.unwrap();
+        let again = bounded(fx.reloader.run()).await.unwrap();
         assert!(!again.persisted, "{again:?}");
     }
 
@@ -12391,11 +12418,11 @@ mod reload_tests {
     async fn a_file_reverted_to_the_baseline_clears_the_pending_set() {
         let fx = Fx::with_baseline("revert").await;
         fx.write_yaml("", "vault_addr_marker: https://w.example:8200\n");
-        fx.reloader.run().await.unwrap();
+        bounded(fx.reloader.run()).await.unwrap();
         assert_eq!(fx.status_lines().len(), 1);
         fx.write_yaml("", "");
         let records_before = fx.seen().len();
-        fx.reloader.run().await.unwrap();
+        bounded(fx.reloader.run()).await.unwrap();
         assert!(fx.status_lines().is_empty());
         assert!(!fx.seen()[records_before..]
             .iter()
@@ -12407,7 +12434,7 @@ mod reload_tests {
         let fx = Fx::with_baseline("refused-publishes-nothing").await;
         fx.write_yaml("", "vault_addr_marker: https://w.example:8200\n");
         fx.write_bindings("schema_version: [\n");
-        assert!(fx.reloader.run().await.is_err());
+        assert!(bounded(fx.reloader.run()).await.is_err());
         assert!(fx.status_lines().is_empty());
         assert!(!fx.seen().iter().any(|s| s.action == GRAPH_BASELINE_ACTION));
     }
@@ -12525,7 +12552,7 @@ mod reload_tests {
             maknae_security::Verdict::Permit { .. }
         ));
         fx.write_bindings(ROOT_ADVERSARY);
-        let applied = fx.reloader.run().await.unwrap();
+        let applied = bounded(fx.reloader.run()).await.unwrap();
         assert_eq!(
             applied,
             crate::reload::Applied {
@@ -13128,7 +13155,7 @@ mod reload_tests {
     async fn the_next_boot_verifies_a_reloaded_store_against_its_checkpoint() {
         let fx = fixture("reboot", AUTHZ, Some(ROOT_ADMIN)).await;
         fx.write_bindings(ROOT_ADVERSARY);
-        fx.reloader.run().await.unwrap();
+        bounded(fx.reloader.run()).await.unwrap();
         let accepted = fx.stored().unwrap();
         let before = fx.dir.join("audit.jsonl");
         let reloaded = std::fs::read_to_string(&before).unwrap().lines().count();
@@ -13198,7 +13225,7 @@ mod reload_tests {
         let fx = fixture("status", AUTHZ, Some(ROOT_ADMIN)).await;
         assert_eq!(fx.status.revision(), 1);
         fx.write_bindings(ROOT_ADVERSARY);
-        fx.reloader.run().await.unwrap();
+        bounded(fx.reloader.run()).await.unwrap();
         assert_eq!(fx.status.revision(), 2);
         assert_eq!(fx.reloader.dir.store_revision(), 2);
     }
@@ -13287,7 +13314,7 @@ mod reload_tests {
         let before = fx.baseline().snapshot();
         let bytes = fx.store_bytes();
         fx.write_policy("not: [valid");
-        let refused = fx.reloader.run().await.unwrap_err();
+        let refused = bounded(fx.reloader.run()).await.unwrap_err();
         assert!(
             matches!(refused, crate::reload::Refusal::Load(_)),
             "{refused:?}"
@@ -13333,7 +13360,7 @@ mod reload_tests {
         let bytes = fx.store_bytes();
         fx.write_bindings(ROOT_ADVERSARY);
         fx.reloader.revision.store(0, AtomicOrdering::Release);
-        let refused = fx.reloader.run().await.unwrap_err();
+        let refused = bounded(fx.reloader.run()).await.unwrap_err();
         assert!(
             matches!(refused, crate::reload::Refusal::Persist(_)),
             "{refused:?}"
@@ -13359,7 +13386,7 @@ mod reload_tests {
         fx.write_bindings(ROOT_ADVERSARY);
         fx.reloader.dir.fail_next_directory_sync();
         let cause = "published, but the directory sync failed (Other { raw: 5 }): kernel.graph";
-        let applied = fx.reloader.run().await.unwrap();
+        let applied = bounded(fx.reloader.run()).await.unwrap();
         assert_eq!(
             applied,
             crate::reload::Applied {
@@ -13390,7 +13417,7 @@ mod reload_tests {
             )
         );
         fx.write_bindings(ROOT_ADMIN);
-        let next = fx.reloader.run().await.unwrap();
+        let next = bounded(fx.reloader.run()).await.unwrap();
         assert_eq!((next.revision, next.durability_error), (3, None));
     }
 
@@ -13400,7 +13427,7 @@ mod reload_tests {
         let before = fx.baseline().snapshot();
         let bytes = fx.store_bytes();
         fx.write_policy("schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\"]\n  deny: []\n");
-        let applied = fx.reloader.run().await.unwrap();
+        let applied = bounded(fx.reloader.run()).await.unwrap();
         assert_eq!(
             applied,
             crate::reload::Applied {
@@ -13437,7 +13464,7 @@ mod reload_tests {
     async fn two_hups_in_flight_run_in_turn() {
         let fx = fixture("turns", AUTHZ, Some(ROOT_ADMIN)).await;
         fx.write_bindings(ROOT_ADVERSARY);
-        let (a, b) = tokio::join!(fx.reloader.run(), fx.reloader.run());
+        let (a, b) = bounded(async { tokio::join!(fx.reloader.run(), fx.reloader.run()) }).await;
         let mut revisions = [a.unwrap().revision, b.unwrap().revision];
         revisions.sort_unstable();
         assert_eq!(revisions, [2, 2]);
@@ -13587,7 +13614,9 @@ mod reload_tests {
         assert!(Arc::ptr_eq(&before, &fx.baseline().snapshot()));
         assert_eq!(fx.store_bytes(), bytes);
         assert!(matches!(
-            reload.await,
+            tokio::time::timeout(Duration::from_secs(30), reload)
+                .await
+                .expect("the reload task ends"),
             Ok(Err(crate::reload::Refusal::Shutdown))
         ));
     }
@@ -13681,7 +13710,7 @@ mod reload_tests {
         let fx = fixture("queued", AUTHZ, Some(ROOT_ADMIN)).await;
         fx.reloader.stopping.send_replace(true);
         assert_eq!(
-            fx.reloader.run().await,
+            bounded(fx.reloader.run()).await,
             Err(crate::reload::Refusal::Shutdown)
         );
         assert!(fx.reload_records().is_empty());
