@@ -3571,7 +3571,6 @@ impl GraphInputs {
         })
     }
 
-    /// The inputs of `merged.source`, carrying the merge and the base it read.
     fn merged(
         merged: &crate::sync::MergedSource,
         seen: Option<maknae_graph::sync::SyncBase>,
@@ -3714,8 +3713,7 @@ fn merge_refusal(e: crate::sync::MergeError, state_dir: &Path) -> RunError {
     }
 }
 
-/// The sync base the boot merges against; none when the store is absent or a reseed
-/// replaces it. When `dir` or `key` is an error, the graph boot raises it.
+/// An error in `dir` or `key` is raised by the graph boot, not here.
 fn boot_sync_base(
     dir: &Result<StateDir, StoreError>,
     key: &Result<WrappingKey, maknae_vault::VaultError>,
@@ -3730,8 +3728,6 @@ fn boot_sync_base(
     }
 }
 
-/// A `graph.sync` record that is not written ahead: journaled, and an append failure
-/// is journaled only.
 async fn record_sync_unavailable<E: AuditEmit + Send + Sync>(
     sink: &E,
     ctx: &BootCtx<'_>,
@@ -3756,12 +3752,9 @@ struct MergedBoot {
     booted: BootedGraph,
     inputs: GraphInputs,
     source: maknae_authz_basic::PolicySource,
-    /// The `graph.sync` lost reason, when this boot found the file lost.
     lost: Option<String>,
 }
 
-/// Merges `source` with the store's sync base, boots the kernel graph from the merged
-/// inputs `inputs` builds, then publishes the mirror of what it booted.
 #[allow(clippy::too_many_arguments)]
 async fn boot_merged_graph(
     state_dir: &Path,
@@ -7650,7 +7643,6 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         (seeded, booted)
     }
 
-    /// A store holding `seed` and no sync base, as one written before #491; the trail's length.
     fn seed_without_sync(
         fx: &GraphFixture,
         inputs: &GraphInputs,
@@ -7859,11 +7851,17 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         .unwrap()
     }
 
-    /// The boot's merge and graph boot over `fx`, as a start decides it; the test plays
-    /// root's reseed marker.
     fn boot_merged(
         fx: &GraphFixture,
         source: maknae_authz_basic::PolicySource,
+    ) -> Result<MergedBoot, RunError> {
+        boot_merged_with(fx, source, || {})
+    }
+
+    fn boot_merged_with(
+        fx: &GraphFixture,
+        source: maknae_authz_basic::PolicySource,
+        merged_inputs: impl FnOnce(),
     ) -> Result<MergedBoot, RunError> {
         let seq = Seq::new();
         let au3_1 = serde_json::Value::Null;
@@ -7894,6 +7892,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             &ctx,
             source,
             |merged, seen| {
+                merged_inputs();
                 let baseline = stored.clone().unwrap_or_else(test_baseline);
                 let inputs = GraphInputs::merged(merged, seen, "UNCLASSIFIED", baseline).unwrap();
                 Ok(match &stored {
@@ -7936,7 +7935,6 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             .collect()
     }
 
-    /// The PDP's subject bindings over the booted graph, as `role=member`.
     fn enforced(m: &MergedBoot) -> Vec<String> {
         use maknae_security::Authorizer;
         crate::boot_gate::authz_boot_gate(
@@ -7980,7 +7978,6 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         }
     }
 
-    /// Commits a live containment of uid 4242 over `m`'s graph, as an operator would.
     fn contain_4242_live(fx: &GraphFixture, m: &MergedBoot) -> maknae_graph::graph::Graph {
         let live = maknae_config::Section::from_canonical(ROOT_AND_4242_SECTION).unwrap();
         let edited = m
@@ -8319,12 +8316,15 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         )
         .unwrap();
         let from = trail(&fx).len();
-        let Err(e) = boot_merged(
+        let merged = std::cell::Cell::new(false);
+        let Err(e) = boot_merged_with(
             &fx,
             policy(&fx.dir.0, Some(super::reload_fixture::ROOT_ADMIN)),
+            || merged.set(true),
         ) else {
             panic!("a store that cannot be read booted");
         };
+        assert!(!merged.get(), "refused before the merge");
         assert_eq!(refusal_exit_code(&e), GRAPH_REFUSAL_EXIT_CODE);
         let RunError::Graph { reason, hint } = &e else {
             panic!("{e:?}");
