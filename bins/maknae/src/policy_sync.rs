@@ -1295,7 +1295,7 @@ mod tests {
         let init_on_state: Vec<_> = te
             .lines()
             .map(str::trim)
-            .filter(|l| l.starts_with("allow init_t") && l.contains("maknae_state_t"))
+            .filter(|l| !l.starts_with('#') && l.contains("init_t") && l.contains("maknae_state_t"))
             .collect();
         assert_eq!(init_on_state, ["allow init_t maknae_state_t:file read;"]);
         assert!(te
