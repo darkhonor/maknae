@@ -1,6 +1,6 @@
 //! What an accepted baseline swaps in for the next request (#490): the redacted
 //! config view and the providers authority. The ceiling level and the principal
-//! are the composition's own holders ([`crate::Composition::install_live`]).
+//! are the composition's own holders, installed by [`install`].
 
 use std::sync::{Arc, PoisonError, RwLock};
 
@@ -14,7 +14,7 @@ pub struct LiveConfig {
     served: RwLock<Arc<Served>>,
 }
 
-/// One accepted live baseline: what [`crate::Composition::install_live`] installs.
+/// One accepted live baseline: what [`install`] installs.
 pub struct LiveValues {
     pub ceiling: maknae_config::Ceiling,
     pub principal: maknae_config::Principal,

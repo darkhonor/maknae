@@ -34,8 +34,6 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::blocking_guard::BLOCKING_OPERATION_TIMEOUT;
-
 use crate::ceiling_authz::CeilingAuthorizer;
 use maknae_authz_basic::Baseline;
 use maknae_security::{
@@ -70,7 +68,7 @@ impl<B: Baseline> Composition<B> {
         self
     }
 
-    /// What the request path serves: the one `LiveConfig` [`Self::install_live`] installs into.
+    /// What the request path serves: the one `LiveConfig` [`crate::live::install`] installs into.
     pub fn live(&self) -> &Arc<crate::live::LiveConfig> {
         &self.live
     }
@@ -84,11 +82,12 @@ impl<B: Baseline> Composition<B> {
         &self.ceiling
     }
 
-    /// An accepted live baseline, installed in one exclusive turn: a decision is made
-    /// wholly under the values before or after, and the providers' generation moves.
-    /// A ceiling the booted system does not rank is refused and nothing changes.
+    #[cfg(feature = "hermetic-test-seam")]
     pub fn install_live(&self, values: crate::live::LiveValues) -> Result<(), String> {
-        self.install_live_within(values, Instant::now() + BLOCKING_OPERATION_TIMEOUT)
+        self.install_live_within(
+            values,
+            Instant::now() + crate::blocking_guard::BLOCKING_OPERATION_TIMEOUT,
+        )
     }
 
     /// Polls for the turn rather than queueing on it, and never takes it at or after
@@ -110,9 +109,20 @@ impl<B: Baseline> Composition<B> {
                 None => std::thread::sleep(Duration::from_millis(1)),
             }
         };
-        self.ceiling.install(&turn, values.ceiling)?;
-        self.baseline.install_principal(&turn, values.principal)?;
-        self.live.install(&turn, values.view, values.providers);
+        self.install_in(&turn, values)
+    }
+
+    fn install_in(
+        &self,
+        turn: &maknae_authz_basic::LiveTurn<'_>,
+        values: crate::live::LiveValues,
+    ) -> Result<(), String> {
+        if !self.baseline.live_turn().holds(turn) {
+            return Err("the live values are installed only in this composition's own turn".into());
+        }
+        self.ceiling.install(turn, values.ceiling)?;
+        self.baseline.install_principal(turn, values.principal)?;
+        self.live.install(turn, values.view, values.providers);
         Ok(())
     }
 
@@ -497,12 +507,15 @@ mod tests {
         ceiling: Ceiling,
         principal: Principal,
     ) -> Result<(), String> {
-        c.install_live(crate::live::LiveValues {
-            ceiling,
-            principal,
-            view: Default::default(),
-            providers: None,
-        })
+        c.install_live_within(
+            crate::live::LiveValues {
+                ceiling,
+                principal,
+                view: Default::default(),
+                providers: None,
+            },
+            Instant::now() + crate::blocking_guard::BLOCKING_OPERATION_TIMEOUT,
+        )
     }
 
     fn enrolled(uid: u32) -> Principal {
@@ -612,6 +625,32 @@ mod tests {
             .unwrap();
         assert_eq!(c.ceiling().ceiling().classification.name, "SECRET");
         assert_eq!(c.baseline().principal(), enrolled(other_uid()));
+    }
+
+    #[test]
+    fn an_install_refused_on_any_value_installs_none() {
+        let (_g, basic) = fixture("live-whole", READ_POLICY, None);
+        let c = Composition::new(basic, ceiling(Ceiling::baseline_for(US)));
+        let before = (
+            c.ceiling().ceiling(),
+            c.baseline().principal(),
+            c.live().generation(),
+        );
+        let foreign = maknae_authz_basic::LiveTurnLock::hermetic();
+        let turn = foreign.try_take().unwrap();
+        let values = crate::live::LiveValues {
+            ceiling: secret(),
+            principal: enrolled(other_uid()),
+            view: std::collections::BTreeMap::from([("core".into(), Default::default())]),
+            providers: None,
+        };
+        assert!(c.install_in(&turn, values).is_err());
+        assert!(
+            *c.ceiling().ceiling() == *before.0,
+            "the ceiling was installed"
+        );
+        assert_eq!(c.baseline().principal(), before.1);
+        assert_eq!(c.live().generation(), before.2);
     }
 
     #[test]

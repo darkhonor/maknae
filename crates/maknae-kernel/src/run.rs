@@ -129,13 +129,23 @@ fn accept_unavailable(reply: &'static str, why: String) -> AcceptAnswer {
 
 /// Turns a drain an accept left at `Begun` (a panic or an abort before its persist
 /// landed) into `Failed`, so the daemon stops with exit 1 instead of refusing forever.
-struct DrainGuard<'a>(&'a tokio::sync::watch::Sender<Drain>);
+/// Dropped while the accept still holds the reload turn. `live_unsettled`: a live
+/// baseline is persisted and its install has not reported.
+struct DrainGuard<'a> {
+    drain: &'a tokio::sync::watch::Sender<Drain>,
+    live_unsettled: bool,
+}
 
 impl Drop for DrainGuard<'_> {
     fn drop(&mut self) {
-        if *self.0.borrow() == Drain::Begun {
-            self.0.send_replace(Drain::Failed);
+        if *self.drain.borrow() == Drain::Begun {
+            self.drain.send_replace(Drain::Failed);
             eprintln!("maknaed: a baseline accept ended without its persist; exiting on the unchanged baseline");
+        } else if self.live_unsettled && *self.drain.borrow() == Drain::Serving {
+            self.drain.send_replace(Drain::Applied);
+            eprintln!(
+                "maknaed: a live baseline accept ended without its install; restarting to apply it"
+            );
         }
     }
 }
@@ -3875,7 +3885,7 @@ where
 {
     async fn run(self: &Arc<Self>) -> Result<crate::reload::Applied, crate::reload::Refusal> {
         let _turn = self.lock.lock().await;
-        let stopping = *self.stopping.borrow();
+        let stopping = *self.stopping.borrow() || *self.drain.borrow() != Drain::Serving;
         crate::reload::turn(stopping, &self.revision, |store_revision| async move {
             let seq = Seq::new();
             let ctx = BootCtx {
@@ -3952,7 +3962,10 @@ where
         if *self.stopping.borrow() || *self.drain.borrow() != Drain::Serving {
             return accept_unavailable(ACCEPT_STOPPING, ACCEPT_STOPPING.into());
         }
-        let _drain = DrainGuard(&self.drain);
+        let mut guard = DrainGuard {
+            drain: &self.drain,
+            live_unsettled: false,
+        };
         let (state, current) = match self.read_pending().await {
             Ok(read) => read,
             Err(why) => {
@@ -4127,6 +4140,7 @@ where
             .persisted
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(next);
+        guard.live_unsettled = !restart;
         self.revision
             .store(committed.revision, AtomicOrdering::Release);
         self.baseline.publish(crate::baseline::BaselineState {
@@ -4158,6 +4172,8 @@ where
                 }
             }
         };
+        guard.live_unsettled = false;
+        drop(guard);
         drop(turn);
         let revision = committed.revision;
         let (result, reason, posture) = match &applied {
@@ -11420,17 +11436,23 @@ mod baseline_accept_tests {
 
     #[test]
     fn a_drain_left_begun_by_an_accept_becomes_failed() {
-        for (at, after) in [
-            (Drain::Begun, Drain::Failed),
-            (Drain::Serving, Drain::Serving),
-            (Drain::Applied, Drain::Applied),
-            (Drain::Failed, Drain::Failed),
+        for (at, live_unsettled, after) in [
+            (Drain::Begun, false, Drain::Failed),
+            (Drain::Serving, false, Drain::Serving),
+            (Drain::Applied, false, Drain::Applied),
+            (Drain::Failed, false, Drain::Failed),
+            (Drain::Serving, true, Drain::Applied),
+            (Drain::Applied, true, Drain::Applied),
+            (Drain::Failed, true, Drain::Failed),
         ] {
             let (tx, rx) = tokio::sync::watch::channel(Drain::Serving);
-            let guard = DrainGuard(&tx);
+            let guard = DrainGuard {
+                drain: &tx,
+                live_unsettled,
+            };
             tx.send_replace(at);
             drop(guard);
-            assert_eq!(*rx.borrow(), after, "{at:?}");
+            assert_eq!(*rx.borrow(), after, "{at:?} {live_unsettled}");
         }
     }
 
@@ -11483,6 +11505,72 @@ mod baseline_accept_tests {
             "UNCLASSIFIED",
             "the store holds the accepted baseline the restart applies"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reload_is_refused_unless_the_drain_is_serving() {
+        let fx = Fx::with_core("reload-drain", &unclassified()).await;
+        let revision = fx.reloader.revision.load(AtomicOrdering::Acquire);
+        for state in [Drain::Begun, Drain::Applied, Drain::Failed] {
+            fx.reloader.drain.send_replace(state);
+            assert_eq!(
+                fx.reloader.run().await.err(),
+                Some(crate::reload::Refusal::Shutdown),
+                "{state:?}"
+            );
+            assert_eq!(fx.reloader.revision.load(AtomicOrdering::Acquire), revision);
+        }
+        fx.reloader.drain.send_replace(Drain::Serving);
+        assert!(fx.reloader.run().await.is_ok());
+    }
+
+    fn is_accept_outcome(r: &AuditRecord) -> bool {
+        r.action == GRAPH_BASELINE_ACTION && r.outcome.reason.starts_with("accepted sha256:")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_finished_live_accept_leaves_the_next_accepts_drain_alone() {
+        let fx = Arc::new(Fx::with_core("guard-turn", &unclassified()).await);
+        fx.write_yaml(SECRET, "");
+        let shown = fx.show().await;
+        assert_eq!(shown.apply, "live");
+        fx.reloader.sink.stall_when(is_accept_outcome);
+        let first = {
+            let fx = Arc::clone(&fx);
+            tokio::spawn(async move { fx.accept(&shown.hash).await })
+        };
+        let next = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if fx
+                    .reloader
+                    .sink
+                    .stalled
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                    > 0
+                {
+                    if let Ok(turn) = fx.reloader.lock.try_lock() {
+                        break turn;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the live accept releases the turn while its outcome is appended");
+        fx.reloader.drain.send_replace(Drain::Begun);
+        accepted(
+            tokio::time::timeout(Duration::from_secs(5), first)
+                .await
+                .expect("the live accept finishes")
+                .unwrap(),
+        );
+        assert_eq!(
+            fx.drain(),
+            Drain::Begun,
+            "the finished accept rewrote the drain the turn's holder began"
+        );
+        fx.reloader.drain.send_replace(Drain::Serving);
+        drop(next);
     }
 
     #[tokio::test]

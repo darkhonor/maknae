@@ -219,6 +219,12 @@ pub fn resolve_readers(
             Ok(None) => return Err(refuse(name, "no such account")),
             Ok(Some(a)) => a,
         };
+        if account.name != *name {
+            return Err(refuse(
+                name,
+                "the account database answered under another name",
+            ));
+        }
         if account.uid < READER_UID_FLOOR || REFUSED_READER_UIDS.contains(&account.uid) {
             return Err(refuse(
                 name,
@@ -649,6 +655,31 @@ mod tests {
             matches!(got, Err(ConfigError::InvalidAudit(ref m)) if m.contains("\"Vector\\nx\"")),
             "{got:?}"
         );
+    }
+
+    struct Renamed(&'static str);
+    impl ReaderLookup for Renamed {
+        fn account(&self, _: &str) -> Result<Option<ReaderAccount>, String> {
+            Ok(Some(acct(self.0, 991, 991, &[])))
+        }
+        fn daemon_gid(&self) -> Result<Option<u32>, String> {
+            Ok(Some(980))
+        }
+        fn service_uids(&self) -> Result<Vec<u32>, String> {
+            Ok(vec![980, 981])
+        }
+    }
+
+    #[test]
+    fn a_directory_answer_under_another_name_is_refused() {
+        for returned in ["alice\neve", "Alice", "alice@corp", "alice ", "alic", ""] {
+            let got = resolve_readers(&["alice".into()], &Renamed(returned));
+            assert!(
+                matches!(got, Err(ConfigError::InvalidAudit(ref m)) if m.starts_with("audit.readers alice: ")),
+                "{returned:?}: {got:?}"
+            );
+        }
+        assert!(resolve_readers(&["alice".into()], &Renamed("alice")).is_ok());
     }
 
     #[test]

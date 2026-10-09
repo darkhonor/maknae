@@ -2116,11 +2116,22 @@ mod tests {
         let h = "ef".repeat(32);
         let accept = || Verb::AdminBaselineAccept { hash: h.clone() };
         assert_eq!(
-            accepted_line(&h, &bview("accepted", "live", "", &["core"])),
+            accepted_line(
+                &h,
+                &bview("accepted", "live", "", &[maknae_config::SUPPRESSED_CHANGED])
+            ),
             Ok(format!("accepted {h}; applied live"))
         );
         assert_eq!(
-            accepted_line(&h, &bview("accepted", "restart", "", &["vault"])),
+            accepted_line(
+                &h,
+                &bview(
+                    "accepted",
+                    "restart",
+                    "",
+                    &["vault.addr: https://v:8200 -> https://w:8200"]
+                )
+            ),
             Ok(format!("accepted {h}; maknaed is restarting to apply it"))
         );
         for state in ["stale", "none", "invalid", "pending"] {

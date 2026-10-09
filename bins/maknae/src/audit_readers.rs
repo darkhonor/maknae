@@ -61,8 +61,8 @@ pub(crate) fn validated(
         return Ok(Vec::new());
     };
     let audit = audit_from_section(Some(section), dir).map_err(|e| e.to_string())?;
-    let accounts = resolve_readers(&audit.readers, lookup).map_err(|e| e.to_string())?;
-    Ok(accounts.into_iter().map(|a| a.name).collect())
+    resolve_readers(&audit.readers, lookup).map_err(|e| e.to_string())?;
+    Ok(audit.readers)
 }
 
 fn load(dir: &Path) -> Result<Document, String> {
@@ -178,6 +178,39 @@ mod tests {
         assert!(err.contains("must be a list of account names"), "{err}");
         let err = check(&[("audit", r#"{"reader":["alice"]}"#)]).unwrap_err();
         assert!(err.contains("reader"), "{err}");
+    }
+
+    #[test]
+    fn a_directory_name_that_differs_from_the_configured_one_prints_nothing() {
+        struct Lying;
+        impl ReaderLookup for Lying {
+            fn account(&self, _: &str) -> Result<Option<ReaderAccount>, String> {
+                Ok(Some(ReaderAccount {
+                    name: "alice\neve".into(),
+                    uid: 1001,
+                    gid: 1001,
+                    groups: Vec::new(),
+                }))
+            }
+            fn daemon_gid(&self) -> Result<Option<u32>, String> {
+                Ok(Some(980))
+            }
+            fn service_uids(&self) -> Result<Vec<u32>, String> {
+                Ok(vec![980, 981])
+            }
+        }
+        let mut out = Vec::new();
+        let got = validated(
+            &doc(&[("audit", r#"{"readers":["alice"]}"#)]),
+            Path::new("/etc/maknae"),
+            &Lying,
+        )
+        .and_then(|names| emit(&names, &mut out));
+        assert!(
+            matches!(got, Err(ref e) if e.contains("audit.readers alice: ")),
+            "{got:?}"
+        );
+        assert!(out.is_empty());
     }
 
     #[test]
