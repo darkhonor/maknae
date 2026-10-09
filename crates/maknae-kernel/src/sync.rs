@@ -292,6 +292,22 @@ mod tests {
 
     const ROOT_BINDINGS: &str = "schema_version: 1\nbindings:\n  admin: [\"root\"]\n";
 
+    fn uids() -> std::collections::BTreeMap<String, u32> {
+        [("root".to_string(), 0), ("eve".to_string(), 1001)]
+            .into_iter()
+            .collect()
+    }
+
+    fn hermetic(src: &PolicySource, b: Bindings) -> Result<PolicySource, AuthzBasicError> {
+        PolicySource::from_parts(
+            src.policy().clone(),
+            b,
+            uids(),
+            src.principal().clone(),
+            src.paths().clone(),
+        )
+    }
+
     fn source_or_missing(body: Option<&str>) -> PolicySource {
         let bindings = body.map_or_else(Bindings::missing, |b| {
             maknae_config::parse_bindings(b).unwrap()
@@ -299,9 +315,7 @@ mod tests {
         PolicySource::from_parts(
             maknae_config::parse_authz("schema_version: 1\n").unwrap(),
             bindings,
-            [("root".to_string(), 0), ("eve".to_string(), 1001)]
-                .into_iter()
-                .collect(),
+            uids(),
             maknae_config::Principal {
                 name: "op".into(),
                 uid: 1000,
@@ -483,8 +497,10 @@ mod tests {
             "[]",
         );
         let file = "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  guest: [\"eve\"]\n";
-        let m = merge_source(source(file), Some(&s)).unwrap();
+        let m = merge_source_with(source(file), Some(&s), hermetic).unwrap();
         assert_eq!(m.kind, SyncKind::RootFile);
+        assert!(has(&m, 1001, "adversary"));
+        assert!(!has(&m, 1001, "guest"));
         assert_eq!(
             m.events,
             ["conflict: eve changed in bindings.yaml and by an unsynced live transition; failed closed: contained"]
@@ -498,6 +514,31 @@ mod tests {
             }
         );
         assert_eq!(m.lost, None);
+    }
+
+    #[test]
+    fn the_enforced_sections_digests_do_not_depend_on_which_path_built_the_source() {
+        let file = "schema_version: 1\n# root's note\nbindings:\n  adversary:\n    - uid: 4242\n    - 'eve'\n  user: []\n  admin: [\"root\"]\n";
+        let kept = merge_source_with(source(file), None, |_, _| {
+            panic!("a created base keeps the file")
+        })
+        .unwrap();
+        let live = Section::of(kept.source.bindings()).canonical();
+        let rebuilt = merge_source_with(
+            source_or_missing(None),
+            Some(&stored(&live, &live, "[]")),
+            hermetic,
+        )
+        .unwrap();
+        assert_eq!(rebuilt.kind, SyncKind::Lost);
+        let digests = |m: &MergedSource| m.source.section_digests(maknae_state::envelope::sha256);
+        assert!(digests(&kept).contains_key("bindings"));
+        assert_eq!(digests(&kept), digests(&rebuilt));
+        let layer = |m: &MergedSource| {
+            m.source
+                .identity_layer("UNCLASSIFIED", digests(m).get("bindings").copied())
+        };
+        assert_eq!(layer(&kept), layer(&rebuilt));
     }
 
     #[test]

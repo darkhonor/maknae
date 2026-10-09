@@ -3571,6 +3571,23 @@ impl GraphInputs {
         })
     }
 
+    /// The inputs of `merged.source`, carrying the merge and the base it read.
+    fn merged(
+        merged: &crate::sync::MergedSource,
+        seen: Option<maknae_graph::sync::SyncBase>,
+        label: &str,
+        baseline: BaselineLayer,
+    ) -> Result<Self, StoreError> {
+        Ok(GraphInputs {
+            bindings_missing: merged.refuse_missing,
+            sync: merged.sync.clone(),
+            sync_seen: seen,
+            sync_events: merged.events.clone(),
+            sync_kind: merged.kind,
+            ..Self::new(&merged.source, label, baseline)?
+        })
+    }
+
     fn boot(&self) -> BootInputs<'_> {
         BootInputs {
             compiled: &self.vocabulary.persisted,
@@ -3688,6 +3705,111 @@ fn store_refusal(e: StoreError, state_dir: &Path) -> RunError {
     }
 }
 
+fn merge_refusal(e: crate::sync::MergeError, state_dir: &Path) -> RunError {
+    match e {
+        crate::sync::MergeError::Stored(m) => {
+            graph_refusal(GraphFailure::Inconsistent(m), state_dir)
+        }
+        crate::sync::MergeError::Policy(m) => RunError::Authz(m),
+    }
+}
+
+/// The sync base the boot merges against; none when the store is absent or a reseed
+/// replaces it. When `dir` or `key` is an error, the graph boot raises it.
+fn boot_sync_base(
+    dir: &Result<StateDir, StoreError>,
+    key: &Result<WrappingKey, maknae_vault::VaultError>,
+    state_dir: &Path,
+) -> Result<Option<maknae_graph::sync::SyncBase>, RunError> {
+    match (dir, key) {
+        (Ok(d), Ok(_)) if d.reseed_authorized() => Ok(None),
+        (Ok(d), Ok(k)) => {
+            maknae_state::store::peek_sync(d, k).map_err(|e| store_refusal(e, state_dir))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// A `graph.sync` record that is not written ahead: journaled, and an append failure
+/// is journaled only.
+async fn record_sync_unavailable<E: AuditEmit + Send + Sync>(
+    sink: &E,
+    ctx: &BootCtx<'_>,
+    reason: &str,
+    what: &str,
+) {
+    journal(format!("maknaed: sync: {reason}"));
+    if let Err(e) = sink
+        .emit_within(
+            &ctx.record(GRAPH_SYNC_ACTION, "deny", reason, "unavailable", None),
+            AUDIT_APPEND_TIMEOUT,
+        )
+        .await
+    {
+        journal(format!(
+            "maknaed: AUDIT WRITE FAILED on the {what} record: {e}"
+        ));
+    }
+}
+
+struct MergedBoot {
+    booted: BootedGraph,
+    inputs: GraphInputs,
+    source: maknae_authz_basic::PolicySource,
+    /// The `graph.sync` lost reason, when this boot found the file lost.
+    lost: Option<String>,
+}
+
+/// Merges `source` with the store's sync base, boots the kernel graph from the merged
+/// inputs `inputs` builds, then publishes the mirror of what it booted.
+#[allow(clippy::too_many_arguments)]
+async fn boot_merged_graph(
+    state_dir: &Path,
+    config_dir: &Path,
+    dir: Result<StateDir, StoreError>,
+    key: Result<WrappingKey, maknae_vault::VaultError>,
+    sink: &Arc<maknae_audit_append::AuditSink>,
+    ctx: &BootCtx<'_>,
+    source: maknae_authz_basic::PolicySource,
+    inputs: impl FnOnce(
+        &crate::sync::MergedSource,
+        Option<maknae_graph::sync::SyncBase>,
+    ) -> Result<GraphInputs, RunError>,
+    scanned: Option<(Option<maknae_state::anchor::Checkpoint>, u64)>,
+) -> Result<MergedBoot, RunError> {
+    let stored = boot_sync_base(&dir, &key, state_dir)?;
+    let seen = stored.clone();
+    let merged = within_blocking(BLOCKING_OPERATION_TIMEOUT, move || {
+        crate::sync::merge_source(source, stored.as_ref())
+    })
+    .await
+    .map_err(|e| RunError::Authz(format!("the bindings merge {e}")))?
+    .map_err(|e| merge_refusal(e, state_dir))?;
+    let inputs = inputs(&merged, seen)?;
+    let booted = boot_kernel_graph(state_dir, dir, key, sink, ctx, &inputs.boot(), scanned).await?;
+    booted.status.sync.set_counts(merged.counts);
+    let newly_lost = booted.status.sync.became_lost(merged.lost.is_some());
+    let lost = merged.lost.filter(|_| newly_lost);
+    match crate::sync::publish_or_remove(
+        &booted.dir,
+        &booted.status.sync,
+        &booted.graph,
+        config_dir,
+    ) {
+        Ok(short) => journal(format!(
+            "maknaed: sync: mirror revision {} published ({short})",
+            booted.graph.revision()
+        )),
+        Err(reason) => record_sync_unavailable(sink.as_ref(), ctx, &reason, "mirror render").await,
+    }
+    Ok(MergedBoot {
+        booted,
+        inputs,
+        source: merged.source,
+        lost,
+    })
+}
+
 /// The kernel graph store as `admin.status` reports it (#488): the revision follows
 /// every applied reload; the anchor is the one boot established.
 #[derive(Debug, Clone)]
@@ -3696,6 +3818,7 @@ pub struct KernelGraphStatus {
     pub anchor: String,
     pub identity: crate::identity_report::IdentityStatus,
     pub baseline: crate::baseline::BaselineStatus,
+    pub sync: crate::sync::SyncStatus,
 }
 
 impl KernelGraphStatus {
@@ -3708,6 +3831,7 @@ impl KernelGraphStatus {
                 accepted: Default::default(),
                 pending: None,
             }),
+            sync: crate::sync::SyncStatus::default(),
         }
     }
 
@@ -5419,38 +5543,47 @@ async fn boot_after_sink(
         Err(e) => return Err(refuse(e.to_string()).await),
     };
     let label = boot.policy().unmarked().name.clone();
-    let mut graph_inputs = GraphInputs::new(&source, &label, run_baseline(&run, classification))
-        .map_err(|e| graph_refusal(GraphFailure::Store(e), state_dir))?;
-    graph_inputs.accepted_seen = accepted_seen;
-    graph_inputs.baseline_events = events;
-    graph_inputs.sync_seen = match (&dir, &key) {
-        (Ok(d), Ok(k)) => maknae_state::store::peek_sync(d, k).ok().flatten(),
-        _ => None,
+    let graph_ctx = BootCtx {
+        event: "boot",
+        host,
+        socket,
+        euid,
+        session_id: boot_session_id(session_ids),
+        seq: boot_seq,
+        au3_1: &audit_cfg.au3_1,
     };
+    let run_layer = run_baseline(&run, classification);
     // The kernel graph boots before the PDP is built from it.
-    let mut booted = match boot_kernel_graph(
+    let merged = match boot_merged_graph(
         state_dir,
+        config_dir,
         dir,
         key,
         sink,
-        &BootCtx {
-            event: "boot",
-            host,
-            socket,
-            euid,
-            session_id: boot_session_id(session_ids),
-            seq: boot_seq,
-            au3_1: &audit_cfg.au3_1,
+        &graph_ctx,
+        source,
+        |merged, seen| {
+            Ok(GraphInputs {
+                accepted_seen,
+                baseline_events: events,
+                ..GraphInputs::merged(merged, seen, &label, run_layer)
+                    .map_err(|e| graph_refusal(GraphFailure::Store(e), state_dir))?
+            })
         },
-        &graph_inputs.boot(),
         scanned,
     )
     .await
     {
-        Ok(booted) => booted,
+        Ok(merged) => merged,
         Err(RunError::Authz(reason)) => return Err(refuse(reason).await),
         Err(e) => return Err(e),
     };
+    let MergedBoot {
+        mut booted,
+        inputs: graph_inputs,
+        source,
+        lost,
+    } = merged;
     booted.status.baseline = crate::baseline::BaselineStatus::new(crate::baseline::BaselineState {
         accepted: run,
         pending: pending.clone(),
@@ -5509,27 +5642,18 @@ async fn boot_after_sink(
     sink.emit_within(&composition_rec, AUDIT_APPEND_TIMEOUT)
         .await
         .map_err(|e| boot_evidence_refused("composition", e))?;
-    let identity_ctx = BootCtx {
-        event: "boot",
-        host,
-        socket,
-        euid,
-        session_id: boot_session_id(session_ids),
-        seq: boot_seq,
-        au3_1: &audit_cfg.au3_1,
-    };
     publish_boot_identity(
         &booted.status.identity,
         &maknae_authz_basic::Baseline::snapshot(authorizer.baseline()),
         &booted.released,
         sink,
-        &identity_ctx,
+        &graph_ctx,
     )
     .await?;
     if let Some(p) = &pending {
         let (result, reason, posture) = crate::baseline::record_fields(p);
         sink.emit_within(
-            &identity_ctx.record(GRAPH_BASELINE_ACTION, result, &reason, posture, None),
+            &graph_ctx.record(GRAPH_BASELINE_ACTION, result, &reason, posture, None),
             AUDIT_APPEND_TIMEOUT,
         )
         .await
@@ -5538,6 +5662,9 @@ async fn boot_after_sink(
             "maknaed: baseline: {}",
             crate::baseline::journal_line(p)
         ));
+    }
+    if let Some(reason) = &lost {
+        record_sync_unavailable(sink.as_ref(), &graph_ctx, reason, "sync lost").await;
     }
     let authorizer = Arc::new(authorizer);
     let identity = booted.status.identity.clone();
@@ -7501,6 +7628,34 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         inputs: &GraphInputs,
         seed: &maknae_graph::identity::IdentityLayer,
     ) -> (usize, Result<BootedGraph, RunError>) {
+        let seeded = seed_without_sync(fx, inputs, seed);
+        let seq = Seq::new();
+        let au3_1 = serde_json::Value::Null;
+        let ctx = BootCtx {
+            event: "boot",
+            host: "h",
+            socket: "s",
+            euid: nix::unistd::geteuid().as_raw(),
+            session_id: 9 << 32,
+            seq: &seq,
+            au3_1: &au3_1,
+        };
+        let booted = block_on(boot_graph_at(
+            &fx.state,
+            key(),
+            &fx.sink,
+            &ctx,
+            &inputs.boot(),
+        ));
+        (seeded, booted)
+    }
+
+    /// A store holding `seed` and no sync base, as one written before #491; the trail's length.
+    fn seed_without_sync(
+        fx: &GraphFixture,
+        inputs: &GraphInputs,
+        seed: &maknae_graph::identity::IdentityLayer,
+    ) -> usize {
         let seq = Seq::new();
         let au3_1 = serde_json::Value::Null;
         let ctx = BootCtx {
@@ -7553,15 +7708,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         ))
         .unwrap();
         drop(booted);
-        let seeded = trail(fx).len();
-        let booted = block_on(boot_graph_at(
-            &fx.state,
-            key(),
-            &fx.sink,
-            &ctx,
-            &inputs.boot(),
-        ));
-        (seeded, booted)
+        trail(fx).len()
     }
 
     fn explicit(
@@ -7585,121 +7732,31 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
     }
 
     #[test]
-    fn a_keyless_boot_records_each_released_containment() {
+    fn a_keyless_boot_over_explicit_bindings_releases_nothing() {
         let fx = graph_fixture("graph_keyless_release");
-        let paths = maknae_authz_basic::PolicyPaths::in_dir(&fx.dir.0);
-        let inputs = bare_inputs(&fx.dir.0);
-        let seed = explicit(&inputs, &paths.bindings, &[(0, "root"), (7, "seven")]);
-        let (seeded, booted) = boot_over_seed(&fx, &inputs, &seed);
-        let booted = booted.unwrap();
-        assert_eq!(booted.released.len(), 2);
-        let after: Vec<(String, String, String, String)> = trail(&fx)[seeded..]
-            .iter()
-            .map(|(r, _)| {
-                (
-                    r.action.clone(),
-                    r.outcome.result.clone(),
-                    r.outcome.posture.clone(),
-                    r.outcome.reason.clone(),
-                )
-            })
-            .collect();
-        let why = "bindings.yaml has no bindings: key, so the enrolled principal is admin and nobody else holds a role";
+        let explicit = "schema_version: 1\nbindings:\n  adversary: [{uid: 0}, {uid: 7}]\n";
+        drop(boot_merged(&fx, policy(&fx.dir.0, Some(explicit))).unwrap());
+        let from = trail(&fx).len();
+        let m = boot_merged(&fx, policy(&fx.dir.0, Some("schema_version: 1\n"))).unwrap();
+        assert!(m.booted.released.is_empty());
+        assert_eq!(actions(&fx, from), ["graph.checkpoint"]);
         assert_eq!(
-            after[..3],
-            [
-                (
-                    "graph.checkpoint".to_string(),
-                    "permit".to_string(),
-                    "authorized".to_string(),
-                    "verified".to_string()
-                ),
-                (
-                    "graph.identity".to_string(),
-                    "permit".to_string(),
-                    "authorized".to_string(),
-                    format!("uid 0 ('root') is no longer contained: {why}")
-                ),
-                (
-                    "graph.identity".to_string(),
-                    "permit".to_string(),
-                    "authorized".to_string(),
-                    format!("uid 7 ('seven') is no longer contained: {why}")
-                ),
-            ]
+            contained(&m),
+            [(0, "adversary".to_string()), (7, "adversary".to_string())]
         );
-        assert_eq!(after[3].3, PRINCIPAL_ADMIN_1000);
-        assert_eq!(after[4].0, "graph.transition");
-        assert_eq!(after.len(), 6);
-        for (r, _) in &trail(&fx)[seeded + 1..seeded + 3] {
-            let g = r.graph.as_ref().unwrap();
-            assert_eq!((g.revision, g.anchor.as_str()), (2, "releasing"));
-        }
-        let g = trail(&fx)[seeded + 3].0.graph.clone().unwrap();
-        assert_eq!((g.revision, g.anchor.as_str()), (2, "promoting"));
-        let stored = maknae_graph::identity::extract(&booted.graph).unwrap();
-        assert!(stored.layer.subjects.is_empty());
+        assert_eq!(
+            m.lost.as_deref(),
+            Some(lost_reason("has no bindings: key").as_str())
+        );
     }
 
     #[test]
     fn a_boot_that_releases_nothing_writes_no_release_record() {
         let fx = graph_fixture("graph_no_release");
-        let inputs = bare_inputs(&fx.dir.0);
         boot_graph(&fx, key()).unwrap();
         boot_graph(&fx, key()).unwrap();
         assert!(!trail(&fx).iter().any(|(r, _)| r.action == "graph.identity"));
-        let paths = maknae_authz_basic::PolicyPaths::in_dir(&fx.dir.0);
-        let fx = graph_fixture("graph_no_release_bound");
-        let bound = maknae_graph::identity::IdentityLayer {
-            subjects: vec![maknae_graph::identity::SubjectEntry {
-                uid: 7,
-                name: "seven".into(),
-                role: "user".into(),
-            }],
-            ..explicit(&inputs, &paths.bindings, &[])
-        };
-        let (seeded, booted) = boot_over_seed(&fx, &inputs, &bound);
-        let booted = booted.unwrap();
-        assert!(booted.released.is_empty());
-        let after: Vec<(String, String, String, String)> = trail(&fx)[seeded..]
-            .iter()
-            .map(|(r, _)| {
-                (
-                    r.action.clone(),
-                    r.outcome.result.clone(),
-                    r.outcome.posture.clone(),
-                    r.graph
-                        .as_ref()
-                        .map_or_else(String::new, |g| g.anchor.clone()),
-                )
-            })
-            .collect();
-        assert_eq!(
-            after[1..3],
-            [
-                (
-                    "graph.identity".to_string(),
-                    "permit".to_string(),
-                    "authorized".to_string(),
-                    "promoting".to_string()
-                ),
-                (
-                    "graph.transition".to_string(),
-                    "permit".to_string(),
-                    "authorized".to_string(),
-                    "transitioning".to_string()
-                ),
-            ],
-            "explicit bindings ending is recorded ahead of the transition"
-        );
-        assert_eq!(
-            trail(&fx)[seeded + 1].0.outcome.reason,
-            PRINCIPAL_ADMIN_1000
-        );
     }
-
-    const PRINCIPAL_ADMIN_1000: &str =
-        "uid 1000, the enrolled principal, now holds admin: bindings.yaml has no bindings: key";
 
     #[test]
     fn an_upgrade_without_the_pasted_block_exits_3() {
@@ -7779,6 +7836,635 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             "{e:?}"
         );
         assert_eq!(trail(&fx).len(), seeded);
+    }
+
+    const ROOT_AND_4242: &str =
+        "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary: [{uid: 4242}]\n";
+    const ROOT_SECTION: &str = r#"{"admin":["root"]}"#;
+    const ROOT_AND_4242_SECTION: &str = r#"{"admin":["root"],"adversary":[{"uid":4242}]}"#;
+
+    fn policy(dir: &Path, body: Option<&str>) -> maknae_authz_basic::PolicySource {
+        maknae_authz_basic::PolicySource::from_parts(
+            maknae_config::parse_authz("schema_version: 1\n").unwrap(),
+            body.map_or_else(maknae_config::Bindings::missing, |b| {
+                maknae_config::parse_bindings(b).unwrap()
+            }),
+            [("root".to_string(), 0)].into_iter().collect(),
+            maknae_config::Principal {
+                name: "op".into(),
+                uid: 1000,
+            },
+            maknae_authz_basic::PolicyPaths::in_dir(dir),
+        )
+        .unwrap()
+    }
+
+    /// The boot's merge and graph boot over `fx`, as a start decides it; the test plays
+    /// root's reseed marker.
+    fn boot_merged(
+        fx: &GraphFixture,
+        source: maknae_authz_basic::PolicySource,
+    ) -> Result<MergedBoot, RunError> {
+        let seq = Seq::new();
+        let au3_1 = serde_json::Value::Null;
+        let euid = nix::unistd::geteuid().as_raw();
+        let ctx = BootCtx {
+            event: "boot",
+            host: "h",
+            socket: "s",
+            euid,
+            session_id: 9 << 32,
+            seq: &seq,
+            au3_1: &au3_1,
+        };
+        let dir = StateDir::open_with_marker_owner(&fx.state, euid, euid);
+        let key = key().map(|k| WrappingKey::new(k.into_bytes()));
+        let stored = match (&dir, &key) {
+            (Ok(d), Ok(k)) if !d.reseed_authorized() => {
+                maknae_state::store::peek_baseline(d, k).ok().flatten()
+            }
+            _ => None,
+        };
+        block_on(boot_merged_graph(
+            &fx.state,
+            &fx.dir.0,
+            dir,
+            key,
+            &fx.sink,
+            &ctx,
+            source,
+            |merged, seen| {
+                let baseline = stored.clone().unwrap_or_else(test_baseline);
+                let inputs = GraphInputs::merged(merged, seen, "UNCLASSIFIED", baseline).unwrap();
+                Ok(match &stored {
+                    Some(b) => GraphInputs {
+                        accepted_seen: Some(b.sha256),
+                        ..inputs
+                    },
+                    None => GraphInputs {
+                        baseline_events: vec![crate::baseline::SEEDED_EVENT.into()],
+                        ..inputs
+                    },
+                })
+            },
+            None,
+        ))
+    }
+
+    fn actions(fx: &GraphFixture, from: usize) -> Vec<String> {
+        trail(fx)[from..]
+            .iter()
+            .map(|(r, _)| r.action.clone())
+            .collect()
+    }
+
+    fn reasons(fx: &GraphFixture, from: usize, action: &str) -> Vec<String> {
+        trail(fx)[from..]
+            .iter()
+            .filter(|(r, _)| r.action == action)
+            .map(|(r, _)| r.outcome.reason.clone())
+            .collect()
+    }
+
+    fn contained(m: &MergedBoot) -> Vec<(u32, String)> {
+        maknae_graph::identity::extract(&m.booted.graph)
+            .unwrap()
+            .layer
+            .subjects
+            .into_iter()
+            .map(|s| (s.uid, s.role))
+            .collect()
+    }
+
+    /// The PDP's subject bindings over the booted graph, as `role=member`.
+    fn enforced(m: &MergedBoot) -> Vec<String> {
+        use maknae_security::Authorizer;
+        crate::boot_gate::authz_boot_gate(
+            m.source.clone(),
+            Arc::new(m.booted.graph.clone()),
+            &m.inputs.vocabulary.full,
+        )
+        .unwrap()
+        .subjects()
+        .unwrap()
+        .into_iter()
+        .flat_map(|b| {
+            b.members
+                .into_iter()
+                .map(move |member| format!("{}={member}", b.role))
+        })
+        .collect()
+    }
+
+    fn lost_reason(what: &str) -> String {
+        format!("lost: bindings.yaml {what}; the enforced bindings stand; restore them with sudo maknae policy sync, or run sudo maknae reseed to return to principal-as-admin")
+    }
+
+    fn mirror_of(fx: &GraphFixture) -> maknae_config::Mirror {
+        maknae_config::parse_mirror(
+            &std::fs::read_to_string(fx.state.join(maknae_config::MIRROR_FILE)).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn graph_audit<'a>(
+        fx: &'a GraphFixture,
+        ctx: &'a BootCtx<'a>,
+    ) -> GraphBootAudit<'a, maknae_audit_append::AuditSink> {
+        GraphBootAudit {
+            sink: fx.sink.as_ref(),
+            ctx,
+            scanned_bytes: 0,
+            bound: AUDIT_APPEND_TIMEOUT,
+            drain: None,
+        }
+    }
+
+    /// Commits a live containment of uid 4242 over `m`'s graph, as an operator would.
+    fn contain_4242_live(fx: &GraphFixture, m: &MergedBoot) -> maknae_graph::graph::Graph {
+        let live = maknae_config::Section::from_canonical(ROOT_AND_4242_SECTION).unwrap();
+        let edited = m
+            .source
+            .with_bindings(maknae_config::Bindings::from_section(&live))
+            .unwrap();
+        let digests = edited.section_digests(maknae_state::envelope::sha256);
+        let layer = edited.identity_layer("UNCLASSIFIED", digests.get("bindings").copied());
+        let stored = maknae_graph::identity::extract(&m.booted.graph).unwrap();
+        let sync = maknae_graph::sync::SyncBase {
+            live: live.canonical(),
+            ..stored.sync.unwrap()
+        };
+        let next = maknae_graph::identity::build(
+            &layer,
+            stored.baseline.as_ref(),
+            Some(&sync),
+            &m.inputs.vocabulary.persisted,
+            m.inputs.vocabulary.digest,
+            m.booted.graph.revision() + 1,
+            maknae_graph::record::ProvenanceKind::Operator,
+        )
+        .unwrap();
+        let (seq, au3_1) = (Seq::new(), serde_json::Value::Null);
+        let ctx = BootCtx {
+            event: "live",
+            host: "h",
+            socket: "s",
+            euid: 0,
+            session_id: 9 << 32,
+            seq: &seq,
+            au3_1: &au3_1,
+        };
+        let initiator = maknae_state::store::LiveInitiator::Operator;
+        let edit = maknae_config::LiveEdit::Contain(maknae_config::BindingEntry::Uid(4242));
+        block_on(maknae_state::store::commit_live(
+            &m.booted.dir,
+            &m.booted.key,
+            &next,
+            &[],
+            &[crate::sync::live_reason(&edit, initiator)],
+            &mut graph_audit(fx, &ctx),
+            initiator,
+        ))
+        .unwrap();
+        next
+    }
+
+    #[test]
+    fn a_first_boot_creates_the_sync_base_and_publishes_the_mirror() {
+        let fx = graph_fixture("sync_first_boot");
+        let (_, from) = journal_capture::since(usize::MAX, "");
+        let m = boot_merged(
+            &fx,
+            policy(&fx.dir.0, Some(super::reload_fixture::ROOT_ADMIN)),
+        )
+        .unwrap();
+        assert_eq!(
+            maknae_graph::identity::extract(&m.booted.graph)
+                .unwrap()
+                .sync,
+            Some(maknae_graph::sync::SyncBase {
+                base: ROOT_SECTION.into(),
+                live: ROOT_SECTION.into(),
+                conflicts: "[]".into(),
+            })
+        );
+        assert_eq!(
+            actions(&fx, 0),
+            ["graph.seed", "graph.baseline", "graph.checkpoint"],
+            "a seed's own records stand for the sync base"
+        );
+        let mirror = mirror_of(&fx);
+        assert_eq!(mirror.header.revision, 1);
+        assert_eq!(
+            mirror.header.base,
+            format!(
+                "sha256:{}",
+                lower_hex(&maknae_state::envelope::sha256(ROOT_SECTION.as_bytes()))
+            )
+        );
+        assert_eq!(mirror.section.canonical(), ROOT_SECTION);
+        let meta = std::fs::metadata(fx.state.join(maknae_config::MIRROR_FILE)).unwrap();
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(
+            (meta.mode() & 0o7777, meta.uid()),
+            (0o600, nix::unistd::geteuid().as_raw())
+        );
+        assert_eq!(m.booted.status.sync.lines(), ["unsynced=0", "conflict=0"]);
+        let (published, _) =
+            journal_capture::since(from, "maknaed: sync: mirror revision 1 published (sha256:");
+        assert!(!published.is_empty());
+    }
+
+    #[test]
+    fn an_upgraded_store_adopts_bindings_yaml_as_a_kernel_transition() {
+        let fx = graph_fixture("sync_upgraded");
+        let source = policy(&fx.dir.0, Some(super::reload_fixture::ROOT_ADMIN));
+        let inputs = GraphInputs::new(&source, "UNCLASSIFIED", test_baseline()).unwrap();
+        let from = seed_without_sync(&fx, &inputs, &inputs.identity);
+        let m = boot_merged(&fx, source).unwrap();
+        assert_eq!(
+            reasons(&fx, from, GRAPH_SYNC_ACTION),
+            ["sync base created from bindings.yaml (the store had none)"]
+        );
+        assert_eq!(
+            reasons(&fx, from, GRAPH_TRANSITION_ACTION),
+            ["intent recorded (kernel)"]
+        );
+        assert_eq!(
+            maknae_graph::identity::extract(&m.booted.graph)
+                .unwrap()
+                .sync
+                .map(|s| (s.base, s.live)),
+            Some((ROOT_SECTION.to_string(), ROOT_SECTION.to_string()))
+        );
+        assert_eq!(mirror_of(&fx).header.revision, m.booted.graph.revision());
+    }
+
+    #[test]
+    fn a_synced_write_is_adopted_at_restart() {
+        let fx = graph_fixture("sync_adopted");
+        let m = boot_merged(
+            &fx,
+            policy(&fx.dir.0, Some(super::reload_fixture::ROOT_ADMIN)),
+        )
+        .unwrap();
+        let next = contain_4242_live(&fx, &m);
+        let committed = crate::sync::render(&next, &fx.dir.0).unwrap();
+        let installed =
+            maknae_config::installable(&maknae_config::parse_mirror(&committed).unwrap());
+        drop(m);
+        let from = trail(&fx).len();
+        let m = boot_merged(
+            &fx,
+            policy(&fx.dir.0, Some(super::reload_fixture::ROOT_ADMIN)),
+        )
+        .unwrap();
+        assert_eq!(
+            actions(&fx, from),
+            ["graph.checkpoint"],
+            "an unsynced edit is kept"
+        );
+        assert!(enforced(&m).contains(&"adversary=uid:4242".to_string()));
+        assert_eq!(m.booted.status.sync.lines(), ["unsynced=1", "conflict=0"]);
+        assert_eq!(mirror_of(&fx).section.canonical(), ROOT_AND_4242_SECTION);
+        drop(m);
+        let from = trail(&fx).len();
+        let m = boot_merged(&fx, policy(&fx.dir.0, Some(&installed))).unwrap();
+        assert_eq!(
+            reasons(&fx, from, GRAPH_SYNC_ACTION),
+            ["adopted: bindings.yaml holds the live section (1 unsynced entries)"]
+        );
+        assert_eq!(
+            reasons(&fx, from, GRAPH_TRANSITION_ACTION),
+            ["intent recorded (kernel)"]
+        );
+        assert!(m.booted.released.is_empty());
+        assert!(
+            enforced(&m).contains(&"adversary=uid:4242".to_string()),
+            "{:?}",
+            enforced(&m)
+        );
+        assert_eq!(m.booted.status.sync.lines(), ["unsynced=0", "conflict=0"]);
+        assert_eq!(
+            maknae_graph::identity::extract(&m.booted.graph)
+                .unwrap()
+                .sync
+                .map(|s| (s.base, s.live)),
+            Some((
+                ROOT_AND_4242_SECTION.to_string(),
+                ROOT_AND_4242_SECTION.to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn a_deleted_bindings_yaml_is_lost_at_restart_and_releases_nothing() {
+        for (tag, body, what) in [
+            ("missing", None, "is missing"),
+            (
+                "keyless",
+                Some("schema_version: 1\n"),
+                "has no bindings: key",
+            ),
+        ] {
+            let fx = graph_fixture(&format!("sync_lost_{tag}"));
+            drop(boot_merged(&fx, policy(&fx.dir.0, Some(ROOT_AND_4242))).unwrap());
+            std::fs::remove_file(fx.state.join(maknae_config::MIRROR_FILE)).unwrap();
+            let from = trail(&fx).len();
+            let m = boot_merged(&fx, policy(&fx.dir.0, body)).unwrap();
+            assert_eq!(m.lost.as_deref(), Some(lost_reason(what).as_str()), "{tag}");
+            assert!(m.booted.released.is_empty(), "{tag}");
+            assert_eq!(actions(&fx, from), ["graph.checkpoint"], "{tag}");
+            assert_eq!(
+                contained(&m),
+                [(0, "admin".to_string()), (4242, "adversary".to_string())],
+                "{tag}"
+            );
+            let enforced = enforced(&m);
+            assert!(
+                enforced.contains(&"admin=uid:0".to_string()),
+                "{tag}: {enforced:?}"
+            );
+            assert!(
+                enforced.contains(&"adversary=uid:4242".to_string()),
+                "{tag}: {enforced:?}"
+            );
+            assert_eq!(
+                m.booted.status.sync.lines(),
+                ["unsynced=0", "conflict=0", "file=lost"],
+                "{tag}"
+            );
+            let mirror = mirror_of(&fx);
+            assert_eq!(mirror.section.canonical(), ROOT_AND_4242_SECTION, "{tag}");
+            assert_eq!(mirror.header.revision, 1, "{tag}");
+        }
+    }
+
+    #[test]
+    fn a_lost_file_is_recorded_after_the_boots_identity_records() {
+        let _g = env_lock();
+        let d = fixture("sync-lost-record");
+        put(&d.0, "bindings.yaml", ROOT_AND_4242, 0o640);
+        let _ = boot(&d);
+        std::fs::remove_file(d.0.join("bindings.yaml")).unwrap();
+        let from = trail_of(&d, "audit.jsonl").len();
+        let (_, journaled) = journal_capture::since(usize::MAX, "");
+        let r = boot(&d);
+        assert!(
+            matches!(r, Err(RunError::Other(_))),
+            "starts past the graph boot: {r:?}"
+        );
+        let recs = trail_of(&d, "audit.jsonl")[from..].to_vec();
+        let lost: Vec<&AuditRecord> = recs
+            .iter()
+            .filter(|r| r.action == GRAPH_SYNC_ACTION)
+            .collect();
+        assert_eq!(lost.len(), 1, "{recs:?}");
+        assert_eq!(
+            (
+                lost[0].outcome.result.as_str(),
+                lost[0].outcome.posture.as_str(),
+                lost[0].outcome.reason.clone(),
+                lost[0].graph.is_none()
+            ),
+            ("deny", "unavailable", lost_reason("is missing"), true)
+        );
+        let at = |action: &str| {
+            recs.iter()
+                .position(|r| r.action == action)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "no {action}: {:?}",
+                        recs.iter()
+                            .map(|r| (&r.action, &r.outcome.reason))
+                            .collect::<Vec<_>>()
+                    )
+                })
+        };
+        let sync = at(GRAPH_SYNC_ACTION);
+        assert_eq!(
+            sync,
+            at("authz") + 1,
+            "after the composition and identity records"
+        );
+        assert!(sync < at("start"));
+        assert!(!recs
+            .iter()
+            .any(|r| r.action == GRAPH_TRANSITION_ACTION || r.action == GRAPH_IDENTITY_ACTION));
+        let (lines, _) = journal_capture::since(
+            journaled,
+            &format!("maknaed: sync: {}", lost_reason("is missing")),
+        );
+        assert!(!lines.is_empty());
+    }
+
+    #[test]
+    fn a_mirror_that_cannot_be_published_is_recorded_and_the_boot_stands() {
+        let fx = graph_fixture("sync_render_failed");
+        let mirror = fx.state.join(maknae_config::MIRROR_FILE);
+        std::fs::create_dir(&mirror).unwrap();
+        std::fs::write(mirror.join("x"), b"").unwrap();
+        let m = boot_merged(
+            &fx,
+            policy(&fx.dir.0, Some(super::reload_fixture::ROOT_ADMIN)),
+        )
+        .unwrap();
+        let failed: Vec<(String, String, String, bool)> = trail(&fx)
+            .into_iter()
+            .filter(|(r, _)| r.action == GRAPH_SYNC_ACTION)
+            .map(|(r, _)| {
+                (
+                    r.outcome.result,
+                    r.outcome.posture,
+                    r.outcome.reason,
+                    r.graph.is_none(),
+                )
+            })
+            .collect();
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        let (result, posture, reason, no_graph) = &failed[0];
+        assert_eq!(
+            (result.as_str(), posture.as_str(), *no_graph),
+            ("deny", "unavailable", true)
+        );
+        assert!(
+            reason.starts_with("mirror render failed: publish: "),
+            "{reason}"
+        );
+        assert!(
+            reason.contains(
+                "; the transition at revision 1 stands; the stale mirror could not be removed: "
+            ),
+            "{reason}"
+        );
+        assert_eq!(
+            m.booted.status.sync.lines(),
+            ["unsynced=0", "conflict=0", "mirror=stale"]
+        );
+    }
+
+    #[test]
+    fn a_sync_base_read_error_refuses_with_the_stores_own_diagnostic() {
+        let fx = graph_fixture("sync_read_error");
+        drop(
+            boot_merged(
+                &fx,
+                policy(&fx.dir.0, Some(super::reload_fixture::ROOT_ADMIN)),
+            )
+            .unwrap(),
+        );
+        std::fs::set_permissions(
+            fx.state.join(STORE_FILE),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        let from = trail(&fx).len();
+        let Err(e) = boot_merged(
+            &fx,
+            policy(&fx.dir.0, Some(super::reload_fixture::ROOT_ADMIN)),
+        ) else {
+            panic!("a store that cannot be read booted");
+        };
+        assert_eq!(refusal_exit_code(&e), GRAPH_REFUSAL_EXIT_CODE);
+        let RunError::Graph { reason, hint } = &e else {
+            panic!("{e:?}");
+        };
+        assert!(
+            hint.starts_with(&format!(
+                "fix the ownership and mode of {}/{STORE_FILE}",
+                fx.state.display()
+            )),
+            "{hint}"
+        );
+        assert!(!reason.contains("merged against"), "{reason}");
+        assert_eq!(trail(&fx).len(), from);
+    }
+
+    #[test]
+    fn a_corrupt_sync_base_exits_5() {
+        let fx = graph_fixture("sync_corrupt");
+        let m = boot_merged(
+            &fx,
+            policy(&fx.dir.0, Some(super::reload_fixture::ROOT_ADMIN)),
+        )
+        .unwrap();
+        let stored = maknae_graph::identity::extract(&m.booted.graph).unwrap();
+        let bad = maknae_graph::sync::SyncBase {
+            live: "{".into(),
+            ..stored.sync.clone().unwrap()
+        };
+        let next = maknae_graph::identity::build(
+            &stored.layer,
+            stored.baseline.as_ref(),
+            Some(&bad),
+            &m.inputs.vocabulary.persisted,
+            m.inputs.vocabulary.digest,
+            m.booted.graph.revision() + 1,
+            maknae_graph::record::ProvenanceKind::RootFile,
+        )
+        .unwrap();
+        let (seq, au3_1) = (Seq::new(), serde_json::Value::Null);
+        let ctx = BootCtx {
+            event: "boot",
+            host: "h",
+            socket: "s",
+            euid: 0,
+            session_id: 9 << 32,
+            seq: &seq,
+            au3_1: &au3_1,
+        };
+        block_on(maknae_state::store::commit(
+            &m.booted.dir,
+            &m.booted.key,
+            &next,
+            &[],
+            &[],
+            &mut graph_audit(&fx, &ctx),
+            maknae_state::store::INITIATOR_ROOT_FILE,
+        ))
+        .unwrap();
+        drop(m);
+        let Err(e) = boot_merged(
+            &fx,
+            policy(&fx.dir.0, Some(super::reload_fixture::ROOT_ADMIN)),
+        ) else {
+            panic!("a corrupt sync base booted");
+        };
+        assert_eq!(refusal_exit_code(&e), GRAPH_REFUSAL_EXIT_CODE);
+        let RunError::Graph { reason, .. } = &e else {
+            panic!("{e:?}");
+        };
+        assert!(
+            reason.starts_with("kernel graph store: the store's sync base does not parse: "),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn merge_refusals_split_exit_5_from_exit_3() {
+        use crate::sync::MergeError;
+        let stored = merge_refusal(MergeError::Stored("x".into()), Path::new("/s"));
+        assert!(
+            matches!(&stored, RunError::Graph { reason, .. } if reason == "kernel graph store: x"),
+            "{stored:?}"
+        );
+        assert_eq!(refusal_exit_code(&stored), GRAPH_REFUSAL_EXIT_CODE);
+        let policy = merge_refusal(MergeError::Policy("y".into()), Path::new("/s"));
+        assert!(
+            matches!(&policy, RunError::Authz(m) if m == "y"),
+            "{policy:?}"
+        );
+        assert_eq!(refusal_exit_code(&policy), 3);
+    }
+
+    #[test]
+    fn the_first_load_of_this_version_refuses_a_keyless_file_over_explicit_bindings() {
+        let fx = graph_fixture("sync_first_load_keyless");
+        let source = policy(&fx.dir.0, Some(ROOT_AND_4242));
+        let inputs = GraphInputs::new(&source, "UNCLASSIFIED", test_baseline()).unwrap();
+        let seeded = seed_without_sync(&fx, &inputs, &inputs.identity);
+        for (body, refusal) in [
+            (
+                Some("schema_version: 1\n"),
+                maknae_graph::identity::BINDINGS_KEY_DROPPED,
+            ),
+            (None, maknae_graph::identity::BINDINGS_MISSING),
+        ] {
+            let Err(e) = boot_merged(&fx, policy(&fx.dir.0, body)) else {
+                panic!("a dropped key over explicit bindings booted");
+            };
+            assert_eq!(refusal_exit_code(&e), 3);
+            assert!(matches!(&e, RunError::Authz(m) if m == refusal), "{e:?}");
+            assert_eq!(trail(&fx).len(), seeded, "nothing recorded");
+        }
+    }
+
+    #[test]
+    fn a_reseed_takes_the_file_and_drops_unsynced_live_state() {
+        let fx = graph_fixture("sync_reseed");
+        let m = boot_merged(
+            &fx,
+            policy(&fx.dir.0, Some(super::reload_fixture::ROOT_ADMIN)),
+        )
+        .unwrap();
+        contain_4242_live(&fx, &m);
+        drop(m);
+        put(&fx.state, MARKER_FILE, "", 0o644);
+        let m = boot_merged(
+            &fx,
+            policy(&fx.dir.0, Some(super::reload_fixture::ROOT_ADMIN)),
+        )
+        .unwrap();
+        assert_eq!(m.booted.status.anchor, ANCHOR_RESEEDED);
+        assert_eq!(contained(&m), [(0, "admin".to_string())]);
+        assert!(!enforced(&m).iter().any(|b| b.contains("4242")));
+        assert_eq!(
+            maknae_graph::identity::extract(&m.booted.graph)
+                .unwrap()
+                .sync
+                .map(|s| (s.base, s.live)),
+            Some((ROOT_SECTION.to_string(), ROOT_SECTION.to_string()))
+        );
     }
 
     #[test]
