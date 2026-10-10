@@ -1260,21 +1260,23 @@ mod tests {
 
     #[test]
     fn an_unattended_sync_refuses_a_removal_that_binds_a_subject() {
-        for (file, named) in [
+        for (file, named, unresolved) in [
             (
                 "schema_version: 1\nbindings:\n  admin: [\"root\", \"alice\"]\n  user: [\"alice\"]\n",
                 "alice",
+                5,
             ),
             (
                 "schema_version: 1\nbindings:\n  admin: [\"root\", \"alice\"]\n  user: [\"al\"]\n",
                 "al, alice",
+                0,
             ),
         ] {
             let live = "schema_version: 1\nbindings:\n  admin: [\"root\", \"alice\"]\n";
             for (terminal, lookup, code) in [
                 (false, accounts as fn(&str) -> _, 5),
                 (true, accounts, 0),
-                (false, no_accounts, 0),
+                (false, no_accounts, unresolved),
             ] {
                 let fx = Fx::new();
                 fx.config("bindings.yaml", file);

@@ -357,8 +357,8 @@ pub fn effective_loosenings(
         BindingEntry::Name(n) => uids.get(n).copied(),
     };
     let (fi, mi) = (indexed(file), indexed(mirror));
-    let (was, _) = subjects_by_uid(&fi, uid_of);
-    let (now, _) = subjects_by_uid(&mi, uid_of);
+    let (was, was_unresolved) = subjects_by_uid(&fi, uid_of);
+    let (now, now_unresolved) = subjects_by_uid(&mi, uid_of);
     let outcome = |h: Option<&Vec<(usize, &BindingEntry)>>| {
         h.and_then(|h| effective(&h.iter().map(|(i, _)| *i).collect::<Vec<_>>()))
     };
@@ -367,6 +367,20 @@ pub fn effective_loosenings(
         let (w, n) = (was.get(uid), now.get(uid));
         if !may_install(outcome(w), outcome(n)) {
             out.extend(w.into_iter().chain(n).flatten().map(|(_, e)| (*e).clone()));
+        }
+    }
+    let by_name = |held: Vec<(usize, &BindingEntry)>| {
+        let mut m: BTreeMap<BindingEntry, Vec<usize>> = BTreeMap::new();
+        for (i, e) in held {
+            m.entry(e.clone()).or_default().push(i);
+        }
+        m
+    };
+    let (w, n) = (by_name(was_unresolved), by_name(now_unresolved));
+    for e in w.keys().chain(n.keys()) {
+        let own = |m: &BTreeMap<BindingEntry, Vec<usize>>| m.get(e).and_then(|r| effective(r));
+        if !may_install(own(&w), own(&n)) {
+            out.insert(e.clone());
         }
     }
     out.into_iter().collect()
@@ -1783,11 +1797,16 @@ mod tests {
     }
 
     #[test]
-    fn an_unresolved_name_is_left_to_the_entry_rule() {
+    fn an_unresolved_name_is_its_own_subject() {
         let file = sec("schema_version: 1\nbindings:\n  admin: [\"root\"]\n");
         let mirror = sec("schema_version: 1\nbindings:\n  admin: [\"root\", \"ghost\"]\n");
-        assert!(effective_loosenings(&file, &mirror, &uids(&[("root", 0)])).is_empty());
-        assert_eq!(loosenings(&file, &mirror), [name("ghost")]);
+        let map = uids(&[("root", 0)]);
+        assert_eq!(effective_loosenings(&file, &mirror, &map), [name("ghost")]);
+        let two = sec("schema_version: 1\nbindings:\n  admin: [\"alice\"]\n  user: [\"alice\"]\n");
+        let one = sec("schema_version: 1\nbindings:\n  admin: [\"alice\"]\n");
+        assert!(loosenings(&two, &one).is_empty());
+        assert_eq!(effective_loosenings(&two, &one, &map), [name("alice")]);
+        assert!(effective_loosenings(&one, &two, &map).is_empty());
     }
 
     fn outcome_by_the_rule(roles: &BTreeSet<&str>) -> Option<&'static str> {
@@ -1817,8 +1836,21 @@ mod tests {
 
     #[test]
     fn effective_loosenings_follow_the_subject_rule_for_two_names_of_one_uid() {
+        effective_loosenings_by_the_rule(true);
+    }
+
+    #[test]
+    fn effective_loosenings_follow_the_subject_rule_for_two_unresolved_names() {
+        effective_loosenings_by_the_rule(false);
+    }
+
+    fn effective_loosenings_by_the_rule(resolved: bool) {
         let (a, b) = (name("a"), name("b"));
-        let map = uids(&[("a", 5), ("b", 5)]);
+        let map = if resolved {
+            uids(&[("a", 5), ("b", 5)])
+        } else {
+            uids(&[])
+        };
         let other: [&[&str]; 3] = [&[], &["user"], &["adversary"]];
         let build = |ar: &[&str], br: &[&str]| {
             let mut m: BTreeMap<String, Vec<BindingEntry>> = BTreeMap::new();
@@ -1845,11 +1877,27 @@ mod tests {
                             outcome_by_the_rule(&set(&mar, mb)),
                         );
                         let mut want = Vec::new();
-                        if !allowed_by_the_rule(fo, mo) {
-                            if !far.is_empty() || !mar.is_empty() {
+                        if resolved {
+                            if !allowed_by_the_rule(fo, mo) {
+                                if !far.is_empty() || !mar.is_empty() {
+                                    want.push(a.clone());
+                                }
+                                if !fb.is_empty() || !mb.is_empty() {
+                                    want.push(b.clone());
+                                }
+                            }
+                        } else {
+                            let own = |x: &[&'static str]| set(x, &[]);
+                            if !allowed_by_the_rule(
+                                outcome_by_the_rule(&own(&far)),
+                                outcome_by_the_rule(&own(&mar)),
+                            ) {
                                 want.push(a.clone());
                             }
-                            if !fb.is_empty() || !mb.is_empty() {
+                            if !allowed_by_the_rule(
+                                outcome_by_the_rule(&own(fb)),
+                                outcome_by_the_rule(&own(mb)),
+                            ) {
                                 want.push(b.clone());
                             }
                         }
