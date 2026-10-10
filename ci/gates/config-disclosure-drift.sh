@@ -645,8 +645,6 @@ while IFS=$'\t' read -r fpath fty fkind; do
   fi
   case "$bare" in
     bool|u8|u16|u32|u64|usize|i8|i16|i32|i64|isize|f32|f64|String|PathBuf|str) continue ;;
-    # A unit-variant enum: one fixed code on the wire, no fields to decide (#165).
-    ContainmentOutcome) continue ;;
   esac
   # ANY visibility, or none -- `pub(crate) struct` and bare `struct` are live
   # house style in this workspace, including inside the very crate SURFACE
@@ -675,6 +673,7 @@ while IFS=$'\t' read -r fpath fty fkind; do
       echo "  Give it a SURFACE entry, an 'omit' manifest row, or a named type."
       exit 1 ;;
   esac
+  enum_has_data=""
   if [ "$bare" != "__DYNAMIC_MAP__" ]; then
     # `struct` OR `enum`: an enum can carry a map variant just as a struct can
     # carry map fields, and matching only `struct` would leave every
@@ -705,6 +704,20 @@ while IFS=$'\t' read -r fpath fty fkind; do
       exit 1
     fi
     [ "$grc" -eq 0 ] || continue
+    # A unit-only enum is one fixed token on the wire: a leaf. An enum with any
+    # data-carrying variant is a subtree and needs a SURFACE entry or an omit row.
+    enum_file="$(grep -rlE "^(pub([[:space:]]|\([^)]*\)[[:space:]]))?enum $bare([[:space:]<{(]|$)" crates/ | head -n 1 || true)"
+    if [ -n "$enum_file" ]; then
+      data_variants="$(awk -v re="^(pub([[:space:]]|\\([^)]*\\)[[:space:]]))?enum $bare([[:space:]<{(]|$)" '
+        $0 ~ re { inenum=1; next }
+        inenum && /^\}/ { exit }
+        inenum && !/^[[:space:]]*(\/\/|#)/ && /[({]/ { print }
+      ' "$enum_file")"
+      if [ -z "$data_variants" ]; then
+        continue
+      fi
+      enum_has_data=1
+    fi
   fi
   covered=""
   for entry in "${SURFACE[@]}"; do
@@ -719,7 +732,11 @@ while IFS=$'\t' read -r fpath fty fkind; do
     if [ "$bare" = "__DYNAMIC_MAP__" ]; then
       echo "FAIL: '$fpath' is a dynamic-key MAP — a subtree whose keys nobody can enumerate."
     else
-      echo "FAIL: '$fpath' has struct type '$bare' — it is a SUBTREE, not a leaf."
+      if [ -n "${enum_has_data:-}" ]; then
+        echo "FAIL: '$fpath' has enum type '$bare' with a data-carrying variant — it is a SUBTREE, not a leaf."
+      else
+        echo "FAIL: '$fpath' has struct type '$bare' — it is a SUBTREE, not a leaf."
+      fi
     fi
     echo "  Its own fields become config paths and none of them is decided."
     echo "  Give it a SURFACE entry with prefix '$fpath', or an 'omit' manifest"

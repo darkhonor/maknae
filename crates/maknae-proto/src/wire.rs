@@ -331,7 +331,7 @@ pub enum Verb {
     /// live in one place. `target` names the subject, `reason` is recorded in the trail.
     AdminContain {
         target: ContainTarget,
-        reason: String,
+        reason: ContainReason,
     },
     /// Lift containment. The recovery path for induced containment; must not
     /// depend on the credential that was contained. `target` names the subject.
@@ -626,6 +626,35 @@ pub enum ContainTarget {
     Uid(u32),
 }
 
+/// The containment reason: free text, so `Debug` prints its length only.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ContainReason(String);
+
+impl ContainReason {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for ContainReason {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for ContainReason {
+    fn from(s: &str) -> Self {
+        Self(s.to_owned())
+    }
+}
+
+impl std::fmt::Debug for ContainReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<{} bytes>", self.0.len())
+    }
+}
+
 /// A free-text operand of the containment verbs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operand {
@@ -662,7 +691,10 @@ pub enum OperandError {
 impl std::fmt::Display for OperandError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match *self {
-            OperandError::Empty(w) | OperandError::TooLong(w) => {
+            OperandError::Empty(w) => {
+                write!(f, "{} must not be empty or whitespace only", w.noun())
+            }
+            OperandError::TooLong(w) => {
                 let max = w.max();
                 write!(
                     f,
@@ -794,11 +826,13 @@ impl ContainmentOutcome {
             Self::NotContained => "subject is not contained",
             Self::LastReleaser => "refused: this would leave no subject able to release",
             Self::SelfContainWithoutRelease => {
-                "refused: containing yourself would leave you unable to release"
+                "refused: you may contain yourself only if you hold admin.release"
             }
             Self::Busy => "refused: the daemon is busy, try again",
             Self::Stopping => "refused: the daemon is stopping",
-            Self::NoExplicitBindings => "refused: the subject has no explicit binding to contain",
+            Self::NoExplicitBindings => {
+                "refused: this host has no explicit bindings; re-enroll first"
+            }
             Self::UnknownAccount => "refused: no such account",
             Self::LookupUnavailable => "refused: the account lookup is unavailable",
         }
@@ -934,7 +968,7 @@ pub struct ProtoError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[allow(clippy::large_enum_variant)]
+#[expect(clippy::large_enum_variant)]
 pub enum RespResult {
     Ok(Payload),
     Err(ProtoError),
@@ -2316,7 +2350,10 @@ mod tests {
         let reason = contain_reason(&reason).unwrap();
         let b = encode_request(&Request {
             protocol_version: 1,
-            verb: Verb::AdminContain { target, reason },
+            verb: Verb::AdminContain {
+                target,
+                reason: reason.into(),
+            },
         })
         .unwrap();
         assert!(
@@ -2400,6 +2437,36 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_contain_reason_never_prints_in_debug() {
+        let verb = Verb::AdminContain {
+            target: ContainTarget::Uid(1),
+            reason: "sentinel-token-theft".into(),
+        };
+        let dbg = format!("{verb:?}");
+        assert!(!dbg.contains("sentinel"), "{dbg}");
+        assert!(dbg.contains("<20 bytes>"), "{dbg}");
+        let b = encode_request(&Request {
+            protocol_version: 1,
+            verb: verb.clone(),
+        })
+        .unwrap();
+        assert_eq!(decode_request(&b).unwrap().verb, verb);
+        assert_eq!(
+            ContainReason::from(String::from("ab")).as_str(),
+            "ab",
+            "the text itself is reachable for the trail"
+        );
+    }
+
+    #[test]
+    fn an_empty_operand_is_named_as_empty() {
+        assert_eq!(
+            OperandError::Empty(Operand::Name).to_string(),
+            "the user name must not be empty or whitespace only"
+        );
     }
 
     #[test]

@@ -1550,6 +1550,28 @@ PY
 expect_reject_because "config-disclosure-drift/whitespace-bearing-surface-prefix" \
   "whitespace-bearing prefix" "$fx/ci/gates/config-disclosure-drift.sh"
 
+# ACCEPT: a unit-only enum field is one fixed token, a leaf.
+fx="$(cfg_fixture "$CFG_OK")"
+cat >> "$fx/crates/maknae-proto/src/wire.rs" <<'FIX'
+pub enum ContainmentOutcome {
+    Contained,
+    Released,
+}
+FIX
+expect_accept "config-disclosure-drift/unit-only-enum-field-is-a-leaf" \
+  ": 52 paths decided, 61 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: the same enum with a data-carrying variant is a subtree, not a leaf.
+fx="$(cfg_fixture "$CFG_OK")"
+cat >> "$fx/crates/maknae-proto/src/wire.rs" <<'FIX'
+pub enum ContainmentOutcome {
+    Contained,
+    Refused(String),
+}
+FIX
+expect_reject_because "config-disclosure-drift/data-carrying-enum-field-is-a-subtree" \
+  "data-carrying variant" "$fx/ci/gates/config-disclosure-drift.sh"
+
 # REJECT: a FOURTH `*View` struct in wire.rs with no SURFACE row. The config
 # half of SURFACE is cross-checked against boot.rs's section registry; the wire
 # half was hand-maintained with no closing rule, so a new disclosure struct --
