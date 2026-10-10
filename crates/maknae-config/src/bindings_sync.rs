@@ -313,9 +313,10 @@ fn loosens(file: &Section, mirror: &Section, e: &BindingEntry) -> bool {
 }
 
 pub fn loosenings(file: &Section, mirror: &Section) -> Vec<BindingEntry> {
+    let keyless = matches!(file, Section::Present(_)) && !matches!(mirror, Section::Present(_));
     let all: BTreeSet<&BindingEntry> = file.entries().into_iter().chain(mirror.entries()).collect();
     all.into_iter()
-        .filter(|e| loosens(file, mirror, e))
+        .filter(|e| keyless || loosens(file, mirror, e))
         .cloned()
         .collect()
 }
@@ -1621,24 +1622,65 @@ mod tests {
     }
 
     #[test]
-    fn an_absent_section_gaining_bindings_loosens_every_bound_entry() {
-        let mirror = sec(
+    fn a_section_gaining_or_losing_its_key_loosens_by_the_rule() {
+        let e = BindingEntry::Name("x".into());
+        let root = BindingEntry::Name("root".into());
+        let states = || {
+            [Section::Missing, Section::Absent]
+                .into_iter()
+                .chain((0..16u8).map(|m| with_bystander(&e, &roles_in(m))))
+        };
+        for file in states() {
+            for mirror in states() {
+                let present = |s: &Section| matches!(s, Section::Present(_));
+                let (fr, mr): (Vec<&str>, Vec<&str>) = (
+                    file.roles_of(&e).into_iter().collect(),
+                    mirror.roles_of(&e).into_iter().collect(),
+                );
+                let want: Vec<BindingEntry> = if present(&file) && !present(&mirror) {
+                    let mut all = vec![root.clone()];
+                    if !fr.is_empty() {
+                        all.push(e.clone());
+                    }
+                    all
+                } else {
+                    let mut out = Vec::new();
+                    if !present(&file) && present(&mirror) {
+                        out.push(root.clone());
+                    }
+                    if loosens_by_the_rule(&fr, &mr) {
+                        out.push(e.clone());
+                    }
+                    out
+                };
+                assert_eq!(loosenings(&file, &mirror), want, "{file:?} -> {mirror:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn losing_the_key_loosens_every_entry_the_file_held() {
+        let file = sec(
             "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  guest: [{uid: 9}]\n  adversary: [\"m\"]\n",
         );
-        for file in [
+        for mirror in [
             Section::Missing,
             Section::Absent,
             sec("schema_version: 1\n"),
         ] {
             assert_eq!(
                 loosenings(&file, &mirror),
-                [BindingEntry::Name("root".into()), BindingEntry::Uid(9)],
-                "{file:?}"
+                [
+                    BindingEntry::Name("m".into()),
+                    BindingEntry::Name("root".into()),
+                    BindingEntry::Uid(9)
+                ],
+                "{mirror:?}"
             );
             assert_eq!(
                 loosenings(&mirror, &file),
-                [BindingEntry::Name("m".into())],
-                "{file:?}"
+                [BindingEntry::Name("root".into()), BindingEntry::Uid(9)],
+                "{mirror:?}"
             );
         }
     }

@@ -55,6 +55,7 @@ pub enum SyncPlan {
         file: String,
         base: String,
     },
+    NoBindingsKey,
     Install {
         diff: Vec<String>,
         conflicts: Vec<BindingEntry>,
@@ -297,6 +298,9 @@ pub fn plan_sync(
             conflicts,
             bytes,
         };
+    }
+    if !matches!(m.section, Section::Present(_)) {
+        return SyncPlan::NoBindingsKey;
     }
     let found = base_token(file, digest);
     if found != m.header.base {
@@ -730,5 +734,32 @@ mod tests {
             ),
             ["bindings: present -> absent", "admin: -a"]
         );
+    }
+
+    #[test]
+    fn a_mirror_with_no_bindings_key_never_replaces_a_present_file() {
+        let s = |b: &str| Section::of(&parse_bindings(b).unwrap());
+        for file in [
+            s("schema_version: 1\nbindings:\n  admin: [\"a\"]\n"),
+            s("schema_version: 1\nbindings: {}\n"),
+        ] {
+            for base in [base_token(&file, fake_digest), "absent".into()] {
+                let m = parse_mirror(&render_mirror(
+                    &MirrorHeader {
+                        revision: 3,
+                        config_dir: "/etc/maknae".into(),
+                        base,
+                        conflicts: Default::default(),
+                    },
+                    &Section::Absent,
+                ))
+                .unwrap();
+                assert_eq!(
+                    plan_sync_etc(&m, &file, fake_digest),
+                    SyncPlan::NoBindingsKey,
+                    "{file:?}"
+                );
+            }
+        }
     }
 }

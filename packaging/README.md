@@ -152,7 +152,8 @@ enable them. The macOS package installs the launchd job `io.maknae.policy-sync`
 and `launchctl disable`s it on a fresh install and on an upgrade that adds it.
 The watcher installs only tightenings, a removed role binding or an added
 containment; a grant or a release exits 5, fails the run and needs
-`sudo maknae policy sync` on a terminal. To opt in:
+`sudo maknae policy sync` on a terminal. Roles are independent, so moving
+an entry from `admin` to `user` is a grant of `user`. To opt in:
 
 ```bash
 sudo systemctl enable --now maknae-policy-sync.path          # Linux

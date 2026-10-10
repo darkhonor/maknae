@@ -30,6 +30,9 @@ const RELOAD: &str = "reload maknaed to adopt it: sudo systemctl reload maknaed"
 
 const ANSWER_MAX_BYTES: u64 = 64;
 
+const NO_BINDINGS_KEY: &str =
+    "the mirror has no bindings: key; it cannot replace bindings.yaml's bindings; nothing was installed";
+
 const CHANGED_DURING: &str = "bindings.yaml changed during the sync; nothing was installed; reload maknaed so it merges, then sync again";
 
 pub(crate) struct Owners {
@@ -277,6 +280,7 @@ pub(crate) fn sync(
             say(out, "bindings.yaml already holds the mirror; nothing to install")?;
             Ok(Outcome::NothingToInstall)
         }
+        SyncPlan::NoBindingsKey => Err(NO_BINDINGS_KEY.into()),
         SyncPlan::BaseChanged { .. } => Err(
             "bindings.yaml changed since maknaed last loaded it; reload maknaed so it merges, then sync again"
                 .into(),
@@ -1113,6 +1117,26 @@ mod tests {
         assert_eq!(code, 5, "{err}");
         assert!(!err.contains('\u{e9}'), "{err:?}");
         assert!(err.contains("adversary: \\u{e9}; nothing"), "{err:?}");
+    }
+
+    #[test]
+    fn a_keyless_mirror_never_replaces_bindings_and_so_never_opens_a_restore() {
+        for (check, terminal) in [(false, false), (false, true), (true, false), (true, true)] {
+            let fx = Fx::new();
+            fx.config("bindings.yaml", BASE);
+            fx.mirror(&mirror_over(BASE, "schema_version: 1\n", &[]));
+            let (r, out) = fx.sync_out(check, "y\n", terminal);
+            assert_eq!(exit_code(&r), 2, "{check} {terminal}: {r:?}");
+            assert_eq!(r.unwrap_err(), NO_BINDINGS_KEY);
+            assert!(!out.contains("installed"), "{out}");
+            assert_eq!(fx.read_config("bindings.yaml"), BASE);
+
+            fx.mirror(&mirror_over(BASE, GRANT, &[]));
+            let (r, out) = fx.sync_out(false, "", false);
+            assert!(!out.contains("restoring"), "{out}");
+            assert_eq!(exit_code(&r), 5, "{r:?}");
+            assert_eq!(fx.read_config("bindings.yaml"), BASE);
+        }
     }
 
     #[test]
