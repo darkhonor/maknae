@@ -1064,18 +1064,19 @@ fn check_sync(
         SyncRule::BaseKept if t.sync_events.is_empty() => Err(StoreError::SyncUnrecorded),
         SyncRule::BaseKept => match (stored, proposed) {
             (Some(s), Some(p)) if s.base == p.base && s.conflicts == p.conflicts => Ok(()),
-            (Some(s), Some(p)) if s.base == p.base && drops_only_the_edited_entry(s, p) => Ok(()),
+            (Some(s), Some(p)) if s.base == p.base && drops_only_edited_entries(s, p) => Ok(()),
             (None, _) | (_, None) => Err(StoreError::SyncAbsent),
             _ => Err(StoreError::SyncBaseChanged),
         },
     }
 }
 
-fn drops_only_the_edited_entry(
+fn drops_only_edited_entries(
     stored: &maknae_graph::sync::SyncBase,
     proposed: &maknae_graph::sync::SyncBase,
 ) -> bool {
     use maknae_config::{conflicts_from_canonical, Section};
+    use std::collections::BTreeSet;
     let (Ok(was), Ok(now), Ok(old), Ok(new)) = (
         conflicts_from_canonical(&stored.conflicts),
         conflicts_from_canonical(&proposed.conflicts),
@@ -1084,16 +1085,16 @@ fn drops_only_the_edited_entry(
     ) else {
         return false;
     };
-    let dropped: Vec<_> = was.difference(&now).collect();
-    let mut changed = old
+    let dropped: BTreeSet<_> = was.difference(&now).cloned().collect();
+    let changed: BTreeSet<_> = old
         .entries()
         .into_iter()
         .chain(new.entries())
-        .filter(|e| old.roles_of(e) != new.roles_of(e));
-    match (now.is_subset(&was), dropped.as_slice(), changed.next()) {
-        (true, [entry], Some(edited)) => *entry == edited && changed.all(|e| e == edited),
-        _ => false,
-    }
+        .filter(|e| old.roles_of(e) != new.roles_of(e))
+        .cloned()
+        .collect();
+    let changed_listed: BTreeSet<_> = changed.intersection(&was).cloned().collect();
+    now.is_subset(&was) && !dropped.is_empty() && dropped == changed_listed
 }
 
 async fn transition(
