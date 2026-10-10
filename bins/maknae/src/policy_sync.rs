@@ -1,7 +1,7 @@
 use crate::cli::terminal_safe;
 use maknae_config::{
-    check_roles, parse_bindings, parse_mirror, plan_sync, Bindings, Mirror, Section, SyncPlan,
-    BINDINGS_FILE, MIRROR_FILE, MIRROR_MAX_BYTES, STATE_DIR,
+    check_roles, loosenings, parse_bindings, parse_mirror, plan_sync, BindingEntry, Bindings,
+    Mirror, Section, SyncPlan, BINDINGS_FILE, MIRROR_FILE, MIRROR_MAX_BYTES, STATE_DIR,
 };
 use maknae_io::{
     open_anchor, open_anchor_resolved, Anchor, AnchorRequired, FileOwner, IoError, IoKind, Mode,
@@ -46,6 +46,7 @@ pub(crate) enum Outcome {
     NothingToInstall,
     WouldInstall,
     NoMirror,
+    NeedsAdministrator(Vec<BindingEntry>),
 }
 
 fn preflight(euid: u32) -> Result<(), String> {
@@ -64,6 +65,14 @@ fn sha256(b: &[u8]) -> [u8; 32] {
 
 fn say(out: &mut dyn Write, line: &str) -> Result<(), String> {
     writeln!(out, "{line}").map_err(|e| format!("cannot write to standard output: {e}"))
+}
+
+fn only_tightenings(entries: &[BindingEntry]) -> String {
+    let names: Vec<String> = entries.iter().map(|e| terminal_safe(&e.render())).collect();
+    format!(
+        "an unattended sync installs only tightenings; these entries gain a role or leave adversary: {}",
+        names.join(", ")
+    )
 }
 
 fn read_mirror(state_dir: &Path, dir_owner: u32, owner: u32) -> Result<Option<Mirror>, String> {
@@ -177,7 +186,7 @@ struct Planned<'a> {
 fn still_as_planned(p: &Planned<'_>, restore: bool) -> Result<(), String> {
     let (etc, config_dir, owner, mirror) = (p.etc, p.config_dir, p.owners.bindings, p.mirror);
     match read_mirror(p.state_dir, p.owners.state_dir, p.owners.mirror)? {
-        Some(now) if now.header.revision == mirror.header.revision => {}
+        Some(now) if now == *mirror => {}
         _ => return Err(MIRROR_CHANGED.into()),
     }
     let file = read_bindings(etc, config_dir, owner)?;
@@ -322,8 +331,19 @@ pub(crate) fn sync(
                     say(out, &format!("  conflict: {}", terminal_safe(&c.render())))?;
                 }
             }
+            let loosened = if terminal {
+                Vec::new()
+            } else {
+                loosenings(&Section::of(&file), &mirror.section)
+            };
             if check {
+                if !loosened.is_empty() {
+                    say(out, &only_tightenings(&loosened))?;
+                }
                 return Ok(Outcome::WouldInstall);
+            }
+            if !loosened.is_empty() {
+                return Ok(Outcome::NeedsAdministrator(loosened));
             }
             if !conflicts.is_empty() {
                 confirm(conflicts.len(), answer, terminal, out)?;
@@ -347,6 +367,7 @@ fn exit_code(r: &Result<Outcome, String>) -> u8 {
         Err(_) => 2,
         Ok(Outcome::NothingToInstall) => 3,
         Ok(Outcome::NoMirror) => 4,
+        Ok(Outcome::NeedsAdministrator(_)) => 5,
     }
 }
 
@@ -395,6 +416,13 @@ fn finish(r: &Result<Outcome, String>, err: &mut dyn Write) -> u8 {
         }
         Ok(Outcome::NoMirror) => {
             let _ = writeln!(err, "maknae: {NO_MIRROR}");
+        }
+        Ok(Outcome::NeedsAdministrator(entries)) => {
+            let _ = writeln!(
+                err,
+                "maknae: {}; nothing was installed; run sudo maknae policy sync on a terminal to review the change",
+                only_tightenings(entries)
+            );
         }
         Ok(_) => {}
     }
@@ -1036,12 +1064,147 @@ mod tests {
         assert_eq!(fx.read_config("bindings.yaml"), BASE);
     }
 
+    const GRANT: &str =
+        "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"x\", \"q\"]\n";
+    const CONTAINED: &str =
+        "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"z\"]\n  adversary: [\"y\"]\n";
+
+    fn refused(r: Result<Outcome, String>) -> (u8, String) {
+        let mut err = Vec::new();
+        let code = finish(&r, &mut err);
+        (code, String::from_utf8(err).unwrap())
+    }
+
+    #[test]
+    fn an_unattended_sync_refuses_a_grant_or_a_release_and_writes_nothing() {
+        for (file, live, named) in [
+            (BASE, GRANT, "q, x"),
+            (CONTAINED, "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"z\"]\n", "y"),
+            (CONTAINED, "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"z\", \"y\"]\n  adversary: [\"y\"]\n", "y"),
+            (BASE, "schema_version: 1\nbindings:\n  user: [\"root\"]\n", "root"),
+        ] {
+            for conflicts in [&[][..], &[BindingEntry::Uid(4242)][..]] {
+                let fx = Fx::new();
+                fx.config("bindings.yaml", file);
+                fx.mirror(&mirror_over(file, live, conflicts));
+                let (r, out) = fx.sync_out(false, "y\n", false);
+                assert!(!out.contains("[y/N]"), "{out}");
+                let (code, err) = refused(r);
+                assert_eq!(code, 5, "{live}: {err}");
+                assert_eq!(
+                    err,
+                    format!("maknae: an unattended sync installs only tightenings; these entries gain a role or leave adversary: {named}; nothing was installed; run sudo maknae policy sync on a terminal to review the change\n")
+                );
+                assert_eq!(fx.read_config("bindings.yaml"), file);
+            }
+        }
+    }
+
+    #[test]
+    fn a_refused_entry_is_printed_terminal_safe() {
+        let fx = Fx::new();
+        fx.config("bindings.yaml", BASE);
+        fx.mirror(&mirror_over(
+            BASE,
+            "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"\\u00e9\"]\n",
+            &[],
+        ));
+        let (code, err) = refused(fx.sync(false, "", false));
+        assert_eq!(code, 5, "{err}");
+        assert!(!err.contains('\u{e9}'), "{err:?}");
+        assert!(err.contains("adversary: \\u{e9}; nothing"), "{err:?}");
+    }
+
+    #[test]
+    fn an_unattended_sync_installs_a_containment_or_a_removal() {
+        for live in [
+            "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"z\"]\n  adversary: [\"y\", \"w\"]\n",
+            "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary: [\"y\"]\n",
+            "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"z\"]\n  adversary: [\"y\", \"z\"]\n",
+        ] {
+            let fx = Fx::new();
+            fx.config("bindings.yaml", CONTAINED);
+            fx.mirror(&mirror_over(CONTAINED, live, &[]));
+            let r = fx.sync(false, "", false);
+            assert_eq!(exit_code(&r), 0, "{live}: {r:?}");
+            assert_eq!(
+                section(&fx.read_config("bindings.yaml")),
+                section(live),
+                "{live}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_grant_installs_from_a_terminal() {
+        for (conflicts, answer) in [(&[][..], ""), (&[BindingEntry::Uid(4242)][..], "y\n")] {
+            let fx = Fx::new();
+            fx.config("bindings.yaml", BASE);
+            fx.mirror(&mirror_over(BASE, GRANT, conflicts));
+            let (r, out) = fx.sync_out(false, answer, true);
+            assert_eq!(exit_code(&r), 0, "{r:?}");
+            assert!(out.contains("user: +x\n"), "{out}");
+            assert!(!out.contains("unattended"), "{out}");
+            assert_eq!(section(&fx.read_config("bindings.yaml")), section(GRANT));
+        }
+    }
+
+    #[test]
+    fn check_says_an_unattended_sync_would_refuse_and_installs_nothing() {
+        for terminal in [false, true] {
+            let fx = Fx::new();
+            fx.config("bindings.yaml", BASE);
+            fx.mirror(&mirror_over(BASE, GRANT, &[]));
+            let (r, out) = fx.sync_out(true, "", terminal);
+            assert_eq!(exit_code(&r), 1, "{r:?}");
+            assert_eq!(
+                out.contains("an unattended sync installs only tightenings; these entries gain a role or leave adversary: q, x\n"),
+                !terminal,
+                "{out}"
+            );
+            assert_eq!(fx.read_config("bindings.yaml"), BASE);
+        }
+    }
+
+    #[test]
+    fn an_unattended_restore_of_a_lost_file_still_installs_grants() {
+        let fx = Fx::new();
+        fx.mirror(&mirror_over(BASE, GRANT, &[]));
+        let r = fx.sync(false, "", false);
+        assert_eq!(exit_code(&r), 0, "{r:?}");
+        assert_eq!(section(&fx.read_config("bindings.yaml")), section(GRANT));
+    }
+
+    #[test]
+    fn a_mirror_that_turns_into_a_grant_during_an_unattended_sync_is_refused() {
+        let fx = Fx::new();
+        fx.config("bindings.yaml", BASE);
+        fx.mirror(&mirror_over(BASE, LIVE, &[]));
+        let mut sink = Vec::new();
+        let mut out = RootEdits {
+            path: fx.state_dir().join(MIRROR_FILE),
+            body: Some(mirror_over(BASE, GRANT, &[])),
+            mode: 0o600,
+            edited: false,
+            inner: &mut sink,
+        };
+        let r = fx.sync_with(me(), false, "", false, &mut out);
+        assert!(out.edited);
+        assert_eq!(exit_code(&r), 2, "{r:?}");
+        assert_eq!(r.unwrap_err(), MIRROR_CHANGED);
+        assert_eq!(fx.read_config("bindings.yaml"), BASE);
+    }
+
     #[test]
     fn exit_codes_tell_an_install_from_nothing_to_do() {
         assert_eq!(exit_code(&Ok(Outcome::Installed)), 0);
         assert_eq!(exit_code(&Ok(Outcome::NothingToInstall)), 3);
         assert_eq!(exit_code(&Ok(Outcome::WouldInstall)), 1);
         assert_eq!(exit_code(&Ok(Outcome::NoMirror)), 4);
+        assert_eq!(
+            exit_code(&Ok(Outcome::NeedsAdministrator(vec![BindingEntry::Uid(1)]))),
+            5
+        );
         assert_eq!(exit_code(&Err("x".into())), 2);
     }
 
@@ -1582,6 +1745,44 @@ mod tests {
         }
         assert!(read("deb/build-deb.sh").contains("usr/lib/systemd/system-preset/80-maknae.preset"));
         assert!(spec.contains("%{_presetdir}/80-maknae.preset"));
+    }
+
+    #[test]
+    fn the_sync_units_reload_only_on_an_install_and_fail_on_a_refusal() {
+        let pkg = concat!(env!("CARGO_MANIFEST_DIR"), "/../../packaging");
+        let read = |p: &str| std::fs::read_to_string(format!("{pkg}/{p}")).unwrap();
+        let unit = read("common/maknae-policy-sync.service");
+        let systemd = unit
+            .lines()
+            .find_map(|l| l.strip_prefix("ExecStart=/bin/sh -c '"))
+            .unwrap()
+            .strip_suffix('\'')
+            .unwrap()
+            .replace("$$", "$")
+            .replace("/usr/bin/maknae policy sync", "(exit $RC)")
+            .replace("exec /usr/bin/systemctl reload maknaed.service", "exit 99");
+        let plist = read("macos/io.maknae.policy-sync.plist");
+        let launchd = plist[plist.find("/usr/local/bin/maknae policy sync").unwrap()..]
+            .split("</string>")
+            .next()
+            .unwrap()
+            .replace("/usr/local/bin/maknae policy sync", "(exit $RC)")
+            .replace(
+                "exec /bin/launchctl kill SIGHUP system/io.maknae.maknaed",
+                "exit 99",
+            );
+        for script in [systemd, launchd] {
+            for (rc, want) in [(0, 99), (1, 1), (2, 2), (3, 0), (4, 0), (5, 5)] {
+                let got = std::process::Command::new("/bin/sh")
+                    .arg("-c")
+                    .arg(&script)
+                    .env("RC", rc.to_string())
+                    .status()
+                    .unwrap()
+                    .code();
+                assert_eq!(got, Some(want), "{script}: {rc}");
+            }
+        }
     }
 
     #[test]

@@ -306,6 +306,20 @@ pub fn equivalent(a: &Section, b: &Section) -> bool {
             .any(|e| differs(a, b, e))
 }
 
+fn loosens(file: &Section, mirror: &Section, e: &BindingEntry) -> bool {
+    let (was, now) = (file.roles_of(e), mirror.roles_of(e));
+    now.iter().any(|r| *r != ADVERSARY && !was.contains(r))
+        || (was.contains(ADVERSARY) && !now.contains(ADVERSARY))
+}
+
+pub fn loosenings(file: &Section, mirror: &Section) -> Vec<BindingEntry> {
+    let all: BTreeSet<&BindingEntry> = file.entries().into_iter().chain(mirror.entries()).collect();
+    all.into_iter()
+        .filter(|e| loosens(file, mirror, e))
+        .cloned()
+        .collect()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BoundRole {
     Admin,
@@ -1492,5 +1506,140 @@ mod tests {
         };
         assert_eq!(err.to_string(), rule.to_string());
         assert!(std::error::Error::source(&err).is_none());
+    }
+
+    const ROLES: [&str; 4] = ["admin", "user", "guest", "adversary"];
+
+    fn roles_in(mask: u8) -> Vec<&'static str> {
+        ROLES
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| mask & (1 << i) != 0)
+            .map(|(_, r)| *r)
+            .collect()
+    }
+
+    fn loosens_by_the_rule(file: &[&str], mirror: &[&str]) -> bool {
+        let gains = ["admin", "user", "guest"]
+            .iter()
+            .any(|r| mirror.contains(r) && !file.contains(r));
+        let releases = file.contains(&"adversary") && !mirror.contains(&"adversary");
+        gains || releases
+    }
+
+    fn with_bystander(e: &BindingEntry, roles: &[&str]) -> Section {
+        let mut s = section_with(e, roles);
+        if let Section::Present(m) = &mut s {
+            m.entry("admin".into())
+                .or_default()
+                .push(BindingEntry::Name("root".into()));
+        }
+        s
+    }
+
+    #[test]
+    fn loosenings_are_exactly_the_gains_and_releases_over_every_role_set() {
+        for e in [BindingEntry::Name("x".into()), BindingEntry::Uid(7)] {
+            for f in 0..16u8 {
+                for m in 0..16u8 {
+                    let (fr, mr) = (roles_in(f), roles_in(m));
+                    let want: Vec<BindingEntry> = if loosens_by_the_rule(&fr, &mr) {
+                        vec![e.clone()]
+                    } else {
+                        Vec::new()
+                    };
+                    assert_eq!(
+                        loosenings(&with_bystander(&e, &fr), &with_bystander(&e, &mr)),
+                        want,
+                        "{e:?} {fr:?} -> {mr:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    fn sec(text: &str) -> Section {
+        Section::of(&parse_bindings(text).unwrap())
+    }
+
+    #[test]
+    fn a_new_entry_loosens_unless_it_is_only_contained() {
+        let file = sec("schema_version: 1\nbindings:\n  admin: [\"root\"]\n");
+        for (mirror, want) in [
+            ("  user: [\"x\"]\n", vec![BindingEntry::Name("x".into())]),
+            ("  guest: [{uid: 9}]\n", vec![BindingEntry::Uid(9)]),
+            ("  adversary: [\"x\", {uid: 9}]\n", vec![]),
+            (
+                "  user: [\"x\"]\n  adversary: [\"x\"]\n",
+                vec![BindingEntry::Name("x".into())],
+            ),
+        ] {
+            let mirror = sec(&format!(
+                "schema_version: 1\nbindings:\n  admin: [\"root\"]\n{mirror}"
+            ));
+            assert_eq!(loosenings(&file, &mirror), want, "{mirror:?}");
+        }
+    }
+
+    #[test]
+    fn a_removed_entry_tightens_unless_it_was_contained() {
+        let mirror = sec("schema_version: 1\nbindings:\n  admin: [\"root\"]\n");
+        for (file, want) in [
+            ("  user: [\"x\"]\n  guest: [{uid: 9}]\n", vec![]),
+            (
+                "  adversary: [\"x\", {uid: 9}]\n",
+                vec![BindingEntry::Name("x".into()), BindingEntry::Uid(9)],
+            ),
+            (
+                "  user: [\"x\"]\n  adversary: [\"x\"]\n",
+                vec![BindingEntry::Name("x".into())],
+            ),
+        ] {
+            let file = sec(&format!(
+                "schema_version: 1\nbindings:\n  admin: [\"root\"]\n{file}"
+            ));
+            assert_eq!(loosenings(&file, &mirror), want, "{file:?}");
+        }
+    }
+
+    #[test]
+    fn a_name_and_a_uid_are_distinct_entries() {
+        let file = sec("schema_version: 1\nbindings:\n  adversary: [{uid: 7}]\n");
+        let mirror = sec("schema_version: 1\nbindings:\n  adversary: [\"7\"]\n");
+        assert_eq!(loosenings(&file, &mirror), [BindingEntry::Uid(7)]);
+        assert_eq!(loosenings(&mirror, &file), [BindingEntry::Name("7".into())]);
+    }
+
+    #[test]
+    fn empty_role_keys_change_nothing() {
+        let file = sec("schema_version: 1\nbindings:\n  admin: [\"root\"]\n");
+        let mirror = sec(
+            "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: []\n  guest: []\n  adversary: []\n",
+        );
+        assert!(loosenings(&file, &mirror).is_empty());
+        assert!(loosenings(&mirror, &file).is_empty());
+    }
+
+    #[test]
+    fn an_absent_section_gaining_bindings_loosens_every_bound_entry() {
+        let mirror = sec(
+            "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  guest: [{uid: 9}]\n  adversary: [\"m\"]\n",
+        );
+        for file in [
+            Section::Missing,
+            Section::Absent,
+            sec("schema_version: 1\n"),
+        ] {
+            assert_eq!(
+                loosenings(&file, &mirror),
+                [BindingEntry::Name("root".into()), BindingEntry::Uid(9)],
+                "{file:?}"
+            );
+            assert_eq!(
+                loosenings(&mirror, &file),
+                [BindingEntry::Name("m".into())],
+                "{file:?}"
+            );
+        }
     }
 }
