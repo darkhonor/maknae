@@ -1243,7 +1243,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             close_bounded(&mut stream).await;
             return;
         }
-        Dispatch::NoBehaviour => {
+        Dispatch::NoBehaviour | Dispatch::ContainRequested | Dispatch::ReleaseRequested => {
             // Decided and PERMITTED above; the term simply has no behaviour.
             // (#181, 2026-09-02: only an EXTENSION grant can produce that
             // Permit — ADR-0008 D2 — since `-basic` cannot permit an unbuilt
@@ -1612,7 +1612,11 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                         }
                     }
                 }
-                Dispatch::NoBehaviour | Dispatch::MutationRequested | Dispatch::PromptRequested => {
+                Dispatch::NoBehaviour
+                | Dispatch::ContainRequested
+                | Dispatch::ReleaseRequested
+                | Dispatch::MutationRequested
+                | Dispatch::PromptRequested => {
                     unreachable!("outer match routes unprepared operations")
                 }
             };

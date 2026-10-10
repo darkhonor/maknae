@@ -608,14 +608,14 @@ mod tests {
         assert_eq!(g.nodes().iter().filter(|n| n.kind == TERM).count(), 61);
         assert_eq!(g.nodes().iter().filter(|n| n.kind == CLASS).count(), 7);
         let rules: Vec<_> = g.nodes().iter().filter(|n| n.kind == RULE).collect();
-        assert_eq!(rules.len(), 24);
+        assert_eq!(rules.len(), 25);
         let admin = g.lookup(ROLE, "admin").unwrap();
         assert_eq!(g.out_edges(admin.id, DENIES).count(), 18);
-        assert_eq!(g.out_edges(admin.id, PERMITS).count(), 6);
+        assert_eq!(g.out_edges(admin.id, PERMITS).count(), 7);
         let grants = g
             .lookup(SECTION, "/etc/maknae/authz.yaml#roles.admin")
             .unwrap();
-        assert_eq!(g.in_edges(grants.id, DECLARED_BY).count(), 4);
+        assert_eq!(g.in_edges(grants.id, DECLARED_BY).count(), 5);
         let user = g.lookup(ROLE, "user").unwrap();
         assert_eq!(g.out_edges(user.id, DENIES).count(), 18);
         assert_eq!(g.out_edges(user.id, PERMITS).count(), 2);
@@ -649,7 +649,7 @@ mod tests {
         }
         assert_eq!(
             g.edges().len() - snap.persisted().edges().len(),
-            61 + 1 + 20 * 3 + 1 + 4 * 3
+            61 + 1 + 20 * 3 + 1 + 5 * 3
         );
 
         let deny0 = g.lookup(RULE, "rule:permissions:deny:0").unwrap();
@@ -1188,7 +1188,7 @@ mod tests {
             shown.starts_with("Snapshot { revision: 5, nodes: "),
             "{shown}"
         );
-        assert!(shown.ends_with(", rules: 24 }"), "{shown}");
+        assert!(shown.ends_with(", rules: 25 }"), "{shown}");
     }
 
     #[test]

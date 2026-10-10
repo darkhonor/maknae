@@ -25,7 +25,7 @@ permissions:
 
 # The administrative terms the enrolled administrator (`admin`) holds on a fresh
 # install: the basic operation of a single-user host (#490). Edit the list to
-# grant fewer or more; `admin.config.show` is grantable the same way.
+# grant fewer or more; `admin.config.show` and `admin.contain` are grantable the same way.
 roles:
   admin:
     allow:
@@ -33,3 +33,4 @@ roles:
       - "admin.subject.list"
       - "admin.baseline.show"
       - "admin.baseline.accept"
+      - "admin.release"

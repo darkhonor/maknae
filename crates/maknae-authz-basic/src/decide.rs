@@ -83,7 +83,7 @@ impl DestinationGrants {
 /// `session.prompt` may be granted to `user`; `admin.baseline.accept` changes state.
 // One line: the drift gate's extractor reads only the matched line.
 #[rustfmt::skip]
-pub(crate) const GRANTABLE_ACTIONS: [&str; 6] = ["admin.status", "admin.config.show", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "session.prompt"];
+pub(crate) const GRANTABLE_ACTIONS: [&str; 8] = ["admin.status", "admin.config.show", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.contain", "admin.release", "session.prompt"];
 
 /// Byte-wise `&str` equality usable in a `const` context.
 ///
@@ -124,7 +124,7 @@ const fn str_eq(a: &str, b: &str) -> bool {
 /// demands the fourth assertion, which is the failure mode an unrolled check
 /// would otherwise have had.
 const _: () = {
-    let [a, b, c, d, e, f] = GRANTABLE_ACTIONS;
+    let [a, b, c, d, e, f, g, h] = GRANTABLE_ACTIONS;
     const WHY: &str = "admin.whoami is unconditional for admins and must not be grantable";
     assert!(!str_eq(a, "admin.whoami"), "{}", WHY);
     assert!(!str_eq(b, "admin.whoami"), "{}", WHY);
@@ -132,6 +132,8 @@ const _: () = {
     assert!(!str_eq(d, "admin.whoami"), "{}", WHY);
     assert!(!str_eq(e, "admin.whoami"), "{}", WHY);
     assert!(!str_eq(f, "admin.whoami"), "{}", WHY);
+    assert!(!str_eq(g, "admin.whoami"), "{}", WHY);
+    assert!(!str_eq(h, "admin.whoami"), "{}", WHY);
 };
 
 /// A validated action term: it appeared in [`GRANTABLE_ACTIONS`] at load time.
@@ -1510,7 +1512,7 @@ mod tests {
         let forged = ActionGrants::from_validated(std::collections::BTreeMap::from([(
             "admin".to_string(),
             (
-                vec![ActionTerm::validated("admin.contain".into())],
+                vec![ActionTerm::validated("admin.policy.reload".into())],
                 Vec::new(),
             ),
         )]));
@@ -1520,10 +1522,10 @@ mod tests {
             decide_loaded(
                 &lp,
                 &principal(),
-                &request(Some(1001), "admin.contain", None)
+                &request(Some(1001), "admin.policy.reload", None)
             ),
             Verdict::NotApplicable {
-                note: Some("term enumerated, not implemented: admin.contain".into())
+                note: Some("term enumerated, not implemented: admin.policy.reload".into())
             },
             "a term outside GRANTABLE_ACTIONS must not be honoured even if it \
              somehow reaches the grant map"
@@ -1551,7 +1553,7 @@ mod tests {
         // Granted in full to admin, with the prompt term's second condition
         // (the destination attribute) satisfied for that term only.
         let lp = lp_with_grants(
-            "roles:\n  admin:\n    allow: [\"admin.status\", \"admin.config.show\", \"admin.subject.list\", \"admin.baseline.show\", \"admin.baseline.accept\", \"session.prompt\"]\ndestinations:\n  admin:\n    allow: [\"provider:openai\"]\n",
+            "roles:\n  admin:\n    allow: [\"admin.status\", \"admin.config.show\", \"admin.subject.list\", \"admin.baseline.show\", \"admin.baseline.accept\", \"admin.contain\", \"admin.release\", \"session.prompt\"]\ndestinations:\n  admin:\n    allow: [\"provider:openai\"]\n",
             GRANT_UIDS,
         );
         for t in GRANTABLE_ACTIONS {
@@ -2007,7 +2009,7 @@ mod tests {
     #[test]
     fn the_baseline_terms_permit_only_a_granted_admin() {
         let lp = lp_with_grants(
-            "roles:\n  admin:\n    allow: [\"admin.status\", \"admin.config.show\", \"admin.subject.list\", \"admin.baseline.show\", \"admin.baseline.accept\", \"session.prompt\"]\n",
+            "roles:\n  admin:\n    allow: [\"admin.status\", \"admin.config.show\", \"admin.subject.list\", \"admin.baseline.show\", \"admin.baseline.accept\", \"admin.contain\", \"admin.release\", \"session.prompt\"]\n",
             GRANT_UIDS,
         );
         for term in ["admin.baseline.show", "admin.baseline.accept"] {
@@ -2073,6 +2075,67 @@ mod tests {
             },
             "a grant can never reach a contained subject"
         );
+    }
+
+    #[test]
+    fn contain_and_release_are_granted_separately_and_never_by_membership() {
+        let only_release = lp_with_grants(
+            "roles:\n  admin:\n    allow: [\"admin.release\"]\n",
+            GRANT_UIDS,
+        );
+        let only_contain = lp_with_grants(
+            "roles:\n  admin:\n    allow: [\"admin.contain\"]\n",
+            GRANT_UIDS,
+        );
+        let neither = lp_with_grants("", GRANT_UIDS);
+        let permits = |lp: &LoadedPolicy, a: &str| {
+            matches!(
+                decide_loaded(lp, &principal(), &request(Some(1001), a, None)),
+                Verdict::Permit { .. }
+            )
+        };
+        assert!(
+            permits(&only_release, "admin.release") && !permits(&only_release, "admin.contain")
+        );
+        assert!(
+            permits(&only_contain, "admin.contain") && !permits(&only_contain, "admin.release")
+        );
+        assert!(!permits(&neither, "admin.contain") && !permits(&neither, "admin.release"));
+        let denied = lp_with_grants(
+            "roles:\n  admin:\n    allow: [\"admin.release\"]\n    deny: [\"admin.release\"]\n",
+            GRANT_UIDS,
+        );
+        assert!(matches!(
+            decide_loaded(
+                &denied,
+                &principal(),
+                &request(Some(1001), "admin.release", None)
+            ),
+            Verdict::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn a_contained_subject_granted_both_terms_is_still_denied_everything() {
+        let lp = lp_with_grants(
+            "roles:\n  admin:\n    allow: [\"admin.release\", \"admin.contain\", \"admin.status\"]\n",
+            GRANT_UIDS,
+        );
+        for a in [
+            "liveness.ping",
+            "admin.whoami",
+            "admin.status",
+            "admin.release",
+            "admin.contain",
+        ] {
+            assert_eq!(
+                decide_loaded(&lp, &principal(), &request(Some(1004), a, None)),
+                Verdict::Deny {
+                    reason: "subject contained: role=adversary".into()
+                },
+                "{a}"
+            );
+        }
     }
 
     /// An empty `roles:` block behaves exactly as an absent one. This is the

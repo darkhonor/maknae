@@ -759,7 +759,7 @@ FIX
   # The spelling here must MATCH production exactly -- `pub(crate)`, one line --
   # or the control exercises a different anchor than the one that ships.
   # $2 overrides the grantable constant, for the subset control below.
-  printf '%s\n' "${2:-pub(crate) const GRANTABLE_ACTIONS: [&str; 6] = [\"admin.status\", \"admin.config.show\", \"admin.subject.list\", \"admin.baseline.show\", \"admin.baseline.accept\", \"session.prompt\"];}" \
+  printf '%s\n' "${2:-pub(crate) const GRANTABLE_ACTIONS: [&str; 8] = [\"admin.status\", \"admin.config.show\", \"admin.subject.list\", \"admin.baseline.show\", \"admin.baseline.accept\", \"admin.contain\", \"admin.release\", \"session.prompt\"];}" \
     > "$fixture/crates/maknae-authz-basic/src/decide.rs"
   printf '%s' "$1" > "$fixture/ci/gates/verb-manifest.txt"
   # $4 is the shipped authz.yaml (#490); the default grants nothing.

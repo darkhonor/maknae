@@ -1115,6 +1115,8 @@ mod tests {
                 "admin.subject.list",
                 "admin.baseline.show",
                 "admin.baseline.accept",
+                "admin.contain",
+                "admin.release",
                 "session.prompt"
             ]
         );
@@ -1765,15 +1767,47 @@ mod tests {
         );
     }
 
-    const SHIPPED_ADMIN_TERMS: [&str; 4] = [
+    const SHIPPED_ADMIN_TERMS: [&str; 5] = [
         "admin.status",
         "admin.subject.list",
         "admin.baseline.show",
         "admin.baseline.accept",
+        "admin.release",
     ];
 
     #[test]
-    fn the_shipped_file_grants_admin_exactly_the_four_terms() {
+    fn a_grant_of_contain_or_release_to_user_guest_or_adversary_refuses_at_load() {
+        for role in ["user", "guest", "adversary"] {
+            for term in ["admin.contain", "admin.release"] {
+                let got = finish(parse_with_roles(&format!(
+                    "roles:\n  {role}:\n    allow: [\"{term}\"]\n"
+                )));
+                assert!(got.is_err(), "{role} {term}: {got:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_shipped_policy_grants_release_and_not_contain_to_admin() {
+        let src = source_with(
+            SHIPPED,
+            Some("schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"daemon\"]\n"),
+            &[("root", 0), ("daemon", 1)],
+        );
+        let auth =
+            BasicAuthorizer::from_snapshot(principal(), paths(), test_digest, compiled(&src));
+        let ask = |uid: i64, action: &str| {
+            let mut r = liveness_req(Some(uid));
+            r.action = Action(action.into());
+            auth.decide(&r)
+        };
+        assert_eq!(ask(0, "admin.release"), audit_permit());
+        assert!(!matches!(ask(0, "admin.contain"), Verdict::Permit { .. }));
+        assert!(!matches!(ask(1, "admin.release"), Verdict::Permit { .. }));
+    }
+
+    #[test]
+    fn the_shipped_file_grants_admin_exactly_the_five_terms() {
         let policy = maknae_config::parse_authz(SHIPPED).expect("shipped authz.yaml parses");
         let roles: Vec<&String> = policy.action_grants.keys().collect();
         assert_eq!(roles, ["admin"]);
@@ -2929,11 +2963,11 @@ mod tests {
     }
 
     /// A term outside `GRANTABLE_ACTIONS` refuses, whether it is a real verb
-    /// this phase withholds (`admin.contain`) or nonexistent (`admin.stauts`).
+    /// this phase withholds (`admin.credential.rotate`) or nonexistent (`admin.stauts`).
     #[test]
     fn roles_ungrantable_term_refuses_construction_naming_the_term() {
         for term in [
-            "admin.contain",
+            "admin.credential.rotate",
             "admin.policy.reload",
             "admin.stauts",
             "fs.read",
@@ -2970,10 +3004,10 @@ mod tests {
     #[test]
     fn roles_ungrantable_term_in_deny_list_also_refuses() {
         let got = finish(parse_with_roles(
-            "roles:\n  admin:\n    deny: [\"admin.contain\"]\n",
+            "roles:\n  admin:\n    deny: [\"admin.credential.rotate\"]\n",
         ));
         assert!(
-            matches!(got, Err(AuthzBasicError::UnknownActionTerm(ref t)) if t == "admin.contain"),
+            matches!(got, Err(AuthzBasicError::UnknownActionTerm(ref t)) if t == "admin.credential.rotate"),
             "deny lists are gated identically to allow lists, got {got:?}"
         );
     }
@@ -3005,8 +3039,8 @@ mod tests {
         }
         .to_string()
         .starts_with("authz roles: `admin.status` is not grantable to role `user`"));
-        let d = AuthzBasicError::UnknownActionTerm("admin.contain".into()).to_string();
-        assert!(d.contains("admin.contain"), "{d}");
+        let d = AuthzBasicError::UnknownActionTerm("admin.credential.rotate".into()).to_string();
+        assert!(d.contains("admin.credential.rotate"), "{d}");
         // ...and lists what IS grantable, so the fix is in the message.
         assert!(d.contains("admin.status"), "{d}");
         assert_eq!(
@@ -3401,11 +3435,11 @@ mod tests {
         ));
         assert_eq!(
             parts(
-                "schema_version: 1\nroles:\n  admin:\n    allow: [\"admin.contain\"]\n",
+                "schema_version: 1\nroles:\n  admin:\n    allow: [\"admin.credential.rotate\"]\n",
                 &[]
             )
             .unwrap_err(),
-            AuthzBasicError::UnknownActionTerm("admin.contain".into())
+            AuthzBasicError::UnknownActionTerm("admin.credential.rotate".into())
         );
         assert_eq!(
             parts(
@@ -3788,11 +3822,13 @@ mod tests {
             let before = auth.snapshot();
             write(
                 &fx.policy(),
-                &format!("{EMPTY}roles:\n  admin:\n    allow: [\"admin.contain\"]\n"),
+                &format!("{EMPTY}roles:\n  admin:\n    allow: [\"admin.credential.rotate\"]\n"),
             );
             assert_eq!(
                 auth.reload_from_file(),
-                Err(AuthzBasicError::UnknownActionTerm("admin.contain".into()))
+                Err(AuthzBasicError::UnknownActionTerm(
+                    "admin.credential.rotate".into()
+                ))
             );
             assert!(Arc::ptr_eq(&before, &auth.snapshot()));
         }

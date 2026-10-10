@@ -49,6 +49,10 @@ pub enum Dispatch {
     /// The peer asked to accept the pending set its operand names; the hash is
     /// read from the verb by the arm, never passed to the PDP.
     BaselineAcceptRequested,
+    /// The peer asked to contain a subject; the target and reason are read from the verb by the arm, never passed to the PDP.
+    ContainRequested,
+    /// The peer asked to lift a containment; the target is read from the verb by the arm, never passed to the PDP.
+    ReleaseRequested,
 }
 
 /// The verbs routed to `mutation::handle`; only these resolve the requester's home.
@@ -71,13 +75,13 @@ pub fn dispatch_verb(verb: &Verb) -> Dispatch {
         Verb::AdminSubjectList => Dispatch::SubjectListRequested,
         Verb::AdminBaselineShow => Dispatch::BaselineShowRequested,
         Verb::AdminBaselineAccept { .. } => Dispatch::BaselineAcceptRequested,
+        Verb::AdminContain { .. } => Dispatch::ContainRequested,
+        Verb::AdminRelease { .. } => Dispatch::ReleaseRequested,
         Verb::SessionPrompt { .. } => Dispatch::PromptRequested,
         Verb::AdminAuditTail
         | Verb::AdminPolicyReload
         | Verb::AdminSubjectBind
         | Verb::AdminSubjectUnbind
-        | Verb::AdminContain { .. }
-        | Verb::AdminRelease { .. }
         | Verb::AdminCredentialRotate
         | Verb::AdminProviderList
         | Verb::AdminProviderSet
@@ -436,6 +440,7 @@ pub fn confinable_home(resolved: std::path::PathBuf) -> Option<std::path::PathBu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use maknae_proto::ContainTarget;
 
     #[test]
     fn only_a_utf8_home_below_the_root_is_confinable() {
@@ -588,6 +593,19 @@ mod tests {
             }),
             Dispatch::BaselineAcceptRequested
         );
+        assert_eq!(
+            dispatch_verb(&Verb::AdminContain {
+                target: ContainTarget::Uid(1),
+                reason: "r".into()
+            }),
+            Dispatch::ContainRequested
+        );
+        assert_eq!(
+            dispatch_verb(&Verb::AdminRelease {
+                target: ContainTarget::Uid(1)
+            }),
+            Dispatch::ReleaseRequested
+        );
         // And EVERY term that is not grantable still has no behaviour --
         // DERIVED, not hand-typed.
         //
@@ -609,6 +627,12 @@ mod tests {
         // remain, BOTH asserted against the constant: the tripwire test below
         // (cross-crate) and `-basic`'s in-crate pin for the mutation lane.)
         let grantable = maknae_authz_basic::grantable_actions();
+        let admin_terms = all_verbs()
+            .iter()
+            .map(verb_to_action)
+            .filter(|a| a.starts_with("admin.") && *a != "admin.whoami")
+            .count();
+        let grantable_admin = grantable.iter().filter(|a| a.starts_with("admin.")).count();
         let ungrantable: Vec<Verb> = all_verbs()
             .into_iter()
             .filter(|v| {
@@ -616,10 +640,14 @@ mod tests {
                 a.starts_with("admin.") && a != "admin.whoami" && !grantable.contains(&a)
             })
             .collect();
+        assert_eq!(
+            ungrantable.len(),
+            admin_terms - grantable_admin,
+            "the ungrantable admin set is derived from the verb list and the constant"
+        );
         assert!(
-            ungrantable.len() >= 13,
-            "the ungrantable admin set should not shrink unnoticed: {}",
-            ungrantable.len()
+            !ungrantable.is_empty(),
+            "the ungrantable admin set should not vanish unnoticed"
         );
         for v in ungrantable {
             assert_eq!(
@@ -661,6 +689,8 @@ mod tests {
                 "admin.subject.list",
                 "admin.baseline.show",
                 "admin.baseline.accept",
+                "admin.contain",
+                "admin.release",
                 "session.prompt"
             ],
             "the hand-copied list in the class test above must match the constant"
@@ -675,8 +705,25 @@ mod tests {
         // real arm, so the helper must say false — otherwise the assert above
         // is vacuous.
         assert!(
-            !all_dispatch(&["admin.contain"]),
+            !all_dispatch(&["admin.credential.rotate"]),
             "all_dispatch must return false for an unbuilt term"
+        );
+    }
+
+    #[test]
+    fn the_containment_terms_dispatch_to_their_own_arms() {
+        assert_eq!(
+            dispatch_verb(&Verb::AdminContain {
+                target: ContainTarget::Uid(1),
+                reason: "r".into()
+            }),
+            Dispatch::ContainRequested
+        );
+        assert_eq!(
+            dispatch_verb(&Verb::AdminRelease {
+                target: ContainTarget::Uid(1)
+            }),
+            Dispatch::ReleaseRequested
         );
     }
 

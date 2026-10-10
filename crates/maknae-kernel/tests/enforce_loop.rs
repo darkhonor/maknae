@@ -2506,10 +2506,7 @@ async fn a_permitted_unbuilt_term_is_audited_then_refused() {
         Arc::new(AlwaysPermit),
         emit.clone(),
         0,
-        maknae_proto::Verb::AdminContain {
-            target: maknae_proto::ContainTarget::Uid(4242),
-            reason: "r".into(),
-        },
+        maknae_proto::Verb::AdminCredentialRotate,
         Duration::from_secs(5),
     )
     .await
@@ -2525,7 +2522,7 @@ async fn a_permitted_unbuilt_term_is_audited_then_refused() {
         other => panic!("expected Unauthorized, got {other:?}"),
     }
     let req = request_record(&emit.records()).clone();
-    assert_eq!(req.action, "admin.contain");
+    assert_eq!(req.action, "admin.credential.rotate");
     assert_eq!(req.outcome.result, "permit");
     assert_eq!(
         req.outcome.posture, "not-implemented",
@@ -2546,10 +2543,7 @@ async fn a_noop_withholds_its_frame_when_the_record_cannot_append() {
         Arc::new(AlwaysPermit),
         emit.clone(),
         0,
-        maknae_proto::Verb::AdminContain {
-            target: maknae_proto::ContainTarget::Uid(4242),
-            reason: "r".into(),
-        },
+        maknae_proto::Verb::AdminCredentialRotate,
         Duration::from_secs(5),
     )
     .await;
@@ -2558,7 +2552,9 @@ async fn a_noop_withholds_its_frame_when_the_record_cannot_append() {
         "no frame may be released when its record could not append"
     );
     assert!(
-        emit.records().iter().any(|r| r.action == "admin.contain"),
+        emit.records()
+            .iter()
+            .any(|r| r.action == "admin.credential.rotate"),
         "the record must have been OFFERED before the frame was withheld"
     );
 }
@@ -2626,10 +2622,7 @@ async fn an_unbuilt_term_tells_the_admin_trail_the_roadmap_fact() {
         fx.authorizer(),
         emit.clone(),
         0,
-        maknae_proto::Verb::AdminContain {
-            target: maknae_proto::ContainTarget::Uid(4242),
-            reason: "r".into(),
-        },
+        maknae_proto::Verb::AdminCredentialRotate,
         Duration::from_secs(5),
     )
     .await
@@ -2644,7 +2637,7 @@ async fn an_unbuilt_term_tells_the_admin_trail_the_roadmap_fact() {
     let req = request_record(&emit.records()).clone();
     assert_eq!(req.outcome.result, "deny");
     assert_eq!(
-        req.outcome.reason, "term enumerated, not implemented: admin.contain",
+        req.outcome.reason, "term enumerated, not implemented: admin.credential.rotate",
         "the ADMIN trail carries the roadmap fact"
     );
 }
@@ -2663,10 +2656,7 @@ async fn an_unbuilt_term_tells_a_user_trail_their_reach() {
         fx.authorizer(),
         emit.clone(),
         0,
-        maknae_proto::Verb::AdminContain {
-            target: maknae_proto::ContainTarget::Uid(4242),
-            reason: "r".into(),
-        },
+        maknae_proto::Verb::AdminCredentialRotate,
         Duration::from_secs(5),
     )
     .await
@@ -2680,7 +2670,7 @@ async fn an_unbuilt_term_tells_a_user_trail_their_reach() {
     }
     let req = request_record(&emit.records()).clone();
     assert_eq!(
-        req.outcome.reason, "role user: no rule for admin.contain",
+        req.outcome.reason, "role user: no rule for admin.credential.rotate",
         "a non-admin trail reads role-reach, never build-state"
     );
 }
