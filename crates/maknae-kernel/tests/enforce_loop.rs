@@ -2506,7 +2506,10 @@ async fn a_permitted_unbuilt_term_is_audited_then_refused() {
         Arc::new(AlwaysPermit),
         emit.clone(),
         0,
-        maknae_proto::Verb::AdminContain,
+        maknae_proto::Verb::AdminContain {
+            target: maknae_proto::ContainTarget::Uid(4242),
+            reason: "r".into(),
+        },
         Duration::from_secs(5),
     )
     .await
@@ -2543,7 +2546,10 @@ async fn a_noop_withholds_its_frame_when_the_record_cannot_append() {
         Arc::new(AlwaysPermit),
         emit.clone(),
         0,
-        maknae_proto::Verb::AdminContain,
+        maknae_proto::Verb::AdminContain {
+            target: maknae_proto::ContainTarget::Uid(4242),
+            reason: "r".into(),
+        },
         Duration::from_secs(5),
     )
     .await;
@@ -2620,7 +2626,10 @@ async fn an_unbuilt_term_tells_the_admin_trail_the_roadmap_fact() {
         fx.authorizer(),
         emit.clone(),
         0,
-        maknae_proto::Verb::AdminContain,
+        maknae_proto::Verb::AdminContain {
+            target: maknae_proto::ContainTarget::Uid(4242),
+            reason: "r".into(),
+        },
         Duration::from_secs(5),
     )
     .await
@@ -2654,7 +2663,10 @@ async fn an_unbuilt_term_tells_a_user_trail_their_reach() {
         fx.authorizer(),
         emit.clone(),
         0,
-        maknae_proto::Verb::AdminContain,
+        maknae_proto::Verb::AdminContain {
+            target: maknae_proto::ContainTarget::Uid(4242),
+            reason: "r".into(),
+        },
         Duration::from_secs(5),
     )
     .await

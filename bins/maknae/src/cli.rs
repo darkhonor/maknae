@@ -973,7 +973,8 @@ fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
         | (v, p @ Payload::MutationAttempt(_))
         | (v, p @ Payload::SubjectList(_))
         | (v, p @ Payload::PromptReply(_))
-        | (v, p @ Payload::Baseline(_)) => Err(format!(
+        | (v, p @ Payload::Baseline(_))
+        | (v, p @ Payload::Containment(_)) => Err(format!(
             "protocol error: daemon returned a {p:?} payload for a {v:?} request"
         )),
     }
@@ -1811,6 +1812,7 @@ mod tests {
             identity_problem_counts: vec![],
             baseline_pending: vec![],
             identity_sync: vec![],
+            containment: vec![],
         };
         let base = status_lines(&s);
         assert_eq!(
@@ -2358,6 +2360,7 @@ mod tests {
             identity_problem_counts: vec!["unresolved=1".into()],
             baseline_pending: vec!["baseline: 1 pending (live)".into()],
             identity_sync: vec![],
+            containment: vec![],
         };
         let lines = status_lines(&s);
         assert_eq!(

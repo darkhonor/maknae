@@ -328,11 +328,14 @@ pub enum Verb {
     /// Containment IS a role binding (`adversary`) in the shipped model, so this
     /// and `admin.release` are the ONLY sanctioned spellings —
     /// `subject.bind`/`.unbind` refuse that role precisely so the constraints
-    /// live in one place.
-    AdminContain,
+    /// live in one place. `target` names the subject, `reason` is recorded in the trail.
+    AdminContain {
+        target: ContainTarget,
+        reason: String,
+    },
     /// Lift containment. The recovery path for induced containment; must not
-    /// depend on the credential that was contained.
-    AdminRelease,
+    /// depend on the credential that was contained. `target` names the subject.
+    AdminRelease { target: ContainTarget },
     /// Rotate the daemon's own credentials.
     AdminCredentialRotate,
     /// Enumerate the model providers available to the agent runtime. A disclosure
@@ -605,6 +608,217 @@ pub enum Payload {
     /// A permitted `admin.baseline.show` or `admin.baseline.accept`. `changes` is
     /// already rendered through the config.show classifier; never construct it from raw configuration.
     Baseline(BaselineView),
+    /// The outcome of a permitted `admin.contain` or `admin.release` (#165).
+    Containment(ContainmentView),
+}
+
+/// The reason's byte limit, measured after normalisation.
+pub const CONTAIN_REASON_MAX_BYTES: usize = 384;
+/// The user name's byte limit, measured after normalisation.
+pub const CONTAIN_NAME_MAX_BYTES: usize = 256;
+/// Format (Cf) characters the operand rule admits; bidi overrides never are.
+pub const CONTAIN_ALLOWED_FORMAT: &[char] = &[];
+
+/// The subject an `admin.contain` or `admin.release` names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ContainTarget {
+    Name(String),
+    Uid(u32),
+}
+
+/// A free-text operand of the containment verbs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Operand {
+    Reason,
+    Name,
+}
+
+impl Operand {
+    fn noun(self) -> &'static str {
+        match self {
+            Operand::Reason => "the reason",
+            Operand::Name => "the user name",
+        }
+    }
+
+    fn max(self) -> usize {
+        match self {
+            Operand::Reason => CONTAIN_REASON_MAX_BYTES,
+            Operand::Name => CONTAIN_NAME_MAX_BYTES,
+        }
+    }
+}
+
+/// Why a containment operand was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperandError {
+    Empty(Operand),
+    TooLong(Operand),
+    Control(Operand, u32),
+    Format(Operand, u32),
+    EdgeWhitespace,
+}
+
+impl std::fmt::Display for OperandError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            OperandError::Empty(w) | OperandError::TooLong(w) => {
+                let max = w.max();
+                write!(
+                    f,
+                    "{} must be 1 to {max} bytes of UTF-8 (about {} Hangul syllables or {max} Latin characters)",
+                    w.noun(),
+                    max / 3
+                )
+            }
+            OperandError::Control(w, c) => {
+                write!(f, "{} contains a control character (U+{c:04X})", w.noun())
+            }
+            OperandError::Format(w, c) => write!(
+                f,
+                "{} contains an invisible or formatting character (U+{c:04X})",
+                w.noun()
+            ),
+            OperandError::EdgeWhitespace => {
+                f.write_str("the user name must not begin or end with whitespace")
+            }
+        }
+    }
+}
+
+impl std::error::Error for OperandError {}
+
+fn is_bidi_override(c: char) -> bool {
+    matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+fn format_allowed(c: char, allowed: &[char]) -> bool {
+    !is_bidi_override(c) && allowed.contains(&c)
+}
+
+fn checked(raw: &str, what: Operand, max: usize) -> Result<String, OperandError> {
+    checked_with(raw, what, max, CONTAIN_ALLOWED_FORMAT)
+}
+
+fn checked_with(
+    raw: &str,
+    what: Operand,
+    max: usize,
+    allowed: &[char],
+) -> Result<String, OperandError> {
+    use icu_properties::props::GeneralCategory;
+    let text = icu_normalizer::ComposingNormalizerBorrowed::new_nfc()
+        .normalize(raw)
+        .into_owned();
+    let gc = icu_properties::CodePointMapData::<GeneralCategory>::new();
+    for c in text.chars() {
+        match gc.get(c) {
+            GeneralCategory::Control => return Err(OperandError::Control(what, c as u32)),
+            GeneralCategory::Format if !format_allowed(c, allowed) => {
+                return Err(OperandError::Format(what, c as u32))
+            }
+            _ => {}
+        }
+    }
+    if text.trim().is_empty() {
+        return Err(OperandError::Empty(what));
+    }
+    if text.len() > max {
+        return Err(OperandError::TooLong(what));
+    }
+    Ok(text)
+}
+
+/// NFC-normalise and validate a containment reason.
+pub fn contain_reason(raw: &str) -> Result<String, OperandError> {
+    checked(raw, Operand::Reason, CONTAIN_REASON_MAX_BYTES)
+}
+
+/// NFC-normalise and validate a user name operand.
+pub fn contain_name(raw: &str) -> Result<String, OperandError> {
+    let name = checked(raw, Operand::Name, CONTAIN_NAME_MAX_BYTES)?;
+    if name.trim() != name {
+        return Err(OperandError::EdgeWhitespace);
+    }
+    Ok(name)
+}
+
+/// Validate a target; a uid needs no rule.
+pub fn contain_target(t: &ContainTarget) -> Result<ContainTarget, OperandError> {
+    match t {
+        ContainTarget::Name(n) => contain_name(n).map(ContainTarget::Name),
+        ContainTarget::Uid(u) => Ok(ContainTarget::Uid(*u)),
+    }
+}
+
+/// The fixed result of a containment request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ContainmentOutcome {
+    Contained,
+    Released,
+    AlreadyContained,
+    NotContained,
+    LastReleaser,
+    SelfContainWithoutRelease,
+    Busy,
+    Stopping,
+    NoExplicitBindings,
+    UnknownAccount,
+    LookupUnavailable,
+}
+
+impl ContainmentOutcome {
+    /// The stable, machine-readable code.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Contained => "contained",
+            Self::Released => "released",
+            Self::AlreadyContained => "already-contained",
+            Self::NotContained => "not-contained",
+            Self::LastReleaser => "last-releaser",
+            Self::SelfContainWithoutRelease => "self-contain-without-release",
+            Self::Busy => "busy",
+            Self::Stopping => "stopping",
+            Self::NoExplicitBindings => "no-explicit-bindings",
+            Self::UnknownAccount => "unknown-account",
+            Self::LookupUnavailable => "lookup-unavailable",
+        }
+    }
+
+    /// The fixed human-readable sentence.
+    pub fn text(self) -> &'static str {
+        match self {
+            Self::Contained => "subject is contained",
+            Self::Released => "subject is released",
+            Self::AlreadyContained => "subject is already contained",
+            Self::NotContained => "subject is not contained",
+            Self::LastReleaser => "refused: this would leave no subject able to release",
+            Self::SelfContainWithoutRelease => {
+                "refused: containing yourself would leave you unable to release"
+            }
+            Self::Busy => "refused: the daemon is busy, try again",
+            Self::Stopping => "refused: the daemon is stopping",
+            Self::NoExplicitBindings => "refused: the subject has no explicit binding to contain",
+            Self::UnknownAccount => "refused: no such account",
+            Self::LookupUnavailable => "refused: the account lookup is unavailable",
+        }
+    }
+
+    /// Whether the request left the subject in the state it asked for.
+    pub fn is_success(self) -> bool {
+        matches!(
+            self,
+            Self::Contained | Self::Released | Self::AlreadyContained | Self::NotContained
+        )
+    }
+}
+
+/// The reply to `admin.contain` and `admin.release`: one code, never free text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContainmentView {
+    pub outcome: ContainmentOutcome,
+    pub target_uid: Option<u32>,
+    pub revision: Option<u64>,
 }
 
 /// The pending baseline change set (#490), or the outcome of accepting it.
@@ -663,6 +877,9 @@ pub struct StatusView {
     /// render failed.
     #[serde(default)]
     pub identity_sync: Vec<String>,
+    /// `subjects=<n>` and `kernel_refused=<n>`: counts only, never a uid or name (#165).
+    #[serde(default)]
+    pub containment: Vec<String>,
 }
 
 /// One subject `bindings.yaml` names (#496). `members` holds its binding (`uid:N`),
@@ -717,6 +934,7 @@ pub struct ProtoError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum RespResult {
     Ok(Payload),
     Err(ProtoError),
@@ -750,8 +968,8 @@ pub fn class_of(verb: &Verb) -> FrameClass {
         | Verb::AdminBaselineAccept { .. }
         | Verb::AdminSubjectBind
         | Verb::AdminSubjectUnbind
-        | Verb::AdminContain
-        | Verb::AdminRelease
+        | Verb::AdminContain { .. }
+        | Verb::AdminRelease { .. }
         | Verb::AdminCredentialRotate
         | Verb::AdminProviderList
         | Verb::AdminProviderSet
@@ -987,6 +1205,7 @@ mod tests {
                 identity_problem_counts: vec![],
                 baseline_pending: vec![],
                 identity_sync: vec![],
+                containment: vec![],
             })),
         }
     }
@@ -2055,6 +2274,335 @@ mod tests {
         }));
     }
 
+    #[test]
+    fn the_containment_verbs_carry_their_operands_and_stay_control_plane() {
+        assert_eq!(PROTOCOL_VERSION, 1);
+        for verb in [
+            Verb::AdminContain {
+                target: ContainTarget::Name("mallory".into()),
+                reason: "token theft".into(),
+            },
+            Verb::AdminContain {
+                target: ContainTarget::Uid(4242),
+                reason: "r".into(),
+            },
+            Verb::AdminRelease {
+                target: ContainTarget::Uid(4242),
+            },
+            Verb::AdminRelease {
+                target: ContainTarget::Name("mallory".into()),
+            },
+        ] {
+            assert_eq!(class_of(&verb), FrameClass::Control);
+            let b = encode_request(&Request {
+                protocol_version: 1,
+                verb: verb.clone(),
+            })
+            .unwrap();
+            assert_eq!(decode_request(&b).unwrap().verb, verb);
+        }
+    }
+
+    #[test]
+    fn the_worst_case_contain_fits_a_control_frame() {
+        let name =
+            "\u{d55c}".repeat(CONTAIN_NAME_MAX_BYTES / 3) + &"n".repeat(CONTAIN_NAME_MAX_BYTES % 3);
+        let reason = "\u{d55c}".repeat(CONTAIN_REASON_MAX_BYTES / 3);
+        assert_eq!(
+            (name.len(), reason.len()),
+            (CONTAIN_NAME_MAX_BYTES, CONTAIN_REASON_MAX_BYTES)
+        );
+        let target = contain_target(&ContainTarget::Name(name)).unwrap();
+        let reason = contain_reason(&reason).unwrap();
+        let b = encode_request(&Request {
+            protocol_version: 1,
+            verb: Verb::AdminContain { target, reason },
+        })
+        .unwrap();
+        assert!(
+            b.len() <= crate::frame::CONTROL_REQUEST_MAX,
+            "{} > {}",
+            b.len(),
+            crate::frame::CONTROL_REQUEST_MAX
+        );
+    }
+
+    #[test]
+    fn a_hangul_reason_is_accepted_and_recorded_as_given() {
+        let r = "\u{d1a0}\u{d070} \u{d0c8}\u{cde8} \u{c758}\u{c2ec}"; // "토큰 탈취 의심"
+        assert_eq!(contain_reason(r).as_deref(), Ok(r));
+        assert_eq!(
+            contain_reason("lost clearance: ticket #12, see IR-4").as_deref(),
+            Ok("lost clearance: ticket #12, see IR-4")
+        );
+    }
+
+    #[test]
+    fn decomposed_jamo_and_precomposed_hangul_normalise_to_identical_bytes() {
+        let precomposed = "\u{d55c}\u{ae00}"; // 한글
+        let jamo = "\u{1112}\u{1161}\u{11ab}\u{1100}\u{1173}\u{11af}";
+        assert_ne!(precomposed.as_bytes(), jamo.as_bytes());
+        assert_eq!(
+            contain_reason(jamo).unwrap().as_bytes(),
+            contain_reason(precomposed).unwrap().as_bytes()
+        );
+        assert_eq!(contain_name(jamo).unwrap(), precomposed);
+        assert_eq!(contain_reason("e\u{301}").unwrap(), "\u{e9}");
+    }
+
+    #[test]
+    fn control_and_format_characters_are_refused_in_both_operands() {
+        for (c, class) in [
+            ('\u{0}', 'c'),
+            ('\u{7}', 'c'),
+            ('\t', 'c'),
+            ('\n', 'c'),
+            ('\u{7f}', 'c'),
+            ('\u{85}', 'c'),
+            ('\u{200b}', 'f'),
+            ('\u{200e}', 'f'),
+            ('\u{202a}', 'f'),
+            ('\u{202e}', 'f'),
+            ('\u{2066}', 'f'),
+            ('\u{2069}', 'f'),
+            ('\u{feff}', 'f'),
+        ] {
+            let text = format!("ab{c}cd");
+            let (r, n) = (contain_reason(&text), contain_name(&text));
+            match class {
+                'c' => {
+                    assert_eq!(
+                        r,
+                        Err(OperandError::Control(Operand::Reason, c as u32)),
+                        "{:04X}",
+                        c as u32
+                    );
+                    assert_eq!(
+                        n,
+                        Err(OperandError::Control(Operand::Name, c as u32)),
+                        "{:04X}",
+                        c as u32
+                    );
+                }
+                _ => {
+                    assert_eq!(
+                        r,
+                        Err(OperandError::Format(Operand::Reason, c as u32)),
+                        "{:04X}",
+                        c as u32
+                    );
+                    assert_eq!(
+                        n,
+                        Err(OperandError::Format(Operand::Name, c as u32)),
+                        "{:04X}",
+                        c as u32
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_permitted_format_list_is_empty_today() {
+        assert_eq!(CONTAIN_ALLOWED_FORMAT, &[] as &[char]);
+    }
+
+    #[test]
+    fn a_listed_format_character_is_admitted_and_a_bidi_override_never_is() {
+        let zwj = &['\u{200D}', '\u{200C}'];
+        assert_eq!(
+            checked_with("a\u{200D}b", Operand::Reason, CONTAIN_REASON_MAX_BYTES, zwj).as_deref(),
+            Ok("a\u{200D}b")
+        );
+        assert_eq!(
+            checked_with("a\u{200D}b", Operand::Reason, CONTAIN_REASON_MAX_BYTES, &[]),
+            Err(OperandError::Format(Operand::Reason, 0x200D))
+        );
+        let overrides: Vec<char> = ('\u{202A}'..='\u{202E}')
+            .chain('\u{2066}'..='\u{2069}')
+            .collect();
+        for c in &overrides {
+            assert_eq!(
+                checked_with(
+                    &format!("a{c}b"),
+                    Operand::Reason,
+                    CONTAIN_REASON_MAX_BYTES,
+                    &overrides
+                ),
+                Err(OperandError::Format(Operand::Reason, *c as u32)),
+                "U+{:04X} is a hard floor",
+                *c as u32
+            );
+        }
+        assert!(
+            !format_allowed('\u{200B}', zwj),
+            "an unlisted Cf stays refused"
+        );
+    }
+
+    #[test]
+    fn empty_whitespace_and_edge_whitespace_are_refused() {
+        assert_eq!(
+            contain_reason(""),
+            Err(OperandError::Empty(Operand::Reason))
+        );
+        assert_eq!(
+            contain_reason("   "),
+            Err(OperandError::Empty(Operand::Reason))
+        );
+        assert_eq!(contain_name(""), Err(OperandError::Empty(Operand::Name)));
+        assert_eq!(contain_name(" alice"), Err(OperandError::EdgeWhitespace));
+        assert_eq!(contain_name("alice "), Err(OperandError::EdgeWhitespace));
+        assert!(
+            contain_reason(" spaced reason ").is_ok(),
+            "a reason may carry edge spaces"
+        );
+        assert_eq!(
+            contain_target(&ContainTarget::Uid(0)),
+            Ok(ContainTarget::Uid(0))
+        );
+    }
+
+    #[test]
+    fn the_byte_limits_are_inclusive_and_measured_after_normalisation() {
+        assert!(contain_reason(&"x".repeat(CONTAIN_REASON_MAX_BYTES)).is_ok());
+        assert_eq!(
+            contain_reason(&"x".repeat(CONTAIN_REASON_MAX_BYTES + 1)),
+            Err(OperandError::TooLong(Operand::Reason))
+        );
+        assert!(contain_name(&"n".repeat(CONTAIN_NAME_MAX_BYTES)).is_ok());
+        assert_eq!(
+            contain_name(&"n".repeat(CONTAIN_NAME_MAX_BYTES + 1)),
+            Err(OperandError::TooLong(Operand::Name))
+        );
+        let jamo = "\u{1112}\u{1161}\u{11ab}".repeat(CONTAIN_REASON_MAX_BYTES / 3);
+        assert!(
+            jamo.len() > CONTAIN_REASON_MAX_BYTES,
+            "the raw text is over the limit"
+        );
+        assert_eq!(
+            contain_reason(&jamo).unwrap().len(),
+            CONTAIN_REASON_MAX_BYTES,
+            "normalised, it fits"
+        );
+    }
+
+    #[test]
+    fn the_error_text_states_the_byte_limit_and_approximate_counts() {
+        assert_eq!(OperandError::TooLong(Operand::Reason).to_string(),
+            format!("the reason must be 1 to {} bytes of UTF-8 (about {} Hangul syllables or {} Latin characters)",
+                CONTAIN_REASON_MAX_BYTES, CONTAIN_REASON_MAX_BYTES / 3, CONTAIN_REASON_MAX_BYTES));
+        assert_eq!(
+            OperandError::Format(Operand::Reason, 0x202e).to_string(),
+            "the reason contains an invisible or formatting character (U+202E)"
+        );
+        assert_eq!(
+            OperandError::Control(Operand::Name, 7).to_string(),
+            "the user name contains a control character (U+0007)"
+        );
+    }
+
+    #[test]
+    fn every_outcome_has_its_fixed_code_and_text() {
+        use ContainmentOutcome::*;
+        let all = [
+            Contained,
+            Released,
+            AlreadyContained,
+            NotContained,
+            LastReleaser,
+            SelfContainWithoutRelease,
+            Busy,
+            Stopping,
+            NoExplicitBindings,
+            UnknownAccount,
+            LookupUnavailable,
+        ];
+        let codes: Vec<&str> = all.iter().map(|o| o.code()).collect();
+        assert_eq!(
+            codes,
+            [
+                "contained",
+                "released",
+                "already-contained",
+                "not-contained",
+                "last-releaser",
+                "self-contain-without-release",
+                "busy",
+                "stopping",
+                "no-explicit-bindings",
+                "unknown-account",
+                "lookup-unavailable"
+            ]
+        );
+        assert_eq!(AlreadyContained.text(), "subject is already contained");
+        assert_eq!(NotContained.text(), "subject is not contained");
+        let texts: std::collections::BTreeSet<&str> = all.iter().map(|o| o.text()).collect();
+        assert_eq!(texts.len(), all.len(), "each text is distinct");
+        for o in all {
+            assert_eq!(
+                o.is_success(),
+                matches!(o, Contained | Released | AlreadyContained | NotContained),
+                "{o:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_containment_payload_round_trips_and_carries_no_free_text() {
+        let view = ContainmentView {
+            outcome: ContainmentOutcome::Contained,
+            target_uid: Some(1003),
+            revision: Some(12),
+        };
+        let r = Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Ok(Payload::Containment(view.clone())),
+        };
+        assert_eq!(decode_response(&encode_response(&r).unwrap()).unwrap(), r);
+        let mut b = Vec::new();
+        ciborium::into_writer(&view, &mut b).unwrap();
+        let v: ciborium::Value = ciborium::from_reader(b.as_slice()).unwrap();
+        let keys: Vec<String> = v
+            .as_map()
+            .unwrap()
+            .iter()
+            .map(|(k, _)| k.as_text().unwrap().to_string())
+            .collect();
+        assert_eq!(keys, ["outcome", "target_uid", "revision"]);
+    }
+
+    #[test]
+    fn a_status_without_the_containment_field_decodes_empty() {
+        let mut old = Vec::new();
+        ciborium::into_writer(
+            &OldStatusView {
+                version: "v".into(),
+                protocol_version: 1,
+                listener: "l".into(),
+                authz_backend: "b".into(),
+                classification_policy: "US".into(),
+            },
+            &mut old,
+        )
+        .unwrap();
+        let back: StatusView = ciborium::from_reader(old.as_slice()).unwrap();
+        assert!(back.containment.is_empty());
+        let mut new = Vec::new();
+        ciborium::into_writer(
+            &StatusView {
+                containment: vec!["subjects=1".into(), "kernel_refused=0".into()],
+                ..back
+            },
+            &mut new,
+        )
+        .unwrap();
+        let old: OldStatusView = ciborium::from_reader(new.as_slice()).unwrap();
+        assert_eq!(old.listener, "l");
+        let again: StatusView = ciborium::from_reader(new.as_slice()).unwrap();
+        assert_eq!(again.containment, ["subjects=1", "kernel_refused=0"]);
+    }
+
     mod class_tests {
         use super::*;
         use crate::frame::{ATTEMPT_REQUEST_MAX, ATTEMPT_RESPONSE_MAX, CONTROL_REQUEST_MAX};
@@ -2081,8 +2629,19 @@ mod tests {
                 ),
                 (Verb::AdminSubjectBind, FrameClass::Control),
                 (Verb::AdminSubjectUnbind, FrameClass::Control),
-                (Verb::AdminContain, FrameClass::Control),
-                (Verb::AdminRelease, FrameClass::Control),
+                (
+                    Verb::AdminContain {
+                        target: ContainTarget::Uid(1),
+                        reason: "r".into(),
+                    },
+                    FrameClass::Control,
+                ),
+                (
+                    Verb::AdminRelease {
+                        target: ContainTarget::Name("n".into()),
+                    },
+                    FrameClass::Control,
+                ),
                 (Verb::AdminCredentialRotate, FrameClass::Control),
                 (Verb::AdminProviderList, FrameClass::Control),
                 (Verb::AdminProviderSet, FrameClass::Control),

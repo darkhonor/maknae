@@ -76,8 +76,8 @@ pub fn dispatch_verb(verb: &Verb) -> Dispatch {
         | Verb::AdminPolicyReload
         | Verb::AdminSubjectBind
         | Verb::AdminSubjectUnbind
-        | Verb::AdminContain
-        | Verb::AdminRelease
+        | Verb::AdminContain { .. }
+        | Verb::AdminRelease { .. }
         | Verb::AdminCredentialRotate
         | Verb::AdminProviderList
         | Verb::AdminProviderSet
@@ -232,8 +232,8 @@ pub fn verb_to_action(verb: &Verb) -> &'static str {
         Verb::AdminBaselineAccept { .. } => "admin.baseline.accept",
         Verb::AdminSubjectBind => "admin.subject.bind",
         Verb::AdminSubjectUnbind => "admin.subject.unbind",
-        Verb::AdminContain => "admin.contain",
-        Verb::AdminRelease => "admin.release",
+        Verb::AdminContain { .. } => "admin.contain",
+        Verb::AdminRelease { .. } => "admin.release",
         Verb::AdminCredentialRotate => "admin.credential.rotate",
         Verb::AdminProviderList => "admin.provider.list",
         Verb::AdminProviderSet => "admin.provider.set",
@@ -1146,8 +1146,13 @@ mod tests {
             },
             Verb::AdminSubjectBind,
             Verb::AdminSubjectUnbind,
-            Verb::AdminContain,
-            Verb::AdminRelease,
+            Verb::AdminContain {
+                target: maknae_proto::ContainTarget::Uid(1),
+                reason: "r".into(),
+            },
+            Verb::AdminRelease {
+                target: maknae_proto::ContainTarget::Uid(1),
+            },
             Verb::AdminCredentialRotate,
             Verb::AdminProviderList,
             Verb::AdminProviderSet,
