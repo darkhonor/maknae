@@ -209,6 +209,43 @@ pub fn checked_roles(b: &Bindings) -> Result<Vec<(usize, &[BindingEntry])>, Role
     Ok(out)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Effective {
+    Bound(usize),
+    Contained,
+    Unbound,
+}
+
+pub fn effective(roles: &[usize]) -> Option<Effective> {
+    let first = *roles.first()?;
+    Some(if roles.contains(&(BINDING_ROLES.len() - 1)) {
+        Effective::Contained
+    } else if roles.iter().all(|r| *r == first) {
+        Effective::Bound(first)
+    } else {
+        Effective::Unbound
+    })
+}
+
+pub type HeldBy<'a> = BTreeMap<u32, Vec<(usize, &'a BindingEntry)>>;
+
+pub fn subjects_by_uid<'a>(
+    roles: &[(usize, &'a [BindingEntry])],
+    uid_of: impl Fn(&BindingEntry) -> Option<u32>,
+) -> (HeldBy<'a>, Vec<(usize, &'a BindingEntry)>) {
+    let mut held = HeldBy::new();
+    let mut unresolved = Vec::new();
+    for (idx, entries) in roles {
+        for e in *entries {
+            match uid_of(e) {
+                Some(u) => held.entry(u).or_default().push((*idx, e)),
+                None => unresolved.push((*idx, e)),
+            }
+        }
+    }
+    (held, unresolved)
+}
+
 pub fn check_roles(b: &Bindings) -> Result<(), RoleRuleError> {
     checked_roles(b).map(|_| ())
 }

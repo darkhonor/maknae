@@ -1,12 +1,14 @@
 use crate::cli::terminal_safe;
 use maknae_config::{
-    check_roles, loosenings, parse_bindings, parse_mirror, plan_sync, BindingEntry, Bindings,
-    Mirror, Section, SyncPlan, BINDINGS_FILE, MIRROR_FILE, MIRROR_MAX_BYTES, STATE_DIR,
+    check_roles, effective_loosenings, loosenings, parse_bindings, parse_mirror, plan_sync,
+    BindingEntry, Bindings, Mirror, Section, SyncPlan, BINDINGS_FILE, MIRROR_FILE,
+    MIRROR_MAX_BYTES, STATE_DIR,
 };
 use maknae_io::{
     open_anchor, open_anchor_resolved, Anchor, AnchorRequired, FileOwner, IoError, IoKind, Mode,
     StrategyPref, TargetRequired,
 };
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, Read, Write};
 use std::path::Path;
 use std::process::ExitCode;
@@ -76,6 +78,30 @@ fn only_tightenings(entries: &[BindingEntry]) -> String {
         "an unattended sync installs only tightenings; these entries gain a role or leave adversary: {}",
         names.join(", ")
     )
+}
+
+fn unattended_loosenings(
+    file: &Section,
+    mirror: &Section,
+    lookup: &dyn Fn(&str) -> Result<Option<u32>, String>,
+) -> Result<Vec<BindingEntry>, String> {
+    let mut uids = BTreeMap::new();
+    for e in file.entries().into_iter().chain(mirror.entries()) {
+        if let BindingEntry::Name(n) = e {
+            if !uids.contains_key(n) {
+                if let Some(u) = lookup(n)
+                    .map_err(|err| format!("cannot look up '{n}': {err}; nothing was installed"))?
+                {
+                    uids.insert(n.clone(), u);
+                }
+            }
+        }
+    }
+    let all: BTreeSet<BindingEntry> = loosenings(file, mirror)
+        .into_iter()
+        .chain(effective_loosenings(file, mirror, &uids))
+        .collect();
+    Ok(all.into_iter().collect())
 }
 
 fn read_mirror(state_dir: &Path, dir_owner: u32, owner: u32) -> Result<Option<Mirror>, String> {
@@ -235,6 +261,7 @@ pub(crate) struct Console<'a> {
     terminal: bool,
     out: &'a mut dyn Write,
     pause: &'a mut dyn FnMut(Duration),
+    lookup: &'a dyn Fn(&str) -> Result<Option<u32>, String>,
 }
 
 pub(crate) fn sync(
@@ -249,6 +276,7 @@ pub(crate) fn sync(
         terminal,
         out,
         pause,
+        lookup,
     } = console;
     let Some(mirror) = await_mirror(state_dir, &owners, terminal, pause)? else {
         return Ok(Outcome::NoMirror);
@@ -338,7 +366,7 @@ pub(crate) fn sync(
             let loosened = if terminal {
                 Vec::new()
             } else {
-                loosenings(&Section::of(&file), &mirror.section)
+                unattended_loosenings(&Section::of(&file), &mirror.section, lookup)?
             };
             if check {
                 if !loosened.is_empty() {
@@ -409,6 +437,7 @@ fn production(euid: u32, check: bool) -> Result<Outcome, String> {
             terminal: crate::tty::stdin_is_terminal(),
             out: &mut std::io::stdout(),
             pause: &mut std::thread::sleep,
+            lookup: &maknae_vault::account_uid,
         },
     )
 }
@@ -489,6 +518,10 @@ mod tests {
         )
     }
 
+    fn no_accounts(_: &str) -> Result<Option<u32>, String> {
+        Ok(None)
+    }
+
     static NEXT: AtomicUsize = AtomicUsize::new(0);
 
     struct Fx(PathBuf);
@@ -554,6 +587,18 @@ mod tests {
             terminal: bool,
             out: &mut dyn std::io::Write,
         ) -> Result<Outcome, String> {
+            self.sync_looking_up(owners, check, answer, terminal, out, &no_accounts)
+        }
+
+        fn sync_looking_up(
+            &self,
+            owners: Owners,
+            check: bool,
+            answer: &str,
+            terminal: bool,
+            out: &mut dyn std::io::Write,
+            lookup: &dyn Fn(&str) -> Result<Option<u32>, String>,
+        ) -> Result<Outcome, String> {
             sync(
                 &self.state_dir(),
                 &self.config_dir(),
@@ -564,6 +609,7 @@ mod tests {
                     terminal,
                     out,
                     pause: &mut |_| {},
+                    lookup,
                 },
             )
         }
@@ -767,6 +813,7 @@ mod tests {
                     terminal: true,
                     out: &mut out,
                     pause: &mut |_| {},
+                    lookup: &no_accounts,
                 },
             );
             assert!(prompt.edited);
@@ -979,6 +1026,7 @@ mod tests {
                 terminal: false,
                 out: &mut Vec::new(),
                 pause: &mut |_| {},
+                lookup: &no_accounts,
             },
         );
         assert!(r.is_err());
@@ -1139,6 +1187,78 @@ mod tests {
         }
     }
 
+    fn accounts(name: &str) -> Result<Option<u32>, String> {
+        Ok(match name {
+            "alice" | "al" => Some(1000),
+            "root" => Some(0),
+            "broken" => return Err("account lookup failed (errno 5)".into()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn an_unattended_sync_refuses_a_removal_that_binds_a_subject() {
+        for (file, named) in [
+            (
+                "schema_version: 1\nbindings:\n  admin: [\"root\", \"alice\"]\n  user: [\"alice\"]\n",
+                "alice",
+            ),
+            (
+                "schema_version: 1\nbindings:\n  admin: [\"root\", \"alice\"]\n  user: [\"al\"]\n",
+                "al, alice",
+            ),
+        ] {
+            let live = "schema_version: 1\nbindings:\n  admin: [\"root\", \"alice\"]\n";
+            for (terminal, lookup, code) in [
+                (false, accounts as fn(&str) -> _, 5),
+                (true, accounts, 0),
+                (false, no_accounts, 0),
+            ] {
+                let fx = Fx::new();
+                fx.config("bindings.yaml", file);
+                fx.mirror(&mirror_over(file, live, &[]));
+                let mut out = Vec::new();
+                let r = fx.sync_looking_up(me(), false, "", terminal, &mut out, &lookup);
+                let (got, err) = refused(r);
+                assert_eq!(got, code, "{file} {terminal}: {err}");
+                if code == 5 {
+                    assert!(
+                        err.contains(&format!("leave adversary: {named}; nothing")),
+                        "{err}"
+                    );
+                    assert_eq!(fx.read_config("bindings.yaml"), file);
+                } else {
+                    assert_eq!(section(&fx.read_config("bindings.yaml")), section(live));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_unattended_sync_refuses_when_an_account_lookup_fails() {
+        let file = "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"broken\"]\n";
+        let fx = Fx::new();
+        fx.config("bindings.yaml", file);
+        fx.mirror(&mirror_over(file, BASE, &[]));
+        let r = fx.sync_looking_up(me(), false, "", false, &mut Vec::new(), &accounts);
+        assert_eq!(exit_code(&r), 2, "{r:?}");
+        assert_eq!(
+            r.unwrap_err(),
+            "cannot look up 'broken': account lookup failed (errno 5); nothing was installed"
+        );
+        assert_eq!(fx.read_config("bindings.yaml"), file);
+    }
+
+    #[test]
+    fn an_unattended_restore_does_not_resolve_subjects() {
+        let live = "schema_version: 1\nbindings:\n  admin: [\"alice\"]\n  user: [\"broken\"]\n";
+        let fx = Fx::new();
+        fx.mirror(&mirror_over(BASE, live, &[]));
+        let r = fx.sync_looking_up(me(), false, "", false, &mut Vec::new(), &accounts);
+        assert_eq!(exit_code(&r), 0, "{r:?}");
+        assert_eq!(section(&fx.read_config("bindings.yaml")), section(live));
+    }
+
     #[test]
     fn an_unattended_sync_installs_a_containment_or_a_removal() {
         for live in [
@@ -1258,6 +1378,7 @@ mod tests {
                 terminal,
                 out: &mut Vec::new(),
                 pause,
+                lookup: &no_accounts,
             },
         )
     }
@@ -1320,6 +1441,7 @@ mod tests {
                     terminal: true,
                     out: &mut Vec::new(),
                     pause: &mut |_| {},
+                    lookup: &no_accounts,
                 },
             );
             assert!(prompt.edited);

@@ -219,31 +219,33 @@ pub(crate) fn resolve_subjects(
         problems: Vec::new(),
         adversary_names: BTreeMap::new(),
     };
-    let mut by_uid: BTreeMap<u32, Vec<(Role, String)>> = BTreeMap::new();
-    for (idx, entries) in maknae_config::checked_roles(bindings)? {
-        let role = ROLE_ORDER[idx];
-        for e in entries {
-            let name = e.render();
-            let uid = match e {
-                BindingEntry::Uid(u) => Some(*u),
-                BindingEntry::Name(n) => lookup.get(n).copied(),
-            };
-            if let (Some(u), BindingEntry::Name(_), Role::Adversary) = (uid, e, role) {
-                out.adversary_names.insert(name.clone(), u);
-            }
-            match uid {
-                Some(u) => by_uid.entry(u).or_default().push((role, name)),
-                None if role == Role::Adversary => out
-                    .problems
-                    .push(IdentityProblem::UnresolvedAdversary { name }),
-                None => out.problems.push(IdentityProblem::Unresolved {
-                    role: role.key(),
-                    name,
-                }),
-            }
+    let roles = maknae_config::checked_roles(bindings)?;
+    let (by_uid, unresolved) = maknae_config::subjects_by_uid(&roles, |e| match e {
+        BindingEntry::Uid(u) => Some(*u),
+        BindingEntry::Name(n) => lookup.get(n).copied(),
+    });
+    for (idx, e) in unresolved {
+        let name = e.render();
+        match ROLE_ORDER[idx] {
+            Role::Adversary => out
+                .problems
+                .push(IdentityProblem::UnresolvedAdversary { name }),
+            role => out.problems.push(IdentityProblem::Unresolved {
+                role: role.key(),
+                name,
+            }),
         }
     }
-    for (uid, held) in by_uid {
+    for (uid, entries) in by_uid {
+        let held: Vec<(Role, String)> = entries
+            .iter()
+            .map(|(idx, e)| (ROLE_ORDER[*idx], e.render()))
+            .collect();
+        for ((role, name), (_, e)) in held.iter().zip(&entries) {
+            if *role == Role::Adversary && matches!(e, BindingEntry::Name(_)) {
+                out.adversary_names.insert(name.clone(), uid);
+            }
+        }
         let mut roles: Vec<&'static str> = held.iter().map(|(r, _)| r.key()).collect();
         roles.sort_unstable();
         roles.dedup();
@@ -253,17 +255,22 @@ pub(crate) fn resolve_subjects(
                 names.push(n.clone());
             }
         }
-        if let Some((_, first)) = held.iter().find(|(r, _)| *r == Role::Adversary) {
-            out.subjects.push((uid, Role::Adversary, first.clone()));
-            if roles.len() > 1 {
-                out.problems
-                    .push(IdentityProblem::Contained { uid, names, roles });
+        let idxs: Vec<usize> = entries.iter().map(|(i, _)| *i).collect();
+        let adversary = held.iter().find(|(r, _)| *r == Role::Adversary);
+        match (maknae_config::effective(&idxs), adversary) {
+            (Some(maknae_config::Effective::Contained), Some((_, first))) => {
+                out.subjects.push((uid, Role::Adversary, first.clone()));
+                if roles.len() > 1 {
+                    out.problems
+                        .push(IdentityProblem::Contained { uid, names, roles });
+                }
             }
-        } else if roles.len() == 1 {
-            out.subjects.push((uid, held[0].0, held[0].1.clone()));
-        } else {
-            out.problems
-                .push(IdentityProblem::Unbound { uid, names, roles });
+            (Some(maknae_config::Effective::Bound(_)), _) => {
+                out.subjects.push((uid, held[0].0, held[0].1.clone()));
+            }
+            _ => out
+                .problems
+                .push(IdentityProblem::Unbound { uid, names, roles }),
         }
     }
     Ok(out)

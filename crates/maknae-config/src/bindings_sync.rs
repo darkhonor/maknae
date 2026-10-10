@@ -1,4 +1,7 @@
-use crate::bindings::{entry, section_roles, BindingEntry, Bindings, BindingsError, RoleRuleError};
+use crate::bindings::{
+    effective, entry, section_roles, subjects_by_uid, BindingEntry, Bindings, BindingsError,
+    Effective, RoleRuleError,
+};
 use crate::value::{canonical_json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -319,6 +322,54 @@ pub fn loosenings(file: &Section, mirror: &Section) -> Vec<BindingEntry> {
         .filter(|e| keyless || loosens(file, mirror, e))
         .cloned()
         .collect()
+}
+
+fn indexed(s: &Section) -> Vec<(usize, &[BindingEntry])> {
+    match s {
+        Section::Present(m) => m
+            .iter()
+            .filter_map(|(k, v)| {
+                crate::BINDING_ROLES
+                    .iter()
+                    .position(|r| r == k)
+                    .map(|i| (i, v.as_slice()))
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn may_install(file: Option<Effective>, mirror: Option<Effective>) -> bool {
+    let held = matches!(file, Some(Effective::Bound(_) | Effective::Unbound));
+    mirror == Some(Effective::Contained)
+        || mirror == file
+        || (mirror == Some(Effective::Unbound) && matches!(file, Some(Effective::Bound(_))))
+        || (mirror.is_none() && held)
+}
+
+pub fn effective_loosenings(
+    file: &Section,
+    mirror: &Section,
+    uids: &BTreeMap<String, u32>,
+) -> Vec<BindingEntry> {
+    let uid_of = |e: &BindingEntry| match e {
+        BindingEntry::Uid(u) => Some(*u),
+        BindingEntry::Name(n) => uids.get(n).copied(),
+    };
+    let (fi, mi) = (indexed(file), indexed(mirror));
+    let (was, _) = subjects_by_uid(&fi, uid_of);
+    let (now, _) = subjects_by_uid(&mi, uid_of);
+    let outcome = |h: Option<&Vec<(usize, &BindingEntry)>>| {
+        h.and_then(|h| effective(&h.iter().map(|(i, _)| *i).collect::<Vec<_>>()))
+    };
+    let mut out: BTreeSet<BindingEntry> = BTreeSet::new();
+    for uid in was.keys().chain(now.keys()) {
+        let (w, n) = (was.get(uid), now.get(uid));
+        if !may_install(outcome(w), outcome(n)) {
+            out.extend(w.into_iter().chain(n).flatten().map(|(_, e)| (*e).clone()));
+        }
+    }
+    out.into_iter().collect()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1682,6 +1733,134 @@ mod tests {
                 [BindingEntry::Name("root".into()), BindingEntry::Uid(9)],
                 "{mirror:?}"
             );
+        }
+    }
+
+    fn uids(pairs: &[(&str, u32)]) -> BTreeMap<String, u32> {
+        pairs.iter().map(|(n, u)| ((*n).to_string(), *u)).collect()
+    }
+
+    fn name(n: &str) -> BindingEntry {
+        BindingEntry::Name(n.into())
+    }
+
+    #[test]
+    fn dropping_one_of_two_roles_binds_the_subject_and_loosens() {
+        let file = sec("schema_version: 1\nbindings:\n  admin: [\"alice\"]\n  user: [\"alice\"]\n");
+        let mirror = sec("schema_version: 1\nbindings:\n  admin: [\"alice\"]\n");
+        assert!(loosenings(&file, &mirror).is_empty());
+        let map = uids(&[("alice", 1000)]);
+        assert_eq!(effective_loosenings(&file, &mirror, &map), [name("alice")]);
+        assert!(effective_loosenings(&mirror, &file, &map).is_empty());
+    }
+
+    #[test]
+    fn two_names_for_one_uid_are_one_subject() {
+        let file = sec("schema_version: 1\nbindings:\n  admin: [\"alice\"]\n  user: [\"al\"]\n");
+        let mirror = sec("schema_version: 1\nbindings:\n  admin: [\"alice\"]\n");
+        assert!(loosenings(&file, &mirror).is_empty());
+        let map = uids(&[("alice", 1000), ("al", 1000)]);
+        assert_eq!(
+            effective_loosenings(&file, &mirror, &map),
+            [name("al"), name("alice")]
+        );
+        let apart = uids(&[("alice", 1000), ("al", 1001)]);
+        assert!(effective_loosenings(&file, &mirror, &apart).is_empty());
+    }
+
+    #[test]
+    fn a_uid_entry_and_a_name_for_it_are_one_subject() {
+        let file = sec("schema_version: 1\nbindings:\n  adversary: [{uid: 7}]\n");
+        let mirror = sec("schema_version: 1\nbindings:\n  admin: [\"alice\"]\n");
+        let map = uids(&[("alice", 7)]);
+        assert_eq!(
+            effective_loosenings(&file, &mirror, &map),
+            [name("alice"), BindingEntry::Uid(7)]
+        );
+        let held =
+            sec("schema_version: 1\nbindings:\n  admin: [\"alice\"]\n  adversary: [{uid: 7}]\n");
+        assert!(effective_loosenings(&mirror, &held, &map).is_empty());
+    }
+
+    #[test]
+    fn an_unresolved_name_is_left_to_the_entry_rule() {
+        let file = sec("schema_version: 1\nbindings:\n  admin: [\"root\"]\n");
+        let mirror = sec("schema_version: 1\nbindings:\n  admin: [\"root\", \"ghost\"]\n");
+        assert!(effective_loosenings(&file, &mirror, &uids(&[("root", 0)])).is_empty());
+        assert_eq!(loosenings(&file, &mirror), [name("ghost")]);
+    }
+
+    fn outcome_by_the_rule(roles: &BTreeSet<&str>) -> Option<&'static str> {
+        if roles.is_empty() {
+            None
+        } else if roles.contains("adversary") {
+            Some("contained")
+        } else if roles.len() == 1 {
+            Some(
+                ["admin", "user", "guest"]
+                    .into_iter()
+                    .find(|r| roles.contains(r))
+                    .unwrap(),
+            )
+        } else {
+            Some("unbound")
+        }
+    }
+
+    fn allowed_by_the_rule(file: Option<&str>, mirror: Option<&str>) -> bool {
+        let bound = |o: Option<&str>| matches!(o, Some("admin" | "user" | "guest"));
+        mirror == Some("contained")
+            || mirror == file
+            || (mirror == Some("unbound") && bound(file))
+            || (mirror.is_none() && (bound(file) || file == Some("unbound")))
+    }
+
+    #[test]
+    fn effective_loosenings_follow_the_subject_rule_for_two_names_of_one_uid() {
+        let (a, b) = (name("a"), name("b"));
+        let map = uids(&[("a", 5), ("b", 5)]);
+        let other: [&[&str]; 3] = [&[], &["user"], &["adversary"]];
+        let build = |ar: &[&str], br: &[&str]| {
+            let mut m: BTreeMap<String, Vec<BindingEntry>> = BTreeMap::new();
+            for r in ar {
+                m.entry((*r).into()).or_default().push(a.clone());
+            }
+            for r in br {
+                m.entry((*r).into()).or_default().push(b.clone());
+            }
+            Section::Present(m)
+        };
+        for fa in 0..16u8 {
+            for ma in 0..16u8 {
+                for fb in other {
+                    for mb in other {
+                        let (far, mar) = (roles_in(fa), roles_in(ma));
+                        let (file, mirror) = (build(&far, fb), build(&mar, mb));
+                        let set =
+                            |x: &[&'static str], y: &[&'static str]| -> BTreeSet<&'static str> {
+                                x.iter().chain(y).copied().collect()
+                            };
+                        let (fo, mo) = (
+                            outcome_by_the_rule(&set(&far, fb)),
+                            outcome_by_the_rule(&set(&mar, mb)),
+                        );
+                        let mut want = Vec::new();
+                        if !allowed_by_the_rule(fo, mo) {
+                            if !far.is_empty() || !mar.is_empty() {
+                                want.push(a.clone());
+                            }
+                            if !fb.is_empty() || !mb.is_empty() {
+                                want.push(b.clone());
+                            }
+                        }
+                        assert_eq!(
+                            effective_loosenings(&file, &mirror, &map),
+                            want,
+                            "{far:?}+{fb:?} -> {mar:?}+{mb:?}"
+                        );
+                    }
+                }
+            }
         }
     }
 }
