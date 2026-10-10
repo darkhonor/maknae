@@ -12215,10 +12215,21 @@ mod reload_fixture {
                 core: "",
                 tail: "",
                 delay: Duration::ZERO,
-                bound: Duration::from_millis(200),
-                turn_wait: Duration::from_millis(200),
+                bound: AUDIT_APPEND_TIMEOUT,
+                turn_wait: BLOCKING_OPERATION_TIMEOUT,
             }
         }
+    }
+
+    pub(super) const STALL_BOUND: Duration = Duration::from_millis(300);
+
+    pub(super) async fn stalling(tag: &str) -> Fx {
+        let opts = Opts {
+            bound: STALL_BOUND,
+            turn_wait: STALL_BOUND,
+            ..Opts::default()
+        };
+        fixture_with(tag, opts).await
     }
 
     pub(super) async fn fixture_with(tag: &str, opts: Opts<'_>) -> Fx {
@@ -13050,7 +13061,7 @@ mod baseline_accept_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_accept_waits_for_a_reload_and_gives_up_after_the_bound() {
-        let fx = Fx::with_baseline("busy").await;
+        let fx = stalling("busy").await;
         write_live(&fx);
         let shown = fx.show().await;
         let held = fx.reloader.lock.lock().await;
@@ -13141,7 +13152,7 @@ mod baseline_accept_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_live_accept_refused_the_turn_by_a_decision_persists_nothing() {
-        let fx = Fx::with_baseline("turn-busy").await;
+        let fx = stalling("turn-busy").await;
         write_live(&fx);
         let shown = fx.show().await;
         assert_eq!(shown.apply, "live");
@@ -13328,7 +13339,7 @@ mod baseline_accept_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_live_accept_whose_outcome_is_not_recorded_applies_by_restart() {
-        let fx = Fx::with_baseline("outcome-fails").await;
+        let fx = stalling("outcome-fails").await;
         write_live(&fx);
         let shown = fx.show().await;
         fx.reloader.sink.stall_when(is_accept_outcome);
@@ -13372,7 +13383,7 @@ mod baseline_accept_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_finished_live_accept_leaves_the_next_accepts_drain_alone() {
-        let fx = Arc::new(Fx::with_baseline("guard-turn").await);
+        let fx = Arc::new(stalling("guard-turn").await);
         write_live(&fx);
         let shown = fx.show().await;
         assert_eq!(shown.apply, "live");
@@ -13774,7 +13785,7 @@ mod reload_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_stalled_sink_refuses_the_reload_within_the_bound_and_a_second_reload_runs() {
-        let fx = fixture("stalled-reload", AUTHZ, Some(ROOT_ADMIN)).await;
+        let fx = stalling("stalled-reload").await;
         fx.reloader.sink.stall_when(is_reload);
         let refused = within(fx.reloader.run()).await;
         assert!(
@@ -13788,7 +13799,7 @@ mod reload_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_stalled_transition_record_refuses_the_commit_within_the_bound() {
-        let fx = fixture("stalled-commit", AUTHZ, Some(ROOT_ADMIN)).await;
+        let fx = stalling("stalled-commit").await;
         let before = fx.store_bytes();
         fx.reloader.sink.stall_when(is_transition);
         fx.write_bindings(ROOT_ADVERSARY);
@@ -13805,7 +13816,7 @@ mod reload_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_stalled_outcome_record_lets_the_applied_reload_return_within_the_bound() {
-        let fx = fixture("stalled-outcome", AUTHZ, Some(ROOT_ADMIN)).await;
+        let fx = stalling("stalled-outcome").await;
         fx.reloader.sink.stall_when(is_reload_outcome);
         fx.write_bindings(ROOT_ADVERSARY);
         assert!(within(fx.reloader.run()).await.unwrap().persisted);
@@ -13816,7 +13827,7 @@ mod reload_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_identity_records_after_a_reload_stop_at_the_first_that_elapses() {
-        let fx = fixture("stalled-identities", AUTHZ, Some(ROOT_ADMIN)).await;
+        let fx = stalling("stalled-identities").await;
         fx.reloader.sink.stall_when(is_identity);
         fx.write_bindings(
             "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"no-such-user-maknae-497\"]\n  adversary: [\"no-such-user-maknae-497b\"]\n",
@@ -13834,7 +13845,7 @@ mod reload_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_stalled_identity_record_after_a_reload_returns_within_the_bound() {
-        let fx = fixture("stalled-identity", AUTHZ, Some(ROOT_ADMIN)).await;
+        let fx = stalling("stalled-identity").await;
         fx.reloader.sink.stall_when(is_identity);
         fx.write_bindings(GHOST_USER);
         assert!(within(fx.reloader.run()).await.unwrap().persisted);
@@ -15882,7 +15893,16 @@ mod reload_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_live_edit_gives_up_on_a_reload_holding_the_turn() {
         let (release, gate) = std::sync::mpsc::channel::<()>();
-        let fx = fixture_gated("live-turn", AUTHZ, Some(ROOT_ADMIN), Some(gate)).await;
+        let fx = fixture_with(
+            "live-turn",
+            Opts {
+                load_gate: Some(gate),
+                bound: STALL_BOUND,
+                turn_wait: STALL_BOUND,
+                ..Opts::default()
+            },
+        )
+        .await;
         let store = fx.store_sha();
         let (entered_tx, entered) = std::sync::mpsc::channel::<()>();
         *fx.reloader.load_entered.lock().unwrap() = Some(entered_tx);
