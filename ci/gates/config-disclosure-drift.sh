@@ -674,6 +674,7 @@ while IFS=$'\t' read -r fpath fty fkind; do
       exit 1 ;;
   esac
   enum_has_data=""
+  ambiguous_name=""
   if [ "$bare" != "__DYNAMIC_MAP__" ]; then
     # `struct` OR `enum`: an enum can carry a map variant just as a struct can
     # carry map fields, and matching only `struct` would leave every
@@ -706,12 +707,23 @@ while IFS=$'\t' read -r fpath fty fkind; do
     [ "$grc" -eq 0 ] || continue
     # A unit-only enum is one fixed token on the wire: a leaf. An enum with any
     # data-carrying variant is a subtree and needs a SURFACE entry or an omit row.
-    enum_file="$(grep -rlE "^(pub([[:space:]]|\([^)]*\)[[:space:]]))?enum $bare([[:space:]<{(]|$)" crates/ | head -n 1 || true)"
+    defpat="^(pub([[:space:]]|[(][^)]*[)][[:space:]]))?(struct|enum) $bare([[:space:]<{(]|$)"
+    ndefs="$(grep -rE "$defpat" crates/ | wc -l | tr -d '[:space:]')"
+    enum_file=""
+    [ "$ndefs" -gt 1 ] && ambiguous_name=1
+    if [ "$ndefs" = "1" ]; then
+      enum_file="$(grep -rlE "${defpat/(struct|enum)/enum}" crates/ | head -n 1 || true)"
+    fi
     if [ -n "$enum_file" ]; then
-      data_variants="$(awk -v re="^(pub([[:space:]]|\\([^)]*\\)[[:space:]]))?enum $bare([[:space:]<{(]|$)" '
-        $0 ~ re { inenum=1; next }
-        inenum && /^\}/ { exit }
-        inenum && !/^[[:space:]]*(\/\/|#)/ && /[({]/ { print }
+      data_variants="$(ENUM_RE="${defpat/(struct|enum)/enum}" awk '
+        $0 ~ ENVIRON["ENUM_RE"] { inenum=1; next }
+        inenum && /^[}]/ { exit }
+        inenum {
+          line=$0
+          while (match(line, /^[[:space:]]*#\[[^]]*\][[:space:]]*/)) line=substr(line, RLENGTH+1)
+          if (line ~ /^[[:space:]]*(\/\/|$)/) next
+          if (line ~ /[({]/) print
+        }
       ' "$enum_file")"
       if [ -z "$data_variants" ]; then
         continue
@@ -732,7 +744,9 @@ while IFS=$'\t' read -r fpath fty fkind; do
     if [ "$bare" = "__DYNAMIC_MAP__" ]; then
       echo "FAIL: '$fpath' is a dynamic-key MAP — a subtree whose keys nobody can enumerate."
     else
-      if [ -n "${enum_has_data:-}" ]; then
+      if [ -n "${ambiguous_name:-}" ]; then
+        echo "FAIL: '$fpath' has type '$bare', which more than one struct or enum under crates/ defines — which one it is cannot be told, so it is a SUBTREE, not a leaf."
+      elif [ -n "${enum_has_data:-}" ]; then
         echo "FAIL: '$fpath' has enum type '$bare' with a data-carrying variant — it is a SUBTREE, not a leaf."
       else
         echo "FAIL: '$fpath' has struct type '$bare' — it is a SUBTREE, not a leaf."

@@ -1572,6 +1572,44 @@ FIX
 expect_reject_because "config-disclosure-drift/data-carrying-enum-field-is-a-subtree" \
   "data-carrying variant" "$fx/ci/gates/config-disclosure-drift.sh"
 
+# REJECT: a restricted-visibility enum with a data-carrying variant.
+fx="$(cfg_fixture "$CFG_OK")"
+cat >> "$fx/crates/maknae-proto/src/wire.rs" <<'FIX'
+pub(crate) enum ContainmentOutcome {
+    Contained,
+    Refused(String),
+}
+FIX
+expect_reject_because "config-disclosure-drift/pub-crate-data-carrying-enum-is-a-subtree" \
+  "data-carrying variant" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a data-carrying variant on the same line as its attribute.
+fx="$(cfg_fixture "$CFG_OK")"
+cat >> "$fx/crates/maknae-proto/src/wire.rs" <<'FIX'
+pub enum ContainmentOutcome {
+    Contained,
+    #[serde(rename = "r")] Refused(String),
+}
+FIX
+expect_reject_because "config-disclosure-drift/attributed-data-variant-is-seen" \
+  "data-carrying variant" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a unit-only enum does not vouch for a same-named struct.
+fx="$(cfg_fixture "$CFG_OK")"
+cat >> "$fx/crates/maknae-proto/src/wire.rs" <<'FIX'
+pub enum ContainmentOutcome {
+    Contained,
+    Released,
+}
+FIX
+cat >> "$fx/crates/maknae-proto/src/mutation.rs" <<'FIX'
+pub struct ContainmentOutcome {
+    pub secret: String,
+}
+FIX
+expect_reject_because "config-disclosure-drift/same-named-struct-and-enum-is-ambiguous" \
+  "more than one struct or enum" "$fx/ci/gates/config-disclosure-drift.sh"
+
 # REJECT: a FOURTH `*View` struct in wire.rs with no SURFACE row. The config
 # half of SURFACE is cross-checked against boot.rs's section registry; the wire
 # half was hand-maintained with no closing rule, so a new disclosure struct --
