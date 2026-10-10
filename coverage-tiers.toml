@@ -315,6 +315,8 @@ files = [
   "crates/maknae-kernel/src/live.rs",
   # #491: which section the daemon enforces after a root edit and what the mirror proposes; a wrong arm releases a contained subject.
   "crates/maknae-kernel/src/sync.rs",
+  # #165: the contain checks and the containment record vocabulary; a wrong branch contains the wrong subject or none.
+  "crates/maknae-kernel/src/containment.rs",
   # The kernel graph store at rest (#488): a wrong check loads a forged, rolled-back or undecryptable enforcement state.
   "crates/maknae-state/src/anchor.rs",
   "crates/maknae-state/src/envelope.rs",

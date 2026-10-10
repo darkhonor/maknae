@@ -1,3 +1,4 @@
+use crate::containment::LiveNote;
 use maknae_authz_basic::{shown, AuthzBasicError, PolicySource};
 use maknae_config::{
     BindingEntry, Bindings, BoundRole, LiveEdit, MergeEvent, ResolvedBy, Section, SyncKind,
@@ -155,10 +156,18 @@ pub fn event_reason(e: &MergeEvent) -> String {
     }
 }
 
-pub fn live_reason(edit: &LiveEdit, who: LiveInitiator) -> String {
+pub(crate) fn live_reason(edit: &LiveEdit, who: LiveInitiator, note: &LiveNote<'_>) -> String {
     let what = match edit {
         LiveEdit::Contain(e) => format!("contain {}", entry(e)),
-        LiveEdit::ReleaseUid { uid, .. } => format!("release {}", entry(&BindingEntry::Uid(*uid))),
+        LiveEdit::ReleaseUid { uid, names } => {
+            let uid = entry(&BindingEntry::Uid(*uid));
+            if names.is_empty() {
+                format!("release {uid}")
+            } else {
+                let names: Vec<String> = names.iter().map(|n| shown(n)).collect();
+                format!("release {uid} ({uid}, {})", names.join(", "))
+            }
+        }
         LiveEdit::Bind { name, role } => {
             let role = match role {
                 BoundRole::Admin => "admin",
@@ -173,7 +182,14 @@ pub fn live_reason(edit: &LiveEdit, who: LiveInitiator) -> String {
         LiveInitiator::Operator => "operator",
         LiveInitiator::Kernel => "kernel",
     };
-    format!("live ({who}): {what}")
+    let mut out = format!("live ({who}): {what}");
+    if let Some((uid, session)) = note.requester {
+        out.push_str(&format!("; requested by uid {uid} in session {session}"));
+    }
+    if let Some(r) = note.reason {
+        out.push_str(&format!("; reason {}", crate::containment::quoted(r)));
+    }
+    out
 }
 
 pub fn live_outcome(revision: u64, durability: Option<&str>, checkpoint: Option<&str>) -> String {
@@ -715,7 +731,11 @@ mod tests {
         assert_eq!(event_reason(&Lost { missing: true }), "lost: bindings.yaml is missing; the enforced bindings stand; restore them with sudo maknae policy sync, or run sudo maknae reseed to return to principal-as-admin");
         assert_eq!(event_reason(&Lost { missing: false }), "lost: bindings.yaml has no bindings: key; the enforced bindings stand; restore them with sudo maknae policy sync, or run sudo maknae reseed to return to principal-as-admin");
         assert_eq!(
-            live_reason(&LiveEdit::Contain(Uid(7)), LiveInitiator::Kernel),
+            live_reason(
+                &LiveEdit::Contain(Uid(7)),
+                LiveInitiator::Kernel,
+                &LiveNote::none(7)
+            ),
             "live (kernel): contain uid:7"
         );
         assert_eq!(
@@ -724,7 +744,8 @@ mod tests {
                     name: "eve".into(),
                     role: BoundRole::User
                 },
-                LiveInitiator::Operator
+                LiveInitiator::Operator,
+                &LiveNote::none(0)
             ),
             "live (operator): bind user eve"
         );
@@ -735,7 +756,8 @@ mod tests {
                         name: "a,b".into(),
                         role
                     },
-                    LiveInitiator::Kernel
+                    LiveInitiator::Kernel,
+                    &LiveNote::none(0)
                 ),
                 format!("live (kernel): bind {word} a\\,b")
             );
@@ -746,13 +768,67 @@ mod tests {
                     uid: 7,
                     names: Default::default()
                 },
-                LiveInitiator::Operator
+                LiveInitiator::Operator,
+                &LiveNote::none(7)
             ),
             "live (operator): release uid:7"
         );
         assert_eq!(
-            live_reason(&LiveEdit::Unbind("eve,x".into()), LiveInitiator::Kernel),
+            live_reason(
+                &LiveEdit::Unbind("eve,x".into()),
+                LiveInitiator::Kernel,
+                &LiveNote::none(0)
+            ),
             "live (kernel): unbind eve\\,x"
+        );
+    }
+
+    #[test]
+    fn the_live_record_carries_the_target_requester_and_reason() {
+        use BindingEntry::Uid;
+        let note = LiveNote {
+            target: 1003,
+            requester: Some((501, 42)),
+            reason: Some("lost clearance, see IR-4"),
+        };
+        assert_eq!(live_reason(&LiveEdit::Contain(Uid(1003)), LiveInitiator::Operator, &note),
+            "live (operator): contain uid:1003; requested by uid 501 in session 42; reason \"lost clearance, see IR-4\"");
+        let hangul = LiveNote {
+            target: 1003,
+            requester: None,
+            reason: Some("\u{d1a0}\u{d070} \u{d0c8}\u{cde8} \"x\" \\"),
+        };
+        assert_eq!(live_reason(&LiveEdit::Contain(Uid(1003)), LiveInitiator::Kernel, &hangul),
+            "live (kernel): contain uid:1003; reason \"\u{d1a0}\u{d070} \u{d0c8}\u{cde8} \\\"x\\\" \\\\\"", "readable Hangul; only quote and backslash escaped");
+        let k = LiveNote {
+            target: 1003,
+            requester: None,
+            reason: Some("r"),
+        };
+        assert_eq!(
+            live_reason(&LiveEdit::Contain(Uid(1003)), LiveInitiator::Kernel, &k),
+            "live (kernel): contain uid:1003; reason \"r\""
+        );
+        let rel = LiveEdit::ReleaseUid {
+            uid: 1003,
+            names: ["mallory".to_string()].into(),
+        };
+        let n = LiveNote {
+            target: 1003,
+            requester: Some((501, 43)),
+            reason: None,
+        };
+        assert_eq!(
+            live_reason(&rel, LiveInitiator::Operator, &n),
+            "live (operator): release uid:1003 (uid:1003, mallory); requested by uid 501 in session 43"
+        );
+        let shown_names = LiveEdit::ReleaseUid {
+            uid: 7,
+            names: ["a,b".to_string(), "mal".into()].into(),
+        };
+        assert_eq!(
+            live_reason(&shown_names, LiveInitiator::Operator, &LiveNote::none(7)),
+            "live (operator): release uid:7 (uid:7, a\\,b, mal)"
         );
     }
 

@@ -4194,9 +4194,13 @@ where
             live: next_live.canonical(),
             conflicts: maknae_config::conflicts_canonical(&edited.conflicts),
         };
-        let events: Vec<String> = std::iter::once(crate::sync::live_reason(&edit, who))
-            .chain(edited.events.iter().map(crate::sync::event_reason))
-            .collect();
+        let events: Vec<String> = std::iter::once(crate::sync::live_reason(
+            &edit,
+            who,
+            &crate::containment::LiveNote::none(0),
+        ))
+        .chain(edited.events.iter().map(crate::sync::event_reason))
+        .collect();
         let counts = crate::sync::counts(&next_sync)?;
         let revision = self
             .revision
@@ -8312,7 +8316,11 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             &m.booted.key,
             &next,
             &[],
-            &[crate::sync::live_reason(&edit, initiator)],
+            &[crate::sync::live_reason(
+                &edit,
+                initiator,
+                &crate::containment::LiveNote::none(4242),
+            )],
             &mut graph_audit(fx, &ctx),
             initiator,
         ))
