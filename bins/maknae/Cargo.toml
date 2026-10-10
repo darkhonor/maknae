@@ -56,11 +56,13 @@ yaml-rust2 = "=0.13.0"
 # clears `cargo deny`, and keeps `unsafe` out of this crate. rpassword's own src/unix.rs
 # calls libc in `unsafe`; #403 tracks replacing it with nix's safe termios API. PR-J1 Task 8.
 rpassword = "7"
+# The SHA-256 maknaed hashes bindings.yaml's section with, so `policy sync` can compare it to the mirror's base.
+aws-lc-rs = { version = "1.18", features = ["fips"] }  # 1.18: the AWS-LC-FIPS 4.x line; one aws-lc-rs in the tree (ADR-0025)
 
 # NO privileged crate (maknae-kernel/-subject-ctx-mint/-audit-append/-spif-compile) — spec §3 P1.
 # STRICTLY non-privileged: the closed set of direct deps this crate links is
 # maknae-proto, maknae-vault, maknae-config, maknae-msgs, maknae-io, maknae-agent, maknae-seal, clap,
-# tokio, nix, zeroize, yaml-rust2 and rpassword — no
+# tokio, nix, zeroize, yaml-rust2, rpassword and aws-lc-rs (policy_sync.rs's digest) — no
 # maknae-mcp either. maknae-agent is non-privileged; it is the loop's decision code and its
 # four direct deps are maknae-proto, serde, serde_json and zeroize. No gate enforces this
 # set, so this comment IS the record.

@@ -353,6 +353,29 @@ impl PolicySource {
         })
     }
 
+    /// Blocking: one getpwnam per bound username.
+    pub fn with_bindings(
+        &self,
+        bindings: maknae_config::Bindings,
+    ) -> Result<Self, AuthzBasicError> {
+        let uid_map = resolve_uid_map(&bindings)?;
+        self.with_bindings_resolved(bindings, uid_map)
+    }
+
+    fn with_bindings_resolved(
+        &self,
+        bindings: maknae_config::Bindings,
+        uid_map: UidMap,
+    ) -> Result<Self, AuthzBasicError> {
+        Self::from_parts(
+            self.policy.clone(),
+            bindings,
+            uid_map,
+            self.principal.clone(),
+            self.paths.clone(),
+        )
+    }
+
     pub fn policy(&self) -> &maknae_config::AuthzPolicy {
         &self.policy
     }
@@ -864,6 +887,9 @@ impl maknae_security::Authorizer for HermeticAuthorizer {
     }
 }
 
+#[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
+const SYNCED_GRAPH: &str = "a graph with a sync base reloads through maknaed, not the file seam";
+
 /// Builds the identity graph `source` declares — fresh at revision 1, or `base`
 /// carried forward (unchanged, or at its revision + 1 when the layer differs) —
 /// and compiles the snapshot over it.
@@ -881,6 +907,9 @@ fn snapshot_over(
     let stored = base
         .map(|g| maknae_graph::identity::extract(g).map_err(|e| refused(e.to_string())))
         .transpose()?;
+    if stored.as_ref().is_some_and(|s| s.sync.is_some()) {
+        return Err(refused(SYNCED_GRAPH.into()));
+    }
     let layer = match &stored {
         None => file,
         Some(stored) => {
@@ -909,6 +938,7 @@ fn snapshot_over(
         maknae_graph::identity::build(
             &layer,
             stored.as_ref().and_then(|s| s.baseline.as_ref()),
+            None,
             &persisted_set,
             vocabulary,
             revision,
@@ -1387,6 +1417,74 @@ mod tests {
             paths(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn a_replacement_section_is_resolved_and_hashed_as_the_enforced_section() {
+        let src = source_with(EMPTY, Some(ADMIN_ROOT), &[("root", 0), ("mallory", 4242)]);
+        let live = maknae_config::parse_bindings(
+            "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary: [\"mallory\"]\n",
+        )
+        .unwrap();
+        let next = src
+            .with_bindings_resolved(
+                live.clone(),
+                [("root".into(), 0), ("mallory".into(), 4242)].into(),
+            )
+            .unwrap();
+        assert_eq!(next.bindings(), &live);
+        let layer = next.identity_layer("UNCLASSIFIED", None);
+        assert!(layer
+            .subjects
+            .iter()
+            .any(|s| s.uid == 4242 && s.role == "adversary"));
+        let d = test_digest;
+        assert_eq!(
+            next.section_digests(d)["bindings"],
+            d(live.section_canonical().unwrap().as_bytes())
+        );
+        assert_ne!(
+            next.section_digests(d)["bindings"],
+            src.section_digests(d)["bindings"]
+        );
+        assert_eq!(next.policy(), src.policy(), "authz.yaml is not re-read");
+        let refused =
+            maknae_config::parse_bindings("schema_version: 1\nbindings:\n  root: [\"x\"]\n")
+                .unwrap();
+        assert!(src
+            .with_bindings_resolved(refused, Default::default())
+            .is_err());
+    }
+
+    #[test]
+    fn with_bindings_resolves_uid_entries_without_a_lookup() {
+        let src = source_with(EMPTY, Some(ADMIN_ROOT), &[("root", 0)]);
+        let live = maknae_config::parse_bindings(
+            "schema_version: 1\nbindings:\n  adversary:\n    - uid: 4242\n",
+        )
+        .unwrap();
+        let next = src.with_bindings(live).unwrap();
+        assert!(next
+            .identity_layer("UNCLASSIFIED", Some([0; 32]))
+            .subjects
+            .iter()
+            .any(|s| s.uid == 4242 && s.role == "adversary"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn with_bindings_resolves_a_named_entry_through_the_account_lookup() {
+        let src = source_with(EMPTY, Some(ADMIN_ROOT), &[]);
+        let live = maknae_config::parse_bindings(
+            "schema_version: 1\nbindings:\n  adversary: [\"root\"]\n",
+        )
+        .unwrap();
+        let next = src.with_bindings(live).unwrap();
+        assert!(next
+            .identity_layer("UNCLASSIFIED", Some([0; 32]))
+            .subjects
+            .iter()
+            .any(|s| s.uid == 0 && s.role == "adversary"));
     }
 
     fn compiled(src: &PolicySource) -> Arc<Snapshot> {
@@ -2396,10 +2494,12 @@ mod tests {
             other => panic!("expected the missing-file refusal, got {other:?}"),
         }
         let absent = source_with(SHIPPED, Some("schema_version: 1\n"), &[]);
-        assert!(
-            snapshot_over(&absent, LABEL, test_digest, Some(explicit.persisted())).is_ok(),
-            "root's keyless edit is allowed"
-        );
+        match snapshot_over(&absent, LABEL, test_digest, Some(explicit.persisted())) {
+            Err(AuthzBasicError::Compile(snapshot::CompileError::Identity(m))) => {
+                assert_eq!(m, maknae_graph::identity::BINDINGS_KEY_DROPPED)
+            }
+            other => panic!("expected the dropped-key refusal, got {other:?}"),
+        }
         let bare = compiled(&source_with(SHIPPED, Some("schema_version: 1\n"), &[]));
         assert!(
             snapshot_over(&gone, LABEL, test_digest, Some(bare.persisted())).is_ok(),
@@ -2423,6 +2523,7 @@ mod tests {
                         role: "adversary".into(),
                     }],
                 },
+                None,
                 None,
                 &set,
                 test_digest(&set.canonical_bytes().unwrap()),
@@ -2475,6 +2576,7 @@ mod tests {
                     subjects: vec![],
                 },
                 Some(&baseline),
+                None,
                 &set,
                 test_digest(&set.canonical_bytes().unwrap()),
                 1,
@@ -3196,7 +3298,7 @@ mod tests {
     mod hermetic {
         use super::super::*;
         use super::{
-            arrives, audit_permit, contained, no_role, principal, whoami, CONTAINED, EMPTY,
+            arrives, audit_permit, contained, no_role, principal, whoami, CONTAINED, EMPTY, LABEL,
         };
         use maknae_security::{Authorizer, Verdict};
         use std::os::unix::fs::PermissionsExt;
@@ -3466,6 +3568,50 @@ mod tests {
             assert_eq!(auth.subjects().unwrap()[0].role, "admin");
             auth.reload_from_file().unwrap();
             assert_eq!(auth.subjects().unwrap()[0].role, "adversary");
+        }
+
+        #[test]
+        fn a_graph_with_a_sync_base_does_not_reload_through_the_file_seam() {
+            let fx = Fixture::new("synced");
+            let auth = fx.authorizer("admin");
+            let current = auth.snapshot();
+            let e = maknae_graph::identity::extract(current.persisted()).unwrap();
+            let token = if e.layer.bindings_sha256.is_some() {
+                r#"{"admin":["root"]}"#
+            } else {
+                "null"
+            };
+            let sync = maknae_graph::sync::SyncBase {
+                base: token.into(),
+                live: token.into(),
+                conflicts: "[]".into(),
+            };
+            let synced = maknae_graph::identity::build(
+                &e.layer,
+                e.baseline.as_ref(),
+                Some(&sync),
+                &maknae_graph::kernel::persisted_compiled_set(LABEL),
+                e.vocabulary_sha256.unwrap(),
+                current.revision(),
+                maknae_graph::record::ProvenanceKind::Seed,
+            )
+            .unwrap();
+            let source = Baseline::load_source(&auth).unwrap();
+            let snap = snapshot::compile(
+                Arc::new(synced),
+                &source,
+                &compiled_set(LABEL),
+                &source.section_digests(test_digest),
+            )
+            .unwrap();
+            Baseline::install(&auth, Arc::new(snap));
+            match auth.reload_from_file() {
+                Err(AuthzBasicError::Compile(snapshot::CompileError::Identity(m))) => {
+                    assert_eq!(m, SYNCED_GRAPH);
+                    assert!(m.contains("sync base"), "{m}");
+                }
+                other => panic!("expected the sync-base refusal, got {other:?}"),
+            }
         }
 
         #[test]

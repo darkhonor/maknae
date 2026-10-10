@@ -90,6 +90,12 @@ install -D -m 0644 "$COMMON/maknae-egress.service" \
     "$PKG_ROOT/usr/lib/systemd/system/maknae-egress.service"
 install -D -m 0644 "$COMMON/maknae-egress.socket" \
     "$PKG_ROOT/usr/lib/systemd/system/maknae-egress.socket"
+install -D -m 0644 "$COMMON/maknae-policy-sync.path" \
+    "$PKG_ROOT/usr/lib/systemd/system/maknae-policy-sync.path"
+install -D -m 0644 "$COMMON/maknae-policy-sync.service" \
+    "$PKG_ROOT/usr/lib/systemd/system/maknae-policy-sync.service"
+install -D -m 0644 "$COMMON/80-maknae.preset" \
+    "$PKG_ROOT/usr/lib/systemd/system-preset/80-maknae.preset"
 
 # --- sysusers.d -----------------------------------------------------------------
 install -D -m 0644 "$COMMON/maknae.sysusers" \

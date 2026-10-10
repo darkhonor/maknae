@@ -4,6 +4,8 @@
 # and nobody else holds a role. Once a `bindings:` key exists, only the entries
 # it lists hold a role, so list yourself under `admin`. `bindings: {}` means
 # nobody holds a role.
+# Removing the bindings: key or this file later does not return to the default
+# above; run sudo maknae reseed for that.
 #
 # Apply an edit with `sudo systemctl reload maknaed` (Linux) or
 # `sudo launchctl kill SIGHUP system/io.maknae.maknaed` (macOS).

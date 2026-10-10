@@ -210,6 +210,10 @@ files = [
   "crates/maknae-config/src/authz.rs",
   # #496: the identity file's grammar and hardened read; a mis-parsed entry binds or contains the wrong subject.
   "crates/maknae-config/src/bindings.rs",
+  # #491: the bindings section the daemon enforces, the merge that decides it and which changes an unattended sync may install; a wrong arm releases a contained subject, overwrites root or installs a grant.
+  "crates/maknae-config/src/bindings_sync.rs",
+  # #491: the only file the installer reads before writing /etc/maknae/bindings.yaml; a lax parse installs what the daemon never proposed.
+  "crates/maknae-config/src/mirror.rs",
   # #489: the canonical JSON each authz.yaml section's digest is taken over; a wrong
   # byte makes an unchanged section look edited, or an edited one look unchanged.
   "crates/maknae-config/src/value.rs",
@@ -301,12 +305,16 @@ files = [
   "crates/maknae-graph/src/schema.rs",
   # #490: the accepted baseline as the store holds it; a mis-read section runs what nobody accepted.
   "crates/maknae-graph/src/baseline.rs",
+  # #491: what the daemon enforces against what root last wrote; a mis-read value merges against the wrong base.
+  "crates/maknae-graph/src/sync.rs",
   # #490: which baseline runs, what is pending and what an accept names; a wrong arm runs or accepts what nobody saw.
   "crates/maknae-kernel/src/baseline.rs",
   # #490: the one validator boot and accept share; a gap here accepts a baseline that cannot start.
   "crates/maknae-kernel/src/baseline_check.rs",
   # #490: what an accept swaps in for the next request; a stale copy serves a baseline that is no longer accepted.
   "crates/maknae-kernel/src/live.rs",
+  # #491: which section the daemon enforces after a root edit and what the mirror proposes; a wrong arm releases a contained subject.
+  "crates/maknae-kernel/src/sync.rs",
   # The kernel graph store at rest (#488): a wrong check loads a forged, rolled-back or undecryptable enforcement state.
   "crates/maknae-state/src/anchor.rs",
   "crates/maknae-state/src/envelope.rs",
@@ -706,6 +714,10 @@ why = "the operator-context helper — self-verification and the CLI configurati
 [[t3]]
 path = "bins/maknae/src/reseed.rs"
 why = "#488: sudo maknae reseed — bin code, T3 per the tiering constraint. It writes one marker through maknae-io's anchored publish (T1 in maknae-io), refusing anything already at the marker path; the marker's authority is decided by the daemon in maknae-state store.rs (T1). The pieces carry real-file unit tests: the umask-077 mode in a child process, a planted symlink left untouched, a pending marker left as is, the root preflight and the directory requirement"
+
+[[t3]]
+path = "bins/maknae/src/policy_sync.rs"
+why = "#491: sudo maknae policy sync — bin code, T3 per the tiering constraint. Every decision (the mirror's validity, the base check, nothing-to-install, the diff, the bytes installed) is maknae-config mirror.rs (T1), and which changes an unattended sync may install is bindings_sync.rs loosenings (T1); the write is maknae-io's owner-setting publish (T1). This file reads and writes through those, and its unit tests cover the one-path pin, the root preflight, the refusals with nothing written, the prompt and its no-terminal refusal, the unattended refusal of a grant or release, the exit codes (0 installed or restored, 1 --check found something to install, 2 refused, 3 nothing to install, 4 no mirror, 5 a grant, a release, or a restore over a file with no bindings: key, with no terminal), the units' handling of each, and (added in the packaging task) the shipped-disabled packaging pin"
 
 [[t3]]
 path = "bins/maknae/src/audit_readers.rs"

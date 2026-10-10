@@ -1,0 +1,10 @@
+[Unit]
+Description=Install maknaed's bindings mirror when it changes (opt-in)
+Documentation=https://github.com/darkhonor/maknae
+
+[Path]
+PathChanged=/var/lib/maknae/bindings.mirror.yaml
+Unit=maknae-policy-sync.service
+
+[Install]
+WantedBy=paths.target

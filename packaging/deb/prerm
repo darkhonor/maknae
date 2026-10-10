@@ -6,6 +6,8 @@ case "$1" in
     remove)
         # Stop before unconfining. The audit trail and its append-only attribute
         # are kept until purge.
+        systemctl stop maknae-policy-sync.path maknae-policy-sync.service 2>/dev/null || :
+        systemctl disable maknae-policy-sync.path maknae-policy-sync.service 2>/dev/null || :
         systemctl stop maknaed.service 2>/dev/null || :
         systemctl disable maknaed.service 2>/dev/null || :
         systemctl stop maknae-egress.service maknae-egress.socket 2>/dev/null || :

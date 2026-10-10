@@ -48,6 +48,8 @@ EGRESS_WAS_LOADED=false
 launchctl print "system/io.maknae.maknae-egress" >/dev/null 2>&1 && EGRESS_WAS_LOADED=true
 EGRESS_PLIST_EXISTED=false
 [ -e /Library/LaunchDaemons/io.maknae.maknae-egress.plist ] && EGRESS_PLIST_EXISTED=true
+SYNC_PLIST_EXISTED=false
+[ -e /Library/LaunchDaemons/io.maknae.policy-sync.plist ] && SYNC_PLIST_EXISTED=true
 
 # Read a numeric id and REFUSE anything else: `dscl -read` prints "No such key: X"
 # on a malformed record, and `awk '{print $2}'` would emit "such" into the receipt.
@@ -241,7 +243,7 @@ for pair in "/usr/local/var/log/maknae/maknaed.err:$MAKNAE_UID" \
 done
 
 # Hand the install kind to postinstall (pkg scripts share no environment).
-printf '%s\n%s\n%s\n%s\n' "$INSTALL_KIND" "$WAS_LOADED" "$EGRESS_WAS_LOADED" "$EGRESS_PLIST_EXISTED" \
+printf '%s\n%s\n%s\n%s\n%s\n' "$INSTALL_KIND" "$WAS_LOADED" "$EGRESS_WAS_LOADED" "$EGRESS_PLIST_EXISTED" "$SYNC_PLIST_EXISTED" \
     > "$RECEIPT_DIR/.install-kind"
 
 # PRESERVE PROVENANCE ACROSS UPGRADES, BUT ONLY FOR THE SAME RECORD.

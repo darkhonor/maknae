@@ -89,6 +89,7 @@ KIND="$(sed -n 1p "$KIND_FILE" 2>/dev/null || echo fresh)"
 WAS_LOADED="$(sed -n 2p "$KIND_FILE" 2>/dev/null || echo false)"
 EGRESS_WAS_LOADED="$(sed -n 3p "$KIND_FILE" 2>/dev/null || echo false)"
 EGRESS_PLIST_EXISTED="$(sed -n 4p "$KIND_FILE" 2>/dev/null || echo false)"
+SYNC_PLIST_EXISTED="$(sed -n 5p "$KIND_FILE" 2>/dev/null || echo false)"
 rm -f "$KIND_FILE"
 disabled_state() {
     case "$(launchctl print-disabled system 2>/dev/null)" in
@@ -96,7 +97,7 @@ disabled_state() {
         *) echo "not disabled" ;;
     esac
 }
-DISABLE_MAKNAED=false; DISABLE_EGRESS=false
+DISABLE_MAKNAED=false; DISABLE_EGRESS=false; DISABLE_SYNC=false
 if [ "$KIND" = "fresh" ]; then DISABLE_MAKNAED=true; fi
 # The deputy follows the same rule, and is also disabled on an upgrade from a
 # package that did not ship it: its plist is new in /Library/LaunchDaemons and
@@ -105,10 +106,16 @@ EGRESS_LABEL="io.maknae.maknae-egress"
 if [ "$KIND" = "fresh" ] || [ "$EGRESS_PLIST_EXISTED" != "true" ]; then
     DISABLE_EGRESS=true
 fi
+SYNC_LABEL="io.maknae.policy-sync"
+if [ "$KIND" = "fresh" ] || [ "$SYNC_PLIST_EXISTED" != "true" ]; then
+    DISABLE_SYNC=true
+fi
 [ "$DISABLE_MAKNAED" = false ] || launchctl disable "system/$LABEL" 2>/dev/null || :
 [ "$DISABLE_EGRESS" = false ] || launchctl disable "system/$EGRESS_LABEL" 2>/dev/null || :
+[ "$DISABLE_SYNC" = false ] || launchctl disable "system/$SYNC_LABEL" 2>/dev/null || :
 [ "$DISABLE_MAKNAED" = false ] || verify "launchctl disable $LABEL" disabled "$(disabled_state "$LABEL")"
 [ "$DISABLE_EGRESS" = false ] || verify "launchctl disable $EGRESS_LABEL" disabled "$(disabled_state "$EGRESS_LABEL")"
+[ "$DISABLE_SYNC" = false ] || verify "launchctl disable $SYNC_LABEL" disabled "$(disabled_state "$SYNC_LABEL")"
 
 install -d -m 0750 -o 0 -g "$MGID" "$ETC"
 for f in authz.yaml maknae.yaml; do
@@ -116,8 +123,8 @@ for f in authz.yaml maknae.yaml; do
         install -m 0640 -o 0 -g "$MGID" "$DEFAULTS/$f" "$ETC/$f"
     fi
 done
-# Fresh install only (no store yet): a bindings.yaml root removed stays removed, so
-# maknaed's missing-file check still applies.
+# Fresh install only (no store yet): a bindings.yaml root removed stays removed;
+# maknaed keeps enforcing the bindings it holds and `maknae policy sync` restores the file.
 CONFIGS=("$ETC/authz.yaml" "$ETC/maknae.yaml")
 if [ -e "$ETC/bindings.yaml" ] || [ -h "$ETC/bindings.yaml" ]; then
     CONFIGS+=("$ETC/bindings.yaml")

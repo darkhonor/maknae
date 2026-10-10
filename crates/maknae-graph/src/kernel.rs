@@ -39,6 +39,9 @@ pub const ATTR_NAME: &str = "name";
 pub const ATTR_UID: &str = "uid";
 pub const ATTR_ALIASES: &str = "aliases";
 pub const ATTR_VALUE: &str = "value";
+pub const ATTR_BASE: &str = "base";
+pub const ATTR_LIVE: &str = "live";
+pub const ATTR_CONFLICTS: &str = "conflicts";
 
 pub fn persisted_compiled_set(label: &str) -> CompiledSet {
     CompiledSet::new(
@@ -103,6 +106,7 @@ pub static SCHEMA: Schema = Schema {
         (LEVEL, DECLARED_BY, SECTION),
         (INSTANCE, DECLARED_BY, SECTION),
         (CONTAINMENT, DECLARED_BY, SECTION),
+        (SYNC_BASE, PART_OF, CONFIG_SOURCE),
     ],
     compiled_kinds: &[ROLE, TERM, CLASS],
     forbidden_targets: &[(BINDS, ROLE, ADVERSARY)],
@@ -212,6 +216,7 @@ mod tests {
                 (LEVEL, DECLARED_BY, SECTION),
                 (INSTANCE, DECLARED_BY, SECTION),
                 (CONTAINMENT, DECLARED_BY, SECTION),
+                (SYNC_BASE, PART_OF, CONFIG_SOURCE),
             ]
         );
         assert_eq!(SCHEMA.compiled_kinds, &[ROLE, TERM, CLASS]);

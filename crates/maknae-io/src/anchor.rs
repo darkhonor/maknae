@@ -98,6 +98,12 @@ impl<T> std::fmt::Debug for Outcome<T> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Mode(pub u32);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileOwner {
+    pub uid: u32,
+    pub gid: u32,
+}
+
 /// `#[non_exhaustive]` because `Other` will eventually need splitting (fifo, socket,
 /// device) and PR B is a downstream crate: without it, that split is a breaking
 /// change to every caller that matches on `Kind`.
@@ -589,6 +595,30 @@ impl Anchor {
         bytes: &[u8],
         mode: Mode,
     ) -> Result<Outcome<()>, IoError> {
+        self.publish_with(rel, desc, bytes, mode, None)
+    }
+
+    /// `publish`, with the owner and exact mode set on the temporary file before the
+    /// rename, so the final name never exists with another owner or an umask-narrowed mode.
+    pub fn publish_owned(
+        &self,
+        rel: &Path,
+        desc: Option<DescendantRequired>,
+        bytes: &[u8],
+        mode: Mode,
+        owner: FileOwner,
+    ) -> Result<Outcome<()>, IoError> {
+        self.publish_with(rel, desc, bytes, mode, Some(owner))
+    }
+
+    fn publish_with(
+        &self,
+        rel: &Path,
+        desc: Option<DescendantRequired>,
+        bytes: &[u8],
+        mode: Mode,
+        owner: Option<FileOwner>,
+    ) -> Result<Outcome<()>, IoError> {
         let (norm, name) = self.split_target(rel, desc.as_ref())?;
         let dir = norm.parent().unwrap_or(Path::new(""));
         let full = self.path.join(&norm);
@@ -608,7 +638,7 @@ impl Anchor {
             None => self.fd.as_fd(),
         };
 
-        let lane = crate::write::publish_at(&base, &name, &full, bytes, mode)?;
+        let lane = crate::write::publish_at(&base, &name, &full, bytes, mode, owner)?;
         Ok(Outcome {
             value: (),
             effective_strategy: lane,
@@ -1181,7 +1211,7 @@ mod tests {
     static PUBLISH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     use crate::checks::AnchorRequired;
-    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
 
     fn none_req() -> AnchorRequired {
         AnchorRequired {
@@ -2702,6 +2732,109 @@ mod tests {
         assert!(!orig.join("out.yaml").exists(), "wrote to the decoy path");
     }
 
+    fn assert_no_temp_left(dir: &Path) {
+        let leftovers: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(leftovers.is_empty(), "temp survived: {leftovers:?}");
+    }
+
+    fn ids() -> (u32, u32) {
+        (
+            nix::unistd::geteuid().as_raw(),
+            nix::unistd::getegid().as_raw(),
+        )
+    }
+
+    #[test]
+    fn publish_owned_sets_the_owner_and_the_exact_mode_under_any_umask() {
+        let _g = PUBLISH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        let (uid, egid) = ids();
+        let inherited = std::fs::metadata(&a.path).unwrap().gid();
+        let groups = std::process::Command::new("id").arg("-G").output().unwrap();
+        let other = String::from_utf8(groups.stdout)
+            .unwrap()
+            .split_whitespace()
+            .map(|g| g.parse::<u32>().unwrap())
+            .find(|g| *g != egid && *g != inherited);
+        let gid = other.unwrap_or_else(|| {
+            println!("gid leg skipped: no supplementary group differs from the egid and the directory's gid");
+            egid
+        });
+        let prior = nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o077));
+        let r = a.publish_owned(Path::new("f"), None, b"x", m(0o640), FileOwner { uid, gid });
+        nix::sys::stat::umask(prior);
+        r.unwrap();
+        let md = std::fs::symlink_metadata(a.path.join("f")).unwrap();
+        assert_eq!(
+            md.permissions().mode() & 0o7777,
+            0o640,
+            "the umask cannot narrow it"
+        );
+        assert_eq!((md.uid(), md.gid()), (uid, gid));
+        assert_eq!(std::fs::read(a.path.join("f")).unwrap(), b"x");
+        assert_no_temp_left(&a.path);
+    }
+
+    #[test]
+    fn publish_owned_replaces_atomically_and_leaves_a_sibling_untouched() {
+        let _g = PUBLISH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        std::fs::write(a.path.join("f"), b"old").unwrap();
+        std::fs::write(a.path.join("authz.yaml"), b"keep").unwrap();
+        let before = std::fs::symlink_metadata(a.path.join("authz.yaml"))
+            .unwrap()
+            .ino();
+        let (uid, gid) = ids();
+        a.publish_owned(
+            Path::new("f"),
+            None,
+            b"new",
+            m(0o600),
+            FileOwner { uid, gid },
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(a.path.join("f")).unwrap(), b"new");
+        assert_eq!(std::fs::read(a.path.join("authz.yaml")).unwrap(), b"keep");
+        assert_eq!(
+            std::fs::symlink_metadata(a.path.join("authz.yaml"))
+                .unwrap()
+                .ino(),
+            before
+        );
+    }
+
+    #[test]
+    fn a_refused_chown_publishes_nothing_and_leaves_no_temp() {
+        if nix::unistd::geteuid().is_root() {
+            return;
+        }
+        let _g = PUBLISH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        std::fs::write(a.path.join("f"), b"old").unwrap();
+        let e = a
+            .publish_owned(
+                Path::new("f"),
+                None,
+                b"new",
+                m(0o640),
+                FileOwner { uid: 0, gid: 0 },
+            )
+            .unwrap_err();
+        assert!(
+            matches!(e, IoError::Io { kind: crate::error::IoKind::Other { raw }, .. } if raw == nix::errno::Errno::EPERM as i32),
+            "{e:?}"
+        );
+        assert_eq!(std::fs::read(a.path.join("f")).unwrap(), b"old");
+        assert_no_temp_left(&a.path);
+    }
+
     /// Effective mode post-umask, and the temp must not survive.
     #[test]
     fn publish_effective_mode_and_no_leftover_temp() {
@@ -2716,12 +2849,7 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(got, 0o640 & !umask_now(), "effective mode {got:o}");
-        let leftovers: Vec<_> = std::fs::read_dir(&a.path)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
-            .collect();
-        assert!(leftovers.is_empty(), "temp survived: {leftovers:?}");
+        assert_no_temp_left(&a.path);
     }
 
     /// MUTATES PROCESS-GLOBAL STATE. Every caller must hold `PUBLISH_LOCK`, or its

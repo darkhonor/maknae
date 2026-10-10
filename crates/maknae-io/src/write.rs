@@ -3,7 +3,7 @@
 //! Both are unconditionally portable: Mode A needs a **dirfd to `renameat` against**,
 //! which the whole-remainder `openat2` lane never yields.
 
-use crate::anchor::{Mode, Strategy};
+use crate::anchor::{FileOwner, Mode, Strategy};
 use crate::error::IoError;
 use crate::syscall;
 use std::os::fd::{AsFd, OwnedFd};
@@ -39,11 +39,12 @@ pub(crate) fn publish_at<F: AsFd>(
     at: &Path,
     bytes: &[u8],
     mode: Mode,
+    owner: Option<FileOwner>,
 ) -> Result<Strategy, IoError> {
     // One CONVERSION at the boundary: the inner fn propagates plain errnos, so each
     // exception downstream names an arm rather than a `map_err` closure. It does not
     // reduce the exception count.
-    publish_synced(dirfd, final_name, at, bytes, mode, syscall::fsync_fd)
+    publish_synced(dirfd, final_name, at, bytes, mode, owner, syscall::fsync_fd)
 }
 
 /// After the rename the final name holds the new bytes, so a failed directory sync is
@@ -54,9 +55,10 @@ fn publish_synced<F: AsFd>(
     at: &Path,
     bytes: &[u8],
     mode: Mode,
+    owner: Option<FileOwner>,
     sync_dir: impl FnOnce(&F) -> nix::Result<()>,
 ) -> Result<Strategy, IoError> {
-    publish_raw(dirfd, final_name, bytes, mode)
+    publish_raw(dirfd, final_name, bytes, mode, owner)
         .map_err(|e| crate::checks::map_errno_no_disambiguation(e, at))?;
     sync_dir(dirfd).map_err(|e| IoError::PublishedNotDurable {
         path: at.to_path_buf(),
@@ -65,7 +67,13 @@ fn publish_synced<F: AsFd>(
     Ok(Strategy::Portable)
 }
 
-fn publish_raw<F: AsFd>(dirfd: &F, final_name: &str, bytes: &[u8], mode: Mode) -> nix::Result<()> {
+fn publish_raw<F: AsFd>(
+    dirfd: &F,
+    final_name: &str,
+    bytes: &[u8],
+    mode: Mode,
+    owner: Option<FileOwner>,
+) -> nix::Result<()> {
     // CONTRACT LIMIT (external review): the temp adds "." + ".tmp.<pid>.<counter>" to
     // the caller's name, so a final name a filesystem accepts (up to 255 bytes on
     // ext4/xfs) can exceed NAME_MAX in its temp form and be REFUSED — ENAMETOOLONG
@@ -77,6 +85,12 @@ fn publish_raw<F: AsFd>(dirfd: &F, final_name: &str, bytes: &[u8], mode: Mode) -
     // work, and until then the limit is stated rather than silent.
     let tmp = temp_name(final_name);
     let fd = syscall::open_temp_excl(dirfd, &tmp, mode)?;
+    if let Some(owner) = owner {
+        if let Err(e) = syscall::set_owner_and_mode(&fd, owner, mode) {
+            let _ = syscall::unlink_at(dirfd, &tmp);
+            return Err(e);
+        }
+    }
 
     // Cleanup is best-effort and deliberately `let _ =`: the caller must keep the
     // ORIGINAL error, never a masking unlink error.
@@ -201,8 +215,10 @@ mod tests {
         std::fs::write(d.path().join("f"), b"old").unwrap();
         let at = d.path().join("f");
         use nix::errno::Errno;
-        let e =
-            publish_synced(&dirfd, "f", &at, b"new", Mode(0o600), |_| Err(Errno::EIO)).unwrap_err();
+        let e = publish_synced(&dirfd, "f", &at, b"new", Mode(0o600), None, |_| {
+            Err(Errno::EIO)
+        })
+        .unwrap_err();
         assert_eq!(
             e,
             IoError::PublishedNotDurable {
@@ -221,7 +237,7 @@ mod tests {
         let dirfd = std::fs::File::open(d.path()).unwrap();
         std::fs::create_dir(d.path().join("busy")).unwrap();
         let at = d.path().join("busy");
-        let e = publish_synced(&dirfd, "busy", &at, b"new", Mode(0o600), |_| {
+        let e = publish_synced(&dirfd, "busy", &at, b"new", Mode(0o600), None, |_| {
             panic!("nothing was renamed, so nothing is synced")
         })
         .unwrap_err();

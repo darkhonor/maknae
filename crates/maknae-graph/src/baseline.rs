@@ -224,6 +224,7 @@ mod tests {
         build(
             &layer(),
             b,
+            None,
             &persisted_compiled_set("UNCLASSIFIED"),
             [9; 32],
             3,
@@ -360,6 +361,7 @@ mod tests {
         assert_eq!(encoded(&g), bytes);
         let rebuilt = build(
             &want,
+            None,
             None,
             &persisted_compiled_set("UNCLASSIFIED"),
             [9; 32],
@@ -761,6 +763,7 @@ mod tests {
         match build(
             &layer(),
             Some(b),
+            None,
             &persisted_compiled_set("UNCLASSIFIED"),
             [9; 32],
             3,

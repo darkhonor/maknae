@@ -85,7 +85,7 @@ pub(crate) fn cli_config_specs() -> [SectionSpec; 3] {
     name = "maknae",
     about = "CLI for maknaed: filesystem operations, daemon queries, and enrollment"
 )]
-struct Cli {
+pub(crate) struct Cli {
     #[command(subcommand)]
     command: Command,
 }
@@ -173,10 +173,25 @@ enum Command {
     /// Authorize maknaed to seed a fresh kernel graph at its next start, keeping a
     /// readable current store aside. Requires `sudo`.
     Reseed,
+    /// Root-only bindings maintenance.
+    Policy {
+        #[command(subcommand)]
+        action: PolicyCommand,
+    },
     /// Hidden operator-context helper `enroll` re-execs via `sudo -u` — not a
     /// user-facing verb.
     #[command(hide = true, name = "enroll-helper")]
     EnrollHelper(crate::enroll::HelperArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum PolicyCommand {
+    /// Install maknaed's bindings mirror as /etc/maknae/bindings.yaml. Requires `sudo`.
+    Sync {
+        /// Print what would change and install nothing.
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 /// The verbs the wire path can issue (mirrors `maknae_proto::Verb`).
@@ -738,7 +753,41 @@ fn status_lines(s: &maknae_proto::StatusView) -> Vec<String> {
     ));
     lines.extend(identity_problems_line(&s.identity_problem_counts));
     lines.extend(s.baseline_pending.iter().map(|l| terminal_safe(l)));
+    lines.extend(identity_sync_line(&s.identity_sync));
     lines
+}
+
+fn identity_sync_line(entries: &[String]) -> Option<String> {
+    if entries.is_empty() {
+        return None;
+    }
+    let count = |key: &str| {
+        entries
+            .iter()
+            .find_map(|e| e.strip_prefix(key)?.strip_prefix('=')?.parse::<u64>().ok())
+    };
+    let known = |e: &str| matches!(e, "file=lost" | "mirror=stale");
+    let (Some(unsynced), Some(conflicts)) = (count("unsynced"), count("conflict")) else {
+        return Some(format!(
+            "identity sync: {}",
+            entries
+                .iter()
+                .map(|e| terminal_safe(e))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    };
+    let mut parts = vec![
+        format!("{unsynced} unsynced"),
+        format!("{conflicts} conflicts"),
+    ];
+    for e in entries.iter().filter(|e| known(e)) {
+        parts.push(match e.as_str() {
+            "file=lost" => "bindings.yaml lost".into(),
+            _ => "mirror stale".into(),
+        });
+    }
+    Some(format!("identity sync: {}", parts.join(", ")))
 }
 
 fn baseline_lines(v: &maknae_proto::BaselineView) -> Vec<String> {
@@ -811,7 +860,7 @@ fn identity_problems_line(counts: &[String]) -> Option<String> {
 
 /// Anything but printable ASCII is escaped: the daemon escapes its labels, and a
 /// daemon that did not cannot reach the terminal with a control character.
-fn terminal_safe(s: &str) -> String {
+pub(crate) fn terminal_safe(s: &str) -> String {
     s.chars()
         .map(|c| {
             if c == ' ' || c.is_ascii_graphic() {
@@ -996,6 +1045,9 @@ pub async fn run_cli() -> ExitCode {
         Command::Logout => crate::login::run_logout().await,
         Command::Enroll(args) => crate::enroll::run_enroll(*args).await,
         Command::Reseed => crate::reseed::run_reseed(),
+        Command::Policy {
+            action: PolicyCommand::Sync { check },
+        } => crate::policy_sync::run(nix::unistd::geteuid().as_raw(), check),
         Command::EnrollHelper(args) => crate::enroll::run_enroll_helper(args).await,
     }
 }
@@ -1075,6 +1127,38 @@ mod tests {
                 .await
                 .unwrap_err(),
             "frame class unexpected: Control, expected Prompt"
+        );
+    }
+
+    #[test]
+    fn the_identity_sync_line_prints_counts_and_the_stale_flag() {
+        assert_eq!(identity_sync_line(&[]), None);
+        assert_eq!(
+            identity_sync_line(&["unsynced=0".into(), "conflict=0".into()]).as_deref(),
+            Some("identity sync: 0 unsynced, 0 conflicts")
+        );
+        assert_eq!(
+            identity_sync_line(&[
+                "unsynced=2".into(),
+                "conflict=1".into(),
+                "mirror=stale".into()
+            ])
+            .as_deref(),
+            Some("identity sync: 2 unsynced, 1 conflicts, mirror stale")
+        );
+        assert_eq!(
+            identity_sync_line(&[
+                "unsynced=0".into(),
+                "conflict=0".into(),
+                "file=lost".into(),
+                "mirror=stale".into()
+            ])
+            .as_deref(),
+            Some("identity sync: 0 unsynced, 0 conflicts, bindings.yaml lost, mirror stale")
+        );
+        assert_eq!(
+            identity_sync_line(&["unsynced=x\u{1b}".into()]).as_deref(),
+            Some("identity sync: unsynced=x\\u{1b}")
         );
     }
 
@@ -1726,6 +1810,7 @@ mod tests {
             kernel_graph_anchor: Some("verified".into()),
             identity_problem_counts: vec![],
             baseline_pending: vec![],
+            identity_sync: vec![],
         };
         let base = status_lines(&s);
         assert_eq!(
@@ -2247,6 +2332,20 @@ mod tests {
     }
 
     #[test]
+    fn policy_sync_parses_with_and_without_check() {
+        for (argv, want) in [
+            (&["maknae", "policy", "sync"][..], false),
+            (&["maknae", "policy", "sync", "--check"][..], true),
+        ] {
+            let cli = Cli::try_parse_from(argv).expect("parses");
+            assert!(
+                matches!(cli.command, Command::Policy { action: PolicyCommand::Sync { check } } if check == want),
+                "{argv:?}"
+            );
+        }
+    }
+
+    #[test]
     fn the_status_ends_with_the_pending_baseline_lines() {
         let s = maknae_proto::StatusView {
             version: "v".into(),
@@ -2258,6 +2357,7 @@ mod tests {
             kernel_graph_anchor: Some("verified".into()),
             identity_problem_counts: vec!["unresolved=1".into()],
             baseline_pending: vec!["baseline: 1 pending (live)".into()],
+            identity_sync: vec![],
         };
         let lines = status_lines(&s);
         assert_eq!(

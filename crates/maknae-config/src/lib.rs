@@ -34,6 +34,7 @@ mod audit_cfg;
 mod authz;
 mod baseline_doc;
 mod bindings;
+pub mod bindings_sync;
 mod bounds;
 mod bounds_io;
 mod builder;
@@ -42,6 +43,7 @@ mod document;
 mod egress_cfg;
 mod error;
 mod loader;
+pub mod mirror;
 mod policy;
 mod principal;
 mod providers;
@@ -65,7 +67,14 @@ pub use authz::load_authz_with_requirement;
 #[cfg(all(unix, feature = "hermetic-test-seam"))]
 pub use bindings::load_bindings_with_requirement;
 pub use bindings::{
-    load_bindings, parse_bindings, BindingEntry, Bindings, BindingsError, BINDINGS_FILE,
+    check_roles, checked_roles, effective, load_bindings, parse_bindings, subjects_by_uid,
+    BindingEntry, Bindings, BindingsError, Effective, HeldBy, RoleRuleError, BINDINGS_FILE,
+    BINDING_ROLES,
+};
+pub use bindings_sync::{
+    apply_edit, conflicts_canonical, conflicts_from_canonical, effective_loosenings, equivalent,
+    loosenings, merge, unsynced, BoundRole, EditError, Edited, LiveEdit, MergeEvent, Merged,
+    ResolvedBy, Section, Stored, SyncKind,
 };
 // Re-exported so downstream seam constructors (maknae-authz-basic's
 // HermeticAuthorizer, #77) can NAME the requirement type without a maknae-io
@@ -94,6 +103,10 @@ pub use error::ConfigError;
 #[cfg(all(unix, feature = "hermetic-test-seam"))]
 pub use maknae_io::TargetRequired;
 pub use maknae_security::{ClassificationPolicy, Level};
+pub use mirror::{
+    base_token, diff_lines, installable, parse_mirror, plan_sync, render_mirror, Mirror,
+    MirrorError, MirrorHeader, SyncPlan, MIRROR_BANNER, MIRROR_MAX_BYTES,
+};
 pub use policy::{BasicPolicy, LEVELS as US_LEVELS};
 pub use principal::{principal_from_section, principal_keys_known, Principal, PRINCIPAL_SECTION};
 pub use providers::{
@@ -104,7 +117,7 @@ pub use providers::{
     MAX_MODEL_BYTES, MAX_PROVIDERS, MAX_PROVIDER_NAME_BYTES, MAX_REASONING_EFFORT_BYTES,
     PROVIDERS_SECTION,
 };
-pub use state::{MARKER_FILE, STATE_DIR, STORE_FILE};
+pub use state::{MARKER_FILE, MIRROR_FILE, STATE_DIR, STORE_FILE};
 pub use transport::{
     content_write_bound, transport_from_section, TransportConfig, ADMISSION_AUDIT_TIMEOUT_MS,
     GROUP_LOOKUP_TIMEOUT_MS, HOME_RESOLVE_TIMEOUT_MS, MACOS_DAEMON_SOCKET_PATH,

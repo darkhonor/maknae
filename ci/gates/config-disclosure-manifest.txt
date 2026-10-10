@@ -62,6 +62,7 @@ always	status.kernel_graph_revision	the kernel graph store's revision counter; n
 always	status.kernel_graph_anchor	the rollback-anchor state at boot (seeded, reseeded, verified, advanced, rollback-anchor-unavailable)
 always	status.identity_problem_counts	how many identity events of each kind the last applied load produced (#496): per-subject problems, releases of a containment, and a promotion of the enrolled principal, as fixed "<kind>=<count>" entries: counts only, never a name, uid or role; which subjects are affected is admin.subject.list's to disclose
 always	status.baseline_pending	how many baseline change sets are pending and their class (live, restart or invalid) (#490): never a section name, a hash or a value; which sections changed is admin.baseline.show's to disclose
+always	status.identity_sync	how many bindings entries the daemon enforces that bindings.yaml does not hold yet, how many are in conflict, whether bindings.yaml is lost, and whether the mirror is stale (#491): counts only, never a name, uid, entry or hash; which entries is the mirror's to show, to root
 always	baseline.source	which source proposed the change set (#490): a fixed token
 always	baseline.hash	the change set's sha256 (#490): what an accept must name; derived from the values, discloses none of them; this reply is the only place the full hash appears (never status, the journal or the trail)
 always	baseline.state	none, pending, invalid, accepted or stale (#490): fixed kernel vocabulary

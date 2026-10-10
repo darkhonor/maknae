@@ -2,21 +2,24 @@ use maknae_graph::baseline::BaselineLayer;
 use maknae_graph::format;
 use maknae_graph::graph::{Graph, GraphBuilder};
 use maknae_graph::identity::{
-    self, IdentityLayer, ReleaseCause, Released, SubjectEntry, BINDINGS_MISSING, BINDINGS_NOT_MOVED,
+    self, IdentityLayer, ReleaseCause, Released, SubjectEntry, BINDINGS_KEY_DROPPED,
+    BINDINGS_MISSING, BINDINGS_NOT_MOVED,
 };
 use maknae_graph::kernel::{
     persisted_compiled_set, ATTR_SHA256, ROLE, SCHEMA, SUBJECT, VOCABULARY_SOURCE_KEY,
 };
 use maknae_graph::record::{AttrValue, Attrs, GraphSpace, NodeRecord, ProvenanceKind};
 use maknae_graph::schema::{CompiledNode, CompiledSet};
+use maknae_graph::sync::SyncBase;
 use maknae_state::anchor::{AnchorState, Checkpoint, Refusal};
 use maknae_state::envelope::{
     self, ciphertext_digest, EnvelopeError, WrappingKey, ENVELOPE_VERSION, KEY_LEN,
 };
 use maknae_state::store::{
-    boot, commit, commit_accept, remedy, BootAudit, BootInputs, BootOutcome, BootReport, Committed,
-    Migration, Remedy, StateDir, StoreError, INITIATOR_OPERATOR, INITIATOR_ROOT_FILE,
-    INITIATOR_SEED, MARKER_FILE, MAX_STORE_BYTES, REJECTED_PREFIX, STORE_FILE,
+    boot, commit, commit_accept, commit_live, initiator_name, remedy, transition_initiator,
+    BootAudit, BootInputs, BootOutcome, BootReport, Committed, LiveInitiator, Migration, Remedy,
+    StateDir, StoreError, INITIATOR_KERNEL, INITIATOR_OPERATOR, INITIATOR_ROOT_FILE,
+    INITIATOR_SEED, MARKER_FILE, MAX_STORE_BYTES, MIRROR_FILE, REJECTED_PREFIX, STORE_FILE,
 };
 use maknae_state::vocabulary;
 use std::fs;
@@ -34,8 +37,8 @@ enum Event {
     Migrate(u64, Option<[u8; 32]>, [u8; 32], Vec<u32>),
     Transition(u64, String),
     Released(u64, Vec<Released>),
-    PrincipalAdmin(u64, u32),
     Baseline(u64, Vec<String>),
+    Sync(u64, Vec<String>),
 }
 
 #[derive(Default)]
@@ -47,11 +50,10 @@ struct Recorder {
     fail_migrate: bool,
     fail_transition: bool,
     fail_released: bool,
-    fail_principal_admin: bool,
     fail_baseline: bool,
+    fail_sync: bool,
     store_at_released: Option<PathBuf>,
     store_bytes_at_released: Option<Vec<u8>>,
-    store_bytes_at_principal_admin: Option<Vec<u8>>,
 }
 
 fn refuse(fail: bool, what: &str) -> Result<(), StoreError> {
@@ -123,18 +125,6 @@ impl BootAudit for Recorder {
         ready(refuse(self.fail_released, "released"))
     }
 
-    fn principal_admin(
-        &mut self,
-        revision: u64,
-        uid: u32,
-    ) -> impl Future<Output = Result<(), StoreError>> + Send {
-        self.events.push(Event::PrincipalAdmin(revision, uid));
-        if let Some(p) = &self.store_at_released {
-            self.store_bytes_at_principal_admin = Some(fs::read(p).unwrap());
-        }
-        ready(refuse(self.fail_principal_admin, "principal admin"))
-    }
-
     fn baseline(
         &mut self,
         revision: u64,
@@ -143,10 +133,18 @@ impl BootAudit for Recorder {
         self.events.push(Event::Baseline(revision, events.to_vec()));
         ready(refuse(self.fail_baseline, "baseline"))
     }
+
+    fn sync(
+        &mut self,
+        revision: u64,
+        events: &[String],
+    ) -> impl Future<Output = Result<(), StoreError>> + Send {
+        self.events.push(Event::Sync(revision, events.to_vec()));
+        ready(refuse(self.fail_sync, "sync"))
+    }
 }
 
 const SOURCE: &str = "/etc/maknae/bindings.yaml";
-const PRINCIPAL_UID: u32 = 501;
 const MOVED_FROM: &str = "/etc/maknae/authz.yaml";
 
 struct Inputs {
@@ -159,6 +157,26 @@ struct Inputs {
     baseline: BaselineLayer,
     seen: Seen,
     events: Vec<String>,
+    sync: SyncBase,
+    sync_seen: SyncSeen,
+    sync_events: Vec<String>,
+    sync_kind: maknae_config::SyncKind,
+}
+
+enum SyncSeen {
+    Peek,
+    Exactly(Option<SyncBase>),
+}
+
+const ADMIN_ROOT: &str = r#"{"admin":["root"]}"#;
+const CREATED: &str = "sync base created from bindings.yaml (the store had none)";
+
+fn synced(section: &str) -> SyncBase {
+    SyncBase {
+        base: section.into(),
+        live: section.into(),
+        conflicts: "[]".into(),
+    }
 }
 
 enum Seen {
@@ -185,7 +203,11 @@ const A: &str = r#"{"deployment_id":"a"}"#;
 const B: &str = r#"{"deployment_id":"b"}"#;
 
 impl Inputs {
-    fn boot(&self, seen: Option<[u8; 32]>) -> BootInputs<'_> {
+    fn boot<'a>(
+        &'a self,
+        seen: Option<[u8; 32]>,
+        sync_seen: Option<&'a SyncBase>,
+    ) -> BootInputs<'a> {
         BootInputs {
             compiled: &self.compiled,
             vocabulary_sha256: self.digest,
@@ -193,10 +215,13 @@ impl Inputs {
             unresolved_adversaries: &self.unresolved,
             bindings_missing: self.missing,
             bindings_lists_nobody: self.lists_nobody,
-            principal_uid: PRINCIPAL_UID,
             baseline: &self.baseline,
             accepted_seen: seen,
             baseline_events: &self.events,
+            sync: &self.sync,
+            sync_seen,
+            sync_events: &self.sync_events,
+            sync_kind: self.sync_kind,
         }
     }
 }
@@ -225,6 +250,11 @@ fn layer(bindings: Option<&[u8]>, subjects: &[(u32, &str, &str)]) -> IdentityLay
 fn inputs_with(layer: IdentityLayer) -> Inputs {
     let compiled = persisted_compiled_set(&layer.label);
     let digest = vocabulary::digest(&compiled).unwrap();
+    let section = if layer.bindings_sha256.is_some() {
+        ADMIN_ROOT
+    } else {
+        "null"
+    };
     Inputs {
         compiled,
         digest,
@@ -235,6 +265,17 @@ fn inputs_with(layer: IdentityLayer) -> Inputs {
         baseline: bl(A),
         seen: Seen::Peek,
         events: vec![SEEDED.into()],
+        sync: synced(section),
+        sync_seen: SyncSeen::Peek,
+        sync_events: vec![],
+        sync_kind: maknae_config::SyncKind::Created,
+    }
+}
+
+fn creating(i: Inputs) -> Inputs {
+    Inputs {
+        sync_events: vec![CREATED.into()],
+        ..i
     }
 }
 
@@ -364,10 +405,19 @@ impl Fixture {
 }
 
 fn sealed_graph(revision: u64, k: &WrappingKey) -> Vec<u8> {
+    sealed_with_sync(revision, k, Some(&inputs().sync))
+}
+
+fn sealed_unsynced(revision: u64, k: &WrappingKey) -> Vec<u8> {
+    sealed_with_sync(revision, k, None)
+}
+
+fn sealed_with_sync(revision: u64, k: &WrappingKey, sync: Option<&SyncBase>) -> Vec<u8> {
     let i = inputs();
     let g = identity::build(
         &i.layer,
         Some(&bl(A)),
+        sync,
         &i.compiled,
         i.digest,
         revision,
@@ -424,7 +474,7 @@ async fn run_with(
         checkpoint,
         &mut audit,
         NOW,
-        &i.boot(seen(dir, k, i)),
+        &i.boot(seen(dir, k, i), sync_seen(dir, k, i).as_ref()),
     )
     .await;
     (r, audit.events)
@@ -444,6 +494,17 @@ fn seen(dir: &StateDir, k: &WrappingKey, i: &Inputs) -> Option<[u8; 32]> {
             .map(|b| b.sha256),
         Seen::Exactly(d) => d,
     }
+}
+
+fn sync_seen(dir: &StateDir, k: &WrappingKey, i: &Inputs) -> Option<SyncBase> {
+    match &i.sync_seen {
+        SyncSeen::Peek => maknae_state::store::peek_sync(dir, k).ok().flatten(),
+        SyncSeen::Exactly(s) => s.clone(),
+    }
+}
+
+fn peeked_sync(fx: &Fixture, k: &WrappingKey) -> Option<SyncBase> {
+    maknae_state::store::peek_sync(&fx.dir(), k).unwrap()
 }
 
 #[tokio::test]
@@ -999,14 +1060,14 @@ async fn seed_audits_intent_before_persist() {
         fail_intent: true,
         ..Recorder::default()
     };
-    let seen = peeked(&fx, &key(1));
+    let (seen, sync_seen) = (peeked(&fx, &key(1)), peeked_sync(&fx, &key(1)));
     let r = boot(
         &fx.dir(),
         &key(1),
         None,
         &mut audit,
         NOW,
-        &inputs().boot(seen),
+        &inputs().boot(seen, sync_seen.as_ref()),
     )
     .await;
     assert_eq!(r.unwrap_err(), StoreError::Audit("intent refused".into()));
@@ -1025,8 +1086,16 @@ async fn reseed_intent_failure_writes_nothing() {
         fail_intent: true,
         ..Recorder::default()
     };
-    let seen = peeked(&fx, &k);
-    let r = boot(&fx.dir(), &k, None, &mut audit, NOW, &inputs().boot(seen)).await;
+    let (seen, sync_seen) = (peeked(&fx, &k), peeked_sync(&fx, &k));
+    let r = boot(
+        &fx.dir(),
+        &k,
+        None,
+        &mut audit,
+        NOW,
+        &inputs().boot(seen, sync_seen.as_ref()),
+    )
+    .await;
     assert!(matches!(r.unwrap_err(), StoreError::Audit(_)));
     assert_eq!(fx.store(), old);
     assert!(fx.rejected().is_empty());
@@ -1041,8 +1110,16 @@ async fn checkpoint_failure_fails_the_seed_and_the_load() {
         fail_checkpoint: true,
         ..Recorder::default()
     };
-    let seen = peeked(&fx, &k);
-    let r = boot(&fx.dir(), &k, None, &mut audit, NOW, &inputs().boot(seen)).await;
+    let (seen, sync_seen) = (peeked(&fx, &k), peeked_sync(&fx, &k));
+    let r = boot(
+        &fx.dir(),
+        &k,
+        None,
+        &mut audit,
+        NOW,
+        &inputs().boot(seen, sync_seen.as_ref()),
+    )
+    .await;
     assert_eq!(
         r.unwrap_err(),
         StoreError::Audit("checkpoint refused".into())
@@ -1051,8 +1128,16 @@ async fn checkpoint_failure_fails_the_seed_and_the_load() {
         fail_checkpoint: true,
         ..Recorder::default()
     };
-    let seen = peeked(&fx, &k);
-    let r = boot(&fx.dir(), &k, None, &mut audit, NOW, &inputs().boot(seen)).await;
+    let (seen, sync_seen) = (peeked(&fx, &k), peeked_sync(&fx, &k));
+    let r = boot(
+        &fx.dir(),
+        &k,
+        None,
+        &mut audit,
+        NOW,
+        &inputs().boot(seen, sync_seen.as_ref()),
+    )
+    .await;
     assert_eq!(
         r.unwrap_err(),
         StoreError::Audit("checkpoint refused".into())
@@ -1546,6 +1631,10 @@ fn each_store_error_has_its_remedy() {
             StoreError::BindingsRefused(BINDINGS_MISSING),
             Remedy::Investigate,
         ),
+        (
+            StoreError::MirrorNotRemoved("EISDIR".into()),
+            Remedy::CheckStateDir,
+        ),
     ];
     for (e, want) in cases {
         assert_eq!(remedy(&e), want, "{e:?}");
@@ -1671,14 +1760,14 @@ async fn a_failed_transition_intent_persists_nothing() {
         fail_transition: true,
         ..Recorder::default()
     };
-    let seen = peeked(&fx, &k);
+    let (seen, sync_seen) = (peeked(&fx, &k), peeked_sync(&fx, &k));
     let r = boot(
         &fx.dir(),
         &k,
         checkpoint_of(&first),
         &mut audit,
         NOW,
-        &edited().boot(seen),
+        &edited().boot(seen, sync_seen.as_ref()),
     )
     .await;
     assert_eq!(
@@ -1697,14 +1786,14 @@ async fn a_transition_persists_before_its_checkpoint() {
         fail_checkpoint_anchor: Some("transitioned"),
         ..Recorder::default()
     };
-    let seen = peeked(&fx, &k);
+    let (seen, sync_seen) = (peeked(&fx, &k), peeked_sync(&fx, &k));
     let r = boot(
         &fx.dir(),
         &k,
         checkpoint_of(&first),
         &mut audit,
         NOW,
-        &edited().boot(seen),
+        &edited().boot(seen, sync_seen.as_ref()),
     )
     .await;
     assert_eq!(
@@ -1744,7 +1833,7 @@ fn migrated_digest(events: &[Event]) -> [u8; 32] {
 
 #[tokio::test]
 async fn a_store_from_before_identity_migrates_then_seeds_identity() {
-    let i = inputs();
+    let i = creating(inputs());
     let (fx, r, events, old) = boot_over_a_store_from_before_identity(1, &i).await;
     let r = r.unwrap();
     assert_eq!(
@@ -1767,6 +1856,7 @@ async fn a_store_from_before_identity_migrates_then_seeds_identity() {
             Event::Migrate(2, None, i.digest, vec![]),
             Event::Checkpoint(2, m, "migrated".into()),
             Event::Baseline(3, vec![SEEDED.into()]),
+            Event::Sync(3, vec![CREATED.into()]),
             Event::Transition(3, "root-file".into()),
             Event::Checkpoint(3, r.digest, "transitioned".into()),
         ]
@@ -1778,7 +1868,7 @@ async fn a_store_from_before_identity_migrates_then_seeds_identity() {
 
 #[tokio::test]
 async fn a_store_from_before_identity_without_bindings_migrates_then_gains_the_baseline() {
-    let i = inputs_with(layer(None, &[]));
+    let i = creating(inputs_with(layer(None, &[])));
     let (fx, r, events, old) = boot_over_a_store_from_before_identity(1, &i).await;
     let r = r.unwrap();
     assert!(r.migration.is_some());
@@ -1793,6 +1883,7 @@ async fn a_store_from_before_identity_without_bindings_migrates_then_gains_the_b
             Event::Migrate(2, None, i.digest, vec![]),
             Event::Checkpoint(2, m, "migrated".into()),
             Event::Baseline(3, vec![SEEDED.into()]),
+            Event::Sync(3, vec![CREATED.into()]),
             Event::Transition(3, "root-file".into()),
             Event::Checkpoint(3, r.digest, "transitioned".into()),
         ]
@@ -1804,14 +1895,15 @@ async fn a_store_from_before_identity_without_bindings_migrates_then_gains_the_b
 
 #[tokio::test]
 async fn a_pre_identity_store_checkpointed_at_its_revision_is_verified_then_migrated() {
-    let i = inputs();
+    let i = creating(inputs());
     let (_fx, r, events, _) = boot_over_a_store_from_before_identity(7, &i).await;
     let r = r.unwrap();
     assert_eq!(r.outcome, BootOutcome::Loaded(AnchorState::Verified));
     assert_eq!(r.revision, 9);
     assert_eq!(events[1], Event::Migrate(8, None, i.digest, vec![]));
     assert_eq!(events[3], Event::Baseline(9, vec![SEEDED.into()]));
-    assert_eq!(events[4], Event::Transition(9, "root-file".into()));
+    assert_eq!(events[4], Event::Sync(9, vec![CREATED.into()]));
+    assert_eq!(events[5], Event::Transition(9, "root-file".into()));
 }
 
 #[tokio::test]
@@ -1834,14 +1926,14 @@ async fn migration_persists_before_its_checkpoint_and_a_failed_intent_persists_n
         fail_migrate: true,
         ..Recorder::default()
     };
-    let seen = peeked(&fx, &k);
+    let (seen, sync_seen) = (peeked(&fx, &k), peeked_sync(&fx, &k));
     let r = boot(
         &fx.dir(),
         &k,
         cp(1, &old),
         &mut audit,
         NOW,
-        &inputs().boot(seen),
+        &inputs().boot(seen, sync_seen.as_ref()),
     )
     .await;
     assert_eq!(r.unwrap_err(), StoreError::Audit("migrate refused".into()));
@@ -1852,14 +1944,14 @@ async fn migration_persists_before_its_checkpoint_and_a_failed_intent_persists_n
         fail_checkpoint_anchor: Some("migrated"),
         ..Recorder::default()
     };
-    let seen = peeked(&fx, &k);
+    let (seen, sync_seen) = (peeked(&fx, &k), peeked_sync(&fx, &k));
     let r = boot(
         &fx.dir(),
         &k,
         cp(1, &old),
         &mut audit,
         NOW,
-        &inputs().boot(seen),
+        &inputs().boot(seen, sync_seen.as_ref()),
     )
     .await;
     assert_eq!(
@@ -1876,16 +1968,24 @@ async fn forged_vocabulary_refuses() {
     let i = inputs();
     let l = layer(None, &[]);
     let claims_binary =
-        identity::build(&l, None, &wider(), i.digest, 1, ProvenanceKind::Seed).unwrap();
-    let roles_only =
-        identity::build(&l, None, &i.compiled, i.digest, 1, ProvenanceKind::Seed).unwrap();
+        identity::build(&l, None, None, &wider(), i.digest, 1, ProvenanceKind::Seed).unwrap();
+    let roles_only = identity::build(
+        &l,
+        None,
+        None,
+        &i.compiled,
+        i.digest,
+        1,
+        ProvenanceKind::Seed,
+    )
+    .unwrap();
     let no_digest = rebuild(
         &roles_only,
         |n| (n.key != VOCABULARY_SOURCE_KEY).then(|| n.clone()),
         &i.compiled,
     );
     let stale_claim =
-        identity::build(&l, None, &wider(), [7; 32], 1, ProvenanceKind::Seed).unwrap();
+        identity::build(&l, None, None, &wider(), [7; 32], 1, ProvenanceKind::Seed).unwrap();
     for forged in [claims_binary, no_digest, stale_claim] {
         let fx = Fixture::new();
         let file = seal_graph(&forged, &k);
@@ -1934,6 +2034,7 @@ async fn a_binds_to_a_vanished_role_is_dropped_and_reported() {
     let g = identity::build(
         &stored,
         Some(&bl(A)),
+        Some(&i.sync),
         &wider(),
         wide,
         1,
@@ -2048,6 +2149,7 @@ fn next_graph(revision: u64, i: &Inputs) -> Graph {
     identity::build(
         &i.layer,
         Some(&bl(A)),
+        Some(&i.sync),
         &i.compiled,
         i.digest,
         revision,
@@ -2069,7 +2171,7 @@ async fn commit_persists_at_the_next_revision_and_checkpoints() {
         &k,
         &next_graph(2, &e),
         &[],
-        None,
+        &[],
         &mut audit,
         INITIATOR_ROOT_FILE,
     )
@@ -2102,7 +2204,7 @@ async fn commit_persists_at_the_next_revision_and_checkpoints() {
             &k,
             &next_graph(stale, &e),
             &[],
-            None,
+            &[],
             &mut audit,
             INITIATOR_ROOT_FILE,
         )
@@ -2136,7 +2238,7 @@ async fn commit_names_its_initiator() {
         &k,
         &next_graph(2, &edited()),
         &[],
-        None,
+        &[],
         &mut audit,
         INITIATOR_SEED,
     )
@@ -2161,7 +2263,7 @@ async fn commit_with_a_failing_checkpoint_still_publishes_and_reports_it() {
         &k,
         &next_graph(2, &e),
         &[],
-        None,
+        &[],
         &mut audit,
         INITIATOR_ROOT_FILE,
     )
@@ -2182,7 +2284,7 @@ async fn commit_with_a_failing_checkpoint_still_publishes_and_reports_it() {
         &k,
         &next_graph(3, &e),
         &[],
-        None,
+        &[],
         &mut audit,
         INITIATOR_ROOT_FILE,
     )
@@ -2213,7 +2315,7 @@ async fn a_commit_whose_directory_sync_fails_is_committed_and_advances_the_floor
         &k,
         &next_graph(2, &e),
         &[],
-        None,
+        &[],
         &mut audit,
         INITIATOR_ROOT_FILE,
     )
@@ -2243,7 +2345,7 @@ async fn a_commit_whose_directory_sync_fails_is_committed_and_advances_the_floor
         &k,
         &next_graph(2, &e),
         &[],
-        None,
+        &[],
         &mut Recorder::default(),
         INITIATOR_ROOT_FILE,
     )
@@ -2260,7 +2362,7 @@ async fn a_commit_whose_directory_sync_fails_is_committed_and_advances_the_floor
         &k,
         &next_graph(3, &e),
         &[],
-        None,
+        &[],
         &mut Recorder::default(),
         INITIATOR_ROOT_FILE,
     )
@@ -2345,7 +2447,7 @@ async fn commit_with_a_failing_intent_writes_nothing() {
         &k,
         &next_graph(2, &edited()),
         &[],
-        None,
+        &[],
         &mut audit,
         INITIATOR_ROOT_FILE,
     )
@@ -2380,7 +2482,7 @@ async fn a_plain_load_sets_the_store_revision_floor() {
         &k,
         &next_graph(7, &e),
         &[],
-        None,
+        &[],
         &mut Recorder::default(),
         INITIATOR_ROOT_FILE,
     )
@@ -2398,7 +2500,7 @@ async fn a_plain_load_sets_the_store_revision_floor() {
         &k,
         &next_graph(8, &e),
         &[],
-        None,
+        &[],
         &mut Recorder::default(),
         INITIATOR_ROOT_FILE,
     )
@@ -2421,7 +2523,7 @@ async fn restoring_the_pre_reload_store_after_a_reload_refuses_as_rolled_back() 
         &k,
         &next,
         &[],
-        None,
+        &[],
         &mut Recorder::default(),
         INITIATOR_ROOT_FILE,
     )
@@ -2462,6 +2564,7 @@ async fn a_stored_node_the_identity_layer_does_not_project_is_rewritten() {
     let clean = identity::build(
         &i.layer,
         Some(&bl(A)),
+        Some(&i.sync),
         &i.compiled,
         i.digest,
         1,
@@ -2555,12 +2658,12 @@ impl BootAudit for Racer<'_> {
         self.inner.released(revision, released)
     }
 
-    fn principal_admin(
+    fn sync(
         &mut self,
         revision: u64,
-        uid: u32,
+        events: &[String],
     ) -> impl Future<Output = Result<(), StoreError>> + Send {
-        self.inner.principal_admin(revision, uid)
+        self.inner.sync(revision, events)
     }
 
     fn baseline(
@@ -2583,7 +2686,7 @@ impl BootAudit for Racer<'_> {
                 key,
                 &rival,
                 &[],
-                None,
+                &[],
                 &mut Recorder::default(),
                 INITIATOR_ROOT_FILE,
             )
@@ -2611,7 +2714,7 @@ async fn a_commit_raced_past_its_check_refuses_at_publish() {
         &k,
         &next_graph(2, &edited()),
         &[],
-        None,
+        &[],
         &mut racer,
         INITIATOR_ROOT_FILE,
     )
@@ -2646,6 +2749,23 @@ fn is_contained(g: &Graph, uid: u32) -> bool {
         .is_some_and(|s| g.out_edges(s.id, maknae_graph::kernel::CONTAINED).count() == 1)
 }
 
+fn unsynced_with(fx: &Fixture, k: &WrappingKey, l: IdentityLayer) -> Option<Checkpoint> {
+    let i = inputs_with(l);
+    let g = identity::build(
+        &i.layer,
+        Some(&bl(A)),
+        None,
+        &i.compiled,
+        i.digest,
+        1,
+        ProvenanceKind::Seed,
+    )
+    .unwrap();
+    let file = seal_graph(&g, k);
+    fx.write(STORE_FILE, &file, 0o600);
+    cp(1, &file)
+}
+
 async fn seeded_with(fx: &Fixture, k: &WrappingKey, l: IdentityLayer) -> BootReport {
     run_with(&fx.dir(), k, None, &inputs_with(l))
         .await
@@ -2657,19 +2777,18 @@ async fn seeded_with(fx: &Fixture, k: &WrappingKey, l: IdentityLayer) -> BootRep
 async fn an_upgrade_without_the_pasted_block_refuses_before_any_record() {
     let fx = Fixture::new();
     let k = key(1);
-    let first = seeded_with(
+    let first = unsynced_with(
         &fx,
         &k,
         bindings_layer(MOVED_FROM, Some(BLOCK), MALLORY_AND_OP),
-    )
-    .await;
+    );
     let before = fx.store();
     for missing in [false, true] {
         let shipped = Inputs {
             missing,
             ..inputs_with(bindings_layer(SOURCE, None, &[]))
         };
-        let (r, events) = run_with(&fx.dir(), &k, checkpoint_of(&first), &shipped).await;
+        let (r, events) = run_with(&fx.dir(), &k, first, &shipped).await;
         assert_eq!(
             r.unwrap_err(),
             StoreError::BindingsRefused(BINDINGS_NOT_MOVED),
@@ -2800,67 +2919,7 @@ async fn an_alias_that_stops_resolving_keeps_its_uid_contained_through_boot() {
 }
 
 #[tokio::test]
-async fn a_missing_file_over_explicit_bindings_refuses_before_any_record() {
-    let fx = Fixture::new();
-    let k = key(1);
-    let first = seeded_with(&fx, &k, bindings_layer(SOURCE, Some(b"{}"), &[])).await;
-    let before = fx.store();
-    let gone = Inputs {
-        missing: true,
-        ..inputs_with(bindings_layer(SOURCE, None, &[]))
-    };
-    let (r, events) = run_with(&fx.dir(), &k, checkpoint_of(&first), &gone).await;
-    assert_eq!(
-        r.unwrap_err(),
-        StoreError::BindingsRefused(BINDINGS_MISSING)
-    );
-    assert!(events.is_empty());
-    assert_eq!(fx.store(), before);
-    assert_eq!(
-        remedy(&StoreError::BindingsRefused(BINDINGS_MISSING)),
-        Remedy::Investigate
-    );
-
-    let fx = Fixture::new();
-    let first = seeded_with(&fx, &k, bindings_layer(SOURCE, None, &[])).await;
-    let (r, events) = run_with(&fx.dir(), &k, checkpoint_of(&first), &gone).await;
-    assert!(!r.unwrap().identity_transition, "nothing explicit to drop");
-    assert_eq!(events.len(), 1);
-}
-
-#[tokio::test]
-async fn a_keyless_edit_releases_and_reports_each_containment() {
-    let fx = Fixture::new();
-    let k = key(1);
-    let first = seeded_with(
-        &fx,
-        &k,
-        bindings_layer(SOURCE, Some(BLOCK), &[(666, "mallory", "adversary")]),
-    )
-    .await;
-    let keyless = inputs_with(bindings_layer(SOURCE, None, &[]));
-    let (r, _) = run_with(&fx.dir(), &k, checkpoint_of(&first), &keyless).await;
-    let r = r.unwrap();
-    assert!(r.identity_transition);
-    assert_eq!(
-        r.released,
-        [Released {
-            uid: 666,
-            name: "mallory".into(),
-            cause: ReleaseCause::BindingsAbsent
-        }]
-    );
-    assert_eq!(r.principal_admin, Some(PRINCIPAL_UID));
-    assert!(!is_contained(&graph_of(&fx.store(), &k), 666));
-    let (again, events) = run_with(&fx.dir(), &k, checkpoint_of(&r), &keyless).await;
-    let again = again.unwrap();
-    assert!(again.released.is_empty(), "released once, never again");
-    assert_eq!(again.principal_admin, None);
-    assert_eq!(events.len(), 1);
-}
-
-#[tokio::test]
-async fn a_keyless_boot_writes_its_release_records_before_the_persist() {
+async fn a_boot_writes_its_release_records_before_the_persist() {
     let fx = Fixture::new();
     let k = key(1);
     let first = seeded_with(
@@ -2870,25 +2929,29 @@ async fn a_keyless_boot_writes_its_release_records_before_the_persist() {
     )
     .await;
     let before = fx.store();
-    let keyless = inputs_with(bindings_layer(SOURCE, None, &[]));
+    let edit = inputs_with(bindings_layer(
+        SOURCE,
+        Some(br#"{"user":["op"]}"#),
+        &[(501, "op", "user")],
+    ));
     let mallory = vec![Released {
         uid: 666,
         name: "mallory".into(),
-        cause: ReleaseCause::BindingsAbsent,
+        cause: ReleaseCause::NotListed,
     }];
 
     let mut failing = Recorder {
         fail_released: true,
         ..Recorder::default()
     };
-    let seen = peeked(&fx, &k);
+    let (seen, sync_seen) = (peeked(&fx, &k), peeked_sync(&fx, &k));
     let r = boot(
         &fx.dir(),
         &k,
         checkpoint_of(&first),
         &mut failing,
         NOW,
-        &keyless.boot(seen),
+        &edit.boot(seen, sync_seen.as_ref()),
     )
     .await;
     assert_eq!(r.unwrap_err(), StoreError::Audit("released refused".into()));
@@ -2905,14 +2968,14 @@ async fn a_keyless_boot_writes_its_release_records_before_the_persist() {
         store_at_released: Some(fx.file(STORE_FILE)),
         ..Recorder::default()
     };
-    let seen = peeked(&fx, &k);
+    let (seen, sync_seen) = (peeked(&fx, &k), peeked_sync(&fx, &k));
     let r = boot(
         &fx.dir(),
         &k,
         checkpoint_of(&first),
         &mut audit,
         NOW,
-        &keyless.boot(seen),
+        &edit.boot(seen, sync_seen.as_ref()),
     )
     .await
     .unwrap();
@@ -2920,169 +2983,13 @@ async fn a_keyless_boot_writes_its_release_records_before_the_persist() {
         audit.events,
         vec![
             Event::Checkpoint(1, first.digest, "verified".into()),
-            Event::Released(2, mallory),
-            Event::PrincipalAdmin(2, PRINCIPAL_UID),
+            Event::Released(2, mallory.clone()),
             Event::Transition(2, "root-file".into()),
             Event::Checkpoint(2, r.digest, "transitioned".into()),
         ]
     );
+    assert_eq!(r.released, mallory);
     assert_eq!(audit.store_bytes_at_released, Some(before.clone()));
-    assert_ne!(fx.store(), before);
-}
-
-const ALICE_AND_BOB: &[(u32, &str, &str)] = &[(1000, "alice", "admin"), (1001, "bob", "user")];
-
-#[tokio::test]
-async fn a_keyless_boot_over_explicit_bindings_records_the_principal_admin_before_the_persist() {
-    let fx = Fixture::new();
-    let k = key(1);
-    let first = seeded_with(&fx, &k, bindings_layer(SOURCE, Some(BLOCK), ALICE_AND_BOB)).await;
-    let before = fx.store();
-    let keyless = inputs_with(bindings_layer(SOURCE, None, &[]));
-
-    let mut failing = Recorder {
-        fail_principal_admin: true,
-        ..Recorder::default()
-    };
-    let seen = peeked(&fx, &k);
-    let r = boot(
-        &fx.dir(),
-        &k,
-        checkpoint_of(&first),
-        &mut failing,
-        NOW,
-        &keyless.boot(seen),
-    )
-    .await;
-    assert_eq!(
-        r.unwrap_err(),
-        StoreError::Audit("principal admin refused".into())
-    );
-    assert_eq!(fx.store(), before);
-    assert_eq!(
-        failing.events,
-        vec![
-            Event::Checkpoint(1, first.digest, "verified".into()),
-            Event::PrincipalAdmin(2, PRINCIPAL_UID),
-        ]
-    );
-
-    let mut audit = Recorder {
-        store_at_released: Some(fx.file(STORE_FILE)),
-        ..Recorder::default()
-    };
-    let seen = peeked(&fx, &k);
-    let r = boot(
-        &fx.dir(),
-        &k,
-        checkpoint_of(&first),
-        &mut audit,
-        NOW,
-        &keyless.boot(seen),
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        audit.events,
-        vec![
-            Event::Checkpoint(1, first.digest, "verified".into()),
-            Event::PrincipalAdmin(2, PRINCIPAL_UID),
-            Event::Transition(2, "root-file".into()),
-            Event::Checkpoint(2, r.digest, "transitioned".into()),
-        ]
-    );
-    assert_eq!(audit.store_bytes_at_principal_admin, Some(before.clone()));
-    assert_ne!(fx.store(), before);
-    assert_eq!(
-        (r.principal_admin, r.released.len()),
-        (Some(PRINCIPAL_UID), 0)
-    );
-    let (again, events) = run_with(&fx.dir(), &k, checkpoint_of(&r), &keyless).await;
-    assert_eq!(again.unwrap().principal_admin, None, "recorded once");
-    assert_eq!(events.len(), 1);
-}
-
-#[tokio::test]
-async fn only_a_transition_that_ends_explicit_bindings_records_the_principal_admin() {
-    for (from, to) in [
-        (Some(BLOCK), Some(&br#"{"user":["bob"]}"#[..])),
-        (Some(BLOCK), Some(&b"{}"[..])),
-        (None, Some(BLOCK)),
-    ] {
-        let fx = Fixture::new();
-        let k = key(1);
-        let first = seeded_with(&fx, &k, bindings_layer(SOURCE, from, ALICE_AND_BOB)).await;
-        let next = inputs_with(bindings_layer(SOURCE, to, &[(1001, "bob", "user")]));
-        let (r, events) = run_with(&fx.dir(), &k, checkpoint_of(&first), &next).await;
-        let r = r.unwrap();
-        assert!(r.identity_transition);
-        assert_eq!(r.principal_admin, None);
-        assert!(
-            !events
-                .iter()
-                .any(|e| matches!(e, Event::PrincipalAdmin(..))),
-            "{events:?}"
-        );
-    }
-}
-
-#[tokio::test]
-async fn a_commit_writes_its_principal_admin_record_before_the_persist() {
-    let fx = Fixture::new();
-    let k = key(1);
-    let dir = fx.dir();
-    run(&dir, &k, None).await.0.unwrap();
-    let before = fx.store();
-
-    let mut failing = Recorder {
-        fail_principal_admin: true,
-        ..Recorder::default()
-    };
-    let r = commit(
-        &dir,
-        &k,
-        &next_graph(2, &edited()),
-        &[],
-        Some(PRINCIPAL_UID),
-        &mut failing,
-        INITIATOR_ROOT_FILE,
-    )
-    .await;
-    assert_eq!(
-        r.unwrap_err(),
-        StoreError::Audit("principal admin refused".into())
-    );
-    assert_eq!(fx.store(), before);
-    assert_eq!(dir.store_revision(), 1);
-    assert_eq!(
-        failing.events,
-        vec![Event::PrincipalAdmin(2, PRINCIPAL_UID)]
-    );
-
-    let mut audit = Recorder {
-        store_at_released: Some(fx.file(STORE_FILE)),
-        ..Recorder::default()
-    };
-    let c = commit(
-        &dir,
-        &k,
-        &next_graph(2, &edited()),
-        &[],
-        Some(PRINCIPAL_UID),
-        &mut audit,
-        INITIATOR_ROOT_FILE,
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        audit.events,
-        vec![
-            Event::PrincipalAdmin(2, PRINCIPAL_UID),
-            Event::Transition(2, "root-file".into()),
-            Event::Checkpoint(2, c.digest, "transitioned".into()),
-        ]
-    );
-    assert_eq!(audit.store_bytes_at_principal_admin, Some(before.clone()));
     assert_ne!(fx.store(), before);
 }
 
@@ -3108,7 +3015,7 @@ async fn a_commit_writes_its_release_records_before_the_persist() {
         &k,
         &next_graph(2, &edited()),
         &released,
-        None,
+        &[],
         &mut failing,
         INITIATOR_ROOT_FILE,
     )
@@ -3127,7 +3034,7 @@ async fn a_commit_writes_its_release_records_before_the_persist() {
         &k,
         &next_graph(2, &edited()),
         &released,
-        None,
+        &[],
         &mut audit,
         INITIATOR_ROOT_FILE,
     )
@@ -3150,10 +3057,10 @@ async fn an_upgrade_from_any_other_spelling_of_authz_yaml_refuses() {
     for old in ["/private/etc/maknae/authz.yaml", "/opt/x/authz.yaml"] {
         let fx = Fixture::new();
         let k = key(1);
-        let first = seeded_with(&fx, &k, bindings_layer(old, Some(BLOCK), MALLORY_AND_OP)).await;
+        let first = unsynced_with(&fx, &k, bindings_layer(old, Some(BLOCK), MALLORY_AND_OP));
         let before = fx.store();
         let shipped = inputs_with(bindings_layer(SOURCE, None, &[]));
-        let (r, events) = run_with(&fx.dir(), &k, checkpoint_of(&first), &shipped).await;
+        let (r, events) = run_with(&fx.dir(), &k, first, &shipped).await;
         assert_eq!(
             r.unwrap_err(),
             StoreError::BindingsRefused(BINDINGS_NOT_MOVED),
@@ -3231,7 +3138,15 @@ async fn a_failed_seed_baseline_record_persists_nothing() {
         ..Recorder::default()
     };
     let i = inputs();
-    let r = boot(&fx.dir(), &key(1), None, &mut audit, NOW, &i.boot(None)).await;
+    let r = boot(
+        &fx.dir(),
+        &key(1),
+        None,
+        &mut audit,
+        NOW,
+        &i.boot(None, None),
+    )
+    .await;
     assert_eq!(r.unwrap_err(), StoreError::Audit("baseline refused".into()));
     assert!(!fx.exists(STORE_FILE));
     assert_eq!(
@@ -3271,6 +3186,7 @@ async fn an_upgrade_store_without_a_baseline_gains_one_in_one_recorded_transitio
     let old = identity::build(
         &i.layer,
         None,
+        None,
         &i.compiled,
         i.digest,
         4,
@@ -3282,12 +3198,13 @@ async fn an_upgrade_store_without_a_baseline_gains_one_in_one_recorded_transitio
         revision: 4,
         digest: ciphertext_digest(&fx.store()),
     });
-    let (r, events) = run(&fx.dir(), &k, cp).await;
+    let (r, events) = run_with(&fx.dir(), &k, cp, &creating(inputs())).await;
     let r = r.unwrap();
     assert_eq!(
         &events[1..],
         &[
             Event::Baseline(5, vec![SEEDED.into()]),
+            Event::Sync(5, vec![CREATED.into()]),
             Event::Transition(5, INITIATOR_ROOT_FILE.into()),
             Event::Checkpoint(5, r.digest, "transitioned".into()),
         ]
@@ -3350,24 +3267,48 @@ async fn a_recorded_baseline_change_persists_the_new_baseline_once() {
 }
 
 #[tokio::test]
-async fn a_baseline_record_follows_the_principal_record_and_precedes_the_transition() {
+async fn a_boot_writes_releases_then_the_baseline_then_the_sync_record_before_the_transition() {
     let fx = Fixture::new();
     let k = key(1);
-    let first = seeded_with(&fx, &k, bindings_layer(SOURCE, Some(BLOCK), ALICE_AND_BOB)).await;
-    let keyless = inputs_with(bindings_layer(SOURCE, None, &[]));
-    let i = with_baseline(
-        keyless,
+    let first = seeded_with(
+        &fx,
+        &k,
+        bindings_layer(
+            SOURCE,
+            Some(BLOCK),
+            &[(666, "mallory", "adversary"), (1001, "bob", "user")],
+        ),
+    )
+    .await;
+    let edit = inputs_with(bindings_layer(
+        SOURCE,
+        Some(br#"{"user":["bob"]}"#),
+        &[(1001, "bob", "user")],
+    ));
+    let mut i = with_baseline(
+        edit,
         bl(B),
         Seen::Exactly(Some(bl(A).sha256)),
         &["one", "two"],
     );
+    i.sync = synced(r#"{"user":["bob"]}"#);
+    i.sync_kind = maknae_config::SyncKind::RootFile;
+    i.sync_events = vec!["s".into()];
     let (r, events) = run_with(&fx.dir(), &k, checkpoint_of(&first), &i).await;
     let r = r.unwrap();
     assert_eq!(
         &events[1..],
         &[
-            Event::PrincipalAdmin(2, PRINCIPAL_UID),
+            Event::Released(
+                2,
+                vec![Released {
+                    uid: 666,
+                    name: "mallory".into(),
+                    cause: ReleaseCause::NotListed,
+                }]
+            ),
             Event::Baseline(2, vec!["one".into(), "two".into()]),
+            Event::Sync(2, vec!["s".into()]),
             Event::Transition(2, INITIATOR_ROOT_FILE.into()),
             Event::Checkpoint(2, r.digest, "transitioned".into()),
         ]
@@ -3375,6 +3316,7 @@ async fn a_baseline_record_follows_the_principal_record_and_precedes_the_transit
     assert!(r.baseline_transition && r.identity_transition);
     let stored = identity::extract(&graph_of(&fx.store(), &k)).unwrap();
     assert_eq!(stored.baseline, Some(bl(B)));
+    assert_eq!(stored.sync, Some(i.sync.clone()));
     assert_eq!(sorted_subjects(&stored.layer), sorted_subjects(&i.layer));
 }
 
@@ -3428,13 +3370,14 @@ async fn a_failed_baseline_record_persists_nothing() {
         fail_baseline: true,
         ..Recorder::default()
     };
+    let sync_seen = peeked_sync(&fx, &k);
     let r = boot(
         &fx.dir(),
         &k,
         checkpoint_of(&first),
         &mut audit,
         NOW,
-        &i.boot(Some(bl(A).sha256)),
+        &i.boot(Some(bl(A).sha256), sync_seen.as_ref()),
     )
     .await;
     assert!(matches!(r, Err(StoreError::Audit(_))), "{r:?}");
@@ -3469,6 +3412,7 @@ async fn an_upgrade_store_read_as_having_a_baseline_is_refused() {
     let i = inputs();
     let old = identity::build(
         &i.layer,
+        None,
         None,
         &i.compiled,
         i.digest,
@@ -3539,13 +3483,14 @@ async fn a_migration_carries_the_stored_baseline_not_the_input() {
         fail_baseline: true,
         ..Recorder::default()
     };
+    let sync_seen = peeked_sync(&fx, &k);
     let r = boot(
         &fx.dir(),
         &k,
         checkpoint_of(&first),
         &mut audit,
         NOW,
-        &i.boot(Some(bl(A).sha256)),
+        &i.boot(Some(bl(A).sha256), sync_seen.as_ref()),
     )
     .await;
     assert_eq!(r.unwrap_err(), StoreError::Audit("baseline refused".into()));
@@ -3562,6 +3507,7 @@ async fn a_store_with_a_baseline_is_canonical() {
     let g = identity::build(
         &i.layer,
         Some(&bl(B)),
+        Some(&i.sync),
         &i.compiled,
         i.digest,
         3,
@@ -3586,6 +3532,7 @@ async fn a_non_canonical_store_is_rebuilt_with_its_baseline() {
     let g = identity::build(
         &i.layer,
         Some(&bl(B)),
+        None,
         &i.compiled,
         i.digest,
         3,
@@ -3679,6 +3626,7 @@ async fn an_operator_commit_records_the_operator_initiator() {
     let next = identity::build(
         &i.layer,
         Some(&bl(A)),
+        None,
         &i.compiled,
         i.digest,
         2,
@@ -3686,7 +3634,7 @@ async fn an_operator_commit_records_the_operator_initiator() {
     )
     .unwrap();
     let mut audit = Recorder::default();
-    let c = commit(&dir, &k, &next, &[], None, &mut audit, INITIATOR_OPERATOR)
+    let c = commit(&dir, &k, &next, &[], &[], &mut audit, INITIATOR_OPERATOR)
         .await
         .unwrap();
     assert_eq!(INITIATOR_OPERATOR, "operator");
@@ -3707,6 +3655,7 @@ async fn an_accept_changes_the_baseline_after_recording_why_and_nothing_else_doe
         identity::build(
             &i.layer,
             b,
+            Some(&i.sync),
             &i.compiled,
             i.digest,
             2,
@@ -3759,6 +3708,7 @@ async fn a_commit_that_changes_or_drops_the_baseline_is_refused() {
         let next = identity::build(
             &i.layer,
             baseline.as_ref(),
+            None,
             &i.compiled,
             i.digest,
             2,
@@ -3766,10 +3716,816 @@ async fn a_commit_that_changes_or_drops_the_baseline_is_refused() {
         )
         .unwrap();
         let mut audit = Recorder::default();
-        let r = commit(&dir, &k, &next, &[], None, &mut audit, INITIATOR_ROOT_FILE).await;
+        let r = commit(&dir, &k, &next, &[], &[], &mut audit, INITIATOR_ROOT_FILE).await;
         assert_eq!(r.unwrap_err(), StoreError::BaselineUnrecorded);
         assert!(audit.events.is_empty(), "{:?}", audit.events);
         assert_eq!(fx.store(), before);
         assert_eq!(dir.store_revision(), 1);
     }
+}
+
+#[tokio::test]
+async fn a_store_without_a_sync_base_adopts_the_file_as_a_kernel_transition() {
+    let (fx, k) = (Fixture::new(), key(1));
+    fx.write(STORE_FILE, &sealed_unsynced(4, &k), 0o600);
+    let i = creating(inputs());
+    let (r, events) = run_with(&fx.dir(), &k, None, &i).await;
+    let r = r.unwrap();
+    assert_eq!(r.revision, 5);
+    assert_eq!(extracted(&r.graph).sync, Some(i.sync.clone()));
+    assert_eq!(
+        extracted(&graph_of(&fx.store(), &k)).sync,
+        Some(i.sync.clone())
+    );
+    assert!(events.contains(&Event::Sync(5, i.sync_events.clone())));
+    assert!(
+        events.contains(&Event::Transition(5, "kernel".into())),
+        "{events:?}"
+    );
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, Event::Transition(_, who) if who == "root-file")));
+    assert!(subject_provenance(&r.graph)
+        .iter()
+        .all(|p| *p == ProvenanceKind::Kernel));
+    assert!(!r.identity_transition && !r.baseline_transition);
+}
+
+#[tokio::test]
+async fn an_adoption_is_kernel_and_a_root_edit_is_root_file() {
+    let (fx, k) = (Fixture::new(), key(1));
+    let (first, _) = run_with(&fx.dir(), &k, None, &inputs()).await;
+    let cp = checkpoint_of(&first.unwrap());
+    let mut adopted = inputs();
+    adopted.sync = synced(r#"{"admin":["root"],"guest":[]}"#);
+    adopted.sync_kind = maknae_config::SyncKind::Adopted;
+    adopted.sync_events =
+        vec!["adopted: bindings.yaml holds the live section (0 unsynced entries)".into()];
+    let (r, events) = run_with(&fx.dir(), &k, cp, &adopted).await;
+    assert!(
+        events.contains(&Event::Transition(2, "kernel".into())),
+        "{events:?}"
+    );
+    assert!(events.contains(&Event::Sync(2, adopted.sync_events.clone())));
+    let cp = checkpoint_of(&r.unwrap());
+    let mut root = edited();
+    root.sync_kind = maknae_config::SyncKind::RootFile;
+    root.sync = synced(r#"{"user":["root"]}"#);
+    root.sync_events = vec![];
+    let (r, events) = run_with(&fx.dir(), &k, cp, &root).await;
+    assert!(
+        events.contains(&Event::Transition(3, "root-file".into())),
+        "{events:?}"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Sync(..))),
+        "{events:?}"
+    );
+    assert!(subject_provenance(&r.unwrap().graph)
+        .iter()
+        .all(|p| *p == ProvenanceKind::RootFile));
+}
+
+#[tokio::test]
+async fn an_unchanged_sync_base_and_layer_commit_nothing() {
+    let (fx, k) = (Fixture::new(), key(1));
+    let (first, _) = run_with(&fx.dir(), &k, None, &inputs()).await;
+    let first = first.unwrap();
+    let before = fx.store();
+    let (r, events) = run_with(&fx.dir(), &k, checkpoint_of(&first), &inputs()).await;
+    assert_eq!(r.unwrap().revision, first.revision);
+    assert_eq!(
+        events,
+        vec![Event::Checkpoint(1, first.digest, "verified".into())]
+    );
+    assert_eq!(fx.store(), before);
+}
+
+#[tokio::test]
+async fn a_supplied_sync_event_is_written_ahead_even_when_the_sync_base_is_unchanged() {
+    let (fx, k) = (Fixture::new(), key(1));
+    let (first, _) = run_with(&fx.dir(), &k, None, &inputs()).await;
+    let first = first.unwrap();
+    let lost = vec!["lost: bindings.yaml is missing".to_string()];
+    let i = Inputs {
+        sync_kind: maknae_config::SyncKind::Lost,
+        sync_events: lost.clone(),
+        ..with_baseline(
+            inputs(),
+            bl(B),
+            Seen::Exactly(Some(bl(A).sha256)),
+            &["baseline changed"],
+        )
+    };
+    assert_eq!(extracted(&first.graph).sync, Some(i.sync.clone()));
+    let (r, events) = run_with(&fx.dir(), &k, checkpoint_of(&first), &i).await;
+    let r = r.unwrap();
+    assert_eq!(
+        events,
+        vec![
+            Event::Checkpoint(1, first.digest, "verified".into()),
+            Event::Baseline(2, vec!["baseline changed".into()]),
+            Event::Sync(2, lost),
+            Event::Transition(2, "root-file".into()),
+            Event::Checkpoint(2, r.digest, "transitioned".into()),
+        ]
+    );
+    assert_eq!(extracted(&r.graph).sync, Some(i.sync.clone()));
+}
+#[tokio::test]
+async fn a_store_whose_sync_base_is_not_the_one_merged_against_refuses() {
+    let (fx, k) = (Fixture::new(), key(1));
+    let (first, _) = run_with(&fx.dir(), &k, None, &inputs()).await;
+    let cp = checkpoint_of(&first.unwrap());
+    let before = fx.store();
+    for seen in [None, Some(synced(r#"{"user":["root"]}"#))] {
+        let mut i = inputs();
+        i.sync_seen = SyncSeen::Exactly(seen);
+        let (r, events) = run_with(&fx.dir(), &k, cp, &i).await;
+        assert_eq!(r.unwrap_err(), StoreError::SyncUnseen);
+        assert!(events.is_empty(), "{events:?}");
+        assert_eq!(fx.store(), before);
+    }
+    fx.write(STORE_FILE, &sealed_unsynced(4, &k), 0o600);
+    let mut i = inputs();
+    i.sync_seen = SyncSeen::Exactly(Some(i.sync.clone()));
+    let (r, _) = run_with(&fx.dir(), &k, None, &i).await;
+    assert_eq!(r.unwrap_err(), StoreError::SyncUnseen);
+}
+
+#[tokio::test]
+async fn a_sync_record_that_cannot_be_appended_persists_nothing() {
+    let (fx, k) = (Fixture::new(), key(1));
+    let (first, _) = run_with(&fx.dir(), &k, None, &inputs()).await;
+    let before = fx.store();
+    let mut audit = Recorder {
+        fail_sync: true,
+        ..Recorder::default()
+    };
+    let mut i = edited();
+    i.sync_kind = maknae_config::SyncKind::RootFile;
+    i.sync_events = vec![
+        "conflict: x changed in bindings.yaml and by an unsynced live transition; failed closed: contained"
+            .into(),
+    ];
+    i.sync = SyncBase {
+        base: r#"{"user":["root"]}"#.into(),
+        live: r#"{"user":["root"]}"#.into(),
+        conflicts: r#"["x"]"#.into(),
+    };
+    let dir = fx.dir();
+    let ss = sync_seen(&dir, &k, &i);
+    let r = boot(
+        &dir,
+        &k,
+        checkpoint_of(&first.unwrap()),
+        &mut audit,
+        NOW,
+        &i.boot(seen(&dir, &k, &i), ss.as_ref()),
+    )
+    .await;
+    assert_eq!(r.unwrap_err(), StoreError::Audit("sync refused".into()));
+    assert_eq!(fx.store(), before);
+    assert!(
+        !audit
+            .events
+            .iter()
+            .any(|e| matches!(e, Event::Transition(..))),
+        "{:?}",
+        audit.events
+    );
+    assert!(audit
+        .events
+        .contains(&Event::Sync(2, i.sync_events.clone())));
+}
+
+#[tokio::test]
+async fn without_a_sync_base_a_lost_file_still_refuses_and_with_one_it_is_the_kernels_to_decide() {
+    let (fx, k) = (Fixture::new(), key(1));
+    let explicit = bindings_layer(SOURCE, Some(BLOCK), MALLORY_AND_OP);
+    let i = inputs_with(explicit.clone());
+    let g = identity::build(
+        &explicit,
+        Some(&bl(A)),
+        None,
+        &i.compiled,
+        i.digest,
+        1,
+        ProvenanceKind::Seed,
+    )
+    .unwrap();
+    fx.write(STORE_FILE, &seal_graph(&g, &k), 0o600);
+    let before = fx.store();
+    let missing = Inputs {
+        missing: true,
+        ..inputs_with(bindings_layer(SOURCE, None, &[]))
+    };
+    let keyless = inputs_with(bindings_layer(SOURCE, None, &[]));
+    for (lost, why) in [
+        (&missing, BINDINGS_MISSING),
+        (&keyless, BINDINGS_KEY_DROPPED),
+    ] {
+        let (r, events) = run_with(&fx.dir(), &k, None, lost).await;
+        assert_eq!(r.unwrap_err(), StoreError::BindingsRefused(why));
+        assert!(events.is_empty(), "{events:?}");
+        assert_eq!(fx.store(), before);
+    }
+    assert_eq!(
+        remedy(&StoreError::BindingsRefused(BINDINGS_KEY_DROPPED)),
+        Remedy::Investigate
+    );
+
+    let (adopted, _) = run_with(&fx.dir(), &k, None, &i).await;
+    let adopted = adopted.unwrap();
+    assert_eq!(extracted(&adopted.graph).sync, Some(i.sync.clone()));
+    let after = fx.store();
+    let lost = Inputs {
+        missing: true,
+        sync_kind: maknae_config::SyncKind::Lost,
+        sync_events: vec!["lost: bindings.yaml is missing".into()],
+        ..inputs_with(explicit)
+    };
+    let (r, events) = run_with(&fx.dir(), &k, checkpoint_of(&adopted), &lost).await;
+    let r = r.unwrap();
+    assert_eq!(r.revision, adopted.revision);
+    assert!(r.released.is_empty());
+    assert_eq!(
+        events,
+        vec![Event::Checkpoint(
+            adopted.revision,
+            adopted.digest,
+            "verified".into()
+        )]
+    );
+    assert_eq!(fx.store(), after);
+}
+
+#[test]
+fn the_initiator_is_kernel_only_for_a_pure_creation_or_adoption() {
+    use maknae_config::SyncKind::*;
+    for kind in [Created, Unchanged, Adopted, RootFile, Lost] {
+        for (id, bl, st) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+        ] {
+            let want = if matches!(kind, Created | Adopted) && !id && !bl && !st {
+                ProvenanceKind::Kernel
+            } else {
+                ProvenanceKind::RootFile
+            };
+            assert_eq!(
+                transition_initiator(kind, id, bl, st),
+                want,
+                "{kind:?} {id} {bl} {st}"
+            );
+        }
+    }
+}
+
+#[test]
+fn each_provenance_names_its_initiator() {
+    assert_eq!(INITIATOR_KERNEL, "kernel");
+    for (p, want) in [
+        (ProvenanceKind::Seed, INITIATOR_SEED),
+        (ProvenanceKind::RootFile, INITIATOR_ROOT_FILE),
+        (ProvenanceKind::Operator, INITIATOR_OPERATOR),
+        (ProvenanceKind::Kernel, INITIATOR_KERNEL),
+        (ProvenanceKind::Compiled, "compiled"),
+    ] {
+        assert_eq!(initiator_name(p), want, "{p:?}");
+    }
+    assert_eq!(
+        LiveInitiator::Operator.provenance(),
+        ProvenanceKind::Operator
+    );
+    assert_eq!(LiveInitiator::Kernel.provenance(), ProvenanceKind::Kernel);
+}
+
+fn live_next(
+    g: &Graph,
+    revision: u64,
+    baseline: Option<&BaselineLayer>,
+    sync: Option<&SyncBase>,
+) -> Graph {
+    let i = inputs();
+    identity::build(
+        &extracted(g).layer,
+        baseline,
+        sync,
+        &i.compiled,
+        i.digest,
+        revision,
+        ProvenanceKind::Operator,
+    )
+    .unwrap()
+}
+
+const LIVE: &str = r#"{"admin":["root"],"adversary":[{"uid":7}]}"#;
+
+#[tokio::test]
+async fn a_live_commit_keeps_the_base_the_conflicts_and_the_baseline() {
+    let (fx, k) = (Fixture::new(), key(1));
+    let dir = fx.dir();
+    let booted = run(&dir, &k, None).await.0.unwrap();
+    let stored = extracted(&booted.graph).sync.unwrap();
+    let live = SyncBase {
+        live: LIVE.into(),
+        ..stored.clone()
+    };
+    let events = vec!["live: uid:7 contained".to_string()];
+    let before = fx.store();
+    let g = &booted.graph;
+    let refusals = [
+        (
+            live_next(
+                g,
+                2,
+                Some(&bl(A)),
+                Some(&SyncBase {
+                    base: r#"{"user":["root"]}"#.into(),
+                    ..live.clone()
+                }),
+            ),
+            events.clone(),
+            StoreError::SyncBaseChanged,
+        ),
+        (
+            live_next(
+                g,
+                2,
+                Some(&bl(A)),
+                Some(&SyncBase {
+                    conflicts: r#"["root"]"#.into(),
+                    ..live.clone()
+                }),
+            ),
+            events.clone(),
+            StoreError::SyncBaseChanged,
+        ),
+        (
+            live_next(g, 2, Some(&bl(A)), None),
+            events.clone(),
+            StoreError::SyncAbsent,
+        ),
+        (
+            live_next(g, 2, Some(&bl(B)), Some(&live)),
+            events.clone(),
+            StoreError::BaselineUnrecorded,
+        ),
+        (
+            live_next(g, 2, Some(&bl(A)), Some(&live)),
+            vec![],
+            StoreError::SyncUnrecorded,
+        ),
+    ];
+    for (next, ev, want) in refusals {
+        let mut audit = Recorder::default();
+        let r = commit_live(
+            &dir,
+            &k,
+            &next,
+            &[],
+            &ev,
+            &mut audit,
+            LiveInitiator::Operator,
+        )
+        .await;
+        assert_eq!(r.unwrap_err(), want);
+        assert!(audit.events.is_empty(), "{:?}", audit.events);
+        assert_eq!(fx.store(), before);
+        assert_eq!(dir.store_revision(), 1);
+    }
+
+    let mut audit = Recorder::default();
+    let next = live_next(g, 2, Some(&bl(A)), Some(&live));
+    let c = commit_live(
+        &dir,
+        &k,
+        &next,
+        &[],
+        &events,
+        &mut audit,
+        LiveInitiator::Operator,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        audit.events,
+        vec![
+            Event::Sync(2, events.clone()),
+            Event::Transition(2, "operator".into()),
+            Event::Checkpoint(2, c.digest, "transitioned".into()),
+        ]
+    );
+    assert_eq!(c.revision, 2);
+    assert_eq!(
+        extracted(&graph_of(&fx.store(), &k)).sync,
+        Some(live.clone())
+    );
+
+    let released = vec![Released {
+        uid: 7,
+        name: "uid:7".into(),
+        cause: ReleaseCause::NotListed,
+    }];
+    let mut audit = Recorder::default();
+    let next = live_next(g, 3, Some(&bl(A)), Some(&stored));
+    let c = commit_live(
+        &dir,
+        &k,
+        &next,
+        &released,
+        &events,
+        &mut audit,
+        LiveInitiator::Kernel,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        audit.events,
+        vec![
+            Event::Released(3, released),
+            Event::Sync(3, events.clone()),
+            Event::Transition(3, "kernel".into()),
+            Event::Checkpoint(3, c.digest, "transitioned".into()),
+        ]
+    );
+    assert_eq!(extracted(&graph_of(&fx.store(), &k)).sync, Some(stored));
+}
+
+#[tokio::test]
+async fn a_live_commit_may_drop_only_the_listed_entry_it_edited() {
+    let (fx, k) = (Fixture::new(), key(1));
+    let listed = SyncBase {
+        base: r#"{"user":["alice","bob"]}"#.into(),
+        live: r#"{"user":[]}"#.into(),
+        conflicts: r#"["alice","bob"]"#.into(),
+    };
+    fx.write(STORE_FILE, &sealed_with_sync(4, &k, Some(&listed)), 0o600);
+    let before = fx.store();
+    let dir = fx.dir();
+    let g = graph_of(&before, &k);
+    let alice_contained = r#"{"adversary":["alice"],"user":[]}"#;
+    let with = |live: &str, conflicts: &str| SyncBase {
+        live: live.into(),
+        conflicts: conflicts.into(),
+        ..listed.clone()
+    };
+    for refused in [
+        with(alice_contained, "[]"),
+        with(alice_contained, r#"["alice"]"#),
+        with(alice_contained, r#"["alice","bob","carol"]"#),
+        with(alice_contained, r#"["bob","carol"]"#),
+        with(r#"{"user":[]}"#, r#"["bob"]"#),
+        with(r#"{"adversary":["alice","bob"],"user":[]}"#, r#"["bob"]"#),
+        with(r#"{"adversary":["alice","carol"],"user":[]}"#, r#"["bob"]"#),
+        with(alice_contained, "not a list"),
+        with("not a section", r#"["bob"]"#),
+    ] {
+        let mut audit = Recorder::default();
+        let r = commit_live(
+            &dir,
+            &k,
+            &live_next(&g, 5, Some(&bl(A)), Some(&refused)),
+            &[],
+            &["live".into()],
+            &mut audit,
+            LiveInitiator::Operator,
+        )
+        .await;
+        assert_eq!(r.unwrap_err(), StoreError::SyncBaseChanged, "{refused:?}");
+        assert!(audit.events.is_empty(), "{:?}", audit.events);
+        assert_eq!(fx.store(), before);
+    }
+    let shrunk = with(alice_contained, r#"["bob"]"#);
+    let mut audit = Recorder::default();
+    commit_live(
+        &dir,
+        &k,
+        &live_next(&g, 5, Some(&bl(A)), Some(&shrunk)),
+        &[],
+        &["live".into()],
+        &mut audit,
+        LiveInitiator::Operator,
+    )
+    .await
+    .unwrap();
+    assert_eq!(extracted(&graph_of(&fx.store(), &k)).sync, Some(shrunk));
+}
+
+#[tokio::test]
+async fn a_live_commit_over_a_store_without_a_sync_base_is_refused() {
+    let (fx, k) = (Fixture::new(), key(1));
+    fx.write(STORE_FILE, &sealed_unsynced(4, &k), 0o600);
+    let before = fx.store();
+    let dir = fx.dir();
+    let g = graph_of(&before, &k);
+    let mut audit = Recorder::default();
+    let r = commit_live(
+        &dir,
+        &k,
+        &live_next(&g, 5, Some(&bl(A)), Some(&synced(LIVE))),
+        &[],
+        &["live".into()],
+        &mut audit,
+        LiveInitiator::Operator,
+    )
+    .await;
+    assert_eq!(r.unwrap_err(), StoreError::SyncAbsent);
+    assert!(audit.events.is_empty());
+    assert_eq!(fx.store(), before);
+}
+
+#[tokio::test]
+async fn an_accept_carries_the_sync_base_unchanged() {
+    let (fx, k) = (Fixture::new(), key(1));
+    let dir = fx.dir();
+    let booted = run(&dir, &k, None).await.0.unwrap();
+    let stored = extracted(&booted.graph).sync.unwrap();
+    let before = fx.store();
+    let changed = SyncBase {
+        live: LIVE.into(),
+        ..stored.clone()
+    };
+    for sync in [Some(&changed), None] {
+        let mut audit = Recorder::default();
+        let next = live_next(&booted.graph, 2, Some(&bl(B)), sync);
+        let r = commit_accept(&dir, &k, &next, &["why".into()], &mut audit).await;
+        assert_eq!(r.unwrap_err(), StoreError::SyncBaseChanged);
+        assert!(audit.events.is_empty(), "{:?}", audit.events);
+        assert_eq!(fx.store(), before);
+    }
+    let mut audit = Recorder::default();
+    let next = live_next(&booted.graph, 2, Some(&bl(B)), Some(&stored));
+    commit_accept(&dir, &k, &next, &["why".into()], &mut audit)
+        .await
+        .unwrap();
+    assert!(!audit.events.iter().any(|e| matches!(e, Event::Sync(..))));
+    assert_eq!(extracted(&graph_of(&fx.store(), &k)).sync, Some(stored));
+}
+
+#[test]
+fn peek_sync_reads_the_stored_sync_base_and_writes_nothing() {
+    let fx = Fixture::new();
+    let k = key(1);
+    assert_eq!(maknae_state::store::peek_sync(&fx.dir(), &k).unwrap(), None);
+    fx.write(STORE_FILE, &sealed_unsynced(4, &k), 0o600);
+    assert_eq!(maknae_state::store::peek_sync(&fx.dir(), &k).unwrap(), None);
+    fs::remove_file(fx.file(STORE_FILE)).unwrap();
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(run(&fx.dir(), &k, None))
+        .0
+        .unwrap();
+    let before = fx.store();
+    assert_eq!(peeked_sync(&fx, &k), Some(inputs().sync));
+    assert_eq!(fx.store(), before);
+    assert!(matches!(
+        maknae_state::store::peek_sync(&fx.dir(), &key(2)),
+        Err(StoreError::Envelope(_))
+    ));
+    fx.write(STORE_FILE, b"x", 0o644);
+    assert!(matches!(
+        maknae_state::store::peek_sync(&fx.dir(), &k),
+        Err(StoreError::StoreFileRefused(_))
+    ));
+}
+
+#[test]
+fn sync_refusals_name_their_cause_and_remedy() {
+    for (e, text) in [
+        (
+            StoreError::SyncUnseen,
+            "the store's sync base is not the one this start merged against; nothing was applied",
+        ),
+        (
+            StoreError::SyncBaseChanged,
+            "a live identity edit would change the sync base; nothing was applied",
+        ),
+        (
+            StoreError::SyncAbsent,
+            "the store holds no sync base; nothing was applied",
+        ),
+        (
+            StoreError::SyncUnrecorded,
+            "a live identity edit was not recorded; nothing was applied",
+        ),
+    ] {
+        assert_eq!(e.to_string(), text);
+        assert_eq!(remedy(&e), Remedy::Investigate, "{e:?}");
+    }
+}
+
+#[test]
+fn the_mirror_is_published_daemon_owned_0600() {
+    let fx = Fixture::new();
+    assert_eq!(MIRROR_FILE, "bindings.mirror.yaml");
+    fx.dir().publish_mirror(b"m").unwrap();
+    let md = std::fs::symlink_metadata(fx.file(MIRROR_FILE)).unwrap();
+    assert_eq!(
+        (md.uid(), md.permissions().mode() & 0o7777),
+        (fx.uid, 0o600)
+    );
+    assert_eq!(fs::read(fx.file(MIRROR_FILE)).unwrap(), b"m");
+    fx.dir().remove_mirror().unwrap();
+    assert!(!fx.exists(MIRROR_FILE));
+    fx.dir().remove_mirror().unwrap();
+    let d = fx.dir();
+    d.publish_mirror(b"old").unwrap();
+    d.fail_next_mirror_publish();
+    assert!(d.publish_mirror(b"n").is_err());
+    assert_eq!(
+        fs::read(fx.file(MIRROR_FILE)).unwrap(),
+        b"old",
+        "the seam fails before the rename; removal is the kernel's job"
+    );
+    assert!(!fs::read_dir(fx.path()).unwrap().any(|e| e
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .contains(".tmp.")));
+    d.publish_mirror(b"n").unwrap();
+    assert_eq!(fs::read(fx.file(MIRROR_FILE)).unwrap(), b"n");
+    d.skip_next_mirror_publish();
+    d.publish_mirror(b"skipped").unwrap();
+    assert_eq!(fs::read(fx.file(MIRROR_FILE)).unwrap(), b"n");
+    d.publish_mirror(b"after").unwrap();
+    assert_eq!(fs::read(fx.file(MIRROR_FILE)).unwrap(), b"after");
+}
+
+#[tokio::test]
+async fn every_persist_removes_the_mirror_first_and_a_load_that_commits_nothing_keeps_it() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let stale = || fx.write(MIRROR_FILE, b"stale", 0o600);
+    stale();
+    let first = run(&fx.dir(), &k, None).await.0.unwrap();
+    assert!(!fx.exists(MIRROR_FILE), "seed");
+    stale();
+    let loaded = run(&fx.dir(), &k, checkpoint_of(&first)).await.0.unwrap();
+    assert!(!loaded.identity_transition);
+    assert_eq!(fs::read(fx.file(MIRROR_FILE)).unwrap(), b"stale", "load");
+    let dir = fx.dir();
+    let e = edited();
+    let moved = run_with(&dir, &k, checkpoint_of(&loaded), &e)
+        .await
+        .0
+        .unwrap();
+    assert!(moved.identity_transition);
+    assert!(!fx.exists(MIRROR_FILE), "boot transition");
+    stale();
+    commit(
+        &dir,
+        &k,
+        &next_graph(3, &e),
+        &[],
+        &[],
+        &mut Recorder::default(),
+        INITIATOR_ROOT_FILE,
+    )
+    .await
+    .unwrap();
+    assert!(!fx.exists(MIRROR_FILE), "commit");
+}
+
+#[tokio::test]
+async fn a_mirror_that_cannot_be_removed_refuses_the_commit_and_persists_nothing() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let dir = fx.dir();
+    run(&dir, &k, None).await.0.unwrap();
+    let before = fx.store();
+    fs::create_dir(fx.file(MIRROR_FILE)).unwrap();
+    fs::write(fx.file(MIRROR_FILE).join("x"), b"").unwrap();
+    let mut audit = Recorder::default();
+    let e = commit(
+        &dir,
+        &k,
+        &next_graph(2, &edited()),
+        &[],
+        &[],
+        &mut audit,
+        INITIATOR_ROOT_FILE,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(e, StoreError::MirrorNotRemoved(_)), "{e:?}");
+    let text = e.to_string();
+    assert!(
+        text.starts_with("the previous bindings mirror could not be removed before the commit: ")
+            && text.ends_with("; nothing was applied"),
+        "{text}"
+    );
+    assert_eq!(fx.store(), before);
+    assert_eq!(dir.store_revision(), 1);
+    assert!(fx.file(MIRROR_FILE).join("x").exists());
+    assert_eq!(audit.events, [Event::Transition(2, "root-file".into())]);
+}
+
+#[tokio::test]
+async fn a_commit_that_fails_after_the_removal_leaves_no_mirror_and_no_change() {
+    let fx = Fixture::new();
+    let k = key(1);
+    let dir = fx.dir();
+    run(&dir, &k, None).await.0.unwrap();
+    let before = fx.store();
+    fx.write(MIRROR_FILE, b"old", 0o600);
+    dir.fail_next_store_publish();
+    let e = commit(
+        &dir,
+        &k,
+        &next_graph(2, &edited()),
+        &[],
+        &[],
+        &mut Recorder::default(),
+        INITIATOR_ROOT_FILE,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(e, StoreError::Io(_)), "{e:?}");
+    assert_eq!(fx.store(), before);
+    assert_eq!(dir.store_revision(), 1);
+    assert!(!fx.exists(MIRROR_FILE));
+}
+
+#[test]
+fn removing_the_mirror_reports_a_failure_other_than_absence() {
+    let fx = Fixture::new();
+    fs::create_dir(fx.file(MIRROR_FILE)).unwrap();
+    fs::write(fx.file(MIRROR_FILE).join("x"), b"").unwrap();
+    assert!(fx.dir().remove_mirror().is_err());
+}
+
+#[tokio::test]
+async fn a_commit_whose_sync_record_cannot_be_appended_persists_nothing() {
+    let (fx, k) = (Fixture::new(), key(1));
+    let dir = fx.dir();
+    let booted = run(&dir, &k, None).await.0.unwrap();
+    let before = fx.store();
+    let mut audit = Recorder {
+        fail_sync: true,
+        ..Recorder::default()
+    };
+    let live = SyncBase {
+        live: LIVE.into(),
+        ..extracted(&booted.graph).sync.unwrap()
+    };
+    let r = commit_live(
+        &dir,
+        &k,
+        &live_next(&booted.graph, 2, Some(&bl(A)), Some(&live)),
+        &[],
+        &["live".into()],
+        &mut audit,
+        LiveInitiator::Operator,
+    )
+    .await;
+    assert_eq!(r.unwrap_err(), StoreError::Audit("sync refused".into()));
+    assert_eq!(audit.events, vec![Event::Sync(2, vec!["live".into()])]);
+    assert_eq!(fx.store(), before);
+    assert_eq!(dir.store_revision(), 1);
+}
+
+#[tokio::test]
+async fn a_commit_over_no_store_is_refused_as_an_unrecorded_baseline() {
+    let (fx, k) = (Fixture::new(), key(1));
+    let mut audit = Recorder::default();
+    let r = commit(
+        &fx.dir(),
+        &k,
+        &next_graph(1, &inputs()),
+        &[],
+        &[],
+        &mut audit,
+        INITIATOR_ROOT_FILE,
+    )
+    .await;
+    assert_eq!(r.unwrap_err(), StoreError::BaselineUnrecorded);
+    assert!(audit.events.is_empty());
+    assert!(!fx.exists(STORE_FILE));
+}
+
+#[tokio::test]
+async fn a_commit_whose_sync_base_contradicts_its_bindings_is_refused() {
+    let (fx, k) = (Fixture::new(), key(1));
+    let dir = fx.dir();
+    let booted = run(&dir, &k, None).await.0.unwrap();
+    let before = fx.store();
+    let mut audit = Recorder::default();
+    let r = commit(
+        &dir,
+        &k,
+        &live_next(&booted.graph, 2, Some(&bl(A)), Some(&synced("null"))),
+        &[],
+        &[],
+        &mut audit,
+        INITIATOR_ROOT_FILE,
+    )
+    .await;
+    assert!(matches!(r, Err(StoreError::Identity(_))), "{r:?}");
+    assert!(audit.events.is_empty());
+    assert_eq!(fx.store(), before);
 }

@@ -230,7 +230,7 @@ from = "mac"
 to = "daemon"
 status = "built"
 class = "platform"
-mechanism = "SELinux policy_module(maknae, 1.0.0) confines maknaed_t, with separate types for etc, private, secret, audit and runtime, plus maknae_vault_port_t on the outbound leg. Debian and Ubuntu get an equivalent AppArmor 3.x profile."
+mechanism = "The SELinux policy module maknae confines maknaed_t, with separate types for etc, private, secret, audit and runtime, plus maknae_vault_port_t on the outbound leg. Debian and Ubuntu get an equivalent AppArmor 3.x profile."
 identity = "the daemon's own domain — maknaed_t, entered via maknaed_exec_t"
 evidence = "packaging/common/maknae.te · packaging/common/maknae.fc · packaging/deb/apparmor/usr.bin.maknaed"
 

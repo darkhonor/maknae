@@ -7,7 +7,11 @@ operator group), the shipped default YAMLs (`authz.yaml` / `maknae.yaml`; `bindi
 `/usr/share/maknae/bindings.yaml`, and `%post` copies it to `/etc/maknae` only
 when neither that file nor `/var/lib/maknae/kernel.graph` exists), the
 SELinux module (compiled to `maknae.pp` at build time), the fapolicyd trust
-fragment, and the Vault-port label helper. The `%post` sets `chattr +a` on the
+fragment, the Vault-port label helper, and the opt-in sync-back units
+(`maknae-policy-sync.path`, `maknae-policy-sync.service`) with
+`/usr/lib/systemd/system-preset/80-maknae.preset`, which disables them; `%post`
+never enables them. Opt in with `sudo systemctl enable --now maknae-policy-sync.path`
+(see [Sync back](../README.md#sync-back-opt-in)). The `%post` sets `chattr +a` on the
 audit **file** only (`/var/log/maknae/audit.jsonl`) — not the directory, which
 would block rpm from managing `/var/log/maknae` on upgrade — beside SELinux's
 append-only rule, and fails if the file system does not support the attribute.

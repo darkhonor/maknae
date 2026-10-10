@@ -24,8 +24,8 @@ pub fn record_fields(p: &IdentityProblem) -> (&'static str, String, &'static str
     }
 }
 
-/// The store writes each release and principal promotion ahead of the persist that
-/// makes it, so neither is recorded here.
+/// The store writes each release ahead of the persist that makes it, and an accept
+/// records the principal it promotes itself, so neither is recorded here.
 fn recordable(p: &&IdentityProblem) -> bool {
     !matches!(
         p,
@@ -33,16 +33,9 @@ fn recordable(p: &&IdentityProblem) -> bool {
     )
 }
 
-/// What a store transition ended: each release, then the principal it made admin.
-pub fn transition_problems(
-    released: &[maknae_graph::identity::Released],
-    principal_admin: Option<u32>,
-) -> Vec<IdentityProblem> {
-    released
-        .iter()
-        .map(IdentityProblem::from)
-        .chain(principal_admin.map(|uid| IdentityProblem::PrincipalAdmin { uid }))
-        .collect()
+/// What a store transition ended: each release.
+pub fn transition_problems(released: &[maknae_graph::identity::Released]) -> Vec<IdentityProblem> {
+    released.iter().map(IdentityProblem::from).collect()
 }
 
 /// `<kind>=<count>` per kind present, in kind order.
@@ -372,17 +365,17 @@ mod tests {
         let released = maknae_graph::identity::Released {
             uid: 666,
             name: "mallory".into(),
-            cause: maknae_graph::identity::ReleaseCause::BindingsAbsent,
+            cause: maknae_graph::identity::ReleaseCause::NotListed,
         };
-        let p = transition_problems(std::slice::from_ref(&released), Some(501));
         assert_eq!(
-            p,
-            [
-                IdentityProblem::from(&released),
-                IdentityProblem::PrincipalAdmin { uid: 501 }
-            ]
+            transition_problems(std::slice::from_ref(&released)),
+            [IdentityProblem::from(&released)]
         );
-        assert!(transition_problems(&[], None).is_empty());
+        assert!(transition_problems(&[]).is_empty());
+        let p = [
+            IdentityProblem::from(&released),
+            IdentityProblem::PrincipalAdmin { uid: 501 },
+        ];
         assert_eq!(
             record_fields(&p[1]),
             (

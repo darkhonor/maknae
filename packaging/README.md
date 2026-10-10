@@ -3,7 +3,9 @@
 This directory builds Linux packages (checksummed; optionally GPG-signed — the
 default build is UNSIGNED, see [Verifying artifacts](#verifying-artifacts)) that install the `maknaed` trust-plane
 daemon, the `maknae` operator CLI and the `maknae-egress` egress deputy, their hardened systemd
-units (`maknaed.service`, `maknae-egress.service`, `maknae-egress.socket`), the MAC policies
+units (`maknaed.service`, `maknae-egress.service`, `maknae-egress.socket`), the opt-in
+sync-back units (`maknae-policy-sync.path`, `maknae-policy-sync.service`, shipped
+disabled, see [Sync back](#sync-back-opt-in)), the MAC policies
 (SELinux on RHEL/Rocky, AppArmor on Debian), the fapolicyd trust fragment, and the
 shipped `/etc/maknae` config defaults. `packaging/macos/` builds the Apple Silicon `.pkg` under its own
 lifecycle; see [packaging/macos/README.md](macos/README.md) for the macOS lifecycle: config
@@ -131,6 +133,58 @@ principal exists refuses to serve. The accumulated audit trail in
 `/var/log/maknae/audit.jsonl` is preserved across upgrades (it is never replaced by
 the package). On a host enrolled before #440, the upgraded daemon refuses to start until `principal.home` is removed; see
 [runbook §3b](../docs/runbook.md#3b-upgrading-a-host-whose-principal-carries-home).
+
+---
+
+## Sync back (opt-in)
+
+`maknaed` keeps a mirror of the bindings it enforces in its state directory
+(`/var/lib/maknae/bindings.mirror.yaml`; macOS
+`/usr/local/var/db/maknae/state/bindings.mirror.yaml`). `sudo maknae policy sync`
+installs it as `/etc/maknae/bindings.yaml`; `--check` reports what it would change.
+Run by hand, it never signals the daemon: reload `maknaed` afterwards.
+
+Both packages install a watcher that does this automatically, and ship it
+**disabled**. The deb and rpm install `maknae-policy-sync.path` and
+`maknae-policy-sync.service` with a preset
+(`/usr/lib/systemd/system-preset/80-maknae.preset`) that disables both, and never
+enable them. The macOS package installs the launchd job `io.maknae.policy-sync`
+and `launchctl disable`s it on a fresh install and on an upgrade that adds it.
+The watcher installs only tightenings, a removed role binding or an added
+containment; a grant or a release exits 5, fails the run and needs
+`sudo maknae policy sync` on a terminal. Roles are independent, so moving
+an entry from `admin` to `user` is a grant of `user`. The watcher restores
+`bindings.yaml` only when it is missing; a file with no `bindings:` key, the
+shipped file included, exits 5 and needs a manual sync on a terminal. To opt in:
+
+```bash
+sudo systemctl enable --now maknae-policy-sync.path          # Linux
+sudo launchctl enable system/io.maknae.policy-sync && \
+  sudo launchctl bootstrap system /Library/LaunchDaemons/io.maknae.policy-sync.plist   # macOS
+```
+
+When the mirror changes, the watcher runs `maknae policy sync` as root and, after
+an install, reloads `maknaed` (`systemctl reload maknaed.service`; on macOS
+`launchctl kill SIGHUP system/io.maknae.maknaed`) so the daemon adopts the file.
+That reload also applies any `authz.yaml` edit not yet reloaded. A sync with
+nothing to install does not reload, and a refused sync (a conflict included, since
+the watcher has no terminal to prompt on) fails the run without reloading. The CLI
+runs unconfined, as `reseed` does (a dedicated confinement policy is #510).
+
+The shipped preset disables both units, so `systemctl preset-all` or
+`systemctl preset maknae-policy-sync.path` turns a Linux opt-in back off. To keep
+it, add a preset that sorts earlier, for example
+`/etc/systemd/system-preset/50-maknae-local.preset` holding
+`enable maknae-policy-sync.path`. The macOS job logs to
+`/Library/Logs/maknae-policy-sync.log` and runs `/usr/local/bin/maknae`; without
+the CLI each run exits 127 and installs nothing. See the
+[runbook](../docs/runbook.md#sync-live-identity-changes-back-to-bindingsyaml) for
+the merge, the exit codes and the refusals.
+
+Removing `/etc/maknae/bindings.yaml`, or its `bindings:` key, does not reset the
+bindings: `maknaed` keeps enforcing the bindings it holds, and `maknae policy sync`
+restores the file. Returning to the shipped default (the enrolled administrator as
+the only `admin`) takes `sudo maknae reseed`.
 
 ---
 

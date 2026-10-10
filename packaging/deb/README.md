@@ -16,6 +16,8 @@ maintainer scripts (`postinst`/`prerm`/`postrm`).
 |---|---|---|
 | `/usr/bin/maknaed`, `/usr/bin/maknae` | built binaries | `0755 root:root` |
 | `/usr/lib/systemd/system/maknaed.service` | `common/maknaed.service` | `0644` |
+| `/usr/lib/systemd/system/maknae-policy-sync.path`, `/usr/lib/systemd/system/maknae-policy-sync.service` | `common/` | `0644`, never enabled |
+| `/usr/lib/systemd/system-preset/80-maknae.preset` | `common/80-maknae.preset` | `0644` |
 | `/usr/lib/sysusers.d/maknae.conf` | `common/maknae.sysusers` | `0644` |
 | `/etc/apparmor.d/usr.bin.maknaed` | `deb/apparmor/usr.bin.maknaed` | `0644` |
 | `/usr/libexec/maknae/maknae-selinux-ports.sh` | `common/maknae-selinux-ports.sh` | `0750` |
@@ -104,9 +106,16 @@ On **upgrade**, re-run `maknae enroll` before restarting the daemon if the
 shipped `maknae.yaml`/`authz.yaml` changed — the same install→enroll→(re)start
 rule applies, because the daemon refuses to start until enrollment writes `principal`.
 
+## Sync back (opt-in)
+
+`maknae-policy-sync.path` and `maknae-policy-sync.service` are installed and never
+enabled; `80-maknae.preset` disables both. Opt in with
+`sudo systemctl enable --now maknae-policy-sync.path`. See
+[Sync back](../README.md#sync-back-opt-in).
+
 ## Removal
 
-`prerm` stops and disables the units, then unloads the AppArmor profiles. `remove`
+`prerm` stops and disables the units, the sync-back units included, then unloads the AppArmor profiles. `remove`
 keeps the audit trail with its append-only attribute. `postrm purge` takes
 `/var/log/maknae` to `root:root 0700` with no ACL entry, verified, clears `+a` on every regular, single-link file
 in it, unless the hold cannot be verified (for example, `acl` was removed before the purge) or a process still runs as `_maknae` (it then warns and leaves the directory root-held), and removes it with `/etc/maknae`. A file that keeps `+a` is reported by name and does not stop the purge. The accumulated audit trail is

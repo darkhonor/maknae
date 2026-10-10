@@ -7,6 +7,7 @@ mod cli;
 mod enroll;
 mod login;
 mod mutation;
+mod policy_sync;
 mod reseed;
 mod tty;
 

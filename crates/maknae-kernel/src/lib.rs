@@ -26,6 +26,7 @@ mod posture;
 mod provider_choice;
 pub mod reload;
 mod run;
+pub mod sync;
 mod uid_gate;
 pub mod vocabulary;
 pub use authz::*;

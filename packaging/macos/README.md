@@ -16,7 +16,7 @@ normative statement; this directory holds the packaging that follows from it.
 | Artifact | Tool | State |
 |---|---|---|
 | `maknaed` + `maknae` + `maknae-egress` **Apple Silicon** binaries | `cargo auditable build --release --target aarch64-apple-darwin` | **built** (`build-pkg.sh`) |
-| launchd plists for `maknaed` and `maknae-egress` | hand-authored; `plutil -lint` in smoke | **authored** (`io.maknae.maknaed.plist`, `io.maknae.maknae-egress.plist`), both shipped `launchctl disable`d |
+| launchd plists for `maknaed`, `maknae-egress` and the opt-in sync-back job | hand-authored; `plutil -lint` in smoke | **authored** (`io.maknae.maknaed.plist`, `io.maknae.maknae-egress.plist`, `io.maknae.policy-sync.plist`), all shipped `launchctl disable`d |
 | `_maknae` + `_maknae-egress` daemon users | `dscl` in the installer `preinstall` | **authored** (`scripts/preinstall`) |
 | **AWS-LC FIPS module (`libaws_lc_fips_*.dylib`)** | shipped to `/usr/local/lib/maknae`, pinned by **absolute install name** | **shipped** |
 | `.pkg` installer | `pkgbuild` → `productbuild` | **built** (`dist/Maknae-<version>-arm64.pkg`) |
@@ -25,7 +25,9 @@ normative statement; this directory holds the packaging that follows from it.
 
 > **`maknae-spifc` is deliberately not packaged.** One manifest, `packaging/common/packaged-binaries.txt`, names the three binaries every package ships (`maknaed`, `maknae`, `maknae-egress`) and drives both the Linux build lanes (`build-deb.sh:72-75`, `ci/gates/packaged-binaries.sh`) and `build-pkg.sh:70-72`; `maknae-spifc`, a setup-only tool, is deliberately not in it (`packaged-binaries.txt:13`).
 >
-> **Install is not enable, and on macOS that takes an explicit step.** `/Library/LaunchDaemons` is scanned at boot (`man launchd`), so `scripts/postinstall` runs `launchctl disable` on both jobs on a fresh install, and on the deputy alone on an upgrade from a package that did not ship it (`scripts/postinstall:74-80`). The flow is: install → `sudo maknae enroll` (which writes `/etc/maknae/egress-bounds.yaml`) → start both jobs → each user runs `maknae login`.
+> **Install is not enable, and on macOS that takes an explicit step.** `/Library/LaunchDaemons` is scanned at boot (`man launchd`), so `scripts/postinstall` runs `launchctl disable` on every job on a fresh install, and on the deputy or the sync-back job on an upgrade from a package that did not ship it (`scripts/postinstall:100-118`). The flow is: install → `sudo maknae enroll` (which writes `/etc/maknae/egress-bounds.yaml`) → start both jobs → each user runs `maknae login`.
+>
+> **The sync-back job is opt-in.** `io.maknae.policy-sync` watches `/usr/local/var/db/maknae/state/bindings.mirror.yaml`, runs `maknae policy sync` as root, and after an install sends `maknaed` `SIGHUP`; its output goes to `/Library/Logs/maknae-policy-sync.log`, which is root-owned. `scripts/postinstall` disables it on a fresh install and on an upgrade that adds it; `uninstall.sh` boots it out and removes it. Opt in with `sudo launchctl enable system/io.maknae.policy-sync && sudo launchctl bootstrap system /Library/LaunchDaemons/io.maknae.policy-sync.plist` (see [Sync back](../README.md#sync-back-opt-in)).
 
 ## Plane secrets: the System keychain
 

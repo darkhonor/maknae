@@ -385,6 +385,16 @@ pub(crate) fn open_temp_excl<F: AsFd>(
     )
 }
 
+pub(crate) fn set_owner_and_mode<F: AsFd>(
+    fd: &F,
+    owner: crate::anchor::FileOwner,
+    mode: crate::anchor::Mode,
+) -> nix::Result<()> {
+    std::os::unix::fs::fchown(fd.as_fd(), Some(owner.uid), Some(owner.gid))
+        .map_err(|e| nix::errno::Errno::from_raw(e.raw_os_error().unwrap_or(nix::libc::EIO)))?;
+    nix::sys::stat::fchmod(fd.as_fd(), NixMode::from_bits_truncate(mode.0 as _))
+}
+
 pub(crate) fn rename_at<F: AsFd>(dirfd: &F, from: &str, to: &str) -> nix::Result<()> {
     nix::fcntl::renameat(dirfd, from, dirfd, to)
 }
