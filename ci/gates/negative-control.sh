@@ -1034,6 +1034,11 @@ pub struct BaselineView {
     pub changes: Vec<String>,
 }
 
+pub enum ContainmentOutcome {
+    Contained,
+    Released,
+}
+
 pub struct ContainmentView {
     pub outcome: ContainmentOutcome,
     pub target_uid: Option<u32>,
@@ -1550,65 +1555,65 @@ PY
 expect_reject_because "config-disclosure-drift/whitespace-bearing-surface-prefix" \
   "whitespace-bearing prefix" "$fx/ci/gates/config-disclosure-drift.sh"
 
-# ACCEPT: a unit-only enum field is one fixed token, a leaf.
-fx="$(cfg_fixture "$CFG_OK")"
-cat >> "$fx/crates/maknae-proto/src/wire.rs" <<'FIX'
-pub enum ContainmentOutcome {
+# The leaf-enum row is the one place an enum-typed field is a leaf. The fixture
+# carries the real row's shape: ContainmentView.outcome is a unit-only enum in
+# the same file. Each probe breaks one thing the row's checks rest on.
+enum_probe() { # <name> <wanted> <python-expr transforming s>
+  local fx; fx="$(cfg_fixture "$CFG_OK")"
+  python3 - "$fx" "$3" <<'PYFIX'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1]) / "crates/maknae-proto/src/wire.rs"
+s = p.read_text()
+s = eval(sys.argv[2])
+p.write_text(s)
+PYFIX
+  expect_reject_because "config-disclosure-drift/$1" "$2" "$fx/ci/gates/config-disclosure-drift.sh"
+}
+UNIT_ENUM='pub enum ContainmentOutcome {
     Contained,
     Released,
-}
-FIX
-expect_accept "config-disclosure-drift/unit-only-enum-field-is-a-leaf" \
-  ": 52 paths decided, 61 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
+}'
+enum_probe leaf-enum-gains-a-data-variant "not unit-only" \
+  's.replace("    Released,\n}", "    Released,\n    Refused(String),\n}")'
+enum_probe leaf-enum-one-line-data-variant "not unit-only" \
+  's.replace("""pub enum ContainmentOutcome {\n    Contained,\n    Released,\n}""", "pub enum ContainmentOutcome { Contained, Refused(String) }")'
+enum_probe leaf-enum-attributed-data-variant "not unit-only" \
+  's.replace("    Released,\n}", "    #[serde(rename = \"r\")] Refused(String),\n}")'
+enum_probe leaf-enum-struct-variant "not unit-only" \
+  's.replace("    Released,\n}", "    Refused { why: String },\n}")'
+enum_probe leaf-enum-name-also-a-struct "also has a struct" \
+  's + "\nmod inner {\n    pub struct ContainmentOutcome { pub secret: String }\n}\n"'
+enum_probe leaf-enum-name-also-an-alias "also has a struct" \
+  's + "\ntype ContainmentOutcome = String;\n"'
+enum_probe leaf-enum-name-defined-twice "times; exactly one" \
+  's + "\nmod inner {\n    pub enum ContainmentOutcome { A }\n}\n"'
+enum_probe leaf-enum-with-no-definition "times; exactly one" \
+  's.replace("pub enum ContainmentOutcome", "pub enum Renamed")'
 
-# REJECT: the same enum with a data-carrying variant is a subtree, not a leaf.
+# REJECT: the enum lives in another file than the field's struct.
 fx="$(cfg_fixture "$CFG_OK")"
-cat >> "$fx/crates/maknae-proto/src/wire.rs" <<'FIX'
-pub enum ContainmentOutcome {
-    Contained,
-    Refused(String),
-}
-FIX
-expect_reject_because "config-disclosure-drift/data-carrying-enum-field-is-a-subtree" \
-  "data-carrying variant" "$fx/ci/gates/config-disclosure-drift.sh"
+python3 - "$fx" <<'PYFIX'
+import pathlib, sys
+root = pathlib.Path(sys.argv[1])
+w = root / "crates/maknae-proto/src/wire.rs"
+m = root / "crates/maknae-proto/src/mutation.rs"
+g = root / "ci/gates/config-disclosure-drift.sh"
+enum = "pub enum ContainmentOutcome {\n    Contained,\n    Released,\n}\n"
+assert enum in w.read_text()
+w.write_text(w.read_text().replace(enum, ""))
+m.write_text(m.read_text() + "\n" + enum)
+old = "containment.outcome|crates/maknae-proto/src/wire.rs|"
+assert old in g.read_text()
+g.write_text(g.read_text().replace(old, "containment.outcome|crates/maknae-proto/src/mutation.rs|"))
+PYFIX
+expect_reject_because "config-disclosure-drift/leaf-enum-in-another-file-than-its-struct" \
+  "not in" "$fx/ci/gates/config-disclosure-drift.sh"
 
-# REJECT: a restricted-visibility enum with a data-carrying variant.
-fx="$(cfg_fixture "$CFG_OK")"
-cat >> "$fx/crates/maknae-proto/src/wire.rs" <<'FIX'
-pub(crate) enum ContainmentOutcome {
-    Contained,
-    Refused(String),
-}
-FIX
-expect_reject_because "config-disclosure-drift/pub-crate-data-carrying-enum-is-a-subtree" \
-  "data-carrying variant" "$fx/ci/gates/config-disclosure-drift.sh"
-
-# REJECT: a data-carrying variant on the same line as its attribute.
-fx="$(cfg_fixture "$CFG_OK")"
-cat >> "$fx/crates/maknae-proto/src/wire.rs" <<'FIX'
-pub enum ContainmentOutcome {
-    Contained,
-    #[serde(rename = "r")] Refused(String),
-}
-FIX
-expect_reject_because "config-disclosure-drift/attributed-data-variant-is-seen" \
-  "data-carrying variant" "$fx/ci/gates/config-disclosure-drift.sh"
-
-# REJECT: a unit-only enum does not vouch for a same-named struct.
-fx="$(cfg_fixture "$CFG_OK")"
-cat >> "$fx/crates/maknae-proto/src/wire.rs" <<'FIX'
-pub enum ContainmentOutcome {
-    Contained,
-    Released,
-}
-FIX
-cat >> "$fx/crates/maknae-proto/src/mutation.rs" <<'FIX'
-pub struct ContainmentOutcome {
-    pub secret: String,
-}
-FIX
-expect_reject_because "config-disclosure-drift/same-named-struct-and-enum-is-ambiguous" \
-  "more than one struct or enum" "$fx/ci/gates/config-disclosure-drift.sh"
+# REJECT: an enum-typed field with no leaf-enum row keeps the subtree rule.
+fx="$(cfg_fixture "$CFG_OK" '' '' '' '' 'Mode')"
+printf 'pub enum Mode {\n    A,\n    B,\n}\n' >> "$fx/crates/maknae-proto/src/wire.rs"
+expect_reject_because "config-disclosure-drift/enum-field-with-no-row-is-a-subtree" \
+  "SUBTREE" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: a FOURTH `*View` struct in wire.rs with no SURFACE row. The config
 # half of SURFACE is cross-checked against boot.rs's section registry; the wire

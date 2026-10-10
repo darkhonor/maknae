@@ -2616,6 +2616,43 @@ mod tests {
     }
 
     #[test]
+    fn every_outcome_encodes_as_a_plain_cbor_text_string() {
+        use ContainmentOutcome::*;
+        let all = [
+            Contained,
+            Released,
+            AlreadyContained,
+            NotContained,
+            LastReleaser,
+            SelfContainWithoutRelease,
+            Busy,
+            Stopping,
+            NoExplicitBindings,
+            UnknownAccount,
+            LookupUnavailable,
+        ];
+        for o in all {
+            match o {
+                Contained
+                | Released
+                | AlreadyContained
+                | NotContained
+                | LastReleaser
+                | SelfContainWithoutRelease
+                | Busy
+                | Stopping
+                | NoExplicitBindings
+                | UnknownAccount
+                | LookupUnavailable => {}
+            }
+            let mut b = Vec::new();
+            ciborium::into_writer(&o, &mut b).unwrap();
+            let v: ciborium::Value = ciborium::from_reader(b.as_slice()).unwrap();
+            assert!(v.is_text(), "{o:?} encodes as {v:?}");
+        }
+    }
+
+    #[test]
     fn a_containment_payload_round_trips_and_carries_no_free_text() {
         let view = ContainmentView {
             outcome: ContainmentOutcome::Contained,

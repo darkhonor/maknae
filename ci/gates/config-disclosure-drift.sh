@@ -90,6 +90,61 @@ SURFACE=(
   "crates/maknae-vault/src/config.rs|UserAuthConfig|vault.user_auth|2|config"
 )
 
+# Fields whose type is a unit-only enum: one fixed token on the wire, so a leaf.
+# Each row names the field, the exact file defining the enum, and the type; the
+# gate verifies the enum itself (leaf_enum_check) and that the field's struct is
+# in the same file. No other enum-typed field is a leaf.
+LEAF_ENUMS=(
+  "containment.outcome|crates/maknae-proto/src/wire.rs|ContainmentOutcome"
+)
+
+leaf_enum_check() { # <field-path> <file> <type>
+  local fp="$1" file="$2" ty="$3" ndef nother structfile body prefix
+  [ -f "$file" ] || { echo "FAIL: leaf-enum row '$fp': '$file' does not exist."; return 1; }
+  ndef="$(grep -cE "(^|[^A-Za-z0-9_])enum[[:space:]]+$ty([^A-Za-z0-9_]|$)" "$file" || true)"
+  if [ "$ndef" != "1" ]; then
+    echo "FAIL: leaf-enum row '$fp': '$file' defines 'enum $ty' $ndef times; exactly one is required."
+    return 1
+  fi
+  nother="$(grep -cE "(^|[^A-Za-z0-9_])(struct|union|type|trait|mod|as)[[:space:]]+$ty([^A-Za-z0-9_]|$)" "$file" || true)"
+  if [ "$nother" != "0" ]; then
+    echo "FAIL: leaf-enum row '$fp': '$file' also has a struct, union, type, trait or 'as' naming '$ty'; the name does not resolve to the enum."
+    return 1
+  fi
+  prefix="${fp%.*}"
+  structfile=""
+  for entry in "${SURFACE[@]}"; do
+    IFS='|' read -r ef _ ep _ <<< "$entry"
+    [ "$ep" = "$prefix" ] && structfile="$ef"
+  done
+  if [ "$structfile" != "$file" ]; then
+    echo "FAIL: leaf-enum row '$fp': its struct is in '${structfile:-no SURFACE entry}', not in '$file', so '$ty' may not resolve to this enum."
+    return 1
+  fi
+  body="$(sed 's|//.*$||' "$file" | tr '\n' ' ' | TYNAME="$ty" awk '
+    {
+      t = ENVIRON["TYNAME"]
+      if (!match($0, "(^|[^A-Za-z0-9_])enum[ \t]+" t "([^A-Za-z0-9_]|$)")) exit 2
+      rest = substr($0, RSTART + RLENGTH - 1)
+      o = index(rest, "{")
+      if (o == 0) exit 2
+      depth = 0
+      for (i = o; i <= length(rest); i++) {
+        c = substr(rest, i, 1)
+        if (c == "{") depth++
+        else if (c == "}") { depth--; if (depth == 0) break }
+      }
+      if (depth != 0) exit 2
+      print substr(rest, o + 1, i - o - 1)
+    }')" || { echo "FAIL: leaf-enum row '$fp': could not read the body of 'enum $ty'."; return 1; }
+  body="$(printf '%s' "$body" | sed -E 's/#\[[^]]*\]//g')"
+  case "$body" in
+    *[\#\(\{]*)
+      echo "FAIL: leaf-enum row '$fp': 'enum $ty' is not unit-only (a variant carries data, or an attribute could not be read)."
+      return 1 ;;
+  esac
+}
+
 # Sections with NO config struct: their keys are carried verbatim for their
 # consumers. Each still needs a manifest row -- struct-less means the keys pass
 # through, not that the disclosure is undecided.
@@ -673,8 +728,16 @@ while IFS=$'\t' read -r fpath fty fkind; do
       echo "  Give it a SURFACE entry, an 'omit' manifest row, or a named type."
       exit 1 ;;
   esac
-  enum_has_data=""
-  ambiguous_name=""
+  leaf_row=""
+  for row in "${LEAF_ENUMS[@]}"; do
+    IFS='|' read -r lp lf lt <<< "$row"
+    if [ "$lp" = "$fpath" ] && [ "$lt" = "$bare" ]; then
+      leaf_enum_check "$lp" "$lf" "$lt" || exit 1
+      echo "$lp" >> "$tmp/leaf-used"
+      leaf_row=1
+    fi
+  done
+  [ -z "$leaf_row" ] || continue
   if [ "$bare" != "__DYNAMIC_MAP__" ]; then
     # `struct` OR `enum`: an enum can carry a map variant just as a struct can
     # carry map fields, and matching only `struct` would leave every
@@ -705,31 +768,6 @@ while IFS=$'\t' read -r fpath fty fkind; do
       exit 1
     fi
     [ "$grc" -eq 0 ] || continue
-    # A unit-only enum is one fixed token on the wire: a leaf. An enum with any
-    # data-carrying variant is a subtree and needs a SURFACE entry or an omit row.
-    defpat="^(pub([[:space:]]|[(][^)]*[)][[:space:]]))?(struct|enum) $bare([[:space:]<{(]|$)"
-    ndefs="$(grep -rE "$defpat" crates/ | wc -l | tr -d '[:space:]')"
-    enum_file=""
-    [ "$ndefs" -gt 1 ] && ambiguous_name=1
-    if [ "$ndefs" = "1" ]; then
-      enum_file="$(grep -rlE "${defpat/(struct|enum)/enum}" crates/ | head -n 1 || true)"
-    fi
-    if [ -n "$enum_file" ]; then
-      data_variants="$(ENUM_RE="${defpat/(struct|enum)/enum}" awk '
-        $0 ~ ENVIRON["ENUM_RE"] { inenum=1; next }
-        inenum && /^[}]/ { exit }
-        inenum {
-          line=$0
-          while (match(line, /^[[:space:]]*#\[[^]]*\][[:space:]]*/)) line=substr(line, RLENGTH+1)
-          if (line ~ /^[[:space:]]*(\/\/|$)/) next
-          if (line ~ /[({]/) print
-        }
-      ' "$enum_file")"
-      if [ -z "$data_variants" ]; then
-        continue
-      fi
-      enum_has_data=1
-    fi
   fi
   covered=""
   for entry in "${SURFACE[@]}"; do
@@ -744,13 +782,7 @@ while IFS=$'\t' read -r fpath fty fkind; do
     if [ "$bare" = "__DYNAMIC_MAP__" ]; then
       echo "FAIL: '$fpath' is a dynamic-key MAP — a subtree whose keys nobody can enumerate."
     else
-      if [ -n "${ambiguous_name:-}" ]; then
-        echo "FAIL: '$fpath' has type '$bare', which more than one struct or enum under crates/ defines — which one it is cannot be told, so it is a SUBTREE, not a leaf."
-      elif [ -n "${enum_has_data:-}" ]; then
-        echo "FAIL: '$fpath' has enum type '$bare' with a data-carrying variant — it is a SUBTREE, not a leaf."
-      else
-        echo "FAIL: '$fpath' has struct type '$bare' — it is a SUBTREE, not a leaf."
-      fi
+      echo "FAIL: '$fpath' has struct type '$bare' — it is a SUBTREE, not a leaf."
     fi
     echo "  Its own fields become config paths and none of them is decided."
     echo "  Give it a SURFACE entry with prefix '$fpath', or an 'omit' manifest"
@@ -759,6 +791,13 @@ while IFS=$'\t' read -r fpath fty fkind; do
     exit 1
   fi
 done < "$tmp/fields"
+for row in "${LEAF_ENUMS[@]}"; do
+  IFS='|' read -r lp _ _ <<< "$row"
+  if ! grep -qxF "$lp" "$tmp/leaf-used" 2>/dev/null; then
+    echo "FAIL: leaf-enum row '$lp' matched no field of that path and type; a stale row is removed, not kept."
+    exit 1
+  fi
+done
 cut -f1 "$tmp/fields" | sort -u > "$tmp/fieldpaths"
 
 # 3. The manifest. Every row needs three tab fields with a non-empty rationale:
