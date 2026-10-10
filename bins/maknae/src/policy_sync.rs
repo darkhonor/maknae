@@ -35,6 +35,8 @@ const ANSWER_MAX_BYTES: u64 = 64;
 const NO_BINDINGS_KEY: &str =
     "the mirror has no bindings: key; it cannot replace bindings.yaml's bindings; nothing was installed";
 
+const NO_KEY_RESTORE: &str = "bindings.yaml has no bindings: key; restoring it needs an administrator: run sudo maknae policy sync at a terminal";
+
 const CHANGED_DURING: &str = "bindings.yaml changed during the sync; nothing was installed; reload maknaed so it merges, then sync again";
 
 pub(crate) struct Owners {
@@ -52,6 +54,7 @@ pub(crate) enum Outcome {
     WouldInstall,
     NoMirror,
     NeedsAdministrator(Vec<BindingEntry>),
+    RestoreNeedsAdministrator,
 }
 
 fn preflight(euid: u32) -> Result<(), String> {
@@ -210,6 +213,7 @@ struct Planned<'a> {
     config_dir: &'a Path,
     owners: &'a Owners,
     mirror: &'a Mirror,
+    unattended: bool,
 }
 
 fn still_as_planned(p: &Planned<'_>, restore: bool) -> Result<(), String> {
@@ -220,7 +224,11 @@ fn still_as_planned(p: &Planned<'_>, restore: bool) -> Result<(), String> {
     }
     let file = read_bindings(etc, config_dir, owner)?;
     match plan_sync(mirror, &Section::of(&file), sha256, CONFIG_DIR) {
-        SyncPlan::Restore { .. } if restore => Ok(()),
+        SyncPlan::Restore { .. }
+            if restore && !(p.unattended && Section::of(&file) != Section::Missing) =>
+        {
+            Ok(())
+        }
         SyncPlan::Install { .. } if !restore => Ok(()),
         _ => Err(CHANGED_DURING.into()),
     }
@@ -301,6 +309,7 @@ pub(crate) fn sync(
         config_dir,
         owners: &owners,
         mirror: &mirror,
+        unattended: !terminal,
     };
     match plan_sync(&mirror, &Section::of(&file), sha256, CONFIG_DIR) {
         SyncPlan::OtherConfigDir { found } => Err(other_config_dir(&found)),
@@ -334,8 +343,15 @@ pub(crate) fn sync(
                     ),
                 )?;
             }
+            let keyless = !terminal && Section::of(&file) != Section::Missing;
             if check {
+                if keyless {
+                    say(out, &format!("an unattended sync would refuse: {NO_KEY_RESTORE}"))?;
+                }
                 return Ok(Outcome::WouldInstall);
+            }
+            if keyless {
+                return Ok(Outcome::RestoreNeedsAdministrator);
             }
             still_as_planned(&planned, true)?;
             install(&etc, config_dir, bytes.as_bytes(), owners.file)?;
@@ -399,7 +415,7 @@ fn exit_code(r: &Result<Outcome, String>) -> u8 {
         Err(_) => 2,
         Ok(Outcome::NothingToInstall) => 3,
         Ok(Outcome::NoMirror) => 4,
-        Ok(Outcome::NeedsAdministrator(_)) => 5,
+        Ok(Outcome::NeedsAdministrator(_) | Outcome::RestoreNeedsAdministrator) => 5,
     }
 }
 
@@ -449,6 +465,9 @@ fn finish(r: &Result<Outcome, String>, err: &mut dyn Write) -> u8 {
         }
         Ok(Outcome::NoMirror) => {
             let _ = writeln!(err, "maknae: {NO_MIRROR}");
+        }
+        Ok(Outcome::RestoreNeedsAdministrator) => {
+            let _ = writeln!(err, "maknae: {NO_KEY_RESTORE}");
         }
         Ok(Outcome::NeedsAdministrator(entries)) => {
             let _ = writeln!(
@@ -827,7 +846,7 @@ mod tests {
 
     #[test]
     fn a_file_that_appears_during_a_restore_is_kept_and_nothing_is_restored() {
-        for body in [ROOT_EDIT, BASE] {
+        for body in [ROOT_EDIT, BASE, SHIPPED] {
             let fx = Fx::new();
             fx.mirror(&mirror_over(BASE, LIVE, &[]));
             let mut sink = Vec::new();
@@ -1036,8 +1055,12 @@ mod tests {
     #[test]
     fn a_lost_file_is_restored_without_a_prompt() {
         let c = [BindingEntry::Uid(4242)];
-        for lost in [None, Some("schema_version: 1\n")] {
-            for terminal in [true, false] {
+        for (lost, terminal) in [
+            (None, true),
+            (None, false),
+            (Some("schema_version: 1\n"), true),
+        ] {
+            {
                 let fx = Fx::new();
                 if let Some(body) = lost {
                     fx.config("bindings.yaml", body);
@@ -1069,6 +1092,45 @@ mod tests {
                     .contains("    - uid: 4242\n"));
             }
         }
+    }
+
+    const SHIPPED: &str = include_str!("../../../packaging/common/bindings.yaml");
+
+    #[test]
+    fn an_unattended_sync_never_restores_a_file_without_the_key() {
+        assert_eq!(section(SHIPPED), Section::Absent);
+        for check in [false, true] {
+            let fx = Fx::new();
+            fx.config("bindings.yaml", SHIPPED);
+            fx.mirror(&mirror_over(BASE, GRANT, &[]));
+            let (r, out) = fx.sync_out(check, "", false);
+            if check {
+                assert_eq!(exit_code(&r), 1, "{r:?}");
+                assert!(
+                    out.contains(&format!(
+                        "an unattended sync would refuse: {NO_KEY_RESTORE}\n"
+                    )),
+                    "{out}"
+                );
+            } else {
+                assert!(matches!(r, Ok(Outcome::RestoreNeedsAdministrator)), "{r:?}");
+                let (code, err) = refused(r);
+                assert_eq!(code, 5);
+                assert_eq!(err, format!("maknae: {NO_KEY_RESTORE}\n"));
+                assert!(!out.contains("restored"), "{out}");
+            }
+            assert_eq!(fx.read_config("bindings.yaml"), SHIPPED);
+        }
+        assert_eq!(NO_KEY_RESTORE, "bindings.yaml has no bindings: key; restoring it needs an administrator: run sudo maknae policy sync at a terminal");
+        let fx = Fx::new();
+        fx.config("bindings.yaml", SHIPPED);
+        fx.mirror(&mirror_over(BASE, GRANT, &[]));
+        let (r, out) = fx.sync_out(true, "", true);
+        assert_eq!(exit_code(&r), 1, "{r:?}");
+        assert!(!out.contains("would refuse"), "{out}");
+        let r = fx.sync(false, "", true);
+        assert_eq!(exit_code(&r), 0, "{r:?}");
+        assert_eq!(section(&fx.read_config("bindings.yaml")), section(GRANT));
     }
 
     #[test]
@@ -1349,6 +1411,7 @@ mod tests {
             exit_code(&Ok(Outcome::NeedsAdministrator(vec![BindingEntry::Uid(1)]))),
             5
         );
+        assert_eq!(exit_code(&Ok(Outcome::RestoreNeedsAdministrator)), 5);
         assert_eq!(exit_code(&Err("x".into())), 2);
     }
 
