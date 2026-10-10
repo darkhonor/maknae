@@ -685,6 +685,8 @@ pub enum OperandError {
     TooLong(Operand),
     Control(Operand, u32),
     Format(Operand, u32),
+    Separator(Operand, u32),
+    PrivateUse(Operand, u32),
     EdgeWhitespace,
 }
 
@@ -709,6 +711,16 @@ impl std::fmt::Display for OperandError {
             OperandError::Format(w, c) => write!(
                 f,
                 "{} contains an invisible or formatting character (U+{c:04X})",
+                w.noun()
+            ),
+            OperandError::Separator(w, c) => write!(
+                f,
+                "{} contains a line or paragraph separator (U+{c:04X})",
+                w.noun()
+            ),
+            OperandError::PrivateUse(w, c) => write!(
+                f,
+                "{} contains a private-use character (U+{c:04X})",
                 w.noun()
             ),
             OperandError::EdgeWhitespace => {
@@ -749,6 +761,10 @@ fn checked_with(
             GeneralCategory::Format if !format_allowed(c, allowed) => {
                 return Err(OperandError::Format(what, c as u32))
             }
+            GeneralCategory::LineSeparator | GeneralCategory::ParagraphSeparator => {
+                return Err(OperandError::Separator(what, c as u32))
+            }
+            GeneralCategory::PrivateUse => return Err(OperandError::PrivateUse(what, c as u32)),
             _ => {}
         }
     }
@@ -2440,6 +2456,40 @@ mod tests {
     }
 
     #[test]
+    fn line_and_paragraph_separators_and_private_use_are_refused_in_both_operands() {
+        type Code = fn(Operand, u32) -> OperandError;
+        let cases: [(char, Code); 6] = [
+            ('\u{2028}', OperandError::Separator),
+            ('\u{2029}', OperandError::Separator),
+            ('\u{e000}', OperandError::PrivateUse),
+            ('\u{f8ff}', OperandError::PrivateUse),
+            ('\u{f0000}', OperandError::PrivateUse),
+            ('\u{10fffd}', OperandError::PrivateUse),
+        ];
+        for (c, code) in cases {
+            let text = format!("ab{c}cd");
+            assert_eq!(
+                contain_reason(&text),
+                Err(code(Operand::Reason, c as u32)),
+                "{:04X}",
+                c as u32
+            );
+            assert_eq!(
+                contain_name(&text),
+                Err(code(Operand::Name, c as u32)),
+                "{:04X}",
+                c as u32
+            );
+            assert_eq!(
+                contain_reason(&c.to_string()),
+                Err(code(Operand::Reason, c as u32)),
+                "{:04X} alone",
+                c as u32
+            );
+        }
+    }
+
+    #[test]
     fn the_contain_reason_never_prints_in_debug() {
         let verb = Verb::AdminContain {
             target: ContainTarget::Uid(1),
@@ -2566,6 +2616,14 @@ mod tests {
         assert_eq!(
             OperandError::Control(Operand::Name, 7).to_string(),
             "the user name contains a control character (U+0007)"
+        );
+        assert_eq!(
+            OperandError::Separator(Operand::Reason, 0x2028).to_string(),
+            "the reason contains a line or paragraph separator (U+2028)"
+        );
+        assert_eq!(
+            OperandError::PrivateUse(Operand::Name, 0xe000).to_string(),
+            "the user name contains a private-use character (U+E000)"
         );
     }
 

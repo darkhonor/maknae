@@ -1242,7 +1242,7 @@ The job writes to `/Library/Logs/maknae-policy-sync.log`. It runs `/usr/local/bi
 
 ### The `graph.sync` records
 
-Every merge and sync event is an audit record with `action:"graph.sync"`. An entry is shown as its username, escaped, or as `uid:<n>`.
+Every merge and sync event is an audit record with `action:"graph.sync"`. An entry is shown as its username, escaped and in double quotes, or as `uid:<n>`.
 
 | When | Result | `graph.anchor` | Reason |
 |---|---|---|---|
@@ -1251,7 +1251,7 @@ Every merge and sync event is an audit record with `action:"graph.sync"`. An ent
 | A load that finds a conflict | `permit` | `syncing` | `conflict: <entry> changed in bindings.yaml and by an unsynced live transition; failed closed: contained` (or `unbound`) |
 | A load that clears a conflict | `permit` | `syncing` | `conflict resolved: <entry>: bindings.yaml changed it again`, or `…: bindings.yaml holds the fail-closed value` |
 | A live edit that clears a conflict, written ahead after the live edit's own record | `permit` | `syncing` | `conflict resolved: <entry>: a live edit changed it` |
-| A live edit, written ahead | `permit` | `syncing` | `live (<operator\|kernel>): contain <entry>`, `release <entry>`, `bind <role> <name>` or `unbind <name>` |
+| A live edit, written ahead | `permit` | `syncing` | `live (<operator\|kernel>): contain <entry>`, `release <entry>`, `bind <role> <name>` or `unbind <name>`; a name is escaped and in double quotes, like an entry |
 | A live edit, applied | `permit` | `live-applied` | `live applied: revision <n>`, followed by `; store not durable: <cause>` and `; checkpoint append failed: <cause>` when those happened; the record carries `policy_sha256` |
 | `bindings.yaml` lost | `deny`, posture `unavailable` | none | `lost: bindings.yaml is missing; the enforced bindings stand; restore them with sudo maknae policy sync, or run sudo maknae reseed to return to principal-as-admin` (or `has no bindings: key` for `is missing`) |
 | The mirror not published | `deny`, posture `unavailable` | none | `mirror render failed: <cause>; the transition at revision <n> stands; the stale mirror was removed` (or `; the stale mirror could not be removed: <cause>`) |

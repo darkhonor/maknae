@@ -4197,7 +4197,7 @@ where
         let events: Vec<String> = std::iter::once(crate::sync::live_reason(
             &edit,
             who,
-            &crate::containment::LiveNote::none(0),
+            &crate::containment::LiveNote::none(),
         ))
         .chain(edited.events.iter().map(crate::sync::event_reason))
         .collect();
@@ -8319,7 +8319,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             &[crate::sync::live_reason(
                 &edit,
                 initiator,
-                &crate::containment::LiveNote::none(4242),
+                &crate::containment::LiveNote::none(),
             )],
             &mut graph_audit(fx, &ctx),
             initiator,
@@ -15612,7 +15612,7 @@ mod reload_tests {
         fx
     }
 
-    const CONTAINED_CONFLICT: &str = "conflict: daemon changed in bindings.yaml and by an unsynced live transition; failed closed: contained";
+    const CONTAINED_CONFLICT: &str = "conflict: \"daemon\" changed in bindings.yaml and by an unsynced live transition; failed closed: contained";
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_collision_contains_the_subject_and_is_counted() {
@@ -15673,7 +15673,7 @@ mod reload_tests {
         assert_eq!(fx.sync_lines(), ["unsynced=1", "conflict=1"]);
         assert_eq!(
             sync_seen(&fx, from),
-            ["conflict: daemon changed in bindings.yaml and by an unsynced live transition; failed closed: unbound"]
+            ["conflict: \"daemon\" changed in bindings.yaml and by an unsynced live transition; failed closed: unbound"]
         );
         let subjects = fx.baseline().snapshot().subjects().unwrap();
         assert!(
@@ -15696,7 +15696,7 @@ mod reload_tests {
         bounded(fx.reloader.run()).await.unwrap();
         assert_eq!(
             sync_seen(&fx, from),
-            ["conflict resolved: daemon: bindings.yaml changed it again"]
+            ["conflict resolved: \"daemon\": bindings.yaml changed it again"]
         );
         assert_eq!(fx.sync_lines(), ["unsynced=0", "conflict=0"]);
         assert_eq!(whoami_as(&fx, daemon_uid()).1, Some("guest"));
@@ -15716,7 +15716,7 @@ mod reload_tests {
             sync_seen(&fx, from),
             [
                 "adopted: bindings.yaml holds the live section (1 unsynced entries)",
-                "conflict resolved: daemon: bindings.yaml holds the fail-closed value"
+                "conflict resolved: \"daemon\": bindings.yaml holds the fail-closed value"
             ]
         );
         assert_eq!(transitions_seen(&fx, from), ["intent recorded (kernel)"]);
@@ -15741,8 +15741,8 @@ mod reload_tests {
         assert_eq!(
             sync_seen(&fx, from),
             [
-                "live (operator): contain daemon",
-                "conflict resolved: daemon: a live edit changed it",
+                "live (operator): contain \"daemon\"",
+                "conflict resolved: \"daemon\": a live edit changed it",
                 &format!(
                     "live applied: revision {}",
                     fx.reloader.revision.load(AtomicOrdering::Acquire)

@@ -1,14 +1,13 @@
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the containment path calls it (#165)")
-)]
-
 use maknae_graph::identity::IdentityLayer;
 use maknae_proto::{ContainTarget, ContainmentOutcome, OperandError, Verb};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Why a live edit did not commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the containment path calls it (#165)")
+)]
 pub(crate) enum LiveRefusal {
     Busy,
     Stopping,
@@ -22,6 +21,10 @@ pub(crate) enum LiveRefusal {
 
 /// Which containment request a record or check is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the containment path calls it (#165)")
+)]
 pub(crate) enum Kind {
     Contain,
     Release,
@@ -30,6 +33,10 @@ pub(crate) enum Kind {
 
 /// The safety check a live edit runs in the turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the containment path calls it (#165)")
+)]
 pub(crate) enum LiveCheck {
     None,
     Contain { target: u32, requester: Option<u32> },
@@ -38,6 +45,10 @@ pub(crate) enum LiveCheck {
 
 /// A live edit, or a release whose claimants are resolved in the turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the containment path calls it (#165)")
+)]
 pub(crate) enum LiveOp {
     Edit(maknae_config::LiveEdit),
     Release { uid: u32, named: Option<String> },
@@ -46,16 +57,14 @@ pub(crate) enum LiveOp {
 /// What the live record says beyond the edit; trail-only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct LiveNote<'a> {
-    pub target: u32,
     pub requester: Option<(u32, u64)>,
     pub reason: Option<&'a str>,
 }
 
 impl LiveNote<'_> {
     /// A note that adds nothing to the record.
-    pub(crate) fn none(target: u32) -> Self {
+    pub(crate) fn none() -> Self {
         Self {
-            target,
             requester: None,
             reason: None,
         }
@@ -63,6 +72,10 @@ impl LiveNote<'_> {
 }
 
 /// The reply code for a refusal; an internal failure has none.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the containment path calls it (#165)")
+)]
 pub(crate) fn outcome(r: &LiveRefusal) -> Option<ContainmentOutcome> {
     Some(match r {
         LiveRefusal::Busy => ContainmentOutcome::Busy,
@@ -77,6 +90,10 @@ pub(crate) fn outcome(r: &LiveRefusal) -> Option<ContainmentOutcome> {
 }
 
 /// The record's (result, posture) for an outcome.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the containment path calls it (#165)")
+)]
 pub(crate) fn record_class(o: ContainmentOutcome) -> (&'static str, &'static str) {
     use ContainmentOutcome as O;
     match o {
@@ -91,6 +108,10 @@ pub(crate) fn record_class(o: ContainmentOutcome) -> (&'static str, &'static str
 }
 
 /// The corrective record's reason for a refused or unchanged request.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the containment path calls it (#165)")
+)]
 pub(crate) fn corrective(
     verb: Kind,
     o: ContainmentOutcome,
@@ -142,6 +163,10 @@ pub(crate) fn corrective(
 }
 
 /// Whether the stored layer binds `uid` as an adversary, carried forward included.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the containment path calls it (#165)")
+)]
 pub(crate) fn is_contained(layer: &IdentityLayer, uid: u32) -> bool {
     layer
         .subjects
@@ -150,6 +175,10 @@ pub(crate) fn is_contained(layer: &IdentityLayer, uid: u32) -> bool {
 }
 
 /// Every adversary name claiming `uid`, plus the name the request gave.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the containment path calls it (#165)")
+)]
 pub(crate) fn release_names(
     uid: u32,
     named: Option<&str>,
@@ -164,6 +193,10 @@ pub(crate) fn release_names(
 }
 
 /// Whether a decision permits, by the request path's own fold and discharge.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the containment path calls it (#165)")
+)]
 pub(crate) fn permits(d: &maknae_security::Decided) -> bool {
     match maknae_security::finalize(maknae_security::combine(vec![d.verdict.clone()])) {
         maknae_security::Decision::Permit { obligations } => {
@@ -175,6 +208,10 @@ pub(crate) fn permits(d: &maknae_security::Decided) -> bool {
 
 /// The probes' answers: whether the requester holds admin.release, and each candidate subject's.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the containment path calls it (#165)")
+)]
 pub(crate) struct Probed {
     pub self_holds: Option<bool>,
     pub releasers: Option<Vec<bool>>,
@@ -182,12 +219,20 @@ pub(crate) struct Probed {
 
 /// Why the probes gave no answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the containment path calls it (#165)")
+)]
 pub(crate) enum ProbeError {
     Busy,
     Failed(String),
 }
 
 /// The operator contain's checks: self-contain first, then the last releaser.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the containment path calls it (#165)")
+)]
 pub(crate) fn check_contain(
     target: u32,
     requester: Option<u32>,
@@ -219,6 +264,10 @@ pub(crate) fn check_contain(
 }
 
 /// The check a request of `kind` runs in the turn.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the containment path calls it (#165)")
+)]
 pub(crate) fn check_for(kind: Kind, target: u32, requester: Option<u32>) -> LiveCheck {
     match kind {
         Kind::Release => LiveCheck::None,
@@ -228,11 +277,19 @@ pub(crate) fn check_for(kind: Kind, target: u32, requester: Option<u32>) -> Live
 }
 
 /// A release by uid; its claimant names are resolved under the turn.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the containment path calls it (#165)")
+)]
 pub(crate) fn release_op(uid: u32, named: Option<String>) -> LiveOp {
     LiveOp::Release { uid, named }
 }
 
 /// Applies the shared operand rule to a containment verb's operands, in place.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the containment path calls it (#165)")
+)]
 pub(crate) fn normalise_operands(verb: &mut Verb) -> Result<(), (&'static str, OperandError)> {
     match verb {
         Verb::AdminContain { target, reason } => {
@@ -255,6 +312,10 @@ pub(crate) fn quoted(r: &str) -> String {
 }
 
 /// The verb whose action is `admin.release`; its operand never reaches the PDP.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the containment path calls it (#165)")
+)]
 pub(crate) fn release_probe() -> Verb {
     Verb::AdminRelease {
         target: ContainTarget::Uid(0),
@@ -691,8 +752,8 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_note_carries_only_its_target() {
-        let n = LiveNote::none(1003);
-        assert_eq!((n.target, n.requester, n.reason), (1003, None, None));
+    fn an_empty_note_carries_nothing() {
+        let n = LiveNote::none();
+        assert_eq!((n.requester, n.reason), (None, None));
     }
 }
