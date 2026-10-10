@@ -414,6 +414,9 @@ pub(crate) fn decide_loaded_cited(
     let Some(uid) = uid else {
         return undecided(Verdict::Indeterminate);
     };
+    if class_of(&req.action.0) == Some(Class::Kernel) {
+        return undecided(kernel_decided(req));
+    }
     let role = match lp.roles.role_for(uid, principal.uid) {
         Resolution::Role(r) => r,
         // Case-1 testimony (#181): the FACT, audit-only. The absence still
@@ -567,6 +570,24 @@ pub(crate) fn decide_loaded_cited(
         verdict,
         role: Some(role.key()),
         cited,
+    }
+}
+
+fn kernel_decided(req: &SecRequest) -> Verdict {
+    let kernel = matches!(
+        req.subject.0.get(maknae_security::SUBJECT_INITIATOR),
+        Some(AttrValue::Str(s)) if s == maknae_security::INITIATOR_KERNEL
+    );
+    match (req.action.0.as_str(), kernel) {
+        ("kernel.contain", true) => permit_with_audit(),
+        (a, false) => Verdict::NotApplicable {
+            note: Some(format!(
+                "kernel action requested by a subject that is not the kernel: {a}"
+            )),
+        },
+        (a, true) => Verdict::NotApplicable {
+            note: Some(format!("term enumerated, not implemented: {a}")),
+        },
     }
 }
 
@@ -1782,6 +1803,78 @@ mod tests {
         ("adam", 1004),
     ];
 
+    fn kernel_request(uid: u32, action: &str, initiator: Option<&str>) -> SecRequest {
+        let mut r = request(Some(i64::from(uid)), action, None);
+        if let Some(i) = initiator {
+            r.subject
+                .0
+                .insert(maknae_security::SUBJECT_INITIATOR, AttrValue::Str(i.into()));
+        }
+        r
+    }
+
+    #[test]
+    fn kernel_contain_is_permitted_only_for_the_kernel_subject() {
+        let lp = lp_with_grants("", GRANT_UIDS);
+        assert!(matches!(
+            decide_loaded(
+                &lp,
+                &principal(),
+                &kernel_request(70, "kernel.contain", Some("kernel"))
+            ),
+            Verdict::Permit { .. }
+        ));
+        for (action, initiator, note) in [
+            (
+                "kernel.contain",
+                None,
+                "kernel action requested by a subject that is not the kernel: kernel.contain",
+            ),
+            (
+                "kernel.contain",
+                Some("operator"),
+                "kernel action requested by a subject that is not the kernel: kernel.contain",
+            ),
+            (
+                "kernel.session.terminate",
+                Some("kernel"),
+                "term enumerated, not implemented: kernel.session.terminate",
+            ),
+        ] {
+            assert_eq!(
+                decide_loaded(&lp, &principal(), &kernel_request(70, action, initiator)),
+                Verdict::NotApplicable {
+                    note: Some(note.into())
+                },
+                "{action} {initiator:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_initiator_attribute_grants_nothing_outside_the_kernel_class() {
+        let lp = lp_with_grants("", GRANT_UIDS);
+        for uid in [70, 1001, 1002] {
+            for action in [
+                "admin.status",
+                "admin.contain",
+                "admin.release",
+                "liveness.ping",
+                "admin.whoami",
+            ] {
+                assert_eq!(
+                    decide_loaded(
+                        &lp,
+                        &principal(),
+                        &kernel_request(uid, action, Some("kernel"))
+                    ),
+                    decide_loaded(&lp, &principal(), &kernel_request(uid, action, None)),
+                    "{uid} {action}"
+                );
+            }
+        }
+    }
+
     /// A granted term permits, and ONLY that term. The other two grantable
     /// terms stay `NotApplicable` -- the arm keys on the action, so one grant
     /// is one grant, not a class-granular opening of `admin.*`.
@@ -2145,12 +2238,24 @@ mod tests {
     #[test]
     fn every_new_class_resolves_and_abstains() {
         let lp = lp_with(None, &[]);
-        for (action, expect) in [
-            ("terminal.create", Class::Terminal),
-            ("mcp.tool.call", Class::Mcp),
-            ("fs.move", Class::Fs),
-            ("fs.link", Class::Fs),
-            ("kernel.contain", Class::Kernel),
+        for (action, expect, note) in [
+            (
+                "terminal.create",
+                Class::Terminal,
+                "term enumerated, not implemented",
+            ),
+            (
+                "mcp.tool.call",
+                Class::Mcp,
+                "term enumerated, not implemented",
+            ),
+            ("fs.move", Class::Fs, "term enumerated, not implemented"),
+            ("fs.link", Class::Fs, "term enumerated, not implemented"),
+            (
+                "kernel.contain",
+                Class::Kernel,
+                "kernel action requested by a subject that is not the kernel",
+            ),
         ] {
             assert_eq!(class_of(action), Some(expect), "{action} must resolve");
             assert_eq!(
@@ -2160,7 +2265,7 @@ mod tests {
                     &request(Some(OPERATOR_UID as i64), action, Some("/home/operator/x")),
                 ),
                 Verdict::NotApplicable {
-                    note: Some(format!("term enumerated, not implemented: {action}"))
+                    note: Some(format!("{note}: {action}"))
                 },
                 "{action} must abstain"
             );

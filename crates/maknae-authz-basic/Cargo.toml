@@ -21,6 +21,7 @@ maknae-graph = { path = "../maknae-graph" }
 # a per-request lookup would reintroduce the SSSD/LDAP worker-stall class the
 # kernel bounds with spawn_blocking+timeout; resolution happens per load, over
 # names root wrote into the policy file).
+# the kernel's admin verbs resolve a request's TARGET through bounded NSS after the decision (#165); decide itself never looks up an account
 nix = { version = "0.31", default-features = false, features = ["user"] }
 
 [features]

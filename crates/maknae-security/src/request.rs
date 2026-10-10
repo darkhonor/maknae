@@ -30,6 +30,12 @@ pub const CONTEXT_DAC_LANE: &str = "dac_lane";
 /// The requester's home `~` binds to, resolved per request and stamped only by the kernel (#435).
 pub const SUBJECT_HOME: &str = "home";
 
+/// Subject attribute naming who initiated a request; only the kernel stamps it.
+pub const SUBJECT_INITIATOR: &str = "initiator";
+
+/// The [`SUBJECT_INITIATOR`] value of a request the kernel makes on its own behalf.
+pub const INITIATOR_KERNEL: &str = "kernel";
+
 /// No PEP stamps this; a filesystem attempt carrying it is refused (ADR-0009 decision 8). Owner, mode and gid are never put on a request for a backend to recompute.
 pub const RESOURCE_OS_ACCESSIBLE: &str = "os_accessible";
 
@@ -159,6 +165,12 @@ mod tests {
         assert_ne!(Lane::Local.as_str(), Lane::Remote.as_str());
         assert_eq!(CONTEXT_DAC_LANE, "dac_lane");
         assert_eq!(SUBJECT_HOME, "home");
+    }
+
+    #[test]
+    fn the_kernel_initiator_spelling_is_pinned() {
+        assert_eq!(SUBJECT_INITIATOR, "initiator");
+        assert_eq!(INITIATOR_KERNEL, "kernel");
     }
 
     use crate::value::{AttrValue, Attributes};
