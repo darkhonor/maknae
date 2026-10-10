@@ -296,15 +296,14 @@ fn answer(
             },
             corrective: None,
         },
-        Err(LiveRefusal::Failed(why)) => ContainAnswer::Unavailable {
-            reply: CONTAINMENT_UNAVAILABLE,
-            why,
-        },
         Err(r) => match crate::containment::outcome(&r) {
             Some(code) => refused(kind, code, Some(uid), "", reason),
             None => ContainAnswer::Unavailable {
                 reply: CONTAINMENT_UNAVAILABLE,
-                why: format!("{r:?}"),
+                why: match r {
+                    LiveRefusal::Failed(why) => why,
+                    other => format!("{other:?}"),
+                },
             },
         },
     }
@@ -5096,12 +5095,8 @@ where
     }
 
     /// The kernel's own total containment of `target`. The first production caller is #149.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(not(test), expect(dead_code, reason = "#149 calls it"))]
     pub(crate) async fn kernel_contain(&self, target: u32, reason: &str) -> KernelContain {
-        use crate::containment::{
-            corrective, outcome, quoted, record_class, Kind, LiveCheck, LiveNote, LiveOp,
-            LiveRefusal,
-        };
         let seq = Seq::new();
         let ctx = BootCtx {
             event: "kernel",
@@ -5134,6 +5129,22 @@ where
                     .await
             }
         };
+        self.kernel_contain_decided(&ctx, target, &reason, decided)
+            .await
+    }
+
+    /// A kernel containment after its decision: refused unless permitted, written ahead, then edited.
+    async fn kernel_contain_decided(
+        &self,
+        ctx: &BootCtx<'_>,
+        target: u32,
+        reason: &str,
+        decided: maknae_security::Decided,
+    ) -> KernelContain {
+        use crate::containment::{
+            corrective, outcome, quoted, record_class, Kind, LiveCheck, LiveNote, LiveOp,
+            LiveRefusal,
+        };
         if !crate::containment::permits(&decided) {
             let why =
                 match maknae_security::finalize(maknae_security::combine(vec![decided.verdict])) {
@@ -5146,12 +5157,12 @@ where
                 .kernel_refused
                 .fetch_add(1, AtomicOrdering::Release);
             self.kernel_record(
-                &ctx,
+                ctx,
                 "deny",
                 "unauthorized",
                 &format!(
                     "kernel containment of uid {target} denied: {why}; reason {}",
-                    quoted(&reason)
+                    quoted(reason)
                 ),
             )
             .await;
@@ -5162,18 +5173,18 @@ where
         }
         if !self
             .kernel_record(
-                &ctx,
+                ctx,
                 "permit",
                 "authorized",
                 &format!(
                     "kernel containment of uid {target} decided; reason {}",
-                    quoted(&reason)
+                    quoted(reason)
                 ),
             )
             .await
         {
             return self
-                .kernel_failed(&ctx, target, "the decision record did not append".into())
+                .kernel_failed(ctx, target, "the decision record did not append".into())
                 .await;
         }
         let req = LiveRequest {
@@ -5184,24 +5195,25 @@ where
             check: LiveCheck::KernelContain { target },
             note: LiveNote {
                 requester: None,
-                reason: Some(&reason),
+                reason: Some(reason),
             },
         };
         let refusal = match self.live_edit(req).await {
             Ok(LiveApplied::Committed { revision }) => {
                 return KernelContain::Contained { revision }
             }
-            Err(LiveRefusal::Failed(why)) => return self.kernel_failed(&ctx, target, why).await,
             Err(r) => r,
         };
         let Some(code) = outcome(&refusal) else {
-            return self
-                .kernel_failed(&ctx, target, format!("{refusal:?}"))
-                .await;
+            let why = match refusal {
+                LiveRefusal::Failed(why) => why,
+                other => format!("{other:?}"),
+            };
+            return self.kernel_failed(ctx, target, why).await;
         };
         let (result, posture) = record_class(code);
-        let text = corrective(Kind::KernelContain, code, Some(target), "", Some(&reason));
-        self.kernel_record(&ctx, result, posture, &text).await;
+        let text = corrective(Kind::KernelContain, code, Some(target), "", Some(reason));
+        self.kernel_record(ctx, result, posture, &text).await;
         if code == maknae_proto::ContainmentOutcome::AlreadyContained {
             return KernelContain::AlreadyContained;
         }
@@ -17729,6 +17741,26 @@ mod reload_tests {
         );
         assert_eq!(fx.sync_lines(), ["unsynced=1", "conflict=0"]);
         assert!(fx.mirror().contains("- uid: 4242"));
+        let booted = crate::boot_gate::authz_boot_gate(
+            (**fx.reloader.applied_source.read().unwrap()).clone(),
+            Arc::clone(&fx.reloader.persisted.read().unwrap()),
+            &fx.reloader.vocabulary.full,
+        )
+        .expect("the production boot gate accepts the restarted state");
+        assert_eq!(
+            maknae_security::Authorizer::decide(
+                &booted,
+                &crate::handler::build_authz_request(
+                    &Verb::Whoami,
+                    4242,
+                    None,
+                    maknae_security::Lane::Local,
+                    None,
+                ),
+            ),
+            adversary(),
+            "the production boot gate denies the contained uid"
+        );
         assert_eq!(
             answer_code(&fx.release(ContainTarget::Uid(4242), 0).await),
             ContainmentOutcome::Released
@@ -17823,6 +17855,61 @@ mod reload_tests {
         ));
         assert!(!fx.mirror().contains("4242"));
         assert_eq!(fx.containment_lines(), ["subjects=0", "kernel_refused=1"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_kernel_contain_the_pdp_refuses_contains_nobody_and_is_counted() {
+        let refusals = [
+            (
+                maknae_security::Verdict::Deny {
+                    reason: "SENTINEL-pdp-deny".into(),
+                },
+                "SENTINEL-pdp-deny",
+            ),
+            (
+                maknae_security::Verdict::Permit {
+                    obligations: vec![maknae_security::Obligation {
+                        id: "SENTINEL-undischargeable".into(),
+                        params: maknae_security::Attributes::new(),
+                    }],
+                },
+                "an obligation the kernel cannot discharge",
+            ),
+        ];
+        for (i, (verdict, why)) in refusals.into_iter().enumerate() {
+            let fx = fixture(&format!("k-pdp-{i}"), RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
+            let before = fx.store_sha();
+            let r = &fx.reloader;
+            let seq = Seq::new();
+            let ctx = BootCtx {
+                event: "kernel",
+                host: &r.host,
+                socket: &r.socket,
+                euid: r.euid,
+                session_id: 1,
+                seq: &seq,
+                au3_1: &r.au3_1,
+            };
+            let decided = maknae_security::Decided {
+                verdict,
+                role: None,
+                rule: None,
+            };
+            assert_eq!(
+                bounded(r.kernel_contain_decided(&ctx, 4242, "r", decided)).await,
+                KernelContain::Failed(format!("kernel.contain denied: {why}"))
+            );
+            assert_eq!(fx.store_sha(), before, "{why}");
+            assert!(!fx.mirror().contains("4242"));
+            assert_eq!(fx.containment_lines(), ["subjects=0", "kernel_refused=1"]);
+            assert!(fx.seen().iter().any(|s| s.action == "kernel.contain"
+                && s.reason
+                    == format!("kernel containment of uid 4242 denied: {why}; reason \"r\"")));
+            assert!(!fx
+                .seen()
+                .iter()
+                .any(|s| s.action == "kernel.contain" && s.reason.contains("decided")));
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
