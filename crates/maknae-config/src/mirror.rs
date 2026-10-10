@@ -85,7 +85,7 @@ fn inline(e: &BindingEntry) -> String {
     }
 }
 
-fn body(live: &Section) -> String {
+pub fn section_body(live: &Section) -> String {
     let mut out = String::from("schema_version: 1\n");
     let Section::Present(roles) = live else {
         return out;
@@ -123,7 +123,7 @@ pub fn render_mirror(h: &MirrorHeader, live: &Section) -> String {
     for c in &h.conflicts {
         out.push_str(&format!("# conflict: {}\n", inline(c)));
     }
-    out.push_str(&body(live));
+    out.push_str(&section_body(live));
     out
 }
 
@@ -236,7 +236,7 @@ pub fn installable(m: &Mirror) -> String {
     format!(
         "# installed by sudo maknae policy sync from maknaed's mirror at revision {}\n{}",
         m.header.revision,
-        body(&m.section)
+        section_body(&m.section)
     )
 }
 
@@ -760,6 +760,26 @@ mod tests {
                     "{file:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn section_body_is_the_mirror_body() {
+        for live in universe() {
+            let text = render_mirror(&header(&[]), &live);
+            assert!(text.ends_with(&section_body(&live)), "{live:?}");
+        }
+    }
+
+    #[test]
+    fn the_installable_file_is_the_section_body() {
+        for live in universe() {
+            let m = parse_mirror(&render_mirror(&header(&[]), &live)).unwrap();
+            assert!(installable(&m).ends_with(&section_body(&m.section)));
+            assert_eq!(
+                parse_bindings(&section_body(&m.section)).map(|b| Section::of(&b)),
+                Ok(m.section.clone())
+            );
         }
     }
 }

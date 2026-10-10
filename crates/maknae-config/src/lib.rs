@@ -72,9 +72,9 @@ pub use bindings::{
     BINDING_ROLES,
 };
 pub use bindings_sync::{
-    apply_edit, conflicts_canonical, conflicts_from_canonical, effective_loosenings, equivalent,
-    loosenings, merge, unsynced, BoundRole, EditError, Edited, LiveEdit, MergeEvent, Merged,
-    ResolvedBy, Section, Stored, SyncKind,
+    apply_edit, conflicts_canonical, conflicts_from_canonical, effective_loosenings,
+    enroll_section, equivalent, loosenings, merge, unsynced, BoundRole, EditError, Edited,
+    EnrollBindings, LiveEdit, MergeEvent, Merged, ResolvedBy, Section, Stored, SyncKind,
 };
 // Re-exported so downstream seam constructors (maknae-authz-basic's
 // HermeticAuthorizer, #77) can NAME the requirement type without a maknae-io
@@ -104,8 +104,8 @@ pub use error::ConfigError;
 pub use maknae_io::TargetRequired;
 pub use maknae_security::{ClassificationPolicy, Level};
 pub use mirror::{
-    base_token, diff_lines, installable, parse_mirror, plan_sync, render_mirror, Mirror,
-    MirrorError, MirrorHeader, SyncPlan, MIRROR_BANNER, MIRROR_MAX_BYTES,
+    base_token, diff_lines, installable, parse_mirror, plan_sync, render_mirror, section_body,
+    Mirror, MirrorError, MirrorHeader, SyncPlan, MIRROR_BANNER, MIRROR_MAX_BYTES,
 };
 pub use policy::{BasicPolicy, LEVELS as US_LEVELS};
 pub use principal::{principal_from_section, principal_keys_known, Principal, PRINCIPAL_SECTION};

@@ -15257,8 +15257,11 @@ mod reload_tests {
         bounded(fx.reloader.run()).await.unwrap();
         assert_eq!(whoami_as(&fx, 4242).1, Some("adversary"));
         let from = fx.seen().len();
-        fx.live_edit(LiveEdit::Release(BindingEntry::Uid(4242)))
-            .await;
+        fx.live_edit(LiveEdit::ReleaseUid {
+            uid: 4242,
+            names: Default::default(),
+        })
+        .await;
         assert_eq!(whoami_as(&fx, 4242).1, None);
         assert_eq!(fx.status.identity.counts(), ["released=1"]);
         assert_eq!(
@@ -15448,7 +15451,10 @@ mod reload_tests {
         );
         assert!(!fx.state_dir().join(MIRROR_FILE).exists());
         bounded(fx.reloader.live_edit(
-            LiveEdit::Release(BindingEntry::Uid(4242)),
+            LiveEdit::ReleaseUid {
+                uid: 4242,
+                names: Default::default(),
+            },
             LiveInitiator::Operator,
         ))
         .await

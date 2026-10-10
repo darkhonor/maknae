@@ -158,7 +158,7 @@ pub fn event_reason(e: &MergeEvent) -> String {
 pub fn live_reason(edit: &LiveEdit, who: LiveInitiator) -> String {
     let what = match edit {
         LiveEdit::Contain(e) => format!("contain {}", entry(e)),
-        LiveEdit::Release(e) => format!("release {}", entry(e)),
+        LiveEdit::ReleaseUid { uid, .. } => format!("release {}", entry(&BindingEntry::Uid(*uid))),
         LiveEdit::Bind { name, role } => {
             let role = match role {
                 BoundRole::Admin => "admin",
@@ -742,10 +742,13 @@ mod tests {
         }
         assert_eq!(
             live_reason(
-                &LiveEdit::Release(Name("e\u{7f}".into())),
+                &LiveEdit::ReleaseUid {
+                    uid: 7,
+                    names: Default::default()
+                },
                 LiveInitiator::Operator
             ),
-            "live (operator): release e\\u{7f}"
+            "live (operator): release uid:7"
         );
         assert_eq!(
             live_reason(&LiveEdit::Unbind("eve,x".into()), LiveInitiator::Kernel),
