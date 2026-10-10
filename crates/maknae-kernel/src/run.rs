@@ -104,6 +104,12 @@ fn baseline_breaker() -> Arc<tokio::sync::Mutex<BlockingBreaker>> {
     Arc::clone(BASELINE_BREAKER.get_or_init(|| Arc::new(Default::default())))
 }
 
+static CONTAIN_PROBE_BREAKER: OnceLock<Arc<tokio::sync::Mutex<BlockingBreaker>>> = OnceLock::new();
+
+fn contain_probe_breaker() -> Arc<tokio::sync::Mutex<BlockingBreaker>> {
+    Arc::clone(CONTAIN_PROBE_BREAKER.get_or_init(|| Arc::new(Default::default())))
+}
+
 pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 #[derive(Debug)]
@@ -4057,6 +4063,8 @@ struct Reloader<B: maknae_authz_basic::Baseline, E> {
     turn_wait: Duration,
     applied_source: std::sync::RwLock<Arc<maknae_authz_basic::PolicySource>>,
     sync: crate::sync::SyncStatus,
+    /// Admits the containment probes' blocking job; never the request path's breaker.
+    probe_breaker: Arc<tokio::sync::Mutex<BlockingBreaker>>,
     #[cfg(test)]
     load_gate: Option<Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>>,
     #[cfg(test)]
@@ -4066,7 +4074,14 @@ struct Reloader<B: maknae_authz_basic::Baseline, E> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LiveApplied {
     Committed { revision: u64 },
-    Unchanged,
+}
+
+/// One live edit: what it changes, who asked, the check it runs in the turn, and its record note.
+pub(crate) struct LiveRequest<'a> {
+    pub op: crate::containment::LiveOp,
+    pub who: maknae_state::store::LiveInitiator,
+    pub check: crate::containment::LiveCheck,
+    pub note: crate::containment::LiveNote<'a>,
 }
 
 struct ReloadCandidate {
@@ -4139,35 +4154,76 @@ where
     B: maknae_authz_basic::Baseline,
     E: AuditEmit + Send + Sync + 'static,
 {
-    /// The first production caller is #165.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the containment path calls it (#165)")
+    )]
     pub(crate) async fn live_edit(
         &self,
-        edit: maknae_config::LiveEdit,
-        who: maknae_state::store::LiveInitiator,
-    ) -> Result<LiveApplied, String> {
+        req: LiveRequest<'_>,
+    ) -> Result<LiveApplied, crate::containment::LiveRefusal> {
+        use crate::containment::{LiveCheck, LiveOp, LiveRefusal};
+        use maknae_config::LiveEdit;
+        let LiveRequest {
+            op,
+            who,
+            check,
+            note,
+        } = req;
         let Ok(_turn) = tokio::time::timeout(self.turn_wait, self.lock.lock()).await else {
-            return Err("a reload holds the turn".into());
+            return Err(LiveRefusal::Busy);
         };
         if *self.stopping.borrow() || *self.drain.borrow() != Drain::Serving {
-            return Err("maknaed is stopping".into());
+            return Err(LiveRefusal::Stopping);
         }
+        let failed = |e: String| LiveRefusal::Failed(e);
         let persisted = Arc::clone(
             &self
                 .persisted
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
-        let stored = maknae_graph::identity::extract(&persisted).map_err(|e| e.to_string())?;
+        let stored =
+            maknae_graph::identity::extract(&persisted).map_err(|e| failed(e.to_string()))?;
+        let edit = match op {
+            LiveOp::Edit(e) => e,
+            LiveOp::Release { uid, named } => LiveEdit::ReleaseUid {
+                uid,
+                names: crate::containment::release_names(
+                    uid,
+                    named.as_deref(),
+                    &stored.layer.claims(),
+                ),
+            },
+        };
+        if !crate::containment::binds_target_by_uid(check, &edit) {
+            return Err(failed("a containment binds its target by uid".into()));
+        }
+        if let LiveCheck::Contain { target, .. } | LiveCheck::KernelContain { target } = check {
+            if crate::containment::is_contained(&stored.layer, target) {
+                return Err(LiveRefusal::AlreadyContained);
+            }
+        }
         let sync = stored
             .sync
             .as_ref()
-            .ok_or("the running graph carries no sync base")?;
-        let (base, live, conflicts) = crate::sync::stored_sections(sync)?;
-        let Some(edited) = maknae_config::apply_edit(&base, &live, &conflicts, &edit)
-            .map_err(|e| e.to_string())?
-        else {
-            return Ok(LiveApplied::Unchanged);
+            .ok_or_else(|| failed("the running graph carries no sync base".into()))?;
+        let (base, live, conflicts) = crate::sync::stored_sections(sync).map_err(failed)?;
+        let edited = match maknae_config::apply_edit(&base, &live, &conflicts, &edit) {
+            Err(maknae_config::EditError::NoExplicitBindings) => {
+                return Err(LiveRefusal::NoExplicitBindings)
+            }
+            Err(e) => return Err(failed(e.to_string())),
+            Ok(None) => {
+                return Err(match edit {
+                    LiveEdit::Contain(_) => LiveRefusal::AlreadyContained,
+                    LiveEdit::ReleaseUid { .. } => LiveRefusal::NotContained,
+                    LiveEdit::Bind { .. } | LiveEdit::Unbind(_) => {
+                        LiveRefusal::Failed("the live edit changes nothing".into())
+                    }
+                })
+            }
+            Ok(Some(e)) => e,
         };
         let next_live = edited.live;
         let applied = Arc::clone(
@@ -4176,12 +4232,22 @@ where
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
+        if let Some(name) =
+            crate::containment::unanswered(&next_live, &edit, |n| applied.answered(n))
+        {
+            journal(format!(
+                "maknaed: live edit refused: the applied load never looked up {}",
+                crate::sync::named(&name)
+            ));
+            return Err(LiveRefusal::LookupUnavailable);
+        }
         let section = next_live.clone();
         let source = within_blocking(BLOCKING_OPERATION_TIMEOUT, move || {
-            applied.with_bindings(maknae_config::Bindings::from_section(&section))
+            applied.with_live_bindings(maknae_config::Bindings::from_section(&section))
         })
-        .await?
-        .map_err(|e| e.to_string())?;
+        .await
+        .map_err(failed)?
+        .map_err(|e| failed(e.to_string()))?;
         let digests = source.section_digests(self.authorizer.baseline().digest());
         let (next_layer, released) = crate::reload::next_layer(
             &source.identity_layer(&self.label, digests.get("bindings").copied()),
@@ -4194,14 +4260,10 @@ where
             live: next_live.canonical(),
             conflicts: maknae_config::conflicts_canonical(&edited.conflicts),
         };
-        let events: Vec<String> = std::iter::once(crate::sync::live_reason(
-            &edit,
-            who,
-            &crate::containment::LiveNote::none(),
-        ))
-        .chain(edited.events.iter().map(crate::sync::event_reason))
-        .collect();
-        let counts = crate::sync::counts(&next_sync)?;
+        let events: Vec<String> = std::iter::once(crate::sync::live_reason(&edit, who, &note))
+            .chain(edited.events.iter().map(crate::sync::event_reason))
+            .collect();
+        let counts = crate::sync::counts(&next_sync).map_err(failed)?;
         let revision = self
             .revision
             .load(AtomicOrdering::Acquire)
@@ -4216,15 +4278,23 @@ where
                 revision,
                 who.provenance(),
             )
-            .map_err(|e| e.to_string())?,
+            .map_err(|e| failed(e.to_string()))?,
         );
-        let snapshot = maknae_authz_basic::snapshot::compile(
-            Arc::clone(&graph),
-            &source,
-            &self.vocabulary.full,
-            &digests,
-        )
-        .map_err(|e| e.to_string())?;
+        let snapshot = Arc::new(
+            maknae_authz_basic::snapshot::compile(
+                Arc::clone(&graph),
+                &source,
+                &self.vocabulary.full,
+                &digests,
+            )
+            .map_err(|e| failed(e.to_string()))?,
+        );
+        if let LiveCheck::Contain { target, requester } = check {
+            let probed = self
+                .probe_contain(target, requester, Arc::clone(&snapshot))
+                .await;
+            crate::containment::check_contain(target, requester, probed)?;
+        }
         let seq = Seq::new();
         let ctx = BootCtx {
             event: "live",
@@ -4247,14 +4317,13 @@ where
         )
         .await
         .inspect_err(|_| self.sync.set_stale(true))
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| failed(e.to_string()))?;
         *self
             .persisted
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::clone(&graph);
         self.revision
             .store(committed.revision, AtomicOrdering::Release);
-        let snapshot = Arc::new(snapshot);
         let published = crate::identity_report::Published::of(
             &snapshot,
             crate::identity_report::transition_problems(&released),
@@ -4291,6 +4360,83 @@ where
         Ok(LiveApplied::Committed {
             revision: committed.revision,
         })
+    }
+
+    /// Both containment probes in one blocking job under the probe breaker: whether the
+    /// requester holds admin.release now, and which candidate subjects would.
+    async fn probe_contain(
+        &self,
+        target: u32,
+        requester: Option<u32>,
+        candidate: Arc<maknae_authz_basic::snapshot::Snapshot>,
+    ) -> Result<crate::containment::Probed, crate::containment::ProbeError> {
+        use crate::containment::{permits, ProbeError, Probed};
+        let breaker = Arc::clone(&self.probe_breaker);
+        let admission = { breaker.lock().await.begin_attempt_at(Instant::now()) };
+        match admission {
+            BreakerAdmission::RefuseOpen | BreakerAdmission::RefuseAtCapacity => {
+                return Err(ProbeError::Busy)
+            }
+            BreakerAdmission::Admit => {}
+        }
+        let pdp = Arc::clone(&self.authorizer);
+        let installed = self.authorizer.baseline().snapshot();
+        let job = move || {
+            let probe = |uid| {
+                crate::handler::build_authz_request(
+                    &crate::containment::release_probe(),
+                    uid,
+                    None,
+                    maknae_security::Lane::Local,
+                    None,
+                )
+            };
+            let self_holds = requester.filter(|r| *r == target).map(|r| {
+                pdp.decide_candidate_all(&installed, &[probe(r)])
+                    .first()
+                    .is_some_and(permits)
+            });
+            if self_holds == Some(false) {
+                return Probed {
+                    self_holds,
+                    releasers: None,
+                };
+            }
+            let probes: Vec<_> = candidate
+                .subject_entries()
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|s| s.uid)
+                .map(probe)
+                .collect();
+            Probed {
+                self_holds,
+                releasers: Some(
+                    pdp.decide_candidate_all(&candidate, &probes)
+                        .iter()
+                        .map(permits)
+                        .collect(),
+                ),
+            }
+        };
+        match tokio::time::timeout(BLOCKING_OPERATION_TIMEOUT, tokio::task::spawn_blocking(job))
+            .await
+        {
+            Ok(Ok(p)) => {
+                breaker.lock().await.record_success();
+                Ok(p)
+            }
+            Ok(Err(join)) => {
+                breaker.lock().await.record_success();
+                Err(ProbeError::Failed(format!(
+                    "the containment check failed: {join}"
+                )))
+            }
+            Err(_) => {
+                breaker.lock().await.record_timeout_at(Instant::now());
+                Err(ProbeError::Failed("the containment check timed out".into()))
+            }
+        }
     }
 
     async fn publish_mirror(&self, graph: &maknae_graph::graph::Graph, ctx: &BootCtx<'_>) {
@@ -6085,6 +6231,7 @@ async fn boot_after_sink(
         turn_wait: BLOCKING_OPERATION_TIMEOUT,
         applied_source: std::sync::RwLock::new(applied_source),
         sync: sync_status,
+        probe_breaker: contain_probe_breaker(),
         #[cfg(test)]
         load_gate: None,
         #[cfg(test)]
@@ -12025,7 +12172,7 @@ mod reload_fixture {
             &self.reloader.authorizer
         }
 
-        pub(super) fn live(&self) -> &Arc<crate::live::LiveConfig> {
+        pub(super) fn live_config(&self) -> &Arc<crate::live::LiveConfig> {
             self.reloader.authorizer.live()
         }
 
@@ -12139,12 +12286,88 @@ mod reload_fixture {
         pub(super) async fn live_edit(&self, edit: maknae_config::LiveEdit) -> LiveApplied {
             tokio::time::timeout(
                 Duration::from_secs(60),
-                self.reloader
-                    .live_edit(edit, maknae_state::store::LiveInitiator::Operator),
+                self.live(
+                    crate::containment::LiveOp::Edit(edit),
+                    crate::containment::LiveCheck::None,
+                ),
             )
             .await
             .expect("the live edit returns")
             .unwrap()
+        }
+
+        pub(super) async fn live(
+            &self,
+            op: crate::containment::LiveOp,
+            check: crate::containment::LiveCheck,
+        ) -> Result<LiveApplied, crate::containment::LiveRefusal> {
+            self.reloader
+                .live_edit(LiveRequest {
+                    op,
+                    who: maknae_state::store::LiveInitiator::Operator,
+                    check,
+                    note: crate::containment::LiveNote::none(),
+                })
+                .await
+        }
+
+        pub(super) async fn contain_uid(
+            &self,
+            uid: u32,
+            requester: Option<u32>,
+        ) -> Result<LiveApplied, crate::containment::LiveRefusal> {
+            self.live(
+                crate::containment::LiveOp::Edit(maknae_config::LiveEdit::Contain(
+                    maknae_config::BindingEntry::Uid(uid),
+                )),
+                crate::containment::LiveCheck::Contain {
+                    target: uid,
+                    requester,
+                },
+            )
+            .await
+        }
+
+        pub(super) fn trip_probe_breaker(&self) {
+            *self
+                .reloader
+                .probe_breaker
+                .try_lock()
+                .expect("no probe is admitted") = BlockingBreaker::new(0);
+        }
+
+        /// The threads every observed decision ran on: the installed path's log and the candidate path's.
+        pub(super) fn decision_threads(&self) -> Vec<std::thread::ThreadId> {
+            let mut out: Vec<_> = self
+                .baseline()
+                .decision_log()
+                .into_iter()
+                .map(|(_, t)| t)
+                .collect();
+            out.extend(self.composition().candidate_threads.lock().unwrap().iter());
+            out
+        }
+
+        pub(super) fn reset_decision_counts(&self) {
+            self.baseline().clear_decision_log();
+            let c = self.composition();
+            c.candidate_decisions
+                .store(0, std::sync::atomic::Ordering::SeqCst);
+            c.candidate_threads.lock().unwrap().clear();
+        }
+
+        /// The applied load as if it had asked only for the names in `yaml`, asking `lookup` from now on.
+        pub(super) fn forget_answers(
+            &self,
+            yaml: &str,
+            lookup: fn(&str) -> Result<Option<u32>, i32>,
+        ) {
+            let applied = Arc::clone(&self.reloader.applied_source.read().unwrap());
+            let mut narrowed = applied
+                .with_bindings(maknae_config::parse_bindings(yaml).unwrap())
+                .unwrap();
+            narrowed.set_lookup(lookup);
+            *self.reloader.applied_source.write().unwrap() = Arc::new(narrowed);
         }
     }
 
@@ -12211,6 +12434,7 @@ mod reload_fixture {
         pub(super) delay: Duration,
         pub(super) bound: Duration,
         pub(super) turn_wait: Duration,
+        pub(super) count_decisions: bool,
     }
 
     impl Default for Opts<'_> {
@@ -12226,6 +12450,7 @@ mod reload_fixture {
                 delay: Duration::ZERO,
                 bound: AUDIT_APPEND_TIMEOUT,
                 turn_wait: BLOCKING_OPERATION_TIMEOUT,
+                count_decisions: false,
             }
         }
     }
@@ -12396,6 +12621,9 @@ mod reload_fixture {
             Arc::clone(&graph),
         )
         .unwrap();
+        if opts.count_decisions {
+            baseline.arm_decision_log();
+        }
         baseline.install(Arc::new(
             maknae_authz_basic::snapshot::compile(
                 Arc::clone(&graph),
@@ -12465,6 +12693,7 @@ mod reload_fixture {
             turn_wait: opts.turn_wait,
             applied_source: std::sync::RwLock::new(Arc::new(source)),
             sync: status.sync.clone(),
+            probe_breaker: Arc::default(),
             load_gate: opts.load_gate.map(|g| Arc::new(std::sync::Mutex::new(g))),
             load_entered: std::sync::Mutex::new(None),
         });
@@ -12623,19 +12852,19 @@ mod baseline_accept_tests {
         let one = "providers:\n  - name: openai\n    endpoint: https://api.example.test/v1\n    models: [m]\n";
         let two = "providers:\n  - name: openai\n    endpoint: https://api.example.test/v1\n    models: [m]\n  - name: other\n    endpoint: https://other.example.test/v1\n    models: [n]\n";
         let fx = Fx::with_baseline_yaml("live-principal", one).await;
-        let generation = fx.live().generation();
+        let generation = fx.live_config().generation();
         fx.write_yaml_principal(4242, two);
         let shown = fx.show().await;
         assert_eq!(shown.apply, "live");
         accepted(fx.accept(&shown.hash).await);
         assert_eq!(fx.composition().baseline().principal().uid, 4242);
         assert_eq!(
-            fx.live().generation(),
+            fx.live_config().generation(),
             generation + 1,
             "the request path's holder moved"
         );
         let names: Vec<String> = fx
-            .live()
+            .live_config()
             .providers()
             .as_ref()
             .as_ref()
@@ -12645,7 +12874,7 @@ mod baseline_accept_tests {
             .map(|p| p.name.clone())
             .collect();
         assert_eq!(names, ["openai", "other"]);
-        assert_eq!(fx.live().view()["principal"]["uid"], "4242");
+        assert_eq!(fx.live_config().view()["principal"]["uid"], "4242");
         fx.write_yaml_principal(4242, "");
         assert_eq!(
             fx.show().await.apply,
@@ -13484,6 +13713,7 @@ mod reload_tests {
     use super::boot_gate_tests::boot_graph_at;
     use super::reload_fixture::*;
     use super::*;
+    use crate::containment::{LiveCheck, LiveNote, LiveOp, LiveRefusal};
     use maknae_authz_basic::Baseline;
     use maknae_config::{BindingEntry, LiveEdit, MIRROR_FILE};
     use maknae_graph::record::ProvenanceKind;
@@ -13491,6 +13721,15 @@ mod reload_tests {
 
     const ROOT_ADMIN_OTHER: &str =
         "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  guest: []\n";
+
+    fn live_req(edit: LiveEdit, who: LiveInitiator) -> LiveRequest<'static> {
+        LiveRequest {
+            op: LiveOp::Edit(edit),
+            who,
+            check: LiveCheck::None,
+            note: LiveNote::none(),
+        }
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_reload_carries_the_persisted_baseline_unchanged() {
@@ -15213,10 +15452,10 @@ mod reload_tests {
         fx.write_bindings(ROOT_ADMIN);
         bounded(fx.reloader.run()).await.unwrap();
         let from = fx.seen().len();
-        let r = bounded(
-            fx.reloader
-                .live_edit(live_contain(BindingEntry::Uid(0)), LiveInitiator::Operator),
-        )
+        let r = bounded(fx.reloader.live_edit(live_req(
+            live_contain(BindingEntry::Uid(0)),
+            LiveInitiator::Operator,
+        )))
         .await
         .unwrap();
         assert!(matches!(r, LiveApplied::Committed { .. }), "{r:?}");
@@ -15248,12 +15487,12 @@ mod reload_tests {
         );
         let store = fx.store_sha();
         assert_eq!(
-            bounded(
-                fx.reloader
-                    .live_edit(live_contain(BindingEntry::Uid(0)), LiveInitiator::Operator)
-            )
+            bounded(fx.reloader.live_edit(live_req(
+                live_contain(BindingEntry::Uid(0)),
+                LiveInitiator::Operator
+            )))
             .await,
-            Ok(LiveApplied::Unchanged)
+            Err(LiveRefusal::AlreadyContained)
         );
         assert_eq!(fx.store_sha(), store);
     }
@@ -15370,10 +15609,10 @@ mod reload_tests {
         let fx = Fx::with_baseline("adopt").await;
         fx.write_bindings(ROOT_ADMIN);
         bounded(fx.reloader.run()).await.unwrap();
-        bounded(
-            fx.reloader
-                .live_edit(live_contain(BindingEntry::Uid(4242)), LiveInitiator::Kernel),
-        )
+        bounded(fx.reloader.live_edit(live_req(
+            live_contain(BindingEntry::Uid(4242)),
+            LiveInitiator::Kernel,
+        )))
         .await
         .unwrap();
         fx.install_mirror();
@@ -15410,10 +15649,10 @@ mod reload_tests {
             "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"maknae-no-such-user-491\"]\n",
         );
         bounded(fx.reloader.run()).await.unwrap();
-        bounded(fx.reloader.live_edit(
+        bounded(fx.reloader.live_edit(live_req(
             live_contain(BindingEntry::Uid(4242)),
             LiveInitiator::Operator,
-        ))
+        )))
         .await
         .unwrap();
         let m = fx.mirror();
@@ -15435,10 +15674,10 @@ mod reload_tests {
         bounded(fx.reloader.run()).await.unwrap();
         fx.reloader.dir.fail_next_mirror_publish();
         let before = fx.store_sha();
-        let r = bounded(fx.reloader.live_edit(
+        let r = bounded(fx.reloader.live_edit(live_req(
             live_contain(BindingEntry::Uid(4242)),
             LiveInitiator::Operator,
-        ))
+        )))
         .await;
         assert!(matches!(r, Ok(LiveApplied::Committed { .. })), "{r:?}");
         assert_ne!(fx.store_sha(), before, "the transition stands");
@@ -15458,13 +15697,13 @@ mod reload_tests {
             fx.seen()
         );
         assert!(!fx.state_dir().join(MIRROR_FILE).exists());
-        bounded(fx.reloader.live_edit(
+        bounded(fx.reloader.live_edit(live_req(
             LiveEdit::ReleaseUid {
                 uid: 4242,
                 names: Default::default(),
             },
             LiveInitiator::Operator,
-        ))
+        )))
         .await
         .unwrap();
         assert_eq!(fx.sync_lines(), ["unsynced=0", "conflict=0"]);
@@ -15482,10 +15721,10 @@ mod reload_tests {
         };
 
         crash_after_the_commit();
-        bounded(fx.reloader.live_edit(
+        bounded(fx.reloader.live_edit(live_req(
             live_contain(BindingEntry::Uid(4242)),
             LiveInitiator::Operator,
-        ))
+        )))
         .await
         .unwrap();
         assert!(!mirror.exists(), "live edit");
@@ -15522,10 +15761,10 @@ mod reload_tests {
         };
 
         fx.reloader.dir.fail_next_store_publish();
-        let r = bounded(fx.reloader.live_edit(
+        let r = bounded(fx.reloader.live_edit(live_req(
             live_contain(BindingEntry::Uid(4242)),
             LiveInitiator::Operator,
-        ))
+        )))
         .await;
         assert!(r.is_err(), "{r:?}");
         assert!(!mirror.exists(), "live edit");
@@ -15570,10 +15809,10 @@ mod reload_tests {
         assert!(bounded(fx.reloader.run()).await.unwrap().persisted);
         assert_eq!(mirror_revision(&fx), running_revision(&fx), "reload");
 
-        bounded(fx.reloader.live_edit(
+        bounded(fx.reloader.live_edit(live_req(
             live_contain(BindingEntry::Uid(4242)),
             LiveInitiator::Operator,
-        ))
+        )))
         .await
         .unwrap();
         assert_eq!(mirror_revision(&fx), running_revision(&fx), "live edit");
@@ -15804,13 +16043,13 @@ mod reload_tests {
     async fn a_live_edit_over_absent_bindings_is_refused_and_changes_nothing() {
         let fx = fixture("live-absent", AUTHZ, Some("schema_version: 1\n")).await;
         let (store, from) = (fx.store_sha(), fx.seen().len());
-        let got = bounded(
-            fx.reloader
-                .live_edit(live_contain(BindingEntry::Uid(0)), LiveInitiator::Operator),
-        )
+        let got = bounded(fx.reloader.live_edit(live_req(
+            live_contain(BindingEntry::Uid(0)),
+            LiveInitiator::Operator,
+        )))
         .await;
         assert!(
-            matches!(&got, Err(m) if m.contains("no bindings: key")),
+            matches!(got, Err(LiveRefusal::NoExplicitBindings)),
             "{got:?}"
         );
         assert_eq!(fx.store_sha(), store);
@@ -15853,10 +16092,7 @@ mod reload_tests {
     async fn a_live_edit_records_its_outcome_after_the_intent() {
         let fx = Fx::with_baseline("live-outcome").await;
         let LiveApplied::Committed { revision } =
-            fx.live_edit(live_contain(BindingEntry::Uid(4242))).await
-        else {
-            panic!("committed");
-        };
+            fx.live_edit(live_contain(BindingEntry::Uid(4242))).await;
         let recs = live_records(&fx);
         let intent = recs
             .iter()
@@ -15895,12 +16131,12 @@ mod reload_tests {
         let fx = Fx::with_baseline("live-draining").await;
         let store = fx.store_sha();
         fx.reloader.drain.send_replace(Drain::Begun);
-        let got = bounded(fx.reloader.live_edit(
+        let got = bounded(fx.reloader.live_edit(live_req(
             live_contain(BindingEntry::Uid(4242)),
             LiveInitiator::Operator,
-        ))
+        )))
         .await;
-        assert_eq!(got, Err("maknaed is stopping".into()));
+        assert_eq!(got, Err(LiveRefusal::Stopping));
         assert_eq!(fx.store_sha(), store);
         assert_ne!(whoami_as(&fx, 4242).1, Some("adversary"));
     }
@@ -15936,14 +16172,14 @@ mod reload_tests {
         let started = Instant::now();
         let got = tokio::time::timeout(
             Duration::from_secs(5),
-            fx.reloader.live_edit(
+            fx.reloader.live_edit(live_req(
                 live_contain(BindingEntry::Uid(4242)),
                 LiveInitiator::Operator,
-            ),
+            )),
         )
         .await
         .expect("the live edit gives up within its bound");
-        assert_eq!(got, Err("a reload holds the turn".into()));
+        assert_eq!(got, Err(LiveRefusal::Busy));
         assert!(started.elapsed() < Duration::from_secs(2));
         assert_eq!(fx.store_sha(), store);
         release.send(()).unwrap();
@@ -15955,14 +16191,355 @@ mod reload_tests {
         let fx = Fx::with_baseline("live-stopping").await;
         let store = fx.store_sha();
         fx.reloader.stopping.send_replace(true);
-        let got = bounded(fx.reloader.live_edit(
+        let got = bounded(fx.reloader.live_edit(live_req(
             live_contain(BindingEntry::Uid(4242)),
             LiveInitiator::Operator,
-        ))
+        )))
         .await;
-        assert_eq!(got, Err("maknaed is stopping".into()));
+        assert_eq!(got, Err(LiveRefusal::Stopping));
         assert_eq!(fx.store_sha(), store);
         assert_ne!(whoami_as(&fx, 4242).1, Some("adversary"));
+    }
+
+    const RELEASE_TO_ADMIN: &str =
+        "schema_version: 1\nroles:\n  admin:\n    allow:\n      - \"admin.release\"\n";
+    const TWO_ADMINS: &str = "schema_version: 1\nbindings:\n  admin: [\"root\", \"daemon\"]\n";
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_contain_that_leaves_no_releaser_is_refused_and_changes_nothing() {
+        let fx = fixture("last-releaser", RELEASE_TO_ADMIN, Some(ROOT_ADMIN)).await;
+        let before = fx.store_sha();
+        assert_eq!(
+            bounded(fx.contain_uid(0, Some(daemon_uid()))).await,
+            Err(LiveRefusal::LastReleaser)
+        );
+        assert_eq!(fx.store_sha(), before);
+        assert!(matches!(
+            fx.root_whoami(),
+            maknae_security::Verdict::Permit { .. }
+        ));
+        assert!(!fx
+            .seen()
+            .iter()
+            .any(|s| s.action == "graph.sync" && s.reason.starts_with("live")));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_explicit_deny_of_release_counts_as_not_holding_it() {
+        let fx = fixture("deny-release", "schema_version: 1\nroles:\n  admin:\n    allow:\n      - \"admin.release\"\n    deny:\n      - \"admin.release\"\n", Some(TWO_ADMINS)).await;
+        assert_eq!(
+            bounded(fx.contain_uid(daemon_uid(), Some(0))).await,
+            Err(LiveRefusal::LastReleaser)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn self_contain_needs_release_and_is_permitted_with_it() {
+        let fx = fixture("self-no", "schema_version: 1\n", Some(TWO_ADMINS)).await;
+        assert_eq!(
+            bounded(fx.contain_uid(0, Some(0))).await,
+            Err(LiveRefusal::SelfContainWithoutRelease)
+        );
+        let fx = fixture("self-yes", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
+        assert!(matches!(
+            bounded(fx.contain_uid(0, Some(0))).await,
+            Ok(LiveApplied::Committed { .. })
+        ));
+        assert!(matches!(
+            fx.root_whoami(),
+            maknae_security::Verdict::Deny { .. }
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_contain_of_a_contained_subject_is_a_no_op_that_keeps_its_conflict_listing() {
+        let fx = fixture(
+            "already",
+            RELEASE_TO_ADMIN,
+            Some("schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary: [\"daemon\"]\n"),
+        )
+        .await;
+        let before = fx.store_sha();
+        assert_eq!(
+            bounded(fx.contain_uid(daemon_uid(), Some(0))).await,
+            Err(LiveRefusal::AlreadyContained)
+        );
+        assert_eq!(fx.store_sha(), before);
+        assert!(
+            !fx.mirror().contains("uid: "),
+            "a subject contained by a root-listed name gets no uid entry"
+        );
+
+        let fx = fixture(
+            "already-listed",
+            RELEASE_TO_ADMIN,
+            Some("schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"daemon\"]\n"),
+        )
+        .await;
+        bounded(fx.live(
+            LiveOp::Edit(LiveEdit::Contain(BindingEntry::Name("daemon".into()))),
+            LiveCheck::None,
+        ))
+        .await
+        .unwrap();
+        fx.write_bindings("schema_version: 1\nbindings:\n  admin: [\"root\", \"daemon\"]\n");
+        bounded(fx.reloader.run()).await.unwrap();
+        assert_eq!(
+            fx.sync_lines(),
+            ["unsynced=1", "conflict=1"],
+            "the #491 collision: daemon contained and listed"
+        );
+        let before = fx.store_sha();
+        assert_eq!(
+            bounded(fx.contain_uid(daemon_uid(), Some(0))).await,
+            Err(LiveRefusal::AlreadyContained)
+        );
+        assert_eq!(fx.store_sha(), before);
+        assert_eq!(
+            fx.sync_lines(),
+            ["unsynced=1", "conflict=1"],
+            "the listing is not cleared"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_release_of_an_uncontained_subject_is_a_no_op() {
+        let fx = fixture("not-contained", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
+        let rel = LiveEdit::ReleaseUid {
+            uid: 4242,
+            names: Default::default(),
+        };
+        assert_eq!(
+            bounded(fx.live(LiveOp::Edit(rel), LiveCheck::None)).await,
+            Err(LiveRefusal::NotContained)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_live_edit_over_keyless_bindings_answers_no_explicit_bindings() {
+        let fx = fixture("keyless", RELEASE_TO_ADMIN, Some("schema_version: 1\n")).await;
+        assert_eq!(
+            bounded(fx.contain_uid(4242, Some(0))).await,
+            Err(LiveRefusal::NoExplicitBindings)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_live_edit_answers_busy_while_a_reload_holds_the_turn() {
+        let fx = stalling("busy").await;
+        let _turn = fx.reloader.lock.lock().await;
+        assert_eq!(
+            bounded(fx.contain_uid(4242, None)).await,
+            Err(LiveRefusal::Busy)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_release_resolves_its_claimants_from_the_layer_under_the_turn() {
+        let fx = fixture(
+            "claims-in-turn",
+            RELEASE_TO_ADMIN,
+            Some(&format!(
+                "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary:\n    - uid: {}\n",
+                daemon_uid()
+            )),
+        )
+        .await;
+        fx.write_bindings(&format!("schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary:\n    - \"daemon\"\n    - uid: {}\n", daemon_uid()));
+        bounded(fx.reloader.run()).await.unwrap();
+        let r = bounded(fx.live(
+            LiveOp::Release {
+                uid: daemon_uid(),
+                named: None,
+            },
+            LiveCheck::None,
+        ))
+        .await;
+        assert!(matches!(r, Ok(LiveApplied::Committed { .. })), "{r:?}");
+        assert!(
+            fx.mirror().contains("  adversary: []\n"),
+            "both claimants went: {}",
+            fx.mirror()
+        );
+        assert!(
+            !matches!(fx.decide_uid(daemon_uid()), maknae_security::Verdict::Deny { ref reason } if reason == "subject contained: role=adversary")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_self_contain_probe_never_blocks_an_async_worker() {
+        let fx = fixture_with(
+            "probe-thread",
+            Opts {
+                authz: RELEASE_TO_ADMIN,
+                bindings: Some(TWO_ADMINS),
+                count_decisions: true,
+                ..Opts::default()
+            },
+        )
+        .await;
+        let worker = std::thread::current().id();
+        fx.reset_decision_counts();
+        let r = bounded(fx.contain_uid(0, Some(0))).await;
+        assert!(matches!(r, Ok(LiveApplied::Committed { .. })), "{r:?}");
+        let threads = fx.decision_threads();
+        assert!(
+            !threads.is_empty(),
+            "the self probe was decided and observed"
+        );
+        assert!(
+            threads.iter().all(|t| *t != worker),
+            "a containment probe decided on the async worker: {threads:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_tripped_probe_breaker_refuses_a_contain_as_busy() {
+        let fx = fixture("probe-breaker", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
+        fx.trip_probe_breaker();
+        assert_eq!(
+            bounded(fx.contain_uid(4242, Some(0))).await,
+            Err(LiveRefusal::Busy)
+        );
+        assert!(
+            matches!(fx.decide_uid(0), maknae_security::Verdict::Permit { .. }),
+            "the request path's breaker is untouched"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_live_edit_answers_stopping_once_the_daemon_stops() {
+        let fx = Fx::with_baseline("stopping").await;
+        fx.reloader.stopping.send_replace(true);
+        assert_eq!(
+            bounded(fx.contain_uid(4242, None)).await,
+            Err(LiveRefusal::Stopping)
+        );
+    }
+
+    fn lookup_fails(_: &str) -> Result<Option<u32>, i32> {
+        Err(5)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_release_refuses_when_an_adversary_name_has_no_answer_and_changes_nothing() {
+        let fx = fixture(
+            "release-unanswered",
+            RELEASE_TO_ADMIN,
+            Some(&format!(
+                "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary:\n    - \"maknae-no-such-user-165\"\n    - uid: {}\n",
+                daemon_uid()
+            )),
+        )
+        .await;
+        fx.forget_answers(
+            &format!(
+                "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary:\n    - uid: {}\n",
+                daemon_uid()
+            ),
+            lookup_fails,
+        );
+        let (store, from) = (fx.store_sha(), fx.seen().len());
+        assert_eq!(
+            bounded(fx.live(
+                LiveOp::Release {
+                    uid: daemon_uid(),
+                    named: None
+                },
+                LiveCheck::None
+            ))
+            .await,
+            Err(LiveRefusal::LookupUnavailable)
+        );
+        assert_eq!(fx.store_sha(), store);
+        assert_eq!(fx.seen().len(), from);
+        assert_eq!(fx.decide_uid(daemon_uid()), adversary());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_containment_edit_asks_no_account_in_the_turn() {
+        let fx = fixture("no-lookup-in-turn", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
+        fx.forget_answers(TWO_ADMINS, lookup_fails);
+        let r = bounded(fx.contain_uid(4242, Some(0))).await;
+        assert!(matches!(r, Ok(LiveApplied::Committed { .. })), "{r:?}");
+        let r = bounded(fx.live(
+            LiveOp::Release {
+                uid: 4242,
+                named: None,
+            },
+            LiveCheck::None,
+        ))
+        .await;
+        assert!(matches!(r, Ok(LiveApplied::Committed { .. })), "{r:?}");
+        assert!(!fx.mirror().contains("4242"), "{}", fx.mirror());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_containment_check_refuses_an_edit_that_names_its_target() {
+        let fx = fixture("contain-by-name", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
+        let store = fx.store_sha();
+        let r = bounded(fx.live(
+            LiveOp::Edit(LiveEdit::Contain(BindingEntry::Name("daemon".into()))),
+            LiveCheck::Contain {
+                target: daemon_uid(),
+                requester: Some(0),
+            },
+        ))
+        .await;
+        assert!(matches!(r, Err(LiveRefusal::Failed(_))), "{r:?}");
+        assert_eq!(fx.store_sha(), store);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_self_probe_decides_on_the_installed_snapshot_and_the_releasers_on_the_candidate() {
+        let fx = fixture_with(
+            "probe-paths",
+            Opts {
+                authz: RELEASE_TO_ADMIN,
+                bindings: Some(TWO_ADMINS),
+                count_decisions: true,
+                ..Opts::default()
+            },
+        )
+        .await;
+        fx.reset_decision_counts();
+        let r = bounded(fx.contain_uid(0, Some(0))).await;
+        assert!(matches!(r, Ok(LiveApplied::Committed { .. })), "{r:?}");
+        assert_eq!(
+            fx.composition()
+                .candidate_decisions
+                .load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "one self probe and one probe per candidate subject, all through the candidate path"
+        );
+        assert!(
+            fx.baseline().decision_log().is_empty(),
+            "nothing decided through the installed path's share"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_live_contain_records_its_note_and_target() {
+        let fx = fixture("note", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
+        let from = fx.seen().len();
+        bounded(fx.reloader.live_edit(LiveRequest {
+            op: LiveOp::Edit(LiveEdit::Contain(BindingEntry::Uid(4242))),
+            who: LiveInitiator::Operator,
+            check: LiveCheck::Contain {
+                target: 4242,
+                requester: Some(0),
+            },
+            note: LiveNote {
+                requester: Some((0, 77)),
+                reason: Some("compromised"),
+            },
+        }))
+        .await
+        .unwrap();
+        assert_eq!(
+            sync_seen(&fx, from)[0],
+            "live (operator): contain uid:4242; requested by uid 0 in session 77; reason \"compromised\""
+        );
     }
 }
 

@@ -118,7 +118,13 @@ pub struct BasicAuthorizer {
     live_turn: LiveTurnLock,
     #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
     evaluation_gate: Option<Arc<EvaluationGate>>,
+    #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
+    decision_log: std::sync::Mutex<Option<DecisionLog>>,
 }
+
+/// Each decided subject uid and the thread that decided it.
+#[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
+pub type DecisionLog = Vec<(u32, std::thread::ThreadId)>;
 
 /// A baseline's live turn: every composed decision shares it, and a live install
 /// takes it alone. Only a baseline owns one, so a [`LiveTurn`] is always a baseline's.
@@ -189,6 +195,8 @@ impl BasicAuthorizer {
             live_turn: LiveTurnLock::new(),
             #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
             evaluation_gate: None,
+            #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
+            decision_log: std::sync::Mutex::new(None),
         }
     }
 
@@ -235,11 +243,37 @@ impl BasicAuthorizer {
     ) -> maknae_security::Decided {
         let d = decide::decide_loaded_cited(snap.loaded(), principal, req);
         #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
+        if let Some(log) = self
+            .decision_log
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_mut()
+        {
+            log.push((logged_uid(req), std::thread::current().id()));
+        }
+        #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
         if let Some(gate) = &self.evaluation_gate {
             gate.arrived.wait();
             gate.release.wait();
         }
         cited_on(snap, d)
+    }
+
+    #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
+    fn set_decision_log(&self, log: Option<DecisionLog>) {
+        *self
+            .decision_log
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = log;
+    }
+
+    #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
+    fn read_decision_log(&self) -> DecisionLog {
+        self.decision_log
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .unwrap_or_default()
     }
 
     /// The file-based evaluator the snapshot path must agree with.
@@ -253,6 +287,14 @@ impl BasicAuthorizer {
             Ok(lp) => decide::decide_loaded_with_role(&lp, &self.current_principal(), req),
             Err(_) => (maknae_security::Verdict::Indeterminate, None),
         }
+    }
+}
+
+#[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
+fn logged_uid(req: &maknae_security::Request) -> u32 {
+    match req.subject.0.get(decide::SUBJECT_UID) {
+        Some(maknae_security::AttrValue::Int(u)) => u32::try_from(*u).unwrap_or(u32::MAX),
+        _ => u32::MAX,
     }
 }
 
@@ -494,6 +536,11 @@ impl PolicySource {
     /// The subjects this load could not bind as written; each is decided alone.
     pub fn identity_problems(&self) -> &[IdentityProblem] {
         &self.resolved.problems
+    }
+
+    /// Whether this load asked for `name`, found or absent.
+    pub fn answered(&self, name: &str) -> bool {
+        self.lookups.contains_key(name)
     }
 
     /// The `adversary:` names this load could not resolve, in problem order.
@@ -962,6 +1009,27 @@ impl HermeticAuthorizer {
     /// Every later evaluation parks on `gate`.
     pub fn park_evaluations(&mut self, gate: Arc<EvaluationGate>) {
         self.inner.evaluation_gate = Some(gate);
+    }
+
+    /// Every later decision appends its subject uid and thread to the log.
+    pub fn arm_decision_log(&self) {
+        self.inner.set_decision_log(Some(DecisionLog::new()));
+    }
+
+    pub fn decision_log(&self) -> DecisionLog {
+        self.inner.read_decision_log()
+    }
+
+    /// Empties the log and leaves it armed as it was.
+    pub fn clear_decision_log(&self) {
+        let mut log = self
+            .inner
+            .decision_log
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(l) = log.as_mut() {
+            l.clear();
+        }
     }
 }
 
@@ -1609,6 +1677,40 @@ mod tests {
             paths(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn an_answered_name_is_one_the_load_asked_found_or_absent() {
+        let source = source_with_lookups(&[("alice", Some(1001)), ("ghost", None)]);
+        assert!(source.answered("alice"));
+        assert!(source.answered("ghost"));
+        assert!(!source.answered("bob"));
+    }
+
+    #[test]
+    fn an_armed_decision_log_records_each_decided_uid_and_its_thread() {
+        let auth = authorizer_over(EMPTY, Some(ADMIN_ROOT), &[("root", 0)]);
+        auth.decide(&whoami(0));
+        assert!(
+            auth.read_decision_log().is_empty(),
+            "a disarmed log records nothing"
+        );
+        auth.set_decision_log(Some(DecisionLog::new()));
+        auth.decide_cited_all(&[whoami(0), whoami(7)]);
+        let here = std::thread::current().id();
+        let elsewhere = {
+            let auth = Arc::new(auth);
+            let a = Arc::clone(&auth);
+            let id = std::thread::spawn(move || {
+                a.decide(&whoami(9));
+                std::thread::current().id()
+            })
+            .join()
+            .unwrap();
+            assert_eq!(auth.read_decision_log(), [(0, here), (7, here), (9, id)]);
+            id
+        };
+        assert_ne!(elsewhere, here);
     }
 
     #[test]
@@ -3563,6 +3665,26 @@ mod tests {
             let mut r = whoami(uid);
             r.action = maknae_security::Action(action.into());
             r
+        }
+
+        #[test]
+        fn the_decision_log_is_empty_until_armed_and_a_clear_keeps_it_armed() {
+            let fx = Fixture::new("decision-log");
+            let auth = fx.authorizer("admin");
+            auth.decide(&whoami(0));
+            assert!(auth.decision_log().is_empty());
+            auth.arm_decision_log();
+            auth.decide(&whoami(3));
+            let here = std::thread::current().id();
+            assert_eq!(auth.decision_log(), [(3, here)]);
+            auth.clear_decision_log();
+            assert!(auth.decision_log().is_empty());
+            auth.decide(&whoami(4));
+            assert_eq!(
+                auth.decision_log(),
+                [(4, here)],
+                "still armed after a clear"
+            );
         }
 
         #[test]

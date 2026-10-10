@@ -55,6 +55,8 @@ pub struct Composition<B: Baseline> {
     pub(crate) panic_on_install: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     pub(crate) candidate_decisions: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    pub(crate) candidate_threads: std::sync::Mutex<Vec<std::thread::ThreadId>>,
 }
 
 impl<B: Baseline> Composition<B> {
@@ -67,6 +69,8 @@ impl<B: Baseline> Composition<B> {
             panic_on_install: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             candidate_decisions: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            candidate_threads: std::sync::Mutex::default(),
         }
     }
 
@@ -149,10 +153,7 @@ impl<B: Baseline> Composition<B> {
     }
 
     /// Decides `reqs` on `candidate` with the installed principal, through both operands.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the containment path calls it (#165)")
-    )]
+    /// Called only under the reload turn, which keeps that principal installed.
     pub(crate) fn decide_candidate_all(
         &self,
         candidate: &maknae_authz_basic::snapshot::Snapshot,
@@ -161,6 +162,11 @@ impl<B: Baseline> Composition<B> {
         #[cfg(test)]
         self.candidate_decisions
             .fetch_add(reqs.len(), std::sync::atomic::Ordering::SeqCst);
+        #[cfg(test)]
+        self.candidate_threads
+            .lock()
+            .unwrap()
+            .extend(reqs.iter().map(|_| std::thread::current().id()));
         let base = maknae_authz_basic::Candidate::new(candidate, self.baseline.principal());
         compose_decide_cited_all(&self.operands_with(&base), reqs)
     }

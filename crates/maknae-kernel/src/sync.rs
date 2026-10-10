@@ -133,7 +133,7 @@ fn entry(e: &BindingEntry) -> String {
     }
 }
 
-fn named(n: &str) -> String {
+pub(crate) fn named(n: &str) -> String {
     format!("\"{}\"", shown(n))
 }
 

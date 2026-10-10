@@ -4,10 +4,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// Why a live edit did not commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the containment path calls it (#165)")
-)]
 pub(crate) enum LiveRefusal {
     Busy,
     Stopping,
@@ -16,6 +12,7 @@ pub(crate) enum LiveRefusal {
     SelfContainWithoutRelease,
     AlreadyContained,
     NotContained,
+    LookupUnavailable,
     Failed(String),
 }
 
@@ -33,10 +30,6 @@ pub(crate) enum Kind {
 
 /// The safety check a live edit runs in the turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the containment path calls it (#165)")
-)]
 pub(crate) enum LiveCheck {
     None,
     Contain { target: u32, requester: Option<u32> },
@@ -63,6 +56,7 @@ pub(crate) struct LiveNote<'a> {
 
 impl LiveNote<'_> {
     /// A note that adds nothing to the record.
+    #[cfg(test)]
     pub(crate) fn none() -> Self {
         Self {
             requester: None,
@@ -85,6 +79,7 @@ pub(crate) fn outcome(r: &LiveRefusal) -> Option<ContainmentOutcome> {
         LiveRefusal::SelfContainWithoutRelease => ContainmentOutcome::SelfContainWithoutRelease,
         LiveRefusal::AlreadyContained => ContainmentOutcome::AlreadyContained,
         LiveRefusal::NotContained => ContainmentOutcome::NotContained,
+        LiveRefusal::LookupUnavailable => ContainmentOutcome::LookupUnavailable,
         LiveRefusal::Failed(_) => return None,
     })
 }
@@ -163,10 +158,6 @@ pub(crate) fn corrective(
 }
 
 /// Whether the stored layer binds `uid` as an adversary, carried forward included.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the containment path calls it (#165)")
-)]
 pub(crate) fn is_contained(layer: &IdentityLayer, uid: u32) -> bool {
     layer
         .subjects
@@ -175,10 +166,6 @@ pub(crate) fn is_contained(layer: &IdentityLayer, uid: u32) -> bool {
 }
 
 /// Every adversary name claiming `uid`, plus the name the request gave.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the containment path calls it (#165)")
-)]
 pub(crate) fn release_names(
     uid: u32,
     named: Option<&str>,
@@ -192,11 +179,35 @@ pub(crate) fn release_names(
         .collect()
 }
 
+/// The first name bound in `live` that `answered` does not know, other than one `edit` binds itself.
+pub(crate) fn unanswered(
+    live: &maknae_config::Section,
+    edit: &maknae_config::LiveEdit,
+    answered: impl Fn(&str) -> bool,
+) -> Option<String> {
+    use maknae_config::{BindingEntry, LiveEdit};
+    let own = match edit {
+        LiveEdit::Contain(BindingEntry::Name(n)) | LiveEdit::Bind { name: n, .. } => Some(n),
+        _ => None,
+    };
+    live.entries().into_iter().find_map(|e| match e {
+        BindingEntry::Name(n) if Some(n) != own && !answered(n) => Some(n.clone()),
+        _ => None,
+    })
+}
+
+/// Whether `edit` is the one a containment check guards: its target, bound by uid.
+pub(crate) fn binds_target_by_uid(check: LiveCheck, edit: &maknae_config::LiveEdit) -> bool {
+    use maknae_config::{BindingEntry, LiveEdit};
+    match check {
+        LiveCheck::None => true,
+        LiveCheck::Contain { target, .. } | LiveCheck::KernelContain { target } => {
+            *edit == LiveEdit::Contain(BindingEntry::Uid(target))
+        }
+    }
+}
+
 /// Whether a decision permits, by the request path's own fold and discharge.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the containment path calls it (#165)")
-)]
 pub(crate) fn permits(d: &maknae_security::Decided) -> bool {
     match maknae_security::finalize(maknae_security::combine(vec![d.verdict.clone()])) {
         maknae_security::Decision::Permit { obligations } => {
@@ -208,10 +219,6 @@ pub(crate) fn permits(d: &maknae_security::Decided) -> bool {
 
 /// The probes' answers: whether the requester holds admin.release, and each candidate subject's.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the containment path calls it (#165)")
-)]
 pub(crate) struct Probed {
     pub self_holds: Option<bool>,
     pub releasers: Option<Vec<bool>>,
@@ -219,20 +226,12 @@ pub(crate) struct Probed {
 
 /// Why the probes gave no answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the containment path calls it (#165)")
-)]
 pub(crate) enum ProbeError {
     Busy,
     Failed(String),
 }
 
 /// The operator contain's checks: self-contain first, then the last releaser.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the containment path calls it (#165)")
-)]
 pub(crate) fn check_contain(
     target: u32,
     requester: Option<u32>,
@@ -312,10 +311,6 @@ pub(crate) fn quoted(r: &str) -> String {
 }
 
 /// The verb whose action is `admin.release`; its operand never reaches the PDP.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the containment path calls it (#165)")
-)]
 pub(crate) fn release_probe() -> Verb {
     Verb::AdminRelease {
         target: ContainTarget::Uid(0),
@@ -617,9 +612,86 @@ mod tests {
             ),
             (LiveRefusal::AlreadyContained, O::AlreadyContained),
             (LiveRefusal::NotContained, O::NotContained),
+            (LiveRefusal::LookupUnavailable, O::LookupUnavailable),
         ] {
             assert_eq!(outcome(&r), Some(o), "{r:?}");
         }
+    }
+
+    fn section(yaml: &str) -> maknae_config::Section {
+        maknae_config::Section::of(&maknae_config::parse_bindings(yaml).unwrap())
+    }
+
+    #[test]
+    fn a_name_the_applied_load_never_answered_is_found_unless_the_edit_binds_it() {
+        use maknae_config::{BindingEntry, BoundRole, LiveEdit};
+        let live = section(
+            "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary:\n    - \"mal\"\n    - uid: 7\n",
+        );
+        let release = LiveEdit::ReleaseUid {
+            uid: 7,
+            names: Default::default(),
+        };
+        assert_eq!(unanswered(&live, &release, |_| true), None);
+        assert_eq!(
+            unanswered(&live, &release, |n| n == "root"),
+            Some("mal".into())
+        );
+        assert_eq!(
+            unanswered(&live, &release, |n| n == "mal"),
+            Some("root".into())
+        );
+        for own in [
+            LiveEdit::Contain(BindingEntry::Name("mal".into())),
+            LiveEdit::Bind {
+                name: "mal".into(),
+                role: BoundRole::Guest,
+            },
+        ] {
+            assert_eq!(unanswered(&live, &own, |n| n == "root"), None, "{own:?}");
+            assert_eq!(
+                unanswered(&live, &own, |n| n == "mal"),
+                Some("root".into()),
+                "{own:?}"
+            );
+        }
+        assert_eq!(
+            unanswered(&live, &LiveEdit::Contain(BindingEntry::Uid(7)), |n| n
+                == "root"),
+            Some("mal".into())
+        );
+    }
+
+    #[test]
+    fn a_containment_check_guards_only_its_target_bound_by_uid() {
+        use maknae_config::{BindingEntry, LiveEdit};
+        let by_uid = LiveEdit::Contain(BindingEntry::Uid(7));
+        let by_name = LiveEdit::Contain(BindingEntry::Name("mal".into()));
+        for check in [
+            LiveCheck::Contain {
+                target: 7,
+                requester: Some(0),
+            },
+            LiveCheck::KernelContain { target: 7 },
+        ] {
+            assert!(binds_target_by_uid(check, &by_uid), "{check:?}");
+            assert!(!binds_target_by_uid(check, &by_name), "{check:?}");
+            assert!(
+                !binds_target_by_uid(check, &LiveEdit::Contain(BindingEntry::Uid(8))),
+                "{check:?}"
+            );
+            assert!(
+                !binds_target_by_uid(
+                    check,
+                    &LiveEdit::ReleaseUid {
+                        uid: 7,
+                        names: Default::default()
+                    }
+                ),
+                "{check:?}"
+            );
+        }
+        assert!(binds_target_by_uid(LiveCheck::None, &by_name));
     }
 
     #[test]
