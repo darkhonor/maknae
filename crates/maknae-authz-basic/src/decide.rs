@@ -1854,13 +1854,25 @@ mod tests {
     #[test]
     fn the_initiator_attribute_grants_nothing_outside_the_kernel_class() {
         let lp = lp_with_grants("", GRANT_UIDS);
-        for uid in [70, 1001, 1002] {
+        assert_eq!(
+            decide_loaded(
+                &lp,
+                &principal(),
+                &kernel_request(1004, "admin.status", Some("kernel"))
+            ),
+            Verdict::Deny {
+                reason: "subject contained: role=adversary".into()
+            }
+        );
+        for uid in [70, 1001, 1002, 1004] {
             for action in [
                 "admin.status",
                 "admin.contain",
                 "admin.release",
                 "liveness.ping",
                 "admin.whoami",
+                "session.prompt",
+                "fs.read",
             ] {
                 assert_eq!(
                     decide_loaded(

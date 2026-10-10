@@ -341,10 +341,8 @@ pub struct PolicySource {
     identity_source: String,
 }
 
-/// What each bound name resolved to at this load: `None` is an absent account.
 type Lookups = std::collections::BTreeMap<String, Option<u32>>;
 
-/// An account lookup: `Ok(None)` is an absent account, `Err` an errno.
 type NssLookup = fn(&str) -> Result<Option<u32>, i32>;
 
 impl PolicySource {
