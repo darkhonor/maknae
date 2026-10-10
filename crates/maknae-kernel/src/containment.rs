@@ -32,7 +32,7 @@ pub(crate) enum Kind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LiveCheck {
     None,
-    Contain { target: u32, requester: Option<u32> },
+    Contain { target: u32, requester: u32 },
     KernelContain { target: u32 },
 }
 
@@ -231,6 +231,15 @@ pub(crate) enum ProbeError {
     Failed(String),
 }
 
+/// The uids to probe for admin.release; a candidate that lists no subjects gives no answer.
+pub(crate) fn releaser_uids(
+    entries: Option<Vec<maknae_authz_basic::ListedSubject>>,
+) -> Result<Vec<u32>, ProbeError> {
+    entries
+        .map(|e| e.iter().filter_map(|s| s.uid).collect())
+        .ok_or_else(|| ProbeError::Failed("the candidate lists no subjects to probe".into()))
+}
+
 /// The operator contain's checks: self-contain first, then the last releaser.
 pub(crate) fn check_contain(
     target: u32,
@@ -267,7 +276,7 @@ pub(crate) fn check_contain(
     not(test),
     expect(dead_code, reason = "the containment path calls it (#165)")
 )]
-pub(crate) fn check_for(kind: Kind, target: u32, requester: Option<u32>) -> LiveCheck {
+pub(crate) fn check_for(kind: Kind, target: u32, requester: u32) -> LiveCheck {
     match kind {
         Kind::Release => LiveCheck::None,
         Kind::Contain => LiveCheck::Contain { target, requester },
@@ -407,6 +416,22 @@ mod tests {
     }
 
     #[test]
+    fn a_candidate_without_subjects_fails_the_probe_rather_than_finding_no_releaser() {
+        use maknae_authz_basic::{ListedSubject, SubjectState};
+        assert!(matches!(releaser_uids(None), Err(ProbeError::Failed(_))));
+        let listed = |uid| ListedSubject {
+            uid,
+            names: Vec::new(),
+            state: SubjectState::Bound("admin"),
+        };
+        assert_eq!(
+            releaser_uids(Some(vec![listed(Some(3)), listed(None), listed(Some(5))])),
+            Ok(vec![3, 5])
+        );
+        assert_eq!(releaser_uids(Some(Vec::new())), Ok(Vec::new()));
+    }
+
+    #[test]
     fn a_failed_probe_keeps_its_cause() {
         assert_eq!(
             check_contain(1, None, Err(ProbeError::Failed("timed out".into()))),
@@ -416,16 +441,16 @@ mod tests {
 
     #[test]
     fn a_release_runs_no_check_and_only_the_operator_contain_checks_the_releasers() {
-        assert_eq!(check_for(Kind::Release, 7, Some(501)), LiveCheck::None);
+        assert_eq!(check_for(Kind::Release, 7, 501), LiveCheck::None);
         assert_eq!(
-            check_for(Kind::Contain, 7, Some(501)),
+            check_for(Kind::Contain, 7, 501),
             LiveCheck::Contain {
                 target: 7,
-                requester: Some(501)
+                requester: 501
             }
         );
         assert_eq!(
-            check_for(Kind::KernelContain, 7, None),
+            check_for(Kind::KernelContain, 7, 501),
             LiveCheck::KernelContain { target: 7 }
         );
     }
@@ -670,7 +695,7 @@ mod tests {
         for check in [
             LiveCheck::Contain {
                 target: 7,
-                requester: Some(0),
+                requester: 0,
             },
             LiveCheck::KernelContain { target: 7 },
         ] {

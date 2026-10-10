@@ -4293,7 +4293,7 @@ where
             let probed = self
                 .probe_contain(target, requester, Arc::clone(&snapshot))
                 .await;
-            crate::containment::check_contain(target, requester, probed)?;
+            crate::containment::check_contain(target, Some(requester), probed)?;
         }
         let seq = Seq::new();
         let ctx = BootCtx {
@@ -4367,7 +4367,7 @@ where
     async fn probe_contain(
         &self,
         target: u32,
-        requester: Option<u32>,
+        requester: u32,
         candidate: Arc<maknae_authz_basic::snapshot::Snapshot>,
     ) -> Result<crate::containment::Probed, crate::containment::ProbeError> {
         use crate::containment::{permits, ProbeError, Probed};
@@ -4391,25 +4391,22 @@ where
                     None,
                 )
             };
-            let self_holds = requester.filter(|r| *r == target).map(|r| {
-                pdp.decide_candidate_all(&installed, &[probe(r)])
+            let self_holds = (requester == target).then(|| {
+                pdp.decide_candidate_all(&installed, &[probe(requester)])
                     .first()
                     .is_some_and(permits)
             });
             if self_holds == Some(false) {
-                return Probed {
+                return Ok(Probed {
                     self_holds,
                     releasers: None,
-                };
+                });
             }
-            let probes: Vec<_> = candidate
-                .subject_entries()
-                .unwrap_or_default()
-                .iter()
-                .filter_map(|s| s.uid)
+            let probes: Vec<_> = crate::containment::releaser_uids(candidate.subject_entries())?
+                .into_iter()
                 .map(probe)
                 .collect();
-            Probed {
+            Ok(Probed {
                 self_holds,
                 releasers: Some(
                     pdp.decide_candidate_all(&candidate, &probes)
@@ -4417,14 +4414,14 @@ where
                         .map(permits)
                         .collect(),
                 ),
-            }
+            })
         };
         match tokio::time::timeout(BLOCKING_OPERATION_TIMEOUT, tokio::task::spawn_blocking(job))
             .await
         {
             Ok(Ok(p)) => {
                 breaker.lock().await.record_success();
-                Ok(p)
+                p
             }
             Ok(Err(join)) => {
                 breaker.lock().await.record_success();
@@ -4433,7 +4430,14 @@ where
                 )))
             }
             Err(_) => {
-                breaker.lock().await.record_timeout_at(Instant::now());
+                if breaker.lock().await.record_timeout_at(Instant::now())
+                    == BreakerTransition::Tripped
+                {
+                    eprintln!(
+                        "maknaed: containment probe circuit breaker tripped after repeated {}s blocking timeouts",
+                        BLOCKING_OPERATION_TIMEOUT.as_secs()
+                    );
+                }
                 Err(ProbeError::Failed("the containment check timed out".into()))
             }
         }
@@ -12314,7 +12318,7 @@ mod reload_fixture {
         pub(super) async fn contain_uid(
             &self,
             uid: u32,
-            requester: Option<u32>,
+            requester: u32,
         ) -> Result<LiveApplied, crate::containment::LiveRefusal> {
             self.live(
                 crate::containment::LiveOp::Edit(maknae_config::LiveEdit::Contain(
@@ -16210,7 +16214,7 @@ mod reload_tests {
         let fx = fixture("last-releaser", RELEASE_TO_ADMIN, Some(ROOT_ADMIN)).await;
         let before = fx.store_sha();
         assert_eq!(
-            bounded(fx.contain_uid(0, Some(daemon_uid()))).await,
+            bounded(fx.contain_uid(0, daemon_uid())).await,
             Err(LiveRefusal::LastReleaser)
         );
         assert_eq!(fx.store_sha(), before);
@@ -16228,7 +16232,7 @@ mod reload_tests {
     async fn an_explicit_deny_of_release_counts_as_not_holding_it() {
         let fx = fixture("deny-release", "schema_version: 1\nroles:\n  admin:\n    allow:\n      - \"admin.release\"\n    deny:\n      - \"admin.release\"\n", Some(TWO_ADMINS)).await;
         assert_eq!(
-            bounded(fx.contain_uid(daemon_uid(), Some(0))).await,
+            bounded(fx.contain_uid(daemon_uid(), 0)).await,
             Err(LiveRefusal::LastReleaser)
         );
     }
@@ -16237,12 +16241,12 @@ mod reload_tests {
     async fn self_contain_needs_release_and_is_permitted_with_it() {
         let fx = fixture("self-no", "schema_version: 1\n", Some(TWO_ADMINS)).await;
         assert_eq!(
-            bounded(fx.contain_uid(0, Some(0))).await,
+            bounded(fx.contain_uid(0, 0)).await,
             Err(LiveRefusal::SelfContainWithoutRelease)
         );
         let fx = fixture("self-yes", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
         assert!(matches!(
-            bounded(fx.contain_uid(0, Some(0))).await,
+            bounded(fx.contain_uid(0, 0)).await,
             Ok(LiveApplied::Committed { .. })
         ));
         assert!(matches!(
@@ -16261,7 +16265,7 @@ mod reload_tests {
         .await;
         let before = fx.store_sha();
         assert_eq!(
-            bounded(fx.contain_uid(daemon_uid(), Some(0))).await,
+            bounded(fx.contain_uid(daemon_uid(), 0)).await,
             Err(LiveRefusal::AlreadyContained)
         );
         assert_eq!(fx.store_sha(), before);
@@ -16291,7 +16295,7 @@ mod reload_tests {
         );
         let before = fx.store_sha();
         assert_eq!(
-            bounded(fx.contain_uid(daemon_uid(), Some(0))).await,
+            bounded(fx.contain_uid(daemon_uid(), 0)).await,
             Err(LiveRefusal::AlreadyContained)
         );
         assert_eq!(fx.store_sha(), before);
@@ -16319,7 +16323,7 @@ mod reload_tests {
     async fn a_live_edit_over_keyless_bindings_answers_no_explicit_bindings() {
         let fx = fixture("keyless", RELEASE_TO_ADMIN, Some("schema_version: 1\n")).await;
         assert_eq!(
-            bounded(fx.contain_uid(4242, Some(0))).await,
+            bounded(fx.contain_uid(4242, 0)).await,
             Err(LiveRefusal::NoExplicitBindings)
         );
     }
@@ -16327,9 +16331,9 @@ mod reload_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_live_edit_answers_busy_while_a_reload_holds_the_turn() {
         let fx = stalling("busy").await;
-        let _turn = fx.reloader.lock.lock().await;
+        let _turn = bounded(fx.reloader.lock.lock()).await;
         assert_eq!(
-            bounded(fx.contain_uid(4242, None)).await,
+            bounded(fx.contain_uid(4242, 0)).await,
             Err(LiveRefusal::Busy)
         );
     }
@@ -16380,7 +16384,7 @@ mod reload_tests {
         .await;
         let worker = std::thread::current().id();
         fx.reset_decision_counts();
-        let r = bounded(fx.contain_uid(0, Some(0))).await;
+        let r = bounded(fx.contain_uid(0, 0)).await;
         assert!(matches!(r, Ok(LiveApplied::Committed { .. })), "{r:?}");
         let threads = fx.decision_threads();
         assert!(
@@ -16395,16 +16399,25 @@ mod reload_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_tripped_probe_breaker_refuses_a_contain_as_busy() {
-        let fx = fixture("probe-breaker", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
+        let fx = fixture_with(
+            "probe-breaker",
+            Opts {
+                authz: RELEASE_TO_ADMIN,
+                bindings: Some(TWO_ADMINS),
+                count_decisions: true,
+                ..Opts::default()
+            },
+        )
+        .await;
         fx.trip_probe_breaker();
+        fx.reset_decision_counts();
+        let store = fx.store_sha();
         assert_eq!(
-            bounded(fx.contain_uid(4242, Some(0))).await,
+            bounded(fx.contain_uid(4242, 0)).await,
             Err(LiveRefusal::Busy)
         );
-        assert!(
-            matches!(fx.decide_uid(0), maknae_security::Verdict::Permit { .. }),
-            "the request path's breaker is untouched"
-        );
+        assert_eq!(fx.store_sha(), store);
+        assert!(fx.decision_threads().is_empty(), "no probe was decided");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -16412,7 +16425,7 @@ mod reload_tests {
         let fx = Fx::with_baseline("stopping").await;
         fx.reloader.stopping.send_replace(true);
         assert_eq!(
-            bounded(fx.contain_uid(4242, None)).await,
+            bounded(fx.contain_uid(4242, 0)).await,
             Err(LiveRefusal::Stopping)
         );
     }
@@ -16460,7 +16473,7 @@ mod reload_tests {
     async fn a_containment_edit_asks_no_account_in_the_turn() {
         let fx = fixture("no-lookup-in-turn", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
         fx.forget_answers(TWO_ADMINS, lookup_fails);
-        let r = bounded(fx.contain_uid(4242, Some(0))).await;
+        let r = bounded(fx.contain_uid(4242, 0)).await;
         assert!(matches!(r, Ok(LiveApplied::Committed { .. })), "{r:?}");
         let r = bounded(fx.live(
             LiveOp::Release {
@@ -16482,7 +16495,7 @@ mod reload_tests {
             LiveOp::Edit(LiveEdit::Contain(BindingEntry::Name("daemon".into()))),
             LiveCheck::Contain {
                 target: daemon_uid(),
-                requester: Some(0),
+                requester: 0,
             },
         ))
         .await;
@@ -16503,7 +16516,7 @@ mod reload_tests {
         )
         .await;
         fx.reset_decision_counts();
-        let r = bounded(fx.contain_uid(0, Some(0))).await;
+        let r = bounded(fx.contain_uid(0, 0)).await;
         assert!(matches!(r, Ok(LiveApplied::Committed { .. })), "{r:?}");
         assert_eq!(
             fx.composition()
@@ -16527,7 +16540,7 @@ mod reload_tests {
             who: LiveInitiator::Operator,
             check: LiveCheck::Contain {
                 target: 4242,
-                requester: Some(0),
+                requester: 0,
             },
             note: LiveNote {
                 requester: Some((0, 77)),
