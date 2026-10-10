@@ -347,8 +347,15 @@ pub fn build_authz_request(
     }
 }
 
-/// The kernel's own request; the only place [`maknae_security::SUBJECT_INITIATOR`] is stamped.
-pub fn build_kernel_request(action: &'static str, kernel_uid: u32) -> maknae_security::Request {
+/// The kernel's own request.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the containment path calls it (#165)")
+)]
+pub(crate) fn build_kernel_request(
+    action: &'static str,
+    kernel_uid: u32,
+) -> maknae_security::Request {
     use maknae_security::{Action, AttrValue, Attributes, Context, Resource, Subject};
     let mut subject = Attributes::new();
     subject.insert("uid", AttrValue::Int(i64::from(kernel_uid)));

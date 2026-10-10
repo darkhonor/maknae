@@ -162,12 +162,16 @@ impl<B: Baseline> Composition<B> {
         self.candidate_decisions
             .fetch_add(reqs.len(), std::sync::atomic::Ordering::SeqCst);
         let base = maknae_authz_basic::Candidate::new(candidate, self.baseline.principal());
-        compose_decide_cited_all(&[&base, &self.ceiling], reqs)
+        compose_decide_cited_all(&self.operands_with(&base), reqs)
     }
 
     /// Baseline FIRST — see the module doc.
     fn operands(&self) -> [&dyn Authorizer; 2] {
-        [&self.baseline, &self.ceiling]
+        self.operands_with(&self.baseline)
+    }
+
+    fn operands_with<'a>(&'a self, base: &'a dyn Authorizer) -> [&'a dyn Authorizer; 2] {
+        [base, &self.ceiling]
     }
 }
 
@@ -872,8 +876,9 @@ mod tests {
         assert!(!matches!(c.decide(&claimed), Verdict::Permit { .. }));
         let snap = c.baseline().snapshot();
         let base = maknae_authz_basic::Candidate::new(&snap, c.baseline().principal());
+        let ops = c.operands_with(&base);
         assert!(matches!(
-            compose_decide_cited(&[&base, &Refuses], &marked).verdict,
+            compose_decide_cited(&[ops[0], ops[1], &Refuses], &marked).verdict,
             Verdict::Deny { ref reason } if reason == "refuses"
         ));
     }
