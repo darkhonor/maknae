@@ -480,11 +480,6 @@ pub(crate) fn decide_loaded_cited(
         },
         Role::Admin => match class {
             Some(Class::Liveness) => (permit_with_audit(), None),
-            // Keyed to the ONE built admin term. A class-granular permit here
-            // would grant admin.contain / admin.credential.broker /
-            // admin.policy.reload off an arm that keys nothing — the outcome
-            // #67's spec D3 names as the thing that must not land. Individual
-            // decidability for the rest is D3's implementation obligation.
             Some(Class::Admin) if req.action.0 == "admin.whoami" => (permit_with_audit(), None),
             // The three disclosure terms are decided per-ACTION by the operator's
             // `roles:` grants (#162), never by the class. The guard keys on the

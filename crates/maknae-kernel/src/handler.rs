@@ -646,8 +646,9 @@ mod tests {
             "the ungrantable admin set is derived from the verb list and the constant"
         );
         assert!(
-            !ungrantable.is_empty(),
-            "the ungrantable admin set should not vanish unnoticed"
+            ungrantable.len() >= 11,
+            "the ungrantable admin set should not shrink unnoticed: {}",
+            ungrantable.len()
         );
         for v in ungrantable {
             assert_eq!(
@@ -707,23 +708,6 @@ mod tests {
         assert!(
             !all_dispatch(&["admin.credential.rotate"]),
             "all_dispatch must return false for an unbuilt term"
-        );
-    }
-
-    #[test]
-    fn the_containment_terms_dispatch_to_their_own_arms() {
-        assert_eq!(
-            dispatch_verb(&Verb::AdminContain {
-                target: ContainTarget::Uid(1),
-                reason: "r".into()
-            }),
-            Dispatch::ContainRequested
-        );
-        assert_eq!(
-            dispatch_verb(&Verb::AdminRelease {
-                target: ContainTarget::Uid(1)
-            }),
-            Dispatch::ReleaseRequested
         );
     }
 

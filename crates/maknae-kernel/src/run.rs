@@ -1245,10 +1245,6 @@ pub async fn handle_with_attempt_caps<S, E, P>(
         }
         Dispatch::NoBehaviour | Dispatch::ContainRequested | Dispatch::ReleaseRequested => {
             // Decided and PERMITTED above; the term simply has no behaviour.
-            // (#181, 2026-09-02: only an EXTENSION grant can produce that
-            // Permit — ADR-0008 D2 — since `-basic` cannot permit an unbuilt
-            // term; with `-basic` alone this arm is unreachable and an
-            // unpermitted unbuilt term answers Unauthorized upstream.)
             // Same audit-then-respond gate as every sibling path — the record
             // must be durable before any frame is released (ADR-0019).
             let appended = emit_request_outcome(

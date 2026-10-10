@@ -1782,7 +1782,16 @@ mod tests {
                 let got = finish(parse_with_roles(&format!(
                     "roles:\n  {role}:\n    allow: [\"{term}\"]\n"
                 )));
-                assert!(got.is_err(), "{role} {term}: {got:?}");
+                match role {
+                    "user" => assert!(
+                        matches!(got, Err(AuthzBasicError::TermNotGrantableForRole { ref role, term: ref t }) if role == "user" && t == term),
+                        "user {term}: {got:?}"
+                    ),
+                    _ => assert!(
+                        matches!(got, Err(AuthzBasicError::RoleNotSupportedYet(ref r)) if r == role),
+                        "{role} {term}: {got:?}"
+                    ),
+                }
             }
         }
     }
