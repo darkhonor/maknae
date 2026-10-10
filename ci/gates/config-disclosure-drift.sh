@@ -91,9 +91,10 @@ SURFACE=(
 )
 
 # Fields whose type is a unit-only enum: one fixed token on the wire, so a leaf.
-# Each row names the field, the exact file defining the enum, and the type; the
-# gate verifies the enum itself (leaf_enum_check) and that the field's struct is
-# in the same file. No other enum-typed field is a leaf.
+# Each row names the field, the file defining the enum at its top level, and the
+# type, which the field must spell exactly, with no path; the gate verifies the
+# enum itself (leaf_enum_check) and that the field's struct is in the same file.
+# No other enum-typed field is a leaf.
 LEAF_ENUMS=(
   "containment.outcome|crates/maknae-proto/src/wire.rs|ContainmentOutcome"
 )
@@ -104,6 +105,10 @@ leaf_enum_check() { # <field-path> <file> <type>
   ndef="$(grep -cE "(^|[^A-Za-z0-9_])enum[[:space:]]+$ty([^A-Za-z0-9_]|$)" "$file" || true)"
   if [ "$ndef" != "1" ]; then
     echo "FAIL: leaf-enum row '$fp': '$file' defines 'enum $ty' $ndef times; exactly one is required."
+    return 1
+  fi
+  if ! grep -qE "^(pub([[:space:]]|\([^)]*\)[[:space:]]))?enum $ty([^A-Za-z0-9_]|$)" "$file"; then
+    echo "FAIL: leaf-enum row '$fp': 'enum $ty' is not at the top level of '$file', so the field may resolve to another item."
     return 1
   fi
   nother="$(grep -cE "(^|[^A-Za-z0-9_])(struct|union|type|trait|mod|as)[[:space:]]+$ty([^A-Za-z0-9_]|$)" "$file" || true)"
@@ -732,6 +737,11 @@ while IFS=$'\t' read -r fpath fty fkind; do
   for row in "${LEAF_ENUMS[@]}"; do
     IFS='|' read -r lp lf lt <<< "$row"
     if [ "$lp" = "$fpath" ] && [ "$lt" = "$bare" ]; then
+      raw=$(printf '%s' "$fty" | sed -E -e ':a' -e "s#^${wrappers}<##" -e 'ta' | sed -E 's/>+$//')
+      if [ "$raw" != "$lt" ]; then
+        echo "FAIL: leaf-enum row '$lp': the field's type is spelled '$fty', not exactly '$lt'; a path may name another item."
+        exit 1
+      fi
       leaf_enum_check "$lp" "$lf" "$lt" || exit 1
       echo "$lp" >> "$tmp/leaf-used"
       leaf_row=1

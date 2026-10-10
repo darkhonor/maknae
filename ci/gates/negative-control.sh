@@ -1569,10 +1569,6 @@ p.write_text(s)
 PYFIX
   expect_reject_because "config-disclosure-drift/$1" "$2" "$fx/ci/gates/config-disclosure-drift.sh"
 }
-UNIT_ENUM='pub enum ContainmentOutcome {
-    Contained,
-    Released,
-}'
 enum_probe leaf-enum-gains-a-data-variant "not unit-only" \
   's.replace("    Released,\n}", "    Released,\n    Refused(String),\n}")'
 enum_probe leaf-enum-one-line-data-variant "not unit-only" \
@@ -1608,6 +1604,53 @@ g.write_text(g.read_text().replace(old, "containment.outcome|crates/maknae-proto
 PYFIX
 expect_reject_because "config-disclosure-drift/leaf-enum-in-another-file-than-its-struct" \
   "not in" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: the field names the type by a path. The row is matched on the
+# qualifier-stripped name, so the path may resolve to a same-named data struct
+# elsewhere while the check verifies the enum in the row's file.
+fx="$(cfg_fixture "$CFG_OK")"
+python3 - "$fx" <<'PYFIX'
+import pathlib, sys
+root = pathlib.Path(sys.argv[1])
+w = root / "crates/maknae-proto/src/wire.rs"
+m = root / "crates/maknae-proto/src/mutation.rs"
+old = "    pub outcome: ContainmentOutcome,\n"
+assert w.read_text().count(old) == 1
+w.write_text(w.read_text().replace(old, "    pub outcome: crate::mutation::ContainmentOutcome,\n"))
+m.write_text(m.read_text() + "\npub struct ContainmentOutcome {\n    pub secret: String,\n}\n")
+PYFIX
+expect_reject_because "config-disclosure-drift/leaf-enum-field-spelled-with-a-path" \
+  "not exactly" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: the enum is nested in an inline module and a glob import brings a
+# same-named data struct into scope, which is what the field then names.
+fx="$(cfg_fixture "$CFG_OK")"
+python3 - "$fx" <<'PYFIX'
+import pathlib, sys
+root = pathlib.Path(sys.argv[1])
+w = root / "crates/maknae-proto/src/wire.rs"
+m = root / "crates/maknae-proto/src/mutation.rs"
+enum = "pub enum ContainmentOutcome {\n    Contained,\n    Released,\n}\n"
+s = w.read_text()
+assert s.count(enum) == 1
+nested = "use crate::mutation::*;\nmod inner {\n    pub enum ContainmentOutcome {\n        Contained,\n        Released,\n    }\n}\n"
+w.write_text(s.replace(enum, nested))
+m.write_text(m.read_text() + "\npub struct ContainmentOutcome {\n    pub secret: String,\n}\n")
+PYFIX
+expect_reject_because "config-disclosure-drift/leaf-enum-nested-under-a-glob-import" \
+  "not at the top level" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a row whose field no longer has the enum type is stale.
+fx="$(cfg_fixture "$CFG_OK")"
+python3 - "$fx" <<'PYFIX'
+import pathlib, sys
+w = pathlib.Path(sys.argv[1]) / "crates/maknae-proto/src/wire.rs"
+old = "    pub outcome: ContainmentOutcome,\n"
+assert w.read_text().count(old) == 1
+w.write_text(w.read_text().replace(old, "    pub outcome: String,\n"))
+PYFIX
+expect_reject_because "config-disclosure-drift/leaf-enum-row-with-a-retyped-field" \
+  "matched no field" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: an enum-typed field with no leaf-enum row keeps the subtree rule.
 fx="$(cfg_fixture "$CFG_OK" '' '' '' '' 'Mode')"

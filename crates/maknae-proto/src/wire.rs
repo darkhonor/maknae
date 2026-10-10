@@ -2569,22 +2569,41 @@ mod tests {
         );
     }
 
+    fn every_outcome() -> Vec<ContainmentOutcome> {
+        use serde::de::IntoDeserializer;
+        use ContainmentOutcome::*;
+        let next = |o| match o {
+            Contained => Some(Released),
+            Released => Some(AlreadyContained),
+            AlreadyContained => Some(NotContained),
+            NotContained => Some(LastReleaser),
+            LastReleaser => Some(SelfContainWithoutRelease),
+            SelfContainWithoutRelease => Some(Busy),
+            Busy => Some(Stopping),
+            Stopping => Some(NoExplicitBindings),
+            NoExplicitBindings => Some(UnknownAccount),
+            UnknownAccount => Some(LookupUnavailable),
+            LookupUnavailable => None,
+        };
+        let all: Vec<_> = std::iter::successors(Some(Contained), |&o| next(o)).collect();
+        for (i, o) in all.iter().enumerate() {
+            assert_eq!(*o as usize, i, "{o:?} is out of declaration order");
+        }
+        let n = all.len() as u32;
+        let past_end: Result<ContainmentOutcome, serde::de::value::Error> =
+            ContainmentOutcome::deserialize(n.into_deserializer());
+        assert_eq!(
+            past_end.unwrap_err().to_string(),
+            format!("invalid value: integer `{n}`, expected variant index 0 <= i < {n}"),
+            "the enum has a variant the list does not reach"
+        );
+        all
+    }
+
     #[test]
     fn every_outcome_has_its_fixed_code_and_text() {
         use ContainmentOutcome::*;
-        let all = [
-            Contained,
-            Released,
-            AlreadyContained,
-            NotContained,
-            LastReleaser,
-            SelfContainWithoutRelease,
-            Busy,
-            Stopping,
-            NoExplicitBindings,
-            UnknownAccount,
-            LookupUnavailable,
-        ];
+        let all = every_outcome();
         let codes: Vec<&str> = all.iter().map(|o| o.code()).collect();
         assert_eq!(
             codes,
@@ -2606,7 +2625,7 @@ mod tests {
         assert_eq!(NotContained.text(), "subject is not contained");
         let texts: std::collections::BTreeSet<&str> = all.iter().map(|o| o.text()).collect();
         assert_eq!(texts.len(), all.len(), "each text is distinct");
-        for o in all {
+        for &o in &all {
             assert_eq!(
                 o.is_success(),
                 matches!(o, Contained | Released | AlreadyContained | NotContained),
@@ -2617,34 +2636,7 @@ mod tests {
 
     #[test]
     fn every_outcome_encodes_as_a_plain_cbor_text_string() {
-        use ContainmentOutcome::*;
-        let all = [
-            Contained,
-            Released,
-            AlreadyContained,
-            NotContained,
-            LastReleaser,
-            SelfContainWithoutRelease,
-            Busy,
-            Stopping,
-            NoExplicitBindings,
-            UnknownAccount,
-            LookupUnavailable,
-        ];
-        for o in all {
-            match o {
-                Contained
-                | Released
-                | AlreadyContained
-                | NotContained
-                | LastReleaser
-                | SelfContainWithoutRelease
-                | Busy
-                | Stopping
-                | NoExplicitBindings
-                | UnknownAccount
-                | LookupUnavailable => {}
-            }
+        for o in every_outcome() {
             let mut b = Vec::new();
             ciborium::into_writer(&o, &mut b).unwrap();
             let v: ciborium::Value = ciborium::from_reader(b.as_slice()).unwrap();
@@ -2674,6 +2666,8 @@ mod tests {
             .map(|(k, _)| k.as_text().unwrap().to_string())
             .collect();
         assert_eq!(keys, ["outcome", "target_uid", "revision"]);
+        let outcome = &v.as_map().unwrap()[0].1;
+        assert_eq!(outcome.as_text(), Some("Contained"), "{outcome:?}");
     }
 
     #[test]
