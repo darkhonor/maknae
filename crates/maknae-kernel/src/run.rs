@@ -110,6 +110,15 @@ fn contain_probe_breaker() -> Arc<tokio::sync::Mutex<BlockingBreaker>> {
     Arc::clone(CONTAIN_PROBE_BREAKER.get_or_init(|| Arc::new(Default::default())))
 }
 
+static ACCOUNT_LOOKUP_BREAKER: OnceLock<Arc<tokio::sync::Mutex<BlockingBreaker>>> = OnceLock::new();
+
+fn account_lookup_breaker() -> Arc<tokio::sync::Mutex<BlockingBreaker>> {
+    Arc::clone(ACCOUNT_LOOKUP_BREAKER.get_or_init(|| Arc::new(Default::default())))
+}
+
+/// Resolves a containment target's account name to its uid.
+pub(crate) type Accounts = Arc<dyn Fn(&str) -> Result<Option<u32>, String> + Send + Sync>;
+
 pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 #[derive(Debug)]
@@ -165,6 +174,140 @@ impl Drop for DrainGuard<'_> {
 pub trait BaselineOps: Send + Sync {
     fn show(&self) -> BoxFuture<'_, Result<maknae_proto::BaselineView, String>>;
     fn accept<'a>(&'a self, hash: &'a str) -> BoxFuture<'a, AcceptAnswer>;
+}
+
+/// An operator's `admin.contain`, its operands already through the operand rule.
+pub struct ContainRequest<'a> {
+    pub requester: u32,
+    pub session: u64,
+    pub target: &'a maknae_proto::ContainTarget,
+    pub reason: &'a str,
+}
+
+/// An operator's `admin.release`, its target already through the operand rule.
+pub struct ReleaseRequest<'a> {
+    pub requester: u32,
+    pub session: u64,
+    pub target: &'a maknae_proto::ContainTarget,
+}
+
+/// The corrective record a refused or unchanged containment request writes.
+#[derive(Debug)]
+pub struct Corrective {
+    pub result: &'static str,
+    pub posture: &'static str,
+    pub reason: String,
+}
+
+#[derive(Debug)]
+pub enum ContainAnswer {
+    /// Respond with this view after `corrective`'s record, when there is one.
+    View {
+        view: maknae_proto::ContainmentView,
+        corrective: Option<Corrective>,
+    },
+    /// Answer Internal with `reply`; `why` reaches the trail only.
+    Unavailable { reply: &'static str, why: String },
+}
+
+/// `admin.contain` and `admin.release`, as a request reaches them.
+pub trait ContainmentOps: Send + Sync {
+    fn contain<'a>(&'a self, req: ContainRequest<'a>) -> BoxFuture<'a, ContainAnswer>;
+    fn release<'a>(&'a self, req: ReleaseRequest<'a>) -> BoxFuture<'a, ContainAnswer>;
+}
+
+/// Every admin verb that reaches the reload turn.
+pub trait AdminOps: BaselineOps + ContainmentOps {}
+
+impl<T: BaselineOps + ContainmentOps + ?Sized> AdminOps for T {}
+
+/// Refused kernel containments since the daemon started.
+#[derive(Debug, Default)]
+pub struct ContainmentStatus {
+    kernel_refused: AtomicU64,
+}
+
+impl ContainmentStatus {
+    /// `admin.status`'s containment lines; counts only.
+    pub fn lines(&self, subjects: usize) -> Vec<String> {
+        vec![
+            format!("subjects={subjects}"),
+            format!(
+                "kernel_refused={}",
+                self.kernel_refused.load(AtomicOrdering::Acquire)
+            ),
+        ]
+    }
+}
+
+/// How a kernel containment ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum KernelContain {
+    Contained { revision: u64 },
+    AlreadyContained,
+    Refused(maknae_proto::ContainmentOutcome),
+    Failed(String),
+}
+
+const CONTAINMENT_UNAVAILABLE: &str = "containment unavailable";
+
+/// A refusal before the live edit ran, or after it refused.
+fn refused(
+    kind: crate::containment::Kind,
+    code: maknae_proto::ContainmentOutcome,
+    uid: Option<u32>,
+    detail: &str,
+    reason: Option<&str>,
+) -> ContainAnswer {
+    let (result, posture) = crate::containment::record_class(code);
+    ContainAnswer::View {
+        view: maknae_proto::ContainmentView {
+            outcome: code,
+            target_uid: uid,
+            revision: None,
+        },
+        corrective: Some(Corrective {
+            result,
+            posture,
+            reason: crate::containment::corrective(kind, code, uid, detail, reason),
+        }),
+    }
+}
+
+/// The reply to an operator's live edit.
+fn answer(
+    kind: crate::containment::Kind,
+    uid: u32,
+    reason: Option<&str>,
+    applied: Result<LiveApplied, crate::containment::LiveRefusal>,
+) -> ContainAnswer {
+    use crate::containment::{Kind, LiveRefusal};
+    match applied {
+        Ok(LiveApplied::Committed { revision }) => ContainAnswer::View {
+            view: maknae_proto::ContainmentView {
+                outcome: match kind {
+                    Kind::Release => maknae_proto::ContainmentOutcome::Released,
+                    Kind::Contain | Kind::KernelContain => {
+                        maknae_proto::ContainmentOutcome::Contained
+                    }
+                },
+                target_uid: Some(uid),
+                revision: Some(revision),
+            },
+            corrective: None,
+        },
+        Err(LiveRefusal::Failed(why)) => ContainAnswer::Unavailable {
+            reply: CONTAINMENT_UNAVAILABLE,
+            why,
+        },
+        Err(r) => match crate::containment::outcome(&r) {
+            Some(code) => refused(kind, code, Some(uid), "", reason),
+            None => ContainAnswer::Unavailable {
+                reply: CONTAINMENT_UNAVAILABLE,
+                why: format!("{r:?}"),
+            },
+        },
+    }
 }
 
 /// Blocking baseline work: admitted by the baseline breaker, bounded, a timeout counted.
@@ -3255,6 +3398,7 @@ async fn record_start_refusal<E: AuditEmit + Send + Sync>(
     }
 }
 
+const KERNEL_CONTAIN_ACTION: &str = "kernel.contain";
 const GRAPH_LOAD_ACTION: &str = "graph.load";
 const GRAPH_SEED_ACTION: &str = "graph.seed";
 const GRAPH_RESEED_ACTION: &str = "graph.reseed";
@@ -3840,6 +3984,7 @@ pub struct KernelGraphStatus {
     pub identity: crate::identity_report::IdentityStatus,
     pub baseline: crate::baseline::BaselineStatus,
     pub sync: crate::sync::SyncStatus,
+    pub containment: Arc<ContainmentStatus>,
 }
 
 impl KernelGraphStatus {
@@ -3853,6 +3998,7 @@ impl KernelGraphStatus {
                 pending: None,
             }),
             sync: crate::sync::SyncStatus::default(),
+            containment: Arc::default(),
         }
     }
 
@@ -4065,10 +4211,17 @@ struct Reloader<B: maknae_authz_basic::Baseline, E> {
     sync: crate::sync::SyncStatus,
     /// Admits the containment probes' blocking job; never the request path's breaker.
     probe_breaker: Arc<tokio::sync::Mutex<BlockingBreaker>>,
+    accounts: Accounts,
+    lookup_bound: Duration,
+    /// Admits a containment target's account lookup.
+    lookup_breaker: Arc<tokio::sync::Mutex<BlockingBreaker>>,
+    containment: Arc<ContainmentStatus>,
     #[cfg(test)]
     load_gate: Option<Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>>,
     #[cfg(test)]
     load_entered: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    #[cfg(test)]
+    release_resolved: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4154,10 +4307,6 @@ where
     B: maknae_authz_basic::Baseline,
     E: AuditEmit + Send + Sync + 'static,
 {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the containment path calls it (#165)")
-    )]
     pub(crate) async fn live_edit(
         &self,
         req: LiveRequest<'_>,
@@ -4785,6 +4934,337 @@ where
         if let Err(e) = self.sink.emit_within(&rec, self.append_bound).await {
             eprintln!("maknaed: AUDIT WRITE FAILED on an identity record ({reason}): {e}");
         }
+    }
+}
+
+impl<B, E> Reloader<B, E>
+where
+    B: maknae_authz_basic::Baseline,
+    E: AuditEmit + Send + Sync + 'static,
+{
+    async fn contain_requested(&self, r: ContainRequest<'_>) -> ContainAnswer {
+        use crate::containment::{check_for, Kind, LiveNote, LiveOp};
+        let target = match self.resolve_contain_target(r.target).await {
+            Ok(uid) => uid,
+            Err((code, detail)) => {
+                return refused(Kind::Contain, code, None, &detail, Some(r.reason))
+            }
+        };
+        let req = LiveRequest {
+            op: LiveOp::Edit(maknae_config::LiveEdit::Contain(
+                maknae_config::BindingEntry::Uid(target),
+            )),
+            who: maknae_state::store::LiveInitiator::Operator,
+            check: check_for(Kind::Contain, target, r.requester),
+            note: LiveNote {
+                requester: Some((r.requester, r.session)),
+                reason: Some(r.reason),
+            },
+        };
+        answer(
+            Kind::Contain,
+            target,
+            Some(r.reason),
+            self.live_edit(req).await,
+        )
+    }
+
+    async fn release_requested(&self, r: ReleaseRequest<'_>) -> ContainAnswer {
+        use crate::containment::{check_for, release_op, Kind, LiveNote};
+        let (uid, named) = match r.target {
+            maknae_proto::ContainTarget::Uid(u) => (*u, None),
+            maknae_proto::ContainTarget::Name(n) => {
+                let claimed = self.claimed(n);
+                match claimed {
+                    Some(u) => (u, Some(n.clone())),
+                    None => match self.lookup_account(n).await {
+                        Ok(u) => (u, Some(n.clone())),
+                        Err((code, detail)) => {
+                            return refused(Kind::Release, code, None, &detail, None)
+                        }
+                    },
+                }
+            }
+        };
+        let op = release_op(uid, named);
+        #[cfg(test)]
+        if let Some(resolved) = self.release_resolved.lock().unwrap().as_ref() {
+            let _ = resolved.send(());
+        }
+        let req = LiveRequest {
+            op,
+            who: maknae_state::store::LiveInitiator::Operator,
+            check: check_for(Kind::Release, uid, r.requester),
+            note: LiveNote {
+                requester: Some((r.requester, r.session)),
+                reason: None,
+            },
+        };
+        answer(Kind::Release, uid, None, self.live_edit(req).await)
+    }
+
+    async fn resolve_contain_target(
+        &self,
+        target: &maknae_proto::ContainTarget,
+    ) -> Result<u32, (maknae_proto::ContainmentOutcome, String)> {
+        match target {
+            maknae_proto::ContainTarget::Uid(u) => Ok(*u),
+            maknae_proto::ContainTarget::Name(n) => self.lookup_account(n).await,
+        }
+    }
+
+    /// The uid the stored layer's adversary claims give `name`, read without the turn.
+    fn claimed(&self, name: &str) -> Option<u32> {
+        let persisted = Arc::clone(
+            &self
+                .persisted
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        maknae_graph::identity::extract(&persisted)
+            .ok()?
+            .layer
+            .claims()
+            .get(name)
+            .copied()
+    }
+
+    /// `name`'s uid from the account database: admitted by the lookup breaker, bounded.
+    async fn lookup_account(
+        &self,
+        name: &str,
+    ) -> Result<u32, (maknae_proto::ContainmentOutcome, String)> {
+        use maknae_proto::ContainmentOutcome as O;
+        let shown = crate::sync::named(name);
+        let breaker = Arc::clone(&self.lookup_breaker);
+        let admission = { breaker.lock().await.begin_attempt_at(Instant::now()) };
+        match admission {
+            BreakerAdmission::RefuseOpen => {
+                return Err((
+                    O::LookupUnavailable,
+                    "the account lookup circuit breaker is open".into(),
+                ))
+            }
+            BreakerAdmission::RefuseAtCapacity => {
+                return Err((
+                    O::LookupUnavailable,
+                    "the account lookup worker budget is exhausted".into(),
+                ))
+            }
+            BreakerAdmission::Admit => {}
+        }
+        let (accounts, owned) = (Arc::clone(&self.accounts), name.to_owned());
+        let looked = tokio::time::timeout(
+            self.lookup_bound,
+            tokio::task::spawn_blocking(move || accounts(&owned)),
+        )
+        .await;
+        match looked {
+            Ok(joined) => {
+                breaker.lock().await.record_success();
+                match joined {
+                    Ok(Ok(Some(uid))) => Ok(uid),
+                    Ok(Ok(None)) => Err((O::UnknownAccount, format!("no account named {shown}"))),
+                    Ok(Err(e)) => Err((
+                        O::LookupUnavailable,
+                        format!("looking up {shown} failed: {e}"),
+                    )),
+                    Err(join) => Err((
+                        O::LookupUnavailable,
+                        format!("looking up {shown} failed: {join}"),
+                    )),
+                }
+            }
+            Err(_elapsed) => {
+                if breaker.lock().await.record_timeout_at(Instant::now())
+                    == BreakerTransition::Tripped
+                {
+                    eprintln!(
+                        "maknaed: account lookup circuit breaker tripped after repeated {}ms blocking timeouts",
+                        self.lookup_bound.as_millis()
+                    );
+                }
+                Err((
+                    O::LookupUnavailable,
+                    format!(
+                        "looking up {shown} did not finish within {}ms",
+                        self.lookup_bound.as_millis()
+                    ),
+                ))
+            }
+        }
+    }
+
+    /// The kernel's own total containment of `target`. The first production caller is #149.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) async fn kernel_contain(&self, target: u32, reason: &str) -> KernelContain {
+        use crate::containment::{
+            corrective, outcome, quoted, record_class, Kind, LiveCheck, LiveNote, LiveOp,
+            LiveRefusal,
+        };
+        let seq = Seq::new();
+        let ctx = BootCtx {
+            event: "kernel",
+            host: &self.host,
+            socket: &self.socket,
+            euid: self.euid,
+            session_id: self.session_ids.next_session(),
+            seq: &seq,
+            au3_1: &self.au3_1,
+        };
+        let reason = match maknae_proto::contain_reason(reason) {
+            Ok(r) => r,
+            Err(e) => {
+                return self
+                    .kernel_failed(&ctx, target, format!("the reason is refused: {e}"))
+                    .await
+            }
+        };
+        let pdp = Arc::clone(&self.authorizer);
+        let req = crate::handler::build_kernel_request("kernel.contain", self.euid);
+        let decided = match within_blocking(BLOCKING_OPERATION_TIMEOUT, move || {
+            maknae_security::Authorizer::decide_cited(pdp.as_ref(), &req)
+        })
+        .await
+        {
+            Ok(d) => d,
+            Err(e) => {
+                return self
+                    .kernel_failed(&ctx, target, format!("the decision failed: {e}"))
+                    .await
+            }
+        };
+        if !crate::containment::permits(&decided) {
+            let why =
+                match maknae_security::finalize(maknae_security::combine(vec![decided.verdict])) {
+                    maknae_security::Decision::Deny { reason } => reason,
+                    maknae_security::Decision::Permit { .. } => {
+                        "an obligation the kernel cannot discharge".into()
+                    }
+                };
+            self.containment
+                .kernel_refused
+                .fetch_add(1, AtomicOrdering::Release);
+            self.kernel_record(
+                &ctx,
+                "deny",
+                "unauthorized",
+                &format!(
+                    "kernel containment of uid {target} denied: {why}; reason {}",
+                    quoted(&reason)
+                ),
+            )
+            .await;
+            journal(format!(
+                "maknaed: containment: kernel containment of uid {target} denied"
+            ));
+            return KernelContain::Failed(format!("kernel.contain denied: {why}"));
+        }
+        if !self
+            .kernel_record(
+                &ctx,
+                "permit",
+                "authorized",
+                &format!(
+                    "kernel containment of uid {target} decided; reason {}",
+                    quoted(&reason)
+                ),
+            )
+            .await
+        {
+            return self
+                .kernel_failed(&ctx, target, "the decision record did not append".into())
+                .await;
+        }
+        let req = LiveRequest {
+            op: LiveOp::Edit(maknae_config::LiveEdit::Contain(
+                maknae_config::BindingEntry::Uid(target),
+            )),
+            who: maknae_state::store::LiveInitiator::Kernel,
+            check: LiveCheck::KernelContain { target },
+            note: LiveNote {
+                requester: None,
+                reason: Some(&reason),
+            },
+        };
+        let refusal = match self.live_edit(req).await {
+            Ok(LiveApplied::Committed { revision }) => {
+                return KernelContain::Contained { revision }
+            }
+            Err(LiveRefusal::Failed(why)) => return self.kernel_failed(&ctx, target, why).await,
+            Err(r) => r,
+        };
+        let Some(code) = outcome(&refusal) else {
+            return self
+                .kernel_failed(&ctx, target, format!("{refusal:?}"))
+                .await;
+        };
+        let (result, posture) = record_class(code);
+        let text = corrective(Kind::KernelContain, code, Some(target), "", Some(&reason));
+        self.kernel_record(&ctx, result, posture, &text).await;
+        if code == maknae_proto::ContainmentOutcome::AlreadyContained {
+            return KernelContain::AlreadyContained;
+        }
+        self.containment
+            .kernel_refused
+            .fetch_add(1, AtomicOrdering::Release);
+        journal(format!(
+            "maknaed: containment: kernel containment of uid {target} refused: {}",
+            code.code()
+        ));
+        KernelContain::Refused(code)
+    }
+
+    /// Records, journals and counts a kernel containment that could not run.
+    async fn kernel_failed(&self, ctx: &BootCtx<'_>, target: u32, why: String) -> KernelContain {
+        self.containment
+            .kernel_refused
+            .fetch_add(1, AtomicOrdering::Release);
+        self.kernel_record(
+            ctx,
+            "deny",
+            "unavailable",
+            &format!("kernel containment of uid {target} failed: {why}"),
+        )
+        .await;
+        journal(format!(
+            "maknaed: containment: kernel containment of uid {target} failed: {why}"
+        ));
+        KernelContain::Failed(why)
+    }
+
+    /// A `kernel.contain` record; whether it appended.
+    async fn kernel_record(
+        &self,
+        ctx: &BootCtx<'_>,
+        result: &str,
+        posture: &str,
+        reason: &str,
+    ) -> bool {
+        let rec = ctx.record(KERNEL_CONTAIN_ACTION, result, reason, posture, None);
+        match self.sink.emit_within(&rec, self.append_bound).await {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!(
+                    "maknaed: AUDIT WRITE FAILED on a kernel containment record ({reason}): {e}"
+                );
+                false
+            }
+        }
+    }
+}
+
+impl<B, E> ContainmentOps for Reloader<B, E>
+where
+    B: maknae_authz_basic::Baseline,
+    E: AuditEmit + Send + Sync + 'static,
+{
+    fn contain<'a>(&'a self, req: ContainRequest<'a>) -> BoxFuture<'a, ContainAnswer> {
+        Box::pin(self.contain_requested(req))
+    }
+
+    fn release<'a>(&'a self, req: ReleaseRequest<'a>) -> BoxFuture<'a, ContainAnswer> {
+        Box::pin(self.release_requested(req))
     }
 }
 
@@ -6107,6 +6587,7 @@ async fn boot_after_sink(
     let graph_revision = Arc::clone(&booted.status.revision);
     let baseline_status = booted.status.baseline.clone();
     let sync_status = booted.status.sync.clone();
+    let containment_status = Arc::clone(&booted.status.containment);
     let kernel_graph = Arc::new(Some(booted.status));
 
     // Plane credential: resolve + read this plane's SecretID source (spec §5.1),
@@ -6236,10 +6717,16 @@ async fn boot_after_sink(
         applied_source: std::sync::RwLock::new(applied_source),
         sync: sync_status,
         probe_breaker: contain_probe_breaker(),
+        accounts: Arc::new(maknae_vault::account_uid),
+        lookup_bound: BLOCKING_OPERATION_TIMEOUT,
+        lookup_breaker: account_lookup_breaker(),
+        containment: containment_status,
         #[cfg(test)]
         load_gate: None,
         #[cfg(test)]
         load_entered: std::sync::Mutex::new(None),
+        #[cfg(test)]
+        release_resolved: std::sync::Mutex::new(None),
     };
     let outcome = serve_after_mint(
         &client,
@@ -11933,6 +12420,8 @@ mod reload_fixture {
         pub(super) status: KernelGraphStatus,
         pub(super) booted_released: usize,
         pub(super) _guard: Guard,
+        gate: Option<Arc<maknae_authz_basic::EvaluationGate>>,
+        sessions: std::sync::atomic::AtomicU64,
     }
 
     /// A record the reload forwarded, with the store file's sha256 at that moment.
@@ -12332,6 +12821,138 @@ mod reload_fixture {
             .await
         }
 
+        pub(super) async fn contain(
+            &self,
+            target: maknae_proto::ContainTarget,
+            requester: u32,
+            reason: &str,
+        ) -> ContainAnswer {
+            let session = self.next_session();
+            tokio::time::timeout(
+                Duration::from_secs(60),
+                ContainmentOps::contain(
+                    self.reloader.as_ref(),
+                    ContainRequest {
+                        requester,
+                        session,
+                        target: &target,
+                        reason,
+                    },
+                ),
+            )
+            .await
+            .expect("the contain returns")
+        }
+
+        pub(super) async fn release(
+            &self,
+            target: maknae_proto::ContainTarget,
+            requester: u32,
+        ) -> ContainAnswer {
+            let session = self.next_session();
+            tokio::time::timeout(
+                Duration::from_secs(60),
+                ContainmentOps::release(
+                    self.reloader.as_ref(),
+                    ReleaseRequest {
+                        requester,
+                        session,
+                        target: &target,
+                    },
+                ),
+            )
+            .await
+            .expect("the release returns")
+        }
+
+        fn next_session(&self) -> u64 {
+            (0x165 << 32)
+                + self
+                    .sessions
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1
+        }
+
+        /// The session the last contain or release was requested in.
+        pub(super) fn last_session(&self) -> u64 {
+            (0x165 << 32) + self.sessions.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        pub(super) fn decide_action(&self, uid: u32, action: &str) -> maknae_security::Verdict {
+            let mut req = crate::handler::build_authz_request(
+                &Verb::Ping,
+                uid,
+                None,
+                maknae_security::Lane::Local,
+                None,
+            );
+            req.action = maknae_security::Action(action.to_string());
+            self.reloader.authorizer.decide(&req)
+        }
+
+        /// Drops the reloader and boots a new one over the same directories.
+        pub(super) async fn restart(self) -> Fx {
+            let Fx {
+                dir,
+                reloader,
+                _guard,
+                ..
+            } = self;
+            drop(reloader);
+            let mut fx = over(&dir, principal()).await;
+            fx._guard = _guard;
+            fx
+        }
+
+        pub(super) fn containment_lines(&self) -> Vec<String> {
+            self.reloader
+                .containment
+                .lines(self.reloader.identity.contained())
+        }
+
+        pub(super) fn status_revision(&self) -> u64 {
+            self.status.revision()
+        }
+
+        /// Lets every later evaluation through the fixture's gate.
+        pub(super) fn disarm_gate(&self) {
+            let gate = Arc::clone(self.gate.as_ref().expect("the fixture parks evaluations"));
+            std::thread::spawn(move || loop {
+                gate.arrived.wait();
+                gate.release.wait();
+            });
+        }
+
+        /// The subject uids the installed snapshot decided.
+        pub(super) fn decision_log(&self) -> Vec<u32> {
+            self.baseline()
+                .decision_log()
+                .into_iter()
+                .map(|(uid, _)| uid)
+                .collect()
+        }
+
+        pub(super) fn candidate_decisions(&self) -> usize {
+            self.composition()
+                .candidate_decisions
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        /// The applied load asks `lookup` for every name it has not asked yet.
+        pub(super) fn set_applied_lookup(&self, lookup: fn(&str) -> Result<Option<u32>, i32>) {
+            let mut source = (**self.reloader.applied_source.read().unwrap()).clone();
+            source.set_lookup(lookup);
+            *self.reloader.applied_source.write().unwrap() = Arc::new(source);
+        }
+
+        pub(super) fn trip_lookup_breaker(&self) {
+            *self
+                .reloader
+                .lookup_breaker
+                .try_lock()
+                .expect("no lookup is admitted") = BlockingBreaker::new(0);
+        }
+
         pub(super) fn trip_probe_breaker(&self) {
             *self
                 .reloader
@@ -12439,6 +13060,9 @@ mod reload_fixture {
         pub(super) bound: Duration,
         pub(super) turn_wait: Duration,
         pub(super) count_decisions: bool,
+        pub(super) accounts: Accounts,
+        pub(super) lookup_bound: Duration,
+        pub(super) gate: Option<Arc<maknae_authz_basic::EvaluationGate>>,
     }
 
     impl Default for Opts<'_> {
@@ -12455,8 +13079,38 @@ mod reload_fixture {
                 bound: AUDIT_APPEND_TIMEOUT,
                 turn_wait: BLOCKING_OPERATION_TIMEOUT,
                 count_decisions: false,
+                accounts: Arc::new(maknae_vault::account_uid),
+                lookup_bound: BLOCKING_OPERATION_TIMEOUT,
+                gate: None,
             }
         }
+    }
+
+    /// Answers each scripted name; a `slow` name answers after the fixture's stall bound has passed.
+    pub(super) fn scripted_accounts(
+        script: &[(&str, Result<Option<u32>, String>)],
+        slow: &[&str],
+    ) -> Accounts {
+        let script: std::collections::BTreeMap<String, Result<Option<u32>, String>> = script
+            .iter()
+            .map(|(n, r)| ((*n).to_string(), r.clone()))
+            .collect();
+        let slow: Vec<String> = slow.iter().map(|n| (*n).to_string()).collect();
+        Arc::new(move |name: &str| {
+            if slow.iter().any(|s| s == name) {
+                std::thread::sleep(STALL_BOUND * 4);
+                return Ok(Some(4242));
+            }
+            script
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| Err(format!("unscripted name {name}")))
+        })
+    }
+
+    /// Fails the test if a target name is ever looked up.
+    pub(super) fn failing_accounts() -> Accounts {
+        Arc::new(|name: &str| panic!("the target resolver was asked for {name}"))
     }
 
     pub(super) const STALL_BOUND: Duration = Duration::from_millis(300);
@@ -12617,14 +13271,16 @@ mod reload_fixture {
         .unwrap();
         let booted_released = booted.released.len();
         let graph = Arc::new(booted.graph);
-        let baseline = HermeticAuthorizer::new_over_graph(
+        let mut baseline = HermeticAuthorizer::new(
             paths,
             principal,
             requirement(),
             maknae_state::envelope::sha256,
-            Arc::clone(&graph),
         )
         .unwrap();
+        if let Some(gate) = &opts.gate {
+            baseline.park_evaluations(Arc::clone(gate));
+        }
         if opts.count_decisions {
             baseline.arm_decision_log();
         }
@@ -12698,8 +13354,13 @@ mod reload_fixture {
             applied_source: std::sync::RwLock::new(Arc::new(source)),
             sync: status.sync.clone(),
             probe_breaker: Arc::default(),
+            accounts: opts.accounts,
+            lookup_bound: opts.lookup_bound,
+            lookup_breaker: Arc::default(),
+            containment: Arc::clone(&status.containment),
             load_gate: opts.load_gate.map(|g| Arc::new(std::sync::Mutex::new(g))),
             load_entered: std::sync::Mutex::new(None),
+            release_resolved: std::sync::Mutex::new(None),
         });
         Fx {
             _guard: Guard(owned),
@@ -12707,6 +13368,8 @@ mod reload_fixture {
             reloader,
             status,
             booted_released,
+            gate: opts.gate,
+            sessions: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }
@@ -13721,6 +14384,7 @@ mod reload_tests {
     use maknae_authz_basic::Baseline;
     use maknae_config::{BindingEntry, LiveEdit, MIRROR_FILE};
     use maknae_graph::record::ProvenanceKind;
+    use maknae_proto::{ContainTarget, ContainmentOutcome};
     use maknae_state::store::LiveInitiator;
 
     const ROOT_ADMIN_OTHER: &str =
@@ -16529,6 +17193,662 @@ mod reload_tests {
             fx.baseline().decision_log().is_empty(),
             "nothing decided through the installed path's share"
         );
+    }
+
+    fn answer_code(a: &ContainAnswer) -> ContainmentOutcome {
+        match a {
+            ContainAnswer::View { view, .. } => view.outcome,
+            ContainAnswer::Unavailable { .. } => panic!("no outcome: {a:?}"),
+        }
+    }
+
+    fn view_rev(a: &ContainAnswer) -> u64 {
+        match a {
+            ContainAnswer::View { view, .. } => view.revision.expect("a committed revision"),
+            ContainAnswer::Unavailable { .. } => panic!("no view: {a:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_contain_by_name_records_the_uid_and_the_reason_and_denies_the_next_decision() {
+        let fx = fixture("by-name", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
+        let a = fx
+            .contain(ContainTarget::Name("daemon".into()), 0, "SENTINEL-r1")
+            .await;
+        let ContainAnswer::View {
+            view,
+            corrective: None,
+        } = a
+        else {
+            panic!("{a:?}")
+        };
+        assert_eq!(
+            (view.outcome, view.target_uid),
+            (ContainmentOutcome::Contained, Some(daemon_uid()))
+        );
+        let rev = view.revision.unwrap();
+        assert!(matches!(
+            fx.decide_uid(daemon_uid()),
+            maknae_security::Verdict::Deny { .. }
+        ));
+        assert!(fx
+            .mirror()
+            .contains(&format!("  adversary:\n    - uid: {}\n", daemon_uid())));
+        let live = fx
+            .seen()
+            .into_iter()
+            .find(|s| s.action == "graph.sync" && s.reason.starts_with("live (operator)"))
+            .unwrap();
+        assert_eq!(
+            live.reason,
+            format!(
+                "live (operator): contain uid:{}; requested by uid 0 in session {}; reason \"SENTINEL-r1\"",
+                daemon_uid(),
+                fx.last_session()
+            )
+        );
+        assert!(fx.seen().iter().any(
+            |s| s.action == "graph.sync" && s.reason == format!("live applied: revision {rev}")
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unknown_name_is_refused_and_a_slow_lookup_is_unavailable() {
+        let fx = fixture_with(
+            "nss",
+            Opts {
+                authz: RELEASE_TO_ADMIN,
+                bindings: Some(TWO_ADMINS),
+                accounts: scripted_accounts(
+                    &[("nobody-here", Ok(None)), ("broken", Err("EIO".into()))],
+                    &["slow"],
+                ),
+                lookup_bound: STALL_BOUND,
+                ..Opts::default()
+            },
+        )
+        .await;
+        for (name, code) in [
+            ("nobody-here", ContainmentOutcome::UnknownAccount),
+            ("broken", ContainmentOutcome::LookupUnavailable),
+            ("slow", ContainmentOutcome::LookupUnavailable),
+        ] {
+            let before = fx.store_sha();
+            let a = fx.contain(ContainTarget::Name(name.into()), 0, "r").await;
+            assert_eq!(answer_code(&a), code, "{name}");
+            assert_eq!(fx.store_sha(), before);
+            let ContainAnswer::View {
+                corrective: Some(c),
+                ..
+            } = a
+            else {
+                panic!()
+            };
+            assert!(
+                c.reason
+                    .starts_with(&format!("contain refused: {}", code.code())),
+                "{c:?}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unknown_name_names_the_account_escaped_in_the_record_only() {
+        let fx = fixture_with(
+            "nss-detail",
+            Opts {
+                authz: RELEASE_TO_ADMIN,
+                bindings: Some(TWO_ADMINS),
+                accounts: scripted_accounts(&[("ghost\u{7f}", Ok(None))], &[]),
+                ..Opts::default()
+            },
+        )
+        .await;
+        let a = fx
+            .release(ContainTarget::Name("ghost\u{7f}".into()), 0)
+            .await;
+        let ContainAnswer::View {
+            view,
+            corrective: Some(c),
+        } = a
+        else {
+            panic!("{a:?}")
+        };
+        assert_eq!(
+            view,
+            maknae_proto::ContainmentView {
+                outcome: ContainmentOutcome::UnknownAccount,
+                target_uid: None,
+                revision: None
+            }
+        );
+        assert_eq!(
+            (c.result, c.posture, c.reason.as_str()),
+            (
+                "deny",
+                "refused",
+                "release refused: unknown-account: no account named \"ghost\\u{7f}\""
+            )
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_tripped_lookup_breaker_refuses_a_name_as_lookup_unavailable() {
+        let fx = fixture_with(
+            "nss-breaker",
+            Opts {
+                authz: RELEASE_TO_ADMIN,
+                bindings: Some(TWO_ADMINS),
+                accounts: scripted_accounts(&[("daemon", Ok(Some(daemon_uid())))], &[]),
+                ..Opts::default()
+            },
+        )
+        .await;
+        let store = fx.store_sha();
+        fx.trip_lookup_breaker();
+        let a = fx
+            .contain(ContainTarget::Name("daemon".into()), 0, "r")
+            .await;
+        assert_eq!(answer_code(&a), ContainmentOutcome::LookupUnavailable);
+        let a = fx.release(ContainTarget::Name("daemon".into()), 0).await;
+        assert_eq!(answer_code(&a), ContainmentOutcome::LookupUnavailable);
+        assert_eq!(fx.store_sha(), store);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_release_by_name_finds_its_claim_without_an_account_lookup() {
+        let fx = fixture_with(
+            "release-by-claim",
+            Opts {
+                authz: RELEASE_TO_ADMIN,
+                bindings: Some(
+                    "schema_version: 1\nbindings:\n  admin: [\"root\", \"daemon\"]\n  adversary: [\"daemon\"]\n",
+                ),
+                accounts: failing_accounts(),
+                ..Opts::default()
+            },
+        )
+        .await;
+        let a = fx.release(ContainTarget::Name("daemon".into()), 0).await;
+        assert_eq!(
+            (answer_code(&a), a_target(&a)),
+            (ContainmentOutcome::Released, Some(daemon_uid()))
+        );
+        assert!(fx.mirror().contains("  adversary: []\n"), "{}", fx.mirror());
+        assert!(matches!(
+            fx.decide_uid(daemon_uid()),
+            maknae_security::Verdict::Permit { .. }
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_release_by_an_unclaimed_name_asks_the_account_database() {
+        let fx = fixture_with(
+            "release-by-nss",
+            Opts {
+                authz: RELEASE_TO_ADMIN,
+                bindings: Some(TWO_ADMINS),
+                accounts: scripted_accounts(&[("someone", Ok(Some(4242)))], &[]),
+                ..Opts::default()
+            },
+        )
+        .await;
+        fx.contain(ContainTarget::Uid(4242), 0, "r").await;
+        let a = fx.release(ContainTarget::Name("someone".into()), 0).await;
+        assert_eq!(
+            (answer_code(&a), a_target(&a)),
+            (ContainmentOutcome::Released, Some(4242))
+        );
+        assert!(!fx.mirror().contains("4242"));
+    }
+
+    fn a_target(a: &ContainAnswer) -> Option<u32> {
+        match a {
+            ContainAnswer::View { view, .. } => view.target_uid,
+            ContainAnswer::Unavailable { .. } => panic!("no view: {a:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_release_by_uid_removes_a_root_listed_name_and_restores_the_binding() {
+        let fx = fixture(
+            "release-name",
+            RELEASE_TO_ADMIN,
+            Some("schema_version: 1\nbindings:\n  admin: [\"root\", \"daemon\"]\n  adversary: [\"daemon\"]\n"),
+        )
+        .await;
+        assert_eq!(
+            answer_code(&fx.release(ContainTarget::Uid(7), 0).await),
+            ContainmentOutcome::NotContained
+        );
+        let a = fx.release(ContainTarget::Uid(daemon_uid()), 0).await;
+        assert_eq!(answer_code(&a), ContainmentOutcome::Released);
+        assert!(
+            matches!(
+                fx.decide_uid(daemon_uid()),
+                maknae_security::Verdict::Permit { .. }
+            ),
+            "admin again"
+        );
+        assert!(fx.mirror().contains("  adversary: []\n"), "{}", fx.mirror());
+        assert_eq!(fx.sync_lines(), ["unsynced=1", "conflict=0"]);
+        assert!(fx
+            .seen()
+            .iter()
+            .any(|s| s.action == "graph.identity" && s.reason.contains("is no longer contained")));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_release_resolved_before_a_reload_removes_the_claimant_the_reload_added() {
+        let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+        let only_uid = format!(
+            "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary:\n    - uid: {}\n",
+            daemon_uid()
+        );
+        let fx = Arc::new(
+            fixture_with(
+                "release-race",
+                Opts {
+                    authz: RELEASE_TO_ADMIN,
+                    bindings: Some(only_uid.as_str()),
+                    load_gate: Some(gate_rx),
+                    ..Opts::default()
+                },
+            )
+            .await,
+        );
+        fx.write_bindings(&format!("schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary:\n    - \"daemon\"\n    - uid: {}\n", daemon_uid()));
+        let (entered_tx, entered) = std::sync::mpsc::channel::<()>();
+        *fx.reloader.load_entered.lock().unwrap() = Some(entered_tx);
+        let (resolved_tx, resolved) = std::sync::mpsc::channel::<()>();
+        *fx.reloader.release_resolved.lock().unwrap() = Some(resolved_tx);
+        let reload = tokio::spawn({
+            let r = Arc::clone(&fx.reloader);
+            async move { r.run().await }
+        });
+        bounded(tokio::task::spawn_blocking(move || entered.recv()))
+            .await
+            .unwrap()
+            .unwrap();
+        let release = tokio::spawn({
+            let fx = Arc::clone(&fx);
+            async move { fx.release(ContainTarget::Uid(daemon_uid()), 0).await }
+        });
+        bounded(tokio::task::spawn_blocking(move || resolved.recv()))
+            .await
+            .unwrap()
+            .unwrap();
+        gate_tx.send(()).unwrap();
+        bounded(reload).await.unwrap().unwrap();
+        assert_eq!(
+            answer_code(&bounded(release).await.unwrap()),
+            ContainmentOutcome::Released
+        );
+        assert!(
+            fx.mirror().contains("  adversary: []\n"),
+            "the name the reload added went too: {}",
+            fx.mirror()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn release_restores_the_prior_effective_permissions_exactly() {
+        let fx = fixture(
+            "restore",
+            "schema_version: 1\nroles:\n  admin:\n    allow:\n      - \"admin.release\"\n      - \"admin.status\"\n",
+            Some(TWO_ADMINS),
+        )
+        .await;
+        let probe = [
+            "liveness.ping",
+            "admin.whoami",
+            "admin.status",
+            "admin.release",
+            "admin.contain",
+            "admin.config.show",
+        ];
+        let before: Vec<_> = probe
+            .iter()
+            .map(|a| fx.decide_action(daemon_uid(), a))
+            .collect();
+        assert_eq!(
+            answer_code(&fx.contain(ContainTarget::Uid(daemon_uid()), 0, "r").await),
+            ContainmentOutcome::Contained
+        );
+        assert!(probe.iter().all(|a| matches!(
+            fx.decide_action(daemon_uid(), a),
+            maknae_security::Verdict::Deny { .. }
+        )));
+        assert_eq!(
+            answer_code(&fx.release(ContainTarget::Uid(daemon_uid()), 0).await),
+            ContainmentOutcome::Released
+        );
+        let after: Vec<_> = probe
+            .iter()
+            .map(|a| fx.decide_action(daemon_uid(), a))
+            .collect();
+        assert_eq!(before, after);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_release_makes_no_decision_about_its_target() {
+        let fx = fixture_with(
+            "release-pure",
+            Opts {
+                authz: RELEASE_TO_ADMIN,
+                bindings: Some(TWO_ADMINS),
+                count_decisions: true,
+                ..Opts::default()
+            },
+        )
+        .await;
+        fx.contain(ContainTarget::Uid(4242), 0, "r").await;
+        assert!(
+            fx.candidate_decisions() > 0,
+            "the counter sees the contain's releaser probes"
+        );
+        fx.reset_decision_counts();
+        assert_eq!(
+            answer_code(&fx.release(ContainTarget::Uid(4242), 0).await),
+            ContainmentOutcome::Released
+        );
+        assert_eq!(fx.candidate_decisions(), 0, "no releaser probe");
+        assert!(
+            fx.decision_log().is_empty(),
+            "no decision on the installed snapshot either: {:?}",
+            fx.decision_log()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_contain_by_uid_does_no_account_lookup() {
+        static ASKED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        fn counting(_: &str) -> Result<Option<u32>, i32> {
+            ASKED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(5)
+        }
+        let fx = fixture_with(
+            "no-nss",
+            Opts {
+                authz: RELEASE_TO_ADMIN,
+                bindings: Some(TWO_ADMINS),
+                accounts: failing_accounts(),
+                ..Opts::default()
+            },
+        )
+        .await;
+        fx.set_applied_lookup(counting);
+        assert_eq!(
+            answer_code(&fx.contain(ContainTarget::Uid(4242), 0, "r").await),
+            ContainmentOutcome::Contained
+        );
+        assert_eq!(
+            ASKED.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "root and daemon were not asked again"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_concurrent_contains_of_the_last_two_releasers_commit_exactly_one() {
+        let fx = Arc::new(fixture("race", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await);
+        let (a, b) = tokio::join!(
+            fx.contain(ContainTarget::Uid(0), daemon_uid(), "a"),
+            fx.contain(ContainTarget::Uid(daemon_uid()), 0, "b"),
+        );
+        let mut codes = [answer_code(&a), answer_code(&b)];
+        codes.sort_by_key(|c| c.code());
+        assert_eq!(
+            codes,
+            [
+                ContainmentOutcome::Contained,
+                ContainmentOutcome::LastReleaser
+            ]
+        );
+        let permitted = [0, daemon_uid()]
+            .iter()
+            .filter(|u| {
+                matches!(
+                    fx.decide_action(**u, "admin.release"),
+                    maknae_security::Verdict::Permit { .. }
+                )
+            })
+            .count();
+        assert_eq!(permitted, 1, "exactly one releaser remains");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_concurrent_contain_and_release_serialize_and_both_are_recorded() {
+        let fx = Arc::new(fixture("race2", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await);
+        fx.contain(ContainTarget::Uid(4242), 0, "first").await;
+        let (r, c) = tokio::join!(
+            fx.release(ContainTarget::Uid(4242), 0),
+            fx.contain(ContainTarget::Uid(4243), 0, "second")
+        );
+        assert_eq!(
+            (answer_code(&r), answer_code(&c)),
+            (ContainmentOutcome::Released, ContainmentOutcome::Contained)
+        );
+        let revs = [view_rev(&r), view_rev(&c)];
+        assert_ne!(revs[0], revs[1], "each committed its own revision");
+        assert_eq!(fx.status_revision(), *revs.iter().max().unwrap());
+        assert!(fx.mirror().contains("- uid: 4243") && !fx.mirror().contains("- uid: 4242"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_contain_whose_record_cannot_append_contains_nobody() {
+        let fx = fixture("wa", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
+        fx.refuse("graph.sync");
+        let before = fx.store_sha();
+        let a = fx.contain(ContainTarget::Uid(4242), 0, "r").await;
+        assert!(
+            matches!(
+                a,
+                ContainAnswer::Unavailable {
+                    reply: "containment unavailable",
+                    ..
+                }
+            ),
+            "{a:?}"
+        );
+        assert_eq!(fx.store_sha(), before);
+        assert!(
+            matches!(
+                fx.decide_uid(4242),
+                maknae_security::Verdict::NotApplicable { .. }
+            ),
+            "4242 is unbound, not contained"
+        );
+        assert!(!fx.mirror().contains("4242"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_decision_in_flight_finishes_on_its_snapshot_and_the_next_is_denied() {
+        let gate = Arc::new(maknae_authz_basic::EvaluationGate {
+            arrived: std::sync::Barrier::new(2),
+            release: std::sync::Barrier::new(2),
+        });
+        let fx = Arc::new(
+            fixture_with(
+                "inflight",
+                Opts {
+                    authz: RELEASE_TO_ADMIN,
+                    bindings: Some(TWO_ADMINS),
+                    gate: Some(Arc::clone(&gate)),
+                    ..Opts::default()
+                },
+            )
+            .await,
+        );
+        let in_flight = {
+            let fx = Arc::clone(&fx);
+            tokio::task::spawn_blocking(move || fx.decide_action(daemon_uid(), "admin.whoami"))
+        };
+        let g = Arc::clone(&gate);
+        bounded(tokio::task::spawn_blocking(move || g.arrived.wait()))
+            .await
+            .unwrap();
+        let contained = {
+            let fx = Arc::clone(&fx);
+            tokio::spawn(async move { fx.contain(ContainTarget::Uid(daemon_uid()), 0, "r").await })
+        };
+        let a = tokio::time::timeout(Duration::from_secs(60), contained).await;
+        let g = Arc::clone(&gate);
+        bounded(tokio::task::spawn_blocking(move || g.release.wait()))
+            .await
+            .unwrap();
+        let a = a.expect("the contain returns").unwrap();
+        assert_eq!(answer_code(&a), ContainmentOutcome::Contained);
+        assert!(
+            matches!(
+                bounded(in_flight).await.unwrap(),
+                maknae_security::Verdict::Permit { .. }
+            ),
+            "decided on the snapshot it started with"
+        );
+        fx.disarm_gate();
+        assert!(
+            matches!(
+                fx.decide_uid(daemon_uid()),
+                maknae_security::Verdict::Deny { .. }
+            ),
+            "the next decision is contained"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_containment_survives_a_restart_and_is_released_after_it() {
+        let fx = fixture("restart", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
+        assert_eq!(
+            answer_code(&fx.contain(ContainTarget::Uid(4242), 0, "r").await),
+            ContainmentOutcome::Contained
+        );
+        let fx = fx.restart().await;
+        assert!(
+            matches!(fx.decide_uid(4242), maknae_security::Verdict::Deny { reason } if reason == "subject contained: role=adversary")
+        );
+        assert_eq!(fx.sync_lines(), ["unsynced=1", "conflict=0"]);
+        assert!(fx.mirror().contains("- uid: 4242"));
+        assert_eq!(
+            answer_code(&fx.release(ContainTarget::Uid(4242), 0).await),
+            ContainmentOutcome::Released
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn kernel_contain_produces_the_operators_state_with_the_kernel_as_initiator() {
+        let op = fixture("k-op", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
+        let k = fixture("k-kernel", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
+        op.contain(ContainTarget::Uid(4242), 0, "r").await;
+        assert!(matches!(
+            bounded(k.reloader.kernel_contain(4242, "r")).await,
+            KernelContain::Contained { .. }
+        ));
+        let layer = |fx: &Fx| {
+            maknae_graph::identity::extract(&fx.reloader.persisted.read().unwrap()).unwrap()
+        };
+        assert_eq!(layer(&op).layer.subjects, layer(&k).layer.subjects);
+        assert_eq!(layer(&op).sync.unwrap().live, layer(&k).sync.unwrap().live);
+        assert!(
+            k.seen()
+                .iter()
+                .any(|s| s.action == GRAPH_TRANSITION_ACTION
+                    && s.reason == "intent recorded (kernel)")
+        );
+        assert!(op.seen().iter().any(
+            |s| s.action == GRAPH_TRANSITION_ACTION && s.reason == "intent recorded (operator)"
+        ));
+        assert!(k.seen().iter().any(|s| s.action == "kernel.contain"
+            && s.reason == "kernel containment of uid 4242 decided; reason \"r\""));
+        assert!(k.seen().iter().any(|s| s.action == "graph.sync"
+            && s.reason == "live (kernel): contain uid:4242; reason \"r\""));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn kernel_contain_of_the_sole_releaser_succeeds_where_the_operator_is_refused() {
+        let op = fixture("sole-op", RELEASE_TO_ADMIN, Some(ROOT_ADMIN)).await;
+        let a = op.contain(ContainTarget::Uid(0), 4242, "r").await;
+        assert_eq!(answer_code(&a), ContainmentOutcome::LastReleaser);
+        assert!(matches!(
+            op.root_whoami(),
+            maknae_security::Verdict::Permit { .. }
+        ));
+        let k = fixture("sole-kernel", RELEASE_TO_ADMIN, Some(ROOT_ADMIN)).await;
+        assert!(matches!(
+            bounded(k.reloader.kernel_contain(0, "r")).await,
+            KernelContain::Contained { .. }
+        ));
+        assert!(matches!(
+            k.root_whoami(),
+            maknae_security::Verdict::Deny { .. }
+        ));
+        assert_eq!(k.containment_lines(), ["subjects=1", "kernel_refused=0"]);
+        assert!(!k.seen().iter().any(|s| s.reason.contains("last-releaser")));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refused_kernel_contain_is_recorded_and_counted_and_a_no_op_is_not_counted() {
+        let fx = fixture("k-keyless", RELEASE_TO_ADMIN, Some("schema_version: 1\n")).await;
+        assert_eq!(
+            bounded(fx.reloader.kernel_contain(4242, "r")).await,
+            KernelContain::Refused(ContainmentOutcome::NoExplicitBindings)
+        );
+        assert_eq!(fx.containment_lines(), ["subjects=0", "kernel_refused=1"]);
+        assert!(fx.seen().iter().any(|s| s.action == "kernel.contain"
+            && s.reason
+                .starts_with("kernel containment refused: no-explicit-bindings")));
+        let fx = fixture(
+            "k-noop",
+            RELEASE_TO_ADMIN,
+            Some("schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary:\n    - uid: 4242\n"),
+        )
+        .await;
+        assert_eq!(
+            bounded(fx.reloader.kernel_contain(4242, "r")).await,
+            KernelContain::AlreadyContained
+        );
+        assert_eq!(fx.containment_lines(), ["subjects=1", "kernel_refused=0"]);
+        assert!(fx.seen().iter().any(|s| s.action == "kernel.contain"
+            && s.reason
+                == "kernel containment unchanged: uid 4242 is already contained; reason \"r\""));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_kernel_contain_whose_decision_record_cannot_append_contains_nobody() {
+        let fx = fixture("k-wa", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
+        fx.refuse("kernel.contain");
+        assert!(matches!(
+            bounded(fx.reloader.kernel_contain(4242, "r")).await,
+            KernelContain::Failed(_)
+        ));
+        assert!(!fx.mirror().contains("4242"));
+        assert_eq!(fx.containment_lines(), ["subjects=0", "kernel_refused=1"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_kernel_contain_with_a_refused_reason_contains_nobody_and_is_counted() {
+        let fx = fixture("k-reason", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
+        let before = fx.store_sha();
+        assert!(matches!(
+            bounded(fx.reloader.kernel_contain(4242, "a\u{202e}b")).await,
+            KernelContain::Failed(_)
+        ));
+        assert_eq!(fx.store_sha(), before);
+        assert_eq!(fx.containment_lines(), ["subjects=0", "kernel_refused=1"]);
+        assert!(fx.seen().iter().any(|s| s.action == "kernel.contain"
+            && s.reason
+                .starts_with("kernel containment of uid 4242 failed: the reason is refused")));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_kernel_contain_records_its_reason_normalised() {
+        let fx = fixture("k-nfc", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
+        assert!(matches!(
+            bounded(fx.reloader.kernel_contain(4242, "\u{1100}\u{1161}")).await,
+            KernelContain::Contained { .. }
+        ));
+        assert!(fx.seen().iter().any(|s| s.action == "kernel.contain"
+            && s.reason == "kernel containment of uid 4242 decided; reason \"\u{ac00}\""));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

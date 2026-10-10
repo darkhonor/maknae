@@ -18,10 +18,6 @@ pub(crate) enum LiveRefusal {
 
 /// Which containment request a record or check is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the containment path calls it (#165)")
-)]
 pub(crate) enum Kind {
     Contain,
     Release,
@@ -38,10 +34,6 @@ pub(crate) enum LiveCheck {
 
 /// A live edit, or a release whose claimants are resolved in the turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the containment path calls it (#165)")
-)]
 pub(crate) enum LiveOp {
     Edit(maknae_config::LiveEdit),
     Release { uid: u32, named: Option<String> },
@@ -66,10 +58,6 @@ impl LiveNote<'_> {
 }
 
 /// The reply code for a refusal; an internal failure has none.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the containment path calls it (#165)")
-)]
 pub(crate) fn outcome(r: &LiveRefusal) -> Option<ContainmentOutcome> {
     Some(match r {
         LiveRefusal::Busy => ContainmentOutcome::Busy,
@@ -85,10 +73,6 @@ pub(crate) fn outcome(r: &LiveRefusal) -> Option<ContainmentOutcome> {
 }
 
 /// The record's (result, posture) for an outcome.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the containment path calls it (#165)")
-)]
 pub(crate) fn record_class(o: ContainmentOutcome) -> (&'static str, &'static str) {
     use ContainmentOutcome as O;
     match o {
@@ -103,10 +87,6 @@ pub(crate) fn record_class(o: ContainmentOutcome) -> (&'static str, &'static str
 }
 
 /// The corrective record's reason for a refused or unchanged request.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the containment path calls it (#165)")
-)]
 pub(crate) fn corrective(
     verb: Kind,
     o: ContainmentOutcome,
@@ -272,10 +252,6 @@ pub(crate) fn check_contain(
 }
 
 /// The check a request of `kind` runs in the turn.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the containment path calls it (#165)")
-)]
 pub(crate) fn check_for(kind: Kind, target: u32, requester: u32) -> LiveCheck {
     match kind {
         Kind::Release => LiveCheck::None,
@@ -285,10 +261,6 @@ pub(crate) fn check_for(kind: Kind, target: u32, requester: u32) -> LiveCheck {
 }
 
 /// A release by uid; its claimant names are resolved under the turn.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the containment path calls it (#165)")
-)]
 pub(crate) fn release_op(uid: u32, named: Option<String>) -> LiveOp {
     LiveOp::Release { uid, named }
 }

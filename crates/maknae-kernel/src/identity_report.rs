@@ -143,6 +143,20 @@ impl IdentityStatus {
     pub fn subjects(&self) -> Arc<[ListedSubject]> {
         self.get().subjects
     }
+
+    /// How many published subjects are contained, carried forward included.
+    pub fn contained(&self) -> usize {
+        self.get()
+            .subjects
+            .iter()
+            .filter(|s| {
+                matches!(
+                    s.state,
+                    SubjectState::Contained | SubjectState::CarriedForward
+                )
+            })
+            .count()
+    }
 }
 
 /// Escaped; the uid and names are the load's, never a live account lookup.
@@ -393,6 +407,28 @@ mod tests {
             checkpoint_error: None,
         });
         assert!(recorded_after(&ok, &[], &p).is_empty());
+    }
+
+    #[test]
+    fn contained_counts_contained_and_carried_forward_subjects_only() {
+        let s = IdentityStatus::default();
+        assert_eq!(s.contained(), 0);
+        s.publish(Published {
+            problems: Arc::from(Vec::new()),
+            subjects: Arc::from(vec![
+                listed(Some(1), &["a"], SubjectState::Bound("user")),
+                listed(Some(2), &[], SubjectState::Contained),
+                listed(Some(3), &["c"], SubjectState::CarriedForward),
+                listed(
+                    Some(4),
+                    &["d"],
+                    SubjectState::Unbound(vec!["user", "guest"]),
+                ),
+                listed(None, &["e"], SubjectState::Unresolved("adversary")),
+                listed(Some(5), &[], SubjectState::Contained),
+            ]),
+        });
+        assert_eq!(s.contained(), 3);
     }
 
     #[test]

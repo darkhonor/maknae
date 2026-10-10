@@ -64,8 +64,9 @@ pub use provider_choice::{
     admit_choice, provider_authority, AdmittedChoice, ChoiceRefusal, ProviderAuthority,
 };
 pub use run::{
-    accept_loop, handle, handle_with_attempt_caps, run, AcceptAnswer, BaselineOps, BoxFuture,
-    ConfigView, Conn, KernelGraphStatus, PlaneAccept, WhereCtx, MAX_SUBJECT_USER_BYTES,
+    accept_loop, handle, handle_with_attempt_caps, run, AcceptAnswer, AdminOps, BaselineOps,
+    BoxFuture, ConfigView, Conn, ContainAnswer, ContainRequest, ContainmentOps, ContainmentStatus,
+    Corrective, KernelGraphStatus, PlaneAccept, ReleaseRequest, WhereCtx, MAX_SUBJECT_USER_BYTES,
 };
 
 #[used]

@@ -348,10 +348,6 @@ pub fn build_authz_request(
 }
 
 /// The kernel's own request.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the containment path calls it (#165)")
-)]
 pub(crate) fn build_kernel_request(
     action: &'static str,
     kernel_uid: u32,
