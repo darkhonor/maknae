@@ -347,6 +347,28 @@ pub fn build_authz_request(
     }
 }
 
+/// The kernel's own request; the only place [`maknae_security::SUBJECT_INITIATOR`] is stamped.
+pub fn build_kernel_request(action: &'static str, kernel_uid: u32) -> maknae_security::Request {
+    use maknae_security::{Action, AttrValue, Attributes, Context, Resource, Subject};
+    let mut subject = Attributes::new();
+    subject.insert("uid", AttrValue::Int(i64::from(kernel_uid)));
+    subject.insert(
+        maknae_security::SUBJECT_INITIATOR,
+        AttrValue::Str(maknae_security::INITIATOR_KERNEL.to_string()),
+    );
+    let mut context = Attributes::new();
+    context.insert(
+        maknae_security::CONTEXT_DAC_LANE,
+        AttrValue::Str(maknae_security::Lane::Local.as_str().to_string()),
+    );
+    maknae_security::Request {
+        subject: Subject(subject),
+        resource: Resource(Attributes::new()),
+        action: Action(action.to_string()),
+        context: Context(context),
+    }
+}
+
 /// An obligation the PEP has no registered handler for — the PEP fails
 /// closed to Deny on it (audit-only reason names the id).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1489,6 +1511,80 @@ mod tests {
                 bytes.windows(hdr.len()).any(|wnd| wnd == hdr.as_slice()),
                 "{key} must appear as a CBOR text key of its exact length"
             );
+        }
+    }
+
+    #[test]
+    fn a_kernel_request_names_the_kernel_and_carries_nothing_else() {
+        let r = build_kernel_request("kernel.contain", 991);
+        assert_eq!(r.action.0, "kernel.contain");
+        assert_eq!(
+            r.subject.0.get("uid"),
+            Some(&maknae_security::AttrValue::Int(991))
+        );
+        assert_eq!(
+            r.subject.0.get(maknae_security::SUBJECT_INITIATOR),
+            Some(&maknae_security::AttrValue::Str("kernel".into()))
+        );
+        assert!(r.resource.0.is_empty());
+        let mut subject = maknae_security::Attributes::new();
+        subject.insert("uid", maknae_security::AttrValue::Int(991));
+        subject.insert(
+            maknae_security::SUBJECT_INITIATOR,
+            maknae_security::AttrValue::Str("kernel".into()),
+        );
+        assert_eq!(
+            format!("{:?}", r.subject.0),
+            format!("{subject:?}"),
+            "uid and initiator only"
+        );
+        let mut context = maknae_security::Attributes::new();
+        context.insert(
+            maknae_security::CONTEXT_DAC_LANE,
+            maknae_security::AttrValue::Str("local".into()),
+        );
+        assert_eq!(
+            format!("{:?}", r.context.0),
+            format!("{context:?}"),
+            "the lane only"
+        );
+        assert!(KERNEL_ACTIONS.contains(&r.action.0.as_str()));
+    }
+
+    #[test]
+    fn no_client_request_carries_the_initiator() {
+        for v in all_verbs() {
+            let r = build_authz_request(&v, 0, None, maknae_security::Lane::Local, None);
+            assert!(
+                r.subject
+                    .0
+                    .get(maknae_security::SUBJECT_INITIATOR)
+                    .is_none(),
+                "{v:?}"
+            );
+            assert!(!KERNEL_ACTIONS.contains(&r.action.0.as_str()), "{v:?}");
+        }
+    }
+
+    #[test]
+    fn the_containment_operands_never_reach_the_pdp() {
+        let reason = "SENTINEL-REASON-7c1";
+        for v in [
+            Verb::AdminContain {
+                target: ContainTarget::Name("SENTINEL-NAME".into()),
+                reason: reason.into(),
+            },
+            Verb::AdminRelease {
+                target: ContainTarget::Uid(424242),
+            },
+        ] {
+            let dbg = format!(
+                "{:?}",
+                build_authz_request(&v, 501, None, maknae_security::Lane::Local, None)
+            );
+            for s in ["SENTINEL", "424242"] {
+                assert!(!dbg.contains(s), "{v:?}: {dbg}");
+            }
         }
     }
 }
