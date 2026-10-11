@@ -4586,6 +4586,7 @@ where
             &source.unresolved_adversaries(),
             &stored.layer,
             source.bindings().lists_nobody(),
+            Some(who.provenance()),
         );
         let next_sync = maknae_graph::sync::SyncBase {
             base: sync.base.clone(),
@@ -5613,6 +5614,7 @@ fn load_candidate<B: maknae_authz_basic::Baseline, E>(
         &source.unresolved_adversaries(),
         &persisted.layer,
         source.bindings().lists_nobody(),
+        None,
     );
     let provenance = maknae_state::store::transition_initiator(
         merged.kind,
@@ -15257,7 +15259,7 @@ mod reload_tests {
                 "permit".to_string(),
                 "authorized".to_string(),
                 format!(
-                    "uid 4242 ('{GHOST}') is no longer contained: its name is no longer listed under adversary"
+                    "uid 4242 ('{GHOST}') is no longer contained: bindings.yaml no longer lists it under adversary"
                 )
             )]
         );
@@ -18011,10 +18013,9 @@ mod reload_tests {
         );
         assert!(fx.mirror().contains("  adversary: []\n"), "{}", fx.mirror());
         assert_eq!(fx.sync_lines(), ["unsynced=1", "conflict=0"]);
-        assert!(fx
-            .seen()
-            .iter()
-            .any(|s| s.action == "graph.identity" && s.reason.contains("is no longer contained")));
+        assert!(fx.seen().iter().any(|s| s.action == "graph.identity"
+            && s.reason
+                .contains("is no longer contained: an operator released it over the wire")));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

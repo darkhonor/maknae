@@ -186,6 +186,9 @@ impl std::fmt::Display for IdentityProblem {
                 }
                 Ok(())
             }
+            Self::Released { uid, name, cause } if *name == format!("uid:{uid}") => {
+                write!(f, "uid {uid} is no longer contained: {cause}")
+            }
             Self::Released { uid, name, cause } => write!(
                 f,
                 "uid {uid} ('{}') is no longer contained: {cause}",
@@ -832,13 +835,13 @@ mod tests {
                 IdentityProblem::Released {
                     uid: 666,
                     name: "mallory".into(),
-                    cause: "its name is no longer listed under adversary".into(),
+                    cause: "bindings.yaml no longer lists it under adversary".into(),
                 },
                 "released",
                 Some(666),
                 vec!["mallory"],
                 vec!["adversary"],
-                "uid 666 ('mallory') is no longer contained: its name is no longer listed under adversary",
+                "uid 666 ('mallory') is no longer contained: bindings.yaml no longer lists it under adversary",
             ),
             (
                 IdentityProblem::PrincipalAdmin { uid: 501 },
@@ -872,6 +875,41 @@ mod tests {
                 name: "mallory".into(),
                 cause: "its name now resolves to uid 777".into(),
             }
+        );
+    }
+
+    #[test]
+    fn a_released_uid_entry_is_named_by_its_uid_only() {
+        let released = |uid, name: &str| {
+            IdentityProblem::from(&maknae_graph::identity::Released {
+                uid,
+                name: name.into(),
+                cause: maknae_graph::identity::ReleaseCause::NotListed,
+            })
+            .to_string()
+        };
+        assert_eq!(
+            released(4242, "uid:4242"),
+            "uid 4242 is no longer contained: bindings.yaml no longer lists it under adversary"
+        );
+        assert_eq!(
+            released(4242, "uid:4243"),
+            "uid 4242 ('uid:4243') is no longer contained: bindings.yaml no longer lists it under adversary"
+        );
+    }
+
+    #[test]
+    fn a_wire_release_names_the_operator_and_not_bindings_yaml() {
+        let r = maknae_graph::identity::Released {
+            uid: 666,
+            name: "mallory".into(),
+            cause: maknae_graph::identity::ReleaseCause::Live(
+                maknae_graph::record::ProvenanceKind::Operator,
+            ),
+        };
+        assert_eq!(
+            IdentityProblem::from(&r).to_string(),
+            "uid 666 ('mallory') is no longer contained: an operator released it over the wire"
         );
     }
 

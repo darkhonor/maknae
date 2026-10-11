@@ -50,16 +50,22 @@ pub fn plan_candidate<G: Clone, E>(
     Ok((plan, graph))
 }
 
-/// The layer a reload persists, with every persisted containment whose name no longer
-/// resolves carried forward, and the containments it ends.
+/// The layer a reload or a `live` edit persists, with every persisted containment whose
+/// name no longer resolves carried forward, and the containments it ends.
 pub fn next_layer(
     file: &IdentityLayer,
     unresolved_adversaries: &[String],
     persisted: &IdentityLayer,
     file_lists_nobody: bool,
+    live: Option<maknae_graph::record::ProvenanceKind>,
 ) -> (IdentityLayer, Vec<maknae_graph::identity::Released>) {
     let next = maknae_graph::identity::carry_forward(file, unresolved_adversaries, persisted).0;
-    let released = maknae_graph::identity::released(persisted, &next, file_lists_nobody);
+    let mut released = maknae_graph::identity::released(persisted, &next, file_lists_nobody);
+    if let Some(by) = live {
+        for r in &mut released {
+            r.cause = maknae_graph::identity::ReleaseCause::Live(by);
+        }
+    }
     (next, released)
 }
 
@@ -296,6 +302,7 @@ mod tests {
     #[test]
     fn the_next_layer_carries_and_reports_releases() {
         use maknae_graph::identity::{ReleaseCause, Released, SubjectEntry};
+        use maknae_graph::record::ProvenanceKind;
         let mallory = SubjectEntry {
             uid: 666,
             name: "mallory".into(),
@@ -323,19 +330,19 @@ mod tests {
             cause: ReleaseCause::NotListed,
         }];
         assert_eq!(
-            next_layer(&file, &[], &moved, false),
+            next_layer(&file, &[], &moved, false, None),
             (file.clone(), unlisted.to_vec())
         );
         assert_eq!(
-            next_layer(&file, &[], &persisted, false),
+            next_layer(&file, &[], &persisted, false, None),
             (file.clone(), unlisted.to_vec())
         );
-        let (carried, released) = next_layer(&file, &["mallory".into()], &persisted, false);
+        let (carried, released) = next_layer(&file, &["mallory".into()], &persisted, false, None);
         assert_eq!(
             (carried.subjects, released.len()),
             (persisted.subjects.clone(), 0)
         );
-        let (plain, released) = next_layer(&file, &[], &persisted, true);
+        let (plain, released) = next_layer(&file, &[], &persisted, true, None);
         assert_eq!(plain, file);
         assert_eq!(
             released,
@@ -345,14 +352,25 @@ mod tests {
                 cause: ReleaseCause::BindingsEmpty
             }]
         );
-        let (_, released) = next_layer(&file, &[], &persisted, false);
+        let (_, released) = next_layer(&file, &[], &persisted, false, None);
         assert_eq!(
             released[0].cause,
             ReleaseCause::NotListed,
             "a file whose names did not resolve still lists them"
         );
-        let (same, released) = next_layer(&persisted, &[], &persisted, false);
+        let (same, released) = next_layer(&persisted, &[], &persisted, false, None);
         assert_eq!((same, released), (persisted.clone(), vec![]));
+        for by in [ProvenanceKind::Operator, ProvenanceKind::Kernel] {
+            let (_, released) = next_layer(&file, &[], &persisted, false, Some(by));
+            assert_eq!(
+                released,
+                [Released {
+                    uid: 666,
+                    name: "mallory".into(),
+                    cause: ReleaseCause::Live(by)
+                }]
+            );
+        }
     }
 
     fn sync() -> SyncBase {

@@ -293,7 +293,7 @@ mod tests {
             IdentityProblem::Released {
                 uid: 667,
                 name: "trudy".into(),
-                cause: "its name is no longer listed under adversary".into(),
+                cause: "bindings.yaml no longer lists it under adversary".into(),
             },
         ]
     }
