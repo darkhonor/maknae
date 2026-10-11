@@ -3821,6 +3821,44 @@ async fn a_caller_without_the_grant_gets_unauthorized_and_no_code() {
     );
 }
 
+#[tokio::test]
+async fn a_contained_admin_granted_release_asking_release_is_unauthorized_with_the_containment_reason(
+) {
+    let fx = Fixture::new("contained-releaser");
+    fx.write_policy(BOTH_GRANTED);
+    fx.write_bindings(
+        "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary:\n    - uid: 4242\n",
+    );
+    let ops = common::scripted_containment(ContainmentOutcome::Released);
+    let emit = RecEmit::new();
+    let frame = drive_with_ops(
+        &fx.dir,
+        fx.authorizer(),
+        emit.clone(),
+        4242,
+        maknae_proto::Verb::AdminRelease {
+            target: ContainTarget::Uid(4242),
+        },
+        ops.clone(),
+    )
+    .await
+    .expect("a frame");
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Err(e) => assert_eq!(
+            (e.code, e.message.as_str()),
+            (ProtoErrCode::Unauthorized, "not authorized")
+        ),
+        other => panic!("{other:?}"),
+    }
+    let needle = b"role=adversary";
+    assert!(!frame.windows(needle.len()).any(|w| w == needle));
+    assert_eq!(
+        request_record(&emit.records()).outcome.reason,
+        "subject contained: role=adversary"
+    );
+    assert_eq!(ops.calls(), 0);
+}
+
 const BOTH_GRANTED: &str = "schema_version: 1\nroles:\n  admin:\n    allow:\n      - \"admin.contain\"\n      - \"admin.release\"\n";
 
 #[tokio::test]

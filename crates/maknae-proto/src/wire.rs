@@ -1802,6 +1802,29 @@ mod tests {
     }
 
     #[test]
+    fn no_client_frame_can_name_the_kernel_containment() {
+        use ciborium::value::Value;
+        for verb in [
+            Value::Text("KernelContain".into()),
+            Value::Map(vec![(Value::Text("KernelContain".into()), Value::Null)]),
+        ] {
+            let mut buf = Vec::new();
+            ciborium::into_writer(
+                &Value::Map(vec![
+                    (
+                        Value::Text("protocol_version".into()),
+                        Value::Integer(1.into()),
+                    ),
+                    (Value::Text("verb".into()), verb),
+                ]),
+                &mut buf,
+            )
+            .unwrap();
+            assert!(decode_request(&buf).is_err());
+        }
+    }
+
+    #[test]
     fn an_unknown_verb_name_fails_to_decode() {
         // Spec §6 test 28: an unknown verb is a codec error, refused before any behaviour.
         // NOT red-first: decode_request already refuses an unknown variant; this pins the obligation.

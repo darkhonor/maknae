@@ -1366,6 +1366,9 @@ mod tests {
                 "{a} collides with a client-reachable term"
             );
         }
+        assert!(all_verbs()
+            .iter()
+            .all(|v| !KERNEL_ACTIONS.contains(&verb_to_action(v))));
     }
 
     /// Claim: a parameterless `[N]` term supplies NO resource attribute, so

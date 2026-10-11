@@ -17333,6 +17333,112 @@ mod reload_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_reason_reaches_the_trail_and_never_the_mirror_status_or_reply() {
+        let fx = fixture("reason", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
+        let sentinel = "SENTINEL-REASON-41d9";
+        let a = fx.contain(ContainTarget::Uid(4242), 0, sentinel).await;
+        assert!(!format!("{a:?}").contains(sentinel), "the reply");
+        assert!(
+            fx.seen().iter().any(|s| s.reason.contains(sentinel)),
+            "the trail"
+        );
+        assert!(!fx.mirror().contains(sentinel), "the mirror");
+        fx.install_mirror();
+        assert!(
+            !std::fs::read_to_string(fx.bindings())
+                .unwrap()
+                .contains(sentinel),
+            "/etc"
+        );
+        for l in fx
+            .sync_lines()
+            .iter()
+            .chain(fx.containment_lines().iter())
+            .chain(fx.status_lines().iter())
+        {
+            assert!(!l.contains(sentinel) && !l.contains("4242"), "status: {l}");
+        }
+        let verb = maknae_proto::Verb::AdminContain {
+            target: ContainTarget::Uid(4242),
+            reason: sentinel.into(),
+        };
+        let dbg = format!("{verb:?}");
+        assert!(!dbg.contains(sentinel), "{dbg}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_hangul_reason_reaches_the_trail_as_readable_utf8() {
+        let fx = fixture("hangul", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
+        let jamo = "\u{1112}\u{1161}\u{11ab}\u{1100}\u{1173}\u{11af}";
+        assert!(matches!(
+            bounded(fx.reloader.kernel_contain(4242, jamo)).await,
+            KernelContain::Contained { .. }
+        ));
+        let rec = fx
+            .seen()
+            .into_iter()
+            .find(|s| s.action == "graph.sync" && s.reason.starts_with("live (kernel)"))
+            .unwrap();
+        assert!(
+            rec.reason.ends_with("reason \"\u{d55c}\u{ae00}\""),
+            "NFC, unescaped: {}",
+            rec.reason
+        );
+        assert!(!rec.reason.contains("\\u{"), "no escape_default");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_contain_and_its_release_correlate_by_uid_and_revision() {
+        let fx = fixture("correlate", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
+        let c = view_rev(&fx.contain(ContainTarget::Uid(4242), 0, "r").await);
+        let r = view_rev(&fx.release(ContainTarget::Uid(4242), 0).await);
+        let live: Vec<_> = fx
+            .seen()
+            .into_iter()
+            .filter(|s| s.action == "graph.sync" && s.reason.starts_with("live (operator)"))
+            .collect();
+        assert!(
+            live[0].reason.contains("contain uid:4242")
+                && live[1].reason.contains("release uid:4242")
+        );
+        assert!(fx
+            .seen()
+            .iter()
+            .any(|s| s.reason == format!("live applied: revision {c}")));
+        assert!(fx
+            .seen()
+            .iter()
+            .any(|s| s.reason == format!("live applied: revision {r}")));
+        assert!(r > c);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_file_route_contains_with_root_file_as_the_initiator() {
+        let fx = fixture("file-route", RELEASE_TO_ADMIN, Some(ROOT_ADMIN)).await;
+        let before = fx.seen().len();
+        fx.write_bindings(
+            "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary:\n    - uid: 4242\n",
+        );
+        bounded(fx.reloader.run()).await.unwrap();
+        assert_eq!(
+            fx.decide_uid(4242),
+            maknae_security::Verdict::Deny {
+                reason: "subject contained: role=adversary".into()
+            }
+        );
+        let after: Vec<_> = fx.seen().into_iter().skip(before).collect();
+        assert!(
+            after.iter().any(|s| s.action == GRAPH_TRANSITION_ACTION
+                && s.reason == "intent recorded (root-file)"),
+            "{after:?}"
+        );
+        assert!(!after
+            .iter()
+            .any(|s| s.reason.starts_with("live (operator)")
+                || s.reason == "intent recorded (operator)"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_contain_by_name_records_the_uid_and_the_reason_and_denies_the_next_decision() {
         let fx = fixture("by-name", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
         let a = fx
