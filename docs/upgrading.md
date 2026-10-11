@@ -4,6 +4,22 @@ Each release that needs an action from you lists it here, newest first. Read eve
 
 ---
 
+## Containment verbs (#165)
+
+`maknae contain` and `maknae release` contain and release a subject over the wire ([runbook](runbook.md#contain-a-subject-over-the-wire)).
+
+**Re-enroll to get a working `maknae contain`.** Enroll now writes `/etc/maknae/bindings.yaml` with the enrolling user under `admin`. Run `sudo maknae enroll` once more, with the same arguments ([runbook Chapter 4 step 3](runbook.md#3-enroll)), then reload `maknaed`. Until then the host has no explicit bindings: a contain answers `no-explicit-bindings`, and the enrolled principal stays `admin` by the keyless fallback. Enroll refuses, before it changes anything, when your uid already holds another role or is contained, or when `maknaed` enforces explicit bindings and `bindings.yaml` is missing; the runbook lists each case. A re-enroll that changes `bindings.yaml` rewrites it in canonical form, which drops any comment root wrote in it.
+
+**The shipped `authz.yaml` now also grants `admin` the term `admin.release`.** `admin.contain` is not granted by default. What happens to an existing file depends on the package format:
+
+- **Debian:** an unedited conffile is replaced with the new default without asking, and the grant applies. If you edited it, dpkg asks; keep yours and add the line below.
+- **Red Hat family:** `%config(noreplace)` replaces an unedited file and keeps an edited one, writing the new default beside it as `authz.yaml.rpmnew`.
+- **macOS:** the installer never replaces an existing `authz.yaml`.
+
+An `authz.yaml` you edited keeps its grants. To get the release grant add `- "admin.release"` under `roles.admin.allow`, and add `- "admin.contain"` too if this host's operators should be able to contain. Then reload `maknaed`.
+
+---
+
 ## Sync back (#491)
 
 `maknaed` now keeps, beside the bindings it enforces, the `bindings:` section of the last `bindings.yaml` it loaded, merges every later `bindings.yaml` with them entry by entry, and publishes a mirror that `sudo maknae policy sync` installs as `bindings.yaml` ([runbook](runbook.md#sync-live-identity-changes-back-to-bindingsyaml)). Nothing is required of you, except on the first start in the case below.

@@ -602,6 +602,12 @@ sudo maknae enroll \
   - Writes the CA chain.
   - Writes your CLI configuration, `~/.maknae/maknae.yaml` (with the `vault` block carrying `user_auth`, `kv_mount` and `user_prefix`) and `~/.maknae/tls/`. It writes no token: you log in yourself (step 9).
   - Adds you to the `maknae` group.
+  - Writes `/etc/maknae/bindings.yaml` with you under `admin` (`bindings: { admin: [<you>] }`), so the host has explicit bindings and `maknae contain` works. A re-enroll adds you to `admin` only if you are not already there and never removes an entry; when it changes the file it rewrites it in canonical form, which drops root's comments (an unchanged file is left alone). It prints `Wrote <you> to bindings.yaml as admin`, or `<you> already holds admin in bindings.yaml; bindings.yaml was not changed`, and the reload command to run if `maknaed` is running.
+  - **Refuses before it changes anything**, so a refused enroll rotates nothing, when:
+    - `maknaed` enforces explicit bindings but `bindings.yaml` is missing or has no `bindings:` key: run `sudo maknae policy sync` at a terminal first, then enroll again. Without that, writing `admin: [<you>]` would read as root deleting every other entry. With no mirror present (a failed render removed it), enroll cannot see the lost file.
+    - your uid already holds another role in `bindings.yaml` (it names the role), or is contained, in the file or live and not yet synced. Enroll matches by uid, not by name, and never replaces a role or lifts a containment. Fix `bindings.yaml` as root and enroll again, so a credential-rotation re-enroll waits until you do.
+    - an account named in the bindings cannot be looked up (an error other than "no such user").
+    - `maknaed` reads its configuration from a directory other than `/etc/maknae`.
   - **Rewrites `/etc/maknae/maknae.yaml`** with four sections: `core`, `vault` (with `user_auth`), `audit`, `principal`.
 - **Anything else you put in `maknae.yaml` is lost on the next enroll.** That is why the provider list goes in `config.d/` (step 5).
 - **A host enrolled before #365 should re-enroll** to remove the `_maknae` ACL entry from your home and enroll's AppArmor include. The daemon needs neither; enroll keeps an include file it did not write. Afterwards `ls -ld ~` may still show `+`: an empty `mask::---` entry remains and grants nothing. Enroll touches only the home it is enrolling; on a home enrolled earlier by another operator, run `sudo setfacl -x u:_maknae <that home>`.
@@ -696,7 +702,7 @@ As yourself, not root, store your own API key in Vault under your own login: [fi
 
 ### 7. Grant the prompt
 
-Edit `/etc/maknae/authz.yaml` in place. The packaged file already has a `roles:` key granting `admin` its four administrative terms, and a second `roles:` key refuses the whole file, so add `session.prompt` to that list and append a `destinations:` key. `sudoedit` and `tee -a` keep the file's owner, mode and label. Step 9's restart applies it; a daemon that is already serving applies it at the next reload, `sudo systemctl reload maknaed` ([Reload the policy](#reload-the-policy)):
+Edit `/etc/maknae/authz.yaml` in place. The packaged file already has a `roles:` key granting `admin` its five administrative terms, and a second `roles:` key refuses the whole file, so add `session.prompt` to that list and append a `destinations:` key. `sudoedit` and `tee -a` keep the file's owner, mode and label. Step 9's restart applies it; a daemon that is already serving applies it at the next reload, `sudo systemctl reload maknaed` ([Reload the policy](#reload-the-policy)):
 
 ```bash
 sudoedit /etc/maknae/authz.yaml      # add - "session.prompt" under roles: admin: allow:
@@ -726,7 +732,7 @@ destinations:
 
 An `authz.yaml` kept from before #490 has no `roles:` key ([upgrading](upgrading.md#baseline-layer-490)); write the whole `roles:` block above into it.
 
-**Grant `admin`, not `user`.** The shipped `bindings.yaml` has no `bindings:` key, and without one the enrolled principal resolves to **`admin`** (`crates/maknae-authz-basic/src/binding.rs`). If you add `bindings:`, that default stops applying and the grants belong under whichever role you bind ([Bind a user, contain a subject](#bind-a-user-contain-a-subject)).
+**Grant `admin`, not `user`.** Enroll writes `bindings.yaml` with a `bindings:` key that lists you under **`admin`** (step 3), so the grants belong under `admin`. Only a keyless host that has not been re-enrolled falls back to resolving the enrolled principal to `admin` (`crates/maknae-authz-basic/src/binding.rs`); if you edit `bindings:` there, that fallback stops applying and the grants belong under whichever role you bind ([Bind a user, contain a subject](#bind-a-user-contain-a-subject)).
 
 The shipped path rules already allow `Read(~/**)` and `Write(~/projects/**)`, so the write target must be under `~/projects/`.
 
@@ -1068,7 +1074,53 @@ The reseed makes the start take the files as the accepted baseline, recorded as 
 
 ## Bind a user, contain a subject
 
-Who holds which role on this host, and who is contained, is `/etc/maknae/bindings.yaml` (configuration §2.3). `authz.yaml` holds what each role may do. Edit `bindings.yaml` in place, then reload:
+Who holds which role on this host, and who is contained, is `/etc/maknae/bindings.yaml` (configuration §2.3). `authz.yaml` holds what each role may do. An operator contains or releases a subject over the wire; root edits the file.
+
+### Contain a subject over the wire
+
+```bash
+maknae contain mallory --reason "credential found in a public paste"
+maknae contain --uid 4242 --reason "exfiltration attempt on the build host"
+maknae release mallory
+maknae release --uid 4242
+```
+
+- **Who may.** `admin.contain` and `admin.release` are separate grants under `roles.admin.allow` in `authz.yaml`, grantable to `admin` only (a grant of either to `guest` or `adversary` refuses at load). The shipped file grants `admin.release` and does **not** grant `admin.contain`: add `- "admin.contain"` deliberately, then reload ([Reload the policy](#reload-the-policy)). Holding `admin` grants neither.
+- **What it does.** The subject is bound to `adversary`, and its next decision is denied, liveness included. Work already running is not stopped (#481, #166).
+- **The target** is a username or `--uid`. A name is looked up at that moment, and an unknown name is refused rather than recording a containment of nobody. The containment is recorded as `uid: N`, so a later directory outage releases nothing.
+- **The reason is required**: 1 to 384 bytes of UTF-8 in any script (about 128 Hangul syllables or 384 Latin characters). Control characters, invisible or bidirectional formatting characters (including the direction overrides), line and paragraph separators and private-use characters are refused, and the text is normalised to NFC. A user name follows the same character rule, up to 256 bytes. The reason and the target go in the audit trail only: never in a reply, the mirror or `/etc/maknae`.
+- **Self-contain** is allowed only if you hold `admin.release`. A contain that would leave nobody uncontained holding `admin.release` is refused, so every operator contain is refused when the policy grants `admin.release` to nobody. The kernel's own containment (`kernel.contain`, compiled in, with no wire form; its triggers are #149) is exempt from that last check. Root can always recover outside the daemon: edit `bindings.yaml` and reload, or `sudo maknae reseed`.
+- **Release** removes every `adversary` entry that claims the uid: the live `uid: N` entry, live names, and a name root listed in the file. It consults nothing the contained subject holds. Removing a name root listed is a live edit, and root's next edit of that name may conflict with it ([How bindings.yaml and live state merge](#how-bindingsyaml-and-live-state-merge)). The release record lists the claimants it removed: `release uid:4242 (uid:4242, "mallory")`.
+- **A keyless host** (not re-enrolled, so `bindings.yaml` has no `bindings:` key) refuses with `no-explicit-bindings`: re-enroll with `sudo maknae enroll` ([upgrading](upgrading.md#containment-verbs-165)).
+
+A policy denial is the generic `Unauthorized`. A caller who holds the grant and is refused gets a fixed code:
+
+| Code | Meaning | What to do |
+|---|---|---|
+| `contained`, `released` | The edit landed; the reply names the uid and the revision. | A release is not in `bindings.yaml` until `sudo maknae policy sync` is run at a terminal; the automatic sync never installs a release. |
+| `already-contained`, `not-contained` | Recorded no-ops: nothing changed, and a conflict listing is not cleared. | Nothing. |
+| `last-releaser` | The contain would leave no uncontained subject holding `admin.release`. | Release or bind another holder first, or have root edit `bindings.yaml`. |
+| `self-contain-without-release` | You do not hold `admin.release`. | Have root grant you `admin.release`, or contain through another operator. |
+| `busy` | Another reload or live edit held the daemon's turn too long. | Try again. |
+| `stopping` | The daemon is stopping. | Retry after the restart. |
+| `no-explicit-bindings` | The host has no `bindings:` key. | Re-enroll. |
+| `unknown-account` | No account has that name. | Check the spelling, or contain by `--uid`. |
+| `lookup-unavailable` | The directory lookup failed or timed out. | Contain by `--uid`, or retry when the directory is back. |
+
+`maknae status` shows `containment: <n> contained, <m> refused kernel containments`; the second count is the kernel containments that were refused, which the kernel has nobody to be told about.
+
+Read the trail:
+
+```bash
+sudo jq -c 'select(.action=="graph.sync" and (.outcome.reason|startswith("live (")))' /var/log/maknae/audit.jsonl | tail -n 20
+sudo jq -c 'select(.action=="kernel.contain" or .action=="admin.contain" or .action=="admin.release")' /var/log/maknae/audit.jsonl | tail -n 20
+```
+
+The live-edit record reads `live (operator): contain uid:4242; requested by uid 501 in session 7; reason "…"` (`live (kernel)` for the kernel, without a requester). A refused or unchanged request writes a corrective record such as `contain refused: last-releaser: …` or `release unchanged: uid 4242 is not contained`. A name in these records is double-quoted and escaped; a uid is `uid:<n>`.
+
+### Contain a subject by editing bindings.yaml
+
+Edit `bindings.yaml` in place, then reload:
 
 ```bash
 sudoedit /etc/maknae/bindings.yaml
@@ -1086,13 +1138,13 @@ bindings:
     - uid: 4242
 ```
 
-- **Once a `bindings:` key exists, only the entries it lists hold a role.** List yourself under `admin`. With no `bindings:` key, as shipped, the enrolled principal holds `admin`.
+- **Once a `bindings:` key exists, only the entries it lists hold a role.** Enroll lists the enrolling user under `admin`; keep yourself there. Only a keyless file, as shipped and not yet re-enrolled, leaves the enrolled principal as `admin` by fallback.
 - **Deleting is not resetting.** Once `maknaed` enforces a `bindings:` key, deleting `bindings.yaml` or removing its `bindings:` key changes nothing: every binding and containment stands, the loss is recorded (`graph.sync`, `lost: …`) and `maknae status` shows `bindings.yaml lost`. `sudo maknae policy sync` puts the file back; the automatic sync restores only a missing file, and a removed `bindings:` key is restored by running the sync on a terminal. Returning to the shipped default, the enrolled principal as the only `admin`, takes `sudo maknae reseed` with a `bindings.yaml` that has no `bindings:` key ([Reseed](#reseed)).
 - **Contain a subject** by listing its username under `adversary`, or its id as `- uid: <n>`. A `uid:` entry contains the id whether or not an account has it, and does not depend on the user directory.
 - **Containment wins.** A uid listed under `adversary` and under another role is contained, and a `graph.identity` record says so: `uid 1003 (mallory) is under adversary, user; containment wins and it is contained`.
 - **One uid under two other roles holds no role**, whether by one name or two: `uid 1002 (gus, gustav) is under guest, user; it holds no role`. Keep one of them.
 - **A name with no account holds no role**, and the rest of the file loads: `'bob' under user has no account on this host; it holds no role`. Under `adversary`, the name contains nothing: `'trudy' under adversary has no account on this host, so the name contains nothing; a "- uid: <n>" entry contains an id whether or not it has an account`.
-- **Release a containment** by deleting its entry and reloading. The reload records one release per containment it ends, ahead of the store write: `uid 1003 ('mallory') is no longer contained: its name is no longer listed under adversary`. A typo in a contained name (`malory` for `mallory`) also ends that containment, and the release record shows it.
+- **Release a containment** by deleting its entry and reloading, or over the wire with `maknae release` (above). The reload records one release per containment it ends, ahead of the store write: `uid 1003 ('mallory') is no longer contained: its name is no longer listed under adversary`. A typo in a contained name (`malory` for `mallory`) also ends that containment, and the release record shows it.
 
 Read the result:
 
@@ -1125,7 +1177,7 @@ A subject that holds no role is decided like any uid the file does not list, whi
 
 ## Sync live identity changes back to bindings.yaml
 
-`maknaed` keeps the bindings it enforces in its kernel graph store. Root changes them by editing `bindings.yaml` and reloading. A live edit, made by a verb or by the kernel itself, changes them in the store directly; #165 adds the verbs that make one, and none exists yet. A live edit is not in `bindings.yaml` until it is synced back, so until then a reseed drops it and a reader of `/etc/maknae` does not see it. Sync back writes the enforced bindings into `bindings.yaml`. The daemon never writes `/etc/maknae`: it publishes a mirror, and root installs it.
+`maknaed` keeps the bindings it enforces in its kernel graph store. Root changes them by editing `bindings.yaml` and reloading. A live edit, made by `maknae contain`, `maknae release` or the kernel's own containment, changes them in the store directly. A live edit is not in `bindings.yaml` until it is synced back, so until then a reseed drops it and a reader of `/etc/maknae` does not see it. Sync back writes the enforced bindings into `bindings.yaml`. The daemon never writes `/etc/maknae`: it publishes a mirror, and root installs it. A release needs `sudo maknae policy sync` at a terminal; the opt-in automatic sync installs a containment, never a release.
 
 ### The mirror
 
@@ -1251,7 +1303,7 @@ Every merge and sync event is an audit record with `action:"graph.sync"`. An ent
 | A load that finds a conflict | `permit` | `syncing` | `conflict: <entry> changed in bindings.yaml and by an unsynced live transition; failed closed: contained` (or `unbound`) |
 | A load that clears a conflict | `permit` | `syncing` | `conflict resolved: <entry>: bindings.yaml changed it again`, or `…: bindings.yaml holds the fail-closed value` |
 | A live edit that clears a conflict, written ahead after the live edit's own record | `permit` | `syncing` | `conflict resolved: <entry>: a live edit changed it` |
-| A live edit, written ahead | `permit` | `syncing` | `live (<operator\|kernel>): contain <entry>`, `release <entry>`, `bind <role> <name>` or `unbind <name>`; a name is escaped and in double quotes, like an entry |
+| A live edit, written ahead | `permit` | `syncing` | `live (<operator\|kernel>): contain <entry>`, `release uid:<n> (uid:<n>, "<name>", …)` listing every claimant it removed, `bind <role> <name>` or `unbind <name>`; a name is escaped and in double quotes, like an entry. An operator's record continues `; requested by uid <n> in session <s>` and, for a contain, `; reason "…"` |
 | A live edit, applied | `permit` | `live-applied` | `live applied: revision <n>`, followed by `; store not durable: <cause>` and `; checkpoint append failed: <cause>` when those happened; the record carries `policy_sha256` |
 | `bindings.yaml` lost | `deny`, posture `unavailable` | none | `lost: bindings.yaml is missing; the enforced bindings stand; restore them with sudo maknae policy sync, or run sudo maknae reseed to return to principal-as-admin` (or `has no bindings: key` for `is missing`) |
 | The mirror not published | `deny`, posture `unavailable` | none | `mirror render failed: <cause>; the transition at revision <n> stands; the stale mirror was removed` (or `; the stale mirror could not be removed: <cause>`) |
