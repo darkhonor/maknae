@@ -983,8 +983,167 @@ impl maknae_kernel::BaselineOps for NoBaseline {
     }
 }
 
-pub fn no_baseline() -> Arc<dyn maknae_kernel::BaselineOps> {
+impl maknae_kernel::ContainmentOps for NoBaseline {
+    fn contain<'a>(
+        &'a self,
+        _: maknae_kernel::ContainRequest<'a>,
+    ) -> maknae_kernel::BoxFuture<'a, maknae_kernel::ContainAnswer> {
+        Box::pin(async { no_containment() })
+    }
+    fn release<'a>(
+        &'a self,
+        _: maknae_kernel::ReleaseRequest<'a>,
+    ) -> maknae_kernel::BoxFuture<'a, maknae_kernel::ContainAnswer> {
+        Box::pin(async { no_containment() })
+    }
+}
+
+pub fn no_containment() -> maknae_kernel::ContainAnswer {
+    maknae_kernel::ContainAnswer::Unavailable {
+        reply: "no containment service",
+        why: "no containment service".into(),
+    }
+}
+
+pub fn no_baseline() -> Arc<dyn maknae_kernel::AdminOps> {
     Arc::new(NoBaseline)
+}
+
+/// Answers every contain and release with `outcome`, as the daemon's service would.
+pub struct ScriptedContainment {
+    outcome: maknae_proto::ContainmentOutcome,
+    calls: std::sync::atomic::AtomicUsize,
+    last_reason: Mutex<Option<String>>,
+    requesters: Mutex<Vec<u32>>,
+}
+
+impl ScriptedContainment {
+    pub fn requesters(&self) -> Vec<u32> {
+        self.requesters.lock().unwrap().clone()
+    }
+    pub fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    pub fn last_reason(&self) -> Option<String> {
+        self.last_reason.lock().unwrap().clone()
+    }
+    fn answer(&self, verb: &str) -> maknae_kernel::ContainAnswer {
+        use maknae_proto::ContainmentOutcome as O;
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let o = self.outcome;
+        let corrective = match o {
+            O::Contained | O::Released => None,
+            O::AlreadyContained | O::NotContained => Some(("permit", "unchanged")),
+            O::Busy | O::Stopping | O::LookupUnavailable => Some(("deny", "unavailable")),
+            O::LastReleaser
+            | O::SelfContainWithoutRelease
+            | O::NoExplicitBindings
+            | O::UnknownAccount => Some(("deny", "refused")),
+        }
+        .map(|(result, posture)| maknae_kernel::Corrective {
+            result,
+            posture,
+            reason: if result == "deny" {
+                format!("{verb} refused: {}: {}", o.code(), o.text())
+            } else {
+                format!("{verb} {posture}: {}", o.text())
+            },
+        });
+        maknae_kernel::ContainAnswer::View {
+            view: maknae_proto::ContainmentView {
+                outcome: o,
+                target_uid: None,
+                revision: None,
+            },
+            corrective,
+        }
+    }
+}
+
+impl maknae_kernel::BaselineOps for ScriptedContainment {
+    fn show(&self) -> maknae_kernel::BoxFuture<'_, Result<maknae_proto::BaselineView, String>> {
+        Box::pin(async { Err("no baseline service".to_string()) })
+    }
+    fn accept<'a>(
+        &'a self,
+        _: &'a str,
+    ) -> maknae_kernel::BoxFuture<'a, maknae_kernel::AcceptAnswer> {
+        Box::pin(async {
+            maknae_kernel::AcceptAnswer::Unavailable {
+                reply: "no baseline service",
+                why: "no baseline service".into(),
+            }
+        })
+    }
+}
+
+impl maknae_kernel::ContainmentOps for ScriptedContainment {
+    fn contain<'a>(
+        &'a self,
+        req: maknae_kernel::ContainRequest<'a>,
+    ) -> maknae_kernel::BoxFuture<'a, maknae_kernel::ContainAnswer> {
+        *self.last_reason.lock().unwrap() = Some(req.reason.to_string());
+        self.requesters.lock().unwrap().push(req.requester);
+        let answer = self.answer("contain");
+        Box::pin(async move { answer })
+    }
+    fn release<'a>(
+        &'a self,
+        req: maknae_kernel::ReleaseRequest<'a>,
+    ) -> maknae_kernel::BoxFuture<'a, maknae_kernel::ContainAnswer> {
+        self.requesters.lock().unwrap().push(req.requester);
+        let answer = self.answer("release");
+        Box::pin(async move { answer })
+    }
+}
+
+pub fn scripted_containment(outcome: maknae_proto::ContainmentOutcome) -> Arc<ScriptedContainment> {
+    Arc::new(ScriptedContainment {
+        outcome,
+        calls: Default::default(),
+        last_reason: Mutex::new(None),
+        requesters: Mutex::new(Vec::new()),
+    })
+}
+
+/// Wraps a PDP and counts its `decide_cited` calls, delegating everything.
+pub struct CountingAuthorizer<A> {
+    inner: A,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl<A> CountingAuthorizer<A> {
+    pub fn new(inner: A) -> Self {
+        Self {
+            inner,
+            calls: Default::default(),
+        }
+    }
+    pub fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl<A: Authorizer> Authorizer for CountingAuthorizer<A> {
+    fn decide(&self, req: &Request) -> Verdict {
+        self.inner.decide(req)
+    }
+    fn decide_reporting_role(&self, req: &Request) -> (Verdict, Option<&'static str>) {
+        self.inner.decide_reporting_role(req)
+    }
+    fn decide_cited(&self, req: &Request) -> maknae_security::Decided {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.decide_cited(req)
+    }
+    fn decide_cited_all(&self, reqs: &[Request]) -> Vec<maknae_security::Decided> {
+        self.inner.decide_cited_all(reqs)
+    }
+    fn subjects(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
+        self.inner.subjects()
+    }
+    fn backend_name(&self) -> String {
+        self.inner.backend_name()
+    }
 }
 
 pub fn serving() -> tokio::sync::watch::Receiver<maknae_kernel::Drain> {

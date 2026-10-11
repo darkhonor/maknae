@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use maknae_authz_basic::HermeticAuthorizer;
-use maknae_proto::{Payload, ProtoErrCode, RespResult};
+use maknae_proto::{ContainTarget, ContainmentOutcome, Payload, ProtoErrCode, RespResult};
 
 mod common;
 use common::{
@@ -346,8 +346,70 @@ where
     .await
 }
 
+async fn drive_with_ops<P>(
+    fx_home: &std::path::Path,
+    authorizer: Arc<P>,
+    emit: Arc<impl AuditEmit + Send + Sync + 'static>,
+    peer_uid: u32,
+    verb: maknae_proto::Verb,
+    ops: Arc<impl maknae_kernel::AdminOps + 'static>,
+) -> Option<Vec<u8>>
+where
+    P: maknae_security::Authorizer + Send + Sync + 'static,
+{
+    drive_admin(
+        Some(fx_home),
+        authorizer,
+        emit,
+        peer_uid,
+        verb,
+        Duration::from_secs(5),
+        maknae_io::DelegatedFds::new(0),
+        Arc::new(Default::default()),
+        maknae_config::transport_from_section(None).unwrap(),
+        Arc::new("US".to_string()),
+        std::sync::Arc::new(None),
+        ops,
+    )
+    .await
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn drive_with<P>(
+    peer_home: Option<&std::path::Path>,
+    authorizer: Arc<P>,
+    emit: Arc<impl AuditEmit + Send + Sync + 'static>,
+    peer_uid: u32,
+    verb: maknae_proto::Verb,
+    timeout: Duration,
+    delegated: maknae_io::DelegatedFds,
+    config_view: Arc<maknae_kernel::ConfigView>,
+    transport: maknae_config::TransportConfig,
+    classification_policy: Arc<String>,
+    kernel_graph: Arc<Option<maknae_kernel::KernelGraphStatus>>,
+) -> Option<Vec<u8>>
+where
+    P: maknae_security::Authorizer + Send + Sync + 'static,
+{
+    drive_admin(
+        peer_home,
+        authorizer,
+        emit,
+        peer_uid,
+        verb,
+        timeout,
+        delegated,
+        config_view,
+        transport,
+        classification_policy,
+        kernel_graph,
+        common::no_baseline(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn drive_admin<P>(
     peer_home: Option<&std::path::Path>,
     authorizer: Arc<P>,
     emit: Arc<impl AuditEmit + Send + Sync + 'static>,
@@ -366,6 +428,7 @@ async fn drive_with<P>(
     // tautological.
     classification_policy: Arc<String>,
     kernel_graph: Arc<Option<maknae_kernel::KernelGraphStatus>>,
+    ops: Arc<dyn maknae_kernel::AdminOps>,
 ) -> Option<Vec<u8>>
 where
     P: maknae_security::Authorizer + Send + Sync + 'static,
@@ -399,7 +462,7 @@ where
         timeout,
         maknae_security::Lane::Local,
         delegated,
-        common::no_baseline(),
+        ops,
     )
     .await;
     match tokio::time::timeout(
@@ -1757,7 +1820,9 @@ async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
     fx.write_policy(
         "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nroles:\n  admin:\n    allow: [\"admin.status\"]\n",
     );
-    fx.write_bindings(BINDINGS_ROOT_ADMIN_AND_A_GHOST);
+    fx.write_bindings(
+        "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"no-such-user-maknae-496\"]\n  adversary: [\"daemon\"]\n",
+    );
     // The classification system is DERIVED from a real `boot()` of a config that
     // declares the NON-default one (ADR-0022): `policy: aus` with a PSPF ceiling.
     // A literal `"US"` here matched the production default and could not tell
@@ -1835,6 +1900,7 @@ async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
             );
             assert_eq!(s.baseline_pending, ["baseline: 1 pending (invalid)"]);
             assert_eq!(s.identity_sync, ["unsynced=1", "conflict=0"]);
+            assert_eq!(s.containment, ["subjects=1", "kernel_refused=0"]);
             for line in &s.identity_sync {
                 let count = |v: &str| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit());
                 let shaped = match line.split_once('=') {
@@ -3520,6 +3586,21 @@ impl maknae_kernel::BaselineOps for ScriptedBaseline {
     }
 }
 
+impl maknae_kernel::ContainmentOps for ScriptedBaseline {
+    fn contain<'a>(
+        &'a self,
+        _: maknae_kernel::ContainRequest<'a>,
+    ) -> maknae_kernel::BoxFuture<'a, maknae_kernel::ContainAnswer> {
+        Box::pin(async { common::no_containment() })
+    }
+    fn release<'a>(
+        &'a self,
+        _: maknae_kernel::ReleaseRequest<'a>,
+    ) -> maknae_kernel::BoxFuture<'a, maknae_kernel::ContainAnswer> {
+        Box::pin(async { common::no_containment() })
+    }
+}
+
 const CHECK_SENTINEL: &str = "panicked at ceiling-value-7f3a";
 
 async fn drive_baseline(
@@ -3648,4 +3729,412 @@ async fn an_accept_request_record_carries_neither_the_hash_nor_the_operand() {
     for r in emit.records() {
         assert!(!serde_json::to_string(&r).unwrap().contains(&hash[..12]));
     }
+}
+
+#[tokio::test]
+async fn under_the_shipped_policy_release_is_permitted_to_admin_and_contain_is_not() {
+    let fx = Fixture::new("shipped-contain");
+    fx.write_policy(SHIPPED_POLICY);
+    fx.write_bindings(BINDINGS_ROOT_ADMIN);
+    for (verb, expect_permit) in [
+        (
+            maknae_proto::Verb::AdminContain {
+                target: ContainTarget::Uid(4242),
+                reason: "r".into(),
+            },
+            false,
+        ),
+        (
+            maknae_proto::Verb::AdminRelease {
+                target: ContainTarget::Uid(4242),
+            },
+            true,
+        ),
+    ] {
+        let emit = RecEmit::new();
+        let frame = drive_with_ops(
+            &fx.dir,
+            fx.authorizer(),
+            emit.clone(),
+            0,
+            verb.clone(),
+            common::scripted_containment(ContainmentOutcome::NotContained),
+        )
+        .await
+        .expect("a frame");
+        let req = request_record(&emit.records()).clone();
+        assert_eq!(req.outcome.result == "permit", expect_permit, "{verb:?}");
+        match maknae_proto::decode_response(&frame).unwrap().result {
+            RespResult::Err(e) if !expect_permit => assert_eq!(
+                (e.code, e.message.as_str()),
+                (ProtoErrCode::Unauthorized, "not authorized")
+            ),
+            RespResult::Ok(maknae_proto::Payload::Containment(v)) if expect_permit => {
+                assert_eq!(v.outcome, ContainmentOutcome::NotContained)
+            }
+            other => panic!("{verb:?}: {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_caller_without_the_grant_gets_unauthorized_and_no_code() {
+    let fx = Fixture::new("contain-ungranted");
+    fx.write_policy(EMPTY_AUTHZ);
+    fx.write_bindings(BINDINGS_ROOT_ADMIN);
+    let ops = common::scripted_containment(ContainmentOutcome::Contained);
+    for (verb, action) in [
+        (
+            maknae_proto::Verb::AdminContain {
+                target: ContainTarget::Uid(4242),
+                reason: "r".into(),
+            },
+            "admin.contain",
+        ),
+        (
+            maknae_proto::Verb::AdminRelease {
+                target: ContainTarget::Uid(4242),
+            },
+            "admin.release",
+        ),
+    ] {
+        let emit = RecEmit::new();
+        let frame = drive_with_ops(&fx.dir, fx.authorizer(), emit.clone(), 0, verb, ops.clone())
+            .await
+            .expect("a frame");
+        match maknae_proto::decode_response(&frame).unwrap().result {
+            RespResult::Err(e) => assert_eq!(
+                (e.code, e.message.as_str()),
+                (ProtoErrCode::Unauthorized, "not authorized")
+            ),
+            other => panic!("{action}: {other:?}"),
+        }
+        assert_eq!(
+            request_record(&emit.records()).outcome.reason,
+            format!("role admin: no rule for {action}")
+        );
+    }
+    assert_eq!(
+        ops.calls(),
+        0,
+        "a denied caller never reaches the containment service"
+    );
+}
+
+const BOTH_GRANTED: &str = "schema_version: 1\nroles:\n  admin:\n    allow:\n      - \"admin.contain\"\n      - \"admin.release\"\n";
+
+#[tokio::test]
+async fn a_permitted_contain_and_release_each_reach_the_containment_service() {
+    let fx = Fixture::new("contain-granted");
+    fx.write_policy(BOTH_GRANTED);
+    fx.write_bindings(BINDINGS_ROOT_ADMIN);
+    for (verb, outcome) in [
+        (
+            maknae_proto::Verb::AdminContain {
+                target: ContainTarget::Uid(4242),
+                reason: "r".into(),
+            },
+            ContainmentOutcome::Contained,
+        ),
+        (
+            maknae_proto::Verb::AdminRelease {
+                target: ContainTarget::Uid(4242),
+            },
+            ContainmentOutcome::Released,
+        ),
+    ] {
+        let ops = common::scripted_containment(outcome);
+        let emit = RecEmit::new();
+        let frame = drive_with_ops(
+            &fx.dir,
+            fx.authorizer(),
+            emit.clone(),
+            0,
+            verb.clone(),
+            ops.clone(),
+        )
+        .await
+        .expect("a frame");
+        match maknae_proto::decode_response(&frame).unwrap().result {
+            RespResult::Ok(maknae_proto::Payload::Containment(v)) => assert_eq!(v.outcome, outcome),
+            other => panic!("{verb:?}: {other:?}"),
+        }
+        assert_eq!(ops.calls(), 1, "{verb:?}");
+        let recs: Vec<_> = emit
+            .records()
+            .into_iter()
+            .filter(|r| r.event == "request")
+            .map(|r| (r.outcome.result, r.outcome.posture))
+            .collect();
+        assert_eq!(
+            recs,
+            [("permit".to_string(), "authorized".to_string())],
+            "{verb:?}: a success writes no corrective record"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_requester_is_the_peer_credential() {
+    let fx = Fixture::new("contain-requester");
+    let ops = common::scripted_containment(ContainmentOutcome::Contained);
+    for verb in [
+        maknae_proto::Verb::AdminContain {
+            target: ContainTarget::Uid(4242),
+            reason: "r".into(),
+        },
+        maknae_proto::Verb::AdminRelease {
+            target: ContainTarget::Uid(4242),
+        },
+    ] {
+        drive_with_ops(
+            &fx.dir,
+            Arc::new(AlwaysPermit),
+            RecEmit::new(),
+            4243,
+            verb,
+            ops.clone(),
+        )
+        .await
+        .expect("a frame");
+    }
+    assert_eq!(ops.requesters(), [4243, 4243]);
+}
+
+#[tokio::test]
+async fn an_operational_refusal_returns_its_code_after_a_corrective_record() {
+    let fx = Fixture::new("contain-refused");
+    fx.write_policy(BOTH_GRANTED);
+    fx.write_bindings(BINDINGS_ROOT_ADMIN);
+    let emit = RecEmit::new();
+    let verb = maknae_proto::Verb::AdminContain {
+        target: ContainTarget::Uid(0),
+        reason: "r".into(),
+    };
+    let frame = drive_with_ops(
+        &fx.dir,
+        fx.authorizer(),
+        emit.clone(),
+        0,
+        verb,
+        common::scripted_containment(ContainmentOutcome::LastReleaser),
+    )
+    .await
+    .expect("a frame");
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Ok(maknae_proto::Payload::Containment(v)) => {
+            assert_eq!(v.outcome, ContainmentOutcome::LastReleaser)
+        }
+        other => panic!("{other:?}"),
+    }
+    let recs: Vec<_> = emit
+        .records()
+        .into_iter()
+        .map(|r| {
+            (
+                r.action,
+                r.outcome.result,
+                r.outcome.posture,
+                r.outcome.reason,
+            )
+        })
+        .collect();
+    assert_eq!(recs.len(), 3, "{recs:?}");
+    assert_eq!(
+        (recs[0].0.as_str(), recs[0].1.as_str()),
+        ("connect", "permit")
+    );
+    assert_eq!(
+        (recs[1].0.as_str(), recs[1].1.as_str(), recs[1].2.as_str()),
+        ("admin.contain", "permit", "authorized")
+    );
+    assert_eq!(
+        (recs[2].0.as_str(), recs[2].1.as_str(), recs[2].2.as_str()),
+        ("admin.contain", "deny", "refused")
+    );
+    assert!(
+        recs[2].3.starts_with("contain refused: last-releaser: "),
+        "{}",
+        recs[2].3
+    );
+}
+
+#[tokio::test]
+async fn a_corrective_record_that_cannot_append_withholds_the_containment_frame() {
+    let fx = Fixture::new("contain-withhold");
+    fx.write_policy(BOTH_GRANTED);
+    fx.write_bindings(BINDINGS_ROOT_ADMIN);
+    let emit = FailNthEmit::new(3);
+    let verb = maknae_proto::Verb::AdminContain {
+        target: ContainTarget::Uid(0),
+        reason: "r".into(),
+    };
+    let out = drive_with_ops(
+        &fx.dir,
+        fx.authorizer(),
+        emit.clone(),
+        0,
+        verb,
+        common::scripted_containment(ContainmentOutcome::LastReleaser),
+    )
+    .await;
+    assert!(out.is_none(), "no frame without its corrective record");
+    assert!(
+        emit.records()
+            .iter()
+            .any(|r| r.outcome.posture == "refused"),
+        "the corrective record was offered"
+    );
+}
+
+#[tokio::test]
+async fn an_unacceptable_operand_is_a_bad_request_before_the_pdp_and_an_acceptable_one_arrives_normalised(
+) {
+    let fx = Fixture::new("contain-pregate");
+    for (verb, why) in [
+        (
+            maknae_proto::Verb::AdminContain {
+                target: ContainTarget::Name(String::new()),
+                reason: "r".into(),
+            },
+            "contain fails operand pre-gate: the user name must not be empty or whitespace only"
+                .to_string(),
+        ),
+        (
+            maknae_proto::Verb::AdminContain {
+                target: ContainTarget::Name("a".repeat(maknae_proto::CONTAIN_NAME_MAX_BYTES + 1)),
+                reason: "r".into(),
+            },
+            format!(
+                "contain fails operand pre-gate: the user name must be 1 to {} bytes",
+                maknae_proto::CONTAIN_NAME_MAX_BYTES
+            ),
+        ),
+        (
+            maknae_proto::Verb::AdminContain {
+                target: ContainTarget::Uid(1),
+                reason: "a\u{202e}b".into(),
+            },
+            "contain fails operand pre-gate: the reason contains an invisible or formatting character (U+202E)"
+                .to_string(),
+        ),
+        (
+            maknae_proto::Verb::AdminRelease {
+                target: ContainTarget::Name("a\u{202e}".into()),
+            },
+            "release fails operand pre-gate: the user name contains an invisible or formatting character (U+202E)"
+                .to_string(),
+        ),
+    ] {
+        let pdp = Arc::new(common::CountingAuthorizer::new(AlwaysPermit));
+        let emit = RecEmit::new();
+        let ops = common::scripted_containment(ContainmentOutcome::Contained);
+        let frame = drive_with_ops(&fx.dir, Arc::clone(&pdp), emit.clone(), 0, verb, ops.clone())
+            .await
+            .expect("a frame");
+        match maknae_proto::decode_response(&frame).unwrap().result {
+            RespResult::Err(e) => assert_eq!(
+                (e.code, e.message.as_str()),
+                (ProtoErrCode::BadRequest, "invalid request")
+            ),
+            other => panic!("{other:?}"),
+        }
+        assert!(
+            request_record(&emit.records()).outcome.reason.starts_with(&why),
+            "{:?}",
+            request_record(&emit.records()).outcome.reason
+        );
+        assert_eq!(pdp.calls(), 0, "the PDP is never consulted for a malformed operand");
+        assert_eq!(ops.calls(), 0);
+    }
+    let pdp = Arc::new(common::CountingAuthorizer::new(AlwaysPermit));
+    let ops = common::scripted_containment(ContainmentOutcome::Contained);
+    let verb = maknae_proto::Verb::AdminContain {
+        target: ContainTarget::Uid(1),
+        reason: "\u{1112}\u{1161}\u{11ab}".into(),
+    };
+    drive_with_ops(
+        &fx.dir,
+        Arc::clone(&pdp),
+        RecEmit::new(),
+        0,
+        verb,
+        ops.clone(),
+    )
+    .await
+    .expect("a frame");
+    assert_eq!(pdp.calls(), 1, "the observer is live");
+    assert_eq!(
+        ops.last_reason().as_deref(),
+        Some("\u{d55c}"),
+        "the service receives the NFC text"
+    );
+}
+
+#[tokio::test]
+async fn an_unavailable_containment_service_answers_internal_after_an_unavailable_record() {
+    let fx = Fixture::new("contain-unavailable");
+    fx.write_policy(BOTH_GRANTED);
+    fx.write_bindings(BINDINGS_ROOT_ADMIN);
+    let emit = RecEmit::new();
+    let verb = maknae_proto::Verb::AdminRelease {
+        target: ContainTarget::Uid(4242),
+    };
+    let frame = drive_with_ops(
+        &fx.dir,
+        fx.authorizer(),
+        emit.clone(),
+        0,
+        verb,
+        Arc::new(common::NoBaseline),
+    )
+    .await
+    .expect("a frame");
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        RespResult::Err(e) => assert_eq!(
+            (e.code, e.message.as_str()),
+            (ProtoErrCode::Internal, "no containment service")
+        ),
+        other => panic!("{other:?}"),
+    }
+    let recs: Vec<_> = emit
+        .records()
+        .into_iter()
+        .filter(|r| r.event == "request")
+        .map(|r| (r.outcome.result, r.outcome.posture, r.outcome.reason))
+        .collect();
+    assert_eq!(recs.len(), 2, "{recs:?}");
+    assert_eq!(
+        (recs[0].0.as_str(), recs[0].1.as_str()),
+        ("permit", "authorized")
+    );
+    assert_eq!(
+        (recs[1].0.as_str(), recs[1].1.as_str(), recs[1].2.as_str()),
+        ("deny", "unavailable", "no containment service")
+    );
+}
+
+#[tokio::test]
+async fn an_unavailable_answer_whose_record_cannot_append_withholds_the_frame() {
+    let fx = Fixture::new("contain-unavailable-withhold");
+    fx.write_policy(BOTH_GRANTED);
+    fx.write_bindings(BINDINGS_ROOT_ADMIN);
+    let emit = FailNthEmit::new(3);
+    let verb = maknae_proto::Verb::AdminRelease {
+        target: ContainTarget::Uid(4242),
+    };
+    let out = drive_with_ops(
+        &fx.dir,
+        fx.authorizer(),
+        emit.clone(),
+        0,
+        verb,
+        Arc::new(common::NoBaseline),
+    )
+    .await;
+    assert!(out.is_none(), "no frame without its unavailable record");
+    assert!(emit
+        .records()
+        .iter()
+        .any(|r| r.outcome.posture == "unavailable"));
 }

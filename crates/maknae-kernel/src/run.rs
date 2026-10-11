@@ -690,7 +690,7 @@ pub async fn handle<S, E, P>(
     authz_decide_timeout: Duration,
     lane: maknae_security::Lane,
     delegated: maknae_io::DelegatedFds,
-    baseline: Arc<dyn BaselineOps>,
+    ops: Arc<dyn AdminOps>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     E: AuditEmit + Send + Sync + 'static,
@@ -716,7 +716,7 @@ pub async fn handle<S, E, P>(
         authz_decide_timeout,
         lane,
         delegated,
-        baseline,
+        ops,
         crate::mutation::AttemptCaps::default(),
     )
     .await
@@ -784,8 +784,8 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     // request per connection, which is what today's per-invocation CLI sends;
     // pipelining on macOS is uncharacterised (ADR-0009).
     delegated: maknae_io::DelegatedFds,
-    // `admin.baseline.show` and `admin.baseline.accept`.
-    baseline: Arc<dyn BaselineOps>,
+    // The admin verbs that reach the reload turn.
+    ops: Arc<dyn AdminOps>,
     attempt_caps: crate::mutation::AttemptCaps,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -932,7 +932,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     };
     let (class, body) = body;
 
-    let request = match decode_request(&body) {
+    let mut request = match decode_request(&body) {
         Ok(r) => r,
         Err(e) => {
             emit_request_deny(
@@ -1023,10 +1023,13 @@ pub async fn handle_with_attempt_caps<S, E, P>(
         }
     }
 
-    // #172, #265: the operand pre-gate, the same shape as the Read one — a
-    // malformed conversation id or an inadmissible content kind is the
-    // BadRequest class and never reaches the PDP. Result-returning emit, frame
+    // #172, #265, #165: the operand pre-gate, the same shape as the Read one — a
+    // malformed conversation id, an inadmissible content kind or a containment
+    // operand the shared rule refuses is the BadRequest class and never reaches the PDP. Result-returning emit, frame
     // gated on the append: `emit_request_deny` is for legs that serve nothing.
+    let operand_refusal = crate::containment::normalise_operands(&mut request.verb)
+        .err()
+        .map(|(noun, e)| (noun, e.to_string()));
     let pregate = match &request.verb {
         Verb::SessionPrompt {
             output_tokens: Some(n),
@@ -1063,7 +1066,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
         }
         _ => None,
     };
-    if let Some((noun, reason)) = pregate {
+    if let Some((noun, reason)) = operand_refusal.or(pregate) {
         let appended = emit_request_outcome(
             &emit,
             &host,
@@ -1391,7 +1394,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             close_bounded(&mut stream).await;
             return;
         }
-        Dispatch::NoBehaviour | Dispatch::ContainRequested | Dispatch::ReleaseRequested => {
+        Dispatch::NoBehaviour => {
             // Decided and PERMITTED above; the term simply has no behaviour.
             // Same audit-then-respond gate as every sibling path — the record
             // must be durable before any frame is released (ADR-0019).
@@ -1441,7 +1444,9 @@ pub async fn handle_with_attempt_caps<S, E, P>(
         | Dispatch::StatusRequested
         | Dispatch::SubjectListRequested
         | Dispatch::BaselineShowRequested
-        | Dispatch::BaselineAcceptRequested => {
+        | Dispatch::BaselineAcceptRequested
+        | Dispatch::ContainRequested
+        | Dispatch::ReleaseRequested => {
             let appended = emit_request_outcome(
                 &emit,
                 &host,
@@ -1504,7 +1509,11 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                         .as_ref()
                         .map(|k| k.sync.lines())
                         .unwrap_or_default(),
-                    containment: Vec::new(),
+                    containment: kernel_graph
+                        .as_ref()
+                        .as_ref()
+                        .map(|k| k.containment.lines(k.identity.contained()))
+                        .unwrap_or_default(),
                 }),
                 // The current snapshot, via the seam. `None` means the backend cannot
                 // enumerate, and that is reported as unavailable below --
@@ -1644,7 +1653,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                         }
                     }
                 }
-                Dispatch::BaselineShowRequested => match baseline.show().await {
+                Dispatch::BaselineShowRequested => match ops.show().await {
                     Ok(view) => Payload::Baseline(view),
                     Err(why) => {
                         let corrected = emit_request_outcome(
@@ -1685,7 +1694,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                     let Verb::AdminBaselineAccept { hash } = &request.verb else {
                         unreachable!("dispatch keyed on the verb")
                     };
-                    match baseline.accept(hash).await {
+                    match ops.accept(hash).await {
                         AcceptAnswer::View {
                             view,
                             corrective: None,
@@ -1756,11 +1765,99 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                         }
                     }
                 }
-                Dispatch::NoBehaviour
-                | Dispatch::ContainRequested
-                | Dispatch::ReleaseRequested
-                | Dispatch::MutationRequested
-                | Dispatch::PromptRequested => {
+                Dispatch::ContainRequested | Dispatch::ReleaseRequested => {
+                    let answer = match &request.verb {
+                        Verb::AdminContain { target, reason } => {
+                            ops.contain(ContainRequest {
+                                requester: peer_uid,
+                                session: session_id,
+                                target,
+                                reason: reason.as_str(),
+                            })
+                            .await
+                        }
+                        Verb::AdminRelease { target } => {
+                            ops.release(ReleaseRequest {
+                                requester: peer_uid,
+                                session: session_id,
+                                target,
+                            })
+                            .await
+                        }
+                        _ => unreachable!("dispatch keyed on the verb"),
+                    };
+                    match answer {
+                        ContainAnswer::View {
+                            view,
+                            corrective: None,
+                        } => Payload::Containment(view),
+                        ContainAnswer::View {
+                            view,
+                            corrective: Some(c),
+                        } => {
+                            let corrected = emit_request_outcome(
+                                &emit,
+                                &host,
+                                &socket,
+                                peer_uid,
+                                &peer_uri,
+                                peer_user.as_deref(),
+                                decided_role,
+                                decided_rule.as_ref(),
+                                session_id,
+                                seq.next(),
+                                verb_to_action(&request.verb),
+                                None,
+                                None,
+                                c.result,
+                                &c.reason,
+                                c.posture,
+                                &au3_1,
+                            )
+                            .await;
+                            if !may_respond(corrected) {
+                                close_bounded(&mut stream).await;
+                                return;
+                            }
+                            Payload::Containment(view)
+                        }
+                        ContainAnswer::Unavailable { reply, why } => {
+                            let corrected = emit_request_outcome(
+                                &emit,
+                                &host,
+                                &socket,
+                                peer_uid,
+                                &peer_uri,
+                                peer_user.as_deref(),
+                                decided_role,
+                                decided_rule.as_ref(),
+                                session_id,
+                                seq.next(),
+                                verb_to_action(&request.verb),
+                                None,
+                                None,
+                                "deny",
+                                &why,
+                                "unavailable",
+                                &au3_1,
+                            )
+                            .await;
+                            if may_respond(corrected) {
+                                write_error_bounded(
+                                    &mut stream,
+                                    &cfg,
+                                    class,
+                                    ProtoErrCode::Internal,
+                                    reply,
+                                )
+                                .await;
+                            }
+                            close_bounded(&mut stream).await;
+                            return;
+                        }
+                    }
+                }
+                Dispatch::NoBehaviour | Dispatch::MutationRequested | Dispatch::PromptRequested => {
                     unreachable!("outer match routes unprepared operations")
                 }
             };
@@ -2734,7 +2831,7 @@ pub async fn accept_loop<A, E, P>(
     classification_policy_name: Arc<String>,
     kernel_graph: Arc<Option<KernelGraphStatus>>,
     egress: Arc<dyn crate::egress::Egress>,
-    baseline: Arc<dyn BaselineOps>,
+    ops: Arc<dyn AdminOps>,
     drain: tokio::sync::watch::Receiver<Drain>,
 ) -> ServeOutcome
 where
@@ -2854,7 +2951,7 @@ where
                                     Arc::clone(&classification_policy_name);
                                 let kernel_graph = Arc::clone(&kernel_graph);
                                 let egress = Arc::clone(&egress);
-                                let baseline = Arc::clone(&baseline);
+                                let ops = Arc::clone(&ops);
                                 handlers.spawn(async move {
                                     let _permit = permit; // held for the connection's life
                                     // The bounded TLS handshake runs HERE, under the permit —
@@ -2966,7 +3063,7 @@ where
                                                 // not of anything read off the wire.
                                                 maknae_security::Lane::Local,
                                                 conn.delegated,
-                                                baseline,
+                                                ops,
                                             )
                                             .await;
                                         }
@@ -6844,7 +6941,7 @@ where
         reloads.clone(),
     );
     let live = Arc::clone(authorizer.live());
-    let baseline: Arc<dyn BaselineOps> = Arc::clone(&reloader) as _;
+    let ops: Arc<dyn AdminOps> = Arc::clone(&reloader) as _;
     let outcome = accept_loop(
         listener,
         Arc::clone(sink),
@@ -6859,7 +6956,7 @@ where
         classification_policy_name,
         kernel_graph,
         egress,
-        baseline,
+        ops,
         drain.clone(),
     )
     .await;
@@ -6960,7 +7057,23 @@ pub(crate) mod baseline_stub {
         }
     }
 
-    pub(crate) fn no_baseline() -> Arc<dyn BaselineOps> {
+    impl ContainmentOps for NoBaseline {
+        fn contain<'a>(&'a self, _: ContainRequest<'a>) -> BoxFuture<'a, ContainAnswer> {
+            Box::pin(async { no_containment() })
+        }
+        fn release<'a>(&'a self, _: ReleaseRequest<'a>) -> BoxFuture<'a, ContainAnswer> {
+            Box::pin(async { no_containment() })
+        }
+    }
+
+    fn no_containment() -> ContainAnswer {
+        ContainAnswer::Unavailable {
+            reply: "no containment service",
+            why: "no containment service".into(),
+        }
+    }
+
+    pub(crate) fn no_baseline() -> Arc<dyn AdminOps> {
         Arc::new(NoBaseline)
     }
 

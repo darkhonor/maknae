@@ -266,10 +266,6 @@ pub(crate) fn release_op(uid: u32, named: Option<String>) -> LiveOp {
 }
 
 /// Applies the shared operand rule to a containment verb's operands, in place.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the containment path calls it (#165)")
-)]
 pub(crate) fn normalise_operands(verb: &mut Verb) -> Result<(), (&'static str, OperandError)> {
     match verb {
         Verb::AdminContain { target, reason } => {
