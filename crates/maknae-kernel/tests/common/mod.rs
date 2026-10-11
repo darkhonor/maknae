@@ -1124,36 +1124,38 @@ pub fn denying_containment(why: &'static str) -> Arc<ScriptedContainment> {
     })
 }
 
-/// Wraps a PDP and counts its `decide_cited` calls, delegating everything.
-pub struct CountingAuthorizer<A> {
-    inner: A,
-    calls: std::sync::atomic::AtomicUsize,
+/// A PDP wrapper that COUNTS decisions and delegates everything to the real
+/// composition, so a test can prove a path never consulted the PDP.
+pub struct Counting<A> {
+    pub inner: std::sync::Arc<A>,
+    pub decisions: std::sync::atomic::AtomicUsize,
 }
-
-impl<A> CountingAuthorizer<A> {
-    pub fn new(inner: A) -> Self {
-        Self {
-            inner,
-            calls: Default::default(),
-        }
+impl<A: maknae_security::Authorizer> maknae_security::Authorizer for Counting<A> {
+    fn decide(&self, req: &maknae_security::Request) -> maknae_security::Verdict {
+        self.decide_reporting_role(req).0
     }
-    pub fn calls(&self) -> usize {
-        self.calls.load(std::sync::atomic::Ordering::SeqCst)
-    }
-}
-
-impl<A: Authorizer> Authorizer for CountingAuthorizer<A> {
-    fn decide(&self, req: &Request) -> Verdict {
-        self.inner.decide(req)
-    }
-    fn decide_reporting_role(&self, req: &Request) -> (Verdict, Option<&'static str>) {
+    /// Delegates the role too (#275). A wrapper that forwards only `decide`
+    /// inherits the trait default and reports `None`, so the records this
+    /// harness observes would say `role=none` while the real composed PDP
+    /// underneath had resolved one -- the wrapper would be manufacturing the
+    /// very defect the suite exists to detect. Counting happens HERE, once, so
+    /// the observer stays exact.
+    fn decide_reporting_role(
+        &self,
+        req: &maknae_security::Request,
+    ) -> (maknae_security::Verdict, Option<&'static str>) {
+        self.decisions
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner.decide_reporting_role(req)
     }
-    fn decide_cited(&self, req: &Request) -> maknae_security::Decided {
-        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    fn decide_cited(&self, req: &maknae_security::Request) -> maknae_security::Decided {
+        self.decisions
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner.decide_cited(req)
     }
-    fn decide_cited_all(&self, reqs: &[Request]) -> Vec<maknae_security::Decided> {
+    fn decide_cited_all(&self, reqs: &[maknae_security::Request]) -> Vec<maknae_security::Decided> {
+        self.decisions
+            .fetch_add(reqs.len(), std::sync::atomic::Ordering::SeqCst);
         self.inner.decide_cited_all(reqs)
     }
     fn subjects(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
@@ -1161,6 +1163,18 @@ impl<A: Authorizer> Authorizer for CountingAuthorizer<A> {
     }
     fn backend_name(&self) -> String {
         self.inner.backend_name()
+    }
+}
+
+impl<A> Counting<A> {
+    pub fn new(inner: A) -> Self {
+        Self {
+            inner: std::sync::Arc::new(inner),
+            decisions: Default::default(),
+        }
+    }
+    pub fn calls(&self) -> usize {
+        self.decisions.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 

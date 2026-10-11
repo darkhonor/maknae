@@ -4135,7 +4135,7 @@ async fn an_unacceptable_operand_is_a_bad_request_before_the_pdp_and_an_acceptab
                 .to_string(),
         ),
     ] {
-        let pdp = Arc::new(common::CountingAuthorizer::new(AlwaysPermit));
+        let pdp = Arc::new(common::Counting::new(AlwaysPermit));
         let emit = RecEmit::new();
         let ops = common::scripted_containment(ContainmentOutcome::Contained);
         let frame = drive_with_ops(&fx.dir, Arc::clone(&pdp), emit.clone(), 0, verb, ops.clone())
@@ -4156,7 +4156,7 @@ async fn an_unacceptable_operand_is_a_bad_request_before_the_pdp_and_an_acceptab
         assert_eq!(pdp.calls(), 0, "the PDP is never consulted for a malformed operand");
         assert_eq!(ops.calls(), 0);
     }
-    let pdp = Arc::new(common::CountingAuthorizer::new(AlwaysPermit));
+    let pdp = Arc::new(common::Counting::new(AlwaysPermit));
     let ops = common::scripted_containment(ContainmentOutcome::Contained);
     let verb = maknae_proto::Verb::AdminContain {
         target: ContainTarget::Uid(1),

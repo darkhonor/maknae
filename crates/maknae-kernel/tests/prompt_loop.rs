@@ -4,7 +4,7 @@
 //! PDP and the backend, outcome-before-reply, the audit-failure closes — is
 //! exercised here against a recording backend.
 mod common;
-use common::{Fixture, Records};
+use common::{Counting, Fixture, Records};
 use maknae_audit_append::EgressStatus;
 use maknae_proto::{
     ContentBlock, Payload, ProposedToolCall, ProtoErrCode, RespResult, SecretText, Turn, Verb,
@@ -156,48 +156,6 @@ fn last_prompt_record(records: &Records) -> maknae_audit_append::AuditRecord {
         .rev()
         .find(|r| r.action == "session.prompt")
         .expect("a session.prompt record")
-}
-
-/// A PDP wrapper that COUNTS decisions and delegates everything to the real
-/// composition, so a test can prove a path never consulted the PDP.
-struct Counting<A> {
-    inner: Arc<A>,
-    decisions: std::sync::atomic::AtomicUsize,
-}
-impl<A: maknae_security::Authorizer> maknae_security::Authorizer for Counting<A> {
-    fn decide(&self, req: &maknae_security::Request) -> maknae_security::Verdict {
-        self.decide_reporting_role(req).0
-    }
-    /// Delegates the role too (#275). A wrapper that forwards only `decide`
-    /// inherits the trait default and reports `None`, so the records this
-    /// harness observes would say `role=none` while the real composed PDP
-    /// underneath had resolved one -- the wrapper would be manufacturing the
-    /// very defect the suite exists to detect. Counting happens HERE, once, so
-    /// the observer stays exact.
-    fn decide_reporting_role(
-        &self,
-        req: &maknae_security::Request,
-    ) -> (maknae_security::Verdict, Option<&'static str>) {
-        self.decisions
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.inner.decide_reporting_role(req)
-    }
-    fn decide_cited(&self, req: &maknae_security::Request) -> maknae_security::Decided {
-        self.decisions
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.inner.decide_cited(req)
-    }
-    fn decide_cited_all(&self, reqs: &[maknae_security::Request]) -> Vec<maknae_security::Decided> {
-        self.decisions
-            .fetch_add(reqs.len(), std::sync::atomic::Ordering::SeqCst);
-        self.inner.decide_cited_all(reqs)
-    }
-    fn subjects(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
-        self.inner.subjects()
-    }
-    fn backend_name(&self) -> String {
-        self.inner.backend_name()
-    }
 }
 
 const GRANTED: &str =
