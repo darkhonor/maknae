@@ -57,6 +57,8 @@ pub struct Composition<B: Baseline> {
     pub(crate) candidate_decisions: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     pub(crate) candidate_threads: std::sync::Mutex<Vec<std::thread::ThreadId>>,
+    #[cfg(test)]
+    pub(crate) candidate_requests: std::sync::Mutex<Vec<Request>>,
 }
 
 impl<B: Baseline> Composition<B> {
@@ -71,6 +73,8 @@ impl<B: Baseline> Composition<B> {
             candidate_decisions: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             candidate_threads: std::sync::Mutex::default(),
+            #[cfg(test)]
+            candidate_requests: std::sync::Mutex::default(),
         }
     }
 
@@ -167,6 +171,11 @@ impl<B: Baseline> Composition<B> {
             .lock()
             .unwrap()
             .extend(reqs.iter().map(|_| std::thread::current().id()));
+        #[cfg(test)]
+        self.candidate_requests
+            .lock()
+            .unwrap()
+            .extend(reqs.iter().cloned());
         let base = maknae_authz_basic::Candidate::new(candidate, self.baseline.principal());
         compose_decide_cited_all(&self.operands_with(&base), reqs)
     }

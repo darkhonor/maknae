@@ -1019,11 +1019,17 @@ pub struct ScriptedContainment {
     calls: std::sync::atomic::AtomicUsize,
     last_reason: Mutex<Option<String>>,
     requesters: Mutex<Vec<u32>>,
+    denied: Option<&'static str>,
+    actions: Mutex<Vec<maknae_security::Request>>,
 }
 
 impl ScriptedContainment {
     pub fn requesters(&self) -> Vec<u32> {
         self.requesters.lock().unwrap().clone()
+    }
+    /// The permitted request each contain or release carried.
+    pub fn actions(&self) -> Vec<maknae_security::Request> {
+        self.actions.lock().unwrap().clone()
     }
     pub fn calls(&self) -> usize {
         self.calls.load(std::sync::atomic::Ordering::SeqCst)
@@ -1034,6 +1040,9 @@ impl ScriptedContainment {
     fn answer(&self) -> maknae_kernel::ContainAnswer {
         use maknae_proto::ContainmentOutcome as O;
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Some(why) = self.denied {
+            return maknae_kernel::ContainAnswer::Denied { why: why.into() };
+        }
         let o = self.outcome;
         let corrective =
             (!matches!(o, O::Contained | O::Released)).then(|| maknae_kernel::Corrective {
@@ -1077,6 +1086,7 @@ impl maknae_kernel::ContainmentOps for ScriptedContainment {
     ) -> maknae_kernel::BoxFuture<'a, maknae_kernel::ContainAnswer> {
         *self.last_reason.lock().unwrap() = Some(req.reason.to_string());
         self.requesters.lock().unwrap().push(req.requester);
+        self.actions.lock().unwrap().push(req.action.clone());
         let answer = self.answer();
         Box::pin(async move { answer })
     }
@@ -1085,6 +1095,7 @@ impl maknae_kernel::ContainmentOps for ScriptedContainment {
         req: maknae_kernel::ReleaseRequest<'a>,
     ) -> maknae_kernel::BoxFuture<'a, maknae_kernel::ContainAnswer> {
         self.requesters.lock().unwrap().push(req.requester);
+        self.actions.lock().unwrap().push(req.action.clone());
         let answer = self.answer();
         Box::pin(async move { answer })
     }
@@ -1096,6 +1107,20 @@ pub fn scripted_containment(outcome: maknae_proto::ContainmentOutcome) -> Arc<Sc
         calls: Default::default(),
         last_reason: Mutex::new(None),
         requesters: Mutex::new(Vec::new()),
+        denied: None,
+        actions: Mutex::default(),
+    })
+}
+
+/// Answers every contain and release as denied in the turn, with `why` as the PDP's reason.
+pub fn denying_containment(why: &'static str) -> Arc<ScriptedContainment> {
+    Arc::new(ScriptedContainment {
+        outcome: maknae_proto::ContainmentOutcome::Contained,
+        calls: Default::default(),
+        last_reason: Mutex::new(None),
+        requesters: Mutex::new(Vec::new()),
+        denied: Some(why),
+        actions: Mutex::default(),
     })
 }
 

@@ -182,6 +182,8 @@ pub struct ContainRequest<'a> {
     pub session: u64,
     pub target: &'a maknae_proto::ContainTarget,
     pub reason: &'a str,
+    /// The request the PDP permitted; decided again under the reload turn.
+    pub action: &'a maknae_security::Request,
 }
 
 /// An operator's `admin.release`, its target already through the operand rule.
@@ -189,6 +191,8 @@ pub struct ReleaseRequest<'a> {
     pub requester: u32,
     pub session: u64,
     pub target: &'a maknae_proto::ContainTarget,
+    /// The request the PDP permitted; decided again under the reload turn.
+    pub action: &'a maknae_security::Request,
 }
 
 /// The corrective record a refused or unchanged containment request writes.
@@ -217,6 +221,8 @@ pub enum ContainAnswer {
     },
     /// Answer Internal with `reply`; `why` reaches the trail only.
     Unavailable { reply: &'static str, why: String },
+    /// Answer Unauthorized; `why`, the PDP's reason, reaches the trail only.
+    Denied { why: String },
 }
 
 impl std::fmt::Debug for ContainAnswer {
@@ -230,6 +236,10 @@ impl std::fmt::Debug for ContainAnswer {
             Self::Unavailable { reply, why } => f
                 .debug_struct("Unavailable")
                 .field("reply", reply)
+                .field("why", &crate::containment::Redacted(why))
+                .finish(),
+            Self::Denied { why } => f
+                .debug_struct("Denied")
                 .field("why", &crate::containment::Redacted(why))
                 .finish(),
         }
@@ -322,6 +332,7 @@ fn answer(
             },
             corrective: None,
         },
+        Err(crate::containment::LiveRefusal::Unauthorized(why)) => ContainAnswer::Denied { why },
         Err(r) => match crate::containment::outcome(r) {
             Ok(code) => refused(kind, code, Some(uid), "", reason),
             Err(why) => ContainAnswer::Unavailable {
@@ -1228,6 +1239,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     // failure converts AT THE CALL SITE to a Deny with its own reason
     // (finalize(Indeterminate) would hardcode a different string).
     let sec_req = build_authz_request(&request.verb, peer_uid, None, lane, admitted.as_ref());
+    let permitted_req = sec_req.clone();
     let authz_breaker = authz_decide_breaker();
     let authz_admission = { authz_breaker.lock().await.begin_attempt_at(Instant::now()) };
     // #275: the role rides out WITH the verdict so the audit record attests the
@@ -1794,6 +1806,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                                 session: session_id,
                                 target,
                                 reason: reason.as_str(),
+                                action: &permitted_req,
                             })
                             .await
                         }
@@ -1802,6 +1815,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                                 requester: peer_uid,
                                 session: session_id,
                                 target,
+                                action: &permitted_req,
                             })
                             .await
                         }
@@ -1841,6 +1855,40 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                                 return;
                             }
                             Payload::Containment(view)
+                        }
+                        ContainAnswer::Denied { why } => {
+                            let corrected = emit_request_outcome(
+                                &emit,
+                                &host,
+                                &socket,
+                                peer_uid,
+                                &peer_uri,
+                                peer_user.as_deref(),
+                                decided_role,
+                                decided_rule.as_ref(),
+                                session_id,
+                                seq.next(),
+                                verb_to_action(&request.verb),
+                                None,
+                                None,
+                                "deny",
+                                &why,
+                                "unauthorized",
+                                &au3_1,
+                            )
+                            .await;
+                            if may_respond(corrected) {
+                                write_error_bounded(
+                                    &mut stream,
+                                    &cfg,
+                                    class,
+                                    ProtoErrCode::Unauthorized,
+                                    "not authorized",
+                                )
+                                .await;
+                            }
+                            close_bounded(&mut stream).await;
+                            return;
                         }
                         ContainAnswer::Unavailable { reply, why } => {
                             let corrected = emit_request_outcome(
@@ -4352,6 +4400,8 @@ pub(crate) struct LiveRequest<'a> {
     pub who: maknae_state::store::LiveInitiator,
     pub check: crate::containment::LiveCheck,
     pub note: crate::containment::LiveNote<'a>,
+    /// The requester's permitted request, decided again on the installed snapshot in the turn.
+    pub authorized: Option<&'a maknae_security::Request>,
 }
 
 struct ReloadCandidate {
@@ -4444,12 +4494,16 @@ where
             who,
             check,
             note,
+            authorized,
         } = req;
         let Ok(_turn) = tokio::time::timeout(self.turn_wait, self.lock.lock()).await else {
             return Err(LiveRefusal::Busy);
         };
         if *self.stopping.borrow() || *self.drain.borrow() != Drain::Serving {
             return Err(LiveRefusal::Stopping);
+        }
+        if let Some(action) = authorized {
+            self.reauthorize(action).await?;
         }
         let failed = |e: String| LiveRefusal::Failed(e);
         let persisted = Arc::clone(
@@ -4648,15 +4702,7 @@ where
         requester: u32,
         candidate: Arc<maknae_authz_basic::snapshot::Snapshot>,
     ) -> Result<crate::containment::Probed, crate::containment::ProbeError> {
-        use crate::containment::{permits, ProbeError, Probed};
-        let breaker = Arc::clone(&self.probe_breaker);
-        let admission = { breaker.lock().await.begin_attempt_at(Instant::now()) };
-        match admission {
-            BreakerAdmission::RefuseOpen | BreakerAdmission::RefuseAtCapacity => {
-                return Err(ProbeError::Busy)
-            }
-            BreakerAdmission::Admit => {}
-        }
+        use crate::containment::{permits, Probed};
         let pdp = Arc::clone(&self.authorizer);
         let installed = self.authorizer.baseline().snapshot();
         let job = move || {
@@ -4694,12 +4740,54 @@ where
                 ),
             })
         };
+        self.probe_blocking(job).await?
+    }
+
+    /// The requester's permitted request decided again on the installed snapshot.
+    async fn reauthorize(
+        &self,
+        action: &maknae_security::Request,
+    ) -> Result<(), crate::containment::LiveRefusal> {
+        use crate::containment::{LiveRefusal, ProbeError};
+        let pdp = Arc::clone(&self.authorizer);
+        let installed = self.authorizer.baseline().snapshot();
+        let req = action.clone();
+        let job = move || {
+            pdp.decide_candidate_all(&installed, std::slice::from_ref(&req))
+                .first()
+                .map_or_else(
+                    || Some("the decision gave no answer".to_string()),
+                    crate::containment::denial,
+                )
+        };
+        match self.probe_blocking(job).await {
+            Ok(None) => Ok(()),
+            Ok(Some(why)) => Err(LiveRefusal::Unauthorized(why)),
+            Err(ProbeError::Busy) => Err(LiveRefusal::Busy),
+            Err(ProbeError::Failed(why)) => Err(LiveRefusal::Failed(why)),
+        }
+    }
+
+    /// `job` on the blocking pool, admitted by the probe breaker and bounded.
+    async fn probe_blocking<T: Send + 'static>(
+        &self,
+        job: impl FnOnce() -> T + Send + 'static,
+    ) -> Result<T, crate::containment::ProbeError> {
+        use crate::containment::ProbeError;
+        let breaker = Arc::clone(&self.probe_breaker);
+        let admission = { breaker.lock().await.begin_attempt_at(Instant::now()) };
+        match admission {
+            BreakerAdmission::RefuseOpen | BreakerAdmission::RefuseAtCapacity => {
+                return Err(ProbeError::Busy)
+            }
+            BreakerAdmission::Admit => {}
+        }
         match tokio::time::timeout(BLOCKING_OPERATION_TIMEOUT, tokio::task::spawn_blocking(job))
             .await
         {
             Ok(Ok(p)) => {
                 breaker.lock().await.record_success();
-                p
+                Ok(p)
             }
             Ok(Err(join)) => {
                 breaker.lock().await.record_success();
@@ -5089,6 +5177,7 @@ where
                 requester: Some((r.requester, r.session)),
                 reason: Some(r.reason),
             },
+            authorized: Some(r.action),
         };
         answer(
             Kind::Contain,
@@ -5128,6 +5217,7 @@ where
                 requester: Some((r.requester, r.session)),
                 reason: None,
             },
+            authorized: Some(r.action),
         };
         let mut released = None;
         let applied = self.live_edit_resolving(req, &mut released).await;
@@ -5330,6 +5420,7 @@ where
                 requester: None,
                 reason: Some(reason),
             },
+            authorized: None,
         };
         let refusal = match self.live_edit(req).await {
             Ok(LiveApplied::Committed { revision }) => {
@@ -12962,6 +13053,7 @@ mod reload_fixture {
                     who: maknae_state::store::LiveInitiator::Operator,
                     check,
                     note: crate::containment::LiveNote::none(),
+                    authorized: None,
                 })
                 .await
         }
@@ -12989,6 +13081,24 @@ mod reload_fixture {
             requester: u32,
             reason: &str,
         ) -> ContainAnswer {
+            let action = Self::permitted_request(
+                &Verb::AdminContain {
+                    target: target.clone(),
+                    reason: reason.into(),
+                },
+                requester,
+            );
+            self.contain_as(target, requester, reason, &action).await
+        }
+
+        /// A contain carrying `action`, the request its requester was permitted earlier.
+        pub(super) async fn contain_as(
+            &self,
+            target: maknae_proto::ContainTarget,
+            requester: u32,
+            reason: &str,
+            action: &maknae_security::Request,
+        ) -> ContainAnswer {
             let session = self.next_session();
             tokio::time::timeout(
                 Duration::from_secs(60),
@@ -12999,6 +13109,7 @@ mod reload_fixture {
                         session,
                         target: &target,
                         reason,
+                        action,
                     },
                 ),
             )
@@ -13011,6 +13122,22 @@ mod reload_fixture {
             target: maknae_proto::ContainTarget,
             requester: u32,
         ) -> ContainAnswer {
+            let action = Self::permitted_request(
+                &Verb::AdminRelease {
+                    target: target.clone(),
+                },
+                requester,
+            );
+            self.release_as(target, requester, &action).await
+        }
+
+        /// A release carrying `action`, the request its requester was permitted earlier.
+        pub(super) async fn release_as(
+            &self,
+            target: maknae_proto::ContainTarget,
+            requester: u32,
+            action: &maknae_security::Request,
+        ) -> ContainAnswer {
             let session = self.next_session();
             tokio::time::timeout(
                 Duration::from_secs(60),
@@ -13020,11 +13147,17 @@ mod reload_fixture {
                         requester,
                         session,
                         target: &target,
+                        action,
                     },
                 ),
             )
             .await
             .expect("the release returns")
+        }
+
+        /// The request the accept loop builds for `verb` from `uid` on the local lane.
+        pub(super) fn permitted_request(verb: &Verb, uid: u32) -> maknae_security::Request {
+            crate::handler::build_authz_request(verb, uid, None, maknae_security::Lane::Local, None)
         }
 
         fn next_session(&self) -> u64 {
@@ -13141,6 +13274,24 @@ mod reload_fixture {
             c.candidate_decisions
                 .store(0, std::sync::atomic::Ordering::SeqCst);
             c.candidate_threads.lock().unwrap().clear();
+            c.candidate_requests.lock().unwrap().clear();
+        }
+
+        /// Each candidate-path decision since the last reset, as (subject uid, action).
+        pub(super) fn candidate_requests(&self) -> Vec<(i64, String)> {
+            self.composition()
+                .candidate_requests
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|r| {
+                    let uid = match r.subject.0.get("uid") {
+                        Some(maknae_security::AttrValue::Int(u)) => *u,
+                        other => panic!("a subject uid: {other:?}"),
+                    };
+                    (uid, r.action.0.clone())
+                })
+                .collect()
         }
 
         /// The applied load as if it had asked only for the names in `yaml`, asking `lookup` from now on.
@@ -14558,6 +14709,7 @@ mod reload_tests {
             who,
             check: LiveCheck::None,
             note: LiveNote::none(),
+            authorized: None,
         }
     }
 
@@ -17048,13 +17200,17 @@ mod reload_tests {
         assert_ne!(whoami_as(&fx, 4242).1, Some("adversary"));
     }
 
-    const RELEASE_TO_ADMIN: &str =
-        "schema_version: 1\nroles:\n  admin:\n    allow:\n      - \"admin.release\"\n";
+    const CONTAIN_AND_RELEASE_TO_ADMIN: &str = "schema_version: 1\nroles:\n  admin:\n    allow:\n      - \"admin.contain\"\n      - \"admin.release\"\n";
     const TWO_ADMINS: &str = "schema_version: 1\nbindings:\n  admin: [\"root\", \"daemon\"]\n";
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_contain_that_leaves_no_releaser_is_refused_and_changes_nothing() {
-        let fx = fixture("last-releaser", RELEASE_TO_ADMIN, Some(ROOT_ADMIN)).await;
+        let fx = fixture(
+            "last-releaser",
+            CONTAIN_AND_RELEASE_TO_ADMIN,
+            Some(ROOT_ADMIN),
+        )
+        .await;
         let before = fx.store_sha();
         assert_eq!(
             bounded(fx.contain_uid(0, daemon_uid())).await,
@@ -17087,7 +17243,7 @@ mod reload_tests {
             bounded(fx.contain_uid(0, 0)).await,
             Err(LiveRefusal::SelfContainWithoutRelease)
         );
-        let fx = fixture("self-yes", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
+        let fx = fixture("self-yes", CONTAIN_AND_RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
         assert!(matches!(
             bounded(fx.contain_uid(0, 0)).await,
             Ok(LiveApplied::Committed { .. })
@@ -17102,7 +17258,7 @@ mod reload_tests {
     async fn a_contain_of_a_contained_subject_is_a_no_op_that_keeps_its_conflict_listing() {
         let fx = fixture(
             "already",
-            RELEASE_TO_ADMIN,
+            CONTAIN_AND_RELEASE_TO_ADMIN,
             Some("schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary: [\"daemon\"]\n"),
         )
         .await;
@@ -17119,7 +17275,7 @@ mod reload_tests {
 
         let fx = fixture(
             "already-listed",
-            RELEASE_TO_ADMIN,
+            CONTAIN_AND_RELEASE_TO_ADMIN,
             Some("schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"daemon\"]\n"),
         )
         .await;
@@ -17151,7 +17307,12 @@ mod reload_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_release_of_an_uncontained_subject_is_a_no_op() {
-        let fx = fixture("not-contained", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
+        let fx = fixture(
+            "not-contained",
+            CONTAIN_AND_RELEASE_TO_ADMIN,
+            Some(TWO_ADMINS),
+        )
+        .await;
         let rel = LiveEdit::ReleaseUid {
             uid: 4242,
             names: Default::default(),
@@ -17164,7 +17325,12 @@ mod reload_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_live_edit_over_keyless_bindings_answers_no_explicit_bindings() {
-        let fx = fixture("keyless", RELEASE_TO_ADMIN, Some("schema_version: 1\n")).await;
+        let fx = fixture(
+            "keyless",
+            CONTAIN_AND_RELEASE_TO_ADMIN,
+            Some("schema_version: 1\n"),
+        )
+        .await;
         assert_eq!(
             bounded(fx.contain_uid(4242, 0)).await,
             Err(LiveRefusal::NoExplicitBindings)
@@ -17185,7 +17351,7 @@ mod reload_tests {
     async fn a_release_resolves_its_claimants_from_the_layer_under_the_turn() {
         let fx = fixture(
             "claims-in-turn",
-            RELEASE_TO_ADMIN,
+            CONTAIN_AND_RELEASE_TO_ADMIN,
             Some(&format!(
                 "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary:\n    - uid: {}\n",
                 daemon_uid()
@@ -17218,7 +17384,7 @@ mod reload_tests {
         let fx = fixture_with(
             "probe-thread",
             Opts {
-                authz: RELEASE_TO_ADMIN,
+                authz: CONTAIN_AND_RELEASE_TO_ADMIN,
                 bindings: Some(TWO_ADMINS),
                 count_decisions: true,
                 ..Opts::default()
@@ -17245,7 +17411,7 @@ mod reload_tests {
         let fx = fixture_with(
             "probe-breaker",
             Opts {
-                authz: RELEASE_TO_ADMIN,
+                authz: CONTAIN_AND_RELEASE_TO_ADMIN,
                 bindings: Some(TWO_ADMINS),
                 count_decisions: true,
                 ..Opts::default()
@@ -17261,6 +17427,33 @@ mod reload_tests {
         );
         assert_eq!(fx.store_sha(), store);
         assert!(fx.decision_threads().is_empty(), "no probe was decided");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_tripped_probe_breaker_refuses_a_release_as_busy_before_deciding_again() {
+        let fx = fixture_with(
+            "reauth-breaker",
+            Opts {
+                authz: CONTAIN_AND_RELEASE_TO_ADMIN,
+                bindings: Some(TWO_ADMINS),
+                count_decisions: true,
+                ..Opts::default()
+            },
+        )
+        .await;
+        assert_eq!(
+            answer_code(&fx.contain(ContainTarget::Uid(4242), 0, "r").await),
+            ContainmentOutcome::Contained
+        );
+        fx.trip_probe_breaker();
+        fx.reset_decision_counts();
+        let store = fx.store_sha();
+        assert_eq!(
+            answer_code(&fx.release(ContainTarget::Uid(4242), 0).await),
+            ContainmentOutcome::Busy
+        );
+        assert_eq!(fx.store_sha(), store);
+        assert!(fx.decision_threads().is_empty(), "nothing was decided");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -17281,7 +17474,7 @@ mod reload_tests {
     async fn a_release_refuses_when_an_adversary_name_has_no_answer_and_changes_nothing() {
         let fx = fixture(
             "release-unanswered",
-            RELEASE_TO_ADMIN,
+            CONTAIN_AND_RELEASE_TO_ADMIN,
             Some(&format!(
                 "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary:\n    - \"maknae-no-such-user-165\"\n    - uid: {}\n",
                 daemon_uid()
@@ -17321,7 +17514,12 @@ mod reload_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_containment_edit_asks_no_account_in_the_turn() {
-        let fx = fixture("no-lookup-in-turn", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
+        let fx = fixture(
+            "no-lookup-in-turn",
+            CONTAIN_AND_RELEASE_TO_ADMIN,
+            Some(TWO_ADMINS),
+        )
+        .await;
         fx.forget_answers(TWO_ADMINS, lookup_fails);
         let r = bounded(fx.contain_uid(4242, 0)).await;
         assert!(matches!(r, Ok(LiveApplied::Committed { .. })), "{r:?}");
@@ -17339,7 +17537,12 @@ mod reload_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_containment_check_refuses_an_edit_that_names_its_target() {
-        let fx = fixture("contain-by-name", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
+        let fx = fixture(
+            "contain-by-name",
+            CONTAIN_AND_RELEASE_TO_ADMIN,
+            Some(TWO_ADMINS),
+        )
+        .await;
         let store = fx.store_sha();
         let r = bounded(fx.live(
             LiveOp::Edit(LiveEdit::Contain(BindingEntry::Name("daemon".into()))),
@@ -17358,7 +17561,7 @@ mod reload_tests {
         let fx = fixture_with(
             "probe-paths",
             Opts {
-                authz: RELEASE_TO_ADMIN,
+                authz: CONTAIN_AND_RELEASE_TO_ADMIN,
                 bindings: Some(TWO_ADMINS),
                 count_decisions: true,
                 ..Opts::default()
@@ -17384,20 +17587,24 @@ mod reload_tests {
     fn answer_code(a: &ContainAnswer) -> ContainmentOutcome {
         match a {
             ContainAnswer::View { view, .. } => view.outcome,
-            ContainAnswer::Unavailable { .. } => panic!("no outcome: {a:?}"),
+            ContainAnswer::Unavailable { .. } | ContainAnswer::Denied { .. } => {
+                panic!("no outcome: {a:?}")
+            }
         }
     }
 
     fn view_rev(a: &ContainAnswer) -> u64 {
         match a {
             ContainAnswer::View { view, .. } => view.revision.expect("a committed revision"),
-            ContainAnswer::Unavailable { .. } => panic!("no view: {a:?}"),
+            ContainAnswer::Unavailable { .. } | ContainAnswer::Denied { .. } => {
+                panic!("no view: {a:?}")
+            }
         }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_reason_reaches_the_trail_and_never_the_mirror_status_or_reply() {
-        let fx = fixture("reason", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
+        let fx = fixture("reason", CONTAIN_AND_RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
         let sentinel = "SENTINEL-REASON-41d9";
         let a = fx.contain(ContainTarget::Uid(4242), 0, sentinel).await;
         assert!(!format!("{a:?}").contains(sentinel), "the reply");
@@ -17431,7 +17638,7 @@ mod reload_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_hangul_reason_reaches_the_trail_as_readable_utf8() {
-        let fx = fixture("hangul", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
+        let fx = fixture("hangul", CONTAIN_AND_RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
         let jamo = "\u{1112}\u{1161}\u{11ab}\u{1100}\u{1173}\u{11af}";
         assert!(matches!(
             bounded(fx.reloader.kernel_contain(4242, jamo)).await,
@@ -17454,7 +17661,7 @@ mod reload_tests {
     async fn a_release_by_name_reports_the_uid_the_name_claims_in_the_turn() {
         let fx = fixture(
             "release-moved",
-            RELEASE_TO_ADMIN,
+            CONTAIN_AND_RELEASE_TO_ADMIN,
             Some("schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary:\n    - \"daemon\"\n"),
         )
         .await;
@@ -17469,6 +17676,7 @@ mod reload_tests {
                 who: LiveInitiator::Operator,
                 check: LiveCheck::None,
                 note: LiveNote::none(),
+                authorized: None,
             },
             &mut released,
         ))
@@ -17488,7 +17696,7 @@ mod reload_tests {
     async fn a_release_record_lists_only_the_claimants_it_removed() {
         let fx = fixture(
             "release-removed",
-            RELEASE_TO_ADMIN,
+            CONTAIN_AND_RELEASE_TO_ADMIN,
             Some(&format!(
                 "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary:\n    - \"{}\"\n",
                 "daemon"
@@ -17526,7 +17734,7 @@ mod reload_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_contain_and_its_release_correlate_by_uid_and_revision() {
-        let fx = fixture("correlate", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
+        let fx = fixture("correlate", CONTAIN_AND_RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
         let c = view_rev(&fx.contain(ContainTarget::Uid(4242), 0, "r").await);
         let r = view_rev(&fx.release(ContainTarget::Uid(4242), 0).await);
         let live: Vec<_> = fx
@@ -17551,7 +17759,7 @@ mod reload_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_file_route_contains_with_root_file_as_the_initiator() {
-        let fx = fixture("file-route", RELEASE_TO_ADMIN, Some(ROOT_ADMIN)).await;
+        let fx = fixture("file-route", CONTAIN_AND_RELEASE_TO_ADMIN, Some(ROOT_ADMIN)).await;
         let before = fx.seen().len();
         fx.write_bindings(
             "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary:\n    - uid: 4242\n",
@@ -17577,7 +17785,7 @@ mod reload_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_contain_by_name_records_the_uid_and_the_reason_and_denies_the_next_decision() {
-        let fx = fixture("by-name", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
+        let fx = fixture("by-name", CONTAIN_AND_RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
         let a = fx
             .contain(ContainTarget::Name("daemon".into()), 0, "SENTINEL-r1")
             .await;
@@ -17623,7 +17831,7 @@ mod reload_tests {
         let fx = fixture_with(
             "nss",
             Opts {
-                authz: RELEASE_TO_ADMIN,
+                authz: CONTAIN_AND_RELEASE_TO_ADMIN,
                 bindings: Some(TWO_ADMINS),
                 accounts: scripted_accounts(
                     &[("nobody-here", Ok(None)), ("broken", Err("EIO".into()))],
@@ -17663,7 +17871,7 @@ mod reload_tests {
         let fx = fixture_with(
             "nss-detail",
             Opts {
-                authz: RELEASE_TO_ADMIN,
+                authz: CONTAIN_AND_RELEASE_TO_ADMIN,
                 bindings: Some(TWO_ADMINS),
                 accounts: scripted_accounts(&[("ghost\u{7f}", Ok(None))], &[]),
                 ..Opts::default()
@@ -17703,7 +17911,7 @@ mod reload_tests {
         let fx = fixture_with(
             "nss-breaker",
             Opts {
-                authz: RELEASE_TO_ADMIN,
+                authz: CONTAIN_AND_RELEASE_TO_ADMIN,
                 bindings: Some(TWO_ADMINS),
                 accounts: scripted_accounts(&[("daemon", Ok(Some(daemon_uid())))], &[]),
                 ..Opts::default()
@@ -17726,7 +17934,7 @@ mod reload_tests {
         let fx = fixture_with(
             "release-by-claim",
             Opts {
-                authz: RELEASE_TO_ADMIN,
+                authz: CONTAIN_AND_RELEASE_TO_ADMIN,
                 bindings: Some(
                     "schema_version: 1\nbindings:\n  admin: [\"root\", \"daemon\"]\n  adversary: [\"daemon\"]\n",
                 ),
@@ -17752,7 +17960,7 @@ mod reload_tests {
         let fx = fixture_with(
             "release-by-nss",
             Opts {
-                authz: RELEASE_TO_ADMIN,
+                authz: CONTAIN_AND_RELEASE_TO_ADMIN,
                 bindings: Some(TWO_ADMINS),
                 accounts: scripted_accounts(&[("someone", Ok(Some(4242)))], &[]),
                 ..Opts::default()
@@ -17771,7 +17979,9 @@ mod reload_tests {
     fn a_target(a: &ContainAnswer) -> Option<u32> {
         match a {
             ContainAnswer::View { view, .. } => view.target_uid,
-            ContainAnswer::Unavailable { .. } => panic!("no view: {a:?}"),
+            ContainAnswer::Unavailable { .. } | ContainAnswer::Denied { .. } => {
+                panic!("no view: {a:?}")
+            }
         }
     }
 
@@ -17779,7 +17989,7 @@ mod reload_tests {
     async fn a_release_by_uid_removes_a_root_listed_name_and_restores_the_binding() {
         let fx = fixture(
             "release-name",
-            RELEASE_TO_ADMIN,
+            CONTAIN_AND_RELEASE_TO_ADMIN,
             Some("schema_version: 1\nbindings:\n  admin: [\"root\", \"daemon\"]\n  adversary: [\"daemon\"]\n"),
         )
         .await;
@@ -17815,7 +18025,7 @@ mod reload_tests {
             fixture_with(
                 "release-race",
                 Opts {
-                    authz: RELEASE_TO_ADMIN,
+                    authz: CONTAIN_AND_RELEASE_TO_ADMIN,
                     bindings: Some(only_uid.as_str()),
                     load_gate: Some(gate_rx),
                     ..Opts::default()
@@ -17861,7 +18071,7 @@ mod reload_tests {
     async fn release_restores_the_prior_effective_permissions_exactly() {
         let fx = fixture(
             "restore",
-            "schema_version: 1\nroles:\n  admin:\n    allow:\n      - \"admin.release\"\n      - \"admin.status\"\n",
+            "schema_version: 1\nroles:\n  admin:\n    allow:\n      - \"admin.contain\"\n      - \"admin.release\"\n      - \"admin.status\"\n",
             Some(TWO_ADMINS),
         )
         .await;
@@ -17901,7 +18111,7 @@ mod reload_tests {
         let fx = fixture_with(
             "release-pure",
             Opts {
-                authz: RELEASE_TO_ADMIN,
+                authz: CONTAIN_AND_RELEASE_TO_ADMIN,
                 bindings: Some(TWO_ADMINS),
                 count_decisions: true,
                 ..Opts::default()
@@ -17918,7 +18128,11 @@ mod reload_tests {
             answer_code(&fx.release(ContainTarget::Uid(4242), 0).await),
             ContainmentOutcome::Released
         );
-        assert_eq!(fx.candidate_decisions(), 0, "no releaser probe");
+        assert_eq!(
+            fx.candidate_requests(),
+            [(0, "admin.release".to_string())],
+            "only the requester's own action is decided again, and no releaser probe"
+        );
         assert!(
             fx.decision_log().is_empty(),
             "no decision on the installed snapshot either: {:?}",
@@ -17936,7 +18150,7 @@ mod reload_tests {
         let fx = fixture_with(
             "no-nss",
             Opts {
-                authz: RELEASE_TO_ADMIN,
+                authz: CONTAIN_AND_RELEASE_TO_ADMIN,
                 bindings: Some(TWO_ADMINS),
                 accounts: failing_accounts(),
                 ..Opts::default()
@@ -17957,19 +18171,19 @@ mod reload_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn two_concurrent_contains_of_the_last_two_releasers_commit_exactly_one() {
-        let fx = Arc::new(fixture("race", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await);
+        let fx = Arc::new(fixture("race", CONTAIN_AND_RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await);
         let (a, b) = tokio::join!(
-            fx.contain(ContainTarget::Uid(0), daemon_uid(), "a"),
-            fx.contain(ContainTarget::Uid(daemon_uid()), 0, "b"),
+            fx.contain_uid(0, daemon_uid()),
+            fx.contain_uid(daemon_uid(), 0),
         );
-        let mut codes = [answer_code(&a), answer_code(&b)];
-        codes.sort_by_key(|c| c.code());
-        assert_eq!(
-            codes,
-            [
-                ContainmentOutcome::Contained,
-                ContainmentOutcome::LastReleaser
-            ]
+        let mut results = [a.is_ok(), b.is_ok()];
+        results.sort_unstable();
+        assert_eq!(results, [false, true], "{a:?} {b:?}");
+        assert!(
+            [&a, &b]
+                .iter()
+                .any(|r| **r == Err(LiveRefusal::LastReleaser)),
+            "{a:?} {b:?}"
         );
         let permitted = [0, daemon_uid()]
             .iter()
@@ -17984,8 +18198,139 @@ mod reload_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_admins_containing_each_other_commit_one_and_the_other_is_unauthorized() {
+        let fx = Arc::new(fixture("mutual", CONTAIN_AND_RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await);
+        let (a, b) = tokio::join!(
+            fx.contain(ContainTarget::Uid(0), daemon_uid(), "a"),
+            fx.contain(ContainTarget::Uid(daemon_uid()), 0, "b"),
+        );
+        let denied = [&a, &b]
+            .iter()
+            .filter(|x| matches!(x, ContainAnswer::Denied { why } if why == "subject contained: role=adversary"))
+            .count();
+        let contained = [&a, &b]
+            .iter()
+            .filter(|x| matches!(x, ContainAnswer::View { view, .. } if view.outcome == ContainmentOutcome::Contained))
+            .count();
+        assert_eq!((denied, contained), (1, 1), "{a:?} {b:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_release_permitted_before_its_requester_was_contained_is_denied_in_the_turn() {
+        let fx = fixture(
+            "self-release",
+            CONTAIN_AND_RELEASE_TO_ADMIN,
+            Some(TWO_ADMINS),
+        )
+        .await;
+        let b = daemon_uid();
+        let action = Fx::permitted_request(
+            &Verb::AdminRelease {
+                target: ContainTarget::Uid(b),
+            },
+            b,
+        );
+        assert!(
+            matches!(
+                fx.reloader.authorizer.decide(&action),
+                maknae_security::Verdict::Permit { .. }
+            ),
+            "the request path permits the release before the contain"
+        );
+        assert_eq!(
+            answer_code(&fx.contain(ContainTarget::Uid(b), 0, "r").await),
+            ContainmentOutcome::Contained
+        );
+        let (store, records) = (fx.store_sha(), fx.seen().len());
+        let a = fx.release_as(ContainTarget::Uid(b), b, &action).await;
+        assert!(
+            matches!(&a, ContainAnswer::Denied { why } if why == "subject contained: role=adversary"),
+            "{a:?}"
+        );
+        assert_eq!(fx.store_sha(), store, "nothing changed");
+        assert_eq!(fx.seen().len(), records, "no release record");
+        assert!(matches!(
+            fx.decide_action(b, "admin.release"),
+            maknae_security::Verdict::Deny { .. }
+        ));
+        assert!(fx.mirror().contains(&format!("- uid: {b}")));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_release_whose_grant_a_reload_removed_while_it_waited_is_denied() {
+        let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+        let contained = |admins: &str| {
+            format!("schema_version: 1\nbindings:\n  admin: [{admins}]\n  adversary:\n    - uid: 4242\n")
+        };
+        let before = contained("\"root\", \"daemon\"");
+        let fx = Arc::new(
+            fixture_with(
+                "regrant",
+                Opts {
+                    authz: CONTAIN_AND_RELEASE_TO_ADMIN,
+                    bindings: Some(before.as_str()),
+                    load_gate: Some(gate_rx),
+                    ..Opts::default()
+                },
+            )
+            .await,
+        );
+        let b = daemon_uid();
+        let action = Fx::permitted_request(
+            &Verb::AdminRelease {
+                target: ContainTarget::Uid(4242),
+            },
+            b,
+        );
+        assert!(matches!(
+            fx.reloader.authorizer.decide(&action),
+            maknae_security::Verdict::Permit { .. }
+        ));
+        fx.write_bindings(&contained("\"root\""));
+        let (entered_tx, entered) = std::sync::mpsc::channel::<()>();
+        *fx.reloader.load_entered.lock().unwrap() = Some(entered_tx);
+        let (resolved_tx, resolved) = std::sync::mpsc::channel::<()>();
+        *fx.reloader.release_resolved.lock().unwrap() = Some(resolved_tx);
+        let reload = tokio::spawn({
+            let r = Arc::clone(&fx.reloader);
+            async move { r.run().await }
+        });
+        bounded(tokio::task::spawn_blocking(move || entered.recv()))
+            .await
+            .unwrap()
+            .unwrap();
+        let release = tokio::spawn({
+            let fx = Arc::clone(&fx);
+            async move { fx.release_as(ContainTarget::Uid(4242), b, &action).await }
+        });
+        bounded(tokio::task::spawn_blocking(move || resolved.recv()))
+            .await
+            .unwrap()
+            .unwrap();
+        gate_tx.send(()).unwrap();
+        bounded(reload).await.unwrap().unwrap();
+        let a = bounded(release).await.unwrap();
+        let maknae_security::Decision::Deny { reason } =
+            maknae_security::finalize(maknae_security::combine(vec![
+                fx.decide_action(b, "admin.release")
+            ]))
+        else {
+            panic!("the reload removed daemon's grant");
+        };
+        assert!(
+            matches!(&a, ContainAnswer::Denied { why } if *why == reason),
+            "{a:?}"
+        );
+        assert!(matches!(
+            fx.decide_uid(4242),
+            maknae_security::Verdict::Deny { .. }
+        ));
+        assert!(fx.mirror().contains("- uid: 4242"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_concurrent_contain_and_release_serialize_and_both_are_recorded() {
-        let fx = Arc::new(fixture("race2", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await);
+        let fx = Arc::new(fixture("race2", CONTAIN_AND_RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await);
         fx.contain(ContainTarget::Uid(4242), 0, "first").await;
         let (r, c) = tokio::join!(
             fx.release(ContainTarget::Uid(4242), 0),
@@ -18003,7 +18348,7 @@ mod reload_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_contain_whose_record_cannot_append_contains_nobody() {
-        let fx = fixture("wa", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
+        let fx = fixture("wa", CONTAIN_AND_RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
         fx.refuse("graph.sync");
         let before = fx.store_sha();
         let a = fx.contain(ContainTarget::Uid(4242), 0, "r").await;
@@ -18038,7 +18383,7 @@ mod reload_tests {
             fixture_with(
                 "inflight",
                 Opts {
-                    authz: RELEASE_TO_ADMIN,
+                    authz: CONTAIN_AND_RELEASE_TO_ADMIN,
                     bindings: Some(TWO_ADMINS),
                     gate: Some(Arc::clone(&gate)),
                     ..Opts::default()
@@ -18084,7 +18429,7 @@ mod reload_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_containment_survives_a_restart_and_is_released_after_it() {
-        let fx = fixture("restart", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
+        let fx = fixture("restart", CONTAIN_AND_RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
         assert_eq!(
             answer_code(&fx.contain(ContainTarget::Uid(4242), 0, "r").await),
             ContainmentOutcome::Contained
@@ -18123,8 +18468,8 @@ mod reload_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn kernel_contain_produces_the_operators_state_with_the_kernel_as_initiator() {
-        let op = fixture("k-op", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
-        let k = fixture("k-kernel", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
+        let op = fixture("k-op", CONTAIN_AND_RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
+        let k = fixture("k-kernel", CONTAIN_AND_RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
         op.contain(ContainTarget::Uid(4242), 0, "r").await;
         assert!(matches!(
             bounded(k.reloader.kernel_contain(4242, "r")).await,
@@ -18152,14 +18497,19 @@ mod reload_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn kernel_contain_of_the_sole_releaser_succeeds_where_the_operator_is_refused() {
-        let op = fixture("sole-op", RELEASE_TO_ADMIN, Some(ROOT_ADMIN)).await;
-        let a = op.contain(ContainTarget::Uid(0), 4242, "r").await;
+        let op = fixture("sole-op", CONTAIN_AND_RELEASE_TO_ADMIN, Some(ROOT_ADMIN)).await;
+        let a = op.contain(ContainTarget::Uid(0), 0, "r").await;
         assert_eq!(answer_code(&a), ContainmentOutcome::LastReleaser);
         assert!(matches!(
             op.root_whoami(),
             maknae_security::Verdict::Permit { .. }
         ));
-        let k = fixture("sole-kernel", RELEASE_TO_ADMIN, Some(ROOT_ADMIN)).await;
+        let k = fixture(
+            "sole-kernel",
+            CONTAIN_AND_RELEASE_TO_ADMIN,
+            Some(ROOT_ADMIN),
+        )
+        .await;
         assert!(matches!(
             bounded(k.reloader.kernel_contain(0, "r")).await,
             KernelContain::Contained { .. }
@@ -18174,7 +18524,12 @@ mod reload_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_refused_kernel_contain_is_recorded_and_counted_and_a_no_op_is_not_counted() {
-        let fx = fixture("k-keyless", RELEASE_TO_ADMIN, Some("schema_version: 1\n")).await;
+        let fx = fixture(
+            "k-keyless",
+            CONTAIN_AND_RELEASE_TO_ADMIN,
+            Some("schema_version: 1\n"),
+        )
+        .await;
         assert_eq!(
             bounded(fx.reloader.kernel_contain(4242, "r")).await,
             KernelContain::Refused(ContainmentOutcome::NoExplicitBindings)
@@ -18185,7 +18540,7 @@ mod reload_tests {
                 .starts_with("kernel containment refused: no-explicit-bindings")));
         let fx = fixture(
             "k-noop",
-            RELEASE_TO_ADMIN,
+            CONTAIN_AND_RELEASE_TO_ADMIN,
             Some("schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary:\n    - uid: 4242\n"),
         )
         .await;
@@ -18201,7 +18556,7 @@ mod reload_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_kernel_contain_whose_decision_record_cannot_append_contains_nobody() {
-        let fx = fixture("k-wa", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
+        let fx = fixture("k-wa", CONTAIN_AND_RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
         fx.refuse("kernel.contain");
         assert!(matches!(
             bounded(fx.reloader.kernel_contain(4242, "r")).await,
@@ -18213,7 +18568,7 @@ mod reload_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_kernel_containment_journals_neither_its_reason_nor_why_it_failed() {
-        let fx = fixture("k-journal", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
+        let fx = fixture("k-journal", CONTAIN_AND_RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
         fx.refuse("kernel.contain");
         let (_, from) = journal_capture::since(usize::MAX, "");
         assert!(matches!(
@@ -18261,7 +18616,12 @@ mod reload_tests {
             ),
         ];
         for (i, (verdict, why)) in refusals.into_iter().enumerate() {
-            let fx = fixture(&format!("k-pdp-{i}"), RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
+            let fx = fixture(
+                &format!("k-pdp-{i}"),
+                CONTAIN_AND_RELEASE_TO_ADMIN,
+                Some(TWO_ADMINS),
+            )
+            .await;
             let before = fx.store_sha();
             let r = &fx.reloader;
             let seq = Seq::new();
@@ -18298,7 +18658,7 @@ mod reload_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_kernel_contain_with_a_refused_reason_contains_nobody_and_is_counted() {
-        let fx = fixture("k-reason", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
+        let fx = fixture("k-reason", CONTAIN_AND_RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
         let before = fx.store_sha();
         assert!(matches!(
             bounded(fx.reloader.kernel_contain(4242, "a\u{202e}b")).await,
@@ -18313,7 +18673,7 @@ mod reload_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_kernel_contain_records_its_reason_normalised() {
-        let fx = fixture("k-nfc", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
+        let fx = fixture("k-nfc", CONTAIN_AND_RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
         assert!(matches!(
             bounded(fx.reloader.kernel_contain(4242, "\u{1100}\u{1161}")).await,
             KernelContain::Contained { .. }
@@ -18324,7 +18684,7 @@ mod reload_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_live_contain_records_its_note_and_target() {
-        let fx = fixture("note", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
+        let fx = fixture("note", CONTAIN_AND_RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
         let from = fx.seen().len();
         bounded(fx.reloader.live_edit(LiveRequest {
             op: LiveOp::Edit(LiveEdit::Contain(BindingEntry::Uid(4242))),
@@ -18337,6 +18697,7 @@ mod reload_tests {
                 requester: Some((0, 77)),
                 reason: Some("compromised"),
             },
+            authorized: None,
         }))
         .await
         .unwrap();
@@ -18371,7 +18732,7 @@ mod reload_tests {
     async fn the_enroll_section_boots_and_the_principal_stays_admin_after_a_contain() {
         let (_, euid, bytes) = enrolled();
         assert_eq!(principal().uid, euid);
-        let fx = fixture("enroll-boot", RELEASE_TO_ADMIN, Some(&bytes)).await;
+        let fx = fixture("enroll-boot", CONTAIN_AND_RELEASE_TO_ADMIN, Some(&bytes)).await;
         assert!(matches!(
             fx.decide_action(euid, "admin.whoami"),
             maknae_security::Verdict::Permit { .. }

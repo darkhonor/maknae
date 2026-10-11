@@ -13,6 +13,8 @@ pub(crate) enum LiveRefusal {
     AlreadyContained,
     NotContained,
     LookupUnavailable,
+    /// The PDP no longer permits the requester's action; the reason is trail-only.
+    Unauthorized(String),
     Failed(String),
 }
 
@@ -99,7 +101,7 @@ pub(crate) fn outcome(r: LiveRefusal) -> Result<ContainmentOutcome, String> {
         LiveRefusal::AlreadyContained => ContainmentOutcome::AlreadyContained,
         LiveRefusal::NotContained => ContainmentOutcome::NotContained,
         LiveRefusal::LookupUnavailable => ContainmentOutcome::LookupUnavailable,
-        LiveRefusal::Failed(why) => return Err(why),
+        LiveRefusal::Failed(why) | LiveRefusal::Unauthorized(why) => return Err(why),
     })
 }
 
@@ -234,11 +236,18 @@ pub(crate) fn binds_target_by_uid(check: LiveCheck, edit: &maknae_config::LiveEd
 
 /// Whether a decision permits, by the request path's own fold and discharge.
 pub(crate) fn permits(d: &maknae_security::Decided) -> bool {
+    denial(d).is_none()
+}
+
+/// Why a decision does not permit, by the request path's own fold and discharge.
+pub(crate) fn denial(d: &maknae_security::Decided) -> Option<String> {
     match maknae_security::finalize(maknae_security::combine(vec![d.verdict.clone()])) {
         maknae_security::Decision::Permit { obligations } => {
-            crate::handler::discharge_plan(&obligations).is_ok()
+            crate::handler::discharge_plan(&obligations)
+                .err()
+                .map(|u| format!("unhonorable obligation: {}", u.0))
         }
-        maknae_security::Decision::Deny { .. } => false,
+        maknae_security::Decision::Deny { reason } => Some(reason),
     }
 }
 
@@ -608,6 +617,19 @@ mod tests {
             rule: None,
         };
         assert!(!permits(&unhonorable));
+        assert_eq!(denial(&permit), None);
+        assert_eq!(
+            denial(&unhonorable).as_deref(),
+            Some("unhonorable obligation: notify")
+        );
+        let deny = maknae_security::Decided {
+            verdict: maknae_security::Verdict::Deny {
+                reason: "pdp-reason-8e21".into(),
+            },
+            role: None,
+            rule: None,
+        };
+        assert_eq!(denial(&deny).as_deref(), Some("pdp-reason-8e21"));
     }
 
     #[test]
@@ -664,6 +686,10 @@ mod tests {
         use ContainmentOutcome::*;
         assert_eq!(outcome(LiveRefusal::Busy), Ok(Busy));
         assert_eq!(outcome(LiveRefusal::Failed("x".into())), Err("x".into()));
+        assert_eq!(
+            outcome(LiveRefusal::Unauthorized("y".into())),
+            Err("y".into())
+        );
         assert_eq!(record_class(LastReleaser), ("deny", "refused"));
         assert_eq!(record_class(SelfContainWithoutRelease), ("deny", "refused"));
         assert_eq!(record_class(NoExplicitBindings), ("deny", "refused"));

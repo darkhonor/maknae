@@ -3859,6 +3859,77 @@ async fn a_contained_admin_granted_release_asking_release_is_unauthorized_with_t
     assert_eq!(ops.calls(), 0);
 }
 
+#[tokio::test]
+async fn a_containment_denied_in_the_turn_answers_unauthorized_and_records_the_pdps_reason() {
+    const WHY: &str = "pdp-reason-sentinel-3b7c";
+    let fx = Fixture::new("contain-reauth");
+    fx.write_policy(BOTH_GRANTED);
+    fx.write_bindings(BINDINGS_ROOT_ADMIN);
+    for (verb, action) in [
+        (
+            maknae_proto::Verb::AdminContain {
+                target: ContainTarget::Uid(4242),
+                reason: "r".into(),
+            },
+            "admin.contain",
+        ),
+        (
+            maknae_proto::Verb::AdminRelease {
+                target: ContainTarget::Uid(4242),
+            },
+            "admin.release",
+        ),
+    ] {
+        let ops = common::denying_containment(WHY);
+        let emit = RecEmit::new();
+        let frame = drive_with_ops(
+            &fx.dir,
+            fx.authorizer(),
+            emit.clone(),
+            0,
+            verb.clone(),
+            ops.clone(),
+        )
+        .await
+        .expect("a frame");
+        match maknae_proto::decode_response(&frame).unwrap().result {
+            RespResult::Err(e) => assert_eq!(
+                (e.code, e.message.as_str()),
+                (ProtoErrCode::Unauthorized, "not authorized")
+            ),
+            other => panic!("{action}: {other:?}"),
+        }
+        assert!(!frame.windows(WHY.len()).any(|w| w == WHY.as_bytes()));
+        let records = emit.records();
+        let requests: Vec<(&str, &str, &str)> = records
+            .iter()
+            .filter(|r| r.event == "request")
+            .map(|r| {
+                (
+                    r.outcome.result.as_str(),
+                    r.outcome.posture.as_str(),
+                    r.outcome.reason.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            requests,
+            [
+                ("permit", "authorized", "authorized"),
+                ("deny", "unauthorized", WHY)
+            ],
+            "{action}"
+        );
+        let carried = ops.actions();
+        assert_eq!(carried.len(), 1, "{action}");
+        assert_eq!(carried[0].action.0, action);
+        assert_eq!(
+            carried[0].subject.0.get("uid"),
+            Some(&maknae_security::AttrValue::Int(0))
+        );
+    }
+}
+
 const BOTH_GRANTED: &str = "schema_version: 1\nroles:\n  admin:\n    allow:\n      - \"admin.contain\"\n      - \"admin.release\"\n";
 
 #[tokio::test]
