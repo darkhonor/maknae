@@ -29,6 +29,10 @@ const DEFAULT_SOCKET_PATH: &str = "/run/maknae-egress/egress.sock";
 pub const MACOS_EGRESS_SOCKET_PATH: &str = "/usr/local/var/run/maknae-egress/egress.sock";
 /// Headroom between the deputy's worst case and `egress.deadline_ms`.
 pub const DEADLINE_MARGIN_MS: u64 = 100_000;
+/// The deputy's two Vault calls at `maknae_vault::VAULT_API_TIMEOUT` each.
+pub const VAULT_CALLS_MS: u64 = 60_000;
+/// The largest `call_timeout_ms` any `deadline_ms` can hold.
+pub const CALL_TIMEOUT_MS_MAX: u64 = EGRESS_DEADLINE_MS_MAX - VAULT_CALLS_MS - DEADLINE_MARGIN_MS;
 /// Two Vault calls (`maknae_vault::VAULT_API_TIMEOUT`), the default provider call
 /// (`DEFAULT_CALL_TIMEOUT_MS`) and `DEADLINE_MARGIN_MS`. The kernel boot gate holds
 /// any configured `call_timeout_ms` to the same sum.

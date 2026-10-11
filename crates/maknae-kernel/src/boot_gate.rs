@@ -852,6 +852,16 @@ mod tests {
             d
         );
         assert_eq!(
+            maknae_config::VAULT_CALLS_MS,
+            2 * maknae_vault::VAULT_API_TIMEOUT.as_millis() as u64
+        );
+        assert_eq!(
+            maknae_config::CALL_TIMEOUT_MS_MAX
+                + maknae_config::VAULT_CALLS_MS
+                + maknae_config::DEADLINE_MARGIN_MS,
+            maknae_config::EGRESS_DEADLINE_MS_MAX
+        );
+        assert_eq!(
             super::egress_bounds_boot_gate(&set(), Some(&bounds("maknae/users")), d),
             Ok(())
         );

@@ -36,7 +36,7 @@ pub const MAX_USER_PREFIX_BYTES: usize = 256;
 /// The provider call timeout when `call_timeout_ms` is absent.
 pub const DEFAULT_CALL_TIMEOUT_MS: u64 = 120_000;
 const CALL_TIMEOUT_MS_RANGE: std::ops::RangeInclusive<i64> =
-    1_000..=crate::EGRESS_DEADLINE_MS_MAX as i64;
+    1_000..=crate::CALL_TIMEOUT_MS_MAX as i64;
 
 /// What the deputy is allowed to do, and nothing more.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -639,7 +639,7 @@ mod tests {
         let d = bounds_from_document(&doc2("maknae-kv", "maknae/users")).unwrap();
         assert_eq!(d.call_timeout_ms, DEFAULT_CALL_TIMEOUT_MS);
         assert_eq!(DEFAULT_CALL_TIMEOUT_MS, 120_000);
-        for ok in [1_000, 200_000, 600_000] {
+        for ok in [1_000, 200_000, 440_000] {
             let b = bounds_from_document(&with_call_timeout(Value::Int(ok))).unwrap();
             assert_eq!(b.call_timeout_ms, ok as u64);
         }
@@ -647,13 +647,13 @@ mod tests {
 
     #[test]
     fn call_timeout_out_of_range_is_refused_as_out_of_range() {
-        for bad in [999, 600_001] {
+        for bad in [999, 440_001] {
             let e = bounds_from_document(&with_call_timeout(Value::Int(bad)))
                 .unwrap_err()
                 .to_string();
             assert!(
                 e.contains(&format!(
-                    "'call_timeout_ms' {bad} out of range 1000..=600000"
+                    "'call_timeout_ms' {bad} out of range 1000..=440000"
                 )),
                 "{e}"
             );

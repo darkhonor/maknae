@@ -349,6 +349,18 @@ pub fn prompt_outcome(
     }
 }
 
+/// Measured against the frame cap before sending (ADR-0023 d7).
+fn frame_fits(verb: &Verb, cap: usize) -> bool {
+    maknae_proto::encode_request_zeroizing(
+        &maknae_proto::Request {
+            protocol_version: maknae_proto::PROTOCOL_VERSION,
+            verb: verb.clone(),
+        },
+        cap,
+    )
+    .is_ok()
+}
+
 /// The real Plane: one authenticated client, one connection per verb.
 pub struct RealPlane<'a> {
     pub transport: &'a maknae_config::TransportConfig,
@@ -367,6 +379,16 @@ impl Plane for RealPlane<'_> {
         conversation: &str,
         turns: &[Turn],
     ) -> Result<maknae_proto::PromptReply, PlaneError> {
+        let mut verb = Verb::SessionPrompt {
+            conversation: conversation.to_string(),
+            turns: turns.to_vec(),
+            output_tokens: self.output_tokens,
+            choice: None,
+        };
+        // Checked before the key is wrapped, so a retry after shedding reasoning costs no Vault call.
+        if !frame_fits(&verb, self.transport.prompt_max_bytes) {
+            return Err(PlaneError::FrameTooLarge);
+        }
         let now = crate::login::now_unix().map_err(PlaneError::Transport)?;
         let (api, token, kv_mount) = (self.api, self.token, self.key.kv_mount);
         let choice = turn_choice(&self.key, conversation, now, |path| async move {
@@ -375,23 +397,10 @@ impl Plane for RealPlane<'_> {
         })
         .await
         .map_err(PlaneError::Transport)?;
-        let verb = Verb::SessionPrompt {
-            conversation: conversation.to_string(),
-            turns: turns.to_vec(),
-            output_tokens: self.output_tokens,
-            choice: Some(choice),
-        };
-        // Measured against the frame cap BEFORE sending (ADR-0023 d7). This
-        // encodes once here and once inside send_verb; accepted for Cooky.
-        if maknae_proto::encode_request_zeroizing(
-            &maknae_proto::Request {
-                protocol_version: maknae_proto::PROTOCOL_VERSION,
-                verb: verb.clone(),
-            },
-            self.transport.prompt_max_bytes,
-        )
-        .is_err()
-        {
+        if let Verb::SessionPrompt { choice: c, .. } = &mut verb {
+            *c = Some(choice);
+        }
+        if !frame_fits(&verb, self.transport.prompt_max_bytes) {
             return Err(PlaneError::FrameTooLarge);
         }
         prompt_outcome(
@@ -1262,5 +1271,30 @@ mod tests {
             read_outcome(Err("handshake timed out".into())),
             ReadOutcome::Unavailable
         );
+    }
+
+    #[test]
+    fn frame_fits_is_the_encoders_cap_check() {
+        let verb = |n: usize| Verb::SessionPrompt {
+            conversation: "c".into(),
+            turns: vec![Turn::User {
+                content: vec![maknae_proto::ContentBlock::Text {
+                    text: maknae_proto::SecretText(zeroize::Zeroizing::new("a".repeat(n))),
+                }],
+            }],
+            output_tokens: None,
+            choice: None,
+        };
+        assert!(frame_fits(&verb(10), 65_536));
+        assert!(!frame_fits(&verb(70_000), 65_536));
+    }
+
+    #[test]
+    fn the_prompt_frame_is_sized_before_the_key_is_wrapped() {
+        let src = include_str!("agent.rs");
+        let body = &src[src.find(concat!("async fn ", "prompt(")).unwrap()..];
+        let fits = body.find(concat!("frame_fits(", "&verb")).unwrap();
+        let wrap = body.find(concat!("turn_choice(", "&self.key")).unwrap();
+        assert!(fits < wrap);
     }
 }

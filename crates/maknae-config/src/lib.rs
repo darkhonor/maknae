@@ -96,8 +96,8 @@ pub use document::{
     Source, ABSENT, MASK, NOT_SET, SUPPRESSED_CHANGED,
 };
 pub use egress_cfg::{
-    egress_from_section, EgressConfig, DEADLINE_MARGIN_MS, EGRESS_DEADLINE_MS_MAX, EGRESS_SECTION,
-    MACOS_EGRESS_SOCKET_PATH,
+    egress_from_section, EgressConfig, CALL_TIMEOUT_MS_MAX, DEADLINE_MARGIN_MS,
+    EGRESS_DEADLINE_MS_MAX, EGRESS_SECTION, MACOS_EGRESS_SOCKET_PATH, VAULT_CALLS_MS,
 };
 pub use error::ConfigError;
 #[cfg(all(unix, feature = "hermetic-test-seam"))]

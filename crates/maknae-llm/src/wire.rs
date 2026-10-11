@@ -878,6 +878,8 @@ mod tests {
             (ReplyError::Malformed("expected value".into()), "malformed"),
             (ReplyError::NoChoices, "no choices"),
             (ReplyError::EmptyMessage, "neither content nor tool calls"),
+            (ReplyError::TokenLimit, "token limit"),
+            (ReplyError::ReasoningOnly, "reasoning but no answer"),
             (ReplyError::UnknownTool("exfiltrate".into()), "exfiltrate"),
             (
                 ReplyError::Unacceptable("over a bound".into()),

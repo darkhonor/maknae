@@ -415,8 +415,7 @@ pub struct ContentMeasure {
 /// carries is attested rather than only its user-visible half.
 ///
 /// *Scoped 2026-09-22, #241: this said "so trail == wire", which overclaims.
-/// What the digest covers is exactly the `Text` blocks' bytes and the tool
-/// calls' `arguments` bytes. A tool call's `name` and `call_id`, and a `Tool`
+/// What the digest covers is stated as a rule below. A tool call's `name` and `call_id`, and a `Tool`
 /// turn's `call_id`, also leave the process and are NOT digest input: they are
 /// length-bounded and shape-admitted (`turn_is_acceptable`,
 /// `proposed_tool_call_is_acceptable`, `MAX_TOOL_CALL_NAME_BYTES`,
@@ -738,7 +737,7 @@ pub fn reply_capacity(reply: &PromptReply) -> usize {
         + crate::handler::FRAME_ENVELOPE_MARGIN as usize
 }
 
-/// Fit an admitted reply under `cap`, dropping its reasoning if that alone is the excess (#512 R6).
+/// Drops an admitted reply's reasoning when it is over `cap`; `true` if the reply then fits (#512 R6).
 pub fn shed_reasoning_to_fit(reply: &mut PromptReply, cap: usize) -> bool {
     if reply_capacity(reply) <= cap {
         return true;

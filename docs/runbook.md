@@ -665,7 +665,7 @@ sudo cat /etc/maknae/egress-bounds.yaml
 
 The file is `0644`, but `/etc/maknae` is `root:_maknae 0750`, enroll adds you to `maknae`, not `_maknae`, and the directory's ACL lets only `_maknae-egress` traverse it. So you read it with `sudo`.
 
-It holds exactly `vault.addr`, `kv_mount` and `user_prefix` (`docs/configuration.md` §6.1.3). Do not edit it by hand: the next enroll rewrites it.
+It holds `vault.addr`, `kv_mount` and `user_prefix`, and optionally `call_timeout_ms` (`docs/configuration.md` §6.1.3). Do not edit the first three by hand: the next enroll rewrites the file, and drops `call_timeout_ms` (#525).
 
 **What must match.** Each Vault layout flag of step 3 must **equal** its Terraform input: `--userpass-mount` ↔ `userpass_mount`, `--kv-mount` ↔ `kv_mount_path`, `--user-prefix` ↔ `user_prefix` (`deploy/vault-pki/variables.tf`). Enroll checks the flags' grammar, not that they equal the Terraform values. Enroll writes the same `kv_mount` and `user_prefix` into this file and into your `~/.maknae/maknae.yaml`, and a user whose copy differs from this file seals a key the Egress Daemon cannot open (`docs/configuration.md` §6.1.2).
 

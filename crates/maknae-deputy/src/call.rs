@@ -13,9 +13,9 @@ use std::time::Duration;
 /// ADMISSION — this is about the call.
 pub enum FulfilError {
     Open(OpenFailure),
-    /// The call did not produce a usable reply. `journal` is the provider's
-    /// error body, key redacted and escaped, for the deputy's journal only;
-    /// neither `Display` nor `Debug` renders it.
+    /// The call did not produce a usable reply. `journal` is the deputy's journal
+    /// line: the provider's error body, key redacted and escaped, or a reply
+    /// defect's closed name. Neither `Display` nor `Debug` renders it.
     Provider {
         summary: String,
         journal: Option<zeroize::Zeroizing<String>>,
@@ -70,10 +70,19 @@ impl Default for CallBounds {
     }
 }
 
+impl CallBounds {
+    pub fn from_bounds(b: &maknae_config::EgressBounds) -> Self {
+        Self {
+            timeout: Duration::from_millis(b.call_timeout_ms),
+            ..Self::default()
+        }
+    }
+}
+
 /// A turn's several `Text` blocks become ONE message with their bytes
 /// concatenated in order, no separator — exactly the bytes `content_measure`
 /// digested, nothing dropped and nothing added (scoped 2026-09-22, #241: this
-/// said "so trail == wire"; the digest covers the text and `arguments` bytes,
+/// said "so trail == wire"; the digest covers what `content_measure` feeds it,
 /// not the names and ids that ride with them).
 ///
 /// FAIL CLOSED, never `filter_map`. `_ => None` would be a SILENT DROP —
@@ -652,8 +661,8 @@ mod tests {
     }
 
     /// #264: every digested block must ride the wire. (Not "trail == wire" —
-    /// the digest covers the `Text` bytes and the tool-call `arguments` bytes,
-    /// not the names and ids that ride with them; the kernel's
+    /// the digest covers what `content_measure` feeds it, not the names and ids
+    /// that ride with them; the kernel's
     /// `content_measure` states the scope, and this test's name predates that
     /// narrowing.)
     ///
@@ -1070,5 +1079,18 @@ mod tests {
             Some("short".into())
         );
         assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn call_bounds_take_the_configured_timeout_and_keep_the_body_cap() {
+        let mut b = bounds();
+        b.call_timeout_ms = 300_000;
+        let c = CallBounds::from_bounds(&b);
+        assert_eq!(c.timeout, Duration::from_millis(300_000));
+        assert_eq!(c.max_body_bytes, CallBounds::default().max_body_bytes);
+        assert_eq!(
+            CallBounds::default().timeout,
+            Duration::from_millis(maknae_config::DEFAULT_CALL_TIMEOUT_MS)
+        );
     }
 }

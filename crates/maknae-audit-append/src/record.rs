@@ -101,8 +101,8 @@ pub enum EgressStatus {
 /// the full 64).
 ///
 /// *Corrected 2026-09-22, #241: this said "of the concatenated text blocks".
-/// The digest covers every `Text` block's bytes AND every proposed tool call's
-/// `arguments` bytes, across every turn in order. A tool call's `name` and
+/// The digest covers what `content_measure` feeds it, across every turn in
+/// order. A tool call's `name` and
 /// `call_id`, and a `Tool` turn's `call_id`, also leave the process and are
 /// NOT digest input — they are length-bounded and shape-admitted, not
 /// attested. `maknae_kernel::egress`'s `content_measure` is the producer and

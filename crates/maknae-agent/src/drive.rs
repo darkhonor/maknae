@@ -120,7 +120,7 @@ pub async fn drive<P: Plane>(
         };
         let reply = match sent {
             Ok(r) => {
-                meter.record(bytes, r.usage);
+                meter.record(transcript.bytes(), r.usage);
                 r
             }
             Err(PlaneError::FrameTooLarge) => {
