@@ -738,8 +738,12 @@ egress:
   lookup, the PDP decision and the audit appends. So it does not stop a turn the daemon
   would still answer, unless an audit append stalls, since those have no time bound.
   A file action's reply waits `transport.read_timeout_ms` plus 5 s, the daemon's bound on
-  resolving the requester's home; every other reply is bounded by
-  `transport.read_timeout_ms`. The default, 280000,
+  resolving the requester's home. `admin.contain` and `admin.release` wait
+  `transport.read_timeout_ms` plus 60 s and `admin.baseline.accept` plus 65 s: the
+  daemon's sequential 5 s stages (the decision, the audit appends, the account lookup,
+  the reload turn, the binding resolution and the checks) and a 10 s margin, so a `busy`
+  or a committed change is answered rather than reported as no response. Every other
+  reply is bounded by `transport.read_timeout_ms`. The default, 280000,
   covers the deputy's worst-case wall time on one request with room to spare: per turn
   the deputy makes one wrapping lookup and one unwrap at Vault, each bounded at 30 s,
   then the provider call, bounded at 120 s — 180 s. There is no boot probe and no key
