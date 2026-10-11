@@ -4564,11 +4564,13 @@ where
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
-        if crate::containment::unanswered(&next_live, &edit, |n| applied.answered(n)).is_some() {
-            journal(
-                "maknaed: live edit refused: the applied load never looked up a name it binds"
-                    .into(),
-            );
+        if let Some(name) =
+            crate::containment::unanswered(&next_live, &edit, |n| applied.answered(n))
+        {
+            journal(format!(
+                "maknaed: live edit refused: the applied load never looked up {}",
+                crate::containment::quoted(&name)
+            ));
             return Err(LiveRefusal::LookupUnavailable);
         }
         let section = next_live.clone();
@@ -17502,9 +17504,10 @@ mod reload_tests {
             Err(LiveRefusal::LookupUnavailable)
         );
         let (lines, _) = journal_capture::since(journaled, "maknaed: live edit refused");
-        assert!(!lines.is_empty());
         assert!(
-            lines.iter().all(|l| !l.contains("maknae-no-such-user-165")),
+            lines
+                .iter()
+                .any(|l| l.contains("never looked up \"maknae-no-such-user-165\"")),
             "{lines:?}"
         );
         assert_eq!(fx.store_sha(), store);

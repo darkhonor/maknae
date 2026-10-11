@@ -2243,9 +2243,7 @@ mod tests {
         let release = Verb::Release {
             target: maknae_proto::ContainTarget::Name(sentinel.into()),
         };
-        for v in [&contain, &release] {
-            assert!(!format!("{v:?}").contains("sentinel"), "{v:?}");
-        }
+        assert!(!format!("{contain:?}").contains("sentinel-reason"));
         let e = print_payload_for_verb(contain, Payload::Pong).unwrap_err();
         assert_eq!(
             e,

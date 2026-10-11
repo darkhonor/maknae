@@ -35,23 +35,10 @@ pub(crate) enum LiveCheck {
 }
 
 /// A live edit, or a release whose claimants are resolved in the turn.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LiveOp {
     Edit(maknae_config::LiveEdit),
     Release { uid: u32, named: Option<String> },
-}
-
-impl std::fmt::Debug for LiveOp {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Edit(e) => f.debug_tuple("Edit").field(e).finish(),
-            Self::Release { uid, named } => f
-                .debug_struct("Release")
-                .field("uid", uid)
-                .field("named", &named.as_deref().map(Redacted))
-                .finish(),
-        }
-    }
 }
 
 /// What the live record says beyond the edit; trail-only.
@@ -351,21 +338,12 @@ pub(crate) fn release_probe() -> Verb {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn live_notes_and_ops_debug_their_operands_as_a_length_only() {
+    fn a_live_note_debugs_its_reason_as_a_length_only() {
         let shown = format!(
             "{:?}",
             super::LiveNote {
                 requester: Some((7, 9)),
                 reason: Some("SENTINEL-note"),
-            }
-        );
-        assert!(!shown.contains("SENTINEL"), "{shown}");
-        assert!(shown.contains("<13 bytes>"), "{shown}");
-        let shown = format!(
-            "{:?}",
-            super::LiveOp::Release {
-                uid: 7,
-                named: Some("SENTINEL-name".into()),
             }
         );
         assert!(!shown.contains("SENTINEL"), "{shown}");

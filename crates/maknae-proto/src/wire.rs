@@ -619,20 +619,11 @@ pub const CONTAIN_NAME_MAX_BYTES: usize = 256;
 /// Format (Cf) characters the operand rule admits; bidi overrides never are.
 pub const CONTAIN_ALLOWED_FORMAT: &[char] = &[];
 
-/// The subject an `admin.contain` or `admin.release` names; `Debug` prints a name's length only.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// The subject an `admin.contain` or `admin.release` names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContainTarget {
     Name(String),
     Uid(u32),
-}
-
-impl std::fmt::Debug for ContainTarget {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Name(n) => write!(f, "Name(<{} bytes>)", n.len()),
-            Self::Uid(u) => f.debug_tuple("Uid").field(u).finish(),
-        }
-    }
 }
 
 /// The containment reason: free text, so `Debug` prints its length only.
@@ -2554,25 +2545,6 @@ mod tests {
             "ab",
             "the text itself is reachable for the trail"
         );
-    }
-
-    #[test]
-    fn a_contain_target_name_never_prints_in_debug() {
-        let sentinel = "sentinel-name-6d0f";
-        for verb in [
-            Verb::AdminContain {
-                target: ContainTarget::Name(sentinel.into()),
-                reason: "r".into(),
-            },
-            Verb::AdminRelease {
-                target: ContainTarget::Name(sentinel.into()),
-            },
-        ] {
-            let dbg = format!("{verb:?}");
-            assert!(!dbg.contains(sentinel), "{dbg}");
-            assert!(dbg.contains("Name(<18 bytes>)"), "{dbg}");
-        }
-        assert_eq!(format!("{:?}", ContainTarget::Uid(4242)), "Uid(4242)");
     }
 
     #[test]
