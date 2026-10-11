@@ -2526,13 +2526,30 @@ ordering_probe a-second-verdict-import-in-a-fn "decide.rs must import Verdict ex
     use crate::fake::Verdict;
 }
 "
-ordering_probe lib-spaced-path "lib.rs calls decide::decide_real; only decide_loaded_cited and decide_loaded_with_role may be entry points (near line 2)" "$CLEAN_DECIDE" "$CLEAN_BINDING" "${CLEAN_LIB/decide::decide_loaded_cited/decide :: decide_real}
+ordering_probe lib-spaced-path "lib.rs references decide::decide_real, which is not on its allowlist (near line 2)" "$CLEAN_DECIDE" "$CLEAN_BINDING" "${CLEAN_LIB/decide::decide_loaded_cited/decide :: decide_real}
 "
-ordering_probe lib-path-broken-after-the-colons "lib.rs calls decide::decide_real; only decide_loaded_cited and decide_loaded_with_role may be entry points (near line 3)" "$CLEAN_DECIDE" "$CLEAN_BINDING" "fn other() {}
+ordering_probe lib-path-broken-after-the-colons "lib.rs references decide::decide_real, which is not on its allowlist (near line 3)" "$CLEAN_DECIDE" "$CLEAN_BINDING" "fn other() {}
 ${CLEAN_LIB/decide::decide_loaded_cited/decide::
         decide_real}
 "
-ordering_probe lib-calls-a-renamed-decision "lib.rs calls decide::decide_real" "$CLEAN_DECIDE" "$CLEAN_BINDING" "${CLEAN_LIB/decide_loaded_cited/decide_real}
+swap='mod inner {
+    #[cfg(any())]
+    use crate::role::Role;
+}
+mod r#Role {
+    pub const Admin: u8 = 0;
+}'
+ordering_probe a-raw-identifier-mod-role-swap "decide.rs declares \`mod Role\`" "${CLEAN_DECIDE/use crate::role::Role;/$swap}"
+ordering_probe a-cfgd-out-canonical-import "decide.rs has a #[cfg below column 0 at line 1" "${CLEAN_DECIDE/use crate::role::Role;/mod dead { #[cfg(any())] use crate::role::Role; \}
+}"
+ordering_probe an-inline-module-in-decide "decide.rs declares an inline module \`dead\` at line 1" "${CLEAN_DECIDE/use crate::role::Role;/mod dead { #[cfg(any())] use crate::role::Role; \}
+}"
+ordering_probe lib-calls-through-a-const-fn-pointer "lib.rs references decide::ENTRY, which is not on its allowlist" "${CLEAN_DECIDE}pub(crate) const ENTRY: fn(&LoadedPolicy, &maknae_config::Principal, &SecRequest) -> Decided = decide_real;
+" "$CLEAN_BINDING" "${CLEAN_LIB/decide::decide_loaded_cited/decide::ENTRY}
+"
+ordering_probe lib-calls-a-raw-identifier "lib.rs references decide::decide_real, which is not on its allowlist (near line 2)" "$CLEAN_DECIDE" "$CLEAN_BINDING" "${CLEAN_LIB/decide::decide_loaded_cited/decide::r#decide_real}
+"
+ordering_probe lib-calls-a-renamed-decision "lib.rs references decide::decide_real, which is not on its allowlist" "$CLEAN_DECIDE" "$CLEAN_BINDING" "${CLEAN_LIB/decide_loaded_cited/decide_real}
 "
 ordering_probe lib-never-calls-decide "lib.rs never calls decide::decide_loaded_cited(" "$CLEAN_DECIDE" "$CLEAN_BINDING" 'fn decide_on() {}
 '

@@ -40,6 +40,7 @@ lex() {
         if (start && match(substr(line, i), /^[bc]?r#*"/)) {
           print "LEX-ERROR raw string literal (prefix " substr(line, i, RLENGTH - 1) ") at line " NR; bad = 1; exit
         }
+        if (start && substr(line, i) ~ /^r#[A-Za-z_]/) { i += 2; continue }
         if (c == "\"") { instr = 1; out = out "\""; i++; continue }
         if (c == q) {
           if (d == "\\") {
@@ -143,11 +144,13 @@ if [ -n "$lib_lexed" ]; then
         }
       }
       rest = text; off = 0
-      while (match(rest, /(^|[^A-Za-z0-9_])decide::[a-z_][A-Za-z0-9_]*/)) {
+      split("decide_loaded_cited decide_loaded_with_role GRANTABLE_ACTIONS SUBJECT_UID RESOURCE_PATH Decided ActionGrants ActionTerm DestinationGrants", names, " ")
+      for (k in names) allowed[tolower(names[k])] = 1
+      while (match(rest, /(^|[^A-Za-z0-9_])decide::[A-Za-z_][A-Za-z0-9_]*/)) {
         name = substr(rest, RSTART, RLENGTH); sub(/^.*decide::/, "", name)
         at = off + RSTART
         if (name == "decide_loaded_cited") cited++
-        else if (name != "decide_loaded_with_role") out("lib.rs calls decide::" name "; only decide_loaded_cited and decide_loaded_with_role may be entry points (near line " line_of(at) ")")
+        if (!(tolower(name) in allowed)) out("lib.rs references decide::" name ", which is not on its allowlist (near line " line_of(at) ")")
         off += RSTART + RLENGTH - 1; rest = substr(rest, RSTART + RLENGTH)
       }
       if (!cited) out("lib.rs never calls decide::decide_loaded_cited(")
@@ -160,7 +163,14 @@ if [ -n "$decide_lexed" ]; then
   awk -F '\t' '
     function out(m) { print "FAIL: " m; rc = 1 }
     function trim(x) { sub(/^[[:space:]]+/, "", x); sub(/[[:space:]]+$/, "", x); return x }
-    { t = $0; sub(/^[^\t]*\t/, "", t); text = text t "\n" }
+    {
+      t = $0; sub(/^[^\t]*\t/, "", t); text = text t "\n"
+      if (index(t, "#[cfg") > 1) out("decide.rs has a #[cfg below column 0 at line " $1)
+      if (match(t, /(^|[^A-Za-z0-9_])mod[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/)) {
+        m = substr(t, RSTART, RLENGTH); sub(/^.*mod[[:space:]]+/, "", m)
+        out("decide.rs declares an inline module `" m "` at line " $1)
+      }
+    }
     END {
       gsub(/[[:space:]]*::[[:space:]]*/, "::", text)
       canon["Role"] = "use crate::role::Role"
