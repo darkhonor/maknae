@@ -440,16 +440,21 @@ mod tests {
         };
         let batch = {
             let (c, home) = (c.clone(), g.0.clone());
+            let (tx, rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
-                c.decide_cited_all(&[permitted_read(&home), permitted_read(&home)])
-            })
+                let _ =
+                    tx.send(c.decide_cited_all(&[permitted_read(&home), permitted_read(&home)]));
+            });
+            rx
         };
         assert!(arrives(), "the batch never reached evaluation");
         c.baseline().install(next.clone());
         releases();
         assert!(arrives(), "the batch stopped after one evaluation");
         releases();
-        let all = batch.join().unwrap();
+        let all = batch
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the batch never finished");
         assert_eq!(all.len(), 2);
         for d in all {
             assert!(matches!(d.verdict, Verdict::Permit { .. }), "{d:?}");
@@ -457,11 +462,17 @@ mod tests {
         assert!(std::sync::Arc::ptr_eq(&c.baseline().snapshot(), &next));
         let probe = {
             let (c, home) = (c.clone(), g.0.clone());
-            std::thread::spawn(move || c.decide(&permitted_read(&home)))
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(c.decide(&permitted_read(&home)));
+            });
+            rx
         };
         assert!(arrives(), "the probe never reached evaluation");
         releases();
-        let probed = probe.join().unwrap();
+        let probed = probe
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the probe never finished");
         assert!(matches!(probed, Verdict::Deny { .. }), "{probed:?}");
     }
 
