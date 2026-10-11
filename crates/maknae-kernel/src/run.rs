@@ -192,14 +192,23 @@ pub struct ReleaseRequest<'a> {
 }
 
 /// The corrective record a refused or unchanged containment request writes.
-#[derive(Debug)]
 pub struct Corrective {
     pub result: &'static str,
     pub posture: &'static str,
     pub reason: String,
 }
 
-#[derive(Debug)]
+impl std::fmt::Debug for Corrective {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Corrective")
+            .field("result", &self.result)
+            .field("posture", &self.posture)
+            .field("reason", &crate::containment::Redacted(&self.reason))
+            .finish()
+    }
+}
+
+/// How a containment request is answered.
 pub enum ContainAnswer {
     /// Respond with this view after `corrective`'s record, when there is one.
     View {
@@ -208,6 +217,23 @@ pub enum ContainAnswer {
     },
     /// Answer Internal with `reply`; `why` reaches the trail only.
     Unavailable { reply: &'static str, why: String },
+}
+
+impl std::fmt::Debug for ContainAnswer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::View { view, corrective } => f
+                .debug_struct("View")
+                .field("view", view)
+                .field("corrective", corrective)
+                .finish(),
+            Self::Unavailable { reply, why } => f
+                .debug_struct("Unavailable")
+                .field("reply", reply)
+                .field("why", &crate::containment::Redacted(why))
+                .finish(),
+        }
+    }
 }
 
 /// `admin.contain` and `admin.release`, as a request reaches them.
@@ -281,7 +307,7 @@ fn answer(
     reason: Option<&str>,
     applied: Result<LiveApplied, crate::containment::LiveRefusal>,
 ) -> ContainAnswer {
-    use crate::containment::{Kind, LiveRefusal};
+    use crate::containment::Kind;
     match applied {
         Ok(LiveApplied::Committed { revision }) => ContainAnswer::View {
             view: maknae_proto::ContainmentView {
@@ -296,14 +322,11 @@ fn answer(
             },
             corrective: None,
         },
-        Err(r) => match crate::containment::outcome(&r) {
-            Some(code) => refused(kind, code, Some(uid), "", reason),
-            None => ContainAnswer::Unavailable {
+        Err(r) => match crate::containment::outcome(r) {
+            Ok(code) => refused(kind, code, Some(uid), "", reason),
+            Err(why) => ContainAnswer::Unavailable {
                 reply: CONTAINMENT_UNAVAILABLE,
-                why: match r {
-                    LiveRefusal::Failed(why) => why,
-                    other => format!("{other:?}"),
-                },
+                why,
             },
         },
     }
@@ -4405,6 +4428,15 @@ where
         &self,
         req: LiveRequest<'_>,
     ) -> Result<LiveApplied, crate::containment::LiveRefusal> {
+        self.live_edit_resolving(req, &mut None).await
+    }
+
+    /// A live edit; `released` is set to the uid a release acted on, resolved in the turn.
+    async fn live_edit_resolving(
+        &self,
+        req: LiveRequest<'_>,
+        released: &mut Option<u32>,
+    ) -> Result<LiveApplied, crate::containment::LiveRefusal> {
         use crate::containment::{LiveCheck, LiveOp, LiveRefusal};
         use maknae_config::LiveEdit;
         let LiveRequest {
@@ -4430,14 +4462,15 @@ where
             maknae_graph::identity::extract(&persisted).map_err(|e| failed(e.to_string()))?;
         let edit = match op {
             LiveOp::Edit(e) => e,
-            LiveOp::Release { uid, named } => LiveEdit::ReleaseUid {
-                uid,
-                names: crate::containment::release_names(
+            LiveOp::Release { uid, named } => {
+                let claims = stored.layer.claims();
+                let uid = crate::containment::release_target(uid, named.as_deref(), &claims);
+                *released = Some(uid);
+                LiveEdit::ReleaseUid {
                     uid,
-                    named.as_deref(),
-                    &stored.layer.claims(),
-                ),
-            },
+                    names: crate::containment::release_names(uid, named.as_deref(), &claims),
+                }
+            }
         };
         if !crate::containment::binds_target_by_uid(check, &edit) {
             return Err(failed("a containment binds its target by uid".into()));
@@ -4460,7 +4493,9 @@ where
             Ok(None) => {
                 return Err(match edit {
                     LiveEdit::Contain(_) => LiveRefusal::AlreadyContained,
-                    LiveEdit::ReleaseUid { .. } => LiveRefusal::NotContained,
+                    LiveEdit::ReleaseUid { uid, .. } => {
+                        crate::containment::nothing_released(&stored.layer, uid)
+                    }
                     LiveEdit::Bind { .. } | LiveEdit::Unbind(_) => {
                         LiveRefusal::Failed("the live edit changes nothing".into())
                     }
@@ -4501,9 +4536,11 @@ where
             live: next_live.canonical(),
             conflicts: maknae_config::conflicts_canonical(&edited.conflicts),
         };
-        let events: Vec<String> = std::iter::once(crate::sync::live_reason(&edit, who, &note))
-            .chain(edited.events.iter().map(crate::sync::event_reason))
-            .collect();
+        let removed = crate::sync::removed(&edit, &live, &next_live);
+        let events: Vec<String> =
+            std::iter::once(crate::sync::live_reason(&edit, &removed, who, &note))
+                .chain(edited.events.iter().map(crate::sync::event_reason))
+                .collect();
         let counts = crate::sync::counts(&next_sync).map_err(failed)?;
         let revision = self
             .revision
@@ -5092,7 +5129,9 @@ where
                 reason: None,
             },
         };
-        answer(Kind::Release, uid, None, self.live_edit(req).await)
+        let mut released = None;
+        let applied = self.live_edit_resolving(req, &mut released).await;
+        answer(Kind::Release, released.unwrap_or(uid), None, applied)
     }
 
     async fn resolve_contain_target(
@@ -5236,7 +5275,6 @@ where
     ) -> KernelContain {
         use crate::containment::{
             corrective, outcome, quoted, record_class, Kind, LiveCheck, LiveNote, LiveOp,
-            LiveRefusal,
         };
         if !crate::containment::permits(&decided) {
             let why =
@@ -5299,12 +5337,9 @@ where
             }
             Err(r) => r,
         };
-        let Some(code) = outcome(&refusal) else {
-            let why = match refusal {
-                LiveRefusal::Failed(why) => why,
-                other => format!("{other:?}"),
-            };
-            return self.kernel_failed(ctx, target, why).await;
+        let code = match outcome(refusal) {
+            Ok(code) => code,
+            Err(why) => return self.kernel_failed(ctx, target, why).await,
         };
         let (result, posture) = record_class(code);
         let text = corrective(Kind::KernelContain, code, Some(target), "", Some(reason));
@@ -9082,6 +9117,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             &[],
             &[crate::sync::live_reason(
                 &edit,
+                &[],
                 initiator,
                 &crate::containment::LiveNote::none(),
             )],
@@ -14525,6 +14561,23 @@ mod reload_tests {
         }
     }
 
+    #[test]
+    fn containment_answers_debug_their_trail_text_as_a_length_only() {
+        let corrective = Corrective {
+            result: "deny",
+            posture: "unauthorized",
+            reason: "SENTINEL-corrective".into(),
+        };
+        let unavailable = ContainAnswer::Unavailable {
+            reply: CONTAINMENT_UNAVAILABLE,
+            why: "SENTINEL-why".into(),
+        };
+        for shown in [format!("{corrective:?}"), format!("{unavailable:?}")] {
+            assert!(!shown.contains("SENTINEL"), "{shown}");
+            assert!(shown.contains(" bytes>"), "{shown}");
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_reload_carries_the_persisted_baseline_unchanged() {
         let fx = Fx::with_baseline("carry").await;
@@ -17395,6 +17448,80 @@ mod reload_tests {
             rec.reason
         );
         assert!(!rec.reason.contains("\\u{"), "no escape_default");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_release_by_name_reports_the_uid_the_name_claims_in_the_turn() {
+        let fx = fixture(
+            "release-moved",
+            RELEASE_TO_ADMIN,
+            Some("schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary:\n    - \"daemon\"\n"),
+        )
+        .await;
+        let stale = daemon_uid().wrapping_add(41651);
+        let mut released = None;
+        let r = bounded(fx.reloader.live_edit_resolving(
+            LiveRequest {
+                op: LiveOp::Release {
+                    uid: stale,
+                    named: Some("daemon".into()),
+                },
+                who: LiveInitiator::Operator,
+                check: LiveCheck::None,
+                note: LiveNote::none(),
+            },
+            &mut released,
+        ))
+        .await;
+        assert!(matches!(r, Ok(LiveApplied::Committed { .. })), "{r:?}");
+        assert_eq!(released, Some(daemon_uid()));
+        assert_eq!(
+            sync_seen(&fx, 0)
+                .into_iter()
+                .find(|l| l.starts_with("live (operator)"))
+                .unwrap(),
+            format!("live (operator): release uid:{} (\"daemon\")", daemon_uid())
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_release_record_lists_only_the_claimants_it_removed() {
+        let fx = fixture(
+            "release-removed",
+            RELEASE_TO_ADMIN,
+            Some(&format!(
+                "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary:\n    - \"{}\"\n",
+                "daemon"
+            )),
+        )
+        .await;
+        let uid = daemon_uid();
+        bounded(fx.live(
+            LiveOp::Edit(LiveEdit::Contain(BindingEntry::Uid(uid))),
+            LiveCheck::None,
+        ))
+        .await
+        .unwrap();
+        let from = fx.seen().len();
+        bounded(fx.live(
+            LiveOp::Release {
+                uid,
+                named: Some("maknae-165-not-a-claimant".into()),
+            },
+            LiveCheck::None,
+        ))
+        .await
+        .unwrap();
+        let rec = fx.seen()[from..]
+            .iter()
+            .find(|s| s.action == "graph.sync" && s.reason.starts_with("live (operator)"))
+            .unwrap()
+            .reason
+            .clone();
+        assert_eq!(
+            rec,
+            format!("live (operator): release uid:{uid} (uid:{uid}, \"daemon\")")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

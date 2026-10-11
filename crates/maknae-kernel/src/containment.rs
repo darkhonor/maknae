@@ -33,17 +33,48 @@ pub(crate) enum LiveCheck {
 }
 
 /// A live edit, or a release whose claimants are resolved in the turn.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) enum LiveOp {
     Edit(maknae_config::LiveEdit),
     Release { uid: u32, named: Option<String> },
 }
 
+impl std::fmt::Debug for LiveOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Edit(e) => f.debug_tuple("Edit").field(e).finish(),
+            Self::Release { uid, named } => f
+                .debug_struct("Release")
+                .field("uid", uid)
+                .field("named", &named.as_deref().map(Redacted))
+                .finish(),
+        }
+    }
+}
+
 /// What the live record says beyond the edit; trail-only.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct LiveNote<'a> {
     pub requester: Option<(u32, u64)>,
     pub reason: Option<&'a str>,
+}
+
+impl std::fmt::Debug for LiveNote<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LiveNote")
+            .field("requester", &self.requester)
+            .field("reason", &self.reason.map(Redacted))
+            .finish()
+    }
+}
+
+/// Trail-only text, shown by its length.
+pub(crate) struct Redacted<'a>(pub &'a str);
+
+impl std::fmt::Debug for Redacted<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<{} bytes>", self.0.len())
+    }
 }
 
 impl LiveNote<'_> {
@@ -57,9 +88,9 @@ impl LiveNote<'_> {
     }
 }
 
-/// The reply code for a refusal; an internal failure has none.
-pub(crate) fn outcome(r: &LiveRefusal) -> Option<ContainmentOutcome> {
-    Some(match r {
+/// The reply code for a refusal, or an internal failure's trail-only text.
+pub(crate) fn outcome(r: LiveRefusal) -> Result<ContainmentOutcome, String> {
+    Ok(match r {
         LiveRefusal::Busy => ContainmentOutcome::Busy,
         LiveRefusal::Stopping => ContainmentOutcome::Stopping,
         LiveRefusal::NoExplicitBindings => ContainmentOutcome::NoExplicitBindings,
@@ -68,7 +99,7 @@ pub(crate) fn outcome(r: &LiveRefusal) -> Option<ContainmentOutcome> {
         LiveRefusal::AlreadyContained => ContainmentOutcome::AlreadyContained,
         LiveRefusal::NotContained => ContainmentOutcome::NotContained,
         LiveRefusal::LookupUnavailable => ContainmentOutcome::LookupUnavailable,
-        LiveRefusal::Failed(_) => return None,
+        LiveRefusal::Failed(why) => return Err(why),
     })
 }
 
@@ -143,6 +174,20 @@ pub(crate) fn is_contained(layer: &IdentityLayer, uid: u32) -> bool {
         .subjects
         .iter()
         .any(|s| s.uid == uid && s.role == maknae_graph::kernel::ADVERSARY)
+}
+
+/// A release that edits nothing: not contained, unless the layer still contains `uid`.
+pub(crate) fn nothing_released(layer: &IdentityLayer, uid: u32) -> LiveRefusal {
+    if is_contained(layer, uid) {
+        LiveRefusal::Failed("the release found no claimant for a contained uid".into())
+    } else {
+        LiveRefusal::NotContained
+    }
+}
+
+/// The uid a release acts on: the one `named` claims under the turn, else `uid`.
+pub(crate) fn release_target(uid: u32, named: Option<&str>, claims: &BTreeMap<String, u32>) -> u32 {
+    named.and_then(|n| claims.get(n)).copied().unwrap_or(uid)
 }
 
 /// Every adversary name claiming `uid`, plus the name the request gave.
@@ -296,6 +341,28 @@ pub(crate) fn release_probe() -> Verb {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn live_notes_and_ops_debug_their_operands_as_a_length_only() {
+        let shown = format!(
+            "{:?}",
+            super::LiveNote {
+                requester: Some((7, 9)),
+                reason: Some("SENTINEL-note"),
+            }
+        );
+        assert!(!shown.contains("SENTINEL"), "{shown}");
+        assert!(shown.contains("<13 bytes>"), "{shown}");
+        let shown = format!(
+            "{:?}",
+            super::LiveOp::Release {
+                uid: 7,
+                named: Some("SENTINEL-name".into()),
+            }
+        );
+        assert!(!shown.contains("SENTINEL"), "{shown}");
+        assert!(shown.contains("<13 bytes>"), "{shown}");
+    }
+
     use super::*;
     use maknae_graph::identity::{IdentityLayer, SubjectEntry};
     use maknae_proto::ContainmentOutcome;
@@ -544,6 +611,17 @@ mod tests {
     }
 
     #[test]
+    fn a_release_that_edits_nothing_fails_while_its_uid_is_contained() {
+        let layer = layer_with(&[(1003, "uid:1003", "adversary"), (1001, "alice", "admin")]);
+        assert!(matches!(
+            nothing_released(&layer, 1003),
+            LiveRefusal::Failed(_)
+        ));
+        assert_eq!(nothing_released(&layer, 1001), LiveRefusal::NotContained);
+        assert_eq!(nothing_released(&layer, 7), LiveRefusal::NotContained);
+    }
+
+    #[test]
     fn contained_is_read_from_the_stored_layer_including_carried_forward() {
         let layer = layer_with(&[
             (1003, "mallory", "adversary"),
@@ -552,6 +630,14 @@ mod tests {
         ]);
         assert!(is_contained(&layer, 1003) && is_contained(&layer, 666));
         assert!(!is_contained(&layer, 1001) && !is_contained(&layer, 7));
+    }
+
+    #[test]
+    fn a_release_by_name_acts_on_the_uid_the_name_claims_in_the_turn() {
+        let claims: BTreeMap<String, u32> = [("mallory".to_string(), 1004)].into();
+        assert_eq!(release_target(1003, Some("mallory"), &claims), 1004);
+        assert_eq!(release_target(1003, Some("ghost"), &claims), 1003);
+        assert_eq!(release_target(1003, None, &claims), 1003);
     }
 
     #[test]
@@ -576,8 +662,8 @@ mod tests {
     #[test]
     fn every_refusal_maps_to_its_code_and_record_class() {
         use ContainmentOutcome::*;
-        assert_eq!(outcome(&LiveRefusal::Busy), Some(Busy));
-        assert_eq!(outcome(&LiveRefusal::Failed("x".into())), None);
+        assert_eq!(outcome(LiveRefusal::Busy), Ok(Busy));
+        assert_eq!(outcome(LiveRefusal::Failed("x".into())), Err("x".into()));
         assert_eq!(record_class(LastReleaser), ("deny", "refused"));
         assert_eq!(record_class(SelfContainWithoutRelease), ("deny", "refused"));
         assert_eq!(record_class(NoExplicitBindings), ("deny", "refused"));
@@ -607,7 +693,7 @@ mod tests {
             (LiveRefusal::NotContained, O::NotContained),
             (LiveRefusal::LookupUnavailable, O::LookupUnavailable),
         ] {
-            assert_eq!(outcome(&r), Some(o), "{r:?}");
+            assert_eq!(outcome(r.clone()), Ok(o), "{r:?}");
         }
     }
 

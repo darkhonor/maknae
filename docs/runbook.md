@@ -316,7 +316,7 @@ now, as of the last applied reload), and `maknae baseline-show` and
 `maknae contain` and `maknae release` ([Bind a user, contain a subject](#bind-a-user-contain-a-subject)).
 The packaged `authz.yaml` grants the `admin` role `admin.status`,
 `admin.subject.list`, `admin.baseline.show`, `admin.baseline.accept` and `admin.release`;
-`admin.config.show` and `admin.contain` ship **ungranted** and answers `not authorized` until a site
+`admin.config.show` and `admin.contain` ship **ungranted** and answer `not authorized` until a site
 adds it to a `roles:` grant. A refusal of an ungranted term is the default
 posture, not a fault to debug — check the grant before the daemon.
 
@@ -1087,12 +1087,12 @@ maknae release mallory
 maknae release --uid 4242
 ```
 
-- **Who may.** `admin.contain` and `admin.release` are separate grants under `roles.admin.allow` in `authz.yaml`, grantable to `admin` only (a grant of either to `guest` or `adversary` refuses at load). The shipped file grants `admin.release` and does **not** grant `admin.contain`: add `- "admin.contain"` deliberately, then reload ([Reload the policy](#reload-the-policy)). Holding `admin` grants neither.
+- **Who may.** `admin.contain` and `admin.release` are separate grants under `roles.admin.allow` in `authz.yaml`, grantable to `admin` only (a grant of either to `user`, `guest` or `adversary` refuses at load). The shipped file grants `admin.release` and does **not** grant `admin.contain`: add `- "admin.contain"` deliberately, then reload ([Reload the policy](#reload-the-policy)). Holding `admin` grants neither.
 - **What it does.** The subject is bound to `adversary`, and its next decision is denied, liveness included. Work already running is not stopped (#481, #166).
 - **The target** is a username or `--uid`. A name is looked up at that moment, and an unknown name is refused rather than recording a containment of nobody. The containment is recorded as `uid: N`, so a later directory outage releases nothing.
 - **The reason is required**: 1 to 384 bytes of UTF-8 in any script (about 128 Hangul syllables or 384 Latin characters). Control characters, invisible or bidirectional formatting characters (including the direction overrides), line and paragraph separators and private-use characters are refused, and the text is normalised to NFC. A user name follows the same character rule, up to 256 bytes, and is refused with leading or trailing whitespace. The reason and any name operand go in the audit trail only: never in a reply, the mirror or `/etc/maknae`. The target uid is not secret: it is in the reply and, after a sync, in `bindings.yaml` as `- uid: <n>`.
 - **Self-contain** is allowed only if you hold `admin.release`, meaning the PDP permits it for you on the current snapshot (an explicit deny counts). A contain that would leave nobody uncontained holding `admin.release` is refused, so every operator contain is refused when the policy grants `admin.release` to nobody. The kernel's own containment (`kernel.contain`, compiled in, with no wire form; its triggers are #149) is exempt from that last check. Root can always recover outside the daemon: edit `bindings.yaml` and reload, or `sudo maknae reseed`.
-- **Release** removes every `adversary` entry that claims the uid: the live `uid: N` entry, live names, and a name root listed in the file. It consults nothing the contained subject holds. Removing a name root listed is a live edit, and root's next edit of that name may conflict with it ([How bindings.yaml and live state merge](#how-bindingsyaml-and-live-state-merge)). The release record lists the claimants it removed, `release uid:4242 (uid:4242, "mallory")`, and is just `release uid:4242` when no name is listed. A contain and its release correlate by target uid and revision.
+- **Release** removes every `adversary` entry that claims the uid: the live `uid: N` entry, live names, and a name root listed in the file. It consults nothing the contained subject holds. Removing a name root listed is a live edit, and root's next edit of that name may conflict with it ([How bindings.yaml and live state merge](#how-bindingsyaml-and-live-state-merge)). The release record lists the claimants it removed, `release uid:4242 (uid:4242, "mallory")`, and is just `release uid:4242` when it removed only the `uid: N` entry. A contain and its release correlate by target uid and revision.
 - **A keyless host** (not re-enrolled, so `bindings.yaml` has no `bindings:` key) refuses with `no-explicit-bindings`: re-enroll with `sudo maknae enroll` ([upgrading](upgrading.md#containment-verbs-165)).
 
 A policy denial is the generic `Unauthorized`. A caller who holds the grant and is refused gets a fixed code:
