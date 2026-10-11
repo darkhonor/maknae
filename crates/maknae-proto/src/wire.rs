@@ -1822,6 +1822,19 @@ mod tests {
             .unwrap();
             assert!(decode_request(&buf).is_err());
         }
+        let mut ok = Vec::new();
+        ciborium::into_writer(
+            &Value::Map(vec![
+                (
+                    Value::Text("protocol_version".into()),
+                    Value::Integer(1.into()),
+                ),
+                (Value::Text("verb".into()), Value::Text("Ping".into())),
+            ]),
+            &mut ok,
+        )
+        .unwrap();
+        assert!(decode_request(&ok).is_ok());
     }
 
     #[test]

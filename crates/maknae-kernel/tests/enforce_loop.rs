@@ -3827,7 +3827,7 @@ async fn a_contained_admin_granted_release_asking_release_is_unauthorized_with_t
     let fx = Fixture::new("contained-releaser");
     fx.write_policy(BOTH_GRANTED);
     fx.write_bindings(
-        "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary:\n    - uid: 4242\n",
+        "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary:\n    - uid: 0\n",
     );
     let ops = common::scripted_containment(ContainmentOutcome::Released);
     let emit = RecEmit::new();
@@ -3835,7 +3835,7 @@ async fn a_contained_admin_granted_release_asking_release_is_unauthorized_with_t
         &fx.dir,
         fx.authorizer(),
         emit.clone(),
-        4242,
+        0,
         maknae_proto::Verb::AdminRelease {
             target: ContainTarget::Uid(4242),
         },
