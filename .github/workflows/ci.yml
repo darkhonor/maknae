@@ -196,6 +196,8 @@ jobs:
         run: ci/gates/config-disclosure-drift.sh
       - name: Gate — authz composition drift (ADR-0008 decision 1; #154/#148)
         run: ci/gates/authz-composition-drift.sh
+      - name: Gate — containment ordering (#165)
+        run: ci/gates/containment-ordering.sh
       - name: Coverage toolchain component (also required on cache hits)
         run: rustup component add llvm-tools
       - name: Cache coverage-tool executable

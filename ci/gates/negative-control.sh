@@ -839,6 +839,10 @@ grantable	admin.status	grantable-not-granted	operator MAY grant per-role via `ro
 '
 fx="$(vocab_fixture "$CLEAN_VOCAB" 'pub(crate) const GRANTABLE_ACTIONS: [&str; 1] = ["admin.status"];')"
 expect_accept "verb-vocabulary-drift/clean-fixture-passes" ": 5 terms," "$fx/ci/gates/verb-vocabulary-drift.sh"
+# #165 test 18: a kernel-action row with no constant behind it.
+fx="$(vocab_fixture "${CLEAN_VOCAB}kernel-action	kernel.retired	not-granted	no Verb variant
+" 'pub(crate) const GRANTABLE_ACTIONS: [&str; 1] = ["admin.status"];')"
+expect_reject_because "verb-vocabulary-drift/stale-kernel-action" "-kernel-action	kernel.retired" "$fx/ci/gates/verb-vocabulary-drift.sh"
 
 # REJECT (#172): the code says session.prompt is grantable (a real action, decided, dispatched);
 # the manifest carries its action row but no grantable row. Every row carries its clause, so
@@ -2255,6 +2259,229 @@ p.write_text(p.read_text() + "// let _ = Composition::new(a, b);\n/* CeilingAuth
 PYFIX
 expect_accept "authz-composition-drift/commented-or-test-construction-is-not-a-site" "authz-composition-drift: ok" "$f/ci/gates/authz-composition-drift.sh" "$f"
 expect_accept "authz-composition-drift/real-repo" "authz-composition-drift: ok" "$here/authz-composition-drift.sh" "$here/../.."
+
+# ---- containment-ordering (#165): containment is decided before any class arm, and the
+# ---- identity hop reads `contained` before `binds`.
+ordering_fixture() { # <decide.rs body> <binding.rs body>
+  local f
+  f="$(mktemp -d -p "$NC_TMP")"
+  mkdir -p "$f/ci/gates" "$f/crates/maknae-authz-basic/src"
+  cp "$here/containment-ordering.sh" "$f/ci/gates/"
+  printf '%s' "$1" > "$f/crates/maknae-authz-basic/src/decide.rs"
+  printf '%s' "$2" > "$f/crates/maknae-authz-basic/src/binding.rs"
+  git -C "$f" init -q
+  git -C "$f" add .
+  echo "$f"
+}
+CLEAN_DECIDE='pub(crate) fn decide_loaded_cited() {
+    let (verdict, cited) = match role {
+        Role::Adversary => (deny(), None),
+        Role::Guest | Role::User => match class {
+            _ => na(),
+        },
+        Role::Admin => match class {
+            _ => na(),
+        },
+    };
+}
+'
+CLEAN_BINDING='pub(crate) fn role_for(&self) -> Resolution {
+    if self.graph.out_edges(subject.id, CONTAINED).next().is_some() {
+        return adversary();
+    }
+    self.graph.out_edges(subject.id, BINDS).next()
+}
+pub(crate) fn as_subject_bindings(&self) {
+    let c = self.graph.out_edges(s.id, CONTAINED).next();
+    let b = self.graph.out_edges(s.id, BINDS).next();
+}
+pub(crate) fn entries(&self) {
+    let c = self.graph.out_edges(s.id, CONTAINED).next();
+    let b = self.graph.out_edges(s.id, BINDS).next();
+}
+'
+ADV_ARM='        Role::Adversary => (deny(), None),'
+before_adversary() { printf '%s' "${CLEAN_DECIDE/"$ADV_ARM"/"$1
+$ADV_ARM"}"; }
+f="$(ordering_fixture "$CLEAN_DECIDE" "$CLEAN_BINDING")"
+expect_accept "containment-ordering/clean-fixture" "containment-ordering: ok" "$f/ci/gates/containment-ordering.sh" "$f"
+f="$(ordering_fixture 'pub(crate) fn decide_loaded_cited() {
+    let (verdict, cited) = match role {
+        Role::Guest | Role::User => match class {
+            _ => na(),
+        },
+        Role::Admin => match class {
+            _ => na(),
+        },
+        Role::Adversary => (deny(), None),
+    };
+}
+' "$CLEAN_BINDING")"
+expect_reject_because "containment-ordering/adversary-after-a-class-arm" "Role::Adversary must precede" "$f/ci/gates/containment-ordering.sh" "$f"
+f="$(ordering_fixture "${CLEAN_DECIDE/Role::Adversary => (deny(), None),
+        /}" "$CLEAN_BINDING")"
+expect_reject_because "containment-ordering/adversary-arm-missing" "exactly one Role::Adversary arm" "$f/ci/gates/containment-ordering.sh" "$f"
+f="$(ordering_fixture "$CLEAN_DECIDE" 'pub(crate) fn role_for(&self) -> Resolution {
+    let b = self.graph.out_edges(subject.id, BINDS).next();
+    if self.graph.out_edges(subject.id, CONTAINED).next().is_some() {
+        return adversary();
+    }
+    b
+}
+')"
+expect_reject_because "containment-ordering/binds-before-contained" "CONTAINED must be read before BINDS" "$f/ci/gates/containment-ordering.sh" "$f"
+KERNEL_RETURN='    if class_of(&req.action.0) == Some(Class::Kernel) {
+        return undecided(kernel_decided(req));
+    }
+'
+ROLE_LINE='    let role = match lp.roles.role_for(uid, principal.uid) { _ => r };
+'
+with_prelude() {
+  local head='pub(crate) fn decide_loaded_cited() {
+'
+  printf '%s' "${head}$1${CLEAN_DECIDE#"$head"}"
+}
+f="$(ordering_fixture "$(with_prelude "${KERNEL_RETURN}${ROLE_LINE}")" "$CLEAN_BINDING")"
+expect_accept "containment-ordering/the-kernel-early-return-is-allowed" "containment-ordering: ok" "$f/ci/gates/containment-ordering.sh" "$f"
+f="$(ordering_fixture "$(with_prelude "${KERNEL_RETURN}    if class_of(&req.action.0) == Some(Class::Admin) {
+        return undecided(permit());
+    }
+${ROLE_LINE}")" "$CLEAN_BINDING")"
+expect_reject_because "containment-ordering/a-second-class-return-before-roles" "only the kernel early return" "$f/ci/gates/containment-ordering.sh" "$f"
+for case in 'wildcard|        _ if req.action.0 == "liveness.ping" => permit(),' 'binding-pattern|        r if r.key() == "admin" => permit(),' 'adversary-in-list|        Role::Admin | Role::Adversary => permit(),' 'adversary-on-a-continuation-line|        Role::Admin
+            | Role::Adversary => permit(),'; do
+  label="${case%%|*}"; arm="${case#*|}"
+  f="$(ordering_fixture "${CLEAN_DECIDE/        Role::Adversary => (deny(), None),/$arm
+        Role::Adversary => (deny(), None),}" "$CLEAN_BINDING")"
+  expect_reject_because "containment-ordering/arm-before-adversary-$label" "an arm before Role::Adversary must name roles other than Adversary" "$f/ci/gates/containment-ordering.sh" "$f"
+done
+f="$(ordering_fixture "${CLEAN_DECIDE/        Role::Adversary => (deny(), None),/        Role::Admin | Role::User if req.action.0 == \"fs.read\" => fs(),
+        Role::Adversary => (deny(), None),}" "$CLEAN_BINDING")"
+expect_accept "containment-ordering/guarded-role-arms-before-adversary-are-allowed" "containment-ordering: ok" "$f/ci/gates/containment-ordering.sh" "$f"
+f="$(ordering_fixture "$(before_adversary '        Role::Admin | Role::User
+            if matches!(
+                req.action.0.as_str(),
+                "fs.read" | "fs.write"
+            ) =>
+        {
+            fs()
+        }')" "$CLEAN_BINDING")"
+expect_accept "containment-ordering/a-wrapped-guard-before-adversary-is-allowed" "containment-ordering: ok" "$f/ci/gates/containment-ordering.sh" "$f"
+f="$(ordering_fixture "${CLEAN_DECIDE/Role::Adversary => (deny(), None),/Role::Adversary if false => (deny(), None),}" "$CLEAN_BINDING")"
+expect_reject_because "containment-ordering/a-guarded-adversary-arm" "must not carry a guard" "$f/ci/gates/containment-ordering.sh" "$f"
+f="$(ordering_fixture "$(before_adversary '        #[cfg(any())]')" "$CLEAN_BINDING")"
+expect_reject_because "containment-ordering/an-attribute-on-the-adversary-arm" "an attribute inside decide_loaded_cited" "$f/ci/gates/containment-ordering.sh" "$f"
+nested='        Role::Guest => match x {
+            Role::Adversary => (deny(), None),
+        },'
+f="$(ordering_fixture "${CLEAN_DECIDE/"$ADV_ARM"/"$nested"}" "$CLEAN_BINDING")"
+expect_reject_because "containment-ordering/a-nested-adversary-arm" "is not an arm of \`match role {\`" "$f/ci/gates/containment-ordering.sh" "$f"
+f="$(ordering_fixture "$(with_prelude "${KERNEL_RETURN}    if principal.uid == 0 {
+        return undecided(permit());
+    }
+${ROLE_LINE}")" "$CLEAN_BINDING")"
+expect_reject_because "containment-ordering/a-permit-before-roles" "before role resolution only an Indeterminate or the kernel return" "$f/ci/gates/containment-ordering.sh" "$f"
+f="$(ordering_fixture "$(with_prelude "${KERNEL_RETURN}${ROLE_LINE}    let class = class_of(&req.action.0);
+    if class == Some(Class::Liveness) {
+        return undecided(permit());
+    }
+")" "$CLEAN_BINDING")"
+expect_reject_because "containment-ordering/a-class-return-between-roles-and-the-match" "may read the class or action between role resolution" "$f/ci/gates/containment-ordering.sh" "$f"
+f="$(ordering_fixture "$(with_prelude "${KERNEL_RETURN}${ROLE_LINE}    let role = Role::Admin;
+")" "$CLEAN_BINDING")"
+expect_reject_because "containment-ordering/the-role-is-rebound" "the role is rebound outside its role_for(" "$f/ci/gates/containment-ordering.sh" "$f"
+f="$(ordering_fixture "${CLEAN_DECIDE}fn decide_loaded_cited() {}
+" "$CLEAN_BINDING")"
+expect_reject_because "containment-ordering/a-second-decide-definition" "expected exactly one fn decide_loaded_cited" "$f/ci/gates/containment-ordering.sh" "$f"
+f="$(ordering_fixture "${CLEAN_DECIDE}const S: &str = r\"}\";
+" "$CLEAN_BINDING")"
+expect_reject_because "containment-ordering/a-raw-string-fails-closed" "cannot lex" "$f/ci/gates/containment-ordering.sh" "$f"
+f="$(ordering_fixture "$CLEAN_DECIDE" "$CLEAN_BINDING")"
+rm "$f/crates/maknae-authz-basic/src/decide.rs"
+expect_reject_because "containment-ordering/a-missing-decide-fails-closed" "decide.rs is missing" "$f/ci/gates/containment-ordering.sh" "$f"
+f="$(ordering_fixture "$CLEAN_DECIDE" "$(printf '%s' "$CLEAN_BINDING" | awk '$0 ~ "fn role_for\\(" {skip=1} skip && /^}/ {skip=0; next} !skip')pub(crate) fn role_for(&self) -> Resolution {
+    self.lookup()
+}
+")"
+expect_reject_because "containment-ordering/role-for-reads-neither" "role_for reads neither CONTAINED nor BINDS" "$f/ci/gates/containment-ordering.sh" "$f"
+f="$(ordering_fixture "$CLEAN_DECIDE" "use crate::graph::Graph;
+#[cfg(test)]
+${CLEAN_BINDING}#[cfg(not(test))]
+pub(crate) fn role_for(&self) -> Resolution {
+    self.graph.out_edges(subject.id, BINDS).next()
+}
+")"
+expect_reject_because "containment-ordering/a-test-only-decoy-cuts-the-production-half" "fn role_for not found" "$f/ci/gates/containment-ordering.sh" "$f"
+f="$(ordering_fixture "$CLEAN_DECIDE" "${CLEAN_BINDING}#[cfg(not(test))]
+pub(crate) fn role_for(&self) -> Resolution {
+    self.graph.out_edges(subject.id, BINDS).next()
+}
+")"
+expect_reject_because "containment-ordering/a-second-definition-is-checked-too" "CONTAINED must be read before BINDS in role_for" "$f/ci/gates/containment-ordering.sh" "$f"
+for case in 'two-arms-on-one-line|        Role::Admin => (x(), None), _ => (permit(), None),' 'an-arm-indented-as-a-body|        Role::Admin => (x(), None),
+            _ => (permit(), None),'; do
+  label="${case%%|*}"
+  f="$(ordering_fixture "$(before_adversary "${case#*|}")" "$CLEAN_BINDING")"
+  expect_reject_because "containment-ordering/arm-before-adversary-$label" "an arm before Role::Adversary must name roles other than Adversary" "$f/ci/gates/containment-ordering.sh" "$f"
+done
+f="$(ordering_fixture "${CLEAN_DECIDE/"$ADV_ARM"/        Role::Adversary => if req.action.0 == \"liveness.ping\" { (permit(), None) } else { (deny(), None) },}" "$CLEAN_BINDING")"
+expect_reject_because "containment-ordering/the-adversary-arm-reads-the-request" "the Role::Adversary arm must decide without reading the request" "$f/ci/gates/containment-ordering.sh" "$f"
+ROLE_MATCH='    let role = match lp.roles.role_for(uid, principal.uid) {
+        Resolution::Role(r) => r,
+        Resolution::NoRole => {
+            return undecided(Verdict::NotApplicable { note: None })
+        }
+    };
+'
+f="$(ordering_fixture "$(with_prelude "${KERNEL_RETURN}${ROLE_MATCH}    let class = class_of(&req.action.0);
+")" "$CLEAN_BINDING")"
+expect_accept "containment-ordering/the-norole-return-is-allowed" "containment-ordering: ok" "$f/ci/gates/containment-ordering.sh" "$f"
+f="$(ordering_fixture "$(with_prelude "${KERNEL_RETURN}${ROLE_MATCH/Resolution::Role(r) => r,/Resolution::Role(r) => {
+            return undecided(permit())
+        }}")" "$CLEAN_BINDING")"
+expect_reject_because "containment-ordering/a-return-from-the-resolved-role" "only the NoRole arm may return" "$f/ci/gates/containment-ordering.sh" "$f"
+f="$(ordering_fixture "$(with_prelude "${KERNEL_RETURN}${ROLE_LINE}    if principal.uid == 0 {
+        audit();
+    }
+")" "$CLEAN_BINDING")"
+expect_reject_because "containment-ordering/a-condition-between-roles-and-the-match" "a condition sits between role resolution" "$f/ci/gates/containment-ordering.sh" "$f"
+f="$(ordering_fixture "$(with_prelude "${KERNEL_RETURN}${ROLE_LINE/let role/let r}")" "$CLEAN_BINDING")"
+expect_reject_because "containment-ordering/role-for-does-not-bind-role" "the role_for( line must bind \`role\`" "$f/ci/gates/containment-ordering.sh" "$f"
+f="$(ordering_fixture "$(with_prelude "${KERNEL_RETURN}${ROLE_LINE}    let (role, _) = (lp.default(), 0);
+")" "$CLEAN_BINDING")"
+expect_reject_because "containment-ordering/the-role-is-rebound-by-a-tuple" "the role is rebound outside its role_for(" "$f/ci/gates/containment-ordering.sh" "$f"
+f="$(ordering_fixture "$(with_prelude "${KERNEL_RETURN}${ROLE_MATCH/Resolution::Role(r) => r,/Resolution::Role(_) => Role::Admin,}")" "$CLEAN_BINDING")"
+expect_reject_because "containment-ordering/the-resolved-role-is-rewritten" "a Role is named between role resolution" "$f/ci/gates/containment-ordering.sh" "$f"
+f="$(ordering_fixture "$(with_prelude "${ROLE_LINE}${ROLE_LINE/let role/let _}")" "$CLEAN_BINDING")"
+expect_reject_because "containment-ordering/two-role-resolutions" "calls role_for( 2 times" "$f/ci/gates/containment-ordering.sh" "$f"
+f="$(ordering_fixture "${CLEAN_DECIDE//match class/match class_of(&req.action.0)}" "$CLEAN_BINDING")"
+expect_reject_because "containment-ordering/no-match-class-fails-closed" "holds no \`match class\`" "$f/ci/gates/containment-ordering.sh" "$f"
+f="$(ordering_fixture "${CLEAN_DECIDE/"$ADV_ARM"/        Role::Guest => match role {
+            _ => na(),
+        },
+$ADV_ARM}" "$CLEAN_BINDING")"
+expect_reject_because "containment-ordering/a-second-match-role" "exactly one \`match role {\`, found 2" "$f/ci/gates/containment-ordering.sh" "$f"
+f="$(ordering_fixture "${CLEAN_DECIDE%\}*}" "$CLEAN_BINDING")"
+expect_reject_because "containment-ordering/an-unclosed-decide-fails-closed" "cannot extract decide_loaded_cited" "$f/ci/gates/containment-ordering.sh" "$f"
+f="$(ordering_fixture "$CLEAN_DECIDE" "$(printf '%s' "$CLEAN_BINDING" | awk '$0 ~ "fn role_for\\(" {skip=1} skip && /^}/ {skip=0; next} !skip')pub(crate) fn role_for(&self) { a(CONTAINED); b(BINDS) } fn role_for(&self) { b(BINDS) }
+")"
+expect_reject_because "containment-ordering/two-definitions-on-one-line-fail-closed" "cannot extract role_for" "$f/ci/gates/containment-ordering.sh" "$f"
+f="$(ordering_fixture "${CLEAN_DECIDE%\}*}${ROLE_LINE}}
+" "$CLEAN_BINDING")"
+expect_reject_because "containment-ordering/role-resolution-after-the-match" "role_for( is called after \`match role {\`" "$f/ci/gates/containment-ordering.sh" "$f"
+f="$(ordering_fixture "$CLEAN_DECIDE" "#[cfg(test)]
+${CLEAN_BINDING}")"
+expect_reject_because "containment-ordering/an-empty-production-half-fails-closed" "the production half of" "$f/ci/gates/containment-ordering.sh" "$f"
+for fn in as_subject_bindings entries; do
+  reversed="pub(crate) fn ${fn}(&self) {
+    let b = self.graph.out_edges(s.id, BINDS).next();
+    let c = self.graph.out_edges(s.id, CONTAINED).next();
+}
+"
+  f="$(ordering_fixture "$CLEAN_DECIDE" "$(printf '%s' "$CLEAN_BINDING" | awk -v fn="$fn" '$0 ~ "fn " fn "\\(" {skip=1} skip && /^}/ {skip=0; next} !skip')${reversed}")"
+  expect_reject_because "containment-ordering/binds-before-contained-in-$fn" "CONTAINED must be read before BINDS in $fn" "$f/ci/gates/containment-ordering.sh" "$f"
+done
+expect_accept "containment-ordering/real-repo" "containment-ordering: ok" "$here/containment-ordering.sh" "$here/../.."
 
 
 # ---- clippy-all (#74): a DERIVED input set is not a scanned one --------------
