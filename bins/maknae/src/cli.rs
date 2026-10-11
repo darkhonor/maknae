@@ -1282,6 +1282,7 @@ mod tests {
         let reply = maknae_proto::Response {
             protocol_version: PROTOCOL_VERSION,
             result: RespResult::Ok(Payload::PromptReply(maknae_proto::PromptReply {
+                reasoning: None,
                 blocks: vec![maknae_proto::ContentBlock::Text {
                     text: maknae_proto::SecretText(zeroize::Zeroizing::new("y".repeat(100 * 1024))),
                 }],
@@ -1446,6 +1447,7 @@ mod tests {
         maknae_proto::encode_response(&maknae_proto::Response {
             protocol_version: PROTOCOL_VERSION,
             result: RespResult::Ok(Payload::PromptReply(maknae_proto::PromptReply {
+                reasoning: None,
                 blocks: vec![maknae_proto::ContentBlock::Text {
                     text: maknae_proto::SecretText(zeroize::Zeroizing::new("sentinel-413".into())),
                 }],

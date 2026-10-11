@@ -156,6 +156,7 @@ mod tests {
 
     fn canned(_a: &maknae_deputy::handle::Admitted<'_>) -> Result<EgressFrameReply, ServeError> {
         Ok(EgressFrameReply::Reply(maknae_proto::PromptReply {
+            reasoning: None,
             blocks: vec![],
             tool_calls: vec![],
             usage: None,
@@ -372,6 +373,7 @@ mod tests {
         assert_eq!(
             reply,
             maknae_proto::EgressFrameReply::Reply(maknae_proto::PromptReply {
+                reasoning: None,
                 blocks: vec![],
                 tool_calls: vec![],
                 usage: None,

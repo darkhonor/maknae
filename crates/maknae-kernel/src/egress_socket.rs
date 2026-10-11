@@ -683,6 +683,7 @@ mod tests {
     fn a_peer_with_the_expected_uid_completes_a_round_trip() {
         let d = tempfile::tempdir().unwrap();
         let reply = maknae_proto::PromptReply {
+            reasoning: None,
             blocks: vec![ContentBlock::Text {
                 text: SecretText(maknae_io::Zeroizing::new("ok".into())),
             }],

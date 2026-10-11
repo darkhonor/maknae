@@ -703,6 +703,7 @@ mod tests {
                 content: vec![text("alpha-user")],
             },
             maknae_proto::Turn::Assistant {
+                reasoning: None,
                 content: vec![],
                 tool_calls: vec![maknae_proto::ProposedToolCall {
                     name: "read_file".into(),

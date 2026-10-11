@@ -409,6 +409,7 @@ mod tests {
             }],
         );
         r.turns.push(crate::Turn::Assistant {
+            reasoning: None,
             content: vec![],
             tool_calls: vec![over],
         });
@@ -543,6 +544,7 @@ mod tests {
         // request leg, and what a model echoing a read file produces here.
         let big = "y".repeat(9 * 1024);
         let r = EgressFrameReply::Reply(crate::PromptReply {
+            reasoning: None,
             blocks: vec![text(&big), text(&big)],
             tool_calls: vec![],
             usage: None,
@@ -579,6 +581,7 @@ mod tests {
     #[test]
     fn the_reply_codec_round_trips_and_refuses_garbage() {
         let r = EgressFrameReply::Reply(crate::PromptReply {
+            reasoning: None,
             blocks: vec![text("ok")],
             tool_calls: vec![],
             usage: None,
@@ -597,6 +600,7 @@ mod tests {
         ciborium::into_writer(&"refused_before_send", &mut tag_only).unwrap();
         assert_eq!(&buf[..], &tag_only[..]);
         let reply = EgressFrameReply::Reply(crate::PromptReply {
+            reasoning: None,
             blocks: vec![],
             tool_calls: vec![],
             usage: None,

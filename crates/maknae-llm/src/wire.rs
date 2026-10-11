@@ -262,6 +262,7 @@ pub fn to_prompt_reply(
         return Err(ReplyError::EmptyMessage);
     }
     Ok(maknae_proto::PromptReply {
+        reasoning: None,
         blocks,
         tool_calls,
         usage,

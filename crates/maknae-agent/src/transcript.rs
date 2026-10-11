@@ -34,6 +34,7 @@ impl Transcript {
     /// tool calls the following tool turns answer.
     pub fn push_assistant(&mut self, reply: &PromptReply) {
         self.turns.push(Turn::Assistant {
+            reasoning: None,
             content: reply.blocks.clone(),
             tool_calls: reply.tool_calls.clone(),
         });
@@ -51,6 +52,7 @@ impl Transcript {
                     content.iter().map(block).sum()
                 }
                 Turn::Assistant {
+                    reasoning: _,
                     content,
                     tool_calls,
                 } => {
@@ -104,6 +106,7 @@ mod tests {
     fn the_models_reply_is_echoed_as_an_assistant_turn_with_its_tool_calls() {
         let mut t = Transcript::new("c", "q");
         t.push_assistant(&PromptReply {
+            reasoning: None,
             blocks: vec![text("thinking")],
             tool_calls: vec![call("c1"), call("c2")],
             usage: None,
@@ -111,6 +114,7 @@ mod tests {
         assert_eq!(
             t.turns()[1],
             Turn::Assistant {
+                reasoning: None,
                 content: vec![text("thinking")],
                 tool_calls: vec![call("c1"), call("c2")]
             }
@@ -120,6 +124,7 @@ mod tests {
     fn a_tool_result_answers_its_call_id_as_a_tool_turn() {
         let mut t = Transcript::new("c", "q");
         t.push_assistant(&PromptReply {
+            reasoning: None,
             blocks: vec![],
             tool_calls: vec![call("c1")],
             usage: None,
@@ -138,6 +143,7 @@ mod tests {
         let mut t = Transcript::new("c", "12345");
         assert_eq!(t.bytes(), 5);
         t.push_assistant(&PromptReply {
+            reasoning: None,
             blocks: vec![text("abc")],
             tool_calls: vec![ProposedToolCall {
                 name: "read_file".into(),

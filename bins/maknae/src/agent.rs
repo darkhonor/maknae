@@ -1145,12 +1145,14 @@ mod tests {
         assert_eq!(
             prompt_outcome(Ok(SentOutcome::Payload(Payload::PromptReply(
                 PromptReply {
+                    reasoning: None,
                     blocks: vec![],
                     tool_calls: vec![],
                     usage: None,
                 }
             )))),
             Ok(PromptReply {
+                reasoning: None,
                 blocks: vec![],
                 tool_calls: vec![],
                 usage: None,

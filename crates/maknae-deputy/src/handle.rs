@@ -428,6 +428,7 @@ mod tests {
                 vec![
                     user(vec![text("q")]),
                     Turn::Assistant {
+                        reasoning: None,
                         content: vec![],
                         tool_calls: vec![call()],
                     },
@@ -442,6 +443,7 @@ mod tests {
                 "no leading user turn",
                 vec![
                     Turn::Assistant {
+                        reasoning: None,
                         content: vec![],
                         tool_calls: vec![call()],
                     },
@@ -457,6 +459,7 @@ mod tests {
                 vec![
                     user(vec![text("q")]),
                     Turn::Assistant {
+                        reasoning: None,
                         content: vec![image()],
                         tool_calls: vec![call()],
                     },
@@ -468,6 +471,7 @@ mod tests {
                 vec![
                     user(vec![text("q")]),
                     Turn::Assistant {
+                        reasoning: None,
                         content: vec![],
                         tool_calls: vec![call()],
                     },
@@ -508,6 +512,7 @@ mod tests {
                 vec![
                     user(vec![text("q")]),
                     Turn::Assistant {
+                        reasoning: None,
                         content: vec![],
                         tool_calls: vec![call()],
                     },

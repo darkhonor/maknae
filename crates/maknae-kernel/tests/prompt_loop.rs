@@ -84,6 +84,7 @@ impl maknae_kernel::Egress for Recording {
                 let (content, tool_calls): (&[ContentBlock], &[ProposedToolCall]) = match t {
                     Turn::User { content } | Turn::Tool { content, .. } => (content, &[]),
                     Turn::Assistant {
+                        reasoning: _,
                         content,
                         tool_calls,
                     } => (content, tool_calls),
@@ -122,6 +123,7 @@ impl maknae_kernel::Egress for Recording {
         }
         Ok(maknae_kernel::EgressReply {
             reply: maknae_proto::PromptReply {
+                reasoning: None,
                 tool_calls: vec![],
                 blocks: vec![text("ok")],
                 usage: self.reply_usage,
@@ -326,6 +328,7 @@ async fn a_non_text_reply_is_refused_for_delivery_and_recorded_landed_undelivere
         ) -> Result<maknae_kernel::EgressReply, maknae_kernel::EgressFailure> {
             Ok(maknae_kernel::EgressReply {
                 reply: maknae_proto::PromptReply {
+                    reasoning: None,
                     tool_calls: vec![],
                     blocks: vec![
                         text("ok"),
@@ -384,6 +387,7 @@ async fn a_non_text_reply_is_refused_for_delivery_and_recorded_landed_undelivere
         ) -> Result<maknae_kernel::EgressReply, maknae_kernel::EgressFailure> {
             Ok(maknae_kernel::EgressReply {
                 reply: maknae_proto::PromptReply {
+                    reasoning: None,
                     tool_calls: vec![],
                     blocks: vec![],
                     usage: None,
@@ -823,6 +827,7 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
                         content: vec![text("q")],
                     },
                     Turn::Assistant {
+                        reasoning: None,
                         content: vec![],
                         tool_calls: vec![ProposedToolCall {
                             name: "read_file".into(),
@@ -1367,6 +1372,7 @@ async fn an_oversize_reply_is_refused_as_too_large_never_truncated() {
         ) -> Result<maknae_kernel::EgressReply, maknae_kernel::EgressFailure> {
             Ok(maknae_kernel::EgressReply {
                 reply: maknae_proto::PromptReply {
+                    reasoning: None,
                     tool_calls: vec![],
                     blocks: vec![text(&"x".repeat(1 << 20))],
                     usage: None,

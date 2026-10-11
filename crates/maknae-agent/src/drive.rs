@@ -276,12 +276,13 @@ mod tests {
     #[test]
     fn a_text_only_reply_is_the_answer() {
         assert!(
-            matches!(step(&PromptReply { blocks: vec![text("done")], tool_calls: vec![], usage: None, }, 3, &budget()), Next::Answer(s) if s == "done")
+            matches!(step(&PromptReply { reasoning: None,  blocks: vec![text("done")], tool_calls: vec![], usage: None, }, 3, &budget()), Next::Answer(s) if s == "done")
         );
     }
     #[test]
     fn tool_calls_are_executed_when_steps_remain_and_stop_when_none_do() {
         let r = PromptReply {
+            reasoning: None,
             blocks: vec![],
             tool_calls: vec![call("c1", "read_file", "{}")],
             usage: None,
@@ -295,6 +296,7 @@ mod tests {
         // other row sits strictly off the boundary, so without this one the
         // `>` → `>=` mutant survives (measured: 27 mutants, 1 missed).
         let at_cap = PromptReply {
+            reasoning: None,
             blocks: vec![],
             tool_calls: vec![call("c1", "read_file", "{}"), call("c2", "read_file", "{}")],
             usage: None,
@@ -304,6 +306,7 @@ mod tests {
     #[test]
     fn more_calls_than_the_cap_stop_the_whole_step_never_a_subset() {
         let r = PromptReply {
+            reasoning: None,
             blocks: vec![],
             tool_calls: vec![
                 call("1", "read_file", "{}"),
@@ -379,6 +382,7 @@ mod tests {
     #[tokio::test]
     async fn a_page_from_a_changed_file_is_flagged_and_the_agents_own_write_refreshes_it() {
         let read = |id: &str| PromptReply {
+            reasoning: None,
             blocks: vec![],
             tool_calls: vec![call(id, "read_file", r#"{"path":"/w/a.txt"}"#)],
             usage: None,
@@ -388,6 +392,7 @@ mod tests {
             read("c2"),
             read("c3"),
             PromptReply {
+                reasoning: None,
                 blocks: vec![],
                 tool_calls: vec![call(
                     "c4",
@@ -398,6 +403,7 @@ mod tests {
             },
             read("c5"),
             PromptReply {
+                reasoning: None,
                 blocks: vec![text("done")],
                 tool_calls: vec![],
                 usage: None,
@@ -444,6 +450,7 @@ mod tests {
 
     fn one(id: &str, name: &str, args: &str) -> PromptReply {
         PromptReply {
+            reasoning: None,
             blocks: vec![],
             tool_calls: vec![call(id, name, args)],
             usage: None,
@@ -451,6 +458,7 @@ mod tests {
     }
     fn done() -> PromptReply {
         PromptReply {
+            reasoning: None,
             blocks: vec![text("done")],
             tool_calls: vec![],
             usage: None,
@@ -581,6 +589,7 @@ mod tests {
     #[tokio::test]
     async fn a_write_that_was_not_applied_keeps_change_detection() {
         let read = |id: &str| PromptReply {
+            reasoning: None,
             blocks: vec![],
             tool_calls: vec![call(id, "read_file", r#"{"path":"/w/a.txt"}"#)],
             usage: None,
@@ -589,6 +598,7 @@ mod tests {
             let mut p = scripted(vec![
                 read("c1"),
                 PromptReply {
+                    reasoning: None,
                     blocks: vec![],
                     tool_calls: vec![call(
                         "c2",
@@ -599,6 +609,7 @@ mod tests {
                 },
                 read("c3"),
                 PromptReply {
+                    reasoning: None,
                     blocks: vec![text("done")],
                     tool_calls: vec![],
                     usage: None,
@@ -628,11 +639,13 @@ mod tests {
         // Absolute paths throughout: `route()` refuses relative ones.
         let mut p = scripted(vec![
             PromptReply {
+                reasoning: None,
                 blocks: vec![],
                 tool_calls: vec![call("c1", "read_file", r#"{"path":"/w/a.txt"}"#)],
                 usage: None,
             },
             PromptReply {
+                reasoning: None,
                 blocks: vec![],
                 tool_calls: vec![call(
                     "c2",
@@ -642,6 +655,7 @@ mod tests {
                 usage: None,
             },
             PromptReply {
+                reasoning: None,
                 blocks: vec![text("all done")],
                 tool_calls: vec![],
                 usage: None,
@@ -670,6 +684,7 @@ mod tests {
         // run does not cover this; only this row does.
         let mut p = scripted(vec![
             PromptReply {
+                reasoning: None,
                 blocks: vec![],
                 tool_calls: vec![
                     call("c1", "read_file", r#"{"path":"/w/a"}"#),
@@ -678,6 +693,7 @@ mod tests {
                 usage: None,
             },
             PromptReply {
+                reasoning: None,
                 blocks: vec![text("both read")],
                 tool_calls: vec![],
                 usage: None,
@@ -706,11 +722,13 @@ mod tests {
     async fn a_refused_read_reaches_the_model_as_not_authorized_and_the_loop_continues() {
         let mut p = scripted(vec![
             PromptReply {
+                reasoning: None,
                 blocks: vec![],
                 tool_calls: vec![call("c1", "read_file", r#"{"path":"/x/.ssh/id_rsa"}"#)],
                 usage: None,
             },
             PromptReply {
+                reasoning: None,
                 blocks: vec![text("I could not read that")],
                 tool_calls: vec![],
                 usage: None,
@@ -730,11 +748,13 @@ mod tests {
         ] {
             let mut p = scripted(vec![
                 PromptReply {
+                    reasoning: None,
                     blocks: vec![],
                     tool_calls: vec![call("c1", "write_file", r#"{"path":"/w/a","content":"x"}"#)],
                     usage: None,
                 },
                 PromptReply {
+                    reasoning: None,
                     blocks: vec![text("ok")],
                     tool_calls: vec![],
                     usage: None,
@@ -751,6 +771,7 @@ mod tests {
     async fn the_step_budget_stops_a_model_that_never_answers() {
         // An absolute path, so this exercises a REAL read on every step, not the BadCall arm.
         let looping = PromptReply {
+            reasoning: None,
             blocks: vec![],
             tool_calls: vec![call("c", "read_file", r#"{"path":"/w/a"}"#)],
             usage: None,
@@ -806,11 +827,13 @@ mod tests {
         ] {
             let mut p = scripted(vec![
                 PromptReply {
+                    reasoning: None,
                     blocks: vec![],
                     tool_calls: vec![call("c1", name, bad)],
                     usage: None,
                 },
                 PromptReply {
+                    reasoning: None,
                     blocks: vec![text("sorry")],
                     tool_calls: vec![],
                     usage: None,
@@ -841,11 +864,13 @@ mod tests {
         ] {
             let mut p = scripted(vec![
                 PromptReply {
+                    reasoning: None,
                     blocks: vec![],
                     tool_calls: vec![call("c1", "read_file", &bad)],
                     usage: None,
                 },
                 PromptReply {
+                    reasoning: None,
                     blocks: vec![text("sorry")],
                     tool_calls: vec![],
                     usage: None,
@@ -865,6 +890,7 @@ mod tests {
         // `admitted_reply` refuses non-text before it reaches the loop; this
         // pins `text_of`'s behaviour if that ever loosens.
         let r = PromptReply {
+            reasoning: None,
             blocks: vec![
                 ContentBlock::Image {
                     data: "AA==".into(),
@@ -884,6 +910,7 @@ mod tests {
         // zero budget safe if `agent_from_section`'s 1..=64 bound were ever
         // loosened. Covered so the guard is a tested property, not dead code.
         let mut p = scripted(vec![PromptReply {
+            reasoning: None,
             blocks: vec![text("never")],
             tool_calls: vec![],
             usage: None,
@@ -905,11 +932,13 @@ mod tests {
     async fn an_unavailable_read_is_rendered_as_unavailable_not_refused() {
         let mut p = scripted(vec![
             PromptReply {
+                reasoning: None,
                 blocks: vec![],
                 tool_calls: vec![call("c1", "read_file", r#"{"path":"/a"}"#)],
                 usage: None,
             },
             PromptReply {
+                reasoning: None,
                 blocks: vec![text("ok")],
                 tool_calls: vec![],
                 usage: None,
@@ -945,6 +974,7 @@ mod tests {
 
     fn answer() -> PromptReply {
         PromptReply {
+            reasoning: None,
             blocks: vec![text("done")],
             tool_calls: vec![],
             usage: None,
@@ -1001,6 +1031,7 @@ mod tests {
     async fn the_providers_usage_meters_the_next_turn() {
         let mut p = scripted(vec![
             PromptReply {
+                reasoning: None,
                 blocks: vec![],
                 tool_calls: vec![call("c1", "read_file", r#"{"path":"/w/a.txt"}"#)],
                 usage: Some(maknae_proto::Usage {

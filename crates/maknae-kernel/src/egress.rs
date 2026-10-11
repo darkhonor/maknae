@@ -451,6 +451,7 @@ pub fn content_measure(turns: &[Turn]) -> ContentMeasure {
         let (content, tool_calls): (&[ContentBlock], &[maknae_proto::ProposedToolCall]) = match t {
             Turn::User { content } | Turn::Tool { content, .. } => (content, &[]),
             Turn::Assistant {
+                reasoning: _,
                 content,
                 tool_calls,
             } => (content, tool_calls),
@@ -780,6 +781,7 @@ mod tests {
     #[test]
     fn a_widest_legal_tool_call_reply_encodes_without_growing() {
         let reply = maknae_proto::PromptReply {
+            reasoning: None,
             blocks: vec![],
             tool_calls: vec![tc(maknae_proto::MAX_TOOL_CALL_ARGS_BYTES)],
             usage: None,
@@ -839,6 +841,7 @@ mod tests {
     fn reply_capacity_counts_every_operand() {
         // text only: 5 bytes of text, one block
         let text_only = maknae_proto::PromptReply {
+            reasoning: None,
             blocks: vec![text("hello")],
             tool_calls: vec![],
             usage: None,
@@ -848,6 +851,7 @@ mod tests {
 
         // one minimal tool call: name 1, id 1, args 1, envelope 64, margin 512
         let one_call = maknae_proto::PromptReply {
+            reasoning: None,
             blocks: vec![],
             tool_calls: vec![maknae_proto::ProposedToolCall {
                 name: "a".into(),
@@ -861,6 +865,7 @@ mod tests {
 
         // TWO calls: the per-call envelope is counted per call, not once.
         let two_calls = maknae_proto::PromptReply {
+            reasoning: None,
             blocks: vec![],
             tool_calls: vec![
                 maknae_proto::ProposedToolCall {
@@ -885,6 +890,7 @@ mod tests {
     #[test]
     fn a_tool_call_only_reply_is_not_empty() {
         let reply = maknae_proto::PromptReply {
+            reasoning: None,
             blocks: vec![],
             tool_calls: vec![tc(16)],
             usage: None,
@@ -892,6 +898,7 @@ mod tests {
         assert_eq!(admitted_reply(&reply), Ok(()));
         assert_eq!(
             admitted_reply(&maknae_proto::PromptReply {
+                reasoning: None,
                 blocks: vec![],
                 tool_calls: vec![],
                 usage: None,
@@ -904,6 +911,7 @@ mod tests {
     #[test]
     fn a_reply_whose_blocks_are_non_text_is_still_nontext() {
         let reply = maknae_proto::PromptReply {
+            reasoning: None,
             blocks: vec![maknae_proto::ContentBlock::Image {
                 data: "x".into(),
                 mime_type: "image/png".into(),
@@ -917,6 +925,7 @@ mod tests {
     #[test]
     fn a_six_kilobyte_write_file_proposal_is_admitted() {
         let reply = maknae_proto::PromptReply {
+            reasoning: None,
             blocks: vec![],
             tool_calls: vec![maknae_proto::ProposedToolCall {
                 name: "write_file".into(),
@@ -930,6 +939,7 @@ mod tests {
     #[test]
     fn a_proposal_at_every_bound_fits_the_smallest_configurable_reply_frame() {
         let reply = maknae_proto::PromptReply {
+            reasoning: None,
             blocks: vec![],
             tool_calls: vec![maknae_proto::ProposedToolCall {
                 name: "n".repeat(maknae_proto::MAX_TOOL_CALL_NAME_BYTES),
@@ -959,6 +969,7 @@ mod tests {
     #[test]
     fn a_tool_call_over_the_arg_bound_is_refused_before_encoding() {
         let reply = maknae_proto::PromptReply {
+            reasoning: None,
             blocks: vec![],
             tool_calls: vec![tc(maknae_proto::MAX_TOOL_CALL_ARGS_BYTES + 1)],
             usage: None,
@@ -1025,6 +1036,7 @@ mod tests {
             self.calls.lock().unwrap().push("send");
             Ok(EgressReply {
                 reply: maknae_proto::PromptReply {
+                    reasoning: None,
                     tool_calls: vec![],
                     blocks: vec![text("ok")],
                     usage: None,
@@ -1578,6 +1590,7 @@ mod tests {
             content: vec![text(s)],
         };
         let asst = || Turn::Assistant {
+            reasoning: None,
             content: vec![],
             tool_calls: vec![call("c1", "{}")],
         };
@@ -1611,6 +1624,7 @@ mod tests {
         // Assistant arm's `find` is unconditionally `None` and its negation
         // survives mutation (#241, measured).
         let asst_img = Turn::Assistant {
+            reasoning: None,
             content: vec![img_b()],
             tool_calls: vec![call("c1", "{}")],
         };
@@ -1629,6 +1643,7 @@ mod tests {
         // An over-bound client-supplied tool call is refused at the
         // pre-gate — before any intent record, before the PDP.
         let over = Turn::Assistant {
+            reasoning: None,
             content: vec![],
             tool_calls: vec![call("c1", &"a".repeat(MAX_TOOL_CALL_ARGS_BYTES + 1))],
         };
@@ -1652,6 +1667,7 @@ mod tests {
                 content: vec![text("ab")],
             },
             Turn::Assistant {
+                reasoning: None,
                 content: vec![],
                 tool_calls: vec![call("c1", "{\"p\":1}")],
             },
@@ -1683,6 +1699,7 @@ mod tests {
             (0..50).map(|i| text(&"z".repeat(i * 100))).collect(),
         ] {
             let reply = maknae_proto::PromptReply {
+                reasoning: None,
                 tool_calls: vec![],
                 blocks: blocks.clone(),
                 usage: None,
@@ -1716,6 +1733,7 @@ mod tests {
         // The non-text arm of reply_text_length is still a region: it contributes nothing.
         assert_eq!(
             reply_text_length(&maknae_proto::PromptReply {
+                reasoning: None,
                 tool_calls: vec![],
                 blocks: vec![
                     text("ab"),
@@ -1730,6 +1748,7 @@ mod tests {
         );
         assert_eq!(
             reply_capacity(&maknae_proto::PromptReply {
+                reasoning: None,
                 tool_calls: vec![],
                 blocks: vec![],
                 usage: None,
@@ -1744,6 +1763,7 @@ mod tests {
         // defect, it refuses replies that fit.
         assert_eq!(
             reply_capacity(&maknae_proto::PromptReply {
+                reasoning: None,
                 tool_calls: vec![],
                 blocks: vec![text("abc"), text("de")],
                 usage: None,
@@ -1755,6 +1775,7 @@ mod tests {
     #[test]
     fn a_reply_is_admitted_only_when_text_only_and_non_empty_and_the_refusal_is_named() {
         let ok = maknae_proto::PromptReply {
+            reasoning: None,
             tool_calls: vec![],
             blocks: vec![text("a"), text("b")],
             usage: None,
@@ -1762,6 +1783,7 @@ mod tests {
         assert_eq!(admitted_reply(&ok), Ok(()));
         assert_eq!(
             admitted_reply(&maknae_proto::PromptReply {
+                reasoning: None,
                 tool_calls: vec![],
                 blocks: vec![],
                 usage: None,
@@ -1770,6 +1792,7 @@ mod tests {
         );
         assert_eq!(
             admitted_reply(&maknae_proto::PromptReply {
+                reasoning: None,
                 tool_calls: vec![],
                 blocks: vec![
                     text("a"),
@@ -1854,6 +1877,7 @@ mod tests {
     #[test]
     fn a_usage_only_reply_has_an_exact_capacity() {
         let reply = maknae_proto::PromptReply {
+            reasoning: None,
             blocks: vec![],
             tool_calls: vec![],
             usage: Some(maknae_proto::Usage {
@@ -1884,6 +1908,7 @@ mod tests {
                     protocol_version: maknae_proto::PROTOCOL_VERSION,
                     result: maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(
                         maknae_proto::PromptReply {
+                            reasoning: None,
                             blocks: vec![],
                             tool_calls: vec![],
                             usage,

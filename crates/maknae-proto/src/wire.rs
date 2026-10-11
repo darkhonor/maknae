@@ -140,6 +140,12 @@ impl ContentBlock {
 pub const MAX_TOOL_CALL_ARGS_BYTES: usize = 61_440;
 /// Upper bound on the tool name. It reaches audit records and terminals.
 pub const MAX_TOOL_CALL_NAME_BYTES: usize = 64;
+/// Upper bound on a reply's or an assistant turn's reasoning.
+pub const MAX_REASONING_BYTES: usize = MAX_TOOL_CALL_ARGS_BYTES;
+
+pub fn reasoning_is_acceptable(r: &Option<SecretText>) -> bool {
+    r.as_ref().is_none_or(|t| t.0.len() <= MAX_REASONING_BYTES)
+}
 /// Upper bound on the provider's opaque correlation id for the call.
 pub const MAX_TOOL_CALL_ID_BYTES: usize = 64;
 
@@ -197,6 +203,8 @@ pub enum Turn {
     Assistant {
         content: Vec<ContentBlock>,
         tool_calls: Vec<ProposedToolCall>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning: Option<SecretText>,
     },
     /// A tool result answering `call_id` from the preceding assistant turn.
     Tool {
@@ -216,9 +224,11 @@ pub fn turn_is_acceptable(t: &Turn) -> bool {
         Turn::Assistant {
             content,
             tool_calls,
+            reasoning,
         } => {
             (!content.is_empty() || !tool_calls.is_empty())
                 && tool_calls.iter().all(proposed_tool_call_is_acceptable)
+                && reasoning_is_acceptable(reasoning)
         }
         Turn::Tool { call_id, content } => {
             !call_id.is_empty() && call_id.len() <= MAX_TOOL_CALL_ID_BYTES && !content.is_empty()
@@ -241,6 +251,8 @@ pub struct PromptReply {
     pub tool_calls: Vec<ProposedToolCall>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<SecretText>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1468,6 +1480,7 @@ mod tests {
     #[test]
     fn a_reply_carries_usage_only_when_reported() {
         let r = PromptReply {
+            reasoning: None,
             blocks: vec![],
             tool_calls: vec![],
             usage: Some(Usage {
@@ -1486,6 +1499,7 @@ mod tests {
         };
         assert_eq!(back, r);
         let none = PromptReply {
+            reasoning: None,
             blocks: vec![],
             tool_calls: vec![],
             usage: None,
@@ -1774,6 +1788,7 @@ mod tests {
         let resp = Response {
             protocol_version: PROTOCOL_VERSION,
             result: RespResult::Ok(Payload::PromptReply(PromptReply {
+                reasoning: None,
                 tool_calls: vec![],
                 blocks: vec![text("hi there")],
                 usage: None,
@@ -2169,6 +2184,7 @@ mod tests {
             let r = Response {
                 protocol_version: PROTOCOL_VERSION,
                 result: RespResult::Ok(Payload::PromptReply(PromptReply {
+                    reasoning: None,
                     blocks: vec![ContentBlock::Text {
                         text: SecretText(zeroize::Zeroizing::new(content.clone())),
                     }],
@@ -2229,6 +2245,7 @@ mod tests {
         );
         // The whole reply, as the CLI actually renders it.
         let reply = PromptReply {
+            reasoning: None,
             blocks: vec![],
             tool_calls: vec![c],
             usage: None,
@@ -2239,6 +2256,7 @@ mod tests {
     #[test]
     fn a_tool_call_reply_round_trips() {
         let reply = PromptReply {
+            reasoning: None,
             blocks: vec![],
             tool_calls: vec![ProposedToolCall {
                 name: "read_file".into(),
@@ -2287,6 +2305,7 @@ mod tests {
                 content: vec![text("hi")],
             },
             Turn::Assistant {
+                reasoning: None,
                 content: vec![],
                 tool_calls: vec![t_call("c1")],
             },
@@ -2325,11 +2344,13 @@ mod tests {
             "a user turn must carry content"
         );
         assert!(turn_is_acceptable(&Turn::Assistant {
+            reasoning: None,
             content: vec![],
             tool_calls: vec![t_call("c1")]
         }));
         assert!(
             !turn_is_acceptable(&Turn::Assistant {
+                reasoning: None,
                 content: vec![],
                 tool_calls: vec![]
             }),
@@ -2343,6 +2364,7 @@ mod tests {
             arguments: SecretText(zeroize::Zeroizing::new("{}".into())),
         };
         assert!(!turn_is_acceptable(&Turn::Assistant {
+            reasoning: None,
             content: vec![],
             tool_calls: vec![over]
         }));
@@ -3038,5 +3060,70 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn reasoning(s: &str) -> Option<SecretText> {
+        Some(SecretText(zeroize::Zeroizing::new(s.into())))
+    }
+
+    fn one_text() -> Vec<ContentBlock> {
+        vec![ContentBlock::Text {
+            text: SecretText(zeroize::Zeroizing::new("a".into())),
+        }]
+    }
+
+    #[test]
+    fn an_assistant_turn_with_over_bound_reasoning_is_not_acceptable() {
+        let turn = |n: usize| Turn::Assistant {
+            content: one_text(),
+            tool_calls: vec![],
+            reasoning: reasoning(&"r".repeat(n)),
+        };
+        assert!(turn_is_acceptable(&turn(MAX_REASONING_BYTES)));
+        assert!(!turn_is_acceptable(&turn(MAX_REASONING_BYTES + 1)));
+    }
+
+    #[test]
+    fn reasoning_alone_does_not_make_an_assistant_turn_acceptable() {
+        let t = Turn::Assistant {
+            content: vec![],
+            tool_calls: vec![],
+            reasoning: reasoning("r"),
+        };
+        assert!(!turn_is_acceptable(&t));
+    }
+
+    #[test]
+    fn reasoning_round_trips_and_its_absence_is_not_encoded() {
+        let with = PromptReply {
+            blocks: one_text(),
+            tool_calls: vec![],
+            usage: None,
+            reasoning: reasoning("why"),
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&with, &mut buf).unwrap();
+        let back: PromptReply = ciborium::from_reader(buf.as_slice()).unwrap();
+        assert_eq!(back, with);
+
+        let without = PromptReply {
+            reasoning: None,
+            ..with.clone()
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&without, &mut buf).unwrap();
+        assert!(!buf.windows(9).any(|w| w == b"reasoning"));
+        let back: PromptReply = ciborium::from_reader(buf.as_slice()).unwrap();
+        assert_eq!(back.reasoning, None);
+    }
+
+    #[test]
+    fn reasoning_debug_prints_a_length_not_the_text() {
+        let t = Turn::Assistant {
+            content: vec![],
+            tool_calls: vec![],
+            reasoning: reasoning("SENTINEL-REASONING"),
+        };
+        assert!(!format!("{t:?}").contains("SENTINEL-REASONING"));
     }
 }
