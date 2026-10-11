@@ -1009,7 +1009,11 @@ pub fn no_baseline() -> Arc<dyn maknae_kernel::AdminOps> {
     Arc::new(NoBaseline)
 }
 
-/// Answers every contain and release with `outcome`, as the daemon's service would.
+pub const CORRECTIVE_RESULT: &str = "result-sentinel-5c1e";
+pub const CORRECTIVE_POSTURE: &str = "posture-sentinel-5c1e";
+pub const CORRECTIVE_REASON: &str = "reason-sentinel-5c1e";
+
+/// Answers every contain and release with `outcome`, and a sentinel corrective unless it succeeded.
 pub struct ScriptedContainment {
     outcome: maknae_proto::ContainmentOutcome,
     calls: std::sync::atomic::AtomicUsize,
@@ -1027,28 +1031,16 @@ impl ScriptedContainment {
     pub fn last_reason(&self) -> Option<String> {
         self.last_reason.lock().unwrap().clone()
     }
-    fn answer(&self, verb: &str) -> maknae_kernel::ContainAnswer {
+    fn answer(&self) -> maknae_kernel::ContainAnswer {
         use maknae_proto::ContainmentOutcome as O;
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let o = self.outcome;
-        let corrective = match o {
-            O::Contained | O::Released => None,
-            O::AlreadyContained | O::NotContained => Some(("permit", "unchanged")),
-            O::Busy | O::Stopping | O::LookupUnavailable => Some(("deny", "unavailable")),
-            O::LastReleaser
-            | O::SelfContainWithoutRelease
-            | O::NoExplicitBindings
-            | O::UnknownAccount => Some(("deny", "refused")),
-        }
-        .map(|(result, posture)| maknae_kernel::Corrective {
-            result,
-            posture,
-            reason: if result == "deny" {
-                format!("{verb} refused: {}: {}", o.code(), o.text())
-            } else {
-                format!("{verb} {posture}: {}", o.text())
-            },
-        });
+        let corrective =
+            (!matches!(o, O::Contained | O::Released)).then(|| maknae_kernel::Corrective {
+                result: CORRECTIVE_RESULT,
+                posture: CORRECTIVE_POSTURE,
+                reason: CORRECTIVE_REASON.to_string(),
+            });
         maknae_kernel::ContainAnswer::View {
             view: maknae_proto::ContainmentView {
                 outcome: o,
@@ -1068,6 +1060,7 @@ impl maknae_kernel::BaselineOps for ScriptedContainment {
         &'a self,
         _: &'a str,
     ) -> maknae_kernel::BoxFuture<'a, maknae_kernel::AcceptAnswer> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Box::pin(async {
             maknae_kernel::AcceptAnswer::Unavailable {
                 reply: "no baseline service",
@@ -1084,7 +1077,7 @@ impl maknae_kernel::ContainmentOps for ScriptedContainment {
     ) -> maknae_kernel::BoxFuture<'a, maknae_kernel::ContainAnswer> {
         *self.last_reason.lock().unwrap() = Some(req.reason.to_string());
         self.requesters.lock().unwrap().push(req.requester);
-        let answer = self.answer("contain");
+        let answer = self.answer();
         Box::pin(async move { answer })
     }
     fn release<'a>(
@@ -1092,7 +1085,7 @@ impl maknae_kernel::ContainmentOps for ScriptedContainment {
         req: maknae_kernel::ReleaseRequest<'a>,
     ) -> maknae_kernel::BoxFuture<'a, maknae_kernel::ContainAnswer> {
         self.requesters.lock().unwrap().push(req.requester);
-        let answer = self.answer("release");
+        let answer = self.answer();
         Box::pin(async move { answer })
     }
 }

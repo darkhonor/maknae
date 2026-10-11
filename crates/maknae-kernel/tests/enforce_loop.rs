@@ -3950,13 +3950,13 @@ async fn an_operational_refusal_returns_its_code_after_a_corrective_record() {
     );
     assert_eq!(
         (recs[2].0.as_str(), recs[2].1.as_str(), recs[2].2.as_str()),
-        ("admin.contain", "deny", "refused")
+        (
+            "admin.contain",
+            common::CORRECTIVE_RESULT,
+            common::CORRECTIVE_POSTURE
+        )
     );
-    assert!(
-        recs[2].3.starts_with("contain refused: last-releaser: "),
-        "{}",
-        recs[2].3
-    );
+    assert_eq!(recs[2].3, common::CORRECTIVE_REASON);
 }
 
 #[tokio::test]
@@ -3982,7 +3982,7 @@ async fn a_corrective_record_that_cannot_append_withholds_the_containment_frame(
     assert!(
         emit.records()
             .iter()
-            .any(|r| r.outcome.posture == "refused"),
+            .any(|r| r.outcome.posture == common::CORRECTIVE_POSTURE),
         "the corrective record was offered"
     );
 }
@@ -4137,4 +4137,49 @@ async fn an_unavailable_answer_whose_record_cannot_append_withholds_the_frame() 
         .records()
         .iter()
         .any(|r| r.outcome.posture == "unavailable"));
+}
+
+#[tokio::test]
+async fn a_request_record_that_cannot_append_never_reaches_the_containment_service() {
+    let fx = Fixture::new("contain-request-withhold");
+    fx.write_policy("schema_version: 1\nroles:\n  admin:\n    allow:\n      - \"admin.contain\"\n      - \"admin.release\"\n      - \"admin.baseline.accept\"\n");
+    fx.write_bindings(BINDINGS_ROOT_ADMIN);
+    for verb in [
+        maknae_proto::Verb::AdminContain {
+            target: ContainTarget::Uid(4242),
+            reason: "r".into(),
+        },
+        maknae_proto::Verb::AdminRelease {
+            target: ContainTarget::Uid(4242),
+        },
+        maknae_proto::Verb::AdminBaselineAccept {
+            hash: "0".repeat(64),
+        },
+    ] {
+        let ops = common::scripted_containment(ContainmentOutcome::Contained);
+        let emit = FailNthEmit::new(2);
+        let out = drive_with_ops(
+            &fx.dir,
+            fx.authorizer(),
+            emit.clone(),
+            0,
+            verb.clone(),
+            ops.clone(),
+        )
+        .await;
+        assert!(
+            out.is_none(),
+            "{verb:?}: no frame without the request record"
+        );
+        assert_eq!(
+            emit.records()
+                .iter()
+                .filter(|r| r.event == "request")
+                .map(|r| r.outcome.posture.as_str())
+                .collect::<Vec<_>>(),
+            ["authorized"],
+            "{verb:?}: the permit was offered"
+        );
+        assert_eq!(ops.calls(), 0, "{verb:?}: the service is never reached");
+    }
 }

@@ -1023,10 +1023,8 @@ pub async fn handle_with_attempt_caps<S, E, P>(
         }
     }
 
-    // #172, #265, #165: the operand pre-gate, the same shape as the Read one — a
-    // malformed conversation id, an inadmissible content kind or a containment
-    // operand the shared rule refuses is the BadRequest class and never reaches the PDP. Result-returning emit, frame
-    // gated on the append: `emit_request_deny` is for legs that serve nothing.
+    // #172, #265, #165: an operand the pre-gate refuses is BadRequest and never
+    // reaches the PDP.
     let operand_refusal = crate::containment::normalise_operands(&mut request.verb)
         .err()
         .map(|(noun, e)| (noun, e.to_string()));
