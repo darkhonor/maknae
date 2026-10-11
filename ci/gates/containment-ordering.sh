@@ -131,18 +131,61 @@ lib_lexed="$lexed"
 if [ -n "$lib_lexed" ]; then
   awk -F '\t' '
     function out(m) { print "FAIL: " m; rc = 1 }
-    {
-      t = $0; sub(/^[^\t]*\t/, "", t)
-      if (t ~ /(^|[^A-Za-z0-9_])use[[:space:]]+(.*[^A-Za-z0-9_])?decide([^A-Za-z0-9_]|$)/) out("lib.rs imports from decide (line " $1 ")")
-      while (match(t, /(^|[^A-Za-z0-9_])decide::[a-z_][A-Za-z0-9_]*/)) {
-        name = substr(t, RSTART, RLENGTH); sub(/^.*decide::/, "", name)
-        if (name == "decide_loaded_cited") cited++
-        else if (name != "decide_loaded_with_role") out("lib.rs calls decide::" name "; only decide_loaded_cited and decide_loaded_with_role may be entry points (line " $1 ")")
-        t = substr(t, RSTART + RLENGTH)
+    function line_of(pos,   pre) { pre = substr(text, 1, pos); return gsub(/\n/, "", pre) + 1 }
+    { t = $0; sub(/^[^\t]*\t/, "", t); text = text t "\n" }
+    END {
+      gsub(/[[:space:]]*::[[:space:]]*/, "::", text)
+      n = split(text, stmts, ";")
+      for (i = 1; i <= n; i++) {
+        st = stmts[i]
+        if (match(st, /(^|[[:space:]{})])use[[:space:]]/)) {
+          if (substr(st, RSTART) ~ /(^|[^A-Za-z0-9_])decide([^A-Za-z0-9_]|$)/) out("lib.rs imports from decide")
+        }
       }
+      rest = text; off = 0
+      while (match(rest, /(^|[^A-Za-z0-9_])decide::[a-z_][A-Za-z0-9_]*/)) {
+        name = substr(rest, RSTART, RLENGTH); sub(/^.*decide::/, "", name)
+        at = off + RSTART
+        if (name == "decide_loaded_cited") cited++
+        else if (name != "decide_loaded_with_role") out("lib.rs calls decide::" name "; only decide_loaded_cited and decide_loaded_with_role may be entry points (near line " line_of(at) ")")
+        off += RSTART + RLENGTH - 1; rest = substr(rest, RSTART + RLENGTH)
+      }
+      if (!cited) out("lib.rs never calls decide::decide_loaded_cited(")
+      exit rc
     }
-    END { if (!cited) out("lib.rs never calls decide::decide_loaded_cited("); exit rc }
   ' <<<"$lib_lexed" || failed=1
+fi
+
+if [ -n "$decide_lexed" ]; then
+  awk -F '\t' '
+    function out(m) { print "FAIL: " m; rc = 1 }
+    function trim(x) { sub(/^[[:space:]]+/, "", x); sub(/[[:space:]]+$/, "", x); return x }
+    { t = $0; sub(/^[^\t]*\t/, "", t); text = text t "\n" }
+    END {
+      gsub(/[[:space:]]*::[[:space:]]*/, "::", text)
+      canon["Role"] = "use crate::role::Role"
+      canon["Verdict"] = "use maknae_security::{AttrValue, Attributes, Obligation, Request as SecRequest, Verdict}"
+      for (name in canon) {
+        w = "(^|[^A-Za-z0-9_])" name "([^A-Za-z0-9_]|$)"
+        if (text ~ ("(^|[^A-Za-z0-9_])mod[[:space:]]+" name "([^A-Za-z0-9_]|$)")) out("decide.rs declares `mod " name "`")
+        if (text ~ ("(^|[^A-Za-z0-9_])(struct|enum|type|trait|union|const|static|fn)[[:space:]]+" name "([^A-Za-z0-9_]|$)")) out("decide.rs defines its own " name)
+        if (text ~ ("(^|[^A-Za-z0-9_])as[[:space:]]+" name "([^A-Za-z0-9_]|$)")) out("decide.rs renames something to " name)
+        if (text ~ ("(^|[^A-Za-z0-9_])" name "::\\*")) out("decide.rs glob-imports the variants of " name)
+        seen = 0; exact = 0
+        n = split(text, stmts, ";")
+        for (i = 1; i <= n; i++) {
+          if (!match(stmts[i], /(^|[[:space:]{})])use[[:space:]]/)) continue
+          u = trim(substr(stmts[i], RSTART)); gsub(/[[:space:]]+/, " ", u)
+          if (u !~ w) continue
+          seen++
+          if (u == canon[name]) exact++
+        }
+        if (seen != 1 || exact != 1) out("decide.rs must import " name " exactly once, as `" canon[name] ";`")
+      }
+      if (text ~ /(^|[^A-Za-z0-9_])as[[:space:]]+(Admin|User|Guest|Adversary)([^A-Za-z0-9_]|$)/) out("decide.rs renames something to a role variant name")
+      exit rc
+    }
+  ' <<<"$decide_lexed" || failed=1
 fi
 
 if [ -n "$decide_lexed" ] && extract decide_loaded_with_role "$decide_lexed"; then
@@ -194,17 +237,12 @@ if [ -n "$decide_lexed" ] && extract decide_loaded_cited "$decide_lexed"; then
         if (advl >= mcl) out("Role::Adversary must precede every class arm in decide_loaded_cited")
         if (tx[advl] ~ /^[[:space:]]*Role::Adversary[[:space:]]*if[[:space:]]/) out("the Role::Adversary arm in decide_loaded_cited must not carry a guard")
 
-        kern = 0
-        for (i = 1; i < rfl; i++) {
-          t = tx[i]
-          if (index(t, "class_of(") || word(t, "match[[:space:]]+class") || index(t, "Class::") || index(t, "req.action")) {
-            if (t ~ /^[[:space:]]*if[[:space:]]+class_of\(&req\.action\.0\)[[:space:]]*==[[:space:]]*Some\(Class::Kernel\)[[:space:]]*\{[[:space:]]*$/ && !kern) kern = i
-            else out("only the kernel early return may evaluate a class before role resolution (line " ln[i] ")")
-          }
-          if (!word(t, "return")) continue
-          if (index(t, "return undecided(Verdict::Indeterminate)")) continue
-          if (kern && i == kern + 1 && t ~ /^[[:space:]]*return[[:space:]]+undecided\(kernel_decided\(req\)\);[[:space:]]*$/) continue
-          out("before role resolution only an Indeterminate or the kernel return may leave decide_loaded_cited (line " ln[i] ")")
+        want = "pub(crate)fndecide_loaded_cited(lp:&LoadedPolicy,principal:&maknae_config::Principal,req:&SecRequest,)->Decided{letundecided=|verdict|Decided{verdict,role:None,cited:None,};letuid:Option<u32>=matchreq.subject.0.get(SUBJECT_UID){None=>None,Some(AttrValue::Int(i))=>matchu32::try_from(*i){Ok(u)=>Some(u),Err(_)=>returnundecided(Verdict::Indeterminate),},Some(_)=>returnundecided(Verdict::Indeterminate),};letSome(uid)=uidelse{returnundecided(Verdict::Indeterminate);};ifclass_of(&req.action.0)==Some(Class::Kernel){returnundecided(kernel_decided(req));}"
+        got = ""
+        for (i = 1; i < rfl; i++) { t = tx[i]; gsub(/[[:space:]]/, "", t); got = got t }
+        if (got != want) {
+          for (p = 1; p <= length(got) && substr(got, p, 1) == substr(want, p, 1); p++) ;
+          out("the prelude of decide_loaded_cited differs from its skeleton at `" (p > length(got) ? "<end>" : substr(got, p, 40)) "`")
         }
 
         split("Resolution::Role(r) => r,|Resolution::NoRole => {|return undecided(Verdict::NotApplicable {|note: Some(\"\".into()),|})|}|};|let class = class_of(&req.action.0);", allow, "|")

@@ -1753,6 +1753,73 @@ mod tests {
         )
     }
 
+    #[test]
+    fn the_production_path_never_permits_a_contained_subject() {
+        let grants: String = decide::GRANTABLE_ACTIONS
+            .iter()
+            .map(|t| format!("      - \"{t}\"\n"))
+            .collect();
+        let authz = format!(
+            "{EMPTY}roles:\n  admin:\n    allow:\n{grants}  user:\n    allow: [\"session.prompt\"]\n"
+        );
+        let bindings =
+            "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary: [\"mallory\"]\n";
+        let uids = [("root", 0), ("mallory", 4242)];
+        let auth = authorizer_over(&authz, Some(bindings), &uids);
+        let snap = compiled(&source_with(&authz, Some(bindings), &uids));
+        let candidate = Candidate::new(&snap, principal());
+        let request = |uid: i64, action: &str, kernel: bool| {
+            let mut s = Attributes::new();
+            s.insert(SUBJECT_UID_KEY, AttrValue::Int(uid));
+            s.insert(
+                maknae_security::SUBJECT_HOME,
+                AttrValue::Str("/root".into()),
+            );
+            if kernel {
+                s.insert(
+                    maknae_security::SUBJECT_INITIATOR,
+                    AttrValue::Str(maknae_security::INITIATOR_KERNEL.into()),
+                );
+            }
+            let mut r = Attributes::new();
+            r.insert(RESOURCE_PATH_KEY, AttrValue::Str("/root/x".into()));
+            r.insert("destination", AttrValue::Str("provider:any".into()));
+            maknae_security::Request {
+                subject: Subject(s),
+                resource: Resource(r),
+                action: Action(action.into()),
+                context: Context(Attributes::new()),
+            }
+        };
+        for path in [
+            &auth as &dyn maknae_security::Authorizer,
+            &candidate as &dyn maknae_security::Authorizer,
+        ] {
+            assert!(
+                matches!(
+                    path.decide_cited(&request(0, "admin.status", false))
+                        .verdict,
+                    maknae_security::Verdict::Permit { .. }
+                ),
+                "an uncontained admin under the same policy is granted"
+            );
+            for action in vocabulary::ACTION_TERMS
+                .iter()
+                .chain(vocabulary::KERNEL_TERMS.iter())
+                .chain(["liveness", "unknown.term", "kernel"].iter())
+            {
+                for kernel in [false, true] {
+                    let d = path.decide_cited(&request(4242, action, kernel));
+                    assert_eq!(
+                        matches!(d.verdict, maknae_security::Verdict::Permit { .. }),
+                        *action == "kernel.contain" && kernel,
+                        "{action} kernel={kernel}: {d:?}"
+                    );
+                }
+            }
+        }
+    }
+
     fn liveness_req(uid: Option<i64>) -> maknae_security::Request {
         let mut s = Attributes::new();
         if let Some(u) = uid {

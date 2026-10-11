@@ -2278,8 +2278,36 @@ ordering_fixture() { # <decide.rs body> <binding.rs body> [lib.rs body]
   git -C "$f" add .
   echo "$f"
 }
-CITED_HEAD='pub(crate) fn decide_loaded_cited(lp: &LoadedPolicy, principal: &Principal, req: &SecRequest) -> Decided {
+USES='use crate::role::Role;
+use maknae_security::{AttrValue, Attributes, Obligation, Request as SecRequest, Verdict};
 '
+SIG='pub(crate) fn decide_loaded_cited(
+    lp: &LoadedPolicy,
+    principal: &maknae_config::Principal,
+    req: &SecRequest,
+) -> Decided {
+'
+PRELUDE='    let undecided = |verdict| Decided {
+        verdict,
+        role: None,
+        cited: None,
+    };
+    let uid: Option<u32> = match req.subject.0.get(SUBJECT_UID) {
+        None => None,
+        Some(AttrValue::Int(i)) => match u32::try_from(*i) {
+            Ok(u) => Some(u),
+            Err(_) => return undecided(Verdict::Indeterminate),
+        },
+        Some(_) => return undecided(Verdict::Indeterminate),
+    };
+    let Some(uid) = uid else {
+        return undecided(Verdict::Indeterminate);
+    };
+    if class_of(&req.action.0) == Some(Class::Kernel) {
+        return undecided(kernel_decided(req));
+    }
+'
+CITED_HEAD="${SIG}${PRELUDE}"
 ROLE_MATCH='    let role = match lp.roles.role_for(uid, principal.uid) {
         Resolution::Role(r) => r,
         Resolution::NoRole => {
@@ -2314,11 +2342,11 @@ WITH_ROLE='pub(crate) fn decide_loaded_with_role(lp: &LoadedPolicy, principal: &
     (d.verdict, d.role)
 }
 '
-CLEAN_DECIDE="${WITH_ROLE}${CITED_HEAD}${ROLE_MATCH}${MATCH_LINE}${ADV_ARM}
+CLEAN_DECIDE="${USES}${WITH_ROLE}${CITED_HEAD}${ROLE_MATCH}${MATCH_LINE}${ADV_ARM}
 ${CLASS_ARMS}${MATCH_CLOSE}${TAIL}"
 before_adversary() { printf '%s' "${CLEAN_DECIDE/"$ADV_ARM"/"$1
 $ADV_ARM"}"; }
-with_prelude() { printf '%s' "${CLEAN_DECIDE/"$CITED_HEAD"/"$CITED_HEAD$1"}"; }
+with_prelude() { printf '%s' "${CLEAN_DECIDE/"$PRELUDE"/"$PRELUDE$1"}"; }
 between() { printf '%s' "${CLEAN_DECIDE/"$MATCH_LINE"/"$1$MATCH_LINE"}"; }
 B_ROLE_FOR='    pub(crate) fn role_for(&self, uid: u32, principal_uid: u32) -> Resolution {
         if self.graph.out_edges(subject.id, CONTAINED).next().is_some() {
@@ -2376,13 +2404,8 @@ ordering_accept() { # <label> <decide> [binding]
   f="$(ordering_fixture "$2" "${3-$CLEAN_BINDING}")"
   expect_accept "containment-ordering/$1" "containment-ordering: ok" "$f/ci/gates/containment-ordering.sh" "$f"
 }
-KERNEL_RETURN='    if class_of(&req.action.0) == Some(Class::Kernel) {
-        return undecided(kernel_decided(req));
-    }
-'
 
 ordering_accept clean-fixture "$CLEAN_DECIDE"
-ordering_accept the-kernel-early-return-is-allowed "$(with_prelude "$KERNEL_RETURN")"
 ordering_accept guarded-role-arms-before-adversary-are-allowed "$(before_adversary '        Role::Admin | Role::User if req.action.0 == "fs.read" => fs(),')"
 ordering_accept a-wrapped-guard-before-adversary-is-allowed "$(before_adversary '        Role::Admin | Role::User
             if matches!(
@@ -2399,14 +2422,14 @@ mod tests {
 "
 ordering_accept multibyte-and-escaped-char-literals-lex "$(before_adversary "        Role::Admin if c == '가' || c == '\\'' || c == '\\\\' => ok(),")"
 
-ordering_probe adversary-after-a-class-arm "Role::Adversary must precede" "${WITH_ROLE}${CITED_HEAD}${ROLE_MATCH}${MATCH_LINE}${CLASS_ARMS}${ADV_ARM}
+ordering_probe adversary-after-a-class-arm "Role::Adversary must precede" "${USES}${WITH_ROLE}${CITED_HEAD}${ROLE_MATCH}${MATCH_LINE}${CLASS_ARMS}${ADV_ARM}
 ${MATCH_CLOSE}${TAIL}"
 ordering_probe adversary-arm-missing "exactly one Role::Adversary arm" "${CLEAN_DECIDE/"$ADV_ARM"/}"
-ordering_probe a-second-class-return-before-roles "only the kernel early return" "$(with_prelude "${KERNEL_RETURN}    if class_of(&req.action.0) == Some(Class::Admin) {
+ordering_probe a-second-class-return-before-roles "differs from its skeleton at \`ifclass_of(&req.action.0)==Some(Class::A" "$(with_prelude "    if class_of(&req.action.0) == Some(Class::Admin) {
         return undecided(permit());
     }
 ")"
-ordering_probe a-permit-before-roles "before role resolution only an Indeterminate or the kernel return" "$(with_prelude '    if principal.uid == 0 {
+ordering_probe a-permit-before-roles "differs from its skeleton at \`ifprincipal.uid==0{" "$(with_prelude '    if principal.uid == 0 {
         return undecided(permit());
     }
 ')"
@@ -2430,19 +2453,19 @@ nested='        Role::Guest => match x {
 ordering_probe a-nested-adversary-arm "is not an arm of \`match role {\`" "${CLEAN_DECIDE/"$ADV_ARM"/"$nested"}"
 ordering_probe the-adversary-arm-reads-the-request "the Role::Adversary arm must decide without reading the request" "${CLEAN_DECIDE/"$ADV_ARM"/        Role::Adversary => if req.action.0 == \"liveness.ping\" { (Verdict::Deny { reason: \"\".into() }, None) } else { (Verdict::Deny { reason: \"\".into() }, None) },}"
 ordering_probe the-adversary-arm-permits "the Role::Adversary arm must be a Verdict::Deny and never a permit" "${CLEAN_DECIDE/"$ADV_ARM"/        Role::Adversary => (Verdict::Permit { obligations: vec![] }, None),}"
-ordering_probe a-class-return-between-roles-and-the-match "(line 15: \`if class == Some(Class::Liveness) {\`)" "$(between '    if class == Some(Class::Liveness) {
+ordering_probe a-class-return-between-roles-and-the-match "(line 40: \`if class == Some(Class::Liveness) {\`)" "$(between '    if class == Some(Class::Liveness) {
         return undecided(permit());
     }
 ')"
-ordering_probe a-role-key-match-between-roles-and-the-match "(line 15: \`match role.key() {\`)" "$(between '    match role.key() {
+ordering_probe a-role-key-match-between-roles-and-the-match "(line 40: \`match role.key() {\`)" "$(between '    match role.key() {
         "adversary" => return undecided(permit()),
         _ => {}
     }
 ')"
-ordering_probe the-resolved-role-is-rewritten "(line 7: \`Resolution::Role(_) => Role::Admin,\`)" "${CLEAN_DECIDE/Resolution::Role(r) => r,/Resolution::Role(_) => Role::Admin,}"
+ordering_probe the-resolved-role-is-rewritten "(line 32: \`Resolution::Role(_) => Role::Admin,\`)" "${CLEAN_DECIDE/Resolution::Role(r) => r,/Resolution::Role(_) => Role::Admin,}"
 ordering_probe the-role-is-rebound "the role is rebound outside its role_for(" "$(between '    let role = Role::Admin;
 ')"
-ordering_probe the-role-is-rebound-by-a-tuple "(line 15: \`let (role, _) = (lp.default(), 0);\`)" "$(between '    let (role, _) = (lp.default(), 0);
+ordering_probe the-role-is-rebound-by-a-tuple "(line 40: \`let (role, _) = (lp.default(), 0);\`)" "$(between '    let (role, _) = (lp.default(), 0);
 ')"
 ordering_probe the-role-is-shadowed-by-an-at-pattern "role is bound by a closure, a pattern or an arm" "$(before_adversary '        role @ Role::Admin => permit(),')"
 ordering_probe the-role-is-a-closure-parameter "role is bound by a closure, a pattern or an arm" "$(with_prelude '    let f = |role: Role| role;
@@ -2456,16 +2479,59 @@ $TAIL}"
 ordering_probe a-second-decide-definition "expected exactly one fn decide_loaded_cited" "${CLEAN_DECIDE}fn decide_loaded_cited() {}
 "
 ordering_probe with-role-does-not-call-cited "decide_loaded_with_role must call decide_loaded_cited(lp, principal, req)" "${CLEAN_DECIDE/let d = decide_loaded_cited(lp, principal, req);/let d = decide_real(lp, principal, req);}"
-ordering_probe an-attribute-above-decide "an attribute above fn decide_loaded_cited" "${CLEAN_DECIDE/"$CITED_HEAD"/#[inline]
-$CITED_HEAD}"
+ordering_probe an-attribute-above-decide "an attribute above fn decide_loaded_cited" "${CLEAN_DECIDE/"$SIG"/#[inline]
+$SIG}"
 ordering_probe a-column-0-cfg-decoy "a column-0 #[cfg outside the test module" "#[cfg(any())]
 ${CLEAN_DECIDE}"
-ordering_probe a-cfg-test-not-opening-mod-tests "is not followed by \`mod tests {\`" "${CLEAN_DECIDE/"$CITED_HEAD"/#[cfg(test)]
-$CITED_HEAD}"
+ordering_probe a-cfg-test-not-opening-mod-tests "is not followed by \`mod tests {\`" "${CLEAN_DECIDE/"$SIG"/#[cfg(test)]
+$SIG}"
 ordering_probe code-after-the-test-module "code follows the test module" "#[cfg(test)]
 mod tests {
 }
 ${CLEAN_DECIDE}"
+ordering_probe prelude-uid-from-the-principal "differs from its skeleton at \`letuid=principal.uid;" "$(with_prelude '    let uid = principal.uid;
+')"
+ordering_probe prelude-uid-swapped "differs from its skeleton at \`letuid=ifuid==7{8}else{uid};" "$(with_prelude '    let uid = if uid == 7 { 8 } else { uid };
+')"
+ordering_probe prelude-undecided-permits "differs from its skeleton at \`_verdict|Decided{verdict:permit_with_aud" "${CLEAN_DECIDE/let undecided = |verdict| Decided \{
+        verdict,/let undecided = |_verdict| Decided \{
+        verdict: permit_with_audit(),}"
+ordering_probe prelude-kernel-if-extended "differs from its skeleton at \`elseifreq.action.0==\"\"{" "${CLEAN_DECIDE/"        return undecided(kernel_decided(req));
+    }
+"/"        return undecided(kernel_decided(req));
+    } else if req.action.0 == \"liveness.ping\" {
+        return undecided(permit_with_audit());
+    }
+"}"
+ordering_probe mod-role-inline "decide.rs declares \`mod Role\`" "${CLEAN_DECIDE}mod Role {
+    pub const Adversary: u8 = 0;
+}
+"
+ordering_probe mod-role-file "decide.rs declares \`mod Role\`" "${CLEAN_DECIDE}pub(crate) mod Role;
+"
+ordering_probe a-local-role-type "decide.rs defines its own Role" "${CLEAN_DECIDE}enum Role { Admin }
+"
+ordering_probe a-rename-to-role "decide.rs renames something to Role" "${CLEAN_DECIDE/use crate::role::Role;/use crate::other::Fake as Role;}"
+ordering_probe a-glob-of-role-variants "decide.rs glob-imports the variants of Role" "${CLEAN_DECIDE}use crate::role::Role::*;
+"
+ordering_probe a-rename-to-a-role-variant "decide.rs renames something to a role variant name" "${CLEAN_DECIDE}use crate::role::Role::Admin as Adversary;
+"
+ordering_probe a-second-role-import-in-a-fn "decide.rs must import Role exactly once" "${CLEAN_DECIDE}fn helper() {
+    use crate::other::Role;
+}
+"
+ordering_probe mod-verdict "decide.rs declares \`mod Verdict\`" "${CLEAN_DECIDE}mod Verdict {}
+"
+ordering_probe a-second-verdict-import-in-a-fn "decide.rs must import Verdict exactly once" "${CLEAN_DECIDE}fn helper() {
+    use crate::fake::Verdict;
+}
+"
+ordering_probe lib-spaced-path "lib.rs calls decide::decide_real; only decide_loaded_cited and decide_loaded_with_role may be entry points (near line 2)" "$CLEAN_DECIDE" "$CLEAN_BINDING" "${CLEAN_LIB/decide::decide_loaded_cited/decide :: decide_real}
+"
+ordering_probe lib-path-broken-after-the-colons "lib.rs calls decide::decide_real; only decide_loaded_cited and decide_loaded_with_role may be entry points (near line 3)" "$CLEAN_DECIDE" "$CLEAN_BINDING" "fn other() {}
+${CLEAN_LIB/decide::decide_loaded_cited/decide::
+        decide_real}
+"
 ordering_probe lib-calls-a-renamed-decision "lib.rs calls decide::decide_real" "$CLEAN_DECIDE" "$CLEAN_BINDING" "${CLEAN_LIB/decide_loaded_cited/decide_real}
 "
 ordering_probe lib-never-calls-decide "lib.rs never calls decide::decide_loaded_cited(" "$CLEAN_DECIDE" "$CLEAN_BINDING" 'fn decide_on() {}
@@ -2478,7 +2544,7 @@ for prefix in 'r' 'br' 'cr' 'br#'; do
 ${HIDDEN_ARM}
         Role::User if t == \"\" => ok(),")"
 done
-ordering_probe an-escaped-quote-char-cannot-hide-an-arm "(line 17: \`_\`)" "$(before_adversary "        Role::Admin if [c] == ['\\'','\"'] => ok(),
+ordering_probe an-escaped-quote-char-cannot-hide-an-arm "(line 42: \`_\`)" "$(before_adversary "        Role::Admin if [c] == ['\\'','\"'] => ok(),
 ${HIDDEN_ARM}
         Role::User if t == \"\" => ok(),")"
 f="$(ordering_fixture "$CLEAN_DECIDE" "$CLEAN_BINDING")"
@@ -2508,7 +2574,7 @@ ordering_probe the-counted-adversary-arm-is-not-the-top-level-one "the Role::Adv
 ordering_probe an-unclosed-decide-fails-closed "cannot extract decide_loaded_cited" "${CLEAN_DECIDE%\}*}"
 ordering_probe two-role-resolutions "must call role_for( exactly once, found 2" "$(with_prelude '    let _ = lp.roles.role_for(uid, principal.uid);
 ')"
-ordering_probe role-resolution-after-the-match "role_for( is called after \`match role {\`" "${WITH_ROLE}${CITED_HEAD}${MATCH_LINE}${ADV_ARM}
+ordering_probe role-resolution-after-the-match "role_for( is called after \`match role {\`" "${USES}${WITH_ROLE}${CITED_HEAD}${MATCH_LINE}${ADV_ARM}
 ${CLASS_ARMS}${MATCH_CLOSE}${ROLE_MATCH}${TAIL}"
 ordering_probe no-match-class-fails-closed "holds no \`match class\`" "${CLEAN_DECIDE//match class/match class_of(&req.action.0)}"
 ordering_probe a-second-match-role "exactly one \`match role {\`, found 2" "$(before_adversary '        Role::Guest => match role {
