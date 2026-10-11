@@ -151,8 +151,13 @@ fn main() {
         match conn {
             Ok(s) => {
                 if let Err(e) = serve::serve_one(s, expected_uid, &bounds, |admitted| {
-                    rt.block_on(call::fulfil(admitted, &opener, call::CallBounds::default()))
-                        .map_err(serve::serve_error)
+                    rt.block_on(call::fulfil(
+                        admitted,
+                        &opener,
+                        call::CallBounds::default(),
+                        &mut |l| eprintln!("{l}"),
+                    ))
+                    .map_err(serve::serve_error)
                 }) {
                     eprintln!("maknae-egress: connection refused: {e:?}");
                 }

@@ -17,7 +17,7 @@
 //! default; the deputy's `.fips()`-asserted provider is the one used. Building
 //! a client that installed its own would be the failure the pin prevents.
 
-use crate::{take_capped, to_prompt_reply, ChatRequest, ReplyError};
+use crate::{take_capped, to_prompt_reply, ChatRequest, Completion, ReplyError};
 use std::time::Duration;
 use zeroize::Zeroizing;
 
@@ -78,7 +78,7 @@ pub async fn chat_completion(
     offered: &[String],
     timeout: Duration,
     max_body_bytes: usize,
-) -> Result<maknae_proto::PromptReply, CallError> {
+) -> Result<Completion, CallError> {
     // THE FIPS GATE, and it is not decorative. `rustls-no-provider` means
     // reqwest installs NO crypto provider of its own — building a client with
     // none configured panics, which is exactly the pin's purpose: the process

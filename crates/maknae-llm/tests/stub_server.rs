@@ -83,6 +83,7 @@ async fn call(url: &str, offered: &[String]) -> Result<maknae_proto::PromptReply
         64 * 1024,
     )
     .await
+    .map(|c| c.reply)
 }
 
 #[tokio::test]
@@ -272,7 +273,7 @@ async fn a_body_of_exactly_the_cap_is_accepted() {
         maknae_llm::chat_completion(&url, &key(), &req("m"), &[], Duration::from_secs(5), cap)
             .await
             .expect("a body of exactly the cap must be accepted — the checks are `>`, not `>=`");
-    assert_eq!(reply.blocks.len(), 1);
+    assert_eq!(reply.reply.blocks.len(), 1);
 }
 
 #[tokio::test]

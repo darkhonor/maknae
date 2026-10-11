@@ -140,6 +140,7 @@ pub async fn fulfil<O: KeyOpener>(
     admitted: &Admitted<'_>,
     opener: &O,
     bounds: CallBounds,
+    journal: &mut dyn FnMut(&str),
 ) -> Result<EgressFrameReply, FulfilError> {
     let req = admitted.request();
 
@@ -193,7 +194,12 @@ pub async fn fulfil<O: KeyOpener>(
         })?;
         messages.push(match t {
             maknae_proto::Turn::User { .. } => maknae_llm::ChatMessage::user(content),
-            maknae_proto::Turn::Assistant { tool_calls, .. } => maknae_llm::ChatMessage {
+            maknae_proto::Turn::Assistant {
+                tool_calls,
+                reasoning,
+                ..
+            } => maknae_llm::ChatMessage {
+                reasoning_content: reasoning.clone(),
                 role: "assistant".into(),
                 content,
                 tool_calls: tool_calls
@@ -215,6 +221,7 @@ pub async fn fulfil<O: KeyOpener>(
                 tool_call_id: None,
             },
             maknae_proto::Turn::Tool { call_id, .. } => maknae_llm::ChatMessage {
+                reasoning_content: None,
                 role: "tool".into(),
                 content,
                 tool_calls: vec![],
@@ -255,7 +262,7 @@ pub async fn fulfil<O: KeyOpener>(
         stream: false,
     };
 
-    let reply = maknae_llm::chat_completion(
+    let completion = maknae_llm::chat_completion(
         &req.endpoint,
         &key,
         &chat,
@@ -281,10 +288,17 @@ pub async fn fulfil<O: KeyOpener>(
                 )),
             }
         }
+        maknae_llm::CallError::Reply(r) => FulfilError::Provider {
+            summary: format!("provider reply unusable: {}", r.defect()),
+            journal: Some(maknae_llm::defect_line(&req.conversation, r.defect())),
+        },
         other => FulfilError::provider(other.to_string()),
     })?;
 
-    Ok(EgressFrameReply::Reply(reply))
+    if let Some(n) = completion.notice {
+        journal(maknae_llm::notice_line(&req.conversation, n.name()).as_str());
+    }
+    Ok(EgressFrameReply::Reply(completion.reply))
 }
 
 #[cfg(test)]
@@ -509,7 +523,7 @@ mod tests {
         let b = bounds();
         let admitted = crate::handle::decide(&f, &b).unwrap();
         let opener = Fixed("sk-test-not-real");
-        let reply = fulfil(&admitted, &opener, CallBounds::default())
+        let reply = fulfil(&admitted, &opener, CallBounds::default(), &mut |_| {})
             .await
             .unwrap();
         let EgressFrameReply::Reply(reply) = reply else {
@@ -563,7 +577,7 @@ mod tests {
         let b = bounds();
         let admitted = crate::handle::decide(&f, &b).unwrap();
         let opener = Fixed("sk-test-not-real");
-        let _ = fulfil(&admitted, &opener, CallBounds::default())
+        let _ = fulfil(&admitted, &opener, CallBounds::default(), &mut |_| {})
             .await
             .unwrap();
 
@@ -622,7 +636,7 @@ mod tests {
             let b = bounds();
             let admitted = crate::handle::decide(&f, &b).unwrap();
             let opener = Fixed("sk-test-not-real");
-            let _ = fulfil(&admitted, &opener, CallBounds::default())
+            let _ = fulfil(&admitted, &opener, CallBounds::default(), &mut |_| {})
                 .await
                 .unwrap();
             let sent = h.await.unwrap();
@@ -665,7 +679,7 @@ mod tests {
         let b = bounds();
         let admitted = crate::handle::decide(&f, &b).unwrap();
         let opener = Fixed("sk-test-not-real");
-        let _ = fulfil(&admitted, &opener, CallBounds::default())
+        let _ = fulfil(&admitted, &opener, CallBounds::default(), &mut |_| {})
             .await
             .unwrap();
 
@@ -721,7 +735,7 @@ mod tests {
         let b = bounds();
         let admitted = crate::handle::decide(&f, &b).unwrap();
         let opener = Fixed("sk-test-not-real");
-        fulfil(&admitted, &opener, CallBounds::default())
+        fulfil(&admitted, &opener, CallBounds::default(), &mut |_| {})
             .await
             .unwrap();
         let sent = h.await.unwrap();
@@ -760,7 +774,7 @@ mod tests {
         let b = bounds();
         let admitted = crate::handle::decide(&f, &b).unwrap();
         let opener = Fixed("sk-SECRET-VALUE");
-        let e = fulfil(&admitted, &opener, CallBounds::default())
+        let e = fulfil(&admitted, &opener, CallBounds::default(), &mut |_| {})
             .await
             .unwrap_err();
         match &e {
@@ -793,7 +807,7 @@ mod tests {
         let b = bounds();
         let admitted = crate::handle::decide(&f, &b).unwrap();
         let opener = Fixed("sk-SECRET-VALUE");
-        let e = fulfil(&admitted, &opener, CallBounds::default())
+        let e = fulfil(&admitted, &opener, CallBounds::default(), &mut |_| {})
             .await
             .unwrap_err();
         let FulfilError::Provider { summary, journal } = &e else {
@@ -840,7 +854,7 @@ mod tests {
             let b = bounds();
             let admitted = crate::handle::decide(&f, &b).unwrap();
             let opener = Fixed("sk-test-not-real");
-            fulfil(&admitted, &opener, CallBounds::default())
+            fulfil(&admitted, &opener, CallBounds::default(), &mut |_| {})
                 .await
                 .unwrap();
             let sent = h.await.unwrap();
@@ -869,6 +883,7 @@ mod tests {
             &admitted,
             &Refuses(OpenFailure::WrongPath),
             CallBounds::default(),
+            &mut |_| {},
         )
         .await
         .unwrap_err();
@@ -901,7 +916,7 @@ mod tests {
         let opener = Recording {
             seen: std::sync::Mutex::new(vec![]),
         };
-        fulfil(&admitted, &opener, CallBounds::default())
+        fulfil(&admitted, &opener, CallBounds::default(), &mut |_| {})
             .await
             .unwrap();
         let sent = h.await.unwrap();
@@ -915,5 +930,143 @@ mod tests {
                 "conv1|openai|m|maknae-kv|maknae/users/alice/openai/personal|api_key".to_string()
             )]
         );
+    }
+
+    fn leak(s: String) -> &'static str {
+        Box::leak(s.into_boxed_str())
+    }
+
+    async fn fulfil_against(
+        body: &'static str,
+    ) -> (Result<EgressFrameReply, FulfilError>, Vec<String>, String) {
+        fips();
+        let (url, h) = provider("200 OK", body).await;
+        let f = frame_to(url);
+        let b = bounds();
+        let admitted = crate::handle::decide(&f, &b).unwrap();
+        let mut lines = Vec::new();
+        let r = fulfil(
+            &admitted,
+            &Fixed("sk-test-not-real"),
+            CallBounds::default(),
+            &mut |l| lines.push(l.to_string()),
+        )
+        .await;
+        (r, lines, h.await.unwrap())
+    }
+
+    #[tokio::test]
+    async fn an_assistant_turns_reasoning_is_sent_as_reasoning_content() {
+        fips();
+        let (url, h) = provider("200 OK", r#"{"choices":[{"message":{"content":"pong"}}]}"#).await;
+        let mut f = frame_to(url);
+        let text = |t: &str| maknae_proto::ContentBlock::Text {
+            text: maknae_proto::SecretText(zeroize::Zeroizing::new(t.into())),
+        };
+        f.turns = vec![
+            maknae_proto::Turn::User {
+                content: vec![text("q")],
+            },
+            maknae_proto::Turn::Assistant {
+                content: vec![],
+                tool_calls: vec![maknae_proto::ProposedToolCall {
+                    name: "read_file".into(),
+                    call_id: "c1".into(),
+                    arguments: maknae_proto::SecretText(zeroize::Zeroizing::new(
+                        r#"{"path":"a"}"#.into(),
+                    )),
+                }],
+                reasoning: Some(maknae_proto::SecretText(zeroize::Zeroizing::new(
+                    "plan-read-then-patch".into(),
+                ))),
+            },
+            maknae_proto::Turn::Tool {
+                call_id: "c1".into(),
+                content: vec![text("file")],
+            },
+        ];
+        let b = bounds();
+        let admitted = crate::handle::decide(&f, &b).unwrap();
+        fulfil(
+            &admitted,
+            &Fixed("sk-test-not-real"),
+            CallBounds::default(),
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+        let sent = h.await.unwrap();
+        assert_eq!(
+            sent.matches(r#""reasoning_content":"plan-read-then-patch""#)
+                .count(),
+            1
+        );
+        assert_eq!(sent.matches("reasoning_content").count(), 1);
+        assert!(!sent.contains(r#""reasoning":"#));
+    }
+
+    #[tokio::test]
+    async fn a_malformed_reply_journals_its_closed_name_and_no_body_bytes() {
+        let (r, lines, _) = fulfil_against(r#"{"choices": "SENTINEL-sk-not-a-key"}"#).await;
+        let err = r.unwrap_err();
+        let FulfilError::Provider {
+            journal: Some(j), ..
+        } = &err
+        else {
+            panic!("{err:?}")
+        };
+        assert!(j.as_str().ends_with("): Malformed"), "{}", j.as_str());
+        assert!(!j.as_str().contains("SENTINEL"));
+        assert!(!err.to_string().contains("SENTINEL"));
+        assert!(lines.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_reasoning_only_reply_journals_reasoning_only() {
+        let (r, _, _) = fulfil_against(
+            r#"{"choices":[{"finish_reason":"stop","message":{"content":null,"reasoning":"SENTINEL thoughts"}}]}"#,
+        )
+        .await;
+        let err = r.unwrap_err();
+        let FulfilError::Provider {
+            journal: Some(j), ..
+        } = &err
+        else {
+            panic!("{err:?}")
+        };
+        assert!(j.as_str().ends_with("): ReasoningOnly"));
+        assert!(!j.as_str().contains("SENTINEL"));
+    }
+
+    #[tokio::test]
+    async fn a_dropped_reasoning_is_journaled_once_and_the_answer_delivered() {
+        let over = "r".repeat(maknae_proto::MAX_REASONING_BYTES + 1);
+        let body = leak(format!(
+            r#"{{"choices":[{{"message":{{"content":"answer","reasoning_content":"{over}"}}}}]}}"#
+        ));
+        let (r, lines, _) = fulfil_against(body).await;
+        let EgressFrameReply::Reply(reply) = r.unwrap() else {
+            panic!("refused")
+        };
+        assert_eq!(reply.reasoning, None);
+        assert_eq!(reply.blocks.len(), 1);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].ends_with("): ReasoningOverBound"), "{}", lines[0]);
+    }
+
+    #[tokio::test]
+    async fn reasoning_within_the_bound_is_delivered_and_nothing_is_journaled() {
+        let (r, lines, _) = fulfil_against(
+            r#"{"choices":[{"message":{"content":"answer","reasoning_content":"short"}}]}"#,
+        )
+        .await;
+        let EgressFrameReply::Reply(reply) = r.unwrap() else {
+            panic!("refused")
+        };
+        assert_eq!(
+            reply.reasoning.map(|r| r.0.to_string()),
+            Some("short".into())
+        );
+        assert!(lines.is_empty());
     }
 }

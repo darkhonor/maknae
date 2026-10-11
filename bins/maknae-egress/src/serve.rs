@@ -523,6 +523,7 @@ mod tests {
                 admitted,
                 &Opens(Err(OpenFailure::Seal)),
                 CallBounds::default(),
+                &mut |_| {},
             ))
             .map_err(serve_error)
         });
@@ -541,6 +542,7 @@ mod tests {
                 admitted,
                 &Opens(Ok("sk-test-not-real")),
                 CallBounds::default(),
+                &mut |_| {},
             ))
             .map_err(serve_error)
         });
@@ -575,8 +577,13 @@ mod tests {
             maknae_proto::SealedKey::new(vec![9u8; maknae_proto::SEALED_KEY_MIN_BYTES]).unwrap();
         for r in [&first, &second] {
             let (out, reply) = served_with(prefixed(&encoded(r)), |admitted| {
-                rt.block_on(fulfil(admitted, &opener, CallBounds::default()))
-                    .map_err(serve_error)
+                rt.block_on(fulfil(
+                    admitted,
+                    &opener,
+                    CallBounds::default(),
+                    &mut |_| {},
+                ))
+                .map_err(serve_error)
             });
             assert!(matches!(out, Err(ServeError::Fulfil(_))), "{out:?}");
             assert_eq!(reply, None);
