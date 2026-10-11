@@ -109,10 +109,16 @@ pub async fn drive<P: Plane>(
             Gate::Send(Some(n)) => notify(&n),
             Gate::Send(None) => {}
         }
-        let reply = match plane
-            .prompt(transcript.conversation(), transcript.turns())
-            .await
-        {
+        let sent = loop {
+            match plane
+                .prompt(transcript.conversation(), transcript.turns())
+                .await
+            {
+                Err(PlaneError::FrameTooLarge) if transcript.shed_oldest_reasoning() => continue,
+                other => break other,
+            }
+        };
+        let reply = match sent {
             Ok(r) => {
                 meter.record(bytes, r.usage);
                 r
@@ -327,13 +333,15 @@ mod tests {
         writes: Vec<(String, String, Vec<u8>)>,
         bases: Vec<ReadBasis>,
         prompts: usize,
+        seen: Vec<Vec<Turn>>,
         read_outcome: ReadOutcome,
         read_versions: VecDeque<[i64; 7]>,
         write_outcome: WriteOutcome,
     }
     impl Plane for Scripted {
-        async fn prompt(&mut self, _c: &str, _t: &[Turn]) -> Result<PromptReply, PlaneError> {
+        async fn prompt(&mut self, _c: &str, t: &[Turn]) -> Result<PromptReply, PlaneError> {
             self.prompts += 1;
+            self.seen.push(t.to_vec());
             self.replies.pop_front().expect("script exhausted")
         }
         async fn read(
@@ -364,6 +372,7 @@ mod tests {
             writes: vec![],
             bases: vec![],
             prompts: 0,
+            seen: vec![],
             read_outcome: ReadOutcome::Content(ReadPage {
                 content: Zeroizing::new(b"file body".to_vec()),
                 level: "UNCLASSIFIED".into(),
@@ -1046,5 +1055,61 @@ mod tests {
         let out = drive(&mut p, &mut t, &budget(), &mut m, &mut |_: &Notice| {}).await;
         assert_eq!(out.stopped, Some(StopReason::ContextBudget));
         assert_eq!(p.prompts, 1);
+    }
+
+    fn transcript_with_two_reasonings() -> Transcript {
+        let reasoned = |id: &str, r: &str| PromptReply {
+            blocks: vec![],
+            tool_calls: vec![call(id, "read_file", "{}")],
+            usage: None,
+            reasoning: Some(maknae_proto::SecretText(Zeroizing::new(r.into()))),
+        };
+        let mut t = Transcript::new("conv", "q");
+        t.push_assistant(&reasoned("c1", "first"));
+        t.push_tool_result("c1", "r1");
+        t.push_assistant(&reasoned("c2", "second"));
+        t.push_tool_result("c2", "r2");
+        t
+    }
+
+    fn reasonings(turns: &[Turn]) -> Vec<Option<String>> {
+        turns
+            .iter()
+            .filter_map(|t| match t {
+                Turn::Assistant { reasoning, .. } => {
+                    Some(reasoning.as_ref().map(|r| r.0.to_string()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_frame_too_large_sheds_the_oldest_reasoning_and_retries() {
+        let mut p = scripted(vec![]);
+        p.replies.push_back(Err(PlaneError::FrameTooLarge));
+        p.replies.push_back(Ok(answer()));
+        let mut t = transcript_with_two_reasonings();
+        let out = drive_unmetered(&mut p, &mut t, &budget()).await;
+        assert_eq!(out.stopped, None);
+        assert_eq!(p.prompts, 2);
+        assert_eq!(
+            reasonings(&p.seen[0]),
+            vec![Some("first".into()), Some("second".into())]
+        );
+        assert_eq!(reasonings(&p.seen[1]), vec![None, Some("second".into())]);
+    }
+
+    #[tokio::test]
+    async fn a_frame_too_large_with_no_reasoning_left_stops_frame_bound() {
+        let mut p = scripted(vec![]);
+        for _ in 0..3 {
+            p.replies.push_back(Err(PlaneError::FrameTooLarge));
+        }
+        let mut t = transcript_with_two_reasonings();
+        let out = drive_unmetered(&mut p, &mut t, &budget()).await;
+        assert_eq!(out.stopped, Some(StopReason::FrameBound));
+        assert_eq!(p.prompts, 3);
+        assert_eq!(reasonings(&p.seen[2]), vec![None, None]);
     }
 }
