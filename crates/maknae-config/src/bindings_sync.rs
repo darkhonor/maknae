@@ -519,6 +519,7 @@ fn edit_section(
     Ok(Some((next, touched)))
 }
 
+/// Why enroll refuses to add its user to the bindings.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EnrollBindings {
     Lost,
@@ -526,6 +527,7 @@ pub enum EnrollBindings {
     Contained,
 }
 
+/// The bindings with `user` added to `admin`; `None` when already there.
 pub fn enroll_section(
     file: &Section,
     mirror: Option<&Section>,
@@ -2038,6 +2040,10 @@ mod tests {
             names: names(&["mallory"]),
         };
         let got = apply_edit(&base, &live, &listed, &edit).unwrap().unwrap();
+        assert_eq!(
+            got.live.roles_of(&BindingEntry::Name("eve".into())),
+            [ADVERSARY].into()
+        );
         assert_eq!(got.conflicts, [BindingEntry::Name("eve".into())].into());
         assert_eq!(
             got.events,

@@ -1701,12 +1701,14 @@ mod tests {
         let elsewhere = {
             let auth = Arc::new(auth);
             let a = Arc::clone(&auth);
-            let id = std::thread::spawn(move || {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
                 a.decide(&whoami(9));
-                std::thread::current().id()
-            })
-            .join()
-            .unwrap();
+                let _ = tx.send(std::thread::current().id());
+            });
+            let id = rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("the decision finishes");
             assert_eq!(auth.read_decision_log(), [(0, here), (7, here), (9, id)]);
             id
         };

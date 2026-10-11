@@ -2683,12 +2683,13 @@ mod tests {
         for (i, o) in all.iter().enumerate() {
             assert_eq!(*o as usize, i, "{o:?} is out of declaration order");
         }
+        let at = |i: u32| -> Result<ContainmentOutcome, serde::de::value::Error> {
+            ContainmentOutcome::deserialize(i.into_deserializer())
+        };
         let n = all.len() as u32;
-        let past_end: Result<ContainmentOutcome, serde::de::value::Error> =
-            ContainmentOutcome::deserialize(n.into_deserializer());
-        assert_eq!(
-            past_end.unwrap_err().to_string(),
-            format!("invalid value: integer `{n}`, expected variant index 0 <= i < {n}"),
+        assert_eq!(at(n - 1).unwrap(), all[all.len() - 1]);
+        assert!(
+            at(n).is_err(),
             "the enum has a variant the list does not reach"
         );
         all

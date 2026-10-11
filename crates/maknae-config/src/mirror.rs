@@ -85,6 +85,7 @@ fn inline(e: &BindingEntry) -> String {
     }
 }
 
+/// `live` as a `bindings.yaml` body.
 pub fn section_body(live: &Section) -> String {
     let mut out = String::from("schema_version: 1\n");
     let Section::Present(roles) = live else {
