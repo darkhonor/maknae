@@ -77,7 +77,7 @@ pub(crate) fn text(id: MsgId) -> &'static str {
             "maknaed가 명시적 바인딩을 적용 중인데 bindings.yaml이 없거나 bindings: 키가 없어요. 먼저 터미널에서 sudo maknae policy sync로 복원한 뒤 다시 등록하세요"
         }
         MsgId::EnrollBindingsOtherRole => {
-            "{user}님은 bindings.yaml에서 {role} 역할을 갖고 있어요. enroll은 다른 역할이 없는 사용자에게만 admin을 추가해요. {user}님이 admin이어야 한다면 bindings.yaml을 직접 고치세요"
+            "{user}님은 {role} 역할을 갖고 있어요. enroll은 다른 역할이 없는 사용자에게만 admin을 추가해요. {user}님이 admin이어야 한다면 먼저 그 바인딩을 바꾸세요"
         }
         MsgId::EnrollBindingsReloadHint => {
             "maknaed가 실행 중이라면 다시 불러와서 bindings.yaml을 적용하세요: sudo systemctl reload maknaed"

@@ -4261,6 +4261,7 @@ lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
                 let t = msg(l, MsgId::EnrollBindingsLookupFailed);
                 assert!(t.contains("{name}") && t.contains("{error}"), "{l:?}");
                 assert!(!msg(l, MsgId::EnrollBindingsContained).contains("bindings.yaml"));
+                assert!(!msg(l, MsgId::EnrollBindingsOtherRole).contains("bindings.yaml"));
             }
             for id in [
                 MsgId::EnrollBindingsWritten,
@@ -4342,7 +4343,12 @@ lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
             fx.write_mirror_with_live(
                 "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary: [\"bob\"]\n",
             );
-            assert!(fx.write_looking_up("alice", ENROLLING, &broken).is_err());
+            assert_eq!(
+                fx.write_looking_up("alice", ENROLLING, &broken)
+                    .unwrap_err()
+                    .to_string(),
+                "cannot look up the account bob named in the bindings: nss down; nothing was written"
+            );
             assert_eq!(fx.read_bindings(), file);
         }
 
@@ -4381,9 +4387,9 @@ lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
                 "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"alice\"]\n",
             );
             let err = fx.plan("alice", ENROLLING).unwrap_err().to_string();
-            assert!(
-                err.starts_with("alice holds user in bindings.yaml"),
-                "{err}"
+            assert_eq!(
+                err,
+                "alice holds user; enroll adds admin only for a user who holds no other role. If alice should hold admin, change that binding first"
             );
             assert!(fx.write_as("alice", ENROLLING).is_err());
             assert_eq!(fx.read_bindings(), file);

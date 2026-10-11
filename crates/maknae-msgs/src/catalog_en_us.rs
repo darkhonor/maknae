@@ -74,7 +74,7 @@ pub(crate) fn text(id: MsgId) -> &'static str {
             "maknaed enforces explicit bindings, but bindings.yaml is missing or has no bindings: key; restore it first at a terminal with sudo maknae policy sync, then enroll again"
         }
         MsgId::EnrollBindingsOtherRole => {
-            "{user} holds {role} in bindings.yaml; enroll adds admin only for a user who holds no other role. If {user} should hold admin, change bindings.yaml yourself"
+            "{user} holds {role}; enroll adds admin only for a user who holds no other role. If {user} should hold admin, change that binding first"
         }
         MsgId::EnrollBindingsReloadHint => {
             "If maknaed is running, reload it to apply bindings.yaml: sudo systemctl reload maknaed"
