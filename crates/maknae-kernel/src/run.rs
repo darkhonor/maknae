@@ -4475,13 +4475,11 @@ where
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
-        if let Some(name) =
-            crate::containment::unanswered(&next_live, &edit, |n| applied.answered(n))
-        {
-            journal(format!(
-                "maknaed: live edit refused: the applied load never looked up {}",
-                crate::sync::named(&name)
-            ));
+        if crate::containment::unanswered(&next_live, &edit, |n| applied.answered(n)).is_some() {
+            journal(
+                "maknaed: live edit refused: the applied load never looked up a name it binds"
+                    .into(),
+            );
             return Err(LiveRefusal::LookupUnavailable);
         }
         let section = next_live.clone();
@@ -5253,6 +5251,7 @@ where
                 .fetch_add(1, AtomicOrdering::Release);
             self.kernel_record(
                 ctx,
+                target,
                 "deny",
                 "unauthorized",
                 &format!(
@@ -5269,6 +5268,7 @@ where
         if !self
             .kernel_record(
                 ctx,
+                target,
                 "permit",
                 "authorized",
                 &format!(
@@ -5308,7 +5308,8 @@ where
         };
         let (result, posture) = record_class(code);
         let text = corrective(Kind::KernelContain, code, Some(target), "", Some(reason));
-        self.kernel_record(ctx, result, posture, &text).await;
+        self.kernel_record(ctx, target, result, posture, &text)
+            .await;
         if code == maknae_proto::ContainmentOutcome::AlreadyContained {
             return KernelContain::AlreadyContained;
         }
@@ -5329,13 +5330,14 @@ where
             .fetch_add(1, AtomicOrdering::Release);
         self.kernel_record(
             ctx,
+            target,
             "deny",
             "unavailable",
             &format!("kernel containment of uid {target} failed: {why}"),
         )
         .await;
         journal(format!(
-            "maknaed: containment: kernel containment of uid {target} failed: {why}"
+            "maknaed: containment: kernel containment of uid {target} failed"
         ));
         KernelContain::Failed(why)
     }
@@ -5344,6 +5346,7 @@ where
     async fn kernel_record(
         &self,
         ctx: &BootCtx<'_>,
+        target: u32,
         result: &str,
         posture: &str,
         reason: &str,
@@ -5352,9 +5355,9 @@ where
         match self.sink.emit_within(&rec, self.append_bound).await {
             Ok(()) => true,
             Err(e) => {
-                eprintln!(
-                    "maknaed: AUDIT WRITE FAILED on a kernel containment record ({reason}): {e}"
-                );
+                journal(format!(
+                    "maknaed: AUDIT WRITE FAILED on a kernel containment record ({result}/{posture}) for uid {target}: {e}"
+                ));
                 false
             }
         }
@@ -17240,6 +17243,7 @@ mod reload_tests {
             lookup_fails,
         );
         let (store, from) = (fx.store_sha(), fx.seen().len());
+        let (_, journaled) = journal_capture::since(usize::MAX, "");
         assert_eq!(
             bounded(fx.live(
                 LiveOp::Release {
@@ -17250,6 +17254,12 @@ mod reload_tests {
             ))
             .await,
             Err(LiveRefusal::LookupUnavailable)
+        );
+        let (lines, _) = journal_capture::since(journaled, "maknaed: live edit refused");
+        assert!(!lines.is_empty());
+        assert!(
+            lines.iter().all(|l| !l.contains("maknae-no-such-user-165")),
+            "{lines:?}"
         );
         assert_eq!(fx.store_sha(), store);
         assert_eq!(fx.seen().len(), from);
@@ -18072,6 +18082,36 @@ mod reload_tests {
         ));
         assert!(!fx.mirror().contains("4242"));
         assert_eq!(fx.containment_lines(), ["subjects=0", "kernel_refused=1"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_kernel_containment_journals_neither_its_reason_nor_why_it_failed() {
+        let fx = fixture("k-journal", RELEASE_TO_ADMIN, Some(TWO_ADMINS)).await;
+        fx.refuse("kernel.contain");
+        let (_, from) = journal_capture::since(usize::MAX, "");
+        assert!(matches!(
+            bounded(fx.reloader.kernel_contain(41651, "SENTINEL-k-reason")).await,
+            KernelContain::Failed(_)
+        ));
+        let (lines, _) = journal_capture::since(from, "uid 41651");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("AUDIT WRITE FAILED on a kernel containment record")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("kernel containment of uid 41651 failed")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .all(|l| !l.contains("SENTINEL") && !l.contains("did not append")),
+            "{lines:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
