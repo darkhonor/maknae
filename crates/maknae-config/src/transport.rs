@@ -40,6 +40,15 @@ const TIMEOUT_MS_RANGE: std::ops::RangeInclusive<i64> = 100..=TRANSPORT_TIMEOUT_
 /// How long the daemon waits for a requester's home to resolve before a
 /// filesystem verb. Shared so the CLI's attempt reply wait covers it.
 pub const HOME_RESOLVE_TIMEOUT_MS: u64 = 5_000;
+/// The daemon's bound on each blocking stage of a request: the decision, an audit
+/// append, an account lookup, the reload turn, a binding resolution or a check.
+pub const BLOCKING_STAGE_TIMEOUT_MS: u64 = 5_000;
+/// The bounded stages `admin.contain` and `admin.release` pass through in sequence.
+pub const CONTAINMENT_REPLY_STAGES: u64 = 10;
+/// The bounded stages `admin.baseline.accept` passes through in sequence.
+pub const BASELINE_ACCEPT_REPLY_STAGES: u64 = 11;
+/// An admin live edit's unbounded work beyond its stages: the persist and the mirror render.
+pub const ADMIN_REPLY_MARGIN_MS: u64 = 10_000;
 /// How long the daemon waits for the peer's `maknae`-group lookup (NSS,
 /// possibly SSSD/LDAP) before failing closed. Shared so the client's
 /// request-write bound can cover it.

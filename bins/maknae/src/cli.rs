@@ -331,6 +331,26 @@ async fn read_reply<S: tokio::io::AsyncRead + Unpin>(
 const PROMPT_REPLY_MARGIN: std::time::Duration = std::time::Duration::from_secs(30);
 
 fn reply_wait(
+    verb: &maknae_proto::Verb,
+    transport: &maknae_config::TransportConfig,
+) -> std::time::Duration {
+    let stages = match verb {
+        maknae_proto::Verb::AdminContain { .. } | maknae_proto::Verb::AdminRelease { .. } => {
+            maknae_config::CONTAINMENT_REPLY_STAGES
+        }
+        maknae_proto::Verb::AdminBaselineAccept { .. } => {
+            maknae_config::BASELINE_ACCEPT_REPLY_STAGES
+        }
+        _ => return class_wait(class_of(verb), transport),
+    };
+    class_wait(class_of(verb), transport)
+        + std::time::Duration::from_millis(
+            stages * maknae_config::BLOCKING_STAGE_TIMEOUT_MS
+                + maknae_config::ADMIN_REPLY_MARGIN_MS,
+        )
+}
+
+fn class_wait(
     class: maknae_proto::FrameClass,
     transport: &maknae_config::TransportConfig,
 ) -> std::time::Duration {
@@ -410,9 +430,9 @@ async fn send_request_frame<S: tokio::io::AsyncWrite + Unpin>(
 async fn await_reply<S: tokio::io::AsyncRead + Unpin>(
     stream: &mut S,
     class: maknae_proto::FrameClass,
+    wait: std::time::Duration,
     transport: &maknae_config::TransportConfig,
 ) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
-    let wait = reply_wait(class, transport);
     match tokio::time::timeout(wait, read_reply(stream, class, &response_caps(transport))).await {
         Err(_elapsed) => Err(match class {
             maknae_proto::FrameClass::Control => format!(
@@ -705,7 +725,13 @@ pub(crate) async fn send_verb(
         encode_request_zeroizing(&request, request_caps.cap(class)).map_err(|e| e.to_string())?;
     let written = send_request_frame(&mut stream, class, &body, transport).await?;
 
-    let resp_body = await_reply(&mut stream, class, transport).await?;
+    let resp_body = await_reply(
+        &mut stream,
+        class,
+        reply_wait(&request.verb, transport),
+        transport,
+    )
+    .await?;
     let response = decode_response(&resp_body).map_err(|e| e.to_string())?;
 
     match response.result {
@@ -1407,7 +1433,7 @@ mod tests {
             let _ = write_frame(&mut daemon, class, &body).await;
             daemon
         });
-        let got = await_reply(&mut cli, class, &transport).await;
+        let got = await_reply(&mut cli, class, class_wait(class, &transport), &transport).await;
         writer.abort();
         got
     }
@@ -1641,6 +1667,44 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err, control_stalled(READ_TIMEOUT_MS));
+    }
+
+    #[test]
+    fn admin_live_edits_wait_out_every_bounded_daemon_stage() {
+        let transport = maknae_config::TransportConfig {
+            read_timeout_ms: READ_TIMEOUT_MS,
+            ..Default::default()
+        };
+        let stage = maknae_config::BLOCKING_STAGE_TIMEOUT_MS;
+        let target = || maknae_proto::ContainTarget::Uid(4242);
+        for (verb, stages) in [
+            (
+                maknae_proto::Verb::AdminContain {
+                    target: target(),
+                    reason: maknae_proto::contain_reason("r").unwrap().into(),
+                },
+                maknae_config::CONTAINMENT_REPLY_STAGES,
+            ),
+            (
+                maknae_proto::Verb::AdminRelease { target: target() },
+                maknae_config::CONTAINMENT_REPLY_STAGES,
+            ),
+            (
+                maknae_proto::Verb::AdminBaselineAccept { hash: "h".into() },
+                maknae_config::BASELINE_ACCEPT_REPLY_STAGES,
+            ),
+        ] {
+            assert!(stages > 0);
+            assert!(
+                reply_wait(&verb, &transport)
+                    >= std::time::Duration::from_millis(READ_TIMEOUT_MS + stages * stage),
+                "{verb:?}"
+            );
+        }
+        assert_eq!(
+            reply_wait(&maknae_proto::Verb::AdminStatus, &transport),
+            std::time::Duration::from_millis(READ_TIMEOUT_MS)
+        );
     }
 
     #[tokio::test(start_paused = true)]

@@ -29,7 +29,8 @@ const _: () = assert!(BLOCKING_BREAKER_MAX_IN_FLIGHT > BLOCKING_BREAKER_TRIP_AFT
 /// Shared operation timeout for policy/read/group blocking guards. Equal to the
 /// pre-existing per-request decision bound: a healthy local filesystem or NSS
 /// lookup is far below this, while wedged infrastructure fails closed promptly.
-pub const BLOCKING_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
+pub const BLOCKING_OPERATION_TIMEOUT: Duration =
+    Duration::from_millis(maknae_config::BLOCKING_STAGE_TIMEOUT_MS);
 
 /// Bound on each boot, reload and request audit append; one that elapses is
 /// unconfirmed and handled as a failed append.
@@ -186,6 +187,14 @@ impl BlockingBreaker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_admin_reply_stage_is_bounded_by_the_bound_the_cli_waits_out() {
+        let stage = Duration::from_millis(maknae_config::BLOCKING_STAGE_TIMEOUT_MS);
+        assert_eq!(BLOCKING_OPERATION_TIMEOUT, stage);
+        assert_eq!(AUDIT_APPEND_TIMEOUT, stage);
+        assert_eq!(crate::handler::AUTHZ_DECIDE_TIMEOUT, stage);
+    }
 
     #[test]
     fn threshold_and_timeout_values_are_pinned() {
