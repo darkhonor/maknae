@@ -349,6 +349,20 @@ pub fn prompt_outcome(
     }
 }
 
+/// A wrapped key whose frame was refused as too large before it was sent, so it is unconsumed.
+pub struct Spare {
+    conversation: String,
+    minted_at: u64,
+    choice: ProviderChoice,
+}
+
+pub const SPARE_MAX_AGE_SECS: u64 = maknae_vault::USER_KEY_WRAP_TTL.as_secs() / 2;
+
+fn take_spare(spare: &mut Option<Spare>, conversation: &str, now: u64) -> Option<Spare> {
+    let s = spare.take()?;
+    (s.conversation == conversation && now <= s.minted_at + SPARE_MAX_AGE_SECS).then_some(s)
+}
+
 /// Measured against the frame cap before sending (ADR-0023 d7).
 fn frame_fits(verb: &Verb, cap: usize) -> bool {
     maknae_proto::encode_request_zeroizing(
@@ -371,6 +385,7 @@ pub struct RealPlane<'a> {
     pub api: &'a VaultApi,
     pub token: &'a UserToken,
     pub key: KeyContext<'a>,
+    pub spare: Option<Spare>,
 }
 
 impl Plane for RealPlane<'_> {
@@ -390,17 +405,34 @@ impl Plane for RealPlane<'_> {
             return Err(PlaneError::FrameTooLarge);
         }
         let now = crate::login::now_unix().map_err(PlaneError::Transport)?;
-        let (api, token, kv_mount) = (self.api, self.token, self.key.kv_mount);
-        let choice = turn_choice(&self.key, conversation, now, |path| async move {
-            api.read_wrapped(token, kv_mount, &path, maknae_vault::USER_KEY_WRAP_TTL)
+        let (choice, minted_at) = match take_spare(&mut self.spare, conversation, now) {
+            Some(s) => (s.choice, s.minted_at),
+            None => {
+                let (api, token, kv_mount) = (self.api, self.token, self.key.kv_mount);
+                let c = turn_choice(&self.key, conversation, now, |path| async move {
+                    api.read_wrapped(token, kv_mount, &path, maknae_vault::USER_KEY_WRAP_TTL)
+                        .await
+                })
                 .await
-        })
-        .await
-        .map_err(PlaneError::Transport)?;
+                .map_err(PlaneError::Transport)?;
+                (c, now)
+            }
+        };
         if let Verb::SessionPrompt { choice: c, .. } = &mut verb {
             *c = Some(choice);
         }
         if !frame_fits(&verb, self.transport.prompt_max_bytes) {
+            if let Verb::SessionPrompt {
+                choice: Some(choice),
+                ..
+            } = verb
+            {
+                self.spare = Some(Spare {
+                    conversation: conversation.to_string(),
+                    minted_at,
+                    choice,
+                });
+            }
             return Err(PlaneError::FrameTooLarge);
         }
         prompt_outcome(
@@ -558,6 +590,7 @@ pub async fn run(label: Option<String>, prompt: String) -> Result<u8, String> {
             seal_key: &seal_key,
             expires_at: session.expires_at,
         },
+        spare: None,
     };
     let mut transcript = Transcript::new(mint_conversation_id(), &prompt);
     let budget = Budget {
@@ -1296,5 +1329,50 @@ mod tests {
         let fits = body.find(concat!("frame_fits(", "&verb")).unwrap();
         let wrap = body.find(concat!("turn_choice(", "&self.key")).unwrap();
         assert!(fits < wrap);
+    }
+
+    fn a_choice() -> ProviderChoice {
+        ProviderChoice {
+            provider: "p".into(),
+            model: "m".into(),
+            key_subpath: "k".into(),
+            key_field: "f".into(),
+            sealed_key: SealedKey::new(vec![7; maknae_proto::SEALED_KEY_MIN_BYTES]).unwrap(),
+        }
+    }
+
+    #[test]
+    fn a_spare_choice_is_reused_once_for_its_conversation_while_its_wrap_is_young() {
+        let mut spare = Some(Spare {
+            conversation: "c".into(),
+            minted_at: 100,
+            choice: a_choice(),
+        });
+        assert!(take_spare(&mut spare, "other", 101).is_none());
+        assert!(spare.is_none());
+
+        let mut spare = Some(Spare {
+            conversation: "c".into(),
+            minted_at: 100,
+            choice: a_choice(),
+        });
+        assert!(take_spare(&mut spare, "c", 100 + SPARE_MAX_AGE_SECS + 1).is_none());
+
+        let mut spare = Some(Spare {
+            conversation: "c".into(),
+            minted_at: 100,
+            choice: a_choice(),
+        });
+        let s = take_spare(&mut spare, "c", 100 + SPARE_MAX_AGE_SECS).unwrap();
+        assert_eq!((s.choice, s.minted_at), (a_choice(), 100));
+        assert!(take_spare(&mut spare, "c", 101).is_none());
+    }
+
+    #[test]
+    fn a_spare_is_never_older_than_half_the_wrap() {
+        assert_eq!(
+            SPARE_MAX_AGE_SECS * 2,
+            maknae_vault::USER_KEY_WRAP_TTL.as_secs()
+        );
     }
 }

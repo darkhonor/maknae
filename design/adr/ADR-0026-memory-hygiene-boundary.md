@@ -32,14 +32,14 @@ Every buffer **Maknae owns** that holds secret-class bytes — in `maknaed`, `ma
 
 | site | what it holds | shape today |
 |---|---|---|
-| `crates/maknae-llm/src/client.rs`, the reply body | the whole provider reply (write content; served content the model quoted back) | plain `Vec<u8>`, `extend_from_slice` per chunk — grows, freed unwiped |
-| `crates/maknae-llm/src/wire.rs`, the response DTOs (`RespMessage.content`, `RespToolFn.arguments`) | reply text and tool arguments | plain `String`s filled by serde_json before `to_prompt_reply` wraps them; dropped plain on an error; `#[derive(Debug)]` |
 | `crates/maknae-proto/src/wire.rs`, `encode_response_zeroizing` | responses, including the prompt reply | `Zeroizing<Vec>` over `with_capacity`; callers pre-size it (`reply_capacity`) but a mis-sized cap grows silently instead of erroring — `encode_egress_frame_request`'s doc calls it the weaker discipline |
 | `crates/maknae-agent/src/drive.rs`, `text_of` | the model's reply text, bound for the subject's own terminal (may echo served content) | plain `String`, `push_str` per block — grows; the code calls the asymmetry deliberate, this ADR grants no exemption |
 | `bins/maknae/src/cli.rs`, `Command::Agent`'s `prompt: String` | the subject's initial prompt, from the command line | plain `String` owned by clap and `agent::run`; `Transcript::new` makes a zeroizing copy and the original is dropped unwiped |
 | `crates/maknae-proto/src/wire.rs`, the secret-class `ciborium::from_reader` call sites (`decode_request`, `decode_response`, the egress frame decoders; `decode_followup` carries only mutation paths, ids, indices and outcome enums) | the most recent 4 KiB chunks decoded | `from_reader`'s own stack scratch, never wiped; `from_reader_with_buffer` would take a Maknae-owned, zeroizing one |
 
 Each is converted by the change that next touches it, or filed as its own issue after the Cooky freeze at the maintainer's word. Until then they are **known**, not disputed.
+
+**Amended 2026-10-12 (#512):** two rows are removed because that change touched them and converted them. `crates/maknae-llm/src/client.rs`'s reply body is a `Zeroizing<Vec<u8>>` sized to `max_body_bytes` once and filled through `take_capped`, so it never grows. `crates/maknae-llm/src/wire.rs`'s response DTOs (`RespMessage.content`, `reasoning_content`, `reasoning` and `RespToolFn.arguments`) deserialize straight into `SecretText`. What serde_json holds while parsing stays a decision-2 path.
 
 ### 2. The residual — the authoritative list
 

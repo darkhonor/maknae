@@ -162,7 +162,7 @@ pub struct Choice {
 #[derive(Debug, Deserialize)]
 pub struct RespMessage {
     #[serde(default)]
-    pub content: Option<String>,
+    pub content: Option<maknae_proto::SecretText>,
     #[serde(default)]
     pub tool_calls: Vec<RespToolCall>,
     #[serde(default)]
@@ -180,7 +180,7 @@ pub struct RespToolCall {
 #[derive(Debug, Deserialize)]
 pub struct RespToolFn {
     pub name: String,
-    pub arguments: String,
+    pub arguments: maknae_proto::SecretText,
 }
 
 /// Why a provider answer is not usable. Each variant is a refusal the loop
@@ -288,10 +288,8 @@ pub fn to_prompt_reply(resp: ChatResponse, offered: &[String]) -> Result<Complet
         .or(msg.reasoning.filter(|r| !r.0.is_empty()));
 
     let mut blocks = Vec::new();
-    if let Some(text) = msg.content.filter(|c| !c.is_empty()) {
-        blocks.push(maknae_proto::ContentBlock::Text {
-            text: maknae_proto::SecretText(zeroize::Zeroizing::new(text)),
-        });
+    if let Some(text) = msg.content.filter(|c| !c.0.is_empty()) {
+        blocks.push(maknae_proto::ContentBlock::Text { text });
     }
 
     let mut tool_calls = Vec::new();
@@ -302,7 +300,7 @@ pub fn to_prompt_reply(resp: ChatResponse, offered: &[String]) -> Result<Complet
         let proposed = maknae_proto::ProposedToolCall {
             name: c.function.name,
             call_id: c.id,
-            arguments: maknae_proto::SecretText(zeroize::Zeroizing::new(c.function.arguments)),
+            arguments: c.function.arguments,
         };
         // Bounded HERE, against the same predicate the kernel applies, so an
         // over-long proposal is refused at the boundary it arrived on rather
@@ -361,10 +359,10 @@ pub fn defect_line(conversation: &str, name: &str) -> zeroize::Zeroizing<String>
     )
 }
 
-/// One journal line for a delivered reply that lost its reasoning.
+/// One journal line for a reply forwarded without its over-bound reasoning.
 pub fn notice_line(conversation: &str, name: &str) -> zeroize::Zeroizing<String> {
     reply_line(
-        "maknae-egress: provider reply delivered without its reasoning (conversation ",
+        "maknae-egress: provider reply forwarded without its reasoning (conversation ",
         conversation,
         name,
     )
@@ -1475,7 +1473,7 @@ mod tests {
         let n = notice_line("conv-2", "ReasoningOverBound");
         assert_eq!(
             n.as_str(),
-            "maknae-egress: provider reply delivered without its reasoning (conversation conv-2): ReasoningOverBound"
+            "maknae-egress: provider reply forwarded without its reasoning (conversation conv-2): ReasoningOverBound"
         );
         assert_eq!(n.capacity(), n.len());
     }
@@ -1493,5 +1491,12 @@ mod tests {
         let v: serde_json::Value = serde_json::to_value(&m).unwrap();
         assert_eq!(v["reasoning_content"], serde_json::json!("why"));
         assert!(v.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn a_parsed_reply_debug_prints_no_content_arguments_or_reasoning() {
+        let r = parse(r#"{"choices":[{"message":{"content":"SENTINEL-TEXT","reasoning":"SENTINEL-WHY","tool_calls":[{"id":"c","function":{"name":"read_file","arguments":"SENTINEL-ARGS"}}]}}]}"#).unwrap();
+        let d = format!("{r:?}");
+        assert!(!d.contains("SENTINEL"), "{d}");
     }
 }

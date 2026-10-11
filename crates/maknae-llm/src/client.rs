@@ -156,21 +156,13 @@ pub async fn chat_completion(
         }
     }
     let mut resp = resp;
-    let mut body: Vec<u8> = Vec::new();
+    let mut body = Zeroizing::new(Vec::with_capacity(max_body_bytes));
     while let Some(chunk) = resp
         .chunk()
         .await
         .map_err(|e| CallError::Transport(e.to_string()))?
     {
-        body.extend_from_slice(&chunk);
-        // Checked on the ACCUMULATED length, after extending — deliberately not
-        // `body.len() + chunk.len() > cap` before it. That form carries an
-        // addition whose mutation to `*` is unkillable: on the first chunk
-        // `body.len()` is 0, so `0 * n == 0` admits unconditionally, and
-        // whether a later chunk catches it depends on how the transport happens
-        // to split the body. This form has no arithmetic to get wrong, and
-        // overshoots by at most one chunk before refusing.
-        if body.len() > max_body_bytes {
+        if take_capped(&mut body, &chunk, max_body_bytes) {
             return Err(CallError::Transport(format!(
                 "provider body exceeded the {max_body_bytes}-byte cap"
             )));

@@ -103,6 +103,7 @@ mod tests {
 
     fn frame(destination: &str) -> EgressFrameRequest {
         EgressFrameRequest {
+            deadline_ms: None,
             destination: destination.into(),
             endpoint: "https://api.example.test/v1".into(),
             model: "gpt-5.6-luna".into(),

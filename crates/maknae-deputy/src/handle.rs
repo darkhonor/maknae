@@ -33,6 +33,8 @@ pub enum Refusal {
     KeyPathMalformed,
     /// Shape admission failed — an empty field, an over-long conversation.
     MalformedFrame,
+    /// This deputy's `call_timeout_ms` does not fit the kernel's egress deadline on the frame.
+    CallTimeoutExceedsDeadline,
     /// The frame carried a non-text block on the prompt leg. Cooky is text
     /// only (#153, #229) and the kernel refuses non-text long before here, so
     /// this names a kernel BUG rather than dropping the block silently — a
@@ -101,6 +103,14 @@ pub fn decide<'a>(
 ) -> Result<Admitted<'a>, Refusal> {
     if !maknae_proto::egress_frame_request_is_acceptable(req) {
         return Err(Refusal::MalformedFrame);
+    }
+    if let Some(deadline_ms) = req.deadline_ms {
+        let needed = bounds.call_timeout_ms
+            + maknae_config::VAULT_CALLS_MS
+            + maknae_config::DEADLINE_MARGIN_MS;
+        if needed > deadline_ms {
+            return Err(Refusal::CallTimeoutExceedsDeadline);
+        }
     }
     if maknae_config::kv_fragment_is_acceptable(&req.key_vault_path).is_err() {
         return Err(Refusal::KeyPathMalformed);
@@ -195,6 +205,7 @@ mod tests {
 
     fn req(key_vault_path: &str) -> EgressFrameRequest {
         EgressFrameRequest {
+            deadline_ms: None,
             destination: "provider:openai".into(),
             endpoint: "https://api.example.test/v1".into(),
             model: "m".into(),
@@ -528,5 +539,22 @@ mod tests {
             f.turns = turns;
             assert!(decide(&f, &bounds()).is_ok(), "{name} must be admitted");
         }
+    }
+
+    #[test]
+    fn a_call_timeout_that_does_not_fit_the_kernels_deadline_is_refused_before_any_io() {
+        let b = bounds();
+        let mut f = req(ALICE);
+        f.deadline_ms = Some(
+            b.call_timeout_ms + maknae_config::VAULT_CALLS_MS + maknae_config::DEADLINE_MARGIN_MS,
+        );
+        assert!(decide(&f, &b).is_ok());
+        f.deadline_ms = Some(f.deadline_ms.unwrap() - 1);
+        assert_eq!(
+            decide(&f, &b).err(),
+            Some(Refusal::CallTimeoutExceedsDeadline)
+        );
+        f.deadline_ms = None;
+        assert!(decide(&f, &b).is_ok());
     }
 }

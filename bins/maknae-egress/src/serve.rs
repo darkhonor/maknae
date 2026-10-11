@@ -174,6 +174,7 @@ mod tests {
 
     fn request(key: &str) -> EgressFrameRequest {
         EgressFrameRequest {
+            deadline_ms: None,
             destination: "provider:openai".into(),
             endpoint: "https://api.example.test/v1".into(),
             model: "m".into(),

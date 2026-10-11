@@ -262,7 +262,7 @@ impl Egress for SocketEgress {
             ));
         }
 
-        let frame = frame_of(req);
+        let frame = frame_of(req, self.timeout);
         // MEASURED FIRST, allocated second (#241, codex round 2 item C). The
         // counting pass serializes through a sink that stores nothing, so the
         // exact encoded length is known before a byte of frame content is
@@ -351,8 +351,9 @@ impl Egress for SocketEgress {
     }
 }
 
-fn frame_of(req: EgressRequest) -> EgressFrameRequest {
+fn frame_of(req: EgressRequest, deadline: Duration) -> EgressFrameRequest {
     EgressFrameRequest {
+        deadline_ms: Some(deadline.as_millis() as u64),
         destination: req.destination,
         endpoint: req.endpoint,
         model: req.model,
@@ -406,7 +407,7 @@ mod tests {
         let mut r = req();
         r.output_tokens = Some(4_096);
         r.output_tokens_field = Some(maknae_proto::OutputTokensField::MaxTokens);
-        let f = frame_of(r.clone());
+        let f = frame_of(r.clone(), Duration::from_secs(1));
         assert_eq!(f.destination, r.destination);
         assert_eq!(f.endpoint, r.endpoint);
         assert_eq!(f.model, r.model);
@@ -1019,5 +1020,11 @@ mod tests {
                 panic!("a hard write error must be reported as AfterSend(write …), not {other:?}")
             }
         }
+    }
+
+    #[test]
+    fn the_frame_carries_the_kernels_egress_deadline() {
+        let f = frame_of(req(), Duration::from_millis(280_000));
+        assert_eq!(f.deadline_ms, Some(280_000));
     }
 }

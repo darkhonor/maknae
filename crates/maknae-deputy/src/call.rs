@@ -368,6 +368,7 @@ mod tests {
 
     fn frame() -> maknae_proto::EgressFrameRequest {
         maknae_proto::EgressFrameRequest {
+            deadline_ms: None,
             destination: "provider:openai".into(),
             endpoint: "http://127.0.0.1:1/v1/chat/completions".into(),
             model: "m".into(),

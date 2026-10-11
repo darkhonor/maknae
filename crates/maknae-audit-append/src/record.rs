@@ -76,10 +76,8 @@ pub struct Integrity {
 /// up (its provider call failed or timed out), or its reply was malformed or
 /// over the cap; `LandedUndelivered` keeps
 /// ADR-0023 decision 3's meaning: the egress went out, the reply arrived, and
-/// it never reached the loop. In #172 the kernel itself refuses delivery for
-/// three reasons, each named in `reason`: over the frame cap (`TooLarge` on
-/// the wire), carrying a block kind this deployment does not admit, or empty
-/// (both `Unauthorized`). A response-write timeout or a closed connection is
+/// it never reached the loop. The kernel refuses delivery for the reasons
+/// `maknae_kernel::egress::ReplyRefusal` names, each in `reason`. A response-write timeout or a closed connection is
 /// not detected on any verb yet and is #240's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EgressStatus {
