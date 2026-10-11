@@ -203,7 +203,7 @@ pub(crate) fn read_bindings(
     Ok(bindings)
 }
 
-fn other_config_dir(found: &str) -> String {
+pub(crate) fn other_config_dir(found: &str) -> String {
     format!(
         "maknaed reads its configuration from {}, not {CONFIG_DIR}; policy sync installs only {CONFIG_DIR}/{BINDINGS_FILE}",
         terminal_safe(found)

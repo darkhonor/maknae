@@ -86,7 +86,10 @@ pub(crate) fn text(id: MsgId) -> &'static str {
             "maknaed가 실행 중이라면 다시 불러와서 bindings.yaml을 적용하세요: sudo launchctl kill SIGHUP system/io.maknae.maknaed"
         }
         MsgId::EnrollBindingsContained => {
-            "{user}님은 bindings.yaml에서 격리되어 있어요. enroll은 격리를 바꾸지 않아요. 의도한 것이라면 먼저 격리를 해제하세요"
+            "{user}님은 격리되어 있어요. enroll은 격리를 바꾸지 않아요. 의도한 것이라면 먼저 격리를 해제하세요"
+        }
+        MsgId::EnrollBindingsLookupFailed => {
+            "바인딩에 있는 계정 {name}을(를) 조회할 수 없어요: {error}. 아무것도 기록하지 않았어요"
         }
         MsgId::HelperContextMismatch => "운영자 컨텍스트 헬퍼가 예상된 신원으로 전환되지 않았어요",
         MsgId::HelperStillPrivileged => {

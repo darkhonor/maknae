@@ -1998,8 +1998,27 @@ fn enroll_refusal(locale: Locale, user: &str, why: maknae_config::EnrollBindings
     })
 }
 
-fn account_uid(name: &str) -> Option<u32> {
-    maknae_vault::account_uid(name).ok().flatten()
+fn resolve_names(
+    sections: &[&maknae_config::Section],
+    locale: Locale,
+    lookup: &dyn Fn(&str) -> Result<Option<u32>, String>,
+) -> Result<BTreeMap<String, Option<u32>>, EnrollError> {
+    let mut uids = BTreeMap::new();
+    for e in sections.iter().flat_map(|s| s.entries()) {
+        if let maknae_config::BindingEntry::Name(n) = e {
+            if !uids.contains_key(n) {
+                let uid = lookup(n).map_err(|err| {
+                    EnrollError::Bindings(
+                        msg(locale, MsgId::EnrollBindingsLookupFailed)
+                            .replace("{name}", &crate::cli::terminal_safe(n))
+                            .replace("{error}", &crate::cli::terminal_safe(&err)),
+                    )
+                })?;
+                uids.insert(n.clone(), uid);
+            }
+        }
+    }
+    Ok(uids)
 }
 
 fn plan_at(
@@ -2009,6 +2028,7 @@ fn plan_at(
     user: &str,
     uid: u32,
     locale: Locale,
+    lookup: &dyn Fn(&str) -> Result<Option<u32>, String>,
 ) -> Result<(maknae_io::Anchor, BindingsStep), EnrollError> {
     let anchor = maknae_io::open_anchor_resolved(
         etc,
@@ -2019,24 +2039,36 @@ fn plan_at(
         maknae_io::StrategyPref::Auto,
     )
     .map_err(|e| EnrollError::Bindings(format!("cannot use {}: {e}", etc.display())))?;
-    let file = crate::policy_sync::read_bindings(&anchor, etc, owners.bindings)
-        .map_err(EnrollError::Bindings)?;
+    let file = maknae_config::Section::of(
+        &crate::policy_sync::read_bindings(&anchor, etc, owners.bindings)
+            .map_err(EnrollError::Bindings)?,
+    );
     let mirror = crate::policy_sync::read_mirror(state_dir, owners.state_dir, owners.mirror)
         .map_err(EnrollError::Bindings)?;
     if let Some(m) = &mirror {
-        if let Err(why @ maknae_config::EnrollBindings::Contained) =
-            maknae_config::enroll_section(&m.section, None, user, uid, account_uid)
+        if m.header.config_dir != crate::policy_sync::CONFIG_DIR {
+            return Err(EnrollError::Bindings(crate::policy_sync::other_config_dir(
+                &m.header.config_dir,
+            )));
+        }
+    }
+    let live = mirror.as_ref().map(|m| &m.section);
+    let uids = resolve_names(
+        &std::iter::once(&file).chain(live).collect::<Vec<_>>(),
+        locale,
+        lookup,
+    )?;
+    let resolve = |n: &str| uids.get(n).copied().flatten();
+    if let Some(live) = live {
+        if let Err(
+            why @ (maknae_config::EnrollBindings::Contained
+            | maknae_config::EnrollBindings::OtherRole(_)),
+        ) = maknae_config::enroll_section(live, None, user, uid, resolve)
         {
             return Err(enroll_refusal(locale, user, why));
         }
     }
-    let step = match maknae_config::enroll_section(
-        &maknae_config::Section::of(&file),
-        mirror.as_ref().map(|m| &m.section),
-        user,
-        uid,
-        account_uid,
-    ) {
+    let step = match maknae_config::enroll_section(&file, live, user, uid, resolve) {
         Ok(Some(section)) => BindingsStep::Write {
             bytes: bindings_bytes(user, &section),
         },
@@ -2054,8 +2086,9 @@ pub(crate) fn plan_bindings(
     user: &str,
     uid: u32,
     locale: Locale,
+    lookup: &dyn Fn(&str) -> Result<Option<u32>, String>,
 ) -> Result<BindingsStep, EnrollError> {
-    plan_at(etc, state_dir, owners, user, uid, locale).map(|(_, step)| step)
+    plan_at(etc, state_dir, owners, user, uid, locale, lookup).map(|(_, step)| step)
 }
 
 /// Re-plans from a fresh read and installs the result.
@@ -2066,8 +2099,9 @@ pub(crate) fn write_bindings(
     user: &str,
     uid: u32,
     locale: Locale,
+    lookup: &dyn Fn(&str) -> Result<Option<u32>, String>,
 ) -> Result<BindingsStep, EnrollError> {
-    let (anchor, step) = plan_at(etc, state_dir, owners, user, uid, locale)?;
+    let (anchor, step) = plan_at(etc, state_dir, owners, user, uid, locale, lookup)?;
     if let BindingsStep::Write { bytes } = &step {
         crate::policy_sync::install(&anchor, etc, bytes.as_bytes(), owners.file)
             .map_err(EnrollError::Bindings)?;
@@ -2118,6 +2152,7 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
         &operator.name,
         operator.uid,
         locale,
+        &maknae_vault::account_uid,
     )?;
 
     let cli_dir = args
@@ -2391,14 +2426,6 @@ async fn finish_enrollment(
         .cloned()
         .collect();
     artifact_write::write_artifacts(&daemon_rows, &contents, &resolver)?;
-    let bindings = write_bindings(
-        etc,
-        Path::new(maknae_config::STATE_DIR),
-        bindings_owners,
-        &operator.name,
-        operator.uid,
-        locale,
-    )?;
 
     // ---- Step 5: seal the daemon credential --------------------------------
     println!("{}", msg(locale, MsgId::EnrollSealingDaemonCredential));
@@ -2488,6 +2515,16 @@ async fn finish_enrollment(
             verb: "provision",
             detail: e.to_string(),
         })?;
+
+    let bindings = write_bindings(
+        Path::new(crate::policy_sync::CONFIG_DIR),
+        Path::new(maknae_config::STATE_DIR),
+        bindings_owners,
+        &operator.name,
+        operator.uid,
+        locale,
+        &maknae_vault::account_uid,
+    )?;
 
     // ---- Step 7b: root context — enroll IS root under sudo -------
     // Enroll grants the daemon nothing on the home; the deputy gets its
@@ -3889,6 +3926,10 @@ lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
             }
 
             fn write_mirror_with_live(&self, live: &str) {
+                self.write_mirror_in(crate::policy_sync::CONFIG_DIR, live);
+            }
+
+            fn write_mirror_in(&self, config_dir: &str, live: &str) {
                 let section = Section::of(&maknae_config::parse_bindings(live).unwrap());
                 let digest = |b: &[u8]| {
                     let mut out = [0; 32];
@@ -3900,7 +3941,7 @@ lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
                 let text = maknae_config::render_mirror(
                     &MirrorHeader {
                         revision: 3,
-                        config_dir: crate::policy_sync::CONFIG_DIR.into(),
+                        config_dir: config_dir.into(),
                         base: maknae_config::base_token(&section, digest),
                         conflicts: Default::default(),
                     },
@@ -3910,6 +3951,15 @@ lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
             }
 
             fn plan(&self, user: &str, uid: u32) -> Result<BindingsStep, EnrollError> {
+                self.plan_looking_up(user, uid, &maknae_vault::account_uid)
+            }
+
+            fn plan_looking_up(
+                &self,
+                user: &str,
+                uid: u32,
+                lookup: &dyn Fn(&str) -> Result<Option<u32>, String>,
+            ) -> Result<BindingsStep, EnrollError> {
                 plan_bindings(
                     &self.etc(),
                     &self.state(),
@@ -3917,10 +3967,20 @@ lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
                     user,
                     uid,
                     Locale::EnUs,
+                    lookup,
                 )
             }
 
             fn write_as(&self, user: &str, uid: u32) -> Result<BindingsStep, EnrollError> {
+                self.write_looking_up(user, uid, &maknae_vault::account_uid)
+            }
+
+            fn write_looking_up(
+                &self,
+                user: &str,
+                uid: u32,
+                lookup: &dyn Fn(&str) -> Result<Option<u32>, String>,
+            ) -> Result<BindingsStep, EnrollError> {
                 write_bindings(
                     &self.etc(),
                     &self.state(),
@@ -3928,6 +3988,7 @@ lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
                     user,
                     uid,
                     Locale::EnUs,
+                    lookup,
                 )
             }
 
@@ -4071,7 +4132,7 @@ lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
                 assert!(matches!(err, EnrollError::Bindings(_)), "{tag}: {err:?}");
                 assert_eq!(
                     err.to_string(),
-                    "alice is contained in bindings.yaml; enroll does not change a containment. Release it first if that is intended",
+                    "alice is contained; enroll does not change a containment. Release it first if that is intended",
                     "{tag}"
                 );
                 assert!(fx.write_as("alice", ENROLLING).is_err(), "{tag}");
@@ -4088,7 +4149,10 @@ lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
                 "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary:\n    - uid: {ENROLLING}\n"
             ));
             let err = fx.plan("alice", ENROLLING).unwrap_err().to_string();
-            assert!(err.contains("alice is contained"), "{err}");
+            assert_eq!(
+                err,
+                "alice is contained; enroll does not change a containment. Release it first if that is intended"
+            );
             assert!(fx.write_as("alice", ENROLLING).is_err());
             assert_eq!(fx.read_bindings(), file);
         }
@@ -4193,6 +4257,11 @@ lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
 
         #[test]
         fn the_enroll_bindings_messages_exist_in_both_locales_with_their_placeholders() {
+            for l in [Locale::EnUs, Locale::KoKr] {
+                let t = msg(l, MsgId::EnrollBindingsLookupFailed);
+                assert!(t.contains("{name}") && t.contains("{error}"), "{l:?}");
+                assert!(!msg(l, MsgId::EnrollBindingsContained).contains("bindings.yaml"));
+            }
             for id in [
                 MsgId::EnrollBindingsWritten,
                 MsgId::EnrollBindingsAlreadyAdmin,
@@ -4243,6 +4312,101 @@ lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
                 kept.starts_with("alice ") && !kept.contains("reload"),
                 "{kept}"
             );
+        }
+
+        #[test]
+        fn an_account_lookup_that_fails_refuses_naming_the_entry_and_writes_nothing() {
+            fn broken(n: &str) -> Result<Option<u32>, String> {
+                if n == "bob" {
+                    Err("nss down".into())
+                } else {
+                    Ok(None)
+                }
+            }
+            let fx = Fx::new("lookup-file");
+            let file =
+                "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary: [\"bob\"]\n";
+            fx.write_bindings(file);
+            let err = fx.plan_looking_up("alice", ENROLLING, &broken).unwrap_err();
+            assert!(matches!(err, EnrollError::Bindings(_)), "{err:?}");
+            assert_eq!(
+                err.to_string(),
+                "cannot look up the account bob named in the bindings: nss down; nothing was written"
+            );
+            assert!(fx.write_looking_up("alice", ENROLLING, &broken).is_err());
+            assert_eq!(fx.read_bindings(), file);
+
+            let fx = Fx::new("lookup-mirror");
+            let file = "schema_version: 1\nbindings:\n  admin: [\"root\"]\n";
+            fx.write_bindings(file);
+            fx.write_mirror_with_live(
+                "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary: [\"bob\"]\n",
+            );
+            assert!(fx.write_looking_up("alice", ENROLLING, &broken).is_err());
+            assert_eq!(fx.read_bindings(), file);
+        }
+
+        #[test]
+        fn a_resolved_alias_is_matched_through_the_lookup_it_was_given() {
+            let fx = Fx::new("lookup-alias");
+            let file =
+                "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary: [\"bob\"]\n";
+            fx.write_bindings(file);
+            let alias = |n: &str| Ok((n == "bob").then_some(ENROLLING));
+            let err = fx
+                .plan_looking_up("alice", ENROLLING, &alias)
+                .unwrap_err()
+                .to_string();
+            assert!(err.starts_with("alice is contained"), "{err}");
+        }
+
+        #[test]
+        fn a_mirror_for_another_config_directory_is_refused() {
+            let fx = Fx::new("other-config");
+            let file = "schema_version: 1\nbindings:\n  admin: [\"root\"]\n";
+            fx.write_bindings(file);
+            fx.write_mirror_in("/opt/maknae", file);
+            let err = fx.plan("alice", ENROLLING).unwrap_err().to_string();
+            assert_eq!(err, crate::policy_sync::other_config_dir("/opt/maknae"));
+            assert!(fx.write_as("alice", ENROLLING).is_err());
+            assert_eq!(fx.read_bindings(), file);
+        }
+
+        #[test]
+        fn enroll_refuses_a_user_the_daemon_binds_live_to_another_role() {
+            let fx = Fx::new("other-role-live");
+            let file = "schema_version: 1\nbindings:\n  admin: [\"root\"]\n";
+            fx.write_bindings(file);
+            fx.write_mirror_with_live(
+                "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"alice\"]\n",
+            );
+            let err = fx.plan("alice", ENROLLING).unwrap_err().to_string();
+            assert!(
+                err.starts_with("alice holds user in bindings.yaml"),
+                "{err}"
+            );
+            assert!(fx.write_as("alice", ENROLLING).is_err());
+            assert_eq!(fx.read_bindings(), file);
+        }
+
+        #[test]
+        fn bindings_are_written_only_after_every_step_that_can_still_fail_and_roll_back() {
+            let src = include_str!("mod.rs");
+            let body = &src[src.find("async fn finish_enrollment(").unwrap()..];
+            let body = &body[..body.find("\n}\n").unwrap()];
+            let write = body.find("write_bindings(").unwrap();
+            for earlier in [
+                "write_artifacts(",
+                "seal_linux(",
+                "place_seal_key(",
+                "place_graph_key(",
+                "ensure_group_membership(",
+                "run_helper(",
+            ] {
+                assert!(body.find(earlier).unwrap() < write, "{earlier}");
+            }
+            assert!(write < body.find("revoke_legacy_home_access(").unwrap());
+            assert_eq!(body.matches("write_bindings(").count(), 1);
         }
 
         #[test]

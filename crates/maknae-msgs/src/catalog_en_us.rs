@@ -83,7 +83,10 @@ pub(crate) fn text(id: MsgId) -> &'static str {
             "If maknaed is running, reload it to apply bindings.yaml: sudo launchctl kill SIGHUP system/io.maknae.maknaed"
         }
         MsgId::EnrollBindingsContained => {
-            "{user} is contained in bindings.yaml; enroll does not change a containment. Release it first if that is intended"
+            "{user} is contained; enroll does not change a containment. Release it first if that is intended"
+        }
+        MsgId::EnrollBindingsLookupFailed => {
+            "cannot look up the account {name} named in the bindings: {error}; nothing was written"
         }
         MsgId::HelperContextMismatch => {
             "Operator-context helper did not land in the expected identity"

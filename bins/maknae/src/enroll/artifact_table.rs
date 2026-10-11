@@ -525,7 +525,6 @@ mod tests {
         assert!(!got.iter().any(|a| a.path.ends_with("authz.yaml")));
     }
 
-    // bindings.yaml is merged by enroll through policy_sync::install, never laid down as a row.
     #[test]
     fn bindings_yaml_is_absent() {
         for macos in [false, true] {
