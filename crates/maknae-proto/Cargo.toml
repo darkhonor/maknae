@@ -19,6 +19,10 @@ ciborium = "0.2"
 # Already in the workspace graph via maknae-io — no new supply-chain surface.
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
 tokio = { workspace = true, features = ["io-util"] }
+# 2.2: the version url's idna_adapter already locks; NFC and General Category for the
+# containment operand rule (#165). A second version would put two Unicode tables in the binary.
+icu_normalizer = { version = "2.2", default-features = false, features = ["compiled_data"] }
+icu_properties = { version = "2.2", default-features = false, features = ["compiled_data"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["io-util", "macros", "rt", "time"] }

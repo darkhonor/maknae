@@ -118,7 +118,13 @@ pub struct BasicAuthorizer {
     live_turn: LiveTurnLock,
     #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
     evaluation_gate: Option<Arc<EvaluationGate>>,
+    #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
+    decision_log: std::sync::Mutex<Option<DecisionLog>>,
 }
+
+/// Each decided subject uid and the thread that decided it.
+#[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
+pub type DecisionLog = Vec<(u32, std::thread::ThreadId)>;
 
 /// A baseline's live turn: every composed decision shares it, and a live install
 /// takes it alone. Only a baseline owns one, so a [`LiveTurn`] is always a baseline's.
@@ -189,6 +195,8 @@ impl BasicAuthorizer {
             live_turn: LiveTurnLock::new(),
             #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
             evaluation_gate: None,
+            #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
+            decision_log: std::sync::Mutex::new(None),
         }
     }
 
@@ -235,15 +243,37 @@ impl BasicAuthorizer {
     ) -> maknae_security::Decided {
         let d = decide::decide_loaded_cited(snap.loaded(), principal, req);
         #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
+        if let Some(log) = self
+            .decision_log
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_mut()
+        {
+            log.push((logged_uid(req), std::thread::current().id()));
+        }
+        #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
         if let Some(gate) = &self.evaluation_gate {
             gate.arrived.wait();
             gate.release.wait();
         }
-        maknae_security::Decided {
-            verdict: d.verdict,
-            role: d.role,
-            rule: d.cited.as_ref().and_then(|c| snap.cite(c)),
-        }
+        cited_on(snap, d)
+    }
+
+    #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
+    fn set_decision_log(&self, log: Option<DecisionLog>) {
+        *self
+            .decision_log
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = log;
+    }
+
+    #[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
+    fn read_decision_log(&self) -> DecisionLog {
+        self.decision_log
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .unwrap_or_default()
     }
 
     /// The file-based evaluator the snapshot path must agree with.
@@ -257,6 +287,61 @@ impl BasicAuthorizer {
             Ok(lp) => decide::decide_loaded_with_role(&lp, &self.current_principal(), req),
             Err(_) => (maknae_security::Verdict::Indeterminate, None),
         }
+    }
+}
+
+#[cfg(any(test, all(unix, feature = "hermetic-test-seam")))]
+fn logged_uid(req: &maknae_security::Request) -> u32 {
+    match req.subject.0.get(decide::SUBJECT_UID) {
+        Some(maknae_security::AttrValue::Int(u)) => u32::try_from(*u).unwrap_or(u32::MAX),
+        _ => u32::MAX,
+    }
+}
+
+fn cited_on(snap: &Snapshot, d: decide::Decided) -> maknae_security::Decided {
+    maknae_security::Decided {
+        verdict: d.verdict,
+        role: d.role,
+        rule: d.cited.as_ref().and_then(|c| snap.cite(c)),
+    }
+}
+
+/// Decides on a compiled snapshot that need not be the installed one.
+pub struct Candidate<'a> {
+    snapshot: &'a Snapshot,
+    principal: maknae_config::Principal,
+}
+
+impl<'a> Candidate<'a> {
+    pub fn new(snapshot: &'a Snapshot, principal: maknae_config::Principal) -> Self {
+        Self {
+            snapshot,
+            principal,
+        }
+    }
+}
+
+impl maknae_security::Authorizer for Candidate<'_> {
+    fn decide(&self, req: &maknae_security::Request) -> maknae_security::Verdict {
+        self.decide_cited(req).verdict
+    }
+
+    fn decide_reporting_role(
+        &self,
+        req: &maknae_security::Request,
+    ) -> (maknae_security::Verdict, Option<&'static str>) {
+        self.decide_cited(req).into()
+    }
+
+    fn decide_cited(&self, req: &maknae_security::Request) -> maknae_security::Decided {
+        cited_on(
+            self.snapshot,
+            decide::decide_loaded_cited(self.snapshot.loaded(), &self.principal, req),
+        )
+    }
+
+    fn decide_cited_all(&self, reqs: &[maknae_security::Request]) -> Vec<maknae_security::Decided> {
+        maknae_security::decide_each_cited(self, reqs)
     }
 }
 
@@ -289,14 +374,18 @@ fn utf8(p: &Path) -> Result<String, AuthzBasicError> {
 pub struct PolicySource {
     policy: maknae_config::AuthzPolicy,
     bindings: maknae_config::Bindings,
-    #[cfg(test)]
-    uid_map: UidMap,
+    lookups: Lookups,
+    lookup: NssLookup,
     resolved: binding::Resolved,
     principal: maknae_config::Principal,
     paths: PolicyPaths,
     policy_source: String,
     identity_source: String,
 }
+
+type Lookups = std::collections::BTreeMap<String, Option<u32>>;
+
+type NssLookup = fn(&str) -> Result<Option<u32>, i32>;
 
 impl PolicySource {
     /// The production loaders (root-owned, `mode & 0o027 == 0`, symlink-refused) for
@@ -309,8 +398,8 @@ impl PolicySource {
             .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
         let bindings = maknae_config::load_bindings(&paths.bindings)
             .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
-        let uid_map = resolve_uid_map(&bindings)?;
-        Self::from_parts(policy, bindings, uid_map, principal, paths)
+        let lookups = resolve_uid_map_with(&bindings, classify(lookup_uid))?;
+        Self::from_lookups(policy, bindings, lookups, lookup_uid, principal, paths)
     }
 
     #[cfg(all(unix, feature = "hermetic-test-seam"))]
@@ -323,8 +412,8 @@ impl PolicySource {
             .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
         let bindings = maknae_config::load_bindings_with_requirement(&paths.bindings, req)
             .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
-        let uid_map = resolve_uid_map(&bindings)?;
-        Self::from_parts(policy, bindings, uid_map, principal, paths)
+        let lookups = resolve_uid_map_with(&bindings, classify(lookup_uid))?;
+        Self::from_lookups(policy, bindings, lookups, lookup_uid, principal, paths)
     }
 
     pub fn from_parts(
@@ -334,17 +423,29 @@ impl PolicySource {
         principal: maknae_config::Principal,
         paths: PolicyPaths,
     ) -> Result<Self, AuthzBasicError> {
+        let lookups = uid_map.into_iter().map(|(n, u)| (n, Some(u))).collect();
+        Self::from_lookups(policy, bindings, lookups, lookup_uid, principal, paths)
+    }
+
+    fn from_lookups(
+        policy: maknae_config::AuthzPolicy,
+        bindings: maknae_config::Bindings,
+        lookups: Lookups,
+        lookup: NssLookup,
+        principal: maknae_config::Principal,
+        paths: PolicyPaths,
+    ) -> Result<Self, AuthzBasicError> {
         let policy_source = utf8(&paths.authz)?;
         let identity_source = utf8(&paths.bindings)?;
-        let resolved = binding::resolve_subjects(&bindings, &uid_map)
+        let resolved = binding::resolve_subjects(&bindings, &found(&lookups))
             .map_err(|e| AuthzBasicError::Bindings(e.to_string()))?;
         validate_grants(&policy.action_grants)?;
         validate_destinations(&policy.destinations)?;
         Ok(Self {
             policy,
             bindings,
-            #[cfg(test)]
-            uid_map,
+            lookups,
+            lookup,
             resolved,
             principal,
             paths,
@@ -358,22 +459,48 @@ impl PolicySource {
         &self,
         bindings: maknae_config::Bindings,
     ) -> Result<Self, AuthzBasicError> {
-        let uid_map = resolve_uid_map(&bindings)?;
-        self.with_bindings_resolved(bindings, uid_map)
+        let lookups = resolve_uid_map_with(&bindings, classify(self.lookup))?;
+        self.with_bindings_resolved(bindings, lookups)
+    }
+
+    /// Blocking only for a name this load never looked up; the rest reuse its answers.
+    pub fn with_live_bindings(
+        &self,
+        bindings: maknae_config::Bindings,
+    ) -> Result<Self, AuthzBasicError> {
+        self.with_live_bindings_using(bindings, classify(self.lookup))
+    }
+
+    fn with_live_bindings_using(
+        &self,
+        bindings: maknae_config::Bindings,
+        lookup: impl Fn(&str) -> Lookup,
+    ) -> Result<Self, AuthzBasicError> {
+        let lookups = resolve_uid_map_with(&bindings, |n| {
+            self.lookups.get(n).map_or_else(|| lookup(n), |&r| r.into())
+        })?;
+        self.with_bindings_resolved(bindings, lookups)
     }
 
     fn with_bindings_resolved(
         &self,
         bindings: maknae_config::Bindings,
-        uid_map: UidMap,
+        lookups: Lookups,
     ) -> Result<Self, AuthzBasicError> {
-        Self::from_parts(
+        Self::from_lookups(
             self.policy.clone(),
             bindings,
-            uid_map,
+            lookups,
+            self.lookup,
             self.principal.clone(),
             self.paths.clone(),
         )
+    }
+
+    /// Every later resolution of this source asks `lookup` instead of the host.
+    #[cfg(all(unix, feature = "hermetic-test-seam"))]
+    pub fn set_lookup(&mut self, lookup: fn(&str) -> Result<Option<u32>, i32>) {
+        self.lookup = lookup;
     }
 
     pub fn policy(&self) -> &maknae_config::AuthzPolicy {
@@ -397,13 +524,23 @@ impl PolicySource {
     }
 
     #[cfg(test)]
-    pub(crate) fn uid_map(&self) -> &UidMap {
-        &self.uid_map
+    pub(crate) fn uid_map(&self) -> UidMap {
+        found(&self.lookups)
+    }
+
+    #[cfg(test)]
+    fn lookups_for_test(&self) -> Lookups {
+        self.lookups.clone()
     }
 
     /// The subjects this load could not bind as written; each is decided alone.
     pub fn identity_problems(&self) -> &[IdentityProblem] {
         &self.resolved.problems
+    }
+
+    /// Whether this load asked for `name`, found or absent.
+    pub fn answered(&self, name: &str) -> bool {
+        self.lookups.contains_key(name)
     }
 
     /// The `adversary:` names this load could not resolve, in problem order.
@@ -534,6 +671,23 @@ pub(crate) enum Lookup {
     Failed(i32),
 }
 
+impl From<Option<u32>> for Lookup {
+    fn from(r: Option<u32>) -> Self {
+        r.map_or(Lookup::Absent, Lookup::Found)
+    }
+}
+
+fn classify(lookup: NssLookup) -> impl Fn(&str) -> Lookup {
+    move |name| lookup(name).map_or_else(Lookup::Failed, Lookup::from)
+}
+
+fn found(lookups: &Lookups) -> UidMap {
+    lookups
+        .iter()
+        .filter_map(|(n, u)| u.map(|u| (n.clone(), u)))
+        .collect()
+}
+
 /// getpwnam(3)'s "not found" spellings are `Ok(None)`, `ENOENT`, `ESRCH`, `EBADF`
 /// and `EPERM`; every other errno, `ERANGE` and errno 0 included, is a failed lookup.
 #[cfg(unix)]
@@ -552,8 +706,8 @@ pub(crate) fn classify_lookup(r: Result<Option<u32>, nix::errno::Errno>) -> Look
 fn resolve_uid_map_with(
     bindings: &maknae_config::Bindings,
     lookup: impl Fn(&str) -> Lookup,
-) -> Result<UidMap, AuthzBasicError> {
-    let mut map = UidMap::new();
+) -> Result<Lookups, AuthzBasicError> {
+    let mut map = Lookups::new();
     let mut asked = std::collections::BTreeSet::new();
     for entries in bindings.roles.iter().flat_map(|r| r.values()) {
         for e in entries {
@@ -565,9 +719,11 @@ fn resolve_uid_map_with(
             }
             match lookup(name) {
                 Lookup::Found(uid) => {
-                    map.insert(name.clone(), uid);
+                    map.insert(name.clone(), Some(uid));
                 }
-                Lookup::Absent => {}
+                Lookup::Absent => {
+                    map.insert(name.clone(), None);
+                }
                 Lookup::Failed(errno) => {
                     return Err(AuthzBasicError::Bindings(format!(
                         "looking up '{name}' failed (errno {errno}); nothing was changed"
@@ -579,25 +735,26 @@ fn resolve_uid_map_with(
     Ok(map)
 }
 
-fn resolve_uid_map(bindings: &maknae_config::Bindings) -> Result<UidMap, AuthzBasicError> {
-    resolve_uid_map_with(bindings, lookup_uid)
-}
-
 /// One function with an INLINE `#[cfg(unix)]`/`#[cfg(not(unix))]` split
 /// (the `security_load` idiom): a standalone `#[cfg(not(unix))] fn` would be
 /// its own mutation target whose body never compiles on a unix runner.
-fn lookup_uid(name: &str) -> Lookup {
+fn lookup_uid(name: &str) -> Result<Option<u32>, i32> {
     #[cfg(not(unix))]
     {
         let _ = name;
-        Lookup::Failed(0)
+        Err(0)
     }
     #[cfg(unix)]
     {
         // nix reads errno on a non-zero return; macOS getpwnam_r returns ERANGE
         // without setting it, so a stale not-found errno must not survive to here.
         nix::errno::Errno::clear();
-        classify_lookup(nix::unistd::User::from_name(name).map(|u| u.map(|u| u.uid.as_raw())))
+        match classify_lookup(nix::unistd::User::from_name(name).map(|u| u.map(|u| u.uid.as_raw())))
+        {
+            Lookup::Found(uid) => Ok(Some(uid)),
+            Lookup::Absent => Ok(None),
+            Lookup::Failed(errno) => Err(errno),
+        }
     }
 }
 
@@ -853,6 +1010,27 @@ impl HermeticAuthorizer {
     pub fn park_evaluations(&mut self, gate: Arc<EvaluationGate>) {
         self.inner.evaluation_gate = Some(gate);
     }
+
+    /// Every later decision appends its subject uid and thread to the log.
+    pub fn arm_decision_log(&self) {
+        self.inner.set_decision_log(Some(DecisionLog::new()));
+    }
+
+    pub fn decision_log(&self) -> DecisionLog {
+        self.inner.read_decision_log()
+    }
+
+    /// Empties the log and leaves it armed as it was.
+    pub fn clear_decision_log(&self) {
+        let mut log = self
+            .inner
+            .decision_log
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(l) = log.as_mut() {
+            l.clear();
+        }
+    }
 }
 
 /// Every seam method DELEGATES: a default here would make every kernel e2e
@@ -1005,6 +1183,8 @@ mod tests {
                 "admin.subject.list",
                 "admin.baseline.show",
                 "admin.baseline.accept",
+                "admin.contain",
+                "admin.release",
                 "session.prompt"
             ]
         );
@@ -1396,8 +1576,8 @@ mod tests {
         policy: maknae_config::AuthzPolicy,
         bindings: maknae_config::Bindings,
     ) -> Result<PolicySource, AuthzBasicError> {
-        let uid_map = resolve_uid_map(&bindings)?;
-        PolicySource::from_parts(policy, bindings, uid_map, principal(), paths())
+        let lookups = resolve_uid_map_with(&bindings, classify(lookup_uid))?;
+        PolicySource::from_lookups(policy, bindings, lookups, lookup_uid, principal(), paths())
     }
 
     fn bound(body: &str) -> maknae_config::Bindings {
@@ -1429,7 +1609,7 @@ mod tests {
         let next = src
             .with_bindings_resolved(
                 live.clone(),
-                [("root".into(), 0), ("mallory".into(), 4242)].into(),
+                [("root".into(), Some(0)), ("mallory".into(), Some(4242))].into(),
             )
             .unwrap();
         assert_eq!(next.bindings(), &live);
@@ -1487,6 +1667,77 @@ mod tests {
             .any(|s| s.uid == 0 && s.role == "adversary"));
     }
 
+    fn source_with_lookups(lookups: &[(&str, Option<u32>)]) -> PolicySource {
+        PolicySource::from_lookups(
+            parse(EMPTY),
+            bound("schema_version: 1\nbindings:\n  admin: [\"alice\"]\n  user: [\"ghost\"]\n"),
+            lookups.iter().map(|(n, u)| (n.to_string(), *u)).collect(),
+            lookup_uid,
+            principal(),
+            paths(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn an_answered_name_is_one_the_load_asked_found_or_absent() {
+        let source = source_with_lookups(&[("alice", Some(1001)), ("ghost", None)]);
+        assert!(source.answered("alice"));
+        assert!(source.answered("ghost"));
+        assert!(!source.answered("bob"));
+    }
+
+    #[test]
+    fn an_armed_decision_log_records_each_decided_uid_and_its_thread() {
+        let auth = authorizer_over(EMPTY, Some(ADMIN_ROOT), &[("root", 0)]);
+        auth.decide(&whoami(0));
+        assert!(
+            auth.read_decision_log().is_empty(),
+            "a disarmed log records nothing"
+        );
+        auth.set_decision_log(Some(DecisionLog::new()));
+        auth.decide_cited_all(&[whoami(0), whoami(7)]);
+        let here = std::thread::current().id();
+        let elsewhere = {
+            let auth = Arc::new(auth);
+            let a = Arc::clone(&auth);
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                a.decide(&whoami(9));
+                let _ = tx.send(std::thread::current().id());
+            });
+            let id = rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("the decision finishes");
+            assert_eq!(auth.read_decision_log(), [(0, here), (7, here), (9, id)]);
+            id
+        };
+        assert_ne!(elsewhere, here);
+    }
+
+    #[test]
+    fn live_bindings_look_up_only_names_the_applied_load_never_asked() {
+        let asked = std::cell::RefCell::new(Vec::new());
+        let source = source_with_lookups(&[("alice", Some(1001)), ("ghost", None)]);
+        let b = bound("schema_version: 1\nbindings:\n  admin: [\"alice\"]\n  user: [\"ghost\", \"bob\"]\n  adversary:\n    - uid: 4242\n");
+        let next = source
+            .with_live_bindings_using(b, |n| {
+                asked.borrow_mut().push(n.to_string());
+                Lookup::Found(2002)
+            })
+            .unwrap();
+        assert_eq!(*asked.borrow(), ["bob"]);
+        assert_eq!(
+            next.lookups_for_test(),
+            [
+                ("alice".into(), Some(1001)),
+                ("bob".into(), Some(2002)),
+                ("ghost".into(), None)
+            ]
+            .into()
+        );
+    }
+
     fn compiled(src: &PolicySource) -> Arc<Snapshot> {
         snapshot_over(src, LABEL, test_digest, None).unwrap()
     }
@@ -1502,6 +1753,73 @@ mod tests {
             test_digest,
             compiled(&source_with(authz, bindings, uids)),
         )
+    }
+
+    #[test]
+    fn the_production_path_never_permits_a_contained_subject() {
+        let grants: String = decide::GRANTABLE_ACTIONS
+            .iter()
+            .map(|t| format!("      - \"{t}\"\n"))
+            .collect();
+        let authz = format!(
+            "{EMPTY}roles:\n  admin:\n    allow:\n{grants}  user:\n    allow: [\"session.prompt\"]\n"
+        );
+        let bindings =
+            "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary: [\"mallory\"]\n";
+        let uids = [("root", 0), ("mallory", 4242)];
+        let auth = authorizer_over(&authz, Some(bindings), &uids);
+        let snap = compiled(&source_with(&authz, Some(bindings), &uids));
+        let candidate = Candidate::new(&snap, principal());
+        let request = |uid: i64, action: &str, kernel: bool| {
+            let mut s = Attributes::new();
+            s.insert(SUBJECT_UID_KEY, AttrValue::Int(uid));
+            s.insert(
+                maknae_security::SUBJECT_HOME,
+                AttrValue::Str("/root".into()),
+            );
+            if kernel {
+                s.insert(
+                    maknae_security::SUBJECT_INITIATOR,
+                    AttrValue::Str(maknae_security::INITIATOR_KERNEL.into()),
+                );
+            }
+            let mut r = Attributes::new();
+            r.insert(RESOURCE_PATH_KEY, AttrValue::Str("/root/x".into()));
+            r.insert("destination", AttrValue::Str("provider:any".into()));
+            maknae_security::Request {
+                subject: Subject(s),
+                resource: Resource(r),
+                action: Action(action.into()),
+                context: Context(Attributes::new()),
+            }
+        };
+        for path in [
+            &auth as &dyn maknae_security::Authorizer,
+            &candidate as &dyn maknae_security::Authorizer,
+        ] {
+            assert!(
+                matches!(
+                    path.decide_cited(&request(0, "admin.status", false))
+                        .verdict,
+                    maknae_security::Verdict::Permit { .. }
+                ),
+                "an uncontained admin under the same policy is granted"
+            );
+            for action in vocabulary::ACTION_TERMS
+                .iter()
+                .chain(vocabulary::KERNEL_TERMS.iter())
+                .chain(["liveness", "unknown.term", "kernel"].iter())
+            {
+                for kernel in [false, true] {
+                    let d = path.decide_cited(&request(4242, action, kernel));
+                    assert_eq!(
+                        matches!(d.verdict, maknae_security::Verdict::Permit { .. }),
+                        *action == "kernel.contain" && kernel,
+                        "{action} kernel={kernel}: {d:?}"
+                    );
+                }
+            }
+        }
     }
 
     fn liveness_req(uid: Option<i64>) -> maknae_security::Request {
@@ -1620,15 +1938,56 @@ mod tests {
         );
     }
 
-    const SHIPPED_ADMIN_TERMS: [&str; 4] = [
+    const SHIPPED_ADMIN_TERMS: [&str; 5] = [
         "admin.status",
         "admin.subject.list",
         "admin.baseline.show",
         "admin.baseline.accept",
+        "admin.release",
     ];
 
     #[test]
-    fn the_shipped_file_grants_admin_exactly_the_four_terms() {
+    fn a_grant_of_contain_or_release_to_user_guest_or_adversary_refuses_at_load() {
+        for role in ["user", "guest", "adversary"] {
+            for term in ["admin.contain", "admin.release"] {
+                let got = finish(parse_with_roles(&format!(
+                    "roles:\n  {role}:\n    allow: [\"{term}\"]\n"
+                )));
+                match role {
+                    "user" => assert!(
+                        matches!(got, Err(AuthzBasicError::TermNotGrantableForRole { ref role, term: ref t }) if role == "user" && t == term),
+                        "user {term}: {got:?}"
+                    ),
+                    _ => assert!(
+                        matches!(got, Err(AuthzBasicError::RoleNotSupportedYet(ref r)) if r == role),
+                        "{role} {term}: {got:?}"
+                    ),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_shipped_policy_grants_release_and_not_contain_to_admin() {
+        let src = source_with(
+            SHIPPED,
+            Some("schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"daemon\"]\n"),
+            &[("root", 0), ("daemon", 1)],
+        );
+        let auth =
+            BasicAuthorizer::from_snapshot(principal(), paths(), test_digest, compiled(&src));
+        let ask = |uid: i64, action: &str| {
+            let mut r = liveness_req(Some(uid));
+            r.action = Action(action.into());
+            auth.decide(&r)
+        };
+        assert_eq!(ask(0, "admin.release"), audit_permit());
+        assert!(!matches!(ask(0, "admin.contain"), Verdict::Permit { .. }));
+        assert!(!matches!(ask(1, "admin.release"), Verdict::Permit { .. }));
+    }
+
+    #[test]
+    fn the_shipped_file_grants_admin_exactly_the_five_terms() {
         let policy = maknae_config::parse_authz(SHIPPED).expect("shipped authz.yaml parses");
         let roles: Vec<&String> = policy.action_grants.keys().collect();
         assert_eq!(roles, ["admin"]);
@@ -1703,7 +2062,7 @@ mod tests {
             );
         }
         let broken = PolicySource {
-            uid_map: UidMap::new(),
+            lookups: Lookups::new(),
             ..src.clone()
         };
         assert_eq!(
@@ -2784,11 +3143,11 @@ mod tests {
     }
 
     /// A term outside `GRANTABLE_ACTIONS` refuses, whether it is a real verb
-    /// this phase withholds (`admin.contain`) or nonexistent (`admin.stauts`).
+    /// this phase withholds (`admin.credential.rotate`) or nonexistent (`admin.stauts`).
     #[test]
     fn roles_ungrantable_term_refuses_construction_naming_the_term() {
         for term in [
-            "admin.contain",
+            "admin.credential.rotate",
             "admin.policy.reload",
             "admin.stauts",
             "fs.read",
@@ -2825,10 +3184,10 @@ mod tests {
     #[test]
     fn roles_ungrantable_term_in_deny_list_also_refuses() {
         let got = finish(parse_with_roles(
-            "roles:\n  admin:\n    deny: [\"admin.contain\"]\n",
+            "roles:\n  admin:\n    deny: [\"admin.credential.rotate\"]\n",
         ));
         assert!(
-            matches!(got, Err(AuthzBasicError::UnknownActionTerm(ref t)) if t == "admin.contain"),
+            matches!(got, Err(AuthzBasicError::UnknownActionTerm(ref t)) if t == "admin.credential.rotate"),
             "deny lists are gated identically to allow lists, got {got:?}"
         );
     }
@@ -2860,8 +3219,8 @@ mod tests {
         }
         .to_string()
         .starts_with("authz roles: `admin.status` is not grantable to role `user`"));
-        let d = AuthzBasicError::UnknownActionTerm("admin.contain".into()).to_string();
-        assert!(d.contains("admin.contain"), "{d}");
+        let d = AuthzBasicError::UnknownActionTerm("admin.credential.rotate".into()).to_string();
+        assert!(d.contains("admin.credential.rotate"), "{d}");
         // ...and lists what IS grantable, so the fix is in the message.
         assert!(d.contains("admin.status"), "{d}");
         assert_eq!(
@@ -3069,9 +3428,13 @@ mod tests {
         .unwrap();
         assert_eq!(
             map,
-            [("alex".to_string(), 1000), ("mallory".to_string(), 666)]
-                .into_iter()
-                .collect()
+            [
+                ("alex".to_string(), Some(1000)),
+                ("ghost".to_string(), None),
+                ("mallory".to_string(), Some(666))
+            ]
+            .into_iter()
+            .collect()
         );
         assert_eq!(
             *calls.borrow(),
@@ -3096,14 +3459,14 @@ mod tests {
             resolve_uid_map_with(&maknae_config::Bindings::missing(), |_| {
                 Lookup::Failed(5)
             }),
-            Ok(UidMap::new())
+            Ok(Lookups::new())
         );
     }
 
     #[test]
     fn the_host_lookup_resolves_root_and_reports_a_missing_name_as_absent() {
-        assert_eq!(lookup_uid("root"), Lookup::Found(0));
-        assert_eq!(lookup_uid("no-such-user-maknae-496"), Lookup::Absent);
+        assert_eq!(lookup_uid("root"), Ok(Some(0)));
+        assert_eq!(lookup_uid("no-such-user-maknae-496"), Ok(None));
     }
 
     /// Measured on macOS 26 (aarch64): a missing name is `Ok(None)`. `getpwnam_r` with a
@@ -3169,7 +3532,7 @@ mod tests {
         assert_eq!(src.bindings(), &bindings);
         assert_eq!(src.principal(), &principal());
         assert_eq!(src.paths(), &paths());
-        assert_eq!(src.uid_map(), &uid_map);
+        assert_eq!(src.uid_map(), uid_map);
         let layer = src.identity_layer("UNCLASSIFIED", Some([4; 32]));
         let entry = |uid: u32, name: &str, role: &str| maknae_graph::identity::SubjectEntry {
             uid,
@@ -3252,11 +3615,11 @@ mod tests {
         ));
         assert_eq!(
             parts(
-                "schema_version: 1\nroles:\n  admin:\n    allow: [\"admin.contain\"]\n",
+                "schema_version: 1\nroles:\n  admin:\n    allow: [\"admin.credential.rotate\"]\n",
                 &[]
             )
             .unwrap_err(),
-            AuthzBasicError::UnknownActionTerm("admin.contain".into())
+            AuthzBasicError::UnknownActionTerm("admin.credential.rotate".into())
         );
         assert_eq!(
             parts(
@@ -3298,7 +3661,8 @@ mod tests {
     mod hermetic {
         use super::super::*;
         use super::{
-            arrives, audit_permit, contained, no_role, principal, whoami, CONTAINED, EMPTY, LABEL,
+            arrives, audit_permit, bound, contained, no_role, principal, whoami, CONTAINED, EMPTY,
+            LABEL,
         };
         use maknae_security::{Authorizer, Verdict};
         use std::os::unix::fs::PermissionsExt;
@@ -3354,12 +3718,136 @@ mod tests {
                 );
             }
 
+            fn write_bindings(&self, body: &str) {
+                write(&self.bindings(), body);
+            }
+
             fn authorizer(&self, role: &str) -> HermeticAuthorizer {
                 write(&self.policy(), EMPTY);
                 self.bind(role);
                 HermeticAuthorizer::new(self.paths(), principal(), fixture_req(), test_digest)
                     .unwrap()
             }
+        }
+
+        fn admin_request(uid: i64, action: &str) -> maknae_security::Request {
+            let mut r = whoami(uid);
+            r.action = maknae_security::Action(action.into());
+            r
+        }
+
+        #[test]
+        fn the_decision_log_is_empty_until_armed_and_a_clear_keeps_it_armed() {
+            let fx = Fixture::new("decision-log");
+            let auth = fx.authorizer("admin");
+            auth.decide(&whoami(0));
+            assert!(auth.decision_log().is_empty());
+            auth.arm_decision_log();
+            auth.decide(&whoami(3));
+            let here = std::thread::current().id();
+            assert_eq!(auth.decision_log(), [(3, here)]);
+            auth.clear_decision_log();
+            assert!(auth.decision_log().is_empty());
+            auth.decide(&whoami(4));
+            assert_eq!(
+                auth.decision_log(),
+                [(4, here)],
+                "still armed after a clear"
+            );
+        }
+
+        #[test]
+        fn a_candidate_decides_on_its_own_snapshot_not_the_installed_one() {
+            let fx = Fixture::new("candidate");
+            let auth = fx.authorizer("admin");
+            let installed = auth.snapshot();
+            fx.write_bindings(
+                "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary:\n    - uid: 0\n",
+            );
+            let next = auth.compile_from_file().unwrap();
+            let req = admin_request(0, "admin.whoami");
+            assert!(matches!(
+                Candidate::new(&next, auth.principal()).decide(&req),
+                Verdict::Deny { .. }
+            ));
+            assert!(matches!(
+                Candidate::new(&installed, auth.principal()).decide(&req),
+                Verdict::Permit { .. }
+            ));
+            assert!(
+                Arc::ptr_eq(&installed, &auth.snapshot()),
+                "nothing was installed"
+            );
+            assert_eq!(
+                Candidate::new(&next, auth.principal())
+                    .decide_cited_all(&[req.clone(), req.clone()])
+                    .len(),
+                2
+            );
+            let on_installed = Candidate::new(&installed, auth.principal());
+            assert_eq!(on_installed.decide_cited(&req), auth.decide_cited(&req));
+            assert_eq!(
+                on_installed.decide_reporting_role(&req),
+                (audit_permit(), Some("admin"))
+            );
+            assert_eq!(
+                on_installed.decide_cited_all(&[admin_request(0, "admin.status"), req.clone()]),
+                auth.decide_cited_all(&[admin_request(0, "admin.status"), req])
+            );
+        }
+
+        static ASKED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+        fn counting(name: &str) -> Result<Option<u32>, i32> {
+            ASKED.lock().unwrap().push(name.to_string());
+            match name {
+                "dave" => Err(5),
+                "nobody" => Ok(None),
+                _ => Ok(Some(7000)),
+            }
+        }
+
+        #[test]
+        fn a_swapped_lookup_answers_every_resolution_of_that_source() {
+            let fx = Fixture::new("set_lookup");
+            write(&fx.policy(), EMPTY);
+            fx.bind("admin");
+            let mut src =
+                PolicySource::load_with_requirement(fx.paths(), principal(), fixture_req())
+                    .unwrap();
+            src.set_lookup(counting);
+            let asked = || std::mem::take(&mut *ASKED.lock().unwrap());
+            let b = |extra: &str| {
+                bound(&format!(
+                    "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"{extra}\"]\n"
+                ))
+            };
+
+            let reloaded = src.with_bindings(b("bob")).unwrap();
+            assert_eq!(asked(), ["root", "bob"]);
+            assert_eq!(
+                reloaded.uid_map(),
+                [("bob".into(), 7000), ("root".into(), 7000)].into()
+            );
+
+            let live = src.with_live_bindings(b("carol")).unwrap();
+            assert_eq!(asked(), ["carol"]);
+            assert_eq!(
+                live.uid_map(),
+                [("carol".into(), 7000), ("root".into(), 0)].into()
+            );
+
+            let absent = live.with_live_bindings(b("nobody")).unwrap();
+            assert_eq!(asked(), ["nobody"]);
+            assert_eq!(absent.lookups_for_test()["nobody"], None);
+
+            assert_eq!(
+                src.with_live_bindings(b("dave")).unwrap_err(),
+                AuthzBasicError::Bindings(
+                    "looking up 'dave' failed (errno 5); nothing was changed".into()
+                )
+            );
+            assert_eq!(asked(), ["dave"]);
         }
 
         #[test]
@@ -3534,11 +4022,13 @@ mod tests {
             let before = auth.snapshot();
             write(
                 &fx.policy(),
-                &format!("{EMPTY}roles:\n  admin:\n    allow: [\"admin.contain\"]\n"),
+                &format!("{EMPTY}roles:\n  admin:\n    allow: [\"admin.credential.rotate\"]\n"),
             );
             assert_eq!(
                 auth.reload_from_file(),
-                Err(AuthzBasicError::UnknownActionTerm("admin.contain".into()))
+                Err(AuthzBasicError::UnknownActionTerm(
+                    "admin.credential.rotate".into()
+                ))
             );
             assert!(Arc::ptr_eq(&before, &auth.snapshot()));
         }

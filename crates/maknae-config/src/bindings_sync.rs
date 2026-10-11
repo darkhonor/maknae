@@ -396,7 +396,7 @@ pub enum BoundRole {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LiveEdit {
     Contain(BindingEntry),
-    Release(BindingEntry),
+    ReleaseUid { uid: u32, names: BTreeSet<String> },
     Bind { name: String, role: BoundRole },
     Unbind(String),
 }
@@ -431,10 +431,13 @@ impl BoundRole {
 }
 
 impl LiveEdit {
-    fn target(&self) -> BindingEntry {
+    fn targets(&self) -> Vec<BindingEntry> {
         match self {
-            Self::Contain(e) | Self::Release(e) => e.clone(),
-            Self::Bind { name, .. } | Self::Unbind(name) => BindingEntry::Name(name.clone()),
+            Self::Contain(e) => vec![e.clone()],
+            Self::ReleaseUid { uid, names } => std::iter::once(BindingEntry::Uid(*uid))
+                .chain(names.iter().cloned().map(BindingEntry::Name))
+                .collect(),
+            Self::Bind { name, .. } | Self::Unbind(name) => vec![BindingEntry::Name(name.clone())],
         }
     }
 }
@@ -452,19 +455,18 @@ pub fn apply_edit(
     conflicts: &BTreeSet<BindingEntry>,
     edit: &LiveEdit,
 ) -> Result<Option<Edited>, EditError> {
-    let Some(next) = edit_section(base, live, edit)? else {
+    let Some((next, changed)) = edit_section(base, live, edit)? else {
         return Ok(None);
     };
-    let entry = edit.target();
     let mut conflicts = conflicts.clone();
-    let events = if conflicts.remove(&entry) {
-        vec![MergeEvent::Resolved {
+    let events = changed
+        .into_iter()
+        .filter(|entry| conflicts.remove(entry))
+        .map(|entry| MergeEvent::Resolved {
             entry,
             by: ResolvedBy::LiveEdit,
-        }]
-    } else {
-        Vec::new()
-    };
+        })
+        .collect();
     Ok(Some(Edited {
         live: next,
         conflicts,
@@ -476,45 +478,123 @@ fn edit_section(
     base: &Section,
     live: &Section,
     edit: &LiveEdit,
-) -> Result<Option<Section>, EditError> {
+) -> Result<Option<(Section, BTreeSet<BindingEntry>)>, EditError> {
     if !matches!(base, Section::Present(_)) || !matches!(live, Section::Present(_)) {
         return Err(EditError::NoExplicitBindings);
     }
-    let target = &edit.target();
-    let old = live.roles_of(target);
-    let mut new = old.clone();
-    match edit {
-        LiveEdit::Contain(_) => {
-            new.insert(ADVERSARY);
+    let mut changed: Vec<(BindingEntry, BTreeSet<&str>)> = Vec::new();
+    for target in edit.targets() {
+        let old = live.roles_of(&target);
+        let mut new = old.clone();
+        match edit {
+            LiveEdit::Contain(_) => {
+                new.insert(ADVERSARY);
+            }
+            LiveEdit::ReleaseUid { .. } => {
+                new.remove(ADVERSARY);
+            }
+            LiveEdit::Bind { role, .. } => {
+                new.retain(|r| !BOUND.contains(r));
+                new.insert(role.key());
+            }
+            LiveEdit::Unbind(_) => new.retain(|r| !BOUND.contains(r)),
         }
-        LiveEdit::Release(_) => {
-            new.remove(ADVERSARY);
+        if new != old {
+            changed.push((target, new));
         }
-        LiveEdit::Bind { role, .. } => {
-            new.retain(|r| !BOUND.contains(r));
-            new.insert(role.key());
-        }
-        LiveEdit::Unbind(_) => new.retain(|r| !BOUND.contains(r)),
     }
-    if new == old {
+    if changed.is_empty() {
         return Ok(None);
     }
+    let touched: BTreeSet<BindingEntry> = changed.iter().map(|(e, _)| e.clone()).collect();
     let mut values: Values<'_> = live
         .entries()
         .into_iter()
-        .filter(|e| *e != target)
+        .filter(|e| !touched.contains(*e))
         .map(|e| (e.clone(), live.roles_of(e)))
         .collect();
-    values.push((target.clone(), new));
+    values.extend(changed);
     let next = merged_section(base, live, &values);
     crate::check_roles(&Bindings::from_section(&next)).map_err(EditError::Rules)?;
-    Ok(Some(next))
+    Ok(Some((next, touched)))
+}
+
+/// Why enroll refuses to add its user to the bindings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EnrollBindings {
+    Lost,
+    OtherRole(String),
+    Contained,
+}
+
+/// The bindings with `user` added to `admin`; `None` when already there.
+pub fn enroll_section(
+    file: &Section,
+    mirror: Option<&Section>,
+    user: &str,
+    uid: u32,
+    resolve: impl Fn(&str) -> Option<u32>,
+) -> Result<Option<Section>, EnrollBindings> {
+    let me = BindingEntry::Name(user.to_string());
+    match file {
+        Section::Present(roles) => {
+            let is_me = |e: &BindingEntry| match e {
+                BindingEntry::Uid(u) => *u == uid,
+                BindingEntry::Name(n) => n == user || resolve(n) == Some(uid),
+            };
+            let held: Vec<&String> = roles
+                .iter()
+                .filter(|(_, l)| l.iter().any(is_me))
+                .map(|(r, _)| r)
+                .collect();
+            if held.iter().any(|r| *r == ADVERSARY) {
+                return Err(EnrollBindings::Contained);
+            }
+            if let Some(r) = held.iter().find(|r| **r != "admin") {
+                return Err(EnrollBindings::OtherRole((*r).clone()));
+            }
+            if !held.is_empty() {
+                return Ok(None);
+            }
+            let mut roles = roles.clone();
+            roles.entry("admin".to_string()).or_default().push(me);
+            Ok(Some(Section::Present(roles)))
+        }
+        Section::Missing | Section::Absent if matches!(mirror, Some(Section::Present(_))) => {
+            Err(EnrollBindings::Lost)
+        }
+        Section::Missing | Section::Absent => Ok(Some(Section::Present(
+            [("admin".to_string(), vec![me])].into(),
+        ))),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::{parse_bindings, Bindings};
+
+    fn release(e: &BindingEntry) -> LiveEdit {
+        match e {
+            BindingEntry::Uid(uid) => LiveEdit::ReleaseUid {
+                uid: *uid,
+                names: BTreeSet::new(),
+            },
+            BindingEntry::Name(n) => LiveEdit::ReleaseUid {
+                uid: u32::MAX,
+                names: [n.clone()].into(),
+            },
+        }
+    }
+
+    fn edit_section(
+        base: &Section,
+        live: &Section,
+        edit: &LiveEdit,
+    ) -> Result<Option<Section>, EditError> {
+        super::edit_section(base, live, edit).map(|o| o.map(|(s, _)| s))
+    }
 
     const FIXTURES: [&str; 6] = [
         "schema_version: 1\n",
@@ -1282,9 +1362,9 @@ mod tests {
         let (a, seven) = (BindingEntry::Name("a".into()), BindingEntry::Uid(7));
         let edits = [
             LiveEdit::Contain(a.clone()),
-            LiveEdit::Release(a.clone()),
+            release(&a),
             LiveEdit::Contain(seven.clone()),
-            LiveEdit::Release(seven.clone()),
+            release(&seven),
             LiveEdit::Bind {
                 name: "a".into(),
                 role: BoundRole::Admin,
@@ -1362,10 +1442,7 @@ mod tests {
             "the tail follows live's per-role list, not the universe order"
         );
         for (on, off) in [
-            (
-                LiveEdit::Contain(seven.clone()),
-                LiveEdit::Release(seven.clone()),
-            ),
+            (LiveEdit::Contain(seven.clone()), release(&seven)),
             (
                 LiveEdit::Bind {
                     name: "z".into(),
@@ -1430,7 +1507,7 @@ mod tests {
             Ok(None)
         );
         assert_eq!(
-            edit_section(&live, &contained, &LiveEdit::Release(eve.clone()))
+            edit_section(&live, &contained, &release(&eve))
                 .unwrap()
                 .unwrap(),
             s("schema_version: 1\nbindings:\n  user: [\"eve\"]\n"),
@@ -1441,16 +1518,11 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(
-            edit_section(&keyed, &kc, &LiveEdit::Release(eve.clone()))
-                .unwrap()
-                .unwrap(),
+            edit_section(&keyed, &kc, &release(&eve)).unwrap().unwrap(),
             keyed,
             "base's empty key is kept"
         );
-        assert_eq!(
-            edit_section(&live, &live, &LiveEdit::Release(eve.clone())),
-            Ok(None)
-        );
+        assert_eq!(edit_section(&live, &live, &release(&eve)), Ok(None));
         assert_eq!(
             edit_section(
                 &live,
@@ -1910,5 +1982,187 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn present(yaml: &str) -> Section {
+        Section::of(&parse_bindings(&format!("schema_version: 1\nbindings:\n{yaml}")).unwrap())
+    }
+
+    fn names(ns: &[&str]) -> BTreeSet<String> {
+        ns.iter().map(|n| n.to_string()).collect()
+    }
+
+    fn no_alias(_: &str) -> Option<u32> {
+        None
+    }
+
+    #[test]
+    fn a_release_by_uid_removes_every_claimant_and_keeps_their_other_roles() {
+        let base = present(
+            "  admin: [\"alice\"]\n  user: [\"mallory\"]\n  adversary: [\"mallory\", \"mal\"]\n",
+        );
+        let live = present("  admin: [\"alice\"]\n  user: [\"mallory\"]\n  adversary:\n    - \"mallory\"\n    - \"mal\"\n    - uid: 1003\n    - uid: 4242\n");
+        let edit = LiveEdit::ReleaseUid {
+            uid: 1003,
+            names: names(&["mallory", "mal"]),
+        };
+        let got = apply_edit(&base, &live, &BTreeSet::new(), &edit)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            got.live,
+            present("  admin: [\"alice\"]\n  user: [\"mallory\"]\n  adversary:\n    - uid: 4242\n")
+        );
+        assert!(got.events.is_empty());
+    }
+
+    #[test]
+    fn a_release_that_finds_no_claimant_under_adversary_is_a_no_op() {
+        let s = present("  admin: [\"alice\"]\n  adversary:\n    - uid: 4242\n");
+        let edit = LiveEdit::ReleaseUid {
+            uid: 1003,
+            names: names(&["alice"]),
+        };
+        assert_eq!(apply_edit(&s, &s, &BTreeSet::new(), &edit), Ok(None));
+    }
+
+    #[test]
+    fn a_release_clears_every_listed_claimant_it_edits_and_no_other() {
+        let base = present("  adversary: [\"mallory\"]\n");
+        let live = present("  adversary:\n    - \"mallory\"\n    - uid: 1003\n    - \"eve\"\n");
+        let listed: BTreeSet<BindingEntry> = [
+            BindingEntry::Name("mallory".into()),
+            BindingEntry::Uid(1003),
+            BindingEntry::Name("eve".into()),
+        ]
+        .into();
+        let edit = LiveEdit::ReleaseUid {
+            uid: 1003,
+            names: names(&["mallory"]),
+        };
+        let got = apply_edit(&base, &live, &listed, &edit).unwrap().unwrap();
+        assert_eq!(
+            got.live.roles_of(&BindingEntry::Name("eve".into())),
+            [ADVERSARY].into()
+        );
+        assert_eq!(got.conflicts, [BindingEntry::Name("eve".into())].into());
+        assert_eq!(
+            got.events,
+            vec![
+                MergeEvent::Resolved {
+                    entry: BindingEntry::Name("mallory".into()),
+                    by: ResolvedBy::LiveEdit
+                },
+                MergeEvent::Resolved {
+                    entry: BindingEntry::Uid(1003),
+                    by: ResolvedBy::LiveEdit
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_release_over_absent_bindings_is_refused() {
+        let edit = LiveEdit::ReleaseUid {
+            uid: 1,
+            names: BTreeSet::new(),
+        };
+        assert_eq!(
+            apply_edit(&Section::Absent, &Section::Absent, &BTreeSet::new(), &edit),
+            Err(EditError::NoExplicitBindings)
+        );
+    }
+
+    #[test]
+    fn enroll_adds_the_user_to_admin_and_never_removes_or_reorders() {
+        let file =
+            present("  admin: [\"root\"]\n  user: [\"bob\"]\n  adversary:\n    - uid: 4242\n");
+        let got = enroll_section(&file, None, "alice", 1001, no_alias)
+            .unwrap()
+            .unwrap();
+        assert_eq!(got, present("  admin: [\"root\", \"alice\"]\n  user: [\"bob\"]\n  adversary:\n    - uid: 4242\n"));
+        assert_eq!(
+            enroll_section(&got, None, "alice", 1001, no_alias),
+            Ok(None),
+            "re-enroll with the user present writes nothing"
+        );
+        let empty = Section::of(&parse_bindings("schema_version: 1\nbindings: {}\n").unwrap());
+        assert_eq!(
+            enroll_section(&empty, None, "alice", 1001, no_alias)
+                .unwrap()
+                .unwrap(),
+            present("  admin: [\"alice\"]\n")
+        );
+    }
+
+    #[test]
+    fn enroll_on_a_keyless_or_missing_file_writes_the_user_as_the_only_admin() {
+        for file in [Section::Absent, Section::Missing] {
+            for mirror in [None, Some(&Section::Absent), Some(&Section::Missing)] {
+                assert_eq!(
+                    enroll_section(&file, mirror, "alice", 1001, no_alias)
+                        .unwrap()
+                        .unwrap(),
+                    present("  admin: [\"alice\"]\n"),
+                    "{file:?} {mirror:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn enroll_refuses_a_lost_file_the_daemon_enforces() {
+        let live = present("  admin: [\"root\"]\n  adversary:\n    - uid: 4242\n");
+        for file in [Section::Absent, Section::Missing] {
+            assert_eq!(
+                enroll_section(&file, Some(&live), "alice", 1001, no_alias),
+                Err(EnrollBindings::Lost)
+            );
+        }
+        assert!(
+            enroll_section(&live, Some(&live), "alice", 1001, no_alias).is_ok(),
+            "a present file merges whatever the mirror says"
+        );
+    }
+
+    #[test]
+    fn enroll_refuses_a_user_listed_under_another_role_and_names_it() {
+        for (role, yaml) in [
+            ("user", "  user: [\"alice\"]\n"),
+            ("guest", "  guest: [\"alice\"]\n"),
+        ] {
+            assert_eq!(
+                enroll_section(&present(yaml), None, "alice", 1001, no_alias),
+                Err(EnrollBindings::OtherRole(role.into())),
+                "{role}"
+            );
+        }
+        let alias = |n: &str| (n == "al").then_some(1001);
+        assert_eq!(
+            enroll_section(&present("  user: [\"al\"]\n"), None, "alice", 1001, alias),
+            Err(EnrollBindings::OtherRole("user".into())),
+            "an alias of the same uid"
+        );
+        assert_eq!(
+            enroll_section(&present("  admin: [\"al\"]\n"), None, "alice", 1001, alias),
+            Ok(None),
+            "already admin by an alias"
+        );
+        for yaml in [
+            "  adversary: [\"alice\"]\n",
+            "  adversary:\n    - uid: 1001\n",
+        ] {
+            assert_eq!(
+                enroll_section(&present(yaml), None, "alice", 1001, no_alias),
+                Err(EnrollBindings::Contained),
+                "{yaml}"
+            );
+        }
+        let both = present("  admin: [\"alice\"]\n  user: [\"alice\"]\n");
+        assert_eq!(
+            enroll_section(&both, None, "alice", 1001, no_alias),
+            Err(EnrollBindings::OtherRole("user".into())),
+            "a uid under admin and another role still refuses"
+        );
     }
 }

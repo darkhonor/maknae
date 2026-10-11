@@ -83,7 +83,7 @@ impl DestinationGrants {
 /// `session.prompt` may be granted to `user`; `admin.baseline.accept` changes state.
 // One line: the drift gate's extractor reads only the matched line.
 #[rustfmt::skip]
-pub(crate) const GRANTABLE_ACTIONS: [&str; 6] = ["admin.status", "admin.config.show", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "session.prompt"];
+pub(crate) const GRANTABLE_ACTIONS: [&str; 8] = ["admin.status", "admin.config.show", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.contain", "admin.release", "session.prompt"];
 
 /// Byte-wise `&str` equality usable in a `const` context.
 ///
@@ -124,7 +124,7 @@ const fn str_eq(a: &str, b: &str) -> bool {
 /// demands the fourth assertion, which is the failure mode an unrolled check
 /// would otherwise have had.
 const _: () = {
-    let [a, b, c, d, e, f] = GRANTABLE_ACTIONS;
+    let [a, b, c, d, e, f, g, h] = GRANTABLE_ACTIONS;
     const WHY: &str = "admin.whoami is unconditional for admins and must not be grantable";
     assert!(!str_eq(a, "admin.whoami"), "{}", WHY);
     assert!(!str_eq(b, "admin.whoami"), "{}", WHY);
@@ -132,6 +132,8 @@ const _: () = {
     assert!(!str_eq(d, "admin.whoami"), "{}", WHY);
     assert!(!str_eq(e, "admin.whoami"), "{}", WHY);
     assert!(!str_eq(f, "admin.whoami"), "{}", WHY);
+    assert!(!str_eq(g, "admin.whoami"), "{}", WHY);
+    assert!(!str_eq(h, "admin.whoami"), "{}", WHY);
 };
 
 /// A validated action term: it appeared in [`GRANTABLE_ACTIONS`] at load time.
@@ -414,6 +416,9 @@ pub(crate) fn decide_loaded_cited(
     let Some(uid) = uid else {
         return undecided(Verdict::Indeterminate);
     };
+    if class_of(&req.action.0) == Some(Class::Kernel) {
+        return undecided(kernel_decided(req));
+    }
     let role = match lp.roles.role_for(uid, principal.uid) {
         Resolution::Role(r) => r,
         // Case-1 testimony (#181): the FACT, audit-only. The absence still
@@ -475,11 +480,6 @@ pub(crate) fn decide_loaded_cited(
         },
         Role::Admin => match class {
             Some(Class::Liveness) => (permit_with_audit(), None),
-            // Keyed to the ONE built admin term. A class-granular permit here
-            // would grant admin.contain / admin.credential.broker /
-            // admin.policy.reload off an arm that keys nothing — the outcome
-            // #67's spec D3 names as the thing that must not land. Individual
-            // decidability for the rest is D3's implementation obligation.
             Some(Class::Admin) if req.action.0 == "admin.whoami" => (permit_with_audit(), None),
             // The three disclosure terms are decided per-ACTION by the operator's
             // `roles:` grants (#162), never by the class. The guard keys on the
@@ -567,6 +567,24 @@ pub(crate) fn decide_loaded_cited(
         verdict,
         role: Some(role.key()),
         cited,
+    }
+}
+
+fn kernel_decided(req: &SecRequest) -> Verdict {
+    let kernel = matches!(
+        req.subject.0.get(maknae_security::SUBJECT_INITIATOR),
+        Some(AttrValue::Str(s)) if s == maknae_security::INITIATOR_KERNEL
+    );
+    match (req.action.0.as_str(), kernel) {
+        ("kernel.contain", true) => permit_with_audit(),
+        (a, false) => Verdict::NotApplicable {
+            note: Some(format!(
+                "kernel action requested by a subject that is not the kernel: {a}"
+            )),
+        },
+        (a, true) => Verdict::NotApplicable {
+            note: Some(format!("term enumerated, not implemented: {a}")),
+        },
     }
 }
 
@@ -1489,7 +1507,7 @@ mod tests {
         let forged = ActionGrants::from_validated(std::collections::BTreeMap::from([(
             "admin".to_string(),
             (
-                vec![ActionTerm::validated("admin.contain".into())],
+                vec![ActionTerm::validated("admin.policy.reload".into())],
                 Vec::new(),
             ),
         )]));
@@ -1499,10 +1517,10 @@ mod tests {
             decide_loaded(
                 &lp,
                 &principal(),
-                &request(Some(1001), "admin.contain", None)
+                &request(Some(1001), "admin.policy.reload", None)
             ),
             Verdict::NotApplicable {
-                note: Some("term enumerated, not implemented: admin.contain".into())
+                note: Some("term enumerated, not implemented: admin.policy.reload".into())
             },
             "a term outside GRANTABLE_ACTIONS must not be honoured even if it \
              somehow reaches the grant map"
@@ -1530,7 +1548,7 @@ mod tests {
         // Granted in full to admin, with the prompt term's second condition
         // (the destination attribute) satisfied for that term only.
         let lp = lp_with_grants(
-            "roles:\n  admin:\n    allow: [\"admin.status\", \"admin.config.show\", \"admin.subject.list\", \"admin.baseline.show\", \"admin.baseline.accept\", \"session.prompt\"]\ndestinations:\n  admin:\n    allow: [\"provider:openai\"]\n",
+            "roles:\n  admin:\n    allow: [\"admin.status\", \"admin.config.show\", \"admin.subject.list\", \"admin.baseline.show\", \"admin.baseline.accept\", \"admin.contain\", \"admin.release\", \"session.prompt\"]\ndestinations:\n  admin:\n    allow: [\"provider:openai\"]\n",
             GRANT_UIDS,
         );
         for t in GRANTABLE_ACTIONS {
@@ -1782,6 +1800,90 @@ mod tests {
         ("adam", 1004),
     ];
 
+    fn kernel_request(uid: u32, action: &str, initiator: Option<&str>) -> SecRequest {
+        let mut r = request(Some(i64::from(uid)), action, None);
+        if let Some(i) = initiator {
+            r.subject
+                .0
+                .insert(maknae_security::SUBJECT_INITIATOR, AttrValue::Str(i.into()));
+        }
+        r
+    }
+
+    #[test]
+    fn kernel_contain_is_permitted_only_for_the_kernel_subject() {
+        let lp = lp_with_grants("", GRANT_UIDS);
+        assert!(matches!(
+            decide_loaded(
+                &lp,
+                &principal(),
+                &kernel_request(70, "kernel.contain", Some("kernel"))
+            ),
+            Verdict::Permit { .. }
+        ));
+        for (action, initiator, note) in [
+            (
+                "kernel.contain",
+                None,
+                "kernel action requested by a subject that is not the kernel: kernel.contain",
+            ),
+            (
+                "kernel.contain",
+                Some("operator"),
+                "kernel action requested by a subject that is not the kernel: kernel.contain",
+            ),
+            (
+                "kernel.session.terminate",
+                Some("kernel"),
+                "term enumerated, not implemented: kernel.session.terminate",
+            ),
+        ] {
+            assert_eq!(
+                decide_loaded(&lp, &principal(), &kernel_request(70, action, initiator)),
+                Verdict::NotApplicable {
+                    note: Some(note.into())
+                },
+                "{action} {initiator:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_initiator_attribute_grants_nothing_outside_the_kernel_class() {
+        let lp = lp_with_grants("", GRANT_UIDS);
+        assert_eq!(
+            decide_loaded(
+                &lp,
+                &principal(),
+                &kernel_request(1004, "admin.status", Some("kernel"))
+            ),
+            Verdict::Deny {
+                reason: "subject contained: role=adversary".into()
+            }
+        );
+        for uid in [70, 1001, 1002, 1004] {
+            for action in [
+                "admin.status",
+                "admin.contain",
+                "admin.release",
+                "liveness.ping",
+                "admin.whoami",
+                "session.prompt",
+                "fs.read",
+            ] {
+                assert_eq!(
+                    decide_loaded(
+                        &lp,
+                        &principal(),
+                        &kernel_request(uid, action, Some("kernel"))
+                    ),
+                    decide_loaded(&lp, &principal(), &kernel_request(uid, action, None)),
+                    "{uid} {action}"
+                );
+            }
+        }
+    }
+
     /// A granted term permits, and ONLY that term. The other two grantable
     /// terms stay `NotApplicable` -- the arm keys on the action, so one grant
     /// is one grant, not a class-granular opening of `admin.*`.
@@ -1902,7 +2004,7 @@ mod tests {
     #[test]
     fn the_baseline_terms_permit_only_a_granted_admin() {
         let lp = lp_with_grants(
-            "roles:\n  admin:\n    allow: [\"admin.status\", \"admin.config.show\", \"admin.subject.list\", \"admin.baseline.show\", \"admin.baseline.accept\", \"session.prompt\"]\n",
+            "roles:\n  admin:\n    allow: [\"admin.status\", \"admin.config.show\", \"admin.subject.list\", \"admin.baseline.show\", \"admin.baseline.accept\", \"admin.contain\", \"admin.release\", \"session.prompt\"]\n",
             GRANT_UIDS,
         );
         for term in ["admin.baseline.show", "admin.baseline.accept"] {
@@ -1968,6 +2070,67 @@ mod tests {
             },
             "a grant can never reach a contained subject"
         );
+    }
+
+    #[test]
+    fn contain_and_release_are_granted_separately_and_never_by_membership() {
+        let only_release = lp_with_grants(
+            "roles:\n  admin:\n    allow: [\"admin.release\"]\n",
+            GRANT_UIDS,
+        );
+        let only_contain = lp_with_grants(
+            "roles:\n  admin:\n    allow: [\"admin.contain\"]\n",
+            GRANT_UIDS,
+        );
+        let neither = lp_with_grants("", GRANT_UIDS);
+        let permits = |lp: &LoadedPolicy, a: &str| {
+            matches!(
+                decide_loaded(lp, &principal(), &request(Some(1001), a, None)),
+                Verdict::Permit { .. }
+            )
+        };
+        assert!(
+            permits(&only_release, "admin.release") && !permits(&only_release, "admin.contain")
+        );
+        assert!(
+            permits(&only_contain, "admin.contain") && !permits(&only_contain, "admin.release")
+        );
+        assert!(!permits(&neither, "admin.contain") && !permits(&neither, "admin.release"));
+        let denied = lp_with_grants(
+            "roles:\n  admin:\n    allow: [\"admin.release\"]\n    deny: [\"admin.release\"]\n",
+            GRANT_UIDS,
+        );
+        assert!(matches!(
+            decide_loaded(
+                &denied,
+                &principal(),
+                &request(Some(1001), "admin.release", None)
+            ),
+            Verdict::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn a_contained_subject_granted_both_terms_is_still_denied_everything() {
+        let lp = lp_with_grants(
+            "roles:\n  admin:\n    allow: [\"admin.release\", \"admin.contain\", \"admin.status\"]\n",
+            GRANT_UIDS,
+        );
+        for a in [
+            "liveness.ping",
+            "admin.whoami",
+            "admin.status",
+            "admin.release",
+            "admin.contain",
+        ] {
+            assert_eq!(
+                decide_loaded(&lp, &principal(), &request(Some(1004), a, None)),
+                Verdict::Deny {
+                    reason: "subject contained: role=adversary".into()
+                },
+                "{a}"
+            );
+        }
     }
 
     /// An empty `roles:` block behaves exactly as an absent one. This is the
@@ -2145,12 +2308,24 @@ mod tests {
     #[test]
     fn every_new_class_resolves_and_abstains() {
         let lp = lp_with(None, &[]);
-        for (action, expect) in [
-            ("terminal.create", Class::Terminal),
-            ("mcp.tool.call", Class::Mcp),
-            ("fs.move", Class::Fs),
-            ("fs.link", Class::Fs),
-            ("kernel.contain", Class::Kernel),
+        for (action, expect, note) in [
+            (
+                "terminal.create",
+                Class::Terminal,
+                "term enumerated, not implemented",
+            ),
+            (
+                "mcp.tool.call",
+                Class::Mcp,
+                "term enumerated, not implemented",
+            ),
+            ("fs.move", Class::Fs, "term enumerated, not implemented"),
+            ("fs.link", Class::Fs, "term enumerated, not implemented"),
+            (
+                "kernel.contain",
+                Class::Kernel,
+                "kernel action requested by a subject that is not the kernel",
+            ),
         ] {
             assert_eq!(class_of(action), Some(expect), "{action} must resolve");
             assert_eq!(
@@ -2160,7 +2335,7 @@ mod tests {
                     &request(Some(OPERATOR_UID as i64), action, Some("/home/operator/x")),
                 ),
                 Verdict::NotApplicable {
-                    note: Some(format!("term enumerated, not implemented: {action}"))
+                    note: Some(format!("{note}: {action}"))
                 },
                 "{action} must abstain"
             );

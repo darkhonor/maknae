@@ -118,7 +118,7 @@ sudo chmod 0640 /etc/maknae/config.d/10-provider.yaml
 
 ### 4. Allow the prompt
 
-Nothing may reach a model until policy says so. The packaged `authz.yaml` already has a `roles:` key granting `admin` its four administrative terms, and a second `roles:` key refuses the whole file, so edit it in place (`sudoedit /etc/maknae/authz.yaml`): add `session.prompt` to `admin`'s list and add a `destinations:` key. The end of the file then reads:
+Nothing may reach a model until policy says so. The packaged `authz.yaml` already has a `roles:` key granting `admin` its five administrative terms, and a second `roles:` key refuses the whole file, so edit it in place (`sudoedit /etc/maknae/authz.yaml`): add `session.prompt` to `admin`'s list and add a `destinations:` key. The end of the file then reads:
 
 ```yaml
 roles:
@@ -128,6 +128,7 @@ roles:
       - "admin.subject.list"
       - "admin.baseline.show"
       - "admin.baseline.accept"
+      - "admin.release"
       - "session.prompt"
 destinations:
   admin:
@@ -224,6 +225,7 @@ Enroll writes `~/.maknae` only for the account that ran it. Each further local u
          - "admin.subject.list"
          - "admin.baseline.show"
          - "admin.baseline.accept"
+         - "admin.release"
          - "session.prompt"
      user:
        allow: ["session.prompt"]

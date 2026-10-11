@@ -149,6 +149,27 @@ enum Command {
     BaselineShow,
     /// Accept the pending baseline change set named by HASH (from `maknae baseline-show`).
     BaselineAccept { hash: String },
+    /// Contain a subject: deny it everything until released. Granted by admin.contain.
+    Contain {
+        /// The account to contain.
+        #[arg(required_unless_present = "uid", conflicts_with = "uid")]
+        user: Option<String>,
+        /// Contain by uid instead of by name.
+        #[arg(long)]
+        uid: Option<u32>,
+        /// Why; recorded in the audit trail only.
+        #[arg(long)]
+        reason: String,
+    },
+    /// Release a contained subject. Granted by admin.release.
+    Release {
+        /// The account to release.
+        #[arg(required_unless_present = "uid", conflicts_with = "uid")]
+        user: Option<String>,
+        /// Release by uid instead of by name.
+        #[arg(long)]
+        uid: Option<u32>,
+    },
     /// Print the accounts `audit.readers` grants read on the audit trail, validated, one
     /// per line. Run as root; the packages call it after every hold of /var/log/maknae.
     /// With --stopped it refuses unless maknaed is stopped (the runbook's file grant).
@@ -225,6 +246,49 @@ enum Verb {
     AdminBaselineAccept {
         hash: AcceptHash,
     },
+    Contain {
+        target: maknae_proto::ContainTarget,
+        reason: maknae_proto::ContainReason,
+    },
+    Release {
+        target: maknae_proto::ContainTarget,
+    },
+}
+
+impl Verb {
+    /// The verb's kind, for messages that must not carry its operands.
+    fn kind(&self) -> &'static str {
+        match self {
+            Verb::Ping => "ping",
+            Verb::Whoami => "whoami",
+            Verb::Read { .. } => "read",
+            Verb::Write { .. } => "write",
+            Verb::Delete { .. } => "delete",
+            Verb::Mkdir { .. } => "mkdir",
+            Verb::AdminStatus => "status",
+            Verb::AdminConfigShow => "config show",
+            Verb::AdminSubjectList => "subject list",
+            Verb::AdminBaselineShow => "baseline show",
+            Verb::AdminBaselineAccept { .. } => "baseline accept",
+            Verb::Contain { .. } => "contain",
+            Verb::Release { .. } => "release",
+        }
+    }
+}
+
+/// A payload's kind, for messages that must not carry its content.
+fn payload_kind(p: &Payload) -> &'static str {
+    match p {
+        Payload::Pong => "pong",
+        Payload::Whoami(_) => "whoami",
+        Payload::ConfigView(_) => "config view",
+        Payload::Status(_) => "status",
+        Payload::SubjectList(_) => "subject list",
+        Payload::MutationAttempt(_) => "mutation attempt",
+        Payload::PromptReply(_) => "prompt reply",
+        Payload::Baseline(_) => "baseline view",
+        Payload::Containment(_) => "containment",
+    }
 }
 
 /// The accept operand; Debug shows only the prefix the trail carries.
@@ -278,6 +342,8 @@ impl From<Verb> for maknae_proto::Verb {
             Verb::AdminBaselineAccept { hash } => {
                 maknae_proto::Verb::AdminBaselineAccept { hash: hash.0 }
             }
+            Verb::Contain { target, reason } => maknae_proto::Verb::AdminContain { target, reason },
+            Verb::Release { target } => maknae_proto::Verb::AdminRelease { target },
         }
     }
 }
@@ -301,6 +367,26 @@ async fn read_reply<S: tokio::io::AsyncRead + Unpin>(
 const PROMPT_REPLY_MARGIN: std::time::Duration = std::time::Duration::from_secs(30);
 
 fn reply_wait(
+    verb: &maknae_proto::Verb,
+    transport: &maknae_config::TransportConfig,
+) -> std::time::Duration {
+    let stages = match verb {
+        maknae_proto::Verb::AdminContain { .. } | maknae_proto::Verb::AdminRelease { .. } => {
+            maknae_config::CONTAINMENT_REPLY_STAGES
+        }
+        maknae_proto::Verb::AdminBaselineAccept { .. } => {
+            maknae_config::BASELINE_ACCEPT_REPLY_STAGES
+        }
+        _ => return class_wait(class_of(verb), transport),
+    };
+    class_wait(class_of(verb), transport)
+        + std::time::Duration::from_millis(
+            stages * maknae_config::BLOCKING_STAGE_TIMEOUT_MS
+                + maknae_config::ADMIN_REPLY_MARGIN_MS,
+        )
+}
+
+fn class_wait(
     class: maknae_proto::FrameClass,
     transport: &maknae_config::TransportConfig,
 ) -> std::time::Duration {
@@ -380,9 +466,9 @@ async fn send_request_frame<S: tokio::io::AsyncWrite + Unpin>(
 async fn await_reply<S: tokio::io::AsyncRead + Unpin>(
     stream: &mut S,
     class: maknae_proto::FrameClass,
+    wait: std::time::Duration,
     transport: &maknae_config::TransportConfig,
 ) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
-    let wait = reply_wait(class, transport);
     match tokio::time::timeout(wait, read_reply(stream, class, &response_caps(transport))).await {
         Err(_elapsed) => Err(match class {
             maknae_proto::FrameClass::Control => format!(
@@ -675,7 +761,13 @@ pub(crate) async fn send_verb(
         encode_request_zeroizing(&request, request_caps.cap(class)).map_err(|e| e.to_string())?;
     let written = send_request_frame(&mut stream, class, &body, transport).await?;
 
-    let resp_body = await_reply(&mut stream, class, transport).await?;
+    let resp_body = await_reply(
+        &mut stream,
+        class,
+        reply_wait(&request.verb, transport),
+        transport,
+    )
+    .await?;
     let response = decode_response(&resp_body).map_err(|e| e.to_string())?;
 
     match response.result {
@@ -754,7 +846,91 @@ fn status_lines(s: &maknae_proto::StatusView) -> Vec<String> {
     lines.extend(identity_problems_line(&s.identity_problem_counts));
     lines.extend(s.baseline_pending.iter().map(|l| terminal_safe(l)));
     lines.extend(identity_sync_line(&s.identity_sync));
+    lines.extend(containment_status_line(&s.containment));
     lines
+}
+
+fn containment_status_line(entries: &[String]) -> Option<String> {
+    if entries.is_empty() {
+        return None;
+    }
+    let count = |key: &str| {
+        entries
+            .iter()
+            .find_map(|e| e.strip_prefix(key)?.strip_prefix('=')?.parse::<u64>().ok())
+    };
+    let (Some(subjects), Some(refused)) = (count("subjects"), count("kernel_refused")) else {
+        return Some(format!(
+            "containment: {}",
+            entries
+                .iter()
+                .map(|e| terminal_safe(e))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    };
+    Some(format!(
+        "containment: {subjects} contained, {refused} refused kernel containments"
+    ))
+}
+
+fn target_operand(
+    user: Option<String>,
+    uid: Option<u32>,
+) -> Result<maknae_proto::ContainTarget, String> {
+    match (user, uid) {
+        (Some(name), None) => Ok(maknae_proto::ContainTarget::Name(name)),
+        (None, Some(uid)) => Ok(maknae_proto::ContainTarget::Uid(uid)),
+        _ => Err("maknae: name a user or give --uid, not both".into()),
+    }
+}
+
+fn contain_verb(user: Option<String>, uid: Option<u32>, reason: String) -> Result<Verb, String> {
+    let refuse = |e: maknae_proto::OperandError| format!("maknae: {e}");
+    let reason = maknae_proto::contain_reason(&reason).map_err(refuse)?;
+    let target = maknae_proto::contain_target(&target_operand(user, uid)?).map_err(refuse)?;
+    Ok(Verb::Contain {
+        target,
+        reason: reason.into(),
+    })
+}
+
+fn release_verb(user: Option<String>, uid: Option<u32>) -> Result<Verb, String> {
+    let target = maknae_proto::contain_target(&target_operand(user, uid)?)
+        .map_err(|e| format!("maknae: {e}"))?;
+    Ok(Verb::Release { target })
+}
+
+fn containment_line(verb: &Verb, v: &maknae_proto::ContainmentView) -> Result<String, String> {
+    use maknae_proto::ContainmentOutcome as O;
+    if !matches!(verb, Verb::Contain { .. } | Verb::Release { .. }) {
+        return Err(format!(
+            "protocol error: daemon returned a containment payload for a {} request",
+            verb.kind()
+        ));
+    }
+    let landed = |what: &str| match (v.target_uid, v.revision) {
+        (Some(uid), Some(rev)) => Ok(format!("{what} uid {uid} (revision {rev})")),
+        _ => Err("protocol error: a containment without a uid and revision".to_string()),
+    };
+    match v.outcome {
+        O::Contained => Ok(format!(
+            "{}; sudo maknae policy sync writes it into bindings.yaml",
+            landed("contained")?
+        )),
+        O::Released => Ok(format!(
+            "{}; writing it into bindings.yaml needs sudo maknae policy sync at a terminal: the automatic sync never installs a release",
+            landed("released")?
+        )),
+        O::AlreadyContained | O::NotContained => Ok(v.outcome.text().to_string()),
+        O::LastReleaser
+        | O::SelfContainWithoutRelease
+        | O::Busy
+        | O::Stopping
+        | O::NoExplicitBindings
+        | O::UnknownAccount
+        | O::LookupUnavailable => Err(v.outcome.text().to_string()),
+    }
 }
 
 fn identity_sync_line(entries: &[String]) -> Option<String> {
@@ -957,6 +1133,10 @@ fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
             println!("{}", accepted_line(&hash, &v)?);
             Ok(())
         }
+        (v @ (Verb::Contain { .. } | Verb::Release { .. }), Payload::Containment(c)) => {
+            println!("{}", containment_line(&v, &c)?);
+            Ok(())
+        }
         // A payload for a DIFFERENT verb than we sent — a protocol error.
         //
         // Written as an explicit list of the wrong-payload cases rather than a
@@ -973,8 +1153,11 @@ fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
         | (v, p @ Payload::MutationAttempt(_))
         | (v, p @ Payload::SubjectList(_))
         | (v, p @ Payload::PromptReply(_))
-        | (v, p @ Payload::Baseline(_)) => Err(format!(
-            "protocol error: daemon returned a {p:?} payload for a {v:?} request"
+        | (v, p @ Payload::Baseline(_))
+        | (v, p @ Payload::Containment(_)) => Err(format!(
+            "protocol error: daemon returned a {} payload for a {} request",
+            payload_kind(&p),
+            v.kind()
         )),
     }
 }
@@ -995,6 +1178,10 @@ pub async fn run_cli() -> ExitCode {
             Ok(hash) => execute(Verb::AdminBaselineAccept { hash: hash.into() }).await,
             Err(e) => Err(e),
         }),
+        Command::Contain { user, uid, reason } => {
+            operand_exit(contain_verb(user, uid, reason)).await
+        }
+        Command::Release { user, uid } => operand_exit(release_verb(user, uid)).await,
         Command::AuditReaders { stopped } => {
             crate::audit_readers::run(nix::unistd::geteuid().as_raw(), stopped)
         }
@@ -1049,6 +1236,16 @@ pub async fn run_cli() -> ExitCode {
             action: PolicyCommand::Sync { check },
         } => crate::policy_sync::run(nix::unistd::geteuid().as_raw(), check),
         Command::EnrollHelper(args) => crate::enroll::run_enroll_helper(args).await,
+    }
+}
+
+async fn operand_exit(verb: Result<Verb, String>) -> ExitCode {
+    match verb {
+        Ok(verb) => wire_exit_code(execute(verb).await),
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -1275,7 +1472,7 @@ mod tests {
             let _ = write_frame(&mut daemon, class, &body).await;
             daemon
         });
-        let got = await_reply(&mut cli, class, &transport).await;
+        let got = await_reply(&mut cli, class, class_wait(class, &transport), &transport).await;
         writer.abort();
         got
     }
@@ -1509,6 +1706,44 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err, control_stalled(READ_TIMEOUT_MS));
+    }
+
+    #[test]
+    fn admin_live_edits_wait_out_every_bounded_daemon_stage() {
+        let transport = maknae_config::TransportConfig {
+            read_timeout_ms: READ_TIMEOUT_MS,
+            ..Default::default()
+        };
+        let stage = maknae_config::BLOCKING_STAGE_TIMEOUT_MS;
+        let target = || maknae_proto::ContainTarget::Uid(4242);
+        for (verb, stages) in [
+            (
+                maknae_proto::Verb::AdminContain {
+                    target: target(),
+                    reason: maknae_proto::contain_reason("r").unwrap().into(),
+                },
+                maknae_config::CONTAINMENT_REPLY_STAGES,
+            ),
+            (
+                maknae_proto::Verb::AdminRelease { target: target() },
+                maknae_config::CONTAINMENT_REPLY_STAGES,
+            ),
+            (
+                maknae_proto::Verb::AdminBaselineAccept { hash: "h".into() },
+                maknae_config::BASELINE_ACCEPT_REPLY_STAGES,
+            ),
+        ] {
+            assert!(stages > 0);
+            assert!(
+                reply_wait(&verb, &transport)
+                    >= std::time::Duration::from_millis(READ_TIMEOUT_MS + stages * stage),
+                "{verb:?}"
+            );
+        }
+        assert_eq!(
+            reply_wait(&maknae_proto::Verb::AdminStatus, &transport),
+            std::time::Duration::from_millis(READ_TIMEOUT_MS)
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1811,6 +2046,7 @@ mod tests {
             identity_problem_counts: vec![],
             baseline_pending: vec![],
             identity_sync: vec![],
+            containment: vec![],
         };
         let base = status_lines(&s);
         assert_eq!(
@@ -1995,6 +2231,51 @@ mod tests {
             peer_uid: 1000,
         };
         assert!(print_payload_for_verb(Verb::Whoami, Payload::Whoami(w)).is_ok());
+    }
+
+    #[test]
+    fn a_mismatched_payload_error_names_the_kinds_and_never_the_operands() {
+        let sentinel = "sentinel-name-6d0f";
+        let contain = Verb::Contain {
+            target: maknae_proto::ContainTarget::Name(sentinel.into()),
+            reason: "sentinel-reason-6d0f".into(),
+        };
+        let release = Verb::Release {
+            target: maknae_proto::ContainTarget::Name(sentinel.into()),
+        };
+        assert!(!format!("{contain:?}").contains("sentinel-reason"));
+        let e = print_payload_for_verb(contain, Payload::Pong).unwrap_err();
+        assert_eq!(
+            e,
+            "protocol error: daemon returned a pong payload for a contain request"
+        );
+        let e = print_payload_for_verb(
+            release,
+            Payload::Whoami(maknae_proto::WhoamiView {
+                peer_plane_uri_san: "urn:maknae:plane:cli".into(),
+                peer_uid: 1000,
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(
+            e,
+            "protocol error: daemon returned a whoami payload for a release request"
+        );
+        let e = containment_line(
+            &Verb::AdminBaselineAccept {
+                hash: "sentinel-hash-6d0f".to_string().into(),
+            },
+            &maknae_proto::ContainmentView {
+                outcome: maknae_proto::ContainmentOutcome::Contained,
+                target_uid: Some(1),
+                revision: Some(1),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            e,
+            "protocol error: daemon returned a containment payload for a baseline accept request"
+        );
     }
 
     #[test]
@@ -2358,6 +2639,7 @@ mod tests {
             identity_problem_counts: vec!["unresolved=1".into()],
             baseline_pending: vec!["baseline: 1 pending (live)".into()],
             identity_sync: vec![],
+            containment: vec![],
         };
         let lines = status_lines(&s);
         assert_eq!(
@@ -2427,5 +2709,193 @@ mod tests {
             c,
             ca,
         ));
+    }
+
+    #[test]
+    fn contain_takes_a_user_or_a_uid_and_requires_a_reason() {
+        use clap::Parser;
+        assert!(Cli::try_parse_from(["maknae", "contain", "mallory", "--reason", "x"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["maknae", "contain", "--uid", "4242", "--reason", "x"]).is_ok()
+        );
+        for bad in [
+            vec!["maknae", "contain", "mallory"],
+            vec!["maknae", "contain", "--reason", "x"],
+            vec![
+                "maknae", "contain", "mallory", "--uid", "1", "--reason", "x",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(&bad).is_err(), "{bad:?}");
+        }
+        assert!(Cli::try_parse_from(["maknae", "release", "--uid", "4242"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["maknae", "release", "mallory", "--reason", "x"]).is_err(),
+            "release takes no reason"
+        );
+    }
+
+    #[test]
+    fn the_reason_is_checked_before_connecting_and_never_printed_by_debug() {
+        assert!(contain_verb(Some("mallory".into()), None, "a\u{202e}b".into()).is_err());
+        let long = contain_verb(
+            Some("mallory".into()),
+            None,
+            "x".repeat(maknae_proto::CONTAIN_REASON_MAX_BYTES + 1),
+        )
+        .unwrap_err();
+        assert_eq!(
+            long,
+            format!(
+                "maknae: {}",
+                maknae_proto::OperandError::TooLong(maknae_proto::Operand::Reason)
+            )
+        );
+        let hangul = contain_verb(None, Some(7), "\u{1112}\u{1161}\u{11ab}".into()).unwrap();
+        assert_eq!(
+            maknae_proto::Verb::from(hangul),
+            maknae_proto::Verb::AdminContain {
+                target: maknae_proto::ContainTarget::Uid(7),
+                reason: "\u{d55c}".into()
+            },
+            "sent normalised"
+        );
+        let v = contain_verb(Some("mallory".into()), None, "SENTINEL-CLI".into()).unwrap();
+        assert!(!format!("{v:?}").contains("SENTINEL-CLI"));
+        assert_eq!(
+            maknae_proto::Verb::from(v),
+            maknae_proto::Verb::AdminContain {
+                target: maknae_proto::ContainTarget::Name("mallory".into()),
+                reason: "SENTINEL-CLI".into()
+            }
+        );
+    }
+
+    #[test]
+    fn the_cli_and_the_pre_gate_share_the_operand_rule() {
+        let src = include_str!("cli.rs");
+        let body = |name: &str| {
+            let start = src.find(&format!("fn {name}(")).unwrap();
+            let end = start + src[start..].find("\n}\n").unwrap();
+            &src[start..end]
+        };
+        let (contain, release) = (body("contain_verb"), body("release_verb"));
+        assert!(
+            contain.contains("maknae_proto::contain_reason(")
+                && contain.contains("maknae_proto::contain_target(")
+        );
+        assert!(release.contains("maknae_proto::contain_target("));
+        for b in [contain, release] {
+            for own in [
+                "is_ascii",
+                "is_control",
+                "chars()",
+                ".len()",
+                "CONTAIN_REASON_MAX_BYTES",
+                "CONTAIN_NAME_MAX_BYTES",
+            ] {
+                assert!(
+                    !b.contains(own),
+                    "the operand path has no rule of its own: {own}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_containment_reply_prints_per_outcome_and_a_refusal_exits_non_zero() {
+        use maknae_proto::{ContainmentOutcome as O, ContainmentView as V};
+        let c = || contain_verb(None, Some(1003), "r".into()).unwrap();
+        let r = || Verb::Release {
+            target: maknae_proto::ContainTarget::Uid(1003),
+        };
+        assert_eq!(
+            containment_line(
+                &c(),
+                &V {
+                    outcome: O::Contained,
+                    target_uid: Some(1003),
+                    revision: Some(12)
+                }
+            ),
+            Ok("contained uid 1003 (revision 12); sudo maknae policy sync writes it into bindings.yaml".into())
+        );
+        assert_eq!(
+            containment_line(
+                &r(),
+                &V {
+                    outcome: O::Released,
+                    target_uid: Some(1003),
+                    revision: Some(13)
+                }
+            ),
+            Ok("released uid 1003 (revision 13); writing it into bindings.yaml needs sudo maknae policy sync at a terminal: the automatic sync never installs a release".into())
+        );
+        assert_eq!(
+            containment_line(
+                &c(),
+                &V {
+                    outcome: O::AlreadyContained,
+                    target_uid: Some(1003),
+                    revision: None
+                }
+            ),
+            Ok("subject is already contained".into())
+        );
+        assert_eq!(
+            containment_line(
+                &r(),
+                &V {
+                    outcome: O::NotContained,
+                    target_uid: Some(1003),
+                    revision: None
+                }
+            ),
+            Ok("subject is not contained".into())
+        );
+        for o in [
+            O::LastReleaser,
+            O::SelfContainWithoutRelease,
+            O::Busy,
+            O::Stopping,
+            O::NoExplicitBindings,
+            O::UnknownAccount,
+            O::LookupUnavailable,
+        ] {
+            assert_eq!(
+                containment_line(
+                    &c(),
+                    &V {
+                        outcome: o,
+                        target_uid: None,
+                        revision: None
+                    }
+                ),
+                Err(o.text().to_string()),
+                "{o:?}"
+            );
+        }
+        assert!(print_payload_for_verb(
+            Verb::AdminStatus,
+            Payload::Containment(V {
+                outcome: O::Contained,
+                target_uid: None,
+                revision: None
+            })
+        )
+        .is_err());
+        assert!(print_payload_for_verb(c(), Payload::Pong).is_err());
+    }
+
+    #[test]
+    fn the_status_line_counts_contained_subjects_and_refused_kernel_containments() {
+        assert_eq!(
+            containment_status_line(&["subjects=2".into(), "kernel_refused=1".into()]),
+            Some("containment: 2 contained, 1 refused kernel containments".into())
+        );
+        assert_eq!(containment_status_line(&[]), None);
+        assert_eq!(
+            containment_status_line(&["subjects=\u{7}".into()]),
+            Some("containment: subjects=\\u{7}".into())
+        );
     }
 }

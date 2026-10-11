@@ -759,7 +759,7 @@ FIX
   # The spelling here must MATCH production exactly -- `pub(crate)`, one line --
   # or the control exercises a different anchor than the one that ships.
   # $2 overrides the grantable constant, for the subset control below.
-  printf '%s\n' "${2:-pub(crate) const GRANTABLE_ACTIONS: [&str; 6] = [\"admin.status\", \"admin.config.show\", \"admin.subject.list\", \"admin.baseline.show\", \"admin.baseline.accept\", \"session.prompt\"];}" \
+  printf '%s\n' "${2:-pub(crate) const GRANTABLE_ACTIONS: [&str; 8] = [\"admin.status\", \"admin.config.show\", \"admin.subject.list\", \"admin.baseline.show\", \"admin.baseline.accept\", \"admin.contain\", \"admin.release\", \"session.prompt\"];}" \
     > "$fixture/crates/maknae-authz-basic/src/decide.rs"
   printf '%s' "$1" > "$fixture/ci/gates/verb-manifest.txt"
   # $4 is the shipped authz.yaml (#490); the default grants nothing.
@@ -839,6 +839,10 @@ grantable	admin.status	grantable-not-granted	operator MAY grant per-role via `ro
 '
 fx="$(vocab_fixture "$CLEAN_VOCAB" 'pub(crate) const GRANTABLE_ACTIONS: [&str; 1] = ["admin.status"];')"
 expect_accept "verb-vocabulary-drift/clean-fixture-passes" ": 5 terms," "$fx/ci/gates/verb-vocabulary-drift.sh"
+# #165 test 18: a kernel-action row with no constant behind it.
+fx="$(vocab_fixture "${CLEAN_VOCAB}kernel-action	kernel.retired	not-granted	no Verb variant
+" 'pub(crate) const GRANTABLE_ACTIONS: [&str; 1] = ["admin.status"];')"
+expect_reject_because "verb-vocabulary-drift/stale-kernel-action" "-kernel-action	kernel.retired" "$fx/ci/gates/verb-vocabulary-drift.sh"
 
 # REJECT (#172): the code says session.prompt is grantable (a real action, decided, dispatched);
 # the manifest carries its action row but no grantable row. Every row carries its clause, so
@@ -1023,6 +1027,7 @@ pub struct StatusView {
     pub identity_problem_counts: Vec<String>,
     pub baseline_pending: Vec<String>,
     pub identity_sync: Vec<String>,
+    pub containment: Vec<String>,
 }
 
 pub struct BaselineView {
@@ -1031,6 +1036,17 @@ pub struct BaselineView {
     pub state: String,
     pub apply: String,
     pub changes: Vec<String>,
+}
+
+pub enum ContainmentOutcome {
+    Contained,
+    Released,
+}
+
+pub struct ContainmentView {
+    pub outcome: ContainmentOutcome,
+    pub target_uid: Option<u32>,
+    pub revision: Option<u64>,
 }
 
 pub struct RoleBindingView {
@@ -1056,6 +1072,7 @@ pub enum Payload {
     MutationAttempt(crate::MutationGrant),
     PromptReply(PromptReply),
     Baseline(BaselineView),
+    Containment(ContainmentView),
 }
 FIX
   cp "$here/mutation-disclosure.py" "$fixture/ci/gates/"
@@ -1225,11 +1242,15 @@ always	status.kernel_graph_anchor	ships by construction
 always	status.identity_problem_counts	ships by construction
 always	status.baseline_pending	ships by construction
 always	status.identity_sync	ships by construction
+always	status.containment	ships by construction
 always	baseline.source	ships by construction
 always	baseline.hash	ships by construction
 always	baseline.state	ships by construction
 always	baseline.apply	ships by construction
 always	baseline.changes	ships by construction
+always	containment.outcome	ships by construction
+always	containment.target_uid	ships by construction
+always	containment.revision	ships by construction
 always	binding.role	ships by construction
 always	binding.members	ships by construction
 always	binding.uid	ships by construction
@@ -1316,7 +1337,7 @@ cat > "$fx/crates/maknae-config/src/document.rs" <<'FIX'
 const DISCLOSABLE: &[&str] = &["transport", "providers[].name", "providers[].endpoint", "providers[].models", "providers[].models[]", "providers[].reasoning_effort", "providers[].output_tokens_field", "vault.addr", "vault.approle_mount", "vault.pki_int_mount", "vault.deployment_id", "vault.user_auth", "vault.user_auth.type", "vault.user_auth.mount", "vault.kv_mount", "vault.user_prefix", "audit.jsonl_path", "principal", "egress.socket_path", "egress.deadline_ms"];
 const SUPPRESSED: &[&str] = &["vault.insecure_plaintext_secret_path", "core.handling", "audit.au3_1"];
 FIX
-expect_accept "config-disclosure-drift/rustfmt-collapsed-array-still-read" ": 48 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_accept "config-disclosure-drift/rustfmt-collapsed-array-still-read" ": 52 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: a section registered in boot.rs with no SURFACE entry. THE THIRD
 # fail-open, and the one that closes the PROPERTY rather than an instance: the
@@ -1531,12 +1552,115 @@ python3 - "$fx" <<'PY'
 import pathlib, sys
 p = pathlib.Path(sys.argv[1]) / "ci/gates/config-disclosure-drift.sh"
 s = p.read_text()
-old = "|StatusView|status|10|wire"
+old = "|StatusView|status|11|wire"
 assert s.count(old) == 1, "fixture prefix anchor moved"
-p.write_text(s.replace(old, "|StatusView|status view|10|wire"))
+p.write_text(s.replace(old, "|StatusView|status view|11|wire"))
 PY
 expect_reject_because "config-disclosure-drift/whitespace-bearing-surface-prefix" \
   "whitespace-bearing prefix" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# The leaf-enum row is the one place an enum-typed field is a leaf. The fixture
+# carries the real row's shape: ContainmentView.outcome is a unit-only enum in
+# the same file. Each probe breaks one thing the row's checks rest on.
+enum_probe() { # <name> <wanted> <python-expr transforming s>
+  local fx; fx="$(cfg_fixture "$CFG_OK")"
+  python3 - "$fx" "$3" <<'PYFIX'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1]) / "crates/maknae-proto/src/wire.rs"
+s = p.read_text()
+s = eval(sys.argv[2])
+p.write_text(s)
+PYFIX
+  expect_reject_because "config-disclosure-drift/$1" "$2" "$fx/ci/gates/config-disclosure-drift.sh"
+}
+enum_probe leaf-enum-gains-a-data-variant "not unit-only" \
+  's.replace("    Released,\n}", "    Released,\n    Refused(String),\n}")'
+enum_probe leaf-enum-one-line-data-variant "not unit-only" \
+  's.replace("""pub enum ContainmentOutcome {\n    Contained,\n    Released,\n}""", "pub enum ContainmentOutcome { Contained, Refused(String) }")'
+enum_probe leaf-enum-attributed-data-variant "not unit-only" \
+  's.replace("    Released,\n}", "    #[serde(rename = \"r\")] Refused(String),\n}")'
+enum_probe leaf-enum-struct-variant "not unit-only" \
+  's.replace("    Released,\n}", "    Refused { why: String },\n}")'
+enum_probe leaf-enum-name-also-a-struct "also has a struct" \
+  's + "\nmod inner {\n    pub struct ContainmentOutcome { pub secret: String }\n}\n"'
+enum_probe leaf-enum-name-also-an-alias "also has a struct" \
+  's + "\ntype ContainmentOutcome = String;\n"'
+enum_probe leaf-enum-name-defined-twice "times; exactly one" \
+  's + "\nmod inner {\n    pub enum ContainmentOutcome { A }\n}\n"'
+enum_probe leaf-enum-with-no-definition "times; exactly one" \
+  's.replace("pub enum ContainmentOutcome", "pub enum Renamed")'
+
+# REJECT: the enum lives in another file than the field's struct.
+fx="$(cfg_fixture "$CFG_OK")"
+python3 - "$fx" <<'PYFIX'
+import pathlib, sys
+root = pathlib.Path(sys.argv[1])
+w = root / "crates/maknae-proto/src/wire.rs"
+m = root / "crates/maknae-proto/src/mutation.rs"
+g = root / "ci/gates/config-disclosure-drift.sh"
+enum = "pub enum ContainmentOutcome {\n    Contained,\n    Released,\n}\n"
+assert enum in w.read_text()
+w.write_text(w.read_text().replace(enum, ""))
+m.write_text(m.read_text() + "\n" + enum)
+old = "containment.outcome|crates/maknae-proto/src/wire.rs|"
+assert old in g.read_text()
+g.write_text(g.read_text().replace(old, "containment.outcome|crates/maknae-proto/src/mutation.rs|"))
+PYFIX
+expect_reject_because "config-disclosure-drift/leaf-enum-in-another-file-than-its-struct" \
+  "not in" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: the field names the type by a path. The row is matched on the
+# qualifier-stripped name, so the path may resolve to a same-named data struct
+# elsewhere while the check verifies the enum in the row's file.
+fx="$(cfg_fixture "$CFG_OK")"
+python3 - "$fx" <<'PYFIX'
+import pathlib, sys
+root = pathlib.Path(sys.argv[1])
+w = root / "crates/maknae-proto/src/wire.rs"
+m = root / "crates/maknae-proto/src/mutation.rs"
+old = "    pub outcome: ContainmentOutcome,\n"
+assert w.read_text().count(old) == 1
+w.write_text(w.read_text().replace(old, "    pub outcome: crate::mutation::ContainmentOutcome,\n"))
+m.write_text(m.read_text() + "\npub struct ContainmentOutcome {\n    pub secret: String,\n}\n")
+PYFIX
+expect_reject_because "config-disclosure-drift/leaf-enum-field-spelled-with-a-path" \
+  "not exactly" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: the enum is nested in an inline module and a glob import brings a
+# same-named data struct into scope, which is what the field then names.
+fx="$(cfg_fixture "$CFG_OK")"
+python3 - "$fx" <<'PYFIX'
+import pathlib, sys
+root = pathlib.Path(sys.argv[1])
+w = root / "crates/maknae-proto/src/wire.rs"
+m = root / "crates/maknae-proto/src/mutation.rs"
+enum = "pub enum ContainmentOutcome {\n    Contained,\n    Released,\n}\n"
+s = w.read_text()
+assert s.count(enum) == 1
+nested = "use crate::mutation::*;\nmod inner {\n    pub enum ContainmentOutcome {\n        Contained,\n        Released,\n    }\n}\n"
+w.write_text(s.replace(enum, nested))
+m.write_text(m.read_text() + "\npub struct ContainmentOutcome {\n    pub secret: String,\n}\n")
+PYFIX
+expect_reject_because "config-disclosure-drift/leaf-enum-nested-under-a-glob-import" \
+  "not at the top level" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: a row whose field no longer has the enum type is stale.
+fx="$(cfg_fixture "$CFG_OK")"
+python3 - "$fx" <<'PYFIX'
+import pathlib, sys
+w = pathlib.Path(sys.argv[1]) / "crates/maknae-proto/src/wire.rs"
+old = "    pub outcome: ContainmentOutcome,\n"
+assert w.read_text().count(old) == 1
+w.write_text(w.read_text().replace(old, "    pub outcome: String,\n"))
+PYFIX
+expect_reject_because "config-disclosure-drift/leaf-enum-row-with-a-retyped-field" \
+  "matched no field" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: an enum-typed field with no leaf-enum row keeps the subtree rule.
+fx="$(cfg_fixture "$CFG_OK" '' '' '' '' 'Mode')"
+printf 'pub enum Mode {\n    A,\n    B,\n}\n' >> "$fx/crates/maknae-proto/src/wire.rs"
+expect_reject_because "config-disclosure-drift/enum-field-with-no-row-is-a-subtree" \
+  "SUBTREE" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: a FOURTH `*View` struct in wire.rs with no SURFACE row. The config
 # half of SURFACE is cross-checked against boot.rs's section registry; the wire
@@ -1772,7 +1896,7 @@ fi
 # go check a sed flag. This probe pins the corrected order.
 fx="$(cfg_fixture "$CFG_OK" '' '' '' 'std::sync::Arc<String>')"
 expect_accept "config-disclosure-drift/qualified-wrapper-is-a-leaf" \
-  ": 48 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+  ": 52 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # ACCEPT: the config-surface `Vec` exemption holds for the QUALIFIED spelling
 # too. Under the old post-loop `s/.*:://`, `Vec<crate::Principal>` reduced to
@@ -1781,7 +1905,7 @@ expect_accept "config-disclosure-drift/qualified-wrapper-is-a-leaf" \
 # the unqualified `config-vec-of-struct-is-a-leaf` probe below cannot see.
 fx="$(cfg_fixture "$CFG_OK" '' '' '' 'Vec<crate::Principal>')"
 expect_accept "config-disclosure-drift/qualified-config-vec-is-still-a-leaf" \
-  ": 48 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+  ": 52 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # ACCEPT: the mirror image. `Vec<WorkspaceStruct>` on a CONFIG surface is a
 # LEAF -- only a sequence whose element paths are declared is walked;
@@ -1790,12 +1914,12 @@ expect_accept "config-disclosure-drift/qualified-config-vec-is-still-a-leaf" \
 # did not, and every config row was silently held to the wire rule.
 fx="$(cfg_fixture "$CFG_OK" '' '' '' 'Vec<Principal>')"
 expect_accept "config-disclosure-drift/config-vec-of-struct-is-a-leaf" \
-  ": 48 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+  ": 52 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # ACCEPT: the clean fixture passes and reports both counts. Without this every
 # rejection above would stay green against a gate that refuses everything.
 fx="$(cfg_fixture "$CFG_OK")"
-expect_accept "config-disclosure-drift/clean-fixture-passes" ": 48 paths decided, 57 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_accept "config-disclosure-drift/clean-fixture-passes" ": 52 paths decided, 61 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
 
 
 # ACCEPT, against the REAL repo: each gate's reported examined-set is
@@ -1858,7 +1982,7 @@ expect_reported_count "p1-manifest/packages-match-the-workspace" "ok (" "$exp_p1
 # control; asserting it here means any future silent shrink is a red build.
 
 expect_accept "config-disclosure-drift/real-repo-counts-pinned" \
-  ": 59 paths decided, 57 struct fields covered" "$here/config-disclosure-drift.sh"
+  ": 63 paths decided, 61 struct fields covered" "$here/config-disclosure-drift.sh"
 
 
 # #158: a grant's own disclosure inventory must reject new data and type changes.
@@ -2135,6 +2259,406 @@ p.write_text(p.read_text() + "// let _ = Composition::new(a, b);\n/* CeilingAuth
 PYFIX
 expect_accept "authz-composition-drift/commented-or-test-construction-is-not-a-site" "authz-composition-drift: ok" "$f/ci/gates/authz-composition-drift.sh" "$f"
 expect_accept "authz-composition-drift/real-repo" "authz-composition-drift: ok" "$here/authz-composition-drift.sh" "$here/../.."
+
+# ---- containment-ordering (#165): containment is decided before any class arm, and the
+# ---- identity hop reads `contained` before `binds`.
+CLEAN_LIB='fn decide_on() {
+    let d = decide::decide_loaded_cited(snap.loaded(), principal, req);
+}
+'
+ordering_fixture() { # <decide.rs body> <binding.rs body> [lib.rs body]
+  local f
+  f="$(mktemp -d -p "$NC_TMP")"
+  mkdir -p "$f/ci/gates" "$f/crates/maknae-authz-basic/src"
+  cp "$here/containment-ordering.sh" "$f/ci/gates/"
+  printf '%s' "$1" > "$f/crates/maknae-authz-basic/src/decide.rs"
+  printf '%s' "$2" > "$f/crates/maknae-authz-basic/src/binding.rs"
+  printf '%s' "${3-$CLEAN_LIB}" > "$f/crates/maknae-authz-basic/src/lib.rs"
+  git -C "$f" init -q
+  git -C "$f" add .
+  echo "$f"
+}
+USES='use crate::role::Role;
+use maknae_security::{AttrValue, Attributes, Obligation, Request as SecRequest, Verdict};
+'
+SIG='pub(crate) fn decide_loaded_cited(
+    lp: &LoadedPolicy,
+    principal: &maknae_config::Principal,
+    req: &SecRequest,
+) -> Decided {
+'
+PRELUDE='    let undecided = |verdict| Decided {
+        verdict,
+        role: None,
+        cited: None,
+    };
+    let uid: Option<u32> = match req.subject.0.get(SUBJECT_UID) {
+        None => None,
+        Some(AttrValue::Int(i)) => match u32::try_from(*i) {
+            Ok(u) => Some(u),
+            Err(_) => return undecided(Verdict::Indeterminate),
+        },
+        Some(_) => return undecided(Verdict::Indeterminate),
+    };
+    let Some(uid) = uid else {
+        return undecided(Verdict::Indeterminate);
+    };
+    if class_of(&req.action.0) == Some(Class::Kernel) {
+        return undecided(kernel_decided(req));
+    }
+'
+CITED_HEAD="${SIG}${PRELUDE}"
+ROLE_MATCH='    let role = match lp.roles.role_for(uid, principal.uid) {
+        Resolution::Role(r) => r,
+        Resolution::NoRole => {
+            return undecided(Verdict::NotApplicable {
+                note: Some("subject resolves to no role".into()),
+            })
+        }
+    };
+    let class = class_of(&req.action.0);
+'
+MATCH_LINE='    let (verdict, cited) = match role {
+'
+ADV_ARM='        Role::Adversary => (Verdict::Deny { reason: "contained".into() }, None),'
+CLASS_ARMS='        Role::Guest | Role::User => match class {
+            _ => na(),
+        },
+        Role::Admin => match class {
+            _ => na(),
+        },
+'
+MATCH_CLOSE='    };
+'
+TAIL='    Decided {
+        verdict,
+        role: Some(role.key()),
+        cited,
+    }
+}
+'
+WITH_ROLE='pub(crate) fn decide_loaded_with_role(lp: &LoadedPolicy, principal: &Principal, req: &SecRequest) -> (Verdict, Option<&'"'"'static str>) {
+    let d = decide_loaded_cited(lp, principal, req);
+    (d.verdict, d.role)
+}
+'
+CLEAN_DECIDE="${USES}${WITH_ROLE}${CITED_HEAD}${ROLE_MATCH}${MATCH_LINE}${ADV_ARM}
+${CLASS_ARMS}${MATCH_CLOSE}${TAIL}"
+before_adversary() { printf '%s' "${CLEAN_DECIDE/"$ADV_ARM"/"$1
+$ADV_ARM"}"; }
+with_prelude() { printf '%s' "${CLEAN_DECIDE/"$PRELUDE"/"$PRELUDE$1"}"; }
+between() { printf '%s' "${CLEAN_DECIDE/"$MATCH_LINE"/"$1$MATCH_LINE"}"; }
+B_ROLE_FOR='    pub(crate) fn role_for(&self, uid: u32, principal_uid: u32) -> Resolution {
+        if self.graph.out_edges(subject.id, CONTAINED).next().is_some() {
+            return Resolution::Role(Role::Adversary);
+        }
+        self.graph.out_edges(subject.id, BINDS).next()
+    }
+'
+B_ASB='    pub(crate) fn as_subject_bindings(&self) -> Option<Vec<SubjectBinding>> {
+        let role = if self.graph.out_edges(s.id, CONTAINED).next().is_some() {
+            Some(ADVERSARY.to_string())
+        } else {
+            self.graph.out_edges(s.id, BINDS).next()
+        };
+    }
+'
+B_ENTRIES='    pub(crate) fn entries(&self) -> Option<Vec<ListedSubject>> {
+        let entry = if carried {
+            carried_forward()
+        } else if self.graph.out_edges(s.id, CONTAINED).next().is_some() {
+            ListedSubject {
+                uid: Some(uid),
+                names: claimed,
+                state: SubjectState::Contained,
+            }
+        } else {
+            self.graph.out_edges(s.id, BINDS).next()
+        };
+    }
+'
+B_DELEGATOR='impl Roles {
+    pub(crate) fn role_for(&self, uid: u32, principal_uid: u32) -> Resolution {
+        match self {
+            #[cfg(test)]
+            Roles::File(r) => r.role_for(uid, principal_uid),
+            Roles::Graph(g) => g.role_for(uid, principal_uid),
+        }
+    }
+}
+'
+binding_with() { # <role_for> <as_subject_bindings> <entries> [extra]
+  printf '%s' "impl GraphBindings {
+$1$2$3}
+${B_DELEGATOR}${4-}"
+}
+CLEAN_BINDING="$(binding_with "$B_ROLE_FOR" "$B_ASB" "$B_ENTRIES")"
+HIDDEN_ARM='        _ => (permit(), None),'
+ordering_probe() { # <label> <expected> <decide> [binding] [lib]
+  local f
+  f="$(ordering_fixture "$3" "${4-$CLEAN_BINDING}" "${5-$CLEAN_LIB}")"
+  expect_reject_because "containment-ordering/$1" "$2" "$f/ci/gates/containment-ordering.sh" "$f"
+}
+ordering_accept() { # <label> <decide> [binding]
+  local f
+  f="$(ordering_fixture "$2" "${3-$CLEAN_BINDING}")"
+  expect_accept "containment-ordering/$1" "containment-ordering: ok" "$f/ci/gates/containment-ordering.sh" "$f"
+}
+
+ordering_accept clean-fixture "$CLEAN_DECIDE"
+ordering_accept guarded-role-arms-before-adversary-are-allowed "$(before_adversary '        Role::Admin | Role::User if req.action.0 == "fs.read" => fs(),')"
+ordering_accept a-wrapped-guard-before-adversary-is-allowed "$(before_adversary '        Role::Admin | Role::User
+            if matches!(
+                req.action.0.as_str(),
+                "fs.read" | "fs.write"
+            ) =>
+        {
+            fs()
+        }')"
+ordering_accept a-trailing-test-module-is-not-read "${CLEAN_DECIDE}#[cfg(test)]
+mod tests {
+    const S: &str = r\"}\";
+}
+"
+ordering_accept multibyte-and-escaped-char-literals-lex "$(before_adversary "        Role::Admin if c == '가' || c == '\\'' || c == '\\\\' => ok(),")"
+
+ordering_probe adversary-after-a-class-arm "Role::Adversary must precede" "${USES}${WITH_ROLE}${CITED_HEAD}${ROLE_MATCH}${MATCH_LINE}${CLASS_ARMS}${ADV_ARM}
+${MATCH_CLOSE}${TAIL}"
+ordering_probe adversary-arm-missing "exactly one Role::Adversary arm" "${CLEAN_DECIDE/"$ADV_ARM"/}"
+ordering_probe a-second-class-return-before-roles "differs from its skeleton at \`ifclass_of(&req.action.0)==Some(Class::A" "$(with_prelude "    if class_of(&req.action.0) == Some(Class::Admin) {
+        return undecided(permit());
+    }
+")"
+ordering_probe a-permit-before-roles "differs from its skeleton at \`ifprincipal.uid==0{" "$(with_prelude '    if principal.uid == 0 {
+        return undecided(permit());
+    }
+')"
+for case in 'wildcard|        _ if req.action.0 == "liveness.ping" => permit(),|_ if req.action.0 == ""' \
+            'binding-pattern|        r if r.key() == "admin" => permit(),|r if r.key() == ""' \
+            'adversary-in-list|        Role::Admin | Role::Adversary => permit(),|Role::Admin | Role::Adversary' \
+            'adversary-on-a-continuation-line|        Role::Admin
+            | Role::Adversary => permit(),|Role::Admin | Role::Adversary' \
+            'two-arms-on-one-line|        Role::Admin => (x(), None), _ => (permit(), None),|: `_`' \
+            'an-arm-indented-as-a-body|        Role::Admin => (x(), None),
+            _ => (permit(), None),|: `_`'; do
+  label="${case%%|*}"; rest="${case#*|}"; arm="${rest%|*}"; want="${rest##*|}"
+  ordering_probe "arm-before-adversary-$label" "an arm before Role::Adversary must name roles other than Adversary (line" "$(before_adversary "$arm")"
+  ordering_probe "arm-before-adversary-$label-names-the-pattern" "$want" "$(before_adversary "$arm")"
+done
+ordering_probe a-guarded-adversary-arm "must not carry a guard" "${CLEAN_DECIDE/Role::Adversary =>/Role::Adversary if false =>}"
+ordering_probe an-attribute-on-the-adversary-arm "an attribute inside decide_loaded_cited" "$(before_adversary '        #[cfg(any())]')"
+nested='        Role::Guest => match x {
+            Role::Adversary => (Verdict::Deny { reason: "".into() }, None),
+        },'
+ordering_probe a-nested-adversary-arm "is not an arm of \`match role {\`" "${CLEAN_DECIDE/"$ADV_ARM"/"$nested"}"
+ordering_probe the-adversary-arm-reads-the-request "the Role::Adversary arm must decide without reading the request" "${CLEAN_DECIDE/"$ADV_ARM"/        Role::Adversary => if req.action.0 == \"liveness.ping\" { (Verdict::Deny { reason: \"\".into() }, None) } else { (Verdict::Deny { reason: \"\".into() }, None) },}"
+ordering_probe the-adversary-arm-permits "the Role::Adversary arm must be a Verdict::Deny and never a permit" "${CLEAN_DECIDE/"$ADV_ARM"/        Role::Adversary => (Verdict::Permit { obligations: vec![] }, None),}"
+ordering_probe a-class-return-between-roles-and-the-match "(line 40: \`if class == Some(Class::Liveness) {\`)" "$(between '    if class == Some(Class::Liveness) {
+        return undecided(permit());
+    }
+')"
+ordering_probe a-role-key-match-between-roles-and-the-match "(line 40: \`match role.key() {\`)" "$(between '    match role.key() {
+        "adversary" => return undecided(permit()),
+        _ => {}
+    }
+')"
+ordering_probe the-resolved-role-is-rewritten "(line 32: \`Resolution::Role(_) => Role::Admin,\`)" "${CLEAN_DECIDE/Resolution::Role(r) => r,/Resolution::Role(_) => Role::Admin,}"
+ordering_probe the-role-is-rebound "the role is rebound outside its role_for(" "$(between '    let role = Role::Admin;
+')"
+ordering_probe the-role-is-rebound-by-a-tuple "(line 40: \`let (role, _) = (lp.default(), 0);\`)" "$(between '    let (role, _) = (lp.default(), 0);
+')"
+ordering_probe the-role-is-shadowed-by-an-at-pattern "role is bound by a closure, a pattern or an arm" "$(before_adversary '        role @ Role::Admin => permit(),')"
+ordering_probe the-role-is-a-closure-parameter "role is bound by a closure, a pattern or an arm" "$(with_prelude '    let f = |role: Role| role;
+')"
+ordering_probe the-match-line-is-not-exact "the \`match role {\` line must be \`let (verdict, cited) = match role {\`" "${CLEAN_DECIDE/let (verdict, cited) = match role/let (verdict, cited, _) = match role}"
+ordering_probe the-role-for-line-is-not-exact "the role_for( line must be" "${CLEAN_DECIDE/let role = match lp.roles.role_for(uid, principal.uid)/let role = match lp.roles.role_for(uid, principal.uid).or_admin()}"
+ordering_probe a-post-match-override "must end in exactly \`Decided { verdict, role: Some(role.key()), cited }\`" "${CLEAN_DECIDE/"$TAIL"/    let verdict = if req.action.0 == \"liveness.ping\" { permit() } else { verdict };
+$TAIL}"
+ordering_probe the-match-does-not-close-plainly "must close with \`};\`" "${CLEAN_DECIDE/"$MATCH_CLOSE$TAIL"/    }.or_permit();
+$TAIL}"
+ordering_probe a-second-decide-definition "expected exactly one fn decide_loaded_cited" "${CLEAN_DECIDE}fn decide_loaded_cited() {}
+"
+ordering_probe with-role-does-not-call-cited "decide_loaded_with_role must call decide_loaded_cited(lp, principal, req)" "${CLEAN_DECIDE/let d = decide_loaded_cited(lp, principal, req);/let d = decide_real(lp, principal, req);}"
+ordering_probe an-attribute-above-decide "an attribute above fn decide_loaded_cited" "${CLEAN_DECIDE/"$SIG"/#[inline]
+$SIG}"
+ordering_probe a-column-0-cfg-decoy "a column-0 #[cfg outside the test module" "#[cfg(any())]
+${CLEAN_DECIDE}"
+ordering_probe a-cfg-test-not-opening-mod-tests "is not followed by \`mod tests {\`" "${CLEAN_DECIDE/"$SIG"/#[cfg(test)]
+$SIG}"
+ordering_probe code-after-the-test-module "code follows the test module" "#[cfg(test)]
+mod tests {
+}
+${CLEAN_DECIDE}"
+ordering_probe prelude-uid-from-the-principal "differs from its skeleton at \`letuid=principal.uid;" "$(with_prelude '    let uid = principal.uid;
+')"
+ordering_probe prelude-uid-swapped "differs from its skeleton at \`letuid=ifuid==7{8}else{uid};" "$(with_prelude '    let uid = if uid == 7 { 8 } else { uid };
+')"
+ordering_probe prelude-undecided-permits "differs from its skeleton at \`_verdict|Decided{verdict:permit_with_aud" "${CLEAN_DECIDE/let undecided = |verdict| Decided \{
+        verdict,/let undecided = |_verdict| Decided \{
+        verdict: permit_with_audit(),}"
+ordering_probe prelude-kernel-if-extended "differs from its skeleton at \`elseifreq.action.0==\"\"{" "${CLEAN_DECIDE/"        return undecided(kernel_decided(req));
+    }
+"/"        return undecided(kernel_decided(req));
+    } else if req.action.0 == \"liveness.ping\" {
+        return undecided(permit_with_audit());
+    }
+"}"
+ordering_probe mod-role-inline "decide.rs declares \`mod Role\`" "${CLEAN_DECIDE}mod Role {
+    pub const Adversary: u8 = 0;
+}
+"
+ordering_probe mod-role-file "decide.rs declares \`mod Role\`" "${CLEAN_DECIDE}pub(crate) mod Role;
+"
+ordering_probe a-local-role-type "decide.rs defines its own Role" "${CLEAN_DECIDE}enum Role { Admin }
+"
+ordering_probe a-rename-to-role "decide.rs renames something to Role" "${CLEAN_DECIDE/use crate::role::Role;/use crate::other::Fake as Role;}"
+ordering_probe a-glob-of-role-variants "decide.rs glob-imports the variants of Role" "${CLEAN_DECIDE}use crate::role::Role::*;
+"
+ordering_probe a-rename-to-a-role-variant "decide.rs renames something to a role variant name" "${CLEAN_DECIDE}use crate::role::Role::Admin as Adversary;
+"
+ordering_probe a-second-role-import-in-a-fn "decide.rs must import Role exactly once" "${CLEAN_DECIDE}fn helper() {
+    use crate::other::Role;
+}
+"
+ordering_probe mod-verdict "decide.rs declares \`mod Verdict\`" "${CLEAN_DECIDE}mod Verdict {}
+"
+ordering_probe a-second-verdict-import-in-a-fn "decide.rs must import Verdict exactly once" "${CLEAN_DECIDE}fn helper() {
+    use crate::fake::Verdict;
+}
+"
+ordering_probe lib-spaced-path "lib.rs references decide::decide_real, which is not on its allowlist (near line 2)" "$CLEAN_DECIDE" "$CLEAN_BINDING" "${CLEAN_LIB/decide::decide_loaded_cited/decide :: decide_real}
+"
+ordering_probe lib-path-broken-after-the-colons "lib.rs references decide::decide_real, which is not on its allowlist (near line 3)" "$CLEAN_DECIDE" "$CLEAN_BINDING" "fn other() {}
+${CLEAN_LIB/decide::decide_loaded_cited/decide::
+        decide_real}
+"
+swap='mod inner {
+    #[cfg(any())]
+    use crate::role::Role;
+}
+mod r#Role {
+    pub const Admin: u8 = 0;
+}'
+ordering_probe a-raw-identifier-mod-role-swap "decide.rs declares \`mod Role\`" "${CLEAN_DECIDE/use crate::role::Role;/$swap}"
+ordering_probe a-cfgd-out-canonical-import "decide.rs has a #[cfg below column 0 at line 1" "${CLEAN_DECIDE/use crate::role::Role;/mod dead { #[cfg(any())] use crate::role::Role; \}
+}"
+ordering_probe an-inline-module-in-decide "decide.rs declares an inline module \`dead\` at line 1" "${CLEAN_DECIDE/use crate::role::Role;/mod dead { #[cfg(any())] use crate::role::Role; \}
+}"
+ordering_probe lib-calls-through-a-const-fn-pointer "lib.rs references decide::ENTRY, which is not on its allowlist" "${CLEAN_DECIDE}pub(crate) const ENTRY: fn(&LoadedPolicy, &maknae_config::Principal, &SecRequest) -> Decided = decide_real;
+" "$CLEAN_BINDING" "${CLEAN_LIB/decide::decide_loaded_cited/decide::ENTRY}
+"
+ordering_probe lib-calls-a-raw-identifier "lib.rs references decide::decide_real, which is not on its allowlist (near line 2)" "$CLEAN_DECIDE" "$CLEAN_BINDING" "${CLEAN_LIB/decide::decide_loaded_cited/decide::r#decide_real}
+"
+ordering_probe lib-calls-a-renamed-decision "lib.rs references decide::decide_real, which is not on its allowlist" "$CLEAN_DECIDE" "$CLEAN_BINDING" "${CLEAN_LIB/decide_loaded_cited/decide_real}
+"
+ordering_probe lib-never-calls-decide "lib.rs never calls decide::decide_loaded_cited(" "$CLEAN_DECIDE" "$CLEAN_BINDING" 'fn decide_on() {}
+'
+ordering_probe lib-imports-from-decide "lib.rs imports from decide" "$CLEAN_DECIDE" "$CLEAN_BINDING" "use crate::decide::*;
+${CLEAN_LIB}"
+for prefix in 'r' 'br' 'cr' 'br#'; do
+  close='"'; [ "$prefix" = 'br#' ] && close='"#'
+  ordering_probe "a-${prefix//#/hash}-string-fails-closed" "raw string literal (prefix ${prefix})" "$(before_adversary "        Role::Admin if s == ${prefix}\"\\${close} => ok(),
+${HIDDEN_ARM}
+        Role::User if t == \"\" => ok(),")"
+done
+ordering_probe an-escaped-quote-char-cannot-hide-an-arm "(line 42: \`_\`)" "$(before_adversary "        Role::Admin if [c] == ['\\'','\"'] => ok(),
+${HIDDEN_ARM}
+        Role::User if t == \"\" => ok(),")"
+f="$(ordering_fixture "$CLEAN_DECIDE" "$CLEAN_BINDING")"
+rm "$f/crates/maknae-authz-basic/src/decide.rs"
+expect_reject_because "containment-ordering/a-missing-decide-fails-closed" "decide.rs is missing" "$f/ci/gates/containment-ordering.sh" "$f"
+ordering_probe an-unclosed-test-module "the test module does not close at the end of the file" "${CLEAN_DECIDE}#[cfg(test)]
+mod tests {
+    fn t() {}
+"
+ordering_probe an-unclosed-escaped-char-fails-closed "cannot lex" "$(before_adversary "        Role::Admin if c == '\\")"
+ordering_probe an-unclosed-escaped-char-names-the-char "LEX-ERROR char literal" "$(before_adversary "        Role::Admin if c == '\\")"
+ordering_probe a-multibyte-quote-without-a-close-fails-closed "LEX-ERROR char literal" "${CLEAN_DECIDE}fn f<'가나다라마>() {}
+"
+ordering_probe an-unterminated-string-fails-closed "unterminated string or block comment" "${CLEAN_DECIDE}const S: &str = \"abc
+"
+ordering_probe a-bodyless-decide-fails-closed "decide_loaded_cited has no body" "fn decide_loaded_cited(x: u8);
+${CLEAN_DECIDE}"
+ordering_probe two-decide-definitions-on-one-line "a second decide_loaded_cited starts on line" "${CLEAN_DECIDE}fn decide_loaded_cited() {} fn decide_loaded_cited() {}
+"
+ordering_probe a-second-with-role-definition "expected exactly one fn decide_loaded_with_role" "${CLEAN_DECIDE}${WITH_ROLE}"
+split_adv='        Role::Guest => match x {
+            Role::Adversary => (Verdict::Deny { reason: "".into() }, None),
+        },
+        Role::Adversary
+            => (Verdict::Deny { reason: "".into() }, None),'
+ordering_probe the-counted-adversary-arm-is-not-the-top-level-one "the Role::Adversary arm is not an arm of \`match role {\` (line" "${CLEAN_DECIDE/"$ADV_ARM"/"$split_adv"}"
+ordering_probe an-unclosed-decide-fails-closed "cannot extract decide_loaded_cited" "${CLEAN_DECIDE%\}*}"
+ordering_probe two-role-resolutions "must call role_for( exactly once, found 2" "$(with_prelude '    let _ = lp.roles.role_for(uid, principal.uid);
+')"
+ordering_probe role-resolution-after-the-match "role_for( is called after \`match role {\`" "${USES}${WITH_ROLE}${CITED_HEAD}${MATCH_LINE}${ADV_ARM}
+${CLASS_ARMS}${MATCH_CLOSE}${ROLE_MATCH}${TAIL}"
+ordering_probe no-match-class-fails-closed "holds no \`match class\`" "${CLEAN_DECIDE//match class/match class_of(&req.action.0)}"
+ordering_probe a-second-match-role "exactly one \`match role {\`, found 2" "$(before_adversary '        Role::Guest => match role {
+            _ => na(),
+        },')"
+
+ordering_probe binds-before-contained "CONTAINED must be read before BINDS in role_for" "$CLEAN_DECIDE" "$(binding_with '    pub(crate) fn role_for(&self) -> Resolution {
+        let b = self.graph.out_edges(subject.id, BINDS).next();
+        if self.graph.out_edges(subject.id, CONTAINED).next().is_some() {
+            return Resolution::Role(Role::Adversary);
+        }
+        b
+    }
+' "$B_ASB" "$B_ENTRIES")"
+ordering_probe binds-before-contained-in-as_subject_bindings "CONTAINED must be read before BINDS in as_subject_bindings" "$CLEAN_DECIDE" "$(binding_with "$B_ROLE_FOR" '    pub(crate) fn as_subject_bindings(&self) {
+        let b = self.graph.out_edges(s.id, BINDS).next();
+        let c = self.graph.out_edges(s.id, CONTAINED).next();
+    }
+' "$B_ENTRIES")"
+ordering_probe binds-before-contained-in-entries "CONTAINED must be read before BINDS in entries" "$CLEAN_DECIDE" "$(binding_with "$B_ROLE_FOR" "$B_ASB" '    pub(crate) fn entries(&self) {
+        let b = self.graph.out_edges(s.id, BINDS).next();
+        let c = self.graph.out_edges(s.id, CONTAINED).next();
+    }
+')"
+ordering_probe a-dead-contained-read "role_for must read CONTAINED once, as" "$CLEAN_DECIDE" "$(binding_with "${B_ROLE_FOR/        if self/        let _ = CONTAINED;
+        if self}" "$B_ASB" "$B_ENTRIES")"
+ordering_probe a-negated-contained-check "role_for must read CONTAINED once, as" "$CLEAN_DECIDE" "$(binding_with "${B_ROLE_FOR/if self/if !self}" "$B_ASB" "$B_ENTRIES")"
+ordering_probe a-contained-branch-that-does-not-contain "the CONTAINED branch of role_for must be exactly" "$CLEAN_DECIDE" "$(binding_with "${B_ROLE_FOR/return Resolution::Role(Role::Adversary);/return Resolution::NoRole;}" "$B_ASB" "$B_ENTRIES")"
+ordering_probe a-contained-branch-in-entries-that-lists-bound "the CONTAINED branch of entries must be exactly" "$CLEAN_DECIDE" "$(binding_with "$B_ROLE_FOR" "$B_ASB" "${B_ENTRIES/SubjectState::Contained/SubjectState::Bound(role)}")"
+ordering_probe role-for-reads-neither "role_for reads neither CONTAINED nor BINDS" "$CLEAN_DECIDE" "$(binding_with '    pub(crate) fn role_for(&self) -> Resolution {
+        self.lookup()
+    }
+' "$B_ASB" "$B_ENTRIES")"
+ordering_probe a-cfg-paired-role-for "an attribute above fn role_for" "$CLEAN_DECIDE" "$(binding_with "    #[cfg(test)]
+${B_ROLE_FOR}    #[cfg(not(test))]
+    pub(crate) fn role_for(&self) -> Resolution {
+        self.binds_only()
+    }
+" "$B_ASB" "$B_ENTRIES")"
+ordering_probe a-second-role-for-delegating-to-a-helper "more than one fn role_for that is not the Roles delegator" "$CLEAN_DECIDE" "$(binding_with "${B_ROLE_FOR}    pub(crate) fn role_for(&self) -> Resolution {
+        self.binds_only(CONTAINED, BINDS)
+    }
+" "$B_ASB" "$B_ENTRIES")"
+ordering_probe a-second-delegator "more than one Roles delegator for role_for" "$CLEAN_DECIDE" "$(binding_with "$B_ROLE_FOR" "$B_ASB" "$B_ENTRIES" "$B_DELEGATOR")"
+ordering_probe entries-is-missing "fn entries not found in the production half of binding.rs" "$CLEAN_DECIDE" "$(binding_with "$B_ROLE_FOR" "$B_ASB" "")"
+ordering_probe entries-is-only-the-delegator "fn entries in binding.rs is only the Roles delegator" "$CLEAN_DECIDE" "$(binding_with "$B_ROLE_FOR" "$B_ASB" "" 'impl Roles {
+    pub(crate) fn entries(&self, problems: &[IdentityProblem]) -> Option<Vec<ListedSubject>> {
+        match self {
+            #[cfg(test)]
+            Roles::File(_) => None,
+            Roles::Graph(g) => g.entries(problems),
+        }
+    }
+}
+')"
+ordering_probe an-attribute-inside-role-for "an attribute inside role_for cannot be read lexically" "$CLEAN_DECIDE" "$(binding_with "${B_ROLE_FOR/        if self/        #[cfg(any())]
+        if self}" "$B_ASB" "$B_ENTRIES")"
+ordering_probe binds-on-the-contained-branch-close "CONTAINED must be read before BINDS in role_for" "$CLEAN_DECIDE" "$(binding_with "${B_ROLE_FOR/        \}
+        self.graph.out_edges(subject.id, BINDS).next()/        \} let b = self.graph.out_edges(subject.id, BINDS).next();
+        b}" "$B_ASB" "$B_ENTRIES")"
+ordering_probe a-column-0-cfg-in-binding "a column-0 #[cfg outside the test module" "$CLEAN_DECIDE" "#[cfg(not(test))]
+$CLEAN_BINDING"
+ordering_probe an-empty-production-half-fails-closed "the production half of" "$CLEAN_DECIDE" "#[cfg(test)]
+mod tests {
+}
+"
+expect_accept "containment-ordering/real-repo" "containment-ordering: ok" "$here/containment-ordering.sh" "$here/../.."
 
 
 # ---- clippy-all (#74): a DERIVED input set is not a scanned one --------------

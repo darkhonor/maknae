@@ -576,15 +576,19 @@ pub enum ReleaseCause {
     NameNowResolvesTo(u32),
     BoundAs(String),
     BindingsEmpty,
+    /// A live edit by this initiator ended it.
+    Live(ProvenanceKind),
 }
 
 impl fmt::Display for ReleaseCause {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NotListed => f.write_str("its name is no longer listed under adversary"),
+            Self::NotListed => f.write_str("bindings.yaml no longer lists it under adversary"),
             Self::NameNowResolvesTo(uid) => write!(f, "its name now resolves to uid {uid}"),
             Self::BoundAs(role) => write!(f, "it is now listed under {role}"),
             Self::BindingsEmpty => f.write_str("bindings.yaml now binds nobody"),
+            Self::Live(ProvenanceKind::Kernel) => f.write_str("the kernel released it"),
+            Self::Live(_) => f.write_str("an operator released it over the wire"),
         }
     }
 }
@@ -1412,6 +1416,8 @@ mod tests {
             ReleaseCause::NameNowResolvesTo(777),
             ReleaseCause::BoundAs("user".into()),
             ReleaseCause::BindingsEmpty,
+            ReleaseCause::Live(ProvenanceKind::Operator),
+            ReleaseCause::Live(ProvenanceKind::Kernel),
         ]
         .iter()
         .map(ToString::to_string)
@@ -1419,10 +1425,12 @@ mod tests {
         assert_eq!(
             texts,
             [
-                "its name is no longer listed under adversary",
+                "bindings.yaml no longer lists it under adversary",
                 "its name now resolves to uid 777",
                 "it is now listed under user",
                 "bindings.yaml now binds nobody",
+                "an operator released it over the wire",
+                "the kernel released it",
             ]
         );
     }

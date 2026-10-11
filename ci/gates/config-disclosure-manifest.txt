@@ -63,11 +63,15 @@ always	status.kernel_graph_anchor	the rollback-anchor state at boot (seeded, res
 always	status.identity_problem_counts	how many identity events of each kind the last applied load produced (#496): per-subject problems, releases of a containment, and a promotion of the enrolled principal, as fixed "<kind>=<count>" entries: counts only, never a name, uid or role; which subjects are affected is admin.subject.list's to disclose
 always	status.baseline_pending	how many baseline change sets are pending and their class (live, restart or invalid) (#490): never a section name, a hash or a value; which sections changed is admin.baseline.show's to disclose
 always	status.identity_sync	how many bindings entries the daemon enforces that bindings.yaml does not hold yet, how many are in conflict, whether bindings.yaml is lost, and whether the mirror is stale (#491): counts only, never a name, uid, entry or hash; which entries is the mirror's to show, to root
+always	status.containment	how many subjects are contained and how many kernel containments were refused since start (#165): counts only, never a uid, name or reason; who is contained is admin.subject.list's to disclose
 always	baseline.source	which source proposed the change set (#490): a fixed token
 always	baseline.hash	the change set's sha256 (#490): what an accept must name; derived from the values, discloses none of them; this reply is the only place the full hash appears (never status, the journal or the trail)
 always	baseline.state	none, pending, invalid, accepted or stale (#490): fixed kernel vocabulary
 always	baseline.apply	live or restart (#490): fixed kernel vocabulary
 always	baseline.changes	one line per changed leaf rendered through effective_view's classifier (disclose, mask as <value set>, any suppressed change as one anonymous "a suppressed setting changed (not disclosed)" line); never a raw value the classifier did not clear
+always	containment.outcome	one fixed code (#165); the caller holds the verb, so the code discloses nothing it may not know
+always	containment.target_uid	the uid the caller named or whose name it gave
+always	containment.revision	the store revision of the change, which correlates the trail
 always	binding.role	the policy-file role token an operator would grep for
 always	binding.members	the identities bound to it; the answer admin.subject.list exists to give
 always	binding.uid	the subject's uid when the last applied load knew one (#496); the same id members spells as uid:N, and also given for a subject that holds no role

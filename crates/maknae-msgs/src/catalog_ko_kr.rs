@@ -67,6 +67,30 @@ pub(crate) fn text(id: MsgId) -> &'static str {
         MsgId::EnrollRollbackDestroyPartial => {
             "등록에 실패했어요 — 방금 발급된 자격 증명을 폐기하려 했지만 일부는 실패했어요 (아래 내용을 확인하세요)"
         }
+        MsgId::EnrollBindingsWritten => {
+            "bindings.yaml에 {user}님을 admin으로 기록했어요"
+        }
+        MsgId::EnrollBindingsAlreadyAdmin => {
+            "{user}님은 이미 bindings.yaml에서 admin이에요. bindings.yaml은 바꾸지 않았어요"
+        }
+        MsgId::EnrollBindingsLost => {
+            "maknaed가 명시적 바인딩을 적용 중인데 bindings.yaml이 없거나 bindings: 키가 없어요. 먼저 터미널에서 sudo maknae policy sync로 복원한 뒤 다시 등록하세요"
+        }
+        MsgId::EnrollBindingsOtherRole => {
+            "{user}님은 {role} 역할을 갖고 있어요. enroll은 다른 역할이 없는 사용자에게만 admin을 추가해요. {user}님이 admin이어야 한다면 먼저 그 바인딩을 바꾸세요"
+        }
+        MsgId::EnrollBindingsReloadHint => {
+            "maknaed가 실행 중이라면 다시 불러와서 bindings.yaml을 적용하세요: sudo systemctl reload maknaed"
+        }
+        MsgId::EnrollBindingsReloadHintMacos => {
+            "maknaed가 실행 중이라면 다시 불러와서 bindings.yaml을 적용하세요: sudo launchctl kill SIGHUP system/io.maknae.maknaed"
+        }
+        MsgId::EnrollBindingsContained => {
+            "{user}님은 격리되어 있어요. enroll은 격리를 바꾸지 않아요. 의도한 것이라면 먼저 격리를 해제하세요"
+        }
+        MsgId::EnrollBindingsLookupFailed => {
+            "바인딩에 있는 계정 {name}을(를) 조회할 수 없어요: {error}. 아무것도 기록하지 않았어요"
+        }
         MsgId::HelperContextMismatch => "운영자 컨텍스트 헬퍼가 예상된 신원으로 전환되지 않았어요",
         MsgId::HelperStillPrivileged => {
             "운영자 컨텍스트 헬퍼가 여전히 root의 그룹 소속을 갖고 있어요 — 거부해요"

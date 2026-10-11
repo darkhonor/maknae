@@ -1206,6 +1206,8 @@ name = "maknae-proto"
 version = "0.0.0"
 dependencies = [
  "ciborium",
+ "icu_normalizer",
+ "icu_properties",
  "serde",
  "tokio",
  "zeroize",

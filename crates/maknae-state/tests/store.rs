@@ -4180,7 +4180,6 @@ async fn a_live_commit_may_drop_only_the_listed_entry_it_edited() {
         with(alice_contained, r#"["bob","carol"]"#),
         with(r#"{"user":[]}"#, r#"["bob"]"#),
         with(r#"{"adversary":["alice","bob"],"user":[]}"#, r#"["bob"]"#),
-        with(r#"{"adversary":["alice","carol"],"user":[]}"#, r#"["bob"]"#),
         with(alice_contained, "not a list"),
         with("not a section", r#"["bob"]"#),
     ] {
@@ -4213,6 +4212,78 @@ async fn a_live_commit_may_drop_only_the_listed_entry_it_edited() {
     .await
     .unwrap();
     assert_eq!(extracted(&graph_of(&fx.store(), &k)).sync, Some(shrunk));
+
+    let fx = Fixture::new();
+    fx.write(STORE_FILE, &sealed_with_sync(4, &k, Some(&listed)), 0o600);
+    let (dir, g) = (fx.dir(), graph_of(&fx.store(), &k));
+    let beside_unlisted = with(r#"{"adversary":["alice","carol"],"user":[]}"#, r#"["bob"]"#);
+    let mut audit = Recorder::default();
+    commit_live(
+        &dir,
+        &k,
+        &live_next(&g, 5, Some(&bl(A)), Some(&beside_unlisted)),
+        &[],
+        &["live".into()],
+        &mut audit,
+        LiveInitiator::Operator,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        extracted(&graph_of(&fx.store(), &k)).sync,
+        Some(beside_unlisted)
+    );
+}
+
+#[tokio::test]
+async fn a_live_commit_may_drop_every_listed_entry_it_changed_and_no_other() {
+    let (fx, k) = (Fixture::new(), key(1));
+    let listed = SyncBase {
+        base: r#"{"adversary":["mallory"]}"#.into(),
+        live: r#"{"adversary":["mallory","eve",{"uid":1003}]}"#.into(),
+        conflicts: r#"["eve","mallory",{"uid":1003}]"#.into(),
+    };
+    fx.write(STORE_FILE, &sealed_with_sync(4, &k, Some(&listed)), 0o600);
+    let before = fx.store();
+    let (dir, g) = (fx.dir(), graph_of(&before, &k));
+    let with = |live: &str, conflicts: &str| SyncBase {
+        live: live.into(),
+        conflicts: conflicts.into(),
+        ..listed.clone()
+    };
+    for refused in [
+        with(r#"{"adversary":["eve"]}"#, r#"["eve",{"uid":1003}]"#),
+        with(r#"{"adversary":["eve"]}"#, "[]"),
+        with(r#"{"adversary":["eve"]}"#, r#"["mallory"]"#),
+    ] {
+        let mut audit = Recorder::default();
+        let r = commit_live(
+            &dir,
+            &k,
+            &live_next(&g, 5, Some(&bl(A)), Some(&refused)),
+            &[],
+            &["live".into()],
+            &mut audit,
+            LiveInitiator::Operator,
+        )
+        .await;
+        assert_eq!(r.unwrap_err(), StoreError::SyncBaseChanged, "{refused:?}");
+        assert_eq!(fx.store(), before);
+    }
+    let released = with(r#"{"adversary":["eve"]}"#, r#"["eve"]"#);
+    let mut audit = Recorder::default();
+    commit_live(
+        &dir,
+        &k,
+        &live_next(&g, 5, Some(&bl(A)), Some(&released)),
+        &[],
+        &["live".into()],
+        &mut audit,
+        LiveInitiator::Operator,
+    )
+    .await
+    .unwrap();
+    assert_eq!(extracted(&graph_of(&fx.store(), &k)).sync, Some(released));
 }
 
 #[tokio::test]

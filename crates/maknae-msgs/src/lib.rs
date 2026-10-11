@@ -85,6 +85,22 @@ pub enum MsgId {
     /// says otherwise. Non-fatal (best-effort rollback stays non-fatal);
     /// this only fixes the message's honesty.
     EnrollRollbackDestroyPartial,
+    /// Enroll wrote the enrolling user under `admin` in `bindings.yaml`. Carries `{user}`.
+    EnrollBindingsWritten,
+    /// The enrolling user already holds `admin` in `bindings.yaml`. Carries `{user}`.
+    EnrollBindingsAlreadyAdmin,
+    /// `bindings.yaml` is lost while maknaed enforces explicit bindings.
+    EnrollBindingsLost,
+    /// The enrolling user holds another role in `bindings.yaml`. Carries `{user}` and `{role}`.
+    EnrollBindingsOtherRole,
+    /// How to apply a `bindings.yaml` enroll wrote (Linux).
+    EnrollBindingsReloadHint,
+    /// How to apply a `bindings.yaml` enroll wrote (macOS).
+    EnrollBindingsReloadHintMacos,
+    /// The enrolling user is contained. Carries `{user}`.
+    EnrollBindingsContained,
+    /// An account named in the bindings could not be looked up. Carries `{name}` and `{error}`.
+    EnrollBindingsLookupFailed,
     /// The operator-context helper's self-verification (euid/egid) failed.
     HelperContextMismatch,
     /// The operator-context helper still carries root's supplementary groups —
@@ -128,6 +144,14 @@ pub const ALL: &[MsgId] = &[
     MsgId::EnrollRotatePreviousDestroyed,
     MsgId::EnrollRollbackDestroyed,
     MsgId::EnrollRollbackDestroyPartial,
+    MsgId::EnrollBindingsWritten,
+    MsgId::EnrollBindingsAlreadyAdmin,
+    MsgId::EnrollBindingsLost,
+    MsgId::EnrollBindingsOtherRole,
+    MsgId::EnrollBindingsReloadHint,
+    MsgId::EnrollBindingsReloadHintMacos,
+    MsgId::EnrollBindingsContained,
+    MsgId::EnrollBindingsLookupFailed,
     MsgId::HelperContextMismatch,
     MsgId::HelperStillPrivileged,
 ];
@@ -301,11 +325,19 @@ mod tests {
                 | MsgId::EnrollRotatePreviousDestroyed
                 | MsgId::EnrollRollbackDestroyed
                 | MsgId::EnrollRollbackDestroyPartial
+                | MsgId::EnrollBindingsWritten
+                | MsgId::EnrollBindingsAlreadyAdmin
+                | MsgId::EnrollBindingsLost
+                | MsgId::EnrollBindingsOtherRole
+                | MsgId::EnrollBindingsReloadHint
+                | MsgId::EnrollBindingsReloadHintMacos
+                | MsgId::EnrollBindingsContained
+                | MsgId::EnrollBindingsLookupFailed
                 | MsgId::HelperContextMismatch
                 | MsgId::HelperStillPrivileged => {}
             }
         }
-        const VARIANT_COUNT: usize = 35;
+        const VARIANT_COUNT: usize = 43;
         assert_eq!(ALL.len(), VARIANT_COUNT);
         for &id in ALL {
             assert_covered(id);

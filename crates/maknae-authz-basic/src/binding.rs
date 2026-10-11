@@ -186,6 +186,9 @@ impl std::fmt::Display for IdentityProblem {
                 }
                 Ok(())
             }
+            Self::Released { uid, name, cause } if *name == format!("uid:{uid}") => {
+                write!(f, "uid {uid} is no longer contained: {cause}")
+            }
             Self::Released { uid, name, cause } => write!(
                 f,
                 "uid {uid} ('{}') is no longer contained: {cause}",
@@ -832,13 +835,13 @@ mod tests {
                 IdentityProblem::Released {
                     uid: 666,
                     name: "mallory".into(),
-                    cause: "its name is no longer listed under adversary".into(),
+                    cause: "bindings.yaml no longer lists it under adversary".into(),
                 },
                 "released",
                 Some(666),
                 vec!["mallory"],
                 vec!["adversary"],
-                "uid 666 ('mallory') is no longer contained: its name is no longer listed under adversary",
+                "uid 666 ('mallory') is no longer contained: bindings.yaml no longer lists it under adversary",
             ),
             (
                 IdentityProblem::PrincipalAdmin { uid: 501 },
@@ -872,6 +875,41 @@ mod tests {
                 name: "mallory".into(),
                 cause: "its name now resolves to uid 777".into(),
             }
+        );
+    }
+
+    #[test]
+    fn a_released_uid_entry_is_named_by_its_uid_only() {
+        let released = |uid, name: &str| {
+            IdentityProblem::from(&maknae_graph::identity::Released {
+                uid,
+                name: name.into(),
+                cause: maknae_graph::identity::ReleaseCause::NotListed,
+            })
+            .to_string()
+        };
+        assert_eq!(
+            released(4242, "uid:4242"),
+            "uid 4242 is no longer contained: bindings.yaml no longer lists it under adversary"
+        );
+        assert_eq!(
+            released(4242, "uid:4243"),
+            "uid 4242 ('uid:4243') is no longer contained: bindings.yaml no longer lists it under adversary"
+        );
+    }
+
+    #[test]
+    fn a_wire_release_names_the_operator_and_not_bindings_yaml() {
+        let r = maknae_graph::identity::Released {
+            uid: 666,
+            name: "mallory".into(),
+            cause: maknae_graph::identity::ReleaseCause::Live(
+                maknae_graph::record::ProvenanceKind::Operator,
+            ),
+        };
+        assert_eq!(
+            IdentityProblem::from(&r).to_string(),
+            "uid 666 ('mallory') is no longer contained: an operator released it over the wire"
         );
     }
 
@@ -1188,5 +1226,136 @@ mod tests {
         let gb = GraphBindings::new(bare, SOURCE);
         assert_eq!(gb.role_for(9, 9), Resolution::NoRole);
         assert_eq!(gb.as_subject_bindings(), Some(vec![]));
+    }
+
+    fn contained_policy(also: Option<&str>) -> crate::decide::LoadedPolicy {
+        let g = graph(&layer(
+            true,
+            &[(7, "mallory", "adversary"), (8, "alex", "admin")],
+        ));
+        let g = match also {
+            Some(role) => with_extra_edge(
+                &g,
+                "uid:7",
+                BINDS,
+                (ROLE, role),
+                &persisted_compiled_set("UNCLASSIFIED"),
+            ),
+            None => g,
+        };
+        let quoted = |terms: &[&str]| {
+            terms
+                .iter()
+                .map(|t| format!("      - \"{t}\"\n"))
+                .collect::<String>()
+        };
+        let policy = maknae_config::parse_authz(&format!(
+            "schema_version: 1\npermissions:\n  allow:\n    - \"Read(~/**)\"\nroles:\n  admin:\n    allow:\n{}  user:\n    allow:\n{}",
+            quoted(&crate::decide::GRANTABLE_ACTIONS),
+            quoted(&["session.prompt"]),
+        ))
+        .unwrap();
+        crate::decide::LoadedPolicy {
+            roles: Roles::Graph(GraphBindings::new(g, SOURCE)),
+            action_grants: crate::validate_grants(&policy.action_grants).unwrap(),
+            destinations: crate::validate_destinations(&policy.destinations).unwrap(),
+            policy,
+        }
+    }
+
+    fn contained_request(uid: i64, action: &str, kernel: bool) -> maknae_security::Request {
+        use maknae_security::{Action, AttrValue as V, Attributes, Context, Resource, Subject};
+        let mut s = Attributes::new();
+        s.insert(crate::decide::SUBJECT_UID, V::Int(uid));
+        s.insert(
+            maknae_security::SUBJECT_HOME,
+            V::Str("/home/mallory".into()),
+        );
+        if kernel {
+            s.insert(
+                maknae_security::SUBJECT_INITIATOR,
+                V::Str(maknae_security::INITIATOR_KERNEL.into()),
+            );
+        }
+        let mut r = Attributes::new();
+        r.insert(
+            crate::decide::RESOURCE_PATH,
+            V::Str("/home/mallory/x".into()),
+        );
+        r.insert(
+            crate::decide::RESOURCE_DESTINATION,
+            V::Str("provider:any".into()),
+        );
+        let mut c = Attributes::new();
+        c.insert(
+            maknae_security::CONTEXT_DAC_LANE,
+            V::Str(maknae_security::Lane::Local.as_str().into()),
+        );
+        c.insert(maknae_security::CONTEXT_FS_OPERATION, V::Str("read".into()));
+        maknae_security::Request {
+            subject: Subject(s),
+            resource: Resource(r),
+            action: Action(action.into()),
+            context: Context(c),
+        }
+    }
+
+    #[test]
+    fn a_contained_subject_is_denied_every_term_whatever_else_it_is_bound_to() {
+        let terms: Vec<&str> = crate::vocabulary::ACTION_TERMS
+            .iter()
+            .chain(crate::decide::GRANTABLE_ACTIONS.iter())
+            .chain(crate::vocabulary::KERNEL_TERMS.iter())
+            .chain(["liveness", "unknown.term", "kernel"].iter())
+            .copied()
+            .collect();
+        let operator = maknae_config::Principal {
+            name: "operator".into(),
+            uid: 501,
+        };
+        for also in [None, Some("admin"), Some("user"), Some("guest")] {
+            let lp = contained_policy(also);
+            for action in ["admin.status", "liveness.ping"] {
+                let d = crate::decide::decide_loaded_cited(
+                    &lp,
+                    &operator,
+                    &contained_request(8, action, false),
+                );
+                assert!(
+                    matches!(d.verdict, maknae_security::Verdict::Permit { .. }),
+                    "an uncontained admin under the same policy is granted {action}: {d:?}"
+                );
+            }
+            for &action in &terms {
+                for kernel in [false, true] {
+                    let d = crate::decide::decide_loaded_cited(
+                        &lp,
+                        &operator,
+                        &contained_request(7, action, kernel),
+                    );
+                    let kernel_class =
+                        crate::decide::class_of(action) == Some(crate::decide::Class::Kernel);
+                    if !kernel_class {
+                        assert_eq!(
+                            d.verdict,
+                            maknae_security::Verdict::Deny {
+                                reason: "subject contained: role=adversary".into()
+                            },
+                            "{action} kernel={kernel} also={also:?}"
+                        );
+                    } else if action == "kernel.contain" && kernel {
+                        assert!(
+                            matches!(d.verdict, maknae_security::Verdict::Permit { .. }),
+                            "the kernel's own containment is the one exempt case: {d:?}"
+                        );
+                    } else {
+                        assert!(
+                            matches!(d.verdict, maknae_security::Verdict::NotApplicable { .. }),
+                            "{action} kernel={kernel} also={also:?}: {d:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }

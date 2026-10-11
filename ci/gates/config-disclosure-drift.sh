@@ -64,7 +64,7 @@ SURFACE=(
   # discloses it anyway" does not cover this path. Adding `au3_1`,
   # `vault.addr` or `principal.home` to this struct later would otherwise pass
   # every gate here. Prefix `status.` so its fields carry their own decisions.
-  "crates/maknae-proto/src/wire.rs|StatusView|status|10|wire"
+  "crates/maknae-proto/src/wire.rs|StatusView|status|11|wire"
   # The SIBLING disclosure struct, added in the same commit for the same
   # feature. Inventorying one of a matched pair is how the pair's second member
   # ships unreviewed: adding `home` or `clearance` to this struct changes no
@@ -83,9 +83,72 @@ SURFACE=(
   "crates/maknae-proto/src/wire.rs|WhoamiView|whoami|2|wire"
   # `admin.baseline.show`/`.accept` (#490): `changes` arrives already rendered by the config.show classifier.
   "crates/maknae-proto/src/wire.rs|BaselineView|baseline|5|wire"
+  # The fifth wire disclosure struct, after StatusView, RoleBindingView, WhoamiView and BaselineView;
+  # a field added to it reaches every holder of either verb.
+  "crates/maknae-proto/src/wire.rs|ContainmentView|containment|3|wire"
   "crates/maknae-vault/src/config.rs|VaultConfig|vault|8|config"
   "crates/maknae-vault/src/config.rs|UserAuthConfig|vault.user_auth|2|config"
 )
+
+# Fields whose type is a unit-only enum: one fixed token on the wire, so a leaf.
+# Each row names the field, the file defining the enum at its top level, and the
+# type, which the field must spell exactly, with no path; the gate verifies the
+# enum itself (leaf_enum_check) and that the field's struct is in the same file.
+# No other enum-typed field is a leaf.
+LEAF_ENUMS=(
+  "containment.outcome|crates/maknae-proto/src/wire.rs|ContainmentOutcome"
+)
+
+leaf_enum_check() { # <field-path> <file> <type>
+  local fp="$1" file="$2" ty="$3" ndef nother structfile body prefix
+  [ -f "$file" ] || { echo "FAIL: leaf-enum row '$fp': '$file' does not exist."; return 1; }
+  ndef="$(grep -cE "(^|[^A-Za-z0-9_])enum[[:space:]]+$ty([^A-Za-z0-9_]|$)" "$file" || true)"
+  if [ "$ndef" != "1" ]; then
+    echo "FAIL: leaf-enum row '$fp': '$file' defines 'enum $ty' $ndef times; exactly one is required."
+    return 1
+  fi
+  if ! grep -qE "^(pub([[:space:]]|\([^)]*\)[[:space:]]))?enum $ty([^A-Za-z0-9_]|$)" "$file"; then
+    echo "FAIL: leaf-enum row '$fp': 'enum $ty' is not at the top level of '$file', so the field may resolve to another item."
+    return 1
+  fi
+  nother="$(grep -cE "(^|[^A-Za-z0-9_])(struct|union|type|trait|mod|as)[[:space:]]+$ty([^A-Za-z0-9_]|$)" "$file" || true)"
+  if [ "$nother" != "0" ]; then
+    echo "FAIL: leaf-enum row '$fp': '$file' also has a struct, union, type, trait or 'as' naming '$ty'; the name does not resolve to the enum."
+    return 1
+  fi
+  prefix="${fp%.*}"
+  structfile=""
+  for entry in "${SURFACE[@]}"; do
+    IFS='|' read -r ef _ ep _ <<< "$entry"
+    [ "$ep" = "$prefix" ] && structfile="$ef"
+  done
+  if [ "$structfile" != "$file" ]; then
+    echo "FAIL: leaf-enum row '$fp': its struct is in '${structfile:-no SURFACE entry}', not in '$file', so '$ty' may not resolve to this enum."
+    return 1
+  fi
+  body="$(sed 's|//.*$||' "$file" | tr '\n' ' ' | TYNAME="$ty" awk '
+    {
+      t = ENVIRON["TYNAME"]
+      if (!match($0, "(^|[^A-Za-z0-9_])enum[ \t]+" t "([^A-Za-z0-9_]|$)")) exit 2
+      rest = substr($0, RSTART + RLENGTH - 1)
+      o = index(rest, "{")
+      if (o == 0) exit 2
+      depth = 0
+      for (i = o; i <= length(rest); i++) {
+        c = substr(rest, i, 1)
+        if (c == "{") depth++
+        else if (c == "}") { depth--; if (depth == 0) break }
+      }
+      if (depth != 0) exit 2
+      print substr(rest, o + 1, i - o - 1)
+    }')" || { echo "FAIL: leaf-enum row '$fp': could not read the body of 'enum $ty'."; return 1; }
+  body="$(printf '%s' "$body" | sed -E 's/#\[[^]]*\]//g')"
+  case "$body" in
+    *[\#\(\{]*)
+      echo "FAIL: leaf-enum row '$fp': 'enum $ty' is not unit-only (a variant carries data, or an attribute could not be read)."
+      return 1 ;;
+  esac
+}
 
 # Sections with NO config struct: their keys are carried verbatim for their
 # consumers. Each still needs a manifest row -- struct-less means the keys pass
@@ -157,6 +220,7 @@ PAYLOAD_DISPOSITIONS=(
   "SubjectList|struct:RoleBindingView"
   "MutationAttempt|authorized-attempt"
   "Baseline|struct:BaselineView"
+  "Containment|struct:ContainmentView"
   "PromptReply|bytes"   # #172: the provider's reply, released only on the session.prompt Permit (its own PEP)
 )
 payload_variants="$(awk '
@@ -669,6 +733,21 @@ while IFS=$'\t' read -r fpath fty fkind; do
       echo "  Give it a SURFACE entry, an 'omit' manifest row, or a named type."
       exit 1 ;;
   esac
+  leaf_row=""
+  for row in "${LEAF_ENUMS[@]}"; do
+    IFS='|' read -r lp lf lt <<< "$row"
+    if [ "$lp" = "$fpath" ] && [ "$lt" = "$bare" ]; then
+      raw=$(printf '%s' "$fty" | sed -E -e ':a' -e "s#^${wrappers}<##" -e 'ta' | sed -E 's/>+$//')
+      if [ "$raw" != "$lt" ]; then
+        echo "FAIL: leaf-enum row '$lp': the field's type is spelled '$fty', not exactly '$lt'; a path may name another item."
+        exit 1
+      fi
+      leaf_enum_check "$lp" "$lf" "$lt" || exit 1
+      echo "$lp" >> "$tmp/leaf-used"
+      leaf_row=1
+    fi
+  done
+  [ -z "$leaf_row" ] || continue
   if [ "$bare" != "__DYNAMIC_MAP__" ]; then
     # `struct` OR `enum`: an enum can carry a map variant just as a struct can
     # carry map fields, and matching only `struct` would leave every
@@ -722,6 +801,13 @@ while IFS=$'\t' read -r fpath fty fkind; do
     exit 1
   fi
 done < "$tmp/fields"
+for row in "${LEAF_ENUMS[@]}"; do
+  IFS='|' read -r lp _ _ <<< "$row"
+  if ! grep -qxF "$lp" "$tmp/leaf-used" 2>/dev/null; then
+    echo "FAIL: leaf-enum row '$lp' matched no field of that path and type; a stale row is removed, not kept."
+    exit 1
+  fi
+done
 cut -f1 "$tmp/fields" | sort -u > "$tmp/fieldpaths"
 
 # 3. The manifest. Every row needs three tab fields with a non-empty rationale:

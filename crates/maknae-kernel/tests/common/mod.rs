@@ -983,8 +983,199 @@ impl maknae_kernel::BaselineOps for NoBaseline {
     }
 }
 
-pub fn no_baseline() -> Arc<dyn maknae_kernel::BaselineOps> {
+impl maknae_kernel::ContainmentOps for NoBaseline {
+    fn contain<'a>(
+        &'a self,
+        _: maknae_kernel::ContainRequest<'a>,
+    ) -> maknae_kernel::BoxFuture<'a, maknae_kernel::ContainAnswer> {
+        Box::pin(async { no_containment() })
+    }
+    fn release<'a>(
+        &'a self,
+        _: maknae_kernel::ReleaseRequest<'a>,
+    ) -> maknae_kernel::BoxFuture<'a, maknae_kernel::ContainAnswer> {
+        Box::pin(async { no_containment() })
+    }
+}
+
+pub fn no_containment() -> maknae_kernel::ContainAnswer {
+    maknae_kernel::ContainAnswer::Unavailable {
+        reply: "no containment service",
+        why: "no containment service".into(),
+    }
+}
+
+pub fn no_baseline() -> Arc<dyn maknae_kernel::AdminOps> {
     Arc::new(NoBaseline)
+}
+
+pub const CORRECTIVE_RESULT: &str = "result-sentinel-5c1e";
+pub const CORRECTIVE_POSTURE: &str = "posture-sentinel-5c1e";
+pub const CORRECTIVE_REASON: &str = "reason-sentinel-5c1e";
+
+/// Answers every contain and release with `outcome`, and a sentinel corrective unless it succeeded.
+pub struct ScriptedContainment {
+    outcome: maknae_proto::ContainmentOutcome,
+    calls: std::sync::atomic::AtomicUsize,
+    last_reason: Mutex<Option<String>>,
+    requesters: Mutex<Vec<u32>>,
+    denied: Option<&'static str>,
+    actions: Mutex<Vec<maknae_security::Request>>,
+}
+
+impl ScriptedContainment {
+    pub fn requesters(&self) -> Vec<u32> {
+        self.requesters.lock().unwrap().clone()
+    }
+    /// The permitted request each contain or release carried.
+    pub fn actions(&self) -> Vec<maknae_security::Request> {
+        self.actions.lock().unwrap().clone()
+    }
+    pub fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    pub fn last_reason(&self) -> Option<String> {
+        self.last_reason.lock().unwrap().clone()
+    }
+    fn answer(&self) -> maknae_kernel::ContainAnswer {
+        use maknae_proto::ContainmentOutcome as O;
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Some(why) = self.denied {
+            return maknae_kernel::ContainAnswer::Denied { why: why.into() };
+        }
+        let o = self.outcome;
+        let corrective =
+            (!matches!(o, O::Contained | O::Released)).then(|| maknae_kernel::Corrective {
+                result: CORRECTIVE_RESULT,
+                posture: CORRECTIVE_POSTURE,
+                reason: CORRECTIVE_REASON.to_string(),
+            });
+        maknae_kernel::ContainAnswer::View {
+            view: maknae_proto::ContainmentView {
+                outcome: o,
+                target_uid: None,
+                revision: None,
+            },
+            corrective,
+        }
+    }
+}
+
+impl maknae_kernel::BaselineOps for ScriptedContainment {
+    fn show(&self) -> maknae_kernel::BoxFuture<'_, Result<maknae_proto::BaselineView, String>> {
+        Box::pin(async { Err("no baseline service".to_string()) })
+    }
+    fn accept<'a>(
+        &'a self,
+        _: &'a str,
+    ) -> maknae_kernel::BoxFuture<'a, maknae_kernel::AcceptAnswer> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async {
+            maknae_kernel::AcceptAnswer::Unavailable {
+                reply: "no baseline service",
+                why: "no baseline service".into(),
+            }
+        })
+    }
+}
+
+impl maknae_kernel::ContainmentOps for ScriptedContainment {
+    fn contain<'a>(
+        &'a self,
+        req: maknae_kernel::ContainRequest<'a>,
+    ) -> maknae_kernel::BoxFuture<'a, maknae_kernel::ContainAnswer> {
+        *self.last_reason.lock().unwrap() = Some(req.reason.to_string());
+        self.requesters.lock().unwrap().push(req.requester);
+        self.actions.lock().unwrap().push(req.action.clone());
+        let answer = self.answer();
+        Box::pin(async move { answer })
+    }
+    fn release<'a>(
+        &'a self,
+        req: maknae_kernel::ReleaseRequest<'a>,
+    ) -> maknae_kernel::BoxFuture<'a, maknae_kernel::ContainAnswer> {
+        self.requesters.lock().unwrap().push(req.requester);
+        self.actions.lock().unwrap().push(req.action.clone());
+        let answer = self.answer();
+        Box::pin(async move { answer })
+    }
+}
+
+pub fn scripted_containment(outcome: maknae_proto::ContainmentOutcome) -> Arc<ScriptedContainment> {
+    Arc::new(ScriptedContainment {
+        outcome,
+        calls: Default::default(),
+        last_reason: Mutex::new(None),
+        requesters: Mutex::new(Vec::new()),
+        denied: None,
+        actions: Mutex::default(),
+    })
+}
+
+/// Answers every contain and release as denied in the turn, with `why` as the PDP's reason.
+pub fn denying_containment(why: &'static str) -> Arc<ScriptedContainment> {
+    Arc::new(ScriptedContainment {
+        outcome: maknae_proto::ContainmentOutcome::Contained,
+        calls: Default::default(),
+        last_reason: Mutex::new(None),
+        requesters: Mutex::new(Vec::new()),
+        denied: Some(why),
+        actions: Mutex::default(),
+    })
+}
+
+/// A PDP wrapper that COUNTS decisions and delegates everything to the real
+/// composition, so a test can prove a path never consulted the PDP.
+pub struct Counting<A> {
+    pub inner: std::sync::Arc<A>,
+    pub decisions: std::sync::atomic::AtomicUsize,
+}
+impl<A: maknae_security::Authorizer> maknae_security::Authorizer for Counting<A> {
+    fn decide(&self, req: &maknae_security::Request) -> maknae_security::Verdict {
+        self.decide_reporting_role(req).0
+    }
+    /// Delegates the role too (#275). A wrapper that forwards only `decide`
+    /// inherits the trait default and reports `None`, so the records this
+    /// harness observes would say `role=none` while the real composed PDP
+    /// underneath had resolved one -- the wrapper would be manufacturing the
+    /// very defect the suite exists to detect. Counting happens HERE, once, so
+    /// the observer stays exact.
+    fn decide_reporting_role(
+        &self,
+        req: &maknae_security::Request,
+    ) -> (maknae_security::Verdict, Option<&'static str>) {
+        self.decisions
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.decide_reporting_role(req)
+    }
+    fn decide_cited(&self, req: &maknae_security::Request) -> maknae_security::Decided {
+        self.decisions
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.decide_cited(req)
+    }
+    fn decide_cited_all(&self, reqs: &[maknae_security::Request]) -> Vec<maknae_security::Decided> {
+        self.decisions
+            .fetch_add(reqs.len(), std::sync::atomic::Ordering::SeqCst);
+        self.inner.decide_cited_all(reqs)
+    }
+    fn subjects(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
+        self.inner.subjects()
+    }
+    fn backend_name(&self) -> String {
+        self.inner.backend_name()
+    }
+}
+
+impl<A> Counting<A> {
+    pub fn new(inner: A) -> Self {
+        Self {
+            inner: std::sync::Arc::new(inner),
+            decisions: Default::default(),
+        }
+    }
+    pub fn calls(&self) -> usize {
+        self.decisions.load(std::sync::atomic::Ordering::SeqCst)
+    }
 }
 
 pub fn serving() -> tokio::sync::watch::Receiver<maknae_kernel::Drain> {

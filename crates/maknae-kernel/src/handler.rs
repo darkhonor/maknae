@@ -49,6 +49,10 @@ pub enum Dispatch {
     /// The peer asked to accept the pending set its operand names; the hash is
     /// read from the verb by the arm, never passed to the PDP.
     BaselineAcceptRequested,
+    /// The peer asked to contain a subject; the target and reason are read from the verb by the arm, never passed to the PDP.
+    ContainRequested,
+    /// The peer asked to lift a containment; the target is read from the verb by the arm, never passed to the PDP.
+    ReleaseRequested,
 }
 
 /// The verbs routed to `mutation::handle`; only these resolve the requester's home.
@@ -71,13 +75,13 @@ pub fn dispatch_verb(verb: &Verb) -> Dispatch {
         Verb::AdminSubjectList => Dispatch::SubjectListRequested,
         Verb::AdminBaselineShow => Dispatch::BaselineShowRequested,
         Verb::AdminBaselineAccept { .. } => Dispatch::BaselineAcceptRequested,
+        Verb::AdminContain { .. } => Dispatch::ContainRequested,
+        Verb::AdminRelease { .. } => Dispatch::ReleaseRequested,
         Verb::SessionPrompt { .. } => Dispatch::PromptRequested,
         Verb::AdminAuditTail
         | Verb::AdminPolicyReload
         | Verb::AdminSubjectBind
         | Verb::AdminSubjectUnbind
-        | Verb::AdminContain
-        | Verb::AdminRelease
         | Verb::AdminCredentialRotate
         | Verb::AdminProviderList
         | Verb::AdminProviderSet
@@ -232,8 +236,8 @@ pub fn verb_to_action(verb: &Verb) -> &'static str {
         Verb::AdminBaselineAccept { .. } => "admin.baseline.accept",
         Verb::AdminSubjectBind => "admin.subject.bind",
         Verb::AdminSubjectUnbind => "admin.subject.unbind",
-        Verb::AdminContain => "admin.contain",
-        Verb::AdminRelease => "admin.release",
+        Verb::AdminContain { .. } => "admin.contain",
+        Verb::AdminRelease { .. } => "admin.release",
         Verb::AdminCredentialRotate => "admin.credential.rotate",
         Verb::AdminProviderList => "admin.provider.list",
         Verb::AdminProviderSet => "admin.provider.set",
@@ -343,6 +347,31 @@ pub fn build_authz_request(
     }
 }
 
+/// The kernel's own request.
+pub(crate) fn build_kernel_request(
+    action: &'static str,
+    kernel_uid: u32,
+) -> maknae_security::Request {
+    use maknae_security::{Action, AttrValue, Attributes, Context, Resource, Subject};
+    let mut subject = Attributes::new();
+    subject.insert("uid", AttrValue::Int(i64::from(kernel_uid)));
+    subject.insert(
+        maknae_security::SUBJECT_INITIATOR,
+        AttrValue::Str(maknae_security::INITIATOR_KERNEL.to_string()),
+    );
+    let mut context = Attributes::new();
+    context.insert(
+        maknae_security::CONTEXT_DAC_LANE,
+        AttrValue::Str(maknae_security::Lane::Local.as_str().to_string()),
+    );
+    maknae_security::Request {
+        subject: Subject(subject),
+        resource: Resource(Attributes::new()),
+        action: Action(action.to_string()),
+        context: Context(context),
+    }
+}
+
 /// An obligation the PEP has no registered handler for — the PEP fails
 /// closed to Deny on it (audit-only reason names the id).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -436,6 +465,7 @@ pub fn confinable_home(resolved: std::path::PathBuf) -> Option<std::path::PathBu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use maknae_proto::ContainTarget;
 
     #[test]
     fn only_a_utf8_home_below_the_root_is_confinable() {
@@ -588,6 +618,19 @@ mod tests {
             }),
             Dispatch::BaselineAcceptRequested
         );
+        assert_eq!(
+            dispatch_verb(&Verb::AdminContain {
+                target: ContainTarget::Uid(1),
+                reason: "r".into()
+            }),
+            Dispatch::ContainRequested
+        );
+        assert_eq!(
+            dispatch_verb(&Verb::AdminRelease {
+                target: ContainTarget::Uid(1)
+            }),
+            Dispatch::ReleaseRequested
+        );
         // And EVERY term that is not grantable still has no behaviour --
         // DERIVED, not hand-typed.
         //
@@ -609,6 +652,12 @@ mod tests {
         // remain, BOTH asserted against the constant: the tripwire test below
         // (cross-crate) and `-basic`'s in-crate pin for the mutation lane.)
         let grantable = maknae_authz_basic::grantable_actions();
+        let admin_terms = all_verbs()
+            .iter()
+            .map(verb_to_action)
+            .filter(|a| a.starts_with("admin.") && *a != "admin.whoami")
+            .count();
+        let grantable_admin = grantable.iter().filter(|a| a.starts_with("admin.")).count();
         let ungrantable: Vec<Verb> = all_verbs()
             .into_iter()
             .filter(|v| {
@@ -616,8 +665,13 @@ mod tests {
                 a.starts_with("admin.") && a != "admin.whoami" && !grantable.contains(&a)
             })
             .collect();
+        assert_eq!(
+            ungrantable.len(),
+            admin_terms - grantable_admin,
+            "the ungrantable admin set is derived from the verb list and the constant"
+        );
         assert!(
-            ungrantable.len() >= 13,
+            ungrantable.len() >= 11,
             "the ungrantable admin set should not shrink unnoticed: {}",
             ungrantable.len()
         );
@@ -661,6 +715,8 @@ mod tests {
                 "admin.subject.list",
                 "admin.baseline.show",
                 "admin.baseline.accept",
+                "admin.contain",
+                "admin.release",
                 "session.prompt"
             ],
             "the hand-copied list in the class test above must match the constant"
@@ -675,7 +731,7 @@ mod tests {
         // real arm, so the helper must say false — otherwise the assert above
         // is vacuous.
         assert!(
-            !all_dispatch(&["admin.contain"]),
+            !all_dispatch(&["admin.credential.rotate"]),
             "all_dispatch must return false for an unbuilt term"
         );
     }
@@ -1146,8 +1202,13 @@ mod tests {
             },
             Verb::AdminSubjectBind,
             Verb::AdminSubjectUnbind,
-            Verb::AdminContain,
-            Verb::AdminRelease,
+            Verb::AdminContain {
+                target: maknae_proto::ContainTarget::Uid(1),
+                reason: "r".into(),
+            },
+            Verb::AdminRelease {
+                target: maknae_proto::ContainTarget::Uid(1),
+            },
             Verb::AdminCredentialRotate,
             Verb::AdminProviderList,
             Verb::AdminProviderSet,
@@ -1305,6 +1366,9 @@ mod tests {
                 "{a} collides with a client-reachable term"
             );
         }
+        assert!(all_verbs()
+            .iter()
+            .all(|v| !KERNEL_ACTIONS.contains(&verb_to_action(v))));
     }
 
     /// Claim: a parameterless `[N]` term supplies NO resource attribute, so
@@ -1453,6 +1517,80 @@ mod tests {
                 bytes.windows(hdr.len()).any(|wnd| wnd == hdr.as_slice()),
                 "{key} must appear as a CBOR text key of its exact length"
             );
+        }
+    }
+
+    #[test]
+    fn a_kernel_request_names_the_kernel_and_carries_nothing_else() {
+        let r = build_kernel_request("kernel.contain", 991);
+        assert_eq!(r.action.0, "kernel.contain");
+        assert_eq!(
+            r.subject.0.get("uid"),
+            Some(&maknae_security::AttrValue::Int(991))
+        );
+        assert_eq!(
+            r.subject.0.get(maknae_security::SUBJECT_INITIATOR),
+            Some(&maknae_security::AttrValue::Str("kernel".into()))
+        );
+        assert!(r.resource.0.is_empty());
+        let mut subject = maknae_security::Attributes::new();
+        subject.insert("uid", maknae_security::AttrValue::Int(991));
+        subject.insert(
+            maknae_security::SUBJECT_INITIATOR,
+            maknae_security::AttrValue::Str("kernel".into()),
+        );
+        assert_eq!(
+            format!("{:?}", r.subject.0),
+            format!("{subject:?}"),
+            "uid and initiator only"
+        );
+        let mut context = maknae_security::Attributes::new();
+        context.insert(
+            maknae_security::CONTEXT_DAC_LANE,
+            maknae_security::AttrValue::Str("local".into()),
+        );
+        assert_eq!(
+            format!("{:?}", r.context.0),
+            format!("{context:?}"),
+            "the lane only"
+        );
+        assert!(KERNEL_ACTIONS.contains(&r.action.0.as_str()));
+    }
+
+    #[test]
+    fn no_client_request_carries_the_initiator() {
+        for v in all_verbs() {
+            let r = build_authz_request(&v, 0, None, maknae_security::Lane::Local, None);
+            assert!(
+                r.subject
+                    .0
+                    .get(maknae_security::SUBJECT_INITIATOR)
+                    .is_none(),
+                "{v:?}"
+            );
+            assert!(!KERNEL_ACTIONS.contains(&r.action.0.as_str()), "{v:?}");
+        }
+    }
+
+    #[test]
+    fn the_containment_operands_never_reach_the_pdp() {
+        let reason = "SENTINEL-REASON-7c1";
+        for v in [
+            Verb::AdminContain {
+                target: ContainTarget::Name("SENTINEL-NAME".into()),
+                reason: reason.into(),
+            },
+            Verb::AdminRelease {
+                target: ContainTarget::Uid(424242),
+            },
+        ] {
+            let dbg = format!(
+                "{:?}",
+                build_authz_request(&v, 501, None, maknae_security::Lane::Local, None)
+            );
+            for s in ["SENTINEL", "424242"] {
+                assert!(!dbg.contains(s), "{v:?}: {dbg}");
+            }
         }
     }
 }

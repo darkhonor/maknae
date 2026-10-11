@@ -1,8 +1,10 @@
-use maknae_authz_basic::{shown, AuthzBasicError, PolicySource};
+use crate::containment::{quoted, LiveNote};
+use maknae_authz_basic::{AuthzBasicError, PolicySource};
 use maknae_config::{
     BindingEntry, Bindings, BoundRole, LiveEdit, MergeEvent, ResolvedBy, Section, SyncKind,
 };
 use maknae_graph::graph::Graph;
+use maknae_graph::kernel::ADVERSARY;
 use maknae_graph::sync::SyncBase;
 use maknae_state::store::{LiveInitiator, StateDir};
 use std::collections::BTreeSet;
@@ -127,7 +129,7 @@ pub fn stored_sections(s: &SyncBase) -> Result<(Section, Section, BTreeSet<Bindi
 
 fn entry(e: &BindingEntry) -> String {
     match e {
-        BindingEntry::Name(n) => shown(n),
+        BindingEntry::Name(n) => quoted(n),
         BindingEntry::Uid(_) => e.render(),
     }
 }
@@ -155,25 +157,57 @@ pub fn event_reason(e: &MergeEvent) -> String {
     }
 }
 
-pub fn live_reason(edit: &LiveEdit, who: LiveInitiator) -> String {
+pub(crate) fn live_reason(
+    edit: &LiveEdit,
+    removed: &[BindingEntry],
+    who: LiveInitiator,
+    note: &LiveNote<'_>,
+) -> String {
     let what = match edit {
         LiveEdit::Contain(e) => format!("contain {}", entry(e)),
-        LiveEdit::Release(e) => format!("release {}", entry(e)),
+        LiveEdit::ReleaseUid { uid, .. } => {
+            let uid = BindingEntry::Uid(*uid);
+            if removed.is_empty() || removed == [uid.clone()] {
+                format!("release {}", entry(&uid))
+            } else {
+                let shown: Vec<String> = removed.iter().map(entry).collect();
+                format!("release {} ({})", entry(&uid), shown.join(", "))
+            }
+        }
         LiveEdit::Bind { name, role } => {
             let role = match role {
                 BoundRole::Admin => "admin",
                 BoundRole::User => "user",
                 BoundRole::Guest => "guest",
             };
-            format!("bind {role} {}", shown(name))
+            format!("bind {role} {}", quoted(name))
         }
-        LiveEdit::Unbind(name) => format!("unbind {}", shown(name)),
+        LiveEdit::Unbind(name) => format!("unbind {}", quoted(name)),
     };
     let who = match who {
         LiveInitiator::Operator => "operator",
         LiveInitiator::Kernel => "kernel",
     };
-    format!("live ({who}): {what}")
+    let mut out = format!("live ({who}): {what}");
+    if let Some((uid, session)) = note.requester {
+        out.push_str(&format!("; requested by uid {uid} in session {session}"));
+    }
+    if let Some(r) = note.reason {
+        out.push_str(&format!("; reason {}", quoted(r)));
+    }
+    out
+}
+
+/// The claimants a release removed: bound as adversary `before` and not `after`, the uid first.
+pub(crate) fn removed(edit: &LiveEdit, before: &Section, after: &Section) -> Vec<BindingEntry> {
+    let LiveEdit::ReleaseUid { uid, names } = edit else {
+        return Vec::new();
+    };
+    let adversary = |s: &Section, e: &BindingEntry| s.roles_of(e).contains(ADVERSARY);
+    std::iter::once(BindingEntry::Uid(*uid))
+        .chain(names.iter().map(|n| BindingEntry::Name(n.clone())))
+        .filter(|e| adversary(before, e) && !adversary(after, e))
+        .collect()
 }
 
 pub fn live_outcome(revision: u64, durability: Option<&str>, checkpoint: Option<&str>) -> String {
@@ -532,7 +566,7 @@ mod tests {
         assert!(!has(&m, 1001, "guest"));
         assert_eq!(
             m.events,
-            ["conflict: eve changed in bindings.yaml and by an unsynced live transition; failed closed: contained"]
+            ["conflict: \"eve\" changed in bindings.yaml and by an unsynced live transition; failed closed: contained"]
         );
         assert_eq!(m.sync.conflicts, r#"["eve"]"#);
         assert_eq!(
@@ -688,7 +722,7 @@ mod tests {
     fn every_event_has_its_reason_and_entries_are_escaped() {
         use maknae_config::{BindingEntry::*, MergeEvent::*, ResolvedBy::RootEdit};
         assert_eq!(event_reason(&Conflict { entry: Name("a,b\u{1b}".into()), contained: true }),
-            "conflict: a\\,b\\u{1b} changed in bindings.yaml and by an unsynced live transition; failed closed: contained");
+            "conflict: \"a,b\\u{1b}\" changed in bindings.yaml and by an unsynced live transition; failed closed: contained");
         assert_eq!(event_reason(&Conflict { entry: Uid(7), contained: false }),
             "conflict: uid:7 changed in bindings.yaml and by an unsynced live transition; failed closed: unbound");
         assert_eq!(
@@ -703,19 +737,24 @@ mod tests {
                 entry: Name("x\n".into()),
                 by: ResolvedBy::Sync
             }),
-            "conflict resolved: x\\n: bindings.yaml holds the fail-closed value"
+            "conflict resolved: \"x\\n\": bindings.yaml holds the fail-closed value"
         );
         assert_eq!(
             event_reason(&Resolved {
-                entry: Name("a,b".into()),
+                entry: Name("\u{d55c},b".into()),
                 by: ResolvedBy::LiveEdit
             }),
-            "conflict resolved: a\\,b: a live edit changed it"
+            "conflict resolved: \"\u{d55c},b\": a live edit changed it"
         );
         assert_eq!(event_reason(&Lost { missing: true }), "lost: bindings.yaml is missing; the enforced bindings stand; restore them with sudo maknae policy sync, or run sudo maknae reseed to return to principal-as-admin");
         assert_eq!(event_reason(&Lost { missing: false }), "lost: bindings.yaml has no bindings: key; the enforced bindings stand; restore them with sudo maknae policy sync, or run sudo maknae reseed to return to principal-as-admin");
         assert_eq!(
-            live_reason(&LiveEdit::Contain(Uid(7)), LiveInitiator::Kernel),
+            live_reason(
+                &LiveEdit::Contain(Uid(7)),
+                &[],
+                LiveInitiator::Kernel,
+                &LiveNote::none()
+            ),
             "live (kernel): contain uid:7"
         );
         assert_eq!(
@@ -724,9 +763,11 @@ mod tests {
                     name: "eve".into(),
                     role: BoundRole::User
                 },
-                LiveInitiator::Operator
+                &[],
+                LiveInitiator::Operator,
+                &LiveNote::none()
             ),
-            "live (operator): bind user eve"
+            "live (operator): bind user \"eve\""
         );
         for (role, word) in [(BoundRole::Admin, "admin"), (BoundRole::Guest, "guest")] {
             assert_eq!(
@@ -735,21 +776,176 @@ mod tests {
                         name: "a,b".into(),
                         role
                     },
-                    LiveInitiator::Kernel
+                    &[],
+                    LiveInitiator::Kernel,
+                    &LiveNote::none()
                 ),
-                format!("live (kernel): bind {word} a\\,b")
+                format!("live (kernel): bind {word} \"a,b\"")
             );
         }
         assert_eq!(
             live_reason(
-                &LiveEdit::Release(Name("e\u{7f}".into())),
-                LiveInitiator::Operator
+                &LiveEdit::ReleaseUid {
+                    uid: 7,
+                    names: Default::default()
+                },
+                &[],
+                LiveInitiator::Operator,
+                &LiveNote::none()
             ),
-            "live (operator): release e\\u{7f}"
+            "live (operator): release uid:7"
         );
         assert_eq!(
-            live_reason(&LiveEdit::Unbind("eve,x".into()), LiveInitiator::Kernel),
-            "live (kernel): unbind eve\\,x"
+            live_reason(
+                &LiveEdit::Unbind("eve,x".into()),
+                &[],
+                LiveInitiator::Kernel,
+                &LiveNote::none()
+            ),
+            "live (kernel): unbind \"eve,x\""
+        );
+    }
+
+    #[test]
+    fn the_live_record_carries_the_target_requester_and_reason() {
+        use BindingEntry::{Name, Uid};
+        let note = LiveNote {
+            requester: Some((501, 42)),
+            reason: Some("lost clearance, see IR-4"),
+        };
+        assert_eq!(live_reason(&LiveEdit::Contain(Uid(1003)), &[], LiveInitiator::Operator, &note),
+            "live (operator): contain uid:1003; requested by uid 501 in session 42; reason \"lost clearance, see IR-4\"");
+        let hangul = LiveNote {
+            requester: None,
+            reason: Some("\u{d1a0}\u{d070} \u{d0c8}\u{cde8} \"x\" \\"),
+        };
+        assert_eq!(live_reason(&LiveEdit::Contain(Uid(1003)), &[], LiveInitiator::Kernel, &hangul),
+            "live (kernel): contain uid:1003; reason \"\u{d1a0}\u{d070} \u{d0c8}\u{cde8} \\\"x\\\" \\\\\"", "readable Hangul; only quote and backslash escaped");
+        let k = LiveNote {
+            requester: None,
+            reason: Some("r"),
+        };
+        assert_eq!(
+            live_reason(
+                &LiveEdit::Contain(Uid(1003)),
+                &[],
+                LiveInitiator::Kernel,
+                &k
+            ),
+            "live (kernel): contain uid:1003; reason \"r\""
+        );
+        let rel = LiveEdit::ReleaseUid {
+            uid: 1003,
+            names: ["mallory".to_string()].into(),
+        };
+        let n = LiveNote {
+            requester: Some((501, 43)),
+            reason: None,
+        };
+        assert_eq!(
+            live_reason(&rel, &[Uid(1003), Name("mallory".into())], LiveInitiator::Operator, &n),
+            "live (operator): release uid:1003 (uid:1003, \"mallory\"); requested by uid 501 in session 43"
+        );
+        assert_eq!(
+            live_reason(&rel, &[Name("mallory".into())], LiveInitiator::Operator, &n),
+            "live (operator): release uid:1003 (\"mallory\"); requested by uid 501 in session 43"
+        );
+        assert_eq!(
+            live_reason(&rel, &[Uid(1003)], LiveInitiator::Operator, &n),
+            "live (operator): release uid:1003; requested by uid 501 in session 43"
+        );
+        let shown_names = LiveEdit::ReleaseUid {
+            uid: 7,
+            names: ["a,b".to_string(), "mal".into()].into(),
+        };
+        assert_eq!(
+            live_reason(
+                &shown_names,
+                &[
+                    BindingEntry::Uid(7),
+                    BindingEntry::Name("a,b".into()),
+                    BindingEntry::Name("mal".into())
+                ],
+                LiveInitiator::Operator,
+                &LiveNote::none()
+            ),
+            "live (operator): release uid:7 (uid:7, \"a,b\", \"mal\")"
+        );
+    }
+
+    #[test]
+    fn a_release_removes_only_the_claimants_it_unbinds_the_uid_first() {
+        use BindingEntry::{Name, Uid};
+        let section = |y: &str| {
+            Section::of(
+                &maknae_config::parse_bindings(&format!("schema_version: 1\nbindings:\n{y}"))
+                    .unwrap(),
+            )
+        };
+        let before = section(
+            "  admin: [\"root\"]\n  adversary:\n    - \"mallory\"\n    - uid: 7\n    - \"eve\"\n",
+        );
+        let after = section("  admin: [\"root\"]\n  adversary:\n    - \"eve\"\n");
+        let rel = LiveEdit::ReleaseUid {
+            uid: 7,
+            names: ["mallory".to_string(), "ghost".into(), "root".into()].into(),
+        };
+        assert_eq!(
+            removed(&rel, &before, &after),
+            [Uid(7), Name("mallory".into())]
+        );
+        let by_name = section("  admin: [\"root\"]\n  adversary:\n    - \"mallory\"\n");
+        assert_eq!(
+            removed(&rel, &by_name, &section("  admin: [\"root\"]\n")),
+            [Name("mallory".into())]
+        );
+        assert!(removed(&LiveEdit::Contain(Uid(7)), &before, &after).is_empty());
+    }
+
+    #[test]
+    fn a_name_in_a_record_is_quoted_so_it_cannot_forge_a_clause() {
+        use BindingEntry::{Name, Uid};
+        let forged = "x; requested by uid 0 in session 1; reason \"y\"";
+        let rel = LiveEdit::ReleaseUid {
+            uid: 7,
+            names: [forged.to_string()].into(),
+        };
+        assert_eq!(
+            live_reason(&rel, &[Uid(7), Name(forged.into())], LiveInitiator::Operator, &LiveNote::none()),
+            "live (operator): release uid:7 (uid:7, \"x; requested by uid 0 in session 1; reason \\\"y\\\"\")"
+        );
+        for (edit, want) in [
+            (LiveEdit::Contain(Name(forged.into())), "contain"),
+            (LiveEdit::Unbind(forged.into()), "unbind"),
+            (
+                LiveEdit::Bind {
+                    name: forged.into(),
+                    role: BoundRole::User,
+                },
+                "bind user",
+            ),
+        ] {
+            assert_eq!(
+                live_reason(&edit, &[], LiveInitiator::Kernel, &LiveNote::none()),
+                format!("live (kernel): {want} \"x; requested by uid 0 in session 1; reason \\\"y\\\"\"")
+            );
+        }
+        assert_eq!(
+            event_reason(&MergeEvent::Resolved {
+                entry: Name("x: a live edit changed it".into()),
+                by: ResolvedBy::Sync
+            }),
+            "conflict resolved: \"x: a live edit changed it\": bindings.yaml holds the fail-closed value"
+        );
+        assert_eq!(
+            live_reason(
+                &LiveEdit::Contain(Uid(7)),
+                &[],
+                LiveInitiator::Kernel,
+                &LiveNote::none()
+            ),
+            "live (kernel): contain uid:7",
+            "a uid entry is not a name"
         );
     }
 

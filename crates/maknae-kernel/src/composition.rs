@@ -53,6 +53,12 @@ pub struct Composition<B: Baseline> {
     live: Arc<crate::live::LiveConfig>,
     #[cfg(test)]
     pub(crate) panic_on_install: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    pub(crate) candidate_decisions: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    pub(crate) candidate_threads: std::sync::Mutex<Vec<std::thread::ThreadId>>,
+    #[cfg(test)]
+    pub(crate) candidate_requests: std::sync::Mutex<Vec<Request>>,
 }
 
 impl<B: Baseline> Composition<B> {
@@ -63,6 +69,12 @@ impl<B: Baseline> Composition<B> {
             live: Arc::new(crate::live::LiveConfig::new(Default::default(), None)),
             #[cfg(test)]
             panic_on_install: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            candidate_decisions: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            candidate_threads: std::sync::Mutex::default(),
+            #[cfg(test)]
+            candidate_requests: std::sync::Mutex::default(),
         }
     }
 
@@ -144,9 +156,37 @@ impl<B: Baseline> Composition<B> {
         self.baseline.live_turn().share()
     }
 
+    /// Decides `reqs` on `candidate` with the installed principal, through both operands.
+    /// Called only under the reload turn, which keeps that principal installed.
+    pub(crate) fn decide_candidate_all(
+        &self,
+        candidate: &maknae_authz_basic::snapshot::Snapshot,
+        reqs: &[Request],
+    ) -> Vec<Decided> {
+        #[cfg(test)]
+        self.candidate_decisions
+            .fetch_add(reqs.len(), std::sync::atomic::Ordering::SeqCst);
+        #[cfg(test)]
+        self.candidate_threads
+            .lock()
+            .unwrap()
+            .extend(reqs.iter().map(|_| std::thread::current().id()));
+        #[cfg(test)]
+        self.candidate_requests
+            .lock()
+            .unwrap()
+            .extend(reqs.iter().cloned());
+        let base = maknae_authz_basic::Candidate::new(candidate, self.baseline.principal());
+        compose_decide_cited_all(&self.operands_with(&base), reqs)
+    }
+
     /// Baseline FIRST — see the module doc.
     fn operands(&self) -> [&dyn Authorizer; 2] {
-        [&self.baseline, &self.ceiling]
+        self.operands_with(&self.baseline)
+    }
+
+    fn operands_with<'a>(&'a self, base: &'a dyn Authorizer) -> [&'a dyn Authorizer; 2] {
+        [base, &self.ceiling]
     }
 }
 
@@ -400,16 +440,21 @@ mod tests {
         };
         let batch = {
             let (c, home) = (c.clone(), g.0.clone());
+            let (tx, rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
-                c.decide_cited_all(&[permitted_read(&home), permitted_read(&home)])
-            })
+                let _ =
+                    tx.send(c.decide_cited_all(&[permitted_read(&home), permitted_read(&home)]));
+            });
+            rx
         };
         assert!(arrives(), "the batch never reached evaluation");
         c.baseline().install(next.clone());
         releases();
         assert!(arrives(), "the batch stopped after one evaluation");
         releases();
-        let all = batch.join().unwrap();
+        let all = batch
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the batch never finished");
         assert_eq!(all.len(), 2);
         for d in all {
             assert!(matches!(d.verdict, Verdict::Permit { .. }), "{d:?}");
@@ -417,11 +462,17 @@ mod tests {
         assert!(std::sync::Arc::ptr_eq(&c.baseline().snapshot(), &next));
         let probe = {
             let (c, home) = (c.clone(), g.0.clone());
-            std::thread::spawn(move || c.decide(&permitted_read(&home)))
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(c.decide(&permitted_read(&home)));
+            });
+            rx
         };
         assert!(arrives(), "the probe never reached evaluation");
         releases();
-        let probed = probe.join().unwrap();
+        let probed = probe
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the probe never finished");
         assert!(matches!(probed, Verdict::Deny { .. }), "{probed:?}");
     }
 
@@ -749,5 +800,112 @@ mod tests {
         assert!(alone.is_some(), "the hermetic baseline enumerates");
         let c = Composition::new(basic, ceiling(secret()));
         assert_eq!(c.subjects(), alone);
+    }
+
+    #[test]
+    fn a_candidate_is_decided_through_both_operands() {
+        let (_g, basic) = fixture(
+            "cand",
+            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nroles:\n  admin:\n    allow: [\"admin.release\"]\n",
+            Some(ADMIN_ROOT),
+        );
+        let c = Composition::new(basic, ceiling(Ceiling::baseline_for(US)));
+        let snap = c.baseline().snapshot();
+        let got =
+            c.decide_candidate_all(&snap, &[request("admin.release"), request("admin.contain")]);
+        assert!(matches!(got[0].verdict, Verdict::Permit { .. }));
+        assert!(!matches!(got[1].verdict, Verdict::Permit { .. }));
+    }
+
+    #[test]
+    fn a_candidate_decides_exactly_as_the_installed_composition() {
+        let (g, basic) = fixture("cand-same", READ_POLICY, None);
+        let c = Composition::new(basic, ceiling(secret()));
+        let batch = [
+            permitted_read(&g.0),
+            permitted_read_marked(&g.0, Some("TOP SECRET")),
+            request("admin.status"),
+            crate::handler::build_kernel_request("kernel.contain", 0),
+        ];
+        let installed = c.decide_cited_all(&batch);
+        assert!(matches!(installed[0].verdict, Verdict::Permit { .. }));
+        assert!(
+            matches!(installed[1].verdict, Verdict::Deny { ref reason } if reason.starts_with("ceiling: ")),
+            "{installed:?}"
+        );
+        assert!(matches!(installed[3].verdict, Verdict::Permit { .. }));
+        let before = c
+            .candidate_decisions
+            .load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            c.decide_candidate_all(&c.baseline().snapshot(), &batch),
+            installed
+        );
+        assert_eq!(
+            c.candidate_decisions
+                .load(std::sync::atomic::Ordering::SeqCst)
+                - before,
+            batch.len()
+        );
+    }
+
+    #[test]
+    fn a_candidate_pairs_its_snapshot_with_the_installed_principal() {
+        let (g, basic) = fixture("cand-principal", READ_POLICY, None);
+        let c = Composition::new(basic, ceiling(secret()));
+        let snap = c.baseline().snapshot();
+        let read = [permitted_read(&g.0)];
+        assert!(matches!(
+            c.decide_candidate_all(&snap, &read)[0].verdict,
+            Verdict::Permit { .. }
+        ));
+        install(&c, enrolled(other_uid())).unwrap();
+        assert!(!matches!(
+            c.decide_candidate_all(&snap, &read)[0].verdict,
+            Verdict::Permit { .. }
+        ));
+    }
+
+    /// The ceiling abstains on `kernel.*` (control plane: no content crosses), so
+    /// the kernel's Permit is the baseline's alone, and any operand's Deny still wins.
+    #[test]
+    fn the_kernels_permit_is_the_baselines_and_a_deny_still_overrides_it() {
+        struct Refuses;
+        impl Authorizer for Refuses {
+            fn decide_cited_all(&self, reqs: &[Request]) -> Vec<Decided> {
+                maknae_security::decide_each_cited(self, reqs)
+            }
+            fn decide(&self, _: &Request) -> Verdict {
+                Verdict::Deny {
+                    reason: "refuses".into(),
+                }
+            }
+        }
+        let (_g, basic) = fixture("kernel-fold", &status_policy(), Some(ADMIN_ROOT));
+        let c = Composition::new(basic, ceiling(Ceiling::baseline_for(US)));
+        let mut marked = crate::handler::build_kernel_request("kernel.contain", 0);
+        marked.resource.0.insert(
+            maknae_security::RESOURCE_CLASSIFICATION,
+            AttrValue::Str("TOP SECRET".into()),
+        );
+        assert_eq!(
+            c.ceiling().decide(&marked),
+            Verdict::NotApplicable { note: None }
+        );
+        assert!(matches!(c.decide(&marked), Verdict::Permit { .. }));
+        let mut claimed = request("kernel.contain");
+        assert!(!matches!(c.decide(&claimed), Verdict::Permit { .. }));
+        claimed.subject.0.insert(
+            maknae_security::SUBJECT_INITIATOR,
+            AttrValue::Str("root".into()),
+        );
+        assert!(!matches!(c.decide(&claimed), Verdict::Permit { .. }));
+        let snap = c.baseline().snapshot();
+        let base = maknae_authz_basic::Candidate::new(&snap, c.baseline().principal());
+        let ops = c.operands_with(&base);
+        assert!(matches!(
+            compose_decide_cited(&[ops[0], ops[1], &Refuses], &marked).verdict,
+            Verdict::Deny { ref reason } if reason == "refuses"
+        ));
     }
 }
