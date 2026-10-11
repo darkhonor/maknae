@@ -1118,7 +1118,7 @@ sudo jq -c 'select(.action=="graph.sync" and (.outcome.reason|startswith("live (
 sudo jq -c 'select(.action=="kernel.contain" or .action=="admin.contain" or .action=="admin.release")' /var/log/maknae/audit.jsonl | tail -n 20
 ```
 
-The live-edit record reads `live (operator): contain uid:4242; requested by uid 501 in session 7; reason "…"` (`live (kernel)` for the kernel, without a requester). A refused or unchanged request writes a corrective record such as `contain refused: last-releaser: …` or `release unchanged: uid 4242 is not contained`. A name in these records is double-quoted and escaped; a uid is `uid:<n>`.
+The live-edit record reads `live (operator): contain uid:4242; requested by uid 501 in session 7; reason "…"` (`live (kernel)` for the kernel, without a requester). A refused or unchanged request writes a corrective record such as `contain refused: last-releaser: …` or `release unchanged: uid 4242 is not contained`. A name and the reason in these records are double-quoted, with `\`, `"` and control characters escaped and other text, Hangul included, as written; a uid is `uid:<n>`.
 
 ### Contain a subject by editing bindings.yaml
 
@@ -1305,7 +1305,7 @@ Every merge and sync event is an audit record with `action:"graph.sync"`. An ent
 | A load that finds a conflict | `permit` | `syncing` | `conflict: <entry> changed in bindings.yaml and by an unsynced live transition; failed closed: contained` (or `unbound`) |
 | A load that clears a conflict | `permit` | `syncing` | `conflict resolved: <entry>: bindings.yaml changed it again`, or `…: bindings.yaml holds the fail-closed value` |
 | A live edit that clears a conflict, written ahead after the live edit's own record | `permit` | `syncing` | `conflict resolved: <entry>: a live edit changed it` |
-| A live edit, written ahead | `permit` | `syncing` | `live (<operator\|kernel>): contain <entry>`, `release uid:<n> (uid:<n>, "<name>", …)` listing every claimant it removed, `bind <role> <name>` or `unbind <name>`; a name is escaped and in double quotes, like an entry. An operator's record continues `; requested by uid <n> in session <s>` and, for a contain, `; reason "…"` |
+| A live edit, written ahead | `permit` | `syncing` | `live (<operator\|kernel>): contain <entry>`, `release uid:<n> (uid:<n>, "<name>", …)` listing every claimant it removed, `bind <role> <name>` or `unbind <name>`; a name is in double quotes, with `\`, `"` and control characters escaped, like an entry. An operator's record continues `; requested by uid <n> in session <s>` and, for a contain, `; reason "…"` |
 | A live edit, applied | `permit` | `live-applied` | `live applied: revision <n>`, followed by `; store not durable: <cause>` and `; checkpoint append failed: <cause>` when those happened; the record carries `policy_sha256` |
 | `bindings.yaml` lost | `deny`, posture `unavailable` | none | `lost: bindings.yaml is missing; the enforced bindings stand; restore them with sudo maknae policy sync, or run sudo maknae reseed to return to principal-as-admin` (or `has no bindings: key` for `is missing`) |
 | The mirror not published | `deny`, posture `unavailable` | none | `mirror render failed: <cause>; the transition at revision <n> stands; the stale mirror was removed` (or `; the stale mirror could not be removed: <cause>`) |

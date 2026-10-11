@@ -336,9 +336,9 @@ pub(crate) fn normalise_operands(verb: &mut Verb) -> Result<(), (&'static str, O
     Ok(())
 }
 
-/// `r` in double quotes with only `\` and `"` escaped; for operand-rule-validated text.
+/// `r` in double quotes, `\`, `"` and control characters escaped; printable text kept as is.
 pub(crate) fn quoted(r: &str) -> String {
-    format!("\"{}\"", r.replace('\\', "\\\\").replace('"', "\\\""))
+    format!("{r:?}")
 }
 
 /// The verb whose action is `admin.release`; its operand never reaches the PDP.
@@ -906,8 +906,10 @@ mod tests {
     }
 
     #[test]
-    fn quoted_escapes_only_backslash_and_quote() {
+    fn quoted_escapes_backslash_quote_and_controls_and_keeps_printable_text() {
         assert_eq!(quoted("plain"), "\"plain\"");
+        assert_eq!(quoted("a\nb\t\u{1b}"), "\"a\\nb\\t\\u{1b}\"");
+        assert_eq!(quoted("mal,x'"), "\"mal,x'\"");
         assert_eq!(quoted("a\\\"b"), "\"a\\\\\\\"b\"");
         assert_eq!(quoted("\\\""), "\"\\\\\\\"\"");
         assert_eq!(

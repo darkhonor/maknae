@@ -1,5 +1,5 @@
-use crate::containment::LiveNote;
-use maknae_authz_basic::{shown, AuthzBasicError, PolicySource};
+use crate::containment::{quoted, LiveNote};
+use maknae_authz_basic::{AuthzBasicError, PolicySource};
 use maknae_config::{
     BindingEntry, Bindings, BoundRole, LiveEdit, MergeEvent, ResolvedBy, Section, SyncKind,
 };
@@ -129,13 +129,9 @@ pub fn stored_sections(s: &SyncBase) -> Result<(Section, Section, BTreeSet<Bindi
 
 fn entry(e: &BindingEntry) -> String {
     match e {
-        BindingEntry::Name(n) => named(n),
+        BindingEntry::Name(n) => quoted(n),
         BindingEntry::Uid(_) => e.render(),
     }
-}
-
-pub(crate) fn named(n: &str) -> String {
-    format!("\"{}\"", shown(n))
 }
 
 pub fn event_reason(e: &MergeEvent) -> String {
@@ -184,9 +180,9 @@ pub(crate) fn live_reason(
                 BoundRole::User => "user",
                 BoundRole::Guest => "guest",
             };
-            format!("bind {role} {}", named(name))
+            format!("bind {role} {}", quoted(name))
         }
-        LiveEdit::Unbind(name) => format!("unbind {}", named(name)),
+        LiveEdit::Unbind(name) => format!("unbind {}", quoted(name)),
     };
     let who = match who {
         LiveInitiator::Operator => "operator",
@@ -197,7 +193,7 @@ pub(crate) fn live_reason(
         out.push_str(&format!("; requested by uid {uid} in session {session}"));
     }
     if let Some(r) = note.reason {
-        out.push_str(&format!("; reason {}", crate::containment::quoted(r)));
+        out.push_str(&format!("; reason {}", quoted(r)));
     }
     out
 }
@@ -726,7 +722,7 @@ mod tests {
     fn every_event_has_its_reason_and_entries_are_escaped() {
         use maknae_config::{BindingEntry::*, MergeEvent::*, ResolvedBy::RootEdit};
         assert_eq!(event_reason(&Conflict { entry: Name("a,b\u{1b}".into()), contained: true }),
-            "conflict: \"a\\,b\\u{1b}\" changed in bindings.yaml and by an unsynced live transition; failed closed: contained");
+            "conflict: \"a,b\\u{1b}\" changed in bindings.yaml and by an unsynced live transition; failed closed: contained");
         assert_eq!(event_reason(&Conflict { entry: Uid(7), contained: false }),
             "conflict: uid:7 changed in bindings.yaml and by an unsynced live transition; failed closed: unbound");
         assert_eq!(
@@ -745,10 +741,10 @@ mod tests {
         );
         assert_eq!(
             event_reason(&Resolved {
-                entry: Name("a,b".into()),
+                entry: Name("\u{d55c},b".into()),
                 by: ResolvedBy::LiveEdit
             }),
-            "conflict resolved: \"a\\,b\": a live edit changed it"
+            "conflict resolved: \"\u{d55c},b\": a live edit changed it"
         );
         assert_eq!(event_reason(&Lost { missing: true }), "lost: bindings.yaml is missing; the enforced bindings stand; restore them with sudo maknae policy sync, or run sudo maknae reseed to return to principal-as-admin");
         assert_eq!(event_reason(&Lost { missing: false }), "lost: bindings.yaml has no bindings: key; the enforced bindings stand; restore them with sudo maknae policy sync, or run sudo maknae reseed to return to principal-as-admin");
@@ -784,7 +780,7 @@ mod tests {
                     LiveInitiator::Kernel,
                     &LiveNote::none()
                 ),
-                format!("live (kernel): bind {word} \"a\\,b\"")
+                format!("live (kernel): bind {word} \"a,b\"")
             );
         }
         assert_eq!(
@@ -806,7 +802,7 @@ mod tests {
                 LiveInitiator::Kernel,
                 &LiveNote::none()
             ),
-            "live (kernel): unbind \"eve\\,x\""
+            "live (kernel): unbind \"eve,x\""
         );
     }
 
@@ -873,7 +869,7 @@ mod tests {
                 LiveInitiator::Operator,
                 &LiveNote::none()
             ),
-            "live (operator): release uid:7 (uid:7, \"a\\,b\", \"mal\")"
+            "live (operator): release uid:7 (uid:7, \"a,b\", \"mal\")"
         );
     }
 

@@ -5256,7 +5256,7 @@ where
         name: &str,
     ) -> Result<u32, (maknae_proto::ContainmentOutcome, String)> {
         use maknae_proto::ContainmentOutcome as O;
-        let shown = crate::sync::named(name);
+        let shown = crate::containment::quoted(name);
         let breaker = Arc::clone(&self.lookup_breaker);
         let admission = { breaker.lock().await.begin_attempt_at(Instant::now()) };
         match admission {
