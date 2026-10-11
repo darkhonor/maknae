@@ -427,7 +427,8 @@ pub struct ContentMeasure {
 /// *(Corrected 2026-09-22, #344: the rider list above reads as exhaustive and
 /// is not, and two other sites had each grown their own partial copy of it.
 /// The RULE, stated as a rule: the digest covers exactly the `Text` bytes and
-/// every proposed tool call's `arguments`, in order. Everything else on the
+/// every proposed tool call's `arguments` and each assistant turn's reasoning,
+/// in order. Everything else on the
 /// frame and on the wire leaves the process undigested — among them the tool
 /// call's `name` and `call_id`, a `Tool` turn's `call_id`, the message roles
 /// and the tool call's `"function"` type, the frame's `model`, and the
@@ -448,13 +449,17 @@ pub fn content_measure(turns: &[Turn]) -> ContentMeasure {
         h.update(bytes);
     };
     for t in turns {
-        let (content, tool_calls): (&[ContentBlock], &[maknae_proto::ProposedToolCall]) = match t {
-            Turn::User { content } | Turn::Tool { content, .. } => (content, &[]),
+        let (content, tool_calls, reasoning): (
+            &[ContentBlock],
+            &[maknae_proto::ProposedToolCall],
+            Option<&maknae_proto::SecretText>,
+        ) = match t {
+            Turn::User { content } | Turn::Tool { content, .. } => (content, &[], None),
             Turn::Assistant {
-                reasoning: _,
                 content,
                 tool_calls,
-            } => (content, tool_calls),
+                reasoning,
+            } => (content, tool_calls, reasoning.as_ref()),
         };
         for b in content {
             if let ContentBlock::Text { text } = b {
@@ -463,6 +468,9 @@ pub fn content_measure(turns: &[Turn]) -> ContentMeasure {
         }
         for c in tool_calls {
             feed(c.arguments.0.as_bytes());
+        }
+        if let Some(r) = reasoning {
+            feed(r.0.as_bytes());
         }
     }
     let mut digest32 = h.finish_hex();
@@ -482,6 +490,8 @@ pub enum ReplyRefusal {
     /// argument payload. Distinct from `NonText`, which is about `blocks`: a
     /// record must never call a bad tool call "non-text" (#240a D1-A).
     ToolCallUnacceptable,
+    /// Reasoning over `MAX_REASONING_BYTES`; the deputy drops it, so this is a deputy defect.
+    ReasoningUnacceptable,
 }
 
 /// The reply-direction admission. `admitted_turns` is the prompt direction
@@ -510,6 +520,9 @@ pub fn admitted_reply(reply: &PromptReply) -> Result<(), ReplyRefusal> {
         .all(maknae_proto::proposed_tool_call_is_acceptable)
     {
         return Err(ReplyRefusal::ToolCallUnacceptable);
+    }
+    if !maknae_proto::reasoning_is_acceptable(&reply.reasoning) {
+        return Err(ReplyRefusal::ReasoningUnacceptable);
     }
     Ok(())
 }
@@ -644,6 +657,17 @@ pub fn outcome_for(
             "reply refused: tool call",
             "unauthorized",
         ),
+        SendOutcome::LandedUndelivered {
+            reply_length,
+            refusal: ReplyRefusal::ReasoningUnacceptable,
+            ..
+        } => (
+            EgressStatus::LandedUndelivered,
+            Some(reply_length),
+            "permit",
+            "reply refused: reasoning",
+            "unauthorized",
+        ),
     };
     r.outcome.result = result.into();
     r.outcome.reason = reason.into();
@@ -668,6 +692,9 @@ pub const REPLY_BLOCK_ENVELOPE: usize = 32;
 /// Per-tool-call CBOR overhead (map header + three key strings + three value
 /// headers): generous, and pinned by the widest-legal-reply no-grow test.
 pub const TOOL_CALL_ENVELOPE: usize = 64;
+
+/// CBOR overhead for a reply's reasoning: its key and a text-string header.
+pub const REASONING_ENVELOPE: usize = 32;
 
 /// The reply's TEXT length: the audit `reply_length`.
 pub fn reply_text_length(reply: &PromptReply) -> u64 {
@@ -704,7 +731,20 @@ pub fn reply_capacity(reply: &PromptReply) -> usize {
             .map(|c| c.name.len() + c.call_id.len() + c.arguments.0.len() + TOOL_CALL_ENVELOPE)
             .sum::<usize>()
         + if reply.usage.is_some() { USAGE_ENVELOPE } else { 0 }
+        + reply
+            .reasoning
+            .as_ref()
+            .map_or(0, |r| r.0.len() + REASONING_ENVELOPE)
         + crate::handler::FRAME_ENVELOPE_MARGIN as usize
+}
+
+/// Fit an admitted reply under `cap`, dropping its reasoning if that alone is the excess (#512 R6).
+pub fn shed_reasoning_to_fit(reply: &mut PromptReply, cap: usize) -> bool {
+    if reply_capacity(reply) <= cap {
+        return true;
+    }
+    reply.reasoning = None;
+    reply_capacity(reply) <= cap
 }
 
 /// Is a length the deputy DECLARED small enough to allocate for?
@@ -2047,6 +2087,18 @@ mod tests {
                 "unauthorized",
                 Some(3),
             ),
+            (
+                SendOutcome::LandedUndelivered {
+                    reply_length: 3,
+                    refusal: ReplyRefusal::ReasoningUnacceptable,
+                    usage: None,
+                },
+                EgressStatus::LandedUndelivered,
+                "permit",
+                "reply refused: reasoning",
+                "unauthorized",
+                Some(3),
+            ),
         ] {
             let o = outcome_for(&i, 9, "2026-09-08T00:00:00Z".into(), outcome);
             assert_eq!((o.seq, o.ts.as_str()), (9, "2026-09-08T00:00:00Z"));
@@ -2082,6 +2134,140 @@ mod tests {
         assert_eq!(
             format!("{:?}", req()),
             r#"EgressRequest { destination: "provider:x", endpoint: "https://api.example.test/v1", model: "m", key_vault_path: "<omitted>", key_field: "<omitted>", sealed_key: "<omitted>", reasoning_effort: None, output_tokens: None, output_tokens_field: None, conversation: "c", turns: <1 turns> }"#
+        );
+    }
+
+    fn secret(s: &str) -> maknae_proto::SecretText {
+        maknae_proto::SecretText(maknae_io::Zeroizing::new(s.into()))
+    }
+
+    fn encodes_without_growing(reply: maknae_proto::PromptReply, cap: usize) {
+        let r = maknae_proto::Response {
+            protocol_version: maknae_proto::PROTOCOL_VERSION,
+            result: maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(reply)),
+        };
+        let buf = maknae_proto::encode_response_zeroizing(&r, cap).unwrap();
+        assert_eq!(buf.capacity(), cap, "encode grew the buffer");
+        assert!(buf.len() <= cap, "encoded {} > capacity {cap}", buf.len());
+    }
+
+    #[test]
+    fn a_reply_carrying_over_bound_reasoning_is_refused_as_reasoning() {
+        let mut reply = maknae_proto::PromptReply {
+            blocks: vec![text("a")],
+            tool_calls: vec![],
+            usage: None,
+            reasoning: Some(secret(&"r".repeat(maknae_proto::MAX_REASONING_BYTES))),
+        };
+        assert_eq!(admitted_reply(&reply), Ok(()));
+        reply.reasoning = Some(secret(&"r".repeat(maknae_proto::MAX_REASONING_BYTES + 1)));
+        assert_eq!(
+            admitted_reply(&reply),
+            Err(ReplyRefusal::ReasoningUnacceptable)
+        );
+    }
+
+    #[test]
+    fn a_widest_legal_tool_call_reply_with_widest_reasoning_encodes_without_growing() {
+        let reply = maknae_proto::PromptReply {
+            blocks: vec![],
+            tool_calls: vec![tc(maknae_proto::MAX_TOOL_CALL_ARGS_BYTES)],
+            usage: None,
+            reasoning: Some(secret(&"r".repeat(maknae_proto::MAX_REASONING_BYTES))),
+        };
+        let cap = reply_capacity(&reply);
+        assert_eq!(
+            cap, 123503,
+            "reply_capacity's arithmetic changed; recompute the oracle deliberately"
+        );
+        encodes_without_growing(reply, cap);
+    }
+
+    #[test]
+    fn reasoning_at_its_bound_with_a_minimal_answer_fits_the_smallest_reply_frame() {
+        let reply = maknae_proto::PromptReply {
+            blocks: vec![text("a")],
+            tool_calls: vec![],
+            usage: None,
+            reasoning: Some(secret(&"r".repeat(maknae_proto::MAX_REASONING_BYTES))),
+        };
+        let cap = reply_capacity(&reply);
+        assert!(cap <= maknae_config::PROMPT_MAX_BYTES_FLOOR, "{cap}");
+        encodes_without_growing(reply, cap);
+    }
+
+    #[test]
+    fn a_reply_over_the_cap_only_because_of_its_reasoning_is_delivered_without_it() {
+        let mut reply = maknae_proto::PromptReply {
+            blocks: vec![text(&"a".repeat(4096))],
+            tool_calls: vec![],
+            usage: None,
+            reasoning: Some(secret(&"r".repeat(maknae_proto::MAX_REASONING_BYTES))),
+        };
+        let cap = maknae_config::PROMPT_MAX_BYTES_FLOOR;
+        assert!(reply_capacity(&reply) > cap);
+        assert!(shed_reasoning_to_fit(&mut reply, cap));
+        assert_eq!(reply.reasoning, None);
+        assert_eq!(reply.blocks.len(), 1);
+        assert!(reply_capacity(&reply) <= cap);
+    }
+
+    #[test]
+    fn a_reply_that_fits_keeps_its_reasoning() {
+        let mut reply = maknae_proto::PromptReply {
+            blocks: vec![text("a")],
+            tool_calls: vec![],
+            usage: None,
+            reasoning: Some(secret("why")),
+        };
+        let cap = reply_capacity(&reply);
+        assert!(shed_reasoning_to_fit(&mut reply, cap));
+        assert_eq!(reply.reasoning, Some(secret("why")));
+    }
+
+    #[test]
+    fn a_reply_too_large_without_its_reasoning_does_not_fit() {
+        let mut reply = maknae_proto::PromptReply {
+            blocks: vec![text(&"a".repeat(70_000))],
+            tool_calls: vec![],
+            usage: None,
+            reasoning: Some(secret("why")),
+        };
+        assert!(!shed_reasoning_to_fit(
+            &mut reply,
+            maknae_config::PROMPT_MAX_BYTES_FLOOR
+        ));
+        let mut plain = maknae_proto::PromptReply {
+            reasoning: None,
+            ..reply.clone()
+        };
+        assert!(!shed_reasoning_to_fit(
+            &mut plain,
+            maknae_config::PROMPT_MAX_BYTES_FLOOR
+        ));
+    }
+
+    #[test]
+    fn content_measure_covers_assistant_reasoning_after_its_tool_arguments() {
+        let turns = [
+            Turn::User {
+                content: vec![text("ab")],
+            },
+            Turn::Assistant {
+                content: vec![],
+                tool_calls: vec![call("c1", "{\"p\":1}")],
+                reasoning: Some(secret("why")),
+            },
+            Turn::Tool {
+                call_id: "c1".into(),
+                content: vec![text("cd")],
+            },
+        ];
+        let m = content_measure(&turns);
+        assert_eq!(m.length, 14);
+        assert_eq!(
+            m.digest32,
+            &maknae_vault::sha256_hex(b"ab{\"p\":1}whycd")[..32]
         );
     }
 }

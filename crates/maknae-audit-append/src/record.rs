@@ -111,7 +111,8 @@ pub enum EgressStatus {
 /// *(Scoped 2026-09-22, #344: the rider list in the record above reads as
 /// exhaustive and is not — it was one of three partial copies. The RULE,
 /// stated as a rule: the digest covers exactly the `Text` bytes and every
-/// proposed tool call's `arguments`, in order, and everything else on the
+/// proposed tool call's `arguments` and each assistant turn's reasoning, in
+/// order, and everything else on the
 /// frame and on the wire rides undigested — among them the tool call's `name`
 /// and `call_id`, a `Tool` turn's `call_id`, the message roles and the tool
 /// call's `"function"` type, the frame's `model`, and the preamble and tool
@@ -123,8 +124,8 @@ pub enum EgressStatus {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EgressAudit {
     pub status: EgressStatus,
-    /// The bytes the digest covers, counted: text-block bytes plus tool-call
-    /// `arguments` bytes, across every turn. *Widened with the digest on
+    /// The bytes the digest covers, counted: text-block bytes, tool-call
+    /// `arguments` bytes and assistant reasoning bytes, across every turn. *Widened with the digest on
     /// 2026-09-22, #241 — it counted text blocks alone before.*
     pub content_length: u64,
     pub content_digest: String,

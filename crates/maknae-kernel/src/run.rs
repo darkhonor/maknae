@@ -2231,25 +2231,30 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                             },
                             None,
                         ),
-                        Ok(())
-                            if crate::egress::reply_capacity(&r.reply) > cfg.prompt_max_bytes =>
-                        {
-                            (
-                                crate::egress::SendOutcome::LandedUndelivered {
-                                    reply_length: n,
-                                    refusal: crate::egress::ReplyRefusal::Oversize,
-                                    usage: r.reply.usage,
-                                },
-                                None,
-                            )
+                        Ok(()) => {
+                            let mut reply = r.reply;
+                            if crate::egress::shed_reasoning_to_fit(
+                                &mut reply,
+                                cfg.prompt_max_bytes,
+                            ) {
+                                (
+                                    crate::egress::SendOutcome::Sent {
+                                        reply_length: n,
+                                        usage: reply.usage,
+                                    },
+                                    Some(reply),
+                                )
+                            } else {
+                                (
+                                    crate::egress::SendOutcome::LandedUndelivered {
+                                        reply_length: n,
+                                        refusal: crate::egress::ReplyRefusal::Oversize,
+                                        usage: reply.usage,
+                                    },
+                                    None,
+                                )
+                            }
                         }
-                        Ok(()) => (
-                            crate::egress::SendOutcome::Sent {
-                                reply_length: n,
-                                usage: r.reply.usage,
-                            },
-                            Some(r.reply),
-                        ),
                     }
                 }
                 Ok(Ok(Err(f))) => (crate::egress::outcome_for_failure(&f), None),

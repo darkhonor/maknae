@@ -160,11 +160,12 @@ pub async fn fulfil<O: KeyOpener>(
     //
     // The property, stated precisely (scoped 2026-09-22, #241 — this read
     // "trail == wire", the same overclaim the kernel struck at
-    // `content_measure`): the deputy sends every `Text` block and every
-    // `arguments` payload that `content_measure` digested, in order, with
+    // `content_measure`): the deputy sends every `Text` block, every
+    // `arguments` payload and every reasoning that `content_measure` digested, in order, with
     // nothing dropped. The rule on the other side, stated rather than
     // enumerated: the digest covers exactly the `Text` bytes and every
-    // proposed tool call's `arguments`, in order, and everything else on the
+    // proposed tool call's `arguments` and each assistant turn's reasoning, in
+    // order, and everything else on the
     // frame and on the wire rides alongside undigested — among them the tool
     // call's `name` and `call_id`, a `Tool` turn's `call_id`, the message
     // roles and the tool call's `"function"` type, the frame's `model`, and
