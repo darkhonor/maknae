@@ -154,7 +154,10 @@ fn main() {
                     rt.block_on(call::fulfil(
                         admitted,
                         &opener,
-                        call::CallBounds::default(),
+                        call::CallBounds {
+                            timeout: std::time::Duration::from_millis(bounds.call_timeout_ms),
+                            ..call::CallBounds::default()
+                        },
                         &mut |l| eprintln!("{l}"),
                     ))
                     .map_err(serve::serve_error)

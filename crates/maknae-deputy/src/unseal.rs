@@ -94,6 +94,7 @@ mod tests {
 
     fn bounds() -> EgressBounds {
         EgressBounds {
+            call_timeout_ms: maknae_config::DEFAULT_CALL_TIMEOUT_MS,
             kv_mount: "maknae-kv".into(),
             user_prefix: "maknae/users".into(),
             vault_addr: "https://vault.example:8200".into(),

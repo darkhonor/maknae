@@ -33,6 +33,11 @@ pub const EGRESS_BOUNDS_FILE: &str = "egress-bounds.yaml";
 /// Upper bound on the prefix. It reaches audit records and terminals.
 pub const MAX_USER_PREFIX_BYTES: usize = 256;
 
+/// The provider call timeout when `call_timeout_ms` is absent.
+pub const DEFAULT_CALL_TIMEOUT_MS: u64 = 120_000;
+const CALL_TIMEOUT_MS_RANGE: std::ops::RangeInclusive<i64> =
+    1_000..=crate::EGRESS_DEADLINE_MS_MAX as i64;
+
 /// What the deputy is allowed to do, and nothing more.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EgressBounds {
@@ -49,6 +54,8 @@ pub struct EgressBounds {
     /// two-coordinate-systems-required-to-match shape. The scheme is validated
     /// where the client is built (`maknae-vault`), not here — one validator.
     pub vault_addr: String,
+    /// How long the deputy waits for one provider answer.
+    pub call_timeout_ms: u64,
 }
 
 /// Is this a usable mount-relative Vault path fragment? `Err` names the reason,
@@ -193,7 +200,11 @@ pub fn bounds_from_document(v: &Value) -> Result<EgressBounds, ConfigError> {
     // and now raises the same error. It kept its own spelling until round-1
     // review pointed out that "one sentence for a wrong key, wherever it
     // appears" was false while these two sites survived.
-    crate::reject_unknown_keys(EGRESS_BOUNDS_FILE, m, &["user_prefix", "kv_mount", "vault"])?;
+    crate::reject_unknown_keys(
+        EGRESS_BOUNDS_FILE,
+        m,
+        &["user_prefix", "kv_mount", "vault", "call_timeout_ms"],
+    )?;
     let required = |name: &str| -> Result<String, ConfigError> {
         let Some((_, Value::Str(v))) = m.iter().find(|(k, _)| k == name) else {
             return Err(err(format!("'{name}' is required and must be a string")));
@@ -238,10 +249,23 @@ pub fn bounds_from_document(v: &Value) -> Result<EgressBounds, ConfigError> {
             "'vault.addr' exceeds {MAX_USER_PREFIX_BYTES} bytes"
         )));
     }
+    let call_timeout_ms = match m.iter().find(|(k, _)| k == "call_timeout_ms") {
+        None => DEFAULT_CALL_TIMEOUT_MS,
+        Some((_, Value::Int(n))) if CALL_TIMEOUT_MS_RANGE.contains(n) => *n as u64,
+        Some((_, Value::Int(n))) => {
+            return Err(err(format!(
+                "'call_timeout_ms' {n} out of range {}..={}",
+                CALL_TIMEOUT_MS_RANGE.start(),
+                CALL_TIMEOUT_MS_RANGE.end()
+            )))
+        }
+        Some(_) => return Err(err("'call_timeout_ms' must be an integer (milliseconds)")),
+    };
     Ok(EgressBounds {
         kv_mount,
         user_prefix,
         vault_addr: addr.clone(),
+        call_timeout_ms,
     })
 }
 
@@ -466,6 +490,7 @@ mod tests {
         assert_eq!(
             bounds_from_document(&doc2("maknae-kv", "maknae/providers")).unwrap(),
             EgressBounds {
+                call_timeout_ms: DEFAULT_CALL_TIMEOUT_MS,
                 kv_mount: "maknae-kv".into(),
                 user_prefix: "maknae/providers".into(),
                 vault_addr: "https://vault.example:8200".into(),
@@ -599,5 +624,47 @@ mod tests {
             }
             other => panic!("expected UnknownKey, got {other:?}"),
         }
+    }
+
+    fn with_call_timeout(v: Value) -> Value {
+        let Value::Map(mut m) = doc2("maknae-kv", "maknae/users") else {
+            unreachable!()
+        };
+        m.push(("call_timeout_ms".into(), v));
+        Value::Map(m)
+    }
+
+    #[test]
+    fn call_timeout_defaults_to_120_seconds_and_reads_its_range_edges() {
+        let d = bounds_from_document(&doc2("maknae-kv", "maknae/users")).unwrap();
+        assert_eq!(d.call_timeout_ms, DEFAULT_CALL_TIMEOUT_MS);
+        assert_eq!(DEFAULT_CALL_TIMEOUT_MS, 120_000);
+        for ok in [1_000, 200_000, 600_000] {
+            let b = bounds_from_document(&with_call_timeout(Value::Int(ok))).unwrap();
+            assert_eq!(b.call_timeout_ms, ok as u64);
+        }
+    }
+
+    #[test]
+    fn call_timeout_out_of_range_is_refused_as_out_of_range() {
+        for bad in [999, 600_001] {
+            let e = bounds_from_document(&with_call_timeout(Value::Int(bad)))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                e.contains(&format!(
+                    "'call_timeout_ms' {bad} out of range 1000..=600000"
+                )),
+                "{e}"
+            );
+        }
+    }
+
+    #[test]
+    fn call_timeout_that_is_not_an_integer_is_refused_as_such() {
+        let e = bounds_from_document(&with_call_timeout(Value::Str("120000".into())))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("'call_timeout_ms' must be an integer"), "{e}");
     }
 }

@@ -132,7 +132,8 @@ pub fn validate(
         let bounds = env
             .egress_bounds()
             .map_err(|e| environment(crate::boot_gate::classify_bounds_load_error(e)))?;
-        crate::boot_gate::egress_bounds_boot_gate(boot.providers(), Some(&bounds))
+        let deadline_ms = egress.deadline_ms;
+        crate::boot_gate::egress_bounds_boot_gate(boot.providers(), Some(&bounds), deadline_ms)
             .map_err(environment)?;
         match env.egress_account() {
             Ok(Some(_)) => {}

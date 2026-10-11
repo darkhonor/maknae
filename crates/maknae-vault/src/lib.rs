@@ -122,7 +122,7 @@ pub use user_login::{
     userpass_username_is_acceptable, Password, UserLogin, UserToken, MAX_PASSWORD_BYTES,
     MAX_USERNAME_BYTES,
 };
-pub use vault_api::VaultApi;
+pub use vault_api::{VaultApi, VAULT_API_TIMEOUT};
 pub use verify::{verify_plane_uri_san, VerifyError};
 pub use wrap::{
     aad_parts, kv_data_path, AadParts, KvDataPath, WrapExpectation, WrapLookup, WrappedSecret,

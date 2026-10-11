@@ -64,7 +64,7 @@ pub struct CallBounds {
 impl Default for CallBounds {
     fn default() -> Self {
         Self {
-            timeout: Duration::from_secs(120),
+            timeout: Duration::from_millis(maknae_config::DEFAULT_CALL_TIMEOUT_MS),
             max_body_bytes: 1024 * 1024,
         }
     }
@@ -382,6 +382,7 @@ mod tests {
 
     fn bounds() -> maknae_config::EgressBounds {
         maknae_config::EgressBounds {
+            call_timeout_ms: maknae_config::DEFAULT_CALL_TIMEOUT_MS,
             kv_mount: "maknae-kv".into(),
             user_prefix: "maknae/users".into(),
             vault_addr: "https://vault.example:8200".into(),

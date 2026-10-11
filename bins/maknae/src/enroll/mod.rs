@@ -3146,6 +3146,7 @@ mod tests {
         assert_eq!(
             bounds,
             maknae_config::EgressBounds {
+                call_timeout_ms: maknae_config::DEFAULT_CALL_TIMEOUT_MS,
                 kv_mount: "corp-kv".to_string(),
                 user_prefix: "corp/users".to_string(),
                 vault_addr: "https://v.example:8200".to_string(),

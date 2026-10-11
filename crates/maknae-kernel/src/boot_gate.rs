@@ -168,6 +168,7 @@ pub fn classify_bounds_load_error(e: maknae_config::ConfigError) -> EgressBounds
 pub fn egress_bounds_boot_gate(
     providers: &maknae_config::ProviderSet,
     bounds: Option<&maknae_config::EgressBounds>,
+    deadline_ms: u64,
 ) -> Result<(), EgressBoundsRefusal> {
     if providers.is_empty() {
         return Ok(());
@@ -194,6 +195,15 @@ pub fn egress_bounds_boot_gate(
     }
     if let Err(e) = maknae_vault::validate_vault_addr(&b.vault_addr) {
         return Err(EgressBoundsRefusal::Refused(format!("vault.addr: {e}")));
+    }
+    let vault_ms = maknae_vault::VAULT_API_TIMEOUT.as_millis() as u64;
+    let needed = 2 * vault_ms + b.call_timeout_ms + maknae_config::DEADLINE_MARGIN_MS;
+    if needed > deadline_ms {
+        return Err(EgressBoundsRefusal::Refused(format!(
+            "call_timeout_ms {} needs egress.deadline_ms of at least {needed} (two Vault calls of {vault_ms} ms and a {} ms margin), but deadline_ms {deadline_ms} is configured",
+            b.call_timeout_ms,
+            maknae_config::DEADLINE_MARGIN_MS
+        )));
     }
     Ok(())
 }
@@ -265,6 +275,7 @@ mod tests {
 
     fn bounds(user_prefix: &str) -> maknae_config::EgressBounds {
         maknae_config::EgressBounds {
+            call_timeout_ms: maknae_config::DEFAULT_CALL_TIMEOUT_MS,
             kv_mount: "maknae-kv".into(),
             user_prefix: user_prefix.into(),
             vault_addr: "https://vault.example:8200".into(),
@@ -274,9 +285,12 @@ mod tests {
     #[test]
     fn no_authorized_provider_needs_no_bounds() {
         let empty = maknae_config::ProviderSet::empty();
-        assert_eq!(super::egress_bounds_boot_gate(&empty, None), Ok(()));
         assert_eq!(
-            super::egress_bounds_boot_gate(&empty, Some(&bounds("/not a fragment"))),
+            super::egress_bounds_boot_gate(&empty, None, 280_000),
+            Ok(())
+        );
+        assert_eq!(
+            super::egress_bounds_boot_gate(&empty, Some(&bounds("/not a fragment")), 280_000),
             Ok(())
         );
     }
@@ -284,12 +298,12 @@ mod tests {
     #[test]
     fn an_authorized_set_with_sound_bounds_boots() {
         assert_eq!(
-            super::egress_bounds_boot_gate(&set(), Some(&bounds("maknae/users"))),
+            super::egress_bounds_boot_gate(&set(), Some(&bounds("maknae/users")), 280_000),
             Ok(())
         );
         let at = "u".repeat(maknae_config::MAX_USER_PREFIX_BYTES);
         assert_eq!(
-            super::egress_bounds_boot_gate(&set(), Some(&bounds(&at))),
+            super::egress_bounds_boot_gate(&set(), Some(&bounds(&at)), 280_000),
             Ok(())
         );
     }
@@ -307,7 +321,7 @@ mod tests {
             "maknae/üsers",
             "maknae/{users}",
         ] {
-            match super::egress_bounds_boot_gate(&set(), Some(&bounds(bad))) {
+            match super::egress_bounds_boot_gate(&set(), Some(&bounds(bad)), 280_000) {
                 Err(super::EgressBoundsRefusal::Refused(m)) => {
                     assert!(m.starts_with("user_prefix "), "{bad:?}: {m}")
                 }
@@ -315,7 +329,7 @@ mod tests {
             }
         }
         let over = "u".repeat(maknae_config::MAX_USER_PREFIX_BYTES + 1);
-        match super::egress_bounds_boot_gate(&set(), Some(&bounds(&over))) {
+        match super::egress_bounds_boot_gate(&set(), Some(&bounds(&over)), 280_000) {
             Err(super::EgressBoundsRefusal::Refused(m)) => assert!(m.contains("exceeds"), "{m}"),
             other => panic!("expected an over-length refusal, got {other:?}"),
         }
@@ -323,7 +337,7 @@ mod tests {
 
     #[test]
     fn an_authorized_set_with_undeclared_bounds_refuses_to_boot() {
-        match super::egress_bounds_boot_gate(&set(), None) {
+        match super::egress_bounds_boot_gate(&set(), None, 280_000) {
             Err(super::EgressBoundsRefusal::Undeclared(m)) => {
                 assert!(m.contains(maknae_config::EGRESS_BOUNDS_FILE), "{m}")
             }
@@ -676,7 +690,7 @@ mod tests {
     fn a_plaintext_vault_addr_in_the_bounds_is_refused_at_boot() {
         let mut b = bounds("maknae/users");
         b.vault_addr = "http://vault.example:8200".into();
-        match super::egress_bounds_boot_gate(&set(), Some(&b)) {
+        match super::egress_bounds_boot_gate(&set(), Some(&b), 280_000) {
             Err(super::EgressBoundsRefusal::Refused(m)) => assert!(m.contains("vault.addr"), "{m}"),
             other => panic!("expected a Refused naming vault.addr, got {other:?}"),
         }
@@ -731,7 +745,7 @@ mod tests {
         let validator = include_str!("baseline_check.rs");
         assert_eq!(
             validator
-                .matches("egress_bounds_boot_gate(boot.providers(), Some(&bounds))")
+                .matches("egress_bounds_boot_gate(boot.providers(), Some(&bounds), deadline_ms)")
                 .count(),
             1,
             "the validator's egress-bounds gate call moved or was renamed"
@@ -825,6 +839,64 @@ mod tests {
         assert!(
             validated < run_rs.find(MINT).unwrap(),
             "the root vault gates must run before mint()"
+        );
+    }
+
+    #[test]
+    fn the_default_call_timeout_fits_the_default_deadline_exactly() {
+        let d = maknae_config::EgressConfig::default().deadline_ms;
+        assert_eq!(
+            2 * maknae_vault::VAULT_API_TIMEOUT.as_millis() as u64
+                + maknae_config::DEFAULT_CALL_TIMEOUT_MS
+                + maknae_config::DEADLINE_MARGIN_MS,
+            d
+        );
+        assert_eq!(
+            super::egress_bounds_boot_gate(&set(), Some(&bounds("maknae/users")), d),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_call_timeout_that_does_not_fit_the_deadline_refuses_boot() {
+        let mut b = bounds("maknae/users");
+        b.call_timeout_ms = 120_001;
+        match super::egress_bounds_boot_gate(&set(), Some(&b), 280_000) {
+            Err(super::EgressBoundsRefusal::Refused(m)) => {
+                assert!(m.contains("call_timeout_ms 120001"), "{m}");
+                assert!(m.contains("at least 280001"), "{m}");
+                assert!(m.contains("deadline_ms 280000"), "{m}");
+            }
+            other => panic!("expected Refused, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn raising_the_deadline_with_the_call_timeout_admits_it_up_to_the_ceiling() {
+        let mut b = bounds("maknae/users");
+        b.call_timeout_ms = 300_000;
+        assert_eq!(
+            super::egress_bounds_boot_gate(&set(), Some(&b), 460_000),
+            Ok(())
+        );
+        assert!(super::egress_bounds_boot_gate(&set(), Some(&b), 459_999).is_err());
+        b.call_timeout_ms = 440_000;
+        assert_eq!(
+            super::egress_bounds_boot_gate(&set(), Some(&b), 600_000),
+            Ok(())
+        );
+        b.call_timeout_ms = 440_001;
+        assert!(super::egress_bounds_boot_gate(&set(), Some(&b), 600_000).is_err());
+    }
+
+    #[test]
+    fn no_authorized_provider_ignores_the_call_timeout() {
+        let empty = maknae_config::ProviderSet::empty();
+        let mut b = bounds("maknae/users");
+        b.call_timeout_ms = 600_000;
+        assert_eq!(
+            super::egress_bounds_boot_gate(&empty, Some(&b), 1_000),
+            Ok(())
         );
     }
 }
