@@ -349,6 +349,32 @@ pub fn prompt_outcome(
     }
 }
 
+/// A wrapped key whose frame was refused as too large before it was sent, so it is unconsumed.
+pub struct Spare {
+    conversation: String,
+    minted_at: u64,
+    choice: ProviderChoice,
+}
+
+pub const SPARE_MAX_AGE_SECS: u64 = maknae_vault::USER_KEY_WRAP_TTL.as_secs() / 2;
+
+fn take_spare(spare: &mut Option<Spare>, conversation: &str, now: u64) -> Option<Spare> {
+    let s = spare.take()?;
+    (s.conversation == conversation && now <= s.minted_at + SPARE_MAX_AGE_SECS).then_some(s)
+}
+
+/// Measured against the frame cap before sending (ADR-0023 d7).
+fn frame_fits(verb: &Verb, cap: usize) -> bool {
+    maknae_proto::encode_request_zeroizing(
+        &maknae_proto::Request {
+            protocol_version: maknae_proto::PROTOCOL_VERSION,
+            verb: verb.clone(),
+        },
+        cap,
+    )
+    .is_ok()
+}
+
 /// The real Plane: one authenticated client, one connection per verb.
 pub struct RealPlane<'a> {
     pub transport: &'a maknae_config::TransportConfig,
@@ -359,6 +385,7 @@ pub struct RealPlane<'a> {
     pub api: &'a VaultApi,
     pub token: &'a UserToken,
     pub key: KeyContext<'a>,
+    pub spare: Option<Spare>,
 }
 
 impl Plane for RealPlane<'_> {
@@ -367,31 +394,45 @@ impl Plane for RealPlane<'_> {
         conversation: &str,
         turns: &[Turn],
     ) -> Result<maknae_proto::PromptReply, PlaneError> {
-        let now = crate::login::now_unix().map_err(PlaneError::Transport)?;
-        let (api, token, kv_mount) = (self.api, self.token, self.key.kv_mount);
-        let choice = turn_choice(&self.key, conversation, now, |path| async move {
-            api.read_wrapped(token, kv_mount, &path, maknae_vault::USER_KEY_WRAP_TTL)
-                .await
-        })
-        .await
-        .map_err(PlaneError::Transport)?;
-        let verb = Verb::SessionPrompt {
+        let mut verb = Verb::SessionPrompt {
             conversation: conversation.to_string(),
             turns: turns.to_vec(),
             output_tokens: self.output_tokens,
-            choice: Some(choice),
+            choice: None,
         };
-        // Measured against the frame cap BEFORE sending (ADR-0023 d7). This
-        // encodes once here and once inside send_verb; accepted for Cooky.
-        if maknae_proto::encode_request_zeroizing(
-            &maknae_proto::Request {
-                protocol_version: maknae_proto::PROTOCOL_VERSION,
-                verb: verb.clone(),
-            },
-            self.transport.prompt_max_bytes,
-        )
-        .is_err()
-        {
+        // Checked before the key is wrapped, so a retry after shedding reasoning costs no Vault call.
+        if !frame_fits(&verb, self.transport.prompt_max_bytes) {
+            return Err(PlaneError::FrameTooLarge);
+        }
+        let now = crate::login::now_unix().map_err(PlaneError::Transport)?;
+        let (choice, minted_at) = match take_spare(&mut self.spare, conversation, now) {
+            Some(s) => (s.choice, s.minted_at),
+            None => {
+                let (api, token, kv_mount) = (self.api, self.token, self.key.kv_mount);
+                let c = turn_choice(&self.key, conversation, now, |path| async move {
+                    api.read_wrapped(token, kv_mount, &path, maknae_vault::USER_KEY_WRAP_TTL)
+                        .await
+                })
+                .await
+                .map_err(PlaneError::Transport)?;
+                (c, now)
+            }
+        };
+        if let Verb::SessionPrompt { choice: c, .. } = &mut verb {
+            *c = Some(choice);
+        }
+        if !frame_fits(&verb, self.transport.prompt_max_bytes) {
+            if let Verb::SessionPrompt {
+                choice: Some(choice),
+                ..
+            } = verb
+            {
+                self.spare = Some(Spare {
+                    conversation: conversation.to_string(),
+                    minted_at,
+                    choice,
+                });
+            }
             return Err(PlaneError::FrameTooLarge);
         }
         prompt_outcome(
@@ -549,6 +590,7 @@ pub async fn run(label: Option<String>, prompt: String) -> Result<u8, String> {
             seal_key: &seal_key,
             expires_at: session.expires_at,
         },
+        spare: None,
     };
     let mut transcript = Transcript::new(mint_conversation_id(), &prompt);
     let budget = Budget {
@@ -1145,12 +1187,14 @@ mod tests {
         assert_eq!(
             prompt_outcome(Ok(SentOutcome::Payload(Payload::PromptReply(
                 PromptReply {
+                    reasoning: None,
                     blocks: vec![],
                     tool_calls: vec![],
                     usage: None,
                 }
             )))),
             Ok(PromptReply {
+                reasoning: None,
                 blocks: vec![],
                 tool_calls: vec![],
                 usage: None,
@@ -1259,6 +1303,76 @@ mod tests {
         assert_eq!(
             read_outcome(Err("handshake timed out".into())),
             ReadOutcome::Unavailable
+        );
+    }
+
+    #[test]
+    fn frame_fits_is_the_encoders_cap_check() {
+        let verb = |n: usize| Verb::SessionPrompt {
+            conversation: "c".into(),
+            turns: vec![Turn::User {
+                content: vec![maknae_proto::ContentBlock::Text {
+                    text: maknae_proto::SecretText(zeroize::Zeroizing::new("a".repeat(n))),
+                }],
+            }],
+            output_tokens: None,
+            choice: None,
+        };
+        assert!(frame_fits(&verb(10), 65_536));
+        assert!(!frame_fits(&verb(70_000), 65_536));
+    }
+
+    #[test]
+    fn the_prompt_frame_is_sized_before_the_key_is_wrapped() {
+        let src = include_str!("agent.rs");
+        let body = &src[src.find(concat!("async fn ", "prompt(")).unwrap()..];
+        let fits = body.find(concat!("frame_fits(", "&verb")).unwrap();
+        let wrap = body.find(concat!("turn_choice(", "&self.key")).unwrap();
+        assert!(fits < wrap);
+    }
+
+    fn a_choice() -> ProviderChoice {
+        ProviderChoice {
+            provider: "p".into(),
+            model: "m".into(),
+            key_subpath: "k".into(),
+            key_field: "f".into(),
+            sealed_key: SealedKey::new(vec![7; maknae_proto::SEALED_KEY_MIN_BYTES]).unwrap(),
+        }
+    }
+
+    #[test]
+    fn a_spare_choice_is_reused_once_for_its_conversation_while_its_wrap_is_young() {
+        let mut spare = Some(Spare {
+            conversation: "c".into(),
+            minted_at: 100,
+            choice: a_choice(),
+        });
+        assert!(take_spare(&mut spare, "other", 101).is_none());
+        assert!(spare.is_none());
+
+        let mut spare = Some(Spare {
+            conversation: "c".into(),
+            minted_at: 100,
+            choice: a_choice(),
+        });
+        assert!(take_spare(&mut spare, "c", 100 + SPARE_MAX_AGE_SECS + 1).is_none());
+
+        let mut spare = Some(Spare {
+            conversation: "c".into(),
+            minted_at: 100,
+            choice: a_choice(),
+        });
+        let s = take_spare(&mut spare, "c", 100 + SPARE_MAX_AGE_SECS).unwrap();
+        assert_eq!((s.choice, s.minted_at), (a_choice(), 100));
+        assert!(take_spare(&mut spare, "c", 101).is_none());
+    }
+
+    #[test]
+    fn a_spare_is_never_older_than_half_the_wrap() {
+        assert_eq!(
+            SPARE_MAX_AGE_SECS * 2,
+            maknae_vault::USER_KEY_WRAP_TTL.as_secs()
         );
     }
 }

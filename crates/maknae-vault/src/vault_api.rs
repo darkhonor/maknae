@@ -13,7 +13,7 @@ use std::path::Path;
 use std::time::Duration;
 use zeroize::Zeroizing;
 
-const VAULT_API_TIMEOUT: Duration = Duration::from_secs(30);
+pub const VAULT_API_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct VaultApi {
     base: ApiBase,

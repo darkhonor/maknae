@@ -64,6 +64,8 @@ pub struct ChatMessage {
     /// Which call a `tool` message answers. Absent on every other role.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<maknae_proto::SecretText>,
 }
 
 impl ChatMessage {
@@ -81,6 +83,7 @@ impl ChatMessage {
             content,
             tool_calls: vec![],
             tool_call_id: None,
+            reasoning_content: None,
         }
     }
 }
@@ -152,14 +155,20 @@ pub struct ChatResponse {
 #[derive(Debug, Deserialize)]
 pub struct Choice {
     pub message: RespMessage,
+    #[serde(default)]
+    pub finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct RespMessage {
     #[serde(default)]
-    pub content: Option<String>,
+    pub content: Option<maknae_proto::SecretText>,
     #[serde(default)]
     pub tool_calls: Vec<RespToolCall>,
+    #[serde(default)]
+    pub reasoning_content: Option<maknae_proto::SecretText>,
+    #[serde(default)]
+    pub reasoning: Option<maknae_proto::SecretText>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -171,7 +180,7 @@ pub struct RespToolCall {
 #[derive(Debug, Deserialize)]
 pub struct RespToolFn {
     pub name: String,
-    pub arguments: String,
+    pub arguments: maknae_proto::SecretText,
 }
 
 /// Why a provider answer is not usable. Each variant is a refusal the loop
@@ -185,6 +194,10 @@ pub enum ReplyError {
     /// Parsed, but the message had neither content nor tool calls. An empty
     /// success is exactly what #240's scope forbids.
     EmptyMessage,
+    /// `finish_reason: length` with neither content nor tool calls.
+    TokenLimit,
+    /// Reasoning arrived, but neither content nor tool calls.
+    ReasoningOnly,
     /// A tool call named a tool this deployment did not offer. The model may
     /// PROPOSE; it may not invent the vocabulary.
     UnknownTool(String),
@@ -200,10 +213,53 @@ impl std::fmt::Display for ReplyError {
             ReplyError::EmptyMessage => {
                 write!(f, "provider reply had neither content nor tool calls")
             }
+            ReplyError::TokenLimit => write!(
+                f,
+                "provider reply hit its token limit before giving an answer or a tool call"
+            ),
+            ReplyError::ReasoningOnly => write!(
+                f,
+                "provider reply carried reasoning but no answer or tool call"
+            ),
             ReplyError::UnknownTool(t) => write!(f, "provider proposed an unknown tool '{t}'"),
             ReplyError::Unacceptable(m) => write!(f, "provider reply is not admissible: {m}"),
         }
     }
+}
+
+impl ReplyError {
+    /// The closed name the deputy journals; never provider bytes.
+    pub fn defect(&self) -> &'static str {
+        match self {
+            ReplyError::Malformed(_) => "Malformed",
+            ReplyError::NoChoices => "NoChoices",
+            ReplyError::EmptyMessage => "Empty",
+            ReplyError::TokenLimit => "TokenLimit",
+            ReplyError::ReasoningOnly => "ReasoningOnly",
+            ReplyError::UnknownTool(_) => "UnknownTool",
+            ReplyError::Unacceptable(_) => "OverBound",
+        }
+    }
+}
+
+/// Something the deputy journals about a reply it still delivers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplyNotice {
+    ReasoningOverBound,
+}
+
+impl ReplyNotice {
+    pub fn name(&self) -> &'static str {
+        match self {
+            ReplyNotice::ReasoningOverBound => "ReasoningOverBound",
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Completion {
+    pub reply: maknae_proto::PromptReply,
+    pub notice: Option<ReplyNotice>,
 }
 
 /// Map a parsed provider response into Maknae's reply type.
@@ -212,10 +268,7 @@ impl std::fmt::Display for ReplyError {
 /// call naming anything else is refused: under the conduit design the model
 /// PROPOSES and the PDP authorizes, so a model that invents a tool name is
 /// proposing outside the vocabulary it was given.
-pub fn to_prompt_reply(
-    resp: ChatResponse,
-    offered: &[String],
-) -> Result<maknae_proto::PromptReply, ReplyError> {
+pub fn to_prompt_reply(resp: ChatResponse, offered: &[String]) -> Result<Completion, ReplyError> {
     let usage = resp.usage.as_ref().and_then(|v| {
         Some(maknae_proto::Usage {
             prompt_tokens: v.get("prompt_tokens")?.as_u64()?,
@@ -227,13 +280,16 @@ pub fn to_prompt_reply(
         .into_iter()
         .next()
         .ok_or(ReplyError::NoChoices)?;
+    let finish_reason = choice.finish_reason;
     let msg = choice.message;
+    let reasoning = msg
+        .reasoning_content
+        .filter(|r| !r.0.is_empty())
+        .or(msg.reasoning.filter(|r| !r.0.is_empty()));
 
     let mut blocks = Vec::new();
-    if let Some(text) = msg.content.filter(|c| !c.is_empty()) {
-        blocks.push(maknae_proto::ContentBlock::Text {
-            text: maknae_proto::SecretText(zeroize::Zeroizing::new(text)),
-        });
+    if let Some(text) = msg.content.filter(|c| !c.0.is_empty()) {
+        blocks.push(maknae_proto::ContentBlock::Text { text });
     }
 
     let mut tool_calls = Vec::new();
@@ -244,7 +300,7 @@ pub fn to_prompt_reply(
         let proposed = maknae_proto::ProposedToolCall {
             name: c.function.name,
             call_id: c.id,
-            arguments: maknae_proto::SecretText(zeroize::Zeroizing::new(c.function.arguments)),
+            arguments: c.function.arguments,
         };
         // Bounded HERE, against the same predicate the kernel applies, so an
         // over-long proposal is refused at the boundary it arrived on rather
@@ -259,13 +315,57 @@ pub fn to_prompt_reply(
     }
 
     if blocks.is_empty() && tool_calls.is_empty() {
-        return Err(ReplyError::EmptyMessage);
+        return Err(if finish_reason.as_deref() == Some("length") {
+            ReplyError::TokenLimit
+        } else if reasoning.is_some() {
+            ReplyError::ReasoningOnly
+        } else {
+            ReplyError::EmptyMessage
+        });
     }
-    Ok(maknae_proto::PromptReply {
-        blocks,
-        tool_calls,
-        usage,
+    let (reasoning, notice) = match reasoning {
+        Some(r) if r.0.len() > maknae_proto::MAX_REASONING_BYTES => {
+            (None, Some(ReplyNotice::ReasoningOverBound))
+        }
+        r => (r, None),
+    };
+    Ok(Completion {
+        reply: maknae_proto::PromptReply {
+            blocks,
+            tool_calls,
+            usage,
+            reasoning,
+        },
+        notice,
     })
+}
+
+fn reply_line(lead: &str, conversation: &str, name: &str) -> zeroize::Zeroizing<String> {
+    let parts = [lead, conversation, "): ", name];
+    let mut line =
+        zeroize::Zeroizing::new(String::with_capacity(parts.iter().map(|p| p.len()).sum()));
+    for p in parts {
+        line.push_str(p);
+    }
+    line
+}
+
+/// One journal line for a refused reply. `conversation` is admission-checked to `[A-Za-z0-9._-]`.
+pub fn defect_line(conversation: &str, name: &str) -> zeroize::Zeroizing<String> {
+    reply_line(
+        "maknae-egress: provider reply unusable (conversation ",
+        conversation,
+        name,
+    )
+}
+
+/// One journal line for a reply forwarded without its over-bound reasoning.
+pub fn notice_line(conversation: &str, name: &str) -> zeroize::Zeroizing<String> {
+    reply_line(
+        "maknae-egress: provider reply forwarded without its reasoning (conversation ",
+        conversation,
+        name,
+    )
 }
 
 /// A provider's error body as one journal line (#372): every byte outside
@@ -408,6 +508,7 @@ pub fn with_preamble(content: Vec<ChatMessage>) -> Vec<ChatMessage> {
         content: maknae_proto::SecretText(zeroize::Zeroizing::new(CORE_PROMPT.to_string())),
         tool_calls: vec![],
         tool_call_id: None,
+        reasoning_content: None,
     });
     out.extend(content);
     out
@@ -495,7 +596,7 @@ mod tests {
     #[test]
     fn a_plain_text_reply_becomes_one_text_block() {
         let r = parse(r#"{"choices":[{"message":{"content":"hello"}}]}"#).unwrap();
-        let reply = to_prompt_reply(r, &offered()).unwrap();
+        let reply = prompt_reply_of(r, &offered()).unwrap();
         assert_eq!(reply.blocks.len(), 1);
         assert!(reply.tool_calls.is_empty());
     }
@@ -507,7 +608,7 @@ mod tests {
                  {"id":"call_1","function":{"name":"read_file","arguments":"{\"p\":\"/x\"}"}}]}}]}"#,
         )
         .unwrap();
-        let reply = to_prompt_reply(r, &offered()).unwrap();
+        let reply = prompt_reply_of(r, &offered()).unwrap();
         assert!(reply.blocks.is_empty());
         assert_eq!(reply.tool_calls.len(), 1);
         assert_eq!(reply.tool_calls[0].name, "read_file");
@@ -521,7 +622,7 @@ mod tests {
                  {"id":"c","function":{"name":"read_file","arguments":"{}"}}]}}]}"#,
         )
         .unwrap();
-        let reply = to_prompt_reply(r, &offered()).unwrap();
+        let reply = prompt_reply_of(r, &offered()).unwrap();
         assert_eq!(reply.blocks.len(), 1);
         assert_eq!(reply.tool_calls.len(), 1);
     }
@@ -537,7 +638,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            to_prompt_reply(r, &offered()),
+            prompt_reply_of(r, &offered()),
             Err(ReplyError::UnknownTool("exfiltrate".into()))
         );
         // and an EMPTY offered set admits nothing — an unset vocabulary is not
@@ -548,7 +649,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            to_prompt_reply(r2, &[]),
+            prompt_reply_of(r2, &[]),
             Err(ReplyError::UnknownTool("read_file".into()))
         );
     }
@@ -559,19 +660,19 @@ mod tests {
     fn every_unusable_shape_is_its_own_refusal() {
         assert!(matches!(parse("not json"), Err(ReplyError::Malformed(_))));
         assert_eq!(
-            to_prompt_reply(parse(r#"{"choices":[]}"#).unwrap(), &offered()),
+            prompt_reply_of(parse(r#"{"choices":[]}"#).unwrap(), &offered()),
             Err(ReplyError::NoChoices)
         );
         // content present but EMPTY, and no calls: still nothing to deliver.
         assert_eq!(
-            to_prompt_reply(
+            prompt_reply_of(
                 parse(r#"{"choices":[{"message":{"content":""}}]}"#).unwrap(),
                 &offered()
             ),
             Err(ReplyError::EmptyMessage)
         );
         assert_eq!(
-            to_prompt_reply(
+            prompt_reply_of(
                 parse(r#"{"choices":[{"message":{}}]}"#).unwrap(),
                 &offered()
             ),
@@ -589,7 +690,7 @@ mod tests {
                  {{"id":"c","function":{{"name":"read_file","arguments":"{big}"}}}}]}}}}]}}"#
         );
         assert!(matches!(
-            to_prompt_reply(parse(&body).unwrap(), &offered()),
+            prompt_reply_of(parse(&body).unwrap(), &offered()),
             Err(ReplyError::Unacceptable(_))
         ));
     }
@@ -604,7 +705,7 @@ mod tests {
             {"id": "c", "function": {"name": "write_file", "arguments": arguments}}
         ]}}]})
         .to_string();
-        let reply = to_prompt_reply(parse(&body).unwrap(), &offered()).unwrap();
+        let reply = prompt_reply_of(parse(&body).unwrap(), &offered()).unwrap();
         assert_eq!(reply.tool_calls[0].arguments.0.as_str(), arguments);
     }
 
@@ -665,6 +766,7 @@ mod tests {
     fn assistant_and_tool_roles_serialise_in_the_provider_shape_and_a_user_message_carries_neither()
     {
         let asst = ChatMessage {
+            reasoning_content: None,
             role: "assistant".into(),
             content: secret(""),
             tool_calls: vec![OutboundToolCall {
@@ -686,6 +788,7 @@ mod tests {
         assert_eq!(v["tool_calls"][0]["function"]["name"], "read_file");
         assert!(v.get("tool_call_id").is_none(), "absent, not null");
         let tool = ChatMessage {
+            reasoning_content: None,
             role: "tool".into(),
             content: secret("r"),
             tool_calls: vec![],
@@ -717,6 +820,7 @@ mod tests {
     fn an_outbound_tool_calls_arguments_redact_through_every_enclosing_debug() {
         let sentinel = r#"{"path":"/home/u/a","content":"SECRET-ARGUMENTS"}"#;
         let msg = ChatMessage {
+            reasoning_content: None,
             role: "assistant".into(),
             content: secret("SECRET-TURN-CONTENT"),
             tool_calls: vec![OutboundToolCall {
@@ -764,43 +868,16 @@ mod tests {
         assert_eq!(keys, ["arguments", "name"]);
     }
 
-    /// Each of the five refusals this test constructs renders something an
-    /// operator can act on, and for those five values none carries provider
-    /// content: `UnknownTool` names the tool (a name the model proposed, not a
-    /// secret), and the other four carry text this crate wrote.
-    ///
-    /// *(Corrected 2026-09-22, #344: the earlier wording generalised to "NONE
-    /// of them renders provider content … and nothing else echoes the body",
-    /// which these five fixed examples cannot establish and which is FALSE of
-    /// one variant. `Malformed` carries serde_json's own diagnostic verbatim —
-    /// `client.rs` builds it as `ReplyError::Malformed(e.to_string())` and
-    /// `Display` renders `provider reply is malformed: {m}` — and serde quotes
-    /// the offending value: measured 2026-09-22, a body of
-    /// `{"choices":"SENTINEL-PROVIDER-BODY"}` renders
-    /// `invalid type: string "SENTINEL-PROVIDER-BODY", expected a sequence`. A
-    /// malformed-response diagnostic CAN echo provider-controlled bytes; what
-    /// this test shows is only that the five constructed cases here do not.
-    /// The kernel already reasons this way about the same serde behaviour and
-    /// logs `e.category()` rather than `{e}` for exactly this reason — see
-    /// `maknae-kernel`'s `run.rs` at its decode-failure record.)*
-    ///
-    /// *(Corrected 2026-09-22, #344: this said "these strings reach the audit
-    /// trail and the terminal". They reach the TERMINAL only. A `ReplyError`
-    /// becomes a provider error inside `maknae-egress`, which `main.rs` turns
-    /// into `ServeError::Fulfil` and reports with
-    /// `eprintln!("maknae-egress: connection refused: …")` before closing the
-    /// connection — and the deputy has no audit sink at all. The kernel then
-    /// records what it can see, a generic transport/outcome failure, never
-    /// this diagnostic: so an operator reading the trail learns that an
-    /// exchange failed, and only the deputy's stderr says the reply named an
-    /// unadvertised tool. `crates/maknae-kernel/tests/agent_loop.rs`'s module
-    /// doc records the same limit from the other side.)*
+    /// `Display` serves in-process diagnostics only. Serde's message can quote the
+    /// body, so the deputy journals `defect()`, never `Display`.
     #[test]
     fn every_refusal_renders_actionably_and_echoes_no_content() {
         let cases = [
             (ReplyError::Malformed("expected value".into()), "malformed"),
             (ReplyError::NoChoices, "no choices"),
             (ReplyError::EmptyMessage, "neither content nor tool calls"),
+            (ReplyError::TokenLimit, "token limit"),
+            (ReplyError::ReasoningOnly, "reasoning but no answer"),
             (ReplyError::UnknownTool("exfiltrate".into()), "exfiltrate"),
             (
                 ReplyError::Unacceptable("over a bound".into()),
@@ -990,7 +1067,7 @@ mod tests {
                 {"id":"c1","function":{"name":"write_file","arguments":"{}"}}]}}]}"#,
         )
         .unwrap();
-        assert!(to_prompt_reply(resp, &offered).is_ok());
+        assert!(prompt_reply_of(resp, &offered).is_ok());
 
         let unoffered: ChatResponse = serde_json::from_str(
             r#"{"choices":[{"message":{"tool_calls":[
@@ -998,7 +1075,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            to_prompt_reply(unoffered, &offered),
+            prompt_reply_of(unoffered, &offered),
             Err(ReplyError::UnknownTool("run_command".to_string()))
         );
     }
@@ -1144,7 +1221,7 @@ mod tests {
     #[test]
     fn usage_is_parsed_leniently_when_present_and_none_when_absent() {
         let reply = |usage: &str| {
-            to_prompt_reply(
+            prompt_reply_of(
                 serde_json::from_str(&format!(
                     r#"{{"choices":[{{"message":{{"content":"hi"}}}}]{usage}}}"#
                 ))
@@ -1234,5 +1311,192 @@ mod tests {
             maknae_proto::PREAMBLE_ALLOWANCE_TOKENS >= bytes / 3,
             "{bytes} bytes need a larger allowance"
         );
+    }
+
+    fn prompt_reply_of(
+        resp: ChatResponse,
+        offered: &[String],
+    ) -> Result<maknae_proto::PromptReply, ReplyError> {
+        to_prompt_reply(resp, offered).map(|c| c.reply)
+    }
+
+    fn reply_of(body: &str) -> Result<Completion, ReplyError> {
+        to_prompt_reply(parse(body).unwrap(), &offered())
+    }
+
+    fn reasoning_of(c: &Completion) -> Option<&str> {
+        c.reply.reasoning.as_ref().map(|r| r.0.as_str())
+    }
+
+    #[test]
+    fn llama_cpp_reasoning_content_with_empty_content_is_reasoning_only() {
+        assert_eq!(
+            reply_of(r#"{"choices":[{"finish_reason":"stop","message":{"content":"","reasoning_content":"thinking"}}]}"#).err(),
+            Some(ReplyError::ReasoningOnly)
+        );
+    }
+
+    #[test]
+    fn vllm_reasoning_with_null_content_is_reasoning_only() {
+        assert_eq!(
+            reply_of(r#"{"choices":[{"finish_reason":"stop","message":{"content":null,"reasoning":"thinking"}}]}"#).err(),
+            Some(ReplyError::ReasoningOnly)
+        );
+    }
+
+    #[test]
+    fn a_length_cut_with_nothing_usable_is_token_limit_whether_or_not_reasoning_arrived() {
+        for body in [
+            r#"{"choices":[{"finish_reason":"length","message":{"content":"","reasoning_content":"half a thou"}}]}"#,
+            r#"{"choices":[{"finish_reason":"length","message":{"content":null,"reasoning":"half a thou"}}]}"#,
+            r#"{"choices":[{"finish_reason":"length","message":{"content":""}}]}"#,
+        ] {
+            assert_eq!(reply_of(body).err(), Some(ReplyError::TokenLimit), "{body}");
+        }
+    }
+
+    #[test]
+    fn a_stop_with_nothing_at_all_is_still_empty() {
+        assert_eq!(
+            reply_of(
+                r#"{"choices":[{"finish_reason":"stop","message":{"content":"","reasoning":""}}]}"#
+            )
+            .err(),
+            Some(ReplyError::EmptyMessage)
+        );
+    }
+
+    #[test]
+    fn a_length_cut_that_still_carries_content_is_delivered() {
+        let c = reply_of(
+            r#"{"choices":[{"finish_reason":"length","message":{"content":"partial answer"}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(c.reply.blocks.len(), 1);
+    }
+
+    #[test]
+    fn content_with_reasoning_is_delivered_with_the_reasoning_attached() {
+        let c = reply_of(r#"{"choices":[{"finish_reason":"stop","message":{"content":"391","reasoning_content":"17*23"}}]}"#).unwrap();
+        assert_eq!(reasoning_of(&c), Some("17*23"));
+        assert_eq!(c.notice, None);
+    }
+
+    #[test]
+    fn a_tool_call_with_reasoning_and_empty_content_is_delivered() {
+        let c = reply_of(r#"{"choices":[{"finish_reason":"tool_calls","message":{"content":"","reasoning":"read it first","tool_calls":[{"id":"c","function":{"name":"read_file","arguments":"{}"}}]}}]}"#).unwrap();
+        assert_eq!(c.reply.tool_calls.len(), 1);
+        assert_eq!(reasoning_of(&c), Some("read it first"));
+    }
+
+    #[test]
+    fn both_reasoning_fields_prefer_reasoning_content() {
+        let c = reply_of(
+            r#"{"choices":[{"message":{"content":"a","reasoning_content":"RC","reasoning":"R"}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(reasoning_of(&c), Some("RC"));
+        let c = reply_of(
+            r#"{"choices":[{"message":{"content":"a","reasoning_content":"","reasoning":"R"}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(reasoning_of(&c), Some("R"));
+    }
+
+    #[test]
+    fn no_reasoning_field_leaves_the_reply_unchanged() {
+        let c = reply_of(r#"{"choices":[{"message":{"content":"a"}}]}"#).unwrap();
+        assert_eq!(c.reply.reasoning, None);
+        assert_eq!(c.notice, None);
+    }
+
+    #[test]
+    fn over_bound_reasoning_is_dropped_and_reported_when_content_is_delivered() {
+        let at = "r".repeat(maknae_proto::MAX_REASONING_BYTES);
+        let c = reply_of(&format!(
+            r#"{{"choices":[{{"message":{{"content":"a","reasoning_content":"{at}"}}}}]}}"#
+        ))
+        .unwrap();
+        assert_eq!(
+            c.reply.reasoning.as_ref().map(|r| r.0.len()),
+            Some(maknae_proto::MAX_REASONING_BYTES)
+        );
+        assert_eq!(c.notice, None);
+
+        let over = "r".repeat(maknae_proto::MAX_REASONING_BYTES + 1);
+        let c = reply_of(&format!(
+            r#"{{"choices":[{{"message":{{"content":"a","reasoning_content":"{over}"}}}}]}}"#
+        ))
+        .unwrap();
+        assert_eq!(c.reply.reasoning, None);
+        assert_eq!(c.reply.blocks.len(), 1);
+        assert_eq!(c.notice, Some(ReplyNotice::ReasoningOverBound));
+    }
+
+    #[test]
+    fn over_bound_reasoning_without_content_is_still_reasoning_only() {
+        let over = "r".repeat(maknae_proto::MAX_REASONING_BYTES + 1);
+        assert_eq!(
+            reply_of(&format!(
+                r#"{{"choices":[{{"finish_reason":"stop","message":{{"reasoning":"{over}"}}}}]}}"#
+            ))
+            .err(),
+            Some(ReplyError::ReasoningOnly)
+        );
+    }
+
+    #[test]
+    fn every_defect_has_a_closed_name() {
+        let cases = [
+            (ReplyError::Malformed("x".into()), "Malformed"),
+            (ReplyError::NoChoices, "NoChoices"),
+            (ReplyError::EmptyMessage, "Empty"),
+            (ReplyError::TokenLimit, "TokenLimit"),
+            (ReplyError::ReasoningOnly, "ReasoningOnly"),
+            (ReplyError::UnknownTool("x".into()), "UnknownTool"),
+            (ReplyError::Unacceptable("x".into()), "OverBound"),
+        ];
+        for (e, name) in cases {
+            assert_eq!(e.defect(), name);
+        }
+        assert_eq!(ReplyNotice::ReasoningOverBound.name(), "ReasoningOverBound");
+    }
+
+    #[test]
+    fn the_defect_and_notice_lines_carry_only_the_conversation_and_the_name_and_never_grow() {
+        let d = defect_line("c1", "Malformed");
+        assert_eq!(
+            d.as_str(),
+            "maknae-egress: provider reply unusable (conversation c1): Malformed"
+        );
+        assert_eq!(d.capacity(), d.len());
+        let n = notice_line("conv-2", "ReasoningOverBound");
+        assert_eq!(
+            n.as_str(),
+            "maknae-egress: provider reply forwarded without its reasoning (conversation conv-2): ReasoningOverBound"
+        );
+        assert_eq!(n.capacity(), n.len());
+    }
+
+    #[test]
+    fn an_assistant_message_sends_reasoning_as_reasoning_content_and_omits_it_when_absent() {
+        let mut m = ChatMessage::user(maknae_proto::SecretText(zeroize::Zeroizing::new(
+            "q".into(),
+        )));
+        assert!(!serde_json::to_string(&m).unwrap().contains("reasoning"));
+        m.role = "assistant".into();
+        m.reasoning_content = Some(maknae_proto::SecretText(zeroize::Zeroizing::new(
+            "why".into(),
+        )));
+        let v: serde_json::Value = serde_json::to_value(&m).unwrap();
+        assert_eq!(v["reasoning_content"], serde_json::json!("why"));
+        assert!(v.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn a_parsed_reply_debug_prints_no_content_arguments_or_reasoning() {
+        let r = parse(r#"{"choices":[{"message":{"content":"SENTINEL-TEXT","reasoning":"SENTINEL-WHY","tool_calls":[{"id":"c","function":{"name":"read_file","arguments":"SENTINEL-ARGS"}}]}}]}"#).unwrap();
+        let d = format!("{r:?}");
+        assert!(!d.contains("SENTINEL"), "{d}");
     }
 }

@@ -350,6 +350,7 @@ async fn read_then_write_then_answer_leaves_the_sequence_the_issue_names_in_the_
         &egress,
         [
             PromptReply {
+                reasoning: None,
                 blocks: vec![],
                 tool_calls: vec![call(
                     "c1",
@@ -359,6 +360,7 @@ async fn read_then_write_then_answer_leaves_the_sequence_the_issue_names_in_the_
                 usage: None,
             },
             PromptReply {
+                reasoning: None,
                 blocks: vec![],
                 tool_calls: vec![call(
                     "c2",
@@ -368,6 +370,7 @@ async fn read_then_write_then_answer_leaves_the_sequence_the_issue_names_in_the_
                 usage: None,
             },
             PromptReply {
+                reasoning: None,
                 blocks: vec![text("Edited.")],
                 tool_calls: vec![],
                 usage: None,
@@ -497,6 +500,7 @@ async fn a_denied_read_reaches_the_model_as_not_authorized_and_is_a_deny_in_the_
         &egress,
         [
             PromptReply {
+                reasoning: None,
                 blocks: vec![],
                 tool_calls: vec![call(
                     "c1",
@@ -506,6 +510,7 @@ async fn a_denied_read_reaches_the_model_as_not_authorized_and_is_a_deny_in_the_
                 usage: None,
             },
             PromptReply {
+                reasoning: None,
                 blocks: vec![text("refused")],
                 tool_calls: vec![],
                 usage: None,
@@ -565,6 +570,7 @@ async fn a_write_outside_the_allow_is_unknown_to_the_model_and_a_deny_in_the_tra
         &egress,
         [
             PromptReply {
+                reasoning: None,
                 blocks: vec![],
                 tool_calls: vec![call(
                     "c1",
@@ -574,6 +580,7 @@ async fn a_write_outside_the_allow_is_unknown_to_the_model_and_a_deny_in_the_tra
                 usage: None,
             },
             PromptReply {
+                reasoning: None,
                 blocks: vec![text("done?")],
                 tool_calls: vec![],
                 usage: None,
@@ -624,6 +631,7 @@ async fn the_step_budget_trips_and_no_further_prompt_reaches_the_kernel() {
     let fx = Fixture::with_rules("agent-budget", &["Read"], &[], GRANTED);
     let egress = Arc::new(Scripted::default());
     let looping = PromptReply {
+        reasoning: None,
         blocks: vec![],
         tool_calls: vec![call("c", "read_file", r#"{"path":"/nonexistent"}"#)],
         usage: None,

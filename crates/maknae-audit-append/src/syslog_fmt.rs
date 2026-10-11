@@ -709,6 +709,14 @@ mod tests {
                 "reply refused: tool call",
                 "unauthorized",
             ),
+            (
+                "undelivered-reasoning",
+                EgressStatus::LandedUndelivered,
+                Some(999_999_999),
+                "permit",
+                "reply refused: reasoning",
+                "unauthorized",
+            ),
         ] {
             let mut r = egress_record(status, reply, result, reason, posture);
             r.subject.user = Some("aackerman".into());

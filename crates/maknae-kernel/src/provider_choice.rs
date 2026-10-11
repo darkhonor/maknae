@@ -331,6 +331,7 @@ mod tests {
     #[test]
     fn an_authority_exists_only_for_a_non_empty_set_with_bounds() {
         let b = EgressBounds {
+            call_timeout_ms: maknae_config::DEFAULT_CALL_TIMEOUT_MS,
             kv_mount: "maknae-kv".into(),
             user_prefix: PREFIX.into(),
             vault_addr: "https://vault.example:8200".into(),

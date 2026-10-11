@@ -2231,25 +2231,30 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                             },
                             None,
                         ),
-                        Ok(())
-                            if crate::egress::reply_capacity(&r.reply) > cfg.prompt_max_bytes =>
-                        {
-                            (
-                                crate::egress::SendOutcome::LandedUndelivered {
-                                    reply_length: n,
-                                    refusal: crate::egress::ReplyRefusal::Oversize,
-                                    usage: r.reply.usage,
-                                },
-                                None,
-                            )
+                        Ok(()) => {
+                            let mut reply = r.reply;
+                            if crate::egress::shed_reasoning_to_fit(
+                                &mut reply,
+                                cfg.prompt_max_bytes,
+                            ) {
+                                (
+                                    crate::egress::SendOutcome::Sent {
+                                        reply_length: n,
+                                        usage: reply.usage,
+                                    },
+                                    Some(reply),
+                                )
+                            } else {
+                                (
+                                    crate::egress::SendOutcome::LandedUndelivered {
+                                        reply_length: n,
+                                        refusal: crate::egress::ReplyRefusal::Oversize,
+                                        usage: reply.usage,
+                                    },
+                                    None,
+                                )
+                            }
                         }
-                        Ok(()) => (
-                            crate::egress::SendOutcome::Sent {
-                                reply_length: n,
-                                usage: r.reply.usage,
-                            },
-                            Some(r.reply),
-                        ),
                     }
                 }
                 Ok(Ok(Err(f))) => (crate::egress::outcome_for_failure(&f), None),
@@ -10532,6 +10537,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         pub(super) fn with_bounds() -> Self {
             TestEnv {
                 bounds: Some(maknae_config::EgressBounds {
+                    call_timeout_ms: maknae_config::DEFAULT_CALL_TIMEOUT_MS,
                     kv_mount: "kv".into(),
                     user_prefix: "users".into(),
                     vault_addr: "https://v.example:8200".into(),
@@ -11760,6 +11766,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         );
         let bounds = TestEnv {
             bounds: Some(maknae_config::EgressBounds {
+                call_timeout_ms: maknae_config::DEFAULT_CALL_TIMEOUT_MS,
                 kv_mount: "kv".into(),
                 user_prefix: "users".into(),
                 vault_addr: "https://v.example:8200".into(),

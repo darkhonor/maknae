@@ -76,10 +76,8 @@ pub struct Integrity {
 /// up (its provider call failed or timed out), or its reply was malformed or
 /// over the cap; `LandedUndelivered` keeps
 /// ADR-0023 decision 3's meaning: the egress went out, the reply arrived, and
-/// it never reached the loop. In #172 the kernel itself refuses delivery for
-/// three reasons, each named in `reason`: over the frame cap (`TooLarge` on
-/// the wire), carrying a block kind this deployment does not admit, or empty
-/// (both `Unauthorized`). A response-write timeout or a closed connection is
+/// it never reached the loop. The kernel refuses delivery for the reasons
+/// `maknae_kernel::egress::ReplyRefusal` names, each in `reason`. A response-write timeout or a closed connection is
 /// not detected on any verb yet and is #240's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EgressStatus {
@@ -101,8 +99,8 @@ pub enum EgressStatus {
 /// the full 64).
 ///
 /// *Corrected 2026-09-22, #241: this said "of the concatenated text blocks".
-/// The digest covers every `Text` block's bytes AND every proposed tool call's
-/// `arguments` bytes, across every turn in order. A tool call's `name` and
+/// The digest covers what `content_measure` feeds it, across every turn in
+/// order. A tool call's `name` and
 /// `call_id`, and a `Tool` turn's `call_id`, also leave the process and are
 /// NOT digest input — they are length-bounded and shape-admitted, not
 /// attested. `maknae_kernel::egress`'s `content_measure` is the producer and
@@ -111,7 +109,8 @@ pub enum EgressStatus {
 /// *(Scoped 2026-09-22, #344: the rider list in the record above reads as
 /// exhaustive and is not — it was one of three partial copies. The RULE,
 /// stated as a rule: the digest covers exactly the `Text` bytes and every
-/// proposed tool call's `arguments`, in order, and everything else on the
+/// proposed tool call's `arguments` and each assistant turn's reasoning, in
+/// order, and everything else on the
 /// frame and on the wire rides undigested — among them the tool call's `name`
 /// and `call_id`, a `Tool` turn's `call_id`, the message roles and the tool
 /// call's `"function"` type, the frame's `model`, and the preamble and tool
@@ -123,8 +122,8 @@ pub enum EgressStatus {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EgressAudit {
     pub status: EgressStatus,
-    /// The bytes the digest covers, counted: text-block bytes plus tool-call
-    /// `arguments` bytes, across every turn. *Widened with the digest on
+    /// The bytes the digest covers, counted: text-block bytes, tool-call
+    /// `arguments` bytes and assistant reasoning bytes, across every turn. *Widened with the digest on
     /// 2026-09-22, #241 — it counted text blocks alone before.*
     pub content_length: u64,
     pub content_digest: String,

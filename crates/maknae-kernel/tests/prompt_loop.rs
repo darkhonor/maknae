@@ -74,20 +74,24 @@ impl maknae_kernel::Egress for Recording {
             r.key_field.clone(),
             r.sealed_key.as_bytes().len(),
         ));
-        // Mirrors `content_measure`: every `Text` block across every turn,
-        // PLUS every assistant turn's tool-call arguments — both leave the
-        // process, so the recorded sum is what the trail digests.
+        // Mirrors `content_measure`'s byte count.
         let text_len = r
             .turns
             .iter()
             .map(|t| {
-                let (content, tool_calls): (&[ContentBlock], &[ProposedToolCall]) = match t {
-                    Turn::User { content } | Turn::Tool { content, .. } => (content, &[]),
-                    Turn::Assistant {
-                        content,
-                        tool_calls,
-                    } => (content, tool_calls),
-                };
+                let (content, tool_calls, reasoning): (&[ContentBlock], &[ProposedToolCall], u64) =
+                    match t {
+                        Turn::User { content } | Turn::Tool { content, .. } => (content, &[], 0),
+                        Turn::Assistant {
+                            reasoning,
+                            content,
+                            tool_calls,
+                        } => (
+                            content,
+                            tool_calls,
+                            reasoning.as_ref().map_or(0, |r| r.0.len() as u64),
+                        ),
+                    };
                 let text: u64 = content
                     .iter()
                     .map(|b| match b {
@@ -96,7 +100,7 @@ impl maknae_kernel::Egress for Recording {
                     })
                     .sum();
                 let args: u64 = tool_calls.iter().map(|c| c.arguments.0.len() as u64).sum();
-                text + args
+                text + args + reasoning
             })
             .sum();
         self.seen
@@ -122,6 +126,7 @@ impl maknae_kernel::Egress for Recording {
         }
         Ok(maknae_kernel::EgressReply {
             reply: maknae_proto::PromptReply {
+                reasoning: None,
                 tool_calls: vec![],
                 blocks: vec![text("ok")],
                 usage: self.reply_usage,
@@ -326,6 +331,7 @@ async fn a_non_text_reply_is_refused_for_delivery_and_recorded_landed_undelivere
         ) -> Result<maknae_kernel::EgressReply, maknae_kernel::EgressFailure> {
             Ok(maknae_kernel::EgressReply {
                 reply: maknae_proto::PromptReply {
+                    reasoning: None,
                     tool_calls: vec![],
                     blocks: vec![
                         text("ok"),
@@ -384,6 +390,7 @@ async fn a_non_text_reply_is_refused_for_delivery_and_recorded_landed_undelivere
         ) -> Result<maknae_kernel::EgressReply, maknae_kernel::EgressFailure> {
             Ok(maknae_kernel::EgressReply {
                 reply: maknae_proto::PromptReply {
+                    reasoning: None,
                     tool_calls: vec![],
                     blocks: vec![],
                     usage: None,
@@ -823,6 +830,7 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
                         content: vec![text("q")],
                     },
                     Turn::Assistant {
+                        reasoning: None,
                         content: vec![],
                         tool_calls: vec![ProposedToolCall {
                             name: "read_file".into(),
@@ -1367,6 +1375,7 @@ async fn an_oversize_reply_is_refused_as_too_large_never_truncated() {
         ) -> Result<maknae_kernel::EgressReply, maknae_kernel::EgressFailure> {
             Ok(maknae_kernel::EgressReply {
                 reply: maknae_proto::PromptReply {
+                    reasoning: None,
                     tool_calls: vec![],
                     blocks: vec![text(&"x".repeat(1 << 20))],
                     usage: None,
@@ -1527,4 +1536,55 @@ async fn a_prompt_admitted_before_a_live_install_and_decided_after_it_is_refused
             "the live baseline changed between admission and decision"
         )
     );
+}
+
+#[tokio::test]
+async fn a_reply_over_the_cap_only_because_of_its_reasoning_is_delivered_without_it() {
+    struct LongThinker;
+    impl maknae_kernel::Egress for LongThinker {
+        fn ready(&self) -> Result<(), maknae_kernel::EgressFailure> {
+            Ok(())
+        }
+        fn deadline(&self) -> std::time::Duration {
+            std::time::Duration::from_secs(5)
+        }
+        fn send(
+            &self,
+            _: &maknae_kernel::DurableEgressIntent,
+            _: maknae_kernel::EgressRequest,
+        ) -> Result<maknae_kernel::EgressReply, maknae_kernel::EgressFailure> {
+            Ok(maknae_kernel::EgressReply {
+                reply: maknae_proto::PromptReply {
+                    blocks: vec![text(&"a".repeat(4096))],
+                    tool_calls: vec![],
+                    usage: None,
+                    reasoning: Some(SecretText(maknae_io::Zeroizing::new(
+                        "r".repeat(maknae_proto::MAX_REASONING_BYTES),
+                    ))),
+                },
+            })
+        }
+    }
+    let fx = Fixture::with_policy("prompt-shed-reasoning", "Read", GRANTED);
+    let records = Records::new(0);
+    let mut cfg = maknae_config::transport_from_section(None).unwrap();
+    cfg.prompt_max_bytes = maknae_config::PROMPT_MAX_BYTES_FLOOR;
+    let resp = fx
+        .roundtrip_with_config(
+            prompt("hello"),
+            Arc::clone(&records),
+            Some("openai"),
+            Arc::new(LongThinker),
+            cfg,
+        )
+        .await
+        .expect("a reply frame");
+    let RespResult::Ok(Payload::PromptReply(reply)) = resp.result else {
+        panic!("{resp:?}")
+    };
+    assert_eq!(reply.reasoning, None);
+    assert_eq!(reply.blocks.len(), 1);
+    let outcome = last_prompt_record(&records);
+    let e = outcome.egress.as_ref().unwrap();
+    assert_eq!((e.status, e.reply_length), (EgressStatus::Sent, Some(4096)));
 }

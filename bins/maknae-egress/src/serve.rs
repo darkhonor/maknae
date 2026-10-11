@@ -156,6 +156,7 @@ mod tests {
 
     fn canned(_a: &maknae_deputy::handle::Admitted<'_>) -> Result<EgressFrameReply, ServeError> {
         Ok(EgressFrameReply::Reply(maknae_proto::PromptReply {
+            reasoning: None,
             blocks: vec![],
             tool_calls: vec![],
             usage: None,
@@ -164,6 +165,7 @@ mod tests {
 
     fn bounds() -> EgressBounds {
         EgressBounds {
+            call_timeout_ms: maknae_config::DEFAULT_CALL_TIMEOUT_MS,
             kv_mount: "maknae-kv".into(),
             user_prefix: "maknae/users".into(),
             vault_addr: "https://vault.example:8200".into(),
@@ -172,6 +174,7 @@ mod tests {
 
     fn request(key: &str) -> EgressFrameRequest {
         EgressFrameRequest {
+            deadline_ms: None,
             destination: "provider:openai".into(),
             endpoint: "https://api.example.test/v1".into(),
             model: "m".into(),
@@ -372,6 +375,7 @@ mod tests {
         assert_eq!(
             reply,
             maknae_proto::EgressFrameReply::Reply(maknae_proto::PromptReply {
+                reasoning: None,
                 blocks: vec![],
                 tool_calls: vec![],
                 usage: None,
@@ -521,6 +525,7 @@ mod tests {
                 admitted,
                 &Opens(Err(OpenFailure::Seal)),
                 CallBounds::default(),
+                &mut |_| {},
             ))
             .map_err(serve_error)
         });
@@ -539,6 +544,7 @@ mod tests {
                 admitted,
                 &Opens(Ok("sk-test-not-real")),
                 CallBounds::default(),
+                &mut |_| {},
             ))
             .map_err(serve_error)
         });
@@ -573,8 +579,13 @@ mod tests {
             maknae_proto::SealedKey::new(vec![9u8; maknae_proto::SEALED_KEY_MIN_BYTES]).unwrap();
         for r in [&first, &second] {
             let (out, reply) = served_with(prefixed(&encoded(r)), |admitted| {
-                rt.block_on(fulfil(admitted, &opener, CallBounds::default()))
-                    .map_err(serve_error)
+                rt.block_on(fulfil(
+                    admitted,
+                    &opener,
+                    CallBounds::default(),
+                    &mut |_| {},
+                ))
+                .map_err(serve_error)
             });
             assert!(matches!(out, Err(ServeError::Fulfil(_))), "{out:?}");
             assert_eq!(reply, None);

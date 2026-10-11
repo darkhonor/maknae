@@ -27,12 +27,15 @@ pub(crate) const EGRESS_KEYS: [&str; 2] = ["socket_path", "deadline_ms"];
 const DEFAULT_SOCKET_PATH: &str = "/run/maknae-egress/egress.sock";
 /// The macOS deputy's socket path.
 pub const MACOS_EGRESS_SOCKET_PATH: &str = "/usr/local/var/run/maknae-egress/egress.sock";
-/// The deputy's worst-case wall time on one request, plus a margin: a wrapping
-/// lookup, an unwrap (each bounded by `maknae-vault`'s 30 s `VAULT_API_TIMEOUT`)
-/// and the provider call (`CallBounds::default().timeout` in
-/// `crates/maknae-deputy/src/call.rs`, 120 s) sum to 180 s, and 280 s leaves
-/// headroom for framing and scheduling.
-/// Raise the deputy's bounds and this one together.
+/// Headroom between the deputy's worst case and `egress.deadline_ms`.
+pub const DEADLINE_MARGIN_MS: u64 = 100_000;
+/// The deputy's two Vault calls at `maknae_vault::VAULT_API_TIMEOUT` each.
+pub const VAULT_CALLS_MS: u64 = 60_000;
+/// The largest `call_timeout_ms` any `deadline_ms` can hold.
+pub const CALL_TIMEOUT_MS_MAX: u64 = EGRESS_DEADLINE_MS_MAX - VAULT_CALLS_MS - DEADLINE_MARGIN_MS;
+/// Two Vault calls (`maknae_vault::VAULT_API_TIMEOUT`), the default provider call
+/// (`DEFAULT_CALL_TIMEOUT_MS`) and `DEADLINE_MARGIN_MS`. The kernel boot gate holds
+/// any configured `call_timeout_ms` to the same sum.
 const DEFAULT_DEADLINE_MS: u64 = 280_000;
 /// The ceiling on `deadline_ms`. Named and exported because the shipped units'
 /// stop timeouts are derived from it (`maknae-kernel`'s shutdown-chain test

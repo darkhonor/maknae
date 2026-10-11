@@ -86,8 +86,8 @@ pub use authz::{
 pub use baseline_doc::{document_sections, value_from_canonical_json, BaselineSections};
 pub use bounds::{
     bounds_from_document, kv_fragment_is_acceptable, mount_path_is_acceptable,
-    path_is_within_prefix, vault_path_is_safe, EgressBounds, EGRESS_BOUNDS_FILE,
-    MAX_USER_PREFIX_BYTES,
+    path_is_within_prefix, vault_path_is_safe, EgressBounds, DEFAULT_CALL_TIMEOUT_MS,
+    EGRESS_BOUNDS_FILE, MAX_USER_PREFIX_BYTES,
 };
 pub use bounds_io::load_egress_bounds;
 pub use ceiling::{ceiling_from_core, policy_name_from_core, Ceiling, IngestPosture};
@@ -96,8 +96,8 @@ pub use document::{
     Source, ABSENT, MASK, NOT_SET, SUPPRESSED_CHANGED,
 };
 pub use egress_cfg::{
-    egress_from_section, EgressConfig, EGRESS_DEADLINE_MS_MAX, EGRESS_SECTION,
-    MACOS_EGRESS_SOCKET_PATH,
+    egress_from_section, EgressConfig, CALL_TIMEOUT_MS_MAX, DEADLINE_MARGIN_MS,
+    EGRESS_DEADLINE_MS_MAX, EGRESS_SECTION, MACOS_EGRESS_SOCKET_PATH, VAULT_CALLS_MS,
 };
 pub use error::ConfigError;
 #[cfg(all(unix, feature = "hermetic-test-seam"))]

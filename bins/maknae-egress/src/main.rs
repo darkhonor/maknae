@@ -151,8 +151,13 @@ fn main() {
         match conn {
             Ok(s) => {
                 if let Err(e) = serve::serve_one(s, expected_uid, &bounds, |admitted| {
-                    rt.block_on(call::fulfil(admitted, &opener, call::CallBounds::default()))
-                        .map_err(serve::serve_error)
+                    rt.block_on(call::fulfil(
+                        admitted,
+                        &opener,
+                        call::CallBounds::from_bounds(&bounds),
+                        &mut |l| eprintln!("{l}"),
+                    ))
+                    .map_err(serve::serve_error)
                 }) {
                     eprintln!("maknae-egress: connection refused: {e:?}");
                 }
@@ -330,5 +335,14 @@ mod tests {
             ]
         );
         assert!(plist.contains("<key>UserName</key>\n  <string>_maknae-egress</string>"));
+    }
+
+    #[test]
+    fn every_provider_call_takes_its_bounds_from_the_loaded_file() {
+        let src = include_str!("main.rs");
+        let wired = concat!("call::CallBounds::", "from_bounds(&bounds)");
+        let fixed = concat!("CallBounds::", "default()");
+        assert_eq!(src.matches(wired).count(), 1);
+        assert_eq!(src.matches(fixed).count(), 0);
     }
 }
