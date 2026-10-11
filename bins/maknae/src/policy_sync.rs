@@ -107,22 +107,32 @@ fn unattended_loosenings(
     Ok(all.into_iter().collect())
 }
 
-fn read_mirror(state_dir: &Path, dir_owner: u32, owner: u32) -> Result<Option<Mirror>, String> {
+pub(crate) fn read_mirror(
+    state_dir: &Path,
+    dir_owner: u32,
+    owner: u32,
+) -> Result<Option<Mirror>, String> {
     let at = state_dir.join(MIRROR_FILE);
-    let anchor = open_anchor(
+    let anchor = match open_anchor(
         state_dir,
         AnchorRequired {
             owner: Some(dir_owner),
             mode_mask: Some(0o077),
         },
         StrategyPref::Auto,
-    )
-    .map_err(|e| {
-        format!(
-            "cannot use the state directory {}: {e}",
-            state_dir.display()
-        )
-    })?;
+    ) {
+        Ok(a) => a,
+        Err(IoError::Io {
+            kind: IoKind::NotFound,
+            ..
+        }) => return Ok(None),
+        Err(e) => {
+            return Err(format!(
+                "cannot use the state directory {}: {e}",
+                state_dir.display()
+            ))
+        }
+    };
     let required = TargetRequired {
         owner: Some(owner),
         mode_mask: Some(0o077),
@@ -161,7 +171,11 @@ fn await_mirror(
     read_mirror(state_dir, owners.state_dir, owners.mirror)
 }
 
-fn read_bindings(etc: &Anchor, config_dir: &Path, owner: u32) -> Result<Bindings, String> {
+pub(crate) fn read_bindings(
+    etc: &Anchor,
+    config_dir: &Path,
+    owner: u32,
+) -> Result<Bindings, String> {
     let required = TargetRequired {
         owner: Some(owner),
         mode_mask: Some(0o027),
@@ -196,7 +210,12 @@ fn other_config_dir(found: &str) -> String {
     )
 }
 
-fn install(etc: &Anchor, config_dir: &Path, bytes: &[u8], owner: FileOwner) -> Result<(), String> {
+pub(crate) fn install(
+    etc: &Anchor,
+    config_dir: &Path,
+    bytes: &[u8],
+    owner: FileOwner,
+) -> Result<(), String> {
     etc.publish_owned(Path::new(BINDINGS_FILE), None, bytes, Mode(0o640), owner)
         .map(|_| ())
         .map_err(|e| {
@@ -419,14 +438,14 @@ fn exit_code(r: &Result<Outcome, String>) -> u8 {
     }
 }
 
-fn kernel_gid() -> Result<u32, String> {
+pub(crate) fn kernel_gid() -> Result<u32, String> {
     nix::unistd::Group::from_name("_maknae")
         .map_err(|e| format!("group _maknae: {e}"))?
         .map(|g| g.gid.as_raw())
         .ok_or_else(|| "no such group: _maknae; is maknae installed?".to_string())
 }
 
-fn production_owners(kernel_uid: u32, kernel_gid: u32) -> Owners {
+pub(crate) fn production_owners(kernel_uid: u32, kernel_gid: u32) -> Owners {
     Owners {
         state_dir: kernel_uid,
         mirror: kernel_uid,
@@ -642,6 +661,14 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn a_missing_state_directory_is_no_mirror() {
+        let fx = Fx::new();
+        std::fs::remove_dir_all(fx.state_dir()).unwrap();
+        assert!(matches!(fx.sync(false, "", true), Ok(Outcome::NoMirror)));
+        assert_eq!(exit_code(&fx.sync(false, "", true)), 4);
     }
 
     #[test]

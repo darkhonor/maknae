@@ -64,6 +64,27 @@ pub(crate) fn text(id: MsgId) -> &'static str {
         MsgId::EnrollRollbackDestroyPartial => {
             "Enrollment failed — attempted to destroy the credentials just issued, but the rollback itself partially failed (see below)"
         }
+        MsgId::EnrollBindingsWritten => {
+            "Wrote {user} to bindings.yaml as admin"
+        }
+        MsgId::EnrollBindingsAlreadyAdmin => {
+            "{user} already holds admin in bindings.yaml; bindings.yaml was not changed"
+        }
+        MsgId::EnrollBindingsLost => {
+            "maknaed enforces explicit bindings, but bindings.yaml is missing or has no bindings: key; restore it first at a terminal with sudo maknae policy sync, then enroll again"
+        }
+        MsgId::EnrollBindingsOtherRole => {
+            "{user} holds {role} in bindings.yaml; enroll adds admin only for a user who holds no other role. If {user} should hold admin, change bindings.yaml yourself"
+        }
+        MsgId::EnrollBindingsReloadHint => {
+            "If maknaed is running, reload it to apply bindings.yaml: sudo systemctl reload maknaed"
+        }
+        MsgId::EnrollBindingsReloadHintMacos => {
+            "If maknaed is running, reload it to apply bindings.yaml: sudo launchctl kill SIGHUP system/io.maknae.maknaed"
+        }
+        MsgId::EnrollBindingsContained => {
+            "{user} is contained in bindings.yaml; enroll does not change a containment. Release it first if that is intended"
+        }
         MsgId::HelperContextMismatch => {
             "Operator-context helper did not land in the expected identity"
         }

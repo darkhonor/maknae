@@ -18178,6 +18178,66 @@ mod reload_tests {
             "live (operator): contain uid:4242; requested by uid 0 in session 77; reason \"compromised\""
         );
     }
+    fn enrolled() -> (String, u32, String) {
+        let euid = nix::unistd::geteuid();
+        let name = nix::unistd::User::from_uid(euid)
+            .unwrap()
+            .expect("the test runs as an account with a passwd entry")
+            .name;
+        let section = maknae_config::enroll_section(
+            &maknae_config::Section::Absent,
+            None,
+            &name,
+            euid.as_raw(),
+            |_| None,
+        )
+        .unwrap()
+        .unwrap();
+        let bytes = format!(
+            "# written by sudo maknae enroll: {name} holds admin\n{}",
+            maknae_config::section_body(&section)
+        );
+        (name, euid.as_raw(), bytes)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_enroll_section_boots_and_the_principal_stays_admin_after_a_contain() {
+        let (_, euid, bytes) = enrolled();
+        assert_eq!(principal().uid, euid);
+        let fx = fixture("enroll-boot", RELEASE_TO_ADMIN, Some(&bytes)).await;
+        assert!(matches!(
+            fx.decide_action(euid, "admin.whoami"),
+            maknae_security::Verdict::Permit { .. }
+        ));
+        assert_eq!(
+            answer_code(&fx.contain(ContainTarget::Uid(4242), euid, "r").await),
+            ContainmentOutcome::Contained
+        );
+        assert_eq!(fx.decide_uid(4242), adversary());
+        assert!(matches!(
+            fx.decide_action(euid, "admin.whoami"),
+            maknae_security::Verdict::Permit { .. }
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn re_enroll_over_a_keyless_store_is_a_root_edit() {
+        let (name, euid, bytes) = enrolled();
+        let fx = fixture("enroll-keyless", AUTHZ, Some("schema_version: 1\n")).await;
+        fx.write_bindings(&bytes);
+        let from = fx.seen().len();
+        let applied = bounded(fx.reloader.run()).await.unwrap();
+        assert!(applied.persisted);
+        assert_eq!(transitions_seen(&fx, from), ["intent recorded (root-file)"]);
+        assert_eq!(
+            maknae_config::Section::of(fx.reloader.applied_source.read().unwrap().bindings())
+                .roles_of(&BindingEntry::Name(name)),
+            ["admin"].into(),
+            "admin by binding"
+        );
+        assert_eq!(whoami_as(&fx, euid).1, Some("admin"));
+        assert_eq!(fx.sync_lines(), ["unsynced=0", "conflict=0"]);
+    }
 }
 
 #[cfg(test)]

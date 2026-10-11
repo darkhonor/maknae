@@ -5,10 +5,11 @@
 //! adds the host-wide `seal.pub`. It does NOT
 //! include packaging-created rows (`/var/log/maknae`, `/var/log/maknae/audit.jsonl`,
 //! `/run/maknae`, `/usr/local/var/run/maknae`) — those ship with PR-J2's package
-//! scriptlets (spec §9.2), never touched here — nor `authz.yaml` or `bindings.yaml`
-//! (also packaging's: spec §7/§9 ships the default capability-grant policy; §4.1's
-//! step list never has enroll write it). `config.d/` is likewise excluded: enroll
-//! never creates it ("if present").
+//! scriptlets (spec §9.2), never touched here — nor `authz.yaml` (also packaging's:
+//! spec §7/§9 ships the default capability-grant policy; §4.1's step list never has
+//! enroll write it). `bindings.yaml` is not a row either: enroll merges the enrolling
+//! user into it through `policy_sync`, from a fresh read, rather than writing fixed
+//! bytes. `config.d/` is likewise excluded: enroll never creates it ("if present").
 //!
 //! Each row is symbolic on purpose: [`Owner`] names a *class* of owner (resolved to
 //! a real uid/gid by `artifact_write.rs` at write time, via passwd/group lookups or
@@ -524,6 +525,7 @@ mod tests {
         assert!(!got.iter().any(|a| a.path.ends_with("authz.yaml")));
     }
 
+    // bindings.yaml is merged by enroll through policy_sync::install, never laid down as a row.
     #[test]
     fn bindings_yaml_is_absent() {
         for macos in [false, true] {
