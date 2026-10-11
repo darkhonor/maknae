@@ -255,6 +255,42 @@ enum Verb {
     },
 }
 
+impl Verb {
+    /// The verb's kind, for messages that must not carry its operands.
+    fn kind(&self) -> &'static str {
+        match self {
+            Verb::Ping => "ping",
+            Verb::Whoami => "whoami",
+            Verb::Read { .. } => "read",
+            Verb::Write { .. } => "write",
+            Verb::Delete { .. } => "delete",
+            Verb::Mkdir { .. } => "mkdir",
+            Verb::AdminStatus => "status",
+            Verb::AdminConfigShow => "config show",
+            Verb::AdminSubjectList => "subject list",
+            Verb::AdminBaselineShow => "baseline show",
+            Verb::AdminBaselineAccept { .. } => "baseline accept",
+            Verb::Contain { .. } => "contain",
+            Verb::Release { .. } => "release",
+        }
+    }
+}
+
+/// A payload's kind, for messages that must not carry its content.
+fn payload_kind(p: &Payload) -> &'static str {
+    match p {
+        Payload::Pong => "pong",
+        Payload::Whoami(_) => "whoami",
+        Payload::ConfigView(_) => "config view",
+        Payload::Status(_) => "status",
+        Payload::SubjectList(_) => "subject list",
+        Payload::MutationAttempt(_) => "mutation attempt",
+        Payload::PromptReply(_) => "prompt reply",
+        Payload::Baseline(_) => "baseline view",
+        Payload::Containment(_) => "containment",
+    }
+}
+
 /// The accept operand; Debug shows only the prefix the trail carries.
 #[derive(Clone, PartialEq, Eq)]
 struct AcceptHash(String);
@@ -869,7 +905,8 @@ fn containment_line(verb: &Verb, v: &maknae_proto::ContainmentView) -> Result<St
     use maknae_proto::ContainmentOutcome as O;
     if !matches!(verb, Verb::Contain { .. } | Verb::Release { .. }) {
         return Err(format!(
-            "protocol error: daemon returned a containment payload for a {verb:?} request"
+            "protocol error: daemon returned a containment payload for a {} request",
+            verb.kind()
         ));
     }
     let landed = |what: &str| match (v.target_uid, v.revision) {
@@ -1118,7 +1155,9 @@ fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
         | (v, p @ Payload::PromptReply(_))
         | (v, p @ Payload::Baseline(_))
         | (v, p @ Payload::Containment(_)) => Err(format!(
-            "protocol error: daemon returned a {p:?} payload for a {v:?} request"
+            "protocol error: daemon returned a {} payload for a {} request",
+            payload_kind(&p),
+            v.kind()
         )),
     }
 }
@@ -2192,6 +2231,53 @@ mod tests {
             peer_uid: 1000,
         };
         assert!(print_payload_for_verb(Verb::Whoami, Payload::Whoami(w)).is_ok());
+    }
+
+    #[test]
+    fn a_mismatched_payload_error_names_the_kinds_and_never_the_operands() {
+        let sentinel = "sentinel-name-6d0f";
+        let contain = Verb::Contain {
+            target: maknae_proto::ContainTarget::Name(sentinel.into()),
+            reason: "sentinel-reason-6d0f".into(),
+        };
+        let release = Verb::Release {
+            target: maknae_proto::ContainTarget::Name(sentinel.into()),
+        };
+        for v in [&contain, &release] {
+            assert!(!format!("{v:?}").contains("sentinel"), "{v:?}");
+        }
+        let e = print_payload_for_verb(contain, Payload::Pong).unwrap_err();
+        assert_eq!(
+            e,
+            "protocol error: daemon returned a pong payload for a contain request"
+        );
+        let e = print_payload_for_verb(
+            release,
+            Payload::Whoami(maknae_proto::WhoamiView {
+                peer_plane_uri_san: "urn:maknae:plane:cli".into(),
+                peer_uid: 1000,
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(
+            e,
+            "protocol error: daemon returned a whoami payload for a release request"
+        );
+        let e = containment_line(
+            &Verb::AdminBaselineAccept {
+                hash: "sentinel-hash-6d0f".to_string().into(),
+            },
+            &maknae_proto::ContainmentView {
+                outcome: maknae_proto::ContainmentOutcome::Contained,
+                target_uid: Some(1),
+                revision: Some(1),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            e,
+            "protocol error: daemon returned a containment payload for a baseline accept request"
+        );
     }
 
     #[test]

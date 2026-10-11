@@ -393,12 +393,46 @@ pub enum BoundRole {
     Guest,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A live identity edit; `Debug` prints each name's length only.
+#[derive(Clone, PartialEq, Eq)]
 pub enum LiveEdit {
     Contain(BindingEntry),
     ReleaseUid { uid: u32, names: BTreeSet<String> },
     Bind { name: String, role: BoundRole },
     Unbind(String),
+}
+
+struct NameLen<'a>(&'a str);
+
+impl std::fmt::Debug for NameLen<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<{} bytes>", self.0.len())
+    }
+}
+
+impl std::fmt::Debug for LiveEdit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Contain(BindingEntry::Name(n)) => {
+                write!(f, "Contain(Name({:?}))", NameLen(n))
+            }
+            Self::Contain(BindingEntry::Uid(u)) => write!(f, "Contain(Uid({u}))"),
+            Self::ReleaseUid { uid, names } => f
+                .debug_struct("ReleaseUid")
+                .field("uid", uid)
+                .field(
+                    "names",
+                    &names.iter().map(|n| NameLen(n)).collect::<Vec<_>>(),
+                )
+                .finish(),
+            Self::Bind { name, role } => f
+                .debug_struct("Bind")
+                .field("name", &NameLen(name))
+                .field("role", role)
+                .finish(),
+            Self::Unbind(n) => f.debug_tuple("Unbind").field(&NameLen(n)).finish(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -572,6 +606,37 @@ pub fn enroll_section(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_live_edit_debugs_every_name_as_a_length_only() {
+        let sentinel = "sentinel-name-6d0f";
+        let edits = [
+            LiveEdit::Contain(BindingEntry::Name(sentinel.into())),
+            LiveEdit::ReleaseUid {
+                uid: 7,
+                names: [sentinel.to_string()].into(),
+            },
+            LiveEdit::Bind {
+                name: sentinel.into(),
+                role: BoundRole::Admin,
+            },
+            LiveEdit::Unbind(sentinel.into()),
+        ];
+        let shown: Vec<String> = edits.iter().map(|e| format!("{e:?}")).collect();
+        assert_eq!(
+            shown,
+            [
+                "Contain(Name(<18 bytes>))",
+                "ReleaseUid { uid: 7, names: [<18 bytes>] }",
+                "Bind { name: <18 bytes>, role: Admin }",
+                "Unbind(<18 bytes>)",
+            ]
+        );
+        assert_eq!(
+            format!("{:?}", LiveEdit::Contain(BindingEntry::Uid(4242))),
+            "Contain(Uid(4242))"
+        );
+    }
     use crate::{parse_bindings, Bindings};
 
     fn release(e: &BindingEntry) -> LiveEdit {
