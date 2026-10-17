@@ -46,7 +46,9 @@ impl std::fmt::Display for CallError {
         match self {
             CallError::Transport(m) => write!(f, "provider call failed: {m}"),
             CallError::Status { code, .. } => write!(f, "provider answered {code}"),
-            CallError::Reply { error, .. } => write!(f, "{error}"),
+            CallError::Reply { error, .. } => {
+                write!(f, "provider reply unusable: {}", error.defect().name())
+            }
         }
     }
 }
@@ -58,11 +60,9 @@ impl std::fmt::Debug for CallError {
             CallError::Status { code, body, .. } => {
                 write!(f, "Status {{ {code}, <{} bytes> }}", body.len())
             }
-            CallError::Reply { error, usage } => f
-                .debug_struct("Reply")
-                .field("error", error)
-                .field("usage", usage)
-                .finish(),
+            CallError::Reply { error, usage } => {
+                write!(f, "Reply {{ {}, {usage:?} }}", error.defect().name())
+            }
         }
     }
 }

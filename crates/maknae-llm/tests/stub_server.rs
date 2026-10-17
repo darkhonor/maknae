@@ -146,6 +146,22 @@ async fn a_malformed_reply_is_a_refusal_not_an_empty_success() {
     }
 }
 
+#[tokio::test]
+async fn an_unusable_reply_renders_no_provider_text() {
+    let unknown = r#"{"choices":[{"message":{"tool_calls":[{"id":"c1","function":{"name":"SENTINEL-524-tool","arguments":"{}"}}]}}]}"#;
+    let malformed = r#"{"choices":SENTINEL-524-body sk-test-not-a-real-key"#;
+    for (body, defect) in [(unknown, "unknown-tool"), (malformed, "malformed")] {
+        let (url, _h) = stub("200 OK", body).await;
+        let e = call(&url, &["read_file".to_string()]).await.unwrap_err();
+        for shown in [e.to_string(), format!("{e:?}")] {
+            assert!(!shown.contains("SENTINEL"), "{shown}");
+            assert!(!shown.contains("sk-test-not-a-real-key"), "{shown}");
+            assert!(shown.contains(defect), "{shown}");
+        }
+        assert_eq!(e.to_string(), format!("provider reply unusable: {defect}"));
+    }
+}
+
 /// A 401 is a refusal carrying the CODE and not the body: a provider error body
 /// is third-party content and must not be echoed into the trail or the terminal.
 #[tokio::test]
@@ -243,14 +259,6 @@ async fn a_body_with_no_declared_length_is_bounded_as_it_arrives() {
 /// three carries provider content: `Status` carries the CODE alone, because a
 /// provider error body is third-party content that must not reach the trail
 /// through a Display impl.
-///
-/// *(Scoped 2026-09-22, #344: this read "Every call refusal renders actionably,
-/// and none renders provider content", which generalises past the three cases
-/// below and is false of a fourth. `CallError::Reply { error: ReplyError::Malformed(_), .. }`
-/// carries serde_json's diagnostic, and serde quotes the offending value — so
-/// a malformed provider body does reach a Display impl. `maknae-llm`'s
-/// `every_refusal_renders_actionably_and_echoes_no_content` records the
-/// measurement.)*
 #[test]
 fn every_call_refusal_renders_actionably() {
     let cases = [
@@ -271,7 +279,7 @@ fn every_call_refusal_renders_actionably() {
                 error: ReplyError::NoChoices,
                 usage: None,
             },
-            "no choices",
+            "no-choices",
         ),
     ];
     for (e, needle) in cases {
