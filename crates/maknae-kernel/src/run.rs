@@ -2225,7 +2225,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                     match crate::egress::admitted_reply(&r.reply) {
                         Err(refusal) => (
                             crate::egress::SendOutcome::LandedUndelivered {
-                                reply_length: n,
+                                reply_length: Some(n),
                                 refusal,
                                 usage: r.reply.usage,
                             },
@@ -2247,7 +2247,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                             } else {
                                 (
                                     crate::egress::SendOutcome::LandedUndelivered {
-                                        reply_length: n,
+                                        reply_length: Some(n),
                                         refusal: crate::egress::ReplyRefusal::Oversize,
                                         usage: reply.usage,
                                     },
@@ -2339,25 +2339,10 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                             }
                         }
                     }
-                    // The outcome record above already names the refusal; no
-                    // second corrective record.
-                    (
-                        crate::egress::SendOutcome::LandedUndelivered {
-                            refusal: crate::egress::ReplyRefusal::Oversize,
-                            ..
-                        },
-                        None,
-                    ) => {
-                        write_error_bounded(
-                            &mut stream,
-                            &cfg,
-                            class,
-                            ProtoErrCode::TooLarge,
-                            "response exceeds the configured frame limit",
-                        )
-                        .await
+                    (crate::egress::SendOutcome::LandedUndelivered { refusal, .. }, None) => {
+                        let (code, message) = crate::egress::refusal_answer(refusal);
+                        write_error_bounded(&mut stream, &cfg, class, code, message).await
                     }
-                    // Failed, DeadlineExpired, and the non-text / empty refusals.
                     (_, None) => {
                         write_error_bounded(
                             &mut stream,

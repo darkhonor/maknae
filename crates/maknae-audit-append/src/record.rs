@@ -73,11 +73,11 @@ pub struct Integrity {
 /// same unknown reached another way — the kernel had begun writing the
 /// request to the deputy and the exchange failed after that, short of the
 /// deadline: the deputy hung
-/// up (its provider call failed or timed out), or its reply was malformed or
+/// up, or its reply was malformed or
 /// over the cap; `LandedUndelivered` keeps
 /// ADR-0023 decision 3's meaning: the egress went out, the reply arrived, and
 /// it never reached the loop. The kernel refuses delivery for the reasons
-/// `maknae_kernel::egress::ReplyRefusal` names, each in `reason`. A response-write timeout or a closed connection is
+/// `maknae_kernel::egress::ReplyRefusal` names, or the Egress Daemon found the provider's answer unusable; each in `reason`. A response-write timeout or a closed connection is
 /// not detected on any verb yet and is #240's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EgressStatus {
