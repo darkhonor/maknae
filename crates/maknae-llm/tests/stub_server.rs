@@ -116,10 +116,32 @@ async fn a_tool_call_reply_arrives_as_a_proposal() {
 }
 
 #[tokio::test]
+async fn a_token_limit_reply_carries_the_providers_usage() {
+    let body = r#"{"choices":[{"message":{"content":""},"finish_reason":"length"}],"usage":{"prompt_tokens":11,"completion_tokens":5}}"#;
+    let (url, _h) = stub("200 OK", body).await;
+    match call(&url, &[]).await {
+        Err(CallError::Reply {
+            error: ReplyError::TokenLimit,
+            usage,
+        }) => assert_eq!(
+            usage,
+            Some(maknae_proto::Usage {
+                prompt_tokens: 11,
+                completion_tokens: Some(5)
+            })
+        ),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn a_malformed_reply_is_a_refusal_not_an_empty_success() {
     let (url, _h) = stub("200 OK", "this is not json").await;
     match call(&url, &[]).await {
-        Err(CallError::Reply(ReplyError::Malformed(_))) => {}
+        Err(CallError::Reply {
+            error: ReplyError::Malformed(_),
+            ..
+        }) => {}
         other => panic!("expected a malformed refusal, got {other:?}"),
     }
 }
@@ -175,7 +197,10 @@ async fn a_lying_content_length_over_the_cap_is_refused_on_the_declaration() {
     match maknae_llm::chat_completion(&url, &key(), &req("m"), &[], Duration::from_secs(5), 1024)
         .await
     {
-        Err(CallError::Transport(m)) => assert!(
+        Err(CallError::Reply {
+            error: ReplyError::Unacceptable(m),
+            usage: None,
+        }) => assert!(
             m.contains("declared") && m.contains("cap"),
             "expected the DECLARED-length refusal, got: {m}"
         ),
@@ -203,7 +228,10 @@ async fn a_body_with_no_declared_length_is_bounded_as_it_arrives() {
     match maknae_llm::chat_completion(&url, &key(), &req("m"), &[], Duration::from_secs(5), 16)
         .await
     {
-        Err(CallError::Transport(m)) => assert!(
+        Err(CallError::Reply {
+            error: ReplyError::Unacceptable(m),
+            usage: None,
+        }) => assert!(
             m.contains("exceeded") && m.contains("cap"),
             "expected the ACCUMULATED-body refusal, got: {m}"
         ),
@@ -218,7 +246,7 @@ async fn a_body_with_no_declared_length_is_bounded_as_it_arrives() {
 ///
 /// *(Scoped 2026-09-22, #344: this read "Every call refusal renders actionably,
 /// and none renders provider content", which generalises past the three cases
-/// below and is false of a fourth. `CallError::Reply(ReplyError::Malformed(_))`
+/// below and is false of a fourth. `CallError::Reply { error: ReplyError::Malformed(_), .. }`
 /// carries serde_json's diagnostic, and serde quotes the offending value — so
 /// a malformed provider body does reach a Display impl. `maknae-llm`'s
 /// `every_refusal_renders_actionably_and_echoes_no_content` records the
@@ -238,7 +266,13 @@ fn every_call_refusal_renders_actionably() {
             },
             "401",
         ),
-        (CallError::Reply(ReplyError::NoChoices), "no choices"),
+        (
+            CallError::Reply {
+                error: ReplyError::NoChoices,
+                usage: None,
+            },
+            "no choices",
+        ),
     ];
     for (e, needle) in cases {
         let r = e.to_string();
@@ -297,7 +331,10 @@ async fn an_over_cap_body_is_refused() {
     )
     .await
     {
-        Err(CallError::Transport(m)) => assert!(m.contains("cap"), "{m}"),
+        Err(CallError::Reply {
+            error: ReplyError::Unacceptable(m),
+            usage: None,
+        }) => assert!(m.contains("cap"), "{m}"),
         other => panic!("expected an over-cap refusal, got {other:?}"),
     }
 }

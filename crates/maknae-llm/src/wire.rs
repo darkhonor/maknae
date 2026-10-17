@@ -228,16 +228,16 @@ impl std::fmt::Display for ReplyError {
 }
 
 impl ReplyError {
-    /// The closed name the deputy journals; never provider bytes.
-    pub fn defect(&self) -> &'static str {
+    pub fn defect(&self) -> maknae_proto::ReplyDefect {
+        use maknae_proto::ReplyDefect as D;
         match self {
-            ReplyError::Malformed(_) => "Malformed",
-            ReplyError::NoChoices => "NoChoices",
-            ReplyError::EmptyMessage => "Empty",
-            ReplyError::TokenLimit => "TokenLimit",
-            ReplyError::ReasoningOnly => "ReasoningOnly",
-            ReplyError::UnknownTool(_) => "UnknownTool",
-            ReplyError::Unacceptable(_) => "OverBound",
+            ReplyError::Malformed(_) => D::Malformed,
+            ReplyError::NoChoices => D::NoChoices,
+            ReplyError::EmptyMessage => D::Empty,
+            ReplyError::TokenLimit => D::TokenLimit,
+            ReplyError::ReasoningOnly => D::ReasoningOnly,
+            ReplyError::UnknownTool(_) => D::UnknownTool,
+            ReplyError::Unacceptable(_) => D::OverBound,
         }
     }
 }
@@ -251,7 +251,7 @@ pub enum ReplyNotice {
 impl ReplyNotice {
     pub fn name(&self) -> &'static str {
         match self {
-            ReplyNotice::ReasoningOverBound => "ReasoningOverBound",
+            ReplyNotice::ReasoningOverBound => "reasoning-over-bound",
         }
     }
 }
@@ -262,6 +262,15 @@ pub struct Completion {
     pub notice: Option<ReplyNotice>,
 }
 
+pub fn usage_of(resp: &ChatResponse) -> Option<maknae_proto::Usage> {
+    resp.usage.as_ref().and_then(|v| {
+        Some(maknae_proto::Usage {
+            prompt_tokens: v.get("prompt_tokens")?.as_u64()?,
+            completion_tokens: v.get("completion_tokens").and_then(|c| c.as_u64()),
+        })
+    })
+}
+
 /// Map a parsed provider response into Maknae's reply type.
 ///
 /// `offered` is the set of tool names this deployment put on the request. A
@@ -269,12 +278,7 @@ pub struct Completion {
 /// PROPOSES and the PDP authorizes, so a model that invents a tool name is
 /// proposing outside the vocabulary it was given.
 pub fn to_prompt_reply(resp: ChatResponse, offered: &[String]) -> Result<Completion, ReplyError> {
-    let usage = resp.usage.as_ref().and_then(|v| {
-        Some(maknae_proto::Usage {
-            prompt_tokens: v.get("prompt_tokens")?.as_u64()?,
-            completion_tokens: v.get("completion_tokens").and_then(|c| c.as_u64()),
-        })
-    });
+    let usage = usage_of(&resp);
     let choice = resp
         .choices
         .into_iter()
@@ -351,11 +355,14 @@ fn reply_line(lead: &str, conversation: &str, name: &str) -> zeroize::Zeroizing<
 }
 
 /// One journal line for a refused reply. `conversation` is admission-checked to `[A-Za-z0-9._-]`.
-pub fn defect_line(conversation: &str, name: &str) -> zeroize::Zeroizing<String> {
+pub fn defect_line(
+    conversation: &str,
+    defect: maknae_proto::ReplyDefect,
+) -> zeroize::Zeroizing<String> {
     reply_line(
         "maknae-egress: provider reply unusable (conversation ",
         conversation,
-        name,
+        defect.name(),
     )
 }
 
@@ -1447,33 +1454,39 @@ mod tests {
 
     #[test]
     fn every_defect_has_a_closed_name() {
-        let cases = [
-            (ReplyError::Malformed("x".into()), "Malformed"),
-            (ReplyError::NoChoices, "NoChoices"),
-            (ReplyError::EmptyMessage, "Empty"),
-            (ReplyError::TokenLimit, "TokenLimit"),
-            (ReplyError::ReasoningOnly, "ReasoningOnly"),
-            (ReplyError::UnknownTool("x".into()), "UnknownTool"),
-            (ReplyError::Unacceptable("x".into()), "OverBound"),
-        ];
-        for (e, name) in cases {
-            assert_eq!(e.defect(), name);
+        use maknae_proto::ReplyDefect;
+        for (e, want) in [
+            (ReplyError::Malformed("x".into()), ReplyDefect::Malformed),
+            (ReplyError::NoChoices, ReplyDefect::NoChoices),
+            (ReplyError::EmptyMessage, ReplyDefect::Empty),
+            (ReplyError::TokenLimit, ReplyDefect::TokenLimit),
+            (ReplyError::ReasoningOnly, ReplyDefect::ReasoningOnly),
+            (
+                ReplyError::UnknownTool("t".into()),
+                ReplyDefect::UnknownTool,
+            ),
+            (ReplyError::Unacceptable("x".into()), ReplyDefect::OverBound),
+        ] {
+            assert_eq!(e.defect(), want);
         }
-        assert_eq!(ReplyNotice::ReasoningOverBound.name(), "ReasoningOverBound");
+        assert_eq!(
+            ReplyNotice::ReasoningOverBound.name(),
+            "reasoning-over-bound"
+        );
     }
 
     #[test]
     fn the_defect_and_notice_lines_carry_only_the_conversation_and_the_name_and_never_grow() {
-        let d = defect_line("c1", "Malformed");
+        let d = defect_line("c1", maknae_proto::ReplyDefect::Malformed);
         assert_eq!(
             d.as_str(),
-            "maknae-egress: provider reply unusable (conversation c1): Malformed"
+            "maknae-egress: provider reply unusable (conversation c1): malformed"
         );
         assert_eq!(d.capacity(), d.len());
-        let n = notice_line("conv-2", "ReasoningOverBound");
+        let n = notice_line("conv-2", "reasoning-over-bound");
         assert_eq!(
             n.as_str(),
-            "maknae-egress: provider reply forwarded without its reasoning (conversation conv-2): ReasoningOverBound"
+            "maknae-egress: provider reply forwarded without its reasoning (conversation conv-2): reasoning-over-bound"
         );
         assert_eq!(n.capacity(), n.len());
     }

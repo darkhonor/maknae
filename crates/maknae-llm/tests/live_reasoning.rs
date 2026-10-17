@@ -92,7 +92,10 @@ async fn a_live_reply_cut_while_reasoning_is_token_limit() {
     println!("{e}");
     assert!(matches!(
         e,
-        maknae_llm::CallError::Reply(ReplyError::TokenLimit)
+        maknae_llm::CallError::Reply {
+            error: ReplyError::TokenLimit,
+            ..
+        }
     ));
 }
 
@@ -121,7 +124,7 @@ async fn a_live_server_accepts_resent_reasoning_content() {
     };
     let accepted = |r: Result<maknae_llm::Completion, maknae_llm::CallError>| match r {
         Ok(c) => c.reply.usage.map(|u| u.prompt_tokens),
-        Err(maknae_llm::CallError::Reply(e)) => {
+        Err(maknae_llm::CallError::Reply { error: e, .. }) => {
             println!("server accepted the request; the reply was refused: {e}");
             None
         }
