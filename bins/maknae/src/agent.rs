@@ -328,10 +328,8 @@ pub fn check_for(basis: ReadBasis) -> crate::mutation::WriteCheck {
 /// `prompt fails operand pre-gate: …` before it writes the `BadRequest` back,
 /// and it writes that error only under `may_respond(appended)`, so a subject
 /// who saw it is proof the record landed. Both facts, and neither more: no
-/// provider contact, and a recorded pre-gate deny. Every OTHER refusal code
-/// stays `Refused`, because the
-/// kernel answers `LandedUndelivered`, `DeadlineExpired` and `OutcomeUnknown`
-/// with the same generic `Unauthorized` and the prompt may well have landed.
+/// provider contact, and a recorded pre-gate deny. `ReplyUnusable` carries the
+/// provider-side reason (#524).
 pub fn prompt_outcome(
     sent: Result<SentOutcome, String>,
 ) -> Result<maknae_proto::PromptReply, PlaneError> {
@@ -341,6 +339,10 @@ pub fn prompt_outcome(
             code: maknae_proto::ProtoErrCode::BadRequest,
             ..
         }) => Err(PlaneError::Malformed),
+        Ok(SentOutcome::Refused {
+            code: maknae_proto::ProtoErrCode::ReplyUnusable(d),
+            ..
+        }) => Err(PlaneError::ReplyUnusable(d)),
         Ok(SentOutcome::Refused { .. }) => Err(PlaneError::Refused),
         Ok(other) => Err(PlaneError::Transport(format!(
             "protocol error: unexpected reply to session.prompt: {other:?}"
@@ -500,6 +502,23 @@ impl Plane for RealPlane<'_> {
     }
 }
 
+pub fn reply_unusable_line(d: maknae_proto::ReplyDefect) -> &'static str {
+    use maknae_proto::ReplyDefect as D;
+    match d {
+        D::Malformed => "the provider's reply was not a chat completion: check that this entry's endpoint and model are OpenAI-compatible",
+        D::NoChoices => "the provider's reply carried no answer: retry, or choose another model",
+        D::Empty => "the provider's reply was empty: retry, or choose another model",
+        D::ReasoningOnly => "the model reasoned but gave no final answer: retry, or choose another model",
+        D::TokenLimit => "the model reached its reply token limit before answering: raise output_tokens for this entry in your providers.yaml",
+        D::UnknownTool => "the model asked for a tool Maknae does not offer: choose another model",
+        D::OverBound => "the model's reply exceeded a platform limit: ask for the work in smaller pieces",
+        D::ProviderAuth => "the provider refused the key: check the key stored in your Vault secret for this entry, and that your login is current (maknae login)",
+        D::ProviderRateLimit => "the provider is rate-limiting this key: wait and retry, or check your quota with the provider",
+        D::ProviderRejected => "the provider rejected the request: check this entry's model name, and ask your administrator for the provider's reason in the Egress Daemon's journal",
+        D::ProviderError => "the provider failed to answer: retry later",
+    }
+}
+
 pub fn stop_line(r: Option<&StopReason>, budget: &Budget) -> String {
     match r {
         Some(StopReason::StepBudget) => format!(
@@ -537,6 +556,7 @@ pub fn stop_line(r: Option<&StopReason>, budget: &Budget) -> String {
             "stopped: the kernel refused the prompt as malformed before any provider contact (the trail records the pre-gate deny)"
                 .into()
         }
+        Some(StopReason::ReplyUnusable(d)) => format!("stopped: {}", reply_unusable_line(*d)),
         Some(StopReason::Transport(m)) => format!("stopped: {m}"),
         Some(StopReason::ContextBudget) => "stopped: the conversation has reached the declared context budget; compaction arrives with #171".into(),
         None => "stopped".into(),
@@ -1154,15 +1174,38 @@ mod tests {
         );
     }
     #[test]
+    fn a_reply_unusable_refusal_is_its_own_plane_error() {
+        for d in maknae_proto::ReplyDefect::ALL {
+            assert_eq!(
+                prompt_outcome(Ok(SentOutcome::Refused {
+                    code: maknae_proto::ProtoErrCode::ReplyUnusable(d),
+                    message: "reply unusable".into(),
+                    armed: false,
+                })),
+                Err(PlaneError::ReplyUnusable(d)),
+            );
+        }
+    }
+    #[test]
+    fn every_reply_defect_has_a_distinct_line_that_never_blames_authorization() {
+        let b = Budget {
+            max_steps: 8,
+            max_tool_calls_per_step: 4,
+        };
+        let mut seen = std::collections::HashSet::new();
+        for d in maknae_proto::ReplyDefect::ALL {
+            let line = stop_line(Some(&StopReason::ReplyUnusable(d)), &b);
+            assert!(line.starts_with("stopped: "), "{line}");
+            assert!(!line.contains("authorized"), "{d:?}: {line}");
+            assert!(!line.contains(PROMPT_REFUSED), "{d:?}");
+            assert!(seen.insert(line), "{d:?} shares its line");
+        }
+        let line = |d| stop_line(Some(&StopReason::ReplyUnusable(d)), &b);
+        assert!(line(maknae_proto::ReplyDefect::TokenLimit).contains("output_tokens"));
+        assert!(line(maknae_proto::ReplyDefect::ProviderAuth).contains("maknae login"));
+    }
+    #[test]
     fn a_prompt_is_malformed_only_for_bad_request_and_refused_for_every_other_code() {
-        // The control: `maknae agent "   "` is refused `BadRequest` for
-        // carrying no text to send, and that refusal is decided BEFORE any
-        // exchange — no egress block, no intent record, so nothing reached the
-        // provider; what the trail holds is the pre-gate deny, not an egress
-        // intent. Every other refusal code keeps `Refused`, because
-        // `LandedUndelivered`, `DeadlineExpired` and
-        // `OutcomeUnknown` all arrive as the same generic `Unauthorized` and
-        // the prompt may well have landed.
         use maknae_proto::{Payload, PromptReply, ProtoErrCode};
         let refused = |code| {
             prompt_outcome(Ok(SentOutcome::Refused {

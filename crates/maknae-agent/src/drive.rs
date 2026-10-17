@@ -22,6 +22,7 @@ pub enum StopReason {
     FrameBound,
     PromptRefused,
     PromptMalformed,
+    ReplyUnusable(maknae_proto::ReplyDefect),
     Transport(String),
     ContextBudget,
 }
@@ -141,6 +142,13 @@ pub async fn drive<P: Plane>(
                 return Outcome {
                     answer: None,
                     stopped: Some(StopReason::PromptMalformed),
+                    steps_used,
+                }
+            }
+            Err(PlaneError::ReplyUnusable(d)) => {
+                return Outcome {
+                    answer: None,
+                    stopped: Some(StopReason::ReplyUnusable(d)),
                     steps_used,
                 }
             }
@@ -967,6 +975,10 @@ mod tests {
             // prints a different line for it, because a pre-gate `BadRequest`
             // provably never reached the provider.
             (PlaneError::Malformed, StopReason::PromptMalformed),
+            (
+                PlaneError::ReplyUnusable(maknae_proto::ReplyDefect::TokenLimit),
+                StopReason::ReplyUnusable(maknae_proto::ReplyDefect::TokenLimit),
+            ),
             (
                 PlaneError::Transport("t".into()),
                 StopReason::Transport("t".into()),

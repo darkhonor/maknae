@@ -121,6 +121,8 @@ pub enum PlaneError {
     /// pre-gate fault, decided before the exchange was attempted, so the
     /// prompt provably never reached the provider.
     Malformed,
+    /// The provider answered and the answer was unusable; nothing was delivered.
+    ReplyUnusable(maknae_proto::ReplyDefect),
 }
 
 pub trait Plane {
@@ -195,6 +197,7 @@ mod tests {
             PlaneError::Transport("t".into()),
             PlaneError::Refused,
             PlaneError::Malformed,
+            PlaneError::ReplyUnusable(maknae_proto::ReplyDefect::Empty),
         ];
         for (i, a) in errs.iter().enumerate() {
             assert_eq!(a.clone(), *a);
