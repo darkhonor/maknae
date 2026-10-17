@@ -103,6 +103,10 @@ impl std::fmt::Debug for EgressFrameRequest {
 pub enum EgressFrameReply {
     Reply(crate::PromptReply),
     RefusedBeforeSend,
+    Unusable {
+        defect: crate::ReplyDefect,
+        usage: Option<crate::Usage>,
+    },
 }
 
 /// The largest request frame that crosses the kernel→deputy socket, stated
@@ -202,6 +206,24 @@ pub fn egress_frame_request_is_acceptable(r: &EgressFrameRequest) -> bool {
 mod tests {
     use super::*;
     use zeroize::Zeroizing;
+
+    #[test]
+    fn an_unusable_reply_round_trips_with_and_without_usage() {
+        for usage in [
+            None,
+            Some(crate::Usage {
+                prompt_tokens: 7,
+                completion_tokens: Some(3),
+            }),
+        ] {
+            for defect in crate::ReplyDefect::ALL {
+                let r = EgressFrameReply::Unusable { defect, usage };
+                let buf =
+                    crate::encode_egress_frame_reply(&r, EGRESS_REPLY_FRAME_ENCODE_BYTES).unwrap();
+                assert_eq!(crate::decode_egress_frame_reply(&buf).unwrap(), r);
+            }
+        }
+    }
 
     /// By VALUE: a mutant turning `1024 * 1024` into 2048 or 1 survives every
     /// symbolic use on both ends.
