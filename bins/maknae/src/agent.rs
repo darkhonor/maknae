@@ -512,7 +512,7 @@ pub fn reply_unusable_line(d: maknae_proto::ReplyDefect) -> &'static str {
         D::TokenLimit => "the model reached its reply token limit before answering: raise output_tokens for this entry in your providers.yaml",
         D::UnknownTool => "the model asked for a tool Maknae does not offer: choose another model",
         D::OverBound => "the model's reply exceeded a platform limit: ask for the work in smaller pieces",
-        D::ProviderAuth => "the provider refused the key: check the key stored in your Vault secret for this entry, and that your login is current (maknae login)",
+        D::ProviderAuth => "the provider refused this key, or its access to this entry's model: check the key stored in your Vault secret for this entry, and the model name",
         D::ProviderRateLimit => "the provider is rate-limiting this key: wait and retry, or check your quota with the provider",
         D::ProviderRejected => "the provider rejected the request: check this entry's model name, and ask your administrator for the provider's reason in the Egress Daemon's journal",
         D::ProviderError => "the provider failed to answer: retry later",
@@ -1202,10 +1202,11 @@ mod tests {
         }
         let line = |d| stop_line(Some(&StopReason::ReplyUnusable(d)), &b);
         assert!(line(maknae_proto::ReplyDefect::TokenLimit).contains("output_tokens"));
-        assert!(line(maknae_proto::ReplyDefect::ProviderAuth).contains("maknae login"));
+        assert!(line(maknae_proto::ReplyDefect::ProviderAuth).contains("Vault secret"));
     }
     #[test]
-    fn a_prompt_is_malformed_only_for_bad_request_and_refused_for_every_other_code() {
+    fn a_prompt_is_malformed_only_for_bad_request_and_refused_for_every_other_code_but_reply_unusable(
+    ) {
         use maknae_proto::{Payload, PromptReply, ProtoErrCode};
         let refused = |code| {
             prompt_outcome(Ok(SentOutcome::Refused {

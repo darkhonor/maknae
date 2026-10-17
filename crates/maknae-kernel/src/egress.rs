@@ -92,8 +92,8 @@ pub struct EgressReply {
 /// `DeadlineExpired` is the backend's own budget running out after the
 /// request left (the kernel's outer timeout maps to the same outcome).
 /// [`SendOutcome::LandedUndelivered`] is the kernel's own
-/// refusal to deliver a reply that DID arrive, or the deputy's `ReplyDefect`,
-/// for one of [`ReplyRefusal`]'s reasons.
+/// refusal to deliver a reply that DID arrive, or the Egress Daemon's report
+/// that the provider's answer was unusable.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EgressFailure {
     NotConfigured,
@@ -487,7 +487,7 @@ pub fn content_measure(turns: &[Turn]) -> ContentMeasure {
     ContentMeasure { length, digest32 }
 }
 
-/// Why the kernel refused to deliver a reply that arrived: over the frame
+/// Why a reply that arrived was not delivered: over the frame
 /// cap (`TooLarge` on the wire), carrying a block kind this deployment does
 /// not admit, or empty.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -151,7 +151,7 @@ The deltas that follow from that, stated rather than left implicit:
   (`io.maknae.maknae-egress.plist:1-33`), and `bins/maknae-egress/src` installs no SIGTERM
   handler (grep, none). So a provider call in flight at shutdown is cut off (**inferred**). The
   kernel records that turn `OutcomeUnknown`, "the provider may have received the prompt"
-  (`crates/maknae-kernel/src/egress.rs:88-95,556-561`), not "nothing left". Recorded only; #76
+  (`crates/maknae-kernel/src/egress.rs:89-96,580-585`), not "nothing left". Recorded only; #76
   owes no change.
 - **(g)** `kickstart -k` restarts the definition launchd already holds (**Apple-documented**,
   `launchctl(1)`). An upgrade that changes a plist needs `bootout` plus `bootstrap`;

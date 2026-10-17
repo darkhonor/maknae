@@ -423,8 +423,8 @@ async fn a_non_text_reply_is_refused_for_delivery_and_recorded_landed_undelivere
     );
 }
 
-struct RateLimited;
-impl maknae_kernel::Egress for RateLimited {
+struct TokenLimited;
+impl maknae_kernel::Egress for TokenLimited {
     fn ready(&self) -> Result<(), maknae_kernel::EgressFailure> {
         Ok(())
     }
@@ -455,7 +455,7 @@ async fn an_unusable_reply_is_landed_undelivered_in_the_trail_and_named_on_the_w
             prompt("sentinel-524-tokenlimit"),
             Arc::clone(&records),
             Some("openai"),
-            Arc::new(RateLimited),
+            Arc::new(TokenLimited),
         )
         .await
         .expect("a refusal frame");
@@ -586,7 +586,7 @@ async fn unusable_replies_are_not_expiries_so_they_never_trip_the_breaker() {
                 prompt("hello world"),
                 Records::new(0),
                 Some("openai"),
-                Arc::new(RateLimited),
+                Arc::new(TokenLimited),
             )
             .await
             .expect("a refusal frame");

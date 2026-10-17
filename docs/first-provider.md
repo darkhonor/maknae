@@ -432,9 +432,11 @@ The intent is written before the action, every time. `content_length` on each pr
 
 Where a row below names `systemctl` or `journalctl`, it also gives the macOS form. The daemon writes to `/usr/local/var/log/maknae/maknaed.err` (`sudo tail /usr/local/var/log/maknae/maknaed.err`) and the deputy to `/usr/local/var/log/maknae-egress/maknae-egress.err`. `sudo` is required: their directories are `_maknae:_maknae 0750` and `_maknae-egress:_maknae-egress 0750`, and the administrator is in neither group.
 
-A kernel refusal reaches you only as one line, `PROMPT_REFUSED` below; the reason is in the audit trail, which only your administrator can read. `PROMPT_REFUSED` is this whole line, exit 2: A provider answer that could not be used reaches you as a different line, in "The provider's reply was unusable" below.
+A kernel refusal reaches you only as one line, `PROMPT_REFUSED` below; the reason is in the audit trail, which only your administrator can read. `PROMPT_REFUSED` is this whole line, exit 2:
 
 > maknae agent: stopped: the kernel refused the exchange — whether the prompt reached the provider is in the host's audit trail (ask your administrator); if it did not, check that your providers.yaml names a provider and model your administrator has authorized for your role and the key subpath and field of your own Vault secret, that your maknae.yaml vault block matches the host's, and that your login is current (maknae login)
+
+A provider answer that could not be used reaches you as a different line, in "The provider's reply was unusable" below.
 
 **Refused by the kernel.** You see `PROMPT_REFUSED`. In the trail, `session.prompt` is denied with the reason below; for the admission reasons the posture is `unauthorized` and the record has no `egress` block.
 
@@ -451,7 +453,7 @@ A kernel refusal reaches you only as one line, `PROMPT_REFUSED` below; the reaso
 | `destination not allowlisted for role <role>: provider:<name>` | your role may prompt, but not to that provider | add `provider:<name>` to your role's `destinations` (step 4, 4a) |
 | `egress backend not ready` | the deputy's socket is not running | `sudo systemctl enable --now maknae-egress.socket`; on macOS, step 5's loop |
 
-**The provider's reply was unusable.** The provider answered, but nothing was delivered. You see `maknae agent: stopped: ` and one of the lines below, exit 2. The trail records the prompt `permit`, `LandedUndelivered`, posture `unavailable`, reason `reply unusable: <name>`; the Egress Daemon's journal holds the detail (for a provider error, `maknae-egress: provider answered <code> (conversation …): <body, key masked>`; otherwise `maknae-egress: provider reply unusable (conversation …): <name>`). The turn is not resent.
+**The provider's reply was unusable.** The provider answered, but nothing was delivered. You see `maknae agent: stopped: ` and one of the lines below, exit 2. The trail records the prompt `permit`, `LandedUndelivered`, posture `unavailable`, reason `reply unusable: <name>`; the Egress Daemon's journal holds the detail (for a provider error, `maknae-egress: provider answered <code> (conversation …): <body, key masked>`; otherwise `maknae-egress: provider reply unusable (conversation …): <name>`). The turn is not resent. When the kernel itself finds the reply empty, a tool call over its bounds or reasoning over its bound (the Egress Daemon did not catch it first), the trail keeps `reply refused: empty`, `reply refused: tool call` or `reply refused: reasoning`, posture `unauthorized`, with a `reply_length`, and you see the `empty` or `over-bound` line. With a small daemon `transport.prompt_max_bytes`, several tool calls that are each within the bound can be refused together as over the frame cap: you see `PROMPT_REFUSED`, the trail records `reply refused: oversize` and `LandedUndelivered`, and the journal has no line.
 
 | You see (after "stopped: ") | `<name>` | Fix |
 |---|---|---|
@@ -459,10 +461,10 @@ A kernel refusal reaches you only as one line, `PROMPT_REFUSED` below; the reaso
 | `the provider's reply carried no answer: retry, or choose another model` | `no-choices` | as above |
 | `the provider's reply was empty: retry, or choose another model` | `empty` | retry, and check the server's reasoning parser and chat template |
 | `the model reasoned but gave no final answer: retry, or choose another model` | `reasoning-only` | retry, and check the server's reasoning parser and chat template |
-| `the model reached its reply token limit before answering: raise output_tokens for this entry in your providers.yaml` | `token-limit` | a reasoning model typically spent its whole budget thinking: raise the entry's `output_tokens` (step 3) |
+| `the model reached its reply token limit before answering: raise output_tokens for this entry in your providers.yaml` | `token-limit` | a reasoning model typically spent its whole budget thinking: raise the entry's `output_tokens` (step U3) |
 | `the model asked for a tool Maknae does not offer: choose another model` | `unknown-tool` | choose another model |
-| `the model's reply exceeded a platform limit: ask for the work in smaller pieces` | `over-bound` | a tool call failed its shape bounds, or the reply body was over the Egress Daemon's cap. `write_file`'s arguments may be at most 61,440 bytes (`docs/configuration.md` §6.1.1) and nothing was written; ask for a smaller file, or for the content in several files |
-| `the provider refused the key: check the key stored in your Vault secret for this entry, and that your login is current (maknae login)` | `provider-auth` | the provider answered 401 or 403: check the stored key (step U2) and your login (step U1) |
+| `the model's reply exceeded a platform limit: ask for the work in smaller pieces` | `over-bound` | a tool call failed its shape bounds (an empty `id` counts; a missing `id` is `malformed`), or the reply body was over the Egress Daemon's cap. `write_file`'s arguments may be at most 61,440 bytes (`docs/configuration.md` §6.1.1) and nothing was written; ask for a smaller file, or for the content in several files |
+| `the provider refused this key, or its access to this entry's model: check the key stored in your Vault secret for this entry, and the model name` | `provider-auth` | the provider answered 401 or 403: check the stored key (step U2) and the model name (step U3) |
 | `the provider is rate-limiting this key: wait and retry, or check your quota with the provider` | `provider-rate-limit` | the provider answered 429: wait and retry |
 | `the provider rejected the request: check this entry's model name, and ask your administrator for the provider's reason in the Egress Daemon's journal` | `provider-rejected` | another 4xx. The text after the colon in `provider answered <code>` is the provider's own reason, with the key masked. For `gpt-5.6-luna` it is the missing `reasoning_effort: none`; a server that names `max_completion_tokens` as unsupported needs `output_tokens_field: max_tokens` in step 3's entry |
 | `the provider failed to answer: retry later` | `provider-error` | the provider answered 5xx or an unrecognized status: retry later |
