@@ -450,13 +450,11 @@ pub fn redact(body: &mut zeroize::Zeroizing<Vec<u8>>, secret: &[u8]) {
     if secret.is_empty() {
         return;
     }
-    let mut i = 0;
-    while i + secret.len() <= body.len() {
-        if &body[i..i + secret.len()] == secret {
-            body[i..i + secret.len()].fill(b'*');
-            i += secret.len();
-        } else {
-            i += 1;
+    if let Some(last) = body.len().checked_sub(secret.len()) {
+        for i in 0..=last {
+            if &body[i..i + secret.len()] == secret {
+                body[i..i + secret.len()].fill(b'*');
+            }
         }
     }
     if let Some(k) = (1..secret.len())
@@ -1353,6 +1351,12 @@ mod tests {
         let mut untouched = zeroize::Zeroizing::new(b"abc".to_vec());
         redact(&mut untouched, b"");
         assert_eq!(&untouched[..], b"abc");
+        let mut exact = zeroize::Zeroizing::new(b"sk-SECRET-123".to_vec());
+        redact(&mut exact, b"sk-SECRET-123");
+        assert_eq!(&exact[..], b"*************");
+        let mut short = zeroize::Zeroizing::new(b"sk".to_vec());
+        redact(&mut short, b"sk-SECRET-123");
+        assert_eq!(&short[..], b"**");
     }
 
     /// The 4 KiB cut can fall inside an echoed key; what survives of it is a

@@ -134,6 +134,14 @@ mod tests {
     }
 
     #[test]
+    fn gid_zero_resolves_to_its_group_entry() {
+        let g = group(nix::unistd::Gid::from_raw(0))
+            .unwrap()
+            .expect("gid 0 exists");
+        assert_eq!(g.gid.as_raw(), 0);
+    }
+
+    #[test]
     fn a_daemon_group_with_no_entry_refuses() {
         assert_eq!(
             daemon_members(DAEMON_ACCOUNT, None),
