@@ -440,7 +440,8 @@ pub struct ContentMeasure {
 /// in order. Everything else on the
 /// frame and on the wire leaves the process undigested — among them the tool
 /// call's `name` and `call_id`, a `Tool` turn's `call_id`, the message roles
-/// and the tool call's `"function"` type, the frame's `model`, and the
+/// and the tool call's `"function"` type, the frame's `model`, the `{}` the
+/// deputy sends in place of a refused call's empty `arguments` (#426), and the
 /// preamble and tool definitions the deputy adds after the kernel is done
 /// with the frame. One consequence, stated because it is easy to assume
 /// otherwise: the feed carries NO separator and NO role tag, so

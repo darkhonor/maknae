@@ -179,7 +179,8 @@ pub async fn fulfil<O: KeyOpener>(
     // "trail == wire", the same overclaim the kernel struck at
     // `content_measure`): the deputy sends every `Text` block, every
     // `arguments` payload and every reasoning that `content_measure` digested, in order, with
-    // nothing dropped. The rule on the other side, stated rather than
+    // nothing dropped, except that a refused call's empty `arguments` go out as
+    // the constant `{}` (#426). The rule on the other side, stated rather than
     // enumerated: the digest covers exactly the `Text` bytes and every
     // proposed tool call's `arguments` and each assistant turn's reasoning, in
     // order, and everything else on the

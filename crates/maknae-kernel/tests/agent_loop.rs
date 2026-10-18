@@ -642,11 +642,17 @@ async fn an_over_bound_write_is_a_tool_error_its_sibling_read_runs_and_the_trail
         recs.iter().all(|r| r.action != "fs.write"),
         "the stub never reached the write verb"
     );
-    assert!(recs
+    let ops: Vec<_> = recs
         .iter()
         .filter_map(|r| r.mutation.as_ref())
         .filter_map(|m| m.operation)
-        .all(|o| o == maknae_audit_append::MutationOperation::Read));
+        .collect();
+    assert!(
+        !ops.is_empty()
+            && ops
+                .iter()
+                .all(|o| *o == maknae_audit_append::MutationOperation::Read)
+    );
     assert!(recs
         .iter()
         .any(|r| r.action == "fs.read" && r.outcome.result == "permit"));

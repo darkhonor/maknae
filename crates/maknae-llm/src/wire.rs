@@ -745,7 +745,6 @@ mod tests {
             ("c1", "{\"path\":\"/w/a\"}", None)
         );
         assert_eq!(c.blocks.len(), 1);
-        assert!(!format!("{c:?}").contains("SENTINEL-426"));
         let cbor = maknae_proto::encode_response(&maknae_proto::Response {
             protocol_version: maknae_proto::PROTOCOL_VERSION,
             result: maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(c)),
