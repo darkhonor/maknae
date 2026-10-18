@@ -728,7 +728,6 @@ pub const REPLY_BLOCK_ENVELOPE: usize = 32;
 /// headers): generous, and pinned by the widest-legal-reply no-grow test.
 pub const TOOL_CALL_ENVELOPE: usize = 64;
 
-/// Extra CBOR overhead for a refused-call marker (#426).
 pub const CALL_REFUSAL_ENVELOPE: usize = 64;
 
 /// CBOR overhead for a reply's reasoning: its key and a text-string header.
