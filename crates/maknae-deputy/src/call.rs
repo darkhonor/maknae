@@ -1054,6 +1054,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_over_bound_provider_call_reaches_the_kernel_frame_as_a_stub_in_its_slot() {
+        let big = format!(
+            "SENTINEL-426-{}",
+            "a".repeat(maknae_proto::MAX_TOOL_CALL_ARGS_BYTES)
+        );
+        let body: &'static str = Box::leak(
+            format!(
+                r#"{{"choices":[{{"message":{{"tool_calls":[{{"id":"c0","function":{{"name":"write_file","arguments":"{big}"}}}},{{"id":"c1","function":{{"name":"read_file","arguments":"{{\"path\":\"/w/a\"}}"}}}}]}}}}]}}"#
+            )
+            .into_boxed_str(),
+        );
+        let (r, _, _) = fulfil_against(body).await;
+        let out = maknae_proto::encode_egress_frame_reply(
+            &r.unwrap(),
+            maknae_proto::EGRESS_REPLY_FRAME_ENCODE_BYTES,
+        )
+        .unwrap();
+        assert!(!out.windows(12).any(|w| w == b"SENTINEL-426"));
+        let EgressFrameReply::Reply(reply) = maknae_proto::decode_egress_frame_reply(&out).unwrap()
+        else {
+            panic!("not a reply frame")
+        };
+        let calls = &reply.tool_calls;
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            (calls[0].call_id.as_str(), calls[0].arguments.0.as_str()),
+            ("c0", "")
+        );
+        assert_eq!(
+            calls[0].refused,
+            Some(maknae_proto::CallRefusal::ArgumentsOverBound {
+                bytes: big.len() as u64
+            })
+        );
+        assert_eq!(
+            (calls[1].arguments.0.as_str(), calls[1].refused),
+            (r#"{"path":"/w/a"}"#, None)
+        );
+    }
+
+    #[tokio::test]
     async fn an_assistant_turns_reasoning_is_sent_as_reasoning_content() {
         fips();
         let (url, h) = provider("200 OK", r#"{"choices":[{"message":{"content":"pong"}}]}"#).await;
