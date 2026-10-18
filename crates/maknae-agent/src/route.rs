@@ -614,15 +614,6 @@ mod tests {
         let e = serde_json::from_str::<WriteArgs>(r#"{"path":"/a","content":7}"#).unwrap_err();
         assert!(e.to_string().contains("a JSON string"), "{e}");
     }
-    /// codex round 1, important 1: serde's DERIVED struct visitor accepts a
-    /// positional ARRAY as well as a map, and `deny_unknown_fields` does not
-    /// turn that representation off — `["/allowed/file"]` deserialized into
-    /// `ReadArgs` and EXECUTED. The tool schemas the model is handed declare
-    /// objects with named properties, so an array is a malformed call, and it
-    /// is refused before anything is deserialized: parsing it into a
-    /// `serde_json::Value` first to inspect its shape would copy the model's
-    /// write bytes into a plain `String`, which is the very thing critical 1
-    /// above closes.
     #[test]
     fn a_refused_call_is_refused_by_its_marker_before_any_argument_parse() {
         for name in ["write_file", "read_file"] {
@@ -636,6 +627,15 @@ mod tests {
             );
         }
     }
+    /// codex round 1, important 1: serde's DERIVED struct visitor accepts a
+    /// positional ARRAY as well as a map, and `deny_unknown_fields` does not
+    /// turn that representation off — `["/allowed/file"]` deserialized into
+    /// `ReadArgs` and EXECUTED. The tool schemas the model is handed declare
+    /// objects with named properties, so an array is a malformed call, and it
+    /// is refused before anything is deserialized: parsing it into a
+    /// `serde_json::Value` first to inspect its shape would copy the model's
+    /// write bytes into a plain `String`, which is the very thing critical 1
+    /// above closes.
     #[test]
     fn positional_array_arguments_are_refused_never_deserialized_by_position() {
         for (name, args) in [
