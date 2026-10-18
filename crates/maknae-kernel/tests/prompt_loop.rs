@@ -929,6 +929,7 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
                             arguments: SecretText(maknae_io::Zeroizing::new(
                                 "a".repeat(maknae_proto::MAX_TOOL_CALL_ARGS_BYTES + 1),
                             )),
+                            refused: None,
                         }],
                     },
                 ],

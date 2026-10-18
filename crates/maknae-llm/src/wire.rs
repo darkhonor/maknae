@@ -326,6 +326,7 @@ pub fn to_prompt_reply(resp: ChatResponse, offered: &[String]) -> Result<Complet
             name: c.function.name,
             call_id: c.id,
             arguments: c.function.arguments,
+            refused: None,
         };
         // Bounded HERE, against the same predicate the kernel applies, so an
         // over-long proposal is refused at the boundary it arrived on rather

@@ -743,6 +743,7 @@ mod tests {
                     arguments: maknae_proto::SecretText(zeroize::Zeroizing::new(
                         r#"{"path":"a"}"#.into(),
                     )),
+                    refused: None,
                 }],
             },
             maknae_proto::Turn::Tool {
@@ -1067,6 +1068,7 @@ mod tests {
                     arguments: maknae_proto::SecretText(zeroize::Zeroizing::new(
                         r#"{"path":"a"}"#.into(),
                     )),
+                    refused: None,
                 }],
                 reasoning: Some(maknae_proto::SecretText(zeroize::Zeroizing::new(
                     "plan-read-then-patch".into(),

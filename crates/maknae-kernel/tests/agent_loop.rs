@@ -50,6 +50,7 @@ fn call(id: &str, name: &str, args: &str) -> ProposedToolCall {
         name: name.into(),
         call_id: id.into(),
         arguments: SecretText(Zeroizing::new(args.into())),
+        refused: None,
     }
 }
 fn tool_text(t: &Turn) -> String {

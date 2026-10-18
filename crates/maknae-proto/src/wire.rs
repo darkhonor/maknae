@@ -167,6 +167,14 @@ pub struct ProposedToolCall {
     pub name: String,
     pub call_id: String,
     pub arguments: SecretText,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused: Option<CallRefusal>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CallRefusal {
+    ArgumentsOverBound { bytes: u64 },
 }
 
 /// Shape-only admission for a proposed tool call. Every field is bounded: the
@@ -176,7 +184,12 @@ pub fn proposed_tool_call_is_acceptable(c: &ProposedToolCall) -> bool {
         && c.name.len() <= MAX_TOOL_CALL_NAME_BYTES
         && !c.call_id.is_empty()
         && c.call_id.len() <= MAX_TOOL_CALL_ID_BYTES
-        && c.arguments.0.len() <= MAX_TOOL_CALL_ARGS_BYTES
+        && match c.refused {
+            None => c.arguments.0.len() <= MAX_TOOL_CALL_ARGS_BYTES,
+            Some(CallRefusal::ArgumentsOverBound { bytes }) => {
+                c.arguments.0.is_empty() && bytes > MAX_TOOL_CALL_ARGS_BYTES as u64
+            }
+        }
 }
 
 /// One turn of the transcript the loop re-sends every call (ADR-0023 d7: the
@@ -2360,6 +2373,7 @@ mod tests {
             arguments: SecretText(zeroize::Zeroizing::new(
                 "{\"path\":\"/etc/maknae/authz.yaml\"}".into(),
             )),
+            refused: None,
         };
         let rendered = format!("{c:?}");
         assert!(
@@ -2389,6 +2403,7 @@ mod tests {
                 name: "read_file".into(),
                 call_id: "call_1".into(),
                 arguments: SecretText(zeroize::Zeroizing::new("{}".into())),
+                refused: None,
             }],
             usage: None,
         };
@@ -2406,6 +2421,7 @@ mod tests {
             arguments: SecretText(zeroize::Zeroizing::new(
                 "a".repeat(MAX_TOOL_CALL_ARGS_BYTES + 1),
             )),
+            refused: None,
         };
         assert!(!proposed_tool_call_is_acceptable(&c));
         let ok = ProposedToolCall {
@@ -2417,11 +2433,76 @@ mod tests {
         assert!(proposed_tool_call_is_acceptable(&ok));
     }
 
+    fn stub(bytes: u64, args: &str) -> ProposedToolCall {
+        ProposedToolCall {
+            name: "write_file".into(),
+            call_id: "c".into(),
+            arguments: SecretText(zeroize::Zeroizing::new(args.into())),
+            refused: Some(CallRefusal::ArgumentsOverBound { bytes }),
+        }
+    }
+
+    #[test]
+    fn a_stub_is_acceptable_only_with_empty_arguments_and_a_count_over_the_bound() {
+        let over = MAX_TOOL_CALL_ARGS_BYTES as u64 + 1;
+        assert!(proposed_tool_call_is_acceptable(&stub(over, "")));
+        assert!(!proposed_tool_call_is_acceptable(&stub(
+            MAX_TOOL_CALL_ARGS_BYTES as u64,
+            ""
+        )));
+        assert!(!proposed_tool_call_is_acceptable(&stub(over, "{}")));
+        assert!(!proposed_tool_call_is_acceptable(&ProposedToolCall {
+            call_id: String::new(),
+            ..stub(over, "")
+        }));
+        assert!(!proposed_tool_call_is_acceptable(&ProposedToolCall {
+            name: "n".repeat(MAX_TOOL_CALL_NAME_BYTES + 1),
+            ..stub(over, "")
+        }));
+    }
+
+    #[test]
+    fn an_unmarked_call_encodes_without_a_refused_key_and_a_stub_round_trips() {
+        let plain = ProposedToolCall {
+            name: "read_file".into(),
+            call_id: "c".into(),
+            arguments: SecretText(zeroize::Zeroizing::new("{}".into())),
+            refused: None,
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&plain, &mut buf).unwrap();
+        assert!(!buf.windows(7).any(|w| w == b"refused"));
+        let s = stub(70_000, "");
+        let mut buf = Vec::new();
+        ciborium::into_writer(&s, &mut buf).unwrap();
+        assert!(buf.windows(20).any(|w| w == b"arguments-over-bound"));
+        let back: ProposedToolCall = ciborium::from_reader(&buf[..]).unwrap();
+        assert_eq!(back, s);
+    }
+
+    #[test]
+    fn an_assistant_turn_carrying_a_stub_is_acceptable_only_while_the_stub_is() {
+        let turn = |c: ProposedToolCall| Turn::Assistant {
+            content: vec![],
+            tool_calls: vec![c],
+            reasoning: None,
+        };
+        assert!(turn_is_acceptable(&turn(stub(
+            MAX_TOOL_CALL_ARGS_BYTES as u64 + 1,
+            ""
+        ))));
+        assert!(!turn_is_acceptable(&turn(stub(
+            MAX_TOOL_CALL_ARGS_BYTES as u64 + 1,
+            "{}"
+        ))));
+    }
+
     fn t_call(id: &str) -> ProposedToolCall {
         ProposedToolCall {
             name: "read_file".into(),
             call_id: id.into(),
             arguments: SecretText(zeroize::Zeroizing::new("{}".into())),
+            refused: None,
         }
     }
 
@@ -2489,6 +2570,7 @@ mod tests {
             name: "x".repeat(MAX_TOOL_CALL_NAME_BYTES + 1),
             call_id: "c1".into(),
             arguments: SecretText(zeroize::Zeroizing::new("{}".into())),
+            refused: None,
         };
         assert!(!turn_is_acceptable(&Turn::Assistant {
             reasoning: None,

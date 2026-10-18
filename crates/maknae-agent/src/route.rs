@@ -314,6 +314,7 @@ mod tests {
             name: name.into(),
             call_id: "c1".into(),
             arguments: SecretText(Zeroizing::new(args.into())),
+            refused: None,
         }
     }
     #[test]

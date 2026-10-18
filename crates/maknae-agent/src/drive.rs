@@ -259,6 +259,7 @@ mod tests {
             name: name.into(),
             call_id: id.into(),
             arguments: SecretText(Zeroizing::new(args.into())),
+            refused: None,
         }
     }
     async fn drive_unmetered<P: Plane>(p: &mut P, t: &mut Transcript, b: &Budget) -> Outcome {

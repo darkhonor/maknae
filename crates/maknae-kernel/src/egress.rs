@@ -844,6 +844,7 @@ mod tests {
             name: "read_file".into(),
             call_id: "call_1".into(),
             arguments: maknae_proto::SecretText(maknae_io::Zeroizing::new("a".repeat(args_len))),
+            refused: None,
         }
     }
 
@@ -932,6 +933,7 @@ mod tests {
                 name: "a".into(),
                 call_id: "b".into(),
                 arguments: maknae_proto::SecretText(maknae_io::Zeroizing::new("c".into())),
+                refused: None,
             }],
             usage: None,
         };
@@ -947,11 +949,13 @@ mod tests {
                     name: "a".into(),
                     call_id: "b".into(),
                     arguments: maknae_proto::SecretText(maknae_io::Zeroizing::new("c".into())),
+                    refused: None,
                 },
                 maknae_proto::ProposedToolCall {
                     name: "a".into(),
                     call_id: "b".into(),
                     arguments: maknae_proto::SecretText(maknae_io::Zeroizing::new("c".into())),
+                    refused: None,
                 },
             ],
             usage: None,
@@ -1022,6 +1026,7 @@ mod tests {
                 arguments: maknae_proto::SecretText(maknae_io::Zeroizing::new(
                     "a".repeat(maknae_proto::MAX_TOOL_CALL_ARGS_BYTES),
                 )),
+                refused: None,
             }],
             usage: Some(maknae_proto::Usage {
                 prompt_tokens: u64::MAX,
@@ -1652,6 +1657,7 @@ mod tests {
             name: "read_file".into(),
             call_id: id.into(),
             arguments: SecretText(maknae_io::Zeroizing::new(args.into())),
+            refused: None,
         }
     }
 
