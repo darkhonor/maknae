@@ -53,6 +53,7 @@ impl std::fmt::Debug for ToolRequest {
 pub enum RouteError {
     UnknownTool(String),
     BadArguments(String),
+    ArgumentsOverBound(u64),
     EmptyPath,
     RelativePath,
     /// Non-canonical, over-long, or NUL-bearing: an empty (`//`), `.` or `..`
@@ -259,6 +260,9 @@ fn checked_path(p: String) -> Result<String, RouteError> {
 }
 
 pub fn route(call: &ProposedToolCall) -> Result<ToolRequest, RouteError> {
+    if let Some(maknae_proto::CallRefusal::ArgumentsOverBound { bytes }) = call.refused {
+        return Err(RouteError::ArgumentsOverBound(bytes));
+    }
     let args: &str = &call.arguments.0;
     match call.name.as_str() {
         "read_file" => {
@@ -619,6 +623,19 @@ mod tests {
     /// `serde_json::Value` first to inspect its shape would copy the model's
     /// write bytes into a plain `String`, which is the very thing critical 1
     /// above closes.
+    #[test]
+    fn a_refused_call_is_refused_by_its_marker_before_any_argument_parse() {
+        for name in ["write_file", "read_file"] {
+            let c = ProposedToolCall {
+                refused: Some(maknae_proto::CallRefusal::ArgumentsOverBound { bytes: 70_000 }),
+                ..call(name, "")
+            };
+            assert!(
+                matches!(route(&c), Err(RouteError::ArgumentsOverBound(70_000))),
+                "{name}"
+            );
+        }
+    }
     #[test]
     fn positional_array_arguments_are_refused_never_deserialized_by_position() {
         for (name, args) in [

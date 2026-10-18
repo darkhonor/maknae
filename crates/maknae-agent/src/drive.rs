@@ -185,6 +185,10 @@ pub async fn drive<P: Plane>(
                             ToolOutcome::BadCall(format!("unknown tool {n}"))
                         }
                         Err(RouteError::BadArguments(m)) => ToolOutcome::BadCall(m),
+                        Err(RouteError::ArgumentsOverBound(n)) => ToolOutcome::BadCall(format!(
+                            "arguments were {n} bytes, over the {max}-byte limit; nothing was run. A single call cannot carry more than {max} bytes; retrying the same content will be refused again.",
+                            max = maknae_proto::MAX_TOOL_CALL_ARGS_BYTES
+                        )),
                         Err(RouteError::EmptyPath) => ToolOutcome::BadCall("empty path".into()),
                         Err(RouteError::RelativePath) => {
                             ToolOutcome::BadCall("path must be absolute".into())
@@ -824,6 +828,93 @@ mod tests {
             "only the step with steps left executed its read"
         );
     }
+    const REFUSED_STUB: &str = "<refused stub>";
+    fn stub(id: &str) -> ProposedToolCall {
+        ProposedToolCall {
+            refused: Some(maknae_proto::CallRefusal::ArgumentsOverBound { bytes: 74_112 }),
+            ..call(id, "write_file", "")
+        }
+    }
+    #[tokio::test]
+    async fn a_refused_call_is_a_tool_error_in_its_slot_and_its_siblings_run() {
+        let mut p = scripted(vec![
+            PromptReply {
+                reasoning: None,
+                blocks: vec![],
+                tool_calls: vec![
+                    call("c1", "write_file", r#"{"path":"/w/a","content":"x"}"#),
+                    stub("c2"),
+                    call("c3", "read_file", r#"{"path":"/w/b"}"#),
+                ],
+                usage: None,
+            },
+            PromptReply {
+                reasoning: None,
+                blocks: vec![text("done")],
+                tool_calls: vec![],
+                usage: None,
+            },
+        ]);
+        let mut t = Transcript::new("conv", "q");
+        let out = drive_unmetered(
+            &mut p,
+            &mut t,
+            &Budget {
+                max_steps: 4,
+                max_tool_calls_per_step: 3,
+            },
+        )
+        .await;
+        assert_eq!(out.answer.as_deref(), Some("done"));
+        assert_eq!(p.writes.len(), 1);
+        assert_eq!(p.reads, vec!["/w/b"]);
+        assert_eq!(
+            [2, 3, 4].map(|i| tool_call_id(&t.turns()[i])),
+            ["c1".to_string(), "c2".to_string(), "c3".to_string()]
+        );
+        let max = maknae_proto::MAX_TOOL_CALL_ARGS_BYTES;
+        assert!(tool_text(&t.turns()[3]).starts_with(&format!(
+            "tool error: arguments were 74112 bytes, over the {max}-byte limit; nothing was run. A single call cannot carry more than {max} bytes; retrying the same content will be refused again."
+        )));
+    }
+    #[tokio::test]
+    async fn a_model_repeating_a_refused_call_stops_at_the_step_budget_with_nothing_run() {
+        let looping = PromptReply {
+            reasoning: None,
+            blocks: vec![],
+            tool_calls: vec![stub("c")],
+            usage: None,
+        };
+        let mut p = scripted(vec![
+            looping.clone(),
+            looping.clone(),
+            looping.clone(),
+            looping,
+        ]);
+        let mut t = Transcript::new("conv", "q");
+        let out = drive_unmetered(
+            &mut p,
+            &mut t,
+            &Budget {
+                max_steps: 3,
+                max_tool_calls_per_step: 2,
+            },
+        )
+        .await;
+        assert!(matches!(out.stopped, Some(StopReason::StepBudget)));
+        assert!(p.writes.is_empty() && p.reads.is_empty());
+        let asked = t
+            .turns()
+            .iter()
+            .filter(|x| matches!(x, Turn::Assistant { .. }))
+            .count();
+        let answered = t
+            .turns()
+            .iter()
+            .filter(|x| matches!(x, Turn::Tool { .. }))
+            .count();
+        assert_eq!((asked, answered), (3, 2));
+    }
     #[tokio::test]
     async fn a_bad_tool_call_is_answered_as_a_tool_error_with_no_plane_call() {
         // Every RouteError arm, by name and by args (each is a render
@@ -842,12 +933,17 @@ mod tests {
             // plane. Both legs, because the shape check is per-arm.
             ("read_file", r#"["/allowed/file"]"#),
             ("write_file", r#"["/allowed/file","SECRET-POSITIONAL"]"#),
+            ("write_file", REFUSED_STUB),
         ] {
             let mut p = scripted(vec![
                 PromptReply {
                     reasoning: None,
                     blocks: vec![],
-                    tool_calls: vec![call("c1", name, bad)],
+                    tool_calls: vec![if bad == REFUSED_STUB {
+                        stub("c1")
+                    } else {
+                        call("c1", name, bad)
+                    }],
                     usage: None,
                 },
                 PromptReply {
