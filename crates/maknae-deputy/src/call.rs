@@ -906,10 +906,18 @@ mod tests {
             !shown.contains("alice") && !shown.contains("api_key"),
             "{shown}"
         );
+        assert_eq!(format!("{e:?}"), "Open(WrongPath)");
         assert!(
             matches!(l.accept(), Err(ref x) if x.kind() == std::io::ErrorKind::WouldBlock),
             "the provider was contacted after the opener refused"
         );
+    }
+
+    #[test]
+    fn a_transport_failure_renders_its_summary() {
+        let e = FulfilError::provider("connect refused".into());
+        assert_eq!(e.to_string(), "connect refused");
+        assert_eq!(format!("{e:?}"), "Provider { \"connect refused\" }");
     }
 
     #[tokio::test]
