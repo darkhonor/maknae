@@ -322,15 +322,18 @@ pub fn to_prompt_reply(resp: ChatResponse, offered: &[String]) -> Result<Complet
         if !offered.contains(&c.function.name) {
             return Err(ReplyError::UnknownTool(c.function.name));
         }
-        let proposed = maknae_proto::ProposedToolCall {
+        let mut proposed = maknae_proto::ProposedToolCall {
             name: c.function.name,
             call_id: c.id,
             arguments: c.function.arguments,
             refused: None,
         };
-        // Bounded HERE, against the same predicate the kernel applies, so an
-        // over-long proposal is refused at the boundary it arrived on rather
-        // than becoming a kernel-side refusal with less context.
+        if proposed.arguments.0.len() > maknae_proto::MAX_TOOL_CALL_ARGS_BYTES {
+            proposed.refused = Some(maknae_proto::CallRefusal::ArgumentsOverBound {
+                bytes: proposed.arguments.0.len() as u64,
+            });
+            proposed.arguments = maknae_proto::SecretText(zeroize::Zeroizing::new(String::new()));
+        }
         if !maknae_proto::proposed_tool_call_is_acceptable(&proposed) {
             return Err(ReplyError::Unacceptable(format!(
                 "tool call '{}' exceeds a declared bound",
@@ -707,19 +710,89 @@ mod tests {
         );
     }
 
-    /// The proposal is bounded HERE, at the boundary it arrived on, against the
-    /// same predicate the kernel applies.
     #[test]
-    fn an_over_bound_proposal_is_refused_at_the_boundary() {
-        let big = "a".repeat(maknae_proto::MAX_TOOL_CALL_ARGS_BYTES + 1);
-        let body = format!(
-            r#"{{"choices":[{{"message":{{"tool_calls":[
-                 {{"id":"c","function":{{"name":"read_file","arguments":"{big}"}}}}]}}}}]}}"#
+    fn an_over_bound_call_becomes_a_stub_in_its_slot_and_its_siblings_pass() {
+        let big = format!(
+            "SENTINEL-426-{}",
+            "a".repeat(maknae_proto::MAX_TOOL_CALL_ARGS_BYTES)
         );
-        assert!(matches!(
-            prompt_reply_of(parse(&body).unwrap(), &offered()),
-            Err(ReplyError::Unacceptable(_))
-        ));
+        let body =
+            serde_json::json!({"choices": [{"message": {"content": "working", "tool_calls": [
+                {"id": "c0", "function": {"name": "write_file", "arguments": big}},
+                {"id": "c1", "function": {"name": "read_file", "arguments": "{\"path\":\"/w/a\"}"}}
+            ]}}]})
+            .to_string();
+        let c = prompt_reply_of(parse(&body).unwrap(), &offered()).unwrap();
+        let calls = &c.tool_calls;
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            (calls[0].name.as_str(), calls[0].call_id.as_str()),
+            ("write_file", "c0")
+        );
+        assert!(calls[0].arguments.0.is_empty());
+        assert_eq!(
+            calls[0].refused,
+            Some(maknae_proto::CallRefusal::ArgumentsOverBound {
+                bytes: big.len() as u64
+            })
+        );
+        assert_eq!(
+            (
+                calls[1].call_id.as_str(),
+                calls[1].arguments.0.as_str(),
+                calls[1].refused
+            ),
+            ("c1", "{\"path\":\"/w/a\"}", None)
+        );
+        assert_eq!(c.blocks.len(), 1);
+        assert!(!format!("{c:?}").contains("SENTINEL-426"));
+        let cbor = maknae_proto::encode_response(&maknae_proto::Response {
+            protocol_version: maknae_proto::PROTOCOL_VERSION,
+            result: maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(c)),
+        })
+        .unwrap();
+        assert!(!cbor.windows(12).any(|w| w == b"SENTINEL-426"));
+    }
+
+    #[test]
+    fn the_argument_bound_is_inclusive_and_one_byte_over_is_a_stub() {
+        for (len, stubbed) in [
+            (maknae_proto::MAX_TOOL_CALL_ARGS_BYTES, false),
+            (maknae_proto::MAX_TOOL_CALL_ARGS_BYTES + 1, true),
+        ] {
+            let body = serde_json::json!({"choices": [{"message": {"tool_calls": [
+                {"id": "c", "function": {"name": "read_file", "arguments": "a".repeat(len)}}
+            ]}}]})
+            .to_string();
+            let c = prompt_reply_of(parse(&body).unwrap(), &offered()).unwrap();
+            assert_eq!(c.tool_calls[0].refused.is_some(), stubbed, "{len}");
+            assert_eq!(
+                c.tool_calls[0].arguments.0.len(),
+                if stubbed { 0 } else { len },
+                "{len}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_over_bound_call_with_a_bad_id_or_an_unknown_name_still_refuses_the_reply() {
+        let big = "a".repeat(maknae_proto::MAX_TOOL_CALL_ARGS_BYTES + 1);
+        for (id, name, unknown) in [
+            ("", "write_file", false),
+            (&*"i".repeat(65), "write_file", false),
+            ("c", "exfiltrate", true),
+        ] {
+            let body = serde_json::json!({"choices": [{"message": {"tool_calls": [
+                {"id": id, "function": {"name": name, "arguments": big}}
+            ]}}]})
+            .to_string();
+            let r = prompt_reply_of(parse(&body).unwrap(), &offered());
+            if unknown {
+                assert!(matches!(r, Err(ReplyError::UnknownTool(_))), "{name}");
+            } else {
+                assert!(matches!(r, Err(ReplyError::Unacceptable(_))), "{id:?}");
+            }
+        }
     }
 
     #[test]
@@ -743,6 +816,10 @@ mod tests {
             "may be at most {} bytes,",
             maknae_proto::MAX_TOOL_CALL_ARGS_BYTES
         )));
+        assert!(catalog[1]
+            .function
+            .description
+            .contains("a longer call is not run: you get an error giving its size"));
     }
 
     /// The request carries only what Maknae sets — no sampling knobs, and
