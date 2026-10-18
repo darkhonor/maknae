@@ -2282,8 +2282,9 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             };
             // 4. the outcome record, then the reply: audit-then-respond on the
             //    release leg (#146).
-            let outcome =
+            let mut outcome =
                 crate::egress::outcome_for(&intent, seq.next(), rfc3339_now(), send_outcome);
+            crate::egress::record_refused_tool_calls(&mut outcome, reply.as_ref());
             let appended =
                 emit_or_report(&emit, &outcome, "egress outcome", peer_uid, session_id).await;
             if may_respond(appended) {

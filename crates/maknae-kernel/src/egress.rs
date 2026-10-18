@@ -728,6 +728,9 @@ pub const REPLY_BLOCK_ENVELOPE: usize = 32;
 /// headers): generous, and pinned by the widest-legal-reply no-grow test.
 pub const TOOL_CALL_ENVELOPE: usize = 64;
 
+/// Extra CBOR overhead for a refused-call marker (#426).
+pub const CALL_REFUSAL_ENVELOPE: usize = 64;
+
 /// CBOR overhead for a reply's reasoning: its key and a text-string header.
 pub const REASONING_ENVELOPE: usize = 32;
 
@@ -763,7 +766,17 @@ pub fn reply_capacity(reply: &PromptReply) -> usize {
         + reply
             .tool_calls
             .iter()
-            .map(|c| c.name.len() + c.call_id.len() + c.arguments.0.len() + TOOL_CALL_ENVELOPE)
+            .map(|c| {
+                c.name.len()
+                    + c.call_id.len()
+                    + c.arguments.0.len()
+                    + TOOL_CALL_ENVELOPE
+                    + if c.refused.is_some() {
+                        CALL_REFUSAL_ENVELOPE
+                    } else {
+                        0
+                    }
+            })
             .sum::<usize>()
         + if reply.usage.is_some() { USAGE_ENVELOPE } else { 0 }
         + reply
@@ -800,6 +813,30 @@ pub fn shed_reasoning_to_fit(reply: &mut PromptReply, cap: usize) -> bool {
 /// ACCEPTABLE frame, not the first refused one.
 pub fn frame_len_within_cap(n: usize, cap: usize) -> bool {
     n <= cap
+}
+
+pub fn refused_tool_calls(reply: &PromptReply) -> Vec<maknae_audit_append::RefusedToolCall> {
+    reply
+        .tool_calls
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| {
+            c.refused.as_ref().map(|r| {
+                let maknae_proto::CallRefusal::ArgumentsOverBound { bytes } = r;
+                maknae_audit_append::RefusedToolCall {
+                    index: i as u64,
+                    name: c.name.clone(),
+                    arguments_bytes: *bytes,
+                }
+            })
+        })
+        .collect()
+}
+
+pub fn record_refused_tool_calls(outcome: &mut AuditRecord, reply: Option<&PromptReply>) {
+    if let (Some(e), Some(r)) = (outcome.egress.as_mut(), reply) {
+        e.refused_tool_calls = refused_tool_calls(r);
+    }
 }
 
 #[cfg(test)]
@@ -2427,5 +2464,121 @@ mod tests {
             m.digest32,
             &maknae_vault::sha256_hex(b"ab{\"p\":1}whycd")[..32]
         );
+    }
+
+    fn stub_at(id: &str, bytes: u64) -> ProposedToolCall {
+        ProposedToolCall {
+            name: "w".repeat(maknae_proto::MAX_TOOL_CALL_NAME_BYTES),
+            call_id: id.into(),
+            arguments: SecretText(maknae_io::Zeroizing::new(String::new())),
+            refused: Some(maknae_proto::CallRefusal::ArgumentsOverBound { bytes }),
+        }
+    }
+
+    fn reply_of(tool_calls: Vec<ProposedToolCall>) -> PromptReply {
+        PromptReply {
+            reasoning: None,
+            blocks: vec![],
+            tool_calls,
+            usage: None,
+        }
+    }
+
+    #[test]
+    fn a_stubs_marker_fits_inside_its_envelope() {
+        let id = "i".repeat(maknae_proto::MAX_TOOL_CALL_ID_BYTES);
+        let marked = stub_at(&id, u64::MAX);
+        let plain = ProposedToolCall {
+            refused: None,
+            ..marked.clone()
+        };
+        let len = |c: &ProposedToolCall| {
+            maknae_proto::encode_response(&maknae_proto::Response {
+                protocol_version: maknae_proto::PROTOCOL_VERSION,
+                result: maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(reply_of(
+                    vec![c.clone()],
+                ))),
+            })
+            .unwrap()
+            .len()
+        };
+        assert!(len(&marked) - len(&plain) <= CALL_REFUSAL_ENVELOPE);
+    }
+
+    #[test]
+    fn a_reply_of_many_stubs_at_the_widest_identifiers_encodes_without_growing() {
+        let id = "i".repeat(maknae_proto::MAX_TOOL_CALL_ID_BYTES);
+        let reply = reply_of((0..64).map(|_| stub_at(&id, u64::MAX)).collect());
+        let cap = reply_capacity(&reply);
+        let r = maknae_proto::Response {
+            protocol_version: maknae_proto::PROTOCOL_VERSION,
+            result: maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(reply)),
+        };
+        let buf = maknae_proto::encode_response_zeroizing(&r, cap).unwrap();
+        assert_eq!(buf.capacity(), cap);
+    }
+
+    #[test]
+    fn reply_capacity_counts_the_refusal_envelope_per_stub() {
+        let plain = reply_of(vec![ProposedToolCall {
+            refused: None,
+            ..stub_at("c", 0)
+        }]);
+        let marked = reply_of(vec![stub_at("c", 70_000)]);
+        assert_eq!(reply_capacity(&marked) - reply_capacity(&plain), 64);
+    }
+
+    #[test]
+    fn refused_tool_calls_lists_each_stub_by_position_in_reply_order() {
+        let ok = |id: &str| ProposedToolCall {
+            name: "read_file".into(),
+            call_id: id.into(),
+            arguments: SecretText(maknae_io::Zeroizing::new("{}".into())),
+            refused: None,
+        };
+        let reply = reply_of(vec![
+            ok("a"),
+            ProposedToolCall {
+                name: "write_file".into(),
+                ..stub_at("b", 70_001)
+            },
+            ok("c"),
+            ProposedToolCall {
+                name: "write_file".into(),
+                ..stub_at("d", 99_999)
+            },
+        ]);
+        assert_eq!(
+            refused_tool_calls(&reply),
+            vec![
+                maknae_audit_append::RefusedToolCall {
+                    index: 1,
+                    name: "write_file".into(),
+                    arguments_bytes: 70_001
+                },
+                maknae_audit_append::RefusedToolCall {
+                    index: 3,
+                    name: "write_file".into(),
+                    arguments_bytes: 99_999
+                },
+            ]
+        );
+        assert!(refused_tool_calls(&reply_of(vec![ok("a")])).is_empty());
+    }
+
+    #[test]
+    fn admitted_reply_admits_a_reply_made_only_of_stubs() {
+        assert!(admitted_reply(&reply_of(vec![stub_at("c", 70_000)])).is_ok());
+    }
+
+    #[test]
+    fn only_a_delivered_reply_fills_refused_tool_calls() {
+        let reply = reply_of(vec![stub_at("c", 70_000)]);
+        let mut rec = intent_record();
+        record_refused_tool_calls(&mut rec, Some(&reply));
+        assert_eq!(rec.egress.as_ref().unwrap().refused_tool_calls.len(), 1);
+        let mut rec = intent_record();
+        record_refused_tool_calls(&mut rec, None);
+        assert!(rec.egress.as_ref().unwrap().refused_tool_calls.is_empty());
     }
 }

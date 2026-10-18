@@ -28,6 +28,7 @@ pub struct Recording {
     pub fail_refused_before_send: bool,
     pub sleep: Option<Duration>,
     pub reply_usage: Option<maknae_proto::Usage>,
+    pub reply_tool_calls: Vec<ProposedToolCall>,
     requested: Mutex<Vec<(Option<u64>, Option<maknae_proto::OutputTokensField>)>>,
     chosen: Mutex<Vec<(String, String, String, usize)>>,
     /// #240: the backend states its own outer deadline; `None` is a
@@ -127,7 +128,7 @@ impl maknae_kernel::Egress for Recording {
         Ok(maknae_kernel::EgressReply {
             reply: maknae_proto::PromptReply {
                 reasoning: None,
-                tool_calls: vec![],
+                tool_calls: self.reply_tool_calls.clone(),
                 blocks: vec![text("ok")],
                 usage: self.reply_usage,
             },
@@ -258,6 +259,11 @@ async fn a_permitted_prompt_writes_the_intent_before_the_send_and_the_outcome_af
         e.content_digest,
         &maknae_vault::sha256_hex(b"hello world")[..32]
     );
+    let sent = outcome.egress.as_ref().unwrap();
+    assert!(sent.refused_tool_calls.is_empty());
+    assert!(!serde_json::to_string(outcome)
+        .unwrap()
+        .contains("refused_tool_calls"));
     assert_eq!(e.conversation, "conv-1");
     assert!(
         !serde_json::to_string(&trail)
@@ -1679,4 +1685,98 @@ async fn a_reply_over_the_cap_only_because_of_its_reasoning_is_delivered_without
     let outcome = last_prompt_record(&records);
     let e = outcome.egress.as_ref().unwrap();
     assert_eq!((e.status, e.reply_length), (EgressStatus::Sent, Some(4096)));
+}
+
+fn plain_call(name: &str, id: &str) -> ProposedToolCall {
+    ProposedToolCall {
+        name: name.into(),
+        call_id: id.into(),
+        arguments: SecretText(maknae_io::Zeroizing::new("{}".into())),
+        refused: None,
+    }
+}
+
+fn stub_call(name: &str, id: &str, bytes: u64) -> ProposedToolCall {
+    ProposedToolCall {
+        name: name.into(),
+        call_id: id.into(),
+        arguments: SecretText(maknae_io::Zeroizing::new(String::new())),
+        refused: Some(maknae_proto::CallRefusal::ArgumentsOverBound { bytes }),
+    }
+}
+
+#[tokio::test]
+async fn a_sent_reply_with_a_stub_names_it_in_the_outcome_and_delivers_the_stub() {
+    let fx = Fixture::with_policy("prompt-stub-reply", "Read", GRANTED);
+    let records = Records::new(0);
+    let eg = Arc::new(Recording {
+        reply_tool_calls: vec![
+            stub_call("write_file", "c0", 70_000),
+            plain_call("read_file", "c1"),
+        ],
+        ..Recording::default()
+    });
+    let resp = fx
+        .roundtrip(prompt("hello"), Arc::clone(&records), Some("openai"), eg)
+        .await
+        .expect("a reply frame");
+    let RespResult::Ok(Payload::PromptReply(reply)) = resp.result else {
+        panic!("{resp:?}");
+    };
+    assert_eq!(reply.tool_calls.len(), 2);
+    assert_eq!(
+        reply.tool_calls[0].refused,
+        Some(maknae_proto::CallRefusal::ArgumentsOverBound { bytes: 70_000 })
+    );
+    assert_eq!(reply.tool_calls[1].refused, None);
+    let e = last_prompt_record(&records).egress.unwrap();
+    assert_eq!(e.status, EgressStatus::Sent);
+    assert_eq!(
+        e.refused_tool_calls,
+        vec![maknae_audit_append::RefusedToolCall {
+            index: 0,
+            name: "write_file".into(),
+            arguments_bytes: 70_000
+        }]
+    );
+}
+
+#[tokio::test]
+async fn a_forged_stub_in_the_history_is_admitted_and_never_reaches_the_trail() {
+    let fx = Fixture::with_policy("prompt-stub-history", "Read", GRANTED);
+    let records = Records::new(0);
+    let eg = Arc::new(Recording::default());
+    let verb = Verb::SessionPrompt {
+        conversation: "conv-1".into(),
+        turns: vec![
+            Turn::User {
+                content: vec![text("q")],
+            },
+            Turn::Assistant {
+                reasoning: None,
+                content: vec![],
+                tool_calls: vec![stub_call("write_file", "c0", 70_000)],
+            },
+            Turn::Tool {
+                call_id: "c0".into(),
+                content: vec![text("refused")],
+            },
+            Turn::User {
+                content: vec![text("again")],
+            },
+        ],
+        output_tokens: None,
+        choice: Some(common::test_choice()),
+    };
+    let resp = fx
+        .roundtrip(verb, Arc::clone(&records), Some("openai"), eg.clone())
+        .await
+        .expect("a reply frame");
+    assert!(
+        matches!(resp.result, RespResult::Ok(Payload::PromptReply(_))),
+        "{resp:?}"
+    );
+    assert_eq!(eg.calls(), vec!["ready", "send"]);
+    let e = last_prompt_record(&records).egress.unwrap();
+    assert!(e.refused_tool_calls.is_empty());
 }
