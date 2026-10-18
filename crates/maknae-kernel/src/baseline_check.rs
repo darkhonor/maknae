@@ -696,12 +696,8 @@ mod tests {
     }
 
     fn file_with(base: &str, members: &[(&str, &str)]) -> Document {
-        let dir = std::env::temp_dir().join(format!(
-            "maknae_bcheck_{}_{}",
-            std::process::id(),
-            members.first().map_or("none", |m| m.0)
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         std::fs::create_dir_all(dir.join("config.d")).unwrap();
         std::fs::write(dir.join("maknae.yaml"), base).unwrap();
         for (name, body) in members {
@@ -716,9 +712,7 @@ mod tests {
         for f in files {
             std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o640)).unwrap();
         }
-        let doc = crate::boot::read_files_as_owner(&dir).unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
-        doc
+        crate::boot::read_files_as_owner(&dir).unwrap()
     }
 
     #[test]

@@ -774,8 +774,11 @@ egress:
   appears, escapes everything outside printable ASCII and writes one line:
   `maknae-egress: provider answered 400 (conversation c…): <body>`. On Linux that is
   `journalctl -u maknae-egress`; on macOS it is the deputy's stderr file,
-  `/usr/local/var/log/maknae-egress/maknae-egress.err`, which nothing rotates. Neither the
-  trail nor the subject's terminal carries the body. **The logged line can carry
+  `/usr/local/var/log/maknae-egress/maknae-egress.err`, which nothing rotates. The
+  trail records the turn `LandedUndelivered` with a closed reason (`reply unusable:
+  provider-rejected`, or `provider-auth`, `provider-rate-limit`, `provider-error`), and
+  the subject sees a fixed line for that class. Neither the trail nor the subject's
+  terminal carries the body. **The logged line can carry
   conversation content:** some OpenAI-compatible servers quote the offending request in a
   `400`/`422` body, so up to 4 KiB of the prompt — including file content the agent read —
   may be written to the journal, outside the trail's never-the-content rule. Treat the

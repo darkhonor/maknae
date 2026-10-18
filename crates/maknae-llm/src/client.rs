@@ -35,7 +35,10 @@ pub enum CallError {
         truncated: bool,
     },
     /// The answer arrived and is unusable.
-    Reply(ReplyError),
+    Reply {
+        error: ReplyError,
+        usage: Option<maknae_proto::Usage>,
+    },
 }
 
 impl std::fmt::Display for CallError {
@@ -43,7 +46,9 @@ impl std::fmt::Display for CallError {
         match self {
             CallError::Transport(m) => write!(f, "provider call failed: {m}"),
             CallError::Status { code, .. } => write!(f, "provider answered {code}"),
-            CallError::Reply(e) => write!(f, "{e}"),
+            CallError::Reply { error, .. } => {
+                write!(f, "provider reply unusable: {}", error.defect().name())
+            }
         }
     }
 }
@@ -55,7 +60,9 @@ impl std::fmt::Debug for CallError {
             CallError::Status { code, body, .. } => {
                 write!(f, "Status {{ {code}, <{} bytes> }}", body.len())
             }
-            CallError::Reply(e) => f.debug_tuple("Reply").field(e).finish(),
+            CallError::Reply { error, usage } => {
+                write!(f, "Reply {{ {}, {usage:?} }}", error.defect().name())
+            }
         }
     }
 }
@@ -150,9 +157,12 @@ pub async fn chat_completion(
     // sends none, must not be able to grow this without limit.
     if let Some(len) = resp.content_length() {
         if len as usize > max_body_bytes {
-            return Err(CallError::Transport(format!(
-                "provider declared a {len}-byte body over the {max_body_bytes}-byte cap"
-            )));
+            return Err(CallError::Reply {
+                error: ReplyError::Unacceptable(format!(
+                    "provider declared a {len}-byte body over the {max_body_bytes}-byte cap"
+                )),
+                usage: None,
+            });
         }
     }
     let mut resp = resp;
@@ -163,13 +173,19 @@ pub async fn chat_completion(
         .map_err(|e| CallError::Transport(e.to_string()))?
     {
         if take_capped(&mut body, &chunk, max_body_bytes) {
-            return Err(CallError::Transport(format!(
-                "provider body exceeded the {max_body_bytes}-byte cap"
-            )));
+            return Err(CallError::Reply {
+                error: ReplyError::Unacceptable(format!(
+                    "provider body exceeded the {max_body_bytes}-byte cap"
+                )),
+                usage: None,
+            });
         }
     }
 
-    let parsed = serde_json::from_slice(&body)
-        .map_err(|e| CallError::Reply(ReplyError::Malformed(e.to_string())))?;
-    to_prompt_reply(parsed, offered).map_err(CallError::Reply)
+    let parsed = serde_json::from_slice(&body).map_err(|e| CallError::Reply {
+        error: ReplyError::Malformed(e.to_string()),
+        usage: None,
+    })?;
+    let usage = crate::usage_of(&parsed);
+    to_prompt_reply(parsed, offered).map_err(|error| CallError::Reply { error, usage })
 }

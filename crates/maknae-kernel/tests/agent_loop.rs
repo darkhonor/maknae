@@ -162,7 +162,10 @@ impl Plane for FixturePlane {
             RespResult::Err(e) if e.code == maknae_proto::ProtoErrCode::BadRequest => {
                 Err(PlaneError::Malformed)
             }
-            RespResult::Err(_) => Err(PlaneError::Refused),
+            RespResult::Err(e) => match e.code {
+                maknae_proto::ProtoErrCode::ReplyUnusable(d) => Err(PlaneError::ReplyUnusable(d)),
+                _ => Err(PlaneError::Refused),
+            },
             other => Err(PlaneError::Transport(format!("{other:?}"))),
         }
     }

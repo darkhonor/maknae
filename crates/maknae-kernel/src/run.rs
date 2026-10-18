@@ -2225,7 +2225,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                     match crate::egress::admitted_reply(&r.reply) {
                         Err(refusal) => (
                             crate::egress::SendOutcome::LandedUndelivered {
-                                reply_length: n,
+                                reply_length: Some(n),
                                 refusal,
                                 usage: r.reply.usage,
                             },
@@ -2247,7 +2247,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                             } else {
                                 (
                                     crate::egress::SendOutcome::LandedUndelivered {
-                                        reply_length: n,
+                                        reply_length: Some(n),
                                         refusal: crate::egress::ReplyRefusal::Oversize,
                                         usage: reply.usage,
                                     },
@@ -2339,25 +2339,10 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                             }
                         }
                     }
-                    // The outcome record above already names the refusal; no
-                    // second corrective record.
-                    (
-                        crate::egress::SendOutcome::LandedUndelivered {
-                            refusal: crate::egress::ReplyRefusal::Oversize,
-                            ..
-                        },
-                        None,
-                    ) => {
-                        write_error_bounded(
-                            &mut stream,
-                            &cfg,
-                            class,
-                            ProtoErrCode::TooLarge,
-                            "response exceeds the configured frame limit",
-                        )
-                        .await
+                    (crate::egress::SendOutcome::LandedUndelivered { refusal, .. }, None) => {
+                        let (code, message) = crate::egress::refusal_answer(refusal);
+                        write_error_bounded(&mut stream, &cfg, class, code, message).await
                     }
-                    // Failed, DeadlineExpired, and the non-text / empty refusals.
                     (_, None) => {
                         write_error_bounded(
                             &mut stream,
@@ -15027,6 +15012,18 @@ mod reload_tests {
             .expect("the reload finished within its bound")
     }
 
+    // A detached std thread, not spawn_blocking: runtime shutdown joins blocking
+    // tasks, so a gate wait that never returns would hang the test instead of failing it.
+    fn off_runtime<T: Send + 'static>(
+        f: impl FnOnce() -> T + Send + 'static,
+    ) -> impl std::future::Future<Output = T> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        async move { rx.await.expect("the thread sends before it exits") }
+    }
+
     fn adversary() -> maknae_security::Verdict {
         maknae_security::Verdict::Deny {
             reason: "subject contained: role=adversary".into(),
@@ -18404,26 +18401,22 @@ mod reload_tests {
         );
         let in_flight = {
             let fx = Arc::clone(&fx);
-            tokio::task::spawn_blocking(move || fx.decide_action(daemon_uid(), "admin.whoami"))
+            off_runtime(move || fx.decide_action(daemon_uid(), "admin.whoami"))
         };
         let g = Arc::clone(&gate);
-        bounded(tokio::task::spawn_blocking(move || g.arrived.wait()))
-            .await
-            .unwrap();
+        bounded(off_runtime(move || g.arrived.wait())).await;
         let contained = {
             let fx = Arc::clone(&fx);
             tokio::spawn(async move { fx.contain(ContainTarget::Uid(daemon_uid()), 0, "r").await })
         };
         let a = tokio::time::timeout(Duration::from_secs(60), contained).await;
         let g = Arc::clone(&gate);
-        bounded(tokio::task::spawn_blocking(move || g.release.wait()))
-            .await
-            .unwrap();
+        bounded(off_runtime(move || g.release.wait())).await;
         let a = a.expect("the contain returns").unwrap();
         assert_eq!(answer_code(&a), ContainmentOutcome::Contained);
         assert!(
             matches!(
-                bounded(in_flight).await.unwrap(),
+                bounded(in_flight).await,
                 maknae_security::Verdict::Permit { .. }
             ),
             "decided on the snapshot it started with"

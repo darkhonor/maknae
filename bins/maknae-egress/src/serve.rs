@@ -29,6 +29,10 @@ pub const MAX_REQUEST_FRAME_BYTES: usize = maknae_proto::EGRESS_REQUEST_FRAME_MA
 pub enum ServeError {
     /// The provider call failed after admission; the connection closes with no reply.
     Fulfil(String),
+    Unusable {
+        defect: maknae_proto::ReplyDefect,
+        usage: Option<maknae_proto::Usage>,
+    },
     OpenFailed(OpenFailure),
     /// The connected peer is not the kernel, or could not be identified at
     /// all. One variant, because the deputy treats them identically: a peer we
@@ -42,15 +46,17 @@ pub enum ServeError {
 
 /// The one `FulfilError` mapping, shared by `main` and the tests.
 pub fn serve_error(e: FulfilError) -> ServeError {
-    if let FulfilError::Provider {
-        journal: Some(j), ..
-    } = &e
-    {
-        eprintln!("{}", j.as_str());
-    }
     match e {
         FulfilError::Open(f) => ServeError::OpenFailed(f),
-        other => ServeError::Fulfil(other.to_string()),
+        FulfilError::Unusable {
+            defect,
+            usage,
+            journal,
+        } => {
+            eprintln!("{}", journal.as_str());
+            ServeError::Unusable { defect, usage }
+        }
+        FulfilError::Provider { summary } => ServeError::Fulfil(summary),
     }
 }
 
@@ -114,6 +120,9 @@ where
     match fulfil(&admitted) {
         Ok(reply) => write_reply(&mut stream, &reply),
         Err(e @ ServeError::OpenFailed(_)) => refuse_before_send(&mut stream, e),
+        Err(ServeError::Unusable { defect, usage }) => {
+            write_reply(&mut stream, &EgressFrameReply::Unusable { defect, usage })
+        }
         Err(e) => Err(e),
     }
 }
@@ -148,7 +157,7 @@ mod tests {
     use super::*;
     use maknae_deputy::call::{fulfil, CallBounds};
     use maknae_deputy::unseal::{KeyOpener, OpenRequest};
-    use maknae_proto::{ContentBlock, EgressFrameRequest, SecretText};
+    use maknae_proto::{ContentBlock, EgressFrameRequest, ReplyDefect, SecretText};
     use std::os::unix::net::UnixListener;
 
     const ALICE: &str = "maknae/users/alice/openai/personal";
@@ -550,6 +559,82 @@ mod tests {
         });
         assert!(matches!(out, Err(ServeError::Fulfil(_))), "{out:?}");
         assert_eq!(reply, None);
+    }
+
+    fn one_shot_provider(status_line: &'static str, body: &'static str) -> String {
+        use std::io::{Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            let mut seen = Vec::new();
+            let mut buf = [0u8; 8192];
+            loop {
+                let n = s.read(&mut buf).unwrap();
+                seen.extend_from_slice(&buf[..n]);
+                let Some(brk) = seen.windows(4).position(|w| w == b"\r\n\r\n") else {
+                    if n == 0 {
+                        break;
+                    } else {
+                        continue;
+                    }
+                };
+                let head = String::from_utf8_lossy(&seen[..brk]).to_lowercase();
+                let want = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if n == 0 || seen.len() - (brk + 4) >= want {
+                    break;
+                }
+            }
+            let resp = format!(
+                "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            s.write_all(resp.as_bytes()).unwrap();
+        });
+        format!("http://{addr}/v1/chat/completions")
+    }
+
+    #[test]
+    fn an_unusable_provider_answer_is_written_as_a_frame_and_carries_no_provider_text() {
+        fips();
+        let rt = runtime();
+        for (status, body, want) in [
+            (
+                "401 Unauthorized",
+                r#"{"error":"SENTINEL-524"}"#,
+                ReplyDefect::ProviderAuth,
+            ),
+            (
+                "200 OK",
+                r#"{"choices":[{"finish_reason":"stop","message":{"content":null,"reasoning":"SENTINEL-524 thoughts"}}]}"#,
+                ReplyDefect::ReasoningOnly,
+            ),
+        ] {
+            let mut r = request(ALICE);
+            r.endpoint = one_shot_provider(status, body);
+            let (out, reply) = served_with(prefixed(&encoded(&r)), |admitted| {
+                rt.block_on(fulfil(
+                    admitted,
+                    &Opens(Ok("sk-test-not-real")),
+                    CallBounds::default(),
+                    &mut |_| {},
+                ))
+                .map_err(serve_error)
+            });
+            assert!(matches!(out, Ok(())), "{status}: {out:?}");
+            assert_eq!(
+                reply,
+                Some(EgressFrameReply::Unusable {
+                    defect: want,
+                    usage: None
+                }),
+                "{status}"
+            );
+        }
     }
 
     #[test]

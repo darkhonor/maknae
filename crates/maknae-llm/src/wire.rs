@@ -143,7 +143,7 @@ pub struct ToolFn {
 /// What we accept back. Deliberately NOT a faithful model of the provider's
 /// schema — only the fields Maknae reads. Unknown fields are ignored by serde;
 /// unknown SHAPES (no choices, no message) are refused below.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct ChatResponse {
     pub choices: Vec<Choice>,
     /// Informational, so parsed leniently: a malformed usage is `None`, never
@@ -152,7 +152,7 @@ pub struct ChatResponse {
     pub usage: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct Choice {
     pub message: RespMessage,
     #[serde(default)]
@@ -171,21 +171,32 @@ pub struct RespMessage {
     pub reasoning: Option<maknae_proto::SecretText>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct RespToolCall {
     pub id: String,
     pub function: RespToolFn,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct RespToolFn {
     pub name: String,
     pub arguments: maknae_proto::SecretText,
 }
 
+macro_rules! provider_text_debug {
+    ($($t:ty),*) => {$(
+        impl std::fmt::Debug for $t {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct(stringify!($t)).finish_non_exhaustive()
+            }
+        }
+    )*};
+}
+provider_text_debug!(ChatResponse, Choice, RespToolCall, RespToolFn);
+
 /// Why a provider answer is not usable. Each variant is a refusal the loop
 /// sees; there is no variant meaning "carry on with nothing".
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum ReplyError {
     /// The body did not parse as a chat completion at all.
     Malformed(String),
@@ -207,37 +218,47 @@ pub enum ReplyError {
 
 impl std::fmt::Display for ReplyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ReplyError::Malformed(m) => write!(f, "provider reply is malformed: {m}"),
-            ReplyError::NoChoices => write!(f, "provider reply carried no choices"),
-            ReplyError::EmptyMessage => {
-                write!(f, "provider reply had neither content nor tool calls")
-            }
-            ReplyError::TokenLimit => write!(
-                f,
+        f.write_str(match self {
+            ReplyError::Malformed(_) => "provider reply is malformed",
+            ReplyError::NoChoices => "provider reply carried no choices",
+            ReplyError::EmptyMessage => "provider reply had neither content nor tool calls",
+            ReplyError::TokenLimit => {
                 "provider reply hit its token limit before giving an answer or a tool call"
-            ),
-            ReplyError::ReasoningOnly => write!(
-                f,
+            }
+            ReplyError::ReasoningOnly => {
                 "provider reply carried reasoning but no answer or tool call"
-            ),
-            ReplyError::UnknownTool(t) => write!(f, "provider proposed an unknown tool '{t}'"),
-            ReplyError::Unacceptable(m) => write!(f, "provider reply is not admissible: {m}"),
-        }
+            }
+            ReplyError::UnknownTool(_) => "provider proposed a tool this deployment did not offer",
+            ReplyError::Unacceptable(_) => "provider reply is not admissible",
+        })
+    }
+}
+
+impl std::fmt::Debug for ReplyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            ReplyError::Malformed(_) => "Malformed",
+            ReplyError::NoChoices => "NoChoices",
+            ReplyError::EmptyMessage => "EmptyMessage",
+            ReplyError::TokenLimit => "TokenLimit",
+            ReplyError::ReasoningOnly => "ReasoningOnly",
+            ReplyError::UnknownTool(_) => "UnknownTool",
+            ReplyError::Unacceptable(_) => "Unacceptable",
+        })
     }
 }
 
 impl ReplyError {
-    /// The closed name the deputy journals; never provider bytes.
-    pub fn defect(&self) -> &'static str {
+    pub fn defect(&self) -> maknae_proto::ReplyDefect {
+        use maknae_proto::ReplyDefect as D;
         match self {
-            ReplyError::Malformed(_) => "Malformed",
-            ReplyError::NoChoices => "NoChoices",
-            ReplyError::EmptyMessage => "Empty",
-            ReplyError::TokenLimit => "TokenLimit",
-            ReplyError::ReasoningOnly => "ReasoningOnly",
-            ReplyError::UnknownTool(_) => "UnknownTool",
-            ReplyError::Unacceptable(_) => "OverBound",
+            ReplyError::Malformed(_) => D::Malformed,
+            ReplyError::NoChoices => D::NoChoices,
+            ReplyError::EmptyMessage => D::Empty,
+            ReplyError::TokenLimit => D::TokenLimit,
+            ReplyError::ReasoningOnly => D::ReasoningOnly,
+            ReplyError::UnknownTool(_) => D::UnknownTool,
+            ReplyError::Unacceptable(_) => D::OverBound,
         }
     }
 }
@@ -251,7 +272,7 @@ pub enum ReplyNotice {
 impl ReplyNotice {
     pub fn name(&self) -> &'static str {
         match self {
-            ReplyNotice::ReasoningOverBound => "ReasoningOverBound",
+            ReplyNotice::ReasoningOverBound => "reasoning-over-bound",
         }
     }
 }
@@ -262,6 +283,15 @@ pub struct Completion {
     pub notice: Option<ReplyNotice>,
 }
 
+pub fn usage_of(resp: &ChatResponse) -> Option<maknae_proto::Usage> {
+    resp.usage.as_ref().and_then(|v| {
+        Some(maknae_proto::Usage {
+            prompt_tokens: v.get("prompt_tokens")?.as_u64()?,
+            completion_tokens: v.get("completion_tokens").and_then(|c| c.as_u64()),
+        })
+    })
+}
+
 /// Map a parsed provider response into Maknae's reply type.
 ///
 /// `offered` is the set of tool names this deployment put on the request. A
@@ -269,12 +299,7 @@ pub struct Completion {
 /// PROPOSES and the PDP authorizes, so a model that invents a tool name is
 /// proposing outside the vocabulary it was given.
 pub fn to_prompt_reply(resp: ChatResponse, offered: &[String]) -> Result<Completion, ReplyError> {
-    let usage = resp.usage.as_ref().and_then(|v| {
-        Some(maknae_proto::Usage {
-            prompt_tokens: v.get("prompt_tokens")?.as_u64()?,
-            completion_tokens: v.get("completion_tokens").and_then(|c| c.as_u64()),
-        })
-    });
+    let usage = usage_of(&resp);
     let choice = resp
         .choices
         .into_iter()
@@ -351,11 +376,14 @@ fn reply_line(lead: &str, conversation: &str, name: &str) -> zeroize::Zeroizing<
 }
 
 /// One journal line for a refused reply. `conversation` is admission-checked to `[A-Za-z0-9._-]`.
-pub fn defect_line(conversation: &str, name: &str) -> zeroize::Zeroizing<String> {
+pub fn defect_line(
+    conversation: &str,
+    defect: maknae_proto::ReplyDefect,
+) -> zeroize::Zeroizing<String> {
     reply_line(
         "maknae-egress: provider reply unusable (conversation ",
         conversation,
-        name,
+        defect.name(),
     )
 }
 
@@ -422,13 +450,11 @@ pub fn redact(body: &mut zeroize::Zeroizing<Vec<u8>>, secret: &[u8]) {
     if secret.is_empty() {
         return;
     }
-    let mut i = 0;
-    while i + secret.len() <= body.len() {
-        if &body[i..i + secret.len()] == secret {
-            body[i..i + secret.len()].fill(b'*');
-            i += secret.len();
-        } else {
-            i += 1;
+    if let Some(last) = body.len().checked_sub(secret.len()) {
+        for i in 0..=last {
+            if &body[i..i + secret.len()] == secret {
+                body[i..i + secret.len()].fill(b'*');
+            }
         }
     }
     if let Some(k) = (1..secret.len())
@@ -878,7 +904,10 @@ mod tests {
             (ReplyError::EmptyMessage, "neither content nor tool calls"),
             (ReplyError::TokenLimit, "token limit"),
             (ReplyError::ReasoningOnly, "reasoning but no answer"),
-            (ReplyError::UnknownTool("exfiltrate".into()), "exfiltrate"),
+            (
+                ReplyError::UnknownTool("exfiltrate".into()),
+                "did not offer",
+            ),
             (
                 ReplyError::Unacceptable("over a bound".into()),
                 "not admissible",
@@ -890,6 +919,38 @@ mod tests {
                 rendered.contains(needle),
                 "{e:?} rendered as {rendered:?}, expected to mention {needle:?}"
             );
+        }
+    }
+
+    #[test]
+    fn reply_errors_and_parsed_responses_render_no_provider_text() {
+        let payload = "SENTINEL-524-payload";
+        let errors = [
+            ReplyError::Malformed(payload.into()),
+            ReplyError::UnknownTool(payload.into()),
+            ReplyError::Unacceptable(payload.into()),
+        ];
+        let want_debug = ["Malformed", "UnknownTool", "Unacceptable"];
+        let want_display = [
+            "provider reply is malformed",
+            "provider proposed a tool this deployment did not offer",
+            "provider reply is not admissible",
+        ];
+        for ((e, dbg), disp) in errors.iter().zip(want_debug).zip(want_display) {
+            assert_eq!(format!("{e:?}"), dbg);
+            assert_eq!(e.to_string(), disp);
+        }
+        let resp: ChatResponse = serde_json::from_str(
+            r#"{"choices":[{"finish_reason":"SENTINEL-524-payload","message":{"tool_calls":[{"id":"SENTINEL-524-payload","function":{"name":"SENTINEL-524-payload","arguments":"{}"}}]}}],"usage":"SENTINEL-524-payload"}"#,
+        )
+        .unwrap();
+        for d in [
+            format!("{:?}", resp.choices[0].message.tool_calls[0].function),
+            format!("{:?}", resp.choices[0].message.tool_calls[0]),
+            format!("{:?}", resp.choices[0]),
+            format!("{resp:?}"),
+        ] {
+            assert!(!d.contains("SENTINEL"), "{d}");
         }
     }
 
@@ -1290,6 +1351,12 @@ mod tests {
         let mut untouched = zeroize::Zeroizing::new(b"abc".to_vec());
         redact(&mut untouched, b"");
         assert_eq!(&untouched[..], b"abc");
+        let mut exact = zeroize::Zeroizing::new(b"sk-SECRET-123".to_vec());
+        redact(&mut exact, b"sk-SECRET-123");
+        assert_eq!(&exact[..], b"*************");
+        let mut short = zeroize::Zeroizing::new(b"sk".to_vec());
+        redact(&mut short, b"sk-SECRET-123");
+        assert_eq!(&short[..], b"**");
     }
 
     /// The 4 KiB cut can fall inside an echoed key; what survives of it is a
@@ -1447,33 +1514,39 @@ mod tests {
 
     #[test]
     fn every_defect_has_a_closed_name() {
-        let cases = [
-            (ReplyError::Malformed("x".into()), "Malformed"),
-            (ReplyError::NoChoices, "NoChoices"),
-            (ReplyError::EmptyMessage, "Empty"),
-            (ReplyError::TokenLimit, "TokenLimit"),
-            (ReplyError::ReasoningOnly, "ReasoningOnly"),
-            (ReplyError::UnknownTool("x".into()), "UnknownTool"),
-            (ReplyError::Unacceptable("x".into()), "OverBound"),
-        ];
-        for (e, name) in cases {
-            assert_eq!(e.defect(), name);
+        use maknae_proto::ReplyDefect;
+        for (e, want) in [
+            (ReplyError::Malformed("x".into()), ReplyDefect::Malformed),
+            (ReplyError::NoChoices, ReplyDefect::NoChoices),
+            (ReplyError::EmptyMessage, ReplyDefect::Empty),
+            (ReplyError::TokenLimit, ReplyDefect::TokenLimit),
+            (ReplyError::ReasoningOnly, ReplyDefect::ReasoningOnly),
+            (
+                ReplyError::UnknownTool("t".into()),
+                ReplyDefect::UnknownTool,
+            ),
+            (ReplyError::Unacceptable("x".into()), ReplyDefect::OverBound),
+        ] {
+            assert_eq!(e.defect(), want);
         }
-        assert_eq!(ReplyNotice::ReasoningOverBound.name(), "ReasoningOverBound");
+        assert_eq!(
+            ReplyNotice::ReasoningOverBound.name(),
+            "reasoning-over-bound"
+        );
     }
 
     #[test]
     fn the_defect_and_notice_lines_carry_only_the_conversation_and_the_name_and_never_grow() {
-        let d = defect_line("c1", "Malformed");
+        let d = defect_line("c1", maknae_proto::ReplyDefect::Malformed);
         assert_eq!(
             d.as_str(),
-            "maknae-egress: provider reply unusable (conversation c1): Malformed"
+            "maknae-egress: provider reply unusable (conversation c1): malformed"
         );
         assert_eq!(d.capacity(), d.len());
-        let n = notice_line("conv-2", "ReasoningOverBound");
+        let n = notice_line("conv-2", "reasoning-over-bound");
         assert_eq!(
             n.as_str(),
-            "maknae-egress: provider reply forwarded without its reasoning (conversation conv-2): ReasoningOverBound"
+            "maknae-egress: provider reply forwarded without its reasoning (conversation conv-2): reasoning-over-bound"
         );
         assert_eq!(n.capacity(), n.len());
     }

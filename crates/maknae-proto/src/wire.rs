@@ -262,6 +262,66 @@ pub struct Usage {
     pub completion_tokens: Option<u64>,
 }
 
+/// Why a provider's answer could not be used (#524). Describes the provider's reply, never a kernel decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReplyDefect {
+    Malformed,
+    NoChoices,
+    Empty,
+    ReasoningOnly,
+    TokenLimit,
+    UnknownTool,
+    OverBound,
+    ProviderAuth,
+    ProviderRateLimit,
+    ProviderRejected,
+    ProviderError,
+}
+
+pub const REPLY_UNUSABLE_MESSAGE: &str = "the provider's reply was unusable";
+
+impl ReplyDefect {
+    pub const ALL: [ReplyDefect; 11] = [
+        ReplyDefect::Malformed,
+        ReplyDefect::NoChoices,
+        ReplyDefect::Empty,
+        ReplyDefect::ReasoningOnly,
+        ReplyDefect::TokenLimit,
+        ReplyDefect::UnknownTool,
+        ReplyDefect::OverBound,
+        ReplyDefect::ProviderAuth,
+        ReplyDefect::ProviderRateLimit,
+        ReplyDefect::ProviderRejected,
+        ReplyDefect::ProviderError,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ReplyDefect::Malformed => "malformed",
+            ReplyDefect::NoChoices => "no-choices",
+            ReplyDefect::Empty => "empty",
+            ReplyDefect::ReasoningOnly => "reasoning-only",
+            ReplyDefect::TokenLimit => "token-limit",
+            ReplyDefect::UnknownTool => "unknown-tool",
+            ReplyDefect::OverBound => "over-bound",
+            ReplyDefect::ProviderAuth => "provider-auth",
+            ReplyDefect::ProviderRateLimit => "provider-rate-limit",
+            ReplyDefect::ProviderRejected => "provider-rejected",
+            ReplyDefect::ProviderError => "provider-error",
+        }
+    }
+
+    pub fn from_status(code: u16) -> ReplyDefect {
+        match code {
+            401 | 403 => ReplyDefect::ProviderAuth,
+            429 => ReplyDefect::ProviderRateLimit,
+            400..=499 => ReplyDefect::ProviderRejected,
+            _ => ReplyDefect::ProviderError,
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderChoice {
     pub provider: String,
@@ -987,6 +1047,7 @@ pub enum ProtoErrCode {
     /// state is not a wire disclosure on any path. Dead, kept additive, same
     /// honest-record treatment as `UnknownVerb` below.
     NotImplemented,
+    ReplyUnusable(ReplyDefect),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1253,6 +1314,72 @@ pub fn decode_response(b: &[u8]) -> Result<Response, ProtoCodecError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_reply_defect_has_its_kebab_name() {
+        let names: Vec<&str> = ReplyDefect::ALL.iter().map(|d| d.name()).collect();
+        assert_eq!(
+            names,
+            [
+                "malformed",
+                "no-choices",
+                "empty",
+                "reasoning-only",
+                "token-limit",
+                "unknown-tool",
+                "over-bound",
+                "provider-auth",
+                "provider-rate-limit",
+                "provider-rejected",
+                "provider-error",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_wire_spelling_of_a_reply_defect_is_its_name() {
+        for d in ReplyDefect::ALL {
+            let mut buf = Vec::new();
+            ciborium::into_writer(&d, &mut buf).unwrap();
+            let v: ciborium::Value = ciborium::from_reader(buf.as_slice()).unwrap();
+            assert_eq!(v.as_text(), Some(d.name()), "{d:?}");
+        }
+    }
+
+    #[test]
+    fn a_status_maps_to_its_closed_class() {
+        for (code, want) in [
+            (401, ReplyDefect::ProviderAuth),
+            (403, ReplyDefect::ProviderAuth),
+            (429, ReplyDefect::ProviderRateLimit),
+            (400, ReplyDefect::ProviderRejected),
+            (404, ReplyDefect::ProviderRejected),
+            (499, ReplyDefect::ProviderRejected),
+            (500, ReplyDefect::ProviderError),
+            (503, ReplyDefect::ProviderError),
+            (302, ReplyDefect::ProviderError),
+            (600, ReplyDefect::ProviderError),
+        ] {
+            assert_eq!(ReplyDefect::from_status(code), want, "{code}");
+        }
+    }
+
+    #[test]
+    fn reply_unusable_round_trips_for_every_defect() {
+        for d in ReplyDefect::ALL {
+            let resp = Response {
+                protocol_version: PROTOCOL_VERSION,
+                result: RespResult::Err(ProtoError {
+                    code: ProtoErrCode::ReplyUnusable(d),
+                    message: REPLY_UNUSABLE_MESSAGE.into(),
+                }),
+            };
+            let mut buf = Vec::new();
+            ciborium::into_writer(&resp, &mut buf).unwrap();
+            let back: Response = ciborium::from_reader(&buf[..]).unwrap();
+            assert_eq!(back, resp, "{d:?}");
+        }
+    }
+
     fn status(kernel_graph: Option<(u64, String)>) -> Response {
         Response {
             protocol_version: PROTOCOL_VERSION,

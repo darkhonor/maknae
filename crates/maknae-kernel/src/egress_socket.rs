@@ -303,9 +303,7 @@ impl Egress for SocketEgress {
         let mut s = stream;
         Self::arm(&s, deadline_at)?;
         // FROM HERE ON the request is leaving: every failure below is
-        // `AfterSend`, recorded as delivery-unknown (codex on #240 — the
-        // deputy closes the connection when its provider call fails or times
-        // out, and the provider may already have the prompt).
+        // `AfterSend`, recorded as delivery-unknown (codex on #240).
         Self::write_all_by(&mut s, &(buf.len() as u32).to_be_bytes(), deadline_at)
             .map_err(Self::after_send)?;
         Self::write_all_by(&mut s, &buf, deadline_at).map_err(Self::after_send)?;
@@ -347,6 +345,9 @@ impl Egress for SocketEgress {
         {
             EgressFrameReply::Reply(reply) => Ok(EgressReply { reply }),
             EgressFrameReply::RefusedBeforeSend => Err(EgressFailure::RefusedBeforeSend),
+            EgressFrameReply::Unusable { defect, usage } => {
+                Err(EgressFailure::ReplyUnusable { defect, usage })
+            }
         }
     }
 }
@@ -718,6 +719,28 @@ mod tests {
             EgressFailure::RefusedBeforeSend
         );
         assert!(seen.load(Ordering::SeqCst) > 0);
+    }
+
+    #[test]
+    fn a_deputy_that_finds_the_reply_unusable_is_a_reply_unusable_failure() {
+        let d = tempfile::tempdir().unwrap();
+        let (path, _seen) = fake_deputy(
+            d.path(),
+            Some(maknae_proto::EgressFrameReply::Unusable {
+                defect: maknae_proto::ReplyDefect::ProviderRateLimit,
+                usage: None,
+            }),
+        );
+        let me = nix::unistd::getuid().as_raw();
+        let e = SocketEgress::new(path, me, Duration::from_secs(2), 64 * 1024);
+        let intent = crate::egress::DurableEgressIntent::canned_for_test();
+        assert_eq!(
+            e.send(&intent, req()).unwrap_err(),
+            EgressFailure::ReplyUnusable {
+                defect: maknae_proto::ReplyDefect::ProviderRateLimit,
+                usage: None,
+            }
+        );
     }
 
     /// `ready()` is cheap and side-effect-free, and fails closed when there is

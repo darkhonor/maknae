@@ -13,21 +13,21 @@ use std::time::Duration;
 /// ADMISSION — this is about the call.
 pub enum FulfilError {
     Open(OpenFailure),
-    /// The call did not produce a usable reply. `journal` is the deputy's journal
-    /// line: the provider's error body, key redacted and escaped, or a reply
-    /// defect's closed name. Neither `Display` nor `Debug` renders it.
+    /// No provider answer was received; the connection closes (`OutcomeUnknown`).
     Provider {
         summary: String,
-        journal: Option<zeroize::Zeroizing<String>>,
+    },
+    /// The provider answered and the answer is unusable (#524). `journal` is never rendered.
+    Unusable {
+        defect: maknae_proto::ReplyDefect,
+        usage: Option<maknae_proto::Usage>,
+        journal: zeroize::Zeroizing<String>,
     },
 }
 
 impl FulfilError {
     fn provider(summary: String) -> Self {
-        FulfilError::Provider {
-            summary,
-            journal: None,
-        }
+        FulfilError::Provider { summary }
     }
 }
 
@@ -35,7 +35,10 @@ impl std::fmt::Display for FulfilError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             FulfilError::Open(o) => write!(f, "refused before send: {}", o.reason()),
-            FulfilError::Provider { summary, .. } => write!(f, "{summary}"),
+            FulfilError::Provider { summary } => write!(f, "{summary}"),
+            FulfilError::Unusable { defect, .. } => {
+                write!(f, "provider reply unusable: {}", defect.name())
+            }
         }
     }
 }
@@ -44,10 +47,15 @@ impl std::fmt::Debug for FulfilError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             FulfilError::Open(o) => f.debug_tuple("Open").field(o).finish(),
-            FulfilError::Provider { summary, journal } => write!(
+            FulfilError::Provider { summary } => write!(f, "Provider {{ {summary:?} }}"),
+            FulfilError::Unusable {
+                defect,
+                usage,
+                journal,
+            } => write!(
                 f,
-                "Provider {{ {summary:?}, <{}-byte journal line> }}",
-                journal.as_ref().map_or(0, |j| j.len())
+                "Unusable {{ {defect:?}, {usage:?}, <{}-byte journal line> }}",
+                journal.len()
             ),
         }
     }
@@ -288,19 +296,16 @@ pub async fn fulfil<O: KeyOpener>(
             truncated,
         } => {
             maknae_llm::redact(&mut body, key.as_bytes());
-            FulfilError::Provider {
-                summary: format!("provider answered {code}"),
-                journal: Some(maknae_llm::journal_line(
-                    code,
-                    &req.conversation,
-                    &body,
-                    truncated,
-                )),
+            FulfilError::Unusable {
+                defect: maknae_proto::ReplyDefect::from_status(code),
+                usage: None,
+                journal: maknae_llm::journal_line(code, &req.conversation, &body, truncated),
             }
         }
-        maknae_llm::CallError::Reply(r) => FulfilError::Provider {
-            summary: format!("provider reply unusable: {}", r.defect()),
-            journal: Some(maknae_llm::defect_line(&req.conversation, r.defect())),
+        maknae_llm::CallError::Reply { error, usage } => FulfilError::Unusable {
+            defect: error.defect(),
+            usage,
+            journal: maknae_llm::defect_line(&req.conversation, error.defect()),
         },
         other => FulfilError::provider(other.to_string()),
     })?;
@@ -315,6 +320,7 @@ pub async fn fulfil<O: KeyOpener>(
 mod tests {
     use super::*;
     use crate::unseal::OpenRequest;
+    use maknae_proto::ReplyDefect;
     use zeroize::Zeroizing;
 
     fn txt(s: &str) -> maknae_proto::ContentBlock {
@@ -767,17 +773,6 @@ mod tests {
         assert!(sent.contains("alpha-user") && sent.contains("omega-tool"));
     }
 
-    /// A provider failure is a NAMED refusal in the DEPUTY's own error value,
-    /// and the key appears in neither that error nor the bytes this test
-    /// inspects. Where the name goes is the deputy's stderr, not the trail:
-    /// `serve_one` propagates `fulfil`'s error through `?` before it writes
-    /// any reply, `main.rs` renders it with
-    /// `eprintln!("maknae-egress: connection refused: …")` and closes the
-    /// connection, so what the kernel observes is a failed exchange after
-    /// send. What this test checks is the error's own text for the one
-    /// provider response it scripts (corrected 2026-09-22, #344: this said the
-    /// kernel reads the name). Since #372 the provider's error body also reaches
-    /// that stderr, as its own escaped line with the key redacted.
     #[tokio::test]
     async fn a_provider_failure_is_a_named_refusal_that_never_echoes_the_key() {
         fips();
@@ -790,15 +785,15 @@ mod tests {
             .await
             .unwrap_err();
         match &e {
-            FulfilError::Provider { summary, journal } => {
-                assert!(summary.contains("401"), "{summary}");
-                let j = journal.as_ref().expect("a status carries a journal line");
+            FulfilError::Unusable { journal, .. } => {
+                assert!(e.to_string().contains("provider-auth"), "{e}");
+                let j = journal;
                 assert!(
                     !j.contains("sk-SECRET-VALUE"),
                     "the key reached the journal"
                 );
             }
-            FulfilError::Open(o) => panic!("a provider failure was classed before send: {o:?}"),
+            other => panic!("expected an unusable answer, got {other:?}"),
         }
         // THE credential assertion #240's scope requires.
         assert!(
@@ -822,11 +817,10 @@ mod tests {
         let e = fulfil(&admitted, &opener, CallBounds::default(), &mut |_| {})
             .await
             .unwrap_err();
-        let FulfilError::Provider { summary, journal } = &e else {
-            panic!("expected a provider refusal, got {e:?}");
+        let FulfilError::Unusable { journal: j, .. } = &e else {
+            panic!("expected an unusable answer, got {e:?}");
         };
-        assert!(!summary.contains("SECRET"), "{summary}");
-        let j = journal.as_ref().expect("a status carries a journal line");
+        assert!(!e.to_string().contains("SECRET"), "{e}");
         assert!(
             j.contains("SECRET-BODY") && j.contains("conv1"),
             "{}",
@@ -838,7 +832,7 @@ mod tests {
         assert_eq!(
             dbg,
             format!(
-                "Provider {{ \"provider answered 401\", <{}-byte journal line> }}",
+                "Unusable {{ ProviderAuth, None, <{}-byte journal line> }}",
                 j.len()
             )
         );
@@ -912,10 +906,18 @@ mod tests {
             !shown.contains("alice") && !shown.contains("api_key"),
             "{shown}"
         );
+        assert_eq!(format!("{e:?}"), "Open(WrongPath)");
         assert!(
             matches!(l.accept(), Err(ref x) if x.kind() == std::io::ErrorKind::WouldBlock),
             "the provider was contacted after the opener refused"
         );
+    }
+
+    #[test]
+    fn a_transport_failure_renders_its_summary() {
+        let e = FulfilError::provider("connect refused".into());
+        assert_eq!(e.to_string(), "connect refused");
+        assert_eq!(format!("{e:?}"), "Provider { \"connect refused\" }");
     }
 
     #[tokio::test]
@@ -942,6 +944,84 @@ mod tests {
                 "conv1|openai|m|maknae-kv|maknae/users/alice/openai/personal|api_key".to_string()
             )]
         );
+    }
+
+    #[tokio::test]
+    async fn a_non_2xx_answer_is_unusable_with_its_status_class_and_no_provider_text() {
+        fips();
+        for (status, code, want) in [
+            ("401 Unauthorized", 401, ReplyDefect::ProviderAuth),
+            ("403 Forbidden", 403, ReplyDefect::ProviderAuth),
+            ("429 Too Many Requests", 429, ReplyDefect::ProviderRateLimit),
+            ("404 Not Found", 404, ReplyDefect::ProviderRejected),
+            ("503 Service Unavailable", 503, ReplyDefect::ProviderError),
+        ] {
+            let (url, _h) = provider(status, "SENTINEL-524 sk-SECRET-VALUE").await;
+            let f = frame_to(url);
+            let b = bounds();
+            let admitted = crate::handle::decide(&f, &b).unwrap();
+            let e = fulfil(
+                &admitted,
+                &Fixed("sk-SECRET-VALUE"),
+                CallBounds::default(),
+                &mut |_| {},
+            )
+            .await
+            .unwrap_err();
+            let FulfilError::Unusable {
+                defect,
+                usage,
+                journal,
+            } = &e
+            else {
+                panic!("{status}: {e:?}")
+            };
+            assert_eq!((*defect, *usage), (want, None), "{status}");
+            assert!(
+                journal.contains(&format!("provider answered {code}")),
+                "{status}"
+            );
+            assert!(
+                !journal.contains("sk-SECRET-VALUE"),
+                "{status}: the key reached the journal"
+            );
+            for rendered in [e.to_string(), format!("{e:?}")] {
+                assert!(!rendered.contains("SENTINEL"), "{status}: {rendered}");
+                assert!(
+                    !rendered.contains("sk-SECRET-VALUE"),
+                    "{status}: {rendered}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_2xx_defect_is_unusable_with_its_defect_and_usage() {
+        let (r, lines, _) = fulfil_against(
+            r#"{"choices":[{"message":{"content":""},"finish_reason":"length"}],"usage":{"prompt_tokens":11,"completion_tokens":5}}"#,
+        )
+        .await;
+        let e = r.unwrap_err();
+        let FulfilError::Unusable {
+            defect,
+            usage,
+            journal,
+        } = &e
+        else {
+            panic!("{e:?}")
+        };
+        assert_eq!(
+            (*defect, *usage),
+            (
+                ReplyDefect::TokenLimit,
+                Some(maknae_proto::Usage {
+                    prompt_tokens: 11,
+                    completion_tokens: Some(5)
+                })
+            )
+        );
+        assert!(journal.ends_with("): token-limit"), "{}", journal.as_str());
+        assert!(lines.is_empty());
     }
 
     fn leak(s: String) -> &'static str {
@@ -1021,13 +1101,10 @@ mod tests {
     async fn a_malformed_reply_journals_its_closed_name_and_no_body_bytes() {
         let (r, lines, _) = fulfil_against(r#"{"choices": "SENTINEL-sk-not-a-key"}"#).await;
         let err = r.unwrap_err();
-        let FulfilError::Provider {
-            journal: Some(j), ..
-        } = &err
-        else {
+        let FulfilError::Unusable { journal: j, .. } = &err else {
             panic!("{err:?}")
         };
-        assert!(j.as_str().ends_with("): Malformed"), "{}", j.as_str());
+        assert!(j.as_str().ends_with("): malformed"), "{}", j.as_str());
         assert!(!j.as_str().contains("SENTINEL"));
         assert!(!err.to_string().contains("SENTINEL"));
         assert!(lines.is_empty());
@@ -1040,13 +1117,10 @@ mod tests {
         )
         .await;
         let err = r.unwrap_err();
-        let FulfilError::Provider {
-            journal: Some(j), ..
-        } = &err
-        else {
+        let FulfilError::Unusable { journal: j, .. } = &err else {
             panic!("{err:?}")
         };
-        assert!(j.as_str().ends_with("): ReasoningOnly"));
+        assert!(j.as_str().ends_with("): reasoning-only"));
         assert!(!j.as_str().contains("SENTINEL"));
     }
 
@@ -1063,7 +1137,11 @@ mod tests {
         assert_eq!(reply.reasoning, None);
         assert_eq!(reply.blocks.len(), 1);
         assert_eq!(lines.len(), 1);
-        assert!(lines[0].ends_with("): ReasoningOverBound"), "{}", lines[0]);
+        assert!(
+            lines[0].ends_with("): reasoning-over-bound"),
+            "{}",
+            lines[0]
+        );
     }
 
     #[tokio::test]

@@ -717,6 +717,14 @@ mod tests {
                 "reply refused: reasoning",
                 "unauthorized",
             ),
+            (
+                "undelivered-unusable",
+                EgressStatus::LandedUndelivered,
+                None,
+                "permit",
+                "reply unusable: provider-rate-limit",
+                "unavailable",
+            ),
         ] {
             let mut r = egress_record(status, reply, result, reason, posture);
             r.subject.user = Some("aackerman".into());

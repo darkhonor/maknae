@@ -11,6 +11,7 @@
 use crate::blocking_guard::AUDIT_APPEND_TIMEOUT;
 use maknae_audit_append::{AuditEmit, AuditError, AuditRecord, EgressStatus};
 use maknae_proto::{ContentBlock, PromptReply, Turn};
+use std::borrow::Cow;
 use std::sync::Arc;
 
 #[derive(Clone, PartialEq, Eq)]
@@ -91,8 +92,8 @@ pub struct EgressReply {
 /// `DeadlineExpired` is the backend's own budget running out after the
 /// request left (the kernel's outer timeout maps to the same outcome).
 /// [`SendOutcome::LandedUndelivered`] is the kernel's own
-/// refusal to deliver a reply that DID arrive, for one of [`ReplyRefusal`]'s
-/// reasons (over the cap, non-text, empty).
+/// refusal to deliver a reply that DID arrive, or the Egress Daemon's report
+/// that the provider's answer was unusable.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EgressFailure {
     NotConfigured,
@@ -106,15 +107,19 @@ pub enum EgressFailure {
     /// #240: the inner budget usually fires first).
     DeadlineExpired,
     /// Something failed from the point the kernel began writing the request
-    /// to the deputy: the deputy closed the connection (its provider call
-    /// failed or timed out — the provider may have received the prompt), the
-    /// reply was malformed, or its frame was over the cap. Bytes may or may
+    /// to the deputy: the deputy closed the connection, the reply was
+    /// malformed, or its frame was over the cap. Bytes may or may
     /// not have crossed; the record is conservative. Recorded as
     /// [`SendOutcome::OutcomeUnknown`], never `Failed`: "nothing left" would
     /// be a false statement about content that did (codex on #240).
     AfterSend(String),
     /// The deputy refused before any provider I/O: nothing left, recorded `Failed`.
     RefusedBeforeSend,
+    /// The deputy holds a provider answer it could not use: recorded `LandedUndelivered` (#427).
+    ReplyUnusable {
+        defect: maknae_proto::ReplyDefect,
+        usage: Option<maknae_proto::Usage>,
+    },
 }
 
 /// Proof of a durable intent. No public constructor: a value exists only
@@ -228,6 +233,11 @@ pub fn outcome_for_failure(f: &EgressFailure) -> SendOutcome {
     match f {
         EgressFailure::DeadlineExpired => SendOutcome::DeadlineExpired,
         EgressFailure::AfterSend(_) => SendOutcome::OutcomeUnknown,
+        EgressFailure::ReplyUnusable { defect, usage } => SendOutcome::LandedUndelivered {
+            reply_length: None,
+            refusal: ReplyRefusal::Unusable(*defect),
+            usage: *usage,
+        },
         EgressFailure::NotConfigured
         | EgressFailure::Transport(_)
         | EgressFailure::RefusedBeforeSend => SendOutcome::Failed,
@@ -477,9 +487,9 @@ pub fn content_measure(turns: &[Turn]) -> ContentMeasure {
     ContentMeasure { length, digest32 }
 }
 
-/// Why the kernel refused to deliver a reply that arrived: over the frame
+/// Why a reply that arrived was not delivered: over the frame
 /// cap (`TooLarge` on the wire), carrying a block kind this deployment does
-/// not admit, or empty (both `Unauthorized`).
+/// not admit, or empty.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReplyRefusal {
     Oversize,
@@ -491,6 +501,20 @@ pub enum ReplyRefusal {
     ToolCallUnacceptable,
     /// Reasoning over `MAX_REASONING_BYTES`; the deputy drops it, so this is a deputy defect.
     ReasoningUnacceptable,
+    Unusable(maknae_proto::ReplyDefect),
+}
+
+pub fn refusal_answer(r: ReplyRefusal) -> (maknae_proto::ProtoErrCode, &'static str) {
+    use maknae_proto::{ProtoErrCode as C, ReplyDefect as D, REPLY_UNUSABLE_MESSAGE as U};
+    match r {
+        ReplyRefusal::Oversize => (C::TooLarge, "response exceeds the configured frame limit"),
+        ReplyRefusal::NonText => (C::Unauthorized, "not authorized"),
+        ReplyRefusal::Empty => (C::ReplyUnusable(D::Empty), U),
+        ReplyRefusal::ToolCallUnacceptable | ReplyRefusal::ReasoningUnacceptable => {
+            (C::ReplyUnusable(D::OverBound), U)
+        }
+        ReplyRefusal::Unusable(d) => (C::ReplyUnusable(d), U),
+    }
 }
 
 /// The reply-direction admission. `admitted_turns` is the prompt direction
@@ -532,7 +556,8 @@ pub fn admitted_reply(reply: &PromptReply) -> Result<(), ReplyRefusal> {
 /// unreachable (T1: every arm must be killable). `DeadlineExpired`: the
 /// egress deadline (`egress.deadline_ms`) passed with no answer, delivery to
 /// the provider unknown. `LandedUndelivered`: the reply arrived and the kernel refuses to
-/// deliver it, ADR-0023 decision 3's meaning, for the [`ReplyRefusal`] named.
+/// deliver it or the deputy found it unusable, ADR-0023 decision 3's meaning, for the
+/// [`ReplyRefusal`] named.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SendOutcome {
     Sent {
@@ -546,7 +571,7 @@ pub enum SendOutcome {
     /// (`EgressFailure::AfterSend`).
     OutcomeUnknown,
     LandedUndelivered {
-        reply_length: u64,
+        reply_length: Option<u64>,
         refusal: ReplyRefusal,
         usage: Option<maknae_proto::Usage>,
     },
@@ -556,7 +581,7 @@ pub enum SendOutcome {
 /// `result`/`reason`/`posture` per outcome. A send that did NOT go out, or
 /// whose delivery is unknown (`Failed`, `DeadlineExpired`, `OutcomeUnknown`),
 /// is a `deny`, never a `permit` that reads
-/// "send failed"; a reply the kernel refused to deliver (`LandedUndelivered`)
+/// "send failed"; a reply that was not delivered (`LandedUndelivered`)
 /// stays `permit`, because the content DID leave and the trail must say so.
 /// Every posture is inside ADR-0019's pinned domain; the egress-specific fact is
 /// `egress.status`. The strings are the ones the syslog cap test measures;
@@ -579,28 +604,28 @@ pub fn outcome_for(
             EgressStatus::Sent,
             Some(reply_length),
             "permit",
-            "sent",
+            Cow::from("sent"),
             "authorized",
         ),
         SendOutcome::Failed => (
             EgressStatus::Failed,
             None,
             "deny",
-            "send failed",
+            "send failed".into(),
             "unavailable",
         ),
         SendOutcome::DeadlineExpired => (
             EgressStatus::DeadlineExpired,
             None,
             "deny",
-            "send deadline expired",
+            "send deadline expired".into(),
             "unavailable",
         ),
         SendOutcome::OutcomeUnknown => (
             EgressStatus::OutcomeUnknown,
             None,
             "deny",
-            "send outcome unknown",
+            "send outcome unknown".into(),
             "unavailable",
         ),
         // `permit` + `refused-oversize`: the pairing ADR-0019 pins for a permit
@@ -611,9 +636,9 @@ pub fn outcome_for(
             ..
         } => (
             EgressStatus::LandedUndelivered,
-            Some(reply_length),
+            reply_length,
             "permit",
-            "reply refused: oversize",
+            "reply refused: oversize".into(),
             "refused-oversize",
         ),
         // `permit` + `unauthorized`: the content left; the reply is not
@@ -624,9 +649,9 @@ pub fn outcome_for(
             ..
         } => (
             EgressStatus::LandedUndelivered,
-            Some(reply_length),
+            reply_length,
             "permit",
-            "reply refused: non-text",
+            "reply refused: non-text".into(),
             "unauthorized",
         ),
         SendOutcome::LandedUndelivered {
@@ -635,9 +660,9 @@ pub fn outcome_for(
             ..
         } => (
             EgressStatus::LandedUndelivered,
-            Some(reply_length),
+            reply_length,
             "permit",
-            "reply refused: empty",
+            "reply refused: empty".into(),
             "unauthorized",
         ),
         // `permit` + `unauthorized`, the NonText pairing: the content left and
@@ -651,9 +676,9 @@ pub fn outcome_for(
             ..
         } => (
             EgressStatus::LandedUndelivered,
-            Some(reply_length),
+            reply_length,
             "permit",
-            "reply refused: tool call",
+            "reply refused: tool call".into(),
             "unauthorized",
         ),
         SendOutcome::LandedUndelivered {
@@ -662,14 +687,25 @@ pub fn outcome_for(
             ..
         } => (
             EgressStatus::LandedUndelivered,
-            Some(reply_length),
+            reply_length,
             "permit",
-            "reply refused: reasoning",
+            "reply refused: reasoning".into(),
             "unauthorized",
+        ),
+        SendOutcome::LandedUndelivered {
+            reply_length,
+            refusal: ReplyRefusal::Unusable(d),
+            ..
+        } => (
+            EgressStatus::LandedUndelivered,
+            reply_length,
+            "permit",
+            format!("reply unusable: {}", d.name()).into(),
+            "unavailable",
         ),
     };
     r.outcome.result = result.into();
-    r.outcome.reason = reason.into();
+    r.outcome.reason = reason.into_owned();
     r.outcome.posture = posture.into();
     if let Some(e) = r.egress.as_mut() {
         e.status = status;
@@ -1022,7 +1058,7 @@ mod tests {
     use super::*;
     use maknae_audit_append::{AuditEmit, AuditError, AuditRecord, EgressAudit, EgressStatus};
     use maknae_proto::{
-        ContentBlock, ProposedToolCall, SecretText, Turn, MAX_TOOL_CALL_ARGS_BYTES,
+        ContentBlock, ProposedToolCall, ReplyDefect, SecretText, Turn, MAX_TOOL_CALL_ARGS_BYTES,
     };
     // `Arc` arrives via `use super::*`; a second import is `unused_imports` under -D warnings.
     use std::sync::Mutex;
@@ -1891,7 +1927,7 @@ mod tests {
                 usage,
             },
             SendOutcome::LandedUndelivered {
-                reply_length: 3,
+                reply_length: Some(3),
                 refusal: ReplyRefusal::Oversize,
                 usage,
             },
@@ -2040,7 +2076,7 @@ mod tests {
             // delivery back was refused.
             (
                 SendOutcome::LandedUndelivered {
-                    reply_length: 7,
+                    reply_length: Some(7),
                     refusal: ReplyRefusal::Oversize,
                     usage: None,
                 },
@@ -2052,7 +2088,7 @@ mod tests {
             ),
             (
                 SendOutcome::LandedUndelivered {
-                    reply_length: 7,
+                    reply_length: Some(7),
                     refusal: ReplyRefusal::NonText,
                     usage: None,
                 },
@@ -2064,7 +2100,7 @@ mod tests {
             ),
             (
                 SendOutcome::LandedUndelivered {
-                    reply_length: 0,
+                    reply_length: Some(0),
                     refusal: ReplyRefusal::Empty,
                     usage: None,
                 },
@@ -2076,7 +2112,7 @@ mod tests {
             ),
             (
                 SendOutcome::LandedUndelivered {
-                    reply_length: 3,
+                    reply_length: Some(3),
                     refusal: ReplyRefusal::ToolCallUnacceptable,
                     usage: None,
                 },
@@ -2088,7 +2124,7 @@ mod tests {
             ),
             (
                 SendOutcome::LandedUndelivered {
-                    reply_length: 3,
+                    reply_length: Some(3),
                     refusal: ReplyRefusal::ReasoningUnacceptable,
                     usage: None,
                 },
@@ -2125,6 +2161,122 @@ mod tests {
                 (3, "a".repeat(32).as_str(), "c"),
                 "identity carried from the intent"
             );
+        }
+    }
+
+    #[test]
+    fn an_unusable_reply_is_landed_undelivered_with_no_length_and_the_providers_usage() {
+        let usage = Some(maknae_proto::Usage {
+            prompt_tokens: 11,
+            completion_tokens: Some(5),
+        });
+        let f = EgressFailure::ReplyUnusable {
+            defect: ReplyDefect::TokenLimit,
+            usage,
+        };
+        assert_eq!(
+            outcome_for_failure(&f),
+            SendOutcome::LandedUndelivered {
+                reply_length: None,
+                refusal: ReplyRefusal::Unusable(ReplyDefect::TokenLimit),
+                usage,
+            }
+        );
+        assert!(!failure_counts_as_expiry(&f));
+    }
+
+    #[test]
+    fn every_unusable_reason_is_a_permit_unavailable_landed_undelivered_record() {
+        for d in ReplyDefect::ALL {
+            let r = outcome_for(
+                &DurableEgressIntent::canned_for_test(),
+                2,
+                "t".into(),
+                SendOutcome::LandedUndelivered {
+                    reply_length: None,
+                    refusal: ReplyRefusal::Unusable(d),
+                    usage: Some(maknae_proto::Usage {
+                        prompt_tokens: 11,
+                        completion_tokens: Some(5),
+                    }),
+                },
+            );
+            let e = r.egress.as_ref().unwrap();
+            assert_eq!(
+                (
+                    r.outcome.result.as_str(),
+                    r.outcome.reason.clone(),
+                    r.outcome.posture.as_str(),
+                    e.status,
+                    e.reply_length,
+                    e.prompt_tokens,
+                    e.completion_tokens,
+                ),
+                (
+                    "permit",
+                    format!("reply unusable: {}", d.name()),
+                    "unavailable",
+                    EgressStatus::LandedUndelivered,
+                    None,
+                    Some(11),
+                    Some(5),
+                ),
+                "{d:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_widest_unusable_reason_is_the_one_the_syslog_width_fixture_types() {
+        let widest = ReplyDefect::ALL
+            .into_iter()
+            .map(|d| {
+                outcome_for(
+                    &DurableEgressIntent::canned_for_test(),
+                    2,
+                    "t".into(),
+                    SendOutcome::LandedUndelivered {
+                        reply_length: None,
+                        refusal: ReplyRefusal::Unusable(d),
+                        usage: None,
+                    },
+                )
+                .outcome
+                .reason
+            })
+            .max_by_key(String::len)
+            .unwrap();
+        assert_eq!(widest, "reply unusable: provider-rate-limit");
+    }
+
+    #[test]
+    fn the_client_is_told_a_reply_defect_and_never_a_policy_refusal_as_one() {
+        use maknae_proto::ProtoErrCode as C;
+        let unusable = maknae_proto::REPLY_UNUSABLE_MESSAGE;
+        for (refusal, want) in [
+            (
+                ReplyRefusal::Oversize,
+                (C::TooLarge, "response exceeds the configured frame limit"),
+            ),
+            (ReplyRefusal::NonText, (C::Unauthorized, "not authorized")),
+            (
+                ReplyRefusal::Empty,
+                (C::ReplyUnusable(ReplyDefect::Empty), unusable),
+            ),
+            (
+                ReplyRefusal::ToolCallUnacceptable,
+                (C::ReplyUnusable(ReplyDefect::OverBound), unusable),
+            ),
+            (
+                ReplyRefusal::ReasoningUnacceptable,
+                (C::ReplyUnusable(ReplyDefect::OverBound), unusable),
+            ),
+            (
+                ReplyRefusal::Unusable(ReplyDefect::ProviderAuth),
+                (C::ReplyUnusable(ReplyDefect::ProviderAuth), unusable),
+            ),
+        ] {
+            assert_eq!(refusal_answer(refusal), want, "{refusal:?}");
         }
     }
 

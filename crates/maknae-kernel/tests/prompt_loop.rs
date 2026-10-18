@@ -408,7 +408,11 @@ async fn a_non_text_reply_is_refused_for_delivery_and_recorded_landed_undelivere
         )
         .await
         .expect("a refusal frame");
-    assert!(matches!(resp.result, RespResult::Err(ref e) if e.code == ProtoErrCode::Unauthorized));
+    assert!(
+        matches!(resp.result, RespResult::Err(ref e)
+            if e.code == ProtoErrCode::ReplyUnusable(maknae_proto::ReplyDefect::Empty)),
+        "{resp:?}"
+    );
     let outcome = last_prompt_record(&records);
     assert_eq!(
         (
@@ -416,6 +420,72 @@ async fn a_non_text_reply_is_refused_for_delivery_and_recorded_landed_undelivere
             outcome.outcome.reason.as_str()
         ),
         (Some(0), "reply refused: empty")
+    );
+}
+
+struct TokenLimited;
+impl maknae_kernel::Egress for TokenLimited {
+    fn ready(&self) -> Result<(), maknae_kernel::EgressFailure> {
+        Ok(())
+    }
+    fn deadline(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(5)
+    }
+    fn send(
+        &self,
+        _: &maknae_kernel::DurableEgressIntent,
+        _: maknae_kernel::EgressRequest,
+    ) -> Result<maknae_kernel::EgressReply, maknae_kernel::EgressFailure> {
+        Err(maknae_kernel::EgressFailure::ReplyUnusable {
+            defect: maknae_proto::ReplyDefect::TokenLimit,
+            usage: Some(maknae_proto::Usage {
+                prompt_tokens: 11,
+                completion_tokens: Some(5),
+            }),
+        })
+    }
+}
+
+#[tokio::test]
+async fn an_unusable_reply_is_landed_undelivered_in_the_trail_and_named_on_the_wire() {
+    let fx = Fixture::with_policy("prompt-reply-unusable", "Read", GRANTED);
+    let records = Records::new(0);
+    let resp = fx
+        .roundtrip(
+            prompt("sentinel-524-tokenlimit"),
+            Arc::clone(&records),
+            Some("openai"),
+            Arc::new(TokenLimited),
+        )
+        .await
+        .expect("a refusal frame");
+    assert!(
+        matches!(resp.result, RespResult::Err(ref e)
+            if e.code == ProtoErrCode::ReplyUnusable(maknae_proto::ReplyDefect::TokenLimit)
+                && e.message == maknae_proto::REPLY_UNUSABLE_MESSAGE),
+        "{resp:?}"
+    );
+    let outcome = last_prompt_record(&records);
+    let e = outcome.egress.as_ref().unwrap();
+    assert_eq!(
+        (
+            outcome.outcome.result.as_str(),
+            outcome.outcome.reason.as_str(),
+            outcome.outcome.posture.as_str(),
+            e.status,
+            e.reply_length,
+            e.prompt_tokens,
+            e.completion_tokens,
+        ),
+        (
+            "permit",
+            "reply unusable: token-limit",
+            "unavailable",
+            EgressStatus::LandedUndelivered,
+            None,
+            Some(11),
+            Some(5),
+        )
     );
 }
 
@@ -507,6 +577,28 @@ async fn every_returned_send_releases_its_breaker_slot_so_sequential_sends_never
 }
 
 #[tokio::test]
+async fn unusable_replies_are_not_expiries_so_they_never_trip_the_breaker() {
+    let fx = Fixture::with_policy("prompt-reply-unusable-breaker", "Read", GRANTED);
+    let n = usize::from(maknae_kernel::BLOCKING_BREAKER_MAX_IN_FLIGHT) + 1;
+    for i in 0..n {
+        let resp = fx
+            .roundtrip(
+                prompt("hello world"),
+                Records::new(0),
+                Some("openai"),
+                Arc::new(TokenLimited),
+            )
+            .await
+            .expect("a refusal frame");
+        assert!(
+            matches!(resp.result, RespResult::Err(ref e)
+                if e.code == ProtoErrCode::ReplyUnusable(maknae_proto::ReplyDefect::TokenLimit)),
+            "send {i} of {n}: {resp:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_send_past_the_egress_deadline_is_deadline_expired_delivery_unknown() {
     let fx = Fixture::with_policy("prompt-deadline", "Read", GRANTED);
     let records = Records::new(0);
@@ -584,9 +676,8 @@ async fn a_backend_reported_deadline_is_deadline_expired_delivery_unknown_too() 
 }
 
 /// #240 (codex): a failure AFTER the request left the kernel — the deputy
-/// hung up because its provider call failed or timed out, or answered with
-/// garbage — is `OutcomeUnknown`, never `Failed`: the provider may have the
-/// prompt, and "nothing left" would be a false record.
+/// hung up or answered with garbage — is `OutcomeUnknown`, never `Failed`: the
+/// provider may have the prompt, and "nothing left" would be a false record.
 #[tokio::test]
 async fn a_failure_after_the_request_left_is_outcome_unknown_never_failed() {
     let fx = Fixture::with_policy("prompt-after-send", "Read", GRANTED);
