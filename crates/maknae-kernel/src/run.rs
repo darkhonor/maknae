@@ -2040,6 +2040,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 output_tokens: *output_tokens,
                 prompt_tokens: None,
                 completion_tokens: None,
+                refused_tool_calls: vec![],
             };
             // 1. readiness BEFORE any intent: a refusal is not a send.
             if let Err(_f) = egress.ready() {

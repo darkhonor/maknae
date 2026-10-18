@@ -379,6 +379,7 @@ mod tests {
             output_tokens: Some(u64::MAX),
             prompt_tokens: Some(u64::MAX),
             completion_tokens: Some(u64::MAX),
+            refused_tool_calls: vec![],
         });
         r
     }
@@ -744,6 +745,24 @@ mod tests {
         path.subject.role = Some("adversary".into());
         path.au3_1 = serde_json::json!({ "pad": "x".repeat(4096) });
         out.push(("pathological deployment".into(), path));
+        let mut refused = egress_record(
+            EgressStatus::Sent,
+            Some(999_999_999),
+            "permit",
+            "sent",
+            "authorized",
+        );
+        refused.subject.user = Some("aackerman".into());
+        refused.subject.role = Some("adversary".into());
+        // 1 MiB body cap / 61,441 bytes per stubbed call (#426)
+        refused.egress.as_mut().unwrap().refused_tool_calls = (0..17)
+            .map(|_| crate::record::RefusedToolCall {
+                index: u64::MAX,
+                name: "n".repeat(64),
+                arguments_bytes: u64::MAX,
+            })
+            .collect();
+        out.push(("sent with 17 refused tool calls".into(), refused));
         out
     }
 

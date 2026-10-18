@@ -1174,6 +1174,7 @@ mod tests {
                 output_tokens: None,
                 prompt_tokens: None,
                 completion_tokens: None,
+                refused_tool_calls: vec![],
             }),
             conversation: None,
             graph: None,
