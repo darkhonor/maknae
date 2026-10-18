@@ -394,6 +394,7 @@ mod tests {
             name: "read_file".into(),
             call_id: "c1".into(),
             arguments: SecretText(zeroize::Zeroizing::new("{}".into())),
+            refused: None,
         };
         let cases: Vec<(&str, Vec<Turn>, Refusal)> = vec![
             (

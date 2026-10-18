@@ -53,6 +53,7 @@ impl std::fmt::Debug for ToolRequest {
 pub enum RouteError {
     UnknownTool(String),
     BadArguments(String),
+    ArgumentsOverBound(u64),
     EmptyPath,
     RelativePath,
     /// Non-canonical, over-long, or NUL-bearing: an empty (`//`), `.` or `..`
@@ -259,6 +260,9 @@ fn checked_path(p: String) -> Result<String, RouteError> {
 }
 
 pub fn route(call: &ProposedToolCall) -> Result<ToolRequest, RouteError> {
+    if let Some(maknae_proto::CallRefusal::ArgumentsOverBound { bytes }) = call.refused {
+        return Err(RouteError::ArgumentsOverBound(bytes));
+    }
     let args: &str = &call.arguments.0;
     match call.name.as_str() {
         "read_file" => {
@@ -314,6 +318,7 @@ mod tests {
             name: name.into(),
             call_id: "c1".into(),
             arguments: SecretText(Zeroizing::new(args.into())),
+            refused: None,
         }
     }
     #[test]
@@ -608,6 +613,19 @@ mod tests {
         // non-string `content` is the input that produces it.
         let e = serde_json::from_str::<WriteArgs>(r#"{"path":"/a","content":7}"#).unwrap_err();
         assert!(e.to_string().contains("a JSON string"), "{e}");
+    }
+    #[test]
+    fn a_refused_call_is_refused_by_its_marker_before_any_argument_parse() {
+        for name in ["write_file", "read_file"] {
+            let c = ProposedToolCall {
+                refused: Some(maknae_proto::CallRefusal::ArgumentsOverBound { bytes: 70_000 }),
+                ..call(name, "")
+            };
+            assert!(
+                matches!(route(&c), Err(RouteError::ArgumentsOverBound(70_000))),
+                "{name}"
+            );
+        }
     }
     /// codex round 1, important 1: serde's DERIVED struct visitor accepts a
     /// positional ARRAY as well as a map, and `deny_unknown_fields` does not

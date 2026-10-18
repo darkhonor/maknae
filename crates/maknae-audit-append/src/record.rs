@@ -138,6 +138,16 @@ pub struct EgressAudit {
     pub prompt_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refused_tool_calls: Vec<RefusedToolCall>,
+}
+
+/// A tool call the Egress Daemon refused for its argument bound (#426).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefusedToolCall {
+    pub index: u64,
+    pub name: String,
+    pub arguments_bytes: u64,
 }
 
 impl EgressAudit {
@@ -602,6 +612,7 @@ mod tests {
             output_tokens: None,
             prompt_tokens: None,
             completion_tokens: None,
+            refused_tool_calls: vec![],
         });
         let s = serde_json::to_string(&rec).unwrap();
         assert!(!s.contains("reply_length"), "None is absent, not null: {s}");
@@ -613,6 +624,37 @@ mod tests {
         let mut sent = e.clone();
         sent.status = EgressStatus::Sent;
         assert!(!sent.is_intent());
+    }
+
+    #[test]
+    fn refused_tool_calls_appear_only_when_present_and_round_trip() {
+        let mut e = EgressAudit {
+            status: EgressStatus::Sent,
+            content_length: 12,
+            content_digest: "ab".repeat(16),
+            conversation: "conv-1".into(),
+            model: None,
+            reply_length: None,
+            output_tokens: None,
+            prompt_tokens: None,
+            completion_tokens: None,
+            refused_tool_calls: vec![],
+        };
+        let plain = serde_json::to_string(&e).unwrap();
+        assert!(!plain.contains("refused_tool_calls"));
+        e.refused_tool_calls = vec![RefusedToolCall {
+            index: 1,
+            name: "write_file".into(),
+            arguments_bytes: 70_000,
+        }];
+        let json = serde_json::to_string(&e).unwrap();
+        assert!(json.contains(
+            r#""refused_tool_calls":[{"index":1,"name":"write_file","arguments_bytes":70000}]"#
+        ));
+        let back: EgressAudit = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.refused_tool_calls, e.refused_tool_calls);
+        let old: EgressAudit = serde_json::from_str(&plain).unwrap();
+        assert!(old.refused_tool_calls.is_empty());
     }
 
     #[test]

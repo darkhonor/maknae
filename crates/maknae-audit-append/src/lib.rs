@@ -26,7 +26,8 @@ pub use record::{
     canonical_json, AuditRecord, ByteRangeAudit, CategoryAudit, EgressAudit, EgressStatus,
     GraphAudit, Integrity, LabelAudit, LineSpanAudit, MutationAudit, MutationEffectKind,
     MutationEffectRecord, MutationOperation, MutationOrigin, MutationPhase, MutationStatus,
-    Outcome, PageAudit, ProvenanceAudit, RuleAudit, Source, Subject, TierAudit, Where, NO_PEER_UID,
+    Outcome, PageAudit, ProvenanceAudit, RefusedToolCall, RuleAudit, Source, Subject, TierAudit,
+    Where, NO_PEER_UID,
 };
 pub use scan::ScanResult;
 pub use session::{Seq, SessionIds};

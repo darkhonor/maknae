@@ -101,6 +101,7 @@ mod tests {
             name: "read_file".into(),
             call_id: id.into(),
             arguments: SecretText(Zeroizing::new("{}".into())),
+            refused: None,
         }
     }
     #[test]
@@ -161,6 +162,7 @@ mod tests {
                 name: "read_file".into(),
                 call_id: "c1".into(),
                 arguments: SecretText(Zeroizing::new("{\"p\":1}".into())),
+                refused: None,
             }],
             usage: None,
         });

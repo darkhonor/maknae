@@ -427,6 +427,7 @@ mod tests {
             arguments: crate::SecretText(zeroize::Zeroizing::new(
                 "a".repeat(crate::MAX_TOOL_CALL_ARGS_BYTES + 1),
             )),
+            refused: None,
         };
         let mut r = req(
             "conv1",
@@ -602,6 +603,27 @@ mod tests {
                 .len(),
             buf.len()
         );
+    }
+
+    #[test]
+    fn a_stub_crosses_the_egress_frame_reply_intact() {
+        let stub = crate::ProposedToolCall {
+            name: "write_file".into(),
+            call_id: "c".into(),
+            arguments: crate::SecretText(zeroize::Zeroizing::new(String::new())),
+            refused: Some(crate::CallRefusal::ArgumentsOverBound { bytes: 70_000 }),
+        };
+        let r = EgressFrameReply::Reply(crate::PromptReply {
+            reasoning: None,
+            blocks: vec![text("ok")],
+            tool_calls: vec![stub.clone()],
+            usage: None,
+        });
+        let buf = crate::encode_egress_frame_reply(&r, EGRESS_REPLY_FRAME_ENCODE_BYTES).unwrap();
+        match crate::decode_egress_frame_reply(&buf).unwrap() {
+            EgressFrameReply::Reply(p) => assert_eq!(p.tool_calls, vec![stub]),
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[test]

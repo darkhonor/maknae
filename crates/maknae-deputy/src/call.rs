@@ -179,7 +179,8 @@ pub async fn fulfil<O: KeyOpener>(
     // "trail == wire", the same overclaim the kernel struck at
     // `content_measure`): the deputy sends every `Text` block, every
     // `arguments` payload and every reasoning that `content_measure` digested, in order, with
-    // nothing dropped. The rule on the other side, stated rather than
+    // nothing dropped, except that a refused call's empty `arguments` go out as
+    // the constant `{}` (#426). The rule on the other side, stated rather than
     // enumerated: the digest covers exactly the `Text` bytes and every
     // proposed tool call's `arguments` and each assistant turn's reasoning, in
     // order, and everything else on the
@@ -232,7 +233,11 @@ pub async fn fulfil<O: KeyOpener>(
                             // these bytes are the model's proposed file
                             // content, and the intermediate was freed
                             // unwiped on every path out of here.
-                            arguments: c.arguments.clone(),
+                            arguments: if c.refused.is_some() {
+                                maknae_proto::SecretText(zeroize::Zeroizing::new("{}".into()))
+                            } else {
+                                c.arguments.clone()
+                            },
                         },
                     })
                     .collect(),
@@ -743,6 +748,7 @@ mod tests {
                     arguments: maknae_proto::SecretText(zeroize::Zeroizing::new(
                         r#"{"path":"a"}"#.into(),
                     )),
+                    refused: None,
                 }],
             },
             maknae_proto::Turn::Tool {
@@ -1048,6 +1054,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_over_bound_provider_call_reaches_the_kernel_frame_as_a_stub_in_its_slot() {
+        let big = format!(
+            "SENTINEL-426-{}",
+            "a".repeat(maknae_proto::MAX_TOOL_CALL_ARGS_BYTES)
+        );
+        let body: &'static str = Box::leak(
+            format!(
+                r#"{{"choices":[{{"message":{{"tool_calls":[{{"id":"c0","function":{{"name":"write_file","arguments":"{big}"}}}},{{"id":"c1","function":{{"name":"read_file","arguments":"{{\"path\":\"/w/a\"}}"}}}}]}}}}]}}"#
+            )
+            .into_boxed_str(),
+        );
+        let (r, _, _) = fulfil_against(body).await;
+        let out = maknae_proto::encode_egress_frame_reply(
+            &r.unwrap(),
+            maknae_proto::EGRESS_REPLY_FRAME_ENCODE_BYTES,
+        )
+        .unwrap();
+        assert!(!out.windows(12).any(|w| w == b"SENTINEL-426"));
+        let EgressFrameReply::Reply(reply) = maknae_proto::decode_egress_frame_reply(&out).unwrap()
+        else {
+            panic!("not a reply frame")
+        };
+        let calls = &reply.tool_calls;
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            (calls[0].call_id.as_str(), calls[0].arguments.0.as_str()),
+            ("c0", "")
+        );
+        assert_eq!(
+            calls[0].refused,
+            Some(maknae_proto::CallRefusal::ArgumentsOverBound {
+                bytes: big.len() as u64
+            })
+        );
+        assert_eq!(
+            (calls[1].arguments.0.as_str(), calls[1].refused),
+            (r#"{"path":"/w/a"}"#, None)
+        );
+    }
+
+    #[tokio::test]
     async fn an_assistant_turns_reasoning_is_sent_as_reasoning_content() {
         fips();
         let (url, h) = provider("200 OK", r#"{"choices":[{"message":{"content":"pong"}}]}"#).await;
@@ -1067,6 +1114,7 @@ mod tests {
                     arguments: maknae_proto::SecretText(zeroize::Zeroizing::new(
                         r#"{"path":"a"}"#.into(),
                     )),
+                    refused: None,
                 }],
                 reasoning: Some(maknae_proto::SecretText(zeroize::Zeroizing::new(
                     "plan-read-then-patch".into(),
@@ -1095,6 +1143,76 @@ mod tests {
         );
         assert_eq!(sent.matches("reasoning_content").count(), 1);
         assert!(!sent.contains(r#""reasoning":"#));
+    }
+
+    #[tokio::test]
+    async fn a_refused_call_in_history_is_sent_as_empty_json_arguments() {
+        fips();
+        let (url, h) = provider("200 OK", r#"{"choices":[{"message":{"content":"pong"}}]}"#).await;
+        let mut f = frame_to(url);
+        let text = |t: &str| maknae_proto::ContentBlock::Text {
+            text: maknae_proto::SecretText(zeroize::Zeroizing::new(t.into())),
+        };
+        let args = |t: &str| maknae_proto::SecretText(zeroize::Zeroizing::new(t.into()));
+        f.turns = vec![
+            maknae_proto::Turn::User {
+                content: vec![text("q")],
+            },
+            maknae_proto::Turn::Assistant {
+                content: vec![],
+                tool_calls: vec![
+                    maknae_proto::ProposedToolCall {
+                        name: "write_file".into(),
+                        call_id: "c1".into(),
+                        arguments: args(""),
+                        refused: Some(maknae_proto::CallRefusal::ArgumentsOverBound {
+                            bytes: 70_000,
+                        }),
+                    },
+                    maknae_proto::ProposedToolCall {
+                        name: "read_file".into(),
+                        call_id: "c2".into(),
+                        arguments: args(r#"{"path":"SENTINEL-426-a"}"#),
+                        refused: None,
+                    },
+                ],
+                reasoning: None,
+            },
+            maknae_proto::Turn::Tool {
+                call_id: "c1".into(),
+                content: vec![text("tool error")],
+            },
+            maknae_proto::Turn::Tool {
+                call_id: "c2".into(),
+                content: vec![text("file")],
+            },
+        ];
+        let b = bounds();
+        let admitted = crate::handle::decide(&f, &b).unwrap();
+        fulfil(
+            &admitted,
+            &Fixed("sk-test-not-real"),
+            CallBounds::default(),
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+        let sent = h.await.unwrap();
+        assert_eq!(
+            sent.matches(
+                r#""id":"c1","type":"function","function":{"name":"write_file","arguments":"{}"}"#
+            )
+            .count(),
+            1
+        );
+        assert_eq!(
+            sent.matches(
+                r#""function":{"name":"read_file","arguments":"{\"path\":\"SENTINEL-426-a\"}"}"#
+            )
+            .count(),
+            1
+        );
+        assert!(!sent.contains("arguments-over-bound"));
     }
 
     #[tokio::test]

@@ -50,6 +50,7 @@ fn call(id: &str, name: &str, args: &str) -> ProposedToolCall {
         name: name.into(),
         call_id: id.into(),
         arguments: SecretText(Zeroizing::new(args.into())),
+        refused: None,
     }
 }
 fn tool_text(t: &Turn) -> String {
@@ -74,6 +75,7 @@ fn role(t: &Turn) -> &'static str {
 struct Scripted {
     replies: Mutex<VecDeque<PromptReply>>,
     seen_roles: Mutex<Vec<Vec<&'static str>>>,
+    seen_refused: Mutex<Vec<Vec<Option<maknae_proto::CallRefusal>>>>,
 }
 impl Scripted {
     /// Replies the loop never asked for.
@@ -99,6 +101,16 @@ impl maknae_kernel::Egress for Scripted {
             .lock()
             .unwrap()
             .push(r.turns.iter().map(role).collect());
+        self.seen_refused.lock().unwrap().push(
+            r.turns
+                .iter()
+                .flat_map(|t| match t {
+                    Turn::Assistant { tool_calls, .. } => tool_calls.as_slice(),
+                    _ => &[],
+                })
+                .map(|c| c.refused)
+                .collect(),
+        );
         // Exhaustion is a BACKEND FAILURE, never a panic: a panic here fires
         // inside the spawned kernel task, where it reaches the test only as
         // `verb`'s missing frame and names the wrong cause. As a failure it
@@ -556,6 +568,116 @@ async fn a_denied_read_reaches_the_model_as_not_authorized_and_is_a_deny_in_the_
         .find(|r| r.action == "fs.read")
         .expect("an fs.read record");
     assert_eq!(read.outcome.result, "deny");
+    assert_eq!(
+        egress.remaining(),
+        0,
+        "the loop asked for every scripted reply"
+    );
+}
+
+#[tokio::test]
+async fn an_over_bound_write_is_a_tool_error_its_sibling_read_runs_and_the_trail_names_it() {
+    let fx = Fixture::with_rules("agent-426", &["Read", "Write"], &[], GRANTED);
+    let target = fx.root.join("notes.txt");
+    std::fs::write(&target, "SENTINEL-426-body").unwrap();
+    let egress = Arc::new(Scripted::default());
+    let stub = ProposedToolCall {
+        name: "write_file".into(),
+        call_id: "c1".into(),
+        arguments: SecretText(Zeroizing::new(String::new())),
+        refused: Some(maknae_proto::CallRefusal::ArgumentsOverBound { bytes: 74_112 }),
+    };
+    script(
+        &egress,
+        [
+            PromptReply {
+                reasoning: None,
+                blocks: vec![],
+                tool_calls: vec![
+                    stub,
+                    call(
+                        "c2",
+                        "read_file",
+                        &format!(r#"{{"path":"{}"}}"#, target.display()),
+                    ),
+                ],
+                usage: None,
+            },
+            PromptReply {
+                reasoning: None,
+                blocks: vec![text("done")],
+                tool_calls: vec![],
+                usage: None,
+            },
+        ],
+    );
+    let records = Records::new(0);
+    let mut plane = FixturePlane {
+        fx,
+        records: Arc::clone(&records),
+        egress: egress.clone(),
+    };
+    let mut transcript = Transcript::new("agent-426-conv", "write a big file");
+    drive(
+        &mut plane,
+        &mut transcript,
+        &Budget {
+            max_steps: 3,
+            max_tool_calls_per_step: 2,
+        },
+        &mut unmetered(),
+        &mut |_: &Notice| {},
+    )
+    .await;
+
+    assert!(
+        tool_text(&transcript.turns()[2]).starts_with("tool error: arguments were 74112 bytes"),
+        "{}",
+        tool_text(&transcript.turns()[2])
+    );
+    assert!(tool_text(&transcript.turns()[3]).contains("SENTINEL-426-body"));
+
+    let recs = records.snapshot();
+    assert!(
+        recs.iter().all(|r| r.action != "fs.write"),
+        "the stub never reached the write verb"
+    );
+    let ops: Vec<_> = recs
+        .iter()
+        .filter_map(|r| r.mutation.as_ref())
+        .filter_map(|m| m.operation)
+        .collect();
+    assert!(
+        !ops.is_empty()
+            && ops
+                .iter()
+                .all(|o| *o == maknae_audit_append::MutationOperation::Read)
+    );
+    assert!(recs
+        .iter()
+        .any(|r| r.action == "fs.read" && r.outcome.result == "permit"));
+    let first_outcome = recs
+        .iter()
+        .filter(|r| r.action == "session.prompt")
+        .filter_map(|r| r.egress.as_ref())
+        .find(|e| !e.is_intent())
+        .expect("a session.prompt outcome");
+    assert_eq!(
+        first_outcome.refused_tool_calls,
+        vec![maknae_audit_append::RefusedToolCall {
+            index: 0,
+            name: "write_file".into(),
+            arguments_bytes: 74_112,
+        }]
+    );
+    assert_eq!(
+        egress.seen_refused.lock().unwrap()[1],
+        vec![
+            Some(maknae_proto::CallRefusal::ArgumentsOverBound { bytes: 74_112 }),
+            None
+        ],
+        "the next request still carries the stub"
+    );
     assert_eq!(
         egress.remaining(),
         0,
