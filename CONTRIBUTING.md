@@ -202,6 +202,12 @@ A choice that constrains future work — an interface, a security property, a vo
 
 ## Code style
 
+- **The style baseline**, for anything the points below don't cover:
+  - [Google's Rust style guide](https://google.github.io/styleguide/rustguide.html);
+  - the [Rust Style Guide](https://doc.rust-lang.org/nightly/style-guide/);
+  - the [Rust API Guidelines](https://rust-lang.github.io/api-guidelines/).
+
+  The precedence order, and the deliberate exceptions (poisoned-lock recovery, the panic boundaries, exhaustive security enums), are in `AGENTS.md`. Where the guides and the points below disagree, the points below win.
 - **`cargo fmt`** — strict; the CI gate rejects unformatted code.
 - **`cargo clippy --all-targets -- -D warnings`** — clippy lints are errors. If you must silence one, do it inline with `#[allow(...)]` and a comment saying why.
 - **Small, focused files** — if a file grows past a couple hundred lines, that's usually a signal to split by responsibility.
