@@ -8,7 +8,7 @@
 ## Terms
 
 - **Egress Daemon:** the `maknae-egress` process, running as `_maknae-egress`, which makes the outbound model call (ADR-0023 decision 3).
-- **Agent Daemon:** a planned service running an agent loop under its own local account on behalf of the users who task it (milestone Rabbithole, epic #420). It is not built, and no ADR yet ratifies it. *(Corrected 2026-10-22: its identity is now ratified, by ADR-0024 decision 6 (#471): it is a subject with its own uid. The service itself is still unbuilt, and its authentication to `maknaed` is #550.)*
+- **Agent Daemon:** a planned service running an agent loop under its own local account on behalf of the users who task it (milestone Rabbithole, epic #420). It is not built, and no ADR yet ratifies it. *(Corrected 2026-10-22: its identity is now ratified, by ADR-0024 decision 6 (#471): it is a subject with its own uid. The service itself is still unbuilt, and its authentication to `maknaed` is #550.)* *(2026-10-23: #550 is decided, by ADR-0006 decision 9: its own plane leaf, bound to its uid on a host. Building it is #472.)*
 
 ## Context
 

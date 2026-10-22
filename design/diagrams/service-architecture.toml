@@ -12,7 +12,7 @@ title = "Service Architecture"
 notation = "UML 2.5.1 deployment view"
 question = "What runs on the host, under which account, in which trust plane, and what may talk to what?"
 readers = "contributor, security assessor"
-legend = "Solid = built. Dashed = proposed or post-mvp: designed, no code. Dotted = vision: NO ADR and NO code, unratified. The Agent Daemon, tool containers, per-tasker workspaces, the TUI, direct prompt delivery to the Egress Daemon, and shared and dedicated modes are all vision. The Agent Daemon's identity alone is ratified (ADR-0024 decision 6)."
+legend = "Solid = built. Dashed = proposed or post-mvp: designed, no code. Dotted = vision: NO ADR and NO code, unratified. The Agent Daemon, tool containers, per-tasker workspaces, the TUI, direct prompt delivery to the Egress Daemon, and shared and dedicated modes are all vision. The Agent Daemon's identity (ADR-0024 decision 6) and its authentication to maknaed (ADR-0006 decision 9) are ratified, so its edges to maknaed and Vault are dashed."
 baseline = "HOST SERVICES. Maknae installs from rpm, deb and the macOS .pkg as system services, each under its own account: systemd on Linux, launchd on macOS. The only containers drawn are tool invocations, and they are vision; the OCI Dockerfiles in packaging/oci are a deferred stub (#81). A containerized deployment (Compose or Kubernetes) is a possible future option, designed in design/container-architecture.md; this view is the baseline it would build from."
 evidence = "packaging/common/maknaed.service · packaging/common/maknae-egress.service · packaging/common/maknae-egress.socket · packaging/common/maknae.sysusers · packaging/macos/io.maknae.maknaed.plist · packaging/macos/io.maknae.maknae-egress.plist · packaging/isolation-contract.md · design/container-architecture.md"
 
@@ -262,9 +262,15 @@ status = "built"
 
 [[flow]]
 from = "agent"
+to = "vault"
+label = "AppRole · PKI sign its own agent leaf"
+status = "proposed"
+
+[[flow]]
+from = "agent"
 to = "maknaed"
-label = "every action · tasking intake"
-status = "vision"
+label = "every action · tasking intake · mTLS, its own plane leaf"
+status = "proposed"
 
 [[flow]]
 from = "agent"
