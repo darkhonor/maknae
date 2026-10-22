@@ -28,7 +28,7 @@ label = "CLI as user B"
 
 [[subject]]
 id = "agentd"
-label = "Agent Daemon (planned, no identity)"
+label = "Agent Daemon (planned, not provisioned)"
 
 [[subject]]
 id = "kernel"

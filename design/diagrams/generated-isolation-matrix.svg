@@ -51,8 +51,8 @@
   <text x="930.0" y="238" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">p</text>
   <text x="941.0" y="231" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">12</text>
   <rect x="40" y="246" width="962" height="26" rx="3" fill="#FAFAF8" stroke="none" stroke-width="0"/>
-  <text x="48" y="257" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A">Agent Daemon (planned, no</text>
-  <text x="48" y="268" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A">identity)</text>
+  <text x="48" y="257" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A">Agent Daemon (planned, not</text>
+  <text x="48" y="268" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A">provisioned)</text>
   <text x="290.0" y="264" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">—</text>
   <text x="301.0" y="257" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">13</text>
   <text x="418.0" y="264" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" fill="#2C2C2A">—</text>
@@ -244,6 +244,6 @@
   <text x="44" y="1923" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">crates/maknae-deputy/src/call.rs::an_admitted_frame_reaches_the_provider_and_returns_its_reply</text>
   <text x="44" y="1939" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">42. model × meta: part: the request names the model and its reasoning and output settings, never the user, conversation or key path, though the bearer</text>
   <text x="44" y="1951" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">key identifies the user's account at the provider — crates/maknae-deputy/src/call.rs:243</text>
-  <text x="40" y="1985" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/isolation-matrix.toml@7d056f93fa · maknae 6c75ede3 · 2026-10-02</text>
+  <text x="40" y="1985" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/isolation-matrix.toml@75bdd11306 · maknae 2cccfee2 · 2026-10-11</text>
   <text x="1002" y="1985" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">Access-control matrix — B. W. Lampson, "Protection", 1971 (ACM SIGOPS OSR 8(1), 1974)</text>
 </svg>
