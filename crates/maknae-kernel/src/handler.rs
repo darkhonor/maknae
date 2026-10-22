@@ -86,7 +86,6 @@ pub fn dispatch_verb(verb: &Verb) -> Dispatch {
         | Verb::AdminProviderList
         | Verb::AdminProviderSet
         | Verb::AdminProviderDisable
-        | Verb::AdminCredentialBroker
         | Verb::AdminSessionList
         | Verb::AdminSessionTerminate
         | Verb::SessionNew
@@ -219,7 +218,7 @@ use std::time::Duration;
 /// The actions the KERNEL initiates on its own behalf, which have no client
 /// request and therefore no `Verb` variant (#67 D2). They are still PDP-decided
 /// and audited, so they need action strings — and the drift gate needs a source
-/// to diff the manifest against, or two of the vocabulary's 61 terms would carry
+/// to diff the manifest against, or two of the vocabulary's 60 terms would carry
 /// no recorded disposition (spec R7).
 pub const KERNEL_ACTIONS: [&str; 2] = ["kernel.contain", "kernel.session.terminate"];
 
@@ -242,7 +241,6 @@ pub fn verb_to_action(verb: &Verb) -> &'static str {
         Verb::AdminProviderList => "admin.provider.list",
         Verb::AdminProviderSet => "admin.provider.set",
         Verb::AdminProviderDisable => "admin.provider.disable",
-        Verb::AdminCredentialBroker => "admin.credential.broker",
         Verb::AdminSessionList => "admin.session.list",
         Verb::AdminSessionTerminate => "admin.session.terminate",
         Verb::SessionNew => "session.new",
@@ -671,7 +669,7 @@ mod tests {
             "the ungrantable admin set is derived from the verb list and the constant"
         );
         assert!(
-            ungrantable.len() >= 11,
+            ungrantable.len() >= 10,
             "the ungrantable admin set should not shrink unnoticed: {}",
             ungrantable.len()
         );
@@ -1213,7 +1211,6 @@ mod tests {
             Verb::AdminProviderList,
             Verb::AdminProviderSet,
             Verb::AdminProviderDisable,
-            Verb::AdminCredentialBroker,
             Verb::AdminSessionList,
             Verb::AdminSessionTerminate,
             Verb::SessionNew,
@@ -1281,7 +1278,7 @@ mod tests {
 
     /// #148: every term is EXACTLY one of control plane or content-bearing, and
     /// the split is what the vocabulary says it is. Pinned over `all_verbs()`
-    /// (59 client action terms) + the two `kernel.*` pseudo-actions, AND
+    /// (58 client action terms) + the two `kernel.*` pseudo-actions, AND
     /// `all_verbs()` is cross-checked against `ci/gates/verb-manifest.txt`'s
     /// `action` rows (critical-review round 1 of PR B: the manifest is
     /// extracted from `verb_to_action`, which the compiler forces a new
@@ -1421,8 +1418,8 @@ mod tests {
 
     /// #67 D4: the vocabulary is the size the spec says.
     #[test]
-    fn the_vocabulary_is_fifty_nine_client_reachable_terms() {
-        assert_eq!(all_verbs().len(), 59);
+    fn the_vocabulary_is_fifty_eight_client_reachable_terms() {
+        assert_eq!(all_verbs().len(), 58);
     }
 
     /// Two terms sharing an action string would be decided as one another —

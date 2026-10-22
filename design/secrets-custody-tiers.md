@@ -6,7 +6,7 @@
 | **Date** | 2026-09-08 |
 | **Prompted by** | The [Jarvis-class field survey](references/2026-09-08-jarvis-class-survey.md) §3.4 (no surveyed project uses a secrets server; every one ends with the value in the agent's process or its tool's environment) and HashiCorp's validated pattern *Secure AI agent authentication using HashiCorp Vault dynamic secrets* (Lynch and Panchal; Enterprise tier; https://developer.hashicorp.com/validated-patterns/vault/ai-agent-identity-with-hashicorp-vault). |
 | **Question** | Maknae uses an external HashiCorp Vault by design. Vault is uncommon outside enterprises. What are the acceptable alternatives for the HomeLab and small-business tiers, and what exactly would be given up? |
-| **Authority** | ADR-0005 (enforcement locus), ADR-0006 (clients never reach Vault; the daemon is the sole door), ADR-0007 (key custody: memory-only, fail-closed, per-plane), ADR-0022 (the three deployment tiers by name), ADR-0023 (the egress process under its own account and Vault principal), #168 (`admin.credential.broker`), #240, #243. This note contradicts none of them; it asks whether the *store* gets the substitution axis the *bootstrap* already has. |
+| **Authority** | ADR-0005 (enforcement locus), ADR-0006 (clients never reach Vault; the daemon is the sole door), ADR-0007 (key custody: memory-only, fail-closed, per-plane), ADR-0022 (the three deployment tiers by name), ADR-0023 (the egress process under its own account and Vault principal), #168 (the Agent Daemon's own outbound credential), #240, #243. This note contradicts none of them; it asks whether the *store* gets the substitution axis the *bootstrap* already has. |
 
 ## 1. What already exists, so the discussion starts from the code
 
@@ -25,7 +25,7 @@ Reading ADR-0005, ADR-0006, ADR-0007 and #168 together, Maknae requires five thi
 2. **Access is by principal.** The egress account may read the provider key; the loop's account, the CLI, and every other process on the host may not.
 3. **Reads are audited somewhere Maknae does not control.**
 4. **Rotation and revocation without redeploying.**
-5. **Dynamic, leased credentials with attribution** where the destination supports them (#168's brokering against databases, cloud APIs, SSH targets).
+5. **Dynamic, leased credentials with attribution** where the destination supports them (a subject's own credential for a database, cloud API or SSH target).
 
 Vault provides all five. **Properties 1 and 2 are the model; 3 to 5 are the enterprise posture.** A tier that gives up 3 to 5 is a weaker posture, stated as such. A tier that gives up 1 or 2 is not Maknae.
 
@@ -61,7 +61,7 @@ The pattern's contribution is identity chaining, not custody mechanics. Mapped o
 - **Its On-Behalf-Of token is Maknae's subject context** (ADR-0007, `maknae-subject-ctx-mint`), with a stronger issuer: the kernel mints it, the agent never performs the exchange. ADR-0005 forbids the agent doing what the pattern's agent does, and that is the better design.
 - **JWT auth instead of AppRole for the egress principal.** Vault (and OpenBao) can validate a kernel-signed token bound to `azp = maknae-egress` carrying the subject id and session id, and map it to policy through external identity groups. Policy becomes per subject and per session with no standing role credential on disk. JWT auth and identity groups are open-tier features, not Enterprise. This would amend ADR-0007's custody note and belongs to the ADR when it is written.
 - **One header.** `X-Correlation-ID` on every Vault request from the egress process, carrying Maknae's session id and the audit record id of the authorizing decision, so Vault's audit log and Maknae's trail join on one key and a reviewer can prove which decision caused which read from a log Maknae does not control.
-- **Dynamic secrets where they exist.** There is no Vault secrets engine for OpenAI or Anthropic; the provider key in #243 is static by nature, and attribution there comes from the audit join, not the credential. For what #168 brokers later, dynamic per-request credentials with a lease are the default; the pattern's own note is the reason: static roles with rotation *"may blur attribution."*
+- **Dynamic secrets where they exist.** There is no Vault secrets engine for OpenAI or Anthropic; the provider key in #243 is static by nature, and attribution there comes from the audit join, not the credential. For a subject's own outbound credentials, dynamic per-request credentials with a lease are the default where the destination supports them; the pattern's own note is the reason: static roles with rotation *"may blur attribution."*
 - **The named threat.** The pattern is built on the confused-deputy problem; its reference repository is `confused-deputy-aws`. #168 records that it lacks a citation for the term. This pattern is not a standard, but it is vendor-validated prior art naming the same threat with the same shape.
 
 ## 6. Two cautions to carry into the ADR

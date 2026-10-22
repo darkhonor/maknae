@@ -115,3 +115,63 @@ variable "kv_mount_path" {
     error_message = "kv_mount_path must be 1-256 bytes of '/'-separated [A-Za-z0-9._-] segments, with no empty, '.', '..' or 'data' segment and no leading or trailing '/'."
   }
 }
+
+variable "maknae_agents" {
+  description = "Agent Daemons to provision, keyed by agent id. Each gets its own policy, reading only <kv_mount_path>/data/<agent_prefix>/<id>/*, and its own AppRole role agent-<id>."
+  type        = map(object({}))
+  default     = {}
+
+  validation {
+    condition     = alltrue([for id in keys(var.maknae_agents) : can(regex("^[a-z0-9_]([a-z0-9._-]{0,30}[a-z0-9_])?$", id)) && id != "data"])
+    error_message = "Each maknae_agents key must be 1-32 bytes of [a-z0-9._-], starting and ending with [a-z0-9_], and not 'data': the id lands in Vault paths and must never carry a glob ('*'), a '/' or a space (ADR-0006 decision 9)."
+  }
+}
+
+variable "agent_prefix" {
+  description = "KV v2 path prefix, relative to kv_mount_path, under which each agent's credentials live at <agent_prefix>/<id>/*. Must not equal, contain or sit inside user_prefix."
+  type        = string
+  default     = "maknae/agents"
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$", var.agent_prefix)) && !contains(split("/", var.agent_prefix), ".") && !contains(split("/", var.agent_prefix), "..") && !contains(split("/", var.agent_prefix), "data") && length(var.agent_prefix) <= 256
+    error_message = "agent_prefix must be 1-256 bytes of '/'-separated [A-Za-z0-9._-] segments, with no empty, '.', '..' or 'data' segment and no leading or trailing '/'."
+  }
+
+  validation {
+    condition     = !(var.agent_prefix == var.user_prefix || startswith("${var.agent_prefix}/", "${var.user_prefix}/") || startswith("${var.user_prefix}/", "${var.agent_prefix}/"))
+    error_message = "agent_prefix and user_prefix must not be equal or nested: an agent's credential must never sit inside a subtree a human can write, and the agent admin policy must never reach a human's keys."
+  }
+}
+
+variable "agent_approle_path" {
+  description = "AppRole auth mount for Agent Daemons. Must differ from approle_path (maknaed's)."
+  type        = string
+  default     = "maknae-agent-approle"
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9._-]+$", var.agent_approle_path))
+    error_message = "agent_approle_path must be a non-empty bare mount name of [A-Za-z0-9._-]."
+  }
+}
+
+variable "agent_token_ttl" {
+  description = "Agent token TTL, in seconds. Default 1h."
+  type        = number
+  default     = 3600
+
+  validation {
+    condition     = var.agent_token_ttl > 0 && var.agent_token_ttl <= var.agent_token_max_ttl
+    error_message = "agent_token_ttl must be > 0 and <= agent_token_max_ttl."
+  }
+}
+
+variable "agent_token_max_ttl" {
+  description = "Hard ceiling on an agent token's life, in seconds. Never 0: an agent token is bounded, unlike maknaed's periodic token (ADR-0006 decision 9). Default 24h."
+  type        = number
+  default     = 86400
+
+  validation {
+    condition     = var.agent_token_max_ttl > 0
+    error_message = "agent_token_max_ttl must be > 0: an agent token is never unbounded (ADR-0006 decision 9)."
+  }
+}

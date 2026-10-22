@@ -26,6 +26,8 @@
 > the design; treat it as the reasoning that was available when only three
 > terms existed.
 >
+> *(2026-10-23, #168: the brokering term named above has since been struck from the vocabulary; every credential is the subject's own, ADR-0028.)*
+>
 > What is NOT provisional is the shipped behaviour: deny-overrides composition,
 > containment preceding the class match, the deny reason staying off the wire,
 > and Phase 1 disclosing nothing. Those are enforced by gates and tests, not by
@@ -39,7 +41,7 @@ The admin role governs Maknae management, not filesystem privilege (operator rul
 
 `authz.yaml`'s grammar is a durable operator-facing contract — `maknae-config/src/authz.rs` treats it as one, and the `verb-vocabulary-drift` gate inventories every term it can name — yet no ADR governed it. Two surfaces already lived there: `permissions:`, which decides **path** access by capability pattern, and `bindings:` (#85), which maps identities to roles. Neither decides an **action**. *(Amended 2026-10-08, #496: `bindings:` moved to its own file, `/etc/maknae/bindings.yaml`; `authz.yaml` refuses the key. The grammar contract now spans both files.)*
 
-That gap had a concrete cost. `maknae-authz-basic`'s admin arm was keyed to the single built term `admin.whoami`, with the rest of `Class::Admin` answering `NotApplicable`. The comment on that arm named the problem precisely: a class-granular permit would grant `admin.contain`, `admin.credential.broker` and `admin.policy.reload` off an arm that keys nothing. So the vocabulary could grow, but nothing could be granted without granting everything — and the alternative, hard-wiring each term into the arm, makes every new term a code change and gives the operator no say at all.
+That gap had a concrete cost. `maknae-authz-basic`'s admin arm was keyed to the single built term `admin.whoami`, with the rest of `Class::Admin` answering `NotApplicable`. The comment on that arm named the problem precisely: a class-granular permit would grant `admin.contain`, `admin.credential.broker` and `admin.policy.reload` off an arm that keys nothing. So the vocabulary could grow, but nothing could be granted without granting everything — and the alternative, hard-wiring each term into the arm, makes every new term a code change and gives the operator no say at all. *(2026-10-23, #168: the brokering term named above has since been struck from the vocabulary; every credential is the subject's own, ADR-0028.)*
 
 Three `admin.*` terms are disclosure-only: `admin.status`, `admin.config.show`, `admin.subject.list`. They read state; they change none. They are the right first population for a per-action grant surface precisely because getting them wrong discloses rather than destroys.
 
