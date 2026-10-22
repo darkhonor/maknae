@@ -102,7 +102,7 @@ Two capabilities are first-class *by design* from the start (design intent, not 
 
 ## Build
 
-Rust 1.98.1 (the pinned toolchain; `rustup` installs it from `rust-toolchain.toml`) on Linux (amd64/arm64) or macOS on Apple Silicon.
+Rust 1.99.1 (the pinned toolchain; `rustup` installs it from `rust-toolchain.toml`) on Linux (amd64/arm64) or macOS on Apple Silicon.
 
 ```bash
 cargo build --locked --workspace
