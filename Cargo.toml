@@ -41,7 +41,7 @@ license = "Apache-2.0"
 publish = false
 repository = "https://github.com/darkhonor/maknae"
 # MSRV = the pinned toolchain; the reasons are in rust-toolchain.toml (#201).
-rust-version = "1.98.1"
+rust-version = "1.99.1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

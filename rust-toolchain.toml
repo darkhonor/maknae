@@ -9,11 +9,13 @@
 # 2. 1.97.1 is a one-line release: "Fix miscompilation in LLVM optimization".
 #    For a deny-by-default, fail-closed product a miscompiling compiler sits
 #    below every gate, test and review. 1.94.1 predated the fix.
-# 3. 1.98.1 (2026-09-01) is the point release on top of 1.98.0; point releases
-#    are fixes only.
+# 3. 1.99.1 (2026-10-15). The Rust project ships fixes only for the current
+#    stable, so 1.98.x gets no further point releases. 1.99.1 is the point
+#    release that fixes 1.99.0's x86_64 FFI `bool` return miscompile (rust-lang/rust#163911);
+#    1.99.0 itself is not acceptable here.
 #
 # The failure this pin prevents: an unsafe attribute compiling under a forbid
 # that did not see it. Bump deliberately, with the reason written here.
 [toolchain]
-channel = "1.98.1"
+channel = "1.99.1"
 components = ["rustfmt", "clippy", "llvm-tools"]
