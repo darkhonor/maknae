@@ -44,6 +44,10 @@ run "agents_shape" {
     error_message = "standing SecretID (custody and rotation are slice 2)"
   }
   assert {
+    condition     = vault_approle_auth_backend_role.agent["hobi"].bind_secret_id == true && vault_approle_auth_backend_role.agent["hobi"].token_type == "service"
+    error_message = "a SecretID is required to log in (the RoleID is a published output), and the token is a revocable service token, never batch (#472 revokes per agent)"
+  }
+  assert {
     condition     = vault_policy.agent["hobi"].policy == <<-EOT
       path "maknae-kv/data/maknae/agents/hobi/*" {
         capabilities     = ["read"]
@@ -58,11 +62,13 @@ run "agents_shape" {
       path "maknae-kv/destroy/maknae/agents/hobi/*" { capabilities = ["deny"] }
       path "maknae-kv/undelete/maknae/agents/hobi" { capabilities = ["deny"] }
       path "maknae-kv/undelete/maknae/agents/hobi/*" { capabilities = ["deny"] }
+      path "maknae-kv/subkeys/maknae/agents/hobi" { capabilities = ["deny"] }
+      path "maknae-kv/subkeys/maknae/agents/hobi/*" { capabilities = ["deny"] }
       path "auth/token/renew-self"  { capabilities = ["update"] }
       path "auth/token/lookup-self" { capabilities = ["read"] }
       path "auth/token/revoke-self" { capabilities = ["update"] }
     EOT
-    error_message = "hobi's policy is read-only, wrapped (1s-300s) on its own subtree, denies every metadata/delete/destroy/undelete path, and grants nothing else"
+    error_message = "hobi's policy is read-only, wrapped (1s-300s) on its own subtree, denies every metadata/delete/destroy/undelete/subkeys path, and grants nothing else"
   }
   assert {
     condition     = strcontains(vault_policy.agent["suga"].policy, "maknae-kv/data/maknae/agents/suga/*") && !strcontains(vault_policy.agent["suga"].policy, "agents/hobi")

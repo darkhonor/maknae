@@ -32,6 +32,8 @@ resource "vault_policy" "agent" {
     path "${format(local.agent_kv, "destroy", each.key)}/*" { capabilities = ["deny"] }
     path "${format(local.agent_kv, "undelete", each.key)}" { capabilities = ["deny"] }
     path "${format(local.agent_kv, "undelete", each.key)}/*" { capabilities = ["deny"] }
+    path "${format(local.agent_kv, "subkeys", each.key)}" { capabilities = ["deny"] }
+    path "${format(local.agent_kv, "subkeys", each.key)}/*" { capabilities = ["deny"] }
     path "auth/token/renew-self"  { capabilities = ["update"] }
     path "auth/token/lookup-self" { capabilities = ["read"] }
     path "auth/token/revoke-self" { capabilities = ["update"] }
@@ -49,6 +51,8 @@ resource "vault_approle_auth_backend_role" "agent" {
   secret_id_ttl           = 0
   secret_id_num_uses      = 0
   token_no_default_policy = true
+  bind_secret_id          = true
+  token_type              = "service"
 }
 
 resource "vault_policy" "agent_credential_admin" {

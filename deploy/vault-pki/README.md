@@ -163,8 +163,13 @@ from `approle_path`). Agent ids follow the same rule as usernames: 1–32 bytes 
 The agent may do one thing: a response-wrapped read of its own subtree
 (`min_wrapping_ttl = "1s"`, `max_wrapping_ttl = "300s"`), plus lookup, renew and revoke of
 its own token. Everything else there is denied (unwrapped read, write, patch, delete, and
-every `metadata/`, `delete/`, `destroy/` and `undelete/` path), and it gets nothing
-outside its subtree.
+every `metadata/`, `delete/`, `destroy/`, `undelete/` and `subkeys/` path), and it gets
+nothing outside its subtree.
+
+The RoleID is not secret and is published as an output: `terraform output -json agent_role_ids`
+(or `vault read -field=role_id auth/maknae-agent-approle/role/agent-<id>/role-id` with an admin
+or root token). Login requires the SecretID as well (`bind_secret_id = true`), and the token is
+a revocable `service` token.
 
 The token is bounded and never periodic: `agent_token_ttl` (default 1h) and
 `agent_token_max_ttl` (default 24h, also set as the hard `explicit_max_ttl`; never 0)
@@ -208,12 +213,17 @@ schema-valid) — those remain a review concern.
 
 Getting a SecretID for `agent-hobi` needs a root or operator token on
 `auth/maknae-agent-approle/role/agent-hobi/secret-id`, until #168 slice 2 ships `enroll` for
-agents. Then, as `hobi` logged in by AppRole on the agent mount, confirm:
+agents. Take the RoleID from `terraform output -json agent_role_ids` (or `vault read
+-field=role_id auth/maknae-agent-approle/role/agent-hobi/role-id` with an admin or root
+token). Then, as `hobi` logged in by AppRole on the agent mount, confirm:
 
 - a wrapped read of its own credential succeeds;
 - an unwrapped read is refused;
 - write, patch and delete are refused;
-- every `metadata/`, `delete/`, `destroy/` and `undelete/` operation is refused;
+- every `metadata/`, `delete/`, `destroy/`, `undelete/` and `subkeys/` operation is refused;
+- an AppRole login with the RoleID and no SecretID is refused;
+- an admin token with `maknae-admin-agent-credentials` can
+  `vault list <kv_mount>/metadata/<agent_prefix>`;
 - another agent's credential is refused;
 - a wrap TTL above 300s is refused (`max_wrapping_ttl`);
 - `token lookup-self` shows `explicit_max_ttl` equal to `agent_token_max_ttl` (it comes from
