@@ -605,7 +605,7 @@ mod tests {
         let s = shipped_with_bindings();
         let snap = snap(&s);
         let g = snap.graph();
-        assert_eq!(g.nodes().iter().filter(|n| n.kind == TERM).count(), 61);
+        assert_eq!(g.nodes().iter().filter(|n| n.kind == TERM).count(), 60);
         assert_eq!(g.nodes().iter().filter(|n| n.kind == CLASS).count(), 7);
         let rules: Vec<_> = g.nodes().iter().filter(|n| n.kind == RULE).collect();
         assert_eq!(rules.len(), 25);
@@ -649,7 +649,7 @@ mod tests {
         }
         assert_eq!(
             g.edges().len() - snap.persisted().edges().len(),
-            61 + 1 + 20 * 3 + 1 + 5 * 3
+            60 + 1 + 20 * 3 + 1 + 5 * 3
         );
 
         let deny0 = g.lookup(RULE, "rule:permissions:deny:0").unwrap();

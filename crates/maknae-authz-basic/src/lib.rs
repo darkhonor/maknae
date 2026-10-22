@@ -4560,7 +4560,7 @@ mod tests {
                 .chain(KERNEL_TERMS.iter())
                 .copied()
                 .collect();
-            assert_eq!(terms.len(), 61);
+            assert_eq!(terms.len(), 60);
             let (uids, paths, homes, ops) = (uids(), paths(), homes(), operations());
             assert_eq!(
                 (uids.len(), paths.len(), homes.len(), ops.len()),
@@ -4588,7 +4588,7 @@ mod tests {
                     distinct(&ops),
                     distinct(&destinations),
                 ),
-                (61, 9, 22, 5, 7, 4)
+                (60, 9, 22, 5, 7, 4)
             );
             let mut cells = 0usize;
             let mut mismatches: Vec<String> = Vec::new();
@@ -4701,7 +4701,7 @@ mod tests {
                 &mismatches[..mismatches.len().min(10)]
             );
             let fs_cells = 4 * 7 * 22 * 5 + 7 * 22 * 5;
-            let other_cells = 56 + 4;
+            let other_cells = 55 + 4;
             assert_eq!(cells, 11 * 9 * (fs_cells + other_cells));
             assert_eq!(
                 roles_seen,

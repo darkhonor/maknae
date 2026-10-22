@@ -1429,8 +1429,8 @@ mod tests {
     // ---- class-match rule pins (spec §5) ----
 
     /// The admin class is NOT a blanket grant. A class-granular permit here
-    /// would grant every future admin term — containment, credential
-    /// brokering, policy reload — off an arm that keys nothing.
+    /// would grant every future admin term — containment, policy reload — off an
+    /// arm that keys nothing.
     #[test]
     fn admin_class_permits_only_whoami() {
         let lp = lp_with(None, &[]); // shipped default: enrolled uid → admin
@@ -1446,7 +1446,6 @@ mod tests {
             "admin.status",
             "admin.contain",
             "admin.release",
-            "admin.credential.broker",
             "admin.policy.reload",
             "admin.subject.bind",
         ] {

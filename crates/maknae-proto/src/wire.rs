@@ -443,13 +443,6 @@ pub enum Verb {
     /// selection by elimination, same axis. *(ADR-0023 decision 3: not built in
     /// Cooky, for the same reason as `admin.provider.set`.)*
     AdminProviderDisable,
-    /// Use a trust-plane-held credential on a subject's behalf against an
-    /// external service, without the subject ever seeing it — egress with an
-    /// irreversible third-party effect. The confused-deputy term — the subject's
-    /// reach becomes the daemon's reach unless the credential is scoped to the
-    /// subject rather than the daemon (#153 §4 and #168; *corrected 2026-09-07,
-    /// ADR-0023 — this said #151, the MCP epic*).
-    AdminCredentialBroker,
     /// Enumerate daemon-side session records (connections to `maknaed`, per #115)
     /// — not agent conversations. A disclosure of who is connected.
     AdminSessionList,
@@ -626,12 +619,8 @@ pub enum Verb {
     /// permitted command open-ended.
     TerminalInput,
     /// Open a connection to an MCP server, local or external. A destination
-    /// decision in itself, and the point where a trust-plane-held credential may
-    /// be used on the agent's behalf without the agent ever seeing it.
-    /// `admin.credential.broker` is the sanctioned spelling for that brokering:
-    /// this term MUST refuse a trust-plane-held credential and defer to it, or a
-    /// grant of `mcp` confers brokering without ever touching the term that
-    /// carries its constraints.
+    /// decision in itself. It MUST NOT receive a trust-plane-held credential:
+    /// every credential is the subject's own (ADR-0028).
     McpConnect,
     /// Tear down a connection.
     McpDisconnect,
@@ -1110,7 +1099,6 @@ pub fn class_of(verb: &Verb) -> FrameClass {
         | Verb::AdminProviderList
         | Verb::AdminProviderSet
         | Verb::AdminProviderDisable
-        | Verb::AdminCredentialBroker
         | Verb::AdminSessionList
         | Verb::AdminSessionTerminate
         | Verb::SessionNew
@@ -3070,7 +3058,6 @@ mod tests {
                 (Verb::AdminProviderList, FrameClass::Control),
                 (Verb::AdminProviderSet, FrameClass::Control),
                 (Verb::AdminProviderDisable, FrameClass::Control),
-                (Verb::AdminCredentialBroker, FrameClass::Control),
                 (Verb::AdminSessionList, FrameClass::Control),
                 (Verb::AdminSessionTerminate, FrameClass::Control),
                 (Verb::SessionNew, FrameClass::Control),
@@ -3154,7 +3141,7 @@ mod tests {
         #[test]
         fn class_of_pins_every_verb() {
             let all = every_verb();
-            assert_eq!(all.len(), 59);
+            assert_eq!(all.len(), 58);
             for (verb, class) in all {
                 assert_eq!(class_of(&verb), class, "{verb:?}");
             }
