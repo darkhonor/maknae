@@ -39,7 +39,7 @@ This resolves cleanly against [ADR-0024](adr/ADR-0024-tenancy-model-and-agent-id
 
 **Relation 1 — subject → model.** *"May this uid use `provider:qwen-local`?"* Subject is the uid, resource is the provider. `maknae-authz-basic` decides this today via `destinations:`. Nothing new is required.
 
-**Relation 2 — the flow.** *"May this content transit this conduit?"* The tempting phrasing is *"resources accessing resources"*, but taken literally that needs a decision with a non-uid principal — which contradicts ADR-0024 decision 2 (*every subject is uid-derived; an agent runtime holds no identity of its own, with no exception*) by the back door. The precise form is:
+**Relation 2 — the flow.** *"May this content transit this conduit?"* The tempting phrasing is *"resources accessing resources"*, but taken literally that needs a decision with a non-uid principal — which contradicts ADR-0024 decision 2 (*every subject is uid-derived*) by the back door. The Agent Daemon has an identity of its own (ADR-0024 decision 6), but it is still a uid. The precise form is:
 
 > **One subject, one action, and the request carries a *conduit* attribute.**
 
