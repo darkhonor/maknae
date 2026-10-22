@@ -69,3 +69,33 @@ output "user_policy_name" {
   description = "Templated user policy, bound to every userpass user through the maknae-users group."
   value       = vault_policy.maknae_user.name
 }
+
+output "agent_approle_mount_path" {
+  description = "AppRole auth mount the Agent Daemons log in through."
+  value       = vault_auth_backend.agent_approle.path
+}
+
+output "agent_prefix" {
+  description = "Per-agent credential prefix within kv_mount_path."
+  value       = var.agent_prefix
+}
+
+output "agent_role_names" {
+  description = "AppRole role name per agent id."
+  value       = { for id, r in vault_approle_auth_backend_role.agent : id => r.role_name }
+}
+
+output "agent_role_ids" {
+  description = "AppRole RoleID per agent id. Non-secret; pair with a SecretID to log in."
+  value       = { for id, r in vault_approle_auth_backend_role.agent : id => r.role_id }
+}
+
+output "agent_policy_names" {
+  description = "Read-only credential policy per agent id."
+  value       = { for id, p in vault_policy.agent : id => p.name }
+}
+
+output "agent_credential_admin_policy_name" {
+  description = "Policy an administrator attaches to their own token to write agent credentials."
+  value       = vault_policy.agent_credential_admin.name
+}

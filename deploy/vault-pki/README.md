@@ -4,8 +4,10 @@ Terraform that provisions a **self-contained Maknae PKI and user identity in Has
 Vault** for development: a dedicated Maknae **Root CA**, one **Intermediate CA** it signs,
 two SAN-locked plane **roles** (`maknae-kernel`, `maknae-cli`), the **`maknaed` AppRole**
 and its policy, a **userpass** auth mount for local users with one **templated user
-policy**, the **KV v2** mount holding each user's provider API keys, and the
-`maknae-enroll` policy.
+policy**, the **KV v2** mount holding each user's provider API keys, the
+`maknae-enroll` policy, and, per Agent Daemon, a read-only credential policy and an
+**AppRole** role on a separate agent mount, plus the administrator policy that writes
+agent credentials.
 
 The Rust plane-cert client (`maknae-vault`) and the mTLS transport consume this PKI.
 
@@ -43,6 +45,14 @@ The Rust plane-cert client (`maknae-vault`) and the mTLS transport consume this 
 - **KV v2 mount** (`maknae-kv`) — provider API keys, one subtree per user. The Egress
   Daemon holds no Vault identity; it opens only the single-use wrapping token a user's
   CLI sends it.
+- **Agent AppRole mount** (`maknae-agent-approle`, #168) — the mount Agent Daemons log in
+  through, separate from `maknaed`'s.
+- **`maknae-agent-<id>` policy and `agent-<id>` role** — one pair per entry of
+  `maknae_agents`: the policy allows only a wrapped read of
+  `<kv_mount>/data/<agent_prefix>/<id>/*`; the role issues a bounded, non-periodic token
+  carrying that policy alone (see "Agent credentials").
+- **`maknae-admin-agent-credentials` policy** — what an administrator attaches to their own
+  token to write agent credentials; it reaches nothing outside `<agent_prefix>`.
 
 ## Requirements
 
@@ -139,18 +149,79 @@ read -rsp "Maknae user token: " VT && echo && read -rsp "OpenAI API key: " KEY &
 
 `read -s` keeps both secrets off the screen and out of shell history; `printf` is a builtin, so the key never appears in `ps`; `vault write <kv_mount>/data/...` with `-` writes the KV v2 data path directly, avoiding the `vault kv` preflight against `sys/internal/ui/mounts`, which a user token may not be allowed; Vault answers with a wrapping token around the write's metadata, which holds nothing secret. Do not use `vault kv put ... api_key=-` (measured not to work for a user). A wrapping token from a wrapped read wraps the key itself, so never paste one anywhere.
 
+## Agent credentials (#168)
+
+Each Agent Daemon's credentials live at `<kv_mount_path>/data/<agent_prefix>/<id>/<name>`,
+for example `maknae-kv/data/maknae/agents/hobi/github`. `agent_prefix` defaults to
+`maknae/agents` and must not equal, contain or sit inside `user_prefix`.
+
+`maknae_agents = { hobi = {} }` creates the policy `maknae-agent-hobi` and the AppRole role
+`agent-hobi` on the `maknae-agent-approle` mount (`agent_approle_path`, which must differ
+from `approle_path`). Agent ids follow the same rule as usernames: 1–32 bytes of
+`[a-z0-9._-]`, starting and ending with `[a-z0-9_]`, and not `data`.
+
+The agent may do one thing: a response-wrapped read of its own subtree
+(`min_wrapping_ttl = "1s"`, `max_wrapping_ttl = "300s"`), plus lookup, renew and revoke of
+its own token. Everything else there is denied (unwrapped read, write, patch, delete, and
+every `metadata/`, `delete/`, `destroy/` and `undelete/` path), and it gets nothing
+outside its subtree.
+
+The token is bounded and never periodic: `agent_token_ttl` (default 1h) and
+`agent_token_max_ttl` (default 24h, also set as the hard `explicit_max_ttl`; never 0)
+(ADR-0006 decision 9). The SecretID is standing; its custody, CIDR binding and rotation are
+#168 slice 2.
+
+The separate mount keeps agent login leases off `maknaed`'s prefix. It does **not**
+separate one agent's leases from another's; per-agent revocation is #472.
+
+To write a credential, an administrator attaches `maknae-admin-agent-credentials` to an
+admin token, then writes the KV v2 data path directly (`read -s` keeps both secrets off the
+screen and out of history). The subpath `github` and the field `token` are an example: the
+Egress Daemon's GitHub call (#168 slice 3) fixes the real layout.
+
+```bash
+read -rsp "Admin token: " VT && echo && read -rsp "Credential: " CRED && echo && printf '{"data":{"token":"%s"}}' "$CRED" | VAULT_TOKEN="$VT" vault write <kv_mount>/data/<agent_prefix>/<id>/github - ; unset VT CRED
+```
+
+Do not use `vault kv put`: it preflights `sys/internal/ui/mounts` and was measured not to
+work for a policy-scoped token (see "Loading a user's provider key").
+
 ## Offline validation (no Vault needed)
 
 ```bash
 terraform init -backend=false
 terraform fmt -check
 terraform validate
+terraform test
 ```
 
-This is the mechanical gate the CI/pre-push flow relies on. It checks provider-schema
-and config validity; it does **not** contact Vault and does **not** prove the SAN locks
-or the policy templates are right (a permissive role is still schema-valid) — that is a
-review concern.
+`terraform test` runs `tests/agents.tftest.hcl` under a mocked Vault provider: it needs
+`init` but no Vault. It pins the agent policies byte for byte and the validations that
+guard the agent ids, prefix, mount and token lifetimes.
+
+No CI workflow runs this module; run these before pushing. They check provider-schema and
+config validity and the agent policies; they do **not** contact Vault and do **not** prove
+the SAN locks or the other policy templates are right (a permissive role is still
+schema-valid) — those remain a review concern.
+
+## Verify on a live Vault (post-merge, maintainer; not CI)
+
+Getting a SecretID for `agent-hobi` needs a root or operator token on
+`auth/maknae-agent-approle/role/agent-hobi/secret-id`, until #168 slice 2 ships `enroll` for
+agents. Then, as `hobi` logged in by AppRole on the agent mount, confirm:
+
+- a wrapped read of its own credential succeeds;
+- an unwrapped read is refused;
+- write, patch and delete are refused;
+- every `metadata/`, `delete/`, `destroy/` and `undelete/` operation is refused;
+- another agent's credential is refused;
+- a wrap TTL above 300s is refused (`max_wrapping_ttl`);
+- `token lookup-self` shows `explicit_max_ttl` equal to `agent_token_max_ttl` (it comes from
+  `token_explicit_max_ttl`) and no `period`.
+
+Write every check with raw `vault read`, `write`, `delete` and `list` against the KV v2 API
+paths, never `vault kv …`: the `kv` subcommands preflight `sys/internal/ui/mounts`, which an
+agent token is not granted, so a refusal there proves nothing.
 
 ## Dev caveats (read before any non-dev use)
 
