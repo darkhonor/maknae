@@ -2193,7 +2193,7 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
                     ),
                 ] {
                     keychain_write::check_install_path(Path::new(bin))?;
-                    keychain_write::verify_release(bin, plane, &team).await?;
+                    keychain_write::verify_release(bin, plane.service(), &team).await?;
                 }
                 Ok::<String, EnrollError>(team)
             }
