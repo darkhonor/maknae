@@ -16,8 +16,10 @@
 //! as direct deps — both already transitive via `vaultrs`, so `cargo deny` stays
 //! green). The hand-rolled endpoint mirrors the pattern in vaultrs' own
 //! `src/api/pki/requests.rs` (`#[derive(Endpoint)]` + `#[endpoint(path = ..., ...)]`).
+use crate::agent_enroll::BindCidrs;
 use crate::VaultError;
 use serde::Deserialize;
+use vaultrs::api::auth::approle::requests::GenerateNewSecretIDRequestBuilder;
 use vaultrs::client::{VaultClient, VaultClientSettingsBuilder};
 use zeroize::Zeroizing;
 
@@ -125,6 +127,50 @@ impl OperatorClient {
         Ok(())
     }
 
+    /// Mint a SecretID whose use and whose resulting tokens are both bound to
+    /// `cidrs`; same return and error shape as `mint_secret_id`.
+    pub async fn mint_bound_secret_id(
+        &self,
+        mount: &str,
+        role: &str,
+        cidrs: &BindCidrs,
+    ) -> Result<(Zeroizing<String>, String), VaultError> {
+        let resp = vaultrs::auth::approle::role::secret::generate(
+            &self.inner,
+            mount,
+            role,
+            Some(&mut bound_secret_id_request(cidrs)),
+        )
+        .await
+        .map_err(|e| VaultError::Operator(e.to_string()))?;
+        Ok((Zeroizing::new(resp.secret_id), resp.secret_id_accessor))
+    }
+
+    /// `destroy_accessor` that treats an already-absent accessor as success.
+    pub async fn destroy_accessor_if_present(
+        &self,
+        mount: &str,
+        role: &str,
+        accessor: &str,
+    ) -> Result<(), VaultError> {
+        match vaultrs::auth::approle::role::secret::delete_accessor(
+            &self.inner,
+            mount,
+            role,
+            accessor,
+        )
+        .await
+        {
+            Ok(_) => Ok(()),
+            Err(vaultrs::error::ClientError::APIError { code, errors })
+                if crate::agent_enroll::accessor_already_gone(code, &errors) =>
+            {
+                Ok(())
+            }
+            Err(e) => Err(VaultError::Operator(e.to_string())),
+        }
+    }
+
     /// Fetch the maknae PKI intermediate's default issuer CA chain (PEM), for
     /// pinning on the newly enrolled deployment. `vaultrs` has no op for this
     /// endpoint, so it is executed via the hand-rolled `ReadDefaultIssuerJsonRequest`
@@ -139,6 +185,13 @@ impl OperatorClient {
             .map_err(|e| VaultError::Operator(e.to_string()))?;
         join_ca_chain(resp.ca_chain)
     }
+}
+
+pub fn bound_secret_id_request(cidrs: &BindCidrs) -> GenerateNewSecretIDRequestBuilder {
+    let mut b = GenerateNewSecretIDRequestBuilder::default();
+    b.cidr_list(cidrs.as_slice().to_vec())
+        .token_bound_cidrs(cidrs.as_slice().to_vec());
+    b
 }
 
 /// `GET {mount}/issuer/default/json` — absent from `vaultrs` 0.7.4 (verified against
@@ -184,6 +237,21 @@ fn join_ca_chain(chain: Vec<String>) -> Result<String, VaultError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_bound_request_carries_both_cidr_fields() {
+        let cidrs = crate::agent_enroll::BindCidrs::parse(&["10.0.0.5".into(), "fd00::/64".into()])
+            .unwrap();
+        let req = bound_secret_id_request(&cidrs)
+            .mount("m")
+            .role_name("r")
+            .build()
+            .unwrap();
+        let want = Some(vec!["10.0.0.5/32".to_string(), "fd00::/64".to_string()]);
+        assert_eq!(req.cidr_list, want);
+        assert_eq!(req.token_bound_cidrs, want);
+        assert_eq!(req.metadata, None);
+    }
 
     #[test]
     fn join_ca_chain_rejects_empty() {
