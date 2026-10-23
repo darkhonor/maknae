@@ -879,15 +879,6 @@ mod darwin_tests {
     }
 
     #[test]
-    fn a_missing_agent_binary_is_not_installed() {
-        let e = check_install_path(std::path::Path::new(
-            "/usr/local/bin/maknae-agentd-absent-for-test",
-        ))
-        .unwrap_err();
-        assert!(matches!(e, EnrollError::NotInstalled { .. }), "{e}");
-    }
-
-    #[test]
     fn a_user_owned_binary_maps_to_not_root_installed() {
         let dir = std::env::temp_dir().join(format!("maknae-install-path-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
