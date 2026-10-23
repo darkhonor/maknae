@@ -127,6 +127,8 @@ files = [
   # (secret_io.rs) is T3 below.
   "crates/maknae-vault/src/secret_source.rs",
   "crates/maknae-vault/src/keychain_policy.rs",
+  # #168: agent enrollment decisions (id, bind CIDRs, service account, retired accessor); fail-closed.
+  "crates/maknae-vault/src/agent_enroll.rs",
   # #172: the FIPS-module SHA-256 wrapper behind every egress content digest.
   "crates/maknae-vault/src/digest.rs",
   "crates/maknae-vault/src/api_shape.rs",
