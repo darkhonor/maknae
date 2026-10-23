@@ -176,8 +176,10 @@ a revocable `service` token.
 
 The token is bounded and never periodic: `agent_token_ttl` (default 1h) and
 `agent_token_max_ttl` (default 24h, also set as the hard `explicit_max_ttl`; never 0)
-(ADR-0006 decision 9). The SecretID is standing; its custody, CIDR binding and rotation are
-#168 slice 2.
+(ADR-0006 decision 9). The SecretID is standing. On the agent's host,
+`sudo maknae enroll agent <id> --account <service-account> --bind-cidr <host address>` (with an
+operator token carrying `maknae-enroll-agent`) mints the agent's SecretID bound to that address
+(`cidr_list` and `token_bound_cidrs`), seals it into OS custody, and `--rotate` replaces it.
 
 `maknae enroll agent` runs under the operator's own Vault token, which must carry the
 `maknae-enroll-agent` policy. Provisioning the policy does not grant it to anyone: the

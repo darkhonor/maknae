@@ -41,7 +41,7 @@ run "agents_shape" {
   }
   assert {
     condition     = vault_approle_auth_backend_role.agent["hobi"].secret_id_ttl == 0 && vault_approle_auth_backend_role.agent["hobi"].secret_id_num_uses == 0
-    error_message = "standing SecretID (custody and rotation are slice 2)"
+    error_message = "standing SecretID (custody and rotation are maknae enroll agent)"
   }
   assert {
     condition     = vault_approle_auth_backend_role.agent["hobi"].bind_secret_id == true && vault_approle_auth_backend_role.agent["hobi"].token_type == "service"
