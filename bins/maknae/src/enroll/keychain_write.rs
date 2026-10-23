@@ -199,7 +199,6 @@ async fn delete_item(service: &str, account: &str) -> Result<(), EnrollError> {
 }
 
 #[cfg(target_os = "macos")]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn seal_agent_secret_macos(
     secret: &str,
     agent: &maknae_vault::agent_enroll::AgentId,

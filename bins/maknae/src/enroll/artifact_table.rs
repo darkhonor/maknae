@@ -71,6 +71,9 @@ pub enum ContentKind {
     /// The sealed daemon SecretID — `systemd-creds`'s `.cred` ciphertext on
     /// Linux; on macOS the SecretID goes to the System keychain.
     SealedDaemonSecret,
+    /// An Agent Daemon's sealed SecretID (`agent-<id>-secret-id.cred`).
+    #[cfg(not(target_os = "macos"))]
+    SealedAgentSecret,
     /// The Egress Daemon's sealing key: a `systemd-creds` credential on Linux,
     /// a System keychain pointer on macOS.
     SealedEgressSealKey,

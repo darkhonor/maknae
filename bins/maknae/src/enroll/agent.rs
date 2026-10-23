@@ -1,11 +1,71 @@
-use super::artifact_write::{emit_yaml, yaml_map};
+use super::artifact_table::{Artifact, ContentKind, Owner};
+use super::artifact_write::{self, emit_yaml, yaml_map, OwnerResolver};
 use super::EnrollError;
+use clap::Args;
 use maknae_config::Value;
-use maknae_vault::agent_enroll::{AgentId, BindCidrs};
+use maknae_io::{AnchorRequired, FileOwner, IoError, IoKind, Mode, StrategyPref, TargetRequired};
+use maknae_msgs::{msg, Locale, MsgId};
+use maknae_vault::agent_enroll::{
+    AccountFacts, AgentId, BindCidrs, HostAccounts, DEFAULT_AGENT_APPROLE_MOUNT,
+    MAKNAE_DAEMON_ACCOUNTS,
+};
+use std::path::{Path, PathBuf};
 use yaml_rust2::Yaml;
 use zeroize::Zeroizing;
 
-#[cfg_attr(not(test), expect(dead_code))]
+/// `maknae enroll agent` — enroll one Agent Daemon on this host.
+#[derive(Args, Debug, Clone)]
+pub struct AgentArgs {
+    /// The agent's id; its AppRole role is `agent-<ID>`.
+    #[arg(value_name = "ID")]
+    pub id: String,
+    /// The service account the Agent Daemon runs as.
+    #[arg(long)]
+    pub account: String,
+    /// An address or CIDR the SecretID may be used from (repeatable).
+    #[arg(long = "bind-cidr", required = true)]
+    pub bind_cidr: Vec<String>,
+    /// The AppRole auth mount the agent's role lives on.
+    #[arg(long, default_value = DEFAULT_AGENT_APPROLE_MOUNT)]
+    pub approle_mount: String,
+    /// Read the Vault token from this file instead of an interactive prompt.
+    #[arg(long)]
+    pub token_file: Option<PathBuf>,
+    /// Replace an enrolled agent's SecretID and destroy the earlier ones.
+    #[arg(long)]
+    pub rotate: bool,
+    /// Print raw operation detail.
+    #[arg(long)]
+    pub verbose: bool,
+}
+
+const PRIVATE_DIR: &str = "/etc/maknae/private";
+const AGENTS_DIR: &str = "/etc/maknae/agents";
+const HOST_CONFIG: &str = "/etc/maknae/maknae.yaml";
+const VAULT_CA: &str = "/etc/maknae/tls/vault-ca.crt";
+const SMALL_FILE: u64 = 64 * 1024;
+
+fn state_file(agent: &AgentId) -> String {
+    format!("agent-{}-enroll-state.yaml", agent.as_str())
+}
+
+fn record_file(agent_id: &str) -> String {
+    format!("{agent_id}.yaml")
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn cred_path(agent: &AgentId) -> PathBuf {
+    Path::new(PRIVATE_DIR).join(format!("agent-{}-secret-id.cred", agent.as_str()))
+}
+
+pub(crate) fn state_path(agent: &AgentId) -> PathBuf {
+    Path::new(PRIVATE_DIR).join(state_file(agent))
+}
+
+pub(crate) fn record_path(agent: &AgentId) -> PathBuf {
+    Path::new(AGENTS_DIR).join(record_file(agent.as_str()))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct HostEnrollment {
     pub vault_addr: String,
@@ -13,7 +73,6 @@ pub(crate) struct HostEnrollment {
     pub principal_uid: u32,
 }
 
-#[cfg_attr(not(test), expect(dead_code))]
 pub(crate) fn parse_host_enrollment(text: &str) -> Result<HostEnrollment, EnrollError> {
     let doc = maknae_config::load_str(text)
         .map_err(|e| EnrollError::State(format!("maknae.yaml: {e:?}")))?;
@@ -45,7 +104,6 @@ pub(crate) struct AgentState {
 }
 
 impl AgentState {
-    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn to_yaml(&self) -> String {
         emit_yaml(yaml_map(vec![
             ("approle_mount", Yaml::String(self.approle_mount.clone())),
@@ -56,7 +114,6 @@ impl AgentState {
         ]))
     }
 
-    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn parse(text: &str) -> Result<Self, EnrollError> {
         const WHAT: &str = "agent enroll state";
         let doc = load(text, WHAT)?;
@@ -77,7 +134,6 @@ pub(crate) enum SecretSource {
 }
 
 impl SecretSource {
-    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Tpm2 => "tpm2",
@@ -99,7 +155,6 @@ pub(crate) struct AgentRecord {
 }
 
 impl AgentRecord {
-    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn to_yaml(&self) -> String {
         emit_yaml(yaml_map(vec![
             ("agent_id", Yaml::String(self.agent_id.clone())),
@@ -113,7 +168,6 @@ impl AgentRecord {
         ]))
     }
 
-    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn parse(text: &str) -> Result<Self, EnrollError> {
         const WHAT: &str = "agent record";
         let doc = load(text, WHAT)?;
@@ -144,7 +198,6 @@ impl AgentRecord {
     }
 }
 
-#[cfg_attr(not(test), expect(dead_code))]
 fn yaml_list(items: &[String]) -> Yaml {
     Yaml::Array(items.iter().cloned().map(Yaml::String).collect())
 }
@@ -208,7 +261,6 @@ pub(crate) trait AgentOps {
     fn write_record(&self, record: &AgentRecord) -> Result<(), EnrollError>;
 }
 
-#[cfg_attr(not(test), expect(dead_code))]
 pub(crate) struct AgentPlan {
     pub agent: AgentId,
     pub account: String,
@@ -218,14 +270,12 @@ pub(crate) struct AgentPlan {
     pub rotate: bool,
 }
 
-#[cfg_attr(not(test), expect(dead_code))]
 #[derive(Debug)]
 pub(crate) struct AgentOutcome {
     pub record: AgentRecord,
     pub retired: usize,
 }
 
-#[cfg_attr(not(test), expect(dead_code))]
 pub(crate) async fn enroll_agent<O: AgentOps>(
     ops: &O,
     plan: &AgentPlan,
@@ -353,6 +403,501 @@ fn dedup<'a>(items: impl Iterator<Item = &'a String>) -> Vec<String> {
         }
     }
     out
+}
+
+fn io_error(path: &Path, e: IoError) -> EnrollError {
+    EnrollError::Io {
+        path: path.to_path_buf(),
+        source: e.to_string(),
+    }
+}
+
+fn is_not_found(e: &IoError) -> bool {
+    matches!(
+        e,
+        IoError::Io {
+            kind: IoKind::NotFound,
+            ..
+        }
+    )
+}
+
+fn root_file(mode_mask: u32, max_bytes: u64) -> TargetRequired {
+    TargetRequired {
+        owner: Some(0),
+        mode_mask: Some(mode_mask),
+        nlink_exactly_one: true,
+        regular_file: true,
+        max_bytes: Some(max_bytes),
+    }
+}
+
+fn utf8(path: &Path, bytes: &[u8]) -> Result<String, EnrollError> {
+    std::str::from_utf8(bytes)
+        .map(str::to_string)
+        .map_err(|_| EnrollError::State(format!("{} is not UTF-8", path.display())))
+}
+
+fn redact(text: &str, secret: &str) -> String {
+    text.replace(secret, "<redacted>")
+}
+
+fn scrub_secret(e: EnrollError, secret: &Zeroizing<String>) -> EnrollError {
+    let secret = secret.as_str();
+    if secret.is_empty() {
+        return e;
+    }
+    let r = |t: String| redact(&t, secret);
+    let e = match e {
+        EnrollError::Command { program, detail } => EnrollError::Command {
+            program: r(program),
+            detail: r(detail),
+        },
+        EnrollError::Owner(m) => EnrollError::Owner(r(m)),
+        EnrollError::State(m) => EnrollError::State(r(m)),
+        EnrollError::Io { path, source } => EnrollError::Io {
+            path,
+            source: r(source),
+        },
+        EnrollError::HrotUnavailable { detail } => {
+            EnrollError::HrotUnavailable { detail: r(detail) }
+        }
+        #[cfg(target_os = "macos")]
+        EnrollError::Keychain { op, detail } => EnrollError::Keychain {
+            op,
+            detail: r(detail),
+        },
+        #[cfg(target_os = "macos")]
+        EnrollError::NotDeveloperIdSigned { binary, reason } => EnrollError::NotDeveloperIdSigned {
+            binary,
+            reason: r(reason),
+        },
+        #[cfg(target_os = "macos")]
+        EnrollError::NotRootInstalled { path, detail } => EnrollError::NotRootInstalled {
+            path,
+            detail: r(detail),
+        },
+        other => other,
+    };
+    let shown = format!("{e} {e:?}");
+    if shown.contains(secret) {
+        EnrollError::State(redact(&e.to_string(), secret))
+    } else {
+        e
+    }
+}
+
+struct RealAgentOps {
+    client: maknae_vault::OperatorClient,
+    private: maknae_io::Anchor,
+    agents: maknae_io::Anchor,
+    daemon_gid: u32,
+    #[cfg(not(target_os = "macos"))]
+    verbose: bool,
+    #[cfg(target_os = "macos")]
+    team: String,
+}
+
+impl RealAgentOps {
+    #[cfg(not(target_os = "macos"))]
+    async fn seal_platform(
+        &self,
+        agent: &AgentId,
+        secret: &str,
+    ) -> Result<SecretSource, EnrollError> {
+        let path = cred_path(agent);
+        super::seal_linux(
+            secret.as_bytes(),
+            &path,
+            maknae_vault::agent_enroll::AGENT_CREDENTIAL_NAME,
+            self.verbose,
+        )
+        .await?;
+        let row = Artifact {
+            path,
+            owner: Owner::RootRoot,
+            mode: 0o600,
+            content: ContentKind::SealedAgentSecret,
+        };
+        artifact_write::apply_ownership_and_mode(&row, &RootOnly)?;
+        Ok(SecretSource::Tpm2)
+    }
+
+    #[cfg(target_os = "macos")]
+    async fn seal_platform(
+        &self,
+        agent: &AgentId,
+        secret: &str,
+    ) -> Result<SecretSource, EnrollError> {
+        super::keychain_write::seal_agent_secret_macos(secret, agent, &self.team).await?;
+        Ok(SecretSource::Keychain)
+    }
+}
+
+impl AgentOps for RealAgentOps {
+    async fn read_role_id(&self, mount: &str, role: &str) -> Result<String, EnrollError> {
+        Ok(self.client.read_role_id(mount, role).await?)
+    }
+
+    async fn mint(
+        &self,
+        mount: &str,
+        role: &str,
+        cidrs: &BindCidrs,
+    ) -> Result<(Zeroizing<String>, String), EnrollError> {
+        Ok(self.client.mint_bound_secret_id(mount, role, cidrs).await?)
+    }
+
+    async fn destroy(&self, mount: &str, role: &str, accessor: &str) -> Result<(), EnrollError> {
+        Ok(self
+            .client
+            .destroy_accessor_if_present(mount, role, accessor)
+            .await?)
+    }
+
+    async fn seal(
+        &self,
+        agent: &AgentId,
+        secret: &Zeroizing<String>,
+    ) -> Result<SecretSource, EnrollError> {
+        self.seal_platform(agent, secret.as_str())
+            .await
+            .map_err(|e| scrub_secret(e, secret))
+    }
+
+    fn write_state(&self, agent: &AgentId, state: &AgentState) -> Result<(), EnrollError> {
+        self.private
+            .publish_owned(
+                Path::new(&state_file(agent)),
+                None,
+                state.to_yaml().as_bytes(),
+                Mode(0o600),
+                FileOwner { uid: 0, gid: 0 },
+            )
+            .map(|_| ())
+            .map_err(|e| io_error(&state_path(agent), e))
+    }
+
+    fn write_record(&self, record: &AgentRecord) -> Result<(), EnrollError> {
+        let agent = AgentId::parse(&record.agent_id)?;
+        self.agents
+            .publish_owned(
+                Path::new(&record_file(agent.as_str())),
+                None,
+                record.to_yaml().as_bytes(),
+                Mode(0o640),
+                FileOwner {
+                    uid: 0,
+                    gid: self.daemon_gid,
+                },
+            )
+            .map(|_| ())
+            .map_err(|e| io_error(&record_path(&agent), e))
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+struct RootOnly;
+
+#[cfg(not(target_os = "macos"))]
+impl OwnerResolver for RootOnly {
+    fn resolve(
+        &self,
+        owner: Owner,
+    ) -> Result<(Option<nix::unistd::Uid>, Option<nix::unistd::Gid>), EnrollError> {
+        match owner {
+            Owner::RootRoot => Ok((
+                Some(nix::unistd::Uid::from_raw(0)),
+                Some(nix::unistd::Gid::from_raw(0)),
+            )),
+            other => Err(EnrollError::Owner(format!(
+                "agent enrollment does not write {other:?} files"
+            ))),
+        }
+    }
+}
+
+type OtherAgent = (String, u32);
+
+fn read_records(
+    agents: &maknae_io::Anchor,
+    agent: &AgentId,
+) -> Result<(Option<AgentRecord>, Vec<OtherAgent>), EnrollError> {
+    let entries = agents
+        .enumerate(Path::new(""), None)
+        .map_err(|e| io_error(Path::new(AGENTS_DIR), e))?
+        .value;
+    let mut prior = None;
+    let mut others = Vec::new();
+    for entry in entries {
+        let Some(name) = entry.name.to_str() else {
+            continue;
+        };
+        let Some(stem) = name.strip_suffix(".yaml") else {
+            continue;
+        };
+        let path = Path::new(AGENTS_DIR).join(name);
+        let bytes = agents
+            .read(Path::new(name), None, root_file(0o027, SMALL_FILE))
+            .map_err(|e| io_error(&path, e))?
+            .value;
+        let record = AgentRecord::parse(&utf8(&path, &bytes)?)
+            .map_err(|e| EnrollError::State(format!("{}: {e}", path.display())))?;
+        if record.agent_id != stem {
+            return Err(EnrollError::State(format!(
+                "{}: records agent {}",
+                path.display(),
+                record.agent_id
+            )));
+        }
+        if stem == agent.as_str() {
+            prior = Some(record);
+        } else {
+            others.push((record.agent_id, record.uid));
+        }
+    }
+    Ok((prior, others))
+}
+
+fn read_state(private: &maknae_io::Anchor, agent: &AgentId) -> Result<AgentState, EnrollError> {
+    let path = state_path(agent);
+    match private.read(
+        Path::new(&state_file(agent)),
+        None,
+        root_file(0o077, SMALL_FILE),
+    ) {
+        Ok(out) => AgentState::parse(&utf8(&path, &out.value)?)
+            .map_err(|e| EnrollError::State(format!("{}: {e}", path.display()))),
+        Err(e) if is_not_found(&e) => Ok(AgentState::default()),
+        Err(e) => Err(io_error(&path, e)),
+    }
+}
+
+fn owner_error(what: &str, e: impl std::fmt::Display) -> EnrollError {
+    EnrollError::Owner(format!("{what}: {e}"))
+}
+
+fn check_account(
+    args: &AgentArgs,
+    agent: &AgentId,
+    host: &HostEnrollment,
+    other_agents: &[(String, u32)],
+) -> Result<u32, EnrollError> {
+    use nix::unistd::{Group, User};
+    let acct = User::from_name(&args.account)
+        .map_err(|e| owner_error(&format!("user {}", args.account), e))?
+        .map(|u| AccountFacts {
+            name: u.name,
+            uid: u.uid.as_raw(),
+            primary_gid: u.gid.as_raw(),
+            shell: u.shell.to_string_lossy().into_owned(),
+        });
+    let maknae = Group::from_name("maknae")
+        .map_err(|e| owner_error("group maknae", e))?
+        .ok_or_else(|| EnrollError::Owner("no maknae group".to_string()))?;
+    let mut daemon_uids = Vec::new();
+    let mut daemon_groups = Vec::new();
+    for name in MAKNAE_DAEMON_ACCOUNTS {
+        if let Some(uid) =
+            maknae_vault::account_uid(name).map_err(|e| owner_error(&format!("user {name}"), e))?
+        {
+            daemon_uids.push(uid);
+        }
+        if let Some(g) =
+            Group::from_name(name).map_err(|e| owner_error(&format!("group {name}"), e))?
+        {
+            daemon_groups.push((g.gid.as_raw(), g.mem));
+        }
+    }
+    let shells_path = Path::new("/etc/shells");
+    let shells = match maknae_io::read_absolute(
+        shells_path,
+        TargetRequired {
+            owner: Some(0),
+            mode_mask: Some(0o022),
+            nlink_exactly_one: false,
+            regular_file: true,
+            max_bytes: Some(SMALL_FILE),
+        },
+        StrategyPref::Auto,
+    ) {
+        Ok(out) => Some(utf8(shells_path, &out.value)?),
+        Err(e) if is_not_found(&e) => None,
+        Err(e) => return Err(io_error(shells_path, e)),
+    };
+    maknae_vault::agent_enroll::service_account_check(
+        acct.as_ref(),
+        &args.account,
+        agent,
+        &HostAccounts {
+            login_shells: shells.as_deref(),
+            maknae_gid: maknae.gid.as_raw(),
+            maknae_members: &maknae.mem,
+            principal_uid: host.principal_uid,
+            daemon_uids: &daemon_uids,
+            daemon_groups: &daemon_groups,
+            other_agents,
+        },
+    )?;
+    acct.map(|a| a.uid)
+        .ok_or_else(|| EnrollError::Owner(format!("no such user: {}", args.account)))
+}
+
+fn read_host() -> Result<HostEnrollment, EnrollError> {
+    let path = Path::new(HOST_CONFIG);
+    let out = maknae_io::read_absolute(
+        path,
+        TargetRequired {
+            owner: Some(0),
+            mode_mask: Some(0o022),
+            nlink_exactly_one: false,
+            regular_file: true,
+            max_bytes: Some(1 << 20),
+        },
+        StrategyPref::Auto,
+    )
+    .map_err(|e| {
+        if is_not_found(&e) {
+            EnrollError::HostNotEnrolled(format!("{HOST_CONFIG} does not exist"))
+        } else {
+            io_error(path, e)
+        }
+    })?;
+    parse_host_enrollment(&utf8(path, &out.value)?)
+}
+
+fn open_dir(path: &str, mode_mask: u32) -> Result<maknae_io::Anchor, EnrollError> {
+    maknae_io::open_anchor(
+        Path::new(path),
+        AnchorRequired {
+            owner: Some(0),
+            mode_mask: Some(mode_mask),
+        },
+        StrategyPref::Auto,
+    )
+    .map_err(|e| io_error(Path::new(path), e))
+}
+
+#[cfg(target_os = "macos")]
+async fn platform_gate() -> Result<String, EnrollError> {
+    use super::keychain_write::{check_install_path, own_team, verify_release, AGENT_BINARY};
+    let me = std::env::current_exe().map_err(|e| EnrollError::Command {
+        program: "current_exe".to_string(),
+        detail: e.to_string(),
+    })?;
+    check_install_path(&me)?;
+    let team = own_team().await?;
+    check_install_path(Path::new(AGENT_BINARY))?;
+    verify_release(
+        AGENT_BINARY,
+        maknae_vault::agent_enroll::AGENT_SIGNING_IDENTIFIER,
+        &team,
+    )
+    .await?;
+    Ok(team)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_gate(verbose: bool) -> Result<(), EnrollError> {
+    if super::detect_hrot_capability(verbose) {
+        Ok(())
+    } else {
+        Err(EnrollError::HrotUnavailable {
+            detail: "agent credentials are sealed with systemd-creds --with-key=tpm2; this host has no usable TPM2".to_string(),
+        })
+    }
+}
+
+pub(crate) async fn run_enroll_agent(
+    args: &AgentArgs,
+    locale: Locale,
+) -> Result<String, EnrollError> {
+    let euid = nix::unistd::geteuid().as_raw();
+    let sudo_uid = super::env_u32("SUDO_UID");
+    let sudo_user = std::env::var("SUDO_USER").ok();
+    let operator = super::preflight_check(euid, sudo_uid, sudo_user.as_deref(), &super::RealPasswd)
+        .inspect_err(|_| eprintln!("{}", msg(locale, MsgId::EnrollPreflightFailed)))?;
+
+    let agent = AgentId::parse(&args.id)?;
+    let cidrs = BindCidrs::parse(&args.bind_cidr)?;
+    maknae_config::mount_path_is_acceptable(&args.approle_mount)
+        .map_err(|why| EnrollError::InvalidVaultMount(format!("--approle-mount {why}")))?;
+
+    let host = read_host()?;
+
+    let resolver = artifact_write::RealOwnerResolver {
+        operator_uid: operator.uid,
+        operator_gid: operator.gid,
+    };
+    artifact_write::ensure_dir(
+        &Artifact {
+            path: PathBuf::from(AGENTS_DIR),
+            owner: Owner::RootMaknaeGroup,
+            mode: 0o750,
+            content: ContentKind::Dir,
+        },
+        &resolver,
+    )?;
+    let daemon_gid = match resolver.resolve(Owner::RootMaknaeGroup)? {
+        (_, Some(gid)) => gid.as_raw(),
+        (_, None) => return Err(EnrollError::Owner("no _maknae group".to_string())),
+    };
+    let agents = open_dir(AGENTS_DIR, 0o022)?;
+    let _lock = agents.try_lock_exclusive().map_err(|e| match e {
+        IoError::Locked { .. } => {
+            EnrollError::State("another maknae enroll agent is running".to_string())
+        }
+        e => io_error(Path::new(AGENTS_DIR), e),
+    })?;
+    let private = open_dir(PRIVATE_DIR, 0o027)?;
+
+    let (prior_record, other_agents) = read_records(&agents, &agent)?;
+    let prior_state = read_state(&private, &agent)?;
+    let uid = check_account(args, &agent, &host, &other_agents)?;
+
+    #[cfg(target_os = "macos")]
+    let team = platform_gate().await?;
+    #[cfg(not(target_os = "macos"))]
+    platform_gate(args.verbose)?;
+
+    let token = super::intake_token_from(args.token_file.as_deref(), locale)?;
+    let client = maknae_vault::OperatorClient::new(&host.vault_addr, Path::new(VAULT_CA), token)?;
+    let ops = RealAgentOps {
+        client,
+        private,
+        agents,
+        daemon_gid,
+        #[cfg(not(target_os = "macos"))]
+        verbose: args.verbose,
+        #[cfg(target_os = "macos")]
+        team,
+    };
+    let plan = AgentPlan {
+        agent,
+        account: args.account.clone(),
+        uid,
+        mount: args.approle_mount.clone(),
+        cidrs,
+        rotate: args.rotate,
+    };
+
+    println!(
+        "{}",
+        msg(locale, MsgId::EnrollAgentStarted).replace("{agent}", plan.agent.as_str())
+    );
+    let outcome = enroll_agent(&ops, &plan, &host, prior_record.as_ref(), prior_state).await?;
+    let mut summary = msg(locale, MsgId::EnrollAgentEnrolled)
+        .replace("{agent}", plan.agent.as_str())
+        .replace("{role}", &outcome.record.role_name)
+        .replace("{cidrs}", &outcome.record.bind_cidrs.join(", "));
+    if outcome.retired > 0 {
+        summary.push('\n');
+        summary.push_str(
+            &msg(locale, MsgId::EnrollAgentRetired)
+                .replace("{count}", &outcome.retired.to_string()),
+        );
+    }
+    Ok(summary)
 }
 
 #[cfg(test)]
@@ -1009,6 +1554,88 @@ mod tests {
         assert!(matches!(
             parse_host_enrollment(&no_mount),
             Err(EnrollError::HostNotEnrolled(_))
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_linux_seal_names_the_agent_credential() {
+        let id = AgentId::parse("hobi").unwrap();
+        let p = cred_path(&id);
+        let (bin, argv) = crate::enroll::seal_argv(
+            maknae_vault::agent_enroll::AGENT_CREDENTIAL_NAME,
+            p.to_str().unwrap(),
+        );
+        assert_eq!(bin, "systemd-creds");
+        assert_eq!(
+            argv,
+            [
+                "encrypt",
+                "--with-key=tpm2",
+                "--name=maknae-agent-secret-id",
+                "-",
+                "/etc/maknae/private/agent-hobi-secret-id.cred"
+            ]
+        );
+    }
+
+    #[test]
+    fn agent_paths_never_name_maknaeds_artifacts() {
+        let id = AgentId::parse("hobi").unwrap();
+        for p in [state_path(&id), record_path(&id)] {
+            let s = p.to_string_lossy().into_owned();
+            assert!(
+                s.contains("hobi")
+                    && !s.ends_with("/enroll-state.yaml")
+                    && !s.ends_with("/maknae.yaml"),
+                "{s}"
+            );
+        }
+        assert_eq!(
+            state_path(&id),
+            std::path::Path::new("/etc/maknae/private/agent-hobi-enroll-state.yaml")
+        );
+        assert_eq!(
+            record_path(&id),
+            std::path::Path::new("/etc/maknae/agents/hobi.yaml")
+        );
+    }
+
+    #[test]
+    fn a_seal_error_never_carries_the_secret() {
+        let secret = Zeroizing::new(SENTINEL.to_string());
+        let leaked = [
+            EnrollError::Command {
+                program: "systemd-creds encrypt".into(),
+                detail: format!("bad input: {SENTINEL} echoed"),
+            },
+            EnrollError::Owner(format!("x{SENTINEL}x")),
+            EnrollError::State(SENTINEL.into()),
+            EnrollError::Io {
+                path: std::path::PathBuf::from("/p"),
+                source: format!("{SENTINEL} {SENTINEL}"),
+            },
+            EnrollError::HrotUnavailable {
+                detail: SENTINEL.into(),
+            },
+            EnrollError::Vault(maknae_vault::VaultError::Operator(format!("op {SENTINEL}"))),
+        ];
+        for e in leaked {
+            let scrubbed = scrub_secret(e, &secret);
+            let shown = format!("{scrubbed} {scrubbed:?}");
+            assert!(!shown.contains(SENTINEL), "{shown}");
+            assert!(shown.contains("<redacted>"), "{shown}");
+        }
+        let clean = scrub_secret(
+            EnrollError::Command {
+                program: "security".into(),
+                detail: "exit 1".into(),
+            },
+            &secret,
+        );
+        assert!(matches!(
+            clean,
+            EnrollError::Command { ref detail, .. } if detail == "exit 1"
         ));
     }
 }
