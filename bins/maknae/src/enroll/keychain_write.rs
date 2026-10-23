@@ -9,6 +9,7 @@ pub(crate) const CODESIGN: &str = "/usr/bin/codesign";
 #[cfg(target_os = "macos")]
 pub(crate) const DAEMON_BINARY: &str = "/usr/local/bin/maknaed";
 pub(crate) const EGRESS_BINARY: &str = "/usr/local/bin/maknae-egress";
+pub(crate) const AGENT_BINARY: &str = "/usr/local/bin/maknae-agentd";
 const DEVELOPER_ID_CA_OID: &str = "1.2.840.113635.100.6.2.6";
 const DEVELOPER_ID_LEAF_OID: &str = "1.2.840.113635.100.6.1.13";
 
@@ -63,12 +64,17 @@ pub(crate) fn classify_find(code: Option<i32>, stdout: &str) -> Result<bool, Str
     }
 }
 
-pub(crate) fn add_command(secret: &str, plane: KeychainPlane, binary: &str) -> Zeroizing<String> {
+pub(crate) fn add_command(
+    secret: &str,
+    service: &str,
+    account: &str,
+    binary: &str,
+) -> Zeroizing<String> {
     let parts = [
         "add-generic-password -a ",
-        KEYCHAIN_ACCOUNT,
+        account,
         " -s ",
-        plane.service(),
+        service,
         " -T ",
         binary,
         " -w ",
@@ -84,24 +90,24 @@ pub(crate) fn add_command(secret: &str, plane: KeychainPlane, binary: &str) -> Z
     cmd
 }
 
-pub(crate) fn delete_args(plane: KeychainPlane) -> [&'static str; 6] {
+pub(crate) fn delete_args<'a>(service: &'a str, account: &'a str) -> [&'a str; 6] {
     [
         "delete-generic-password",
         "-a",
-        KEYCHAIN_ACCOUNT,
+        account,
         "-s",
-        plane.service(),
+        service,
         SYSTEM_KEYCHAIN,
     ]
 }
 
-pub(crate) fn find_args(plane: KeychainPlane) -> [&'static str; 6] {
+pub(crate) fn find_args<'a>(service: &'a str, account: &'a str) -> [&'a str; 6] {
     [
         "find-generic-password",
         "-a",
-        KEYCHAIN_ACCOUNT,
+        account,
         "-s",
-        plane.service(),
+        service,
         SYSTEM_KEYCHAIN,
     ]
 }
@@ -175,15 +181,43 @@ pub(crate) async fn seal_secret_macos(
     team: &str,
 ) -> Result<(), EnrollError> {
     validate_item_content(plane, secret)?;
-    let stderr = |o: &std::process::Output| String::from_utf8_lossy(&o.stderr).trim().to_string();
-    let del = run(SECURITY, &delete_args(plane)).await?;
-    if !matches!(del.status.code(), Some(0) | Some(44)) {
-        return Err(EnrollError::Keychain {
-            op: "delete",
-            detail: stderr(&del),
-        });
-    }
+    delete_item(plane.service(), KEYCHAIN_ACCOUNT).await?;
     add_secret_macos(secret, plane, binary, team).await
+}
+
+#[cfg(target_os = "macos")]
+async fn delete_item(service: &str, account: &str) -> Result<(), EnrollError> {
+    let del = run(SECURITY, &delete_args(service, account)).await?;
+    if matches!(del.status.code(), Some(0) | Some(44)) {
+        Ok(())
+    } else {
+        Err(EnrollError::Keychain {
+            op: "delete",
+            detail: String::from_utf8_lossy(&del.stderr).trim().to_string(),
+        })
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) async fn seal_agent_secret_macos(
+    secret: &str,
+    agent: &maknae_vault::agent_enroll::AgentId,
+    team: &str,
+) -> Result<(), EnrollError> {
+    use maknae_vault::agent_enroll::AGENT_SIGNING_IDENTIFIER;
+    validate_secret_id(secret)?;
+    check_install_path(std::path::Path::new(AGENT_BINARY))?;
+    verify_release(AGENT_BINARY, AGENT_SIGNING_IDENTIFIER, team).await?;
+    delete_item(AGENT_SIGNING_IDENTIFIER, agent.as_str()).await?;
+    add_verified_item(
+        secret,
+        AGENT_SIGNING_IDENTIFIER,
+        agent.as_str(),
+        AGENT_BINARY,
+        AGENT_SIGNING_IDENTIFIER,
+        team,
+    )
+    .await
 }
 
 /// Adds the item without deleting a previous one: `add-generic-password`
@@ -195,8 +229,28 @@ pub(crate) async fn add_secret_macos(
     binary: &'static str,
     team: &str,
 ) -> Result<(), EnrollError> {
-    use tokio::io::AsyncWriteExt;
     validate_item_content(plane, secret)?;
+    add_verified_item(
+        secret,
+        plane.service(),
+        KEYCHAIN_ACCOUNT,
+        binary,
+        verification_plane(plane).service(),
+        team,
+    )
+    .await
+}
+
+#[cfg(target_os = "macos")]
+async fn add_verified_item(
+    secret: &str,
+    service: &str,
+    account: &str,
+    binary: &str,
+    identifier: &str,
+    team: &str,
+) -> Result<(), EnrollError> {
+    use tokio::io::AsyncWriteExt;
     let stderr = |o: &std::process::Output| String::from_utf8_lossy(&o.stderr).trim().to_string();
     let io = |e: std::io::Error| EnrollError::Command {
         program: SECURITY.to_string(),
@@ -204,7 +258,7 @@ pub(crate) async fn add_secret_macos(
     };
 
     check_install_path(std::path::Path::new(binary))?;
-    verify_release(binary, verification_plane(plane), team).await?;
+    verify_release(binary, identifier, team).await?;
     let mut child = tokio::process::Command::new(SECURITY)
         .arg("-i")
         .kill_on_drop(true)
@@ -214,7 +268,7 @@ pub(crate) async fn add_secret_macos(
         .spawn()
         .map_err(io)?;
     {
-        let cmd = add_command(secret, plane, binary);
+        let cmd = add_command(secret, service, account, binary);
         let mut stdin = child
             .stdin
             .take()
@@ -229,7 +283,7 @@ pub(crate) async fn add_secret_macos(
         });
     }
 
-    let find = run(SECURITY, &find_args(plane)).await?;
+    let find = run(SECURITY, &find_args(service, account)).await?;
     if !find.status.success() {
         return Err(EnrollError::Keychain {
             op: "verify",
@@ -239,17 +293,7 @@ pub(crate) async fn add_secret_macos(
     match parse_keychain_line(&String::from_utf8_lossy(&find.stdout)) {
         Some(k) if k == SYSTEM_KEYCHAIN => Ok(()),
         other => {
-            let _ = run(
-                SECURITY,
-                &[
-                    "delete-generic-password",
-                    "-a",
-                    KEYCHAIN_ACCOUNT,
-                    "-s",
-                    plane.service(),
-                ],
-            )
-            .await;
+            let _ = run(SECURITY, &delete_args(service, account)).await;
             Err(EnrollError::Keychain {
                 op: "verify",
                 detail: format!("the item landed in {other:?}, not {SYSTEM_KEYCHAIN}"),
@@ -260,14 +304,14 @@ pub(crate) async fn add_secret_macos(
 
 #[cfg(target_os = "macos")]
 pub(crate) async fn item_in_system_keychain(plane: KeychainPlane) -> Result<bool, EnrollError> {
-    let find = run(SECURITY, &find_args(plane)).await?;
+    let find = run(SECURITY, &find_args(plane.service(), KEYCHAIN_ACCOUNT)).await?;
     Ok(find.status.success()
         && parse_keychain_line(&String::from_utf8_lossy(&find.stdout)) == Some(SYSTEM_KEYCHAIN))
 }
 
 #[cfg(target_os = "macos")]
 pub(crate) async fn item_presence(plane: KeychainPlane) -> Result<bool, EnrollError> {
-    let find = run(SECURITY, &find_args(plane)).await?;
+    let find = run(SECURITY, &find_args(plane.service(), KEYCHAIN_ACCOUNT)).await?;
     classify_find(find.status.code(), &String::from_utf8_lossy(&find.stdout))
         .map_err(|detail| EnrollError::Keychain { op: "find", detail })
 }
@@ -343,19 +387,19 @@ pub(crate) async fn own_team() -> Result<String, EnrollError> {
 
 #[cfg(target_os = "macos")]
 pub(crate) async fn verify_release(
-    binary: &'static str,
-    plane: KeychainPlane,
+    binary: &str,
+    identifier: &str,
     team: &str,
 ) -> Result<(), EnrollError> {
     let refuse = |reason: String| EnrollError::NotDeveloperIdSigned {
         binary: binary.to_string(),
         reason,
     };
-    if let Some(why) = codesign_verify(binary, &requirement(plane.service(), team)).await? {
+    if let Some(why) = codesign_verify(binary, &requirement(identifier, team)).await? {
         return Err(refuse(why));
     }
     let d = display(binary).await.map_err(refuse)?;
-    if !embedded_requirement_is_strong(&d.requirement, plane.service(), team) {
+    if !embedded_requirement_is_strong(&d.requirement, identifier, team) {
         return Err(refuse("its embedded designated requirement does not pin the Developer ID chain and team; the keychain ACL records that requirement".to_string()));
     }
     check_runtime_and_entitlements(&d.details, &d.entitlements).map_err(refuse)
@@ -463,7 +507,12 @@ mod tests {
     #[test]
     fn the_add_command_is_exact_and_sized_once() {
         let s = Zeroizing::new("30818e020100".to_string());
-        let c = add_command(&s, KeychainPlane::Egress, EGRESS_BINARY);
+        let c = add_command(
+            &s,
+            KeychainPlane::Egress.service(),
+            KEYCHAIN_ACCOUNT,
+            EGRESS_BINARY,
+        );
         assert_eq!(
             c.as_str(),
             "add-generic-password -a secret-id -s io.maknae.maknae-egress -T /usr/local/bin/maknae-egress -w 30818e020100 /Library/Keychains/System.keychain\n"
@@ -474,7 +523,7 @@ mod tests {
     #[test]
     fn delete_and_find_carry_no_secret() {
         assert_eq!(
-            delete_args(KeychainPlane::Daemon),
+            delete_args(KeychainPlane::Daemon.service(), KEYCHAIN_ACCOUNT),
             [
                 "delete-generic-password",
                 "-a",
@@ -484,10 +533,13 @@ mod tests {
                 "/Library/Keychains/System.keychain"
             ]
         );
-        assert_eq!(find_args(KeychainPlane::Daemon)[0], "find-generic-password");
         assert_eq!(
-            &find_args(KeychainPlane::Daemon)[1..],
-            &delete_args(KeychainPlane::Daemon)[1..]
+            find_args(KeychainPlane::Daemon.service(), KEYCHAIN_ACCOUNT)[0],
+            "find-generic-password"
+        );
+        assert_eq!(
+            &find_args(KeychainPlane::Daemon.service(), KEYCHAIN_ACCOUNT)[1..],
+            &delete_args(KeychainPlane::Daemon.service(), KEYCHAIN_ACCOUNT)[1..]
         );
     }
 
@@ -659,11 +711,16 @@ mod tests {
         );
         let hex = "ab".repeat(32);
         assert_eq!(
-            add_command(&hex, KeychainPlane::Graph, "/usr/local/bin/maknaed").as_str(),
+            add_command(
+                &hex,
+                KeychainPlane::Graph.service(),
+                KEYCHAIN_ACCOUNT,
+                "/usr/local/bin/maknaed"
+            ).as_str(),
             format!("add-generic-password -a secret-id -s io.maknae.maknaed.graph -T /usr/local/bin/maknaed -w {hex} /Library/Keychains/System.keychain\n")
         );
         assert_eq!(
-            find_args(KeychainPlane::Graph),
+            find_args(KeychainPlane::Graph.service(), KEYCHAIN_ACCOUNT),
             [
                 "find-generic-password",
                 "-a",
@@ -711,6 +768,68 @@ mod tests {
         for code in [Some(1), Some(45), Some(51), None] {
             assert!(classify_find(code, system).is_err(), "{code:?}");
         }
+    }
+
+    #[test]
+    fn existing_planes_build_the_same_argv_as_before() {
+        use maknae_vault::{KeychainPlane, KEYCHAIN_ACCOUNT, SYSTEM_KEYCHAIN};
+        for p in [
+            KeychainPlane::Daemon,
+            KeychainPlane::Egress,
+            KeychainPlane::Graph,
+        ] {
+            assert_eq!(
+                find_args(p.service(), KEYCHAIN_ACCOUNT),
+                [
+                    "find-generic-password",
+                    "-a",
+                    KEYCHAIN_ACCOUNT,
+                    "-s",
+                    p.service(),
+                    SYSTEM_KEYCHAIN
+                ]
+            );
+            assert_eq!(
+                delete_args(p.service(), KEYCHAIN_ACCOUNT),
+                [
+                    "delete-generic-password",
+                    "-a",
+                    KEYCHAIN_ACCOUNT,
+                    "-s",
+                    p.service(),
+                    SYSTEM_KEYCHAIN
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn the_agent_item_is_keyed_by_id_and_trusts_only_the_agent_binary() {
+        let id = maknae_vault::agent_enroll::AgentId::parse("hobi").unwrap();
+        let s = "0123abcd-0123-abcd-0123-0123456789ab";
+        let cmd = add_command(
+            s,
+            maknae_vault::agent_enroll::AGENT_SIGNING_IDENTIFIER,
+            id.as_str(),
+            AGENT_BINARY,
+        );
+        assert_eq!(*cmd, format!("add-generic-password -a hobi -s io.maknae.maknae-agentd -T /usr/local/bin/maknae-agentd -w {s} {}\n", maknae_vault::SYSTEM_KEYCHAIN));
+    }
+
+    #[test]
+    fn the_agent_requirement_pins_the_agent_identifier() {
+        let r = requirement(
+            maknae_vault::agent_enroll::AGENT_SIGNING_IDENTIFIER,
+            "ABCDE12345",
+        );
+        assert!(
+            r.starts_with("=identifier \"io.maknae.maknae-agentd\" and anchor apple generic"),
+            "{r}"
+        );
+        assert!(
+            r.ends_with("certificate leaf[subject.OU] = \"ABCDE12345\""),
+            "{r}"
+        );
     }
 }
 

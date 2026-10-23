@@ -91,6 +91,11 @@ pub(crate) fn text(id: MsgId) -> &'static str {
         MsgId::EnrollBindingsLookupFailed => {
             "바인딩에 있는 계정 {name}을(를) 조회할 수 없어요: {error}. 아무것도 기록하지 않았어요"
         }
+        MsgId::EnrollAgentStarted => "에이전트 데몬 {agent}을(를) 등록하고 있어요",
+        MsgId::EnrollAgentEnrolled => {
+            "에이전트 데몬 {agent} 등록이 완료됐어요. {role}의 SecretID를 이 호스트에 봉인했고, {cidrs}에서만 사용할 수 있어요"
+        }
+        MsgId::EnrollAgentRetired => "이 에이전트의 이전 SecretID {count}개를 폐기했어요",
         MsgId::HelperContextMismatch => "운영자 컨텍스트 헬퍼가 예상된 신원으로 전환되지 않았어요",
         MsgId::HelperStillPrivileged => {
             "운영자 컨텍스트 헬퍼가 여전히 root의 그룹 소속을 갖고 있어요 — 거부해요"

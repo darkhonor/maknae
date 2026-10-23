@@ -101,6 +101,12 @@ pub enum MsgId {
     EnrollBindingsContained,
     /// An account named in the bindings could not be looked up. Carries `{name}` and `{error}`.
     EnrollBindingsLookupFailed,
+    /// `maknae enroll agent` started. Carries `{agent}`.
+    EnrollAgentStarted,
+    /// An Agent Daemon's SecretID is sealed. Carries `{agent}`, `{role}` and `{cidrs}`.
+    EnrollAgentEnrolled,
+    /// Earlier SecretIDs of the agent were destroyed. Carries `{count}`.
+    EnrollAgentRetired,
     /// The operator-context helper's self-verification (euid/egid) failed.
     HelperContextMismatch,
     /// The operator-context helper still carries root's supplementary groups —
@@ -152,6 +158,9 @@ pub const ALL: &[MsgId] = &[
     MsgId::EnrollBindingsReloadHintMacos,
     MsgId::EnrollBindingsContained,
     MsgId::EnrollBindingsLookupFailed,
+    MsgId::EnrollAgentStarted,
+    MsgId::EnrollAgentEnrolled,
+    MsgId::EnrollAgentRetired,
     MsgId::HelperContextMismatch,
     MsgId::HelperStillPrivileged,
 ];
@@ -333,11 +342,14 @@ mod tests {
                 | MsgId::EnrollBindingsReloadHintMacos
                 | MsgId::EnrollBindingsContained
                 | MsgId::EnrollBindingsLookupFailed
+                | MsgId::EnrollAgentStarted
+                | MsgId::EnrollAgentEnrolled
+                | MsgId::EnrollAgentRetired
                 | MsgId::HelperContextMismatch
                 | MsgId::HelperStillPrivileged => {}
             }
         }
-        const VARIANT_COUNT: usize = 43;
+        const VARIANT_COUNT: usize = 46;
         assert_eq!(ALL.len(), VARIANT_COUNT);
         for &id in ALL {
             assert_covered(id);

@@ -17,6 +17,7 @@
 //! Root performs every privileged mutation FIRST; its last act is spawning the
 //! final operator-context child and reporting — monotonic descent by flow order.
 
+mod agent;
 pub mod artifact_table;
 pub mod artifact_write;
 mod helper;
@@ -157,6 +158,25 @@ pub enum EnrollError {
     },
     /// `bindings.yaml` could not be read, planned or written.
     Bindings(String),
+    Agent(maknae_vault::agent_enroll::AgentEnrollError),
+    AgentMountIsDaemons(String),
+    AgentAlreadyEnrolled(String),
+    AgentRekeyRefused {
+        agent: String,
+        field: &'static str,
+        recorded: String,
+        given: String,
+    },
+    AgentRetireFailed {
+        agent: String,
+        accessors: Vec<String>,
+    },
+    AgentOrphanedAccessor {
+        accessor: String,
+        cause: String,
+        recorded: bool,
+    },
+    HostNotEnrolled(String),
 }
 
 impl std::fmt::Display for EnrollError {
@@ -257,6 +277,50 @@ impl std::fmt::Display for EnrollError {
                  error and re-run enroll"
             ),
             EnrollError::Bindings(m) => f.write_str(m),
+            EnrollError::Agent(e) => write!(f, "{e}"),
+            EnrollError::AgentMountIsDaemons(mount) => write!(
+                f,
+                "{mount} is the Maknae daemons' own AppRole mount; enroll Agent Daemons on their own mount (the default is {})",
+                maknae_vault::agent_enroll::DEFAULT_AGENT_APPROLE_MOUNT
+            ),
+            EnrollError::AgentAlreadyEnrolled(agent) => write!(
+                f,
+                "agent {agent} is already enrolled; pass --rotate to replace its SecretID"
+            ),
+            EnrollError::AgentRekeyRefused {
+                agent,
+                field,
+                recorded,
+                given,
+            } => write!(
+                f,
+                "agent {agent} is enrolled with {field} {recorded}, not {given}; --rotate keeps the {field}, so de-enroll the agent before changing it"
+            ),
+            EnrollError::AgentRetireFailed { agent, accessors } => write!(
+                f,
+                "agent {agent} has its new SecretID, but these earlier SecretID accessors could not be destroyed: {}; they stay recorded, and the next --rotate retries them",
+                accessors.join(", ")
+            ),
+            EnrollError::AgentOrphanedAccessor {
+                accessor,
+                cause,
+                recorded: false,
+            } => write!(
+                f,
+                "{cause}; the SecretID just minted (accessor {accessor}) could not be destroyed and is not recorded; the next `maknae enroll agent --rotate` finds it in Vault's accessor list and retires it"
+            ),
+            EnrollError::AgentOrphanedAccessor {
+                accessor,
+                cause,
+                recorded: true,
+            } => write!(
+                f,
+                "{cause}; the SecretID just minted (accessor {accessor}) could not be destroyed; it stays recorded under pending in the agent's state file, and the next `maknae enroll agent --rotate` retires it"
+            ),
+            EnrollError::HostNotEnrolled(detail) => write!(
+                f,
+                "this host is not enrolled ({detail}); run `sudo maknae enroll` first"
+            ),
         }
     }
 }
@@ -266,6 +330,12 @@ impl std::error::Error for EnrollError {}
 impl From<maknae_vault::VaultError> for EnrollError {
     fn from(e: maknae_vault::VaultError) -> Self {
         EnrollError::Vault(e)
+    }
+}
+
+impl From<maknae_vault::agent_enroll::AgentEnrollError> for EnrollError {
+    fn from(e: maknae_vault::agent_enroll::AgentEnrollError) -> Self {
+        EnrollError::Agent(e)
     }
 }
 
@@ -358,6 +428,7 @@ pub fn preflight_check(
 /// `maknae enroll` — one-time elevated provisioning (spec §4.1).
 #[derive(Args, Debug, Clone)]
 #[command(group(ArgGroup::new("ca_source").required(true).multiple(false).args(["vault_ca", "ca_dir"])))]
+#[command(subcommand_negates_reqs = true, args_conflicts_with_subcommands = true)]
 pub struct EnrollArgs {
     /// The Vault TLS trust anchor (a single PEM file). Mutually exclusive
     /// with `--ca-dir`; exactly one is required — the trust anchor cannot be
@@ -369,11 +440,11 @@ pub struct EnrollArgs {
     #[arg(long)]
     pub ca_dir: Option<PathBuf>,
     /// The Vault server address, e.g. `https://vault.example:8200`.
-    #[arg(long)]
-    pub vault_addr: String,
+    #[arg(long, required = true)]
+    pub vault_addr: Option<String>,
     /// This deployment's identifier (charset-guarded by `maknae-vault`).
-    #[arg(long)]
-    pub deployment_id: String,
+    #[arg(long, required = true)]
+    pub deployment_id: Option<String>,
     /// The AppRole auth mount `maknaed` logs in through (persisted into the daemon config).
     #[arg(long, default_value_t = maknae_vault::DEFAULT_APPROLE_MOUNT.to_string())]
     pub approle_mount: String,
@@ -412,6 +483,25 @@ pub struct EnrollArgs {
     /// of the default plain-language transcript (spec §4.2).
     #[arg(long)]
     pub verbose: bool,
+    #[command(subcommand)]
+    pub sub: Option<EnrollSub>,
+}
+
+impl EnrollArgs {
+    fn host_required(&self) -> Result<(&str, &str), EnrollError> {
+        match (&self.vault_addr, &self.deployment_id) {
+            (Some(addr), Some(id)) => Ok((addr, id)),
+            _ => Err(EnrollError::State(
+                "host enrollment needs --vault-addr and --deployment-id".to_string(),
+            )),
+        }
+    }
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum EnrollSub {
+    /// Enroll an Agent Daemon: seal its own AppRole SecretID, bound to the given addresses.
+    Agent(agent::AgentArgs),
 }
 
 /// Identity/verbosity args shared by every `enroll-helper` verb.
@@ -1003,9 +1093,16 @@ async fn run_helper(
 // ============================================================================
 
 fn intake_token(args: &EnrollArgs, locale: Locale) -> Result<Zeroizing<String>, EnrollError> {
-    if let Some(path) = &args.token_file {
+    intake_token_from(args.token_file.as_deref(), locale)
+}
+
+fn intake_token_from(
+    token_file: Option<&Path>,
+    locale: Locale,
+) -> Result<Zeroizing<String>, EnrollError> {
+    if let Some(path) = token_file {
         let raw = std::fs::read_to_string(path).map_err(|e| EnrollError::Io {
-            path: path.clone(),
+            path: path.to_path_buf(),
             source: e.to_string(),
         })?;
         let trimmed = raw.trim();
@@ -1723,8 +1820,15 @@ pub async fn run_enroll(args: EnrollArgs) -> ExitCode {
     // FIPS install FIRST, before any OperatorClient build (round-1 Q3).
     maknae_vault::install_default_crypto_provider();
     let locale = detect_locale();
+    if let Some(EnrollSub::Agent(a)) = &args.sub {
+        return report(agent::run_enroll_agent(a, locale).await, locale);
+    }
     println!("{}", msg(locale, MsgId::EnrollStarted));
-    match enroll_inner(&args, locale).await {
+    report(enroll_inner(&args, locale).await, locale)
+}
+
+fn report(result: Result<String, EnrollError>, locale: Locale) -> ExitCode {
+    match result {
         Ok(summary) => {
             println!("{summary}");
             ExitCode::SUCCESS
@@ -2161,7 +2265,8 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
         .unwrap_or_else(|| operator.home.join(".maknae"));
     let macos = cfg!(target_os = "macos");
 
-    check_vault_reachable(&args.vault_addr)?;
+    let (vault_addr, _) = args.host_required()?;
+    check_vault_reachable(vault_addr)?;
     let seal_home = seal_pub_home(macos, read_os_release)
         .inspect_err(|_| eprintln!("{}", msg(locale, MsgId::EnrollPreflightFailed)))?;
 
@@ -2193,7 +2298,7 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
                     ),
                 ] {
                     keychain_write::check_install_path(Path::new(bin))?;
-                    keychain_write::verify_release(bin, plane, &team).await?;
+                    keychain_write::verify_release(bin, plane.service(), &team).await?;
                 }
                 Ok::<String, EnrollError>(team)
             }
@@ -2232,7 +2337,7 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
         path: vault_ca_path.clone(),
         source: e.to_string(),
     })?;
-    let client = maknae_vault::OperatorClient::new(&args.vault_addr, &vault_ca_path, token)?;
+    let client = maknae_vault::OperatorClient::new(vault_addr, &vault_ca_path, token)?;
     println!("{}", msg(locale, MsgId::EnrollVaultOpsStarted));
 
     // Unconditional rotate: a pre-existing enroll-state.yaml is destroyed
@@ -2340,6 +2445,7 @@ async fn finish_enrollment(
     bindings_owners: &crate::policy_sync::Owners,
 ) -> Result<String, EnrollError> {
     // ---- Step 4: write the daemon's config artifacts -----------------------
+    let (vault_addr, deployment_id) = args.host_required()?;
     println!("{}", msg(locale, MsgId::EnrollWritingDaemonConfig));
 
     let table = artifact_table::artifact_table(cli_dir, macos, args.insecure_plaintext_secret);
@@ -2352,8 +2458,8 @@ async fn finish_enrollment(
     let socket_path = macos.then_some(maknae_config::MACOS_DAEMON_SOCKET_PATH);
 
     let daemon_yaml = build_daemon_yaml(
-        &args.deployment_id,
-        &args.vault_addr,
+        deployment_id,
+        vault_addr,
         &args.approle_mount,
         &args.pki_int_mount,
         &args.userpass_mount,
@@ -2391,7 +2497,7 @@ async fn finish_enrollment(
     );
     contents.insert(
         etc.join(maknae_config::EGRESS_BOUNDS_FILE),
-        build_egress_bounds_yaml(&args.vault_addr, &args.kv_mount, &args.user_prefix).into_bytes(),
+        build_egress_bounds_yaml(vault_addr, &args.kv_mount, &args.user_prefix).into_bytes(),
     );
     contents.insert(
         etc.join("tls/maknae-root-ca.crt"),
@@ -2499,8 +2605,8 @@ async fn finish_enrollment(
         cli_dir: cli_dir.to_path_buf(),
         macos,
         insecure_plaintext: args.insecure_plaintext_secret,
-        deployment_id: args.deployment_id.clone(),
-        vault_addr: args.vault_addr.clone(),
+        deployment_id: deployment_id.to_string(),
+        vault_addr: vault_addr.to_string(),
         pki_int_mount: args.pki_int_mount.clone(),
         userpass_mount: args.userpass_mount.clone(),
         kv_mount: args.kv_mount.clone(),
@@ -3087,8 +3193,8 @@ mod tests {
         EnrollArgs {
             vault_ca: Some(PathBuf::from("/tmp/ca.crt")),
             ca_dir: None,
-            vault_addr: "https://v.example:8200".to_string(),
-            deployment_id: "dev-01".to_string(),
+            vault_addr: Some("https://v.example:8200".to_string()),
+            deployment_id: Some("dev-01".to_string()),
             approle_mount: maknae_vault::DEFAULT_APPROLE_MOUNT.to_string(),
             pki_int_mount: maknae_vault::DEFAULT_PKI_INT_MOUNT.to_string(),
             userpass_mount: "maknae-userpass".to_string(),
@@ -3100,7 +3206,19 @@ mod tests {
             rotate_seal_key: false,
             insecure_plaintext_secret: false,
             verbose: false,
+            sub: None,
         }
+    }
+
+    #[test]
+    fn host_required_returns_the_vault_address_and_deployment() {
+        assert_eq!(
+            default_args().host_required().unwrap(),
+            ("https://v.example:8200", "dev-01")
+        );
+        let mut a = default_args();
+        a.deployment_id = None;
+        assert!(matches!(a.host_required(), Err(EnrollError::State(_))));
     }
 
     // ---- YAML content builders ---------------------------------------------

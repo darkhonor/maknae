@@ -8,6 +8,7 @@
 
 #[cfg(unix)]
 mod accounts;
+pub mod agent_enroll;
 mod api_request;
 mod api_shape;
 mod auth;

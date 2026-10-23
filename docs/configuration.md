@@ -818,6 +818,47 @@ audit:
 
 **Moving the trail.** A start that finds a different `jsonl_path` in the file moves the trail to it, as does the restart after an accepted change to it. The new path must name a file in the same directory as the current trail, and that file must already exist, prepared by root: a regular file with one link, owned by the daemon account, not group-writable and with no world access, carrying the append-only flag only root can clear (`chattr +a` on Linux, `chflags sappnd` on macOS; `uappnd` is refused). `maknaed` never creates it. The move records the new path as the last record of the old trail (`audit trail moves to <path> at start`), opens the new trail with a back-link (`audit trail continues from <old path>; last checkpoint revision <n>`), checks the kernel graph store against the newer checkpoint of the two trails, and records `audit trail moved from <old> to <new>` with the start's store transition. A target that is not a sibling (`the audit trail may move only within <directory>`) or is not prepared (`<path> is not append-only; prepare it with chattr +a (Linux) or chflags sappnd (macOS) as root`) leaves the current trail in use and makes the files an invalid change. The runbook's "Move the audit trail" prepares the file. Once an accepted baseline exists, `maknaed` never creates any trail: a missing one refuses to start, naming that runbook section.
 
+### 6.4 Enrolling an Agent Daemon
+
+`sudo maknae enroll agent` places an Agent Daemon's standing AppRole SecretID in OS custody, bound to the host's address (ADR-0006 decision 9).
+
+**Prerequisites.**
+
+- The host is enrolled (`sudo maknae enroll`).
+- The agent's id is in Terraform's `maknae_agents` (`deploy/vault-pki`), which creates its AppRole role.
+- An operator Vault token carrying the `maknae-enroll-agent` policy, supplied by `--token-file` or a no-echo prompt.
+- A dedicated service account for the agent: it is not root, it is not the enrolling principal's account, its shell is one of the non-login shells `/usr/sbin/nologin`, `/sbin/nologin`, `/usr/bin/nologin`, `/bin/false` or `/usr/bin/false`, it is outside the `maknae` group, it is not a Maknae daemon account and is not a member (primary or supplementary) of the `_maknae` or `_maknae-egress` group, and no other agent is enrolled to it. Enrollment refuses any other account.
+- The agent id is enrolled on this host only. Each agent id is enrolled on exactly one host: enrolling or rotating the same id on another host destroys this host's SecretID, because every enrollment retires every other SecretID on `agent-<id>`.
+- Linux: a usable TPM2. There is no plaintext fallback.
+- macOS: `/usr/local/bin/maknae-agentd` installed and Developer ID-signed, and the running `maknae` binary itself root-installed and Developer ID-signed. Enrollment refuses until both are.
+
+```bash
+sudo maknae enroll agent <id> --account <service-account> --bind-cidr <cidr> [--bind-cidr <cidr>…] \
+  [--approle-mount <mount>] [--token-file <file>] [--verbose]
+```
+
+`--bind-cidr` is required, once per address range. The SecretID is minted with `cidr_list` and `token_bound_cidrs` set to those ranges, so Vault refuses it, and any token it yields, from a source address outside them. Vault sees the address after any NAT, so behind NAT bind the translated address. A prefix is plain decimal digits with no leading zero, an IPv4-mapped IPv6 range (`::ffff:a.b.c.d/n`) is taken as its IPv4 range, and enrollment refuses `0.0.0.0/0`, `::/0`, or any set of ranges that together covers every IPv4 or every IPv6 address. `--approle-mount` defaults to `maknae-agent-approle`; it may use only `A-Z`, `a-z`, `0-9`, `.`, `_`, `/` and `-`, and must differ from `maknaed`'s AppRole mount, which must use the same characters so the two can be compared.
+
+**Files written.**
+
+| Path | Contents |
+|---|---|
+| `/etc/maknae/private/agent-<id>-secret-id.cred` (Linux) | the SecretID, a TPM2-bound `systemd-creds` credential named `maknae-agent-secret-id` |
+| System keychain (macOS) | an item with service `io.maknae.maknae-agentd` and account `<id>`, trusted only to `/usr/local/bin/maknae-agentd` |
+| `/etc/maknae/private/agent-<id>-enroll-state.yaml` | the mount, the role, and the `live`, `pending` and `retiring` SecretID accessors |
+| `/etc/maknae/agents/<id>.yaml` | the agent's id, account, uid, mount, role, RoleID, bound CIDRs and custody source |
+
+**Rotating.** `sudo maknae enroll agent <id> --account <service-account> --bind-cidr <cidr>… --rotate` takes the same `--account` and mount as the enrollment, and `--bind-cidr` again. It mints and seals the new SecretID before destroying the old one, and an accessor stays recorded in the state file until its destroy succeeds. Every enrollment, first or rotating, also lists the role's SecretID accessors in Vault after sealing and retires each one except the new SecretID's, so a SecretID that an interrupted earlier run minted but never recorded is destroyed too. That includes a SecretID another host holds for the same id, which is why an agent id is enrolled on one host only. A different account or mount means de-enrolling first.
+
+**De-enrolling.** Until de-enrollment ships (#472), do it by hand. List the role's SecretID accessors with an operator token that carries the policy, and destroy each one:
+
+```bash
+vault list auth/<mount>/role/agent-<id>/secret-id
+vault write auth/<mount>/role/agent-<id>/secret-id-accessor/destroy secret_id_accessor=<a>
+```
+
+Then remove that state file, `/etc/maknae/agents/<id>.yaml` and the sealed credential: on Linux the `.cred` file, on macOS `security delete-generic-password -s io.maknae.maknae-agentd -a <id> /Library/Keychains/System.keychain`.
+
 ---
 
 ## 7. Accepted YAML

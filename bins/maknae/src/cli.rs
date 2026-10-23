@@ -1873,8 +1873,8 @@ mod tests {
             Command::Enroll(args) => {
                 assert_eq!(args.vault_ca, Some(std::path::PathBuf::from("/tmp/ca.crt")));
                 assert_eq!(args.ca_dir, None);
-                assert_eq!(args.vault_addr, "https://v.example:8200");
-                assert_eq!(args.deployment_id, "dev-01");
+                assert_eq!(args.vault_addr.as_deref(), Some("https://v.example:8200"));
+                assert_eq!(args.deployment_id.as_deref(), Some("dev-01"));
                 assert_eq!(args.approle_mount, maknae_vault::DEFAULT_APPROLE_MOUNT);
                 assert_eq!(args.pki_int_mount, maknae_vault::DEFAULT_PKI_INT_MOUNT);
                 assert_eq!(args.userpass_mount, "maknae-userpass");
@@ -1887,6 +1887,133 @@ mod tests {
             }
             other => panic!("expected Command::Enroll, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn enroll_agent_parses_and_plain_enroll_is_unchanged() {
+        use crate::enroll::EnrollSub;
+        let parse = |v: &[&str]| Cli::try_parse_from(v.iter().copied());
+        let c = parse(&[
+            "maknae",
+            "enroll",
+            "agent",
+            "hobi",
+            "--account",
+            "hobi-svc",
+            "--bind-cidr",
+            "10.0.0.5",
+            "--bind-cidr",
+            "10.0.0.6",
+        ])
+        .unwrap();
+        match c.command {
+            Command::Enroll(args) => match &args.sub {
+                Some(EnrollSub::Agent(a)) => {
+                    assert_eq!(a.id, "hobi");
+                    assert_eq!(a.account, "hobi-svc");
+                    assert_eq!(a.bind_cidr, ["10.0.0.5", "10.0.0.6"]);
+                    assert_eq!(a.approle_mount, "maknae-agent-approle");
+                    assert!(!a.rotate);
+                    assert_eq!(a.token_file, None);
+                }
+                None => panic!("expected the agent subcommand"),
+            },
+            other => panic!("expected Command::Enroll, got {other:?}"),
+        }
+        assert!(parse(&["maknae", "enroll", "agent", "hobi", "--account", "x"]).is_err());
+        assert!(parse(&[
+            "maknae",
+            "enroll",
+            "agent",
+            "--account",
+            "x",
+            "--bind-cidr",
+            "10.0.0.5"
+        ])
+        .is_err());
+        assert!(parse(&[
+            "maknae",
+            "enroll",
+            "agent",
+            "hobi",
+            "--account",
+            "x",
+            "--bind-cidr",
+            "10.0.0.5",
+            "--insecure-plaintext-secret"
+        ])
+        .is_err());
+        assert!(parse(&[
+            "maknae",
+            "enroll",
+            "--approle-mount",
+            "other",
+            "agent",
+            "hobi",
+            "--account",
+            "x",
+            "--bind-cidr",
+            "10.0.0.5"
+        ])
+        .is_err());
+        assert!(parse(&[
+            "maknae",
+            "enroll",
+            "--rotate",
+            "agent",
+            "hobi",
+            "--account",
+            "x",
+            "--bind-cidr",
+            "10.0.0.5"
+        ])
+        .is_err());
+        let h = parse(&[
+            "maknae",
+            "enroll",
+            "--vault-ca",
+            "/x",
+            "--vault-addr",
+            "https://v:8200",
+            "--deployment-id",
+            "d",
+        ])
+        .unwrap();
+        match h.command {
+            Command::Enroll(args) => {
+                assert!(args.sub.is_none());
+                assert_eq!(args.vault_addr.as_deref(), Some("https://v:8200"));
+                assert_eq!(args.deployment_id.as_deref(), Some("d"));
+            }
+            other => panic!("expected Command::Enroll, got {other:?}"),
+        }
+        assert!(parse(&[
+            "maknae",
+            "enroll",
+            "--vault-addr",
+            "https://v:8200",
+            "--deployment-id",
+            "d"
+        ])
+        .is_err());
+        assert!(parse(&[
+            "maknae",
+            "enroll",
+            "--vault-ca",
+            "/x",
+            "--deployment-id",
+            "d"
+        ])
+        .is_err());
+        assert!(parse(&[
+            "maknae",
+            "enroll",
+            "--vault-ca",
+            "/x",
+            "--vault-addr",
+            "https://v:8200"
+        ])
+        .is_err());
     }
 
     #[test]

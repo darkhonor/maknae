@@ -88,6 +88,11 @@ pub(crate) fn text(id: MsgId) -> &'static str {
         MsgId::EnrollBindingsLookupFailed => {
             "cannot look up the account {name} named in the bindings: {error}; nothing was written"
         }
+        MsgId::EnrollAgentStarted => "Enrolling the Agent Daemon {agent}",
+        MsgId::EnrollAgentEnrolled => {
+            "Agent Daemon {agent} is enrolled: the SecretID for {role} is sealed on this host and works only from {cidrs}"
+        }
+        MsgId::EnrollAgentRetired => "Destroyed {count} earlier SecretID(s) of this agent",
         MsgId::HelperContextMismatch => {
             "Operator-context helper did not land in the expected identity"
         }
