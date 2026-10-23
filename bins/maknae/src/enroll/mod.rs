@@ -174,6 +174,7 @@ pub enum EnrollError {
     AgentOrphanedAccessor {
         accessor: String,
         cause: String,
+        recorded: bool,
     },
     HostNotEnrolled(String),
 }
@@ -300,9 +301,21 @@ impl std::fmt::Display for EnrollError {
                 "agent {agent} has its new SecretID, but these earlier SecretID accessors could not be destroyed: {}; they stay recorded, and the next --rotate retries them",
                 accessors.join(", ")
             ),
-            EnrollError::AgentOrphanedAccessor { accessor, cause } => write!(
+            EnrollError::AgentOrphanedAccessor {
+                accessor,
+                cause,
+                recorded: false,
+            } => write!(
                 f,
                 "{cause}; the SecretID just minted (accessor {accessor}) could not be destroyed and is not recorded, so destroy it in Vault before retrying"
+            ),
+            EnrollError::AgentOrphanedAccessor {
+                accessor,
+                cause,
+                recorded: true,
+            } => write!(
+                f,
+                "{cause}; the SecretID just minted (accessor {accessor}) could not be destroyed; it stays recorded under pending in the agent's state file, and the next `maknae enroll agent --rotate` retires it"
             ),
             EnrollError::HostNotEnrolled(detail) => write!(
                 f,

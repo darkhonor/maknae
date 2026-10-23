@@ -827,9 +827,9 @@ audit:
 - The host is enrolled (`sudo maknae enroll`).
 - The agent's id is in Terraform's `maknae_agents` (`deploy/vault-pki`), which creates its AppRole role.
 - An operator Vault token carrying the `maknae-enroll-agent` policy, supplied by `--token-file` or a no-echo prompt.
-- A dedicated service account for the agent: its shell is not in `/etc/shells`, it is outside the `maknae` group, it is not a Maknae daemon account, and no other agent is enrolled to it. Enrollment refuses any other account.
+- A dedicated service account for the agent: it is not root, it is not the enrolling principal's account, its shell is not in `/etc/shells`, it is outside the `maknae` group, it is not a Maknae daemon account and is not a member (primary or supplementary) of the `_maknae` or `_maknae-egress` group, and no other agent is enrolled to it. Enrollment refuses any other account.
 - Linux: a usable TPM2. There is no plaintext fallback.
-- macOS: `/usr/local/bin/maknae-agentd` installed and Developer ID-signed. Enrollment refuses until it is.
+- macOS: `/usr/local/bin/maknae-agentd` installed and Developer ID-signed, and the running `maknae` binary itself root-installed and Developer ID-signed. Enrollment refuses until both are.
 
 ```bash
 sudo maknae enroll agent <id> --account <service-account> --bind-cidr <cidr> [--bind-cidr <cidr>…] \

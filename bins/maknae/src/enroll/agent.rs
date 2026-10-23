@@ -332,6 +332,7 @@ pub(crate) async fn enroll_agent<O: AgentOps>(
             Err(_) => EnrollError::AgentOrphanedAccessor {
                 accessor: acc,
                 cause: e.to_string(),
+                recorded: false,
             },
         });
     }
@@ -349,6 +350,7 @@ pub(crate) async fn enroll_agent<O: AgentOps>(
                 Err(_) => EnrollError::AgentOrphanedAccessor {
                     accessor: acc,
                     cause: e.to_string(),
+                    recorded: true,
                 },
             });
         }
@@ -438,8 +440,23 @@ fn utf8(path: &Path, bytes: &[u8]) -> Result<String, EnrollError> {
         .map_err(|_| EnrollError::State(format!("{} is not UTF-8", path.display())))
 }
 
-fn redact(text: &str, secret: &str) -> String {
-    text.replace(secret, "<redacted>")
+fn redact(raw: Zeroizing<String>, secret: &str) -> String {
+    raw.replace(secret, "<redacted>")
+}
+
+fn render(args: std::fmt::Arguments<'_>) -> Zeroizing<String> {
+    struct Count(usize);
+    impl std::fmt::Write for Count {
+        fn write_str(&mut self, s: &str) -> std::fmt::Result {
+            self.0 += s.len();
+            Ok(())
+        }
+    }
+    let mut n = Count(0);
+    let _ = std::fmt::write(&mut n, args);
+    let mut out = Zeroizing::new(String::with_capacity(n.0));
+    let _ = std::fmt::write(&mut *out, args);
+    out
 }
 
 fn scrub_secret(e: EnrollError, secret: &Zeroizing<String>) -> EnrollError {
@@ -447,7 +464,7 @@ fn scrub_secret(e: EnrollError, secret: &Zeroizing<String>) -> EnrollError {
     if secret.is_empty() {
         return e;
     }
-    let r = |t: String| redact(&t, secret);
+    let r = |t: String| redact(Zeroizing::new(t), secret);
     let e = match e {
         EnrollError::Command { program, detail } => EnrollError::Command {
             program: r(program),
@@ -479,9 +496,8 @@ fn scrub_secret(e: EnrollError, secret: &Zeroizing<String>) -> EnrollError {
         },
         other => other,
     };
-    let shown = format!("{e} {e:?}");
-    if shown.contains(secret) {
-        EnrollError::State(redact(&e.to_string(), secret))
+    if render(format_args!("{e} {e:?}")).contains(secret) {
+        EnrollError::State(redact(render(format_args!("{e}")), secret))
     } else {
         e
     }
@@ -1305,10 +1321,13 @@ mod tests {
         let fake = Fake::failing(&["state#1", "destroy:acc-new"]);
         let e = first(&fake).await.unwrap_err();
         assert!(
-            matches!(&e, EnrollError::AgentOrphanedAccessor { accessor, cause }
+            matches!(&e, EnrollError::AgentOrphanedAccessor { accessor, cause, recorded: false }
                 if accessor == "acc-new" && cause == "state#1 failed"),
             "{e:?}"
         );
+        let shown = e.to_string();
+        assert!(shown.contains("is not recorded"), "{shown}");
+        assert!(!shown.contains("pending"), "{shown}");
         assert!(!fake.log().contains(&"seal".to_string()));
     }
 
@@ -1352,10 +1371,17 @@ mod tests {
         let fake = Fake::failing(&["seal", "destroy:acc-new"]);
         let e = rotate(&fake, &["a"], &[], &[]).await.unwrap_err();
         assert!(
-            matches!(&e, EnrollError::AgentOrphanedAccessor { accessor, cause }
+            matches!(&e, EnrollError::AgentOrphanedAccessor { accessor, cause, recorded: true }
                 if accessor == "acc-new" && cause == "seal failed"),
             "{e:?}"
         );
+        let shown = e.to_string();
+        assert!(
+            shown.contains("stays recorded under pending")
+                && shown.contains("maknae enroll agent --rotate"),
+            "{shown}"
+        );
+        assert!(!shown.contains("not recorded"), "{shown}");
         assert_eq!(
             fake.log().last().map(String::as_str),
             Some("destroy:acc-new")
@@ -1599,6 +1625,13 @@ mod tests {
             record_path(&id),
             std::path::Path::new("/etc/maknae/agents/hobi.yaml")
         );
+    }
+
+    #[test]
+    fn render_sizes_its_buffer_before_writing() {
+        let out = render(format_args!("{} {:?}", "abc", "d"));
+        assert_eq!(out.as_str(), "abc \"d\"");
+        assert_eq!(out.capacity(), out.len());
     }
 
     #[test]
