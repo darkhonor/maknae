@@ -89,6 +89,18 @@ run "agents_shape" {
     error_message = "the admin policy writes agent credentials and reaches nothing outside the agent prefix"
   }
   assert {
+    condition = vault_policy.enroll_agent.policy == <<-EOT
+      path "auth/maknae-agent-approle/role/+/role-id"                    { capabilities = ["read"] }
+      path "auth/maknae-agent-approle/role/+/secret-id"                  { capabilities = ["create", "update"] }
+      path "auth/maknae-agent-approle/role/+/secret-id-accessor/destroy" { capabilities = ["update"] }
+    EOT
+    error_message = "maknae-enroll-agent policy text drifted"
+  }
+  assert {
+    condition     = vault_policy.enroll_agent.name == "maknae-enroll-agent" && output.agent_enroll_policy_name == "maknae-enroll-agent"
+    error_message = "maknae-enroll-agent name drifted"
+  }
+  assert {
     condition     = output.agent_role_names == { hobi = "agent-hobi", suga = "agent-suga" } && output.agent_policy_names == { hobi = "maknae-agent-hobi", suga = "maknae-agent-suga" }
     error_message = "outputs name each agent's role and policy"
   }
@@ -112,6 +124,10 @@ run "no_agents" {
   assert {
     condition     = vault_policy.agent_credential_admin.name == "maknae-admin-agent-credentials" && vault_auth_backend.agent_approle.path == "maknae-agent-approle"
     error_message = "the admin policy and the agent mount exist with no agents"
+  }
+  assert {
+    condition     = vault_policy.enroll_agent.name == "maknae-enroll-agent"
+    error_message = "the agent enrollment policy exists with no agents"
   }
 }
 

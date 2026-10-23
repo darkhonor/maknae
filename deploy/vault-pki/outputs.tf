@@ -99,3 +99,8 @@ output "agent_credential_admin_policy_name" {
   description = "Policy an administrator attaches to their own token to write agent credentials."
   value       = vault_policy.agent_credential_admin.name
 }
+
+output "agent_enroll_policy_name" {
+  description = "Policy an operator attaches to their own token to run maknae enroll agent."
+  value       = vault_policy.enroll_agent.name
+}

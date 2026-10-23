@@ -69,3 +69,12 @@ resource "vault_policy" "agent_credential_admin" {
     path "${vault_mount.maknae_kv.path}/undelete/${var.agent_prefix}/*" { capabilities = ["update"] }
   EOT
 }
+
+resource "vault_policy" "enroll_agent" {
+  name   = "maknae-enroll-agent"
+  policy = <<-EOT
+    path "auth/${vault_auth_backend.agent_approle.path}/role/+/role-id"                    { capabilities = ["read"] }
+    path "auth/${vault_auth_backend.agent_approle.path}/role/+/secret-id"                  { capabilities = ["create", "update"] }
+    path "auth/${vault_auth_backend.agent_approle.path}/role/+/secret-id-accessor/destroy" { capabilities = ["update"] }
+  EOT
+}

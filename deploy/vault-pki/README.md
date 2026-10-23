@@ -5,7 +5,7 @@ Vault** for development: a dedicated Maknae **Root CA**, one **Intermediate CA**
 two SAN-locked plane **roles** (`maknae-kernel`, `maknae-cli`), the **`maknaed` AppRole**
 and its policy, a **userpass** auth mount for local users with one **templated user
 policy**, the **KV v2** mount holding each user's provider API keys, the
-`maknae-enroll` policy, and, per Agent Daemon, a read-only credential policy and an
+`maknae-enroll` and `maknae-enroll-agent` policies, and, per Agent Daemon, a read-only credential policy and an
 **AppRole** role on a separate agent mount, plus the administrator policy that writes
 agent credentials.
 
@@ -53,6 +53,9 @@ The Rust plane-cert client (`maknae-vault`) and the mTLS transport consume this 
   carrying that policy alone (see "Agent credentials").
 - **`maknae-admin-agent-credentials` policy** — what an administrator attaches to their own
   token to write agent credentials; it reaches nothing outside `<agent_prefix>`.
+- **`maknae-enroll-agent` policy** — what an operator attaches to their own token to run
+  `maknae enroll agent`: read a role's RoleID, mint its SecretID, destroy a SecretID accessor,
+  on the agent mount only.
 
 ## Requirements
 
@@ -176,6 +179,13 @@ The token is bounded and never periodic: `agent_token_ttl` (default 1h) and
 (ADR-0006 decision 9). The SecretID is standing; its custody, CIDR binding and rotation are
 #168 slice 2.
 
+`maknae enroll agent` runs under the operator's own Vault token, which must carry the
+`maknae-enroll-agent` policy. Provisioning the policy does not grant it to anyone: the
+administrator attaches it to the operator's identity the same way as `maknae-enroll`. It
+allows `read` on `auth/<agent_approle_path>/role/+/role-id`, `create` and `update` on
+`.../role/+/secret-id`, and `update` on `.../role/+/secret-id-accessor/destroy`, and nothing
+else.
+
 The separate mount keeps agent login leases off `maknaed`'s prefix. It does **not**
 separate one agent's leases from another's; per-agent revocation is #472.
 
@@ -211,9 +221,9 @@ schema-valid) — those remain a review concern.
 
 ## Verify on a live Vault (post-merge, maintainer; not CI)
 
-Getting a SecretID for `agent-hobi` needs a root or operator token on
-`auth/maknae-agent-approle/role/agent-hobi/secret-id`, until #168 slice 2 ships `enroll` for
-agents. Take the RoleID from `terraform output -json agent_role_ids` (or `vault read
+Getting a SecretID for `agent-hobi` needs a token carrying `maknae-enroll-agent` (see
+"Agent credentials"), or a root token, on
+`auth/maknae-agent-approle/role/agent-hobi/secret-id`. Take the RoleID from `terraform output -json agent_role_ids` (or `vault read
 -field=role_id auth/maknae-agent-approle/role/agent-hobi/role-id` with an admin or root
 token). Then, as `hobi` logged in by AppRole on the agent mount, confirm:
 
