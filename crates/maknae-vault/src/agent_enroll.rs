@@ -5,6 +5,13 @@ pub const DEFAULT_AGENT_APPROLE_MOUNT: &str = "maknae-agent-approle";
 pub const AGENT_CREDENTIAL_NAME: &str = "maknae-agent-secret-id";
 pub const AGENT_SIGNING_IDENTIFIER: &str = "io.maknae.maknae-agentd";
 pub const MAKNAE_DAEMON_ACCOUNTS: [&str; 2] = ["_maknae", "_maknae-egress"];
+pub const NON_LOGIN_SHELLS: [&str; 5] = [
+    "/usr/sbin/nologin",
+    "/sbin/nologin",
+    "/usr/bin/nologin",
+    "/bin/false",
+    "/usr/bin/false",
+];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AgentEnrollError {
@@ -14,7 +21,6 @@ pub enum AgentEnrollError {
     CatchAllCidr(String),
     HostBitsSet { given: String, network: String },
     NoSuchAccount(String),
-    ShellsUnreadable,
     RootAccount,
     IsPrincipal,
     MaknaeDaemonAccount(String),
@@ -49,10 +55,6 @@ impl fmt::Display for AgentEnrollError {
                 f,
                 "no account named {a} exists on this host; create a service account for the Agent Daemon first"
             ),
-            Self::ShellsUnreadable => write!(
-                f,
-                "/etc/shells could not be read, so the account's shell cannot be checked; restore /etc/shells and retry"
-            ),
             Self::RootAccount => write!(
                 f,
                 "the account is root; run the Agent Daemon under its own unprivileged service account"
@@ -71,7 +73,7 @@ impl fmt::Display for AgentEnrollError {
             ),
             Self::LoginShell(s) => write!(
                 f,
-                "the account's shell {s} is listed in /etc/shells, so a person can log in as it; give the Agent Daemon account a shell that is not (for example /usr/sbin/nologin)"
+                "the account's shell {s} is not a non-login shell; give the Agent Daemon account /usr/sbin/nologin (Linux) or /usr/bin/false (macOS)"
             ),
             Self::AccountInUse { account, agent } => write!(
                 f,
@@ -121,11 +123,22 @@ impl BindCidrs {
             return Err(AgentEnrollError::NoBindCidr);
         }
         let mut out: Vec<String> = Vec::new();
+        let mut v4: Vec<(u128, u128)> = Vec::new();
+        let mut v6: Vec<(u128, u128)> = Vec::new();
         for item in raw {
-            let canonical = canonical_cidr(item)?;
+            let (network, prefix) = canonical_cidr(item)?;
+            let (spans, start, width) = match network {
+                IpAddr::V4(a) => (&mut v4, u128::from(u32::from(a)), 32),
+                IpAddr::V6(a) => (&mut v6, u128::from(a), 128),
+            };
+            spans.push((start, start + ((1u128 << (width - prefix)) - 1)));
+            let canonical = format!("{network}/{prefix}");
             if !out.contains(&canonical) {
                 out.push(canonical);
             }
+        }
+        if covers_all(v4, u128::from(u32::MAX)) || covers_all(v6, u128::MAX) {
+            return Err(AgentEnrollError::CatchAllCidr(raw.join(",")));
         }
         Ok(Self(out))
     }
@@ -135,33 +148,62 @@ impl BindCidrs {
     }
 }
 
-fn canonical_cidr(item: &str) -> Result<String, AgentEnrollError> {
+fn covers_all(mut spans: Vec<(u128, u128)>, max: u128) -> bool {
+    spans.sort_unstable();
+    let mut next = 0u128;
+    for (start, end) in spans {
+        if start > next {
+            return false;
+        }
+        if end >= next {
+            if end == max {
+                return true;
+            }
+            next = end + 1;
+        }
+    }
+    false
+}
+
+fn is_prefix_text(p: &str) -> bool {
+    !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) && (p == "0" || !p.starts_with('0'))
+}
+
+fn canonical_cidr(item: &str) -> Result<(IpAddr, u32), AgentEnrollError> {
     let invalid = || AgentEnrollError::InvalidCidr(item.to_string());
     let (addr_text, prefix_text) = match item.split_once('/') {
         Some((a, p)) => (a, Some(p)),
         None => (item, None),
     };
     let addr: IpAddr = addr_text.parse().map_err(|_| invalid())?;
-    let max: u8 = if addr.is_ipv4() { 32 } else { 128 };
+    let max: u32 = if addr.is_ipv4() { 32 } else { 128 };
     let prefix = match prefix_text {
-        Some(p) => p.parse::<u8>().map_err(|_| invalid())?,
+        Some(p) if is_prefix_text(p) => p.parse::<u32>().map_err(|_| invalid())?,
+        Some(_) => return Err(invalid()),
         None => max,
     };
     if prefix > max {
         return Err(invalid());
     }
+    let (addr, prefix) = match addr {
+        IpAddr::V6(a) => match a.to_ipv4_mapped() {
+            Some(v4) if prefix >= 96 => (IpAddr::V4(v4), prefix - 96),
+            _ => (addr, prefix),
+        },
+        IpAddr::V4(_) => (addr, prefix),
+    };
     if prefix == 0 {
         return Err(AgentEnrollError::CatchAllCidr(item.to_string()));
     }
     let (masked, network) = match addr {
         IpAddr::V4(a) => {
             let bits = u32::from(a);
-            let m = bits & (u32::MAX << (32 - u32::from(prefix)));
+            let m = bits & (u32::MAX << (32 - prefix));
             (m == bits, IpAddr::from(m.to_be_bytes()))
         }
         IpAddr::V6(a) => {
             let bits = u128::from(a);
-            let m = bits & (u128::MAX << (128 - u32::from(prefix)));
+            let m = bits & (u128::MAX << (128 - prefix));
             (m == bits, IpAddr::from(m.to_be_bytes()))
         }
     };
@@ -171,7 +213,7 @@ fn canonical_cidr(item: &str) -> Result<String, AgentEnrollError> {
             network: format!("{network}/{prefix}"),
         });
     }
-    Ok(format!("{addr}/{prefix}"))
+    Ok((addr, prefix))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -183,7 +225,6 @@ pub struct AccountFacts {
 }
 
 pub struct HostAccounts<'a> {
-    pub login_shells: Option<&'a str>,
     pub maknae_gid: u32,
     pub maknae_members: &'a [String],
     pub principal_uid: u32,
@@ -217,20 +258,10 @@ pub fn service_account_check(
     if acct.primary_gid == host.maknae_gid || host.maknae_members.contains(&acct.name) {
         return Err(AgentEnrollError::MaknaeGroupMember);
     }
-    let shells = host
-        .login_shells
-        .ok_or(AgentEnrollError::ShellsUnreadable)?;
-    let shell = match acct.shell.trim() {
-        "" => "/bin/sh",
-        s => s,
-    };
-    let listed = shells
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .any(|l| l == shell);
-    if listed {
-        return Err(AgentEnrollError::LoginShell(shell.to_string()));
+    let shell = acct.shell.trim();
+    if !NON_LOGIN_SHELLS.contains(&shell) {
+        let shown = if shell.is_empty() { "(empty)" } else { shell };
+        return Err(AgentEnrollError::LoginShell(shown.to_string()));
     }
     if let Some((other, _)) = host
         .other_agents
@@ -252,6 +283,10 @@ pub fn accessor_already_gone(code: u16, errors: &[String]) -> bool {
         || (code == 404 && errors.is_empty())
 }
 
+pub fn list_is_empty(code: u16, errors: &[String]) -> bool {
+    code == 404 && errors.is_empty()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,14 +299,12 @@ mod tests {
             shell: "/usr/sbin/nologin".into(),
         }
     }
-    const SHELLS: &str = "# /etc/shells\n/bin/sh\n/bin/bash\n  /usr/bin/zsh  \n";
     fn hobi() -> AgentId {
         AgentId::parse("hobi").unwrap()
     }
     static DAEMON_GROUPS: std::sync::OnceLock<Vec<(u32, Vec<String>)>> = std::sync::OnceLock::new();
     fn host<'a>(members: &'a [String], others: &'a [(String, u32)]) -> HostAccounts<'a> {
         HostAccounts {
-            login_shells: Some(SHELLS),
             maknae_gid: 980,
             maknae_members: members,
             principal_uid: 1000,
@@ -347,6 +380,13 @@ mod tests {
             "10.0.0.0/",
             "10.0.0.0/-1",
             "/8",
+            "10.0.0.5/+32",
+            "10.0.0.0/08",
+            "10.0.0.5/032",
+            "10.0.0.0/00",
+            "10.0.0.5/ 32",
+            "10.0.0.5/32 ",
+            "fd00::/+64",
         ] {
             assert!(
                 matches!(
@@ -378,6 +418,96 @@ mod tests {
                 network: "fd00::/64".into()
             })
         );
+    }
+
+    #[test]
+    fn a_cidr_set_that_together_covers_a_family_is_refused() {
+        for set in [
+            &["0.0.0.0/1", "128.0.0.0/1"][..],
+            &["::/1", "8000::/1"][..],
+            &["10.0.0.0/8", "128.0.0.0/1", "0.0.0.0/1"][..],
+            &["0.0.0.0/1", "10.0.0.0/8", "128.0.0.0/1"][..],
+            &["fd00::/8", "::/1", "8000::/1"][..],
+        ] {
+            let raw: Vec<String> = set.iter().map(|s| s.to_string()).collect();
+            assert_eq!(
+                BindCidrs::parse(&raw),
+                Err(AgentEnrollError::CatchAllCidr(set.join(","))),
+                "{set:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_chain_of_adjacent_cidrs_down_to_one_address_covers_ipv4() {
+        let mut raw = vec!["0.0.0.0/32".to_string()];
+        for p in (1..=32u32).rev() {
+            let start = if p == 32 { 1u32 } else { 1u32 << (32 - p) };
+            raw.push(format!("{}/{p}", std::net::Ipv4Addr::from(start)));
+        }
+        assert!(
+            matches!(
+                BindCidrs::parse(&raw),
+                Err(AgentEnrollError::CatchAllCidr(_))
+            ),
+            "{raw:?}"
+        );
+        raw.remove(0);
+        assert!(BindCidrs::parse(&raw).is_ok(), "{raw:?}");
+    }
+
+    #[test]
+    fn a_cidr_set_with_a_gap_is_accepted() {
+        for set in [
+            &["0.0.0.0/1", "128.0.0.0/2"][..],
+            &["10.0.0.0/8", "fd00::/8"][..],
+            &["128.0.0.0/1", "0.0.0.0/2", "64.0.0.0/3"][..],
+            &["0.0.0.0/1", "128.0.0.1/32"][..],
+            &["0.0.0.0/2", "128.0.0.0/1"][..],
+            &["0.0.0.0/1", "8000::/1"][..],
+        ] {
+            let raw: Vec<String> = set.iter().map(|s| s.to_string()).collect();
+            assert!(BindCidrs::parse(&raw).is_ok(), "{set:?}");
+        }
+    }
+
+    #[test]
+    fn an_ipv4_mapped_cidr_is_judged_as_ipv4() {
+        assert_eq!(
+            BindCidrs::parse(&["::ffff:10.0.0.5".into(), "::ffff:10.1.0.0/112".into()])
+                .unwrap()
+                .as_slice(),
+            ["10.0.0.5/32", "10.1.0.0/16"]
+        );
+        assert!(matches!(
+            BindCidrs::parse(&["::ffff:0.0.0.0/96".into()]),
+            Err(AgentEnrollError::CatchAllCidr(_))
+        ));
+        assert_eq!(
+            BindCidrs::parse(&["::ffff:10.0.0.0/95".into()]),
+            Err(AgentEnrollError::HostBitsSet {
+                given: "::ffff:10.0.0.0/95".into(),
+                network: "::fffe:0:0/95".into()
+            })
+        );
+        assert_eq!(
+            BindCidrs::parse(&["::ffff:0.0.0.0/97".into(), "128.0.0.0/1".into()]),
+            Err(AgentEnrollError::CatchAllCidr(
+                "::ffff:0.0.0.0/97,128.0.0.0/1".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn only_an_empty_404_is_an_empty_list() {
+        assert!(list_is_empty(404, &[]));
+        assert!(!list_is_empty(
+            404,
+            &["no handler for route \"auth/x\"".into()]
+        ));
+        assert!(!list_is_empty(403, &[]));
+        assert!(!list_is_empty(500, &[]));
+        assert!(!list_is_empty(200, &[]));
     }
 
     #[test]
@@ -440,21 +570,6 @@ mod tests {
             check(&acct(), &host(&members, &[])),
             Err(AgentEnrollError::MaknaeGroupMember)
         );
-        for sh in ["/bin/bash", "/usr/bin/zsh", " /bin/bash "] {
-            let mut a = acct();
-            a.shell = sh.into();
-            assert_eq!(
-                check(&a, &h),
-                Err(AgentEnrollError::LoginShell(sh.trim().into())),
-                "{sh:?}"
-            );
-        }
-        let mut a = acct();
-        a.shell = "".into();
-        assert_eq!(
-            check(&a, &h),
-            Err(AgentEnrollError::LoginShell("/bin/sh".into()))
-        );
         let others = vec![("suga".to_string(), 990)];
         assert_eq!(
             check(&acct(), &host(&[], &others)),
@@ -462,12 +577,6 @@ mod tests {
                 account: "hobi-svc".into(),
                 agent: "suga".into()
             })
-        );
-        let mut no_shells = host(&[], &[]);
-        no_shells.login_shells = None;
-        assert_eq!(
-            check(&acct(), &no_shells),
-            Err(AgentEnrollError::ShellsUnreadable)
         );
     }
 
@@ -488,30 +597,51 @@ mod tests {
     }
 
     #[test]
-    fn a_commented_shell_line_is_not_a_login_shell() {
-        let mut a = acct();
-        a.shell = "/bin/fish".into();
-        let mut h = host(&[], &[]);
-        h.login_shells = Some("# /bin/fish\n/bin/sh\n");
-        assert_eq!(check(&a, &h), Ok(()));
+    fn only_an_allowlisted_non_login_shell_passes() {
+        let h = host(&[], &[]);
+        for sh in NON_LOGIN_SHELLS {
+            for spelled in [sh.to_string(), format!(" {sh} ")] {
+                let mut a = acct();
+                a.shell = spelled.clone();
+                assert_eq!(check(&a, &h), Ok(()), "{spelled:?}");
+            }
+        }
+        for sh in [
+            "/bin/bash",
+            "/usr/bin/zsh",
+            "/bin/fish",
+            "/bin/sh",
+            "/usr/sbin/nologin2",
+            "/usr/sbin/nologin/x",
+        ] {
+            let mut a = acct();
+            a.shell = format!(" {sh} ");
+            assert_eq!(
+                check(&a, &h),
+                Err(AgentEnrollError::LoginShell(sh.into())),
+                "{sh:?}"
+            );
+        }
+        for empty in ["", "  "] {
+            let mut a = acct();
+            a.shell = empty.into();
+            assert_eq!(
+                check(&a, &h),
+                Err(AgentEnrollError::LoginShell("(empty)".into())),
+                "{empty:?}"
+            );
+        }
     }
 
     #[test]
-    fn an_empty_shell_passes_only_when_sh_is_not_a_login_shell() {
+    fn the_shell_is_checked_before_the_account_in_use_test() {
         let mut a = acct();
-        a.shell = "  ".into();
-        let mut h = host(&[], &[]);
-        h.login_shells = Some("/bin/bash\n");
-        assert_eq!(check(&a, &h), Ok(()));
-    }
-
-    #[test]
-    fn a_shell_that_looks_like_a_comment_is_not_matched_by_a_commented_line() {
-        let mut a = acct();
-        a.shell = "#odd".into();
-        let mut h = host(&[], &[]);
-        h.login_shells = Some("#odd\n");
-        assert_eq!(check(&a, &h), Ok(()));
+        a.shell = "/bin/bash".into();
+        let others = vec![("suga".to_string(), 990)];
+        assert_eq!(
+            check(&a, &host(&[], &others)),
+            Err(AgentEnrollError::LoginShell("/bin/bash".into()))
+        );
     }
 
     #[test]
@@ -532,7 +662,6 @@ mod tests {
                 "g has host bits set; use n",
             ),
             (AgentEnrollError::NoSuchAccount("ghost".into()), "ghost"),
-            (AgentEnrollError::ShellsUnreadable, "/etc/shells"),
             (AgentEnrollError::RootAccount, "root"),
             (AgentEnrollError::IsPrincipal, "principal"),
             (
@@ -542,7 +671,7 @@ mod tests {
             (AgentEnrollError::MaknaeGroupMember, "maknae group"),
             (
                 AgentEnrollError::LoginShell("/bin/bash".into()),
-                "shell /bin/bash is listed",
+                "shell /bin/bash is not a non-login shell",
             ),
             (
                 AgentEnrollError::AccountInUse {

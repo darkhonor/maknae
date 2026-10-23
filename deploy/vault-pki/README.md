@@ -184,9 +184,10 @@ operator token carrying `maknae-enroll-agent`) mints the agent's SecretID bound 
 `maknae enroll agent` runs under the operator's own Vault token, which must carry the
 `maknae-enroll-agent` policy. Provisioning the policy does not grant it to anyone: the
 administrator attaches it to the operator's identity the same way as `maknae-enroll`. It
-allows `read` on `auth/<agent_approle_path>/role/+/role-id`, `create` and `update` on
-`.../role/+/secret-id`, and `update` on `.../role/+/secret-id-accessor/destroy`, and nothing
-else.
+allows `read` on `auth/<agent_approle_path>/role/+/role-id`, `create`, `update` and `list`
+on `.../role/+/secret-id`, and `update` on `.../role/+/secret-id-accessor/destroy`, and
+nothing else. `list` lets enrollment find and retire a SecretID that an interrupted earlier
+run minted but never recorded.
 
 The separate mount keeps agent login leases off `maknaed`'s prefix. It does **not**
 separate one agent's leases from another's; per-agent revocation is #472.

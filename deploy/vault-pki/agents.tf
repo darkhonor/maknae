@@ -74,7 +74,7 @@ resource "vault_policy" "enroll_agent" {
   name   = "maknae-enroll-agent"
   policy = <<-EOT
     path "auth/${vault_auth_backend.agent_approle.path}/role/+/role-id"                    { capabilities = ["read"] }
-    path "auth/${vault_auth_backend.agent_approle.path}/role/+/secret-id"                  { capabilities = ["create", "update"] }
+    path "auth/${vault_auth_backend.agent_approle.path}/role/+/secret-id"                  { capabilities = ["create", "update", "list"] }
     path "auth/${vault_auth_backend.agent_approle.path}/role/+/secret-id-accessor/destroy" { capabilities = ["update"] }
   EOT
 }

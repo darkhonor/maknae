@@ -40,6 +40,8 @@ pub struct AgentArgs {
 }
 
 const PRIVATE_DIR: &str = "/etc/maknae/private";
+const ETC_DIR: &str = "/etc/maknae";
+const AGENTS_ENTRY: &str = "agents";
 const AGENTS_DIR: &str = "/etc/maknae/agents";
 const HOST_CONFIG: &str = "/etc/maknae/maknae.yaml";
 const VAULT_CA: &str = "/etc/maknae/tls/vault-ca.crt";
@@ -252,6 +254,7 @@ pub(crate) trait AgentOps {
         cidrs: &BindCidrs,
     ) -> Result<(Zeroizing<String>, String), EnrollError>;
     async fn destroy(&self, mount: &str, role: &str, accessor: &str) -> Result<(), EnrollError>;
+    async fn list_accessors(&self, mount: &str, role: &str) -> Result<Vec<String>, EnrollError>;
     async fn seal(
         &self,
         agent: &AgentId,
@@ -356,7 +359,17 @@ pub(crate) async fn enroll_agent<O: AgentOps>(
         }
     };
 
-    let retiring = dedup(base.live.iter().chain(&base.pending).chain(&base.retiring));
+    let listed = ops.list_accessors(mount, &role).await?;
+    let retiring: Vec<String> = dedup(
+        base.live
+            .iter()
+            .chain(&base.pending)
+            .chain(&base.retiring)
+            .chain(&listed),
+    )
+    .into_iter()
+    .filter(|a| *a != acc)
+    .collect();
     let record = AgentRecord {
         agent_id: id.to_string(),
         account: plan.account.clone(),
@@ -571,6 +584,10 @@ impl AgentOps for RealAgentOps {
             .await?)
     }
 
+    async fn list_accessors(&self, mount: &str, role: &str) -> Result<Vec<String>, EnrollError> {
+        Ok(self.client.list_secret_id_accessors(mount, role).await?)
+    }
+
     async fn seal(
         &self,
         agent: &AgentId,
@@ -725,28 +742,11 @@ fn check_account(
             daemon_groups.push((g.gid.as_raw(), g.mem));
         }
     }
-    let shells_path = Path::new("/etc/shells");
-    let shells = match maknae_io::read_absolute(
-        shells_path,
-        TargetRequired {
-            owner: Some(0),
-            mode_mask: Some(0o022),
-            nlink_exactly_one: false,
-            regular_file: true,
-            max_bytes: Some(SMALL_FILE),
-        },
-        StrategyPref::Auto,
-    ) {
-        Ok(out) => Some(utf8(shells_path, &out.value)?),
-        Err(e) if is_not_found(&e) => None,
-        Err(e) => return Err(io_error(shells_path, e)),
-    };
     maknae_vault::agent_enroll::service_account_check(
         acct.as_ref(),
         &args.account,
         agent,
         &HostAccounts {
-            login_shells: shells.as_deref(),
             maknae_gid: maknae.gid.as_raw(),
             maknae_members: &maknae.mem,
             principal_uid: host.principal_uid,
@@ -780,6 +780,38 @@ fn read_host() -> Result<HostEnrollment, EnrollError> {
         }
     })?;
     parse_host_enrollment(&utf8(path, &out.value)?)
+}
+
+fn check_mount(what: &str, mount: &str) -> Result<(), EnrollError> {
+    maknae_config::mount_path_is_acceptable(mount)
+        .map_err(|why| EnrollError::InvalidVaultMount(format!("{what} {why}")))?;
+    if !maknae_config::vault_path_is_safe(mount) {
+        return Err(EnrollError::InvalidVaultMount(format!(
+            "{what} has a character outside [A-Za-z0-9._/-]"
+        )));
+    }
+    Ok(())
+}
+
+fn agents_dir_check(kind: Option<maknae_io::Kind>) -> Result<(), EnrollError> {
+    match kind {
+        None | Some(maknae_io::Kind::Dir) => Ok(()),
+        Some(_) => Err(EnrollError::State(format!(
+            "{AGENTS_DIR} is not a directory; refusing to follow it"
+        ))),
+    }
+}
+
+fn agents_dir_kind() -> Result<Option<maknae_io::Kind>, EnrollError> {
+    let etc = open_dir(ETC_DIR, 0o027)?;
+    let entries = etc
+        .enumerate(Path::new(""), None)
+        .map_err(|e| io_error(Path::new(ETC_DIR), e))?
+        .value;
+    Ok(entries
+        .into_iter()
+        .find(|e| e.name == AGENTS_ENTRY)
+        .map(|e| e.kind))
 }
 
 fn open_dir(path: &str, mode_mask: u32) -> Result<maknae_io::Anchor, EnrollError> {
@@ -836,15 +868,16 @@ pub(crate) async fn run_enroll_agent(
 
     let agent = AgentId::parse(&args.id)?;
     let cidrs = BindCidrs::parse(&args.bind_cidr)?;
-    maknae_config::mount_path_is_acceptable(&args.approle_mount)
-        .map_err(|why| EnrollError::InvalidVaultMount(format!("--approle-mount {why}")))?;
+    check_mount("--approle-mount", &args.approle_mount)?;
 
     let host = read_host()?;
+    check_mount("maknae.yaml vault.approle_mount", &host.approle_mount)?;
 
     let resolver = artifact_write::RealOwnerResolver {
         operator_uid: operator.uid,
         operator_gid: operator.gid,
     };
+    agents_dir_check(agents_dir_kind()?)?;
     artifact_write::ensure_dir(
         &Artifact {
             path: PathBuf::from(AGENTS_DIR),
@@ -933,6 +966,7 @@ mod tests {
         written: RefCell<Vec<u8>>,
         sealed: RefCell<Vec<String>>,
         state_calls: Cell<usize>,
+        listed: RefCell<Vec<String>>,
     }
 
     impl Fake {
@@ -950,6 +984,11 @@ mod tests {
             } else {
                 Ok(())
             }
+        }
+
+        fn listing(self, accessors: &[&str]) -> Self {
+            *self.listed.borrow_mut() = strings(accessors);
+            self
         }
 
         fn log(&self) -> Vec<String> {
@@ -990,6 +1029,16 @@ mod tests {
             let key = format!("destroy:{accessor}");
             self.log.borrow_mut().push(key.clone());
             self.check(&key)
+        }
+
+        async fn list_accessors(
+            &self,
+            _mount: &str,
+            _role: &str,
+        ) -> Result<Vec<String>, EnrollError> {
+            self.log.borrow_mut().push("list".into());
+            self.check("list")?;
+            Ok(self.listed.borrow().clone())
         }
 
         async fn seal(
@@ -1112,6 +1161,7 @@ mod tests {
                 "mint:maknae-agent-approle:agent-hobi:10.0.0.5/32",
                 "state",
                 "seal",
+                "list",
                 "record",
                 "state",
                 "state",
@@ -1232,6 +1282,7 @@ mod tests {
                 "mint:maknae-agent-approle:agent-hobi:10.0.0.5/32",
                 "state",
                 "seal",
+                "list",
                 "record",
                 "state",
                 "destroy:a",
@@ -1269,7 +1320,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            fake.log()[6..],
+            fake.log()[7..],
             strings(&["destroy:acc-stale", "destroy:gone", "state"])[..]
         );
         assert_eq!(fake.states().last(), Some(&state(&["acc-new"], &[], &[])));
@@ -1286,7 +1337,7 @@ mod tests {
             "{e:?}"
         );
         assert_eq!(
-            fake.log()[5..],
+            fake.log()[6..],
             strings(&["state", "destroy:a", "destroy:b", "state"])[..]
         );
         assert_eq!(
@@ -1326,8 +1377,14 @@ mod tests {
             "{e:?}"
         );
         let shown = e.to_string();
-        assert!(shown.contains("is not recorded"), "{shown}");
+        assert!(
+            shown.contains("is not recorded")
+                && shown.contains("Vault's accessor list")
+                && shown.contains("maknae enroll agent --rotate"),
+            "{shown}"
+        );
         assert!(!shown.contains("pending"), "{shown}");
+        assert!(!shown.contains("destroy it in Vault"), "{shown}");
         assert!(!fake.log().contains(&"seal".to_string()));
     }
 
@@ -1418,6 +1475,103 @@ mod tests {
         assert_eq!(fake.states(), vec![state(&["a"], &["acc-new"], &[])]);
     }
 
+    #[tokio::test]
+    async fn a_vault_accessor_missing_from_state_is_retired() {
+        let fake = Fake::default().listing(&["stray", "acc-new"]);
+        let out = first(&fake).await.unwrap();
+        assert_eq!(
+            fake.log()[4..],
+            strings(&["list", "record", "state", "destroy:stray", "state"])[..]
+        );
+        assert_eq!(
+            fake.states(),
+            vec![
+                state(&[], &["acc-new"], &[]),
+                state(&["acc-new"], &[], &["stray"]),
+                state(&["acc-new"], &[], &[]),
+            ]
+        );
+        assert_eq!(out.retired, 1);
+    }
+
+    #[tokio::test]
+    async fn listed_accessors_follow_the_recorded_ones_without_repeats() {
+        let fake = Fake::default().listing(&["x", "r", "acc-new", "a", "x"]);
+        let out = rotate(&fake, &["a"], &["p"], &["r"]).await.unwrap();
+        assert_eq!(
+            fake.states()[1],
+            state(&["acc-new"], &[], &["a", "p", "r", "x"])
+        );
+        assert_eq!(out.retired, 4);
+    }
+
+    #[tokio::test]
+    async fn the_new_accessor_is_never_retired_even_if_listed() {
+        let fake = Fake::default().listing(&["acc-new", "a"]);
+        let out = rotate(&fake, &["a"], &[], &[]).await.unwrap();
+        assert!(!fake.log().contains(&"destroy:acc-new".to_string()));
+        assert_eq!(fake.states()[1], state(&["acc-new"], &[], &["a"]));
+        assert_eq!(fake.states().last(), Some(&state(&["acc-new"], &[], &[])));
+        assert_eq!(out.retired, 1);
+    }
+
+    #[tokio::test]
+    async fn a_list_failure_after_seal_keeps_the_new_accessor_pending() {
+        let fake = Fake::failing(&["list"]).listing(&["stray"]);
+        let e = rotate(&fake, &["a"], &[], &[]).await.unwrap_err();
+        assert!(
+            matches!(&e, EnrollError::State(m) if m == "list failed"),
+            "{e:?}"
+        );
+        assert!(!fake.log().iter().any(|l| l.starts_with("destroy:")));
+        assert!(!fake.log().contains(&"record".to_string()));
+        assert_eq!(fake.log().last().map(String::as_str), Some("list"));
+        assert_eq!(fake.sealed.borrow().len(), 1);
+        assert_eq!(fake.states(), vec![state(&["a"], &["acc-new"], &[])]);
+    }
+
+    #[test]
+    fn a_percent_encoded_or_unsafe_mount_is_refused() {
+        for bad in [
+            "%6daknae-approle",
+            "a?b",
+            "a#b",
+            "a b",
+            "maknae%2dagent",
+            "a;b",
+        ] {
+            assert!(
+                matches!(
+                    check_mount("--approle-mount", bad),
+                    Err(EnrollError::InvalidVaultMount(ref m)) if m.starts_with("--approle-mount ")
+                ),
+                "{bad:?}"
+            );
+        }
+        for ok in [DEFAULT_AGENT_APPROLE_MOUNT, "team/agents", "a.b_c-d"] {
+            assert!(check_mount("--approle-mount", ok).is_ok(), "{ok:?}");
+        }
+        assert!(matches!(
+            check_mount("--approle-mount", "/x"),
+            Err(EnrollError::InvalidVaultMount(_))
+        ));
+    }
+
+    #[test]
+    fn only_an_absent_or_real_agents_directory_is_used() {
+        use maknae_io::Kind;
+        assert!(agents_dir_check(None).is_ok());
+        assert!(agents_dir_check(Some(Kind::Dir)).is_ok());
+        for k in [Kind::Symlink, Kind::File, Kind::Other] {
+            let e = agents_dir_check(Some(k)).unwrap_err();
+            assert!(
+                matches!(&e, EnrollError::State(m)
+                    if m == "/etc/maknae/agents is not a directory; refusing to follow it"),
+                "{k:?}: {e:?}"
+            );
+        }
+    }
+
     fn assert_no_leak(name: &str, fake: &Fake, result: &Result<AgentOutcome, EnrollError>) {
         let sealed = fake.sealed.borrow().clone();
         assert!(
@@ -1451,7 +1605,12 @@ mod tests {
         assert_no_leak("rotate", &fake, &r);
         sealed_once += fake.sealed.borrow().len();
 
-        let cases: [(&str, &[&str], bool); 8] = [
+        let fake = Fake::default().listing(&["stray", "acc-new"]);
+        let r = rotate(&fake, &["a"], &[], &[]).await;
+        assert_no_leak("reconcile", &fake, &r);
+        sealed_once += fake.sealed.borrow().len();
+
+        let cases: [(&str, &[&str], bool); 10] = [
             ("retire", &["destroy:a"], true),
             ("pending", &["state#1"], false),
             ("pending+destroy", &["state#1", "destroy:acc-new"], false),
@@ -1460,6 +1619,8 @@ mod tests {
             ("record", &["record"], true),
             ("live", &["state#2"], true),
             ("mint", &["mint"], false),
+            ("list", &["list"], true),
+            ("list+destroy", &["list", "destroy:acc-new"], true),
         ];
         for (name, keys, reaches_seal) in cases {
             let fake = Fake::failing(keys);
@@ -1472,7 +1633,7 @@ mod tests {
                 "{name}"
             );
         }
-        assert_eq!(sealed_once, 2);
+        assert_eq!(sealed_once, 3);
     }
 
     #[test]

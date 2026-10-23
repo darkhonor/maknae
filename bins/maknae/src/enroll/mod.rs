@@ -307,7 +307,7 @@ impl std::fmt::Display for EnrollError {
                 recorded: false,
             } => write!(
                 f,
-                "{cause}; the SecretID just minted (accessor {accessor}) could not be destroyed and is not recorded, so destroy it in Vault before retrying"
+                "{cause}; the SecretID just minted (accessor {accessor}) could not be destroyed and is not recorded; the next `maknae enroll agent --rotate` finds it in Vault's accessor list and retires it"
             ),
             EnrollError::AgentOrphanedAccessor {
                 accessor,

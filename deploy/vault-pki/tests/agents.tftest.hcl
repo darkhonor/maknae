@@ -89,9 +89,9 @@ run "agents_shape" {
     error_message = "the admin policy writes agent credentials and reaches nothing outside the agent prefix"
   }
   assert {
-    condition = vault_policy.enroll_agent.policy == <<-EOT
+    condition     = vault_policy.enroll_agent.policy == <<-EOT
       path "auth/maknae-agent-approle/role/+/role-id"                    { capabilities = ["read"] }
-      path "auth/maknae-agent-approle/role/+/secret-id"                  { capabilities = ["create", "update"] }
+      path "auth/maknae-agent-approle/role/+/secret-id"                  { capabilities = ["create", "update", "list"] }
       path "auth/maknae-agent-approle/role/+/secret-id-accessor/destroy" { capabilities = ["update"] }
     EOT
     error_message = "maknae-enroll-agent policy text drifted"

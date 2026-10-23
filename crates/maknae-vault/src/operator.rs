@@ -171,6 +171,23 @@ impl OperatorClient {
         }
     }
 
+    /// The accessors of every SecretID on `role`; a role with none is an empty list.
+    pub async fn list_secret_id_accessors(
+        &self,
+        mount: &str,
+        role: &str,
+    ) -> Result<Vec<String>, VaultError> {
+        match vaultrs::auth::approle::role::secret::list(&self.inner, mount, role).await {
+            Ok(resp) => Ok(resp.keys),
+            Err(vaultrs::error::ClientError::APIError { code, errors })
+                if crate::agent_enroll::list_is_empty(code, &errors) =>
+            {
+                Ok(Vec::new())
+            }
+            Err(e) => Err(VaultError::Operator(e.to_string())),
+        }
+    }
+
     /// Fetch the maknae PKI intermediate's default issuer CA chain (PEM), for
     /// pinning on the newly enrolled deployment. `vaultrs` has no op for this
     /// endpoint, so it is executed via the hand-rolled `ReadDefaultIssuerJsonRequest`
