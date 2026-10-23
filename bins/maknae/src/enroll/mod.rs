@@ -17,6 +17,7 @@
 //! Root performs every privileged mutation FIRST; its last act is spawning the
 //! final operator-context child and reporting — monotonic descent by flow order.
 
+mod agent;
 pub mod artifact_table;
 pub mod artifact_write;
 mod helper;
@@ -157,6 +158,30 @@ pub enum EnrollError {
     },
     /// `bindings.yaml` could not be read, planned or written.
     Bindings(String),
+    Agent(maknae_vault::agent_enroll::AgentEnrollError),
+    #[cfg_attr(not(test), expect(dead_code))]
+    AgentMountIsDaemons(String),
+    #[cfg_attr(not(test), expect(dead_code))]
+    AgentAlreadyEnrolled(String),
+    #[cfg_attr(not(test), expect(dead_code))]
+    AgentRekeyRefused {
+        agent: String,
+        field: &'static str,
+        recorded: String,
+        given: String,
+    },
+    #[cfg_attr(not(test), expect(dead_code))]
+    AgentRetireFailed {
+        agent: String,
+        accessors: Vec<String>,
+    },
+    #[cfg_attr(not(test), expect(dead_code))]
+    AgentOrphanedAccessor {
+        accessor: String,
+        cause: String,
+    },
+    #[cfg_attr(not(test), expect(dead_code))]
+    HostNotEnrolled(String),
 }
 
 impl std::fmt::Display for EnrollError {
@@ -257,6 +282,38 @@ impl std::fmt::Display for EnrollError {
                  error and re-run enroll"
             ),
             EnrollError::Bindings(m) => f.write_str(m),
+            EnrollError::Agent(e) => write!(f, "{e}"),
+            EnrollError::AgentMountIsDaemons(mount) => write!(
+                f,
+                "{mount} is the Maknae daemons' own AppRole mount; enroll Agent Daemons on their own mount (the default is {})",
+                maknae_vault::agent_enroll::DEFAULT_AGENT_APPROLE_MOUNT
+            ),
+            EnrollError::AgentAlreadyEnrolled(agent) => write!(
+                f,
+                "agent {agent} is already enrolled; pass --rotate to replace its SecretID"
+            ),
+            EnrollError::AgentRekeyRefused {
+                agent,
+                field,
+                recorded,
+                given,
+            } => write!(
+                f,
+                "agent {agent} is enrolled with {field} {recorded}, not {given}; --rotate keeps the {field}, so de-enroll the agent before changing it"
+            ),
+            EnrollError::AgentRetireFailed { agent, accessors } => write!(
+                f,
+                "agent {agent} has its new SecretID, but these earlier SecretID accessors could not be destroyed: {}; they stay recorded, and the next --rotate retries them",
+                accessors.join(", ")
+            ),
+            EnrollError::AgentOrphanedAccessor { accessor, cause } => write!(
+                f,
+                "{cause}; the SecretID just minted (accessor {accessor}) could not be destroyed and is not recorded, so destroy it in Vault before retrying"
+            ),
+            EnrollError::HostNotEnrolled(detail) => write!(
+                f,
+                "this host is not enrolled ({detail}); run `sudo maknae enroll` first"
+            ),
         }
     }
 }
@@ -266,6 +323,12 @@ impl std::error::Error for EnrollError {}
 impl From<maknae_vault::VaultError> for EnrollError {
     fn from(e: maknae_vault::VaultError) -> Self {
         EnrollError::Vault(e)
+    }
+}
+
+impl From<maknae_vault::agent_enroll::AgentEnrollError> for EnrollError {
+    fn from(e: maknae_vault::agent_enroll::AgentEnrollError) -> Self {
+        EnrollError::Agent(e)
     }
 }
 

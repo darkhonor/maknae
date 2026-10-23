@@ -712,6 +712,10 @@ path = "bins/maknae/src/enroll/vault_ops.rs"
 why = "thin OperatorClient call wrappers; the pure pieces (split_ca_chain, still_provisioned) carry real unit tests, the async Vault I/O is exercised by the same gated-live-test pattern as crates/maknae-vault/src/operator.rs"
 
 [[t3]]
+path = "bins/maknae/src/enroll/agent.rs"
+why = "#168: maknae enroll agent's orchestration behind the AgentOps seam; the rotation order, the rollback naming of an orphaned accessor, the no-leak property of the SecretID, the state and record YAML round trips and the host-config parse carry real unit tests against a recording fake; the decisions are T1 in maknae-vault/src/agent_enroll.rs"
+
+[[t3]]
 path = "bins/maknae/src/enroll/helper.rs"
 why = "the operator-context helper — self-verification and the CLI configuration write; the id-G parser and the identity refusal carry real unit tests, the write runs through artifact_write's tested writer"
 
