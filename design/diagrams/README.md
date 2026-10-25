@@ -97,6 +97,7 @@ to `ci/gates/`. A stereotype is readable by anyone who knows UML; a bespoke glyp
 | `plane-architecture.svg` | UML component | *How do the three planes relate?* | onboarding, reviewer | authored |
 | `knowledge-lifecycle.svg` | conceptual | *By which route does knowledge enter, and where is it refused or held?* | onboarding | authored |
 | `knowledge-position-cards.svg` | bespoke, self-describing | *For a given document and subject: can the agent use it, who must follow it, how much should we believe it — and so what is it good for?* | maintainer, reviewer | authored — **exploratory, not a decision** |
+| `egress-and-tool-execution.svg` | UML component | *Under the egress design concept, which process would decide, enforce or carry each hop from a subject's tool, and which hops are built?* | security assessor, contributor | authored, a design concept and not authoritative — solid is built, dashed is proposed ([`../egress-and-tool-execution.md`](../egress-and-tool-execution.md)); the regions are partitions, and dashing marks status, not UML's dependency, as in the service architecture |
 | `tier-state-machine.svg` | UML state machine | *How does an object enter, move between tiers and review hold, and leave?* | reviewer | authored |
 | `action-vocabulary-map.svg` | bespoke, self-describing | *What are the supported verbs, which component serves each, and what depends on what?* | contributor, reviewer | authored |
 

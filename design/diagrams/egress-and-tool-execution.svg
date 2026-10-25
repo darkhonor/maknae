@@ -1,0 +1,208 @@
+<svg width="1180" height="1130" viewBox="0 0 1180 1130" xmlns="http://www.w3.org/2000/svg" role="img">
+<title>Maknae egress and tool execution</title>
+<desc>UML component view of how a subject's tools reach sites and Vault through maknae-proxy, how model calls reach providers through maknae-egress, and which process decides, enforces or carries each hop. Solid is built; dashed is proposed.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="context-stroke" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+<rect x="0" y="0" width="1180" height="1130" rx="0" fill="#FFFFFF" stroke="#FFFFFF" stroke-width="0"/>
+<text x="30" y="34" font-family="Helvetica, Arial, sans-serif" font-size="18" font-weight="600" fill="#2C2C2A" text-anchor="start">Egress and tool execution — who decides, who enforces, who carries each hop</text>
+<text x="30" y="54" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#5F5E5A" text-anchor="start">UML 2.5.1 component view. Solid lines and borders are built today; dashed are proposed by a design concept, design/egress-and-tool-execution.md, which is not authoritative.</text>
+<text x="30" y="70" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#5F5E5A" text-anchor="start">Dashing alone marks status. A person and an Agent Daemon use the same path; their tier's policy differs (§3), not the mechanism.</text>
+<rect x="20" y="100" width="330" height="660" rx="14" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="36" y="124" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#2C2C2A" text-anchor="start">Subject side · subject or workspace uids</text>
+<text x="36" y="141" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="start">«untrusted» (ADR-0023 d2) · launcher: §10 item 4</text>
+<rect x="400" y="100" width="380" height="660" rx="14" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
+<text x="416" y="124" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#26215C" text-anchor="start">Trust plane</text>
+<text x="416" y="141" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#534AB7" text-anchor="start">each process under its own service account</text>
+<rect x="830" y="100" width="330" height="660" rx="14" fill="#F4F7F2" stroke="#4E6B47" stroke-width="0.75"/>
+<text x="846" y="124" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#2F4A2A" text-anchor="start">External</text>
+<text x="846" y="141" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#4E6B47" text-anchor="start">outside Maknae</text>
+<rect x="45" y="160" width="280" height="78" rx="8" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
+<text x="185.0" y="180" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">«untrusted» · the person's uid</text>
+<text x="185.0" y="198" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#2C2C2A" text-anchor="middle">maknae TUI  (maknae agent)</text>
+<text x="185.0" y="216" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">the person's agent loop</text>
+<rect x="45" y="270" width="280" height="78" rx="8" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25" stroke-dasharray="7 5"/>
+<text x="185.0" y="290" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">«untrusted» · the agent's account</text>
+<text x="185.0" y="308" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#2C2C2A" text-anchor="middle">Agent Daemon  (maknae-agentd)</text>
+<text x="185.0" y="326" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">to be built (#472)</text>
+<rect x="45" y="420" width="280" height="70" rx="8" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25" stroke-dasharray="7 5"/>
+<text x="185.0" y="440" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">trusted or not: §10 item 4</text>
+<text x="185.0" y="458" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#2C2C2A" text-anchor="middle">launcher</text>
+<text x="185.0" y="476" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">applies the envelope; trusted for an agent's task</text>
+<rect x="45" y="560" width="280" height="100" rx="8" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25" stroke-dasharray="7 5"/>
+<text x="185.0" y="580" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">«untrusted» · subject's or workspace uid</text>
+<text x="185.0" y="598" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#2C2C2A" text-anchor="middle">tool</text>
+<text x="185.0" y="616" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">git · gh · glab · cargo · vault · ssh …</text>
+<text x="185.0" y="631" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">the host's own binaries</text>
+<text x="185.0" y="646" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">own credential via a plug-in point</text>
+<rect x="425" y="160" width="330" height="88" rx="8" fill="#FFFFFF" stroke="#534AB7" stroke-width="1.25"/>
+<text x="590.0" y="180" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#534AB7" text-anchor="middle">«PDP» · _maknae</text>
+<text x="590.0" y="198" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#26215C" text-anchor="middle">maknaed</text>
+<text x="590.0" y="216" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">decides every request</text>
+<text x="590.0" y="231" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">writes the trail (intent, outcome)</text>
+<rect x="560" y="300" width="195" height="92" rx="8" fill="#FFFFFF" stroke="#534AB7" stroke-width="1.25"/>
+<text x="657.5" y="320" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#534AB7" text-anchor="middle">«deputy» · _maknae-egress</text>
+<text x="657.5" y="338" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#26215C" text-anchor="middle">maknae-egress</text>
+<text x="657.5" y="356" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">holds the seal key</text>
+<text x="657.5" y="371" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">one model call, then zeroize</text>
+<rect x="425" y="540" width="330" height="100" rx="8" fill="#FFFFFF" stroke="#534AB7" stroke-width="1.25" stroke-dasharray="7 5"/>
+<text x="590.0" y="560" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#534AB7" text-anchor="middle">«PEP» · its own account</text>
+<text x="590.0" y="578" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#26215C" text-anchor="middle">maknae-proxy</text>
+<text x="590.0" y="596" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">HTTP CONNECT host:port</text>
+<text x="590.0" y="611" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">no seal key, Vault identity or subject credential</text>
+<text x="590.0" y="626" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">never terminates the subject's TLS</text>
+<rect x="860" y="160" width="270" height="78" rx="8" fill="#FFFFFF" stroke="#4E6B47" stroke-width="1.25"/>
+<text x="995.0" y="180" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#4E6B47" text-anchor="middle">«external»</text>
+<text x="995.0" y="198" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#2F4A2A" text-anchor="middle">Vault</text>
+<text x="995.0" y="216" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">decides which paths a token may read</text>
+<rect x="860" y="305" width="270" height="70" rx="8" fill="#FFFFFF" stroke="#4E6B47" stroke-width="1.25"/>
+<text x="995.0" y="325" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#4E6B47" text-anchor="middle">«external»</text>
+<text x="995.0" y="343" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#2F4A2A" text-anchor="middle">Model providers</text>
+<text x="995.0" y="361" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">the configured endpoints</text>
+<rect x="860" y="450" width="270" height="78" rx="8" fill="#FFFFFF" stroke="#4E6B47" stroke-width="1.25"/>
+<text x="995.0" y="470" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#4E6B47" text-anchor="middle">«external»</text>
+<text x="995.0" y="488" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#2F4A2A" text-anchor="middle">Sites</text>
+<text x="995.0" y="506" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">github.com, gitlab.com, registries …</text>
+<text x="995.0" y="521" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">enforce repositories and sign-in</text>
+<rect x="425" y="662" width="330" height="80" rx="8" fill="#FFFFFF" stroke="#534AB7" stroke-width="1.25" stroke-dasharray="7 5"/>
+<text x="590.0" y="682" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#534AB7" text-anchor="middle">«deputy» · _maknae-ssh · #456</text>
+<text x="590.0" y="700" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#26215C" text-anchor="middle">maknae-ssh</text>
+<text x="590.0" y="718" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">maknaed decides each ssh operation</text>
+<text x="590.0" y="733" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">no subject holds the key</text>
+<rect x="860" y="672" width="270" height="70" rx="8" fill="#FFFFFF" stroke="#4E6B47" stroke-width="1.25"/>
+<text x="995.0" y="692" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#4E6B47" text-anchor="middle">«external» · registered</text>
+<text x="995.0" y="710" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#2F4A2A" text-anchor="middle">SSH destinations</text>
+<text x="995.0" y="728" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">host keys pinned</text>
+<rect x="860" y="590" width="270" height="70" rx="8" fill="#FFFFFF" stroke="#4E6B47" stroke-width="1.25"/>
+<text x="995.0" y="610" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#4E6B47" text-anchor="middle">«external» · optional</text>
+<text x="995.0" y="628" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#2F4A2A" text-anchor="middle">Network's proxy</text>
+<text x="995.0" y="646" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A" text-anchor="middle">required by some enterprises</text>
+<path d="M325 190 L425 190" fill="none" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<circle cx="375" cy="190" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
+<text x="375" y="194" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">1</text>
+<text x="375" y="175" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="middle">requests</text>
+<path d="M325 300 L390 300 L390 232 L425 232" fill="none" stroke="#5F5E5A" stroke-width="1.5" stroke-dasharray="7 5" marker-end="url(#arrow)"/>
+<circle cx="368" cy="300" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
+<text x="368" y="304" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">2</text>
+<path d="M45 199 L32 199 L32 455 L45 455" fill="none" stroke="#5F5E5A" stroke-width="1.5" stroke-dasharray="7 5" marker-end="url(#arrow)"/>
+<path d="M185 348 L185 420" fill="none" stroke="#5F5E5A" stroke-width="1.5" stroke-dasharray="7 5" marker-end="url(#arrow)"/>
+<circle cx="185" cy="384" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
+<text x="185" y="388" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">3</text>
+<text x="200" y="388" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">launch after a permit</text>
+<path d="M185 490 L185 560" fill="none" stroke="#5F5E5A" stroke-width="1.5" stroke-dasharray="7 5" marker-end="url(#arrow)"/>
+<circle cx="185" cy="525" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
+<text x="185" y="529" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">4</text>
+<text x="200" y="529" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">starts the tool</text>
+<path d="M325 600 L425 600" fill="none" stroke="#5F5E5A" stroke-width="1.5" stroke-dasharray="7 5" marker-end="url(#arrow)"/>
+<circle cx="375" cy="600" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
+<text x="375" y="604" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">5</text>
+<text x="375" y="585" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="middle">CONNECT</text>
+<path d="M450 540 L450 248" fill="none" stroke="#5F5E5A" stroke-width="1.5" stroke-dasharray="7 5" marker-end="url(#arrow)"/>
+<circle cx="450" cy="420" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
+<text x="450" y="424" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">6</text>
+<text x="465" y="424" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">site?</text>
+<path d="M755 575 L800 575 L800 489 L860 489" fill="none" stroke="#5F5E5A" stroke-width="1.5" stroke-dasharray="7 5" marker-end="url(#arrow)"/>
+<circle cx="800" cy="532" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
+<text x="800" y="536" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">7</text>
+<path d="M755 615 L860 625" fill="none" stroke="#5F5E5A" stroke-width="1.5" stroke-dasharray="7 5" marker-end="url(#arrow)"/>
+<circle cx="808" cy="620" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
+<text x="808" y="624" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">8</text>
+<path d="M995 590 L995 528" fill="none" stroke="#5F5E5A" stroke-width="1.5" stroke-dasharray="7 5" marker-end="url(#arrow)"/>
+<path d="M755 707 L860 707" fill="none" stroke="#5F5E5A" stroke-width="1.5" stroke-dasharray="7 5" marker-end="url(#arrow)"/>
+<circle cx="808" cy="707" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
+<text x="808" y="711" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">16</text>
+<path d="M425 240 L412 240 L412 700 L425 700" fill="none" stroke="#5F5E5A" stroke-width="1.5" stroke-dasharray="7 5" marker-end="url(#arrow)"/>
+<path d="M325 470 L395 470 L395 238 L425 238" fill="none" stroke="#5F5E5A" stroke-width="1.5" stroke-dasharray="7 5" marker-end="url(#arrow)"/>
+<circle cx="362" cy="470" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
+<text x="362" y="474" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">17</text>
+<path d="M740 540 L740 430 L845 430 L845 256 L930 256 L930 238" fill="none" stroke="#5F5E5A" stroke-width="1.5" stroke-dasharray="7 5" marker-end="url(#arrow)"/>
+<circle cx="845" cy="400" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
+<text x="845" y="404" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">9</text>
+<path d="M755 180 L860 180" fill="none" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<circle cx="808" cy="180" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
+<text x="808" y="184" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">10</text>
+<text x="808" y="165" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="middle">direct</text>
+<path d="M318 160 L318 88 L1100 88 L1100 160" fill="none" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<circle cx="805" cy="88" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
+<text x="805" y="92" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">14</text>
+<text x="820" y="92" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">today: direct</text>
+<path d="M657 248 L657 300" fill="none" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<circle cx="657" cy="274" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
+<text x="657" y="278" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">11</text>
+<path d="M755 340 L860 340" fill="none" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<circle cx="808" cy="340" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
+<text x="808" y="344" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">12</text>
+<path d="M755 375 L775 375 L775 468 L860 468" fill="none" stroke="#5F5E5A" stroke-width="1.5" stroke-dasharray="7 5" marker-end="url(#arrow)"/>
+<circle cx="775" cy="450" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
+<text x="775" y="454" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">15</text>
+<path d="M735 300 L735 268 L830 268 L830 205 L860 205" fill="none" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<circle cx="785" cy="268" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
+<text x="785" y="272" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">13</text>
+<rect x="20" y="790" width="1140" height="320" rx="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="36" y="814" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#2C2C2A" text-anchor="start">Key</text>
+<circle cx="46" cy="836" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
+<text x="46" y="840" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">1</text>
+<text x="64" y="834" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">The person's TUI asks maknaed for each verb: fs.read, fs.write and</text>
+<text x="64" y="847" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">session.prompt today; tool invocations under this design.</text>
+<circle cx="46" cy="866" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
+<text x="46" y="870" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">2</text>
+<text x="64" y="864" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">The Agent Daemon asks maknaed over its own plane certificate, mutual TLS</text>
+<text x="64" y="877" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">(ADR-0006 decision 9; built by #472).</text>
+<circle cx="46" cy="896" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
+<text x="46" y="900" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">3</text>
+<text x="64" y="894" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">After a permit, the loop hands the invocation to the launcher; a trusted</text>
+<text x="64" y="907" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">launcher takes the run-as uid from maknaed, not the loop.</text>
+<circle cx="46" cy="926" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
+<text x="46" y="930" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">4</text>
+<text x="64" y="924" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">The launcher starts the host's own tool as the subject (for an agent's task, the</text>
+<text x="64" y="937" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">tasker's workspace uid), inside the envelope, with HTTPS_PROXY set.</text>
+<circle cx="46" cy="956" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
+<text x="46" y="960" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">5</text>
+<text x="64" y="954" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">The tool's connections go to maknae-proxy (HTTP CONNECT, with the proxy</text>
+<text x="64" y="967" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">identity): by default, and as their only network path where §7 enforces.</text>
+<circle cx="46" cy="986" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
+<text x="46" y="990" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">6</text>
+<text x="64" y="984" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">maknae-proxy asks maknaed, per connection, whether this subject may reach this</text>
+<text x="64" y="997" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">site; maknaed decides and records it.</text>
+<circle cx="46" cy="1016" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
+<text x="46" y="1020" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">7</text>
+<text x="64" y="1014" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">A permitted connection is tunnelled byte for byte; TLS stays end to end, and the</text>
+<text x="64" y="1027" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">site decides repositories and sign-in.</text>
+<circle cx="46" cy="1046" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
+<text x="46" y="1050" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">8</text>
+<text x="64" y="1044" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">Where the network requires it, maknae-proxy chains to the network's proxy,</text>
+<text x="64" y="1057" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">stamping each CONNECT with who is acting (Forwarded, Via, subject).</text>
+<circle cx="46" cy="1076" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
+<text x="46" y="1080" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">9</text>
+<text x="64" y="1074" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">Subjects' Vault traffic (loops and tools; the loops' path is not drawn) goes</text>
+<text x="64" y="1087" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">through maknae-proxy, never chained upstream (§10 item 1).</text>
+<circle cx="616" cy="836" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
+<text x="616" y="840" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">10</text>
+<text x="634" y="834" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">The trust plane calls Vault directly: maknaed for its own AppRole and plane</text>
+<text x="634" y="847" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">certificates.</text>
+<circle cx="616" cy="866" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
+<text x="616" y="870" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">11</text>
+<text x="634" y="864" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">A model turn: maknaed decides session.prompt and hands maknae-egress the sealed</text>
+<text x="634" y="877" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">frame (ADR-0028 decision 5).</text>
+<circle cx="616" cy="896" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
+<text x="616" y="900" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">12</text>
+<text x="634" y="900" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">maknae-egress makes the one model call with the subject's key and zeroizes it.</text>
+<circle cx="616" cy="926" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
+<text x="616" y="930" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">13</text>
+<text x="634" y="924" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">maknae-egress checks and unwraps the subject's single-use wrapping token with</text>
+<text x="634" y="937" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">Vault, directly (ADR-0028 decision 6).</text>
+<circle cx="616" cy="956" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
+<text x="616" y="960" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">14</text>
+<text x="634" y="954" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">Built today: the maknae CLI and TUI call Vault directly (login, certificate,</text>
+<text x="634" y="967" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">wrapped reads). Under this design that traffic moves to 9.</text>
+<circle cx="616" cy="986" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
+<text x="616" y="990" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">15</text>
+<text x="634" y="984" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">Proposed (#168 slice 4): at intake, maknae-egress asks the site for the tasker's</text>
+<text x="634" y="997" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">and the agent's access; who mints the task token is open (§10 item 13).</text>
+<circle cx="616" cy="1016" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
+<text x="616" y="1020" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">16</text>
+<text x="634" y="1014" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">Where Maknae holds the SSH credential: maknae-ssh, deciding each operation with</text>
+<text x="634" y="1027" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">maknaed; a sealed key or a Vault SSH certificate (#456).</text>
+<circle cx="616" cy="1046" r="10" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="1.25"/>
+<text x="616" y="1050" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#5F5E5A" text-anchor="middle">17</text>
+<text x="634" y="1044" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">A trusted launcher (an agent's task) takes the decided invocation and its run-as</text>
+<text x="634" y="1057" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#2C2C2A" text-anchor="start">uid from maknaed (§10 item 4).</text>
+</svg>
