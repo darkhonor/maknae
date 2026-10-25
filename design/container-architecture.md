@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft — for team review; language calls are operator-ratified where marked, proposed otherwise |
-| **Deployment** | A possible future containerized deployment. Maknae today installs as host services from rpm, deb and the macOS .pkg; see the [Service Architecture](diagrams/generated-service-architecture.svg). `egress-proxy` ships as the `maknae-egress` process ([ADR-0023](adr/ADR-0023-runtime-loop-role-and-placement.md)). |
+| **Deployment** | A possible future containerized deployment. Maknae today installs as host services from rpm, deb and the macOS .pkg; see the [Service Architecture](diagrams/generated-service-architecture.svg). The egress role ships as the `maknae-egress` process ([ADR-0023](adr/ADR-0023-runtime-loop-role-and-placement.md)); a second process, `maknae-proxy`, is proposed in a design concept ([egress-and-tool-execution.md](egress-and-tool-execution.md)). |
 | **Date** | 2026-07-14 (revised 2026-08-22) |
 | **Scope** | Container decomposition for both future deployment models (Compose/Podman stack; full Kubernetes), per-container language selection, trust levels, volumes |
 | **Doctrine** | Language targets best fit for the action being done. Kernel is 100% Rust (operator-ratified 2026-07-14). TDD everywhere (§5). |
@@ -12,10 +12,10 @@
 
 ## 1. Principles
 
-1. **One trust plane, few trusted containers.** The kernel and the egress enforcement point are the only containers whose compromise defeats the architecture. A trust-plane lake storage service, if the lake's storage is split out of the kernel (proposed, not decided), would be a third, under the same Rust TCB rule (ADR-0002). Everything else is constrained by them, not trusted alongside them.
+1. **One trust plane, few trusted containers.** The kernel and the egress containers (and `maknae-ssh`, #456, which holds SSH credentials) are the only containers whose compromise defeats the architecture. A trust-plane lake storage service, if the lake's storage is split out of the kernel (proposed, not decided), would be a fifth, under the same Rust TCB rule (ADR-0002). Everything else is constrained by them, not trusted alongside them.
 2. **Language per action.** Precedent is the operator's Security MCP server (Go gateway/query services, Python parser, Rust proxy, TypeScript UI): pick the language whose ecosystem and guarantees fit the container's job, not a house language. Pattern inheritance from the upstreams is language-independent (autopsy, open item 3).
 3. **The runtime plane is untrusted by design** (KLC §3). Its containers get velocity-optimized languages; correctness is enforced at the kernel boundary, not assumed in the runtime.
-4. **Both deployment models from birth.** Every container ships with a Compose/Podman definition and a Kubernetes manifest, STIG-default configurations and baselines assumed. Volumes are declared per container (§4); in Kubernetes, kernel-mediated flows become NetworkPolicies; in Compose, internal networks + the egress proxy enforce the same shape (TaeBot's scoped nftables table is the host-level reference).
+4. **Both deployment models from birth.** Every container ships with a Compose/Podman definition and a Kubernetes manifest, STIG-default configurations and baselines assumed. Volumes are declared per container (§4); in Kubernetes, kernel-mediated flows become NetworkPolicies; in Compose, internal networks + the egress containers enforce the same shape (TaeBot's scoped nftables table is the host-level reference).
 5. **The runtime plane is stateless by declared design.** Untrusted containers hold no durable state; working sets check in and out through kernel-mediated durable storage. Compromise of the runtime leaks only its current working set; a crash loses nothing; "no read up" is enforceable at rest, not merely at retrieval time.
 
 ## 2. Container inventory
@@ -23,7 +23,7 @@
 | # | Container | Plane | Trust | Language | Status |
 |---|---|---|---|---|---|
 | 1 | `kernel` | Trust | **Trusted** | **Rust** | **Ratified** |
-| 2 | `egress-proxy` | Trust | **Trusted** | **Rust** | Proposed |
+| 2 | `egress-proxy` | Trust | **Trusted** | **Rust** | Proposed; two containers, `maknae-egress` and `maknae-proxy` (§3.2) |
 | 2a | `lake-store` | Trust | **Trusted** | **Rust** | Option only: lake storage I/O and intake hold, commanded by the kernel alone; otherwise this lives in `kernel` |
 | 3 | `gateway` | Interaction | Security-relevant | **Go** | Proposed |
 | 4 | `runtime` | Runtime | Untrusted by design | **Python** | Proposed |
@@ -32,7 +32,7 @@
 | 7 | `web-ui` | Interaction | Security-relevant | **TypeScript** | Proposed; post-MVP |
 | 8 | `vault-agent` | Cross-cutting | Vendor | n/a (HashiCorp image) | Ratified pattern |
 
-MVP builds six images (1–6); `web-ui` is deferred per the roadmap; `vault-agent` is a vendored sidecar image. Consolidations are deliberate: the scheduler lives inside `gateway`, the skill registry and audit writer live inside `kernel`, and the memory subsystem co-locates with `lake` — each splits out later only under measured pressure, never speculatively.
+MVP builds seven images (rows 1–6, row 2 being two); `web-ui` is deferred per the roadmap; `vault-agent` is a vendored sidecar image. Consolidations are deliberate: the scheduler lives inside `gateway`, the skill registry and audit writer live inside `kernel`, and the memory subsystem co-locates with `lake` — each splits out later only under measured pressure, never speculatively.
 
 Durable **operational-state storage** (per-operator session state, scheduler tasks, the memory-recall index) is an **open decision** — engine and at-rest enforcement are not yet chosen (§7).
 
@@ -42,11 +42,17 @@ Durable **operational-state storage** (per-operator session state, scheduler tas
 
 The trust plane: PDP (the sole policy decision point, ADR-0005), label-schema enforcement, all six KLC hooks, intake staging and review hold (KLC §8.1), skill-registry signature verification, and the append-only audit writer. Rationale for Rust: memory-safety CSI alignment (the language choice is a citable control), KLC §15 invariants encoded in the type system (illegal states unrepresentable — a `tier_ceiling` automation cannot raise, a downgrade constructible only from a consumed signed authorization), FIPS 140-3 via `aws-lc-rs` (Microkosmos precedent), static binary into a distroless/from-scratch image (TaeBot pattern). The kernel reaches policy through the **policy-agnostic `maknae-security` seam** and composes pluggable `maknae-authz-*` backends deny-overrides ([ADR-0004](adr/ADR-0004-modular-authorization-architecture.md), [ADR-0020](adr/ADR-0020-access-control-model-and-vocabulary.md)).
 
-### 3.2 `egress-proxy` — Rust (proposed)
+### 3.2 `egress-proxy` — Rust (`maknae-egress` built; `maknae-proxy` and the containers proposed)
 
-> **Dated note 2026-09-07 ([ADR-0023](adr/ADR-0023-runtime-loop-role-and-placement.md) decision 3, milestone Cooky):** this lands first as a **process**, `maknae-egress`, under its own `_maknae-egress` service account (distinct from `_maknae`), reached by `maknaed` over a peer-credential Unix socket (no mTLS on-host; the container will add it) — the model call, the provider credential, outbound TLS and response validation live there, never in the PDP. It becomes this container when a second destination or the Kubernetes model arrives. A host proxy (Traefik) was considered and rejected: non-Rust, non-FIPS, and it would not take response parsing out of `maknaed`.
+The egress role is the outbound flows Maknae carries or decides, except `maknaed`'s own Vault calls. On the host it runs as processes, not a container, in two parts, with `maknae-ssh` proposed as a third ([ADR-0023](adr/ADR-0023-runtime-loop-role-and-placement.md) decision 3; [egress-and-tool-execution.md](egress-and-tool-execution.md)):
 
-The single enforcement point for all outbound flows: model-endpoint calls (OAuth subscription + OpenAI-compatible registrations), learning fetches, and channel egress all transit it; the kernel decides, the proxy enforces (PEP). Holds the Hook E data path: destination allowlisting from the authority map, payload label screening, model-endpoint dominance checks as decided by the kernel. Rust for the same reasons as the kernel — this is the one other container whose compromise is architecture-defeating, and it terminates TLS with FIPS requirements. Microkosmos is the in-house precedent for a hardened Rust network data path. In Kubernetes this pairs with NetworkPolicies that force all egress through it; in Compose, internal networks make it the only externally-connected service besides `gateway`.
+- **`maknae-egress`** (built) runs under its own `_maknae-egress` account, reached by `maknaed` over a peer-credential Unix socket. It carries the trust plane's model calls, and is proposed to carry #168's intake check to the code-hosting site: the provider credential, outbound TLS and response validation live there, never in the PDP. The Hook E data path for those calls (payload label screening and model-endpoint dominance checks as decided by the kernel) is proposed and not built, and which trust-plane process runs it is open (ADR-0022 decision 10). A host proxy (Traefik) was considered for this and rejected: non-Rust, non-FIPS, and it would not take response parsing out of `maknaed`.
+- **`maknae-proxy`** (proposed) is the PEP for the connections of tools Maknae launches for a subject, and the only network path left to them where the network enforces, local services excepted. It decides on the `CONNECT` host and port with the kernel, never terminates the subject's TLS, and sees no content.
+- **`maknae-ssh`** (proposed, #456) is a third outbound trust-plane process: an SSH client under its own account, deciding each operation with the kernel. Its packaging and container are #456's to settle, and it is not counted in the images below.
+
+Learning fetches and channel egress, both proposed, are outbound flows of the same role; which process carries each is decided when they are designed.
+
+Rust for all three, for the same reasons as the kernel: compromise of any of them is architecture-defeating. Microkosmos is the in-house precedent for a hardened Rust network data path. In a containerized deployment the role becomes two containers, one per process, so that the seal key and the proxy never share a security context; in Kubernetes they pair with NetworkPolicies that force all egress through them, and in Compose internal networks make them the only externally-connected services besides `gateway` and the kernel's own Vault connection.
 
 ### 3.3 `gateway` — Go (proposed)
 
@@ -54,7 +60,7 @@ Channel adapter (Discord/Matrix/etc. per the team vote), operator authentication
 
 ### 3.4 `runtime` — Python (proposed)
 
-> **Dated note 2026-09-07 ([ADR-0023](adr/ADR-0023-runtime-loop-role-and-placement.md), milestone Cooky):** the MVP loop is **Rust**, a subcommand of the existing untrusted `maknae` binary (`maknae agent`) — it reuses the plane client that already exists and adds no packaging surface. The Python proposal below is for the *eventual* runtime container and is re-decided on evidence after Cooky; the evidence that would move it is named in the ADR. The loop is the ACP **Agent**; the kernel is the ACP **Client**; the model call is decided per turn by the kernel and executed by the `maknae-egress` process (§3.2 note) on the Agent's request — which reverses ACP's own direction for `session/prompt` (an agent method the Client calls); ADR-0023 decision 3 owns that reversal.
+> **Dated note 2026-09-07 ([ADR-0023](adr/ADR-0023-runtime-loop-role-and-placement.md), milestone Cooky):** the MVP loop is **Rust**, a subcommand of the existing untrusted `maknae` binary (`maknae agent`) — it reuses the plane client that already exists and adds no packaging surface. The Python proposal below is for the *eventual* runtime container and is re-decided on evidence after Cooky; the evidence that would move it is named in the ADR. The loop is the ACP **Agent**; the kernel is the ACP **Client**; the model call is decided per turn by the kernel and executed by the `maknae-egress` process (§3.2) on the Agent's request — which reverses ACP's own direction for `session/prompt` (an agent method the Client calls); ADR-0023 decision 3 owns that reversal.
 
 The agent loop: LLM conversation orchestration, tool invocation (via kernel-mediated grants), MCP client integrations, gap detection, and learning-loop requests. Python rationale: best fit for the most experimental, fastest-iterating layer — the LLM/MCP SDK ecosystem is Python-first, Hermes' learning-loop concepts port naturally, and the layer is untrusted by design so its language guarantees are not load-bearing. Every privileged act transits the kernel; the runtime requests, never performs, lifecycle transitions.
 
@@ -108,9 +114,9 @@ Two standards on top of volume:
 
 ## 6. Shared DCS capability strategy — one engine, not eight
 
-The risk: six containers in four languages each growing their own label/lattice/policy logic. The strategy defeats it in three layers, in priority order:
+The risk: seven containers in four languages each growing their own label/lattice/policy logic. The strategy defeats it in three layers, in priority order:
 
-1. **Architecture first: decisions are centralized, not distributed.** The kernel is the only decision-maker (PDP); every other container is a PEP that requests decisions and enforces outcomes. Five of six containers never evaluate policy — most of the duplication risk is eliminated by the plane model itself, not by libraries.
+1. **Architecture first: decisions are centralized, not distributed.** The kernel is the only decision-maker (PDP); every other container is a PEP that requests decisions and enforces outcomes. Six of seven containers never evaluate policy — most of the duplication risk is eliminated by the plane model itself, not by libraries.
 2. **Representation is schema-first.** The label block and the kernel decision request/response protocol are versioned schemas (JSON Schema at MVP); per-language types are generated, never hand-rolled. Every container can *parse and carry* labels; parsing is not evaluating.
 3. **Local evaluation is one library, reached through the seam — never a per-container port.** Where a hot path justifies evaluating locally instead of calling the kernel, containers consume a single canonical implementation. An attribute-keyed classification engine, where a deployment installs one, is reached only through the policy-agnostic `maknae-security` seam ([ADR-0004](adr/ADR-0004-modular-authorization-architecture.md)) — consumed natively by the Rust trust-plane containers and via bindings by the Python containers. The identified hot path is the lake's per-subject retrieval filtering (kernel bulk-decision API vs. local bindings — decided by measurement, same library either way). A **non-DCS build** — improving OpenClaw/Hermes without DCS awareness — stays a first-class configuration, because the seam speaks general security vocabulary, not DCS.
 
@@ -121,4 +127,4 @@ The risk: six containers in four languages each growing their own label/lattice/
 1. **Operational-state storage** — whether and how per-operator session state, scheduler tasks, and the memory-recall index are stored and label-enforced *at rest*. Open decision tracked in #2 (storage / label-integrity) and #20 (vendor-substrate trust locus); the direction under consideration is Apache Accumulo cell-level visibility.
 2. Channel vote decides `gateway` SDK details and whether the TypeScript alternative is live (§3.3).
 3. Kubernetes profile specifics (PSA levels, NetworkPolicy set, operator vs. plain manifests) — after the Compose stack proves the shape.
-4. Whether `egress-proxy` and `kernel` share an image with distinct entrypoints or build separately — decide at kernel-skeleton time; trust-plane review treats them as one surface either way.
+4. Whether the egress containers and `kernel` share an image with distinct entrypoints or build separately — decide at kernel-skeleton time; trust-plane review treats them as one surface either way.
