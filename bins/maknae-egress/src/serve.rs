@@ -892,7 +892,8 @@ mod tests {
         let request = prefixed(&frame(ALICE));
         let stalled = UnixStream::connect(&path).unwrap();
         let mut c = UnixStream::connect(&path).unwrap();
-        c.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        // macOS refuses setsockopt once the deputy has closed, which is the outcome under test.
+        let _ = c.set_read_timeout(Some(Duration::from_secs(3)));
         let _ = c.write_all(&request);
         let mut back = Vec::new();
         match c.read_to_end(&mut back) {
