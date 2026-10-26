@@ -3,12 +3,19 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-/// Not measured: the kernel's egress admission today
-/// (`maknae_kernel::BLOCKING_BREAKER_MAX_IN_FLIGHT`), so a single kernel never
-/// reaches the refusal pool's limit. Once load measurement
-/// exists, capacity derives from the host's cgroup and CPU limits over the
-/// measured per-call cost, so resizing the instance is what scales it (#321).
-pub const UNMEASURED_CEILING: usize = 32;
+/// The kernel's egress admission (`maknae_kernel::BLOCKING_BREAKER_MAX_IN_FLIGHT`).
+pub const KERNEL_ADMISSION: usize = 32;
+
+/// Spare slots above the kernel's admission. A slot is freed just after its
+/// reply is written, and a call the kernel abandoned at its deadline runs to
+/// its own bound, so without headroom a send can meet `AtCapacity` while both
+/// ends are within their limits.
+pub const HEADROOM: usize = 4;
+
+/// Not measured. Once load measurement exists, capacity derives from the
+/// host's cgroup and CPU limits over the measured per-call cost, so resizing
+/// the instance is what scales it (#321).
+pub const UNMEASURED_CEILING: usize = KERNEL_ADMISSION + HEADROOM;
 
 pub fn deputy_capacity() -> usize {
     UNMEASURED_CEILING
@@ -72,6 +79,11 @@ mod tests {
         assert!(s.try_take().is_none());
         drop((b, c));
         assert_eq!(s.in_use(), 0);
+    }
+
+    #[test]
+    fn the_deputy_serves_more_than_the_kernel_admits() {
+        assert!(deputy_capacity() > KERNEL_ADMISSION);
     }
 
     #[test]

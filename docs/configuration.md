@@ -753,7 +753,7 @@ egress:
   bound expired first, the kernel would record delivery-unknown for a call the deputy
   answered, so with providers authorized boot refuses a `deadline_ms` below
   `60000 + call_timeout_ms + 100000` (two Vault calls and a 100 s margin), naming both
-  values. The bound holds per request: the deputy serves up to 32 requests at once, and
+  values. The bound holds per request: the deputy serves up to 36 requests at once (four more than the daemon admits), and
   answers one past that at once as refused before any provider I/O, so no request spends
   its deadline queued behind another. Out of range refuses boot by name. Shutdown waits
   for a send in flight: the daemon's handler drain is bounded by one connection's whole

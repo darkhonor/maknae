@@ -196,6 +196,21 @@ mod tests {
         assert_eq!(crate::handler::AUTHZ_DECIDE_TIMEOUT, stage);
     }
 
+    /// The egress deputy cannot depend on this crate, so it states the
+    /// kernel's egress admission itself; this holds the two equal (#321).
+    #[test]
+    fn the_egress_deputy_states_this_admission() {
+        let deputy = include_str!("../../../bins/maknae-egress/src/capacity.rs");
+        let stated = format!(
+            "pub const KERNEL_ADMISSION: usize = {};",
+            BLOCKING_BREAKER_MAX_IN_FLIGHT
+        );
+        assert!(
+            deputy.contains(&stated),
+            "expected `{stated}` in capacity.rs"
+        );
+    }
+
     #[test]
     fn threshold_and_timeout_values_are_pinned() {
         assert_eq!(BLOCKING_BREAKER_TRIP_AFTER, 3);
