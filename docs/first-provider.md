@@ -73,7 +73,7 @@ Four flags name the Vault layout, and each **must equal** its Terraform input:
 | `--user-prefix` | `maknae/users` | `user_prefix` |
 | `--plane-key` | `ml-dsa-87` | `plane_key_algorithm` (`ml-dsa-87` needs Vault 2.2.0+; `p384` or `p521` otherwise) |
 
-Enroll writes them into `/etc/maknae/egress-bounds.yaml` (`root:root 0644`), into the `vault` block of your own `~/.maknae/maknae.yaml`, and `--userpass-mount` into the root `maknae.yaml`. You do not write `egress-bounds.yaml` by hand, except to add the optional `call_timeout_ms` for a slow self-hosted model (`docs/configuration.md` §6.1.3); the next enroll drops it again (#525).
+Enroll writes `--kv-mount` and `--user-prefix` into `/etc/maknae/egress-bounds.yaml` (`root:root 0644`), all four into the `vault` block of your own `~/.maknae/maknae.yaml`, and `--userpass-mount` and `--plane-key` into the root `maknae.yaml`. You do not write `egress-bounds.yaml` by hand, except to add the optional `call_timeout_ms` for a slow self-hosted model (`docs/configuration.md` §6.1.3); the next enroll drops it again (#525).
 
 Enroll also generates the Egress Daemon's sealing key pair and publishes the public key, `seal.pub`, where every user's CLI reads it: `/etc/pki/maknae/seal.pub` on the Red Hat family, `/etc/ssl/maknae/seal.pub` on the Debian family, and `/Library/Application Support/Maknae/pki/seal.pub` on macOS. On the first enroll it prints:
 

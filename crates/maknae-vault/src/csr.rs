@@ -65,22 +65,29 @@ pub(crate) enum SpkiParams {
 }
 
 /// PURE decision: the parsed SPKI is exactly `key`'s algorithm, parameters and key length.
-pub(crate) fn spki_is(alg: &str, params: &SpkiParams, key_len: usize, key: PlaneKey) -> bool {
-    match key {
-        PlaneKey::MlDsa87 => {
-            alg == ID_ML_DSA_87 && *params == SpkiParams::Absent && key_len == 2592
+pub(crate) fn spki_is(
+    alg: &str,
+    params: &SpkiParams,
+    key_len: usize,
+    unused_bits: u8,
+    key: PlaneKey,
+) -> bool {
+    unused_bits == 0
+        && match key {
+            PlaneKey::MlDsa87 => {
+                alg == ID_ML_DSA_87 && *params == SpkiParams::Absent && key_len == 2592
+            }
+            PlaneKey::P384 => {
+                alg == ID_EC_PUBLIC_KEY
+                    && *params == SpkiParams::NamedCurve(SECP384R1.to_string())
+                    && key_len == 97
+            }
+            PlaneKey::P521 => {
+                alg == ID_EC_PUBLIC_KEY
+                    && *params == SpkiParams::NamedCurve(SECP521R1.to_string())
+                    && key_len == 133
+            }
         }
-        PlaneKey::P384 => {
-            alg == ID_EC_PUBLIC_KEY
-                && *params == SpkiParams::NamedCurve(SECP384R1.to_string())
-                && key_len == 97
-        }
-        PlaneKey::P521 => {
-            alg == ID_EC_PUBLIC_KEY
-                && *params == SpkiParams::NamedCurve(SECP521R1.to_string())
-                && key_len == 133
-        }
-    }
 }
 
 /// True iff the CSR's public key is exactly `key`'s algorithm (see [`spki_is`]).
@@ -103,6 +110,7 @@ pub fn csr_key_is(pem: &str, key: PlaneKey) -> bool {
         &spki.algorithm.algorithm.to_id_string(),
         &params,
         spki.subject_public_key.data.len(),
+        spki.subject_public_key.unused_bits,
         key,
     )
 }
@@ -249,22 +257,46 @@ mod tests {
 
     #[test]
     fn spki_is_requires_every_conjunct() {
+        assert!(!spki_is(
+            ID_ML_DSA_87,
+            &SpkiParams::Absent,
+            2592,
+            1,
+            PlaneKey::MlDsa87
+        ));
+        assert!(!spki_is(
+            ID_EC_PUBLIC_KEY,
+            &curve(SECP384R1),
+            97,
+            1,
+            PlaneKey::P384
+        ));
+        assert!(!spki_is(
+            ID_EC_PUBLIC_KEY,
+            &curve(SECP521R1),
+            133,
+            1,
+            PlaneKey::P521
+        ));
         assert!(spki_is(
             ID_ML_DSA_87,
             &SpkiParams::Absent,
             2592,
+            0,
             PlaneKey::MlDsa87
         ));
         assert!(spki_is(
             ID_EC_PUBLIC_KEY,
             &curve(SECP384R1),
             97,
+            0,
             PlaneKey::P384
         ));
         assert!(spki_is(
             ID_EC_PUBLIC_KEY,
             &curve(SECP521R1),
             133,
+            0,
             PlaneKey::P521
         ));
 
@@ -272,24 +304,28 @@ mod tests {
             ID_EC_PUBLIC_KEY,
             &SpkiParams::Absent,
             2592,
+            0,
             PlaneKey::MlDsa87
         ));
         assert!(!spki_is(
             ID_ML_DSA_87,
             &SpkiParams::Other,
             2592,
+            0,
             PlaneKey::MlDsa87
         ));
         assert!(!spki_is(
             ID_ML_DSA_87,
             &curve(SECP384R1),
             2592,
+            0,
             PlaneKey::MlDsa87
         ));
         assert!(!spki_is(
             ID_ML_DSA_87,
             &SpkiParams::Absent,
             97,
+            0,
             PlaneKey::MlDsa87
         ));
 
@@ -297,30 +333,35 @@ mod tests {
             ID_ML_DSA_87,
             &curve(SECP384R1),
             97,
+            0,
             PlaneKey::P384
         ));
         assert!(!spki_is(
             ID_EC_PUBLIC_KEY,
             &curve(SECP521R1),
             97,
+            0,
             PlaneKey::P384
         ));
         assert!(!spki_is(
             ID_EC_PUBLIC_KEY,
             &SpkiParams::Absent,
             97,
+            0,
             PlaneKey::P384
         ));
         assert!(!spki_is(
             ID_EC_PUBLIC_KEY,
             &SpkiParams::Other,
             97,
+            0,
             PlaneKey::P384
         ));
         assert!(!spki_is(
             ID_EC_PUBLIC_KEY,
             &curve(SECP384R1),
             133,
+            0,
             PlaneKey::P384
         ));
 
@@ -328,24 +369,28 @@ mod tests {
             ID_ML_DSA_87,
             &curve(SECP521R1),
             133,
+            0,
             PlaneKey::P521
         ));
         assert!(!spki_is(
             ID_EC_PUBLIC_KEY,
             &curve(SECP384R1),
             133,
+            0,
             PlaneKey::P521
         ));
         assert!(!spki_is(
             ID_EC_PUBLIC_KEY,
             &SpkiParams::Other,
             133,
+            0,
             PlaneKey::P521
         ));
         assert!(!spki_is(
             ID_EC_PUBLIC_KEY,
             &curve(SECP521R1),
             97,
+            0,
             PlaneKey::P521
         ));
     }
