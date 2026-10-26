@@ -42,6 +42,12 @@ deny = [
   { name = "rcgen", wrappers = ["maknae-vault"] },
 ]
 
+# reqwest's own TLS features install a stock provider when none is set;
+# `rustls-no-provider` leaves the choice to maknae-crypto's process default.
+[[bans.features]]
+crate = "reqwest"
+deny = ["default-tls", "rustls", "__rustls-aws-lc-rs", "native-tls", "native-tls-no-alpn"]
+
 [licenses]
 # OpenSSL: AWS-LC (aws-lc-fips-sys).
 allow = ["Apache-2.0", "MIT", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib", "OpenSSL"]

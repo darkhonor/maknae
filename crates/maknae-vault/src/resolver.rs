@@ -4,9 +4,8 @@
 //! resolves to `None` → the handshake aborts cleanly: a daemon whose Vault-backed identity
 //! was cleared (renewal expired) cannot present a live plane cert (fail closed).
 use arc_swap::ArcSwapOption;
-use maknae_crypto::rustls;
-use rustls::server::{ClientHello, ResolvesServerCert};
-use rustls::sign::CertifiedKey;
+use maknae_crypto::rustls::server::{ClientHello, ResolvesServerCert};
+use maknae_crypto::rustls::sign::CertifiedKey;
 use std::sync::Arc;
 
 pub(crate) struct PlaneCertResolver(pub(crate) Arc<ArcSwapOption<CertifiedKey>>);
@@ -44,7 +43,7 @@ mod tests {
         let cert = params.self_signed(&kp).unwrap();
         let key = maknae_crypto::crypto_provider()
             .key_provider
-            .load_private_key(rustls::pki_types::PrivateKeyDer::Pkcs8(
+            .load_private_key(maknae_crypto::rustls::pki_types::PrivateKeyDer::Pkcs8(
                 kp.serialize_der().into(),
             ))
             .unwrap();

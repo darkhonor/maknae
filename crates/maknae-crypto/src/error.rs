@@ -1,5 +1,3 @@
-//! `maknae-crypto` refusals. The messages are the ones operators already see.
-
 #[derive(Debug)]
 pub enum CryptoError {
     /// The process is not running the aws-lc-rs FIPS provider (or none installed).

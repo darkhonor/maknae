@@ -1,11 +1,10 @@
 use crate::glue::{fips_gate, lc};
 use crate::seal_pub::{check_canonical, check_length, check_tag, encode_seal_pub};
 use crate::SealError;
-use aws_lc_rs::agreement::{
+use maknae_crypto::aws_lc_rs::agreement::{
     ParsedPublicKey, ParsedPublicKeyFormat, PrivateKey, UnparsedPublicKey, ECDH_P384,
 };
-use aws_lc_rs::encoding::{AsDer, Pkcs8V1Der, PublicKeyX509Der};
-use maknae_crypto::aws_lc_rs;
+use maknae_crypto::aws_lc_rs::encoding::{AsDer, Pkcs8V1Der, PublicKeyX509Der};
 use std::fmt;
 use zeroize::Zeroizing;
 
@@ -103,7 +102,7 @@ impl fmt::Debug for SealPrivateKey {
 mod tests {
     use super::*;
     use crate::SEAL_PUB_PEM_LEN;
-    use aws_lc_rs::agreement::ECDH_P256;
+    use maknae_crypto::aws_lc_rs::agreement::ECDH_P256;
 
     #[test]
     fn a_generated_key_has_a_120_byte_p384_spki_and_a_redacted_debug() {

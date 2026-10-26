@@ -15,8 +15,7 @@ use crate::{
 use arc_swap::ArcSwapOption;
 use maknae_config::{load_config, Document, SectionSpec};
 use maknae_crypto::assert_fips_provider;
-use maknae_crypto::rustls;
-use rustls::sign::CertifiedKey;
+use maknae_crypto::rustls::sign::CertifiedKey;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -1069,7 +1068,7 @@ mod tests {
     /// **That is a CONSEQUENCE of the feature choice, not its reason.** The
     /// manifest records the reason: from reqwest 0.13 the `rustls` feature
     /// installs the non-FIPS aws-lc-rs provider as the process default and
-    /// races the FIPS provider this crate installs. This test guards BOTH
+    /// races the FIPS provider `maknae_crypto` installs. This test guards BOTH
     /// properties with one assertion, because one line of manifest carries
     /// them both — and neither was checked by anything before #318.
     #[test]

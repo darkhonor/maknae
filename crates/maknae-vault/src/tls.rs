@@ -6,12 +6,11 @@ use crate::plane_verify::{PlaneClientCertVerifier, PlaneServerCertVerifier};
 use crate::resolver::PlaneCertResolver;
 use crate::{CaBundle, Plane, PlaneClient, PlaneIdentity, VaultError};
 use maknae_crypto::assert_fips_provider;
-use maknae_crypto::rustls;
-use rustls::client::danger::ServerCertVerifier;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use rustls::server::danger::ClientCertVerifier;
-use rustls::sign::CertifiedKey;
-use rustls::{ClientConfig, ServerConfig};
+use maknae_crypto::rustls::client::danger::ServerCertVerifier;
+use maknae_crypto::rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use maknae_crypto::rustls::server::danger::ClientCertVerifier;
+use maknae_crypto::rustls::sign::CertifiedKey;
+use maknae_crypto::rustls::{ClientConfig, ServerConfig};
 use std::sync::Arc;
 
 fn pem_chain_to_der(id: &PlaneIdentity) -> Result<Vec<CertificateDer<'static>>, VaultError> {
@@ -75,7 +74,7 @@ pub(crate) fn plane_server_config(
 ) -> Result<ServerConfig, VaultError> {
     Ok(
         ServerConfig::builder_with_provider(Arc::new(maknae_crypto::crypto_provider()))
-            .with_protocol_versions(&[&rustls::version::TLS13])
+            .with_protocol_versions(&[&maknae_crypto::rustls::version::TLS13])
             .map_err(|e| VaultError::Handshake(format!("server tls13: {e}")))?
             .with_client_cert_verifier(verifier)
             .with_cert_resolver(resolver),
@@ -87,7 +86,7 @@ pub(crate) fn plane_client_config(
     client_auth: Option<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>,
 ) -> Result<ClientConfig, VaultError> {
     let builder = ClientConfig::builder_with_provider(Arc::new(maknae_crypto::crypto_provider()))
-        .with_protocol_versions(&[&rustls::version::TLS13])
+        .with_protocol_versions(&[&maknae_crypto::rustls::version::TLS13])
         .map_err(|e| VaultError::Handshake(format!("client tls13: {e}")))?
         .dangerous()
         .with_custom_certificate_verifier(verifier);
@@ -104,12 +103,12 @@ mod tests {
     use super::*;
     const _: fn() = || {
         fn _sig(client: &PlaneClient, ca: &CaBundle) {
-            let _s: Result<Arc<rustls::ServerConfig>, VaultError> = server_config(
+            let _s: Result<Arc<maknae_crypto::rustls::ServerConfig>, VaultError> = server_config(
                 client,
                 ca,
                 Arc::new(crate::resolver::PlaneCertResolver::new_empty()),
             );
-            let _c: Result<Arc<rustls::ClientConfig>, VaultError> =
+            let _c: Result<Arc<maknae_crypto::rustls::ClientConfig>, VaultError> =
                 client_config(client, ca, Plane::Kernel);
         }
     };

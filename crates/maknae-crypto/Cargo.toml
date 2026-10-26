@@ -94,5 +94,4 @@ workspace = true
 # comment and the posture docs — never a version change, and no one is obliged
 # to notice. Do not file a watch, and do not re-raise the pin.
 aws-lc-rs = { version = "1.18", features = ["fips"] }
-# `std` beside `fips` so this crate's own tests and mutants build the rustls the shipped binaries unify to.
 rustls = { version = "0.23", default-features = false, features = ["fips", "std"] }

@@ -4,7 +4,6 @@ use maknae_config::{
     BindingEntry, Bindings, Mirror, Section, SyncPlan, BINDINGS_FILE, MIRROR_FILE,
     MIRROR_MAX_BYTES, STATE_DIR,
 };
-use maknae_crypto::aws_lc_rs;
 use maknae_io::{
     open_anchor, open_anchor_resolved, Anchor, AnchorRequired, FileOwner, IoError, IoKind, Mode,
     StrategyPref, TargetRequired,
@@ -68,7 +67,10 @@ fn preflight(euid: u32) -> Result<(), String> {
 
 fn sha256(b: &[u8]) -> [u8; 32] {
     let mut out = [0; 32];
-    out.copy_from_slice(aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, b).as_ref());
+    out.copy_from_slice(
+        maknae_crypto::aws_lc_rs::digest::digest(&maknae_crypto::aws_lc_rs::digest::SHA256, b)
+            .as_ref(),
+    );
     out
 }
 

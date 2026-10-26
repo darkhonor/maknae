@@ -1,7 +1,6 @@
-use aws_lc_rs::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, NONCE_LEN};
-use aws_lc_rs::digest::{digest, SHA256};
-use aws_lc_rs::rand::{SecureRandom, SystemRandom};
-use maknae_crypto::aws_lc_rs;
+use maknae_crypto::aws_lc_rs::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, NONCE_LEN};
+use maknae_crypto::aws_lc_rs::digest::{digest, SHA256};
+use maknae_crypto::aws_lc_rs::rand::{SecureRandom, SystemRandom};
 use std::fmt;
 use zeroize::Zeroizing;
 

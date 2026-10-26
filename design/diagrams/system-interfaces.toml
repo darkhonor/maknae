@@ -135,7 +135,7 @@ to = "daemon"
 status = "built"
 mechanism = "AF_UNIX stream at /run/maknae/maknaed.sock, group-gated on bind; mutual mTLS, TLS 1.3 pinned; SCM_RIGHTS carries the subject's descriptor"
 identity = "plane leaf certificate, URI-SAN — MACHINE identity only"
-evidence = "crates/maknae-config/src/transport.rs:15 · crates/maknae-vault/src/tls.rs:51 · crates/maknae-io/src/delegated.rs:182"
+evidence = "crates/maknae-config/src/transport.rs:15 · crates/maknae-vault/src/tls.rs:77 · crates/maknae-io/src/delegated.rs:182"
 
 [[iface]]
 n = "I3"
@@ -144,7 +144,7 @@ to = "vault"
 status = "built"
 mechanism = "HTTPS via vaultrs/reqwest; AppRole login, then pki sign; TLS negotiated (1.2 floor), FIPS suite set asserted"
 identity = "AppRole role `maknaed` + per-plane SecretID"
-evidence = "crates/maknae-vault/src/client.rs:344 · crates/maknae-vault/src/plane.rs:17"
+evidence = "crates/maknae-vault/src/client.rs:429 · crates/maknae-vault/src/plane.rs:17"
 
 [[iface]]
 n = "I4"

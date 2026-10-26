@@ -4,7 +4,6 @@
 use crate::peercred::{self, PeerCreds};
 use crate::resolver::PlaneCertResolver;
 use crate::{socket, tls, CaBundle, Plane, PlaneClient, VaultError};
-use maknae_crypto::rustls;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -49,34 +48,36 @@ pub struct AcceptRejection {
 }
 
 /// Classify a failed `TlsAcceptor::accept()` outcome. tokio-rustls wraps the underlying
-/// `rustls::Error` as the io::Error's source (`io::Error::new(InvalidData, rustls_err)`), so
-/// downcast to it when present. `rustls::Error` and `CertificateError` are `#[non_exhaustive]`
+/// `maknae_crypto::rustls::Error` as the io::Error's source (`io::Error::new(InvalidData, rustls_err)`), so
+/// downcast to it when present. `maknae_crypto::rustls::Error` and `CertificateError` are `#[non_exhaustive]`
 /// — an unmatched variant falls back to `Handshake` per the brief (WrongPlane is preserved
 /// exactly because that's OUR OWN `plane_verify` rejection, tagged by its message prefix).
 fn classify_handshake_error(e: &std::io::Error) -> RejectReason {
     let Some(rustls_err) = e
         .get_ref()
-        .and_then(|inner| inner.downcast_ref::<rustls::Error>())
+        .and_then(|inner| inner.downcast_ref::<maknae_crypto::rustls::Error>())
     else {
         return RejectReason::Handshake;
     };
     match rustls_err {
         // plane_verify.rs wraps a WrongSan/NoUriSan/ExtraSans/ParseError rejection as
-        // `rustls::Error::General("plane URI-SAN: {e:?}")` — see PlaneClientCertVerifier.
-        rustls::Error::General(msg) if msg.starts_with("plane URI-SAN") => RejectReason::WrongPlane,
-        rustls::Error::InvalidCertificate(cert_err) => match cert_err {
-            rustls::CertificateError::Expired
-            | rustls::CertificateError::ExpiredContext { .. }
-            | rustls::CertificateError::NotValidYet
-            | rustls::CertificateError::NotValidYetContext { .. } => {
+        // `maknae_crypto::rustls::Error::General("plane URI-SAN: {e:?}")` — see PlaneClientCertVerifier.
+        maknae_crypto::rustls::Error::General(msg) if msg.starts_with("plane URI-SAN") => {
+            RejectReason::WrongPlane
+        }
+        maknae_crypto::rustls::Error::InvalidCertificate(cert_err) => match cert_err {
+            maknae_crypto::rustls::CertificateError::Expired
+            | maknae_crypto::rustls::CertificateError::ExpiredContext { .. }
+            | maknae_crypto::rustls::CertificateError::NotValidYet
+            | maknae_crypto::rustls::CertificateError::NotValidYetContext { .. } => {
                 RejectReason::ExpiredOrInvalidCert
             }
-            rustls::CertificateError::UnknownIssuer
-            | rustls::CertificateError::BadSignature
-            | rustls::CertificateError::Revoked
-            | rustls::CertificateError::UnknownRevocationStatus
-            | rustls::CertificateError::ExpiredRevocationList
-            | rustls::CertificateError::ExpiredRevocationListContext { .. } => {
+            maknae_crypto::rustls::CertificateError::UnknownIssuer
+            | maknae_crypto::rustls::CertificateError::BadSignature
+            | maknae_crypto::rustls::CertificateError::Revoked
+            | maknae_crypto::rustls::CertificateError::UnknownRevocationStatus
+            | maknae_crypto::rustls::CertificateError::ExpiredRevocationList
+            | maknae_crypto::rustls::CertificateError::ExpiredRevocationListContext { .. } => {
                 RejectReason::ChainOrCa
             }
             _ => RejectReason::Handshake,
@@ -178,7 +179,7 @@ impl AsyncWrite for AuthenticatedStream {
 /// Recompute the peer's URI-SAN string to report it (the verifier already accepted the
 /// leaf; this re-confirms and yields the canonical string).
 fn peer_uri_san(
-    peer_certs: Option<&[rustls::pki_types::CertificateDer<'static>]>,
+    peer_certs: Option<&[maknae_crypto::rustls::pki_types::CertificateDer<'static>]>,
     expect: Plane,
     dep: &str,
 ) -> Result<String, VaultError> {
@@ -395,7 +396,7 @@ impl PlaneConnector {
         let cfg = tls::client_config(client, ca, expect)?;
         let raw = socket::connect(path).await?;
         let peer_creds = peercred::capture(&raw)?;
-        let name = rustls::pki_types::ServerName::try_from("maknae.invalid")
+        let name = maknae_crypto::rustls::pki_types::ServerName::try_from("maknae.invalid")
             .map_err(|e| VaultError::Handshake(format!("placeholder server name: {e}")))?;
         // Interposed BEFORE the connector, for the same reason the collector sits
         // beneath the acceptor: SCM_RIGHTS is ancillary data on the raw socket and

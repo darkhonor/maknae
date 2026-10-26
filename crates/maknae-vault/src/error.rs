@@ -312,6 +312,8 @@ impl From<maknae_config::ConfigError> for VaultError {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn each_crypto_refusal_keeps_its_name_and_message() {
         use maknae_crypto::CryptoError;
@@ -333,8 +335,6 @@ mod tests {
             super::VaultError::FipsUnavailable
         ));
     }
-
-    use super::*;
     #[test]
     fn transport_variants_display() {
         let cases: Vec<VaultError> = vec![

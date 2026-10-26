@@ -1,7 +1,6 @@
 //! Operator-gated: MAKNAE_VAULT_ADDR, MAKNAE_VAULT_CA, MAKNAE_VAULT_TOKEN; optional MAKNAE_KV_MOUNT, MAKNAE_USERPASS_MOUNT.
 #![cfg(unix)]
 
-use maknae_crypto::aws_lc_rs;
 use maknae_vault::{
     Password, UserAuth, UserAuthMethod, VaultApi, VaultError, WrapExpectation, WrapMismatch,
     WrappingToken,
@@ -24,7 +23,7 @@ fn env_or(key: &str, default: &str) -> String {
 fn random_hex(n: usize) -> Zeroizing<String> {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut b = Zeroizing::new(vec![0u8; n]);
-    aws_lc_rs::rand::fill(&mut b[..]).unwrap();
+    maknae_crypto::aws_lc_rs::rand::fill(&mut b[..]).unwrap();
     let mut out = Zeroizing::new(String::with_capacity(2 * n));
     for x in b.iter() {
         out.push(char::from(HEX[usize::from(x >> 4)]));

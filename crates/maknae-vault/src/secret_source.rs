@@ -5,7 +5,6 @@
 //! reads inside these functions — the caller supplies already-observed inputs) is what
 //! makes the fail-closed precedence provably testable and mutation-hardened (T1).
 use crate::VaultError;
-use maknae_crypto::aws_lc_rs;
 use std::env::VarError;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -161,7 +160,7 @@ pub struct GraphKey(Zeroizing<[u8; GRAPH_KEY_BYTES]>);
 
 impl GraphKey {
     pub fn generate() -> Result<Self, VaultError> {
-        use aws_lc_rs::rand::{SecureRandom, SystemRandom};
+        use maknae_crypto::aws_lc_rs::rand::{SecureRandom, SystemRandom};
         let mut key = Zeroizing::new([0u8; GRAPH_KEY_BYTES]);
         SystemRandom::new()
             .fill(&mut key[..])

@@ -1,9 +1,8 @@
 use crate::fips::fips_result;
 use crate::SealError;
-use maknae_crypto::aws_lc_rs;
 
 pub(crate) fn fips_gate() -> Result<(), SealError> {
-    fips_result(aws_lc_rs::try_fips_mode().is_ok())
+    fips_result(maknae_crypto::aws_lc_rs::try_fips_mode().is_ok())
 }
 
 pub(crate) fn lc<T, E>(r: Result<T, E>, err: SealError) -> Result<T, SealError> {

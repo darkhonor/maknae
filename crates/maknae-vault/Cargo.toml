@@ -17,7 +17,7 @@ maknae-config = { path = "../maknae-config" }
 # vaultrs 0.8.0 (reqwest 0.13, rustify 0.7). `rustls-no-provider`, NOT `rustls`: from
 # reqwest 0.13 the `rustls` feature installs the non-FIPS aws-lc-rs provider as the
 # process default, which would silently pull aws-lc-sys into the TLS path and race
-# the FIPS provider this crate installs (§6.1). `rustls-no-provider` leaves provider
+# the FIPS provider maknae_crypto::install_default_crypto_provider installs (§6.1). `rustls-no-provider` leaves provider
 # selection to the process, i.e. to the `.fips()`-asserted install. Same choice as
 # Microkosmos. The failure this prevents: a Vault-HTTPS leg on a non-FIPS provider
 # with every test still green. vaultrs and rustify move TOGETHER (0.7.4 needs rustify
