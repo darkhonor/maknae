@@ -6143,8 +6143,8 @@ async fn run_inner(
     // FIPS first (spec §6.1): install the aws-lc-rs FIPS default (once), then assert it —
     // before any crypto/Vault client is built. The assert stays authoritative: on a
     // non-FIPS build the installed default's `.fips()` is false and the daemon refuses.
-    maknae_vault::install_default_crypto_provider();
-    maknae_vault::assert_fips_provider().map_err(|e| RunError::Other(e.to_string()))?;
+    maknae_crypto::install_default_crypto_provider();
+    maknae_crypto::assert_fips_provider().map_err(|e| RunError::Other(e.to_string()))?;
 
     let env = &*seams.env;
     let euid = nix::unistd::geteuid().as_raw();

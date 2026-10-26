@@ -4,11 +4,15 @@
 //! because rustls bakes DNS/IP name-matching into the *server*-cert path but a plane leaf
 //! is URI-SAN-only, so the client side uses the name-free primitives (spec §4.2).
 use crate::{verify_plane_uri_san, CaBundle, Plane, VaultError};
-use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
-use rustls::server::WebPkiClientVerifier;
-use rustls::{DigitallySignedStruct, DistinguishedName, RootCertStore, SignatureScheme};
+use maknae_crypto::rustls::client::danger::{
+    HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+};
+use maknae_crypto::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use maknae_crypto::rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
+use maknae_crypto::rustls::server::WebPkiClientVerifier;
+use maknae_crypto::rustls::{
+    DigitallySignedStruct, DistinguishedName, RootCertStore, SignatureScheme,
+};
 use std::sync::Arc;
 
 /// RootCertStore with the PINNED ROOT anchor ONLY (never the intermediate — that rides the
@@ -37,7 +41,7 @@ impl PlaneClientCertVerifier {
         deployment_id: &str,
     ) -> Result<Arc<Self>, VaultError> {
         let roots = Arc::new(root_store(ca)?);
-        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        let provider = Arc::new(maknae_crypto::crypto_provider());
         let inner = WebPkiClientVerifier::builder_with_provider(roots, provider)
             .build()
             .map_err(|e| VaultError::Handshake(format!("client verifier: {e}")))?;
@@ -58,13 +62,13 @@ impl ClientCertVerifier for PlaneClientCertVerifier {
         end_entity: &CertificateDer<'_>,
         intermediates: &[CertificateDer<'_>],
         now: UnixTime,
-    ) -> Result<ClientCertVerified, rustls::Error> {
+    ) -> Result<ClientCertVerified, maknae_crypto::rustls::Error> {
         // chain + expiry + anchor (no name check on the client-cert path)
         self.inner
             .verify_client_cert(end_entity, intermediates, now)?;
         // ADD the plane identity decision (T1)
         verify_plane_uri_san(end_entity.as_ref(), self.expect, &self.deployment_id)
-            .map_err(|e| rustls::Error::General(format!("plane URI-SAN: {e:?}")))?;
+            .map_err(|e| maknae_crypto::rustls::Error::General(format!("plane URI-SAN: {e:?}")))?;
         Ok(ClientCertVerified::assertion())
     }
     fn verify_tls12_signature(
@@ -72,7 +76,7 @@ impl ClientCertVerifier for PlaneClientCertVerifier {
         m: &[u8],
         c: &CertificateDer<'_>,
         d: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+    ) -> Result<HandshakeSignatureValid, maknae_crypto::rustls::Error> {
         self.inner.verify_tls12_signature(m, c, d)
     }
     fn verify_tls13_signature(
@@ -80,7 +84,7 @@ impl ClientCertVerifier for PlaneClientCertVerifier {
         m: &[u8],
         c: &CertificateDer<'_>,
         d: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+    ) -> Result<HandshakeSignatureValid, maknae_crypto::rustls::Error> {
         self.inner.verify_tls13_signature(m, c, d)
     }
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
@@ -93,7 +97,7 @@ impl ClientCertVerifier for PlaneClientCertVerifier {
 #[derive(Debug)]
 pub(crate) struct PlaneServerCertVerifier {
     roots: RootCertStore,
-    provider: Arc<rustls::crypto::CryptoProvider>,
+    provider: Arc<maknae_crypto::rustls::crypto::CryptoProvider>,
     expect: Plane,
     deployment_id: String,
 }
@@ -106,7 +110,7 @@ impl PlaneServerCertVerifier {
     ) -> Result<Arc<Self>, VaultError> {
         Ok(Arc::new(Self {
             roots: root_store(ca)?,
-            provider: Arc::new(rustls::crypto::aws_lc_rs::default_provider()),
+            provider: Arc::new(maknae_crypto::crypto_provider()),
             expect,
             deployment_id: deployment_id.to_string(),
         }))
@@ -121,9 +125,9 @@ impl ServerCertVerifier for PlaneServerCertVerifier {
         _server_name: &ServerName<'_>, // IGNORED — identity is the URI-SAN, not a hostname
         _ocsp: &[u8],
         now: UnixTime,
-    ) -> Result<ServerCertVerified, rustls::Error> {
-        let parsed = rustls::server::ParsedCertificate::try_from(end_entity)?;
-        rustls::client::verify_server_cert_signed_by_trust_anchor(
+    ) -> Result<ServerCertVerified, maknae_crypto::rustls::Error> {
+        let parsed = maknae_crypto::rustls::server::ParsedCertificate::try_from(end_entity)?;
+        maknae_crypto::rustls::client::verify_server_cert_signed_by_trust_anchor(
             &parsed,
             &self.roots,
             intermediates,
@@ -131,7 +135,7 @@ impl ServerCertVerifier for PlaneServerCertVerifier {
             self.provider.signature_verification_algorithms.all,
         )?;
         verify_plane_uri_san(end_entity.as_ref(), self.expect, &self.deployment_id)
-            .map_err(|e| rustls::Error::General(format!("plane URI-SAN: {e:?}")))?;
+            .map_err(|e| maknae_crypto::rustls::Error::General(format!("plane URI-SAN: {e:?}")))?;
         Ok(ServerCertVerified::assertion())
     }
     fn verify_tls12_signature(
@@ -139,8 +143,8 @@ impl ServerCertVerifier for PlaneServerCertVerifier {
         m: &[u8],
         c: &CertificateDer<'_>,
         d: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(
+    ) -> Result<HandshakeSignatureValid, maknae_crypto::rustls::Error> {
+        maknae_crypto::rustls::crypto::verify_tls12_signature(
             m,
             c,
             d,
@@ -152,8 +156,8 @@ impl ServerCertVerifier for PlaneServerCertVerifier {
         m: &[u8],
         c: &CertificateDer<'_>,
         d: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(
+    ) -> Result<HandshakeSignatureValid, maknae_crypto::rustls::Error> {
+        maknae_crypto::rustls::crypto::verify_tls13_signature(
             m,
             c,
             d,
@@ -170,13 +174,11 @@ impl ServerCertVerifier for PlaneServerCertVerifier {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustls::client::danger::ServerCertVerifier;
-    use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+    use maknae_crypto::rustls::client::danger::ServerCertVerifier;
+    use maknae_crypto::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 
     fn provider() {
-        rustls::crypto::aws_lc_rs::default_provider()
-            .install_default()
-            .ok();
+        maknae_crypto::install_default_crypto_provider();
     }
 
     /// The CA keeps its `CertificateParams`, not its `Certificate`: rcgen 0.14

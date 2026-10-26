@@ -188,8 +188,9 @@ CLIPPY_PIN=(--config 'env.CLIPPY_ARGS.value=""' --config 'env.CLIPPY_ARGS.force=
 # manifest -- the sanctioned spelling of `#![allow]`, i.e. source-level
 # suppression, which a lint gate cannot and should not override.
 meta_err="$(mktemp "${TMPDIR:-/tmp}/maknae-clippy-all.XXXXXXXX")"
+lint_log="$(mktemp "${TMPDIR:-/tmp}/maknae-clippy-all.XXXXXXXX")"
 cleanup() {
-  rm -f "$meta_err"
+  rm -f "$meta_err" "$lint_log"
   [ -n "${pin_dir:-}" ] && rm -rf "$pin_dir"
   [ -n "${gate_cwd:-}" ] && rm -rf "$gate_cwd"
   [ -n "${gate_lock:-}" ] && rmdir "$gate_lock" 2>/dev/null
@@ -400,19 +401,27 @@ fi
 # `ran` counts passes that actually COMPLETED, so the OK line reports work done
 # rather than work intended.
 ran=0
-run_lints() {
+lint_pass() { # <label> [extra clippy args...]
+  local label="$1"; shift
   fresh_target
-  genv "$CARGO_CLIPPY_BIN" clippy --locked --manifest-path "$root/Cargo.toml" --workspace --all-targets "${CLIPPY_PIN[@]}" -- -D warnings \
-    || fail "clippy failed on the base --workspace pass"
+  if ! genv "$CARGO_CLIPPY_BIN" clippy --locked --manifest-path "$root/Cargo.toml" --workspace --all-targets "$@" "${CLIPPY_PIN[@]}" -- -D warnings 2>"$lint_log"; then
+    cat "$lint_log" >&2
+    fail "clippy failed on $label"
+  fi
+  cat "$lint_log" >&2
+  # A clippy.toml entry that does not resolve to a function is only a warning, which `-D warnings` does not deny (#564).
+  if grep -qE -- '--> .*clippy\.toml:[0-9]+' "$lint_log"; then
+    fail "clippy reported a problem in clippy.toml on $label, so a disallowed entry may refuse nothing (see above)"
+  fi
   ran=$((ran + 1))
+}
+run_lints() {
+  lint_pass "the base --workspace pass"
   while IFS= read -r pf; do
     [ -n "$pf" ] || continue
     # One pass per declared feature, redundant where already unified -- see the
     # block above for why redundant beats derived.
-    fresh_target
-    genv "$CARGO_CLIPPY_BIN" clippy --locked --manifest-path "$root/Cargo.toml" --workspace --all-targets --features "$pf" "${CLIPPY_PIN[@]}" -- -D warnings \
-      || fail "clippy failed on feature pass '$pf'"
-    ran=$((ran + 1))
+    lint_pass "feature pass '$pf'" --features "$pf"
   done <<< "$feats"
 }
 

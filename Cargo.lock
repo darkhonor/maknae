@@ -1029,10 +1029,10 @@ checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 name = "maknae"
 version = "0.0.0"
 dependencies = [
- "aws-lc-rs",
  "clap",
  "maknae-agent",
  "maknae-config",
+ "maknae-crypto",
  "maknae-io",
  "maknae-msgs",
  "maknae-proto",
@@ -1102,13 +1102,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "maknae-crypto"
+version = "0.0.0"
+dependencies = [
+ "aws-lc-rs",
+ "rustls",
+]
+
+[[package]]
 name = "maknae-deputy"
 version = "0.0.0"
 dependencies = [
  "maknae-config",
+ "maknae-crypto",
  "maknae-llm",
  "maknae-proto",
- "maknae-vault",
  "tokio",
  "zeroize",
 ]
@@ -1119,6 +1127,7 @@ version = "0.0.0"
 dependencies = [
  "listenfd",
  "maknae-config",
+ "maknae-crypto",
  "maknae-deputy",
  "maknae-proto",
  "maknae-seal",
@@ -1154,6 +1163,7 @@ dependencies = [
  "maknae-authz-basic",
  "maknae-classification-aus",
  "maknae-config",
+ "maknae-crypto",
  "maknae-graph",
  "maknae-io",
  "maknae-kernel",
@@ -1175,8 +1185,8 @@ dependencies = [
 name = "maknae-llm"
 version = "0.0.0"
 dependencies = [
+ "maknae-crypto",
  "maknae-proto",
- "maknae-vault",
  "reqwest",
  "serde",
  "serde_json",
@@ -1218,7 +1228,7 @@ dependencies = [
 name = "maknae-seal"
 version = "0.0.0"
 dependencies = [
- "aws-lc-rs",
+ "maknae-crypto",
  "maknae-proto",
  "pem",
  "zeroize",
@@ -1247,8 +1257,8 @@ dependencies = [
 name = "maknae-state"
 version = "0.0.0"
 dependencies = [
- "aws-lc-rs",
  "maknae-config",
+ "maknae-crypto",
  "maknae-graph",
  "maknae-io",
  "maknae-state",
@@ -1278,9 +1288,9 @@ name = "maknae-vault"
 version = "0.0.0"
 dependencies = [
  "arc-swap",
- "aws-lc-rs",
  "bytes",
  "maknae-config",
+ "maknae-crypto",
  "maknae-io",
  "maknae-plane",
  "maknae-seal",
@@ -1289,7 +1299,6 @@ dependencies = [
  "reqwest",
  "rustify",
  "rustify_derive",
- "rustls",
  "security-framework",
  "serde",
  "serde_json",

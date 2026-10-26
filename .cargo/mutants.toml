@@ -145,7 +145,9 @@ exclude_globs = [
   "crates/maknae-vault/src/supervisor_run.rs", # credential-supervisor I/O driver — T3 (decisions it drives, retry_action/rotate_now, stay in supervisor.rs, NOT excluded)
   "crates/maknae-vault/src/ca.rs",         # PEM file I/O (fixture-tested for coverage, not mutation)
   "crates/maknae-vault/src/csr_gen.rs",    # rcgen keygen I/O (non-deterministic); pure shape checks are csr.rs (T1)
-  "crates/maknae-vault/src/fips_glue.rs",  # process-global provider fetch (T3)
+  "crates/maknae-crypto/src/glue.rs",      # process-global provider fetch (T3)
+  "crates/maknae-crypto/src/error.rs",     # Display declarations
+  "crates/maknae-crypto/src/lib.rs",       # re-exports
   "crates/maknae-vault/src/error.rs",      # Display/From declarations
   "crates/maknae-vault/src/lib.rs",        # re-exports
   "crates/maknae-vault/src/tls.rs",           # rustls config builders — provider/handshake I/O (T3)

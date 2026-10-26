@@ -51,7 +51,7 @@ pub(crate) fn local_username() -> Result<String, String> {
 }
 
 fn session() -> Result<Session, String> {
-    maknae_vault::install_default_crypto_provider();
+    maknae_crypto::install_default_crypto_provider();
     let dir = crate::cli::resolve_config_dir();
     let doc = maknae_config::load_config(&dir, &crate::cli::cli_config_specs())
         .map_err(|e| e.to_string())?;

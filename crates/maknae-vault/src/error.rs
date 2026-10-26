@@ -8,6 +8,8 @@ use std::path::PathBuf;
 pub enum VaultError {
     /// The process is not running the aws-lc-rs FIPS provider (or none installed).
     FipsUnavailable,
+    /// The process provider's key-exchange groups are not exactly Maknae's list (#564).
+    KxGroupsDrift,
     /// A config-load failure from `maknae-config`.
     Config(maknae_config::ConfigError),
     /// A required config key was absent.
@@ -148,12 +150,25 @@ pub enum VaultError {
     Random,
 }
 
+impl From<maknae_crypto::CryptoError> for VaultError {
+    fn from(e: maknae_crypto::CryptoError) -> Self {
+        match e {
+            maknae_crypto::CryptoError::FipsUnavailable => VaultError::FipsUnavailable,
+            maknae_crypto::CryptoError::KxGroupsDrift => VaultError::KxGroupsDrift,
+        }
+    }
+}
+
 impl std::fmt::Display for VaultError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             VaultError::FipsUnavailable => write!(
                 f,
                 "FIPS provider not active: the process default is not aws-lc-rs FIPS (refusing to start)"
+            ),
+            VaultError::KxGroupsDrift => write!(
+                f,
+                "the process TLS provider does not carry Maknae's key-exchange groups (refusing TLS)"
             ),
             VaultError::Config(e) => write!(f, "config error: {e}"),
             VaultError::InvalidKeyVaultPath(m) => write!(f, "invalid key_vault_path: {m}"),
@@ -298,6 +313,28 @@ impl From<maknae_config::ConfigError> for VaultError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_crypto_refusal_keeps_its_name_and_message() {
+        use maknae_crypto::CryptoError;
+        for (e, want) in [
+            (CryptoError::FipsUnavailable, "FIPS provider not active"),
+            (CryptoError::KxGroupsDrift, "key-exchange groups"),
+        ] {
+            let msg = e.to_string();
+            let v = super::VaultError::from(e);
+            assert_eq!(v.to_string(), msg);
+            assert!(msg.contains(want), "{msg}");
+        }
+        assert!(matches!(
+            super::VaultError::from(CryptoError::KxGroupsDrift),
+            super::VaultError::KxGroupsDrift
+        ));
+        assert!(matches!(
+            super::VaultError::from(CryptoError::FipsUnavailable),
+            super::VaultError::FipsUnavailable
+        ));
+    }
     #[test]
     fn transport_variants_display() {
         let cases: Vec<VaultError> = vec![

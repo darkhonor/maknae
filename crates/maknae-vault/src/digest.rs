@@ -3,11 +3,13 @@
 //! digest of what was sent, never the content. Incremental so callers need
 //! not concatenate secret text into a second buffer.
 
-pub struct Sha256(aws_lc_rs::digest::Context);
+pub struct Sha256(maknae_crypto::aws_lc_rs::digest::Context);
 
 impl Sha256 {
     pub fn new() -> Self {
-        Sha256(aws_lc_rs::digest::Context::new(&aws_lc_rs::digest::SHA256))
+        Sha256(maknae_crypto::aws_lc_rs::digest::Context::new(
+            &maknae_crypto::aws_lc_rs::digest::SHA256,
+        ))
     }
     pub fn update(&mut self, b: &[u8]) {
         self.0.update(b)

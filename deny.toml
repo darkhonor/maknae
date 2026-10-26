@@ -10,28 +10,33 @@ unsound = "all"
 
 [bans]
 multiple-versions = "warn"
-# maknae-vault FIPS posture (spec §6.2): the Vault-HTTPS leg must be rustls-aws-lc-fips,
-# never the OpenSSL path. `ring` and `aws-lc-sys` are NOT banned — both are present-but-dead
-# and unbannable (aws-lc-sys pulled by rcgen[aws_lc_rs]; ring is reqwest's bundled fallback,
-# never used once the FIPS provider is installed). The runtime `.fips()` assertion is the gate.
+# FIPS posture (spec §6.2): every TLS leg must be rustls-aws-lc-fips, never
+# the OpenSSL path, and `ring` is banned outright (maintainer ruling
+# 2026-10-27, ADR-0030): it is a second, non-FIPS crypto library, absent from
+# the graph since #320, and enabling a `ring` feature on rustls or a wrapper
+# would expose a stock provider no start-up assertion sees. `aws-lc-sys` is
+# pulled by `aws-lc-rs` itself and is not banned. The runtime `.fips()`
+# assertion is the gate on the process default.
 #
-# MEASURED 2026-09-19 (#320) — `ring` IS NO LONGER IN THE GRAPH AT ALL, so the
-# sentence above is stale on its facts though not in its conclusion. `cargo tree
-# -i ring --target all` prints no tree (it warns "nothing to print" and exits
-# 0): ring left when reqwest moved 0.12 -> 0.13 under `rustls-no-provider`, and
-# the regenerated THIRD-PARTY-NOTICES.md no longer lists it. It survives in
-# Cargo.lock only as an unselected optional feature edge of rustls-webpki.
-# "Present-but-dead" is therefore now simply "absent", and "unbannable" is
-# untested against the current graph. WHETHER TO BAN IT OUTRIGHT IS THE
-# MAINTAINER'S CALL AND IS DELIBERATELY NOT TAKEN HERE — this note records the
-# fact so the next reader is not reasoning from a stale rationale. Also
-# corrected: `aws-lc-sys` is pulled by `aws-lc-rs` itself, not by
-# `rcgen[aws_lc_rs]` (`cargo tree -i aws-lc-sys --target all` roots at aws-lc-
-# rs; rcgen is one consumer of four).
+# The cryptographic libraries are declared only by maknae-crypto (ADR-0030):
+# each entry below refuses a direct dependency from any other workspace member.
+# The other wrappers are the third-party crates that depend on them today.
+# tokio-rustls re-exports rustls, so it is confined to maknae-vault the same way.
 deny = [
   { name = "native-tls" },
   { name = "openssl-sys" },
+  { name = "ring" },
+  { name = "aws-lc-rs", wrappers = ["maknae-crypto", "rustls", "rustls-webpki", "rcgen"] },
+  { name = "rustls", wrappers = ["maknae-crypto", "hyper-rustls", "reqwest", "rustls-platform-verifier", "tokio-rustls"] },
+  { name = "tokio-rustls", wrappers = ["maknae-vault", "hyper-rustls", "reqwest"] },
+  { name = "rcgen", wrappers = ["maknae-vault"] },
 ]
+
+# reqwest's own TLS features install a stock provider when none is set;
+# `rustls-no-provider` leaves the choice to maknae-crypto's process default.
+[[bans.features]]
+crate = "reqwest"
+deny = ["default-tls", "rustls", "__rustls-aws-lc-rs", "native-tls", "native-tls-no-alpn"]
 
 [licenses]
 # OpenSSL: AWS-LC (aws-lc-fips-sys).

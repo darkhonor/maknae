@@ -93,7 +93,7 @@ pub async fn chat_completion(
     // "the deputy probably installed the FIPS provider" into a refusal the
     // caller sees, at the only place that matters — immediately before a
     // credential rides a TLS connection.
-    maknae_vault::assert_fips_provider()
+    maknae_crypto::assert_fips_provider()
         .map_err(|e| CallError::Transport(format!("refusing to call a provider: {e}")))?;
 
     let client = reqwest::Client::builder()

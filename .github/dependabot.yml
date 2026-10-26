@@ -61,7 +61,7 @@ updates:
     # and the tree moved to the 4.x module line so RUSTSEC-2026-0285 could be
     # taken (rustls 0.23.45 requires aws-lc-rs >=1.18). The decision of record
     # is design/adr/ADR-0025-fips-validation-is-a-goal-not-a-constraint.md; the
-    # posture comment in crates/maknae-vault/Cargo.toml mirrors it with the
+    # posture comment in crates/maknae-crypto/Cargo.toml mirrors it with the
     # dependency facts. A Dependabot bump of aws-lc-rs or rcgen is now an
     # ordinary bump: review it against that comment, which must stay true.
 

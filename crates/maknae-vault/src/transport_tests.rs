@@ -5,13 +5,11 @@
 //! tested in socket.rs/peercred.rs). rcgen mints a test CA + kernel/cli leaves. This is
 //! ADR-0005's mTLS negative suite: happy path + each negative fails closed.
 use crate::{CaBundle, Plane};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use maknae_crypto::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::sync::Arc;
 
 fn provider() {
-    rustls::crypto::aws_lc_rs::default_provider()
-        .install_default()
-        .ok();
+    maknae_crypto::install_default_crypto_provider();
 }
 
 /// The CA keeps its `CertificateParams`, not its `Certificate`: rcgen 0.14 signs
@@ -97,25 +95,17 @@ fn server_cfg(
     key: Vec<u8>,
     ca: &CaBundle,
     expect: Plane,
-) -> Arc<rustls::ServerConfig> {
-    let key = rustls::crypto::aws_lc_rs::default_provider()
+) -> Arc<maknae_crypto::rustls::ServerConfig> {
+    let key = maknae_crypto::crypto_provider()
         .key_provider
         .load_private_key(PrivateKeyDer::Pkcs8(key.into()))
         .unwrap();
     let resolver = Arc::new(crate::resolver::PlaneCertResolver::new_empty());
-    resolver
-        .slot()
-        .store(Some(Arc::new(rustls::sign::CertifiedKey::new(chain, key))));
+    resolver.slot().store(Some(Arc::new(
+        maknae_crypto::rustls::sign::CertifiedKey::new(chain, key),
+    )));
     let verifier = crate::plane_verify::PlaneClientCertVerifier::new(ca, expect, "d").unwrap();
-    Arc::new(
-        rustls::ServerConfig::builder_with_provider(Arc::new(
-            rustls::crypto::aws_lc_rs::default_provider(),
-        ))
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .unwrap()
-        .with_client_cert_verifier(verifier)
-        .with_cert_resolver(resolver),
-    )
+    Arc::new(crate::tls::plane_server_config(verifier, resolver).unwrap())
 }
 
 fn client_cfg(
@@ -124,32 +114,21 @@ fn client_cfg(
     ca: &CaBundle,
     expect: Plane,
     with_cert: bool,
-) -> Arc<rustls::ClientConfig> {
+) -> Arc<maknae_crypto::rustls::ClientConfig> {
     let verifier = crate::plane_verify::PlaneServerCertVerifier::new(ca, expect, "d").unwrap();
-    let b = rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::aws_lc_rs::default_provider(),
-    ))
-    .with_protocol_versions(&[&rustls::version::TLS13])
-    .unwrap()
-    .dangerous()
-    .with_custom_certificate_verifier(verifier);
-    Arc::new(if with_cert {
-        b.with_client_auth_cert(chain, PrivateKeyDer::Pkcs8(key.into()))
-            .unwrap()
-    } else {
-        b.with_no_client_auth()
-    })
+    let auth = with_cert.then(|| (chain, PrivateKeyDer::Pkcs8(key.into())));
+    Arc::new(crate::tls::plane_client_config(verifier, auth).unwrap())
 }
 
 async fn handshake(
-    server: Arc<rustls::ServerConfig>,
-    client: Arc<rustls::ClientConfig>,
+    server: Arc<maknae_crypto::rustls::ServerConfig>,
+    client: Arc<maknae_crypto::rustls::ClientConfig>,
 ) -> Result<(), String> {
     use tokio_rustls::{TlsAcceptor, TlsConnector};
     let (c, s) = tokio::io::duplex(16 * 1024);
     let acceptor = TlsAcceptor::from(server);
     let connector = TlsConnector::from(client);
-    let name = rustls::pki_types::ServerName::try_from("maknae.invalid").unwrap();
+    let name = maknae_crypto::rustls::pki_types::ServerName::try_from("maknae.invalid").unwrap();
     let srv = tokio::spawn(async move {
         acceptor
             .accept(s)
@@ -227,7 +206,7 @@ async fn a_delegated_descriptor_survives_the_assembled_tls_path() {
         buf
     });
 
-    let name = rustls::pki_types::ServerName::try_from("maknae.invalid").unwrap();
+    let name = maknae_crypto::rustls::pki_types::ServerName::try_from("maknae.invalid").unwrap();
     let mut tls = connector
         .connect(name, sender)
         .await
@@ -418,7 +397,8 @@ mod accept_reject {
 
         let raw = crate::socket::connect(&sock).await.expect("client connect");
         let connector = tokio_rustls::TlsConnector::from(client_cfg);
-        let name = rustls::pki_types::ServerName::try_from("maknae.invalid").unwrap();
+        let name =
+            maknae_crypto::rustls::pki_types::ServerName::try_from("maknae.invalid").unwrap();
         // The client's own connect() is expected to fail too (server sends a rejection
         // alert) — the assertion of record is on the SERVER's AcceptRejection below.
         let _ = connector.connect(name, raw).await;
@@ -443,4 +423,238 @@ mod accept_reject {
             ),
         }
     }
+}
+
+struct Pki {
+    ca: Ca,
+    kernel: (Vec<CertificateDer<'static>>, Vec<u8>),
+    cli: (Vec<CertificateDer<'static>>, Vec<u8>),
+}
+
+fn pki() -> Pki {
+    provider();
+    let ca = mk_ca();
+    let kernel = mk_leaf(&ca, "maknae://d/plane/kernel", false);
+    let cli = mk_leaf(&ca, "maknae://d/plane/cli", false);
+    Pki { ca, kernel, cli }
+}
+
+fn offering(
+    groups: &[&'static dyn maknae_crypto::rustls::crypto::SupportedKxGroup],
+) -> Arc<maknae_crypto::rustls::crypto::CryptoProvider> {
+    Arc::new(maknae_crypto::rustls::crypto::CryptoProvider {
+        kx_groups: groups.to_vec(),
+        ..maknae_crypto::crypto_provider()
+    })
+}
+
+fn peer_client(
+    p: &Pki,
+    groups: &[&'static dyn maknae_crypto::rustls::crypto::SupportedKxGroup],
+) -> Arc<maknae_crypto::rustls::ClientConfig> {
+    let verifier =
+        crate::plane_verify::PlaneServerCertVerifier::new(&cab(&p.ca), Plane::Kernel, "d").unwrap();
+    Arc::new(
+        maknae_crypto::rustls::ClientConfig::builder_with_provider(offering(groups))
+            .with_protocol_versions(&[&maknae_crypto::rustls::version::TLS13])
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(verifier)
+            .with_client_auth_cert(
+                p.cli.0.clone(),
+                PrivateKeyDer::Pkcs8(p.cli.1.clone().into()),
+            )
+            .unwrap(),
+    )
+}
+
+fn peer_server(
+    p: &Pki,
+    groups: &[&'static dyn maknae_crypto::rustls::crypto::SupportedKxGroup],
+) -> Arc<maknae_crypto::rustls::ServerConfig> {
+    let verifier =
+        crate::plane_verify::PlaneClientCertVerifier::new(&cab(&p.ca), Plane::Cli, "d").unwrap();
+    Arc::new(
+        maknae_crypto::rustls::ServerConfig::builder_with_provider(offering(groups))
+            .with_protocol_versions(&[&maknae_crypto::rustls::version::TLS13])
+            .unwrap()
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(
+                p.kernel.0.clone(),
+                PrivateKeyDer::Pkcs8(p.kernel.1.clone().into()),
+            )
+            .unwrap(),
+    )
+}
+
+type Outcome = Result<
+    (
+        maknae_crypto::rustls::NamedGroup,
+        maknae_crypto::rustls::HandshakeKind,
+    ),
+    String,
+>;
+
+async fn negotiate(
+    server: Arc<maknae_crypto::rustls::ServerConfig>,
+    client: Arc<maknae_crypto::rustls::ClientConfig>,
+) -> Outcome {
+    use tokio_rustls::{TlsAcceptor, TlsConnector};
+    let (c, s) = tokio::io::duplex(64 * 1024);
+    let srv = tokio::spawn(async move {
+        TlsAcceptor::from(server)
+            .accept(s)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    });
+    let name = maknae_crypto::rustls::pki_types::ServerName::try_from("maknae.invalid").unwrap();
+    match TlsConnector::from(client).connect(name, c).await {
+        Ok(stream) => {
+            srv.await.unwrap()?;
+            let conn = stream.get_ref().1;
+            Ok((
+                conn.negotiated_key_exchange_group().unwrap().name(),
+                conn.handshake_kind().unwrap(),
+            ))
+        }
+        Err(client_err) => Err(match srv.await.unwrap() {
+            Err(server_err) => server_err,
+            Ok(()) => client_err.to_string(),
+        }),
+    }
+}
+
+fn maknae_server(p: &Pki) -> Arc<maknae_crypto::rustls::ServerConfig> {
+    server_cfg(
+        p.kernel.0.clone(),
+        p.kernel.1.clone(),
+        &cab(&p.ca),
+        Plane::Cli,
+    )
+}
+
+fn maknae_client(p: &Pki) -> Arc<maknae_crypto::rustls::ClientConfig> {
+    client_cfg(
+        p.cli.0.clone(),
+        p.cli.1.clone(),
+        &cab(&p.ca),
+        Plane::Kernel,
+        true,
+    )
+}
+
+fn group_names(
+    groups: &[&dyn maknae_crypto::rustls::crypto::SupportedKxGroup],
+) -> Vec<maknae_crypto::rustls::NamedGroup> {
+    groups.iter().map(|g| g.name()).collect()
+}
+
+#[test]
+fn both_plane_builders_carry_maknaes_key_exchange_groups() {
+    let p = pki();
+    let want = group_names(&maknae_crypto::KX_GROUPS);
+    assert_eq!(
+        group_names(&maknae_server(&p).crypto_provider().kx_groups),
+        want
+    );
+    assert_eq!(
+        group_names(&maknae_client(&p).crypto_provider().kx_groups),
+        want
+    );
+}
+
+#[tokio::test]
+async fn a_peer_offering_each_supported_group_alone_completes_on_it_with_no_retry() {
+    use maknae_crypto::rustls::crypto::aws_lc_rs::kx_group;
+    let p = pki();
+    for g in [
+        kx_group::MLKEM1024,
+        kx_group::X25519MLKEM768,
+        kx_group::SECP256R1MLKEM768,
+        kx_group::SECP384R1,
+        kx_group::SECP256R1,
+    ] {
+        assert_eq!(
+            negotiate(maknae_server(&p), peer_client(&p, &[g])).await,
+            Ok((g.name(), maknae_crypto::rustls::HandshakeKind::Full)),
+            "{:?}",
+            g.name()
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_rhel_fips_shaped_client_gets_its_first_hybrid_with_no_retry() {
+    use maknae_crypto::rustls::crypto::aws_lc_rs::kx_group;
+    let p = pki();
+    let client = peer_client(
+        &p,
+        &[
+            kx_group::SECP256R1MLKEM768,
+            kx_group::X25519MLKEM768,
+            kx_group::SECP256R1,
+        ],
+    );
+    assert_eq!(
+        negotiate(maknae_server(&p), client).await,
+        Ok((
+            maknae_crypto::rustls::NamedGroup::secp256r1MLKEM768,
+            maknae_crypto::rustls::HandshakeKind::Full
+        ))
+    );
+}
+
+#[tokio::test]
+async fn the_server_takes_the_clients_order_not_its_own() {
+    use maknae_crypto::rustls::crypto::aws_lc_rs::kx_group;
+    let p = pki();
+    let client = peer_client(&p, &[kx_group::SECP384R1, kx_group::MLKEM1024]);
+    assert_eq!(
+        negotiate(maknae_server(&p), client).await,
+        Ok((
+            maknae_crypto::rustls::NamedGroup::secp384r1,
+            maknae_crypto::rustls::HandshakeKind::Full
+        ))
+    );
+}
+
+#[tokio::test]
+async fn a_peer_offering_only_x25519_is_refused_for_no_common_group() {
+    let p = pki();
+    let client = peer_client(
+        &p,
+        &[maknae_crypto::rustls::crypto::aws_lc_rs::kx_group::X25519],
+    );
+    let err = negotiate(maknae_server(&p), client).await.unwrap_err();
+    assert!(err.contains("NoKxGroupsInCommon"), "{err}");
+}
+
+#[tokio::test]
+async fn maknaes_client_retries_once_onto_a_hybrid_only_server() {
+    use maknae_crypto::rustls::crypto::aws_lc_rs::kx_group;
+    let p = pki();
+    assert_eq!(
+        negotiate(
+            peer_server(&p, &[kx_group::X25519MLKEM768]),
+            maknae_client(&p)
+        )
+        .await,
+        Ok((
+            maknae_crypto::rustls::NamedGroup::X25519MLKEM768,
+            maknae_crypto::rustls::HandshakeKind::FullWithHelloRetryRequest
+        ))
+    );
+}
+
+#[tokio::test]
+async fn maknaes_client_and_server_agree_on_ml_kem_1024() {
+    let p = pki();
+    assert_eq!(
+        negotiate(maknae_server(&p), maknae_client(&p)).await,
+        Ok((
+            maknae_crypto::rustls::NamedGroup::MLKEM1024,
+            maknae_crypto::rustls::HandshakeKind::Full
+        ))
+    );
 }

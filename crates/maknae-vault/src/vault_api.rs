@@ -8,7 +8,8 @@ use crate::wrap::{
     kv_data_path, parse_lookup, parse_wrapped_read, unwrap_checked, CheckedLookup, UnwrapOps,
     WrapExpectation, WrapLookup, WrappedSecret, WrappingToken,
 };
-use crate::{assert_fips_provider, UserAuth, UserAuthMethod, VaultError};
+use crate::{UserAuth, UserAuthMethod, VaultError};
+use maknae_crypto::assert_fips_provider;
 use std::path::Path;
 use std::time::Duration;
 use zeroize::Zeroizing;
@@ -134,7 +135,7 @@ mod tests {
 
     #[test]
     fn construction_fails_closed_on_plaintext_addr_and_missing_ca() {
-        crate::install_default_crypto_provider();
+        maknae_crypto::install_default_crypto_provider();
         assert!(matches!(
             VaultApi::new("http://127.0.0.1:1", &ca().1),
             Err(VaultError::InvalidAddr(_))
@@ -148,7 +149,7 @@ mod tests {
 
     #[test]
     fn a_dead_vault_fails_every_call_as_a_transport_error() {
-        crate::install_default_crypto_provider();
+        maknae_crypto::install_default_crypto_provider();
         let (_dir, ca) = ca();
         let api = VaultApi::new("https://127.0.0.1:1", &ca).unwrap();
         assert_eq!(api.vault_addr(), "https://127.0.0.1:1/v1/");
@@ -201,7 +202,7 @@ mod tests {
 
     #[test]
     fn a_malformed_path_is_refused_before_any_connection() {
-        crate::install_default_crypto_provider();
+        maknae_crypto::install_default_crypto_provider();
         let (_dir, ca) = ca();
         let api = VaultApi::new("https://127.0.0.1:1", &ca).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()

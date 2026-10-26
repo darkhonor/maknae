@@ -16,6 +16,7 @@ maknae-config = { path = "../../crates/maknae-config" }
 maknae-deputy = { path = "../../crates/maknae-deputy" }
 maknae-proto = { path = "../../crates/maknae-proto" }
 maknae-seal = { path = "../../crates/maknae-seal" }
+maknae-crypto = { path = "../../crates/maknae-crypto" }
 maknae-vault = { path = "../../crates/maknae-vault" }
 # #240a D4-A, maintainer ruling 2026-09-12 (option b). Adopting an inherited
 # listening fd requires `UnixListener::from_raw_fd`, which is `unsafe`, and

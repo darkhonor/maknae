@@ -20,9 +20,7 @@ async fn mint_kernel_leaf_against_live_vault() {
     let dir = std::env::var("MAKNAE_CONFIG_DIR")
         .expect("set MAKNAE_CONFIG_DIR to the config dir (e.g. ~/.maknae)");
     // The daemon's `main` installs the FIPS provider; the smoke installs it too.
-    rustls::crypto::aws_lc_rs::default_provider()
-        .install_default()
-        .ok();
+    maknae_crypto::install_default_crypto_provider();
 
     let client = maknae_vault::PlaneClient::from_config_dir(
         std::path::Path::new(&dir),
@@ -68,9 +66,7 @@ async fn mint_kernel_leaf_against_live_vault() {
 async fn rotate_leaf_against_live_vault() {
     let dir = std::env::var("MAKNAE_CONFIG_DIR")
         .expect("set MAKNAE_CONFIG_DIR to the config dir (e.g. ~/.maknae)");
-    rustls::crypto::aws_lc_rs::default_provider()
-        .install_default()
-        .ok();
+    maknae_crypto::install_default_crypto_provider();
 
     let client = maknae_vault::PlaneClient::from_config_dir(
         std::path::Path::new(&dir),

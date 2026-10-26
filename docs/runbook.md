@@ -97,6 +97,8 @@ Expected: `LIVE SMOKE OK: minted maknae://<deployment_id>/plane/kernel (P-384), 
 - FIPS: the process runs the aws-lc-rs FIPS provider (`.fips()==true`, asserted
   fail-closed before the Vault client is built, so vaultrs's reqwest rides the FIPS
   provider; `ring` is not in the graph).
+- The same start-up check refuses a process provider whose TLS key-exchange groups are
+  not Maknae's list ([TLS key exchange](#tls-key-exchange)).
 - The AppRole login used the **standing** raw SecretID; the SecretID does not expire and
   the login does not consume it.
 - The CSR is empty-subject, URI-SAN-only, EC P-384; the leaf's only SAN is
@@ -167,13 +169,26 @@ Expected: `LIVE TRANSPORT OK: kernel<->cli mTLS + peer-creds round-trip over UDS
 - **Mutual mTLS with plane-URI-SAN identity** — each side presents its Vault-minted P-384
   leaf and verifies the peer's leaf carries **exactly** the expected
   `maknae://<deployment_id>/plane/{kernel,cli}` URI-SAN (the T1 verifier), over TLS 1.3 on
-  the aws-lc-rs FIPS provider.
+  the aws-lc-rs FIPS provider, with ML-KEM-1024 key exchange (both ends are Maknae's).
 - **Peer-cred capture** — the daemon reads the connecting uid (+ pid) from the kernel
   (`SO_PEERCRED` on Linux, `LOCAL_PEERCRED`+`LOCAL_PEERPID` on macOS). The transport
   *reports* these; uid **policy** + audit are the Stage-3 daemon's job.
 - **Fail-closed** — a wrong-plane, expired, foreign-CA, absent, or extra-SAN peer cert
   aborts the handshake (see the in-process negative suite); a listener whose identity was
   cleared (renewal expired) presents no leaf and the handshake fails.
+
+### TLS key exchange
+
+Every TLS configuration offers `MLKEM1024`, `X25519MLKEM768`, `SECP256R1MLKEM768`,
+`SECP384R1` and `SECP256R1`, in that order. ML-KEM-1024 (CNSSP 15) is offered first, not
+enforced: a server without it answers with one HelloRetryRequest, and the connection
+lands on a hybrid (the EU and BSI recommendation) or a classical group, whichever the
+server chooses. Pure `X25519` is not offered (FIPS mode). In testing in October 2026,
+Vault Community and Vault Enterprise negotiated post-quantum groups and Vault Enterprise
+FIPS builds stayed on classical groups.
+
+CNSA 2.0 is not met: key exchange is not restricted to ML-KEM-1024, the cipher suites
+include AES-128, and certificates and signatures stay EC P-384.
 
 ### Teardown
 

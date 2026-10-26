@@ -2966,6 +2966,32 @@ expect_reported_count "clippy-all/clean-fixture-runs-base-plus-one-per-declared-
   "packages linted, " 2 \
   "$here/clippy-all.sh" --root "$fx_clean"
 
+# REJECT ×2: a clippy.toml `disallowed-methods` entry that is not a reachable
+# function refuses nothing, and clippy reports it only as a warning that
+# `-D warnings` does not deny (#564): one unresolvable, one the wrong kind.
+for entry in std::nosuch::f std::vec::Vec; do
+  fx_dis="$(lint_fixture clean)"
+  printf 'disallowed-methods = ["%s"]\n' "$entry" > "$fx_dis/clippy.toml"
+  expect_reject_because "clippy-all/disallowed-entry-$entry-that-is-not-a-function-is-refused" \
+    "a problem in clippy.toml" \
+    "$here/clippy-all.sh" --root "$fx_dis"
+done
+
+# REJECT: the same, for an entry only a FEATURE pass can resolve: clippy names
+# a path in a dependency it has not loaded nowhere, so a base-only scan misses it.
+fx_disf="$(lint_fixture clean)"
+mkdir -p "$fx_disf/crates/extra/src"
+printf '[workspace]\nresolver = "3"\nmembers = ["crates/root", "crates/leaf"]\nexclude = ["crates/extra"]\n' > "$fx_disf/Cargo.toml"
+printf '[package]\nname = "extra"\nversion = "0.0.0"\nedition = "2021"\n' > "$fx_disf/crates/extra/Cargo.toml"
+printf 'pub fn e() {}\n' > "$fx_disf/crates/extra/src/lib.rs"
+printf '[package]\nname = "leaf"\nversion = "0.0.0"\nedition = "2021"\n[dependencies]\nextra = { path = "../extra", optional = true }\n[features]\ndark = ["dep:extra"]\n' > "$fx_disf/crates/leaf/Cargo.toml"
+printf 'pub fn l() -> u8 { 7 }\n#[cfg(feature = "dark")]\npub fn d() { extra::e() }\n' > "$fx_disf/crates/leaf/src/lib.rs"
+( cd "$fx_disf" && cargo generate-lockfile --offline >/dev/null 2>&1 )
+printf 'disallowed-methods = ["extra::nosuch"]\n' > "$fx_disf/clippy.toml"
+expect_reject_because "clippy-all/disallowed-entry-only-a-feature-pass-resolves-is-refused" \
+  "a problem in clippy.toml on feature pass" \
+  "$here/clippy-all.sh" --root "$fx_disf"
+
 # REJECT: a lint in an UNSELECTED crate's TEST target must be caught by the
 # base pass. Kills `--workspace` -> `-p root` (leaf's tests unlinted),
 # dropping `--all-targets` (no tests linted), and dropping `-D warnings`

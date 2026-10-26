@@ -177,7 +177,7 @@ mod tests {
     use crate::{MAX_PASSWORD_BYTES, MAX_TOKEN_BYTES};
 
     fn http() -> Client {
-        crate::install_default_crypto_provider();
+        maknae_crypto::install_default_crypto_provider();
         let d = std::env::temp_dir().join(format!("mv-api-request-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         let params = rcgen::CertificateParams::new(vec!["ca.test".to_string()]).unwrap();

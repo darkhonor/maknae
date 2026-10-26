@@ -4,12 +4,12 @@ use crate::wire::{
     SEAL_VERSION,
 };
 use crate::{SealAad, SealError, SealPrivateKey, SealPublicKey};
-use aws_lc_rs::aead::{Aad, Nonce, RandomizedNonceKey, AES_256_GCM};
-use aws_lc_rs::agreement::{
+use maknae_crypto::aws_lc_rs::aead::{Aad, Nonce, RandomizedNonceKey, AES_256_GCM};
+use maknae_crypto::aws_lc_rs::agreement::{
     agree, agree_ephemeral, EphemeralPrivateKey, ParsedPublicKey, UnparsedPublicKey, ECDH_P384,
 };
-use aws_lc_rs::hkdf::{Salt, HKDF_SHA384};
-use aws_lc_rs::rand::SystemRandom;
+use maknae_crypto::aws_lc_rs::hkdf::{Salt, HKDF_SHA384};
+use maknae_crypto::aws_lc_rs::rand::SystemRandom;
 use std::fmt;
 use zeroize::Zeroizing;
 
@@ -185,7 +185,7 @@ mod tests {
     }
 
     fn agreed_key(
-        private: &aws_lc_rs::agreement::PrivateKey,
+        private: &maknae_crypto::aws_lc_rs::agreement::PrivateKey,
         ephemeral: &[u8],
         recipient: &SealPublicKey,
     ) -> RandomizedNonceKey {
@@ -291,7 +291,8 @@ mod tests {
     fn a_key_agreed_by_another_recipient_private_key_does_not_open() {
         let recipient = SealPrivateKey::generate().unwrap();
         let intruder = SealPrivateKey::generate().unwrap();
-        let ephemeral_key = aws_lc_rs::agreement::PrivateKey::generate(&ECDH_P384).unwrap();
+        let ephemeral_key =
+            maknae_crypto::aws_lc_rs::agreement::PrivateKey::generate(&ECDH_P384).unwrap();
         let point = ephemeral_key.compute_public_key().unwrap();
         let ephemeral = point.as_ref();
         let right = agreed_key(recipient.agreement_key(), ephemeral, recipient.public_key());

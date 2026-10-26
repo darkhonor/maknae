@@ -67,7 +67,10 @@ fn preflight(euid: u32) -> Result<(), String> {
 
 fn sha256(b: &[u8]) -> [u8; 32] {
     let mut out = [0; 32];
-    out.copy_from_slice(aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, b).as_ref());
+    out.copy_from_slice(
+        maknae_crypto::aws_lc_rs::digest::digest(&maknae_crypto::aws_lc_rs::digest::SHA256, b)
+            .as_ref(),
+    );
     out
 }
 

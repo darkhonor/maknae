@@ -535,7 +535,7 @@ async fn execute(verb: Verb) -> Result<bool, String> {
     // `mint()` fails closed with "FIPS provider not active" and the CLI never connects.
     // (Live-smoke-caught: the CLI tests only cover arg-parsing/config-discovery, never the
     // live mint path, so no unit test exercised this.)
-    maknae_vault::install_default_crypto_provider();
+    maknae_crypto::install_default_crypto_provider();
 
     let dir = resolve_config_dir();
 
