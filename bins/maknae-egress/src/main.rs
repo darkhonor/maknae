@@ -35,8 +35,7 @@ use std::sync::Arc;
 const BOUNDS_PATH: &str = "/etc/maknae/egress-bounds.yaml";
 /// The account the kernel runs as. The deputy speaks to nobody else.
 const KERNEL_USER: &str = "_maknae";
-/// EX_SOFTWARE. Any failing exit restarts the deputy (`Restart=on-failure`,
-/// launchd `SuccessfulExit` false).
+/// EX_SOFTWARE.
 const PANIC_EXIT: i32 = 70;
 
 fn fail(msg: impl std::fmt::Display) -> ! {
@@ -224,10 +223,8 @@ mod tests {
             "LoadCredentialEncrypted=", // its own sealed seal key
             "ProtectHome=",             // `yes` here, `read-only` for the daemon's read path
             "ReadWritePaths=",          // the daemon's audit sink; the deputy writes nothing
-            "Restart=",
-            "RestartForceExitStatus=", // a SIGHUP before the daemon's reload handler exists
-            "RestartSec=",
-            "RuntimeDirectory=", // the deputy's is the socket unit's
+            "RestartForceExitStatus=",  // a SIGHUP before the daemon's reload handler exists
+            "RuntimeDirectory=",        // the deputy's is the socket unit's
             "RuntimeDirectoryMode=",
             "StandardError=",
             "StandardOutput=",
@@ -343,6 +340,12 @@ mod tests {
             ]
         );
         assert!(plist.contains("<key>UserName</key>\n  <string>_maknae-egress</string>"));
+        assert!(
+            plist.contains(
+                "<key>KeepAlive</key>\n  <dict>\n    <key>SuccessfulExit</key>\n    <false/>"
+            ),
+            "a panic exits failing, and only a restart on failure brings the deputy back"
+        );
     }
 
     /// A fixed worker count keeps tokio from probing `/proc` and the cgroup

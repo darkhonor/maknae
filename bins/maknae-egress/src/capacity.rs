@@ -6,15 +6,10 @@ use std::sync::Arc;
 /// The kernel's egress admission (`maknae_kernel::BLOCKING_BREAKER_MAX_IN_FLIGHT`).
 pub const KERNEL_ADMISSION: usize = 32;
 
-/// Spare slots above the kernel's admission. A slot is freed just after its
-/// reply is written, and a call the kernel abandoned at its deadline runs to
-/// its own bound, so without headroom a send can meet `AtCapacity` while both
-/// ends are within their limits.
+/// Covers slots still held just after a reply, or by calls the kernel abandoned (#321).
 pub const HEADROOM: usize = 4;
 
-/// Not measured. Once load measurement exists, capacity derives from the
-/// host's cgroup and CPU limits over the measured per-call cost, so resizing
-/// the instance is what scales it (#321).
+/// Not measured; to be derived from the host's limits over the measured per-call cost (#321).
 pub const UNMEASURED_CEILING: usize = KERNEL_ADMISSION + HEADROOM;
 
 pub fn deputy_capacity() -> usize {
