@@ -461,6 +461,10 @@ pub struct EnrollArgs {
     /// The path under the KV mount that holds one folder per user.
     #[arg(long, default_value = "maknae/users")]
     pub user_prefix: String,
+    /// The plane identity key algorithm (`vault.plane_key`): ml-dsa-87, p384 or p521. Must
+    /// equal deploy/vault-pki's plane_key_algorithm.
+    #[arg(long, default_value = "ml-dsa-87")]
+    pub plane_key: String,
     /// Read the Vault token from this file instead of an interactive prompt.
     #[arg(long)]
     pub token_file: Option<PathBuf>,
@@ -548,6 +552,7 @@ pub(crate) struct ProvisionJob {
     pub userpass_mount: String,
     pub kv_mount: String,
     pub user_prefix: String,
+    pub plane_key: String,
     pub vault_ca_pem: String,
     pub root_ca_pem: String,
     pub int_ca_pem: String,
@@ -568,6 +573,7 @@ impl ProvisionJob {
             ("userpass_mount", Yaml::String(self.userpass_mount.clone())),
             ("kv_mount", Yaml::String(self.kv_mount.clone())),
             ("user_prefix", Yaml::String(self.user_prefix.clone())),
+            ("plane_key", Yaml::String(self.plane_key.clone())),
             ("vault_ca_pem", Yaml::String(self.vault_ca_pem.clone())),
             ("root_ca_pem", Yaml::String(self.root_ca_pem.clone())),
             ("int_ca_pem", Yaml::String(self.int_ca_pem.clone())),
@@ -609,6 +615,7 @@ impl ProvisionJob {
             userpass_mount: get_str("userpass_mount")?,
             kv_mount: get_str("kv_mount")?,
             user_prefix: get_str("user_prefix")?,
+            plane_key: get_str("plane_key")?,
             vault_ca_pem: get_str("vault_ca_pem")?,
             root_ca_pem: get_str("root_ca_pem")?,
             int_ca_pem: get_str("int_ca_pem")?,
@@ -633,12 +640,14 @@ fn build_daemon_yaml(
     macos: bool,
     socket_path: Option<&str>,
     principal: &Operator,
+    plane_key: &str,
 ) -> String {
     let mut vault_pairs = vec![
         ("addr", Yaml::String(vault_addr.to_string())),
         ("approle_mount", Yaml::String(approle_mount.to_string())),
         ("pki_int_mount", Yaml::String(pki_int_mount.to_string())),
         ("user_auth", user_auth_yaml(userpass_mount)),
+        ("plane_key", Yaml::String(plane_key.to_string())),
     ];
     if let Some(p) = insecure_plaintext_path {
         vault_pairs.push((
@@ -692,6 +701,7 @@ fn build_cli_yaml(
     userpass_mount: &str,
     kv_mount: &str,
     user_prefix: &str,
+    plane_key: &str,
     macos: bool,
 ) -> String {
     let mut top = vec![
@@ -710,6 +720,7 @@ fn build_cli_yaml(
                 ("user_auth", user_auth_yaml(userpass_mount)),
                 ("kv_mount", Yaml::String(kv_mount.to_string())),
                 ("user_prefix", Yaml::String(user_prefix.to_string())),
+                ("plane_key", Yaml::String(plane_key.to_string())),
             ]),
         ),
     ];
@@ -1146,6 +1157,12 @@ fn insecure_plaintext_path(args: &EnrollArgs) -> Option<PathBuf> {
 }
 
 fn check_vault_layout(args: &EnrollArgs) -> Result<(), EnrollError> {
+    if maknae_vault::PlaneKey::parse(&args.plane_key).is_none() {
+        return Err(EnrollError::InvalidVaultLayout(format!(
+            "--plane-key `{}` is not one of ml-dsa-87, p384, p521",
+            args.plane_key
+        )));
+    }
     maknae_vault::UserAuth::new(maknae_vault::UserAuthMethod::Userpass, &args.userpass_mount)
         .map_err(|e| EnrollError::InvalidVaultLayout(format!("--userpass-mount: {e}")))?;
     for (flag, value) in [
@@ -2468,6 +2485,7 @@ async fn finish_enrollment(
         macos,
         socket_path,
         operator,
+        &args.plane_key,
     );
     let enroll_state_yaml = build_enroll_state_yaml(&args.approle_mount, minted);
     // `target` is the sealed daemon secret's own row path — the single source
@@ -2611,6 +2629,7 @@ async fn finish_enrollment(
         userpass_mount: args.userpass_mount.clone(),
         kv_mount: args.kv_mount.clone(),
         user_prefix: args.user_prefix.clone(),
+        plane_key: args.plane_key.clone(),
         vault_ca_pem: String::from_utf8_lossy(vault_ca_pem).to_string(),
         root_ca_pem: root_ca_pem.to_string(),
         int_ca_pem: int_ca_pem.to_string(),
@@ -3200,6 +3219,7 @@ mod tests {
             userpass_mount: "maknae-userpass".to_string(),
             kv_mount: "maknae-kv".to_string(),
             user_prefix: "maknae/users".to_string(),
+            plane_key: "ml-dsa-87".to_string(),
             token_file: None,
             cli_dir: None,
             rotate: false,
@@ -3233,6 +3253,7 @@ mod tests {
             "corp-userpass",
             "corp-kv",
             "corp/users",
+            "p521",
             false,
         );
         let d = std::env::temp_dir().join(format!("maknae-enroll-cli-yaml-{}", std::process::id()));
@@ -3253,6 +3274,7 @@ mod tests {
         assert_eq!(vc.kv_mount.as_deref(), Some("corp-kv"));
         assert_eq!(vc.user_prefix.as_deref(), Some("corp/users"));
         assert_eq!(vc.pki_int_mount, "pm");
+        assert_eq!(vc.plane_key, maknae_vault::PlaneKey::P521);
         assert!(!text.contains("approle_mount"), "{text}");
     }
 
@@ -3294,6 +3316,7 @@ mod tests {
         assert!(refused(|a| a.userpass_mount = "maknae userpass".into())
             .starts_with("--userpass-mount"));
         assert!(refused(|a| a.kv_mount = "maknae-kv/data".into()).starts_with("--kv-mount"));
+        assert!(refused(|a| a.plane_key = "p256".into()).starts_with("--plane-key `p256`"));
         assert!(refused(|a| a.user_prefix = "/maknae/users".into()).starts_with("--user-prefix"));
         assert!(refused(|a| a.user_prefix = "maknae/../users".into()).starts_with("--user-prefix"));
         assert!(
@@ -3331,8 +3354,10 @@ mod tests {
             false,
             None,
             &op,
+            "p384",
         );
         assert!(!linux.contains("transport"));
+        assert!(linux.contains("plane_key: p384"), "{linux}");
 
         let macos = build_daemon_yaml(
             "dev-01",
@@ -3345,6 +3370,7 @@ mod tests {
             true,
             Some(maknae_config::MACOS_DAEMON_SOCKET_PATH),
             &op,
+            "p384",
         );
         assert!(macos.contains("transport"));
         assert!(macos.contains("socket_path"));
@@ -3377,6 +3403,7 @@ mod tests {
             true,
             Some(maknae_config::MACOS_DAEMON_SOCKET_PATH),
             &op,
+            "p384",
         ));
         let cli = |macos| {
             socket(build_cli_yaml(
@@ -3386,6 +3413,7 @@ mod tests {
                 "maknae-userpass",
                 "maknae-kv",
                 "maknae/users",
+                "ml-dsa-87",
                 macos,
             ))
         };
@@ -3445,6 +3473,7 @@ mod tests {
             false,
             None,
             &op,
+            "p384",
         );
         let v = maknae_config::load_str(&text).unwrap();
         match section(&v, "principal") {
@@ -3733,6 +3762,7 @@ lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
             userpass_mount: "corp-userpass".to_string(),
             kv_mount: "corp-kv".to_string(),
             user_prefix: "corp/users".to_string(),
+            plane_key: "p521".to_string(),
             vault_ca_pem: "-----BEGIN CERTIFICATE-----\nA\n-----END CERTIFICATE-----\n".to_string(),
             root_ca_pem: "-----BEGIN CERTIFICATE-----\nB\n-----END CERTIFICATE-----\n".to_string(),
             int_ca_pem: "-----BEGIN CERTIFICATE-----\nC\n-----END CERTIFICATE-----\n".to_string(),

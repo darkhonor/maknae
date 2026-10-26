@@ -1,6 +1,7 @@
 //! Pure CSR-shape predicates (T1, 0-missed): assert an empty subject, exactly one
-//! URI SAN, and the configured `PlaneKey` by algorithm identifier (#573). `generate_plane_csr` (the rcgen keygen I/O) lives in
-//! `csr_gen.rs` (T3) and self-checks its output with these predicates.
+//! URI SAN, and the configured `PlaneKey` by algorithm identifier (#573).
+//! `generate_plane_csr` (the rcgen keygen I/O) lives in `csr_gen.rs` (T3) and
+//! self-checks its output with these predicates.
 use crate::PlaneKey;
 use x509_parser::certification_request::X509CertificationRequest;
 use x509_parser::extensions::{GeneralName, ParsedExtension};

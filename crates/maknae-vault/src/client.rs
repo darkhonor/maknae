@@ -10,8 +10,8 @@ use crate::secret_io::read_daemon_secret;
 use crate::secret_source::{resolve_daemon_secret_source, CredentialSourceKind};
 use crate::{
     generate_plane_csr, load_ca_pin, sign_refusal_detail, vault_config_from_document,
-    verify::verify_plane_uri_san, Plane, PlaneKey, UserToken, VaultConfig, VaultError,
-    VAULT_SECTION,
+    vault_error_text, verify::verify_plane_uri_san, Plane, PlaneKey, UserToken, VaultConfig,
+    VaultError, VAULT_SECTION,
 };
 use arc_swap::ArcSwapOption;
 use maknae_config::{load_config, Document, SectionSpec};
@@ -258,7 +258,7 @@ async fn sign_leaf_for(
         None,
     )
     .await
-    .map_err(|e| VaultError::Sign(sign_refusal_detail(&e.to_string(), plane_key)))?;
+    .map_err(|e| VaultError::Sign(sign_refusal_detail(&vault_error_text(&e), plane_key)))?;
     // Defense-in-depth: the leaf Vault returned must carry exactly our plane SAN.
     let leaf_der = pem_to_der(&resp.certificate)?;
     verify_plane_uri_san(&leaf_der, plane, deployment_id)
@@ -611,12 +611,12 @@ impl PlaneClient {
     pub(crate) fn deployment_id(&self) -> &str {
         &self.deployment_id
     }
-    /// This client's plane (crate-internal — used to assert `expected_peer == plane.peer()`).
     /// The key algorithm this plane mints its identity with (`vault.plane_key`).
     pub fn plane_key(&self) -> PlaneKey {
         self.plane_key
     }
 
+    /// This client's plane (crate-internal — used to assert `expected_peer == plane.peer()`).
     pub(crate) fn plane(&self) -> Plane {
         self.plane
     }

@@ -70,6 +70,12 @@ impl Posture {
     }
 }
 
+/// The boot posture record's reason: the posture is the outcome; the reason names the
+/// plane identity's key algorithm (#573).
+pub fn boot_reason(plane_key: &str) -> String {
+    format!("boot credential posture recorded; plane key: {plane_key}")
+}
+
 /// The pure `(source, marker) -> posture` decision (spec §5.2) — a CLOSED map over
 /// every combination:
 ///
@@ -99,12 +105,6 @@ impl Posture {
 /// doesn't match this host's path) — it does not close the same-host,
 /// root-forges-both gap; a root-level adversary remains outside this
 /// control's threat model.
-/// The boot posture record's reason: the posture is the outcome; the reason names the
-/// plane identity's key algorithm (#573).
-pub fn boot_reason(plane_key: &str) -> String {
-    format!("boot credential posture recorded; plane key: {plane_key}")
-}
-
 pub fn determine(
     source: CredentialSource,
     marker: Option<&PostureMarker>,

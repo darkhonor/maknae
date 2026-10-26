@@ -3,7 +3,7 @@
 
 locals {
   plane_key = {
-    "ml-dsa-87" = { key_type = "ml-dsa", key_bits = 0, parameter_set = "ml-dsa-87", signature_bits = null }
+    "ml-dsa-87" = { key_type = "ml-dsa", key_bits = null, parameter_set = "ml-dsa-87", signature_bits = null }
     "p384"      = { key_type = "ec", key_bits = 384, parameter_set = null, signature_bits = 384 }
     "p521"      = { key_type = "ec", key_bits = 521, parameter_set = null, signature_bits = 512 }
   }[var.plane_key_algorithm]
@@ -28,7 +28,6 @@ resource "vault_pki_secret_backend_root_cert" "maknae_root" {
   ttl            = "${var.root_ttl_seconds}s" # backend cert ttl is a DURATION STRING
   issuer_name    = "maknae-root"
 
-  # A changed algorithm would replace the CA and orphan every enrolled CA pin (#573).
   lifecycle {
     prevent_destroy = true
   }

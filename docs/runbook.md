@@ -200,13 +200,13 @@ Certificates and signatures follow `vault.plane_key`: ML-DSA-87 by default.
 1. Re-apply the PKI with the new `plane_key_algorithm`. The root and intermediate carry
    `prevent_destroy`, so moving an existing hierarchy is a deliberate rebuild (see
    `deploy/vault-pki/README.md`, "Upgrading an existing PKI").
-2. Re-run `maknae enroll` on each host to refresh the CA pins.
-3. Set `vault.plane_key` in the daemon's and every user's `maknae.yaml`.
-4. Restart `maknaed`.
+2. Re-run `maknae enroll --plane-key <value>` on each host: it refreshes the CA pins and writes
+   `vault.plane_key` into the daemon's and the user's `maknae.yaml`.
+3. Restart `maknaed`.
 
-A mismatch fails closed at the first mint: Vault refuses the CSR (`pki/sign rejected: … role
-requires keys of type … (the Vault PKI role issues a different key type than vault.plane_key …;
-set vault.plane_key to match deploy/vault-pki's plane_key_algorithm)`). A plane chained to a
+A mismatch fails closed at the first mint: Vault refuses the CSR, for example `pki/sign
+rejected: Vault returned 400: role requires keys of type ec (check that vault.plane_key ml-dsa-87
+matches deploy/vault-pki's plane_key_algorithm, and that Vault is 2.2.0 or later for ml-dsa-87)`. A plane chained to a
 different CA fails the pinned chain at the handshake.
 
 ### Teardown

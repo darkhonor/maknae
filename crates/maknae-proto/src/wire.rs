@@ -983,8 +983,7 @@ pub struct StatusView {
     /// build carries. An operator reading a ceiling refusal needs to know
     /// which ladder ranked it.
     pub classification_policy: String,
-    /// The plane identity's key algorithm, `vault.plane_key` (#573). Absent from a
-    /// daemon that predates it.
+    /// The plane identity's key algorithm, `vault.plane_key` (#573).
     #[serde(default)]
     pub plane_key: Option<String>,
     /// The kernel graph store's revision counter (#488). Absent from a daemon

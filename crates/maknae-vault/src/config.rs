@@ -161,13 +161,25 @@ impl PlaneKey {
     }
 }
 
-/// A `pki/sign` refusal's message, with a hint when Vault refused the key type: the PKI
-/// role issues a different algorithm than `vault.plane_key`.
+/// Vault's own messages for a refused request. vaultrs's `Display` for `APIError` carries
+/// only the status code, so the messages are read from the variant.
+pub fn vault_error_text(e: &vaultrs::error::ClientError) -> String {
+    match e {
+        vaultrs::error::ClientError::APIError { code, errors } if !errors.is_empty() => {
+            format!("Vault returned {code}: {}", errors.join("; "))
+        }
+        other => other.to_string(),
+    }
+}
+
+/// A `pki/sign` refusal's message, with a hint when Vault's message concerns the key: the
+/// PKI role issues a different algorithm than `vault.plane_key`, or the Vault predates the
+/// algorithm.
 pub fn sign_refusal_detail(vault_message: &str, plane_key: PlaneKey) -> String {
-    if vault_message.contains("requires keys of type") {
+    if vault_message.to_ascii_lowercase().contains("key") {
         format!(
-            "{vault_message} (the Vault PKI role issues a different key type than vault.plane_key \
-             {}; set vault.plane_key to match deploy/vault-pki's plane_key_algorithm)",
+            "{vault_message} (check that vault.plane_key {} matches deploy/vault-pki's \
+             plane_key_algorithm, and that Vault is 2.2.0 or later for ml-dsa-87)",
             plane_key.as_str()
         )
     } else {
@@ -433,22 +445,43 @@ mod tests {
     }
 
     #[test]
-    fn a_key_type_refusal_names_plane_key_and_others_pass_through() {
-        let m = sign_refusal_detail(
-            "1 error occurred: role requires keys of type ec",
-            PlaneKey::MlDsa87,
-        );
-        assert!(
-            m.starts_with("1 error occurred: role requires keys of type ec ("),
-            "{m}"
-        );
-        assert!(
-            m.contains("vault.plane_key ml-dsa-87") && m.contains("plane_key_algorithm"),
-            "{m}"
-        );
+    fn vault_error_text_reads_the_messages_vaultrs_display_drops() {
+        let e = vaultrs::error::ClientError::APIError {
+            code: 400,
+            errors: vec!["role requires keys of type ec".into(), "second".into()],
+        };
         assert_eq!(
-            sign_refusal_detail("permission denied", PlaneKey::P384),
-            "permission denied"
+            vault_error_text(&e),
+            "Vault returned 400: role requires keys of type ec; second"
+        );
+        let bare = vaultrs::error::ClientError::APIError {
+            code: 503,
+            errors: vec![],
+        };
+        assert_eq!(vault_error_text(&bare), bare.to_string());
+        assert_eq!(
+            vault_error_text(&vaultrs::error::ClientError::ResponseEmptyError),
+            vaultrs::error::ClientError::ResponseEmptyError.to_string()
+        );
+    }
+
+    #[test]
+    fn a_key_refusal_names_plane_key_and_others_pass_through() {
+        for msg in [
+            "Vault returned 400: role requires keys of type ec",
+            "Vault returned 400: role requires a minimum of 521 Key bits",
+            "Vault returned 400: unknown public key algorithm",
+        ] {
+            let m = sign_refusal_detail(msg, PlaneKey::MlDsa87);
+            assert!(m.starts_with(&format!("{msg} (")), "{m}");
+            assert!(
+                m.contains("vault.plane_key ml-dsa-87") && m.contains("plane_key_algorithm"),
+                "{m}"
+            );
+        }
+        assert_eq!(
+            sign_refusal_detail("Vault returned 403: permission denied", PlaneKey::P384),
+            "Vault returned 403: permission denied"
         );
     }
 

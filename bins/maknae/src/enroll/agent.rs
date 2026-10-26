@@ -1722,6 +1722,7 @@ mod tests {
             false,
             None,
             &op,
+            "ml-dsa-87",
         );
         assert_eq!(
             parse_host_enrollment(&text).unwrap(),

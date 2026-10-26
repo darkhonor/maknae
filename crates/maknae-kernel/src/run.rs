@@ -7711,7 +7711,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
     fn write_common_fixture(d: &Dir, principal_block: &str) {
         let yaml = format!(
             "core:\n  deployment_id: dev-01\n\
-             vault:\n  addr: https://v.example:8200\n\
+             vault:\n  addr: https://v.example:8200\n  plane_key: p521\n\
              transport:\n  socket_path: {}\n\
              audit:\n  jsonl_path: {}\n\
              {}",
@@ -8110,6 +8110,10 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             // $CREDENTIALS_DIRECTORY resolves to CredentialsDirectory; with no
             // posture marker file present that's Unverified (spec §5.2 closed map).
             assert_eq!(posture_rec.outcome.posture, "unverified");
+            assert_eq!(
+                posture_rec.outcome.reason,
+                crate::posture::boot_reason("p521")
+            );
             assert_eq!(posture_rec.subject.user, None);
             assert_eq!(posture_rec.source.uid, nix::unistd::geteuid().as_raw());
             // ADR-0008 decision 1, fourth layer (#154): the trail records the

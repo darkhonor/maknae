@@ -1886,6 +1886,7 @@ mod tests {
                 assert_eq!(args.userpass_mount, "maknae-userpass");
                 assert_eq!(args.kv_mount, "maknae-kv");
                 assert_eq!(args.user_prefix, "maknae/users");
+                assert_eq!(args.plane_key, "ml-dsa-87");
                 assert!(!args.rotate);
                 assert!(!args.rotate_seal_key);
                 assert!(!args.insecure_plaintext_secret);

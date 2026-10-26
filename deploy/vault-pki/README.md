@@ -87,8 +87,8 @@ The Rust plane-cert client (`maknae-vault`) and the mTLS transport consume this 
 `plane_key_algorithm` (`ml-dsa-87` by default, `p384`, `p521`) sets the key algorithm of the
 root, the intermediate and both plane roles together, so a chain is never weaker than its
 leaves. It **must equal `vault.plane_key`** in the daemon's and every user's `maknae.yaml`; a
-mismatch fails closed at the first mint (Vault refuses the CSR's key type, and the CLI's or
-daemon's error names both settings).
+mismatch fails closed at the first mint (Vault refuses the CSR's key type or size, and a refusal
+whose message concerns the key adds a hint naming both settings).
 
 - **The preferred setup** is the default: an all-ML-DSA-87 hierarchy (CNSA 2.0 signatures) on
   Vault 2.2.0+ Community. ML-DSA on Vault Enterprise FIPS builds (BoringCrypto, CMVP #4735)
@@ -113,11 +113,12 @@ plan instead. The guard also blocks any other change that replaces them (`ttl`,
 `common_name`, `issuer_name`) and `terraform destroy`; that is its purpose.
 
 - **To keep an existing EC P-384 hierarchy:** before the first apply after this change, set
-  `plane_key_algorithm = "p384"`, and set `vault.plane_key: p384` in `/etc/maknae/maknae.yaml`
-  and in each user's `maknae.yaml`. An install that changes neither fails closed at mint.
+  `plane_key_algorithm = "p384"`, and pass `--plane-key p384` to every `maknae enroll` (which
+  writes `vault.plane_key` into `/etc/maknae/maknae.yaml` and each user's `maknae.yaml`), or set
+  it in those files by hand. An install that changes neither fails closed at mint.
 - **To move to ML-DSA-87:** a deliberate rebuild. Remove the guard (or stand up fresh mounts),
-  apply, re-run `maknae enroll` on every host to refresh the CA pins, set `vault.plane_key`,
-  and restart.
+  apply, re-run `maknae enroll --plane-key ml-dsa-87` on every host to refresh the CA pins and
+  write the key, and restart.
 
 ## Run it
 
