@@ -188,8 +188,9 @@ CLIPPY_PIN=(--config 'env.CLIPPY_ARGS.value=""' --config 'env.CLIPPY_ARGS.force=
 # manifest -- the sanctioned spelling of `#![allow]`, i.e. source-level
 # suppression, which a lint gate cannot and should not override.
 meta_err="$(mktemp "${TMPDIR:-/tmp}/maknae-clippy-all.XXXXXXXX")"
+lint_log="$(mktemp "${TMPDIR:-/tmp}/maknae-clippy-all.XXXXXXXX")"
 cleanup() {
-  rm -f "$meta_err"
+  rm -f "$meta_err" "$lint_log"
   [ -n "${pin_dir:-}" ] && rm -rf "$pin_dir"
   [ -n "${gate_cwd:-}" ] && rm -rf "$gate_cwd"
   [ -n "${gate_lock:-}" ] && rmdir "$gate_lock" 2>/dev/null
@@ -402,8 +403,15 @@ fi
 ran=0
 run_lints() {
   fresh_target
-  genv "$CARGO_CLIPPY_BIN" clippy --locked --manifest-path "$root/Cargo.toml" --workspace --all-targets "${CLIPPY_PIN[@]}" -- -D warnings \
-    || fail "clippy failed on the base --workspace pass"
+  if ! genv "$CARGO_CLIPPY_BIN" clippy --locked --manifest-path "$root/Cargo.toml" --workspace --all-targets "${CLIPPY_PIN[@]}" -- -D warnings 2>"$lint_log"; then
+    cat "$lint_log" >&2
+    fail "clippy failed on the base --workspace pass"
+  fi
+  cat "$lint_log" >&2
+  # An unresolvable `disallowed-methods` path is only a warning that `-D warnings` does not deny (#564).
+  if grep -q 'does not refer to a reachable function' "$lint_log"; then
+    fail "clippy.toml names a disallowed path clippy cannot resolve, so it refuses nothing (see above)"
+  fi
   ran=$((ran + 1))
   while IFS= read -r pf; do
     [ -n "$pf" ] || continue

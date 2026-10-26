@@ -32,9 +32,7 @@ fn env_or(key: &str, default: &str) -> String {
 #[tokio::test]
 #[ignore = "needs live Vault + an operator's own token (operator-gated)"]
 async fn operator_client_role_id_secret_id_ca_chain_roundtrip() {
-    rustls::crypto::aws_lc_rs::default_provider()
-        .install_default()
-        .ok();
+    maknae_vault::crypto_provider().install_default().ok();
 
     let addr = std::env::var("MAKNAE_VAULT_ADDR")
         .expect("set MAKNAE_VAULT_ADDR (e.g. https://vault.example:8200)");

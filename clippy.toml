@@ -1,0 +1,9 @@
+disallowed-methods = [
+  { path = "rustls::crypto::aws_lc_rs::default_provider", reason = "use maknae_vault::crypto_provider() (#564)" },
+  { path = "rustls::ClientConfig::builder", reason = "installs the stock provider; use builder_with_provider(maknae_vault::crypto_provider()) (#564)" },
+  { path = "rustls::ClientConfig::builder_with_protocol_versions", reason = "installs the stock provider; use builder_with_provider(maknae_vault::crypto_provider()) (#564)" },
+  { path = "rustls::ServerConfig::builder", reason = "installs the stock provider; use builder_with_provider(maknae_vault::crypto_provider()) (#564)" },
+  { path = "rustls::ServerConfig::builder_with_protocol_versions", reason = "installs the stock provider; use builder_with_provider(maknae_vault::crypto_provider()) (#564)" },
+  { path = "rustls::server::WebPkiClientVerifier::builder", reason = "installs the stock provider; use builder_with_provider (#564)" },
+  { path = "rustls::client::WebPkiServerVerifier::builder", reason = "installs the stock provider; use builder_with_provider (#564)" },
+]

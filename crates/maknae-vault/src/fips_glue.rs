@@ -15,7 +15,8 @@
 //!
 //! T3 (a process-global default is not deterministically coverable) + mutation-
 //! excluded (`mutants.toml`). The pure `fips::fips_result` carries the T1 logic.
-use crate::{fips::fips_result, VaultError};
+use crate::fips::{crypto_provider, fips_result, kx_groups_result};
+use crate::VaultError;
 
 /// Install the aws-lc-rs FIPS provider as the process-default `CryptoProvider`, once.
 /// Idempotent: a pre-existing default (or a second call) is a no-op. The daemon `main`
@@ -25,7 +26,7 @@ use crate::{fips::fips_result, VaultError};
 /// remains the authoritative gate: this installer only makes a FIPS build's default
 /// available; it never masks a non-FIPS build (whose `.fips()` is false → refuse).
 pub fn install_default_crypto_provider() {
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let _ = crypto_provider().install_default();
 }
 
 /// Assert the process is running the aws-lc-rs FIPS provider. Fail-closed:
@@ -33,7 +34,9 @@ pub fn install_default_crypto_provider() {
 pub fn assert_fips_provider() -> Result<(), VaultError> {
     let provider =
         rustls::crypto::CryptoProvider::get_default().ok_or(VaultError::FipsUnavailable)?;
-    fips_result(provider.fips())
+    fips_result(provider.fips())?;
+    let names: Vec<_> = provider.kx_groups.iter().map(|g| g.name()).collect();
+    kx_groups_result(&names)
 }
 
 #[cfg(test)]
@@ -42,10 +45,7 @@ mod tests {
 
     #[test]
     fn asserts_fips_true_on_this_build() {
-        // With rustls[fips] + aws-lc-rs[fips], installing the default is FIPS.
-        rustls::crypto::aws_lc_rs::default_provider()
-            .install_default()
-            .ok();
+        install_default_crypto_provider();
         assert!(assert_fips_provider().is_ok());
     }
 }

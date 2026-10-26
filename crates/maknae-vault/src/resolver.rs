@@ -37,13 +37,11 @@ mod tests {
     use super::*;
 
     fn dummy_certified_key() -> Arc<CertifiedKey> {
-        rustls::crypto::aws_lc_rs::default_provider()
-            .install_default()
-            .ok();
+        crate::crypto_provider().install_default().ok();
         let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
         let params = rcgen::CertificateParams::new(vec![]).unwrap();
         let cert = params.self_signed(&kp).unwrap();
-        let key = rustls::crypto::aws_lc_rs::default_provider()
+        let key = crate::crypto_provider()
             .key_provider
             .load_private_key(rustls::pki_types::PrivateKeyDer::Pkcs8(
                 kp.serialize_der().into(),

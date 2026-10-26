@@ -12,9 +12,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[tokio::test]
 #[ignore = "needs live Vault + a kernel SecretID and a CLI maknae login token + a real UDS (operator-gated)"]
 async fn plane_to_plane_roundtrip() {
-    rustls::crypto::aws_lc_rs::default_provider()
-        .install_default()
-        .ok();
+    maknae_vault::crypto_provider().install_default().ok();
     let kdir = std::env::var("MAKNAE_KERNEL_CONFIG_DIR").expect("set MAKNAE_KERNEL_CONFIG_DIR");
     let cdir = std::env::var("MAKNAE_CLI_CONFIG_DIR").expect("set MAKNAE_CLI_CONFIG_DIR");
     // The socket's parent dir must be owner-only (PlaneListener::bind refuses a

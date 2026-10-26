@@ -8,6 +8,8 @@ use std::path::PathBuf;
 pub enum VaultError {
     /// The process is not running the aws-lc-rs FIPS provider (or none installed).
     FipsUnavailable,
+    /// The process provider's key-exchange groups are not exactly Maknae's list (#564).
+    KxGroupsDrift,
     /// A config-load failure from `maknae-config`.
     Config(maknae_config::ConfigError),
     /// A required config key was absent.
@@ -154,6 +156,10 @@ impl std::fmt::Display for VaultError {
             VaultError::FipsUnavailable => write!(
                 f,
                 "FIPS provider not active: the process default is not aws-lc-rs FIPS (refusing to start)"
+            ),
+            VaultError::KxGroupsDrift => write!(
+                f,
+                "the process TLS provider does not carry Maknae's key-exchange groups (refusing to start)"
             ),
             VaultError::Config(e) => write!(f, "config error: {e}"),
             VaultError::InvalidKeyVaultPath(m) => write!(f, "invalid key_vault_path: {m}"),

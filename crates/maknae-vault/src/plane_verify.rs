@@ -37,7 +37,7 @@ impl PlaneClientCertVerifier {
         deployment_id: &str,
     ) -> Result<Arc<Self>, VaultError> {
         let roots = Arc::new(root_store(ca)?);
-        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        let provider = Arc::new(crate::crypto_provider());
         let inner = WebPkiClientVerifier::builder_with_provider(roots, provider)
             .build()
             .map_err(|e| VaultError::Handshake(format!("client verifier: {e}")))?;
@@ -106,7 +106,7 @@ impl PlaneServerCertVerifier {
     ) -> Result<Arc<Self>, VaultError> {
         Ok(Arc::new(Self {
             roots: root_store(ca)?,
-            provider: Arc::new(rustls::crypto::aws_lc_rs::default_provider()),
+            provider: Arc::new(crate::crypto_provider()),
             expect,
             deployment_id: deployment_id.to_string(),
         }))
@@ -174,9 +174,7 @@ mod tests {
     use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 
     fn provider() {
-        rustls::crypto::aws_lc_rs::default_provider()
-            .install_default()
-            .ok();
+        crate::crypto_provider().install_default().ok();
     }
 
     /// The CA keeps its `CertificateParams`, not its `Certificate`: rcgen 0.14
