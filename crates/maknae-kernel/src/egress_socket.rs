@@ -248,8 +248,7 @@ impl Egress for SocketEgress {
         req: EgressRequest,
     ) -> Result<EgressReply, EgressFailure> {
         let deadline_at = Instant::now() + self.timeout;
-        let stream = UnixStream::connect(&self.path)
-            .map_err(|e| EgressFailure::DeputyUnreachable(e.to_string()))?;
+        let stream = UnixStream::connect(&self.path).map_err(connect_failure)?;
 
         // BEFORE the first write. Moving this below the write hands prompt
         // content and a Vault path to an unauthenticated peer. A capture error
@@ -352,6 +351,19 @@ impl Egress for SocketEgress {
                 Err(EgressFailure::ReplyUnusable { defect, usage })
             }
         }
+    }
+}
+
+/// Only a deputy that is not running (refused, socket gone, backlog full) is
+/// unavailability; any other connect error is a deployment fault and stays a
+/// generic transport failure (#321).
+fn connect_failure(e: std::io::Error) -> EgressFailure {
+    use std::io::ErrorKind as K;
+    match e.kind() {
+        K::ConnectionRefused | K::NotFound | K::WouldBlock => {
+            EgressFailure::DeputyUnreachable(e.to_string())
+        }
+        _ => EgressFailure::Transport(e.to_string()),
     }
 }
 
@@ -780,6 +792,31 @@ mod tests {
         let (path, _seen) = fake_deputy(d.path(), None);
         let e = SocketEgress::new(path, 0, Duration::from_secs(1), 64 * 1024);
         assert_eq!(e.ready(), Ok(()));
+    }
+
+    #[test]
+    fn only_a_deputy_that_is_not_running_is_unreachable() {
+        use std::io::{Error, ErrorKind as K};
+        for k in [K::ConnectionRefused, K::NotFound, K::WouldBlock] {
+            assert!(
+                matches!(
+                    connect_failure(Error::from(k)),
+                    EgressFailure::DeputyUnreachable(_)
+                ),
+                "{k:?}"
+            );
+        }
+        for k in [
+            K::PermissionDenied,
+            K::NotADirectory,
+            K::InvalidInput,
+            K::Other,
+        ] {
+            assert!(
+                matches!(connect_failure(Error::from(k)), EgressFailure::Transport(_)),
+                "{k:?}"
+            );
+        }
     }
 
     #[test]

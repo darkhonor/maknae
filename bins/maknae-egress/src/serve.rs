@@ -371,15 +371,15 @@ fn spawn_contained(
                 // A plain write: `eprintln!` panics when stderr fails.
                 let _ = writeln!(
                     std::io::stderr(),
-                    "maknae-egress: a connection panicked; that connection alone was refused"
+                    "maknae-egress: a connection panicked; only that connection was affected"
                 );
                 if !committed.load(Ordering::Acquire) {
                     if let Ok(mut s) = spare {
                         let _ = write_reply(&mut s, &unsent, io_timeout, &committed);
                     }
                 }
-                // A payload whose destructor panics would unwind this thread.
-                std::mem::forget(payload);
+                // Last: a payload whose destructor panics ends only this thread.
+                drop(payload);
             }
         })
         .map(drop)
@@ -963,10 +963,10 @@ mod tests {
         eventually("the slot was kept", || slots.in_use() == 0);
     }
 
-    /// A payload whose destructor panics is never dropped, so it cannot
-    /// unwind the thread past the refusal, and the deputy keeps serving.
+    /// A payload is freed, not leaked, even one whose destructor panics: that
+    /// ends only the connection's own thread, and the deputy keeps serving.
     #[test]
-    fn a_panic_whose_payload_panics_on_drop_is_still_contained() {
+    fn a_panic_whose_payload_panics_on_drop_is_freed_and_still_contained() {
         static DROPPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         struct Bomb;
         impl Drop for Bomb {
@@ -990,8 +990,8 @@ mod tests {
         eventually("the slot was kept", || slots.in_use() == 0);
         assert!(matches!(ask(&path), EgressFrameReply::Reply(_)));
         assert!(
-            !DROPPED.load(std::sync::atomic::Ordering::SeqCst),
-            "the payload was dropped"
+            DROPPED.load(std::sync::atomic::Ordering::SeqCst),
+            "the payload was leaked"
         );
     }
 

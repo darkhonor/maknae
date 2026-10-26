@@ -126,10 +126,10 @@ jobs:
         run: cargo fmt --all --check
       - name: Unsafe confinement (ADR-0027)
         run: ci/gates/unsafe-confinement.sh
-      - name: Panic strategy must be unwind (maknae-config catch_unwind boundary depends on it)
+      - name: Panic strategy must be unwind (the catch_unwind boundaries in maknae-security, maknae-config and maknae-egress depend on it)
         run: |
           if grep -rEln 'panic[[:space:]]*=[[:space:]]*["'\'']abort["'\'']' Cargo.toml crates/*/Cargo.toml bins/*/Cargo.toml .cargo/config.toml 2>/dev/null; then
-            echo "ERROR: a manifest sets panic = \"abort\"; maknae-config's fail-closed parse boundary requires unwind"; exit 1
+            echo "ERROR: a manifest sets panic = \"abort\"; the catch_unwind boundaries in maknae-security, maknae-config and maknae-egress require unwind"; exit 1
           fi
       # #74: the package set is DERIVED from `cargo metadata`, not listed here.
       # The old hand-written loop named 13 of 21 workspace members, and a copy of

@@ -176,6 +176,7 @@ impl Plane for FixturePlane {
             }
             RespResult::Err(e) => match e.code {
                 maknae_proto::ProtoErrCode::ReplyUnusable(d) => Err(PlaneError::ReplyUnusable(d)),
+                maknae_proto::ProtoErrCode::EgressUnavailable => Err(PlaneError::Unavailable),
                 _ => Err(PlaneError::Refused),
             },
             other => Err(PlaneError::Transport(format!("{other:?}"))),
