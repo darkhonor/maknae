@@ -1,7 +1,7 @@
 //! maknae-vault — shared, NON-PRIVILEGED Vault plane-cert client (ADR-0005, amended
 //! by ADR-0018). Stage 1: config -> AppRole auth (standing raw SecretID) -> P-384 CSR ->
 //! pki/sign -> memory-only leaf, plus the CA-pin loader + URI-SAN verifier.
-//! FIPS: the runtime `.fips()` assertion (assert_fips_provider, in fips_glue) is
+//! FIPS: the runtime `.fips()` assertion (`maknae_crypto::assert_fips_provider`) is
 //! authoritative; the load-bearing install-before-first-Vault-client ordering keeps
 //! vaultrs's reqwest on the FIPS provider (spec §6.1).
 #![forbid(unsafe_code)]
@@ -20,8 +20,6 @@ mod csr_gen;
 mod digest;
 mod env;
 mod error;
-mod fips;
-mod fips_glue;
 mod graph_key_io;
 mod http;
 mod keychain;
@@ -73,8 +71,6 @@ pub use csr_gen::generate_plane_csr;
 pub use digest::{sha256_hex, Sha256};
 pub use env::{scrub_with, NEVER_SCRUB_ENV, SCRUBBED_ENV};
 pub use error::VaultError;
-pub use fips::crypto_provider;
-pub use fips_glue::{assert_fips_provider, install_default_crypto_provider};
 pub use graph_key_io::read_graph_key;
 pub use keychain_policy::{
     daemon_keychain_pointer, gate, graph_keychain_pointer, parse_pointer, pointer_document,

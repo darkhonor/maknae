@@ -10,6 +10,7 @@ use aws_lc_rs::agreement::{
 };
 use aws_lc_rs::hkdf::{Salt, HKDF_SHA384};
 use aws_lc_rs::rand::SystemRandom;
+use maknae_crypto::aws_lc_rs;
 use std::fmt;
 use zeroize::Zeroizing;
 

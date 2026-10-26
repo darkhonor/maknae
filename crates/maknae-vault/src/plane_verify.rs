@@ -4,6 +4,7 @@
 //! because rustls bakes DNS/IP name-matching into the *server*-cert path but a plane leaf
 //! is URI-SAN-only, so the client side uses the name-free primitives (spec §4.2).
 use crate::{verify_plane_uri_san, CaBundle, Plane, VaultError};
+use maknae_crypto::rustls;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
@@ -37,7 +38,7 @@ impl PlaneClientCertVerifier {
         deployment_id: &str,
     ) -> Result<Arc<Self>, VaultError> {
         let roots = Arc::new(root_store(ca)?);
-        let provider = Arc::new(crate::crypto_provider());
+        let provider = Arc::new(maknae_crypto::crypto_provider());
         let inner = WebPkiClientVerifier::builder_with_provider(roots, provider)
             .build()
             .map_err(|e| VaultError::Handshake(format!("client verifier: {e}")))?;
@@ -106,7 +107,7 @@ impl PlaneServerCertVerifier {
     ) -> Result<Arc<Self>, VaultError> {
         Ok(Arc::new(Self {
             roots: root_store(ca)?,
-            provider: Arc::new(crate::crypto_provider()),
+            provider: Arc::new(maknae_crypto::crypto_provider()),
             expect,
             deployment_id: deployment_id.to_string(),
         }))
@@ -174,7 +175,7 @@ mod tests {
     use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 
     fn provider() {
-        crate::install_default_crypto_provider();
+        maknae_crypto::install_default_crypto_provider();
     }
 
     /// The CA keeps its `CertificateParams`, not its `Certificate`: rcgen 0.14

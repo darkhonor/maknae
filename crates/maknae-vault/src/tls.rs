@@ -4,7 +4,9 @@
 //! leaves the crate — the `CertifiedKey` is built here from the `pub(crate)` key accessor.
 use crate::plane_verify::{PlaneClientCertVerifier, PlaneServerCertVerifier};
 use crate::resolver::PlaneCertResolver;
-use crate::{assert_fips_provider, CaBundle, Plane, PlaneClient, PlaneIdentity, VaultError};
+use crate::{CaBundle, Plane, PlaneClient, PlaneIdentity, VaultError};
+use maknae_crypto::assert_fips_provider;
+use maknae_crypto::rustls;
 use rustls::client::danger::ServerCertVerifier;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::danger::ClientCertVerifier;
@@ -30,7 +32,7 @@ pub(crate) fn certified_key_from_identity(
     id: &PlaneIdentity,
 ) -> Result<Arc<CertifiedKey>, VaultError> {
     let chain = pem_chain_to_der(id)?;
-    let key = crate::crypto_provider()
+    let key = maknae_crypto::crypto_provider()
         .key_provider
         .load_private_key(PrivateKeyDer::Pkcs8(id.key_der().to_vec().into()))
         .map_err(|e| VaultError::Handshake(format!("load leaf key: {e}")))?;
@@ -72,7 +74,7 @@ pub(crate) fn plane_server_config(
     resolver: Arc<PlaneCertResolver>,
 ) -> Result<ServerConfig, VaultError> {
     Ok(
-        ServerConfig::builder_with_provider(Arc::new(crate::crypto_provider()))
+        ServerConfig::builder_with_provider(Arc::new(maknae_crypto::crypto_provider()))
             .with_protocol_versions(&[&rustls::version::TLS13])
             .map_err(|e| VaultError::Handshake(format!("server tls13: {e}")))?
             .with_client_cert_verifier(verifier)
@@ -84,7 +86,7 @@ pub(crate) fn plane_client_config(
     verifier: Arc<dyn ServerCertVerifier>,
     client_auth: Option<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>,
 ) -> Result<ClientConfig, VaultError> {
-    let builder = ClientConfig::builder_with_provider(Arc::new(crate::crypto_provider()))
+    let builder = ClientConfig::builder_with_provider(Arc::new(maknae_crypto::crypto_provider()))
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(|e| VaultError::Handshake(format!("client tls13: {e}")))?
         .dangerous()

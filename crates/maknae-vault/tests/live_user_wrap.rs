@@ -1,6 +1,7 @@
 //! Operator-gated: MAKNAE_VAULT_ADDR, MAKNAE_VAULT_CA, MAKNAE_VAULT_TOKEN; optional MAKNAE_KV_MOUNT, MAKNAE_USERPASS_MOUNT.
 #![cfg(unix)]
 
+use maknae_crypto::aws_lc_rs;
 use maknae_vault::{
     Password, UserAuth, UserAuthMethod, VaultApi, VaultError, WrapExpectation, WrapMismatch,
     WrappingToken,
@@ -117,7 +118,7 @@ async fn scenario(
 #[tokio::test]
 #[ignore = "needs a live Vault, an operator token and a userpass mount (operator-gated)"]
 async fn userpass_login_wrapped_read_lookup_and_checked_unwrap_against_live_vault() {
-    maknae_vault::install_default_crypto_provider();
+    maknae_crypto::install_default_crypto_provider();
     let addr = env("MAKNAE_VAULT_ADDR");
     let ca = env("MAKNAE_VAULT_CA");
     let operator = Zeroizing::new(env("MAKNAE_VAULT_TOKEN"));

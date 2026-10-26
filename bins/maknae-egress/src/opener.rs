@@ -133,7 +133,7 @@ ampbv97Rcx9j
 
     fn fips() {
         static ONCE: Once = Once::new();
-        ONCE.call_once(maknae_vault::install_default_crypto_provider);
+        ONCE.call_once(maknae_crypto::install_default_crypto_provider);
     }
 
     fn run<F: Future>(f: F) -> F::Output {

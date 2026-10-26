@@ -50,7 +50,7 @@ version = "AWS-LC-FIPS 4.x — in CMVP review"
 category = "Cryptography"
 applies_to = "all crypto operations; Vault leg, plane mTLS"
 status = "enforced"
-evidence = "design/adr/ADR-0025-fips-validation-is-a-goal-not-a-constraint.md; crates/maknae-vault/src/fips.rs"
+evidence = "design/adr/ADR-0025-fips-validation-is-a-goal-not-a-constraint.md; crates/maknae-crypto/src/glue.rs"
 
 [[standard]]
 name = "TLS"
@@ -82,7 +82,7 @@ version = "ML-KEM-1024 first, then hybrids"
 category = "Cryptography"
 applies_to = "the list every TLS config offers (the negotiated group is the peer's choice)"
 status = "enforced"
-evidence = "crates/maknae-vault/src/fips.rs KX_GROUPS; asserted at start by assert_fips_provider"
+evidence = "crates/maknae-crypto/src/provider.rs KX_GROUPS; asserted at start by assert_fips_provider"
 
 [[standard]]
 name = "X.509"

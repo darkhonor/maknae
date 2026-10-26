@@ -4,6 +4,7 @@ use maknae_config::{
     BindingEntry, Bindings, Mirror, Section, SyncPlan, BINDINGS_FILE, MIRROR_FILE,
     MIRROR_MAX_BYTES, STATE_DIR,
 };
+use maknae_crypto::aws_lc_rs;
 use maknae_io::{
     open_anchor, open_anchor_resolved, Anchor, AnchorRequired, FileOwner, IoError, IoKind, Mode,
     StrategyPref, TargetRequired,

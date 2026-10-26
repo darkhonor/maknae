@@ -1,0 +1,33 @@
+# ADR-0030: Cryptographic libraries are confined to `maknae-crypto`
+
+- **Status:** Accepted (maintainer-ruled 2026-10-27)
+- **Date:** 2026-10-27
+- **Deciders:** Alex Ackerman (maintainer)
+- **Raised by:** [#564](https://github.com/darkhonor/maknae/issues/564) (post-quantum TLS key exchange), part of the PQC epic [#569](https://github.com/darkhonor/maknae/issues/569)
+
+## Context
+
+Before this decision, five workspace manifests declared the FIPS cryptographic libraries directly: `maknae-vault` (`aws-lc-rs` and `rustls`, with the posture comment [ADR-0025](ADR-0025-fips-validation-is-a-goal-not-a-constraint.md) records), `maknae-seal`, `maknae-state` and the `maknae` binary (`aws-lc-rs`). The process-wide TLS provider and its start-up assertion lived in `maknae-vault`, so `maknae-llm` and `maknae-deputy` depended on the whole Vault client crate for one function each.
+
+#564 made the TLS key-exchange groups explicit and asserted at start. That added cryptographic policy to the same crate. The PQC epic will next change the seal's key agreement (#565) and needs a cryptographic inventory and CBOM (#570). With the libraries spread over five manifests, an upgrade has five places to edit, and the CBOM has no single manifest to read.
+
+## Decision
+
+1. **`maknae-crypto` is the only workspace member that declares `aws-lc-rs` or `rustls`.** It carries their version requirements and the FIPS posture comment, and re-exports both (`pub use aws_lc_rs; pub use rustls;`). Every other member reaches them through the re-exports.
+2. **It owns the cryptographic policy over them:** `crypto_provider()` (the aws-lc-rs FIPS provider with `KX_GROUPS`), `install_default_crypto_provider()`, `assert_fips_provider()`, and the pure decisions behind the assertion. Its refusals are `CryptoError`; `maknae-vault` maps them to its own variants of the same name.
+3. **Enforcement.** `deny.toml` `[bans]` denies `aws-lc-rs` and `rustls` to every direct dependent except `maknae-crypto` and the third-party crates that wrap them today. `tokio-rustls` re-exports rustls, so it is confined to `maknae-vault` the same way, as is `rcgen`, which selects aws-lc-rs's FIPS backend. `reqwest` needs no entry: enabling its `rustls` feature makes it a direct dependent of `aws-lc-rs`, which the first entry refuses. `cargo deny --locked check` runs in `build-and-gate`. `clippy.toml` refuses the rustls functions that build or install a stock provider (#564).
+4. **Mutation.** `maknae-crypto` is a mutation crate; its decisions are T1.
+
+## Consequences
+
+- An upgrade of `aws-lc-rs` or `rustls` is one manifest. The CBOM reads the algorithms and libraries Maknae ships from one crate.
+- `maknae-llm` and `maknae-deputy` no longer depend on `maknae-vault`.
+- **Residuals.**
+  - Third-party wrappers still name the libraries in their own manifests (`rcgen`, `tokio-rustls` and `reqwest` in `maknae-vault`, `reqwest` in `maknae-llm`). A major version bump of either library also moves them.
+  - `maknae-seal` keeps its own FIPS check over aws-lc-rs until #565 decides the seal's shape.
+  - The `deny.toml` control was observed red by planting a direct dependency in a member (normal and dev); no negative-control probe repeats it, because that gate's environment has no `cargo-deny`.
+  - `cargo test -p maknae-crypto` builds rustls with `fips` and `std` only; the shipped binaries unify more features onto it (`tls12`, `logging`). The decisions this crate tests do not depend on them.
+
+## Related
+
+ADR-0025 (the module line and the claim), ADR-0027 (the same confinement shape for `unsafe`), #564, #565, #569, #570.

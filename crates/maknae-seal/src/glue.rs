@@ -1,5 +1,6 @@
 use crate::fips::fips_result;
 use crate::SealError;
+use maknae_crypto::aws_lc_rs;
 
 pub(crate) fn fips_gate() -> Result<(), SealError> {
     fips_result(aws_lc_rs::try_fips_mode().is_ok())

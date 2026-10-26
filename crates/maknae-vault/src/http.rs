@@ -96,7 +96,7 @@ mod tests {
     /// A missing or malformed CA is refused at construction, naming the path.
     #[test]
     fn a_missing_or_malformed_ca_is_refused_at_construction() {
-        crate::install_default_crypto_provider();
+        maknae_crypto::install_default_crypto_provider();
         let d = tmp("ca");
         let absent = d.join("absent.crt");
         match hardened_http_client(&absent, std::time::Duration::from_secs(1)) {
@@ -135,7 +135,7 @@ mod tests {
 
     #[test]
     fn a_plaintext_url_is_refused_by_the_client_itself() {
-        crate::install_default_crypto_provider();
+        maknae_crypto::install_default_crypto_provider();
         let d = tmp("https");
         let ca = d.join("ca.crt");
         std::fs::write(&ca, self_signed_pem()).unwrap();

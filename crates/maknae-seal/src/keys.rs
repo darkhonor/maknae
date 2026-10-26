@@ -5,6 +5,7 @@ use aws_lc_rs::agreement::{
     ParsedPublicKey, ParsedPublicKeyFormat, PrivateKey, UnparsedPublicKey, ECDH_P384,
 };
 use aws_lc_rs::encoding::{AsDer, Pkcs8V1Der, PublicKeyX509Der};
+use maknae_crypto::aws_lc_rs;
 use std::fmt;
 use zeroize::Zeroizing;
 

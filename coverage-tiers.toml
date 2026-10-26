@@ -112,13 +112,14 @@ files = [
   # maknae-vault Stage 1: the plane-cert client's PURE decision logic. The URI-SAN
   # verifier is the register's single consciously-owned code; the CSR shape + config
   # + FIPS decision are fail-closed gates. Each in [t1].files ONLY (own 95% floor;
-  # NOT ratchet_cohort). The network/keygen/provider I/O (auth/client/ca/fips_glue)
+  # NOT ratchet_cohort). The network/keygen/provider I/O (auth/client/ca)
   # is T3 + excluded from mutation via the workspace-root mutants.toml.
   "crates/maknae-vault/src/verify.rs",
   "crates/maknae-vault/src/csr.rs",
   "crates/maknae-vault/src/plane.rs",
   "crates/maknae-vault/src/config.rs",
-  "crates/maknae-vault/src/fips.rs",
+  # maknae-crypto (#564, ADR-0030): the FIPS and key-exchange-group decisions.
+  "crates/maknae-crypto/src/provider.rs",
   # PR-J1 Task 4: per-plane SecretID credential-SOURCE resolution (spec §5.1) —
   # pure decision logic, no I/O. A swapped precedence arm or a missing fail-closed
   # default here is exactly the T1 line-drawing rule (silently prefers a weaker
@@ -332,7 +333,7 @@ files = [
 # critical crates whose fail-closed behavior must be provable to external
 # third parties. Zero missed mutants required.
 # It also carries the loop's decision code (maknae-agent), whose false-assurance surface is T1.
-mutants_crates = ["maknae-security", "maknae-config", "maknae-io", "maknae-kernel", "maknae-vault", "maknae-proto", "maknae-audit-append", "maknae-msgs", "maknae-authz-basic", "maknae-classification-aus", "maknae-llm", "maknae-agent", "maknae-deputy", "maknae-sys", "maknae-seal", "maknae-graph", "maknae-state"]
+mutants_crates = ["maknae-security", "maknae-config", "maknae-io", "maknae-kernel", "maknae-vault", "maknae-crypto", "maknae-proto", "maknae-audit-append", "maknae-msgs", "maknae-authz-basic", "maknae-classification-aus", "maknae-llm", "maknae-agent", "maknae-deputy", "maknae-sys", "maknae-seal", "maknae-graph", "maknae-state"]
 # Crates whose mutation run needs a non-default feature so feature-gated seam
 # code is LIVE (mutants in cfg'd-out code are unkillable-MISSED — the
 # 2026-08-27 main-red class; #77 generalized the maknae-config special case).
@@ -529,8 +530,16 @@ path = "crates/maknae-vault/src/error.rs"
 why = "VaultError enum + Display/From declarations; no decision logic"
 
 [[t3]]
-path = "crates/maknae-vault/src/fips_glue.rs"
-why = "process-global CryptoProvider fetch (not deterministically coverable); the pure fips_result and kx_groups_result decisions are in fips.rs (T1); the wiring is tests/kx_drift_gate.rs. Mutation-excluded (mutants.toml)"
+path = "crates/maknae-crypto/src/glue.rs"
+why = "process-global CryptoProvider fetch (not deterministically coverable); the pure fips_result and kx_groups_result decisions are in provider.rs (T1); the wiring is tests/kx_drift_gate.rs. Mutation-excluded (mutants.toml)"
+
+[[t3]]
+path = "crates/maknae-crypto/src/error.rs"
+why = "CryptoError enum and Display; no decision logic"
+
+[[t3]]
+path = "crates/maknae-crypto/src/lib.rs"
+why = "re-exports of aws-lc-rs, rustls and the crate's API (ADR-0030)"
 
 [[t3]]
 path = "crates/maknae-vault/src/ca.rs"
@@ -598,7 +607,7 @@ why = "SealError enum and Display; no decision logic"
 
 [[t3]]
 path = "crates/maknae-seal/src/glue.rs"
-why = "#153: the live FIPS-module probe and the error-mapping helper, the fips_glue.rs pattern; the decision is fips.rs (T1). Mutation-excluded: fips_gate returning Ok is unkillable on a FIPS build"
+why = "#153: the live FIPS-module probe and the error-mapping helper, the maknae-crypto glue.rs pattern; the decision is fips.rs (T1). Mutation-excluded: fips_gate returning Ok is unkillable on a FIPS build"
 
 [[t3]]
 path = "crates/maknae-seal/src/keys.rs"

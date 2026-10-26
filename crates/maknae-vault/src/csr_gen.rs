@@ -12,8 +12,8 @@
 //! propagates rcgen's failures via `.map_err`. Those `.map_err` arms cannot be
 //! unit-covered without forcing rcgen to fail on valid input — that would test
 //! rcgen's error handling, not our logic. That is the definition of a T3 boundary
-//! (I/O + external-error plumbing), the same split as `fips.rs` (T1 decision) vs
-//! `fips_glue.rs` (T3 provider fetch). No decision logic was demoted: the shape
+//! (I/O + external-error plumbing), the same split as `maknae-crypto`'s `provider.rs`
+//! (T1 decision) vs `glue.rs` (T3 provider fetch). No decision logic was demoted: the shape
 //! decision is T1 and self-checked below, fail-closed.
 use crate::csr::csr_matches_plane_shape;
 use crate::{Plane, VaultError};

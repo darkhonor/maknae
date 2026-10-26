@@ -25,13 +25,13 @@
 //! and unbannable" no longer describes ring: it is simply absent, and whether to
 //! ban it outright is the maintainer's call, not this comment's. What is unchanged
 //! is the conclusion — the runtime assertion, not the dependency tree, is the gate.*
-use crate::VaultError;
+use crate::CryptoError;
 use rustls::crypto::aws_lc_rs::{self, kx_group};
 use rustls::crypto::{CryptoProvider, SupportedKxGroup};
 use rustls::NamedGroup;
 
 /// Every TLS configuration's key-exchange groups, in preference order (#564, epic #569).
-pub(crate) const KX_GROUPS: [&dyn SupportedKxGroup; 5] = [
+pub const KX_GROUPS: [&dyn SupportedKxGroup; 5] = [
     kx_group::MLKEM1024,
     kx_group::X25519MLKEM768,
     kx_group::SECP256R1MLKEM768,
@@ -49,20 +49,20 @@ pub fn crypto_provider() -> CryptoProvider {
 }
 
 /// PURE decision — both branches are unit-killable (this is the T1 / 0-missed surface).
-pub(crate) fn fips_result(is_fips: bool) -> Result<(), VaultError> {
+pub(crate) fn fips_result(is_fips: bool) -> Result<(), CryptoError> {
     if is_fips {
         Ok(())
     } else {
-        Err(VaultError::FipsUnavailable)
+        Err(CryptoError::FipsUnavailable)
     }
 }
 
 /// PURE decision: the process provider's groups are exactly [`KX_GROUPS`], in order.
-pub(crate) fn kx_groups_result(names: &[NamedGroup]) -> Result<(), VaultError> {
+pub(crate) fn kx_groups_result(names: &[NamedGroup]) -> Result<(), CryptoError> {
     if names.iter().copied().eq(KX_GROUPS.iter().map(|g| g.name())) {
         Ok(())
     } else {
-        Err(VaultError::KxGroupsDrift)
+        Err(CryptoError::KxGroupsDrift)
     }
 }
 
@@ -106,7 +106,7 @@ mod tests {
         for drift in [&reordered[..], missing, &extra[..], &[][..]] {
             assert!(matches!(
                 kx_groups_result(drift),
-                Err(VaultError::KxGroupsDrift)
+                Err(CryptoError::KxGroupsDrift)
             ));
         }
     }

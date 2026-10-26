@@ -4,6 +4,7 @@
 //! resolves to `None` → the handshake aborts cleanly: a daemon whose Vault-backed identity
 //! was cleared (renewal expired) cannot present a live plane cert (fail closed).
 use arc_swap::ArcSwapOption;
+use maknae_crypto::rustls;
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
 use std::sync::Arc;
@@ -37,11 +38,11 @@ mod tests {
     use super::*;
 
     fn dummy_certified_key() -> Arc<CertifiedKey> {
-        crate::install_default_crypto_provider();
+        maknae_crypto::install_default_crypto_provider();
         let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
         let params = rcgen::CertificateParams::new(vec![]).unwrap();
         let cert = params.self_signed(&kp).unwrap();
-        let key = crate::crypto_provider()
+        let key = maknae_crypto::crypto_provider()
             .key_provider
             .load_private_key(rustls::pki_types::PrivateKeyDer::Pkcs8(
                 kp.serialize_der().into(),

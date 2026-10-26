@@ -56,7 +56,8 @@ fn good_config_passes_gates_then_fails_without_vault() {
     // Proof the good config advanced PAST the FIPS gate (provider installed + FIPS) and PAST
     // config validation — i.e. it failed at the credential/serving phase, not at a gate.
     assert!(
-        !stderr.contains("FIPS provider not active"),
+        !stderr.contains("FIPS provider not active")
+            && !stderr.contains("does not carry Maknae's key-exchange groups"),
         "the FIPS provider must install and pass on this build; stderr: {stderr}"
     );
     assert!(

@@ -3,6 +3,7 @@
 //! digest of what was sent, never the content. Incremental so callers need
 //! not concatenate secret text into a second buffer.
 
+use maknae_crypto::aws_lc_rs;
 pub struct Sha256(aws_lc_rs::digest::Context);
 
 impl Sha256 {

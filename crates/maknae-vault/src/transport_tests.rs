@@ -5,11 +5,12 @@
 //! tested in socket.rs/peercred.rs). rcgen mints a test CA + kernel/cli leaves. This is
 //! ADR-0005's mTLS negative suite: happy path + each negative fails closed.
 use crate::{CaBundle, Plane};
+use maknae_crypto::rustls;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::sync::Arc;
 
 fn provider() {
-    crate::install_default_crypto_provider();
+    maknae_crypto::install_default_crypto_provider();
 }
 
 /// The CA keeps its `CertificateParams`, not its `Certificate`: rcgen 0.14 signs
@@ -96,7 +97,7 @@ fn server_cfg(
     ca: &CaBundle,
     expect: Plane,
 ) -> Arc<rustls::ServerConfig> {
-    let key = crate::crypto_provider()
+    let key = maknae_crypto::crypto_provider()
         .key_provider
         .load_private_key(PrivateKeyDer::Pkcs8(key.into()))
         .unwrap();
@@ -443,7 +444,7 @@ fn offering(
 ) -> Arc<rustls::crypto::CryptoProvider> {
     Arc::new(rustls::crypto::CryptoProvider {
         kx_groups: groups.to_vec(),
-        ..crate::crypto_provider()
+        ..maknae_crypto::crypto_provider()
     })
 }
 
@@ -544,7 +545,7 @@ fn group_names(groups: &[&dyn rustls::crypto::SupportedKxGroup]) -> Vec<rustls::
 #[test]
 fn both_plane_builders_carry_maknaes_key_exchange_groups() {
     let p = pki();
-    let want = group_names(&crate::fips::KX_GROUPS);
+    let want = group_names(&maknae_crypto::KX_GROUPS);
     assert_eq!(
         group_names(&maknae_server(&p).crypto_provider().kx_groups),
         want

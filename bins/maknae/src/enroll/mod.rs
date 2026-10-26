@@ -1818,7 +1818,7 @@ async fn destroy_previous_accessors_or_abort(
 
 pub async fn run_enroll(args: EnrollArgs) -> ExitCode {
     // FIPS install FIRST, before any OperatorClient build (round-1 Q3).
-    maknae_vault::install_default_crypto_provider();
+    maknae_crypto::install_default_crypto_provider();
     let locale = detect_locale();
     if let Some(EnrollSub::Agent(a)) = &args.sub {
         return report(agent::run_enroll_agent(a, locale).await, locale);
@@ -3644,7 +3644,7 @@ lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
         // one; production installs it first (`cli.rs`), so the fixture does the
         // same. The panic is reqwest's, not a refusal of ours -- see the note on
         // the typed guard in the PR that took this bump.
-        maknae_vault::install_default_crypto_provider();
+        maknae_crypto::install_default_crypto_provider();
         let client = maknae_vault::OperatorClient::new(
             "https://vault.invalid.example:8200",
             &ca_path,
@@ -4053,7 +4053,11 @@ lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
                 let digest = |b: &[u8]| {
                     let mut out = [0; 32];
                     out.copy_from_slice(
-                        aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, b).as_ref(),
+                        maknae_crypto::aws_lc_rs::digest::digest(
+                            &maknae_crypto::aws_lc_rs::digest::SHA256,
+                            b,
+                        )
+                        .as_ref(),
                     );
                     out
                 };

@@ -4,6 +4,7 @@
 use crate::peercred::{self, PeerCreds};
 use crate::resolver::PlaneCertResolver;
 use crate::{socket, tls, CaBundle, Plane, PlaneClient, VaultError};
+use maknae_crypto::rustls;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;

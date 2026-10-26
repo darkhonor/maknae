@@ -150,6 +150,15 @@ pub enum VaultError {
     Random,
 }
 
+impl From<maknae_crypto::CryptoError> for VaultError {
+    fn from(e: maknae_crypto::CryptoError) -> Self {
+        match e {
+            maknae_crypto::CryptoError::FipsUnavailable => VaultError::FipsUnavailable,
+            maknae_crypto::CryptoError::KxGroupsDrift => VaultError::KxGroupsDrift,
+        }
+    }
+}
+
 impl std::fmt::Display for VaultError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -303,6 +312,28 @@ impl From<maknae_config::ConfigError> for VaultError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn each_crypto_refusal_keeps_its_name_and_message() {
+        use maknae_crypto::CryptoError;
+        for (e, want) in [
+            (CryptoError::FipsUnavailable, "FIPS provider not active"),
+            (CryptoError::KxGroupsDrift, "key-exchange groups"),
+        ] {
+            let msg = e.to_string();
+            let v = super::VaultError::from(e);
+            assert_eq!(v.to_string(), msg);
+            assert!(msg.contains(want), "{msg}");
+        }
+        assert!(matches!(
+            super::VaultError::from(CryptoError::KxGroupsDrift),
+            super::VaultError::KxGroupsDrift
+        ));
+        assert!(matches!(
+            super::VaultError::from(CryptoError::FipsUnavailable),
+            super::VaultError::FipsUnavailable
+        ));
+    }
+
     use super::*;
     #[test]
     fn transport_variants_display() {

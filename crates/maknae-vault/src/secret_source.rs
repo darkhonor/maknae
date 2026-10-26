@@ -5,6 +5,7 @@
 //! reads inside these functions — the caller supplies already-observed inputs) is what
 //! makes the fail-closed precedence provably testable and mutation-hardened (T1).
 use crate::VaultError;
+use maknae_crypto::aws_lc_rs;
 use std::env::VarError;
 use std::fmt;
 use std::path::{Path, PathBuf};

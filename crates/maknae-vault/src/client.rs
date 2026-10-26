@@ -9,11 +9,13 @@ use crate::plane::PlaneTokenSource;
 use crate::secret_io::read_daemon_secret;
 use crate::secret_source::{resolve_daemon_secret_source, CredentialSourceKind};
 use crate::{
-    assert_fips_provider, generate_plane_csr, load_ca_pin, vault_config_from_document,
-    verify::verify_plane_uri_san, Plane, UserToken, VaultConfig, VaultError, VAULT_SECTION,
+    generate_plane_csr, load_ca_pin, vault_config_from_document, verify::verify_plane_uri_san,
+    Plane, UserToken, VaultConfig, VaultError, VAULT_SECTION,
 };
 use arc_swap::ArcSwapOption;
 use maknae_config::{load_config, Document, SectionSpec};
+use maknae_crypto::assert_fips_provider;
+use maknae_crypto::rustls;
 use rustls::sign::CertifiedKey;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -389,7 +391,7 @@ impl PlaneClient {
     /// prints no tree), so it is not what a missing install would fall back TO. **The
     /// ordering requirement is unchanged and still load-bearing** — an absent process
     /// default is fail-closed either way, and the point is that the FIPS install happens
-    /// before anything can read a default. Same correction as `fips_glue.rs`; this file is
+    /// before anything can read a default. Same correction as `maknae-crypto`'s `glue.rs`; this file is
     /// what `design/references/2026-08-30-fips-supply-chain-visibility.md` cites as the
     /// ordering's evidence site, which is why the rationale here has to be true.*
     ///
@@ -907,9 +909,9 @@ mod tests {
             // PROCESS-GLOBAL rustls default provider; install it here (idempotent —
             // a no-op if some other test already did) rather than relying on test
             // execution order, matching every other provider-touching test in this
-            // crate (fips_glue.rs, resolver.rs, transport_tests.rs, tls.rs,
+            // crate (resolver.rs, transport_tests.rs, tls.rs,
             // plane_verify.rs all do this same call at their own point of use).
-            crate::install_default_crypto_provider();
+            maknae_crypto::install_default_crypto_provider();
             let p =
                 std::env::temp_dir().join(format!("mv-dispatch-{}-{}", std::process::id(), tag));
             let _ = std::fs::remove_dir_all(&p);
