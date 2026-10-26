@@ -13,11 +13,11 @@ The Rust plane-cert client (`maknae-vault`) and the mTLS transport consume this 
 
 ## What it stands up
 
-- **Root CA** (`maknae-pki-root`, EC P-384, ~10y) — signs exactly one thing: the
+- **Root CA** (`maknae-pki-root`, `plane_key_algorithm`: ML-DSA-87 by default, ~10y) — signs exactly one thing: the
   Maknae intermediate. Dev-only; production would instead chain the intermediate
   under the operator's enterprise root.
-- **Intermediate CA** (`maknae-pki-int`, EC P-384, ~5y) — issues all plane leaves.
-- **Roles** `maknae-kernel` / `maknae-cli` — 72h EC P-384 leaves whose **only**
+- **Intermediate CA** (`maknae-pki-int`, the same algorithm, ~5y) — issues all plane leaves.
+- **Roles** `maknae-kernel` / `maknae-cli` — 72h leaves of the same algorithm whose **only**
   identity is the plane URI-SAN `maknae://<deployment_id>/plane/{kernel,cli}`.
   Every other SAN channel (IP, localhost, wildcard, domains, other-SANs) is pinned
   off; presence of the correct plane-SAN is enforced downstream by the peer verifier.
@@ -60,7 +60,7 @@ The Rust plane-cert client (`maknae-vault`) and the mTLS transport consume this 
 ## Requirements
 
 - Terraform `>= 1.11` (write-only attributes and ephemeral resources),
-  `hashicorp/vault` `~> 5.10` and `hashicorp/random` `~> 3.7`, pinned in
+  `hashicorp/vault` `~> 5.13` and `hashicorp/random` `~> 3.7`, pinned in
   `.terraform.lock.hcl` to the validated versions. The lock carries `h1:` + registry
   `zh:` hashes for **linux and darwin, amd64 and arm64**, so a clean `terraform init`
   is reproducible on any of them without lock drift. To refresh after a version bump,
@@ -71,6 +71,9 @@ The Rust plane-cert client (`maknae-vault`) and the mTLS transport consume this 
     -platform=linux_amd64 -platform=linux_arm64 \
     -platform=darwin_amd64 -platform=darwin_arm64
   ```
+- **Vault 2.2.0 or later** for the default `plane_key_algorithm = "ml-dsa-87"` (Vault's PKI
+  issues ML-DSA certificates from 2.2.0). Older Vault: set `p384` or `p521`
+  (see "Plane key algorithm").
 - A reachable Vault with a token that can create PKI and KV mounts, roles, policies, and
   AppRole and userpass auth mounts and users. Provide it via the environment — **never in
   code**:
@@ -78,6 +81,43 @@ The Rust plane-cert client (`maknae-vault`) and the mTLS transport consume this 
   export VAULT_ADDR="https://vault.example.internal:8200"
   export VAULT_TOKEN="<a token with the privileges above>"
   ```
+
+## Plane key algorithm
+
+`plane_key_algorithm` (`ml-dsa-87` by default, `p384`, `p521`) sets the key algorithm of the
+root, the intermediate and both plane roles together, so a chain is never weaker than its
+leaves. It **must equal `vault.plane_key`** in the daemon's and every user's `maknae.yaml`; a
+mismatch fails closed at the first mint (Vault refuses the CSR's key type, and the CLI's or
+daemon's error names both settings).
+
+- **The preferred setup** is the default: an all-ML-DSA-87 hierarchy (CNSA 2.0 signatures) on
+  Vault 2.2.0+ Community. ML-DSA on Vault Enterprise FIPS builds (BoringCrypto, CMVP #4735)
+  is unverified.
+- **Older Vault, or a regime that wants classical signatures** (BSI TR-02102 recommends
+  ML-DSA only in a hybrid, which nothing in the stack issues yet, #575): `p384` or `p521`.
+- **A role's ML-DSA `parameter_set` is not enforced on `pki/sign`** (measured on Vault
+  2.2.1): a role set to ML-DSA-87 signs an ML-DSA-44 CSR. Maknae's planes refuse to generate
+  anything but the configured algorithm, but any other holder of the sign policy (a CLI
+  user's own token) can obtain a weaker leaf. Narrowing which peer algorithms a plane accepts
+  is #574.
+- **Chaining under an enterprise root** (the production note above) is an operator choice;
+  the root's algorithm is then the operator's. Vault's PKCS#11 managed keys have no ML-DSA
+  mechanism, so an HSM-held CA key cannot be ML-DSA: use an ECDSA root over an ML-DSA-87
+  intermediate held in Vault.
+
+### Upgrading an existing PKI
+
+The root certificate and the intermediate's key request carry `prevent_destroy`. A changed
+algorithm would replace both, and every enrolled CA pin with them, so Terraform refuses the
+plan instead. The guard also blocks any other change that replaces them (`ttl`,
+`common_name`, `issuer_name`) and `terraform destroy`; that is its purpose.
+
+- **To keep an existing EC P-384 hierarchy:** before the first apply after this change, set
+  `plane_key_algorithm = "p384"`, and set `vault.plane_key: p384` in `/etc/maknae/maknae.yaml`
+  and in each user's `maknae.yaml`. An install that changes neither fails closed at mint.
+- **To move to ML-DSA-87:** a deliberate rebuild. Remove the guard (or stand up fresh mounts),
+  apply, re-run `maknae enroll` on every host to refresh the CA pins, set `vault.plane_key`,
+  and restart.
 
 ## Run it
 
@@ -213,9 +253,12 @@ terraform validate
 terraform test
 ```
 
-`terraform test` runs `tests/agents.tftest.hcl` under a mocked Vault provider: it needs
-`init` but no Vault. It pins the agent policies byte for byte and the validations that
-guard the agent ids, prefix, mount and token lifetimes.
+`terraform test` runs `tests/agents.tftest.hcl` and `tests/plane_key.tftest.hcl` under a
+mocked Vault provider: it needs `init` but no Vault. It pins the agent policies byte for byte,
+the validations that guard the agent ids, prefix, mount and token lifetimes, and the key
+algorithm of the root, intermediate and roles for each `plane_key_algorithm` (with `p384`
+planning exactly the pre-#573 hierarchy). It does not exercise `prevent_destroy`, which needs
+existing state.
 
 No CI workflow runs this module; run these before pushing. They check provider-schema and
 config validity and the agent policies; they do **not** contact Vault and do **not** prove

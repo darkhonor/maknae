@@ -4,8 +4,9 @@ terraform {
   required_providers {
     vault = {
       source = "hashicorp/vault"
-      # vault_userpass_auth_backend_user does not exist before 5.10.0
-      version = "~> 5.10"
+      # vault_userpass_auth_backend_user does not exist before 5.10.0; the ml-dsa
+      # key_type and parameter_set (#573) do not exist before 5.13.0
+      version = "~> 5.13"
     }
     random = {
       source = "hashicorp/random"
