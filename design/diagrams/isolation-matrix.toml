@@ -294,7 +294,7 @@ test = "crates/maknae-vault/src/wrap.rs::a_matching_token_is_looked_up_then_unwr
 subject = "egress"
 object = "key_b"
 right = "u"
-control = "the same check on B's turns: the Egress Daemon sees each active user's key, one call at a time, so a compromised one harvests every key used while it is compromised"
+control = "the same check on B's turns: the Egress Daemon sees each active user's key for one call each, up to its capacity at once, so a compromised one harvests every key used while it is compromised"
 evidence = "crates/maknae-vault/src/wrap.rs:299 · ADR-0028"
 test = "crates/maknae-vault/src/wrap.rs::a_matching_token_is_looked_up_then_unwrapped_and_yields_only_the_field"
 

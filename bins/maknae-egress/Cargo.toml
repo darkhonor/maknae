@@ -28,12 +28,11 @@ maknae-vault = { path = "../../crates/maknae-vault" }
 listenfd = "=1.0.2"
 
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
-# The deputy is the only async surface in this binary: the provider call and the
-# Vault read are both futures. Minimal features — a current-thread runtime per
-# connection, no multi-thread scheduler.
-tokio = { version = "1", default-features = false, features = ["rt", "time", "net"] }
+# The provider call and the Vault read are futures; one multi-thread runtime is
+# driven by each connection's thread (#321).
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "time", "net"] }
 
-nix = { version = "0.31", default-features = false, features = ["user"] }
+nix = { version = "0.31", default-features = false, features = ["user", "poll"] }
 
 [dev-dependencies]
 tempfile = "3"

@@ -373,6 +373,9 @@ files = [
   # — socket I/O, with the DECISION in handle.rs (T1) and the peer-identity
   # check in maknae-vault's peer_identity.rs (T1).
   "bins/maknae-egress/src/serve.rs",
+  # #321: the deputy's connection-slot accounting. T2: a leaked slot refuses
+  # every later prompt (availability), and it carries no verdict.
+  "bins/maknae-egress/src/capacity.rs",
   "crates/maknae-plane/src/fd.rs", "crates/maknae-plane/src/send.rs",
   # Cooperative execution in the untrusted CLI: cannot issue a PDP Permit or
   # kernel-observed completion. Guard failures can damage the subject's own
@@ -443,7 +446,7 @@ why = "#153: reads ~/.maknae/providers.yaml through maknae-config's existing mak
 
 [[t3]]
 path = "bins/maknae-egress/src/main.rs"
-why = "thin main: env scrub + FIPS install + arg parse + bounds load + uid resolve + seal-key load + Vault client + socket acquire; every decision it makes is fail-closed exit-1, the behaviour lives in maknae-deputy's handle.rs/unseal.rs/call.rs (T1), serve.rs (T2), opener.rs and listen.rs (T3) and maknae-vault's env.rs (T1), and its load-bearing ORDERINGS (scrub first, keys loaded before the listener) are pinned by a source-order test in its OWN test module. Same treatment as bins/maknaed/src/main.rs"
+why = "thin main: env scrub + FIPS install + arg parse + bounds load + uid resolve + seal-key load + Vault client + socket acquire + the runtime and accept-loop wiring (#321, its runtime proven able to drive concurrent block_on calls by a test here); every decision it makes is fail-closed exit-1, the behaviour lives in maknae-deputy's handle.rs/unseal.rs/call.rs (T1), serve.rs (T2), opener.rs and listen.rs (T3) and maknae-vault's env.rs (T1), and its load-bearing ORDERINGS (scrub first, keys loaded before the listener) are pinned by a source-order test in its OWN test module. Same treatment as bins/maknaed/src/main.rs"
 
 [[t3]]
 path = "bins/maknaed/src/main.rs"

@@ -2145,9 +2145,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                             "maknaed: egress circuit breaker open (peer_uid={peer_uid} session_id={session_id}) — refusing the send without spawning more egress work"
                         );
                     }
-                    Ok(Ok(Err(crate::egress::EgressFailure::Transport(
-                        "egress circuit breaker open".into(),
-                    ))))
+                    Ok(Ok(Err(crate::egress::EgressFailure::CircuitOpen)))
                 }
                 BreakerAdmission::RefuseAtCapacity => {
                     if egress_breaker
@@ -2159,9 +2157,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                             "maknaed: egress blocking worker budget exhausted (peer_uid={peer_uid} session_id={session_id}) — refusing the send"
                         );
                     }
-                    Ok(Ok(Err(crate::egress::EgressFailure::Transport(
-                        "egress blocking worker budget exhausted".into(),
-                    ))))
+                    Ok(Ok(Err(crate::egress::EgressFailure::KernelAtCapacity)))
                 }
                 BreakerAdmission::Admit => {
                     let egress = Arc::clone(&egress);
@@ -2215,6 +2211,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                     sent
                 }
             };
+            let mut unavailable = false;
             let (send_outcome, reply) = match sent {
                 Ok(Ok(Ok(r))) => {
                     // Admission and the cap check happen HERE, before the
@@ -2258,7 +2255,20 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                         }
                     }
                 }
-                Ok(Ok(Err(f))) => (crate::egress::outcome_for_failure(&f), None),
+                Ok(Ok(Err(f))) => {
+                    if f == crate::egress::EgressFailure::DeputyAtCapacity
+                        && egress_breaker
+                            .lock()
+                            .await
+                            .should_log_refusal_at(Instant::now())
+                    {
+                        eprintln!(
+                            "maknaed: egress deputy at capacity (peer_uid={peer_uid} session_id={session_id}) — the send was refused before any provider I/O"
+                        );
+                    }
+                    unavailable = crate::egress::failure_is_unavailability(&f);
+                    (crate::egress::outcome_for_failure(&f), None)
+                }
                 Ok(Err(join)) => {
                     // The blocking worker was LOST (it panicked). Whether bytes
                     // left before the panic is unknowable to the kernel.
@@ -2344,6 +2354,16 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                     (crate::egress::SendOutcome::LandedUndelivered { refusal, .. }, None) => {
                         let (code, message) = crate::egress::refusal_answer(refusal);
                         write_error_bounded(&mut stream, &cfg, class, code, message).await
+                    }
+                    (_, None) if unavailable => {
+                        write_error_bounded(
+                            &mut stream,
+                            &cfg,
+                            class,
+                            ProtoErrCode::EgressUnavailable,
+                            maknae_proto::EGRESS_UNAVAILABLE_MESSAGE,
+                        )
+                        .await
                     }
                     (_, None) => {
                         write_error_bounded(

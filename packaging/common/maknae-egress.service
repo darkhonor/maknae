@@ -71,6 +71,8 @@ LockPersonality=yes
 # #242's enforcing-host run is where this unit is first observed live.
 SystemCallFilter=@system-service
 SystemCallArchitectures=native
+Restart=on-failure
+RestartSec=5s
 # #240b: the only process with a route out gets exactly the families its two
 # legs use — the activation socket and TCP to Vault and the provider.
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

@@ -26,6 +26,7 @@ pub struct Recording {
     /// #240: the backend reports a failure AFTER the request left.
     pub fail_after_send: bool,
     pub fail_refused_before_send: bool,
+    pub fail_at_capacity: bool,
     pub sleep: Option<Duration>,
     pub reply_usage: Option<maknae_proto::Usage>,
     pub reply_tool_calls: Vec<ProposedToolCall>,
@@ -124,6 +125,9 @@ impl maknae_kernel::Egress for Recording {
         }
         if self.fail_refused_before_send {
             return Err(maknae_kernel::EgressFailure::RefusedBeforeSend);
+        }
+        if self.fail_at_capacity {
+            return Err(maknae_kernel::EgressFailure::DeputyAtCapacity);
         }
         Ok(maknae_kernel::EgressReply {
             reply: maknae_proto::PromptReply {
@@ -733,6 +737,41 @@ async fn a_deputy_refusal_before_any_provider_io_is_recorded_failed_never_outcom
         .await
         .expect("a refusal frame");
     assert!(matches!(resp.result, RespResult::Err(ref e) if e.code == ProtoErrCode::Unauthorized));
+    let outcome = last_prompt_record(&records);
+    assert_eq!(
+        (
+            outcome.outcome.result.as_str(),
+            outcome.outcome.reason.as_str(),
+            outcome.outcome.posture.as_str()
+        ),
+        ("deny", "send failed", "unavailable")
+    );
+    assert_eq!(outcome.egress.unwrap().status, EgressStatus::Failed);
+    assert_eq!(eg.calls(), vec!["ready", "send"]);
+}
+
+#[tokio::test]
+async fn a_deputy_at_capacity_is_recorded_failed_and_named_unavailable_to_the_subject() {
+    let fx = Fixture::with_policy("prompt-at-capacity", "Read", GRANTED);
+    let records = Records::new(0);
+    let eg = Arc::new(Recording {
+        fail_at_capacity: true,
+        ..Default::default()
+    });
+    let resp = fx
+        .roundtrip(
+            prompt("hello"),
+            Arc::clone(&records),
+            Some("openai"),
+            eg.clone(),
+        )
+        .await
+        .expect("a refusal frame");
+    assert!(
+        matches!(resp.result, RespResult::Err(ref e) if e.code == ProtoErrCode::EgressUnavailable),
+        "{:?}",
+        resp.result
+    );
     let outcome = last_prompt_record(&records);
     assert_eq!(
         (

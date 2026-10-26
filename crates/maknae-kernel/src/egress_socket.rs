@@ -7,10 +7,11 @@
 //! connection per request is naturally concurrent, needs no correlation id and
 //! no reply demuxer, and — the stronger reason — makes the peer-credential
 //! check run **per request** rather than once on a long-lived connection.
-//! What the OTHER end does with that: the deputy today serves one connection
-//! to completion before accepting the next (`bins/maknae-egress/src/main.rs`),
-//! so two concurrent prompts queue head-to-tail behind one provider call and
-//! the deadline below is a queueing bound as well as a call bound (#321).
+//! The deputy serves connections concurrently up to its capacity and answers
+//! one past it `AtCapacity` at once (`bins/maknae-egress/src/serve.rs`, #321),
+//! so the deadline below bounds one call, not a queue. Past its refusal slots
+//! as well, it closes the connection unanswered: recorded delivery unknown,
+//! or `Failed` on macOS when the close lands before `arm`.
 //!
 //! **Peer credentials are checked BEFORE the first write** (D3). The request
 //! carries prompt content and the Vault path naming where the provider
@@ -223,8 +224,8 @@ impl SocketEgress {
 
 impl Egress for SocketEgress {
     /// The configured `egress.deadline_ms`: a WALL-CLOCK budget over the whole
-    /// exchange — every write is sent under a timer re-armed to what is left
-    /// (`write_all_by`) and every read is preceded by a `poll` for what is
+    /// exchange — every non-blocking write is preceded by a `poll` for what is
+    /// left (`write_all_by`) and every read is preceded by a `poll` for what is
     /// left (`read_exact_by`), so per-operation timers cannot be strung
     /// together past it in either direction. The one step outside it is `connect`, which on a Unix socket
     /// completes or fails at once unless the listener's backlog is full; the
@@ -247,7 +248,7 @@ impl Egress for SocketEgress {
         req: EgressRequest,
     ) -> Result<EgressReply, EgressFailure> {
         let deadline_at = Instant::now() + self.timeout;
-        let stream = UnixStream::connect(&self.path).map_err(Self::transport)?;
+        let stream = UnixStream::connect(&self.path).map_err(connect_failure)?;
 
         // BEFORE the first write. Moving this below the write hands prompt
         // content and a Vault path to an unauthenticated peer. A capture error
@@ -345,10 +346,24 @@ impl Egress for SocketEgress {
         {
             EgressFrameReply::Reply(reply) => Ok(EgressReply { reply }),
             EgressFrameReply::RefusedBeforeSend => Err(EgressFailure::RefusedBeforeSend),
+            EgressFrameReply::AtCapacity => Err(EgressFailure::DeputyAtCapacity),
             EgressFrameReply::Unusable { defect, usage } => {
                 Err(EgressFailure::ReplyUnusable { defect, usage })
             }
         }
+    }
+}
+
+/// Only a deputy that is not running (refused, socket gone, backlog full) is
+/// unavailability; any other connect error is a deployment fault and stays a
+/// generic transport failure (#321).
+fn connect_failure(e: std::io::Error) -> EgressFailure {
+    use std::io::ErrorKind as K;
+    match e.kind() {
+        K::ConnectionRefused | K::NotFound | K::WouldBlock => {
+            EgressFailure::DeputyUnreachable(e.to_string())
+        }
+        _ => EgressFailure::Transport(e.to_string()),
     }
 }
 
@@ -722,6 +737,20 @@ mod tests {
     }
 
     #[test]
+    fn a_deputy_at_capacity_is_a_named_refusal_not_a_lost_send() {
+        let d = tempfile::tempdir().unwrap();
+        let (path, seen) = fake_deputy(d.path(), Some(maknae_proto::EgressFrameReply::AtCapacity));
+        let me = nix::unistd::getuid().as_raw();
+        let e = SocketEgress::new(path, me, Duration::from_secs(2), 64 * 1024);
+        let intent = crate::egress::DurableEgressIntent::canned_for_test();
+        assert_eq!(
+            e.send(&intent, req()).unwrap_err(),
+            EgressFailure::DeputyAtCapacity
+        );
+        assert!(seen.load(Ordering::SeqCst) > 0);
+    }
+
+    #[test]
     fn a_deputy_that_finds_the_reply_unusable_is_a_reply_unusable_failure() {
         let d = tempfile::tempdir().unwrap();
         let (path, _seen) = fake_deputy(
@@ -766,7 +795,32 @@ mod tests {
     }
 
     #[test]
-    fn a_connect_to_no_deputy_is_a_transport_failure() {
+    fn only_a_deputy_that_is_not_running_is_unreachable() {
+        use std::io::{Error, ErrorKind as K};
+        for k in [K::ConnectionRefused, K::NotFound, K::WouldBlock] {
+            assert!(
+                matches!(
+                    connect_failure(Error::from(k)),
+                    EgressFailure::DeputyUnreachable(_)
+                ),
+                "{k:?}"
+            );
+        }
+        for k in [
+            K::PermissionDenied,
+            K::NotADirectory,
+            K::InvalidInput,
+            K::Other,
+        ] {
+            assert!(
+                matches!(connect_failure(Error::from(k)), EgressFailure::Transport(_)),
+                "{k:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_connect_to_no_deputy_is_unreachable_not_a_refusal() {
         let d = tempfile::tempdir().unwrap();
         let e = SocketEgress::new(
             d.path().join("absent.sock"),
@@ -777,7 +831,7 @@ mod tests {
         let intent = crate::egress::DurableEgressIntent::canned_for_test();
         assert!(matches!(
             e.send(&intent, req()),
-            Err(EgressFailure::Transport(_))
+            Err(EgressFailure::DeputyUnreachable(_))
         ));
     }
 

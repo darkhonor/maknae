@@ -23,6 +23,7 @@ pub enum StopReason {
     PromptRefused,
     PromptMalformed,
     ReplyUnusable(maknae_proto::ReplyDefect),
+    EgressUnavailable,
     Transport(String),
     ContextBudget,
 }
@@ -149,6 +150,13 @@ pub async fn drive<P: Plane>(
                 return Outcome {
                     answer: None,
                     stopped: Some(StopReason::ReplyUnusable(d)),
+                    steps_used,
+                }
+            }
+            Err(PlaneError::Unavailable) => {
+                return Outcome {
+                    answer: None,
+                    stopped: Some(StopReason::EgressUnavailable),
                     steps_used,
                 }
             }
@@ -1076,6 +1084,7 @@ mod tests {
                 PlaneError::ReplyUnusable(maknae_proto::ReplyDefect::TokenLimit),
                 StopReason::ReplyUnusable(maknae_proto::ReplyDefect::TokenLimit),
             ),
+            (PlaneError::Unavailable, StopReason::EgressUnavailable),
             (
                 PlaneError::Transport("t".into()),
                 StopReason::Transport("t".into()),
