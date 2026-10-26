@@ -1,4 +1,5 @@
-//! FIPS gate — PURE decisions, and the provider they decide about. The AUTHORITATIVE FIPS proof is the runtime `.fips()`
+//! FIPS gate — PURE decisions, and the provider they decide about.
+//! The AUTHORITATIVE FIPS proof is the runtime `.fips()`
 //! value asserted here: aws-lc-rs reports fips only when built against the AWS-LC-FIPS
 //! module with its power-on self-tests passing.
 //!

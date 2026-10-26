@@ -29,7 +29,8 @@ pub fn install_default_crypto_provider() {
     let _ = crypto_provider().install_default();
 }
 
-/// Assert the process is running the aws-lc-rs FIPS provider with Maknae's key-exchange groups. Fail-closed:
+/// Assert the process is running the aws-lc-rs FIPS provider with Maknae's key-exchange
+/// groups. Fail-closed:
 /// no installed default (the binary `main` forgot to install one) → refuse.
 pub fn assert_fips_provider() -> Result<(), VaultError> {
     let provider =

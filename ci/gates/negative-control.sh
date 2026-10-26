@@ -2973,7 +2973,7 @@ for entry in std::nosuch::f std::vec::Vec; do
   fx_dis="$(lint_fixture clean)"
   printf 'disallowed-methods = ["%s"]\n' "$entry" > "$fx_dis/clippy.toml"
   expect_reject_because "clippy-all/disallowed-entry-$entry-that-is-not-a-function-is-refused" \
-    "names a disallowed path" \
+    "a problem in clippy.toml" \
     "$here/clippy-all.sh" --root "$fx_dis"
 done
 

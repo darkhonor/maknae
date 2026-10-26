@@ -410,7 +410,7 @@ run_lints() {
   cat "$lint_log" >&2
   # A clippy.toml entry that does not resolve to a function is only a warning, which `-D warnings` does not deny (#564).
   if grep -qE -- '--> .*clippy\.toml:[0-9]+' "$lint_log"; then
-    fail "clippy.toml names a disallowed path that is not a reachable function, so it refuses nothing (see above)"
+    fail "clippy reported a problem in clippy.toml, so a disallowed entry may refuse nothing (see above)"
   fi
   ran=$((ran + 1))
   while IFS= read -r pf; do
