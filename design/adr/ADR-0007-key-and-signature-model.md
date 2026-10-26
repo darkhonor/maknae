@@ -31,7 +31,7 @@ Maknae's architecture rests on signatures, but the base (non-DCS) product must h
 | **SHOULDN'T (→ DCS library)** | Classification / tier / caveat attestation; §12 signed-tier cross-site import; classification downgrade authorization; STANAG 4778 label-binding | authoritative label signing | DCS library (rust-dcs) |
 
 **Key model (narrow — core's real signing surface):**
-- **mTLS plane certs** — Vault-issued (PKI, done). Custody: memory-only, fail-closed, per-plane AppRole (ADR-0005 / `maknae-vault`).
+- **mTLS plane certs** — Vault-issued (PKI, done). Custody: memory-only, fail-closed, per-plane AppRole (ADR-0005 / `maknae-vault`). *(2026-10-27, #573: their key algorithm is `vault.plane_key`, ML-DSA-87 by default; the decision and its residual are recorded in ADR-0005 decision 4.)*
 - **Audit-signing key** (if signed checkpoints are adopted) — same Vault memory-only / fail-closed custody pattern; trust-plane only.
 - **GPG release/tag key** — the operator's **self-published GitHub-noreply GPG key** (the Microkosmos key). It is a **project requirement** to sign annotated tags and releases with it. Self-published keys are sufficient here — standard for a non-organization OSS project without a corporate sponsor; no org PKI dependency.
 - **Out of scope (→ DCS / gateway / later):** operator conversational-signature keys, web-ui signature production, a "CI key" that signs skills/Tier-1 promotions, §12 cross-site trust anchors, STANAG 4778 label-binding.

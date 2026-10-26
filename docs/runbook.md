@@ -8,7 +8,7 @@ per implementation stage.
 ## Chapter 1 — Mint a plane cert (`maknae-vault` Stage 1)
 
 Prove the plane-cert client authenticates to your Vault and mints a memory-only
-`maknae://<deployment_id>/plane/kernel` EC P-384 leaf. This is the first live milestone;
+`maknae://<deployment_id>/plane/kernel` leaf of the `vault.plane_key` algorithm (ML-DSA-87 by default). This is the first live milestone;
 the daemon + CLI round-trip arrives in later stages.
 
 ### Prerequisites
@@ -90,7 +90,7 @@ The client trims surrounding whitespace from the file, so a trailing newline is 
 cargo test -p maknae-vault --test live_smoke -- --ignored --nocapture
 ```
 
-Expected: `LIVE SMOKE OK: minted maknae://<deployment_id>/plane/kernel (P-384), revoked on shutdown`.
+Expected: `LIVE SMOKE OK: minted maknae://<deployment_id>/plane/kernel (ml-dsa-87), revoked on shutdown` (the configured `vault.plane_key`).
 
 ### What it proves
 
@@ -101,7 +101,8 @@ Expected: `LIVE SMOKE OK: minted maknae://<deployment_id>/plane/kernel (P-384), 
   not Maknae's list ([TLS key exchange](#tls-key-exchange)).
 - The AppRole login used the **standing** raw SecretID; the SecretID does not expire and
   the login does not consume it.
-- The CSR is empty-subject, URI-SAN-only, EC P-384; the leaf's only SAN is
+- The CSR is empty-subject, URI-SAN-only, and of exactly the `vault.plane_key` algorithm (checked by
+  algorithm identifier); the leaf's only SAN is
   `maknae://<deployment_id>/plane/kernel` (self-checked in `mint()`).
 - The leaf + key are held **memory-only** and the token is revoked on shutdown.
 
@@ -166,8 +167,8 @@ Expected: `LIVE TRANSPORT OK: kernel<->cli mTLS + peer-creds round-trip over UDS
 
 ### What it proves
 
-- **Mutual mTLS with plane-URI-SAN identity** — each side presents its Vault-minted P-384
-  leaf and verifies the peer's leaf carries **exactly** the expected
+- **Mutual mTLS with plane-URI-SAN identity** — each side presents its Vault-minted
+  `vault.plane_key` leaf and verifies the peer's leaf carries **exactly** the expected
   `maknae://<deployment_id>/plane/{kernel,cli}` URI-SAN (the T1 verifier), over TLS 1.3 on
   the aws-lc-rs FIPS provider, with ML-KEM-1024 key exchange (both ends are Maknae's).
 - **Peer-cred capture** — the daemon reads the connecting uid (+ pid) from the kernel
@@ -188,7 +189,25 @@ Vault Community and Vault Enterprise negotiated post-quantum groups and Vault En
 FIPS builds stayed on classical groups.
 
 CNSA 2.0 is not met: key exchange is not restricted to ML-KEM-1024, the cipher suites
-include AES-128, and certificates and signatures stay EC P-384.
+include AES-128, and a plane does not yet refuse a peer certificate of another algorithm (#574).
+Certificates and signatures follow `vault.plane_key`: ML-DSA-87 by default.
+
+### Switching the plane key algorithm
+
+`vault.plane_key` (in `/etc/maknae/maknae.yaml` and each user's `maknae.yaml`) must equal
+`deploy/vault-pki`'s `plane_key_algorithm`. To switch a deployment:
+
+1. Re-apply the PKI with the new `plane_key_algorithm`. The root and intermediate carry
+   `prevent_destroy`, so moving an existing hierarchy is a deliberate rebuild (see
+   `deploy/vault-pki/README.md`, "Upgrading an existing PKI").
+2. Re-run `maknae enroll` on each host to refresh the CA pins.
+3. Set `vault.plane_key` in the daemon's and every user's `maknae.yaml`.
+4. Restart `maknaed`.
+
+A mismatch fails closed at the first mint: Vault refuses the CSR (`pki/sign rejected: … role
+requires keys of type … (the Vault PKI role issues a different key type than vault.plane_key …;
+set vault.plane_key to match deploy/vault-pki's plane_key_algorithm)`). A plane chained to a
+different CA fails the pinned chain at the handshake.
 
 ### Teardown
 
