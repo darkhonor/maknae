@@ -41,6 +41,16 @@ fn fail(msg: impl std::fmt::Display) -> ! {
     std::process::exit(1)
 }
 
+/// One runtime for the process. Its workers run the I/O and timer drivers;
+/// each connection thread polls its own call with `Handle::block_on`, which a
+/// current-thread runtime cannot drive. The pooled Vault client stays on it.
+fn runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+}
+
 fn main() {
     // FIRST of all, while single-threaded: nothing inherited from the
     // environment may choose where a connection goes or how it is verified.
@@ -92,14 +102,7 @@ fn main() {
         Err(e) => fail(format!("cannot resolve '{KERNEL_USER}': {e}")),
     };
 
-    // One runtime for the process, driven by every connection's thread: the
-    // provider call and the Vault read are futures, the serving path is
-    // otherwise blocking, and the pooled Vault client stays on one runtime.
-    let rt = match tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-    {
+    let rt = match runtime() {
         Ok(r) => r,
         Err(e) => fail(format!("cannot start a runtime: {e}")),
     };
@@ -352,6 +355,28 @@ mod tests {
             .count(),
             1
         );
+    }
+
+    /// Connection threads drive their calls through `Handle::block_on`. On a
+    /// current-thread runtime that cannot drive timers or I/O, and every
+    /// provider call would hang holding its slot.
+    #[test]
+    fn connection_threads_can_drive_timers_on_the_runtime_concurrently() {
+        let rt = super::runtime().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        for _ in 0..2 {
+            let (h, tx) = (rt.handle().clone(), tx.clone());
+            std::thread::spawn(move || {
+                h.block_on(async {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await
+                });
+                let _ = tx.send(());
+            });
+        }
+        for _ in 0..2 {
+            rx.recv_timeout(std::time::Duration::from_secs(10))
+                .expect("a connection thread could not drive the runtime's timer");
+        }
     }
 
     #[test]

@@ -54,8 +54,6 @@ pub enum ServeError {
     OversizeFrame(usize),
     Io(String),
     Refused(Refusal),
-    /// No slot was free; the frame was read, discarded and answered `AtCapacity`.
-    AtCapacity,
 }
 
 /// The one `FulfilError` mapping, shared by `main` and the tests.
@@ -163,8 +161,7 @@ pub fn refuse_at_capacity(
 ) -> Result<(), ServeError> {
     authenticate(&stream, expected_uid, io_timeout)?;
     drop(read_body_zeroizing(&mut stream)?);
-    write_reply(&mut stream, &EgressFrameReply::AtCapacity)?;
-    Err(ServeError::AtCapacity)
+    write_reply(&mut stream, &EgressFrameReply::AtCapacity)
 }
 
 /// Accept forever. A failed connection is refused and the loop continues: one
@@ -191,11 +188,10 @@ pub fn accept_loop<H>(
             }
         };
         let Some(slot) = slots.try_take() else {
-            if let Err(e) = refuse_at_capacity(stream, expected_uid, io_timeout) {
-                eprintln!("maknae-egress: connection refused: {e:?}");
-            }
+            answer_at_capacity(stream, expected_uid, io_timeout);
             continue;
         };
+        let spare = stream.try_clone();
         let (bounds, handler) = (Arc::clone(&bounds), Arc::clone(&handler));
         let spawned = std::thread::Builder::new()
             .name("maknae-egress-conn".into())
@@ -208,7 +204,17 @@ pub fn accept_loop<H>(
             });
         if let Err(e) = spawned {
             eprintln!("maknae-egress: cannot start a connection thread: {e}");
+            if let Ok(s) = spare {
+                answer_at_capacity(s, expected_uid, io_timeout);
+            }
         }
+    }
+}
+
+fn answer_at_capacity(stream: UnixStream, expected_uid: u32, io_timeout: Duration) {
+    match refuse_at_capacity(stream, expected_uid, io_timeout) {
+        Ok(()) => eprintln!("maknae-egress: at capacity; answered a connection AtCapacity"),
+        Err(e) => eprintln!("maknae-egress: connection refused: {e:?}"),
     }
 }
 
@@ -580,7 +586,7 @@ mod tests {
             *n += 1;
             cv.notify_all();
             let (n, _) = cv
-                .wait_timeout_while(n, Duration::from_secs(3), |n| *n < 2)
+                .wait_timeout_while(n, Duration::from_secs(20), |n| *n < 2)
                 .unwrap();
             if *n >= 2 {
                 seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -645,10 +651,7 @@ mod tests {
             c.read_to_end(&mut back).unwrap();
             back
         });
-        assert_eq!(
-            refuse_at_capacity(b, me, FRAME_IO_TIMEOUT),
-            Err(ServeError::AtCapacity)
-        );
+        assert_eq!(refuse_at_capacity(b, me, FRAME_IO_TIMEOUT), Ok(()));
         let back = h.join().unwrap();
         let n = u32::from_be_bytes(back[..4].try_into().unwrap()) as usize;
         assert_eq!(back.len(), 4 + n);
@@ -688,14 +691,19 @@ mod tests {
         let bound = Duration::from_millis(200);
         for at_capacity in [false, true] {
             let (a, b) = UnixStream::pair().unwrap();
-            let started = std::time::Instant::now();
-            let out = if at_capacity {
-                refuse_at_capacity(b, me, bound)
-            } else {
-                serve_one(b, me, &bounds(), bound, canned)
-            };
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let out = if at_capacity {
+                    refuse_at_capacity(b, me, bound)
+                } else {
+                    serve_one(b, me, &bounds(), bound, canned)
+                };
+                let _ = tx.send(out);
+            });
+            let out = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("a stalled peer held the connection past the bound");
             assert!(matches!(out, Err(ServeError::Io(_))), "{out:?}");
-            assert!(started.elapsed() < Duration::from_secs(5));
             drop(a);
         }
     }

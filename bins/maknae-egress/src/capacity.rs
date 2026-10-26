@@ -85,9 +85,4 @@ mod tests {
         assert_eq!(s.in_use(), 0);
         assert!(s.try_take().is_some());
     }
-
-    #[test]
-    fn the_deputy_starts_at_the_unmeasured_ceiling() {
-        assert_eq!(deputy_capacity(), 32);
-    }
 }

@@ -446,7 +446,7 @@ why = "#153: reads ~/.maknae/providers.yaml through maknae-config's existing mak
 
 [[t3]]
 path = "bins/maknae-egress/src/main.rs"
-why = "thin main: env scrub + FIPS install + arg parse + bounds load + uid resolve + seal-key load + Vault client + socket acquire; every decision it makes is fail-closed exit-1, the behaviour lives in maknae-deputy's handle.rs/unseal.rs/call.rs (T1), serve.rs (T2), opener.rs and listen.rs (T3) and maknae-vault's env.rs (T1), and its load-bearing ORDERINGS (scrub first, keys loaded before the listener) are pinned by a source-order test in its OWN test module. Same treatment as bins/maknaed/src/main.rs"
+why = "thin main: env scrub + FIPS install + arg parse + bounds load + uid resolve + seal-key load + Vault client + socket acquire + the runtime and accept-loop wiring (#321, its runtime proven able to drive concurrent block_on calls by a test here); every decision it makes is fail-closed exit-1, the behaviour lives in maknae-deputy's handle.rs/unseal.rs/call.rs (T1), serve.rs (T2), opener.rs and listen.rs (T3) and maknae-vault's env.rs (T1), and its load-bearing ORDERINGS (scrub first, keys loaded before the listener) are pinned by a source-order test in its OWN test module. Same treatment as bins/maknaed/src/main.rs"
 
 [[t3]]
 path = "bins/maknaed/src/main.rs"
