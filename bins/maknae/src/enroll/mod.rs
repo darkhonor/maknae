@@ -694,6 +694,7 @@ fn build_daemon_yaml(
     artifact_write::emit_yaml(artifact_write::yaml_map(top))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_cli_yaml(
     deployment_id: &str,
     vault_addr: &str,

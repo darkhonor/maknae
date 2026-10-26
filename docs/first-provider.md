@@ -64,13 +64,14 @@ sudo maknae enroll \
 
 Enroll prompts for your administrator Vault token (`--token-file <path>` reads it from a file instead). Runbook Chapter 4, step 3, explains every flag. On Linux, run enroll from a direct login whose `id -Z` shows `unconfined_u`, not from `sudo su` out of a confined account. On macOS, the flags are the same.
 
-Three flags name the Vault layout for user keys, and each **must equal** its Terraform input:
+Four flags name the Vault layout, and each **must equal** its Terraform input:
 
 | Enroll flag | Default | Terraform input |
 |---|---|---|
 | `--userpass-mount` | `maknae-userpass` | `userpass_mount` |
 | `--kv-mount` | `maknae-kv` | `kv_mount_path` |
 | `--user-prefix` | `maknae/users` | `user_prefix` |
+| `--plane-key` | `ml-dsa-87` | `plane_key_algorithm` (`ml-dsa-87` needs Vault 2.2.0+; `p384` or `p521` otherwise) |
 
 Enroll writes them into `/etc/maknae/egress-bounds.yaml` (`root:root 0644`), into the `vault` block of your own `~/.maknae/maknae.yaml`, and `--userpass-mount` into the root `maknae.yaml`. You do not write `egress-bounds.yaml` by hand, except to add the optional `call_timeout_ms` for a slow self-hosted model (`docs/configuration.md` §6.1.3); the next enroll drops it again (#525).
 

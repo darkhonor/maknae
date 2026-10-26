@@ -166,7 +166,12 @@ impl PlaneKey {
 pub fn vault_error_text(e: &vaultrs::error::ClientError) -> String {
     match e {
         vaultrs::error::ClientError::APIError { code, errors } if !errors.is_empty() => {
-            format!("Vault returned {code}: {}", errors.join("; "))
+            let text: String = errors
+                .join("; ")
+                .chars()
+                .filter(|c| !c.is_control())
+                .collect();
+            format!("Vault returned {code}: {text}")
         }
         other => other.to_string(),
     }
@@ -454,6 +459,11 @@ mod tests {
             vault_error_text(&e),
             "Vault returned 400: role requires keys of type ec; second"
         );
+        let hostile = vaultrs::error::ClientError::APIError {
+            code: 400,
+            errors: vec!["bad\u{1b}[2Jkey\n".into()],
+        };
+        assert_eq!(vault_error_text(&hostile), "Vault returned 400: bad[2Jkey");
         let bare = vaultrs::error::ClientError::APIError {
             code: 503,
             errors: vec![],
