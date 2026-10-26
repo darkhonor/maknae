@@ -9,7 +9,9 @@
 //! check run **per request** rather than once on a long-lived connection.
 //! The deputy serves connections concurrently up to its capacity and answers
 //! one past it `AtCapacity` at once (`bins/maknae-egress/src/serve.rs`, #321),
-//! so the deadline below bounds one call, not a queue.
+//! so the deadline below bounds one call, not a queue. Past its refusal slots
+//! as well, it closes the connection unanswered, which this side records as
+//! delivery unknown.
 //!
 //! **Peer credentials are checked BEFORE the first write** (D3). The request
 //! carries prompt content and the Vault path naming where the provider

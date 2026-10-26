@@ -3,7 +3,9 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-/// Not measured: the kernel's egress admission today. Once load measurement
+/// Not measured: the kernel's egress admission today
+/// (`maknae_kernel::BLOCKING_BREAKER_MAX_IN_FLIGHT`), so a single kernel never
+/// reaches the refusal pool's limit. Once load measurement
 /// exists, capacity derives from the host's cgroup and CPU limits over the
 /// measured per-call cost, so resizing the instance is what scales it (#321).
 pub const UNMEASURED_CEILING: usize = 32;

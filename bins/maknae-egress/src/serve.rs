@@ -21,7 +21,9 @@ use maknae_deputy::call::FulfilError;
 use maknae_deputy::handle::{decide, Refusal};
 use maknae_deputy::unseal::OpenFailure;
 use maknae_proto::EgressFrameReply;
+use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 use std::io::{Read, Write};
+use std::os::fd::AsFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -105,20 +107,33 @@ fn read_body_zeroizing(
     Ok(body)
 }
 
-fn remaining(by: Instant) -> Result<Duration, ServeError> {
-    let left = by.saturating_duration_since(Instant::now());
-    if left.is_zero() {
-        return Err(io("the connection's I/O bound expired"));
+/// Waits for `flags` within what is left of `by`. `poll`, not a re-armed
+/// socket timeout: one blocking call under `SO_SNDTIMEO` or `SO_RCVTIMEO` can
+/// run far past it against a peer that frees space or sends bytes a little at
+/// a time, and macOS refuses `setsockopt` once the peer has closed (the
+/// kernel's side, `egress_socket.rs`, measured both).
+fn wait_for(stream: &UnixStream, flags: PollFlags, by: Instant) -> Result<(), ServeError> {
+    loop {
+        let left = by.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io("the connection's I/O bound expired"));
+        }
+        let timeout =
+            PollTimeout::try_from(left.max(Duration::from_millis(1))).unwrap_or(PollTimeout::MAX);
+        match poll(&mut [PollFd::new(stream.as_fd(), flags)], timeout) {
+            Ok(0) => return Err(io("the connection's I/O bound expired")),
+            Ok(_) => return Ok(()),
+            Err(nix::errno::Errno::EINTR) => continue,
+            Err(e) => return Err(io(format!("poll: {e}"))),
+        }
     }
-    Ok(left)
 }
 
-/// `read_exact` under one deadline for the whole buffer: each read is bounded
-/// by what is left of it, so a peer trickling bytes cannot extend it.
+/// `read_exact` under one deadline for the whole buffer.
 fn read_exact_by(stream: &mut UnixStream, buf: &mut [u8], by: Instant) -> Result<(), ServeError> {
     let mut filled = 0;
     while filled < buf.len() {
-        stream.set_read_timeout(Some(remaining(by)?)).map_err(io)?;
+        wait_for(stream, PollFlags::POLLIN, by)?;
         match stream.read(&mut buf[filled..]) {
             Ok(0) => return Err(io("the peer closed the connection mid-frame")),
             Ok(n) => filled += n,
@@ -129,18 +144,30 @@ fn read_exact_by(stream: &mut UnixStream, buf: &mut [u8], by: Instant) -> Result
     Ok(())
 }
 
+/// `write_all` under one deadline: non-blocking writes, each after a `poll`.
 fn write_all_by(stream: &mut UnixStream, buf: &[u8], by: Instant) -> Result<(), ServeError> {
+    stream.set_nonblocking(true).map_err(io)?;
     let mut written = 0;
-    while written < buf.len() {
-        stream.set_write_timeout(Some(remaining(by)?)).map_err(io)?;
-        match stream.write(&buf[written..]) {
-            Ok(0) => return Err(io("the peer stopped accepting the reply")),
-            Ok(n) => written += n,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(e) => return Err(io(e)),
+    let out = loop {
+        if written >= buf.len() {
+            break Ok(());
         }
-    }
-    Ok(())
+        if let Err(e) = wait_for(stream, PollFlags::POLLOUT, by) {
+            break Err(e);
+        }
+        match stream.write(&buf[written..]) {
+            Ok(0) => break Err(io("the peer stopped accepting the reply")),
+            Ok(n) => written += n,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+                ) => {}
+            Err(e) => break Err(io(e)),
+        }
+    };
+    stream.set_nonblocking(false).map_err(io)?;
+    out
 }
 
 /// Serve exactly one connection: authenticate, read one frame, answer, close.
@@ -787,6 +814,87 @@ mod tests {
             };
             assert!(matches!(out, Err(ServeError::Io(_))), "{out:?}");
         }
+    }
+
+    /// The reply write is bounded as a whole too: one blocking write under a
+    /// send timeout is not, against a peer that drains a little at a time.
+    #[test]
+    fn a_peer_that_drains_the_reply_slowly_is_released_by_the_bound() {
+        let me = nix::unistd::getuid().as_raw();
+        let (a, b) = UnixStream::pair().unwrap();
+        let mut r = a;
+        r.write_all(&prefixed(&frame(ALICE))).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let big = |_a: &maknae_deputy::handle::Admitted<'_>| {
+                Ok(EgressFrameReply::Reply(maknae_proto::PromptReply {
+                    reasoning: None,
+                    blocks: vec![ContentBlock::Text {
+                        text: SecretText(zeroize::Zeroizing::new("a".repeat(900_000))),
+                    }],
+                    tool_calls: vec![],
+                    usage: None,
+                }))
+            };
+            let _ = tx.send(serve_one(b, me, &bounds(), Duration::from_millis(300), big));
+        });
+        let started = std::time::Instant::now();
+        let mut chunk = [0u8; 16 * 1024];
+        let mut drained = 0;
+        let out = loop {
+            if let Ok(out) = rx.recv_timeout(Duration::from_millis(50)) {
+                break out;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "a slowly draining peer held the reply write past the bound"
+            );
+            drained += r.read(&mut chunk).unwrap_or(0);
+        };
+        assert!(drained > 0, "the reply write never began: {out:?}");
+        assert!(matches!(out, Err(ServeError::Io(_))), "{out:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    /// Past both the serving and the refusal slots, a connection is closed
+    /// with nothing written, rather than queued behind the others.
+    #[test]
+    fn past_every_slot_a_connection_is_closed_unanswered() {
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = std::sync::Mutex::new(release_rx);
+        let (_d, path, slots) = looping(1, move |a| {
+            let _ = release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10));
+            canned(a)
+        });
+        let p = path.clone();
+        let held = std::thread::spawn(move || ask(&p));
+        eventually("the first connection never took its slot", || {
+            slots.in_use() == 1
+        });
+        let stalled = UnixStream::connect(&path).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        let mut c = UnixStream::connect(&path).unwrap();
+        c.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let _ = c.write_all(&prefixed(&frame(ALICE)));
+        let mut back = Vec::new();
+        match c.read_to_end(&mut back) {
+            Ok(_) => assert!(back.is_empty(), "a reply was written: {} bytes", back.len()),
+            Err(e) => assert_ne!(
+                e.kind(),
+                std::io::ErrorKind::WouldBlock,
+                "the connection was queued, not closed"
+            ),
+        }
+        release_tx.send(()).unwrap();
+        assert!(matches!(held.join().unwrap(), EgressFrameReply::Reply(_)));
+        drop(stalled);
     }
 
     /// A stalled connection past capacity is answered off the accept thread,
