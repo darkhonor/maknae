@@ -103,6 +103,8 @@ impl std::fmt::Debug for EgressFrameRequest {
 pub enum EgressFrameReply {
     Reply(crate::PromptReply),
     RefusedBeforeSend,
+    /// The deputy had no free slot: the frame was read and discarded, and nothing left the host.
+    AtCapacity,
     Unusable {
         defect: crate::ReplyDefect,
         usage: Option<crate::Usage>,
@@ -654,6 +656,17 @@ mod tests {
             usage: None,
         });
         assert_ne!(reply, r);
+    }
+
+    #[test]
+    fn an_at_capacity_refusal_round_trips_as_its_own_tag() {
+        let r = EgressFrameReply::AtCapacity;
+        let buf = crate::encode_egress_frame_reply(&r, EGRESS_REPLY_FRAME_ENCODE_BYTES).unwrap();
+        assert_eq!(crate::decode_egress_frame_reply(&buf).unwrap(), r);
+        let mut tag_only = Vec::new();
+        ciborium::into_writer(&"at_capacity", &mut tag_only).unwrap();
+        assert_eq!(&buf[..], &tag_only[..]);
+        assert_ne!(r, EgressFrameReply::RefusedBeforeSend);
     }
 
     /// Every field of the shape check earns its place: drop any one and a

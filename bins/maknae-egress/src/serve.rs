@@ -8,14 +8,22 @@
 //! **One request per connection.** The kernel opens a fresh connection per
 //! request, so the credential check runs per request rather than once on a
 //! long-lived socket.
+//!
+//! **Connections are served concurrently, up to the deputy's capacity**
+//! (#321). Each holds a slot on its own thread; past capacity the frame is read
+//! and answered `AtCapacity` at once, never left queued in the backlog against
+//! the kernel's deadline. Every blocking read and write is bounded.
 
+use crate::capacity::Slots;
 use maknae_config::EgressBounds;
 use maknae_deputy::call::FulfilError;
 use maknae_deputy::handle::{decide, Refusal};
 use maknae_deputy::unseal::OpenFailure;
 use maknae_proto::EgressFrameReply;
 use std::io::{Read, Write};
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::sync::Arc;
+use std::time::Duration;
 
 /// The largest request frame the deputy will ACCEPT. Checked against the
 /// declared length BEFORE allocation: the kernel is trusted, but a bug there
@@ -24,6 +32,10 @@ use std::os::unix::net::UnixStream;
 /// The VALUE is `maknae-proto`'s, shared with the kernel's pre-send check so
 /// the two ends cannot drift (#240, review round 4).
 pub const MAX_REQUEST_FRAME_BYTES: usize = maknae_proto::EGRESS_REQUEST_FRAME_MAX_BYTES;
+
+/// The bound on each blocking read and write of a connection. The kernel
+/// writes its frame as soon as it connects, so only a stalled peer meets it.
+pub const FRAME_IO_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ServeError {
@@ -42,6 +54,8 @@ pub enum ServeError {
     OversizeFrame(usize),
     Io(String),
     Refused(Refusal),
+    /// No slot was free; the frame was read, discarded and answered `AtCapacity`.
+    AtCapacity,
 }
 
 /// The one `FulfilError` mapping, shared by `main` and the tests.
@@ -99,16 +113,13 @@ pub fn serve_one<F>(
     mut stream: UnixStream,
     expected_uid: u32,
     bounds: &EgressBounds,
+    io_timeout: Duration,
     fulfil: F,
 ) -> Result<(), ServeError>
 where
     F: FnOnce(&maknae_deputy::handle::Admitted<'_>) -> Result<EgressFrameReply, ServeError>,
 {
-    // BEFORE the first read. A peer we have not authenticated does not get to
-    // hand us bytes to parse.
-    if !maknae_vault::peer_uid_is(&stream, expected_uid).map_err(|_| ServeError::WrongPeer)? {
-        return Err(ServeError::WrongPeer);
-    }
+    authenticate(&stream, expected_uid, io_timeout)?;
 
     let body = read_body_zeroizing(&mut stream)?;
 
@@ -124,6 +135,80 @@ where
             write_reply(&mut stream, &EgressFrameReply::Unusable { defect, usage })
         }
         Err(e) => Err(e),
+    }
+}
+
+/// The peer check, BEFORE the first read: a peer we have not authenticated
+/// does not get to hand us bytes to parse. Then every later read and write is
+/// bounded, so a stalled peer gives its slot back.
+fn authenticate(
+    stream: &UnixStream,
+    expected_uid: u32,
+    io_timeout: Duration,
+) -> Result<(), ServeError> {
+    if !maknae_vault::peer_uid_is(&stream, expected_uid).map_err(|_| ServeError::WrongPeer)? {
+        return Err(ServeError::WrongPeer);
+    }
+    stream.set_read_timeout(Some(io_timeout)).map_err(io)?;
+    stream.set_write_timeout(Some(io_timeout)).map_err(io)
+}
+
+/// Answer a connection that found no free slot. The frame is read before the
+/// reply so the kernel's write completes and it reads a named refusal; closed
+/// unread, the kernel would record delivery unknown for content that never left.
+pub fn refuse_at_capacity(
+    mut stream: UnixStream,
+    expected_uid: u32,
+    io_timeout: Duration,
+) -> Result<(), ServeError> {
+    authenticate(&stream, expected_uid, io_timeout)?;
+    drop(read_body_zeroizing(&mut stream)?);
+    write_reply(&mut stream, &EgressFrameReply::AtCapacity)?;
+    Err(ServeError::AtCapacity)
+}
+
+/// Accept forever. A failed connection is refused and the loop continues: one
+/// bad or hostile peer must not take the deputy down.
+pub fn accept_loop<H>(
+    listener: UnixListener,
+    slots: Arc<Slots>,
+    expected_uid: u32,
+    bounds: Arc<EgressBounds>,
+    io_timeout: Duration,
+    handler: Arc<H>,
+) where
+    H: Fn(&maknae_deputy::handle::Admitted<'_>) -> Result<EgressFrameReply, ServeError>
+        + Send
+        + Sync
+        + 'static,
+{
+    for conn in listener.incoming() {
+        let stream = match conn {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("maknae-egress: accept failed: {e}");
+                continue;
+            }
+        };
+        let Some(slot) = slots.try_take() else {
+            if let Err(e) = refuse_at_capacity(stream, expected_uid, io_timeout) {
+                eprintln!("maknae-egress: connection refused: {e:?}");
+            }
+            continue;
+        };
+        let (bounds, handler) = (Arc::clone(&bounds), Arc::clone(&handler));
+        let spawned = std::thread::Builder::new()
+            .name("maknae-egress-conn".into())
+            .spawn(move || {
+                let _slot = slot;
+                if let Err(e) = serve_one(stream, expected_uid, &bounds, io_timeout, |a| handler(a))
+                {
+                    eprintln!("maknae-egress: connection refused: {e:?}");
+                }
+            });
+        if let Err(e) = spawned {
+            eprintln!("maknae-egress: cannot start a connection thread: {e}");
+        }
     }
 }
 
@@ -158,7 +243,7 @@ mod tests {
     use maknae_deputy::call::{fulfil, CallBounds};
     use maknae_deputy::unseal::{KeyOpener, OpenRequest};
     use maknae_proto::{ContentBlock, EgressFrameRequest, ReplyDefect, SecretText};
-    use std::os::unix::net::UnixListener;
+    use std::path::PathBuf;
 
     const ALICE: &str = "maknae/users/alice/openai/personal";
     const DEAD_PROVIDER: &str = "http://127.0.0.1:1/v1/chat/completions";
@@ -261,7 +346,7 @@ mod tests {
             c.read_to_end(&mut back).unwrap();
             back
         });
-        let out = serve_one(b, me, &bounds(), fulfil);
+        let out = serve_one(b, me, &bounds(), FRAME_IO_TIMEOUT, fulfil);
         let back = h.join().unwrap();
         let reply = (!back.is_empty()).then(|| {
             let n = u32::from_be_bytes(back[..4].try_into().unwrap()) as usize;
@@ -299,7 +384,7 @@ mod tests {
             // Hold the socket open until the reader is done with it.
             let _ = done_rx.recv();
         });
-        let out = serve_one(b, expected_uid, &bounds(), canned);
+        let out = serve_one(b, expected_uid, &bounds(), FRAME_IO_TIMEOUT, canned);
         let _ = done_tx.send(());
         h.join().unwrap();
         out
@@ -351,7 +436,7 @@ mod tests {
 
         let mut keep = b.try_clone().unwrap();
         assert_eq!(
-            serve_one(b, me.wrapping_add(1), &bounds(), canned),
+            serve_one(b, me.wrapping_add(1), &bounds(), FRAME_IO_TIMEOUT, canned),
             Err(ServeError::WrongPeer)
         );
 
@@ -379,7 +464,7 @@ mod tests {
             c.read_exact(&mut body).unwrap();
             maknae_proto::decode_egress_frame_reply(&body).unwrap()
         });
-        serve_one(b, me, &bounds(), canned).unwrap();
+        serve_one(b, me, &bounds(), FRAME_IO_TIMEOUT, canned).unwrap();
         let reply = h.join().unwrap();
         assert_eq!(
             reply,
@@ -431,35 +516,188 @@ mod tests {
     /// or broken peer must not take the deputy down.
     #[test]
     fn the_accept_loop_survives_a_refused_connection_and_serves_the_next() {
+        let (_d, path, _slots) = looping(4, canned);
+        drop(UnixStream::connect(&path).unwrap());
+        assert!(matches!(ask(&path), EgressFrameReply::Reply(_)));
+    }
+
+    fn looping<H>(cap: usize, handler: H) -> (tempfile::TempDir, PathBuf, Arc<Slots>)
+    where
+        H: Fn(&maknae_deputy::handle::Admitted<'_>) -> Result<EgressFrameReply, ServeError>
+            + Send
+            + Sync
+            + 'static,
+    {
         let d = tempfile::tempdir().unwrap();
         let path = d.path().join("egress.sock");
         let l = UnixListener::bind(&path).unwrap();
         let me = nix::unistd::getuid().as_raw();
-        let p2 = path.clone();
-        let h = std::thread::spawn(move || {
-            // 1: hang up immediately -> refused, loop continues
-            drop(UnixStream::connect(&p2).unwrap());
-            // 2: a real request -> answered
-            let mut c = UnixStream::connect(&p2).unwrap();
-            let f = frame(ALICE);
-            c.write_all(&(f.len() as u32).to_be_bytes()).unwrap();
-            c.write_all(&f).unwrap();
-            let mut len = [0u8; 4];
-            c.read_exact(&mut len).unwrap();
-            let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
-            c.read_exact(&mut body).unwrap();
-            maknae_proto::decode_egress_frame_reply(&body).unwrap()
+        let slots = Slots::new(cap);
+        let held = Arc::clone(&slots);
+        std::thread::spawn(move || {
+            accept_loop(
+                l,
+                held,
+                me,
+                Arc::new(bounds()),
+                Duration::from_secs(5),
+                Arc::new(handler),
+            )
         });
-        let b = bounds();
-        let mut served = 0;
-        for conn in l.incoming() {
-            let _ = serve_one(conn.unwrap(), me, &b, canned);
-            served += 1;
-            if served == 2 {
-                break;
-            }
+        (d, path, slots)
+    }
+
+    fn ask(path: &std::path::Path) -> EgressFrameReply {
+        let mut c = UnixStream::connect(path).unwrap();
+        c.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+        c.write_all(&prefixed(&frame(ALICE))).unwrap();
+        let mut len = [0u8; 4];
+        c.read_exact(&mut len).unwrap();
+        let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
+        c.read_exact(&mut body).unwrap();
+        maknae_proto::decode_egress_frame_reply(&body).unwrap()
+    }
+
+    fn eventually(what: &str, cond: impl Fn() -> bool) {
+        let until = std::time::Instant::now() + Duration::from_secs(10);
+        while !cond() {
+            assert!(std::time::Instant::now() < until, "{what}");
+            std::thread::sleep(Duration::from_millis(10));
         }
-        h.join().unwrap();
+    }
+
+    /// #321: the second connection is served while the first is still in its
+    /// provider call. Each handler waits until both are inside it; a serial
+    /// loop never lets the second in, so each waits out its bound and fails.
+    #[test]
+    fn two_connections_are_served_at_the_same_time() {
+        let inside = Arc::new((std::sync::Mutex::new(0usize), std::sync::Condvar::new()));
+        let both_seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (i, seen) = (Arc::clone(&inside), Arc::clone(&both_seen));
+        let (_d, path, _slots) = looping(4, move |a| {
+            let (m, cv) = &*i;
+            let mut n = m.lock().unwrap();
+            *n += 1;
+            cv.notify_all();
+            let (n, _) = cv
+                .wait_timeout_while(n, Duration::from_secs(3), |n| *n < 2)
+                .unwrap();
+            if *n >= 2 {
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            canned(a)
+        });
+        let p = path.clone();
+        let other = std::thread::spawn(move || ask(&p));
+        assert!(matches!(ask(&path), EgressFrameReply::Reply(_)));
+        assert!(matches!(other.join().unwrap(), EgressFrameReply::Reply(_)));
+        assert_eq!(
+            both_seen.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the connections were served one after the other"
+        );
+    }
+
+    /// Past capacity a connection is answered `AtCapacity` at once, not left in
+    /// the backlog; the held connection still completes, and its slot comes back.
+    #[test]
+    fn a_connection_past_capacity_is_answered_at_capacity_at_once() {
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = std::sync::Mutex::new(release_rx);
+        let (_d, path, slots) = looping(1, move |a| {
+            let _ = release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10));
+            canned(a)
+        });
+        let p = path.clone();
+        let held = std::thread::spawn(move || ask(&p));
+        eventually("the first connection never took its slot", || {
+            slots.in_use() == 1
+        });
+        assert_eq!(ask(&path), EgressFrameReply::AtCapacity);
+        release_tx.send(()).unwrap();
+        assert!(matches!(held.join().unwrap(), EgressFrameReply::Reply(_)));
+        eventually("the slot was not given back", || slots.in_use() == 0);
+        release_tx.send(()).unwrap();
+        assert!(matches!(ask(&path), EgressFrameReply::Reply(_)));
+    }
+
+    #[test]
+    fn a_handler_that_panics_gives_its_slot_back() {
+        let (_d, path, slots) = looping(1, |_a| panic!("handler panicked"));
+        let mut c = UnixStream::connect(&path).unwrap();
+        c.write_all(&prefixed(&frame(ALICE))).unwrap();
+        let mut rest = Vec::new();
+        let _ = c.read_to_end(&mut rest);
+        eventually("a panicking handler kept its slot", || slots.in_use() == 0);
+    }
+
+    #[test]
+    fn the_at_capacity_answer_consumes_the_frame_and_names_itself() {
+        let (a, b) = UnixStream::pair().unwrap();
+        let me = nix::unistd::getuid().as_raw();
+        let h = std::thread::spawn(move || {
+            let mut c = a;
+            c.write_all(&prefixed(&frame(ALICE))).unwrap();
+            let mut back = Vec::new();
+            c.read_to_end(&mut back).unwrap();
+            back
+        });
+        assert_eq!(
+            refuse_at_capacity(b, me, FRAME_IO_TIMEOUT),
+            Err(ServeError::AtCapacity)
+        );
+        let back = h.join().unwrap();
+        let n = u32::from_be_bytes(back[..4].try_into().unwrap()) as usize;
+        assert_eq!(back.len(), 4 + n);
+        assert_eq!(
+            maknae_proto::decode_egress_frame_reply(&back[4..]).unwrap(),
+            EgressFrameReply::AtCapacity
+        );
+    }
+
+    #[test]
+    fn the_at_capacity_path_refuses_a_wrong_peer_before_reading() {
+        let (a, b) = UnixStream::pair().unwrap();
+        let me = nix::unistd::getuid().as_raw();
+        let f = frame(ALICE);
+        let mut writer = a;
+        writer.write_all(&(f.len() as u32).to_be_bytes()).unwrap();
+        writer.write_all(&f).unwrap();
+        let mut keep = b.try_clone().unwrap();
+        assert_eq!(
+            refuse_at_capacity(b, me.wrapping_add(1), FRAME_IO_TIMEOUT),
+            Err(ServeError::WrongPeer)
+        );
+        keep.set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        let mut len = [0u8; 4];
+        keep.read_exact(&mut len)
+            .expect("the frame was consumed before the peer check");
+        assert_eq!(u32::from_be_bytes(len), f.len() as u32);
+        drop(writer);
+    }
+
+    /// A peer that connects and sends nothing is released by the bound, on
+    /// both paths, rather than holding the connection forever.
+    #[test]
+    fn a_peer_that_stalls_is_released_by_the_io_bound() {
+        let me = nix::unistd::getuid().as_raw();
+        let bound = Duration::from_millis(200);
+        for at_capacity in [false, true] {
+            let (a, b) = UnixStream::pair().unwrap();
+            let started = std::time::Instant::now();
+            let out = if at_capacity {
+                refuse_at_capacity(b, me, bound)
+            } else {
+                serve_one(b, me, &bounds(), bound, canned)
+            };
+            assert!(matches!(out, Err(ServeError::Io(_))), "{out:?}");
+            assert!(started.elapsed() < Duration::from_secs(5));
+            drop(a);
+        }
     }
 
     /// The receive buffer is `Zeroizing` FROM ALLOCATION, not after decode.

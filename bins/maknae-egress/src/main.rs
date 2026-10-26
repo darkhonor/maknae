@@ -22,6 +22,7 @@
 //! Thin by design (T3, the `bins/maknaed` precedent): the decision is in
 //! `handle`, the I/O in `serve`, the socket in `listen`.
 
+mod capacity;
 mod listen;
 mod opener;
 mod serve;
@@ -29,6 +30,7 @@ mod serve;
 use maknae_deputy::call;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 const BOUNDS_PATH: &str = "/etc/maknae/egress-bounds.yaml";
 /// The account the kernel runs as. The deputy speaks to nobody else.
@@ -90,9 +92,11 @@ fn main() {
         Err(e) => fail(format!("cannot resolve '{KERNEL_USER}': {e}")),
     };
 
-    // One current-thread runtime for the process: the provider call and the
-    // Vault read are futures, and the serving path is otherwise blocking.
-    let rt = match tokio::runtime::Builder::new_current_thread()
+    // One runtime for the process, driven by every connection's thread: the
+    // provider call and the Vault read are futures, the serving path is
+    // otherwise blocking, and the pooled Vault client stays on one runtime.
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
         .enable_all()
         .build()
     {
@@ -122,7 +126,7 @@ fn main() {
         Ok(a) => a,
         Err(e) => fail(format!("vault client: {e}")),
     };
-    let opener = opener::SealedOpener { key, api };
+    let opener = Arc::new(opener::SealedOpener { key, api });
 
     let listener = match listen::from_init_system() {
         Ok(Some(l)) => l,
@@ -143,28 +147,25 @@ fn main() {
         Err(e) => fail(e),
     };
 
-    // Accept forever. A failed connection is refused and the loop continues:
-    // one bad or hostile peer must not take the deputy down. This is wiring,
-    // not logic — the decision is `handle::decide`, the per-connection I/O is
-    // `serve::serve_one`, and both are tested.
-    for conn in listener.incoming() {
-        match conn {
-            Ok(s) => {
-                if let Err(e) = serve::serve_one(s, expected_uid, &bounds, |admitted| {
-                    rt.block_on(call::fulfil(
-                        admitted,
-                        &opener,
-                        call::CallBounds::from_bounds(&bounds),
-                        &mut |l| eprintln!("{l}"),
-                    ))
-                    .map_err(serve::serve_error)
-                }) {
-                    eprintln!("maknae-egress: connection refused: {e:?}");
-                }
-            }
-            Err(e) => eprintln!("maknae-egress: accept failed: {e}"),
-        }
-    }
+    // Wiring, not logic: the decision is `handle::decide`, the per-connection
+    // I/O and the accept loop are `serve`, and all are tested.
+    let handle = rt.handle().clone();
+    let call_bounds = call::CallBounds::from_bounds(&bounds);
+    let fulfil = move |admitted: &maknae_deputy::handle::Admitted<'_>| {
+        handle
+            .block_on(call::fulfil(admitted, &*opener, call_bounds, &mut |l| {
+                eprintln!("{l}")
+            }))
+            .map_err(serve::serve_error)
+    };
+    serve::accept_loop(
+        listener,
+        capacity::Slots::new(capacity::deputy_capacity()),
+        expected_uid,
+        Arc::new(bounds),
+        serve::FRAME_IO_TIMEOUT,
+        Arc::new(fulfil),
+    );
 }
 
 #[cfg(test)]
@@ -335,6 +336,22 @@ mod tests {
             ]
         );
         assert!(plist.contains("<key>UserName</key>\n  <string>_maknae-egress</string>"));
+    }
+
+    /// A fixed worker count keeps tokio from probing `/proc` and the cgroup
+    /// tree for CPUs, which the deputy's AppArmor profile does not grant.
+    #[test]
+    fn the_runtime_has_a_fixed_worker_count_and_serves_at_the_deputys_capacity() {
+        let src = include_str!("main.rs");
+        assert_eq!(src.matches(concat!(".worker_threads", "(2)")).count(), 1);
+        assert_eq!(
+            src.matches(concat!(
+                "capacity::Slots::new(capacity::",
+                "deputy_capacity())"
+            ))
+            .count(),
+            1
+        );
     }
 
     #[test]

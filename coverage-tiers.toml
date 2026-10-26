@@ -373,6 +373,9 @@ files = [
   # — socket I/O, with the DECISION in handle.rs (T1) and the peer-identity
   # check in maknae-vault's peer_identity.rs (T1).
   "bins/maknae-egress/src/serve.rs",
+  # #321: the deputy's connection-slot accounting. T2: a leaked slot refuses
+  # every later prompt (availability), and it carries no verdict.
+  "bins/maknae-egress/src/capacity.rs",
   "crates/maknae-plane/src/fd.rs", "crates/maknae-plane/src/send.rs",
   # Cooperative execution in the untrusted CLI: cannot issue a PDP Permit or
   # kernel-observed completion. Guard failures can damage the subject's own

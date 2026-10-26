@@ -2258,7 +2258,19 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                         }
                     }
                 }
-                Ok(Ok(Err(f))) => (crate::egress::outcome_for_failure(&f), None),
+                Ok(Ok(Err(f))) => {
+                    if f == crate::egress::EgressFailure::DeputyAtCapacity
+                        && egress_breaker
+                            .lock()
+                            .await
+                            .should_log_refusal_at(Instant::now())
+                    {
+                        eprintln!(
+                            "maknaed: egress deputy at capacity (peer_uid={peer_uid} session_id={session_id}) — the send was refused before any provider I/O"
+                        );
+                    }
+                    (crate::egress::outcome_for_failure(&f), None)
+                }
                 Ok(Err(join)) => {
                     // The blocking worker was LOST (it panicked). Whether bytes
                     // left before the panic is unknowable to the kernel.

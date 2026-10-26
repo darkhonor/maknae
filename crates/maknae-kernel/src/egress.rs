@@ -115,6 +115,8 @@ pub enum EgressFailure {
     AfterSend(String),
     /// The deputy refused before any provider I/O: nothing left, recorded `Failed`.
     RefusedBeforeSend,
+    /// The deputy had no free slot and refused before any provider I/O: nothing left, recorded `Failed`.
+    DeputyAtCapacity,
     /// The deputy holds a provider answer it could not use: recorded `LandedUndelivered` (#427).
     ReplyUnusable {
         defect: maknae_proto::ReplyDefect,
@@ -240,7 +242,8 @@ pub fn outcome_for_failure(f: &EgressFailure) -> SendOutcome {
         },
         EgressFailure::NotConfigured
         | EgressFailure::Transport(_)
-        | EgressFailure::RefusedBeforeSend => SendOutcome::Failed,
+        | EgressFailure::RefusedBeforeSend
+        | EgressFailure::DeputyAtCapacity => SendOutcome::Failed,
     }
 }
 
@@ -1418,6 +1421,7 @@ mod tests {
             "x".into()
         )));
         assert!(!failure_counts_as_expiry(&EgressFailure::RefusedBeforeSend));
+        assert!(!failure_counts_as_expiry(&EgressFailure::DeputyAtCapacity));
     }
 
     #[test]
@@ -1440,6 +1444,10 @@ mod tests {
         );
         assert_eq!(
             outcome_for_failure(&EgressFailure::NotConfigured),
+            SendOutcome::Failed
+        );
+        assert_eq!(
+            outcome_for_failure(&EgressFailure::DeputyAtCapacity),
             SendOutcome::Failed
         );
     }

@@ -7,10 +7,9 @@
 //! connection per request is naturally concurrent, needs no correlation id and
 //! no reply demuxer, and — the stronger reason — makes the peer-credential
 //! check run **per request** rather than once on a long-lived connection.
-//! What the OTHER end does with that: the deputy today serves one connection
-//! to completion before accepting the next (`bins/maknae-egress/src/main.rs`),
-//! so two concurrent prompts queue head-to-tail behind one provider call and
-//! the deadline below is a queueing bound as well as a call bound (#321).
+//! The deputy serves connections concurrently up to its capacity and answers
+//! one past it `AtCapacity` at once (`bins/maknae-egress/src/serve.rs`, #321),
+//! so the deadline below bounds one call, not a queue.
 //!
 //! **Peer credentials are checked BEFORE the first write** (D3). The request
 //! carries prompt content and the Vault path naming where the provider
@@ -345,6 +344,7 @@ impl Egress for SocketEgress {
         {
             EgressFrameReply::Reply(reply) => Ok(EgressReply { reply }),
             EgressFrameReply::RefusedBeforeSend => Err(EgressFailure::RefusedBeforeSend),
+            EgressFrameReply::AtCapacity => Err(EgressFailure::DeputyAtCapacity),
             EgressFrameReply::Unusable { defect, usage } => {
                 Err(EgressFailure::ReplyUnusable { defect, usage })
             }
@@ -717,6 +717,20 @@ mod tests {
         assert_eq!(
             e.send(&intent, req()).unwrap_err(),
             EgressFailure::RefusedBeforeSend
+        );
+        assert!(seen.load(Ordering::SeqCst) > 0);
+    }
+
+    #[test]
+    fn a_deputy_at_capacity_is_a_named_refusal_not_a_lost_send() {
+        let d = tempfile::tempdir().unwrap();
+        let (path, seen) = fake_deputy(d.path(), Some(maknae_proto::EgressFrameReply::AtCapacity));
+        let me = nix::unistd::getuid().as_raw();
+        let e = SocketEgress::new(path, me, Duration::from_secs(2), 64 * 1024);
+        let intent = crate::egress::DurableEgressIntent::canned_for_test();
+        assert_eq!(
+            e.send(&intent, req()).unwrap_err(),
+            EgressFailure::DeputyAtCapacity
         );
         assert!(seen.load(Ordering::SeqCst) > 0);
     }

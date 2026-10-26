@@ -39,9 +39,9 @@ profile maknae-egress /usr/bin/maknae-egress {
   @{run}/maknae-egress/                  r,
   @{run}/maknae-egress/egress.sock       rw,
 
-  # No @{PROC} or cgroup grants, deliberately: the deputy is a current-thread
-  # runtime over a std listener that binds nothing, so tokio's somaxconn and
-  # cgroup probes (which maknaed's profile grants) are never reached here.
+  # No @{PROC} or cgroup grants, deliberately: the deputy's runtime has a fixed
+  # worker count over a std listener that binds nothing, so tokio's somaxconn
+  # and cgroup probes (which maknaed's profile grants) are never reached here.
   # An enforcing-host denial would say otherwise; that is #242's to see.
 
   # #240b: the deputy's copy of the Vault TLS anchor, written by
