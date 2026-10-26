@@ -838,6 +838,12 @@ fn status_lines(s: &maknae_proto::StatusView) -> Vec<String> {
         format!("listener              {}", s.listener),
         format!("authz_backend         {}", s.authz_backend),
         format!("classification_policy {}", s.classification_policy),
+        format!(
+            "plane_key             {}",
+            s.plane_key
+                .as_deref()
+                .map_or_else(|| "not reported".to_string(), terminal_safe)
+        ),
     ];
     lines.extend(kernel_graph_line(
         s.kernel_graph_revision,
@@ -2170,6 +2176,7 @@ mod tests {
             listener: "l".into(),
             authz_backend: "b".into(),
             classification_policy: "US".into(),
+            plane_key: None,
             kernel_graph_revision: Some(3),
             kernel_graph_anchor: Some("verified".into()),
             identity_problem_counts: vec![],
@@ -2182,6 +2189,10 @@ mod tests {
             base.last().map(String::as_str),
             Some("kernel graph: revision 3 (verified)")
         );
+        assert!(base.contains(&"plane_key             not reported".to_string()));
+        let mut reported = s.clone();
+        reported.plane_key = Some("ml-dsa-87".into());
+        assert!(status_lines(&reported).contains(&"plane_key             ml-dsa-87".to_string()));
         assert!(!base.iter().any(|l| l.starts_with("identity problem")));
         s.identity_problem_counts = vec!["unbound_conflict=0".into(), "released=0".into()];
         assert_eq!(status_lines(&s), base, "all-zero counts print nothing");
@@ -2763,6 +2774,7 @@ mod tests {
             listener: "l".into(),
             authz_backend: "b".into(),
             classification_policy: "US".into(),
+            plane_key: None,
             kernel_graph_revision: Some(3),
             kernel_graph_anchor: Some("verified".into()),
             identity_problem_counts: vec!["unresolved=1".into()],

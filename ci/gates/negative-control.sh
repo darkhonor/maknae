@@ -1022,6 +1022,7 @@ pub struct StatusView {
     pub listener: String,
     pub authz_backend: String,
     pub classification_policy: String,
+    pub plane_key: Option<String>,
     pub kernel_graph_revision: Option<u64>,
     pub kernel_graph_anchor: Option<String>,
     pub identity_problem_counts: Vec<String>,
@@ -1245,6 +1246,7 @@ always	status.protocol_version	ships by construction
 always	status.listener	ships by construction
 always	status.authz_backend	ships by construction
 always	status.classification_policy	ships by construction
+always	status.plane_key	ships by construction
 always	status.kernel_graph_revision	ships by construction
 always	status.kernel_graph_anchor	ships by construction
 always	status.identity_problem_counts	ships by construction
@@ -1560,9 +1562,9 @@ python3 - "$fx" <<'PY'
 import pathlib, sys
 p = pathlib.Path(sys.argv[1]) / "ci/gates/config-disclosure-drift.sh"
 s = p.read_text()
-old = "|StatusView|status|11|wire"
+old = "|StatusView|status|12|wire"
 assert s.count(old) == 1, "fixture prefix anchor moved"
-p.write_text(s.replace(old, "|StatusView|status view|11|wire"))
+p.write_text(s.replace(old, "|StatusView|status view|12|wire"))
 PY
 expect_reject_because "config-disclosure-drift/whitespace-bearing-surface-prefix" \
   "whitespace-bearing prefix" "$fx/ci/gates/config-disclosure-drift.sh"

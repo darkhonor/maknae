@@ -1345,6 +1345,7 @@ async fn failed_grant_or_ack_write_stops_before_accepting_more_client_reports() 
             std::sync::Arc::new(maknae_kernel::LiveConfig::new(Default::default(), None)),
             Arc::new("basic+ceiling".into()),
             Arc::new("US".into()),
+            std::sync::Arc::new("ml-dsa-87".to_string()),
             std::sync::Arc::new(None),
             maknae_kernel::unavailable_egress(),
             Duration::from_secs(2),

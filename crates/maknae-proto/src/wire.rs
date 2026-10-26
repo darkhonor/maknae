@@ -983,6 +983,10 @@ pub struct StatusView {
     /// build carries. An operator reading a ceiling refusal needs to know
     /// which ladder ranked it.
     pub classification_policy: String,
+    /// The plane identity's key algorithm, `vault.plane_key` (#573). Absent from a
+    /// daemon that predates it.
+    #[serde(default)]
+    pub plane_key: Option<String>,
     /// The kernel graph store's revision counter (#488). Absent from a daemon
     /// that predates the store.
     #[serde(default)]
@@ -1413,6 +1417,7 @@ mod tests {
                 listener: "/run/maknae.sock".into(),
                 authz_backend: "b".into(),
                 classification_policy: "US".into(),
+                plane_key: None,
                 kernel_graph_revision: kernel_graph.as_ref().map(|k| k.0),
                 kernel_graph_anchor: kernel_graph.map(|k| k.1),
                 identity_problem_counts: vec![],

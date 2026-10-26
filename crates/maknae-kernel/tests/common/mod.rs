@@ -599,6 +599,7 @@ impl Fixture {
             live,
             Arc::new("basic+ceiling".into()),
             Arc::new("US".into()),
+            std::sync::Arc::new("ml-dsa-87".to_string()),
             std::sync::Arc::new(None),
             egress,
             Duration::from_secs(2),
