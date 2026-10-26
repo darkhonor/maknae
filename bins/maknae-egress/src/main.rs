@@ -35,8 +35,6 @@ use std::sync::Arc;
 const BOUNDS_PATH: &str = "/etc/maknae/egress-bounds.yaml";
 /// The account the kernel runs as. The deputy speaks to nobody else.
 const KERNEL_USER: &str = "_maknae";
-/// EX_SOFTWARE.
-const PANIC_EXIT: i32 = 70;
 
 fn fail(msg: impl std::fmt::Display) -> ! {
     eprintln!("maknae-egress: refusing to start: {msg}");
@@ -170,7 +168,6 @@ fn main() {
         Arc::new(bounds),
         serve::FRAME_IO_TIMEOUT,
         Arc::new(fulfil),
-        Arc::new(|| std::process::exit(PANIC_EXIT)),
     );
 }
 
@@ -344,7 +341,7 @@ mod tests {
             plist.contains(
                 "<key>KeepAlive</key>\n  <dict>\n    <key>SuccessfulExit</key>\n    <false/>"
             ),
-            "a panic exits failing, and only a restart on failure brings the deputy back"
+            "a crash exits failing, and only a restart on failure brings the deputy back"
         );
     }
 

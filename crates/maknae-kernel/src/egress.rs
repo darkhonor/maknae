@@ -117,6 +117,12 @@ pub enum EgressFailure {
     RefusedBeforeSend,
     /// The deputy had no free slot and refused before any provider I/O: nothing left, recorded `Failed`.
     DeputyAtCapacity,
+    /// The daemon's own egress worker budget was spent; refused without spawning, recorded `Failed`.
+    KernelAtCapacity,
+    /// The egress breaker is open after repeated deadlines; refused without spawning, recorded `Failed`.
+    CircuitOpen,
+    /// The deputy could not be connected to (down or restarting); nothing was written, recorded `Failed`.
+    DeputyUnreachable(String),
     /// The deputy holds a provider answer it could not use: recorded `LandedUndelivered` (#427).
     ReplyUnusable {
         defect: maknae_proto::ReplyDefect,
@@ -231,6 +237,24 @@ pub fn failure_counts_as_expiry(f: &EgressFailure) -> bool {
     matches!(f, EgressFailure::DeadlineExpired)
 }
 
+/// Which failures the subject is told are a matter of availability
+/// (`ProtoErrCode::EgressUnavailable`) rather than a refusal: each one
+/// provably sent nothing, so the subject can simply try again.
+pub fn failure_is_unavailability(f: &EgressFailure) -> bool {
+    match f {
+        EgressFailure::DeputyAtCapacity
+        | EgressFailure::KernelAtCapacity
+        | EgressFailure::CircuitOpen
+        | EgressFailure::DeputyUnreachable(_) => true,
+        EgressFailure::NotConfigured
+        | EgressFailure::Transport(_)
+        | EgressFailure::DeadlineExpired
+        | EgressFailure::AfterSend(_)
+        | EgressFailure::RefusedBeforeSend
+        | EgressFailure::ReplyUnusable { .. } => false,
+    }
+}
+
 pub fn outcome_for_failure(f: &EgressFailure) -> SendOutcome {
     match f {
         EgressFailure::DeadlineExpired => SendOutcome::DeadlineExpired,
@@ -243,7 +267,10 @@ pub fn outcome_for_failure(f: &EgressFailure) -> SendOutcome {
         EgressFailure::NotConfigured
         | EgressFailure::Transport(_)
         | EgressFailure::RefusedBeforeSend
-        | EgressFailure::DeputyAtCapacity => SendOutcome::Failed,
+        | EgressFailure::DeputyAtCapacity
+        | EgressFailure::KernelAtCapacity
+        | EgressFailure::CircuitOpen
+        | EgressFailure::DeputyUnreachable(_) => SendOutcome::Failed,
     }
 }
 
@@ -1422,6 +1449,39 @@ mod tests {
         )));
         assert!(!failure_counts_as_expiry(&EgressFailure::RefusedBeforeSend));
         assert!(!failure_counts_as_expiry(&EgressFailure::DeputyAtCapacity));
+        assert!(!failure_counts_as_expiry(&EgressFailure::KernelAtCapacity));
+        assert!(!failure_counts_as_expiry(&EgressFailure::CircuitOpen));
+        assert!(!failure_counts_as_expiry(
+            &EgressFailure::DeputyUnreachable("x".into())
+        ));
+    }
+
+    /// Only failures that provably sent nothing, for want of capacity, are
+    /// named to the subject; a refusal or a send of unknown outcome is not.
+    #[test]
+    fn only_capacity_failures_that_sent_nothing_are_named_unavailable() {
+        for f in [
+            EgressFailure::DeputyAtCapacity,
+            EgressFailure::KernelAtCapacity,
+            EgressFailure::CircuitOpen,
+            EgressFailure::DeputyUnreachable("x".into()),
+        ] {
+            assert!(failure_is_unavailability(&f), "{f:?}");
+            assert_eq!(outcome_for_failure(&f), SendOutcome::Failed, "{f:?}");
+        }
+        for f in [
+            EgressFailure::NotConfigured,
+            EgressFailure::Transport("x".into()),
+            EgressFailure::DeadlineExpired,
+            EgressFailure::AfterSend("x".into()),
+            EgressFailure::RefusedBeforeSend,
+            EgressFailure::ReplyUnusable {
+                defect: maknae_proto::ReplyDefect::Empty,
+                usage: None,
+            },
+        ] {
+            assert!(!failure_is_unavailability(&f), "{f:?}");
+        }
     }
 
     #[test]

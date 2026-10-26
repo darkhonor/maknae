@@ -248,7 +248,8 @@ impl Egress for SocketEgress {
         req: EgressRequest,
     ) -> Result<EgressReply, EgressFailure> {
         let deadline_at = Instant::now() + self.timeout;
-        let stream = UnixStream::connect(&self.path).map_err(Self::transport)?;
+        let stream = UnixStream::connect(&self.path)
+            .map_err(|e| EgressFailure::DeputyUnreachable(e.to_string()))?;
 
         // BEFORE the first write. Moving this below the write hands prompt
         // content and a Vault path to an unauthenticated peer. A capture error
@@ -782,7 +783,7 @@ mod tests {
     }
 
     #[test]
-    fn a_connect_to_no_deputy_is_a_transport_failure() {
+    fn a_connect_to_no_deputy_is_unreachable_not_a_refusal() {
         let d = tempfile::tempdir().unwrap();
         let e = SocketEgress::new(
             d.path().join("absent.sock"),
@@ -793,7 +794,7 @@ mod tests {
         let intent = crate::egress::DurableEgressIntent::canned_for_test();
         assert!(matches!(
             e.send(&intent, req()),
-            Err(EgressFailure::Transport(_))
+            Err(EgressFailure::DeputyUnreachable(_))
         ));
     }
 

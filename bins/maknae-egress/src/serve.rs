@@ -25,6 +25,7 @@ use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 use std::io::{Read, Write};
 use std::os::fd::AsFd;
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -237,22 +238,20 @@ pub fn refuse_at_capacity(
 }
 
 /// Accept forever. A failed connection is refused and the loop continues: one
-/// bad or hostile peer must not take the deputy down. A connection that
-/// panics calls `on_panic` instead.
-pub fn accept_loop<H, P>(
+/// bad or hostile peer must not take the deputy down, and neither may one
+/// connection's panic.
+pub fn accept_loop<H>(
     listener: UnixListener,
     slots: Arc<Slots>,
     expected_uid: u32,
     bounds: Arc<EgressBounds>,
     io_timeout: Duration,
     handler: Arc<H>,
-    on_panic: Arc<P>,
 ) where
     H: Fn(&maknae_deputy::handle::Admitted<'_>) -> Result<EgressFrameReply, ServeError>
         + Send
         + Sync
         + 'static,
-    P: Fn() + Send + Sync + 'static,
 {
     let refusals = Slots::new(slots.cap());
     for conn in listener.incoming() {
@@ -264,20 +263,31 @@ pub fn accept_loop<H, P>(
             }
         };
         let Some(slot) = slots.try_take() else {
-            answer_at_capacity(stream, &refusals, expected_uid, io_timeout, &on_panic);
+            answer_at_capacity(stream, &refusals, expected_uid, io_timeout);
             continue;
         };
-        let spare = stream.try_clone();
+        let fallback = stream.try_clone();
         let (bounds, handler) = (Arc::clone(&bounds), Arc::clone(&handler));
-        let spawned = spawn_guarded("maknae-egress-conn", slot, &on_panic, move || {
-            if let Err(e) = serve_one(stream, expected_uid, &bounds, io_timeout, |a| handler(a)) {
-                eprintln!("maknae-egress: connection refused: {e:?}");
-            }
-        });
+        let spawned = spawn_contained(
+            "maknae-egress-conn",
+            slot,
+            stream,
+            io_timeout,
+            EgressFrameReply::RefusedBeforeSend,
+            move |stream, began| {
+                let fulfil = |a: &maknae_deputy::handle::Admitted<'_>| {
+                    began.store(true, Ordering::Release);
+                    handler(a)
+                };
+                if let Err(e) = serve_one(stream, expected_uid, &bounds, io_timeout, fulfil) {
+                    eprintln!("maknae-egress: connection refused: {e:?}");
+                }
+            },
+        );
         if let Err(e) = spawned {
             eprintln!("maknae-egress: cannot start a connection thread: {e}");
-            if let Ok(s) = spare {
-                answer_at_capacity(s, &refusals, expected_uid, io_timeout, &on_panic);
+            if let Ok(s) = fallback {
+                answer_at_capacity(s, &refusals, expected_uid, io_timeout);
             }
         }
     }
@@ -286,12 +296,11 @@ pub fn accept_loop<H, P>(
 /// Off the accept thread, so a stalled peer here never delays the next
 /// accept. Refusals hold their own slots; past those, the connection closes
 /// unanswered rather than queueing.
-fn answer_at_capacity<P: Fn() + Send + Sync + 'static>(
+fn answer_at_capacity(
     stream: UnixStream,
     refusals: &Arc<Slots>,
     expected_uid: u32,
     io_timeout: Duration,
-    on_panic: &Arc<P>,
 ) {
     let Some(slot) = refusals.try_take() else {
         eprintln!(
@@ -299,16 +308,17 @@ fn answer_at_capacity<P: Fn() + Send + Sync + 'static>(
         );
         return;
     };
-    let spawned =
-        spawn_guarded(
-            "maknae-egress-refuse",
-            slot,
-            on_panic,
-            move || match refuse_at_capacity(stream, expected_uid, io_timeout) {
-                Ok(()) => eprintln!("maknae-egress: at capacity; answered a connection AtCapacity"),
-                Err(e) => eprintln!("maknae-egress: connection refused: {e:?}"),
-            },
-        );
+    let spawned = spawn_contained(
+        "maknae-egress-refuse",
+        slot,
+        stream,
+        io_timeout,
+        EgressFrameReply::AtCapacity,
+        move |stream, _began| match refuse_at_capacity(stream, expected_uid, io_timeout) {
+            Ok(()) => eprintln!("maknae-egress: at capacity; answered a connection AtCapacity"),
+            Err(e) => eprintln!("maknae-egress: connection refused: {e:?}"),
+        },
+    );
     if let Err(e) = spawned {
         eprintln!(
             "maknae-egress: cannot start a refusal thread; closed a connection unanswered: {e}"
@@ -316,26 +326,38 @@ fn answer_at_capacity<P: Fn() + Send + Sync + 'static>(
     }
 }
 
-/// Every connection and refusal thread starts here. The log is a plain write,
-/// because `eprintln!` panics when stderr fails and would skip `on_panic`.
-fn spawn_guarded<P: Fn() + Send + Sync + 'static>(
+/// Runs one connection on its own thread, holding `slot`. A panic ends that
+/// connection alone: the others in flight are untouched (#321). If `work` had
+/// not set `began` (the provider call started), the peer is answered
+/// `unsent`, since nothing left; otherwise it is closed, delivery unknown.
+fn spawn_contained(
     name: &str,
     slot: Slot,
-    on_panic: &Arc<P>,
-    work: impl FnOnce() + Send + 'static,
+    stream: UnixStream,
+    io_timeout: Duration,
+    unsent: EgressFrameReply,
+    work: impl FnOnce(UnixStream, &AtomicBool) + Send + 'static,
 ) -> std::io::Result<()> {
-    let on_panic = Arc::clone(on_panic);
+    let spare = stream.try_clone();
     std::thread::Builder::new()
         .name(name.into())
         .spawn(move || {
             let _slot = slot;
-            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)) {
+            let began = AtomicBool::new(false);
+            let worked =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(stream, &began)));
+            if let Err(payload) = worked {
+                // A plain write: `eprintln!` panics when stderr fails.
                 let _ = writeln!(
                     std::io::stderr(),
-                    "maknae-egress: a connection panicked; exiting so a clean deputy is restarted"
+                    "maknae-egress: a connection panicked; that connection alone was refused"
                 );
-                on_panic();
-                // Never dropped: a payload whose destructor panics would unwind past `on_panic`.
+                if !began.load(Ordering::Acquire) {
+                    if let Ok(mut s) = spare {
+                        let _ = write_reply(&mut s, &unsent, io_timeout);
+                    }
+                }
+                // A payload whose destructor panics would unwind this thread.
                 std::mem::forget(payload);
             }
         })
@@ -652,35 +674,15 @@ mod tests {
     /// or broken peer must not take the deputy down.
     #[test]
     fn the_accept_loop_survives_a_refused_connection_and_serves_the_next() {
-        let (_d, path, slots, panics) = looping_counting_panics(4, canned);
+        let (_d, path, slots) = looping(4, canned);
         drop(UnixStream::connect(&path).unwrap());
         assert!(matches!(ask(&path), EgressFrameReply::Reply(_)));
         eventually("the served connection kept its slot", || {
             slots.in_use() == 0
         });
-        assert_eq!(panics.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     fn looping<H>(cap: usize, handler: H) -> (tempfile::TempDir, PathBuf, Arc<Slots>)
-    where
-        H: Fn(&maknae_deputy::handle::Admitted<'_>) -> Result<EgressFrameReply, ServeError>
-            + Send
-            + Sync
-            + 'static,
-    {
-        let (d, path, slots, _) = looping_counting_panics(cap, handler);
-        (d, path, slots)
-    }
-
-    fn looping_counting_panics<H>(
-        cap: usize,
-        handler: H,
-    ) -> (
-        tempfile::TempDir,
-        PathBuf,
-        Arc<Slots>,
-        Arc<std::sync::atomic::AtomicUsize>,
-    )
     where
         H: Fn(&maknae_deputy::handle::Admitted<'_>) -> Result<EgressFrameReply, ServeError>
             + Send
@@ -693,8 +695,6 @@ mod tests {
         let me = nix::unistd::getuid().as_raw();
         let slots = Slots::new(cap);
         let held = Arc::clone(&slots);
-        let panics = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let counted = Arc::clone(&panics);
         std::thread::spawn(move || {
             accept_loop(
                 l,
@@ -703,12 +703,9 @@ mod tests {
                 Arc::new(bounds()),
                 Duration::from_secs(5),
                 Arc::new(handler),
-                Arc::new(move || {
-                    counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                }),
             )
         });
-        (d, path, slots, panics)
+        (d, path, slots)
     }
 
     fn ask(path: &std::path::Path) -> EgressFrameReply {
@@ -792,38 +789,107 @@ mod tests {
         assert!(matches!(ask(&path), EgressFrameReply::Reply(_)));
     }
 
+    /// #321: one connection's panic is that connection's alone. B, in flight
+    /// beside it, is answered; A, whose provider call had begun, is closed
+    /// (delivery unknown); the deputy serves the next connection; the slots
+    /// all come back.
     #[test]
-    fn a_panic_whose_payload_panics_on_drop_is_still_fatal() {
+    fn a_panicking_connection_leaves_the_others_in_flight_untouched() {
+        let order = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let a_done = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let (o, done) = (Arc::clone(&order), Arc::clone(&a_done));
+        let (_d, path, slots) = looping(4, move |a| {
+            let n = o.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 0 {
+                struct Signal(Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
+                impl Drop for Signal {
+                    fn drop(&mut self) {
+                        *self.0 .0.lock().unwrap_or_else(|p| p.into_inner()) = true;
+                        self.0 .1.notify_all();
+                    }
+                }
+                let _signal = Signal(Arc::clone(&done));
+                panic!("the first connection panics");
+            }
+            if n == 1 {
+                let (m, cv) = &*done;
+                let _ = cv
+                    .wait_timeout_while(m.lock().unwrap(), Duration::from_secs(10), |d| !*d)
+                    .unwrap();
+            }
+            canned(a)
+        });
+        let request = prefixed(&frame(ALICE));
+        let mut first = UnixStream::connect(&path).unwrap();
+        first.write_all(&request).unwrap();
+        eventually("the first connection never started", || {
+            order.load(std::sync::atomic::Ordering::SeqCst) == 1
+        });
+        let p = path.clone();
+        let second = std::thread::spawn(move || ask(&p));
+        let mut back = Vec::new();
+        let _ = first.read_to_end(&mut back);
+        assert!(
+            back.is_empty(),
+            "a call that began must not be answered as unsent"
+        );
+        assert!(matches!(second.join().unwrap(), EgressFrameReply::Reply(_)));
+        assert!(matches!(ask(&path), EgressFrameReply::Reply(_)));
+        eventually("a slot was kept", || slots.in_use() == 0);
+    }
+
+    /// Before the provider call began, a panicking connection is answered as
+    /// refused before send: nothing left, so the kernel records `Failed`.
+    #[test]
+    fn a_panic_before_the_call_began_is_answered_refused_before_send() {
+        let (a, b) = UnixStream::pair().unwrap();
+        let slots = Slots::new(1);
+        spawn_contained(
+            "t",
+            slots.try_take().unwrap(),
+            b,
+            FRAME_IO_TIMEOUT,
+            EgressFrameReply::RefusedBeforeSend,
+            |_stream, _began| panic!("before the call"),
+        )
+        .unwrap();
+        let mut c = a;
+        c.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let mut len = [0u8; 4];
+        c.read_exact(&mut len).unwrap();
+        let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
+        c.read_exact(&mut body).unwrap();
+        assert_eq!(
+            maknae_proto::decode_egress_frame_reply(&body).unwrap(),
+            EgressFrameReply::RefusedBeforeSend
+        );
+        eventually("the slot was kept", || slots.in_use() == 0);
+    }
+
+    /// A payload whose destructor panics is never dropped, so it cannot
+    /// unwind the thread past the refusal, and the deputy keeps serving.
+    #[test]
+    fn a_panic_whose_payload_panics_on_drop_is_still_contained() {
         struct Bomb;
         impl Drop for Bomb {
             fn drop(&mut self) {
                 panic!("payload dropped");
             }
         }
-        let (_d, path, _slots, panics) =
-            looping_counting_panics(1, |_a| std::panic::panic_any(Bomb));
+        let first = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (_d, path, slots) = looping(1, move |a| {
+            if first.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                std::panic::panic_any(Bomb);
+            }
+            canned(a)
+        });
         let request = prefixed(&frame(ALICE));
         let mut c = UnixStream::connect(&path).unwrap();
         c.write_all(&request).unwrap();
         let mut rest = Vec::new();
         let _ = c.read_to_end(&mut rest);
-        eventually("the payload's drop skipped on_panic", || {
-            panics.load(std::sync::atomic::Ordering::SeqCst) == 1
-        });
-    }
-
-    #[test]
-    fn a_panicking_connection_is_fatal_and_gives_its_slot_back() {
-        let (_d, path, slots, panics) = looping_counting_panics(1, |_a| panic!("handler panicked"));
-        let request = prefixed(&frame(ALICE));
-        let mut c = UnixStream::connect(&path).unwrap();
-        c.write_all(&request).unwrap();
-        let mut rest = Vec::new();
-        let _ = c.read_to_end(&mut rest);
-        eventually("a panicking connection was not reported fatal", || {
-            panics.load(std::sync::atomic::Ordering::SeqCst) == 1
-        });
-        eventually("a panicking handler kept its slot", || slots.in_use() == 0);
+        eventually("the slot was kept", || slots.in_use() == 0);
+        assert!(matches!(ask(&path), EgressFrameReply::Reply(_)));
     }
 
     #[test]

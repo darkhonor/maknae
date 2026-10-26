@@ -92,6 +92,8 @@ pub const LOGIN_EXPIRED: &str = "your Vault login expired: run `maknae login`";
 
 pub const PROMPT_REFUSED: &str = "the kernel refused the exchange — whether the prompt reached the provider is in the host's audit trail (ask your administrator); if it did not, check that your providers.yaml names a provider and model your administrator has authorized for your role and the key subpath and field of your own Vault secret, that your maknae.yaml vault block matches the host's, and that your login is current (maknae login)";
 
+pub const EGRESS_UNAVAILABLE: &str = "the model service is at capacity or restarting, and nothing was sent to the provider: try again in a moment";
+
 pub fn login_expired(expires_at: u64, now: u64) -> bool {
     now.saturating_add(maknae_vault::TOKEN_EXPIRY_MARGIN.as_secs()) >= expires_at
 }
@@ -343,6 +345,10 @@ pub fn prompt_outcome(
             code: maknae_proto::ProtoErrCode::ReplyUnusable(d),
             ..
         }) => Err(PlaneError::ReplyUnusable(d)),
+        Ok(SentOutcome::Refused {
+            code: maknae_proto::ProtoErrCode::EgressUnavailable,
+            ..
+        }) => Err(PlaneError::Unavailable),
         Ok(SentOutcome::Refused { .. }) => Err(PlaneError::Refused),
         Ok(other) => Err(PlaneError::Transport(format!(
             "protocol error: unexpected reply to session.prompt: {other:?}"
@@ -557,6 +563,7 @@ pub fn stop_line(r: Option<&StopReason>, budget: &Budget) -> String {
                 .into()
         }
         Some(StopReason::ReplyUnusable(d)) => format!("stopped: {}", reply_unusable_line(*d)),
+        Some(StopReason::EgressUnavailable) => format!("stopped: {EGRESS_UNAVAILABLE}"),
         Some(StopReason::Transport(m)) => format!("stopped: {m}"),
         Some(StopReason::ContextBudget) => "stopped: the conversation has reached the declared context budget; compaction arrives with #171".into(),
         None => "stopped".into(),
@@ -929,6 +936,26 @@ mod tests {
         let t =
             maknae_vault::UserToken::new(zeroize::Zeroizing::new("hvs.copy-153".into())).unwrap();
         assert!(token_copy(&t).unwrap().expose() == "hvs.copy-153");
+    }
+
+    #[test]
+    fn an_unavailable_egress_says_so_and_that_nothing_was_sent() {
+        assert_eq!(
+            prompt_outcome(Ok(SentOutcome::Refused {
+                code: maknae_proto::ProtoErrCode::EgressUnavailable,
+                message: maknae_proto::EGRESS_UNAVAILABLE_MESSAGE.into(),
+                armed: false,
+            })),
+            Err(PlaneError::Unavailable)
+        );
+        let b = Budget {
+            max_steps: 8,
+            max_tool_calls_per_step: 4,
+        };
+        assert_eq!(
+            stop_line(Some(&StopReason::EgressUnavailable), &b),
+            "stopped: the model service is at capacity or restarting, and nothing was sent to the provider: try again in a moment"
+        );
     }
 
     #[test]

@@ -294,6 +294,9 @@ pub enum ReplyDefect {
 
 pub const REPLY_UNUSABLE_MESSAGE: &str = "the provider's reply was unusable";
 
+pub const EGRESS_UNAVAILABLE_MESSAGE: &str =
+    "the model service is at capacity or restarting; nothing was sent";
+
 impl ReplyDefect {
     pub const ALL: [ReplyDefect; 11] = [
         ReplyDefect::Malformed,
@@ -1050,6 +1053,11 @@ pub enum ProtoErrCode {
     /// honest-record treatment as `UnknownVerb` below.
     NotImplemented,
     ReplyUnusable(ReplyDefect),
+    /// The exchange could not be attempted for lack of capacity: the Egress
+    /// Daemon was at capacity, restarting or down, or the daemon's own egress
+    /// budget was spent. Nothing left the host. Availability is not
+    /// confidential, so it is named (#321).
+    EgressUnavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1362,6 +1370,21 @@ mod tests {
         ] {
             assert_eq!(ReplyDefect::from_status(code), want, "{code}");
         }
+    }
+
+    #[test]
+    fn egress_unavailable_round_trips() {
+        let resp = Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Err(ProtoError {
+                code: ProtoErrCode::EgressUnavailable,
+                message: EGRESS_UNAVAILABLE_MESSAGE.into(),
+            }),
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&resp, &mut buf).unwrap();
+        let back: Response = ciborium::from_reader(&buf[..]).unwrap();
+        assert_eq!(back, resp);
     }
 
     #[test]

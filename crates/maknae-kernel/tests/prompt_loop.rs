@@ -751,7 +751,7 @@ async fn a_deputy_refusal_before_any_provider_io_is_recorded_failed_never_outcom
 }
 
 #[tokio::test]
-async fn a_deputy_at_capacity_is_recorded_failed_never_outcome_unknown() {
+async fn a_deputy_at_capacity_is_recorded_failed_and_named_unavailable_to_the_subject() {
     let fx = Fixture::with_policy("prompt-at-capacity", "Read", GRANTED);
     let records = Records::new(0);
     let eg = Arc::new(Recording {
@@ -767,7 +767,11 @@ async fn a_deputy_at_capacity_is_recorded_failed_never_outcome_unknown() {
         )
         .await
         .expect("a refusal frame");
-    assert!(matches!(resp.result, RespResult::Err(ref e) if e.code == ProtoErrCode::Unauthorized));
+    assert!(
+        matches!(resp.result, RespResult::Err(ref e) if e.code == ProtoErrCode::EgressUnavailable),
+        "{:?}",
+        resp.result
+    );
     let outcome = last_prompt_record(&records);
     assert_eq!(
         (

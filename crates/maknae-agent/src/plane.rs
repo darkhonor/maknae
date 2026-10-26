@@ -123,6 +123,8 @@ pub enum PlaneError {
     Malformed,
     /// The provider answered and the answer was unusable; nothing was delivered.
     ReplyUnusable(maknae_proto::ReplyDefect),
+    /// The exchange was not attempted for lack of capacity; nothing was sent.
+    Unavailable,
 }
 
 pub trait Plane {
@@ -198,6 +200,7 @@ mod tests {
             PlaneError::Refused,
             PlaneError::Malformed,
             PlaneError::ReplyUnusable(maknae_proto::ReplyDefect::Empty),
+            PlaneError::Unavailable,
         ];
         for (i, a) in errs.iter().enumerate() {
             assert_eq!(a.clone(), *a);
