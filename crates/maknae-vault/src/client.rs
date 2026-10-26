@@ -1,5 +1,5 @@
 //! `PlaneClient` — the Stage-1 orchestrator: config → AppRole auth (standing raw
-//! SecretID, ADR-0018) or the user's stored `maknae login` token → P-384 CSR → `pki/sign` →
+//! SecretID, ADR-0018) or the user's stored `maknae login` token → CSR (`vault.plane_key`) → `pki/sign` →
 //! memory-only leaf. The identity is Arc-backed
 //! (cheap snapshot; key wiped on drop). The credential supervisor (`spawn_supervisor`,
 //! `supervisor_run.rs`) runs on a shared handle so serving, token renewal, and leaf
@@ -9,8 +9,9 @@ use crate::plane::PlaneTokenSource;
 use crate::secret_io::read_daemon_secret;
 use crate::secret_source::{resolve_daemon_secret_source, CredentialSourceKind};
 use crate::{
-    generate_plane_csr, load_ca_pin, vault_config_from_document, verify::verify_plane_uri_san,
-    Plane, UserToken, VaultConfig, VaultError, VAULT_SECTION,
+    generate_plane_csr, load_ca_pin, sign_refusal_detail, vault_config_from_document,
+    verify::verify_plane_uri_san, Plane, PlaneKey, UserToken, VaultConfig, VaultError,
+    VAULT_SECTION,
 };
 use arc_swap::ArcSwapOption;
 use maknae_config::{load_config, Document, SectionSpec};
@@ -110,6 +111,7 @@ pub struct PlaneClient {
     auth: PlaneAuth,
     /// Intermediate PKI mount for `pki/sign` (from config; Terraform `int_mount_path`).
     pki_int_mount: String,
+    plane_key: PlaneKey,
     client: Arc<Mutex<VaultClient>>,
     identity: Arc<RwLock<Option<PlaneIdentity>>>,
     /// The last mint's token lease (seconds); drives the renewal interval so it tracks
@@ -243,9 +245,10 @@ async fn sign_leaf_for(
     plane: Plane,
     deployment_id: &str,
     pki_int_mount: &str,
+    plane_key: PlaneKey,
     client: &VaultClient,
 ) -> Result<(Zeroizing<Vec<u8>>, String, Vec<String>), VaultError> {
-    let (key_der, csr_pem) = generate_plane_csr(plane, deployment_id)?;
+    let (key_der, csr_pem) = generate_plane_csr(plane, deployment_id, plane_key)?;
     let resp = vaultrs::pki::cert::ca::sign(
         client,
         pki_int_mount,
@@ -255,7 +258,7 @@ async fn sign_leaf_for(
         None,
     )
     .await
-    .map_err(|e| VaultError::Sign(e.to_string()))?;
+    .map_err(|e| VaultError::Sign(sign_refusal_detail(&e.to_string(), plane_key)))?;
     // Defense-in-depth: the leaf Vault returned must carry exactly our plane SAN.
     let leaf_der = pem_to_der(&resp.certificate)?;
     verify_plane_uri_san(&leaf_der, plane, deployment_id)
@@ -446,6 +449,7 @@ impl PlaneClient {
             deployment_id: cfg.deployment_id,
             auth,
             pki_int_mount: cfg.pki_int_mount,
+            plane_key: cfg.plane_key,
             client: Arc::new(Mutex::new(client)),
             identity: Arc::new(RwLock::new(None)),
             lease_secs: Arc::new(AtomicU64::new(0)),
@@ -592,7 +596,14 @@ impl PlaneClient {
         &self,
         client: &VaultClient,
     ) -> Result<(Zeroizing<Vec<u8>>, String, Vec<String>), VaultError> {
-        sign_leaf_for(self.plane, &self.deployment_id, &self.pki_int_mount, client).await
+        sign_leaf_for(
+            self.plane,
+            &self.deployment_id,
+            &self.pki_int_mount,
+            self.plane_key,
+            client,
+        )
+        .await
     }
 
     /// The deployment id (crate-internal — the verifier needs it to compute the expected
@@ -601,6 +612,11 @@ impl PlaneClient {
         &self.deployment_id
     }
     /// This client's plane (crate-internal — used to assert `expected_peer == plane.peer()`).
+    /// The key algorithm this plane mints its identity with (`vault.plane_key`).
+    pub fn plane_key(&self) -> PlaneKey {
+        self.plane_key
+    }
+
     pub(crate) fn plane(&self) -> Plane {
         self.plane
     }
@@ -634,6 +650,7 @@ impl PlaneClient {
             plane: self.plane,
             deployment_id: self.deployment_id.clone(),
             pki_int_mount: self.pki_int_mount.clone(),
+            plane_key: self.plane_key,
         }
     }
 
@@ -714,6 +731,7 @@ pub(crate) struct SupervisorCtx {
     plane: Plane,
     deployment_id: String,
     pki_int_mount: String,
+    plane_key: PlaneKey,
 }
 
 impl SupervisorCtx {
@@ -798,6 +816,7 @@ impl SupervisorCtx {
             self.plane,
             &self.deployment_id,
             &self.pki_int_mount,
+            self.plane_key,
             &client,
         )
         .await?;

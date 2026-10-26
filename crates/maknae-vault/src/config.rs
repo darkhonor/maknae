@@ -161,6 +161,20 @@ impl PlaneKey {
     }
 }
 
+/// A `pki/sign` refusal's message, with a hint when Vault refused the key type: the PKI
+/// role issues a different algorithm than `vault.plane_key`.
+pub fn sign_refusal_detail(vault_message: &str, plane_key: PlaneKey) -> String {
+    if vault_message.contains("requires keys of type") {
+        format!(
+            "{vault_message} (the Vault PKI role issues a different key type than vault.plane_key \
+             {}; set vault.plane_key to match deploy/vault-pki's plane_key_algorithm)",
+            plane_key.as_str()
+        )
+    } else {
+        vault_message.to_string()
+    }
+}
+
 /// The non-sensitive Vault settings.
 pub struct VaultConfig {
     pub addr: String,
@@ -415,6 +429,26 @@ mod tests {
         assert_eq!(
             PlaneKey::ALL.map(PlaneKey::as_str),
             ["ml-dsa-87", "p384", "p521"]
+        );
+    }
+
+    #[test]
+    fn a_key_type_refusal_names_plane_key_and_others_pass_through() {
+        let m = sign_refusal_detail(
+            "1 error occurred: role requires keys of type ec",
+            PlaneKey::MlDsa87,
+        );
+        assert!(
+            m.starts_with("1 error occurred: role requires keys of type ec ("),
+            "{m}"
+        );
+        assert!(
+            m.contains("vault.plane_key ml-dsa-87") && m.contains("plane_key_algorithm"),
+            "{m}"
+        );
+        assert_eq!(
+            sign_refusal_detail("permission denied", PlaneKey::P384),
+            "permission denied"
         );
     }
 
