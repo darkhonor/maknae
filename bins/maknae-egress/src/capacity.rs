@@ -37,6 +37,10 @@ impl Slots {
             .map(|_| Slot(Arc::clone(self)))
     }
 
+    pub fn cap(&self) -> usize {
+        self.cap
+    }
+
     #[cfg(test)]
     pub fn in_use(&self) -> usize {
         self.in_use.load(Ordering::Acquire)

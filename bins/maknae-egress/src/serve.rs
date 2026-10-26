@@ -11,8 +11,9 @@
 //!
 //! **Connections are served concurrently, up to the deputy's capacity**
 //! (#321). Each holds a slot on its own thread; past capacity the frame is read
-//! and answered `AtCapacity` at once, never left queued in the backlog against
-//! the kernel's deadline. Every blocking read and write is bounded.
+//! and answered `AtCapacity` on a refusal thread, never left queued in the
+//! backlog against the kernel's deadline. The frame read and the reply write
+//! are each bounded as a whole, not per call.
 
 use crate::capacity::Slots;
 use maknae_config::EgressBounds;
@@ -23,7 +24,7 @@ use maknae_proto::EgressFrameReply;
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The largest request frame the deputy will ACCEPT. Checked against the
 /// declared length BEFORE allocation: the kernel is trusted, but a bug there
@@ -89,16 +90,57 @@ fn io(e: impl std::fmt::Display) -> ServeError {
 ///
 /// The length is checked BEFORE the allocation: a four-byte prefix must not be
 /// able to make the deputy reserve four gigabytes.
-fn read_body_zeroizing(stream: &mut UnixStream) -> Result<zeroize::Zeroizing<Vec<u8>>, ServeError> {
+fn read_body_zeroizing(
+    stream: &mut UnixStream,
+    by: Instant,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, ServeError> {
     let mut len = [0u8; 4];
-    stream.read_exact(&mut len).map_err(io)?;
+    read_exact_by(stream, &mut len, by)?;
     let n = u32::from_be_bytes(len) as usize;
     if n > MAX_REQUEST_FRAME_BYTES {
         return Err(ServeError::OversizeFrame(n));
     }
     let mut body = zeroize::Zeroizing::new(vec![0u8; n]);
-    stream.read_exact(&mut body).map_err(io)?;
+    read_exact_by(stream, &mut body, by)?;
     Ok(body)
+}
+
+fn remaining(by: Instant) -> Result<Duration, ServeError> {
+    let left = by.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        return Err(io("the connection's I/O bound expired"));
+    }
+    Ok(left)
+}
+
+/// `read_exact` under one deadline for the whole buffer: each read is bounded
+/// by what is left of it, so a peer trickling bytes cannot extend it.
+fn read_exact_by(stream: &mut UnixStream, buf: &mut [u8], by: Instant) -> Result<(), ServeError> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        stream.set_read_timeout(Some(remaining(by)?)).map_err(io)?;
+        match stream.read(&mut buf[filled..]) {
+            Ok(0) => return Err(io("the peer closed the connection mid-frame")),
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(io(e)),
+        }
+    }
+    Ok(())
+}
+
+fn write_all_by(stream: &mut UnixStream, buf: &[u8], by: Instant) -> Result<(), ServeError> {
+    let mut written = 0;
+    while written < buf.len() {
+        stream.set_write_timeout(Some(remaining(by)?)).map_err(io)?;
+        match stream.write(&buf[written..]) {
+            Ok(0) => return Err(io("the peer stopped accepting the reply")),
+            Ok(n) => written += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(io(e)),
+        }
+    }
+    Ok(())
 }
 
 /// Serve exactly one connection: authenticate, read one frame, answer, close.
@@ -117,38 +159,34 @@ pub fn serve_one<F>(
 where
     F: FnOnce(&maknae_deputy::handle::Admitted<'_>) -> Result<EgressFrameReply, ServeError>,
 {
-    authenticate(&stream, expected_uid, io_timeout)?;
+    authenticate(&stream, expected_uid)?;
 
-    let body = read_body_zeroizing(&mut stream)?;
+    let body = read_body_zeroizing(&mut stream, Instant::now() + io_timeout)?;
 
     let req = maknae_proto::decode_egress_frame_request(&body).map_err(io)?;
     let admitted = match decide(&req, bounds) {
         Ok(a) => a,
-        Err(r) => return refuse_before_send(&mut stream, ServeError::Refused(r)),
+        Err(r) => return refuse_before_send(&mut stream, ServeError::Refused(r), io_timeout),
     };
     match fulfil(&admitted) {
-        Ok(reply) => write_reply(&mut stream, &reply),
-        Err(e @ ServeError::OpenFailed(_)) => refuse_before_send(&mut stream, e),
-        Err(ServeError::Unusable { defect, usage }) => {
-            write_reply(&mut stream, &EgressFrameReply::Unusable { defect, usage })
-        }
+        Ok(reply) => write_reply(&mut stream, &reply, io_timeout),
+        Err(e @ ServeError::OpenFailed(_)) => refuse_before_send(&mut stream, e, io_timeout),
+        Err(ServeError::Unusable { defect, usage }) => write_reply(
+            &mut stream,
+            &EgressFrameReply::Unusable { defect, usage },
+            io_timeout,
+        ),
         Err(e) => Err(e),
     }
 }
 
 /// The peer check, BEFORE the first read: a peer we have not authenticated
-/// does not get to hand us bytes to parse. Then every later read and write is
-/// bounded, so a stalled peer gives its slot back.
-fn authenticate(
-    stream: &UnixStream,
-    expected_uid: u32,
-    io_timeout: Duration,
-) -> Result<(), ServeError> {
+/// does not get to hand us bytes to parse.
+fn authenticate(stream: &UnixStream, expected_uid: u32) -> Result<(), ServeError> {
     if !maknae_vault::peer_uid_is(&stream, expected_uid).map_err(|_| ServeError::WrongPeer)? {
         return Err(ServeError::WrongPeer);
     }
-    stream.set_read_timeout(Some(io_timeout)).map_err(io)?;
-    stream.set_write_timeout(Some(io_timeout)).map_err(io)
+    Ok(())
 }
 
 /// Answer a connection that found no free slot. The frame is read before the
@@ -159,9 +197,12 @@ pub fn refuse_at_capacity(
     expected_uid: u32,
     io_timeout: Duration,
 ) -> Result<(), ServeError> {
-    authenticate(&stream, expected_uid, io_timeout)?;
-    drop(read_body_zeroizing(&mut stream)?);
-    write_reply(&mut stream, &EgressFrameReply::AtCapacity)
+    authenticate(&stream, expected_uid)?;
+    drop(read_body_zeroizing(
+        &mut stream,
+        Instant::now() + io_timeout,
+    )?);
+    write_reply(&mut stream, &EgressFrameReply::AtCapacity, io_timeout)
 }
 
 /// Accept forever. A failed connection is refused and the loop continues: one
@@ -179,6 +220,7 @@ pub fn accept_loop<H>(
         + Sync
         + 'static,
 {
+    let refusals = Slots::new(slots.cap());
     for conn in listener.incoming() {
         let stream = match conn {
             Ok(s) => s,
@@ -188,7 +230,7 @@ pub fn accept_loop<H>(
             }
         };
         let Some(slot) = slots.try_take() else {
-            answer_at_capacity(stream, expected_uid, io_timeout);
+            answer_at_capacity(stream, &refusals, expected_uid, io_timeout);
             continue;
         };
         let spare = stream.try_clone();
@@ -205,27 +247,60 @@ pub fn accept_loop<H>(
         if let Err(e) = spawned {
             eprintln!("maknae-egress: cannot start a connection thread: {e}");
             if let Ok(s) = spare {
-                answer_at_capacity(s, expected_uid, io_timeout);
+                answer_at_capacity(s, &refusals, expected_uid, io_timeout);
             }
         }
     }
 }
 
-fn answer_at_capacity(stream: UnixStream, expected_uid: u32, io_timeout: Duration) {
-    match refuse_at_capacity(stream, expected_uid, io_timeout) {
-        Ok(()) => eprintln!("maknae-egress: at capacity; answered a connection AtCapacity"),
-        Err(e) => eprintln!("maknae-egress: connection refused: {e:?}"),
+/// Off the accept thread, so a stalled peer here never delays the next
+/// accept. Refusals hold their own slots; past those, the connection closes
+/// unanswered rather than queueing.
+fn answer_at_capacity(
+    stream: UnixStream,
+    refusals: &Arc<Slots>,
+    expected_uid: u32,
+    io_timeout: Duration,
+) {
+    let Some(slot) = refusals.try_take() else {
+        eprintln!(
+            "maknae-egress: at capacity and no refusal slot free; closed a connection unanswered"
+        );
+        return;
+    };
+    let spawned = std::thread::Builder::new()
+        .name("maknae-egress-refuse".into())
+        .spawn(move || {
+            let _slot = slot;
+            match refuse_at_capacity(stream, expected_uid, io_timeout) {
+                Ok(()) => eprintln!("maknae-egress: at capacity; answered a connection AtCapacity"),
+                Err(e) => eprintln!("maknae-egress: connection refused: {e:?}"),
+            }
+        });
+    if let Err(e) = spawned {
+        eprintln!(
+            "maknae-egress: cannot start a refusal thread; closed a connection unanswered: {e}"
+        );
     }
 }
 
-fn refuse_before_send(stream: &mut UnixStream, why: ServeError) -> Result<(), ServeError> {
-    if let Err(w) = write_reply(stream, &EgressFrameReply::RefusedBeforeSend) {
+fn refuse_before_send(
+    stream: &mut UnixStream,
+    why: ServeError,
+    io_timeout: Duration,
+) -> Result<(), ServeError> {
+    if let Err(w) = write_reply(stream, &EgressFrameReply::RefusedBeforeSend, io_timeout) {
         eprintln!("maknae-egress: the refused-before-send reply was not delivered: {w:?}");
     }
     Err(why)
 }
 
-fn write_reply(stream: &mut UnixStream, reply: &EgressFrameReply) -> Result<(), ServeError> {
+fn write_reply(
+    stream: &mut UnixStream,
+    reply: &EgressFrameReply,
+    io_timeout: Duration,
+) -> Result<(), ServeError> {
+    let by = Instant::now() + io_timeout;
     // Into ONE fixed preallocation that never grows (#241, codex round 2 item
     // B): a reply carries whatever kernel-served content the model quoted
     // back, and the growing buffer this replaces freed a partly-written copy
@@ -236,11 +311,8 @@ fn write_reply(stream: &mut UnixStream, reply: &EgressFrameReply) -> Result<(), 
         maknae_proto::EGRESS_REPLY_FRAME_ENCODE_BYTES,
     )
     .map_err(io)?;
-    stream
-        .write_all(&(out.len() as u32).to_be_bytes())
-        .map_err(io)?;
-    stream.write_all(&out).map_err(io)?;
-    stream.flush().map_err(io)
+    write_all_by(stream, &(out.len() as u32).to_be_bytes(), by)?;
+    write_all_by(stream, &out, by)
 }
 
 #[cfg(test)]
@@ -683,6 +755,78 @@ mod tests {
         drop(writer);
     }
 
+    /// The bound covers the whole frame, not each read: a peer that trickles
+    /// one byte at a time, each well inside the bound, is still released.
+    #[test]
+    fn a_peer_that_trickles_its_frame_is_released_by_the_whole_frame_bound() {
+        let me = nix::unistd::getuid().as_raw();
+        let bound = Duration::from_millis(300);
+        for at_capacity in [false, true] {
+            let (a, b) = UnixStream::pair().unwrap();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let out = if at_capacity {
+                    refuse_at_capacity(b, me, bound)
+                } else {
+                    serve_one(b, me, &bounds(), bound, canned)
+                };
+                let _ = tx.send(out);
+            });
+            let started = std::time::Instant::now();
+            let mut w = a;
+            w.write_all(&1000u32.to_be_bytes()).unwrap();
+            let out = loop {
+                if let Ok(out) = rx.recv_timeout(Duration::from_millis(50)) {
+                    break out;
+                }
+                assert!(
+                    started.elapsed() < Duration::from_secs(5),
+                    "a trickling peer held the connection past the bound"
+                );
+                let _ = w.write_all(&[0u8]);
+            };
+            assert!(matches!(out, Err(ServeError::Io(_))), "{out:?}");
+        }
+    }
+
+    /// A stalled connection past capacity is answered off the accept thread,
+    /// so the connections behind it are still accepted and answered.
+    #[test]
+    fn a_stalled_peer_past_capacity_does_not_stop_accepting() {
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = std::sync::Mutex::new(release_rx);
+        let (_d, path, slots) = looping(2, move |a| {
+            let _ = release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10));
+            canned(a)
+        });
+        let held: Vec<_> = (0..2)
+            .map(|_| {
+                let p = path.clone();
+                std::thread::spawn(move || ask(&p))
+            })
+            .collect();
+        eventually("the first connections never took their slots", || {
+            slots.in_use() == 2
+        });
+        let stalled = UnixStream::connect(&path).unwrap();
+        let started = std::time::Instant::now();
+        assert_eq!(ask(&path), EgressFrameReply::AtCapacity);
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "the answer waited behind the stalled connection"
+        );
+        for _ in 0..2 {
+            release_tx.send(()).unwrap();
+        }
+        for h in held {
+            assert!(matches!(h.join().unwrap(), EgressFrameReply::Reply(_)));
+        }
+        drop(stalled);
+    }
+
     /// A peer that connects and sends nothing is released by the bound, on
     /// both paths, rather than holding the connection forever.
     #[test]
@@ -720,13 +864,14 @@ mod tests {
         writer.write_all(&(f.len() as u32).to_be_bytes()).unwrap();
         writer.write_all(&f).unwrap();
         let mut b = b;
-        let body: zeroize::Zeroizing<Vec<u8>> = read_body_zeroizing(&mut b).unwrap();
+        let body: zeroize::Zeroizing<Vec<u8>> =
+            read_body_zeroizing(&mut b, std::time::Instant::now() + FRAME_IO_TIMEOUT).unwrap();
         assert_eq!(&*body, &f[..]);
         // And the over-cap refusal happens before any allocation on this path.
         let (mut c, mut d) = UnixStream::pair().unwrap();
         c.write_all(&u32::MAX.to_be_bytes()).unwrap();
         assert_eq!(
-            read_body_zeroizing(&mut d),
+            read_body_zeroizing(&mut d, std::time::Instant::now() + FRAME_IO_TIMEOUT),
             Err(ServeError::OversizeFrame(u32::MAX as usize))
         );
     }
@@ -936,7 +1081,11 @@ mod tests {
         let (a, mut b) = UnixStream::pair().unwrap();
         drop(a);
         assert_eq!(
-            refuse_before_send(&mut b, ServeError::Refused(Refusal::KeyPathOutsideBounds)),
+            refuse_before_send(
+                &mut b,
+                ServeError::Refused(Refusal::KeyPathOutsideBounds),
+                FRAME_IO_TIMEOUT
+            ),
             Err(ServeError::Refused(Refusal::KeyPathOutsideBounds))
         );
     }
