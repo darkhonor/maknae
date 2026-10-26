@@ -329,12 +329,14 @@ fn spawn_guarded<P: Fn() + Send + Sync + 'static>(
         .name(name.into())
         .spawn(move || {
             let _slot = slot;
-            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).is_err() {
+            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)) {
                 let _ = writeln!(
                     std::io::stderr(),
                     "maknae-egress: a connection panicked; exiting so a clean deputy is restarted"
                 );
                 on_panic();
+                // Never dropped: a payload whose destructor panics would unwind past `on_panic`.
+                std::mem::forget(payload);
             }
         })
         .map(drop)
@@ -788,6 +790,26 @@ mod tests {
         eventually("the slot was not given back", || slots.in_use() == 0);
         release_tx.send(()).unwrap();
         assert!(matches!(ask(&path), EgressFrameReply::Reply(_)));
+    }
+
+    #[test]
+    fn a_panic_whose_payload_panics_on_drop_is_still_fatal() {
+        struct Bomb;
+        impl Drop for Bomb {
+            fn drop(&mut self) {
+                panic!("payload dropped");
+            }
+        }
+        let (_d, path, _slots, panics) =
+            looping_counting_panics(1, |_a| std::panic::panic_any(Bomb));
+        let request = prefixed(&frame(ALICE));
+        let mut c = UnixStream::connect(&path).unwrap();
+        c.write_all(&request).unwrap();
+        let mut rest = Vec::new();
+        let _ = c.read_to_end(&mut rest);
+        eventually("the payload's drop skipped on_panic", || {
+            panics.load(std::sync::atomic::Ordering::SeqCst) == 1
+        });
     }
 
     #[test]
