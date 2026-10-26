@@ -166,8 +166,7 @@ fn write_all_by(stream: &mut UnixStream, buf: &[u8], by: Instant) -> Result<(), 
             Err(e) => break Err(io(e)),
         }
     };
-    stream.set_nonblocking(false).map_err(io)?;
-    out
+    out.and(stream.set_nonblocking(false).map_err(io))
 }
 
 /// Serve exactly one connection: authenticate, read one frame, answer, close.
@@ -186,7 +185,7 @@ pub fn serve_one<F>(
 where
     F: FnOnce(&maknae_deputy::handle::Admitted<'_>) -> Result<EgressFrameReply, ServeError>,
 {
-    authenticate(&stream, expected_uid)?;
+    authenticate(&stream, expected_uid, io_timeout)?;
 
     let body = read_body_zeroizing(&mut stream, Instant::now() + io_timeout)?;
 
@@ -209,11 +208,16 @@ where
 
 /// The peer check, BEFORE the first read: a peer we have not authenticated
 /// does not get to hand us bytes to parse.
-fn authenticate(stream: &UnixStream, expected_uid: u32) -> Result<(), ServeError> {
+fn authenticate(
+    stream: &UnixStream,
+    expected_uid: u32,
+    io_timeout: Duration,
+) -> Result<(), ServeError> {
     if !maknae_vault::peer_uid_is(&stream, expected_uid).map_err(|_| ServeError::WrongPeer)? {
         return Err(ServeError::WrongPeer);
     }
-    Ok(())
+    // A backstop under `poll`: a read woken without a readable byte still ends.
+    stream.set_read_timeout(Some(io_timeout)).map_err(io)
 }
 
 /// Answer a connection that found no free slot. The frame is read before the
@@ -224,7 +228,7 @@ pub fn refuse_at_capacity(
     expected_uid: u32,
     io_timeout: Duration,
 ) -> Result<(), ServeError> {
-    authenticate(&stream, expected_uid)?;
+    authenticate(&stream, expected_uid, io_timeout)?;
     drop(read_body_zeroizing(
         &mut stream,
         Instant::now() + io_timeout,
@@ -653,9 +657,13 @@ mod tests {
     }
 
     fn ask(path: &std::path::Path) -> EgressFrameReply {
+        ask_with(path, &prefixed(&frame(ALICE)))
+    }
+
+    fn ask_with(path: &std::path::Path, request: &[u8]) -> EgressFrameReply {
         let mut c = UnixStream::connect(path).unwrap();
         c.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
-        c.write_all(&prefixed(&frame(ALICE))).unwrap();
+        c.write_all(request).unwrap();
         let mut len = [0u8; 4];
         c.read_exact(&mut len).unwrap();
         let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
@@ -732,8 +740,9 @@ mod tests {
     #[test]
     fn a_handler_that_panics_gives_its_slot_back() {
         let (_d, path, slots) = looping(1, |_a| panic!("handler panicked"));
+        let request = prefixed(&frame(ALICE));
         let mut c = UnixStream::connect(&path).unwrap();
-        c.write_all(&prefixed(&frame(ALICE))).unwrap();
+        c.write_all(&request).unwrap();
         let mut rest = Vec::new();
         let _ = c.read_to_end(&mut rest);
         eventually("a panicking handler kept its slot", || slots.in_use() == 0);
@@ -851,6 +860,8 @@ mod tests {
             );
             drained += r.read(&mut chunk).unwrap_or(0);
         };
+        r.set_nonblocking(true).unwrap();
+        drained += r.read(&mut chunk).unwrap_or(0);
         assert!(drained > 0, "the reply write never began: {out:?}");
         assert!(matches!(out, Err(ServeError::Io(_))), "{out:?}");
         assert!(
@@ -878,11 +889,11 @@ mod tests {
         eventually("the first connection never took its slot", || {
             slots.in_use() == 1
         });
+        let request = prefixed(&frame(ALICE));
         let stalled = UnixStream::connect(&path).unwrap();
-        std::thread::sleep(Duration::from_millis(200));
         let mut c = UnixStream::connect(&path).unwrap();
         c.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-        let _ = c.write_all(&prefixed(&frame(ALICE)));
+        let _ = c.write_all(&request);
         let mut back = Vec::new();
         match c.read_to_end(&mut back) {
             Ok(_) => assert!(back.is_empty(), "a reply was written: {} bytes", back.len()),
@@ -919,9 +930,10 @@ mod tests {
         eventually("the first connections never took their slots", || {
             slots.in_use() == 2
         });
+        let request = prefixed(&frame(ALICE));
         let stalled = UnixStream::connect(&path).unwrap();
         let started = std::time::Instant::now();
-        assert_eq!(ask(&path), EgressFrameReply::AtCapacity);
+        assert_eq!(ask_with(&path, &request), EgressFrameReply::AtCapacity);
         assert!(
             started.elapsed() < Duration::from_secs(3),
             "the answer waited behind the stalled connection"

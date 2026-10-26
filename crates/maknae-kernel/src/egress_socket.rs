@@ -10,8 +10,8 @@
 //! The deputy serves connections concurrently up to its capacity and answers
 //! one past it `AtCapacity` at once (`bins/maknae-egress/src/serve.rs`, #321),
 //! so the deadline below bounds one call, not a queue. Past its refusal slots
-//! as well, it closes the connection unanswered, which this side records as
-//! delivery unknown.
+//! as well, it closes the connection unanswered: recorded delivery unknown,
+//! or `Failed` on macOS when the close lands before `arm`.
 //!
 //! **Peer credentials are checked BEFORE the first write** (D3). The request
 //! carries prompt content and the Vault path naming where the provider
@@ -224,8 +224,8 @@ impl SocketEgress {
 
 impl Egress for SocketEgress {
     /// The configured `egress.deadline_ms`: a WALL-CLOCK budget over the whole
-    /// exchange — every write is sent under a timer re-armed to what is left
-    /// (`write_all_by`) and every read is preceded by a `poll` for what is
+    /// exchange — every non-blocking write is preceded by a `poll` for what is
+    /// left (`write_all_by`) and every read is preceded by a `poll` for what is
     /// left (`read_exact_by`), so per-operation timers cannot be strung
     /// together past it in either direction. The one step outside it is `connect`, which on a Unix socket
     /// completes or fails at once unless the listener's backlog is full; the
