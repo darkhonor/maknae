@@ -176,11 +176,15 @@ fn write_all_by(stream: &mut UnixStream, buf: &[u8], by: Instant) -> Result<(), 
 /// in rather than constructed here so the transport can be tested without a
 /// provider or a Vault — this project has no Vault stub and deliberately uses
 /// none, so the seam is a function, not a fake server.
+///
+/// `committed` is set once the provider call or a reply has begun: from then
+/// on a contained panic must not answer the peer again.
 pub fn serve_one<F>(
     mut stream: UnixStream,
     expected_uid: u32,
     bounds: &EgressBounds,
     io_timeout: Duration,
+    committed: &AtomicBool,
     fulfil: F,
 ) -> Result<(), ServeError>
 where
@@ -193,15 +197,21 @@ where
     let req = maknae_proto::decode_egress_frame_request(&body).map_err(io)?;
     let admitted = match decide(&req, bounds) {
         Ok(a) => a,
-        Err(r) => return refuse_before_send(&mut stream, ServeError::Refused(r), io_timeout),
+        Err(r) => {
+            return refuse_before_send(&mut stream, ServeError::Refused(r), io_timeout, committed)
+        }
     };
+    committed.store(true, Ordering::Release);
     match fulfil(&admitted) {
-        Ok(reply) => write_reply(&mut stream, &reply, io_timeout),
-        Err(e @ ServeError::OpenFailed(_)) => refuse_before_send(&mut stream, e, io_timeout),
+        Ok(reply) => write_reply(&mut stream, &reply, io_timeout, committed),
+        Err(e @ ServeError::OpenFailed(_)) => {
+            refuse_before_send(&mut stream, e, io_timeout, committed)
+        }
         Err(ServeError::Unusable { defect, usage }) => write_reply(
             &mut stream,
             &EgressFrameReply::Unusable { defect, usage },
             io_timeout,
+            committed,
         ),
         Err(e) => Err(e),
     }
@@ -224,17 +234,23 @@ fn authenticate(
 /// Answer a connection that found no free slot. The frame is read before the
 /// reply so the kernel's write completes and it reads a named refusal; closed
 /// unread, the kernel would record delivery unknown for content that never left.
-pub fn refuse_at_capacity(
+fn refuse_at_capacity_committing(
     mut stream: UnixStream,
     expected_uid: u32,
     io_timeout: Duration,
+    committed: &AtomicBool,
 ) -> Result<(), ServeError> {
     authenticate(&stream, expected_uid, io_timeout)?;
     drop(read_body_zeroizing(
         &mut stream,
         Instant::now() + io_timeout,
     )?);
-    write_reply(&mut stream, &EgressFrameReply::AtCapacity, io_timeout)
+    write_reply(
+        &mut stream,
+        &EgressFrameReply::AtCapacity,
+        io_timeout,
+        committed,
+    )
 }
 
 /// Accept forever. A failed connection is refused and the loop continues: one
@@ -274,12 +290,12 @@ pub fn accept_loop<H>(
             stream,
             io_timeout,
             EgressFrameReply::RefusedBeforeSend,
-            move |stream, began| {
-                let fulfil = |a: &maknae_deputy::handle::Admitted<'_>| {
-                    began.store(true, Ordering::Release);
-                    handler(a)
-                };
-                if let Err(e) = serve_one(stream, expected_uid, &bounds, io_timeout, fulfil) {
+            move |stream, committed| {
+                if let Err(e) =
+                    serve_one(stream, expected_uid, &bounds, io_timeout, committed, |a| {
+                        handler(a)
+                    })
+                {
                     eprintln!("maknae-egress: connection refused: {e:?}");
                 }
             },
@@ -314,7 +330,12 @@ fn answer_at_capacity(
         stream,
         io_timeout,
         EgressFrameReply::AtCapacity,
-        move |stream, _began| match refuse_at_capacity(stream, expected_uid, io_timeout) {
+        move |stream, committed| match refuse_at_capacity_committing(
+            stream,
+            expected_uid,
+            io_timeout,
+            committed,
+        ) {
             Ok(()) => eprintln!("maknae-egress: at capacity; answered a connection AtCapacity"),
             Err(e) => eprintln!("maknae-egress: connection refused: {e:?}"),
         },
@@ -327,9 +348,9 @@ fn answer_at_capacity(
 }
 
 /// Runs one connection on its own thread, holding `slot`. A panic ends that
-/// connection alone: the others in flight are untouched (#321). If `work` had
-/// not set `began` (the provider call started), the peer is answered
-/// `unsent`, since nothing left; otherwise it is closed, delivery unknown.
+/// connection alone: the others in flight are untouched (#321). Unless `work`
+/// had set `committed` (the provider call or a reply had begun), the peer is
+/// answered `unsent`, since nothing left; otherwise it is closed.
 fn spawn_contained(
     name: &str,
     slot: Slot,
@@ -343,18 +364,18 @@ fn spawn_contained(
         .name(name.into())
         .spawn(move || {
             let _slot = slot;
-            let began = AtomicBool::new(false);
+            let committed = AtomicBool::new(false);
             let worked =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(stream, &began)));
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(stream, &committed)));
             if let Err(payload) = worked {
                 // A plain write: `eprintln!` panics when stderr fails.
                 let _ = writeln!(
                     std::io::stderr(),
                     "maknae-egress: a connection panicked; that connection alone was refused"
                 );
-                if !began.load(Ordering::Acquire) {
+                if !committed.load(Ordering::Acquire) {
                     if let Ok(mut s) = spare {
-                        let _ = write_reply(&mut s, &unsent, io_timeout);
+                        let _ = write_reply(&mut s, &unsent, io_timeout, &committed);
                     }
                 }
                 // A payload whose destructor panics would unwind this thread.
@@ -368,8 +389,14 @@ fn refuse_before_send(
     stream: &mut UnixStream,
     why: ServeError,
     io_timeout: Duration,
+    committed: &AtomicBool,
 ) -> Result<(), ServeError> {
-    if let Err(w) = write_reply(stream, &EgressFrameReply::RefusedBeforeSend, io_timeout) {
+    if let Err(w) = write_reply(
+        stream,
+        &EgressFrameReply::RefusedBeforeSend,
+        io_timeout,
+        committed,
+    ) {
         eprintln!("maknae-egress: the refused-before-send reply was not delivered: {w:?}");
     }
     Err(why)
@@ -379,7 +406,9 @@ fn write_reply(
     stream: &mut UnixStream,
     reply: &EgressFrameReply,
     io_timeout: Duration,
+    committed: &AtomicBool,
 ) -> Result<(), ServeError> {
+    committed.store(true, Ordering::Release);
     let by = Instant::now() + io_timeout;
     // Into ONE fixed preallocation that never grows (#241, codex round 2 item
     // B): a reply carries whatever kernel-served content the model quoted
@@ -402,6 +431,34 @@ mod tests {
     use maknae_deputy::unseal::{KeyOpener, OpenRequest};
     use maknae_proto::{ContentBlock, EgressFrameRequest, ReplyDefect, SecretText};
     use std::path::PathBuf;
+
+    fn serve_one_unmarked<F>(
+        stream: UnixStream,
+        expected_uid: u32,
+        bounds: &EgressBounds,
+        io_timeout: Duration,
+        fulfil: F,
+    ) -> Result<(), ServeError>
+    where
+        F: FnOnce(&maknae_deputy::handle::Admitted<'_>) -> Result<EgressFrameReply, ServeError>,
+    {
+        serve_one(
+            stream,
+            expected_uid,
+            bounds,
+            io_timeout,
+            &AtomicBool::new(false),
+            fulfil,
+        )
+    }
+
+    fn refuse_at_capacity(
+        stream: UnixStream,
+        expected_uid: u32,
+        io_timeout: Duration,
+    ) -> Result<(), ServeError> {
+        refuse_at_capacity_committing(stream, expected_uid, io_timeout, &AtomicBool::new(false))
+    }
 
     const ALICE: &str = "maknae/users/alice/openai/personal";
     const DEAD_PROVIDER: &str = "http://127.0.0.1:1/v1/chat/completions";
@@ -504,7 +561,7 @@ mod tests {
             c.read_to_end(&mut back).unwrap();
             back
         });
-        let out = serve_one(b, me, &bounds(), FRAME_IO_TIMEOUT, fulfil);
+        let out = serve_one_unmarked(b, me, &bounds(), FRAME_IO_TIMEOUT, fulfil);
         let back = h.join().unwrap();
         let reply = (!back.is_empty()).then(|| {
             let n = u32::from_be_bytes(back[..4].try_into().unwrap()) as usize;
@@ -542,7 +599,7 @@ mod tests {
             // Hold the socket open until the reader is done with it.
             let _ = done_rx.recv();
         });
-        let out = serve_one(b, expected_uid, &bounds(), FRAME_IO_TIMEOUT, canned);
+        let out = serve_one_unmarked(b, expected_uid, &bounds(), FRAME_IO_TIMEOUT, canned);
         let _ = done_tx.send(());
         h.join().unwrap();
         out
@@ -594,7 +651,7 @@ mod tests {
 
         let mut keep = b.try_clone().unwrap();
         assert_eq!(
-            serve_one(b, me.wrapping_add(1), &bounds(), FRAME_IO_TIMEOUT, canned),
+            serve_one_unmarked(b, me.wrapping_add(1), &bounds(), FRAME_IO_TIMEOUT, canned),
             Err(ServeError::WrongPeer)
         );
 
@@ -622,7 +679,7 @@ mod tests {
             c.read_exact(&mut body).unwrap();
             maknae_proto::decode_egress_frame_reply(&body).unwrap()
         });
-        serve_one(b, me, &bounds(), FRAME_IO_TIMEOUT, canned).unwrap();
+        serve_one_unmarked(b, me, &bounds(), FRAME_IO_TIMEOUT, canned).unwrap();
         let reply = h.join().unwrap();
         assert_eq!(
             reply,
@@ -809,13 +866,20 @@ mod tests {
                     }
                 }
                 let _signal = Signal(Arc::clone(&done));
-                panic!("the first connection panics");
+                let until = std::time::Instant::now() + Duration::from_secs(10);
+                while o.load(std::sync::atomic::Ordering::SeqCst) < 2
+                    && std::time::Instant::now() < until
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                panic!("the first connection panics while the second is in flight");
             }
             if n == 1 {
                 let (m, cv) = &*done;
-                let _ = cv
+                let (finished, _) = cv
                     .wait_timeout_while(m.lock().unwrap(), Duration::from_secs(10), |d| !*d)
                     .unwrap();
+                assert!(*finished, "the first connection never panicked");
             }
             canned(a)
         });
@@ -836,6 +900,39 @@ mod tests {
         assert!(matches!(second.join().unwrap(), EgressFrameReply::Reply(_)));
         assert!(matches!(ask(&path), EgressFrameReply::Reply(_)));
         eventually("a slot was kept", || slots.in_use() == 0);
+    }
+
+    /// A panic after the reply was written answers nothing more: one frame,
+    /// then the close.
+    #[test]
+    fn a_panic_after_a_reply_writes_no_second_frame() {
+        let (a, b) = UnixStream::pair().unwrap();
+        let slots = Slots::new(1);
+        spawn_contained(
+            "t",
+            slots.try_take().unwrap(),
+            b,
+            FRAME_IO_TIMEOUT,
+            EgressFrameReply::AtCapacity,
+            |stream, committed| {
+                let mut s = stream;
+                write_reply(
+                    &mut s,
+                    &EgressFrameReply::AtCapacity,
+                    FRAME_IO_TIMEOUT,
+                    committed,
+                )
+                .unwrap();
+                panic!("the log after the reply failed");
+            },
+        )
+        .unwrap();
+        let mut c = a;
+        c.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let mut back = Vec::new();
+        c.read_to_end(&mut back).unwrap();
+        let n = u32::from_be_bytes(back[..4].try_into().unwrap()) as usize;
+        assert_eq!(back.len(), 4 + n, "a second frame followed the reply");
     }
 
     /// Before the provider call began, a panicking connection is answered as
@@ -870,9 +967,11 @@ mod tests {
     /// unwind the thread past the refusal, and the deputy keeps serving.
     #[test]
     fn a_panic_whose_payload_panics_on_drop_is_still_contained() {
+        static DROPPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         struct Bomb;
         impl Drop for Bomb {
             fn drop(&mut self) {
+                DROPPED.store(true, std::sync::atomic::Ordering::SeqCst);
                 panic!("payload dropped");
             }
         }
@@ -890,6 +989,10 @@ mod tests {
         let _ = c.read_to_end(&mut rest);
         eventually("the slot was kept", || slots.in_use() == 0);
         assert!(matches!(ask(&path), EgressFrameReply::Reply(_)));
+        assert!(
+            !DROPPED.load(std::sync::atomic::Ordering::SeqCst),
+            "the payload was dropped"
+        );
     }
 
     #[test]
@@ -948,7 +1051,7 @@ mod tests {
                 let out = if at_capacity {
                     refuse_at_capacity(b, me, bound)
                 } else {
-                    serve_one(b, me, &bounds(), bound, canned)
+                    serve_one_unmarked(b, me, &bounds(), bound, canned)
                 };
                 let _ = tx.send(out);
             });
@@ -989,7 +1092,13 @@ mod tests {
                     usage: None,
                 }))
             };
-            let _ = tx.send(serve_one(b, me, &bounds(), Duration::from_millis(300), big));
+            let _ = tx.send(serve_one_unmarked(
+                b,
+                me,
+                &bounds(),
+                Duration::from_millis(300),
+                big,
+            ));
         });
         let started = std::time::Instant::now();
         let mut chunk = [0u8; 16 * 1024];
@@ -1105,7 +1214,7 @@ mod tests {
                 let out = if at_capacity {
                     refuse_at_capacity(b, me, bound)
                 } else {
-                    serve_one(b, me, &bounds(), bound, canned)
+                    serve_one_unmarked(b, me, &bounds(), bound, canned)
                 };
                 let _ = tx.send(out);
             });
@@ -1349,7 +1458,8 @@ mod tests {
             refuse_before_send(
                 &mut b,
                 ServeError::Refused(Refusal::KeyPathOutsideBounds),
-                FRAME_IO_TIMEOUT
+                FRAME_IO_TIMEOUT,
+                &AtomicBool::new(false),
             ),
             Err(ServeError::Refused(Refusal::KeyPathOutsideBounds))
         );
