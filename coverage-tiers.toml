@@ -530,7 +530,7 @@ why = "VaultError enum + Display/From declarations; no decision logic"
 
 [[t3]]
 path = "crates/maknae-vault/src/fips_glue.rs"
-why = "process-global CryptoProvider fetch (not deterministically coverable); the pure fips_result decision is in fips.rs (T1). Mutation-excluded (mutants.toml)"
+why = "process-global CryptoProvider fetch (not deterministically coverable); the pure fips_result and kx_groups_result decisions are in fips.rs (T1); the wiring is tests/kx_drift_gate.rs. Mutation-excluded (mutants.toml)"
 
 [[t3]]
 path = "crates/maknae-vault/src/ca.rs"

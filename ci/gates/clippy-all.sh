@@ -408,9 +408,9 @@ run_lints() {
     fail "clippy failed on the base --workspace pass"
   fi
   cat "$lint_log" >&2
-  # An unresolvable `disallowed-methods` path is only a warning that `-D warnings` does not deny (#564).
-  if grep -q 'does not refer to a reachable function' "$lint_log"; then
-    fail "clippy.toml names a disallowed path clippy cannot resolve, so it refuses nothing (see above)"
+  # A clippy.toml entry that does not resolve to a function is only a warning, which `-D warnings` does not deny (#564).
+  if grep -qE -- '--> .*clippy\.toml:[0-9]+' "$lint_log"; then
+    fail "clippy.toml names a disallowed path that is not a reachable function, so it refuses nothing (see above)"
   fi
   ran=$((ran + 1))
   while IFS= read -r pf; do

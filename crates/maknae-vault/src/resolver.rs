@@ -37,7 +37,7 @@ mod tests {
     use super::*;
 
     fn dummy_certified_key() -> Arc<CertifiedKey> {
-        crate::crypto_provider().install_default().ok();
+        crate::install_default_crypto_provider();
         let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
         let params = rcgen::CertificateParams::new(vec![]).unwrap();
         let cert = params.self_signed(&kp).unwrap();

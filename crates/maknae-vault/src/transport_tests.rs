@@ -9,7 +9,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::sync::Arc;
 
 fn provider() {
-    crate::crypto_provider().install_default().ok();
+    crate::install_default_crypto_provider();
 }
 
 /// The CA keeps its `CertificateParams`, not its `Certificate`: rcgen 0.14 signs

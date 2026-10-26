@@ -80,7 +80,7 @@ evidence = "crates/maknae-vault/src/csr.rs — rejects a CSR whose key is not a 
 name = "TLS key establishment"
 version = "ML-KEM-1024 first, then hybrids"
 category = "Cryptography"
-applies_to = "every TLS connection; offered, not enforced; P-384 and P-256 for interop"
+applies_to = "the list every TLS config offers (the negotiated group is the peer's choice)"
 status = "enforced"
 evidence = "crates/maknae-vault/src/fips.rs KX_GROUPS; asserted at start by assert_fips_provider"
 

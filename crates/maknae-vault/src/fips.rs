@@ -1,4 +1,4 @@
-//! FIPS gate — PURE decision. The AUTHORITATIVE FIPS proof is the runtime `.fips()`
+//! FIPS gate — PURE decisions, and the provider they decide about. The AUTHORITATIVE FIPS proof is the runtime `.fips()`
 //! value asserted here: aws-lc-rs reports fips only when built against the AWS-LC-FIPS
 //! module with its power-on self-tests passing.
 //!
@@ -38,7 +38,7 @@ pub(crate) const KX_GROUPS: [&dyn SupportedKxGroup; 5] = [
     kx_group::SECP256R1,
 ];
 
-/// The aws-lc-rs FIPS provider carrying [`KX_GROUPS`]: the only provider Maknae builds.
+/// The aws-lc-rs FIPS provider carrying [`KX_GROUPS`].
 #[expect(clippy::disallowed_methods)]
 pub fn crypto_provider() -> CryptoProvider {
     CryptoProvider {

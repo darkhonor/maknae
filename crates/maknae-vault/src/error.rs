@@ -159,7 +159,7 @@ impl std::fmt::Display for VaultError {
             ),
             VaultError::KxGroupsDrift => write!(
                 f,
-                "the process TLS provider does not carry Maknae's key-exchange groups (refusing to start)"
+                "the process TLS provider does not carry Maknae's key-exchange groups (refusing TLS)"
             ),
             VaultError::Config(e) => write!(f, "config error: {e}"),
             VaultError::InvalidKeyVaultPath(m) => write!(f, "invalid key_vault_path: {m}"),

@@ -909,7 +909,7 @@ mod tests {
             // execution order, matching every other provider-touching test in this
             // crate (fips_glue.rs, resolver.rs, transport_tests.rs, tls.rs,
             // plane_verify.rs all do this same call at their own point of use).
-            crate::crypto_provider().install_default().ok();
+            crate::install_default_crypto_provider();
             let p =
                 std::env::temp_dir().join(format!("mv-dispatch-{}-{}", std::process::id(), tag));
             let _ = std::fs::remove_dir_all(&p);

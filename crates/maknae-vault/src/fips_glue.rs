@@ -1,7 +1,7 @@
 //! Provider-fetch glue for the FIPS gate. Fail-closed: the binary `main` installs
 //! the process-default `CryptoProvider` once (aws-lc-rs FIPS); this reads it —
 //! detecting a pre-installed NON-FIPS default, or none at all — and delegates the
-//! decision to `fips::fips_result`.
+//! decision to `fips::fips_result` and `fips::kx_groups_result`.
 //!
 //! **Load-bearing ordering:** callers MUST run `assert_fips_provider()` before
 //! constructing any Vault client, because `vaultrs`'s reqwest reads the same
@@ -29,7 +29,7 @@ pub fn install_default_crypto_provider() {
     let _ = crypto_provider().install_default();
 }
 
-/// Assert the process is running the aws-lc-rs FIPS provider. Fail-closed:
+/// Assert the process is running the aws-lc-rs FIPS provider with Maknae's key-exchange groups. Fail-closed:
 /// no installed default (the binary `main` forgot to install one) → refuse.
 pub fn assert_fips_provider() -> Result<(), VaultError> {
     let provider =
