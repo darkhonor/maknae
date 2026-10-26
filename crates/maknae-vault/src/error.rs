@@ -8,6 +8,8 @@ use std::path::PathBuf;
 pub enum VaultError {
     /// The process is not running the aws-lc-rs FIPS provider (or none installed).
     FipsUnavailable,
+    /// `vault.plane_key` is not one of the closed values (#573).
+    InvalidPlaneKey(String),
     /// The process provider's key-exchange groups are not exactly Maknae's list (#564).
     KxGroupsDrift,
     /// A config-load failure from `maknae-config`.
@@ -165,6 +167,10 @@ impl std::fmt::Display for VaultError {
             VaultError::FipsUnavailable => write!(
                 f,
                 "FIPS provider not active: the process default is not aws-lc-rs FIPS (refusing to start)"
+            ),
+            VaultError::InvalidPlaneKey(v) => write!(
+                f,
+                "vault.plane_key `{v}` is not one of ml-dsa-87, p384, p521"
             ),
             VaultError::KxGroupsDrift => write!(
                 f,

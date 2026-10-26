@@ -309,6 +309,7 @@ const DISCLOSABLE: &[&str] = &[
     "vault.user_auth.mount",
     "vault.kv_mount",
     "vault.user_prefix",
+    "vault.plane_key",
     // Audit destination. A path, and the operator already needs it to find the
     // log they are debugging.
     "audit.jsonl_path",
@@ -737,6 +738,7 @@ pub struct ResolvedSettings<'a> {
     pub vault_pki_int_mount: Option<String>,
     pub vault_user_auth_type: Option<String>,
     pub vault_user_auth_mount: Option<String>,
+    pub vault_plane_key: Option<String>,
     /// The `egress` section as resolved (#240): both keys default, so both are
     /// always present here.
     pub egress: &'a crate::EgressConfig,
@@ -776,6 +778,7 @@ pub fn effective_view(
             ("pki_int_mount", r.vault_pki_int_mount.clone()),
             ("user_auth.type", r.vault_user_auth_type.clone()),
             ("user_auth.mount", r.vault_user_auth_mount.clone()),
+            ("plane_key", r.vault_plane_key.clone()),
         ],
     );
     Document::merge_resolved(
@@ -1152,6 +1155,7 @@ mod tests {
                 vault_pki_int_mount: None,
                 vault_user_auth_type: None,
                 vault_user_auth_mount: None,
+                vault_plane_key: None,
                 egress: &crate::EgressConfig::default(),
             },
         );
@@ -1175,6 +1179,7 @@ mod tests {
                 vault_pki_int_mount: None,
                 vault_user_auth_type: None,
                 vault_user_auth_mount: None,
+                vault_plane_key: None,
                 egress: &crate::EgressConfig::default(),
             },
         );
@@ -1203,6 +1208,7 @@ mod tests {
                 vault_pki_int_mount: Some("maknae-pki-int".into()),
                 vault_user_auth_type: Some("userpass".into()),
                 vault_user_auth_mount: Some("maknae-userpass".into()),
+                vault_plane_key: Some("ml-dsa-87".into()),
                 egress: &crate::EgressConfig::default(),
             },
         );
@@ -1210,6 +1216,7 @@ mod tests {
         assert_eq!(v["audit"]["jsonl_path"], "/var/log/maknae/audit.jsonl");
         assert_eq!(v["vault"]["approle_mount"], "maknae-approle");
         assert_eq!(v["vault"]["pki_int_mount"], "maknae-pki-int");
+        assert_eq!(v["vault"]["plane_key"], "ml-dsa-87");
         assert_eq!(v["vault"]["user_auth.type"], "userpass");
         assert_eq!(v["vault"]["user_auth.mount"], "maknae-userpass");
         // #240: the egress fold is asserted, not just passed — deleting the

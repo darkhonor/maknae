@@ -63,7 +63,7 @@ pub use ca::{load_ca_pin, CaBundle};
 pub use client::{PlaneClient, PlaneIdentity, PLANE_HTTP_TIMEOUT, PLANE_SHUTDOWN_BOUND};
 pub use config::{
     load_vault_config, user_auth_from_value, validate_deployment_id, validate_vault_addr,
-    vault_config_from_document, UserAuth, UserAuthConfig, UserAuthMethod, VaultConfig,
+    vault_config_from_document, PlaneKey, UserAuth, UserAuthConfig, UserAuthMethod, VaultConfig,
     DEFAULT_APPROLE_MOUNT, DEFAULT_PKI_INT_MOUNT, DEFAULT_USERPASS_MOUNT, EGRESS_VAULT_CA_FILE,
     VAULT_SECTION,
 };

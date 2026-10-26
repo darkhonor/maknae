@@ -86,7 +86,7 @@ SURFACE=(
   # The fifth wire disclosure struct, after StatusView, RoleBindingView, WhoamiView and BaselineView;
   # a field added to it reaches every holder of either verb.
   "crates/maknae-proto/src/wire.rs|ContainmentView|containment|3|wire"
-  "crates/maknae-vault/src/config.rs|VaultConfig|vault|8|config"
+  "crates/maknae-vault/src/config.rs|VaultConfig|vault|9|config"
   "crates/maknae-vault/src/config.rs|UserAuthConfig|vault.user_auth|2|config"
 )
 
@@ -97,6 +97,7 @@ SURFACE=(
 # No other enum-typed field is a leaf.
 LEAF_ENUMS=(
   "containment.outcome|crates/maknae-proto/src/wire.rs|ContainmentOutcome"
+  "vault.plane_key|crates/maknae-vault/src/config.rs|PlaneKey"
 )
 
 leaf_enum_check() { # <field-path> <file> <type>

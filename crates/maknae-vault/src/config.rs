@@ -124,7 +124,7 @@ pub fn user_auth_from_value(user_auth: Option<&Value>) -> Result<UserAuth, Vault
 
 /// #210: the keys this section's parser reads — the closed vocabulary, held
 /// EQUAL to `VaultConfig`'s fields by a test below.
-pub(crate) const VAULT_KEYS: [&str; 8] = [
+pub(crate) const VAULT_KEYS: [&str; 9] = [
     "addr",
     "approle_mount",
     "pki_int_mount",
@@ -133,7 +133,33 @@ pub(crate) const VAULT_KEYS: [&str; 8] = [
     "user_auth",
     "kv_mount",
     "user_prefix",
+    "plane_key",
 ];
+
+/// The plane identity's key algorithm (#573): what this plane generates, and what
+/// `deploy/vault-pki`'s `plane_key_algorithm` must issue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaneKey {
+    MlDsa87,
+    P384,
+    P521,
+}
+
+impl PlaneKey {
+    pub const ALL: [PlaneKey; 3] = [PlaneKey::MlDsa87, PlaneKey::P384, PlaneKey::P521];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PlaneKey::MlDsa87 => "ml-dsa-87",
+            PlaneKey::P384 => "p384",
+            PlaneKey::P521 => "p521",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        PlaneKey::ALL.into_iter().find(|k| k.as_str() == s)
+    }
+}
 
 /// The non-sensitive Vault settings.
 pub struct VaultConfig {
@@ -152,6 +178,7 @@ pub struct VaultConfig {
     pub user_auth: UserAuthConfig,
     pub kv_mount: Option<String>,
     pub user_prefix: Option<String>,
+    pub plane_key: PlaneKey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -338,6 +365,18 @@ pub fn vault_config_from_document(doc: &Document) -> Result<VaultConfig, VaultEr
         "vault.user_prefix",
         VaultError::InvalidKeyVaultPath,
     )?;
+    let plane_key = match get_value(vault, "plane_key") {
+        None => PlaneKey::MlDsa87,
+        Some(Value::Str(s)) => {
+            PlaneKey::parse(s).ok_or_else(|| VaultError::InvalidPlaneKey(s.clone()))?
+        }
+        Some(_) => {
+            return Err(VaultError::ConfigShape {
+                key: "vault.plane_key",
+                want: "a string",
+            })
+        }
+    };
     Ok(VaultConfig {
         addr,
         deployment_id,
@@ -347,12 +386,59 @@ pub fn vault_config_from_document(doc: &Document) -> Result<VaultConfig, VaultEr
         user_auth,
         kv_mount,
         user_prefix,
+        plane_key,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plane_key_of(extra: &str) -> Result<VaultConfig, VaultError> {
+        let tag: String = extra.chars().filter(char::is_ascii_alphanumeric).collect();
+        let d = TempDir::new(&format!("pk-{tag}"));
+        d.write(
+            "maknae.yaml",
+            &format!("core:\n  deployment_id: d\nvault:\n  addr: https://v.example:8200\n{extra}"),
+        );
+        load_vault_config(&d.0)
+    }
+
+    #[test]
+    fn plane_key_parses_each_value_and_defaults_to_ml_dsa_87() {
+        assert_eq!(plane_key_of("").unwrap().plane_key, PlaneKey::MlDsa87);
+        for k in PlaneKey::ALL {
+            let cfg = plane_key_of(&format!("  plane_key: {}\n", k.as_str())).unwrap();
+            assert_eq!(cfg.plane_key, k);
+            assert_eq!(PlaneKey::parse(k.as_str()), Some(k));
+        }
+        assert_eq!(
+            PlaneKey::ALL.map(PlaneKey::as_str),
+            ["ml-dsa-87", "p384", "p521"]
+        );
+    }
+
+    #[test]
+    fn plane_key_refuses_an_unknown_or_non_string_value() {
+        match plane_key_of("  plane_key: p256\n") {
+            Err(e @ VaultError::InvalidPlaneKey(_)) => {
+                let m = e.to_string();
+                assert!(
+                    m.contains("p256") && m.contains("ml-dsa-87, p384, p521"),
+                    "{m}"
+                );
+            }
+            other => panic!("expected InvalidPlaneKey, got {:?}", other.err()),
+        }
+        assert!(matches!(
+            plane_key_of("  plane_key: 7\n"),
+            Err(VaultError::ConfigShape {
+                key: "vault.plane_key",
+                ..
+            })
+        ));
+        assert_eq!(PlaneKey::parse("ML-DSA-87"), None);
+    }
 
     #[test]
     fn get_str_map_str_hit_and_misses() {

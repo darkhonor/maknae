@@ -1117,6 +1117,7 @@ const DISCLOSABLE: &[&str] = &[
     "vault.user_auth.mount",
     "vault.kv_mount",
     "vault.user_prefix",
+    "vault.plane_key",
     "audit.jsonl_path",
     "principal",
     "egress.socket_path",
@@ -1187,6 +1188,11 @@ pub struct Ceiling {
 }
 FIX
   cat > "$fixture/crates/maknae-vault/src/config.rs" <<'FIX'
+pub enum PlaneKey {
+    MlDsa87,
+    P384,
+    P521,
+}
 pub struct VaultConfig {
     pub addr: String,
     pub approle_mount: String,
@@ -1196,6 +1202,7 @@ pub struct VaultConfig {
     pub user_auth: UserAuthConfig,
     pub kv_mount: Option<String>,
     pub user_prefix: Option<String>,
+    pub plane_key: PlaneKey,
 }
 pub struct UserAuthConfig {
     pub r#type: String,
@@ -1220,6 +1227,7 @@ disclose	vault.user_auth.type	the method
 disclose	vault.user_auth.mount	mount name
 disclose	vault.kv_mount	mount name
 disclose	vault.user_prefix	layout prefix below the mount
+disclose	vault.plane_key	key algorithm name
 disclose	principal	readable via getpwuid anyway
 disclose	providers[].name	the authorized provider label
 disclose	providers[].endpoint	where the loop content goes
@@ -1334,7 +1342,7 @@ expect_reject "config-disclosure-drift/struct-anchor-not-found" "$fx/ci/gates/co
 # the reader to delete manifest rows that were correct.
 fx="$(cfg_fixture "$CFG_OK")"
 cat > "$fx/crates/maknae-config/src/document.rs" <<'FIX'
-const DISCLOSABLE: &[&str] = &["transport", "providers[].name", "providers[].endpoint", "providers[].models", "providers[].models[]", "providers[].reasoning_effort", "providers[].output_tokens_field", "vault.addr", "vault.approle_mount", "vault.pki_int_mount", "vault.deployment_id", "vault.user_auth", "vault.user_auth.type", "vault.user_auth.mount", "vault.kv_mount", "vault.user_prefix", "audit.jsonl_path", "principal", "egress.socket_path", "egress.deadline_ms"];
+const DISCLOSABLE: &[&str] = &["transport", "providers[].name", "providers[].endpoint", "providers[].models", "providers[].models[]", "providers[].reasoning_effort", "providers[].output_tokens_field", "vault.addr", "vault.approle_mount", "vault.pki_int_mount", "vault.deployment_id", "vault.user_auth", "vault.user_auth.type", "vault.user_auth.mount", "vault.kv_mount", "vault.user_prefix", "vault.plane_key", "audit.jsonl_path", "principal", "egress.socket_path", "egress.deadline_ms"];
 const SUPPRESSED: &[&str] = &["vault.insecure_plaintext_secret_path", "core.handling", "audit.au3_1"];
 FIX
 expect_accept "config-disclosure-drift/rustfmt-collapsed-array-still-read" ": 52 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
@@ -1747,7 +1755,7 @@ python3 - "$fx" <<'PY'
 import pathlib, sys
 p = pathlib.Path(sys.argv[1]) / "ci/gates/config-disclosure-drift.sh"
 s = p.read_text()
-row = '  "crates/maknae-vault/src/config.rs|VaultConfig|vault|8|config"\n'
+row = '  "crates/maknae-vault/src/config.rs|VaultConfig|vault|9|config"\n'
 last = '  "crates/maknae-proto/src/wire.rs|WhoamiView|whoami|2|wire"\n'
 assert s.count(row) == 1 and s.count(last) == 1, "fixture reorder anchors moved"
 p.write_text(s.replace(row, "").replace(last, last + row))
