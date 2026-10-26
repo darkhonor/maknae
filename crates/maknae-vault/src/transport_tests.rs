@@ -26,10 +26,18 @@ impl Ca {
         rcgen::Issuer::from_params(&self.params, &self.kp)
     }
 }
+type Alg = &'static rcgen::SignatureAlgorithm;
+const P384: Alg = &rcgen::PKCS_ECDSA_P384_SHA384;
+const P521: Alg = &rcgen::PKCS_ECDSA_P521_SHA512;
+const MLDSA87: Alg = &rcgen::PKCS_ML_DSA_87;
+
 fn mk_ca() -> Ca {
+    mk_ca_with(P384)
+}
+fn mk_ca_with(alg: Alg) -> Ca {
     let mut p = rcgen::CertificateParams::new(vec![]).unwrap();
     p.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-    let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
+    let kp = rcgen::KeyPair::generate_for(alg).unwrap();
     let cert = p.self_signed(&kp).unwrap();
     Ca {
         der: cert.der().to_vec(),
@@ -40,6 +48,14 @@ fn mk_ca() -> Ca {
 
 /// Returns (chain=[leaf, ca], leaf_key_der). `expired=true` → not_after in the past.
 fn mk_leaf(ca: &Ca, uri: &str, expired: bool) -> (Vec<CertificateDer<'static>>, Vec<u8>) {
+    mk_leaf_with(ca, uri, expired, P384)
+}
+fn mk_leaf_with(
+    ca: &Ca,
+    uri: &str,
+    expired: bool,
+    alg: Alg,
+) -> (Vec<CertificateDer<'static>>, Vec<u8>) {
     let mut p = rcgen::CertificateParams::new(vec![]).unwrap();
     p.distinguished_name = rcgen::DistinguishedName::new();
     p.subject_alt_names = vec![rcgen::SanType::URI(uri.try_into().unwrap())];
@@ -47,7 +63,7 @@ fn mk_leaf(ca: &Ca, uri: &str, expired: bool) -> (Vec<CertificateDer<'static>>, 
         p.not_before = rcgen::date_time_ymd(1999, 1, 1);
         p.not_after = rcgen::date_time_ymd(2000, 1, 1);
     }
-    let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
+    let kp = rcgen::KeyPair::generate_for(alg).unwrap();
     let leaf = p.signed_by(&kp, &ca.issuer()).unwrap();
     (
         vec![
@@ -60,13 +76,16 @@ fn mk_leaf(ca: &Ca, uri: &str, expired: bool) -> (Vec<CertificateDer<'static>>, 
 
 /// A leaf carrying the plane URI PLUS a rogue DNS SAN (defense-in-depth negative).
 fn mk_leaf_extra_san(ca: &Ca, uri: &str) -> (Vec<CertificateDer<'static>>, Vec<u8>) {
+    mk_leaf_extra_san_with(ca, uri, P384)
+}
+fn mk_leaf_extra_san_with(ca: &Ca, uri: &str, alg: Alg) -> (Vec<CertificateDer<'static>>, Vec<u8>) {
     let mut p = rcgen::CertificateParams::new(vec![]).unwrap();
     p.distinguished_name = rcgen::DistinguishedName::new();
     p.subject_alt_names = vec![
         rcgen::SanType::URI(uri.try_into().unwrap()),
         rcgen::SanType::DnsName("evil.example".try_into().unwrap()),
     ];
-    let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
+    let kp = rcgen::KeyPair::generate_for(alg).unwrap();
     let leaf = p.signed_by(&kp, &ca.issuer()).unwrap();
     (
         vec![
@@ -79,9 +98,12 @@ fn mk_leaf_extra_san(ca: &Ca, uri: &str) -> (Vec<CertificateDer<'static>>, Vec<u
 
 /// A real intermediate CA signed by `root` (for the root-only-anchor topology test).
 fn mk_intermediate(root: &Ca) -> Ca {
+    mk_intermediate_with(root, P384)
+}
+fn mk_intermediate_with(root: &Ca, alg: Alg) -> Ca {
     let mut p = rcgen::CertificateParams::new(vec![]).unwrap();
     p.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-    let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
+    let kp = rcgen::KeyPair::generate_for(alg).unwrap();
     let cert = p.signed_by(&kp, &root.issuer()).unwrap();
     Ca {
         der: cert.der().to_vec(),
@@ -657,4 +679,239 @@ async fn maknaes_client_and_server_agree_on_ml_kem_1024() {
             maknae_crypto::rustls::HandshakeKind::Full
         ))
     );
+}
+
+mod plane_key_algorithms {
+    use super::*;
+    use maknae_crypto::rustls::client::danger::{
+        HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+    };
+    use maknae_crypto::rustls::pki_types::{ServerName, UnixTime};
+    use maknae_crypto::rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
+    use maknae_crypto::rustls::{DigitallySignedStruct, DistinguishedName, Error, SignatureScheme};
+    use std::sync::Mutex;
+
+    #[derive(Debug)]
+    struct Recording<V> {
+        inner: Arc<V>,
+        seen: Arc<Mutex<Vec<SignatureScheme>>>,
+    }
+
+    impl ServerCertVerifier for Recording<crate::plane_verify::PlaneServerCertVerifier> {
+        fn verify_server_cert(
+            &self,
+            e: &CertificateDer<'_>,
+            i: &[CertificateDer<'_>],
+            n: &ServerName<'_>,
+            o: &[u8],
+            t: UnixTime,
+        ) -> Result<ServerCertVerified, Error> {
+            self.inner.verify_server_cert(e, i, n, o, t)
+        }
+        fn verify_tls12_signature(
+            &self,
+            m: &[u8],
+            c: &CertificateDer<'_>,
+            d: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, Error> {
+            self.inner.verify_tls12_signature(m, c, d)
+        }
+        fn verify_tls13_signature(
+            &self,
+            m: &[u8],
+            c: &CertificateDer<'_>,
+            d: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, Error> {
+            self.seen.lock().unwrap().push(d.scheme);
+            self.inner.verify_tls13_signature(m, c, d)
+        }
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            self.inner.supported_verify_schemes()
+        }
+    }
+
+    impl ClientCertVerifier for Recording<crate::plane_verify::PlaneClientCertVerifier> {
+        fn root_hint_subjects(&self) -> &[DistinguishedName] {
+            self.inner.root_hint_subjects()
+        }
+        fn verify_client_cert(
+            &self,
+            e: &CertificateDer<'_>,
+            i: &[CertificateDer<'_>],
+            n: UnixTime,
+        ) -> Result<ClientCertVerified, Error> {
+            self.inner.verify_client_cert(e, i, n)
+        }
+        fn verify_tls12_signature(
+            &self,
+            m: &[u8],
+            c: &CertificateDer<'_>,
+            d: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, Error> {
+            self.inner.verify_tls12_signature(m, c, d)
+        }
+        fn verify_tls13_signature(
+            &self,
+            m: &[u8],
+            c: &CertificateDer<'_>,
+            d: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, Error> {
+            self.seen.lock().unwrap().push(d.scheme);
+            self.inner.verify_tls13_signature(m, c, d)
+        }
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            self.inner.supported_verify_schemes()
+        }
+    }
+
+    struct Seen {
+        by_server: Arc<Mutex<Vec<SignatureScheme>>>,
+        by_client: Arc<Mutex<Vec<SignatureScheme>>>,
+    }
+
+    async fn mutual_tls(
+        cab: &CaBundle,
+        kernel: (Vec<CertificateDer<'static>>, Vec<u8>),
+        cli: (Vec<CertificateDer<'static>>, Vec<u8>),
+    ) -> Result<Seen, String> {
+        let seen = Seen {
+            by_server: Arc::default(),
+            by_client: Arc::default(),
+        };
+        let key = maknae_crypto::crypto_provider()
+            .key_provider
+            .load_private_key(PrivateKeyDer::Pkcs8(kernel.1.into()))
+            .unwrap();
+        let resolver = Arc::new(crate::resolver::PlaneCertResolver::new_empty());
+        resolver.slot().store(Some(Arc::new(
+            maknae_crypto::rustls::sign::CertifiedKey::new(kernel.0, key),
+        )));
+        let client_verifier = Arc::new(Recording {
+            inner: crate::plane_verify::PlaneClientCertVerifier::new(cab, Plane::Cli, "d").unwrap(),
+            seen: Arc::clone(&seen.by_server),
+        });
+        let server_verifier = Arc::new(Recording {
+            inner: crate::plane_verify::PlaneServerCertVerifier::new(cab, Plane::Kernel, "d")
+                .unwrap(),
+            seen: Arc::clone(&seen.by_client),
+        });
+        let server = Arc::new(crate::tls::plane_server_config(client_verifier, resolver).unwrap());
+        let client = Arc::new(
+            crate::tls::plane_client_config(
+                server_verifier,
+                Some((cli.0, PrivateKeyDer::Pkcs8(cli.1.into()))),
+            )
+            .unwrap(),
+        );
+        handshake(server, client).await.map(|()| seen)
+    }
+
+    fn scheme_of(alg: Alg) -> SignatureScheme {
+        if std::ptr::eq(alg, MLDSA87) {
+            SignatureScheme::ML_DSA_87
+        } else if std::ptr::eq(alg, P521) {
+            SignatureScheme::ECDSA_NISTP521_SHA512
+        } else {
+            SignatureScheme::ECDSA_NISTP384_SHA384
+        }
+    }
+
+    #[tokio::test]
+    async fn each_plane_key_completes_mutual_tls_and_both_sides_sign_with_it() {
+        provider();
+        for alg in [MLDSA87, P384, P521] {
+            let ca = mk_ca_with(alg);
+            let seen = mutual_tls(
+                &cab(&ca),
+                mk_leaf_with(&ca, "maknae://d/plane/kernel", false, alg),
+                mk_leaf_with(&ca, "maknae://d/plane/cli", false, alg),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{alg:?}: {e}"));
+            let want = vec![scheme_of(alg)];
+            assert_eq!(
+                *seen.by_client.lock().unwrap(),
+                want,
+                "kernel's CertificateVerify"
+            );
+            assert_eq!(
+                *seen.by_server.lock().unwrap(),
+                want,
+                "cli's CertificateVerify"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_p384_root_over_an_ml_dsa_87_intermediate_and_leaves_completes() {
+        provider();
+        let root = mk_ca_with(P384);
+        let int = mk_intermediate_with(&root, MLDSA87);
+        let cab = CaBundle {
+            root_der: root.der.clone(),
+            int_der: int.der.clone(),
+        };
+        let seen = mutual_tls(
+            &cab,
+            mk_leaf_with(&int, "maknae://d/plane/kernel", false, MLDSA87),
+            mk_leaf_with(&int, "maknae://d/plane/cli", false, MLDSA87),
+        )
+        .await
+        .expect("mixed chain");
+        assert_eq!(
+            *seen.by_client.lock().unwrap(),
+            vec![SignatureScheme::ML_DSA_87]
+        );
+        assert_eq!(
+            *seen.by_server.lock().unwrap(),
+            vec![SignatureScheme::ML_DSA_87]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_negative_suite_fails_closed_for_every_plane_key() {
+        provider();
+        for alg in [MLDSA87, P384, P521] {
+            let ca = mk_ca_with(alg);
+            let foreign = mk_ca_with(alg);
+            let kernel = || mk_leaf_with(&ca, "maknae://d/plane/kernel", false, alg);
+            let cli = || mk_leaf_with(&ca, "maknae://d/plane/cli", false, alg);
+            let cases = [
+                (
+                    "wrong plane",
+                    kernel(),
+                    mk_leaf_with(&ca, "maknae://d/plane/kernel", false, alg),
+                ),
+                (
+                    "expired server leaf",
+                    mk_leaf_with(&ca, "maknae://d/plane/kernel", true, alg),
+                    cli(),
+                ),
+                (
+                    "foreign CA",
+                    mk_leaf_with(&foreign, "maknae://d/plane/kernel", false, alg),
+                    cli(),
+                ),
+                (
+                    "extra SAN",
+                    kernel(),
+                    mk_leaf_extra_san_with(&ca, "maknae://d/plane/cli", alg),
+                ),
+            ];
+            for (what, k, c) in cases {
+                assert!(
+                    mutual_tls(&cab(&ca), k, c).await.is_err(),
+                    "{alg:?}: {what} must fail"
+                );
+            }
+            let (kchain, kkey) = kernel();
+            let (cchain, ckey) = cli();
+            let s = server_cfg(kchain, kkey, &cab(&ca), Plane::Cli);
+            let c = client_cfg(cchain, ckey, &cab(&ca), Plane::Kernel, false);
+            assert!(
+                handshake(s, c).await.is_err(),
+                "{alg:?}: absent client cert must fail"
+            );
+        }
+    }
 }
