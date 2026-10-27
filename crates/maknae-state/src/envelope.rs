@@ -69,7 +69,7 @@ pub fn seal(plain: &[u8], kek: &WrappingKey) -> Result<Vec<u8>, EnvelopeError> {
     let mut dek = Zeroizing::new([0u8; KEY_LEN]);
     random::fill(&mut dek[..]).map_err(|_| EnvelopeError::Crypto)?;
 
-    let mut out = Vec::with_capacity(HEADER_LEN + plain.len() + TAG_LEN);
+    let mut out = Zeroizing::new(Vec::with_capacity(HEADER_LEN + plain.len() + TAG_LEN));
     out.extend_from_slice(&MAGIC);
     out.extend_from_slice(&ENVELOPE_VERSION.to_le_bytes());
     out.extend_from_slice(&AEAD_AES_256_GCM.to_le_bytes());
@@ -93,7 +93,7 @@ pub fn seal(plain: &[u8], kek: &WrappingKey) -> Result<Vec<u8>, EnvelopeError> {
         .map_err(|_| EnvelopeError::Crypto)?;
     head[PAYLOAD_NONCE..].copy_from_slice(&payload_nonce);
     out.extend_from_slice(&tag);
-    Ok(out)
+    Ok(std::mem::take(&mut *out))
 }
 
 pub fn open(file: &[u8], kek: &WrappingKey) -> Result<Zeroizing<Vec<u8>>, EnvelopeError> {
