@@ -30,6 +30,7 @@ disclose	vault.user_auth	the user authentication block: a method type and a moun
 disclose	vault.user_auth.type	the user authentication method; only userpass is accepted
 disclose	vault.user_auth.mount	mount name, never a credential
 disclose	vault.kv_mount	the KV mount user keys live in; a mount name, never a credential, and already world-readable in egress-bounds.yaml
+disclose	vault.plane_key	the plane identity key algorithm name, never a credential
 disclose	vault.user_prefix	where each user's keys sit below the mount; a layout prefix, never a credential, and already world-readable in egress-bounds.yaml
 disclose	audit.jsonl_path	the log the operator is trying to find
 disclose	principal.name	readable by any local process via getpwuid
@@ -58,6 +59,7 @@ always	status.protocol_version	every peer that completed a handshake already has
 always	status.listener	the socket the caller is already connected to
 always	status.authz_backend	which PDP produced a verdict; the point of the field
 always	status.classification_policy	which classification SYSTEM ranked a ceiling (ADR-0022); a name from the build's registry, never a level or a marking
+always	status.plane_key	the plane identity key algorithm name (#573); the same value vault.plane_key discloses
 always	status.kernel_graph_revision	the kernel graph store's revision counter; no key, digest or content
 always	status.kernel_graph_anchor	the rollback-anchor state at boot (seeded, reseeded, verified, advanced, rollback-anchor-unavailable)
 always	status.identity_problem_counts	how many identity events of each kind the last applied load produced (#496): per-subject problems, releases of a containment, and a promotion of the enrolled principal, as fixed "<kind>=<count>" entries: counts only, never a name, uid or role; which subjects are affected is admin.subject.list's to disclose

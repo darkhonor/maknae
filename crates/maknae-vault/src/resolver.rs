@@ -35,6 +35,7 @@ impl ResolvesServerCert for PlaneCertResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use maknae_crypto::rcgen;
 
     fn dummy_certified_key() -> Arc<CertifiedKey> {
         maknae_crypto::install_default_crypto_provider();

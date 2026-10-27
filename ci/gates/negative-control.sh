@@ -1012,7 +1012,8 @@ cfg_fixture() { # <manifest> [extra-transport-field] [extra-disclosable-entry] [
   fixture="$(mktemp -d -p "$NC_TMP")"
   mkdir -p "$fixture/ci/gates" "$fixture/crates/maknae-config/src" \
            "$fixture/crates/maknae-vault/src" "$fixture/crates/maknae-kernel/src" \
-           "$fixture/crates/maknae-proto/src"
+           "$fixture/crates/maknae-proto/src" "$fixture/crates/maknae-crypto/src"
+  printf 'pub enum PlaneKey {\n    MlDsa87,\n    P384,\n    P521,\n}\n' > "$fixture/crates/maknae-crypto/src/signature.rs"
   # `StatusView` is the second disclosure surface (admin.status returns it
   # whole); the gate's SURFACE table names it, so a fixture needs it too.
   cat > "$fixture/crates/maknae-proto/src/wire.rs" <<FIX
@@ -1022,6 +1023,7 @@ pub struct StatusView {
     pub listener: String,
     pub authz_backend: String,
     pub classification_policy: String,
+    pub plane_key: Option<String>,
     pub kernel_graph_revision: Option<u64>,
     pub kernel_graph_anchor: Option<String>,
     pub identity_problem_counts: Vec<String>,
@@ -1117,6 +1119,7 @@ const DISCLOSABLE: &[&str] = &[
     "vault.user_auth.mount",
     "vault.kv_mount",
     "vault.user_prefix",
+    "vault.plane_key",
     "audit.jsonl_path",
     "principal",
     "egress.socket_path",
@@ -1187,6 +1190,7 @@ pub struct Ceiling {
 }
 FIX
   cat > "$fixture/crates/maknae-vault/src/config.rs" <<'FIX'
+use maknae_crypto::signature::PlaneKey;
 pub struct VaultConfig {
     pub addr: String,
     pub approle_mount: String,
@@ -1196,7 +1200,10 @@ pub struct VaultConfig {
     pub user_auth: UserAuthConfig,
     pub kv_mount: Option<String>,
     pub user_prefix: Option<String>,
+    pub plane_key: PlaneKey,
 }
+const _: fn(&VaultConfig) -> ::maknae_crypto::signature::PlaneKey = |c| c.plane_key;
+const _: fn(&VaultConfig) -> isize = |c| c.plane_key as isize;
 pub struct UserAuthConfig {
     pub r#type: String,
     pub mount: String,
@@ -1220,6 +1227,7 @@ disclose	vault.user_auth.type	the method
 disclose	vault.user_auth.mount	mount name
 disclose	vault.kv_mount	mount name
 disclose	vault.user_prefix	layout prefix below the mount
+disclose	vault.plane_key	key algorithm name
 disclose	principal	readable via getpwuid anyway
 disclose	providers[].name	the authorized provider label
 disclose	providers[].endpoint	where the loop content goes
@@ -1237,6 +1245,7 @@ always	status.protocol_version	ships by construction
 always	status.listener	ships by construction
 always	status.authz_backend	ships by construction
 always	status.classification_policy	ships by construction
+always	status.plane_key	ships by construction
 always	status.kernel_graph_revision	ships by construction
 always	status.kernel_graph_anchor	ships by construction
 always	status.identity_problem_counts	ships by construction
@@ -1334,10 +1343,10 @@ expect_reject "config-disclosure-drift/struct-anchor-not-found" "$fx/ci/gates/co
 # the reader to delete manifest rows that were correct.
 fx="$(cfg_fixture "$CFG_OK")"
 cat > "$fx/crates/maknae-config/src/document.rs" <<'FIX'
-const DISCLOSABLE: &[&str] = &["transport", "providers[].name", "providers[].endpoint", "providers[].models", "providers[].models[]", "providers[].reasoning_effort", "providers[].output_tokens_field", "vault.addr", "vault.approle_mount", "vault.pki_int_mount", "vault.deployment_id", "vault.user_auth", "vault.user_auth.type", "vault.user_auth.mount", "vault.kv_mount", "vault.user_prefix", "audit.jsonl_path", "principal", "egress.socket_path", "egress.deadline_ms"];
+const DISCLOSABLE: &[&str] = &["transport", "providers[].name", "providers[].endpoint", "providers[].models", "providers[].models[]", "providers[].reasoning_effort", "providers[].output_tokens_field", "vault.addr", "vault.approle_mount", "vault.pki_int_mount", "vault.deployment_id", "vault.user_auth", "vault.user_auth.type", "vault.user_auth.mount", "vault.kv_mount", "vault.user_prefix", "vault.plane_key", "audit.jsonl_path", "principal", "egress.socket_path", "egress.deadline_ms"];
 const SUPPRESSED: &[&str] = &["vault.insecure_plaintext_secret_path", "core.handling", "audit.au3_1"];
 FIX
-expect_accept "config-disclosure-drift/rustfmt-collapsed-array-still-read" ": 52 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_accept "config-disclosure-drift/rustfmt-collapsed-array-still-read" ": 54 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: a section registered in boot.rs with no SURFACE entry. THE THIRD
 # fail-open, and the one that closes the PROPERTY rather than an instance: the
@@ -1552,9 +1561,9 @@ python3 - "$fx" <<'PY'
 import pathlib, sys
 p = pathlib.Path(sys.argv[1]) / "ci/gates/config-disclosure-drift.sh"
 s = p.read_text()
-old = "|StatusView|status|11|wire"
+old = "|StatusView|status|12|wire"
 assert s.count(old) == 1, "fixture prefix anchor moved"
-p.write_text(s.replace(old, "|StatusView|status view|11|wire"))
+p.write_text(s.replace(old, "|StatusView|status view|12|wire"))
 PY
 expect_reject_because "config-disclosure-drift/whitespace-bearing-surface-prefix" \
   "whitespace-bearing prefix" "$fx/ci/gates/config-disclosure-drift.sh"
@@ -1608,6 +1617,18 @@ g.write_text(g.read_text().replace(old, "containment.outcome|crates/maknae-proto
 PYFIX
 expect_reject_because "config-disclosure-drift/leaf-enum-in-another-file-than-its-struct" \
   "not in" "$fx/ci/gates/config-disclosure-drift.sh"
+
+# REJECT: the enum is in another crate and the struct's file lacks one of the
+# two assertions through which rustc proves the field is that fieldless enum.
+for line in 'const _: fn(&VaultConfig) -> ::maknae_crypto::signature::PlaneKey = |c| c.plane_key;' \
+            'const _: fn(&VaultConfig) -> isize = |c| c.plane_key as isize;'; do
+  fx="$(cfg_fixture "$CFG_OK")"
+  grep -vxF "$line" "$fx/crates/maknae-vault/src/config.rs" > "$fx/config.rs.new"
+  mv "$fx/config.rs.new" "$fx/crates/maknae-vault/src/config.rs"
+  case "$line" in *isize*) name=cast ;; *) name=type ;; esac
+  expect_reject_because "config-disclosure-drift/leaf-enum-cross-crate-without-the-$name-assertion" \
+    "does not hold" "$fx/ci/gates/config-disclosure-drift.sh"
+done
 
 # REJECT: the field names the type by a path. The row is matched on the
 # qualifier-stripped name, so the path may resolve to a same-named data struct
@@ -1747,7 +1768,7 @@ python3 - "$fx" <<'PY'
 import pathlib, sys
 p = pathlib.Path(sys.argv[1]) / "ci/gates/config-disclosure-drift.sh"
 s = p.read_text()
-row = '  "crates/maknae-vault/src/config.rs|VaultConfig|vault|8|config"\n'
+row = '  "crates/maknae-vault/src/config.rs|VaultConfig|vault|9|config"\n'
 last = '  "crates/maknae-proto/src/wire.rs|WhoamiView|whoami|2|wire"\n'
 assert s.count(row) == 1 and s.count(last) == 1, "fixture reorder anchors moved"
 p.write_text(s.replace(row, "").replace(last, last + row))
@@ -1896,7 +1917,7 @@ fi
 # go check a sed flag. This probe pins the corrected order.
 fx="$(cfg_fixture "$CFG_OK" '' '' '' 'std::sync::Arc<String>')"
 expect_accept "config-disclosure-drift/qualified-wrapper-is-a-leaf" \
-  ": 52 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+  ": 54 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # ACCEPT: the config-surface `Vec` exemption holds for the QUALIFIED spelling
 # too. Under the old post-loop `s/.*:://`, `Vec<crate::Principal>` reduced to
@@ -1905,7 +1926,7 @@ expect_accept "config-disclosure-drift/qualified-wrapper-is-a-leaf" \
 # the unqualified `config-vec-of-struct-is-a-leaf` probe below cannot see.
 fx="$(cfg_fixture "$CFG_OK" '' '' '' 'Vec<crate::Principal>')"
 expect_accept "config-disclosure-drift/qualified-config-vec-is-still-a-leaf" \
-  ": 52 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+  ": 54 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # ACCEPT: the mirror image. `Vec<WorkspaceStruct>` on a CONFIG surface is a
 # LEAF -- only a sequence whose element paths are declared is walked;
@@ -1914,12 +1935,12 @@ expect_accept "config-disclosure-drift/qualified-config-vec-is-still-a-leaf" \
 # did not, and every config row was silently held to the wire rule.
 fx="$(cfg_fixture "$CFG_OK" '' '' '' 'Vec<Principal>')"
 expect_accept "config-disclosure-drift/config-vec-of-struct-is-a-leaf" \
-  ": 52 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+  ": 54 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # ACCEPT: the clean fixture passes and reports both counts. Without this every
 # rejection above would stay green against a gate that refuses everything.
 fx="$(cfg_fixture "$CFG_OK")"
-expect_accept "config-disclosure-drift/clean-fixture-passes" ": 52 paths decided, 61 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_accept "config-disclosure-drift/clean-fixture-passes" ": 54 paths decided, 63 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
 
 
 # ACCEPT, against the REAL repo: each gate's reported examined-set is
@@ -1982,7 +2003,7 @@ expect_reported_count "p1-manifest/packages-match-the-workspace" "ok (" "$exp_p1
 # control; asserting it here means any future silent shrink is a red build.
 
 expect_accept "config-disclosure-drift/real-repo-counts-pinned" \
-  ": 63 paths decided, 61 struct fields covered" "$here/config-disclosure-drift.sh"
+  ": 65 paths decided, 63 struct fields covered" "$here/config-disclosure-drift.sh"
 
 
 # #158: a grant's own disclosure inventory must reject new data and type changes.

@@ -9,7 +9,7 @@
 #
 #   enforced   implemented AND something in CI or the runtime refuses a violation
 #   adopted    implemented and relied upon, but nothing mechanically checks it
-#   emerging   applies to a surface not yet built (gateway #117, MCP #151)
+#   emerging   applies to a surface or control not yet built (gateway #117, MCP #151, #574)
 #   excluded   deliberately out of scope, with the decision recorded
 #
 # `evidence` must name a file, gate or ADR a reader can open. A claim with no
@@ -69,12 +69,20 @@ status = "enforced"
 evidence = "crates/maknae-crypto/src/glue.rs:35 assert_fips_provider; rustls has no TLS older than 1.2"
 
 [[standard]]
-name = "CNSA Suite"
-version = "1.0 — EC P-384"
+name = "Plane key algorithm"
+version = "ML-DSA-87 default (plane_key)"
 category = "Cryptography"
-applies_to = "plane certificate keys and signatures"
+applies_to = "a plane's own CSR key; the peer's algorithm is not pinned (#574)"
 status = "enforced"
-evidence = "crates/maknae-vault/src/csr.rs — rejects a CSR whose key is not a 97-byte P-384 point"
+evidence = "crates/maknae-crypto/src/signature.rs PlaneKey::matches_spki (called by maknae-vault csr_key_is); vault.plane_key"
+
+[[standard]]
+name = "CNSA Suite"
+version = "2.0"
+category = "Cryptography"
+applies_to = "the plane, once #574 pins peer keys, groups and suites"
+status = "emerging"
+evidence = "#574"
 
 [[standard]]
 name = "TLS key establishment"

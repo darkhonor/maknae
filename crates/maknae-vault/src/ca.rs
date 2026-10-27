@@ -41,6 +41,7 @@ pub fn load_ca_pin(dir: &Path) -> Result<CaBundle, VaultError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use maknae_crypto::rcgen;
 
     struct TempDir(std::path::PathBuf);
     impl TempDir {

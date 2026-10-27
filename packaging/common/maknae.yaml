@@ -19,6 +19,9 @@ vault:
   # AppRole auth mount + PKI intermediate mount (defaults match the deploy module).
   approle_mount: maknae-approle
   pki_int_mount: maknae-pki-int
+  # Plane identity key: ml-dsa-87 needs a Vault 2.2.0+ PKI; p384 or p521 otherwise.
+  # Must match deploy/vault-pki's plane_key_algorithm.
+  plane_key: ml-dsa-87
 
 audit:
   # MUST be under /var/log/maknae — the daemon's default sink would otherwise land

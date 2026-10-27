@@ -103,6 +103,7 @@ fn provision(job: ProvisionJob, verbose: bool) -> Result<(), EnrollError> {
         &job.userpass_mount,
         &job.kv_mount,
         &job.user_prefix,
+        &job.plane_key,
         job.macos,
     );
 

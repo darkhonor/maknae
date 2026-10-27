@@ -29,7 +29,7 @@ deny = [
   { name = "aws-lc-rs", wrappers = ["maknae-crypto", "rustls", "rustls-webpki", "rcgen"] },
   { name = "rustls", wrappers = ["maknae-crypto", "hyper-rustls", "reqwest", "rustls-platform-verifier", "tokio-rustls"] },
   { name = "tokio-rustls", wrappers = ["maknae-vault", "hyper-rustls", "reqwest"] },
-  { name = "rcgen", wrappers = ["maknae-vault"] },
+  { name = "rcgen", wrappers = ["maknae-crypto"] },
 ]
 
 # reqwest's own TLS features install a stock provider when none is set;

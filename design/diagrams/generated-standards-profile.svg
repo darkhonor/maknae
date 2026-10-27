@@ -1,7 +1,7 @@
-<svg width="1220" height="1190" viewBox="0 0 1220 1190" xmlns="http://www.w3.org/2000/svg" role="img">
+<svg width="1220" height="1238" viewBox="0 0 1220 1238" xmlns="http://www.w3.org/2000/svg" role="img">
   <title>Maknae standards profile (DoDAF StdV-1)</title>
   <desc>The technical standards Maknae conforms to, the elements each applies to, whether the claim is mechanically enforced, and the evidence for it.</desc>
-  <rect x="0" y="0" width="1220" height="1190" fill="#FFFFFF"/>
+  <rect x="0" y="0" width="1220" height="1238" fill="#FFFFFF"/>
 <text x="40" y="46" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="17" font-weight="600" fill="#2C2C2A">Standards profile — DoDAF StdV-1</text>
   <text x="40" y="68" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A">The technical standards Maknae claims, the elements they apply to, and what enforces each. Status separates what is mechanically</text>
   <text x="40" y="83" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A">checked from what is merely implemented — a profile that blurs the two is a wish list.</text>
@@ -20,29 +20,29 @@
   <text x="660" y="156" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#2C2C2A">the maknaed &lt;-&gt; maknae wire protocol</text>
   <text x="660" y="171" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9" font-weight="400" fill="#5F5E5A">crates/maknae-proto; ADR-0009 (byte-string content codec)</text>
   <rect x="40" y="190" width="1140" height="44" rx="4" fill="#FCFCFB" stroke="none" stroke-width="0"/>
-  <text x="44" y="204" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#2C2C2A">CNSA Suite</text>
+  <text x="44" y="204" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#2C2C2A">CNSSI 4009</text>
   <rect x="40" y="210" width="62" height="13" rx="6" fill="#FFFFFF" stroke="#0F6E56" stroke-width="0.75"/>
   <text x="71" y="220" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="600" fill="#0F6E56">enforced</text>
-  <text x="296" y="204" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="400" fill="#2C2C2A">1.0 — EC P-384</text>
-  <text x="500" y="204" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">Cryptography</text>
-  <text x="660" y="204" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#2C2C2A">plane certificate keys and signatures</text>
-  <text x="660" y="219" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9" font-weight="400" fill="#5F5E5A">crates/maknae-vault/src/csr.rs — rejects a CSR whose key is not a 97-byte P-384 point</text>
+  <text x="296" y="204" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="400" fill="#2C2C2A">current</text>
+  <text x="500" y="204" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">Vocabulary</text>
+  <text x="660" y="204" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#2C2C2A">the access-control vocabulary — DAC/MAC, RBAC/ABAC</text>
+  <text x="660" y="219" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9" font-weight="400" fill="#5F5E5A">ADR-0020; AGENTS.md currency guard names it as the fixed vocabulary</text>
   <rect x="40" y="238" width="1140" height="44" rx="4" fill="#FCFCFB" stroke="none" stroke-width="0"/>
-  <text x="44" y="252" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#2C2C2A">CNSSI 4009</text>
+  <text x="44" y="252" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#2C2C2A">FIPS 140-3</text>
   <rect x="40" y="258" width="62" height="13" rx="6" fill="#FFFFFF" stroke="#0F6E56" stroke-width="0.75"/>
   <text x="71" y="268" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="600" fill="#0F6E56">enforced</text>
-  <text x="296" y="252" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="400" fill="#2C2C2A">current</text>
-  <text x="500" y="252" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">Vocabulary</text>
-  <text x="660" y="252" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#2C2C2A">the access-control vocabulary — DAC/MAC, RBAC/ABAC</text>
-  <text x="660" y="267" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9" font-weight="400" fill="#5F5E5A">ADR-0020; AGENTS.md currency guard names it as the fixed vocabulary</text>
+  <text x="296" y="252" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="400" fill="#2C2C2A">AWS-LC-FIPS 4.x — in CMVP review</text>
+  <text x="500" y="252" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">Cryptography</text>
+  <text x="660" y="252" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#2C2C2A">all crypto operations; Vault leg, plane mTLS</text>
+  <text x="660" y="267" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9" font-weight="400" fill="#5F5E5A">design/adr/ADR-0025-fips-validation-is-a-goal-not-a-constraint.md; crates/maknae-crypto/src/glue.rs</text>
   <rect x="40" y="286" width="1140" height="44" rx="4" fill="#FCFCFB" stroke="none" stroke-width="0"/>
-  <text x="44" y="300" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#2C2C2A">FIPS 140-3</text>
+  <text x="44" y="300" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#2C2C2A">Plane key algorithm</text>
   <rect x="40" y="306" width="62" height="13" rx="6" fill="#FFFFFF" stroke="#0F6E56" stroke-width="0.75"/>
   <text x="71" y="316" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="600" fill="#0F6E56">enforced</text>
-  <text x="296" y="300" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="400" fill="#2C2C2A">AWS-LC-FIPS 4.x — in CMVP review</text>
+  <text x="296" y="300" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="400" fill="#2C2C2A">ML-DSA-87 default (plane_key)</text>
   <text x="500" y="300" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">Cryptography</text>
-  <text x="660" y="300" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#2C2C2A">all crypto operations; Vault leg, plane mTLS</text>
-  <text x="660" y="315" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9" font-weight="400" fill="#5F5E5A">design/adr/ADR-0025-fips-validation-is-a-goal-not-a-constraint.md; crates/maknae-crypto/src/glue.rs</text>
+  <text x="660" y="300" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#2C2C2A">a plane's own CSR key; the peer's algorithm is not pinned (#574)</text>
+  <text x="660" y="315" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9" font-weight="400" fill="#5F5E5A">crates/maknae-crypto/src/signature.rs PlaneKey::matches_spki (called by maknae-vault csr_key_is); vau…</text>
   <rect x="40" y="334" width="1140" height="44" rx="4" fill="#FCFCFB" stroke="none" stroke-width="0"/>
   <text x="44" y="348" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#2C2C2A">SPDX license expressions</text>
   <rect x="40" y="354" width="62" height="13" rx="6" fill="#FFFFFF" stroke="#0F6E56" stroke-width="0.75"/>
@@ -134,31 +134,39 @@
   <text x="660" y="859" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9" font-weight="400" fill="#5F5E5A">ADR-0019 (audit record model); ADR-0006 D4 (visit clock, SC-10/AC-12)</text>
   <text x="44" y="892" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#8A6D1F">applies to a surface not yet built</text>
   <rect x="40" y="894" width="1140" height="44" rx="4" fill="#FCFCFB" stroke="none" stroke-width="0"/>
-  <text x="44" y="908" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#2C2C2A">NIST SP 800-63B / 63C</text>
+  <text x="44" y="908" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#2C2C2A">CNSA Suite</text>
   <rect x="40" y="914" width="62" height="13" rx="6" fill="#FFFFFF" stroke="#8A6D1F" stroke-width="0.75"/>
   <text x="71" y="924" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="600" fill="#8A6D1F">emerging</text>
-  <text x="296" y="908" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="400" fill="#2C2C2A">AAL2 / FAL2</text>
-  <text x="500" y="908" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">Identity assurance</text>
-  <text x="660" y="908" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#2C2C2A">remote authentication via the gateway</text>
-  <text x="660" y="923" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9" font-weight="400" fill="#5F5E5A">ADR-0006 D5 — REQUIREd properties; gateway is #117, unbuilt</text>
+  <text x="296" y="908" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="400" fill="#2C2C2A">2.0</text>
+  <text x="500" y="908" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">Cryptography</text>
+  <text x="660" y="908" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#2C2C2A">the plane, once #574 pins peer keys, groups and suites</text>
+  <text x="660" y="923" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9" font-weight="400" fill="#5F5E5A">#574</text>
   <rect x="40" y="942" width="1140" height="44" rx="4" fill="#FCFCFB" stroke="none" stroke-width="0"/>
-  <text x="44" y="956" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#2C2C2A">OAuth 2.0 family</text>
+  <text x="44" y="956" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#2C2C2A">NIST SP 800-63B / 63C</text>
   <rect x="40" y="962" width="62" height="13" rx="6" fill="#FFFFFF" stroke="#8A6D1F" stroke-width="0.75"/>
   <text x="71" y="972" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="600" fill="#8A6D1F">emerging</text>
-  <text x="296" y="956" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="400" fill="#2C2C2A">RFC 6749 + 8 related</text>
-  <text x="500" y="956" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">Federation</text>
-  <text x="660" y="956" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#2C2C2A">gateway OIDC federation; MCP authorization</text>
-  <text x="660" y="971" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9" font-weight="400" fill="#5F5E5A">RFC 6750/7591/7636/8414/9068/9728/8707 — #117, #151 (the OAuth compliance note lives with the externa…</text>
-  <text x="44" y="1004" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#5F5E5A">deliberately out of scope, decision recorded</text>
-  <rect x="40" y="1006" width="1140" height="44" rx="4" fill="#FCFCFB" stroke="none" stroke-width="0"/>
-  <text x="44" y="1020" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#2C2C2A">STANAG 4774 / 4778</text>
-  <rect x="40" y="1026" width="62" height="13" rx="6" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75"/>
-  <text x="71" y="1036" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="600" fill="#5F5E5A">excluded</text>
-  <text x="296" y="1020" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="400" fill="#2C2C2A">—</text>
-  <text x="500" y="1020" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">Labelling</text>
-  <text x="660" y="1020" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#2C2C2A">confidentiality metadata label binding</text>
-  <text x="660" y="1035" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9" font-weight="400" fill="#5F5E5A">ADR-0007 §Out of scope — deferred to the external DCS library</text>
-  <text x="40" y="1092" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">Every row names evidence a reader can open. A claim with no evidence does not belong in this profile.</text>
-  <text x="40" y="1164" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/standards-profile.toml@5a5955a6d1 · maknae a17197c1 · 2026-10-27</text>
-  <text x="1180" y="1164" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">DoDAF 2.02 Change 1 · StdV-1</text>
+  <text x="296" y="956" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="400" fill="#2C2C2A">AAL2 / FAL2</text>
+  <text x="500" y="956" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">Identity assurance</text>
+  <text x="660" y="956" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#2C2C2A">remote authentication via the gateway</text>
+  <text x="660" y="971" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9" font-weight="400" fill="#5F5E5A">ADR-0006 D5 — REQUIREd properties; gateway is #117, unbuilt</text>
+  <rect x="40" y="990" width="1140" height="44" rx="4" fill="#FCFCFB" stroke="none" stroke-width="0"/>
+  <text x="44" y="1004" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#2C2C2A">OAuth 2.0 family</text>
+  <rect x="40" y="1010" width="62" height="13" rx="6" fill="#FFFFFF" stroke="#8A6D1F" stroke-width="0.75"/>
+  <text x="71" y="1020" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="600" fill="#8A6D1F">emerging</text>
+  <text x="296" y="1004" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="400" fill="#2C2C2A">RFC 6749 + 8 related</text>
+  <text x="500" y="1004" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">Federation</text>
+  <text x="660" y="1004" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#2C2C2A">gateway OIDC federation; MCP authorization</text>
+  <text x="660" y="1019" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9" font-weight="400" fill="#5F5E5A">RFC 6750/7591/7636/8414/9068/9728/8707 — #117, #151 (the OAuth compliance note lives with the externa…</text>
+  <text x="44" y="1052" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#5F5E5A">deliberately out of scope, decision recorded</text>
+  <rect x="40" y="1054" width="1140" height="44" rx="4" fill="#FCFCFB" stroke="none" stroke-width="0"/>
+  <text x="44" y="1068" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#2C2C2A">STANAG 4774 / 4778</text>
+  <rect x="40" y="1074" width="62" height="13" rx="6" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75"/>
+  <text x="71" y="1084" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="600" fill="#5F5E5A">excluded</text>
+  <text x="296" y="1068" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="400" fill="#2C2C2A">—</text>
+  <text x="500" y="1068" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">Labelling</text>
+  <text x="660" y="1068" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#2C2C2A">confidentiality metadata label binding</text>
+  <text x="660" y="1083" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9" font-weight="400" fill="#5F5E5A">ADR-0007 §Out of scope — deferred to the external DCS library</text>
+  <text x="40" y="1140" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">Every row names evidence a reader can open. A claim with no evidence does not belong in this profile.</text>
+  <text x="40" y="1212" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/standards-profile.toml@2365190608 · maknae c7dd72cc · 2026-10-27</text>
+  <text x="1180" y="1212" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">DoDAF 2.02 Change 1 · StdV-1</text>
 </svg>

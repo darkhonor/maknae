@@ -294,6 +294,7 @@ where
         std::sync::Arc::new(maknae_kernel::LiveConfig::new(Default::default(), None)),
         backend_name,
         Arc::new("US".to_string()),
+        std::sync::Arc::new("ml-dsa-87".to_string()),
         std::sync::Arc::new(None),
         maknae_kernel::unavailable_egress(),
         timeout,
@@ -457,6 +458,7 @@ where
         Arc::new(maknae_kernel::LiveConfig::new((*config_view).clone(), None)),
         backend_name,
         classification_policy,
+        std::sync::Arc::new("p521".to_string()),
         kernel_graph,
         maknae_kernel::unavailable_egress(),
         timeout,
@@ -1891,6 +1893,7 @@ async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
             // same package whose CARGO_PKG_VERSION `run.rs` expands, so the
             // distinguishing assertion is free.
             assert_eq!(s.version, env!("CARGO_PKG_VERSION"));
+            assert_eq!(s.plane_key.as_deref(), Some("p521"));
             assert_eq!(s.kernel_graph_revision, Some(41));
             assert_eq!(s.kernel_graph_anchor.as_deref(), Some("advanced"));
             assert_eq!(
@@ -3630,6 +3633,7 @@ async fn drive_baseline(
         Arc::new(maknae_kernel::LiveConfig::new(Default::default(), None)),
         backend_name,
         Arc::new("US".to_string()),
+        std::sync::Arc::new("ml-dsa-87".to_string()),
         std::sync::Arc::new(None),
         maknae_kernel::unavailable_egress(),
         Duration::from_secs(5),

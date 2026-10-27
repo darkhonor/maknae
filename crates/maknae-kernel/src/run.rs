@@ -719,6 +719,7 @@ pub async fn handle<S, E, P>(
     live: Arc<crate::live::LiveConfig>,
     authz_backend_name: Arc<String>,
     classification_policy_name: Arc<String>,
+    plane_key_name: Arc<String>,
     kernel_graph: Arc<Option<KernelGraphStatus>>,
     egress: Arc<dyn crate::egress::Egress>,
     authz_decide_timeout: Duration,
@@ -745,6 +746,7 @@ pub async fn handle<S, E, P>(
         live,
         authz_backend_name,
         classification_policy_name,
+        plane_key_name,
         kernel_graph,
         egress,
         authz_decide_timeout,
@@ -804,6 +806,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     // Captured ONCE at boot from the booted config (ADR-0022): the system
     // `core.handling.policy` selected, by name.
     classification_policy_name: Arc<String>,
+    plane_key_name: Arc<String>,
     kernel_graph: Arc<Option<KernelGraphStatus>>,
     // #172: the egress backend behind the seam. `Unavailable` in Cooky.
     egress: Arc<dyn crate::egress::Egress>,
@@ -1522,6 +1525,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                     // runs no operand code for this field.
                     authz_backend: (*authz_backend_name).clone(),
                     classification_policy: (*classification_policy_name).clone(),
+                    plane_key: Some((*plane_key_name).clone()),
                     kernel_graph_revision: kernel_graph
                         .as_ref()
                         .as_ref()
@@ -2910,6 +2914,7 @@ pub async fn accept_loop<A, E, P>(
     live: Arc<crate::live::LiveConfig>,
     authz_backend_name: Arc<String>,
     classification_policy_name: Arc<String>,
+    plane_key_name: Arc<String>,
     kernel_graph: Arc<Option<KernelGraphStatus>>,
     egress: Arc<dyn crate::egress::Egress>,
     ops: Arc<dyn AdminOps>,
@@ -3030,6 +3035,7 @@ where
                                 let authz_backend_name = Arc::clone(&authz_backend_name);
                                 let classification_policy_name =
                                     Arc::clone(&classification_policy_name);
+                                let plane_key_name = Arc::clone(&plane_key_name);
                                 let kernel_graph = Arc::clone(&kernel_graph);
                                 let egress = Arc::clone(&egress);
                                 let ops = Arc::clone(&ops);
@@ -3132,6 +3138,7 @@ where
                                                 live,
                                                 authz_backend_name,
                                                 classification_policy_name,
+                                                plane_key_name,
                                                 kernel_graph,
                                                 egress,
                                                 AUTHZ_DECIDE_TIMEOUT,
@@ -6891,7 +6898,7 @@ async fn boot_after_sink(
         "posture",
         None,
         "permit",
-        "boot credential posture recorded",
+        &crate::posture::boot_reason(client.plane_key().as_str()),
         posture.as_str(),
         &audit_cfg.au3_1,
     );
@@ -6941,6 +6948,7 @@ async fn boot_after_sink(
     // from `core.handling.policy` (ADR-0022) -- captured here for the same
     // reason as the backend name: fixed for the life of the process.
     let classification_policy_name = Arc::new(boot.classification_policy_name().to_string());
+    let plane_key_name = Arc::new(client.plane_key().as_str().to_string());
     // Holds the one-maknaed state-dir lock for the serve's lifetime.
     let reloader = Reloader {
         dir: booted.dir,
@@ -6991,6 +6999,7 @@ async fn boot_after_sink(
         Arc::clone(&authorizer),
         authz_backend_name,
         classification_policy_name,
+        plane_key_name,
         kernel_graph,
         egress,
         hup,
@@ -7033,6 +7042,7 @@ async fn serve_after_mint<B>(
     // Captured at boot (see run_inner).
     authz_backend_name: Arc<String>,
     classification_policy_name: Arc<String>,
+    plane_key_name: Arc<String>,
     kernel_graph: Arc<Option<KernelGraphStatus>>,
     egress: Arc<dyn crate::egress::Egress>,
     hup: tokio::signal::unix::Signal,
@@ -7097,6 +7107,7 @@ where
         live,
         authz_backend_name,
         classification_policy_name,
+        plane_key_name,
         kernel_graph,
         egress,
         ops,
@@ -7700,7 +7711,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
     fn write_common_fixture(d: &Dir, principal_block: &str) {
         let yaml = format!(
             "core:\n  deployment_id: dev-01\n\
-             vault:\n  addr: https://v.example:8200\n\
+             vault:\n  addr: https://v.example:8200\n  plane_key: p521\n\
              transport:\n  socket_path: {}\n\
              audit:\n  jsonl_path: {}\n\
              {}",
@@ -8099,6 +8110,10 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             // $CREDENTIALS_DIRECTORY resolves to CredentialsDirectory; with no
             // posture marker file present that's Unverified (spec §5.2 closed map).
             assert_eq!(posture_rec.outcome.posture, "unverified");
+            assert_eq!(
+                posture_rec.outcome.reason,
+                crate::posture::boot_reason("p521")
+            );
             assert_eq!(posture_rec.subject.user, None);
             assert_eq!(posture_rec.source.uid, nix::unistd::geteuid().as_raw());
             // ADR-0008 decision 1, fourth layer (#154): the trail records the
@@ -11950,6 +11965,7 @@ mod home_resolution_tests {
             std::sync::Arc::new(crate::live::LiveConfig::new(ConfigView::default(), None)),
             backend_name,
             Arc::new("US".to_string()),
+            Arc::new("ml-dsa-87".to_string()),
             Arc::new(None),
             crate::egress::unavailable_egress(),
             Duration::from_secs(10),
@@ -12172,6 +12188,7 @@ mod admission_bound_tests {
                 std::sync::Arc::new(crate::live::LiveConfig::new(ConfigView::default(), None)),
                 backend_name,
                 Arc::new("US".to_string()),
+                Arc::new("ml-dsa-87".to_string()),
                 Arc::new(None),
                 crate::egress::unavailable_egress(),
                 Duration::from_secs(10),
@@ -16283,6 +16300,7 @@ mod reload_tests {
                 std::sync::Arc::new(crate::live::LiveConfig::new(ConfigView::default(), None)),
                 Arc::new("b".into()),
                 Arc::new("US".into()),
+                Arc::new("ml-dsa-87".to_string()),
                 Arc::new(None),
                 crate::egress::unavailable_egress(),
                 baseline_stub::no_baseline(),
@@ -16379,6 +16397,7 @@ mod reload_tests {
                 std::sync::Arc::new(crate::live::LiveConfig::new(ConfigView::default(), None)),
                 Arc::new("b".into()),
                 Arc::new("US".into()),
+                Arc::new("ml-dsa-87".to_string()),
                 Arc::new(None),
                 crate::egress::unavailable_egress(),
                 baseline_stub::no_baseline(),

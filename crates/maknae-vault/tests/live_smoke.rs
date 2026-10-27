@@ -45,9 +45,10 @@ async fn mint_kernel_leaf_against_live_vault() {
         "identity stored as a snapshot"
     );
 
+    let plane_key = client.plane_key().as_str();
     client.shutdown().await;
     println!(
-        "LIVE SMOKE OK: minted maknae://<deployment_id>/plane/kernel (P-384), revoked on shutdown"
+        "LIVE SMOKE OK: minted maknae://<deployment_id>/plane/kernel ({plane_key}), revoked on shutdown"
     );
 }
 

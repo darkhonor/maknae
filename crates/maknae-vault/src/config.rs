@@ -4,6 +4,7 @@
 //! the plane URI-SAN or be rejected by Vault). All pure/fixture-testable (T1).
 use crate::VaultError;
 use maknae_config::{load_config, Document, SectionSpec, Value};
+use maknae_crypto::signature::PlaneKey;
 use std::path::{Path, PathBuf};
 
 /// The config section this client reads (the Terraform `vault` block: addr + mounts).
@@ -124,7 +125,7 @@ pub fn user_auth_from_value(user_auth: Option<&Value>) -> Result<UserAuth, Vault
 
 /// #210: the keys this section's parser reads — the closed vocabulary, held
 /// EQUAL to `VaultConfig`'s fields by a test below.
-pub(crate) const VAULT_KEYS: [&str; 8] = [
+pub(crate) const VAULT_KEYS: [&str; 9] = [
     "addr",
     "approle_mount",
     "pki_int_mount",
@@ -133,7 +134,39 @@ pub(crate) const VAULT_KEYS: [&str; 8] = [
     "user_auth",
     "kv_mount",
     "user_prefix",
+    "plane_key",
 ];
+
+/// Vault's own messages for a refused request. vaultrs's `Display` for `APIError` carries
+/// only the status code, so the messages are read from the variant.
+pub fn vault_error_text(e: &vaultrs::error::ClientError) -> String {
+    match e {
+        vaultrs::error::ClientError::APIError { code, errors } if !errors.is_empty() => {
+            let text: String = errors
+                .join("; ")
+                .chars()
+                .filter(|c| !c.is_control())
+                .collect();
+            format!("Vault returned {code}: {text}")
+        }
+        other => other.to_string(),
+    }
+}
+
+/// A `pki/sign` refusal's message, with a hint when Vault's message concerns the key: the
+/// PKI role issues a different algorithm than `vault.plane_key`, or the Vault predates the
+/// algorithm.
+pub fn sign_refusal_detail(vault_message: &str, plane_key: PlaneKey) -> String {
+    if vault_message.to_ascii_lowercase().contains("key") {
+        format!(
+            "{vault_message} (check that vault.plane_key {} matches deploy/vault-pki's \
+             plane_key_algorithm, and that Vault is 2.2.0 or later for ml-dsa-87)",
+            plane_key.as_str()
+        )
+    } else {
+        vault_message.to_string()
+    }
+}
 
 /// The non-sensitive Vault settings.
 pub struct VaultConfig {
@@ -152,7 +185,11 @@ pub struct VaultConfig {
     pub user_auth: UserAuthConfig,
     pub kv_mount: Option<String>,
     pub user_prefix: Option<String>,
+    pub plane_key: PlaneKey,
 }
+
+const _: fn(&VaultConfig) -> ::maknae_crypto::signature::PlaneKey = |c| c.plane_key;
+const _: fn(&VaultConfig) -> isize = |c| c.plane_key as isize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserAuthConfig {
@@ -338,6 +375,18 @@ pub fn vault_config_from_document(doc: &Document) -> Result<VaultConfig, VaultEr
         "vault.user_prefix",
         VaultError::InvalidKeyVaultPath,
     )?;
+    let plane_key = match get_value(vault, "plane_key") {
+        None => PlaneKey::MlDsa87,
+        Some(Value::Str(s)) => {
+            PlaneKey::parse(s).ok_or_else(|| VaultError::InvalidPlaneKey(s.clone()))?
+        }
+        Some(_) => {
+            return Err(VaultError::ConfigShape {
+                key: "vault.plane_key",
+                want: "a string",
+            })
+        }
+    };
     Ok(VaultConfig {
         addr,
         deployment_id,
@@ -347,12 +396,99 @@ pub fn vault_config_from_document(doc: &Document) -> Result<VaultConfig, VaultEr
         user_auth,
         kv_mount,
         user_prefix,
+        plane_key,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plane_key_of(extra: &str) -> Result<VaultConfig, VaultError> {
+        let tag: String = extra.chars().filter(char::is_ascii_alphanumeric).collect();
+        let d = TempDir::new(&format!("pk-{tag}"));
+        d.write(
+            "maknae.yaml",
+            &format!("core:\n  deployment_id: d\nvault:\n  addr: https://v.example:8200\n{extra}"),
+        );
+        load_vault_config(&d.0)
+    }
+
+    #[test]
+    fn plane_key_parses_each_value_and_defaults_to_ml_dsa_87() {
+        assert_eq!(plane_key_of("").unwrap().plane_key, PlaneKey::MlDsa87);
+        for k in PlaneKey::ALL {
+            let cfg = plane_key_of(&format!("  plane_key: {}\n", k.as_str())).unwrap();
+            assert_eq!(cfg.plane_key, k);
+        }
+    }
+
+    #[test]
+    fn vault_error_text_reads_the_messages_vaultrs_display_drops() {
+        let e = vaultrs::error::ClientError::APIError {
+            code: 400,
+            errors: vec!["role requires keys of type ec".into(), "second".into()],
+        };
+        assert_eq!(
+            vault_error_text(&e),
+            "Vault returned 400: role requires keys of type ec; second"
+        );
+        let hostile = vaultrs::error::ClientError::APIError {
+            code: 400,
+            errors: vec!["bad\u{1b}[2Jkey\n".into()],
+        };
+        assert_eq!(vault_error_text(&hostile), "Vault returned 400: bad[2Jkey");
+        let bare = vaultrs::error::ClientError::APIError {
+            code: 503,
+            errors: vec![],
+        };
+        assert_eq!(vault_error_text(&bare), bare.to_string());
+        assert_eq!(
+            vault_error_text(&vaultrs::error::ClientError::ResponseEmptyError),
+            vaultrs::error::ClientError::ResponseEmptyError.to_string()
+        );
+    }
+
+    #[test]
+    fn a_key_refusal_names_plane_key_and_others_pass_through() {
+        for msg in [
+            "Vault returned 400: role requires keys of type ec",
+            "Vault returned 400: role requires a minimum of 521 Key bits",
+            "Vault returned 400: unknown public key algorithm",
+        ] {
+            let m = sign_refusal_detail(msg, PlaneKey::MlDsa87);
+            assert!(m.starts_with(&format!("{msg} (")), "{m}");
+            assert!(
+                m.contains("vault.plane_key ml-dsa-87") && m.contains("plane_key_algorithm"),
+                "{m}"
+            );
+        }
+        assert_eq!(
+            sign_refusal_detail("Vault returned 403: permission denied", PlaneKey::P384),
+            "Vault returned 403: permission denied"
+        );
+    }
+
+    #[test]
+    fn plane_key_refuses_an_unknown_or_non_string_value() {
+        match plane_key_of("  plane_key: p256\n") {
+            Err(e @ VaultError::InvalidPlaneKey(_)) => {
+                let m = e.to_string();
+                assert!(
+                    m.contains("p256") && m.contains("ml-dsa-87, p384, p521"),
+                    "{m}"
+                );
+            }
+            other => panic!("expected InvalidPlaneKey, got {:?}", other.err()),
+        }
+        assert!(matches!(
+            plane_key_of("  plane_key: 7\n"),
+            Err(VaultError::ConfigShape {
+                key: "vault.plane_key",
+                ..
+            })
+        ));
+    }
 
     #[test]
     fn get_str_map_str_hit_and_misses() {

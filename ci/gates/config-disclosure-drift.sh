@@ -64,7 +64,7 @@ SURFACE=(
   # discloses it anyway" does not cover this path. Adding `au3_1`,
   # `vault.addr` or `principal.home` to this struct later would otherwise pass
   # every gate here. Prefix `status.` so its fields carry their own decisions.
-  "crates/maknae-proto/src/wire.rs|StatusView|status|11|wire"
+  "crates/maknae-proto/src/wire.rs|StatusView|status|12|wire"
   # The SIBLING disclosure struct, added in the same commit for the same
   # feature. Inventorying one of a matched pair is how the pair's second member
   # ships unreviewed: adding `home` or `clearance` to this struct changes no
@@ -86,7 +86,7 @@ SURFACE=(
   # The fifth wire disclosure struct, after StatusView, RoleBindingView, WhoamiView and BaselineView;
   # a field added to it reaches every holder of either verb.
   "crates/maknae-proto/src/wire.rs|ContainmentView|containment|3|wire"
-  "crates/maknae-vault/src/config.rs|VaultConfig|vault|8|config"
+  "crates/maknae-vault/src/config.rs|VaultConfig|vault|9|config"
   "crates/maknae-vault/src/config.rs|UserAuthConfig|vault.user_auth|2|config"
 )
 
@@ -94,9 +94,15 @@ SURFACE=(
 # Each row names the field, the file defining the enum at its top level, and the
 # type, which the field must spell exactly, with no path; the gate verifies the
 # enum itself (leaf_enum_check) and that the field's struct is in the same file.
+# An enum in another crate's `src/<module>.rs` is accepted when the struct's
+# file holds the two assertions below, through which rustc proves the field is
+# that enum (`::`-rooted, so only the crate can supply it) and fieldless (only a
+# fieldless enum casts to an integer). Like every check here, this one catches
+# drift; text written to mislead it is review's to catch, as in ADR-0027.
 # No other enum-typed field is a leaf.
 LEAF_ENUMS=(
   "containment.outcome|crates/maknae-proto/src/wire.rs|ContainmentOutcome"
+  "vault.plane_key|crates/maknae-crypto/src/signature.rs|PlaneKey"
 )
 
 leaf_enum_check() { # <field-path> <file> <type>
@@ -123,8 +129,18 @@ leaf_enum_check() { # <field-path> <file> <type>
     [ "$ep" = "$prefix" ] && structfile="$ef"
   done
   if [ "$structfile" != "$file" ]; then
-    echo "FAIL: leaf-enum row '$fp': its struct is in '${structfile:-no SURFACE entry}', not in '$file', so '$ty' may not resolve to this enum."
-    return 1
+    local sname="" path field="${fp##*.}"
+    for entry in "${SURFACE[@]}"; do
+      IFS='|' read -r _ sn ep _ <<< "$entry"
+      [ "$ep" = "$prefix" ] && sname="$sn"
+    done
+    path="$(printf '%s' "$file" | sed -nE 's#^crates/([a-z0-9-]+)/src/([a-z0-9_]+)\.rs$#::\1::\2#p' | tr '-' '_')"
+    if [ -z "$path" ] || [ -z "$sname" ] \
+       || ! grep -qxF "const _: fn(&$sname) -> $path::$ty = |c| c.$field;" "$structfile" \
+       || ! grep -qxF "const _: fn(&$sname) -> isize = |c| c.$field as isize;" "$structfile"; then
+      echo "FAIL: leaf-enum row '$fp': its struct is in '${structfile:-no SURFACE entry}', not in '$file', and does not hold 'const _: fn(&$sname) -> $path::$ty = |c| c.$field;' and 'const _: fn(&$sname) -> isize = |c| c.$field as isize;', so '$ty' may not resolve to this enum."
+      return 1
+    fi
   fi
   body="$(sed 's|//.*$||' "$file" | tr '\n' ' ' | TYNAME="$ty" awk '
     {

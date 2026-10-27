@@ -123,6 +123,7 @@ impl UnwrapOps for VaultApi {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use maknae_crypto::rcgen;
 
     fn ca() -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();

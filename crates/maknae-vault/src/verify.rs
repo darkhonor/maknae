@@ -63,6 +63,7 @@ pub fn verify_plane_uri_san(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use maknae_crypto::rcgen;
 
     /// Build a self-signed leaf carrying exactly the given URI SANs (DER).
     fn leaf_with_uri_sans(uris: &[&str]) -> Vec<u8> {

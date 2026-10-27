@@ -174,6 +174,7 @@ impl ServerCertVerifier for PlaneServerCertVerifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use maknae_crypto::rcgen;
     use maknae_crypto::rustls::client::danger::ServerCertVerifier;
     use maknae_crypto::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 

@@ -1,5 +1,5 @@
 //! maknae-vault — shared, NON-PRIVILEGED Vault plane-cert client (ADR-0005, amended
-//! by ADR-0018). Stage 1: config -> AppRole auth (standing raw SecretID) -> P-384 CSR ->
+//! by ADR-0018). Stage 1: config -> AppRole auth (standing raw SecretID) -> CSR (`vault.plane_key`) ->
 //! pki/sign -> memory-only leaf, plus the CA-pin loader + URI-SAN verifier.
 //! FIPS: the runtime `.fips()` assertion (`maknae_crypto::assert_fips_provider`) is
 //! authoritative; the load-bearing install-before-first-Vault-client ordering keeps
@@ -62,10 +62,10 @@ pub use auth::{AppRoleAuth, AuthMethod, VaultToken};
 pub use ca::{load_ca_pin, CaBundle};
 pub use client::{PlaneClient, PlaneIdentity, PLANE_HTTP_TIMEOUT, PLANE_SHUTDOWN_BOUND};
 pub use config::{
-    load_vault_config, user_auth_from_value, validate_deployment_id, validate_vault_addr,
-    vault_config_from_document, UserAuth, UserAuthConfig, UserAuthMethod, VaultConfig,
-    DEFAULT_APPROLE_MOUNT, DEFAULT_PKI_INT_MOUNT, DEFAULT_USERPASS_MOUNT, EGRESS_VAULT_CA_FILE,
-    VAULT_SECTION,
+    load_vault_config, sign_refusal_detail, user_auth_from_value, validate_deployment_id,
+    validate_vault_addr, vault_config_from_document, vault_error_text, UserAuth, UserAuthConfig,
+    UserAuthMethod, VaultConfig, DEFAULT_APPROLE_MOUNT, DEFAULT_PKI_INT_MOUNT,
+    DEFAULT_USERPASS_MOUNT, EGRESS_VAULT_CA_FILE, VAULT_SECTION,
 };
 pub use csr_gen::generate_plane_csr;
 pub use digest::{sha256_hex, Sha256};

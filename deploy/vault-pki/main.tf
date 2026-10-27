@@ -1,6 +1,14 @@
 # Maknae Vault PKI (dev) — CA chain, plane roles and policies, the maknaed AppRole, the userpass users.
 # All wiring is by resource reference so Terraform derives the create-ordering edges.
 
+locals {
+  plane_key = {
+    "ml-dsa-87" = { key_type = "ml-dsa", key_bits = null, parameter_set = "ml-dsa-87", signature_bits = null }
+    "p384"      = { key_type = "ec", key_bits = 384, parameter_set = null, signature_bits = 384 }
+    "p521"      = { key_type = "ec", key_bits = 521, parameter_set = null, signature_bits = 512 }
+  }[var.plane_key_algorithm]
+}
+
 # ---- Root CA (dedicated Maknae dev root; signs exactly one intermediate) --------
 resource "vault_mount" "maknae_root" {
   path                  = var.root_mount_path
@@ -13,11 +21,16 @@ resource "vault_pki_secret_backend_root_cert" "maknae_root" {
   backend        = vault_mount.maknae_root.path
   type           = "internal" # private key stays in Vault; never enters TF state
   common_name    = "Maknae Dev Root CA"
-  key_type       = "ec"
-  key_bits       = 384
-  signature_bits = 384
+  key_type       = local.plane_key.key_type
+  key_bits       = local.plane_key.key_bits
+  parameter_set  = local.plane_key.parameter_set
+  signature_bits = local.plane_key.signature_bits
   ttl            = "${var.root_ttl_seconds}s" # backend cert ttl is a DURATION STRING
   issuer_name    = "maknae-root"
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "vault_mount" "maknae_kv" {
@@ -50,18 +63,23 @@ resource "vault_mount" "maknae_int" {
 }
 
 resource "vault_pki_secret_backend_intermediate_cert_request" "maknae_int" {
-  backend     = vault_mount.maknae_int.path
-  type        = "internal"
-  common_name = "Maknae Dev Intermediate CA"
-  key_type    = "ec"
-  key_bits    = 384
+  backend       = vault_mount.maknae_int.path
+  type          = "internal"
+  common_name   = "Maknae Dev Intermediate CA"
+  key_type      = local.plane_key.key_type
+  key_bits      = local.plane_key.key_bits
+  parameter_set = local.plane_key.parameter_set
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "vault_pki_secret_backend_root_sign_intermediate" "maknae_int" {
   backend        = vault_mount.maknae_root.path
   csr            = vault_pki_secret_backend_intermediate_cert_request.maknae_int.csr
   common_name    = "Maknae Dev Intermediate CA"
-  signature_bits = 384
+  signature_bits = local.plane_key.signature_bits
   ttl            = "${var.int_ttl_seconds}s"
 }
 
@@ -77,9 +95,10 @@ resource "vault_pki_secret_backend_intermediate_set_signed" "maknae_int" {
 resource "vault_pki_secret_backend_role" "maknae_kernel" {
   backend        = vault_mount.maknae_int.path
   name           = "maknae-kernel"
-  key_type       = "ec"
-  key_bits       = 384
-  signature_bits = 384
+  key_type       = local.plane_key.key_type
+  key_bits       = local.plane_key.key_bits
+  parameter_set  = local.plane_key.parameter_set
+  signature_bits = local.plane_key.signature_bits
 
   allowed_uri_sans    = ["maknae://${var.deployment_id}/plane/kernel"]
   use_csr_sans        = true  # honor the plane's URI-SAN as presented in its CSR
@@ -103,9 +122,10 @@ resource "vault_pki_secret_backend_role" "maknae_kernel" {
 resource "vault_pki_secret_backend_role" "maknae_cli" {
   backend        = vault_mount.maknae_int.path
   name           = "maknae-cli"
-  key_type       = "ec"
-  key_bits       = 384
-  signature_bits = 384
+  key_type       = local.plane_key.key_type
+  key_bits       = local.plane_key.key_bits
+  parameter_set  = local.plane_key.parameter_set
+  signature_bits = local.plane_key.signature_bits
 
   allowed_uri_sans    = ["maknae://${var.deployment_id}/plane/cli"]
   use_csr_sans        = true

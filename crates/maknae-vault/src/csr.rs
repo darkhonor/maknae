@@ -1,12 +1,11 @@
 //! Pure CSR-shape predicates (T1, 0-missed): assert an empty subject, exactly one
-//! URI SAN, and an EC P-384 key. `generate_plane_csr` (the rcgen keygen I/O) lives in
-//! `csr_gen.rs` (T3) and self-checks its output with these predicates.
+//! URI SAN, and the configured `PlaneKey` by algorithm identifier (#573).
+//! `generate_plane_csr` (keygen via `maknae_crypto::generate_csr`) lives in `csr_gen.rs` (T3) and
+//! self-checks its output with these predicates.
+use maknae_crypto::signature::{PlaneKey, SpkiParams};
 use x509_parser::certification_request::X509CertificationRequest;
 use x509_parser::extensions::{GeneralName, ParsedExtension};
 use x509_parser::prelude::FromDer;
-
-/// Uncompressed EC P-384 public-key point length: 0x04 || X(48) || Y(48) = 97 bytes.
-const P384_UNCOMPRESSED_POINT_LEN: usize = 97;
 
 fn parse_csr(pem: &str) -> Option<Vec<u8>> {
     let (_, pem) = x509_parser::pem::parse_x509_pem(pem.as_bytes()).ok()?;
@@ -52,35 +51,43 @@ pub fn csr_single_uri_san(pem: &str, want: &str) -> bool {
     all_sans == 1 && uris.len() == 1 && uris[0] == want
 }
 
-/// True iff the CSR's public key is EC on the P-384 curve (by the uncompressed
-/// point length, which is unambiguous for P-384).
-pub fn csr_is_p384(pem: &str) -> bool {
+/// True iff the CSR's public key is exactly `key`'s algorithm (`PlaneKey::matches_spki`).
+pub fn csr_key_is(pem: &str, key: PlaneKey) -> bool {
     let Some(der) = parse_csr(pem) else {
         return false;
     };
     let Ok((_, csr)) = X509CertificationRequest::from_der(&der) else {
         return false;
     };
-    csr.certification_request_info
-        .subject_pki
-        .subject_public_key
-        .data
-        .len()
-        == P384_UNCOMPRESSED_POINT_LEN
+    let spki = &csr.certification_request_info.subject_pki;
+    let params = match &spki.algorithm.parameters {
+        None => SpkiParams::Absent,
+        Some(p) => match p.as_oid() {
+            Ok(oid) => SpkiParams::NamedCurve(oid.to_id_string()),
+            Err(_) => SpkiParams::Other,
+        },
+    };
+    key.matches_spki(
+        &spki.algorithm.algorithm.to_id_string(),
+        &params,
+        spki.subject_public_key.data.len(),
+        spki.subject_public_key.unused_bits,
+    )
 }
 
 /// True iff the CSR matches the required plane-cert shape: empty subject, EXACTLY one
-/// URI SAN == `want_uri_san`, and EC P-384. This is the fail-closed self-check that
+/// URI SAN == `want_uri_san`, and `key`'s algorithm. This is the fail-closed self-check that
 /// `csr_gen::generate_plane_csr` applies to its own output. The AND-decision lives
 /// here (T1, mutation-covered — the negative tests prove it REJECTS a bad shape) so
 /// that `csr_gen.rs` is left with only external-error plumbing (T3).
-pub fn csr_matches_plane_shape(pem: &str, want_uri_san: &str) -> bool {
-    csr_has_empty_subject(pem) && csr_single_uri_san(pem, want_uri_san) && csr_is_p384(pem)
+pub fn csr_matches_plane_shape(pem: &str, want_uri_san: &str, key: PlaneKey) -> bool {
+    csr_has_empty_subject(pem) && csr_single_uri_san(pem, want_uri_san) && csr_key_is(pem, key)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use maknae_crypto::rcgen;
 
     /// Build a CSR with a configurable CN, URI SANs, and key algorithm.
     fn make_csr(
@@ -156,30 +163,60 @@ mod tests {
             rcgen::SanType::DnsName("evil.example".try_into().unwrap()),
         ]);
         assert!(!csr_single_uri_san(&mixed, want)); // second (DNS) SAN → reject
-        assert!(!csr_matches_plane_shape(&mixed, want));
+        assert!(!csr_matches_plane_shape(&mixed, want, PlaneKey::P384));
+    }
+
+    fn csr_with_key(key: &rcgen::KeyPair) -> String {
+        let mut params = rcgen::CertificateParams::new(vec![]).unwrap();
+        params.distinguished_name = rcgen::DistinguishedName::new();
+        params.subject_alt_names = vec![rcgen::SanType::URI(
+            "maknae://d/plane/kernel".try_into().unwrap(),
+        )];
+        params.serialize_request(key).unwrap().pem().unwrap()
+    }
+
+    fn csr_for(alg: &'static rcgen::SignatureAlgorithm) -> String {
+        csr_with_key(&rcgen::KeyPair::generate_for(alg).unwrap())
     }
 
     #[test]
-    fn p384_true_and_false() {
-        let p384 = make_csr(
-            None,
-            &["maknae://d/plane/kernel"],
-            &rcgen::PKCS_ECDSA_P384_SHA384,
-        );
-        assert!(csr_is_p384(&p384));
-        let p256 = make_csr(
-            None,
-            &["maknae://d/plane/kernel"],
-            &rcgen::PKCS_ECDSA_P256_SHA256,
-        );
-        assert!(!csr_is_p384(&p256));
+    fn each_plane_key_accepts_only_its_own_algorithm() {
+        let cases = [
+            (PlaneKey::MlDsa87, csr_for(&rcgen::PKCS_ML_DSA_87)),
+            (PlaneKey::P384, csr_for(&rcgen::PKCS_ECDSA_P384_SHA384)),
+            (PlaneKey::P521, csr_for(&rcgen::PKCS_ECDSA_P521_SHA512)),
+        ];
+        for (want, pem) in &cases {
+            for k in PlaneKey::ALL {
+                assert_eq!(csr_key_is(pem, k), k == *want, "{want:?} CSR against {k:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_other_algorithm_is_refused() {
+        let rsa =
+            rcgen::KeyPair::generate_rsa_for(&rcgen::PKCS_RSA_SHA256, rcgen::RsaKeySize::_3072)
+                .unwrap();
+        let others = [
+            csr_for(&rcgen::PKCS_ML_DSA_44),
+            csr_for(&rcgen::PKCS_ML_DSA_65),
+            csr_for(&rcgen::PKCS_ECDSA_P256_SHA256),
+            csr_for(&rcgen::PKCS_ED25519),
+            csr_with_key(&rsa),
+        ];
+        for pem in &others {
+            for k in PlaneKey::ALL {
+                assert!(!csr_key_is(pem, k), "{k:?} accepted {pem}");
+            }
+        }
     }
 
     #[test]
     fn malformed_pem_all_false() {
         assert!(!csr_has_empty_subject("garbage"));
         assert!(!csr_single_uri_san("garbage", "x"));
-        assert!(!csr_is_p384("garbage"));
+        assert!(!csr_key_is("garbage", PlaneKey::P384));
     }
 
     #[test]
@@ -191,7 +228,7 @@ mod tests {
             "-----BEGIN CERTIFICATE REQUEST-----\nAQIDBA==\n-----END CERTIFICATE REQUEST-----\n";
         assert!(!csr_has_empty_subject(g));
         assert!(!csr_single_uri_san(g, "maknae://d/plane/kernel"));
-        assert!(!csr_is_p384(g));
+        assert!(!csr_key_is(g, PlaneKey::MlDsa87));
     }
 
     #[test]
@@ -199,18 +236,19 @@ mod tests {
         let want = "maknae://d/plane/kernel";
         // Good shape: empty subject, one URI-SAN == want, P-384.
         let good = make_csr(None, &[want], &rcgen::PKCS_ECDSA_P384_SHA384);
-        assert!(csr_matches_plane_shape(&good, want));
+        assert!(csr_matches_plane_shape(&good, want, PlaneKey::P384));
+        assert!(!csr_matches_plane_shape(&good, want, PlaneKey::MlDsa87));
         // Each SINGLE failing dimension must flip it to false (this also kills the
         // `&&`->`||` mutants — with only one predicate false, `||` would still be true).
         let cn = make_csr(Some("x"), &[want], &rcgen::PKCS_ECDSA_P384_SHA384); // subject not empty
-        assert!(!csr_matches_plane_shape(&cn, want));
+        assert!(!csr_matches_plane_shape(&cn, want, PlaneKey::P384));
         let wrong_san = make_csr(
             None,
             &["maknae://d/plane/cli"],
             &rcgen::PKCS_ECDSA_P384_SHA384,
         );
-        assert!(!csr_matches_plane_shape(&wrong_san, want)); // SAN != want
+        assert!(!csr_matches_plane_shape(&wrong_san, want, PlaneKey::P384)); // SAN != want
         let p256 = make_csr(None, &[want], &rcgen::PKCS_ECDSA_P256_SHA256); // not P-384
-        assert!(!csr_matches_plane_shape(&p256, want));
+        assert!(!csr_matches_plane_shape(&p256, want, PlaneKey::P384));
     }
 }

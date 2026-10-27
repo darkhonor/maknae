@@ -95,3 +95,13 @@ workspace = true
 # to notice. Do not file a watch, and do not re-raise the pin.
 aws-lc-rs = { version = "1.18", features = ["fips"] }
 rustls = { version = "0.23", default-features = false, features = ["fips", "std"] }
+# rcgen: `>=0.14.9, <0.15`. THE FLOOR IS THE CONTROL: nothing below 0.14.9 has
+# been resolved or tested against Maknae's rcgen usage (`csr.rs` here, and
+# maknae-vault's `Issuer::from_params` test issuers), and a bare `"0.14"` would
+# be cargo's `>=0.14.0`. The `<0.15` is cargo's own caret bound for a 0.x crate,
+# written out so the floor is visible, not a compliance ceiling (ADR-0025).
+# 0.14 signs against an `Issuer` built from the issuing `CertificateParams`;
+# `Issuer::from_ca_cert_der` would need rcgen's `x509-parser` feature, which is
+# not enabled. The `aws_lc_rs` + `fips` features select the FIPS backend.
+rcgen = { version = ">=0.14.9, <0.15", default-features = false, features = ["aws_lc_rs", "fips", "pem"] }
+zeroize = "1"

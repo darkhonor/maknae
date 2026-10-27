@@ -2,12 +2,15 @@
 //! `maknae-config`'s `ConfigError` pattern (no extra dep). Every fallible path in
 //! the crate returns one of these; there is no partial-identity / non-FIPS / file
 //! fallback anywhere.
+use maknae_crypto::signature::PlaneKey;
 use std::path::PathBuf;
 
 #[derive(Debug)]
 pub enum VaultError {
     /// The process is not running the aws-lc-rs FIPS provider (or none installed).
     FipsUnavailable,
+    /// `vault.plane_key` is not one of the closed values (#573).
+    InvalidPlaneKey(String),
     /// The process provider's key-exchange groups are not exactly Maknae's list (#564).
     KxGroupsDrift,
     /// A config-load failure from `maknae-config`.
@@ -155,6 +158,7 @@ impl From<maknae_crypto::CryptoError> for VaultError {
         match e {
             maknae_crypto::CryptoError::FipsUnavailable => VaultError::FipsUnavailable,
             maknae_crypto::CryptoError::KxGroupsDrift => VaultError::KxGroupsDrift,
+            maknae_crypto::CryptoError::Csr(e) => VaultError::CsrGen(e),
         }
     }
 }
@@ -165,6 +169,11 @@ impl std::fmt::Display for VaultError {
             VaultError::FipsUnavailable => write!(
                 f,
                 "FIPS provider not active: the process default is not aws-lc-rs FIPS (refusing to start)"
+            ),
+            VaultError::InvalidPlaneKey(v) => write!(
+                f,
+                "vault.plane_key `{v}` is not one of {}",
+                PlaneKey::ALL.map(PlaneKey::as_str).join(", ")
             ),
             VaultError::KxGroupsDrift => write!(
                 f,
@@ -320,6 +329,7 @@ mod tests {
         for (e, want) in [
             (CryptoError::FipsUnavailable, "FIPS provider not active"),
             (CryptoError::KxGroupsDrift, "key-exchange groups"),
+            (CryptoError::Csr("rcgen refused".into()), "rcgen refused"),
         ] {
             let msg = e.to_string();
             let v = super::VaultError::from(e);
@@ -333,6 +343,10 @@ mod tests {
         assert!(matches!(
             super::VaultError::from(CryptoError::FipsUnavailable),
             super::VaultError::FipsUnavailable
+        ));
+        assert!(matches!(
+            super::VaultError::from(CryptoError::Csr(String::new())),
+            super::VaultError::CsrGen(_)
         ));
     }
     #[test]

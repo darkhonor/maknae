@@ -8,7 +8,7 @@ per implementation stage.
 ## Chapter 1 — Mint a plane cert (`maknae-vault` Stage 1)
 
 Prove the plane-cert client authenticates to your Vault and mints a memory-only
-`maknae://<deployment_id>/plane/kernel` EC P-384 leaf. This is the first live milestone;
+`maknae://<deployment_id>/plane/kernel` leaf of the `vault.plane_key` algorithm (ML-DSA-87 by default). This is the first live milestone;
 the daemon + CLI round-trip arrives in later stages.
 
 ### Prerequisites
@@ -90,7 +90,7 @@ The client trims surrounding whitespace from the file, so a trailing newline is 
 cargo test -p maknae-vault --test live_smoke -- --ignored --nocapture
 ```
 
-Expected: `LIVE SMOKE OK: minted maknae://<deployment_id>/plane/kernel (P-384), revoked on shutdown`.
+Expected: `LIVE SMOKE OK: minted maknae://<deployment_id>/plane/kernel (ml-dsa-87), revoked on shutdown` (the configured `vault.plane_key`).
 
 ### What it proves
 
@@ -101,7 +101,8 @@ Expected: `LIVE SMOKE OK: minted maknae://<deployment_id>/plane/kernel (P-384), 
   not Maknae's list ([TLS key exchange](#tls-key-exchange)).
 - The AppRole login used the **standing** raw SecretID; the SecretID does not expire and
   the login does not consume it.
-- The CSR is empty-subject, URI-SAN-only, EC P-384; the leaf's only SAN is
+- The CSR is empty-subject, URI-SAN-only, and of exactly the `vault.plane_key` algorithm (checked by
+  algorithm identifier); the leaf's only SAN is
   `maknae://<deployment_id>/plane/kernel` (self-checked in `mint()`).
 - The leaf + key are held **memory-only** and the token is revoked on shutdown.
 
@@ -166,8 +167,8 @@ Expected: `LIVE TRANSPORT OK: kernel<->cli mTLS + peer-creds round-trip over UDS
 
 ### What it proves
 
-- **Mutual mTLS with plane-URI-SAN identity** — each side presents its Vault-minted P-384
-  leaf and verifies the peer's leaf carries **exactly** the expected
+- **Mutual mTLS with plane-URI-SAN identity** — each side presents its Vault-minted
+  `vault.plane_key` leaf and verifies the peer's leaf carries **exactly** the expected
   `maknae://<deployment_id>/plane/{kernel,cli}` URI-SAN (the T1 verifier), over TLS 1.3 on
   the aws-lc-rs FIPS provider, with ML-KEM-1024 key exchange (both ends are Maknae's).
 - **Peer-cred capture** — the daemon reads the connecting uid (+ pid) from the kernel
@@ -189,7 +190,25 @@ Vault Community and Vault Enterprise negotiated post-quantum groups and Vault En
 FIPS builds stayed on classical groups.
 
 CNSA 2.0 is not met: key exchange is not restricted to ML-KEM-1024, the cipher suites
-include AES-128, and certificates and signatures stay EC P-384.
+include AES-128, and a plane does not yet refuse a peer certificate of another algorithm (#574).
+Certificates and signatures follow `vault.plane_key`: ML-DSA-87 by default.
+
+### Switching the plane key algorithm
+
+`vault.plane_key` (in `/etc/maknae/maknae.yaml` and each user's `maknae.yaml`) must equal
+`deploy/vault-pki`'s `plane_key_algorithm`. To switch a deployment:
+
+1. Re-apply the PKI with the new `plane_key_algorithm`. The root and intermediate carry
+   `prevent_destroy`, so moving an existing hierarchy is a deliberate rebuild (see
+   `deploy/vault-pki/README.md`, "Upgrading an existing PKI").
+2. Re-run `maknae enroll --plane-key <value>` on each host: it refreshes the CA pins and writes
+   `vault.plane_key` into the daemon's and the user's `maknae.yaml`.
+3. Restart `maknaed`.
+
+A mismatch fails closed at the first mint: Vault refuses the CSR, for example `pki/sign
+rejected: Vault returned 400: role requires keys of type ec (check that vault.plane_key ml-dsa-87
+matches deploy/vault-pki's plane_key_algorithm, and that Vault is 2.2.0 or later for ml-dsa-87)`. A plane chained to a
+different CA fails the pinned chain at the handshake.
 
 ### Teardown
 
@@ -610,7 +629,7 @@ sudo maknae enroll \
 - **Operator token:** you are prompted for it; `--token-file <path>` reads it from a file instead. `VAULT_TOKEN` is scrubbed from the environment and ignored.
 - **Run it through `sudo`.** Bare root is refused, because enroll takes the operator's identity from `SUDO_UID`/`SUDO_USER`.
 - **Run it from an unconfined session.** On SELinux, `sudo su -l <operator>` from an account mapped to `staff_u` lands in `sysadm_r:sysadm_t`, which is denied `/dev/tpmrm0`, and enroll's seal check fails with `no hardware root of trust available`. Run enroll from a session whose `id -Z` shows `unconfined_u`, such as a direct login as an operator on the default `unconfined_u` mapping. An operator mapped to a confined SELinux user is not supported for enrollment.
-- **The Vault layout flags.** `--userpass-mount` (default `maknae-userpass`), `--kv-mount` (default `maknae-kv`) and `--user-prefix` (default `maknae/users`) must equal Terraform's `userpass_mount`, `kv_mount_path` and `user_prefix` (step 4).
+- **The Vault layout flags.** `--userpass-mount` (default `maknae-userpass`), `--kv-mount` (default `maknae-kv`), `--user-prefix` (default `maknae/users`) and `--plane-key` (default `ml-dsa-87`) must equal Terraform's `userpass_mount`, `kv_mount_path`, `user_prefix` and `plane_key_algorithm` (step 4). Enroll writes `--plane-key` into `vault.plane_key` in both `maknae.yaml` files; `ml-dsa-87` needs a Vault 2.2.0+ PKI.
 - **What enroll does:**
   - Mints `maknaed`'s SecretID (the only AppRole) and seals it to the TPM2 (`/etc/maknae/private/maknaed-secret-id.cred`, `root:root 0400`). A re-enroll rotates it.
   - Generates the Egress Daemon's sealing key pair when none is in place: the private key is sealed to the TPM2 at `/etc/maknae/private/maknae-egress-seal-key.cred` (`root:root 0400`), and the public key is published as `seal.pub` (`/etc/pki/maknae/seal.pub` on the Red Hat family, `/etc/ssl/maknae/seal.pub` on the Debian family), where every user's CLI reads it. On a first enroll it prints `` Generated the Egress Daemon's sealing key and published its public key at {path}. An Egress Daemon that is already running still holds the previous key: restart it with `sudo {restart}` ``, with `{restart}` = `systemctl try-restart maknae-egress.service`; on a re-enroll it prints `Kept the Egress Daemon's sealing key and its published public key; pass --rotate-seal-key to replace them`.

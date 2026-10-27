@@ -4,6 +4,8 @@ pub enum CryptoError {
     FipsUnavailable,
     /// The process provider's key-exchange groups are not exactly Maknae's list (#564).
     KxGroupsDrift,
+    /// Key or certificate-request generation failed.
+    Csr(String),
 }
 
 impl std::fmt::Display for CryptoError {
@@ -17,6 +19,7 @@ impl std::fmt::Display for CryptoError {
                 f,
                 "the process TLS provider does not carry Maknae's key-exchange groups (refusing TLS)"
             ),
+            CryptoError::Csr(e) => write!(f, "keypair/CSR generation failed: {e}"),
         }
     }
 }
