@@ -36,6 +36,7 @@ ExclusiveArch:  x86_64
 # SELinux policy compilation
 BuildRequires:  checkpolicy
 BuildRequires:  bzip2
+BuildRequires:  selinux-policy-devel
 %{?selinux_requires}
 # sysusers-dir / unit-dir macros + sysusers_create_compat / systemd_* scriptlets.
 BuildRequires:  systemd-rpm-macros
