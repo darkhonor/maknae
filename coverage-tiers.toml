@@ -777,9 +777,13 @@ why = "frame_len's u32::try_from(body.len()) overflow guard fires only for a bod
 
 [[exception]]
 path = "crates/maknae-crypto/src/aead.rs"
-anchor = "RandomizedNonceKey::new(&AES_256_GCM, key).map_err"
-end_anchor = "Ok(Self { sealer, opener })"
-why = "the key is a fixed-size [u8; 32] and the algorithm is AES-256-GCM, the only length aws-lc-rs accepts for it, so key construction cannot fail; the arms exist so a provider refusal is an error, not a panic"
+anchor = "let sealer = sealer.map_err(|_| CryptoError::AeadKey)?;"
+why = "the key is a fixed-size [u8; 32] and AES-256-GCM accepts exactly that length, so construction cannot fail; the arm exists so a provider refusal is an error, not a panic"
+
+[[exception]]
+path = "crates/maknae-crypto/src/aead.rs"
+anchor = "let opener = opener.map_err(|_| CryptoError::AeadKey)?;"
+why = "same fixed-length argument as the sealer key above"
 
 [[exception]]
 path = "crates/maknae-crypto/src/aead.rs"

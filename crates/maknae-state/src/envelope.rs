@@ -84,13 +84,14 @@ pub fn seal(plain: &[u8], kek: &WrappingKey) -> Result<Vec<u8>, EnvelopeError> {
     out.extend_from_slice(&wrapped[..]);
     out.extend_from_slice(&wrap_tag);
 
-    let mut body = plain.to_vec();
-    let sealed = Aes256GcmKey::new(&dek)
-        .and_then(|k| k.seal_in_place(&out[..PAYLOAD_NONCE], &mut body))
-        .map_err(|_| EnvelopeError::Crypto);
-    let (payload_nonce, tag) = sealed?;
-    out.extend_from_slice(&payload_nonce);
-    out.extend_from_slice(&body);
+    out.extend_from_slice(&[0u8; NONCE_LEN]);
+    let start = out.len();
+    out.extend_from_slice(plain);
+    let (head, body) = out.split_at_mut(start);
+    let (payload_nonce, tag) = Aes256GcmKey::new(&dek)
+        .and_then(|k| k.seal_in_place(&head[..PAYLOAD_NONCE], body))
+        .map_err(|_| EnvelopeError::Crypto)?;
+    head[PAYLOAD_NONCE..].copy_from_slice(&payload_nonce);
     out.extend_from_slice(&tag);
     Ok(out)
 }

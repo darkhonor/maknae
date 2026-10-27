@@ -15,11 +15,11 @@ pub struct Aes256GcmKey {
 
 impl Aes256GcmKey {
     pub fn new(key: &[u8; KEY_LEN]) -> Result<Self, CryptoError> {
-        let sealer =
-            RandomizedNonceKey::new(&AES_256_GCM, key).map_err(|_| CryptoError::AeadKey)?;
-        let opener = UnboundKey::new(&AES_256_GCM, key)
-            .map(LessSafeKey::new)
-            .map_err(|_| CryptoError::AeadKey)?;
+        let sealer = RandomizedNonceKey::new(&AES_256_GCM, key);
+        let sealer = sealer.map_err(|_| CryptoError::AeadKey)?;
+        let opener = UnboundKey::new(&AES_256_GCM, key);
+        let opener = opener.map_err(|_| CryptoError::AeadKey)?;
+        let opener = LessSafeKey::new(opener);
         Ok(Self { sealer, opener })
     }
 
