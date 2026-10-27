@@ -51,7 +51,7 @@ Requires(post): acl coreutils
 Requires:       fapolicyd
 Requires(pre):  systemd
 Requires(post): systemd policycoreutils selinux-policy-targeted e2fsprogs
-Requires(preun):  systemd
+Requires(preun):  systemd policycoreutils policycoreutils-python-utils
 Requires(postun): systemd policycoreutils
 
 %description
@@ -197,12 +197,16 @@ chown -h _maknae:_maknae %{_localstatedir}/log/maknae
 
 %preun
 %systemd_preun maknaed.service maknae-egress.service maknae-egress.socket maknae-policy-sync.path maknae-policy-sync.service
+remove_selinux_module() {
+    # A maknae_vault_port_t label references the module's type and blocks its removal (#584).
+    for p in $(semanage port -l -C | awk '$1=="maknae_vault_port_t" { for (i = 3; i <= NF; i++) { sub(",", "", $i); print $i } }'); do
+        %{_libexecdir}/maknae/maknae-selinux-ports.sh remove "$p" || return 1
+    done
+    semodule -r maknae
+}
 if [ $1 -eq 0 ]; then
     # Full removal only. The audit trail and its append-only attribute are kept.
-    semodule -r maknae 2>/dev/null || :
-    # NOTE: the operator's Vault port label is intentionally NOT auto-removed here
-    # (%preun cannot know the port; a default-8200 removal would orphan/clobber).
-    # Run `maknae-selinux-ports.sh remove <port>` before uninstall if desired.
+    remove_selinux_module || echo "maknae: the maknae SELinux module was not removed: delete each maknae_vault_port_t label (semanage port -l -C) and run semodule -r maknae" >&2
 fi
 
 %postun
