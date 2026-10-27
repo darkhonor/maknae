@@ -112,6 +112,10 @@ pub enum MsgId {
     /// The operator-context helper still carries root's supplementary groups —
     /// the exact "helper still holding root's groups" failure spec §4.1 names.
     HelperStillPrivileged,
+    /// A daemon refused to start: the process cryptographic provider is not the FIPS provider.
+    CryptoFipsUnavailable,
+    /// A daemon refused to start: the TLS provider lacks the required key-exchange groups.
+    CryptoKxGroupsDrift,
 }
 
 /// Every `MsgId` variant, in declaration order. `all_slice_is_exhaustive`
@@ -163,6 +167,8 @@ pub const ALL: &[MsgId] = &[
     MsgId::EnrollAgentRetired,
     MsgId::HelperContextMismatch,
     MsgId::HelperStillPrivileged,
+    MsgId::CryptoFipsUnavailable,
+    MsgId::CryptoKxGroupsDrift,
 ];
 
 /// Supported locales. Unknown/unset environment locale falls back to `EnUs`.
@@ -346,10 +352,12 @@ mod tests {
                 | MsgId::EnrollAgentEnrolled
                 | MsgId::EnrollAgentRetired
                 | MsgId::HelperContextMismatch
-                | MsgId::HelperStillPrivileged => {}
+                | MsgId::HelperStillPrivileged
+                | MsgId::CryptoFipsUnavailable
+                | MsgId::CryptoKxGroupsDrift => {}
             }
         }
-        const VARIANT_COUNT: usize = 46;
+        const VARIANT_COUNT: usize = 48;
         assert_eq!(ALL.len(), VARIANT_COUNT);
         for &id in ALL {
             assert_covered(id);

@@ -27,6 +27,7 @@ mod operator;
 mod password_line;
 mod plane;
 mod plane_verify;
+mod refusal;
 mod resolver;
 mod seal_key_io;
 mod secret_io;
@@ -80,6 +81,7 @@ pub use password_line::{PasswordFeed, PasswordLine};
 pub use peer_identity::{creds_match_listener_uid, creds_match_uid, listener_uid_is, peer_uid_is};
 pub use peercred::PeerCreds;
 pub use plane::Plane;
+pub use refusal::crypto_refusal_message;
 pub use seal_key_io::read_egress_seal_key;
 #[cfg(unix)]
 pub use seal_pub_io::read_seal_pub_pem;

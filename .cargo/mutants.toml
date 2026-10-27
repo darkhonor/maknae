@@ -107,7 +107,7 @@ exclude_re = [
   "maknae-audit-append.*SyslogMirror::mirror with \\(\\)",
   # Password::new refuses an empty password, so is_empty is always false and `false` is equivalent.
   "^crates/maknae-vault/src/user_login\\.rs:[0-9]+:[0-9]+: replace Password::is_empty -> bool with false$",
-  # #578: equivalent: the named arm and the non_exhaustive wildcard both map to SealError::Crypto; the naming rule requires both. Held by each_crypto_refusal_maps_to_its_seal_error_and_message.
+  # #578: equivalent; the named arm and the wildcard both map to SealError::Crypto.
   "^crates/maknae-seal/src/error\\.rs:[0-9]+:[0-9]+: delete match arm C::Primitive \\| C::Random \\| C::AeadKey \\| C::AeadSeal \\| C::AeadOpen \\| C::KxGroupsDrift \\| C::Csr\\(_\\) \\| C::Tls\\(_\\) in <impl From<maknae_crypto::CryptoError> for SealError>::from$",
   # #488: open() errors only on a version != ENVELOPE_VERSION, so an equal version never reaches this and `>=` is equivalent; `<`/`==` are killed by a_newer_envelope_version_is_a_newer_store / an_older_envelope_version_is_corruption.
   "^crates/maknae-state/src/store\\.rs:[0-9]+:[0-9]+: replace > with >= in newer_envelope$",

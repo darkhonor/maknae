@@ -1294,6 +1294,7 @@ dependencies = [
  "maknae-config",
  "maknae-crypto",
  "maknae-io",
+ "maknae-msgs",
  "maknae-plane",
  "maknae-seal",
  "nix",
@@ -1318,6 +1319,7 @@ version = "0.0.0"
 dependencies = [
  "maknae-kernel",
  "maknae-mcp",
+ "maknae-msgs",
  "maknae-vault",
 ]
 

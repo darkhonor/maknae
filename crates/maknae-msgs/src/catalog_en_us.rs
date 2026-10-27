@@ -99,5 +99,11 @@ pub(crate) fn text(id: MsgId) -> &'static str {
         MsgId::HelperStillPrivileged => {
             "Operator-context helper still holds root's group membership — refusing"
         }
+        MsgId::CryptoFipsUnavailable => {
+            "refused to start: the FIPS cryptographic provider is not active"
+        }
+        MsgId::CryptoKxGroupsDrift => {
+            "refused to start: the TLS provider does not carry the required key-exchange groups"
+        }
     }
 }

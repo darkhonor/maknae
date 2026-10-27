@@ -185,7 +185,7 @@ impl std::fmt::Display for VaultError {
         match self {
             VaultError::FipsUnavailable => write!(
                 f,
-                "FIPS provider not active: the process default is not aws-lc-rs FIPS (refusing to start)"
+                "FIPS provider not active: the process default is not the aws-lc-rs FIPS provider"
             ),
             VaultError::InvalidPlaneKey(v) => write!(
                 f,
@@ -194,7 +194,7 @@ impl std::fmt::Display for VaultError {
             ),
             VaultError::KxGroupsDrift => write!(
                 f,
-                "the process TLS provider does not carry Maknae's key-exchange groups (refusing TLS)"
+                "the process TLS provider does not carry the configured key-exchange groups"
             ),
             VaultError::Config(e) => write!(f, "config error: {e}"),
             VaultError::InvalidKeyVaultPath(m) => write!(f, "invalid key_vault_path: {m}"),
@@ -350,12 +350,12 @@ mod tests {
             (
                 C::FipsUnavailable,
                 |v| matches!(v, V::FipsUnavailable),
-                "FIPS provider not active: the process default is not aws-lc-rs FIPS (refusing to start)",
+                "FIPS provider not active: the process default is not the aws-lc-rs FIPS provider",
             ),
             (
                 C::KxGroupsDrift,
                 |v| matches!(v, V::KxGroupsDrift),
-                "the process TLS provider does not carry Maknae's key-exchange groups (refusing TLS)",
+                "the process TLS provider does not carry the configured key-exchange groups",
             ),
             (
                 C::Csr("rcgen refused".into()),
@@ -385,7 +385,7 @@ mod tests {
             (
                 C::FipsModuleUnavailable,
                 |v| matches!(v, V::FipsUnavailable),
-                "FIPS provider not active: the process default is not aws-lc-rs FIPS (refusing to start)",
+                "FIPS provider not active: the process default is not the aws-lc-rs FIPS provider",
             ),
             (
                 C::SealPlaintext,

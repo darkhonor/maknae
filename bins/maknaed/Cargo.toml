@@ -19,3 +19,6 @@ path = "src/main.rs"
 maknae-kernel = { path = "../../crates/maknae-kernel" }
 maknae-mcp = { path = "../../crates/maknae-mcp" }
 maknae-vault = { path = "../../crates/maknae-vault" }
+
+[dev-dependencies]
+maknae-msgs = { path = "../../crates/maknae-msgs" }

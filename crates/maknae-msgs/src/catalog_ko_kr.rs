@@ -100,5 +100,7 @@ pub(crate) fn text(id: MsgId) -> &'static str {
         MsgId::HelperStillPrivileged => {
             "운영자 컨텍스트 헬퍼가 여전히 root의 그룹 소속을 갖고 있어요 — 거부해요"
         }
+        MsgId::CryptoFipsUnavailable => "시작 거부: FIPS 암호 제공자가 활성화되어 있지 않습니다",
+        MsgId::CryptoKxGroupsDrift => "시작 거부: TLS 제공자에 필요한 키 교환 그룹이 없습니다",
     }
 }

@@ -145,6 +145,7 @@ files = [
   "crates/maknae-vault/src/token_record.rs",
   "crates/maknae-vault/src/password_line.rs",
   "crates/maknae-vault/src/seal_pub_store.rs",
+  "crates/maknae-vault/src/refusal.rs",
   "crates/maknae-seal/src/aad.rs",
   "crates/maknae-seal/src/seal.rs",
   "crates/maknae-seal/src/error.rs",
@@ -536,7 +537,7 @@ why = "VaultError enum + Display/From declarations; no decision logic"
 
 [[t3]]
 path = "crates/maknae-crypto/src/glue.rs"
-why = "process-global CryptoProvider fetch and the aws-lc FIPS-module probe (#578; Ok on every FIPS build, so its mutant is unkillable) — not deterministically coverable; the pure decisions are provider.rs fips_result/kx_groups_result and fips.rs fips_result (T1); the wiring is tests/kx_drift_gate.rs. Mutation-excluded (mutants.toml)"
+why = "reads the process-global CryptoProvider and the FIPS module state; the decisions are T1 in provider.rs and fips.rs. Mutation-excluded"
 
 [[t3]]
 path = "crates/maknae-crypto/src/tls.rs"

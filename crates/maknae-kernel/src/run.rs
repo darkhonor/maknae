@@ -6151,7 +6151,8 @@ async fn run_inner(
     // before any crypto/Vault client is built. The assert stays authoritative: on a
     // non-FIPS build the installed default's `.fips()` is false and the daemon refuses.
     maknae_crypto::install_default_crypto_provider();
-    maknae_crypto::assert_fips_provider().map_err(|e| RunError::Other(e.to_string()))?;
+    maknae_crypto::assert_fips_provider()
+        .map_err(|e| RunError::Other(maknae_vault::crypto_refusal_message(&e)))?;
 
     let env = &*seams.env;
     let euid = nix::unistd::geteuid().as_raw();
