@@ -105,7 +105,7 @@ The SELinux policy grants the daemon `name_connect` **only to a port labeled
 to the one port you declare. Vault's default `8200` is *not* labeled that way out of
 the box, so under enforcement the daemon's connection to Vault is **denied** and it
 cannot AppRole-authenticate. The helper labels your port; run it **before**
-`systemctl enable --now maknaed`. It is idempotent, and removal is operator-invoked:
+`systemctl enable --now maknaed`. It is idempotent. `rpm -e` removes every local `maknae_vault_port_t` label along with the module that defines the type, so a reinstall runs the helper again. To remove the label yourself:
 
 ```bash
 sudo /usr/libexec/maknae/maknae-selinux-ports.sh remove <vault-tcp-port>

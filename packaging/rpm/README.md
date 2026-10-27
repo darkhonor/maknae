@@ -6,7 +6,7 @@ system unit, the sysusers.d definition (`_maknae` service account + `maknae`
 operator group), the shipped default YAMLs (`authz.yaml` / `maknae.yaml`; `bindings.yaml` ships as
 `/usr/share/maknae/bindings.yaml`, and `%post` copies it to `/etc/maknae` only
 when neither that file nor `/var/lib/maknae/kernel.graph` exists), the
-SELinux module (compiled to `maknae.pp` at build time), the fapolicyd trust
+SELinux module (compiled at build time, shipped as `/usr/share/selinux/packages/targeted/maknae.pp.bz2`, and installed and removed at priority 200 by the `selinux-policy` RPM macros), the fapolicyd trust
 fragment, the Vault-port label helper, and the opt-in sync-back units
 (`maknae-policy-sync.path`, `maknae-policy-sync.service`) with
 `/usr/lib/systemd/system-preset/80-maknae.preset`, which disables them; `%post`
@@ -73,7 +73,7 @@ SELinux `bin_t` tool-domain honest limit.
 
 ## Removal
 
-`rpm -e` / `dnf remove` stops and disables the units, unloads the SELinux module,
+`rpm -e` / `dnf remove` stops and disables the units, deletes every local `maknae_vault_port_t` port label (a label of the module's type blocks its removal, #584), unloads the SELinux module,
 and keeps the audit trail: `/var/log/maknae/audit.jsonl` is created by `%post`,
 not owned by the package, so erase leaves it in place with its append-only
 attribute. Upgrading from a package that predates #498, which owned the trail as a `%ghost` file that never carried `+a`, has a residual: if the new `%post` refuses, rpm still deletes the old package's `%ghost` entry, and that trail is lost. Keep a copy before such an upgrade. To remove a kept trail, see
