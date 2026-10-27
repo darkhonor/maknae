@@ -45,12 +45,17 @@ impl SignatureAlgorithm {
             .find(|k| k.as_str() == s)
     }
 
-    pub fn rcgen_algorithm(self) -> &'static rcgen::SignatureAlgorithm {
+    pub(crate) fn rcgen_alg(self) -> &'static rcgen::SignatureAlgorithm {
         match self {
             SignatureAlgorithm::MlDsa87 => &rcgen::PKCS_ML_DSA_87,
             SignatureAlgorithm::EcdsaP384Sha384 => &rcgen::PKCS_ECDSA_P384_SHA384,
             SignatureAlgorithm::EcdsaP521Sha512 => &rcgen::PKCS_ECDSA_P521_SHA512,
         }
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn rcgen_algorithm(self) -> &'static rcgen::SignatureAlgorithm {
+        self.rcgen_alg()
     }
 
     pub fn signature_scheme(self) -> SignatureScheme {
@@ -138,7 +143,7 @@ mod tests {
         ];
         for (k, scheme, alg, params) in &table {
             assert_eq!(k.signature_scheme(), *scheme);
-            let key = rcgen::KeyPair::generate_for(k.rcgen_algorithm()).unwrap();
+            let key = rcgen::KeyPair::generate_for(k.rcgen_alg()).unwrap();
             let len = key.public_key_raw().len();
             for other in SignatureAlgorithm::ALL {
                 assert_eq!(
@@ -154,7 +159,7 @@ mod tests {
     fn each_algorithm_generates_a_key_the_provider_signs_with_only_its_scheme() {
         let schemes = SignatureAlgorithm::ALL.map(SignatureAlgorithm::signature_scheme);
         for k in SignatureAlgorithm::ALL {
-            let key = rcgen::KeyPair::generate_for(k.rcgen_algorithm()).unwrap();
+            let key = rcgen::KeyPair::generate_for(k.rcgen_alg()).unwrap();
             let signing =
                 crate::tls::load_private_key(PrivateKeyDer::Pkcs8(key.serialize_der().into()))
                     .unwrap();

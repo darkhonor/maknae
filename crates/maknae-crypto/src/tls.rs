@@ -3,18 +3,21 @@ use crate::{crypto_provider, CryptoError};
 use rustls::{ClientConfig, ConfigBuilder, ServerConfig, WantsVerifier};
 use std::sync::Arc;
 
+#[expect(clippy::disallowed_methods)]
 pub fn client_builder() -> Result<ConfigBuilder<ClientConfig, WantsVerifier>, CryptoError> {
     ClientConfig::builder_with_provider(Arc::new(crypto_provider()))
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(|e| CryptoError::Tls(e.to_string()))
 }
 
+#[expect(clippy::disallowed_methods)]
 pub fn server_builder() -> Result<ConfigBuilder<ServerConfig, WantsVerifier>, CryptoError> {
     ServerConfig::builder_with_provider(Arc::new(crypto_provider()))
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(|e| CryptoError::Tls(e.to_string()))
 }
 
+#[expect(clippy::disallowed_methods)]
 pub fn load_private_key(
     der: rustls::pki_types::PrivateKeyDer<'static>,
 ) -> Result<Arc<dyn rustls::sign::SigningKey>, CryptoError> {
@@ -24,12 +27,14 @@ pub fn load_private_key(
         .map_err(|e| CryptoError::Tls(e.to_string()))
 }
 
+#[expect(clippy::disallowed_methods)]
 pub fn client_cert_verifier_builder(
     roots: Arc<rustls::RootCertStore>,
 ) -> rustls::server::ClientCertVerifierBuilder {
     rustls::server::WebPkiClientVerifier::builder_with_provider(roots, Arc::new(crypto_provider()))
 }
 
+#[expect(clippy::disallowed_methods)]
 pub fn server_cert_verifier_builder(
     roots: Arc<rustls::RootCertStore>,
 ) -> rustls::client::ServerCertVerifierBuilder {

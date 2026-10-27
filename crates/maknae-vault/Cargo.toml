@@ -65,6 +65,7 @@ maknae-plane = { path = "../maknae-plane" }
 security-framework = "3"
 
 [dev-dependencies]
+maknae-crypto = { path = "../maknae-crypto", features = ["test-support"] }
 # Fixtures CREATE the objects they delegate rather than borrowing a system file:
 # `/etc/hostname` does not exist on macOS, which the darwin-native job caught.
 tempfile = "3"

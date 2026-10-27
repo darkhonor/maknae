@@ -471,6 +471,7 @@ fn offering(
     })
 }
 
+#[expect(clippy::disallowed_methods)]
 fn peer_client(
     p: &Pki,
     groups: &[&'static dyn maknae_crypto::rustls::crypto::SupportedKxGroup],
@@ -491,6 +492,7 @@ fn peer_client(
     )
 }
 
+#[expect(clippy::disallowed_methods)]
 fn peer_server(
     p: &Pki,
     groups: &[&'static dyn maknae_crypto::rustls::crypto::SupportedKxGroup],

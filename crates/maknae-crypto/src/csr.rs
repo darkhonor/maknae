@@ -12,7 +12,7 @@ pub fn generate_csr(
     let mut params = rcgen::CertificateParams::new(vec![]).map_err(csr_err)?;
     params.distinguished_name = rcgen::DistinguishedName::new();
     params.subject_alt_names = vec![rcgen::SanType::URI(uri_san.try_into().map_err(csr_err)?)];
-    let pair = rcgen::KeyPair::generate_for(key.rcgen_algorithm()).map_err(csr_err)?;
+    let pair = rcgen::KeyPair::generate_for(key.rcgen_alg()).map_err(csr_err)?;
     let csr_pem = params
         .serialize_request(&pair)
         .map_err(csr_err)?

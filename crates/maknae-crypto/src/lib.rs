@@ -1,7 +1,8 @@
-//! Maknae's cryptographic libraries and its single implementation of each
-//! cryptographic function (ADR-0030). The only workspace crate that declares
-//! `aws-lc-rs`, `rustls` or `rcgen`; every other crate uses the re-exports below.
-pub use aws_lc_rs;
+//! The single implementation of each cryptographic function (ADR-0030).
+//! `rustls` is re-exported because its types are API; the listed rustls entry
+//! points are refused by `clippy.toml` (residual: #581). `rcgen` is re-exported
+//! only under `test-support`.
+#[cfg(feature = "test-support")]
 pub use rcgen;
 pub use rustls;
 
