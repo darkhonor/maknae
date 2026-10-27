@@ -6,7 +6,7 @@ system unit, the sysusers.d definition (`_maknae` service account + `maknae`
 operator group), the shipped default YAMLs (`authz.yaml` / `maknae.yaml`; `bindings.yaml` ships as
 `/usr/share/maknae/bindings.yaml`, and `%post` copies it to `/etc/maknae` only
 when neither that file nor `/var/lib/maknae/kernel.graph` exists), the
-SELinux module (compiled to `maknae.pp` at build time), the fapolicyd trust
+SELinux module (compiled at build time, shipped as `/usr/share/selinux/packages/targeted/maknae.pp.bz2`, and installed and removed at priority 200 by the `selinux-policy` RPM macros), the fapolicyd trust
 fragment, the Vault-port label helper, and the opt-in sync-back units
 (`maknae-policy-sync.path`, `maknae-policy-sync.service`) with
 `/usr/lib/systemd/system-preset/80-maknae.preset`, which disables them; `%post`

@@ -1,4 +1,5 @@
 %global debug_package %{nil}
+%global selinuxtype targeted
 
 Name:           maknae
 # Version injected by build-rpm.sh via --define "_pkgversion X.Y.Z" so the git
@@ -34,14 +35,15 @@ ExclusiveArch:  x86_64
 
 # SELinux policy compilation
 BuildRequires:  checkpolicy
-BuildRequires:  selinux-policy-devel
+BuildRequires:  bzip2
+%{?selinux_requires}
 # sysusers-dir / unit-dir macros + sysusers_create_compat / systemd_* scriptlets.
 BuildRequires:  systemd-rpm-macros
 
 Requires:       systemd
 Requires:       tpm2-tss
 Requires:       policycoreutils-python-utils
-Requires:       selinux-policy-targeted
+Requires:       selinux-policy-%{selinuxtype}
 # enroll re-asserts the deputy's /etc/maknae ACL and removes the legacy
 # _maknae home ACL (#365) with setfacl/getfacl.
 Requires:       acl
@@ -50,9 +52,9 @@ Requires:       acl
 Requires(post): acl coreutils
 Requires:       fapolicyd
 Requires(pre):  systemd
-Requires(post): systemd policycoreutils selinux-policy-targeted e2fsprogs
-Requires(preun):  systemd policycoreutils policycoreutils-python-utils
-Requires(postun): systemd policycoreutils
+Requires(post): systemd selinux-policy-%{selinuxtype} e2fsprogs
+Requires(preun):  systemd
+Requires(postun): systemd policycoreutils policycoreutils-python-utils
 
 %description
 Maknae is a security-first, local AI-agent platform. This package installs the
@@ -73,6 +75,7 @@ until then). See the install guide.
 cp %{SOURCE4} maknae.te
 cp %{SOURCE5} maknae.fc
 make -f /usr/share/selinux/devel/Makefile maknae.pp
+bzip2 -9 maknae.pp
 
 %install
 # Binaries
@@ -92,7 +95,7 @@ install -D -m 0644 %{SOURCE16} %{buildroot}%{_presetdir}/80-maknae.preset
 install -D -m 0644 %{SOURCE3} %{buildroot}%{_sysusersdir}/maknae.conf
 
 # SELinux policy module
-install -D -m 0644 maknae.pp %{buildroot}%{_datadir}/selinux/packages/maknae.pp
+install -D -m 0644 maknae.pp.bz2 %{buildroot}%{_datadir}/selinux/packages/%{selinuxtype}/maknae.pp.bz2
 
 # Vault-port label helper
 install -D -m 0750 %{SOURCE7} %{buildroot}%{_libexecdir}/maknae/maknae-selinux-ports.sh
@@ -117,6 +120,7 @@ install -d -m 0700 %{buildroot}%{_localstatedir}/lib/maknae
 # Create the _maknae and _maknae-egress accounts and the maknae operator group
 # BEFORE payload unpack so rpm -V never sees owner drift.
 %sysusers_create_compat %{SOURCE3}
+%selinux_relabel_pre -s %{selinuxtype}
 
 %post
 %systemd_post maknaed.service maknae-egress.service maknae-egress.socket
@@ -128,7 +132,10 @@ if [ ! -d "$d" ] || [ -h "$d" ] || ! chown 0:0 "$d" || ! setfacl -P -b "$d" || !
     exit 1
 fi
 # SELinux module + contexts
-semodule -i %{_datadir}/selinux/packages/maknae.pp || echo "maknae: the maknae SELinux module was not loaded: run semodule -i %{_datadir}/selinux/packages/maknae.pp" >&2
+%selinux_modules_install -s %{selinuxtype} %{_datadir}/selinux/packages/%{selinuxtype}/maknae.pp.bz2
+if selinuxenabled && ! semodule -l | grep -qx maknae; then
+    echo "maknae: the maknae SELinux module was not loaded: run semodule -X 200 -i %{_datadir}/selinux/packages/%{selinuxtype}/maknae.pp.bz2" >&2
+fi
 # Fresh install only (no store yet): a bindings.yaml root removed stays removed;
 # maknaed keeps enforcing the bindings it holds and `maknae policy sync` restores the file.
 B=%{_sysconfdir}/maknae/bindings.yaml
@@ -197,17 +204,6 @@ chown -h _maknae:_maknae %{_localstatedir}/log/maknae
 
 %preun
 %systemd_preun maknaed.service maknae-egress.service maknae-egress.socket maknae-policy-sync.path maknae-policy-sync.service
-remove_selinux_module() {
-    labels=$(semanage port -l -C | awk '$1=="maknae_vault_port_t" { for (i = 3; i <= NF; i++) { sub(",", "", $i); print $2 "/" $i } }')
-    for l in $labels; do
-        semanage port -d -p "${l%%/*}" "${l#*/}" || return 1
-    done
-    semodule -r maknae
-}
-if [ $1 -eq 0 ]; then
-    # Full removal only. The audit trail and its append-only attribute are kept.
-    remove_selinux_module || echo "maknae: the maknae SELinux module was not removed: delete each maknae_vault_port_t label (semanage port -l -C) and run semodule -r maknae" >&2
-fi
 
 %postun
 # /run/maknae-egress is the socket unit's RuntimeDirectory= (#240); an existing
@@ -218,7 +214,18 @@ fi
 %systemd_postun maknae-policy-sync.path maknae-policy-sync.service
 if [ $1 -eq 0 ]; then
     fapolicyd-cli --update 2>/dev/null || :
+    # A local maknae_vault_port_t label references the module's type and blocks its removal (#584).
+    for l in $(semanage port -l -C | awk '$1=="maknae_vault_port_t" { for (i = 3; i <= NF; i++) { sub(",", "", $i); print $2 "/" $i } }'); do
+        semanage port -d -p "${l%%/*}" "${l#*/}" || echo "maknae: cannot delete the port label $l: the SELinux module stays loaded until it is gone" >&2
+    done
 fi
+%selinux_modules_uninstall -s %{selinuxtype} maknae
+if [ $1 -eq 0 ] && selinuxenabled && semodule -l | grep -qx maknae; then
+    echo "maknae: the maknae SELinux module was not removed: delete each maknae_vault_port_t label (semanage port -l -C) and run semodule -X 200 -r maknae" >&2
+fi
+
+%posttrans
+%selinux_relabel_post -s %{selinuxtype}
 
 %files
 %{_bindir}/maknaed
@@ -231,7 +238,7 @@ fi
 %{_unitdir}/maknae-policy-sync.service
 %{_presetdir}/80-maknae.preset
 %{_sysusersdir}/maknae.conf
-%{_datadir}/selinux/packages/maknae.pp
+%{_datadir}/selinux/packages/%{selinuxtype}/maknae.pp.bz2
 %{_libexecdir}/maknae/maknae-selinux-ports.sh
 %dir %{_datadir}/maknae
 %{_datadir}/maknae/bindings.yaml
