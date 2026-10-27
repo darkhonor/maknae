@@ -33,7 +33,7 @@ Because this is a single-operator private project and every ADR carries its **to
 | 0027 | Unsafe code is confined to `maknae-sys`: one crate under its own `deny`/`forbid` lints, with a safe public surface only, gated by `unsafe-confinement.sh` and native clippy; `unsafe_code = "forbid"` stays on every other member | Accepted (maintainer-ruled 2026-09-28) |
 | 0028 | Per-user model providers with kernel-blind credentials — root-owned authorized set (0..n, admin-pinned models); per-user selection; keys only in Vault under a kernel-derived per-user path, read with the user's own userpass identity; sealed wrapping token the kernel cannot open; Egress Daemon holds no Vault identity | Accepted (maintainer-ruled 2026-09-30 and 2026-10-01) |
 | 0029 | The kernel enforcement-state graph — one kernel-owned graph holds running config, policy and live enforcement state; seeded from `/etc/maknae`, persisted, encrypted at rest, synced back under root control; custom binary format v1 | Accepted (maintainer-ruled 2026-10-07) |
-| 0030 | Cryptographic libraries are confined to `maknae-crypto`: the only member declaring `aws-lc-rs` and `rustls`, re-exporting both, owning the FIPS provider, its TLS key-exchange groups and the start-up assertion; `deny.toml` bans enforce it | Accepted (maintainer-ruled 2026-10-27) |
+| 0030 | Cryptographic libraries are confined to `maknae-crypto`: the only member declaring `aws-lc-rs` and `rustls`; re-exports `rustls` only (and `rcgen` for tests); owns the FIPS provider, its TLS key-exchange groups and the start-up assertion; `deny.toml` bans enforce it | Accepted (maintainer-ruled 2026-10-27) |
 
 A number not in this table is available. The registry lists **written ADRs only** — no reservations.
 
