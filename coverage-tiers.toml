@@ -539,6 +539,10 @@ path = "crates/maknae-crypto/src/glue.rs"
 why = "process-global CryptoProvider fetch and the aws-lc FIPS-module probe (#578; Ok on every FIPS build, so its mutant is unkillable) — not deterministically coverable; the pure decisions are provider.rs fips_result/kx_groups_result and fips.rs fips_result (T1); the wiring is tests/kx_drift_gate.rs. Mutation-excluded (mutants.toml)"
 
 [[t3]]
+path = "crates/maknae-crypto/src/tls.rs"
+why = "rustls builder, key-loader and verifier-builder calls on the crate provider (#578); each is a one-line pass-through whose only logic is the provider and TLS 1.3 choice, asserted by its test (both builders carry the crate groups and report fips). Mutation-excluded (mutants.toml)"
+
+[[t3]]
 path = "crates/maknae-crypto/src/csr.rs"
 why = "rcgen keypair+CSR generation (non-deterministic keygen I/O); the algorithm map and SPKI decision are signature.rs (T1) and the shape self-check is maknae-vault's csr.rs (T1). Mutation-excluded (mutants.toml)"
 

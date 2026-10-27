@@ -173,7 +173,8 @@ impl From<maknae_crypto::CryptoError> for VaultError {
             | C::SealPublicKey
             | C::SealPrivateKey
             | C::SealOpen
-            | C::Primitive => VaultError::Crypto(detail),
+            | C::Primitive
+            | C::Tls(_) => VaultError::Crypto(detail),
             _ => VaultError::Crypto(detail),
         }
     }
@@ -345,7 +346,7 @@ mod tests {
         use super::VaultError as V;
         use maknae_crypto::CryptoError as C;
         type Is = fn(&V) -> bool;
-        let table: [(C, Is, &str); 16] = [
+        let table: [(C, Is, &str); 17] = [
             (
                 C::FipsUnavailable,
                 |v| matches!(v, V::FipsUnavailable),
@@ -425,6 +426,11 @@ mod tests {
                 C::Primitive,
                 |v| matches!(v, V::Crypto(d) if d == "a cryptographic primitive failed"),
                 "a cryptographic operation failed: a cryptographic primitive failed",
+            ),
+            (
+                C::Tls("refused".into()),
+                |v| matches!(v, V::Crypto(d) if d == "TLS configuration failed: refused"),
+                "a cryptographic operation failed: TLS configuration failed: refused",
             ),
         ];
         for (e, is, want) in table {

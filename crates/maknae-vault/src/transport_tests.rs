@@ -122,10 +122,7 @@ fn server_cfg(
     ca: &CaBundle,
     expect: Plane,
 ) -> Arc<maknae_crypto::rustls::ServerConfig> {
-    let key = maknae_crypto::crypto_provider()
-        .key_provider
-        .load_private_key(PrivateKeyDer::Pkcs8(key.into()))
-        .unwrap();
+    let key = maknae_crypto::tls::load_private_key(PrivateKeyDer::Pkcs8(key.into())).unwrap();
     let resolver = Arc::new(crate::resolver::PlaneCertResolver::new_empty());
     resolver.slot().store(Some(Arc::new(
         maknae_crypto::rustls::sign::CertifiedKey::new(chain, key),
@@ -782,10 +779,8 @@ mod plane_key_algorithms {
             by_server: Arc::default(),
             by_client: Arc::default(),
         };
-        let key = maknae_crypto::crypto_provider()
-            .key_provider
-            .load_private_key(PrivateKeyDer::Pkcs8(kernel.1.into()))
-            .unwrap();
+        let key =
+            maknae_crypto::tls::load_private_key(PrivateKeyDer::Pkcs8(kernel.1.into())).unwrap();
         let resolver = Arc::new(crate::resolver::PlaneCertResolver::new_empty());
         resolver.slot().store(Some(Arc::new(
             maknae_crypto::rustls::sign::CertifiedKey::new(kernel.0, key),

@@ -33,6 +33,8 @@ pub enum CryptoError {
     Primitive,
     /// The aws-lc FIPS module is not active.
     FipsModuleUnavailable,
+    /// A TLS configuration or private key was refused.
+    Tls(String),
 }
 
 impl std::fmt::Display for CryptoError {
@@ -71,6 +73,7 @@ impl std::fmt::Display for CryptoError {
             ),
             CryptoError::Primitive => write!(f, "a cryptographic primitive failed"),
             CryptoError::FipsModuleUnavailable => write!(f, "the aws-lc FIPS module is not active"),
+            CryptoError::Tls(e) => write!(f, "TLS configuration failed: {e}"),
         }
     }
 }

@@ -15,6 +15,7 @@ mod provider;
 pub mod random;
 pub mod sealbox;
 pub mod signature;
+pub mod tls;
 
 pub use csr::generate_csr;
 pub use error::CryptoError;

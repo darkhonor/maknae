@@ -53,10 +53,9 @@ mod tests {
                 "maknae://dev-01/plane/kernel",
                 k
             ));
-            let signing = maknae_crypto::crypto_provider()
-                .key_provider
-                .load_private_key(PrivateKeyDer::Pkcs8(key_der.to_vec().into()))
-                .unwrap();
+            let signing =
+                maknae_crypto::tls::load_private_key(PrivateKeyDer::Pkcs8(key_der.to_vec().into()))
+                    .unwrap();
             for scheme in schemes {
                 let chosen = signing.choose_scheme(&[scheme]).map(|s| s.scheme());
                 if scheme == k.signature_scheme() {

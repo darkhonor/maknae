@@ -55,7 +55,8 @@ impl From<maknae_crypto::CryptoError> for SealError {
             | C::AeadSeal
             | C::AeadOpen
             | C::KxGroupsDrift
-            | C::Csr(_) => SealError::Crypto,
+            | C::Csr(_)
+            | C::Tls(_) => SealError::Crypto,
             _ => SealError::Crypto,
         }
     }
@@ -69,7 +70,7 @@ mod tests {
     #[test]
     fn each_crypto_refusal_maps_to_its_seal_error_and_message() {
         let crypto = "a cryptographic primitive failed";
-        let table: [(C, SealError, &str); 16] = [
+        let table: [(C, SealError, &str); 17] = [
             (
                 C::FipsModuleUnavailable,
                 SealError::FipsUnavailable,
@@ -122,6 +123,7 @@ mod tests {
             (C::AeadOpen, SealError::Crypto, crypto),
             (C::KxGroupsDrift, SealError::Crypto, crypto),
             (C::Csr("refused".into()), SealError::Crypto, crypto),
+            (C::Tls("refused".into()), SealError::Crypto, crypto),
         ];
         for (from, want, text) in table {
             let got = SealError::from(from);

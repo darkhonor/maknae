@@ -42,12 +42,10 @@ mod tests {
         let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
         let params = rcgen::CertificateParams::new(vec![]).unwrap();
         let cert = params.self_signed(&kp).unwrap();
-        let key = maknae_crypto::crypto_provider()
-            .key_provider
-            .load_private_key(maknae_crypto::rustls::pki_types::PrivateKeyDer::Pkcs8(
-                kp.serialize_der().into(),
-            ))
-            .unwrap();
+        let key = maknae_crypto::tls::load_private_key(
+            maknae_crypto::rustls::pki_types::PrivateKeyDer::Pkcs8(kp.serialize_der().into()),
+        )
+        .unwrap();
         Arc::new(CertifiedKey::new(vec![cert.der().clone()], key))
     }
 

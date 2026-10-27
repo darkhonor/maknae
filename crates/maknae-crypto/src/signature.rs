@@ -85,7 +85,6 @@ impl PlaneKey {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto_provider;
     use rustls::pki_types::PrivateKeyDer;
 
     #[test]
@@ -143,10 +142,9 @@ mod tests {
         let schemes = PlaneKey::ALL.map(PlaneKey::signature_scheme);
         for k in PlaneKey::ALL {
             let key = rcgen::KeyPair::generate_for(k.rcgen_algorithm()).unwrap();
-            let signing = crypto_provider()
-                .key_provider
-                .load_private_key(PrivateKeyDer::Pkcs8(key.serialize_der().into()))
-                .unwrap();
+            let signing =
+                crate::tls::load_private_key(PrivateKeyDer::Pkcs8(key.serialize_der().into()))
+                    .unwrap();
             for scheme in schemes {
                 let chosen = signing.choose_scheme(&[scheme]).map(|s| s.scheme());
                 if scheme == k.signature_scheme() {
