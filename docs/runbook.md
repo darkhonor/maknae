@@ -182,8 +182,9 @@ Expected: `LIVE TRANSPORT OK: kernel<->cli mTLS + peer-creds round-trip over UDS
 Every TLS configuration offers `MLKEM1024`, `X25519MLKEM768`, `SECP256R1MLKEM768`,
 `SECP384R1` and `SECP256R1`, in that order. ML-KEM-1024 (CNSSP 15) is offered first, not
 enforced: a server without it answers with one HelloRetryRequest, and the connection
-lands on a hybrid (the EU and BSI recommendation) or a classical group, whichever the
-server chooses. Pure `X25519` is not offered (FIPS mode). In testing in October 2026,
+lands on a hybrid or a classical group, whichever the server chooses. `X25519MLKEM768` is
+there for broad interoperability (every measured model provider accepts it);
+`SECP256R1MLKEM768` is the hybrid BSI TR-02102-2 (2026-01) intends to recommend. Pure `X25519` is not offered (FIPS mode). In testing in October 2026,
 Vault Community and Vault Enterprise negotiated post-quantum groups and Vault Enterprise
 FIPS builds stayed on classical groups.
 
