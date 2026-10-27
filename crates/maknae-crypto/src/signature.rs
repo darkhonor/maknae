@@ -130,6 +130,28 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn the_test_support_accessor_returns_the_algorithms_own_rcgen_algorithm() {
+        for (a, expected) in [
+            (SignatureAlgorithm::MlDsa87, &rcgen::PKCS_ML_DSA_87),
+            (
+                SignatureAlgorithm::EcdsaP384Sha384,
+                &rcgen::PKCS_ECDSA_P384_SHA384,
+            ),
+            (
+                SignatureAlgorithm::EcdsaP521Sha512,
+                &rcgen::PKCS_ECDSA_P521_SHA512,
+            ),
+        ] {
+            assert!(
+                std::ptr::eq(a.rcgen_algorithm(), expected),
+                "{}",
+                a.as_str()
+            );
+        }
+    }
+
     #[test]
     fn each_algorithm_maps_to_its_own_scheme_and_spki() {
         let table = [
