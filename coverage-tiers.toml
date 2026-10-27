@@ -121,6 +121,7 @@ files = [
   # maknae-crypto (#564, ADR-0030): the FIPS and key-exchange-group decisions,
   # and the plane signature algorithms' identifiers (#573).
   "crates/maknae-crypto/src/provider.rs",
+  "crates/maknae-crypto/src/aead.rs",
   "crates/maknae-crypto/src/digest.rs",
   "crates/maknae-crypto/src/random.rs",
   "crates/maknae-crypto/src/signature.rs",
@@ -773,6 +774,17 @@ path = "crates/maknae-proto/src/frame.rs"
 anchor = "map_err(|_| ProtoFrameError::Oversize {"
 end_anchor = "max: u32::MAX as usize,"
 why = "frame_len's u32::try_from(body.len()) overflow guard fires only for a body >= 4 GiB (u32::MAX bytes); constructing such a slice in a unit test would require an actual multi-gigabyte allocation (or unsafe code to fake a slice length, forbidden by the workspace's unsafe_code forbid). Provably-unreachable in practice — every caller bounds a body by its frame class cap (at most 1 MiB), never by this defensive cap. write_frame's Io error paths (header write, body write, flush) ARE unit-tested via a hand-rolled failing AsyncWrite."
+
+[[exception]]
+path = "crates/maknae-crypto/src/aead.rs"
+anchor = "RandomizedNonceKey::new(&AES_256_GCM, key).map_err"
+end_anchor = "Ok(Self { sealer, opener })"
+why = "the key is a fixed-size [u8; 32] and the algorithm is AES-256-GCM, the only length aws-lc-rs accepts for it, so key construction cannot fail; the arms exist so a provider refusal is an error, not a panic"
+
+[[exception]]
+path = "crates/maknae-crypto/src/aead.rs"
+anchor = ".map_err(|_| CryptoError::AeadSeal)?;"
+why = "sealing fails only if the module's own random generator or GCM invocation limit fails, which a unit test cannot induce without a seam in the FIPS module; the open-side refusals are all tested"
 
 [[exception]]
 path = "crates/maknae-io/src/mutation.rs"

@@ -163,6 +163,7 @@ impl From<maknae_crypto::CryptoError> for VaultError {
             C::KxGroupsDrift => VaultError::KxGroupsDrift,
             C::Csr(m) => VaultError::CsrGen(m),
             C::Random => VaultError::Random,
+            C::AeadKey | C::AeadSeal | C::AeadOpen => VaultError::Crypto(detail),
             _ => VaultError::Crypto(detail),
         }
     }
@@ -334,7 +335,7 @@ mod tests {
         use super::VaultError as V;
         use maknae_crypto::CryptoError as C;
         type Is = fn(&V) -> bool;
-        let table: [(C, Is, &str); 4] = [
+        let table: [(C, Is, &str); 7] = [
             (
                 C::FipsUnavailable,
                 |v| matches!(v, V::FipsUnavailable),
@@ -354,6 +355,21 @@ mod tests {
                 C::Random,
                 |v| matches!(v, V::Random),
                 "the FIPS random generator failed",
+            ),
+            (
+                C::AeadKey,
+                |v| matches!(v, V::Crypto(d) if d == "the AEAD key was refused"),
+                "a cryptographic operation failed: the AEAD key was refused",
+            ),
+            (
+                C::AeadSeal,
+                |v| matches!(v, V::Crypto(d) if d == "AEAD sealing failed"),
+                "a cryptographic operation failed: AEAD sealing failed",
+            ),
+            (
+                C::AeadOpen,
+                |v| matches!(v, V::Crypto(d) if d == "the AEAD ciphertext does not authenticate"),
+                "a cryptographic operation failed: the AEAD ciphertext does not authenticate",
             ),
         ];
         for (e, is, want) in table {

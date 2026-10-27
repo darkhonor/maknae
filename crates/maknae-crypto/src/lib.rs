@@ -5,6 +5,7 @@ pub use aws_lc_rs;
 pub use rcgen;
 pub use rustls;
 
+pub mod aead;
 mod csr;
 pub mod digest;
 mod error;

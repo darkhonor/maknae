@@ -9,6 +9,12 @@ pub enum CryptoError {
     Csr(String),
     /// The FIPS module's random generator failed.
     Random,
+    /// The AEAD key was refused.
+    AeadKey,
+    /// AEAD sealing failed.
+    AeadSeal,
+    /// The AEAD ciphertext did not authenticate.
+    AeadOpen,
 }
 
 impl std::fmt::Display for CryptoError {
@@ -24,6 +30,9 @@ impl std::fmt::Display for CryptoError {
             ),
             CryptoError::Csr(e) => write!(f, "keypair/CSR generation failed: {e}"),
             CryptoError::Random => write!(f, "the random generator failed"),
+            CryptoError::AeadKey => write!(f, "the AEAD key was refused"),
+            CryptoError::AeadSeal => write!(f, "AEAD sealing failed"),
+            CryptoError::AeadOpen => write!(f, "the AEAD ciphertext does not authenticate"),
         }
     }
 }
