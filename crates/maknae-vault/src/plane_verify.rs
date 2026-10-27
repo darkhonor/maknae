@@ -9,7 +9,6 @@ use maknae_crypto::rustls::client::danger::{
 };
 use maknae_crypto::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use maknae_crypto::rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
-use maknae_crypto::rustls::server::WebPkiClientVerifier;
 use maknae_crypto::rustls::{
     DigitallySignedStruct, DistinguishedName, RootCertStore, SignatureScheme,
 };
@@ -41,8 +40,7 @@ impl PlaneClientCertVerifier {
         deployment_id: &str,
     ) -> Result<Arc<Self>, VaultError> {
         let roots = Arc::new(root_store(ca)?);
-        let provider = Arc::new(maknae_crypto::crypto_provider());
-        let inner = WebPkiClientVerifier::builder_with_provider(roots, provider)
+        let inner = maknae_crypto::tls::client_cert_verifier_builder(roots)
             .build()
             .map_err(|e| VaultError::Handshake(format!("client verifier: {e}")))?;
         Ok(Arc::new(Self {

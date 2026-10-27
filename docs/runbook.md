@@ -680,7 +680,7 @@ A host enrolled before per-user providers (#153) carries the removed AppRoles' c
 A host enrolled before #440 has a `home:` line under `principal:` in `/etc/maknae/maknae.yaml`. The package upgrade restarts `maknaed`, and the daemon then refuses to start with:
 
 ```text
-maknae daemon refused to start: the authorization policy could not be loaded: unknown key 'home' in 'principal'
+maknaed: refusing to start: the authorization policy could not be loaded: unknown key 'home' in 'principal'
 ```
 
 It refuses while any file carries the key, whether `maknae.yaml` or a `config.d/` member. Delete the `home:` line from whichever file carries it. Re-enrolling with step 3's command also removes it, but only from `/etc/maknae/maknae.yaml`. Then restart `maknaed`: `sudo systemctl restart maknaed`; on macOS, `sudo launchctl kickstart -k system/io.maknae.maknaed`.

@@ -125,7 +125,7 @@ subject = "cli_a"
 object = "sealed"
 right = "r"
 control = "A's CLI seals it, so A already holds what it contains"
-evidence = "bins/maknae/src/agent.rs:185 · crates/maknae-seal/src/seal.rs:54"
+evidence = "bins/maknae/src/agent.rs:185 · crates/maknae-seal/src/seal.rs:105"
 test = "bins/maknae/src/agent.rs::a_turn_reads_the_wrapped_key_then_seals_it_to_exactly_this_request"
 
 [[cell]]
@@ -239,29 +239,29 @@ evidence = "ADR-0028"
 subject = "kernel"
 object = "key_a"
 right = "none"
-control = "maknaed's AppRole policy grants no KV path, and the wrapping token reaches it only sealed: the seal private key is held only by the Egress Daemon (Linux root:root 0400 credential loaded by LoadCredentialEncrypted; macOS keychain ACL), and maknaed does not link maknae-seal; residual: maknaed can attach a user's sealed token to content of its own choosing, using the key without reading it"
-evidence = "deploy/vault-pki/main.tf:138 · packaging/common/maknae-egress.service · bins/maknae/src/enroll/artifact_table.rs:215 · bins/maknae/src/enroll/keychain_write.rs:44 · ci/gates/seal-confinement.sh · ADR-0028"
+control = "maknaed's AppRole policy grants no KV path, and the wrapping token reaches it only sealed: the seal private key is held only by the Egress Daemon (Linux root:root 0400 credential loaded by LoadCredentialEncrypted into the _maknae-egress unit; macOS keychain item whose ACL trusts only the egress binary); residual: maknaed can attach a user's sealed token to content of its own choosing, using the key without reading it"
+evidence = "deploy/vault-pki/main.tf:158 · packaging/common/maknae-egress.service · bins/maknae/src/enroll/artifact_table.rs:214-228 · bins/maknae/src/enroll/keychain_write.rs:11,67 · crates/maknae-vault/src/seal_key_io.rs:9 · ADR-0028"
 
 [[cell]]
 subject = "kernel"
 object = "key_b"
 right = "none"
-control = "as for A's key: no KV grant in maknaed's AppRole policy, no seal private key, and maknae-seal is not linked; the same residual: maknaed can attach B's sealed token to content of its own choosing"
-evidence = "deploy/vault-pki/main.tf:138 · packaging/common/maknae-egress.service · ci/gates/seal-confinement.sh · ADR-0028"
+control = "as for A's key: no KV grant in maknaed's AppRole policy and no seal private key; the same residual: maknaed can attach B's sealed token to content of its own choosing"
+evidence = "deploy/vault-pki/main.tf:158 · packaging/common/maknae-egress.service · crates/maknae-vault/src/seal_key_io.rs:9 · ADR-0028"
 
 [[cell]]
 subject = "kernel"
 object = "wrap"
 right = "s"
-control = "carried only inside the sealed blob; maknaed does not link maknae-seal and holds no seal private key"
-evidence = "crates/maknae-kernel/src/egress.rs:26 · ci/gates/seal-confinement.sh · ci/gates/lib.sh:13"
+control = "carried only inside the sealed blob; maknaed holds no seal private key"
+evidence = "crates/maknae-kernel/src/egress.rs:28 · packaging/common/maknae-egress.service · ADR-0028"
 
 [[cell]]
 subject = "kernel"
 object = "sealed"
 right = "s"
-control = "forwarded as opaque bytes with the path it admitted; maknaed does not link maknae-seal and holds no seal private key"
-evidence = "crates/maknae-kernel/src/egress.rs:26 · ci/gates/seal-confinement.sh · ci/gates/lib.sh:13"
+control = "forwarded as opaque bytes with the path it admitted; maknaed holds no seal private key"
+evidence = "crates/maknae-kernel/src/egress.rs:28 · packaging/common/maknae-egress.service · ADR-0028"
 test = "crates/maknae-kernel/src/egress.rs::a_request_for_a_choice_carries_the_providers_record_the_choices_model_and_the_admitted_path"
 
 [[cell]]
@@ -311,7 +311,7 @@ subject = "egress"
 object = "sealed"
 right = "r"
 control = "it holds the seal private key and opens the blob only under this request's AAD"
-evidence = "bins/maknae-egress/src/opener.rs:78 · crates/maknae-seal/src/seal.rs:84"
+evidence = "bins/maknae-egress/src/opener.rs:78 · crates/maknae-seal/src/seal.rs:116"
 test = "bins/maknae-egress/src/opener.rs::a_blob_sealed_for_one_request_opens_only_under_that_request · crates/maknae-seal/src/seal.rs::a_blob_retargeted_to_another_request_fails_to_open"
 
 [[cell]]

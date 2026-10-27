@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError, RwLock};
 
 use maknae_config::{canonical_json, value_from_canonical_json, BaselineSections, Value};
+use maknae_crypto::digest::sha256;
 use maknae_graph::identity::hex;
 use maknae_proto::BaselineView;
-use maknae_state::envelope::sha256;
 
 pub const ROOT_FILE: &str = "root-file";
 pub const FOLLOWED_AT_BOOT: [&str; 2] = ["audit", "vault"];

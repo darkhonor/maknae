@@ -84,7 +84,7 @@ fn main() {
     // The same ordering as `maknae_kernel::run`.
     maknae_crypto::install_default_crypto_provider();
     if let Err(e) = maknae_crypto::assert_fips_provider() {
-        fail(e);
+        fail(maknae_vault::crypto_refusal_message(&e));
     }
 
     // The error names the file (or the path that failed) itself.

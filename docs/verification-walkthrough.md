@@ -11,7 +11,7 @@ Controls are cited two ways. A pair such as `cli_b × key_a` is a cell of the is
 | C3 | An unwrapped read of your own key is refused | yes |
 | C4 | B cannot redirect the kernel to A's key | by tests; the live CLI refusal is not yet measured |
 | C5 | A wrapping token for A's path is refused when carried in B's turn | by tests |
-| C6 | `maknaed` never links the seal | by CI; not yet measured on a host |
+| C6 | Only the Egress Daemon holds the seal private key | by tests on macOS; not yet measured on a host |
 | C7 | An unlisted model is refused before any egress | yes, on Rocky 10.2 and macOS 26.6.2 |
 | C8 | Revoking B's token stops B's next run and leaves A unaffected | not yet measured |
 | C9 | Withdrawing a user's model access takes host authority, not their `providers.yaml` | not yet measured |
@@ -180,27 +180,40 @@ cargo test -p maknae-seal a_blob_retargeted_to_another_request_fails_to_open
 
 **Measured.** By the named tests, which CI runs on every pull request (`cargo test --locked --workspace`, `.github/workflows/ci.yml`).
 
-## C6. `maknaed` never links the seal
+## C6. Only the Egress Daemon holds the seal private key
 
-**Claim.** The kernel cannot open a sealed key, because it does not contain the code that opens one.
+**Claim.** The kernel cannot open a sealed key, because the private key that opens it is delivered only to the Egress Daemon's process.
 
-**Control.** `kernel × key_a` and `kernel × sealed`. The gate fails if `maknae-seal` is reachable from `maknaed` or `maknae-kernel` (`ci/gates/lib.sh:12-13`). Credential-path step: `admit (peer-uid username, set, model, subpath, field), PDP, destination stamp: metadata only`.
+**Control.** `kernel × key_a` and `kernel × sealed`. On Linux, systemd decrypts the `maknae-egress-seal-key` credential (`/etc/maknae/private/maknae-egress-seal-key.cred`, `root:root 0400`) into the `$CREDENTIALS_DIRECTORY` of `maknae-egress.service`, which runs as `_maknae-egress`; `maknaed.service` loads no such credential. On macOS, the key is the System keychain item `io.maknae.maknae-egress`, whose ACL trusts only `/usr/local/bin/maknae-egress`, and the Egress Daemon refuses to read it unless it runs as `_maknae-egress` (`crates/maknae-vault/src/seal_key_io.rs:9`). Credential-path step: `admit (peer-uid username, set, model, subpath, field), PDP, destination stamp: metadata only`.
 
-**Command.** On a build host with the repository checked out:
+**Command, Linux.** On the host:
 
 ```bash
-bash ci/gates/seal-confinement.sh
+systemctl cat maknae-egress.service | grep '^LoadCredentialEncrypted='
+systemctl cat maknaed.service | grep -c 'maknae-egress-seal-key'
+sudo stat -c '%U:%G %a' /etc/maknae/private/maknae-egress-seal-key.cred
 ```
 
-**Expected.**
+**Expected, Linux.**
 
 ```
-seal-confinement: ok
+LoadCredentialEncrypted=maknae-egress-seal-key:/etc/maknae/private/maknae-egress-seal-key.cred
+0
+root:root 400
 ```
 
-(`ci/gates/seal-confinement.sh:33`.) A failure prints `FAIL: seal-confinement: 'maknae-seal' is reachable from '<package>'` and exits 1.
+(`packaging/common/maknae-egress.service:18`, `packaging/common/maknaed.service:44-45`, `bins/maknae/src/enroll/artifact_table.rs:222-228`.)
 
-**Measured.** CI runs the gate on every pull request (`.github/workflows/ci.yml`, step "Seal confinement — the kernel never links the unseal path (#153)"). On a host for this walkthrough: not yet measured.
+**Command, macOS.** The keychain ACL and the account check are shown by tests, on a macOS build host with the repository checked out:
+
+```bash
+cargo test -p maknae-vault an_untrusted_binary_is_refused_by_the_acl
+cargo test -p maknae-vault a_pointer_reaches_the_keychain_read_only_as_the_egress_account
+```
+
+**Expected, macOS.** Both tests pass. The first reads an item whose ACL does not trust the test binary and expects the keychain's refusal (status `-25293`). The second reads the egress item as an account other than `_maknae-egress` and expects `WrongAccount`.
+
+**Measured.** The macOS tests run on every pull request (`cargo test --locked --workspace` on the `darwin-native` job, `.github/workflows/ci.yml`). The Linux commands on a host: not yet measured.
 
 ## C7. An unlisted model is refused before any egress
 

@@ -7,7 +7,7 @@
 use crate::{CaBundle, Plane};
 use maknae_crypto::rcgen;
 use maknae_crypto::rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use maknae_crypto::signature::PlaneKey;
+use maknae_crypto::signature::SignatureAlgorithm;
 use std::sync::Arc;
 
 fn provider() {
@@ -28,13 +28,13 @@ impl Ca {
         rcgen::Issuer::from_params(&self.params, &self.kp)
     }
 }
-const P384: PlaneKey = PlaneKey::P384;
-const MLDSA87: PlaneKey = PlaneKey::MlDsa87;
+const P384: SignatureAlgorithm = SignatureAlgorithm::EcdsaP384Sha384;
+const MLDSA87: SignatureAlgorithm = SignatureAlgorithm::MlDsa87;
 
 fn mk_ca() -> Ca {
     mk_ca_with(P384)
 }
-fn mk_ca_with(alg: PlaneKey) -> Ca {
+fn mk_ca_with(alg: SignatureAlgorithm) -> Ca {
     let mut p = rcgen::CertificateParams::new(vec![]).unwrap();
     p.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
     let kp = rcgen::KeyPair::generate_for(alg.rcgen_algorithm()).unwrap();
@@ -54,7 +54,7 @@ fn mk_leaf_with(
     ca: &Ca,
     uri: &str,
     expired: bool,
-    alg: PlaneKey,
+    alg: SignatureAlgorithm,
 ) -> (Vec<CertificateDer<'static>>, Vec<u8>) {
     let mut p = rcgen::CertificateParams::new(vec![]).unwrap();
     p.distinguished_name = rcgen::DistinguishedName::new();
@@ -81,7 +81,7 @@ fn mk_leaf_extra_san(ca: &Ca, uri: &str) -> (Vec<CertificateDer<'static>>, Vec<u
 fn mk_leaf_extra_san_with(
     ca: &Ca,
     uri: &str,
-    alg: PlaneKey,
+    alg: SignatureAlgorithm,
 ) -> (Vec<CertificateDer<'static>>, Vec<u8>) {
     let mut p = rcgen::CertificateParams::new(vec![]).unwrap();
     p.distinguished_name = rcgen::DistinguishedName::new();
@@ -104,7 +104,7 @@ fn mk_leaf_extra_san_with(
 fn mk_intermediate(root: &Ca) -> Ca {
     mk_intermediate_with(root, P384)
 }
-fn mk_intermediate_with(root: &Ca, alg: PlaneKey) -> Ca {
+fn mk_intermediate_with(root: &Ca, alg: SignatureAlgorithm) -> Ca {
     let mut p = rcgen::CertificateParams::new(vec![]).unwrap();
     p.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
     let kp = rcgen::KeyPair::generate_for(alg.rcgen_algorithm()).unwrap();
@@ -122,10 +122,7 @@ fn server_cfg(
     ca: &CaBundle,
     expect: Plane,
 ) -> Arc<maknae_crypto::rustls::ServerConfig> {
-    let key = maknae_crypto::crypto_provider()
-        .key_provider
-        .load_private_key(PrivateKeyDer::Pkcs8(key.into()))
-        .unwrap();
+    let key = maknae_crypto::tls::load_private_key(PrivateKeyDer::Pkcs8(key.into())).unwrap();
     let resolver = Arc::new(crate::resolver::PlaneCertResolver::new_empty());
     resolver.slot().store(Some(Arc::new(
         maknae_crypto::rustls::sign::CertifiedKey::new(chain, key),
@@ -474,6 +471,7 @@ fn offering(
     })
 }
 
+#[expect(clippy::disallowed_methods)]
 fn peer_client(
     p: &Pki,
     groups: &[&'static dyn maknae_crypto::rustls::crypto::SupportedKxGroup],
@@ -494,6 +492,7 @@ fn peer_client(
     )
 }
 
+#[expect(clippy::disallowed_methods)]
 fn peer_server(
     p: &Pki,
     groups: &[&'static dyn maknae_crypto::rustls::crypto::SupportedKxGroup],
@@ -782,10 +781,8 @@ mod plane_key_algorithms {
             by_server: Arc::default(),
             by_client: Arc::default(),
         };
-        let key = maknae_crypto::crypto_provider()
-            .key_provider
-            .load_private_key(PrivateKeyDer::Pkcs8(kernel.1.into()))
-            .unwrap();
+        let key =
+            maknae_crypto::tls::load_private_key(PrivateKeyDer::Pkcs8(kernel.1.into())).unwrap();
         let resolver = Arc::new(crate::resolver::PlaneCertResolver::new_empty());
         resolver.slot().store(Some(Arc::new(
             maknae_crypto::rustls::sign::CertifiedKey::new(kernel.0, key),
@@ -813,7 +810,7 @@ mod plane_key_algorithms {
     #[tokio::test]
     async fn each_plane_key_completes_mutual_tls_and_both_sides_sign_with_it() {
         provider();
-        for alg in PlaneKey::ALL {
+        for alg in SignatureAlgorithm::ALL {
             let ca = mk_ca_with(alg);
             let seen = mutual_tls(
                 &cab(&ca),
@@ -865,7 +862,7 @@ mod plane_key_algorithms {
     #[tokio::test]
     async fn the_negative_suite_fails_closed_for_every_plane_key() {
         provider();
-        for alg in PlaneKey::ALL {
+        for alg in SignatureAlgorithm::ALL {
             let ca = mk_ca_with(alg);
             let foreign = mk_ca_with(alg);
             let kernel = || mk_leaf_with(&ca, "maknae://d/plane/kernel", false, alg);

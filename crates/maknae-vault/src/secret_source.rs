@@ -160,11 +160,8 @@ pub struct GraphKey(Zeroizing<[u8; GRAPH_KEY_BYTES]>);
 
 impl GraphKey {
     pub fn generate() -> Result<Self, VaultError> {
-        use maknae_crypto::aws_lc_rs::rand::{SecureRandom, SystemRandom};
         let mut key = Zeroizing::new([0u8; GRAPH_KEY_BYTES]);
-        SystemRandom::new()
-            .fill(&mut key[..])
-            .map_err(|_| VaultError::Random)?;
+        maknae_crypto::random::fill(&mut key[..]).map_err(|_| VaultError::Random)?;
         Ok(GraphKey(key))
     }
 

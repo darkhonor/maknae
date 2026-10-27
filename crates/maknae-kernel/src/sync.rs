@@ -241,7 +241,7 @@ pub fn render(graph: &Graph, config_dir: &Path) -> Result<String, String> {
             .to_str()
             .ok_or("the configuration directory is not UTF-8")?
             .to_string(),
-        base: maknae_config::base_token(&base, maknae_state::envelope::sha256),
+        base: maknae_config::base_token(&base, maknae_crypto::digest::sha256),
         conflicts,
     };
     let text = maknae_config::render_mirror(&header, &live);
@@ -255,7 +255,7 @@ pub fn publish_mirror(dir: &StateDir, graph: &Graph, config_dir: &Path) -> Resul
     let text = render(graph, config_dir)?;
     dir.publish_mirror(text.as_bytes())
         .map_err(|e| format!("publish: {e}"))?;
-    let hex: String = maknae_state::envelope::sha256(text.as_bytes())[..6]
+    let hex: String = maknae_crypto::digest::sha256(text.as_bytes())[..6]
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
@@ -481,7 +481,7 @@ mod tests {
     }
 
     fn short_hash(bytes: &[u8]) -> String {
-        let hex: String = maknae_state::envelope::sha256(bytes)
+        let hex: String = maknae_crypto::digest::sha256(bytes)
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect();
@@ -594,7 +594,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(rebuilt.kind, SyncKind::Lost);
-        let digests = |m: &MergedSource| m.source.section_digests(maknae_state::envelope::sha256);
+        let digests = |m: &MergedSource| m.source.section_digests(maknae_crypto::digest::sha256);
         assert!(digests(&kept).contains_key("bindings"));
         assert_eq!(digests(&kept), digests(&rebuilt));
         let layer = |m: &MergedSource| {
@@ -956,7 +956,7 @@ mod tests {
         let m = maknae_config::parse_mirror(&text).unwrap();
         let want = maknae_config::base_token(
             &Section::from_canonical(base).unwrap(),
-            maknae_state::envelope::sha256,
+            maknae_crypto::digest::sha256,
         );
         assert_eq!(
             (

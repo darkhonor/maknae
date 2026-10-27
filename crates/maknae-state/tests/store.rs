@@ -194,7 +194,7 @@ fn bl(core: &str) -> BaselineLayer {
             .collect(),
         system: "US".into(),
         ceiling: "UNCLASSIFIED".into(),
-        sha256: envelope::sha256(core.as_bytes()),
+        sha256: maknae_crypto::digest::sha256(core.as_bytes()),
         moved_from: None,
     }
 }
@@ -231,7 +231,7 @@ fn layer_at(label: &str, bindings: Option<&[u8]>, subjects: &[(u32, &str, &str)]
         aliases: Default::default(),
         source: SOURCE.into(),
         label: label.into(),
-        bindings_sha256: bindings.map(envelope::sha256),
+        bindings_sha256: bindings.map(maknae_crypto::digest::sha256),
         subjects: subjects
             .iter()
             .map(|(uid, name, role)| SubjectEntry {

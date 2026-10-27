@@ -461,7 +461,7 @@ pub struct EnrollArgs {
     /// The path under the KV mount that holds one folder per user.
     #[arg(long, default_value = "maknae/users")]
     pub user_prefix: String,
-    /// The plane identity key algorithm (`vault.plane_key`): ml-dsa-87, p384 or p521. Must
+    /// The plane identity key algorithm (`vault.plane_key`): ml-dsa-87, ecdsa-p384-sha384 or ecdsa-p521-sha512. Must
     /// equal deploy/vault-pki's plane_key_algorithm.
     #[arg(long, default_value = "ml-dsa-87")]
     pub plane_key: String,
@@ -1158,12 +1158,12 @@ fn insecure_plaintext_path(args: &EnrollArgs) -> Option<PathBuf> {
 }
 
 fn check_vault_layout(args: &EnrollArgs) -> Result<(), EnrollError> {
-    if maknae_crypto::signature::PlaneKey::parse(&args.plane_key).is_none() {
+    if maknae_crypto::signature::SignatureAlgorithm::parse(&args.plane_key).is_none() {
         return Err(EnrollError::InvalidVaultLayout(format!(
             "--plane-key `{}` is not one of {}",
             args.plane_key,
-            maknae_crypto::signature::PlaneKey::ALL
-                .map(maknae_crypto::signature::PlaneKey::as_str)
+            maknae_crypto::signature::SignatureAlgorithm::ALL
+                .map(maknae_crypto::signature::SignatureAlgorithm::as_str)
                 .join(", ")
         )));
     }
@@ -3257,7 +3257,7 @@ mod tests {
             "corp-userpass",
             "corp-kv",
             "corp/users",
-            "p521",
+            "ecdsa-p521-sha512",
             false,
         );
         let d = std::env::temp_dir().join(format!("maknae-enroll-cli-yaml-{}", std::process::id()));
@@ -3278,7 +3278,10 @@ mod tests {
         assert_eq!(vc.kv_mount.as_deref(), Some("corp-kv"));
         assert_eq!(vc.user_prefix.as_deref(), Some("corp/users"));
         assert_eq!(vc.pki_int_mount, "pm");
-        assert_eq!(vc.plane_key, maknae_crypto::signature::PlaneKey::P521);
+        assert_eq!(
+            vc.plane_key,
+            maknae_crypto::signature::SignatureAlgorithm::EcdsaP521Sha512
+        );
         assert!(!text.contains("approle_mount"), "{text}");
     }
 
@@ -3321,6 +3324,7 @@ mod tests {
             .starts_with("--userpass-mount"));
         assert!(refused(|a| a.kv_mount = "maknae-kv/data".into()).starts_with("--kv-mount"));
         assert!(refused(|a| a.plane_key = "p256".into()).starts_with("--plane-key `p256`"));
+        assert!(refused(|a| a.plane_key = "p384".into()).starts_with("--plane-key `p384`"));
         assert!(refused(|a| a.user_prefix = "/maknae/users".into()).starts_with("--user-prefix"));
         assert!(refused(|a| a.user_prefix = "maknae/../users".into()).starts_with("--user-prefix"));
         assert!(
@@ -3358,10 +3362,10 @@ mod tests {
             false,
             None,
             &op,
-            "p384",
+            "ecdsa-p384-sha384",
         );
         assert!(!linux.contains("transport"));
-        assert!(linux.contains("plane_key: p384"), "{linux}");
+        assert!(linux.contains("plane_key: ecdsa-p384-sha384"), "{linux}");
 
         let macos = build_daemon_yaml(
             "dev-01",
@@ -3374,7 +3378,7 @@ mod tests {
             true,
             Some(maknae_config::MACOS_DAEMON_SOCKET_PATH),
             &op,
-            "p384",
+            "ecdsa-p384-sha384",
         );
         assert!(macos.contains("transport"));
         assert!(macos.contains("socket_path"));
@@ -3407,7 +3411,7 @@ mod tests {
             true,
             Some(maknae_config::MACOS_DAEMON_SOCKET_PATH),
             &op,
-            "p384",
+            "ecdsa-p384-sha384",
         ));
         let cli = |macos| {
             socket(build_cli_yaml(
@@ -3477,7 +3481,7 @@ mod tests {
             false,
             None,
             &op,
-            "p384",
+            "ecdsa-p384-sha384",
         );
         let v = maknae_config::load_str(&text).unwrap();
         match section(&v, "principal") {
@@ -3766,7 +3770,7 @@ lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
             userpass_mount: "corp-userpass".to_string(),
             kv_mount: "corp-kv".to_string(),
             user_prefix: "corp/users".to_string(),
-            plane_key: "p521".to_string(),
+            plane_key: "ecdsa-p521-sha512".to_string(),
             vault_ca_pem: "-----BEGIN CERTIFICATE-----\nA\n-----END CERTIFICATE-----\n".to_string(),
             root_ca_pem: "-----BEGIN CERTIFICATE-----\nB\n-----END CERTIFICATE-----\n".to_string(),
             int_ca_pem: "-----BEGIN CERTIFICATE-----\nC\n-----END CERTIFICATE-----\n".to_string(),
@@ -4084,17 +4088,7 @@ lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
 
             fn write_mirror_in(&self, config_dir: &str, live: &str) {
                 let section = Section::of(&maknae_config::parse_bindings(live).unwrap());
-                let digest = |b: &[u8]| {
-                    let mut out = [0; 32];
-                    out.copy_from_slice(
-                        maknae_crypto::aws_lc_rs::digest::digest(
-                            &maknae_crypto::aws_lc_rs::digest::SHA256,
-                            b,
-                        )
-                        .as_ref(),
-                    );
-                    out
-                };
+                let digest = maknae_crypto::digest::sha256;
                 let text = maknae_config::render_mirror(
                     &MirrorHeader {
                         revision: 3,

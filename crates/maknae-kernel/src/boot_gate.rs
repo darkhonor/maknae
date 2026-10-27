@@ -86,7 +86,7 @@ pub fn authz_boot_gate(
     graph: Arc<Graph>,
     vocabulary: &CompiledSet,
 ) -> Result<BasicAuthorizer, AuthzBootRefusal> {
-    let digest: fn(&[u8]) -> [u8; 32] = maknae_state::envelope::sha256;
+    let digest: fn(&[u8]) -> [u8; 32] = maknae_crypto::digest::sha256;
     let snapshot = compile(graph, &source, vocabulary, &source.section_digests(digest))
         .map_err(AuthzBootRefusal::Compile)?;
     Ok(BasicAuthorizer::from_snapshot(
@@ -448,7 +448,7 @@ mod tests {
     const LABEL: &str = "UNCLASSIFIED";
 
     fn sha_digests(source: &PolicySource) -> std::collections::BTreeMap<String, [u8; 32]> {
-        source.section_digests(maknae_state::envelope::sha256)
+        source.section_digests(maknae_crypto::digest::sha256)
     }
 
     /// The identity graph the store would hold for `layer`, built in memory.
@@ -493,7 +493,7 @@ mod tests {
         assert_eq!(Baseline::principal(&auth), principal());
         assert_eq!(
             Baseline::digest(&auth)(b"x"),
-            maknae_state::envelope::sha256(b"x")
+            maknae_crypto::digest::sha256(b"x")
         );
         assert_eq!(
             auth.subjects().unwrap()[0].members,

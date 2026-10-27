@@ -27,11 +27,11 @@ variable "int_ttl_seconds" {
 
 variable "plane_key_algorithm" {
   type        = string
-  description = "Key algorithm of the Maknae root, intermediate and plane leaves (#573): ml-dsa-87 (needs Vault >= 2.2.0), p384 or p521. Must equal vault.plane_key in maknae.yaml."
+  description = "Key algorithm of the Maknae root, intermediate and plane leaves (#573): ml-dsa-87 (needs Vault >= 2.2.0), ecdsa-p384-sha384 or ecdsa-p521-sha512. Must equal vault.plane_key in maknae.yaml."
   default     = "ml-dsa-87"
   validation {
-    condition     = contains(["ml-dsa-87", "p384", "p521"], var.plane_key_algorithm)
-    error_message = "plane_key_algorithm must be one of ml-dsa-87, p384, p521."
+    condition     = contains(["ml-dsa-87", "ecdsa-p384-sha384", "ecdsa-p521-sha512"], var.plane_key_algorithm)
+    error_message = "plane_key_algorithm must be one of ml-dsa-87, ecdsa-p384-sha384, ecdsa-p521-sha512."
   }
 }
 

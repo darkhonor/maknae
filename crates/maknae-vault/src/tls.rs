@@ -1,5 +1,5 @@
 //! FIPS-pinned rustls config builders (Layer 1, T3). Both builders assert the aws-lc-rs
-//! FIPS provider first (fail-closed) and construct via `builder_with_provider(...)` so no
+//! FIPS provider first (fail-closed) and start from `maknae_crypto::tls`, so no
 //! ambient `CryptoProvider` default is relied on. TLS 1.3 only. The private key never
 //! leaves the crate — the `CertifiedKey` is built here from the `pub(crate)` key accessor.
 use crate::plane_verify::{PlaneClientCertVerifier, PlaneServerCertVerifier};
@@ -31,10 +31,9 @@ pub(crate) fn certified_key_from_identity(
     id: &PlaneIdentity,
 ) -> Result<Arc<CertifiedKey>, VaultError> {
     let chain = pem_chain_to_der(id)?;
-    let key = maknae_crypto::crypto_provider()
-        .key_provider
-        .load_private_key(PrivateKeyDer::Pkcs8(id.key_der().to_vec().into()))
-        .map_err(|e| VaultError::Handshake(format!("load leaf key: {e}")))?;
+    let key =
+        maknae_crypto::tls::load_private_key(PrivateKeyDer::Pkcs8(id.key_der().to_vec().into()))
+            .map_err(|e| VaultError::Handshake(format!("load leaf key: {e}")))?;
     Ok(Arc::new(CertifiedKey::new(chain, key)))
 }
 
@@ -72,21 +71,17 @@ pub(crate) fn plane_server_config(
     verifier: Arc<dyn ClientCertVerifier>,
     resolver: Arc<PlaneCertResolver>,
 ) -> Result<ServerConfig, VaultError> {
-    Ok(
-        ServerConfig::builder_with_provider(Arc::new(maknae_crypto::crypto_provider()))
-            .with_protocol_versions(&[&maknae_crypto::rustls::version::TLS13])
-            .map_err(|e| VaultError::Handshake(format!("server tls13: {e}")))?
-            .with_client_cert_verifier(verifier)
-            .with_cert_resolver(resolver),
-    )
+    Ok(maknae_crypto::tls::server_builder()
+        .map_err(|e| VaultError::Handshake(format!("server tls13: {e}")))?
+        .with_client_cert_verifier(verifier)
+        .with_cert_resolver(resolver))
 }
 
 pub(crate) fn plane_client_config(
     verifier: Arc<dyn ServerCertVerifier>,
     client_auth: Option<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>,
 ) -> Result<ClientConfig, VaultError> {
-    let builder = ClientConfig::builder_with_provider(Arc::new(maknae_crypto::crypto_provider()))
-        .with_protocol_versions(&[&maknae_crypto::rustls::version::TLS13])
+    let builder = maknae_crypto::tls::client_builder()
         .map_err(|e| VaultError::Handshake(format!("client tls13: {e}")))?
         .dangerous()
         .with_custom_certificate_verifier(verifier);

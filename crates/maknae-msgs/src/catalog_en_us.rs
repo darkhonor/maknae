@@ -15,10 +15,10 @@ pub(crate) fn text(id: MsgId) -> &'static str {
         MsgId::DaemonNotRunning => "maknae daemon is not running",
         MsgId::DaemonStartFailed => "Failed to start maknae daemon",
         MsgId::AuthzConfigRefused => {
-            "maknae daemon refused to start: the authorization policy could not be loaded"
+            "the authorization policy could not be loaded"
         }
         MsgId::AuditOffloadUnsupported => {
-            "maknae daemon refused to start: audit.siem is configured but off-host audit offload is not implemented"
+            "audit.siem is configured but off-host audit offload is not implemented"
         }
         MsgId::PostureDegraded => {
             "warning: this boot's credential posture is not hardware-root-of-trust sealed"
@@ -98,6 +98,12 @@ pub(crate) fn text(id: MsgId) -> &'static str {
         }
         MsgId::HelperStillPrivileged => {
             "Operator-context helper still holds root's group membership — refusing"
+        }
+        MsgId::CryptoFipsUnavailable => {
+            "the FIPS cryptographic provider is not active"
+        }
+        MsgId::CryptoKxGroupsDrift => {
+            "the TLS provider does not carry the required key-exchange groups"
         }
     }
 }

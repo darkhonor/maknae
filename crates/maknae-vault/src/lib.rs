@@ -17,7 +17,6 @@ mod client;
 mod config;
 mod csr;
 mod csr_gen;
-mod digest;
 mod env;
 mod error;
 mod graph_key_io;
@@ -28,6 +27,7 @@ mod operator;
 mod password_line;
 mod plane;
 mod plane_verify;
+mod refusal;
 mod resolver;
 mod seal_key_io;
 mod secret_io;
@@ -68,7 +68,6 @@ pub use config::{
     DEFAULT_USERPASS_MOUNT, EGRESS_VAULT_CA_FILE, VAULT_SECTION,
 };
 pub use csr_gen::generate_plane_csr;
-pub use digest::{sha256_hex, Sha256};
 pub use env::{scrub_with, NEVER_SCRUB_ENV, SCRUBBED_ENV};
 pub use error::VaultError;
 pub use graph_key_io::read_graph_key;
@@ -82,6 +81,7 @@ pub use password_line::{PasswordFeed, PasswordLine};
 pub use peer_identity::{creds_match_listener_uid, creds_match_uid, listener_uid_is, peer_uid_is};
 pub use peercred::PeerCreds;
 pub use plane::Plane;
+pub use refusal::crypto_refusal_message;
 pub use seal_key_io::read_egress_seal_key;
 #[cfg(unix)]
 pub use seal_pub_io::read_seal_pub_pem;

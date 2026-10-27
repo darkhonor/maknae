@@ -71,7 +71,7 @@ Four flags name the Vault layout, and each **must equal** its Terraform input:
 | `--userpass-mount` | `maknae-userpass` | `userpass_mount` |
 | `--kv-mount` | `maknae-kv` | `kv_mount_path` |
 | `--user-prefix` | `maknae/users` | `user_prefix` |
-| `--plane-key` | `ml-dsa-87` | `plane_key_algorithm` (`ml-dsa-87` needs Vault 2.2.0+; `p384` or `p521` otherwise) |
+| `--plane-key` | `ml-dsa-87` | `plane_key_algorithm` (`ml-dsa-87` needs Vault 2.2.0+; `ecdsa-p384-sha384` or `ecdsa-p521-sha512` otherwise) |
 
 Enroll writes `--kv-mount` and `--user-prefix` into `/etc/maknae/egress-bounds.yaml` (`root:root 0644`), all four into the `vault` block of your own `~/.maknae/maknae.yaml`, and `--userpass-mount` and `--plane-key` into the root `maknae.yaml`. You do not write `egress-bounds.yaml` by hand, except to add the optional `call_timeout_ms` for a slow self-hosted model (`docs/configuration.md` §6.1.3); the next enroll drops it again (#525).
 

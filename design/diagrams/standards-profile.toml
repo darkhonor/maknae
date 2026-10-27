@@ -66,7 +66,7 @@ version = "1.2 floor"
 category = "Transport security"
 applies_to = "outbound to THIRD PARTIES: Vault leg today; model/MCP endpoints later"
 status = "enforced"
-evidence = "crates/maknae-crypto/src/glue.rs:35 assert_fips_provider; rustls has no TLS older than 1.2"
+evidence = "crates/maknae-crypto/src/glue.rs:40 assert_fips_provider; rustls has no TLS older than 1.2"
 
 [[standard]]
 name = "Plane key algorithm"
@@ -74,7 +74,7 @@ version = "ML-DSA-87 default (plane_key)"
 category = "Cryptography"
 applies_to = "a plane's own CSR key; the peer's algorithm is not pinned (#574)"
 status = "enforced"
-evidence = "crates/maknae-crypto/src/signature.rs PlaneKey::matches_spki (called by maknae-vault csr_key_is); vault.plane_key"
+evidence = "crates/maknae-crypto/src/signature.rs SignatureAlgorithm::matches_spki (called by maknae-vault csr_key_is); vault.plane_key"
 
 [[standard]]
 name = "CNSA Suite"

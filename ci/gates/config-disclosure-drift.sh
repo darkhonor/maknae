@@ -102,7 +102,7 @@ SURFACE=(
 # No other enum-typed field is a leaf.
 LEAF_ENUMS=(
   "containment.outcome|crates/maknae-proto/src/wire.rs|ContainmentOutcome"
-  "vault.plane_key|crates/maknae-crypto/src/signature.rs|PlaneKey"
+  "vault.plane_key|crates/maknae-crypto/src/signature.rs|SignatureAlgorithm"
 )
 
 leaf_enum_check() { # <field-path> <file> <type>

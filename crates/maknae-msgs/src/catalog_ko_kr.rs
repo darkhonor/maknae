@@ -18,10 +18,10 @@ pub(crate) fn text(id: MsgId) -> &'static str {
         MsgId::DaemonNotRunning => "maknae 데몬이 실행 중이 아니에요",
         MsgId::DaemonStartFailed => "maknae 데몬 시작에 실패했어요",
         MsgId::AuthzConfigRefused => {
-            "maknae 데몬이 시작을 거부했어요: 권한 정책을 불러올 수 없어요"
+            "권한 정책을 불러올 수 없어요"
         }
         MsgId::AuditOffloadUnsupported => {
-            "maknae 데몬이 시작을 거부했어요: audit.siem이 설정되어 있지만 외부 감사 전송은 아직 구현되지 않았어요"
+            "audit.siem이 설정되어 있지만 외부 감사 전송은 아직 구현되지 않았어요"
         }
         MsgId::PostureDegraded => {
             "경고: 이번 부팅의 자격 증명 상태가 하드웨어 신뢰 루트로 봉인되지 않았어요"
@@ -100,5 +100,7 @@ pub(crate) fn text(id: MsgId) -> &'static str {
         MsgId::HelperStillPrivileged => {
             "운영자 컨텍스트 헬퍼가 여전히 root의 그룹 소속을 갖고 있어요 — 거부해요"
         }
+        MsgId::CryptoFipsUnavailable => "FIPS 암호 제공자가 활성화되어 있지 않아요",
+        MsgId::CryptoKxGroupsDrift => "TLS 제공자에 필요한 키 교환 그룹이 없어요",
     }
 }

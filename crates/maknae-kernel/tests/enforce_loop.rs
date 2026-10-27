@@ -127,7 +127,7 @@ impl Fixture {
                 self.paths(),
                 self.principal.clone(),
                 seam_req(),
-                maknae_state::envelope::sha256,
+                maknae_crypto::digest::sha256,
             )
             .expect("fixture policy constructs"),
         )
@@ -458,7 +458,7 @@ where
         Arc::new(maknae_kernel::LiveConfig::new((*config_view).clone(), None)),
         backend_name,
         classification_policy,
-        std::sync::Arc::new("p521".to_string()),
+        std::sync::Arc::new("ecdsa-p521-sha512".to_string()),
         kernel_graph,
         maknae_kernel::unavailable_egress(),
         timeout,
@@ -1893,7 +1893,7 @@ async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
             // same package whose CARGO_PKG_VERSION `run.rs` expands, so the
             // distinguishing assertion is free.
             assert_eq!(s.version, env!("CARGO_PKG_VERSION"));
-            assert_eq!(s.plane_key.as_deref(), Some("p521"));
+            assert_eq!(s.plane_key.as_deref(), Some("ecdsa-p521-sha512"));
             assert_eq!(s.kernel_graph_revision, Some(41));
             assert_eq!(s.kernel_graph_anchor.as_deref(), Some("advanced"));
             assert_eq!(
@@ -2842,7 +2842,7 @@ fn composed(fx: &Fixture, level: &str) -> Arc<maknae_kernel::Composition<Hermeti
         fx.paths(),
         fx.principal.clone(),
         seam_req(),
-        maknae_state::envelope::sha256,
+        maknae_crypto::digest::sha256,
     )
     .expect("fixture policy constructs");
     Arc::new(maknae_kernel::Composition::new(

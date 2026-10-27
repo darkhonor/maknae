@@ -2,7 +2,7 @@
 //! `maknae-config`'s `ConfigError` pattern (no extra dep). Every fallible path in
 //! the crate returns one of these; there is no partial-identity / non-FIPS / file
 //! fallback anywhere.
-use maknae_crypto::signature::PlaneKey;
+use maknae_crypto::signature::SignatureAlgorithm;
 use std::path::PathBuf;
 
 #[derive(Debug)]
@@ -151,14 +151,31 @@ pub enum VaultError {
     GraphKey(&'static str),
     GraphKeyAbsent(String),
     Random,
+    Crypto(String),
 }
 
 impl From<maknae_crypto::CryptoError> for VaultError {
     fn from(e: maknae_crypto::CryptoError) -> Self {
+        use maknae_crypto::CryptoError as C;
+        let detail = e.to_string();
         match e {
-            maknae_crypto::CryptoError::FipsUnavailable => VaultError::FipsUnavailable,
-            maknae_crypto::CryptoError::KxGroupsDrift => VaultError::KxGroupsDrift,
-            maknae_crypto::CryptoError::Csr(e) => VaultError::CsrGen(e),
+            C::FipsUnavailable | C::FipsModuleUnavailable => VaultError::FipsUnavailable,
+            C::KxGroupsDrift => VaultError::KxGroupsDrift,
+            C::Csr(m) => VaultError::CsrGen(m),
+            C::Random => VaultError::Random,
+            C::AeadKey
+            | C::AeadSeal
+            | C::AeadOpen
+            | C::SealPlaintext
+            | C::SealBlob
+            | C::SealVersion
+            | C::SealEphemeralKey
+            | C::SealPublicKey
+            | C::SealPrivateKey
+            | C::SealOpen
+            | C::Primitive
+            | C::Tls(_) => VaultError::Crypto(detail),
+            _ => VaultError::Crypto(detail),
         }
     }
 }
@@ -168,16 +185,16 @@ impl std::fmt::Display for VaultError {
         match self {
             VaultError::FipsUnavailable => write!(
                 f,
-                "FIPS provider not active: the process default is not aws-lc-rs FIPS (refusing to start)"
+                "FIPS provider not active: the process default is not the aws-lc-rs FIPS provider"
             ),
             VaultError::InvalidPlaneKey(v) => write!(
                 f,
                 "vault.plane_key `{v}` is not one of {}",
-                PlaneKey::ALL.map(PlaneKey::as_str).join(", ")
+                SignatureAlgorithm::ALL.map(SignatureAlgorithm::as_str).join(", ")
             ),
             VaultError::KxGroupsDrift => write!(
                 f,
-                "the process TLS provider does not carry Maknae's key-exchange groups (refusing TLS)"
+                "the process TLS provider does not carry the configured key-exchange groups"
             ),
             VaultError::Config(e) => write!(f, "config error: {e}"),
             VaultError::InvalidKeyVaultPath(m) => write!(f, "invalid key_vault_path: {m}"),
@@ -303,6 +320,7 @@ impl std::fmt::Display for VaultError {
             ),
             VaultError::GraphKey(why) => write!(f, "the kernel graph key is malformed ({why})"),
             VaultError::Random => write!(f, "the FIPS random generator failed"),
+            VaultError::Crypto(e) => write!(f, "a cryptographic operation failed: {e}"),
             VaultError::GraphKeyAbsent(detail) => write!(
                 f,
                 "no kernel graph key ({detail}): run `sudo maknae enroll`"
@@ -325,29 +343,101 @@ mod tests {
 
     #[test]
     fn each_crypto_refusal_keeps_its_name_and_message() {
-        use maknae_crypto::CryptoError;
-        for (e, want) in [
-            (CryptoError::FipsUnavailable, "FIPS provider not active"),
-            (CryptoError::KxGroupsDrift, "key-exchange groups"),
-            (CryptoError::Csr("rcgen refused".into()), "rcgen refused"),
-        ] {
-            let msg = e.to_string();
-            let v = super::VaultError::from(e);
-            assert_eq!(v.to_string(), msg);
-            assert!(msg.contains(want), "{msg}");
+        use super::VaultError as V;
+        use maknae_crypto::CryptoError as C;
+        type Is = fn(&V) -> bool;
+        let table: [(C, Is, &str); 17] = [
+            (
+                C::FipsUnavailable,
+                |v| matches!(v, V::FipsUnavailable),
+                "FIPS provider not active: the process default is not the aws-lc-rs FIPS provider",
+            ),
+            (
+                C::KxGroupsDrift,
+                |v| matches!(v, V::KxGroupsDrift),
+                "the process TLS provider does not carry the configured key-exchange groups",
+            ),
+            (
+                C::Csr("rcgen refused".into()),
+                |v| matches!(v, V::CsrGen(_)),
+                "keypair/CSR generation failed: rcgen refused",
+            ),
+            (
+                C::Random,
+                |v| matches!(v, V::Random),
+                "the FIPS random generator failed",
+            ),
+            (
+                C::AeadKey,
+                |v| matches!(v, V::Crypto(d) if d == "the AEAD key was refused"),
+                "a cryptographic operation failed: the AEAD key was refused",
+            ),
+            (
+                C::AeadSeal,
+                |v| matches!(v, V::Crypto(d) if d == "AEAD sealing failed"),
+                "a cryptographic operation failed: AEAD sealing failed",
+            ),
+            (
+                C::AeadOpen,
+                |v| matches!(v, V::Crypto(d) if d == "the AEAD ciphertext does not authenticate"),
+                "a cryptographic operation failed: the AEAD ciphertext does not authenticate",
+            ),
+            (
+                C::FipsModuleUnavailable,
+                |v| matches!(v, V::FipsUnavailable),
+                "FIPS provider not active: the process default is not the aws-lc-rs FIPS provider",
+            ),
+            (
+                C::SealPlaintext,
+                |v| matches!(v, V::Crypto(d) if d == "the sealed plaintext is empty"),
+                "a cryptographic operation failed: the sealed plaintext is empty",
+            ),
+            (
+                C::SealBlob,
+                |v| matches!(v, V::Crypto(d) if d == "the sealed blob is too short"),
+                "a cryptographic operation failed: the sealed blob is too short",
+            ),
+            (
+                C::SealVersion,
+                |v| matches!(v, V::Crypto(d) if d == "the sealed blob has an unknown version"),
+                "a cryptographic operation failed: the sealed blob has an unknown version",
+            ),
+            (
+                C::SealEphemeralKey,
+                |v| matches!(v, V::Crypto(d) if d == "the sealed blob's ephemeral key is not an uncompressed P-384 point"),
+                "a cryptographic operation failed: the sealed blob's ephemeral key is not an uncompressed P-384 point",
+            ),
+            (
+                C::SealPublicKey,
+                |v| matches!(v, V::Crypto(d) if d == "the sealing public key is not a canonical P-384 SubjectPublicKeyInfo PEM"),
+                "a cryptographic operation failed: the sealing public key is not a canonical P-384 SubjectPublicKeyInfo PEM",
+            ),
+            (
+                C::SealPrivateKey,
+                |v| matches!(v, V::Crypto(d) if d == "the sealing private key is not a P-384 PKCS#8 key"),
+                "a cryptographic operation failed: the sealing private key is not a P-384 PKCS#8 key",
+            ),
+            (
+                C::SealOpen,
+                |v| matches!(v, V::Crypto(d) if d == "the sealed blob does not open under this key, domain and AAD"),
+                "a cryptographic operation failed: the sealed blob does not open under this key, domain and AAD",
+            ),
+            (
+                C::Primitive,
+                |v| matches!(v, V::Crypto(d) if d == "a cryptographic primitive failed"),
+                "a cryptographic operation failed: a cryptographic primitive failed",
+            ),
+            (
+                C::Tls("refused".into()),
+                |v| matches!(v, V::Crypto(d) if d == "TLS configuration failed: refused"),
+                "a cryptographic operation failed: TLS configuration failed: refused",
+            ),
+        ];
+        for (e, is, want) in table {
+            let v = V::from(e);
+            assert!(is(&v), "{v:?}");
+            assert_eq!(v.to_string(), want);
         }
-        assert!(matches!(
-            super::VaultError::from(CryptoError::KxGroupsDrift),
-            super::VaultError::KxGroupsDrift
-        ));
-        assert!(matches!(
-            super::VaultError::from(CryptoError::FipsUnavailable),
-            super::VaultError::FipsUnavailable
-        ));
-        assert!(matches!(
-            super::VaultError::from(CryptoError::Csr(String::new())),
-            super::VaultError::CsrGen(_)
-        ));
     }
     #[test]
     fn transport_variants_display() {
@@ -428,6 +518,7 @@ mod tests {
             VaultError::GraphKey("not exactly 32 bytes"),
             VaultError::GraphKeyAbsent("no credential".into()),
             VaultError::Random,
+            VaultError::Crypto("x".into()),
         ];
         for e in cases {
             assert!(!format!("{e}").is_empty());

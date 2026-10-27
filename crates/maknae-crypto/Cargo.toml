@@ -1,7 +1,7 @@
 [package]
 name = "maknae-crypto"
 publish.workspace = true
-description = "Maknae's cryptographic libraries and policy: the aws-lc-rs FIPS provider, its TLS key-exchange groups, and the start-up assertion"
+description = "One implementation of each cryptographic function on the aws-lc-rs FIPS module: digest, random, AEAD, sealed box, TLS 1.3 configuration and signature algorithms"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,6 +10,9 @@ rust-version.workspace = true
 
 [lints]
 workspace = true
+
+[features]
+test-support = []
 
 [dependencies]
 # FIPS POSTURE — READ BEFORE CHANGING THIS LINE. This crate is the only
@@ -104,4 +107,5 @@ rustls = { version = "0.23", default-features = false, features = ["fips", "std"
 # `Issuer::from_ca_cert_der` would need rcgen's `x509-parser` feature, which is
 # not enabled. The `aws_lc_rs` + `fips` features select the FIPS backend.
 rcgen = { version = ">=0.14.9, <0.15", default-features = false, features = ["aws_lc_rs", "fips", "pem"] }
+pem = "4"
 zeroize = "1"

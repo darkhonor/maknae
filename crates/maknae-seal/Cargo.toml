@@ -13,7 +13,6 @@ workspace = true
 
 [dependencies]
 maknae-crypto = { path = "../maknae-crypto" }
-pem = "4"
 zeroize = "1"
 
 [dev-dependencies]

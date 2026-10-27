@@ -4,7 +4,7 @@
 //! the plane URI-SAN or be rejected by Vault). All pure/fixture-testable (T1).
 use crate::VaultError;
 use maknae_config::{load_config, Document, SectionSpec, Value};
-use maknae_crypto::signature::PlaneKey;
+use maknae_crypto::signature::SignatureAlgorithm;
 use std::path::{Path, PathBuf};
 
 /// The config section this client reads (the Terraform `vault` block: addr + mounts).
@@ -156,7 +156,7 @@ pub fn vault_error_text(e: &vaultrs::error::ClientError) -> String {
 /// A `pki/sign` refusal's message, with a hint when Vault's message concerns the key: the
 /// PKI role issues a different algorithm than `vault.plane_key`, or the Vault predates the
 /// algorithm.
-pub fn sign_refusal_detail(vault_message: &str, plane_key: PlaneKey) -> String {
+pub fn sign_refusal_detail(vault_message: &str, plane_key: SignatureAlgorithm) -> String {
     if vault_message.to_ascii_lowercase().contains("key") {
         format!(
             "{vault_message} (check that vault.plane_key {} matches deploy/vault-pki's \
@@ -185,10 +185,10 @@ pub struct VaultConfig {
     pub user_auth: UserAuthConfig,
     pub kv_mount: Option<String>,
     pub user_prefix: Option<String>,
-    pub plane_key: PlaneKey,
+    pub plane_key: SignatureAlgorithm,
 }
 
-const _: fn(&VaultConfig) -> ::maknae_crypto::signature::PlaneKey = |c| c.plane_key;
+const _: fn(&VaultConfig) -> ::maknae_crypto::signature::SignatureAlgorithm = |c| c.plane_key;
 const _: fn(&VaultConfig) -> isize = |c| c.plane_key as isize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -376,9 +376,9 @@ pub fn vault_config_from_document(doc: &Document) -> Result<VaultConfig, VaultEr
         VaultError::InvalidKeyVaultPath,
     )?;
     let plane_key = match get_value(vault, "plane_key") {
-        None => PlaneKey::MlDsa87,
+        None => SignatureAlgorithm::MlDsa87,
         Some(Value::Str(s)) => {
-            PlaneKey::parse(s).ok_or_else(|| VaultError::InvalidPlaneKey(s.clone()))?
+            SignatureAlgorithm::parse(s).ok_or_else(|| VaultError::InvalidPlaneKey(s.clone()))?
         }
         Some(_) => {
             return Err(VaultError::ConfigShape {
@@ -416,8 +416,11 @@ mod tests {
 
     #[test]
     fn plane_key_parses_each_value_and_defaults_to_ml_dsa_87() {
-        assert_eq!(plane_key_of("").unwrap().plane_key, PlaneKey::MlDsa87);
-        for k in PlaneKey::ALL {
+        assert_eq!(
+            plane_key_of("").unwrap().plane_key,
+            SignatureAlgorithm::MlDsa87
+        );
+        for k in SignatureAlgorithm::ALL {
             let cfg = plane_key_of(&format!("  plane_key: {}\n", k.as_str())).unwrap();
             assert_eq!(cfg.plane_key, k);
         }
@@ -456,7 +459,7 @@ mod tests {
             "Vault returned 400: role requires a minimum of 521 Key bits",
             "Vault returned 400: unknown public key algorithm",
         ] {
-            let m = sign_refusal_detail(msg, PlaneKey::MlDsa87);
+            let m = sign_refusal_detail(msg, SignatureAlgorithm::MlDsa87);
             assert!(m.starts_with(&format!("{msg} (")), "{m}");
             assert!(
                 m.contains("vault.plane_key ml-dsa-87") && m.contains("plane_key_algorithm"),
@@ -464,9 +467,47 @@ mod tests {
             );
         }
         assert_eq!(
-            sign_refusal_detail("Vault returned 403: permission denied", PlaneKey::P384),
+            sign_refusal_detail(
+                "Vault returned 403: permission denied",
+                SignatureAlgorithm::EcdsaP384Sha384
+            ),
             "Vault returned 403: permission denied"
         );
+    }
+
+    #[test]
+    fn the_terraform_validation_list_is_signature_algorithm_all() {
+        let tf = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../deploy/vault-pki/variables.tf"),
+        )
+        .unwrap();
+        let want = SignatureAlgorithm::ALL
+            .map(|a| format!("\"{}\"", a.as_str()))
+            .join(", ");
+        assert!(
+            tf.contains(&format!("contains([{want}], var.plane_key_algorithm)")),
+            "deploy/vault-pki/variables.tf must validate plane_key_algorithm against [{want}]"
+        );
+    }
+
+    #[test]
+    fn the_short_names_are_refused_with_the_valid_list() {
+        for old in ["p384", "p521"] {
+            match plane_key_of(&format!("  plane_key: {old}\n")) {
+                Err(e @ VaultError::InvalidPlaneKey(_)) => {
+                    let m = e.to_string();
+                    assert!(
+                        m.contains("ecdsa-p384-sha384") && m.contains("ml-dsa-87"),
+                        "{m}"
+                    );
+                }
+                other => panic!(
+                    "{old} must be refused, got {:?}",
+                    other.map(|c| c.plane_key)
+                ),
+            }
+        }
     }
 
     #[test]
@@ -475,7 +516,8 @@ mod tests {
             Err(e @ VaultError::InvalidPlaneKey(_)) => {
                 let m = e.to_string();
                 assert!(
-                    m.contains("p256") && m.contains("ml-dsa-87, p384, p521"),
+                    m.contains("p256")
+                        && m.contains("ml-dsa-87, ecdsa-p384-sha384, ecdsa-p521-sha512"),
                     "{m}"
                 );
             }

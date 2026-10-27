@@ -483,7 +483,7 @@ pub struct ContentMeasure {
 /// made, and truncated to 32 hex characters (record.rs says why).
 pub fn content_measure(turns: &[Turn]) -> ContentMeasure {
     let mut length = 0u64;
-    let mut h = maknae_vault::Sha256::new();
+    let mut h = maknae_crypto::digest::Sha256::new();
     let mut feed = |bytes: &[u8]| {
         length += bytes.len() as u64;
         h.update(bytes);
@@ -1731,7 +1731,10 @@ mod tests {
             content: vec![text("abc"), text("de")],
         }]);
         assert_eq!(m.length, 5);
-        assert_eq!(m.digest32, &maknae_vault::sha256_hex(b"abcde")[..32]);
+        assert_eq!(
+            m.digest32,
+            &maknae_crypto::digest::sha256_hex(b"abcde")[..32]
+        );
         assert_eq!(m.digest32.len(), 32);
         let m2 = content_measure(&[Turn::User {
             content: vec![text("the secret plan")],
@@ -1754,7 +1757,7 @@ mod tests {
         }]);
         assert_eq!(
             (m.length, m.digest32.as_str()),
-            (3, &maknae_vault::sha256_hex(b"abc")[..32])
+            (3, &maknae_crypto::digest::sha256_hex(b"abc")[..32])
         );
     }
 
@@ -1867,7 +1870,7 @@ mod tests {
         assert_eq!(m.length, 11);
         assert_eq!(
             m.digest32,
-            &maknae_vault::sha256_hex(b"ab{\"p\":1}cd")[..32]
+            &maknae_crypto::digest::sha256_hex(b"ab{\"p\":1}cd")[..32]
         );
         assert_eq!(m.digest32, "88f32a34ef1a5afa7297f567ab39cf2b");
     }
@@ -2530,7 +2533,7 @@ mod tests {
         assert_eq!(m.length, 14);
         assert_eq!(
             m.digest32,
-            &maknae_vault::sha256_hex(b"ab{\"p\":1}whycd")[..32]
+            &maknae_crypto::digest::sha256_hex(b"ab{\"p\":1}whycd")[..32]
         );
     }
 

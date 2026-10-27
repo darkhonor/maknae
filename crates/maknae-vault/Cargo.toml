@@ -41,6 +41,7 @@ reqwest = { version = "=0.13.5", default-features = false, features = ["rustls-n
 rustify = { version = "=0.7.0", default-features = false }        # direct dep only for the hand-rolled issuer/default/json Endpoint; already transitive via vaultrs, pinned to the resolved Cargo.lock version and moved in lockstep with vaultrs; no features of our own
 rustify_derive = "=0.5.5"                                          # the #[derive(Endpoint)] macro used by the endpoint above; already transitive via vaultrs, pinned to the resolved Cargo.lock version
 maknae-crypto = { path = "../maknae-crypto" }
+maknae-msgs = { path = "../maknae-msgs" }
 x509-parser = "0.18"  # also parses CA/leaf PEM->DER (rustls-pemfile is unmaintained, RUSTSEC-2025-0134)
 url = "2"             # validate vault.addr is a well-formed https:// URL (fail-closed, no plaintext)
 zeroize = "1"
@@ -65,8 +66,9 @@ maknae-plane = { path = "../maknae-plane" }
 security-framework = "3"
 
 [dev-dependencies]
+maknae-crypto = { path = "../maknae-crypto", features = ["test-support"] }
 # Fixtures CREATE the objects they delegate rather than borrowing a system file:
 # `/etc/hostname` does not exist on macOS, which the darwin-native job caught.
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "macros", "io-util", "test-util"] }
-maknae-seal = { path = "../maknae-seal" }  # dev-only: a normal edge would link maknae-seal into maknaed (seal-confinement.sh)
+maknae-seal = { path = "../maknae-seal" }
