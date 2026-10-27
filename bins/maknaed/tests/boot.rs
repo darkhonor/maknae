@@ -10,6 +10,7 @@
 #![cfg(unix)]
 
 use maknae_msgs::{msg, Locale, MsgId};
+use maknae_vault::VaultError;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -62,7 +63,9 @@ fn good_config_passes_gates_then_fails_without_vault() {
     // config validation — i.e. it failed at the credential/serving phase, not at a gate.
     assert!(
         !stderr.contains(msg(Locale::EnUs, MsgId::CryptoFipsUnavailable))
-            && !stderr.contains(msg(Locale::EnUs, MsgId::CryptoKxGroupsDrift)),
+            && !stderr.contains(msg(Locale::EnUs, MsgId::CryptoKxGroupsDrift))
+            && !stderr.contains(&VaultError::FipsUnavailable.to_string())
+            && !stderr.contains(&VaultError::KxGroupsDrift.to_string()),
         "the FIPS provider must install and pass on this build; stderr: {stderr}"
     );
     assert!(

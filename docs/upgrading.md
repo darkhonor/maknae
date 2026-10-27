@@ -98,7 +98,7 @@ While it is absent and the store holds bindings from `authz.yaml`, the daemon re
 **If your `authz.yaml` has a `bindings:` block, move it right after upgrading.** The package restarts `maknaed` (RPM `%systemd_postun_with_restart`, the deb's `postinst` `try-restart`, `launchctl kickstart -k` on macOS), and while the block is still in `authz.yaml` the new daemon refuses to start with exit 3:
 
 ```text
-maknaed: refusing to start: maknae daemon refused to start: the authorization policy could not be loaded: authz policy load refused: authz.yaml no longer carries `bindings:`; move the block unchanged to bindings.yaml in the same directory (docs/upgrading.md)
+maknaed: refusing to start: the authorization policy could not be loaded: authz policy load refused: authz.yaml no longer carries `bindings:`; move the block unchanged to bindings.yaml in the same directory (docs/upgrading.md)
 ```
 
 systemd and launchd retry every 5 seconds, and each attempt writes a denied `authz` record to the audit trail, until you move the block. A reload of a daemon that is already running the new release refuses with the same cause, and the running policy stands. To move it:
@@ -112,7 +112,7 @@ The first start then records one `graph.transition` (`root-file`) and a `graph.c
 **Do not delete the block without pasting it.** If you remove it from `authz.yaml` and `bindings.yaml` still has no `bindings:` key, the new daemon refuses to start (exit 3) rather than release every containment and make the enrolled principal admin:
 
 ```text
-maknaed: refusing to start: maknae daemon refused to start: the authorization policy could not be loaded: the store holds explicit bindings from authz.yaml; paste the bindings: block into /etc/maknae/bindings.yaml
+maknaed: refusing to start: the authorization policy could not be loaded: the store holds explicit bindings from authz.yaml; paste the bindings: block into /etc/maknae/bindings.yaml
 ```
 
 Paste the block and start again. Once the store's bindings come from `bindings.yaml`, a `bindings.yaml` without a `bindings:` key, or a missing one, changes nothing; see [Sync back (#491)](#sync-back-491) and [configuration §2.3](configuration.md#23-bindingsyaml).
@@ -128,7 +128,7 @@ Paste the block and start again. Once the store's bindings come from `bindings.y
 **`/etc/maknae` itself is now checked.** Both policy files are read through their directory, which must be owned by root and not group- or other-writable. The packages create it `root:_maknae 0750`, and earlier releases did not check it. A directory changed since then refuses to start (exit 3), naming the directory:
 
 ```text
-maknaed: refusing to start: maknae daemon refused to start: the authorization policy could not be loaded: authz policy load refused: the directory /etc/maknae holding authz.yaml must be owned by root (uid 0) and not group- or other-writable
+maknaed: refusing to start: the authorization policy could not be loaded: authz policy load refused: the directory /etc/maknae holding authz.yaml must be owned by root (uid 0) and not group- or other-writable
 ```
 
 Restore it with `sudo chown root:_maknae /etc/maknae && sudo chmod 0750 /etc/maknae`, then start again.
@@ -206,7 +206,7 @@ Uninstalling on macOS keeps the store and its keychain item, as it keeps `/etc/m
 A host enrolled before #440 may still carry a `home:` line under `principal:` in `/etc/maknae/maknae.yaml`. Current `maknaed` refuses to start while any configuration file carries it, `maknae.yaml` or a `config.d/` member, and exits with code 3. The journal holds:
 
 ```text
-maknaed: refusing to start: maknae daemon refused to start: the authorization policy could not be loaded: unknown key 'home' in 'principal'
+maknaed: refusing to start: the authorization policy could not be loaded: unknown key 'home' in 'principal'
 ```
 
 Delete the `home:` line from the file that carries it, then restart `maknaed`. The [runbook](runbook.md#3b-upgrading-a-host-whose-principal-carries-home) has the details.

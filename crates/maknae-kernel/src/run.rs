@@ -7991,7 +7991,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         match block_on_run_inner(&d.0) {
             Err(RunError::Authz(msg)) => assert_eq!(
                 msg.to_string(),
-                "maknae daemon refused to start: the authorization policy could not be loaded: \
+                "the authorization policy could not be loaded: \
                  unknown key 'home' in 'principal'"
             ),
             other => panic!("expected Err(RunError::Authz), got {other:?}"),
