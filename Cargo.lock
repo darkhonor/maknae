@@ -1106,6 +1106,7 @@ name = "maknae-crypto"
 version = "0.0.0"
 dependencies = [
  "aws-lc-rs",
+ "pem",
  "rcgen",
  "rustls",
  "zeroize",
@@ -1232,7 +1233,6 @@ version = "0.0.0"
 dependencies = [
  "maknae-crypto",
  "maknae-proto",
- "pem",
  "zeroize",
 ]
 

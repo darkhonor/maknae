@@ -15,6 +15,24 @@ pub enum CryptoError {
     AeadSeal,
     /// The AEAD ciphertext did not authenticate.
     AeadOpen,
+    /// A sealed-box plaintext is empty.
+    SealPlaintext,
+    /// A sealed blob is shorter than a header, one byte and a tag.
+    SealBlob,
+    /// A sealed blob carries an unknown version.
+    SealVersion,
+    /// A sealed blob's ephemeral key is not a P-384 point.
+    SealEphemeralKey,
+    /// A sealing public key is not a canonical P-384 SubjectPublicKeyInfo.
+    SealPublicKey,
+    /// A sealing private key is not a P-384 PKCS#8 key.
+    SealPrivateKey,
+    /// A sealed blob does not open under this key, domain and AAD.
+    SealOpen,
+    /// A cryptographic primitive failed.
+    Primitive,
+    /// The aws-lc FIPS module is not active.
+    FipsModuleUnavailable,
 }
 
 impl std::fmt::Display for CryptoError {
@@ -33,6 +51,26 @@ impl std::fmt::Display for CryptoError {
             CryptoError::AeadKey => write!(f, "the AEAD key was refused"),
             CryptoError::AeadSeal => write!(f, "AEAD sealing failed"),
             CryptoError::AeadOpen => write!(f, "the AEAD ciphertext does not authenticate"),
+            CryptoError::SealPlaintext => write!(f, "the sealed plaintext is empty"),
+            CryptoError::SealBlob => write!(f, "the sealed blob is too short"),
+            CryptoError::SealVersion => write!(f, "the sealed blob has an unknown version"),
+            CryptoError::SealEphemeralKey => write!(
+                f,
+                "the sealed blob's ephemeral key is not an uncompressed P-384 point"
+            ),
+            CryptoError::SealPublicKey => write!(
+                f,
+                "the sealing public key is not a canonical P-384 SubjectPublicKeyInfo PEM"
+            ),
+            CryptoError::SealPrivateKey => {
+                write!(f, "the sealing private key is not a P-384 PKCS#8 key")
+            }
+            CryptoError::SealOpen => write!(
+                f,
+                "the sealed blob does not open under this key, domain and AAD"
+            ),
+            CryptoError::Primitive => write!(f, "a cryptographic primitive failed"),
+            CryptoError::FipsModuleUnavailable => write!(f, "the aws-lc FIPS module is not active"),
         }
     }
 }

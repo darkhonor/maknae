@@ -104,4 +104,5 @@ rustls = { version = "0.23", default-features = false, features = ["fips", "std"
 # `Issuer::from_ca_cert_der` would need rcgen's `x509-parser` feature, which is
 # not enabled. The `aws_lc_rs` + `fips` features select the FIPS backend.
 rcgen = { version = ">=0.14.9, <0.15", default-features = false, features = ["aws_lc_rs", "fips", "pem"] }
+pem = "4"
 zeroize = "1"

@@ -105,7 +105,7 @@
 <path d="M 548.0 333 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
 <rect x="548.0" y="333" width="150" height="111" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
 <text x="557.0" y="350" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">vault</text>
-<text x="557.0" y="361" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">arc-swap, bytes, nix, rcgen,</text>
+<text x="557.0" y="361" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">arc-swap, bytes, nix,</text>
 <text x="557.0" y="372" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">reqwest, rustify,</text>
 <text x="557.0" y="383" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">rustify_derive,</text>
 <text x="557.0" y="394" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">security-framework, serde,</text>
@@ -146,7 +146,7 @@
 <path d="M 632.0 595 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
 <rect x="632.0" y="595" width="150" height="45" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
 <text x="641.0" y="612" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">seal</text>
-<text x="641.0" y="623" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">pem, zeroize</text>
+<text x="641.0" y="623" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">zeroize</text>
 <path d="M 800.0 595 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
 <rect x="800.0" y="595" width="150" height="45" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
 <text x="809.0" y="612" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">io</text>
@@ -181,9 +181,10 @@
 <text x="977.0" y="743" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">icu_properties, serde,</text>
 <text x="977.0" y="754" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">tokio, zeroize</text>
 <path d="M 1136.0 704 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
-<rect x="1136.0" y="704" width="150" height="45" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<rect x="1136.0" y="704" width="150" height="56" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
 <text x="1145.0" y="721" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">crypto</text>
-<text x="1145.0" y="732" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">aws-lc-rs, rustls</text>
+<text x="1145.0" y="732" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">aws-lc-rs, pem, rcgen,</text>
+<text x="1145.0" y="743" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8" font-weight="400" fill="#5F5E5A">rustls, zeroize</text>
 <path d="M 1304.0 704 h 46 l 5 -9 h 0 v 9" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
 <rect x="1304.0" y="704" width="150" height="28" rx="3" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
 <text x="1313.0" y="721" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#2C2C2A">msgs</text>
@@ -201,7 +202,7 @@
 <rect x="968.0" y="824" width="150" height="39" rx="3" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
 <text x="977.0" y="841" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="600" fill="#26215C">spif-compile</text>
 <text x="977.0" y="851" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#534AB7">«trusted»</text>
-<text x="44" y="931" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#B3452F">The dependency closure of a «trusted» package covers 20 of the 29 workspace packages and 24 of the 28 direct external crates — 16 through maknae-vault alone.</text>
+<text x="44" y="931" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#B3452F">The dependency closure of a «trusted» package covers 20 of the 29 workspace packages and 25 of the 28 direct external crates — 15 through maknae-vault alone.</text>
 <text x="44" y="946" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">Closure is not TCB membership (see the component view) — but it is the code a privileged package can reach, so it is the surface that matters.</text>
-<text x="24" y="971" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: cargo metadata (normal deps) · inputs at 3c9d8c70 · 2026-10-27</text><text x="1474" y="971" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">UML 2.5.1 (OMG formal/2017-12-05)</text>
+<text x="24" y="971" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: cargo metadata (normal deps) · inputs at fb295aa0 +UNCOMMITTED-INPUTS · 2026-10-27</text><text x="1474" y="971" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">UML 2.5.1 (OMG formal/2017-12-05)</text>
 </svg>

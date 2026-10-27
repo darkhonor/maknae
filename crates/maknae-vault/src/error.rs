@@ -159,11 +159,21 @@ impl From<maknae_crypto::CryptoError> for VaultError {
         use maknae_crypto::CryptoError as C;
         let detail = e.to_string();
         match e {
-            C::FipsUnavailable => VaultError::FipsUnavailable,
+            C::FipsUnavailable | C::FipsModuleUnavailable => VaultError::FipsUnavailable,
             C::KxGroupsDrift => VaultError::KxGroupsDrift,
             C::Csr(m) => VaultError::CsrGen(m),
             C::Random => VaultError::Random,
-            C::AeadKey | C::AeadSeal | C::AeadOpen => VaultError::Crypto(detail),
+            C::AeadKey
+            | C::AeadSeal
+            | C::AeadOpen
+            | C::SealPlaintext
+            | C::SealBlob
+            | C::SealVersion
+            | C::SealEphemeralKey
+            | C::SealPublicKey
+            | C::SealPrivateKey
+            | C::SealOpen
+            | C::Primitive => VaultError::Crypto(detail),
             _ => VaultError::Crypto(detail),
         }
     }
@@ -335,7 +345,7 @@ mod tests {
         use super::VaultError as V;
         use maknae_crypto::CryptoError as C;
         type Is = fn(&V) -> bool;
-        let table: [(C, Is, &str); 7] = [
+        let table: [(C, Is, &str); 16] = [
             (
                 C::FipsUnavailable,
                 |v| matches!(v, V::FipsUnavailable),
@@ -370,6 +380,51 @@ mod tests {
                 C::AeadOpen,
                 |v| matches!(v, V::Crypto(d) if d == "the AEAD ciphertext does not authenticate"),
                 "a cryptographic operation failed: the AEAD ciphertext does not authenticate",
+            ),
+            (
+                C::FipsModuleUnavailable,
+                |v| matches!(v, V::FipsUnavailable),
+                "FIPS provider not active: the process default is not aws-lc-rs FIPS (refusing to start)",
+            ),
+            (
+                C::SealPlaintext,
+                |v| matches!(v, V::Crypto(d) if d == "the sealed plaintext is empty"),
+                "a cryptographic operation failed: the sealed plaintext is empty",
+            ),
+            (
+                C::SealBlob,
+                |v| matches!(v, V::Crypto(d) if d == "the sealed blob is too short"),
+                "a cryptographic operation failed: the sealed blob is too short",
+            ),
+            (
+                C::SealVersion,
+                |v| matches!(v, V::Crypto(d) if d == "the sealed blob has an unknown version"),
+                "a cryptographic operation failed: the sealed blob has an unknown version",
+            ),
+            (
+                C::SealEphemeralKey,
+                |v| matches!(v, V::Crypto(d) if d == "the sealed blob's ephemeral key is not an uncompressed P-384 point"),
+                "a cryptographic operation failed: the sealed blob's ephemeral key is not an uncompressed P-384 point",
+            ),
+            (
+                C::SealPublicKey,
+                |v| matches!(v, V::Crypto(d) if d == "the sealing public key is not a canonical P-384 SubjectPublicKeyInfo PEM"),
+                "a cryptographic operation failed: the sealing public key is not a canonical P-384 SubjectPublicKeyInfo PEM",
+            ),
+            (
+                C::SealPrivateKey,
+                |v| matches!(v, V::Crypto(d) if d == "the sealing private key is not a P-384 PKCS#8 key"),
+                "a cryptographic operation failed: the sealing private key is not a P-384 PKCS#8 key",
+            ),
+            (
+                C::SealOpen,
+                |v| matches!(v, V::Crypto(d) if d == "the sealed blob does not open under this key, domain and AAD"),
+                "a cryptographic operation failed: the sealed blob does not open under this key, domain and AAD",
+            ),
+            (
+                C::Primitive,
+                |v| matches!(v, V::Crypto(d) if d == "a cryptographic primitive failed"),
+                "a cryptographic operation failed: a cryptographic primitive failed",
             ),
         ];
         for (e, is, want) in table {

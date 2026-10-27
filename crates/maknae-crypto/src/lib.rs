@@ -9,9 +9,11 @@ pub mod aead;
 mod csr;
 pub mod digest;
 mod error;
+pub mod fips;
 mod glue;
 mod provider;
 pub mod random;
+pub mod sealbox;
 pub mod signature;
 
 pub use csr::generate_csr;

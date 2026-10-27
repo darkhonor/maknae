@@ -125,7 +125,7 @@ subject = "cli_a"
 object = "sealed"
 right = "r"
 control = "A's CLI seals it, so A already holds what it contains"
-evidence = "bins/maknae/src/agent.rs:185 · crates/maknae-seal/src/seal.rs:54"
+evidence = "bins/maknae/src/agent.rs:185 · crates/maknae-seal/src/seal.rs:105"
 test = "bins/maknae/src/agent.rs::a_turn_reads_the_wrapped_key_then_seals_it_to_exactly_this_request"
 
 [[cell]]
@@ -311,7 +311,7 @@ subject = "egress"
 object = "sealed"
 right = "r"
 control = "it holds the seal private key and opens the blob only under this request's AAD"
-evidence = "bins/maknae-egress/src/opener.rs:78 · crates/maknae-seal/src/seal.rs:84"
+evidence = "bins/maknae-egress/src/opener.rs:78 · crates/maknae-seal/src/seal.rs:116"
 test = "bins/maknae-egress/src/opener.rs::a_blob_sealed_for_one_request_opens_only_under_that_request · crates/maknae-seal/src/seal.rs::a_blob_retargeted_to_another_request_fails_to_open"
 
 [[cell]]
