@@ -1,11 +1,11 @@
-use crate::signature::PlaneKey;
+use crate::signature::SignatureAlgorithm;
 use crate::CryptoError;
 use zeroize::Zeroizing;
 
 /// A new keypair and its PKCS#10 request: an empty subject and exactly one URI SAN.
 /// Returns `(key_der, csr_pem)`, the key as zeroizing PKCS#8.
 pub fn generate_csr(
-    key: PlaneKey,
+    key: SignatureAlgorithm,
     uri_san: &str,
 ) -> Result<(Zeroizing<Vec<u8>>, String), CryptoError> {
     let csr_err = |e: rcgen::Error| CryptoError::Csr(e.to_string());

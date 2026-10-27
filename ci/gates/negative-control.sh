@@ -1013,7 +1013,7 @@ cfg_fixture() { # <manifest> [extra-transport-field] [extra-disclosable-entry] [
   mkdir -p "$fixture/ci/gates" "$fixture/crates/maknae-config/src" \
            "$fixture/crates/maknae-vault/src" "$fixture/crates/maknae-kernel/src" \
            "$fixture/crates/maknae-proto/src" "$fixture/crates/maknae-crypto/src"
-  printf 'pub enum PlaneKey {\n    MlDsa87,\n    P384,\n    P521,\n}\n' > "$fixture/crates/maknae-crypto/src/signature.rs"
+  printf 'pub enum SignatureAlgorithm {\n    MlDsa87,\n    EcdsaP384Sha384,\n    EcdsaP521Sha512,\n}\n' > "$fixture/crates/maknae-crypto/src/signature.rs"
   # `StatusView` is the second disclosure surface (admin.status returns it
   # whole); the gate's SURFACE table names it, so a fixture needs it too.
   cat > "$fixture/crates/maknae-proto/src/wire.rs" <<FIX
@@ -1190,7 +1190,7 @@ pub struct Ceiling {
 }
 FIX
   cat > "$fixture/crates/maknae-vault/src/config.rs" <<'FIX'
-use maknae_crypto::signature::PlaneKey;
+use maknae_crypto::signature::SignatureAlgorithm;
 pub struct VaultConfig {
     pub addr: String,
     pub approle_mount: String,
@@ -1200,9 +1200,9 @@ pub struct VaultConfig {
     pub user_auth: UserAuthConfig,
     pub kv_mount: Option<String>,
     pub user_prefix: Option<String>,
-    pub plane_key: PlaneKey,
+    pub plane_key: SignatureAlgorithm,
 }
-const _: fn(&VaultConfig) -> ::maknae_crypto::signature::PlaneKey = |c| c.plane_key;
+const _: fn(&VaultConfig) -> ::maknae_crypto::signature::SignatureAlgorithm = |c| c.plane_key;
 const _: fn(&VaultConfig) -> isize = |c| c.plane_key as isize;
 pub struct UserAuthConfig {
     pub r#type: String,
@@ -1620,7 +1620,7 @@ expect_reject_because "config-disclosure-drift/leaf-enum-in-another-file-than-it
 
 # REJECT: the enum is in another crate and the struct's file lacks one of the
 # two assertions through which rustc proves the field is that fieldless enum.
-for line in 'const _: fn(&VaultConfig) -> ::maknae_crypto::signature::PlaneKey = |c| c.plane_key;' \
+for line in 'const _: fn(&VaultConfig) -> ::maknae_crypto::signature::SignatureAlgorithm = |c| c.plane_key;' \
             'const _: fn(&VaultConfig) -> isize = |c| c.plane_key as isize;'; do
   fx="$(cfg_fixture "$CFG_OK")"
   grep -vxF "$line" "$fx/crates/maknae-vault/src/config.rs" > "$fx/config.rs.new"

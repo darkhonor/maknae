@@ -2,7 +2,7 @@
 //! `maknae-config`'s `ConfigError` pattern (no extra dep). Every fallible path in
 //! the crate returns one of these; there is no partial-identity / non-FIPS / file
 //! fallback anywhere.
-use maknae_crypto::signature::PlaneKey;
+use maknae_crypto::signature::SignatureAlgorithm;
 use std::path::PathBuf;
 
 #[derive(Debug)]
@@ -190,7 +190,7 @@ impl std::fmt::Display for VaultError {
             VaultError::InvalidPlaneKey(v) => write!(
                 f,
                 "vault.plane_key `{v}` is not one of {}",
-                PlaneKey::ALL.map(PlaneKey::as_str).join(", ")
+                SignatureAlgorithm::ALL.map(SignatureAlgorithm::as_str).join(", ")
             ),
             VaultError::KxGroupsDrift => write!(
                 f,

@@ -17,7 +17,7 @@ use arc_swap::ArcSwapOption;
 use maknae_config::{load_config, Document, SectionSpec};
 use maknae_crypto::assert_fips_provider;
 use maknae_crypto::rustls::sign::CertifiedKey;
-use maknae_crypto::signature::PlaneKey;
+use maknae_crypto::signature::SignatureAlgorithm;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -112,7 +112,7 @@ pub struct PlaneClient {
     auth: PlaneAuth,
     /// Intermediate PKI mount for `pki/sign` (from config; Terraform `int_mount_path`).
     pki_int_mount: String,
-    plane_key: PlaneKey,
+    plane_key: SignatureAlgorithm,
     client: Arc<Mutex<VaultClient>>,
     identity: Arc<RwLock<Option<PlaneIdentity>>>,
     /// The last mint's token lease (seconds); drives the renewal interval so it tracks
@@ -246,7 +246,7 @@ async fn sign_leaf_for(
     plane: Plane,
     deployment_id: &str,
     pki_int_mount: &str,
-    plane_key: PlaneKey,
+    plane_key: SignatureAlgorithm,
     client: &VaultClient,
 ) -> Result<(Zeroizing<Vec<u8>>, String, Vec<String>), VaultError> {
     let (key_der, csr_pem) = generate_plane_csr(plane, deployment_id, plane_key)?;
@@ -613,7 +613,7 @@ impl PlaneClient {
         &self.deployment_id
     }
     /// The key algorithm this plane mints its identity with (`vault.plane_key`).
-    pub fn plane_key(&self) -> PlaneKey {
+    pub fn plane_key(&self) -> SignatureAlgorithm {
         self.plane_key
     }
 
@@ -732,7 +732,7 @@ pub(crate) struct SupervisorCtx {
     plane: Plane,
     deployment_id: String,
     pki_int_mount: String,
-    plane_key: PlaneKey,
+    plane_key: SignatureAlgorithm,
 }
 
 impl SupervisorCtx {

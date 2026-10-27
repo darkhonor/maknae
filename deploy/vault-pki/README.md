@@ -72,7 +72,7 @@ The Rust plane-cert client (`maknae-vault`) and the mTLS transport consume this 
     -platform=darwin_amd64 -platform=darwin_arm64
   ```
 - **Vault 2.2.0 or later** for the default `plane_key_algorithm = "ml-dsa-87"` (Vault's PKI
-  issues ML-DSA certificates from 2.2.0). Older Vault: set `p384` or `p521`
+  issues ML-DSA certificates from 2.2.0). Older Vault: set `ecdsa-p384-sha384` or `ecdsa-p521-sha512`
   (see "Plane key algorithm").
 - A reachable Vault with a token that can create PKI and KV mounts, roles, policies, and
   AppRole and userpass auth mounts and users. Provide it via the environment — **never in
@@ -84,7 +84,7 @@ The Rust plane-cert client (`maknae-vault`) and the mTLS transport consume this 
 
 ## Plane key algorithm
 
-`plane_key_algorithm` (`ml-dsa-87` by default, `p384`, `p521`) sets the key algorithm of the
+`plane_key_algorithm` (`ml-dsa-87` by default, `ecdsa-p384-sha384`, `ecdsa-p521-sha512`) sets the key algorithm of the
 root, the intermediate and both plane roles together, so a chain is never weaker than its
 leaves. It **must equal `vault.plane_key`** in the daemon's and every user's `maknae.yaml`; a
 mismatch fails closed at the first mint (Vault refuses the CSR's key type or size, and a refusal
@@ -94,7 +94,7 @@ whose message concerns the key adds a hint naming both settings).
   Vault 2.2.0+ Community. ML-DSA on Vault Enterprise FIPS builds (BoringCrypto, CMVP #4735)
   is unverified.
 - **Older Vault, or a regime that wants classical signatures** (BSI TR-02102 recommends
-  ML-DSA only in a hybrid, which nothing in the stack issues yet, #575): `p384` or `p521`.
+  ML-DSA only in a hybrid, which nothing in the stack issues yet, #575): `ecdsa-p384-sha384` or `ecdsa-p521-sha512`.
 - **A role's ML-DSA `parameter_set` is not enforced on `pki/sign`** (measured on Vault
   2.2.1): a role set to ML-DSA-87 signs an ML-DSA-44 CSR. Maknae's planes refuse to generate
   anything but the configured algorithm, but any other holder of the sign policy (a CLI
@@ -113,7 +113,7 @@ plan instead. The guard also blocks any other change that replaces them (`ttl`,
 `common_name`, `issuer_name`) and `terraform destroy`; that is its purpose.
 
 - **To keep an existing EC P-384 hierarchy:** before the first apply after this change, set
-  `plane_key_algorithm = "p384"`, and pass `--plane-key p384` to every `maknae enroll` (which
+  `plane_key_algorithm = "ecdsa-p384-sha384"`, and pass `--plane-key ecdsa-p384-sha384` to every `maknae enroll` (which
   writes `vault.plane_key` into `/etc/maknae/maknae.yaml` and each user's `maknae.yaml`), or set
   it in those files by hand. An install that changes neither fails closed at mint.
 - **To move to ML-DSA-87:** a deliberate rebuild. Remove the guard (or stand up fresh mounts),
@@ -257,7 +257,7 @@ terraform test
 `terraform test` runs `tests/agents.tftest.hcl` and `tests/plane_key.tftest.hcl` under a
 mocked Vault provider: it needs `init` but no Vault. It pins the agent policies byte for byte,
 the validations that guard the agent ids, prefix, mount and token lifetimes, and the key
-algorithm of the root, intermediate and roles for each `plane_key_algorithm` (with `p384`
+algorithm of the root, intermediate and roles for each `plane_key_algorithm` (with `ecdsa-p384-sha384`
 planning exactly the pre-#573 hierarchy). It does not exercise `prevent_destroy`, which needs
 existing state.
 
