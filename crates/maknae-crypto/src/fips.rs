@@ -1,9 +1,6 @@
-//! The FIPS module check, independent of any TLS provider.
+//! The FIPS module decision; the probe that feeds it is `glue::assert_fips_module`.
+pub use crate::glue::assert_fips_module;
 use crate::CryptoError;
-
-pub fn assert_fips_module() -> Result<(), CryptoError> {
-    fips_result(aws_lc_rs::try_fips_mode().is_ok())
-}
 
 pub(crate) fn fips_result(active: bool) -> Result<(), CryptoError> {
     if active {
@@ -18,12 +15,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_decision_and_this_build() {
+    fn the_decision_has_both_branches() {
         assert!(fips_result(true).is_ok());
         assert!(matches!(
             fips_result(false),
             Err(CryptoError::FipsModuleUnavailable)
         ));
-        assert!(assert_fips_module().is_ok());
     }
 }

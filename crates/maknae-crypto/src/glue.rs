@@ -29,6 +29,11 @@ pub fn install_default_crypto_provider() {
     let _ = crypto_provider().install_default();
 }
 
+/// Assert the aws-lc FIPS module is active, independent of any TLS provider.
+pub fn assert_fips_module() -> Result<(), CryptoError> {
+    crate::fips::fips_result(aws_lc_rs::try_fips_mode().is_ok())
+}
+
 /// Assert the process is running the aws-lc-rs FIPS provider with Maknae's key-exchange
 /// groups. Fail-closed:
 /// no installed default (the binary `main` forgot to install one) → refuse.
@@ -48,5 +53,10 @@ mod tests {
     fn asserts_fips_true_on_this_build() {
         install_default_crypto_provider();
         assert!(assert_fips_provider().is_ok());
+    }
+
+    #[test]
+    fn the_fips_module_is_active_on_this_build() {
+        assert!(assert_fips_module().is_ok());
     }
 }

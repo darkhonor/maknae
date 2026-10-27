@@ -536,7 +536,7 @@ why = "VaultError enum + Display/From declarations; no decision logic"
 
 [[t3]]
 path = "crates/maknae-crypto/src/glue.rs"
-why = "process-global CryptoProvider fetch (not deterministically coverable); the pure fips_result and kx_groups_result decisions are in provider.rs (T1); the wiring is tests/kx_drift_gate.rs. Mutation-excluded (mutants.toml)"
+why = "process-global CryptoProvider fetch and the aws-lc FIPS-module probe (#578; Ok on every FIPS build, so its mutant is unkillable) — not deterministically coverable; the pure decisions are provider.rs fips_result/kx_groups_result and fips.rs fips_result (T1); the wiring is tests/kx_drift_gate.rs. Mutation-excluded (mutants.toml)"
 
 [[t3]]
 path = "crates/maknae-crypto/src/csr.rs"
