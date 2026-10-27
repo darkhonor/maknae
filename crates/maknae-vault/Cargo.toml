@@ -70,4 +70,4 @@ maknae-crypto = { path = "../maknae-crypto", features = ["test-support"] }
 # `/etc/hostname` does not exist on macOS, which the darwin-native job caught.
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "macros", "io-util", "test-util"] }
-maknae-seal = { path = "../maknae-seal" }  # dev-only: a normal edge would link maknae-seal into maknaed (seal-confinement.sh)
+maknae-seal = { path = "../maknae-seal" }
