@@ -103,6 +103,42 @@ mod tests {
     }
 
     #[test]
+    fn each_algorithm_maps_to_its_own_scheme_and_spki() {
+        let table = [
+            (
+                PlaneKey::MlDsa87,
+                SignatureScheme::ML_DSA_87,
+                ID_ML_DSA_87,
+                SpkiParams::Absent,
+            ),
+            (
+                PlaneKey::P384,
+                SignatureScheme::ECDSA_NISTP384_SHA384,
+                ID_EC_PUBLIC_KEY,
+                curve(SECP384R1),
+            ),
+            (
+                PlaneKey::P521,
+                SignatureScheme::ECDSA_NISTP521_SHA512,
+                ID_EC_PUBLIC_KEY,
+                curve(SECP521R1),
+            ),
+        ];
+        for (k, scheme, alg, params) in &table {
+            assert_eq!(k.signature_scheme(), *scheme);
+            let key = rcgen::KeyPair::generate_for(k.rcgen_algorithm()).unwrap();
+            let len = key.public_key_raw().len();
+            for other in PlaneKey::ALL {
+                assert_eq!(
+                    other.matches_spki(alg, params, len, 0),
+                    other == *k,
+                    "{k:?} key against {other:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn each_algorithm_generates_a_key_the_provider_signs_with_only_its_scheme() {
         let schemes = PlaneKey::ALL.map(PlaneKey::signature_scheme);
         for k in PlaneKey::ALL {
@@ -158,6 +194,8 @@ mod tests {
             (PlaneKey::P384, ID_EC_PUBLIC_KEY, curve(SECP384R1), 133),
             (PlaneKey::P521, ID_ML_DSA_87, curve(SECP521R1), 133),
             (PlaneKey::P521, ID_EC_PUBLIC_KEY, curve(SECP384R1), 133),
+            (PlaneKey::P521, ID_EC_PUBLIC_KEY, SpkiParams::Absent, 133),
+            (PlaneKey::MlDsa87, ID_ML_DSA_87, curve(SECP521R1), 2592),
             (PlaneKey::P521, ID_EC_PUBLIC_KEY, SpkiParams::Other, 133),
             (PlaneKey::P521, ID_EC_PUBLIC_KEY, curve(SECP521R1), 97),
         ];

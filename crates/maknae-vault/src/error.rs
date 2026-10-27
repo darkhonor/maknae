@@ -2,6 +2,7 @@
 //! `maknae-config`'s `ConfigError` pattern (no extra dep). Every fallible path in
 //! the crate returns one of these; there is no partial-identity / non-FIPS / file
 //! fallback anywhere.
+use maknae_crypto::signature::PlaneKey;
 use std::path::PathBuf;
 
 #[derive(Debug)]
@@ -171,7 +172,8 @@ impl std::fmt::Display for VaultError {
             ),
             VaultError::InvalidPlaneKey(v) => write!(
                 f,
-                "vault.plane_key `{v}` is not one of ml-dsa-87, p384, p521"
+                "vault.plane_key `{v}` is not one of {}",
+                PlaneKey::ALL.map(PlaneKey::as_str).join(", ")
             ),
             VaultError::KxGroupsDrift => write!(
                 f,
@@ -327,6 +329,7 @@ mod tests {
         for (e, want) in [
             (CryptoError::FipsUnavailable, "FIPS provider not active"),
             (CryptoError::KxGroupsDrift, "key-exchange groups"),
+            (CryptoError::Csr("rcgen refused".into()), "rcgen refused"),
         ] {
             let msg = e.to_string();
             let v = super::VaultError::from(e);
@@ -340,6 +343,10 @@ mod tests {
         assert!(matches!(
             super::VaultError::from(CryptoError::FipsUnavailable),
             super::VaultError::FipsUnavailable
+        ));
+        assert!(matches!(
+            super::VaultError::from(CryptoError::Csr(String::new())),
+            super::VaultError::CsrGen(_)
         ));
     }
     #[test]

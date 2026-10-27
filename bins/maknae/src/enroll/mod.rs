@@ -1160,8 +1160,11 @@ fn insecure_plaintext_path(args: &EnrollArgs) -> Option<PathBuf> {
 fn check_vault_layout(args: &EnrollArgs) -> Result<(), EnrollError> {
     if maknae_crypto::signature::PlaneKey::parse(&args.plane_key).is_none() {
         return Err(EnrollError::InvalidVaultLayout(format!(
-            "--plane-key `{}` is not one of ml-dsa-87, p384, p521",
-            args.plane_key
+            "--plane-key `{}` is not one of {}",
+            args.plane_key,
+            maknae_crypto::signature::PlaneKey::ALL
+                .map(maknae_crypto::signature::PlaneKey::as_str)
+                .join(", ")
         )));
     }
     maknae_vault::UserAuth::new(maknae_vault::UserAuthMethod::Userpass, &args.userpass_mount)

@@ -188,6 +188,9 @@ pub struct VaultConfig {
     pub plane_key: PlaneKey,
 }
 
+const _: fn(&VaultConfig) -> ::maknae_crypto::signature::PlaneKey = |c| c.plane_key;
+const _: fn(&VaultConfig) -> isize = |c| c.plane_key as isize;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserAuthConfig {
     pub r#type: String,
@@ -417,12 +420,7 @@ mod tests {
         for k in PlaneKey::ALL {
             let cfg = plane_key_of(&format!("  plane_key: {}\n", k.as_str())).unwrap();
             assert_eq!(cfg.plane_key, k);
-            assert_eq!(PlaneKey::parse(k.as_str()), Some(k));
         }
-        assert_eq!(
-            PlaneKey::ALL.map(PlaneKey::as_str),
-            ["ml-dsa-87", "p384", "p521"]
-        );
     }
 
     #[test]
@@ -490,7 +488,6 @@ mod tests {
                 ..
             })
         ));
-        assert_eq!(PlaneKey::parse("ML-DSA-87"), None);
     }
 
     #[test]

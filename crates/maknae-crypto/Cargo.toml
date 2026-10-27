@@ -95,40 +95,13 @@ workspace = true
 # to notice. Do not file a watch, and do not re-raise the pin.
 aws-lc-rs = { version = "1.18", features = ["fips"] }
 rustls = { version = "0.23", default-features = false, features = ["fips", "std"] }
-# rcgen moved here from maknae-vault 2026-10-27 (#573, ADR-0030), with this note.
-# THE COMPLIANCE CEILING IS REMOVED 2026-09-19 (#320) TOGETHER WITH THE aws-lc-rs
-# BOUND IN THIS FILE. What remains -- `<0.15` -- IS NOT A CONTROL: for a 0.x crate that
-# is exactly cargo's caret bound, i.e. `>=0.14.9, <0.15` resolves identically to
-# `rcgen = "0.14.9"`, written out so the floor is visible. THE FLOOR IS THE
-# CONTROL; the ceiling is cargo's own semantics. (Review caught an earlier draft
-# of this header claiming the bound was simply "removed" while the line below
-# still spelled one out -- an unexplained ceiling in a manifest whose rule is
-# that a bound records the failure it prevents.)
-#
-# See the aws-lc-rs posture comment above for the ruling and the module-line facts,
-# which are not restated here so there is one place to correct. The ceiling here was never
-# about rcgen: `>=0.14.9, <0.14.10` existed because rcgen 0.14.10 raises its OWN
-# aws-lc-rs requirement to ^1.18, which the old FIPS bound excluded, so the two
-# were unsatisfiable and cargo refused the pair. With that bound lifted, 0.14.10
-# resolves normally (MEASURED: aws-lc-rs 1.18.1, aws-lc-fips-sys 0.14.2, rcgen
-# 0.14.10, pem 4.0.0 in one `cargo update`; workspace tests and `cargo deny
-# check` both green).
-#
-# THE FLOOR IS DELIBERATE AND STAYS: `>=0.14.9`, not the bare `0.14` a first
-# pass wrote. Caught in review 2026-09-19 before this shipped -- `"0.14"` is
-# cargo's caret requirement, i.e. `>=0.14.0`, which would have silently dropped
-# the floor eight patch versions below anything measured here, in a manifest
-# whose own rule is that a bound records the failure it prevents. Nothing below
-# 0.14.9 has ever been resolved or tested against Maknae's rcgen usage --
-# this crate's `csr.rs` in production, plus maknae-vault's `Issuer::from_params`
-# test issuers the API note below describes.
-#
-# 0.13 -> 0.14 was an API break, not a routine bump: `CertificateParams::signed_by`
-# takes an `Issuer` instead of (issuer certificate, issuer key). Test issuers
-# therefore retain the CA's `CertificateParams` and build `Issuer::from_params`
-# — `Issuer::from_ca_cert_der` would need rcgen's `x509-parser` feature, which
-# Maknae deliberately does not enable (maknae-vault parses with x509-parser).
-# The `aws_lc_rs` + `fips` feature definitions are byte-identical across the
-# break, so the FIPS backend selection is unchanged by the bump.
+# rcgen: `>=0.14.9, <0.15`. THE FLOOR IS THE CONTROL: nothing below 0.14.9 has
+# been resolved or tested against Maknae's rcgen usage (`csr.rs` here, and
+# maknae-vault's `Issuer::from_params` test issuers), and a bare `"0.14"` would
+# be cargo's `>=0.14.0`. The `<0.15` is cargo's own caret bound for a 0.x crate,
+# written out so the floor is visible, not a compliance ceiling (ADR-0025).
+# 0.14 signs against an `Issuer` built from the issuing `CertificateParams`;
+# `Issuer::from_ca_cert_der` would need rcgen's `x509-parser` feature, which is
+# not enabled. The `aws_lc_rs` + `fips` features select the FIPS backend.
 rcgen = { version = ">=0.14.9, <0.15", default-features = false, features = ["aws_lc_rs", "fips", "pem"] }
 zeroize = "1"

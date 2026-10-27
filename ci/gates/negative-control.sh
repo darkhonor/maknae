@@ -1013,7 +1013,6 @@ cfg_fixture() { # <manifest> [extra-transport-field] [extra-disclosable-entry] [
   mkdir -p "$fixture/ci/gates" "$fixture/crates/maknae-config/src" \
            "$fixture/crates/maknae-vault/src" "$fixture/crates/maknae-kernel/src" \
            "$fixture/crates/maknae-proto/src" "$fixture/crates/maknae-crypto/src"
-  printf 'pub mod signature;\n' > "$fixture/crates/maknae-crypto/src/lib.rs"
   printf 'pub enum PlaneKey {\n    MlDsa87,\n    P384,\n    P521,\n}\n' > "$fixture/crates/maknae-crypto/src/signature.rs"
   # `StatusView` is the second disclosure surface (admin.status returns it
   # whole); the gate's SURFACE table names it, so a fixture needs it too.
@@ -1203,6 +1202,8 @@ pub struct VaultConfig {
     pub user_prefix: Option<String>,
     pub plane_key: PlaneKey,
 }
+const _: fn(&VaultConfig) -> ::maknae_crypto::signature::PlaneKey = |c| c.plane_key;
+const _: fn(&VaultConfig) -> isize = |c| c.plane_key as isize;
 pub struct UserAuthConfig {
     pub r#type: String,
     pub mount: String,
@@ -1617,30 +1618,17 @@ PYFIX
 expect_reject_because "config-disclosure-drift/leaf-enum-in-another-file-than-its-struct" \
   "not in" "$fx/ci/gates/config-disclosure-drift.sh"
 
-# The vault.plane_key row is the cross-crate shape: the enum is in
-# maknae-crypto and VaultConfig's file imports it. Each probe breaks one link.
-import_probe() { # <name> <wanted> <file under the fixture> <python-expr transforming s>
-  local fx; fx="$(cfg_fixture "$CFG_OK")"
-  python3 - "$fx" "$3" "$4" <<'PYFIX'
-import pathlib, sys
-p = pathlib.Path(sys.argv[1]) / sys.argv[2]
-s = p.read_text()
-t = eval(sys.argv[3])
-assert t != s, "probe changed nothing"
-p.write_text(t)
-PYFIX
-  expect_reject_because "config-disclosure-drift/$1" "$2" "$fx/ci/gates/config-disclosure-drift.sh"
-}
-import_probe leaf-enum-cross-crate-without-its-import "does not import" \
-  crates/maknae-vault/src/config.rs 's.replace("use maknae_crypto::signature::PlaneKey;\n", "")'
-import_probe leaf-enum-cross-crate-imported-from-another-module "does not import" \
-  crates/maknae-vault/src/config.rs 's.replace("maknae_crypto::signature::PlaneKey", "maknae_crypto::other::PlaneKey")'
-import_probe leaf-enum-cross-crate-imported-in-a-nested-module "does not import" \
-  crates/maknae-vault/src/config.rs 's.replace("use maknae_crypto::signature::PlaneKey;\n", "mod inner {\n    use maknae_crypto::signature::PlaneKey;\n}\n")'
-import_probe leaf-enum-cross-crate-module-not-public "does not declare" \
-  crates/maknae-crypto/src/lib.rs 's.replace("pub mod signature;", "mod signature;")'
-import_probe leaf-enum-cross-crate-also-defined-locally "also names" \
-  crates/maknae-vault/src/config.rs 's + "\nmod inner {\n    pub struct PlaneKey { pub secret: String }\n}\n"'
+# REJECT: the enum is in another crate and the struct's file lacks one of the
+# two assertions through which rustc proves the field is that fieldless enum.
+for line in 'const _: fn(&VaultConfig) -> ::maknae_crypto::signature::PlaneKey = |c| c.plane_key;' \
+            'const _: fn(&VaultConfig) -> isize = |c| c.plane_key as isize;'; do
+  fx="$(cfg_fixture "$CFG_OK")"
+  grep -vxF "$line" "$fx/crates/maknae-vault/src/config.rs" > "$fx/config.rs.new"
+  mv "$fx/config.rs.new" "$fx/crates/maknae-vault/src/config.rs"
+  case "$line" in *isize*) name=cast ;; *) name=type ;; esac
+  expect_reject_because "config-disclosure-drift/leaf-enum-cross-crate-without-the-$name-assertion" \
+    "does not hold" "$fx/ci/gates/config-disclosure-drift.sh"
+done
 
 # REJECT: the field names the type by a path. The row is matched on the
 # qualifier-stripped name, so the path may resolve to a same-named data struct

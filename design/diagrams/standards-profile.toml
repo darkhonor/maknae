@@ -74,7 +74,7 @@ version = "ML-DSA-87 default (plane_key)"
 category = "Cryptography"
 applies_to = "a plane's own CSR key; the peer's algorithm is not pinned (#574)"
 status = "enforced"
-evidence = "crates/maknae-vault/src/csr.rs csr_key_is; vault.plane_key"
+evidence = "crates/maknae-crypto/src/signature.rs PlaneKey::matches_spki (called by maknae-vault csr_key_is); vault.plane_key"
 
 [[standard]]
 name = "CNSA Suite"

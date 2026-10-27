@@ -1,6 +1,6 @@
 //! Pure CSR-shape predicates (T1, 0-missed): assert an empty subject, exactly one
 //! URI SAN, and the configured `PlaneKey` by algorithm identifier (#573).
-//! `generate_plane_csr` (the rcgen keygen I/O) lives in `csr_gen.rs` (T3) and
+//! `generate_plane_csr` (keygen via `maknae_crypto::generate_csr`) lives in `csr_gen.rs` (T3) and
 //! self-checks its output with these predicates.
 use maknae_crypto::signature::{PlaneKey, SpkiParams};
 use x509_parser::certification_request::X509CertificationRequest;

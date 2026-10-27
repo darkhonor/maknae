@@ -19,7 +19,7 @@ impl std::fmt::Display for CryptoError {
                 f,
                 "the process TLS provider does not carry Maknae's key-exchange groups (refusing TLS)"
             ),
-            CryptoError::Csr(e) => write!(f, "key or CSR generation failed: {e}"),
+            CryptoError::Csr(e) => write!(f, "keypair/CSR generation failed: {e}"),
         }
     }
 }
