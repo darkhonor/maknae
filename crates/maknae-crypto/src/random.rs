@@ -2,6 +2,7 @@
 use crate::CryptoError;
 use aws_lc_rs::rand::{SecureRandom, SystemRandom};
 
+/// Fills `out` from the FIPS module's DRBG.
 pub fn fill(out: &mut [u8]) -> Result<(), CryptoError> {
     SystemRandom::new()
         .fill(out)

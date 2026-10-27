@@ -11,26 +11,34 @@ const SECP521R1: &str = "1.3.132.0.35";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SignatureAlgorithm {
+    /// ML-DSA-87 (FIPS 204).
     MlDsa87,
+    /// ECDSA on P-384 with SHA-384.
     EcdsaP384Sha384,
+    /// ECDSA on P-521 with SHA-512.
     EcdsaP521Sha512,
 }
 
 /// The SubjectPublicKeyInfo algorithm parameters, as far as [`SignatureAlgorithm::matches_spki`] reads them.
 #[derive(Debug, PartialEq, Eq)]
 pub enum SpkiParams {
+    /// The parameters field is omitted.
     Absent,
+    /// A named-curve OID, in dotted form.
     NamedCurve(String),
+    /// Any other parameters encoding.
     Other,
 }
 
 impl SignatureAlgorithm {
+    /// Every supported algorithm.
     pub const ALL: [SignatureAlgorithm; 3] = [
         SignatureAlgorithm::MlDsa87,
         SignatureAlgorithm::EcdsaP384Sha384,
         SignatureAlgorithm::EcdsaP521Sha512,
     ];
 
+    /// The algorithm's configuration name.
     pub fn as_str(self) -> &'static str {
         match self {
             SignatureAlgorithm::MlDsa87 => "ml-dsa-87",
@@ -39,6 +47,7 @@ impl SignatureAlgorithm {
         }
     }
 
+    /// The algorithm with this configuration name, if any.
     pub fn parse(s: &str) -> Option<Self> {
         SignatureAlgorithm::ALL
             .into_iter()
@@ -53,11 +62,13 @@ impl SignatureAlgorithm {
         }
     }
 
+    /// The rcgen algorithm used to generate keys of this kind.
     #[cfg(feature = "test-support")]
     pub fn rcgen_algorithm(self) -> &'static rcgen::SignatureAlgorithm {
         self.rcgen_alg()
     }
 
+    /// The TLS signature scheme this algorithm signs with.
     pub fn signature_scheme(self) -> SignatureScheme {
         match self {
             SignatureAlgorithm::MlDsa87 => SignatureScheme::ML_DSA_87,

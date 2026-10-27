@@ -1,33 +1,40 @@
 //! SHA-256 through the FIPS module.
 use aws_lc_rs::digest;
 
+/// The SHA-256 digest of `bytes`.
 pub fn sha256(bytes: &[u8]) -> [u8; 32] {
     let mut out = [0u8; 32];
     out.copy_from_slice(digest::digest(&digest::SHA256, bytes).as_ref());
     out
 }
 
+/// The SHA-256 digest of `bytes` as lowercase hex.
 pub fn sha256_hex(bytes: &[u8]) -> String {
     hex(&sha256(bytes))
 }
 
+/// An incremental SHA-256 computation.
 pub struct Sha256(digest::Context);
 
 impl Sha256 {
+    /// Starts an empty digest.
     pub fn new() -> Self {
         Sha256(digest::Context::new(&digest::SHA256))
     }
 
+    /// Appends `bytes` to the input.
     pub fn update(&mut self, bytes: &[u8]) {
         self.0.update(bytes)
     }
 
+    /// Returns the digest of everything appended.
     pub fn finish(self) -> [u8; 32] {
         let mut out = [0u8; 32];
         out.copy_from_slice(self.0.finish().as_ref());
         out
     }
 
+    /// Returns the digest of everything appended as lowercase hex.
     pub fn finish_hex(self) -> String {
         hex(&self.finish())
     }

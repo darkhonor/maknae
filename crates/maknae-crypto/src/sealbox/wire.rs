@@ -1,9 +1,14 @@
 use crate::CryptoError;
 
+/// The sealed-blob format version byte.
 pub const VERSION: u8 = 1;
+/// The length of the uncompressed ephemeral P-384 point.
 pub const EPHEMERAL_KEY_LEN: usize = 97;
+/// The AES-GCM nonce length in a sealed blob.
 pub const NONCE_LEN: usize = crate::aead::NONCE_LEN;
+/// The AES-GCM tag length in a sealed blob.
 pub const TAG_LEN: usize = crate::aead::TAG_LEN;
+/// The length of the version, ephemeral point and nonce that precede the ciphertext.
 pub const HEADER_LEN: usize = 1 + EPHEMERAL_KEY_LEN + NONCE_LEN;
 pub(super) const MIN_BLOB_LEN: usize = HEADER_LEN + 1 + TAG_LEN;
 const UNCOMPRESSED_POINT: u8 = 0x04;

@@ -8,16 +8,20 @@ use aws_lc_rs::encoding::{AsDer, Pkcs8V1Der, PublicKeyX509Der};
 use std::fmt;
 use zeroize::Zeroizing;
 
+/// The DER length of a P-384 SubjectPublicKeyInfo.
 pub const SPKI_LEN: usize = 120;
+/// The length of a canonical P-384 public-key PEM with LF line endings.
 pub const PEM_LEN: usize = 215;
 const PEM_TAG: &str = "PUBLIC KEY";
 
+/// A sealed-box recipient's P-384 public key.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PublicKey {
     spki: [u8; SPKI_LEN],
 }
 
 impl PublicKey {
+    /// Parses a P-384 SubjectPublicKeyInfo, refusing any other key or encoding.
     pub fn from_spki_der(der: &[u8]) -> Result<Self, CryptoError> {
         let spki: [u8; SPKI_LEN] = der.try_into().map_err(|_| CryptoError::SealPublicKey)?;
         let parsed = ParsedPublicKey::try_from(UnparsedPublicKey::new(&ECDH_P384, &spki[..]));
@@ -28,6 +32,7 @@ impl PublicKey {
         }
     }
 
+    /// Parses exactly one canonical `PUBLIC KEY` PEM block holding a P-384 key.
     pub fn from_pem(text: &str) -> Result<Self, CryptoError> {
         check_length(text)?;
         let block = pem::parse(text).map_err(|_| CryptoError::SealPublicKey)?;
@@ -37,10 +42,12 @@ impl PublicKey {
         Ok(key)
     }
 
+    /// The canonical PEM encoding of the key.
     pub fn to_pem(&self) -> String {
         encode_pem(&self.spki)
     }
 
+    /// The key's SubjectPublicKeyInfo DER.
     pub fn spki_der(&self) -> &[u8] {
         &self.spki
     }
@@ -52,18 +59,21 @@ impl fmt::Debug for PublicKey {
     }
 }
 
+/// A sealed-box recipient's P-384 private key.
 pub struct PrivateKey {
     key: AgreementKey,
     public: PublicKey,
 }
 
 impl PrivateKey {
+    /// Generates a fresh key in the FIPS module.
     pub fn generate() -> Result<Self, CryptoError> {
         let generated = assert_fips_module()
             .and_then(|()| AgreementKey::generate(&ECDH_P384).map_err(|_| CryptoError::Primitive));
         Self::from_key(generated?)
     }
 
+    /// Parses a P-384 PKCS#8 private key.
     pub fn from_pkcs8_der(der: &[u8]) -> Result<Self, CryptoError> {
         let parsed = assert_fips_module().and_then(|()| {
             AgreementKey::from_private_key_der(&ECDH_P384, der)
@@ -79,12 +89,14 @@ impl PrivateKey {
         Ok(Self { key, public })
     }
 
+    /// The key's PKCS#8 DER, in a zeroizing buffer.
     pub fn to_pkcs8_der(&self) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
         let der: Result<Pkcs8V1Der<'static>, _> = self.key.as_der();
         let der = der.map_err(|_| CryptoError::Primitive)?;
         Ok(Zeroizing::new(der.as_ref().to_vec()))
     }
 
+    /// The matching public key.
     pub fn public_key(&self) -> &PublicKey {
         &self.public
     }
@@ -188,10 +200,13 @@ mod tests {
         );
     }
 
+    const P256_PUBLIC_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEwb+kKvUQ/6NXarrQo1llFsZkKq3p\nuwMJSL1oX7GpbcalqGg9o0UfaXuMQoO4n+cJ7zqWEHgkmImfZBUhkoVpHQ==\n-----END PUBLIC KEY-----\n";
+
     #[test]
     fn a_non_canonical_foreign_or_malformed_public_key_is_refused() {
         let key = PrivateKey::generate().unwrap();
         let canonical = key.public_key().to_pem();
+        let other = PrivateKey::generate().unwrap().public_key().to_pem();
         let spki = key.public_key().spki_der();
         let mut reflowed = canonical.replacen('\n', "", 2);
         reflowed.insert(26, '\n');
@@ -200,8 +215,10 @@ mod tests {
         for bad in [
             canonical.replace('\n', "\r\n"),
             format!("{canonical}trailing"),
+            format!("{canonical}{other}"),
             canonical.replace("PUBLIC KEY", "PRIVATE KEY"),
             canonical.replace("PUBLIC KEY", "PUBLIC KEZ"),
+            P256_PUBLIC_PEM.to_string(),
             reflowed,
             encode_pem(&[0u8; SPKI_LEN]),
             "x".repeat(PEM_LEN),

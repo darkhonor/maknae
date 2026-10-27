@@ -22,13 +22,16 @@ use zeroize::Zeroizing;
 
 const KDF_SUITE: &[u8] = b" p384 hkdf-sha384 aes-256-gcm";
 
+/// The wire bytes of one sealed box.
 pub struct SealedBlob(Vec<u8>);
 
 impl SealedBlob {
+    /// The blob's bytes.
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
 
+    /// Consumes the blob, returning its bytes.
     pub fn into_bytes(self) -> Vec<u8> {
         self.0
     }
@@ -71,6 +74,7 @@ fn check_plaintext(plaintext: &[u8]) -> Result<(), CryptoError> {
     Ok(())
 }
 
+/// Seals a non-empty `plaintext` to `recipient` under `domain`, authenticating `aad`.
 pub fn seal(
     recipient: &PublicKey,
     domain: &[u8],
@@ -100,6 +104,7 @@ pub fn seal(
     Ok(SealedBlob(std::mem::take(&mut *out)))
 }
 
+/// Opens a blob sealed to `recipient` under `domain` and `aad`.
 pub fn open(
     recipient: &PrivateKey,
     domain: &[u8],

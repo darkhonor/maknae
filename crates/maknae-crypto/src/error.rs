@@ -1,3 +1,4 @@
+/// A refusal from one of the crate's cryptographic operations.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum CryptoError {

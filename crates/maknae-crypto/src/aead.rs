@@ -4,16 +4,21 @@ use crate::CryptoError;
 use aws_lc_rs::aead::{self, Aad, LessSafeKey, RandomizedNonceKey, UnboundKey, AES_256_GCM};
 use std::fmt;
 
+/// The AES-256 key length in bytes.
 pub const KEY_LEN: usize = 32;
+/// The GCM nonce length in bytes.
 pub const NONCE_LEN: usize = aead::NONCE_LEN;
+/// The GCM authentication tag length in bytes.
 pub const TAG_LEN: usize = 16;
 
+/// An AES-256-GCM key that seals under module-chosen nonces and opens under stored ones.
 pub struct Aes256GcmKey {
     sealer: RandomizedNonceKey,
     opener: LessSafeKey,
 }
 
 impl Aes256GcmKey {
+    /// Builds the key from 32 raw bytes.
     pub fn new(key: &[u8; KEY_LEN]) -> Result<Self, CryptoError> {
         let sealer = RandomizedNonceKey::new(&AES_256_GCM, key);
         let sealer = sealer.map_err(|_| CryptoError::AeadKey)?;
@@ -23,6 +28,7 @@ impl Aes256GcmKey {
         Ok(Self { sealer, opener })
     }
 
+    /// Encrypts `buf` in place; the module picks the nonce, which the caller must store beside the ciphertext.
     pub fn seal_in_place(
         &self,
         aad: &[u8],
@@ -37,6 +43,7 @@ impl Aes256GcmKey {
         Ok((*nonce.as_ref(), t))
     }
 
+    /// Authenticates and decrypts `buf` in place, returning the plaintext prefix.
     pub fn open_in_place<'b>(
         &self,
         nonce: &[u8; NONCE_LEN],

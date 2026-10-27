@@ -2,6 +2,8 @@
 //! `rustls` is re-exported because its types are API; the listed rustls entry
 //! points are refused by `clippy.toml` (residual: #581). `rcgen` is re-exported
 //! only under `test-support`.
+#![deny(missing_docs)]
+
 #[cfg(feature = "test-support")]
 pub use rcgen;
 pub use rustls;
