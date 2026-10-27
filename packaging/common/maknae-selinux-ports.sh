@@ -12,6 +12,9 @@ command -v semanage >/dev/null || {
     echo "semanage not found (install policycoreutils-python-utils)" >&2
     exit 1
 }
+ours() {
+    semanage port -l -C | awk -v p="$port" '$1=="maknae_vault_port_t" && $2=="tcp" { for (i = 3; i <= NF; i++) { t = $i; sub(",", "", t); if (t == p) f = 1 } } END { exit !f }'
+}
 case "$action" in
     add)
         # Try to add; if the port is already defined, only MODIFY it when it is
@@ -20,7 +23,7 @@ case "$action" in
         # ignores the current -t, so an unconditional -m would reassign it.
         if semanage port -a -t maknae_vault_port_t -p tcp "$port" 2>/dev/null; then
             :
-        elif semanage port -l | awk '$1=="maknae_vault_port_t"' | grep -qw "$port"; then
+        elif ours; then
             :  # already ours — idempotent no-op
         else
             owner=$(semanage port -l | awk -v p="$port" '$2=="tcp" { n=split($3,a,", "); for(i=1;i<=n;i++) if(a[i]==p) print $1 }' | head -1)
@@ -33,7 +36,7 @@ case "$action" in
         # is-ours guard: `semanage port -d` keys on (proto,port) and ignores -t,
         # so only delete if the label is actually maknae_vault_port_t — never
         # clobber a foreign local customization on the same port.
-        if semanage port -l | awk '$1=="maknae_vault_port_t"' | grep -qw "$port"; then
+        if ours; then
             semanage port -d -t maknae_vault_port_t -p tcp "$port"
         else
             echo "port $port not labeled maknae_vault_port_t; leaving untouched" >&2

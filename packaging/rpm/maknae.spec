@@ -128,7 +128,7 @@ if [ ! -d "$d" ] || [ -h "$d" ] || ! chown 0:0 "$d" || ! setfacl -P -b "$d" || !
     exit 1
 fi
 # SELinux module + contexts
-semodule -i %{_datadir}/selinux/packages/maknae.pp 2>/dev/null || :
+semodule -i %{_datadir}/selinux/packages/maknae.pp || echo "maknae: the maknae SELinux module was not loaded: run semodule -i %{_datadir}/selinux/packages/maknae.pp" >&2
 # Fresh install only (no store yet): a bindings.yaml root removed stays removed;
 # maknaed keeps enforcing the bindings it holds and `maknae policy sync` restores the file.
 B=%{_sysconfdir}/maknae/bindings.yaml
@@ -198,9 +198,9 @@ chown -h _maknae:_maknae %{_localstatedir}/log/maknae
 %preun
 %systemd_preun maknaed.service maknae-egress.service maknae-egress.socket maknae-policy-sync.path maknae-policy-sync.service
 remove_selinux_module() {
-    # A maknae_vault_port_t label references the module's type and blocks its removal (#584).
-    for p in $(semanage port -l -C | awk '$1=="maknae_vault_port_t" { for (i = 3; i <= NF; i++) { sub(",", "", $i); print $i } }'); do
-        %{_libexecdir}/maknae/maknae-selinux-ports.sh remove "$p" || return 1
+    labels=$(semanage port -l -C | awk '$1=="maknae_vault_port_t" { for (i = 3; i <= NF; i++) { sub(",", "", $i); print $2 "/" $i } }')
+    for l in $labels; do
+        semanage port -d -p "${l%%/*}" "${l#*/}" || return 1
     done
     semodule -r maknae
 }

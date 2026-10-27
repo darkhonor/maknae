@@ -73,7 +73,7 @@ SELinux `bin_t` tool-domain honest limit.
 
 ## Removal
 
-`rpm -e` / `dnf remove` stops and disables the units, unloads the SELinux module,
+`rpm -e` / `dnf remove` stops and disables the units, deletes every local `maknae_vault_port_t` port label (a label of the module's type blocks its removal, #584), unloads the SELinux module,
 and keeps the audit trail: `/var/log/maknae/audit.jsonl` is created by `%post`,
 not owned by the package, so erase leaves it in place with its append-only
 attribute. Upgrading from a package that predates #498, which owned the trail as a `%ghost` file that never carried `+a`, has a residual: if the new `%post` refuses, rpm still deletes the old package's `%ghost` entry, and that trail is lost. Keep a copy before such an upgrade. To remove a kept trail, see
