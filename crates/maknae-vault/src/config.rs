@@ -4,6 +4,7 @@
 //! the plane URI-SAN or be rejected by Vault). All pure/fixture-testable (T1).
 use crate::VaultError;
 use maknae_config::{load_config, Document, SectionSpec, Value};
+use maknae_crypto::signature::PlaneKey;
 use std::path::{Path, PathBuf};
 
 /// The config section this client reads (the Terraform `vault` block: addr + mounts).
@@ -135,31 +136,6 @@ pub(crate) const VAULT_KEYS: [&str; 9] = [
     "user_prefix",
     "plane_key",
 ];
-
-/// The plane identity's key algorithm (#573): what this plane generates, and what
-/// `deploy/vault-pki`'s `plane_key_algorithm` must issue.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlaneKey {
-    MlDsa87,
-    P384,
-    P521,
-}
-
-impl PlaneKey {
-    pub const ALL: [PlaneKey; 3] = [PlaneKey::MlDsa87, PlaneKey::P384, PlaneKey::P521];
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            PlaneKey::MlDsa87 => "ml-dsa-87",
-            PlaneKey::P384 => "p384",
-            PlaneKey::P521 => "p521",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Self> {
-        PlaneKey::ALL.into_iter().find(|k| k.as_str() == s)
-    }
-}
 
 /// Vault's own messages for a refused request. vaultrs's `Display` for `APIError` carries
 /// only the status code, so the messages are read from the variant.

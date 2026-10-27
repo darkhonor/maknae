@@ -1158,7 +1158,7 @@ fn insecure_plaintext_path(args: &EnrollArgs) -> Option<PathBuf> {
 }
 
 fn check_vault_layout(args: &EnrollArgs) -> Result<(), EnrollError> {
-    if maknae_vault::PlaneKey::parse(&args.plane_key).is_none() {
+    if maknae_crypto::signature::PlaneKey::parse(&args.plane_key).is_none() {
         return Err(EnrollError::InvalidVaultLayout(format!(
             "--plane-key `{}` is not one of ml-dsa-87, p384, p521",
             args.plane_key
@@ -3275,7 +3275,7 @@ mod tests {
         assert_eq!(vc.kv_mount.as_deref(), Some("corp-kv"));
         assert_eq!(vc.user_prefix.as_deref(), Some("corp/users"));
         assert_eq!(vc.pki_int_mount, "pm");
-        assert_eq!(vc.plane_key, maknae_vault::PlaneKey::P521);
+        assert_eq!(vc.plane_key, maknae_crypto::signature::PlaneKey::P521);
         assert!(!text.contains("approle_mount"), "{text}");
     }
 

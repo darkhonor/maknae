@@ -2,15 +2,10 @@
 //! URI SAN, and the configured `PlaneKey` by algorithm identifier (#573).
 //! `generate_plane_csr` (the rcgen keygen I/O) lives in `csr_gen.rs` (T3) and
 //! self-checks its output with these predicates.
-use crate::PlaneKey;
+use maknae_crypto::signature::{PlaneKey, SpkiParams};
 use x509_parser::certification_request::X509CertificationRequest;
 use x509_parser::extensions::{GeneralName, ParsedExtension};
 use x509_parser::prelude::FromDer;
-
-const ID_ML_DSA_87: &str = "2.16.840.1.101.3.4.3.19";
-const ID_EC_PUBLIC_KEY: &str = "1.2.840.10045.2.1";
-const SECP384R1: &str = "1.3.132.0.34";
-const SECP521R1: &str = "1.3.132.0.35";
 
 fn parse_csr(pem: &str) -> Option<Vec<u8>> {
     let (_, pem) = x509_parser::pem::parse_x509_pem(pem.as_bytes()).ok()?;
@@ -56,41 +51,7 @@ pub fn csr_single_uri_san(pem: &str, want: &str) -> bool {
     all_sans == 1 && uris.len() == 1 && uris[0] == want
 }
 
-/// The SubjectPublicKeyInfo algorithm parameters, as far as the plane decision reads them.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum SpkiParams {
-    Absent,
-    NamedCurve(String),
-    Other,
-}
-
-/// PURE decision: the parsed SPKI is exactly `key`'s algorithm, parameters and key length.
-pub(crate) fn spki_is(
-    alg: &str,
-    params: &SpkiParams,
-    key_len: usize,
-    unused_bits: u8,
-    key: PlaneKey,
-) -> bool {
-    unused_bits == 0
-        && match key {
-            PlaneKey::MlDsa87 => {
-                alg == ID_ML_DSA_87 && *params == SpkiParams::Absent && key_len == 2592
-            }
-            PlaneKey::P384 => {
-                alg == ID_EC_PUBLIC_KEY
-                    && *params == SpkiParams::NamedCurve(SECP384R1.to_string())
-                    && key_len == 97
-            }
-            PlaneKey::P521 => {
-                alg == ID_EC_PUBLIC_KEY
-                    && *params == SpkiParams::NamedCurve(SECP521R1.to_string())
-                    && key_len == 133
-            }
-        }
-}
-
-/// True iff the CSR's public key is exactly `key`'s algorithm (see [`spki_is`]).
+/// True iff the CSR's public key is exactly `key`'s algorithm (`PlaneKey::matches_spki`).
 pub fn csr_key_is(pem: &str, key: PlaneKey) -> bool {
     let Some(der) = parse_csr(pem) else {
         return false;
@@ -106,12 +67,11 @@ pub fn csr_key_is(pem: &str, key: PlaneKey) -> bool {
             Err(_) => SpkiParams::Other,
         },
     };
-    spki_is(
+    key.matches_spki(
         &spki.algorithm.algorithm.to_id_string(),
         &params,
         spki.subject_public_key.data.len(),
         spki.subject_public_key.unused_bits,
-        key,
     )
 }
 
@@ -127,6 +87,7 @@ pub fn csr_matches_plane_shape(pem: &str, want_uri_san: &str, key: PlaneKey) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use maknae_crypto::rcgen;
 
     /// Build a CSR with a configurable CN, URI SANs, and key algorithm.
     fn make_csr(
@@ -249,150 +210,6 @@ mod tests {
                 assert!(!csr_key_is(pem, k), "{k:?} accepted {pem}");
             }
         }
-    }
-
-    fn curve(oid: &str) -> SpkiParams {
-        SpkiParams::NamedCurve(oid.to_string())
-    }
-
-    #[test]
-    fn spki_is_requires_every_conjunct() {
-        assert!(!spki_is(
-            ID_ML_DSA_87,
-            &SpkiParams::Absent,
-            2592,
-            1,
-            PlaneKey::MlDsa87
-        ));
-        assert!(!spki_is(
-            ID_EC_PUBLIC_KEY,
-            &curve(SECP384R1),
-            97,
-            1,
-            PlaneKey::P384
-        ));
-        assert!(!spki_is(
-            ID_EC_PUBLIC_KEY,
-            &curve(SECP521R1),
-            133,
-            1,
-            PlaneKey::P521
-        ));
-        assert!(spki_is(
-            ID_ML_DSA_87,
-            &SpkiParams::Absent,
-            2592,
-            0,
-            PlaneKey::MlDsa87
-        ));
-        assert!(spki_is(
-            ID_EC_PUBLIC_KEY,
-            &curve(SECP384R1),
-            97,
-            0,
-            PlaneKey::P384
-        ));
-        assert!(spki_is(
-            ID_EC_PUBLIC_KEY,
-            &curve(SECP521R1),
-            133,
-            0,
-            PlaneKey::P521
-        ));
-
-        assert!(!spki_is(
-            ID_EC_PUBLIC_KEY,
-            &SpkiParams::Absent,
-            2592,
-            0,
-            PlaneKey::MlDsa87
-        ));
-        assert!(!spki_is(
-            ID_ML_DSA_87,
-            &SpkiParams::Other,
-            2592,
-            0,
-            PlaneKey::MlDsa87
-        ));
-        assert!(!spki_is(
-            ID_ML_DSA_87,
-            &curve(SECP384R1),
-            2592,
-            0,
-            PlaneKey::MlDsa87
-        ));
-        assert!(!spki_is(
-            ID_ML_DSA_87,
-            &SpkiParams::Absent,
-            97,
-            0,
-            PlaneKey::MlDsa87
-        ));
-
-        assert!(!spki_is(
-            ID_ML_DSA_87,
-            &curve(SECP384R1),
-            97,
-            0,
-            PlaneKey::P384
-        ));
-        assert!(!spki_is(
-            ID_EC_PUBLIC_KEY,
-            &curve(SECP521R1),
-            97,
-            0,
-            PlaneKey::P384
-        ));
-        assert!(!spki_is(
-            ID_EC_PUBLIC_KEY,
-            &SpkiParams::Absent,
-            97,
-            0,
-            PlaneKey::P384
-        ));
-        assert!(!spki_is(
-            ID_EC_PUBLIC_KEY,
-            &SpkiParams::Other,
-            97,
-            0,
-            PlaneKey::P384
-        ));
-        assert!(!spki_is(
-            ID_EC_PUBLIC_KEY,
-            &curve(SECP384R1),
-            133,
-            0,
-            PlaneKey::P384
-        ));
-
-        assert!(!spki_is(
-            ID_ML_DSA_87,
-            &curve(SECP521R1),
-            133,
-            0,
-            PlaneKey::P521
-        ));
-        assert!(!spki_is(
-            ID_EC_PUBLIC_KEY,
-            &curve(SECP384R1),
-            133,
-            0,
-            PlaneKey::P521
-        ));
-        assert!(!spki_is(
-            ID_EC_PUBLIC_KEY,
-            &SpkiParams::Other,
-            133,
-            0,
-            PlaneKey::P521
-        ));
-        assert!(!spki_is(
-            ID_EC_PUBLIC_KEY,
-            &curve(SECP521R1),
-            97,
-            0,
-            PlaneKey::P521
-        ));
     }
 
     #[test]

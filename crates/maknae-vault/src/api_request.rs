@@ -175,6 +175,7 @@ mod tests {
     use super::*;
     use crate::wrap::kv_data_path;
     use crate::{MAX_PASSWORD_BYTES, MAX_TOKEN_BYTES};
+    use maknae_crypto::rcgen;
 
     fn http() -> Client {
         maknae_crypto::install_default_crypto_provider();

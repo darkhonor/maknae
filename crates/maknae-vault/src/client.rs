@@ -10,13 +10,14 @@ use crate::secret_io::read_daemon_secret;
 use crate::secret_source::{resolve_daemon_secret_source, CredentialSourceKind};
 use crate::{
     generate_plane_csr, load_ca_pin, sign_refusal_detail, vault_config_from_document,
-    vault_error_text, verify::verify_plane_uri_san, Plane, PlaneKey, UserToken, VaultConfig,
-    VaultError, VAULT_SECTION,
+    vault_error_text, verify::verify_plane_uri_san, Plane, UserToken, VaultConfig, VaultError,
+    VAULT_SECTION,
 };
 use arc_swap::ArcSwapOption;
 use maknae_config::{load_config, Document, SectionSpec};
 use maknae_crypto::assert_fips_provider;
 use maknae_crypto::rustls::sign::CertifiedKey;
+use maknae_crypto::signature::PlaneKey;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -862,6 +863,7 @@ impl SupervisorCtx {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use maknae_crypto::rcgen;
     use std::os::unix::fs::PermissionsExt;
 
     fn tmpfile(name: &str, mode: u32) -> std::path::PathBuf {

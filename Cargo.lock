@@ -1106,7 +1106,9 @@ name = "maknae-crypto"
 version = "0.0.0"
 dependencies = [
  "aws-lc-rs",
+ "rcgen",
  "rustls",
+ "zeroize",
 ]
 
 [[package]]
@@ -1295,7 +1297,6 @@ dependencies = [
  "maknae-plane",
  "maknae-seal",
  "nix",
- "rcgen",
  "reqwest",
  "rustify",
  "rustify_derive",

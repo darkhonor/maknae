@@ -157,6 +157,7 @@ impl From<maknae_crypto::CryptoError> for VaultError {
         match e {
             maknae_crypto::CryptoError::FipsUnavailable => VaultError::FipsUnavailable,
             maknae_crypto::CryptoError::KxGroupsDrift => VaultError::KxGroupsDrift,
+            maknae_crypto::CryptoError::Csr(e) => VaultError::CsrGen(e),
         }
     }
 }

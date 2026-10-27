@@ -93,11 +93,14 @@ SURFACE=(
 # Fields whose type is a unit-only enum: one fixed token on the wire, so a leaf.
 # Each row names the field, the file defining the enum at its top level, and the
 # type, which the field must spell exactly, with no path; the gate verifies the
-# enum itself (leaf_enum_check) and that the field's struct is in the same file.
+# enum itself (leaf_enum_check) and that the field's struct is in the same file,
+# or, for an enum in another crate's `src/<module>.rs`, that the crate declares
+# `pub mod <module>;` and the struct's file has exactly one top-level
+# `use <crate>::<module>::<type>;` and defines nothing else of that name.
 # No other enum-typed field is a leaf.
 LEAF_ENUMS=(
   "containment.outcome|crates/maknae-proto/src/wire.rs|ContainmentOutcome"
-  "vault.plane_key|crates/maknae-vault/src/config.rs|PlaneKey"
+  "vault.plane_key|crates/maknae-crypto/src/signature.rs|PlaneKey"
 )
 
 leaf_enum_check() { # <field-path> <file> <type>
@@ -124,8 +127,29 @@ leaf_enum_check() { # <field-path> <file> <type>
     [ "$ep" = "$prefix" ] && structfile="$ef"
   done
   if [ "$structfile" != "$file" ]; then
-    echo "FAIL: leaf-enum row '$fp': its struct is in '${structfile:-no SURFACE entry}', not in '$file', so '$ty' may not resolve to this enum."
-    return 1
+    local ecrate emod scrate ipath nlocal
+    ecrate="$(printf '%s' "$file" | sed -nE 's#^crates/([a-z0-9-]+)/src/[a-z0-9_]+\.rs$#\1#p')"
+    emod="$(printf '%s' "$file" | sed -nE 's#^crates/[a-z0-9-]+/src/([a-z0-9_]+)\.rs$#\1#p')"
+    scrate="$(printf '%s' "$structfile" | sed -nE 's#^crates/([a-z0-9-]+)/src/.*#\1#p')"
+    case "$emod" in lib|main|mod|"") ecrate="" ;; esac
+    if [ -z "$structfile" ] || [ -z "$ecrate" ] || [ "$ecrate" = "$scrate" ]; then
+      echo "FAIL: leaf-enum row '$fp': its struct is in '${structfile:-no SURFACE entry}', not in '$file', so '$ty' may not resolve to this enum."
+      return 1
+    fi
+    if ! grep -qxF "pub mod $emod;" "crates/$ecrate/src/lib.rs" 2>/dev/null; then
+      echo "FAIL: leaf-enum row '$fp': 'crates/$ecrate/src/lib.rs' does not declare 'pub mod $emod;', so the import path does not resolve to '$file'."
+      return 1
+    fi
+    ipath="${ecrate//-/_}::$emod::$ty"
+    if [ "$(grep -cxF "use $ipath;" "$structfile" || true)" != "1" ]; then
+      echo "FAIL: leaf-enum row '$fp': its struct is in '$structfile', which does not import '$ty' with exactly one top-level 'use $ipath;'."
+      return 1
+    fi
+    nlocal="$(grep -cE "(^|[^A-Za-z0-9_])(enum|struct|union|type|trait|mod|as)[[:space:]]+$ty([^A-Za-z0-9_]|$)" "$structfile" || true)"
+    if [ "$nlocal" != "0" ]; then
+      echo "FAIL: leaf-enum row '$fp': '$structfile' also names '$ty' itself, so the field may not resolve to the imported enum."
+      return 1
+    fi
   fi
   body="$(sed 's|//.*$||' "$file" | tr '\n' ' ' | TYNAME="$ty" awk '
     {

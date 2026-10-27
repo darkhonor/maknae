@@ -118,8 +118,10 @@ files = [
   "crates/maknae-vault/src/csr.rs",
   "crates/maknae-vault/src/plane.rs",
   "crates/maknae-vault/src/config.rs",
-  # maknae-crypto (#564, ADR-0030): the FIPS and key-exchange-group decisions.
+  # maknae-crypto (#564, ADR-0030): the FIPS and key-exchange-group decisions,
+  # and the plane signature algorithms' identifiers (#573).
   "crates/maknae-crypto/src/provider.rs",
+  "crates/maknae-crypto/src/signature.rs",
   # PR-J1 Task 4: per-plane SecretID credential-SOURCE resolution (spec §5.1) —
   # pure decision logic, no I/O. A swapped precedence arm or a missing fail-closed
   # default here is exactly the T1 line-drawing rule (silently prefers a weaker
@@ -534,6 +536,10 @@ path = "crates/maknae-crypto/src/glue.rs"
 why = "process-global CryptoProvider fetch (not deterministically coverable); the pure fips_result and kx_groups_result decisions are in provider.rs (T1); the wiring is tests/kx_drift_gate.rs. Mutation-excluded (mutants.toml)"
 
 [[t3]]
+path = "crates/maknae-crypto/src/csr.rs"
+why = "rcgen keypair+CSR generation (non-deterministic keygen I/O); the algorithm map and SPKI decision are signature.rs (T1) and the shape self-check is maknae-vault's csr.rs (T1). Mutation-excluded (mutants.toml)"
+
+[[t3]]
 path = "crates/maknae-crypto/src/error.rs"
 why = "CryptoError enum and Display; no decision logic"
 
@@ -547,7 +553,7 @@ why = "PEM file I/O for the CA-pin loader; fixture-tested for coverage, mutation
 
 [[t3]]
 path = "crates/maknae-vault/src/csr_gen.rs"
-why = "rcgen keypair+CSR generation (non-deterministic keygen I/O); the pure shape predicates it self-checks are csr.rs (T1). Mutation-excluded (mutants.toml)"
+why = "calls maknae_crypto::generate_csr (non-deterministic keygen I/O) and self-checks the result; the pure shape predicates are csr.rs (T1). Mutation-excluded (mutants.toml)"
 
 [[t3]]
 path = "crates/maknae-vault/src/auth.rs"

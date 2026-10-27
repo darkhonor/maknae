@@ -40,42 +40,7 @@ vaultrs = { version = "=0.8.0", default-features = false, features = ["rustls-no
 reqwest = { version = "=0.13.5", default-features = false, features = ["rustls-no-provider"] }
 rustify = { version = "=0.7.0", default-features = false }        # direct dep only for the hand-rolled issuer/default/json Endpoint; already transitive via vaultrs, pinned to the resolved Cargo.lock version and moved in lockstep with vaultrs; no features of our own
 rustify_derive = "=0.5.5"                                          # the #[derive(Endpoint)] macro used by the endpoint above; already transitive via vaultrs, pinned to the resolved Cargo.lock version
-# THE COMPLIANCE CEILING IS REMOVED 2026-09-19 (#320) TOGETHER WITH THE aws-lc-rs
-# BOUND BELOW. What remains -- `<0.15` -- IS NOT A CONTROL: for a 0.x crate that
-# is exactly cargo's caret bound, i.e. `>=0.14.9, <0.15` resolves identically to
-# `rcgen = "0.14.9"`, written out so the floor is visible. THE FLOOR IS THE
-# CONTROL; the ceiling is cargo's own semantics. (Review caught an earlier draft
-# of this header claiming the bound was simply "removed" while the line below
-# still spelled one out -- an unexplained ceiling in a manifest whose rule is
-# that a bound records the failure it prevents.)
-#
-# See the aws-lc-rs posture comment in crates/maknae-crypto/Cargo.toml for the ruling and the module-line facts,
-# which are not restated here so there is one place to correct. The ceiling here was never
-# about rcgen: `>=0.14.9, <0.14.10` existed because rcgen 0.14.10 raises its OWN
-# aws-lc-rs requirement to ^1.18, which the old FIPS bound excluded, so the two
-# were unsatisfiable and cargo refused the pair. With that bound lifted, 0.14.10
-# resolves normally (MEASURED: aws-lc-rs 1.18.1, aws-lc-fips-sys 0.14.2, rcgen
-# 0.14.10, pem 4.0.0 in one `cargo update`; workspace tests and `cargo deny
-# check` both green).
-#
-# THE FLOOR IS DELIBERATE AND STAYS: `>=0.14.9`, not the bare `0.14` a first
-# pass wrote. Caught in review 2026-09-19 before this shipped -- `"0.14"` is
-# cargo's caret requirement, i.e. `>=0.14.0`, which would have silently dropped
-# the floor eight patch versions below anything measured here, in a manifest
-# whose own rule is that a bound records the failure it prevents. Nothing below
-# 0.14.9 has ever been resolved or tested against this crate's rcgen usage --
-# `csr_gen.rs` in production, plus the `Issuer::from_params` test issuers the
-# API note below describes.
-#
-# 0.13 -> 0.14 was an API break, not a routine bump: `CertificateParams::signed_by`
-# takes an `Issuer` instead of (issuer certificate, issuer key). Test issuers
-# therefore retain the CA's `CertificateParams` and build `Issuer::from_params`
-# — `Issuer::from_ca_cert_der` would need rcgen's `x509-parser` feature, which
-# this crate deliberately does not enable (we parse with our own x509-parser).
-# The `aws_lc_rs` + `fips` feature definitions are byte-identical across the
-# break, so the FIPS backend selection is unchanged by the bump.
 maknae-crypto = { path = "../maknae-crypto" }
-rcgen = { version = ">=0.14.9, <0.15", default-features = false, features = ["aws_lc_rs", "fips", "pem"] }
 x509-parser = "0.18"  # also parses CA/leaf PEM->DER (rustls-pemfile is unmaintained, RUSTSEC-2025-0134)
 url = "2"             # validate vault.addr is a well-formed https:// URL (fail-closed, no plaintext)
 zeroize = "1"

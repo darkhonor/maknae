@@ -79,6 +79,7 @@ pub(crate) fn harden(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use maknae_crypto::rcgen;
 
     fn tmp(name: &str) -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!("mv-http-{}-{name}", std::process::id()));
