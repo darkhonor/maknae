@@ -17,7 +17,6 @@ mod client;
 mod config;
 mod csr;
 mod csr_gen;
-mod digest;
 mod env;
 mod error;
 mod graph_key_io;
@@ -68,7 +67,6 @@ pub use config::{
     DEFAULT_USERPASS_MOUNT, EGRESS_VAULT_CA_FILE, VAULT_SECTION,
 };
 pub use csr_gen::generate_plane_csr;
-pub use digest::{sha256_hex, Sha256};
 pub use env::{scrub_with, NEVER_SCRUB_ENV, SCRUBBED_ENV};
 pub use error::VaultError;
 pub use graph_key_io::read_graph_key;

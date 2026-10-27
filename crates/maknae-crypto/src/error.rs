@@ -1,4 +1,5 @@
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum CryptoError {
     /// The process is not running the aws-lc-rs FIPS provider (or none installed).
     FipsUnavailable,
@@ -6,6 +7,8 @@ pub enum CryptoError {
     KxGroupsDrift,
     /// Key or certificate-request generation failed.
     Csr(String),
+    /// The FIPS module's random generator failed.
+    Random,
 }
 
 impl std::fmt::Display for CryptoError {
@@ -20,6 +23,7 @@ impl std::fmt::Display for CryptoError {
                 "the process TLS provider does not carry Maknae's key-exchange groups (refusing TLS)"
             ),
             CryptoError::Csr(e) => write!(f, "keypair/CSR generation failed: {e}"),
+            CryptoError::Random => write!(f, "the random generator failed"),
         }
     }
 }

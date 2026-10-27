@@ -261,7 +261,7 @@ async fn a_permitted_prompt_writes_the_intent_before_the_send_and_the_outcome_af
     assert_eq!(e.content_length, 11);
     assert_eq!(
         e.content_digest,
-        &maknae_vault::sha256_hex(b"hello world")[..32]
+        &maknae_crypto::digest::sha256_hex(b"hello world")[..32]
     );
     let sent = outcome.egress.as_ref().unwrap();
     assert!(sent.refused_tool_calls.is_empty());

@@ -121,6 +121,8 @@ files = [
   # maknae-crypto (#564, ADR-0030): the FIPS and key-exchange-group decisions,
   # and the plane signature algorithms' identifiers (#573).
   "crates/maknae-crypto/src/provider.rs",
+  "crates/maknae-crypto/src/digest.rs",
+  "crates/maknae-crypto/src/random.rs",
   "crates/maknae-crypto/src/signature.rs",
   # PR-J1 Task 4: per-plane SecretID credential-SOURCE resolution (spec §5.1) —
   # pure decision logic, no I/O. A swapped precedence arm or a missing fail-closed
@@ -132,8 +134,6 @@ files = [
   "crates/maknae-vault/src/keychain_policy.rs",
   # #168: agent enrollment decisions (id, bind CIDRs, service account, retired accessor); fail-closed.
   "crates/maknae-vault/src/agent_enroll.rs",
-  # #172: the FIPS-module SHA-256 wrapper behind every egress content digest.
-  "crates/maknae-vault/src/digest.rs",
   "crates/maknae-vault/src/api_shape.rs",
   "crates/maknae-vault/src/user_login.rs",
   "crates/maknae-vault/src/wrap.rs",

@@ -65,15 +65,6 @@ fn preflight(euid: u32) -> Result<(), String> {
     }
 }
 
-fn sha256(b: &[u8]) -> [u8; 32] {
-    let mut out = [0; 32];
-    out.copy_from_slice(
-        maknae_crypto::aws_lc_rs::digest::digest(&maknae_crypto::aws_lc_rs::digest::SHA256, b)
-            .as_ref(),
-    );
-    out
-}
-
 fn say(out: &mut dyn Write, line: &str) -> Result<(), String> {
     writeln!(out, "{line}").map_err(|e| format!("cannot write to standard output: {e}"))
 }
@@ -245,7 +236,12 @@ fn still_as_planned(p: &Planned<'_>, restore: bool) -> Result<(), String> {
         _ => return Err(MIRROR_CHANGED.into()),
     }
     let file = read_bindings(etc, config_dir, owner)?;
-    match plan_sync(mirror, &Section::of(&file), sha256, CONFIG_DIR) {
+    match plan_sync(
+        mirror,
+        &Section::of(&file),
+        maknae_crypto::digest::sha256,
+        CONFIG_DIR,
+    ) {
         SyncPlan::Restore { .. }
             if restore && !(p.unattended && Section::of(&file) != Section::Missing) =>
         {
@@ -333,7 +329,7 @@ pub(crate) fn sync(
         mirror: &mirror,
         unattended: !terminal,
     };
-    match plan_sync(&mirror, &Section::of(&file), sha256, CONFIG_DIR) {
+    match plan_sync(&mirror, &Section::of(&file), maknae_crypto::digest::sha256, CONFIG_DIR) {
         SyncPlan::OtherConfigDir { found } => Err(other_config_dir(&found)),
         SyncPlan::NothingToInstall => {
             say(out, "bindings.yaml already holds the mirror; nothing to install")?;
@@ -531,7 +527,7 @@ mod tests {
             &MirrorHeader {
                 revision: 7,
                 config_dir: config_dir.into(),
-                base: base_token(&section(base), sha256),
+                base: base_token(&section(base), maknae_crypto::digest::sha256),
                 conflicts: conflicts.iter().cloned().collect(),
             },
             &section(live),
@@ -1607,15 +1603,6 @@ mod tests {
             "{e}"
         );
         assert_eq!(fx.read_config("bindings.yaml"), BASE);
-    }
-
-    #[test]
-    fn sha256_is_the_daemons_digest() {
-        let hex: String = sha256(b"abc").iter().map(|b| format!("{b:02x}")).collect();
-        assert_eq!(
-            hex,
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
     }
 
     #[test]

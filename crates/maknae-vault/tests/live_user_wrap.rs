@@ -23,7 +23,7 @@ fn env_or(key: &str, default: &str) -> String {
 fn random_hex(n: usize) -> Zeroizing<String> {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut b = Zeroizing::new(vec![0u8; n]);
-    maknae_crypto::aws_lc_rs::rand::fill(&mut b[..]).unwrap();
+    maknae_crypto::random::fill(&mut b[..]).unwrap();
     let mut out = Zeroizing::new(String::with_capacity(2 * n));
     for x in b.iter() {
         out.push(char::from(HEX[usize::from(x >> 4)]));

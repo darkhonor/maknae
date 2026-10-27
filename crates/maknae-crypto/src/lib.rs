@@ -6,9 +6,11 @@ pub use rcgen;
 pub use rustls;
 
 mod csr;
+pub mod digest;
 mod error;
 mod glue;
 mod provider;
+pub mod random;
 pub mod signature;
 
 pub use csr::generate_csr;

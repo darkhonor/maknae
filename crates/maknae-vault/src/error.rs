@@ -151,14 +151,19 @@ pub enum VaultError {
     GraphKey(&'static str),
     GraphKeyAbsent(String),
     Random,
+    Crypto(String),
 }
 
 impl From<maknae_crypto::CryptoError> for VaultError {
     fn from(e: maknae_crypto::CryptoError) -> Self {
+        use maknae_crypto::CryptoError as C;
+        let detail = e.to_string();
         match e {
-            maknae_crypto::CryptoError::FipsUnavailable => VaultError::FipsUnavailable,
-            maknae_crypto::CryptoError::KxGroupsDrift => VaultError::KxGroupsDrift,
-            maknae_crypto::CryptoError::Csr(e) => VaultError::CsrGen(e),
+            C::FipsUnavailable => VaultError::FipsUnavailable,
+            C::KxGroupsDrift => VaultError::KxGroupsDrift,
+            C::Csr(m) => VaultError::CsrGen(m),
+            C::Random => VaultError::Random,
+            _ => VaultError::Crypto(detail),
         }
     }
 }
@@ -303,6 +308,7 @@ impl std::fmt::Display for VaultError {
             ),
             VaultError::GraphKey(why) => write!(f, "the kernel graph key is malformed ({why})"),
             VaultError::Random => write!(f, "the FIPS random generator failed"),
+            VaultError::Crypto(e) => write!(f, "a cryptographic operation failed: {e}"),
             VaultError::GraphKeyAbsent(detail) => write!(
                 f,
                 "no kernel graph key ({detail}): run `sudo maknae enroll`"
@@ -325,29 +331,36 @@ mod tests {
 
     #[test]
     fn each_crypto_refusal_keeps_its_name_and_message() {
-        use maknae_crypto::CryptoError;
-        for (e, want) in [
-            (CryptoError::FipsUnavailable, "FIPS provider not active"),
-            (CryptoError::KxGroupsDrift, "key-exchange groups"),
-            (CryptoError::Csr("rcgen refused".into()), "rcgen refused"),
-        ] {
-            let msg = e.to_string();
-            let v = super::VaultError::from(e);
-            assert_eq!(v.to_string(), msg);
-            assert!(msg.contains(want), "{msg}");
+        use super::VaultError as V;
+        use maknae_crypto::CryptoError as C;
+        type Is = fn(&V) -> bool;
+        let table: [(C, Is, &str); 4] = [
+            (
+                C::FipsUnavailable,
+                |v| matches!(v, V::FipsUnavailable),
+                "FIPS provider not active: the process default is not aws-lc-rs FIPS (refusing to start)",
+            ),
+            (
+                C::KxGroupsDrift,
+                |v| matches!(v, V::KxGroupsDrift),
+                "the process TLS provider does not carry Maknae's key-exchange groups (refusing TLS)",
+            ),
+            (
+                C::Csr("rcgen refused".into()),
+                |v| matches!(v, V::CsrGen(_)),
+                "keypair/CSR generation failed: rcgen refused",
+            ),
+            (
+                C::Random,
+                |v| matches!(v, V::Random),
+                "the FIPS random generator failed",
+            ),
+        ];
+        for (e, is, want) in table {
+            let v = V::from(e);
+            assert!(is(&v), "{v:?}");
+            assert_eq!(v.to_string(), want);
         }
-        assert!(matches!(
-            super::VaultError::from(CryptoError::KxGroupsDrift),
-            super::VaultError::KxGroupsDrift
-        ));
-        assert!(matches!(
-            super::VaultError::from(CryptoError::FipsUnavailable),
-            super::VaultError::FipsUnavailable
-        ));
-        assert!(matches!(
-            super::VaultError::from(CryptoError::Csr(String::new())),
-            super::VaultError::CsrGen(_)
-        ));
     }
     #[test]
     fn transport_variants_display() {
@@ -428,6 +441,7 @@ mod tests {
             VaultError::GraphKey("not exactly 32 bytes"),
             VaultError::GraphKeyAbsent("no credential".into()),
             VaultError::Random,
+            VaultError::Crypto("x".into()),
         ];
         for e in cases {
             assert!(!format!("{e}").is_empty());

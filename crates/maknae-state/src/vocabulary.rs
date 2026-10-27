@@ -1,4 +1,4 @@
-use crate::envelope::sha256;
+use maknae_crypto::digest::sha256;
 use maknae_graph::graph::GraphError;
 use maknae_graph::schema::CompiledSet;
 
@@ -70,12 +70,12 @@ mod tests {
         let r = roles();
         assert_eq!(
             d(&r),
-            crate::envelope::sha256(&r.canonical_bytes().unwrap())
+            maknae_crypto::digest::sha256(&r.canonical_bytes().unwrap())
         );
         assert_ne!(d(&r), d(&persisted_compiled_set("UNOFFICIAL")));
         assert_eq!(
             d(&CompiledSet::default()),
-            crate::envelope::sha256(&0u32.to_le_bytes())
+            maknae_crypto::digest::sha256(&0u32.to_le_bytes())
         );
     }
 

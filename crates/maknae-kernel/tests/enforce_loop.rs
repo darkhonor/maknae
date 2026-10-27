@@ -127,7 +127,7 @@ impl Fixture {
                 self.paths(),
                 self.principal.clone(),
                 seam_req(),
-                maknae_state::envelope::sha256,
+                maknae_crypto::digest::sha256,
             )
             .expect("fixture policy constructs"),
         )
@@ -2842,7 +2842,7 @@ fn composed(fx: &Fixture, level: &str) -> Arc<maknae_kernel::Composition<Hermeti
         fx.paths(),
         fx.principal.clone(),
         seam_req(),
-        maknae_state::envelope::sha256,
+        maknae_crypto::digest::sha256,
     )
     .expect("fixture policy constructs");
     Arc::new(maknae_kernel::Composition::new(

@@ -1005,7 +1005,7 @@ mod tests {
                 regular_file: true,
                 max_bytes: None,
             },
-            maknae_state::envelope::sha256,
+            maknae_crypto::digest::sha256,
         )
         .unwrap();
         let us = &maknae_config::BasicPolicy;

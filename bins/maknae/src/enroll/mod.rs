@@ -4084,17 +4084,7 @@ lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
 
             fn write_mirror_in(&self, config_dir: &str, live: &str) {
                 let section = Section::of(&maknae_config::parse_bindings(live).unwrap());
-                let digest = |b: &[u8]| {
-                    let mut out = [0; 32];
-                    out.copy_from_slice(
-                        maknae_crypto::aws_lc_rs::digest::digest(
-                            &maknae_crypto::aws_lc_rs::digest::SHA256,
-                            b,
-                        )
-                        .as_ref(),
-                    );
-                    out
-                };
+                let digest = maknae_crypto::digest::sha256;
                 let text = maknae_config::render_mirror(
                     &MirrorHeader {
                         revision: 3,

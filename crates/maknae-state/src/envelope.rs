@@ -1,6 +1,4 @@
 use maknae_crypto::aws_lc_rs::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, NONCE_LEN};
-use maknae_crypto::aws_lc_rs::digest::{digest, SHA256};
-use maknae_crypto::aws_lc_rs::rand::{SecureRandom, SystemRandom};
 use std::fmt;
 use zeroize::Zeroizing;
 
@@ -72,18 +70,17 @@ fn key(bytes: &[u8]) -> Result<LessSafeKey, EnvelopeError> {
         .map_err(|_| EnvelopeError::Crypto)
 }
 
-fn random<const N: usize>(rng: &SystemRandom) -> Result<[u8; N], EnvelopeError> {
+fn random<const N: usize>() -> Result<[u8; N], EnvelopeError> {
     let mut out = [0u8; N];
-    rng.fill(&mut out).map_err(|_| EnvelopeError::Crypto)?;
+    maknae_crypto::random::fill(&mut out).map_err(|_| EnvelopeError::Crypto)?;
     Ok(out)
 }
 
 pub fn seal(plain: &[u8], kek: &WrappingKey) -> Result<Vec<u8>, EnvelopeError> {
-    let rng = SystemRandom::new();
     let mut dek = Zeroizing::new([0u8; KEY_LEN]);
-    rng.fill(&mut dek[..]).map_err(|_| EnvelopeError::Crypto)?;
-    let wrap_nonce: [u8; NONCE_LEN] = random(&rng)?;
-    let payload_nonce: [u8; NONCE_LEN] = random(&rng)?;
+    maknae_crypto::random::fill(&mut dek[..]).map_err(|_| EnvelopeError::Crypto)?;
+    let wrap_nonce: [u8; NONCE_LEN] = random()?;
+    let payload_nonce: [u8; NONCE_LEN] = random()?;
 
     let mut out = Vec::with_capacity(HEADER_LEN + plain.len() + TAG_LEN);
     out.extend_from_slice(&MAGIC);
@@ -164,14 +161,8 @@ pub fn open(file: &[u8], kek: &WrappingKey) -> Result<Zeroizing<Vec<u8>>, Envelo
     Ok(body)
 }
 
-pub fn sha256(bytes: &[u8]) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    out.copy_from_slice(digest(&SHA256, bytes).as_ref());
-    out
-}
-
 pub fn ciphertext_digest(file: &[u8]) -> [u8; 32] {
-    sha256(file)
+    maknae_crypto::digest::sha256(file)
 }
 
 #[cfg(test)]
@@ -272,13 +263,6 @@ mod tests {
     #[test]
     fn digest_is_sha256_of_the_file() {
         assert_eq!(ciphertext_digest(b"abc")[..4], [0xba, 0x78, 0x16, 0xbf]);
-    }
-
-    #[test]
-    fn sha256_is_the_digest_ciphertext_digest_uses() {
-        assert_eq!(sha256(b"abc")[..4], [0xba, 0x78, 0x16, 0xbf]);
-        assert_eq!(sha256(b"abc")[28..], [0xf2, 0x00, 0x15, 0xad]);
-        assert_eq!(ciphertext_digest(b"graph"), sha256(b"graph"));
     }
 
     #[test]

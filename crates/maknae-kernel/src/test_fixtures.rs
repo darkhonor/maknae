@@ -166,7 +166,7 @@ pub(crate) fn fixture(
         regular_file: true,
         max_bytes: None,
     };
-    let basic = HermeticAuthorizer::new(paths, principal, req, maknae_state::envelope::sha256)
+    let basic = HermeticAuthorizer::new(paths, principal, req, maknae_crypto::digest::sha256)
         .expect("fixture constructs");
     (DirGuard(dir), basic)
 }
