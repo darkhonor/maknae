@@ -18,6 +18,7 @@
 //! `src/api/pki/requests.rs` (`#[derive(Endpoint)]` + `#[endpoint(path = ..., ...)]`).
 use crate::agent_enroll::BindCidrs;
 use crate::VaultError;
+use maknae_crypto::assert_fips_provider;
 use serde::Deserialize;
 use vaultrs::api::auth::approle::requests::GenerateNewSecretIDRequestBuilder;
 use vaultrs::client::{VaultClient, VaultClientSettingsBuilder};
@@ -45,6 +46,7 @@ impl OperatorClient {
         ca_path: &std::path::Path,
         token: Zeroizing<String>,
     ) -> Result<Self, VaultError> {
+        assert_fips_provider()?;
         // The same scheme guard as the two plane clients (self-review round 7
         // found this the one constructor without it): a plaintext address is
         // refused by NAME here, before the operator token and three SecretIDs
