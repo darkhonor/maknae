@@ -107,8 +107,6 @@ exclude_re = [
   "maknae-audit-append.*SyslogMirror::mirror with \\(\\)",
   # Password::new refuses an empty password, so is_empty is always false and `false` is equivalent.
   "^crates/maknae-vault/src/user_login\\.rs:[0-9]+:[0-9]+: replace Password::is_empty -> bool with false$",
-  # #578: equivalent; the named arm and the wildcard both map to SealError::Crypto.
-  "^crates/maknae-seal/src/error\\.rs:[0-9]+:[0-9]+: delete match arm C::Primitive \\| C::Random \\| C::AeadKey \\| C::AeadSeal \\| C::AeadOpen \\| C::KxGroupsDrift \\| C::Csr\\(_\\) \\| C::Tls\\(_\\) in <impl From<maknae_crypto::CryptoError> for SealError>::from$",
   # #488: open() errors only on a version != ENVELOPE_VERSION, so an equal version never reaches this and `>=` is equivalent; `<`/`==` are killed by a_newer_envelope_version_is_a_newer_store / an_older_envelope_version_is_corruption.
   "^crates/maknae-state/src/store\\.rs:[0-9]+:[0-9]+: replace > with >= in newer_envelope$",
   # #488: decode() errors only on a format version != FORMAT_VERSION, so `>=` is equivalent; held by a_newer_graph_format_version_is_a_newer_store / an_older_graph_format_version_is_a_format_error.
@@ -147,10 +145,6 @@ exclude_globs = [
   "crates/maknae-vault/src/supervisor_run.rs", # credential-supervisor I/O driver — T3 (decisions it drives, retry_action/rotate_now, stay in supervisor.rs, NOT excluded)
   "crates/maknae-vault/src/ca.rs",         # PEM file I/O (fixture-tested for coverage, not mutation)
   "crates/maknae-vault/src/csr_gen.rs",    # keygen I/O via maknae-crypto (non-deterministic); pure shape checks are csr.rs (T1)
-  "crates/maknae-crypto/src/csr.rs",       # rcgen keygen I/O (non-deterministic); the decisions are signature.rs (T1)
-  "crates/maknae-crypto/src/tls.rs",       # rustls builder pass-throughs (T3)
-  "crates/maknae-crypto/src/glue.rs",      # process-global provider fetch (T3)
-  "crates/maknae-crypto/src/error.rs",     # Display declarations
   "crates/maknae-crypto/src/lib.rs",       # re-exports
   "crates/maknae-vault/src/error.rs",      # Display/From declarations
   "crates/maknae-vault/src/lib.rs",        # re-exports

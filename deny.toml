@@ -10,33 +10,39 @@ unsound = "all"
 
 [bans]
 multiple-versions = "warn"
-# FIPS posture (spec §6.2): every TLS leg must be rustls-aws-lc-fips, never
-# the OpenSSL path, and `ring` is banned outright (maintainer ruling
-# 2026-10-27, ADR-0030): it is a second, non-FIPS crypto library, absent from
-# the graph since #320, and enabling a `ring` feature on rustls or a wrapper
-# would expose a stock provider no start-up assertion sees. `aws-lc-sys` is
-# pulled by `aws-lc-rs` itself and is not banned. The runtime `.fips()`
-# assertion is the gate on the process default.
-#
-# The cryptographic libraries are declared only by maknae-crypto (ADR-0030):
-# each entry below refuses a direct dependency from any other workspace member.
-# The other wrappers are the third-party crates that depend on them today.
-# tokio-rustls re-exports rustls, so it is confined to maknae-vault the same way.
+# Every TLS leg runs on crypto-profile-awslc4's provider over the AWS-LC FIPS
+# module (ADR-0025, ADR-0030, ADR-0031). `ring` and the OpenSSL path are banned
+# outright. The cryptographic libraries are reached only through
+# crypto-profile-awslc4, and it only through maknae-crypto; the other wrappers
+# are the third-party crates that depend on them today. tokio-rustls re-exports
+# rustls, so it is confined to maknae-vault the same way. `aws-lc-sys` is pulled
+# by aws-lc-rs itself and is not banned.
 deny = [
   { name = "native-tls" },
   { name = "openssl-sys" },
   { name = "ring" },
-  { name = "aws-lc-rs", wrappers = ["maknae-crypto", "rustls", "rustls-webpki", "rcgen"] },
-  { name = "rustls", wrappers = ["maknae-crypto", "hyper-rustls", "reqwest", "rustls-platform-verifier", "tokio-rustls"] },
+  { name = "crypto-profile-awslc3" },
+  { name = "crypto-profile-awslc4", wrappers = ["maknae-crypto"] },
+  { name = "aws-lc-rs", wrappers = ["crypto-profile-awslc4", "rcgen"] },
+  { name = "rustls", wrappers = ["crypto-profile-awslc4", "hyper-rustls", "reqwest", "rustls-platform-verifier", "tokio-rustls"] },
   { name = "tokio-rustls", wrappers = ["maknae-vault", "hyper-rustls", "reqwest"] },
-  { name = "rcgen", wrappers = ["maknae-crypto"] },
+  { name = "rcgen", wrappers = ["crypto-profile-awslc4"] },
 ]
 
-# reqwest's own TLS features install a stock provider when none is set;
-# `rustls-no-provider` leaves the choice to maknae-crypto's process default.
+# reqwest's own TLS features install a stock provider; rustls-no-provider leaves it to maknae-crypto's init().
 [[bans.features]]
 crate = "reqwest"
 deny = ["default-tls", "rustls", "__rustls-aws-lc-rs", "native-tls", "native-tls-no-alpn"]
+
+# rustls's built-in providers stay out of the graph, so its stock-provider
+# entry points do not compile anywhere in Maknae (#581).
+[[bans.features]]
+crate = "rustls"
+deny = ["aws_lc_rs", "aws-lc-rs", "fips", "ring"]
+
+[[bans.features]]
+crate = "rustls-webpki"
+deny = ["aws-lc-rs", "aws-lc-rs-fips", "ring"]
 
 [licenses]
 # OpenSSL: AWS-LC (aws-lc-fips-sys).
