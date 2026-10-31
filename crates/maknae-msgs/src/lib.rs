@@ -114,8 +114,8 @@ pub enum MsgId {
     HelperStillPrivileged,
     /// A daemon refused to start: the process cryptographic provider is not the FIPS provider.
     CryptoFipsUnavailable,
-    /// A daemon refused to start: the TLS provider lacks the required key-exchange groups.
-    CryptoKxGroupsDrift,
+    /// A daemon refused to start: the TLS provider does not match the crypto policy.
+    CryptoPolicyDrift,
 }
 
 /// Every `MsgId` variant, in declaration order. `all_slice_is_exhaustive`
@@ -168,7 +168,7 @@ pub const ALL: &[MsgId] = &[
     MsgId::HelperContextMismatch,
     MsgId::HelperStillPrivileged,
     MsgId::CryptoFipsUnavailable,
-    MsgId::CryptoKxGroupsDrift,
+    MsgId::CryptoPolicyDrift,
 ];
 
 /// Supported locales. Unknown/unset environment locale falls back to `EnUs`.
@@ -354,7 +354,7 @@ mod tests {
                 | MsgId::HelperContextMismatch
                 | MsgId::HelperStillPrivileged
                 | MsgId::CryptoFipsUnavailable
-                | MsgId::CryptoKxGroupsDrift => {}
+                | MsgId::CryptoPolicyDrift => {}
             }
         }
         const VARIANT_COUNT: usize = 48;

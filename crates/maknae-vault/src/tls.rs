@@ -31,9 +31,11 @@ pub(crate) fn certified_key_from_identity(
     id: &PlaneIdentity,
 ) -> Result<Arc<CertifiedKey>, VaultError> {
     let chain = pem_chain_to_der(id)?;
-    let key =
-        maknae_crypto::tls::load_private_key(PrivateKeyDer::Pkcs8(id.key_der().to_vec().into()))
-            .map_err(|e| VaultError::Handshake(format!("load leaf key: {e}")))?;
+    let key = maknae_crypto::tls::load_private_key(
+        &maknae_crypto::policy()?.tls,
+        PrivateKeyDer::Pkcs8(id.key_der().to_vec().into()),
+    )
+    .map_err(|e| VaultError::Handshake(format!("load leaf key: {e}")))?;
     Ok(Arc::new(CertifiedKey::new(chain, key)))
 }
 
@@ -71,17 +73,19 @@ pub(crate) fn plane_server_config(
     verifier: Arc<dyn ClientCertVerifier>,
     resolver: Arc<PlaneCertResolver>,
 ) -> Result<ServerConfig, VaultError> {
-    Ok(maknae_crypto::tls::server_builder()
-        .map_err(|e| VaultError::Handshake(format!("server tls13: {e}")))?
-        .with_client_cert_verifier(verifier)
-        .with_cert_resolver(resolver))
+    Ok(
+        maknae_crypto::tls::server_builder(&maknae_crypto::policy()?.tls)
+            .map_err(|e| VaultError::Handshake(format!("server tls13: {e}")))?
+            .with_client_cert_verifier(verifier)
+            .with_cert_resolver(resolver),
+    )
 }
 
 pub(crate) fn plane_client_config(
     verifier: Arc<dyn ServerCertVerifier>,
     client_auth: Option<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>,
 ) -> Result<ClientConfig, VaultError> {
-    let builder = maknae_crypto::tls::client_builder()
+    let builder = maknae_crypto::tls::client_builder(&maknae_crypto::policy()?.tls)
         .map_err(|e| VaultError::Handshake(format!("client tls13: {e}")))?
         .dangerous()
         .with_custom_certificate_verifier(verifier);

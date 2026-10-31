@@ -102,8 +102,8 @@ pub(crate) fn text(id: MsgId) -> &'static str {
         MsgId::CryptoFipsUnavailable => {
             "the FIPS cryptographic provider is not active"
         }
-        MsgId::CryptoKxGroupsDrift => {
-            "the TLS provider does not carry the required key-exchange groups"
+        MsgId::CryptoPolicyDrift => {
+            "the TLS provider does not match the crypto policy"
         }
     }
 }

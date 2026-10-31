@@ -38,11 +38,12 @@ mod tests {
     use maknae_crypto::rcgen;
 
     fn dummy_certified_key() -> Arc<CertifiedKey> {
-        maknae_crypto::install_default_crypto_provider();
+        maknae_crypto::init().unwrap();
         let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
         let params = rcgen::CertificateParams::new(vec![]).unwrap();
         let cert = params.self_signed(&kp).unwrap();
         let key = maknae_crypto::tls::load_private_key(
+            &maknae_crypto::policy().unwrap().tls,
             maknae_crypto::rustls::pki_types::PrivateKeyDer::Pkcs8(kp.serialize_der().into()),
         )
         .unwrap();

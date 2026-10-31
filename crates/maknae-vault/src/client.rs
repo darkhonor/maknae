@@ -16,8 +16,8 @@ use crate::{
 use arc_swap::ArcSwapOption;
 use maknae_config::{load_config, Document, SectionSpec};
 use maknae_crypto::assert_fips_provider;
+use maknae_crypto::plane_key::PlaneKey;
 use maknae_crypto::rustls::sign::CertifiedKey;
-use maknae_crypto::signature::SignatureAlgorithm;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -112,7 +112,7 @@ pub struct PlaneClient {
     auth: PlaneAuth,
     /// Intermediate PKI mount for `pki/sign` (from config; Terraform `int_mount_path`).
     pki_int_mount: String,
-    plane_key: SignatureAlgorithm,
+    plane_key: PlaneKey,
     client: Arc<Mutex<VaultClient>>,
     identity: Arc<RwLock<Option<PlaneIdentity>>>,
     /// The last mint's token lease (seconds); drives the renewal interval so it tracks
@@ -246,7 +246,7 @@ async fn sign_leaf_for(
     plane: Plane,
     deployment_id: &str,
     pki_int_mount: &str,
-    plane_key: SignatureAlgorithm,
+    plane_key: PlaneKey,
     client: &VaultClient,
 ) -> Result<(Zeroizing<Vec<u8>>, String, Vec<String>), VaultError> {
     let (key_der, csr_pem) = generate_plane_csr(plane, deployment_id, plane_key)?;
@@ -394,7 +394,7 @@ impl PlaneClient {
     /// prints no tree), so it is not what a missing install would fall back TO. **The
     /// ordering requirement is unchanged and still load-bearing** — an absent process
     /// default is fail-closed either way, and the point is that the FIPS install happens
-    /// before anything can read a default. Same correction as `maknae-crypto`'s `glue.rs`; this file is
+    /// before anything can read a default. This file is
     /// what `design/references/2026-08-30-fips-supply-chain-visibility.md` cites as the
     /// ordering's evidence site, which is why the rationale here has to be true.*
     ///
@@ -613,7 +613,7 @@ impl PlaneClient {
         &self.deployment_id
     }
     /// The key algorithm this plane mints its identity with (`vault.plane_key`).
-    pub fn plane_key(&self) -> SignatureAlgorithm {
+    pub fn plane_key(&self) -> PlaneKey {
         self.plane_key
     }
 
@@ -732,7 +732,7 @@ pub(crate) struct SupervisorCtx {
     plane: Plane,
     deployment_id: String,
     pki_int_mount: String,
-    plane_key: SignatureAlgorithm,
+    plane_key: PlaneKey,
 }
 
 impl SupervisorCtx {
@@ -931,7 +931,7 @@ mod tests {
             // execution order, matching every other provider-touching test in this
             // crate (resolver.rs, transport_tests.rs, tls.rs,
             // plane_verify.rs all do this same call at their own point of use).
-            maknae_crypto::install_default_crypto_provider();
+            maknae_crypto::init().unwrap();
             let p =
                 std::env::temp_dir().join(format!("mv-dispatch-{}-{}", std::process::id(), tag));
             let _ = std::fs::remove_dir_all(&p);

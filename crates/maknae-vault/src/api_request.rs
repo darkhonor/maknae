@@ -178,7 +178,7 @@ mod tests {
     use maknae_crypto::rcgen;
 
     fn http() -> Client {
-        maknae_crypto::install_default_crypto_provider();
+        maknae_crypto::init().unwrap();
         let d = std::env::temp_dir().join(format!("mv-api-request-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         let params = rcgen::CertificateParams::new(vec!["ca.test".to_string()]).unwrap();

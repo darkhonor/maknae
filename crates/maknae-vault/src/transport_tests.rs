@@ -5,13 +5,13 @@
 //! tested in socket.rs/peercred.rs). rcgen mints a test CA + kernel/cli leaves. This is
 //! ADR-0005's mTLS negative suite: happy path + each negative fails closed.
 use crate::{CaBundle, Plane};
+use maknae_crypto::plane_key::PlaneKey;
 use maknae_crypto::rcgen;
 use maknae_crypto::rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use maknae_crypto::signature::SignatureAlgorithm;
 use std::sync::Arc;
 
 fn provider() {
-    maknae_crypto::install_default_crypto_provider();
+    maknae_crypto::init().unwrap();
 }
 
 /// The CA keeps its `CertificateParams`, not its `Certificate`: rcgen 0.14 signs
@@ -28,13 +28,13 @@ impl Ca {
         rcgen::Issuer::from_params(&self.params, &self.kp)
     }
 }
-const P384: SignatureAlgorithm = SignatureAlgorithm::EcdsaP384Sha384;
-const MLDSA87: SignatureAlgorithm = SignatureAlgorithm::MlDsa87;
+const P384: PlaneKey = PlaneKey::EcdsaP384Sha384;
+const MLDSA87: PlaneKey = PlaneKey::MlDsa87;
 
 fn mk_ca() -> Ca {
     mk_ca_with(P384)
 }
-fn mk_ca_with(alg: SignatureAlgorithm) -> Ca {
+fn mk_ca_with(alg: PlaneKey) -> Ca {
     let mut p = rcgen::CertificateParams::new(vec![]).unwrap();
     p.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
     let kp = rcgen::KeyPair::generate_for(alg.rcgen_algorithm()).unwrap();
@@ -54,7 +54,7 @@ fn mk_leaf_with(
     ca: &Ca,
     uri: &str,
     expired: bool,
-    alg: SignatureAlgorithm,
+    alg: PlaneKey,
 ) -> (Vec<CertificateDer<'static>>, Vec<u8>) {
     let mut p = rcgen::CertificateParams::new(vec![]).unwrap();
     p.distinguished_name = rcgen::DistinguishedName::new();
@@ -81,7 +81,7 @@ fn mk_leaf_extra_san(ca: &Ca, uri: &str) -> (Vec<CertificateDer<'static>>, Vec<u
 fn mk_leaf_extra_san_with(
     ca: &Ca,
     uri: &str,
-    alg: SignatureAlgorithm,
+    alg: PlaneKey,
 ) -> (Vec<CertificateDer<'static>>, Vec<u8>) {
     let mut p = rcgen::CertificateParams::new(vec![]).unwrap();
     p.distinguished_name = rcgen::DistinguishedName::new();
@@ -104,7 +104,7 @@ fn mk_leaf_extra_san_with(
 fn mk_intermediate(root: &Ca) -> Ca {
     mk_intermediate_with(root, P384)
 }
-fn mk_intermediate_with(root: &Ca, alg: SignatureAlgorithm) -> Ca {
+fn mk_intermediate_with(root: &Ca, alg: PlaneKey) -> Ca {
     let mut p = rcgen::CertificateParams::new(vec![]).unwrap();
     p.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
     let kp = rcgen::KeyPair::generate_for(alg.rcgen_algorithm()).unwrap();
@@ -122,7 +122,11 @@ fn server_cfg(
     ca: &CaBundle,
     expect: Plane,
 ) -> Arc<maknae_crypto::rustls::ServerConfig> {
-    let key = maknae_crypto::tls::load_private_key(PrivateKeyDer::Pkcs8(key.into())).unwrap();
+    let key = maknae_crypto::tls::load_private_key(
+        &maknae_crypto::policy().unwrap().tls,
+        PrivateKeyDer::Pkcs8(key.into()),
+    )
+    .unwrap();
     let resolver = Arc::new(crate::resolver::PlaneCertResolver::new_empty());
     resolver.slot().store(Some(Arc::new(
         maknae_crypto::rustls::sign::CertifiedKey::new(chain, key),
@@ -463,18 +467,19 @@ fn pki() -> Pki {
 }
 
 fn offering(
-    groups: &[&'static dyn maknae_crypto::rustls::crypto::SupportedKxGroup],
+    groups: &[maknae_crypto::KxGroup],
 ) -> Arc<maknae_crypto::rustls::crypto::CryptoProvider> {
-    Arc::new(maknae_crypto::rustls::crypto::CryptoProvider {
+    let p = maknae_crypto::tls::Policy {
         kx_groups: groups.to_vec(),
-        ..maknae_crypto::crypto_provider()
-    })
+        ..maknae_crypto::policy().unwrap().tls.clone()
+    };
+    Arc::new(maknae_crypto::tls::crypto_provider(&p).unwrap())
 }
 
 #[expect(clippy::disallowed_methods)]
 fn peer_client(
     p: &Pki,
-    groups: &[&'static dyn maknae_crypto::rustls::crypto::SupportedKxGroup],
+    groups: &[maknae_crypto::KxGroup],
 ) -> Arc<maknae_crypto::rustls::ClientConfig> {
     let verifier =
         crate::plane_verify::PlaneServerCertVerifier::new(&cab(&p.ca), Plane::Kernel, "d").unwrap();
@@ -495,7 +500,7 @@ fn peer_client(
 #[expect(clippy::disallowed_methods)]
 fn peer_server(
     p: &Pki,
-    groups: &[&'static dyn maknae_crypto::rustls::crypto::SupportedKxGroup],
+    groups: &[maknae_crypto::KxGroup],
 ) -> Arc<maknae_crypto::rustls::ServerConfig> {
     let verifier =
         crate::plane_verify::PlaneClientCertVerifier::new(&cab(&p.ca), Plane::Cli, "d").unwrap();
@@ -578,7 +583,13 @@ fn group_names(
 #[test]
 fn both_plane_builders_carry_maknaes_key_exchange_groups() {
     let p = pki();
-    let want = group_names(&maknae_crypto::KX_GROUPS);
+    let want = maknae_crypto::policy()
+        .unwrap()
+        .tls
+        .kx_groups
+        .iter()
+        .map(|g| maknae_crypto::rustls::NamedGroup::from(g.iana()))
+        .collect::<Vec<_>>();
     assert_eq!(
         group_names(&maknae_server(&p).crypto_provider().kx_groups),
         want
@@ -591,34 +602,33 @@ fn both_plane_builders_carry_maknaes_key_exchange_groups() {
 
 #[tokio::test]
 async fn a_peer_offering_each_supported_group_alone_completes_on_it_with_no_retry() {
-    use maknae_crypto::rustls::crypto::aws_lc_rs::kx_group;
     let p = pki();
-    for g in [
-        kx_group::MLKEM1024,
-        kx_group::X25519MLKEM768,
-        kx_group::SECP256R1MLKEM768,
-        kx_group::SECP384R1,
-        kx_group::SECP256R1,
-    ] {
+    for g in maknae_crypto::policy()
+        .unwrap()
+        .tls
+        .kx_groups
+        .iter()
+        .copied()
+    {
+        let name = maknae_crypto::rustls::NamedGroup::from(g.iana());
         assert_eq!(
             negotiate(maknae_server(&p), peer_client(&p, &[g])).await,
-            Ok((g.name(), maknae_crypto::rustls::HandshakeKind::Full)),
-            "{:?}",
-            g.name()
+            Ok((name, maknae_crypto::rustls::HandshakeKind::Full)),
+            "{name:?}"
         );
     }
 }
 
 #[tokio::test]
 async fn a_rhel_fips_shaped_client_gets_its_first_hybrid_with_no_retry() {
-    use maknae_crypto::rustls::crypto::aws_lc_rs::kx_group;
+    use maknae_crypto::KxGroup;
     let p = pki();
     let client = peer_client(
         &p,
         &[
-            kx_group::SECP256R1MLKEM768,
-            kx_group::X25519MLKEM768,
-            kx_group::SECP256R1,
+            KxGroup::Secp256r1MlKem768,
+            KxGroup::X25519MlKem768,
+            KxGroup::Secp256r1,
         ],
     );
     assert_eq!(
@@ -632,9 +642,9 @@ async fn a_rhel_fips_shaped_client_gets_its_first_hybrid_with_no_retry() {
 
 #[tokio::test]
 async fn the_server_takes_the_clients_order_not_its_own() {
-    use maknae_crypto::rustls::crypto::aws_lc_rs::kx_group;
+    use maknae_crypto::KxGroup;
     let p = pki();
-    let client = peer_client(&p, &[kx_group::SECP384R1, kx_group::MLKEM1024]);
+    let client = peer_client(&p, &[KxGroup::Secp384r1, KxGroup::MlKem1024]);
     assert_eq!(
         negotiate(maknae_server(&p), client).await,
         Ok((
@@ -647,21 +657,18 @@ async fn the_server_takes_the_clients_order_not_its_own() {
 #[tokio::test]
 async fn a_peer_offering_only_x25519_is_refused_for_no_common_group() {
     let p = pki();
-    let client = peer_client(
-        &p,
-        &[maknae_crypto::rustls::crypto::aws_lc_rs::kx_group::X25519],
-    );
+    let client = peer_client(&p, &[maknae_crypto::KxGroup::X25519]);
     let err = negotiate(maknae_server(&p), client).await.unwrap_err();
     assert!(err.contains("NoKxGroupsInCommon"), "{err}");
 }
 
 #[tokio::test]
 async fn maknaes_client_retries_once_onto_a_hybrid_only_server() {
-    use maknae_crypto::rustls::crypto::aws_lc_rs::kx_group;
+    use maknae_crypto::KxGroup;
     let p = pki();
     assert_eq!(
         negotiate(
-            peer_server(&p, &[kx_group::X25519MLKEM768]),
+            peer_server(&p, &[KxGroup::X25519MlKem768]),
             maknae_client(&p)
         )
         .await,
@@ -781,8 +788,11 @@ mod plane_key_algorithms {
             by_server: Arc::default(),
             by_client: Arc::default(),
         };
-        let key =
-            maknae_crypto::tls::load_private_key(PrivateKeyDer::Pkcs8(kernel.1.into())).unwrap();
+        let key = maknae_crypto::tls::load_private_key(
+            &maknae_crypto::policy().unwrap().tls,
+            PrivateKeyDer::Pkcs8(kernel.1.into()),
+        )
+        .unwrap();
         let resolver = Arc::new(crate::resolver::PlaneCertResolver::new_empty());
         resolver.slot().store(Some(Arc::new(
             maknae_crypto::rustls::sign::CertifiedKey::new(kernel.0, key),
@@ -810,7 +820,7 @@ mod plane_key_algorithms {
     #[tokio::test]
     async fn each_plane_key_completes_mutual_tls_and_both_sides_sign_with_it() {
         provider();
-        for alg in SignatureAlgorithm::ALL {
+        for alg in PlaneKey::ALL {
             let ca = mk_ca_with(alg);
             let seen = mutual_tls(
                 &cab(&ca),
@@ -862,7 +872,7 @@ mod plane_key_algorithms {
     #[tokio::test]
     async fn the_negative_suite_fails_closed_for_every_plane_key() {
         provider();
-        for alg in SignatureAlgorithm::ALL {
+        for alg in PlaneKey::ALL {
             let ca = mk_ca_with(alg);
             let foreign = mk_ca_with(alg);
             let kernel = || mk_leaf_with(&ca, "maknae://d/plane/kernel", false, alg);

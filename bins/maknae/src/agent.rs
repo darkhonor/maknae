@@ -572,7 +572,7 @@ pub fn stop_line(r: Option<&StopReason>, budget: &Budget) -> String {
 
 /// Mirrors `execute()`'s setup (FIPS provider, config, user token, mint).
 pub async fn run(label: Option<String>, prompt: String) -> Result<u8, String> {
-    maknae_crypto::install_default_crypto_provider();
+    maknae_crypto::init().map_err(|e| maknae_vault::crypto_refusal_message(&e))?;
     let dir = crate::cli::resolve_config_dir();
     let document = maknae_config::load_config(&dir, &crate::cli::cli_config_specs())
         .map_err(|e| e.to_string())?;

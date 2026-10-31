@@ -136,7 +136,7 @@ mod tests {
 
     #[test]
     fn construction_fails_closed_on_plaintext_addr_and_missing_ca() {
-        maknae_crypto::install_default_crypto_provider();
+        maknae_crypto::init().unwrap();
         assert!(matches!(
             VaultApi::new("http://127.0.0.1:1", &ca().1),
             Err(VaultError::InvalidAddr(_))
@@ -150,7 +150,7 @@ mod tests {
 
     #[test]
     fn a_dead_vault_fails_every_call_as_a_transport_error() {
-        maknae_crypto::install_default_crypto_provider();
+        maknae_crypto::init().unwrap();
         let (_dir, ca) = ca();
         let api = VaultApi::new("https://127.0.0.1:1", &ca).unwrap();
         assert_eq!(api.vault_addr(), "https://127.0.0.1:1/v1/");
@@ -203,7 +203,7 @@ mod tests {
 
     #[test]
     fn a_malformed_path_is_refused_before_any_connection() {
-        maknae_crypto::install_default_crypto_provider();
+        maknae_crypto::init().unwrap();
         let (_dir, ca) = ca();
         let api = VaultApi::new("https://127.0.0.1:1", &ca).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()

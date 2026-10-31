@@ -11,7 +11,7 @@ struct Live {
 }
 
 fn live() -> Live {
-    maknae_crypto::install_default_crypto_provider();
+    maknae_crypto::init().unwrap();
     let var = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("set {k}"));
     let key = std::fs::read_to_string(var("LIVE_LLM_KEY_FILE")).expect("read the key file");
     Live {

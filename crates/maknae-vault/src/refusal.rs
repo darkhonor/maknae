@@ -3,8 +3,8 @@ use maknae_msgs::MsgId;
 
 pub fn crypto_refusal_message(e: &CryptoError) -> String {
     let id = match e {
-        CryptoError::FipsUnavailable => MsgId::CryptoFipsUnavailable,
-        CryptoError::KxGroupsDrift => MsgId::CryptoKxGroupsDrift,
+        CryptoError::NotFips => MsgId::CryptoFipsUnavailable,
+        CryptoError::PolicyDrift => MsgId::CryptoPolicyDrift,
         _ => return e.to_string(),
     };
     format!(
@@ -24,8 +24,8 @@ mod tests {
     #[test]
     fn each_boot_refusal_leads_with_its_catalog_headline_and_keeps_the_detail() {
         for (e, id) in [
-            (CryptoError::FipsUnavailable, MsgId::CryptoFipsUnavailable),
-            (CryptoError::KxGroupsDrift, MsgId::CryptoKxGroupsDrift),
+            (CryptoError::NotFips, MsgId::CryptoFipsUnavailable),
+            (CryptoError::PolicyDrift, MsgId::CryptoPolicyDrift),
         ] {
             let got = crypto_refusal_message(&e);
             assert!(got.starts_with(catalog(id)), "{got}");

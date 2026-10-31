@@ -41,7 +41,7 @@ impl From<maknae_crypto::CryptoError> for SealError {
     fn from(e: maknae_crypto::CryptoError) -> Self {
         use maknae_crypto::CryptoError as C;
         match e {
-            C::FipsModuleUnavailable | C::FipsUnavailable => SealError::FipsUnavailable,
+            C::NotFips => SealError::FipsUnavailable,
             C::SealPlaintext => SealError::PlaintextLength,
             C::SealBlob => SealError::BlobLength,
             C::SealVersion => SealError::Version,
@@ -49,14 +49,6 @@ impl From<maknae_crypto::CryptoError> for SealError {
             C::SealPublicKey => SealError::PublicKey,
             C::SealPrivateKey => SealError::PrivateKey,
             C::SealOpen => SealError::Open,
-            C::Primitive
-            | C::Random
-            | C::AeadKey
-            | C::AeadSeal
-            | C::AeadOpen
-            | C::KxGroupsDrift
-            | C::Csr(_)
-            | C::Tls(_) => SealError::Crypto,
             _ => SealError::Crypto,
         }
     }
@@ -70,14 +62,9 @@ mod tests {
     #[test]
     fn each_crypto_refusal_maps_to_its_seal_error_and_message() {
         let crypto = "a cryptographic primitive failed";
-        let table: [(C, SealError, &str); 17] = [
+        let table: [(C, SealError, &str); 11] = [
             (
-                C::FipsModuleUnavailable,
-                SealError::FipsUnavailable,
-                "the aws-lc FIPS module is not active",
-            ),
-            (
-                C::FipsUnavailable,
+                C::NotFips,
                 SealError::FipsUnavailable,
                 "the aws-lc FIPS module is not active",
             ),
@@ -116,14 +103,13 @@ mod tests {
                 SealError::Open,
                 "the seal does not match this request",
             ),
-            (C::Primitive, SealError::Crypto, crypto),
             (C::Random, SealError::Crypto, crypto),
-            (C::AeadKey, SealError::Crypto, crypto),
-            (C::AeadSeal, SealError::Crypto, crypto),
             (C::AeadOpen, SealError::Crypto, crypto),
-            (C::KxGroupsDrift, SealError::Crypto, crypto),
-            (C::Csr("refused".into()), SealError::Crypto, crypto),
-            (C::Tls("refused".into()), SealError::Crypto, crypto),
+            (
+                C::Tls(maknae_crypto::TlsError::PrivateKey),
+                SealError::Crypto,
+                crypto,
+            ),
         ];
         for (from, want, text) in table {
             let got = SealError::from(from);

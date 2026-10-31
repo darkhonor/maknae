@@ -1,8 +1,9 @@
 //! Pure CSR-shape predicates (T1, 0-missed): assert an empty subject, exactly one
-//! URI SAN, and the configured `SignatureAlgorithm` by algorithm identifier (#573).
-//! `generate_plane_csr` (keygen via `maknae_crypto::generate_csr`) lives in `csr_gen.rs` (T3) and
+//! URI SAN, and the configured `PlaneKey` by algorithm identifier (#573).
+//! `generate_plane_csr` (keygen via `maknae_crypto::csr::generate_csr`) lives in `csr_gen.rs` (T3) and
 //! self-checks its output with these predicates.
-use maknae_crypto::signature::{SignatureAlgorithm, SpkiParams};
+use maknae_crypto::plane_key::PlaneKey;
+use maknae_crypto::signature::SpkiParams;
 use x509_parser::certification_request::X509CertificationRequest;
 use x509_parser::extensions::{GeneralName, ParsedExtension};
 use x509_parser::prelude::FromDer;
@@ -51,8 +52,8 @@ pub fn csr_single_uri_san(pem: &str, want: &str) -> bool {
     all_sans == 1 && uris.len() == 1 && uris[0] == want
 }
 
-/// True iff the CSR's public key is exactly `key`'s algorithm (`SignatureAlgorithm::matches_spki`).
-pub fn csr_key_is(pem: &str, key: SignatureAlgorithm) -> bool {
+/// True iff the CSR's public key is exactly `key`'s algorithm (`PlaneKey::matches_spki`).
+pub fn csr_key_is(pem: &str, key: PlaneKey) -> bool {
     let Some(der) = parse_csr(pem) else {
         return false;
     };
@@ -80,7 +81,7 @@ pub fn csr_key_is(pem: &str, key: SignatureAlgorithm) -> bool {
 /// `csr_gen::generate_plane_csr` applies to its own output. The AND-decision lives
 /// here (T1, mutation-covered — the negative tests prove it REJECTS a bad shape) so
 /// that `csr_gen.rs` is left with only external-error plumbing (T3).
-pub fn csr_matches_plane_shape(pem: &str, want_uri_san: &str, key: SignatureAlgorithm) -> bool {
+pub fn csr_matches_plane_shape(pem: &str, want_uri_san: &str, key: PlaneKey) -> bool {
     csr_has_empty_subject(pem) && csr_single_uri_san(pem, want_uri_san) && csr_key_is(pem, key)
 }
 
@@ -166,7 +167,7 @@ mod tests {
         assert!(!csr_matches_plane_shape(
             &mixed,
             want,
-            SignatureAlgorithm::EcdsaP384Sha384
+            PlaneKey::EcdsaP384Sha384
         ));
     }
 
@@ -186,18 +187,18 @@ mod tests {
     #[test]
     fn each_plane_key_accepts_only_its_own_algorithm() {
         let cases = [
-            (SignatureAlgorithm::MlDsa87, csr_for(&rcgen::PKCS_ML_DSA_87)),
+            (PlaneKey::MlDsa87, csr_for(&rcgen::PKCS_ML_DSA_87)),
             (
-                SignatureAlgorithm::EcdsaP384Sha384,
+                PlaneKey::EcdsaP384Sha384,
                 csr_for(&rcgen::PKCS_ECDSA_P384_SHA384),
             ),
             (
-                SignatureAlgorithm::EcdsaP521Sha512,
+                PlaneKey::EcdsaP521Sha512,
                 csr_for(&rcgen::PKCS_ECDSA_P521_SHA512),
             ),
         ];
         for (want, pem) in &cases {
-            for k in SignatureAlgorithm::ALL {
+            for k in PlaneKey::ALL {
                 assert_eq!(csr_key_is(pem, k), k == *want, "{want:?} CSR against {k:?}");
             }
         }
@@ -216,7 +217,7 @@ mod tests {
             csr_with_key(&rsa),
         ];
         for pem in &others {
-            for k in SignatureAlgorithm::ALL {
+            for k in PlaneKey::ALL {
                 assert!(!csr_key_is(pem, k), "{k:?} accepted {pem}");
             }
         }
@@ -226,7 +227,7 @@ mod tests {
     fn malformed_pem_all_false() {
         assert!(!csr_has_empty_subject("garbage"));
         assert!(!csr_single_uri_san("garbage", "x"));
-        assert!(!csr_key_is("garbage", SignatureAlgorithm::EcdsaP384Sha384));
+        assert!(!csr_key_is("garbage", PlaneKey::EcdsaP384Sha384));
     }
 
     #[test]
@@ -238,7 +239,7 @@ mod tests {
             "-----BEGIN CERTIFICATE REQUEST-----\nAQIDBA==\n-----END CERTIFICATE REQUEST-----\n";
         assert!(!csr_has_empty_subject(g));
         assert!(!csr_single_uri_san(g, "maknae://d/plane/kernel"));
-        assert!(!csr_key_is(g, SignatureAlgorithm::MlDsa87));
+        assert!(!csr_key_is(g, PlaneKey::MlDsa87));
     }
 
     #[test]
@@ -249,20 +250,16 @@ mod tests {
         assert!(csr_matches_plane_shape(
             &good,
             want,
-            SignatureAlgorithm::EcdsaP384Sha384
+            PlaneKey::EcdsaP384Sha384
         ));
-        assert!(!csr_matches_plane_shape(
-            &good,
-            want,
-            SignatureAlgorithm::MlDsa87
-        ));
+        assert!(!csr_matches_plane_shape(&good, want, PlaneKey::MlDsa87));
         // Each SINGLE failing dimension must flip it to false (this also kills the
         // `&&`->`||` mutants — with only one predicate false, `||` would still be true).
         let cn = make_csr(Some("x"), &[want], &rcgen::PKCS_ECDSA_P384_SHA384); // subject not empty
         assert!(!csr_matches_plane_shape(
             &cn,
             want,
-            SignatureAlgorithm::EcdsaP384Sha384
+            PlaneKey::EcdsaP384Sha384
         ));
         let wrong_san = make_csr(
             None,
@@ -272,13 +269,13 @@ mod tests {
         assert!(!csr_matches_plane_shape(
             &wrong_san,
             want,
-            SignatureAlgorithm::EcdsaP384Sha384
+            PlaneKey::EcdsaP384Sha384
         )); // SAN != want
         let p256 = make_csr(None, &[want], &rcgen::PKCS_ECDSA_P256_SHA256); // not P-384
         assert!(!csr_matches_plane_shape(
             &p256,
             want,
-            SignatureAlgorithm::EcdsaP384Sha384
+            PlaneKey::EcdsaP384Sha384
         ));
     }
 }

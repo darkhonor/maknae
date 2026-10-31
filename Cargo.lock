@@ -402,6 +402,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
+name = "crypto-profile"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "162685b75537e0d8a0251653e7320d91c0bb1746dacf5907d881e4848c62e0bf"
+
+[[package]]
+name = "crypto-profile-awslc4"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9da6f06e61c715d4a777737514835b22d1a0e136a23dc4062e63688ee14b68b8"
+dependencies = [
+ "aws-lc-rs",
+ "crypto-profile",
+ "pem",
+ "rcgen",
+ "rustls",
+ "rustls-webpki",
+ "zeroize",
+]
+
+[[package]]
 name = "darling"
 version = "0.20.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1105,11 +1126,7 @@ dependencies = [
 name = "maknae-crypto"
 version = "0.0.0"
 dependencies = [
- "aws-lc-rs",
- "pem",
- "rcgen",
- "rustls",
- "zeroize",
+ "crypto-profile-awslc4",
 ]
 
 [[package]]
@@ -1707,7 +1724,6 @@ version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
- "aws-lc-rs",
  "once_cell",
  "rustls-pki-types",
  "rustls-webpki",
@@ -1769,7 +1785,6 @@ version = "0.103.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
 dependencies = [
- "aws-lc-rs",
  "ring",
  "rustls-pki-types",
  "untrusted 0.9.0",

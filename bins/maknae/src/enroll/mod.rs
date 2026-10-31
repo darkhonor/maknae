@@ -1158,12 +1158,12 @@ fn insecure_plaintext_path(args: &EnrollArgs) -> Option<PathBuf> {
 }
 
 fn check_vault_layout(args: &EnrollArgs) -> Result<(), EnrollError> {
-    if maknae_crypto::signature::SignatureAlgorithm::parse(&args.plane_key).is_none() {
+    if maknae_crypto::plane_key::PlaneKey::parse(&args.plane_key).is_none() {
         return Err(EnrollError::InvalidVaultLayout(format!(
             "--plane-key `{}` is not one of {}",
             args.plane_key,
-            maknae_crypto::signature::SignatureAlgorithm::ALL
-                .map(maknae_crypto::signature::SignatureAlgorithm::as_str)
+            maknae_crypto::plane_key::PlaneKey::ALL
+                .map(maknae_crypto::plane_key::PlaneKey::as_str)
                 .join(", ")
         )));
     }
@@ -1838,9 +1838,16 @@ async fn destroy_previous_accessors_or_abort(
 // ============================================================================
 
 pub async fn run_enroll(args: EnrollArgs) -> ExitCode {
-    // FIPS install FIRST, before any OperatorClient build (round-1 Q3).
-    maknae_crypto::install_default_crypto_provider();
     let locale = detect_locale();
+    // FIPS install FIRST, before any OperatorClient build (round-1 Q3).
+    if let Err(e) = maknae_crypto::init() {
+        eprintln!(
+            "{}: {}",
+            msg(locale, MsgId::EnrollFailed),
+            maknae_vault::crypto_refusal_message(&e)
+        );
+        return ExitCode::FAILURE;
+    }
     if let Some(EnrollSub::Agent(a)) = &args.sub {
         return report(agent::run_enroll_agent(a, locale).await, locale);
     }
@@ -3280,7 +3287,7 @@ mod tests {
         assert_eq!(vc.pki_int_mount, "pm");
         assert_eq!(
             vc.plane_key,
-            maknae_crypto::signature::SignatureAlgorithm::EcdsaP521Sha512
+            maknae_crypto::plane_key::PlaneKey::EcdsaP521Sha512
         );
         assert!(!text.contains("approle_mount"), "{text}");
     }
@@ -3681,7 +3688,7 @@ lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
         // one; production installs it first (`cli.rs`), so the fixture does the
         // same. The panic is reqwest's, not a refusal of ours -- see the note on
         // the typed guard in the PR that took this bump.
-        maknae_crypto::install_default_crypto_provider();
+        maknae_crypto::init().unwrap();
         let client = maknae_vault::OperatorClient::new(
             "https://vault.invalid.example:8200",
             &ca_path,
