@@ -40,9 +40,10 @@ impl PlaneClientCertVerifier {
         deployment_id: &str,
     ) -> Result<Arc<Self>, VaultError> {
         let roots = Arc::new(root_store(ca)?);
-        let inner = maknae_crypto::tls::client_cert_verifier_builder(roots)
-            .build()
-            .map_err(|e| VaultError::Handshake(format!("client verifier: {e}")))?;
+        let inner =
+            maknae_crypto::tls::client_cert_verifier_builder(roots, &maknae_crypto::policy()?.tls)?
+                .build()
+                .map_err(|e| VaultError::Handshake(format!("client verifier: {e}")))?;
         Ok(Arc::new(Self {
             inner,
             expect,
@@ -108,7 +109,9 @@ impl PlaneServerCertVerifier {
     ) -> Result<Arc<Self>, VaultError> {
         Ok(Arc::new(Self {
             roots: root_store(ca)?,
-            provider: Arc::new(maknae_crypto::crypto_provider()),
+            provider: Arc::new(maknae_crypto::tls::crypto_provider(
+                &maknae_crypto::policy()?.tls,
+            )?),
             expect,
             deployment_id: deployment_id.to_string(),
         }))
@@ -177,7 +180,7 @@ mod tests {
     use maknae_crypto::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 
     fn provider() {
-        maknae_crypto::install_default_crypto_provider();
+        maknae_crypto::init().unwrap();
     }
 
     /// The CA keeps its `CertificateParams`, not its `Certificate`: rcgen 0.14

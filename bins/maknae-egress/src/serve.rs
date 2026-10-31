@@ -524,7 +524,7 @@ mod tests {
 
     fn fips() {
         static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(maknae_crypto::install_default_crypto_provider);
+        ONCE.call_once(|| maknae_crypto::init().unwrap());
     }
 
     fn runtime() -> tokio::runtime::Runtime {

@@ -2,17 +2,17 @@
 //! `maknae-config`'s `ConfigError` pattern (no extra dep). Every fallible path in
 //! the crate returns one of these; there is no partial-identity / non-FIPS / file
 //! fallback anywhere.
-use maknae_crypto::signature::SignatureAlgorithm;
+use maknae_crypto::plane_key::PlaneKey;
 use std::path::PathBuf;
 
 #[derive(Debug)]
 pub enum VaultError {
-    /// The process is not running the aws-lc-rs FIPS provider (or none installed).
+    /// The process is not running the aws-lc-rs FIPS provider.
     FipsUnavailable,
     /// `vault.plane_key` is not one of the closed values (#573).
     InvalidPlaneKey(String),
-    /// The process provider's key-exchange groups are not exactly Maknae's list (#564).
-    KxGroupsDrift,
+    /// The process default is not exactly the crypto policy's provider (#589).
+    PolicyDrift,
     /// A config-load failure from `maknae-config`.
     Config(maknae_config::ConfigError),
     /// A required config key was absent.
@@ -159,22 +159,10 @@ impl From<maknae_crypto::CryptoError> for VaultError {
         use maknae_crypto::CryptoError as C;
         let detail = e.to_string();
         match e {
-            C::FipsUnavailable | C::FipsModuleUnavailable => VaultError::FipsUnavailable,
-            C::KxGroupsDrift => VaultError::KxGroupsDrift,
-            C::Csr(m) => VaultError::CsrGen(m),
+            C::NotFips => VaultError::FipsUnavailable,
+            C::PolicyDrift => VaultError::PolicyDrift,
+            C::Csr(_) => VaultError::CsrGen(detail),
             C::Random => VaultError::Random,
-            C::AeadKey
-            | C::AeadSeal
-            | C::AeadOpen
-            | C::SealPlaintext
-            | C::SealBlob
-            | C::SealVersion
-            | C::SealEphemeralKey
-            | C::SealPublicKey
-            | C::SealPrivateKey
-            | C::SealOpen
-            | C::Primitive
-            | C::Tls(_) => VaultError::Crypto(detail),
             _ => VaultError::Crypto(detail),
         }
     }
@@ -190,11 +178,11 @@ impl std::fmt::Display for VaultError {
             VaultError::InvalidPlaneKey(v) => write!(
                 f,
                 "vault.plane_key `{v}` is not one of {}",
-                SignatureAlgorithm::ALL.map(SignatureAlgorithm::as_str).join(", ")
+                PlaneKey::ALL.map(PlaneKey::as_str).join(", ")
             ),
-            VaultError::KxGroupsDrift => write!(
+            VaultError::PolicyDrift => write!(
                 f,
-                "the process TLS provider does not carry the configured key-exchange groups"
+                "the process TLS provider does not match the crypto policy"
             ),
             VaultError::Config(e) => write!(f, "config error: {e}"),
             VaultError::InvalidKeyVaultPath(m) => write!(f, "invalid key_vault_path: {m}"),
@@ -345,22 +333,23 @@ mod tests {
     fn each_crypto_refusal_keeps_its_name_and_message() {
         use super::VaultError as V;
         use maknae_crypto::CryptoError as C;
+        use maknae_crypto::{CsrError, TlsError};
         type Is = fn(&V) -> bool;
-        let table: [(C, Is, &str); 17] = [
+        let table: [(C, Is, &str); 7] = [
             (
-                C::FipsUnavailable,
+                C::NotFips,
                 |v| matches!(v, V::FipsUnavailable),
                 "FIPS provider not active: the process default is not the aws-lc-rs FIPS provider",
             ),
             (
-                C::KxGroupsDrift,
-                |v| matches!(v, V::KxGroupsDrift),
-                "the process TLS provider does not carry the configured key-exchange groups",
+                C::PolicyDrift,
+                |v| matches!(v, V::PolicyDrift),
+                "the process TLS provider does not match the crypto policy",
             ),
             (
-                C::Csr("rcgen refused".into()),
+                C::Csr(CsrError::Signing),
                 |v| matches!(v, V::CsrGen(_)),
-                "keypair/CSR generation failed: rcgen refused",
+                "keypair/CSR generation failed: the certificate signing request failed: Signing",
             ),
             (
                 C::Random,
@@ -368,54 +357,9 @@ mod tests {
                 "the FIPS random generator failed",
             ),
             (
-                C::AeadKey,
-                |v| matches!(v, V::Crypto(d) if d == "the AEAD key was refused"),
-                "a cryptographic operation failed: the AEAD key was refused",
-            ),
-            (
-                C::AeadSeal,
-                |v| matches!(v, V::Crypto(d) if d == "AEAD sealing failed"),
-                "a cryptographic operation failed: AEAD sealing failed",
-            ),
-            (
                 C::AeadOpen,
                 |v| matches!(v, V::Crypto(d) if d == "the AEAD ciphertext does not authenticate"),
                 "a cryptographic operation failed: the AEAD ciphertext does not authenticate",
-            ),
-            (
-                C::FipsModuleUnavailable,
-                |v| matches!(v, V::FipsUnavailable),
-                "FIPS provider not active: the process default is not the aws-lc-rs FIPS provider",
-            ),
-            (
-                C::SealPlaintext,
-                |v| matches!(v, V::Crypto(d) if d == "the sealed plaintext is empty"),
-                "a cryptographic operation failed: the sealed plaintext is empty",
-            ),
-            (
-                C::SealBlob,
-                |v| matches!(v, V::Crypto(d) if d == "the sealed blob is too short"),
-                "a cryptographic operation failed: the sealed blob is too short",
-            ),
-            (
-                C::SealVersion,
-                |v| matches!(v, V::Crypto(d) if d == "the sealed blob has an unknown version"),
-                "a cryptographic operation failed: the sealed blob has an unknown version",
-            ),
-            (
-                C::SealEphemeralKey,
-                |v| matches!(v, V::Crypto(d) if d == "the sealed blob's ephemeral key is not an uncompressed P-384 point"),
-                "a cryptographic operation failed: the sealed blob's ephemeral key is not an uncompressed P-384 point",
-            ),
-            (
-                C::SealPublicKey,
-                |v| matches!(v, V::Crypto(d) if d == "the sealing public key is not a canonical P-384 SubjectPublicKeyInfo PEM"),
-                "a cryptographic operation failed: the sealing public key is not a canonical P-384 SubjectPublicKeyInfo PEM",
-            ),
-            (
-                C::SealPrivateKey,
-                |v| matches!(v, V::Crypto(d) if d == "the sealing private key is not a P-384 PKCS#8 key"),
-                "a cryptographic operation failed: the sealing private key is not a P-384 PKCS#8 key",
             ),
             (
                 C::SealOpen,
@@ -423,14 +367,9 @@ mod tests {
                 "a cryptographic operation failed: the sealed blob does not open under this key, domain and AAD",
             ),
             (
-                C::Primitive,
-                |v| matches!(v, V::Crypto(d) if d == "a cryptographic primitive failed"),
-                "a cryptographic operation failed: a cryptographic primitive failed",
-            ),
-            (
-                C::Tls("refused".into()),
-                |v| matches!(v, V::Crypto(d) if d == "TLS configuration failed: refused"),
-                "a cryptographic operation failed: TLS configuration failed: refused",
+                C::Tls(TlsError::PrivateKey),
+                |v| matches!(v, V::Crypto(d) if d == "the TLS configuration was refused: PrivateKey"),
+                "a cryptographic operation failed: the TLS configuration was refused: PrivateKey",
             ),
         ];
         for (e, is, want) in table {

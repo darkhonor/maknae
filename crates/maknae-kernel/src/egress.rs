@@ -483,7 +483,7 @@ pub struct ContentMeasure {
 /// made, and truncated to 32 hex characters (record.rs says why).
 pub fn content_measure(turns: &[Turn]) -> ContentMeasure {
     let mut length = 0u64;
-    let mut h = maknae_crypto::digest::Sha256::new();
+    let mut h = maknae_crypto::digest::Hasher::new(maknae_crypto::HashAlgorithm::Sha256);
     let mut feed = |bytes: &[u8]| {
         length += bytes.len() as u64;
         h.update(bytes);
@@ -513,7 +513,7 @@ pub fn content_measure(turns: &[Turn]) -> ContentMeasure {
             feed(r.0.as_bytes());
         }
     }
-    let mut digest32 = h.finish_hex();
+    let mut digest32: String = h.finish().iter().map(|b| format!("{b:02x}")).collect();
     digest32.truncate(32);
     ContentMeasure { length, digest32 }
 }

@@ -82,8 +82,7 @@ fn main() {
     // `maknae-llm` and `maknae-vault` both assert `.fips()` at the moment a
     // credential rides TLS; without this install every call would refuse.
     // The same ordering as `maknae_kernel::run`.
-    maknae_crypto::install_default_crypto_provider();
-    if let Err(e) = maknae_crypto::assert_fips_provider() {
+    if let Err(e) = maknae_crypto::init() {
         fail(maknae_vault::crypto_refusal_message(&e));
     }
 
@@ -262,10 +261,7 @@ mod tests {
             "maknae_vault::scrub_with(|k| ",
             "std::env::remove_var(k))"
         ));
-        let fips = at(concat!(
-            "maknae_crypto::install_default_crypto_provider",
-            "();"
-        ));
+        let fips = at(concat!("maknae_crypto::init", "()"));
         let seal = at(concat!(
             "maknae_vault::read_egress_seal_key",
             "(credentials_dir.as_deref(), &egress_dir)"

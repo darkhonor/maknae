@@ -118,17 +118,8 @@ files = [
   "crates/maknae-vault/src/csr.rs",
   "crates/maknae-vault/src/plane.rs",
   "crates/maknae-vault/src/config.rs",
-  # maknae-crypto (#564, ADR-0030): the FIPS and key-exchange-group decisions,
-  # and the plane signature algorithms' identifiers (#573).
-  "crates/maknae-crypto/src/provider.rs",
-  "crates/maknae-crypto/src/aead.rs",
-  "crates/maknae-crypto/src/digest.rs",
-  "crates/maknae-crypto/src/random.rs",
-  "crates/maknae-crypto/src/signature.rs",
-  "crates/maknae-crypto/src/fips.rs",
-  "crates/maknae-crypto/src/sealbox/mod.rs",
-  "crates/maknae-crypto/src/sealbox/keys.rs",
-  "crates/maknae-crypto/src/sealbox/wire.rs",
+  # maknae-crypto (ADR-0030, ADR-0031, #589): the plane signature key subset.
+  "crates/maknae-crypto/src/plane_key.rs",
   # PR-J1 Task 4: per-plane SecretID credential-SOURCE resolution (spec §5.1) —
   # pure decision logic, no I/O. A swapped precedence arm or a missing fail-closed
   # default here is exactly the T1 line-drawing rule (silently prefers a weaker
@@ -536,24 +527,12 @@ path = "crates/maknae-vault/src/error.rs"
 why = "VaultError enum + Display/From declarations; no decision logic"
 
 [[t3]]
-path = "crates/maknae-crypto/src/glue.rs"
-why = "reads the process-global CryptoProvider and the FIPS module state; the decisions are T1 in provider.rs and fips.rs. Mutation-excluded"
-
-[[t3]]
-path = "crates/maknae-crypto/src/tls.rs"
-why = "rustls builder, key-loader and verifier-builder pass-throughs on the crate provider; the decisions are the provider (provider.rs) and TLS 1.3. Mutation-excluded (mutants.toml)"
-
-[[t3]]
-path = "crates/maknae-crypto/src/csr.rs"
-why = "rcgen keypair+CSR generation (non-deterministic keygen I/O); the algorithm map and SPKI decision are signature.rs (T1) and the shape self-check is maknae-vault's csr.rs (T1). Mutation-excluded (mutants.toml)"
-
-[[t3]]
-path = "crates/maknae-crypto/src/error.rs"
-why = "CryptoError enum and Display; no decision logic"
-
-[[t3]]
 path = "crates/maknae-crypto/src/lib.rs"
-why = "re-exports of rustls (and rcgen under test-support) and the crate's API (ADR-0030)"
+why = "re-exports of crypto-profile-awslc4's API, rustls (and rcgen under test-support); the decisions are crypto-profile's, and plane_key.rs (T1)"
+
+[[t3]]
+path = "crates/maknae-crypto/src/policy.rs"
+why = "process-global wiring of the preferred profile: resolve once, install, check the installed default; the decisions are crypto-profile's assert_provider_matches and assert_fips_module, and its error branches are unreachable on a FIPS build. Mutation-tested (not excluded)"
 
 [[t3]]
 path = "crates/maknae-vault/src/ca.rs"
@@ -561,7 +540,7 @@ why = "PEM file I/O for the CA-pin loader; fixture-tested for coverage, mutation
 
 [[t3]]
 path = "crates/maknae-vault/src/csr_gen.rs"
-why = "calls maknae_crypto::generate_csr (non-deterministic keygen I/O) and self-checks the result; the pure shape predicates are csr.rs (T1). Mutation-excluded (mutants.toml)"
+why = "calls maknae_crypto::csr::generate_csr (non-deterministic keygen I/O) and self-checks the result; the pure shape predicates are csr.rs (T1). Mutation-excluded (mutants.toml)"
 
 [[t3]]
 path = "crates/maknae-vault/src/auth.rs"
@@ -771,21 +750,6 @@ end_anchor = "max: u32::MAX as usize,"
 why = "frame_len's u32::try_from(body.len()) overflow guard fires only for a body >= 4 GiB (u32::MAX bytes); constructing such a slice in a unit test would require an actual multi-gigabyte allocation (or unsafe code to fake a slice length, forbidden by the workspace's unsafe_code forbid). Provably-unreachable in practice — every caller bounds a body by its frame class cap (at most 1 MiB), never by this defensive cap. write_frame's Io error paths (header write, body write, flush) ARE unit-tested via a hand-rolled failing AsyncWrite."
 
 [[exception]]
-path = "crates/maknae-crypto/src/aead.rs"
-anchor = "let sealer = sealer.map_err(|_| CryptoError::AeadKey)?;"
-why = "the key is a fixed-size [u8; 32] and AES-256-GCM accepts exactly that length, so construction cannot fail; the arm exists so a provider refusal is an error, not a panic"
-
-[[exception]]
-path = "crates/maknae-crypto/src/aead.rs"
-anchor = "let opener = opener.map_err(|_| CryptoError::AeadKey)?;"
-why = "same fixed-length argument as the sealer key above"
-
-[[exception]]
-path = "crates/maknae-crypto/src/aead.rs"
-anchor = ".map_err(|_| CryptoError::AeadSeal)?;"
-why = "sealing fails only if the module's own random generator or GCM invocation limit fails, which a unit test cannot induce without a seam in the FIPS module; the open-side refusals are all tested"
-
-[[exception]]
 path = "crates/maknae-io/src/mutation.rs"
 anchor = "nix::unistd::read(self.fd, buf).map_err"
 why = "read(2) on a freshly reopened, pinned regular file fails only on a device error (EIO); pure errno passthrough with no decision. read_page's own error handling is proven with a failing reader in page.rs"
@@ -832,64 +796,6 @@ why = "the read-leg retry taken (EINTR mid-read): cannot be provoked without a s
 path = "crates/maknae-kernel/src/egress_socket.rs"
 anchor = "continue; // EAGAIN or EINTR: re-ask the budget"
 why = "the write-leg retry taken (EAGAIN after poll reported writable, or EINTR): not controllable through a real socket; the decision (`write_is_retried`) is proven on a table and the hard-error direction on the wire"
-
-[[exception]]
-path = "crates/maknae-crypto/src/sealbox/keys.rs"
-anchor = "_ => Err(CryptoError::SealPublicKey),"
-why = "#578: a 120-byte input that parses as a P-384 key can only be a SubjectPublicKeyInfo; the raw point forms are 49 or 97 bytes"
-
-[[exception]]
-path = "crates/maknae-crypto/src/sealbox/keys.rs"
-anchor = ".and_then(|()| AgreementKey::generate(&ECDH_P384)"
-end_anchor = "Self::from_key(generated?)"
-why = "#578: the FIPS module is active on every build these tests run on (fips.rs proves both branches of the decision), and P-384 key generation fails only on an internal aws-lc error"
-
-[[exception]]
-path = "crates/maknae-crypto/src/sealbox/keys.rs"
-anchor = "let spki: PublicKeyX509Der<'static> = spki.map_err"
-end_anchor = "let public = PublicKey::from_spki_der(spki.as_ref())?;"
-why = "#578: deriving and encoding the public key of a key aws-lc just generated or parsed fails only on an internal error, and that encoding always parses"
-
-[[exception]]
-path = "crates/maknae-crypto/src/sealbox/keys.rs"
-anchor = "let der = der.map_err(|_| CryptoError::Primitive)?;"
-why = "#578: PKCS#8 encoding of a held P-384 key fails only on an internal aws-lc error"
-
-[[exception]]
-path = "crates/maknae-crypto/src/sealbox/mod.rs"
-anchor = "let okm = okm.map_err(|_| CryptoError::Primitive)?;"
-why = "#578: HKDF expand fails only for an output over 255 hash lengths; the length is the AES-256 key length"
-
-[[exception]]
-path = "crates/maknae-crypto/src/sealbox/mod.rs"
-anchor = "filled.map_err(|_| CryptoError::Primitive)?;"
-why = "#578: fill fails only when the buffer length differs from the requested length; both are KEY_LEN"
-
-[[exception]]
-path = "crates/maknae-crypto/src/sealbox/mod.rs"
-anchor = "let ephemeral = generated.map_err"
-end_anchor = "let point_bytes = as_array.map_err"
-why = "#578: ephemeral P-384 generation and its public point fail only on an internal aws-lc error, and an uncompressed P-384 point is always 97 bytes"
-
-[[exception]]
-path = "crates/maknae-crypto/src/sealbox/mod.rs"
-anchor = "let sealer = agreed?;"
-why = "#578: ECDH against a recipient key that from_spki_der already validated fails only on an internal error"
-
-[[exception]]
-path = "crates/maknae-crypto/src/sealbox/mod.rs"
-anchor = "let (nonce, tag) = sealer.seal_in_place(aad, body)?;"
-why = "#578: AES-GCM sealing with a module-chosen nonce fails only on an internal error (see the aead.rs exception)"
-
-[[exception]]
-path = "crates/maknae-crypto/src/sealbox/mod.rs"
-anchor = "let opener = agreed?;"
-why = "#578: ECDH against an ephemeral point that ParsedPublicKey already validated fails only on an internal error"
-
-[[exception]]
-path = "crates/maknae-seal/src/error.rs"
-anchor = "_ => SealError::Crypto,"
-why = "#578: every CryptoError variant is named above; the wildcard exists because CryptoError is non_exhaustive"
 
 # [[env_bound_override]] — §9 discriminator. t1/t2 only;
 # closed grammar ^target_os:(linux|macos|windows)$.

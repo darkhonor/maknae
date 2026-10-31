@@ -7,7 +7,7 @@
 //! deputy's provider install and `assert_fips_provider`, not by a test fixture.
 //!
 //! *Corrected 2026-09-19 (#320): this said "a DEPENDENCY PINNING property".
-//! ADR-0025 and `maknae-crypto`'s `provider.rs` both strike that framing — the pin was
+//! ADR-0025 strikes that framing — the pin was
 //! never the control, and dependency-tree hygiene never was either; the runtime
 //! assertion is. What the fixture does and does not prove is unchanged.*
 #![cfg(unix)]
@@ -25,7 +25,7 @@ use zeroize::Zeroizing;
 fn fips() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        maknae_crypto::install_default_crypto_provider();
+        maknae_crypto::init().unwrap();
     });
 }
 

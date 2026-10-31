@@ -6147,12 +6147,7 @@ async fn run_inner(
     // is buffered until the reload task drains it after mint.
     let hup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
         .map_err(|e| RunError::Other(format!("cannot install SIGHUP handler: {e}")))?;
-    // FIPS first (spec §6.1): install the aws-lc-rs FIPS default (once), then assert it —
-    // before any crypto/Vault client is built. The assert stays authoritative: on a
-    // non-FIPS build the installed default's `.fips()` is false and the daemon refuses.
-    maknae_crypto::install_default_crypto_provider();
-    maknae_crypto::assert_fips_provider()
-        .map_err(|e| RunError::Other(maknae_vault::crypto_refusal_message(&e)))?;
+    maknae_crypto::init().map_err(|e| RunError::Other(maknae_vault::crypto_refusal_message(&e)))?;
 
     let env = &*seams.env;
     let euid = nix::unistd::geteuid().as_raw();

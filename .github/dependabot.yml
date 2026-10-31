@@ -50,20 +50,18 @@ updates:
       rustls-ecosystem:
         patterns:
           - "rustls*"
+          - "crypto-profile*"
           - "aws-lc*"
           - "webpki*"
       dev-dependencies:
         dependency-type: "development"
-    # NO IGNORE RULES. Removed 2026-09-19 (#320) with the bounds they mirrored:
-    # `aws-lc-rs >=1.18.0` and `rcgen >=0.14.10` were both the same FIPS control,
-    # holding the tree on the AWS-LC-FIPS 3.x module. The maintainer ruled that
-    # FIPS 140-3 validation is Maknae's design GOAL, not a constraint in force,
-    # and the tree moved to the 4.x module line so RUSTSEC-2026-0285 could be
-    # taken (rustls 0.23.45 requires aws-lc-rs >=1.18). The decision of record
-    # is design/adr/ADR-0025-fips-validation-is-a-goal-not-a-constraint.md; the
-    # posture comment in crates/maknae-crypto/Cargo.toml mirrors it with the
-    # dependency facts. A Dependabot bump of aws-lc-rs or rcgen is now an
-    # ordinary bump: review it against that comment, which must stay true.
+    # rustls, rustls-webpki, aws-lc-rs and rcgen are pinned exactly by
+    # crypto-profile-awslc4 (ADR-0031): their versions move only with a
+    # crypto-profile release, which arrives here as a crypto-profile* bump.
+    ignore:
+      # crypto-profile-awslc4's build refuses any FIPS module but the one it
+      # pins; the module moves with a crypto-profile release (ADR-0031).
+      - dependency-name: "aws-lc-fips-sys"
 
   # ---------------------------------------------------------------------------
   # GitHub Actions

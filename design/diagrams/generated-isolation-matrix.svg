@@ -244,6 +244,6 @@
   <text x="44" y="1923" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">crates/maknae-deputy/src/call.rs::an_admitted_frame_reaches_the_provider_and_returns_its_reply</text>
   <text x="44" y="1939" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">42. model × meta: part: the request names the model and its reasoning and output settings, never the user, conversation or key path, though the bearer</text>
   <text x="44" y="1951" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">key identifies the user's account at the provider — crates/maknae-deputy/src/call.rs:243</text>
-  <text x="40" y="1985" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/isolation-matrix.toml@b0da30ab27 · maknae a92a230f · 2026-10-27</text>
+  <text x="40" y="1985" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/isolation-matrix.toml@b0da30ab27 · maknae 15a1c555 · 2026-10-31</text>
   <text x="1002" y="1985" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">Access-control matrix — B. W. Lampson, "Protection", 1971 (ACM SIGOPS OSR 8(1), 1974)</text>
 </svg>
