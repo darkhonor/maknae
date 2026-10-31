@@ -50,7 +50,7 @@ version = "AWS-LC-FIPS 4.x — in CMVP review"
 category = "Cryptography"
 applies_to = "all crypto operations; Vault leg, plane mTLS"
 status = "enforced"
-evidence = "design/adr/ADR-0025-fips-validation-is-a-goal-not-a-constraint.md; crates/maknae-crypto/src/glue.rs"
+evidence = "ADR-0025; crates/maknae-crypto/src/policy.rs init, assert_fips_provider"
 
 [[standard]]
 name = "TLS"
@@ -58,15 +58,15 @@ version = "1.3 only"
 category = "Transport security"
 applies_to = "Maknae-CONTROLLED channels: client plane (UDS), machine plane"
 status = "enforced"
-evidence = "crates/maknae-vault/src/tls.rs — with_protocol_versions(&[&TLS13]), server and client"
+evidence = "crates/maknae-crypto/src/policy.rs (preferred profile: TLS 1.3 only)"
 
 [[standard]]
 name = "TLS"
-version = "1.2 floor"
+version = "1.3 only"
 category = "Transport security"
-applies_to = "outbound to THIRD PARTIES: Vault leg today; model/MCP endpoints later"
+applies_to = "outbound to THIRD PARTIES: Vault leg, model providers (per-destination profiles: #574)"
 status = "enforced"
-evidence = "crates/maknae-crypto/src/glue.rs:40 assert_fips_provider; rustls has no TLS older than 1.2"
+evidence = "crates/maknae-crypto/src/policy.rs init (preferred profile); ADR-0031 decision 4"
 
 [[standard]]
 name = "Plane key algorithm"
@@ -74,7 +74,7 @@ version = "ML-DSA-87 default (plane_key)"
 category = "Cryptography"
 applies_to = "a plane's own CSR key; the peer's algorithm is not pinned (#574)"
 status = "enforced"
-evidence = "crates/maknae-crypto/src/signature.rs SignatureAlgorithm::matches_spki (called by maknae-vault csr_key_is); vault.plane_key"
+evidence = "crates/maknae-crypto/src/plane_key.rs PlaneKey::matches_spki; vault.plane_key"
 
 [[standard]]
 name = "CNSA Suite"
@@ -90,7 +90,7 @@ version = "ML-KEM-1024 first, then hybrids"
 category = "Cryptography"
 applies_to = "the list every TLS config offers (the negotiated group is the peer's choice)"
 status = "enforced"
-evidence = "crates/maknae-crypto/src/provider.rs KX_GROUPS; asserted at start by assert_fips_provider"
+evidence = "crypto-profile preferred profile; asserted at start by maknae_crypto::init"
 
 [[standard]]
 name = "X.509"

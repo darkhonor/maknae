@@ -97,8 +97,9 @@ Expected: `LIVE SMOKE OK: minted maknae://<deployment_id>/plane/kernel (ml-dsa-8
 - FIPS: the process runs the aws-lc-rs FIPS provider (`.fips()==true`, asserted
   fail-closed before the Vault client is built, so vaultrs's reqwest rides the FIPS
   provider; `ring` is not in the graph).
-- The same start-up check refuses a process provider whose TLS key-exchange groups are
-  not Maknae's list ([TLS key exchange](#tls-key-exchange)).
+- The same start-up check refuses a process provider that is not exactly the
+  `preferred` crypto profile: its key-exchange groups, cipher suites and signature schemes
+  ([TLS key exchange](#tls-key-exchange)).
 - The AppRole login used the **standing** raw SecretID; the SecretID does not expire and
   the login does not consume it.
 - The CSR is empty-subject, URI-SAN-only, and of exactly the `vault.plane_key` algorithm (checked by
@@ -180,8 +181,10 @@ Expected: `LIVE TRANSPORT OK: kernel<->cli mTLS + peer-creds round-trip over UDS
 
 ### TLS key exchange
 
-Every TLS configuration offers `MLKEM1024`, `X25519MLKEM768`, `SECP256R1MLKEM768`,
-`SECP384R1` and `SECP256R1`, in that order. ML-KEM-1024 (CNSSP 15) is offered first, not
+Every TLS configuration offers `MLKEM1024`, `SECP384R1MLKEM1024`, `X25519MLKEM768`,
+`SECP256R1MLKEM768`, `SECP384R1` and `SECP256R1`, in that order, from the `preferred`
+profile of `crypto-profile`. Every connection, plane and external, is TLS 1.3 only, with
+AES-256-GCM then AES-128-GCM; a server that speaks only TLS 1.2 is refused. ML-KEM-1024 (CNSSP 15) is offered first, not
 enforced: a server without it answers with one HelloRetryRequest, and the connection
 lands on a hybrid or a classical group, whichever the server chooses. `X25519MLKEM768` is
 there for broad interoperability (every measured model provider accepts it);

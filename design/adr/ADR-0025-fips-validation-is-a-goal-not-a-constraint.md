@@ -7,6 +7,8 @@
 
 > **Amended 2026-10-27 ([ADR-0030](ADR-0030-cryptographic-libraries-are-confined-to-maknae-crypto.md), #564).** The `aws-lc-rs` requirement and the FIPS posture comment this ADR places in `crates/maknae-vault/Cargo.toml` moved to `crates/maknae-crypto/Cargo.toml`, which is now the only manifest declaring `aws-lc-rs` or `rustls`; `fips_glue::tests::asserts_fips_true_on_this_build` is now `maknae-crypto`'s `glue::tests::asserts_fips_true_on_this_build`. The decision is unchanged.
 
+> **Amended 2026-10-31 ([ADR-0031](ADR-0031-maknaes-cryptography-comes-from-crypto-profile.md), #589).** The `aws-lc-rs` requirement now lives in `crypto-profile-awslc4`'s manifest as an exact pin (`=1.18.2`, the 4.x line). Its build script refuses any module but aws-lc-fips-sys 0.14.2, which Cargo.lock holds, and `crates/maknae-crypto/Cargo.toml` points here. The runtime `.fips()` assertion is kept, in `maknae_crypto::assert_fips_provider`. `glue::tests::asserts_fips_true_on_this_build` is now `policy::tests::after_init_the_installed_default_matches_the_policy`. The decision is unchanged.
+
 ## Context
 
 `maknae-vault` pinned `aws-lc-rs` below 1.18 as a **compliance control**, not as dependency hygiene. The reasoning was recorded in the manifest, in `.github/dependabot.yml`, in `packaging/isolation-contract.md`, in ADR-0002's SC-13 row and in #259: aws-lc-rs 1.18 moves the `fips` backend from the AWS-LC-FIPS **3.x** module (CMVP certificates **#5314** static / **#5298** dynamic, on the validated list) to **4.x** (submitted, Modules In Process), and ASD STIG **APSC-DV-001860 (CAT I)** requires a module on the validated list.

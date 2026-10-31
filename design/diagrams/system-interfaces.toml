@@ -142,7 +142,7 @@ n = "I3"
 from = "daemon"
 to = "vault"
 status = "built"
-mechanism = "HTTPS via vaultrs/reqwest; AppRole login, then pki sign; TLS negotiated (1.2 floor), FIPS suite set asserted"
+mechanism = "HTTPS via vaultrs/reqwest; AppRole login, then pki sign; TLS 1.3 only (preferred profile), FIPS suite set asserted"
 identity = "AppRole role `maknaed` + per-plane SecretID"
 evidence = "crates/maknae-vault/src/client.rs:429 · crates/maknae-vault/src/plane.rs:17"
 

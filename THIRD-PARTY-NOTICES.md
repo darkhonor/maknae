@@ -56,6 +56,8 @@ Generated from `cargo deny list -f json -l crate` over the locked dependency gra
 | core-foundation | 0.10.1 | MIT OR Apache-2.0 |
 | core-foundation-sys | 0.8.7 | MIT OR Apache-2.0 |
 | crunchy | 0.2.4 | MIT |
+| crypto-profile | 0.9.0 | MIT OR Apache-2.0 |
+| crypto-profile-awslc4 | 0.9.0 | MIT OR Apache-2.0 |
 | darling | 0.20.11 | MIT |
 | darling_core | 0.20.11 | MIT |
 | darling_macro | 0.20.11 | MIT |
