@@ -1,7 +1,6 @@
 //! The process default's offer, golden-pinned so a change to it is a named change (#589).
 use maknae_crypto::rustls::crypto::CryptoProvider;
 use maknae_crypto::rustls::{CipherSuite as C, NamedGroup as G, SignatureScheme as S};
-use maknae_crypto::KxGroup;
 
 #[test]
 fn the_installed_default_offers_exactly_this() {
@@ -19,7 +18,7 @@ fn the_installed_default_offers_exactly_this() {
         groups,
         [
             G::MLKEM1024,
-            G::from(KxGroup::Secp384r1MlKem1024.iana()),
+            G::from(0x11ed),
             G::X25519MLKEM768,
             G::secp256r1MLKEM768,
             G::secp384r1,

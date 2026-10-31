@@ -540,7 +540,7 @@ why = "PEM file I/O for the CA-pin loader; fixture-tested for coverage, mutation
 
 [[t3]]
 path = "crates/maknae-vault/src/csr_gen.rs"
-why = "calls maknae_crypto::generate_csr (non-deterministic keygen I/O) and self-checks the result; the pure shape predicates are csr.rs (T1). Mutation-excluded (mutants.toml)"
+why = "calls maknae_crypto::csr::generate_csr (non-deterministic keygen I/O) and self-checks the result; the pure shape predicates are csr.rs (T1). Mutation-excluded (mutants.toml)"
 
 [[t3]]
 path = "crates/maknae-vault/src/auth.rs"

@@ -166,4 +166,117 @@ mod tests {
         };
         assert!(chain.contains("scheme"), "{chain}");
     }
+
+    fn tls12_only() -> maknae_crypto::tls::Policy {
+        use maknae_crypto::{CipherSuite as C, KxGroup as K, TlsSignatureScheme as S};
+        maknae_crypto::tls::Policy {
+            versions: vec![maknae_crypto::TlsVersion::Tls12],
+            cipher_suites: vec![
+                C::Tls12EcdheEcdsaAes256GcmSha384,
+                C::Tls12EcdheEcdsaAes128GcmSha256,
+            ],
+            kx_groups: vec![K::Secp384r1, K::Secp256r1],
+            signature_schemes: vec![S::EcdsaNistp384Sha384, S::EcdsaNistp256Sha256],
+            peer_certificate_rule: None,
+        }
+    }
+
+    /// One HTTPS GET from the hardened client to an in-process server on `server`.
+    /// Returns the client's result and the server's.
+    fn get_against(
+        name: &str,
+        server: &maknae_crypto::tls::Policy,
+    ) -> (Result<String, reqwest::Error>, Result<(), std::io::Error>) {
+        use maknae_crypto::rustls::pki_types::{CertificateDer, PrivateKeyDer};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        maknae_crypto::init().unwrap();
+        let mut ca_params = rcgen::CertificateParams::new(vec![]).unwrap();
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ca_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
+        let ca = ca_params.self_signed(&ca_key).unwrap();
+        let mut leaf_params = rcgen::CertificateParams::new(vec![]).unwrap();
+        leaf_params.subject_alt_names = vec![rcgen::SanType::IpAddress(
+            std::net::Ipv4Addr::LOCALHOST.into(),
+        )];
+        let leaf_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
+        let leaf = leaf_params
+            .signed_by(&leaf_key, &rcgen::Issuer::from_params(&ca_params, &ca_key))
+            .unwrap();
+
+        let d = tmp(name);
+        let ca_file = d.join("ca.crt");
+        std::fs::write(&ca_file, ca.pem()).unwrap();
+        let cfg = maknae_crypto::tls::server_builder(server)
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![
+                    CertificateDer::from(leaf.der().to_vec()),
+                    CertificateDer::from(ca.der().to_vec()),
+                ],
+                PrivateKeyDer::Pkcs8(leaf_key.serialize_der().into()),
+            )
+            .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(cfg));
+        let client = hardened_http_client(&ca_file, Duration::from_secs(5)).unwrap();
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let served = tokio::spawn(async move {
+                let (tcp, _) = listener.accept().await?;
+                let mut tls = acceptor.accept(tcp).await?;
+                let mut req = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let n = tls.read(&mut buf).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    req.extend_from_slice(&buf[..n]);
+                }
+                tls.write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok",
+                )
+                .await?;
+                tls.shutdown().await
+            });
+            let got = async {
+                client
+                    .get(format!("https://127.0.0.1:{port}/v1/sys/health"))
+                    .send()
+                    .await?
+                    .text()
+                    .await
+            }
+            .await;
+            (got, served.await.unwrap())
+        })
+    }
+
+    /// The external leg runs on the process default built from `preferred`: a
+    /// server on that policy is reached, and a TLS 1.2-only server is refused
+    /// in the handshake (ADR-0031 decision 4).
+    #[test]
+    fn the_hardened_client_speaks_tls13_only() {
+        let (got, served) = get_against("tls13", &maknae_crypto::policy().unwrap().tls);
+        assert_eq!(got.unwrap(), "ok");
+        served.unwrap();
+
+        let (got, served) = get_against("tls12", &tls12_only());
+        let e = got.expect_err("a TLS 1.2-only server must be refused");
+        assert!(e.is_connect(), "not a handshake failure: {e:?}");
+        let server_err = served.expect_err("the server's TLS 1.2 handshake must fail");
+        assert!(
+            server_err
+                .get_ref()
+                .is_some_and(|i| i.is::<maknae_crypto::rustls::Error>()),
+            "not a TLS-layer refusal: {server_err:?}"
+        );
+    }
 }

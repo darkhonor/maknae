@@ -184,16 +184,19 @@ Expected: `LIVE TRANSPORT OK: kernel<->cli mTLS + peer-creds round-trip over UDS
 Every TLS configuration offers `MLKEM1024`, `SECP384R1MLKEM1024`, `X25519MLKEM768`,
 `SECP256R1MLKEM768`, `SECP384R1` and `SECP256R1`, in that order, from the `preferred`
 profile of `crypto-profile`. Every connection, plane and external, is TLS 1.3 only, with
-AES-256-GCM then AES-128-GCM; a server that speaks only TLS 1.2 is refused. ML-KEM-1024 (CNSSP 15) is offered first, not
-enforced: a server without it answers with one HelloRetryRequest, and the connection
-lands on a hybrid or a classical group, whichever the server chooses. `X25519MLKEM768` is
-there for broad interoperability (every measured model provider accepts it);
-`SECP256R1MLKEM768` is the hybrid BSI TR-02102-2 (2026-01) intends to recommend. Pure `X25519` is not offered (FIPS mode). In testing in October 2026,
-Vault Community and Vault Enterprise negotiated post-quantum groups and Vault Enterprise
-FIPS builds stayed on classical groups.
+AES-256-GCM then AES-128-GCM; a server that speaks only TLS 1.2 is refused. ML-KEM-1024
+(CNSSP 15) is offered first, not enforced: a server without it answers with one
+HelloRetryRequest, and the connection lands on a hybrid or a classical group, whichever
+the server chooses. `X25519MLKEM768` is there for broad interoperability (every measured
+model provider accepts it); `SECP256R1MLKEM768` is the hybrid BSI TR-02102-2 (2026-01)
+intends to recommend. Pure `X25519` is not offered (FIPS mode). Vault was measured in
+October 2026 against an earlier offer that still allowed TLS 1.2 and did not include
+`SECP384R1MLKEM1024`: Vault Community and Vault Enterprise negotiated post-quantum
+groups, and Vault Enterprise FIPS builds stayed on classical groups.
 
 CNSA 2.0 is not met: key exchange is not restricted to ML-KEM-1024, the cipher suites
-include AES-128, and a plane does not yet refuse a peer certificate of another algorithm (#574).
+include AES-128, and a plane does not yet refuse a peer certificate of another algorithm
+(#574).
 Certificates and signatures follow `vault.plane_key`: ML-DSA-87 by default.
 
 ### Switching the plane key algorithm

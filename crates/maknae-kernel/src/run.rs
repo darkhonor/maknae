@@ -6147,7 +6147,6 @@ async fn run_inner(
     // is buffered until the reload task drains it after mint.
     let hup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
         .map_err(|e| RunError::Other(format!("cannot install SIGHUP handler: {e}")))?;
-    // FIPS first (spec §6.1): init() installs and asserts the policy's provider before any crypto/Vault client is built.
     maknae_crypto::init().map_err(|e| RunError::Other(maknae_vault::crypto_refusal_message(&e)))?;
 
     let env = &*seams.env;
