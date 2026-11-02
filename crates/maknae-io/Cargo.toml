@@ -58,7 +58,7 @@ nix = { version = "0.31", default-features = false, features = ["fs", "dir", "ui
 #       none by decision (#320, 2026-09-19). A bump to 1.1.5 is an ordinary
 #       bump reviewed against this comment, and it cannot keep it true, so it
 #       is closed -- which is what happened to #340.
-rustix = { version = "=1.1.4", default-features = false, features = ["std", "net"] }
+rustix = { version = "=1.1.6", default-features = false, features = ["std", "net"] }
 # Credential reads return Zeroizing<..> so the buffer is wiped on drop rather than left
 # in freed heap. Re-exported from lib.rs so consumers need no zeroize pin of their own.
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
