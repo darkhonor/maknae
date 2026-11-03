@@ -2,10 +2,10 @@
 //! the brain in `maknae-agent`. Runs as the subject, holds no key and no
 //! policy, and asks the kernel for everything (ADR-0023 d2, d4).
 use crate::cli::{send_verb, write_request};
-use maknae_agent::budget::{prompt_cap, ContextBudget, Meter, Notice};
-use maknae_agent::drive::{drive, Budget, StopReason};
+use maknae_agent::budget::{prompt_cap, ContextBudget, Notice};
+use maknae_agent::drive::{Budget, LoopEvent, Outcome, StopReason};
 use maknae_agent::plane::{Plane, PlaneError, ReadBasis, ReadOutcome, WriteOutcome};
-use maknae_agent::transcript::Transcript;
+use maknae_agent::session::Session;
 use maknae_agent::wire::{check_for, prompt_outcome, read_outcome, write_outcome, WireOutcome};
 use maknae_config::{UserProviderEntry, UserProviders, Value};
 use maknae_proto::{ProviderChoice, SealedKey, Turn, Verb};
@@ -15,6 +15,7 @@ use maknae_vault::{
     USER_KEY_WRAP_TTL,
 };
 use std::future::Future;
+use std::io::Write;
 use std::path::Path;
 
 pub const AGENT_SECTION: &str = "agent";
@@ -466,6 +467,59 @@ pub fn stop_line(r: Option<&StopReason>, budget: &Budget) -> String {
     }
 }
 
+/// The lines a run prints while it is going: notices and the plane's
+/// diagnostics, on stderr. The answer and the stop line are [`print_end`]'s.
+pub fn print_event(e: &LoopEvent, err: &mut impl Write) -> std::io::Result<()> {
+    match e {
+        LoopEvent::Notice(n) => writeln!(err, "{}", warning_line(n)),
+        LoopEvent::Diagnostic(d) => writeln!(err, "{d}"),
+        _ => Ok(()),
+    }
+}
+
+pub fn print_end(
+    outcome: &Outcome,
+    budget: &Budget,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> std::io::Result<u8> {
+    if let Some(answer) = &outcome.answer {
+        writeln!(out, "{answer}")?;
+        return Ok(0);
+    }
+    writeln!(
+        err,
+        "maknae agent: {}",
+        stop_line(outcome.stopped.as_ref(), budget)
+    )?;
+    Ok(2)
+}
+
+/// A failed print stops the session at its next step, so nothing further
+/// is attempted on the subject's behalf after output is lost.
+pub async fn drive_to<P: Plane + Send>(
+    session: &mut Session,
+    plane: &mut P,
+    err: &mut (impl Write + Send),
+) -> std::io::Result<Outcome> {
+    let handle = session.handle();
+    let mut failed: Option<std::io::Error> = None;
+    let outcome = session
+        .run(plane, &mut |e| {
+            if failed.is_none() {
+                if let Err(e) = print_event(&e, err) {
+                    handle.stop();
+                    failed = Some(e);
+                }
+            }
+        })
+        .await;
+    match failed {
+        Some(e) => Err(e),
+        None => Ok(outcome),
+    }
+}
+
 /// Mirrors `execute()`'s setup (FIPS provider, config, user token, mint).
 pub async fn run(label: Option<String>, prompt: String) -> Result<u8, String> {
     maknae_crypto::init().map_err(|e| maknae_vault::crypto_refusal_message(&e))?;
@@ -515,29 +569,21 @@ pub async fn run(label: Option<String>, prompt: String) -> Result<u8, String> {
         },
         spare: None,
     };
-    let mut transcript = Transcript::new(mint_conversation_id(), &prompt);
     let budget = Budget {
         max_steps: agent.max_steps,
         max_tool_calls_per_step: agent.max_tool_calls_per_step,
     };
-    let outcome = drive(
-        &mut plane,
-        &mut transcript,
-        &budget,
-        &mut Meter::new(context),
-        &mut |n| eprintln!("{}", warning_line(n)),
-    )
-    .await;
+    let mut session = Session::new(mint_conversation_id(), &prompt, budget, context);
+    let outcome = drive_to(&mut session, &mut plane, &mut std::io::stderr()).await;
     client.shutdown().await;
-    if let Some(answer) = outcome.answer {
-        println!("{answer}");
-        return Ok(0);
-    }
-    eprintln!(
-        "maknae agent: {}",
-        stop_line(outcome.stopped.as_ref(), &budget)
-    );
-    Ok(2)
+    let outcome = outcome.map_err(|e| e.to_string())?;
+    print_end(
+        &outcome,
+        &budget,
+        &mut std::io::stdout(),
+        &mut std::io::stderr(),
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -1110,5 +1156,259 @@ mod tests {
             SPARE_MAX_AGE_SECS * 2,
             maknae_vault::USER_KEY_WRAP_TTL.as_secs()
         );
+    }
+
+    mod printer {
+        use super::*;
+        use maknae_agent::drive::Outcome;
+        use maknae_agent::session::Session;
+        use maknae_proto::{ContentBlock, PromptReply, ProposedToolCall, SecretText};
+        use std::collections::VecDeque;
+
+        const ARMING: &str = "maknae: cannot prepare filesystem operation: x";
+        const ATTEMPT: &str = "mutation stopped: OsRefused; 0 effect(s) reported";
+
+        fn reply(text: Option<&str>, calls: &[(&str, &str)]) -> PromptReply {
+            PromptReply {
+                reasoning: None,
+                blocks: text
+                    .map(|t| {
+                        vec![ContentBlock::Text {
+                            text: SecretText(zeroize::Zeroizing::new(t.into())),
+                        }]
+                    })
+                    .unwrap_or_default(),
+                tool_calls: calls
+                    .iter()
+                    .map(|(id, path)| ProposedToolCall {
+                        name: "write_file".into(),
+                        call_id: (*id).into(),
+                        arguments: SecretText(zeroize::Zeroizing::new(format!(
+                            r#"{{"path":"{path}","content":"x"}}"#
+                        ))),
+                        refused: None,
+                    })
+                    .collect(),
+                usage: None,
+            }
+        }
+
+        struct Fake {
+            replies: VecDeque<PromptReply>,
+            write_diags: VecDeque<&'static str>,
+            queued: Vec<String>,
+            prompts: usize,
+            writes: usize,
+        }
+        impl Plane for Fake {
+            async fn prompt(
+                &mut self,
+                _c: &str,
+                _t: &[Turn],
+            ) -> Result<maknae_proto::PromptReply, PlaneError> {
+                self.prompts += 1;
+                Ok(self.replies.pop_front().expect("script exhausted"))
+            }
+            async fn read(
+                &mut self,
+                _c: &str,
+                _p: &str,
+                _page: maknae_proto::PageRequest,
+            ) -> ReadOutcome {
+                ReadOutcome::Unavailable
+            }
+            async fn write(
+                &mut self,
+                _c: &str,
+                _p: &str,
+                _b: &[u8],
+                _b2: ReadBasis,
+            ) -> WriteOutcome {
+                self.writes += 1;
+                if let Some(d) = self.write_diags.pop_front() {
+                    self.queued.push(d.into());
+                }
+                WriteOutcome::Applied(None)
+            }
+            fn take_diagnostics(&mut self) -> Vec<String> {
+                std::mem::take(&mut self.queued)
+            }
+        }
+        fn fake(replies: Vec<PromptReply>) -> Fake {
+            Fake {
+                replies: replies.into(),
+                write_diags: VecDeque::new(),
+                queued: vec![],
+                prompts: 0,
+                writes: 0,
+            }
+        }
+        fn budget() -> Budget {
+            Budget {
+                max_steps: 8,
+                max_tool_calls_per_step: 4,
+            }
+        }
+        fn unmetered() -> ContextBudget {
+            ContextBudget::new(maknae_proto::MAX_CONTEXT_TOKENS, None).unwrap()
+        }
+
+        async fn host(
+            mut session: Session,
+            plane: &mut Fake,
+        ) -> (Vec<u8>, Vec<u8>, std::io::Result<u8>) {
+            let (mut out, mut err) = (vec![], vec![]);
+            let code = match drive_to(&mut session, plane, &mut err).await {
+                Ok(outcome) => print_end(&outcome, &session.budget(), &mut out, &mut err),
+                Err(e) => Err(e),
+            };
+            (out, err, code)
+        }
+
+        #[tokio::test]
+        async fn the_agent_printer_is_byte_identical() {
+            let (out, err, code) = host(
+                Session::new("c", "q", budget(), unmetered()),
+                &mut fake(vec![reply(Some("ok"), &[])]),
+            )
+            .await;
+            assert_eq!((out, err, code.unwrap()), (b"ok\n".to_vec(), vec![], 0));
+
+            let (out, err, code) = host(
+                Session::new(
+                    "c",
+                    &"q".repeat(1_800),
+                    budget(),
+                    ContextBudget::new(2_000, None).unwrap(),
+                ),
+                &mut fake(vec![reply(Some("ok"), &[])]),
+            )
+            .await;
+            let notice = Notice {
+                percent: 99,
+                tokens: 1_986,
+                budget: 2_000,
+                estimated: true,
+            };
+            assert_eq!(out, b"ok\n");
+            assert_eq!(
+                String::from_utf8(err).unwrap(),
+                format!("{}\n", warning_line(&notice))
+            );
+            assert_eq!(code.unwrap(), 0);
+
+            let b = budget();
+            let every = [
+                StopReason::StepBudget,
+                StopReason::TooManyToolCalls(5),
+                StopReason::FrameBound,
+                StopReason::PromptRefused,
+                StopReason::PromptMalformed,
+                StopReason::ReplyUnusable(maknae_proto::ReplyDefect::Empty),
+                StopReason::EgressUnavailable,
+                StopReason::Transport("t".into()),
+                StopReason::ContextBudget,
+                StopReason::Stopped,
+                StopReason::NothingPending,
+            ];
+            for r in &every {
+                match r {
+                    StopReason::StepBudget
+                    | StopReason::TooManyToolCalls(_)
+                    | StopReason::FrameBound
+                    | StopReason::PromptRefused
+                    | StopReason::PromptMalformed
+                    | StopReason::ReplyUnusable(_)
+                    | StopReason::EgressUnavailable
+                    | StopReason::Transport(_)
+                    | StopReason::ContextBudget
+                    | StopReason::Stopped
+                    | StopReason::NothingPending => {}
+                }
+                let (mut out, mut err) = (vec![], vec![]);
+                let outcome = Outcome {
+                    answer: None,
+                    stopped: Some(r.clone()),
+                    steps_used: 0,
+                };
+                assert_eq!(print_end(&outcome, &b, &mut out, &mut err).unwrap(), 2);
+                assert!(out.is_empty());
+                assert_eq!(
+                    String::from_utf8(err).unwrap(),
+                    format!("maknae agent: {}\n", stop_line(Some(r), &b))
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn the_agent_printer_interleaves_diagnostics_in_todays_order() {
+            let mut p = fake(vec![
+                reply(None, &[("c1", "/w/a")]),
+                reply(None, &[("c2", "/w/b")]),
+                reply(None, &[("c3", "/w/c")]),
+            ]);
+            p.write_diags = VecDeque::from([ARMING, ATTEMPT]);
+            let b = Budget {
+                max_steps: 3,
+                max_tool_calls_per_step: 4,
+            };
+            let (out, err, code) = host(
+                Session::new(
+                    "c",
+                    &"q".repeat(1_700),
+                    b,
+                    ContextBudget::new(2_000, None).unwrap(),
+                ),
+                &mut p,
+            )
+            .await;
+            assert!(out.is_empty());
+            assert_eq!(code.unwrap(), 2);
+            let err = String::from_utf8(err).unwrap();
+            let lines: Vec<&str> = err.lines().collect();
+            assert_eq!(lines.len(), 4, "{err}");
+            assert!(lines[0].starts_with("warning: "), "{err}");
+            assert_eq!(lines[1], ARMING);
+            assert_eq!(lines[2], ATTEMPT);
+            assert_eq!(
+                lines[3],
+                format!(
+                    "maknae agent: {}",
+                    stop_line(Some(&StopReason::StepBudget), &b)
+                )
+            );
+            assert!(err.ends_with('\n'));
+        }
+
+        struct Broken;
+        impl std::io::Write for Broken {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        #[tokio::test]
+        async fn a_stderr_write_error_stops_the_loop() {
+            let mut p = fake(vec![
+                reply(None, &[("c1", "/w/a")]),
+                reply(None, &[("c2", "/w/b")]),
+                reply(None, &[("c3", "/w/c")]),
+                reply(Some("done"), &[]),
+            ]);
+            p.write_diags = VecDeque::from([ARMING, ARMING, ARMING]);
+            let mut session = Session::new("c", "q", budget(), unmetered());
+            match drive_to(&mut session, &mut p, &mut Broken).await {
+                Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe),
+                Ok(_) => panic!("a failed print must surface as an error"),
+            }
+            assert_eq!(
+                (p.prompts, p.writes),
+                (1, 1),
+                "nothing ran after the failed print"
+            );
+        }
     }
 }
