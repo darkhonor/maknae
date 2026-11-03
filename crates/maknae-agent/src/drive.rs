@@ -127,6 +127,7 @@ pub async fn drive<P: Plane>(
 /// `stop` is read before each plane call that has not started: at the top of a
 /// step, before the prompt, and before each tool call. A granted read, write or
 /// exchange is never cut short; a skipped call is answered as not run.
+#[allow(clippy::too_many_arguments)]
 pub async fn drive_session<P: Plane>(
     plane: &mut P,
     transcript: &mut Transcript,

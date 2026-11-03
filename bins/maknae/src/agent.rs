@@ -417,6 +417,8 @@ pub async fn run(label: Option<String>, prompt: String) -> Result<u8, String> {
     let mut transport = transport;
     transport.prompt_max_bytes = loop_prompt_cap(context.context_tokens(), explicit);
     let id = maknae_loop::id::mint_conversation_id()?;
+    // One snapshot per session: `~` cannot change meaning for this process (#596).
+    let home = maknae_io::session_home().and_then(|p| p.to_str().map(str::to_string));
     let client = PlaneClient::for_user(&document, &dir, token_copy(&session.token)?)
         .map_err(|e| e.to_string())?;
     let ca = maknae_vault::load_ca_pin(&dir).map_err(|e| e.to_string())?;
@@ -443,7 +445,7 @@ pub async fn run(label: Option<String>, prompt: String) -> Result<u8, String> {
         max_steps: agent.max_steps,
         max_tool_calls_per_step: agent.max_tool_calls_per_step,
     };
-    let mut session = Session::new(id, &prompt, budget, context);
+    let mut session = Session::new(id, &prompt, budget, context, home);
     let outcome = drive_to(&mut session, &mut plane, &mut std::io::stderr()).await;
     plane.into_client().shutdown().await;
     let outcome = outcome.map_err(|e| e.to_string())?;
@@ -1034,7 +1036,7 @@ mod tests {
         #[tokio::test]
         async fn the_agent_printer_is_byte_identical() {
             let (out, err, code) = host(
-                Session::new("c", "q", budget(), unmetered()),
+                Session::new("c", "q", budget(), unmetered(), None),
                 &mut fake(vec![reply(Some("ok"), &[])]),
             )
             .await;
@@ -1046,6 +1048,7 @@ mod tests {
                     &"q".repeat(1_800),
                     budget(),
                     ContextBudget::new(2_000, None).unwrap(),
+                    None,
                 ),
                 &mut fake(vec![reply(Some("ok"), &[])]),
             )
@@ -1148,6 +1151,7 @@ mod tests {
                     &"q".repeat(1_700),
                     b,
                     ContextBudget::new(2_000, None).unwrap(),
+                    None,
                 ),
                 &mut p,
             )
@@ -1188,6 +1192,7 @@ mod tests {
                 &"q".repeat(1_800),
                 budget(),
                 ContextBudget::new(2_000, None).unwrap(),
+                None,
             );
             match drive_to(&mut session, &mut p, &mut Broken).await {
                 Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe),
@@ -1205,7 +1210,7 @@ mod tests {
                 reply(Some("done"), &[]),
             ]);
             p.write_diags = VecDeque::from([ARMING, ARMING, ARMING]);
-            let mut session = Session::new("c", "q", budget(), unmetered());
+            let mut session = Session::new("c", "q", budget(), unmetered(), None);
             match drive_to(&mut session, &mut p, &mut Broken).await {
                 Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe),
                 Ok(_) => panic!("a failed print must surface as an error"),

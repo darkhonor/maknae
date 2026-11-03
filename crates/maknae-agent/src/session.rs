@@ -31,6 +31,7 @@ pub struct Session {
     stop: Arc<AtomicBool>,
     answered: bool,
     pending: bool,
+    home: Option<String>,
 }
 
 impl Session {
@@ -39,6 +40,7 @@ impl Session {
         first_prompt: &str,
         budget: Budget,
         context: ContextBudget,
+        home: Option<String>,
     ) -> Self {
         Session {
             transcript: Transcript::new(conversation, first_prompt),
@@ -48,6 +50,7 @@ impl Session {
             stop: Arc::new(AtomicBool::new(false)),
             answered: false,
             pending: true,
+            home,
         }
     }
 
@@ -100,7 +103,7 @@ impl Session {
             &mut self.meter,
             &self.stop,
             emit,
-            None,
+            self.home.as_deref(),
         )
         .await;
         match (&outcome.answer, &outcome.stopped) {
@@ -171,6 +174,7 @@ mod tests {
         replies: VecDeque<PromptReply>,
         prompts: Vec<(String, usize)>,
         bases: Vec<ReadBasis>,
+        paths: Vec<String>,
         version: [i64; 7],
         yields: bool,
         started: Option<tokio::sync::oneshot::Sender<()>>,
@@ -187,9 +191,10 @@ mod tests {
         async fn read(
             &mut self,
             _c: &str,
-            _p: &str,
+            p: &str,
             _page: maknae_proto::PageRequest,
         ) -> ReadOutcome {
+            self.paths.push(p.into());
             if self.yields {
                 tokio::task::yield_now().await;
             }
@@ -204,7 +209,8 @@ mod tests {
                 changed: false,
             })
         }
-        async fn write(&mut self, _c: &str, _p: &str, _b: &[u8], basis: ReadBasis) -> WriteOutcome {
+        async fn write(&mut self, _c: &str, p: &str, _b: &[u8], basis: ReadBasis) -> WriteOutcome {
+            self.paths.push(p.into());
             if let Some(s) = self.started.take() {
                 s.send(()).unwrap();
             }
@@ -248,7 +254,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_answer_emits_one_answer_event_and_opens_the_session() {
-        let mut s = Session::new("conv-1", "hello", budget(), unmetered());
+        let mut s = Session::new("conv-1", "hello", budget(), unmetered(), None);
         let mut p = fake(vec![answer("hi")]);
         assert_eq!(
             run_answer(&mut s, &mut p).await,
@@ -260,7 +266,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_prompt_after_a_stop_is_refused() {
-        let mut s = Session::new("c", "go", budget(), unmetered());
+        let mut s = Session::new("c", "go", budget(), unmetered(), None);
         let mut p = fake(vec![PromptReply {
             reasoning: None,
             blocks: vec![],
@@ -283,7 +289,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_run_without_a_pending_prompt_sends_nothing() {
-        let mut s = Session::new("c", "go", budget(), unmetered());
+        let mut s = Session::new("c", "go", budget(), unmetered(), None);
         let mut p = fake(vec![answer("hi")]);
         run_collect(&mut s, &mut p).await;
         let events = run_collect(&mut s, &mut p).await;
@@ -299,7 +305,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_second_prompt_carries_the_conversation_and_the_read_basis() {
-        let mut s = Session::new("conv-x", "read /f", budget(), unmetered());
+        let mut s = Session::new("conv-x", "read /f", budget(), unmetered(), None);
         let mut p = fake(vec![
             tool("c1", "read_file", &read_args("/f")),
             answer("read"),
@@ -325,6 +331,7 @@ mod tests {
             &"q".repeat(1_700),
             budget(),
             ContextBudget::new(2_000, None).unwrap(),
+            None,
         );
         let mut p = fake(vec![answer("one"), answer("two")]);
         let first = run_collect(&mut s, &mut p).await;
@@ -341,7 +348,7 @@ mod tests {
     async fn two_sessions_run_concurrently_without_sharing_state() {
         let spawn = |id: &'static str, script: Vec<PromptReply>| {
             tokio::spawn(async move {
-                let mut s = Session::new(id, "go", budget(), unmetered());
+                let mut s = Session::new(id, "go", budget(), unmetered(), None);
                 let mut p = fake(script);
                 p.yields = true;
                 let mut events = vec![];
@@ -377,7 +384,7 @@ mod tests {
     async fn a_stop_waits_for_the_granted_write_then_ends_the_loop() {
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-        let mut sa = Session::new("conv-a", "go", budget(), unmetered());
+        let mut sa = Session::new("conv-a", "go", budget(), unmetered(), None);
         let handle = sa.handle();
         let mut pa = fake(vec![
             tool("a1", "write_file", &write_args("/a")),
@@ -391,7 +398,7 @@ mod tests {
             (events, pa, sa)
         });
         let b = tokio::spawn(async move {
-            let mut sb = Session::new("conv-b", "go", budget(), unmetered());
+            let mut sb = Session::new("conv-b", "go", budget(), unmetered(), None);
             let mut pb = fake(vec![tool("b1", "read_file", &read_args("/b")), answer("B")]);
             pb.yields = true;
             let mut events = vec![];
@@ -416,7 +423,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_run_cancelled_mid_write_leaves_the_session_closed() {
-        let mut s = Session::new("c", "first", budget(), unmetered());
+        let mut s = Session::new("c", "first", budget(), unmetered(), None);
         let mut p = fake(vec![
             answer("one"),
             tool("w1", "write_file", &write_args("/a")),
@@ -441,7 +448,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_answer_event_carries_no_reply_text() {
-        let mut s = Session::new("c", "q", budget(), unmetered());
+        let mut s = Session::new("c", "q", budget(), unmetered(), None);
         let mut p = fake(vec![answer("SENTINEL-ANSWER-TEXT")]);
         let mut events = vec![];
         let out = s.run(&mut p, &mut |e| events.push(e)).await;
@@ -450,17 +457,77 @@ mod tests {
         assert!(!shown.contains("SENTINEL-ANSWER-TEXT"), "{shown}");
     }
 
+    fn home_session(home: Option<&str>) -> Session {
+        Session::new("c", "go", budget(), unmetered(), home.map(str::to_string))
+    }
+
+    #[tokio::test]
+    async fn a_session_writes_through_its_home() {
+        let mut s = home_session(Some("/home/u"));
+        let mut p = fake(vec![
+            tool("w1", "write_file", &write_args("~/f")),
+            answer("ok"),
+        ]);
+        run_collect(&mut s, &mut p).await;
+        assert_eq!(p.paths, vec!["/home/u/f".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn the_read_basis_spans_the_tilde_and_absolute_forms() {
+        let mut s = home_session(Some("/home/u"));
+        let mut p = fake(vec![
+            tool("r1", "read_file", &read_args("~/f")),
+            tool("w1", "write_file", &write_args("/home/u/f")),
+            answer("ok"),
+        ]);
+        p.version = [9; 7];
+        run_collect(&mut s, &mut p).await;
+        assert_eq!(p.bases, vec![ReadBasis::Read([9; 7])]);
+        assert_eq!(
+            p.paths,
+            vec!["/home/u/f".to_string(), "/home/u/f".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_without_a_home_refuses_tilde_and_keeps_absolute() {
+        let mut s = home_session(None);
+        let mut p = fake(vec![
+            tool("w1", "write_file", &write_args("~/f")),
+            tool("w2", "write_file", &write_args("/abs/f")),
+            answer("ok"),
+        ]);
+        run_collect(&mut s, &mut p).await;
+        assert_eq!(p.paths, vec!["/abs/f".to_string()]);
+        let tilde_result = s
+            .transcript
+            .turns()
+            .iter()
+            .find_map(|t| match t {
+                Turn::Tool { call_id, content } if call_id == "w1" => match &content[0] {
+                    ContentBlock::Text { text } => Some(text.0.to_string()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            tilde_result.starts_with("tool error: home-relative paths are unavailable"),
+            "{tilde_result}"
+        );
+    }
+
     #[test]
     fn run_is_send() {
         fn assert_send<T: Send>(_: T) {}
-        let mut s = Session::new("c", "q", budget(), unmetered());
+        let mut s = Session::new("c", "q", budget(), unmetered(), None);
         let mut p = fake(vec![]);
         assert_send(s.run(&mut p, &mut |_| {}));
     }
 
     #[test]
     fn the_budget_is_returned_as_given() {
-        let s = Session::new("c", "q", budget(), unmetered());
+        let s = Session::new("c", "q", budget(), unmetered(), None);
         let b = s.budget();
         assert_eq!((b.max_steps, b.max_tool_calls_per_step), (8, 2));
     }
