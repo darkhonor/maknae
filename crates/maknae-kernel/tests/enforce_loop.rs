@@ -3384,6 +3384,51 @@ async fn a_second_users_tilde_grant_does_not_reach_the_enrolled_home() {
     assert_denied_with_prefix(&emit, "read evidence refused: escapes the anchor");
 }
 
+/// The real router's `~` expansion (#596), fed to the real decision path: a
+/// path routed with a user's own `maknae_io::session_home`-form home is
+/// decided against that user's home, and the same routed path is refused for
+/// anyone else.
+fn routed_home_path(home: &std::path::Path, tilde: &str) -> std::path::PathBuf {
+    let home = maknae_io::canonical_home(home).expect("the second home resolves");
+    let call = maknae_proto::ProposedToolCall {
+        name: "read_file".into(),
+        call_id: "c1".into(),
+        arguments: maknae_proto::SecretText(maknae_io::Zeroizing::new(format!(
+            r#"{{"path":"{tilde}"}}"#
+        ))),
+        refused: None,
+    };
+    match maknae_agent::route::route(&call, home.to_str()) {
+        Ok(maknae_agent::route::ToolRequest::Read { path, .. }) => path.into(),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn an_expanded_home_path_is_decided_against_the_requesters_home() {
+    let fx = Fixture::new("expanded_home");
+    let b = common::second_home("enforce_expanded_home");
+    std::fs::write(b.join("notes.txt"), b"b's own notes").unwrap();
+    fx.write_policy(&allow_policy("Read(~/**)", ""));
+    let routed = routed_home_path(&b, "~/notes.txt");
+    assert_eq!(routed, b.join("notes.txt"));
+
+    let emit = RecEmit::new();
+    let run = read_as_requester(&fx, Some(&b), &routed, emit.clone()).await;
+    assert_eq!(
+        read_content(&run),
+        Some(&b"b's own notes"[..]),
+        "{:?}",
+        request_record(&emit.records()).outcome
+    );
+
+    let other = common::second_home("enforce_expanded_home_other");
+    let emit = RecEmit::new();
+    let run = read_as_requester(&fx, Some(&other), &routed, emit.clone()).await;
+    assert_unauthorized(&run);
+    assert_denied_with_prefix(&emit, "read evidence refused: escapes the anchor");
+}
+
 #[tokio::test]
 async fn an_absolute_grant_cannot_reach_beyond_the_requesters_home() {
     let fx = Fixture::new("absolute_enrolled");
