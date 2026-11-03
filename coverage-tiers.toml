@@ -489,7 +489,7 @@ why = "module declarations + re-exports + PRIVILEGED_MARKER; the boot logic is b
 
 [[t3]]
 path = "crates/maknae-agent/src/lib.rs"
-why = "module declarations only; the loop logic is transcript.rs (T1) and the other module files (route.rs, render.rs, drive.rs, budget.rs)"
+why = "module declarations only; the loop logic is transcript.rs (T1) and the other module files (route.rs, render.rs, drive.rs, budget.rs, session.rs, wire.rs)"
 
 [[t3]]
 path = "crates/maknae-loop/src/lib.rs"
@@ -497,7 +497,7 @@ why = "#470: module declarations only, as crates/maknae-agent/src/lib.rs"
 
 [[t3]]
 path = "crates/maknae-loop/src/send.rs"
-why = "#470: the wire client moved from bins/maknae/src/cli.rs (T3 there for the same reason): connect, mint and frame I/O against a live daemon, with no fail-closed decision of its own. Its frame-timing and write-bound tests moved with it; the arming line it emits is decided by mutation.rs's arming_diagnostic (T2) and the outcome it returns is mapped by maknae-agent::wire (T1)"
+why = "#470: the wire client moved from bins/maknae/src/cli.rs (T3 there for the same reason): connect and frame I/O against a live daemon over an already-minted client, with no fail-closed decision of its own. Its frame-timing and write-bound tests moved with it; the arming line it emits is decided by mutation.rs's arming_diagnostic (T2) and the outcome it returns is mapped by maknae-agent::wire (T1)"
 
 [[t3]]
 path = "crates/maknae-loop/src/plane.rs"

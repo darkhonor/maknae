@@ -279,6 +279,22 @@ mod tests {
         assert!(fits < wrap);
     }
 
+    /// Structural tripwire: a LoopPlane needs a live daemon, so this pins the
+    /// wiring by source. Without the override, the trait default drops every
+    /// line `maknae agent` used to print.
+    #[test]
+    fn loop_plane_hands_its_diagnostics_to_the_loop() {
+        let src = include_str!("plane.rs");
+        let body = &src[src
+            .find(concat!("impl<K: KeySupply> Plane ", "for LoopPlane"))
+            .unwrap()..];
+        assert_eq!(body.matches(concat!("diagnostics", ".push(l)")).count(), 3);
+        assert!(body.contains(concat!(
+            "fn take_diagnostics(&mut self) -> Vec<String> {\n",
+            "        std::mem::take(&mut self.diagnostics)"
+        )));
+    }
+
     fn a_choice() -> ProviderChoice {
         ProviderChoice {
             provider: "p".into(),

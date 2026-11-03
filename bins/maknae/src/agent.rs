@@ -1106,6 +1106,30 @@ mod tests {
             }
         }
 
+        #[test]
+        fn the_agent_printer_matches_literal_bytes() {
+            let b = budget();
+            for (r, want) in [
+                (
+                    StopReason::StepBudget,
+                    "maknae agent: stopped: the step budget (8) was spent without an answer\n",
+                ),
+                (
+                    StopReason::TooManyToolCalls(5),
+                    "maknae agent: stopped: the model asked for 5 tools in one step (cap 4)\n",
+                ),
+            ] {
+                let (mut out, mut err) = (vec![], vec![]);
+                let outcome = Outcome {
+                    answer: None,
+                    stopped: Some(r),
+                    steps_used: 0,
+                };
+                assert_eq!(print_end(&outcome, &b, &mut out, &mut err).unwrap(), 2);
+                assert_eq!(String::from_utf8(err).unwrap(), want);
+            }
+        }
+
         #[tokio::test]
         async fn the_agent_printer_interleaves_diagnostics_in_todays_order() {
             let mut p = fake(vec![

@@ -146,8 +146,8 @@ async fn await_reply<S: tokio::io::AsyncRead + Unpin>(
 }
 
 /// Send ONE verb over the post-mint plane and report what came back, printing no RESULT —
-/// the caller decides what a terminal (or a model) is told. Not silent: the arming
-/// diagnostic below goes to stderr, and `mutation::execute` prints on the attempt path.
+/// the caller decides what a terminal (or a model) is told. The arming line and the
+/// attempt's stop line go to `diag`, which the caller prints or buffers.
 pub async fn send_verb(
     request_verb: maknae_proto::Verb,
     content: Option<maknae_proto::Bytes>,
@@ -259,7 +259,7 @@ pub async fn send_verb(
 }
 
 /// Build an `FsWrite` for `content` the caller already holds in memory, bounded by the
-/// prompt budget [`request_from_input`] applies to stdin; the request carries only the length.
+/// prompt budget the CLI's `request_from_input` applies to stdin; the request carries only the length.
 ///
 /// The mode is `Existing` — what `maknae write` sends too — because
 /// [`crate::mutation::prepare_checked`] overrides it at open time (`CreateExclusive` on a
@@ -690,12 +690,12 @@ mod tests {
         assert_eq!(err, stalled(wait_ms));
     }
 
-    /// The future `send_verb` returns must be `Send`: the CLI's `impl Plane`
-    /// (`agent.rs`) returns it behind a trait bound that carries `+ Send`, and a
+    /// The future `send_verb` returns must be `Send`: `LoopPlane`'s `impl Plane`
+    /// (`plane.rs`) returns it behind a trait bound that carries `+ Send`, and a
     /// guard held across an `.await` inside `send_verb` would otherwise only
     /// surface there. Compile-time only — never called, and that is the point:
     /// it checks the FUTURE, not a closure. It lives inside `mod tests` so a
-    /// future re-tiering of `cli.rs` cannot trip
+    /// future re-tiering of this file cannot trip
     /// `coverage_check.py`'s column-0-after-the-test-module rule.
     #[allow(dead_code)]
     fn assert_send_verb_future_is_send(

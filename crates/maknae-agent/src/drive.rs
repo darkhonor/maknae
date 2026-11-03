@@ -88,14 +88,15 @@ pub struct Outcome {
 
 pub type Seen = std::collections::HashMap<String, [i64; 7]>;
 
-/// What a loop reports while it runs. Never carries served content, a provider
-/// key or a wrapping token.
+/// What a loop reports while it runs. Never carries the model's reply, served
+/// content, a provider key or a wrapping token: the reply is in the `Outcome`.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoopEvent {
     Notice(Notice),
     Diagnostic(String),
-    Answer(String),
+    /// The text is in the run's `Outcome`; the event carries none of it.
+    Answered,
     Stopped(StopReason),
 }
 
@@ -1393,6 +1394,7 @@ mod tests {
         inner: Scripted,
         on_prompt: VecDeque<&'static str>,
         on_write: &'static str,
+        on_read: &'static str,
         queued: Vec<String>,
     }
     impl Plane for Diagnosing {
@@ -1403,6 +1405,7 @@ mod tests {
             self.inner.prompt(c, t).await
         }
         async fn read(&mut self, c: &str, p: &str, page: maknae_proto::PageRequest) -> ReadOutcome {
+            self.queued.push(self.on_read.into());
             self.inner.read(c, p, page).await
         }
         async fn write(&mut self, c: &str, p: &str, b: &[u8], basis: ReadBasis) -> WriteOutcome {
@@ -1417,27 +1420,72 @@ mod tests {
     #[tokio::test]
     async fn diagnostics_are_emitted_right_after_the_plane_call_that_made_them() {
         let mut p = Diagnosing {
-            inner: scripted(vec![one("c1", "write_file", WRITE_A), done()]),
-            on_prompt: VecDeque::from(["diag-p1", "diag-p2"]),
+            inner: scripted(vec![
+                one("c1", "read_file", READ_A),
+                one("c2", "write_file", WRITE_A),
+                done(),
+            ]),
+            on_prompt: VecDeque::from(["diag-p1", "diag-p2", "diag-p3"]),
             on_write: "diag-w",
+            on_read: "diag-r",
             queued: vec![],
         };
-        let mut t = Transcript::new("c", "q");
+        // The read's result pushes the meter past 80%, so the notice is
+        // emitted between the read and the next prompt: the read's line must
+        // come before it, not with the next prompt's.
+        if let ReadOutcome::Content(page) = &mut p.inner.read_outcome {
+            page.content = Zeroizing::new(vec![b'x'; 400]);
+        }
         let stop = AtomicBool::new(false);
-        let (_, events) = session_unmetered(&mut p, &mut t, &mut Seen::new(), &stop).await;
-        assert_eq!(
-            events,
-            vec![
-                LoopEvent::Diagnostic("diag-p1".into()),
-                LoopEvent::Diagnostic("diag-w".into()),
-                LoopEvent::Diagnostic("diag-p2".into()),
-            ]
+        let mut events = vec![];
+        drive_session(
+            &mut p,
+            &mut Transcript::new("c", "q"),
+            &mut Seen::new(),
+            &budget(),
+            &mut Meter::new(ContextBudget::new(2_000, None).unwrap()),
+            &stop,
+            &mut |e| events.push(e),
+        )
+        .await;
+        let d = |s: &str| LoopEvent::Diagnostic(s.into());
+        assert!(
+            matches!(&events[..], [a, b, LoopEvent::Notice(_), c, e, f]
+                if *a == d("diag-p1") && *b == d("diag-r") && *c == d("diag-p2")
+                    && *e == d("diag-w") && *f == d("diag-p3")),
+            "{events:?}"
+        );
+
+        let big_write = format!(r#"{{"path":"/w/a.txt","content":"{}"}}"#, "x".repeat(400));
+        let mut p = Diagnosing {
+            inner: scripted(vec![one("c1", "write_file", &big_write), done()]),
+            on_prompt: VecDeque::from(["diag-p1", "diag-p2"]),
+            on_write: "diag-w",
+            on_read: "unused",
+            queued: vec![],
+        };
+        let mut events = vec![];
+        drive_session(
+            &mut p,
+            &mut Transcript::new("c", "q"),
+            &mut Seen::new(),
+            &budget(),
+            &mut Meter::new(ContextBudget::new(2_000, None).unwrap()),
+            &stop,
+            &mut |e| events.push(e),
+        )
+        .await;
+        assert!(
+            matches!(&events[..], [a, b, LoopEvent::Notice(_), c]
+                if *a == d("diag-p1") && *b == d("diag-w") && *c == d("diag-p2")),
+            "{events:?}"
         );
 
         let mut p = Diagnosing {
             inner: scripted(vec![answer()]),
             on_prompt: VecDeque::from(["diag-p1"]),
             on_write: "unused",
+            on_read: "unused",
             queued: vec![],
         };
         let mut events = vec![];

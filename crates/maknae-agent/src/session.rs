@@ -99,7 +99,7 @@ impl Session {
         )
         .await;
         match (&outcome.answer, &outcome.stopped) {
-            (Some(a), _) => emit(LoopEvent::Answer(a.clone())),
+            (Some(_), _) => emit(LoopEvent::Answered),
             (None, Some(r)) => emit(LoopEvent::Stopped(r.clone())),
             (None, None) => {}
         }
@@ -232,9 +232,13 @@ mod tests {
     }
 
     async fn run_collect(s: &mut Session, p: &mut Fake) -> Vec<LoopEvent> {
+        run_answer(s, p).await.0
+    }
+
+    async fn run_answer(s: &mut Session, p: &mut Fake) -> (Vec<LoopEvent>, Option<String>) {
         let mut events = vec![];
-        s.run(p, &mut |e| events.push(e)).await;
-        events
+        let out = s.run(p, &mut |e| events.push(e)).await;
+        (events, out.answer)
     }
 
     #[tokio::test]
@@ -242,8 +246,8 @@ mod tests {
         let mut s = Session::new("conv-1", "hello", budget(), unmetered());
         let mut p = fake(vec![answer("hi")]);
         assert_eq!(
-            run_collect(&mut s, &mut p).await,
-            vec![LoopEvent::Answer("hi".into())]
+            run_answer(&mut s, &mut p).await,
+            (vec![LoopEvent::Answered], Some("hi".to_string()))
         );
         assert_eq!(s.prompt("again"), Ok(()));
         assert_eq!(s.conversation(), "conv-1");
@@ -300,8 +304,9 @@ mod tests {
         p.version = [5; 7];
         run_collect(&mut s, &mut p).await;
         s.prompt("now edit /f").unwrap();
-        let events = run_collect(&mut s, &mut p).await;
-        assert_eq!(events, vec![LoopEvent::Answer("written".into())]);
+        let (events, answer) = run_answer(&mut s, &mut p).await;
+        assert_eq!(events, vec![LoopEvent::Answered]);
+        assert_eq!(answer.as_deref(), Some("written"));
         assert_eq!(p.bases, vec![ReadBasis::Read([5; 7])]);
         assert!(p.prompts.iter().all(|(c, _)| c == "conv-x"));
         let lens: Vec<usize> = p.prompts.iter().map(|(_, n)| *n).collect();
@@ -319,12 +324,12 @@ mod tests {
         let mut p = fake(vec![answer("one"), answer("two")]);
         let first = run_collect(&mut s, &mut p).await;
         assert!(
-            matches!(&first[..], [LoopEvent::Notice(_), LoopEvent::Answer(_)]),
+            matches!(&first[..], [LoopEvent::Notice(_), LoopEvent::Answered]),
             "{first:?}"
         );
         s.prompt("more").unwrap();
         let second = run_collect(&mut s, &mut p).await;
-        assert_eq!(second, vec![LoopEvent::Answer("two".into())]);
+        assert_eq!(second, vec![LoopEvent::Answered]);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -335,8 +340,8 @@ mod tests {
                 let mut p = fake(script);
                 p.yields = true;
                 let mut events = vec![];
-                s.run(&mut p, &mut |e| events.push(e)).await;
-                (events, p, s)
+                let out = s.run(&mut p, &mut |e| events.push(e)).await;
+                (events, p, s, out.answer)
             })
         };
         let a = spawn(
@@ -351,10 +356,11 @@ mod tests {
                 answer("B"),
             ],
         );
-        let (ea, pa, sa) = a.await.unwrap();
-        let (eb, pb, sb) = b.await.unwrap();
-        assert_eq!(ea.last(), Some(&LoopEvent::Answer("A".into())));
-        assert_eq!(eb.last(), Some(&LoopEvent::Answer("B".into())));
+        let (ea, pa, sa, aa) = a.await.unwrap();
+        let (eb, pb, sb, ab) = b.await.unwrap();
+        assert_eq!(ea.last(), Some(&LoopEvent::Answered));
+        assert_eq!(eb.last(), Some(&LoopEvent::Answered));
+        assert_eq!((aa.as_deref(), ab.as_deref()), (Some("A"), Some("B")));
         assert!(pa.prompts.iter().all(|(c, _)| c == "conv-a"));
         assert!(pb.prompts.iter().all(|(c, _)| c == "conv-b"));
         assert!(tool_ids(&sa).iter().all(|id| id.starts_with('a')));
@@ -384,8 +390,8 @@ mod tests {
             let mut pb = fake(vec![tool("b1", "read_file", &read_args("/b")), answer("B")]);
             pb.yields = true;
             let mut events = vec![];
-            sb.run(&mut pb, &mut |e| events.push(e)).await;
-            events
+            let out = sb.run(&mut pb, &mut |e| events.push(e)).await;
+            (events, out.answer)
         });
         tokio::time::timeout(std::time::Duration::from_secs(10), started_rx)
             .await
@@ -398,10 +404,20 @@ mod tests {
         assert_eq!(pa.bases.len(), 1, "the granted write ran to its outcome");
         assert_eq!(pa.prompts.len(), 1);
         assert_eq!(ea.last(), Some(&LoopEvent::Stopped(StopReason::Stopped)));
-        assert_eq!(
-            b.await.unwrap().last(),
-            Some(&LoopEvent::Answer("B".into()))
-        );
+        let (eb, ab) = b.await.unwrap();
+        assert_eq!(eb.last(), Some(&LoopEvent::Answered));
+        assert_eq!(ab.as_deref(), Some("B"));
+    }
+
+    #[tokio::test]
+    async fn an_answer_event_carries_no_reply_text() {
+        let mut s = Session::new("c", "q", budget(), unmetered());
+        let mut p = fake(vec![answer("SENTINEL-ANSWER-TEXT")]);
+        let mut events = vec![];
+        let out = s.run(&mut p, &mut |e| events.push(e)).await;
+        assert_eq!(out.answer.as_deref(), Some("SENTINEL-ANSWER-TEXT"));
+        let shown = format!("{events:?}");
+        assert!(!shown.contains("SENTINEL-ANSWER-TEXT"), "{shown}");
     }
 
     #[test]

@@ -1,16 +1,16 @@
 //! What one sent verb came back as, and its conversion into the loop's
 //! I/O-free `WireOutcome`.
 /// What one sent verb came back as, with no RESULT printed — the caller decides what a
-/// terminal (or a model) is told. (`send_verb`'s arming diagnostic goes to stderr;
-/// see [`send_verb`].)
+/// terminal (or a model) is told. [`crate::send::send_verb`] hands its arming and
+/// attempt lines to the caller's `diag` sink.
 ///
-/// `Refused` carries the code AND the message because [`round_trip`] prints both; dropping
+/// `Refused` carries the code AND the message because the CLI's `round_trip` prints both; dropping
 /// the message would be a silent behaviour change no CLI test captures. `Debug` because a
 /// caller that expected a different variant formats the whole outcome to say so.
 #[derive(Debug)]
 pub enum SentOutcome {
     /// A successful payload, NOT yet checked against the verb that asked for it —
-    /// [`print_payload_for_verb`] is what rejects an answer to a different question.
+    /// the CLI's `print_payload_for_verb` is what rejects an answer to a different question.
     Payload(maknae_proto::Payload),
     /// A mutation reached a terminal state. `applied` is true ONLY for a client-reported
     /// `Ok(true)` — a CLAIM (ADR-0023 decision 4), never a kernel assertion.

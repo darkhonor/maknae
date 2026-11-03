@@ -432,11 +432,10 @@ async fn execute(verb: Verb) -> Result<bool, String> {
 /// `ProtoError` (already printed), `Err` on any transport/codec/timeout failure.
 ///
 /// On this file's wire path, result printing lives here and in [`print_payload_for_verb`];
-/// `maknae agent` prints its own (`agent::run`'s `println!` of the final answer). The
-/// sendable core is [`send_verb`], which prints no result, so a caller that sends many
-/// verbs is not also a printer. `send_verb` is not silent: it writes one arming
-/// diagnostic to stderr (`cannot prepare filesystem operation`), and
-/// `mutation::execute`, which it calls on the `MutationAttempt` path, prints too.
+/// `maknae agent` prints its own (`agent::print_end`). The sendable core is
+/// [`send_verb`], which prints no result, so a caller that sends many verbs is not also
+/// a printer. Its arming line (`cannot prepare filesystem operation`) and the attempt's
+/// stop line go to the `diag` sink, which this file prints to stderr.
 async fn round_trip(
     verb: Verb,
     request_verb: maknae_proto::Verb,
