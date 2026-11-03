@@ -925,13 +925,10 @@ pub async fn run_cli() -> ExitCode {
                 }
             }
         }
-        Command::Agent { provider, prompt } => match crate::agent::run(provider, prompt).await {
-            Ok(code) => ExitCode::from(code),
-            Err(e) => {
-                eprintln!("maknae: {e}");
-                ExitCode::from(1)
-            }
-        },
+        Command::Agent { provider, prompt } => agent_exit(
+            crate::agent::run(provider, prompt).await,
+            &mut std::io::stderr(),
+        ),
         Command::Login => crate::login::run_login().await,
         Command::Logout => crate::login::run_logout().await,
         Command::Enroll(args) => crate::enroll::run_enroll(*args).await,
@@ -956,6 +953,18 @@ async fn operand_exit(verb: Result<Verb, String>) -> ExitCode {
 /// Map the wire path's `execute()` outcome to an exit code — split out of
 /// `run_cli` so `Ping`/`Whoami` share one mapping (unchanged from before the
 /// `Command`-enum restructure).
+/// Best-effort: the error may be that stderr itself is gone, and the exit
+/// code must still be 1.
+fn agent_exit(result: Result<u8, String>, err: &mut impl std::io::Write) -> ExitCode {
+    match result {
+        Ok(code) => ExitCode::from(code),
+        Err(e) => {
+            let _ = writeln!(err, "maknae: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
 fn wire_exit_code(result: Result<bool, String>) -> ExitCode {
     match result {
         Ok(true) => ExitCode::SUCCESS,
@@ -983,6 +992,28 @@ fn single_page(
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    struct ClosedStderr;
+    impl std::io::Write for ClosedStderr {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn the_agent_exit_is_one_even_when_stderr_is_closed() {
+        assert_eq!(
+            agent_exit(Err("x".into()), &mut ClosedStderr),
+            ExitCode::from(1)
+        );
+        let mut err = vec![];
+        assert_eq!(agent_exit(Err("boom".into()), &mut err), ExitCode::from(1));
+        assert_eq!(err, b"maknae: boom\n");
+        assert_eq!(agent_exit(Ok(2), &mut ClosedStderr), ExitCode::from(2));
+    }
 
     #[test]
     fn the_identity_sync_line_prints_counts_and_the_stale_flag() {

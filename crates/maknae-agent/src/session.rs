@@ -89,6 +89,9 @@ impl Session {
             };
         }
         self.pending = false;
+        // Cleared before the await: a run dropped mid-call must leave the
+        // session closed, not answered from the run before it.
+        self.answered = false;
         let outcome = drive_session(
             plane,
             &mut self.transcript,
@@ -408,6 +411,31 @@ mod tests {
         let (eb, ab) = b.await.unwrap();
         assert_eq!(eb.last(), Some(&LoopEvent::Answered));
         assert_eq!(ab.as_deref(), Some("B"));
+    }
+
+    #[tokio::test]
+    async fn a_run_cancelled_mid_write_leaves_the_session_closed() {
+        let mut s = Session::new("c", "first", budget(), unmetered());
+        let mut p = fake(vec![
+            answer("one"),
+            tool("w1", "write_file", &write_args("/a")),
+        ]);
+        run_collect(&mut s, &mut p).await;
+        s.prompt("second").unwrap();
+        let (_started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+        let (_release_tx, release_rx) = tokio::sync::oneshot::channel();
+        drop(started_rx);
+        p.release = Some(release_rx);
+        let cancelled = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            s.run(&mut p, &mut |_| {}),
+        )
+        .await;
+        assert!(
+            cancelled.is_err(),
+            "the run must still be waiting on its write"
+        );
+        assert_eq!(s.prompt("third"), Err(SessionClosed));
     }
 
     #[tokio::test]
