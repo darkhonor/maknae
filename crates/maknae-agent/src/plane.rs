@@ -146,6 +146,11 @@ pub trait Plane {
         content: &[u8],
         basis: ReadBasis,
     ) -> impl Future<Output = WriteOutcome> + Send;
+    /// Lines the plane would have printed during its last call, for the host
+    /// to show. Drained after every call, so order is preserved.
+    fn take_diagnostics(&mut self) -> Vec<String> {
+        vec![]
+    }
 }
 
 #[cfg(test)]

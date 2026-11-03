@@ -460,6 +460,8 @@ pub fn stop_line(r: Option<&StopReason>, budget: &Budget) -> String {
         Some(StopReason::EgressUnavailable) => format!("stopped: {EGRESS_UNAVAILABLE}"),
         Some(StopReason::Transport(m)) => format!("stopped: {m}"),
         Some(StopReason::ContextBudget) => "stopped: the conversation has reached the declared context budget; compaction arrives with #171".into(),
+        Some(StopReason::Stopped) => "stopped: the loop was asked to stop".into(),
+        Some(StopReason::NothingPending) => "stopped: there was no prompt to answer".into(),
         None => "stopped".into(),
     }
 }
@@ -930,6 +932,14 @@ mod tests {
         assert_eq!(
             stop_line(Some(&StopReason::StepBudget), &b),
             "stopped: the step budget (8) was spent without an answer"
+        );
+        assert_eq!(
+            stop_line(Some(&StopReason::Stopped), &b),
+            "stopped: the loop was asked to stop"
+        );
+        assert_eq!(
+            stop_line(Some(&StopReason::NothingPending), &b),
+            "stopped: there was no prompt to answer"
         );
         assert_eq!(
             stop_line(Some(&StopReason::TooManyToolCalls(5)), &b),
