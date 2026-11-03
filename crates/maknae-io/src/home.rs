@@ -1,6 +1,7 @@
-//! "This user's home", one implementation for the client and the kernel (#596).
-//! The kernel's per-request requester home (#435) and a session's `~` (#596)
-//! come from the same function, so they are the same string.
+//! A home's canonical form. `canonical_home` serves the kernel's per-request
+//! requester home (#435) and, through `session_home`, a session's `~` (#596),
+//! so the two are the same string. Enroll keeps its own fallback to the raw
+//! passwd value (`bins/maknae/src/enroll`) on purpose.
 use std::path::{Path, PathBuf};
 
 fn confinable_home(resolved: PathBuf) -> Option<PathBuf> {
@@ -128,6 +129,7 @@ mod tests {
     /// Run only by `session_home_ignores_the_home_variable`, in a child
     /// process, so `HOME` is never changed in this test process.
     #[test]
+    #[ignore = "run only by session_home_ignores_the_home_variable"]
     fn session_home_probe() {
         if std::env::var_os(PROBE).is_none() {
             return;
@@ -146,7 +148,12 @@ mod tests {
         }
         let decoy = scratch("decoy");
         let out = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "home::tests::session_home_probe", "--nocapture"])
+            .args([
+                "--exact",
+                "home::tests::session_home_probe",
+                "--ignored",
+                "--nocapture",
+            ])
             .env(PROBE, "1")
             .env("HOME", &decoy)
             .output()

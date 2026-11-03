@@ -21,11 +21,7 @@ workspace = true
 # uio  — pwrite for offset-independent replacement through the subject's own writable re-open.
 # dir  — nix::dir::Dir for fd-relative enumeration. Dir::openat BORROWS the dirfd;
 #        Dir::from_fd consumes and Drop-closes it, which would destroy the anchor pin.
-# user — home.rs's session_home(): the passwd record for the effective uid (geteuid,
-#        User::from_uid), the one "this user's home" lookup the client and the kernel
-#        share (#596, maintainer ruling 2026-11-04: host facts come from maknae-io).
-#        Amended 2026-11-04 (#596): this was a production non-dependency, kept out
-#        because nothing in production called it; session_home is that caller now.
+# user — home.rs's session_home(): the passwd record for the effective uid (#596).
 nix = { version = "0.31", default-features = false, features = ["fs", "dir", "uio", "user"] }
 # net — recvmsg with SCM_RIGHTS, for ADR-0009 subject-delegated descriptors. THE reason
 #       this is rustix and not another nix feature: `unsafe_code = "forbid"` is set

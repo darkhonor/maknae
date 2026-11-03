@@ -189,6 +189,26 @@ fn require_object(args: &str) -> Result<(), RouteError> {
     }
 }
 
+/// `~` and `~/rest` become the session's home and `home/rest`; every other
+/// leading `~` (`~user`, `~~`, `~foo`) is refused. The home is a value the
+/// host passes in: this crate reads no environment. Run before every other
+/// rule, so the result is judged as the absolute path it now is.
+fn expand_home(p: String, home: Option<&str>) -> Result<String, RouteError> {
+    if !p.starts_with('~') {
+        return Ok(p);
+    }
+    let rest = match p.strip_prefix("~/") {
+        Some(rest) => Some(rest),
+        None if p == "~" => None,
+        None => return Err(RouteError::RelativePath),
+    };
+    let home = home.ok_or(RouteError::HomeUnavailable)?;
+    Ok(match rest {
+        Some(rest) => format!("{home}/{rest}"),
+        None => home.to_string(),
+    })
+}
+
 /// Absolute AND canonical only, within the kernel's byte bound, and never NUL
 /// bearing. Never resolved against the CWD. A `~` form is expanded first
 /// ([`expand_home`]), so these rules judge the absolute result.
@@ -237,26 +257,6 @@ fn require_object(args: &str) -> Result<(), RouteError> {
 /// render the same way, which is the point here: the model was told
 /// `read unavailable — do not retry`, just as unappealable as the write lane's
 /// "may have happened", for a path it could have corrected.
-/// `~` and `~/rest` become the session's home and `home/rest`; every other
-/// leading `~` (`~user`, `~~`, `~foo`) is refused. The home is a value the
-/// host passes in: this crate reads no environment. Run before every other
-/// rule, so the result is judged as the absolute path it now is.
-fn expand_home(p: String, home: Option<&str>) -> Result<String, RouteError> {
-    if !p.starts_with('~') {
-        return Ok(p);
-    }
-    let rest = match p.strip_prefix("~/") {
-        Some(rest) => Some(rest),
-        None if p == "~" => None,
-        None => return Err(RouteError::RelativePath),
-    };
-    let home = home.ok_or(RouteError::HomeUnavailable)?;
-    Ok(match rest {
-        Some(rest) => format!("{home}/{rest}"),
-        None => home.to_string(),
-    })
-}
-
 fn checked_path(p: String, home: Option<&str>) -> Result<String, RouteError> {
     if p.is_empty() {
         return Err(RouteError::EmptyPath);

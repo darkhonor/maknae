@@ -3430,6 +3430,39 @@ async fn an_expanded_home_path_is_decided_against_the_requesters_home() {
 }
 
 #[tokio::test]
+async fn a_symlinked_home_routes_to_its_target_and_is_served() {
+    let fx = Fixture::new("expanded_symhome");
+    let b = common::second_home("enforce_expanded_symhome");
+    std::fs::write(b.join("notes.txt"), b"b's own notes").unwrap();
+    let link = common::DirGuard(
+        b.parent()
+            .expect("a canonical home has a parent")
+            .join(format!(
+                "enforce_expanded_symhome_link_{}",
+                std::process::id()
+            )),
+    );
+    let _ = std::fs::remove_file(&*link);
+    std::os::unix::fs::symlink(&*b, &*link).unwrap();
+    fx.write_policy(&allow_policy("Read(~/**)", ""));
+    let routed = routed_home_path(&link, "~/notes.txt");
+    assert_eq!(
+        routed,
+        b.join("notes.txt"),
+        "the routed path is the link's target"
+    );
+
+    let emit = RecEmit::new();
+    let run = read_as_requester(&fx, Some(&link), &routed, emit.clone()).await;
+    assert_eq!(
+        read_content(&run),
+        Some(&b"b's own notes"[..]),
+        "{:?}",
+        request_record(&emit.records()).outcome
+    );
+}
+
+#[tokio::test]
 async fn an_absolute_grant_cannot_reach_beyond_the_requesters_home() {
     let fx = Fixture::new("absolute_enrolled");
     let b = common::second_home("enforce_absolute_enrolled");
