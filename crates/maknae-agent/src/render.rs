@@ -25,6 +25,7 @@ pub enum ToolOutcome {
     WriteUnread,
     WriteUnknown,
     WriteNotSent,
+    NotRun,
     BadCall(String),
 }
 
@@ -54,6 +55,7 @@ impl std::fmt::Debug for ToolOutcome {
             ToolOutcome::WriteUnread => f.write_str("WriteUnread"),
             ToolOutcome::WriteUnknown => f.write_str("WriteUnknown"),
             ToolOutcome::WriteNotSent => f.write_str("WriteNotSent"),
+            ToolOutcome::NotRun => f.write_str("NotRun"),
             ToolOutcome::BadCall(why) => f.debug_tuple("BadCall").field(why).finish(),
         }
     }
@@ -70,6 +72,8 @@ pub const NOT_WRITTEN_UNREAD: &str =
 pub const READ_UNAVAILABLE: &str = "read unavailable — do not retry";
 /// A LOCAL pre-send refusal is a tool error, not an unknown outcome.
 pub const WRITE_NOT_SENT: &str = "tool error: write not sent — content exceeds the frame bound";
+/// A call skipped because the host stopped the loop: not the model's error.
+pub const NOT_RUN: &str = "not run: the loop was stopped";
 
 /// Headroom the read arm pre-allocates for the suffix `render`
 /// appends, so THAT append never reallocates: 19 bytes of
@@ -198,7 +202,7 @@ pub fn render(outcome: &ToolOutcome, steps_remaining: u32) -> Zeroizing<String> 
         // reallocates and frees each of these buffers. What it frees is a
         // HEAP COPY of a compiled-in constant — `NOT_AUTHORIZED`,
         // `READ_UNAVAILABLE`, `APPLIED`, `OUTCOME_UNKNOWN`, `WRITE_NOT_SENT`,
-        // `NOT_WRITTEN_STALE`, `NOT_WRITTEN_UNREAD` — never the `.rodata`
+        // `NOT_WRITTEN_STALE`, `NOT_WRITTEN_UNREAD`, `NOT_RUN` — never the `.rodata`
         // original, which is not freed at all, so
         // nothing secret is freed and headroom would buy nothing. One arm is
         // different, and is the reason this is written down: `BadCall(why)`
@@ -215,6 +219,7 @@ pub fn render(outcome: &ToolOutcome, steps_remaining: u32) -> Zeroizing<String> 
         ToolOutcome::WriteUnread => Zeroizing::new(NOT_WRITTEN_UNREAD.to_string()),
         ToolOutcome::WriteUnknown => Zeroizing::new(OUTCOME_UNKNOWN.to_string()),
         ToolOutcome::WriteNotSent => Zeroizing::new(WRITE_NOT_SENT.to_string()),
+        ToolOutcome::NotRun => Zeroizing::new(NOT_RUN.to_string()),
         ToolOutcome::BadCall(why) => Zeroizing::new(format!("tool error: {why}")),
     };
     // The live step count rides HERE, in per-turn content — never in the
@@ -376,6 +381,11 @@ mod tests {
             render(&ToolOutcome::WriteNotSent, 4).as_str(),
             "tool error: write not sent — content exceeds the frame bound\n\nsteps remaining: 4"
         );
+        // A call the loop skipped because it was stopped: not the model's error.
+        assert_eq!(
+            render(&ToolOutcome::NotRun, 4).as_str(),
+            "not run: the loop was stopped\n\nsteps remaining: 4"
+        );
         for o in [
             ToolOutcome::ReadRefused,
             ToolOutcome::ReadUnavailable,
@@ -384,6 +394,7 @@ mod tests {
             ToolOutcome::WriteUnread,
             ToolOutcome::WriteUnknown,
             ToolOutcome::WriteNotSent,
+            ToolOutcome::NotRun,
         ] {
             assert!(render(&o, 7).ends_with("steps remaining: 7"), "{o:?}");
         }
@@ -421,6 +432,7 @@ mod tests {
             (ToolOutcome::WriteUnread, "WriteUnread"),
             (ToolOutcome::WriteUnknown, "WriteUnknown"),
             (ToolOutcome::WriteNotSent, "WriteNotSent"),
+            (ToolOutcome::NotRun, "NotRun"),
         ] {
             assert_eq!(format!("{o:?}"), want);
         }

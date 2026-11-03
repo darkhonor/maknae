@@ -9,7 +9,9 @@ use crate::render::{render, ToolOutcome};
 use crate::route::{route, RouteError, ToolRequest};
 use crate::transcript::Transcript;
 use maknae_proto::{ContentBlock, PromptReply, ProposedToolCall};
+use std::sync::atomic::{AtomicBool, Ordering};
 
+#[derive(Debug, Clone, Copy)]
 pub struct Budget {
     pub max_steps: u32,
     pub max_tool_calls_per_step: u32,
@@ -26,6 +28,8 @@ pub enum StopReason {
     EgressUnavailable,
     Transport(String),
     ContextBudget,
+    Stopped,
+    NothingPending,
 }
 
 #[derive(Debug)]
@@ -82,6 +86,20 @@ pub struct Outcome {
     pub steps_used: u32,
 }
 
+pub type Seen = std::collections::HashMap<String, [i64; 7]>;
+
+/// What a loop reports while it runs. Never carries the model's reply, served
+/// content, a provider key or a wrapping token: the reply is in the `Outcome`.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoopEvent {
+    Notice(Notice),
+    Diagnostic(String),
+    /// The text is in the run's `Outcome`; the event carries none of it.
+    Answered,
+    Stopped(StopReason),
+}
+
 pub async fn drive<P: Plane>(
     plane: &mut P,
     transcript: &mut Transcript,
@@ -89,9 +107,43 @@ pub async fn drive<P: Plane>(
     meter: &mut Meter,
     notify: &mut impl FnMut(&Notice),
 ) -> Outcome {
+    drive_session(
+        plane,
+        transcript,
+        &mut Seen::new(),
+        budget,
+        meter,
+        &AtomicBool::new(false),
+        &mut |e| {
+            if let LoopEvent::Notice(n) = e {
+                notify(&n)
+            }
+        },
+    )
+    .await
+}
+
+/// `stop` is read before each plane call that has not started: at the top of a
+/// step, before the prompt, and before each tool call. A granted read, write or
+/// exchange is never cut short; a skipped call is answered as not run.
+pub async fn drive_session<P: Plane>(
+    plane: &mut P,
+    transcript: &mut Transcript,
+    seen: &mut Seen,
+    budget: &Budget,
+    meter: &mut Meter,
+    stop: &AtomicBool,
+    emit: &mut impl FnMut(LoopEvent),
+) -> Outcome {
     let mut steps_used = 0u32;
-    let mut seen: std::collections::HashMap<String, [i64; 7]> = std::collections::HashMap::new();
     loop {
+        if stop.load(Ordering::Acquire) {
+            return Outcome {
+                answer: None,
+                stopped: Some(StopReason::Stopped),
+                steps_used,
+            };
+        }
         if steps_used >= budget.max_steps {
             return Outcome {
                 answer: None,
@@ -108,14 +160,31 @@ pub async fn drive<P: Plane>(
                     steps_used,
                 }
             }
-            Gate::Send(Some(n)) => notify(&n),
+            Gate::Send(Some(n)) => emit(LoopEvent::Notice(n)),
             Gate::Send(None) => {}
         }
+        if stop.load(Ordering::Acquire) {
+            return Outcome {
+                answer: None,
+                stopped: Some(StopReason::Stopped),
+                steps_used,
+            };
+        }
         let sent = loop {
-            match plane
+            let sent = plane
                 .prompt(transcript.conversation(), transcript.turns())
-                .await
-            {
+                .await;
+            for d in plane.take_diagnostics() {
+                emit(LoopEvent::Diagnostic(d));
+            }
+            match sent {
+                Err(PlaneError::FrameTooLarge) if stop.load(Ordering::Acquire) => {
+                    return Outcome {
+                        answer: None,
+                        stopped: Some(StopReason::Stopped),
+                        steps_used,
+                    }
+                }
                 Err(PlaneError::FrameTooLarge) if transcript.shed_oldest_reasoning() => continue,
                 other => break other,
             }
@@ -188,6 +257,13 @@ pub async fn drive<P: Plane>(
             }
             Next::Execute(calls) => {
                 for call in &calls {
+                    if stop.load(Ordering::Acquire) {
+                        transcript.push_tool_result(
+                            &call.call_id,
+                            &render(&ToolOutcome::NotRun, steps_remaining),
+                        );
+                        continue;
+                    }
                     let outcome = match route(call) {
                         Err(RouteError::UnknownTool(n)) => {
                             ToolOutcome::BadCall(format!("unknown tool {n}"))
@@ -213,7 +289,12 @@ pub async fn drive<P: Plane>(
                             "path must be canonical: no empty, \".\" or \"..\" segments and no trailing \"/\"; at most {} bytes and no NUL byte",
                             maknae_proto::MAX_MUTATION_PATH_BYTES
                         )),
-                        Ok(ToolRequest::Read { path, page, .. }) => match plane.read(transcript.conversation(), &path, page).await {
+                        Ok(ToolRequest::Read { path, page, .. }) => {
+                            let read = plane.read(transcript.conversation(), &path, page).await;
+                            for d in plane.take_diagnostics() {
+                                emit(LoopEvent::Diagnostic(d));
+                            }
+                            match read {
                             ReadOutcome::Content(mut p) => {
                                 p.changed = seen
                                     .insert(path.clone(), p.version)
@@ -222,10 +303,15 @@ pub async fn drive<P: Plane>(
                             }
                             ReadOutcome::Refused => ToolOutcome::ReadRefused,
                             ReadOutcome::Unavailable => ToolOutcome::ReadUnavailable,
-                        },
+                            }
+                        }
                         Ok(ToolRequest::Write { path, content, .. }) => {
                             let basis = seen.get(&path).map_or(ReadBasis::Unread, |v| ReadBasis::Read(*v));
-                            match plane.write(transcript.conversation(), &path, &content, basis).await {
+                            let written = plane.write(transcript.conversation(), &path, &content, basis).await;
+                            for d in plane.take_diagnostics() {
+                                emit(LoopEvent::Diagnostic(d));
+                            }
+                            match written {
                                 WriteOutcome::Applied(Some(v)) => {
                                     seen.insert(path.clone(), v);
                                     ToolOutcome::WriteApplied
@@ -1229,5 +1315,335 @@ mod tests {
         assert_eq!(out.stopped, Some(StopReason::FrameBound));
         assert_eq!(p.prompts, 3);
         assert_eq!(reasonings(&p.seen[2]), vec![None, None]);
+    }
+
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn unmetered() -> Meter {
+        Meter::new(ContextBudget::new(maknae_proto::MAX_CONTEXT_TOKENS, None).unwrap())
+    }
+
+    async fn session_unmetered<P: Plane>(
+        p: &mut P,
+        t: &mut Transcript,
+        seen: &mut Seen,
+        stop: &AtomicBool,
+    ) -> (Outcome, Vec<LoopEvent>) {
+        let mut events = vec![];
+        let out = drive_session(p, t, seen, &budget(), &mut unmetered(), stop, &mut |e| {
+            events.push(e)
+        })
+        .await;
+        (out, events)
+    }
+
+    #[tokio::test]
+    async fn a_set_stop_flag_ends_the_loop_before_any_prompt() {
+        let mut p = scripted(vec![done()]);
+        let mut t = Transcript::new("c", "q");
+        let stop = AtomicBool::new(true);
+        let (out, events) = session_unmetered(&mut p, &mut t, &mut Seen::new(), &stop).await;
+        assert_eq!(out.stopped, Some(StopReason::Stopped));
+        assert_eq!((out.steps_used, p.prompts), (0, 0));
+        assert!(events.is_empty(), "{events:?}");
+    }
+
+    struct StopOnWrite<'a> {
+        inner: Scripted,
+        stop: &'a AtomicBool,
+    }
+    impl Plane for StopOnWrite<'_> {
+        async fn prompt(&mut self, c: &str, t: &[Turn]) -> Result<PromptReply, PlaneError> {
+            self.inner.prompt(c, t).await
+        }
+        async fn read(&mut self, c: &str, p: &str, page: maknae_proto::PageRequest) -> ReadOutcome {
+            self.inner.read(c, p, page).await
+        }
+        async fn write(&mut self, c: &str, p: &str, b: &[u8], basis: ReadBasis) -> WriteOutcome {
+            self.stop.store(true, Ordering::Release);
+            self.inner.write(c, p, b, basis).await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stop_set_during_a_write_takes_effect_before_the_next_plane_call() {
+        let stop = AtomicBool::new(false);
+        let mut p = StopOnWrite {
+            inner: scripted(vec![one("c1", "write_file", WRITE_A), done()]),
+            stop: &stop,
+        };
+        let mut t = Transcript::new("c", "q");
+        let (out, _) = session_unmetered(&mut p, &mut t, &mut Seen::new(), &stop).await;
+        assert_eq!(out.stopped, Some(StopReason::Stopped));
+        assert_eq!((p.inner.prompts, p.inner.writes.len()), (1, 1));
+        assert_eq!(tool_call_id(&t.turns()[2]), "c1");
+        assert!(
+            tool_text(&t.turns()[2]).contains("applied"),
+            "{}",
+            tool_text(&t.turns()[2])
+        );
+    }
+
+    struct StopOnFirstPrompt<'a> {
+        inner: Scripted,
+        stop: &'a AtomicBool,
+    }
+    impl Plane for StopOnFirstPrompt<'_> {
+        async fn prompt(&mut self, c: &str, t: &[Turn]) -> Result<PromptReply, PlaneError> {
+            self.stop.store(true, Ordering::Release);
+            self.inner.prompt(c, t).await
+        }
+        async fn read(&mut self, c: &str, p: &str, page: maknae_proto::PageRequest) -> ReadOutcome {
+            self.inner.read(c, p, page).await
+        }
+        async fn write(&mut self, c: &str, p: &str, b: &[u8], basis: ReadBasis) -> WriteOutcome {
+            self.inner.write(c, p, b, basis).await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stop_during_a_too_large_prompt_is_not_retried() {
+        let stop = AtomicBool::new(false);
+        let mut inner = scripted(vec![done()]);
+        inner.replies.push_front(Err(PlaneError::FrameTooLarge));
+        let mut p = StopOnFirstPrompt { inner, stop: &stop };
+        let mut t = transcript_with_two_reasonings();
+        let (out, _) = session_unmetered(&mut p, &mut t, &mut Seen::new(), &stop).await;
+        assert_eq!(out.stopped, Some(StopReason::Stopped));
+        assert_eq!(
+            p.inner.prompts, 1,
+            "the shed-and-retry must not resend after a stop"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stop_at_the_top_of_a_step_preempts_the_context_gate() {
+        let mut p = scripted(vec![answer()]);
+        let mut events = vec![];
+        let out = drive_session(
+            &mut p,
+            &mut Transcript::new("c", &"q".repeat(1_800)),
+            &mut Seen::new(),
+            &budget(),
+            &mut Meter::new(ContextBudget::new(2_000, None).unwrap()),
+            &AtomicBool::new(true),
+            &mut |e| events.push(e),
+        )
+        .await;
+        assert_eq!(out.stopped, Some(StopReason::Stopped));
+        assert!(events.is_empty(), "no notice after a stop: {events:?}");
+    }
+
+    #[tokio::test]
+    async fn a_stop_raised_by_the_notice_sends_no_prompt() {
+        let mut p = scripted(vec![answer()]);
+        let stop = AtomicBool::new(false);
+        let mut events = vec![];
+        let out = drive_session(
+            &mut p,
+            &mut Transcript::new("c", &"q".repeat(1_800)),
+            &mut Seen::new(),
+            &budget(),
+            &mut Meter::new(ContextBudget::new(2_000, None).unwrap()),
+            &stop,
+            &mut |e| {
+                if matches!(e, LoopEvent::Notice(_)) {
+                    stop.store(true, Ordering::Release);
+                }
+                events.push(e)
+            },
+        )
+        .await;
+        assert_eq!(out.stopped, Some(StopReason::Stopped));
+        assert_eq!(p.prompts, 0, "nothing is sent after the host asked to stop");
+        assert!(matches!(&events[..], [LoopEvent::Notice(_)]), "{events:?}");
+    }
+
+    #[tokio::test]
+    async fn a_stop_between_calls_runs_no_further_call_and_answers_each_skipped_one() {
+        let stop = AtomicBool::new(false);
+        let two_writes = PromptReply {
+            reasoning: None,
+            blocks: vec![],
+            tool_calls: vec![
+                call("c1", "write_file", WRITE_A),
+                call("c2", "write_file", r#"{"path":"/w/b.txt","content":"new"}"#),
+            ],
+            usage: None,
+        };
+        let mut p = StopOnWrite {
+            inner: scripted(vec![two_writes, done()]),
+            stop: &stop,
+        };
+        let mut t = Transcript::new("c", "q");
+        let (out, _) = session_unmetered(&mut p, &mut t, &mut Seen::new(), &stop).await;
+        assert_eq!(out.stopped, Some(StopReason::Stopped));
+        assert_eq!((p.inner.prompts, p.inner.writes.len()), (1, 1));
+        assert_eq!(
+            (tool_call_id(&t.turns()[2]), tool_call_id(&t.turns()[3])),
+            ("c1".to_string(), "c2".to_string()),
+            "every call in the step is answered, in order"
+        );
+        assert!(tool_text(&t.turns()[3]).starts_with("not run: the loop was stopped"));
+    }
+
+    #[tokio::test]
+    async fn seen_survives_across_calls() {
+        let mut p = scripted(vec![
+            one("c1", "read_file", READ_A),
+            done(),
+            one("c2", "write_file", WRITE_A),
+            done(),
+        ]);
+        p.read_versions = VecDeque::from([[7; 7]]);
+        let mut seen = Seen::new();
+        let stop = AtomicBool::new(false);
+        session_unmetered(
+            &mut p,
+            &mut Transcript::new("c", "read it"),
+            &mut seen,
+            &stop,
+        )
+        .await;
+        session_unmetered(
+            &mut p,
+            &mut Transcript::new("c", "write it"),
+            &mut seen,
+            &stop,
+        )
+        .await;
+        assert_eq!(p.bases, vec![ReadBasis::Read([7; 7])]);
+    }
+
+    struct Diagnosing {
+        inner: Scripted,
+        on_prompt: VecDeque<&'static str>,
+        on_write: &'static str,
+        on_read: &'static str,
+        queued: Vec<String>,
+    }
+    impl Plane for Diagnosing {
+        async fn prompt(&mut self, c: &str, t: &[Turn]) -> Result<PromptReply, PlaneError> {
+            if let Some(d) = self.on_prompt.pop_front() {
+                self.queued.push(d.into());
+            }
+            self.inner.prompt(c, t).await
+        }
+        async fn read(&mut self, c: &str, p: &str, page: maknae_proto::PageRequest) -> ReadOutcome {
+            self.queued.push(self.on_read.into());
+            self.inner.read(c, p, page).await
+        }
+        async fn write(&mut self, c: &str, p: &str, b: &[u8], basis: ReadBasis) -> WriteOutcome {
+            self.queued.push(self.on_write.into());
+            self.inner.write(c, p, b, basis).await
+        }
+        fn take_diagnostics(&mut self) -> Vec<String> {
+            std::mem::take(&mut self.queued)
+        }
+    }
+
+    #[tokio::test]
+    async fn diagnostics_are_emitted_right_after_the_plane_call_that_made_them() {
+        let mut p = Diagnosing {
+            inner: scripted(vec![
+                one("c1", "read_file", READ_A),
+                one("c2", "write_file", WRITE_A),
+                done(),
+            ]),
+            on_prompt: VecDeque::from(["diag-p1", "diag-p2", "diag-p3"]),
+            on_write: "diag-w",
+            on_read: "diag-r",
+            queued: vec![],
+        };
+        // The read's result pushes the meter past 80%, so the notice is
+        // emitted between the read and the next prompt: the read's line must
+        // come before it, not with the next prompt's.
+        if let ReadOutcome::Content(page) = &mut p.inner.read_outcome {
+            page.content = Zeroizing::new(vec![b'x'; 400]);
+        }
+        let stop = AtomicBool::new(false);
+        let mut events = vec![];
+        drive_session(
+            &mut p,
+            &mut Transcript::new("c", "q"),
+            &mut Seen::new(),
+            &budget(),
+            &mut Meter::new(ContextBudget::new(2_000, None).unwrap()),
+            &stop,
+            &mut |e| events.push(e),
+        )
+        .await;
+        let d = |s: &str| LoopEvent::Diagnostic(s.into());
+        assert!(
+            matches!(&events[..], [a, b, LoopEvent::Notice(_), c, e, f]
+                if *a == d("diag-p1") && *b == d("diag-r") && *c == d("diag-p2")
+                    && *e == d("diag-w") && *f == d("diag-p3")),
+            "{events:?}"
+        );
+
+        let big_write = format!(r#"{{"path":"/w/a.txt","content":"{}"}}"#, "x".repeat(400));
+        let mut p = Diagnosing {
+            inner: scripted(vec![one("c1", "write_file", &big_write), done()]),
+            on_prompt: VecDeque::from(["diag-p1", "diag-p2"]),
+            on_write: "diag-w",
+            on_read: "unused",
+            queued: vec![],
+        };
+        let mut events = vec![];
+        drive_session(
+            &mut p,
+            &mut Transcript::new("c", "q"),
+            &mut Seen::new(),
+            &budget(),
+            &mut Meter::new(ContextBudget::new(2_000, None).unwrap()),
+            &stop,
+            &mut |e| events.push(e),
+        )
+        .await;
+        assert!(
+            matches!(&events[..], [a, b, LoopEvent::Notice(_), c]
+                if *a == d("diag-p1") && *b == d("diag-w") && *c == d("diag-p2")),
+            "{events:?}"
+        );
+
+        let mut p = Diagnosing {
+            inner: scripted(vec![answer()]),
+            on_prompt: VecDeque::from(["diag-p1"]),
+            on_write: "unused",
+            on_read: "unused",
+            queued: vec![],
+        };
+        let mut events = vec![];
+        drive_session(
+            &mut p,
+            &mut Transcript::new("c", &"q".repeat(1_800)),
+            &mut Seen::new(),
+            &budget(),
+            &mut Meter::new(ContextBudget::new(2_000, None).unwrap()),
+            &stop,
+            &mut |e| events.push(e),
+        )
+        .await;
+        assert!(
+            matches!(&events[..], [LoopEvent::Notice(_), LoopEvent::Diagnostic(d)] if d == "diag-p1"),
+            "{events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_plane_with_the_default_emits_no_diagnostics() {
+        let mut p = scripted(vec![one("c1", "write_file", WRITE_A), answer()]);
+        let mut events = vec![];
+        drive_session(
+            &mut p,
+            &mut Transcript::new("c", &"q".repeat(1_700)),
+            &mut Seen::new(),
+            &budget(),
+            &mut Meter::new(ContextBudget::new(2_000, None).unwrap()),
+            &AtomicBool::new(false),
+            &mut |e| events.push(e),
+        )
+        .await;
+        assert!(matches!(&events[..], [LoopEvent::Notice(_)]), "{events:?}");
     }
 }

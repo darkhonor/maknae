@@ -64,7 +64,7 @@ Run `unset VT` when you are done.
 
 **Never paste a wrapping token from a successful read.** A wrapped read of a key returns a token that wraps the key itself. None of the commands below asks for one.
 
-**Where refusals show.** A kernel refusal reaches the user only as one line, exit 2: `maknae agent: stopped: ` followed by the `PROMPT_REFUSED` text (`bins/maknae/src/agent.rs:93`, printed at `:572`). That text begins `the kernel refused the exchange — whether the prompt reached the provider is in the host's audit trail`, and it is quoted in full in [When it does not work](first-provider.md#when-it-does-not-work). The kernel's reason is only in the audit trail, which the administrator reads with `sudo jq`. The CLI's own setup refusals print after `maknae: ` and exit 1 (`bins/maknae/src/cli.rs:735`).
+**Where refusals show.** A kernel refusal reaches the user only as one line, exit 2: `maknae agent: stopped: ` followed by the `PROMPT_REFUSED` text (`bins/maknae/src/agent.rs:95`, printed by `print_end`, `:349`). That text begins `the kernel refused the exchange — whether the prompt reached the provider is in the host's audit trail`, and it is quoted in full in [When it does not work](first-provider.md#when-it-does-not-work). The kernel's reason is only in the audit trail, which the administrator reads with `sudo jq`. The CLI's own setup refusals print after `maknae: ` and exit 1 (`bins/maknae/src/cli.rs:931`).
 
 The administrator's audit query for every claim below (the same on macOS):
 

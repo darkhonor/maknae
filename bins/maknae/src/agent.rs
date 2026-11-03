@@ -1,19 +1,21 @@
 //! `maknae agent` — the HANDS of the runtime loop (#241). T3: I/O wiring over
 //! the brain in `maknae-agent`. Runs as the subject, holds no key and no
 //! policy, and asks the kernel for everything (ADR-0023 d2, d4).
-use crate::cli::{send_verb, write_request, SentOutcome};
-use maknae_agent::budget::{prompt_cap, ContextBudget, Meter, Notice};
-use maknae_agent::drive::{drive, Budget, StopReason};
-use maknae_agent::plane::{Plane, PlaneError, ReadBasis, ReadOutcome, ReadPage, WriteOutcome};
-use maknae_agent::transcript::Transcript;
+use maknae_agent::budget::{prompt_cap, ContextBudget, Notice};
+use maknae_agent::drive::{Budget, LoopEvent, Outcome, StopReason};
+use maknae_agent::plane::Plane;
+use maknae_agent::session::Session;
 use maknae_config::{UserProviderEntry, UserProviders, Value};
-use maknae_proto::{Payload, ProviderChoice, SealedKey, Turn, Verb};
+use maknae_loop::keys::KeySupply;
+use maknae_loop::plane::LoopPlane;
+use maknae_proto::{ProviderChoice, SealedKey};
 use maknae_seal::{SealAad, SealContext, SealPublicKey};
 use maknae_vault::{
     aad_parts, PlaneClient, UserToken, VaultApi, VaultError, WrapExpectation, WrappedSecret,
     USER_KEY_WRAP_TTL,
 };
 use std::future::Future;
+use std::io::Write;
 use std::path::Path;
 
 pub const AGENT_SECTION: &str = "agent";
@@ -238,273 +240,35 @@ pub fn warning_line(n: &Notice) -> String {
     )
 }
 
-/// ≤32 chars, no whitespace — `conversation_id_is_acceptable`'s bound.
-pub fn mint_conversation_id() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    format!("c{secs:x}p{:x}", std::process::id())
+/// The user host's key supply: each turn reads the subject's own wrapped key
+/// under their login and seals it to exactly that request (ADR-0028).
+pub struct UserLoginKeys {
+    pub api: VaultApi,
+    pub token: UserToken,
+    pub entry: UserProviderEntry,
+    pub kv_mount: String,
+    pub user_prefix: String,
+    pub username: String,
+    pub seal_key: SealPublicKey,
+    pub expires_at: u64,
 }
 
-/// A CONTROL, and a pure function so it is testable: only an AUTHORIZATION
-/// refusal of an ARMED request is `Refused` — the one outcome the model may
-/// not appeal. An armed `Unauthorized` is the kernel's refusal before any
-/// grant; the wire carries no reason (ADR-0019), so it also covers evidence and
-/// capacity refusals (#344, #370). An unarmed refusal, any other
-/// code (a `BadRequest` for `/a/../b` is a client-shape fault), any protocol
-/// surprise and any transport error is `Unavailable`. So is a grant that ends
-/// without an acknowledged `Success` (OS refusal, limit, changed object, lost
-/// ack): a fact about the attempt, not a verdict.
-pub fn read_outcome(sent: Result<SentOutcome, String>) -> ReadOutcome {
-    match sent {
-        Ok(SentOutcome::ReadDone { read: Some(r) }) => ReadOutcome::Content(ReadPage {
-            content: r.content,
-            level: r.label.level,
-            lines: r.page.lines,
-            complete_line: r.page.complete_last,
-            next: r.page.next,
-            eof: r.page.eof,
-            version: r.page.version.key(),
-            changed: false,
-        }),
-        Ok(SentOutcome::Refused { armed: false, .. }) => ReadOutcome::Unavailable,
-        Ok(SentOutcome::Refused {
-            code: maknae_proto::ProtoErrCode::Unauthorized,
-            ..
-        }) => ReadOutcome::Refused,
-        _ => ReadOutcome::Unavailable,
-    }
-}
-
-/// The write half of the same treatment, and pure for the same reason: ONLY a
-/// clean `WriteDone { applied: true }` is `Applied`.
-///
-/// Everything else is `Unknown` — a non-applied completion, a refusal, a
-/// payload for some other verb, and every transport error. ADR-0023 d4: a
-/// `String` error cannot tell a pre-send connect failure from a post-send read
-/// timeout, and guessing would manufacture certainty. `NotSent` is NOT decided
-/// here: it is the one LOCAL refusal, judged from `write_request`'s `Err`
-/// before `send_verb` is ever called. `armed` does not enter the write
-/// decision: every non-`Applied` write is already `Unknown`.
-///
-/// **Amended 2026-09-28 (#388):** one non-applied completion is certain, not
-/// guessed — `stale`, set only when the client's read-before-write check refused
-/// the attempt before any write syscall and the no-effect completion was
-/// acknowledged. It is `Stale`; every other non-applied completion stays
-/// `Unknown`.
-pub fn write_outcome(sent: Result<SentOutcome, String>) -> WriteOutcome {
-    match sent {
-        Ok(SentOutcome::WriteDone {
-            applied: true,
-            version,
-            ..
-        }) => WriteOutcome::Applied(version),
-        Ok(SentOutcome::WriteDone {
-            applied: false,
-            stale: true,
-            ..
-        }) => WriteOutcome::Stale,
-        _ => WriteOutcome::Unknown,
-    }
-}
-
-/// The loop's knowledge of a file, as the client's write check (#388). The
-/// loop never sends `Unchecked`: that is `maknae write`'s, for a human.
-pub fn check_for(basis: ReadBasis) -> crate::mutation::WriteCheck {
-    match basis {
-        ReadBasis::Unread => crate::mutation::WriteCheck::Unread,
-        ReadBasis::Read(k) => crate::mutation::WriteCheck::Read(k),
-    }
-}
-
-/// The prompt leg's mapper, pure and tested for the same reason the read and
-/// write mappers are: it is a CONTROL. A `BadRequest` on `session.prompt` is a
-/// pre-gate fault on the request's own shape — `maknae agent "   "` is refused
-/// for carrying no text to send, and provably never reached the provider: no
-/// egress block was opened and no intent record was written. Reporting that
-/// with [`PROMPT_REFUSED`] would send the subject to their providers.yaml and
-/// their login for a fault they can fix from the message. What
-/// the trail does hold is the pre-gate deny: the kernel appends
-/// `emit_request_outcome` with a `deny` and the reason
-/// `prompt fails operand pre-gate: …` before it writes the `BadRequest` back,
-/// and it writes that error only under `may_respond(appended)`, so a subject
-/// who saw it is proof the record landed. Both facts, and neither more: no
-/// provider contact, and a recorded pre-gate deny. `ReplyUnusable` carries the
-/// provider-side reason (#524).
-pub fn prompt_outcome(
-    sent: Result<SentOutcome, String>,
-) -> Result<maknae_proto::PromptReply, PlaneError> {
-    match sent {
-        Ok(SentOutcome::Payload(Payload::PromptReply(r))) => Ok(r),
-        Ok(SentOutcome::Refused {
-            code: maknae_proto::ProtoErrCode::BadRequest,
-            ..
-        }) => Err(PlaneError::Malformed),
-        Ok(SentOutcome::Refused {
-            code: maknae_proto::ProtoErrCode::ReplyUnusable(d),
-            ..
-        }) => Err(PlaneError::ReplyUnusable(d)),
-        Ok(SentOutcome::Refused {
-            code: maknae_proto::ProtoErrCode::EgressUnavailable,
-            ..
-        }) => Err(PlaneError::Unavailable),
-        Ok(SentOutcome::Refused { .. }) => Err(PlaneError::Refused),
-        Ok(other) => Err(PlaneError::Transport(format!(
-            "protocol error: unexpected reply to session.prompt: {other:?}"
-        ))),
-        Err(m) => Err(PlaneError::Transport(m)),
-    }
-}
-
-/// A wrapped key whose frame was refused as too large before it was sent, so it is unconsumed.
-pub struct Spare {
-    conversation: String,
-    minted_at: u64,
-    choice: ProviderChoice,
-}
-
-pub const SPARE_MAX_AGE_SECS: u64 = maknae_vault::USER_KEY_WRAP_TTL.as_secs() / 2;
-
-fn take_spare(spare: &mut Option<Spare>, conversation: &str, now: u64) -> Option<Spare> {
-    let s = spare.take()?;
-    (s.conversation == conversation && now <= s.minted_at + SPARE_MAX_AGE_SECS).then_some(s)
-}
-
-/// Measured against the frame cap before sending (ADR-0023 d7).
-fn frame_fits(verb: &Verb, cap: usize) -> bool {
-    maknae_proto::encode_request_zeroizing(
-        &maknae_proto::Request {
-            protocol_version: maknae_proto::PROTOCOL_VERSION,
-            verb: verb.clone(),
-        },
-        cap,
-    )
-    .is_ok()
-}
-
-/// The real Plane: one authenticated client, one connection per verb.
-pub struct RealPlane<'a> {
-    pub transport: &'a maknae_config::TransportConfig,
-    pub client: &'a PlaneClient,
-    pub ca: &'a maknae_vault::CaBundle,
-    pub output_tokens: Option<u64>,
-    pub write_max: usize,
-    pub api: &'a VaultApi,
-    pub token: &'a UserToken,
-    pub key: KeyContext<'a>,
-    pub spare: Option<Spare>,
-}
-
-impl Plane for RealPlane<'_> {
-    async fn prompt(
-        &mut self,
-        conversation: &str,
-        turns: &[Turn],
-    ) -> Result<maknae_proto::PromptReply, PlaneError> {
-        let mut verb = Verb::SessionPrompt {
-            conversation: conversation.to_string(),
-            turns: turns.to_vec(),
-            output_tokens: self.output_tokens,
-            choice: None,
+impl KeySupply for UserLoginKeys {
+    async fn choice(&mut self, conversation: &str, now: u64) -> Result<ProviderChoice, String> {
+        let key = KeyContext {
+            entry: &self.entry,
+            kv_mount: &self.kv_mount,
+            user_prefix: &self.user_prefix,
+            username: &self.username,
+            seal_key: &self.seal_key,
+            expires_at: self.expires_at,
         };
-        // Checked before the key is wrapped, so a retry after shedding reasoning costs no Vault call.
-        if !frame_fits(&verb, self.transport.prompt_max_bytes) {
-            return Err(PlaneError::FrameTooLarge);
-        }
-        let now = crate::login::now_unix().map_err(PlaneError::Transport)?;
-        let (choice, minted_at) = match take_spare(&mut self.spare, conversation, now) {
-            Some(s) => (s.choice, s.minted_at),
-            None => {
-                let (api, token, kv_mount) = (self.api, self.token, self.key.kv_mount);
-                let c = turn_choice(&self.key, conversation, now, |path| async move {
-                    api.read_wrapped(token, kv_mount, &path, maknae_vault::USER_KEY_WRAP_TTL)
-                        .await
-                })
+        let (api, token, kv_mount) = (&self.api, &self.token, self.kv_mount.as_str());
+        turn_choice(&key, conversation, now, |path| async move {
+            api.read_wrapped(token, kv_mount, &path, maknae_vault::USER_KEY_WRAP_TTL)
                 .await
-                .map_err(PlaneError::Transport)?;
-                (c, now)
-            }
-        };
-        if let Verb::SessionPrompt { choice: c, .. } = &mut verb {
-            *c = Some(choice);
-        }
-        if !frame_fits(&verb, self.transport.prompt_max_bytes) {
-            if let Verb::SessionPrompt {
-                choice: Some(choice),
-                ..
-            } = verb
-            {
-                self.spare = Some(Spare {
-                    conversation: conversation.to_string(),
-                    minted_at,
-                    choice,
-                });
-            }
-            return Err(PlaneError::FrameTooLarge);
-        }
-        prompt_outcome(
-            send_verb(
-                verb,
-                None,
-                crate::mutation::WriteCheck::Unchecked,
-                self.transport,
-                self.client,
-                self.ca,
-            )
-            .await,
-        )
-    }
-    async fn read(
-        &mut self,
-        conversation: &str,
-        path: &str,
-        page: maknae_proto::PageRequest,
-    ) -> ReadOutcome {
-        read_outcome(
-            send_verb(
-                Verb::Read {
-                    path: path.to_string(),
-                    conversation: Some(conversation.to_string()),
-                    page: Some(page),
-                },
-                None,
-                crate::mutation::WriteCheck::Unchecked,
-                self.transport,
-                self.client,
-                self.ca,
-            )
-            .await,
-        )
-    }
-    async fn write(
-        &mut self,
-        conversation: &str,
-        path: &str,
-        content: &[u8],
-        basis: ReadBasis,
-    ) -> WriteOutcome {
-        // The prompt-budget refusal is LOCAL and pre-send — nothing left
-        // the process, nothing is on the trail, the file is untouched.
-        let Ok((verb, content)) = write_request(
-            path.to_string(),
-            zeroize::Zeroizing::new(content.to_vec()),
-            Some(conversation.to_string()),
-            self.write_max,
-        ) else {
-            return WriteOutcome::NotSent;
-        };
-        write_outcome(
-            send_verb(
-                verb,
-                Some(content),
-                check_for(basis),
-                self.transport,
-                self.client,
-                self.ca,
-            )
-            .await,
-        )
+        })
+        .await
     }
 }
 
@@ -566,7 +330,62 @@ pub fn stop_line(r: Option<&StopReason>, budget: &Budget) -> String {
         Some(StopReason::EgressUnavailable) => format!("stopped: {EGRESS_UNAVAILABLE}"),
         Some(StopReason::Transport(m)) => format!("stopped: {m}"),
         Some(StopReason::ContextBudget) => "stopped: the conversation has reached the declared context budget; compaction arrives with #171".into(),
+        Some(StopReason::Stopped) => "stopped: the loop was asked to stop".into(),
+        Some(StopReason::NothingPending) => "stopped: there was no prompt to answer".into(),
         None => "stopped".into(),
+    }
+}
+
+/// The lines a run prints while it is going: notices and the plane's
+/// diagnostics, on stderr. The answer and the stop line are [`print_end`]'s.
+pub fn print_event(e: &LoopEvent, err: &mut impl Write) -> std::io::Result<()> {
+    match e {
+        LoopEvent::Notice(n) => writeln!(err, "{}", warning_line(n)),
+        LoopEvent::Diagnostic(d) => writeln!(err, "{d}"),
+        _ => Ok(()),
+    }
+}
+
+pub fn print_end(
+    outcome: &Outcome,
+    budget: &Budget,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> std::io::Result<u8> {
+    if let Some(answer) = &outcome.answer {
+        writeln!(out, "{answer}")?;
+        return Ok(0);
+    }
+    writeln!(
+        err,
+        "maknae agent: {}",
+        stop_line(outcome.stopped.as_ref(), budget)
+    )?;
+    Ok(2)
+}
+
+/// A failed print stops the session before its next plane call, so nothing new
+/// is started on the subject's behalf after output is lost; a granted attempt finishes.
+pub async fn drive_to<P: Plane + Send>(
+    session: &mut Session,
+    plane: &mut P,
+    err: &mut (impl Write + Send),
+) -> std::io::Result<Outcome> {
+    let handle = session.handle();
+    let mut failed: Option<std::io::Error> = None;
+    let outcome = session
+        .run(plane, &mut |e| {
+            if failed.is_none() {
+                if let Err(e) = print_event(&e, err) {
+                    handle.stop();
+                    failed = Some(e);
+                }
+            }
+        })
+        .await;
+    match failed {
+        Some(e) => Err(e),
+        None => Ok(outcome),
     }
 }
 
@@ -597,51 +416,44 @@ pub async fn run(label: Option<String>, prompt: String) -> Result<u8, String> {
     let write_max = transport.prompt_max_bytes;
     let mut transport = transport;
     transport.prompt_max_bytes = loop_prompt_cap(context.context_tokens(), explicit);
+    let id = maknae_loop::id::mint_conversation_id()?;
     let client = PlaneClient::for_user(&document, &dir, token_copy(&session.token)?)
         .map_err(|e| e.to_string())?;
     let ca = maknae_vault::load_ca_pin(&dir).map_err(|e| e.to_string())?;
     client.mint().await.map_err(|e| e.to_string())?;
-    let mut plane = RealPlane {
-        transport: &transport,
-        client: &client,
-        ca: &ca,
-        output_tokens: context.output_tokens(),
-        write_max,
-        api: &session.api,
-        token: &session.token,
-        key: KeyContext {
-            entry,
-            kv_mount,
-            user_prefix,
-            username: &username,
-            seal_key: &seal_key,
-            expires_at: session.expires_at,
-        },
-        spare: None,
+    let keys = UserLoginKeys {
+        api: session.api,
+        token: session.token,
+        entry: entry.clone(),
+        kv_mount: kv_mount.to_string(),
+        user_prefix: user_prefix.to_string(),
+        username,
+        seal_key,
+        expires_at: session.expires_at,
     };
-    let mut transcript = Transcript::new(mint_conversation_id(), &prompt);
+    let mut plane = LoopPlane::new(
+        transport,
+        client,
+        ca,
+        context.output_tokens(),
+        write_max,
+        keys,
+    );
     let budget = Budget {
         max_steps: agent.max_steps,
         max_tool_calls_per_step: agent.max_tool_calls_per_step,
     };
-    let outcome = drive(
-        &mut plane,
-        &mut transcript,
+    let mut session = Session::new(id, &prompt, budget, context);
+    let outcome = drive_to(&mut session, &mut plane, &mut std::io::stderr()).await;
+    plane.into_client().shutdown().await;
+    let outcome = outcome.map_err(|e| e.to_string())?;
+    print_end(
+        &outcome,
         &budget,
-        &mut Meter::new(context),
-        &mut |n| eprintln!("{}", warning_line(n)),
+        &mut std::io::stdout(),
+        &mut std::io::stderr(),
     )
-    .await;
-    client.shutdown().await;
-    if let Some(answer) = outcome.answer {
-        println!("{answer}");
-        return Ok(0);
-    }
-    eprintln!(
-        "maknae agent: {}",
-        stop_line(outcome.stopped.as_ref(), &budget)
-    );
-    Ok(2)
+    .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -940,14 +752,6 @@ mod tests {
 
     #[test]
     fn an_unavailable_egress_says_so_and_that_nothing_was_sent() {
-        assert_eq!(
-            prompt_outcome(Ok(SentOutcome::Refused {
-                code: maknae_proto::ProtoErrCode::EgressUnavailable,
-                message: maknae_proto::EGRESS_UNAVAILABLE_MESSAGE.into(),
-                armed: false,
-            })),
-            Err(PlaneError::Unavailable)
-        );
         let b = Budget {
             max_steps: 8,
             max_tool_calls_per_step: 4,
@@ -960,14 +764,6 @@ mod tests {
 
     #[test]
     fn an_unauthorized_prompt_prints_one_line_that_names_what_to_check_and_nothing_else() {
-        assert_eq!(
-            prompt_outcome(Ok(SentOutcome::Refused {
-                code: maknae_proto::ProtoErrCode::Unauthorized,
-                message: "not authorized".into(),
-                armed: false,
-            })),
-            Err(PlaneError::Refused)
-        );
         assert_eq!(
             PROMPT_REFUSED,
             "the kernel refused the exchange — whether the prompt reached the provider is in the host's audit trail (ask your administrator); if it did not, check that your providers.yaml names a provider and model your administrator has authorized for your role and the key subpath and field of your own Vault secret, that your maknae.yaml vault block matches the host's, and that your login is current (maknae login)"
@@ -1054,6 +850,14 @@ mod tests {
             "stopped: the step budget (8) was spent without an answer"
         );
         assert_eq!(
+            stop_line(Some(&StopReason::Stopped), &b),
+            "stopped: the loop was asked to stop"
+        );
+        assert_eq!(
+            stop_line(Some(&StopReason::NothingPending), &b),
+            "stopped: there was no prompt to answer"
+        );
+        assert_eq!(
             stop_line(Some(&StopReason::TooManyToolCalls(5)), &b),
             "stopped: the model asked for 5 tools in one step (cap 4)"
         );
@@ -1101,119 +905,6 @@ mod tests {
         );
     }
     #[test]
-    fn a_conversation_id_is_minted_within_the_wire_bound() {
-        assert!(maknae_proto::conversation_id_is_acceptable(
-            &mint_conversation_id()
-        ));
-    }
-    #[test]
-    fn the_loops_basis_becomes_the_clients_check() {
-        use crate::mutation::WriteCheck;
-        assert_eq!(check_for(ReadBasis::Unread), WriteCheck::Unread);
-        assert_eq!(check_for(ReadBasis::Read([4; 7])), WriteCheck::Read([4; 7]));
-    }
-    #[test]
-    fn the_loops_same_content_agrees_with_the_file_versions() {
-        let base = maknae_io::FileVersion {
-            dev: 1,
-            ino: 2,
-            size: 3,
-            mtime: 4,
-            mtime_nsec: 5,
-            ctime: 6,
-            ctime_nsec: 7,
-        };
-        let changed: [fn(&mut maknae_io::FileVersion); 7] = [
-            |v| v.dev += 1,
-            |v| v.ino += 1,
-            |v| v.size += 1,
-            |v| v.mtime += 1,
-            |v| v.mtime_nsec += 1,
-            |v| v.ctime += 1,
-            |v| v.ctime_nsec += 1,
-        ];
-        for (i, change) in changed.iter().enumerate() {
-            let mut v = base;
-            change(&mut v);
-            assert_eq!(
-                maknae_agent::plane::same_content(&base.key(), &v.key()),
-                base.same_content(&v),
-                "field {i}"
-            );
-        }
-    }
-    #[test]
-    fn a_write_is_applied_only_for_a_clean_completion_and_unknown_for_everything_else() {
-        // ADR-0023 d4: the wire cannot distinguish uncertain from refused
-        // on the write lane, so only a clean `applied: true` — and, since #388,
-        // a client-decided `stale` refusal — may claim certainty. `NotSent` is
-        // absent by construction: it is decided from `write_request`'s `Err`,
-        // before `send_verb` is called.
-        use maknae_proto::{Payload, ProtoErrCode};
-        assert_eq!(
-            write_outcome(Ok(SentOutcome::WriteDone {
-                applied: true,
-                stale: false,
-                version: None
-            })),
-            WriteOutcome::Applied(None)
-        );
-        assert_eq!(
-            write_outcome(Ok(SentOutcome::WriteDone {
-                applied: true,
-                stale: false,
-                version: Some([2; 7])
-            })),
-            WriteOutcome::Applied(Some([2; 7]))
-        );
-        assert_eq!(
-            write_outcome(Ok(SentOutcome::WriteDone {
-                applied: false,
-                stale: true,
-                version: None
-            })),
-            WriteOutcome::Stale
-        );
-        assert_eq!(
-            write_outcome(Ok(SentOutcome::WriteDone {
-                applied: false,
-                stale: false,
-                version: None
-            })),
-            WriteOutcome::Unknown
-        );
-        assert_eq!(
-            write_outcome(Ok(SentOutcome::Refused {
-                code: ProtoErrCode::Unauthorized,
-                message: "not authorized".into(),
-                armed: true
-            })),
-            WriteOutcome::Unknown,
-            "a refusal is not a certainty on the write lane"
-        );
-        assert_eq!(
-            write_outcome(Ok(SentOutcome::Payload(Payload::Pong))),
-            WriteOutcome::Unknown
-        );
-        assert_eq!(
-            write_outcome(Err("no response from daemon within 5000ms".into())),
-            WriteOutcome::Unknown
-        );
-    }
-    #[test]
-    fn a_reply_unusable_refusal_is_its_own_plane_error() {
-        for d in maknae_proto::ReplyDefect::ALL {
-            assert_eq!(
-                prompt_outcome(Ok(SentOutcome::Refused {
-                    code: maknae_proto::ProtoErrCode::ReplyUnusable(d),
-                    message: "reply unusable".into(),
-                    armed: false,
-                })),
-                Err(PlaneError::ReplyUnusable(d)),
-            );
-        }
-    }
-    #[test]
     fn every_reply_defect_has_a_distinct_line_that_never_blames_authorization() {
         let b = Budget {
             max_steps: 8,
@@ -1231,219 +922,299 @@ mod tests {
         assert!(line(maknae_proto::ReplyDefect::TokenLimit).contains("output_tokens"));
         assert!(line(maknae_proto::ReplyDefect::ProviderAuth).contains("Vault secret"));
     }
-    #[test]
-    fn a_prompt_is_malformed_only_for_bad_request_and_refused_for_every_other_code_but_reply_unusable(
-    ) {
-        use maknae_proto::{Payload, PromptReply, ProtoErrCode};
-        let refused = |code| {
-            prompt_outcome(Ok(SentOutcome::Refused {
-                code,
-                message: "prompt carries no text to send".into(),
-                armed: false,
-            }))
-        };
-        assert_eq!(
-            refused(ProtoErrCode::BadRequest),
-            Err(PlaneError::Malformed)
-        );
-        for code in [
-            ProtoErrCode::Unauthorized,
-            ProtoErrCode::Internal,
-            ProtoErrCode::TooLarge,
-            ProtoErrCode::UnknownVerb,
-            ProtoErrCode::NotImplemented,
-        ] {
-            assert_eq!(refused(code.clone()), Err(PlaneError::Refused), "{code:?}");
-        }
-        assert_eq!(
-            prompt_outcome(Ok(SentOutcome::Payload(Payload::PromptReply(
-                PromptReply {
-                    reasoning: None,
-                    blocks: vec![],
-                    tool_calls: vec![],
-                    usage: None,
-                }
-            )))),
-            Ok(PromptReply {
+    mod printer {
+        use super::*;
+        use maknae_agent::drive::Outcome;
+        use maknae_agent::plane::{PlaneError, ReadBasis, ReadOutcome, WriteOutcome};
+        use maknae_agent::session::Session;
+        use maknae_proto::Turn;
+        use maknae_proto::{ContentBlock, PromptReply, ProposedToolCall, SecretText};
+        use std::collections::VecDeque;
+
+        const ARMING: &str = "maknae: cannot prepare filesystem operation: x";
+        const ATTEMPT: &str = "mutation stopped: OsRefused; 0 effect(s) reported";
+
+        fn reply(text: Option<&str>, calls: &[(&str, &str)]) -> PromptReply {
+            PromptReply {
                 reasoning: None,
-                blocks: vec![],
-                tool_calls: vec![],
+                blocks: text
+                    .map(|t| {
+                        vec![ContentBlock::Text {
+                            text: SecretText(zeroize::Zeroizing::new(t.into())),
+                        }]
+                    })
+                    .unwrap_or_default(),
+                tool_calls: calls
+                    .iter()
+                    .map(|(id, path)| ProposedToolCall {
+                        name: "write_file".into(),
+                        call_id: (*id).into(),
+                        arguments: SecretText(zeroize::Zeroizing::new(format!(
+                            r#"{{"path":"{path}","content":"x"}}"#
+                        ))),
+                        refused: None,
+                    })
+                    .collect(),
                 usage: None,
-            })
-        );
-        assert!(matches!(
-            prompt_outcome(Ok(SentOutcome::Payload(Payload::Pong))),
-            Err(PlaneError::Transport(_))
-        ));
-        assert!(matches!(
-            prompt_outcome(Err("handshake timed out".into())),
-            Err(PlaneError::Transport(_))
-        ));
-    }
-    #[test]
-    fn a_read_is_refused_only_for_unauthorized_and_unavailable_for_every_other_outcome() {
-        // This mapper is a CONTROL, so it is tested: only the authorization
-        // code is a refusal the model may not appeal; a BadRequest
-        // (`/a/../b`), a protocol error, or a transport error is
-        // "unavailable".
-        use maknae_proto::{Payload, ProtoErrCode};
-        let read = crate::mutation::ReadResult {
-            content: zeroize::Zeroizing::new(b"x".to_vec()),
-            label: maknae_proto::ObjectLabel {
-                level: "UNCLASSIFIED".into(),
-                categories: vec![],
-            },
-            page: crate::mutation::PageMeta {
-                start: 0,
-                lines: Some((1, 1)),
-                complete_last: true,
-                next: None,
-                eof: true,
-                version: maknae_io::FileVersion::default(),
-            },
-        };
-        assert_eq!(
-            read_outcome(Ok(SentOutcome::ReadDone { read: Some(read) })),
-            ReadOutcome::Content(ReadPage {
-                content: zeroize::Zeroizing::new(b"x".to_vec()),
-                level: "UNCLASSIFIED".into(),
-                lines: Some((1, 1)),
-                complete_line: true,
-                next: None,
-                eof: true,
-                version: maknae_io::FileVersion::default().key(),
-                changed: false,
-            })
-        );
-        assert_eq!(
-            read_outcome(Ok(SentOutcome::ReadDone { read: None })),
-            ReadOutcome::Unavailable
-        );
-        assert_eq!(
-            read_outcome(Ok(SentOutcome::Payload(Payload::Pong))),
-            ReadOutcome::Unavailable
-        );
-        assert_eq!(
-            read_outcome(Ok(SentOutcome::Refused {
-                code: ProtoErrCode::Unauthorized,
-                message: "not authorized".into(),
-                armed: true
-            })),
-            ReadOutcome::Refused
-        );
-        assert_eq!(
-            read_outcome(Ok(SentOutcome::Refused {
-                code: ProtoErrCode::BadRequest,
-                message: "not absolute".into(),
-                armed: true
-            })),
-            ReadOutcome::Unavailable
-        );
-        // #241: an UNARMED refusal is not a PDP verdict on the content. The
-        // subject's own `open_path_for_delegation` failed (ENOENT), the
-        // request went out without a descriptor, and the kernel denied it for
-        // want of one (ADR-0009 d2) — which arrives as the same generic
-        // `Unauthorized`. Telling the model "Not authorized" for a typo'd path
-        // asserts a decision nobody made, and the compiled prompt forbids the
-        // model to diagnose or retry it.
-        assert_eq!(
-            read_outcome(Ok(SentOutcome::Refused {
-                code: ProtoErrCode::Unauthorized,
-                message: "no delegated descriptor".into(),
-                armed: false
-            })),
-            ReadOutcome::Unavailable,
-            "a read the subject could not arm was never decided"
-        );
-        assert_eq!(
-            read_outcome(Ok(SentOutcome::Refused {
-                code: ProtoErrCode::BadRequest,
-                message: "not absolute".into(),
-                armed: false
-            })),
-            ReadOutcome::Unavailable
-        );
-        assert_eq!(
-            read_outcome(Ok(SentOutcome::WriteDone {
-                applied: true,
-                stale: false,
-                version: None
-            })),
-            ReadOutcome::Unavailable
-        );
-        assert_eq!(
-            read_outcome(Err("handshake timed out".into())),
-            ReadOutcome::Unavailable
-        );
-    }
-
-    #[test]
-    fn frame_fits_is_the_encoders_cap_check() {
-        let verb = |n: usize| Verb::SessionPrompt {
-            conversation: "c".into(),
-            turns: vec![Turn::User {
-                content: vec![maknae_proto::ContentBlock::Text {
-                    text: maknae_proto::SecretText(zeroize::Zeroizing::new("a".repeat(n))),
-                }],
-            }],
-            output_tokens: None,
-            choice: None,
-        };
-        assert!(frame_fits(&verb(10), 65_536));
-        assert!(!frame_fits(&verb(70_000), 65_536));
-    }
-
-    #[test]
-    fn the_prompt_frame_is_sized_before_the_key_is_wrapped() {
-        let src = include_str!("agent.rs");
-        let body = &src[src.find(concat!("async fn ", "prompt(")).unwrap()..];
-        let fits = body.find(concat!("frame_fits(", "&verb")).unwrap();
-        let wrap = body.find(concat!("turn_choice(", "&self.key")).unwrap();
-        assert!(fits < wrap);
-    }
-
-    fn a_choice() -> ProviderChoice {
-        ProviderChoice {
-            provider: "p".into(),
-            model: "m".into(),
-            key_subpath: "k".into(),
-            key_field: "f".into(),
-            sealed_key: SealedKey::new(vec![7; maknae_proto::SEALED_KEY_MIN_BYTES]).unwrap(),
+            }
         }
-    }
 
-    #[test]
-    fn a_spare_choice_is_reused_once_for_its_conversation_while_its_wrap_is_young() {
-        let mut spare = Some(Spare {
-            conversation: "c".into(),
-            minted_at: 100,
-            choice: a_choice(),
-        });
-        assert!(take_spare(&mut spare, "other", 101).is_none());
-        assert!(spare.is_none());
+        struct Fake {
+            replies: VecDeque<PromptReply>,
+            write_diags: VecDeque<&'static str>,
+            queued: Vec<String>,
+            prompts: usize,
+            writes: usize,
+        }
+        impl Plane for Fake {
+            async fn prompt(
+                &mut self,
+                _c: &str,
+                _t: &[Turn],
+            ) -> Result<maknae_proto::PromptReply, PlaneError> {
+                self.prompts += 1;
+                Ok(self.replies.pop_front().expect("script exhausted"))
+            }
+            async fn read(
+                &mut self,
+                _c: &str,
+                _p: &str,
+                _page: maknae_proto::PageRequest,
+            ) -> ReadOutcome {
+                ReadOutcome::Unavailable
+            }
+            async fn write(
+                &mut self,
+                _c: &str,
+                _p: &str,
+                _b: &[u8],
+                _b2: ReadBasis,
+            ) -> WriteOutcome {
+                self.writes += 1;
+                if let Some(d) = self.write_diags.pop_front() {
+                    self.queued.push(d.into());
+                }
+                WriteOutcome::Applied(None)
+            }
+            fn take_diagnostics(&mut self) -> Vec<String> {
+                std::mem::take(&mut self.queued)
+            }
+        }
+        fn fake(replies: Vec<PromptReply>) -> Fake {
+            Fake {
+                replies: replies.into(),
+                write_diags: VecDeque::new(),
+                queued: vec![],
+                prompts: 0,
+                writes: 0,
+            }
+        }
+        fn budget() -> Budget {
+            Budget {
+                max_steps: 8,
+                max_tool_calls_per_step: 4,
+            }
+        }
+        fn unmetered() -> ContextBudget {
+            ContextBudget::new(maknae_proto::MAX_CONTEXT_TOKENS, None).unwrap()
+        }
 
-        let mut spare = Some(Spare {
-            conversation: "c".into(),
-            minted_at: 100,
-            choice: a_choice(),
-        });
-        assert!(take_spare(&mut spare, "c", 100 + SPARE_MAX_AGE_SECS + 1).is_none());
+        async fn host(
+            mut session: Session,
+            plane: &mut Fake,
+        ) -> (Vec<u8>, Vec<u8>, std::io::Result<u8>) {
+            let (mut out, mut err) = (vec![], vec![]);
+            let code = match drive_to(&mut session, plane, &mut err).await {
+                Ok(outcome) => print_end(&outcome, &session.budget(), &mut out, &mut err),
+                Err(e) => Err(e),
+            };
+            (out, err, code)
+        }
 
-        let mut spare = Some(Spare {
-            conversation: "c".into(),
-            minted_at: 100,
-            choice: a_choice(),
-        });
-        let s = take_spare(&mut spare, "c", 100 + SPARE_MAX_AGE_SECS).unwrap();
-        assert_eq!((s.choice, s.minted_at), (a_choice(), 100));
-        assert!(take_spare(&mut spare, "c", 101).is_none());
-    }
+        #[tokio::test]
+        async fn the_agent_printer_is_byte_identical() {
+            let (out, err, code) = host(
+                Session::new("c", "q", budget(), unmetered()),
+                &mut fake(vec![reply(Some("ok"), &[])]),
+            )
+            .await;
+            assert_eq!((out, err, code.unwrap()), (b"ok\n".to_vec(), vec![], 0));
 
-    #[test]
-    fn a_spare_is_never_older_than_half_the_wrap() {
-        assert_eq!(
-            SPARE_MAX_AGE_SECS * 2,
-            maknae_vault::USER_KEY_WRAP_TTL.as_secs()
-        );
+            let (out, err, code) = host(
+                Session::new(
+                    "c",
+                    &"q".repeat(1_800),
+                    budget(),
+                    ContextBudget::new(2_000, None).unwrap(),
+                ),
+                &mut fake(vec![reply(Some("ok"), &[])]),
+            )
+            .await;
+            let notice = Notice {
+                percent: 99,
+                tokens: 1_986,
+                budget: 2_000,
+                estimated: true,
+            };
+            assert_eq!(out, b"ok\n");
+            assert_eq!(
+                String::from_utf8(err).unwrap(),
+                format!("{}\n", warning_line(&notice))
+            );
+            assert_eq!(code.unwrap(), 0);
+
+            let b = budget();
+            let every = [
+                StopReason::StepBudget,
+                StopReason::TooManyToolCalls(5),
+                StopReason::FrameBound,
+                StopReason::PromptRefused,
+                StopReason::PromptMalformed,
+                StopReason::ReplyUnusable(maknae_proto::ReplyDefect::Empty),
+                StopReason::EgressUnavailable,
+                StopReason::Transport("t".into()),
+                StopReason::ContextBudget,
+                StopReason::Stopped,
+                StopReason::NothingPending,
+            ];
+            for r in &every {
+                match r {
+                    StopReason::StepBudget
+                    | StopReason::TooManyToolCalls(_)
+                    | StopReason::FrameBound
+                    | StopReason::PromptRefused
+                    | StopReason::PromptMalformed
+                    | StopReason::ReplyUnusable(_)
+                    | StopReason::EgressUnavailable
+                    | StopReason::Transport(_)
+                    | StopReason::ContextBudget
+                    | StopReason::Stopped
+                    | StopReason::NothingPending => {}
+                }
+                let (mut out, mut err) = (vec![], vec![]);
+                let outcome = Outcome {
+                    answer: None,
+                    stopped: Some(r.clone()),
+                    steps_used: 0,
+                };
+                assert_eq!(print_end(&outcome, &b, &mut out, &mut err).unwrap(), 2);
+                assert!(out.is_empty());
+                assert_eq!(
+                    String::from_utf8(err).unwrap(),
+                    format!("maknae agent: {}\n", stop_line(Some(r), &b))
+                );
+            }
+        }
+
+        #[test]
+        fn the_agent_printer_matches_literal_bytes() {
+            let b = budget();
+            for (r, want) in [
+                (
+                    StopReason::StepBudget,
+                    "maknae agent: stopped: the step budget (8) was spent without an answer\n",
+                ),
+                (
+                    StopReason::TooManyToolCalls(5),
+                    "maknae agent: stopped: the model asked for 5 tools in one step (cap 4)\n",
+                ),
+            ] {
+                let (mut out, mut err) = (vec![], vec![]);
+                let outcome = Outcome {
+                    answer: None,
+                    stopped: Some(r),
+                    steps_used: 0,
+                };
+                assert_eq!(print_end(&outcome, &b, &mut out, &mut err).unwrap(), 2);
+                assert_eq!(String::from_utf8(err).unwrap(), want);
+            }
+        }
+
+        #[tokio::test]
+        async fn the_agent_printer_interleaves_diagnostics_in_todays_order() {
+            let mut p = fake(vec![
+                reply(None, &[("c1", "/w/a")]),
+                reply(None, &[("c2", "/w/b")]),
+                reply(None, &[("c3", "/w/c")]),
+            ]);
+            p.write_diags = VecDeque::from([ARMING, ATTEMPT]);
+            let b = Budget {
+                max_steps: 3,
+                max_tool_calls_per_step: 4,
+            };
+            let (out, err, code) = host(
+                Session::new(
+                    "c",
+                    &"q".repeat(1_700),
+                    b,
+                    ContextBudget::new(2_000, None).unwrap(),
+                ),
+                &mut p,
+            )
+            .await;
+            assert!(out.is_empty());
+            assert_eq!(code.unwrap(), 2);
+            let err = String::from_utf8(err).unwrap();
+            let lines: Vec<&str> = err.lines().collect();
+            assert_eq!(lines.len(), 4, "{err}");
+            assert!(lines[0].starts_with("warning: "), "{err}");
+            assert_eq!(lines[1], ARMING);
+            assert_eq!(lines[2], ATTEMPT);
+            assert_eq!(
+                lines[3],
+                format!(
+                    "maknae agent: {}",
+                    stop_line(Some(&StopReason::StepBudget), &b)
+                )
+            );
+            assert!(err.ends_with('\n'));
+        }
+
+        struct Broken;
+        impl std::io::Write for Broken {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        #[tokio::test]
+        async fn a_failed_notice_print_sends_no_prompt() {
+            let mut p = fake(vec![reply(None, &[("c1", "/w/a"), ("c2", "/w/b")])]);
+            let mut session = Session::new(
+                "c",
+                &"q".repeat(1_800),
+                budget(),
+                ContextBudget::new(2_000, None).unwrap(),
+            );
+            match drive_to(&mut session, &mut p, &mut Broken).await {
+                Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe),
+                Ok(_) => panic!("a failed print must surface as an error"),
+            }
+            assert_eq!((p.prompts, p.writes), (0, 0));
+        }
+
+        #[tokio::test]
+        async fn a_stderr_write_error_stops_the_loop() {
+            let mut p = fake(vec![
+                reply(None, &[("c1", "/w/a")]),
+                reply(None, &[("c2", "/w/b")]),
+                reply(None, &[("c3", "/w/c")]),
+                reply(Some("done"), &[]),
+            ]);
+            p.write_diags = VecDeque::from([ARMING, ARMING, ARMING]);
+            let mut session = Session::new("c", "q", budget(), unmetered());
+            match drive_to(&mut session, &mut p, &mut Broken).await {
+                Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe),
+                Ok(_) => panic!("a failed print must surface as an error"),
+            }
+            assert_eq!(
+                (p.prompts, p.writes),
+                (1, 1),
+                "nothing ran after the failed print"
+            );
+        }
     }
 }

@@ -13,6 +13,7 @@ members = [
   "crates/maknae-io",
   "crates/maknae-kernel",
   "crates/maknae-llm",
+  "crates/maknae-loop",
   "crates/maknae-mcp",
   "crates/maknae-msgs",
   "crates/maknae-proto",

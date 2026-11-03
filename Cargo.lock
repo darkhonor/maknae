@@ -1055,6 +1055,7 @@ dependencies = [
  "maknae-config",
  "maknae-crypto",
  "maknae-io",
+ "maknae-loop",
  "maknae-msgs",
  "maknae-proto",
  "maknae-seal",
@@ -1210,6 +1211,21 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
+name = "maknae-loop"
+version = "0.0.0"
+dependencies = [
+ "maknae-agent",
+ "maknae-config",
+ "maknae-crypto",
+ "maknae-io",
+ "maknae-proto",
+ "maknae-vault",
+ "nix",
  "tokio",
  "zeroize",
 ]

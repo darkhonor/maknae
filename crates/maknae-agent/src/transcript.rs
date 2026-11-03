@@ -27,6 +27,11 @@ impl Transcript {
     pub fn conversation(&self) -> &str {
         &self.conversation
     }
+    pub fn push_user(&mut self, prompt: &str) {
+        self.turns.push(Turn::User {
+            content: vec![text(prompt)],
+        });
+    }
     pub fn turns(&self) -> &[Turn] {
         &self.turns
     }
