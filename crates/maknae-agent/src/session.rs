@@ -100,6 +100,7 @@ impl Session {
             &mut self.meter,
             &self.stop,
             emit,
+            None,
         )
         .await;
         match (&outcome.answer, &outcome.stopped) {
