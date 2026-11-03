@@ -18,7 +18,8 @@ workspace = true
 # process. Reproduce with `cargo tree -p maknae-agent -e no-dev`, where tokio
 # appears once, under `maknae-proto`, with only `bytes` and `pin-project-lite`
 # beneath it; `-e no-dev` is load-bearing, because this crate's own
-# dev-dependencies add `macros` and `rt`. Scoped 2026-09-22, #344: that is a
+# dev-dependencies add `macros`, `rt`, `rt-multi-thread`, `sync` and `time`
+# (session.rs's concurrency tests). Scoped 2026-09-22, #344: that is a
 # property of this crate's own graph and NOT of the binary. Cargo unifies
 # features per build graph, so inside `bins/maknae` — which asks tokio for
 # `rt-multi-thread, macros, time, process, io-util` — the tokio in this crate's
@@ -42,4 +43,4 @@ serde_json = "1"
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }

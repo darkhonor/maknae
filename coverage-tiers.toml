@@ -287,6 +287,7 @@ files = [
   # control is executable logic and belongs under the T1 floor.
   "crates/maknae-agent/src/plane.rs",
   "crates/maknae-agent/src/wire.rs",
+  "crates/maknae-agent/src/session.rs",
   "crates/maknae-agent/src/route.rs",
   "crates/maknae-agent/src/render.rs",
   "crates/maknae-agent/src/drive.rs",
