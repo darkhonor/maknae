@@ -43,12 +43,7 @@ pub struct Membership {
     pub dir: std::path::PathBuf,
 }
 
-pub fn canonical_home(dir: &std::path::Path) -> Option<std::path::PathBuf> {
-    if !dir.is_absolute() {
-        return None;
-    }
-    crate::handler::confinable_home(maknae_io::resolve_dir(dir).ok()?)
-}
+pub use maknae_io::canonical_home;
 
 pub fn uid_in_maknae_group(uid: u32) -> Result<Membership, AuthzError> {
     // The USER is resolved FIRST, and deliberately so (#275). Resolving the
@@ -153,66 +148,6 @@ mod tests {
             uid_in_maknae_group(999_999).is_err(),
             "an unresolvable uid must fail closed, not resolve to a nameless non-member"
         );
-    }
-
-    fn scratch(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("groupres_{tag}_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
-    }
-
-    #[test]
-    fn a_real_directory_resolves_to_its_kernel_form() {
-        let d = scratch("real");
-        let canon = Some(maknae_io::resolve_dir(&d).unwrap().into_os_string());
-        let doubled = std::path::PathBuf::from(format!("/{}", d.display()));
-        for form in [d.clone(), d.join(""), doubled] {
-            assert_eq!(
-                canonical_home(&form).map(|p| p.into_os_string()),
-                canon,
-                "{form:?}"
-            );
-        }
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    #[test]
-    fn a_symlinked_home_resolves_to_its_target() {
-        let d = scratch("linktarget");
-        let link = d.with_extension("link");
-        let _ = std::fs::remove_file(&link);
-        std::os::unix::fs::symlink(&d, &link).unwrap();
-        assert_eq!(canonical_home(&link), canonical_home(&d));
-        let _ = std::fs::remove_file(&link);
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    #[test]
-    fn an_unusable_home_is_none() {
-        let d = scratch("unusable");
-        let file = d.join("f");
-        std::fs::write(&file, b"").unwrap();
-        for bad in [
-            std::path::PathBuf::from("relative/home"),
-            d.join("missing"),
-            file.clone(),
-            std::path::PathBuf::from("/"),
-        ] {
-            assert_eq!(canonical_home(&bad), None, "{bad:?}");
-        }
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_non_utf8_home_is_none() {
-        use std::os::unix::ffi::OsStrExt;
-        let d = scratch("nonutf8");
-        let odd = d.join(std::ffi::OsStr::from_bytes(&[0x68, 0xff]));
-        std::fs::create_dir_all(&odd).unwrap();
-        assert_eq!(canonical_home(&odd), None);
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
