@@ -1,13 +1,14 @@
 //! `maknae agent` — the HANDS of the runtime loop (#241). T3: I/O wiring over
 //! the brain in `maknae-agent`. Runs as the subject, holds no key and no
 //! policy, and asks the kernel for everything (ADR-0023 d2, d4).
-use crate::cli::{send_verb, write_request, SentOutcome};
+use crate::cli::{send_verb, write_request};
 use maknae_agent::budget::{prompt_cap, ContextBudget, Meter, Notice};
 use maknae_agent::drive::{drive, Budget, StopReason};
-use maknae_agent::plane::{Plane, PlaneError, ReadBasis, ReadOutcome, ReadPage, WriteOutcome};
+use maknae_agent::plane::{Plane, PlaneError, ReadBasis, ReadOutcome, WriteOutcome};
 use maknae_agent::transcript::Transcript;
+use maknae_agent::wire::{check_for, prompt_outcome, read_outcome, write_outcome, WireOutcome};
 use maknae_config::{UserProviderEntry, UserProviders, Value};
-use maknae_proto::{Payload, ProviderChoice, SealedKey, Turn, Verb};
+use maknae_proto::{ProviderChoice, SealedKey, Turn, Verb};
 use maknae_seal::{SealAad, SealContext, SealPublicKey};
 use maknae_vault::{
     aad_parts, PlaneClient, UserToken, VaultApi, VaultError, WrapExpectation, WrappedSecret,
@@ -247,116 +248,6 @@ pub fn mint_conversation_id() -> String {
     format!("c{secs:x}p{:x}", std::process::id())
 }
 
-/// A CONTROL, and a pure function so it is testable: only an AUTHORIZATION
-/// refusal of an ARMED request is `Refused` — the one outcome the model may
-/// not appeal. An armed `Unauthorized` is the kernel's refusal before any
-/// grant; the wire carries no reason (ADR-0019), so it also covers evidence and
-/// capacity refusals (#344, #370). An unarmed refusal, any other
-/// code (a `BadRequest` for `/a/../b` is a client-shape fault), any protocol
-/// surprise and any transport error is `Unavailable`. So is a grant that ends
-/// without an acknowledged `Success` (OS refusal, limit, changed object, lost
-/// ack): a fact about the attempt, not a verdict.
-pub fn read_outcome(sent: Result<SentOutcome, String>) -> ReadOutcome {
-    match sent {
-        Ok(SentOutcome::ReadDone { read: Some(r) }) => ReadOutcome::Content(ReadPage {
-            content: r.content,
-            level: r.label.level,
-            lines: r.page.lines,
-            complete_line: r.page.complete_last,
-            next: r.page.next,
-            eof: r.page.eof,
-            version: r.page.version.key(),
-            changed: false,
-        }),
-        Ok(SentOutcome::Refused { armed: false, .. }) => ReadOutcome::Unavailable,
-        Ok(SentOutcome::Refused {
-            code: maknae_proto::ProtoErrCode::Unauthorized,
-            ..
-        }) => ReadOutcome::Refused,
-        _ => ReadOutcome::Unavailable,
-    }
-}
-
-/// The write half of the same treatment, and pure for the same reason: ONLY a
-/// clean `WriteDone { applied: true }` is `Applied`.
-///
-/// Everything else is `Unknown` — a non-applied completion, a refusal, a
-/// payload for some other verb, and every transport error. ADR-0023 d4: a
-/// `String` error cannot tell a pre-send connect failure from a post-send read
-/// timeout, and guessing would manufacture certainty. `NotSent` is NOT decided
-/// here: it is the one LOCAL refusal, judged from `write_request`'s `Err`
-/// before `send_verb` is ever called. `armed` does not enter the write
-/// decision: every non-`Applied` write is already `Unknown`.
-///
-/// **Amended 2026-09-28 (#388):** one non-applied completion is certain, not
-/// guessed — `stale`, set only when the client's read-before-write check refused
-/// the attempt before any write syscall and the no-effect completion was
-/// acknowledged. It is `Stale`; every other non-applied completion stays
-/// `Unknown`.
-pub fn write_outcome(sent: Result<SentOutcome, String>) -> WriteOutcome {
-    match sent {
-        Ok(SentOutcome::WriteDone {
-            applied: true,
-            version,
-            ..
-        }) => WriteOutcome::Applied(version),
-        Ok(SentOutcome::WriteDone {
-            applied: false,
-            stale: true,
-            ..
-        }) => WriteOutcome::Stale,
-        _ => WriteOutcome::Unknown,
-    }
-}
-
-/// The loop's knowledge of a file, as the client's write check (#388). The
-/// loop never sends `Unchecked`: that is `maknae write`'s, for a human.
-pub fn check_for(basis: ReadBasis) -> crate::mutation::WriteCheck {
-    match basis {
-        ReadBasis::Unread => crate::mutation::WriteCheck::Unread,
-        ReadBasis::Read(k) => crate::mutation::WriteCheck::Read(k),
-    }
-}
-
-/// The prompt leg's mapper, pure and tested for the same reason the read and
-/// write mappers are: it is a CONTROL. A `BadRequest` on `session.prompt` is a
-/// pre-gate fault on the request's own shape — `maknae agent "   "` is refused
-/// for carrying no text to send, and provably never reached the provider: no
-/// egress block was opened and no intent record was written. Reporting that
-/// with [`PROMPT_REFUSED`] would send the subject to their providers.yaml and
-/// their login for a fault they can fix from the message. What
-/// the trail does hold is the pre-gate deny: the kernel appends
-/// `emit_request_outcome` with a `deny` and the reason
-/// `prompt fails operand pre-gate: …` before it writes the `BadRequest` back,
-/// and it writes that error only under `may_respond(appended)`, so a subject
-/// who saw it is proof the record landed. Both facts, and neither more: no
-/// provider contact, and a recorded pre-gate deny. `ReplyUnusable` carries the
-/// provider-side reason (#524).
-pub fn prompt_outcome(
-    sent: Result<SentOutcome, String>,
-) -> Result<maknae_proto::PromptReply, PlaneError> {
-    match sent {
-        Ok(SentOutcome::Payload(Payload::PromptReply(r))) => Ok(r),
-        Ok(SentOutcome::Refused {
-            code: maknae_proto::ProtoErrCode::BadRequest,
-            ..
-        }) => Err(PlaneError::Malformed),
-        Ok(SentOutcome::Refused {
-            code: maknae_proto::ProtoErrCode::ReplyUnusable(d),
-            ..
-        }) => Err(PlaneError::ReplyUnusable(d)),
-        Ok(SentOutcome::Refused {
-            code: maknae_proto::ProtoErrCode::EgressUnavailable,
-            ..
-        }) => Err(PlaneError::Unavailable),
-        Ok(SentOutcome::Refused { .. }) => Err(PlaneError::Refused),
-        Ok(other) => Err(PlaneError::Transport(format!(
-            "protocol error: unexpected reply to session.prompt: {other:?}"
-        ))),
-        Err(m) => Err(PlaneError::Transport(m)),
-    }
-}
-
 /// A wrapped key whose frame was refused as too large before it was sent, so it is unconsumed.
 pub struct Spare {
     conversation: String,
@@ -452,7 +343,8 @@ impl Plane for RealPlane<'_> {
                 self.client,
                 self.ca,
             )
-            .await,
+            .await
+            .map(WireOutcome::from),
         )
     }
     async fn read(
@@ -474,7 +366,8 @@ impl Plane for RealPlane<'_> {
                 self.client,
                 self.ca,
             )
-            .await,
+            .await
+            .map(WireOutcome::from),
         )
     }
     async fn write(
@@ -503,7 +396,8 @@ impl Plane for RealPlane<'_> {
                 self.client,
                 self.ca,
             )
-            .await,
+            .await
+            .map(WireOutcome::from),
         )
     }
 }
@@ -940,14 +834,6 @@ mod tests {
 
     #[test]
     fn an_unavailable_egress_says_so_and_that_nothing_was_sent() {
-        assert_eq!(
-            prompt_outcome(Ok(SentOutcome::Refused {
-                code: maknae_proto::ProtoErrCode::EgressUnavailable,
-                message: maknae_proto::EGRESS_UNAVAILABLE_MESSAGE.into(),
-                armed: false,
-            })),
-            Err(PlaneError::Unavailable)
-        );
         let b = Budget {
             max_steps: 8,
             max_tool_calls_per_step: 4,
@@ -960,14 +846,6 @@ mod tests {
 
     #[test]
     fn an_unauthorized_prompt_prints_one_line_that_names_what_to_check_and_nothing_else() {
-        assert_eq!(
-            prompt_outcome(Ok(SentOutcome::Refused {
-                code: maknae_proto::ProtoErrCode::Unauthorized,
-                message: "not authorized".into(),
-                armed: false,
-            })),
-            Err(PlaneError::Refused)
-        );
         assert_eq!(
             PROMPT_REFUSED,
             "the kernel refused the exchange — whether the prompt reached the provider is in the host's audit trail (ask your administrator); if it did not, check that your providers.yaml names a provider and model your administrator has authorized for your role and the key subpath and field of your own Vault secret, that your maknae.yaml vault block matches the host's, and that your login is current (maknae login)"
@@ -1107,12 +985,6 @@ mod tests {
         ));
     }
     #[test]
-    fn the_loops_basis_becomes_the_clients_check() {
-        use crate::mutation::WriteCheck;
-        assert_eq!(check_for(ReadBasis::Unread), WriteCheck::Unread);
-        assert_eq!(check_for(ReadBasis::Read([4; 7])), WriteCheck::Read([4; 7]));
-    }
-    #[test]
     fn the_loops_same_content_agrees_with_the_file_versions() {
         let base = maknae_io::FileVersion {
             dev: 1,
@@ -1143,77 +1015,6 @@ mod tests {
         }
     }
     #[test]
-    fn a_write_is_applied_only_for_a_clean_completion_and_unknown_for_everything_else() {
-        // ADR-0023 d4: the wire cannot distinguish uncertain from refused
-        // on the write lane, so only a clean `applied: true` — and, since #388,
-        // a client-decided `stale` refusal — may claim certainty. `NotSent` is
-        // absent by construction: it is decided from `write_request`'s `Err`,
-        // before `send_verb` is called.
-        use maknae_proto::{Payload, ProtoErrCode};
-        assert_eq!(
-            write_outcome(Ok(SentOutcome::WriteDone {
-                applied: true,
-                stale: false,
-                version: None
-            })),
-            WriteOutcome::Applied(None)
-        );
-        assert_eq!(
-            write_outcome(Ok(SentOutcome::WriteDone {
-                applied: true,
-                stale: false,
-                version: Some([2; 7])
-            })),
-            WriteOutcome::Applied(Some([2; 7]))
-        );
-        assert_eq!(
-            write_outcome(Ok(SentOutcome::WriteDone {
-                applied: false,
-                stale: true,
-                version: None
-            })),
-            WriteOutcome::Stale
-        );
-        assert_eq!(
-            write_outcome(Ok(SentOutcome::WriteDone {
-                applied: false,
-                stale: false,
-                version: None
-            })),
-            WriteOutcome::Unknown
-        );
-        assert_eq!(
-            write_outcome(Ok(SentOutcome::Refused {
-                code: ProtoErrCode::Unauthorized,
-                message: "not authorized".into(),
-                armed: true
-            })),
-            WriteOutcome::Unknown,
-            "a refusal is not a certainty on the write lane"
-        );
-        assert_eq!(
-            write_outcome(Ok(SentOutcome::Payload(Payload::Pong))),
-            WriteOutcome::Unknown
-        );
-        assert_eq!(
-            write_outcome(Err("no response from daemon within 5000ms".into())),
-            WriteOutcome::Unknown
-        );
-    }
-    #[test]
-    fn a_reply_unusable_refusal_is_its_own_plane_error() {
-        for d in maknae_proto::ReplyDefect::ALL {
-            assert_eq!(
-                prompt_outcome(Ok(SentOutcome::Refused {
-                    code: maknae_proto::ProtoErrCode::ReplyUnusable(d),
-                    message: "reply unusable".into(),
-                    armed: false,
-                })),
-                Err(PlaneError::ReplyUnusable(d)),
-            );
-        }
-    }
-    #[test]
     fn every_reply_defect_has_a_distinct_line_that_never_blames_authorization() {
         let b = Budget {
             max_steps: 8,
@@ -1231,152 +1032,6 @@ mod tests {
         assert!(line(maknae_proto::ReplyDefect::TokenLimit).contains("output_tokens"));
         assert!(line(maknae_proto::ReplyDefect::ProviderAuth).contains("Vault secret"));
     }
-    #[test]
-    fn a_prompt_is_malformed_only_for_bad_request_and_refused_for_every_other_code_but_reply_unusable(
-    ) {
-        use maknae_proto::{Payload, PromptReply, ProtoErrCode};
-        let refused = |code| {
-            prompt_outcome(Ok(SentOutcome::Refused {
-                code,
-                message: "prompt carries no text to send".into(),
-                armed: false,
-            }))
-        };
-        assert_eq!(
-            refused(ProtoErrCode::BadRequest),
-            Err(PlaneError::Malformed)
-        );
-        for code in [
-            ProtoErrCode::Unauthorized,
-            ProtoErrCode::Internal,
-            ProtoErrCode::TooLarge,
-            ProtoErrCode::UnknownVerb,
-            ProtoErrCode::NotImplemented,
-        ] {
-            assert_eq!(refused(code.clone()), Err(PlaneError::Refused), "{code:?}");
-        }
-        assert_eq!(
-            prompt_outcome(Ok(SentOutcome::Payload(Payload::PromptReply(
-                PromptReply {
-                    reasoning: None,
-                    blocks: vec![],
-                    tool_calls: vec![],
-                    usage: None,
-                }
-            )))),
-            Ok(PromptReply {
-                reasoning: None,
-                blocks: vec![],
-                tool_calls: vec![],
-                usage: None,
-            })
-        );
-        assert!(matches!(
-            prompt_outcome(Ok(SentOutcome::Payload(Payload::Pong))),
-            Err(PlaneError::Transport(_))
-        ));
-        assert!(matches!(
-            prompt_outcome(Err("handshake timed out".into())),
-            Err(PlaneError::Transport(_))
-        ));
-    }
-    #[test]
-    fn a_read_is_refused_only_for_unauthorized_and_unavailable_for_every_other_outcome() {
-        // This mapper is a CONTROL, so it is tested: only the authorization
-        // code is a refusal the model may not appeal; a BadRequest
-        // (`/a/../b`), a protocol error, or a transport error is
-        // "unavailable".
-        use maknae_proto::{Payload, ProtoErrCode};
-        let read = crate::mutation::ReadResult {
-            content: zeroize::Zeroizing::new(b"x".to_vec()),
-            label: maknae_proto::ObjectLabel {
-                level: "UNCLASSIFIED".into(),
-                categories: vec![],
-            },
-            page: crate::mutation::PageMeta {
-                start: 0,
-                lines: Some((1, 1)),
-                complete_last: true,
-                next: None,
-                eof: true,
-                version: maknae_io::FileVersion::default(),
-            },
-        };
-        assert_eq!(
-            read_outcome(Ok(SentOutcome::ReadDone { read: Some(read) })),
-            ReadOutcome::Content(ReadPage {
-                content: zeroize::Zeroizing::new(b"x".to_vec()),
-                level: "UNCLASSIFIED".into(),
-                lines: Some((1, 1)),
-                complete_line: true,
-                next: None,
-                eof: true,
-                version: maknae_io::FileVersion::default().key(),
-                changed: false,
-            })
-        );
-        assert_eq!(
-            read_outcome(Ok(SentOutcome::ReadDone { read: None })),
-            ReadOutcome::Unavailable
-        );
-        assert_eq!(
-            read_outcome(Ok(SentOutcome::Payload(Payload::Pong))),
-            ReadOutcome::Unavailable
-        );
-        assert_eq!(
-            read_outcome(Ok(SentOutcome::Refused {
-                code: ProtoErrCode::Unauthorized,
-                message: "not authorized".into(),
-                armed: true
-            })),
-            ReadOutcome::Refused
-        );
-        assert_eq!(
-            read_outcome(Ok(SentOutcome::Refused {
-                code: ProtoErrCode::BadRequest,
-                message: "not absolute".into(),
-                armed: true
-            })),
-            ReadOutcome::Unavailable
-        );
-        // #241: an UNARMED refusal is not a PDP verdict on the content. The
-        // subject's own `open_path_for_delegation` failed (ENOENT), the
-        // request went out without a descriptor, and the kernel denied it for
-        // want of one (ADR-0009 d2) — which arrives as the same generic
-        // `Unauthorized`. Telling the model "Not authorized" for a typo'd path
-        // asserts a decision nobody made, and the compiled prompt forbids the
-        // model to diagnose or retry it.
-        assert_eq!(
-            read_outcome(Ok(SentOutcome::Refused {
-                code: ProtoErrCode::Unauthorized,
-                message: "no delegated descriptor".into(),
-                armed: false
-            })),
-            ReadOutcome::Unavailable,
-            "a read the subject could not arm was never decided"
-        );
-        assert_eq!(
-            read_outcome(Ok(SentOutcome::Refused {
-                code: ProtoErrCode::BadRequest,
-                message: "not absolute".into(),
-                armed: false
-            })),
-            ReadOutcome::Unavailable
-        );
-        assert_eq!(
-            read_outcome(Ok(SentOutcome::WriteDone {
-                applied: true,
-                stale: false,
-                version: None
-            })),
-            ReadOutcome::Unavailable
-        );
-        assert_eq!(
-            read_outcome(Err("handshake timed out".into())),
-            ReadOutcome::Unavailable
-        );
-    }
-
     #[test]
     fn frame_fits_is_the_encoders_cap_check() {
         let verb = |n: usize| Verb::SessionPrompt {

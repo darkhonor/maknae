@@ -10,7 +10,7 @@ use std::future::Future;
 /// fix, not a decision), an UNARMED refusal of any code (`armed: false`: the
 /// client could not prepare a descriptor), and a grant that ended without an
 /// acknowledged success. None of these is a verdict on content. The mapping is
-/// made and tested in `read_outcome`, in `bins/maknae`'s `agent`.
+/// made and tested in [`crate::wire::read_outcome`].
 ///
 /// `Content` carries a [`ReadPage`] whose bytes are the CLI's own zeroizing
 /// read buffer, moved through, never copied out into a plain `Vec`

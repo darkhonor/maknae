@@ -17,23 +17,13 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite};
 
-/// What an existing file must be before a replace writes it (#388). The
-/// agent's loop sends `Unread` or `Read`; `maknae write` sends `Unchecked`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WriteCheck {
-    Unchecked,
-    Unread,
-    Read([i64; 7]),
-}
-impl WriteCheck {
-    fn base(self) -> maknae_io::WriteBase {
-        match self {
-            WriteCheck::Unchecked => maknae_io::WriteBase::Any,
-            WriteCheck::Unread => maknae_io::WriteBase::Unread,
-            WriteCheck::Read(k) => {
-                maknae_io::WriteBase::Version(maknae_io::FileVersion::from_key(k))
-            }
-        }
+pub use maknae_agent::wire::WriteCheck;
+
+fn write_base(check: WriteCheck) -> maknae_io::WriteBase {
+    match check {
+        WriteCheck::Unchecked => maknae_io::WriteBase::Any,
+        WriteCheck::Unread => maknae_io::WriteBase::Unread,
+        WriteCheck::Read(k) => maknae_io::WriteBase::Version(maknae_io::FileVersion::from_key(k)),
     }
 }
 
@@ -561,7 +551,7 @@ impl Worker {
                     held.as_fd(),
                     Path::new(&path),
                     &bytes.0,
-                    check.base(),
+                    write_base(check),
                 ) {
                     Ok(version) => {
                         self.version = version;
@@ -1911,10 +1901,10 @@ mod tests {
     #[test]
     fn the_check_maps_to_its_base() {
         let k = [1, 2, 3, 4, 5, 6, 7];
-        assert_eq!(WriteCheck::Unchecked.base(), maknae_io::WriteBase::Any);
-        assert_eq!(WriteCheck::Unread.base(), maknae_io::WriteBase::Unread);
+        assert_eq!(write_base(WriteCheck::Unchecked), maknae_io::WriteBase::Any);
+        assert_eq!(write_base(WriteCheck::Unread), maknae_io::WriteBase::Unread);
         assert_eq!(
-            WriteCheck::Read(k).base(),
+            write_base(WriteCheck::Read(k)),
             maknae_io::WriteBase::Version(maknae_io::FileVersion::from_key(k))
         );
     }

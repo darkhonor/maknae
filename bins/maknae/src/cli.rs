@@ -692,6 +692,44 @@ pub(crate) enum SentOutcome {
     },
 }
 
+impl From<SentOutcome> for maknae_agent::wire::WireOutcome {
+    fn from(sent: SentOutcome) -> Self {
+        use maknae_agent::wire::{WireOutcome, WireRead};
+        match sent {
+            SentOutcome::Payload(p) => WireOutcome::Payload(p),
+            SentOutcome::WriteDone {
+                applied,
+                stale,
+                version,
+            } => WireOutcome::WriteDone {
+                applied,
+                stale,
+                version,
+            },
+            SentOutcome::ReadDone { read } => WireOutcome::ReadDone {
+                read: read.map(|r| WireRead {
+                    content: r.content,
+                    level: r.label.level,
+                    lines: r.page.lines,
+                    complete_last: r.page.complete_last,
+                    next: r.page.next,
+                    eof: r.page.eof,
+                    version: r.page.version.key(),
+                }),
+            },
+            SentOutcome::Refused {
+                code,
+                message,
+                armed,
+            } => WireOutcome::Refused {
+                code,
+                message,
+                armed,
+            },
+        }
+    }
+}
+
 /// Send ONE verb over the post-mint plane and report what came back, printing no RESULT —
 /// the caller decides what a terminal (or a model) is told. Not silent: the arming
 /// diagnostic below goes to stderr, and `mutation::execute` prints on the attempt path.
@@ -3039,5 +3077,86 @@ mod tests {
             containment_status_line(&["subjects=\u{7}".into()]),
             Some("containment: subjects=\\u{7}".into())
         );
+    }
+
+    #[test]
+    fn sent_outcome_converts_field_for_field() {
+        use maknae_agent::wire::WireOutcome;
+        use maknae_proto::{Payload, ProtoErrCode};
+        let version = maknae_io::FileVersion {
+            dev: 1,
+            ino: 2,
+            size: 3,
+            mtime: 4,
+            mtime_nsec: 5,
+            ctime: 6,
+            ctime_nsec: 7,
+        };
+        let read = crate::mutation::ReadResult {
+            content: zeroize::Zeroizing::new(b"body".to_vec()),
+            label: maknae_proto::ObjectLabel {
+                level: "SECRET".into(),
+                categories: vec![],
+            },
+            page: crate::mutation::PageMeta {
+                start: 0,
+                lines: Some((3, 9)),
+                complete_last: false,
+                next: Some((10, 2)),
+                eof: false,
+                version,
+            },
+        };
+        match WireOutcome::from(SentOutcome::ReadDone { read: Some(read) }) {
+            WireOutcome::ReadDone { read: Some(r) } => {
+                assert_eq!(&r.content[..], b"body");
+                assert_eq!(r.level, "SECRET");
+                assert_eq!(r.lines, Some((3, 9)));
+                assert!(!r.complete_last);
+                assert_eq!(r.next, Some((10, 2)));
+                assert!(!r.eof);
+                assert_eq!(r.version, version.key());
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            WireOutcome::from(SentOutcome::ReadDone { read: None }),
+            WireOutcome::ReadDone { read: None }
+        ));
+        for (applied, stale, version) in [(true, false, Some([9; 7])), (false, true, None)] {
+            match WireOutcome::from(SentOutcome::WriteDone {
+                applied,
+                stale,
+                version,
+            }) {
+                WireOutcome::WriteDone {
+                    applied: a,
+                    stale: s,
+                    version: v,
+                } => assert_eq!((a, s, v), (applied, stale, version)),
+                other => panic!("{other:?}"),
+            }
+        }
+        for armed in [true, false] {
+            match WireOutcome::from(SentOutcome::Refused {
+                code: ProtoErrCode::BadRequest,
+                message: "m".into(),
+                armed,
+            }) {
+                WireOutcome::Refused {
+                    code,
+                    message,
+                    armed: a,
+                } => assert_eq!(
+                    (code, message.as_str(), a),
+                    (ProtoErrCode::BadRequest, "m", armed)
+                ),
+                other => panic!("{other:?}"),
+            }
+        }
+        assert!(matches!(
+            WireOutcome::from(SentOutcome::Payload(Payload::Pong)),
+            WireOutcome::Payload(Payload::Pong)
+        ));
     }
 }
