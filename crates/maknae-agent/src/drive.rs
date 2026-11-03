@@ -178,6 +178,13 @@ pub async fn drive_session<P: Plane>(
                 emit(LoopEvent::Diagnostic(d));
             }
             match sent {
+                Err(PlaneError::FrameTooLarge) if stop.load(Ordering::Acquire) => {
+                    return Outcome {
+                        answer: None,
+                        stopped: Some(StopReason::Stopped),
+                        steps_used,
+                    }
+                }
                 Err(PlaneError::FrameTooLarge) if transcript.shed_oldest_reasoning() => continue,
                 other => break other,
             }
@@ -1359,7 +1366,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_stop_set_during_a_step_takes_effect_at_the_next_boundary() {
+    async fn a_stop_set_during_a_write_takes_effect_before_the_next_plane_call() {
         let stop = AtomicBool::new(false);
         let mut p = StopOnWrite {
             inner: scripted(vec![one("c1", "write_file", WRITE_A), done()]),
@@ -1375,6 +1382,56 @@ mod tests {
             "{}",
             tool_text(&t.turns()[2])
         );
+    }
+
+    struct StopOnFirstPrompt<'a> {
+        inner: Scripted,
+        stop: &'a AtomicBool,
+    }
+    impl Plane for StopOnFirstPrompt<'_> {
+        async fn prompt(&mut self, c: &str, t: &[Turn]) -> Result<PromptReply, PlaneError> {
+            self.stop.store(true, Ordering::Release);
+            self.inner.prompt(c, t).await
+        }
+        async fn read(&mut self, c: &str, p: &str, page: maknae_proto::PageRequest) -> ReadOutcome {
+            self.inner.read(c, p, page).await
+        }
+        async fn write(&mut self, c: &str, p: &str, b: &[u8], basis: ReadBasis) -> WriteOutcome {
+            self.inner.write(c, p, b, basis).await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stop_during_a_too_large_prompt_is_not_retried() {
+        let stop = AtomicBool::new(false);
+        let mut inner = scripted(vec![done()]);
+        inner.replies.push_front(Err(PlaneError::FrameTooLarge));
+        let mut p = StopOnFirstPrompt { inner, stop: &stop };
+        let mut t = transcript_with_two_reasonings();
+        let (out, _) = session_unmetered(&mut p, &mut t, &mut Seen::new(), &stop).await;
+        assert_eq!(out.stopped, Some(StopReason::Stopped));
+        assert_eq!(
+            p.inner.prompts, 1,
+            "the shed-and-retry must not resend after a stop"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stop_at_the_top_of_a_step_preempts_the_context_gate() {
+        let mut p = scripted(vec![answer()]);
+        let mut events = vec![];
+        let out = drive_session(
+            &mut p,
+            &mut Transcript::new("c", &"q".repeat(1_800)),
+            &mut Seen::new(),
+            &budget(),
+            &mut Meter::new(ContextBudget::new(2_000, None).unwrap()),
+            &AtomicBool::new(true),
+            &mut |e| events.push(e),
+        )
+        .await;
+        assert_eq!(out.stopped, Some(StopReason::Stopped));
+        assert!(events.is_empty(), "no notice after a stop: {events:?}");
     }
 
     #[tokio::test]

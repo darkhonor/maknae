@@ -63,8 +63,9 @@ impl Session {
         self.budget
     }
 
-    /// Refused unless the last run answered: a stopped run can leave tool
-    /// calls unanswered, and a user turn after them is not a valid exchange.
+    /// Refused unless the last run answered: a step-budget or too-many-calls
+    /// stop leaves tool calls unanswered, and a user turn after them is not a
+    /// valid exchange.
     pub fn prompt(&mut self, text: &str) -> Result<(), SessionClosed> {
         if !self.answered || self.pending {
             return Err(SessionClosed);
