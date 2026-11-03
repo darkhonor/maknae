@@ -824,7 +824,7 @@ pub async fn execute<S: AsyncRead + AsyncWrite + Unpin + Send>(
     grant: MutationGrant,
     stream: &mut S,
     cfg: &TransportConfig,
-    written: crate::cli::WriteCompleted,
+    written: crate::send::WriteCompleted,
 ) -> Result<WriteEnd, String> {
     run_attempt(
         prepared,
@@ -846,7 +846,7 @@ pub async fn execute_read<S: AsyncRead + AsyncWrite + Unpin + Send>(
     grant: MutationGrant,
     stream: &mut S,
     cfg: &TransportConfig,
-    written: crate::cli::WriteCompleted,
+    written: crate::send::WriteCompleted,
 ) -> Result<Option<ReadResult>, String> {
     let label = grant.label.clone();
     run_attempt(
@@ -1226,7 +1226,7 @@ mod tests {
             grant,
             &mut client,
             &cfg,
-            crate::cli::WriteCompleted::for_test(written_at),
+            crate::send::WriteCompleted::for_test(written_at),
         )
         .await
         .map(|end| end.applied);
@@ -1293,7 +1293,7 @@ mod tests {
             grant,
             &mut client,
             &cfg,
-            crate::cli::WriteCompleted::for_test(Instant::now()),
+            crate::send::WriteCompleted::for_test(Instant::now()),
         )
         .await;
         drop(client);
@@ -1669,7 +1669,7 @@ mod tests {
             read_grant(&path, 65536),
             &mut client,
             &TransportConfig::default(),
-            crate::cli::WriteCompleted::for_test(Instant::now()),
+            crate::send::WriteCompleted::for_test(Instant::now()),
         )
         .await;
         drop(client);
@@ -1733,7 +1733,7 @@ mod tests {
             grant,
             &mut client,
             &cfg,
-            crate::cli::WriteCompleted::for_test(Instant::now()),
+            crate::send::WriteCompleted::for_test(Instant::now()),
         )
         .await;
         drop(client);
@@ -2088,7 +2088,7 @@ mod tests {
                 grant(MutationScope::Directories { paths }),
                 &mut client,
                 &TransportConfig::default(),
-                crate::cli::WriteCompleted::for_test(Instant::now()),
+                crate::send::WriteCompleted::for_test(Instant::now()),
             )
             .await
         });
@@ -2173,7 +2173,7 @@ mod tests {
                 g,
                 &mut client,
                 &TransportConfig::default(),
-                crate::cli::WriteCompleted::for_test(Instant::now()),
+                crate::send::WriteCompleted::for_test(Instant::now()),
             )
             .await
         });
@@ -2224,7 +2224,7 @@ mod tests {
                 g,
                 &mut client,
                 &TransportConfig::default(),
-                crate::cli::WriteCompleted::for_test(Instant::now()),
+                crate::send::WriteCompleted::for_test(Instant::now()),
             )
             .await
         });
@@ -2272,7 +2272,7 @@ mod tests {
                 g,
                 &mut client,
                 &cfg,
-                crate::cli::WriteCompleted::for_test(Instant::now()),
+                crate::send::WriteCompleted::for_test(Instant::now()),
             )
             .await
         });
@@ -3026,7 +3026,7 @@ mod tests {
                 g,
                 &mut client,
                 &cfg,
-                crate::cli::WriteCompleted::for_test(started),
+                crate::send::WriteCompleted::for_test(started),
             )
             .await
         });

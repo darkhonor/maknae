@@ -1,0 +1,32 @@
+[package]
+name = "maknae-loop"
+publish.workspace = true
+description = "The runtime loop's I/O half (#470): the wire client, the subject-side mutation client, the real Plane and conversation IDs. Untrusted; never linked into maknaed."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The loop's decision code; this crate is its hands.
+maknae-agent = { path = "../maknae-agent" }
+maknae-proto = { path = "../maknae-proto" }
+maknae-config = { path = "../maknae-config" }
+# ADR-0009: the subject's open and the delegated attempt run through maknae-io,
+# so the std-fs-drift gate needs no client-side exemption.
+maknae-io = { path = "../maknae-io" }
+# The plane client and its mTLS connector.
+maknae-vault = { path = "../maknae-vault" }
+# Framing timeouts, frame I/O, and the attempt worker's spawn_blocking.
+tokio = { workspace = true, features = ["rt", "time", "io-util", "macros"] }
+zeroize = "1"
+
+[dev-dependencies]
+# mutation.rs's tests stat files and check the euid; #421's real-buffer test sets socket buffer sizes.
+nix = { version = "0.31", default-features = false, features = ["fs", "user", "socket"] }
+# start_paused timing tests and #421's UnixStream pair.
+tokio = { workspace = true, features = ["test-util", "net", "rt-multi-thread"] }

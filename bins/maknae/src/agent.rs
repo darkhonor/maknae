@@ -1,13 +1,13 @@
 //! `maknae agent` — the HANDS of the runtime loop (#241). T3: I/O wiring over
 //! the brain in `maknae-agent`. Runs as the subject, holds no key and no
 //! policy, and asks the kernel for everything (ADR-0023 d2, d4).
-use crate::cli::{send_verb, write_request};
 use maknae_agent::budget::{prompt_cap, ContextBudget, Notice};
 use maknae_agent::drive::{Budget, LoopEvent, Outcome, StopReason};
 use maknae_agent::plane::{Plane, PlaneError, ReadBasis, ReadOutcome, WriteOutcome};
 use maknae_agent::session::Session;
 use maknae_agent::wire::{check_for, prompt_outcome, read_outcome, write_outcome, WireOutcome};
 use maknae_config::{UserProviderEntry, UserProviders, Value};
+use maknae_loop::send::{send_verb, write_request};
 use maknae_proto::{ProviderChoice, SealedKey, Turn, Verb};
 use maknae_seal::{SealAad, SealContext, SealPublicKey};
 use maknae_vault::{
@@ -339,7 +339,7 @@ impl Plane for RealPlane<'_> {
             send_verb(
                 verb,
                 None,
-                crate::mutation::WriteCheck::Unchecked,
+                maknae_loop::mutation::WriteCheck::Unchecked,
                 self.transport,
                 self.client,
                 self.ca,
@@ -362,7 +362,7 @@ impl Plane for RealPlane<'_> {
                     page: Some(page),
                 },
                 None,
-                crate::mutation::WriteCheck::Unchecked,
+                maknae_loop::mutation::WriteCheck::Unchecked,
                 self.transport,
                 self.client,
                 self.ca,

@@ -105,7 +105,7 @@ crates/maknae-io/src/mutation.rs|..TargetRequired::OS_DAC_REGULAR
 
 # #158: CLI verifies the granted parent location; OS checks namespace access at
 # each syscall under the CLI user. The CLI must not invent daemon owner policy.
-bins/maknae/src/mutation.rs|root_required: AnchorRequired::OS_DAC,
+crates/maknae-loop/src/mutation.rs|root_required: AnchorRequired::OS_DAC,
 # #158: maknae-io's audit appender converts already checked owned descriptors to
 # persistent File handles for the primary writer and same-parent fsync.
 crates/maknae-io/src/audit_append.rs|use std::fs::File;

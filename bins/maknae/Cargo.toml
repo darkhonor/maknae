@@ -35,6 +35,9 @@ maknae-msgs = { path = "../../crates/maknae-msgs" }
 # filesystem, socket or process API. Its own lib.rs states it that way and says why the
 # feature-set framing was wrong.)
 maknae-agent = { path = "../../crates/maknae-agent" }
+# The loop's I/O half (#470): the wire client, the subject-side mutation client
+# and the real Plane. The CLI's own verbs use the same wire client.
+maknae-loop = { path = "../../crates/maknae-loop" }
 # Without it each turn's wrapping token would cross maknaed readable (ADR-0028).
 maknae-seal = { path = "../../crates/maknae-seal" }
 clap = { version = "4", features = ["derive"] }
