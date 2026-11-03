@@ -47,6 +47,13 @@ impl PreparedMutation {
     }
 }
 
+/// The line the subject sees when its own open failed before arming: the
+/// request still goes out, unarmed, and the kernel decides on that.
+pub fn arming_diagnostic(p: &PreparedMutation) -> Option<String> {
+    p.preparation_error()
+        .map(|error| format!("maknae: cannot prepare filesystem operation: {error}"))
+}
+
 fn normal(name: &str) -> bool {
     !name.is_empty()
         && name != "."
@@ -825,6 +832,7 @@ pub async fn execute<S: AsyncRead + AsyncWrite + Unpin + Send>(
     stream: &mut S,
     cfg: &TransportConfig,
     written: crate::send::WriteCompleted,
+    diag: &mut (dyn FnMut(String) + Send),
 ) -> Result<WriteEnd, String> {
     run_attempt(
         prepared,
@@ -833,6 +841,7 @@ pub async fn execute<S: AsyncRead + AsyncWrite + Unpin + Send>(
         cfg,
         proto::ATTEMPT_REQUEST_MAX,
         written.at(),
+        diag,
     )
     .await
     .map(|a| WriteEnd {
@@ -847,6 +856,7 @@ pub async fn execute_read<S: AsyncRead + AsyncWrite + Unpin + Send>(
     stream: &mut S,
     cfg: &TransportConfig,
     written: crate::send::WriteCompleted,
+    diag: &mut (dyn FnMut(String) + Send),
 ) -> Result<Option<ReadResult>, String> {
     let label = grant.label.clone();
     run_attempt(
@@ -856,6 +866,7 @@ pub async fn execute_read<S: AsyncRead + AsyncWrite + Unpin + Send>(
         cfg,
         proto::ATTEMPT_REQUEST_MAX,
         written.at(),
+        diag,
     )
     .await
     .map(|a| match (a.success, a.content, a.page) {
@@ -903,6 +914,7 @@ async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
     cfg: &TransportConfig,
     cap: usize,
     written_at: Instant,
+    diag: &mut (dyn FnMut(String) + Send),
 ) -> Result<Attempted, String> {
     let reading = matches!(prepared.request, proto::Verb::Read { .. });
     let granted = match &prepared.request {
@@ -1048,7 +1060,7 @@ async fn run_attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
             )
             .await?;
             if let Some(line) = stop_line(outcome, reading, next.stale, next.next_index) {
-                eprintln!("{line}");
+                diag(line);
             }
             return Ok(Attempted {
                 success: outcome == ReportedFinish::Success,
@@ -1207,9 +1219,17 @@ mod tests {
         let cfg = TransportConfig::default();
         let (mut client, server) = tokio::io::duplex(65536);
         let receiver = acknowledge_all(server, proto::ATTEMPT_RESPONSE_MAX);
-        let result = run_attempt(prepared, grant, &mut client, &cfg, cap, Instant::now())
-            .await
-            .map(|a| a.success);
+        let result = run_attempt(
+            prepared,
+            grant,
+            &mut client,
+            &cfg,
+            cap,
+            Instant::now(),
+            &mut |_| {},
+        )
+        .await
+        .map(|a| a.success);
         drop(client);
         (result, receiver.await.unwrap())
     }
@@ -1227,6 +1247,7 @@ mod tests {
             &mut client,
             &cfg,
             crate::send::WriteCompleted::for_test(written_at),
+            &mut |_| {},
         )
         .await
         .map(|end| end.applied);
@@ -1294,6 +1315,7 @@ mod tests {
             &mut client,
             &cfg,
             crate::send::WriteCompleted::for_test(Instant::now()),
+            &mut |_| {},
         )
         .await;
         drop(client);
@@ -1670,6 +1692,7 @@ mod tests {
             &mut client,
             &TransportConfig::default(),
             crate::send::WriteCompleted::for_test(Instant::now()),
+            &mut |_| {},
         )
         .await;
         drop(client);
@@ -1721,6 +1744,26 @@ mod tests {
         assert!(malformed.preparation_error().is_some());
         assert!(prepare(proto::Verb::Ping, None).is_none());
     }
+    #[test]
+    fn arming_diagnostic_is_todays_line() {
+        let d = Fixture::new();
+        std::fs::write(d.path("original"), b"unchanged").unwrap();
+        let beneath_file = prepare_write(d.path("original/child")).unwrap();
+        let error = beneath_file.preparation_error().unwrap().to_string();
+        assert_eq!(
+            arming_diagnostic(&beneath_file),
+            Some(format!(
+                "maknae: cannot prepare filesystem operation: {error}"
+            ))
+        );
+    }
+    #[test]
+    fn arming_diagnostic_is_none_without_an_error() {
+        let d = Fixture::new();
+        std::fs::write(d.path("original"), b"unchanged").unwrap();
+        let p = prepare_write(d.path("original")).unwrap();
+        assert_eq!(arming_diagnostic(&p), None);
+    }
     async fn acknowledged_end(
         prepared: PreparedMutation,
         grant: MutationGrant,
@@ -1734,6 +1777,7 @@ mod tests {
             &mut client,
             &cfg,
             crate::send::WriteCompleted::for_test(Instant::now()),
+            &mut |_| {},
         )
         .await;
         drop(client);
@@ -1907,6 +1951,35 @@ mod tests {
             write_base(WriteCheck::Read(k)),
             maknae_io::WriteBase::Version(maknae_io::FileVersion::from_key(k))
         );
+    }
+    #[tokio::test]
+    async fn the_attempt_stop_line_goes_to_the_sink() {
+        let d = Fixture::new();
+        let path = d.path("exclusive-collision-sink");
+        let prepared = prepare_write(path.clone()).unwrap();
+        std::fs::write(&path, b"intervening owner bytes").unwrap();
+        let (mut client, server) = tokio::io::duplex(65536);
+        let receiver = acknowledge_all(server, proto::ATTEMPT_RESPONSE_MAX);
+        let mut lines = vec![];
+        let result = execute(
+            prepared,
+            grant(MutationScope::Exact {
+                path: path.clone(),
+                effect: ReportedEffect::CreatedFile,
+            }),
+            &mut client,
+            &TransportConfig::default(),
+            crate::send::WriteCompleted::for_test(Instant::now()),
+            &mut |l| lines.push(l),
+        )
+        .await
+        .map(|end| end.applied);
+        drop(client);
+        receiver.await.unwrap();
+        assert_eq!(result, Ok(false));
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].starts_with("mutation stopped: "), "{lines:?}");
+        assert!(lines[0].ends_with("; 0 effect(s) reported"), "{lines:?}");
     }
     #[tokio::test]
     async fn exclusive_collision_preserves_intervening_sentinel() {
@@ -2089,6 +2162,7 @@ mod tests {
                 &mut client,
                 &TransportConfig::default(),
                 crate::send::WriteCompleted::for_test(Instant::now()),
+                &mut |_| {},
             )
             .await
         });
@@ -2174,6 +2248,7 @@ mod tests {
                 &mut client,
                 &TransportConfig::default(),
                 crate::send::WriteCompleted::for_test(Instant::now()),
+                &mut |_| {},
             )
             .await
         });
@@ -2225,6 +2300,7 @@ mod tests {
                 &mut client,
                 &TransportConfig::default(),
                 crate::send::WriteCompleted::for_test(Instant::now()),
+                &mut |_| {},
             )
             .await
         });
@@ -2273,6 +2349,7 @@ mod tests {
                 &mut client,
                 &cfg,
                 crate::send::WriteCompleted::for_test(Instant::now()),
+                &mut |_| {},
             )
             .await
         });
@@ -3027,6 +3104,7 @@ mod tests {
                 &mut client,
                 &cfg,
                 crate::send::WriteCompleted::for_test(started),
+                &mut |_| {},
             )
             .await
         });

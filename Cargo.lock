@@ -1221,6 +1221,7 @@ version = "0.0.0"
 dependencies = [
  "maknae-agent",
  "maknae-config",
+ "maknae-crypto",
  "maknae-io",
  "maknae-proto",
  "maknae-vault",

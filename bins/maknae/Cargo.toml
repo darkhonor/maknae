@@ -64,7 +64,7 @@ maknae-crypto = { path = "../../crates/maknae-crypto" }
 
 # NO privileged crate (maknae-kernel/-subject-ctx-mint/-audit-append/-spif-compile) — spec §3 P1.
 # STRICTLY non-privileged: the closed set of direct deps this crate links is
-# maknae-proto, maknae-vault, maknae-config, maknae-msgs, maknae-io, maknae-agent, maknae-seal, clap,
+# maknae-proto, maknae-vault, maknae-config, maknae-msgs, maknae-io, maknae-agent, maknae-loop, maknae-seal, clap,
 # tokio, nix, zeroize, yaml-rust2, rpassword and maknae-crypto (policy_sync.rs's digest, the TLS provider) — no
 # maknae-mcp either. maknae-agent is non-privileged; it is the loop's decision code and its
 # four direct deps are maknae-proto, serde, serde_json and zeroize. No gate enforces this
@@ -79,8 +79,7 @@ maknae-crypto = { path = "../../crates/maknae-crypto" }
 # (spec §4.1-§4.6); `cli.rs`'s wire path touches `maknae-proto`, `maknae-vault`,
 # `maknae-config`, `maknae-msgs`, `clap` and `maknae-io` (delegation arming); `agent.rs`
 # adds `maknae-agent` and `maknae-seal` and nothing else.
-
-[dev-dependencies]
-# Socket options for #421's real-buffer test; feature-only, the runtime dependency's features are unchanged.
-nix = { version = "0.31", default-features = false, features = ["socket"] }
-tokio = { workspace = true, features = ["test-util", "net"] }
+# (Amended 2026-11-03, #470: the wire client and the subject-side mutation client moved to
+# maknae-loop, which `cli.rs` and `agent.rs` now reach them through; `maknae-io` stays a
+# direct dependency for `enroll/`, `reseed`, `policy_sync` and `audit_readers`. #421's
+# real-buffer test and its dev-dependencies moved to maknae-loop with the code it tests.)

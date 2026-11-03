@@ -6,14 +6,14 @@
 //!
 //! **Closed dependency enumeration** (recorded here and in `Cargo.toml`; no gate
 //! enforces it): `maknae-proto`, `maknae-vault`, `maknae-config`, `maknae-msgs`,
-//! `maknae-io`, `maknae-agent`, `maknae-seal`, `clap`, `tokio`, `nix`, `zeroize`, `yaml-rust2`,
-//! and `rpassword` (`bins/maknae/Cargo.toml`).
+//! `maknae-io`, `maknae-agent`, `maknae-loop`, `maknae-seal`, `clap`, `tokio`, `nix`, `zeroize`,
+//! `yaml-rust2`, and `rpassword` (`bins/maknae/Cargo.toml`).
 //! *(Corrected 2026-09-22, #241: `maknae-io` was missing from both this list and
 //! the "wire path" sentence below, though it has been a direct dependency and on
 //! the wire path since ADR-0009 arming landed.)* The `ping`/`whoami` wire path
 //! below uses only `maknae-proto`, `maknae-vault`, `maknae-config`, `maknae-msgs`,
-//! `clap` and `maknae-io` (delegation arming — `mutation.rs`); `maknae-agent` and `maknae-seal` are the agent loop's
-//! (`agent.rs`) alone; `yaml-rust2`/`rpassword` are
+//! `clap` and `maknae-loop` (the wire client and delegation arming, #470); `maknae-agent` and
+//! `maknae-seal` are the agent loop's (`agent.rs`) alone; `yaml-rust2`/`rpassword` are
 //! `enroll/`-only, and `nix`/`zeroize` serve `enroll/` and `login`/`tty`. NO privileged crate
 //! (`maknae-kernel`/`-subject-ctx-mint`/`-audit-append`/`-spif-compile`) — spec §3
 //! P1 — even for `enroll`: it does its own privileged work via `nix` safe wrappers
@@ -462,6 +462,7 @@ async fn round_trip(
                         transport,
                         client,
                         ca,
+                        &mut |l| eprintln!("{l}"),
                     )
                     .await?
                     {
@@ -485,6 +486,7 @@ async fn round_trip(
         transport,
         client,
         ca,
+        &mut |l| eprintln!("{l}"),
     )
     .await?
     {

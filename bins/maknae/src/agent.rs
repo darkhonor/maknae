@@ -3,12 +3,12 @@
 //! policy, and asks the kernel for everything (ADR-0023 d2, d4).
 use maknae_agent::budget::{prompt_cap, ContextBudget, Notice};
 use maknae_agent::drive::{Budget, LoopEvent, Outcome, StopReason};
-use maknae_agent::plane::{Plane, PlaneError, ReadBasis, ReadOutcome, WriteOutcome};
+use maknae_agent::plane::Plane;
 use maknae_agent::session::Session;
-use maknae_agent::wire::{check_for, prompt_outcome, read_outcome, write_outcome, WireOutcome};
 use maknae_config::{UserProviderEntry, UserProviders, Value};
-use maknae_loop::send::{send_verb, write_request};
-use maknae_proto::{ProviderChoice, SealedKey, Turn, Verb};
+use maknae_loop::keys::KeySupply;
+use maknae_loop::plane::LoopPlane;
+use maknae_proto::{ProviderChoice, SealedKey};
 use maknae_seal::{SealAad, SealContext, SealPublicKey};
 use maknae_vault::{
     aad_parts, PlaneClient, UserToken, VaultApi, VaultError, WrapExpectation, WrappedSecret,
@@ -240,166 +240,35 @@ pub fn warning_line(n: &Notice) -> String {
     )
 }
 
-/// ≤32 chars, no whitespace — `conversation_id_is_acceptable`'s bound.
-pub fn mint_conversation_id() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    format!("c{secs:x}p{:x}", std::process::id())
+/// The user host's key supply: each turn reads the subject's own wrapped key
+/// under their login and seals it to exactly that request (ADR-0028).
+pub struct UserLoginKeys {
+    pub api: VaultApi,
+    pub token: UserToken,
+    pub entry: UserProviderEntry,
+    pub kv_mount: String,
+    pub user_prefix: String,
+    pub username: String,
+    pub seal_key: SealPublicKey,
+    pub expires_at: u64,
 }
 
-/// A wrapped key whose frame was refused as too large before it was sent, so it is unconsumed.
-pub struct Spare {
-    conversation: String,
-    minted_at: u64,
-    choice: ProviderChoice,
-}
-
-pub const SPARE_MAX_AGE_SECS: u64 = maknae_vault::USER_KEY_WRAP_TTL.as_secs() / 2;
-
-fn take_spare(spare: &mut Option<Spare>, conversation: &str, now: u64) -> Option<Spare> {
-    let s = spare.take()?;
-    (s.conversation == conversation && now <= s.minted_at + SPARE_MAX_AGE_SECS).then_some(s)
-}
-
-/// Measured against the frame cap before sending (ADR-0023 d7).
-fn frame_fits(verb: &Verb, cap: usize) -> bool {
-    maknae_proto::encode_request_zeroizing(
-        &maknae_proto::Request {
-            protocol_version: maknae_proto::PROTOCOL_VERSION,
-            verb: verb.clone(),
-        },
-        cap,
-    )
-    .is_ok()
-}
-
-/// The real Plane: one authenticated client, one connection per verb.
-pub struct RealPlane<'a> {
-    pub transport: &'a maknae_config::TransportConfig,
-    pub client: &'a PlaneClient,
-    pub ca: &'a maknae_vault::CaBundle,
-    pub output_tokens: Option<u64>,
-    pub write_max: usize,
-    pub api: &'a VaultApi,
-    pub token: &'a UserToken,
-    pub key: KeyContext<'a>,
-    pub spare: Option<Spare>,
-}
-
-impl Plane for RealPlane<'_> {
-    async fn prompt(
-        &mut self,
-        conversation: &str,
-        turns: &[Turn],
-    ) -> Result<maknae_proto::PromptReply, PlaneError> {
-        let mut verb = Verb::SessionPrompt {
-            conversation: conversation.to_string(),
-            turns: turns.to_vec(),
-            output_tokens: self.output_tokens,
-            choice: None,
+impl KeySupply for UserLoginKeys {
+    async fn choice(&mut self, conversation: &str, now: u64) -> Result<ProviderChoice, String> {
+        let key = KeyContext {
+            entry: &self.entry,
+            kv_mount: &self.kv_mount,
+            user_prefix: &self.user_prefix,
+            username: &self.username,
+            seal_key: &self.seal_key,
+            expires_at: self.expires_at,
         };
-        // Checked before the key is wrapped, so a retry after shedding reasoning costs no Vault call.
-        if !frame_fits(&verb, self.transport.prompt_max_bytes) {
-            return Err(PlaneError::FrameTooLarge);
-        }
-        let now = crate::login::now_unix().map_err(PlaneError::Transport)?;
-        let (choice, minted_at) = match take_spare(&mut self.spare, conversation, now) {
-            Some(s) => (s.choice, s.minted_at),
-            None => {
-                let (api, token, kv_mount) = (self.api, self.token, self.key.kv_mount);
-                let c = turn_choice(&self.key, conversation, now, |path| async move {
-                    api.read_wrapped(token, kv_mount, &path, maknae_vault::USER_KEY_WRAP_TTL)
-                        .await
-                })
+        let (api, token, kv_mount) = (&self.api, &self.token, self.kv_mount.as_str());
+        turn_choice(&key, conversation, now, |path| async move {
+            api.read_wrapped(token, kv_mount, &path, maknae_vault::USER_KEY_WRAP_TTL)
                 .await
-                .map_err(PlaneError::Transport)?;
-                (c, now)
-            }
-        };
-        if let Verb::SessionPrompt { choice: c, .. } = &mut verb {
-            *c = Some(choice);
-        }
-        if !frame_fits(&verb, self.transport.prompt_max_bytes) {
-            if let Verb::SessionPrompt {
-                choice: Some(choice),
-                ..
-            } = verb
-            {
-                self.spare = Some(Spare {
-                    conversation: conversation.to_string(),
-                    minted_at,
-                    choice,
-                });
-            }
-            return Err(PlaneError::FrameTooLarge);
-        }
-        prompt_outcome(
-            send_verb(
-                verb,
-                None,
-                maknae_loop::mutation::WriteCheck::Unchecked,
-                self.transport,
-                self.client,
-                self.ca,
-            )
-            .await
-            .map(WireOutcome::from),
-        )
-    }
-    async fn read(
-        &mut self,
-        conversation: &str,
-        path: &str,
-        page: maknae_proto::PageRequest,
-    ) -> ReadOutcome {
-        read_outcome(
-            send_verb(
-                Verb::Read {
-                    path: path.to_string(),
-                    conversation: Some(conversation.to_string()),
-                    page: Some(page),
-                },
-                None,
-                maknae_loop::mutation::WriteCheck::Unchecked,
-                self.transport,
-                self.client,
-                self.ca,
-            )
-            .await
-            .map(WireOutcome::from),
-        )
-    }
-    async fn write(
-        &mut self,
-        conversation: &str,
-        path: &str,
-        content: &[u8],
-        basis: ReadBasis,
-    ) -> WriteOutcome {
-        // The prompt-budget refusal is LOCAL and pre-send — nothing left
-        // the process, nothing is on the trail, the file is untouched.
-        let Ok((verb, content)) = write_request(
-            path.to_string(),
-            zeroize::Zeroizing::new(content.to_vec()),
-            Some(conversation.to_string()),
-            self.write_max,
-        ) else {
-            return WriteOutcome::NotSent;
-        };
-        write_outcome(
-            send_verb(
-                verb,
-                Some(content),
-                check_for(basis),
-                self.transport,
-                self.client,
-                self.ca,
-            )
-            .await
-            .map(WireOutcome::from),
-        )
+        })
+        .await
     }
 }
 
@@ -547,35 +416,36 @@ pub async fn run(label: Option<String>, prompt: String) -> Result<u8, String> {
     let write_max = transport.prompt_max_bytes;
     let mut transport = transport;
     transport.prompt_max_bytes = loop_prompt_cap(context.context_tokens(), explicit);
+    let id = maknae_loop::id::mint_conversation_id()?;
     let client = PlaneClient::for_user(&document, &dir, token_copy(&session.token)?)
         .map_err(|e| e.to_string())?;
     let ca = maknae_vault::load_ca_pin(&dir).map_err(|e| e.to_string())?;
     client.mint().await.map_err(|e| e.to_string())?;
-    let mut plane = RealPlane {
-        transport: &transport,
-        client: &client,
-        ca: &ca,
-        output_tokens: context.output_tokens(),
-        write_max,
-        api: &session.api,
-        token: &session.token,
-        key: KeyContext {
-            entry,
-            kv_mount,
-            user_prefix,
-            username: &username,
-            seal_key: &seal_key,
-            expires_at: session.expires_at,
-        },
-        spare: None,
+    let keys = UserLoginKeys {
+        api: session.api,
+        token: session.token,
+        entry: entry.clone(),
+        kv_mount: kv_mount.to_string(),
+        user_prefix: user_prefix.to_string(),
+        username,
+        seal_key,
+        expires_at: session.expires_at,
     };
+    let mut plane = LoopPlane::new(
+        transport,
+        client,
+        ca,
+        context.output_tokens(),
+        write_max,
+        keys,
+    );
     let budget = Budget {
         max_steps: agent.max_steps,
         max_tool_calls_per_step: agent.max_tool_calls_per_step,
     };
-    let mut session = Session::new(mint_conversation_id(), &prompt, budget, context);
+    let mut session = Session::new(id, &prompt, budget, context);
     let outcome = drive_to(&mut session, &mut plane, &mut std::io::stderr()).await;
-    client.shutdown().await;
+    plane.into_client().shutdown().await;
     let outcome = outcome.map_err(|e| e.to_string())?;
     print_end(
         &outcome,
@@ -1035,42 +905,6 @@ mod tests {
         );
     }
     #[test]
-    fn a_conversation_id_is_minted_within_the_wire_bound() {
-        assert!(maknae_proto::conversation_id_is_acceptable(
-            &mint_conversation_id()
-        ));
-    }
-    #[test]
-    fn the_loops_same_content_agrees_with_the_file_versions() {
-        let base = maknae_io::FileVersion {
-            dev: 1,
-            ino: 2,
-            size: 3,
-            mtime: 4,
-            mtime_nsec: 5,
-            ctime: 6,
-            ctime_nsec: 7,
-        };
-        let changed: [fn(&mut maknae_io::FileVersion); 7] = [
-            |v| v.dev += 1,
-            |v| v.ino += 1,
-            |v| v.size += 1,
-            |v| v.mtime += 1,
-            |v| v.mtime_nsec += 1,
-            |v| v.ctime += 1,
-            |v| v.ctime_nsec += 1,
-        ];
-        for (i, change) in changed.iter().enumerate() {
-            let mut v = base;
-            change(&mut v);
-            assert_eq!(
-                maknae_agent::plane::same_content(&base.key(), &v.key()),
-                base.same_content(&v),
-                "field {i}"
-            );
-        }
-    }
-    #[test]
     fn every_reply_defect_has_a_distinct_line_that_never_blames_authorization() {
         let b = Budget {
             max_steps: 8,
@@ -1088,80 +922,12 @@ mod tests {
         assert!(line(maknae_proto::ReplyDefect::TokenLimit).contains("output_tokens"));
         assert!(line(maknae_proto::ReplyDefect::ProviderAuth).contains("Vault secret"));
     }
-    #[test]
-    fn frame_fits_is_the_encoders_cap_check() {
-        let verb = |n: usize| Verb::SessionPrompt {
-            conversation: "c".into(),
-            turns: vec![Turn::User {
-                content: vec![maknae_proto::ContentBlock::Text {
-                    text: maknae_proto::SecretText(zeroize::Zeroizing::new("a".repeat(n))),
-                }],
-            }],
-            output_tokens: None,
-            choice: None,
-        };
-        assert!(frame_fits(&verb(10), 65_536));
-        assert!(!frame_fits(&verb(70_000), 65_536));
-    }
-
-    #[test]
-    fn the_prompt_frame_is_sized_before_the_key_is_wrapped() {
-        let src = include_str!("agent.rs");
-        let body = &src[src.find(concat!("async fn ", "prompt(")).unwrap()..];
-        let fits = body.find(concat!("frame_fits(", "&verb")).unwrap();
-        let wrap = body.find(concat!("turn_choice(", "&self.key")).unwrap();
-        assert!(fits < wrap);
-    }
-
-    fn a_choice() -> ProviderChoice {
-        ProviderChoice {
-            provider: "p".into(),
-            model: "m".into(),
-            key_subpath: "k".into(),
-            key_field: "f".into(),
-            sealed_key: SealedKey::new(vec![7; maknae_proto::SEALED_KEY_MIN_BYTES]).unwrap(),
-        }
-    }
-
-    #[test]
-    fn a_spare_choice_is_reused_once_for_its_conversation_while_its_wrap_is_young() {
-        let mut spare = Some(Spare {
-            conversation: "c".into(),
-            minted_at: 100,
-            choice: a_choice(),
-        });
-        assert!(take_spare(&mut spare, "other", 101).is_none());
-        assert!(spare.is_none());
-
-        let mut spare = Some(Spare {
-            conversation: "c".into(),
-            minted_at: 100,
-            choice: a_choice(),
-        });
-        assert!(take_spare(&mut spare, "c", 100 + SPARE_MAX_AGE_SECS + 1).is_none());
-
-        let mut spare = Some(Spare {
-            conversation: "c".into(),
-            minted_at: 100,
-            choice: a_choice(),
-        });
-        let s = take_spare(&mut spare, "c", 100 + SPARE_MAX_AGE_SECS).unwrap();
-        assert_eq!((s.choice, s.minted_at), (a_choice(), 100));
-        assert!(take_spare(&mut spare, "c", 101).is_none());
-    }
-
-    #[test]
-    fn a_spare_is_never_older_than_half_the_wrap() {
-        assert_eq!(
-            SPARE_MAX_AGE_SECS * 2,
-            maknae_vault::USER_KEY_WRAP_TTL.as_secs()
-        );
-    }
-
     mod printer {
         use super::*;
         use maknae_agent::drive::Outcome;
+        use maknae_agent::plane::{PlaneError, ReadBasis, ReadOutcome, WriteOutcome};
         use maknae_agent::session::Session;
+        use maknae_proto::Turn;
         use maknae_proto::{ContentBlock, PromptReply, ProposedToolCall, SecretText};
         use std::collections::VecDeque;
 

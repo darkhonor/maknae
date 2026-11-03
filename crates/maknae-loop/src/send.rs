@@ -155,6 +155,7 @@ pub async fn send_verb(
     transport: &maknae_config::TransportConfig,
     client: &PlaneClient,
     ca: &maknae_vault::CaBundle,
+    diag: &mut (dyn FnMut(String) + Send),
 ) -> Result<SentOutcome, String> {
     // Bound the client-side TLS handshake by the configured `handshake_timeout_ms`: a
     // process that accepts the Unix socket but never completes TLS must not hang the CLI
@@ -183,8 +184,8 @@ pub async fn send_verb(
     let prepared = crate::mutation::prepare_checked(request_verb.clone(), content, check);
     let mut armed = true;
     if let Some(prepared) = &prepared {
-        if let Some(error) = prepared.preparation_error() {
-            eprintln!("maknae: cannot prepare filesystem operation: {error}");
+        if let Some(line) = crate::mutation::arming_diagnostic(prepared) {
+            diag(line);
         }
         match (
             prepared.descriptor().map_err(|e| e.to_string())?,
@@ -228,13 +229,20 @@ pub async fn send_verb(
             let prepared =
                 prepared.ok_or("protocol error: mutation grant for an ordinary request")?;
             if matches!(prepared.request(), maknae_proto::Verb::Read { .. }) {
-                let read =
-                    crate::mutation::execute_read(prepared, grant, &mut stream, transport, written)
-                        .await?;
+                let read = crate::mutation::execute_read(
+                    prepared,
+                    grant,
+                    &mut stream,
+                    transport,
+                    written,
+                    diag,
+                )
+                .await?;
                 return Ok(SentOutcome::ReadDone { read });
             }
             let end =
-                crate::mutation::execute(prepared, grant, &mut stream, transport, written).await?;
+                crate::mutation::execute(prepared, grant, &mut stream, transport, written, diag)
+                    .await?;
             Ok(SentOutcome::WriteDone {
                 applied: end.applied,
                 stale: end.stale,
@@ -703,6 +711,7 @@ mod tests {
             t,
             c,
             ca,
+            &mut |_| {},
         ));
     }
 }

@@ -21,6 +21,8 @@ maknae-config = { path = "../maknae-config" }
 maknae-io = { path = "../maknae-io" }
 # The plane client and its mTLS connector.
 maknae-vault = { path = "../maknae-vault" }
+# Conversation IDs draw from the one random source the project uses.
+maknae-crypto = { path = "../maknae-crypto" }
 # Framing timeouts, frame I/O, and the attempt worker's spawn_blocking.
 tokio = { workspace = true, features = ["rt", "time", "io-util", "macros"] }
 zeroize = "1"
