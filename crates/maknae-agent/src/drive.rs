@@ -123,8 +123,9 @@ pub async fn drive<P: Plane>(
     .await
 }
 
-/// `stop` is read only at the top of a step, so a granted read or write is
-/// never cut short.
+/// `stop` is read before each plane call that has not started: at the top of a
+/// step, before the prompt, and before each tool call. A granted read, write or
+/// exchange is never cut short; a skipped call is answered as not run.
 pub async fn drive_session<P: Plane>(
     plane: &mut P,
     transcript: &mut Transcript,
@@ -161,6 +162,13 @@ pub async fn drive_session<P: Plane>(
             }
             Gate::Send(Some(n)) => emit(LoopEvent::Notice(n)),
             Gate::Send(None) => {}
+        }
+        if stop.load(Ordering::Acquire) {
+            return Outcome {
+                answer: None,
+                stopped: Some(StopReason::Stopped),
+                steps_used,
+            };
         }
         let sent = loop {
             let sent = plane
@@ -242,6 +250,13 @@ pub async fn drive_session<P: Plane>(
             }
             Next::Execute(calls) => {
                 for call in &calls {
+                    if stop.load(Ordering::Acquire) {
+                        transcript.push_tool_result(
+                            &call.call_id,
+                            &render(&ToolOutcome::NotRun, steps_remaining),
+                        );
+                        continue;
+                    }
                     let outcome = match route(call) {
                         Err(RouteError::UnknownTool(n)) => {
                             ToolOutcome::BadCall(format!("unknown tool {n}"))
@@ -1360,6 +1375,59 @@ mod tests {
             "{}",
             tool_text(&t.turns()[2])
         );
+    }
+
+    #[tokio::test]
+    async fn a_stop_raised_by_the_notice_sends_no_prompt() {
+        let mut p = scripted(vec![answer()]);
+        let stop = AtomicBool::new(false);
+        let mut events = vec![];
+        let out = drive_session(
+            &mut p,
+            &mut Transcript::new("c", &"q".repeat(1_800)),
+            &mut Seen::new(),
+            &budget(),
+            &mut Meter::new(ContextBudget::new(2_000, None).unwrap()),
+            &stop,
+            &mut |e| {
+                if matches!(e, LoopEvent::Notice(_)) {
+                    stop.store(true, Ordering::Release);
+                }
+                events.push(e)
+            },
+        )
+        .await;
+        assert_eq!(out.stopped, Some(StopReason::Stopped));
+        assert_eq!(p.prompts, 0, "nothing is sent after the host asked to stop");
+        assert!(matches!(&events[..], [LoopEvent::Notice(_)]), "{events:?}");
+    }
+
+    #[tokio::test]
+    async fn a_stop_between_calls_runs_no_further_call_and_answers_each_skipped_one() {
+        let stop = AtomicBool::new(false);
+        let two_writes = PromptReply {
+            reasoning: None,
+            blocks: vec![],
+            tool_calls: vec![
+                call("c1", "write_file", WRITE_A),
+                call("c2", "write_file", r#"{"path":"/w/b.txt","content":"new"}"#),
+            ],
+            usage: None,
+        };
+        let mut p = StopOnWrite {
+            inner: scripted(vec![two_writes, done()]),
+            stop: &stop,
+        };
+        let mut t = Transcript::new("c", "q");
+        let (out, _) = session_unmetered(&mut p, &mut t, &mut Seen::new(), &stop).await;
+        assert_eq!(out.stopped, Some(StopReason::Stopped));
+        assert_eq!((p.inner.prompts, p.inner.writes.len()), (1, 1));
+        assert_eq!(
+            (tool_call_id(&t.turns()[2]), tool_call_id(&t.turns()[3])),
+            ("c1".to_string(), "c2".to_string()),
+            "every call in the step is answered, in order"
+        );
+        assert!(tool_text(&t.turns()[3]).starts_with("not run: the loop was stopped"));
     }
 
     #[tokio::test]

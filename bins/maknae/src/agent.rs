@@ -364,8 +364,8 @@ pub fn print_end(
     Ok(2)
 }
 
-/// A failed print stops the session at its next step, so nothing further
-/// is attempted on the subject's behalf after output is lost.
+/// A failed print stops the session before its next plane call, so nothing new
+/// is started on the subject's behalf after output is lost; a granted attempt finishes.
 pub async fn drive_to<P: Plane + Send>(
     session: &mut Session,
     plane: &mut P,
@@ -1178,6 +1178,22 @@ mod tests {
             fn flush(&mut self) -> std::io::Result<()> {
                 Ok(())
             }
+        }
+
+        #[tokio::test]
+        async fn a_failed_notice_print_sends_no_prompt() {
+            let mut p = fake(vec![reply(None, &[("c1", "/w/a"), ("c2", "/w/b")])]);
+            let mut session = Session::new(
+                "c",
+                &"q".repeat(1_800),
+                budget(),
+                ContextBudget::new(2_000, None).unwrap(),
+            );
+            match drive_to(&mut session, &mut p, &mut Broken).await {
+                Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe),
+                Ok(_) => panic!("a failed print must surface as an error"),
+            }
+            assert_eq!((p.prompts, p.writes), (0, 0));
         }
 
         #[tokio::test]

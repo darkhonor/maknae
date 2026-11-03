@@ -9,7 +9,7 @@ use crate::transcript::Transcript;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-/// Stops one session at its next step boundary. A cooperative courtesy: the
+/// Stops one session before its next plane call. A cooperative courtesy: the
 /// stop that must hold without the loop's cooperation is enforced elsewhere.
 #[derive(Clone)]
 pub struct LoopHandle(Arc<AtomicBool>);
