@@ -159,6 +159,7 @@ mod tests {
             .output()
             .unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "{stdout}");
         let want = format!("PROBE-HOME={:?}", session_home());
         assert!(stdout.contains(&want), "{stdout}");
         assert!(!stdout.contains(decoy.to_str().unwrap()), "{stdout}");

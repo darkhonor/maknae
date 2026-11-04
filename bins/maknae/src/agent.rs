@@ -390,6 +390,21 @@ pub async fn drive_to<P: Plane + Send>(
 }
 
 /// Mirrors `execute()`'s setup (FIPS provider, config, user token, mint).
+const HOME_SNAPSHOT_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(maknae_config::HOME_RESOLVE_TIMEOUT_MS);
+
+/// A stalled passwd service or home mount leaves the session without `~`,
+/// never without a session.
+async fn snapshot_home<F>(timeout: std::time::Duration, resolve: F) -> Option<String>
+where
+    F: FnOnce() -> Option<std::path::PathBuf> + Send + 'static,
+{
+    match tokio::time::timeout(timeout, tokio::task::spawn_blocking(resolve)).await {
+        Ok(Ok(Some(home))) => home.to_str().map(str::to_string),
+        _ => None,
+    }
+}
+
 pub async fn run(label: Option<String>, prompt: String) -> Result<u8, String> {
     maknae_crypto::init().map_err(|e| maknae_vault::crypto_refusal_message(&e))?;
     let dir = crate::cli::resolve_config_dir();
@@ -418,7 +433,7 @@ pub async fn run(label: Option<String>, prompt: String) -> Result<u8, String> {
     transport.prompt_max_bytes = loop_prompt_cap(context.context_tokens(), explicit);
     let id = maknae_loop::id::mint_conversation_id()?;
     // One snapshot per session: `~` cannot change meaning for this process (#596).
-    let home = maknae_io::session_home().and_then(|p| p.to_str().map(str::to_string));
+    let home = snapshot_home(HOME_SNAPSHOT_TIMEOUT, maknae_io::session_home).await;
     let client = PlaneClient::for_user(&document, &dir, token_copy(&session.token)?)
         .map_err(|e| e.to_string())?;
     let ca = maknae_vault::load_ca_pin(&dir).map_err(|e| e.to_string())?;
@@ -460,6 +475,28 @@ pub async fn run(label: Option<String>, prompt: String) -> Result<u8, String> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn a_stalled_home_lookup_snapshots_no_home() {
+        let fast = std::time::Duration::from_millis(20);
+        let stalled = super::snapshot_home(fast, || {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            Some("/home/late".into())
+        });
+        let started = std::time::Instant::now();
+        assert_eq!(stalled.await, None);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn a_prompt_home_lookup_is_snapshotted() {
+        let patient = std::time::Duration::from_secs(10);
+        assert_eq!(
+            super::snapshot_home(patient, || Some("/home/b".into())).await,
+            Some("/home/b".to_string())
+        );
+        assert_eq!(super::snapshot_home(patient, || None).await, None);
+    }
+
     use super::*;
     fn yaml(s: &str) -> maknae_config::Value {
         maknae_config::load_str(s).unwrap()
