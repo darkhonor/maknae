@@ -387,25 +387,16 @@ class Scope(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
 
-    def touched(self, env=None, workspace=None):
-        base = self.git("rev-parse", "HEAD~1")
-        result = run_cli("touched", str(self.root), base, "HEAD", str(workspace or self.root),
-                         env=dict(os.environ, **(env or {})))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        return json.loads(result.stdout)
-
     def change(self, path, text):
         self.put(path, text)
         self.commit("head")
 
-    def assertScope(self, cases, touched=None):
+    def assertScope(self, cases):
         for path, text, expected in cases:
             with self.subTest(path=path, text=text):
                 self.change(path, text)
                 try:
                     self.assertEqual(self.scope(), expected)
-                    if touched is not None:
-                        self.assertEqual(self.touched(), touched)
                 finally:
                     self.git("reset", "-q", "--hard", "HEAD~1")
 
@@ -413,28 +404,33 @@ class Scope(unittest.TestCase):
         self.assertScope([("README.md", "x", []), ("packaging/README.md", "x", []),
                           ("design/notes.md", "x", [])])
 
-    def test_scope_a_path_in_a_crate_is_left_to_its_file_list(self):
+    def test_scope_a_path_in_a_crate_is_left_to_dep_info(self):
         self.assertScope([(f"crates/beta/{d}/x.rs", "fn x() {}\n", []) for d in ("src", "tests", "benches", "examples")]
                          + [("crates/beta/src/prompt.txt", "data\n", []),
                             ("crates/beta/src/policy.rs", "ALLOW\n", []),
                             ("crates/beta/build_rule.rs", "pub fn emit() {}\n", []),
                             ("crates/beta/README.md", "could be include_str data\n", []),
-                            ("crates/beta/tests/data/case.json", "{}\n", []),
-                            ("crates/beta/Cargo.toml",
-                             MANIFEST.format(n="beta", extra='\n[lib]\npath = "src/x.rs"\n'), [])],
-                         touched=["beta"])
+                            ("crates/beta/tests/data/case.json", "{}\n", [])])
+
+    def test_scope_a_crate_manifest_change_is_that_crate(self):
+        self.assertScope([("crates/beta/Cargo.toml",
+                           MANIFEST.format(n="beta", extra='\n[lib]\npath = "src/x.rs"\n'), ["beta"])])
 
     def test_scope_an_added_build_script_is_that_crate(self):
         self.assertScope([("crates/beta/build.rs", "fn main() {}\n", ["beta"])])
 
-    def test_scope_an_input_owned_by_no_crate_is_all(self):
+    def test_scope_a_scope_file_is_all(self):
         root = (self.root / "Cargo.toml").read_text()
         self.assertScope([("Cargo.toml", root + "\n[profile.release]\nopt-level = 1\n", ALL)]
                          + [(path, "x = 1\n", ALL) for path in (
-            ".cargo/config.toml", ".cargo/mutants.toml",
+            ".cargo/config", ".cargo/config.toml", ".cargo/mutants.toml", "rust-toolchain",
             "rust-toolchain.toml", ".config/nextest.toml", ".github/workflows/ci.yml",
-            "ci/gates/mutation-terminated.txt", "ci/gates/coverage-tiers.sh", "ci/affected.py",
-            "tools/gen.rs", ".gitattributes")])
+            "ci/gates/mutation-terminated.txt", "ci/gates/coverage-tiers.sh", "ci/gates/mutation-diff.py",
+            "ci/gates/mutation-oracle.sh", "ci/gates/mutation-platform.sh", "ci/affected.py")])
+
+    def test_scope_an_unowned_input_that_is_not_a_scope_file_is_empty(self):
+        self.assertScope([(path, "x = 1\n", []) for path in (
+            "tools/gen.rs", ".gitattributes", "ci/gates/other.sh", "fixtures/policy.rs")])
 
     def test_scope_lockfile_is_empty(self):
         self.assertScope([("Cargo.lock", "version = 4\n", [])])
@@ -459,36 +455,32 @@ class Scope(unittest.TestCase):
         root = (self.root / "Cargo.toml").read_text()
         self.assertScope([("crates/beta/Cargo.toml",
                            MANIFEST.format(n="beta", extra='\n[dependencies]\nx = "1"\n\n[features]\nf = []\n'),
-                           [])], touched=["beta"])
-        self.assertScope([("Cargo.toml", root + '\n[workspace.dependencies]\nx = "1"\n\n[profile.dev]\nopt-level = 1\n',
+                           ["beta"]),
+                          ("Cargo.toml", root + '\n[workspace.dependencies]\nx = "1"\n\n[profile.dev]\nopt-level = 1\n',
                            ALL)])
 
     def test_scope_an_added_or_once_unparseable_manifest_still_widens(self):
-        self.assertScope([("crates/alpha/sub/Cargo.toml", MANIFEST.format(n="sub", extra=""), [])],
-                         touched=["alpha"])
+        self.assertScope([("crates/alpha/sub/Cargo.toml", MANIFEST.format(n="sub", extra=""), ["alpha"]),
+                          ("tools/Cargo.toml", MANIFEST.format(n="tools", extra=""), ALL)])
         self.put("crates/beta/Cargo.toml", "[package\n")
         self.commit("break")
         self.change("crates/beta/Cargo.toml", MANIFEST.format(n="beta", extra=""))
-        self.assertEqual(self.touched(), ["beta"])
+        self.assertEqual(self.scope(), ["beta"])
 
     def test_scope_a_crate_outside_the_mutation_contract_is_empty(self):
-        self.assertScope([("crates/gamma/src/prompt.txt", "data\n", []),
-                          ("crates/gamma/src/lib.rs", "fn x() {}\n", [])], touched=[])
+        self.assertScope([("crates/gamma/Cargo.toml", MANIFEST.format(n="gamma", extra="\n[features]\nf = []\n"), [])])
 
-    def test_scope_a_nested_crate_owns_its_own_paths(self):
+    def test_scope_a_nested_crate_owns_its_own_manifest(self):
         self.put("Cargo.toml", '[workspace]\nmembers = ["crates/*", "crates/beta/inner"]\nresolver = "2"\n')
         self.put("crates/beta/inner/Cargo.toml", MANIFEST.format(n="inner", extra=""))
         self.put("crates/beta/inner/src/lib.rs", "")
         self.commit("nest")
-        self.assertScope([("crates/beta/inner/data.txt", "x\n", [])], touched=[])
-        self.assertScope([("crates/beta/data.txt", "x\n", [])], touched=["beta"])
+        self.assertScope([("crates/beta/inner/Cargo.toml", MANIFEST.format(n="inner", extra="\n[features]\nf = []\n"), [])])
 
-    def test_scope_a_deletion_is_a_change(self):
-        self.put("crates/beta/src/prompt.txt", "data\n")
-        self.commit("add")
-        (self.root / "crates/beta/src/prompt.txt").unlink()
+    def test_scope_a_deleted_scope_file_is_still_all(self):
+        (self.root / ".cargo/mutants.toml").unlink()
         self.commit("remove")
-        self.assertEqual(self.touched(), ["beta"])
+        self.assertEqual(self.scope(), ALL)
 
     def test_scope_tiers_contract_change_is_all_of_head(self):
         self.change("coverage-tiers.toml", '[t1]\nmutants_crates = ["alpha", "beta", "gamma"]\n')
@@ -506,25 +498,20 @@ class Scope(unittest.TestCase):
         self.change("crates/beta/src/build.rs", "fn main() {}\n")
         self.assertEqual(self.scope(), ["beta"])
 
-    def test_scope_any_change_in_a_crate_with_a_build_script_is_that_crate(self):
+    def test_scope_any_change_makes_a_build_script_crate_whole(self):
         self.change("crates/beta/build.rs", "mod src {\n    mod helper;\n}\nfn main() {}\n")
         self.assertScope([("crates/beta/src/helper.rs", "pub fn x() {}\n", ["beta"]),
                           ("crates/beta/src/lib.rs", "pub fn y() {}\n", ["beta"]),
                           ("crates/beta/tests/t.rs", "fn t() {}\n", ["beta"]),
-                          ("crates/alpha/src/x.rs", "fn x() {}\n", [])])
+                          ("crates/alpha/src/x.rs", "fn x() {}\n", ["beta"]),
+                          ("shared/input.txt", "x\n", ["beta"]),
+                          ("README.md", "x\n", [])])
 
     def test_scope_a_named_build_script_crate_is_that_crate(self):
         self.change("crates/beta/Cargo.toml",
-                    MANIFEST.format(n="beta", extra='build = "build/main.rs"\n'))
-        self.change("crates/beta/build/main.rs", "fn main() {}\n")
-        self.assertScope([("crates/beta/build/rule.rs", "fn r() {}\n", ["beta"]),
-                          ("crates/beta/src/x.rs", "fn x() {}\n", ["beta"])])
-
-    def test_scope_a_build_script_in_another_crate_widens_on_its_directory(self):
-        self.change("crates/beta/Cargo.toml",
                     MANIFEST.format(n="beta", extra='build = "../gamma/gen/build.rs"\n'))
         self.assertScope([("crates/gamma/gen/rule.rs", "fn r() {}\n", ["beta"]),
-                          ("crates/gamma/src/lib.rs", "fn x() {}\n", [])])
+                          ("crates/beta/src/x.rs", "fn x() {}\n", ["beta"])])
 
     def test_scope_a_disabled_build_script_does_not_widen(self):
         self.change("crates/beta/Cargo.toml", MANIFEST.format(n="beta", extra="build = false\n"))
@@ -532,28 +519,27 @@ class Scope(unittest.TestCase):
         self.assertScope([("crates/beta/src/x.rs", "fn x() {}\n", [])])
 
     def test_scope_reads_crate_directories_from_the_workspace_given(self):
-        self.change("crates/beta/src/prompt.txt", "data\n")
+        self.change("crates/beta/Cargo.toml", MANIFEST.format(n="beta", extra="\n[features]\nf = []\n"))
         snapshot = Path(tempfile.mkdtemp()) / "snap"
         self.addCleanup(shutil.rmtree, snapshot.parent)
         md.snapshot(self.root, "HEAD", snapshot)
         self.put("Cargo.toml", '[workspace]\nmembers = ["crates/alpha"]\nresolver = "2"\n')
         self.assertEqual(self.scope(), ALL)
-        self.assertEqual(self.scope(workspace=snapshot), [])
-        self.assertEqual(self.touched(workspace=snapshot), ["beta"])
+        self.assertEqual(self.scope(workspace=snapshot), ["beta"])
 
     def test_scope_git_env_is_ignored(self):
-        self.change("crates/beta/src/prompt.txt", "data\n")
+        self.change(".cargo/mutants.toml", "exclude_globs = []\n")
         bogus = tempfile.mkdtemp()
         self.addCleanup(os.rmdir, bogus)
-        self.assertEqual(self.touched({"GIT_DIR": bogus, "GIT_INDEX_FILE": bogus + "/idx",
-                                       "GIT_LITERAL_PATHSPECS": "1"}), ["beta"])
+        self.assertEqual(self.scope({"GIT_DIR": bogus, "GIT_INDEX_FILE": bogus + "/idx",
+                                     "GIT_LITERAL_PATHSPECS": "1"}), ALL)
 
     def test_scope_ignores_replace_refs(self):
-        self.change("crates/beta/src/prompt.txt", "data\n")
+        self.change(".cargo/mutants.toml", "exclude_globs = []\n")
         fake = self.git("commit-tree", "HEAD^{tree}", "-m", "fake")
         self.git("replace", self.git("rev-parse", "HEAD~1"), fake)
         self.assertEqual(self.git("diff", "HEAD~1", "HEAD"), "")
-        self.assertEqual(self.touched(), ["beta"])
+        self.assertEqual(self.scope(), ALL)
 
     def test_scope_unresolvable_revision_exits_one(self):
         result = run_cli("scope", str(self.root), "no-such-rev", "HEAD")
@@ -679,85 +665,145 @@ class Unmappable(unittest.TestCase):
         self.assertIn("symlink crates/beta/src/alias.rs", result.stdout)
 
 
-class Unlisted(unittest.TestCase):
+class Compiled(unittest.TestCase):
     setUp, git, put, commit = Scope.setUp, Scope.git, Scope.put, Scope.commit
 
-    def unlisted(self, files, crate="beta"):
-        listing = Path(self.tmp.name + "-files.json")
-        self.addCleanup(lambda: listing.unlink(missing_ok=True))
-        listing.write_text(files if isinstance(files, str) else
-                           json.dumps([{"package": crate, "path": f} for f in files]))
-        return run_cli("unlisted", str(self.root), self.git("rev-parse", "HEAD~1"), "HEAD",
-                       str(self.root), crate, str(listing))
+    def compiled(self, env=None):
+        target = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, target, True)
+        return run_cli("compiled", str(self.root), self.git("rev-parse", "HEAD~1"), "HEAD",
+                       str(self.root), str(target / "t"), env=dict(os.environ, **(env or {})))
 
-    def assertVerdict(self, files, expected, crate="beta"):
-        result = self.unlisted(files, crate)
-        self.assertEqual((result.returncode, result.stdout), (0, expected), result.stderr)
+    def assertCompiled(self, expected):
+        result = self.compiled()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), expected)
 
-    def test_unlisted_a_walked_file_is_left_to_the_diff(self):
-        self.put("crates/beta/src/lib.rs", "pub fn x() {}\n")
-        self.commit("edit")
-        self.assertVerdict(["crates/beta/src/lib.rs"], "")
+    def base(self, files):
+        for path, text in files.items():
+            self.put(path, text)
+        self.commit("base")
 
-    def test_unlisted_embedded_rust_data_runs_the_crate_whole(self):
-        self.put("crates/beta/src/policy.rs", "ALLOW\n")
-        self.commit("data")
+    def test_compiled_embedded_rust_data_is_compiled_into_its_crate(self):
+        self.base({"crates/beta/src/lib.rs": 'pub fn check() -> bool {\n    include_str!("policy.rs") == "ALLOW\\n"\n}\n',
+                   "crates/beta/src/policy.rs": "ALLOW\n"})
         self.put("crates/beta/src/policy.rs", "DENY\n")
         self.commit("edit")
-        self.assertVerdict(["crates/beta/src/lib.rs"],
-                           "whole: beta: changed crates/beta/src/policy.rs is not a file cargo-mutants walks\n")
+        self.assertCompiled({"beta": ["crates/beta/src/policy.rs"]})
 
-    def test_unlisted_any_unwalked_path_runs_the_crate_whole(self):
-        for path in ("crates/beta/src/prompt.txt", "crates/beta/tests/t.rs", "crates/beta/README.md",
-                     "crates/beta/src/skip.rs"):
-            with self.subTest(path=path):
-                self.put(path, "x\n")
-                self.commit("edit")
-                try:
-                    self.assertVerdict(["crates/beta/src/lib.rs"],
-                                       f"whole: beta: changed {path} is not a file cargo-mutants walks\n")
-                finally:
-                    self.git("reset", "-q", "--hard", "HEAD~1")
-
-    def test_unlisted_other_crates_paths_are_not_this_crates(self):
-        self.put("crates/alpha/src/prompt.txt", "x\n")
+    def test_compiled_another_crates_file_is_compiled_into_the_embedding_crate(self):
+        self.base({"crates/alpha/src/lib.rs": 'pub fn check() -> bool {\n    include_str!("../../beta/src/policy.rs") == "x"\n}\n',
+                   "crates/beta/src/policy.rs": "ALLOW\n"})
+        self.put("crates/beta/src/policy.rs", "DENY\n")
         self.commit("edit")
-        self.assertVerdict(["crates/beta/src/lib.rs"], "")
+        self.assertCompiled({"alpha": ["crates/beta/src/policy.rs"]})
 
-    def test_unlisted_dependency_only_manifest_is_exempt(self):
-        self.put("crates/beta/Cargo.toml", MANIFEST.format(n="beta", extra='\n[dependencies]\nx = "1"\n'))
-        self.commit("deps")
-        self.assertVerdict(["crates/beta/src/lib.rs"], "")
-        self.put("crates/beta/Cargo.toml", MANIFEST.format(n="beta", extra='\n[lib]\npath = "src/x.rs"\n'))
-        self.commit("lib")
-        self.assertVerdict(["crates/beta/src/lib.rs"],
-                           "whole: beta: changed crates/beta/Cargo.toml is not a file cargo-mutants walks\n")
+    def test_compiled_a_module_file_is_compiled_into_its_crate(self):
+        self.base({"crates/beta/src/lib.rs": "pub mod x;\n", "crates/beta/src/x.rs": "pub fn x() {}\n"})
+        self.put("crates/beta/src/x.rs", "pub fn x() -> u8 {\n    1\n}\n")
+        self.commit("edit")
+        self.assertCompiled({"beta": ["crates/beta/src/x.rs"]})
 
-    def test_unlisted_a_deletion_runs_the_crate_whole(self):
-        self.put("crates/beta/src/old.rs", "")
-        self.commit("add")
-        (self.root / "crates/beta/src/old.rs").unlink()
-        self.commit("remove")
-        self.assertVerdict(["crates/beta/src/lib.rs"],
-                           "whole: beta: changed crates/beta/src/old.rs is not a file cargo-mutants walks\n")
+    def test_compiled_a_feature_gated_module_follows_the_declared_features(self):
+        files = {"coverage-tiers.toml": TIERS + 'mutants_features = { beta = ["seam"] }\n'}
+        for crate in ("alpha", "beta"):
+            files[f"crates/{crate}/Cargo.toml"] = MANIFEST.format(n=crate, extra="\n[features]\nseam = []\n")
+            files[f"crates/{crate}/src/lib.rs"] = '#[cfg(feature = "seam")]\npub mod x;\n'
+            files[f"crates/{crate}/src/x.rs"] = "pub fn x() {}\n"
+        self.base(files)
+        for crate in ("alpha", "beta"):
+            self.put(f"crates/{crate}/src/x.rs", "pub fn x() -> u8 {\n    1\n}\n")
+        self.commit("edit")
+        self.assertCompiled({"beta": ["crates/beta/src/x.rs"]})
 
-    def test_unlisted_an_unreadable_file_list_fails(self):
+    def test_compiled_test_only_and_unreferenced_files_are_not_production_inputs(self):
+        self.base({"crates/beta/src/lib.rs": "#[cfg(test)]\nmod fixtures;\n",
+                   "crates/beta/src/fixtures.rs": "", "crates/beta/tests/t.rs": "",
+                   "crates/beta/benches/b.rs": "", "crates/beta/examples/e.rs": "",
+                   "crates/beta/src/prompt.txt": "x\n", "README.md": "x\n"})
+        for path in ("crates/beta/src/fixtures.rs", "crates/beta/tests/t.rs", "crates/beta/benches/b.rs",
+                     "crates/beta/examples/e.rs", "crates/beta/src/prompt.txt", "README.md"):
+            self.put(path, "// edited\n")
+        self.commit("edit")
+        self.assertCompiled({})
+
+    def test_compiled_a_deletion_is_not_an_input(self):
+        self.base({"crates/beta/src/lib.rs": "pub mod x;\n", "crates/beta/src/x.rs": ""})
+        self.put("crates/beta/src/lib.rs", "")
+        (self.root / "crates/beta/src/x.rs").unlink()
+        self.commit("edit")
+        self.assertCompiled({"beta": ["crates/beta/src/lib.rs"]})
+
+    def test_compiled_a_failed_check_fails(self):
+        self.put("crates/beta/src/lib.rs", "pub fn broken( {\n")
+        self.commit("edit")
+        result = self.compiled()
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("FAIL: beta: cargo check of its production targets failed", result.stderr)
+
+    def test_compiled_a_scope_crate_is_not_checked(self):
+        self.put("crates/beta/src/lib.rs", "pub fn broken( {\n")
+        self.put(".cargo/mutants.toml", "exclude_globs = []\n")
+        self.commit("edit")
+        self.assertCompiled({})
+
+    def test_compiled_git_env_is_ignored(self):
         self.put("crates/beta/src/lib.rs", "pub fn x() {}\n")
         self.commit("edit")
+        bogus = tempfile.mkdtemp()
+        self.addCleanup(os.rmdir, bogus)
+        result = self.compiled({"GIT_DIR": bogus, "GIT_INDEX_FILE": bogus + "/idx"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"beta": ["crates/beta/src/lib.rs"]})
+
+    def test_compiled_dep_tokens_unescape_spaces_and_skip_comments(self):
+        text = ("/t/deps/a-1.d: crates/a/src/lib.rs crates/a/src/my\\ data.txt\n\n"
+                "crates/a/src/lib.rs:\n# env-dep:X=1\n")
+        self.assertEqual(md.dep_tokens(text), ["/t/deps/a-1.d", "crates/a/src/lib.rs",
+                                               "crates/a/src/my data.txt", "crates/a/src/lib.rs"])
+
+
+class Unlisted(unittest.TestCase):
+    def unlisted(self, files, compiled, crate="beta"):
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory)
+        (directory / "files.json").write_text(files if isinstance(files, str) else
+                                              json.dumps([{"package": crate, "path": f} for f in files]))
+        (directory / "compiled.json").write_text(compiled if isinstance(compiled, str) else json.dumps(compiled))
+        return run_cli("unlisted", crate, str(directory / "files.json"), str(directory / "compiled.json"))
+
+    def assertVerdict(self, files, compiled, expected):
+        result = self.unlisted(files, compiled)
+        self.assertEqual((result.returncode, result.stdout), (0, expected), result.stderr)
+
+    def test_unlisted_a_walked_compiled_file_is_left_to_the_diff(self):
+        self.assertVerdict(["crates/beta/src/lib.rs"], {"beta": ["crates/beta/src/lib.rs"]}, "")
+
+    def test_unlisted_a_compiled_file_cargo_mutants_does_not_walk_runs_the_crate_whole(self):
+        for path in ("crates/beta/src/policy.rs", "crates/alpha/src/data.txt", "crates/beta/src/skip.rs"):
+            with self.subTest(path=path):
+                self.assertVerdict(["crates/beta/src/lib.rs"], {"beta": [path]},
+                                   f"whole: beta: changed {path} is compiled into beta but not walked "
+                                   "by cargo-mutants\n")
+
+    def test_unlisted_another_crates_inputs_are_not_this_crates(self):
+        self.assertVerdict(["crates/beta/src/lib.rs"], {"alpha": ["crates/beta/src/policy.rs"]}, "")
+
+    def test_unlisted_an_unreadable_file_list_fails(self):
         for text in ("", "  \n", "not json", "{}", '[{"path": "crates/beta/src/lib.rs"}]',
                      '[{"package": "alpha", "path": "crates/beta/src/lib.rs"}]', '[{"package": "beta"}]'):
             with self.subTest(text=text):
-                result = self.unlisted(text)
+                result = self.unlisted(text, {})
                 self.assertEqual(result.returncode, 1, result.stdout)
                 self.assertEqual(result.stdout, "")
                 self.assertRegex(result.stderr, r"^FAIL: beta: cargo mutants --list-files printed")
 
-    def test_unlisted_an_unknown_crate_fails(self):
-        self.put("crates/beta/src/lib.rs", "pub fn x() {}\n")
-        self.commit("edit")
-        result = self.unlisted([], crate="delta")
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("FAIL: delta is not a workspace crate", result.stderr)
+    def test_unlisted_an_unreadable_compiled_list_fails(self):
+        for text in ("", "[]", '{"beta": "crates/beta/src/lib.rs"}', '{"beta": [1]}'):
+            with self.subTest(text=text):
+                result = self.unlisted(["crates/beta/src/lib.rs"], text)
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn("FAIL: beta: unreadable compiled-input list", result.stderr)
 
 
 class Snapshot(unittest.TestCase):

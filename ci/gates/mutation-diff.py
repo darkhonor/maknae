@@ -16,8 +16,14 @@ GIT_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
 HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 BINARY = re.compile(r"^(?:Binary files .* differ|GIT binary patch)$")
 ABSENT = re.compile(r"does not exist in|exists on disk, but not in")
-SOURCE_DIRS = ("src", "tests", "benches", "examples")
 DEPENDENCY_TABLES = ("dependencies", "dev-dependencies", "build-dependencies")
+PRODUCTION_LIB = frozenset(("lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"))
+SCOPE_FILES = frozenset(("Cargo.toml", "coverage-tiers.toml", ".cargo/config", ".cargo/config.toml",
+                         ".cargo/mutants.toml", ".config/nextest.toml", "rust-toolchain",
+                         "rust-toolchain.toml", ".github/workflows/ci.yml", "ci/affected.py",
+                         "ci/gates/coverage-tiers.sh", "ci/gates/mutation-oracle.sh",
+                         "ci/gates/mutation-platform.sh", "ci/gates/mutation-diff.py",
+                         "ci/gates/mutation-terminated.txt"))
 
 
 class DiffError(Exception):
@@ -246,18 +252,25 @@ def parse_toml(text):
         return None
 
 
-def workspace_crates(root):
-    env = {k: v for k, v in git_env().items() if k not in ("LLVM_COV", "LLVM_PROFDATA")}
+def cargo_env():
+    return {k: v for k, v in git_env().items() if k not in ("LLVM_COV", "LLVM_PROFDATA")}
+
+
+def packages(root):
     done = subprocess.run(
         ["cargo", "metadata", "--no-deps", "--format-version", "1",
          "--manifest-path", str(Path(root) / "Cargo.toml")],
-        capture_output=True, env=env, check=False)
+        capture_output=True, env=cargo_env(), check=False)
     if done.returncode != 0:
         raise ScopeError("FAIL: cargo metadata failed: " + done.stderr.decode().strip())
+    return {package["name"]: package for package in json.loads(done.stdout)["packages"]}
+
+
+def workspace_crates(root):
     crates = {}
-    for package in json.loads(done.stdout)["packages"]:
+    for name, package in packages(root).items():
         manifest = Path(package["manifest_path"]).resolve()
-        crates[package["name"]] = manifest.parent.relative_to(Path(root).resolve()).as_posix()
+        crates[name] = manifest.parent.relative_to(Path(root).resolve()).as_posix()
     return crates
 
 
@@ -372,14 +385,13 @@ def script_path(directory, script):
     return None if path == ".." or path.startswith("../") else path
 
 
-def script_dirs(root, shas, mutants, dirs):
-    found = {}
+def script_crates(root, shas, mutants, dirs):
+    found = set()
     for crate in sorted(mutants & set(dirs)):
         for sha in shas:
             present = lambda path, sha=sha: show(root, sha, path) is not None
-            for script in build_scripts(root, sha, dirs[crate], present):
-                path = script_path(dirs[crate], script)
-                found.setdefault(crate, {dirs[crate]}).add("." if path is None else posixpath.dirname(path))
+            if build_scripts(root, sha, dirs[crate], present):
+                found.add(crate)
     return found
 
 
@@ -397,29 +409,116 @@ def scope_crates(root, base, head, workspace=None):
     dirs = workspace_crates(workspace or root)
     mutants = contract(root, head_sha, dirs)
     docs_only = affected().docs_only
-    built = script_dirs(root, (base_sha, head_sha), mutants, dirs)
+    built = script_crates(root, (base_sha, head_sha), mutants, dirs)
     selected = set()
     for path in changed_names(root, base_sha, head_sha):
         if exempt(root, base_sha, head_sha, path, docs_only):
             continue
-        selected.update(c for c, found in built.items() if any(within(path, d) for d in found))
-        owner = owner_of(path, dirs)
-        if owner is not None and dirs[owner] != ".":
-            continue
-        if owner is not None and path.endswith(".rs") and path.split("/")[0] in SOURCE_DIRS:
-            continue
-        selected.update(mutants)
+        selected.update(built)
+        if path in SCOPE_FILES:
+            selected.update(mutants)
+        elif posixpath.basename(path) == "Cargo.toml":
+            owner = owner_of(path, dirs)
+            selected.update(mutants if owner is None or dirs[owner] == "." else {owner})
     return sorted(selected & mutants)
 
 
-def touched(root, base, head, workspace):
+def features_of(text, crate):
+    data = parse_toml(text)
+    try:
+        found = data["t1"]["mutants_features"][crate]
+    except (KeyError, TypeError):
+        return []
+    if not isinstance(found, list) or not all(isinstance(f, str) for f in found):
+        raise ScopeError(f"FAIL: [t1].mutants_features.{crate} is not a list of strings")
+    return found
+
+
+def dep_tokens(text):
+    tokens = []
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        parts = re.split(r"(?<!\\):(?:\s|$)", line, maxsplit=1)
+        tokens.append(parts[0])
+        if len(parts) == 2:
+            tokens.extend(re.split(r"(?<!\\)\s+", parts[1].strip()))
+    return [t.replace("\\ ", " ") for t in tokens if t]
+
+
+def production_inputs(tree, package, features, target):
+    kinds = {k for t in package["targets"] for k in t["kind"]}
+    selectors = (["--lib"] if kinds & PRODUCTION_LIB else []) + (["--bins"] if "bin" in kinds else [])
+    if not selectors:
+        raise ScopeError(f"FAIL: {package['name']}: no library or binary target to check")
+    argv = ["cargo", "check", "--package", package["name"], *selectors, "--message-format=json",
+            "--target-dir", str(target), "--manifest-path", str(tree / "Cargo.toml")]
+    for feature in features:
+        argv += ["--features", feature]
+    done = subprocess.run(argv, cwd=tree, capture_output=True, env=cargo_env(), check=False)
+    if done.returncode != 0:
+        tail = done.stderr.decode(errors="replace").strip().splitlines()[-5:]
+        raise ScopeError(f"FAIL: {package['name']}: cargo check of its production targets failed: "
+                         + " | ".join(tail))
+    found, read = set(), 0
+    for line in done.stdout.decode(errors="replace").splitlines():
+        try:
+            message = json.loads(line)
+        except ValueError:
+            continue
+        if (not isinstance(message, dict) or message.get("reason") != "compiler-artifact"
+                or message.get("package_id") != package["id"]
+                or not set(message.get("target", {}).get("kind", [])) & (PRODUCTION_LIB | {"bin"})):
+            continue
+        for artifact in message.get("filenames", []):
+            artifact = Path(artifact)
+            candidates = [artifact.with_suffix(".d")]
+            if artifact.name.startswith("lib"):
+                candidates.append(artifact.with_name(artifact.stem[3:] + ".d"))
+            info = next((c for c in candidates if c.is_file()), None)
+            if info is None:
+                continue
+            read += 1
+            for token in dep_tokens(info.read_text(errors="replace")):
+                path = Path(token) if os.path.isabs(token) else tree / token
+                try:
+                    stat = os.stat(path)
+                except OSError:
+                    continue
+                found.add((stat.st_dev, stat.st_ino))
+    if read == 0:
+        raise ScopeError(f"FAIL: {package['name']}: cargo check wrote no dep-info for its production targets")
+    return found
+
+
+def compiled(root, base, head, workspace, target):
     base_sha, head_sha = resolve(root, base), resolve(root, head)
-    dirs = workspace_crates(workspace)
+    tree = Path(os.path.realpath(workspace))
+    found = packages(tree)
+    dirs = {name: Path(os.path.realpath(Path(p["manifest_path"]).parent)).relative_to(tree).as_posix()
+            for name, p in found.items()}
+    tiers_text = show(root, head_sha, "coverage-tiers.toml")
     mutants = contract(root, head_sha, dirs)
     docs_only = affected().docs_only
-    owners = {owner_of(path, dirs) for path in changed_names(root, base_sha, head_sha)
-              if not exempt(root, base_sha, head_sha, path, docs_only)}
-    return sorted(owners & mutants)
+    identities = {}
+    for path in changed_names(root, base_sha, head_sha):
+        if exempt(root, base_sha, head_sha, path, docs_only):
+            continue
+        try:
+            stat = os.stat(tree / path)
+        except OSError:
+            continue
+        identities[(stat.st_dev, stat.st_ino)] = path
+    if not identities:
+        return {}
+    whole = set(scope_crates(root, base, head, workspace))
+    result = {}
+    for crate in sorted((mutants & set(found)) - whole):
+        inputs = production_inputs(tree, found[crate], features_of(tiers_text, crate), Path(target))
+        hits = sorted(path for key, path in identities.items() if key in inputs)
+        if hits:
+            result[crate] = hits
+    return result
 
 
 def read_files(crate, path):
@@ -440,19 +539,18 @@ def read_files(crate, path):
     return listed
 
 
-def unlisted(root, base, head, workspace, crate, files):
-    base_sha, head_sha = resolve(root, base), resolve(root, head)
-    dirs = workspace_crates(workspace)
-    if crate not in dirs:
-        raise ScopeError(f"FAIL: {crate} is not a workspace crate")
+def unlisted(crate, files, inputs):
     listed = read_files(crate, files)
-    docs_only = affected().docs_only
-    for path in changed_names(root, base_sha, head_sha):
-        if owner_of(path, dirs) != crate or path in listed:
-            continue
-        if exempt(root, base_sha, head_sha, path, docs_only):
-            continue
-        return f"whole: {crate}: changed {path} is not a file cargo-mutants walks"
+    try:
+        data = json.loads(Path(inputs).read_text())
+        changed = data.get(crate, [])
+        if not isinstance(changed, list) or not all(isinstance(p, str) for p in changed):
+            raise ValueError
+    except (ValueError, AttributeError):
+        raise DiffError(f"FAIL: {crate}: unreadable compiled-input list {inputs}") from None
+    for path in changed:
+        if path not in listed:
+            return f"whole: {crate}: changed {path} is compiled into {crate} but not walked by cargo-mutants"
     return None
 
 
@@ -594,9 +692,9 @@ def main(argv):
                 return 1
         elif len(argv) == 4 and command == "snapshot":
             snapshot(argv[1], argv[2], argv[3])
-        elif len(argv) == 5 and command == "touched":
-            print(json.dumps(touched(*argv[1:])))
-        elif len(argv) == 7 and command == "unlisted":
+        elif len(argv) == 6 and command == "compiled":
+            print(json.dumps(compiled(*argv[1:])))
+        elif len(argv) == 4 and command == "unlisted":
             line = unlisted(*argv[1:])
             if line:
                 print(line)
@@ -609,8 +707,8 @@ def main(argv):
             print("FAIL: usage: mutation-diff.py changed-lines <diff> | classify <pkg> <diff> "
                   "<whole> <indiff> | scope <root> <base> <head> [<workspace>] | paths <root> <base> "
                   "<diff> [<head>] | history <root> | snapshot <root> <rev> <dest> | "
-                  "touched <root> <base> <head> <workspace> | unlisted <root> <base> <head> "
-                  "<workspace> <crate> <files> | unmappable <root> <head> <workspace>",
+                  "compiled <root> <base> <head> <workspace> <target> | unlisted <crate> <files> "
+                  "<compiled> | unmappable <root> <head> <workspace>",
                   file=sys.stderr)
             return 1
     except (DiffError, ScopeError) as exc:

@@ -694,14 +694,16 @@ print("\n".join(crates))' 2>/dev/null)"; then
     if ! problem="$(python3 "$here/mutation-diff.py" unmappable "$root" "$head_oid" "$snap" 2>&1)"; then
       printf '%s\n' "${problem:-FAIL: --in-diff: the unmappable-shape check printed nothing}"; exit 1
     fi
-    if ! owned="$(python3 "$here/mutation-diff.py" touched "$root" "$base" "$head_oid" "$snap" 2>&1)" ||
-       ! owned_lines="$(printf '%s' "$owned" | python3 -c '
+    compiled_file="$mut_tmp/compiled.json"
+    if ! python3 "$here/mutation-diff.py" compiled "$root" "$base" "$head_oid" "$snap" "$mut_tmp/depinfo" \
+         >"$compiled_file" 2>"$mut_tmp/compiled.err" ||
+       ! owned_lines="$(python3 -c '
 import json, sys
-crates = json.load(sys.stdin)
-if not (isinstance(crates, list) and all(isinstance(c, str) for c in crates)):
+crates = json.load(open(sys.argv[1]))
+if not (isinstance(crates, dict) and all(isinstance(c, str) for c in crates)):
     sys.exit(1)
-print("\n".join(crates))' 2>/dev/null)"; then
-      printf 'FAIL: --in-diff: changed crates cannot be computed: %s\n' "$owned"; exit 1
+print("\n".join(sorted(crates)))' "$compiled_file" 2>/dev/null)"; then
+      printf 'FAIL: --in-diff: compiled inputs cannot be computed: %s\n' "$(cat "$mut_tmp/compiled.err")"; exit 1
     fi
     declare -A touched=()
     while IFS= read -r c; do
@@ -763,7 +765,7 @@ print("\n".join(crates))' 2>/dev/null)"; then
           fail "cargo mutants --list-files --package $cname failed"
           continue
         fi
-        if ! walked="$(python3 "$here/mutation-diff.py" unlisted "$root" "$base" "$head_oid" "$snap" "$cname" "$mut_tmp/files.json" 2>&1)"; then
+        if ! walked="$(python3 "$here/mutation-diff.py" unlisted "$cname" "$mut_tmp/files.json" "$compiled_file" 2>&1)"; then
           printf '%s\n' "${walked:-FAIL: $cname: mutation-diff.py unlisted printed nothing}"
           fail_n=$((fail_n + 1))
           continue

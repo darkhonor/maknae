@@ -4656,7 +4656,7 @@ mid_git() { # <repo> <git-args...>
     -c commit.gpgsign=false -c tag.gpgsign=false -c core.hooksPath=/dev/null "$@" >/dev/null
 }
 mid_lib() { # <file> <line-7-or-empty> <line-12> <line-3>
-  printf '//! Crate a.\n//!\n//! %s\n\npub fn a(x: u32) -> u32 {\n    let y = x + 1;\n' "$4" > "$1"
+  printf '//! Crate a.\n//!\n//! %s\n\npub fn a(x: u32) -> u32 {\n    let y = x + 1; let z = y;\n' "$4" > "$1"
   if [ -n "$2" ]; then printf '    %s\n' "$2" >> "$1"; fi
   printf '    z - 3\n}\n\npub fn d(x: u32) -> u32 {\n    %s\n}\n' "$3" >> "$1"
 }
@@ -4751,6 +4751,7 @@ expect_reject_because "mutation-in-diff/replace-refs-fail" "the repository has r
   mid_gate "$mid_r" "$mid_whole_edit" "[$mid_a,$mid_star]" 0
 mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
 printf 'be brief\n' > "$mid_r/crates/a/src/prompt.txt"
+printf 'pub fn prompt() -> &'"'"'static str {\n    include_str!("prompt.txt")\n}\n' >> "$mid_r/crates/a/src/lib.rs"
 mid_git "$mid_r" add -A
 mid_git "$mid_r" commit -qm data
 mid_git "$mid_r" tag -f base
@@ -4810,6 +4811,16 @@ mid_git "$mid_r" tag -f base
 printf 'DENY\n' > "$mid_r/crates/a/src/policy.rs"
 mid_git "$mid_r" commit -qam deny
 expect_reject_because "mutation-in-diff/include-str-rs-survivor-fails" "reported missed/timeout mutants" \
+  mid_gate "$mid_r" "$mid_whole_edit" "" 2
+mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
+printf 'pub fn check() -> bool {\n    include_str!("../../a/src/policy.rs").trim() == "ALLOW"\n}\n' > "$mid_r/crates/b/src/lib.rs"
+printf 'ALLOW\n' > "$mid_r/crates/a/src/policy.rs"
+mid_git "$mid_r" add -A
+mid_git "$mid_r" commit -qm policy
+mid_git "$mid_r" tag -f base
+printf 'DENY\n' > "$mid_r/crates/a/src/policy.rs"
+mid_git "$mid_r" commit -qam deny
+expect_reject_because "mutation-in-diff/cross-crate-include-str-survivor-fails" "cargo mutants --package b reported missed/timeout mutants" \
   mid_gate "$mid_r" "$mid_whole_edit" "" 2
 mid_r="$(mid_repo 'let z = y * 4;' 'x * 5' Fixture.)"
 if [ -e "$mid_r/CRATES" ]; then
