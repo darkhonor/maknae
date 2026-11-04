@@ -16,6 +16,7 @@ HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 BINARY = re.compile(r"^(?:Binary files .* differ|GIT binary patch)$")
 ABSENT = re.compile(r"does not exist in|exists on disk, but not in")
 SOURCE_DIRS = ("src", "tests", "benches", "examples")
+DEPENDENCY_TABLES = ("dependencies", "dev-dependencies", "build-dependencies")
 
 
 class DiffError(Exception):
@@ -318,6 +319,30 @@ def owner_of(path, dirs):
     return owner
 
 
+def without_dependencies(manifest):
+    data = {k: v for k, v in manifest.items() if k not in DEPENDENCY_TABLES}
+    if isinstance(data.get("target"), dict):
+        targets = {cfg: {k: v for k, v in table.items() if k not in DEPENDENCY_TABLES}
+                   if isinstance(table, dict) else table for cfg, table in data["target"].items()}
+        data["target"] = {cfg: table for cfg, table in targets.items() if table != {}}
+        if not data["target"]:
+            del data["target"]
+    if isinstance(data.get("workspace"), dict):
+        data["workspace"] = {k: v for k, v in data["workspace"].items() if k != "dependencies"}
+    return data
+
+
+def dependency_only(root, base_sha, head_sha, path):
+    if Path(path).name != "Cargo.toml":
+        return False
+    old, new = show(root, base_sha, path), show(root, head_sha, path)
+    if old is None or new is None:
+        return False
+    old_data, new_data = parse_toml(old), parse_toml(new)
+    return (old_data is not None and new_data is not None
+            and without_dependencies(old_data) == without_dependencies(new_data))
+
+
 def scope_crates(root, base, head, workspace=None):
     base_sha, head_sha = resolve(root, base), resolve(root, head)
     dirs = workspace_crates(workspace or root)
@@ -326,7 +351,7 @@ def scope_crates(root, base, head, workspace=None):
     docs_only = affected().docs_only
     selected = set()
     for path in changed_names(root, base_sha, head_sha):
-        if docs_only(path):
+        if docs_only(path) or path == "Cargo.lock" or dependency_only(root, base_sha, head_sha, path):
             continue
         owner = owner_of(path, dirs)
         nested = owner is not None and dirs[owner] != "."

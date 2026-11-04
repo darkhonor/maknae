@@ -414,16 +414,51 @@ class Scope(unittest.TestCase):
                           ("crates/beta/build.rs", "fn main() {}\n", ["beta"]),
                           ("crates/beta/README.md", "could be include_str data\n", ["beta"]),
                           ("crates/beta/tests/data/case.json", "{}\n", ["beta"]),
-                          ("crates/beta/Cargo.toml", "# note\n" + MANIFEST.format(n="beta", extra=""),
+                          ("crates/beta/Cargo.toml", MANIFEST.format(n="beta", extra='\n[lib]\npath = "src/x.rs"\n'),
                            ["beta"])])
 
     def test_scope_an_input_owned_by_no_crate_is_all(self):
         root = (self.root / "Cargo.toml").read_text()
-        self.assertScope([("Cargo.toml", root + "# note\n", ALL)] + [(path, "x = 1\n", ALL) for path in (
-            "Cargo.lock", ".cargo/config.toml", ".cargo/mutants.toml",
+        self.assertScope([("Cargo.toml", root + "\n[profile.release]\nopt-level = 1\n", ALL)]
+                         + [(path, "x = 1\n", ALL) for path in (
+            ".cargo/config.toml", ".cargo/mutants.toml",
             "rust-toolchain.toml", ".config/nextest.toml", ".github/workflows/ci.yml",
             "ci/gates/mutation-terminated.txt", "ci/gates/coverage-tiers.sh", "ci/affected.py",
             "tools/gen.rs", ".gitattributes")])
+
+    def test_scope_lockfile_is_empty(self):
+        self.assertScope([("Cargo.lock", "version = 4\n", [])])
+
+    def test_scope_dependency_tables_only_are_empty(self):
+        deps = ('\n[dependencies]\ngamma = { path = "../gamma" }\n'
+                '\n[dev-dependencies]\nx = "1"\n\n[build-dependencies]\ny = "1"\n'
+                '\n[target.\'cfg(unix)\'.dependencies]\nz = "1"\n'
+                '\n[target.\'cfg(unix)\'.dev-dependencies]\nw = "1"\n'
+                '\n[target.\'cfg(unix)\'.build-dependencies]\nv = "1"\n')
+        root = (self.root / "Cargo.toml").read_text()
+        self.assertScope([("crates/beta/Cargo.toml", MANIFEST.format(n="beta", extra=deps), []),
+                          ("Cargo.toml", root + '\n[workspace.dependencies]\nx = "1"\n', [])])
+
+    def test_scope_manifest_comment_or_format_is_empty(self):
+        root = (self.root / "Cargo.toml").read_text()
+        self.assertScope([("crates/beta/Cargo.toml",
+                           '# note\n[package]\nname    = "beta"\nversion = "0.1.0"\nedition = "2021"\n', []),
+                          ("Cargo.toml", "# note\n" + root.replace(" = ", "   =   "), [])])
+
+    def test_scope_dependency_and_other_table_still_widens(self):
+        root = (self.root / "Cargo.toml").read_text()
+        self.assertScope([("crates/beta/Cargo.toml",
+                           MANIFEST.format(n="beta", extra='\n[dependencies]\nx = "1"\n\n[features]\nf = []\n'),
+                           ["beta"]),
+                          ("Cargo.toml", root + '\n[workspace.dependencies]\nx = "1"\n\n[profile.dev]\nopt-level = 1\n',
+                           ALL)])
+
+    def test_scope_an_added_or_once_unparseable_manifest_still_widens(self):
+        self.assertScope([("crates/alpha/sub/Cargo.toml", MANIFEST.format(n="sub", extra=""), ["alpha"])])
+        self.put("crates/beta/Cargo.toml", "[package\n")
+        self.commit("break")
+        self.change("crates/beta/Cargo.toml", MANIFEST.format(n="beta", extra=""))
+        self.assertEqual(self.scope(), ["beta"])
 
     def test_scope_a_crate_outside_the_mutation_contract_is_empty(self):
         self.assertScope([("crates/gamma/src/prompt.txt", "data\n", []),
