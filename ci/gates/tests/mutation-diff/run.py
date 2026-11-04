@@ -37,7 +37,11 @@ def run_cli(*args, env=None):
 class ChangedLines(unittest.TestCase):
     def test_changed_lines_new_side_only(self):
         text = diff("@@ -36,3 +36,3 @@\n ctx\n-old\n+new\n ctx\n")
-        self.assertEqual(md.changed_lines(text), {F: {37}})
+        self.assertEqual(md.changed_lines(text), {F: {36, 37}})
+
+    def test_replacement_marks_the_line_before_not_after(self):
+        text = diff("@@ -4,6 +4,4 @@\n a4\n-b\n-c\n-d\n+n5\n e6\n f7\n")
+        self.assertEqual(md.changed_lines(text), {F: {4, 5}})
 
     def test_non_rs_files_ignored(self):
         text = diff("@@ -1 +1 @@\n-a\n+b\n", path="README.md")
@@ -46,7 +50,7 @@ class ChangedLines(unittest.TestCase):
     def test_rename_keys_new_path(self):
         text = ("diff --git a/a.rs b/b.rs\nsimilarity index 90%\nrename from a.rs\nrename to b.rs\n"
                 "--- a/a.rs\n+++ b/b.rs\n@@ -1,2 +1,2 @@\n x\n-y\n+z\n")
-        self.assertEqual(md.changed_lines(text), {"b.rs": {2}})
+        self.assertEqual(md.changed_lines(text), {"b.rs": {1, 2}})
 
     def test_deletion_maps_to_its_neighbours(self):
         text = diff("@@ -190,3 +190,2 @@\n ctx190\n-gone\n ctx191\n")
@@ -88,13 +92,13 @@ class ChangedLines(unittest.TestCase):
             md.changed_lines(diff("@@ nonsense @@\n a\n"))
 
     def test_omitted_counts_parse(self):
-        self.assertEqual(md.changed_lines(diff("@@ -421 +436 @@\n-a\n+b\n")), {F: {436}})
+        self.assertEqual(md.changed_lines(diff("@@ -421 +436 @@\n-a\n+b\n")), {F: {435, 436}})
         text = diff("@@ -0,0 +1 @@\n+fn x() {}\n", header=f"diff --git a/{F} b/{F}\nnew file mode 100644\n--- /dev/null\n+++ b/{F}\n")
         self.assertEqual(md.changed_lines(text), {F: {1}})
 
     def test_no_newline_marker_counts_toward_neither_side(self):
         text = diff("@@ -1,2 +1,2 @@\n a\n-b\n\\ No newline at end of file\n+c\n\\ No newline at end of file\n")
-        self.assertEqual(md.changed_lines(text), {F: {2}})
+        self.assertEqual(md.changed_lines(text), {F: {1, 2}})
 
     def test_pure_rename_has_no_lines_and_passes(self):
         text = "diff --git a/a.rs b/b.rs\nsimilarity index 100%\nrename from a.rs\nrename to b.rs\n"

@@ -184,6 +184,17 @@ jobs:
         run: python3 ci/gates/tests/mutation-gate/run.py
       - name: Gate — mutation-diff changed lines, classification and scope (#593)
         run: python3 ci/gates/tests/mutation-diff/run.py
+      - name: Cache cargo-mutants executable
+        id: mutants-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-mutants
+          key: cargo-mutants-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml') }}-27.1.0
+      - name: Install cargo-mutants 27.1.0
+        if: steps.mutants-cache.outputs.cache-hit != 'true'
+        run: cargo install cargo-mutants --version 27.1.0 --locked
+      - name: Gate — mutation-diff changed lines conform to real cargo-mutants --in-diff (#593)
+        run: python3 ci/gates/tests/mutation-diff/conformance.py
       - name: Gate — the packages' audit.readers grant refuses hostile helper output (#500)
         run: bash ci/gates/tests/reader-grant/run.sh
       - name: Gate — the RPM erase removes the Vault port labels before the SELinux module (#584)

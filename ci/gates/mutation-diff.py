@@ -109,10 +109,10 @@ def hunk_lines(body, start, no_new_side):
         else:
             while k < len(body) and body[k] == "-":
                 k += 1
-            if k < len(body) and body[k] == "+":
-                continue
             if nxt - 1 >= 1:
                 marked.add(nxt - 1)
+            if k < len(body) and body[k] == "+":
+                continue
             # A pure deletion ending a hunk that has context sits at end of file: no following line.
             if k < len(body) or not has_context:
                 marked.add(nxt)
