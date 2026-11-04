@@ -4768,6 +4768,29 @@ printf '%s %s\n' "$(env -u GIT_DIR git -C "$mid_r" rev-parse base)" "$(env -u GI
   > "$mid_r/.git/info/grafts"
 expect_reject_because "mutation-in-diff/grafts-fail" "the repository has grafts" \
   mid_gate "$mid_r" "$mid_whole_edit" "[$mid_a,$mid_star]" 0
+mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
+printf 'pub mod alias;\n' >> "$mid_r/crates/a/src/lib.rs"
+printf 'pub fn allowed(x: u32) -> bool {\n    x > 10\n}\n' > "$mid_r/crates/a/src/real.rs"
+ln -s real.rs "$mid_r/crates/a/src/alias.rs"
+mid_git "$mid_r" add -A
+mid_git "$mid_r" commit -qm alias
+mid_git "$mid_r" tag -f base
+printf 'pub fn allowed(x: u32) -> bool {\n    x > 20\n}\n' > "$mid_r/crates/a/src/real.rs"
+mid_git "$mid_r" commit -qam real
+mid_alias='[{"name":"allowed gt","package":"a","file":"crates/a/src/alias.rs","span":{"start":{"line":2,"column":5},"end":{"line":2,"column":11}}}]'
+expect_reject_because "mutation-in-diff/symlinked-source-fails" "symlink crates/a/src/alias.rs in mutation crate a" \
+  mid_gate "$mid_r" "$mid_alias" "" 0
+mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
+printf '[package]\nname = "a"\nversion = "0.1.0"\nedition = "2021"\nbuild = "src/build.rs"\n' > "$mid_r/crates/a/Cargo.toml"
+printf 'mod helper;\nfn main() {\n    helper::emit();\n}\n' > "$mid_r/crates/a/src/build.rs"
+printf 'pub fn emit() {\n    println!("cargo:rustc-cfg=fast");\n}\n' > "$mid_r/crates/a/src/helper.rs"
+mid_git "$mid_r" add -A
+mid_git "$mid_r" commit -qm build
+mid_git "$mid_r" tag -f base
+printf 'pub fn emit() {\n    println!("cargo:rustc-cfg=slow");\n}\n' > "$mid_r/crates/a/src/helper.rs"
+mid_git "$mid_r" commit -qam helper
+expect_reject_because "mutation-in-diff/build-script-in-src-fails" "build script crates/a/src/build.rs of mutation crate a lies inside a diff-mapped directory" \
+  mid_gate "$mid_r" "$mid_whole_edit" "" 0
 
 # ---- payload-xattr-clean (#332): an AppleDouble sibling per tagged entry ------
 # pkgbuild serialises a `._name` AppleDouble sibling INTO the payload for every

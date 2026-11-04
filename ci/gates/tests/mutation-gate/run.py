@@ -320,7 +320,7 @@ class InDiff(unittest.TestCase):
         fake_cargo(self.aux / "tools")
 
     def in_diff_repo(self, changes, *, names=("a", "b"), base_crates=None, features="",
-                     config=None, base_files=None):
+                     config=None, base_files=None, links=None):
         repo = self.tmp / "repo"
         crates = list(base_crates or names)
         files = {
@@ -339,6 +339,8 @@ class InDiff(unittest.TestCase):
             files[f"ci/gates/{name}"] = (ROOT / "ci/gates" / name).read_text()
         files["ci/affected.py"] = (ROOT / "ci/affected.py").read_text()
         write_tree(repo, files)
+        for name, target in (links or {}).items():
+            (repo / name).symlink_to(target)
         git(repo, "init", "-q", "-b", "main")
         for key, value in (config or {}).items():
             git(repo, "config", key, value)
@@ -832,6 +834,63 @@ class InDiff(unittest.TestCase):
         self.assertEqual(run[:3], ["mutants", "--package", "a"])
         self.assertNotIn("--in-diff", run)
 
+    def test_in_diff_symlinked_source_fails(self):
+        real = "crates/a/src/real.rs"
+        repo = self.in_diff_repo({real: GATE_RS.replace("10", "20")},
+                                 base_files={A_RS: LIB_A + "pub mod alias;\n", real: GATE_RS},
+                                 links={"crates/a/src/alias.rs": "real.rs"})
+        alias = "crates/a/src/alias.rs"
+        result, out = self.gate(repo, whole=[listed(f"{alias}:2:7: replace > with == in allowed",
+                                                    "a", alias, 2)])
+        self.assertFails(result, out, "FAIL: --in-diff: symlink crates/a/src/alias.rs in mutation "
+                         "crate a; in-diff mapping cannot follow aliases — use the whole-package run")
+        self.assertEqual(self.invocations(), [])
+
+    def test_in_diff_symlink_into_a_mutation_crate_fails(self):
+        repo = self.in_diff_repo(EDIT_A, links={"alias": "crates/a/src"})
+        result, out = self.gate(repo, whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2])
+        self.assertFails(result, out, "FAIL: --in-diff: symlink alias in mutation crate a;")
+        self.assertEqual(self.invocations(), [])
+
+    def test_in_diff_symlink_outside_every_mutation_crate_is_accepted(self):
+        repo = self.in_diff_repo(EDIT_A, base_files={"AGENTS.md": "guidance\n"},
+                                 links={"CLAUDE.md": "AGENTS.md"})
+        result, out = self.gate(repo, whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2])
+        self.assertEqual(result.returncode, 0, out)
+        self.assertIn("RUN a: 2 in-diff mutants", out)
+
+    def test_in_diff_build_script_inside_src_fails(self):
+        helper = "crates/a/src/helper.rs"
+        for script in ("src/build.rs", "tests/build.rs", "benches/build.rs", "examples/build.rs"):
+            with self.subTest(script=script):
+                shutil.rmtree(self.tmp / "repo", ignore_errors=True)
+                manifest = package_toml("a") + f'build = "{script}"\n\n[features]\nextra = []\n'
+                repo = self.in_diff_repo({helper: BUILD_HELPER.replace("fast", "slow")},
+                                         base_files={"crates/a/Cargo.toml": manifest,
+                                                     f"crates/a/{script}": BUILD_MAIN,
+                                                     helper: BUILD_HELPER})
+                result, out = self.gate(repo, whole=WHOLE_EDIT)
+                self.assertFails(result, out, f"FAIL: --in-diff: build script crates/a/{script} of "
+                                 "mutation crate a lies inside a diff-mapped directory — use the "
+                                 "whole-package run")
+                self.assertEqual(self.invocations(), [])
+
+    def test_in_diff_root_build_script_helper_runs_that_crate_whole(self):
+        cases = {"crates/a/helper.rs": BUILD_MAIN,
+                 "crates/a/src/helper.rs": BUILD_MAIN.replace("mod helper;", "mod src {\n    pub mod helper;\n}")
+                 .replace("helper::emit", "src::helper::emit")}
+        for helper, script in cases.items():
+            with self.subTest(helper=helper):
+                shutil.rmtree(self.tmp / "repo", ignore_errors=True)
+                repo = self.in_diff_repo({helper: BUILD_HELPER.replace("fast", "slow")},
+                                         base_files={"crates/a/build.rs": script, helper: BUILD_HELPER})
+                result, out = self.gate(repo, whole=WHOLE_EDIT)
+                self.assertEqual(result.returncode, 0, out)
+                self.assertIn("whole: a: mutation scope changed", out)
+                whole = [run for run in self.runs() if run[2] == "a"]
+                self.assertEqual(len(whole), 1)
+                self.assertNotIn("--in-diff", whole[0])
+
 def git(repo, *args, input=None):
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     return subprocess.run(["git", "-C", str(repo), "-c", "user.name=fixture", "-c",
@@ -888,6 +947,9 @@ WHOLE_EDIT = [listed(f"{A_RS}:2:5: replace a -> u32 with 0", "a", A_RS, 2, 4),
               listed(f"{A_RS}:3:15: replace * with + in a", "a", A_RS, 3),
               listed(f"{A_RS}:8:5: replace d -> u32 with 0", "a", A_RS, 8),
               listed("crates/b/src/lib.rs:2:5: replace b -> u32 with 0", "b", "crates/b/src/lib.rs", 2)]
+GATE_RS = "pub fn allowed(x: u32) -> bool {\n    x > 10\n}\n"
+BUILD_MAIN = "mod helper;\nfn main() {\n    helper::emit();\n}\n"
+BUILD_HELPER = 'pub fn emit() {\n    println!("cargo:rustc-cfg=fast");\n}\n'
 DECISION = "crates/a/src/decision.rs"
 WHOLE_DECISION = [listed(f"{DECISION}:2:7: replace > with == in decide", "a", DECISION, 2)]
 WHOLE_DELETE = [listed(f"{A_RS}:2:5: replace a -> u32 with 0", "a", A_RS, 2, 3),

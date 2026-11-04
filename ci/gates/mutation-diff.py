@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import posixpath
 import re
 import subprocess
 import sys
@@ -343,16 +344,52 @@ def dependency_only(root, base_sha, head_sha, path):
             and without_dependencies(old_data) == without_dependencies(new_data))
 
 
+def within(path, directory):
+    return directory in (".", "") or path == directory or path.startswith(directory + "/")
+
+
+def join(directory, name):
+    return name if directory in (".", "") else f"{directory}/{name}"
+
+
+def build_scripts(root, sha, directory, present):
+    manifest = parse_toml(show(root, sha, join(directory, "Cargo.toml")))
+    package = manifest.get("package") if isinstance(manifest, dict) else None
+    build = package.get("build") if isinstance(package, dict) else None
+    if isinstance(build, str):
+        return [build]
+    if isinstance(build, list):
+        return [b for b in build if isinstance(b, str)]
+    if build is False:
+        return []
+    return ["build.rs"] if present(join(directory, "build.rs")) else []
+
+
+def script_path(directory, script):
+    if posixpath.isabs(script):
+        return None
+    path = posixpath.normpath(join(directory, script))
+    return None if path == ".." or path.startswith("../") else path
+
+
 def scope_crates(root, base, head, workspace=None):
     base_sha, head_sha = resolve(root, base), resolve(root, head)
     dirs = workspace_crates(workspace or root)
     head_tiers = tiers(show(root, head_sha, "coverage-tiers.toml"))
     mutants = head_tiers if head_tiers is not None else set(dirs)
     docs_only = affected().docs_only
+    script_dirs = {}
+    for crate in sorted(mutants & set(dirs)):
+        for sha in (base_sha, head_sha):
+            present = lambda path, sha=sha: show(root, sha, path) is not None
+            for script in build_scripts(root, sha, dirs[crate], present):
+                path = script_path(dirs[crate], script)
+                script_dirs.setdefault(crate, set()).add("." if path is None else posixpath.dirname(path))
     selected = set()
     for path in changed_names(root, base_sha, head_sha):
         if docs_only(path) or path == "Cargo.lock" or dependency_only(root, base_sha, head_sha, path):
             continue
+        selected.update(c for c, found in script_dirs.items() if any(within(path, d) for d in found))
         owner = owner_of(path, dirs)
         nested = owner is not None and dirs[owner] != "."
         rel = path[len(dirs[owner]) + 1:] if nested else path
@@ -362,18 +399,41 @@ def scope_crates(root, base, head, workspace=None):
             selected.update(mutants)
         elif owner in mutants:
             selected.add(owner)
-
-    for crate in mutants & set(dirs):
-        manifests = [parse_toml(show(root, sha, f"{dirs[crate]}/Cargo.toml"))
-                     for sha in (base_sha, head_sha)]
-        scripts = {d["package"].get("build") for d in manifests
-                   if isinstance(d, dict) and isinstance(d.get("package"), dict)}
-        for script in sorted(s for s in scripts if isinstance(s, str)):
-            path = f"{dirs[crate]}/{script}"
-            if show(root, base_sha, path) != show(root, head_sha, path):
-                selected.add(crate)
-
     return sorted(selected & mutants)
+
+
+def unmappable(root, head, workspace):
+    sha = resolve(root, head)
+    dirs = workspace_crates(workspace)
+    head_tiers = tiers(show(root, sha, "coverage-tiers.toml"))
+    mutants = sorted((head_tiers if head_tiers is not None else set(dirs)) & set(dirs))
+    listing = git(root, "ls-tree", "-r", "-z", "--full-tree", sha)
+    if listing.returncode != 0:
+        raise ScopeError(f"FAIL: git ls-tree {sha} failed: {listing.stderr.decode().strip()}")
+    paths, links = set(), []
+    for record in listing.stdout.split(b"\0"):
+        if not record:
+            continue
+        meta, _, raw = record.partition(b"\t")
+        paths.add(raw.decode())
+        if meta.split(b" ")[0] == b"120000":
+            links.append(raw.decode())
+    tree = Path(workspace).resolve()
+    for crate in mutants:
+        directory = dirs[crate]
+        for link in sorted(links):
+            target = os.path.relpath(os.path.realpath(tree / link), tree)
+            if within(link, directory) or within(target, directory) or within(directory, target):
+                return (f"FAIL: --in-diff: symlink {link} in mutation crate {crate}; in-diff mapping "
+                        "cannot follow aliases — use the whole-package run")
+        for script in build_scripts(root, sha, directory, paths.__contains__):
+            path = script_path(directory, script)
+            owner = None if path is None else owner_of(path, dirs)
+            rel = path if owner is None or dirs[owner] == "." else path[len(dirs[owner]) + 1:]
+            if path is None or (owner is not None and rel.split("/")[0] in SOURCE_DIRS):
+                return (f"FAIL: --in-diff: build script {path or script} of mutation crate {crate} "
+                        "lies inside a diff-mapped directory — use the whole-package run")
+    return None
 
 
 def untrusted_history(root):
@@ -461,10 +521,16 @@ def main(argv):
                 return 1
         elif len(argv) == 4 and command == "snapshot":
             snapshot(argv[1], argv[2], argv[3])
+        elif len(argv) == 4 and command == "unmappable":
+            problem = unmappable(*argv[1:])
+            if problem:
+                print(problem)
+                return 1
         else:
             print("FAIL: usage: mutation-diff.py changed-lines <diff> | classify <pkg> <diff> "
                   "<whole> <indiff> | scope <root> <base> <head> [<workspace>] | paths <root> <base> "
-                  "<diff> [<head>] | history <root> | snapshot <root> <rev> <dest>",
+                  "<diff> [<head>] | history <root> | snapshot <root> <rev> <dest> | "
+                  "unmappable <root> <head> <workspace>",
                   file=sys.stderr)
             return 1
     except (DiffError, ScopeError) as exc:

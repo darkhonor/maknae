@@ -495,6 +495,24 @@ class Scope(unittest.TestCase):
         self.change("crates/beta/src/build.rs", "fn main() {}\n")
         self.assertEqual(self.scope(), ["beta"])
 
+    def test_scope_any_change_under_a_build_scripts_directory_is_that_crate(self):
+        self.change("crates/beta/build.rs", "mod src {\n    mod helper;\n}\nfn main() {}\n")
+        self.assertScope([("crates/beta/src/helper.rs", "pub fn x() {}\n", ["beta"]),
+                          ("crates/beta/tests/t.rs", "fn t() {}\n", ["beta"]),
+                          ("crates/alpha/src/x.rs", "fn x() {}\n", [])])
+
+    def test_scope_a_named_build_script_directory_bounds_the_widening(self):
+        self.change("crates/beta/Cargo.toml",
+                    MANIFEST.format(n="beta", extra='build = "build/main.rs"\n'))
+        self.change("crates/beta/build/main.rs", "fn main() {}\n")
+        self.assertScope([("crates/beta/build/rule.rs", "fn r() {}\n", ["beta"]),
+                          ("crates/beta/src/x.rs", "fn x() {}\n", [])])
+
+    def test_scope_a_disabled_build_script_does_not_widen(self):
+        self.change("crates/beta/Cargo.toml", MANIFEST.format(n="beta", extra="build = false\n"))
+        self.change("crates/beta/build.rs", "fn main() {}\n")
+        self.assertScope([("crates/beta/src/x.rs", "fn x() {}\n", [])])
+
     def test_scope_reads_crate_directories_from_the_workspace_given(self):
         self.change("crates/beta/src/prompt.txt", "data\n")
         snapshot = Path(tempfile.mkdtemp()) / "snap"
@@ -527,6 +545,103 @@ class Scope(unittest.TestCase):
         result = run_cli("scope", str(self.root), "--help", "HEAD")
         self.assertEqual(result.returncode, 1)
         self.assertIn("FAIL:", result.stderr)
+
+
+class Unmappable(unittest.TestCase):
+    setUp, git, put, commit = Scope.setUp, Scope.git, Scope.put, Scope.commit
+
+    def check(self, env=None):
+        return run_cli("unmappable", str(self.root), "HEAD", str(self.root),
+                       env=dict(os.environ, **(env or {})))
+
+    def assertRefused(self, *texts):
+        result = self.check()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        for text in texts:
+            self.assertIn(text, result.stdout)
+
+    def assertAccepted(self):
+        result = self.check()
+        self.assertEqual((result.returncode, result.stdout), (0, ""), result.stderr)
+
+    def link(self, path, target):
+        (self.root / path).symlink_to(target)
+        self.commit("link")
+
+    def test_unmappable_plain_workspace_is_accepted(self):
+        self.assertAccepted()
+
+    def test_unmappable_symlink_inside_a_mutation_crate_is_refused(self):
+        self.put("crates/beta/src/real.rs", "")
+        self.link("crates/beta/src/alias.rs", "real.rs")
+        self.assertRefused("FAIL: --in-diff: symlink crates/beta/src/alias.rs in mutation crate beta; "
+                           "in-diff mapping cannot follow aliases — use the whole-package run")
+
+    def test_unmappable_symlink_aliasing_a_mutation_crate_is_refused(self):
+        for target in ("crates/alpha/src", "crates", "."):
+            with self.subTest(target=target):
+                self.link("alias", target)
+                try:
+                    self.assertRefused("FAIL: --in-diff: symlink alias in mutation crate alpha;")
+                finally:
+                    self.git("reset", "-q", "--hard", "HEAD~1")
+
+    def test_unmappable_symlink_outside_every_mutation_crate_is_accepted(self):
+        self.put("AGENTS.md", "x\n")
+        self.link("CLAUDE.md", "AGENTS.md")
+        self.put("crates/gamma/src/real.rs", "")
+        self.link("crates/gamma/src/alias.rs", "real.rs")
+        self.assertAccepted()
+
+    def test_unmappable_build_script_in_a_mapped_directory_is_refused(self):
+        for script in ("src/build.rs", "./tests/build.rs", "benches/b/build.rs", "examples/build.rs",
+                       "../alpha/src/build.rs", "/abs/build.rs", "../../../build.rs"):
+            with self.subTest(script=script):
+                self.put("crates/beta/Cargo.toml", MANIFEST.format(n="beta", extra=f'build = "{script}"\n'))
+                self.commit("build")
+                try:
+                    result = self.check()
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertRegex(result.stdout, r"^FAIL: --in-diff: build script \S+ of mutation "
+                                     r"crate beta lies inside a diff-mapped directory — use the "
+                                     r"whole-package run\n$")
+                finally:
+                    self.git("reset", "-q", "--hard", "HEAD~1")
+        self.put("crates/beta/Cargo.toml", MANIFEST.format(n="beta", extra='build = "src/build.rs"\n'))
+        self.commit("build")
+        self.assertRefused("build script crates/beta/src/build.rs of mutation crate beta")
+
+    def test_unmappable_build_script_outside_mapped_directories_is_accepted(self):
+        cases = {"build.rs": "", "build/main.rs": 'build = "build/main.rs"\n',
+                 "src/build.rs": "build = false\n", "srcs/build.rs": 'build = "srcs/build.rs"\n'}
+        for script, extra in cases.items():
+            with self.subTest(script=script):
+                self.put("crates/beta/Cargo.toml", MANIFEST.format(n="beta", extra=extra))
+                self.put(f"crates/beta/{script}", "fn main() {}\n")
+                self.commit("build")
+                try:
+                    self.assertAccepted()
+                finally:
+                    self.git("reset", "-q", "--hard", "HEAD~1")
+
+    def test_unmappable_build_script_in_a_non_mutation_crate_is_ignored(self):
+        self.put("crates/gamma/Cargo.toml", MANIFEST.format(n="gamma", extra='build = "src/build.rs"\n'))
+        self.commit("build")
+        self.assertAccepted()
+
+    def test_unmappable_reads_heads_tree_not_the_working_tree(self):
+        self.put("crates/beta/src/real.rs", "")
+        (self.root / "crates/beta/src/alias.rs").symlink_to("real.rs")
+        self.assertAccepted()
+
+    def test_unmappable_git_env_is_ignored(self):
+        self.put("crates/beta/src/real.rs", "")
+        self.link("crates/beta/src/alias.rs", "real.rs")
+        bogus = tempfile.mkdtemp()
+        self.addCleanup(os.rmdir, bogus)
+        result = self.check({"GIT_DIR": bogus, "GIT_INDEX_FILE": bogus + "/idx"})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("symlink crates/beta/src/alias.rs", result.stdout)
 
 
 class Snapshot(unittest.TestCase):

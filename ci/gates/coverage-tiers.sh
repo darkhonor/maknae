@@ -687,6 +687,9 @@ print("\n".join(crates))' 2>/dev/null)"; then
     if [ "$oracle_ok" -ne 1 ]; then
       printf 'FAIL: --in-diff: changed files cannot be mapped to crates without cargo metadata\n'; exit 1
     fi
+    if ! problem="$(python3 "$here/mutation-diff.py" unmappable "$root" "$head_oid" "$snap" 2>&1)"; then
+      printf '%s\n' "${problem:-FAIL: --in-diff: the unmappable-shape check printed nothing}"; exit 1
+    fi
     while IFS= read -r path; do
       [ -z "$path" ] && continue
       owner="" owner_len=-1
