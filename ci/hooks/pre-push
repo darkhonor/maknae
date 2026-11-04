@@ -5,9 +5,12 @@
 # selected packages; a new ref's base is <remote>/HEAD or MAKNAE_PRE_PUSH_MUTANTS_BASE.
 set -euo pipefail
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR GIT_ALTERNATE_OBJECT_DIRECTORIES \
-  GIT_LITERAL_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_GLOB_PATHSPECS GIT_ICASE_PATHSPECS
+  GIT_LITERAL_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_GLOB_PATHSPECS GIT_ICASE_PATHSPECS GIT_GRAFT_FILE
 export GIT_NO_REPLACE_OBJECTS=1
 root="$(env -u GIT_DIR -u GIT_WORK_TREE git rev-parse --show-toplevel)"
+if [ "${MAKNAE_PRE_PUSH_MUTANTS:-0}" = 1 ]; then
+  python3 "$root/ci/affected.py" --root "$root" --check-history
+fi
 selection="$(mktemp "${TMPDIR:-/tmp}/maknae-push.XXXXXXXX")"
 trap 'rm -f "$selection"' EXIT
 build=0

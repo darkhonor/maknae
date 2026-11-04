@@ -18,16 +18,16 @@ fi
 
 in_diff_git_env=(-u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_COMMON_DIR
   -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_LITERAL_PATHSPECS -u GIT_NOGLOB_PATHSPECS
-  -u GIT_GLOB_PATHSPECS -u GIT_ICASE_PATHSPECS GIT_NO_REPLACE_OBJECTS=1)
-in_diff_generate() { # <base> <out>
+  -u GIT_GLOB_PATHSPECS -u GIT_ICASE_PATHSPECS -u GIT_GRAFT_FILE GIT_NO_REPLACE_OBJECTS=1)
+in_diff_generate() { # <base> <out> [<head>]
   env -u GIT_DIFF_OPTS -u GIT_EXTERNAL_DIFF "${in_diff_git_env[@]}" \
     git -C "$root" -c diff.noprefix=false -c diff.mnemonicPrefix=false -c diff.suppressBlankEmpty=false \
     -c core.quotePath=true diff --text --no-ext-diff --no-textconv --no-color --unified=3 \
-    --src-prefix=a/ --dst-prefix=b/ --find-renames "$1" HEAD -- '*.rs' >"$2"
+    --src-prefix=a/ --dst-prefix=b/ --find-renames "$1" "${3:-HEAD}" -- '*.rs' >"$2"
 }
 [ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR GIT_ALTERNATE_OBJECT_DIRECTORIES \
-  GIT_LITERAL_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_GLOB_PATHSPECS GIT_ICASE_PATHSPECS
+  GIT_LITERAL_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_GLOB_PATHSPECS GIT_ICASE_PATHSPECS GIT_GRAFT_FILE
 export GIT_NO_REPLACE_OBJECTS=1
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -224,11 +224,11 @@ if [ "$has_env_bound" -eq 1 ]; then
 fi
 
 # ---- name oracle + sync helper ---------------------------------------------
-resolve_crate_dirs() {
+resolve_crate_dirs() { # [<workspace dir>]
   # populates crate_dir_map from cargo metadata on live roots (injection map already loaded)
   [ "$injection" -eq 1 ] && return 0
-  local meta
-  if ! meta="$(cd "$root" && cargo metadata --manifest-path "$root/Cargo.toml" --no-deps --format-version 1)"; then
+  local meta ws="${1:-$root}"
+  if ! meta="$(cd "$ws" && cargo metadata --manifest-path "$ws/Cargo.toml" --no-deps --format-version 1)"; then
     return 1
   fi
   local parsed
@@ -239,7 +239,7 @@ root = os.path.realpath(sys.argv[1])
 for p in m["packages"]:
     d = os.path.relpath(os.path.realpath(os.path.dirname(p["manifest_path"])), root)
     print(p["name"] + "\t" + d)
-' "$root")"; then
+' "$ws")"; then
     return 1
   fi
   while IFS=$'\t' read -r name dir; do
@@ -607,29 +607,23 @@ if [ "$mutants_mode" != "" ]; then
   fi
   declare -A in_scope=()
   in_diff_file=""
+  mut_dir="$root"
   if [ -n "$in_diff" ]; then
     in_git() { env "${in_diff_git_env[@]}" git -C "$root" "$@"; }
     toplevel="$(in_git rev-parse --show-toplevel 2>/dev/null || true)"
     if [ -z "$toplevel" ] || [ "$(cd -P "$toplevel" && pwd)" != "$(cd -P "$root" && pwd)" ]; then
       printf 'FAIL: --in-diff needs --root at the git toplevel (%s is not)\n' "$root"; exit 1
     fi
-    shallow="$(in_git rev-parse --is-shallow-repository 2>&1 || true)"
-    case "$shallow" in
-      false) ;;
-      true) printf 'FAIL: --in-diff: the repository is shallow; the merge base cannot be trusted\n'; exit 1;;
-      *) printf 'FAIL: --in-diff: cannot tell whether the repository is shallow: %s\n' "$shallow"; exit 1;;
-    esac
-    if ! grafts="$(in_git rev-parse --git-path info/grafts)" || [ -z "$grafts" ]; then
-      printf 'FAIL: --in-diff: cannot locate info/grafts in %s\n' "$root"; exit 1
-    fi
-    case "$grafts" in /*) ;; *) grafts="$root/$grafts";; esac
-    if [ -e "$grafts" ] || [ -L "$grafts" ]; then
-      printf 'FAIL: --in-diff: the repository has grafts (%s); history cannot be trusted\n' "$grafts"; exit 1
+    if ! problem="$(python3 "$here/mutation-diff.py" history "$root" 2>&1)"; then
+      printf 'FAIL: --in-diff: %s\n' "${problem:-the history check printed nothing}"; exit 1
     fi
     if ! rev_oid="$(in_git rev-parse --verify --quiet --end-of-options "$in_diff^{commit}")" || [ -z "$rev_oid" ]; then
       printf 'FAIL: --in-diff: %s is not a commit\n' "$in_diff"; exit 1
     fi
-    if ! base="$(in_git merge-base --end-of-options "$rev_oid" HEAD)" || [ -z "$base" ]; then
+    if ! head_oid="$(in_git rev-parse --verify --quiet 'HEAD^{commit}')" || [ -z "$head_oid" ]; then
+      printf 'FAIL: --in-diff: HEAD is not a commit\n'; exit 1
+    fi
+    if ! base="$(in_git merge-base --end-of-options "$rev_oid" "$head_oid")" || [ -z "$base" ]; then
       printf 'FAIL: --in-diff: no merge base between %s and HEAD\n' "$in_diff"; exit 1
     fi
     if ! dirty="$(in_git status --porcelain --untracked-files=all)"; then
@@ -639,14 +633,32 @@ if [ "$mutants_mode" != "" ]; then
       printf 'FAIL: --in-diff attests to HEAD; uncommitted or untracked: %s\n' \
         "$(printf '%s\n' "$dirty" | cut -c4- | tr '\n' ' ')"; exit 1
     fi
+    snap="$mut_tmp/snapshot"
+    if ! out="$(python3 "$here/mutation-diff.py" snapshot "$root" "$head_oid" "$snap" 2>&1)"; then
+      printf 'FAIL: --in-diff: cannot snapshot HEAD: %s\n' "$out"; exit 1
+    fi
+    attested=(coverage-tiers.toml)
+    if [ "$(cd -P "$here" && pwd)" = "$(cd -P "$root" && pwd)/ci/gates" ]; then
+      attested+=(ci/affected.py ci/gates/coverage-tiers.sh ci/gates/mutation-oracle.sh
+                 ci/gates/mutation-platform.sh ci/gates/mutation-diff.py ci/gates/mutation-terminated.txt)
+    fi
+    for rel in "${attested[@]}"; do
+      if { [ -e "$root/$rel" ] || [ -e "$snap/$rel" ]; } && ! cmp -s -- "$root/$rel" "$snap/$rel"; then
+        printf 'FAIL: --in-diff: %s in the working tree is not HEAD'"'"'s\n' "$rel"; exit 1
+      fi
+    done
+    toml="$snap/coverage-tiers.toml"
+    mut_dir="$snap"
+    crate_dir_map=()
+    if resolve_crate_dirs "$snap"; then oracle_ok=1; else oracle_ok=0; fi
     in_diff_file="$mut_tmp/in.diff"
-    if ! in_diff_generate "$base" "$in_diff_file"; then
+    if ! in_diff_generate "$base" "$in_diff_file" "$head_oid"; then
       printf 'FAIL: --in-diff: git diff %s HEAD failed\n' "$base"; exit 1
     fi
-    if ! changed_paths="$(python3 "$here/mutation-diff.py" paths "$root" "$base" "$in_diff_file" 2>&1)"; then
+    if ! changed_paths="$(python3 "$here/mutation-diff.py" paths "$root" "$base" "$in_diff_file" "$head_oid" 2>&1)"; then
       printf 'FAIL: --in-diff: the diff does not name the changed Rust files: %s\n' "$changed_paths"; exit 1
     fi
-    if ! scope="$(python3 "$here/mutation-diff.py" scope "$root" "$base" HEAD 2>"$mut_tmp/scope.err")" ||
+    if ! scope="$(python3 "$here/mutation-diff.py" scope "$root" "$base" "$head_oid" "$snap" 2>"$mut_tmp/scope.err")" ||
        ! scope_lines="$(printf '%s' "$scope" | python3 -c '
 import json, sys
 crates = json.load(sys.stdin)
@@ -742,8 +754,8 @@ print("\n".join(crates))' 2>/dev/null)"; then
         printf 'SKIP: %s: no Rust change between %s and HEAD\n' "$cname" "$base"
         continue
       else
-        if ! (cd "$root" && exec env "${run_env[@]}" cargo mutants --package "$cname" --list --json "${extra_mutants_flags[@]}") >"$mut_tmp/whole.json" ||
-           ! (cd "$root" && exec env "${run_env[@]}" cargo mutants --package "$cname" --in-diff "$in_diff_file" --list --json "${extra_mutants_flags[@]}") >"$mut_tmp/indiff.json"; then
+        if ! (cd "$mut_dir" && exec env "${run_env[@]}" cargo mutants --package "$cname" --list --json "${extra_mutants_flags[@]}") >"$mut_tmp/whole.json" ||
+           ! (cd "$mut_dir" && exec env "${run_env[@]}" cargo mutants --package "$cname" --in-diff "$in_diff_file" --list --json "${extra_mutants_flags[@]}") >"$mut_tmp/indiff.json"; then
           fail "cargo mutants --list --package $cname failed"
           continue
         fi
@@ -768,7 +780,7 @@ print("\n".join(crates))' 2>/dev/null)"; then
     # crate in the loop.
     mut_out="$root/target/mutants-$cname"
     rm -rf "$mut_out"
-    (cd "$root" && exec env "${run_env[@]}" cargo mutants --package "$cname" --output "$mut_out" "${diff_flags[@]}" "${extra_mutants_flags[@]}") &
+    (cd "$mut_dir" && exec env "${run_env[@]}" cargo mutants --package "$cname" --output "$mut_out" "${diff_flags[@]}" "${extra_mutants_flags[@]}") &
     mut_pid=$!
     if ! wait "$mut_pid"; then
       fail "cargo mutants --package $cname reported missed/timeout mutants"

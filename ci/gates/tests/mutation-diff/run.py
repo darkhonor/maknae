@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -339,6 +340,7 @@ class Paths(unittest.TestCase):
 
 MANIFEST = '[package]\nname = "{n}"\nversion = "0.1.0"\nedition = "2021"\n{extra}'
 TIERS = '[t1]\nmutants_crates = ["alpha", "beta"]\n'
+ALL = ["alpha", "beta"]
 
 
 class Scope(unittest.TestCase):
@@ -377,10 +379,11 @@ class Scope(unittest.TestCase):
         self.git("add", "-A")
         self.git("commit", "-q", "-m", message)
 
-    def scope(self, env=None):
+    def scope(self, env=None, workspace=None):
         base = self.git("rev-parse", "HEAD~1")
         full = dict(os.environ, **(env or {}))
-        result = run_cli("scope", str(self.root), base, "HEAD", env=full)
+        result = run_cli("scope", str(self.root), base, "HEAD", *([str(workspace)] if workspace else []),
+                         env=full)
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
 
@@ -388,180 +391,97 @@ class Scope(unittest.TestCase):
         self.put(path, text)
         self.commit("head")
 
-    def test_scope_no_change_is_empty(self):
-        self.put("README.md", "x")
-        self.commit("head")
-        self.assertEqual(self.scope(), [])
+    def assertScope(self, cases):
+        for path, text, expected in cases:
+            with self.subTest(path=path, text=text):
+                self.change(path, text)
+                try:
+                    self.assertEqual(self.scope(), expected)
+                finally:
+                    self.git("reset", "-q", "--hard", "HEAD~1")
 
-    def test_scope_comment_only_mutants_toml_is_empty(self):
-        self.change(".cargo/mutants.toml", '# note\nexclude_globs = ["crates/alpha/src/skip.rs"]\n')
-        self.assertEqual(self.scope(), [])
+    def test_scope_documentation_is_empty(self):
+        self.assertScope([("README.md", "x", []), ("packaging/README.md", "x", []),
+                          ("design/notes.md", "x", [])])
 
-    def test_scope_mutants_toml_attributed(self):
-        self.change(".cargo/mutants.toml",
-                    'exclude_globs = ["crates/alpha/src/skip.rs", "crates/beta/src/new.rs"]\n')
-        self.assertEqual(self.scope(), ["beta"])
+    def test_scope_rust_in_a_crate_target_dir_is_left_to_the_diff(self):
+        self.assertScope([(f"crates/beta/{d}/x.rs", "fn x() {}\n", [])
+                          for d in ("src", "tests", "benches", "examples")])
 
-    def test_scope_unattributable_mutants_toml_is_all(self):
-        self.change(".cargo/mutants.toml",
-                    'exclude_globs = ["crates/alpha/src/skip.rs"]\nexclude_re = ["some::thing"]\n')
-        self.assertEqual(self.scope(), ["alpha", "beta"])
+    def test_scope_non_rust_input_in_a_crate_is_that_crate(self):
+        self.assertScope([("crates/beta/src/prompt.txt", "data\n", ["beta"]),
+                          ("crates/beta/build_rule.rs", "pub fn emit() {}\n", ["beta"]),
+                          ("crates/beta/build.rs", "fn main() {}\n", ["beta"]),
+                          ("crates/beta/README.md", "could be include_str data\n", ["beta"]),
+                          ("crates/beta/tests/data/case.json", "{}\n", ["beta"]),
+                          ("crates/beta/Cargo.toml", "# note\n" + MANIFEST.format(n="beta", extra=""),
+                           ["beta"])])
 
-    def test_scope_other_key_change_is_all(self):
-        self.change(".cargo/mutants.toml",
-                    'exclude_globs = ["crates/alpha/src/skip.rs"]\nexamine_globs = ["x"]\n')
-        self.assertEqual(self.scope(), ["alpha", "beta"])
-
-    def test_scope_unparseable_base_is_all(self):
-        self.put(".cargo/mutants.toml", "exclude_globs = [\n")
-        self.commit("break")
-        self.put(".cargo/mutants.toml", 'exclude_globs = ["crates/alpha/src/skip.rs"]\n')
-        self.commit("fix")
-        self.assertEqual(self.scope(), ["alpha", "beta"])
-
-    def test_scope_toolchain_is_all(self):
-        self.change("rust-toolchain.toml", '[toolchain]\nchannel = "1.99.2"\n')
-        self.assertEqual(self.scope(), ["alpha", "beta"])
-
-    def test_scope_cargo_mutants_pin_is_all(self):
-        self.change(".github/workflows/ci.yml", "run: cargo install cargo-mutants --version 27.2.0 --locked\n")
-        self.assertEqual(self.scope(), ["alpha", "beta"])
-
-    def test_scope_gate_script_is_all(self):
-        for name in ("mutation-oracle.sh", "coverage-tiers.sh", "mutation-diff.py"):
-            self.change(f"ci/gates/{name}", "x\n")
-            self.assertEqual(self.scope(), ["alpha", "beta"], name)
-            self.git("reset", "-q", "--hard", "HEAD~1")
-
-    def test_scope_added_crate(self):
-        self.change("coverage-tiers.toml", '[t1]\nmutants_crates = ["alpha", "beta", "gamma"]\n')
-        self.assertEqual(self.scope(), ["gamma"])
-
-    def test_scope_removed_crate_is_not_selected(self):
-        self.change("coverage-tiers.toml", '[t1]\nmutants_crates = ["alpha"]\n')
-        self.assertEqual(self.scope(), [])
-
-    def test_scope_features_change(self):
-        self.change("coverage-tiers.toml",
-                    TIERS + 'mutants_features = { beta = ["x"] }\n')
-        self.assertEqual(self.scope(), ["beta"])
-
-    def test_scope_crate_features_is_that_crate(self):
-        self.change("crates/beta/Cargo.toml", MANIFEST.format(n="beta", extra='\n[features]\nx = []\n'))
-        self.assertEqual(self.scope(), ["beta"])
-
-    def test_scope_crate_dependency_tables_are_empty(self):
-        deps = ('\n[dependencies]\ngamma = { path = "../gamma" }\n'
-                '\n[dev-dependencies]\nx = "1"\n\n[build-dependencies]\ny = "1"\n'
-                '\n[target.\'cfg(unix)\'.dependencies]\nz = "1"\n'
-                '\n[target.\'cfg(unix)\'.dev-dependencies]\nw = "1"\n'
-                '\n[target.\'cfg(unix)\'.build-dependencies]\nv = "1"\n')
-        self.change("crates/beta/Cargo.toml", MANIFEST.format(n="beta", extra=deps))
-        self.assertEqual(self.scope(), [])
-
-    def test_scope_crate_manifest_comment_or_format_is_empty(self):
-        self.change("crates/beta/Cargo.toml",
-                    '# note\n[package]\nname    = "beta"\nversion = "0.1.0"\nedition = "2021"\n')
-        self.assertEqual(self.scope(), [])
-
-    def test_scope_crate_target_tables_are_that_crate(self):
-        for extra in ('\n[lib]\npath = "src/other.rs"\n', '\n[[bin]]\nname = "b"\npath = "src/b.rs"\n',
-                      '\n[[test]]\nname = "t"\n', '\n[[example]]\nname = "e"\n',
-                      '\n[[bench]]\nname = "x"\n', 'autobins = false\n',
-                      'build = "gen.rs"\n', 'autotests = false\n', '\n[lints.rust]\nunused = "deny"\n',
-                      'description = "d"\n', '\n[target.\'cfg(unix)\'.other]\nk = 1\n'):
-            with self.subTest(extra):
-                self.change("crates/beta/Cargo.toml", MANIFEST.format(n="beta", extra=extra))
-                self.assertEqual(self.scope(), ["beta"])
-                self.git("reset", "-q", "--hard", "HEAD~1")
-
-    def test_scope_crate_edition_is_that_crate(self):
-        self.change("crates/beta/Cargo.toml", MANIFEST.format(n="beta", extra="").replace("2021", "2024"))
-        self.assertEqual(self.scope(), ["beta"])
-
-    def test_scope_unparseable_crate_manifest_is_that_crate(self):
-        self.put("crates/beta/Cargo.toml", "[package\n")
-        self.commit("break")
-        self.change("crates/beta/Cargo.toml", MANIFEST.format(n="beta", extra=""))
-        self.assertEqual(self.scope(), ["beta"])
-
-    def test_scope_root_manifest_outside_workspace_dependencies_is_all(self):
-        root = '[workspace]\nmembers = ["crates/*"]\nresolver = "2"\n'
-        for extra in ('\n[workspace.lints.rust]\nunused = "deny"\n',
-                      '\n[profile.release]\nopt-level = 1\n', '\n[workspace.package]\nedition = "2024"\n'):
-            with self.subTest(extra):
-                self.change("Cargo.toml", root + extra)
-                self.assertEqual(self.scope(), ["alpha", "beta"])
-                self.git("reset", "-q", "--hard", "HEAD~1")
-        self.change("Cargo.toml", "# note\n" + root + '\n[workspace.dependencies]\nx = "1"\n')
-        self.assertEqual(self.scope(), [])
-
-    def test_scope_unparseable_root_manifest_is_all(self):
+    def test_scope_an_input_owned_by_no_crate_is_all(self):
         root = (self.root / "Cargo.toml").read_text()
-        self.put("Cargo.toml", "[workspace\n")
-        self.commit("break")
-        self.change("Cargo.toml", root)
-        self.assertEqual(self.scope(), ["alpha", "beta"])
+        self.assertScope([("Cargo.toml", root + "# note\n", ALL)] + [(path, "x = 1\n", ALL) for path in (
+            "Cargo.lock", ".cargo/config.toml", ".cargo/mutants.toml",
+            "rust-toolchain.toml", ".config/nextest.toml", ".github/workflows/ci.yml",
+            "ci/gates/mutation-terminated.txt", "ci/gates/coverage-tiers.sh", "ci/affected.py",
+            "tools/gen.rs", ".gitattributes")])
 
-    def test_scope_cargo_config_is_all(self):
-        for path in (".cargo/config.toml", ".cargo/config"):
-            with self.subTest(path):
-                self.change(path, '[build]\nrustflags = ["--cfg", "x"]\n')
-                self.assertEqual(self.scope(), ["alpha", "beta"])
-                self.git("reset", "-q", "--hard", "HEAD~1")
+    def test_scope_a_crate_outside_the_mutation_contract_is_empty(self):
+        self.assertScope([("crates/gamma/src/prompt.txt", "data\n", []),
+                          ("crates/gamma/src/lib.rs", "fn x() {}\n", [])])
 
-    def test_scope_build_script_is_that_crate(self):
-        self.change("crates/beta/build.rs", "fn main() {}\n")
+    def test_scope_a_nested_crate_owns_its_own_paths(self):
+        self.put("Cargo.toml", '[workspace]\nmembers = ["crates/*", "crates/beta/inner"]\nresolver = "2"\n')
+        self.put("crates/beta/inner/Cargo.toml", MANIFEST.format(n="inner", extra=""))
+        self.put("crates/beta/inner/src/lib.rs", "")
+        self.commit("nest")
+        self.assertScope([("crates/beta/inner/data.txt", "x\n", []),
+                          ("crates/beta/data.txt", "x\n", ["beta"])])
+
+    def test_scope_a_deletion_is_a_change(self):
+        self.put("crates/beta/src/prompt.txt", "data\n")
+        self.commit("add")
+        (self.root / "crates/beta/src/prompt.txt").unlink()
+        self.commit("remove")
         self.assertEqual(self.scope(), ["beta"])
-        self.change("crates/beta/build.rs", "fn main() { println!(); }\n")
-        self.assertEqual(self.scope(), ["beta"])
 
-    def test_scope_named_build_script_is_that_crate(self):
-        self.put("crates/beta/gen.rs", "fn main() {}\n")
-        self.change("crates/beta/Cargo.toml", MANIFEST.format(n="beta", extra='build = "gen.rs"\n'))
-        self.change("crates/beta/gen.rs", "fn main() { println!(); }\n")
-        self.assertEqual(self.scope(), ["beta"])
+    def test_scope_tiers_contract_change_is_all_of_head(self):
+        self.change("coverage-tiers.toml", '[t1]\nmutants_crates = ["alpha", "beta", "gamma"]\n')
+        self.assertEqual(self.scope(), ["alpha", "beta", "gamma"])
+        self.git("reset", "-q", "--hard", "HEAD~1")
+        self.change("coverage-tiers.toml", '[t1]\nmutants_crates = ["alpha"]\n')
+        self.assertEqual(self.scope(), ["alpha"])
 
-    def test_scope_unparseable_tiers_is_all(self):
+    def test_scope_unparseable_tiers_is_every_workspace_crate(self):
         self.change("coverage-tiers.toml", "[t1\n")
         self.assertEqual(self.scope(), ["alpha", "beta", "gamma"])
 
-    def test_scope_terminated_entry(self):
-        self.change("ci/gates/mutation-terminated.txt",
-                    "# header\nLinux\tcrates/alpha/src/a.rs\tf\t\\*=\twhy\nLinux\tcrates/beta/src/b.rs\tg\t.*\twhy\n")
+    def test_scope_build_script_inside_src_is_that_crate(self):
+        self.change("crates/beta/Cargo.toml", MANIFEST.format(n="beta", extra='build = "src/build.rs"\n'))
+        self.change("crates/beta/src/build.rs", "fn main() {}\n")
         self.assertEqual(self.scope(), ["beta"])
 
-    def test_scope_terminated_unsplittable_or_unmapped_is_all(self):
-        self.change("ci/gates/mutation-terminated.txt",
-                    "# header\nLinux\tcrates/alpha/src/a.rs\tf\t\\*=\twhy\nbroken line\n")
-        self.assertEqual(self.scope(), ["alpha", "beta"])
-        self.git("reset", "-q", "--hard", "HEAD~1")
-        self.change("ci/gates/mutation-terminated.txt",
-                    "# header\nLinux\tcrates/alpha/src/a.rs\tf\t\\*=\twhy\nLinux\tcrates/nowhere/x.rs\tg\t.*\twhy\n")
-        self.assertEqual(self.scope(), ["alpha", "beta"])
-
-    def test_scope_nextest_profile_is_io_and_sys(self):
-        self.put("crates/io/Cargo.toml", MANIFEST.format(n="maknae-io", extra=""))
-        self.put("crates/io/src/lib.rs", "")
-        self.put("crates/sys/Cargo.toml", MANIFEST.format(n="maknae-sys", extra=""))
-        self.put("crates/sys/src/lib.rs", "")
-        self.put("coverage-tiers.toml", '[t1]\nmutants_crates = ["alpha", "beta", "maknae-io", "maknae-sys"]\n')
-        self.commit("add io and sys")
-        self.change(".config/nextest.toml", "x = 1\n")
-        self.assertEqual(self.scope(), ["maknae-io", "maknae-sys"])
+    def test_scope_reads_crate_directories_from_the_workspace_given(self):
+        self.change("crates/beta/src/prompt.txt", "data\n")
+        snapshot = Path(tempfile.mkdtemp()) / "snap"
+        self.addCleanup(shutil.rmtree, snapshot.parent)
+        md.snapshot(self.root, "HEAD", snapshot)
+        self.put("Cargo.toml", '[workspace]\nmembers = ["crates/alpha"]\nresolver = "2"\n')
+        self.assertEqual(self.scope(), ALL)
+        self.assertEqual(self.scope(workspace=snapshot), ["beta"])
 
     def test_scope_git_env_is_ignored(self):
-        self.change("coverage-tiers.toml", '[t1]\nmutants_crates = ["alpha", "beta", "gamma"]\n')
+        self.change("crates/beta/src/prompt.txt", "data\n")
         bogus = tempfile.mkdtemp()
         self.addCleanup(os.rmdir, bogus)
-        self.assertEqual(self.scope({"GIT_DIR": bogus, "GIT_INDEX_FILE": bogus + "/idx"}), ["gamma"])
+        self.assertEqual(self.scope({"GIT_DIR": bogus, "GIT_INDEX_FILE": bogus + "/idx",
+                                     "GIT_LITERAL_PATHSPECS": "1"}), ["beta"])
 
     def test_scope_ignores_replace_refs(self):
-        self.change("coverage-tiers.toml", '[t1]\nmutants_crates = ["alpha", "beta", "gamma"]\n')
+        self.change("crates/beta/src/prompt.txt", "data\n")
         fake = self.git("commit-tree", "HEAD^{tree}", "-m", "fake")
         self.git("replace", self.git("rev-parse", "HEAD~1"), fake)
         self.assertEqual(self.git("diff", "HEAD~1", "HEAD"), "")
-        self.assertEqual(self.scope(), ["gamma"])
+        self.assertEqual(self.scope(), ["beta"])
 
     def test_scope_unresolvable_revision_exits_one(self):
         result = run_cli("scope", str(self.root), "no-such-rev", "HEAD")
@@ -572,6 +492,137 @@ class Scope(unittest.TestCase):
         result = run_cli("scope", str(self.root), "--help", "HEAD")
         self.assertEqual(result.returncode, 1)
         self.assertIn("FAIL:", result.stderr)
+
+
+class Snapshot(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.root = self.tmp / "repo"
+        self.root.mkdir()
+        self.git("init", "-q", "-b", "main")
+        for name, text in FILES.items():
+            (self.root / name).parent.mkdir(parents=True, exist_ok=True)
+            (self.root / name).write_text(text)
+        (self.root / "run.sh").chmod(0o755)
+        os.symlink("src/lib.rs", self.root / "link.rs")
+        self.git("add", "-A")
+        self.git("-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false",
+                 "commit", "-qm", "base")
+        self.dest = self.tmp / "snap"
+
+    def git(self, *args):
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        return subprocess.run(["git", "-C", str(self.root), *args], env=env, check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def tree(self, root):
+        return {p.relative_to(root).as_posix(): (p.is_symlink(), os.readlink(p) if p.is_symlink()
+                                                  else p.read_bytes(), p.lstat().st_mode & 0o777)
+                for p in sorted(root.rglob("*")) if p.is_symlink() or p.is_file()}
+
+    def test_snapshot_is_heads_raw_tree(self):
+        result = run_cli("snapshot", str(self.root), "HEAD", str(self.dest))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        got = self.tree(self.dest)
+        self.assertEqual(sorted(got), sorted([*FILES, "link.rs"]))
+        for name, text in FILES.items():
+            self.assertEqual(got[name][1], text.encode(), name)
+        self.assertEqual(got["run.sh"][2], 0o755)
+        self.assertEqual(got["src/lib.rs"][2], 0o644)
+        self.assertEqual(got["link.rs"][:2], (True, "src/lib.rs"))
+
+    def test_snapshot_ignores_local_state(self):
+        (self.root / ".git/info").mkdir(exist_ok=True)
+        (self.root / ".git/info/attributes").write_text(
+            "src/lib.rs export-ignore\nnotes.txt export-subst\n*.rs text eol=crlf\n")
+        self.git("update-index", "--assume-unchanged", "src/lib.rs")
+        (self.root / "src/lib.rs").write_text("// local\n")
+        (self.root / "untracked.rs").write_text("fn u() {}\n")
+        result = run_cli("snapshot", str(self.root), "HEAD", str(self.dest))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        got = self.tree(self.dest)
+        self.assertEqual(got["src/lib.rs"][1], FILES["src/lib.rs"].encode())
+        self.assertEqual(got["notes.txt"][1], FILES["notes.txt"].encode())
+        self.assertNotIn("untracked.rs", got)
+
+    def test_snapshot_ignores_replace_refs(self):
+        blob = subprocess.run(["git", "-C", str(self.root), "hash-object", "-w", "--stdin"],
+                              input="// replaced\n", capture_output=True, text=True, check=True).stdout.strip()
+        self.git("replace", "-f", self.git("rev-parse", "HEAD:src/lib.rs"), blob)
+        self.assertEqual(self.git("show", "HEAD:src/lib.rs"), "// replaced")
+        result = run_cli("snapshot", str(self.root), "HEAD", str(self.dest))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.dest / "src/lib.rs").read_text(), FILES["src/lib.rs"])
+
+    def test_snapshot_refuses_a_submodule(self):
+        commit = self.git("rev-parse", "HEAD")
+        self.git("update-index", "--add", "--cacheinfo", f"160000,{commit},vendor/sub")
+        self.git("-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false",
+                 "commit", "-qm", "sub")
+        result = run_cli("snapshot", str(self.root), "HEAD", str(self.dest))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("FAIL: HEAD has a commit at vendor/sub", result.stderr)
+
+    def test_snapshot_refuses_an_existing_destination(self):
+        self.dest.mkdir()
+        result = run_cli("snapshot", str(self.root), "HEAD", str(self.dest))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("FAIL:", result.stderr)
+
+
+FILES = {"src/lib.rs": "pub fn a() -> u32 {\n    1\n}\n", "notes.txt": "$Format:%H$\n",
+         "run.sh": "#!/bin/sh\n", "Cargo.toml": '[package]\nname = "s"\nversion = "0.1.0"\n'}
+
+
+class History(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.root = self.tmp / "repo"
+        self.root.mkdir()
+        self.git("init", "-q", "-b", "main")
+        for n in (1, 2):
+            (self.root / "f").write_text(f"{n}\n")
+            self.git("add", "-A")
+            self.git("-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false",
+                     "commit", "-qm", str(n))
+
+    def git(self, *args):
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        return subprocess.run(["git", "-C", str(self.root), *args], env=env, check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def history(self, root=None, env=None):
+        return run_cli("history", str(root or self.root), env=dict(os.environ, **(env or {})))
+
+    def test_history_clean_passes(self):
+        result = self.history()
+        self.assertEqual((result.returncode, result.stdout), (0, ""), result.stderr)
+
+    def test_history_refuses_substitution(self):
+        clone = self.tmp / "clone"
+        subprocess.run(["git", "clone", "-q", "--depth", "1", "--no-local", f"file://{self.root}", str(clone)],
+                       check=True, capture_output=True)
+        result = self.history(clone)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("the repository is shallow", result.stdout)
+        (self.root / ".git/info").mkdir(exist_ok=True)
+        (self.root / ".git/info/grafts").write_text(self.git("rev-parse", "HEAD") + "\n")
+        result = self.history()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("the repository has grafts", result.stdout)
+        (self.root / ".git/info/grafts").unlink()
+        self.git("replace", self.git("rev-parse", "HEAD~1"), self.git("rev-parse", "HEAD"))
+        result = self.history(env={"GIT_NO_REPLACE_OBJECTS": "1"})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("the repository has replace refs (refs/replace/", result.stdout)
+
+    def test_history_ignores_graft_file_env(self):
+        grafts = self.tmp / "grafts"
+        grafts.write_text(self.git("rev-parse", "HEAD") + "\n")
+        result = self.history(env={"GIT_GRAFT_FILE": str(grafts)})
+        self.assertEqual((result.returncode, result.stdout), (0, ""), result.stderr)
 
 
 if __name__ == "__main__":

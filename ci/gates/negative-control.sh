@@ -4619,8 +4619,16 @@ done
 if [ "$list" = 1 ]; then
   if [ -n "$indiff" ]; then json="$MID_INDIFF"; else json="$MID_WHOLE"; fi
   [ -z "$json" ] && exit 0
-  printf '%s' "$json" | python3 -c 'import json, sys
-print(json.dumps([m for m in json.load(sys.stdin) if m["package"] == sys.argv[1]]))' "$pkg"
+  printf '%s' "$json" | python3 -c 'import json, os, re, sys
+def found(m):
+    crate, sep, name = m["file"].rpartition("/src/")
+    if not os.path.isfile(m["file"]):
+        return False
+    if not sep or name == "lib.rs" or "/" in name:
+        return True
+    with open(os.path.join(crate, "src/lib.rs")) as f:
+        return re.search(r"\bmod " + re.escape(name[:-3]) + r"\s*;", f.read()) is not None
+print(json.dumps([m for m in json.load(sys.stdin) if m["package"] == sys.argv[1] and found(m)]))' "$pkg"
   exit 0
 fi
 mkdir -p "$out/mutants.out"
@@ -4705,9 +4713,13 @@ mid_r="$(mid_repo '' 'x * 6' Fixture.)"
 expect_reject_because "mutation-in-diff/git-diff-opts-mixed-change-fails" "in-diff listing dropped" \
   mid_gate "$mid_r" "$mid_whole_delete" "[$(mid_m 'd body' a 11 11)]" 0 GIT_DIFF_OPTS=-u0
 mid_r="$(mid_repo 'let z = y * 4;' 'x * 5' Fixture.)"
+mid_git "$mid_r" reset -q --hard base
 printf '*.rs -diff\n' > "$mid_r/.gitattributes"
 mid_git "$mid_r" add -A
-mid_git "$mid_r" commit -q --amend --no-edit
+mid_git "$mid_r" commit -qm attributes
+mid_git "$mid_r" tag -f base
+mid_lib "$mid_r/crates/a/src/lib.rs" 'let z = y * 4;' 'x * 5' Fixture.
+mid_git "$mid_r" commit -qam head
 expect_reject_because "mutation-in-diff/rs-diff-attribute-mapping-failure-fails" "the in-diff listing found none" \
   mid_gate "$mid_r" "$mid_whole_edit" "" 0
 mid_r="$(mid_repo 'let z = y * 4;' 'x * 5' Fixture.)"
@@ -4725,8 +4737,31 @@ mid_r="$(mid_repo 'let z = y * 4;' 'x * 5' Fixture.)"
 mid_fake="$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY \
   git -C "$mid_r" -c user.name=fixture -c user.email=fixture@example.invalid commit-tree 'HEAD^{tree}' -m fake)"
 mid_git "$mid_r" replace base "$mid_fake"
-expect_reject_because "mutation-in-diff/replaced-base-mapping-failure-fails" "the in-diff listing found none" \
-  mid_gate "$mid_r" "$mid_whole_edit" "" 0
+expect_reject_because "mutation-in-diff/replace-refs-fail" "the repository has replace refs" \
+  mid_gate "$mid_r" "$mid_whole_edit" "[$mid_a,$mid_star]" 0
+mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
+printf 'be brief\n' > "$mid_r/crates/a/src/prompt.txt"
+mid_git "$mid_r" add -A
+mid_git "$mid_r" commit -qm data
+mid_git "$mid_r" tag -f base
+printf 'be terse\n' > "$mid_r/crates/a/src/prompt.txt"
+mid_git "$mid_r" commit -qam prompt
+expect_reject_because "mutation-in-diff/include-str-data-survivor-fails" "reported missed/timeout mutants" \
+  mid_gate "$mid_r" "$mid_whole_edit" "" 2
+mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
+printf 'pub mod decision;\n' >> "$mid_r/crates/a/src/lib.rs"
+printf 'pub fn decide(x: u32) -> bool {\n    x > 3\n}\n' > "$mid_r/crates/a/src/decision.rs"
+mid_git "$mid_r" add -A
+mid_git "$mid_r" commit -qm decision
+mid_git "$mid_r" tag -f base
+printf 'pub fn decide(x: u32) -> bool {\n    x > 4\n}\n' > "$mid_r/crates/a/src/decision.rs"
+mid_git "$mid_r" commit -qam decide
+mid_git "$mid_r" update-index --assume-unchanged crates/a/src/lib.rs
+sed '/^pub mod decision;$/d' "$mid_r/crates/a/src/lib.rs" > "$mid_r/lib.rs.local"
+mv "$mid_r/lib.rs.local" "$mid_r/crates/a/src/lib.rs"
+mid_decision='[{"name":"decide gt","package":"a","file":"crates/a/src/decision.rs","span":{"start":{"line":2,"column":5},"end":{"line":2,"column":10}}}]'
+expect_reject_because "mutation-in-diff/assume-unchanged-mapping-failure-fails" "the in-diff listing found none" \
+  mid_gate "$mid_r" "$mid_decision" "" 0
 mid_r="$(mid_repo 'let z = y * 4;' 'x * 5' Fixture.)"
 mkdir -p "$mid_r/.git/info"
 printf '%s %s\n' "$(env -u GIT_DIR git -C "$mid_r" rev-parse base)" "$(env -u GIT_DIR git -C "$mid_r" rev-parse HEAD)" \

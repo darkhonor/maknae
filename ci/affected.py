@@ -13,13 +13,40 @@ import tomllib
 
 GIT_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR",
            "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_LITERAL_PATHSPECS", "GIT_NOGLOB_PATHSPECS",
-           "GIT_GLOB_PATHSPECS", "GIT_ICASE_PATHSPECS")
+           "GIT_GLOB_PATHSPECS", "GIT_ICASE_PATHSPECS", "GIT_GRAFT_FILE")
 
 
 def git_env():
     env = {k: v for k, v in os.environ.items() if k not in GIT_ENV}
     env['GIT_NO_REPLACE_OBJECTS'] = '1'
     return env
+
+
+def untrusted_history(root):
+    def git(*args):
+        done = subprocess.run(['git', '-C', str(root), *args], capture_output=True, env=git_env(),
+                              check=False)
+        return done.returncode, done.stdout.decode(errors='replace').strip(), \
+            done.stderr.decode(errors='replace').strip()
+
+    code, shallow, err = git('rev-parse', '--is-shallow-repository')
+    if code != 0 or shallow not in ('true', 'false'):
+        return 'cannot tell whether the repository is shallow: ' + err
+    if shallow == 'true':
+        return 'the repository is shallow; the merge base cannot be trusted'
+    code, grafts, _ = git('rev-parse', '--git-path', 'info/grafts')
+    if code != 0 or not grafts:
+        return f'cannot locate info/grafts in {root}'
+    grafts = Path(grafts) if os.path.isabs(grafts) else Path(root) / grafts
+    if grafts.exists() or grafts.is_symlink():
+        return f'the repository has grafts ({grafts}); history cannot be trusted'
+    code, replaced, err = git('for-each-ref', '--format=%(refname)', 'refs/replace/')
+    if code != 0:
+        return 'cannot list replace refs: ' + err
+    replaced = replaced.split()
+    if replaced:
+        return f'the repository has replace refs ({replaced[0]}); history cannot be trusted'
+    return None
 
 
 def read_toml(path):
@@ -101,6 +128,10 @@ def select(root, base, head, event):
         return subprocess.check_output(['git', '-C', str(root), *args], stderr=subprocess.PIPE,
                                        env=git_env())
 
+    if event == 'pull_request':
+        problem = untrusted_history(root)
+        if problem:
+            raise ValueError(problem)
     try:
         # Resolve first: even a user-supplied '--help' is data, never an option.
         base_id = git('rev-parse', '--verify', '--end-of-options', base + '^{commit}').decode().strip()
@@ -136,11 +167,19 @@ def select(root, base, head, event):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, default=Path('.'))
-    parser.add_argument('--base', required=True)
+    parser.add_argument('--base')
     parser.add_argument('--head', default='HEAD')
-    parser.add_argument('--event', choices=('pull_request', 'push'), required=True)
+    parser.add_argument('--event', choices=('pull_request', 'push'))
     parser.add_argument('--github-output', type=Path)
+    parser.add_argument('--check-history', action='store_true')
     args = parser.parse_args()
+    if args.check_history:
+        problem = untrusted_history(args.root.resolve())
+        if problem:
+            parser.exit(1, f'FAIL: history cannot be trusted for a merge-base selection: {problem}\n')
+        return
+    if args.base is None or args.event is None:
+        parser.error('--base and --event are required')
     try:
         result = select(args.root.resolve(), args.base, args.head, args.event)
     except (OSError, ValueError, KeyError, TypeError) as exc:

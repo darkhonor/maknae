@@ -58,7 +58,8 @@ class AffectedTests(unittest.TestCase):
                            ('GIT_GLOB_PATHSPECS', '1'), ('GIT_ICASE_PATHSPECS', '1'),
                            ('GIT_DIR', bogus), ('GIT_WORK_TREE', bogus),
                            ('GIT_INDEX_FILE', bogus + '/index'), ('GIT_OBJECT_DIRECTORY', bogus),
-                           ('GIT_COMMON_DIR', bogus), ('GIT_ALTERNATE_OBJECT_DIRECTORIES', bogus)):
+                           ('GIT_COMMON_DIR', bogus), ('GIT_ALTERNATE_OBJECT_DIRECTORIES', bogus),
+                           ('GIT_GRAFT_FILE', bogus + '/grafts')):
             with self.subTest(var):
                 for event in ('pull_request', 'push'):
                     result = self.select(event=event, env={var: value, 'GIT_LITERAL_PATHSPECS': '1'})
@@ -71,11 +72,57 @@ class AffectedTests(unittest.TestCase):
         self.write('README.md', 'updated\n')
         self.commit()
         self.git('replace', self.base, self.git('commit-tree', changed + '^{tree}', '-m', 'fake'))
-        for event in ('pull_request', 'push'):
-            with self.subTest(event):
-                result = self.select(event=event)
-                self.assertEqual((result['mutants'], result['reason']),
-                                 (['c'], 'changed packages and reverse dependencies'))
+        result = self.select(event='push')
+        self.assertEqual((result['mutants'], result['reason']),
+                         (['c'], 'changed packages and reverse dependencies'))
+        self.assertRefused(self.base, 'the repository has replace refs (refs/replace/')
+
+    def assertRefused(self, base, text, root=None):
+        proc = subprocess.run([sys.executable, str(SELECTOR), '--root', str(root or self.root),
+                               '--base=' + base, '--head', 'HEAD', '--event', 'pull_request'],
+                              capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn('FAIL: cannot establish affected-package authority: ' + text, proc.stderr)
+        self.assertEqual(proc.stdout, '')
+
+    def graft_onto_docs_ancestor(self):
+        self.write('crates/c/src/lib.rs', '// changed\n')
+        head = self.commit()
+        tree = self.git('rev-parse', 'HEAD^{tree}')
+        self.write('README.md', 'older\n')
+        self.git('add', '.')
+        ancestor = self.git('commit-tree', self.git('write-tree'), '-m', 'synthetic')
+        self.git('reset', '-q', '--hard', head)
+        self.assertEqual(self.git('rev-parse', 'HEAD^{tree}'), tree)
+        grafts = self.root / '.git/info/grafts'
+        grafts.parent.mkdir(exist_ok=True)
+        grafts.write_text(f'{self.base} {ancestor}\n{head} {ancestor}\n')
+        return head
+
+    def test_grafted_history_is_refused_for_a_merge_base(self):
+        self.graft_onto_docs_ancestor()
+        self.assertRefused(self.base, 'the repository has grafts (')
+        self.assertEqual(self.select(event='push')['mutants'], ['c'])
+
+    def test_shallow_history_is_refused_for_a_merge_base(self):
+        self.change_c()
+        clone = self.root.parent / (self.root.name + '-shallow')
+        self.addCleanup(subprocess.run, ['rm', '-rf', str(clone)])
+        subprocess.run(['git', 'clone', '-q', '--depth', '1', '--no-local', f'file://{self.root}',
+                        str(clone)], check=True, capture_output=True)
+        head = subprocess.check_output(['git', '-C', str(clone), 'rev-parse', 'HEAD'], text=True).strip()
+        self.assertRefused(head, 'the repository is shallow', root=clone)
+
+    def test_check_history_mode(self):
+        proc = subprocess.run([sys.executable, str(SELECTOR), '--root', str(self.root), '--check-history'],
+                              capture_output=True, text=True)
+        self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, '', ''))
+        self.graft_onto_docs_ancestor()
+        proc = subprocess.run([sys.executable, str(SELECTOR), '--root', str(self.root), '--check-history'],
+                              capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn('FAIL: history cannot be trusted for a merge-base selection: the repository has grafts',
+                      proc.stderr)
 
     def test_docs_pr_and_push(self):
         self.write('README.md', 'updated\n')
@@ -436,6 +483,15 @@ class AffectedTests(unittest.TestCase):
         invocations = self.hook(old_tip, mutations=True)
         self.assertEqual(invocations, ['--root ' + self.git('rev-parse', '--show-toplevel')
                                        + ' --mutants a b --in-diff ' + old_tip])
+
+    def test_hook_refuses_grafted_history_before_any_selection(self):
+        self.graft_onto_docs_ancestor()
+        proc, invocations = self.hook(self.base, mutations=True, expect_fail=True)
+        self.assertIn('FAIL: history cannot be trusted for a merge-base selection: '
+                      'the repository has grafts', proc.stderr)
+        self.assertNotIn('"build"', proc.stdout)
+        self.assertEqual(invocations, [])
+        self.assertEqual(len(self.hook(self.base)), 2)
 
     def test_hook_without_opt_in_runs_no_mutation(self):
         self.change_c()

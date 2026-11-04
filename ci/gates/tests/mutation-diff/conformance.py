@@ -113,6 +113,9 @@ SHAPES = [
      {**lib("t = t - 3;", "t = t - 4;"), "src/other.rs": OTHER.replace("y * x", "y + x")}, {}, {}),
     ("a deletion under diff.context=0", lib("    t = t * 2;\n", ""), {"diff.context": "0"}, {}),
     ("a mixed change under GIT_DIFF_OPTS=-u0", mixed(), {}, {"GIT_DIFF_OPTS": "-u0"}),
+    ("a change to a module the working tree hides behind --assume-unchanged",
+     {"src/other.rs": OTHER.replace("y * x", "y + x")}, {}, {}, BASE,
+     {"src/lib.rs": LIB.replace("pub mod other;\n", "").replace("other::delta(3), 9", "9, 9")}),
 ]
 
 
@@ -157,7 +160,7 @@ def generate(repo, base, out, env):
     return out.read_text()
 
 
-def check(name, head, config, env, scratch, base_tree=BASE):
+def check(name, head, config, env, scratch, base_tree=BASE, local=None):
     repo = scratch / "repo"
     write(repo, base_tree)
     git(repo, "init", "-q")
@@ -170,15 +173,25 @@ def check(name, head, config, env, scratch, base_tree=BASE):
     write(repo, head)
     git(repo, "add", "-A")
     git(repo, "commit", "-qm", "head")
+    for path, text in (local or {}).items():
+        git(repo, "update-index", "--assume-unchanged", path)
+        (repo / path).write_text(text)
     diff = generate(repo, base, scratch / "in.diff", env)
     if not diff.strip():
         return ["in_diff_generate wrote an empty diff"], 0
-    whole = mutants(repo)
+    snapshot = scratch / "snapshot"
+    md.snapshot(repo, "HEAD", snapshot)
+    whole = mutants(snapshot)
     if not whole:
         return ["the whole listing is empty"], 0
-    selected = sorted(m["name"] for m in mutants(repo, "--in-diff", str(scratch / "in.diff")))
-    marked = sorted(m["name"] for m in md.overlapping("conf", md.changed_lines(diff), whole))
+    indiff = mutants(snapshot, "--in-diff", str(scratch / "in.diff"))
+    selected = sorted(m["name"] for m in indiff)
+    changed = md.changed_lines(diff)
+    marked = sorted(m["name"] for m in md.overlapping("conf", changed, whole))
     problems = []
+    stray = sorted({m["file"] for m in indiff} - set(changed))
+    if stray:
+        problems.append(f"in-diff mutants name files the diff does not: {stray}")
     if marked != selected:
         problems.append(f"parser-only {sorted(set(marked) - set(selected))}, "
                         f"cargo-mutants-only {sorted(set(selected) - set(marked))}")
@@ -208,7 +221,7 @@ def main():
         with tempfile.TemporaryDirectory() as directory:
             try:
                 result = check(name, head, config, env, Path(directory), *base_tree)
-            except (RuntimeError, subprocess.CalledProcessError, md.DiffError) as exc:
+            except (RuntimeError, subprocess.CalledProcessError, md.DiffError, md.ScopeError) as exc:
                 result = ([str(exc)], 0)
         problems, count = result
         if problems:

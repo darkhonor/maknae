@@ -8,7 +8,7 @@ import unittest
 CI = Path(__file__).resolve().parents[1]
 CLEARED = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR",
            "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_LITERAL_PATHSPECS", "GIT_NOGLOB_PATHSPECS",
-           "GIT_GLOB_PATHSPECS", "GIT_ICASE_PATHSPECS")
+           "GIT_GLOB_PATHSPECS", "GIT_ICASE_PATHSPECS", "GIT_GRAFT_FILE")
 NO_REPLACE = "GIT_NO_REPLACE_OBJECTS=1"
 SHELL_GIT = re.compile(r"""(?:^|[\s($`|;&])git\s+(?:-C|-c|rev-parse|ls-files|diff|show|status|"""
                        r"""merge-base|log|cat-file|ls-tree|for-each-ref)\b""")

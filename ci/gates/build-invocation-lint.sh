@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR GIT_ALTERNATE_OBJECT_DIRECTORIES \
-  GIT_LITERAL_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_GLOB_PATHSPECS GIT_ICASE_PATHSPECS
+  GIT_LITERAL_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_GLOB_PATHSPECS GIT_ICASE_PATHSPECS GIT_GRAFT_FILE
 export GIT_NO_REPLACE_OBJECTS=1
 root="${1:-$(git rev-parse --show-toplevel)}"; fail=0   # arg override for the negative-control
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/maknae-build-invocation-lint.XXXXXXXX")"; trap 'rm -rf "$tmp"' EXIT

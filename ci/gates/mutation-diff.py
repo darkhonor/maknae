@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Pure decisions for the PR-scoped mutation gate (#593). Python 3.11+, stdlib only."""
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -10,21 +11,11 @@ import tomllib
 
 GIT_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR",
            "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_LITERAL_PATHSPECS", "GIT_NOGLOB_PATHSPECS",
-           "GIT_GLOB_PATHSPECS", "GIT_ICASE_PATHSPECS")
+           "GIT_GLOB_PATHSPECS", "GIT_ICASE_PATHSPECS", "GIT_GRAFT_FILE")
 HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 BINARY = re.compile(r"^(?:Binary files .* differ|GIT binary patch)$")
 ABSENT = re.compile(r"does not exist in|exists on disk, but not in")
-MUTANTS_INSTALL = re.compile(r"cargo-mutants\s+--version\s+\S+")
-NEXTEST_FILES = (".config/nextest.toml", "ci/gates/mutation-platform.sh")
-NEXTEST_CRATES = ("maknae-io", "maknae-sys")
-CARGO_CONFIGS = (".cargo/config.toml", ".cargo/config")
-DEPENDENCY_TABLES = ("dependencies", "dev-dependencies", "build-dependencies")
-ALL_FILES = (
-    "ci/gates/mutation-oracle.sh",
-    "ci/gates/coverage-tiers.sh",
-    "ci/gates/mutation-diff.py",
-    "rust-toolchain.toml",
-)
+SOURCE_DIRS = ("src", "tests", "benches", "examples")
 
 
 class DiffError(Exception):
@@ -268,12 +259,12 @@ def workspace_crates(root):
     return crates
 
 
-def check_paths(root, base, diff_text):
+def check_paths(root, base, diff_text, head="HEAD"):
     named = diff_paths(diff_text)
     done = git(root, "-c", "core.quotePath=true", "diff", "--name-only", "-z", "--no-renames",
-               "--diff-filter=d", "--no-ext-diff", base, "HEAD")
+               "--diff-filter=d", "--no-ext-diff", base, head)
     if done.returncode != 0:
-        raise ScopeError(f"FAIL: git diff --name-only {base} HEAD failed: {done.stderr.decode().strip()}")
+        raise ScopeError(f"FAIL: git diff --name-only {base} {head} failed: {done.stderr.decode().strip()}")
     listed = {p for p in done.stdout.decode().split("\0") if p.endswith(".rs")}
     if named != listed:
         raise DiffError(f"FAIL: the diff names {sorted(named - listed)} that git diff --name-only "
@@ -286,130 +277,139 @@ def tiers(text):
     if data is None:
         return None
     try:
-        t1 = data["t1"]
-        crates = t1["mutants_crates"]
-        features = t1.get("mutants_features", {})
-        if not (isinstance(crates, list) and isinstance(features, dict)):
+        crates = data["t1"]["mutants_crates"]
+        if not isinstance(crates, list):
             return None
-        return set(crates), features
+        return set(crates)
     except (KeyError, TypeError):
         return None
 
 
-def scope_crates(root, base, head):
-    base_sha, head_sha = resolve(root, base), resolve(root, head)
-    dirs = workspace_crates(root)
+def affected():
+    selector = Path(__file__).resolve().parents[1] / "affected.py"
+    spec = importlib.util.spec_from_file_location("affected", selector)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
-    def read(path):
-        return show(root, base_sha, path), show(root, head_sha, path)
 
-    base_tiers, head_tiers = (tiers(text) for text in read("coverage-tiers.toml"))
-    mutants = set(head_tiers[0]) if head_tiers else set(dirs)
-    selected = set()
+def changed_names(root, base_sha, head_sha):
+    done = git(root, "diff", "--name-only", "-z", "--no-renames", "--no-ext-diff", base_sha, head_sha)
+    if done.returncode != 0:
+        raise ScopeError(f"FAIL: git diff --name-only {base_sha} {head_sha} failed: "
+                         f"{done.stderr.decode().strip()}")
+    try:
+        return [p for p in done.stdout.decode().split("\0") if p]
+    except UnicodeError:
+        raise ScopeError("FAIL: a changed path is not UTF-8") from None
 
-    def widen_all():
-        selected.update(mutants)
 
-    def owners_of(entry, by_path):
-        if by_path:
-            return {c for c in mutants if c in dirs and entry.startswith(dirs[c] + "/")}
-        return {c for c in mutants if c in dirs and (dirs[c] in entry or Path(dirs[c]).name in entry)}
-
-    if head_tiers is None or base_tiers is None:
-        widen_all()
-    else:
-        selected |= head_tiers[0] - base_tiers[0]
-        for crate in set(head_tiers[1]) | set(base_tiers[1]):
-            if head_tiers[1].get(crate) != base_tiers[1].get(crate):
-                selected.add(crate)
-
-    old, new = read(".cargo/mutants.toml")
-    if old != new:
-        old_data, new_data = parse_toml(old), parse_toml(new)
-        if old_data is None or new_data is None:
-            widen_all()
+def owner_of(path, dirs):
+    owner, size = None, -1
+    for crate, directory in dirs.items():
+        if directory == ".":
+            n = 0
+        elif path.startswith(directory + "/"):
+            n = len(directory)
         else:
-            for key in set(old_data) | set(new_data):
-                if key in ("exclude_globs", "exclude_re"):
-                    pair = (old_data.get(key, []), new_data.get(key, []))
-                    if not all(isinstance(v, list) and all(isinstance(e, str) for e in v) for v in pair):
-                        widen_all()
-                        continue
-                    for entry in set(pair[0]) ^ set(pair[1]):
-                        owners = owners_of(entry, False)
-                        selected.update(owners) if owners else widen_all()
-                elif old_data.get(key) != new_data.get(key):
-                    widen_all()
-
-    old, new = read("ci/gates/mutation-terminated.txt")
-    for entry in set((old or "").splitlines()) ^ set((new or "").splitlines()):
-        if not entry.strip() or entry.startswith("#"):
             continue
-        fields = entry.split("\t")
-        owners = owners_of(fields[1], True) if len(fields) == 5 else set()
-        selected.update(owners) if owners else widen_all()
+        if n > size:
+            owner, size = crate, n
+    return owner
 
-    for path in ALL_FILES:
-        old, new = read(path)
-        if old != new:
-            widen_all()
 
-    old, new = read(".github/workflows/ci.yml")
-    if set(MUTANTS_INSTALL.findall(old or "")) != set(MUTANTS_INSTALL.findall(new or "")):
-        widen_all()
-
-    for path in NEXTEST_FILES:
-        old, new = read(path)
-        if old != new:
-            selected.update(NEXTEST_CRATES)
-
-    for path in CARGO_CONFIGS:
-        old, new = read(path)
-        if old != new:
-            widen_all()
-
-    old, new = read("Cargo.toml")
-    if old != new:
-        old_data, new_data = parse_toml(old), parse_toml(new)
-        if old_data is None or new_data is None or root_compiled(old_data) != root_compiled(new_data):
-            widen_all()
+def scope_crates(root, base, head, workspace=None):
+    base_sha, head_sha = resolve(root, base), resolve(root, head)
+    dirs = workspace_crates(workspace or root)
+    head_tiers = tiers(show(root, head_sha, "coverage-tiers.toml"))
+    mutants = head_tiers if head_tiers is not None else set(dirs)
+    docs_only = affected().docs_only
+    selected = set()
+    for path in changed_names(root, base_sha, head_sha):
+        if docs_only(path):
+            continue
+        owner = owner_of(path, dirs)
+        nested = owner is not None and dirs[owner] != "."
+        rel = path[len(dirs[owner]) + 1:] if nested else path
+        if owner is not None and rel.endswith(".rs") and rel.split("/")[0] in SOURCE_DIRS:
+            continue
+        if not nested:
+            selected.update(mutants)
+        elif owner in mutants:
+            selected.add(owner)
 
     for crate in mutants & set(dirs):
-        old, new = read(f"{dirs[crate]}/Cargo.toml")
-        old_data, new_data = parse_toml(old), parse_toml(new)
-        if old != new and (old_data is None or new_data is None
-                           or crate_compiled(old_data) != crate_compiled(new_data)):
-            selected.add(crate)
-            continue
-        scripts = {"build.rs"} | {d.get("package", {}).get("build") for d in (old_data, new_data)
-                                  if isinstance(d, dict) and isinstance(d.get("package"), dict)}
+        manifests = [parse_toml(show(root, sha, f"{dirs[crate]}/Cargo.toml"))
+                     for sha in (base_sha, head_sha)]
+        scripts = {d["package"].get("build") for d in manifests
+                   if isinstance(d, dict) and isinstance(d.get("package"), dict)}
         for script in sorted(s for s in scripts if isinstance(s, str)):
-            old, new = read(f"{dirs[crate]}/{script}")
-            if old != new:
+            path = f"{dirs[crate]}/{script}"
+            if show(root, base_sha, path) != show(root, head_sha, path):
                 selected.add(crate)
 
     return sorted(selected & mutants)
 
 
-def without(table, keys):
-    return {k: v for k, v in table.items() if k not in keys} if isinstance(table, dict) else table
+def untrusted_history(root):
+    return affected().untrusted_history(Path(root))
 
 
-def crate_compiled(manifest):
-    data = without(manifest, DEPENDENCY_TABLES)
-    if isinstance(data.get("target"), dict):
-        targets = {cfg: without(table, DEPENDENCY_TABLES) for cfg, table in data["target"].items()}
-        data["target"] = {cfg: table for cfg, table in targets.items() if table != {}}
-        if data["target"] == {}:
-            del data["target"]
-    return data
+def snapshot(root, rev, dest):
+    sha = resolve(root, rev)
+    listing = git(root, "ls-tree", "-r", "-z", "--full-tree", sha)
+    if listing.returncode != 0:
+        raise ScopeError(f"FAIL: git ls-tree {sha} failed: {listing.stderr.decode().strip()}")
+    entries = []
+    for record in listing.stdout.split(b"\0"):
+        if not record:
+            continue
+        meta, _, raw = record.partition(b"\t")
+        mode, kind, oid = meta.decode().split(" ")
+        path = raw.decode()
+        parts = path.split("/")
+        if any(p in ("", ".", "..") or p.lower() == ".git" for p in parts):
+            raise ScopeError(f"FAIL: HEAD names an unsafe path: {path!r}")
+        if kind != "blob" or mode not in ("100644", "100755", "120000"):
+            raise ScopeError(f"FAIL: HEAD has a {kind} at {path} (mode {mode}) that a snapshot cannot hold")
+        entries.append((mode, oid, path))
+    done = subprocess.run(["git", "-C", str(root), "cat-file", "--batch"], capture_output=True,
+                          env=git_env(), check=False,
+                          input="".join(oid + "\n" for _, oid, _ in entries).encode())
+    if done.returncode != 0:
+        raise ScopeError(f"FAIL: git cat-file --batch failed: {done.stderr.decode().strip()}")
+    out, at, blobs = done.stdout, 0, []
+    for _, oid, path in entries:
+        end = out.index(b"\n", at)
+        header = out[at:end].decode().split(" ")
+        if len(header) != 3 or header[0] != oid or header[1] != "blob":
+            raise ScopeError(f"FAIL: cannot read {path} ({oid}) from the object store")
+        size = int(header[2])
+        blobs.append(out[end + 1:end + 1 + size])
+        at = end + 1 + size + 1
+    target = Path(dest)
+    target.mkdir(mode=0o700)
 
+    def place(path):
+        for parent in Path(path).parents:
+            if (target / parent).is_symlink():
+                raise ScopeError(f"FAIL: HEAD places {path} beneath the symlink {parent}")
+        file = target / path
+        file.parent.mkdir(parents=True, exist_ok=True)
+        return file
 
-def root_compiled(manifest):
-    data = dict(manifest)
-    if isinstance(data.get("workspace"), dict):
-        data["workspace"] = without(data["workspace"], ("dependencies",))
-    return data
+    links = []
+    for (mode, _, path), blob in zip(entries, blobs):
+        if mode == "120000":
+            links.append((path, blob))
+            continue
+        file = place(path)
+        fd = os.open(file, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(blob)
+        os.chmod(file, 0o755 if mode == "100755" else 0o644)
+    for path, blob in links:
+        os.symlink(os.fsdecode(blob), place(path))
 
 
 def main(argv):
@@ -424,20 +424,28 @@ def main(argv):
             line, status = classify(pkg, changed, read_list(pkg, argv[3]), read_list(pkg, argv[4]))
             print(line)
             return status
-        elif len(argv) == 4 and command == "scope":
-            print(json.dumps(scope_crates(argv[1], argv[2], argv[3])))
-        elif len(argv) == 4 and command == "paths":
-            for name in check_paths(argv[1], argv[2], read_diff(argv[3])):
+        elif len(argv) in (4, 5) and command == "scope":
+            print(json.dumps(scope_crates(*argv[1:])))
+        elif len(argv) in (4, 5) and command == "paths":
+            for name in check_paths(argv[1], argv[2], read_diff(argv[3]), *argv[4:]):
                 print(name)
+        elif len(argv) == 2 and command == "history":
+            problem = untrusted_history(argv[1])
+            if problem:
+                print(problem)
+                return 1
+        elif len(argv) == 4 and command == "snapshot":
+            snapshot(argv[1], argv[2], argv[3])
         else:
             print("FAIL: usage: mutation-diff.py changed-lines <diff> | classify <pkg> <diff> "
-                  "<whole> <indiff> | scope <root> <base> <head> | paths <root> <base> <diff>",
+                  "<whole> <indiff> | scope <root> <base> <head> [<workspace>] | paths <root> <base> "
+                  "<diff> [<head>] | history <root> | snapshot <root> <rev> <dest>",
                   file=sys.stderr)
             return 1
     except (DiffError, ScopeError) as exc:
         print(exc, file=sys.stdout if command == "classify" else sys.stderr)
         return 1
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1
     return 0
