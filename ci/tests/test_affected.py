@@ -364,7 +364,22 @@ class AffectedTests(unittest.TestCase):
     def test_hook_skips_docs_using_actual_remote_endpoint(self):
         self.write('README.md', 'docs\n')
         self.commit()
-        self.assertEqual(self.hook(self.base, mutations=True), [])
+        self.assertEqual(self.hook(self.base), [])
+
+    def test_hook_opted_in_passes_every_mutation_crate_even_for_docs_only(self):
+        self.write('README.md', 'docs\n')
+        self.commit()
+        self.assertEqual(self.hook(self.base, mutations=True),
+                         ['--root ' + self.git('rev-parse', '--show-toplevel')
+                          + ' --mutants a b c --in-diff ' + self.base])
+
+    def test_hook_opted_in_refuses_an_unreadable_mutation_contract(self):
+        self.write('crates/a/src/lib.rs', '// changed\n')
+        self.write('coverage-tiers.toml', '[t1]\nmutants_crates=[]\n')
+        self.commit()
+        proc, invocations = self.hook(self.base, mutations=True, expect_fail=True)
+        self.assertIn('FAIL: pre-push: [t1].mutants_crates is not a non-empty list', proc.stderr)
+        self.assertEqual(invocations, [])
 
     def test_hook_rejects_invalid_docs_without_running_rust(self):
         self.write('packaging/isolation-contract.md', '| descriptor | ✓ | | ✓ | ✓ |\n')
@@ -378,7 +393,7 @@ class AffectedTests(unittest.TestCase):
         self.assertEqual(len(invocations), 3)
         self.assertEqual(invocations[0], 'unsafe-confinement --root ' + self.git('rev-parse', '--show-toplevel'))
         self.assertNotIn('--mutants', invocations[1])
-        self.assertTrue(invocations[2].endswith('--mutants a b --in-diff ' + self.base), invocations)
+        self.assertTrue(invocations[2].endswith('--mutants a b c --in-diff ' + self.base), invocations)
 
     def test_hook_default_does_not_force_mutation(self):
         self.write('crates/c/src/lib.rs', '// changed\n')
@@ -392,7 +407,7 @@ class AffectedTests(unittest.TestCase):
         self.change_c()
         calls = self.mutation_calls(self.hook(self.base, mutations=True))
         self.assertEqual(calls, ['--root ' + self.git('rev-parse', '--show-toplevel')
-                                 + ' --mutants c --in-diff ' + self.base])
+                                 + ' --mutants a b c --in-diff ' + self.base])
 
     def test_hook_new_ref_without_base_fails(self):
         self.change_c()
@@ -416,7 +431,10 @@ class AffectedTests(unittest.TestCase):
         proc, invocations = self.hook(ZERO, mutations=True, selector=stub, expect_fail=True)
         self.assertIn('MAKNAE_PRE_PUSH_MUTANTS_BASE=<rev>', proc.stderr)
         self.assertEqual(invocations, [])
-        self.assertEqual(self.hook(ZERO, mutations=True, selector=stub, remote_head=self.base), [])
+        self.assertEqual(self.mutation_calls(self.hook(ZERO, mutations=True, selector=stub,
+                                                       remote_head=self.base)),
+                         ['--root ' + self.git('rev-parse', '--show-toplevel')
+                          + ' --mutants a b c --in-diff ' + self.base])
 
     def test_hook_mutation_runs_after_build_gates(self):
         self.change_c()
@@ -459,7 +477,7 @@ class AffectedTests(unittest.TestCase):
         override = {'MAKNAE_PRE_PUSH_MUTANTS_BASE': main}
         calls = self.mutation_calls(self.hook(old_tip, mutations=True, env=override))
         self.assertEqual(calls, ['--root ' + self.git('rev-parse', '--show-toplevel')
-                                 + ' --mutants a b --in-diff ' + main])
+                                 + ' --mutants a b c --in-diff ' + main])
 
     def test_hook_rebased_ref_selects_over_the_merge_base(self):
         self.write('crates/a/src/lib.rs', '// branch\n')
@@ -482,7 +500,7 @@ class AffectedTests(unittest.TestCase):
         self.commit()
         invocations = self.hook(old_tip, mutations=True)
         self.assertEqual(invocations, ['--root ' + self.git('rev-parse', '--show-toplevel')
-                                       + ' --mutants a b --in-diff ' + old_tip])
+                                       + ' --mutants a b c --in-diff ' + old_tip])
 
     def test_hook_refuses_grafted_history_before_any_selection(self):
         self.graft_onto_docs_ancestor()

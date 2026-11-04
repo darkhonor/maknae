@@ -4822,6 +4822,36 @@ printf 'DENY\n' > "$mid_r/crates/a/src/policy.rs"
 mid_git "$mid_r" commit -qam deny
 expect_reject_because "mutation-in-diff/cross-crate-include-str-survivor-fails" "cargo mutants --package b reported missed/timeout mutants" \
   mid_gate "$mid_r" "$mid_whole_edit" "" 2
+mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
+printf 'pub fn check() -> bool {\n    include_str!("../../../README.md").trim() == "ALLOW"\n}\n' >> "$mid_r/crates/a/src/lib.rs"
+printf 'ALLOW\n' > "$mid_r/README.md"
+mid_git "$mid_r" add -A
+mid_git "$mid_r" commit -qm readme
+mid_git "$mid_r" tag -f base
+printf 'DENY\n' > "$mid_r/README.md"
+mid_git "$mid_r" commit -qam deny
+expect_reject_because "mutation-in-diff/readme-include-survivor-fails" "cargo mutants --package a reported missed/timeout mutants" \
+  mid_gate "$mid_r" "$mid_whole_edit" "" 2
+mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
+printf 'pub mod policy;\npub fn check() -> bool {\n    include_str!("policy.rs").contains("ALLOW")\n}\n' >> "$mid_r/crates/a/src/lib.rs"
+printf 'pub const RULE: &str = "ALLOW";\n' > "$mid_r/crates/a/src/policy.rs"
+mid_git "$mid_r" add -A
+mid_git "$mid_r" commit -qm policy
+mid_git "$mid_r" tag -f base
+printf 'pub const RULE: &str = "DENY";\n' > "$mid_r/crates/a/src/policy.rs"
+mid_git "$mid_r" commit -qam deny
+expect_reject_because "mutation-in-diff/module-include-survivor-fails" "cargo mutants --package a reported missed/timeout mutants" \
+  mid_gate "$mid_r" "$mid_whole_edit" "" 2
+mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
+printf 'pub fn check() -> bool {\n    include_str!("policy\\nname.txt") == "ALLOW"\n}\n' >> "$mid_r/crates/a/src/lib.rs"
+printf 'ALLOW' > "$mid_r/crates/a/src/policy"$'\n'"name.txt"
+mid_git "$mid_r" add -A
+mid_git "$mid_r" commit -qm data
+mid_git "$mid_r" tag -f base
+printf 'DENY' > "$mid_r/crates/a/src/policy"$'\n'"name.txt"
+mid_git "$mid_r" commit -qam deny
+expect_reject_because "mutation-in-diff/newline-path-fails" "contains a newline or control character" \
+  mid_gate "$mid_r" "$mid_whole_edit" "" 2
 mid_r="$(mid_repo 'let z = y * 4;' 'x * 5' Fixture.)"
 if [ -e "$mid_r/CRATES" ]; then
   mid_git "$mid_r" reset -q --hard base

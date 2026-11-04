@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 import tomllib
+import unicodedata
 
 sys.dont_write_bytecode = True
 GIT_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR",
@@ -485,7 +486,8 @@ def production_inputs(tree, package, features, target):
                 try:
                     stat = os.stat(path)
                 except OSError:
-                    continue
+                    raise ScopeError(f"FAIL: {package['name']}: dep-info entry {json.dumps(token)} in "
+                                     f"{info.name} does not resolve to a file") from None
                 found.add((stat.st_dev, stat.st_ino))
     if read == 0:
         raise ScopeError(f"FAIL: {package['name']}: cargo check wrote no dep-info for its production targets")
@@ -500,11 +502,8 @@ def compiled(root, base, head, workspace, target):
             for name, p in found.items()}
     tiers_text = show(root, head_sha, "coverage-tiers.toml")
     mutants = contract(root, head_sha, dirs)
-    docs_only = affected().docs_only
     identities = {}
     for path in changed_names(root, base_sha, head_sha):
-        if exempt(root, base_sha, head_sha, path, docs_only):
-            continue
         try:
             stat = os.stat(tree / path)
         except OSError:
@@ -540,7 +539,209 @@ def read_files(crate, path):
     return listed
 
 
-def unlisted(crate, files, inputs):
+class LexError(Exception):
+    pass
+
+
+STRING = re.compile(r'(b|c)?r(#*)"|(b|c)?"')
+ESCAPES = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", "0": "\0", "'": "'", '"': '"'}
+WORD = re.compile(r"\w+")
+
+
+def unescape(body):
+    out, i = [], 0
+    while i < len(body):
+        ch = body[i]
+        i += 1
+        if ch != "\\":
+            out.append(ch)
+            continue
+        if i >= len(body):
+            raise LexError("dangling escape")
+        kind = body[i]
+        i += 1
+        if kind in ESCAPES:
+            out.append(ESCAPES[kind])
+        elif kind == "x":
+            out.append(chr(int(body[i:i + 2], 16)))
+            i += 2
+        elif kind == "u" and body[i:i + 1] == "{":
+            end = body.index("}", i)
+            out.append(chr(int(body[i + 1:end].replace("_", ""), 16)))
+            i = end + 1
+        elif kind == "\n":
+            while i < len(body) and body[i] in " \t\n\r":
+                i += 1
+        else:
+            raise LexError(f"unknown escape \\{kind}")
+    return "".join(out)
+
+
+def tokens(text):
+    found, i, n = [], 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch.isspace():
+            i += 1
+        elif text.startswith("//", i):
+            end = text.find("\n", i)
+            i = n if end < 0 else end
+        elif text.startswith("/*", i):
+            depth, i = 1, i + 2
+            while depth:
+                if i >= n:
+                    raise LexError("unterminated block comment")
+                if text.startswith("/*", i):
+                    depth, i = depth + 1, i + 2
+                elif text.startswith("*/", i):
+                    depth, i = depth - 1, i + 2
+                else:
+                    i += 1
+        elif (literal := STRING.match(text, i)) is not None:
+            start = literal.end()
+            if literal.group(2) is not None:
+                close = '"' + literal.group(2)
+                end = text.find(close, start)
+                if end < 0:
+                    raise LexError("unterminated raw string")
+                value, i = text[start:end], end + len(close)
+            else:
+                end = start
+                while end < n and text[end] != '"':
+                    end += 2 if text[end] == "\\" else 1
+                if end >= n:
+                    raise LexError("unterminated string")
+                value, i = unescape(text[start:end]), end + 1
+            plain = literal.group(1) is None and literal.group(3) is None
+            found.append(("str" if plain else "bytes", value))
+        elif ch == "'" or text.startswith("b'", i):
+            j = i + (2 if ch == "b" else 1)
+            if text.startswith("\\", j):
+                end = text.find("'", j + 2)
+                if end < 0:
+                    raise LexError("unterminated character literal")
+                found.append(("char", text[j:end]))
+                i = end + 1
+            elif j + 1 < n and text[j + 1] == "'":
+                found.append(("char", text[j]))
+                i = j + 2
+            else:
+                word = WORD.match(text, j)
+                found.append(("lifetime", word.group() if word else ""))
+                i = word.end() if word else j
+        elif ch.isalpha() or ch == "_":
+            word = WORD.match(text, i)
+            i = word.end()
+            if word.group() == "r" and text.startswith("#", i) and (raw := WORD.match(text, i + 1)):
+                word, i = raw, raw.end()
+            found.append(("ident", word.group()))
+        elif ch.isdigit():
+            i = WORD.match(text, i).end()
+            found.append(("number", ""))
+        else:
+            found.append(("punct", ch))
+            i += 1
+    return found
+
+
+PAIRS = {"(": ")", "[": "]", "{": "}"}
+CFG_OPEN = [("punct", "#"), ("punct", "["), ("ident", "cfg"), ("punct", "(")]
+
+
+def closing(toks, at):
+    depth = 0
+    for k in range(at, len(toks)):
+        kind, value = toks[k]
+        if kind == "punct" and value in PAIRS:
+            depth += 1
+        elif kind == "punct" and value in PAIRS.values():
+            depth -= 1
+            if depth == 0:
+                return k
+    raise LexError("unbalanced delimiters")
+
+
+def test_only(pred):
+    if pred == [("ident", "test")]:
+        return True
+    if pred[:2] != [("ident", "all"), ("punct", "(")] or closing(pred, 1) != len(pred) - 1:
+        return False
+    args, depth, current = [], 0, []
+    for tok in pred[2:-1]:
+        if tok[0] == "punct" and tok[1] in PAIRS:
+            depth += 1
+        elif tok[0] == "punct" and tok[1] in PAIRS.values():
+            depth -= 1
+        if depth == 0 and tok == ("punct", ","):
+            args.append(current)
+            current = []
+        else:
+            current.append(tok)
+    args.append(current)
+    return [("ident", "test")] in args
+
+
+def test_module_end(toks, at):
+    if toks[at:at + 4] != CFG_OPEN:
+        return None
+    close = closing(toks, at + 3)
+    if not test_only(toks[at + 4:close]) or toks[close + 1:close + 2] != [("punct", "]")]:
+        return None
+    k = close + 2
+    while toks[k:k + 2] == [("punct", "#"), ("punct", "[")]:
+        k = closing(toks, k + 1) + 1
+    if toks[k:k + 1] == [("ident", "pub")]:
+        k += 1
+        if toks[k:k + 1] == [("punct", "(")]:
+            k = closing(toks, k) + 1
+    if (toks[k:k + 1] == [("ident", "mod")] and k + 2 < len(toks) and toks[k + 1][0] == "ident"
+            and toks[k + 2] == ("punct", "{")):
+        return closing(toks, k + 2)
+    return None
+
+
+def includes(text):
+    toks = tokens(text)
+    literal, opaque, k = [], False, 0
+    while k < len(toks):
+        end = test_module_end(toks, k)
+        if end is not None:
+            k = end + 1
+        elif (toks[k][0] == "ident" and toks[k][1] in ("include_str", "include_bytes")
+              and toks[k + 1:k + 2] == [("punct", "!")] and k + 2 < len(toks)
+              and toks[k + 2][0] == "punct" and toks[k + 2][1] in PAIRS):
+            end = closing(toks, k + 2)
+            args = toks[k + 3:end]
+            if args and args[0][0] == "str" and args[1:] in ([], [("punct", ",")]):
+                literal.append(args[0][1])
+            else:
+                opaque = True
+            k = end + 1
+        else:
+            k += 1
+    return literal, opaque
+
+
+def embedded(crate, tree, listed):
+    targets, opaque = set(), None
+    for name in sorted(listed):
+        file = tree / name
+        try:
+            literal, dynamic = includes(file.read_text())
+        except (OSError, UnicodeError, ValueError, LexError) as exc:
+            raise DiffError(f"FAIL: {crate}: cannot scan {name} for include_str!/include_bytes!: {exc}") from None
+        if dynamic and opaque is None:
+            opaque = name
+        for value in literal:
+            try:
+                stat = os.stat(Path(value) if os.path.isabs(value) else file.parent / value)
+            except OSError:
+                continue
+            targets.add((stat.st_dev, stat.st_ino))
+    return targets, opaque
+
+
+def unlisted(crate, files, inputs, workspace):
     listed = read_files(crate, files)
     try:
         data = json.loads(Path(inputs).read_text())
@@ -549,6 +750,20 @@ def unlisted(crate, files, inputs):
             raise ValueError
     except (ValueError, AttributeError):
         raise DiffError(f"FAIL: {crate}: unreadable compiled-input list {inputs}") from None
+    if not changed:
+        return None
+    tree = Path(os.path.realpath(workspace))
+    targets, opaque = embedded(crate, tree, listed)
+    for path in changed:
+        try:
+            stat = os.stat(tree / path)
+        except OSError:
+            raise DiffError(f"FAIL: {crate}: changed {path} is not in the snapshot") from None
+        if (stat.st_dev, stat.st_ino) in targets:
+            return f"whole: {crate}: changed {path} is embedded by include_str!/include_bytes!"
+    if opaque is not None:
+        return (f"whole: {crate}: changed {changed[0]} may be embedded by a non-literal "
+                f"include_str!/include_bytes! in {opaque}")
     for path in changed:
         if path not in listed:
             return f"whole: {crate}: changed {path} is compiled into {crate} but not walked by cargo-mutants"
@@ -581,7 +796,13 @@ def unmappable(root, head, workspace):
         if not record:
             continue
         meta, _, raw = record.partition(b"\t")
-        paths.add(raw.decode())
+        name = raw.decode()
+        if any(unicodedata.category(ch) == "Cc" for ch in name):
+            shown = json.dumps(name, ensure_ascii=False).translate({c: f"\\u{c:04x}" for c in range(0x7f, 0xa0)})
+            return (f"FAIL: --in-diff: tracked path {shown} contains a "
+                    "newline or control character; in-diff mapping cannot name it — use the "
+                    "whole-package run")
+        paths.add(name)
         if meta.split(b" ")[0] == b"120000":
             links.append(raw.decode())
     tree = Path(os.path.realpath(workspace))
@@ -695,7 +916,7 @@ def main(argv):
             snapshot(argv[1], argv[2], argv[3])
         elif len(argv) == 6 and command == "compiled":
             print(json.dumps(compiled(*argv[1:])))
-        elif len(argv) == 4 and command == "unlisted":
+        elif len(argv) == 5 and command == "unlisted":
             line = unlisted(*argv[1:])
             if line:
                 print(line)
@@ -709,7 +930,7 @@ def main(argv):
                   "<whole> <indiff> | scope <root> <base> <head> [<workspace>] | paths <root> <base> "
                   "<diff> [<head>] | history <root> | snapshot <root> <rev> <dest> | "
                   "compiled <root> <base> <head> <workspace> <target> | unlisted <crate> <files> "
-                  "<compiled> | unmappable <root> <head> <workspace>",
+                  "<compiled> <workspace> | unmappable <root> <head> <workspace>",
                   file=sys.stderr)
             return 1
     except (DiffError, ScopeError) as exc:

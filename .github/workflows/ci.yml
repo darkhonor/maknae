@@ -245,11 +245,16 @@ jobs:
     # variable MUTATION_IN_CI is 'true'; otherwise it shows as SKIPPED in every
     # run, and build-and-gate prints the pause. The zero-missed obligation is
     # met locally (dev host + Rocky lane) and reported in the PR body.
+    # The label's in-diff run passes every mutation crate and the gate decides,
+    # so it runs even when affected.py selects none.
     if: >-
       ${{ always()
-          && (needs.affected.result != 'success' || needs.affected.outputs.mutants != '')
-          && ((github.event.action == 'labeled' && github.event.label.name == 'run-mutants')
-              || (github.event.action != 'labeled' && (contains(github.event.pull_request.labels.*.name, 'run-mutants') || vars.MUTATION_IN_CI == 'true'))) }}
+          && ((github.event_name == 'pull_request' && vars.MUTATION_IN_CI != 'true'
+               && ((github.event.action == 'labeled' && github.event.label.name == 'run-mutants')
+                   || (github.event.action != 'labeled' && contains(github.event.pull_request.labels.*.name, 'run-mutants'))))
+              || ((needs.affected.result != 'success' || needs.affected.outputs.mutants != '')
+                  && ((github.event.action == 'labeled' && github.event.label.name == 'run-mutants')
+                      || (github.event.action != 'labeled' && (contains(github.event.pull_request.labels.*.name, 'run-mutants') || vars.MUTATION_IN_CI == 'true'))))) }}
     runs-on: ubuntu-latest
     # #238, run 34053713105: all nine completed crate sweeps passed, but the
     # 35m job limit killed the final (Vault) sweep after its 143s cold build.
@@ -265,6 +270,23 @@ jobs:
         env:
           SELECTOR_RESULT: ${{ needs.affected.result }}
         run: test "$SELECTOR_RESULT" = success
+      - name: Select mutation packages (in-diff on a PR passes every mutation crate; the gate decides)
+        id: packages
+        env:
+          PACKAGES: ${{ needs.affected.outputs.mutants }}
+          EVENT_NAME: ${{ github.event_name }}
+          MUTATION_IN_CI: ${{ vars.MUTATION_IN_CI }}
+        run: |
+          if [ "$EVENT_NAME" = pull_request ] && [ "$MUTATION_IN_CI" != true ]; then
+            PACKAGES="$(python3 -c '
+          import sys, tomllib
+          crates = tomllib.load(open(sys.argv[1], "rb"))["t1"]["mutants_crates"]
+          if not (isinstance(crates, list) and crates and all(isinstance(c, str) and c for c in crates)):
+              sys.exit("FAIL: [t1].mutants_crates is not a non-empty list of crate names")
+          print(" ".join(crates))' coverage-tiers.toml)"
+          fi
+          test -n "$PACKAGES"
+          echo "mutants=$PACKAGES" >> "$GITHUB_OUTPUT"
       - name: Install toolchain (pinned)
         run: rustup show
       - name: Cache cargo-mutants executable
@@ -277,7 +299,7 @@ jobs:
         if: steps.mutants-cache.outputs.cache-hit != 'true'
         run: cargo install cargo-mutants --version 27.1.0 --locked
       - name: Install cargo-nextest 0.9.146 (prebuilt, checksum-pinned)
-        if: contains(format(' {0} ', needs.affected.outputs.mutants), ' maknae-io ')
+        if: contains(format(' {0} ', steps.packages.outputs.mutants), ' maknae-io ')
         env:
           NEXTEST_TARBALL: cargo-nextest-0.9.146-x86_64-unknown-linux-gnu.tar.gz
           NEXTEST_SHA256: 682c21b777c333e96fd532e114d3a5a894e0729ab88d94c0a9f20f8419695428
@@ -288,11 +310,11 @@ jobs:
           tar -xzf "$RUNNER_TEMP/$NEXTEST_TARBALL" -C ~/.cargo/bin cargo-nextest
           cargo nextest --version
       - name: Native syscall mutation filter fixtures
-        if: contains(format(' {0} ', needs.affected.outputs.mutants), ' maknae-io ') || contains(format(' {0} ', needs.affected.outputs.mutants), ' maknae-sys ')
+        if: contains(format(' {0} ', steps.packages.outputs.mutants), ' maknae-io ') || contains(format(' {0} ', steps.packages.outputs.mutants), ' maknae-sys ')
         run: python3 ci/gates/tests/mutation-platform/run.py
       - name: Mutation gate (in-diff on a PR, whole crates otherwise; zero missed; TIMEOUT = investigate)
         env:
-          PACKAGES: ${{ needs.affected.outputs.mutants }}
+          PACKAGES: ${{ steps.packages.outputs.mutants }}
           EVENT_NAME: ${{ github.event_name }}
           MUTATION_IN_CI: ${{ vars.MUTATION_IN_CI }}
           # Mutation evidence needs test assertions, not debugger symbols. #238

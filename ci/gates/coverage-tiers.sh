@@ -765,7 +765,7 @@ print("\n".join(sorted(crates)))' "$compiled_file" 2>/dev/null)"; then
           fail "cargo mutants --list-files --package $cname failed"
           continue
         fi
-        if ! walked="$(python3 "$here/mutation-diff.py" unlisted "$cname" "$mut_tmp/files.json" "$compiled_file" 2>&1)"; then
+        if ! walked="$(python3 "$here/mutation-diff.py" unlisted "$cname" "$mut_tmp/files.json" "$compiled_file" "$mut_dir" 2>&1)"; then
           printf '%s\n' "${walked:-FAIL: $cname: mutation-diff.py unlisted printed nothing}"
           fail_n=$((fail_n + 1))
           continue

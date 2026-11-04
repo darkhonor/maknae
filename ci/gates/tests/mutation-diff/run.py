@@ -645,6 +645,23 @@ class Unmappable(unittest.TestCase):
         self.link("alias", "CRATES/ALPHA/src")
         self.assertRefused("FAIL: --in-diff: symlink alias in mutation crate alpha;")
 
+    def test_unmappable_a_tracked_path_with_a_control_character_is_refused(self):
+        for name, shown in (("crates/beta/src/policy\nname.txt", '"crates/beta/src/policy\\nname.txt"'),
+                            ("docs/tab\there.md", '"docs/tab\\there.md"'),
+                            ("docs/bell\x07.md", '"docs/bell\\u0007.md"'),
+                            ("docs/del\x7f.md", '"docs/del\\u007f.md"')):
+            with self.subTest(name=name):
+                self.put(name, "x\n")
+                self.commit("odd")
+                try:
+                    result = self.check()
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertEqual(result.stdout, f"FAIL: --in-diff: tracked path {shown} contains a newline "
+                                     "or control character; in-diff mapping cannot name it — use the "
+                                     "whole-package run\n")
+                finally:
+                    self.git("reset", "-q", "--hard", "HEAD~1")
+
     def test_unmappable_build_script_in_a_non_mutation_crate_is_ignored(self):
         self.put("crates/gamma/Cargo.toml", MANIFEST.format(n="gamma", extra='build = "src/build.rs"\n'))
         self.commit("build")
@@ -690,6 +707,23 @@ class Compiled(unittest.TestCase):
         self.put("crates/beta/src/policy.rs", "DENY\n")
         self.commit("edit")
         self.assertCompiled({"beta": ["crates/beta/src/policy.rs"]})
+
+    def test_compiled_dep_info_comes_before_the_documentation_exemption(self):
+        self.base({"crates/beta/src/lib.rs": 'pub fn check() -> bool {\n    include_str!("../../../README.md").trim() == "ALLOW"\n}\n',
+                   "README.md": "ALLOW\n"})
+        self.put("README.md", "DENY\n")
+        self.commit("edit")
+        self.assertCompiled({"beta": ["README.md"]})
+
+    def test_compiled_a_dep_info_entry_that_does_not_resolve_fails(self):
+        self.base({"crates/beta/src/lib.rs": 'pub fn check() -> bool {\n    include_str!("policy\\nname.txt") == "ALLOW"\n}\n',
+                   "crates/beta/src/policy\nname.txt": "ALLOW"})
+        self.put("crates/beta/src/policy\nname.txt", "DENY")
+        self.commit("edit")
+        result = self.compiled()
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertRegex(result.stderr, r'FAIL: beta: dep-info entry "[^"]*" in beta-\w+\.d does not '
+                                        r"resolve to a file")
 
     def test_compiled_another_crates_file_is_compiled_into_the_embedding_crate(self):
         self.base({"crates/alpha/src/lib.rs": 'pub fn check() -> bool {\n    include_str!("../../beta/src/policy.rs") == "x"\n}\n',
@@ -763,18 +797,100 @@ class Compiled(unittest.TestCase):
                                                "crates/a/src/my data.txt", "crates/a/src/lib.rs"])
 
 
+class Includes(unittest.TestCase):
+    def test_includes_decodes_literal_arguments(self):
+        self.assertEqual(md.includes('const A: &str = include_str!("a\\x41\\u{42}\\\n   .txt");\n'
+                                     'const B: &[u8] = include_bytes!(r##"b"#.bin"##);\n'),
+                         (["aAB.txt", 'b"#.bin'], False))
+
+    def test_includes_lexes_lifetimes_and_character_literals(self):
+        self.assertEqual(md.includes("fn f<'a>(x: &'a str) -> char { let _ = b'\"'; '\\'' }\n"
+                                     'const A: &str = include_str!("ok");\n'), (["ok"], False))
+
+    def test_includes_byte_or_c_string_arguments_are_non_literal(self):
+        for arg in ('b"x"', 'c"x"', 'br"x"', '"a" "b"'):
+            with self.subTest(arg=arg):
+                self.assertEqual(md.includes(f"const A: &str = include_str!({arg});\n"), ([], True))
+
+    def test_includes_only_test_only_cfg_modules_are_skipped(self):
+        self.assertEqual(md.includes('#[cfg(any(test, unix))]\nmod m {\n    const A: &str = include_str!("kept");\n}\n'
+                                     '#[cfg(test)]\nfn helper() -> &\'static str {\n    include_str!("also")\n}\n'),
+                         (["kept", "also"], False))
+
+
 class Unlisted(unittest.TestCase):
-    def unlisted(self, files, compiled, crate="beta"):
+    def unlisted(self, files, compiled, crate="beta", sources=None):
         directory = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, directory)
+        tree = directory / "ws"
+        names = [] if isinstance(files, str) else list(files)
+        if isinstance(compiled, dict):
+            names += [p for paths in compiled.values() if isinstance(paths, list) for p in paths
+                      if isinstance(p, str)]
+        for name, text in {**dict.fromkeys(names, ""), **(sources or {})}.items():
+            (tree / name).parent.mkdir(parents=True, exist_ok=True)
+            (tree / name).write_text(text)
+        tree.mkdir(exist_ok=True)
         (directory / "files.json").write_text(files if isinstance(files, str) else
                                               json.dumps([{"package": crate, "path": f} for f in files]))
         (directory / "compiled.json").write_text(compiled if isinstance(compiled, str) else json.dumps(compiled))
-        return run_cli("unlisted", crate, str(directory / "files.json"), str(directory / "compiled.json"))
+        return run_cli("unlisted", crate, str(directory / "files.json"), str(directory / "compiled.json"),
+                       str(tree))
 
-    def assertVerdict(self, files, compiled, expected):
-        result = self.unlisted(files, compiled)
+    def assertVerdict(self, files, compiled, expected, sources=None):
+        result = self.unlisted(files, compiled, sources=sources)
         self.assertEqual((result.returncode, result.stdout), (0, expected), result.stderr)
+
+    def test_unlisted_a_module_that_is_also_embedded_runs_the_crate_whole(self):
+        lib = 'pub mod policy;\npub fn check() -> bool {\n    include_str!("policy.rs").contains("ALLOW")\n}\n'
+        self.assertVerdict(["crates/beta/src/lib.rs", "crates/beta/src/policy.rs"],
+                           {"beta": ["crates/beta/src/policy.rs"]},
+                           "whole: beta: changed crates/beta/src/policy.rs is embedded by "
+                           "include_str!/include_bytes!\n", sources={"crates/beta/src/lib.rs": lib})
+
+    def test_unlisted_every_include_spelling_is_an_include(self):
+        for call in ('include_str!("policy.rs")', 'include_bytes! ( "policy.rs" , )',
+                     '::core::include_str!["policy.rs"]', 'std::include_bytes!{r#"policy.rs"#}',
+                     'core :: include_str !\n("./policy.rs")', 'include_str!("../src/policy.rs")'):
+            with self.subTest(call=call):
+                lib = f"pub mod policy;\npub fn f() -> usize {{\n    {call}.len()\n}}\n"
+                self.assertVerdict(["crates/beta/src/lib.rs", "crates/beta/src/policy.rs"],
+                                   {"beta": ["crates/beta/src/policy.rs"]},
+                                   "whole: beta: changed crates/beta/src/policy.rs is embedded by "
+                                   "include_str!/include_bytes!\n", sources={"crates/beta/src/lib.rs": lib})
+
+    def test_unlisted_an_include_in_a_comment_string_or_test_module_does_not_count(self):
+        for text in ('// include_str!("policy.rs")\n', '/* a /* include_str!("policy.rs") */ */\n',
+                     '/// include_str!("policy.rs")\n', 'const S: &str = "include_str!(\\"policy.rs\\")";\n',
+                     'const R: &str = r#"include_str!("policy.rs")"#;\n',
+                     '#[cfg(test)]\n#[allow(dead_code)]\nmod tests {\n    const P: &str = include_str!("policy.rs");\n}\n',
+                     '#[cfg(all(test, unix))]\npub(crate) mod tests {\n    const P: &str = include_str!("policy.rs");\n}\n'):
+            with self.subTest(text=text):
+                lib = "pub mod policy;\nfn q(c: char) -> bool { c == '\"' }\n" + text
+                self.assertVerdict(["crates/beta/src/lib.rs", "crates/beta/src/policy.rs"],
+                                   {"beta": ["crates/beta/src/policy.rs"]}, "",
+                                   sources={"crates/beta/src/lib.rs": lib})
+
+    def test_unlisted_a_non_literal_include_runs_the_crate_whole_on_any_compiled_change(self):
+        for arg in ('concat!("pol", "icy.rs")', 'env!("POLICY")', '$path', 'PATH'):
+            with self.subTest(arg=arg):
+                lib = f"pub mod x;\npub fn f() -> usize {{\n    include_str!({arg}).len()\n}}\n"
+                self.assertVerdict(["crates/beta/src/lib.rs", "crates/beta/src/x.rs"],
+                                   {"beta": ["crates/beta/src/x.rs"]},
+                                   "whole: beta: changed crates/beta/src/x.rs may be embedded by a "
+                                   "non-literal include_str!/include_bytes! in crates/beta/src/lib.rs\n",
+                                   sources={"crates/beta/src/lib.rs": lib})
+        self.assertVerdict(["crates/beta/src/lib.rs"], {"alpha": ["crates/alpha/src/lib.rs"]}, "",
+                           sources={"crates/beta/src/lib.rs": "const S: &str = include_str!(env!(\"X\"));\n"})
+
+    def test_unlisted_an_unscannable_walked_file_fails(self):
+        for text in ('const S: &str = "open\n', "/* open\n", "fn f() { include_str!(\"x\"\n"):
+            with self.subTest(text=text):
+                result = self.unlisted(["crates/beta/src/lib.rs"], {"beta": ["crates/beta/src/lib.rs"]},
+                                       sources={"crates/beta/src/lib.rs": text})
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn("FAIL: beta: cannot scan crates/beta/src/lib.rs for "
+                              "include_str!/include_bytes!", result.stderr)
 
     def test_unlisted_a_walked_compiled_file_is_left_to_the_diff(self):
         self.assertVerdict(["crates/beta/src/lib.rs"], {"beta": ["crates/beta/src/lib.rs"]}, "")
