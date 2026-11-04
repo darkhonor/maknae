@@ -4671,7 +4671,7 @@ mid_repo() { # <line-7-or-empty> <line-12> <line-3> [git-config key=value...] â€
   mid_lib "$d/crates/a/src/lib.rs" 'let z = y * 2;' 'x * 5' 'Fixture.'
   printf 'pub fn b(x: u32) -> u32 {\n    x + 2\n}\n' > "$d/crates/b/src/lib.rs"
   printf '[t1]\nmutants_crates = ["a", "b"]\n' > "$d/coverage-tiers.toml"
-  printf '/target\nCargo.lock\n' > "$d/.gitignore"
+  printf '/target\nCargo.lock\n__pycache__/\n' > "$d/.gitignore"
   cp "$here/../../rust-toolchain.toml" "$d/rust-toolchain.toml"
   mid_git "$d" init -q -b main
   for k in "$@"; do mid_git "$d" config "${k%%=*}" "${k#*=}"; done

@@ -330,7 +330,7 @@ class InDiff(unittest.TestCase):
             "crates/b/Cargo.toml": package_toml(names[1]),
             "crates/b/src/lib.rs": "pub fn b(x: u32) -> u32 {\n    x + 2\n}\n",
             "coverage-tiers.toml": tiers_toml(crates, features),
-            ".gitignore": "/target\nCargo.lock\n",
+            ".gitignore": "/target\nCargo.lock\n__pycache__/\n",
             "ci/gates/mutation-terminated.txt": "",
             **(base_files or {}),
         }
