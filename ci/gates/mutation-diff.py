@@ -448,30 +448,34 @@ def dep_tokens(text):
     return [t.replace("\\ ", " ") for t in tokens if t]
 
 
-def production_inputs(tree, package, features, target):
+def selectors(package):
     kinds = {k for t in package["targets"] for k in t["kind"]}
-    selectors = (["--lib"] if kinds & PRODUCTION_LIB else []) + (["--bins"] if "bin" in kinds else [])
-    if not selectors:
+    found = (["--lib"] if kinds & PRODUCTION_LIB else []) + (["--bins"] if "bin" in kinds else [])
+    if not found:
         raise ScopeError(f"FAIL: {package['name']}: no library or binary target to check")
-    argv = ["cargo", "check", "--package", package["name"], *selectors, "--message-format=json",
+    return found
+
+
+def check_inputs(tree, label, args, features, target, members):
+    argv = ["cargo", "check", *args, "--message-format=json",
             "--target-dir", str(target), "--manifest-path", str(tree / "Cargo.toml")]
     for feature in features:
         argv += ["--features", feature]
     done = subprocess.run(argv, cwd=tree, capture_output=True, env=cargo_env(), check=False)
     if done.returncode != 0:
         tail = done.stderr.decode(errors="replace").strip().splitlines()[-5:]
-        raise ScopeError(f"FAIL: {package['name']}: cargo check of its production targets failed: "
-                         + " | ".join(tail))
-    found, read = set(), 0
+        raise ScopeError(f"FAIL: {label}: cargo check of its production targets failed: " + " | ".join(tail))
+    found, read = {}, 0
     for line in done.stdout.decode(errors="replace").splitlines():
         try:
             message = json.loads(line)
         except ValueError:
             continue
         if (not isinstance(message, dict) or message.get("reason") != "compiler-artifact"
-                or message.get("package_id") != package["id"]
+                or message.get("package_id") not in members
                 or not set(message.get("target", {}).get("kind", [])) & (PRODUCTION_LIB | {"bin"})):
             continue
+        name = members[message["package_id"]]
         for artifact in message.get("filenames", []):
             artifact = Path(artifact)
             candidates = [artifact.with_suffix(".d")]
@@ -486,12 +490,35 @@ def production_inputs(tree, package, features, target):
                 try:
                     stat = os.stat(path)
                 except OSError:
-                    raise ScopeError(f"FAIL: {package['name']}: dep-info entry {json.dumps(token)} in "
+                    raise ScopeError(f"FAIL: {name}: dep-info entry {json.dumps(token)} in "
                                      f"{info.name} does not resolve to a file") from None
-                found.add((stat.st_dev, stat.st_ino))
+                found.setdefault(name, {})[(stat.st_dev, stat.st_ino)] = path
     if read == 0:
-        raise ScopeError(f"FAIL: {package['name']}: cargo check wrote no dep-info for its production targets")
+        raise ScopeError(f"FAIL: {label}: cargo check wrote no dep-info for its production targets")
     return found
+
+
+def production_inputs(tree, package, features, target):
+    found = check_inputs(tree, package["name"], ["--package", package["name"], *selectors(package)],
+                         features, target, {package["id"]: package["name"]})
+    return set(found.get(package["name"], {}))
+
+
+def workspace_sources(root, sha, tree, target):
+    found = packages(tree)
+    members = {p["id"]: name for name, p in found.items()}
+    tiers_text = show(root, sha, "coverage-tiers.toml")
+    runs = [("workspace", ["--workspace", "--lib", "--bins"], [])]
+    for crate in sorted(contract(root, sha, found) & set(found)):
+        features = features_of(tiers_text, crate)
+        if features:
+            runs.append((crate, ["--package", crate, *selectors(found[crate])], features))
+    sources = {}
+    for label, args, features in runs:
+        for name, files in check_inputs(tree, label, args, features, target, members).items():
+            for key, path in files.items():
+                sources.setdefault(key, (path, set()))[1].add(name)
+    return sources
 
 
 def compiled(root, base, head, workspace, target):
@@ -751,47 +778,37 @@ def includes(text):
     return literal, indirect
 
 
-TEST_ONLY_DIRS = ("tests", "benches", "examples")
-
-
-def test_only_file(path, dirs):
-    owner = owner_of(path, dirs)
-    if owner is None:
-        return False
-    directory = dirs[owner]
-    rest = path if directory in (".", "") else path[len(directory) + 1:]
-    return rest.split("/", 1)[0] in TEST_ONLY_DIRS
-
-
-def embeds(root, base, head, workspace):
+def embeds(root, base, head, workspace, target):
     base_sha, head_sha = resolve(root, base), resolve(root, head)
+    if not changed_names(root, base_sha, head_sha):
+        return {"indirect": None, "targets": {}}
     tree = Path(os.path.realpath(workspace))
-    dirs = workspace_crates(tree)
-    listing = git(root, "ls-tree", "-r", "-z", "--full-tree", "--name-only", head_sha)
-    if listing.returncode != 0:
-        raise ScopeError(f"FAIL: git ls-tree {head_sha} failed: {listing.stderr.decode().strip()}")
-    indirect, targets = None, {}
-    for name in sorted(n.decode() for n in listing.stdout.split(b"\0") if n.endswith(b".rs")):
-        if test_only_file(name, dirs) or (tree / name).is_symlink():
+    built = Path(target)
+    scanned = []
+    for path, sites in workspace_sources(root, head_sha, tree, built).values():
+        real = Path(os.path.realpath(path))
+        if contains(built, real):
             continue
-        file = tree / name
+        name = Path(os.path.relpath(real, tree)).as_posix() if contains(tree, real) else str(real)
+        scanned.append((name, Path(path), sites))
+    indirect, targets = None, {}
+    for name, file, sites in sorted(scanned, key=lambda entry: entry[0]):
         try:
-            literal, dynamic = includes(file.read_text())
+            raw = file.read_bytes()
+            if not any(macro.encode() in raw for macro in INCLUDE_MACROS):
+                continue
+            literal, dynamic = includes(raw.decode())
         except (OSError, UnicodeError, ValueError, LexError) as exc:
             raise ScopeError(f"FAIL: cannot scan {name} for include_str!/include_bytes!: {exc}") from None
         if dynamic and indirect is None:
             indirect = name
-        site = owner_of(name, dirs)
         for value in literal:
-            target = Path(os.path.realpath(Path(value) if os.path.isabs(value) else file.parent / value))
-            if not target.is_file() or not contains(tree, target):
+            embedded = Path(os.path.realpath(Path(value) if os.path.isabs(value) else file.parent / value))
+            if not embedded.is_file() or not contains(tree, embedded):
                 continue
-            key = Path(os.path.relpath(target, tree)).as_posix()
-            targets.setdefault(key, set()).add(site)
-    if indirect is not None and not changed_names(root, base_sha, head_sha):
-        indirect = None
-    return {"indirect": indirect,
-            "targets": {k: sorted(s, key=lambda v: (v is None, v or "")) for k, s in sorted(targets.items())}}
+            key = Path(os.path.relpath(embedded, tree)).as_posix()
+            targets.setdefault(key, set()).update(sites)
+    return {"indirect": indirect, "targets": {k: sorted(s) for k, s in sorted(targets.items())}}
 
 
 def read_embeds(crate, path):
@@ -833,7 +850,7 @@ def unlisted(crate, files, inputs, workspace, embed_file):
         except OSError:
             raise DiffError(f"FAIL: {crate}: changed {path} is not in the snapshot") from None
         owners = sites.get((stat.st_dev, stat.st_ino), set())
-        if crate in owners or None in owners:
+        if crate in owners:
             return f"whole: {crate}: changed {path} is embedded by include_str!/include_bytes!"
     for name in sorted(listed):
         if not name.endswith(".rs"):
@@ -990,7 +1007,7 @@ def main(argv):
             snapshot(argv[1], argv[2], argv[3])
         elif len(argv) == 6 and command == "compiled":
             print(json.dumps(compiled(*argv[1:])))
-        elif len(argv) == 5 and command == "embeds":
+        elif len(argv) == 6 and command == "embeds":
             print(json.dumps(embeds(*argv[1:])))
         elif len(argv) == 6 and command == "unlisted":
             line = unlisted(*argv[1:])
@@ -1005,7 +1022,8 @@ def main(argv):
             print("FAIL: usage: mutation-diff.py changed-lines <diff> | classify <pkg> <diff> "
                   "<whole> <indiff> | scope <root> <base> <head> [<workspace>] | paths <root> <base> "
                   "<diff> [<head>] | history <root> | snapshot <root> <rev> <dest> | "
-                  "compiled <root> <base> <head> <workspace> <target> | embeds <root> <base> <head> <workspace> | "
+                  "compiled <root> <base> <head> <workspace> <target> | "
+                  "embeds <root> <base> <head> <workspace> <target> | "
                   "unlisted <crate> <files> <compiled> <workspace> <embeds> | unmappable <root> <head> <workspace>",
                   file=sys.stderr)
             return 1

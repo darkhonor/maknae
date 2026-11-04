@@ -706,7 +706,7 @@ print("\n".join(sorted(crates)))' "$compiled_file" 2>/dev/null)"; then
       printf 'FAIL: --in-diff: compiled inputs cannot be computed: %s\n' "$(cat "$mut_tmp/compiled.err")"; exit 1
     fi
     embeds_file="$mut_tmp/embeds.json"
-    if ! python3 "$here/mutation-diff.py" embeds "$root" "$base" "$head_oid" "$snap" \
+    if ! python3 "$here/mutation-diff.py" embeds "$root" "$base" "$head_oid" "$snap" "$mut_tmp/depinfo" \
          >"$embeds_file" 2>"$mut_tmp/embeds.err"; then
       printf 'FAIL: --in-diff: include sites cannot be scanned: %s\n' "$(cat "$mut_tmp/embeds.err")"; exit 1
     fi

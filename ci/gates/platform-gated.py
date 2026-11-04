@@ -519,11 +519,38 @@ def derive(root):
     return sorted(set(items), key=lambda g: (g.crate, g.file, g.line, g.kind, g.name))
 
 
+ARRAY_OPEN = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\+?=\(")
+
+
+def invocations(lines):
+    found, in_array = [], False
+    for n, text in enumerate(lines):
+        if text.lstrip().startswith("#"):
+            continue
+        code, rest = [], text
+        while rest:
+            if in_array:
+                close = rest.find(")")
+                if close < 0:
+                    break
+                in_array, rest = False, rest[close + 1:]
+            else:
+                opened = ARRAY_OPEN.search(rest)
+                if opened is None:
+                    code.append(rest)
+                    break
+                code.append(rest[:opened.start()])
+                in_array, rest = True, rest[opened.end():]
+        if "mutation-platform.sh" in "".join(code):
+            found.append(n)
+    return found
+
+
 def filtered(root):
     lines = (Path(root) / "ci/gates/coverage-tiers.sh").read_text().splitlines()
-    call = [n for n, text in enumerate(lines) if "mutation-platform.sh" in text and not text.lstrip().startswith("#")]
+    call = invocations(lines)
     if len(call) != 1:
-        raise GateError("coverage-tiers.sh: expected exactly one mutation-platform.sh call")
+        raise GateError("coverage-tiers.sh: expected exactly one mutation-platform.sh invocation")
     guard = next((lines[n] for n in range(call[0], -1, -1) if re.match(r"\s*if \[", lines[n])), "")
     crates = set(re.findall(r'\[ "\$cname" = "([^"]+)" \]', guard))
     if not crates:

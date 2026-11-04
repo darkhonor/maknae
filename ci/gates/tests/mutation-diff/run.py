@@ -938,7 +938,7 @@ class Unlisted(unittest.TestCase):
             return run_cli("unlisted", "beta", str(directory / "files.json"), str(directory / "compiled.json"),
                            str(tree), str(directory / "embeds.json"))
 
-        for owners, expected in ((["gamma"], ""), (["beta"], embedded), ([None], embedded)):
+        for owners, expected in ((["gamma"], ""), (["beta"], embedded), (["alpha", "beta"], embedded)):
             with self.subTest(owners=owners):
                 result = run(json.dumps({"indirect": None, "targets": {"crates/beta/src/policy.rs": owners}}))
                 self.assertEqual((result.returncode, result.stdout), (0, expected), result.stderr)
@@ -981,8 +981,14 @@ class Unlisted(unittest.TestCase):
 class Embeds(unittest.TestCase):
     setUp, git, put, commit = Scope.setUp, Scope.git, Scope.put, Scope.commit
 
+    def run_embeds(self, base="HEAD~1"):
+        target = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, target, True)
+        return run_cli("embeds", str(self.root), self.git("rev-parse", base), "HEAD", str(self.root),
+                       str(target / "t"))
+
     def embeds(self, base="HEAD~1"):
-        result = run_cli("embeds", str(self.root), self.git("rev-parse", base), "HEAD", str(self.root))
+        result = self.run_embeds(base)
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
 
@@ -991,18 +997,41 @@ class Embeds(unittest.TestCase):
             self.put(path, text)
         self.commit("edit")
 
-    def test_embeds_scans_every_tracked_rust_file_of_every_crate(self):
-        self.change({"crates/alpha/src/embedder.rs": 'const P: &str = include_str!("policy.rs");\n',
+    def test_embeds_scans_every_production_input_of_every_package(self):
+        self.change({"crates/alpha/src/lib.rs": "mod embedder;\n",
+                     "crates/alpha/src/embedder.rs": 'const P: &str = include_str!("policy.rs");\n',
                      "crates/alpha/src/policy.rs": "",
+                     "crates/alpha/src/unused.rs": 'const P: &str = include_str!("lib.rs");\n',
                      "crates/gamma/src/lib.rs": 'const P: &str = include_str!("../../beta/src/lib.rs");\n',
-                     "bins/tool/main.rs": 'const P: &str = include_str!("../../crates/beta/src/lib.rs");\n'})
+                     "crates/gamma/src/main.rs": 'const P: &str = include_str!("../../alpha/src/policy.rs");\n'
+                                                 "fn main() {}\n"})
         self.assertEqual(self.embeds(), {"indirect": None, "targets": {
-            "crates/alpha/src/policy.rs": ["alpha"], "crates/beta/src/lib.rs": ["gamma", None]}})
+            "crates/alpha/src/policy.rs": ["alpha", "gamma"], "crates/beta/src/lib.rs": ["gamma"]}})
+
+    def test_embeds_a_production_source_of_any_suffix_or_directory_is_scanned(self):
+        examples = 'autoexamples = false\n\n[lib]\npath = "examples/lib.rs"\n'
+        cases = [({"crates/gamma/Cargo.toml": MANIFEST.format(n="gamma", extra='\n[lib]\npath = "src/lib.rust"\n'),
+                   "crates/gamma/src/lib.rust": "pub use std::include_str as embed;\n"},
+                  {"indirect": "crates/gamma/src/lib.rust", "targets": {}}),
+                 ({"crates/beta/Cargo.toml": MANIFEST.format(n="beta", extra=examples),
+                   "crates/beta/examples/lib.rs": 'pub mod policy;\npub const P: &str = include_str!("policy.rs");\n',
+                   "crates/beta/examples/policy.rs": ""},
+                  {"indirect": None, "targets": {"crates/beta/examples/policy.rs": ["beta"]}}),
+                 ({"crates/gamma/src/lib.rs": 'pub const D: &str = include_str!("data.txt");\n',
+                   "crates/gamma/src/data.txt": "pub use std::include_str as embed;\n"},
+                  {"indirect": "crates/gamma/src/data.txt", "targets": {"crates/gamma/src/data.txt": ["gamma"]}})]
+        for files, expected in cases:
+            with self.subTest(files=sorted(files)):
+                self.change(files)
+                try:
+                    self.assertEqual(self.embeds(), expected)
+                finally:
+                    self.git("reset", "-q", "--hard", "HEAD~1")
 
     def test_embeds_an_indirect_mention_in_any_crate_is_reported(self):
         for text in ("pub use std::include_str as embed;\n",
                      'macro_rules! m {\n    () => { include_str!("x") };\n}\n',
-                     'const S: &str = include_str!(concat!("a", "b"));\n'):
+                     'const S: &str = include_str!(concat!("lib", ".rs"));\n'):
             with self.subTest(text=text):
                 self.change({"crates/gamma/src/lib.rs": text})
                 try:
@@ -1010,30 +1039,41 @@ class Embeds(unittest.TestCase):
                 finally:
                     self.git("reset", "-q", "--hard", "HEAD~1")
 
+    def test_embeds_a_feature_gated_source_follows_the_declared_features(self):
+        files = {"coverage-tiers.toml": TIERS + 'mutants_features = { beta = ["seam"] }\n'}
+        for crate in ("beta", "gamma"):
+            files[f"crates/{crate}/Cargo.toml"] = MANIFEST.format(n=crate, extra="\n[features]\nseam = []\n")
+            files[f"crates/{crate}/src/lib.rs"] = '#[cfg(feature = "seam")]\nmod x;\n'
+            files[f"crates/{crate}/src/x.rs"] = "pub use std::include_str as embed;\n"
+        self.change(files)
+        self.assertEqual(self.embeds()["indirect"], "crates/beta/src/x.rs")
+
     def test_embeds_test_only_code_is_not_scanned(self):
-        files = {f"crates/gamma/{d}/x.rs": "use std::include_str as embed;\n"
+        files = {f"crates/gamma/{d}/x.rs": "use std::include_str as embed;\nfn main() {}\n"
                  for d in ("tests", "benches", "examples")}
-        files["crates/gamma/src/lib.rs"] = ("#[cfg(test)]\nmod tests {\n    use std::include_str as embed;\n}\n"
+        files["crates/gamma/src/fixtures.rs"] = "use std::include_str as embed;\n"
+        files["crates/gamma/src/lib.rs"] = ("#[cfg(test)]\nmod fixtures;\n"
+                                            "#[cfg(test)]\nmod tests {\n    use std::include_str as embed;\n}\n"
                                             "// pub use std::include_str as embed;\n")
         self.change(files)
         self.assertEqual(self.embeds(), {"indirect": None, "targets": {}})
 
-    def test_embeds_an_unscannable_file_fails(self):
-        for text in ('const S: &str = "open\n', "/* open\n", 'fn f() { include_str!("x"\n'):
-            with self.subTest(text=text):
-                self.change({"crates/gamma/src/lib.rs": text})
-                try:
-                    result = run_cli("embeds", str(self.root), self.git("rev-parse", "HEAD~1"), "HEAD",
-                                     str(self.root))
-                    self.assertEqual(result.returncode, 1, result.stdout)
-                    self.assertIn("FAIL: cannot scan crates/gamma/src/lib.rs for include_str!/include_bytes!",
-                                  result.stderr)
-                finally:
-                    self.git("reset", "-q", "--hard", "HEAD~1")
+    def test_embeds_an_unscannable_input_fails(self):
+        self.change({"crates/gamma/src/lib.rs": 'pub const D: &str = include_str!("data.txt");\n',
+                     "crates/gamma/src/data.txt": 'include_str!("open\n'})
+        result = self.run_embeds()
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("FAIL: cannot scan crates/gamma/src/data.txt for include_str!/include_bytes!", result.stderr)
 
-    def test_embeds_an_empty_range_reports_no_indirect_use(self):
-        self.change({"crates/gamma/src/lib.rs": "pub use std::include_str as embed;\n"})
-        self.assertEqual(self.embeds(base="HEAD")["indirect"], None)
+    def test_embeds_a_failed_check_fails(self):
+        self.change({"crates/gamma/src/lib.rs": "pub fn broken( {\n"})
+        result = self.run_embeds()
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("FAIL: workspace: cargo check of its production targets failed", result.stderr)
+
+    def test_embeds_an_empty_range_reports_nothing_and_builds_nothing(self):
+        self.change({"crates/gamma/src/lib.rs": "pub use std::include_str as embed;\npub fn broken( {\n"})
+        self.assertEqual(self.embeds(base="HEAD"), {"indirect": None, "targets": {}})
 
 
 class Snapshot(unittest.TestCase):

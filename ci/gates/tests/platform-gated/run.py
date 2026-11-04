@@ -279,6 +279,24 @@ class Derivation(unittest.TestCase):
         self.tree.files["ci/gates/coverage-tiers.sh"] = 'bash "$here/mutation-platform.sh"\n'
         self.assertFails("no crate list guards the mutation-platform.sh call")
 
+    def test_a_mention_in_a_list_is_not_an_invocation(self):
+        call = self.tree.files["ci/gates/coverage-tiers.sh"]
+        for listing in ('    attested+=(ci/affected.py ci/gates/coverage-tiers.sh\n'
+                        '               ci/gates/mutation-platform.sh ci/gates/mutation-diff.py)\n',
+                        '    files=("$here/mutation-platform.sh")\n'):
+            with self.subTest(listing=listing):
+                self.tree.files["ci/gates/coverage-tiers.sh"] = listing + call
+                result = self.tree.run()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_two_invocations_fail(self):
+        call = self.tree.files["ci/gates/coverage-tiers.sh"]
+        for second in ('x="$(bash "$here/mutation-platform.sh")"\n', '"$here/mutation-platform.sh"\n',
+                       'ci/gates/mutation-platform.sh Linux\n', 'list=(a) ; bash "$here/mutation-platform.sh"\n'):
+            with self.subTest(second=second):
+                self.tree.files["ci/gates/coverage-tiers.sh"] = call + second
+                self.assertFails("expected exactly one mutation-platform.sh invocation")
+
     def test_broken_parser_cannot_pass(self):
         self.tree.files["crates/maknae-io/src/syscall.rs"] = "fn nothing() {}\n"
         self.tree.files["crates/maknae-sys/src/lib.rs"] = ""

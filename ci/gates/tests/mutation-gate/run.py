@@ -869,9 +869,9 @@ class InDiff(unittest.TestCase):
         self.assertIn("RUN a: 2 in-diff mutants", out)
 
     def test_in_diff_build_script_inside_src_runs_that_crate_whole(self):
-        helper = "crates/a/src/helper.rs"
         for script in ("src/build.rs", "tests/build.rs", "benches/build.rs", "examples/build.rs"):
             with self.subTest(script=script):
+                helper = f"crates/a/{script.split('/')[0]}/helper.rs"
                 shutil.rmtree(self.tmp / "repo", ignore_errors=True)
                 manifest = package_toml("a") + f'build = "{script}"\n\n[features]\nextra = []\n'
                 repo = self.in_diff_repo({helper: BUILD_HELPER.replace("fast", "slow")},
@@ -1046,6 +1046,36 @@ class InDiff(unittest.TestCase):
         self.assertIn(f"whole: a: walked source {rust} is not a .rs file the in-diff mapping reads", out)
         self.assertEqual(len(self.whole_runs("a")), 1)
 
+    def test_in_diff_an_include_alias_re_exported_from_a_non_rs_library_runs_every_crate_whole(self):
+        rust = "crates/a/src/lib.rust"
+        policy = "crates/b/src/policy.rs"
+        lib_b = 'pub mod policy;\npub fn allowed() -> bool {\n    a::embed!("policy.rs").contains("ALLOW")\n}\n'
+        base = {"crates/a/Cargo.toml": package_toml("a") + '\n[lib]\npath = "src/lib.rust"\n',
+                rust: "pub use std::include_str as embed;\n" + LIB_A, "crates/b/src/lib.rs": lib_b,
+                policy: 'pub const RULE: &str = "ALLOW";\n',
+                "crates/b/Cargo.toml": package_toml("b") + '\n[dependencies]\na = { path = "../a" }\n'}
+        repo = self.in_diff_repo({policy: 'pub const RULE: &str = "DENY";\n'}, base_files=base)
+        result, out = self.gate(repo, whole=WHOLE_EDIT)
+        self.assertEqual(result.returncode, 0, out)
+        for crate in ("a", "b"):
+            self.assertIn(f"whole: {crate}: include_str/include_bytes used indirectly in {rust}", out)
+            self.assertEqual(len(self.whole_runs(crate)), 1)
+        result, out = self.gate(repo, whole=WHOLE_EDIT, missed=1, fake_exit=2)
+        self.assertFails(result, out, "cargo mutants --package b reported missed/timeout mutants")
+
+    def test_in_diff_a_production_library_under_examples_is_scanned(self):
+        policy = "crates/b/examples/policy.rs"
+        lib_b = 'pub mod policy;\npub fn check() -> bool {\n    include_str!("policy.rs").contains("ALLOW")\n}\n'
+        manifest = package_toml("b") + 'autoexamples = false\n\n[lib]\npath = "examples/lib.rs"\n'
+        repo = self.in_diff_repo({policy: 'pub const RULE: &str = "DENY";\n'},
+                                 base_files={"crates/b/Cargo.toml": manifest, "crates/b/examples/lib.rs": lib_b,
+                                             policy: 'pub const RULE: &str = "ALLOW";\n'})
+        result, out = self.gate(repo, whole=WHOLE_EDIT)
+        self.assertEqual(result.returncode, 0, out)
+        self.assertIn(f"whole: b: changed {policy} is embedded by include_str!/include_bytes!", out)
+        self.assertEqual(len(self.whole_runs("b")), 1)
+        self.assertEqual(self.whole_runs("a"), [])
+
     def test_in_diff_a_build_script_crate_runs_whole_on_a_documentation_change(self):
         build = ('fn main() {\n    let readme = std::fs::read_to_string("../../README.md").unwrap();\n'
                  '    println!("cargo:rustc-env=POLICY={}", readme.trim());\n}\n')
@@ -1108,6 +1138,7 @@ class InDiff(unittest.TestCase):
 
     def test_in_diff_a_test_only_file_runs_nothing(self):
         cases = {"crates/a/tests/it.rs": ("#[test]\nfn it() {}\n", "#[test]\nfn it() {\n    assert!(true);\n}\n", {}),
+                 "crates/a/examples/demo.rs": ("fn main() {}\n", "use std::include_str as embed;\nfn main() {\n    let _ = a::a(1);\n}\n", {}),
                  "crates/a/src/fixtures.rs": ("pub fn f() {}\n", "pub fn f() {\n    let _ = 1;\n}\n",
                                               {A_RS: LIB_A + "\n#[cfg(test)]\nmod fixtures;\n"})}
         for path, (before, after, extra) in cases.items():
