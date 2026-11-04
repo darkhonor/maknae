@@ -16,10 +16,13 @@ if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
   exit 1
 fi
 
+in_diff_git_env=(-u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_COMMON_DIR
+  -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_LITERAL_PATHSPECS -u GIT_NOGLOB_PATHSPECS
+  -u GIT_GLOB_PATHSPECS -u GIT_ICASE_PATHSPECS)
 in_diff_generate() { # <base> <out>
-  env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_DIFF_OPTS -u GIT_EXTERNAL_DIFF \
+  env "${in_diff_git_env[@]}" -u GIT_DIFF_OPTS -u GIT_EXTERNAL_DIFF \
     git -C "$root" -c diff.noprefix=false -c diff.mnemonicPrefix=false -c diff.suppressBlankEmpty=false \
-    -c core.quotePath=true diff --no-ext-diff --no-textconv --no-color --unified=3 \
+    -c core.quotePath=true diff --text --no-ext-diff --no-textconv --no-color --unified=3 \
     --src-prefix=a/ --dst-prefix=b/ --find-renames "$1" HEAD -- '*.rs' >"$2"
 }
 [ "${BASH_SOURCE[0]}" = "$0" ] || return 0
@@ -231,7 +234,7 @@ import json, os, sys
 m = json.load(sys.stdin)
 root = os.path.realpath(sys.argv[1])
 for p in m["packages"]:
-    d = os.path.relpath(os.path.dirname(p["manifest_path"]), root)
+    d = os.path.relpath(os.path.realpath(os.path.dirname(p["manifest_path"])), root)
     print(p["name"] + "\t" + d)
 ' "$root")"; then
     return 1
@@ -602,7 +605,7 @@ if [ "$mutants_mode" != "" ]; then
   declare -A in_scope=()
   in_diff_file=""
   if [ -n "$in_diff" ]; then
-    in_git() { env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY git -C "$root" "$@"; }
+    in_git() { env "${in_diff_git_env[@]}" git -C "$root" "$@"; }
     toplevel="$(in_git rev-parse --show-toplevel 2>/dev/null || true)"
     if [ -z "$toplevel" ] || [ "$(cd -P "$toplevel" && pwd)" != "$(cd -P "$root" && pwd)" ]; then
       printf 'FAIL: --in-diff needs --root at the git toplevel (%s is not)\n' "$root"; exit 1
@@ -623,6 +626,9 @@ if [ "$mutants_mode" != "" ]; then
     in_diff_file="$mut_tmp/in.diff"
     if ! in_diff_generate "$base" "$in_diff_file"; then
       printf 'FAIL: --in-diff: git diff %s HEAD failed\n' "$base"; exit 1
+    fi
+    if ! changed_paths="$(python3 "$here/mutation-diff.py" paths "$root" "$base" "$in_diff_file" 2>&1)"; then
+      printf 'FAIL: --in-diff: the diff does not name the changed Rust files: %s\n' "$changed_paths"; exit 1
     fi
     if ! scope="$(python3 "$here/mutation-diff.py" scope "$root" "$base" HEAD 2>"$mut_tmp/scope.err")" ||
        ! scope_lines="$(printf '%s' "$scope" | python3 -c '
@@ -650,10 +656,35 @@ print("\n".join(crates))' 2>/dev/null)"; then
         printf 'FAIL: --in-diff: scope crate %s not selected by --mutants\n' "$c"; exit 1
       fi
     done
+    if [ "$oracle_ok" -ne 1 ]; then
+      printf 'FAIL: --in-diff: changed files cannot be mapped to crates without cargo metadata\n'; exit 1
+    fi
+    while IFS= read -r path; do
+      [ -z "$path" ] && continue
+      owner="" owner_len=-1
+      for c in "${!crate_dir_map[@]}"; do
+        d="${crate_dir_map[$c]}"
+        if [ "$d" = "." ]; then
+          n=0
+        elif [ "${path#"$d"/}" != "$path" ]; then
+          n=${#d}
+        else
+          continue
+        fi
+        if [ "$n" -gt "$owner_len" ]; then owner="$c" owner_len=$n; fi
+      done
+      if [ -n "$owner" ] && [ -n "${contract[$owner]+x}" ] && [ -z "${selected[$owner]+x}" ]; then
+        printf 'FAIL: --in-diff: changed crate %s not selected by --mutants\n' "$owner"; exit 1
+      fi
+    done <<<"$changed_paths"
     if [ ! -s "$in_diff_file" ] && [ "${#in_scope[@]}" -eq 0 ]; then
       printf 'SKIP: in-diff: no Rust change between %s and HEAD\n' "$base"
       mutant_crates=()
     fi
+  fi
+  if ! mkdir -p -- "$root/target"; then
+    fail "cannot create $root/target for the mutation output"
+    printf '%d violation(s).\n' "$fail_n"; exit 1
   fi
   for cname in "${mutant_crates[@]}"; do
     [ -z "$cname" ] && continue
@@ -710,8 +741,10 @@ print("\n".join(crates))' 2>/dev/null)"; then
           "SKIP: $cname: "*) printf '%s\n' "$verdict"; continue;;
           *) fail "$cname: mutation-diff.py classify printed no verdict: $verdict"; continue;;
         esac
+        listed_n="${verdict#"RUN $cname: "}"
+        listed_n="${listed_n%% *}"
         diff_flags=(--in-diff "$in_diff_file")
-        judge_flags=(--in-diff)
+        judge_flags=(--in-diff --expect "$listed_n")
       fi
     fi
     # A per-crate output dir, so each crate's outcomes.json and per-mutant logs

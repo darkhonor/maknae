@@ -369,6 +369,30 @@ class AffectedTests(unittest.TestCase):
                 self.assertEqual(len(calls), 1, calls)
                 self.assertTrue(calls[0].endswith(' --in-diff v-base'), calls)
 
+    def test_hook_existing_ref_override_selects_over_the_diff_range(self):
+        self.write('crates/a/src/lib.rs', '// branch\n')
+        old_tip = self.commit()
+        self.git('reset', '-q', '--hard', self.base)
+        self.change_c()
+        main = self.git('rev-parse', 'HEAD')
+        self.write('crates/a/src/lib.rs', '// branch\n')
+        self.commit()
+        override = {'MAKNAE_PRE_PUSH_MUTANTS_BASE': main}
+        calls = self.mutation_calls(self.hook(old_tip, mutations=True, env=override))
+        self.assertEqual(calls, ['--root ' + self.git('rev-parse', '--show-toplevel')
+                                 + ' --mutants a b --in-diff ' + main])
+
+    def test_hook_rebased_ref_selects_over_the_merge_base(self):
+        self.write('crates/a/src/lib.rs', '// branch\n')
+        old_tip = self.commit()
+        self.git('reset', '-q', '--hard', self.base)
+        self.change_c()
+        self.write('crates/a/src/lib.rs', '// branch\n')
+        self.commit()
+        calls = self.mutation_calls(self.hook(old_tip, mutations=True))
+        self.assertEqual(calls, ['--root ' + self.git('rev-parse', '--show-toplevel')
+                                 + ' --mutants a b c --in-diff ' + old_tip])
+
     def test_hook_without_opt_in_runs_no_mutation(self):
         self.change_c()
         for base in (self.base, ZERO):

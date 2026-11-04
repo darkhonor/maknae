@@ -4566,15 +4566,22 @@ mo_indiff() { # <label> <baseline-outcome-json|""> <enospc 0|1>
   [ "$3" = 1 ] && printf 'No space left on device (os error 28)\n' > "$d/log/m1.log"
   printf '%s' "$d"
 }
+mo_no_accept() { # <cmd...> — exits 0 when the command printed an accept line, so a reject probe fails on it
+  local out rc=0
+  out="$("$@" 2>&1)" || rc=$?
+  printf '%s\n' "$out"
+  if grep -qF "baseline passed" <<<"$out"; then return 0; fi
+  return "$rc"
+}
 mo_d1="$(mo_indiff x '{"scenario":"Baseline","summary":"Failure"}' 0)"
 expect_reject_because "oracle/in-diff-unviable-without-baseline" "ZERO viable" \
-  bash "$mo" judge --in-diff "$mo_d1" maknae-kernel
+  bash "$mo" judge --in-diff --expect 3 "$mo_d1" maknae-kernel
 mo_d2="$(mo_indiff x '{"scenario":"Baseline","summary":"Success"}' 1)"
 expect_reject_because "oracle/in-diff-unviable-enospc" "ENVIRONMENT failure" \
-  bash "$mo" judge --in-diff "$mo_d2" maknae-kernel
+  mo_no_accept bash "$mo" judge --in-diff --expect 3 "$mo_d2" maknae-kernel
 mo_d3="$(mo_indiff x '{"scenario":"Baseline","summary":"Success"}' 0)"
 expect_accept "oracle/in-diff-unviable-with-baseline" "baseline passed" \
-  bash "$mo" judge --in-diff "$mo_d3" maknae-kernel
+  bash "$mo" judge --in-diff --expect 3 "$mo_d3" maknae-kernel
 
 # SCRATCH: a volume without room must be refused BEFORE the run, not discovered
 # as a wall of 'unviable' afterwards. The floor is raised via the documented
@@ -4595,7 +4602,10 @@ expect_reject_because "mutation-oracle/scratch-missing-dir" "does not exist" \
 # A real git fixture and real `cargo metadata`; only cargo-mutants is a stand-in,
 # which answers `--list` from MID_WHOLE/MID_INDIFF and exits MID_EXIT for a run.
 mid_aux="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$mid_aux/tools" "$mid_aux/cargo-home"
-mid_real_cargo="$(command -v cargo)"
+if ! mid_real_cargo="$(command -v cargo)"; then
+  echo "FAIL: negative-control: cargo is not on PATH; the mutation-in-diff probes need real cargo metadata"
+  exit 1
+fi
 mid_channel="$(sed -n 's/^channel *= *"\(.*\)".*/\1/p' "$here/../../rust-toolchain.toml")"
 cat > "$mid_aux/tools/cargo" <<'EOF'
 #!/bin/sh
@@ -4661,15 +4671,16 @@ mid_m() { # <name> <package> <start> <end>
   printf '{"name":"%s","package":"%s","file":"%s","span":{"start":{"line":%s,"column":5},"end":{"line":%s,"column":6}}}' \
     "$1" "$2" "$file" "$3" "$4"
 }
-mid_gate() { # <repo> <whole-json> <indiff-json> <exit> [extra env...]
-  local repo="$1" whole="$2" indiff="$3" code="$4"; shift 4
+mid_gate() { # <repo> <whole-json> <indiff-json> <exit> [extra env...] — mutates $mid_mutants (default: a b)
+  local repo="$1" whole="$2" indiff="$3" code="$4" sel; shift 4
+  read -r -a sel <<<"${mid_mutants:-a b}"
   env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_DIFF_OPTS \
     -u COVERAGE_TIERS_JSON -u COVERAGE_TIERS_FILELIST -u COVERAGE_TIERS_CRATE_DIRS \
     -u LLVM_COV -u LLVM_PROFDATA \
     PATH="$mid_aux/tools:$PATH" MID_REAL_CARGO="$mid_real_cargo" CARGO_HOME="$mid_aux/cargo-home" \
     RUSTUP_TOOLCHAIN="$mid_channel" MID_WHOLE="$whole" MID_INDIFF="$indiff" MID_EXIT="$code" \
     MUTATION_ORACLE_MIN_KIB=1 "$@" \
-    bash "$here/coverage-tiers.sh" --root "$repo" --mutants a b --in-diff base
+    bash "$here/coverage-tiers.sh" --root "$repo" --mutants "${sel[@]}" --in-diff base
 }
 mid_a="$(mid_m 'a body' a 6 8)"; mid_star="$(mid_m 'a star' a 7 7)"
 mid_whole_edit="[$mid_a,$mid_star,$(mid_m 'd body' a 12 12),$(mid_m 'b body' b 2 2)]"
@@ -4693,6 +4704,23 @@ expect_reject_because "mutation-in-diff/noprefix-mapping-failure-fails" "the in-
 mid_r="$(mid_repo '' 'x * 6' Fixture.)"
 expect_reject_because "mutation-in-diff/git-diff-opts-mixed-change-fails" "in-diff listing dropped" \
   mid_gate "$mid_r" "$mid_whole_delete" "[$(mid_m 'd body' a 11 11)]" 0 GIT_DIFF_OPTS=-u0
+mid_r="$(mid_repo 'let z = y * 4;' 'x * 5' Fixture.)"
+printf '*.rs -diff\n' > "$mid_r/.gitattributes"
+mid_git "$mid_r" add -A
+mid_git "$mid_r" commit -q --amend --no-edit
+expect_reject_because "mutation-in-diff/rs-diff-attribute-mapping-failure-fails" "the in-diff listing found none" \
+  mid_gate "$mid_r" "$mid_whole_edit" "" 0
+mid_r="$(mid_repo 'let z = y * 4;' 'x * 5' Fixture.)"
+expect_reject_because "mutation-in-diff/literal-pathspecs-mapping-failure-fails" "the in-diff listing found none" \
+  mid_gate "$mid_r" "$mid_whole_edit" "" 0 GIT_LITERAL_PATHSPECS=1
+mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' Fixture.)"
+printf 'pub fn b(x: u32) -> u32 {\n    x + 3\n}\n' > "$mid_r/crates/b/src/lib.rs"
+mid_git "$mid_r" add -A
+mid_git "$mid_r" commit -qm b
+mid_mutants=a
+expect_reject_because "mutation-in-diff/changed-crate-not-selected-fails" "changed crate b not selected by --mutants" \
+  mid_gate "$mid_r" "$mid_whole_edit" "" 0
+mid_mutants=
 
 # ---- payload-xattr-clean (#332): an AppleDouble sibling per tagged entry ------
 # pkgbuild serialises a `._name` AppleDouble sibling INTO the payload for every

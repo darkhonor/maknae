@@ -46,8 +46,13 @@ while read -r local_ref local_oid _remote_ref remote_oid; do
     else
       diff_base="$remote_oid"
     fi
-    mutation_bases+=("$diff_base")
-    mutation_packages+=("$selected")
+    python3 "$root/ci/affected.py" --root "$root" --event pull_request \
+      --base="$diff_base" --head="$local_oid" >"$selection"
+    selected="$(python3 -c 'import json,sys; print(" ".join(json.load(open(sys.argv[1]))["mutants"]))' "$selection")"
+    if [ -n "${selected// /}" ]; then
+      mutation_bases+=("$diff_base")
+      mutation_packages+=("$selected")
+    fi
   fi
 done
 if [ "$build" = 1 ]; then

@@ -122,6 +122,10 @@ class MutationGate(unittest.TestCase):
         self.assertEqual(run.argv[4], str(run.root / "target" / f"mutants-{crate}"))
         return run
 
+    def test_gate_creates_the_output_parent_on_a_fresh_tree(self):
+        run = self.gate_argv("maknae-kernel")
+        self.assertIn("mutants[maknae-kernel]:", run.result.stdout)
+
     def test_gate_passes_native_filter_as_one_argument(self):
         expected = subprocess.check_output(["bash", str(SCRIPT)], text=True).strip()
         run = self.gate_argv("maknae-io", extra_env=AMBIENT)
@@ -345,10 +349,10 @@ class InDiff(unittest.TestCase):
         return repo
 
     def gate(self, repo, *args, crates=("a", "b"), whole=(), indiff=(), extra_env=None,
-             missed=0, fake_exit=0, root=None):
+             missed=0, fake_exit=0, root=None, total=None):
         payload = self.aux / "payload"
         shutil.rmtree(payload)
-        write_payload(payload, CAUGHT_LOGS, None, missed=missed)
+        write_payload(payload, CAUGHT_LOGS, len(indiff) if indiff else total, missed=missed)
         self.args = self.aux / "args"
         for f in self.aux.glob("args*"):
             f.unlink()
@@ -521,7 +525,9 @@ class InDiff(unittest.TestCase):
         result, out = self.gate(repo, whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2], extra_env={
             "GIT_DIR": str(other / ".git"), "GIT_WORK_TREE": str(other),
             "GIT_INDEX_FILE": str(other / ".git/index"),
-            "GIT_OBJECT_DIRECTORY": str(other / ".git/objects")})
+            "GIT_OBJECT_DIRECTORY": str(other / ".git/objects"),
+            "GIT_COMMON_DIR": str(other / ".git"),
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(other / ".git/objects")})
         self.assertEqual(result.returncode, 0, out)
         self.assertIn("RUN a: 2 in-diff mutants", out)
 
@@ -585,6 +591,87 @@ class InDiff(unittest.TestCase):
         self.assertEqual(self.runs(), [])
         self.assertEqual(len(self.invocations()), 4)
 
+    def test_in_diff_fresh_tree_without_target_runs(self):
+        repo = self.in_diff_repo(EDIT_A)
+        self.assertFalse((repo / "target").exists())
+        result, out = self.gate(repo, whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2])
+        self.assertEqual(result.returncode, 0, out)
+        self.assertIn("mutants[a]:", out)
+
+    def test_in_diff_rs_diff_attribute_still_classifies(self):
+        attributes = {".gitattributes": "*.rs -diff\n"}
+        for where in ("committed", "info", "attributesFile"):
+            with self.subTest(where):
+                shutil.rmtree(self.tmp / "repo", ignore_errors=True)
+                repo = self.in_diff_repo({**EDIT_A, **attributes} if where == "committed" else EDIT_A)
+                if where == "info":
+                    (repo / ".git/info").mkdir(exist_ok=True)
+                    (repo / ".git/info/attributes").write_text("*.rs -diff\n")
+                elif where == "attributesFile":
+                    (self.aux / "attributes").write_text("*.rs -diff\n")
+                    git(repo, "config", "core.attributesFile", str(self.aux / "attributes"))
+                result, out = self.gate(repo, whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2])
+                self.assertEqual(result.returncode, 0, out)
+                self.assertIn("RUN a: 2 in-diff mutants", out)
+                result, out = self.gate(repo, whole=WHOLE_EDIT)
+                self.assertFails(result, out, "FAIL: a: 2 listed mutants on changed lines in "
+                                 "crates/a/src/lib.rs but the in-diff listing found none")
+                self.assertNotIn("Binary files", Path(str(self.args) + ".in.diff").read_text())
+
+    def test_in_diff_pathspec_env_is_ignored(self):
+        repo = self.in_diff_repo(EDIT_A)
+        for var in ("GIT_LITERAL_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_GLOB_PATHSPECS",
+                    "GIT_ICASE_PATHSPECS"):
+            with self.subTest(var):
+                result, out = self.gate(repo, whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2],
+                                        extra_env={var: "1"})
+                self.assertEqual(result.returncode, 0, out)
+                self.assertIn("RUN a: 2 in-diff mutants", out)
+                result, out = self.gate(repo, whole=WHOLE_EDIT, extra_env={var: "1"})
+                self.assertFails(result, out, "the in-diff listing found none")
+
+    def test_in_diff_changed_crate_not_selected_fails(self):
+        repo = self.in_diff_repo({"crates/b/src/lib.rs": "pub fn b(x: u32) -> u32 {\n    x + 3\n}\n"})
+        result, out = self.gate(repo, crates=("a",), whole=WHOLE_EDIT)
+        self.assertFails(result, out, "FAIL: --in-diff: changed crate b not selected by --mutants")
+        self.assertEqual(self.invocations(), [])
+
+    def test_in_diff_run_count_must_match_the_listing(self):
+        repo = self.in_diff_repo(EDIT_A)
+        result, out = self.gate(repo, whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2])
+        self.assertEqual(result.returncode, 0, out)
+        payload = self.aux / "payload/outcomes.json"
+        self.assertEqual(json.loads(payload.read_text())["total_mutants"], 2)
+        fake = self.aux / "tools/cargo"
+        original = fake.read_text()
+        self.addCleanup(fake.write_text, original)
+        fake.write_text(original.replace(
+            'cp -R "$FAKE_PAYLOAD/." "$out/mutants.out/"\n',
+            'cp -R "$FAKE_PAYLOAD/." "$out/mutants.out/"\n'
+            'python3 -c "import json,sys; p=sys.argv[1]; d=json.load(open(p)); '
+            'd[\'total_mutants\']+=1; d[\'caught\']+=1; json.dump(d, open(p, \'w\'))" '
+            '"$out/mutants.out/outcomes.json"\n'))
+        result, out = self.gate(repo, whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2])
+        self.assertFails(result, out, "mutation run for a cannot be trusted",
+                         "total_mutants is 3 but the in-diff listing has 2")
+
+    def test_in_diff_native_filter_reaches_both_listings(self):
+        native = subprocess.run([BASH, str(ROOT / "ci/gates/mutation-platform.sh")],
+                                capture_output=True, text=True, check=True).stdout.strip()
+        fake_nextest(self.aux / "tools", "0.9.146")
+        for crate in ("maknae-io", "maknae-sys"):
+            with self.subTest(crate):
+                shutil.rmtree(self.tmp / "repo", ignore_errors=True)
+                repo = self.in_diff_repo(EDIT_A, names=(crate, "b"))
+                listed_a = [dict(m, package=crate) for m in WHOLE_EDIT[2:3]]
+                result, out = self.gate(repo, crates=(crate, "b"), whole=listed_a)
+                self.assertEqual(result.returncode, 0, out)
+                self.assertIn(f"SKIP: {crate}: no mutant on a changed line", out)
+                lists = [argv for argv in self.invocations() if "--list" in argv and crate in argv]
+                self.assertEqual(len(lists), 2, self.invocations())
+                self.assertEqual(sum("--in-diff" in argv for argv in lists), 1)
+                for argv in lists:
+                    self.assertEqual(argv[argv.index("--exclude-re") + 1], native)
 
 def git(repo, *args, input=None):
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
@@ -723,6 +810,7 @@ def fake_cargo(tools):
         '  [ "$1" = "--output" ] && { out="$2"; break; }\n'
         '  shift\n'
         'done\n'
+        '[ -d "$(dirname "$out")" ] || { echo "Error: create output directory $out: No such file or directory" >&2; exit 1; }\n'
         'mkdir -p "$out/mutants.out"\n'
         'cp -R "$FAKE_PAYLOAD/." "$out/mutants.out/"\n'
         'if [ "$FAKE_LITTER" = 1 ]; then\n'

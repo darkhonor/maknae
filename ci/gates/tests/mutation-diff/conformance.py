@@ -62,9 +62,19 @@ BASE = {
 }
 
 
-def lib(old, new):
+WORKSPACE = {
+    "Cargo.toml": '[workspace]\nmembers = ["crates/x"]\nresolver = "2"\n',
+    ".gitignore": "/target\nCargo.lock\n",
+    "crates/x/Cargo.toml": BASE["Cargo.toml"],
+    "crates/x/src/lib.rs": LIB,
+    "crates/x/src/other.rs": OTHER,
+}
+NOT_DIFFABLE = {**BASE, ".gitattributes": "*.rs -diff\n"}
+
+
+def lib(old, new, path="src/lib.rs"):
     assert old in LIB, old
-    return {"src/lib.rs": LIB.replace(old, new, 1)}
+    return {path: LIB.replace(old, new, 1)}
 
 
 def rename_with_edit():
@@ -83,6 +93,14 @@ def mixed():
 
 SHAPES = [
     ("one added line", lib("    t = t * 2;\n", "    t = t * 2;\n    t = t + 0;\n"), {}, {}),
+    ("a replacement in a workspace member", lib("t = t * 2;", "t = t * 4;", "crates/x/src/lib.rs"),
+     {}, {}, WORKSPACE),
+    ("a deletion in a workspace member", lib("    v.push(x * 2);\n", "", "crates/x/src/lib.rs"),
+     {}, {}, WORKSPACE),
+    ("a replacement under a *.rs -diff attribute", lib("x > 10 &&", "x > 11 &&"), {}, {},
+     NOT_DIFFABLE),
+    ("a replacement under GIT_LITERAL_PATHSPECS=1", lib("t = t - 3;", "t = t - 5;"), {},
+     {"GIT_LITERAL_PATHSPECS": "1"}),
     ("a replacement", lib("t = t * 2;", "t = t * 4;"), {}, {}),
     ("a replacement whose - run is longer than its + run",
      lib("    t = t * 2;\n    t = t - 3;\n    t\n", "    t * 2 - 3\n"), {}, {}),
@@ -139,9 +157,9 @@ def generate(repo, base, out, env):
     return out.read_text()
 
 
-def check(name, head, config, env, scratch):
+def check(name, head, config, env, scratch, base_tree=BASE):
     repo = scratch / "repo"
-    write(repo, BASE)
+    write(repo, base_tree)
     git(repo, "init", "-q")
     for key, value in config.items():
         git(repo, "config", key, value)
@@ -186,10 +204,10 @@ def main():
         print(f"FAIL: conformance needs {VERSION}, found {version or 'nothing'}")
         return 1
     failures = 0
-    for name, head, config, env in SHAPES:
+    for name, head, config, env, *base_tree in SHAPES:
         with tempfile.TemporaryDirectory() as directory:
             try:
-                result = check(name, head, config, env, Path(directory))
+                result = check(name, head, config, env, Path(directory), *base_tree)
             except (RuntimeError, subprocess.CalledProcessError, md.DiffError) as exc:
                 result = ([str(exc)], 0)
         problems, count = result

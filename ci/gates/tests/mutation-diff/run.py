@@ -119,8 +119,36 @@ class ChangedLines(unittest.TestCase):
                 + diff("@@ -5,2 +5,3 @@\n a\n b\n+z\n", path="crates/b/src/y.rs"))
         self.assertEqual(md.changed_lines(text), {F: {2}, "crates/b/src/y.rs": {7}})
 
+    def test_binary_files_line_fails(self):
+        text = f"diff --git a/{F} b/{F}\nindex 1111111..2222222 100644\nBinary files a/{F} and b/{F} differ\n"
+        with self.assertRaises(md.DiffError):
+            md.changed_lines(text)
+        result = run_cli("changed-lines", self.write(text))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("FAIL:", result.stderr)
+
+    def test_git_binary_patch_fails(self):
+        text = f"diff --git a/{F} b/{F}\nindex 1111111..2222222 100644\nGIT binary patch\nliteral 3\nKcmZ?\n\n"
+        with self.assertRaises(md.DiffError):
+            md.changed_lines(text)
+
+    def test_form_feed_inside_an_added_line(self):
+        for sep in ("\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+            with self.subTest(repr(sep)):
+                text = diff(f"@@ -1,2 +1,3 @@\n ctx\n-a\n+b{sep}+c\n+d\n")
+                self.assertEqual(md.changed_lines(text), {F: {1, 2, 3}})
+
+    def test_carriage_return_inside_an_added_line_read_from_a_file(self):
+        path = self.write(diff("@@ -1,2 +1,3 @@\n ctx\n-a\n+b\r+c\x0c+e\n+d\n"))
+        result = run_cli("changed-lines", path)
+        self.assertEqual((result.returncode, result.stdout), (0, json.dumps({F: [1, 2, 3]}) + "\n"),
+                         result.stderr)
+
+    def test_missing_final_newline_still_parses(self):
+        self.assertEqual(md.changed_lines(diff("@@ -1 +1 @@\n-a\n+b")), {F: {1}})
+
     def write(self, text):
-        handle = tempfile.NamedTemporaryFile("w", suffix=".diff", delete=False)
+        handle = tempfile.NamedTemporaryFile("w", suffix=".diff", delete=False, newline="")
         self.addCleanup(os.unlink, handle.name)
         handle.write(text)
         handle.close()
@@ -214,6 +242,92 @@ class Classify(unittest.TestCase):
     def test_bad_argv_exits_one(self):
         self.assertEqual(run_cli("classify").returncode, 1)
         self.assertEqual(run_cli().returncode, 1)
+
+
+class Paths(unittest.TestCase):
+    def test_paths_name_each_new_side_file(self):
+        text = (diff("@@ -1 +1 @@\n-a\n+b\n")
+                + "diff --git a/a.rs b/b.rs\nsimilarity index 100%\nrename from a.rs\nrename to b.rs\n"
+                + "diff --git a/m b.rs b/m b.rs\nold mode 100644\nnew mode 100755\n"
+                + "diff --git a/e.rs b/e.rs\nnew file mode 100644\nindex 0000000..e69de29\n"
+                + "diff --git a/g.rs b/g.rs\ndeleted file mode 100644\nindex e69de29..0000000\n"
+                + "diff --git a/x.rs b/x.rs\ndeleted file mode 100644\n--- a/x.rs\n+++ /dev/null\n"
+                + "@@ -1 +0,0 @@\n-+++ b/fake.rs\n")
+        self.assertEqual(md.diff_paths(text), {F, "b.rs", "m b.rs", "e.rs"})
+
+    def test_paths_unnameable_header_fails(self):
+        with self.assertRaises(md.DiffError):
+            md.diff_paths('diff --git "a/\\303.rs" "b/\\303.rs"\nold mode 100644\nnew mode 100755\n')
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        for args in (("init", "-q"), ("config", "user.email", "t@example.com"),
+                     ("config", "user.name", "t"), ("config", "commit.gpgsign", "false")):
+            self.git(*args)
+        for name in ("a.rs", "src/b.rs", "gone.rs", "notes.md"):
+            self.put(name, "x\n")
+        self.git("add", "-A")
+        self.git("commit", "-qm", "base")
+        self.base = self.git("rev-parse", "HEAD")
+        self.put("a.rs", "y\n")
+        self.put("src/b.rs", "y\n")
+        self.put("notes.md", "y\n")
+        (self.root / "gone.rs").unlink()
+        self.git("add", "-A")
+        self.git("commit", "-qm", "head")
+
+    def git(self, *args):
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        return subprocess.run(["git", "-C", str(self.root), *args], env=env, check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def put(self, name, text):
+        (self.root / name).parent.mkdir(parents=True, exist_ok=True)
+        (self.root / name).write_text(text)
+
+    def paths(self, text, env=None):
+        patch = self.root.parent / (self.root.name + ".diff")
+        self.addCleanup(lambda: patch.unlink(missing_ok=True))
+        patch.write_text(text)
+        return run_cli("paths", str(self.root), self.base, str(patch),
+                       env=dict(os.environ, **(env or {})))
+
+    def real_diff(self):
+        return self.git("diff", "--no-color", self.base, "HEAD", "--", "*.rs") + "\n"
+
+    def test_paths_agree_with_name_only(self):
+        result = self.paths(self.real_diff())
+        self.assertEqual((result.returncode, result.stdout), (0, "a.rs\nsrc/b.rs\n"), result.stderr)
+
+    def test_paths_missing_a_changed_file_fails(self):
+        text = self.real_diff()
+        text = text[:text.index("diff --git a/src/b.rs")]
+        result = self.paths(text)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("FAIL:", result.stderr)
+        self.assertIn("src/b.rs", result.stderr)
+
+    def test_paths_empty_diff_with_rust_changes_fails(self):
+        result = self.paths("")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("a.rs", result.stderr)
+
+    def test_paths_naming_an_unchanged_file_fails(self):
+        result = self.paths(self.real_diff() + diff("@@ -1 +1 @@\n-a\n+b\n", path="other.rs"))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("other.rs", result.stderr)
+
+    def test_paths_ignore_pathspec_and_repository_env(self):
+        bogus = tempfile.mkdtemp()
+        self.addCleanup(os.rmdir, bogus)
+        for var in ("GIT_LITERAL_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_GLOB_PATHSPECS",
+                    "GIT_ICASE_PATHSPECS", "GIT_COMMON_DIR", "GIT_ALTERNATE_OBJECT_DIRECTORIES"):
+            with self.subTest(var):
+                result = self.paths(self.real_diff(), env={var: bogus if "DIR" in var else "1"})
+                self.assertEqual((result.returncode, result.stdout), (0, "a.rs\nsrc/b.rs\n"),
+                                 result.stderr)
 
 
 MANIFEST = '[package]\nname = "{n}"\nversion = "0.1.0"\nedition = "2021"\n{extra}'

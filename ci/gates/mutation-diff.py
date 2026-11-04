@@ -8,8 +8,11 @@ import subprocess
 import sys
 import tomllib
 
-GIT_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY")
+GIT_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR",
+           "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_LITERAL_PATHSPECS", "GIT_NOGLOB_PATHSPECS",
+           "GIT_GLOB_PATHSPECS", "GIT_ICASE_PATHSPECS")
 HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+BINARY = re.compile(r"^(?:Binary files .* differ|GIT binary patch)$")
 ABSENT = re.compile(r"does not exist in|exists on disk, but not in")
 MUTANTS_INSTALL = re.compile(r"cargo-mutants\s+--version\s+\S+")
 NEXTEST_FILES = (".config/nextest.toml", "ci/gates/mutation-platform.sh")
@@ -30,28 +33,77 @@ class ScopeError(Exception):
     pass
 
 
+def split_lines(text):
+    lines = text.split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    return lines
+
+
+def read_diff(path):
+    return Path(path).read_bytes().decode()
+
+
+def header_path(line):
+    rest = line[len("diff --git "):]
+    size = (len(rest) - len("a/ b/")) // 2
+    name = rest[2:2 + size]
+    return name if size > 0 and rest == f"a/{name} b/{name}" else None
+
+
 def changed_lines(diff_text):
-    lines = diff_text.splitlines()
+    return parse(diff_text)[0]
+
+
+def diff_paths(diff_text):
+    return parse(diff_text)[1]
+
+
+def parse(diff_text):
+    lines = split_lines(diff_text)
     if not any(line.strip() for line in lines):
-        return {}
+        return {}, set()
     if not any(line.startswith("diff --git ") for line in lines):
         raise DiffError("FAIL: non-empty diff with no 'diff --git' header")
     result = {}
+    paths = set()
+    section = None
     path = None
     have_header = False
+
+    def close():
+        if section is None or section["deleted"]:
+            return
+        name = section["new"] or section["rename"] or header_path(section["line"])
+        if name is None:
+            raise DiffError("FAIL: cannot name the file of: " + section["line"])
+        paths.add(name)
+
     i = 0
     while i < len(lines):
         line = lines[i]
         i += 1
+        if BINARY.match(line):
+            raise DiffError("FAIL: binary diff, so no changed lines can be read: " + line)
         if line.startswith("diff --git "):
+            close()
+            section = {"line": line, "new": None, "rename": None, "deleted": False}
             path = None
             have_header = False
+        elif section is not None and line.startswith("deleted file mode "):
+            section["deleted"] = True
+        elif section is not None and line.startswith("rename to "):
+            section["rename"] = line[len("rename to "):]
         elif line.startswith("+++ "):
             target = line[4:].rstrip("\t")
             if target == "/dev/null":
                 path = None
+                if section is not None:
+                    section["deleted"] = True
             elif target.startswith("b/") and len(target) > 2:
                 path = target[2:]
+                if section is not None:
+                    section["new"] = path
             else:
                 raise DiffError("FAIL: unrecognised file header: " + line)
             have_header = True
@@ -89,7 +141,8 @@ def changed_lines(diff_text):
                 result.setdefault(path, set()).update(hunk_lines(body, start, no_new_side))
         elif line[:1] in (" ", "+", "-") and not line.startswith("--- "):
             raise DiffError("FAIL: hunk longer than its header: " + line)
-    return result
+    close()
+    return result, paths
 
 
 def hunk_lines(body, start, no_new_side):
@@ -212,6 +265,19 @@ def workspace_crates(root):
     return crates
 
 
+def check_paths(root, base, diff_text):
+    named = diff_paths(diff_text)
+    done = git(root, "-c", "core.quotePath=true", "diff", "--name-only", "-z", "--no-renames",
+               "--diff-filter=d", "--no-ext-diff", base, "HEAD")
+    if done.returncode != 0:
+        raise ScopeError(f"FAIL: git diff --name-only {base} HEAD failed: {done.stderr.decode().strip()}")
+    listed = {p for p in done.stdout.decode().split("\0") if p.endswith(".rs")}
+    if named != listed:
+        raise DiffError(f"FAIL: the diff names {sorted(named - listed)} that git diff --name-only "
+                        f"does not, and misses {sorted(listed - named)}")
+    return sorted(named)
+
+
 def tiers(text):
     data = parse_toml(text)
     if data is None:
@@ -309,19 +375,23 @@ def main(argv):
     command = argv[0] if argv else ""
     try:
         if len(argv) == 2 and command == "changed-lines":
-            data = changed_lines(Path(argv[1]).read_text())
+            data = changed_lines(read_diff(argv[1]))
             print(json.dumps({k: sorted(v) for k, v in sorted(data.items())}))
         elif len(argv) == 5 and command == "classify":
             pkg = argv[1]
-            changed = changed_lines(Path(argv[2]).read_text())
+            changed = changed_lines(read_diff(argv[2]))
             line, status = classify(pkg, changed, read_list(pkg, argv[3]), read_list(pkg, argv[4]))
             print(line)
             return status
         elif len(argv) == 4 and command == "scope":
             print(json.dumps(scope_crates(argv[1], argv[2], argv[3])))
+        elif len(argv) == 4 and command == "paths":
+            for name in check_paths(argv[1], argv[2], read_diff(argv[3])):
+                print(name)
         else:
             print("FAIL: usage: mutation-diff.py changed-lines <diff> | classify <pkg> <diff> "
-                  "<whole> <indiff> | scope <root> <base> <head>", file=sys.stderr)
+                  "<whole> <indiff> | scope <root> <base> <head> | paths <root> <base> <diff>",
+                  file=sys.stderr)
             return 1
     except (DiffError, ScopeError) as exc:
         print(exc, file=sys.stdout if command == "classify" else sys.stderr)
