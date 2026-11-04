@@ -356,11 +356,13 @@ pub fn print_end(
         writeln!(out, "{answer}")?;
         return Ok(0);
     }
-    writeln!(
+    crate::stderr::line(
         err,
-        "maknae agent: {}",
-        stop_line(outcome.stopped.as_ref(), budget)
-    )?;
+        format_args!(
+            "maknae agent: {}",
+            stop_line(outcome.stopped.as_ref(), budget)
+        ),
+    );
     Ok(2)
 }
 
@@ -463,14 +465,22 @@ pub async fn run(label: Option<String>, prompt: String) -> Result<u8, String> {
     let mut session = Session::new(id, &prompt, budget, context, home);
     let outcome = drive_to(&mut session, &mut plane, &mut std::io::stderr()).await;
     plane.into_client().shutdown().await;
-    let outcome = outcome.map_err(|e| e.to_string())?;
-    print_end(
-        &outcome,
+    finish(
+        outcome,
         &budget,
         &mut std::io::stdout(),
         &mut std::io::stderr(),
     )
-    .map_err(|e| e.to_string())
+}
+
+pub fn finish(
+    outcome: std::io::Result<Outcome>,
+    budget: &Budget,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> Result<u8, String> {
+    let outcome = outcome.map_err(|e| e.to_string())?;
+    print_end(&outcome, budget, out, err).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -1219,6 +1229,31 @@ mod tests {
             fn flush(&mut self) -> std::io::Result<()> {
                 Ok(())
             }
+        }
+
+        #[tokio::test]
+        async fn a_closed_stderr_keeps_the_sessions_exit_code() {
+            let mut p = fake(vec![reply(None, &[("c1", "/w/a")])]);
+            let b = Budget {
+                max_steps: 1,
+                max_tool_calls_per_step: 4,
+            };
+            let mut session = Session::new("c", "q", b, unmetered(), None);
+            let outcome = drive_to(&mut session, &mut p, &mut Broken).await;
+            assert_eq!(
+                outcome.as_ref().map(|o| o.stopped.clone()).ok(),
+                Some(Some(StopReason::StepBudget))
+            );
+            let mut out = vec![];
+            assert_eq!(finish(outcome, &b, &mut out, &mut Broken), Ok(2));
+            assert!(out.is_empty());
+
+            let mut p = fake(vec![reply(Some("ok"), &[])]);
+            let mut session = Session::new("c", "q", budget(), unmetered(), None);
+            let outcome = drive_to(&mut session, &mut p, &mut Broken).await;
+            let mut out = vec![];
+            assert_eq!(finish(outcome, &budget(), &mut out, &mut Broken), Ok(0));
+            assert_eq!(out, b"ok\n");
         }
 
         #[tokio::test]
