@@ -51,6 +51,7 @@ pub mod checks;
 pub mod delegated;
 mod dir;
 pub mod error;
+mod home;
 pub mod mutation;
 pub mod normalize;
 mod page;
@@ -71,6 +72,7 @@ pub use delegated::{
     DELEGATED_FDS_PER_CONNECTION,
 };
 pub use error::{IoError, IoKind};
+pub use home::{canonical_home, session_home};
 pub use mutation::{
     read_held_file, read_held_page, replace_held_file, verify_mutation_directory, DirectoryCursor,
     EffectState, FileVersion, MutationDirectory, MutationEffect, MutationEffectKind,

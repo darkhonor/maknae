@@ -69,6 +69,8 @@ files = [
   # read ceiling and mis-routes oversize; the visitor is a refusal surface.
   "crates/maknae-proto/src/bytes.rs",
   "crates/maknae-io/src/anchor.rs",
+  # #596: the one "this user's home" translation, shared by the client and the kernel.
+  "crates/maknae-io/src/home.rs",
   "crates/maknae-io/src/checks.rs",
   # ADR-0009 confinement: every line is a refusal path, and the failure mode is
   # exact — a wrong branch hands a subject an object outside its home,

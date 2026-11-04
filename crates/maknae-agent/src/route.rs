@@ -71,6 +71,8 @@ pub enum RouteError {
     /// here caught it. `checked_path` records why this crate needs no such
     /// branch.
     MalformedPath,
+    /// A `~` form, in a session that has no home to expand it against.
+    HomeUnavailable,
 }
 
 #[derive(Deserialize)]
@@ -187,8 +189,29 @@ fn require_object(args: &str) -> Result<(), RouteError> {
     }
 }
 
+/// `~` and `~/rest` become the session's home and `home/rest`; every other
+/// leading `~` (`~user`, `~~`, `~foo`) is refused. The home is a value the
+/// host passes in: this crate reads no environment. Run before every other
+/// rule, so the result is judged as the absolute path it now is.
+fn expand_home(p: String, home: Option<&str>) -> Result<String, RouteError> {
+    if !p.starts_with('~') {
+        return Ok(p);
+    }
+    let rest = match p.strip_prefix("~/") {
+        Some(rest) => Some(rest),
+        None if p == "~" => None,
+        None => return Err(RouteError::RelativePath),
+    };
+    let home = home.ok_or(RouteError::HomeUnavailable)?;
+    Ok(match rest {
+        Some(rest) => format!("{home}/{rest}"),
+        None => home.to_string(),
+    })
+}
+
 /// Absolute AND canonical only, within the kernel's byte bound, and never NUL
-/// bearing. Never resolved against the CWD.
+/// bearing. Never resolved against the CWD. A `~` form is expanded first
+/// ([`expand_home`]), so these rules judge the absolute result.
 ///
 /// MIRRORS both of the kernel's pre-PDP path gates by RE-STATING their rules,
 /// never by importing them — the brain links no kernel: `lexical_pregate`
@@ -234,10 +257,11 @@ fn require_object(args: &str) -> Result<(), RouteError> {
 /// render the same way, which is the point here: the model was told
 /// `read unavailable — do not retry`, just as unappealable as the write lane's
 /// "may have happened", for a path it could have corrected.
-fn checked_path(p: String) -> Result<String, RouteError> {
+fn checked_path(p: String, home: Option<&str>) -> Result<String, RouteError> {
     if p.is_empty() {
         return Err(RouteError::EmptyPath);
     }
+    let p = expand_home(p, home)?;
     // The kernel's write gate runs these two BEFORE its lexical pre-gate, so
     // they are mirrored in that order, with its constant and its comparator:
     // `>`, so a path of exactly `MAX_MUTATION_PATH_BYTES` is accepted. `>=`
@@ -259,7 +283,7 @@ fn checked_path(p: String) -> Result<String, RouteError> {
     Ok(p)
 }
 
-pub fn route(call: &ProposedToolCall) -> Result<ToolRequest, RouteError> {
+pub fn route(call: &ProposedToolCall, home: Option<&str>) -> Result<ToolRequest, RouteError> {
     if let Some(maknae_proto::CallRefusal::ArgumentsOverBound { bytes }) = call.refused {
         return Err(RouteError::ArgumentsOverBound(bytes));
     }
@@ -281,7 +305,7 @@ pub fn route(call: &ProposedToolCall) -> Result<ToolRequest, RouteError> {
             }
             Ok(ToolRequest::Read {
                 call_id: call.call_id.clone(),
-                path: checked_path(a.path)?,
+                path: checked_path(a.path, home)?,
                 page,
             })
         }
@@ -289,7 +313,7 @@ pub fn route(call: &ProposedToolCall) -> Result<ToolRequest, RouteError> {
             require_object(args)?;
             let mut a: WriteArgs =
                 serde_json::from_str(args).map_err(|e| RouteError::BadArguments(e.to_string()))?;
-            let path = checked_path(a.path)?;
+            let path = checked_path(a.path, home)?;
             // The ONE allocation, handed along: `mem::take` moves the
             // `String` out of its zeroizing owner (which is left holding an
             // unallocated `String`), and `into_bytes` re-labels that same
@@ -323,7 +347,7 @@ mod tests {
     }
     #[test]
     fn read_file_routes_to_a_read_of_the_named_path() {
-        match route(&call("read_file", r#"{"path":"/home/u/notes.txt"}"#)).unwrap() {
+        match route(&call("read_file", r#"{"path":"/home/u/notes.txt"}"#), None).unwrap() {
             ToolRequest::Read { call_id, path, .. } => {
                 assert_eq!(call_id, "c1");
                 assert_eq!(path, "/home/u/notes.txt");
@@ -333,7 +357,7 @@ mod tests {
     }
     #[test]
     fn read_paging_arguments_default_and_are_checked() {
-        let page_of = |args: &str| match route(&call("read_file", args)) {
+        let page_of = |args: &str| match route(&call("read_file", args), None) {
             Ok(ToolRequest::Read { page, .. }) => page,
             other => panic!("{other:?}"),
         };
@@ -361,7 +385,7 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    route(&call("read_file", bad)),
+                    route(&call("read_file", bad), None),
                     Err(RouteError::BadArguments(_))
                 ),
                 "{bad}"
@@ -370,10 +394,13 @@ mod tests {
     }
     #[test]
     fn write_file_routes_to_a_write_carrying_exactly_the_models_bytes() {
-        match route(&call(
-            "write_file",
-            r#"{"path":"/home/u/a.txt","content":"héllo\n"}"#,
-        ))
+        match route(
+            &call(
+                "write_file",
+                r#"{"path":"/home/u/a.txt","content":"héllo\n"}"#,
+            ),
+            None,
+        )
         .unwrap()
         {
             ToolRequest::Write { path, content, .. } => {
@@ -390,46 +417,99 @@ mod tests {
         // descriptor's path differ from the wire's — the `object_requested`
         // symlink-probe signal. Refused here, as a tool error the model can fix.
         assert!(matches!(
-            route(&call("read_file", r#"{"path":"notes.txt"}"#)),
+            route(&call("read_file", r#"{"path":"notes.txt"}"#), None),
             Err(RouteError::RelativePath)
         ));
         assert!(matches!(
-            route(&call("write_file", r#"{"path":"./a","content":"x"}"#)),
+            route(&call("write_file", r#"{"path":"./a","content":"x"}"#), None),
             Err(RouteError::RelativePath)
         ));
-        // A home-relative path is refused, never expanded — this crate has
-        // no environment to expand `~` against, and must never acquire one.
+        // This crate reads no environment: `~` expands only against a home
+        // the host hands it (#596), and without one it is refused.
         assert!(matches!(
-            route(&call("read_file", r#"{"path":"~/foo"}"#)),
-            Err(RouteError::RelativePath)
+            route(&call("read_file", r#"{"path":"~/foo"}"#), None),
+            Err(RouteError::HomeUnavailable)
         ));
     }
     #[test]
+    fn a_home_relative_write_expands_to_the_session_home() {
+        match route(
+            &call(
+                "write_file",
+                r#"{"path":"~/maknae-470.txt","content":"hello"}"#,
+            ),
+            Some("/home/u"),
+        ) {
+            Ok(ToolRequest::Write { path, .. }) => assert_eq!(path, "/home/u/maknae-470.txt"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn read_path(path: &str, home: Option<&str>) -> Result<String, RouteError> {
+        let args = serde_json::json!({ "path": path }).to_string();
+        match route(&call("read_file", &args), home)? {
+            ToolRequest::Read { path, .. } => Ok(path),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn tilde_forms_expand_or_are_refused() {
+        let home = Some("/home/u");
+        let over = format!(
+            "~/{}",
+            "a".repeat(maknae_proto::MAX_MUTATION_PATH_BYTES - 2)
+        );
+        assert_eq!(over.len(), maknae_proto::MAX_MUTATION_PATH_BYTES);
+        let rows: Vec<(&str, Option<&str>, Result<String, RouteError>)> = vec![
+            ("~", home, Ok("/home/u".into())),
+            ("~/a/b", home, Ok("/home/u/a/b".into())),
+            ("~user/a", home, Err(RouteError::RelativePath)),
+            ("~~/a", home, Err(RouteError::RelativePath)),
+            ("~foo", home, Err(RouteError::RelativePath)),
+            ("~\u{0}x", home, Err(RouteError::RelativePath)),
+            ("~/../etc", home, Err(RouteError::MalformedPath)),
+            ("~/a//b", home, Err(RouteError::MalformedPath)),
+            ("~/./a", home, Err(RouteError::MalformedPath)),
+            ("~/a/", home, Err(RouteError::MalformedPath)),
+            (&over, home, Err(RouteError::MalformedPath)),
+            ("/a/~/b", home, Ok("/a/~/b".into())),
+            ("~/a", None, Err(RouteError::HomeUnavailable)),
+            ("~", None, Err(RouteError::HomeUnavailable)),
+            ("~user/a", None, Err(RouteError::RelativePath)),
+            ("/abs", None, Ok("/abs".into())),
+        ];
+        for (path, home, want) in rows {
+            assert_eq!(read_path(path, home), want, "{path:?} home={home:?}");
+        }
+    }
+
+    #[test]
     fn an_unknown_tool_fails_closed_without_guessing() {
         assert!(
-            matches!(route(&call("read", r#"{"path":"x"}"#)), Err(RouteError::UnknownTool(n)) if n == "read")
+            matches!(route(&call("read", r#"{"path":"x"}"#), None), Err(RouteError::UnknownTool(n)) if n == "read")
         );
         assert!(matches!(
-            route(&call("fs.read", r#"{"path":"x"}"#)),
+            route(&call("fs.read", r#"{"path":"x"}"#), None),
             Err(RouteError::UnknownTool(_))
         ));
     }
     #[test]
     fn malformed_or_over_specified_arguments_are_refused_before_any_plane_call() {
         assert!(matches!(
-            route(&call("read_file", "not json")),
+            route(&call("read_file", "not json"), None),
             Err(RouteError::BadArguments(_))
         ));
         assert!(matches!(
-            route(&call("read_file", r#"{"path":"x","extra":1}"#)),
+            route(&call("read_file", r#"{"path":"x","extra":1}"#), None),
             Err(RouteError::BadArguments(_))
         ));
         assert!(matches!(
-            route(&call("write_file", r#"{"path":"x"}"#)),
+            route(&call("write_file", r#"{"path":"x"}"#), None),
             Err(RouteError::BadArguments(_))
         ));
         assert!(matches!(
-            route(&call("read_file", r#"{"path":""}"#)),
+            route(&call("read_file", r#"{"path":""}"#), None),
             Err(RouteError::EmptyPath)
         ));
         // The kernel's `lexical_pregate` (maknae-kernel/src/handler.rs) refuses
@@ -447,17 +527,20 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    route(&call("read_file", &format!(r#"{{"path":"{bad}"}}"#))),
+                    route(&call("read_file", &format!(r#"{{"path":"{bad}"}}"#)), None),
                     Err(RouteError::MalformedPath)
                 ),
                 "read {bad}"
             );
             assert!(
                 matches!(
-                    route(&call(
-                        "write_file",
-                        &format!(r#"{{"path":"{bad}","content":"x"}}"#)
-                    )),
+                    route(
+                        &call(
+                            "write_file",
+                            &format!(r#"{{"path":"{bad}","content":"x"}}"#)
+                        ),
+                        None
+                    ),
                     Err(RouteError::MalformedPath)
                 ),
                 "write {bad}"
@@ -468,11 +551,11 @@ mod tests {
         // (deny) rather than a shape fault. Mirrored: accepted here too, so the
         // model sees the decision and not a router opinion.
         assert!(matches!(
-            route(&call("read_file", r#"{"path":"/"}"#)),
+            route(&call("read_file", r#"{"path":"/"}"#), None),
             Ok(ToolRequest::Read { .. })
         ));
         assert!(matches!(
-            route(&call("write_file", r#"{"path":"/","content":"x"}"#)),
+            route(&call("write_file", r#"{"path":"/","content":"x"}"#), None),
             Ok(ToolRequest::Write { .. })
         ));
         // The kernel's WRITE gate adds two rules its READ pre-gate does not
@@ -499,14 +582,20 @@ mod tests {
         // a raw NUL in the JSON would be a control character serde rejects
         // first, and would prove nothing about this rule.
         assert!(matches!(
-            route(&call("read_file", r#"{"path":"/home/u/a\u0000.txt"}"#)),
+            route(
+                &call("read_file", r#"{"path":"/home/u/a\u0000.txt"}"#),
+                None
+            ),
             Err(RouteError::MalformedPath)
         ));
         assert!(matches!(
-            route(&call(
-                "write_file",
-                r#"{"path":"/home/u/a\u0000.txt","content":"x"}"#
-            )),
+            route(
+                &call(
+                    "write_file",
+                    r#"{"path":"/home/u/a\u0000.txt","content":"x"}"#
+                ),
+                None
+            ),
             Err(RouteError::MalformedPath)
         ));
         // Built the way the kernel's own `checked` vector table builds them
@@ -516,14 +605,17 @@ mod tests {
         assert_eq!(over.len(), maknae_proto::MAX_MUTATION_PATH_BYTES + 1);
         assert_eq!(exact.len(), maknae_proto::MAX_MUTATION_PATH_BYTES);
         assert!(matches!(
-            route(&call("read_file", &format!(r#"{{"path":"{over}"}}"#))),
+            route(&call("read_file", &format!(r#"{{"path":"{over}"}}"#)), None),
             Err(RouteError::MalformedPath)
         ));
         assert!(matches!(
-            route(&call(
-                "write_file",
-                &format!(r#"{{"path":"{over}","content":"x"}}"#)
-            )),
+            route(
+                &call(
+                    "write_file",
+                    &format!(r#"{{"path":"{over}","content":"x"}}"#)
+                ),
+                None
+            ),
             Err(RouteError::MalformedPath)
         ));
         // The comparator is the kernel's `>`, not `>=`: a path of EXACTLY
@@ -531,23 +623,29 @@ mod tests {
         // two rows a `>` → `>=` mutant survives, and the router would refuse
         // a write the kernel would have taken.
         assert!(matches!(
-            route(&call("read_file", &format!(r#"{{"path":"{exact}"}}"#))),
+            route(
+                &call("read_file", &format!(r#"{{"path":"{exact}"}}"#)),
+                None
+            ),
             Ok(ToolRequest::Read { .. })
         ));
         assert!(matches!(
-            route(&call(
-                "write_file",
-                &format!(r#"{{"path":"{exact}","content":"x"}}"#)
-            )),
+            route(
+                &call(
+                    "write_file",
+                    &format!(r#"{{"path":"{exact}","content":"x"}}"#)
+                ),
+                None
+            ),
             Ok(ToolRequest::Write { .. })
         ));
     }
     #[test]
     fn a_write_requests_debug_never_prints_the_models_bytes() {
-        let r = route(&call(
-            "write_file",
-            r#"{"path":"/a","content":"SECRET-BYTES"}"#,
-        ))
+        let r = route(
+            &call("write_file", r#"{"path":"/a","content":"SECRET-BYTES"}"#),
+            None,
+        )
         .unwrap();
         let d = format!("{r:?}");
         assert!(!d.contains("SECRET-BYTES"), "{d}");
@@ -559,7 +657,7 @@ mod tests {
         // without this, route.rs sits at 88% against the 95 floor).
         let rd = format!(
             "{:?}",
-            route(&call("read_file", r#"{"path":"/a"}"#)).unwrap()
+            route(&call("read_file", r#"{"path":"/a"}"#), None).unwrap()
         );
         assert!(rd.contains("Read") && rd.contains("/a"), "{rd}");
     }
@@ -576,10 +674,13 @@ mod tests {
     fn a_write_refused_for_its_path_never_owned_the_content_in_a_plain_string() {
         // The refusal itself, unchanged.
         assert!(matches!(
-            route(&call(
-                "write_file",
-                r#"{"path":"relative.txt","content":"SECRET-CONTENT"}"#
-            )),
+            route(
+                &call(
+                    "write_file",
+                    r#"{"path":"relative.txt","content":"SECRET-CONTENT"}"#
+                ),
+                None
+            ),
             Err(RouteError::RelativePath)
         ));
         let args: WriteArgs =
@@ -622,7 +723,7 @@ mod tests {
                 ..call(name, "")
             };
             assert!(
-                matches!(route(&c), Err(RouteError::ArgumentsOverBound(70_000))),
+                matches!(route(&c, None), Err(RouteError::ArgumentsOverBound(70_000))),
                 "{name}"
             );
         }
@@ -649,14 +750,14 @@ mod tests {
             ("write_file", r#""just a string""#),
         ] {
             assert!(
-                matches!(route(&call(name, args)), Err(RouteError::BadArguments(m)) if m == "tool arguments must be a JSON object"),
+                matches!(route(&call(name, args), None), Err(RouteError::BadArguments(m)) if m == "tool arguments must be a JSON object"),
                 "{name} {args} routed"
             );
         }
         // And a padded OBJECT still routes — the check trims first, so this
         // row is the discriminator against a mutant dropping the trim.
         assert!(matches!(
-            route(&call("read_file", "\n\t {\"path\":\"/a\"}")),
+            route(&call("read_file", "\n\t {\"path\":\"/a\"}"), None),
             Ok(ToolRequest::Read { .. })
         ));
     }

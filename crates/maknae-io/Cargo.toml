@@ -21,15 +21,8 @@ workspace = true
 # uio  — pwrite for offset-independent replacement through the subject's own writable re-open.
 # dir  — nix::dir::Dir for fd-relative enumeration. Dir::openat BORROWS the dirfd;
 #        Dir::from_fd consumes and Drop-closes it, which would destroy the anchor pin.
-# NOT "user": nothing in production calls geteuid/Uid/User/Group — grep every module up
-#        to its #[cfg(test)] marker and there are zero hits. It was declared here because
-#        TESTS assert owner == geteuid() (production asserts owner == 0 over the identical
-#        code path, and libc::geteuid() is unsafe, which is forbidden here). Declaring it
-#        as a production dependency compiled nix's user/group surface into the crate
-#        AGENTS.md holds up as the minimal-TCB I/O primitive. Workspace feature
-#        unification hid it — maknae-kernel::groupres enables "user" — so it only shows
-#        in a standalone `cargo build -p maknae-io`. Moved to dev-dependencies.
-nix = { version = "0.31", default-features = false, features = ["fs", "dir", "uio"] }
+# user — home.rs's session_home(): the passwd record for the effective uid (#596).
+nix = { version = "0.31", default-features = false, features = ["fs", "dir", "uio", "user"] }
 # net — recvmsg with SCM_RIGHTS, for ADR-0009 subject-delegated descriptors. THE reason
 #       this is rustix and not another nix feature: `unsafe_code = "forbid"` is set
 #       workspace-wide and cannot be locally overridden, and nix's
@@ -72,5 +65,5 @@ tempfile = "3"
 # off-unix either way, but a manifest that says so in one table and not the other
 # invites the reader to think one of them is deliberate.
 [target.'cfg(unix)'.dev-dependencies]
-# "user" is a TEST need only — see the note above the production nix entry.
+# "user" is also a production feature now (home.rs); tests use it for geteuid owner checks.
 nix = { version = "0.31", default-features = false, features = ["fs", "dir", "user"] }

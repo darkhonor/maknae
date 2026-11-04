@@ -119,6 +119,7 @@ pub async fn drive<P: Plane>(
                 notify(&n)
             }
         },
+        None,
     )
     .await
 }
@@ -126,6 +127,7 @@ pub async fn drive<P: Plane>(
 /// `stop` is read before each plane call that has not started: at the top of a
 /// step, before the prompt, and before each tool call. A granted read, write or
 /// exchange is never cut short; a skipped call is answered as not run.
+#[allow(clippy::too_many_arguments)]
 pub async fn drive_session<P: Plane>(
     plane: &mut P,
     transcript: &mut Transcript,
@@ -134,6 +136,7 @@ pub async fn drive_session<P: Plane>(
     meter: &mut Meter,
     stop: &AtomicBool,
     emit: &mut impl FnMut(LoopEvent),
+    home: Option<&str>,
 ) -> Outcome {
     let mut steps_used = 0u32;
     loop {
@@ -264,7 +267,7 @@ pub async fn drive_session<P: Plane>(
                         );
                         continue;
                     }
-                    let outcome = match route(call) {
+                    let outcome = match route(call, home) {
                         Err(RouteError::UnknownTool(n)) => {
                             ToolOutcome::BadCall(format!("unknown tool {n}"))
                         }
@@ -274,9 +277,13 @@ pub async fn drive_session<P: Plane>(
                             max = maknae_proto::MAX_TOOL_CALL_ARGS_BYTES
                         )),
                         Err(RouteError::EmptyPath) => ToolOutcome::BadCall("empty path".into()),
-                        Err(RouteError::RelativePath) => {
-                            ToolOutcome::BadCall("path must be absolute".into())
-                        }
+                        Err(RouteError::RelativePath) => ToolOutcome::BadCall(
+                            "path must be absolute, or start with ~/ for your home".into(),
+                        ),
+                        Err(RouteError::HomeUnavailable) => ToolOutcome::BadCall(
+                            "home-relative paths are unavailable in this session; use an absolute path"
+                                .into(),
+                        ),
                         // Every cause, by name: the segment rules, AND the
                         // length and NUL rules the router mirrors from the
                         // kernel's write gate, which land on this same
@@ -1330,11 +1337,72 @@ mod tests {
         stop: &AtomicBool,
     ) -> (Outcome, Vec<LoopEvent>) {
         let mut events = vec![];
-        let out = drive_session(p, t, seen, &budget(), &mut unmetered(), stop, &mut |e| {
-            events.push(e)
-        })
+        let out = drive_session(
+            p,
+            t,
+            seen,
+            &budget(),
+            &mut unmetered(),
+            stop,
+            &mut |e| events.push(e),
+            None,
+        )
         .await;
         (out, events)
+    }
+
+    async fn first_tool_text(path: &str, home: Option<&str>) -> String {
+        let mut p = scripted(vec![
+            one("c1", "read_file", &format!(r#"{{"path":"{path}"}}"#)),
+            done(),
+        ]);
+        let mut t = Transcript::new("c", "q");
+        drive_session(
+            &mut p,
+            &mut t,
+            &mut Seen::new(),
+            &budget(),
+            &mut unmetered(),
+            &AtomicBool::new(false),
+            &mut |_| {},
+            home,
+        )
+        .await;
+        tool_text(&t.turns()[2])
+    }
+
+    #[tokio::test]
+    async fn the_relative_path_tool_error_teaches_the_home_form() {
+        assert!(first_tool_text("notes.txt", Some("/home/u"))
+            .await
+            .starts_with("tool error: path must be absolute, or start with ~/ for your home\n"));
+    }
+
+    #[tokio::test]
+    async fn a_missing_home_names_the_absolute_fallback() {
+        assert!(first_tool_text("~/notes.txt", None).await.starts_with(
+            "tool error: home-relative paths are unavailable in this session; use an absolute path\n"
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_home_relative_read_reaches_the_plane_as_its_absolute_path() {
+        let mut p = scripted(vec![
+            one("c1", "read_file", r#"{"path":"~/notes.txt"}"#),
+            done(),
+        ]);
+        drive_session(
+            &mut p,
+            &mut Transcript::new("c", "q"),
+            &mut Seen::new(),
+            &budget(),
+            &mut unmetered(),
+            &AtomicBool::new(false),
+            &mut |_| {},
+            Some("/home/u"),
+        )
+        .await;
+        assert_eq!(p.reads, vec!["/home/u/notes.txt".to_string()]);
     }
 
     #[tokio::test]
@@ -1428,6 +1496,7 @@ mod tests {
             &mut Meter::new(ContextBudget::new(2_000, None).unwrap()),
             &AtomicBool::new(true),
             &mut |e| events.push(e),
+            None,
         )
         .await;
         assert_eq!(out.stopped, Some(StopReason::Stopped));
@@ -1452,6 +1521,7 @@ mod tests {
                 }
                 events.push(e)
             },
+            None,
         )
         .await;
         assert_eq!(out.stopped, Some(StopReason::Stopped));
@@ -1571,6 +1641,7 @@ mod tests {
             &mut Meter::new(ContextBudget::new(2_000, None).unwrap()),
             &stop,
             &mut |e| events.push(e),
+            None,
         )
         .await;
         let d = |s: &str| LoopEvent::Diagnostic(s.into());
@@ -1598,6 +1669,7 @@ mod tests {
             &mut Meter::new(ContextBudget::new(2_000, None).unwrap()),
             &stop,
             &mut |e| events.push(e),
+            None,
         )
         .await;
         assert!(
@@ -1622,6 +1694,7 @@ mod tests {
             &mut Meter::new(ContextBudget::new(2_000, None).unwrap()),
             &stop,
             &mut |e| events.push(e),
+            None,
         )
         .await;
         assert!(
@@ -1642,6 +1715,7 @@ mod tests {
             &mut Meter::new(ContextBudget::new(2_000, None).unwrap()),
             &AtomicBool::new(false),
             &mut |e| events.push(e),
+            None,
         )
         .await;
         assert!(matches!(&events[..], [LoopEvent::Notice(_)]), "{events:?}");
