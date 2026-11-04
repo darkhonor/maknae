@@ -61,30 +61,7 @@ class MutationGate(unittest.TestCase):
         if home_nextest:
             (cargo_home / "bin").mkdir()
             fake_nextest(cargo_home / "bin", home_nextest)
-        recorder = tools / "cargo"
-        recorder.write_text(
-            '#!/bin/sh\n'
-            '[ "$1" = mutants ] || exec "$REAL_CARGO" "$@"\n'
-            'env | grep -E "^(NEXTEST_[A-Z_]*|CLICOLOR_FORCE|CARGO_TERM_COLOR)=" | sort > "$MUTATION_ARGS.env"\n'
-            'printf "%s\\n" "${TMPDIR-}" > "$MUTATION_ARGS.tmpdir"\n'
-            'printf "%s\\n" "$@" > "$MUTATION_ARGS"\n'
-            'out=.\n'
-            'while [ $# -gt 0 ]; do\n'
-            '  [ "$1" = "--output" ] && { out="$2"; break; }\n'
-            '  shift\n'
-            'done\n'
-            'mkdir -p "$out/mutants.out"\n'
-            'cp -R "$FAKE_PAYLOAD/." "$out/mutants.out/"\n'
-            'if [ "$FAKE_LITTER" = 1 ]; then\n'
-            '  mkdir -p "$TMPDIR/.tmpKILLED/inner" && touch "$TMPDIR/.tmpKILLED/inner/f" "$TMPDIR/stray"\n'
-            '  chmod 000 "$TMPDIR/.tmpKILLED/inner" "$TMPDIR/.tmpKILLED"\n'
-            '  echo littered > "$MUTATION_ARGS.litter"\n'
-            'fi\n'
-            'if [ "$FAKE_SLEEP" = 1 ]; then echo $$ > "$MUTATION_ARGS.pid"; exec sleep 60; fi\n'
-            'exit "$FAKE_EXIT"\n'
-        )
-        recorder.chmod(0o755)
-        (tools / "cargo-mutants").symlink_to(recorder)
+        fake_cargo(tools)
         if failing_chmod:
             (tools / "chmod").write_text(f'#!/bin/sh\n"{shutil.which("chmod")}" "$@"\nexit 1\n')
             (tools / "chmod").chmod(0o755)
@@ -326,6 +303,332 @@ class MutationGate(unittest.TestCase):
         self.assertGate(False, [TIMEOUT_AND_FAIL], MISSING, contains=("reviewed terminated-mutant list",))
 
 
+class InDiff(unittest.TestCase):
+    """`--in-diff <rev>` on a real git fixture, real `cargo metadata`, and a fake cargo-mutants."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: (subprocess.run(["chmod", "-R", "u+rwx", str(self.tmp)]),
+                                 shutil.rmtree(self.tmp, ignore_errors=True)))
+        self.aux = self.tmp / "aux"
+        for name in ("tools", "tmp", "cargo-home", "payload"):
+            (self.aux / name).mkdir(parents=True)
+        fake_cargo(self.aux / "tools")
+
+    def in_diff_repo(self, changes, *, names=("a", "b"), base_crates=None, features="",
+                     config=None):
+        repo = self.tmp / "repo"
+        crates = list(base_crates or names)
+        files = {
+            "Cargo.toml": '[workspace]\nmembers = ["crates/a", "crates/b"]\nresolver = "2"\n',
+            "crates/a/Cargo.toml": package_toml(names[0]) + "\n[features]\nextra = []\n",
+            "crates/a/src/lib.rs": LIB_A,
+            "crates/b/Cargo.toml": package_toml(names[1]),
+            "crates/b/src/lib.rs": "pub fn b(x: u32) -> u32 {\n    x + 2\n}\n",
+            "coverage-tiers.toml": tiers_toml(crates, features),
+            ".gitignore": "/target\nCargo.lock\n",
+            "ci/gates/mutation-terminated.txt": "",
+        }
+        for name in ("coverage-tiers.sh", "mutation-oracle.sh", "mutation-platform.sh",
+                     "mutation-diff.py"):
+            files[f"ci/gates/{name}"] = (ROOT / "ci/gates" / name).read_text()
+        write_tree(repo, files)
+        git(repo, "init", "-q", "-b", "main")
+        for key, value in (config or {}).items():
+            git(repo, "config", key, value)
+        git(repo, "add", "-A")
+        git(repo, "commit", "-qm", "base")
+        git(repo, "tag", "base")
+        write_tree(repo, changes)
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "--allow-empty", "-m", "head")
+        return repo
+
+    def gate(self, repo, *args, crates=("a", "b"), whole=(), indiff=(), extra_env=None,
+             missed=0, fake_exit=0, root=None):
+        payload = self.aux / "payload"
+        shutil.rmtree(payload)
+        write_payload(payload, CAUGHT_LOGS, None, missed=missed)
+        self.args = self.aux / "args"
+        for f in self.aux.glob("args*"):
+            f.unlink()
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith(("NEXTEST_", "COVERAGE_TIERS_", "GIT_"))}
+        env.update(PATH=str(self.aux / "tools") + os.pathsep + os.environ["PATH"],
+                   MUTATION_ARGS=str(self.args), FAKE_PAYLOAD=str(payload),
+                   FAKE_EXIT=str(fake_exit), REAL_CARGO=REAL_CARGO,
+                   CARGO_HOME=str(self.aux / "cargo-home"), RUSTUP_TOOLCHAIN=CHANNEL,
+                   TMPDIR=str(self.aux / "tmp"), MUTATION_ORACLE_MIN_KIB="1",
+                   LLVM_COV="", LLVM_PROFDATA="",
+                   FAKE_WHOLE_LIST=json.dumps(list(whole)) if whole else "",
+                   FAKE_INDIFF_LIST=json.dumps(list(indiff)) if indiff else "",
+                   **(extra_env or {}))
+        argv = [BASH, str(repo / "ci/gates/coverage-tiers.sh"), "--root", str(root or repo)]
+        argv += list(args) if args else ["--mutants", *crates, "--in-diff", "base"]
+        result = subprocess.run(argv, env=env, text=True, capture_output=True)
+        return result, result.stdout + result.stderr
+
+    def invocations(self):
+        log = Path(str(self.args) + ".log")
+        return [line.rstrip("\t").split("\t") for line in log.read_text().splitlines()] \
+            if log.exists() else []
+
+    def runs(self):
+        return [argv for argv in self.invocations() if "--list" not in argv]
+
+    def assertFails(self, result, out, *texts):
+        self.assertEqual(result.returncode, 1, out)
+        for text in texts:
+            self.assertIn(text, out)
+
+    def test_in_diff_passes_flag_to_cargo_mutants(self):
+        repo = self.in_diff_repo(EDIT_A, features='mutants_features = { a = ["extra"] }\n')
+        result, out = self.gate(repo, whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2])
+        self.assertEqual(result.returncode, 0, out)
+        self.assertIn("RUN a: 2 in-diff mutants", out)
+        self.assertIn("SKIP: b: no mutant on a changed line", out)
+        self.assertIn("mutants[a]:", out)
+        [run] = self.runs()
+        self.assertEqual(run[:4], ["mutants", "--package", "a", "--output"])
+        self.assertIn("--in-diff", run)
+        self.assertEqual(Path(run[run.index("--in-diff") + 1]).name, "in.diff")
+        self.assertEqual(run[run.index("--features") + 1], "extra")
+        lists = [argv for argv in self.invocations() if "--list" in argv and "a" in argv]
+        self.assertEqual(len(lists), 2)
+        for argv in lists:
+            self.assertEqual(argv[argv.index("--features") + 1], "extra")
+
+    def test_in_diff_survivor_fails(self):
+        repo = self.in_diff_repo(EDIT_A)
+        result, out = self.gate(repo, whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2], missed=1,
+                                fake_exit=2)
+        self.assertFails(result, out, "RUN a: 2 in-diff mutants",
+                         "cargo mutants --package a reported missed/timeout mutants")
+
+    def test_in_diff_mapping_failure_fails(self):
+        repo = self.in_diff_repo(EDIT_A)
+        result, out = self.gate(repo, whole=WHOLE_EDIT)
+        self.assertFails(result, out, "FAIL: a: 2 listed mutants on changed lines in "
+                         "crates/a/src/lib.rs but the in-diff listing found none")
+        self.assertEqual(self.runs(), [])
+
+    def test_in_diff_docs_only_skips(self):
+        repo = self.in_diff_repo({"README.md": "docs\n"})
+        result, out = self.gate(repo, whole=WHOLE_EDIT)
+        self.assertEqual(result.returncode, 0, out)
+        self.assertRegex(out, r"SKIP: in-diff: no Rust change between [0-9a-f]{40} and HEAD")
+        self.assertEqual(self.invocations(), [])
+
+    def test_in_diff_test_module_change_skips(self):
+        repo = self.in_diff_repo(TEST_MOD_A)
+        result, out = self.gate(repo, whole=WHOLE_EDIT)
+        self.assertEqual(result.returncode, 0, out)
+        self.assertIn("SKIP: a: no mutant on a changed line", out)
+        self.assertEqual(self.runs(), [])
+        self.assertTrue(self.invocations())
+
+    def test_in_diff_one_package(self):
+        repo = self.in_diff_repo(EDIT_A)
+        result, out = self.gate(repo, whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2])
+        self.assertEqual(result.returncode, 0, out)
+        self.assertIn("RUN a: 2 in-diff mutants", out)
+        self.assertIn("SKIP: b: no mutant on a changed line", out)
+        self.assertEqual([run[2] for run in self.runs()], ["a"])
+
+    def test_in_diff_scope_change_runs_whole(self):
+        repo = self.in_diff_repo({"coverage-tiers.toml": tiers_toml(["a", "b"], "")},
+                                 base_crates=["a"])
+        result, out = self.gate(repo, whole=WHOLE_EDIT)
+        self.assertEqual(result.returncode, 0, out)
+        self.assertIn("whole: b: mutation scope changed", out)
+        self.assertNotIn("whole: a", out)
+        [run] = self.invocations()
+        self.assertEqual(run[:3], ["mutants", "--package", "b"])
+        self.assertNotIn("--in-diff", run)
+
+    def test_in_diff_bad_rev_fails(self):
+        repo = self.in_diff_repo(EDIT_A)
+        result, out = self.gate(repo, "--mutants", "a", "--in-diff", "no-such-rev")
+        self.assertFails(result, out, "FAIL: --in-diff: no-such-rev is not a commit")
+        self.assertEqual(self.invocations(), [])
+
+    def test_in_diff_no_merge_base_fails(self):
+        repo = self.in_diff_repo(EDIT_A)
+        tree = git(repo, "mktree", input="")
+        git(repo, "tag", "unrelated", git(repo, "commit-tree", tree, "-m", "unrelated"))
+        result, out = self.gate(repo, "--mutants", "a", "--in-diff", "unrelated")
+        self.assertFails(result, out, "FAIL: --in-diff: no merge base between unrelated and HEAD")
+        self.assertEqual(self.invocations(), [])
+
+    def test_in_diff_dirty_tree_fails(self):
+        repo = self.in_diff_repo(EDIT_A)
+        (repo / "crates/a/src/lib.rs").write_text(LIB_A + "\n")
+        result, out = self.gate(repo, whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2])
+        self.assertFails(result, out, "FAIL: --in-diff attests to HEAD; uncommitted or untracked:",
+                         "crates/a/src/lib.rs")
+        self.assertEqual(self.invocations(), [])
+
+    def test_in_diff_untracked_test_file_fails(self):
+        repo = self.in_diff_repo(EDIT_A)
+        write_tree(repo, {"crates/a/tests/extra.rs": "#[test]\nfn t() {}\n"})
+        result, out = self.gate(repo, whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2])
+        self.assertFails(result, out, "FAIL: --in-diff attests to HEAD; uncommitted or untracked:",
+                         "crates/a/tests/extra.rs")
+        self.assertEqual(self.invocations(), [])
+
+    def test_in_diff_noprefix_config_still_fails_on_mapping_failure(self):
+        repo = self.in_diff_repo(DELETE_A, config={
+            "diff.noprefix": "true", "diff.mnemonicPrefix": "true",
+            "diff.suppressBlankEmpty": "true", "diff.context": "0"})
+        result, out = self.gate(repo, whole=WHOLE_DELETE, extra_env={"GIT_DIFF_OPTS": "-u0"})
+        self.assertFails(result, out, "FAIL: a: 1 listed mutants on changed lines in "
+                         "crates/a/src/lib.rs but the in-diff listing found none")
+        self.assertNotIn("unrecognised", out)
+        self.assertThreeLineContext()
+
+    def test_in_diff_git_diff_opts_mixed_change(self):
+        repo = self.in_diff_repo(MIXED_A)
+        result, out = self.gate(repo, whole=WHOLE_DELETE, indiff=WHOLE_DELETE[1:2],
+                                extra_env={"GIT_DIFF_OPTS": "-u0"})
+        self.assertFails(result, out, "FAIL: a: in-diff listing dropped 1 mutants on changed "
+                         "lines: " + WHOLE_DELETE[0]["name"])
+        self.assertThreeLineContext()
+        self.assertEqual(self.runs(), [])
+
+    def assertThreeLineContext(self):
+        text = Path(str(self.args) + ".in.diff").read_text()
+        self.assertTrue(text.startswith("diff --git a/crates/a/src/lib.rs b/crates/a/src/lib.rs\n"),
+                        text)
+        hunks = re.findall(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@", text, re.M)
+        self.assertTrue(hunks, text)
+        for old, new in hunks:
+            self.assertGreater(int(old or 1), 1, text)
+            self.assertGreater(int(new or 1), 1, text)
+
+    def test_in_diff_root_not_toplevel_fails(self):
+        repo = self.in_diff_repo({"sub/coverage-tiers.toml": tiers_toml(["a"], "")})
+        result, out = self.gate(repo, "--mutants", "a", "--in-diff", "base", root=repo / "sub")
+        self.assertFails(result, out, "FAIL: --in-diff needs --root at the git toplevel")
+        self.assertEqual(self.invocations(), [])
+
+    def test_in_diff_git_env_is_ignored(self):
+        other = self.tmp / "other"
+        write_tree(other, {"x.rs": "fn x() {}\n"})
+        git(other, "init", "-q")
+        git(other, "add", "-A")
+        git(other, "commit", "-qm", "other")
+        repo = self.in_diff_repo(EDIT_A)
+        result, out = self.gate(repo, whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2], extra_env={
+            "GIT_DIR": str(other / ".git"), "GIT_WORK_TREE": str(other),
+            "GIT_INDEX_FILE": str(other / ".git/index"),
+            "GIT_OBJECT_DIRECTORY": str(other / ".git/objects")})
+        self.assertEqual(result.returncode, 0, out)
+        self.assertIn("RUN a: 2 in-diff mutants", out)
+
+    def test_in_diff_scope_failure_stops_the_gate(self):
+        repo = self.in_diff_repo(EDIT_A)
+        result, out = self.gate(repo, whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2],
+                                extra_env={"FAKE_METADATA_FAIL": "1"})
+        self.assertFails(result, out, "FAIL: --in-diff: mutation scope", "cargo metadata failed")
+        self.assertEqual(self.invocations(), [])
+
+    def test_in_diff_new_scope_file_runs_whole(self):
+        names = ("a", "maknae-sys")
+        repo = self.in_diff_repo({".config/nextest.toml": "[profile.mutants]\n"}, names=names)
+        result, out = self.gate(repo, crates=names, whole=WHOLE_EDIT)
+        self.assertEqual(result.returncode, 0, out)
+        self.assertIn("whole: maknae-sys: mutation scope changed", out)
+        [run] = self.invocations()
+        self.assertEqual(run[:3], ["mutants", "--package", "maknae-sys"])
+        self.assertNotIn("--in-diff", run)
+        self.assertIn("--exclude-re", run)
+
+    def test_in_diff_usage_errors(self):
+        repo = self.in_diff_repo(EDIT_A)
+        cases = {
+            ("--mutants", "a", "--in-diff"): "--in-diff needs a revision",
+            ("--mutants", "a", "--in-diff", "-x"): "--in-diff needs a revision",
+            ("--in-diff", "--mutants", "a"): "--in-diff needs a revision",
+            ("--mutants-all", "--in-diff", "base"): "--in-diff cannot be combined with --mutants-all",
+            ("--in-diff", "base"): "--in-diff needs --mutants",
+            ("--injection", "--mutants", "a", "--in-diff", "base"):
+                "--in-diff cannot be combined with --injection",
+        }
+        for args, text in cases.items():
+            with self.subTest(args):
+                result, out = self.gate(repo, *args)
+                self.assertFails(result, out, "FAIL: " + text)
+                self.assertEqual(self.invocations(), [])
+
+    def test_in_diff_empty_stdout_is_empty_list(self):
+        repo = self.in_diff_repo(EDIT_A)
+        result, out = self.gate(repo, whole=WHOLE_EDIT[2:])
+        self.assertEqual(result.returncode, 0, out)
+        self.assertIn("SKIP: a: no mutant on a changed line", out)
+        self.assertIn("SKIP: b: no mutant on a changed line", out)
+        self.assertEqual(self.runs(), [])
+        self.assertEqual(len(self.invocations()), 4)
+
+
+def git(repo, *args, input=None):
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    return subprocess.run(["git", "-C", str(repo), "-c", "user.name=fixture", "-c",
+                           "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false",
+                           "-c", "tag.gpgsign=false", "-c", "core.hooksPath=/dev/null", *args],
+                          env=env, check=True, capture_output=True, text=True,
+                          input=input).stdout.strip()
+
+
+def write_tree(root, files):
+    for name, text in files.items():
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+
+
+def package_toml(name):
+    return f'[package]\nname = "{name}"\nversion = "0.1.0"\nedition = "2021"\n'
+
+
+def tiers_toml(crates, features):
+    return f"[t1]\nmutants_crates = {json.dumps(list(crates))}\n{features}"
+
+
+def listed(name, package, file, start, end=None):
+    return {"name": name, "package": package, "file": file,
+            "span": {"start": {"line": start, "column": 5},
+                     "end": {"line": start if end is None else end, "column": 6}}}
+
+
+LIB_A = ("pub fn a(x: u32) -> u32 {\n"
+         "    let y = x + 1;\n"
+         "    let z = y * 2;\n"
+         "    z - 3\n"
+         "}\n"
+         "\n"
+         "pub fn d(x: u32) -> u32 {\n"
+         "    x * 5\n"
+         "}\n"
+         "\n"
+         "#[cfg(test)]\n"
+         "mod tests {\n"
+         "    #[test]\n"
+         "    fn t() {\n"
+         "        assert_eq!(super::a(1), 1);\n"
+         "    }\n"
+         "}\n")
+A_RS = "crates/a/src/lib.rs"
+EDIT_A = {A_RS: LIB_A.replace("y * 2", "y * 4")}
+DELETE_A = {A_RS: LIB_A.replace("    let z = y * 2;\n", "")}
+MIXED_A = {A_RS: DELETE_A[A_RS].replace("x * 5", "x * 6")}
+TEST_MOD_A = {A_RS: LIB_A.replace("super::a(1), 1", "super::a(1), 2")}
+WHOLE_EDIT = [listed(f"{A_RS}:2:5: replace a -> u32 with 0", "a", A_RS, 2, 4),
+              listed(f"{A_RS}:3:15: replace * with + in a", "a", A_RS, 3),
+              listed(f"{A_RS}:8:5: replace d -> u32 with 0", "a", A_RS, 8),
+              listed("crates/b/src/lib.rs:2:5: replace b -> u32 with 0", "b", "crates/b/src/lib.rs", 2)]
+WHOLE_DELETE = [listed(f"{A_RS}:2:5: replace a -> u32 with 0", "a", A_RS, 2, 3),
+                listed(f"{A_RS}:7:5: replace d -> u32 with 0", "a", A_RS, 7)]
+
 Run = collections.namedtuple("Run", "result argv env tmpdir litter leftover root")
 MISSING = object()
 BASH = shutil.which("bash")
@@ -370,13 +673,62 @@ def entry(system, *, file=None, fn="grow_page", regex="\\*="):
     return f"{system}\t{PAGE if file is None else file}\t{fn}\t{regex}\tfixture\n"
 
 
+LIST_FILTER = ("import json, sys\n"
+               "print(json.dumps([m for m in json.load(sys.stdin) if m['package'] == sys.argv[1]]))\n")
+
+
+def fake_cargo(tools):
+    recorder = tools / "cargo"
+    recorder.write_text(
+        '#!/bin/sh\n'
+        'if [ "$1" != mutants ]; then\n'
+        # mutation-diff.py's `scope` is the only caller that spells `metadata --no-deps` first.
+        '  [ "$1 $2 ${FAKE_METADATA_FAIL-}" = "metadata --no-deps 1" ] && exit 1\n'
+        '  exec "$REAL_CARGO" "$@"\n'
+        'fi\n'
+        '{ printf "%s\\t" "$@"; echo; } >> "$MUTATION_ARGS.log"\n'
+        'pkg= indiff= list=0\n'
+        'for a in "$@"; do\n'
+        '  case "$prev" in --package) pkg="$a";; --in-diff) indiff="$a";; esac\n'
+        '  [ "$a" = --list ] && list=1\n'
+        '  prev="$a"\n'
+        'done\n'
+        'if [ "$list" = 1 ]; then\n'
+        '  if [ -n "$indiff" ]; then cp "$indiff" "$MUTATION_ARGS.in.diff"; json="${FAKE_INDIFF_LIST-}"\n'
+        '  else json="${FAKE_WHOLE_LIST-}"; fi\n'
+        f'  [ -n "$json" ] && printf "%s" "$json" | python3 -c "{LIST_FILTER}" "$pkg"\n'
+        '  exit "${FAKE_LIST_EXIT:-0}"\n'
+        'fi\n'
+        'env | grep -E "^(NEXTEST_[A-Z_]*|CLICOLOR_FORCE|CARGO_TERM_COLOR)=" | sort > "$MUTATION_ARGS.env"\n'
+        'printf "%s\\n" "${TMPDIR-}" > "$MUTATION_ARGS.tmpdir"\n'
+        'printf "%s\\n" "$@" > "$MUTATION_ARGS"\n'
+        'out=.\n'
+        'while [ $# -gt 0 ]; do\n'
+        '  [ "$1" = "--output" ] && { out="$2"; break; }\n'
+        '  shift\n'
+        'done\n'
+        'mkdir -p "$out/mutants.out"\n'
+        'cp -R "$FAKE_PAYLOAD/." "$out/mutants.out/"\n'
+        'if [ "$FAKE_LITTER" = 1 ]; then\n'
+        '  mkdir -p "$TMPDIR/.tmpKILLED/inner" && touch "$TMPDIR/.tmpKILLED/inner/f" "$TMPDIR/stray"\n'
+        '  chmod 000 "$TMPDIR/.tmpKILLED/inner" "$TMPDIR/.tmpKILLED"\n'
+        '  echo littered > "$MUTATION_ARGS.litter"\n'
+        'fi\n'
+        'if [ "$FAKE_SLEEP" = 1 ]; then echo $$ > "$MUTATION_ARGS.pid"; exec sleep 60; fi\n'
+        'exit "$FAKE_EXIT"\n'
+    )
+    recorder.chmod(0o755)
+    (tools / "cargo-mutants").symlink_to(recorder)
+
+
 def fake_nextest(directory, version):
     tool = directory / "cargo-nextest"
     tool.write_text(f"#!/bin/sh\nprintf 'cargo-nextest {version} (fixture)\\nrelease: {version}\\n'\n")
     tool.chmod(0o755)
 
 
-def write_payload(payload, logs, total, planned_extra=0, phase="Test", plan=True, baseline=None):
+def write_payload(payload, logs, total, planned_extra=0, phase="Test", plan=True, baseline=None,
+                  missed=0):
     (payload / "log").mkdir(parents=True)
     (payload / "log" / "baseline.log").write_text(
         "\n*** baseline\n\n*** /toolchain/bin/cargo nextest run --verbose\n"
@@ -399,8 +751,8 @@ def write_payload(payload, logs, total, planned_extra=0, phase="Test", plan=True
         (payload / "mutants.json").write_text(json.dumps(planned))
     count = len(logs) if total is None else total
     (payload / "outcomes.json").write_text(json.dumps({
-        "outcomes": outcomes, "total_mutants": count, "caught": count,
-        "missed": 0, "timeout": 0, "unviable": 0}))
+        "outcomes": outcomes, "total_mutants": count, "caught": count - missed,
+        "missed": missed, "timeout": 0, "unviable": 0}))
 
 
 TERMINATED = mutant("+= with *= in grow_page", TIMEOUT_LINE)
