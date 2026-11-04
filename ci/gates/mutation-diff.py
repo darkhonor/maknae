@@ -457,7 +457,7 @@ def selectors(package):
 
 
 def check_inputs(tree, label, args, features, target, members):
-    argv = ["cargo", "check", *args, "--message-format=json",
+    argv = ["cargo", "check", *args, "--tests", "--message-format=json",
             "--target-dir", str(target), "--manifest-path", str(tree / "Cargo.toml")]
     for feature in features:
         argv += ["--features", feature]
@@ -473,17 +473,21 @@ def check_inputs(tree, label, args, features, target, members):
             continue
         if (not isinstance(message, dict) or message.get("reason") != "compiler-artifact"
                 or message.get("package_id") not in members
-                or not set(message.get("target", {}).get("kind", [])) & (PRODUCTION_LIB | {"bin"})):
+                or not set(message.get("target", {}).get("kind", [])) & (PRODUCTION_LIB | {"bin"})
+                or (message.get("profile") or {}).get("test") is not False):
             continue
         name = members[message["package_id"]]
+        infos = set()
         for artifact in message.get("filenames", []):
             artifact = Path(artifact)
             candidates = [artifact.with_suffix(".d")]
             if artifact.name.startswith("lib"):
                 candidates.append(artifact.with_name(artifact.stem[3:] + ".d"))
-            info = next((c for c in candidates if c.is_file()), None)
-            if info is None:
-                continue
+            infos.update(c for c in candidates if c.is_file())
+        if len(infos) != 1:
+            raise ScopeError(f"FAIL: {name}: cannot locate exactly one dep-info file for its "
+                             f"{message['target'].get('name')} target (found {len(infos)})")
+        for info in infos:
             read += 1
             for token in dep_tokens(info.read_text(errors="replace")):
                 path = Path(token) if os.path.isabs(token) else tree / token
@@ -875,6 +879,25 @@ def contains(directory, path):
     return False
 
 
+CONFIG_FILES = frozenset(("Cargo.toml", "coverage-tiers.toml", "rust-toolchain", "rust-toolchain.toml"))
+
+
+def config_links(root, head):
+    sha = resolve(root, head)
+    listing = git(root, "ls-tree", "-r", "-z", "--full-tree", sha)
+    if listing.returncode != 0:
+        raise ScopeError(f"FAIL: git ls-tree {sha} failed: {listing.stderr.decode().strip()}")
+    for record in listing.stdout.split(b"\0"):
+        meta, _, raw = record.partition(b"\t")
+        if not record or meta.split(b" ")[0] != b"120000":
+            continue
+        path = raw.decode()
+        if (path == ".cargo" or path.startswith(".cargo/") or path in CONFIG_FILES
+                or posixpath.basename(path) == "Cargo.toml"):
+            return f"FAIL: --in-diff: {path} is a symlink; config inputs must be regular files"
+    return None
+
+
 MUTANTS_CONFIG_KEYS = frozenset(("exclude_globs", "exclude_re"))
 
 
@@ -1032,6 +1055,11 @@ def main(argv):
             line = unlisted(*argv[1:])
             if line:
                 print(line)
+        elif len(argv) == 3 and command == "config-links":
+            problem = config_links(*argv[1:])
+            if problem:
+                print(problem)
+                return 1
         elif len(argv) == 4 and command == "unmappable":
             problem = unmappable(*argv[1:])
             if problem:
@@ -1043,7 +1071,8 @@ def main(argv):
                   "<diff> [<head>] | history <root> | snapshot <root> <rev> <dest> | "
                   "compiled <root> <base> <head> <workspace> <target> | "
                   "embeds <root> <base> <head> <workspace> <target> | "
-                  "unlisted <crate> <files> <compiled> <workspace> <embeds> | unmappable <root> <head> <workspace>",
+                  "unlisted <crate> <files> <compiled> <workspace> <embeds> | unmappable <root> <head> <workspace> | "
+                  "config-links <root> <head>",
                   file=sys.stderr)
             return 1
     except (DiffError, ScopeError) as exc:

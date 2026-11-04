@@ -340,6 +340,7 @@ class InDiff(unittest.TestCase):
         files["ci/affected.py"] = (ROOT / "ci/affected.py").read_text()
         write_tree(repo, files)
         for name, target in (links or {}).items():
+            (repo / name).unlink(missing_ok=True)
             (repo / name).symlink_to(target)
         git(repo, "init", "-q", "-b", "main")
         for key, value in (config or {}).items():
@@ -1076,6 +1077,28 @@ class InDiff(unittest.TestCase):
         self.assertEqual(len(self.whole_runs("b")), 1)
         self.assertEqual(self.whole_runs("a"), [])
 
+    def test_in_diff_a_feature_a_dev_dependency_enables_is_followed(self):
+        policy = "crates/a/src/enabled/policy.rs"
+        lib = (LIB_A + '\n#[cfg(feature = "extra")]\npub mod enabled {\n    pub mod policy;\n'
+               '    pub fn allowed() -> bool {\n        include_str!("enabled/policy.rs").contains("ALLOW")\n'
+               '    }\n}\n')
+        manifest = (package_toml("a") + '\n[features]\nextra = []\n\n[dev-dependencies]\n'
+                    'a = { path = ".", features = ["extra"] }\n')
+        base = {"crates/a/Cargo.toml": manifest, A_RS: lib, policy: 'pub const RULE: &str = "ALLOW";\n',
+                "crates/a/tests/it.rs": "#[test]\nfn it() {}\n"}
+        cases = {policy: ('pub const RULE: &str = "DENY";\n',
+                          f"whole: a: changed {policy} is embedded by include_str!/include_bytes!"),
+                 "crates/a/tests/it.rs": ("#[test]\nfn it() {\n    assert!(true);\n}\n",
+                                          "SKIP: a: no mutant on a changed line")}
+        for path, (after, expected) in cases.items():
+            with self.subTest(path=path):
+                shutil.rmtree(self.tmp / "repo", ignore_errors=True)
+                repo = self.in_diff_repo({path: after}, base_files=base)
+                result, out = self.gate(repo, whole=WHOLE_EDIT)
+                self.assertEqual(result.returncode, 0, out)
+                self.assertIn(expected, out)
+                self.assertEqual(len(self.whole_runs("a")), 1 if path == policy else 0)
+
     def test_in_diff_a_build_setting_in_the_mutants_config_fails_before_any_listing(self):
         policy = "crates/a/src/enabled/policy.rs"
         lib = (LIB_A + '\n#[cfg(feature = "extra")]\npub mod enabled {\n    pub mod policy;\n'
@@ -1234,6 +1257,20 @@ class InDiff(unittest.TestCase):
                 result, out = self.gate(repo, whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2])
                 self.assertFails(result, out, f"FAIL: --in-diff: symlink {link} points outside the "
                                  "repository; in-diff mapping cannot follow aliases — use the whole-package run")
+                self.assertEqual(self.invocations(), [])
+
+    def test_in_diff_a_symlinked_config_input_fails_before_it_is_read(self):
+        cases = {".cargo/mutants.toml": ({"cargo-config/mutants.toml": "exclude_globs = []\n", ".cargo/keep": ""},
+                                         "../cargo-config/mutants.toml"),
+                 ".cargo": ({"cargo-config/mutants.toml": "exclude_globs = []\n"}, "cargo-config"),
+                 "crates/b/Cargo.toml": ({"manifests/b.toml": package_toml("b")}, "../../manifests/b.toml")}
+        for link, (files, target) in cases.items():
+            with self.subTest(link=link):
+                shutil.rmtree(self.tmp / "repo", ignore_errors=True)
+                repo = self.in_diff_repo(EDIT_A, base_files=files, links={link: target})
+                result, out = self.gate(repo, whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2])
+                self.assertFails(result, out, f"FAIL: --in-diff: {link} is a symlink; config inputs must be "
+                                 "regular files")
                 self.assertEqual(self.invocations(), [])
 
     def test_in_diff_the_ci_invocation_with_a_relative_root_runs(self):

@@ -4882,6 +4882,26 @@ mid_git "$mid_r" commit -qm config
 expect_reject_because "mutation-in-diff/unmodelled-mutants-config-fails" ".cargo/mutants.toml sets all_features" \
   mid_gate "$mid_r" "$mid_whole_edit" "[$mid_a,$mid_star]" 0
 mid_r="$(mid_repo 'let z = y * 4;' 'x * 5' Fixture.)"
+mkdir -p "$mid_r/cargo-config"
+printf 'exclude_globs = []\n' > "$mid_r/cargo-config/mutants.toml"
+ln -s cargo-config "$mid_r/.cargo"
+mid_git "$mid_r" add -A
+mid_git "$mid_r" commit -qm config
+expect_reject_because "mutation-in-diff/symlinked-config-input-fails" ".cargo is a symlink; config inputs must be regular files" \
+  mid_gate "$mid_r" "$mid_whole_edit" "[$mid_a,$mid_star]" 0
+mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
+printf '\n[features]\nextra = []\n\n[dev-dependencies]\na = { path = ".", features = ["extra"] }\n' >> "$mid_r/crates/a/Cargo.toml"
+mkdir -p "$mid_r/crates/a/src/enabled"
+printf '#[cfg(feature = "extra")]\npub mod enabled {\n    pub mod policy;\n    pub fn allowed() -> bool {\n        include_str!("enabled/policy.rs").contains("ALLOW")\n    }\n}\n' >> "$mid_r/crates/a/src/lib.rs"
+printf 'pub const RULE: &str = "ALLOW";\n' > "$mid_r/crates/a/src/enabled/policy.rs"
+mid_git "$mid_r" add -A
+mid_git "$mid_r" commit -qm devdep
+mid_git "$mid_r" tag -f base
+printf 'pub const RULE: &str = "DENY";\n' > "$mid_r/crates/a/src/enabled/policy.rs"
+mid_git "$mid_r" commit -qam deny
+expect_reject_because "mutation-in-diff/dev-dependency-feature-survivor-fails" "cargo mutants --package a reported missed/timeout mutants" \
+  mid_gate "$mid_r" "$mid_whole_edit" "" 2
+mid_r="$(mid_repo 'let z = y * 4;' 'x * 5' Fixture.)"
 if [ -e "$mid_r/CRATES" ]; then
   mid_git "$mid_r" reset -q --hard base
   ln -s CRATES/A/src "$mid_r/alias"

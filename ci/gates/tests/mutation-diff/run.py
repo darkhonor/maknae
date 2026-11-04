@@ -780,6 +780,19 @@ class Compiled(unittest.TestCase):
         self.commit("edit")
         self.assertCompiled({"beta": ["crates/beta/src/x.rs"]})
 
+    def test_compiled_a_feature_a_dev_dependency_enables_is_followed(self):
+        extra = '\n[features]\nextra = []\n\n[dev-dependencies]\nbeta = { path = ".", features = ["extra"] }\n'
+        self.base({"crates/beta/Cargo.toml": MANIFEST.format(n="beta", extra=extra),
+                   "crates/beta/src/lib.rs": '#[cfg(feature = "extra")]\npub mod enabled {\n    pub mod policy;\n'
+                                             '    pub fn allowed() -> bool {\n'
+                                             '        include_str!("enabled/policy.rs").contains("ALLOW")\n    }\n}\n',
+                   "crates/beta/src/enabled/policy.rs": 'pub const RULE: &str = "ALLOW";\n',
+                   "crates/beta/tests/t.rs": "#[test]\nfn t() {}\n"})
+        self.put("crates/beta/src/enabled/policy.rs", 'pub const RULE: &str = "DENY";\n')
+        self.put("crates/beta/tests/t.rs", "#[test]\nfn t() {\n    assert!(true);\n}\n")
+        self.commit("edit")
+        self.assertCompiled({"beta": ["crates/beta/src/enabled/policy.rs"]})
+
     def test_compiled_test_only_and_unreferenced_files_are_not_production_inputs(self):
         self.base({"crates/beta/src/lib.rs": "#[cfg(test)]\nmod fixtures;\n",
                    "crates/beta/src/fixtures.rs": "", "crates/beta/tests/t.rs": "",
@@ -1075,6 +1088,13 @@ class Embeds(unittest.TestCase):
         self.change(files)
         self.assertEqual(self.embeds()["indirect"], "crates/beta/src/x.rs")
 
+    def test_embeds_a_feature_a_dev_dependency_enables_is_scanned(self):
+        extra = '\n[features]\nextra = []\n\n[dev-dependencies]\ngamma = { path = ".", features = ["extra"] }\n'
+        self.change({"crates/gamma/Cargo.toml": MANIFEST.format(n="gamma", extra=extra),
+                     "crates/gamma/src/lib.rs": '#[cfg(feature = "extra")]\nmod x;\n',
+                     "crates/gamma/src/x.rs": "pub use std::include_str as embed;\n"})
+        self.assertEqual(self.embeds()["indirect"], "crates/gamma/src/x.rs")
+
     def test_embeds_test_only_code_is_not_scanned(self):
         files = {f"crates/gamma/{d}/x.rs": "use std::include_str as embed;\nfn main() {}\n"
                  for d in ("tests", "benches", "examples")}
@@ -1182,6 +1202,51 @@ class Snapshot(unittest.TestCase):
 
 FILES = {"src/lib.rs": "pub fn a() -> u32 {\n    1\n}\n", "notes.txt": "$Format:%H$\n",
          "run.sh": "#!/bin/sh\n", "Cargo.toml": '[package]\nname = "s"\nversion = "0.1.0"\n'}
+
+
+class ConfigLinks(unittest.TestCase):
+    setUp, git, put, commit = Scope.setUp, Scope.git, Scope.put, Scope.commit
+
+    def check(self):
+        return run_cli("config-links", str(self.root), "HEAD")
+
+    def linked(self, link, target):
+        path = self.root / link
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        path.unlink(missing_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.symlink_to(target)
+        self.commit("link")
+
+    def test_config_links_a_symlinked_config_input_is_refused(self):
+        cases = {".cargo/mutants.toml": "../real.toml", ".cargo": "real-cargo", ".cargo/config.toml": "../real.toml",
+                 "Cargo.toml": "real.toml", "crates/beta/Cargo.toml": "../../real.toml",
+                 "coverage-tiers.toml": "real.toml", "rust-toolchain.toml": "real.toml", "rust-toolchain": "real.toml"}
+        self.put("real.toml", "")
+        self.put("real-cargo/mutants.toml", "exclude_globs = []\n")
+        self.commit("targets")
+        for link, target in cases.items():
+            with self.subTest(link=link):
+                self.linked(link, target)
+                try:
+                    result = self.check()
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertEqual(result.stdout, f"FAIL: --in-diff: {link} is a symlink; config inputs must be "
+                                                    "regular files\n")
+                finally:
+                    self.git("reset", "-q", "--hard", "HEAD~1")
+
+    def test_config_links_other_symlinks_are_not_config_inputs(self):
+        self.put("AGENTS.md", "x\n")
+        self.commit("agents")
+        self.linked("CLAUDE.md", "AGENTS.md")
+        result = self.check()
+        self.assertEqual((result.returncode, result.stdout), (0, ""), result.stderr)
+
+    def test_config_links_the_real_tree_passes(self):
+        result = run_cli("config-links", str(ROOT), "HEAD")
+        self.assertEqual((result.returncode, result.stdout), (0, ""), result.stderr)
 
 
 class History(unittest.TestCase):
