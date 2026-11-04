@@ -50,6 +50,8 @@
 # is the verification lane, and it tests the WHOLE workspace, SDK crates
 # included -- the runner has the SDK.
 set -euo pipefail
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR GIT_ALTERNATE_OBJECT_DIRECTORIES \
+  GIT_LITERAL_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_GLOB_PATHSPECS GIT_ICASE_PATHSPECS
 
 # bash >= 4: arrays under `set -u` (see clippy-all.sh for the 3.2 failure).
 if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then

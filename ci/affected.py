@@ -5,10 +5,19 @@ Python 3.11+. Unknown inputs widen; unreadable package/contract authority fails.
 """
 import argparse
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
 import tomllib
+
+GIT_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR",
+           "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_LITERAL_PATHSPECS", "GIT_NOGLOB_PATHSPECS",
+           "GIT_GLOB_PATHSPECS", "GIT_ICASE_PATHSPECS")
+
+
+def git_env():
+    return {k: v for k, v in os.environ.items() if k not in GIT_ENV}
 
 
 def read_toml(path):
@@ -87,7 +96,8 @@ def select(root, base, head, event):
         return result(set(packages), reason)
 
     def git(*args):
-        return subprocess.check_output(['git', '-C', str(root), *args], stderr=subprocess.PIPE)
+        return subprocess.check_output(['git', '-C', str(root), *args], stderr=subprocess.PIPE,
+                                       env=git_env())
 
     try:
         # Resolve first: even a user-supplied '--help' is data, never an option.

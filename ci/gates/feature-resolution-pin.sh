@@ -14,6 +14,8 @@
 # The maknae-spifc arm is currently VACUOUS (it reaches neither crate) — kept
 # as cheap defense-in-depth, not evidence of a live risk.
 set -euo pipefail
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR GIT_ALTERNATE_OBJECT_DIRECTORIES \
+  GIT_LITERAL_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_GLOB_PATHSPECS GIT_ICASE_PATHSPECS
 root="${1:-$(git rev-parse --show-toplevel)}"
 fail=0
 

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR GIT_ALTERNATE_OBJECT_DIRECTORIES \
+  GIT_LITERAL_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_GLOB_PATHSPECS GIT_ICASE_PATHSPECS
 here="$(cd "$(dirname "$0")" && pwd)"; source "$here/lib.sh"
 ROOT="${1:-$(git rev-parse --show-toplevel)}"
 cd "$ROOT"

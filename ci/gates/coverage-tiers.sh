@@ -26,6 +26,8 @@ in_diff_generate() { # <base> <out>
     --src-prefix=a/ --dst-prefix=b/ --find-renames "$1" HEAD -- '*.rs' >"$2"
 }
 [ "${BASH_SOURCE[0]}" = "$0" ] || return 0
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR GIT_ALTERNATE_OBJECT_DIRECTORIES \
+  GIT_LITERAL_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_GLOB_PATHSPECS GIT_ICASE_PATHSPECS
 
 here="$(cd "$(dirname "$0")" && pwd)"
 

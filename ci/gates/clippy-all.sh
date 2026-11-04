@@ -55,6 +55,8 @@
 # a COLD-run cost only; without that volume it recurred on every run, because
 # the official image ships neither clippy nor rustfmt.
 set -euo pipefail
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR GIT_ALTERNATE_OBJECT_DIRECTORIES \
+  GIT_LITERAL_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_GLOB_PATHSPECS GIT_ICASE_PATHSPECS
 
 # bash 3.2 is fatal here, not merely limiting, and the failure is SILENT-GREEN:
 # `"${arr[@]}"` on an empty array is an unbound-variable error under `set -u`

@@ -41,12 +41,29 @@ class AffectedTests(unittest.TestCase):
         self.git('commit', '-qm', 'fixture')
         return self.git('rev-parse', 'HEAD')
 
-    def select(self, base=None, event='pull_request'):
+    def select(self, base=None, event='pull_request', env=None):
         proc = subprocess.run([sys.executable, str(SELECTOR), '--root', str(self.root),
                                '--base=' + (base or self.base), '--head', 'HEAD', '--event', event],
-                              capture_output=True, text=True)
+                              capture_output=True, text=True,
+                              env={**os.environ, **(env or {})})
         self.assertEqual(proc.returncode, 0, proc.stderr)
         return json.loads(proc.stdout)
+
+    def test_ambient_git_env_does_not_change_selection(self):
+        self.write('crates/c/src/lib.rs', '// changed\n')
+        self.commit()
+        bogus = tempfile.mkdtemp()
+        self.addCleanup(os.rmdir, bogus)
+        for var, value in (('GIT_LITERAL_PATHSPECS', '1'), ('GIT_NOGLOB_PATHSPECS', '1'),
+                           ('GIT_GLOB_PATHSPECS', '1'), ('GIT_ICASE_PATHSPECS', '1'),
+                           ('GIT_DIR', bogus), ('GIT_WORK_TREE', bogus),
+                           ('GIT_INDEX_FILE', bogus + '/index'), ('GIT_OBJECT_DIRECTORY', bogus),
+                           ('GIT_COMMON_DIR', bogus), ('GIT_ALTERNATE_OBJECT_DIRECTORIES', bogus)):
+            with self.subTest(var):
+                for event in ('pull_request', 'push'):
+                    result = self.select(event=event, env={var: value, 'GIT_LITERAL_PATHSPECS': '1'})
+                    self.assertEqual((result['mutants'], result['reason']),
+                                     (['c'], 'changed packages and reverse dependencies'))
 
     def test_docs_pr_and_push(self):
         self.write('README.md', 'updated\n')
