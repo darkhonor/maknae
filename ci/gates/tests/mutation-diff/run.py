@@ -665,6 +665,33 @@ class Unmappable(unittest.TestCase):
                 finally:
                     self.git("reset", "-q", "--hard", "HEAD~1")
 
+    def test_unmappable_a_build_setting_in_the_mutants_config_is_refused(self):
+        for line in ("all_features = true", 'features = ["extra"]', "no_default_features = true",
+                     'additional_cargo_args = ["--all-features"]'):
+            with self.subTest(line=line):
+                self.put(".cargo/mutants.toml", f'exclude_globs = []\nexclude_re = []\n{line}\n')
+                self.commit("config")
+                try:
+                    key = line.split(" ", 1)[0]
+                    self.assertRefused(f"FAIL: --in-diff: .cargo/mutants.toml sets {key}, which changes what "
+                                       "cargo-mutants builds and the in-diff checks do not model — use the "
+                                       "whole-package run")
+                finally:
+                    self.git("reset", "-q", "--hard", "HEAD~1")
+
+    def test_unmappable_an_unparseable_mutants_config_is_refused(self):
+        self.put(".cargo/mutants.toml", "exclude_globs = [\n")
+        self.commit("config")
+        self.assertRefused("FAIL: --in-diff: .cargo/mutants.toml does not parse")
+
+    def test_unmappable_exclusions_only_or_no_mutants_config_is_accepted(self):
+        self.put(".cargo/mutants.toml", 'exclude_globs = ["x.rs"]\nexclude_re = ["y"]\n')
+        self.commit("config")
+        self.assertAccepted()
+        (self.root / ".cargo/mutants.toml").unlink()
+        self.commit("drop")
+        self.assertAccepted()
+
     def test_unmappable_build_script_in_a_non_mutation_crate_is_ignored(self):
         self.put("crates/gamma/Cargo.toml", MANIFEST.format(n="gamma", extra='build = "src/build.rs"\n'))
         self.commit("build")

@@ -4875,6 +4875,13 @@ mid_git "$mid_r" commit -qam deny
 expect_reject_because "mutation-in-diff/cross-crate-include-alias-survivor-fails" "cargo mutants --package b reported missed/timeout mutants" \
   mid_gate "$mid_r" "$mid_whole_edit" "" 2
 mid_r="$(mid_repo 'let z = y * 4;' 'x * 5' Fixture.)"
+mkdir -p "$mid_r/.cargo"
+printf 'exclude_globs = []\nall_features = true\n' > "$mid_r/.cargo/mutants.toml"
+mid_git "$mid_r" add -A
+mid_git "$mid_r" commit -qm config
+expect_reject_because "mutation-in-diff/unmodelled-mutants-config-fails" ".cargo/mutants.toml sets all_features" \
+  mid_gate "$mid_r" "$mid_whole_edit" "[$mid_a,$mid_star]" 0
+mid_r="$(mid_repo 'let z = y * 4;' 'x * 5' Fixture.)"
 if [ -e "$mid_r/CRATES" ]; then
   mid_git "$mid_r" reset -q --hard base
   ln -s CRATES/A/src "$mid_r/alias"

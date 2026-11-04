@@ -875,8 +875,27 @@ def contains(directory, path):
     return False
 
 
+MUTANTS_CONFIG_KEYS = frozenset(("exclude_globs", "exclude_re"))
+
+
+def unmodelled_config(root, sha):
+    text = show(root, sha, ".cargo/mutants.toml")
+    if text is None:
+        return None
+    data = parse_toml(text)
+    if data is None:
+        return "FAIL: --in-diff: .cargo/mutants.toml does not parse — use the whole-package run"
+    for key in sorted(set(data) - MUTANTS_CONFIG_KEYS):
+        return (f"FAIL: --in-diff: .cargo/mutants.toml sets {key}, which changes what cargo-mutants builds "
+                "and the in-diff checks do not model — use the whole-package run")
+    return None
+
+
 def unmappable(root, head, workspace):
     sha = resolve(root, head)
+    problem = unmodelled_config(root, sha)
+    if problem:
+        return problem
     dirs = workspace_crates(workspace)
     mutants = sorted(contract(root, sha, dirs) & set(dirs))
     listing = git(root, "ls-tree", "-r", "-z", "--full-tree", sha)

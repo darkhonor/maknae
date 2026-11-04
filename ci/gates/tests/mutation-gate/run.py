@@ -1076,6 +1076,20 @@ class InDiff(unittest.TestCase):
         self.assertEqual(len(self.whole_runs("b")), 1)
         self.assertEqual(self.whole_runs("a"), [])
 
+    def test_in_diff_a_build_setting_in_the_mutants_config_fails_before_any_listing(self):
+        policy = "crates/a/src/enabled/policy.rs"
+        lib = (LIB_A + '\n#[cfg(feature = "extra")]\npub mod enabled {\n    pub mod policy;\n'
+               '    pub fn allowed() -> bool {\n        include_str!("enabled/policy.rs").contains("ALLOW")\n'
+               '    }\n}\n')
+        repo = self.in_diff_repo({policy: 'pub const RULE: &str = "DENY";\n'},
+                                 base_files={".cargo/mutants.toml": "exclude_globs = []\nall_features = true\n",
+                                             A_RS: lib, policy: 'pub const RULE: &str = "ALLOW";\n'})
+        result, out = self.gate(repo, whole=WHOLE_EDIT)
+        self.assertFails(result, out, "FAIL: --in-diff: .cargo/mutants.toml sets all_features, which changes "
+                         "what cargo-mutants builds and the in-diff checks do not model — use the "
+                         "whole-package run")
+        self.assertEqual(self.invocations(), [])
+
     def test_in_diff_a_build_script_crate_runs_whole_on_a_documentation_change(self):
         build = ('fn main() {\n    let readme = std::fs::read_to_string("../../README.md").unwrap();\n'
                  '    println!("cargo:rustc-env=POLICY={}", readme.trim());\n}\n')
