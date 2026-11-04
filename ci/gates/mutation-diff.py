@@ -514,9 +514,7 @@ def workspace_sources(root, sha, tree, target):
     tiers_text = show(root, sha, "coverage-tiers.toml")
     runs = [("workspace", ["--workspace", "--lib", "--bins"], [])]
     for crate in sorted(contract(root, sha, found) & set(found)):
-        features = features_of(tiers_text, crate)
-        if features:
-            runs.append((crate, ["--package", crate, *selectors(found[crate])], features))
+        runs.append((crate, ["--package", crate, *selectors(found[crate])], features_of(tiers_text, crate)))
     sources = {}
     for label, args, features in runs:
         for name, files in check_inputs(tree, label, args, features, target, members).items():

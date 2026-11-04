@@ -1095,6 +1095,15 @@ class Embeds(unittest.TestCase):
                      "crates/gamma/src/x.rs": "pub use std::include_str as embed;\n"})
         self.assertEqual(self.embeds()["indirect"], "crates/gamma/src/x.rs")
 
+    def test_embeds_a_source_another_members_features_remove_is_scanned(self):
+        self.change({"crates/beta/Cargo.toml": MANIFEST.format(n="beta", extra="\n[features]\nextra = []\n"),
+                     "crates/beta/src/lib.rs": '#[cfg(not(feature = "extra"))]\nmod active;\n',
+                     "crates/beta/src/active.rs": 'pub mod policy;\npub const P: &str = include_str!("active/policy.rs");\n',
+                     "crates/beta/src/active/policy.rs": "",
+                     "crates/gamma/Cargo.toml": MANIFEST.format(
+                         n="gamma", extra='\n[dependencies]\nbeta = { path = "../beta", features = ["extra"] }\n')})
+        self.assertEqual(self.embeds()["targets"], {"crates/beta/src/active/policy.rs": ["beta"]})
+
     def test_embeds_test_only_code_is_not_scanned(self):
         files = {f"crates/gamma/{d}/x.rs": "use std::include_str as embed;\nfn main() {}\n"
                  for d in ("tests", "benches", "examples")}

@@ -98,6 +98,9 @@ fi
 if [ -n "$in_diff" ] && ! root="$(CDPATH='' cd -P -- "$root" && pwd -P)"; then
   fail "--in-diff: --root does not resolve to a directory"; exit 1
 fi
+if [ -n "$in_diff" ] && ! problem="$(python3 "$here/mutation-diff.py" config-links "$root" HEAD 2>&1)"; then
+  printf '%s\n' "${problem:-FAIL: --in-diff: the config symlink check printed nothing}"; exit 1
+fi
 
 # ---- injection-in-work-tree refusal ----------------------------------------
 if [ "$injection" -eq 1 ]; then
@@ -620,9 +623,6 @@ if [ "$mutants_mode" != "" ]; then
     fi
     if ! problem="$(python3 "$here/mutation-diff.py" history "$root" 2>&1)"; then
       printf 'FAIL: --in-diff: %s\n' "${problem:-the history check printed nothing}"; exit 1
-    fi
-    if ! problem="$(python3 "$here/mutation-diff.py" config-links "$root" HEAD 2>&1)"; then
-      printf '%s\n' "${problem:-FAIL: --in-diff: the config symlink check printed nothing}"; exit 1
     fi
     if ! rev_oid="$(in_git rev-parse --verify --quiet --end-of-options "$in_diff^{commit}")" || [ -z "$rev_oid" ]; then
       printf 'FAIL: --in-diff: %s is not a commit\n' "$in_diff"; exit 1

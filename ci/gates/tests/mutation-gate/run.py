@@ -1263,14 +1263,20 @@ class InDiff(unittest.TestCase):
         cases = {".cargo/mutants.toml": ({"cargo-config/mutants.toml": "exclude_globs = []\n", ".cargo/keep": ""},
                                          "../cargo-config/mutants.toml"),
                  ".cargo": ({"cargo-config/mutants.toml": "exclude_globs = []\n"}, "cargo-config"),
-                 "crates/b/Cargo.toml": ({"manifests/b.toml": package_toml("b")}, "../../manifests/b.toml")}
+                 "crates/b/Cargo.toml": ({"manifests/b.toml": package_toml("b")}, "../../manifests/b.toml"),
+                 "Cargo.toml": ({"manifests/root.toml": '[workspace]\nmembers = ["crates/a", "crates/b"]\n'},
+                                "manifests/root.toml"),
+                 "coverage-tiers.toml": ({"manifests/tiers.toml": tiers_toml(["a", "b"], "")}, "manifests/tiers.toml")}
         for link, (files, target) in cases.items():
             with self.subTest(link=link):
                 shutil.rmtree(self.tmp / "repo", ignore_errors=True)
                 repo = self.in_diff_repo(EDIT_A, base_files=files, links={link: target})
+                (repo / "coverage-tiers.toml").chmod(0)
                 result, out = self.gate(repo, whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2])
-                self.assertFails(result, out, f"FAIL: --in-diff: {link} is a symlink; config inputs must be "
-                                 "regular files")
+                self.assertEqual((result.returncode, out), (1, f"FAIL: --in-diff: {link} is a symlink; config "
+                                                               "inputs must be regular files\n"))
+                cargo = Path(str(self.args) + ".cargo")
+                self.assertEqual(cargo.read_text() if cargo.exists() else "", "")
                 self.assertEqual(self.invocations(), [])
 
     def test_in_diff_the_ci_invocation_with_a_relative_root_runs(self):
@@ -1469,6 +1475,7 @@ def fake_cargo(tools):
     recorder = tools / "cargo"
     recorder.write_text(
         '#!/bin/sh\n'
+        '[ -n "${MUTATION_ARGS-}" ] && printf "%s\\n" "$*" >> "$MUTATION_ARGS.cargo"\n'
         'if [ "$1" != mutants ]; then\n'
         # mutation-diff.py's `scope` is the only caller that spells `metadata --no-deps` first.
         '  [ "$1 $2 ${FAKE_METADATA_FAIL-}" = "metadata --no-deps 1" ] && exit 1\n'
