@@ -17,6 +17,8 @@ ABSENT = re.compile(r"does not exist in|exists on disk, but not in")
 MUTANTS_INSTALL = re.compile(r"cargo-mutants\s+--version\s+\S+")
 NEXTEST_FILES = (".config/nextest.toml", "ci/gates/mutation-platform.sh")
 NEXTEST_CRATES = ("maknae-io", "maknae-sys")
+CARGO_CONFIGS = (".cargo/config.toml", ".cargo/config")
+DEPENDENCY_TABLES = ("dependencies", "dev-dependencies", "build-dependencies")
 ALL_FILES = (
     "ci/gates/mutation-oracle.sh",
     "ci/gates/coverage-tiers.sh",
@@ -218,6 +220,7 @@ def read_list(pkg, path):
 
 def git_env():
     env = {k: v for k, v in os.environ.items() if k not in GIT_ENV}
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
     env["LC_ALL"] = "C"
     return env
 
@@ -360,15 +363,53 @@ def scope_crates(root, base, head):
         if old != new:
             selected.update(NEXTEST_CRATES)
 
+    for path in CARGO_CONFIGS:
+        old, new = read(path)
+        if old != new:
+            widen_all()
+
+    old, new = read("Cargo.toml")
+    if old != new:
+        old_data, new_data = parse_toml(old), parse_toml(new)
+        if old_data is None or new_data is None or root_compiled(old_data) != root_compiled(new_data):
+            widen_all()
+
     for crate in mutants & set(dirs):
         old, new = read(f"{dirs[crate]}/Cargo.toml")
-        if old == new:
-            continue
         old_data, new_data = parse_toml(old), parse_toml(new)
-        if old_data is None or new_data is None or old_data.get("features") != new_data.get("features"):
+        if old != new and (old_data is None or new_data is None
+                           or crate_compiled(old_data) != crate_compiled(new_data)):
             selected.add(crate)
+            continue
+        scripts = {"build.rs"} | {d.get("package", {}).get("build") for d in (old_data, new_data)
+                                  if isinstance(d, dict) and isinstance(d.get("package"), dict)}
+        for script in sorted(s for s in scripts if isinstance(s, str)):
+            old, new = read(f"{dirs[crate]}/{script}")
+            if old != new:
+                selected.add(crate)
 
     return sorted(selected & mutants)
+
+
+def without(table, keys):
+    return {k: v for k, v in table.items() if k not in keys} if isinstance(table, dict) else table
+
+
+def crate_compiled(manifest):
+    data = without(manifest, DEPENDENCY_TABLES)
+    if isinstance(data.get("target"), dict):
+        targets = {cfg: without(table, DEPENDENCY_TABLES) for cfg, table in data["target"].items()}
+        data["target"] = {cfg: table for cfg, table in targets.items() if table != {}}
+        if data["target"] == {}:
+            del data["target"]
+    return data
+
+
+def root_compiled(manifest):
+    data = dict(manifest)
+    if isinstance(data.get("workspace"), dict):
+        data["workspace"] = without(data["workspace"], ("dependencies",))
+    return data
 
 
 def main(argv):

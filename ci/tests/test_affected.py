@@ -65,6 +65,18 @@ class AffectedTests(unittest.TestCase):
                     self.assertEqual((result['mutants'], result['reason']),
                                      (['c'], 'changed packages and reverse dependencies'))
 
+    def test_replace_refs_do_not_change_selection(self):
+        self.write('crates/c/src/lib.rs', '// changed\n')
+        changed = self.commit()
+        self.write('README.md', 'updated\n')
+        self.commit()
+        self.git('replace', self.base, self.git('commit-tree', changed + '^{tree}', '-m', 'fake'))
+        for event in ('pull_request', 'push'):
+            with self.subTest(event):
+                result = self.select(event=event)
+                self.assertEqual((result['mutants'], result['reason']),
+                                 (['c'], 'changed packages and reverse dependencies'))
+
     def test_docs_pr_and_push(self):
         self.write('README.md', 'updated\n')
         self.commit()

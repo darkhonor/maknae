@@ -4721,6 +4721,18 @@ mid_mutants=a
 expect_reject_because "mutation-in-diff/changed-crate-not-selected-fails" "changed crate b not selected by --mutants" \
   mid_gate "$mid_r" "$mid_whole_edit" "" 0
 mid_mutants=
+mid_r="$(mid_repo 'let z = y * 4;' 'x * 5' Fixture.)"
+mid_fake="$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY \
+  git -C "$mid_r" -c user.name=fixture -c user.email=fixture@example.invalid commit-tree 'HEAD^{tree}' -m fake)"
+mid_git "$mid_r" replace base "$mid_fake"
+expect_reject_because "mutation-in-diff/replaced-base-mapping-failure-fails" "the in-diff listing found none" \
+  mid_gate "$mid_r" "$mid_whole_edit" "" 0
+mid_r="$(mid_repo 'let z = y * 4;' 'x * 5' Fixture.)"
+mkdir -p "$mid_r/.git/info"
+printf '%s %s\n' "$(env -u GIT_DIR git -C "$mid_r" rev-parse base)" "$(env -u GIT_DIR git -C "$mid_r" rev-parse HEAD)" \
+  > "$mid_r/.git/info/grafts"
+expect_reject_because "mutation-in-diff/grafts-fail" "the repository has grafts" \
+  mid_gate "$mid_r" "$mid_whole_edit" "[$mid_a,$mid_star]" 0
 
 # ---- payload-xattr-clean (#332): an AppleDouble sibling per tagged entry ------
 # pkgbuild serialises a `._name` AppleDouble sibling INTO the payload for every

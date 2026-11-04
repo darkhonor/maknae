@@ -320,7 +320,7 @@ class InDiff(unittest.TestCase):
         fake_cargo(self.aux / "tools")
 
     def in_diff_repo(self, changes, *, names=("a", "b"), base_crates=None, features="",
-                     config=None):
+                     config=None, base_files=None):
         repo = self.tmp / "repo"
         crates = list(base_crates or names)
         files = {
@@ -332,6 +332,7 @@ class InDiff(unittest.TestCase):
             "coverage-tiers.toml": tiers_toml(crates, features),
             ".gitignore": "/target\nCargo.lock\n",
             "ci/gates/mutation-terminated.txt": "",
+            **(base_files or {}),
         }
         for name in ("coverage-tiers.sh", "mutation-oracle.sh", "mutation-platform.sh",
                      "mutation-diff.py"):
@@ -672,6 +673,51 @@ class InDiff(unittest.TestCase):
                 self.assertEqual(sum("--in-diff" in argv for argv in lists), 1)
                 for argv in lists:
                     self.assertEqual(argv[argv.index("--exclude-re") + 1], native)
+
+    def test_in_diff_replaced_base_still_classifies(self):
+        repo = self.in_diff_repo(EDIT_A)
+        fake = git(repo, "commit-tree", git(repo, "rev-parse", "HEAD^{tree}"), "-m", "fake")
+        git(repo, "replace", git(repo, "rev-parse", "base"), fake)
+        self.assertEqual(git(repo, "diff", "base", "HEAD"), "")
+        result, out = self.gate(repo, whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2])
+        self.assertEqual(result.returncode, 0, out)
+        self.assertIn("RUN a: 2 in-diff mutants", out)
+        result, out = self.gate(repo, whole=WHOLE_EDIT)
+        self.assertFails(result, out, "FAIL: a: 2 listed mutants on changed lines in "
+                         "crates/a/src/lib.rs but the in-diff listing found none")
+
+    def test_in_diff_grafts_fail(self):
+        repo = self.in_diff_repo(EDIT_A)
+        (repo / ".git/info").mkdir(exist_ok=True)
+        (repo / ".git/info/grafts").write_text(
+            f'{git(repo, "rev-parse", "base")} {git(repo, "rev-parse", "HEAD")}\n')
+        result, out = self.gate(repo, whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2])
+        self.assertFails(result, out, "FAIL: --in-diff: the repository has grafts")
+        self.assertEqual(self.invocations(), [])
+
+    def test_in_diff_shallow_clone_fails(self):
+        repo = self.in_diff_repo(EDIT_A)
+        clone = self.tmp / "clone"
+        git(self.tmp, "clone", "-q", "--depth", "1", "--no-local", f"file://{repo}", str(clone))
+        git(clone, "tag", "base", "HEAD")
+        self.assertEqual(git(clone, "rev-parse", "--is-shallow-repository"), "true")
+        result, out = self.gate(clone, whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2])
+        self.assertFails(result, out, "FAIL: --in-diff: the repository is shallow")
+        self.assertEqual(self.invocations(), [])
+
+    def test_in_diff_lib_path_change_runs_that_crate_whole(self):
+        repo = self.in_diff_repo(
+            {"crates/a/Cargo.toml": package_toml("a")
+             + '\n[features]\nextra = []\n\n[lib]\npath = "src/dormant.rs"\n'},
+            base_files={"crates/a/src/dormant.rs": "pub fn a(x: u32) -> u32 {\n    x * 7\n}\n"})
+        self.assertEqual(git(repo, "diff", "--name-only", "base", "HEAD"), "crates/a/Cargo.toml")
+        result, out = self.gate(repo, whole=WHOLE_EDIT)
+        self.assertEqual(result.returncode, 0, out)
+        self.assertIn("whole: a: mutation scope changed", out)
+        self.assertNotIn("whole: b", out)
+        [run] = self.invocations()
+        self.assertEqual(run[:3], ["mutants", "--package", "a"])
+        self.assertNotIn("--in-diff", run)
 
 def git(repo, *args, input=None):
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}

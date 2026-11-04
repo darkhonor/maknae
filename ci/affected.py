@@ -17,7 +17,9 @@ GIT_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
 
 
 def git_env():
-    return {k: v for k, v in os.environ.items() if k not in GIT_ENV}
+    env = {k: v for k, v in os.environ.items() if k not in GIT_ENV}
+    env['GIT_NO_REPLACE_OBJECTS'] = '1'
+    return env
 
 
 def read_toml(path):

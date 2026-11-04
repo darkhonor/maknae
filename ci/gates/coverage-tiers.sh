@@ -18,9 +18,9 @@ fi
 
 in_diff_git_env=(-u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_COMMON_DIR
   -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_LITERAL_PATHSPECS -u GIT_NOGLOB_PATHSPECS
-  -u GIT_GLOB_PATHSPECS -u GIT_ICASE_PATHSPECS)
+  -u GIT_GLOB_PATHSPECS -u GIT_ICASE_PATHSPECS GIT_NO_REPLACE_OBJECTS=1)
 in_diff_generate() { # <base> <out>
-  env "${in_diff_git_env[@]}" -u GIT_DIFF_OPTS -u GIT_EXTERNAL_DIFF \
+  env -u GIT_DIFF_OPTS -u GIT_EXTERNAL_DIFF "${in_diff_git_env[@]}" \
     git -C "$root" -c diff.noprefix=false -c diff.mnemonicPrefix=false -c diff.suppressBlankEmpty=false \
     -c core.quotePath=true diff --text --no-ext-diff --no-textconv --no-color --unified=3 \
     --src-prefix=a/ --dst-prefix=b/ --find-renames "$1" HEAD -- '*.rs' >"$2"
@@ -28,6 +28,7 @@ in_diff_generate() { # <base> <out>
 [ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR GIT_ALTERNATE_OBJECT_DIRECTORIES \
   GIT_LITERAL_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_GLOB_PATHSPECS GIT_ICASE_PATHSPECS
+export GIT_NO_REPLACE_OBJECTS=1
 
 here="$(cd "$(dirname "$0")" && pwd)"
 
@@ -611,6 +612,19 @@ if [ "$mutants_mode" != "" ]; then
     toplevel="$(in_git rev-parse --show-toplevel 2>/dev/null || true)"
     if [ -z "$toplevel" ] || [ "$(cd -P "$toplevel" && pwd)" != "$(cd -P "$root" && pwd)" ]; then
       printf 'FAIL: --in-diff needs --root at the git toplevel (%s is not)\n' "$root"; exit 1
+    fi
+    shallow="$(in_git rev-parse --is-shallow-repository 2>&1 || true)"
+    case "$shallow" in
+      false) ;;
+      true) printf 'FAIL: --in-diff: the repository is shallow; the merge base cannot be trusted\n'; exit 1;;
+      *) printf 'FAIL: --in-diff: cannot tell whether the repository is shallow: %s\n' "$shallow"; exit 1;;
+    esac
+    if ! grafts="$(in_git rev-parse --git-path info/grafts)" || [ -z "$grafts" ]; then
+      printf 'FAIL: --in-diff: cannot locate info/grafts in %s\n' "$root"; exit 1
+    fi
+    case "$grafts" in /*) ;; *) grafts="$root/$grafts";; esac
+    if [ -e "$grafts" ] || [ -L "$grafts" ]; then
+      printf 'FAIL: --in-diff: the repository has grafts (%s); history cannot be trusted\n' "$grafts"; exit 1
     fi
     if ! rev_oid="$(in_git rev-parse --verify --quiet --end-of-options "$in_diff^{commit}")" || [ -z "$rev_oid" ]; then
       printf 'FAIL: --in-diff: %s is not a commit\n' "$in_diff"; exit 1
