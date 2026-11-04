@@ -560,6 +560,22 @@ class InDiff(unittest.TestCase):
                 self.assertFails(result, out, "FAIL: " + text)
                 self.assertEqual(self.invocations(), [])
 
+    def test_in_diff_scope_crate_not_selected_fails(self):
+        repo = self.in_diff_repo({"coverage-tiers.toml": tiers_toml(["a", "b"], "")},
+                                 base_crates=["a"])
+        result, out = self.gate(repo, crates=("a",), whole=WHOLE_EDIT)
+        self.assertFails(result, out, "FAIL: --in-diff: scope crate b not selected by --mutants")
+        self.assertEqual(self.invocations(), [])
+
+    def test_in_diff_unknown_mutants_name_fails_on_an_empty_diff(self):
+        repo = self.in_diff_repo({"README.md": "docs\n"})
+        for crates in (("a", "zz"), ("a", "b", "zz")):
+            with self.subTest(crates):
+                result, out = self.gate(repo, crates=crates, whole=WHOLE_EDIT)
+                self.assertFails(result, out, "FAIL: --in-diff: --mutants names zz, which is not "
+                                 "in [t1].mutants_crates")
+                self.assertEqual(self.invocations(), [])
+
     def test_in_diff_empty_stdout_is_empty_list(self):
         repo = self.in_diff_repo(EDIT_A)
         result, out = self.gate(repo, whole=WHOLE_EDIT[2:])

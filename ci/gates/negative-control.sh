@@ -4591,6 +4591,109 @@ expect_accept "mutation-oracle/scratch-with-room-passes" "KiB free" \
 expect_reject_because "mutation-oracle/scratch-missing-dir" "does not exist" \
   bash "$mo" scratch "$NC_TMP/definitely-not-here"
 
+# ---- mutation-in-diff (#593): the gate's --in-diff run fires end to end ------
+# A real git fixture and real `cargo metadata`; only cargo-mutants is a stand-in,
+# which answers `--list` from MID_WHOLE/MID_INDIFF and exits MID_EXIT for a run.
+mid_aux="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$mid_aux/tools" "$mid_aux/cargo-home"
+mid_real_cargo="$(command -v cargo)"
+mid_channel="$(sed -n 's/^channel *= *"\(.*\)".*/\1/p' "$here/../../rust-toolchain.toml")"
+cat > "$mid_aux/tools/cargo" <<'EOF'
+#!/bin/sh
+[ "$1" = mutants ] || exec "$MID_REAL_CARGO" "$@"
+list=0 pkg= indiff= out= prev=
+for a in "$@"; do
+  case "$prev" in --package) pkg="$a";; --in-diff) indiff="$a";; --output) out="$a";; esac
+  [ "$a" = --list ] && list=1
+  prev="$a"
+done
+if [ "$list" = 1 ]; then
+  if [ -n "$indiff" ]; then json="$MID_INDIFF"; else json="$MID_WHOLE"; fi
+  [ -z "$json" ] && exit 0
+  printf '%s' "$json" | python3 -c 'import json, sys
+print(json.dumps([m for m in json.load(sys.stdin) if m["package"] == sys.argv[1]]))' "$pkg"
+  exit 0
+fi
+mkdir -p "$out/mutants.out"
+missed=0; [ "$MID_EXIT" = 0 ] || missed=1
+printf '{"total_mutants":2,"caught":%s,"missed":%s,"timeout":0,"unviable":0,"outcomes":[]}\n' \
+  "$((2 - missed))" "$missed" > "$out/mutants.out/outcomes.json"
+exit "$MID_EXIT"
+EOF
+chmod +x "$mid_aux/tools/cargo"
+ln -s cargo "$mid_aux/tools/cargo-mutants"
+mid_git() { # <repo> <git-args...>
+  local repo="$1"; shift
+  env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY \
+    git -C "$repo" -c user.name=fixture -c user.email=fixture@example.invalid \
+    -c commit.gpgsign=false -c tag.gpgsign=false -c core.hooksPath=/dev/null "$@" >/dev/null
+}
+mid_lib() { # <file> <line-7-or-empty> <line-12> <line-3>
+  printf '//! Crate a.\n//!\n//! %s\n\npub fn a(x: u32) -> u32 {\n    let y = x + 1;\n' "$4" > "$1"
+  if [ -n "$2" ]; then printf '    %s\n' "$2" >> "$1"; fi
+  printf '    z - 3\n}\n\npub fn d(x: u32) -> u32 {\n    %s\n}\n' "$3" >> "$1"
+}
+mid_repo() { # <line-7-or-empty> <line-12> <line-3> [git-config key=value...] — tag base, one head commit
+  local d k z="$1" e="$2" doc="$3"; shift 3
+  d="$(mktemp -d -p "$NC_TMP")"
+  mkdir -p "$d/crates/a/src" "$d/crates/b/src"
+  printf '[workspace]\nmembers = ["crates/a", "crates/b"]\nresolver = "2"\n' > "$d/Cargo.toml"
+  for k in a b; do
+    printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2021"\n' "$k" > "$d/crates/$k/Cargo.toml"
+  done
+  mid_lib "$d/crates/a/src/lib.rs" 'let z = y * 2;' 'x * 5' 'Fixture.'
+  printf 'pub fn b(x: u32) -> u32 {\n    x + 2\n}\n' > "$d/crates/b/src/lib.rs"
+  printf '[t1]\nmutants_crates = ["a", "b"]\n' > "$d/coverage-tiers.toml"
+  printf '/target\nCargo.lock\n' > "$d/.gitignore"
+  cp "$here/../../rust-toolchain.toml" "$d/rust-toolchain.toml"
+  mid_git "$d" init -q -b main
+  for k in "$@"; do mid_git "$d" config "${k%%=*}" "${k#*=}"; done
+  mid_git "$d" add -A
+  mid_git "$d" commit -qm base
+  mid_git "$d" tag base
+  mid_lib "$d/crates/a/src/lib.rs" "$z" "$e" "$doc"
+  mid_git "$d" add -A
+  mid_git "$d" commit -qm head
+  printf '%s' "$d"
+}
+mid_m() { # <name> <package> <start> <end>
+  local file=crates/a/src/lib.rs
+  if [ "$2" = b ]; then file=crates/b/src/lib.rs; fi
+  printf '{"name":"%s","package":"%s","file":"%s","span":{"start":{"line":%s,"column":5},"end":{"line":%s,"column":6}}}' \
+    "$1" "$2" "$file" "$3" "$4"
+}
+mid_gate() { # <repo> <whole-json> <indiff-json> <exit> [extra env...]
+  local repo="$1" whole="$2" indiff="$3" code="$4"; shift 4
+  env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_DIFF_OPTS \
+    -u COVERAGE_TIERS_JSON -u COVERAGE_TIERS_FILELIST -u COVERAGE_TIERS_CRATE_DIRS \
+    -u LLVM_COV -u LLVM_PROFDATA \
+    PATH="$mid_aux/tools:$PATH" MID_REAL_CARGO="$mid_real_cargo" CARGO_HOME="$mid_aux/cargo-home" \
+    RUSTUP_TOOLCHAIN="$mid_channel" MID_WHOLE="$whole" MID_INDIFF="$indiff" MID_EXIT="$code" \
+    MUTATION_ORACLE_MIN_KIB=1 "$@" \
+    bash "$here/coverage-tiers.sh" --root "$repo" --mutants a b --in-diff base
+}
+mid_a="$(mid_m 'a body' a 6 8)"; mid_star="$(mid_m 'a star' a 7 7)"
+mid_whole_edit="[$mid_a,$mid_star,$(mid_m 'd body' a 12 12),$(mid_m 'b body' b 2 2)]"
+mid_whole_delete="[$(mid_m 'a body' a 6 7),$(mid_m 'd body' a 11 11)]"
+
+mid_r="$(mid_repo 'let z = y * 4;' 'x * 5' Fixture.)"
+expect_reject_because "mutation-in-diff/survivor-fails" "reported missed/timeout mutants" \
+  mid_gate "$mid_r" "$mid_whole_edit" "[$mid_a,$mid_star]" 2
+mid_r="$(mid_repo 'let z = y * 4;' 'x * 5' Fixture.)"
+expect_reject_because "mutation-in-diff/mapping-failure-fails" "the in-diff listing found none" \
+  mid_gate "$mid_r" "$mid_whole_edit" "" 0
+mid_r="$(mid_repo 'let z = y * 4;' 'x * 5' Fixture.)"
+expect_reject_because "mutation-in-diff/partial-mapping-failure-fails" "in-diff listing dropped" \
+  mid_gate "$mid_r" "$mid_whole_edit" "[$mid_star]" 0
+mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
+expect_accept "mutation-in-diff/docs-only-skips" "no mutant on a changed line" \
+  mid_gate "$mid_r" "$mid_whole_edit" "" 0
+mid_r="$(mid_repo '' 'x * 5' Fixture. diff.noprefix=true diff.context=0)"
+expect_reject_because "mutation-in-diff/noprefix-mapping-failure-fails" "the in-diff listing found none" \
+  mid_gate "$mid_r" "$mid_whole_delete" "" 0
+mid_r="$(mid_repo '' 'x * 6' Fixture.)"
+expect_reject_because "mutation-in-diff/git-diff-opts-mixed-change-fails" "in-diff listing dropped" \
+  mid_gate "$mid_r" "$mid_whole_delete" "[$(mid_m 'd body' a 11 11)]" 0 GIT_DIFF_OPTS=-u0
+
 # ---- payload-xattr-clean (#332): an AppleDouble sibling per tagged entry ------
 # pkgbuild serialises a `._name` AppleDouble sibling INTO the payload for every
 # entry carrying an extended attribute, and those become REAL INSTALLED FILES.

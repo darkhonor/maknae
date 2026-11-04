@@ -234,12 +234,15 @@ class AffectedTests(unittest.TestCase):
         self.assertIn('design/contract.md:1 cites an external', proc.stdout)
 
 
-    def hook(self, base, mutations=False, invalid_contract=False):
+    def hook(self, base, mutations=False, invalid_contract=False, refs=('refs/heads/topic',),
+             env=None, remote_head=None, selector=None, expect_fail=False):
         # A recording shell gate proves invocation/selection, not coverage itself.
-        self.write('ci/affected.py', SELECTOR.read_text())
+        self.write('ci/affected.py', selector or SELECTOR.read_text())
         hook = SELECTOR.parent / 'hooks/pre-push'
         self.write('ci/hooks/pre-push', hook.read_text())
-        self.write('ci/gates/coverage-tiers.sh', '#!/bin/sh\nprintf "%s\\n" "$*" >> "$RECORD"\n')
+        self.write('ci/gates/coverage-tiers.sh',
+                   '#!/bin/sh\nprintf "%s\\n" "$*" >> "$RECORD"\n'
+                   'case " $* " in *" --in-diff "*) cat >> "$RECORD.stdin";; esac\n')
         self.write('ci/gates/unsafe-confinement.sh',
                    '#!/bin/sh\nprintf "unsafe-confinement %s\\n" "$*" >> "$RECORD"\n')
         for name in ('external-authority-lint.sh', 'isolation-contract-lint.sh'):
@@ -249,19 +252,38 @@ class AffectedTests(unittest.TestCase):
         self.write('packaging/isolation-contract.md',
                    '| descriptor | ✓ | | ✓ | ✓ |\n' if invalid_contract else
                    '| descriptor | ✓ | ✓ | ✓ | ✓ |\n')
+        if remote_head:
+            self.git('update-ref', 'refs/remotes/origin/main', remote_head)
+            self.git('symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main')
         record = self.root / 'invocations'
-        proc = subprocess.run(['bash', 'ci/hooks/pre-push'], cwd=self.root,
-                              input=f'refs/heads/topic {self.git("rev-parse", "HEAD")} refs/heads/topic {base}\n',
+        for stale in (record, self.root / 'invocations.stdin'):
+            stale.unlink(missing_ok=True)
+        head = self.git('rev-parse', 'HEAD')
+        proc = subprocess.run(['bash', 'ci/hooks/pre-push', 'origin', 'https://example.invalid/r.git'],
+                              cwd=self.root,
+                              input=''.join(f'{ref} {head} {ref} {base}\n' for ref in refs),
                               env={**os.environ, 'RECORD': str(record),
-                                   'MAKNAE_PRE_PUSH_MUTANTS': '1' if mutations else '0'},
+                                   'MAKNAE_PRE_PUSH_MUTANTS': '1' if mutations else '0',
+                                   **(env or {})},
                               capture_output=True, text=True)
         if invalid_contract:
             self.assertNotEqual(proc.returncode, 0)
             self.assertIn('EMPTY', proc.stdout)
             self.assertFalse(record.exists(), 'Rust gate ran after invalid documentation')
             return
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        return record.read_text().splitlines() if record.exists() else []
+        invocations = record.read_text().splitlines() if record.exists() else []
+        if expect_fail:
+            self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+            return proc, invocations
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        return invocations
+
+    def mutation_calls(self, invocations):
+        return [line for line in invocations if '--mutants' in line]
+
+    def change_c(self):
+        self.write('crates/c/src/lib.rs', '// changed\n')
+        self.commit()
 
     def test_hook_skips_docs_using_actual_remote_endpoint(self):
         self.write('README.md', 'docs\n')
@@ -280,7 +302,7 @@ class AffectedTests(unittest.TestCase):
         self.assertEqual(len(invocations), 3)
         self.assertEqual(invocations[0], 'unsafe-confinement --root ' + self.git('rev-parse', '--show-toplevel'))
         self.assertNotIn('--mutants', invocations[1])
-        self.assertTrue(invocations[2].endswith('--mutants a b'), invocations)
+        self.assertTrue(invocations[2].endswith('--mutants a b --in-diff ' + self.base), invocations)
 
     def test_hook_default_does_not_force_mutation(self):
         self.write('crates/c/src/lib.rs', '// changed\n')
@@ -290,6 +312,71 @@ class AffectedTests(unittest.TestCase):
         self.assertEqual(invocations[0], 'unsafe-confinement --root ' + self.git('rev-parse', '--show-toplevel'))
         self.assertNotIn('--mutants', invocations[1])
 
+    def test_hook_existing_ref_passes_remote_oid(self):
+        self.change_c()
+        calls = self.mutation_calls(self.hook(self.base, mutations=True))
+        self.assertEqual(calls, ['--root ' + self.git('rev-parse', '--show-toplevel')
+                                 + ' --mutants c --in-diff ' + self.base])
+
+    def test_hook_new_ref_without_base_fails(self):
+        self.change_c()
+        proc, invocations = self.hook(ZERO, mutations=True, expect_fail=True)
+        self.assertIn('FAIL: pre-push: new ref refs/heads/topic has no base; set '
+                      'MAKNAE_PRE_PUSH_MUTANTS_BASE=<rev>', proc.stderr)
+        self.assertEqual(invocations, [])
+
+    def test_hook_new_ref_without_opt_in_does_not_fail(self):
+        self.change_c()
+        invocations = self.hook(ZERO)
+        self.assertEqual(len(invocations), 2, invocations)
+        self.assertEqual(self.mutation_calls(invocations), [])
+
+    def test_hook_docs_only_new_ref_does_not_fail(self):
+        # The real selector widens every new ref to a full selection, so a stub
+        # supplies the empty one the hook's own condition is written for.
+        self.write('README.md', 'docs\n')
+        self.commit()
+        stub = 'import json\nprint(json.dumps({"build": False, "mutants": [], "reason": "stub"}))\n'
+        self.assertEqual(self.hook(ZERO, mutations=True, selector=stub), [])
+
+    def test_hook_mutation_runs_after_build_gates(self):
+        self.change_c()
+        invocations = self.hook(self.base, mutations=True,
+                                refs=('refs/heads/topic', 'refs/heads/other'))
+        self.assertEqual(len(invocations), 4, invocations)
+        self.assertTrue(invocations[0].startswith('unsafe-confinement '), invocations)
+        self.assertNotIn('--mutants', invocations[1])
+        self.assertEqual(len(self.mutation_calls(invocations[2:])), 2, invocations)
+
+    def test_hook_mutation_stdin_is_not_the_ref_list(self):
+        self.change_c()
+        self.hook(self.base, mutations=True, refs=('refs/heads/topic', 'refs/heads/other'))
+        self.assertEqual((self.root / 'invocations.stdin').read_text(), '')
+
+    def test_hook_new_ref_uses_remote_head(self):
+        self.change_c()
+        calls = self.mutation_calls(self.hook(ZERO, mutations=True, remote_head=self.base))
+        self.assertEqual(len(calls), 1, calls)
+        self.assertTrue(calls[0].endswith(' --in-diff ' + self.base), calls)
+
+    def test_hook_new_ref_base_override(self):
+        self.change_c()
+        override = {'MAKNAE_PRE_PUSH_MUTANTS_BASE': 'v-base'}
+        for base, head in ((ZERO, None), (ZERO, self.base), (self.base, None)):
+            with self.subTest(base=base, remote_head=head):
+                calls = self.mutation_calls(self.hook(base, mutations=True, env=override,
+                                                      remote_head=head))
+                self.assertEqual(len(calls), 1, calls)
+                self.assertTrue(calls[0].endswith(' --in-diff v-base'), calls)
+
+    def test_hook_without_opt_in_runs_no_mutation(self):
+        self.change_c()
+        for base in (self.base, ZERO):
+            with self.subTest(base=base):
+                self.assertEqual(self.mutation_calls(self.hook(base)), [])
+
+
+ZERO = '0' * 40
 
 if __name__ == '__main__':
     unittest.main()

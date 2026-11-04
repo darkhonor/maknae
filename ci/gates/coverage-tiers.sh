@@ -22,7 +22,6 @@ in_diff_generate() { # <base> <out>
     -c core.quotePath=true diff --no-ext-diff --no-textconv --no-color --unified=3 \
     --src-prefix=a/ --dst-prefix=b/ --find-renames "$1" HEAD -- '*.rs' >"$2"
 }
-# Sourced (ci/gates/tests/mutation-diff/conformance.py): define in_diff_generate only.
 [ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -635,6 +634,22 @@ print("\n".join(crates))' 2>/dev/null)"; then
       printf 'FAIL: --in-diff: mutation scope cannot be computed: %s %s\n' "$scope" "$(cat "$mut_tmp/scope.err")"; exit 1
     fi
     while IFS= read -r c; do [ -n "$c" ] && in_scope["$c"]=1; done <<<"$scope_lines"
+    if ! crates_out="$(toml_mutants_crates)"; then
+      printf 'FAIL: --in-diff: cannot read mutants_crates from %s\n' "$toml"; exit 1
+    fi
+    declare -A selected=() contract=()
+    while IFS= read -r c; do [ -n "$c" ] && contract["$c"]=1; done <<<"$crates_out"
+    for c in "${mutant_crates[@]}"; do
+      if [ -z "${contract[$c]+x}" ]; then
+        printf 'FAIL: --in-diff: --mutants names %s, which is not in [t1].mutants_crates\n' "$c"; exit 1
+      fi
+      selected["$c"]=1
+    done
+    for c in "${!in_scope[@]}"; do
+      if [ -z "${selected[$c]+x}" ]; then
+        printf 'FAIL: --in-diff: scope crate %s not selected by --mutants\n' "$c"; exit 1
+      fi
+    done
     if [ ! -s "$in_diff_file" ] && [ "${#in_scope[@]}" -eq 0 ]; then
       printf 'SKIP: in-diff: no Rust change between %s and HEAD\n' "$base"
       mutant_crates=()
