@@ -806,6 +806,19 @@ class Compiled(unittest.TestCase):
         self.commit("edit")
         self.assertCompiled({"beta": ["crates/beta/src/enabled/policy.rs"]})
 
+    def test_compiled_follows_the_test_profile(self):
+        root = (self.root / "Cargo.toml").read_text()
+        self.base({"Cargo.toml": root + "\n[profile.test]\ndebug-assertions = false\n",
+                   "crates/beta/src/lib.rs": '#[cfg(not(debug_assertions))]\npub mod release {\n    pub mod policy;\n'
+                                             '    pub fn allowed() -> bool {\n'
+                                             '        include_str!("release/policy.rs").contains("ALLOW")\n    }\n}\n',
+                   "crates/beta/src/release/policy.rs": "// ALLOW\n",
+                   "crates/beta/tests/t.rs": "#[test]\nfn t() {}\n"})
+        self.put("crates/beta/src/release/policy.rs", "// DENY\n")
+        self.put("crates/beta/tests/t.rs", "#[test]\nfn t() {\n    assert!(true);\n}\n")
+        self.commit("edit")
+        self.assertCompiled({"beta": ["crates/beta/src/release/policy.rs"]})
+
     def test_compiled_test_only_and_unreferenced_files_are_not_production_inputs(self):
         self.base({"crates/beta/src/lib.rs": "#[cfg(test)]\nmod fixtures;\n",
                    "crates/beta/src/fixtures.rs": "", "crates/beta/tests/t.rs": "",
@@ -1116,6 +1129,13 @@ class Embeds(unittest.TestCase):
                      "crates/gamma/Cargo.toml": MANIFEST.format(
                          n="gamma", extra='\n[dependencies]\nbeta = { path = "../beta", features = ["extra"] }\n')})
         self.assertEqual(self.embeds()["targets"], {"crates/beta/src/active/policy.rs": ["beta"]})
+
+    def test_embeds_follow_the_test_profile(self):
+        root = (self.root / "Cargo.toml").read_text()
+        self.change({"Cargo.toml": root + "\n[profile.test]\ndebug-assertions = false\n",
+                     "crates/gamma/src/lib.rs": "#[cfg(not(debug_assertions))]\nmod x;\n",
+                     "crates/gamma/src/x.rs": "pub use std::include_str as embed;\n"})
+        self.assertEqual(self.embeds()["indirect"], "crates/gamma/src/x.rs")
 
     def test_embeds_test_only_code_is_not_scanned(self):
         files = {f"crates/gamma/{d}/x.rs": "use std::include_str as embed;\nfn main() {}\n"

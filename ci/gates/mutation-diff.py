@@ -460,7 +460,8 @@ def selectors(package):
 
 
 def check_inputs(tree, label, args, features, target, members):
-    argv = ["cargo", "check", *args, "--tests", "--message-format=json",
+    argv = ["cargo", "check", *args, "--tests", "--config", 'profile.mutation-discovery.inherits="test"',
+            "--profile", "mutation-discovery", "--message-format=json",
             "--target-dir", str(target), "--manifest-path", str(tree / "Cargo.toml")]
     for feature in features:
         argv += ["--features", feature]

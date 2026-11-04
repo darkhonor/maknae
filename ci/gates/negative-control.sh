@@ -4889,6 +4889,18 @@ mid_git "$mid_r" add -A
 mid_git "$mid_r" commit -qm config
 expect_reject_because "mutation-in-diff/symlinked-config-input-fails" ".cargo is a symlink; config inputs must be regular files" \
   mid_gate "$mid_r" "$mid_whole_edit" "[$mid_a,$mid_star]" 0
+mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
+printf '\n[profile.test]\ndebug-assertions = false\n' >> "$mid_r/Cargo.toml"
+mkdir -p "$mid_r/crates/a/src/release"
+printf '#[cfg(not(debug_assertions))]\npub mod release {\n    pub mod policy;\n    pub fn allowed() -> bool {\n        include_str!("release/policy.rs").contains("ALLOW")\n    }\n}\n' >> "$mid_r/crates/a/src/lib.rs"
+printf '// ALLOW\n' > "$mid_r/crates/a/src/release/policy.rs"
+mid_git "$mid_r" add -A
+mid_git "$mid_r" commit -qm profile
+mid_git "$mid_r" tag -f base
+printf '// DENY\n' > "$mid_r/crates/a/src/release/policy.rs"
+mid_git "$mid_r" commit -qam deny
+expect_reject_because "mutation-in-diff/test-profile-cfg-survivor-fails" "cargo mutants --package a reported missed/timeout mutants" \
+  mid_gate "$mid_r" "$mid_whole_edit" "" 2
 mid_r="$(mid_repo 'let z = y * 4;' 'x * 5' Fixture.)"
 printf 'all_features = true\n' > "$NC_TMP/variant-mutants.toml"
 mid_blob="$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY \

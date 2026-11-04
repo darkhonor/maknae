@@ -1099,6 +1099,26 @@ class InDiff(unittest.TestCase):
                 self.assertIn(expected, out)
                 self.assertEqual(len(self.whole_runs("a")), 1 if path == policy else 0)
 
+    def test_in_diff_discovery_follows_the_test_profile(self):
+        policy = "crates/a/src/release/policy.rs"
+        lib = (LIB_A + '\n#[cfg(not(debug_assertions))]\npub mod release {\n    pub mod policy;\n'
+               '    pub fn allowed() -> bool {\n        include_str!("release/policy.rs").contains("ALLOW")\n'
+               '    }\n}\n')
+        workspace = ('[workspace]\nmembers = ["crates/a", "crates/b"]\nresolver = "2"\n\n'
+                     '[profile.test]\ndebug-assertions = false\n')
+        base = {"Cargo.toml": workspace, A_RS: lib, policy: "// ALLOW\n", "crates/a/tests/it.rs": "#[test]\nfn it() {}\n"}
+        cases = {policy: ("// DENY\n", f"whole: a: changed {policy} is embedded by include_str!/include_bytes!"),
+                 "crates/a/tests/it.rs": ("#[test]\nfn it() {\n    assert!(true);\n}\n",
+                                          "SKIP: a: no mutant on a changed line")}
+        for path, (after, expected) in cases.items():
+            with self.subTest(path=path):
+                shutil.rmtree(self.tmp / "repo", ignore_errors=True)
+                repo = self.in_diff_repo({path: after}, base_files=base)
+                result, out = self.gate(repo, whole=WHOLE_EDIT)
+                self.assertEqual(result.returncode, 0, out)
+                self.assertIn(expected, out)
+                self.assertEqual(len(self.whole_runs("a")), 1 if path == policy else 0)
+
     def test_in_diff_a_build_setting_in_the_mutants_config_fails_before_any_listing(self):
         policy = "crates/a/src/enabled/policy.rs"
         lib = (LIB_A + '\n#[cfg(feature = "extra")]\npub mod enabled {\n    pub mod policy;\n'
