@@ -772,7 +772,8 @@ print("\n".join(sorted(crates)))' "$compiled_file" 2>/dev/null)"; then
         fi
         case "$walked" in
           "") ;;
-          "whole: $cname: changed "*) printf '%s\n' "$walked"; whole=1;;
+          "whole: $cname: changed "* | "whole: $cname: include_str/include_bytes used indirectly in "*)
+            printf '%s\n' "$walked"; whole=1;;
           *) fail "$cname: mutation-diff.py unlisted printed no verdict: $walked"; continue;;
         esac
       fi

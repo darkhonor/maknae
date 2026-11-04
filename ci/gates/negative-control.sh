@@ -4852,6 +4852,16 @@ printf 'DENY' > "$mid_r/crates/a/src/policy"$'\n'"name.txt"
 mid_git "$mid_r" commit -qam deny
 expect_reject_because "mutation-in-diff/newline-path-fails" "contains a newline or control character" \
   mid_gate "$mid_r" "$mid_whole_edit" "" 2
+mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
+printf 'pub mod policy;\nuse std::include_str as embed;\npub fn allowed() -> bool {\n    embed!("policy.rs").contains("ALLOW")\n}\n' >> "$mid_r/crates/a/src/lib.rs"
+printf '// ALLOW\npub fn rule() {}\n' > "$mid_r/crates/a/src/policy.rs"
+mid_git "$mid_r" add -A
+mid_git "$mid_r" commit -qm policy
+mid_git "$mid_r" tag -f base
+printf '// DENY\npub fn rule() {}\n' > "$mid_r/crates/a/src/policy.rs"
+mid_git "$mid_r" commit -qam deny
+expect_reject_because "mutation-in-diff/include-alias-survivor-fails" "cargo mutants --package a reported missed/timeout mutants" \
+  mid_gate "$mid_r" "$mid_whole_edit" "" 2
 mid_r="$(mid_repo 'let z = y * 4;' 'x * 5' Fixture.)"
 if [ -e "$mid_r/CRATES" ]; then
   mid_git "$mid_r" reset -q --hard base

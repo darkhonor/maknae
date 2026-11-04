@@ -414,9 +414,9 @@ def scope_crates(root, base, head, workspace=None):
     built = script_crates(root, (base_sha, head_sha), mutants, dirs)
     selected = set()
     for path in changed_names(root, base_sha, head_sha):
+        selected.update(built)
         if exempt(root, base_sha, head_sha, path, docs_only):
             continue
-        selected.update(built)
         if path in SCOPE_FILES:
             selected.update(mutants)
         elif posixpath.basename(path) == "Cargo.toml":
@@ -700,26 +700,55 @@ def test_module_end(toks, at):
     return None
 
 
+INCLUDE_MACROS = ("include_str", "include_bytes")
+COLONS = [("punct", ":"), ("punct", ":")]
+
+
+def plain_path(toks, k):
+    if k < 2 or toks[k - 2:k] != COLONS:
+        return True
+    if k < 3 or toks[k - 3] not in (("ident", "std"), ("ident", "core")):
+        return False
+    j = k - 3
+    return j < 2 or toks[j - 2:j] != COLONS or j < 3 or toks[j - 3][0] != "ident"
+
+
+def direct_call(toks, k):
+    if not plain_path(toks, k) or toks[k + 1:k + 2] != [("punct", "!")] or k + 2 >= len(toks) \
+            or toks[k + 2][0] != "punct" or toks[k + 2][1] not in PAIRS:
+        return None
+    end = closing(toks, k + 2)
+    args = toks[k + 3:end]
+    if args and args[0][0] == "str" and args[1:] in ([], [("punct", ",")]):
+        return end, args[0][1]
+    return None
+
+
 def includes(text):
     toks = tokens(text)
-    literal, opaque, k = [], False, 0
+    literal, indirect, k = [], False, 0
     while k < len(toks):
         end = test_module_end(toks, k)
         if end is not None:
             k = end + 1
-        elif (toks[k][0] == "ident" and toks[k][1] in ("include_str", "include_bytes")
-              and toks[k + 1:k + 2] == [("punct", "!")] and k + 2 < len(toks)
-              and toks[k + 2][0] == "punct" and toks[k + 2][1] in PAIRS):
-            end = closing(toks, k + 2)
-            args = toks[k + 3:end]
-            if args and args[0][0] == "str" and args[1:] in ([], [("punct", ",")]):
-                literal.append(args[0][1])
-            else:
-                opaque = True
+        elif (toks[k] == ("ident", "macro_rules") and toks[k + 1:k + 2] == [("punct", "!")]
+              and k + 3 < len(toks) and toks[k + 2][0] == "ident" and toks[k + 3][0] == "punct"
+              and toks[k + 3][1] in PAIRS):
+            end = closing(toks, k + 3)
+            indirect = indirect or any(tok[0] == "ident" and tok[1] in INCLUDE_MACROS
+                                       for tok in toks[k + 4:end])
             k = end + 1
+        elif toks[k][0] == "ident" and toks[k][1] in INCLUDE_MACROS:
+            call = direct_call(toks, k)
+            if call is None:
+                indirect = True
+                k += 1
+            else:
+                literal.append(call[1])
+                k = call[0] + 1
         else:
             k += 1
-    return literal, opaque
+    return literal, indirect
 
 
 def embedded(crate, tree, listed):
@@ -762,8 +791,7 @@ def unlisted(crate, files, inputs, workspace):
         if (stat.st_dev, stat.st_ino) in targets:
             return f"whole: {crate}: changed {path} is embedded by include_str!/include_bytes!"
     if opaque is not None:
-        return (f"whole: {crate}: changed {changed[0]} may be embedded by a non-literal "
-                f"include_str!/include_bytes! in {opaque}")
+        return f"whole: {crate}: include_str/include_bytes used indirectly in {opaque}"
     for path in changed:
         if path not in listed:
             return f"whole: {crate}: changed {path} is compiled into {crate} but not walked by cargo-mutants"

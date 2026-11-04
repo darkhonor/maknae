@@ -978,9 +978,37 @@ class InDiff(unittest.TestCase):
                                  base_files={A_RS: lib, DECISION: decision})
         result, out = self.gate(repo, whole=WHOLE_DECISION, indiff=WHOLE_DECISION)
         self.assertEqual(result.returncode, 0, out)
-        self.assertIn(f"whole: a: changed {DECISION} may be embedded by a non-literal "
-                      f"include_str!/include_bytes! in {A_RS}", out)
+        self.assertIn(f"whole: a: include_str/include_bytes used indirectly in {A_RS}", out)
         self.assertEqual(len(self.whole_runs("a")), 1)
+
+    def test_in_diff_an_include_macro_alias_runs_that_crate_whole(self):
+        cases = {"use": "use std::include_str as embed;\n",
+                 "pub use": "pub use std::include_str as embed;\n",
+                 "macro_rules": "macro_rules! embed {\n    ($p:literal) => { include_str!($p) };\n}\n"}
+        policy = "crates/a/src/policy.rs"
+        for name, alias in cases.items():
+            with self.subTest(name):
+                shutil.rmtree(self.tmp / "repo", ignore_errors=True)
+                lib = ("pub mod policy;\n" + alias + LIB_A
+                       + 'pub fn allowed() -> bool {\n    embed!("policy.rs").contains("ALLOW")\n}\n')
+                repo = self.in_diff_repo({policy: "// DENY\npub fn rule() {}\n"},
+                                         base_files={A_RS: lib, policy: "// ALLOW\npub fn rule() {}\n"})
+                result, out = self.gate(repo, whole=WHOLE_EDIT)
+                self.assertEqual(result.returncode, 0, out)
+                self.assertIn(f"whole: a: include_str/include_bytes used indirectly in {A_RS}", out)
+                self.assertEqual(len(self.whole_runs("a")), 1)
+
+    def test_in_diff_a_build_script_crate_runs_whole_on_a_documentation_change(self):
+        build = ('fn main() {\n    let readme = std::fs::read_to_string("../../README.md").unwrap();\n'
+                 '    println!("cargo:rustc-env=POLICY={}", readme.trim());\n}\n')
+        lib = LIB_A + 'pub fn allowed() -> bool {\n    env!("POLICY") == "ALLOW"\n}\n'
+        repo = self.in_diff_repo({"README.md": "DENY\n"},
+                                 base_files={A_RS: lib, "crates/a/build.rs": build, "README.md": "ALLOW\n"})
+        result, out = self.gate(repo, whole=WHOLE_EDIT)
+        self.assertEqual(result.returncode, 0, out)
+        self.assertIn("whole: a: mutation scope changed", out)
+        self.assertEqual(len(self.whole_runs("a")), 1)
+        self.assertEqual(self.whole_runs("b"), [])
 
     def test_in_diff_an_include_in_a_comment_is_not_an_include(self):
         lib = "pub mod decision;\n// include_str!(\"decision.rs\")\n" + LIB_A

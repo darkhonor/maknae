@@ -505,7 +505,10 @@ class Scope(unittest.TestCase):
                           ("crates/beta/tests/t.rs", "fn t() {}\n", ["beta"]),
                           ("crates/alpha/src/x.rs", "fn x() {}\n", ["beta"]),
                           ("shared/input.txt", "x\n", ["beta"]),
-                          ("README.md", "x\n", [])])
+                          ("README.md", "x\n", ["beta"]),
+                          ("Cargo.lock", "# lock\n", ["beta"]),
+                          ("crates/alpha/Cargo.toml", MANIFEST.format(n="alpha", extra="")
+                           + '\n[dependencies]\nserde = "1"\n', ["beta"])])
 
     def test_scope_a_named_build_script_crate_is_that_crate(self):
         self.change("crates/beta/Cargo.toml",
@@ -871,15 +874,37 @@ class Unlisted(unittest.TestCase):
                                    {"beta": ["crates/beta/src/policy.rs"]}, "",
                                    sources={"crates/beta/src/lib.rs": lib})
 
-    def test_unlisted_a_non_literal_include_runs_the_crate_whole_on_any_compiled_change(self):
-        for arg in ('concat!("pol", "icy.rs")', 'env!("POLICY")', '$path', 'PATH'):
-            with self.subTest(arg=arg):
-                lib = f"pub mod x;\npub fn f() -> usize {{\n    include_str!({arg}).len()\n}}\n"
+    def test_unlisted_an_indirect_include_runs_the_crate_whole_on_any_compiled_change(self):
+        indirect = [f"pub fn f() -> usize {{\n    include_str!({arg}).len()\n}}\n"
+                    for arg in ('concat!("pol", "icy.rs")', 'env!("POLICY")', 'PATH')]
+        indirect += ['use std::include_str as embed;\npub fn f() -> bool {\n    embed!("x.rs").contains("A")\n}\n',
+                     'pub use core::include_bytes;\n',
+                     'use std::{include_str};\n',
+                     'macro_rules! embed {\n    () => { include_str!("x.rs") };\n}\n',
+                     'macro_rules! embed {\n    ($p:expr) => { include_str!($p) };\n}\n',
+                     'pub fn f() -> &\'static str {\n    my::include_str!("x.rs")\n}\n',
+                     'pub fn f() -> &\'static str {\n    a::std::include_str!("x.rs")\n}\n',
+                     'pub fn f() -> usize {\n    include_str("x.rs")\n}\n']
+        for text in indirect:
+            with self.subTest(text=text):
                 self.assertVerdict(["crates/beta/src/lib.rs", "crates/beta/src/x.rs"],
                                    {"beta": ["crates/beta/src/x.rs"]},
-                                   "whole: beta: changed crates/beta/src/x.rs may be embedded by a "
-                                   "non-literal include_str!/include_bytes! in crates/beta/src/lib.rs\n",
-                                   sources={"crates/beta/src/lib.rs": lib})
+                                   "whole: beta: include_str/include_bytes used indirectly in "
+                                   "crates/beta/src/lib.rs\n",
+                                   sources={"crates/beta/src/lib.rs": "pub mod x;\n" + text})
+
+    def test_unlisted_a_direct_call_or_a_mere_mention_is_not_indirect(self):
+        for text in ('// use std::include_str as embed;\n',
+                     '/* macro_rules! m { () => { include_str!($p) } } */\n',
+                     'const S: &str = "use std::include_str as embed;";\n',
+                     'const A: &str = ::std::include_str!("lib.rs");\n'
+                     'const B: &[u8] = ::core::include_bytes!("lib.rs");\n'
+                     'const C: &str = core::include_str!("lib.rs");\n',
+                     '#[cfg(test)]\nmod tests {\n    use std::include_str as embed;\n}\n'):
+            with self.subTest(text=text):
+                self.assertVerdict(["crates/beta/src/lib.rs", "crates/beta/src/x.rs"],
+                                   {"beta": ["crates/beta/src/x.rs"]}, "",
+                                   sources={"crates/beta/src/lib.rs": "pub mod x;\n" + text})
         self.assertVerdict(["crates/beta/src/lib.rs"], {"alpha": ["crates/alpha/src/lib.rs"]}, "",
                            sources={"crates/beta/src/lib.rs": "const S: &str = include_str!(env!(\"X\"));\n"})
 
