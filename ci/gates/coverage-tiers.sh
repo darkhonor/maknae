@@ -705,6 +705,19 @@ if not (isinstance(crates, dict) and all(isinstance(c, str) for c in crates)):
 print("\n".join(sorted(crates)))' "$compiled_file" 2>/dev/null)"; then
       printf 'FAIL: --in-diff: compiled inputs cannot be computed: %s\n' "$(cat "$mut_tmp/compiled.err")"; exit 1
     fi
+    embeds_file="$mut_tmp/embeds.json"
+    if ! python3 "$here/mutation-diff.py" embeds "$root" "$base" "$head_oid" "$snap" \
+         >"$embeds_file" 2>"$mut_tmp/embeds.err"; then
+      printf 'FAIL: --in-diff: include sites cannot be scanned: %s\n' "$(cat "$mut_tmp/embeds.err")"; exit 1
+    fi
+    if ! indirect="$(python3 -c '
+import json, sys
+data = json.load(open(sys.argv[1]))
+if not (isinstance(data, dict) and (data.get("indirect") is None or isinstance(data["indirect"], str))):
+    sys.exit(1)
+print(data["indirect"] or "")' "$embeds_file" 2>/dev/null)"; then
+      printf 'FAIL: --in-diff: unreadable include-site list %s\n' "$embeds_file"; exit 1
+    fi
     declare -A touched=()
     while IFS= read -r c; do
       [ -z "$c" ] && continue
@@ -713,7 +726,7 @@ print("\n".join(sorted(crates)))' "$compiled_file" 2>/dev/null)"; then
       fi
       touched["$c"]=1
     done <<<"$owned_lines"
-    if [ ! -s "$in_diff_file" ] && [ "${#in_scope[@]}" -eq 0 ] && [ "${#touched[@]}" -eq 0 ]; then
+    if [ ! -s "$in_diff_file" ] && [ "${#in_scope[@]}" -eq 0 ] && [ "${#touched[@]}" -eq 0 ] && [ -z "$indirect" ]; then
       printf 'SKIP: in-diff: no Rust change between %s and HEAD\n' "$base"
       mutant_crates=()
     fi
@@ -757,7 +770,10 @@ print("\n".join(sorted(crates)))' "$compiled_file" 2>/dev/null)"; then
     judge_flags=()
     if [ -n "$in_diff" ]; then
       whole=0
-      if [ -n "${in_scope[$cname]+x}" ]; then
+      if [ -n "$indirect" ]; then
+        printf 'whole: %s: include_str/include_bytes used indirectly in %s\n' "$cname" "$indirect"
+        whole=1
+      elif [ -n "${in_scope[$cname]+x}" ]; then
         printf 'whole: %s: mutation scope changed\n' "$cname"
         whole=1
       elif [ -n "${touched[$cname]+x}" ]; then
@@ -765,14 +781,15 @@ print("\n".join(sorted(crates)))' "$compiled_file" 2>/dev/null)"; then
           fail "cargo mutants --list-files --package $cname failed"
           continue
         fi
-        if ! walked="$(python3 "$here/mutation-diff.py" unlisted "$cname" "$mut_tmp/files.json" "$compiled_file" "$mut_dir" 2>&1)"; then
+        if ! walked="$(python3 "$here/mutation-diff.py" unlisted "$cname" "$mut_tmp/files.json" "$compiled_file" "$mut_dir" "$embeds_file" 2>&1)"; then
           printf '%s\n' "${walked:-FAIL: $cname: mutation-diff.py unlisted printed nothing}"
           fail_n=$((fail_n + 1))
           continue
         fi
         case "$walked" in
           "") ;;
-          "whole: $cname: changed "* | "whole: $cname: include_str/include_bytes used indirectly in "*)
+          "whole: $cname: changed "* | "whole: $cname: include_str/include_bytes used indirectly in "* | \
+          "whole: $cname: walked source "*)
             printf '%s\n' "$walked"; whole=1;;
           *) fail "$cname: mutation-diff.py unlisted printed no verdict: $walked"; continue;;
         esac

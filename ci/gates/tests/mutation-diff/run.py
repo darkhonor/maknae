@@ -837,8 +837,18 @@ class Unlisted(unittest.TestCase):
         (directory / "files.json").write_text(files if isinstance(files, str) else
                                               json.dumps([{"package": crate, "path": f} for f in files]))
         (directory / "compiled.json").write_text(compiled if isinstance(compiled, str) else json.dumps(compiled))
+        found = {"indirect": None, "targets": {}}
+        for name in sorted(n for n in names + list(sources or {}) if n.endswith(".rs")):
+            literal, dynamic = md.includes((tree / name).read_text())
+            if dynamic and found["indirect"] is None:
+                found["indirect"] = name
+            for value in literal:
+                target = os.path.normpath(os.path.join(os.path.dirname(name), value))
+                if (tree / target).is_file():
+                    found["targets"][target] = [crate]
+        (directory / "embeds.json").write_text(json.dumps(found))
         return run_cli("unlisted", crate, str(directory / "files.json"), str(directory / "compiled.json"),
-                       str(tree))
+                       str(tree), str(directory / "embeds.json"))
 
     def assertVerdict(self, files, compiled, expected, sources=None):
         result = self.unlisted(files, compiled, sources=sources)
@@ -908,14 +918,35 @@ class Unlisted(unittest.TestCase):
         self.assertVerdict(["crates/beta/src/lib.rs"], {"alpha": ["crates/alpha/src/lib.rs"]}, "",
                            sources={"crates/beta/src/lib.rs": "const S: &str = include_str!(env!(\"X\"));\n"})
 
-    def test_unlisted_an_unscannable_walked_file_fails(self):
-        for text in ('const S: &str = "open\n', "/* open\n", "fn f() { include_str!(\"x\"\n"):
+    def test_unlisted_a_walked_source_without_the_rs_suffix_runs_the_crate_whole(self):
+        self.assertVerdict(["crates/beta/src/lib.rust"], {"beta": ["crates/beta/src/lib.rust"]},
+                           "whole: beta: walked source crates/beta/src/lib.rust is not a .rs file the "
+                           "in-diff mapping reads\n")
+
+    def test_unlisted_an_include_site_widens_its_own_crate_only(self):
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory)
+        tree = directory / "ws"
+        (tree / "crates/beta/src").mkdir(parents=True)
+        (tree / "crates/beta/src/policy.rs").write_text("")
+        (directory / "files.json").write_text(json.dumps([{"package": "beta", "path": "crates/beta/src/policy.rs"}]))
+        (directory / "compiled.json").write_text(json.dumps({"beta": ["crates/beta/src/policy.rs"]}))
+        embedded = "whole: beta: changed crates/beta/src/policy.rs is embedded by include_str!/include_bytes!\n"
+
+        def run(text):
+            (directory / "embeds.json").write_text(text)
+            return run_cli("unlisted", "beta", str(directory / "files.json"), str(directory / "compiled.json"),
+                           str(tree), str(directory / "embeds.json"))
+
+        for owners, expected in ((["gamma"], ""), (["beta"], embedded), ([None], embedded)):
+            with self.subTest(owners=owners):
+                result = run(json.dumps({"indirect": None, "targets": {"crates/beta/src/policy.rs": owners}}))
+                self.assertEqual((result.returncode, result.stdout), (0, expected), result.stderr)
+        for text in ("", "[]", '{"targets": []}', '{"indirect": 1, "targets": {}}'):
             with self.subTest(text=text):
-                result = self.unlisted(["crates/beta/src/lib.rs"], {"beta": ["crates/beta/src/lib.rs"]},
-                                       sources={"crates/beta/src/lib.rs": text})
+                result = run(text)
                 self.assertEqual(result.returncode, 1, result.stdout)
-                self.assertIn("FAIL: beta: cannot scan crates/beta/src/lib.rs for "
-                              "include_str!/include_bytes!", result.stderr)
+                self.assertIn("FAIL: beta: unreadable include-site list", result.stderr)
 
     def test_unlisted_a_walked_compiled_file_is_left_to_the_diff(self):
         self.assertVerdict(["crates/beta/src/lib.rs"], {"beta": ["crates/beta/src/lib.rs"]}, "")
@@ -945,6 +976,64 @@ class Unlisted(unittest.TestCase):
                 result = self.unlisted(["crates/beta/src/lib.rs"], text)
                 self.assertEqual(result.returncode, 1, result.stdout)
                 self.assertIn("FAIL: beta: unreadable compiled-input list", result.stderr)
+
+
+class Embeds(unittest.TestCase):
+    setUp, git, put, commit = Scope.setUp, Scope.git, Scope.put, Scope.commit
+
+    def embeds(self, base="HEAD~1"):
+        result = run_cli("embeds", str(self.root), self.git("rev-parse", base), "HEAD", str(self.root))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def change(self, files):
+        for path, text in files.items():
+            self.put(path, text)
+        self.commit("edit")
+
+    def test_embeds_scans_every_tracked_rust_file_of_every_crate(self):
+        self.change({"crates/alpha/src/embedder.rs": 'const P: &str = include_str!("policy.rs");\n',
+                     "crates/alpha/src/policy.rs": "",
+                     "crates/gamma/src/lib.rs": 'const P: &str = include_str!("../../beta/src/lib.rs");\n',
+                     "bins/tool/main.rs": 'const P: &str = include_str!("../../crates/beta/src/lib.rs");\n'})
+        self.assertEqual(self.embeds(), {"indirect": None, "targets": {
+            "crates/alpha/src/policy.rs": ["alpha"], "crates/beta/src/lib.rs": ["gamma", None]}})
+
+    def test_embeds_an_indirect_mention_in_any_crate_is_reported(self):
+        for text in ("pub use std::include_str as embed;\n",
+                     'macro_rules! m {\n    () => { include_str!("x") };\n}\n',
+                     'const S: &str = include_str!(concat!("a", "b"));\n'):
+            with self.subTest(text=text):
+                self.change({"crates/gamma/src/lib.rs": text})
+                try:
+                    self.assertEqual(self.embeds()["indirect"], "crates/gamma/src/lib.rs")
+                finally:
+                    self.git("reset", "-q", "--hard", "HEAD~1")
+
+    def test_embeds_test_only_code_is_not_scanned(self):
+        files = {f"crates/gamma/{d}/x.rs": "use std::include_str as embed;\n"
+                 for d in ("tests", "benches", "examples")}
+        files["crates/gamma/src/lib.rs"] = ("#[cfg(test)]\nmod tests {\n    use std::include_str as embed;\n}\n"
+                                            "// pub use std::include_str as embed;\n")
+        self.change(files)
+        self.assertEqual(self.embeds(), {"indirect": None, "targets": {}})
+
+    def test_embeds_an_unscannable_file_fails(self):
+        for text in ('const S: &str = "open\n', "/* open\n", 'fn f() { include_str!("x"\n'):
+            with self.subTest(text=text):
+                self.change({"crates/gamma/src/lib.rs": text})
+                try:
+                    result = run_cli("embeds", str(self.root), self.git("rev-parse", "HEAD~1"), "HEAD",
+                                     str(self.root))
+                    self.assertEqual(result.returncode, 1, result.stdout)
+                    self.assertIn("FAIL: cannot scan crates/gamma/src/lib.rs for include_str!/include_bytes!",
+                                  result.stderr)
+                finally:
+                    self.git("reset", "-q", "--hard", "HEAD~1")
+
+    def test_embeds_an_empty_range_reports_no_indirect_use(self):
+        self.change({"crates/gamma/src/lib.rs": "pub use std::include_str as embed;\n"})
+        self.assertEqual(self.embeds(base="HEAD")["indirect"], None)
 
 
 class Snapshot(unittest.TestCase):

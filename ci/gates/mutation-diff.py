@@ -751,26 +751,61 @@ def includes(text):
     return literal, indirect
 
 
-def embedded(crate, tree, listed):
-    targets, opaque = set(), None
-    for name in sorted(listed):
+TEST_ONLY_DIRS = ("tests", "benches", "examples")
+
+
+def test_only_file(path, dirs):
+    owner = owner_of(path, dirs)
+    if owner is None:
+        return False
+    directory = dirs[owner]
+    rest = path if directory in (".", "") else path[len(directory) + 1:]
+    return rest.split("/", 1)[0] in TEST_ONLY_DIRS
+
+
+def embeds(root, base, head, workspace):
+    base_sha, head_sha = resolve(root, base), resolve(root, head)
+    tree = Path(os.path.realpath(workspace))
+    dirs = workspace_crates(tree)
+    listing = git(root, "ls-tree", "-r", "-z", "--full-tree", "--name-only", head_sha)
+    if listing.returncode != 0:
+        raise ScopeError(f"FAIL: git ls-tree {head_sha} failed: {listing.stderr.decode().strip()}")
+    indirect, targets = None, {}
+    for name in sorted(n.decode() for n in listing.stdout.split(b"\0") if n.endswith(b".rs")):
+        if test_only_file(name, dirs) or (tree / name).is_symlink():
+            continue
         file = tree / name
         try:
             literal, dynamic = includes(file.read_text())
         except (OSError, UnicodeError, ValueError, LexError) as exc:
-            raise DiffError(f"FAIL: {crate}: cannot scan {name} for include_str!/include_bytes!: {exc}") from None
-        if dynamic and opaque is None:
-            opaque = name
+            raise ScopeError(f"FAIL: cannot scan {name} for include_str!/include_bytes!: {exc}") from None
+        if dynamic and indirect is None:
+            indirect = name
+        site = owner_of(name, dirs)
         for value in literal:
-            try:
-                stat = os.stat(Path(value) if os.path.isabs(value) else file.parent / value)
-            except OSError:
+            target = Path(os.path.realpath(Path(value) if os.path.isabs(value) else file.parent / value))
+            if not target.is_file() or not contains(tree, target):
                 continue
-            targets.add((stat.st_dev, stat.st_ino))
-    return targets, opaque
+            key = Path(os.path.relpath(target, tree)).as_posix()
+            targets.setdefault(key, set()).add(site)
+    if indirect is not None and not changed_names(root, base_sha, head_sha):
+        indirect = None
+    return {"indirect": indirect,
+            "targets": {k: sorted(s, key=lambda v: (v is None, v or "")) for k, s in sorted(targets.items())}}
 
 
-def unlisted(crate, files, inputs, workspace):
+def read_embeds(crate, path):
+    try:
+        data = json.loads(Path(path).read_text())
+        if (not isinstance(data, dict) or not isinstance(data.get("targets"), dict)
+                or not (data.get("indirect") is None or isinstance(data["indirect"], str))):
+            raise ValueError
+    except ValueError:
+        raise DiffError(f"FAIL: {crate}: unreadable include-site list {path}") from None
+    return data
+
+
+def unlisted(crate, files, inputs, workspace, embed_file):
     listed = read_files(crate, files)
     try:
         data = json.loads(Path(inputs).read_text())
@@ -779,19 +814,30 @@ def unlisted(crate, files, inputs, workspace):
             raise ValueError
     except (ValueError, AttributeError):
         raise DiffError(f"FAIL: {crate}: unreadable compiled-input list {inputs}") from None
+    found = read_embeds(crate, embed_file)
     if not changed:
         return None
+    if found["indirect"] is not None:
+        return f"whole: {crate}: include_str/include_bytes used indirectly in {found['indirect']}"
     tree = Path(os.path.realpath(workspace))
-    targets, opaque = embedded(crate, tree, listed)
+    sites = {}
+    for target, owners in found["targets"].items():
+        try:
+            stat = os.stat(tree / target)
+        except OSError:
+            continue
+        sites[(stat.st_dev, stat.st_ino)] = set(owners)
     for path in changed:
         try:
             stat = os.stat(tree / path)
         except OSError:
             raise DiffError(f"FAIL: {crate}: changed {path} is not in the snapshot") from None
-        if (stat.st_dev, stat.st_ino) in targets:
+        owners = sites.get((stat.st_dev, stat.st_ino), set())
+        if crate in owners or None in owners:
             return f"whole: {crate}: changed {path} is embedded by include_str!/include_bytes!"
-    if opaque is not None:
-        return f"whole: {crate}: include_str/include_bytes used indirectly in {opaque}"
+    for name in sorted(listed):
+        if not name.endswith(".rs"):
+            return f"whole: {crate}: walked source {name} is not a .rs file the in-diff mapping reads"
     for path in changed:
         if path not in listed:
             return f"whole: {crate}: changed {path} is compiled into {crate} but not walked by cargo-mutants"
@@ -944,7 +990,9 @@ def main(argv):
             snapshot(argv[1], argv[2], argv[3])
         elif len(argv) == 6 and command == "compiled":
             print(json.dumps(compiled(*argv[1:])))
-        elif len(argv) == 5 and command == "unlisted":
+        elif len(argv) == 5 and command == "embeds":
+            print(json.dumps(embeds(*argv[1:])))
+        elif len(argv) == 6 and command == "unlisted":
             line = unlisted(*argv[1:])
             if line:
                 print(line)
@@ -957,8 +1005,8 @@ def main(argv):
             print("FAIL: usage: mutation-diff.py changed-lines <diff> | classify <pkg> <diff> "
                   "<whole> <indiff> | scope <root> <base> <head> [<workspace>] | paths <root> <base> "
                   "<diff> [<head>] | history <root> | snapshot <root> <rev> <dest> | "
-                  "compiled <root> <base> <head> <workspace> <target> | unlisted <crate> <files> "
-                  "<compiled> <workspace> | unmappable <root> <head> <workspace>",
+                  "compiled <root> <base> <head> <workspace> <target> | embeds <root> <base> <head> <workspace> | "
+                  "unlisted <crate> <files> <compiled> <workspace> <embeds> | unmappable <root> <head> <workspace>",
                   file=sys.stderr)
             return 1
     except (DiffError, ScopeError) as exc:

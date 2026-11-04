@@ -998,6 +998,54 @@ class InDiff(unittest.TestCase):
                 self.assertIn(f"whole: a: include_str/include_bytes used indirectly in {A_RS}", out)
                 self.assertEqual(len(self.whole_runs("a")), 1)
 
+    def test_in_diff_an_include_site_in_an_excluded_file_runs_that_crate_whole(self):
+        policy, embedder = "crates/a/src/policy.rs", "crates/a/src/embedder.rs"
+        lib = ("pub mod policy;\npub mod embedder;\n" + LIB_A
+               + 'pub fn allowed() -> bool {\n    embedder::P.contains("ALLOW")\n}\n')
+        repo = self.in_diff_repo({policy: 'pub const RULE: &str = "DENY";\n'},
+                                 base_files={A_RS: lib, policy: 'pub const RULE: &str = "ALLOW";\n',
+                                             embedder: 'pub const P: &str = include_str!("policy.rs");\n',
+                                             ".cargo/mutants.toml": f'exclude_globs = ["{embedder}"]\n'})
+        result, out = self.gate(repo, whole=WHOLE_EDIT)
+        self.assertEqual(result.returncode, 0, out)
+        self.assertIn(f"whole: a: changed {policy} is embedded by include_str!/include_bytes!", out)
+        self.assertEqual(len(self.whole_runs("a")), 1)
+
+    def test_in_diff_an_include_alias_re_exported_by_another_crate_runs_every_crate_whole(self):
+        policy = "crates/b/src/policy.rs"
+        lib_b = ('pub mod policy;\npub fn allowed() -> bool {\n    a::embed!("policy.rs").contains("ALLOW")\n}\n')
+        repo = self.in_diff_repo(
+            {policy: 'pub const RULE: &str = "DENY";\n'},
+            base_files={A_RS: "pub use std::include_str as embed;\n" + LIB_A, "crates/b/src/lib.rs": lib_b,
+                        policy: 'pub const RULE: &str = "ALLOW";\n',
+                        "crates/b/Cargo.toml": package_toml("b") + '\n[dependencies]\na = { path = "../a" }\n'})
+        result, out = self.gate(repo, whole=WHOLE_EDIT)
+        self.assertEqual(result.returncode, 0, out)
+        for crate in ("a", "b"):
+            self.assertIn(f"whole: {crate}: include_str/include_bytes used indirectly in {A_RS}", out)
+            self.assertEqual(len(self.whole_runs(crate)), 1)
+
+    def test_in_diff_an_include_in_a_crate_outside_the_mutation_contract_widens_nothing(self):
+        base_lib = "pub mod decision;\n\n" + LIB_A
+        decision = "pub fn decide(x: u32) -> bool {\n    x > 3\n}\n"
+        lib_b = 'pub fn n() -> usize {\n    include_str!("../../a/src/decision.rs").len()\n}\n'
+        repo = self.in_diff_repo({DECISION: decision.replace("x > 3", "x > 4")}, base_crates=["a"],
+                                 base_files={A_RS: base_lib, DECISION: decision, "crates/b/src/lib.rs": lib_b})
+        result, out = self.gate(repo, crates=("a",), whole=WHOLE_DECISION, indiff=WHOLE_DECISION)
+        self.assertEqual(result.returncode, 0, out)
+        self.assertIn("RUN a: 1 in-diff mutants", out)
+        self.assertNotIn("whole:", out)
+
+    def test_in_diff_a_walked_source_without_the_rs_suffix_runs_that_crate_whole(self):
+        rust = "crates/a/src/lib.rust"
+        repo = self.in_diff_repo({rust: "pub fn a(x: u32) -> bool {\n    x > 2\n}\n"},
+                                 base_files={"crates/a/Cargo.toml": package_toml("a") + '\n[lib]\npath = "src/lib.rust"\n',
+                                             rust: "pub fn a(x: u32) -> bool {\n    x > 1\n}\n"})
+        result, out = self.gate(repo, whole=WHOLE_EDIT)
+        self.assertEqual(result.returncode, 0, out)
+        self.assertIn(f"whole: a: walked source {rust} is not a .rs file the in-diff mapping reads", out)
+        self.assertEqual(len(self.whole_runs("a")), 1)
+
     def test_in_diff_a_build_script_crate_runs_whole_on_a_documentation_change(self):
         build = ('fn main() {\n    let readme = std::fs::read_to_string("../../README.md").unwrap();\n'
                  '    println!("cargo:rustc-env=POLICY={}", readme.trim());\n}\n')
