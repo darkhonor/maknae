@@ -28,6 +28,9 @@ SCOPE_FILES = frozenset(("Cargo.toml", "coverage-tiers.toml", ".cargo/config", "
                          "ci/gates/mutation-terminated.txt"))
 
 
+SCOPE_FOLDED = frozenset(name.casefold() for name in SCOPE_FILES)
+
+
 class DiffError(Exception):
     pass
 
@@ -417,9 +420,9 @@ def scope_crates(root, base, head, workspace=None):
         selected.update(built)
         if exempt(root, base_sha, head_sha, path, docs_only):
             continue
-        if path in SCOPE_FILES:
+        if path.casefold() in SCOPE_FOLDED:
             selected.update(mutants)
-        elif posixpath.basename(path) == "Cargo.toml":
+        elif posixpath.basename(path).casefold() == "cargo.toml":
             owner = owner_of(path, dirs)
             selected.update(mutants if owner is None or dirs[owner] == "." else {owner})
     return sorted(selected & mutants)
@@ -877,21 +880,55 @@ def contains(directory, path):
     return False
 
 
-CONFIG_FILES = frozenset(("Cargo.toml", "coverage-tiers.toml", "rust-toolchain", "rust-toolchain.toml"))
+ROOT_CONFIG = {name.casefold(): name for name in ("coverage-tiers.toml", "rust-toolchain", "rust-toolchain.toml")}
+CARGO_CONFIG = {name.casefold(): name for name in ("mutants.toml", "config", "config.toml")}
 
 
-def config_links(root, head):
+def config_path(path):
+    parts = path.split("/")
+    if parts[0].casefold() == ".cargo":
+        rest = parts[1:]
+        if len(rest) == 1:
+            rest = [CARGO_CONFIG.get(rest[0].casefold(), rest[0])]
+        return "/".join([".cargo", *rest])
+    if len(parts) == 1 and parts[0].casefold() in ROOT_CONFIG:
+        return ROOT_CONFIG[parts[0].casefold()]
+    if parts[-1].casefold() == "cargo.toml":
+        return "/".join([*parts[:-1], "Cargo.toml"])
+    return None
+
+
+def prefixes(path):
+    parts = path.split("/")
+    return ["/".join(parts[:k]) for k in range(1, len(parts))]
+
+
+def config_guard(root, head):
     sha = resolve(root, head)
     listing = git(root, "ls-tree", "-r", "-z", "--full-tree", sha)
     if listing.returncode != 0:
         raise ScopeError(f"FAIL: git ls-tree {sha} failed: {listing.stderr.decode().strip()}")
+    entries = []
     for record in listing.stdout.split(b"\0"):
-        meta, _, raw = record.partition(b"\t")
-        if not record or meta.split(b" ")[0] != b"120000":
-            continue
-        path = raw.decode()
-        if (path == ".cargo" or path.startswith(".cargo/") or path in CONFIG_FILES
-                or posixpath.basename(path) == "Cargo.toml"):
+        if record:
+            meta, _, raw = record.partition(b"\t")
+            entries.append((meta.split(b" ")[0], raw.decode()))
+    configs = {}
+    for _, path in entries:
+        canonical = config_path(path)
+        if canonical is not None and canonical != path:
+            return f"FAIL: --in-diff: {path} is a case variant of the config path {canonical}; rename it"
+        if canonical is not None:
+            for directory in prefixes(path):
+                configs.setdefault(directory.casefold(), (directory, path))
+    for _, path in entries:
+        for directory in prefixes(path) + [path]:
+            found = configs.get(directory.casefold())
+            if found is not None and found[0] != directory:
+                return (f"FAIL: --in-diff: {path} is a case variant of the config path {found[1]}; "
+                        "rename it")
+    for mode, path in entries:
+        if mode == b"120000" and config_path(path) is not None:
             return f"FAIL: --in-diff: {path} is a symlink; config inputs must be regular files"
     return None
 
@@ -1053,8 +1090,8 @@ def main(argv):
             line = unlisted(*argv[1:])
             if line:
                 print(line)
-        elif len(argv) == 3 and command == "config-links":
-            problem = config_links(*argv[1:])
+        elif len(argv) == 3 and command == "config-guard":
+            problem = config_guard(*argv[1:])
             if problem:
                 print(problem)
                 return 1
@@ -1070,7 +1107,7 @@ def main(argv):
                   "compiled <root> <base> <head> <workspace> <target> | "
                   "embeds <root> <base> <head> <workspace> <target> | "
                   "unlisted <crate> <files> <compiled> <workspace> <embeds> | unmappable <root> <head> <workspace> | "
-                  "config-links <root> <head>",
+                  "config-guard <root> <head>",
                   file=sys.stderr)
             return 1
     except (DiffError, ScopeError) as exc:

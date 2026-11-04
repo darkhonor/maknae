@@ -4889,6 +4889,15 @@ mid_git "$mid_r" add -A
 mid_git "$mid_r" commit -qm config
 expect_reject_because "mutation-in-diff/symlinked-config-input-fails" ".cargo is a symlink; config inputs must be regular files" \
   mid_gate "$mid_r" "$mid_whole_edit" "[$mid_a,$mid_star]" 0
+mid_r="$(mid_repo 'let z = y * 4;' 'x * 5' Fixture.)"
+printf 'all_features = true\n' > "$NC_TMP/variant-mutants.toml"
+mid_blob="$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY \
+  git -C "$mid_r" hash-object -w "$NC_TMP/variant-mutants.toml")"
+mid_git "$mid_r" update-index --add --cacheinfo "100644,$mid_blob,.CARGO/mutants.toml"
+mid_git "$mid_r" commit -qm variant
+expect_reject_because "mutation-in-diff/case-variant-config-path-fails" \
+  ".CARGO/mutants.toml is a case variant of the config path .cargo/mutants.toml" \
+  mid_gate "$mid_r" "$mid_whole_edit" "[$mid_a,$mid_star]" 0
 mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
 printf '\n[features]\nextra = []\n\n[dev-dependencies]\na = { path = ".", features = ["extra"] }\n' >> "$mid_r/crates/a/Cargo.toml"
 mkdir -p "$mid_r/crates/a/src/enabled"

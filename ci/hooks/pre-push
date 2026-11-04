@@ -9,6 +9,7 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR G
 export GIT_NO_REPLACE_OBJECTS=1
 root="$(env -u GIT_DIR -u GIT_WORK_TREE git rev-parse --show-toplevel)"
 if [ "${MAKNAE_PRE_PUSH_MUTANTS:-0}" = 1 ]; then
+  bash "$root/ci/gates/coverage-tiers.sh" --root "$root" --in-diff-preflight
   python3 "$root/ci/affected.py" --root "$root" --check-history
   mutation_crates_text="$(python3 -c '
 import sys, tomllib

@@ -278,6 +278,7 @@ jobs:
           MUTATION_IN_CI: ${{ vars.MUTATION_IN_CI }}
         run: |
           if [ "$EVENT_NAME" = pull_request ] && [ "$MUTATION_IN_CI" != true ]; then
+            bash ci/gates/coverage-tiers.sh --root . --in-diff-preflight
             PACKAGES="$(python3 -c '
           import sys, tomllib
           crates = tomllib.load(open(sys.argv[1], "rb"))["t1"]["mutants_crates"]

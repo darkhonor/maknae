@@ -42,6 +42,7 @@ readiness_only=0
 mutants_mode=""      # "", "all", "list"
 mutant_crates=()
 in_diff=""
+preflight=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --root)
@@ -60,6 +61,7 @@ while [ $# -gt 0 ]; do
         mutant_crates+=("$1"); shift
       done
       continue;;
+    --in-diff-preflight) preflight=1;;
     --in-diff)
       shift
       if [ $# -eq 0 ] || [ -z "$1" ] || [ "${1#-}" != "$1" ]; then fail "--in-diff needs a revision"; exit 1; fi
@@ -68,6 +70,9 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+if [ "$preflight" -eq 1 ] && { [ -n "$in_diff" ] || [ -n "$mutants_mode" ] || [ "$injection" -eq 1 ] || [ "$readiness_only" -eq 1 ]; }; then
+  fail "--in-diff-preflight takes only --root"; exit 1
+fi
 if [ -n "$in_diff" ]; then
   if [ "$mutants_mode" = "all" ]; then fail "--in-diff cannot be combined with --mutants-all"; exit 1; fi
   if [ "$mutants_mode" != "list" ]; then fail "--in-diff needs --mutants"; exit 1; fi
@@ -95,11 +100,15 @@ if [ -z "$root" ]; then
   fi
 fi
 
-if [ -n "$in_diff" ] && ! root="$(CDPATH='' cd -P -- "$root" && pwd -P)"; then
+if { [ -n "$in_diff" ] || [ "$preflight" -eq 1 ]; } && ! root="$(CDPATH='' cd -P -- "$root" && pwd -P)"; then
   fail "--in-diff: --root does not resolve to a directory"; exit 1
 fi
-if [ -n "$in_diff" ] && ! problem="$(python3 "$here/mutation-diff.py" config-links "$root" HEAD 2>&1)"; then
-  printf '%s\n' "${problem:-FAIL: --in-diff: the config symlink check printed nothing}"; exit 1
+if { [ -n "$in_diff" ] || [ "$preflight" -eq 1 ]; } &&
+   ! problem="$(python3 "$here/mutation-diff.py" config-guard "$root" HEAD 2>&1)"; then
+  printf '%s\n' "${problem:-FAIL: --in-diff: the config guard printed nothing}"; exit 1
+fi
+if [ "$preflight" -eq 1 ]; then
+  echo "PASS: --in-diff preflight"; exit 0
 fi
 
 # ---- injection-in-work-tree refusal ----------------------------------------

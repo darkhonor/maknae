@@ -428,6 +428,19 @@ class Scope(unittest.TestCase):
             "ci/gates/mutation-terminated.txt", "ci/gates/coverage-tiers.sh", "ci/gates/mutation-diff.py",
             "ci/gates/mutation-oracle.sh", "ci/gates/mutation-platform.sh", "ci/affected.py")])
 
+    def test_scope_a_case_variant_of_a_scope_file_is_attributed_like_it(self):
+        for path, expected in ((".CARGO/mutants.toml", ALL), ("Coverage-Tiers.toml", ALL),
+                               ("crates/beta/Cargo.TOML", ["beta"])):
+            with self.subTest(path=path):
+                blob = subprocess.run(["git", "-C", str(self.root), "hash-object", "-w", "--stdin"],
+                                      input="x = 1\n", capture_output=True, text=True, check=True).stdout.strip()
+                self.git("update-index", "--add", "--cacheinfo", f"100644,{blob},{path}")
+                self.git("commit", "-q", "-m", "variant")
+                try:
+                    self.assertEqual(self.scope(), expected)
+                finally:
+                    self.git("reset", "-q", "--hard", "HEAD~1")
+
     def test_scope_an_unowned_input_that_is_not_a_scope_file_is_empty(self):
         self.assertScope([(path, "x = 1\n", []) for path in (
             "tools/gen.rs", ".gitattributes", "ci/gates/other.sh", "fixtures/policy.rs")])
@@ -1217,7 +1230,7 @@ class ConfigLinks(unittest.TestCase):
     setUp, git, put, commit = Scope.setUp, Scope.git, Scope.put, Scope.commit
 
     def check(self):
-        return run_cli("config-links", str(self.root), "HEAD")
+        return run_cli("config-guard", str(self.root), "HEAD")
 
     def linked(self, link, target):
         path = self.root / link
@@ -1246,6 +1259,35 @@ class ConfigLinks(unittest.TestCase):
                 finally:
                     self.git("reset", "-q", "--hard", "HEAD~1")
 
+    def tracked(self, path, text=""):
+        blob = subprocess.run(["git", "-C", str(self.root), "hash-object", "-w", "--stdin"], input=text,
+                              capture_output=True, text=True, check=True).stdout.strip()
+        self.git("update-index", "--add", "--cacheinfo", f"100644,{blob},{path}")
+        self.git("commit", "-q", "-m", "variant")
+
+    def test_config_guard_a_case_variant_of_a_config_path_is_refused(self):
+        cases = {".CARGO/mutants.toml": ".cargo/mutants.toml", ".cargo/Mutants.toml": ".cargo/mutants.toml",
+                 ".Cargo/config.toml": ".cargo/config.toml", "crates/beta/Cargo.TOML": "crates/beta/Cargo.toml",
+                 "Coverage-Tiers.toml": "coverage-tiers.toml", "RUST-TOOLCHAIN.toml": "rust-toolchain.toml",
+                 "Rust-Toolchain": "rust-toolchain"}
+        for path, canonical in cases.items():
+            with self.subTest(path=path):
+                self.tracked(path, "all_features = true\n")
+                try:
+                    result = self.check()
+                    self.assertEqual((result.returncode, result.stdout),
+                                     (1, f"FAIL: --in-diff: {path} is a case variant of the config path "
+                                         f"{canonical}; rename it\n"), result.stderr)
+                finally:
+                    self.git("reset", "-q", "--hard", "HEAD~1")
+
+    def test_config_guard_a_case_variant_of_a_config_directory_is_refused(self):
+        self.tracked("Crates/beta/src/x.rs")
+        result = self.check()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertRegex(result.stdout, r"^FAIL: --in-diff: Crates/beta/src/x\.rs is a case variant of the config "
+                                        r"path crates/\w+/Cargo\.toml; rename it\n$")
+
     def test_config_links_other_symlinks_are_not_config_inputs(self):
         self.put("AGENTS.md", "x\n")
         self.commit("agents")
@@ -1254,7 +1296,7 @@ class ConfigLinks(unittest.TestCase):
         self.assertEqual((result.returncode, result.stdout), (0, ""), result.stderr)
 
     def test_config_links_the_real_tree_passes(self):
-        result = run_cli("config-links", str(ROOT), "HEAD")
+        result = run_cli("config-guard", str(ROOT), "HEAD")
         self.assertEqual((result.returncode, result.stdout), (0, ""), result.stderr)
 
 

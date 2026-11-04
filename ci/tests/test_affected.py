@@ -342,12 +342,16 @@ class AffectedTests(unittest.TestCase):
                                    'MAKNAE_PRE_PUSH_MUTANTS': '1' if mutations else '0',
                                    **(env or {})},
                               capture_output=True, text=True)
+        invocations = record.read_text().splitlines() if record.exists() else []
+        if mutations:
+            preflight = '--root ' + self.git('rev-parse', '--show-toplevel') + ' --in-diff-preflight'
+            self.assertEqual(invocations[:1], [preflight], 'the in-diff preflight did not run first')
+            invocations = invocations[1:]
         if invalid_contract:
             self.assertNotEqual(proc.returncode, 0)
             self.assertIn('EMPTY', proc.stdout)
-            self.assertFalse(record.exists(), 'Rust gate ran after invalid documentation')
+            self.assertEqual(invocations, [], 'Rust gate ran after invalid documentation')
             return
-        invocations = record.read_text().splitlines() if record.exists() else []
         if expect_fail:
             self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
             return proc, invocations
@@ -510,6 +514,48 @@ class AffectedTests(unittest.TestCase):
         self.assertNotIn('"build"', proc.stdout)
         self.assertEqual(invocations, [])
         self.assertEqual(len(self.hook(self.base)), 2)
+
+    def symlinked_contract(self):
+        for name in ('coverage-tiers.sh', 'mutation-diff.py'):
+            self.write('ci/gates/' + name, (SELECTOR.parent / 'gates' / name).read_text())
+        record = self.root / 'invocations'
+        self.write('ci/affected.py', 'import os, sys\nopen(os.environ["RECORD"], "a").write("affected\\n")\n')
+        self.write('contract/tiers.toml', '[t1\nmutants_crates = [\n')
+        (self.root / 'coverage-tiers.toml').unlink()
+        (self.root / 'coverage-tiers.toml').symlink_to('contract/tiers.toml')
+        self.write('crates/a/src/lib.rs', '// changed\n')
+        self.commit()
+        return record
+
+    def assertGuardFailedFirst(self, proc, record):
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn('FAIL: --in-diff: coverage-tiers.toml is a symlink; config inputs must be regular files',
+                      proc.stdout + proc.stderr)
+        self.assertNotIn('TOMLDecodeError', proc.stdout + proc.stderr)
+        self.assertFalse(record.exists(), 'a config consumer ran before the preflight')
+
+    def test_hook_preflight_refuses_a_symlinked_contract_before_reading_it(self):
+        record = self.symlinked_contract()
+        self.write('ci/hooks/pre-push', (SELECTOR.parent / 'hooks/pre-push').read_text())
+        head = self.git('rev-parse', 'HEAD')
+        proc = subprocess.run(['bash', 'ci/hooks/pre-push', 'origin', 'https://example.invalid/r.git'],
+                              cwd=self.root, input=f'refs/heads/topic {head} refs/heads/topic {self.base}\n',
+                              env={**os.environ, 'RECORD': str(record), 'MAKNAE_PRE_PUSH_MUTANTS': '1'},
+                              capture_output=True, text=True)
+        self.assertGuardFailedFirst(proc, record)
+
+    def test_ci_mutation_selection_preflight_refuses_a_symlinked_contract_before_reading_it(self):
+        record = self.symlinked_contract()
+        workflow = (SELECTOR.parent.parent / '.github/workflows/ci.yml').read_text()
+        step = workflow.split('      - name: Select mutation packages', 1)[1].split('\n      - name:', 1)[0]
+        body = step.split('        run: |\n', 1)[1]
+        script = ''.join(line[10:] + '\n' for line in body.splitlines())
+        output = self.root / 'github-output'
+        proc = subprocess.run(['bash', '-e', '-c', script], cwd=self.root, capture_output=True, text=True,
+                              env={**os.environ, 'RECORD': str(record), 'EVENT_NAME': 'pull_request',
+                                   'MUTATION_IN_CI': '', 'PACKAGES': '', 'GITHUB_OUTPUT': str(output)})
+        self.assertGuardFailedFirst(proc, record)
+        self.assertFalse(output.exists())
 
     def test_hook_without_opt_in_runs_no_mutation(self):
         self.change_c()
