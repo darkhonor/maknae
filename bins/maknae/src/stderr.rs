@@ -3,7 +3,7 @@
 //! CLI's verdict.
 
 pub(crate) fn line(err: &mut impl std::io::Write, args: std::fmt::Arguments<'_>) {
-    let _ = err.write_fmt(args).and_then(|()| err.write_all(b"\n"));
+    let _ = err.write_all(format!("{args}\n").as_bytes());
 }
 
 pub(crate) fn raw(err: &mut impl std::io::Write, bytes: &[u8]) {
@@ -46,6 +46,29 @@ mod tests {
         let mut out = vec![];
         line(&mut out, format_args!("a {}", 1));
         assert_eq!(out, b"a 1\n");
+    }
+
+    #[derive(Default)]
+    struct Counting {
+        writes: usize,
+        bytes: Vec<u8>,
+    }
+    impl std::io::Write for Counting {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.writes += 1;
+            self.bytes.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_line_is_one_write() {
+        let mut out = Counting::default();
+        line(&mut out, format_args!("a {} b {}", 1, "c"));
+        assert_eq!((out.writes, out.bytes.as_slice()), (1, &b"a 1 b c\n"[..]));
     }
 
     #[test]
