@@ -1,6 +1,7 @@
 use super::artifact_table::{Artifact, ContentKind, Owner};
 use super::artifact_write::{self, emit_yaml, yaml_map, OwnerResolver};
 use super::EnrollError;
+use crate::stderr::errln;
 use clap::Args;
 use maknae_config::Value;
 use maknae_io::{AnchorRequired, FileOwner, IoError, IoKind, Mode, StrategyPref, TargetRequired};
@@ -864,7 +865,7 @@ pub(crate) async fn run_enroll_agent(
     let sudo_uid = super::env_u32("SUDO_UID");
     let sudo_user = std::env::var("SUDO_USER").ok();
     let operator = super::preflight_check(euid, sudo_uid, sudo_user.as_deref(), &super::RealPasswd)
-        .inspect_err(|_| eprintln!("{}", msg(locale, MsgId::EnrollPreflightFailed)))?;
+        .inspect_err(|_| errln!("{}", msg(locale, MsgId::EnrollPreflightFailed)))?;
 
     let agent = AgentId::parse(&args.id)?;
     let cidrs = BindCidrs::parse(&args.bind_cidr)?;
@@ -1650,6 +1651,8 @@ mod tests {
             "eprintln!",
             "print!",
             "eprint!",
+            "errln!",
+            "stderr::",
             "dbg!",
             "format!",
         ] {

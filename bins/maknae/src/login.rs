@@ -1,3 +1,4 @@
+use crate::stderr::errln;
 use crate::tty::{read_password, stdin_is_terminal, PromptError};
 use maknae_vault::{
     check_vault_addr, custody_for_store, custody_label, erase_user_token, observe_systemd_creds,
@@ -246,11 +247,11 @@ pub(crate) async fn run_login() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(Failure::Interrupted) => {
-            eprintln!("maknae login: interrupted");
+            errln!("maknae login: interrupted");
             ExitCode::from(INTERRUPTED)
         }
         Err(Failure::Refused(m)) => {
-            eprintln!("maknae login: {m}");
+            errln!("maknae login: {m}");
             ExitCode::FAILURE
         }
     }
@@ -493,7 +494,7 @@ pub(crate) async fn run_logout() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(m) => {
-            eprintln!("maknae logout: {m}");
+            errln!("maknae logout: {m}");
             ExitCode::FAILURE
         }
     }

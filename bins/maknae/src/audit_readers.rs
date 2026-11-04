@@ -2,6 +2,7 @@
 //! the audit trail, one validated name per line and nothing else. The packages parse
 //! this output after every hold of `/var/log/maknae`, so its format is a contract.
 
+use crate::stderr::errln;
 use maknae_config::{
     audit_from_section, load_config_root_owned, resolve_readers, Document, ReaderLookup,
     SectionSpec, AUDIT_SECTION, DAEMON_SECTIONS, STATE_DIR,
@@ -96,7 +97,7 @@ pub(crate) fn run(euid: u32, stopped: bool) -> ExitCode {
     match collect(euid, stopped).and_then(|names| emit(&names, &mut std::io::stdout().lock())) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("maknae: {e}");
+            errln!("maknae: {e}");
             ExitCode::FAILURE
         }
     }
