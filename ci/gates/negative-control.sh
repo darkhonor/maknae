@@ -4558,6 +4558,24 @@ mo_shape "counts-zero-mutants"      "ZERO mutants" \
   '{"total_mutants":0,"caught":0,"missed":0,"timeout":0,"unviable":0}'
 mo_shape "counts-not-an-object"     "not a JSON object" '[]'
 
+mo_indiff() { # <label> <baseline-outcome-json|""> <enospc 0|1>
+  local d bl=""; d="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$d/log"
+  [ -n "$2" ] && bl="$2,"
+  printf '{"total_mutants":3,"missed":0,"caught":0,"timeout":0,"unviable":3,"outcomes":[%s{"scenario":{"Mutant":{"name":"a"}},"summary":"Unviable"}]}\n' \
+    "$bl" > "$d/outcomes.json"
+  [ "$3" = 1 ] && printf 'No space left on device (os error 28)\n' > "$d/log/m1.log"
+  printf '%s' "$d"
+}
+mo_d1="$(mo_indiff x '{"scenario":"Baseline","summary":"Failure"}' 0)"
+expect_reject_because "oracle/in-diff-unviable-without-baseline" "ZERO viable" \
+  bash "$mo" judge --in-diff "$mo_d1" maknae-kernel
+mo_d2="$(mo_indiff x '{"scenario":"Baseline","summary":"Success"}' 1)"
+expect_reject_because "oracle/in-diff-unviable-enospc" "ENVIRONMENT failure" \
+  bash "$mo" judge --in-diff "$mo_d2" maknae-kernel
+mo_d3="$(mo_indiff x '{"scenario":"Baseline","summary":"Success"}' 0)"
+expect_accept "oracle/in-diff-unviable-with-baseline" "baseline passed" \
+  bash "$mo" judge --in-diff "$mo_d3" maknae-kernel
+
 # SCRATCH: a volume without room must be refused BEFORE the run, not discovered
 # as a wall of 'unviable' afterwards. The floor is raised via the documented
 # override so the probe does not depend on this host's free space.

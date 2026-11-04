@@ -1003,6 +1003,38 @@ expect "mutation oracle: an ENOSPC build failure is not unviability" "ENVIRONMEN
     COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
     COVERAGE_TIERS_CRATE_DIRS="xcore=crates/x" "$gate" --root "$r" --injection --mutants xcore
 
+mo_oracle="$here/../../mutation-oracle.sh"
+mk_indiff() { # <dir> <baseline-summary|none> [enospc]
+  local d="$1" base="$2" bl=""
+  mkdir -p "$d/log"
+  if [ "$base" != "none" ]; then
+    bl='{"scenario":"Baseline","summary":"'"$base"'","phase_results":[{"phase":"Build"},{"phase":"Test"}]},'
+  fi
+  printf '{"total_mutants":3,"missed":0,"caught":0,"timeout":0,"unviable":3,"outcomes":[%s{"scenario":{"Mutant":{"name":"a"}},"summary":"Unviable"}]}\n' \
+    "$bl" > "$d/outcomes.json"
+  if [ "${3:-}" = "enospc" ]; then
+    printf 'error: could not create session directory lock file: No space left on device (os error 28)\n' > "$d/log/m1.log"
+  fi
+}
+d_ok="$(newroot)"; mk_indiff "$d_ok" Success
+expect "judge --in-diff: all unviable with a passing baseline is accepted" "all 3 in-diff mutants unviable (baseline passed)" 0 -- \
+  bash "$mo_oracle" judge --in-diff "$d_ok" xcore
+d_bf="$(newroot)"; mk_indiff "$d_bf" Failure
+expect "judge --in-diff: all unviable with a failing baseline is refused" "ZERO viable" nonzero -- \
+  bash "$mo_oracle" judge --in-diff "$d_bf" xcore
+d_nb="$(newroot)"; mk_indiff "$d_nb" none
+expect "judge --in-diff: all unviable with no baseline entry is refused" "ZERO viable" nonzero -- \
+  bash "$mo_oracle" judge --in-diff "$d_nb" xcore
+d_z="$(newroot)"
+printf '{"total_mutants":0,"missed":0,"caught":0,"timeout":0,"unviable":0,"outcomes":[{"scenario":"Baseline","summary":"Success"}]}\n' > "$d_z/outcomes.json"
+expect "judge --in-diff: zero mutants is still refused" "ZERO mutants" nonzero -- \
+  bash "$mo_oracle" judge --in-diff "$d_z" xcore
+d_en="$(newroot)"; mk_indiff "$d_en" Success enospc
+expect "judge --in-diff: ENOSPC after a passing baseline is an environment failure" "ENVIRONMENT failure" nonzero -- \
+  bash "$mo_oracle" judge --in-diff "$d_en" xcore
+expect "judge (whole): the in-diff all-unviable data is refused without the flag" "ZERO viable" nonzero -- \
+  bash "$mo_oracle" judge "$d_ok" xcore
+
 # ---------- ambient-GIT_DIR immunity ----------------------------------------
 r="$(newroot)"; mk_base "$r"
 expect "ambient GIT_DIR immunity (pass path unaffected)" "PASS: coverage-tiers gate" 0 -- \
