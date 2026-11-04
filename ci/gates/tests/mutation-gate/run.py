@@ -353,7 +353,7 @@ class InDiff(unittest.TestCase):
         return repo
 
     def gate(self, repo, *args, crates=("a", "b"), whole=(), indiff=(), extra_env=None,
-             missed=0, fake_exit=0, root=None, total=None):
+             missed=0, fake_exit=0, root=None, total=None, cwd=None, script=None):
         payload = self.aux / "payload"
         shutil.rmtree(payload)
         write_payload(payload, CAUGHT_LOGS, len(indiff) if indiff else total, missed=missed)
@@ -371,9 +371,9 @@ class InDiff(unittest.TestCase):
                    FAKE_WHOLE_LIST=json.dumps(list(whole)) if whole else "",
                    FAKE_INDIFF_LIST=json.dumps(list(indiff)) if indiff else "",
                    **(extra_env or {}))
-        argv = [BASH, str(repo / "ci/gates/coverage-tiers.sh"), "--root", str(root or repo)]
+        argv = [BASH, script or str(repo / "ci/gates/coverage-tiers.sh"), "--root", str(root or repo)]
         argv += list(args) if args else ["--mutants", *crates, "--in-diff", "base"]
-        result = subprocess.run(argv, env=env, text=True, capture_output=True)
+        result = subprocess.run(argv, env=env, text=True, capture_output=True, cwd=cwd)
         return result, result.stdout + result.stderr
 
     def invocations(self):
@@ -382,7 +382,7 @@ class InDiff(unittest.TestCase):
             if log.exists() else []
 
     def runs(self):
-        return [argv for argv in self.invocations() if "--list" not in argv]
+        return [argv for argv in self.invocations() if "--list" not in argv and "--list-files" not in argv]
 
     def assertFails(self, result, out, *texts):
         self.assertEqual(result.returncode, 1, out)
@@ -597,7 +597,8 @@ class InDiff(unittest.TestCase):
         self.assertIn("SKIP: a: no mutant on a changed line", out)
         self.assertIn("SKIP: b: no mutant on a changed line", out)
         self.assertEqual(self.runs(), [])
-        self.assertEqual(len(self.invocations()), 4)
+        self.assertEqual(len(self.invocations()), 5)
+        self.assertEqual(self.invocations()[0], ["mutants", "--package", "a", "--list-files", "--json"])
 
     def test_in_diff_fresh_tree_without_target_runs(self):
         repo = self.in_diff_repo(EDIT_A)
@@ -715,10 +716,10 @@ class InDiff(unittest.TestCase):
         repo = self.in_diff_repo(EDIT_A)
         result, out = self.gate(repo, whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2])
         self.assertEqual(result.returncode, 0, out)
-        self.assertEqual(len(self.cwds()), 5, self.invocations())
+        self.assertEqual(len(self.cwds()), 6, self.invocations())
         self.assertSnapshotOnly(repo)
         [run] = self.runs()
-        self.assertEqual(run[run.index("--output") + 1], str(repo / "target/mutants-a"))
+        self.assertEqual(run[run.index("--output") + 1], str(repo.resolve() / "target/mutants-a"))
         self.assertFalse(list((self.aux / "tmp").iterdir()))
 
     def hidden_module_repo(self):
@@ -774,9 +775,9 @@ class InDiff(unittest.TestCase):
         self.assertEqual(git(repo, "diff", "--name-only", "base", "HEAD"), "crates/a/src/prompt.txt")
         result, out = self.gate(repo, whole=WHOLE_EDIT)
         self.assertEqual(result.returncode, 0, out)
-        self.assertIn("whole: a: mutation scope changed", out)
+        self.assertIn("whole: a: changed crates/a/src/prompt.txt is not a file cargo-mutants walks", out)
         self.assertIn("SKIP: b: no Rust change", out)
-        [run] = self.invocations()
+        [run] = self.runs()
         self.assertEqual(run[:3], ["mutants", "--package", "a"])
         self.assertNotIn("--in-diff", run)
         self.assertSnapshotOnly(repo)
@@ -828,9 +829,9 @@ class InDiff(unittest.TestCase):
         self.assertEqual(git(repo, "diff", "--name-only", "base", "HEAD"), "crates/a/Cargo.toml")
         result, out = self.gate(repo, whole=WHOLE_EDIT)
         self.assertEqual(result.returncode, 0, out)
-        self.assertIn("whole: a: mutation scope changed", out)
+        self.assertIn("whole: a: changed crates/a/Cargo.toml is not a file cargo-mutants walks", out)
         self.assertNotIn("whole: b", out)
-        [run] = self.invocations()
+        [run] = self.runs()
         self.assertEqual(run[:3], ["mutants", "--package", "a"])
         self.assertNotIn("--in-diff", run)
 
@@ -859,7 +860,7 @@ class InDiff(unittest.TestCase):
         self.assertEqual(result.returncode, 0, out)
         self.assertIn("RUN a: 2 in-diff mutants", out)
 
-    def test_in_diff_build_script_inside_src_fails(self):
+    def test_in_diff_build_script_inside_src_runs_that_crate_whole(self):
         helper = "crates/a/src/helper.rs"
         for script in ("src/build.rs", "tests/build.rs", "benches/build.rs", "examples/build.rs"):
             with self.subTest(script=script):
@@ -870,10 +871,11 @@ class InDiff(unittest.TestCase):
                                                      f"crates/a/{script}": BUILD_MAIN,
                                                      helper: BUILD_HELPER})
                 result, out = self.gate(repo, whole=WHOLE_EDIT)
-                self.assertFails(result, out, f"FAIL: --in-diff: build script crates/a/{script} of "
-                                 "mutation crate a lies inside a diff-mapped directory — use the "
-                                 "whole-package run")
-                self.assertEqual(self.invocations(), [])
+                self.assertEqual(result.returncode, 0, out)
+                self.assertIn("whole: a: mutation scope changed", out)
+                [run] = self.runs()
+                self.assertEqual(run[2], "a")
+                self.assertNotIn("--in-diff", run)
 
     def test_in_diff_root_build_script_helper_runs_that_crate_whole(self):
         cases = {"crates/a/helper.rs": BUILD_MAIN,
@@ -890,6 +892,110 @@ class InDiff(unittest.TestCase):
                 whole = [run for run in self.runs() if run[2] == "a"]
                 self.assertEqual(len(whole), 1)
                 self.assertNotIn("--in-diff", whole[0])
+
+    def whole_runs(self, crate):
+        found = [run for run in self.runs() if run[2] == crate]
+        for run in found:
+            self.assertNotIn("--in-diff", run)
+        return found
+
+    def test_in_diff_include_str_of_a_rust_file_runs_that_crate_whole(self):
+        policy = "crates/a/src/policy.rs"
+        lib = LIB_A + 'pub fn check() -> bool {\n    include_str!("policy.rs").trim() == "ALLOW"\n}\n'
+        repo = self.in_diff_repo({policy: "DENY\n"}, base_files={A_RS: lib, policy: "ALLOW\n"})
+        self.assertEqual(git(repo, "diff", "--name-only", "base", "HEAD"), policy)
+        result, out = self.gate(repo, whole=WHOLE_EDIT)
+        self.assertEqual(result.returncode, 0, out)
+        self.assertIn(f"whole: a: changed {policy} is not a file cargo-mutants walks", out)
+        self.assertEqual(len(self.whole_runs("a")), 1)
+        self.assertIn(["mutants", "--package", "a", "--list-files", "--json"], self.invocations())
+
+    def test_in_diff_include_str_of_a_text_file_runs_that_crate_whole(self):
+        prompt = "crates/a/src/prompt.txt"
+        lib = LIB_A + "pub fn prompt() -> &'static str {\n    include_str!(\"prompt.txt\")\n}\n"
+        repo = self.in_diff_repo({prompt: "be terse\n"}, base_files={A_RS: lib, prompt: "be brief\n"})
+        result, out = self.gate(repo, whole=WHOLE_EDIT)
+        self.assertEqual(result.returncode, 0, out)
+        self.assertIn(f"whole: a: changed {prompt} is not a file cargo-mutants walks", out)
+        self.assertEqual(len(self.whole_runs("a")), 1)
+
+    def test_in_diff_a_changed_file_in_the_module_tree_is_diff_mapped(self):
+        repo, _ = self.hidden_module_repo()
+        result, out = self.gate(repo, whole=WHOLE_DECISION, indiff=WHOLE_DECISION)
+        self.assertEqual(result.returncode, 0, out)
+        self.assertIn("RUN a: 1 in-diff mutants", out)
+        self.assertNotIn("whole:", out)
+        self.assertIn(["mutants", "--package", "a", "--list-files", "--json"], self.invocations())
+        [run] = self.runs()
+        self.assertIn("--in-diff", run)
+
+    def test_in_diff_a_changed_file_the_config_excludes_runs_that_crate_whole(self):
+        base_lib = "pub mod decision;\n\n" + LIB_A
+        decision = "pub fn decide(x: u32) -> bool {\n    x > 3\n}\n"
+        repo = self.in_diff_repo({DECISION: decision.replace("x > 3", "x > 4")},
+                                 base_files={A_RS: base_lib, DECISION: decision,
+                                             ".cargo/mutants.toml": f'exclude_globs = ["{DECISION}"]\n'})
+        result, out = self.gate(repo, whole=WHOLE_EDIT)
+        self.assertEqual(result.returncode, 0, out)
+        self.assertIn(f"whole: a: changed {DECISION} is not a file cargo-mutants walks", out)
+        self.assertEqual(len(self.whole_runs("a")), 1)
+
+    def test_in_diff_a_crate_with_a_root_build_script_runs_whole_on_any_change(self):
+        repo = self.in_diff_repo(EDIT_A, base_files={"crates/a/build.rs": "fn main() {}\n"})
+        result, out = self.gate(repo, whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2])
+        self.assertEqual(result.returncode, 0, out)
+        self.assertIn("whole: a: mutation scope changed", out)
+        self.assertEqual(len(self.whole_runs("a")), 1)
+        self.assertNotIn("RUN a:", out)
+
+    def test_in_diff_an_unreadable_file_list_fails(self):
+        for text, status in (("", "0"), ("not json", "0"), ('{"files": []}', "0"), ("[]", "3")):
+            with self.subTest(text=text, status=status):
+                shutil.rmtree(self.tmp / "repo", ignore_errors=True)
+                repo = self.in_diff_repo(EDIT_A)
+                result, out = self.gate(repo, whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2],
+                                        extra_env={"FAKE_LIST_FILES": text, "FAKE_LIST_FILES_EXIT": status})
+                self.assertEqual(result.returncode, 1, out)
+                self.assertNotIn("PASS", out)
+                self.assertRegex(out, r"FAIL: (a: cargo mutants --list-files printed|cargo mutants "
+                                 r"--list-files --package a failed)")
+                self.assertEqual([run for run in self.runs() if run[2] == "a"], [])
+
+    def test_in_diff_symlink_alias_differing_only_in_case_fails(self):
+        repo = self.in_diff_repo(
+            EDIT_A, links={"alias": "CRATES/A/src"},
+            base_files={"crates/a/Cargo.toml": package_toml("a")
+                        + '\n[features]\nextra = []\n\n[lib]\npath = "../../alias/lib.rs"\n'})
+        if not (repo / "CRATES").exists():
+            self.skipTest("SKIP: case-insensitive symlink alias: this filesystem is case-sensitive")
+        result, out = self.gate(repo, whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2])
+        self.assertFails(result, out, "FAIL: --in-diff: symlink alias in mutation crate a; in-diff "
+                         "mapping cannot follow aliases — use the whole-package run")
+        self.assertEqual(self.invocations(), [])
+
+    def test_in_diff_symlink_leaving_the_repository_fails(self):
+        for link, target in (("docs-link", "/etc"), ("tools/up", "../..")):
+            with self.subTest(link=link):
+                shutil.rmtree(self.tmp / "repo", ignore_errors=True)
+                repo = self.in_diff_repo(EDIT_A, base_files={"tools/keep": ""}, links={link: target})
+                result, out = self.gate(repo, whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2])
+                self.assertFails(result, out, f"FAIL: --in-diff: symlink {link} points outside the "
+                                 "repository; in-diff mapping cannot follow aliases — use the whole-package run")
+                self.assertEqual(self.invocations(), [])
+
+    def test_in_diff_the_ci_invocation_with_a_relative_root_runs(self):
+        repo = self.in_diff_repo(EDIT_A)
+        result, out = self.gate(repo, "--mutants", "a", "b", "--in-diff", "base", root=".", cwd=repo,
+                                script="ci/gates/coverage-tiers.sh", whole=WHOLE_EDIT, indiff=WHOLE_EDIT[:2])
+        self.assertEqual(result.returncode, 0, out)
+        self.assertIn("RUN a: 2 in-diff mutants", out)
+        self.assertIn("mutants[a]:", out)
+        [run] = self.runs()
+        output = run[run.index("--output") + 1]
+        self.assertEqual(output, str(repo.resolve() / "target/mutants-a"))
+        self.assertTrue((repo / "target/mutants-a/mutants.out/outcomes.json").is_file())
+        self.assertSnapshotOnly(repo)
+
 
 def git(repo, *args, input=None):
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
@@ -1027,6 +1133,48 @@ print(json.dumps([m for m in json.load(sys.stdin) if m["package"] == sys.argv[1]
 """
 
 
+LIST_FILES = """import fnmatch, glob, json, os, re, sys, tomllib
+
+
+def load(path):
+    with open(path, "rb") as f:
+        return tomllib.load(f)
+
+
+def walk(file, out):
+    out.append(file)
+    try:
+        with open(file) as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return
+    here = os.path.dirname(file)
+    for index, line in enumerate(lines):
+        found = re.match(r"\\s*(?:pub\\s+)?mod (\\w+)\\s*;", line)
+        if not found or (index and "cfg(test)" in lines[index - 1]):
+            continue
+        for name in (found.group(1) + ".rs", found.group(1) + "/mod.rs"):
+            if os.path.isfile(os.path.join(here, name)):
+                walk(os.path.join(here, name), out)
+                break
+
+
+try:
+    globs = load(".cargo/mutants.toml").get("exclude_globs", [])
+except OSError:
+    globs = []
+files = []
+for member in load("Cargo.toml").get("workspace", {}).get("members", []):
+    for directory in sorted(glob.glob(member)):
+        manifest = load(os.path.join(directory, "Cargo.toml"))
+        if manifest.get("package", {}).get("name") != sys.argv[1]:
+            continue
+        walk(os.path.join(directory, manifest.get("lib", {}).get("path", "src/lib.rs")), files)
+print(json.dumps([{"package": sys.argv[1], "path": f} for f in files
+                  if not any(fnmatch.fnmatch(f, g) for g in globs)]))
+"""
+
+
 def fake_cargo(tools):
     recorder = tools / "cargo"
     recorder.write_text(
@@ -1038,12 +1186,18 @@ def fake_cargo(tools):
         'fi\n'
         '{ printf "%s\\t" "$@"; echo; } >> "$MUTATION_ARGS.log"\n'
         'pwd -P >> "$MUTATION_ARGS.cwd"\n'
-        'pkg= indiff= list=0\n'
+        'pkg= indiff= list=0 files=0\n'
         'for a in "$@"; do\n'
         '  case "$prev" in --package) pkg="$a";; --in-diff) indiff="$a";; esac\n'
         '  [ "$a" = --list ] && list=1\n'
+        '  [ "$a" = --list-files ] && files=1\n'
         '  prev="$a"\n'
         'done\n'
+        'if [ "$files" = 1 ]; then\n'
+        '  if [ -n "${FAKE_LIST_FILES+x}" ]; then printf "%s" "$FAKE_LIST_FILES"\n'
+        '  else python3 "$(dirname "$0")/list_files.py" "$pkg"; fi\n'
+        '  exit "${FAKE_LIST_FILES_EXIT:-0}"\n'
+        'fi\n'
         'if [ "$list" = 1 ]; then\n'
         '  if [ -n "$indiff" ]; then cp "$indiff" "$MUTATION_ARGS.in.diff"; json="${FAKE_INDIFF_LIST-}"\n'
         '  else json="${FAKE_WHOLE_LIST-}"; fi\n'
@@ -1071,6 +1225,7 @@ def fake_cargo(tools):
     )
     recorder.chmod(0o755)
     (tools / "list_filter.py").write_text(LIST_FILTER)
+    (tools / "list_files.py").write_text(LIST_FILES)
     (tools / "cargo-mutants").symlink_to(recorder)
 
 

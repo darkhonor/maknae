@@ -95,6 +95,10 @@ if [ -z "$root" ]; then
   fi
 fi
 
+if [ -n "$in_diff" ] && ! root="$(CDPATH='' cd -P -- "$root" && pwd -P)"; then
+  fail "--in-diff: --root does not resolve to a directory"; exit 1
+fi
+
 # ---- injection-in-work-tree refusal ----------------------------------------
 if [ "$injection" -eq 1 ]; then
   if ! command -v git >/dev/null 2>&1; then
@@ -690,25 +694,24 @@ print("\n".join(crates))' 2>/dev/null)"; then
     if ! problem="$(python3 "$here/mutation-diff.py" unmappable "$root" "$head_oid" "$snap" 2>&1)"; then
       printf '%s\n' "${problem:-FAIL: --in-diff: the unmappable-shape check printed nothing}"; exit 1
     fi
-    while IFS= read -r path; do
-      [ -z "$path" ] && continue
-      owner="" owner_len=-1
-      for c in "${!crate_dir_map[@]}"; do
-        d="${crate_dir_map[$c]}"
-        if [ "$d" = "." ]; then
-          n=0
-        elif [ "${path#"$d"/}" != "$path" ]; then
-          n=${#d}
-        else
-          continue
-        fi
-        if [ "$n" -gt "$owner_len" ]; then owner="$c" owner_len=$n; fi
-      done
-      if [ -n "$owner" ] && [ -n "${contract[$owner]+x}" ] && [ -z "${selected[$owner]+x}" ]; then
-        printf 'FAIL: --in-diff: changed crate %s not selected by --mutants\n' "$owner"; exit 1
+    if ! owned="$(python3 "$here/mutation-diff.py" touched "$root" "$base" "$head_oid" "$snap" 2>&1)" ||
+       ! owned_lines="$(printf '%s' "$owned" | python3 -c '
+import json, sys
+crates = json.load(sys.stdin)
+if not (isinstance(crates, list) and all(isinstance(c, str) for c in crates)):
+    sys.exit(1)
+print("\n".join(crates))' 2>/dev/null)"; then
+      printf 'FAIL: --in-diff: changed crates cannot be computed: %s\n' "$owned"; exit 1
+    fi
+    declare -A touched=()
+    while IFS= read -r c; do
+      [ -z "$c" ] && continue
+      if [ -z "${selected[$c]+x}" ]; then
+        printf 'FAIL: --in-diff: changed crate %s not selected by --mutants\n' "$c"; exit 1
       fi
-    done <<<"$changed_paths"
-    if [ ! -s "$in_diff_file" ] && [ "${#in_scope[@]}" -eq 0 ]; then
+      touched["$c"]=1
+    done <<<"$owned_lines"
+    if [ ! -s "$in_diff_file" ] && [ "${#in_scope[@]}" -eq 0 ] && [ "${#touched[@]}" -eq 0 ]; then
       printf 'SKIP: in-diff: no Rust change between %s and HEAD\n' "$base"
       mutant_crates=()
     fi
@@ -751,8 +754,28 @@ print("\n".join(crates))' 2>/dev/null)"; then
     diff_flags=()
     judge_flags=()
     if [ -n "$in_diff" ]; then
+      whole=0
       if [ -n "${in_scope[$cname]+x}" ]; then
         printf 'whole: %s: mutation scope changed\n' "$cname"
+        whole=1
+      elif [ -n "${touched[$cname]+x}" ]; then
+        if ! (cd "$mut_dir" && exec env "${run_env[@]}" cargo mutants --package "$cname" --list-files --json "${extra_mutants_flags[@]}") >"$mut_tmp/files.json"; then
+          fail "cargo mutants --list-files --package $cname failed"
+          continue
+        fi
+        if ! walked="$(python3 "$here/mutation-diff.py" unlisted "$root" "$base" "$head_oid" "$snap" "$cname" "$mut_tmp/files.json" 2>&1)"; then
+          printf '%s\n' "${walked:-FAIL: $cname: mutation-diff.py unlisted printed nothing}"
+          fail_n=$((fail_n + 1))
+          continue
+        fi
+        case "$walked" in
+          "") ;;
+          "whole: $cname: changed "*) printf '%s\n' "$walked"; whole=1;;
+          *) fail "$cname: mutation-diff.py unlisted printed no verdict: $walked"; continue;;
+        esac
+      fi
+      if [ "$whole" -eq 1 ]; then
+        :
       elif [ ! -s "$in_diff_file" ]; then
         printf 'SKIP: %s: no Rust change between %s and HEAD\n' "$cname" "$base"
         continue

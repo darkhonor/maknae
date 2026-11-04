@@ -150,6 +150,14 @@ def mutants(repo, *args):
     return json.loads(done.stdout) if done.stdout.strip() else []
 
 
+def walked(repo):
+    done = subprocess.run(["cargo", "mutants", "--list-files", "--json"], cwd=repo,
+                          env=clean_env(), capture_output=True, text=True)
+    if done.returncode != 0 or not done.stdout.strip():
+        raise RuntimeError(f"cargo mutants --list-files exited {done.returncode}: {done.stderr}")
+    return {entry["path"] for entry in json.loads(done.stdout)}
+
+
 def generate(repo, base, out, env):
     done = subprocess.run(
         ["bash", "-c", 'source "$1" && root="$2" && in_diff_generate "$3" "$4"', "conformance",
@@ -192,6 +200,9 @@ def check(name, head, config, env, scratch, base_tree=BASE, local=None):
     stray = sorted({m["file"] for m in indiff} - set(changed))
     if stray:
         problems.append(f"in-diff mutants name files the diff does not: {stray}")
+    unwalked = sorted({m["file"] for m in whole} - walked(snapshot))
+    if unwalked:
+        problems.append(f"listed mutants name files --list-files does not: {unwalked}")
     if marked != selected:
         problems.append(f"parser-only {sorted(set(marked) - set(selected))}, "
                         f"cargo-mutants-only {sorted(set(selected) - set(marked))}")

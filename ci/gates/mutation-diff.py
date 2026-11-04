@@ -372,41 +372,108 @@ def script_path(directory, script):
     return None if path == ".." or path.startswith("../") else path
 
 
-def scope_crates(root, base, head, workspace=None):
-    base_sha, head_sha = resolve(root, base), resolve(root, head)
-    dirs = workspace_crates(workspace or root)
-    head_tiers = tiers(show(root, head_sha, "coverage-tiers.toml"))
-    mutants = head_tiers if head_tiers is not None else set(dirs)
-    docs_only = affected().docs_only
-    script_dirs = {}
+def script_dirs(root, shas, mutants, dirs):
+    found = {}
     for crate in sorted(mutants & set(dirs)):
-        for sha in (base_sha, head_sha):
+        for sha in shas:
             present = lambda path, sha=sha: show(root, sha, path) is not None
             for script in build_scripts(root, sha, dirs[crate], present):
                 path = script_path(dirs[crate], script)
-                script_dirs.setdefault(crate, set()).add("." if path is None else posixpath.dirname(path))
+                found.setdefault(crate, {dirs[crate]}).add("." if path is None else posixpath.dirname(path))
+    return found
+
+
+def exempt(root, base_sha, head_sha, path, docs_only):
+    return docs_only(path) or path == "Cargo.lock" or dependency_only(root, base_sha, head_sha, path)
+
+
+def contract(root, sha, dirs):
+    head_tiers = tiers(show(root, sha, "coverage-tiers.toml"))
+    return head_tiers if head_tiers is not None else set(dirs)
+
+
+def scope_crates(root, base, head, workspace=None):
+    base_sha, head_sha = resolve(root, base), resolve(root, head)
+    dirs = workspace_crates(workspace or root)
+    mutants = contract(root, head_sha, dirs)
+    docs_only = affected().docs_only
+    built = script_dirs(root, (base_sha, head_sha), mutants, dirs)
     selected = set()
     for path in changed_names(root, base_sha, head_sha):
-        if docs_only(path) or path == "Cargo.lock" or dependency_only(root, base_sha, head_sha, path):
+        if exempt(root, base_sha, head_sha, path, docs_only):
             continue
-        selected.update(c for c, found in script_dirs.items() if any(within(path, d) for d in found))
+        selected.update(c for c, found in built.items() if any(within(path, d) for d in found))
         owner = owner_of(path, dirs)
-        nested = owner is not None and dirs[owner] != "."
-        rel = path[len(dirs[owner]) + 1:] if nested else path
-        if owner is not None and rel.endswith(".rs") and rel.split("/")[0] in SOURCE_DIRS:
+        if owner is not None and dirs[owner] != ".":
             continue
-        if not nested:
-            selected.update(mutants)
-        elif owner in mutants:
-            selected.add(owner)
+        if owner is not None and path.endswith(".rs") and path.split("/")[0] in SOURCE_DIRS:
+            continue
+        selected.update(mutants)
     return sorted(selected & mutants)
+
+
+def touched(root, base, head, workspace):
+    base_sha, head_sha = resolve(root, base), resolve(root, head)
+    dirs = workspace_crates(workspace)
+    mutants = contract(root, head_sha, dirs)
+    docs_only = affected().docs_only
+    owners = {owner_of(path, dirs) for path in changed_names(root, base_sha, head_sha)
+              if not exempt(root, base_sha, head_sha, path, docs_only)}
+    return sorted(owners & mutants)
+
+
+def read_files(crate, path):
+    text = Path(path).read_text()
+    if not text.strip():
+        raise DiffError(f"FAIL: {crate}: cargo mutants --list-files printed nothing")
+    try:
+        data = json.loads(text)
+        if not isinstance(data, list):
+            raise ValueError
+        listed = set()
+        for entry in data:
+            if not isinstance(entry, dict) or entry["package"] != crate or not isinstance(entry["path"], str):
+                raise ValueError
+            listed.add(entry["path"])
+    except (ValueError, KeyError, TypeError):
+        raise DiffError(f"FAIL: {crate}: cargo mutants --list-files printed no file list") from None
+    return listed
+
+
+def unlisted(root, base, head, workspace, crate, files):
+    base_sha, head_sha = resolve(root, base), resolve(root, head)
+    dirs = workspace_crates(workspace)
+    if crate not in dirs:
+        raise ScopeError(f"FAIL: {crate} is not a workspace crate")
+    listed = read_files(crate, files)
+    docs_only = affected().docs_only
+    for path in changed_names(root, base_sha, head_sha):
+        if owner_of(path, dirs) != crate or path in listed:
+            continue
+        if exempt(root, base_sha, head_sha, path, docs_only):
+            continue
+        return f"whole: {crate}: changed {path} is not a file cargo-mutants walks"
+    return None
+
+
+def contains(directory, path):
+    try:
+        anchor = os.stat(directory)
+    except OSError:
+        return False
+    for candidate in (path, *path.parents):
+        try:
+            if os.path.samestat(os.stat(candidate), anchor):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def unmappable(root, head, workspace):
     sha = resolve(root, head)
     dirs = workspace_crates(workspace)
-    head_tiers = tiers(show(root, sha, "coverage-tiers.toml"))
-    mutants = sorted((head_tiers if head_tiers is not None else set(dirs)) & set(dirs))
+    mutants = sorted(contract(root, sha, dirs) & set(dirs))
     listing = git(root, "ls-tree", "-r", "-z", "--full-tree", sha)
     if listing.returncode != 0:
         raise ScopeError(f"FAIL: git ls-tree {sha} failed: {listing.stderr.decode().strip()}")
@@ -418,21 +485,27 @@ def unmappable(root, head, workspace):
         paths.add(raw.decode())
         if meta.split(b" ")[0] == b"120000":
             links.append(raw.decode())
-    tree = Path(workspace).resolve()
+    tree = Path(os.path.realpath(workspace))
+    resolved = {}
+    for link in sorted(links):
+        place = tree / link
+        target = Path(os.path.realpath(place))
+        if os.path.isabs(os.readlink(place)) or not contains(tree, target):
+            return (f"FAIL: --in-diff: symlink {link} points outside the repository; in-diff "
+                    "mapping cannot follow aliases — use the whole-package run")
+        resolved[link] = (Path(os.path.realpath(place.parent)), target)
     for crate in mutants:
         directory = dirs[crate]
-        for link in sorted(links):
-            target = os.path.relpath(os.path.realpath(tree / link), tree)
-            if within(link, directory) or within(target, directory) or within(directory, target):
+        home = Path(os.path.realpath(tree / directory))
+        for link, (parent, target) in resolved.items():
+            if (within(link, directory) or contains(home, parent) or contains(home, target)
+                    or contains(target, home)):
                 return (f"FAIL: --in-diff: symlink {link} in mutation crate {crate}; in-diff mapping "
                         "cannot follow aliases — use the whole-package run")
         for script in build_scripts(root, sha, directory, paths.__contains__):
-            path = script_path(directory, script)
-            owner = None if path is None else owner_of(path, dirs)
-            rel = path if owner is None or dirs[owner] == "." else path[len(dirs[owner]) + 1:]
-            if path is None or (owner is not None and rel.split("/")[0] in SOURCE_DIRS):
-                return (f"FAIL: --in-diff: build script {path or script} of mutation crate {crate} "
-                        "lies inside a diff-mapped directory — use the whole-package run")
+            if script_path(directory, script) is None:
+                return (f"FAIL: --in-diff: build script {script} of mutation crate {crate} "
+                        "lies outside the repository — use the whole-package run")
     return None
 
 
@@ -521,6 +594,12 @@ def main(argv):
                 return 1
         elif len(argv) == 4 and command == "snapshot":
             snapshot(argv[1], argv[2], argv[3])
+        elif len(argv) == 5 and command == "touched":
+            print(json.dumps(touched(*argv[1:])))
+        elif len(argv) == 7 and command == "unlisted":
+            line = unlisted(*argv[1:])
+            if line:
+                print(line)
         elif len(argv) == 4 and command == "unmappable":
             problem = unmappable(*argv[1:])
             if problem:
@@ -530,7 +609,8 @@ def main(argv):
             print("FAIL: usage: mutation-diff.py changed-lines <diff> | classify <pkg> <diff> "
                   "<whole> <indiff> | scope <root> <base> <head> [<workspace>] | paths <root> <base> "
                   "<diff> [<head>] | history <root> | snapshot <root> <rev> <dest> | "
-                  "unmappable <root> <head> <workspace>",
+                  "touched <root> <base> <head> <workspace> | unlisted <root> <base> <head> "
+                  "<workspace> <crate> <files> | unmappable <root> <head> <workspace>",
                   file=sys.stderr)
             return 1
     except (DiffError, ScopeError) as exc:

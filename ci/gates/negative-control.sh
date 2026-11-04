@@ -4610,12 +4610,22 @@ mid_channel="$(sed -n 's/^channel *= *"\(.*\)".*/\1/p' "$here/../../rust-toolcha
 cat > "$mid_aux/tools/cargo" <<'EOF'
 #!/bin/sh
 [ "$1" = mutants ] || exec "$MID_REAL_CARGO" "$@"
-list=0 pkg= indiff= out= prev=
+list=0 files=0 pkg= indiff= out= prev=
 for a in "$@"; do
   case "$prev" in --package) pkg="$a";; --in-diff) indiff="$a";; --output) out="$a";; esac
   [ "$a" = --list ] && list=1
+  [ "$a" = --list-files ] && files=1
   prev="$a"
 done
+if [ "$files" = 1 ]; then
+  python3 -c 'import json, os, re, sys
+lib = os.path.join("crates", sys.argv[1], "src/lib.rs")
+with open(lib) as f:
+    names = re.findall(r"^(?:pub )?mod (\w+)\s*;", f.read(), re.M)
+walked = [lib] + [os.path.join(os.path.dirname(lib), n + ".rs") for n in names]
+print(json.dumps([{"package": sys.argv[1], "path": w} for w in walked if os.path.isfile(w)]))' "$pkg"
+  exit 0
+fi
 if [ "$list" = 1 ]; then
   if [ -n "$indiff" ]; then json="$MID_INDIFF"; else json="$MID_WHOLE"; fi
   [ -z "$json" ] && exit 0
@@ -4789,8 +4799,33 @@ mid_git "$mid_r" commit -qm build
 mid_git "$mid_r" tag -f base
 printf 'pub fn emit() {\n    println!("cargo:rustc-cfg=slow");\n}\n' > "$mid_r/crates/a/src/helper.rs"
 mid_git "$mid_r" commit -qam helper
-expect_reject_because "mutation-in-diff/build-script-in-src-fails" "build script crates/a/src/build.rs of mutation crate a lies inside a diff-mapped directory" \
-  mid_gate "$mid_r" "$mid_whole_edit" "" 0
+expect_reject_because "mutation-in-diff/build-script-crate-survivor-fails" "reported missed/timeout mutants" \
+  mid_gate "$mid_r" "$mid_whole_edit" "" 2
+mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
+printf 'pub fn check() -> bool {\n    include_str!("policy.rs").trim() == "ALLOW"\n}\n' >> "$mid_r/crates/a/src/lib.rs"
+printf 'ALLOW\n' > "$mid_r/crates/a/src/policy.rs"
+mid_git "$mid_r" add -A
+mid_git "$mid_r" commit -qm policy
+mid_git "$mid_r" tag -f base
+printf 'DENY\n' > "$mid_r/crates/a/src/policy.rs"
+mid_git "$mid_r" commit -qam deny
+expect_reject_because "mutation-in-diff/include-str-rs-survivor-fails" "reported missed/timeout mutants" \
+  mid_gate "$mid_r" "$mid_whole_edit" "" 2
+mid_r="$(mid_repo 'let z = y * 4;' 'x * 5' Fixture.)"
+if [ -e "$mid_r/CRATES" ]; then
+  mid_git "$mid_r" reset -q --hard base
+  ln -s CRATES/A/src "$mid_r/alias"
+  mid_git "$mid_r" add -A
+  mid_git "$mid_r" commit -qm alias
+  mid_git "$mid_r" tag -f base
+  mid_lib "$mid_r/crates/a/src/lib.rs" 'let z = y * 4;' 'x * 5' Fixture.
+  mid_git "$mid_r" commit -qam head
+  expect_reject_because "mutation-in-diff/case-insensitive-symlink-fails" "symlink alias in mutation crate a" \
+    mid_gate "$mid_r" "$mid_whole_edit" "[$mid_a,$mid_star]" 0
+else
+  echo "neg-skip: [mutation-in-diff/case-insensitive-symlink-fails] this filesystem is case-sensitive; CRATES/A/src cannot alias crates/a/src"
+  skipped=$((skipped+1))
+fi
 
 # ---- payload-xattr-clean (#332): an AppleDouble sibling per tagged entry ------
 # pkgbuild serialises a `._name` AppleDouble sibling INTO the payload for every
