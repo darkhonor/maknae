@@ -348,13 +348,16 @@ class AffectedTests(unittest.TestCase):
         self.assertEqual(len(invocations), 2, invocations)
         self.assertEqual(self.mutation_calls(invocations), [])
 
-    def test_hook_docs_only_new_ref_does_not_fail(self):
-        # The real selector widens every new ref to a full selection, so a stub
-        # supplies the empty one the hook's own condition is written for.
+    def test_hook_docs_only_new_ref_needs_a_mutation_base(self):
+        # An empty push selection no longer skips mutation: the merge-base selection
+        # decides, and a new ref needs <remote>/HEAD or the override to compute it.
         self.write('README.md', 'docs\n')
         self.commit()
         stub = 'import json\nprint(json.dumps({"build": False, "mutants": [], "reason": "stub"}))\n'
-        self.assertEqual(self.hook(ZERO, mutations=True, selector=stub), [])
+        proc, invocations = self.hook(ZERO, mutations=True, selector=stub, expect_fail=True)
+        self.assertIn('MAKNAE_PRE_PUSH_MUTANTS_BASE=<rev>', proc.stderr)
+        self.assertEqual(invocations, [])
+        self.assertEqual(self.hook(ZERO, mutations=True, selector=stub, remote_head=self.base), [])
 
     def test_hook_mutation_runs_after_build_gates(self):
         self.change_c()
@@ -409,6 +412,18 @@ class AffectedTests(unittest.TestCase):
         calls = self.mutation_calls(self.hook(old_tip, mutations=True))
         self.assertEqual(calls, ['--root ' + self.git('rev-parse', '--show-toplevel')
                                  + ' --mutants a b c --in-diff ' + old_tip])
+
+    def test_hook_rebase_with_docs_only_push_range_still_mutates_the_branch(self):
+        self.write('crates/a/src/lib.rs', '// branch\n')
+        old_tip = self.commit()
+        self.git('reset', '-q', '--hard', self.base)
+        self.write('README.md', 'main moved\n')
+        self.commit()
+        self.write('crates/a/src/lib.rs', '// branch\n')
+        self.commit()
+        invocations = self.hook(old_tip, mutations=True)
+        self.assertEqual(invocations, ['--root ' + self.git('rev-parse', '--show-toplevel')
+                                       + ' --mutants a b --in-diff ' + old_tip])
 
     def test_hook_without_opt_in_runs_no_mutation(self):
         self.change_c()
