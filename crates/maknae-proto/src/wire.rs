@@ -651,7 +651,7 @@ pub enum Verb {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WhoamiView {
-    pub peer_plane_uri_san: String,
+    pub peer_plane_uri_san: Option<String>,
     pub peer_uid: u32,
 }
 
@@ -2125,7 +2125,7 @@ mod tests {
         let r = Response {
             protocol_version: PROTOCOL_VERSION,
             result: RespResult::Ok(Payload::Whoami(WhoamiView {
-                peer_plane_uri_san: "maknae://d/plane/cli".into(),
+                peer_plane_uri_san: Some("spiffe://d/plane/cli".into()),
                 peer_uid: 501,
             })),
         };

@@ -1,16 +1,20 @@
-//! FIPS-pinned rustls config builders (Layer 1, T3). Both builders assert the aws-lc-rs
-//! FIPS provider first (fail-closed) and start from `maknae_crypto::tls`, so no
-//! ambient `CryptoProvider` default is relied on. TLS 1.3 only. The private key never
-//! leaves the crate — the `CertifiedKey` is built here from the `pub(crate)` key accessor.
-use crate::plane_verify::{PlaneClientCertVerifier, PlaneServerCertVerifier};
+//! FIPS-pinned rustls config builders (Layer 1, T3). `server_config` and `client_config`
+//! assert the aws-lc-rs FIPS provider first (fail-closed); every builder starts from
+//! `maknae_crypto::tls`, so no ambient `CryptoProvider` default is relied on. TLS 1.3
+//! only. The private key never leaves the crate — the `CertifiedKey` is built here from
+//! the `pub(crate)` key accessor.
+use crate::peer_auth::SanIdentity;
 use crate::resolver::PlaneCertResolver;
-use crate::{CaBundle, Plane, PlaneClient, PlaneIdentity, VaultError};
+use crate::{PeerAuth, PlaneClient, PlaneIdentity, SanRule, TrustBundle, VaultError};
 use maknae_crypto::assert_fips_provider;
 use maknae_crypto::rustls::client::danger::ServerCertVerifier;
+use maknae_crypto::rustls::client::Resumption;
 use maknae_crypto::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use maknae_crypto::rustls::server::danger::ClientCertVerifier;
+use maknae_crypto::rustls::server::NoServerSessionStorage;
 use maknae_crypto::rustls::sign::CertifiedKey;
 use maknae_crypto::rustls::{ClientConfig, ServerConfig};
+use maknae_crypto::tls::{ClientVerifierHandle, ServerVerifierHandle};
 use std::sync::Arc;
 
 fn pem_chain_to_der(id: &PlaneIdentity) -> Result<Vec<CertificateDer<'static>>, VaultError> {
@@ -27,6 +31,26 @@ fn pem_chain_to_der(id: &PlaneIdentity) -> Result<Vec<CertificateDer<'static>>, 
     Ok(out)
 }
 
+pub(crate) fn client_verifier(
+    trust: &TrustBundle,
+    rule: SanRule,
+) -> Result<Arc<ClientVerifierHandle>, VaultError> {
+    maknae_crypto::tls::client_cert_verifier_builder(trust.roots(), &maknae_crypto::policy()?.tls)?
+        .with_peer_identity(Arc::new(SanIdentity(rule)))
+        .build()
+        .map_err(|e| VaultError::Handshake(format!("client verifier: {e}")))
+}
+
+pub(crate) fn server_verifier(
+    trust: &TrustBundle,
+    rule: SanRule,
+) -> Result<Arc<ServerVerifierHandle>, VaultError> {
+    maknae_crypto::tls::server_cert_verifier_builder(trust.roots(), &maknae_crypto::policy()?.tls)?
+        .with_peer_identity(Arc::new(SanIdentity(rule)))
+        .build()
+        .map_err(|e| VaultError::Handshake(format!("server verifier: {e}")))
+}
+
 pub(crate) fn certified_key_from_identity(
     id: &PlaneIdentity,
 ) -> Result<Arc<CertifiedKey>, VaultError> {
@@ -39,28 +63,36 @@ pub(crate) fn certified_key_from_identity(
     Ok(Arc::new(CertifiedKey::new(chain, key)))
 }
 
-/// Server config: dynamic resolver (fail-closed when empty) + client-auth via the custom
-/// client-cert verifier expecting the peer plane.
+/// Server config: dynamic resolver (fail-closed when empty); client auth per `auth`.
 pub(crate) fn server_config(
-    client: &PlaneClient,
-    ca: &CaBundle,
+    trust: &TrustBundle,
+    auth: &PeerAuth,
     resolver: Arc<PlaneCertResolver>,
 ) -> Result<Arc<ServerConfig>, VaultError> {
     assert_fips_provider()?;
-    let expect = client.plane().peer();
-    let verifier = PlaneClientCertVerifier::new(ca, expect, client.deployment_id())?;
-    Ok(Arc::new(plane_server_config(verifier, resolver)?))
+    let config = match auth {
+        PeerAuth::Certless => without_resumption(
+            maknae_crypto::tls::server_builder(&maknae_crypto::policy()?.tls)
+                .map_err(|e| VaultError::Handshake(format!("server tls13: {e}")))?
+                .with_no_client_auth()
+                .with_cert_resolver(resolver),
+        ),
+        PeerAuth::PlaneLeaf { accept } => {
+            plane_server_config(client_verifier(trust, accept.clone())?, resolver)?
+        }
+    };
+    Ok(Arc::new(config))
 }
 
-/// Client config: custom server-cert verifier + STATIC client cert (CLI is stateless).
+/// Client config. The CLI still configures its static leaf (removed by #116); the client
+/// channel never requests it, so only the machine class sends it.
 pub(crate) fn client_config(
     client: &PlaneClient,
-    ca: &CaBundle,
-    expected_peer: Plane,
+    trust: &TrustBundle,
+    accept: SanRule,
 ) -> Result<Arc<ClientConfig>, VaultError> {
     assert_fips_provider()?;
-    debug_assert_eq!(expected_peer, client.plane().peer());
-    let verifier = PlaneServerCertVerifier::new(ca, expected_peer, client.deployment_id())?;
+    let verifier = server_verifier(trust, accept)?;
     let id = client
         .current_identity()
         .ok_or_else(|| VaultError::Handshake("no minted identity".into()))?;
@@ -69,16 +101,22 @@ pub(crate) fn client_config(
     Ok(Arc::new(plane_client_config(verifier, Some((chain, key)))?))
 }
 
+fn without_resumption(mut config: ServerConfig) -> ServerConfig {
+    config.session_storage = Arc::new(NoServerSessionStorage {});
+    config.send_tls13_tickets = 0;
+    config
+}
+
 pub(crate) fn plane_server_config(
     verifier: Arc<dyn ClientCertVerifier>,
     resolver: Arc<PlaneCertResolver>,
 ) -> Result<ServerConfig, VaultError> {
-    Ok(
+    Ok(without_resumption(
         maknae_crypto::tls::server_builder(&maknae_crypto::policy()?.tls)
             .map_err(|e| VaultError::Handshake(format!("server tls13: {e}")))?
             .with_client_cert_verifier(verifier)
             .with_cert_resolver(resolver),
-    )
+    ))
 }
 
 pub(crate) fn plane_client_config(
@@ -89,26 +127,28 @@ pub(crate) fn plane_client_config(
         .map_err(|e| VaultError::Handshake(format!("client tls13: {e}")))?
         .dangerous()
         .with_custom_certificate_verifier(verifier);
-    match client_auth {
+    let mut config = match client_auth {
         Some((chain, key)) => builder
             .with_client_auth_cert(chain, key)
-            .map_err(|e| VaultError::Handshake(format!("client auth cert: {e}"))),
-        None => Ok(builder.with_no_client_auth()),
-    }
+            .map_err(|e| VaultError::Handshake(format!("client auth cert: {e}")))?,
+        None => builder.with_no_client_auth(),
+    };
+    config.resumption = Resumption::disabled();
+    Ok(config)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     const _: fn() = || {
-        fn _sig(client: &PlaneClient, ca: &CaBundle) {
+        fn _sig(client: &PlaneClient, trust: &TrustBundle, auth: &PeerAuth) {
             let _s: Result<Arc<maknae_crypto::rustls::ServerConfig>, VaultError> = server_config(
-                client,
-                ca,
+                trust,
+                auth,
                 Arc::new(crate::resolver::PlaneCertResolver::new_empty()),
             );
             let _c: Result<Arc<maknae_crypto::rustls::ClientConfig>, VaultError> =
-                client_config(client, ca, Plane::Kernel);
+                client_config(client, trust, SanRule::Exact(String::new()));
         }
     };
 }

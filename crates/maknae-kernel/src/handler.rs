@@ -7,7 +7,29 @@ use std::process::ExitCode;
 
 use crate::blocking_guard::BLOCKING_OPERATION_TIMEOUT;
 use maknae_proto::{Payload, Verb, WhoamiView};
-use maknae_vault::VaultError;
+use maknae_vault::{ChannelPeer, PeerAuth, VaultError};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Admission {
+    MaknaeGroupMember,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelClass {
+    pub peer_auth: PeerAuth,
+    pub admission: Admission,
+    pub lane: maknae_security::Lane,
+    pub socket: std::path::PathBuf,
+}
+
+pub fn client_class(transport: &maknae_config::TransportConfig) -> ChannelClass {
+    ChannelClass {
+        peer_auth: PeerAuth::Certless,
+        admission: Admission::MaknaeGroupMember,
+        lane: maknae_security::Lane::Local,
+        socket: transport.socket_path.clone(),
+    }
+}
 
 /// What a request's verb resolves to. Carries NO peer facts: `WhoamiRequested` says
 /// only "the peer asked who-am-I"; the whoami *view* is built separately from the
@@ -125,10 +147,17 @@ pub fn dispatch_verb(verb: &Verb) -> Dispatch {
     }
 }
 
+pub fn peer_san(peer: &ChannelPeer) -> Option<&str> {
+    match peer {
+        ChannelPeer::Certified(san) => Some(san),
+        ChannelPeer::Certless => None,
+    }
+}
+
 /// Build the `whoami` response payload from the kernel-verified peer facts.
-pub fn build_whoami(uri: &str, uid: u32) -> Payload {
+pub fn build_whoami(uri: Option<&str>, uid: u32) -> Payload {
     Payload::Whoami(WhoamiView {
-        peer_plane_uri_san: uri.to_string(),
+        peer_plane_uri_san: uri.map(str::to_string),
         peer_uid: uid,
     })
 }
@@ -163,6 +192,9 @@ pub enum ServeOutcome {
     /// The drain for a restart-class accept began and the accept did not persist;
     /// exit non-zero on the unchanged baseline.
     AcceptAbandoned,
+    /// The listener authenticates peers other than as its channel class requires;
+    /// nothing was accepted.
+    ChannelMismatch,
 }
 
 /// The exit status that asks the supervisor to restart into an accepted baseline.
@@ -175,7 +207,9 @@ pub const APPLY_BY_RESTART_EXIT_CODE: u8 = 6;
 pub fn serve_outcome_to_exit_code(outcome: &ServeOutcome) -> ExitCode {
     match outcome {
         ServeOutcome::GracefulShutdown => ExitCode::SUCCESS,
-        ServeOutcome::SupervisorExited(_) | ServeOutcome::AcceptAbandoned => ExitCode::FAILURE,
+        ServeOutcome::SupervisorExited(_)
+        | ServeOutcome::AcceptAbandoned
+        | ServeOutcome::ChannelMismatch => ExitCode::FAILURE,
         ServeOutcome::ApplyByRestart => ExitCode::from(APPLY_BY_RESTART_EXIT_CODE),
     }
 }
@@ -459,6 +493,21 @@ pub fn delegated_plan(home: &std::path::Path, owner_uid: u32) -> maknae_io::Dele
 mod tests {
     use super::*;
     use maknae_proto::ContainTarget;
+
+    #[test]
+    fn the_client_class_is_certless_group_admitted_local_on_the_configured_socket() {
+        let mut transport = maknae_config::transport_from_section(None).unwrap();
+        transport.socket_path = "/run/maknae/test-client.sock".into();
+        assert_eq!(
+            client_class(&transport),
+            ChannelClass {
+                peer_auth: PeerAuth::Certless,
+                admission: Admission::MaknaeGroupMember,
+                lane: maknae_security::Lane::Local,
+                socket: "/run/maknae/test-client.sock".into(),
+            }
+        );
+    }
 
     #[test]
     fn exactly_the_four_file_actions_are_filesystem_verbs() {
@@ -819,6 +868,10 @@ mod tests {
             serve_outcome_to_exit_code(&ServeOutcome::AcceptAbandoned),
             ExitCode::FAILURE
         );
+        assert_eq!(
+            serve_outcome_to_exit_code(&ServeOutcome::ChannelMismatch),
+            ExitCode::FAILURE
+        );
         assert_eq!(APPLY_BY_RESTART_EXIT_CODE, 6);
     }
 
@@ -833,19 +886,31 @@ mod tests {
 
     #[test]
     fn whoami_view_carries_exact_peer_facts() {
-        match build_whoami("maknae://d/plane/cli", 501) {
+        match build_whoami(Some("spiffe://d/plane/cli"), 501) {
             Payload::Whoami(w) => {
                 assert_eq!(w.peer_uid, 501);
-                assert_eq!(w.peer_plane_uri_san, "maknae://d/plane/cli");
+                assert_eq!(
+                    w.peer_plane_uri_san.as_deref(),
+                    Some("spiffe://d/plane/cli")
+                );
             }
             other => panic!("expected Payload::Whoami, got {other:?}"),
         }
     }
 
     #[test]
+    fn peer_san_is_the_san_or_none() {
+        assert_eq!(
+            peer_san(&ChannelPeer::Certified("spiffe://d/plane/cli".to_string())),
+            Some("spiffe://d/plane/cli")
+        );
+        assert_eq!(peer_san(&ChannelPeer::Certless), None);
+    }
+
+    #[test]
     fn build_whoami_is_not_pong() {
         // A mutant returning Payload::Pong must fail.
-        assert_ne!(build_whoami("maknae://d/plane/cli", 1), Payload::Pong);
+        assert_ne!(build_whoami(Some("spiffe://d/plane/cli"), 1), Payload::Pong);
     }
     // ---- verb_to_action (T1: arm-swap killers via pairwise ne) ----
 

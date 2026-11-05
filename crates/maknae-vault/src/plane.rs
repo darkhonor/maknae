@@ -26,22 +26,13 @@ impl Plane {
         }
     }
 
-    /// The plane on the OTHER end of a plane-to-plane channel. `Kernel`'s peer is the
-    /// `Cli`, and vice versa. Used to compute the expected peer URI-SAN for mTLS.
-    pub fn peer(self) -> Plane {
-        match self {
-            Plane::Kernel => Plane::Cli,
-            Plane::Cli => Plane::Kernel,
-        }
-    }
-
     /// The URI-SAN this plane's leaf must carry.
-    pub fn uri_san(&self, deployment_id: &str) -> String {
+    pub fn uri_san(&self, trust_domain: &str) -> String {
         let plane = match self {
             Plane::Kernel => "kernel",
             Plane::Cli => "cli",
         };
-        format!("maknae://{deployment_id}/plane/{plane}")
+        format!("spiffe://{trust_domain}/plane/{plane}")
     }
 }
 
@@ -70,21 +61,15 @@ mod tests {
         assert_eq!(Plane::Kernel.config_prefix(), Some("maknaed"));
         assert_eq!(
             Plane::Kernel.uri_san("dev-01"),
-            "maknae://dev-01/plane/kernel"
+            "spiffe://dev-01/plane/kernel"
         );
-    }
-
-    #[test]
-    fn peer_is_the_other_plane() {
-        assert_eq!(Plane::Kernel.peer(), Plane::Cli);
-        assert_eq!(Plane::Cli.peer(), Plane::Kernel);
     }
 
     #[test]
     fn cli_names() {
         assert_eq!(Plane::Cli.pki_sign_role(), "maknae-cli");
         assert_eq!(Plane::Cli.config_prefix(), None);
-        assert_eq!(Plane::Cli.uri_san("dev-01"), "maknae://dev-01/plane/cli");
+        assert_eq!(Plane::Cli.uri_san("dev-01"), "spiffe://dev-01/plane/cli");
     }
 
     #[test]

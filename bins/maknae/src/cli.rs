@@ -1,6 +1,7 @@
 //! `maknae` CLI — the untrusted interaction plane (spec §3). Resolves its own
-//! config dir, mints a short-lived plane leaf, connects to `maknaed` over the
-//! Stage-2 mTLS/UDS transport, and issues one verb per invocation
+//! config dir, mints a short-lived plane leaf (required before it connects until #116
+//! retires it, though the daemon requests no client certificate), connects to `maknaed` over the
+//! server-authenticated TLS/UDS transport, and issues one verb per invocation
 //! (`ping`/`whoami`) — OR, one-time and elevated, provisions the deployment via
 //! `enroll`/`enroll-helper` (`enroll/`, spec §4.1-§4.6, PR-J1 Task 8).
 //!
@@ -76,7 +77,7 @@ pub(crate) fn cli_config_specs() -> [SectionSpec; 3] {
     ]
 }
 
-/// `maknae` — filesystem and management verbs over the mTLS plane, plus elevated
+/// `maknae` — filesystem and management verbs over the TLS plane, plus elevated
 /// enrollment.
 #[derive(Parser, Debug)]
 #[command(
@@ -421,8 +422,9 @@ async fn execute(verb: Verb) -> Result<bool, String> {
     let client =
         PlaneClient::for_user(&document, &dir, session.token).map_err(|e| e.to_string())?;
     let ca = load_ca_pin(&dir).map_err(|e| e.to_string())?;
+    let trust = maknae_vault::TrustBundle::from_pins(&[&ca]).map_err(|e| e.to_string())?;
     client.mint().await.map_err(|e| e.to_string())?;
-    let outcome = round_trip(verb, request, content, &transport, &client, &ca).await;
+    let outcome = round_trip(verb, request, content, &transport, &client, &trust).await;
     client.shutdown().await;
     outcome
 }
@@ -443,7 +445,7 @@ async fn round_trip(
     content: Option<maknae_proto::Bytes>,
     transport: &maknae_config::TransportConfig,
     client: &PlaneClient,
-    ca: &maknae_vault::CaBundle,
+    trust: &std::sync::Arc<maknae_vault::TrustBundle>,
 ) -> Result<bool, String> {
     if let Verb::Read { path, page: None } = &verb {
         let mut stdout = std::io::stdout().lock();
@@ -461,7 +463,7 @@ async fn round_trip(
                         maknae_loop::mutation::WriteCheck::Unchecked,
                         transport,
                         client,
-                        ca,
+                        trust,
                         &mut |l| errln!("{l}"),
                     )
                     .await?
@@ -485,7 +487,7 @@ async fn round_trip(
         maknae_loop::mutation::WriteCheck::Unchecked,
         transport,
         client,
-        ca,
+        trust,
         &mut |l| errln!("{l}"),
     )
     .await?
@@ -794,6 +796,13 @@ fn subject_table(entries: &[maknae_proto::RoleBindingView]) -> Vec<String> {
         .collect()
 }
 
+pub fn whoami_line(w: &maknae_proto::WhoamiView) -> String {
+    match &w.peer_plane_uri_san {
+        Some(san) => format!("{san} uid={}", w.peer_uid),
+        None => format!("uid={}", w.peer_uid),
+    }
+}
+
 /// Print the successful `payload` IFF its variant matches the requested `verb`
 /// (`Ping`→`Pong`, `Whoami`→`Whoami(_)`). A mismatched variant means the daemon
 /// answered a different question than we asked — a protocol error: return `Err`
@@ -805,7 +814,7 @@ fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
             Ok(())
         }
         (Verb::Whoami, Payload::Whoami(w)) => {
-            println!("{} uid={}", w.peer_plane_uri_san, w.peer_uid);
+            println!("{}", whoami_line(&w));
             Ok(())
         }
         (Verb::AdminStatus, Payload::Status(s)) => {
@@ -1766,7 +1775,7 @@ mod tests {
     #[test]
     fn whoami_accepts_whoami_payload() {
         let w = maknae_proto::WhoamiView {
-            peer_plane_uri_san: "urn:maknae:plane:cli".into(),
+            peer_plane_uri_san: None,
             peer_uid: 1000,
         };
         assert!(print_payload_for_verb(Verb::Whoami, Payload::Whoami(w)).is_ok());
@@ -1791,7 +1800,7 @@ mod tests {
         let e = print_payload_for_verb(
             release,
             Payload::Whoami(maknae_proto::WhoamiView {
-                peer_plane_uri_san: "urn:maknae:plane:cli".into(),
+                peer_plane_uri_san: None,
                 peer_uid: 1000,
             }),
         )
@@ -1818,6 +1827,17 @@ mod tests {
     }
 
     #[test]
+    fn whoami_line_with_no_san_is_the_uid_alone() {
+        let mut w = maknae_proto::WhoamiView {
+            peer_plane_uri_san: None,
+            peer_uid: 1000,
+        };
+        assert_eq!(whoami_line(&w), "uid=1000");
+        w.peer_plane_uri_san = Some("spiffe://d/plane/cli".into());
+        assert_eq!(whoami_line(&w), "spiffe://d/plane/cli uid=1000");
+    }
+
+    #[test]
     fn whoami_rejects_pong_payload() {
         // The daemon answered a `ping` question for our `whoami` — a protocol error.
         assert!(print_payload_for_verb(Verb::Whoami, Payload::Pong).is_err());
@@ -1826,7 +1846,7 @@ mod tests {
     #[test]
     fn ping_rejects_whoami_payload() {
         let w = maknae_proto::WhoamiView {
-            peer_plane_uri_san: "urn:maknae:plane:cli".into(),
+            peer_plane_uri_san: None,
             peer_uid: 1000,
         };
         assert!(print_payload_for_verb(Verb::Ping, Payload::Whoami(w)).is_err());

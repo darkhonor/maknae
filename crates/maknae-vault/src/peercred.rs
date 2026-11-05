@@ -2,7 +2,7 @@
 //! `SO_PEERCRED` (pid/uid/gid in one call); macOS uses `LOCAL_PEERCRED` (uid+groups) plus
 //! `LOCAL_PEERPID` (pid). `uid` is guaranteed on both platforms and is the only
 //! security-relevant field — the daemon polices it. This is a Layer-2 *connectivity*
-//! signal, never identity (identity is the mTLS URI-SAN). **Supported platforms: Linux +
+//! signal, never identity (the client channel's principal is this uid, attested by the kernel, and decided by the daemon's group check). **Supported platforms: Linux +
 //! macOS only** (the two first-class targets); on any other unix, `capture` fails closed.
 use crate::VaultError;
 use std::os::fd::AsFd;

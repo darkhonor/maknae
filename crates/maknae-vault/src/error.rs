@@ -77,7 +77,7 @@ pub enum VaultError {
     /// Peer-credential capture failed — a local connection whose kernel creds cannot be
     /// read cannot be policed by the daemon, so it is refused (fail closed).
     PeerCred(String),
-    /// The TLS handshake failed (chain invalid/expired, foreign CA, absent client cert).
+    /// The TLS handshake failed (chain invalid/expired, foreign CA, and on a machine channel an absent client cert).
     Handshake(String),
     /// The peer leaf's plane URI-SAN was wrong/absent/extra (wraps the T1 verifier error).
     PeerIdentity(crate::VerifyError),
@@ -189,8 +189,8 @@ impl std::fmt::Display for VaultError {
             VaultError::MissingKey(k) => write!(f, "required config key absent: {k}"),
             VaultError::InvalidDeploymentId(id) => write!(
                 f,
-                "deployment_id {id:?} is invalid: must be non-empty and match ^[A-Za-z0-9._-]+$ \
-                 (a glob/slash would corrupt the plane URI-SAN)"
+                "deployment_id {id:?} is invalid: it is the SPIFFE trust domain, at most 255 bytes \
+                 of [a-z0-9._-] with at least one [a-z0-9]"
             ),
             VaultError::InvalidAddr(msg) => write!(f, "invalid vault.addr: {msg}"),
             VaultError::InvalidMount(msg) => write!(f, "invalid Vault mount: {msg}"),

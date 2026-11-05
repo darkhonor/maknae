@@ -1,15 +1,18 @@
 variable "deployment_id" {
   type        = string
-  description = "Deployment identity branded into every plane leaf SAN (maknae://<deployment_id>/plane/*). No default — an explicit value is REQUIRED so a prod apply cannot silently emit 'dev'-branded certs. Constrained to [A-Za-z0-9._-] so it cannot inject a Vault glob into allowed_uri_sans."
+  description = "SPIFFE trust domain of the deployment, branded into every plane leaf SAN (spiffe://<deployment_id>/plane/*). No default: an explicit value is REQUIRED so a prod apply cannot silently emit 'dev'-branded certs. At most 255 bytes of [a-z0-9._-] with at least one [a-z0-9]; the charset keeps a Vault glob out of allowed_uri_sans."
 
-  # Charset lock (also enforces non-empty via `+`). CRITICAL — not cosmetic:
-  # Vault's `allowed_uri_sans` treats `*` as a GLOB. If deployment_id could contain
-  # `*`, then allowed_uri_sans = ["maknae://*/plane/kernel"] would match ANY
-  # deployment's plane SAN, silently defeating SAN-locked plane isolation. Slashes
-  # and spaces would likewise corrupt the SAN. Restrict to a safe identifier charset.
   validation {
-    condition     = can(regex("^[A-Za-z0-9._-]+$", var.deployment_id))
-    error_message = "deployment_id must be non-empty and contain only [A-Za-z0-9._-] — no glob metacharacters (notably '*'), slashes, or spaces. A '*' would turn the leaf allowed_uri_sans into a Vault glob (maknae://*/plane/...), matching ANY deployment and defeating plane isolation."
+    condition     = can(regex("^[a-z0-9._-]+$", var.deployment_id))
+    error_message = "deployment_id may contain only [a-z0-9._-]: no glob metacharacters (notably '*'), slashes, spaces or upper case."
+  }
+  validation {
+    condition     = can(regex("[a-z0-9]", var.deployment_id))
+    error_message = "deployment_id must contain at least one [a-z0-9]."
+  }
+  validation {
+    condition     = length(var.deployment_id) <= 255
+    error_message = "deployment_id is at most 255 bytes."
   }
 }
 

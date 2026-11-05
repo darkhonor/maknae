@@ -109,7 +109,7 @@ async fn audit_failure_withholds_response() {
     let authz = permissive_authz();
     maknae_kernel::handle(
         s,
-        "maknae://d/plane/cli".to_string(),
+        Some("spiffe://d/plane/cli".to_string()),
         501,
         true,
         None,
@@ -166,7 +166,7 @@ async fn admission_audit_failure_withholds_response_without_reading_request() {
     let authz = permissive_authz();
     maknae_kernel::handle(
         s,
-        "maknae://d/plane/cli".to_string(),
+        Some("spiffe://d/plane/cli".to_string()),
         501,
         true,
         None, // in_group -> Permit
@@ -227,7 +227,7 @@ async fn deny_audits_then_closes() {
     let authz = permissive_authz();
     maknae_kernel::handle(
         s,
-        "maknae://d/plane/cli".to_string(),
+        Some("spiffe://d/plane/cli".to_string()),
         501,
         false,
         None, // in_group = false → Deny
@@ -285,7 +285,7 @@ async fn happy_ping_responds() {
     let authz = permissive_authz();
     maknae_kernel::handle(
         s,
-        "maknae://d/plane/cli".to_string(),
+        Some("spiffe://d/plane/cli".to_string()),
         501,
         true,
         None,
@@ -340,7 +340,7 @@ async fn permit_admission_precedes_request_record() {
     let authz = permissive_authz();
     maknae_kernel::handle(
         s,
-        "maknae://d/plane/cli".to_string(),
+        Some("spiffe://d/plane/cli".to_string()),
         501,
         true,
         None, // in_group -> Permit
@@ -404,7 +404,7 @@ async fn happy_whoami_carries_peer_facts() {
     let authz = permissive_authz();
     maknae_kernel::handle(
         s,
-        "maknae://d/plane/cli".to_string(),
+        Some("spiffe://d/plane/cli".to_string()),
         501,
         true,
         None,
@@ -431,7 +431,10 @@ async fn happy_whoami_carries_peer_facts() {
     match maknae_proto::decode_response(&frame).unwrap().result {
         maknae_proto::RespResult::Ok(maknae_proto::Payload::Whoami(w)) => {
             assert_eq!(w.peer_uid, 501);
-            assert_eq!(w.peer_plane_uri_san, "maknae://d/plane/cli");
+            assert_eq!(
+                w.peer_plane_uri_san.as_deref(),
+                Some("spiffe://d/plane/cli")
+            );
         }
         other => panic!("expected Ok(Whoami), got {other:?}"),
     }
@@ -449,7 +452,7 @@ async fn read_timeout_closes() {
     let authz = permissive_authz();
     maknae_kernel::handle(
         s,
-        "maknae://d/plane/cli".to_string(),
+        Some("spiffe://d/plane/cli".to_string()),
         501,
         true,
         None,
@@ -512,7 +515,7 @@ async fn configured_au3_1_is_stamped_onto_every_record() {
     let authz = permissive_authz();
     maknae_kernel::handle(
         s,
-        "maknae://d/plane/cli".to_string(),
+        Some("spiffe://d/plane/cli".to_string()),
         501,
         true,
         None,
@@ -551,7 +554,7 @@ async fn configured_au3_1_is_stamped_onto_every_record() {
     let authz = permissive_authz();
     maknae_kernel::handle(
         s2,
-        "maknae://d/plane/cli".to_string(),
+        Some("spiffe://d/plane/cli".to_string()),
         501,
         false,
         None, // in_group = false -> Deny
@@ -618,7 +621,7 @@ async fn unread_response_does_not_hang_the_handler() {
         std::time::Duration::from_secs(3),
         maknae_kernel::handle(
             server,
-            "maknae://d/plane/cli".to_string(),
+            Some("spiffe://d/plane/cli".to_string()),
             501,
             true,
             None,
@@ -680,7 +683,7 @@ async fn serve_raw(
     let authz = permissive_authz();
     maknae_kernel::handle(
         s,
-        "maknae://d/plane/cli".to_string(),
+        Some("spiffe://d/plane/cli".to_string()),
         501,
         true,
         None,

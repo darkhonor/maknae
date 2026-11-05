@@ -81,7 +81,6 @@ crates/maknae-vault/src/socket.rs|std::fs::remove_file(path)
 crates/maknae-vault/src/socket.rs|let _ = std::fs::remove_file(path);
 crates/maknae-vault/src/socket.rs|std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))
 crates/maknae-vault/src/stream.rs|let _ = std::fs::remove_file(&self.path);
-crates/maknae-vault/src/stream.rs|let _ = std::fs::remove_file(path);
 
 # The object-descriptor target requirement (handler.rs::delegated_plan). These two
 # `None`s are DELIBERATE and load-bearing (ADR-0009): the descriptor proves location

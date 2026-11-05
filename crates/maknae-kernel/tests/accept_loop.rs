@@ -1,5 +1,5 @@
 //! Accept-loop integration suite (spec §10). Exercises the run-loop's accept-level
-//! behaviour — audit-and-continue on a surfaced cert-half rejection (NEVER kill the
+//! behaviour — audit-and-continue on a surfaced handshake rejection (NEVER kill the
 //! daemon), fast-close at capacity, and audit of a handshake-timeout rejection —
 //! against a SCRIPTED [`maknae_kernel::PlaneAccept`] fake.
 //!
@@ -18,8 +18,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use maknae_audit_append::{AuditEmit, AuditError, AuditRecord, SessionIds};
-use maknae_kernel::{Conn, PlaneAccept, ServeOutcome, WhereCtx};
-use maknae_vault::{AcceptRejection, PeerCreds, RejectReason, VaultError};
+use maknae_kernel::{Admission, ChannelClass, Conn, PlaneAccept, ServeOutcome, WhereCtx};
+use maknae_vault::{AcceptRejection, ChannelPeer, PeerAuth, PeerCreds, RejectReason, VaultError};
 use tokio::io::DuplexStream;
 use tokio::time::Instant;
 
@@ -50,19 +50,19 @@ impl AuditEmit for RecEmit {
 /// runs UNDER its semaphore) — proving the loop's new prompt-accept / deferred-handshake
 /// split behaves: rejections still audit, and a stalled handshake does not block the loop.
 enum Scripted {
-    Ok(DuplexStream, String, u32),
+    Ok(DuplexStream, ChannelPeer, u32),
     Reject(AcceptRejection),
     /// `accept_raw` succeeds, but `finish_handshake` sleeps this long before yielding an OK
     /// connection — simulating a peer that stalls the TLS handshake.
-    Stall(Duration, DuplexStream, String, u32),
+    Stall(Duration, DuplexStream, ChannelPeer, u32),
     RawFail(maknae_vault::RawAcceptError),
 }
 
 /// The raw handle `accept_raw` hands to `finish_handshake` (opaque, like `RawPlaneConn`).
 enum FakeRaw {
-    Conn(DuplexStream, String, u32),
+    Conn(DuplexStream, ChannelPeer, u32),
     Reject(AcceptRejection),
-    Stall(Duration, DuplexStream, String, u32),
+    Stall(Duration, DuplexStream, ChannelPeer, u32),
 }
 
 struct FakeAccept {
@@ -72,12 +72,14 @@ struct FakeAccept {
     /// far the loop has progressed (P2: proving the loop keeps accepting even while the
     /// at-capacity audit sink is slow).
     popped: Arc<std::sync::atomic::AtomicUsize>,
+    peer_auth: PeerAuth,
 }
 impl FakeAccept {
     fn new(items: Vec<Scripted>) -> Self {
         FakeAccept {
             queue: Mutex::new(items.into_iter().collect()),
             popped: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            peer_auth: PeerAuth::Certless,
         }
     }
     fn pop_counter(&self) -> Arc<std::sync::atomic::AtomicUsize> {
@@ -87,6 +89,10 @@ impl FakeAccept {
 impl PlaneAccept for FakeAccept {
     type Raw = FakeRaw;
     type Stream = DuplexStream;
+
+    fn peer_auth(&self) -> &PeerAuth {
+        &self.peer_auth
+    }
 
     // Pop INSIDE the future so a `select!` that loses to shutdown (dropping this future
     // unpolled) does not silently consume a scripted item. The std MutexGuard is released
@@ -98,15 +104,15 @@ impl PlaneAccept for FakeAccept {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         match item {
-            Some(Scripted::Ok(stream, uri, uid)) => {
-                Ok((FakeRaw::Conn(stream, uri, uid), creds(uid)))
+            Some(Scripted::Ok(stream, peer, uid)) => {
+                Ok((FakeRaw::Conn(stream, peer, uid), creds(uid)))
             }
             Some(Scripted::Reject(rej)) => {
                 let c = rej.peer_creds.unwrap_or_else(|| creds(0));
                 Ok((FakeRaw::Reject(rej), c))
             }
-            Some(Scripted::Stall(d, stream, uri, uid)) => {
-                Ok((FakeRaw::Stall(d, stream, uri, uid), creds(uid)))
+            Some(Scripted::Stall(d, stream, peer, uid)) => {
+                Ok((FakeRaw::Stall(d, stream, peer, uid), creds(uid)))
             }
             Some(Scripted::RawFail(e)) => Err(e),
             None => {
@@ -123,19 +129,19 @@ impl PlaneAccept for FakeAccept {
         _handshake_timeout: Duration,
     ) -> Result<Conn<DuplexStream>, AcceptRejection> {
         match raw {
-            FakeRaw::Conn(stream, uri, uid) => Ok(Conn {
+            FakeRaw::Conn(stream, peer, uid) => Ok(Conn {
                 delegated: maknae_io::DelegatedFds::new(0),
                 stream,
-                peer_uri: uri,
+                peer,
                 peer_uid: uid,
             }),
             FakeRaw::Reject(rej) => Err(rej),
-            FakeRaw::Stall(d, stream, uri, uid) => {
+            FakeRaw::Stall(d, stream, peer, uid) => {
                 tokio::time::sleep(d).await;
                 Ok(Conn {
                     delegated: maknae_io::DelegatedFds::new(0),
                     stream,
-                    peer_uri: uri,
+                    peer,
                     peer_uid: uid,
                 })
             }
@@ -154,9 +160,28 @@ fn creds(uid: u32) -> PeerCreds {
 fn wctx() -> WhereCtx {
     WhereCtx {
         host: "test-host".to_string(),
-        socket: "/run/maknae/test.sock".to_string(),
+        socket: TEST_SOCKET.to_string(),
         au3_1: serde_json::json!({}),
     }
+}
+
+const TEST_SOCKET: &str = "/run/maknae/test.sock";
+
+fn client_class() -> ChannelClass {
+    class_on(TEST_SOCKET)
+}
+
+fn class_on(socket: &str) -> ChannelClass {
+    ChannelClass {
+        peer_auth: PeerAuth::Certless,
+        admission: Admission::MaknaeGroupMember,
+        lane: maknae_security::Lane::Local,
+        socket: socket.into(),
+    }
+}
+
+fn certified(san: &str) -> ChannelPeer {
+    ChannelPeer::Certified(san.to_string())
 }
 
 fn cfg_with(max_connections: u32, read_timeout_ms: u64) -> maknae_config::TransportConfig {
@@ -177,7 +202,7 @@ fn pending_supervisor() -> tokio::task::JoinHandle<VaultError> {
 fn ok_conn(uri: &str, uid: u32) -> Scripted {
     let (client, server) = tokio::io::duplex(1024);
     drop(client);
-    Scripted::Ok(server, uri.to_string(), uid)
+    Scripted::Ok(server, certified(uri), uid)
 }
 
 /// Run the loop over a script until it drains, then fire shutdown and join. Returns the
@@ -187,6 +212,15 @@ async fn drive(script: Vec<Scripted>, cfg: maknae_config::TransportConfig) -> Ve
 }
 
 async fn drive_with(
+    script: Vec<Scripted>,
+    cfg: maknae_config::TransportConfig,
+    drain: tokio::sync::watch::Receiver<maknae_kernel::Drain>,
+) -> Vec<AuditRecord> {
+    drive_class(client_class(), script, cfg, drain).await
+}
+
+async fn drive_class(
+    class: ChannelClass,
     script: Vec<Scripted>,
     cfg: maknae_config::TransportConfig,
     drain: tokio::sync::watch::Receiver<maknae_kernel::Drain>,
@@ -203,6 +237,7 @@ async fn drive_with(
     let loop_task = tokio::spawn(async move {
         maknae_kernel::accept_loop(
             acceptor,
+            class,
             emit_for_loop,
             session_ids,
             cfg,
@@ -238,7 +273,7 @@ async fn cert_half_rejection_audits() {
             peer_creds: Some(creds(1001)),
             reason: RejectReason::WrongPlane,
         }),
-        ok_conn("maknae://d/plane/cli", 1002),
+        ok_conn("spiffe://d/plane/cli", 1002),
     ];
     let recs = drive(script, cfg_with(64, 150)).await;
 
@@ -264,17 +299,57 @@ async fn cert_half_rejection_audits() {
 }
 
 #[tokio::test]
+async fn a_peer_is_audited_with_its_san_or_none() {
+    let class = class_on("/run/maknae/client-class.sock");
+    let socket = class.socket.display().to_string();
+    let certless = {
+        let (client, server) = tokio::io::duplex(1024);
+        drop(client);
+        Scripted::Ok(server, ChannelPeer::Certless, 2001)
+    };
+    let recs = drive_class(
+        class,
+        vec![certless, ok_conn("spiffe://d/plane/cli", 2002)],
+        cfg_with(64, 150),
+        common::serving(),
+    )
+    .await;
+    let connection = |uid: u32| {
+        recs.iter()
+            .find(|r| r.source.uid == uid && r.event == "connection")
+            .unwrap_or_else(|| panic!("uid {uid}'s connection record: {recs:?}"))
+    };
+
+    let none = connection(2001);
+    assert_eq!(none.source.plane_uri_san, None);
+    assert_eq!(none.subject.plane_uri_san, None);
+    assert_eq!(none.where_.socket, socket);
+
+    let some = connection(2002);
+    assert_eq!(
+        some.source.plane_uri_san.as_deref(),
+        Some("spiffe://d/plane/cli")
+    );
+    assert_eq!(
+        some.subject.plane_uri_san.as_deref(),
+        Some("spiffe://d/plane/cli")
+    );
+    assert_eq!(some.where_.socket, socket);
+}
+
+#[tokio::test]
 async fn at_capacity_fast_closes() {
     // max_connections = 1. The first connection's handler holds the only permit (it blocks
     // in read for read_timeout_ms because we keep its peer end open); the second is accepted
     // while the permit is held → at-capacity fast-close + audit.
     let (client1, server1) = tokio::io::duplex(1024);
     let script = vec![
-        Scripted::Ok(server1, "maknae://d/plane/cli".to_string(), 2001),
-        ok_conn("maknae://d/plane/cli", 2002),
+        Scripted::Ok(server1, certified("spiffe://d/plane/cli"), 2001),
+        ok_conn("spiffe://d/plane/cli", 2002),
     ];
     // read_timeout_ms = 1000 so the first handler keeps the permit long enough.
-    let recs = drive(script, cfg_with(1, 1000)).await;
+    let class = class_on("/run/maknae/at-capacity.sock");
+    let recs = drive_class(class, script, cfg_with(1, 1000), common::serving()).await;
     drop(client1); // keep client1's peer end open across the loop's processing window
 
     let at_cap = recs
@@ -284,6 +359,7 @@ async fn at_capacity_fast_closes() {
     assert_eq!(at_cap.outcome.result, "deny");
     assert_eq!(at_cap.source.uid, 2002);
     assert_eq!(at_cap.outcome.posture, "unauthorized");
+    assert_eq!(at_cap.where_.socket, "/run/maknae/at-capacity.sock");
 }
 
 #[tokio::test]
@@ -295,7 +371,7 @@ async fn handshake_timeout_audits() {
             peer_creds: Some(creds(3001)),
             reason: RejectReason::HandshakeTimeout,
         }),
-        ok_conn("maknae://d/plane/cli", 3002),
+        ok_conn("spiffe://d/plane/cli", 3002),
     ];
     let recs = drive(script, cfg_with(64, 150)).await;
 
@@ -330,10 +406,10 @@ async fn stalled_handshake_does_not_block_next_connection() {
         Scripted::Stall(
             Duration::from_secs(30),
             a_server,
-            "maknae://d/plane/cli".to_string(),
+            certified("spiffe://d/plane/cli"),
             7001,
         ),
-        ok_conn("maknae://d/plane/cli", 7002),
+        ok_conn("spiffe://d/plane/cli", 7002),
     ];
 
     let emit = RecEmit::new();
@@ -346,6 +422,7 @@ async fn stalled_handshake_does_not_block_next_connection() {
     let loop_task = tokio::spawn(async move {
         maknae_kernel::accept_loop(
             acceptor,
+            client_class(),
             emit_for_loop,
             session_ids,
             cfg,
@@ -427,11 +504,11 @@ async fn at_capacity_audit_does_not_block_accept_loop() {
     let (_c1, server1) = tokio::io::duplex(1024); // keep peer end open so handler holds the permit
     let mut script = vec![Scripted::Ok(
         server1,
-        "maknae://d/plane/cli".to_string(),
+        certified("spiffe://d/plane/cli"),
         9000,
     )];
     for i in 0..8 {
-        script.push(ok_conn("maknae://d/plane/cli", 9001 + i));
+        script.push(ok_conn("spiffe://d/plane/cli", 9001 + i));
     }
     let n_items = script.len();
 
@@ -445,6 +522,7 @@ async fn at_capacity_audit_does_not_block_accept_loop() {
     let loop_task = tokio::spawn(async move {
         maknae_kernel::accept_loop(
             acceptor,
+            client_class(),
             emit_for_loop,
             session_ids,
             cfg,
@@ -524,11 +602,11 @@ async fn every_at_capacity_refusal_is_recorded_or_counted() {
     let (_c1, server1) = tokio::io::duplex(1024);
     let mut script = vec![Scripted::Ok(
         server1,
-        "maknae://d/plane/cli".to_string(),
+        certified("spiffe://d/plane/cli"),
         9000,
     )];
     for i in 0..REFUSED {
-        script.push(ok_conn("maknae://d/plane/cli", 10_000 + i as u32));
+        script.push(ok_conn("spiffe://d/plane/cli", 10_000 + i as u32));
     }
     let emit = SlowEmit::new(Duration::from_millis(10));
     let acceptor = FakeAccept::new(script);
@@ -538,6 +616,7 @@ async fn every_at_capacity_refusal_is_recorded_or_counted() {
     let loop_task = tokio::spawn(async move {
         maknae_kernel::accept_loop(
             acceptor,
+            client_class(),
             emit_for_loop,
             Arc::new(SessionIds::with_nonce(1)),
             cfg_with(1, 150),
@@ -603,6 +682,7 @@ async fn supervisor_exit_stops_the_loop_and_reports_failure() {
         Duration::from_secs(5),
         maknae_kernel::accept_loop(
             acceptor,
+            client_class(),
             emit.clone(),
             session_ids,
             cfg,
@@ -650,6 +730,57 @@ async fn supervisor_exit_stops_the_loop_and_reports_failure() {
     );
 }
 
+#[tokio::test]
+async fn a_listener_that_authenticates_otherwise_than_its_class_serves_nothing() {
+    let emit = RecEmit::new();
+    let mut acceptor = FakeAccept::new(vec![ok_conn("spiffe://d/plane/cli", 4001)]);
+    acceptor.peer_auth = PeerAuth::PlaneLeaf {
+        accept: maknae_vault::SanRule::Exact("spiffe://d/plane/cli".to_string()),
+    };
+    let popped = acceptor.pop_counter();
+    let shutdown = tokio::time::sleep(Duration::from_millis(300));
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        maknae_kernel::accept_loop(
+            acceptor,
+            client_class(),
+            emit.clone(),
+            Arc::new(SessionIds::with_nonce(1)),
+            cfg_with(64, 150),
+            wctx(),
+            shutdown,
+            pending_supervisor(),
+            std::sync::Arc::new(common::AlwaysPermit),
+            std::sync::Arc::new(maknae_kernel::LiveConfig::new(Default::default(), None)),
+            std::sync::Arc::new("test-backend".to_string()),
+            std::sync::Arc::new("US".to_string()),
+            std::sync::Arc::new("ml-dsa-87".to_string()),
+            std::sync::Arc::new(None),
+            maknae_kernel::unavailable_egress(),
+            common::no_baseline(),
+            common::serving(),
+        ),
+    )
+    .await
+    .expect("accept_loop must return");
+
+    assert!(
+        matches!(outcome, ServeOutcome::ChannelMismatch),
+        "expected ServeOutcome::ChannelMismatch, got {outcome:?}"
+    );
+    assert_eq!(popped.load(std::sync::atomic::Ordering::Relaxed), 0);
+    let recs = emit.records();
+    assert!(
+        recs.iter().all(|r| r.event != "connection"),
+        "no connection was served: {recs:?}"
+    );
+    assert!(
+        recs.iter().any(|r| r.event == "shutdown"),
+        "the mismatch exit writes the shutdown record: {recs:?}"
+    );
+}
+
 /// Companion to the supervisor-exit test: the OTHER legitimate way the loop stops
 /// (SIGTERM/SIGINT, modeled here by firing the shutdown future) must yield the
 /// opposite, distinct outcome — `GracefulShutdown` — so `run_inner`'s `ExitCode`
@@ -668,6 +799,7 @@ async fn shutdown_signal_yields_graceful_outcome() {
 
     let loop_task = tokio::spawn(maknae_kernel::accept_loop(
         acceptor,
+        client_class(),
         emit.clone(),
         session_ids,
         cfg,
@@ -732,7 +864,7 @@ async fn the_record_carries_the_username_even_when_the_group_lookup_fails() {
         eprintln!("SKIP: euid {me} does not resolve to a user on this host");
         return;
     };
-    let recs = drive(vec![ok_conn("maknae://d/plane/cli", me)], cfg_with(8, 500)).await;
+    let recs = drive(vec![ok_conn("spiffe://d/plane/cli", me)], cfg_with(8, 500)).await;
     let conn = recs
         .iter()
         .find(|r| r.event == "connection")
@@ -757,7 +889,7 @@ async fn the_record_carries_the_username_even_when_the_group_lookup_fails() {
 #[tokio::test]
 async fn an_unresolvable_uid_carries_no_username_and_no_role() {
     let recs = drive(
-        vec![ok_conn("maknae://d/plane/cli", 999_999)],
+        vec![ok_conn("spiffe://d/plane/cli", 999_999)],
         cfg_with(8, 500),
     )
     .await;
@@ -775,7 +907,7 @@ const DRAINING: &str = "draining to apply an accepted baseline";
 async fn a_connection_during_the_drain_is_closed_unserved() {
     let (_tx, begun) = tokio::sync::watch::channel(maknae_kernel::Drain::Begun);
     let recs = drive_with(
-        vec![ok_conn("maknae://d/plane/cli", 1002)],
+        vec![ok_conn("spiffe://d/plane/cli", 1002)],
         cfg_with(64, 150),
         begun,
     )
@@ -799,7 +931,7 @@ async fn a_connection_during_the_drain_is_closed_unserved() {
     );
 
     let served = drive(
-        vec![ok_conn("maknae://d/plane/cli", 1002)],
+        vec![ok_conn("spiffe://d/plane/cli", 1002)],
         cfg_with(64, 150),
     )
     .await;

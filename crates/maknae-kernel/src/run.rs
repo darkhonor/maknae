@@ -12,7 +12,7 @@
 //! - [`accept_loop`] is the anti-DoS accept loop: accept the raw socket PROMPTLY, then run
 //!   the bounded TLS handshake per-connection UNDER the concurrency semaphore (so a stalled
 //!   handshake occupies one permit for at most `handshake_timeout`, never the loop itself);
-//!   audit-and-continue on a surfaced cert-half rejection (NEVER `?` — a bad handshake must
+//!   audit-and-continue on a surfaced peer-authentication rejection (NEVER `?` — a bad handshake must
 //!   not kill the daemon), fast-close at capacity. Generic over a [`PlaneAccept`] source so
 //!   it is testable without a live Vault-backed `PlaneListener`.
 //! - [`run`] is the process entrypoint: FIPS install/assert → boot → sink → plane
@@ -53,7 +53,8 @@ use maknae_state::store::{
     ANCHOR_RESEEDED, ANCHOR_SEEDED, ANCHOR_SEEDING, MARKER_FILE, STORE_FILE,
 };
 use maknae_vault::{
-    AcceptRejection, AuthenticatedStream, PeerCreds, PlaneListener, RawPlaneConn, RejectReason,
+    AcceptRejection, AuthenticatedStream, ChannelPeer, PeerAuth, PeerCreds, PlaneListener,
+    RawPlaneConn, RejectReason,
 };
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
@@ -70,7 +71,8 @@ use crate::boot_gate::authz_boot_gate;
 use crate::groupres::{maknae_gid, uid_in_maknae_group};
 use crate::handler::{
     build_authz_request, build_whoami, discharge_plan, dispatch_verb, lexical_pregate, may_respond,
-    verb_to_action, Dispatch, Drain, ServeOutcome, AUTHZ_DECIDE_TIMEOUT,
+    peer_san, verb_to_action, Admission, ChannelClass, Dispatch, Drain, ServeOutcome,
+    AUTHZ_DECIDE_TIMEOUT,
 };
 use maknae_proto::{encode_response_zeroizing, ProtoErrCode, ProtoError};
 use maknae_security::{
@@ -483,7 +485,7 @@ const HANDLER_DRAIN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 /// both ceilings by a test.
 fn handler_drain_bound(cfg: &TransportConfig, egress_deadline: Duration) -> Duration {
     // One connection's bounded work, in the order the handler performs it:
-    // the mTLS handshake (inside the handler, not on the loop), the peer's
+    // the TLS handshake (inside the handler, not on the loop), the peer's
     // group lookup, the admission audit append, the frame read, the requester home's resolution (filesystem
     // verbs only), the PDP decision, the verb's own blocking step under the
     // same bound (the subject enumeration — a second `AUTHZ_DECIDE_TIMEOUT`,
@@ -685,7 +687,7 @@ fn make_record(
     }
 }
 
-/// A stable, non-leaky label for each surfaced cert-half rejection (Boundary A: the
+/// A stable, non-leaky label for each surfaced peer-authentication rejection (Boundary A: the
 /// transport reports the reason; the daemon audits it).
 fn reject_reason_str(reason: &RejectReason) -> &'static str {
     match reason {
@@ -694,6 +696,7 @@ fn reject_reason_str(reason: &RejectReason) -> &'static str {
         RejectReason::WrongPlane => "wrong plane uri-san",
         RejectReason::ExpiredOrInvalidCert => "expired or not-yet-valid cert",
         RejectReason::ChainOrCa => "chain/ca validation failed",
+        RejectReason::UnexpectedClientCert => "unexpected client certificate",
         RejectReason::PeerCredCapture => "peer-credential capture failed",
         RejectReason::Io => "socket accept io error",
     }
@@ -706,9 +709,9 @@ fn reject_reason_str(reason: &RejectReason) -> &'static str {
 #[allow(clippy::too_many_arguments)]
 pub async fn handle<S, E, P>(
     stream: S,
-    peer_uri: String,
+    peer_uri: Option<String>,
     peer_uid: u32,
-    in_group: bool,
+    class_admitted: bool,
     peer_user: Option<String>,
     peer_dir: Option<PathBuf>,
     emit: Arc<E>,
@@ -735,7 +738,7 @@ pub async fn handle<S, E, P>(
         stream,
         peer_uri,
         peer_uid,
-        in_group,
+        class_admitted,
         peer_user,
         peer_dir,
         emit,
@@ -763,10 +766,10 @@ pub async fn handle<S, E, P>(
 /// `tokio::spawn`ed call is `'static`.
 ///
 /// Sequence (spec §6):
-/// 1. `authorize_connection(cert_verified = true, in_group)` — the stream exists only
-///    because the mTLS cert half already verified, so `cert_verified` is `true`; the
-///    group half is the caller-supplied `in_group`. On `Deny` → emit an AU-3
-///    `connection`/`deny` record and close WITHOUT reading a verb.
+/// 1. `authorize_connection(channel_authenticated = true, class_admitted)` — the stream exists
+///    only because the channel class's TLS-layer requirement was met, so
+///    `channel_authenticated` is `true`; `class_admitted` is the class admission result. On
+///    `Deny` → emit an AU-3 `connection`/`deny` record and close WITHOUT reading a verb.
 /// 2. On `Permit`, emit the `connection`/permit admission record (seq 1) and GATE on
 ///    it (codex round-8 P1, same `may_respond` gate as step 4): a failed admission
 ///    append closes the connection WITHOUT reading the request or serving — a session
@@ -781,9 +784,9 @@ pub async fn handle<S, E, P>(
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_with_attempt_caps<S, E, P>(
     mut stream: S,
-    peer_uri: String,
+    peer_uri: Option<String>,
     peer_uid: u32,
-    in_group: bool,
+    class_admitted: bool,
     // #275: the peer OS username, resolved on the blocking pool alongside the
     // group check. `None` on every fail-closed accept-loop arm, where not
     // spawning NSS work is the point -- the record then renders
@@ -833,13 +836,13 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     let host = hostname();
     let socket = cfg.socket_path.display().to_string();
 
-    // 1. Connection admission (cert half already verified by the transport). ADR-0019's
+    // 1. Connection admission (the transport has already authenticated the peer for its channel class). ADR-0019's
     //    scheme audits admission at seq 1 for BOTH outcomes: a deny closes here; a permit
     //    emits a `connection`/permit AU-3 record (seq 1) BEFORE the request is read, and
     //    (codex round-8 P1) GATES on it — the request record follows at seq 2 only once
     //    the admission record is durably written, so a served session's trail is always
     //    complete.
-    match authorize_connection(true, in_group) {
+    match authorize_connection(true, class_admitted) {
         ConnDecision::Deny { reason } => {
             let mut rec = make_record(
                 "connection",
@@ -848,7 +851,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 peer_uid,
                 None,
                 None,
-                Some(&peer_uri),
+                peer_uri.as_deref(),
                 session_id,
                 seq.next(),
                 "connect",
@@ -871,7 +874,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 // the already-fail-closed outcome (the connection is refused); the permit
                 // path gates on audit success, deny paths already deny.
                 crate::diag::report(format!(
-                    "maknaed: admission audit append failed or is unconfirmed on connection-deny (group check) for peer_uid={peer_uid} peer_uri={peer_uri} — the rejection proceeded: {e}"
+                    "maknaed: admission audit append failed or is unconfirmed on connection-deny (group check) for peer_uid={peer_uid} peer_uri={peer_uri:?} — the rejection proceeded: {e}"
                 ));
             }
             close_bounded(&mut stream).await;
@@ -890,7 +893,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 peer_uid,
                 None,
                 None,
-                Some(&peer_uri),
+                peer_uri.as_deref(),
                 session_id,
                 seq.next(),
                 "connect",
@@ -911,7 +914,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             if !may_respond(admission_result.is_ok()) {
                 if let Err(e) = admission_result {
                     crate::diag::report(format!(
-                        "maknaed: admission audit write failed for peer_uid={peer_uid} peer_uri={peer_uri} session_id={session_id} — closing without serving: {e}"
+                        "maknaed: admission audit write failed for peer_uid={peer_uid} peer_uri={peer_uri:?} session_id={session_id} — closing without serving: {e}"
                     ));
                 }
                 close_bounded(&mut stream).await;
@@ -933,7 +936,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 &host,
                 &socket,
                 peer_uid,
-                &peer_uri,
+                peer_uri.as_deref(),
                 peer_user.as_deref(),
                 None,
                 session_id,
@@ -952,7 +955,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 &host,
                 &socket,
                 peer_uid,
-                &peer_uri,
+                peer_uri.as_deref(),
                 peer_user.as_deref(),
                 None,
                 session_id,
@@ -977,7 +980,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 &host,
                 &socket,
                 peer_uid,
-                &peer_uri,
+                peer_uri.as_deref(),
                 peer_user.as_deref(),
                 None,
                 session_id,
@@ -1000,7 +1003,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             &host,
             &socket,
             peer_uid,
-            &peer_uri,
+            peer_uri.as_deref(),
             peer_user.as_deref(),
             None,
             session_id,
@@ -1030,7 +1033,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 &host,
                 &socket,
                 peer_uid,
-                &peer_uri,
+                peer_uri.as_deref(),
                 peer_user.as_deref(),
                 None,
                 None,
@@ -1107,7 +1110,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             &host,
             &socket,
             peer_uid,
-            &peer_uri,
+            peer_uri.as_deref(),
             peer_user.as_deref(),
             None,
             None,
@@ -1144,7 +1147,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             peer_uid,
             None,
             None,
-            Some(&peer_uri),
+            peer_uri.as_deref(),
             session_id,
             seq.next(),
             verb_to_action(&request.verb),
@@ -1202,7 +1205,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                         &host,
                         &socket,
                         peer_uid,
-                        &peer_uri,
+                        peer_uri.as_deref(),
                         peer_user.as_deref(),
                         None,
                         None,
@@ -1323,7 +1326,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 &host,
                 &socket,
                 peer_uid,
-                &peer_uri,
+                peer_uri.as_deref(),
                 peer_user.as_deref(),
                 decided_role,
                 decided_rule.as_ref(),
@@ -1363,7 +1366,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             &host,
             &socket,
             peer_uid,
-            &peer_uri,
+            peer_uri.as_deref(),
             peer_user.as_deref(),
             decided_role,
             None,
@@ -1402,7 +1405,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 &host,
                 &socket,
                 peer_uid,
-                &peer_uri,
+                peer_uri.as_deref(),
                 peer_user.as_deref(),
                 decided_role,
                 None,
@@ -1439,7 +1442,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 &host,
                 &socket,
                 peer_uid,
-                &peer_uri,
+                peer_uri.as_deref(),
                 peer_user.as_deref(),
                 decided_role,
                 decided_rule.as_ref(),
@@ -1488,7 +1491,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 &host,
                 &socket,
                 peer_uid,
-                &peer_uri,
+                peer_uri.as_deref(),
                 peer_user.as_deref(),
                 decided_role,
                 decided_rule.as_ref(),
@@ -1509,7 +1512,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             }
             let payload = match dispatch_verb(&request.verb) {
                 Dispatch::Pong => Payload::Pong,
-                Dispatch::WhoamiRequested => build_whoami(&peer_uri, peer_uid),
+                Dispatch::WhoamiRequested => build_whoami(peer_uri.as_deref(), peer_uid),
                 // Redacted when installed, and taken at admission with the
                 // providers the decision was generation-checked against.
                 Dispatch::ConfigShowRequested => Payload::ConfigView((*admitted_view).clone()),
@@ -1643,7 +1646,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                                 &host,
                                 &socket,
                                 peer_uid,
-                                &peer_uri,
+                                peer_uri.as_deref(),
                                 peer_user.as_deref(),
                                 decided_role,
                                 decided_rule.as_ref(),
@@ -1698,7 +1701,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                             &host,
                             &socket,
                             peer_uid,
-                            &peer_uri,
+                            peer_uri.as_deref(),
                             peer_user.as_deref(),
                             decided_role,
                             decided_rule.as_ref(),
@@ -1745,7 +1748,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                                 &host,
                                 &socket,
                                 peer_uid,
-                                &peer_uri,
+                                peer_uri.as_deref(),
                                 peer_user.as_deref(),
                                 decided_role,
                                 decided_rule.as_ref(),
@@ -1772,7 +1775,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                                 &host,
                                 &socket,
                                 peer_uid,
-                                &peer_uri,
+                                peer_uri.as_deref(),
                                 peer_user.as_deref(),
                                 decided_role,
                                 decided_rule.as_ref(),
@@ -1839,7 +1842,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                                 &host,
                                 &socket,
                                 peer_uid,
-                                &peer_uri,
+                                peer_uri.as_deref(),
                                 peer_user.as_deref(),
                                 decided_role,
                                 decided_rule.as_ref(),
@@ -1866,7 +1869,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                                 &host,
                                 &socket,
                                 peer_uid,
-                                &peer_uri,
+                                peer_uri.as_deref(),
                                 peer_user.as_deref(),
                                 decided_role,
                                 decided_rule.as_ref(),
@@ -1900,7 +1903,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                                 &host,
                                 &socket,
                                 peer_uid,
-                                &peer_uri,
+                                peer_uri.as_deref(),
                                 peer_user.as_deref(),
                                 decided_role,
                                 decided_rule.as_ref(),
@@ -1954,7 +1957,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                         &host,
                         &socket,
                         peer_uid,
-                        &peer_uri,
+                        peer_uri.as_deref(),
                         peer_user.as_deref(),
                         decided_role,
                         decided_rule.as_ref(),
@@ -1974,7 +1977,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                         &host,
                         &socket,
                         peer_uid,
-                        &peer_uri,
+                        peer_uri.as_deref(),
                         peer_user.as_deref(),
                         decided_role,
                         decided_rule.as_ref(),
@@ -2003,7 +2006,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                     &host,
                     &socket,
                     peer_uid,
-                    &peer_uri,
+                    peer_uri.as_deref(),
                     peer_user.as_deref(),
                     decided_role,
                     None,
@@ -2055,7 +2058,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                     peer_uid,
                     None,
                     None,
-                    Some(&peer_uri),
+                    peer_uri.as_deref(),
                     session_id,
                     seq.next(),
                     "session.prompt",
@@ -2096,7 +2099,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 peer_uid,
                 None,
                 None,
-                Some(&peer_uri),
+                peer_uri.as_deref(),
                 session_id,
                 seq.next(),
                 "session.prompt",
@@ -2322,7 +2325,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                                     &host,
                                     &socket,
                                     peer_uid,
-                                    &peer_uri,
+                                    peer_uri.as_deref(),
                                     peer_user.as_deref(),
                                     decided_role,
                                     decided_rule.as_ref(),
@@ -2342,7 +2345,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                                     &host,
                                     &socket,
                                     peer_uid,
-                                    &peer_uri,
+                                    peer_uri.as_deref(),
                                     peer_user.as_deref(),
                                     decided_role,
                                     decided_rule.as_ref(),
@@ -2422,7 +2425,7 @@ async fn refuse_oversize_bounded<S, E: AuditEmit + Send + Sync>(
     host: &str,
     socket: &str,
     peer_uid: u32,
-    peer_uri: &str,
+    peer_uri: Option<&str>,
     // #275: the peer's OS username, already bounded.
     peer_user: Option<&str>,
     role: Option<&'static str>,
@@ -2483,7 +2486,7 @@ async fn refuse_unencodable_bounded<S, E: AuditEmit + Send + Sync>(
     host: &str,
     socket: &str,
     peer_uid: u32,
-    peer_uri: &str,
+    peer_uri: Option<&str>,
     // #275: the peer's OS username, already bounded.
     peer_user: Option<&str>,
     role: Option<&'static str>,
@@ -2544,7 +2547,7 @@ async fn write_frame_bounded<S, E: AuditEmit + Send + Sync>(
     host: &str,
     socket: &str,
     peer_uid: u32,
-    peer_uri: &str,
+    peer_uri: Option<&str>,
     peer_user: Option<&str>,
     role: Option<&'static str>,
     rule: Option<&RuleCitation>,
@@ -2623,7 +2626,7 @@ async fn emit_request_outcome<E: AuditEmit + Send + Sync>(
     host: &str,
     socket: &str,
     uid: u32,
-    peer_uri: &str,
+    peer_uri: Option<&str>,
     // #275: the peer's OS username, already bounded by `admitted_user`.
     peer_user: Option<&str>,
     // #275: the role the decision was MADE ON, or None on records that
@@ -2644,21 +2647,8 @@ async fn emit_request_outcome<E: AuditEmit + Send + Sync>(
     au3_1: &serde_json::Value,
 ) -> bool {
     let mut rec = make_record(
-        "request",
-        host,
-        socket,
-        uid,
-        None,
-        None,
-        Some(peer_uri),
-        session_id,
-        seq,
-        action,
-        object,
-        result,
-        reason,
-        posture,
-        au3_1,
+        "request", host, socket, uid, None, None, peer_uri, session_id, seq, action, object,
+        result, reason, posture, au3_1,
     );
     // #275: the peer identity, bounded and audit-only.
     rec.subject.user = admitted_user(peer_user);
@@ -2669,7 +2659,7 @@ async fn emit_request_outcome<E: AuditEmit + Send + Sync>(
         Ok(()) => true,
         Err(e) => {
             eprintln!(
-                "maknaed: AUDIT WRITE FAILED on request outcome ({action}/{result}) for peer_uid={uid} peer_uri={peer_uri} session_id={session_id} — withholding the frame: {e}"
+                "maknaed: AUDIT WRITE FAILED on request outcome ({action}/{result}) for peer_uid={uid} peer_uri={peer_uri:?} session_id={session_id} — withholding the frame: {e}"
             );
             false
         }
@@ -2682,7 +2672,7 @@ async fn emit_request_deny<E: AuditEmit + Send + Sync>(
     host: &str,
     socket: &str,
     uid: u32,
-    peer_uri: &str,
+    peer_uri: Option<&str>,
     // #275: the peer's OS username, already bounded by `admitted_user`.
     peer_user: Option<&str>,
     // #275: the role the decision was MADE ON, or None on records that
@@ -2701,7 +2691,7 @@ async fn emit_request_deny<E: AuditEmit + Send + Sync>(
         uid,
         None,
         None,
-        Some(peer_uri),
+        peer_uri,
         session_id,
         seq,
         action,
@@ -2718,7 +2708,7 @@ async fn emit_request_deny<E: AuditEmit + Send + Sync>(
         // See the group-check deny above: logged, not control-flow-changing — the
         // caller already closes the connection regardless.
         eprintln!(
-            "maknaed: AUDIT WRITE FAILED on request-deny ({action}) for peer_uid={uid} peer_uri={peer_uri} — rejection proceeded without a durable record: {e}"
+            "maknaed: AUDIT WRITE FAILED on request-deny ({action}) for peer_uid={uid} peer_uri={peer_uri:?} — rejection proceeded without a durable record: {e}"
         );
     }
 }
@@ -2730,7 +2720,7 @@ async fn emit_request_deny<E: AuditEmit + Send + Sync>(
 /// One accepted, authenticated connection with the peer facts the daemon polices.
 pub struct Conn<S> {
     pub stream: S,
-    pub peer_uri: String,
+    pub peer: ChannelPeer,
     pub peer_uid: u32,
     /// Descriptors this peer delegated over `SCM_RIGHTS`, collected beneath the TLS
     /// layer (ADR-0009). A property of the accepted CONNECTION, like the peer facts
@@ -2747,13 +2737,17 @@ pub trait PlaneAccept {
     type Raw: Send + 'static;
     type Stream: AsyncRead + AsyncWrite + Unpin + Send + 'static;
 
+    /// How this listener authenticates its peers; `accept_loop` refuses to serve a
+    /// class that names another.
+    fn peer_auth(&self) -> &PeerAuth;
+
     /// Prompt half: take the next raw socket + its peer-creds. The loop continues on
     /// either error (never `?`).
     fn accept_raw(
         &self,
     ) -> impl Future<Output = Result<(Self::Raw, PeerCreds), maknae_vault::RawAcceptError>> + Send;
 
-    /// Bounded half: run the mTLS handshake within `handshake_timeout` and report the
+    /// Bounded half: run the TLS handshake within `handshake_timeout` and report the
     /// authenticated peer, or an `AcceptRejection` carrying the passed-through creds. Run
     /// per-connection UNDER the accept loop's semaphore.
     fn finish_handshake(
@@ -2767,6 +2761,10 @@ pub trait PlaneAccept {
 impl PlaneAccept for PlaneListener {
     type Raw = RawPlaneConn;
     type Stream = AuthenticatedStream;
+
+    fn peer_auth(&self) -> &PeerAuth {
+        PlaneListener::peer_auth(self)
+    }
 
     // `async fn` (not a manual `-> impl Future`): its anonymous future satisfies the trait's
     // `+ Send` bound because the only awaits are `Send`.
@@ -2782,12 +2780,12 @@ impl PlaneAccept for PlaneListener {
     ) -> Result<Conn<AuthenticatedStream>, AcceptRejection> {
         let stream =
             PlaneListener::finish_handshake(self, raw, peer_creds, handshake_timeout).await?;
-        let peer_uri = stream.peer_uri_san().to_string();
+        let peer = stream.peer().clone();
         let peer_uid = stream.peer_creds().uid;
         let delegated = stream.delegated();
         Ok(Conn {
             stream,
-            peer_uri,
+            peer,
             peer_uid,
             delegated,
         })
@@ -2892,7 +2890,7 @@ async fn drain_refusal_audit<E: AuditEmit + Send + Sync + 'static>(
 }
 
 /// The anti-DoS accept loop (spec §6a/§10). Bounds live handlers with a
-/// `cfg.max_connections` semaphore; audits-and-continues on a surfaced cert-half
+/// `cfg.max_connections` semaphore; audits-and-continues on a surfaced peer-authentication
 /// rejection (never `?` — a bad handshake must not kill the daemon); fast-closes at
 /// capacity. Also `select!`s on `supervisor` (codex round-5 P1): the credential
 /// supervisor's handle resolving means it gave up (retry window exhausted) and cleared
@@ -2904,10 +2902,11 @@ async fn drain_refusal_audit<E: AuditEmit + Send + Sync + 'static>(
 #[allow(clippy::too_many_arguments)]
 pub async fn accept_loop<A, E, P>(
     acceptor: A,
+    class: ChannelClass,
     emit: Arc<E>,
     session_ids: Arc<SessionIds>,
-    cfg: TransportConfig,
-    wctx: WhereCtx,
+    mut cfg: TransportConfig,
+    mut wctx: WhereCtx,
     shutdown: impl Future<Output = ()> + Send,
     supervisor: tokio::task::JoinHandle<maknae_vault::VaultError>,
     authorizer: Arc<P>,
@@ -2925,6 +2924,18 @@ where
     E: AuditEmit + Send + Sync + 'static,
     P: Authorizer + Send + Sync + 'static,
 {
+    let channel_mismatch = acceptor.peer_auth() != &class.peer_auth;
+    if channel_mismatch {
+        eprintln!(
+            "maknaed: the listener for {} authenticates peers as {:?}, its channel class as {:?}; serving nothing",
+            class.socket.display(),
+            acceptor.peer_auth(),
+            class.peer_auth
+        );
+    }
+    cfg.socket_path = class.socket.clone();
+    wctx.socket = class.socket.display().to_string();
+    let class = Arc::new(class);
     let sem = Arc::new(Semaphore::new(cfg.max_connections as usize));
     let handshake_timeout = Duration::from_millis(cfg.handshake_timeout_ms);
     // Shared so each spawned task can drive the bounded handshake off the accept path.
@@ -2960,6 +2971,9 @@ where
     tokio::pin!(supervisor);
 
     let outcome = loop {
+        if channel_mismatch {
+            break ServeOutcome::ChannelMismatch;
+        }
         tokio::select! {
             biased;
             _ = &mut shutdown => break ServeOutcome::GracefulShutdown,
@@ -3027,6 +3041,7 @@ where
                             }
                             Ok(permit) => {
                                 let acceptor = Arc::clone(&acceptor);
+                                let class = Arc::clone(&class);
                                 let emit = Arc::clone(&emit);
                                 let cfg = cfg.clone();
                                 let wctx = wctx.clone();
@@ -3066,13 +3081,14 @@ where
                                             // in the background.
                                             let group_breaker = group_lookup_breaker();
                                             let now = Instant::now();
-                                            let admission =
+                                            let breaker =
                                                 group_breaker.lock().await.begin_attempt_at(now);
                                             // #275, #435: the peer's username and
                                             // raw home ride the SAME blocking lookup
                                             // as membership. Absent on every
                                             // fail-closed arm.
-                                            let (in_group, peer_user, peer_dir) = match admission {
+                                            let lane = class.lane;
+                                            let (admitted, peer_user, peer_dir) = match breaker {
                                                 BreakerAdmission::RefuseOpen => {
                                                     if group_breaker
                                                         .lock()
@@ -3089,7 +3105,11 @@ where
                                                 BreakerAdmission::Admit => match tokio::time::timeout(
                                                     Duration::from_millis(maknae_config::GROUP_LOOKUP_TIMEOUT_MS),
                                                     tokio::task::spawn_blocking(move || {
-                                                        uid_in_maknae_group(uid)
+                                                        match class.admission {
+                                                            Admission::MaknaeGroupMember => {
+                                                                uid_in_maknae_group(uid)
+                                                            }
+                                                        }
                                                     }),
                                                 )
                                                 .await
@@ -3130,7 +3150,10 @@ where
                                             // (value pinned in handler.rs, behavior
                                             // proven in the handle() suite).
                                             handle(
-                                                conn.stream, conn.peer_uri, conn.peer_uid, in_group,
+                                                conn.stream,
+                                                peer_san(&conn.peer).map(str::to_string),
+                                                conn.peer_uid,
+                                                admitted,
                                                 peer_user,
                                                 peer_dir,
                                                 emit, session_id, cfg, wctx.au3_1,
@@ -3142,20 +3165,13 @@ where
                                                 kernel_graph,
                                                 egress,
                                                 AUTHZ_DECIDE_TIMEOUT,
-                                                // THIS accept loop owns the on-host
-                                                // client listener, so every connection
-                                                // it yields is local by construction.
-                                                // When #114 splits listeners, the
-                                                // machine/gateway loop passes its own —
-                                                // the lane is a property of the door,
-                                                // not of anything read off the wire.
-                                                maknae_security::Lane::Local,
+                                                lane,
                                                 conn.delegated,
                                                 ops,
                                             )
                                             .await;
                                         }
-                                        // A surfaced cert-half rejection: audit WHO/WHY and drop
+                                        // A surfaced peer-authentication rejection: audit WHO/WHY and drop
                                         // (Boundary A — the transport reports, the daemon audits).
                                         Err(rej) => {
                                             let uid = rej.peer_creds.map(|c| c.uid).unwrap_or(0);
@@ -3186,6 +3202,12 @@ where
         (ServeOutcome::SupervisorExited(e), _) => (
             "deny",
             format!("shutdown: credential supervisor exited: {e}"),
+            "unavailable",
+        ),
+        (ServeOutcome::ChannelMismatch, _) => (
+            "deny",
+            "shutdown: the listener's peer authentication does not match its channel class"
+                .to_string(),
             "unavailable",
         ),
         (_, Drain::Applied) => (
@@ -6856,6 +6878,8 @@ async fn boot_after_sink(
     )
     .map_err(|e| RunError::Other(e.to_string()))?;
     let ca = maknae_vault::load_ca_pin(config_dir).map_err(|e| RunError::Other(e.to_string()))?;
+    let trust =
+        maknae_vault::TrustBundle::from_pins(&[&ca]).map_err(|e| RunError::Other(e.to_string()))?;
 
     // --- BOOT POSTURE RECORD (spec §5.2/§5.3): stated BEFORE mint, right after the
     // plane client resolved which SecretID source it actually used. An append
@@ -6986,7 +7010,7 @@ async fn boot_after_sink(
     };
     let outcome = serve_after_mint(
         &client,
-        &ca,
+        &trust,
         sink,
         transport,
         audit_cfg,
@@ -7023,7 +7047,7 @@ async fn boot_after_sink(
 #[allow(clippy::too_many_arguments)]
 async fn serve_after_mint<B>(
     client: &maknae_vault::PlaneClient,
-    ca: &maknae_vault::CaBundle,
+    trust: &Arc<maknae_vault::TrustBundle>,
     sink: &Arc<maknae_audit_append::AuditSink>,
     transport: maknae_config::TransportConfig,
     audit_cfg: &maknae_config::AuditConfig,
@@ -7051,19 +7075,27 @@ where
     // under the normal service-account setup `maknaed`'s PRIMARY group is NOT `maknae`
     // (it's a supplementary member), so a bare bind would group-own the 0660 socket by the
     // wrong group and block authorized `maknae`-group peers at the socket layer, before
-    // mTLS/`uid_in_maknae_group` ever runs. This `?` propagates through the SAME post-mint
+    // the TLS handshake or `uid_in_maknae_group` ever runs. This `?` propagates through the SAME post-mint
     // failure path as a bind error (see this fn's doc comment): the caller's unconditional
     // `client.shutdown().await` revokes the minted token before returning `ExitCode::FAILURE`.
     let gid =
         maknae_gid().map_err(|e| format!("resolving `maknae` group for the socket: {e:?}"))?;
-    let listener = PlaneListener::bind(&transport.socket_path, client, ca, Some(gid))
-        .map_err(|e| e.to_string())?;
+    let class = crate::handler::client_class(&transport);
+    let identity = maknae_vault::ServerIdentity::attach(client).map_err(|e| e.to_string())?;
+    let listener = PlaneListener::bind(
+        &class.socket,
+        identity,
+        Arc::clone(trust),
+        &class.peer_auth,
+        Some(gid),
+    )
+    .map_err(|e| e.to_string())?;
     // `session_ids` is the SAME allocator `run_inner` used for this boot's AU-3
     // boot-level records (spec §5.3): every real connection's `next_session()`
     // therefore shares the one per-boot nonce, starting its counter at 1.
     let wctx = WhereCtx {
         host: hostname(),
-        socket: transport.socket_path.display().to_string(),
+        socket: class.socket.display().to_string(),
         au3_1: audit_cfg.au3_1.clone(),
     };
     // Install the shutdown-signal handlers EAGERLY, before serving: a failure here is a
@@ -7093,6 +7125,7 @@ where
     let ops: Arc<dyn AdminOps> = Arc::clone(&reloader) as _;
     let outcome = accept_loop(
         listener,
+        class,
         Arc::clone(sink),
         session_ids,
         transport,
@@ -7276,6 +7309,7 @@ mod tests {
             RejectReason::WrongPlane,
             RejectReason::ExpiredOrInvalidCert,
             RejectReason::ChainOrCa,
+            RejectReason::UnexpectedClientCert,
             RejectReason::PeerCredCapture,
             RejectReason::Io,
         ];
@@ -11948,7 +11982,7 @@ mod home_resolution_tests {
         let backend_name = Arc::new(maknae_security::guarded_backend_name(&*authorizer));
         handle(
             server,
-            "maknae://d/plane/cli".to_string(),
+            Some("spiffe://d/plane/cli".to_string()),
             uid,
             true,
             Some(user.to_string()),
@@ -12171,7 +12205,7 @@ mod admission_bound_tests {
             Duration::from_secs(120),
             handle(
                 server,
-                "maknae://d/plane/cli".to_string(),
+                Some("spiffe://d/plane/cli".to_string()),
                 uid,
                 in_group,
                 Some("operator".to_string()),
@@ -12554,7 +12588,7 @@ mod graph_audit_bound_tests {
                 "h",
                 "s",
                 7,
-                "uri",
+                Some("uri"),
                 None,
                 None,
                 None,
@@ -12574,7 +12608,18 @@ mod graph_audit_bound_tests {
         let deny = tokio::time::timeout(
             OUTER,
             emit_request_deny(
-                &stall, "h", "s", 7, "uri", None, None, 1, 3, "whoami", "no", &au3,
+                &stall,
+                "h",
+                "s",
+                7,
+                Some("uri"),
+                None,
+                None,
+                1,
+                3,
+                "whoami",
+                "no",
+                &au3,
             ),
         )
         .await;
@@ -16233,6 +16278,10 @@ mod reload_tests {
         type Raw = ();
         type Stream = tokio::io::DuplexStream;
 
+        fn peer_auth(&self) -> &PeerAuth {
+            &PeerAuth::Certless
+        }
+
         async fn accept_raw(&self) -> Result<((), PeerCreds), maknae_vault::RawAcceptError> {
             std::future::pending().await
         }
@@ -16278,6 +16327,12 @@ mod reload_tests {
             Duration::from_secs(5),
             accept_loop(
                 IdleAccept,
+                ChannelClass {
+                    peer_auth: PeerAuth::Certless,
+                    admission: Admission::MaknaeGroupMember,
+                    lane: maknae_security::Lane::Local,
+                    socket: "s".into(),
+                },
                 Arc::clone(&fx.reloader.sink),
                 Arc::new(SessionIds::new()),
                 maknae_config::transport_from_section(None).unwrap(),
@@ -16375,6 +16430,12 @@ mod reload_tests {
             RELOAD_STOP_TIMEOUT + Duration::from_secs(5),
             accept_loop(
                 IdleAccept,
+                ChannelClass {
+                    peer_auth: PeerAuth::Certless,
+                    admission: Admission::MaknaeGroupMember,
+                    lane: maknae_security::Lane::Local,
+                    socket: "s".into(),
+                },
                 Arc::clone(&fx.reloader.sink),
                 Arc::new(SessionIds::new()),
                 maknae_config::transport_from_section(None).unwrap(),
@@ -18839,7 +18900,7 @@ mod unencodable_tests {
             "h",
             "s",
             1000,
-            "maknae://d/plane/cli",
+            Some("spiffe://d/plane/cli"),
             Some("alice"),
             Some("user"),
             Some(&rule),

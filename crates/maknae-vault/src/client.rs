@@ -9,9 +9,9 @@ use crate::plane::PlaneTokenSource;
 use crate::secret_io::read_daemon_secret;
 use crate::secret_source::{resolve_daemon_secret_source, CredentialSourceKind};
 use crate::{
-    generate_plane_csr, load_ca_pin, sign_refusal_detail, vault_config_from_document,
-    vault_error_text, verify::verify_plane_uri_san, Plane, UserToken, VaultConfig, VaultError,
-    VAULT_SECTION,
+    generate_plane_csr, load_ca_pin, peer_auth::SanRule, sign_refusal_detail,
+    vault_config_from_document, vault_error_text, verify::verify_uri_san, Plane, UserToken,
+    VaultConfig, VaultError, VAULT_SECTION,
 };
 use arc_swap::ArcSwapOption;
 use maknae_config::{load_config, Document, SectionSpec};
@@ -262,7 +262,7 @@ async fn sign_leaf_for(
     .map_err(|e| VaultError::Sign(sign_refusal_detail(&vault_error_text(&e), plane_key)))?;
     // Defense-in-depth: the leaf Vault returned must carry exactly our plane SAN.
     let leaf_der = pem_to_der(&resp.certificate)?;
-    verify_plane_uri_san(&leaf_der, plane, deployment_id)
+    verify_uri_san(&leaf_der, &SanRule::for_plane(plane, deployment_id))
         .map_err(|e| VaultError::Sign(format!("returned leaf failed SAN self-check: {e:?}")))?;
     Ok((key_der, resp.certificate, resp.ca_chain.unwrap_or_default()))
 }
@@ -617,11 +617,6 @@ impl PlaneClient {
         self.plane_key
     }
 
-    /// This client's plane (crate-internal — used to assert `expected_peer == plane.peer()`).
-    pub(crate) fn plane(&self) -> Plane {
-        self.plane
-    }
-
     /// Non-blocking snapshot of the current identity (for the Stage-2 transport).
     pub fn current_identity(&self) -> Option<PlaneIdentity> {
         self.identity
@@ -929,8 +924,8 @@ mod tests {
             // PROCESS-GLOBAL rustls default provider; install it here (idempotent —
             // a no-op if some other test already did) rather than relying on test
             // execution order, matching every other provider-touching test in this
-            // crate (resolver.rs, transport_tests.rs, tls.rs,
-            // plane_verify.rs all do this same call at their own point of use).
+            // crate (resolver.rs, transport_tests.rs, tls.rs all do this same call at
+            // their own point of use).
             maknae_crypto::init().unwrap();
             let p =
                 std::env::temp_dir().join(format!("mv-dispatch-{}-{}", std::process::id(), tag));
@@ -1406,7 +1401,7 @@ mod tests {
         let fx = DispatchFixture::with_addr("user-plane", DEAD_VAULT, "");
         std::fs::remove_file(fx.0.join("maknaed-approle-id")).unwrap();
         let client = PlaneClient::for_user(&fx.doc(), &fx.0, user_token()).unwrap();
-        assert_eq!(client.plane(), Plane::Cli);
+        assert_eq!(client.plane, Plane::Cli);
         assert_eq!(
             client.auth.token_source(),
             PlaneTokenSource::StoredUserLogin

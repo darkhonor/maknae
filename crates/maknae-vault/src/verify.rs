@@ -3,7 +3,7 @@
 //! asserts the peer leaf carries EXACTLY the expected plane URI-SAN and nothing
 //! else. SAN extraction via `x509-parser` (webpki is verification-only and does not
 //! enumerate SANs — verified).
-use crate::Plane;
+use crate::peer_auth::SanRule;
 use x509_parser::extensions::{GeneralName, ParsedExtension};
 use x509_parser::prelude::*;
 
@@ -20,13 +20,9 @@ pub enum VerifyError {
     ParseError,
 }
 
-/// Assert the peer leaf carries EXACTLY `maknae://<deployment_id>/plane/<expect>`
-/// and nothing else. Fail-closed on any deviation.
-pub fn verify_plane_uri_san(
-    peer_cert_der: &[u8],
-    expect: Plane,
-    deployment_id: &str,
-) -> Result<(), VerifyError> {
+/// Assert the peer leaf carries exactly one SAN, a URI accepted by `rule`, and
+/// return it. Fail-closed on any deviation.
+pub fn verify_uri_san(peer_cert_der: &[u8], rule: &SanRule) -> Result<String, VerifyError> {
     let (_, cert) =
         X509Certificate::from_der(peer_cert_der).map_err(|_| VerifyError::ParseError)?;
     // Collect ALL SANs of ANY type — the plane URI must be the leaf's ONLY SAN, so a
@@ -52,18 +48,21 @@ pub fn verify_plane_uri_san(
         return Err(VerifyError::ExtraSans);
     }
     // Exactly one SAN — it must be the expected plane URI.
-    let want = expect.uri_san(deployment_id);
-    if uris.len() == 1 && uris[0] == want {
-        Ok(())
-    } else {
-        Err(VerifyError::WrongSan { found: all_sans })
+    match (rule, uris.pop()) {
+        (SanRule::Exact(want), Some(got)) if uris.is_empty() && got == *want => Ok(got),
+        (SanRule::Exact(_), _) => Err(VerifyError::WrongSan { found: all_sans }),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Plane;
     use maknae_crypto::rcgen;
+
+    fn check(der: &[u8], expect: Plane, dep: &str) -> Result<String, VerifyError> {
+        verify_uri_san(der, &SanRule::for_plane(expect, dep))
+    }
 
     /// Build a self-signed leaf carrying exactly the given URI SANs (DER).
     fn leaf_with_uri_sans(uris: &[&str]) -> Vec<u8> {
@@ -79,24 +78,24 @@ mod tests {
 
     #[test]
     fn accepts_exact_plane_san() {
-        let der = leaf_with_uri_sans(&["maknae://dev-01/plane/kernel"]);
-        assert!(verify_plane_uri_san(&der, Plane::Kernel, "dev-01").is_ok());
+        let der = leaf_with_uri_sans(&["spiffe://dev-01/plane/kernel"]);
+        assert!(check(&der, Plane::Kernel, "dev-01").is_ok());
     }
 
     #[test]
     fn rejects_wrong_plane() {
-        let der = leaf_with_uri_sans(&["maknae://dev-01/plane/cli"]);
+        let der = leaf_with_uri_sans(&["spiffe://dev-01/plane/cli"]);
         assert!(matches!(
-            verify_plane_uri_san(&der, Plane::Kernel, "dev-01"),
+            check(&der, Plane::Kernel, "dev-01"),
             Err(VerifyError::WrongSan { .. })
         ));
     }
 
     #[test]
     fn rejects_wrong_deployment_id() {
-        let der = leaf_with_uri_sans(&["maknae://other/plane/kernel"]);
+        let der = leaf_with_uri_sans(&["spiffe://other/plane/kernel"]);
         assert!(matches!(
-            verify_plane_uri_san(&der, Plane::Kernel, "dev-01"),
+            check(&der, Plane::Kernel, "dev-01"),
             Err(VerifyError::WrongSan { .. })
         ));
     }
@@ -116,7 +115,7 @@ mod tests {
             "example.com".try_into().unwrap(),
         )]);
         assert!(matches!(
-            verify_plane_uri_san(&der, Plane::Kernel, "dev-01"),
+            check(&der, Plane::Kernel, "dev-01"),
             Err(VerifyError::WrongSan { .. })
         ));
     }
@@ -125,7 +124,7 @@ mod tests {
     fn rejects_no_san_at_all() {
         let der = cert_with_sans(vec![]);
         assert_eq!(
-            verify_plane_uri_san(&der, Plane::Kernel, "dev-01"),
+            check(&der, Plane::Kernel, "dev-01"),
             Err(VerifyError::NoUriSan)
         );
     }
@@ -134,11 +133,11 @@ mod tests {
     fn rejects_plane_uri_plus_rogue_dns() {
         // The expected plane URI PLUS a rogue DNS SAN — the P1 codex caught: must reject.
         let der = cert_with_sans(vec![
-            rcgen::SanType::URI("maknae://dev-01/plane/kernel".try_into().unwrap()),
+            rcgen::SanType::URI("spiffe://dev-01/plane/kernel".try_into().unwrap()),
             rcgen::SanType::DnsName("evil.example".try_into().unwrap()),
         ]);
         assert_eq!(
-            verify_plane_uri_san(&der, Plane::Kernel, "dev-01"),
+            check(&der, Plane::Kernel, "dev-01"),
             Err(VerifyError::ExtraSans)
         );
     }
@@ -146,9 +145,9 @@ mod tests {
     #[test]
     fn rejects_extra_sans() {
         let der =
-            leaf_with_uri_sans(&["maknae://dev-01/plane/kernel", "maknae://dev-01/plane/cli"]);
+            leaf_with_uri_sans(&["spiffe://dev-01/plane/kernel", "spiffe://dev-01/plane/cli"]);
         assert_eq!(
-            verify_plane_uri_san(&der, Plane::Kernel, "dev-01"),
+            check(&der, Plane::Kernel, "dev-01"),
             Err(VerifyError::ExtraSans)
         );
     }
@@ -156,7 +155,7 @@ mod tests {
     #[test]
     fn rejects_unparseable() {
         assert_eq!(
-            verify_plane_uri_san(b"not a cert", Plane::Kernel, "dev-01"),
+            check(b"not a cert", Plane::Kernel, "dev-01"),
             Err(VerifyError::ParseError)
         );
     }

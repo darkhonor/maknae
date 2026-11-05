@@ -8,7 +8,7 @@ per implementation stage.
 ## Chapter 1 — Mint a plane cert (`maknae-vault` Stage 1)
 
 Prove the plane-cert client authenticates to your Vault and mints a memory-only
-`maknae://<deployment_id>/plane/kernel` leaf of the `vault.plane_key` algorithm (ML-DSA-87 by default). This is the first live milestone;
+`spiffe://<deployment_id>/plane/kernel` leaf of the `vault.plane_key` algorithm (ML-DSA-87 by default). This is the first live milestone;
 the daemon + CLI round-trip arrives in later stages.
 
 ### Prerequisites
@@ -90,7 +90,7 @@ The client trims surrounding whitespace from the file, so a trailing newline is 
 cargo test -p maknae-vault --test live_smoke -- --ignored --nocapture
 ```
 
-Expected: `LIVE SMOKE OK: minted maknae://<deployment_id>/plane/kernel (ml-dsa-87), revoked on shutdown` (the configured `vault.plane_key`).
+Expected: `LIVE SMOKE OK: minted spiffe://<deployment_id>/plane/kernel (ml-dsa-87), revoked on shutdown` (the configured `vault.plane_key`).
 
 ### What it proves
 
@@ -104,7 +104,7 @@ Expected: `LIVE SMOKE OK: minted maknae://<deployment_id>/plane/kernel (ml-dsa-8
   the login does not consume it.
 - The CSR is empty-subject, URI-SAN-only, and of exactly the `vault.plane_key` algorithm (checked by
   algorithm identifier); the leaf's only SAN is
-  `maknae://<deployment_id>/plane/kernel` (self-checked in `mint()`).
+  `spiffe://<deployment_id>/plane/kernel` (self-checked in `mint()`).
 - The leaf + key are held **memory-only** and the token is revoked on shutdown.
 
 ### Teardown
@@ -115,20 +115,22 @@ remove `~/.maknae/maknaed-secret-id` when you are done with the dev dir.
 
 ---
 
-## Chapter 2 — Plane-to-plane mTLS (`maknae-vault` Stage 2)
+## Chapter 2 — The client channel (`maknae-vault` Stage 2)
 
-Prove the two planes establish a **mutually-authenticated TLS 1.3 channel over a local
-Unix domain socket**, each verifying the peer's `maknae://<deployment_id>/plane/<other>`
-URI-SAN, and the daemon captures the peer's kernel credentials. This is the second live
-milestone (the transport; the daemon run-loop + CLI arrive in Stage 3).
+Prove the CLI establishes a **server-authenticated TLS 1.3 channel over a local Unix
+domain socket**: the CLI verifies the daemon's `spiffe://<deployment_id>/plane/kernel`
+URI-SAN, the daemon requests no client certificate, and it captures the peer's kernel
+credentials. This is the second live milestone (the transport; the daemon run-loop + CLI
+arrive in Stage 3). Machine channels (the Agent Daemon, the gateway) use mutual TLS; none is
+listening yet.
 
 ### Prerequisites
 
 - Chapter 1 works (the kernel plane mints a leaf against your Vault).
-- Your account is a Vault userpass user with a password set ([first-provider step 1](first-provider.md#1-create-the-user-in-vault)). The CLI plane has no AppRole: it mints its leaf with the Vault token `maknae login` stores (`crates/maknae-vault/src/client.rs`, `PlaneClient::for_user`).
+- Your account is a Vault userpass user with a password set ([first-provider step 1](first-provider.md#1-create-the-user-in-vault)). The CLI plane has no AppRole: it mints a leaf with the Vault token `maknae login` stores, which `maknaed` does not request on the client channel and #116 removes (`crates/maknae-vault/src/client.rs`, `PlaneClient::for_user`).
 - **Two config dirs** — one per plane:
   - **kernel** → `~/.maknae`, the Chapter-1 layout (`maknaed-approle-id`, `maknaed-secret-id`, the `tls/` CAs, `maknae.yaml`).
-  - **cli** → `~/.maknae-cli` (`0700`): a copy of the `tls/` dir (`0700`, files `0600`) and a `0600` `maknae.yaml` holding only `vault.addr` and `core.deployment_id`. The CLI plane signs with the `maknae-cli` PKI role.
+  - **cli** → `~/.maknae-cli` (`0700`): a copy of the `tls/` dir (`0700`, files `0600`) and a `0600` `maknae.yaml` holding only `vault.addr` and `core.deployment_id`. The CLI plane signs with the `maknae-cli` PKI role; the daemon does not request that leaf (removed by #116).
 
 ### 1. Log the CLI plane in
 
@@ -144,8 +146,8 @@ unset MAKNAE_CONFIG_DIR
 
 The listener binds a pathname socket in a directory the daemon owns and only it can write.
 The socket is group-gated `0660`; the operator account joins the `maknae` group so the CLI
-can `connect()`. Group membership is **only** the outer fence — a valid plane cert (mTLS)
-is still required to authenticate.
+can `connect()`. Group membership is admission, not the whole check — the peer uid the kernel
+attests is the principal, and the daemon decides every request on it.
 
 - **Linux (Debian/RHEL)** — systemd provisions the dir: `RuntimeDirectory=maknae`
   (`/run/maknae`, `_maknae:maknae`, `0750`); add the operator to `maknae`
@@ -164,20 +166,23 @@ export MAKNAE_CLI_CONFIG_DIR="$HOME/.maknae-cli"
 cargo test -p maknae-vault --test live_transport_smoke -- --ignored --nocapture
 ```
 
-Expected: `LIVE TRANSPORT OK: kernel<->cli mTLS + peer-creds round-trip over UDS`.
+Expected: `LIVE TRANSPORT OK: kernel<->cli certless client channel + peer-creds round-trip over UDS`.
 
 ### What it proves
 
-- **Mutual mTLS with plane-URI-SAN identity** — each side presents its Vault-minted
-  `vault.plane_key` leaf and verifies the peer's leaf carries **exactly** the expected
-  `maknae://<deployment_id>/plane/{kernel,cli}` URI-SAN (the T1 verifier), over TLS 1.3 on
-  the aws-lc-rs FIPS provider, with ML-KEM-1024 key exchange (both ends are Maknae's).
+- **Server authentication with plane-URI-SAN identity** — the daemon presents its
+  Vault-minted `vault.plane_key` leaf and the CLI verifies it carries **exactly** the
+  `spiffe://<deployment_id>/plane/kernel` URI-SAN (the T1 verifier), over TLS 1.3 on the
+  aws-lc-rs FIPS provider, with ML-KEM-1024 key exchange (both ends are Maknae's). The
+  daemon requests no client certificate: a leaf the CLI offers is neither requested nor
+  read, and the connection is certless.
 - **Peer-cred capture** — the daemon reads the connecting uid (+ pid) from the kernel
   (`SO_PEERCRED` on Linux, `LOCAL_PEERCRED`+`LOCAL_PEERPID` on macOS). The transport
   *reports* these; uid **policy** + audit are the Stage-3 daemon's job.
-- **Fail-closed** — a wrong-plane, expired, foreign-CA, absent, or extra-SAN peer cert
-  aborts the handshake (see the in-process negative suite); a listener whose identity was
-  cleared (renewal expired) presents no leaf and the handshake fails.
+- **Fail-closed** — a wrong-plane, expired, or foreign-CA server leaf aborts the CLI's
+  handshake, and a listener whose identity was cleared (renewal expired) presents no leaf
+  and the handshake fails (see the in-process negative suite). The machine-channel
+  suite additionally refuses a wrong-plane, absent, or extra-SAN client certificate.
 
 ### TLS key exchange
 
@@ -229,8 +234,8 @@ CLI plane's login token is not, and stays valid until it expires or you run
 
 Prove the daemon actually serves a request end-to-end: `maknaed` boots, binds the
 group-gated plane socket, and a real `ssh`-in operator session running `maknae ping`
-and `maknae whoami` gets a real answer — authorized by mTLS + peer-creds + group
-membership AND, since #77, a per-request PDP verdict (the enrolled principal
+and `maknae whoami` gets a real answer — authorized by the kernel-attested peer uid +
+`maknae`-group membership AND, since #77, a per-request PDP verdict (the enrolled principal
 resolves `admin` via the policy defaults; a non-enrolled in-group peer is DENIED
 per request — see the deny record below), with every request landing an AU-3
 line in the audit log. This is the third
@@ -240,7 +245,7 @@ chapter proves the whole daemon.
 ### Prerequisites
 
 - Chapter 1 works for the kernel plane, and Chapter 2's CLI dir holds a `maknae login` token (Chapter 2 §1).
-- Chapter 2's live loopback passes (mTLS + peer-creds round-trip already proven).
+- Chapter 2's live loopback passes (the certless client channel + peer-creds round-trip already proven).
 - A host you can `ssh` into as the operator account that will run the CLI — this chapter
   is written as a two-terminal exercise: one terminal starts `maknaed` in the foreground,
   the other `ssh`-es in fresh and runs `maknae`.
@@ -263,10 +268,10 @@ sudo dscl . -append /Groups/maknae GroupMembership "$(whoami)"
 
 > Group membership is the **outer fence only** (`authorize_connection`, `maknae-kernel/src/authz.rs`)
 > — a peer uid outside `maknae` is denied before a request is even read. Since #77 a
-> cert-valid, in-group peer is then decided PER REQUEST by the PDP: with the shipped
+> in-group peer is then decided PER REQUEST by the PDP: with the shipped
 > (bindings-absent) policy the ENROLLED principal's uid resolves `admin` and is served;
 > every other in-group uid has no role and is denied everything, including `ping` —
-> deny-by-default made operational. It is not a substitute for the mTLS half.
+> deny-by-default made operational. It is not a substitute for the per-request decision.
 
 ### 2. Seed the daemon's standing SecretID
 
@@ -325,8 +330,10 @@ A quiescent, successfully-bound daemon prints nothing further and blocks; it res
 
 ### 5. `ssh` in and run the acceptance verbs
 
-In terminal 2, a **fresh** session (proves the CLI's own leaf mint + connect works from a
-cold start, not a warm terminal that happens to already have Vault env vars set):
+In terminal 2, a **fresh** session proves that the CLI's leaf mint and connect work from a
+cold start, not from a warm terminal that happens to already have Vault env vars set. The
+daemon does not request the leaf, but until #116 the CLI still requires a successful mint,
+and so a live Vault token, before it connects:
 
 ```bash
 ssh <operator>@<host>
@@ -343,7 +350,7 @@ $ maknae ping
 pong
 
 $ maknae whoami
-maknae://<deployment_id>/plane/cli uid=<your uid>
+uid=<your uid>
 ```
 
 The `admin.*` subcommands are reachable from the same CLI —
@@ -366,7 +373,7 @@ Every verb needs a stored login: without one the CLI prints
 
 Exit code `0` on both **when run as the enrolled principal**. A non-`maknae`-group
 uid, an in-group-but-NOT-enrolled uid (per-request deny since #77 — the CLI prints
-`maknae: daemon refused: Unauthorized: not authorized`), an expired/wrong-plane cert,
+`maknae: daemon refused: Unauthorized: not authorized`), a daemon whose server certificate is expired or names the wrong plane,
 or the daemon not running each produce a non-zero exit with a `maknae: <reason>` line
 on stderr instead — the CLI never prints a placeholder or partial answer on failure (`bins/maknae/src/cli.rs`
 `execute`'s single `Result<bool, String>` return: `Ok(true)` on a real verb response,
@@ -447,7 +454,7 @@ may be present in the JSONL but is not confirmed durable (the marker's hint is
 count of degraded emissions is the signal your enclave should alert on.
 
 ```json
-{"action":"liveness.ping","au3_1":{},"event":"request","integrity":{"prev_hash":null,"sig":null},"outcome":{"posture":"authorized","reason":"authorized","result":"permit"},"seq":2,"session_id":...,"source":{"gid":null,"pid":null,"plane_uri_san":"maknae://<deployment_id>/plane/cli","uid":<your uid>},"subject":{"plane_uri_san":"maknae://<deployment_id>/plane/cli","role":"user","user":"<your login>"},"ts":"...","where":{"component":"kernel","host":"maknaed","socket":"/run/maknae/maknaed.sock"}}
+{"action":"liveness.ping","au3_1":{},"event":"request","integrity":{"prev_hash":null,"sig":null},"outcome":{"posture":"authorized","reason":"authorized","result":"permit"},"seq":2,"session_id":...,"source":{"gid":null,"pid":null,"plane_uri_san":null,"uid":<your uid>},"subject":{"plane_uri_san":null,"role":"user","user":"<your login>"},"ts":"...","where":{"component":"kernel","host":"maknaed","socket":"/run/maknae/maknaed.sock"}}
 ```
 
 A **deny** record (a non-enrolled in-group uid running any verb, or a read of a
@@ -529,15 +536,17 @@ destinations:                # #172: per-role egress allowlist for session.promp
 
 ### What it proves
 
-- **mTLS** — the CLI's Vault-minted `maknae://<deployment_id>/plane/cli` leaf and the
-  daemon's `.../plane/kernel` leaf completed a real TLS 1.3 handshake and each verified
-  the other's URI-SAN (Chapter 2's proof, now exercised through the full daemon rather
-  than the loopback smoke test).
+- **Server-authenticated TLS** — the daemon's `spiffe://<deployment_id>/plane/kernel`
+  leaf completed a real TLS 1.3 handshake and the CLI verified its URI-SAN; the daemon
+  requested no client certificate (Chapter 2's proof, now exercised through the full
+  daemon rather than the loopback smoke test). The record's `plane_uri_san` is `null`
+  because the client channel is certless; its `where.socket` names the client socket.
 - **Peer-creds** — the daemon captured your real connecting uid off the kernel
   (`SO_PEERCRED`/`LOCAL_PEERCRED`) and it is exactly what `maknae whoami` echoes back —
   proof the kernel-verified fact, not a client-asserted one, is what's in the response.
 - **Group ADMISSION** — you are in `maknae` (step 1); `authorize_connection` permits the
-  connection on `(cert_verified=true, uid_in_group=true)`. Removing yourself from the
+  connection on `(channel_authenticated=true, admitted=true)`, where `admitted` is the
+  client class's admission rule: `maknae`-group membership. Removing yourself from the
   group (and starting a fresh `ssh` session so group membership re-resolves) turns the
   same commands into a denied connection — an audited `deny`/`unauthorized` record, no
   response, non-zero CLI exit. Admission is the TRANSPORT half.
@@ -691,7 +700,14 @@ maknaed: refusing to start: the authorization policy could not be loaded: unknow
 
 It refuses while any file carries the key, whether `maknae.yaml` or a `config.d/` member. Delete the `home:` line from whichever file carries it. Re-enrolling with step 3's command also removes it, but only from `/etc/maknae/maknae.yaml`. Then restart `maknaed`: `sudo systemctl restart maknaed`; on macOS, `sudo launchctl kickstart -k system/io.maknae.maknaed`.
 
-### 3c. More than one user
+### 3c. Upgrading a host enrolled before #114
+
+Plane leaves now carry `spiffe://<deployment_id>/plane/{kernel,cli}` URI-SANs, and `deployment_id` must be a valid SPIFFE trust domain: at most 255 bytes of `[a-z0-9._-]`, at least one of `[a-z0-9]`. Enroll and the daemon refuse any other value. In this order:
+
+1. **Apply the current `deploy/vault-pki` Terraform.** The `maknae-kernel` and `maknae-cli` roles accept only the `spiffe://` SAN and issue leaves with `DigitalSignature` key usage. If `deployment_id` has uppercase letters or other characters outside the grammar, change it in Terraform and in `maknae.yaml` together.
+2. **Re-enroll** with step 3's command, then restart `maknaed`. Leaves are minted at run time, so none needs replacing by hand.
+
+### 3d. More than one user
 
 Enroll writes `~/.maknae` only for the account that ran it. To give another local account the agent, follow [first-provider step 4a](first-provider.md#4a-add-another-local-user): it adds the account to the `maknae` group, copies your CLI configuration to it, binds it in `bindings.yaml` and creates its Vault user. The consequence for you: once `bindings.yaml` has a `bindings:` block, only the names it lists have a role, so the enrolled administrator must be listed under `admin` too, and step 7's grant then belongs under each bound role; [reload](#reload-the-policy) `maknaed` after adding a name. A second user's file actions are confined to their own home, resolved per request.
 

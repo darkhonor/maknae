@@ -100,7 +100,7 @@ resource "vault_pki_secret_backend_role" "maknae_kernel" {
   parameter_set  = local.plane_key.parameter_set
   signature_bits = local.plane_key.signature_bits
 
-  allowed_uri_sans    = ["maknae://${var.deployment_id}/plane/kernel"]
+  allowed_uri_sans    = ["spiffe://${var.deployment_id}/plane/kernel"]
   use_csr_sans        = true  # honor the plane's URI-SAN as presented in its CSR
   use_csr_common_name = false # the URI-SAN is the WHOLE identity — never take a CN from the CSR
 
@@ -112,6 +112,7 @@ resource "vault_pki_secret_backend_role" "maknae_kernel" {
   require_cn                  = false
   allow_any_name              = false
 
+  key_usage   = ["DigitalSignature"]
   client_flag = true # each plane is both TLS client and server on the socket
   server_flag = true
 
@@ -127,7 +128,7 @@ resource "vault_pki_secret_backend_role" "maknae_cli" {
   parameter_set  = local.plane_key.parameter_set
   signature_bits = local.plane_key.signature_bits
 
-  allowed_uri_sans    = ["maknae://${var.deployment_id}/plane/cli"]
+  allowed_uri_sans    = ["spiffe://${var.deployment_id}/plane/cli"]
   use_csr_sans        = true
   use_csr_common_name = false # the URI-SAN is the WHOLE identity — never take a CN from the CSR
 
@@ -139,6 +140,7 @@ resource "vault_pki_secret_backend_role" "maknae_cli" {
   require_cn                  = false
   allow_any_name              = false
 
+  key_usage   = ["DigitalSignature"]
   client_flag = true
   server_flag = true
 

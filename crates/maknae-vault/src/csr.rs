@@ -114,13 +114,13 @@ mod tests {
     fn empty_subject_true_and_false() {
         let empty = make_csr(
             None,
-            &["maknae://d/plane/kernel"],
+            &["spiffe://d/plane/kernel"],
             &rcgen::PKCS_ECDSA_P384_SHA384,
         );
         assert!(csr_has_empty_subject(&empty));
         let with_cn = make_csr(
             Some("someone"),
-            &["maknae://d/plane/kernel"],
+            &["spiffe://d/plane/kernel"],
             &rcgen::PKCS_ECDSA_P384_SHA384,
         );
         assert!(!csr_has_empty_subject(&with_cn));
@@ -130,19 +130,19 @@ mod tests {
     fn single_uri_san_variants() {
         let one = make_csr(
             None,
-            &["maknae://d/plane/kernel"],
+            &["spiffe://d/plane/kernel"],
             &rcgen::PKCS_ECDSA_P384_SHA384,
         );
-        assert!(csr_single_uri_san(&one, "maknae://d/plane/kernel"));
-        assert!(!csr_single_uri_san(&one, "maknae://d/plane/cli")); // wrong value
+        assert!(csr_single_uri_san(&one, "spiffe://d/plane/kernel"));
+        assert!(!csr_single_uri_san(&one, "spiffe://d/plane/cli")); // wrong value
         let none = make_csr(None, &[], &rcgen::PKCS_ECDSA_P384_SHA384);
-        assert!(!csr_single_uri_san(&none, "maknae://d/plane/kernel")); // zero SANs
+        assert!(!csr_single_uri_san(&none, "spiffe://d/plane/kernel")); // zero SANs
         let two = make_csr(
             None,
-            &["maknae://d/plane/kernel", "maknae://d/plane/cli"],
+            &["spiffe://d/plane/kernel", "spiffe://d/plane/cli"],
             &rcgen::PKCS_ECDSA_P384_SHA384,
         );
-        assert!(!csr_single_uri_san(&two, "maknae://d/plane/kernel")); // two SANs
+        assert!(!csr_single_uri_san(&two, "spiffe://d/plane/kernel")); // two SANs
     }
 
     /// Build a CSR with an empty subject and an arbitrary mix of SAN types (P-384).
@@ -158,7 +158,7 @@ mod tests {
     fn rejects_plane_uri_plus_rogue_dns() {
         // The expected plane URI PLUS a rogue DNS SAN — must be rejected as URI-only,
         // exactly as the returned-leaf verifier does (codex r6 P2).
-        let want = "maknae://d/plane/kernel";
+        let want = "spiffe://d/plane/kernel";
         let mixed = make_csr_sans(vec![
             rcgen::SanType::URI(want.try_into().unwrap()),
             rcgen::SanType::DnsName("evil.example".try_into().unwrap()),
@@ -175,7 +175,7 @@ mod tests {
         let mut params = rcgen::CertificateParams::new(vec![]).unwrap();
         params.distinguished_name = rcgen::DistinguishedName::new();
         params.subject_alt_names = vec![rcgen::SanType::URI(
-            "maknae://d/plane/kernel".try_into().unwrap(),
+            "spiffe://d/plane/kernel".try_into().unwrap(),
         )];
         params.serialize_request(key).unwrap().pem().unwrap()
     }
@@ -238,13 +238,13 @@ mod tests {
         let g =
             "-----BEGIN CERTIFICATE REQUEST-----\nAQIDBA==\n-----END CERTIFICATE REQUEST-----\n";
         assert!(!csr_has_empty_subject(g));
-        assert!(!csr_single_uri_san(g, "maknae://d/plane/kernel"));
+        assert!(!csr_single_uri_san(g, "spiffe://d/plane/kernel"));
         assert!(!csr_key_is(g, PlaneKey::MlDsa87));
     }
 
     #[test]
     fn matches_plane_shape_accepts_and_rejects_each_failure() {
-        let want = "maknae://d/plane/kernel";
+        let want = "spiffe://d/plane/kernel";
         // Good shape: empty subject, one URI-SAN == want, P-384.
         let good = make_csr(None, &[want], &rcgen::PKCS_ECDSA_P384_SHA384);
         assert!(csr_matches_plane_shape(
@@ -263,7 +263,7 @@ mod tests {
         ));
         let wrong_san = make_csr(
             None,
-            &["maknae://d/plane/cli"],
+            &["spiffe://d/plane/cli"],
             &rcgen::PKCS_ECDSA_P384_SHA384,
         );
         assert!(!csr_matches_plane_shape(

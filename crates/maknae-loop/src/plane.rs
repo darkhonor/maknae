@@ -7,7 +7,8 @@ use maknae_agent::plane::{Plane, PlaneError, ReadBasis, ReadOutcome, WriteOutcom
 use maknae_agent::wire::{check_for, prompt_outcome, read_outcome, write_outcome, WireOutcome};
 use maknae_config::TransportConfig;
 use maknae_proto::{ProviderChoice, Turn, Verb};
-use maknae_vault::{CaBundle, PlaneClient};
+use maknae_vault::{PlaneClient, TrustBundle};
+use std::sync::Arc;
 
 /// A wrapped key whose frame was refused as too large before it was sent, so it is unconsumed.
 pub struct Spare {
@@ -47,7 +48,7 @@ fn now_unix() -> Result<u64, String> {
 pub struct LoopPlane<K: KeySupply> {
     transport: TransportConfig,
     client: PlaneClient,
-    ca: CaBundle,
+    trust: Arc<TrustBundle>,
     output_tokens: Option<u64>,
     write_max: usize,
     keys: K,
@@ -59,7 +60,7 @@ impl<K: KeySupply> LoopPlane<K> {
     pub fn new(
         transport: TransportConfig,
         client: PlaneClient,
-        ca: CaBundle,
+        trust: Arc<TrustBundle>,
         output_tokens: Option<u64>,
         write_max: usize,
         keys: K,
@@ -67,7 +68,7 @@ impl<K: KeySupply> LoopPlane<K> {
         LoopPlane {
             transport,
             client,
-            ca,
+            trust,
             output_tokens,
             write_max,
             keys,
@@ -134,7 +135,7 @@ impl<K: KeySupply> Plane for LoopPlane<K> {
                 crate::mutation::WriteCheck::Unchecked,
                 &self.transport,
                 &self.client,
-                &self.ca,
+                &self.trust,
                 &mut |l| diagnostics.push(l),
             )
             .await
@@ -159,7 +160,7 @@ impl<K: KeySupply> Plane for LoopPlane<K> {
                 crate::mutation::WriteCheck::Unchecked,
                 &self.transport,
                 &self.client,
-                &self.ca,
+                &self.trust,
                 &mut |l| diagnostics.push(l),
             )
             .await
@@ -191,7 +192,7 @@ impl<K: KeySupply> Plane for LoopPlane<K> {
                 check_for(basis),
                 &self.transport,
                 &self.client,
-                &self.ca,
+                &self.trust,
                 &mut |l| diagnostics.push(l),
             )
             .await

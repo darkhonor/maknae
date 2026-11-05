@@ -1,10 +1,11 @@
 #![cfg(test)]
 
-//! In-process mTLS negative suite (Stage 2, CI). Unit-module so it can reach pub(crate)
+//! In-process negative suite (Stage 2, CI) for both channel classes: mutual TLS for machine
+//! peers, server-authenticated TLS for the certless client. Unit-module so it can reach pub(crate)
 //! config/verifier constructors. Uses tokio duplex (no socket/peer-creds — those are unit
 //! tested in socket.rs/peercred.rs). rcgen mints a test CA + kernel/cli leaves. This is
-//! ADR-0005's mTLS negative suite: happy path + each negative fails closed.
-use crate::{CaBundle, Plane};
+//! ADR-0005's negative suite: happy path + each negative fails closed.
+use crate::{CaBundle, ChannelPeer, PeerAuth, Plane, SanRule, TrustBundle};
 use maknae_crypto::plane_key::PlaneKey;
 use maknae_crypto::rcgen;
 use maknae_crypto::rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -116,12 +117,28 @@ fn mk_intermediate_with(root: &Ca, alg: PlaneKey) -> Ca {
     }
 }
 
-fn server_cfg(
+fn trust(ca: &CaBundle) -> Arc<TrustBundle> {
+    TrustBundle::from_pins(&[ca]).unwrap()
+}
+
+fn client_verifier(ca: &CaBundle, expect: Plane) -> Arc<maknae_crypto::tls::ClientVerifierHandle> {
+    crate::tls::client_verifier(&trust(ca), SanRule::for_plane(expect, "d")).unwrap()
+}
+
+fn server_verifier(ca: &CaBundle, expect: Plane) -> Arc<maknae_crypto::tls::ServerVerifierHandle> {
+    crate::tls::server_verifier(&trust(ca), SanRule::for_plane(expect, "d")).unwrap()
+}
+
+fn plane_leaf(expect: Plane) -> PeerAuth {
+    PeerAuth::PlaneLeaf {
+        accept: SanRule::for_plane(expect, "d"),
+    }
+}
+
+fn resolver_for(
     chain: Vec<CertificateDer<'static>>,
     key: Vec<u8>,
-    ca: &CaBundle,
-    expect: Plane,
-) -> Arc<maknae_crypto::rustls::ServerConfig> {
+) -> Arc<crate::resolver::PlaneCertResolver> {
     let key = maknae_crypto::tls::load_private_key(
         &maknae_crypto::policy().unwrap().tls,
         PrivateKeyDer::Pkcs8(key.into()),
@@ -131,8 +148,16 @@ fn server_cfg(
     resolver.slot().store(Some(Arc::new(
         maknae_crypto::rustls::sign::CertifiedKey::new(chain, key),
     )));
-    let verifier = crate::plane_verify::PlaneClientCertVerifier::new(ca, expect, "d").unwrap();
-    Arc::new(crate::tls::plane_server_config(verifier, resolver).unwrap())
+    resolver
+}
+
+fn server_cfg(
+    chain: Vec<CertificateDer<'static>>,
+    key: Vec<u8>,
+    ca: &CaBundle,
+    auth: &PeerAuth,
+) -> Arc<maknae_crypto::rustls::ServerConfig> {
+    crate::tls::server_config(&trust(ca), auth, resolver_for(chain, key)).unwrap()
 }
 
 fn client_cfg(
@@ -142,10 +167,12 @@ fn client_cfg(
     expect: Plane,
     with_cert: bool,
 ) -> Arc<maknae_crypto::rustls::ClientConfig> {
-    let verifier = crate::plane_verify::PlaneServerCertVerifier::new(ca, expect, "d").unwrap();
+    let verifier = server_verifier(ca, expect);
     let auth = with_cert.then(|| (chain, PrivateKeyDer::Pkcs8(key.into())));
     Arc::new(crate::tls::plane_client_config(verifier, auth).unwrap())
 }
+
+const NO_CLIENT_CERT: &str = "peer sent no certificates";
 
 async fn handshake(
     server: Arc<maknae_crypto::rustls::ServerConfig>,
@@ -209,9 +236,9 @@ async fn a_delegated_descriptor_survives_the_assembled_tls_path() {
 
     provider();
     let ca = mk_ca();
-    let (kchain, kkey) = mk_leaf(&ca, "maknae://d/plane/kernel", false);
-    let (cchain, ckey) = mk_leaf(&ca, "maknae://d/plane/cli", false);
-    let server = server_cfg(kchain, kkey, &cab(&ca), Plane::Cli);
+    let (kchain, kkey) = mk_leaf(&ca, "spiffe://d/plane/kernel", false);
+    let (cchain, ckey) = mk_leaf(&ca, "spiffe://d/plane/cli", false);
+    let server = server_cfg(kchain, kkey, &cab(&ca), &PeerAuth::Certless);
     let client = client_cfg(cchain, ckey, &cab(&ca), Plane::Kernel, true);
 
     // A REAL socket pair — a duplex pipe cannot carry ancillary data at all, which is
@@ -270,9 +297,9 @@ async fn a_delegated_descriptor_survives_the_assembled_tls_path() {
 async fn happy_path_mutual_auth() {
     provider();
     let ca = mk_ca();
-    let (kchain, kkey) = mk_leaf(&ca, "maknae://d/plane/kernel", false);
-    let (cchain, ckey) = mk_leaf(&ca, "maknae://d/plane/cli", false);
-    let s = server_cfg(kchain, kkey, &cab(&ca), Plane::Cli); // daemon=kernel expects cli
+    let (kchain, kkey) = mk_leaf(&ca, "spiffe://d/plane/kernel", false);
+    let (cchain, ckey) = mk_leaf(&ca, "spiffe://d/plane/cli", false);
+    let s = server_cfg(kchain, kkey, &cab(&ca), &plane_leaf(Plane::Cli)); // daemon=kernel expects cli
     let c = client_cfg(cchain, ckey, &cab(&ca), Plane::Kernel, true); // cli expects kernel
     handshake(s, c).await.expect("mutual auth succeeds");
 }
@@ -281,34 +308,49 @@ async fn happy_path_mutual_auth() {
 async fn rejects_wrong_plane_client() {
     provider();
     let ca = mk_ca();
-    let (kchain, kkey) = mk_leaf(&ca, "maknae://d/plane/kernel", false);
+    let (kchain, kkey) = mk_leaf(&ca, "spiffe://d/plane/kernel", false);
     // CLI presents a KERNEL leaf (wrong plane) — server expects cli → reject.
-    let (wrong, wkey) = mk_leaf(&ca, "maknae://d/plane/kernel", false);
-    let s = server_cfg(kchain, kkey, &cab(&ca), Plane::Cli);
+    let (wrong, wkey) = mk_leaf(&ca, "spiffe://d/plane/kernel", false);
+    let s = server_cfg(kchain, kkey, &cab(&ca), &plane_leaf(Plane::Cli));
     let c = client_cfg(wrong, wkey, &cab(&ca), Plane::Kernel, true);
-    assert!(handshake(s, c).await.is_err());
+    let e = handshake(s, c).await.unwrap_err();
+    assert!(e.contains(crate::peer_auth::PLANE_URI_SAN_PREFIX), "{e}");
+}
+
+#[tokio::test]
+async fn rejects_wrong_plane_server() {
+    provider();
+    let ca = mk_ca();
+    let (wrong, wkey) = mk_leaf(&ca, "spiffe://d/plane/cli", false);
+    let (cchain, ckey) = mk_leaf(&ca, "spiffe://d/plane/cli", false);
+    let s = server_cfg(wrong, wkey, &cab(&ca), &plane_leaf(Plane::Cli));
+    let c = client_cfg(cchain, ckey, &cab(&ca), Plane::Kernel, true);
+    let e = handshake(s, c).await.unwrap_err();
+    assert!(e.contains(crate::peer_auth::PLANE_URI_SAN_PREFIX), "{e}");
 }
 
 #[tokio::test]
 async fn rejects_absent_client_cert() {
     provider();
     let ca = mk_ca();
-    let (kchain, kkey) = mk_leaf(&ca, "maknae://d/plane/kernel", false);
-    let (cchain, ckey) = mk_leaf(&ca, "maknae://d/plane/cli", false);
-    let s = server_cfg(kchain, kkey, &cab(&ca), Plane::Cli);
+    let (kchain, kkey) = mk_leaf(&ca, "spiffe://d/plane/kernel", false);
+    let (cchain, ckey) = mk_leaf(&ca, "spiffe://d/plane/cli", false);
+    let s = server_cfg(kchain, kkey, &cab(&ca), &plane_leaf(Plane::Cli));
     let c = client_cfg(cchain, ckey, &cab(&ca), Plane::Kernel, false); // no client cert
-    assert!(handshake(s, c).await.is_err());
+    assert_eq!(handshake(s, c).await, Err(NO_CLIENT_CERT.to_string()));
 }
 
 #[tokio::test]
 async fn rejects_expired_server_leaf() {
     provider();
     let ca = mk_ca();
-    let (kchain, kkey) = mk_leaf(&ca, "maknae://d/plane/kernel", true); // expired
-    let (cchain, ckey) = mk_leaf(&ca, "maknae://d/plane/cli", false);
-    let s = server_cfg(kchain, kkey, &cab(&ca), Plane::Cli);
-    let c = client_cfg(cchain, ckey, &cab(&ca), Plane::Kernel, true);
-    assert!(handshake(s, c).await.is_err());
+    let (kchain, kkey) = mk_leaf(&ca, "spiffe://d/plane/kernel", true); // expired
+    let (cchain, ckey) = mk_leaf(&ca, "spiffe://d/plane/cli", false);
+    for auth in [PeerAuth::Certless, plane_leaf(Plane::Cli)] {
+        let s = server_cfg(kchain.clone(), kkey.clone(), &cab(&ca), &auth);
+        let c = client_cfg(cchain.clone(), ckey.clone(), &cab(&ca), Plane::Kernel, true);
+        assert!(handshake(s, c).await.is_err(), "{auth:?}");
+    }
 }
 
 #[tokio::test]
@@ -316,11 +358,13 @@ async fn rejects_foreign_ca() {
     provider();
     let ca = mk_ca();
     let foreign = mk_ca();
-    let (kchain, kkey) = mk_leaf(&foreign, "maknae://d/plane/kernel", false); // foreign-signed
-    let (cchain, ckey) = mk_leaf(&ca, "maknae://d/plane/cli", false);
-    let s = server_cfg(kchain, kkey, &cab(&ca), Plane::Cli);
-    let c = client_cfg(cchain, ckey, &cab(&ca), Plane::Kernel, true);
-    assert!(handshake(s, c).await.is_err());
+    let (kchain, kkey) = mk_leaf(&foreign, "spiffe://d/plane/kernel", false); // foreign-signed
+    let (cchain, ckey) = mk_leaf(&ca, "spiffe://d/plane/cli", false);
+    for auth in [PeerAuth::Certless, plane_leaf(Plane::Cli)] {
+        let s = server_cfg(kchain.clone(), kkey.clone(), &cab(&ca), &auth);
+        let c = client_cfg(cchain.clone(), ckey.clone(), &cab(&ca), Plane::Kernel, true);
+        assert!(handshake(s, c).await.is_err(), "{auth:?}");
+    }
 }
 
 #[tokio::test]
@@ -336,10 +380,10 @@ async fn root_only_anchor_with_presented_intermediate() {
         int_der: int.der.clone(),
     };
     // leaves signed by the INTERMEDIATE; mk_leaf presents chain [leaf, int].
-    let (kchain, kkey) = mk_leaf(&int, "maknae://d/plane/kernel", false);
-    let (cchain, ckey) = mk_leaf(&int, "maknae://d/plane/cli", false);
+    let (kchain, kkey) = mk_leaf(&int, "spiffe://d/plane/kernel", false);
+    let (cchain, ckey) = mk_leaf(&int, "spiffe://d/plane/cli", false);
     // Happy: present [leaf, int] → path-builds to the pinned root.
-    let s = server_cfg(kchain.clone(), kkey.clone(), &cab, Plane::Cli);
+    let s = server_cfg(kchain.clone(), kkey.clone(), &cab, &plane_leaf(Plane::Cli));
     let c = client_cfg(cchain.clone(), ckey.clone(), &cab, Plane::Kernel, true);
     handshake(s, c)
         .await
@@ -349,7 +393,7 @@ async fn root_only_anchor_with_presented_intermediate() {
     let (mut kleaf, mut cleaf) = (kchain, cchain);
     kleaf.truncate(1);
     cleaf.truncate(1);
-    let s2 = server_cfg(kleaf, kkey, &cab, Plane::Cli);
+    let s2 = server_cfg(kleaf, kkey, &cab, &plane_leaf(Plane::Cli));
     let c2 = client_cfg(cleaf, ckey, &cab, Plane::Kernel, true);
     assert!(
         handshake(s2, c2).await.is_err(),
@@ -361,12 +405,13 @@ async fn root_only_anchor_with_presented_intermediate() {
 async fn rejects_extra_san_client() {
     provider();
     let ca = mk_ca();
-    let (kchain, kkey) = mk_leaf(&ca, "maknae://d/plane/kernel", false);
+    let (kchain, kkey) = mk_leaf(&ca, "spiffe://d/plane/kernel", false);
     // CLI leaf carries the correct plane URI PLUS a rogue DNS SAN → rejected (URI-SAN-only).
-    let (cchain, ckey) = mk_leaf_extra_san(&ca, "maknae://d/plane/cli");
-    let s = server_cfg(kchain, kkey, &cab(&ca), Plane::Cli);
+    let (cchain, ckey) = mk_leaf_extra_san(&ca, "spiffe://d/plane/cli");
+    let s = server_cfg(kchain, kkey, &cab(&ca), &plane_leaf(Plane::Cli));
     let c = client_cfg(cchain, ckey, &cab(&ca), Plane::Kernel, true);
-    assert!(handshake(s, c).await.is_err());
+    let e = handshake(s, c).await.unwrap_err();
+    assert!(e.contains(crate::peer_auth::PLANE_URI_SAN_PREFIX), "{e}");
 }
 
 // ---- accept() rejection surfacing (Task 5): needs a REAL UnixStream socketpair, since the
@@ -393,62 +438,210 @@ mod accept_reject {
     /// Drive `accept_on` (the real socket-backed accept path `PlaneListener::accept`
     /// delegates to) against a client that presents a wrong-plane leaf. Expect a rejection
     /// that carries the captured `PeerCreds` (available since creds are captured BEFORE the
-    /// handshake) tagged `WrongPlane` (our own SAN check) — `Handshake` is the documented
-    /// fallback if the rustls error can't be classified more precisely.
+    /// handshake) tagged `WrongPlane` (our own SAN check).
     #[tokio::test]
     async fn accept_reject_wrong_plane_carries_peer_creds() {
         provider();
         let ca = mk_ca();
-        let (kchain, kkey) = mk_leaf(&ca, "maknae://d/plane/kernel", false);
-        // Server (daemon) presents kernel, expects the peer to prove plane == cli.
-        let server_cfg = server_cfg(kchain, kkey, &cab(&ca), Plane::Cli);
+        let server = Server::new("wrong-plane", &ca);
         // Client presents a KERNEL leaf instead of the expected CLI leaf — wrong plane.
-        let (wrong_chain, wrong_key) = mk_leaf(&ca, "maknae://d/plane/kernel", false);
+        let (wrong_chain, wrong_key) = mk_leaf(&ca, "spiffe://d/plane/kernel", false);
         let client_cfg = client_cfg(wrong_chain, wrong_key, &cab(&ca), Plane::Kernel, true);
+        let trust = trust(&cab(&ca));
+        let auth = plane_leaf(Plane::Cli);
 
-        let dir = tmp_sock_dir("wrong-plane");
-        let sock = dir.join("s.sock");
-        let listener = crate::socket::bind_listener(&sock, None).expect("bind real UDS");
-        let acceptor = tokio_rustls::TlsAcceptor::from(server_cfg);
-
-        let srv = tokio::spawn(async move {
-            accept_on(
-                &listener,
-                &acceptor,
-                Plane::Cli,
-                "d",
-                Duration::from_secs(5),
-            )
-            .await
-        });
-
-        let raw = crate::socket::connect(&sock).await.expect("client connect");
-        let connector = tokio_rustls::TlsConnector::from(client_cfg);
-        let name =
-            maknae_crypto::rustls::pki_types::ServerName::try_from("maknae.invalid").unwrap();
-        // The client's own connect() is expected to fail too (server sends a rejection
-        // alert) — the assertion of record is on the SERVER's AcceptRejection below.
-        let _ = connector.connect(name, raw).await;
-
-        let result = srv.await.expect("server task did not panic");
-        let _ = std::fs::remove_dir_all(&dir);
+        let client = async {
+            let raw = crate::socket::connect(&server.sock)
+                .await
+                .expect("client connect");
+            let name =
+                maknae_crypto::rustls::pki_types::ServerName::try_from("maknae.invalid").unwrap();
+            // The client's own connect() may fail too (server sends a rejection alert) —
+            // the assertion of record is on the SERVER's AcceptRejection below.
+            tokio_rustls::TlsConnector::from(client_cfg)
+                .connect(name, raw)
+                .await
+        };
+        let accepted = accept_on(
+            &server.listener,
+            &server.resolver,
+            &trust,
+            &auth,
+            Duration::from_secs(5),
+        );
+        let (_client, result) = tokio::join!(client, accepted);
         match result {
             Err(AcceptRejection {
                 peer_creds: Some(_),
                 reason,
-            }) => {
-                assert!(
-                    matches!(reason, RejectReason::WrongPlane | RejectReason::Handshake),
-                    "expected WrongPlane (or Handshake fallback), got {reason:?}"
-                );
-            }
+            }) => assert_eq!(reason, RejectReason::WrongPlane),
             Err(other) => panic!(
-                "expected Err(AcceptRejection {{ peer_creds: Some(_), reason: WrongPlane | Handshake }}), got {other:?}"
+                "expected Err(AcceptRejection {{ peer_creds: Some(_), reason: WrongPlane }}), got {other:?}"
             ),
-            Ok(_) => panic!(
-                "expected accept_on to REJECT a wrong-plane leaf, but it succeeded"
-            ),
+            Ok(_) => panic!("expected accept_on to REJECT a wrong-plane leaf, but it succeeded"),
         }
+    }
+
+    struct Server {
+        listener: tokio::net::UnixListener,
+        sock: std::path::PathBuf,
+        dir: std::path::PathBuf,
+        resolver: Arc<crate::resolver::PlaneCertResolver>,
+    }
+
+    impl Server {
+        fn new(tag: &str, ca: &Ca) -> Self {
+            let (kchain, kkey) = mk_leaf(ca, "spiffe://d/plane/kernel", false);
+            let dir = tmp_sock_dir(tag);
+            let sock = dir.join("s.sock");
+            let listener = crate::socket::bind_listener(&sock, None).expect("bind real UDS");
+            Server {
+                listener,
+                sock,
+                dir,
+                resolver: resolver_for(kchain, kkey),
+            }
+        }
+
+        async fn attempt(
+            &self,
+            trust: &Arc<TrustBundle>,
+            auth: &PeerAuth,
+            client_cfg: Arc<maknae_crypto::rustls::ClientConfig>,
+        ) -> Result<ChannelPeer, RejectReason> {
+            let connector = tokio_rustls::TlsConnector::from(client_cfg);
+            let name =
+                maknae_crypto::rustls::pki_types::ServerName::try_from("maknae.invalid").unwrap();
+            let client = async {
+                let raw = crate::socket::connect(&self.sock)
+                    .await
+                    .expect("client connect");
+                connector.connect(name, raw).await
+            };
+            let server = accept_on(
+                &self.listener,
+                &self.resolver,
+                trust,
+                auth,
+                Duration::from_secs(5),
+            );
+            let (_client, server) = tokio::join!(client, server);
+            server.map(|s| s.peer().clone()).map_err(|r| r.reason)
+        }
+    }
+
+    impl Drop for Server {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn san_identity_admits_only_its_san() {
+        provider();
+        let ca = mk_ca();
+        let server = Server::new("san-identity", &ca);
+        let trust = trust(&cab(&ca));
+        let auth = plane_leaf(Plane::Cli);
+        let client_with = |(chain, key)| client_cfg(chain, key, &cab(&ca), Plane::Kernel, true);
+        let cli = client_with(mk_leaf(&ca, "spiffe://d/plane/cli", false));
+        let kernel = client_with(mk_leaf(&ca, "spiffe://d/plane/kernel", false));
+        let extra = client_with(mk_leaf_extra_san(&ca, "spiffe://d/plane/cli"));
+
+        let admitted = server.attempt(&trust, &auth, cli).await;
+        let wrong = server.attempt(&trust, &auth, Arc::clone(&kernel)).await;
+        let extra_san = server.attempt(&trust, &auth, Arc::clone(&extra)).await;
+
+        assert_eq!(
+            admitted,
+            Ok(ChannelPeer::Certified("spiffe://d/plane/cli".to_string()))
+        );
+        assert_eq!(wrong, Err(RejectReason::WrongPlane));
+        assert_eq!(extra_san, Err(RejectReason::WrongPlane));
+        let (kchain, kkey) = mk_leaf(&ca, "spiffe://d/plane/kernel", false);
+        let in_handshake = server_cfg(kchain, kkey, &cab(&ca), &auth);
+        for refused in [kernel, extra] {
+            let e = handshake(Arc::clone(&in_handshake), refused)
+                .await
+                .unwrap_err();
+            assert!(
+                e.contains(crate::peer_auth::PLANE_URI_SAN_PREFIX),
+                "refused in the handshake by the identity check, got {e}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn client_class_completes_with_no_client_cert() {
+        provider();
+        let ca = mk_ca();
+        let server = Server::new("certless-none", &ca);
+        let (cchain, ckey) = mk_leaf(&ca, "spiffe://d/plane/cli", false);
+        let client = client_cfg(cchain, ckey, &cab(&ca), Plane::Kernel, false);
+        assert_eq!(
+            server
+                .attempt(&trust(&cab(&ca)), &PeerAuth::Certless, client)
+                .await,
+            Ok(ChannelPeer::Certless)
+        );
+    }
+
+    #[tokio::test]
+    async fn machine_class_refuses_a_certless_client_in_the_handshake() {
+        provider();
+        let ca = mk_ca();
+        let server = Server::new("plane-leaf-certless", &ca);
+        let (cchain, ckey) = mk_leaf(&ca, "spiffe://d/plane/cli", false);
+        let client = client_cfg(cchain, ckey, &cab(&ca), Plane::Kernel, false);
+        assert_eq!(
+            server
+                .attempt(&trust(&cab(&ca)), &plane_leaf(Plane::Cli), client)
+                .await,
+            Err(RejectReason::Handshake)
+        );
+    }
+
+    #[tokio::test]
+    async fn client_class_reports_certless_even_when_the_client_offers_a_leaf() {
+        provider();
+        let ca = mk_ca();
+        let server = Server::new("certless-offered", &ca);
+        let (cchain, ckey) = mk_leaf(&ca, "spiffe://d/plane/cli", false);
+        let client = client_cfg(cchain, ckey, &cab(&ca), Plane::Kernel, true);
+        assert_eq!(
+            server
+                .attempt(&trust(&cab(&ca)), &PeerAuth::Certless, client)
+                .await,
+            Ok(ChannelPeer::Certless)
+        );
+    }
+
+    #[tokio::test]
+    async fn swapping_the_trust_bundle_changes_which_peer_verifies() {
+        provider();
+        let ca_a = mk_ca();
+        let ca_b = mk_ca();
+        let server = Server::new("trust-swap", &ca_a);
+        let trust = trust(&cab(&ca_a));
+        let auth = plane_leaf(Plane::Cli);
+        let client_of = |ca: &Ca| {
+            let (chain, key) = mk_leaf(ca, "spiffe://d/plane/cli", false);
+            client_cfg(chain, key, &cab(&ca_a), Plane::Kernel, true)
+        };
+        let from_a = client_of(&ca_a);
+        let from_b = client_of(&ca_b);
+        let cli = Ok(ChannelPeer::Certified("spiffe://d/plane/cli".to_string()));
+
+        assert_eq!(
+            server.attempt(&trust, &auth, Arc::clone(&from_a)).await,
+            cli
+        );
+        trust.replace(&[&cab(&ca_b)]).unwrap();
+        assert_eq!(
+            server.attempt(&trust, &auth, from_a).await,
+            Err(RejectReason::ChainOrCa)
+        );
+        assert_eq!(server.attempt(&trust, &auth, from_b).await, cli);
     }
 }
 
@@ -461,8 +654,8 @@ struct Pki {
 fn pki() -> Pki {
     provider();
     let ca = mk_ca();
-    let kernel = mk_leaf(&ca, "maknae://d/plane/kernel", false);
-    let cli = mk_leaf(&ca, "maknae://d/plane/cli", false);
+    let kernel = mk_leaf(&ca, "spiffe://d/plane/kernel", false);
+    let cli = mk_leaf(&ca, "spiffe://d/plane/cli", false);
     Pki { ca, kernel, cli }
 }
 
@@ -479,8 +672,7 @@ fn peer_client(
     p: &Pki,
     groups: &[maknae_crypto::KxGroup],
 ) -> Arc<maknae_crypto::rustls::ClientConfig> {
-    let verifier =
-        crate::plane_verify::PlaneServerCertVerifier::new(&cab(&p.ca), Plane::Kernel, "d").unwrap();
+    let verifier = server_verifier(&cab(&p.ca), Plane::Kernel);
     Arc::new(
         maknae_crypto::rustls::ClientConfig::builder_with_provider(offering(groups))
             .with_protocol_versions(&[&maknae_crypto::rustls::version::TLS13])
@@ -500,8 +692,7 @@ fn peer_server(
     p: &Pki,
     groups: &[maknae_crypto::KxGroup],
 ) -> Arc<maknae_crypto::rustls::ServerConfig> {
-    let verifier =
-        crate::plane_verify::PlaneClientCertVerifier::new(&cab(&p.ca), Plane::Cli, "d").unwrap();
+    let verifier = client_verifier(&cab(&p.ca), Plane::Cli);
     Arc::new(
         maknae_crypto::rustls::ServerConfig::builder_with_provider(offering(groups))
             .with_protocol_versions(&[&maknae_crypto::rustls::version::TLS13])
@@ -558,7 +749,7 @@ fn maknae_server(p: &Pki) -> Arc<maknae_crypto::rustls::ServerConfig> {
         p.kernel.0.clone(),
         p.kernel.1.clone(),
         &cab(&p.ca),
-        Plane::Cli,
+        &plane_leaf(Plane::Cli),
     )
 }
 
@@ -570,6 +761,75 @@ fn maknae_client(p: &Pki) -> Arc<maknae_crypto::rustls::ClientConfig> {
         Plane::Kernel,
         true,
     )
+}
+
+async fn second_session_kind(
+    server: Arc<maknae_crypto::rustls::ServerConfig>,
+    client: Arc<maknae_crypto::rustls::ClientConfig>,
+) -> maknae_crypto::rustls::HandshakeKind {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut kind = None;
+    for _ in 0..2 {
+        let (c, s) = tokio::io::duplex(16 * 1024);
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::clone(&server));
+        let srv = tokio::spawn(async move {
+            let mut tls = acceptor.accept(s).await.unwrap();
+            tls.write_all(b"x").await.unwrap();
+            tls.flush().await.unwrap();
+            tls
+        });
+        let name =
+            maknae_crypto::rustls::pki_types::ServerName::try_from("maknae.invalid").unwrap();
+        let mut tls = tokio_rustls::TlsConnector::from(Arc::clone(&client))
+            .connect(name, c)
+            .await
+            .unwrap();
+        let mut byte = [0u8; 1];
+        tls.read_exact(&mut byte).await.unwrap();
+        kind = tls.get_ref().1.handshake_kind();
+        drop(srv.await.unwrap());
+    }
+    kind.unwrap()
+}
+
+#[tokio::test]
+async fn neither_plane_side_resumes_a_session() {
+    use maknae_crypto::rustls::client::Resumption;
+    use maknae_crypto::rustls::server::ServerSessionMemoryCache;
+    use maknae_crypto::rustls::HandshakeKind;
+    let p = pki();
+    let server = maknae_server(&p);
+    let client = maknae_client(&p);
+    let mut resuming_server = (*server).clone();
+    resuming_server.send_tls13_tickets = 2;
+    resuming_server.session_storage = ServerSessionMemoryCache::new(32);
+    let resuming_server = Arc::new(resuming_server);
+    let mut resuming_client = (*client).clone();
+    resuming_client.resumption = Resumption::default();
+    let resuming_client = Arc::new(resuming_client);
+
+    assert_eq!(
+        second_session_kind(Arc::clone(&resuming_server), Arc::clone(&resuming_client)).await,
+        HandshakeKind::Resumed
+    );
+    assert_eq!(
+        second_session_kind(server, Arc::clone(&resuming_client)).await,
+        HandshakeKind::Full
+    );
+    let certless = server_cfg(
+        p.kernel.0.clone(),
+        p.kernel.1.clone(),
+        &cab(&p.ca),
+        &PeerAuth::Certless,
+    );
+    assert_eq!(
+        second_session_kind(certless, resuming_client).await,
+        HandshakeKind::Full
+    );
+    assert_eq!(
+        second_session_kind(resuming_server, client).await,
+        HandshakeKind::Full
+    );
 }
 
 fn group_names(
@@ -705,7 +965,7 @@ mod plane_key_algorithms {
         seen: Arc<Mutex<Vec<SignatureScheme>>>,
     }
 
-    impl ServerCertVerifier for Recording<crate::plane_verify::PlaneServerCertVerifier> {
+    impl ServerCertVerifier for Recording<maknae_crypto::tls::ServerVerifierHandle> {
         fn verify_server_cert(
             &self,
             e: &CertificateDer<'_>,
@@ -738,7 +998,7 @@ mod plane_key_algorithms {
         }
     }
 
-    impl ClientCertVerifier for Recording<crate::plane_verify::PlaneClientCertVerifier> {
+    impl ClientCertVerifier for Recording<maknae_crypto::tls::ClientVerifierHandle> {
         fn root_hint_subjects(&self) -> &[DistinguishedName] {
             self.inner.root_hint_subjects()
         }
@@ -796,12 +1056,11 @@ mod plane_key_algorithms {
             maknae_crypto::rustls::sign::CertifiedKey::new(kernel.0, key),
         )));
         let client_verifier = Arc::new(Recording {
-            inner: crate::plane_verify::PlaneClientCertVerifier::new(cab, Plane::Cli, "d").unwrap(),
+            inner: client_verifier(cab, Plane::Cli),
             seen: Arc::clone(&seen.by_server),
         });
         let server_verifier = Arc::new(Recording {
-            inner: crate::plane_verify::PlaneServerCertVerifier::new(cab, Plane::Kernel, "d")
-                .unwrap(),
+            inner: server_verifier(cab, Plane::Kernel),
             seen: Arc::clone(&seen.by_client),
         });
         let server = Arc::new(crate::tls::plane_server_config(client_verifier, resolver).unwrap());
@@ -822,8 +1081,8 @@ mod plane_key_algorithms {
             let ca = mk_ca_with(alg);
             let seen = mutual_tls(
                 &cab(&ca),
-                mk_leaf_with(&ca, "maknae://d/plane/kernel", false, alg),
-                mk_leaf_with(&ca, "maknae://d/plane/cli", false, alg),
+                mk_leaf_with(&ca, "spiffe://d/plane/kernel", false, alg),
+                mk_leaf_with(&ca, "spiffe://d/plane/cli", false, alg),
             )
             .await
             .unwrap_or_else(|e| panic!("{alg:?}: {e}"));
@@ -852,8 +1111,8 @@ mod plane_key_algorithms {
         };
         let seen = mutual_tls(
             &cab,
-            mk_leaf_with(&int, "maknae://d/plane/kernel", false, MLDSA87),
-            mk_leaf_with(&int, "maknae://d/plane/cli", false, MLDSA87),
+            mk_leaf_with(&int, "spiffe://d/plane/kernel", false, MLDSA87),
+            mk_leaf_with(&int, "spiffe://d/plane/cli", false, MLDSA87),
         )
         .await
         .expect("mixed chain");
@@ -873,28 +1132,28 @@ mod plane_key_algorithms {
         for alg in PlaneKey::ALL {
             let ca = mk_ca_with(alg);
             let foreign = mk_ca_with(alg);
-            let kernel = || mk_leaf_with(&ca, "maknae://d/plane/kernel", false, alg);
-            let cli = || mk_leaf_with(&ca, "maknae://d/plane/cli", false, alg);
+            let kernel = || mk_leaf_with(&ca, "spiffe://d/plane/kernel", false, alg);
+            let cli = || mk_leaf_with(&ca, "spiffe://d/plane/cli", false, alg);
             let cases = [
                 (
                     "wrong plane",
                     kernel(),
-                    mk_leaf_with(&ca, "maknae://d/plane/kernel", false, alg),
+                    mk_leaf_with(&ca, "spiffe://d/plane/kernel", false, alg),
                 ),
                 (
                     "expired server leaf",
-                    mk_leaf_with(&ca, "maknae://d/plane/kernel", true, alg),
+                    mk_leaf_with(&ca, "spiffe://d/plane/kernel", true, alg),
                     cli(),
                 ),
                 (
                     "foreign CA",
-                    mk_leaf_with(&foreign, "maknae://d/plane/kernel", false, alg),
+                    mk_leaf_with(&foreign, "spiffe://d/plane/kernel", false, alg),
                     cli(),
                 ),
                 (
                     "extra SAN",
                     kernel(),
-                    mk_leaf_extra_san_with(&ca, "maknae://d/plane/cli", alg),
+                    mk_leaf_extra_san_with(&ca, "spiffe://d/plane/cli", alg),
                 ),
             ];
             for (what, k, c) in cases {
@@ -905,10 +1164,11 @@ mod plane_key_algorithms {
             }
             let (kchain, kkey) = kernel();
             let (cchain, ckey) = cli();
-            let s = server_cfg(kchain, kkey, &cab(&ca), Plane::Cli);
+            let s = server_cfg(kchain, kkey, &cab(&ca), &plane_leaf(Plane::Cli));
             let c = client_cfg(cchain, ckey, &cab(&ca), Plane::Kernel, false);
-            assert!(
-                handshake(s, c).await.is_err(),
+            assert_eq!(
+                handshake(s, c).await,
+                Err(NO_CLIENT_CERT.to_string()),
                 "{alg:?}: absent client cert must fail"
             );
         }

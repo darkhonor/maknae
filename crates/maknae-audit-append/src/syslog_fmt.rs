@@ -355,8 +355,8 @@ mod tests {
         let mut r = rec(reason);
         r.where_.host = "maknaed-01".into();
         r.where_.socket = "/var/run/maknae/plane.sock".into();
-        r.source.plane_uri_san = Some("maknae://d/plane/cli".into());
-        r.subject.plane_uri_san = Some("maknae://d/plane/cli".into());
+        r.source.plane_uri_san = Some("spiffe://d/plane/cli".into());
+        r.subject.plane_uri_san = Some("spiffe://d/plane/cli".into());
         r.source.uid = u32::MAX;
         // production make_record never sets these; measure the production shape
         r.subject.user = None;

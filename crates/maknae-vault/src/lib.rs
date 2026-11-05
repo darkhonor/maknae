@@ -25,36 +25,35 @@ mod keychain;
 mod keychain_policy;
 mod operator;
 mod password_line;
+mod peer_auth;
+mod peer_identity;
+mod peercred;
 mod plane;
-mod plane_verify;
 mod refusal;
 mod resolver;
 mod seal_key_io;
-mod secret_io;
-mod secret_source;
-mod supervisor;
-mod supervisor_run;
-mod tls;
-mod user_login;
-mod vault_api;
-mod verify;
-mod wrap;
-// The UDS transport is unix-only (UnixStream / SO_PEERCRED); the pure-rustls layers above
-// (tls/resolver/plane_verify) compile everywhere so the Stage-1 client stays cross-platform.
-mod peer_identity;
-mod peercred;
 #[cfg(unix)]
 mod seal_pub_io;
 #[cfg(unix)]
 mod seal_pub_store;
+mod secret_io;
+mod secret_source;
 #[cfg(unix)]
 mod socket;
 #[cfg(unix)]
 mod stream;
+mod supervisor;
+mod supervisor_run;
+mod tls;
 #[cfg(unix)]
 mod token_record;
 #[cfg(unix)]
 mod token_store;
+mod trust_bundle;
+mod user_login;
+mod vault_api;
+mod verify;
+mod wrap;
 #[cfg(unix)]
 pub use accounts::{account_uid, NssAccounts};
 pub use api_shape::{WrapMismatch, MAX_TOKEN_BYTES, MAX_VAULT_BODY_BYTES};
@@ -78,6 +77,7 @@ pub use keychain_policy::{
 };
 pub use operator::OperatorClient;
 pub use password_line::{PasswordFeed, PasswordLine};
+pub use peer_auth::{ChannelPeer, PeerAuth, SanRule};
 pub use peer_identity::{creds_match_listener_uid, creds_match_uid, listener_uid_is, peer_uid_is};
 pub use peercred::PeerCreds;
 pub use plane::Plane;
@@ -104,7 +104,7 @@ pub use socket::probe_bindable;
 #[cfg(unix)]
 pub use stream::{
     AcceptRejection, AuthenticatedStream, PlaneConnector, PlaneListener, RawAcceptError,
-    RawPlaneConn, RejectReason,
+    RawPlaneConn, RejectReason, ServerIdentity,
 };
 #[cfg(unix)]
 pub use token_record::{
@@ -116,12 +116,13 @@ pub use token_record::{
 pub use token_store::{
     erase_user_token, load_user_token, observe_systemd_creds, read_user_token, store_user_token,
 };
+pub use trust_bundle::TrustBundle;
 pub use user_login::{
     userpass_username_is_acceptable, Password, UserLogin, UserToken, MAX_PASSWORD_BYTES,
     MAX_USERNAME_BYTES,
 };
 pub use vault_api::{VaultApi, VAULT_API_TIMEOUT};
-pub use verify::{verify_plane_uri_san, VerifyError};
+pub use verify::{verify_uri_san, VerifyError};
 pub use wrap::{
     aad_parts, kv_data_path, AadParts, KvDataPath, WrapExpectation, WrapLookup, WrappedSecret,
     WrappingToken, MAX_KV_DATA_PATH_BYTES, MAX_WRAP_TTL, USER_KEY_WRAP_TTL,

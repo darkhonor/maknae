@@ -9,7 +9,7 @@ policy**, the **KV v2** mount holding each user's provider API keys, the
 **AppRole** role on a separate agent mount, plus the administrator policy that writes
 agent credentials.
 
-The Rust plane-cert client (`maknae-vault`) and the mTLS transport consume this PKI.
+The Rust plane-cert client (`maknae-vault`) and the TLS transport consume this PKI.
 
 ## What it stands up
 
@@ -18,7 +18,8 @@ The Rust plane-cert client (`maknae-vault`) and the mTLS transport consume this 
   under the operator's enterprise root.
 - **Intermediate CA** (`maknae-pki-int`, the same algorithm, ~5y) — issues all plane leaves.
 - **Roles** `maknae-kernel` / `maknae-cli` — 72h leaves of the same algorithm whose **only**
-  identity is the plane URI-SAN `maknae://<deployment_id>/plane/{kernel,cli}`.
+  identity is the plane URI-SAN `spiffe://<deployment_id>/plane/{kernel,cli}`
+  (`deployment_id` is the SPIFFE trust domain); leaves carry `DigitalSignature` key usage.
   Every other SAN channel (IP, localhost, wildcard, domains, other-SANs) is pinned
   off; presence of the correct plane-SAN is enforced downstream by the peer verifier.
 - **`maknaed` AppRole** (ADR-0018) — a **periodic token** (renews indefinitely; fails
@@ -297,8 +298,9 @@ agent token is not granted, so a refusal there proves nothing.
 - **`deployment_id`.** A wrong value silently mislabels every cert. The no-default +
   validation block forces an explicit choice; still pick it deliberately (it is the
   shared "this is dev" guard with the dedicated-root decision). It is constrained to
-  `[A-Za-z0-9._-]` because Vault's `allowed_uri_sans` treats `*` as a **glob** — a `*`
-  in `deployment_id` would make the leaf SAN `maknae://*/plane/...` match *any*
+  the SPIFFE trust-domain grammar (at most 255 bytes of `[a-z0-9._-]`, at least one
+  `[a-z0-9]`) because Vault's `allowed_uri_sans` treats `*` as a **glob** — a `*`
+  in `deployment_id` would make the leaf SAN `spiffe://*/plane/...` match *any*
   deployment and defeat plane isolation; the charset guard blocks that.
 - **`revoke` is mount-wide.** Vault has no per-role revoke path, so the trust plane's
   token can revoke a CLI plane's live cert (a DoS, bounded by requiring the target serial

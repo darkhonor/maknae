@@ -5,11 +5,11 @@ pub enum ConnDecision {
     Deny { reason: String },
 }
 
-pub fn authorize_connection(cert_verified: bool, uid_in_group: bool) -> ConnDecision {
-    match (cert_verified, uid_in_group) {
+pub fn authorize_connection(channel_authenticated: bool, admitted: bool) -> ConnDecision {
+    match (channel_authenticated, admitted) {
         (true, true) => ConnDecision::Permit,
         (false, _) => ConnDecision::Deny {
-            reason: "plane cert not verified".into(),
+            reason: "channel not authenticated".into(),
         },
         (true, false) => ConnDecision::Deny {
             reason: "peer uid not in `maknae` group".into(),
@@ -537,11 +537,11 @@ mod tests {
         );
     }
     #[test]
-    fn deny_when_cert_unverified() {
+    fn deny_when_channel_unauthenticated() {
         assert_eq!(
             authorize_connection(false, true),
             ConnDecision::Deny {
-                reason: "plane cert not verified".into()
+                reason: "channel not authenticated".into()
             }
         );
     }
@@ -550,7 +550,7 @@ mod tests {
         assert_eq!(
             authorize_connection(false, false),
             ConnDecision::Deny {
-                reason: "plane cert not verified".into()
+                reason: "channel not authenticated".into()
             }
         );
     }
