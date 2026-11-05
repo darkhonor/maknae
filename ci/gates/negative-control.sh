@@ -3136,7 +3136,7 @@ expect_reject_without "clippy-all/a-failing-lint-never-prints-the-ok-line" \
 # cut of the gate DERIVED the set from a metadata closure; two reviewers broke
 # the derivation in the bad direction (members silently excluded), so the gate
 # now runs cargo per member and READS the outcome. These probes need the
-# `aarch64-apple-darwin` target (CI's `build-and-gate` adds it; locally:
+# `aarch64-apple-darwin` target (CI's `negative-control` job adds it; locally:
 # `rustup target add aarch64-apple-darwin`); the guard probes below the target
 # block do not.
 #
@@ -4948,7 +4948,7 @@ fi
 # exist to prove that re-read actually fires.
 #
 # Darwin-only: `xattr(1)` does not exist on Linux, and this suite runs on
-# ubuntu-latest (ci.yml:176). A silent pass there would be the ok-on-nothing
+# ubuntu-latest. A silent pass there would be the ok-on-nothing
 # class this whole file exists to make impossible, so it is a counted skip.
 pxc="$here/payload-xattr-clean.sh"
 if [ "$(uname -s)" != "Darwin" ]; then

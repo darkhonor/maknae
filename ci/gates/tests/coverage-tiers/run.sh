@@ -670,7 +670,7 @@ expect "malformed collection shape ([t3] not [[t3]], no traceback)" "array of ta
 
 # ---------- mutation contract-shape modes (CR-impl C1) -----------------------
 # These select the mutation stage, so readiness requires cargo-mutants —
-# absent in build-and-gate. Shim a stub (same pattern as the unknown-crate
+# absent in the gates job. Shim a stub (same pattern as the unknown-crate
 # fixture) so the mode-identifying contract-shape FAIL is reachable in ANY
 # lane (lane-dependent fixtures are forbidden).
 shimM="$(newroot)"; printf '#!/bin/sh\nexit 0\n' >"$shimM/cargo-mutants"; printf '#!/bin/sh\necho "cargo-nextest 0.9.146 (fixture)"\n' >"$shimM/cargo-nextest"
