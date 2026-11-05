@@ -46,7 +46,7 @@ status = "unbuilt"
 [[surface]]
 name = "Many ways in"
 terms = "on-system CLI · gateway · mobile"
-detail = "A local client today. Remote subjects arrive through a gateway that asserts identity to the PDP — never straight to the kernel."
+detail = "A local client today. Remote subjects arrive through a gateway that forwards their IdP token for the PDP to verify — never straight to the kernel."
 status = "partial"
 
 

@@ -179,7 +179,7 @@ from = "remote"
 to = "gateway"
 status = "ratified-unbuilt"
 mechanism = "OIDC federation; AAL2/FAL2 (NIST SP 800-63B/63C)"
-identity = "enrolled remote subject, asserted by the gateway"
+identity = "enrolled remote subject, the IdP token forwarded by the gateway and verified by the PDP"
 evidence = "design/adr/ADR-0006-client-authentication-model.md"
 
 [[iface]]
@@ -187,7 +187,7 @@ n = "I7"
 from = "gateway"
 to = "daemon"
 status = "ratified-unbuilt"
-mechanism = "machine channel; the gateway ASSERTS the principal to the PDP"
+mechanism = "machine channel; the gateway FORWARDS the IdP token and the PDP verifies it (ADR-0006 decision 11)"
 identity = "gateway's own scoped machine credential — never the daemon's plane/kernel identity"
 evidence = "design/adr/ADR-0006-client-authentication-model.md"
 
