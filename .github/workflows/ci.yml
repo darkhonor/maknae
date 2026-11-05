@@ -162,8 +162,10 @@ jobs:
         run: test "$SELECTOR_RESULT" = success
       - name: Install toolchain (pinned)
         run: rustup show   # honors rust-toolchain.toml
-      - name: Add the darwin target (negative-control probes the darwin cross-check gate, #198)
-        run: rustup target add aarch64-apple-darwin
+      - name: Cache compiled dependencies (workspace crates are always rebuilt)
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: gates
       - name: Cache gate-tool executables
         id: gate-tools-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -271,6 +273,9 @@ jobs:
           name: coverage-json
           path: target/coverage.json
           if-no-files-found: warn
+      - name: Keep clippy's per-pass target dir out of the dependency cache
+        if: always()
+        run: rm -rf target/clippy-all target/clippy-all.lock
 
   # ---------------------------------------------------------------------------
   # MUTATION LANE: wired, paused by default. See the job's `if:` below.

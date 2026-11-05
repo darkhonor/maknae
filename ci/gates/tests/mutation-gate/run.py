@@ -1597,4 +1597,7 @@ REVIEWED_HEADER = "# platform\tfile\tfunction\treplacement-regex\treason\n"
 
 
 if __name__ == "__main__":
-    unittest.main()
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import parallel
+    parallel.main(__file__, sys.modules["__main__"])
