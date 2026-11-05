@@ -1,6 +1,6 @@
 //! `maknae` CLI — the untrusted interaction plane (spec §3). Resolves its own
-//! config dir, mints a short-lived plane leaf (a self-check until #116 retires it;
-//! the daemon requests no client certificate), connects to `maknaed` over the
+//! config dir, mints a short-lived plane leaf (required before it connects until #116
+//! retires it, though the daemon requests no client certificate), connects to `maknaed` over the
 //! server-authenticated TLS/UDS transport, and issues one verb per invocation
 //! (`ping`/`whoami`) — OR, one-time and elevated, provisions the deployment via
 //! `enroll`/`enroll-helper` (`enroll/`, spec §4.1-§4.6, PR-J1 Task 8).

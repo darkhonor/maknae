@@ -330,8 +330,10 @@ A quiescent, successfully-bound daemon prints nothing further and blocks; it res
 
 ### 5. `ssh` in and run the acceptance verbs
 
-In terminal 2, a **fresh** session (proves the CLI's own leaf mint (a self-check; the daemon does not request the leaf) + connect works from a
-cold start, not a warm terminal that happens to already have Vault env vars set):
+In terminal 2, a **fresh** session proves that the CLI's leaf mint and connect work from a
+cold start, not from a warm terminal that happens to already have Vault env vars set. The
+daemon does not request the leaf, but until #116 the CLI still requires a successful mint,
+and so a live Vault token, before it connects:
 
 ```bash
 ssh <operator>@<host>
