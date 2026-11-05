@@ -2,7 +2,7 @@
 //! may hold, under their `vault.plane_key` names (#573, #589).
 use crate::rustls::SignatureScheme;
 use crate::signature::{self, SpkiParams};
-use crate::SignatureAlgorithm;
+use crate::{SignatureAlgorithm, TlsSignatureScheme};
 
 /// A plane identity's signature key algorithm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,7 +35,12 @@ impl PlaneKey {
 
     /// The TLS signature scheme this key signs with.
     pub fn signature_scheme(self) -> SignatureScheme {
-        SignatureScheme::from(SignatureAlgorithm::from(self).tls_scheme().iana())
+        let scheme = match self {
+            PlaneKey::MlDsa87 => TlsSignatureScheme::MlDsa87,
+            PlaneKey::EcdsaP384Sha384 => TlsSignatureScheme::EcdsaNistp384Sha384,
+            PlaneKey::EcdsaP521Sha512 => TlsSignatureScheme::EcdsaNistp521Sha512,
+        };
+        SignatureScheme::from(scheme.iana())
     }
 
     /// True iff a parsed SubjectPublicKeyInfo is exactly this algorithm's key.

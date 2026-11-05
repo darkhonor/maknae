@@ -483,7 +483,7 @@ pub struct ContentMeasure {
 /// made, and truncated to 32 hex characters (record.rs says why).
 pub fn content_measure(turns: &[Turn]) -> ContentMeasure {
     let mut length = 0u64;
-    let mut h = maknae_crypto::digest::Hasher::new(maknae_crypto::HashAlgorithm::Sha256);
+    let mut h = maknae_crypto::sha256_hasher();
     let mut feed = |bytes: &[u8]| {
         length += bytes.len() as u64;
         h.update(bytes);
@@ -871,6 +871,13 @@ pub fn record_refused_tool_calls(outcome: &mut AuditRecord, reply: Option<&Promp
 
 #[cfg(test)]
 mod tests {
+    fn sha256_hex(data: &[u8]) -> String {
+        maknae_crypto::sha256(data)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+
     // ---- the declared-length cap, as integers ----------------------------
 
     /// Every operator `cargo mutants` substitutes for `<=` here, killed on a
@@ -1731,10 +1738,7 @@ mod tests {
             content: vec![text("abc"), text("de")],
         }]);
         assert_eq!(m.length, 5);
-        assert_eq!(
-            m.digest32,
-            &maknae_crypto::digest::sha256_hex(b"abcde")[..32]
-        );
+        assert_eq!(m.digest32, &sha256_hex(b"abcde")[..32]);
         assert_eq!(m.digest32.len(), 32);
         let m2 = content_measure(&[Turn::User {
             content: vec![text("the secret plan")],
@@ -1757,7 +1761,7 @@ mod tests {
         }]);
         assert_eq!(
             (m.length, m.digest32.as_str()),
-            (3, &maknae_crypto::digest::sha256_hex(b"abc")[..32])
+            (3, &sha256_hex(b"abc")[..32])
         );
     }
 
@@ -1868,10 +1872,7 @@ mod tests {
         ];
         let m = content_measure(&turns);
         assert_eq!(m.length, 11);
-        assert_eq!(
-            m.digest32,
-            &maknae_crypto::digest::sha256_hex(b"ab{\"p\":1}cd")[..32]
-        );
+        assert_eq!(m.digest32, &sha256_hex(b"ab{\"p\":1}cd")[..32]);
         assert_eq!(m.digest32, "88f32a34ef1a5afa7297f567ab39cf2b");
     }
 
@@ -2531,10 +2532,7 @@ mod tests {
         ];
         let m = content_measure(&turns);
         assert_eq!(m.length, 14);
-        assert_eq!(
-            m.digest32,
-            &maknae_crypto::digest::sha256_hex(b"ab{\"p\":1}whycd")[..32]
-        );
+        assert_eq!(m.digest32, &sha256_hex(b"ab{\"p\":1}whycd")[..32]);
     }
 
     fn stub_at(id: &str, bytes: u64) -> ProposedToolCall {

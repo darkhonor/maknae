@@ -53,19 +53,19 @@ pub struct SealPrivateKey {
 
 impl SealPrivateKey {
     pub fn generate() -> Result<Self, SealError> {
-        sealbox::PrivateKey::generate()
+        sealbox::PrivateKey::generate(maknae_crypto::admitted())
             .map(Self::from_key)
             .map_err(SealError::from)
     }
 
     pub fn from_pkcs8_der(der: &[u8]) -> Result<Self, SealError> {
-        sealbox::PrivateKey::from_pkcs8_der(der)
+        sealbox::PrivateKey::from_pkcs8_der(maknae_crypto::admitted(), der)
             .map(Self::from_key)
             .map_err(SealError::from)
     }
 
     fn from_key(key: sealbox::PrivateKey) -> Self {
-        let public = SealPublicKey(key.public_key().clone());
+        let public = SealPublicKey(key.recipient().clone());
         Self { key, public }
     }
 
@@ -110,7 +110,14 @@ pub fn seal(
     maknae_crypto::fips::assert_fips_module()
         .map_err(SealError::from)
         .and_then(|()| check_plaintext_len(plaintext.len()))?;
-    sealbox::seal(recipient.inner(), DOMAIN, aad.as_bytes(), plaintext).map_err(SealError::from)
+    sealbox::seal(
+        maknae_crypto::admitted(),
+        recipient.inner(),
+        DOMAIN,
+        aad.as_bytes(),
+        plaintext,
+    )
+    .map_err(SealError::from)
 }
 
 pub fn open(
@@ -121,7 +128,14 @@ pub fn open(
     maknae_crypto::fips::assert_fips_module()
         .map_err(SealError::from)
         .and_then(|()| check_blob_len(blob.len()))?;
-    sealbox::open(recipient.inner(), DOMAIN, aad.as_bytes(), blob).map_err(SealError::from)
+    sealbox::open(
+        maknae_crypto::admitted(),
+        recipient.inner(),
+        DOMAIN,
+        aad.as_bytes(),
+        blob,
+    )
+    .map_err(SealError::from)
 }
 
 #[cfg(test)]

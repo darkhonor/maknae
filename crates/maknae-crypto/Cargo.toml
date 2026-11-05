@@ -17,4 +17,4 @@ test-support = ["crypto-profile-awslc4/test-support"]
 [dependencies]
 # Exact: a crypto-profile release can change the `preferred` lists, which
 # tests/offer_golden.rs pins (ADR-0031). The module line is ADR-0025's.
-crypto-profile-awslc4 = "=0.9.0"
+crypto-profile-awslc4 = "=0.10.0"

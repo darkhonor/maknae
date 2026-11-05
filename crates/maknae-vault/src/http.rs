@@ -169,16 +169,16 @@ mod tests {
 
     fn tls12_only() -> maknae_crypto::tls::Policy {
         use maknae_crypto::{CipherSuite as C, KxGroup as K, TlsSignatureScheme as S};
-        maknae_crypto::tls::Policy {
-            versions: vec![maknae_crypto::TlsVersion::Tls12],
-            cipher_suites: vec![
-                C::Tls12EcdheEcdsaAes256GcmSha384,
-                C::Tls12EcdheEcdsaAes128GcmSha256,
-            ],
-            kx_groups: vec![K::Secp384r1, K::Secp256r1],
-            signature_schemes: vec![S::EcdsaNistp384Sha384, S::EcdsaNistp256Sha256],
-            peer_certificate_rule: None,
-        }
+        let mut p = maknae_crypto::tls::Policy::default();
+        p.versions = vec![maknae_crypto::TlsVersion::Tls12];
+        p.cipher_suites = vec![
+            C::Tls12EcdheEcdsaAes256GcmSha384,
+            C::Tls12EcdheEcdsaAes128GcmSha256,
+        ];
+        p.kx_groups = vec![K::Secp384r1, K::Secp256r1];
+        p.signature_schemes = vec![S::EcdsaNistp384Sha384, S::EcdsaNistp256Sha256];
+        p.peer_certificate_rule = None;
+        p
     }
 
     /// One HTTPS GET from the hardened client to an in-process server on `server`.

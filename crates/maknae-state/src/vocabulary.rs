@@ -1,4 +1,4 @@
-use maknae_crypto::digest::sha256;
+use maknae_crypto::sha256;
 use maknae_graph::graph::GraphError;
 use maknae_graph::schema::CompiledSet;
 
@@ -68,14 +68,11 @@ mod tests {
     #[test]
     fn digest_is_sha256_of_canonical_bytes_and_differs_across_labels() {
         let r = roles();
-        assert_eq!(
-            d(&r),
-            maknae_crypto::digest::sha256(&r.canonical_bytes().unwrap())
-        );
+        assert_eq!(d(&r), maknae_crypto::sha256(&r.canonical_bytes().unwrap()));
         assert_ne!(d(&r), d(&persisted_compiled_set("UNOFFICIAL")));
         assert_eq!(
             d(&CompiledSet::default()),
-            maknae_crypto::digest::sha256(&0u32.to_le_bytes())
+            maknae_crypto::sha256(&0u32.to_le_bytes())
         );
     }
 

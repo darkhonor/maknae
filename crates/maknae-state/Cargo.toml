@@ -25,6 +25,7 @@ maknae-io = { path = "../maknae-io" }
 hermetic-test-seam = []
 
 [dev-dependencies]
+maknae-crypto = { path = "../maknae-crypto", features = ["test-support"] }
 maknae-state = { path = ".", features = ["hermetic-test-seam"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
 tempfile = "3"
