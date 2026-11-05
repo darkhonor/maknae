@@ -2,6 +2,9 @@
 # containment-ordering (#165): the Adversary arm is decided before any class arm, and
 # the identity hop reads `contained` before `binds`.
 set -euo pipefail
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR GIT_ALTERNATE_OBJECT_DIRECTORIES \
+  GIT_LITERAL_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_GLOB_PATHSPECS GIT_ICASE_PATHSPECS GIT_GRAFT_FILE
+export GIT_NO_REPLACE_OBJECTS=1
 export LC_ALL=C
 root="${1:-$(git rev-parse --show-toplevel)}"
 src="$root/crates/maknae-authz-basic/src"

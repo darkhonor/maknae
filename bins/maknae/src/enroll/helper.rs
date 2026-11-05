@@ -9,6 +9,7 @@
 use super::{EnrollError, HelperArgs, HelperIdentityArgs, HelperVerb, ProvisionJob};
 use crate::enroll::artifact_table;
 use crate::enroll::artifact_write::{self, SelfOwnerResolver};
+use crate::stderr::errln;
 use std::io::Read;
 use std::path::PathBuf;
 
@@ -128,7 +129,7 @@ fn provision(job: ProvisionJob, verbose: bool) -> Result<(), EnrollError> {
         .cloned()
         .collect();
     if verbose {
-        eprintln!(
+        errln!(
             "write: {} CLI artifacts under {}",
             cli_rows.len(),
             job.cli_dir.display()

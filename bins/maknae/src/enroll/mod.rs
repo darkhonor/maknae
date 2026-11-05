@@ -25,6 +25,7 @@ mod helper;
 mod keychain_write;
 pub mod vault_ops;
 
+use crate::stderr::errln;
 use clap::{ArgGroup, Args, Subcommand};
 use maknae_msgs::{detect_locale, msg, Locale, MsgId};
 use std::collections::BTreeMap;
@@ -982,7 +983,7 @@ fn tpm2_seal_roundtrip(verbose: bool) -> bool {
         Ok(c) => c,
         Err(e) => {
             if verbose {
-                eprintln!("tpm2 probe spawn failed: {e}");
+                errln!("tpm2 probe spawn failed: {e}");
             }
             return false;
         }
@@ -1013,7 +1014,7 @@ fn tpm2_seal_roundtrip(verbose: bool) -> bool {
 fn detect_hrot_capability(verbose: bool) -> bool {
     let ok = tpm2_seal_roundtrip(verbose);
     if verbose {
-        eprintln!("exec: systemd-creds encrypt/decrypt --with-key=tpm2 round-trip -> {ok}");
+        errln!("exec: systemd-creds encrypt/decrypt --with-key=tpm2 round-trip -> {ok}");
     }
     ok
 }
@@ -1053,7 +1054,7 @@ async fn run_helper(
     cmd.stderr(std::process::Stdio::piped());
 
     if verbose {
-        eprintln!(
+        errln!(
             "exec: sudo -u {} env XDG_RUNTIME_DIR=/run/user/{} {} enroll-helper {verb}",
             operator.name,
             operator.uid,
@@ -1088,7 +1089,7 @@ async fn run_helper(
         })?;
 
     if verbose && !output.stdout.is_empty() {
-        eprint!("{}", String::from_utf8_lossy(&output.stdout));
+        crate::stderr::raw(&mut std::io::stderr(), &output.stdout);
     }
 
     if !output.status.success() {
@@ -1590,7 +1591,7 @@ async fn place_graph_key(
                 msg(locale, MsgId::EnrollGraphKeyCreated).replace("{path}", &path)
             );
             if graph_store_warning(action, store_present) {
-                eprintln!("{}", msg(locale, MsgId::EnrollGraphStoreExists));
+                errln!("{}", msg(locale, MsgId::EnrollGraphStoreExists));
             }
         }
         GraphKeyAction::Keep => println!(
@@ -1654,7 +1655,7 @@ async fn ensure_group_membership(operator: &Operator, verbose: bool) -> Result<b
         )
     };
     if verbose {
-        eprintln!("exec: {program} {}", cmd_args.join(" "));
+        errln!("exec: {program} {}", cmd_args.join(" "));
     }
     let status = tokio::process::Command::new(program)
         .args(&cmd_args)
@@ -1706,7 +1707,7 @@ async fn seal_linux(
         .ok_or_else(|| EnrollError::Owner("non-UTF-8 seal output path".to_string()))?;
     let (bin, argv) = seal_argv(cred_name, out_str);
     if verbose {
-        eprintln!("exec: {bin} {}", argv.join(" "));
+        errln!("exec: {bin} {}", argv.join(" "));
     }
     let mut child = tokio::process::Command::new(bin)
         .args(&argv)
@@ -1775,7 +1776,7 @@ async fn destroy_and_report(
     }
     let failures = vault_ops::destroy_all(client, mount, records).await;
     if failures.is_empty() {
-        eprintln!("{}", msg(locale, MsgId::EnrollRollbackDestroyed));
+        errln!("{}", msg(locale, MsgId::EnrollRollbackDestroyed));
     } else {
         // FIX 2 (final-fix wave): this branch previously printed the SAME
         // "destroyed" success message as the branch above, then listed
@@ -1783,9 +1784,9 @@ async fn destroy_and_report(
         // right above the evidence it didn't happen. `destroy_and_report`
         // stays non-fatal (best-effort post-mint rollback, spec §4.1); only
         // the message's honesty changes.
-        eprintln!("{}", msg(locale, MsgId::EnrollRollbackDestroyPartial));
+        errln!("{}", msg(locale, MsgId::EnrollRollbackDestroyPartial));
         for (role, accessor, e) in &failures {
-            eprintln!("  ! failed to destroy accessor for role {role} ({accessor}): {e}");
+            errln!("  ! failed to destroy accessor for role {role} ({accessor}): {e}");
         }
     }
 }
@@ -1819,7 +1820,7 @@ async fn destroy_previous_accessors_or_abort(
     }
     let failures = vault_ops::destroy_all(client, mount, &records).await;
     if failures.is_empty() {
-        eprintln!("{}", msg(locale, ROTATE_CLEANUP_DONE));
+        errln!("{}", msg(locale, ROTATE_CLEANUP_DONE));
         return Ok(());
     }
     let detail = failures
@@ -1841,7 +1842,7 @@ pub async fn run_enroll(args: EnrollArgs) -> ExitCode {
     let locale = detect_locale();
     // FIPS install FIRST, before any OperatorClient build (round-1 Q3).
     if let Err(e) = maknae_crypto::init() {
-        eprintln!(
+        errln!(
             "{}: {}",
             msg(locale, MsgId::EnrollFailed),
             maknae_vault::crypto_refusal_message(&e)
@@ -1862,7 +1863,7 @@ fn report(result: Result<String, EnrollError>, locale: Locale) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("{}: {e}", msg(locale, MsgId::EnrollFailed));
+            errln!("{}: {e}", msg(locale, MsgId::EnrollFailed));
             ExitCode::FAILURE
         }
     }
@@ -1907,7 +1908,7 @@ fn grant_egress_traversal(verbose: bool) {
     match acl {
         Ok(o) if o.status.success() => {
             if verbose {
-                eprintln!("exec: setfacl -m {EGRESS_TRAVERSAL_ACL} /etc/maknae");
+                errln!("exec: setfacl -m {EGRESS_TRAVERSAL_ACL} /etc/maknae");
             }
             // `setfacl` exits 0 on a filesystem mounted without ACL support in
             // some configurations; read the entry back rather than trust the
@@ -1926,17 +1927,17 @@ fn grant_egress_traversal(verbose: bool) {
                 })
                 .unwrap_or(false);
             if !seen {
-                eprintln!(
+                errln!(
                     "maknae enroll: the ACL entry did not read back (getfacl shows no `{want}` on /etc/maknae); the egress deputy cannot start until it does"
                 );
             }
         }
-        Ok(o) => eprintln!(
+        Ok(o) => errln!(
             "maknae enroll: setfacl failed ({}); the egress deputy cannot open /etc/maknae/egress-bounds.yaml until /etc/maknae carries the ACL entry `{EGRESS_TRAVERSAL_ACL}` (r-x: the anchored reader opens the directory): {}",
             o.status,
             String::from_utf8_lossy(&o.stderr).trim()
         ),
-        Err(e) => eprintln!(
+        Err(e) => errln!(
             "maknae enroll: setfacl unavailable ({e}); install the `acl` package or apply `setfacl -m {EGRESS_TRAVERSAL_ACL} /etc/maknae` by hand (r-x: the anchored reader opens the directory) — the egress deputy refuses to start until then"
         ),
     }
@@ -1949,7 +1950,7 @@ fn grant_egress_traversal_macos(verbose: bool) {
         .args(["+a", EGRESS_TRAVERSAL_ACE, "/etc/maknae"])
         .output();
     if verbose {
-        eprintln!("exec: /bin/chmod +a {EGRESS_TRAVERSAL_ACE:?} /etc/maknae");
+        errln!("exec: /bin/chmod +a {EGRESS_TRAVERSAL_ACE:?} /etc/maknae");
     }
     match std::process::Command::new("/bin/ls")
         .args(["-led", "/etc/maknae"])
@@ -1961,11 +1962,11 @@ fn grant_egress_traversal_macos(verbose: bool) {
                     Ok(o) => String::from_utf8_lossy(&o.stderr).trim().to_string(),
                     Err(e) => e.to_string(),
                 };
-                eprintln!("maknae enroll: /etc/maknae does not carry `{EGRESS_TRAVERSAL_ACE}` ({why}); the egress deputy cannot open its bounds file until it does");
+                errln!("maknae enroll: /etc/maknae does not carry `{EGRESS_TRAVERSAL_ACE}` ({why}); the egress deputy cannot open its bounds file until it does");
             }
         }
-        Ok(o) => eprintln!("maknae enroll: could not read /etc/maknae's ACL back ({}); confirm it carries `{EGRESS_TRAVERSAL_ACE}` — the egress deputy cannot open its bounds file without it", o.status),
-        Err(e) => eprintln!("maknae enroll: could not read /etc/maknae's ACL back ({e}); confirm it carries `{EGRESS_TRAVERSAL_ACE}` — the egress deputy cannot open its bounds file without it"),
+        Ok(o) => errln!("maknae enroll: could not read /etc/maknae's ACL back ({}); confirm it carries `{EGRESS_TRAVERSAL_ACE}` — the egress deputy cannot open its bounds file without it", o.status),
+        Err(e) => errln!("maknae enroll: could not read /etc/maknae's ACL back ({e}); confirm it carries `{EGRESS_TRAVERSAL_ACE}` — the egress deputy cannot open its bounds file without it"),
     }
 }
 
@@ -1996,7 +1997,7 @@ fn revoke_legacy_home_access(home: &Path, verbose: bool) {
     match remove_legacy_include(inc) {
         Ok(true) => {
             if verbose {
-                eprintln!("exec: rm {LEGACY_INCLUDE}");
+                errln!("exec: rm {LEGACY_INCLUDE}");
             }
             let reload = std::process::Command::new("apparmor_parser")
                 .args(["-r", "/etc/apparmor.d/usr.bin.maknaed"])
@@ -2004,23 +2005,23 @@ fn revoke_legacy_home_access(home: &Path, verbose: bool) {
             match reload {
                 Ok(o) if o.status.success() => {
                     if verbose {
-                        eprintln!("exec: apparmor_parser -r usr.bin.maknaed");
+                        errln!("exec: apparmor_parser -r usr.bin.maknaed");
                     }
                 }
-                Ok(o) => eprintln!(
+                Ok(o) => errln!(
                     "maknae enroll: apparmor_parser reload failed ({}); the loaded profile keeps the old home rules until it reloads",
                     o.status
                 ),
-                Err(e) => eprintln!(
+                Err(e) => errln!(
                     "maknae enroll: apparmor_parser unavailable ({e}); the loaded profile keeps the old home rules until it reloads"
                 ),
             }
         }
-        Ok(false) if inc.exists() => eprintln!(
+        Ok(false) if inc.exists() => errln!(
             "maknae enroll: {LEGACY_INCLUDE} was not written by enroll and is kept; the daemon needs no home rule in it"
         ),
         Ok(false) => {}
-        Err(e) => eprintln!("maknae enroll: cannot remove {LEGACY_INCLUDE} ({e}); the daemon needs no home rule in it"),
+        Err(e) => errln!("maknae enroll: cannot remove {LEGACY_INCLUDE} ({e}); the daemon needs no home rule in it"),
     }
 }
 
@@ -2051,11 +2052,11 @@ fn revoke_home_acl(home: &Path, uid: u32, verbose: bool) {
     {
         Ok(o) if o.status.success() => {
             if verbose {
-                eprintln!("exec: setfacl -x {spec} {}", home.display());
+                errln!("exec: setfacl -x {spec} {}", home.display());
             }
         }
         Ok(o) => {
-            eprintln!(
+            errln!(
                 "maknae enroll: setfacl -x {spec} failed ({}); the daemon needs no ACL on {}, remove it by hand: {}",
                 o.status,
                 home.display(),
@@ -2064,7 +2065,7 @@ fn revoke_home_acl(home: &Path, uid: u32, verbose: bool) {
             return;
         }
         Err(e) => {
-            eprintln!(
+            errln!(
                 "maknae enroll: setfacl unavailable ({e}); the daemon needs no ACL on {}, remove `u:{LEGACY_HOME_ACL_USER}` by hand",
                 home.display()
             );
@@ -2073,11 +2074,11 @@ fn revoke_home_acl(home: &Path, uid: u32, verbose: bool) {
     }
     match present() {
         Ok(false) => {}
-        Ok(true) => eprintln!(
+        Ok(true) => errln!(
             "maknae enroll: the `{LEGACY_HOME_ACL_USER}` ACL entry is still on {}; remove it with `setfacl -x u:{LEGACY_HOME_ACL_USER}`",
             home.display()
         ),
-        Err(e) => eprintln!(
+        Err(e) => errln!(
             "maknae enroll: cannot confirm the `{LEGACY_HOME_ACL_USER}` ACL entry is gone from {} (getfacl: {e})",
             home.display()
         ),
@@ -2275,7 +2276,7 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
     let sudo_uid = env_u32("SUDO_UID");
     let sudo_user = std::env::var("SUDO_USER").ok();
     let operator = preflight_check(euid, sudo_uid, sudo_user.as_deref(), &RealPasswd)
-        .inspect_err(|_| eprintln!("{}", msg(locale, MsgId::EnrollPreflightFailed)))?;
+        .inspect_err(|_| errln!("{}", msg(locale, MsgId::EnrollPreflightFailed)))?;
     let bindings_owners = bindings_owners()?;
     plan_bindings(
         Path::new(crate::policy_sync::CONFIG_DIR),
@@ -2296,14 +2297,14 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
     let (vault_addr, _) = args.host_required()?;
     check_vault_reachable(vault_addr)?;
     let seal_home = seal_pub_home(macos, read_os_release)
-        .inspect_err(|_| eprintln!("{}", msg(locale, MsgId::EnrollPreflightFailed)))?;
+        .inspect_err(|_| errln!("{}", msg(locale, MsgId::EnrollPreflightFailed)))?;
 
     // Daemon-surface gate, pre-mint: Linux's TPM2 round-trip; macOS's release checks.
     #[cfg(target_os = "macos")]
     let mut release_team = String::new();
     if macos {
         if args.insecure_plaintext_secret {
-            eprintln!("{}", msg(locale, MsgId::EnrollPreflightFailed));
+            errln!("{}", msg(locale, MsgId::EnrollPreflightFailed));
             return Err(EnrollError::PlaintextOptOutOnMacos);
         }
         #[cfg(target_os = "macos")]
@@ -2334,13 +2335,13 @@ async fn enroll_inner(args: &EnrollArgs, locale: Locale) -> Result<String, Enrol
             match checked {
                 Ok(team) => release_team = team,
                 Err(e) => {
-                    eprintln!("{}", msg(locale, MsgId::EnrollPreflightFailed));
+                    errln!("{}", msg(locale, MsgId::EnrollPreflightFailed));
                     return Err(e);
                 }
             }
         }
     } else if !detect_hrot_capability(args.verbose) {
-        eprintln!("{}", msg(locale, MsgId::EnrollPreflightFailed));
+        errln!("{}", msg(locale, MsgId::EnrollPreflightFailed));
         return Err(EnrollError::HrotUnavailable {
             detail: "daemon TPM2 seal round-trip failed (systemd-creds --with-key=tpm2) \
                      — no usable TPM2 for the daemon credential"
@@ -2707,7 +2708,7 @@ pub async fn run_enroll_helper(args: HelperArgs) -> ExitCode {
     match helper::dispatch(args).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("maknae enroll-helper: {e}");
+            errln!("maknae enroll-helper: {e}");
             ExitCode::FAILURE
         }
     }

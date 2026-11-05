@@ -46,6 +46,13 @@ concurrency:
 # clean, so ten crates -- `maknae-authz-basic` among them -- were compiled for
 # macOS by nothing. Same defect class as #74's clippy list, same cure.
 env:
+  # Exact versions from the passing #235 merge run. Floating installs made
+  # cold and cached runs use different tools; every pin participates in its
+  # executable-only cache key. No coverage reports or test outcomes cached.
+  CARGO_DENY_VERSION: "0.19.9"
+  CARGO_AUDITABLE_VERSION: "0.7.6"
+  RUST_AUDIT_INFO_VERSION: "0.5.4"
+  CARGO_LLVM_COV_VERSION: "0.8.7"
   MUTANTS_PATHS: "crates/maknae-config,crates/maknae-security,crates/maknae-io,crates/maknae-kernel,crates/maknae-vault,crates/maknae-crypto,crates/maknae-proto,crates/maknae-audit-append,crates/maknae-msgs,crates/maknae-authz-basic,crates/maknae-classification-aus,crates/maknae-llm,crates/maknae-agent,crates/maknae-deputy,crates/maknae-sys,crates/maknae-seal,crates/maknae-graph,crates/maknae-state"
 
 jobs:
@@ -81,22 +88,29 @@ jobs:
           python3 ci/affected.py --base="$BASE" --head="$HEAD" --event="$EVENT" --github-output "$GITHUB_OUTPUT"
 
   build-and-gate:
-    needs: affected
-    # Propagate lightweight-job failure into the required check before any Rust build.
-    # Never on a `labeled` event: labels reach the mutation lane only.
+    # The required check. `gates` and `negative-control` run in parallel because
+    # together they exceeded one job's 40-minute limit (#593).
+    needs: [affected, gates, negative-control]
     if: ${{ always() && github.event.action != 'labeled' && (needs.affected.result != 'success' || needs.affected.outputs.build == 'true') }}
     runs-on: ubuntu-latest
-    # A blocking open(2) on a FIFO is a real failure mode in maknae-io; without
-    # this a regression burns the 360-minute default and emits no diagnostic.
+    timeout-minutes: 5
+    steps:
+      - name: Require the selector, gates and negative-control jobs
+        env:
+          SELECTOR_RESULT: ${{ needs.affected.result }}
+          GATES_RESULT: ${{ needs.gates.result }}
+          NEGATIVE_CONTROL_RESULT: ${{ needs.negative-control.result }}
+        run: |
+          echo "affected=$SELECTOR_RESULT gates=$GATES_RESULT negative-control=$NEGATIVE_CONTROL_RESULT"
+          test "$SELECTOR_RESULT" = success
+          test "$GATES_RESULT" = success
+          test "$NEGATIVE_CONTROL_RESULT" = success
+
+  negative-control:
+    needs: affected
+    if: ${{ always() && github.event.action != 'labeled' && (needs.affected.result != 'success' || needs.affected.outputs.build == 'true') }}
+    runs-on: ubuntu-latest
     timeout-minutes: 40  # negative-control's real-repo darwin probe runs one per-pass cold cross-check (#198): 116 s measured on Rocky 9 x86_64, ~2.5 min on Apple Silicon; plus ~75 fixture probes
-    env:
-      # Exact versions from the passing #235 merge run. Floating installs made
-      # cold and cached runs use different tools; every pin participates in its
-      # executable-only cache key. No coverage reports or test outcomes cached.
-      CARGO_DENY_VERSION: "0.19.9"
-      CARGO_AUDITABLE_VERSION: "0.7.6"
-      RUST_AUDIT_INFO_VERSION: "0.5.4"
-      CARGO_LLVM_COV_VERSION: "0.8.7"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Require successful lightweight gates and selection
@@ -107,6 +121,59 @@ jobs:
         run: rustup show   # honors rust-toolchain.toml
       - name: Add the darwin target (negative-control probes the darwin cross-check gate, #198)
         run: rustup target add aarch64-apple-darwin
+      - name: Cache gate-tool executables
+        id: gate-tools-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/bin/cargo-deny
+            ~/.cargo/bin/cargo-auditable
+            ~/.cargo/bin/rust-audit-info
+          key: gate-tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml') }}-deny-${{ env.CARGO_DENY_VERSION }}-auditable-${{ env.CARGO_AUDITABLE_VERSION }}-audit-info-${{ env.RUST_AUDIT_INFO_VERSION }}
+      - name: Install gate tooling
+        if: steps.gate-tools-cache.outputs.cache-hit != 'true'
+        run: |
+          cargo install cargo-deny --version "$CARGO_DENY_VERSION" --locked
+          cargo install cargo-auditable --version "$CARGO_AUDITABLE_VERSION" --locked
+          cargo install rust-audit-info --version "$RUST_AUDIT_INFO_VERSION" --locked
+      - name: Negative-control (gates must fire)
+        run: ci/gates/negative-control.sh
+      - name: Gate — platform-gated code is named in the native mutation filter (#443)
+        run: python3 ci/gates/platform-gated.py check . && python3 ci/gates/tests/platform-gated/run.py
+      - name: Gate — mutation gate wiring fixtures (#443)
+        run: python3 ci/gates/tests/mutation-gate/run.py
+      - name: Gate — mutation-diff changed lines, classification and scope (#593)
+        run: python3 ci/gates/tests/mutation-diff/run.py
+
+  gates:
+    needs: affected
+    # Propagate lightweight-job failure into the required check before any Rust build.
+    # Never on a `labeled` event: labels reach the mutation lane only.
+    if: ${{ always() && github.event.action != 'labeled' && (needs.affected.result != 'success' || needs.affected.outputs.build == 'true') }}
+    runs-on: ubuntu-latest
+    # A blocking open(2) on a FIFO is a real failure mode in maknae-io; without
+    # this a regression burns the 360-minute default and emits no diagnostic.
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require successful lightweight gates and selection
+        env:
+          SELECTOR_RESULT: ${{ needs.affected.result }}
+        run: test "$SELECTOR_RESULT" = success
+      - name: Install toolchain (pinned)
+        run: rustup show   # honors rust-toolchain.toml
+      # A fresh checkout gives every workspace source a new mtime, so cargo
+      # rebuilds the workspace crates and reuses only unchanged dependencies.
+      - name: Cache the cargo registry and compiled dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: gates-target-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: gates-target-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml') }}-
       - name: Cache gate-tool executables
         id: gate-tools-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -174,14 +241,8 @@ jobs:
         run: ci/gates/build-invocation-lint.sh
       - name: Feature-resolution pin (production stays featureless on the authz door)
         run: ci/gates/feature-resolution-pin.sh
-      - name: Negative-control (gates must fire)
-        run: ci/gates/negative-control.sh
       - name: Direct std::fs production drift is forbidden
         run: ci/gates/std-fs-drift.sh .
-      - name: Gate — platform-gated code is named in the native mutation filter (#443)
-        run: python3 ci/gates/platform-gated.py check . && python3 ci/gates/tests/platform-gated/run.py
-      - name: Gate — mutation gate wiring fixtures (#443)
-        run: python3 ci/gates/tests/mutation-gate/run.py
       - name: Gate — the packages' audit.readers grant refuses hostile helper output (#500)
         run: bash ci/gates/tests/reader-grant/run.sh
       - name: Gate — the RPM erase removes the Vault port labels before the SELinux module (#584)
@@ -191,7 +252,7 @@ jobs:
       - name: Gate — verb-vocabulary drift (#67)
         run: ci/gates/verb-vocabulary-drift.sh
       - name: Mutation lane status (paused by default — operator ruling 2026-09-07)
-        run: echo "mutation lane paused in hosted CI; opt in with the run-mutants label or vars.MUTATION_IN_CI=true; the zero-missed evidence is in the PR body"
+        run: echo "mutation lane paused in hosted CI; opt in with the run-mutants label (in-diff) or vars.MUTATION_IN_CI=true (whole crates); the evidence is in the PR body"
       - name: Gate — config-disclosure drift (#162)
         run: ci/gates/config-disclosure-drift.sh
       - name: Gate — authz composition drift (ADR-0008 decision 1; #154/#148)
@@ -220,6 +281,9 @@ jobs:
           name: coverage-json
           path: target/coverage.json
           if-no-files-found: warn
+      - name: Keep clippy's per-pass target dir out of the dependency cache
+        if: always()
+        run: rm -rf target/clippy-all target/clippy-all.lock
 
   # ---------------------------------------------------------------------------
   # MUTATION LANE: wired, paused by default. See the job's `if:` below.
@@ -230,13 +294,18 @@ jobs:
     # operator's personal account). The lane stays WIRED (hobibot, PR #247): it
     # runs only when a PR carries the `run-mutants` label or the repository
     # variable MUTATION_IN_CI is 'true'; otherwise it shows as SKIPPED in every
-    # run, and build-and-gate prints the pause. The zero-missed obligation is
+    # run, and the gates job prints the pause. The zero-missed obligation is
     # met locally (dev host + Rocky lane) and reported in the PR body.
+    # The label's in-diff run passes every mutation crate and the gate decides,
+    # so it runs even when affected.py selects none.
     if: >-
       ${{ always()
-          && (needs.affected.result != 'success' || needs.affected.outputs.mutants != '')
-          && ((github.event.action == 'labeled' && github.event.label.name == 'run-mutants')
-              || (github.event.action != 'labeled' && (contains(github.event.pull_request.labels.*.name, 'run-mutants') || vars.MUTATION_IN_CI == 'true'))) }}
+          && ((github.event_name == 'pull_request' && vars.MUTATION_IN_CI != 'true'
+               && ((github.event.action == 'labeled' && github.event.label.name == 'run-mutants')
+                   || (github.event.action != 'labeled' && contains(github.event.pull_request.labels.*.name, 'run-mutants'))))
+              || ((needs.affected.result != 'success' || needs.affected.outputs.mutants != '')
+                  && ((github.event.action == 'labeled' && github.event.label.name == 'run-mutants')
+                      || (github.event.action != 'labeled' && (contains(github.event.pull_request.labels.*.name, 'run-mutants') || vars.MUTATION_IN_CI == 'true'))))) }}
     runs-on: ubuntu-latest
     # #238, run 34053713105: all nine completed crate sweeps passed, but the
     # 35m job limit killed the final (Vault) sweep after its 143s cold build.
@@ -252,6 +321,24 @@ jobs:
         env:
           SELECTOR_RESULT: ${{ needs.affected.result }}
         run: test "$SELECTOR_RESULT" = success
+      - name: Select mutation packages (in-diff on a PR passes every mutation crate; the gate decides)
+        id: packages
+        env:
+          PACKAGES: ${{ needs.affected.outputs.mutants }}
+          EVENT_NAME: ${{ github.event_name }}
+          MUTATION_IN_CI: ${{ vars.MUTATION_IN_CI }}
+        run: |
+          if [ "$EVENT_NAME" = pull_request ] && [ "$MUTATION_IN_CI" != true ]; then
+            bash ci/gates/coverage-tiers.sh --root . --in-diff-preflight
+            PACKAGES="$(python3 -c '
+          import sys, tomllib
+          crates = tomllib.load(open(sys.argv[1], "rb"))["t1"]["mutants_crates"]
+          if not (isinstance(crates, list) and crates and all(isinstance(c, str) and c for c in crates)):
+              sys.exit("FAIL: [t1].mutants_crates is not a non-empty list of crate names")
+          print(" ".join(crates))' coverage-tiers.toml)"
+          fi
+          test -n "$PACKAGES"
+          echo "mutants=$PACKAGES" >> "$GITHUB_OUTPUT"
       - name: Install toolchain (pinned)
         run: rustup show
       - name: Cache cargo-mutants executable
@@ -264,7 +351,7 @@ jobs:
         if: steps.mutants-cache.outputs.cache-hit != 'true'
         run: cargo install cargo-mutants --version 27.1.0 --locked
       - name: Install cargo-nextest 0.9.146 (prebuilt, checksum-pinned)
-        if: contains(format(' {0} ', needs.affected.outputs.mutants), ' maknae-io ')
+        if: contains(format(' {0} ', steps.packages.outputs.mutants), ' maknae-io ')
         env:
           NEXTEST_TARBALL: cargo-nextest-0.9.146-x86_64-unknown-linux-gnu.tar.gz
           NEXTEST_SHA256: 682c21b777c333e96fd532e114d3a5a894e0729ab88d94c0a9f20f8419695428
@@ -275,11 +362,13 @@ jobs:
           tar -xzf "$RUNNER_TEMP/$NEXTEST_TARBALL" -C ~/.cargo/bin cargo-nextest
           cargo nextest --version
       - name: Native syscall mutation filter fixtures
-        if: contains(format(' {0} ', needs.affected.outputs.mutants), ' maknae-io ') || contains(format(' {0} ', needs.affected.outputs.mutants), ' maknae-sys ')
+        if: contains(format(' {0} ', steps.packages.outputs.mutants), ' maknae-io ') || contains(format(' {0} ', steps.packages.outputs.mutants), ' maknae-sys ')
         run: python3 ci/gates/tests/mutation-platform/run.py
-      - name: Mutation gate (whole crates; zero missed; TIMEOUT = investigate)
+      - name: Mutation gate (in-diff on a PR, whole crates otherwise; zero missed; TIMEOUT = investigate)
         env:
-          PACKAGES: ${{ needs.affected.outputs.mutants }}
+          PACKAGES: ${{ steps.packages.outputs.mutants }}
+          EVENT_NAME: ${{ github.event_name }}
+          MUTATION_IN_CI: ${{ vars.MUTATION_IN_CI }}
           # Mutation evidence needs test assertions, not debugger symbols. #238
           # exceeded this job's 35m budget; two representative kernel mutant
           # rebuilds on Rocky9 fell from 7.08s to 2.46s without symbols. Keep the
@@ -288,7 +377,16 @@ jobs:
         run: |
           test -n "$PACKAGES"
           read -r -a packages <<< "$PACKAGES"
-          bash ci/gates/coverage-tiers.sh --root . --mutants "${packages[@]}"
+          in_diff=()
+          if [ "$EVENT_NAME" = pull_request ] && [ "$MUTATION_IN_CI" != true ]; then
+            # The checkout is the PR merge commit; its first parent is the base tip as merged.
+            read -r -a parents <<< "$(git rev-list --parents -n1 HEAD)"
+            if [ "${#parents[@]}" -ne 3 ]; then
+              echo "FAIL: expected the PR merge commit"; exit 1
+            fi
+            in_diff=(--in-diff HEAD^1)
+          fi
+          bash ci/gates/coverage-tiers.sh --root . --mutants "${packages[@]}" "${in_diff[@]}"
 
   # macOS is a DEPLOYMENT TARGET (packaging/isolation-contract.md). These two jobs
   # are the only automated macOS coverage that exists; neither substitutes for the

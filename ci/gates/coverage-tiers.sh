@@ -3,7 +3,7 @@
 # 2026-08-04-coverage-tiers-design.md (out-of-repo design spec) (v18).
 #
 # Usage: coverage-tiers.sh [--root <path>] [--injection]
-#                          [--mutants <crate>... | --mutants-all | --readiness-check]
+#                          [--mutants <crate>... [--in-diff <rev>] | --mutants-all | --readiness-check]
 #
 # Injection contract (named, not a backdoor — CI never sets these):
 #   COVERAGE_TIERS_JSON      coverage JSON (replaces the cargo llvm-cov run)
@@ -15,6 +15,21 @@ if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
   printf 'FAIL: bash >= 4 required (declare -A/mapfile); macOS system bash is 3.2 — install via brew\n'
   exit 1
 fi
+
+in_diff_git_env=(-u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_COMMON_DIR
+  -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_LITERAL_PATHSPECS -u GIT_NOGLOB_PATHSPECS
+  -u GIT_GLOB_PATHSPECS -u GIT_ICASE_PATHSPECS -u GIT_GRAFT_FILE GIT_NO_REPLACE_OBJECTS=1)
+in_diff_generate() { # <base> <out> [<head>]
+  env -u GIT_DIFF_OPTS -u GIT_EXTERNAL_DIFF "${in_diff_git_env[@]}" \
+    git -C "$root" -c diff.noprefix=false -c diff.mnemonicPrefix=false -c diff.suppressBlankEmpty=false \
+    -c core.quotePath=true diff --text --no-ext-diff --no-textconv --no-color --unified=3 \
+    --src-prefix=a/ --dst-prefix=b/ --find-renames "$1" "${3:-HEAD}" -- '*.rs' >"$2"
+}
+[ "${BASH_SOURCE[0]}" = "$0" ] || return 0
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR GIT_ALTERNATE_OBJECT_DIRECTORIES \
+  GIT_LITERAL_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_GLOB_PATHSPECS GIT_ICASE_PATHSPECS GIT_GRAFT_FILE
+export GIT_NO_REPLACE_OBJECTS=1
+
 here="$(cd "$(dirname "$0")" && pwd)"
 
 fail_n=0
@@ -26,6 +41,8 @@ injection=0
 readiness_only=0
 mutants_mode=""      # "", "all", "list"
 mutant_crates=()
+in_diff=""
+preflight=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --root)
@@ -44,10 +61,23 @@ while [ $# -gt 0 ]; do
         mutant_crates+=("$1"); shift
       done
       continue;;
+    --in-diff-preflight) preflight=1;;
+    --in-diff)
+      shift
+      if [ $# -eq 0 ] || [ -z "$1" ] || [ "${1#-}" != "$1" ]; then fail "--in-diff needs a revision"; exit 1; fi
+      in_diff="$1";;
     *) fail "unknown argument: $1"; exit 1;;
   esac
   shift
 done
+if [ "$preflight" -eq 1 ] && { [ -n "$in_diff" ] || [ -n "$mutants_mode" ] || [ "$injection" -eq 1 ] || [ "$readiness_only" -eq 1 ]; }; then
+  fail "--in-diff-preflight takes only --root"; exit 1
+fi
+if [ -n "$in_diff" ]; then
+  if [ "$mutants_mode" = "all" ]; then fail "--in-diff cannot be combined with --mutants-all"; exit 1; fi
+  if [ "$mutants_mode" != "list" ]; then fail "--in-diff needs --mutants"; exit 1; fi
+  if [ "$injection" -eq 1 ]; then fail "--in-diff cannot be combined with --injection"; exit 1; fi
+fi
 
 # ---- unrecognized-var scan (FIRST; zero-match tolerant; presence semantics) -
 for v in $(compgen -v | grep '^COVERAGE_TIERS_' || true); do
@@ -68,6 +98,17 @@ if [ -z "$root" ]; then
   if ! root="$(env -u GIT_DIR -u GIT_WORK_TREE git rev-parse --show-toplevel 2>/dev/null)"; then
     fail "cannot resolve --root (not in a git repo and no --root given)"; exit 1
   fi
+fi
+
+if { [ -n "$in_diff" ] || [ "$preflight" -eq 1 ]; } && ! root="$(CDPATH='' cd -P -- "$root" && pwd -P)"; then
+  fail "--in-diff: --root does not resolve to a directory"; exit 1
+fi
+if { [ -n "$in_diff" ] || [ "$preflight" -eq 1 ]; } &&
+   ! problem="$(python3 "$here/mutation-diff.py" config-guard "$root" HEAD 2>&1)"; then
+  printf '%s\n' "${problem:-FAIL: --in-diff: the config guard printed nothing}"; exit 1
+fi
+if [ "$preflight" -eq 1 ]; then
+  echo "PASS: --in-diff preflight"; exit 0
 fi
 
 # ---- injection-in-work-tree refusal ----------------------------------------
@@ -199,11 +240,11 @@ if [ "$has_env_bound" -eq 1 ]; then
 fi
 
 # ---- name oracle + sync helper ---------------------------------------------
-resolve_crate_dirs() {
+resolve_crate_dirs() { # [<workspace dir>]
   # populates crate_dir_map from cargo metadata on live roots (injection map already loaded)
   [ "$injection" -eq 1 ] && return 0
-  local meta
-  if ! meta="$(cd "$root" && cargo metadata --manifest-path "$root/Cargo.toml" --no-deps --format-version 1)"; then
+  local meta ws="${1:-$root}"
+  if ! meta="$(cd "$ws" && cargo metadata --manifest-path "$ws/Cargo.toml" --no-deps --format-version 1)"; then
     return 1
   fi
   local parsed
@@ -212,9 +253,9 @@ import json, os, sys
 m = json.load(sys.stdin)
 root = os.path.realpath(sys.argv[1])
 for p in m["packages"]:
-    d = os.path.relpath(os.path.dirname(p["manifest_path"]), root)
+    d = os.path.relpath(os.path.realpath(os.path.dirname(p["manifest_path"])), root)
     print(p["name"] + "\t" + d)
-' "$root")"; then
+' "$ws")"; then
     return 1
   fi
   while IFS=$'\t' read -r name dir; do
@@ -580,6 +621,132 @@ if [ "$mutants_mode" != "" ]; then
       printf '%d violation(s).\n' "$fail_n"; exit 1
     fi
   fi
+  declare -A in_scope=()
+  in_diff_file=""
+  mut_dir="$root"
+  if [ -n "$in_diff" ]; then
+    in_git() { env "${in_diff_git_env[@]}" git -C "$root" "$@"; }
+    toplevel="$(in_git rev-parse --show-toplevel 2>/dev/null || true)"
+    if [ -z "$toplevel" ] || [ "$(cd -P "$toplevel" && pwd)" != "$(cd -P "$root" && pwd)" ]; then
+      printf 'FAIL: --in-diff needs --root at the git toplevel (%s is not)\n' "$root"; exit 1
+    fi
+    if ! problem="$(python3 "$here/mutation-diff.py" history "$root" 2>&1)"; then
+      printf 'FAIL: --in-diff: %s\n' "${problem:-the history check printed nothing}"; exit 1
+    fi
+    if ! rev_oid="$(in_git rev-parse --verify --quiet --end-of-options "$in_diff^{commit}")" || [ -z "$rev_oid" ]; then
+      printf 'FAIL: --in-diff: %s is not a commit\n' "$in_diff"; exit 1
+    fi
+    if ! head_oid="$(in_git rev-parse --verify --quiet 'HEAD^{commit}')" || [ -z "$head_oid" ]; then
+      printf 'FAIL: --in-diff: HEAD is not a commit\n'; exit 1
+    fi
+    if ! base="$(in_git merge-base --end-of-options "$rev_oid" "$head_oid")" || [ -z "$base" ]; then
+      printf 'FAIL: --in-diff: no merge base between %s and HEAD\n' "$in_diff"; exit 1
+    fi
+    if ! dirty="$(in_git status --porcelain --untracked-files=all)"; then
+      printf 'FAIL: --in-diff: git status failed in %s\n' "$root"; exit 1
+    fi
+    if [ -n "$dirty" ]; then
+      printf 'FAIL: --in-diff attests to HEAD; uncommitted or untracked: %s\n' \
+        "$(printf '%s\n' "$dirty" | cut -c4- | tr '\n' ' ')"; exit 1
+    fi
+    snap="$mut_tmp/snapshot"
+    if ! out="$(python3 "$here/mutation-diff.py" snapshot "$root" "$head_oid" "$snap" 2>&1)"; then
+      printf 'FAIL: --in-diff: cannot snapshot HEAD: %s\n' "$out"; exit 1
+    fi
+    attested=(coverage-tiers.toml)
+    if [ "$(cd -P "$here" && pwd)" = "$(cd -P "$root" && pwd)/ci/gates" ]; then
+      attested+=(ci/affected.py ci/gates/coverage-tiers.sh ci/gates/mutation-oracle.sh
+                 ci/gates/mutation-platform.sh ci/gates/mutation-diff.py ci/gates/mutation-terminated.txt)
+    fi
+    for rel in "${attested[@]}"; do
+      if { [ -e "$root/$rel" ] || [ -e "$snap/$rel" ]; } && ! cmp -s -- "$root/$rel" "$snap/$rel"; then
+        printf 'FAIL: --in-diff: %s in the working tree is not HEAD'"'"'s\n' "$rel"; exit 1
+      fi
+    done
+    toml="$snap/coverage-tiers.toml"
+    mut_dir="$snap"
+    crate_dir_map=()
+    if resolve_crate_dirs "$snap"; then oracle_ok=1; else oracle_ok=0; fi
+    in_diff_file="$mut_tmp/in.diff"
+    if ! in_diff_generate "$base" "$in_diff_file" "$head_oid"; then
+      printf 'FAIL: --in-diff: git diff %s HEAD failed\n' "$base"; exit 1
+    fi
+    if ! changed_paths="$(python3 "$here/mutation-diff.py" paths "$root" "$base" "$in_diff_file" "$head_oid" 2>&1)"; then
+      printf 'FAIL: --in-diff: the diff does not name the changed Rust files: %s\n' "$changed_paths"; exit 1
+    fi
+    if ! scope="$(python3 "$here/mutation-diff.py" scope "$root" "$base" "$head_oid" "$snap" 2>"$mut_tmp/scope.err")" ||
+       ! scope_lines="$(printf '%s' "$scope" | python3 -c '
+import json, sys
+crates = json.load(sys.stdin)
+if not (isinstance(crates, list) and all(isinstance(c, str) for c in crates)):
+    sys.exit(1)
+print("\n".join(crates))' 2>/dev/null)"; then
+      printf 'FAIL: --in-diff: mutation scope cannot be computed: %s %s\n' "$scope" "$(cat "$mut_tmp/scope.err")"; exit 1
+    fi
+    while IFS= read -r c; do [ -n "$c" ] && in_scope["$c"]=1; done <<<"$scope_lines"
+    if ! crates_out="$(toml_mutants_crates)"; then
+      printf 'FAIL: --in-diff: cannot read mutants_crates from %s\n' "$toml"; exit 1
+    fi
+    declare -A selected=() contract=()
+    while IFS= read -r c; do [ -n "$c" ] && contract["$c"]=1; done <<<"$crates_out"
+    for c in "${mutant_crates[@]}"; do
+      if [ -z "${contract[$c]+x}" ]; then
+        printf 'FAIL: --in-diff: --mutants names %s, which is not in [t1].mutants_crates\n' "$c"; exit 1
+      fi
+      selected["$c"]=1
+    done
+    for c in "${!in_scope[@]}"; do
+      if [ -z "${selected[$c]+x}" ]; then
+        printf 'FAIL: --in-diff: scope crate %s not selected by --mutants\n' "$c"; exit 1
+      fi
+    done
+    if [ "$oracle_ok" -ne 1 ]; then
+      printf 'FAIL: --in-diff: changed files cannot be mapped to crates without cargo metadata\n'; exit 1
+    fi
+    if ! problem="$(python3 "$here/mutation-diff.py" unmappable "$root" "$head_oid" "$snap" 2>&1)"; then
+      printf '%s\n' "${problem:-FAIL: --in-diff: the unmappable-shape check printed nothing}"; exit 1
+    fi
+    compiled_file="$mut_tmp/compiled.json"
+    if ! python3 "$here/mutation-diff.py" compiled "$root" "$base" "$head_oid" "$snap" "$mut_tmp/depinfo" \
+         >"$compiled_file" 2>"$mut_tmp/compiled.err" ||
+       ! owned_lines="$(python3 -c '
+import json, sys
+crates = json.load(open(sys.argv[1]))
+if not (isinstance(crates, dict) and all(isinstance(c, str) for c in crates)):
+    sys.exit(1)
+print("\n".join(sorted(crates)))' "$compiled_file" 2>/dev/null)"; then
+      printf 'FAIL: --in-diff: compiled inputs cannot be computed: %s\n' "$(cat "$mut_tmp/compiled.err")"; exit 1
+    fi
+    embeds_file="$mut_tmp/embeds.json"
+    if ! python3 "$here/mutation-diff.py" embeds "$root" "$base" "$head_oid" "$snap" "$mut_tmp/depinfo" \
+         >"$embeds_file" 2>"$mut_tmp/embeds.err"; then
+      printf 'FAIL: --in-diff: include sites cannot be scanned: %s\n' "$(cat "$mut_tmp/embeds.err")"; exit 1
+    fi
+    if ! indirect="$(python3 -c '
+import json, sys
+data = json.load(open(sys.argv[1]))
+if not (isinstance(data, dict) and (data.get("indirect") is None or isinstance(data["indirect"], str))):
+    sys.exit(1)
+print(data["indirect"] or "")' "$embeds_file" 2>/dev/null)"; then
+      printf 'FAIL: --in-diff: unreadable include-site list %s\n' "$embeds_file"; exit 1
+    fi
+    declare -A touched=()
+    while IFS= read -r c; do
+      [ -z "$c" ] && continue
+      if [ -z "${selected[$c]+x}" ]; then
+        printf 'FAIL: --in-diff: changed crate %s not selected by --mutants\n' "$c"; exit 1
+      fi
+      touched["$c"]=1
+    done <<<"$owned_lines"
+    if [ ! -s "$in_diff_file" ] && [ "${#in_scope[@]}" -eq 0 ] && [ "${#touched[@]}" -eq 0 ] && [ -z "$indirect" ]; then
+      printf 'SKIP: in-diff: no Rust change between %s and HEAD\n' "$base"
+      mutant_crates=()
+    fi
+  fi
+  if ! mkdir -p -- "$root/target"; then
+    fail "cannot create $root/target for the mutation output"
+    printf '%d violation(s).\n' "$fail_n"; exit 1
+  fi
   for cname in "${mutant_crates[@]}"; do
     [ -z "$cname" ] && continue
     if [ -z "${crate_dir_map[$cname]+x}" ]; then
@@ -611,12 +778,67 @@ if [ "$mutants_mode" != "" ]; then
                 NEXTEST_STATUS_LEVEL=fail NEXTEST_FINAL_STATUS_LEVEL=fail)
     fi
     run_env+=(TMPDIR="$mut_tmp")
+    diff_flags=()
+    judge_flags=()
+    if [ -n "$in_diff" ]; then
+      whole=0
+      if [ -n "$indirect" ]; then
+        printf 'whole: %s: include_str/include_bytes used indirectly in %s\n' "$cname" "$indirect"
+        whole=1
+      elif [ -n "${in_scope[$cname]+x}" ]; then
+        printf 'whole: %s: mutation scope changed\n' "$cname"
+        whole=1
+      elif [ -n "${touched[$cname]+x}" ]; then
+        if ! (cd "$mut_dir" && exec env "${run_env[@]}" cargo mutants --package "$cname" --list-files --json "${extra_mutants_flags[@]}") >"$mut_tmp/files.json"; then
+          fail "cargo mutants --list-files --package $cname failed"
+          continue
+        fi
+        if ! walked="$(python3 "$here/mutation-diff.py" unlisted "$cname" "$mut_tmp/files.json" "$compiled_file" "$mut_dir" "$embeds_file" 2>&1)"; then
+          printf '%s\n' "${walked:-FAIL: $cname: mutation-diff.py unlisted printed nothing}"
+          fail_n=$((fail_n + 1))
+          continue
+        fi
+        case "$walked" in
+          "") ;;
+          "whole: $cname: changed "* | "whole: $cname: include_str/include_bytes used indirectly in "* | \
+          "whole: $cname: walked source "*)
+            printf '%s\n' "$walked"; whole=1;;
+          *) fail "$cname: mutation-diff.py unlisted printed no verdict: $walked"; continue;;
+        esac
+      fi
+      if [ "$whole" -eq 1 ]; then
+        :
+      elif [ ! -s "$in_diff_file" ]; then
+        printf 'SKIP: %s: no Rust change between %s and HEAD\n' "$cname" "$base"
+        continue
+      else
+        if ! (cd "$mut_dir" && exec env "${run_env[@]}" cargo mutants --package "$cname" --list --json "${extra_mutants_flags[@]}") >"$mut_tmp/whole.json" ||
+           ! (cd "$mut_dir" && exec env "${run_env[@]}" cargo mutants --package "$cname" --in-diff "$in_diff_file" --list --json "${extra_mutants_flags[@]}") >"$mut_tmp/indiff.json"; then
+          fail "cargo mutants --list --package $cname failed"
+          continue
+        fi
+        if ! verdict="$(python3 "$here/mutation-diff.py" classify "$cname" "$in_diff_file" "$mut_tmp/whole.json" "$mut_tmp/indiff.json")"; then
+          printf '%s\n' "${verdict:-FAIL: $cname: mutation-diff.py classify printed nothing}"
+          fail_n=$((fail_n + 1))
+          continue
+        fi
+        case "$verdict" in
+          "RUN $cname: "*) printf '%s\n' "$verdict";;
+          "SKIP: $cname: "*) printf '%s\n' "$verdict"; continue;;
+          *) fail "$cname: mutation-diff.py classify printed no verdict: $verdict"; continue;;
+        esac
+        listed_n="${verdict#"RUN $cname: "}"
+        listed_n="${listed_n%% *}"
+        diff_flags=(--in-diff "$in_diff_file")
+        judge_flags=(--in-diff --expect "$listed_n")
+      fi
+    fi
     # A per-crate output dir, so each crate's outcomes.json and per-mutant logs
     # survive for the two checks below instead of being overwritten by the next
     # crate in the loop.
     mut_out="$root/target/mutants-$cname"
     rm -rf "$mut_out"
-    (cd "$root" && exec env "${run_env[@]}" cargo mutants --package "$cname" --output "$mut_out" "${extra_mutants_flags[@]}") &
+    (cd "$mut_dir" && exec env "${run_env[@]}" cargo mutants --package "$cname" --output "$mut_out" "${diff_flags[@]}" "${extra_mutants_flags[@]}") &
     mut_pid=$!
     if ! wait "$mut_pid"; then
       fail "cargo mutants --package $cname reported missed/timeout mutants"
@@ -625,7 +847,7 @@ if [ "$mutants_mode" != "" ]; then
     # The exit status above answers "were any mutants missed?". This answers
     # "did the run measure anything at all, and was it the mutations that failed
     # to build or the environment?" — a green exit code answers neither (#301).
-    if ! out="$(bash "$oracle" judge "$mut_out" "$cname" 2>&1)"; then
+    if ! out="$(bash "$oracle" judge "${judge_flags[@]}" "$mut_out" "$cname" 2>&1)"; then
       fail "mutation run for $cname cannot be trusted: $out"
     else
       printf '%s\n' "$out"

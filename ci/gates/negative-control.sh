@@ -3136,7 +3136,7 @@ expect_reject_without "clippy-all/a-failing-lint-never-prints-the-ok-line" \
 # cut of the gate DERIVED the set from a metadata closure; two reviewers broke
 # the derivation in the bad direction (members silently excluded), so the gate
 # now runs cargo per member and READS the outcome. These probes need the
-# `aarch64-apple-darwin` target (CI's `build-and-gate` adds it; locally:
+# `aarch64-apple-darwin` target (CI's `negative-control` job adds it; locally:
 # `rustup target add aarch64-apple-darwin`); the guard probes below the target
 # block do not.
 #
@@ -4558,6 +4558,31 @@ mo_shape "counts-zero-mutants"      "ZERO mutants" \
   '{"total_mutants":0,"caught":0,"missed":0,"timeout":0,"unviable":0}'
 mo_shape "counts-not-an-object"     "not a JSON object" '[]'
 
+mo_indiff() { # <label> <baseline-outcome-json|""> <enospc 0|1>
+  local d bl=""; d="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$d/log"
+  [ -n "$2" ] && bl="$2,"
+  printf '{"total_mutants":3,"missed":0,"caught":0,"timeout":0,"unviable":3,"outcomes":[%s{"scenario":{"Mutant":{"name":"a"}},"summary":"Unviable"}]}\n' \
+    "$bl" > "$d/outcomes.json"
+  [ "$3" = 1 ] && printf 'No space left on device (os error 28)\n' > "$d/log/m1.log"
+  printf '%s' "$d"
+}
+mo_no_accept() { # <cmd...> — exits 0 when the command printed an accept line, so a reject probe fails on it
+  local out rc=0
+  out="$("$@" 2>&1)" || rc=$?
+  printf '%s\n' "$out"
+  if grep -qF "baseline passed" <<<"$out"; then return 0; fi
+  return "$rc"
+}
+mo_d1="$(mo_indiff x '{"scenario":"Baseline","summary":"Failure"}' 0)"
+expect_reject_because "oracle/in-diff-unviable-without-baseline" "ZERO viable" \
+  bash "$mo" judge --in-diff --expect 3 "$mo_d1" maknae-kernel
+mo_d2="$(mo_indiff x '{"scenario":"Baseline","summary":"Success"}' 1)"
+expect_reject_because "oracle/in-diff-unviable-enospc" "ENVIRONMENT failure" \
+  mo_no_accept bash "$mo" judge --in-diff --expect 3 "$mo_d2" maknae-kernel
+mo_d3="$(mo_indiff x '{"scenario":"Baseline","summary":"Success"}' 0)"
+expect_accept "oracle/in-diff-unviable-with-baseline" "baseline passed" \
+  bash "$mo" judge --in-diff --expect 3 "$mo_d3" maknae-kernel
+
 # SCRATCH: a volume without room must be refused BEFORE the run, not discovered
 # as a wall of 'unviable' afterwards. The floor is raised via the documented
 # override so the probe does not depend on this host's free space.
@@ -4573,6 +4598,346 @@ expect_accept "mutation-oracle/scratch-with-room-passes" "KiB free" \
 expect_reject_because "mutation-oracle/scratch-missing-dir" "does not exist" \
   bash "$mo" scratch "$NC_TMP/definitely-not-here"
 
+# ---- mutation-in-diff (#593): the gate's --in-diff run fires end to end ------
+# A real git fixture and real `cargo metadata`; only cargo-mutants is a stand-in,
+# which answers `--list` from MID_WHOLE/MID_INDIFF and exits MID_EXIT for a run.
+mid_aux="$(mktemp -d -p "$NC_TMP")"; mkdir -p "$mid_aux/tools" "$mid_aux/cargo-home"
+if ! mid_real_cargo="$(command -v cargo)"; then
+  echo "FAIL: negative-control: cargo is not on PATH; the mutation-in-diff probes need real cargo metadata"
+  exit 1
+fi
+mid_channel="$(sed -n 's/^channel *= *"\(.*\)".*/\1/p' "$here/../../rust-toolchain.toml")"
+cat > "$mid_aux/tools/cargo" <<'EOF'
+#!/bin/sh
+[ "$1" = mutants ] || exec "$MID_REAL_CARGO" "$@"
+list=0 files=0 pkg= indiff= out= prev=
+for a in "$@"; do
+  case "$prev" in --package) pkg="$a";; --in-diff) indiff="$a";; --output) out="$a";; esac
+  [ "$a" = --list ] && list=1
+  [ "$a" = --list-files ] && files=1
+  prev="$a"
+done
+if [ "$files" = 1 ]; then
+  python3 -c 'import json, os, re, sys
+lib = os.path.join("crates", sys.argv[1], "src/lib.rs")
+with open(lib) as f:
+    names = re.findall(r"^(?:pub )?mod (\w+)\s*;", f.read(), re.M)
+walked = [lib] + [os.path.join(os.path.dirname(lib), n + ".rs") for n in names]
+print(json.dumps([{"package": sys.argv[1], "path": w} for w in walked if os.path.isfile(w)]))' "$pkg"
+  exit 0
+fi
+if [ "$list" = 1 ]; then
+  if [ -n "$indiff" ]; then json="$MID_INDIFF"; else json="$MID_WHOLE"; fi
+  [ -z "$json" ] && exit 0
+  printf '%s' "$json" | python3 -c 'import json, os, re, sys
+def found(m):
+    crate, sep, name = m["file"].rpartition("/src/")
+    if not os.path.isfile(m["file"]):
+        return False
+    if not sep or name == "lib.rs" or "/" in name:
+        return True
+    with open(os.path.join(crate, "src/lib.rs")) as f:
+        return re.search(r"\bmod " + re.escape(name[:-3]) + r"\s*;", f.read()) is not None
+print(json.dumps([m for m in json.load(sys.stdin) if m["package"] == sys.argv[1] and found(m)]))' "$pkg"
+  exit 0
+fi
+mkdir -p "$out/mutants.out"
+missed=0; [ "$MID_EXIT" = 0 ] || missed=1
+printf '{"total_mutants":2,"caught":%s,"missed":%s,"timeout":0,"unviable":0,"outcomes":[]}\n' \
+  "$((2 - missed))" "$missed" > "$out/mutants.out/outcomes.json"
+exit "$MID_EXIT"
+EOF
+chmod +x "$mid_aux/tools/cargo"
+ln -s cargo "$mid_aux/tools/cargo-mutants"
+mid_git() { # <repo> <git-args...>
+  local repo="$1"; shift
+  env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY \
+    git -C "$repo" -c user.name=fixture -c user.email=fixture@example.invalid \
+    -c commit.gpgsign=false -c tag.gpgsign=false -c core.hooksPath=/dev/null "$@" >/dev/null
+}
+mid_lib() { # <file> <line-7-or-empty> <line-12> <line-3>
+  printf '//! Crate a.\n//!\n//! %s\n\npub fn a(x: u32) -> u32 {\n    let y = x + 1; let z = y;\n' "$4" > "$1"
+  if [ -n "$2" ]; then printf '    %s\n' "$2" >> "$1"; fi
+  printf '    z - 3\n}\n\npub fn d(x: u32) -> u32 {\n    %s\n}\n' "$3" >> "$1"
+}
+mid_repo() { # <line-7-or-empty> <line-12> <line-3> [git-config key=value...] — tag base, one head commit
+  local d k z="$1" e="$2" doc="$3"; shift 3
+  d="$(mktemp -d -p "$NC_TMP")"
+  mkdir -p "$d/crates/a/src" "$d/crates/b/src"
+  printf '[workspace]\nmembers = ["crates/a", "crates/b"]\nresolver = "2"\n' > "$d/Cargo.toml"
+  for k in a b; do
+    printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2021"\n' "$k" > "$d/crates/$k/Cargo.toml"
+  done
+  mid_lib "$d/crates/a/src/lib.rs" 'let z = y * 2;' 'x * 5' 'Fixture.'
+  printf 'pub fn b(x: u32) -> u32 {\n    x + 2\n}\n' > "$d/crates/b/src/lib.rs"
+  printf '[t1]\nmutants_crates = ["a", "b"]\n' > "$d/coverage-tiers.toml"
+  printf '/target\nCargo.lock\n__pycache__/\n' > "$d/.gitignore"
+  cp "$here/../../rust-toolchain.toml" "$d/rust-toolchain.toml"
+  mid_git "$d" init -q -b main
+  for k in "$@"; do mid_git "$d" config "${k%%=*}" "${k#*=}"; done
+  mid_git "$d" add -A
+  mid_git "$d" commit -qm base
+  mid_git "$d" tag base
+  mid_lib "$d/crates/a/src/lib.rs" "$z" "$e" "$doc"
+  mid_git "$d" add -A
+  mid_git "$d" commit -qm head
+  printf '%s' "$d"
+}
+mid_m() { # <name> <package> <start> <end>
+  local file=crates/a/src/lib.rs
+  if [ "$2" = b ]; then file=crates/b/src/lib.rs; fi
+  printf '{"name":"%s","package":"%s","file":"%s","span":{"start":{"line":%s,"column":5},"end":{"line":%s,"column":6}}}' \
+    "$1" "$2" "$file" "$3" "$4"
+}
+mid_gate() { # <repo> <whole-json> <indiff-json> <exit> [extra env...] — mutates $mid_mutants (default: a b)
+  local repo="$1" whole="$2" indiff="$3" code="$4" sel; shift 4
+  read -r -a sel <<<"${mid_mutants:-a b}"
+  env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_DIFF_OPTS \
+    -u COVERAGE_TIERS_JSON -u COVERAGE_TIERS_FILELIST -u COVERAGE_TIERS_CRATE_DIRS \
+    -u LLVM_COV -u LLVM_PROFDATA \
+    PATH="$mid_aux/tools:$PATH" MID_REAL_CARGO="$mid_real_cargo" CARGO_HOME="$mid_aux/cargo-home" \
+    RUSTUP_TOOLCHAIN="$mid_channel" MID_WHOLE="$whole" MID_INDIFF="$indiff" MID_EXIT="$code" \
+    MUTATION_ORACLE_MIN_KIB=1 "$@" \
+    bash "$here/coverage-tiers.sh" --root "$repo" --mutants "${sel[@]}" --in-diff base
+}
+mid_a="$(mid_m 'a body' a 6 8)"; mid_star="$(mid_m 'a star' a 7 7)"
+mid_whole_edit="[$mid_a,$mid_star,$(mid_m 'd body' a 12 12),$(mid_m 'b body' b 2 2)]"
+mid_whole_delete="[$(mid_m 'a body' a 6 7),$(mid_m 'd body' a 11 11)]"
+
+mid_r="$(mid_repo 'let z = y * 4;' 'x * 5' Fixture.)"
+expect_reject_because "mutation-in-diff/survivor-fails" "reported missed/timeout mutants" \
+  mid_gate "$mid_r" "$mid_whole_edit" "[$mid_a,$mid_star]" 2
+mid_r="$(mid_repo 'let z = y * 4;' 'x * 5' Fixture.)"
+expect_reject_because "mutation-in-diff/mapping-failure-fails" "the in-diff listing found none" \
+  mid_gate "$mid_r" "$mid_whole_edit" "" 0
+mid_r="$(mid_repo 'let z = y * 4;' 'x * 5' Fixture.)"
+expect_reject_because "mutation-in-diff/partial-mapping-failure-fails" "in-diff listing dropped" \
+  mid_gate "$mid_r" "$mid_whole_edit" "[$mid_star]" 0
+mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
+expect_accept "mutation-in-diff/docs-only-skips" "no mutant on a changed line" \
+  mid_gate "$mid_r" "$mid_whole_edit" "" 0
+mid_r="$(mid_repo '' 'x * 5' Fixture. diff.noprefix=true diff.context=0)"
+expect_reject_because "mutation-in-diff/noprefix-mapping-failure-fails" "the in-diff listing found none" \
+  mid_gate "$mid_r" "$mid_whole_delete" "" 0
+mid_r="$(mid_repo '' 'x * 6' Fixture.)"
+expect_reject_because "mutation-in-diff/git-diff-opts-mixed-change-fails" "in-diff listing dropped" \
+  mid_gate "$mid_r" "$mid_whole_delete" "[$(mid_m 'd body' a 11 11)]" 0 GIT_DIFF_OPTS=-u0
+mid_r="$(mid_repo 'let z = y * 4;' 'x * 5' Fixture.)"
+mid_git "$mid_r" reset -q --hard base
+printf '*.rs -diff\n' > "$mid_r/.gitattributes"
+mid_git "$mid_r" add -A
+mid_git "$mid_r" commit -qm attributes
+mid_git "$mid_r" tag -f base
+mid_lib "$mid_r/crates/a/src/lib.rs" 'let z = y * 4;' 'x * 5' Fixture.
+mid_git "$mid_r" commit -qam head
+expect_reject_because "mutation-in-diff/rs-diff-attribute-mapping-failure-fails" "the in-diff listing found none" \
+  mid_gate "$mid_r" "$mid_whole_edit" "" 0
+mid_r="$(mid_repo 'let z = y * 4;' 'x * 5' Fixture.)"
+expect_reject_because "mutation-in-diff/literal-pathspecs-mapping-failure-fails" "the in-diff listing found none" \
+  mid_gate "$mid_r" "$mid_whole_edit" "" 0 GIT_LITERAL_PATHSPECS=1
+mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' Fixture.)"
+printf 'pub fn b(x: u32) -> u32 {\n    x + 3\n}\n' > "$mid_r/crates/b/src/lib.rs"
+mid_git "$mid_r" add -A
+mid_git "$mid_r" commit -qm b
+mid_mutants=a
+expect_reject_because "mutation-in-diff/changed-crate-not-selected-fails" "changed crate b not selected by --mutants" \
+  mid_gate "$mid_r" "$mid_whole_edit" "" 0
+mid_mutants=
+mid_r="$(mid_repo 'let z = y * 4;' 'x * 5' Fixture.)"
+mid_fake="$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY \
+  git -C "$mid_r" -c user.name=fixture -c user.email=fixture@example.invalid commit-tree 'HEAD^{tree}' -m fake)"
+mid_git "$mid_r" replace base "$mid_fake"
+expect_reject_because "mutation-in-diff/replace-refs-fail" "the repository has replace refs" \
+  mid_gate "$mid_r" "$mid_whole_edit" "[$mid_a,$mid_star]" 0
+mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
+printf 'be brief\n' > "$mid_r/crates/a/src/prompt.txt"
+printf 'pub fn prompt() -> &'"'"'static str {\n    include_str!("prompt.txt")\n}\n' >> "$mid_r/crates/a/src/lib.rs"
+mid_git "$mid_r" add -A
+mid_git "$mid_r" commit -qm data
+mid_git "$mid_r" tag -f base
+printf 'be terse\n' > "$mid_r/crates/a/src/prompt.txt"
+mid_git "$mid_r" commit -qam prompt
+expect_reject_because "mutation-in-diff/include-str-data-survivor-fails" "reported missed/timeout mutants" \
+  mid_gate "$mid_r" "$mid_whole_edit" "" 2
+mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
+printf 'pub mod decision;\n' >> "$mid_r/crates/a/src/lib.rs"
+printf 'pub fn decide(x: u32) -> bool {\n    x > 3\n}\n' > "$mid_r/crates/a/src/decision.rs"
+mid_git "$mid_r" add -A
+mid_git "$mid_r" commit -qm decision
+mid_git "$mid_r" tag -f base
+printf 'pub fn decide(x: u32) -> bool {\n    x > 4\n}\n' > "$mid_r/crates/a/src/decision.rs"
+mid_git "$mid_r" commit -qam decide
+mid_git "$mid_r" update-index --assume-unchanged crates/a/src/lib.rs
+sed '/^pub mod decision;$/d' "$mid_r/crates/a/src/lib.rs" > "$mid_r/lib.rs.local"
+mv "$mid_r/lib.rs.local" "$mid_r/crates/a/src/lib.rs"
+mid_decision='[{"name":"decide gt","package":"a","file":"crates/a/src/decision.rs","span":{"start":{"line":2,"column":5},"end":{"line":2,"column":10}}}]'
+expect_reject_because "mutation-in-diff/assume-unchanged-mapping-failure-fails" "the in-diff listing found none" \
+  mid_gate "$mid_r" "$mid_decision" "" 0
+mid_r="$(mid_repo 'let z = y * 4;' 'x * 5' Fixture.)"
+mkdir -p "$mid_r/.git/info"
+printf '%s %s\n' "$(env -u GIT_DIR git -C "$mid_r" rev-parse base)" "$(env -u GIT_DIR git -C "$mid_r" rev-parse HEAD)" \
+  > "$mid_r/.git/info/grafts"
+expect_reject_because "mutation-in-diff/grafts-fail" "the repository has grafts" \
+  mid_gate "$mid_r" "$mid_whole_edit" "[$mid_a,$mid_star]" 0
+mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
+printf 'pub mod alias;\n' >> "$mid_r/crates/a/src/lib.rs"
+printf 'pub fn allowed(x: u32) -> bool {\n    x > 10\n}\n' > "$mid_r/crates/a/src/real.rs"
+ln -s real.rs "$mid_r/crates/a/src/alias.rs"
+mid_git "$mid_r" add -A
+mid_git "$mid_r" commit -qm alias
+mid_git "$mid_r" tag -f base
+printf 'pub fn allowed(x: u32) -> bool {\n    x > 20\n}\n' > "$mid_r/crates/a/src/real.rs"
+mid_git "$mid_r" commit -qam real
+mid_alias='[{"name":"allowed gt","package":"a","file":"crates/a/src/alias.rs","span":{"start":{"line":2,"column":5},"end":{"line":2,"column":11}}}]'
+expect_reject_because "mutation-in-diff/symlinked-source-fails" "symlink crates/a/src/alias.rs in mutation crate a" \
+  mid_gate "$mid_r" "$mid_alias" "" 0
+mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
+printf '[package]\nname = "a"\nversion = "0.1.0"\nedition = "2021"\nbuild = "src/build.rs"\n' > "$mid_r/crates/a/Cargo.toml"
+printf 'mod helper;\nfn main() {\n    helper::emit();\n}\n' > "$mid_r/crates/a/src/build.rs"
+printf 'pub fn emit() {\n    println!("cargo:rustc-cfg=fast");\n}\n' > "$mid_r/crates/a/src/helper.rs"
+mid_git "$mid_r" add -A
+mid_git "$mid_r" commit -qm build
+mid_git "$mid_r" tag -f base
+printf 'pub fn emit() {\n    println!("cargo:rustc-cfg=slow");\n}\n' > "$mid_r/crates/a/src/helper.rs"
+mid_git "$mid_r" commit -qam helper
+expect_reject_because "mutation-in-diff/build-script-crate-survivor-fails" "reported missed/timeout mutants" \
+  mid_gate "$mid_r" "$mid_whole_edit" "" 2
+mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
+printf 'pub fn check() -> bool {\n    include_str!("policy.rs").trim() == "ALLOW"\n}\n' >> "$mid_r/crates/a/src/lib.rs"
+printf 'ALLOW\n' > "$mid_r/crates/a/src/policy.rs"
+mid_git "$mid_r" add -A
+mid_git "$mid_r" commit -qm policy
+mid_git "$mid_r" tag -f base
+printf 'DENY\n' > "$mid_r/crates/a/src/policy.rs"
+mid_git "$mid_r" commit -qam deny
+expect_reject_because "mutation-in-diff/include-str-rs-survivor-fails" "reported missed/timeout mutants" \
+  mid_gate "$mid_r" "$mid_whole_edit" "" 2
+mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
+printf 'pub fn check() -> bool {\n    include_str!("../../a/src/policy.rs").trim() == "ALLOW"\n}\n' > "$mid_r/crates/b/src/lib.rs"
+printf 'ALLOW\n' > "$mid_r/crates/a/src/policy.rs"
+mid_git "$mid_r" add -A
+mid_git "$mid_r" commit -qm policy
+mid_git "$mid_r" tag -f base
+printf 'DENY\n' > "$mid_r/crates/a/src/policy.rs"
+mid_git "$mid_r" commit -qam deny
+expect_reject_because "mutation-in-diff/cross-crate-include-str-survivor-fails" "cargo mutants --package b reported missed/timeout mutants" \
+  mid_gate "$mid_r" "$mid_whole_edit" "" 2
+mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
+printf 'pub fn check() -> bool {\n    include_str!("../../../README.md").trim() == "ALLOW"\n}\n' >> "$mid_r/crates/a/src/lib.rs"
+printf 'ALLOW\n' > "$mid_r/README.md"
+mid_git "$mid_r" add -A
+mid_git "$mid_r" commit -qm readme
+mid_git "$mid_r" tag -f base
+printf 'DENY\n' > "$mid_r/README.md"
+mid_git "$mid_r" commit -qam deny
+expect_reject_because "mutation-in-diff/readme-include-survivor-fails" "cargo mutants --package a reported missed/timeout mutants" \
+  mid_gate "$mid_r" "$mid_whole_edit" "" 2
+mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
+printf 'pub mod policy;\npub fn check() -> bool {\n    include_str!("policy.rs").contains("ALLOW")\n}\n' >> "$mid_r/crates/a/src/lib.rs"
+printf 'pub const RULE: &str = "ALLOW";\n' > "$mid_r/crates/a/src/policy.rs"
+mid_git "$mid_r" add -A
+mid_git "$mid_r" commit -qm policy
+mid_git "$mid_r" tag -f base
+printf 'pub const RULE: &str = "DENY";\n' > "$mid_r/crates/a/src/policy.rs"
+mid_git "$mid_r" commit -qam deny
+expect_reject_because "mutation-in-diff/module-include-survivor-fails" "cargo mutants --package a reported missed/timeout mutants" \
+  mid_gate "$mid_r" "$mid_whole_edit" "" 2
+mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
+printf 'pub fn check() -> bool {\n    include_str!("policy\\nname.txt") == "ALLOW"\n}\n' >> "$mid_r/crates/a/src/lib.rs"
+printf 'ALLOW' > "$mid_r/crates/a/src/policy"$'\n'"name.txt"
+mid_git "$mid_r" add -A
+mid_git "$mid_r" commit -qm data
+mid_git "$mid_r" tag -f base
+printf 'DENY' > "$mid_r/crates/a/src/policy"$'\n'"name.txt"
+mid_git "$mid_r" commit -qam deny
+expect_reject_because "mutation-in-diff/newline-path-fails" "contains a newline or control character" \
+  mid_gate "$mid_r" "$mid_whole_edit" "" 2
+mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
+printf 'pub mod policy;\nuse std::include_str as embed;\npub fn allowed() -> bool {\n    embed!("policy.rs").contains("ALLOW")\n}\n' >> "$mid_r/crates/a/src/lib.rs"
+printf '// ALLOW\npub fn rule() {}\n' > "$mid_r/crates/a/src/policy.rs"
+mid_git "$mid_r" add -A
+mid_git "$mid_r" commit -qm policy
+mid_git "$mid_r" tag -f base
+printf '// DENY\npub fn rule() {}\n' > "$mid_r/crates/a/src/policy.rs"
+mid_git "$mid_r" commit -qam deny
+expect_reject_because "mutation-in-diff/include-alias-survivor-fails" "cargo mutants --package a reported missed/timeout mutants" \
+  mid_gate "$mid_r" "$mid_whole_edit" "" 2
+mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
+printf 'pub use std::include_str as embed;\n' >> "$mid_r/crates/a/src/lib.rs"
+printf '\n[dependencies]\na = { path = "../a" }\n' >> "$mid_r/crates/b/Cargo.toml"
+printf 'pub mod policy;\npub fn allowed() -> bool {\n    a::embed!("policy.rs").contains("ALLOW")\n}\n' > "$mid_r/crates/b/src/lib.rs"
+printf 'pub const RULE: &str = "ALLOW";\n' > "$mid_r/crates/b/src/policy.rs"
+mid_git "$mid_r" add -A
+mid_git "$mid_r" commit -qm alias
+mid_git "$mid_r" tag -f base
+printf 'pub const RULE: &str = "DENY";\n' > "$mid_r/crates/b/src/policy.rs"
+mid_git "$mid_r" commit -qam deny
+expect_reject_because "mutation-in-diff/cross-crate-include-alias-survivor-fails" "cargo mutants --package b reported missed/timeout mutants" \
+  mid_gate "$mid_r" "$mid_whole_edit" "" 2
+mid_r="$(mid_repo 'let z = y * 4;' 'x * 5' Fixture.)"
+mkdir -p "$mid_r/.cargo"
+printf 'exclude_globs = []\nall_features = true\n' > "$mid_r/.cargo/mutants.toml"
+mid_git "$mid_r" add -A
+mid_git "$mid_r" commit -qm config
+expect_reject_because "mutation-in-diff/unmodelled-mutants-config-fails" ".cargo/mutants.toml sets all_features" \
+  mid_gate "$mid_r" "$mid_whole_edit" "[$mid_a,$mid_star]" 0
+mid_r="$(mid_repo 'let z = y * 4;' 'x * 5' Fixture.)"
+mkdir -p "$mid_r/cargo-config"
+printf 'exclude_globs = []\n' > "$mid_r/cargo-config/mutants.toml"
+ln -s cargo-config "$mid_r/.cargo"
+mid_git "$mid_r" add -A
+mid_git "$mid_r" commit -qm config
+expect_reject_because "mutation-in-diff/symlinked-config-input-fails" ".cargo is a symlink; config inputs must be regular files" \
+  mid_gate "$mid_r" "$mid_whole_edit" "[$mid_a,$mid_star]" 0
+mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
+printf '\n[profile.test]\ndebug-assertions = false\n' >> "$mid_r/Cargo.toml"
+mkdir -p "$mid_r/crates/a/src/release"
+printf '#[cfg(not(debug_assertions))]\npub mod release {\n    pub mod policy;\n    pub fn allowed() -> bool {\n        include_str!("release/policy.rs").contains("ALLOW")\n    }\n}\n' >> "$mid_r/crates/a/src/lib.rs"
+printf '// ALLOW\n' > "$mid_r/crates/a/src/release/policy.rs"
+mid_git "$mid_r" add -A
+mid_git "$mid_r" commit -qm profile
+mid_git "$mid_r" tag -f base
+printf '// DENY\n' > "$mid_r/crates/a/src/release/policy.rs"
+mid_git "$mid_r" commit -qam deny
+expect_reject_because "mutation-in-diff/test-profile-cfg-survivor-fails" "cargo mutants --package a reported missed/timeout mutants" \
+  mid_gate "$mid_r" "$mid_whole_edit" "" 2
+mid_r="$(mid_repo 'let z = y * 4;' 'x * 5' Fixture.)"
+printf 'all_features = true\n' > "$NC_TMP/variant-mutants.toml"
+mid_blob="$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY \
+  git -C "$mid_r" hash-object -w "$NC_TMP/variant-mutants.toml")"
+mid_git "$mid_r" update-index --add --cacheinfo "100644,$mid_blob,.CARGO/mutants.toml"
+mid_git "$mid_r" commit -qm variant
+expect_reject_because "mutation-in-diff/case-variant-config-path-fails" \
+  ".CARGO/mutants.toml is a case variant of the config path .cargo/mutants.toml" \
+  mid_gate "$mid_r" "$mid_whole_edit" "[$mid_a,$mid_star]" 0
+mid_r="$(mid_repo 'let z = y * 2;' 'x * 5' 'The fixture.')"
+printf '\n[features]\nextra = []\n\n[dev-dependencies]\na = { path = ".", features = ["extra"] }\n' >> "$mid_r/crates/a/Cargo.toml"
+mkdir -p "$mid_r/crates/a/src/enabled"
+printf '#[cfg(feature = "extra")]\npub mod enabled {\n    pub mod policy;\n    pub fn allowed() -> bool {\n        include_str!("enabled/policy.rs").contains("ALLOW")\n    }\n}\n' >> "$mid_r/crates/a/src/lib.rs"
+printf 'pub const RULE: &str = "ALLOW";\n' > "$mid_r/crates/a/src/enabled/policy.rs"
+mid_git "$mid_r" add -A
+mid_git "$mid_r" commit -qm devdep
+mid_git "$mid_r" tag -f base
+printf 'pub const RULE: &str = "DENY";\n' > "$mid_r/crates/a/src/enabled/policy.rs"
+mid_git "$mid_r" commit -qam deny
+expect_reject_because "mutation-in-diff/dev-dependency-feature-survivor-fails" "cargo mutants --package a reported missed/timeout mutants" \
+  mid_gate "$mid_r" "$mid_whole_edit" "" 2
+mid_r="$(mid_repo 'let z = y * 4;' 'x * 5' Fixture.)"
+if [ -e "$mid_r/CRATES" ]; then
+  mid_git "$mid_r" reset -q --hard base
+  ln -s CRATES/A/src "$mid_r/alias"
+  mid_git "$mid_r" add -A
+  mid_git "$mid_r" commit -qm alias
+  mid_git "$mid_r" tag -f base
+  mid_lib "$mid_r/crates/a/src/lib.rs" 'let z = y * 4;' 'x * 5' Fixture.
+  mid_git "$mid_r" commit -qam head
+  expect_reject_because "mutation-in-diff/case-insensitive-symlink-fails" "symlink alias in mutation crate a" \
+    mid_gate "$mid_r" "$mid_whole_edit" "[$mid_a,$mid_star]" 0
+else
+  echo "neg-skip: [mutation-in-diff/case-insensitive-symlink-fails] this filesystem is case-sensitive; CRATES/A/src cannot alias crates/a/src"
+  skipped=$((skipped+1))
+fi
+
 # ---- payload-xattr-clean (#332): an AppleDouble sibling per tagged entry ------
 # pkgbuild serialises a `._name` AppleDouble sibling INTO the payload for every
 # entry carrying an extended attribute, and those become REAL INSTALLED FILES.
@@ -4583,7 +4948,7 @@ expect_reject_because "mutation-oracle/scratch-missing-dir" "does not exist" \
 # exist to prove that re-read actually fires.
 #
 # Darwin-only: `xattr(1)` does not exist on Linux, and this suite runs on
-# ubuntu-latest (ci.yml:176). A silent pass there would be the ok-on-nothing
+# ubuntu-latest. A silent pass there would be the ok-on-nothing
 # class this whole file exists to make impossible, so it is a counted skip.
 pxc="$here/payload-xattr-clean.sh"
 if [ "$(uname -s)" != "Darwin" ]; then

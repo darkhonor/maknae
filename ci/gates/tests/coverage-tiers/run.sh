@@ -670,7 +670,7 @@ expect "malformed collection shape ([t3] not [[t3]], no traceback)" "array of ta
 
 # ---------- mutation contract-shape modes (CR-impl C1) -----------------------
 # These select the mutation stage, so readiness requires cargo-mutants —
-# absent in build-and-gate. Shim a stub (same pattern as the unknown-crate
+# absent in the gates job. Shim a stub (same pattern as the unknown-crate
 # fixture) so the mode-identifying contract-shape FAIL is reachable in ANY
 # lane (lane-dependent fixtures are forbidden).
 shimM="$(newroot)"; printf '#!/bin/sh\nexit 0\n' >"$shimM/cargo-mutants"; printf '#!/bin/sh\necho "cargo-nextest 0.9.146 (fixture)"\n' >"$shimM/cargo-nextest"
@@ -1002,6 +1002,63 @@ expect "mutation oracle: an ENOSPC build failure is not unviability" "ENVIRONMEN
   env PATH="$shim:$PATH" FIXTURE_MUTANT_OUTCOMES=enospc \
     COVERAGE_TIERS_JSON="$r/cov.json" COVERAGE_TIERS_FILELIST="$r/files.list" \
     COVERAGE_TIERS_CRATE_DIRS="xcore=crates/x" "$gate" --root "$r" --injection --mutants xcore
+
+mo_oracle="$here/../../mutation-oracle.sh"
+mk_indiff() { # <dir> <baseline-summary|none> [enospc]
+  local d="$1" base="$2" bl=""
+  mkdir -p "$d/log"
+  if [ "$base" != "none" ]; then
+    bl='{"scenario":"Baseline","summary":"'"$base"'","phase_results":[{"phase":"Build"},{"phase":"Test"}]},'
+  fi
+  printf '{"total_mutants":3,"missed":0,"caught":0,"timeout":0,"unviable":3,"outcomes":[%s{"scenario":{"Mutant":{"name":"a"}},"summary":"Unviable"}]}\n' \
+    "$bl" > "$d/outcomes.json"
+  if [ "${3:-}" = "enospc" ]; then
+    printf 'error: could not create session directory lock file: No space left on device (os error 28)\n' > "$d/log/m1.log"
+  fi
+}
+d_ok="$(newroot)"; mk_indiff "$d_ok" Success
+expect "judge --in-diff: all unviable with a passing baseline is accepted" "all 3 in-diff mutants unviable (baseline passed)" 0 -- \
+  bash "$mo_oracle" judge --in-diff --expect 3 "$d_ok" xcore
+d_bf="$(newroot)"; mk_indiff "$d_bf" Failure
+expect "judge --in-diff: all unviable with a failing baseline is refused" "ZERO viable" nonzero -- \
+  bash "$mo_oracle" judge --in-diff --expect 3 "$d_bf" xcore
+d_nb="$(newroot)"; mk_indiff "$d_nb" none
+expect "judge --in-diff: all unviable with no baseline entry is refused" "ZERO viable" nonzero -- \
+  bash "$mo_oracle" judge --in-diff --expect 3 "$d_nb" xcore
+d_z="$(newroot)"
+printf '{"total_mutants":0,"missed":0,"caught":0,"timeout":0,"unviable":0,"outcomes":[{"scenario":"Baseline","summary":"Success"}]}\n' > "$d_z/outcomes.json"
+expect "judge --in-diff: zero mutants is still refused" "ZERO mutants" nonzero -- \
+  bash "$mo_oracle" judge --in-diff --expect 0 "$d_z" xcore
+d_en="$(newroot)"; mk_indiff "$d_en" Success enospc
+expect "judge --in-diff: ENOSPC after a passing baseline is an environment failure" "ENVIRONMENT failure" nonzero -- \
+  bash "$mo_oracle" judge --in-diff --expect 3 "$d_en" xcore
+expect "judge (whole): the in-diff all-unviable data is refused without the flag" "ZERO viable" nonzero -- \
+  bash "$mo_oracle" judge "$d_ok" xcore
+expect_without() { # <label> <absent-substring> -- cmd...
+  local label="$1" unwanted="$2"; shift 2; [ "$1" = "--" ] && shift
+  local out rc=0
+  out="$("$@" 2>&1)" || rc=$?
+  if grep -qF "$unwanted" <<<"$out"; then bad "$label (printed: $unwanted)"; printf '%s\n' "$out" | tail -5
+  else ok "$label"; fi
+}
+expect_without "judge --in-diff: ENOSPC prints no accept line" "baseline passed" -- \
+  bash "$mo_oracle" judge --in-diff --expect 3 "$d_en" xcore
+expect "judge --in-diff: a total matching the listing is accepted" "all 3 in-diff mutants unviable" 0 -- \
+  bash "$mo_oracle" judge --in-diff --expect 3 "$d_ok" xcore
+expect "judge --in-diff: a total other than the listing's is refused" "total_mutants is 3 but the in-diff listing has 2" nonzero -- \
+  bash "$mo_oracle" judge --in-diff --expect 2 "$d_ok" xcore
+for bad_args in "--in-diff" "--in-diff --expect" "--in-diff --expect x"; do
+  # shellcheck disable=SC2086
+  expect "judge $bad_args: refused as usage" "FAIL: usage" nonzero -- \
+    bash "$mo_oracle" judge $bad_args "$d_ok" xcore
+done
+d_ev="$(newroot)"; mkdir -p "$d_ev/log"
+printf '{"total_mutants":2,"missed":0,"caught":2,"timeout":0,"unviable":0,"outcomes":[]}\n' > "$d_ev/outcomes.json"
+printf 'No space left on device (os error 28)\n' > "$d_ev/log/m1.log"
+expect "judge (whole): ENOSPC beside viable mutants is still an environment failure" "ENVIRONMENT failure" nonzero -- \
+  bash "$mo_oracle" judge "$d_ev" xcore
+expect_without "judge (whole): ENOSPC prints no accept line" "viable (" -- \
+  bash "$mo_oracle" judge "$d_ev" xcore
 
 # ---------- ambient-GIT_DIR immunity ----------------------------------------
 r="$(newroot)"; mk_base "$r"

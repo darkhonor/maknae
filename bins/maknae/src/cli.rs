@@ -19,6 +19,7 @@
 //! P1 — even for `enroll`: it does its own privileged work via `nix` safe wrappers
 //! and process re-exec (`sudo -u`), never by linking the daemon's privileged crates.
 
+use crate::stderr::errln;
 use clap::{Parser, Subcommand};
 use maknae_config::{load_config, transport_from_section, SectionSpec, TRANSPORT_SECTION};
 use maknae_loop::outcome::SentOutcome;
@@ -461,13 +462,13 @@ async fn round_trip(
                         transport,
                         client,
                         ca,
-                        &mut |l| eprintln!("{l}"),
+                        &mut |l| errln!("{l}"),
                     )
                     .await?
                     {
                         SentOutcome::ReadDone { read } => Ok(read),
                         SentOutcome::Refused { code, message, .. } => {
-                            eprintln!("maknae: daemon refused: {code:?}: {message}");
+                            errln!("maknae: daemon refused: {code:?}: {message}");
                             Ok(None)
                         }
                         _ => Err("protocol error: a read answered with something else".into()),
@@ -485,7 +486,7 @@ async fn round_trip(
         transport,
         client,
         ca,
-        &mut |l| eprintln!("{l}"),
+        &mut |l| errln!("{l}"),
     )
     .await?
     {
@@ -506,14 +507,14 @@ async fn round_trip(
                 .write_all(&r.content)
                 .map_err(|e| format!("writing content to stdout: {e}"))?;
             match r.page.next {
-                Some((line, column)) => eprintln!("next: line {line} column {column}"),
-                None => eprintln!("eof"),
+                Some((line, column)) => errln!("next: line {line} column {column}"),
+                None => errln!("eof"),
             }
             Ok(true)
         }
         SentOutcome::ReadDone { read: None } => Ok(false),
         SentOutcome::Refused { code, message, .. } => {
-            eprintln!("maknae: daemon refused: {code:?}: {message}");
+            errln!("maknae: daemon refused: {code:?}: {message}");
             Ok(false)
         }
     }
@@ -872,35 +873,57 @@ fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
 pub async fn run_cli() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
-        Command::Ping => wire_exit_code(execute(Verb::Ping).await),
-        Command::Whoami => wire_exit_code(execute(Verb::Whoami).await),
-        Command::Status => wire_exit_code(execute(Verb::AdminStatus).await),
-        Command::ConfigShow => wire_exit_code(execute(Verb::AdminConfigShow).await),
-        Command::SubjectList => wire_exit_code(execute(Verb::AdminSubjectList).await),
-        Command::BaselineShow => wire_exit_code(execute(Verb::AdminBaselineShow).await),
-        Command::BaselineAccept { hash } => wire_exit_code(match accept_hash(hash) {
-            Ok(hash) => execute(Verb::AdminBaselineAccept { hash: hash.into() }).await,
-            Err(e) => Err(e),
-        }),
-        Command::Contain { user, uid, reason } => {
-            operand_exit(contain_verb(user, uid, reason)).await
+        Command::Ping => wire_exit_code(execute(Verb::Ping).await, &mut std::io::stderr()),
+        Command::Whoami => wire_exit_code(execute(Verb::Whoami).await, &mut std::io::stderr()),
+        Command::Status => wire_exit_code(execute(Verb::AdminStatus).await, &mut std::io::stderr()),
+        Command::ConfigShow => {
+            wire_exit_code(execute(Verb::AdminConfigShow).await, &mut std::io::stderr())
         }
-        Command::Release { user, uid } => operand_exit(release_verb(user, uid)).await,
+        Command::SubjectList => wire_exit_code(
+            execute(Verb::AdminSubjectList).await,
+            &mut std::io::stderr(),
+        ),
+        Command::BaselineShow => wire_exit_code(
+            execute(Verb::AdminBaselineShow).await,
+            &mut std::io::stderr(),
+        ),
+        Command::BaselineAccept { hash } => wire_exit_code(
+            match accept_hash(hash) {
+                Ok(hash) => execute(Verb::AdminBaselineAccept { hash: hash.into() }).await,
+                Err(e) => Err(e),
+            },
+            &mut std::io::stderr(),
+        ),
+        Command::Contain { user, uid, reason } => {
+            operand_exit(contain_verb(user, uid, reason), &mut std::io::stderr()).await
+        }
+        Command::Release { user, uid } => {
+            operand_exit(release_verb(user, uid), &mut std::io::stderr()).await
+        }
         Command::AuditReaders { stopped } => {
             crate::audit_readers::run(nix::unistd::geteuid().as_raw(), stopped)
         }
-        Command::Write { path } => wire_exit_code(match absolute_path(path) {
-            Ok(path) => execute(Verb::Write { path }).await,
-            Err(e) => Err(e),
-        }),
-        Command::Delete { path, recursive } => wire_exit_code(match absolute_path(path) {
-            Ok(path) => execute(Verb::Delete { path, recursive }).await,
-            Err(e) => Err(e),
-        }),
-        Command::Mkdir { path, parents } => wire_exit_code(match absolute_path(path) {
-            Ok(path) => execute(Verb::Mkdir { path, parents }).await,
-            Err(e) => Err(e),
-        }),
+        Command::Write { path } => wire_exit_code(
+            match absolute_path(path) {
+                Ok(path) => execute(Verb::Write { path }).await,
+                Err(e) => Err(e),
+            },
+            &mut std::io::stderr(),
+        ),
+        Command::Delete { path, recursive } => wire_exit_code(
+            match absolute_path(path) {
+                Ok(path) => execute(Verb::Delete { path, recursive }).await,
+                Err(e) => Err(e),
+            },
+            &mut std::io::stderr(),
+        ),
+        Command::Mkdir { path, parents } => wire_exit_code(
+            match absolute_path(path) {
+                Ok(path) => execute(Verb::Mkdir { path, parents }).await,
+                Err(e) => Err(e),
+            },
+            &mut std::io::stderr(),
+        ),
         Command::Read {
             path,
             offset,
@@ -913,14 +936,17 @@ pub async fn run_cli() -> ExitCode {
             // BadRequest, a stated consequence); `~` is the shell's business.
             match std::path::absolute(&path) {
                 Ok(abs) => match abs.into_os_string().into_string() {
-                    Ok(p) => wire_exit_code(execute(Verb::Read { path: p, page }).await),
+                    Ok(p) => wire_exit_code(
+                        execute(Verb::Read { path: p, page }).await,
+                        &mut std::io::stderr(),
+                    ),
                     Err(_) => {
-                        eprintln!("maknae: path is not valid UTF-8 (recorded v1 limit)");
+                        errln!("maknae: path is not valid UTF-8 (recorded v1 limit)");
                         ExitCode::FAILURE
                     }
                 },
                 Err(e) => {
-                    eprintln!("maknae: cannot absolutize path: {e}");
+                    errln!("maknae: cannot absolutize path: {e}");
                     ExitCode::FAILURE
                 }
             }
@@ -940,11 +966,11 @@ pub async fn run_cli() -> ExitCode {
     }
 }
 
-async fn operand_exit(verb: Result<Verb, String>) -> ExitCode {
+async fn operand_exit(verb: Result<Verb, String>, err: &mut impl std::io::Write) -> ExitCode {
     match verb {
-        Ok(verb) => wire_exit_code(execute(verb).await),
+        Ok(verb) => wire_exit_code(execute(verb).await, err),
         Err(e) => {
-            eprintln!("{e}");
+            crate::stderr::line(err, format_args!("{e}"));
             ExitCode::FAILURE
         }
     }
@@ -959,18 +985,18 @@ fn agent_exit(result: Result<u8, String>, err: &mut impl std::io::Write) -> Exit
     match result {
         Ok(code) => ExitCode::from(code),
         Err(e) => {
-            let _ = writeln!(err, "maknae: {e}");
+            crate::stderr::line(err, format_args!("maknae: {e}"));
             ExitCode::from(1)
         }
     }
 }
 
-fn wire_exit_code(result: Result<bool, String>) -> ExitCode {
+fn wire_exit_code(result: Result<bool, String>, err: &mut impl std::io::Write) -> ExitCode {
     match result {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::FAILURE,
         Err(e) => {
-            eprintln!("maknae: {e}");
+            crate::stderr::line(err, format_args!("maknae: {e}"));
             ExitCode::FAILURE
         }
     }
@@ -1013,6 +1039,53 @@ mod tests {
         assert_eq!(agent_exit(Err("boom".into()), &mut err), ExitCode::from(1));
         assert_eq!(err, b"maknae: boom\n");
         assert_eq!(agent_exit(Ok(2), &mut ClosedStderr), ExitCode::from(2));
+    }
+
+    #[test]
+    fn the_wire_error_exit_is_one_even_when_stderr_is_closed() {
+        assert_eq!(
+            wire_exit_code(Err("x".into()), &mut ClosedStderr),
+            ExitCode::FAILURE
+        );
+        let mut err = vec![];
+        assert_eq!(
+            wire_exit_code(Err("boom".into()), &mut err),
+            ExitCode::FAILURE
+        );
+        assert_eq!(err, b"maknae: boom\n");
+    }
+
+    #[test]
+    fn the_operand_error_exit_is_one_even_when_stderr_is_closed() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        assert_eq!(
+            rt.block_on(operand_exit(Err("x".into()), &mut ClosedStderr)),
+            ExitCode::FAILURE
+        );
+        let mut err = vec![];
+        assert_eq!(
+            rt.block_on(operand_exit(Err("bad operand".into()), &mut err)),
+            ExitCode::FAILURE
+        );
+        assert_eq!(err, b"bad operand\n");
+    }
+
+    #[test]
+    fn a_refused_wire_result_exits_one() {
+        assert_eq!(
+            wire_exit_code(Ok(false), &mut ClosedStderr),
+            ExitCode::FAILURE
+        );
+    }
+
+    #[test]
+    fn a_wire_success_exits_zero() {
+        assert_eq!(
+            wire_exit_code(Ok(true), &mut ClosedStderr),
+            ExitCode::SUCCESS
+        );
     }
 
     #[test]

@@ -20,7 +20,7 @@
 #
 # Usage:
 #   mutation-oracle.sh scratch <dir>            — room to run at all, BEFORE the run
-#   mutation-oracle.sh judge <outdir> <crate>   — did it measure anything, AFTER
+#   mutation-oracle.sh judge [--in-diff --expect <n>] <outdir> <crate> — did it measure anything, AFTER
 set -euo pipefail
 
 # MEASURED 2026-09-13, sampling the scratch tree during a maknae-kernel mutant
@@ -31,7 +31,7 @@ set -euo pipefail
 # margin rather than sit on the boundary that already bit once.
 MIN_SCRATCH_KIB=${MUTATION_ORACLE_MIN_KIB:-$((6 * 1024 * 1024))}
 
-usage() { printf 'FAIL: usage: mutation-oracle.sh scratch <dir> | judge <outdir> <crate>\n'; exit 2; }
+usage() { printf 'FAIL: usage: mutation-oracle.sh scratch <dir> | judge [--in-diff --expect <n>] <outdir> <crate>\n'; exit 2; }
 
 scratch() {
   local dir="${1:?}" avail
@@ -51,7 +51,7 @@ scratch() {
 }
 
 judge() {
-  local out="${1:?}" cname="${2:?}" rc=0 hit
+  local in_diff="${1:?}" expect="$2" out="${3:?}" cname="${4:?}" rc=0 hit
   # `cargo mutants --output DIR` writes DIR/mutants.out/ — the results are one
   # level below what the caller named. Accept either spelling so a caller may
   # pass the --output dir or the mutants.out dir itself; the layout belongs to
@@ -76,10 +76,11 @@ judge() {
     printf 'FAIL: %s: cargo mutants wrote no outcomes.json — the run cannot be judged (#301)\n' "$cname"
     return 1
   fi
-  python3 - "$out/outcomes.json" "$cname" <<'PYEOF' || rc=1
+  python3 - "$out/outcomes.json" "$cname" "$in_diff" "$expect" "$rc" <<'PYEOF' || rc=1
 import json, sys
 
-path, cname = sys.argv[1], sys.argv[2]
+path, cname, in_diff = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
+expect, env_failed = sys.argv[4], sys.argv[5] != "0"
 try:
     with open(path) as f:
         d = json.load(f)
@@ -140,21 +141,44 @@ if total == 0:
           f"would pass vacuously (#301)")
     sys.exit(1)
 
+if in_diff and total != int(expect):
+    print(f"FAIL: {cname}: total_mutants is {total} but the in-diff listing has {expect} — "
+          f"the run did not mutate what was listed")
+    sys.exit(1)
+
+outcomes = d.get("outcomes")
+baseline_passed = isinstance(outcomes, list) and any(
+    isinstance(o, dict) and o.get("scenario") == "Baseline" and o.get("summary") == "Success"
+    for o in outcomes
+)
+if viable == 0 and in_diff and baseline_passed:
+    if not env_failed:
+        print(f"mutants[{cname}]: all {total} in-diff mutants unviable (baseline passed)")
+    sys.exit(0)
+
 if viable == 0:
     print(f"FAIL: {cname}: {total} mutants, {v['unviable']} unviable, ZERO "
           f"viable — the mutation lane measured nothing and would otherwise "
           f"pass the zero-missed contract (#301)")
     sys.exit(1)
 
-print(f"mutants[{cname}]: {viable} viable ({v['caught']} caught, "
-      f"{v['missed']} missed, {v['timeout']} timeout), {v['unviable']} unviable "
-      f"of {total}")
+if not env_failed:
+    print(f"mutants[{cname}]: {viable} viable ({v['caught']} caught, "
+          f"{v['missed']} missed, {v['timeout']} timeout), {v['unviable']} unviable "
+          f"of {total}")
 PYEOF
   return $rc
 }
 
 case "${1:-}" in
   scratch) shift; [ $# -eq 1 ] || usage; scratch "$1";;
-  judge)   shift; [ $# -eq 2 ] || usage; judge "$1" "$2";;
+  judge)   shift; d=0 n=""
+           if [ "${1:-}" = "--in-diff" ]; then
+             d=1; shift
+             [ "${1:-}" = "--expect" ] || usage
+             n="${2:-}"; grep -Eq '^[0-9]+$' <<<"$n" || usage
+             shift 2
+           fi
+           [ $# -eq 2 ] || usage; judge "$d" "$n" "$1" "$2";;
   *) usage;;
 esac

@@ -6,6 +6,7 @@
 //! the directory is writable by `_maknae`, so a path-based write as root would follow
 //! a planted `reseed.authorized -> /etc/shadow`.
 
+use crate::stderr::errln;
 use maknae_config::state::{MARKER_FILE, MARKER_MAX_BYTES, STATE_DIR};
 use maknae_io::{open_anchor, AnchorRequired, IoError, IoKind, Mode, StrategyPref, TargetRequired};
 use std::path::Path;
@@ -114,7 +115,7 @@ pub(crate) fn run_reseed() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("maknae: {e}");
+            errln!("maknae: {e}");
             ExitCode::FAILURE
         }
     }

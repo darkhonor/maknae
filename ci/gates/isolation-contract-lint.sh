@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR GIT_ALTERNATE_OBJECT_DIRECTORIES \
+  GIT_LITERAL_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_GLOB_PATHSPECS GIT_ICASE_PATHSPECS GIT_GRAFT_FILE
+export GIT_NO_REPLACE_OBJECTS=1
 # Root override, matching p1-manifest-lint / p2-invert-tree / build-invocation-lint
 # / feature-resolution-pin. Added by #219 for one reason: without it this gate
 # resolves its own root from the CWD and therefore cannot be pointed at a

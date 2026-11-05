@@ -1,6 +1,8 @@
 //! maknae — Maknae CLI, untrusted interaction plane (spec §3). Thin entrypoint:
 //! all logic lives in `cli::run_cli` (T3 — arg parse + orchestration, no
 //! decision logic of its own).
+#![cfg_attr(not(test), deny(clippy::print_stderr))]
+
 mod agent;
 mod audit_readers;
 mod cli;
@@ -8,8 +10,10 @@ mod enroll;
 mod login;
 mod policy_sync;
 mod reseed;
+mod stderr;
 mod tty;
 
+use crate::stderr::errln;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -29,7 +33,7 @@ fn main() -> ExitCode {
     {
         Ok(runtime) => runtime,
         Err(error) => {
-            eprintln!("maknae: cannot start runtime: {error}");
+            errln!("maknae: cannot start runtime: {error}");
             return ExitCode::FAILURE;
         }
     };

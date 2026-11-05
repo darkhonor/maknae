@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR GIT_ALTERNATE_OBJECT_DIRECTORIES \
+  GIT_LITERAL_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_GLOB_PATHSPECS GIT_ICASE_PATHSPECS GIT_GRAFT_FILE
+export GIT_NO_REPLACE_OBJECTS=1
 root="${1:-$(cd "$(dirname "$0")/../.." && pwd)}"
 allow="$root/ci/gates/std-fs-allowlist.txt"
 tmp="$(mktemp "${TMPDIR:-/tmp}/maknae-std-fs-drift.XXXXXXXX")"
