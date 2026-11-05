@@ -124,13 +124,13 @@
 <text x="78" y="968" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A">remote subject  →  gateway</text>
 <text x="916" y="968" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" fill="#B3452F">ratified · NOT built</text>
 <text x="78" y="982" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">OIDC federation; AAL2/FAL2 (NIST SP 800-63B/63C)</text>
-<text x="78" y="994" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">identity: enrolled remote subject, asserted by the gateway</text>
+<text x="78" y="994" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">identity: enrolled remote subject, the IdP token forwarded by the gateway and verified by the PDP</text>
 <text x="78" y="1006" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="7.5" font-weight="400" fill="#5F5E5A">design/adr/ADR-0006-client-authentication-model.md</text>
 <line x1="44" y1="1018" x2="916" y2="1018" stroke="#E8E6DF" stroke-width="1"/>
 <text x="44" y="1034" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700" fill="#26215C">I7</text>
 <text x="78" y="1034" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A">gateway  →  maknaed</text>
 <text x="916" y="1034" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" fill="#B3452F">ratified · NOT built</text>
-<text x="78" y="1048" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">machine channel; the gateway ASSERTS the principal to the PDP</text>
+<text x="78" y="1048" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A">machine channel; the gateway FORWARDS the IdP token and the PDP verifies it (ADR-0006 decision 11)</text>
 <text x="78" y="1060" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">identity: gateway's own scoped machine credential — never the daemon's plane/kernel identity</text>
 <text x="78" y="1072" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="7.5" font-weight="400" fill="#5F5E5A">design/adr/ADR-0006-client-authentication-model.md</text>
 <line x1="44" y1="1084" x2="916" y2="1084" stroke="#E8E6DF" stroke-width="1"/>
@@ -203,5 +203,5 @@
 <text x="58" y="1873" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">The socket is filesystem-mediated: group-gated at bind, then mutual mTLS over it. A network position buys nothing, so</text>
 <text x="58" y="1886" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">perimeter controls are not the boundary that matters here.</text>
 <text x="58" y="1900" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="7.5" font-weight="400" fill="#5F5E5A">crates/maknae-kernel/src/run.rs:1879 · crates/maknae-config/src/transport.rs:15</text>
-<text x="24" y="1947" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/system-interfaces.toml@e0ef152ef3 · maknae 82ab50f2 · 2026-11-04</text><text x="936" y="1947" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">DoDAF 2.02 Change 1 · SV-1</text>
+<text x="24" y="1947" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/system-interfaces.toml@5596e852aa · maknae 767845fb · 2026-11-04</text><text x="936" y="1947" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">DoDAF 2.02 Change 1 · SV-1</text>
 </svg>

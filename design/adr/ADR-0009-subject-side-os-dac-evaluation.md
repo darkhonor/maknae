@@ -51,7 +51,7 @@ Any design in which the daemon resolves a name beneath the subject's home inheri
 
 ### The remote lane has no uid at all
 
-[ADR-0006](ADR-0006-client-authentication-model.md) decision 5: *"the remote client **never reaches `maknaed`** — its session is `client↔gateway`."* The gateway validates OIDC and asserts the principal over a separate internal mutual-mTLS machine channel. Decision 7: locally the principal is the `SO_PEERCRED` uid; remotely it is *"the validated OIDC principal (and its claims → subject attributes)."*
+[ADR-0006](ADR-0006-client-authentication-model.md) decision 5: *"the remote client **never reaches `maknaed`** — its session is `client↔gateway`."* The gateway validates OIDC and asserts the principal over a separate internal mutual-mTLS machine channel. *(Amended 2026-11-05, [ADR-0006](ADR-0006-client-authentication-model.md) decision 11: the gateway forwards the IdP's signed token over that channel, and `maknaed` verifies it on every request; the gateway no longer asserts the principal.)* Decision 7: locally the principal is the `SO_PEERCRED` uid; remotely it is *"the validated OIDC principal (and its claims → subject attributes)."*
 
 A remote subject therefore has no process, no uid, and no file descriptors on the Maknae host. **OS DAC is a local-lane control.** Any design that treats it as universal either fabricates an answer remotely or — under [ADR-0008](ADR-0008-authorization-composition-contract.md) decision 4's *unknown → Deny* — denies every remote read the day the gateway lands.
 
