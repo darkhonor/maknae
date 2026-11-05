@@ -30,13 +30,29 @@ fn unhex(s: &str) -> Vec<u8> {
 
 #[test]
 fn a_blob_sealed_before_the_swap_opens() {
-    let key = PrivateKey::from_pkcs8_der(&unhex(KAT_RECIPIENT_PKCS8)).unwrap();
-    let opened = open(&key, DOMAIN, &kat_aad(), &unhex(KAT_BLOB)).unwrap();
+    let key =
+        PrivateKey::from_pkcs8_der(maknae_crypto::admitted(), &unhex(KAT_RECIPIENT_PKCS8)).unwrap();
+    let opened = open(
+        maknae_crypto::admitted(),
+        &key,
+        DOMAIN,
+        &kat_aad(),
+        &unhex(KAT_BLOB),
+    )
+    .unwrap();
     assert!(opened.as_slice() == KAT_PLAINTEXT);
 }
 
 #[test]
 fn the_same_blob_does_not_open_under_another_domain() {
-    let key = PrivateKey::from_pkcs8_der(&unhex(KAT_RECIPIENT_PKCS8)).unwrap();
-    assert!(open(&key, b"maknae-seal-v2", &kat_aad(), &unhex(KAT_BLOB)).is_err());
+    let key =
+        PrivateKey::from_pkcs8_der(maknae_crypto::admitted(), &unhex(KAT_RECIPIENT_PKCS8)).unwrap();
+    assert!(open(
+        maknae_crypto::admitted(),
+        &key,
+        b"maknae-seal-v2",
+        &kat_aad(),
+        &unhex(KAT_BLOB)
+    )
+    .is_err());
 }

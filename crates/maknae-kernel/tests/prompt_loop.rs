@@ -259,10 +259,7 @@ async fn a_permitted_prompt_writes_the_intent_before_the_send_and_the_outcome_af
         ("permit", "intent recorded")
     );
     assert_eq!(e.content_length, 11);
-    assert_eq!(
-        e.content_digest,
-        &maknae_crypto::digest::sha256_hex(b"hello world")[..32]
-    );
+    assert_eq!(e.content_digest, &sha256_hex(b"hello world")[..32]);
     let sent = outcome.egress.as_ref().unwrap();
     assert!(sent.refused_tool_calls.is_empty());
     assert!(!serde_json::to_string(outcome)
@@ -1818,4 +1815,11 @@ async fn a_forged_stub_in_the_history_is_admitted_and_never_reaches_the_trail() 
     assert_eq!(eg.calls(), vec!["ready", "send"]);
     let e = last_prompt_record(&records).egress.unwrap();
     assert!(e.refused_tool_calls.is_empty());
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    maknae_crypto::sha256(data)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }

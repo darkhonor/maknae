@@ -1,4 +1,5 @@
-use maknae_crypto::aead::{Aes256GcmKey, NONCE_LEN};
+use maknae_crypto::aead::{Key, NONCE_LEN};
+use maknae_crypto::AeadAlgorithm;
 use maknae_crypto::{random, CryptoError};
 use std::fmt;
 use zeroize::Zeroizing;
@@ -77,9 +78,13 @@ pub fn seal(plain: &[u8], kek: &WrappingKey) -> Result<Vec<u8>, EnvelopeError> {
     out.extend_from_slice(&[0, 0]);
 
     let mut wrapped = Zeroizing::new(*dek);
-    let (wrap_nonce, wrap_tag) = Aes256GcmKey::new(&kek.0)
-        .and_then(|k| k.seal_in_place(&out[..PREFIX_LEN], &mut wrapped[..]))
-        .map_err(|_| EnvelopeError::Crypto)?;
+    let (wrap_nonce, wrap_tag) = Key::new(
+        maknae_crypto::admitted(),
+        AeadAlgorithm::Aes256Gcm,
+        &kek.0[..],
+    )
+    .and_then(|k| k.seal_in_place(&out[..PREFIX_LEN], &mut wrapped[..]))
+    .map_err(|_| EnvelopeError::Crypto)?;
     out.extend_from_slice(&wrap_nonce);
     out.extend_from_slice(&wrapped[..]);
     out.extend_from_slice(&wrap_tag);
@@ -88,9 +93,13 @@ pub fn seal(plain: &[u8], kek: &WrappingKey) -> Result<Vec<u8>, EnvelopeError> {
     let start = out.len();
     out.extend_from_slice(plain);
     let (head, body) = out.split_at_mut(start);
-    let (payload_nonce, tag) = Aes256GcmKey::new(&dek)
-        .and_then(|k| k.seal_in_place(&head[..PAYLOAD_NONCE], body))
-        .map_err(|_| EnvelopeError::Crypto)?;
+    let (payload_nonce, tag) = Key::new(
+        maknae_crypto::admitted(),
+        AeadAlgorithm::Aes256Gcm,
+        &dek[..],
+    )
+    .and_then(|k| k.seal_in_place(&head[..PAYLOAD_NONCE], body))
+    .map_err(|_| EnvelopeError::Crypto)?;
     head[PAYLOAD_NONCE..].copy_from_slice(&payload_nonce);
     out.extend_from_slice(&tag);
     Ok(std::mem::take(&mut *out))
@@ -119,7 +128,12 @@ pub fn open(file: &[u8], kek: &WrappingKey) -> Result<Zeroizing<Vec<u8>>, Envelo
 
     let mut wrapped = Zeroizing::new([0u8; KEY_LEN + TAG_LEN]);
     wrapped.copy_from_slice(&file[WRAPPED_DEK..PAYLOAD_NONCE]);
-    let kek_key = Aes256GcmKey::new(&kek.0).map_err(|_| EnvelopeError::Crypto)?;
+    let kek_key = Key::new(
+        maknae_crypto::admitted(),
+        AeadAlgorithm::Aes256Gcm,
+        &kek.0[..],
+    )
+    .map_err(|_| EnvelopeError::Crypto)?;
     let dek = kek_key
         .open_in_place(&nonce(WRAP_NONCE), &file[..PREFIX_LEN], &mut wrapped[..])
         .map_err(|e| match e {
@@ -129,7 +143,8 @@ pub fn open(file: &[u8], kek: &WrappingKey) -> Result<Zeroizing<Vec<u8>>, Envelo
     let dek: &[u8; KEY_LEN] = (&*dek).try_into().map_err(|_| EnvelopeError::Crypto)?;
 
     let mut body = Zeroizing::new(file[HEADER_LEN..].to_vec());
-    let dek_key = Aes256GcmKey::new(dek).map_err(|_| EnvelopeError::Crypto)?;
+    let dek_key = Key::new(maknae_crypto::admitted(), AeadAlgorithm::Aes256Gcm, dek)
+        .map_err(|_| EnvelopeError::Crypto)?;
     let plain_len = dek_key
         .open_in_place(&nonce(PAYLOAD_NONCE), &file[..PAYLOAD_NONCE], &mut body[..])
         .map_err(|e| match e {
@@ -142,7 +157,7 @@ pub fn open(file: &[u8], kek: &WrappingKey) -> Result<Zeroizing<Vec<u8>>, Envelo
 }
 
 pub fn ciphertext_digest(file: &[u8]) -> [u8; 32] {
-    maknae_crypto::digest::sha256(file)
+    maknae_crypto::sha256(file)
 }
 
 #[cfg(test)]

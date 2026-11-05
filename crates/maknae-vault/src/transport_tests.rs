@@ -469,10 +469,8 @@ fn pki() -> Pki {
 fn offering(
     groups: &[maknae_crypto::KxGroup],
 ) -> Arc<maknae_crypto::rustls::crypto::CryptoProvider> {
-    let p = maknae_crypto::tls::Policy {
-        kx_groups: groups.to_vec(),
-        ..maknae_crypto::policy().unwrap().tls.clone()
-    };
+    let mut p = maknae_crypto::policy().unwrap().tls.clone();
+    p.kx_groups = groups.to_vec();
     Arc::new(maknae_crypto::tls::crypto_provider(&p).unwrap())
 }
 

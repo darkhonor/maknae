@@ -3888,7 +3888,7 @@ impl GraphInputs {
     ) -> Result<Self, StoreError> {
         let vocabulary = crate::vocabulary::kernel_vocabulary(label)
             .map_err(|e| StoreError::Identity(e.to_string()))?;
-        let sections = source.section_digests(maknae_crypto::digest::sha256);
+        let sections = source.section_digests(maknae_crypto::sha256);
         let identity = source.identity_layer(label, sections.get("bindings").copied());
         let section = maknae_config::Section::of(source.bindings()).canonical();
         Ok(GraphInputs {
@@ -9199,7 +9199,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             .source
             .with_bindings(maknae_config::Bindings::from_section(&live))
             .unwrap();
-        let digests = edited.section_digests(maknae_crypto::digest::sha256);
+        let digests = edited.section_digests(maknae_crypto::sha256);
         let layer = edited.identity_layer("UNCLASSIFIED", digests.get("bindings").copied());
         let stored = maknae_graph::identity::extract(&m.booted.graph).unwrap();
         let sync = maknae_graph::sync::SyncBase {
@@ -9276,7 +9276,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             mirror.header.base,
             format!(
                 "sha256:{}",
-                lower_hex(&maknae_crypto::digest::sha256(ROOT_SECTION.as_bytes()))
+                lower_hex(&maknae_crypto::sha256(ROOT_SECTION.as_bytes()))
             )
         );
         assert_eq!(mirror.section.canonical(), ROOT_SECTION);
@@ -11896,7 +11896,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
                 sections: sections.clone().into_inner(),
                 system: "US".into(),
                 ceiling: "UNCLASSIFIED".into(),
-                sha256: maknae_crypto::digest::sha256(br#"{"core":"{}"}"#),
+                sha256: maknae_crypto::sha256(br#"{"core":"{}"}"#),
                 moved_from: None,
             }
         );
@@ -12023,7 +12023,7 @@ mod home_resolution_tests {
                     regular_file: true,
                     max_bytes: None,
                 },
-                maknae_crypto::digest::sha256,
+                maknae_crypto::sha256,
             )
             .unwrap(),
             crate::CeilingAuthorizer::new(maknae_config::Ceiling::baseline_for(us), us),
@@ -12146,7 +12146,7 @@ mod admission_bound_tests {
                     regular_file: true,
                     max_bytes: None,
                 },
-                maknae_crypto::digest::sha256,
+                maknae_crypto::sha256,
             )
             .unwrap(),
             crate::CeilingAuthorizer::new(maknae_config::Ceiling::baseline_for(us), us),
@@ -12760,7 +12760,7 @@ mod reload_fixture {
 
     fn file_sha(path: &Path) -> String {
         std::fs::read(path)
-            .map(|b| lower_hex(&maknae_crypto::digest::sha256(&b)))
+            .map(|b| lower_hex(&maknae_crypto::sha256(&b)))
             .unwrap_or_default()
     }
 
@@ -13615,13 +13615,9 @@ mod reload_fixture {
         .unwrap();
         let booted_released = booted.released.len();
         let graph = Arc::new(booted.graph);
-        let mut baseline = HermeticAuthorizer::new(
-            paths,
-            principal,
-            requirement(),
-            maknae_crypto::digest::sha256,
-        )
-        .unwrap();
+        let mut baseline =
+            HermeticAuthorizer::new(paths, principal, requirement(), maknae_crypto::sha256)
+                .unwrap();
         if let Some(gate) = &opts.gate {
             baseline.park_evaluations(Arc::clone(gate));
         }
@@ -13633,7 +13629,7 @@ mod reload_fixture {
                 Arc::clone(&graph),
                 &source,
                 &inputs.vocabulary.full,
-                &source.section_digests(maknae_crypto::digest::sha256),
+                &source.section_digests(maknae_crypto::sha256),
             )
             .unwrap(),
         ));
@@ -15837,7 +15833,7 @@ mod reload_tests {
         let policy = fx
             .baseline()
             .snapshot()
-            .policy_sha256(maknae_crypto::digest::sha256);
+            .policy_sha256(maknae_crypto::sha256);
         fx.reloader
             .sink
             .fail_identity
@@ -15853,7 +15849,7 @@ mod reload_tests {
         assert_eq!(
             fx.baseline()
                 .snapshot()
-                .policy_sha256(maknae_crypto::digest::sha256),
+                .policy_sha256(maknae_crypto::sha256),
             policy
         );
         assert_eq!(
@@ -15994,7 +15990,7 @@ mod reload_tests {
         let digest = fx
             .baseline()
             .snapshot()
-            .policy_sha256(maknae_crypto::digest::sha256);
+            .policy_sha256(maknae_crypto::sha256);
         fx.write_policy("schema_version: 1\nroles:\n  admin:\n    allow: [admin.status]\n");
         fx.write_bindings("schema_version: 1\nbindings: [\n");
         let got = bounded(fx.reloader.run()).await;
@@ -16006,7 +16002,7 @@ mod reload_tests {
         assert_eq!(
             fx.baseline()
                 .snapshot()
-                .policy_sha256(maknae_crypto::digest::sha256),
+                .policy_sha256(maknae_crypto::sha256),
             digest,
             "the authz.yaml edit made with it is not applied either"
         );
@@ -16060,7 +16056,7 @@ mod reload_tests {
         );
         assert_eq!(
             recs[1].policy_sha256,
-            Some(before.policy_sha256(maknae_crypto::digest::sha256))
+            Some(before.policy_sha256(maknae_crypto::sha256))
         );
         assert!(matches!(
             fx.root_whoami(),
@@ -16166,7 +16162,7 @@ mod reload_tests {
             ["graph.reload", "graph.reload"]
         );
         assert_eq!(o[1].2, "reload applied: revision 1; identity unchanged");
-        let digest = maknae_crypto::digest::sha256;
+        let digest = maknae_crypto::sha256;
         assert_eq!(recs[0].policy_sha256, None);
         assert_eq!(
             recs[1].policy_sha256.as_deref(),

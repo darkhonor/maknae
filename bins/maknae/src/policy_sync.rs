@@ -239,7 +239,7 @@ fn still_as_planned(p: &Planned<'_>, restore: bool) -> Result<(), String> {
     match plan_sync(
         mirror,
         &Section::of(&file),
-        maknae_crypto::digest::sha256,
+        maknae_crypto::sha256,
         CONFIG_DIR,
     ) {
         SyncPlan::Restore { .. }
@@ -329,7 +329,7 @@ pub(crate) fn sync(
         mirror: &mirror,
         unattended: !terminal,
     };
-    match plan_sync(&mirror, &Section::of(&file), maknae_crypto::digest::sha256, CONFIG_DIR) {
+    match plan_sync(&mirror, &Section::of(&file), maknae_crypto::sha256, CONFIG_DIR) {
         SyncPlan::OtherConfigDir { found } => Err(other_config_dir(&found)),
         SyncPlan::NothingToInstall => {
             say(out, "bindings.yaml already holds the mirror; nothing to install")?;
@@ -527,7 +527,7 @@ mod tests {
             &MirrorHeader {
                 revision: 7,
                 config_dir: config_dir.into(),
-                base: base_token(&section(base), maknae_crypto::digest::sha256),
+                base: base_token(&section(base), maknae_crypto::sha256),
                 conflicts: conflicts.iter().cloned().collect(),
             },
             &section(live),

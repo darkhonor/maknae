@@ -559,7 +559,7 @@ why = "re-exports of crypto-profile-awslc4's API, rustls (and rcgen under test-s
 
 [[t3]]
 path = "crates/maknae-crypto/src/policy.rs"
-why = "process-global wiring of the preferred profile: resolve once, install, check the installed default; the decisions are crypto-profile's assert_provider_matches and assert_fips_module, and its error branches are unreachable on a FIPS build. Mutation-tested (not excluded)"
+why = "process-global wiring of the preferred profile: resolve and admit once, install, check the installed default, and the SHA-256 adapter over the admitted profile; the decisions are crypto-profile's assert_provider_matches, assert_fips_module and admission, and its error branches are unreachable on a FIPS build with the pinned crate. Mutation-tested (not excluded)"
 
 [[t3]]
 path = "crates/maknae-vault/src/ca.rs"
@@ -567,7 +567,7 @@ why = "PEM file I/O for the CA-pin loader; fixture-tested for coverage, mutation
 
 [[t3]]
 path = "crates/maknae-vault/src/csr_gen.rs"
-why = "calls maknae_crypto::csr::generate_csr (non-deterministic keygen I/O) and self-checks the result; the pure shape predicates are csr.rs (T1). Mutation-excluded (mutants.toml)"
+why = "calls maknae_crypto::tls::CertificateKey::generate (non-deterministic keygen) and csr::generate_csr, then self-checks the result; the pure shape predicates are csr.rs (T1). Mutation-excluded (mutants.toml)"
 
 [[t3]]
 path = "crates/maknae-vault/src/auth.rs"
