@@ -23,7 +23,7 @@ pub enum RejectReason {
     /// The handshake did not complete within the configured bound.
     HandshakeTimeout,
     /// The peer's leaf carried a plane URI-SAN other than the one expected (the T1
-    /// `verify_plane_uri_san` check — this crate's own decision, not rustls').
+    /// `verify_uri_san` check — this crate's own decision, not rustls').
     WrongPlane,
     /// The peer's leaf was expired / not yet valid.
     ExpiredOrInvalidCert,
@@ -186,8 +186,11 @@ fn peer_uri_san(
     let leaf = peer_certs
         .and_then(|c| c.first())
         .ok_or_else(|| VaultError::Handshake("peer presented no cert".into()))?;
-    crate::verify_plane_uri_san(leaf.as_ref(), expect, dep).map_err(VaultError::PeerIdentity)?;
-    Ok(expect.uri_san(dep))
+    crate::verify_uri_san(
+        leaf.as_ref(),
+        &crate::peer_auth::SanRule::Exact(expect.uri_san(dep)),
+    )
+    .map_err(VaultError::PeerIdentity)
 }
 
 /// Daemon (server) side.

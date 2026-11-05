@@ -41,6 +41,7 @@ mod verify;
 mod wrap;
 // The UDS transport is unix-only (UnixStream / SO_PEERCRED); the pure-rustls layers above
 // (tls/resolver/plane_verify) compile everywhere so the Stage-1 client stays cross-platform.
+mod peer_auth;
 mod peer_identity;
 mod peercred;
 #[cfg(unix)]
@@ -78,6 +79,7 @@ pub use keychain_policy::{
 };
 pub use operator::OperatorClient;
 pub use password_line::{PasswordFeed, PasswordLine};
+pub use peer_auth::{ChannelPeer, PeerAuth, SanRule};
 pub use peer_identity::{creds_match_listener_uid, creds_match_uid, listener_uid_is, peer_uid_is};
 pub use peercred::PeerCreds;
 pub use plane::Plane;
@@ -121,7 +123,7 @@ pub use user_login::{
     MAX_USERNAME_BYTES,
 };
 pub use vault_api::{VaultApi, VAULT_API_TIMEOUT};
-pub use verify::{verify_plane_uri_san, VerifyError};
+pub use verify::{verify_uri_san, VerifyError};
 pub use wrap::{
     aad_parts, kv_data_path, AadParts, KvDataPath, WrapExpectation, WrapLookup, WrappedSecret,
     WrappingToken, MAX_KV_DATA_PATH_BYTES, MAX_WRAP_TTL, USER_KEY_WRAP_TTL,

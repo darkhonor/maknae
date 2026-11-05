@@ -117,6 +117,7 @@ files = [
   # NOT ratchet_cohort). The network/keygen/provider I/O (auth/client/ca)
   # is T3 + excluded from mutation via the workspace-root mutants.toml.
   "crates/maknae-vault/src/verify.rs",
+  "crates/maknae-vault/src/peer_auth.rs",
   "crates/maknae-vault/src/csr.rs",
   "crates/maknae-vault/src/plane.rs",
   "crates/maknae-vault/src/config.rs",
@@ -628,7 +629,7 @@ why = "rustls FIPS config builders (Stage 2); provider/handshake I/O, no live-un
 
 [[t3]]
 path = "crates/maknae-vault/src/plane_verify.rs"
-why = "asymmetric rustls verifier adapter (Stage 2); delegates chain/PoP to WebPki + T1 verify_plane_uri_san"
+why = "asymmetric rustls verifier adapter (Stage 2); delegates chain/PoP to WebPki + T1 verify_uri_san"
 
 [[t3]]
 path = "crates/maknae-vault/src/resolver.rs"

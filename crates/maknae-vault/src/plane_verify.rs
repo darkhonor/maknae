@@ -1,9 +1,10 @@
 //! The asymmetric mTLS peer verifier (Layer 1, T3 adapter over the T1 decision). Chain +
 //! proof-of-possession stay in rustls' trusted primitives; we ADD exactly one thing — the
-//! T1 `verify_plane_uri_san` — after the library says the chain is valid. ASYMMETRIC
+//! T1 `verify_uri_san` — after the library says the chain is valid. ASYMMETRIC
 //! because rustls bakes DNS/IP name-matching into the *server*-cert path but a plane leaf
 //! is URI-SAN-only, so the client side uses the name-free primitives (spec §4.2).
-use crate::{verify_plane_uri_san, CaBundle, Plane, VaultError};
+use crate::peer_auth::SanRule;
+use crate::{verify_uri_san, CaBundle, Plane, VaultError};
 use maknae_crypto::rustls::client::danger::{
     HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
 };
@@ -66,8 +67,11 @@ impl ClientCertVerifier for PlaneClientCertVerifier {
         self.inner
             .verify_client_cert(end_entity, intermediates, now)?;
         // ADD the plane identity decision (T1)
-        verify_plane_uri_san(end_entity.as_ref(), self.expect, &self.deployment_id)
-            .map_err(|e| maknae_crypto::rustls::Error::General(format!("plane URI-SAN: {e:?}")))?;
+        verify_uri_san(
+            end_entity.as_ref(),
+            &SanRule::Exact(self.expect.uri_san(&self.deployment_id)),
+        )
+        .map_err(|e| maknae_crypto::rustls::Error::General(format!("plane URI-SAN: {e:?}")))?;
         Ok(ClientCertVerified::assertion())
     }
     fn verify_tls12_signature(
@@ -135,8 +139,11 @@ impl ServerCertVerifier for PlaneServerCertVerifier {
             now,
             self.provider.signature_verification_algorithms.all,
         )?;
-        verify_plane_uri_san(end_entity.as_ref(), self.expect, &self.deployment_id)
-            .map_err(|e| maknae_crypto::rustls::Error::General(format!("plane URI-SAN: {e:?}")))?;
+        verify_uri_san(
+            end_entity.as_ref(),
+            &SanRule::Exact(self.expect.uri_san(&self.deployment_id)),
+        )
+        .map_err(|e| maknae_crypto::rustls::Error::General(format!("plane URI-SAN: {e:?}")))?;
         Ok(ServerCertVerified::assertion())
     }
     fn verify_tls12_signature(
