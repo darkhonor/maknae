@@ -62,8 +62,7 @@ pub(crate) fn certified_key_from_identity(
     Ok(Arc::new(CertifiedKey::new(chain, key)))
 }
 
-/// Server config: dynamic resolver (fail-closed when empty) + client-auth via the custom
-/// client-cert verifier expecting the peer plane.
+/// Server config: dynamic resolver (fail-closed when empty) + mandatory client auth.
 pub(crate) fn server_config(
     client: &PlaneClient,
     ca: &CaBundle,
@@ -79,7 +78,7 @@ pub(crate) fn server_config(
     Ok(Arc::new(plane_server_config(verifier, resolver)?))
 }
 
-/// Client config: custom server-cert verifier + STATIC client cert (CLI is stateless).
+/// Client config: STATIC client cert (CLI is stateless).
 pub(crate) fn client_config(
     client: &PlaneClient,
     ca: &CaBundle,

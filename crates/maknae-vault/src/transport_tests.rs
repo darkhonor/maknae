@@ -309,6 +309,18 @@ async fn rejects_wrong_plane_client() {
 }
 
 #[tokio::test]
+async fn rejects_wrong_plane_server() {
+    provider();
+    let ca = mk_ca();
+    let (wrong, wkey) = mk_leaf(&ca, "spiffe://d/plane/cli", false);
+    let (cchain, ckey) = mk_leaf(&ca, "spiffe://d/plane/cli", false);
+    let s = server_cfg(wrong, wkey, &cab(&ca), Plane::Cli);
+    let c = client_cfg(cchain, ckey, &cab(&ca), Plane::Kernel, true);
+    let e = handshake(s, c).await.unwrap_err();
+    assert!(e.contains(crate::peer_auth::PLANE_URI_SAN_PREFIX), "{e}");
+}
+
+#[tokio::test]
 async fn rejects_absent_client_cert() {
     provider();
     let ca = mk_ca();
