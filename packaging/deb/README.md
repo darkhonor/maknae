@@ -93,7 +93,7 @@ sudo systemctl enable --now maknaed.service
 sudo systemctl enable --now maknae-egress.socket
 maknae login    # your Vault userpass password, prompted with echo off
 maknae ping     # -> pong
-maknae whoami   # -> maknae://<id>/plane/cli
+maknae whoami   # -> spiffe://<id>/plane/cli
 ```
 
 The packaged `authz.yaml` grants the `admin` role `admin.status`,

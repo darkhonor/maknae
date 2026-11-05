@@ -53,7 +53,7 @@ mod tests {
             let (key_der, csr_pem) = generate_plane_csr(Plane::Kernel, "dev-01", k).unwrap();
             assert!(csr_matches_plane_shape(
                 &csr_pem,
-                "maknae://dev-01/plane/kernel",
+                "spiffe://dev-01/plane/kernel",
                 k
             ));
             let signing = maknae_crypto::tls::load_private_key(

@@ -209,8 +209,8 @@ async fn a_delegated_descriptor_survives_the_assembled_tls_path() {
 
     provider();
     let ca = mk_ca();
-    let (kchain, kkey) = mk_leaf(&ca, "maknae://d/plane/kernel", false);
-    let (cchain, ckey) = mk_leaf(&ca, "maknae://d/plane/cli", false);
+    let (kchain, kkey) = mk_leaf(&ca, "spiffe://d/plane/kernel", false);
+    let (cchain, ckey) = mk_leaf(&ca, "spiffe://d/plane/cli", false);
     let server = server_cfg(kchain, kkey, &cab(&ca), Plane::Cli);
     let client = client_cfg(cchain, ckey, &cab(&ca), Plane::Kernel, true);
 
@@ -270,8 +270,8 @@ async fn a_delegated_descriptor_survives_the_assembled_tls_path() {
 async fn happy_path_mutual_auth() {
     provider();
     let ca = mk_ca();
-    let (kchain, kkey) = mk_leaf(&ca, "maknae://d/plane/kernel", false);
-    let (cchain, ckey) = mk_leaf(&ca, "maknae://d/plane/cli", false);
+    let (kchain, kkey) = mk_leaf(&ca, "spiffe://d/plane/kernel", false);
+    let (cchain, ckey) = mk_leaf(&ca, "spiffe://d/plane/cli", false);
     let s = server_cfg(kchain, kkey, &cab(&ca), Plane::Cli); // daemon=kernel expects cli
     let c = client_cfg(cchain, ckey, &cab(&ca), Plane::Kernel, true); // cli expects kernel
     handshake(s, c).await.expect("mutual auth succeeds");
@@ -281,9 +281,9 @@ async fn happy_path_mutual_auth() {
 async fn rejects_wrong_plane_client() {
     provider();
     let ca = mk_ca();
-    let (kchain, kkey) = mk_leaf(&ca, "maknae://d/plane/kernel", false);
+    let (kchain, kkey) = mk_leaf(&ca, "spiffe://d/plane/kernel", false);
     // CLI presents a KERNEL leaf (wrong plane) — server expects cli → reject.
-    let (wrong, wkey) = mk_leaf(&ca, "maknae://d/plane/kernel", false);
+    let (wrong, wkey) = mk_leaf(&ca, "spiffe://d/plane/kernel", false);
     let s = server_cfg(kchain, kkey, &cab(&ca), Plane::Cli);
     let c = client_cfg(wrong, wkey, &cab(&ca), Plane::Kernel, true);
     assert!(handshake(s, c).await.is_err());
@@ -293,8 +293,8 @@ async fn rejects_wrong_plane_client() {
 async fn rejects_absent_client_cert() {
     provider();
     let ca = mk_ca();
-    let (kchain, kkey) = mk_leaf(&ca, "maknae://d/plane/kernel", false);
-    let (cchain, ckey) = mk_leaf(&ca, "maknae://d/plane/cli", false);
+    let (kchain, kkey) = mk_leaf(&ca, "spiffe://d/plane/kernel", false);
+    let (cchain, ckey) = mk_leaf(&ca, "spiffe://d/plane/cli", false);
     let s = server_cfg(kchain, kkey, &cab(&ca), Plane::Cli);
     let c = client_cfg(cchain, ckey, &cab(&ca), Plane::Kernel, false); // no client cert
     assert!(handshake(s, c).await.is_err());
@@ -304,8 +304,8 @@ async fn rejects_absent_client_cert() {
 async fn rejects_expired_server_leaf() {
     provider();
     let ca = mk_ca();
-    let (kchain, kkey) = mk_leaf(&ca, "maknae://d/plane/kernel", true); // expired
-    let (cchain, ckey) = mk_leaf(&ca, "maknae://d/plane/cli", false);
+    let (kchain, kkey) = mk_leaf(&ca, "spiffe://d/plane/kernel", true); // expired
+    let (cchain, ckey) = mk_leaf(&ca, "spiffe://d/plane/cli", false);
     let s = server_cfg(kchain, kkey, &cab(&ca), Plane::Cli);
     let c = client_cfg(cchain, ckey, &cab(&ca), Plane::Kernel, true);
     assert!(handshake(s, c).await.is_err());
@@ -316,8 +316,8 @@ async fn rejects_foreign_ca() {
     provider();
     let ca = mk_ca();
     let foreign = mk_ca();
-    let (kchain, kkey) = mk_leaf(&foreign, "maknae://d/plane/kernel", false); // foreign-signed
-    let (cchain, ckey) = mk_leaf(&ca, "maknae://d/plane/cli", false);
+    let (kchain, kkey) = mk_leaf(&foreign, "spiffe://d/plane/kernel", false); // foreign-signed
+    let (cchain, ckey) = mk_leaf(&ca, "spiffe://d/plane/cli", false);
     let s = server_cfg(kchain, kkey, &cab(&ca), Plane::Cli);
     let c = client_cfg(cchain, ckey, &cab(&ca), Plane::Kernel, true);
     assert!(handshake(s, c).await.is_err());
@@ -336,8 +336,8 @@ async fn root_only_anchor_with_presented_intermediate() {
         int_der: int.der.clone(),
     };
     // leaves signed by the INTERMEDIATE; mk_leaf presents chain [leaf, int].
-    let (kchain, kkey) = mk_leaf(&int, "maknae://d/plane/kernel", false);
-    let (cchain, ckey) = mk_leaf(&int, "maknae://d/plane/cli", false);
+    let (kchain, kkey) = mk_leaf(&int, "spiffe://d/plane/kernel", false);
+    let (cchain, ckey) = mk_leaf(&int, "spiffe://d/plane/cli", false);
     // Happy: present [leaf, int] → path-builds to the pinned root.
     let s = server_cfg(kchain.clone(), kkey.clone(), &cab, Plane::Cli);
     let c = client_cfg(cchain.clone(), ckey.clone(), &cab, Plane::Kernel, true);
@@ -361,9 +361,9 @@ async fn root_only_anchor_with_presented_intermediate() {
 async fn rejects_extra_san_client() {
     provider();
     let ca = mk_ca();
-    let (kchain, kkey) = mk_leaf(&ca, "maknae://d/plane/kernel", false);
+    let (kchain, kkey) = mk_leaf(&ca, "spiffe://d/plane/kernel", false);
     // CLI leaf carries the correct plane URI PLUS a rogue DNS SAN → rejected (URI-SAN-only).
-    let (cchain, ckey) = mk_leaf_extra_san(&ca, "maknae://d/plane/cli");
+    let (cchain, ckey) = mk_leaf_extra_san(&ca, "spiffe://d/plane/cli");
     let s = server_cfg(kchain, kkey, &cab(&ca), Plane::Cli);
     let c = client_cfg(cchain, ckey, &cab(&ca), Plane::Kernel, true);
     assert!(handshake(s, c).await.is_err());
@@ -399,11 +399,11 @@ mod accept_reject {
     async fn accept_reject_wrong_plane_carries_peer_creds() {
         provider();
         let ca = mk_ca();
-        let (kchain, kkey) = mk_leaf(&ca, "maknae://d/plane/kernel", false);
+        let (kchain, kkey) = mk_leaf(&ca, "spiffe://d/plane/kernel", false);
         // Server (daemon) presents kernel, expects the peer to prove plane == cli.
         let server_cfg = server_cfg(kchain, kkey, &cab(&ca), Plane::Cli);
         // Client presents a KERNEL leaf instead of the expected CLI leaf — wrong plane.
-        let (wrong_chain, wrong_key) = mk_leaf(&ca, "maknae://d/plane/kernel", false);
+        let (wrong_chain, wrong_key) = mk_leaf(&ca, "spiffe://d/plane/kernel", false);
         let client_cfg = client_cfg(wrong_chain, wrong_key, &cab(&ca), Plane::Kernel, true);
 
         let dir = tmp_sock_dir("wrong-plane");
@@ -461,8 +461,8 @@ struct Pki {
 fn pki() -> Pki {
     provider();
     let ca = mk_ca();
-    let kernel = mk_leaf(&ca, "maknae://d/plane/kernel", false);
-    let cli = mk_leaf(&ca, "maknae://d/plane/cli", false);
+    let kernel = mk_leaf(&ca, "spiffe://d/plane/kernel", false);
+    let cli = mk_leaf(&ca, "spiffe://d/plane/cli", false);
     Pki { ca, kernel, cli }
 }
 
@@ -822,8 +822,8 @@ mod plane_key_algorithms {
             let ca = mk_ca_with(alg);
             let seen = mutual_tls(
                 &cab(&ca),
-                mk_leaf_with(&ca, "maknae://d/plane/kernel", false, alg),
-                mk_leaf_with(&ca, "maknae://d/plane/cli", false, alg),
+                mk_leaf_with(&ca, "spiffe://d/plane/kernel", false, alg),
+                mk_leaf_with(&ca, "spiffe://d/plane/cli", false, alg),
             )
             .await
             .unwrap_or_else(|e| panic!("{alg:?}: {e}"));
@@ -852,8 +852,8 @@ mod plane_key_algorithms {
         };
         let seen = mutual_tls(
             &cab,
-            mk_leaf_with(&int, "maknae://d/plane/kernel", false, MLDSA87),
-            mk_leaf_with(&int, "maknae://d/plane/cli", false, MLDSA87),
+            mk_leaf_with(&int, "spiffe://d/plane/kernel", false, MLDSA87),
+            mk_leaf_with(&int, "spiffe://d/plane/cli", false, MLDSA87),
         )
         .await
         .expect("mixed chain");
@@ -873,28 +873,28 @@ mod plane_key_algorithms {
         for alg in PlaneKey::ALL {
             let ca = mk_ca_with(alg);
             let foreign = mk_ca_with(alg);
-            let kernel = || mk_leaf_with(&ca, "maknae://d/plane/kernel", false, alg);
-            let cli = || mk_leaf_with(&ca, "maknae://d/plane/cli", false, alg);
+            let kernel = || mk_leaf_with(&ca, "spiffe://d/plane/kernel", false, alg);
+            let cli = || mk_leaf_with(&ca, "spiffe://d/plane/cli", false, alg);
             let cases = [
                 (
                     "wrong plane",
                     kernel(),
-                    mk_leaf_with(&ca, "maknae://d/plane/kernel", false, alg),
+                    mk_leaf_with(&ca, "spiffe://d/plane/kernel", false, alg),
                 ),
                 (
                     "expired server leaf",
-                    mk_leaf_with(&ca, "maknae://d/plane/kernel", true, alg),
+                    mk_leaf_with(&ca, "spiffe://d/plane/kernel", true, alg),
                     cli(),
                 ),
                 (
                     "foreign CA",
-                    mk_leaf_with(&foreign, "maknae://d/plane/kernel", false, alg),
+                    mk_leaf_with(&foreign, "spiffe://d/plane/kernel", false, alg),
                     cli(),
                 ),
                 (
                     "extra SAN",
                     kernel(),
-                    mk_leaf_extra_san_with(&ca, "maknae://d/plane/cli", alg),
+                    mk_leaf_extra_san_with(&ca, "spiffe://d/plane/cli", alg),
                 ),
             ];
             for (what, k, c) in cases {

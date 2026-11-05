@@ -2125,7 +2125,7 @@ mod tests {
         let r = Response {
             protocol_version: PROTOCOL_VERSION,
             result: RespResult::Ok(Payload::Whoami(WhoamiView {
-                peer_plane_uri_san: "maknae://d/plane/cli".into(),
+                peer_plane_uri_san: "spiffe://d/plane/cli".into(),
                 peer_uid: 501,
             })),
         };

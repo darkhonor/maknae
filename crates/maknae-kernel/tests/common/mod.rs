@@ -586,7 +586,7 @@ impl Fixture {
         let turn = verb.clone();
         let served = maknae_kernel::handle_with_attempt_caps(
             server,
-            "maknae://d/plane/cli".into(),
+            "spiffe://d/plane/cli".into(),
             self.peer_uid,
             true,
             self.peer_user.clone(),

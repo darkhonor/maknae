@@ -64,7 +64,7 @@ async fn plane_to_plane_roundtrip() {
         // Deployment-agnostic: assert the plane suffix, not a hard-coded deployment_id.
         let san = s.peer_uri_san();
         assert!(
-            san.starts_with("maknae://") && san.ends_with("/plane/cli"),
+            san.starts_with("spiffe://") && san.ends_with("/plane/cli"),
             "kernel must see the cli plane URI-SAN, got {san}"
         );
         let mut buf = [0u8; 5];
@@ -78,7 +78,7 @@ async fn plane_to_plane_roundtrip() {
         .expect("connect");
     let csan = c.peer_uri_san();
     assert!(
-        csan.starts_with("maknae://") && csan.ends_with("/plane/kernel"),
+        csan.starts_with("spiffe://") && csan.ends_with("/plane/kernel"),
         "cli must see the kernel plane URI-SAN, got {csan}"
     );
     c.write_all(b"hello").await.unwrap();

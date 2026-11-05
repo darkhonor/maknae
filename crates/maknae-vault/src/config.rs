@@ -267,12 +267,16 @@ pub(crate) fn get_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     }
 }
 
-/// `deployment_id` charset guard — non-empty, `^[A-Za-z0-9._-]+$`.
+/// `deployment_id` is the SPIFFE trust domain: at most 255 bytes of `[a-z0-9._-]`,
+/// at least one `[a-z0-9]`.
 pub fn validate_deployment_id(id: &str) -> Result<(), VaultError> {
-    let ok = !id.is_empty()
+    let ok = id.len() <= 255
         && id
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+            .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-'))
+        && id
+            .bytes()
+            .any(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
     if ok {
         Ok(())
     } else {
@@ -567,12 +571,33 @@ mod tests {
     }
 
     #[test]
-    fn validate_deployment_id_guard() {
-        assert!(validate_deployment_id("maknae-dev-01").is_ok());
-        assert!(validate_deployment_id("*").is_err());
-        assert!(validate_deployment_id("a/b").is_err());
-        assert!(validate_deployment_id("a b").is_err());
-        assert!(validate_deployment_id("").is_err());
+    fn deployment_id_is_a_spiffe_trust_domain() {
+        let accepted = ["dev-01", "maknae-dev-01", "a.b_c-9", &"a".repeat(255)];
+        for id in accepted {
+            assert!(
+                validate_deployment_id(id).is_ok(),
+                "{id:?} must be accepted"
+            );
+        }
+        let refused = [
+            "",
+            "Dev-01",
+            "dev 01",
+            "dev/01",
+            "dev*",
+            "*",
+            ".",
+            "..",
+            "-",
+            "_",
+            &"a".repeat(256),
+        ];
+        for id in refused {
+            assert!(
+                validate_deployment_id(id).is_err(),
+                "{id:?} must be refused"
+            );
+        }
     }
 
     // ---- load_vault_config fixture tests (tempdir) --------------------------

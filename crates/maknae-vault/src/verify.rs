@@ -20,7 +20,7 @@ pub enum VerifyError {
     ParseError,
 }
 
-/// Assert the peer leaf carries EXACTLY `maknae://<deployment_id>/plane/<expect>`
+/// Assert the peer leaf carries EXACTLY `spiffe://<deployment_id>/plane/<expect>`
 /// and nothing else. Fail-closed on any deviation.
 pub fn verify_plane_uri_san(
     peer_cert_der: &[u8],
@@ -79,13 +79,13 @@ mod tests {
 
     #[test]
     fn accepts_exact_plane_san() {
-        let der = leaf_with_uri_sans(&["maknae://dev-01/plane/kernel"]);
+        let der = leaf_with_uri_sans(&["spiffe://dev-01/plane/kernel"]);
         assert!(verify_plane_uri_san(&der, Plane::Kernel, "dev-01").is_ok());
     }
 
     #[test]
     fn rejects_wrong_plane() {
-        let der = leaf_with_uri_sans(&["maknae://dev-01/plane/cli"]);
+        let der = leaf_with_uri_sans(&["spiffe://dev-01/plane/cli"]);
         assert!(matches!(
             verify_plane_uri_san(&der, Plane::Kernel, "dev-01"),
             Err(VerifyError::WrongSan { .. })
@@ -94,7 +94,7 @@ mod tests {
 
     #[test]
     fn rejects_wrong_deployment_id() {
-        let der = leaf_with_uri_sans(&["maknae://other/plane/kernel"]);
+        let der = leaf_with_uri_sans(&["spiffe://other/plane/kernel"]);
         assert!(matches!(
             verify_plane_uri_san(&der, Plane::Kernel, "dev-01"),
             Err(VerifyError::WrongSan { .. })
@@ -134,7 +134,7 @@ mod tests {
     fn rejects_plane_uri_plus_rogue_dns() {
         // The expected plane URI PLUS a rogue DNS SAN — the P1 codex caught: must reject.
         let der = cert_with_sans(vec![
-            rcgen::SanType::URI("maknae://dev-01/plane/kernel".try_into().unwrap()),
+            rcgen::SanType::URI("spiffe://dev-01/plane/kernel".try_into().unwrap()),
             rcgen::SanType::DnsName("evil.example".try_into().unwrap()),
         ]);
         assert_eq!(
@@ -146,7 +146,7 @@ mod tests {
     #[test]
     fn rejects_extra_sans() {
         let der =
-            leaf_with_uri_sans(&["maknae://dev-01/plane/kernel", "maknae://dev-01/plane/cli"]);
+            leaf_with_uri_sans(&["spiffe://dev-01/plane/kernel", "spiffe://dev-01/plane/cli"]);
         assert_eq!(
             verify_plane_uri_san(&der, Plane::Kernel, "dev-01"),
             Err(VerifyError::ExtraSans)

@@ -11948,7 +11948,7 @@ mod home_resolution_tests {
         let backend_name = Arc::new(maknae_security::guarded_backend_name(&*authorizer));
         handle(
             server,
-            "maknae://d/plane/cli".to_string(),
+            "spiffe://d/plane/cli".to_string(),
             uid,
             true,
             Some(user.to_string()),
@@ -12171,7 +12171,7 @@ mod admission_bound_tests {
             Duration::from_secs(120),
             handle(
                 server,
-                "maknae://d/plane/cli".to_string(),
+                "spiffe://d/plane/cli".to_string(),
                 uid,
                 in_group,
                 Some("operator".to_string()),
@@ -18839,7 +18839,7 @@ mod unencodable_tests {
             "h",
             "s",
             1000,
-            "maknae://d/plane/cli",
+            "spiffe://d/plane/cli",
             Some("alice"),
             Some("user"),
             Some(&rule),

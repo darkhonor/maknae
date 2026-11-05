@@ -10,7 +10,7 @@
 
 core:
   # Deployment identity — the branding baked into every plane leaf's URI SAN
-  # (maknae://<deployment_id>/plane/*). Set by enroll (--deployment-id).
+  # (spiffe://<deployment_id>/plane/*). Set by enroll (--deployment-id).
   deployment_id: REPLACE_ME
 
 vault:

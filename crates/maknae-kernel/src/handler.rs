@@ -833,10 +833,10 @@ mod tests {
 
     #[test]
     fn whoami_view_carries_exact_peer_facts() {
-        match build_whoami("maknae://d/plane/cli", 501) {
+        match build_whoami("spiffe://d/plane/cli", 501) {
             Payload::Whoami(w) => {
                 assert_eq!(w.peer_uid, 501);
-                assert_eq!(w.peer_plane_uri_san, "maknae://d/plane/cli");
+                assert_eq!(w.peer_plane_uri_san, "spiffe://d/plane/cli");
             }
             other => panic!("expected Payload::Whoami, got {other:?}"),
         }
@@ -845,7 +845,7 @@ mod tests {
     #[test]
     fn build_whoami_is_not_pong() {
         // A mutant returning Payload::Pong must fail.
-        assert_ne!(build_whoami("maknae://d/plane/cli", 1), Payload::Pong);
+        assert_ne!(build_whoami("spiffe://d/plane/cli", 1), Payload::Pong);
     }
     // ---- verb_to_action (T1: arm-swap killers via pairwise ne) ----
 

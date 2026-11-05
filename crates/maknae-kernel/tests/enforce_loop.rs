@@ -281,7 +281,7 @@ where
     let backend_name = Arc::new(maknae_security::guarded_backend_name(&*authorizer));
     let task = tokio::spawn(maknae_kernel::handle(
         server,
-        "maknae://d/plane/cli".to_string(),
+        "spiffe://d/plane/cli".to_string(),
         peer_uid,
         true,
         None,
@@ -445,7 +445,7 @@ where
     let backend_name = Arc::new(maknae_security::guarded_backend_name(&*authorizer));
     maknae_kernel::handle(
         server,
-        "maknae://d/plane/cli".to_string(),
+        "spiffe://d/plane/cli".to_string(),
         peer_uid,
         true,
         None,
@@ -3698,7 +3698,7 @@ async fn drive_baseline(
     let backend_name = Arc::new(maknae_security::guarded_backend_name(&*authorizer));
     maknae_kernel::handle(
         server,
-        "maknae://d/plane/cli".to_string(),
+        "spiffe://d/plane/cli".to_string(),
         nix::unistd::geteuid().as_raw(),
         true,
         None,

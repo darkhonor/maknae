@@ -495,7 +495,10 @@ pub struct EnrollArgs {
 impl EnrollArgs {
     fn host_required(&self) -> Result<(&str, &str), EnrollError> {
         match (&self.vault_addr, &self.deployment_id) {
-            (Some(addr), Some(id)) => Ok((addr, id)),
+            (Some(addr), Some(id)) => {
+                maknae_vault::validate_deployment_id(id).map_err(EnrollError::Vault)?;
+                Ok((addr, id))
+            }
             _ => Err(EnrollError::State(
                 "host enrollment needs --vault-addr and --deployment-id".to_string(),
             )),
@@ -3251,6 +3254,14 @@ mod tests {
         let mut a = default_args();
         a.deployment_id = None;
         assert!(matches!(a.host_required(), Err(EnrollError::State(_))));
+        let mut a = default_args();
+        a.deployment_id = Some("Dev*".to_string());
+        assert!(matches!(
+            a.host_required(),
+            Err(EnrollError::Vault(
+                maknae_vault::VaultError::InvalidDeploymentId(_)
+            ))
+        ));
     }
 
     // ---- YAML content builders ---------------------------------------------

@@ -8,7 +8,7 @@ per implementation stage.
 ## Chapter 1 — Mint a plane cert (`maknae-vault` Stage 1)
 
 Prove the plane-cert client authenticates to your Vault and mints a memory-only
-`maknae://<deployment_id>/plane/kernel` leaf of the `vault.plane_key` algorithm (ML-DSA-87 by default). This is the first live milestone;
+`spiffe://<deployment_id>/plane/kernel` leaf of the `vault.plane_key` algorithm (ML-DSA-87 by default). This is the first live milestone;
 the daemon + CLI round-trip arrives in later stages.
 
 ### Prerequisites
@@ -90,7 +90,7 @@ The client trims surrounding whitespace from the file, so a trailing newline is 
 cargo test -p maknae-vault --test live_smoke -- --ignored --nocapture
 ```
 
-Expected: `LIVE SMOKE OK: minted maknae://<deployment_id>/plane/kernel (ml-dsa-87), revoked on shutdown` (the configured `vault.plane_key`).
+Expected: `LIVE SMOKE OK: minted spiffe://<deployment_id>/plane/kernel (ml-dsa-87), revoked on shutdown` (the configured `vault.plane_key`).
 
 ### What it proves
 
@@ -104,7 +104,7 @@ Expected: `LIVE SMOKE OK: minted maknae://<deployment_id>/plane/kernel (ml-dsa-8
   the login does not consume it.
 - The CSR is empty-subject, URI-SAN-only, and of exactly the `vault.plane_key` algorithm (checked by
   algorithm identifier); the leaf's only SAN is
-  `maknae://<deployment_id>/plane/kernel` (self-checked in `mint()`).
+  `spiffe://<deployment_id>/plane/kernel` (self-checked in `mint()`).
 - The leaf + key are held **memory-only** and the token is revoked on shutdown.
 
 ### Teardown
@@ -118,7 +118,7 @@ remove `~/.maknae/maknaed-secret-id` when you are done with the dev dir.
 ## Chapter 2 — Plane-to-plane mTLS (`maknae-vault` Stage 2)
 
 Prove the two planes establish a **mutually-authenticated TLS 1.3 channel over a local
-Unix domain socket**, each verifying the peer's `maknae://<deployment_id>/plane/<other>`
+Unix domain socket**, each verifying the peer's `spiffe://<deployment_id>/plane/<other>`
 URI-SAN, and the daemon captures the peer's kernel credentials. This is the second live
 milestone (the transport; the daemon run-loop + CLI arrive in Stage 3).
 
@@ -170,7 +170,7 @@ Expected: `LIVE TRANSPORT OK: kernel<->cli mTLS + peer-creds round-trip over UDS
 
 - **Mutual mTLS with plane-URI-SAN identity** — each side presents its Vault-minted
   `vault.plane_key` leaf and verifies the peer's leaf carries **exactly** the expected
-  `maknae://<deployment_id>/plane/{kernel,cli}` URI-SAN (the T1 verifier), over TLS 1.3 on
+  `spiffe://<deployment_id>/plane/{kernel,cli}` URI-SAN (the T1 verifier), over TLS 1.3 on
   the aws-lc-rs FIPS provider, with ML-KEM-1024 key exchange (both ends are Maknae's).
 - **Peer-cred capture** — the daemon reads the connecting uid (+ pid) from the kernel
   (`SO_PEERCRED` on Linux, `LOCAL_PEERCRED`+`LOCAL_PEERPID` on macOS). The transport
@@ -343,7 +343,7 @@ $ maknae ping
 pong
 
 $ maknae whoami
-maknae://<deployment_id>/plane/cli uid=<your uid>
+spiffe://<deployment_id>/plane/cli uid=<your uid>
 ```
 
 The `admin.*` subcommands are reachable from the same CLI —
@@ -447,7 +447,7 @@ may be present in the JSONL but is not confirmed durable (the marker's hint is
 count of degraded emissions is the signal your enclave should alert on.
 
 ```json
-{"action":"liveness.ping","au3_1":{},"event":"request","integrity":{"prev_hash":null,"sig":null},"outcome":{"posture":"authorized","reason":"authorized","result":"permit"},"seq":2,"session_id":...,"source":{"gid":null,"pid":null,"plane_uri_san":"maknae://<deployment_id>/plane/cli","uid":<your uid>},"subject":{"plane_uri_san":"maknae://<deployment_id>/plane/cli","role":"user","user":"<your login>"},"ts":"...","where":{"component":"kernel","host":"maknaed","socket":"/run/maknae/maknaed.sock"}}
+{"action":"liveness.ping","au3_1":{},"event":"request","integrity":{"prev_hash":null,"sig":null},"outcome":{"posture":"authorized","reason":"authorized","result":"permit"},"seq":2,"session_id":...,"source":{"gid":null,"pid":null,"plane_uri_san":"spiffe://<deployment_id>/plane/cli","uid":<your uid>},"subject":{"plane_uri_san":"spiffe://<deployment_id>/plane/cli","role":"user","user":"<your login>"},"ts":"...","where":{"component":"kernel","host":"maknaed","socket":"/run/maknae/maknaed.sock"}}
 ```
 
 A **deny** record (a non-enrolled in-group uid running any verb, or a read of a
@@ -529,7 +529,7 @@ destinations:                # #172: per-role egress allowlist for session.promp
 
 ### What it proves
 
-- **mTLS** — the CLI's Vault-minted `maknae://<deployment_id>/plane/cli` leaf and the
+- **mTLS** — the CLI's Vault-minted `spiffe://<deployment_id>/plane/cli` leaf and the
   daemon's `.../plane/kernel` leaf completed a real TLS 1.3 handshake and each verified
   the other's URI-SAN (Chapter 2's proof, now exercised through the full daemon rather
   than the loopback smoke test).

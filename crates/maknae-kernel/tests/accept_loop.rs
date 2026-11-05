@@ -238,7 +238,7 @@ async fn cert_half_rejection_audits() {
             peer_creds: Some(creds(1001)),
             reason: RejectReason::WrongPlane,
         }),
-        ok_conn("maknae://d/plane/cli", 1002),
+        ok_conn("spiffe://d/plane/cli", 1002),
     ];
     let recs = drive(script, cfg_with(64, 150)).await;
 
@@ -270,8 +270,8 @@ async fn at_capacity_fast_closes() {
     // while the permit is held → at-capacity fast-close + audit.
     let (client1, server1) = tokio::io::duplex(1024);
     let script = vec![
-        Scripted::Ok(server1, "maknae://d/plane/cli".to_string(), 2001),
-        ok_conn("maknae://d/plane/cli", 2002),
+        Scripted::Ok(server1, "spiffe://d/plane/cli".to_string(), 2001),
+        ok_conn("spiffe://d/plane/cli", 2002),
     ];
     // read_timeout_ms = 1000 so the first handler keeps the permit long enough.
     let recs = drive(script, cfg_with(1, 1000)).await;
@@ -295,7 +295,7 @@ async fn handshake_timeout_audits() {
             peer_creds: Some(creds(3001)),
             reason: RejectReason::HandshakeTimeout,
         }),
-        ok_conn("maknae://d/plane/cli", 3002),
+        ok_conn("spiffe://d/plane/cli", 3002),
     ];
     let recs = drive(script, cfg_with(64, 150)).await;
 
@@ -330,10 +330,10 @@ async fn stalled_handshake_does_not_block_next_connection() {
         Scripted::Stall(
             Duration::from_secs(30),
             a_server,
-            "maknae://d/plane/cli".to_string(),
+            "spiffe://d/plane/cli".to_string(),
             7001,
         ),
-        ok_conn("maknae://d/plane/cli", 7002),
+        ok_conn("spiffe://d/plane/cli", 7002),
     ];
 
     let emit = RecEmit::new();
@@ -427,11 +427,11 @@ async fn at_capacity_audit_does_not_block_accept_loop() {
     let (_c1, server1) = tokio::io::duplex(1024); // keep peer end open so handler holds the permit
     let mut script = vec![Scripted::Ok(
         server1,
-        "maknae://d/plane/cli".to_string(),
+        "spiffe://d/plane/cli".to_string(),
         9000,
     )];
     for i in 0..8 {
-        script.push(ok_conn("maknae://d/plane/cli", 9001 + i));
+        script.push(ok_conn("spiffe://d/plane/cli", 9001 + i));
     }
     let n_items = script.len();
 
@@ -524,11 +524,11 @@ async fn every_at_capacity_refusal_is_recorded_or_counted() {
     let (_c1, server1) = tokio::io::duplex(1024);
     let mut script = vec![Scripted::Ok(
         server1,
-        "maknae://d/plane/cli".to_string(),
+        "spiffe://d/plane/cli".to_string(),
         9000,
     )];
     for i in 0..REFUSED {
-        script.push(ok_conn("maknae://d/plane/cli", 10_000 + i as u32));
+        script.push(ok_conn("spiffe://d/plane/cli", 10_000 + i as u32));
     }
     let emit = SlowEmit::new(Duration::from_millis(10));
     let acceptor = FakeAccept::new(script);
@@ -732,7 +732,7 @@ async fn the_record_carries_the_username_even_when_the_group_lookup_fails() {
         eprintln!("SKIP: euid {me} does not resolve to a user on this host");
         return;
     };
-    let recs = drive(vec![ok_conn("maknae://d/plane/cli", me)], cfg_with(8, 500)).await;
+    let recs = drive(vec![ok_conn("spiffe://d/plane/cli", me)], cfg_with(8, 500)).await;
     let conn = recs
         .iter()
         .find(|r| r.event == "connection")
@@ -757,7 +757,7 @@ async fn the_record_carries_the_username_even_when_the_group_lookup_fails() {
 #[tokio::test]
 async fn an_unresolvable_uid_carries_no_username_and_no_role() {
     let recs = drive(
-        vec![ok_conn("maknae://d/plane/cli", 999_999)],
+        vec![ok_conn("spiffe://d/plane/cli", 999_999)],
         cfg_with(8, 500),
     )
     .await;
@@ -775,7 +775,7 @@ const DRAINING: &str = "draining to apply an accepted baseline";
 async fn a_connection_during_the_drain_is_closed_unserved() {
     let (_tx, begun) = tokio::sync::watch::channel(maknae_kernel::Drain::Begun);
     let recs = drive_with(
-        vec![ok_conn("maknae://d/plane/cli", 1002)],
+        vec![ok_conn("spiffe://d/plane/cli", 1002)],
         cfg_with(64, 150),
         begun,
     )
@@ -799,7 +799,7 @@ async fn a_connection_during_the_drain_is_closed_unserved() {
     );
 
     let served = drive(
-        vec![ok_conn("maknae://d/plane/cli", 1002)],
+        vec![ok_conn("spiffe://d/plane/cli", 1002)],
         cfg_with(64, 150),
     )
     .await;

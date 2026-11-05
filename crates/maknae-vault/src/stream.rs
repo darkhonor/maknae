@@ -113,7 +113,7 @@ pub struct AuthenticatedStream {
 }
 
 impl AuthenticatedStream {
-    /// The peer's verified plane URI-SAN (`maknae://<dep>/plane/<peer>`).
+    /// The peer's verified plane URI-SAN (`spiffe://<dep>/plane/<peer>`).
     pub fn peer_uri_san(&self) -> &str {
         &self.peer_uri_san
     }

@@ -229,12 +229,12 @@ mod tests {
         let now = UnixTime::now();
         let ca_int = CertificateDer::from(ca.der.clone());
         // Correct plane (kernel) accepted:
-        let kernel = CertificateDer::from(mk_leaf(&ca, "maknae://d/plane/kernel"));
+        let kernel = CertificateDer::from(mk_leaf(&ca, "spiffe://d/plane/kernel"));
         assert!(v
             .verify_server_cert(&kernel, std::slice::from_ref(&ca_int), &name, &[], now)
             .is_ok());
         // Wrong plane (cli) rejected:
-        let cli = CertificateDer::from(mk_leaf(&ca, "maknae://d/plane/cli"));
+        let cli = CertificateDer::from(mk_leaf(&ca, "spiffe://d/plane/cli"));
         assert!(v
             .verify_server_cert(&cli, std::slice::from_ref(&ca_int), &name, &[], now)
             .is_err());
