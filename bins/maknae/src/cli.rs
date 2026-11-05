@@ -795,6 +795,13 @@ fn subject_table(entries: &[maknae_proto::RoleBindingView]) -> Vec<String> {
         .collect()
 }
 
+pub fn whoami_line(w: &maknae_proto::WhoamiView) -> String {
+    match &w.peer_plane_uri_san {
+        Some(san) => format!("{san} uid={}", w.peer_uid),
+        None => format!("uid={}", w.peer_uid),
+    }
+}
+
 /// Print the successful `payload` IFF its variant matches the requested `verb`
 /// (`Ping`→`Pong`, `Whoami`→`Whoami(_)`). A mismatched variant means the daemon
 /// answered a different question than we asked — a protocol error: return `Err`
@@ -806,7 +813,7 @@ fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(), String> {
             Ok(())
         }
         (Verb::Whoami, Payload::Whoami(w)) => {
-            println!("{} uid={}", w.peer_plane_uri_san, w.peer_uid);
+            println!("{}", whoami_line(&w));
             Ok(())
         }
         (Verb::AdminStatus, Payload::Status(s)) => {
@@ -1767,7 +1774,7 @@ mod tests {
     #[test]
     fn whoami_accepts_whoami_payload() {
         let w = maknae_proto::WhoamiView {
-            peer_plane_uri_san: "urn:maknae:plane:cli".into(),
+            peer_plane_uri_san: None,
             peer_uid: 1000,
         };
         assert!(print_payload_for_verb(Verb::Whoami, Payload::Whoami(w)).is_ok());
@@ -1792,7 +1799,7 @@ mod tests {
         let e = print_payload_for_verb(
             release,
             Payload::Whoami(maknae_proto::WhoamiView {
-                peer_plane_uri_san: "urn:maknae:plane:cli".into(),
+                peer_plane_uri_san: None,
                 peer_uid: 1000,
             }),
         )
@@ -1819,6 +1826,17 @@ mod tests {
     }
 
     #[test]
+    fn whoami_line_with_no_san_is_the_uid_alone() {
+        let mut w = maknae_proto::WhoamiView {
+            peer_plane_uri_san: None,
+            peer_uid: 1000,
+        };
+        assert_eq!(whoami_line(&w), "uid=1000");
+        w.peer_plane_uri_san = Some("spiffe://d/plane/cli".into());
+        assert_eq!(whoami_line(&w), "spiffe://d/plane/cli uid=1000");
+    }
+
+    #[test]
     fn whoami_rejects_pong_payload() {
         // The daemon answered a `ping` question for our `whoami` — a protocol error.
         assert!(print_payload_for_verb(Verb::Whoami, Payload::Pong).is_err());
@@ -1827,7 +1845,7 @@ mod tests {
     #[test]
     fn ping_rejects_whoami_payload() {
         let w = maknae_proto::WhoamiView {
-            peer_plane_uri_san: "urn:maknae:plane:cli".into(),
+            peer_plane_uri_san: None,
             peer_uid: 1000,
         };
         assert!(print_payload_for_verb(Verb::Ping, Payload::Whoami(w)).is_err());

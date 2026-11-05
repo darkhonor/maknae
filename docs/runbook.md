@@ -537,7 +537,8 @@ destinations:                # #172: per-role egress allowlist for session.promp
   (`SO_PEERCRED`/`LOCAL_PEERCRED`) and it is exactly what `maknae whoami` echoes back —
   proof the kernel-verified fact, not a client-asserted one, is what's in the response.
 - **Group ADMISSION** — you are in `maknae` (step 1); `authorize_connection` permits the
-  connection on `(cert_verified=true, uid_in_group=true)`. Removing yourself from the
+  connection on `(channel_authenticated=true, admitted=true)`, where `admitted` is the
+  client class's admission rule: `maknae`-group membership. Removing yourself from the
   group (and starting a fresh `ssh` session so group membership re-resolves) turns the
   same commands into a denied connection — an audited `deny`/`unauthorized` record, no
   response, non-zero CLI exit. Admission is the TRANSPORT half.

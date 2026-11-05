@@ -7,7 +7,7 @@ use std::process::ExitCode;
 
 use crate::blocking_guard::BLOCKING_OPERATION_TIMEOUT;
 use maknae_proto::{Payload, Verb, WhoamiView};
-use maknae_vault::VaultError;
+use maknae_vault::{ChannelPeer, VaultError};
 
 /// What a request's verb resolves to. Carries NO peer facts: `WhoamiRequested` says
 /// only "the peer asked who-am-I"; the whoami *view* is built separately from the
@@ -125,10 +125,17 @@ pub fn dispatch_verb(verb: &Verb) -> Dispatch {
     }
 }
 
+pub fn peer_san(peer: &ChannelPeer) -> Option<&str> {
+    match peer {
+        ChannelPeer::Certified(san) => Some(san),
+        ChannelPeer::Certless => None,
+    }
+}
+
 /// Build the `whoami` response payload from the kernel-verified peer facts.
-pub fn build_whoami(uri: &str, uid: u32) -> Payload {
+pub fn build_whoami(uri: Option<&str>, uid: u32) -> Payload {
     Payload::Whoami(WhoamiView {
-        peer_plane_uri_san: uri.to_string(),
+        peer_plane_uri_san: uri.map(str::to_string),
         peer_uid: uid,
     })
 }
@@ -833,19 +840,31 @@ mod tests {
 
     #[test]
     fn whoami_view_carries_exact_peer_facts() {
-        match build_whoami("spiffe://d/plane/cli", 501) {
+        match build_whoami(Some("spiffe://d/plane/cli"), 501) {
             Payload::Whoami(w) => {
                 assert_eq!(w.peer_uid, 501);
-                assert_eq!(w.peer_plane_uri_san, "spiffe://d/plane/cli");
+                assert_eq!(
+                    w.peer_plane_uri_san.as_deref(),
+                    Some("spiffe://d/plane/cli")
+                );
             }
             other => panic!("expected Payload::Whoami, got {other:?}"),
         }
     }
 
     #[test]
+    fn peer_san_is_the_san_or_none() {
+        assert_eq!(
+            peer_san(&ChannelPeer::Certified("spiffe://d/plane/cli".to_string())),
+            Some("spiffe://d/plane/cli")
+        );
+        assert_eq!(peer_san(&ChannelPeer::Certless), None);
+    }
+
+    #[test]
     fn build_whoami_is_not_pong() {
         // A mutant returning Payload::Pong must fail.
-        assert_ne!(build_whoami("spiffe://d/plane/cli", 1), Payload::Pong);
+        assert_ne!(build_whoami(Some("spiffe://d/plane/cli"), 1), Payload::Pong);
     }
     // ---- verb_to_action (T1: arm-swap killers via pairwise ne) ----
 
