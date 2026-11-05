@@ -3,10 +3,10 @@
 //! re-exported because its types are API; `rcgen` only under `test-support`.
 #![deny(missing_docs)]
 
-#[cfg(feature = "test-support")]
-pub use crypto_profile_awslc4::rcgen;
 pub use crypto_profile_awslc4::rustls;
 pub use crypto_profile_awslc4::{aead, csr, digest, fips, random, sealbox, signature, tls};
+#[cfg(feature = "test-support")]
+pub use crypto_profile_awslc4::{rcgen, test_support};
 pub use crypto_profile_awslc4::{
     Admitted, AeadAlgorithm, Algorithm, CipherSuite, CryptoError, CsrError, HashAlgorithm,
     KdfAlgorithm, KeyAgreementAlgorithm, KxGroup, Options, Profile, Resolved, SignatureAlgorithm,
