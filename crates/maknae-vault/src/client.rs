@@ -929,8 +929,8 @@ mod tests {
             // PROCESS-GLOBAL rustls default provider; install it here (idempotent —
             // a no-op if some other test already did) rather than relying on test
             // execution order, matching every other provider-touching test in this
-            // crate (resolver.rs, transport_tests.rs, tls.rs,
-            // plane_verify.rs all do this same call at their own point of use).
+            // crate (resolver.rs, transport_tests.rs, tls.rs all do this same call at
+            // their own point of use).
             maknae_crypto::init().unwrap();
             let p =
                 std::env::temp_dir().join(format!("mv-dispatch-{}-{}", std::process::id(), tag));

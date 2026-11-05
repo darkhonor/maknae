@@ -1,9 +1,39 @@
 use crate::verify::{verify_uri_san, VerifyError};
 use maknae_crypto::rustls::pki_types::CertificateDer;
+use maknae_crypto::tls::{PeerIdentity, PeerLeaf};
+
+pub(crate) const PLANE_URI_SAN_PREFIX: &str = "plane URI-SAN";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SanRule {
     Exact(String),
+}
+
+#[derive(Debug)]
+pub(crate) struct SanIdentity(pub(crate) SanRule);
+
+impl PeerIdentity for SanIdentity {
+    fn check(&self, leaf: &PeerLeaf<'_>) -> Result<(), maknae_crypto::rustls::Error> {
+        identity_holds(&self.0, leaf.der(), leaf.uri_names())
+    }
+}
+
+fn identity_holds(
+    rule: &SanRule,
+    der: &[u8],
+    webpki_uris: Result<Vec<&str>, maknae_crypto::rustls::Error>,
+) -> Result<(), maknae_crypto::rustls::Error> {
+    let refuse = |why: String| {
+        maknae_crypto::rustls::Error::General(format!("{PLANE_URI_SAN_PREFIX}: {why}"))
+    };
+    let accepted = verify_uri_san(der, rule).map_err(|e| refuse(format!("{e:?}")))?;
+    let names = webpki_uris.map_err(|e| refuse(e.to_string()))?;
+    match names.as_slice() {
+        [one] if *one == accepted => Ok(()),
+        _ => Err(refuse(format!(
+            "parsers disagree: {accepted:?} against {names:?}"
+        ))),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,6 +100,34 @@ mod tests {
     fn plane_leaf() -> PeerAuth {
         PeerAuth::PlaneLeaf {
             accept: SanRule::Exact(CLI.to_string()),
+        }
+    }
+
+    #[test]
+    fn the_identity_holds_only_when_both_parsers_name_the_accepted_san() {
+        let good = leaf(vec![uri(CLI)]);
+        let rule = SanRule::Exact(CLI.to_string());
+        let bad_encoding = || Err(maknae_crypto::rustls::CertificateError::BadEncoding.into());
+
+        assert_eq!(identity_holds(&rule, &good, Ok(vec![CLI])), Ok(()));
+        let refusals = [
+            identity_holds(
+                &rule,
+                &leaf(vec![uri("spiffe://d/plane/kernel")]),
+                Ok(vec![CLI]),
+            ),
+            identity_holds(&rule, &good, bad_encoding()),
+            identity_holds(&rule, &good, Ok(vec![])),
+            identity_holds(&rule, &good, Ok(vec![CLI, CLI])),
+            identity_holds(&rule, &good, Ok(vec!["spiffe://d/plane/kernel"])),
+        ];
+        for refusal in refusals {
+            match refusal {
+                Err(maknae_crypto::rustls::Error::General(msg)) => {
+                    assert!(msg.starts_with(PLANE_URI_SAN_PREFIX), "{msg}");
+                }
+                other => panic!("expected a {PLANE_URI_SAN_PREFIX} refusal, got {other:?}"),
+            }
         }
     }
 

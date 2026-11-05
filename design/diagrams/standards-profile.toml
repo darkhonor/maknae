@@ -98,7 +98,7 @@ version = "RFC 5280 profile"
 category = "Identity"
 applies_to = "plane leaves — MACHINE identity only"
 status = "enforced"
-evidence = "ADR-0006 D2; crates/maknae-vault/src/plane_verify.rs — URI-SAN verifier"
+evidence = "ADR-0006 D2; crates/maknae-vault/src/peer_auth.rs SanIdentity on the crypto-profile verifier"
 
 [[standard]]
 name = "CBOR"

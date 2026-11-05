@@ -51,7 +51,7 @@ pub struct AcceptRejection {
 /// `maknae_crypto::rustls::Error` as the io::Error's source (`io::Error::new(InvalidData, rustls_err)`), so
 /// downcast to it when present. `maknae_crypto::rustls::Error` and `CertificateError` are `#[non_exhaustive]`
 /// — an unmatched variant falls back to `Handshake` per the brief (WrongPlane is preserved
-/// exactly because that's OUR OWN `plane_verify` rejection, tagged by its message prefix).
+/// exactly because that's OUR OWN `SanIdentity` rejection, tagged by `PLANE_URI_SAN_PREFIX`).
 fn classify_handshake_error(e: &std::io::Error) -> RejectReason {
     let Some(rustls_err) = e
         .get_ref()
@@ -60,9 +60,9 @@ fn classify_handshake_error(e: &std::io::Error) -> RejectReason {
         return RejectReason::Handshake;
     };
     match rustls_err {
-        // plane_verify.rs wraps a WrongSan/NoUriSan/ExtraSans/ParseError rejection as
-        // `maknae_crypto::rustls::Error::General("plane URI-SAN: {e:?}")` — see PlaneClientCertVerifier.
-        maknae_crypto::rustls::Error::General(msg) if msg.starts_with("plane URI-SAN") => {
+        maknae_crypto::rustls::Error::General(msg)
+            if msg.starts_with(crate::peer_auth::PLANE_URI_SAN_PREFIX) =>
+        {
             RejectReason::WrongPlane
         }
         maknae_crypto::rustls::Error::InvalidCertificate(cert_err) => match cert_err {

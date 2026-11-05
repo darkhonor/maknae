@@ -26,7 +26,6 @@ mod keychain_policy;
 mod operator;
 mod password_line;
 mod plane;
-mod plane_verify;
 mod refusal;
 mod resolver;
 mod seal_key_io;
@@ -35,12 +34,13 @@ mod secret_source;
 mod supervisor;
 mod supervisor_run;
 mod tls;
+mod trust_bundle;
 mod user_login;
 mod vault_api;
 mod verify;
 mod wrap;
 // The UDS transport is unix-only (UnixStream / SO_PEERCRED); the pure-rustls layers above
-// (tls/resolver/plane_verify) compile everywhere so the Stage-1 client stays cross-platform.
+// (tls/resolver/trust_bundle) compile everywhere so the Stage-1 client stays cross-platform.
 mod peer_auth;
 mod peer_identity;
 mod peercred;
@@ -118,6 +118,7 @@ pub use token_record::{
 pub use token_store::{
     erase_user_token, load_user_token, observe_systemd_creds, read_user_token, store_user_token,
 };
+pub use trust_bundle::TrustBundle;
 pub use user_login::{
     userpass_username_is_acceptable, Password, UserLogin, UserToken, MAX_PASSWORD_BYTES,
     MAX_USERNAME_BYTES,
