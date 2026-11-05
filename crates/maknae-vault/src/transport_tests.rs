@@ -122,16 +122,16 @@ fn trust(ca: &CaBundle) -> Arc<TrustBundle> {
 }
 
 fn client_verifier(ca: &CaBundle, expect: Plane) -> Arc<maknae_crypto::tls::ClientVerifierHandle> {
-    crate::tls::client_verifier(&trust(ca), SanRule::Exact(expect.uri_san("d"))).unwrap()
+    crate::tls::client_verifier(&trust(ca), SanRule::for_plane(expect, "d")).unwrap()
 }
 
 fn server_verifier(ca: &CaBundle, expect: Plane) -> Arc<maknae_crypto::tls::ServerVerifierHandle> {
-    crate::tls::server_verifier(&trust(ca), SanRule::Exact(expect.uri_san("d"))).unwrap()
+    crate::tls::server_verifier(&trust(ca), SanRule::for_plane(expect, "d")).unwrap()
 }
 
 fn plane_leaf(expect: Plane) -> PeerAuth {
     PeerAuth::PlaneLeaf {
-        accept: SanRule::Exact(expect.uri_san("d")),
+        accept: SanRule::for_plane(expect, "d"),
     }
 }
 
@@ -171,6 +171,8 @@ fn client_cfg(
     let auth = with_cert.then(|| (chain, PrivateKeyDer::Pkcs8(key.into())));
     Arc::new(crate::tls::plane_client_config(verifier, auth).unwrap())
 }
+
+const NO_CLIENT_CERT: &str = "peer sent no certificates";
 
 async fn handshake(
     server: Arc<maknae_crypto::rustls::ServerConfig>,
@@ -335,7 +337,7 @@ async fn rejects_absent_client_cert() {
     let (cchain, ckey) = mk_leaf(&ca, "spiffe://d/plane/cli", false);
     let s = server_cfg(kchain, kkey, &cab(&ca), &plane_leaf(Plane::Cli));
     let c = client_cfg(cchain, ckey, &cab(&ca), Plane::Kernel, false); // no client cert
-    assert!(handshake(s, c).await.is_err());
+    assert_eq!(handshake(s, c).await, Err(NO_CLIENT_CERT.to_string()));
 }
 
 #[tokio::test]
@@ -581,6 +583,21 @@ mod accept_reject {
                 .attempt(&trust(&cab(&ca)), &PeerAuth::Certless, client)
                 .await,
             Ok(ChannelPeer::Certless)
+        );
+    }
+
+    #[tokio::test]
+    async fn machine_class_refuses_a_certless_client_in_the_handshake() {
+        provider();
+        let ca = mk_ca();
+        let server = Server::new("plane-leaf-certless", &ca);
+        let (cchain, ckey) = mk_leaf(&ca, "spiffe://d/plane/cli", false);
+        let client = client_cfg(cchain, ckey, &cab(&ca), Plane::Kernel, false);
+        assert_eq!(
+            server
+                .attempt(&trust(&cab(&ca)), &plane_leaf(Plane::Cli), client)
+                .await,
+            Err(RejectReason::Handshake)
         );
     }
 
@@ -1149,8 +1166,9 @@ mod plane_key_algorithms {
             let (cchain, ckey) = cli();
             let s = server_cfg(kchain, kkey, &cab(&ca), &plane_leaf(Plane::Cli));
             let c = client_cfg(cchain, ckey, &cab(&ca), Plane::Kernel, false);
-            assert!(
-                handshake(s, c).await.is_err(),
+            assert_eq!(
+                handshake(s, c).await,
+                Err(NO_CLIENT_CERT.to_string()),
                 "{alg:?}: absent client cert must fail"
             );
         }

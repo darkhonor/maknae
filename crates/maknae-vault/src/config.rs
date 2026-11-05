@@ -270,14 +270,16 @@ pub(crate) fn get_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
 /// `deployment_id` is the SPIFFE trust domain: at most 255 bytes of `[a-z0-9._-]`,
 /// at least one `[a-z0-9]`.
 pub fn validate_deployment_id(id: &str) -> Result<(), VaultError> {
-    let ok = id.len() <= 255
-        && id
-            .bytes()
-            .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-'))
-        && id
-            .bytes()
-            .any(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
-    if ok {
+    let mut alnum = false;
+    let charset = id.bytes().all(|b| match b {
+        b'a'..=b'z' | b'0'..=b'9' => {
+            alnum = true;
+            true
+        }
+        b'.' | b'_' | b'-' => true,
+        _ => false,
+    });
+    if id.len() <= 255 && charset && alnum {
         Ok(())
     } else {
         Err(VaultError::InvalidDeploymentId(id.to_string()))

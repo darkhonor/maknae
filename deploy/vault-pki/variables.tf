@@ -2,10 +2,17 @@ variable "deployment_id" {
   type        = string
   description = "SPIFFE trust domain of the deployment, branded into every plane leaf SAN (spiffe://<deployment_id>/plane/*). No default: an explicit value is REQUIRED so a prod apply cannot silently emit 'dev'-branded certs. At most 255 bytes of [a-z0-9._-] with at least one [a-z0-9]; the charset keeps a Vault glob out of allowed_uri_sans."
 
-  # `*` is a glob in Vault's allowed_uri_sans; the charset lock keeps it out.
   validation {
-    condition     = can(regex("^[a-z0-9._-]+$", var.deployment_id)) && can(regex("[a-z0-9]", var.deployment_id)) && length(var.deployment_id) <= 255
-    error_message = "deployment_id is the SPIFFE trust domain: at most 255 bytes of [a-z0-9._-] with at least one [a-z0-9]. No glob metacharacters (notably '*'), slashes, spaces or upper case."
+    condition     = can(regex("^[a-z0-9._-]+$", var.deployment_id))
+    error_message = "deployment_id may contain only [a-z0-9._-]: no glob metacharacters (notably '*'), slashes, spaces or upper case."
+  }
+  validation {
+    condition     = can(regex("[a-z0-9]", var.deployment_id))
+    error_message = "deployment_id must contain at least one [a-z0-9]."
+  }
+  validation {
+    condition     = length(var.deployment_id) <= 255
+    error_message = "deployment_id is at most 255 bytes."
   }
 }
 

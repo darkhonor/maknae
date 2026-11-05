@@ -391,7 +391,7 @@ impl PlaneConnector {
         client: &PlaneClient,
         trust: &Arc<TrustBundle>,
     ) -> Result<AuthenticatedStream, VaultError> {
-        let accept = SanRule::Exact(Plane::Kernel.uri_san(client.deployment_id()));
+        let accept = SanRule::for_plane(Plane::Kernel, client.deployment_id());
         let cfg = tls::client_config(client, trust, accept.clone())?;
         let kernel = PeerAuth::PlaneLeaf { accept };
         let raw = socket::connect(path).await?;

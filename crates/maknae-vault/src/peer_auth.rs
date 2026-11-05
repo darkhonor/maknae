@@ -1,3 +1,4 @@
+use crate::plane::Plane;
 use crate::verify::{verify_uri_san, VerifyError};
 use maknae_crypto::rustls::pki_types::CertificateDer;
 use maknae_crypto::tls::{PeerIdentity, PeerLeaf};
@@ -7,6 +8,12 @@ pub(crate) const PLANE_URI_SAN_PREFIX: &str = "plane URI-SAN";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SanRule {
     Exact(String),
+}
+
+impl SanRule {
+    pub fn for_plane(plane: Plane, trust_domain: &str) -> Self {
+        SanRule::Exact(plane.uri_san(trust_domain))
+    }
 }
 
 #[derive(Debug)]
@@ -91,7 +98,7 @@ mod tests {
 
     fn plane_leaf() -> PeerAuth {
         PeerAuth::PlaneLeaf {
-            accept: SanRule::Exact(CLI.to_string()),
+            accept: SanRule::for_plane(Plane::Cli, "d"),
         }
     }
 
@@ -152,6 +159,41 @@ mod tests {
         assert_eq!(
             decide(&plane_leaf(), Some(&[extra])),
             Err(PeerAuthRefusal::San(VerifyError::ExtraSans))
+        );
+    }
+
+    #[test]
+    fn decide_reads_only_the_first_certificate_and_an_empty_chain_is_no_cert() {
+        let good = leaf(vec![uri(CLI)]);
+        let kernel = leaf(vec![uri("spiffe://d/plane/kernel")]);
+
+        assert_eq!(
+            decide(&PeerAuth::Certless, Some(&[])),
+            Ok(ChannelPeer::Certless)
+        );
+        assert_eq!(
+            decide(&plane_leaf(), Some(&[])),
+            Err(PeerAuthRefusal::NoClientCert)
+        );
+        assert_eq!(
+            decide(&plane_leaf(), Some(&[good.clone(), kernel.clone()])),
+            Ok(ChannelPeer::Certified(CLI.to_string()))
+        );
+        assert!(matches!(
+            decide(&plane_leaf(), Some(&[kernel, good])),
+            Err(PeerAuthRefusal::San(VerifyError::WrongSan { .. }))
+        ));
+    }
+
+    #[test]
+    fn a_plane_rule_names_that_plane_in_the_trust_domain() {
+        assert_eq!(
+            SanRule::for_plane(Plane::Cli, "d"),
+            SanRule::Exact(CLI.to_string())
+        );
+        assert_eq!(
+            SanRule::for_plane(Plane::Kernel, "example.org"),
+            SanRule::Exact("spiffe://example.org/plane/kernel".to_string())
         );
     }
 }

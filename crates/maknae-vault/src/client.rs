@@ -262,7 +262,7 @@ async fn sign_leaf_for(
     .map_err(|e| VaultError::Sign(sign_refusal_detail(&vault_error_text(&e), plane_key)))?;
     // Defense-in-depth: the leaf Vault returned must carry exactly our plane SAN.
     let leaf_der = pem_to_der(&resp.certificate)?;
-    verify_uri_san(&leaf_der, &SanRule::Exact(plane.uri_san(deployment_id)))
+    verify_uri_san(&leaf_der, &SanRule::for_plane(plane, deployment_id))
         .map_err(|e| VaultError::Sign(format!("returned leaf failed SAN self-check: {e:?}")))?;
     Ok((key_der, resp.certificate, resp.ca_chain.unwrap_or_default()))
 }

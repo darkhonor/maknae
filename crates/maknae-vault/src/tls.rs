@@ -1,7 +1,8 @@
-//! FIPS-pinned rustls config builders (Layer 1, T3). Both builders assert the aws-lc-rs
-//! FIPS provider first (fail-closed) and start from `maknae_crypto::tls`, so no
-//! ambient `CryptoProvider` default is relied on. TLS 1.3 only. The private key never
-//! leaves the crate — the `CertifiedKey` is built here from the `pub(crate)` key accessor.
+//! FIPS-pinned rustls config builders (Layer 1, T3). `server_config` and `client_config`
+//! assert the aws-lc-rs FIPS provider first (fail-closed); every builder starts from
+//! `maknae_crypto::tls`, so no ambient `CryptoProvider` default is relied on. TLS 1.3
+//! only. The private key never leaves the crate — the `CertifiedKey` is built here from
+//! the `pub(crate)` key accessor.
 use crate::peer_auth::SanIdentity;
 use crate::resolver::PlaneCertResolver;
 use crate::{PeerAuth, PlaneClient, PlaneIdentity, SanRule, TrustBundle, VaultError};

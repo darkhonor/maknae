@@ -25,37 +25,35 @@ mod keychain;
 mod keychain_policy;
 mod operator;
 mod password_line;
+mod peer_auth;
+mod peer_identity;
+mod peercred;
 mod plane;
 mod refusal;
 mod resolver;
 mod seal_key_io;
+#[cfg(unix)]
+mod seal_pub_io;
+#[cfg(unix)]
+mod seal_pub_store;
 mod secret_io;
 mod secret_source;
+#[cfg(unix)]
+mod socket;
+#[cfg(unix)]
+mod stream;
 mod supervisor;
 mod supervisor_run;
 mod tls;
+#[cfg(unix)]
+mod token_record;
+#[cfg(unix)]
+mod token_store;
 mod trust_bundle;
 mod user_login;
 mod vault_api;
 mod verify;
 mod wrap;
-// The UDS transport is unix-only (UnixStream / SO_PEERCRED); the pure-rustls layers above
-// (tls/resolver/trust_bundle) compile everywhere so the Stage-1 client stays cross-platform.
-mod peer_auth;
-mod peer_identity;
-mod peercred;
-#[cfg(unix)]
-mod seal_pub_io;
-#[cfg(unix)]
-mod seal_pub_store;
-#[cfg(unix)]
-mod socket;
-#[cfg(unix)]
-mod stream;
-#[cfg(unix)]
-mod token_record;
-#[cfg(unix)]
-mod token_store;
 #[cfg(unix)]
 pub use accounts::{account_uid, NssAccounts};
 pub use api_shape::{WrapMismatch, MAX_TOKEN_BYTES, MAX_VAULT_BODY_BYTES};

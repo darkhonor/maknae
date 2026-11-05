@@ -61,7 +61,7 @@ mod tests {
     use maknae_crypto::rcgen;
 
     fn check(der: &[u8], expect: Plane, dep: &str) -> Result<String, VerifyError> {
-        verify_uri_san(der, &SanRule::Exact(expect.uri_san(dep)))
+        verify_uri_san(der, &SanRule::for_plane(expect, dep))
     }
 
     /// Build a self-signed leaf carrying exactly the given URI SANs (DER).
