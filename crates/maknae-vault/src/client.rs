@@ -617,11 +617,6 @@ impl PlaneClient {
         self.plane_key
     }
 
-    /// This client's plane (crate-internal — used to assert `expected_peer == plane.peer()`).
-    pub(crate) fn plane(&self) -> Plane {
-        self.plane
-    }
-
     /// Non-blocking snapshot of the current identity (for the Stage-2 transport).
     pub fn current_identity(&self) -> Option<PlaneIdentity> {
         self.identity
@@ -1406,7 +1401,7 @@ mod tests {
         let fx = DispatchFixture::with_addr("user-plane", DEAD_VAULT, "");
         std::fs::remove_file(fx.0.join("maknaed-approle-id")).unwrap();
         let client = PlaneClient::for_user(&fx.doc(), &fx.0, user_token()).unwrap();
-        assert_eq!(client.plane(), Plane::Cli);
+        assert_eq!(client.plane, Plane::Cli);
         assert_eq!(
             client.auth.token_source(),
             PlaneTokenSource::StoredUserLogin

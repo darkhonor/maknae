@@ -694,6 +694,7 @@ fn reject_reason_str(reason: &RejectReason) -> &'static str {
         RejectReason::WrongPlane => "wrong plane uri-san",
         RejectReason::ExpiredOrInvalidCert => "expired or not-yet-valid cert",
         RejectReason::ChainOrCa => "chain/ca validation failed",
+        RejectReason::UnexpectedClientCert => "unexpected client certificate",
         RejectReason::PeerCredCapture => "peer-credential capture failed",
         RejectReason::Io => "socket accept io error",
     }
@@ -2782,7 +2783,15 @@ impl PlaneAccept for PlaneListener {
     ) -> Result<Conn<AuthenticatedStream>, AcceptRejection> {
         let stream =
             PlaneListener::finish_handshake(self, raw, peer_creds, handshake_timeout).await?;
-        let peer_uri = stream.peer_uri_san().to_string();
+        let peer_uri = match stream.peer() {
+            maknae_vault::ChannelPeer::Certified(san) => san.clone(),
+            maknae_vault::ChannelPeer::Certless => {
+                return Err(AcceptRejection {
+                    peer_creds: Some(*stream.peer_creds()),
+                    reason: RejectReason::Handshake,
+                })
+            }
+        };
         let peer_uid = stream.peer_creds().uid;
         let delegated = stream.delegated();
         Ok(Conn {
@@ -6856,6 +6865,14 @@ async fn boot_after_sink(
     )
     .map_err(|e| RunError::Other(e.to_string()))?;
     let ca = maknae_vault::load_ca_pin(config_dir).map_err(|e| RunError::Other(e.to_string()))?;
+    let trust =
+        maknae_vault::TrustBundle::from_pins(&[&ca]).map_err(|e| RunError::Other(e.to_string()))?;
+    let deployment_id = maknae_vault::vault_config_from_document(boot.document())
+        .map_err(|e| RunError::Other(e.to_string()))?
+        .deployment_id;
+    let client_auth = maknae_vault::PeerAuth::PlaneLeaf {
+        accept: maknae_vault::SanRule::Exact(maknae_vault::Plane::Cli.uri_san(&deployment_id)),
+    };
 
     // --- BOOT POSTURE RECORD (spec §5.2/§5.3): stated BEFORE mint, right after the
     // plane client resolved which SecretID source it actually used. An append
@@ -6986,7 +7003,8 @@ async fn boot_after_sink(
     };
     let outcome = serve_after_mint(
         &client,
-        &ca,
+        &trust,
+        &client_auth,
         sink,
         transport,
         audit_cfg,
@@ -7023,7 +7041,8 @@ async fn boot_after_sink(
 #[allow(clippy::too_many_arguments)]
 async fn serve_after_mint<B>(
     client: &maknae_vault::PlaneClient,
-    ca: &maknae_vault::CaBundle,
+    trust: &Arc<maknae_vault::TrustBundle>,
+    client_auth: &maknae_vault::PeerAuth,
     sink: &Arc<maknae_audit_append::AuditSink>,
     transport: maknae_config::TransportConfig,
     audit_cfg: &maknae_config::AuditConfig,
@@ -7056,8 +7075,15 @@ where
     // `client.shutdown().await` revokes the minted token before returning `ExitCode::FAILURE`.
     let gid =
         maknae_gid().map_err(|e| format!("resolving `maknae` group for the socket: {e:?}"))?;
-    let listener = PlaneListener::bind(&transport.socket_path, client, ca, Some(gid))
-        .map_err(|e| e.to_string())?;
+    let identity = maknae_vault::ServerIdentity::attach(client).map_err(|e| e.to_string())?;
+    let listener = PlaneListener::bind(
+        &transport.socket_path,
+        identity,
+        Arc::clone(trust),
+        client_auth,
+        Some(gid),
+    )
+    .map_err(|e| e.to_string())?;
     // `session_ids` is the SAME allocator `run_inner` used for this boot's AU-3
     // boot-level records (spec §5.3): every real connection's `next_session()`
     // therefore shares the one per-boot nonce, starting its counter at 1.

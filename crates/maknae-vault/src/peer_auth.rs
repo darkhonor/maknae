@@ -49,20 +49,12 @@ pub enum ChannelPeer {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "consumed by the listener and connector")
-)]
 pub(crate) enum PeerAuthRefusal {
     UnexpectedClientCert,
     NoClientCert,
     San(VerifyError),
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "consumed by the listener and connector")
-)]
 pub(crate) fn decide(
     auth: &PeerAuth,
     peer_certs: Option<&[CertificateDer<'_>]>,

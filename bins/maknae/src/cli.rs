@@ -421,8 +421,9 @@ async fn execute(verb: Verb) -> Result<bool, String> {
     let client =
         PlaneClient::for_user(&document, &dir, session.token).map_err(|e| e.to_string())?;
     let ca = load_ca_pin(&dir).map_err(|e| e.to_string())?;
+    let trust = maknae_vault::TrustBundle::from_pins(&[&ca]).map_err(|e| e.to_string())?;
     client.mint().await.map_err(|e| e.to_string())?;
-    let outcome = round_trip(verb, request, content, &transport, &client, &ca).await;
+    let outcome = round_trip(verb, request, content, &transport, &client, &trust).await;
     client.shutdown().await;
     outcome
 }
@@ -443,7 +444,7 @@ async fn round_trip(
     content: Option<maknae_proto::Bytes>,
     transport: &maknae_config::TransportConfig,
     client: &PlaneClient,
-    ca: &maknae_vault::CaBundle,
+    trust: &std::sync::Arc<maknae_vault::TrustBundle>,
 ) -> Result<bool, String> {
     if let Verb::Read { path, page: None } = &verb {
         let mut stdout = std::io::stdout().lock();
@@ -461,7 +462,7 @@ async fn round_trip(
                         maknae_loop::mutation::WriteCheck::Unchecked,
                         transport,
                         client,
-                        ca,
+                        trust,
                         &mut |l| errln!("{l}"),
                     )
                     .await?
@@ -485,7 +486,7 @@ async fn round_trip(
         maknae_loop::mutation::WriteCheck::Unchecked,
         transport,
         client,
-        ca,
+        trust,
         &mut |l| errln!("{l}"),
     )
     .await?

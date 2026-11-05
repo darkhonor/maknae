@@ -1,7 +1,8 @@
 //! Gated live loopback — runbook ch.2. Stands up BOTH planes in one process against the
 //! operator's real Vault (the kernel dir with its seeded standing raw SecretID, the CLI
-//! dir with a `maknae login` token), mints both leaves, and does a real mTLS + peer-cred
-//! round-trip over a real UDS. #[ignore]; operator-present only.
+//! dir with a `maknae login` token), mints both leaves, and does a real round-trip over
+//! the certless client channel (the CLI authenticates the kernel leaf, the kernel
+//! captures peer-creds) over a real UDS. #[ignore]; operator-present only.
 //!
 //!   MAKNAE_KERNEL_CONFIG_DIR=/etc/maknae MAKNAE_CLI_CONFIG_DIR=~/.maknae \
 //!     cargo test -p maknae-vault --test live_transport_smoke -- --ignored --nocapture
@@ -29,7 +30,14 @@ async fn plane_to_plane_roundtrip() {
     .unwrap();
     kclient.mint().await.expect("kernel mint");
     let kca = maknae_vault::load_ca_pin(std::path::Path::new(&kdir)).unwrap();
-    let listener = maknae_vault::PlaneListener::bind(&sock, &kclient, &kca, None).unwrap();
+    let listener = maknae_vault::PlaneListener::bind(
+        &sock,
+        maknae_vault::ServerIdentity::attach(&kclient).unwrap(),
+        maknae_vault::TrustBundle::from_pins(&[&kca]).unwrap(),
+        &maknae_vault::PeerAuth::Certless,
+        None,
+    )
+    .unwrap();
 
     let cdir = std::path::Path::new(&cdir);
     let cdoc = maknae_config::load_config(
@@ -51,7 +59,8 @@ async fn plane_to_plane_roundtrip() {
         .expect("run `maknae login` with MAKNAE_CONFIG_DIR set to the CLI config dir first");
     let cclient = maknae_vault::PlaneClient::for_user(&cdoc, cdir, token).unwrap();
     cclient.mint().await.expect("cli mint");
-    let cca = maknae_vault::load_ca_pin(cdir).unwrap();
+    let ctrust =
+        maknae_vault::TrustBundle::from_pins(&[&maknae_vault::load_ca_pin(cdir).unwrap()]).unwrap();
 
     let srv = tokio::spawn(async move {
         // Prompt raw accept, then the bounded handshake — the same anti-DoS split the daemon
@@ -61,22 +70,20 @@ async fn plane_to_plane_roundtrip() {
             .finish_handshake(raw, creds, std::time::Duration::from_secs(10))
             .await
             .expect("finish_handshake");
-        // Deployment-agnostic: assert the plane suffix, not a hard-coded deployment_id.
-        let san = s.peer_uri_san();
-        assert!(
-            san.starts_with("spiffe://") && san.ends_with("/plane/cli"),
-            "kernel must see the cli plane URI-SAN, got {san}"
-        );
+        assert_eq!(s.peer(), &maknae_vault::ChannelPeer::Certless);
         let mut buf = [0u8; 5];
         s.read_exact(&mut buf).await.unwrap();
         s.write_all(b"pong!").await.unwrap();
         s.flush().await.unwrap();
         buf
     });
-    let mut c = maknae_vault::PlaneConnector::connect(&sock, &cclient, &cca)
+    let mut c = maknae_vault::PlaneConnector::connect(&sock, &cclient, &ctrust)
         .await
         .expect("connect");
-    let csan = c.peer_uri_san();
+    // Deployment-agnostic: assert the plane suffix, not a hard-coded deployment_id.
+    let maknae_vault::ChannelPeer::Certified(csan) = c.peer() else {
+        panic!("cli must see a certified kernel peer, got {:?}", c.peer());
+    };
     assert!(
         csan.starts_with("spiffe://") && csan.ends_with("/plane/kernel"),
         "cli must see the kernel plane URI-SAN, got {csan}"
@@ -90,5 +97,7 @@ async fn plane_to_plane_roundtrip() {
     kclient.shutdown().await;
     cclient.shutdown().await;
     let _ = std::fs::remove_dir_all(&sockdir);
-    println!("LIVE TRANSPORT OK: kernel<->cli mTLS + peer-creds round-trip over UDS");
+    println!(
+        "LIVE TRANSPORT OK: kernel<->cli certless client channel + peer-creds round-trip over UDS"
+    );
 }

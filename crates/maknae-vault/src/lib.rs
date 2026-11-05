@@ -106,7 +106,7 @@ pub use socket::probe_bindable;
 #[cfg(unix)]
 pub use stream::{
     AcceptRejection, AuthenticatedStream, PlaneConnector, PlaneListener, RawAcceptError,
-    RawPlaneConn, RejectReason,
+    RawPlaneConn, RejectReason, ServerIdentity,
 };
 #[cfg(unix)]
 pub use token_record::{

@@ -439,6 +439,7 @@ pub async fn run(label: Option<String>, prompt: String) -> Result<u8, String> {
     let client = PlaneClient::for_user(&document, &dir, token_copy(&session.token)?)
         .map_err(|e| e.to_string())?;
     let ca = maknae_vault::load_ca_pin(&dir).map_err(|e| e.to_string())?;
+    let trust = maknae_vault::TrustBundle::from_pins(&[&ca]).map_err(|e| e.to_string())?;
     client.mint().await.map_err(|e| e.to_string())?;
     let keys = UserLoginKeys {
         api: session.api,
@@ -453,7 +454,7 @@ pub async fn run(label: Option<String>, prompt: String) -> Result<u8, String> {
     let mut plane = LoopPlane::new(
         transport,
         client,
-        ca,
+        trust,
         context.output_tokens(),
         write_max,
         keys,

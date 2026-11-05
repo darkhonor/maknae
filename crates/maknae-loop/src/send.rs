@@ -7,7 +7,8 @@ use maknae_proto::{
     FrameCaps, Payload, Request, RespResult, ATTEMPT_REQUEST_MAX, CONTROL_REQUEST_MAX,
     PROTOCOL_VERSION,
 };
-use maknae_vault::{PlaneClient, PlaneConnector};
+use maknae_vault::{PlaneClient, PlaneConnector, TrustBundle};
+use std::sync::Arc;
 
 fn response_caps(transport: &maknae_config::TransportConfig) -> FrameCaps {
     FrameCaps::responses(transport.prompt_max_bytes)
@@ -154,7 +155,7 @@ pub async fn send_verb(
     check: crate::mutation::WriteCheck,
     transport: &maknae_config::TransportConfig,
     client: &PlaneClient,
-    ca: &maknae_vault::CaBundle,
+    trust: &Arc<TrustBundle>,
     diag: &mut (dyn FnMut(String) + Send),
 ) -> Result<SentOutcome, String> {
     // Bound the client-side TLS handshake by the configured `handshake_timeout_ms`: a
@@ -162,7 +163,7 @@ pub async fn send_verb(
     // forever (it still fails non-zero).
     let connect = tokio::time::timeout(
         std::time::Duration::from_millis(transport.handshake_timeout_ms),
-        PlaneConnector::connect(&transport.socket_path, client, ca),
+        PlaneConnector::connect(&transport.socket_path, client, trust),
     )
     .await;
     let mut stream = match connect {
@@ -701,7 +702,7 @@ mod tests {
     fn assert_send_verb_future_is_send(
         t: &maknae_config::TransportConfig,
         c: &PlaneClient,
-        ca: &maknae_vault::CaBundle,
+        trust: &Arc<TrustBundle>,
     ) {
         fn s<T: Send>(_: T) {}
         s(send_verb(
@@ -710,7 +711,7 @@ mod tests {
             crate::mutation::WriteCheck::Unchecked,
             t,
             c,
-            ca,
+            trust,
             &mut |_| {},
         ));
     }
