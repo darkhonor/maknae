@@ -83,7 +83,8 @@ pub(crate) fn server_config(
     Ok(Arc::new(config))
 }
 
-/// Client config: STATIC client cert (CLI is stateless).
+/// Client config. The CLI still offers its static leaf; the client channel does not
+/// request it (removed by #116), and only the machine class reads it.
 pub(crate) fn client_config(
     client: &PlaneClient,
     trust: &TrustBundle,

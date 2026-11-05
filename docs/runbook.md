@@ -127,10 +127,10 @@ listening yet.
 ### Prerequisites
 
 - Chapter 1 works (the kernel plane mints a leaf against your Vault).
-- Your account is a Vault userpass user with a password set ([first-provider step 1](first-provider.md#1-create-the-user-in-vault)). The CLI plane has no AppRole: it mints its leaf with the Vault token `maknae login` stores (`crates/maknae-vault/src/client.rs`, `PlaneClient::for_user`).
+- Your account is a Vault userpass user with a password set ([first-provider step 1](first-provider.md#1-create-the-user-in-vault)). The CLI plane has no AppRole: it mints a leaf with the Vault token `maknae login` stores, which `maknaed` does not request on the client channel and #116 removes (`crates/maknae-vault/src/client.rs`, `PlaneClient::for_user`).
 - **Two config dirs** — one per plane:
   - **kernel** → `~/.maknae`, the Chapter-1 layout (`maknaed-approle-id`, `maknaed-secret-id`, the `tls/` CAs, `maknae.yaml`).
-  - **cli** → `~/.maknae-cli` (`0700`): a copy of the `tls/` dir (`0700`, files `0600`) and a `0600` `maknae.yaml` holding only `vault.addr` and `core.deployment_id`. The CLI plane signs with the `maknae-cli` PKI role.
+  - **cli** → `~/.maknae-cli` (`0700`): a copy of the `tls/` dir (`0700`, files `0600`) and a `0600` `maknae.yaml` holding only `vault.addr` and `core.deployment_id`. The CLI plane signs with the `maknae-cli` PKI role; the daemon does not request that leaf (removed by #116).
 
 ### 1. Log the CLI plane in
 
@@ -330,7 +330,7 @@ A quiescent, successfully-bound daemon prints nothing further and blocks; it res
 
 ### 5. `ssh` in and run the acceptance verbs
 
-In terminal 2, a **fresh** session (proves the CLI's own leaf mint + connect works from a
+In terminal 2, a **fresh** session (proves the CLI's own leaf mint (a self-check; the daemon does not request the leaf) + connect works from a
 cold start, not a warm terminal that happens to already have Vault env vars set):
 
 ```bash
