@@ -84,8 +84,8 @@ pub(crate) fn server_config(
     Ok(Arc::new(config))
 }
 
-/// Client config. The CLI still offers its static leaf; the client channel does not
-/// request it (removed by #116), and only the machine class reads it.
+/// Client config. The CLI still configures its static leaf (removed by #116); the client
+/// channel never requests it, so only the machine class sends it.
 pub(crate) fn client_config(
     client: &PlaneClient,
     trust: &TrustBundle,
