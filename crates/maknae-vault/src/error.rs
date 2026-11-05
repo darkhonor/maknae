@@ -77,7 +77,7 @@ pub enum VaultError {
     /// Peer-credential capture failed — a local connection whose kernel creds cannot be
     /// read cannot be policed by the daemon, so it is refused (fail closed).
     PeerCred(String),
-    /// The TLS handshake failed (chain invalid/expired, foreign CA, absent client cert).
+    /// The TLS handshake failed (chain invalid/expired, foreign CA, and on a machine channel an absent client cert).
     Handshake(String),
     /// The peer leaf's plane URI-SAN was wrong/absent/extra (wraps the T1 verifier error).
     PeerIdentity(crate::VerifyError),

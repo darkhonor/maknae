@@ -1,6 +1,7 @@
 //! `maknae` CLI — the untrusted interaction plane (spec §3). Resolves its own
-//! config dir, mints a short-lived plane leaf, connects to `maknaed` over the
-//! Stage-2 mTLS/UDS transport, and issues one verb per invocation
+//! config dir, mints a short-lived plane leaf (a self-check until #116 retires it;
+//! the daemon requests no client certificate), connects to `maknaed` over the
+//! server-authenticated TLS/UDS transport, and issues one verb per invocation
 //! (`ping`/`whoami`) — OR, one-time and elevated, provisions the deployment via
 //! `enroll`/`enroll-helper` (`enroll/`, spec §4.1-§4.6, PR-J1 Task 8).
 //!
@@ -76,7 +77,7 @@ pub(crate) fn cli_config_specs() -> [SectionSpec; 3] {
     ]
 }
 
-/// `maknae` — filesystem and management verbs over the mTLS plane, plus elevated
+/// `maknae` — filesystem and management verbs over the TLS plane, plus elevated
 /// enrollment.
 #[derive(Parser, Debug)]
 #[command(

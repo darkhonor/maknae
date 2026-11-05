@@ -89,7 +89,7 @@ evidence = "O_PATH on Linux: no access is conferred and none is checked on the o
 from = "cli"
 to = "daemon"
 kind = "call"
-label = "Request{Read} + SCM_RIGHTS(fd) over the mTLS plane"
+label = "Request{Read} + SCM_RIGHTS(fd) over the TLS plane"
 evidence = "crates/maknae-io/src/delegated.rs:160 send_delegated · crates/maknae-plane/src/send.rs:42 FdSender · bins/maknae/src/cli.rs:387"
 note = "A failed open still sends, UNARMED. The daemon then has no descriptor and refuses it before the PDP: read descriptor missing."
 

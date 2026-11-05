@@ -133,8 +133,8 @@ n = "I2"
 from = "cli"
 to = "daemon"
 status = "built"
-mechanism = "AF_UNIX stream at /run/maknae/maknaed.sock, group-gated on bind; mutual mTLS, TLS 1.3 pinned; SCM_RIGHTS carries the subject's descriptor"
-identity = "plane leaf certificate, URI-SAN — MACHINE identity only"
+mechanism = "AF_UNIX stream at /run/maknae/maknaed.sock, group-gated on bind; server-authenticated TLS 1.3 pinned, no client certificate; SCM_RIGHTS carries the subject's descriptor"
+identity = "kernel-attested peer uid; the daemon's plane/kernel leaf authenticates the server only"
 evidence = "crates/maknae-config/src/transport.rs:15 · crates/maknae-vault/src/tls.rs:77 · crates/maknae-io/src/delegated.rs:182"
 
 [[iface]]
@@ -270,5 +270,5 @@ evidence = "packaging/common/maknae-selinux-ports.sh · packaging/common/maknae.
 
 [[negative]]
 claim = "Reaching the client plane requires a local account in the gated group, not a route."
-consequence = "The socket is filesystem-mediated: group-gated at bind, then mutual mTLS over it. A network position buys nothing, so perimeter controls are not the boundary that matters here."
+consequence = "The socket is filesystem-mediated: group-gated at bind, then server-authenticated TLS over it. A network position buys nothing, so perimeter controls are not the boundary that matters here."
 evidence = "crates/maknae-kernel/src/run.rs:1879 · crates/maknae-config/src/transport.rs:15"

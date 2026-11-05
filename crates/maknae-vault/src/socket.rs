@@ -1,5 +1,5 @@
 //! Pathname Unix-domain-socket binding + connect (Layer 2, T3). The socket is the OUTER
-//! fence only (mTLS + peer-creds are the real gate); provisioning is hardened against the
+//! fence only (TLS + peer-creds are the real gate); provisioning is hardened against the
 //! Docker-adjacent path/perm race class: verify the parent dir is owner-only before bind,
 //! set 0660 atomically, and never blindly unlink an attacker-influenceable stale socket.
 use crate::VaultError;
@@ -41,7 +41,7 @@ fn verify_parent_dir(path: &Path) -> Result<(), VaultError> {
 /// round-7 P1): under a service account whose PRIMARY group isn't `maknae` (the
 /// normal production setup — `maknae` is a supplementary group), a bare bind leaves the
 /// 0660 socket group-owned by the wrong group, so authorized `maknae`-group peers get
-/// permission-denied at the socket layer before mTLS/`uid_in_maknae_group` ever runs. The
+/// permission-denied at the socket layer before the TLS handshake or `uid_in_maknae_group` ever runs. The
 /// caller resolves the gid and fails closed if it can't (see
 /// `maknae-kernel::groupres::maknae_gid`); `None` is for callers that don't need the
 /// group-gate to actually gate (tests, the CLI-side connector never binds).

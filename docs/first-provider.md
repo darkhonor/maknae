@@ -274,7 +274,7 @@ maknae ping          # pong
 ```
 
 - **Why the loop checks first.** `launchctl print` exits 0 for a loaded job and 113 for an unknown one; the package's own uninstall and install scripts rely on that convention, and it was not re-measured for this page. A second `bootstrap` of a loaded job errors: that is known launchctl behaviour, not measured here. `kickstart -k` restarts a loaded job; on a host where `maknaed` has started before, accept the provider list as above.
-- **`pong`.** `maknae ping` uses the Vault token `maknae login` stored to obtain its client certificate, then reaches the daemon's socket.
+- **`pong`.** `maknae ping` reads the Vault token `maknae login` stored, then reaches the daemon's socket; the daemon identifies you by your uid, not by a certificate.
 - **The posture record.** The boot's posture record reads `code_bound`:
   ```bash
   sudo jq -c 'select(.action=="posture") | .outcome.posture' /var/log/maknae/audit.jsonl | tail -n 1

@@ -19,7 +19,7 @@ maknae-config = { path = "../maknae-config" }
 # ADR-0009: the subject's open and the delegated attempt run through maknae-io,
 # so the std-fs-drift gate needs no client-side exemption.
 maknae-io = { path = "../maknae-io" }
-# The plane client and its mTLS connector.
+# The plane client and its TLS connector.
 maknae-vault = { path = "../maknae-vault" }
 # Conversation IDs draw from the one random source the project uses.
 maknae-crypto = { path = "../maknae-crypto" }

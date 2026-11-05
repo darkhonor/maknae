@@ -12,7 +12,7 @@
 //! - [`accept_loop`] is the anti-DoS accept loop: accept the raw socket PROMPTLY, then run
 //!   the bounded TLS handshake per-connection UNDER the concurrency semaphore (so a stalled
 //!   handshake occupies one permit for at most `handshake_timeout`, never the loop itself);
-//!   audit-and-continue on a surfaced cert-half rejection (NEVER `?` — a bad handshake must
+//!   audit-and-continue on a surfaced peer-authentication rejection (NEVER `?` — a bad handshake must
 //!   not kill the daemon), fast-close at capacity. Generic over a [`PlaneAccept`] source so
 //!   it is testable without a live Vault-backed `PlaneListener`.
 //! - [`run`] is the process entrypoint: FIPS install/assert → boot → sink → plane
@@ -484,7 +484,7 @@ const HANDLER_DRAIN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 /// both ceilings by a test.
 fn handler_drain_bound(cfg: &TransportConfig, egress_deadline: Duration) -> Duration {
     // One connection's bounded work, in the order the handler performs it:
-    // the mTLS handshake (inside the handler, not on the loop), the peer's
+    // the TLS handshake (inside the handler, not on the loop), the peer's
     // group lookup, the admission audit append, the frame read, the requester home's resolution (filesystem
     // verbs only), the PDP decision, the verb's own blocking step under the
     // same bound (the subject enumeration — a second `AUTHZ_DECIDE_TIMEOUT`,
@@ -686,7 +686,7 @@ fn make_record(
     }
 }
 
-/// A stable, non-leaky label for each surfaced cert-half rejection (Boundary A: the
+/// A stable, non-leaky label for each surfaced peer-authentication rejection (Boundary A: the
 /// transport reports the reason; the daemon audits it).
 fn reject_reason_str(reason: &RejectReason) -> &'static str {
     match reason {
@@ -835,7 +835,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     let host = hostname();
     let socket = cfg.socket_path.display().to_string();
 
-    // 1. Connection admission (cert half already verified by the transport). ADR-0019's
+    // 1. Connection admission (the transport has already authenticated the peer for its channel class). ADR-0019's
     //    scheme audits admission at seq 1 for BOTH outcomes: a deny closes here; a permit
     //    emits a `connection`/permit AU-3 record (seq 1) BEFORE the request is read, and
     //    (codex round-8 P1) GATES on it — the request record follows at seq 2 only once
@@ -2755,7 +2755,7 @@ pub trait PlaneAccept {
         &self,
     ) -> impl Future<Output = Result<(Self::Raw, PeerCreds), maknae_vault::RawAcceptError>> + Send;
 
-    /// Bounded half: run the mTLS handshake within `handshake_timeout` and report the
+    /// Bounded half: run the TLS handshake within `handshake_timeout` and report the
     /// authenticated peer, or an `AcceptRejection` carrying the passed-through creds. Run
     /// per-connection UNDER the accept loop's semaphore.
     fn finish_handshake(
@@ -2894,7 +2894,7 @@ async fn drain_refusal_audit<E: AuditEmit + Send + Sync + 'static>(
 }
 
 /// The anti-DoS accept loop (spec §6a/§10). Bounds live handlers with a
-/// `cfg.max_connections` semaphore; audits-and-continues on a surfaced cert-half
+/// `cfg.max_connections` semaphore; audits-and-continues on a surfaced peer-authentication
 /// rejection (never `?` — a bad handshake must not kill the daemon); fast-closes at
 /// capacity. Also `select!`s on `supervisor` (codex round-5 P1): the credential
 /// supervisor's handle resolving means it gave up (retry window exhausted) and cleared
@@ -3163,7 +3163,7 @@ where
                                             )
                                             .await;
                                         }
-                                        // A surfaced cert-half rejection: audit WHO/WHY and drop
+                                        // A surfaced peer-authentication rejection: audit WHO/WHY and drop
                                         // (Boundary A — the transport reports, the daemon audits).
                                         Err(rej) => {
                                             let uid = rej.peer_creds.map(|c| c.uid).unwrap_or(0);
@@ -7061,7 +7061,7 @@ where
     // under the normal service-account setup `maknaed`'s PRIMARY group is NOT `maknae`
     // (it's a supplementary member), so a bare bind would group-own the 0660 socket by the
     // wrong group and block authorized `maknae`-group peers at the socket layer, before
-    // mTLS/`uid_in_maknae_group` ever runs. This `?` propagates through the SAME post-mint
+    // the TLS handshake or `uid_in_maknae_group` ever runs. This `?` propagates through the SAME post-mint
     // failure path as a bind error (see this fn's doc comment): the caller's unconditional
     // `client.shutdown().await` revokes the minted token before returning `ExitCode::FAILURE`.
     let gid =

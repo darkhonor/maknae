@@ -150,7 +150,7 @@ claim = "One kernel across all three. The lattice gets richer and the authority 
 evidence = "README.md — \"That is not a special mode\" · design/adr/ADR-0004-modular-authorization-architecture.md"
 
 [delivery]
-built = "Trust plane: maknaed as sole PDP, per-request authorization composed deny-overrides, subject-side OS DAC by descriptor delegation, append-only audit gating the reply, FIPS-asserted mTLS planes."
+built = "Trust plane: maknaed as sole PDP, per-request authorization composed deny-overrides, subject-side OS DAC by descriptor delegation, append-only audit gating the reply, FIPS-asserted TLS planes."
 unbuilt = "Runtime plane and the entire knowledge lifecycle: the Knowledge Lake, the intake routes and review hold, the skill registry, the tier state machine, the promotion pipeline, the consolidation cycle, and the remote gateway."
 honest = "The kernel that makes the loop safe is substantially real. The loop is not. This graphic is the concept, not a description of a working system."
 evidence = "design/knowledge-lifecycle-contract.md · design/diagrams/generated-system-interfaces.svg"

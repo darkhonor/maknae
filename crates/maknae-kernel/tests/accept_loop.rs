@@ -1,5 +1,5 @@
 //! Accept-loop integration suite (spec §10). Exercises the run-loop's accept-level
-//! behaviour — audit-and-continue on a surfaced cert-half rejection (NEVER kill the
+//! behaviour — audit-and-continue on a surfaced handshake rejection (NEVER kill the
 //! daemon), fast-close at capacity, and audit of a handshake-timeout rejection —
 //! against a SCRIPTED [`maknae_kernel::PlaneAccept`] fake.
 //!

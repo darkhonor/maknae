@@ -1,9 +1,10 @@
 #![cfg(test)]
 
-//! In-process mTLS negative suite (Stage 2, CI). Unit-module so it can reach pub(crate)
+//! In-process negative suite (Stage 2, CI) for both channel classes: mutual TLS for machine
+//! peers, server-authenticated TLS for the certless client. Unit-module so it can reach pub(crate)
 //! config/verifier constructors. Uses tokio duplex (no socket/peer-creds — those are unit
 //! tested in socket.rs/peercred.rs). rcgen mints a test CA + kernel/cli leaves. This is
-//! ADR-0005's mTLS negative suite: happy path + each negative fails closed.
+//! ADR-0005's negative suite: happy path + each negative fails closed.
 use crate::{CaBundle, ChannelPeer, PeerAuth, Plane, SanRule, TrustBundle};
 use maknae_crypto::plane_key::PlaneKey;
 use maknae_crypto::rcgen;

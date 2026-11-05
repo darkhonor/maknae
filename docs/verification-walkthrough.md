@@ -247,7 +247,7 @@ mv ~/.maknae/providers.yaml.orig ~/.maknae/providers.yaml
 
 **Claim.** Once the administrator revokes B's Vault token, B gets no more model calls, and A carries on.
 
-**Control.** No matrix cell is keyed to token validity, so the control is cited by credential-path step. Every run mints its client certificate with the stored token (`bins/maknae/src/agent.rs:535`), and every turn makes its own wrapped read of the key with that token (`agent.rs:373`). Credential-path steps: `load the user token; choose the providers.yaml entry` and `wrapped read of <kv>/data/<prefix>/<user>/<subpath>, X-Vault-Wrap-TTL: 60s`. A's unaffected run rests on `cli_a × key_a`, A's own identity.
+**Control.** No matrix cell is keyed to token validity, so the control is cited by credential-path step. Every turn makes its own wrapped read of the key with the stored token (`agent.rs:373`), and Vault refuses that read once the token is revoked. The CLI also mints its plane leaf with the token first (`bins/maknae/src/agent.rs:535`); that is a client-side self-check only, since the daemon requests no client certificate and admits B by its kernel-attested uid and `maknae`-group membership, which a token revocation does not touch. Credential-path steps: `load the user token; choose the providers.yaml entry` and `wrapped read of <kv>/data/<prefix>/<user>/<subpath>, X-Vault-Wrap-TTL: 60s`. A's unaffected run rests on `cli_a × key_a`, A's own identity.
 
 `maknae agent` runs one prompt per invocation (`bins/maknae/src/cli.rs:146-151`). So "mid-conversation" means between the loop steps of one run. This claim therefore uses fresh runs.
 

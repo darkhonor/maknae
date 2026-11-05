@@ -9,7 +9,7 @@ policy**, the **KV v2** mount holding each user's provider API keys, the
 **AppRole** role on a separate agent mount, plus the administrator policy that writes
 agent credentials.
 
-The Rust plane-cert client (`maknae-vault`) and the mTLS transport consume this PKI.
+The Rust plane-cert client (`maknae-vault`) and the TLS transport consume this PKI.
 
 ## What it stands up
 
