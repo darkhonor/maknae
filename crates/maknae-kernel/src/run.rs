@@ -2924,15 +2924,14 @@ where
     E: AuditEmit + Send + Sync + 'static,
     P: Authorizer + Send + Sync + 'static,
 {
-    if acceptor.peer_auth() != &class.peer_auth {
+    let channel_mismatch = acceptor.peer_auth() != &class.peer_auth;
+    if channel_mismatch {
         eprintln!(
             "maknaed: the listener for {} authenticates peers as {:?}, its channel class as {:?}; serving nothing",
             class.socket.display(),
             acceptor.peer_auth(),
             class.peer_auth
         );
-        supervisor.abort();
-        return ServeOutcome::ChannelMismatch;
     }
     cfg.socket_path = class.socket.clone();
     wctx.socket = class.socket.display().to_string();
@@ -2972,6 +2971,9 @@ where
     tokio::pin!(supervisor);
 
     let outcome = loop {
+        if channel_mismatch {
+            break ServeOutcome::ChannelMismatch;
+        }
         tokio::select! {
             biased;
             _ = &mut shutdown => break ServeOutcome::GracefulShutdown,
@@ -3200,6 +3202,12 @@ where
         (ServeOutcome::SupervisorExited(e), _) => (
             "deny",
             format!("shutdown: credential supervisor exited: {e}"),
+            "unavailable",
+        ),
+        (ServeOutcome::ChannelMismatch, _) => (
+            "deny",
+            "shutdown: the listener's peer authentication does not match its channel class"
+                .to_string(),
             "unavailable",
         ),
         (_, Drain::Applied) => (

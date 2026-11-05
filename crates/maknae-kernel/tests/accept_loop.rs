@@ -775,6 +775,10 @@ async fn a_listener_that_authenticates_otherwise_than_its_class_serves_nothing()
         recs.iter().all(|r| r.event != "connection"),
         "no connection was served: {recs:?}"
     );
+    assert!(
+        recs.iter().any(|r| r.event == "shutdown"),
+        "the mismatch exit writes the shutdown record: {recs:?}"
+    );
 }
 
 /// Companion to the supervisor-exit test: the OTHER legitimate way the loop stops
