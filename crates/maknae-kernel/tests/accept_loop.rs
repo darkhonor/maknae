@@ -72,12 +72,14 @@ struct FakeAccept {
     /// far the loop has progressed (P2: proving the loop keeps accepting even while the
     /// at-capacity audit sink is slow).
     popped: Arc<std::sync::atomic::AtomicUsize>,
+    peer_auth: PeerAuth,
 }
 impl FakeAccept {
     fn new(items: Vec<Scripted>) -> Self {
         FakeAccept {
             queue: Mutex::new(items.into_iter().collect()),
             popped: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            peer_auth: PeerAuth::Certless,
         }
     }
     fn pop_counter(&self) -> Arc<std::sync::atomic::AtomicUsize> {
@@ -87,6 +89,10 @@ impl FakeAccept {
 impl PlaneAccept for FakeAccept {
     type Raw = FakeRaw;
     type Stream = DuplexStream;
+
+    fn peer_auth(&self) -> &PeerAuth {
+        &self.peer_auth
+    }
 
     // Pop INSIDE the future so a `select!` that loses to shutdown (dropping this future
     // unpolled) does not silently consume a scripted item. The std MutexGuard is released
@@ -342,7 +348,8 @@ async fn at_capacity_fast_closes() {
         ok_conn("spiffe://d/plane/cli", 2002),
     ];
     // read_timeout_ms = 1000 so the first handler keeps the permit long enough.
-    let recs = drive(script, cfg_with(1, 1000)).await;
+    let class = class_on("/run/maknae/at-capacity.sock");
+    let recs = drive_class(class, script, cfg_with(1, 1000), common::serving()).await;
     drop(client1); // keep client1's peer end open across the loop's processing window
 
     let at_cap = recs
@@ -352,6 +359,7 @@ async fn at_capacity_fast_closes() {
     assert_eq!(at_cap.outcome.result, "deny");
     assert_eq!(at_cap.source.uid, 2002);
     assert_eq!(at_cap.outcome.posture, "unauthorized");
+    assert_eq!(at_cap.where_.socket, "/run/maknae/at-capacity.sock");
 }
 
 #[tokio::test]
@@ -719,6 +727,53 @@ async fn supervisor_exit_stops_the_loop_and_reports_failure() {
             .contains("credential supervisor exited"),
         "{:?}",
         recs[0].outcome
+    );
+}
+
+#[tokio::test]
+async fn a_listener_that_authenticates_otherwise_than_its_class_serves_nothing() {
+    let emit = RecEmit::new();
+    let mut acceptor = FakeAccept::new(vec![ok_conn("spiffe://d/plane/cli", 4001)]);
+    acceptor.peer_auth = PeerAuth::PlaneLeaf {
+        accept: maknae_vault::SanRule::Exact("spiffe://d/plane/cli".to_string()),
+    };
+    let popped = acceptor.pop_counter();
+    let shutdown = tokio::time::sleep(Duration::from_millis(300));
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        maknae_kernel::accept_loop(
+            acceptor,
+            client_class(),
+            emit.clone(),
+            Arc::new(SessionIds::with_nonce(1)),
+            cfg_with(64, 150),
+            wctx(),
+            shutdown,
+            pending_supervisor(),
+            std::sync::Arc::new(common::AlwaysPermit),
+            std::sync::Arc::new(maknae_kernel::LiveConfig::new(Default::default(), None)),
+            std::sync::Arc::new("test-backend".to_string()),
+            std::sync::Arc::new("US".to_string()),
+            std::sync::Arc::new("ml-dsa-87".to_string()),
+            std::sync::Arc::new(None),
+            maknae_kernel::unavailable_egress(),
+            common::no_baseline(),
+            common::serving(),
+        ),
+    )
+    .await
+    .expect("accept_loop must return");
+
+    assert!(
+        matches!(outcome, ServeOutcome::ChannelMismatch),
+        "expected ServeOutcome::ChannelMismatch, got {outcome:?}"
+    );
+    assert_eq!(popped.load(std::sync::atomic::Ordering::Relaxed), 0);
+    let recs = emit.records();
+    assert!(
+        recs.iter().all(|r| r.event != "connection"),
+        "no connection was served: {recs:?}"
     );
 }
 

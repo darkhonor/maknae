@@ -222,7 +222,6 @@ pub struct PlaneListener {
     auth: PeerAuth,
     /// The bound pathname socket — unlinked on drop (tokio/std `UnixListener` leaves it).
     path: std::path::PathBuf,
-    /// Last, so the sink guard it owns outlives every acceptor built from it.
     identity: Arc<ServerIdentity>,
 }
 
@@ -272,6 +271,10 @@ impl PlaneListener {
     /// `?` in the loop: see [`RawAcceptError`].
     pub async fn accept_raw(&self) -> Result<(RawPlaneConn, PeerCreds), RawAcceptError> {
         accept_raw_on(&self.listener).await
+    }
+
+    pub fn peer_auth(&self) -> &PeerAuth {
+        &self.auth
     }
 
     /// Bounded half of accept (anti-DoS): complete the TLS server handshake within

@@ -71,7 +71,8 @@ use crate::boot_gate::authz_boot_gate;
 use crate::groupres::{maknae_gid, uid_in_maknae_group};
 use crate::handler::{
     build_authz_request, build_whoami, discharge_plan, dispatch_verb, lexical_pregate, may_respond,
-    peer_san, verb_to_action, Dispatch, Drain, ServeOutcome, AUTHZ_DECIDE_TIMEOUT,
+    peer_san, verb_to_action, Admission, ChannelClass, Dispatch, Drain, ServeOutcome,
+    AUTHZ_DECIDE_TIMEOUT,
 };
 use maknae_proto::{encode_response_zeroizing, ProtoErrCode, ProtoError};
 use maknae_security::{
@@ -710,7 +711,7 @@ pub async fn handle<S, E, P>(
     stream: S,
     peer_uri: Option<String>,
     peer_uid: u32,
-    admitted: bool,
+    class_admitted: bool,
     peer_user: Option<String>,
     peer_dir: Option<PathBuf>,
     emit: Arc<E>,
@@ -737,7 +738,7 @@ pub async fn handle<S, E, P>(
         stream,
         peer_uri,
         peer_uid,
-        admitted,
+        class_admitted,
         peer_user,
         peer_dir,
         emit,
@@ -765,9 +766,9 @@ pub async fn handle<S, E, P>(
 /// `tokio::spawn`ed call is `'static`.
 ///
 /// Sequence (spec §6):
-/// 1. `authorize_connection(channel_authenticated = true, admitted)` — the stream exists
+/// 1. `authorize_connection(channel_authenticated = true, class_admitted)` — the stream exists
 ///    only because the channel class's TLS-layer requirement was met, so
-///    `channel_authenticated` is `true`; `admitted` is the class admission result. On
+///    `channel_authenticated` is `true`; `class_admitted` is the class admission result. On
 ///    `Deny` → emit an AU-3 `connection`/`deny` record and close WITHOUT reading a verb.
 /// 2. On `Permit`, emit the `connection`/permit admission record (seq 1) and GATE on
 ///    it (codex round-8 P1, same `may_respond` gate as step 4): a failed admission
@@ -785,7 +786,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     mut stream: S,
     peer_uri: Option<String>,
     peer_uid: u32,
-    admitted: bool,
+    class_admitted: bool,
     // #275: the peer OS username, resolved on the blocking pool alongside the
     // group check. `None` on every fail-closed accept-loop arm, where not
     // spawning NSS work is the point -- the record then renders
@@ -841,7 +842,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     //    (codex round-8 P1) GATES on it — the request record follows at seq 2 only once
     //    the admission record is durably written, so a served session's trail is always
     //    complete.
-    match authorize_connection(true, admitted) {
+    match authorize_connection(true, class_admitted) {
         ConnDecision::Deny { reason } => {
             let mut rec = make_record(
                 "connection",
@@ -2716,19 +2717,6 @@ async fn emit_request_deny<E: AuditEmit + Send + Sync>(
 // Layer 2: the accept loop.
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Admission {
-    MaknaeGroupMember,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChannelClass {
-    pub peer_auth: PeerAuth,
-    pub admission: Admission,
-    pub lane: maknae_security::Lane,
-    pub socket: PathBuf,
-}
-
 /// One accepted, authenticated connection with the peer facts the daemon polices.
 pub struct Conn<S> {
     pub stream: S,
@@ -2748,6 +2736,10 @@ pub trait PlaneAccept {
     /// `finish_handshake`).
     type Raw: Send + 'static;
     type Stream: AsyncRead + AsyncWrite + Unpin + Send + 'static;
+
+    /// How this listener authenticates its peers; `accept_loop` refuses to serve a
+    /// class that names another.
+    fn peer_auth(&self) -> &PeerAuth;
 
     /// Prompt half: take the next raw socket + its peer-creds. The loop continues on
     /// either error (never `?`).
@@ -2769,6 +2761,10 @@ pub trait PlaneAccept {
 impl PlaneAccept for PlaneListener {
     type Raw = RawPlaneConn;
     type Stream = AuthenticatedStream;
+
+    fn peer_auth(&self) -> &PeerAuth {
+        PlaneListener::peer_auth(self)
+    }
 
     // `async fn` (not a manual `-> impl Future`): its anonymous future satisfies the trait's
     // `+ Send` bound because the only awaits are `Send`.
@@ -2928,6 +2924,16 @@ where
     E: AuditEmit + Send + Sync + 'static,
     P: Authorizer + Send + Sync + 'static,
 {
+    if acceptor.peer_auth() != &class.peer_auth {
+        eprintln!(
+            "maknaed: the listener for {} authenticates peers as {:?}, its channel class as {:?}; serving nothing",
+            class.socket.display(),
+            acceptor.peer_auth(),
+            class.peer_auth
+        );
+        supervisor.abort();
+        return ServeOutcome::ChannelMismatch;
+    }
     cfg.socket_path = class.socket.clone();
     wctx.socket = class.socket.display().to_string();
     let class = Arc::new(class);
@@ -7066,12 +7072,7 @@ where
     // `client.shutdown().await` revokes the minted token before returning `ExitCode::FAILURE`.
     let gid =
         maknae_gid().map_err(|e| format!("resolving `maknae` group for the socket: {e:?}"))?;
-    let class = ChannelClass {
-        peer_auth: PeerAuth::Certless,
-        admission: Admission::MaknaeGroupMember,
-        lane: maknae_security::Lane::Local,
-        socket: transport.socket_path.clone(),
-    };
+    let class = crate::handler::client_class(&transport);
     let identity = maknae_vault::ServerIdentity::attach(client).map_err(|e| e.to_string())?;
     let listener = PlaneListener::bind(
         &class.socket,
@@ -16268,6 +16269,10 @@ mod reload_tests {
     impl PlaneAccept for IdleAccept {
         type Raw = ();
         type Stream = tokio::io::DuplexStream;
+
+        fn peer_auth(&self) -> &PeerAuth {
+            &PeerAuth::Certless
+        }
 
         async fn accept_raw(&self) -> Result<((), PeerCreds), maknae_vault::RawAcceptError> {
             std::future::pending().await
