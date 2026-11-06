@@ -1311,7 +1311,7 @@ async fn every_admission_refusal_is_a_content_free_deny_with_no_intent_and_no_pd
             ChoiceRefusal::UnsafeUsername,
         ),
         (
-            None,
+            Some(""),
             Some(common::test_choice()),
             ChoiceRefusal::UnsafeUsername,
         ),

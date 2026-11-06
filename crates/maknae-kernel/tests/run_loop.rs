@@ -110,8 +110,8 @@ async fn audit_failure_withholds_response() {
     maknae_kernel::handle(
         s,
         Some("spiffe://d/plane/cli".to_string()),
-        maknae_kernel::SessionRecord::for_test(501, None, Some(common::fixture_home())).into(),
-        maknae_kernel::FactsGate::allow(),
+        maknae_kernel::SessionRecord::for_test(501, None).into(),
+        maknae_kernel::FactsGate::allow_as(None, Some(common::fixture_home())),
         emit.clone(),
         default_cfg(),
         serde_json::json!({}),
@@ -163,10 +163,10 @@ async fn admission_audit_failure_withholds_response_without_reading_request() {
     maknae_kernel::handle(
         s,
         Some("spiffe://d/plane/cli".to_string()),
-        maknae_kernel::SessionRecord::for_test(501, None, Some(common::fixture_home()))
+        maknae_kernel::SessionRecord::for_test(501, None)
             .with_session_id(99)
             .into(),
-        maknae_kernel::FactsGate::allow(),
+        maknae_kernel::FactsGate::allow_as(None, Some(common::fixture_home())),
         emit.clone(),
         default_cfg(),
         serde_json::json!({}),
@@ -222,7 +222,7 @@ async fn deny_audits_then_closes() {
     maknae_kernel::handle(
         s,
         Some("spiffe://d/plane/cli".to_string()),
-        maknae_kernel::SessionRecord::for_test(501, None, Some(common::fixture_home()))
+        maknae_kernel::SessionRecord::for_test(501, None)
             .with_session_id(7)
             .into(),
         common::ScriptedFacts::gate(vec![common::non_member()]),
@@ -285,8 +285,8 @@ async fn happy_ping_responds() {
     maknae_kernel::handle(
         s,
         Some("spiffe://d/plane/cli".to_string()),
-        maknae_kernel::SessionRecord::for_test(501, None, Some(common::fixture_home())).into(),
-        maknae_kernel::FactsGate::allow(),
+        maknae_kernel::SessionRecord::for_test(501, None).into(),
+        maknae_kernel::FactsGate::allow_as(None, Some(common::fixture_home())),
         emit.clone(),
         default_cfg(),
         serde_json::json!({}),
@@ -336,10 +336,10 @@ async fn permit_admission_precedes_request_record() {
     maknae_kernel::handle(
         s,
         Some("spiffe://d/plane/cli".to_string()),
-        maknae_kernel::SessionRecord::for_test(501, None, Some(common::fixture_home()))
+        maknae_kernel::SessionRecord::for_test(501, None)
             .with_session_id(42)
             .into(),
-        maknae_kernel::FactsGate::allow(),
+        maknae_kernel::FactsGate::allow_as(None, Some(common::fixture_home())),
         emit.clone(),
         default_cfg(),
         serde_json::json!({}),
@@ -398,8 +398,8 @@ async fn happy_whoami_carries_peer_facts() {
     maknae_kernel::handle(
         s,
         Some("spiffe://d/plane/cli".to_string()),
-        maknae_kernel::SessionRecord::for_test(501, None, Some(common::fixture_home())).into(),
-        maknae_kernel::FactsGate::allow(),
+        maknae_kernel::SessionRecord::for_test(501, None).into(),
+        maknae_kernel::FactsGate::allow_as(None, Some(common::fixture_home())),
         emit.clone(),
         default_cfg(),
         serde_json::json!({}),
@@ -442,8 +442,8 @@ async fn read_timeout_closes() {
     maknae_kernel::handle(
         s,
         Some("spiffe://d/plane/cli".to_string()),
-        maknae_kernel::SessionRecord::for_test(501, None, Some(common::fixture_home())).into(),
-        maknae_kernel::FactsGate::allow(),
+        maknae_kernel::SessionRecord::for_test(501, None).into(),
+        maknae_kernel::FactsGate::allow_as(None, Some(common::fixture_home())),
         emit.clone(),
         cfg,
         serde_json::json!({}),
@@ -501,8 +501,8 @@ async fn configured_au3_1_is_stamped_onto_every_record() {
     maknae_kernel::handle(
         s,
         Some("spiffe://d/plane/cli".to_string()),
-        maknae_kernel::SessionRecord::for_test(501, None, Some(common::fixture_home())).into(),
-        maknae_kernel::FactsGate::allow(),
+        maknae_kernel::SessionRecord::for_test(501, None).into(),
+        maknae_kernel::FactsGate::allow_as(None, Some(common::fixture_home())),
         emit.clone(),
         default_cfg(),
         au3_1.clone(),
@@ -536,7 +536,7 @@ async fn configured_au3_1_is_stamped_onto_every_record() {
     maknae_kernel::handle(
         s2,
         Some("spiffe://d/plane/cli".to_string()),
-        maknae_kernel::SessionRecord::for_test(501, None, Some(common::fixture_home())).into(),
+        maknae_kernel::SessionRecord::for_test(501, None).into(),
         common::ScriptedFacts::gate(vec![common::non_member()]),
         emit2.clone(),
         default_cfg(),
@@ -599,10 +599,10 @@ async fn unread_response_does_not_hang_the_handler() {
         maknae_kernel::handle(
             server,
             Some("spiffe://d/plane/cli".to_string()),
-            maknae_kernel::SessionRecord::for_test(501, None, Some(common::fixture_home()))
+            maknae_kernel::SessionRecord::for_test(501, None)
                 .with_session_id(7)
                 .into(),
-            maknae_kernel::FactsGate::allow(),
+            maknae_kernel::FactsGate::allow_as(None, Some(common::fixture_home())),
             emit.clone(),
             cfg,
             serde_json::json!({}),
@@ -659,10 +659,10 @@ async fn serve_raw(
     maknae_kernel::handle(
         s,
         Some("spiffe://d/plane/cli".to_string()),
-        maknae_kernel::SessionRecord::for_test(501, None, Some(common::fixture_home()))
+        maknae_kernel::SessionRecord::for_test(501, None)
             .with_session_id(9)
             .into(),
-        maknae_kernel::FactsGate::allow(),
+        maknae_kernel::FactsGate::allow_as(None, Some(common::fixture_home())),
         emit.clone(),
         cfg,
         serde_json::json!({}),

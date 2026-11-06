@@ -1,5 +1,6 @@
 //! The daemon-side session record and the bounded gather of the facts it is
 //! re-decided on (ADR-0006 decision 4, #115).
+#[cfg(any(test, feature = "hermetic-test-seam"))]
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -63,23 +64,27 @@ impl FactsGate {
         })
     }
 
+    /// A member named `user` (or `allow-<uid>`) whose home is `dir` (or none that resolves).
     #[cfg(any(test, feature = "hermetic-test-seam"))]
-    pub fn allow() -> Arc<Self> {
-        Self::for_test(Arc::new(AllowFacts), Duration::from_secs(5))
+    pub fn allow_as(user: Option<String>, dir: Option<PathBuf>) -> Arc<Self> {
+        Self::for_test(Arc::new(AllowFacts { user, dir }), Duration::from_secs(5))
     }
 }
 
 /// A member with a live login whose account state this platform does not read.
 #[cfg(any(test, feature = "hermetic-test-seam"))]
-pub struct AllowFacts;
+pub struct AllowFacts {
+    pub user: Option<String>,
+    pub dir: Option<PathBuf>,
+}
 
 #[cfg(any(test, feature = "hermetic-test-seam"))]
 impl SessionFacts for AllowFacts {
     fn membership(&self, _admission: Admission, uid: u32) -> Result<Membership, AuthzError> {
         Ok(Membership {
             in_group: true,
-            user: format!("allow-{uid}"),
-            dir: PathBuf::from("/nonexistent"),
+            user: self.user.clone().unwrap_or_else(|| format!("allow-{uid}")),
+            dir: self.dir.clone().unwrap_or_default(),
         })
     }
 
@@ -99,15 +104,13 @@ impl SessionFacts for AllowFacts {
 }
 
 /// Every lookup the decision needs, as one blocking unit under the gate's breaker
-/// and bound. `user` is the session's when it has one; otherwise `login` gets
-/// the name `membership` resolved.
+/// and bound. `login` is asked for the name this same `membership` resolved.
 pub(crate) async fn gather(
     gate: &FactsGate,
     admission: Admission,
     uid: u32,
     process: Arc<PeerProcess>,
     pid: Option<u32>,
-    user: Option<String>,
 ) -> Facts {
     let now = Instant::now();
     let admitted = gate.breaker.lock().await.begin_attempt_at(now);
@@ -129,8 +132,8 @@ pub(crate) async fn gather(
                 gate.bound,
                 tokio::task::spawn_blocking(move || {
                     let membership = facts.membership(admission, uid);
-                    let name = user.or_else(|| membership.as_ref().ok().map(|m| m.user.clone()));
-                    let login = facts.login(&process, pid, uid, name.as_deref());
+                    let name = membership.as_ref().ok().map(|m| m.user.as_str());
+                    let login = facts.login(&process, pid, uid, name);
                     let account = facts.account(uid);
                     Facts {
                         membership,
@@ -168,10 +171,10 @@ pub(crate) async fn gather(
 }
 
 /// One admitted client connection, held only daemon-side and dropped with it.
+/// `user` is the name admitted at connect; every request decides on its own gather.
 pub struct SessionRecord {
     pub uid: u32,
     pub user: Option<String>,
-    pub dir: Option<PathBuf>,
     pub session_id: u64,
     pub lane: maknae_security::Lane,
     pub admission: Admission,
@@ -206,11 +209,10 @@ impl SessionRecord {
     }
 
     #[cfg(any(test, feature = "hermetic-test-seam"))]
-    pub fn for_test(uid: u32, user: Option<String>, dir: Option<PathBuf>) -> Self {
+    pub fn for_test(uid: u32, user: Option<String>) -> Self {
         SessionRecord {
             uid,
             user,
-            dir,
             session_id: 1,
             lane: maknae_security::Lane::Local,
             admission: Admission::MaknaeGroupMember,
@@ -293,14 +295,13 @@ mod tests {
         FactsGate::for_test(Arc::clone(probe) as Arc<dyn SessionFacts>, bound)
     }
 
-    async fn ask(gate: &FactsGate, user: Option<&str>) -> Facts {
+    async fn ask(gate: &FactsGate) -> Facts {
         gather(
             gate,
             Admission::MaknaeGroupMember,
             4242,
             Arc::new(PeerProcess::Gone),
             Some(1),
-            user.map(str::to_string),
         )
         .await
     }
@@ -308,7 +309,7 @@ mod tests {
     #[tokio::test]
     async fn the_three_answers_are_gathered_together() {
         let probe = Probe::new(Duration::ZERO, resolved("ann"));
-        let got = ask(&gate(&probe, Duration::from_secs(5)), None).await;
+        let got = ask(&gate(&probe, Duration::from_secs(5))).await;
         assert_eq!(
             got,
             Facts {
@@ -321,25 +322,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_login_is_asked_for_the_sessions_user_before_the_resolved_one() {
-        let probe = Probe::new(Duration::ZERO, resolved("resolved"));
-        let g = gate(&probe, Duration::from_secs(5));
-        ask(&g, Some("bound")).await;
+    async fn the_login_is_asked_for_the_name_this_lookup_resolved() {
+        let probe = Probe::new(Duration::ZERO, resolved("renamed"));
+        ask(&gate(&probe, Duration::from_secs(5))).await;
         assert_eq!(
             *probe.seen_user.lock().unwrap(),
-            Some(Some("bound".to_string()))
-        );
-        ask(&g, None).await;
-        assert_eq!(
-            *probe.seen_user.lock().unwrap(),
-            Some(Some("resolved".to_string()))
+            Some(Some("renamed".to_string()))
         );
     }
 
     #[tokio::test]
     async fn a_failed_membership_is_unanswered_and_names_no_user() {
         let probe = Probe::new(Duration::ZERO, Err(AuthzError::Resolve("nss".into())));
-        let got = ask(&gate(&probe, Duration::from_secs(5)), None).await;
+        let got = ask(&gate(&probe, Duration::from_secs(5))).await;
         assert_eq!(got.membership, Err(AuthzError::Resolve("nss".into())));
         assert_eq!(*probe.seen_user.lock().unwrap(), Some(None));
     }
@@ -349,7 +344,7 @@ mod tests {
         let probe = Probe::new(Duration::from_millis(200), resolved("slow"));
         let g = gate(&probe, Duration::from_millis(20));
         for _ in 0..crate::blocking_guard::BLOCKING_BREAKER_TRIP_AFTER {
-            let got = ask(&g, None).await;
+            let got = ask(&g).await;
             assert_eq!(got, Facts::unanswered("session fact lookup timed out"));
             assert_eq!(
                 crate::authz::revalidate(4242, 4242, &got),
@@ -361,7 +356,7 @@ mod tests {
         let spawned = probe.calls.load(Ordering::SeqCst);
         for _ in 0..2 {
             assert_eq!(
-                ask(&g, None).await,
+                ask(&g).await,
                 Facts::unanswered("session fact lookup circuit breaker open")
             );
         }
@@ -381,7 +376,7 @@ mod tests {
             while b.begin_attempt_at(Instant::now()) == BreakerAdmission::Admit {}
         }
         assert_eq!(
-            ask(&g, None).await,
+            ask(&g).await,
             Facts::unanswered("session fact lookup blocking worker budget exhausted")
         );
         assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
@@ -411,7 +406,7 @@ mod tests {
         let g = FactsGate::for_test(Arc::new(Panics), Duration::from_secs(5));
         for _ in 0..=crate::blocking_guard::BLOCKING_BREAKER_TRIP_AFTER {
             assert_eq!(
-                ask(&g, None).await,
+                ask(&g).await,
                 Facts::unanswered("session fact lookup failed")
             );
         }
@@ -419,7 +414,7 @@ mod tests {
 
     #[test]
     fn the_first_ending_other_than_a_disconnect_stands() {
-        let s = SessionRecord::for_test(1, None, None);
+        let s = SessionRecord::for_test(1, None);
         assert_eq!(s.ending(), Ending::Disconnect);
         s.end(Ending::Disconnect);
         assert_eq!(s.ending(), Ending::Disconnect);
@@ -431,7 +426,7 @@ mod tests {
 
     #[test]
     fn a_session_expires_only_after_its_lifetime() {
-        let mut s = SessionRecord::for_test(1, None, None).with_session_id(9);
+        let mut s = SessionRecord::for_test(1, None).with_session_id(9);
         assert_eq!(s.session_id, 9);
         assert!(!s.expired());
         s.lifetime = Duration::ZERO;
@@ -443,10 +438,23 @@ mod tests {
 
     #[test]
     fn the_allowing_facts_answer_a_live_member_whose_account_is_not_read() {
-        let f = AllowFacts;
+        let named = AllowFacts {
+            user: Some("ann".into()),
+            dir: Some("/home/ann".into()),
+        };
+        let m = named.membership(Admission::MaknaeGroupMember, 7).unwrap();
+        assert_eq!(
+            (m.in_group, m.user.as_str(), m.dir),
+            (true, "ann", PathBuf::from("/home/ann"))
+        );
+        let f = AllowFacts {
+            user: None,
+            dir: None,
+        };
         let m = f.membership(Admission::MaknaeGroupMember, 7).unwrap();
         assert!(m.in_group);
         assert_eq!(m.user, "allow-7");
+        assert_eq!(m.dir, PathBuf::new());
         assert_eq!(f.login(&PeerProcess::Gone, None, 7, None), LoginFact::Live);
         assert_eq!(
             f.account(7),

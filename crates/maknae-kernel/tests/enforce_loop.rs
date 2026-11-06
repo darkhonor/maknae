@@ -282,13 +282,8 @@ where
     let task = tokio::spawn(maknae_kernel::handle(
         server,
         Some("spiffe://d/plane/cli".to_string()),
-        maknae_kernel::SessionRecord::for_test(
-            peer_uid,
-            None,
-            peer_home.map(std::path::Path::to_path_buf),
-        )
-        .into(),
-        maknae_kernel::FactsGate::allow(),
+        maknae_kernel::SessionRecord::for_test(peer_uid, None).into(),
+        maknae_kernel::FactsGate::allow_as(None, peer_home.map(std::path::Path::to_path_buf)),
         emit,
         maknae_config::transport_from_section(None).unwrap(),
         serde_json::json!({}),
@@ -447,13 +442,8 @@ where
     maknae_kernel::handle(
         server,
         Some("spiffe://d/plane/cli".to_string()),
-        maknae_kernel::SessionRecord::for_test(
-            peer_uid,
-            None,
-            peer_home.map(std::path::Path::to_path_buf),
-        )
-        .into(),
-        maknae_kernel::FactsGate::allow(),
+        maknae_kernel::SessionRecord::for_test(peer_uid, None).into(),
+        maknae_kernel::FactsGate::allow_as(None, peer_home.map(std::path::Path::to_path_buf)),
         emit,
         transport,
         serde_json::json!({}),
@@ -3701,13 +3691,8 @@ async fn drive_baseline(
     maknae_kernel::handle(
         server,
         Some("spiffe://d/plane/cli".to_string()),
-        maknae_kernel::SessionRecord::for_test(
-            nix::unistd::geteuid().as_raw(),
-            None,
-            Some(fx.dir.clone()),
-        )
-        .into(),
-        maknae_kernel::FactsGate::allow(),
+        maknae_kernel::SessionRecord::for_test(nix::unistd::geteuid().as_raw(), None).into(),
+        maknae_kernel::FactsGate::allow_as(None, Some(fx.dir.clone())),
         emit,
         maknae_config::transport_from_section(None).unwrap(),
         serde_json::json!({}),

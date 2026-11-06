@@ -1354,6 +1354,65 @@ async fn a_directory_account_is_served_and_says_not_checked() {
 }
 
 #[tokio::test]
+async fn a_group_source_that_fails_is_an_infrastructure_denial_that_keeps_the_name() {
+    let mut failed = common::active_member();
+    failed.membership = Err(maknae_kernel::AuthzError::Unanswered {
+        user: "scripted".into(),
+        why: "EIO".into(),
+    });
+    let (conn, client) = pinging().await;
+    let recs = drive_facts(vec![conn], common::ScriptedFacts::gate(vec![failed])).await;
+    let session = of_session(&recs);
+    assert_eq!(session.len(), 1, "{session:?}");
+    let deny = session[0];
+    assert_eq!(
+        (
+            deny.event.as_str(),
+            deny.outcome.result.as_str(),
+            deny.outcome.posture.as_str(),
+            deny.subject.user.as_deref(),
+        ),
+        ("connection", "deny", "unavailable", Some("scripted"))
+    );
+    assert!(
+        deny.outcome.reason.starts_with("infrastructure"),
+        "{:?}",
+        deny.outcome.reason
+    );
+    assert_eq!(answer(client).await, None);
+}
+
+#[tokio::test]
+async fn a_user_renamed_between_connect_and_request_is_served_under_the_new_name() {
+    let mut renamed = common::active_member();
+    if let Ok(m) = renamed.membership.as_mut() {
+        m.user = "renamed-115".into();
+        m.dir = "/home/renamed-115".into();
+    }
+    let (conn, client) = pinging().await;
+    let recs = drive_facts(
+        vec![conn],
+        common::ScriptedFacts::gate(vec![common::active_member(), renamed]),
+    )
+    .await;
+    assert_eq!(
+        of_session(&recs)
+            .iter()
+            .map(|r| (r.event.as_str(), r.subject.user.as_deref()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("connection", Some("scripted")),
+            ("request", Some("renamed-115")),
+            ("session", Some("scripted")),
+        ]
+    );
+    assert!(matches!(
+        answer(client).await,
+        Some(maknae_proto::RespResult::Ok(maknae_proto::Payload::Pong))
+    ));
+}
+
+#[tokio::test]
 async fn a_served_connection_ends_with_a_disconnect_record() {
     let (conn, client) = pinging().await;
     let recs = drive_facts(

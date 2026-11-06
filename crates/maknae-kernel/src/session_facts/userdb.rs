@@ -72,8 +72,10 @@ pub(crate) fn map_record(json: &serde_json::Value, uid: u32, now_usec: u64) -> A
     else {
         return unknown("userdb: no record");
     };
-    if record.get("uid").and_then(serde_json::Value::as_u64) != Some(u64::from(uid)) {
-        return unknown("userdb: record is for another uid");
+    match record.get("uid").map(serde_json::Value::as_u64) {
+        Some(Some(got)) if got == u64::from(uid) => {}
+        Some(Some(_)) => return unknown("userdb: record is for another uid"),
+        Some(None) | None => return unknown("userdb: malformed uid"),
     }
     match record.get("locked") {
         None => {}
@@ -97,10 +99,17 @@ pub(crate) fn map_record(json: &serde_json::Value, uid: u32, now_usec: u64) -> A
             return AccountState::Disabled;
         }
     }
-    if !AGING_FIELDS
-        .iter()
-        .any(|k| record.get(*k).is_some_and(|v| !v.is_null()))
-    {
+    let mut shadow = false;
+    for key in AGING_FIELDS {
+        match record.get(key) {
+            None | Some(serde_json::Value::Null) => {}
+            Some(value) => match value.as_u64() {
+                Some(_) => shadow = true,
+                None => return unknown(format!("userdb: malformed {key}")),
+            },
+        }
+    }
+    if !shadow {
         return unknown("no shadow");
     }
     AccountState::Active
@@ -351,6 +360,64 @@ mod tests {
         assert_eq!(named(json!("a".repeat(129))), unprintable);
         assert_eq!(named(json!("a/b")), unprintable);
         assert_eq!(named(json!(7)), unprintable);
+    }
+
+    fn malformed() -> [serde_json::Value; 5] {
+        [json!("1"), json!(true), json!([1]), json!(-1), json!(1.5)]
+    }
+
+    #[test]
+    fn a_malformed_aging_field_is_unknown_never_shadow_evidence() {
+        for key in AGING_FIELDS {
+            for value in malformed() {
+                let alone = json!({"uid": 1000, key: value.clone()});
+                assert_eq!(
+                    map_record(&reply(alone), 1000, NOW),
+                    AccountState::Unknown(format!("userdb: malformed {key}")),
+                    "{key} = {value}"
+                );
+                assert_eq!(
+                    map_record(&with(key, value.clone()), 1000, NOW),
+                    AccountState::Unknown(format!("userdb: malformed {key}")),
+                    "{key} = {value} beside well-formed fields"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_field_the_mapping_reads_refuses_a_malformed_value() {
+        for value in malformed() {
+            assert_eq!(
+                map_record(&with("uid", value.clone()), 1000, NOW),
+                AccountState::Unknown("userdb: malformed uid".into()),
+                "uid = {value}"
+            );
+            for key in ["notAfterUSec", "notBeforeUSec"] {
+                assert_eq!(
+                    map_record(&with(key, value.clone()), 1000, NOW),
+                    AccountState::Unknown(format!("userdb: malformed {key}")),
+                    "{key} = {value}"
+                );
+            }
+            if !value.is_boolean() {
+                assert_eq!(
+                    map_record(&with("locked", value.clone()), 1000, NOW),
+                    AccountState::Unknown("userdb: malformed locked".into()),
+                    "locked = {value}"
+                );
+            }
+        }
+        assert_eq!(
+            map_record(&with("locked", json!(null)), 1000, NOW),
+            AccountState::Unknown("userdb: malformed locked".into())
+        );
+        let mut r = aging();
+        r.as_object_mut().expect("object").remove("uid");
+        assert_eq!(
+            map_record(&reply(r), 1000, NOW),
+            AccountState::Unknown("userdb: malformed uid".into())
+        );
     }
 
     #[test]

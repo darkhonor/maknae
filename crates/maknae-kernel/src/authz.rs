@@ -60,7 +60,7 @@ pub fn revalidate(bound_uid: u32, request_uid: u32, f: &Facts) -> Revalidation {
         return Revalidation::Deny(DenyCause::Infrastructure(FactSource::SessionFacts));
     }
     match &f.membership {
-        Err(AuthzError::Resolve(_)) => {
+        Err(AuthzError::Resolve(_) | AuthzError::Unanswered { .. }) => {
             return Revalidation::Deny(DenyCause::Infrastructure(FactSource::Group));
         }
         Err(AuthzError::NoUser) => return Revalidation::Deny(DenyCause::NotMember),
@@ -165,11 +165,16 @@ pub fn ending_posture(e: &Ending) -> &'static str {
 }
 
 pub fn admission_facts(
-    looked_up: Option<crate::groupres::Membership>,
+    looked_up: &Result<crate::groupres::Membership, AuthzError>,
 ) -> (bool, Option<String>, Option<std::path::PathBuf>) {
     match looked_up {
-        Some(m) => (m.in_group, Some(m.user), m.in_group.then_some(m.dir)),
-        None => (false, None, None),
+        Ok(m) => (
+            m.in_group,
+            Some(m.user.clone()),
+            m.in_group.then(|| m.dir.clone()),
+        ),
+        Err(AuthzError::Unanswered { user, .. }) => (false, Some(user.clone()), None),
+        Err(AuthzError::Resolve(_) | AuthzError::NoUser) => (false, None, None),
     }
 }
 
@@ -366,7 +371,7 @@ mod tests {
     #[test]
     fn a_member_carries_its_user_and_raw_home_through() {
         assert_eq!(
-            admission_facts(Some(membership(true, "b-435-sentinel"))),
+            admission_facts(&Ok(membership(true, "b-435-sentinel"))),
             (
                 true,
                 Some("b-435-sentinel".to_string()),
@@ -378,14 +383,24 @@ mod tests {
     #[test]
     fn a_non_member_keeps_its_user_but_never_its_home() {
         assert_eq!(
-            admission_facts(Some(membership(false, "c-435-sentinel"))),
+            admission_facts(&Ok(membership(false, "c-435-sentinel"))),
             (false, Some("c-435-sentinel".to_string()), None)
         );
     }
 
     #[test]
     fn a_failed_lookup_admits_no_one_and_carries_no_home() {
-        assert_eq!(admission_facts(None), (false, None, None));
+        for failed in [AuthzError::Resolve("nss".into()), AuthzError::NoUser] {
+            assert_eq!(admission_facts(&Err(failed)), (false, None, None));
+        }
+        let unanswered = AuthzError::Unanswered {
+            user: "d-115-sentinel".into(),
+            why: "EIO".into(),
+        };
+        assert_eq!(
+            admission_facts(&Err(unanswered)),
+            (false, Some("d-115-sentinel".to_string()), None)
+        );
     }
 
     const FAST: std::time::Duration = std::time::Duration::from_millis(20);
@@ -727,6 +742,20 @@ mod tests {
     fn an_unanswered_membership_is_infrastructure() {
         let mut f = member(true);
         f.membership = Err(AuthzError::Resolve("nss".into()));
+        f.login = LoginFact::NoSession;
+        assert_eq!(
+            revalidate(7, 7, &f),
+            deny(DenyCause::Infrastructure(FactSource::Group))
+        );
+    }
+
+    #[test]
+    fn a_failed_group_source_is_infrastructure_not_de_enrollment() {
+        let mut f = member(true);
+        f.membership = Err(AuthzError::Unanswered {
+            user: "s-115-sentinel".into(),
+            why: "EIO".into(),
+        });
         f.login = LoginFact::NoSession;
         assert_eq!(
             revalidate(7, 7, &f),

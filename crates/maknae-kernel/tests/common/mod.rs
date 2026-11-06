@@ -591,12 +591,8 @@ impl Fixture {
         )
     }
     pub fn session(&self) -> maknae_kernel::SessionRecord {
-        maknae_kernel::SessionRecord::for_test(
-            self.peer_uid,
-            self.peer_user.clone(),
-            self.requester_home.clone(),
-        )
-        .with_session_id(718)
+        maknae_kernel::SessionRecord::for_test(self.peer_uid, self.peer_user.clone())
+            .with_session_id(718)
     }
     /// The default starter over a session the caller keeps, to read its ending.
     pub fn start_in_session(
@@ -655,7 +651,7 @@ impl Fixture {
             server,
             Some("spiffe://d/plane/cli".into()),
             session,
-            maknae_kernel::FactsGate::allow(),
+            maknae_kernel::FactsGate::allow_as(self.peer_user.clone(), self.requester_home.clone()),
             records,
             config,
             serde_json::json!({"mutation": "untrusted extension"}),

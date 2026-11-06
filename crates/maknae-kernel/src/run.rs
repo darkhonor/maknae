@@ -876,7 +876,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 &mut stream,
                 &emit,
                 (&host, &socket),
-                &session,
+                (&session, session.user.as_deref()),
                 peer_uri.as_deref(),
                 (&cfg, FrameClass::Control),
                 "read",
@@ -988,7 +988,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             &mut stream,
             &emit,
             (&host, &socket),
-            &session,
+            (&session, session.user.as_deref()),
             peer_uri.as_deref(),
             (&cfg, class),
             action,
@@ -1004,9 +1004,10 @@ pub async fn handle_with_attempt_caps<S, E, P>(
         peer_uid,
         Arc::clone(&session.process),
         session.pid,
-        peer_user.clone(),
     )
     .await;
+    // #115: this request's own lookup names the user and home it is decided on.
+    let (_, peer_user, peer_dir) = admission_facts(&facts.membership);
     match revalidate(session.uid, peer_uid, &facts) {
         Revalidation::Continue => {}
         Revalidation::Deny(cause) => {
@@ -1015,7 +1016,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 &mut stream,
                 &emit,
                 (&host, &socket),
-                &session,
+                (&session, peer_user.as_deref()),
                 peer_uri.as_deref(),
                 (&cfg, class),
                 action,
@@ -1031,7 +1032,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             &mut stream,
             &emit,
             (&host, &socket),
-            &session,
+            (&session, peer_user.as_deref()),
             peer_uri.as_deref(),
             (&cfg, class),
             action,
@@ -1192,7 +1193,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             &delegated,
             Arc::clone(&authorizer),
             Arc::clone(&emit),
-            crate::authz::admitted_home(peer_uid, session.dir.clone()).await,
+            crate::authz::admitted_home(peer_uid, peer_dir).await,
             &cfg,
             seq,
             record,
@@ -2730,7 +2731,7 @@ async fn end_session<S, E: AuditEmit + Send + Sync>(
     stream: &mut S,
     emit: &Arc<E>,
     (host, socket): (&str, &str),
-    session: &SessionRecord,
+    (session, user): (&SessionRecord, Option<&str>),
     peer_uri: Option<&str>,
     (cfg, class): (&TransportConfig, FrameClass),
     action: &str,
@@ -2745,7 +2746,7 @@ async fn end_session<S, E: AuditEmit + Send + Sync>(
         socket,
         session.uid,
         peer_uri,
-        session.user.as_deref(),
+        user,
         None,
         None,
         session.session_id,
@@ -3258,13 +3259,11 @@ where
                                                 uid,
                                                 Arc::clone(&process),
                                                 peer_pid,
-                                                None,
                                             )
                                             .await;
-                                            // #275, #435: the username and raw home ride the
-                                            // membership lookup; a non-member's home is never carried.
-                                            let (_, user, dir) =
-                                                admission_facts(facts.membership.clone().ok());
+                                            // #275: the username rides the membership lookup.
+                                            let (_, user, _) =
+                                                admission_facts(&facts.membership);
                                             match revalidate(uid, uid, &facts) {
                                                 Revalidation::Deny(cause) => {
                                                     report_unanswered(&cause, uid, session_id);
@@ -3284,7 +3283,6 @@ where
                                                     let session = Arc::new(SessionRecord {
                                                         uid,
                                                         user,
-                                                        dir,
                                                         session_id,
                                                         lane: class.lane,
                                                         admission: class.admission,
@@ -12347,6 +12345,19 @@ mod home_resolution_tests {
         home: &Path,
         authorizer: Arc<crate::Composition<maknae_authz_basic::HermeticAuthorizer>>,
     ) -> (RespResult, Vec<AuditRecord>) {
+        serve_admitted_as(verb, uid, user, user, home, authorizer).await
+    }
+
+    /// `admitted` is the name the connection was admitted under; the request's own
+    /// lookup answers `user` and `home`.
+    async fn serve_admitted_as(
+        verb: Verb,
+        uid: u32,
+        admitted: &str,
+        user: &str,
+        home: &Path,
+        authorizer: Arc<crate::Composition<maknae_authz_basic::HermeticAuthorizer>>,
+    ) -> (RespResult, Vec<AuditRecord>) {
         let (mut client, server) = tokio::io::duplex(256 * 1024);
         let body = maknae_proto::encode_request(&maknae_proto::Request {
             protocol_version: PROTOCOL_VERSION,
@@ -12361,8 +12372,8 @@ mod home_resolution_tests {
         handle(
             server,
             Some("spiffe://d/plane/cli".to_string()),
-            SessionRecord::for_test(uid, Some(user.to_string()), Some(home.to_path_buf())).into(),
-            FactsGate::allow(),
+            SessionRecord::for_test(uid, Some(admitted.to_string())).into(),
+            FactsGate::allow_as(Some(user.to_string()), Some(home.to_path_buf())),
             emit.clone(),
             maknae_config::transport_from_section(None).unwrap(),
             serde_json::json!({}),
@@ -12473,6 +12484,100 @@ mod home_resolution_tests {
         );
         drop(held);
     }
+
+    #[tokio::test]
+    async fn a_request_is_decided_on_the_name_and_home_its_own_lookup_resolved() {
+        let uid = 4_115_000;
+        let raw = std::env::temp_dir().join(format!("run_fresh_home_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&raw);
+        std::fs::create_dir(&raw).unwrap();
+        let dir = Dir(raw.canonicalize().unwrap());
+        std::fs::set_permissions(&dir.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(
+            dir.0.join("authz.yaml"),
+            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            dir.0.join("authz.yaml"),
+            std::fs::Permissions::from_mode(0o640),
+        )
+        .unwrap();
+        let us = &maknae_config::BasicPolicy;
+        let authorizer = Arc::new(crate::Composition::new(
+            maknae_authz_basic::HermeticAuthorizer::new(
+                maknae_authz_basic::PolicyPaths::in_dir(&dir.0),
+                maknae_config::Principal {
+                    name: "operator".into(),
+                    uid,
+                },
+                maknae_config::TargetRequired {
+                    owner: None,
+                    mode_mask: Some(0o022),
+                    nlink_exactly_one: false,
+                    regular_file: true,
+                    max_bytes: None,
+                },
+                maknae_crypto::sha256,
+            )
+            .unwrap(),
+            crate::CeilingAuthorizer::new(maknae_config::Ceiling::baseline_for(us), us),
+        ));
+        let read = || Verb::Read {
+            path: dir.0.join("x").to_str().unwrap().into(),
+            conversation: None,
+            page: None,
+        };
+        let unresolvable = crate::authz::HomeUnavailable::Unresolvable.reason();
+
+        let (_, records) = serve_admitted_as(
+            Verb::Ping,
+            uid,
+            "admitted-115",
+            "renamed-115",
+            &dir.0,
+            authorizer.clone(),
+        )
+        .await;
+        assert_eq!(
+            records
+                .iter()
+                .map(|r| (r.event.as_str(), r.subject.user.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("connection", Some("admitted-115")),
+                ("request", Some("renamed-115"))
+            ]
+        );
+
+        let (_, records) = serve_admitted_as(
+            read(),
+            uid,
+            "admitted-115",
+            "renamed-115",
+            &dir.0.join("moved-away"),
+            authorizer.clone(),
+        )
+        .await;
+        let last = records.last().expect("a request record");
+        assert_eq!(last.outcome.reason, unresolvable);
+        assert_eq!(last.subject.user.as_deref(), Some("renamed-115"));
+
+        let (_, records) = serve_admitted_as(
+            read(),
+            uid,
+            "admitted-115",
+            "renamed-115",
+            &dir.0,
+            authorizer,
+        )
+        .await;
+        assert_ne!(
+            records.last().expect("a request record").outcome.reason,
+            unresolvable,
+            "the home this request resolved is the one confined to"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -12580,9 +12685,8 @@ mod admission_bound_tests {
             handle(
                 server,
                 Some("spiffe://d/plane/cli".to_string()),
-                SessionRecord::for_test(uid, Some("operator".to_string()), Some(root.clone()))
-                    .into(),
-                FactsGate::allow(),
+                SessionRecord::for_test(uid, Some("operator".to_string())).into(),
+                FactsGate::allow_as(Some("operator".to_string()), Some(root.clone())),
                 emit.clone(),
                 maknae_config::transport_from_section(None).unwrap(),
                 serde_json::json!({}),
@@ -12671,7 +12775,7 @@ mod admission_bound_tests {
             socket: "s".into(),
             au3_1: serde_json::json!({}),
         };
-        let session = SessionRecord::for_test(7, None, None);
+        let session = SessionRecord::for_test(7, None);
         let t0 = tokio::time::Instant::now();
         emit_termination(&emit, &wctx, &session, None).await;
         assert!(t0.elapsed() <= bound() + Duration::from_secs(1));
@@ -16778,7 +16882,7 @@ mod reload_tests {
                 crate::egress::unavailable_egress(),
                 baseline_stub::no_baseline(),
                 baseline_stub::serving(),
-                FactsGate::allow(),
+                FactsGate::allow_as(None, None),
                 Duration::MAX,
             ),
         )
@@ -16883,7 +16987,7 @@ mod reload_tests {
                 crate::egress::unavailable_egress(),
                 baseline_stub::no_baseline(),
                 baseline_stub::serving(),
-                FactsGate::allow(),
+                FactsGate::allow_as(None, None),
                 Duration::MAX,
             ),
         )

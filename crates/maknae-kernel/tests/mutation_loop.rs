@@ -1386,10 +1386,10 @@ async fn failed_grant_or_ack_write_stops_before_accepting_more_client_reports() 
                 fail: fail.clone(),
             },
             Some("spiffe://d/plane/cli".into()),
-            maknae_kernel::SessionRecord::for_test(fx.peer_uid, None, fx.requester_home.clone())
+            maknae_kernel::SessionRecord::for_test(fx.peer_uid, None)
                 .with_session_id(718)
                 .into(),
-            maknae_kernel::FactsGate::allow(),
+            maknae_kernel::FactsGate::allow_as(None, fx.requester_home.clone()),
             records.clone(),
             maknae_config::transport_from_section(None).unwrap(),
             serde_json::json!({}),
