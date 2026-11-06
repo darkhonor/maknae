@@ -51,13 +51,14 @@ the way out.
 
 What a start runs is the **accepted baseline** (§3.2), not the files as they stand.
 `maknaed` reads `maknae.yaml` and `config.d/`, then the accepted baseline from its
-kernel graph store, and runs the accepted baseline with the files' `vault` and
-`audit` sections in place of its own. Any other difference between the files and
+kernel graph store, and runs the accepted baseline with the files' `vault`, `audit`
+and `deployment` sections in place of its own. Any other difference between the files and
 the accepted baseline is a pending change that waits for `maknae baseline-accept`;
 a restart never applies it. The first start of this version, and the first start of
 a fresh install, takes the files as the accepted baseline with no accept.
 
-- An **empty or `core`-less `maknae.yaml`** boots at the **Public baseline** (§4.1).
+- A `core`-less `maknae.yaml` boots at the **Public baseline** (§4.1). An empty one
+  refuses to start (exit 1), because the `deployment` section is required (§6.5).
 - An **absent config directory or a missing `maknae.yaml`** **fails closed** (exit 1)
   when there is no accepted baseline yet — a fresh install with no `/etc/maknae` does
   not come up. Over an accepted baseline, the start keeps the accepted baseline and
@@ -117,6 +118,7 @@ An exported `VAULT_ADDR` or `VAULT_TOKEN` is for **your** `vault` CLI, as `docs/
 | `LC_MESSAGES` `LANG` | `maknae`, `maknaed` | message locale (en-US / ko-KR) |
 | `PATH` | `maknae`, `maknae enroll` | selects which `systemd-creds`, `setfacl`, `apparmor_parser` … actually runs, including on the CLI's credential-read path. **That dependency is a defect, tracked as #327** — the fix is to stop relying on `PATH`, not to scrub it |
 | `HOSTNAME` | `maknaed` | the AU-3c host label, which is correlation only and falls back to `maknaed`. Listed so inheriting it is a decision rather than an oversight |
+| `KUBERNETES_SERVICE_HOST` `container` | `maknaed` | corroborating container markers for the boot check of `deployment.mode` (§6.5). They can let `container` start; they never refuse `linux-host` |
 
 **The two things that are enforced,** as opposed to documented here:
 
@@ -296,6 +298,7 @@ To contain an id independently of the directory, list it as `- uid: <n>`. On Lin
 > | `vault.user_auth` | `type`, `mount` |
 > | `providers` (each entry) | `name`, `endpoint`, `models`, `reasoning_effort`, `output_tokens_field` (§6.1) |
 > | `egress` | `socket_path`, `deadline_ms` (§6.2) |
+> | `deployment` | `mode`, `account_source` (§6.5) |
 >
 > The CLI's own `maknae.yaml` registers `vault`, `transport` and `agent` only (`bins/maknae/src/cli.rs`), so any other section there — a `provider:` block included — refuses every CLI verb with `UnknownSection`. Standalone documents close their keys the same way: `egress-bounds.yaml` (§6.1.3), `providers.yaml` (§6.1.1) and `authz.yaml`.
 >
@@ -337,7 +340,7 @@ Everything in `maknae.yaml` and `config.d/` is the **baseline**: every section, 
 
 **The first start takes the files.** On a fresh install, and on the first start of this version over an existing store, there is no accepted baseline yet: the start takes the files as the accepted baseline with no accept, and records it (`graph.baseline`, reason `baseline seeded from maknae.yaml and config.d (no accepted baseline yet)`). A file that does not validate then refuses to start, as it always has: exit 1 with nothing written to the audit trail, or exit 3 for a `principal` defect and exit 4 for an audit offload refusal, each recorded.
 
-**`vault` and `audit` follow the file at start.** The start runs the accepted baseline with the files' `vault` and `audit` sections in their place, except `audit.readers`, which keeps its accepted value, and records each section that changed (`graph.baseline`, `vault follows maknae.yaml at start`, `audit follows maknae.yaml at start`). `audit.readers` changes only by an accept, where each account is resolved (§6.3); a readers difference stays in the pending change set, and no restart, a package upgrade's included, folds it into the accepted baseline. That combination is validated as a whole first; if it does not validate, or it moves the audit trail to a file that is not prepared (§6.3), the start runs the accepted baseline unchanged and the files are an invalid change. A reload never applies either section.
+**`vault`, `audit` and `deployment` follow the file at start.** The start runs the accepted baseline with the files' `vault`, `audit` and `deployment` sections in their place, except `audit.readers`, which keeps its accepted value, and records each section that changed (`graph.baseline`, `vault follows maknae.yaml at start`, `audit follows maknae.yaml at start`, `deployment follows maknae.yaml at start`). `audit.readers` changes only by an accept, where each account is resolved (§6.3); a readers difference stays in the pending change set, and no restart, a package upgrade's included, folds it into the accepted baseline. That combination is validated as a whole first; if it does not validate, or it moves the audit trail to a file that is not prepared (§6.3), the start runs the accepted baseline unchanged and the files are an invalid change. A reload never applies any of the three.
 
 **Every other difference is a pending change set.** There is one set per source, and today the only source is the files (`root-file`). The set is the whole difference between the files and the accepted baseline, recomputed every time it is read, so a further edit changes the same set rather than adding another; it is never persisted, and a restart never applies it. It applies only when a granted operator accepts it:
 
@@ -356,7 +359,7 @@ maknae baseline-accept <hash>        # the 64-character hash baseline-show print
 |---|---|
 | `principal`, and `providers` while it stays non-empty | **live**: the next decision uses it |
 | `audit.readers` | **live**: no restart; `maknaed` reads nothing from it. The grant follows the file: the packages and the runbook's "Grant the declared readers" block read `maknae.yaml`, and the accept records the list and resolves each account (§6.3) |
-| everything else, including all of `core.handling`: adding the block, the ceiling and its level, `accreditation_ref` and `policy` (the classification system); every other `core` key, `vault`, `transport`, `egress`, `lake`, the other `audit` keys, `providers` going from empty to non-empty or back, and a section added or removed | **by restart** |
+| everything else, including all of `core.handling`: adding the block, the ceiling and its level, `accreditation_ref` and `policy` (the classification system); every other `core` key, `vault`, `deployment`, `transport`, `egress`, `lake`, the other `audit` keys, `providers` going from empty to non-empty or back, and a section added or removed | **by restart** |
 
 A set that contains any restart change applies by restart as a whole. A live accept is persisted, then installed in one step once the decisions in flight have finished; no decision sees part of it. A restart accept is persisted and checkpointed, then `maknaed` stops admitting connections (each is closed unserved, recorded as `connect` denied `draining to apply an accepted baseline`), lets the requests in flight finish under the old baseline, and exits **6**. systemd (`Restart=on-failure`) and launchd (`KeepAlive` with `SuccessfulExit` false) start it again, and the new process runs the accepted baseline. A live accept whose install fails after the persist applies by restart in the same way. A restart accept whose persist fails after admission stopped exits 1, and the supervisor restarts the daemon on the unchanged baseline, with the set still pending.
 
@@ -551,13 +554,14 @@ an `UnknownSection` error.
 
 ## 6. Extension sections
 
-A section the daemon does not register is `ConfigError::UnknownSection`, which **refuses boot** and names the file it came from: `unknown config section '<section>' in '<path>' (no registered spec)`. The registered set is `crates/maknae-kernel/src/boot.rs`'s `boot_specs()` — `lake`, `vault`, `transport`, `audit`, `principal`, `providers`, `egress`, plus `core` — so every row below marked Forthcoming or Withdrawn stops the daemon if written, rather than being ignored. Of the extension sections, `providers` (§6.1), `egress` (§6.2) and `audit` (§6.3) can be configured today.
+A section the daemon does not register is `ConfigError::UnknownSection`, which **refuses boot** and names the file it came from: `unknown config section '<section>' in '<path>' (no registered spec)`. The registered set is `crates/maknae-kernel/src/boot.rs`'s `boot_specs()` — `lake`, `vault`, `transport`, `audit`, `principal`, `providers`, `egress`, `deployment`, plus `core` — so every row below marked Forthcoming or Withdrawn stops the daemon if written, rather than being ignored. Of the extension sections, `providers` (§6.1), `egress` (§6.2), `audit` (§6.3) and `deployment` (§6.5) can be configured today.
 
 | Section | Owner | Status |
 |---|---|---|
 | `authz` | authorization policy *(the config-section registration; the policy FILES `/etc/maknae/authz.yaml` and `/etc/maknae/bindings.yaml` (§2.3) are separate and are enforced per request from a snapshot compiled at start and at `SIGHUP` reload — see the runbook)* | Forthcoming |
 | `providers` | the model providers this host authorizes (ADR-0028 decision 1) — **see §6.1** | **Shipped** |
 | `egress` | where `maknaed` finds the egress deputy, and the outer bound on one provider call (#240) — **see §6.2** | **Shipped** |
+| `deployment` | the kind of host `maknaed` runs on, and the account-state source it asks (#115) — **see §6.5** | **Shipped**; required |
 | `provider` | the single registered provider, replaced by `providers` (#153) | Withdrawn — **writing it refuses boot** |
 | `llm` | LLM-provider authentication, replaced by `provider` and then `providers` | Withdrawn — **writing it refuses boot** |
 | `channels` | channel/comms adapters (Discord, Matrix, …) | Forthcoming |
@@ -862,6 +866,28 @@ vault write auth/<mount>/role/agent-<id>/secret-id-accessor/destroy secret_id_ac
 
 Then remove that state file, `/etc/maknae/agents/<id>.yaml` and the sealed credential: on Linux the `.cred` file, on macOS `security delete-generic-password -s io.maknae.maknae-agentd -a <id> /Library/Keychains/System.keychain`.
 
+### 6.5 The `deployment` section
+
+```yaml
+deployment:
+  mode: linux-host          # linux-host, macos-host or container
+  account_source: userdb    # userdb or none; linux-host only
+```
+
+`maknaed` refuses to start without it. `maknae enroll` writes it: `mode: macos-host` on macOS; on Linux `mode: linux-host` and `account_source: userdb`, or `account_source: none` with a warning when the host has no `systemd-userdbd.socket` unit (el9 ships none). It follows the file at start (§3.2); a reload never applies it. `admin.config.show` discloses both keys.
+
+**`mode`** names the host, and the daemon checks it against the host at boot, refusing (exit 1) when they disagree. It never infers the mode from what it finds.
+
+| `mode` | Required at boot | Refused when |
+|---|---|---|
+| `linux-host` | a Linux build, `/run/systemd/system` present | a container file marker is present: `/var/run/secrets/kubernetes.io/serviceaccount`, `/run/.containerenv` or `/.dockerenv` |
+| `macos-host` | a macOS build | — |
+| `container` | a Linux build, and a container file marker or a non-empty `KUBERNETES_SERVICE_HOST` or `container` variable | no marker is present |
+
+A marker that cannot be examined refuses the boot. The check applies to the baseline the start runs (§3.2): over an accepted baseline whose mode the host confirms, a file whose mode it contradicts is recorded as an invalid change and the accepted mode runs. The environment variables only ever let `container` start; they never refuse `linux-host`. On `linux-host` and `macos-host` the daemon binds the client socket and checks every session as the runbook's "Session checks" describes. On `container` it binds no client socket at all and logs `maknaed: deployment.mode is container; no client listener is bound`; the human path in a container deployment is the gateway (#117).
+
+**`account_source`** is where the daemon asks a local account's state on every request. `userdb` (the default on `linux-host`) asks `systemd-userdbd` (`/run/systemd/userdb/io.systemd.Multiplexer`) about each account listed in `/etc/passwd`; a locked, expired or not-yet-valid account is refused, and a userdbd that does not answer refuses every local account. `none` checks no account state, and each admission record says so (`admitted (account: not-checked:configured)`). Set `none` only on a host without `systemd-userdbd`, and set `userdb` once it is installed. On `macos-host` only `none` is accepted (omit the key); on `container` the key has no effect. A directory-backed account (SSSD, LDAP, AD) is never asked; its admission record reads `not-checked:directory` (#117).
+
 ---
 
 ## 7. Accepted YAML
@@ -923,7 +949,7 @@ boot gate (`crates/maknae-kernel/src/boot_gate.rs`).
 | A duplicate section name in the registration | `DuplicateSpec` |
 | `egress-bounds.yaml` read but refused: a missing `vault` block or key, a fragment outside `[A-Za-z0-9._/-]` or with an empty, `.`, `..` or `data` segment, a value over 256 bytes, a `call_timeout_ms` that is not an integer or is outside `1000..=440000` (§6.1.3). Reads `egress-bounds.yaml: <reason>`; an unknown key such as `key_vault_path_prefix` or `approle_mount` is `UnknownKey` | `InvalidEgressBounds` |
 | The `egress` section (§6.2): a non-map section, a value of the wrong type or out of range (#240) | `InvalidEgress` |
-| **A key no parser reads** — in `maknae.yaml`'s `core` (own level), `transport`, `audit`, `principal`, each `providers` entry, `egress`, `vault` and `vault.user_auth`; in `core.handling` and `core.handling.ceiling`; in `egress-bounds.yaml` and its `vault` block (`egress-bounds.yaml/vault`); in `providers.yaml` at its top level (`providers.yaml`), each entry (`providers.yaml/providers`) and each entry's `key` (`providers.yaml/providers/key`); and at `authz.yaml`'s four map levels (the document, `permissions`, and each role body under `roles:`/`destinations:` — a mistyped ROLE NAME is `UnknownRole`, not this). **Not** `lake` or `core.identity`, which are deliberately open (§3) (#210) | **`UnknownKey`** |
+| **A key no parser reads** — in `maknae.yaml`'s `core` (own level), `transport`, `audit`, `principal`, each `providers` entry, `egress`, `deployment`, `vault` and `vault.user_auth`; in `core.handling` and `core.handling.ceiling`; in `egress-bounds.yaml` and its `vault` block (`egress-bounds.yaml/vault`); in `providers.yaml` at its top level (`providers.yaml`), each entry (`providers.yaml/providers`) and each entry's `key` (`providers.yaml/providers/key`); and at `authz.yaml`'s four map levels (the document, `permissions`, and each role body under `roles:`/`destinations:` — a mistyped ROLE NAME is `UnknownRole`, not this). **Not** `lake` or `core.identity`, which are deliberately open (§3) (#210) | **`UnknownKey`** |
 | A present-but-malformed `core.handling` ceiling | `InvalidCeiling` |
 | `transport.prompt_max_bytes` outside 65536..=16777216 (default 1048576 since #372; it bounds prompt-class frames only, and control and attempt frames have fixed caps) | `InvalidTransport` |
 | The `providers` section (§6.1): not a list (a null `providers:` included), more than 32 entries, a duplicate `name`, an entry that is not a map, a missing or malformed `name`, `endpoint` or `models`, a malformed `reasoning_effort`, an `output_tokens_field` other than `max_completion_tokens` or `max_tokens`. Reads `invalid provider config: <reason>` | `InvalidProvider` |
@@ -933,6 +959,7 @@ boot gate (`crates/maknae-kernel/src/boot_gate.rs`).
 | `providers.yaml` (§6.1.1) malformed, or no entry selectable: `providers.yaml: <reason>` | `UserProviders` |
 | `vault.kv_mount` or `vault.user_prefix` in the root `maknae.yaml`, shadowed `config.d/` blocks included: `vault.kv_mount in the root maknae.yaml is not read by maknaed: set kv_mount in egress-bounds.yaml` | `RootVaultKeyRefused` (kernel) |
 | `audit.readers` not a list of strings, an entry outside `^[a-z_][a-z0-9_-]{0,30}[$]?$`, or a name listed twice (§6.3) | `InvalidAudit` |
+| The `deployment` section (§6.5) absent or not a map, `mode` missing, not a string or not one of the three: `invalid deployment config: deployment.mode: <what was found>; it must be one of linux-host, macos-host, container`. An `account_source` other than `userdb` or `none`, or `userdb` on `macos-host`: `invalid deployment config: deployment.account_source: <reason>` | `InvalidDeployment` |
 | At an accept or in `sudo maknae audit-readers`: an `audit.readers` account that is missing or refused (§6.3): `audit.readers <name>: <why>` | `InvalidAudit` |
 
 The baseline (§3.2) adds refusals of its own. At a start over an accepted baseline, a file that fails any row above is not a refusal: the daemon keeps the accepted baseline and records the files as an invalid change. A trail move (§6.3) to a file outside the current trail's directory is `the audit trail may move only within <directory>`, and to a file root has not prepared, the open's own refusal, for example `<path> is not append-only; prepare it with chattr +a (Linux) or chflags sappnd (macOS) as root`; at a start either leaves the current trail in use. Once an accepted baseline exists, a missing trail refuses to start (exit 1): `the audit trail <path> is missing; prepare it as the runbook's "Move the audit trail" step does, then start`. An accepted baseline that no longer validates refuses to start with `accepted baseline cannot start: <cause>` in the journal, at the exit code of the row that failed; the trail records `accepted baseline cannot start (cause in the journal)`.
@@ -956,10 +983,13 @@ core:
     name: "Maknae — Lab"
     domain: "DoD DevSecOps"
     urn_root: "urn:maknae"
+deployment:
+  mode: linux-host
 ```
 
-An even smaller config is a valid **empty** `maknae.yaml` — the instance still runs at
-the Public baseline.
+`deployment` cannot be dropped (§6.5): without it, an empty `maknae.yaml` included, the
+daemon refuses to start, naming `deployment.mode`. Without `core` it still runs at the
+Public baseline.
 
 ### 9.2 CUI — a private-network deployment
 

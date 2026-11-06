@@ -36,7 +36,10 @@ in the deb — both are SELinux-N/A here. The path-attached profile
 (`apparmor/usr.bin.maknaed`) mirrors the `.te`: read-only `/etc/maknae/**`,
 `rwk` on every `/var/log/maknae/*.jsonl` trail, `rw` on the
 `/run/maknae` UDS, read of the systemd-decrypted credential under
-`/run/credentials/maknaed.service/`, and TCP for Vault egress. A discrete
+`/run/credentials/maknaed.service/`, TCP for Vault egress, and the session facts
+read per request (a peer's `/proc/<pid>/cgroup` and `status`,
+`/run/systemd/sessions/`, `/etc/passwd`, and the `systemd-userdbd` Multiplexer
+socket). A discrete
 `maknae_tool` profile is declared (structure-now, near-empty) as the `px`
 transition target for the future tool-exec increment; it is inert today (the
 daemon spawns no subprocess).

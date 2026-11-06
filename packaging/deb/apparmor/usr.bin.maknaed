@@ -81,6 +81,15 @@ profile maknaed /usr/bin/maknaed {
   # cgroup detection: the runtime reads its own (and connecting peers') cgroup
   # membership and the cgroup-v2 cpu limits (resource/parallelism detection).
   @{PROC}/*/cgroup                       r,
+  # #115: the session facts. maknae-io opens each file's parent directory as an
+  # anchor, so the directories are granted as well as the files.
+  @{PROC}/*/                             r,
+  @{PROC}/*/status                       r,
+  /run/systemd/sessions/                 r,
+  /run/systemd/sessions/*                r,
+  /etc/                                  r,
+  /etc/passwd                            r,
+  /run/systemd/userdb/io.systemd.Multiplexer rw,
   /sys/fs/cgroup/                        r,
   /sys/fs/cgroup/**                      r,
   /sys/devices/system/cpu/               r,

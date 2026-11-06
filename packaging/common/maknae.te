@@ -1,4 +1,4 @@
-policy_module(maknae, 1.0.1)
+policy_module(maknae, 1.0.2)
 
 ########################################
 # Type declarations
@@ -191,6 +191,12 @@ allow maknaed_t user_home_type:file { getattr ioctl };
 allowxperm maknaed_t user_home_dir_t:dir ioctl 0x0000;
 allowxperm maknaed_t user_home_type:dir ioctl 0x0000;
 allowxperm maknaed_t user_home_type:file ioctl 0x0000;
+
+# #115: the per-request session facts. A peer's /proc/<pid>/cgroup and status,
+# logind's session records, and systemd-userdbd's Multiplexer socket.
+domain_read_all_domains_state(maknaed_t)
+systemd_read_logind_sessions_files(maknaed_t)
+systemd_userdbd_stream_connect(maknaed_t)
 
 # CRITICAL (maknae-specific; Microkosmos has no analog — it uses EnvironmentFile=):
 # LoadCredentialEncrypted= makes systemd DECRYPT the SecretID into a per-service

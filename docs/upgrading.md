@@ -4,6 +4,39 @@ Each release that needs an action from you lists it here, newest first. Read eve
 
 ---
 
+## Session checks and the `deployment` section (#115)
+
+`maknaed` now re-checks every connection and every request against the host: `maknae`-group membership, a live login session of the connecting process, and on Linux the local account's state and the sender of every message ([runbook](runbook.md#session-checks)). Run `maknae` from your own console or SSH login; a cron job, a service, `sudo -u <other>` and a terminal started by current GNOME are refused.
+
+**Before you upgrade, add a `deployment` section to `/etc/maknae/maknae.yaml`.** The new daemon refuses to start without one (exit 1), and its journal names `deployment.mode` and the three values it accepts. The section follows the file at start ([configuration §6.5](configuration.md#65-the-deployment-section)), so no `maknae baseline-accept` is needed. Add, as root, at the top level of the file:
+
+- **Linux with `systemd-userdbd`** (Rocky 10, Debian 13; the Debian package now depends on `systemd-userdbd`):
+
+  ```yaml
+  deployment:
+    mode: linux-host
+    account_source: userdb
+  ```
+
+- **Linux without `systemd-userdbd`** (Rocky 9, whose systemd 252 ships none). Locked and expired local accounts are then not refused:
+
+  ```yaml
+  deployment:
+    mode: linux-host
+    account_source: none
+  ```
+
+- **macOS:**
+
+  ```yaml
+  deployment:
+    mode: macos-host
+  ```
+
+Re-enrolling with `sudo maknae enroll` writes the same section, choosing `userdb` or `none` by whether the `systemd-userdbd.socket` unit is installed. On SELinux and AppArmor hosts the upgrade's policy and profile grant the new reads (the peer's `/proc/<pid>/cgroup` and `status`, `/run/systemd/sessions`, `/etc/passwd`, and the userdbd socket).
+
+---
+
 ## Containment verbs (#165)
 
 `maknae contain` and `maknae release` contain and release a subject over the wire ([runbook](runbook.md#contain-a-subject-over-the-wire)).
