@@ -282,12 +282,14 @@ where
     let task = tokio::spawn(maknae_kernel::handle(
         server,
         Some("spiffe://d/plane/cli".to_string()),
-        peer_uid,
-        true,
-        None,
-        peer_home.map(std::path::Path::to_path_buf),
+        maknae_kernel::SessionRecord::for_test(
+            peer_uid,
+            None,
+            peer_home.map(std::path::Path::to_path_buf),
+        )
+        .into(),
+        maknae_kernel::FactsGate::allow(),
         emit,
-        1,
         maknae_config::transport_from_section(None).unwrap(),
         serde_json::json!({}),
         authorizer,
@@ -298,7 +300,6 @@ where
         std::sync::Arc::new(None),
         maknae_kernel::unavailable_egress(),
         timeout,
-        maknae_security::Lane::Local,
         fds,
         common::no_baseline(),
     ));
@@ -446,12 +447,14 @@ where
     maknae_kernel::handle(
         server,
         Some("spiffe://d/plane/cli".to_string()),
-        peer_uid,
-        true,
-        None,
-        peer_home.map(std::path::Path::to_path_buf),
+        maknae_kernel::SessionRecord::for_test(
+            peer_uid,
+            None,
+            peer_home.map(std::path::Path::to_path_buf),
+        )
+        .into(),
+        maknae_kernel::FactsGate::allow(),
         emit,
-        1,
         transport,
         serde_json::json!({}),
         authorizer,
@@ -462,7 +465,6 @@ where
         kernel_graph,
         maknae_kernel::unavailable_egress(),
         timeout,
-        maknae_security::Lane::Local,
         delegated,
         ops,
     )
@@ -3699,12 +3701,14 @@ async fn drive_baseline(
     maknae_kernel::handle(
         server,
         Some("spiffe://d/plane/cli".to_string()),
-        nix::unistd::geteuid().as_raw(),
-        true,
-        None,
-        Some(fx.dir.clone()),
+        maknae_kernel::SessionRecord::for_test(
+            nix::unistd::geteuid().as_raw(),
+            None,
+            Some(fx.dir.clone()),
+        )
+        .into(),
+        maknae_kernel::FactsGate::allow(),
         emit,
-        1,
         maknae_config::transport_from_section(None).unwrap(),
         serde_json::json!({}),
         authorizer,
@@ -3715,7 +3719,6 @@ async fn drive_baseline(
         std::sync::Arc::new(None),
         maknae_kernel::unavailable_egress(),
         Duration::from_secs(5),
-        maknae_security::Lane::Local,
         maknae_io::DelegatedFds::new(0),
         Arc::new(baseline),
     )

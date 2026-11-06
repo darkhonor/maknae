@@ -28,6 +28,7 @@ mod posture;
 mod provider_choice;
 pub mod reload;
 mod run;
+mod session;
 pub mod session_facts;
 pub mod sync;
 mod uid_gate;
@@ -71,6 +72,9 @@ pub use run::{
     BoxFuture, ConfigView, Conn, ContainAnswer, ContainRequest, ContainmentOps, ContainmentStatus,
     Corrective, KernelGraphStatus, PlaneAccept, ReleaseRequest, WhereCtx, MAX_SUBJECT_USER_BYTES,
 };
+#[cfg(any(test, feature = "hermetic-test-seam"))]
+pub use session::AllowFacts;
+pub use session::{Facts, FactsGate, SessionFacts, SessionRecord};
 
 #[used]
 pub static PRIVILEGED_MARKER: &[u8] = b"PRIVILEGED_MAKNAE_KERNEL";

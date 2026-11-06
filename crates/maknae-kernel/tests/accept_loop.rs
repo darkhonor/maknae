@@ -18,8 +18,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use maknae_audit_append::{AuditEmit, AuditError, AuditRecord, SessionIds};
+use maknae_kernel::session_facts::{AccountFact, AccountState, LoginFact, NotCheckedWhy};
+use maknae_kernel::FactsGate;
 use maknae_kernel::{Admission, ChannelClass, Conn, PlaneAccept, ServeOutcome, WhereCtx};
-use maknae_vault::{AcceptRejection, ChannelPeer, PeerAuth, PeerCreds, RejectReason, VaultError};
+use maknae_vault::{
+    AcceptRejection, ChannelPeer, PeerAuth, PeerCreds, PeerProcess, RejectReason, SenderVerdict,
+    VaultError,
+};
 use tokio::io::DuplexStream;
 use tokio::time::Instant;
 
@@ -51,6 +56,8 @@ impl AuditEmit for RecEmit {
 /// split behaves: rejections still audit, and a stalled handshake does not block the loop.
 enum Scripted {
     Ok(DuplexStream, ChannelPeer, u32),
+    /// An OK connection whose peer process handle and sender verdict are given.
+    OkWith(DuplexStream, ChannelPeer, u32, PeerProcess, SenderVerdict),
     Reject(AcceptRejection),
     /// `accept_raw` succeeds, but `finish_handshake` sleeps this long before yielding an OK
     /// connection — simulating a peer that stalls the TLS handshake.
@@ -60,9 +67,27 @@ enum Scripted {
 
 /// The raw handle `accept_raw` hands to `finish_handshake` (opaque, like `RawPlaneConn`).
 enum FakeRaw {
-    Conn(DuplexStream, ChannelPeer, u32),
+    Conn(DuplexStream, ChannelPeer, u32, PeerProcess, SenderVerdict),
     Reject(AcceptRejection),
     Stall(Duration, DuplexStream, ChannelPeer, u32),
+}
+
+fn conn(
+    stream: DuplexStream,
+    peer: ChannelPeer,
+    uid: u32,
+    process: PeerProcess,
+    sender: SenderVerdict,
+) -> Conn<DuplexStream> {
+    Conn {
+        delegated: maknae_io::DelegatedFds::new(0),
+        stream,
+        peer,
+        peer_uid: uid,
+        process: Arc::new(process),
+        peer_pid: Some(4242),
+        sender,
+    }
 }
 
 struct FakeAccept {
@@ -104,9 +129,20 @@ impl PlaneAccept for FakeAccept {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         match item {
-            Some(Scripted::Ok(stream, peer, uid)) => {
-                Ok((FakeRaw::Conn(stream, peer, uid), creds(uid)))
-            }
+            Some(Scripted::Ok(stream, peer, uid)) => Ok((
+                FakeRaw::Conn(
+                    stream,
+                    peer,
+                    uid,
+                    PeerProcess::Unavailable,
+                    SenderVerdict::default(),
+                ),
+                creds(uid),
+            )),
+            Some(Scripted::OkWith(stream, peer, uid, process, sender)) => Ok((
+                FakeRaw::Conn(stream, peer, uid, process, sender),
+                creds(uid),
+            )),
             Some(Scripted::Reject(rej)) => {
                 let c = rej.peer_creds.unwrap_or_else(|| creds(0));
                 Ok((FakeRaw::Reject(rej), c))
@@ -129,21 +165,19 @@ impl PlaneAccept for FakeAccept {
         _handshake_timeout: Duration,
     ) -> Result<Conn<DuplexStream>, AcceptRejection> {
         match raw {
-            FakeRaw::Conn(stream, peer, uid) => Ok(Conn {
-                delegated: maknae_io::DelegatedFds::new(0),
-                stream,
-                peer,
-                peer_uid: uid,
-            }),
+            FakeRaw::Conn(stream, peer, uid, process, sender) => {
+                Ok(conn(stream, peer, uid, process, sender))
+            }
             FakeRaw::Reject(rej) => Err(rej),
             FakeRaw::Stall(d, stream, peer, uid) => {
                 tokio::time::sleep(d).await;
-                Ok(Conn {
-                    delegated: maknae_io::DelegatedFds::new(0),
+                Ok(conn(
                     stream,
                     peer,
-                    peer_uid: uid,
-                })
+                    uid,
+                    PeerProcess::Unavailable,
+                    SenderVerdict::default(),
+                ))
             }
         }
     }
@@ -225,6 +259,40 @@ async fn drive_class(
     cfg: maknae_config::TransportConfig,
     drain: tokio::sync::watch::Receiver<maknae_kernel::Drain>,
 ) -> Vec<AuditRecord> {
+    drive_gated(class, script, cfg, drain, host_gate(), Duration::MAX).await
+}
+
+/// The host's own sources, with no account source declared: the membership the
+/// accept loop always asked, and a login no fake peer process can satisfy.
+fn host_gate() -> Arc<FactsGate> {
+    FactsGate::for_test(
+        Arc::new(maknae_kernel::session_facts::HostSessionFacts {
+            account_source: maknae_config::AccountSource::None,
+        }),
+        Duration::from_millis(maknae_config::GROUP_LOOKUP_TIMEOUT_MS),
+    )
+}
+
+async fn drive_facts(script: Vec<Scripted>, gate: Arc<FactsGate>) -> Vec<AuditRecord> {
+    drive_gated(
+        client_class(),
+        script,
+        cfg_with(8, 150),
+        common::serving(),
+        gate,
+        Duration::MAX,
+    )
+    .await
+}
+
+async fn drive_gated(
+    class: ChannelClass,
+    script: Vec<Scripted>,
+    cfg: maknae_config::TransportConfig,
+    drain: tokio::sync::watch::Receiver<maknae_kernel::Drain>,
+    gate: Arc<FactsGate>,
+    lifetime: Duration,
+) -> Vec<AuditRecord> {
     let emit = RecEmit::new();
     let acceptor = FakeAccept::new(script);
     let session_ids = Arc::new(SessionIds::with_nonce(1));
@@ -253,6 +321,8 @@ async fn drive_class(
             maknae_kernel::unavailable_egress(),
             common::no_baseline(),
             drain,
+            gate,
+            lifetime,
         )
         .await;
     });
@@ -438,6 +508,8 @@ async fn stalled_handshake_does_not_block_next_connection() {
             maknae_kernel::unavailable_egress(),
             common::no_baseline(),
             common::serving(),
+            host_gate(),
+            Duration::MAX,
         )
         .await;
     });
@@ -538,6 +610,8 @@ async fn at_capacity_audit_does_not_block_accept_loop() {
             maknae_kernel::unavailable_egress(),
             common::no_baseline(),
             common::serving(),
+            host_gate(),
+            Duration::MAX,
         )
         .await;
     });
@@ -634,6 +708,8 @@ async fn every_at_capacity_refusal_is_recorded_or_counted() {
             maknae_kernel::unavailable_egress(),
             common::no_baseline(),
             common::serving(),
+            host_gate(),
+            Duration::MAX,
         )
         .await;
     });
@@ -698,6 +774,8 @@ async fn supervisor_exit_stops_the_loop_and_reports_failure() {
             maknae_kernel::unavailable_egress(),
             common::no_baseline(),
             common::serving(),
+            host_gate(),
+            Duration::MAX,
         ),
     )
     .await
@@ -760,6 +838,8 @@ async fn a_listener_that_authenticates_otherwise_than_its_class_serves_nothing()
             maknae_kernel::unavailable_egress(),
             common::no_baseline(),
             common::serving(),
+            host_gate(),
+            Duration::MAX,
         ),
     )
     .await
@@ -815,6 +895,8 @@ async fn shutdown_signal_yields_graceful_outcome() {
         maknae_kernel::unavailable_egress(),
         common::no_baseline(),
         common::serving(),
+        host_gate(),
+        Duration::MAX,
     ));
     tx.send(()).expect("shutdown receiver must still be alive");
     let outcome = tokio::time::timeout(Duration::from_secs(5), loop_task)
@@ -937,4 +1019,360 @@ async fn a_connection_during_the_drain_is_closed_unserved() {
     .await;
     assert!(served.iter().any(|r| r.source.uid == 1002));
     assert!(!served.iter().any(|r| r.outcome.reason == DRAINING));
+}
+
+const SESSION_UID: u32 = 11_500;
+
+/// A connection that has already written one ping and closed its write side.
+async fn pinging() -> Scripted {
+    let (mut client, server) = tokio::io::duplex(4096);
+    let ping = maknae_proto::encode_request(&maknae_proto::Request {
+        protocol_version: maknae_proto::PROTOCOL_VERSION,
+        verb: maknae_proto::Verb::Ping,
+    })
+    .unwrap();
+    common::write_frame(&mut client, &ping).await.unwrap();
+    drop(client);
+    Scripted::Ok(server, certified("spiffe://d/plane/cli"), SESSION_UID)
+}
+
+fn of_session(recs: &[AuditRecord]) -> Vec<&AuditRecord> {
+    recs.iter()
+        .filter(|r| r.source.uid == SESSION_UID)
+        .collect()
+}
+
+/// `(event, action, result, reason)` of each record, in order.
+fn trail(recs: &[&AuditRecord]) -> Vec<(String, String, String, String)> {
+    recs.iter()
+        .map(|r| {
+            (
+                r.event.clone(),
+                r.action.clone(),
+                r.outcome.result.clone(),
+                r.outcome.reason.clone(),
+            )
+        })
+        .collect()
+}
+
+fn row(event: &str, action: &str, result: &str, reason: &str) -> (String, String, String, String) {
+    (event.into(), action.into(), result.into(), reason.into())
+}
+
+fn admitted(account: &str) -> (String, String, String, String) {
+    row(
+        "connection",
+        "connect",
+        "permit",
+        &format!("admitted (account: {account})"),
+    )
+}
+
+fn terminated(result: &str, reason: &str) -> (String, String, String, String) {
+    row("session", "terminate", result, reason)
+}
+
+/// A session refused at its request: admitted, the request refused for `reason`,
+/// the session ended for the same reason.
+async fn refused_at_the_request(request: maknae_kernel::Facts, reason: &str) -> Vec<AuditRecord> {
+    let recs = drive_facts(
+        vec![pinging().await],
+        common::ScriptedFacts::gate(vec![common::active_member(), request]),
+    )
+    .await;
+    let session = of_session(&recs);
+    assert_eq!(
+        trail(&session),
+        vec![
+            admitted("active"),
+            row("request", "liveness.ping", "deny", reason),
+            terminated("deny", reason),
+        ],
+        "{session:?}"
+    );
+    assert_eq!(
+        session.iter().map(|r| r.seq).collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    recs
+}
+
+#[tokio::test]
+async fn a_non_member_is_refused_at_connect() {
+    let recs = drive_facts(
+        vec![pinging().await],
+        common::ScriptedFacts::gate(vec![common::non_member()]),
+    )
+    .await;
+    let session = of_session(&recs);
+    assert_eq!(
+        trail(&session),
+        vec![row("connection", "connect", "deny", "not-member")]
+    );
+    let deny = session[0];
+    assert_eq!(
+        (deny.seq, deny.outcome.posture.as_str()),
+        (1, "unauthorized")
+    );
+    assert_eq!(deny.subject.user.as_deref(), Some("scripted"));
+    assert_eq!(
+        deny.source.plane_uri_san.as_deref(),
+        Some("spiffe://d/plane/cli")
+    );
+}
+
+#[tokio::test]
+async fn a_member_de_enrolled_before_the_request_is_refused_at_the_request() {
+    refused_at_the_request(common::non_member(), "not-member").await;
+}
+
+#[tokio::test]
+async fn a_logged_out_process_is_refused_at_the_request() {
+    refused_at_the_request(common::with_login(LoginFact::NotActive), "logout").await;
+}
+
+#[tokio::test]
+async fn a_locked_local_account_is_refused() {
+    let locked = || common::member_facts(AccountFact::Checked(AccountState::Locked));
+    refused_at_the_request(locked(), "account-locked").await;
+    let recs = drive_facts(
+        vec![pinging().await],
+        common::ScriptedFacts::gate(vec![locked()]),
+    )
+    .await;
+    assert_eq!(
+        trail(&of_session(&recs)),
+        vec![row("connection", "connect", "deny", "account-locked")]
+    );
+}
+
+#[tokio::test]
+async fn an_unanswerable_source_is_an_infrastructure_denial() {
+    let mut unanswered = common::active_member();
+    unanswered.membership = None;
+    let recs = refused_at_the_request(unanswered, "infrastructure").await;
+    let session = of_session(&recs);
+    assert_eq!(session[1].outcome.posture, "unavailable");
+    assert_eq!(session[2].outcome.posture, "unavailable");
+}
+
+#[tokio::test]
+async fn a_directory_account_is_served_and_says_not_checked() {
+    let directory =
+        || common::member_facts(AccountFact::NotChecked(NotCheckedWhy::DirectoryAccount));
+    let recs = drive_facts(
+        vec![pinging().await],
+        common::ScriptedFacts::gate(vec![directory(), directory()]),
+    )
+    .await;
+    assert_eq!(
+        trail(&of_session(&recs)),
+        vec![
+            admitted("not-checked:directory"),
+            row("request", "liveness.ping", "permit", "authorized"),
+            terminated("permit", "disconnect"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_served_connection_ends_with_a_disconnect_record() {
+    let recs = drive_facts(
+        vec![pinging().await],
+        common::ScriptedFacts::gate(vec![common::active_member(), common::active_member()]),
+    )
+    .await;
+    let session = of_session(&recs);
+    let last = session.last().expect("records for the session");
+    assert_eq!(
+        (
+            last.event.as_str(),
+            last.action.as_str(),
+            last.outcome.result.as_str(),
+            last.outcome.reason.as_str(),
+            last.outcome.posture.as_str(),
+        ),
+        ("session", "terminate", "permit", "disconnect", "stopped")
+    );
+    assert_eq!(last.seq, session[session.len() - 2].seq + 1);
+    assert_eq!(last.session_id, session[0].session_id);
+    assert_eq!(last.subject.user.as_deref(), Some("scripted"));
+}
+
+#[tokio::test]
+async fn a_connection_past_its_lifetime_ends_with_a_lifetime_record() {
+    let ended_by_lifetime = vec![
+        admitted("active"),
+        row("request", "liveness.ping", "deny", "lifetime"),
+        terminated("deny", "lifetime"),
+    ];
+    let slow_request_gather = drive_gated(
+        client_class(),
+        vec![pinging().await],
+        cfg_with(8, 150),
+        common::serving(),
+        common::ScriptedFacts::gate_with(
+            vec![
+                (Duration::ZERO, common::active_member()),
+                (Duration::from_millis(100), common::active_member()),
+            ],
+            Duration::from_secs(1),
+        ),
+        Duration::from_millis(50),
+    )
+    .await;
+    assert_eq!(trail(&of_session(&slow_request_gather)), ended_by_lifetime);
+
+    let spent_before_the_request = drive_gated(
+        client_class(),
+        vec![pinging().await],
+        cfg_with(8, 150),
+        common::serving(),
+        common::ScriptedFacts::gate(vec![common::active_member()]),
+        Duration::ZERO,
+    )
+    .await;
+    assert_eq!(
+        trail(&of_session(&spent_before_the_request)),
+        ended_by_lifetime
+    );
+}
+
+/// A verdict the real per-read check set: a read whose bytes carry no
+/// credentials naming the expected sender.
+async fn mismatched_sender() -> SenderVerdict {
+    let (writer, reader) = tokio::net::UnixStream::pair().unwrap();
+    let mut collector = maknae_plane::FdCollector::new(
+        reader,
+        1,
+        Some(maknae_io::ExpectedSender {
+            pid: 1,
+            uid: u32::MAX,
+        }),
+    );
+    let verdict = collector.sender_verdict();
+    writer.writable().await.unwrap();
+    writer.try_write(b"x").unwrap();
+    let mut buf = [0u8; 1];
+    let refused = tokio::io::AsyncReadExt::read(&mut collector, &mut buf).await;
+    assert!(refused.is_err(), "{refused:?}");
+    assert!(verdict.mismatched());
+    verdict
+}
+
+#[tokio::test]
+async fn a_sender_mismatch_read_is_refused() {
+    let (client, server) = tokio::io::duplex(1024);
+    drop(client);
+    let recs = drive_facts(
+        vec![Scripted::OkWith(
+            server,
+            certified("spiffe://d/plane/cli"),
+            SESSION_UID,
+            PeerProcess::Unavailable,
+            mismatched_sender().await,
+        )],
+        common::ScriptedFacts::gate(vec![common::active_member()]),
+    )
+    .await;
+    assert_eq!(
+        trail(&of_session(&recs)),
+        vec![
+            admitted("active"),
+            row("request", "read", "deny", "sender-mismatch"),
+            terminated("deny", "sender-mismatch"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_frame_read_timeout_ends_idle() {
+    let (_client, server) = tokio::io::duplex(1024);
+    let recs = drive_facts(
+        vec![Scripted::Ok(
+            server,
+            certified("spiffe://d/plane/cli"),
+            SESSION_UID,
+        )],
+        common::ScriptedFacts::gate(vec![common::active_member()]),
+    )
+    .await;
+    assert_eq!(
+        trail(&of_session(&recs)),
+        vec![
+            admitted("active"),
+            row("request", "read", "deny", "read timeout"),
+            terminated("deny", "idle"),
+        ]
+    );
+}
+
+/// A member whose process was alive at connect and is asked of the host's own
+/// mapping afterwards.
+struct ExitsAfterConnect(std::sync::atomic::AtomicUsize);
+
+impl maknae_kernel::SessionFacts for ExitsAfterConnect {
+    fn membership(
+        &self,
+        admission: maknae_kernel::Admission,
+        uid: u32,
+    ) -> Result<maknae_kernel::Membership, maknae_kernel::AuthzError> {
+        let _ = (admission, uid);
+        Ok(common::active_member().membership.unwrap())
+    }
+
+    fn login(
+        &self,
+        process: &PeerProcess,
+        pid: Option<u32>,
+        uid: u32,
+        user: Option<&str>,
+    ) -> LoginFact {
+        if self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            return LoginFact::Live;
+        }
+        maknae_kernel::SessionFacts::login(
+            &maknae_kernel::session_facts::HostSessionFacts {
+                account_source: maknae_config::AccountSource::None,
+            },
+            process,
+            pid,
+            uid,
+            user,
+        )
+    }
+
+    fn account(&self, _uid: u32) -> AccountFact {
+        AccountFact::NotChecked(NotCheckedWhy::Configured)
+    }
+}
+
+#[tokio::test]
+async fn a_peer_process_that_exited_is_refused() {
+    let Scripted::Ok(server, peer, uid) = pinging().await else {
+        unreachable!()
+    };
+    let recs = drive_facts(
+        vec![Scripted::OkWith(
+            server,
+            peer,
+            uid,
+            PeerProcess::Gone,
+            SenderVerdict::default(),
+        )],
+        FactsGate::for_test(
+            Arc::new(ExitsAfterConnect(std::sync::atomic::AtomicUsize::new(0))),
+            Duration::from_secs(5),
+        ),
+    )
+    .await;
+    assert_eq!(
+        trail(&of_session(&recs)),
+        vec![
+            admitted("not-checked:configured"),
+            row("request", "liveness.ping", "deny", "logout"),
+            terminated("deny", "logout"),
+        ]
+    );
 }

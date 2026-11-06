@@ -18,13 +18,13 @@ pub(crate) const CONTAINER_FILE_MARKERS: [&str; 3] = [
 pub(crate) const CONTAINER_ENV_MARKERS: [&str; 2] = ["KUBERNETES_SERVICE_HOST", "container"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Platform {
+pub enum Platform {
     Linux,
     Macos,
 }
 
 impl Platform {
-    pub(crate) fn of_build() -> Self {
+    pub fn of_build() -> Self {
         if cfg!(target_os = "macos") {
             Platform::Macos
         } else {

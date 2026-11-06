@@ -1189,6 +1189,7 @@ dependencies = [
  "maknae-io",
  "maknae-kernel",
  "maknae-msgs",
+ "maknae-plane",
  "maknae-proto",
  "maknae-security",
  "maknae-spif",

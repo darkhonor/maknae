@@ -40,13 +40,14 @@ serde_json = "1"
 
 [dev-dependencies]
 maknae-kernel = { path = ".", features = ["hermetic-test-seam"] }
+maknae-plane = { path = "../maknae-plane" }
 # #240a: the egress-socket tests bind a real UDS under a temp dir.
 tempfile = "3"
 # The Document test seam: the e2e config.show test must drive the REAL
 # disclosable_view over a REAL Document, not a hand-simulated view.
 maknae-config = { path = "../maknae-config", features = ["hermetic-test-seam"] }
 # paused-clock tests for #421's admission bound
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "test-util"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "test-util", "net"] }
 # The enforcement e2e constructs the REAL PDP over fixture policy files via the
 # requirement-parameterized seam (nothing stubbed); dev-only — the
 # feature-resolution-pin gate proves production resolution stays featureless.

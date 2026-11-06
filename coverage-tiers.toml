@@ -71,6 +71,12 @@ files = [
   "crates/maknae-kernel/src/session_facts/logind.rs",
   "crates/maknae-kernel/src/session_facts/userdb.rs",
   "crates/maknae-kernel/src/session_facts/macos_login.rs",
+  # #115: which host source answers each fact (mod.rs: an exited peer is a logout, a
+  # directory account is not checked, an unreadable passwd is unknown) and the gather
+  # that asks them as one bounded unit (session.rs). A wrong arm checks the wrong
+  # account, asks the login of the wrong user, or answers a stalled source as live.
+  "crates/maknae-kernel/src/session_facts/mod.rs",
+  "crates/maknae-kernel/src/session.rs",
   # The CBOR byte-string content codec (#77): a wrong major type halves the
   # read ceiling and mis-routes oversize; the visitor is a refusal surface.
   "crates/maknae-proto/src/bytes.rs",
@@ -515,10 +521,6 @@ why = "test-only fixtures shared by the kernel's module test suites (the gate re
 [[t3]]
 path = "crates/maknae-kernel/src/lib.rs"
 why = "module declarations + re-exports + PRIVILEGED_MARKER; the boot logic is boot.rs (T1)"
-
-[[t3]]
-path = "crates/maknae-kernel/src/session_facts/mod.rs"
-why = "#115: the session-fact types and module declarations; the decisions are logind.rs, userdb.rs and macos_login.rs (T1)"
 
 [[t3]]
 path = "crates/maknae-agent/src/lib.rs"
