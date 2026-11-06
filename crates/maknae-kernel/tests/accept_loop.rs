@@ -1245,10 +1245,43 @@ async fn a_locked_local_account_is_refused() {
 async fn an_unanswerable_source_is_an_infrastructure_denial() {
     let mut unanswered = common::active_member();
     unanswered.membership = Err(maknae_kernel::AuthzError::Resolve("nss".into()));
-    let recs = refused_at_the_request(unanswered, "infrastructure").await;
+    let recs = refused_at_the_request(unanswered, "infrastructure:group").await;
     let session = of_session(&recs);
     assert_eq!(session[1].outcome.posture, "unavailable");
     assert_eq!(session[2].outcome.posture, "unavailable");
+}
+
+#[tokio::test]
+async fn a_request_gather_past_its_bound_names_the_session_facts() {
+    let (conn, client) = pinging().await;
+    let recs = drive_facts(
+        vec![conn],
+        common::ScriptedFacts::gate_with(
+            vec![
+                (Duration::ZERO, common::active_member()),
+                (Duration::from_millis(300), common::active_member()),
+            ],
+            Duration::from_millis(100),
+        ),
+    )
+    .await;
+    let session = of_session(&recs);
+    assert_eq!(
+        trail(&session),
+        vec![
+            admitted("active"),
+            row(
+                "request",
+                "liveness.ping",
+                "deny",
+                "infrastructure:session-facts"
+            ),
+            terminated("deny", "infrastructure:session-facts"),
+        ]
+    );
+    assert_eq!(session[1].outcome.posture, "unavailable");
+    assert_eq!(session[2].outcome.posture, "unavailable");
+    assert_unauthorized(answer(client).await);
 }
 
 #[tokio::test]
@@ -1291,7 +1324,10 @@ async fn a_failed_admission_append_ends_the_session_as_an_infrastructure_denial(
     let session = of_session(&recs);
     assert_eq!(
         trail(&session),
-        vec![admitted("active"), terminated("deny", "infrastructure")]
+        vec![
+            admitted("active"),
+            terminated("deny", "infrastructure:audit")
+        ]
     );
     assert_eq!(session[1].outcome.posture, "unavailable");
     assert_eq!(answer(client).await, None);

@@ -1,5 +1,5 @@
-//! The decisions behind `peer_process::capture`, apart from the syscalls that feed
-//! them, so they are mutation-tested on every platform.
+//! The decisions behind the Linux `peer_process::capture`, apart from the syscalls
+//! that feed them, so they are mutation-tested without them.
 use nix::errno::Errno;
 
 /// What `SO_PEERPIDFD`'s failure says to do next.

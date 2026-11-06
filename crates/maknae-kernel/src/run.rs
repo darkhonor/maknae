@@ -63,7 +63,7 @@ use tokio::task::JoinSet;
 
 use crate::authz::{
     admission_facts, admission_reason, cause_posture, cause_reason, ending_posture, ending_reason,
-    ending_result, revalidate, DenyCause, Ending, Revalidation, HOME_RESOLVE_TIMEOUT,
+    ending_result, revalidate, DenyCause, Ending, FactSource, Revalidation, HOME_RESOLVE_TIMEOUT,
 };
 use crate::baseline_check::{Invalid, Mode};
 use crate::blocking_guard::{
@@ -815,6 +815,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
     E: AuditEmit + Send + Sync + 'static,
     P: Authorizer + Send + Sync + 'static,
 {
+    let _post_request = EndsOnSenderMismatch(Arc::clone(&session));
     let peer_uid = session.uid;
     let session_id = session.session_id;
     let lane = session.lane;
@@ -858,7 +859,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 "maknaed: admission audit write failed for peer_uid={peer_uid} peer_uri={peer_uri:?} session_id={session_id} — closing without serving: {e}"
             ));
         }
-        session.end(Ending::Denied(DenyCause::Infrastructure("audit")));
+        session.end(Ending::Denied(DenyCause::Infrastructure(FactSource::Audit)));
         close_bounded(&mut stream).await;
         return;
     }
@@ -2772,10 +2773,23 @@ async fn end_session<S, E: AuditEmit + Send + Sync>(
     close_bounded(stream).await;
 }
 
+/// A read after the request (the mutation report) fails closed on a foreign
+/// writer; this names that cause on the session's ending.
+struct EndsOnSenderMismatch(Arc<SessionRecord>);
+
+impl Drop for EndsOnSenderMismatch {
+    fn drop(&mut self) {
+        if self.0.sender.mismatched() {
+            self.0.end(Ending::Denied(DenyCause::SenderMismatch));
+        }
+    }
+}
+
 fn report_unanswered(cause: &DenyCause, uid: u32, session_id: u64) {
     if let DenyCause::Infrastructure(source) = cause {
         crate::diag::report(format!(
-            "maknaed: the {source} source could not answer for uid={uid} session_id={session_id} — denied"
+            "maknaed: the {} source could not answer for uid={uid} session_id={session_id} — denied",
+            source.name()
         ));
     }
 }
@@ -6843,7 +6857,12 @@ async fn boot_after_sink(
         deployment,
         ..
     } = validated;
-    if let Some(line) = account_source_diag(deployment) {
+    if let Some(line) = account_source_diag(deployment, || {
+        matches!(
+            maknae_io::presence(Path::new(crate::session_facts::USERDB_MULTIPLEXER)),
+            Ok(true)
+        )
+    }) {
         eprintln!("{line}");
     }
     if let Some(why) = inconsistent {
@@ -7358,13 +7377,21 @@ fn install_shutdown_signal() -> Result<impl Future<Output = ()> + Send, String> 
     })
 }
 
-fn account_source_diag(d: maknae_config::Deployment) -> Option<&'static str> {
+/// A boot diagnostic only: what the probe sees never changes the declared source.
+fn account_source_diag(
+    d: maknae_config::Deployment,
+    multiplexer_present: impl FnOnce() -> bool,
+) -> Option<&'static str> {
     match (d.mode, d.account_source) {
         (maknae_config::DeploymentMode::LinuxHost, maknae_config::AccountSource::None) => Some(
             "maknaed: deployment.account_source is none: account state (locked, expired) is not checked on this host",
         ),
-        (maknae_config::DeploymentMode::LinuxHost, maknae_config::AccountSource::Userdb)
-        | (maknae_config::DeploymentMode::MacosHost | maknae_config::DeploymentMode::Container, _) => {
+        (maknae_config::DeploymentMode::LinuxHost, maknae_config::AccountSource::Userdb) => {
+            (!multiplexer_present()).then_some(
+                "maknaed: deployment.account_source is userdb but /run/systemd/userdb/io.systemd.Multiplexer is not present: every local account will be refused as infrastructure:account until systemd-userdbd answers; set deployment.account_source: none to declare the gap",
+            )
+        }
+        (maknae_config::DeploymentMode::MacosHost | maknae_config::DeploymentMode::Container, _) => {
             None
         }
     }
@@ -7464,14 +7491,43 @@ mod tests {
             mode,
             account_source,
         };
-        let line = account_source_diag(d(DeploymentMode::LinuxHost, AccountSource::None)).unwrap();
-        assert!(line.contains("account_source is none"), "{line}");
+        for present in [true, false] {
+            let line =
+                account_source_diag(d(DeploymentMode::LinuxHost, AccountSource::None), || {
+                    present
+                })
+                .unwrap();
+            assert!(line.contains("account_source is none"), "{line}");
+        }
         for quiet in [
-            d(DeploymentMode::LinuxHost, AccountSource::Userdb),
             d(DeploymentMode::MacosHost, AccountSource::None),
             d(DeploymentMode::Container, AccountSource::None),
         ] {
-            assert_eq!(account_source_diag(quiet), None, "{quiet:?}");
+            assert_eq!(account_source_diag(quiet, || false), None, "{quiet:?}");
+        }
+        assert_eq!(
+            account_source_diag(d(DeploymentMode::LinuxHost, AccountSource::Userdb), || true),
+            None
+        );
+    }
+
+    #[test]
+    fn a_declared_userdb_without_its_socket_says_what_will_be_refused() {
+        use maknae_config::{AccountSource, Deployment, DeploymentMode};
+        let line = account_source_diag(
+            Deployment {
+                mode: DeploymentMode::LinuxHost,
+                account_source: AccountSource::Userdb,
+            },
+            || false,
+        )
+        .unwrap();
+        for part in [
+            crate::session_facts::USERDB_MULTIPLEXER,
+            "every local account will be refused as infrastructure:account until systemd-userdbd answers",
+            "set deployment.account_source: none to declare the gap",
+        ] {
+            assert!(line.contains(part), "{line}");
         }
     }
 

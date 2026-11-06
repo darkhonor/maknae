@@ -11,7 +11,6 @@ use super::AccountState;
 /// The whole userdb exchange's wall-clock budget, well under the session-facts bound.
 pub const USERDB_DEADLINE: Duration = Duration::from_secs(2);
 
-const MULTIPLEXER: &str = "/run/systemd/userdb/io.systemd.Multiplexer";
 const REPLY_CAP: usize = 64 * 1024;
 const PASSWD: &str = "/etc/passwd";
 
@@ -25,7 +24,7 @@ const PASSWD_FILE: TargetRequired = TargetRequired {
 
 /// The state userdb reports for `uid`; anything but a well-formed record is `Unknown`.
 pub fn account_linux(uid: u32, deadline: Duration) -> AccountState {
-    account_linux_at(Path::new(MULTIPLEXER), 0, uid, deadline)
+    account_linux_at(Path::new(super::USERDB_MULTIPLEXER), 0, uid, deadline)
 }
 
 fn account_linux_at(path: &Path, listener_uid: u32, uid: u32, deadline: Duration) -> AccountState {

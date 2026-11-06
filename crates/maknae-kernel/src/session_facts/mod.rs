@@ -17,6 +17,8 @@ pub use macos_login::login_macos;
 #[cfg(target_os = "linux")]
 pub use userdb::{account_linux, is_local_linux, USERDB_DEADLINE};
 
+pub(crate) const USERDB_MULTIPLEXER: &str = "/run/systemd/userdb/io.systemd.Multiplexer";
+
 /// Whether the peer process is in a qualifying login session.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LoginFact {

@@ -9,7 +9,31 @@ pub enum DenyCause {
     Logout(LoginFact),
     Account(AccountState),
     SenderMismatch,
-    Infrastructure(&'static str),
+    Infrastructure(FactSource),
+}
+
+/// The fact source that could not answer, named in an infrastructure denial.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FactSource {
+    Group,
+    Login,
+    Account,
+    SessionMap,
+    Audit,
+    SessionFacts,
+}
+
+impl FactSource {
+    pub fn name(self) -> &'static str {
+        match self {
+            FactSource::Group => "group",
+            FactSource::Login => "login",
+            FactSource::Account => "account",
+            FactSource::SessionMap => "session-map",
+            FactSource::Audit => "audit",
+            FactSource::SessionFacts => "session-facts",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,11 +54,14 @@ pub enum Ending {
 /// (ADR-0006 decision 4): the uid map, then membership, login and account state.
 pub fn revalidate(bound_uid: u32, request_uid: u32, f: &Facts) -> Revalidation {
     if bound_uid != request_uid {
-        return Revalidation::Deny(DenyCause::Infrastructure("session-map"));
+        return Revalidation::Deny(DenyCause::Infrastructure(FactSource::SessionMap));
+    }
+    if !f.answered {
+        return Revalidation::Deny(DenyCause::Infrastructure(FactSource::SessionFacts));
     }
     match &f.membership {
         Err(AuthzError::Resolve(_)) => {
-            return Revalidation::Deny(DenyCause::Infrastructure("group"));
+            return Revalidation::Deny(DenyCause::Infrastructure(FactSource::Group));
         }
         Err(AuthzError::NoUser) => return Revalidation::Deny(DenyCause::NotMember),
         Ok(m) => {
@@ -46,7 +73,7 @@ pub fn revalidate(bound_uid: u32, request_uid: u32, f: &Facts) -> Revalidation {
     match &f.login {
         LoginFact::Live => {}
         LoginFact::Unavailable(_) => {
-            return Revalidation::Deny(DenyCause::Infrastructure("login"));
+            return Revalidation::Deny(DenyCause::Infrastructure(FactSource::Login));
         }
         LoginFact::NoSession
         | LoginFact::NotUserClass
@@ -60,7 +87,7 @@ pub fn revalidate(bound_uid: u32, request_uid: u32, f: &Facts) -> Revalidation {
             Revalidation::Continue
         }
         AccountFact::Checked(AccountState::Unknown(_)) => {
-            Revalidation::Deny(DenyCause::Infrastructure("account"))
+            Revalidation::Deny(DenyCause::Infrastructure(FactSource::Account))
         }
         AccountFact::Checked(
             state @ (AccountState::Locked | AccountState::Expired | AccountState::Disabled),
@@ -78,7 +105,12 @@ pub fn cause_reason(c: &DenyCause) -> &'static str {
         DenyCause::Account(AccountState::Active) => "account-active",
         DenyCause::Account(AccountState::Unknown(_)) => "account-unknown",
         DenyCause::SenderMismatch => "sender-mismatch",
-        DenyCause::Infrastructure(_) => "infrastructure",
+        DenyCause::Infrastructure(FactSource::Group) => "infrastructure:group",
+        DenyCause::Infrastructure(FactSource::Login) => "infrastructure:login",
+        DenyCause::Infrastructure(FactSource::Account) => "infrastructure:account",
+        DenyCause::Infrastructure(FactSource::SessionMap) => "infrastructure:session-map",
+        DenyCause::Infrastructure(FactSource::Audit) => "infrastructure:audit",
+        DenyCause::Infrastructure(FactSource::SessionFacts) => "infrastructure:session-facts",
     }
 }
 
@@ -640,6 +672,7 @@ mod tests {
             membership: Ok(membership(in_group, "s-115-sentinel")),
             login: LoginFact::Live,
             account: AccountFact::Checked(AccountState::Active),
+            answered: true,
         }
     }
 
@@ -658,8 +691,36 @@ mod tests {
         f.membership = Err(AuthzError::Resolve("nss".into()));
         assert_eq!(
             revalidate(7, 8, &f),
-            deny(DenyCause::Infrastructure("session-map"))
+            deny(DenyCause::Infrastructure(FactSource::SessionMap))
         );
+    }
+
+    #[test]
+    fn a_gather_that_did_not_answer_names_the_session_facts_not_a_source() {
+        let mut f = member(true);
+        f.answered = false;
+        assert_eq!(
+            revalidate(7, 7, &f),
+            deny(DenyCause::Infrastructure(FactSource::SessionFacts))
+        );
+        assert_eq!(
+            revalidate(7, 8, &f),
+            deny(DenyCause::Infrastructure(FactSource::SessionMap))
+        );
+    }
+
+    #[test]
+    fn each_source_has_its_name() {
+        for (source, name) in [
+            (FactSource::Group, "group"),
+            (FactSource::Login, "login"),
+            (FactSource::Account, "account"),
+            (FactSource::SessionMap, "session-map"),
+            (FactSource::Audit, "audit"),
+            (FactSource::SessionFacts, "session-facts"),
+        ] {
+            assert_eq!(source.name(), name);
+        }
     }
 
     #[test]
@@ -669,7 +730,7 @@ mod tests {
         f.login = LoginFact::NoSession;
         assert_eq!(
             revalidate(7, 7, &f),
-            deny(DenyCause::Infrastructure("group"))
+            deny(DenyCause::Infrastructure(FactSource::Group))
         );
     }
 
@@ -695,7 +756,7 @@ mod tests {
         f.account = AccountFact::Checked(AccountState::Locked);
         assert_eq!(
             revalidate(7, 7, &f),
-            deny(DenyCause::Infrastructure("login"))
+            deny(DenyCause::Infrastructure(FactSource::Login))
         );
     }
 
@@ -720,7 +781,7 @@ mod tests {
         f.account = AccountFact::Checked(AccountState::Unknown("userdb".into()));
         assert_eq!(
             revalidate(7, 7, &f),
-            deny(DenyCause::Infrastructure("account"))
+            deny(DenyCause::Infrastructure(FactSource::Account))
         );
     }
 
@@ -786,8 +847,33 @@ mod tests {
             ),
             (DenyCause::SenderMismatch, "sender-mismatch", "unauthorized"),
             (
-                DenyCause::Infrastructure("group"),
-                "infrastructure",
+                DenyCause::Infrastructure(FactSource::Group),
+                "infrastructure:group",
+                "unavailable",
+            ),
+            (
+                DenyCause::Infrastructure(FactSource::Login),
+                "infrastructure:login",
+                "unavailable",
+            ),
+            (
+                DenyCause::Infrastructure(FactSource::Account),
+                "infrastructure:account",
+                "unavailable",
+            ),
+            (
+                DenyCause::Infrastructure(FactSource::SessionMap),
+                "infrastructure:session-map",
+                "unavailable",
+            ),
+            (
+                DenyCause::Infrastructure(FactSource::Audit),
+                "infrastructure:audit",
+                "unavailable",
+            ),
+            (
+                DenyCause::Infrastructure(FactSource::SessionFacts),
+                "infrastructure:session-facts",
                 "unavailable",
             ),
         ] {
@@ -844,8 +930,8 @@ mod tests {
                 "unauthorized",
             ),
             (
-                Ending::Denied(DenyCause::Infrastructure("login")),
-                "infrastructure",
+                Ending::Denied(DenyCause::Infrastructure(FactSource::Login)),
+                "infrastructure:login",
                 "deny",
                 "unavailable",
             ),

@@ -578,6 +578,73 @@ impl Fixture {
     where
         P: maknae_security::Authorizer + Send + Sync + 'static,
     {
+        self.start_in(
+            Arc::new(self.session()),
+            authz,
+            live,
+            verb,
+            fd,
+            records,
+            config,
+            egress,
+            attempt_caps,
+        )
+    }
+    pub fn session(&self) -> maknae_kernel::SessionRecord {
+        maknae_kernel::SessionRecord::for_test(
+            self.peer_uid,
+            self.peer_user.clone(),
+            self.requester_home.clone(),
+        )
+        .with_session_id(718)
+    }
+    /// The default starter over a session the caller keeps, to read its ending.
+    pub fn start_in_session(
+        &self,
+        session: Arc<maknae_kernel::SessionRecord>,
+        verb: Verb,
+        fd: Option<OwnedFd>,
+        records: Arc<impl AuditEmit + Send + Sync + 'static>,
+    ) -> (
+        tokio::io::DuplexStream,
+        tokio::task::JoinHandle<()>,
+        Vec<u8>,
+    ) {
+        self.start_in(
+            session,
+            self.authorizer(),
+            Arc::new(maknae_kernel::LiveConfig::new(
+                Default::default(),
+                authority(None),
+            )),
+            verb,
+            fd,
+            records,
+            maknae_config::transport_from_section(None).unwrap(),
+            maknae_kernel::unavailable_egress(),
+            maknae_kernel::AttemptCaps::default(),
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn start_in<P>(
+        &self,
+        session: Arc<maknae_kernel::SessionRecord>,
+        authz: Arc<P>,
+        live: Arc<maknae_kernel::LiveConfig>,
+        verb: Verb,
+        fd: Option<OwnedFd>,
+        records: Arc<impl AuditEmit + Send + Sync + 'static>,
+        config: maknae_config::TransportConfig,
+        egress: Arc<dyn maknae_kernel::Egress>,
+        attempt_caps: maknae_kernel::AttemptCaps,
+    ) -> (
+        tokio::io::DuplexStream,
+        tokio::task::JoinHandle<()>,
+        Vec<u8>,
+    )
+    where
+        P: maknae_security::Authorizer + Send + Sync + 'static,
+    {
         let (client, server) = tokio::io::duplex(65536);
         let fds = maknae_io::DelegatedFds::new(4);
         if let Some(fd) = fd {
@@ -587,13 +654,7 @@ impl Fixture {
         let served = maknae_kernel::handle_with_attempt_caps(
             server,
             Some("spiffe://d/plane/cli".into()),
-            maknae_kernel::SessionRecord::for_test(
-                self.peer_uid,
-                self.peer_user.clone(),
-                self.requester_home.clone(),
-            )
-            .with_session_id(718)
-            .into(),
+            session,
             maknae_kernel::FactsGate::allow(),
             records,
             config,
@@ -1271,6 +1332,7 @@ pub fn member_facts(account: AccountFact) -> maknae_kernel::Facts {
         }),
         login: LoginFact::Live,
         account,
+        answered: true,
     }
 }
 

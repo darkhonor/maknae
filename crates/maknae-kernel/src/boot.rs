@@ -423,7 +423,7 @@ mod tests {
         put(
             &d.0,
             "maknae.yaml",
-            "deployment:\n  mode: container\n  account_source: none\n",
+            "deployment:\n  mode: container\n",
             0o640,
         );
         let cfg = owned(&d.0).expect("boots");

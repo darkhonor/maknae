@@ -144,9 +144,9 @@ pub struct Received {
 ///
 /// When the sender attaches none, these are its thread-group id and real uid and gid.
 /// A sender may attach its own; the kernel (`scm_check_creds`) then accepts any of
-/// its real, effective or saved uid and gid (any value with `CAP_SETUID` /
-/// `CAP_SETGID`), and a pid naming any process with `CAP_SYS_ADMIN` in its pid
-/// namespace, its own tgid otherwise.
+/// its real, effective or saved uid and gid (any value when the sender holds
+/// `CAP_SETUID` / `CAP_SETGID`), and a pid naming any process when the sender holds
+/// `CAP_SYS_ADMIN` in its pid namespace, its own tgid otherwise.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SenderCreds {
     pub pid: i32,

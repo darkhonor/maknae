@@ -1,4 +1,4 @@
-policy_module(maknae, 1.0.2)
+policy_module(maknae, 1.0.3)
 
 ########################################
 # Type declarations
@@ -192,7 +192,7 @@ allowxperm maknaed_t user_home_dir_t:dir ioctl 0x0000;
 allowxperm maknaed_t user_home_type:dir ioctl 0x0000;
 allowxperm maknaed_t user_home_type:file ioctl 0x0000;
 
-domain_read_all_domains_state(maknaed_t)
+userdom_read_all_users_state(maknaed_t)
 systemd_read_logind_sessions_files(maknaed_t)
 systemd_userdbd_stream_connect(maknaed_t)
 

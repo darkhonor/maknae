@@ -10,6 +10,8 @@ pub(crate) const DEPLOYMENT_KEYS: [&str; 2] = ["mode", "account_source"];
 
 const MODES: &str = "linux-host, macos-host, container";
 
+const CONTAINER_IGNORES: &str = "container mode ignores it, so it may not be set; omit the key";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeploymentMode {
     LinuxHost,
@@ -71,34 +73,40 @@ pub fn deployment_from_section(v: Option<&Value>) -> Result<Deployment, ConfigEr
         },
         Some(_) => return Err(invalid_mode("not a string")),
     };
-    let declared = match field("account_source") {
-        None => None,
-        Some(Value::Str(s)) => match s.as_str() {
-            "userdb" => Some(AccountSource::Userdb),
-            "none" => Some(AccountSource::None),
-            other => {
-                return Err(invalid_source(&format!(
-                    "'{other}' is not a source; it must be userdb or none"
-                )))
+    let declared = field("account_source");
+    let account_source = match mode {
+        DeploymentMode::LinuxHost => declared_source(declared)?.unwrap_or(AccountSource::Userdb),
+        DeploymentMode::MacosHost => match declared_source(declared)? {
+            None | Some(AccountSource::None) => AccountSource::None,
+            Some(AccountSource::Userdb) => {
+                return Err(invalid_source(
+                    "userdb is not available on macos-host; omit the key or set none",
+                ))
             }
         },
-        Some(_) => return Err(invalid_source("not a string")),
-    };
-    let account_source = match (mode, declared) {
-        (DeploymentMode::LinuxHost, None) => AccountSource::Userdb,
-        (DeploymentMode::LinuxHost, Some(s)) => s,
-        (DeploymentMode::MacosHost, None | Some(AccountSource::None)) => AccountSource::None,
-        (DeploymentMode::MacosHost, Some(AccountSource::Userdb)) => {
-            return Err(invalid_source(
-                "userdb is not available on macos-host; omit the key or set none",
-            ))
-        }
-        (DeploymentMode::Container, _) => AccountSource::None,
+        DeploymentMode::Container => match declared {
+            None => AccountSource::None,
+            Some(_) => return Err(invalid_source(CONTAINER_IGNORES)),
+        },
     };
     Ok(Deployment {
         mode,
         account_source,
     })
+}
+
+fn declared_source(v: Option<&Value>) -> Result<Option<AccountSource>, ConfigError> {
+    match v {
+        None => Ok(None),
+        Some(Value::Str(s)) => match s.as_str() {
+            "userdb" => Ok(Some(AccountSource::Userdb)),
+            "none" => Ok(Some(AccountSource::None)),
+            other => Err(invalid_source(&format!(
+                "'{other}' is not a source; it must be userdb or none"
+            ))),
+        },
+        Some(_) => Err(invalid_source("not a string")),
+    }
 }
 
 #[cfg(test)]
@@ -222,12 +230,27 @@ mod tests {
     }
 
     #[test]
-    fn container_ignores_the_account_source() {
-        for source in [None, Some("userdb"), Some("none")] {
-            let mut pairs = vec![("mode", "container")];
-            pairs.extend(source.map(|s| ("account_source", s)));
-            assert_eq!(parse(&pairs).unwrap().account_source, AccountSource::None);
+    fn container_has_no_account_source_and_refuses_any_declared_one() {
+        assert_eq!(
+            parse(&[("mode", "container")]).unwrap().account_source,
+            AccountSource::None
+        );
+        for source in ["userdb", "none", "nss"] {
+            let e = parse(&[("mode", "container"), ("account_source", source)]).unwrap_err();
+            assert!(
+                matches!(&e, ConfigError::InvalidDeployment(m)
+                    if m.contains("deployment.account_source") && m.contains("container mode ignores it")),
+                "{source}: {e:?}"
+            );
         }
+        let not_a_string = Value::Map(vec![
+            ("mode".into(), Value::Str("container".into())),
+            ("account_source".into(), Value::Bool(true)),
+        ]);
+        assert!(matches!(
+            deployment_from_section(Some(&not_a_string)),
+            Err(ConfigError::InvalidDeployment(m)) if m.contains("container mode ignores it")
+        ));
     }
 
     #[test]

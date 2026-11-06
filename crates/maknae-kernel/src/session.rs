@@ -26,13 +26,14 @@ pub trait SessionFacts: Send + Sync {
     fn account(&self, uid: u32) -> AccountFact;
 }
 
-/// The facts one decision is made on; `membership` is `Err(Resolve)` when the lookup
-/// failed or did not answer in time.
+/// The facts one decision is made on; `answered` is false when the gather as a
+/// whole was refused, failed or timed out, so no one source is to blame.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Facts {
     pub membership: Result<Membership, AuthzError>,
     pub login: LoginFact,
     pub account: AccountFact,
+    pub answered: bool,
 }
 
 impl Facts {
@@ -41,6 +42,7 @@ impl Facts {
             membership: Err(AuthzError::Resolve(why.to_string())),
             login: LoginFact::Unavailable(why.to_string()),
             account: AccountFact::Checked(AccountState::Unknown(why.to_string())),
+            answered: false,
         }
     }
 }
@@ -134,6 +136,7 @@ pub(crate) async fn gather(
                         membership,
                         login,
                         account,
+                        answered: true,
                     }
                 }),
             )
@@ -312,6 +315,7 @@ mod tests {
                 membership: resolved("ann"),
                 login: LoginFact::NotActive,
                 account: AccountFact::Checked(AccountState::Expired),
+                answered: true,
             }
         );
     }
@@ -349,7 +353,9 @@ mod tests {
             assert_eq!(got, Facts::unanswered("session fact lookup timed out"));
             assert_eq!(
                 crate::authz::revalidate(4242, 4242, &got),
-                crate::authz::Revalidation::Deny(DenyCause::Infrastructure("group"))
+                crate::authz::Revalidation::Deny(DenyCause::Infrastructure(
+                    crate::authz::FactSource::SessionFacts
+                ))
             );
         }
         let spawned = probe.calls.load(Ordering::SeqCst);
