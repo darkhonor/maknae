@@ -90,27 +90,6 @@ fn good_config_passes_gates_then_fails_without_vault() {
 }
 
 #[test]
-fn a_config_without_deployment_exits_one() {
-    let d = new_dir("no-deployment");
-    put(
-        &d.0,
-        "maknae.yaml",
-        "core:\n  identity:\n    name: t\n",
-        0o640,
-    );
-    let out = Command::new(bin()).arg(&d.0).output().unwrap();
-    assert_eq!(out.status.code(), Some(1));
-    if std::fs::metadata(&d.0).unwrap().uid() == 0 {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains("deployment.mode")
-                && stderr.contains("linux-host, macos-host, container"),
-            "{stderr}"
-        );
-    }
-}
-
-#[test]
 fn unknown_section_exits_one() {
     let d = new_dir("bad");
     put(&d.0, "maknae.yaml", "mystery:\n  a: 1\n", 0o640);

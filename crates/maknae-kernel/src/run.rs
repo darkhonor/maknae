@@ -7201,7 +7201,6 @@ fn install_shutdown_signal() -> Result<impl Future<Output = ()> + Send, String> 
     })
 }
 
-/// The boot diagnostic for a host that declared it checks no account state.
 fn account_source_diag(d: maknae_config::Deployment) -> Option<&'static str> {
     match (d.mode, d.account_source) {
         (maknae_config::DeploymentMode::LinuxHost, maknae_config::AccountSource::None) => Some(

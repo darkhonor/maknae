@@ -637,8 +637,6 @@ const USERDBD_SOCKET_UNITS: [&str; 2] = [
     "/lib/systemd/system/systemd-userdbd.socket",
 ];
 
-/// Whether this host ships the systemd-userdbd socket unit, the account-state
-/// source a Linux host's `deployment.account_source: userdb` asks.
 fn userdbd_socket_installed(
     presence: impl Fn(&Path) -> std::io::Result<bool>,
 ) -> Result<bool, EnrollError> {

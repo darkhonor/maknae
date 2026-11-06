@@ -136,7 +136,6 @@ pub(crate) const DEPLOYMENT: &str = if cfg!(target_os = "macos") {
 } else {
     r#"{"mode":"linux-host"}"#
 };
-/// [`DEPLOYMENT`] as a `maknae.yaml` block.
 pub(crate) const DEPLOYMENT_YAML: &str = if cfg!(target_os = "macos") {
     "deployment:\n  mode: macos-host\n"
 } else {

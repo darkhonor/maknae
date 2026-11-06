@@ -352,6 +352,7 @@ const DISCLOSABLE: &[&str] = &[
     "transport.handshake_timeout_ms",
     "transport.read_timeout_ms",
     "deployment.mode",
+    "deployment.account_source",
     // NOT classified, deliberately. Each carries its reason, because "absent
     // from the list" and "considered and withheld" are different states and
     // only one of them survives a review:

@@ -1050,6 +1050,11 @@ end_anchor = "            Err(e) => return Err(map_errno_no_disambiguation(e, pa
 why = "read_pseudo_file's read loop: EINTR needs signal delivery mid-syscall and a mid-read Err is EIO on a healthy FS; neither is provokable from a unit test without a seam. Both are pure control flow; the cap decision after the loop is covered by a_file_over_cap_is_refused and a_file_within_cap_reads_whole"
 
 [[exception]]
+path = "crates/maknae-io/src/host_facts.rs"
+anchor = "    let st = syscall::fstat(&fd).map_err(|e| map_errno_no_disambiguation(e, path))?;"
+why = "fstat on the fd openat just returned cannot fail on a healthy FS; a pure errno passthrough with no decision, as anchor.rs's same-shaped exception records"
+
+[[exception]]
 path = "crates/maknae-io/src/anchor.rs"
 anchor = "            Ok(0) => break,"
 end_anchor = "Err(e) => return Err(crate::checks::map_errno_no_disambiguation(e, full)),"

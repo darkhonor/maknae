@@ -256,10 +256,12 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
-    fn console_owner_is_a_uid() {
-        assert!(console_owner_uid().is_ok());
+    fn the_console_owner_is_the_owner_of_dev_console() {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        let st = std::fs::symlink_metadata("/dev/console").expect("stat /dev/console");
+        assert!(st.file_type().is_char_device());
+        assert_eq!(console_owner_uid().expect("owner"), st.uid());
     }
 
     #[test]
@@ -288,6 +290,12 @@ mod tests {
                 .expect_err("a symlink is not followed")
                 .kind(),
             std::io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            char_device_owner(&d.path().join("absent"))
+                .expect_err("an absent device has no owner")
+                .kind(),
+            std::io::ErrorKind::NotFound
         );
     }
 
