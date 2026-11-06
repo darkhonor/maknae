@@ -44,6 +44,9 @@ pub(crate) fn text(id: MsgId) -> &'static str {
         MsgId::EnrollGraphStoreExists => {
             "커널 그래프 저장소가 이미 있어서 새 키로는 열 수 없어요. sudo maknae reseed를 실행하세요"
         }
+        MsgId::EnrollAccountSourceNone => {
+            "경고: 이 호스트에는 systemd-userdbd가 없어서 deployment.account_source: none으로 기록했어요. systemd-userdbd를 설치하고 이 키를 userdb로 바꾸기 전까지는 잠기거나 만료된 계정을 거부하지 않아요"
+        }
         MsgId::EnrollProvisioningCli => "CLI 설정을 기록하고 있어요",
         MsgId::EnrollPostureSummary => "등록이 완료됐어요. CLI 설정: {cli_dir}",
         MsgId::EnrollReloginNote => {

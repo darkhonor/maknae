@@ -351,6 +351,7 @@ const DISCLOSABLE: &[&str] = &[
     "transport.prompt_max_bytes",
     "transport.handshake_timeout_ms",
     "transport.read_timeout_ms",
+    "deployment.mode",
     // NOT classified, deliberately. Each carries its reason, because "absent
     // from the list" and "considered and withheld" are different states and
     // only one of them survives a review:
@@ -1468,7 +1469,7 @@ mod tests {
     /// (`audit_cfg.rs`) and named by neither list, so deriving the allow-lists
     /// FROM this inventory would refuse a shipped, valid config.
     ///
-    /// COVERS the five sections whose lists live in this crate. `core`'s TOP
+    /// COVERS the six sections whose lists live in this crate. `core`'s TOP
     /// level (list in `maknae-kernel`'s `boot.rs`, where core is consumed) and
     /// `vault` (in `maknae-vault`) are out of reach from here. `core.handling`
     /// and `core.handling.ceiling` ARE in this crate (`ceiling.rs`) and are
@@ -1483,6 +1484,10 @@ mod tests {
             (crate::PRINCIPAL_SECTION, &crate::principal::PRINCIPAL_KEYS),
             (crate::EGRESS_SECTION, &crate::egress_cfg::EGRESS_KEYS),
             (crate::PROVIDERS_SECTION, &crate::providers::PROVIDER_KEYS),
+            (
+                crate::DEPLOYMENT_SECTION,
+                &crate::deployment::DEPLOYMENT_KEYS,
+            ),
         ];
         let mut matched: Vec<&str> = Vec::new();
         for path in DISCLOSABLE.iter().chain(SUPPRESSED.iter()) {
@@ -1526,7 +1531,7 @@ mod tests {
     /// floor, not a count. `ci/gates/config-disclosure-drift.sh` already
     /// inventories the same `file|struct|section|count|kind` rows for its own
     /// purpose, which is why these structs are the right authority. Covered
-    /// here: the five whose allow-lists live beside them in this crate. `Ceiling`
+    /// here: the six whose allow-lists live beside them in this crate. `Ceiling`
     /// is deliberately outside — its seven fields span TWO YAML levels
     /// (`accreditation_ref` is a sibling of `ceiling`, not a field under it), so
     /// plain equality cannot hold. `VaultConfig` is in another crate.
@@ -1604,6 +1609,11 @@ mod tests {
                 include_str!("providers.rs"),
                 "AuthorizedProvider",
                 &crate::providers::PROVIDER_KEYS,
+            ),
+            (
+                include_str!("deployment.rs"),
+                "Deployment",
+                &crate::deployment::DEPLOYMENT_KEYS,
             ),
         ];
         for (src, name, keys) in cases {

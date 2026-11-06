@@ -39,6 +39,7 @@ mod bounds;
 mod bounds_io;
 mod builder;
 mod ceiling;
+mod deployment;
 mod document;
 mod egress_cfg;
 mod error;
@@ -91,6 +92,9 @@ pub use bounds::{
 };
 pub use bounds_io::load_egress_bounds;
 pub use ceiling::{ceiling_from_core, policy_name_from_core, Ceiling, IngestPosture};
+pub use deployment::{
+    deployment_from_section, AccountSource, Deployment, DeploymentMode, DEPLOYMENT_SECTION,
+};
 pub use document::{
     baseline_change_lines, effective_view, Document, Override, ResolvedSettings, SectionSpec,
     Source, ABSENT, MASK, NOT_SET, SUPPRESSED_CHANGED,
@@ -133,7 +137,7 @@ pub use value::{canonical_json, Value};
 use builder::Builder;
 
 /// The sections `maknaed` reads from `maknae.yaml` and `config.d`.
-pub const DAEMON_SECTIONS: [&str; 7] = [
+pub const DAEMON_SECTIONS: [&str; 8] = [
     "lake",
     "vault",
     "transport",
@@ -141,6 +145,7 @@ pub const DAEMON_SECTIONS: [&str; 7] = [
     "principal",
     "providers",
     "egress",
+    "deployment",
 ];
 
 /// Refuse a key the section's parser does not read (#210).
@@ -167,7 +172,7 @@ pub const DAEMON_SECTIONS: [&str; 7] = [
 /// names NONE of `core.handling`'s three keys (it carries only the bare prefix
 /// `core.handling`) — so deriving from it would refuse a shipped, valid config.
 /// A test holds the inventory to be a SUBSET of these lists — one direction
-/// only, for that reason, and over the five IN-CRATE sections only: `core`'s
+/// only, for that reason, and over the six IN-CRATE sections only: `core`'s
 /// list lives in `maknae-kernel` and `vault`'s in `maknae-vault`, each carrying
 /// its own guard.
 pub fn reject_unknown_keys(
@@ -282,6 +287,7 @@ mod tests {
             PRINCIPAL_SECTION,
             PROVIDERS_SECTION,
             EGRESS_SECTION,
+            DEPLOYMENT_SECTION,
         ] {
             assert!(DAEMON_SECTIONS.contains(&name), "{name}");
         }

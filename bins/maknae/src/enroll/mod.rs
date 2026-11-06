@@ -632,6 +632,42 @@ impl ProvisionJob {
 // and helper.rs (CLI side, via `super::build_cli_yaml`).
 // ============================================================================
 
+const USERDBD_SOCKET_UNITS: [&str; 2] = [
+    "/usr/lib/systemd/system/systemd-userdbd.socket",
+    "/lib/systemd/system/systemd-userdbd.socket",
+];
+
+/// Whether this host ships the systemd-userdbd socket unit, the account-state
+/// source a Linux host's `deployment.account_source: userdb` asks.
+fn userdbd_socket_installed(
+    presence: impl Fn(&Path) -> std::io::Result<bool>,
+) -> Result<bool, EnrollError> {
+    for unit in USERDBD_SOCKET_UNITS {
+        let present = presence(Path::new(unit)).map_err(|e| EnrollError::Io {
+            path: PathBuf::from(unit),
+            source: e.to_string(),
+        })?;
+        if present {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn deployment_yaml(macos: bool, userdb_available: bool) -> Yaml {
+    let pairs = match (macos, userdb_available) {
+        (true, _) => vec![("mode", Yaml::String("macos-host".into()))],
+        (false, available) => vec![
+            ("mode", Yaml::String("linux-host".into())),
+            (
+                "account_source",
+                Yaml::String(if available { "userdb" } else { "none" }.into()),
+            ),
+        ],
+    };
+    artifact_write::yaml_map(pairs)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_daemon_yaml(
     deployment_id: &str,
@@ -642,6 +678,7 @@ fn build_daemon_yaml(
     insecure_plaintext_path: Option<&Path>,
     jsonl_path: &str,
     macos: bool,
+    userdb_available: bool,
     socket_path: Option<&str>,
     principal: &Operator,
     plane_key: &str,
@@ -679,6 +716,7 @@ fn build_daemon_yaml(
                 ("uid", Yaml::Integer(i64::from(principal.uid))),
             ]),
         ),
+        ("deployment", deployment_yaml(macos, userdb_available)),
     ];
     if macos {
         if let Some(sp) = socket_path {
@@ -2488,6 +2526,10 @@ async fn finish_enrollment(
 
     let jsonl_path = "/var/log/maknae/audit.jsonl";
     let socket_path = macos.then_some(maknae_config::MACOS_DAEMON_SOCKET_PATH);
+    let userdb_available = !macos && userdbd_socket_installed(maknae_io::presence)?;
+    if !macos && !userdb_available {
+        errln!("{}", msg(locale, MsgId::EnrollAccountSourceNone));
+    }
 
     let daemon_yaml = build_daemon_yaml(
         deployment_id,
@@ -2498,6 +2540,7 @@ async fn finish_enrollment(
         insecure_plaintext_path(args).as_deref(),
         jsonl_path,
         macos,
+        userdb_available,
         socket_path,
         operator,
         &args.plane_key,
@@ -3379,6 +3422,7 @@ mod tests {
             None,
             "/var/log/maknae/audit.jsonl",
             false,
+            true,
             None,
             &op,
             "ecdsa-p384-sha384",
@@ -3395,6 +3439,7 @@ mod tests {
             None,
             "/var/log/maknae/audit.jsonl",
             true,
+            false,
             Some(maknae_config::MACOS_DAEMON_SOCKET_PATH),
             &op,
             "ecdsa-p384-sha384",
@@ -3403,6 +3448,83 @@ mod tests {
         assert!(macos.contains("socket_path"));
         assert!(macos.contains(maknae_config::MACOS_EGRESS_SOCKET_PATH));
         assert!(!linux.contains("egress"));
+    }
+
+    fn deployment_of(text: &str) -> maknae_config::Deployment {
+        let v = maknae_config::load_str(text).unwrap();
+        maknae_config::deployment_from_section(section(&v, "deployment")).unwrap()
+    }
+
+    #[test]
+    fn build_daemon_yaml_writes_the_deployment_the_host_declares() {
+        use maknae_config::{AccountSource, Deployment, DeploymentMode};
+        let op = Operator {
+            uid: 1000,
+            gid: 1000,
+            name: "ops".to_string(),
+            home: PathBuf::from("/home/ops"),
+        };
+        let yaml = |macos: bool, userdb: bool| {
+            build_daemon_yaml(
+                "dev-01",
+                "https://v.example:8200",
+                "am",
+                "pm",
+                "corp-userpass",
+                None,
+                "/var/log/maknae/audit.jsonl",
+                macos,
+                userdb,
+                macos.then_some(maknae_config::MACOS_DAEMON_SOCKET_PATH),
+                &op,
+                "ecdsa-p384-sha384",
+            )
+        };
+        let with_userdbd = yaml(false, true);
+        assert!(
+            with_userdbd.contains("mode: linux-host")
+                && with_userdbd.contains("account_source: userdb"),
+            "{with_userdbd}"
+        );
+        assert_eq!(
+            deployment_of(&with_userdbd),
+            Deployment {
+                mode: DeploymentMode::LinuxHost,
+                account_source: AccountSource::Userdb,
+            }
+        );
+        let without = yaml(false, false);
+        assert!(without.contains("account_source: none"), "{without}");
+        assert_eq!(deployment_of(&without).account_source, AccountSource::None);
+        for userdb in [false, true] {
+            let macos = yaml(true, userdb);
+            assert!(macos.contains("mode: macos-host"), "{macos}");
+            assert!(!macos.contains("account_source"), "{macos}");
+            assert_eq!(deployment_of(&macos).mode, DeploymentMode::MacosHost);
+        }
+    }
+
+    #[test]
+    fn the_userdbd_socket_is_found_in_either_unit_directory_and_a_failed_probe_refuses() {
+        use std::io::{Error, ErrorKind};
+        for found in USERDBD_SOCKET_UNITS {
+            assert!(
+                userdbd_socket_installed(|p| Ok(p == Path::new(found))).unwrap(),
+                "{found}"
+            );
+        }
+        assert!(!userdbd_socket_installed(|_| Ok(false)).unwrap());
+        let refused = userdbd_socket_installed(|p| {
+            if p == Path::new(USERDBD_SOCKET_UNITS[1]) {
+                Err(Error::from(ErrorKind::PermissionDenied))
+            } else {
+                Ok(false)
+            }
+        });
+        assert!(
+            matches!(&refused, Err(EnrollError::Io { path, .. }) if path == Path::new(USERDBD_SOCKET_UNITS[1])),
+            "{refused:?}"
+        );
     }
 
     #[test]
@@ -3428,6 +3550,7 @@ mod tests {
             None,
             "/var/log/maknae/audit.jsonl",
             true,
+            false,
             Some(maknae_config::MACOS_DAEMON_SOCKET_PATH),
             &op,
             "ecdsa-p384-sha384",
@@ -3498,6 +3621,7 @@ mod tests {
             None,
             "/var/log/maknae/audit.jsonl",
             false,
+            true,
             None,
             &op,
             "ecdsa-p384-sha384",

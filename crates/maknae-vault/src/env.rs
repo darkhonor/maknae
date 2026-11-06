@@ -198,6 +198,10 @@ pub const NEVER_SCRUB_ENV: &[&str] = &[
     // ProtectHostname=yes gives a private UTS namespace and blocks
     // sethostname; it does nothing to the environment block.)
     "HOSTNAME",
+    // The container markers `maknae-kernel`'s deployment self-check reads
+    // (`deployment.rs`); they may only corroborate `deployment.mode: container`.
+    "KUBERNETES_SERVICE_HOST",
+    "container",
 ];
 
 /// The scrub, over an injected remover. Each `main` passes
@@ -270,6 +274,8 @@ mod tests {
             "LANG",
             "PATH",
             "HOSTNAME",
+            "KUBERNETES_SERVICE_HOST",
+            "container",
         ] {
             assert!(
                 NEVER_SCRUB_ENV.contains(&must),

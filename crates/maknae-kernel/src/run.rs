@@ -6401,18 +6401,19 @@ fn inconsistency(b: &BaselineLayer) -> Option<String> {
             "the accepted baseline's recorded digest does not match its sections".to_string(),
         );
     }
-    let declared =
-        match maknae_config::Document::from_baseline(&sections).and_then(crate::boot::assemble) {
-            Ok(declared) => declared,
-            Err(e) => {
-                return Some(format!(
-                    "the accepted baseline's sections do not assemble: {e}"
-                ))
-            }
-        };
+    let declared = match maknae_config::Document::from_baseline(&sections)
+        .and_then(|doc| crate::boot::declared(&doc))
+    {
+        Ok(declared) => declared,
+        Err(e) => {
+            return Some(format!(
+                "the accepted baseline's sections do not assemble: {e}"
+            ))
+        }
+    };
     let (system, ceiling) = (
-        declared.classification_policy_name(),
-        &declared.ceiling().classification.name,
+        declared.policy.name(),
+        &declared.ceiling.classification.name,
     );
     (system != b.system || *ceiling != b.ceiling).then(|| {
         format!(
@@ -6692,8 +6693,12 @@ async fn boot_after_sink(
         egress: egress_cfg,
         audit,
         principal,
+        deployment,
         ..
     } = validated;
+    if let Some(line) = account_source_diag(deployment) {
+        eprintln!("{line}");
+    }
     if let Some(why) = inconsistent {
         return Err(graph_refusal(GraphFailure::Inconsistent(why), state_dir));
     }
@@ -7025,6 +7030,7 @@ async fn boot_after_sink(
         egress,
         hup,
         Arc::new(reloader),
+        deployment.mode,
     )
     .await;
 
@@ -7068,10 +7074,22 @@ async fn serve_after_mint<B>(
     egress: Arc<dyn crate::egress::Egress>,
     hup: tokio::signal::unix::Signal,
     reloader: Arc<Reloader<B, maknae_audit_append::AuditSink>>,
+    mode: maknae_config::DeploymentMode,
 ) -> Result<ServeOutcome, String>
 where
     B: maknae_authz_basic::Baseline,
 {
+    if !crate::deployment::client_listener_wanted(mode) {
+        eprintln!(
+            "maknaed: deployment.mode is {}; no client listener is bound",
+            mode.as_str()
+        );
+        let signalled = install_shutdown_signal()?;
+        return Ok(tokio::select! {
+            _ = signalled => ServeOutcome::GracefulShutdown,
+            joined = supervisor => ServeOutcome::SupervisorExited(supervisor_exit_reason(joined)),
+        });
+    }
     // Resolve the `maknae` gid BEFORE bind (codex round-7 P1) and fail closed if it can't:
     // under the normal service-account setup `maknaed`'s PRIMARY group is NOT `maknae`
     // (it's a supplementary member), so a bare bind would group-own the 0660 socket by the
@@ -7183,6 +7201,19 @@ fn install_shutdown_signal() -> Result<impl Future<Output = ()> + Send, String> 
     })
 }
 
+/// The boot diagnostic for a host that declared it checks no account state.
+fn account_source_diag(d: maknae_config::Deployment) -> Option<&'static str> {
+    match (d.mode, d.account_source) {
+        (maknae_config::DeploymentMode::LinuxHost, maknae_config::AccountSource::None) => Some(
+            "maknaed: deployment.account_source is none: account state (locked, expired) is not checked on this host",
+        ),
+        (maknae_config::DeploymentMode::LinuxHost, maknae_config::AccountSource::Userdb)
+        | (maknae_config::DeploymentMode::MacosHost | maknae_config::DeploymentMode::Container, _) => {
+            None
+        }
+    }
+}
+
 /// Best-effort host label for AU-3c. Not security-load-bearing (the security-relevant
 /// AU-3 facts are the peer uid / plane URI-SAN / outcome); a missing hostname degrades
 /// only correlation, so this never fails the daemon.
@@ -7269,6 +7300,24 @@ pub(crate) mod baseline_stub {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_linux_host_that_declared_no_account_source_says_so_at_boot() {
+        use maknae_config::{AccountSource, Deployment, DeploymentMode};
+        let d = |mode, account_source| Deployment {
+            mode,
+            account_source,
+        };
+        let line = account_source_diag(d(DeploymentMode::LinuxHost, AccountSource::None)).unwrap();
+        assert!(line.contains("account_source is none"), "{line}");
+        for quiet in [
+            d(DeploymentMode::LinuxHost, AccountSource::Userdb),
+            d(DeploymentMode::MacosHost, AccountSource::None),
+            d(DeploymentMode::Container, AccountSource::None),
+        ] {
+            assert_eq!(account_source_diag(quiet), None, "{quiet:?}");
+        }
+    }
 
     #[test]
     fn the_sync_records_are_a_graph_pseudo_action() {
@@ -7746,10 +7795,11 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
              vault:\n  addr: https://v.example:8200\n  plane_key: ecdsa-p521-sha512\n\
              transport:\n  socket_path: {}\n\
              audit:\n  jsonl_path: {}\n\
-             {}",
+             {}{}",
             d.0.join("maknaed.sock").display(),
             d.0.join("audit.jsonl").display(),
             principal_block,
+            crate::test_fixtures::DEPLOYMENT_YAML,
         );
         put(&d.0, "maknae.yaml", &yaml, 0o640);
         for f in [
@@ -10668,6 +10718,12 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }
+        fn presence(&self, path: &Path) -> Result<bool, String> {
+            Ok(path == Path::new(crate::deployment::SYSTEMD_RUNNING))
+        }
+        fn env_var(&self, _: &str) -> Option<String> {
+            None
+        }
     }
 
     fn test_seams() -> BootSeams {
@@ -10770,9 +10826,10 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
     /// The common fixture's maknae.yaml with `core_extra` under `core:`, the trail at `audit`, and `tail` appended.
     fn write_yaml(d: &Dir, core_extra: &str, vault_addr: &str, audit: &Path, tail: &str) {
         let yaml = format!(
-            "core:\n  deployment_id: dev-01\n{core_extra}vault:\n  addr: {vault_addr}\ntransport:\n  socket_path: {}\naudit:\n  jsonl_path: {}\n{PRINCIPAL_BLOCK}{tail}",
+            "core:\n  deployment_id: dev-01\n{core_extra}vault:\n  addr: {vault_addr}\ntransport:\n  socket_path: {}\naudit:\n  jsonl_path: {}\n{PRINCIPAL_BLOCK}{}{tail}",
             d.0.join("maknaed.sock").display(),
             audit.display(),
+            crate::test_fixtures::DEPLOYMENT_YAML,
         );
         put(&d.0, "maknae.yaml", &yaml, 0o640);
     }
@@ -11099,6 +11156,111 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         assert_eq!(revision_of_store(&d), revision);
     }
 
+    fn without_deployment(d: &Dir) {
+        let mut b = accepted(d);
+        assert!(b.sections.remove("deployment").is_some());
+        b.sha256 = crate::baseline::accepted_digest(&b.sections.clone().into());
+        rewrite_baseline(d, Some(&b));
+    }
+
+    #[test]
+    fn a_baseline_accepted_without_deployment_follows_the_files_at_start() {
+        let _g = env_lock();
+        let d = fixture("deployment-follows");
+        let _ = boot(&d);
+        without_deployment(&d);
+        let before = trail_of(&d, "audit.jsonl").len();
+        let _ = boot(&d);
+        let recs = trail_of(&d, "audit.jsonl")[before..].to_vec();
+        assert!(
+            recs.iter().any(|r| r.action == GRAPH_BASELINE_ACTION
+                && r.outcome.reason == "deployment follows maknae.yaml at start"),
+            "{:?}",
+            recs.iter().map(|r| &r.outcome.reason).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            accepted(&d).sections["deployment"],
+            crate::test_fixtures::DEPLOYMENT
+        );
+    }
+
+    #[test]
+    fn a_baseline_accepted_without_deployment_and_an_invalid_file_refuses_naming_the_key() {
+        let _g = env_lock();
+        let d = fixture("deployment-pre-115");
+        let _ = boot(&d);
+        without_deployment(&d);
+        write_yaml(
+            &d,
+            "  unknown_key: 1\n",
+            "https://v.example:8200",
+            &d.0.join("audit.jsonl"),
+            "",
+        );
+        let r = boot(&d);
+        let Err(e @ RunError::Other(m)) = &r else {
+            panic!("expected the start refusal, got {r:?}");
+        };
+        assert!(
+            m.starts_with("accepted baseline cannot start: ")
+                && m.contains("deployment.mode")
+                && m.contains("linux-host, macos-host, container"),
+            "{m}"
+        );
+        assert_eq!(refusal_exit_code(e), 1);
+    }
+
+    #[test]
+    fn a_baseline_with_deployment_keeps_running_over_an_invalid_file() {
+        let _g = env_lock();
+        let d = fixture("deployment-kept");
+        let _ = boot(&d);
+        let stored = accepted(&d).sections["deployment"].clone();
+        let yaml = std::fs::read_to_string(d.0.join("maknae.yaml")).unwrap();
+        put(
+            &d.0,
+            "maknae.yaml",
+            &yaml.replace(crate::test_fixtures::DEPLOYMENT_YAML, ""),
+            0o640,
+        );
+        let before = trail_of(&d, "audit.jsonl").len();
+        let _ = boot(&d);
+        let recs = trail_of(&d, "audit.jsonl")[before..].to_vec();
+        let b = baseline_records(&recs);
+        assert_eq!(b.len(), 1, "{b:?}");
+        assert_eq!(b[0].1, crate::baseline::INVALID_RECORDED);
+        assert_eq!(accepted(&d).sections["deployment"], stored);
+    }
+
+    #[test]
+    fn a_mode_the_host_contradicts_refuses_the_first_start_audited() {
+        let _g = env_lock();
+        let d = fixture("deployment-contradicted");
+        let yaml = std::fs::read_to_string(d.0.join("maknae.yaml")).unwrap();
+        put(
+            &d.0,
+            "maknae.yaml",
+            &yaml.replace(
+                crate::test_fixtures::DEPLOYMENT_YAML,
+                "deployment:\n  mode: container\n",
+            ),
+            0o640,
+        );
+        let r = boot(&d);
+        let Err(e @ RunError::Other(m)) = &r else {
+            panic!("expected the start refusal, got {r:?}");
+        };
+        assert!(m.contains("deployment.mode is container"), "{m}");
+        assert_eq!(refusal_exit_code(e), 1);
+        let recs = trail_of(&d, "audit.jsonl");
+        assert_eq!(recs.len(), 1, "{recs:?}");
+        assert_eq!(
+            (recs[0].action.as_str(), recs[0].outcome.reason.as_str()),
+            ("start", m.as_str())
+        );
+        assert!(!state_dir(&d.0).join(STORE_FILE).exists());
+    }
+
     #[test]
     fn vault_follows_the_file_at_start_and_is_recorded() {
         let _g = env_lock();
@@ -11397,9 +11559,10 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
 
     fn yaml_with_offload(d: &Dir, trail: &Path) {
         let yaml = format!(
-            "core:\n  deployment_id: dev-01\nvault:\n  addr: https://v.example:8200\ntransport:\n  socket_path: {}\naudit:\n  jsonl_path: {}\n  siem: https://siem.example:6514\n{PRINCIPAL_BLOCK}",
+            "core:\n  deployment_id: dev-01\nvault:\n  addr: https://v.example:8200\ntransport:\n  socket_path: {}\naudit:\n  jsonl_path: {}\n  siem: https://siem.example:6514\n{PRINCIPAL_BLOCK}{}",
             d.0.join("maknaed.sock").display(),
             trail.display(),
+            crate::test_fixtures::DEPLOYMENT_YAML,
         );
         put(&d.0, "maknae.yaml", &yaml, 0o640);
     }
@@ -11609,9 +11772,10 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         let d = fixture("accepted-restart");
         let _ = boot(&d);
         let yaml = format!(
-            "core:\n  deployment_id: dev-01\nvault:\n  addr: https://v.example:8200\ntransport:\n  socket_path: {}\n  max_connections: 7\naudit:\n  jsonl_path: {}\n{PRINCIPAL_BLOCK}",
+            "core:\n  deployment_id: dev-01\nvault:\n  addr: https://v.example:8200\ntransport:\n  socket_path: {}\n  max_connections: 7\naudit:\n  jsonl_path: {}\n{PRINCIPAL_BLOCK}{}",
             d.0.join("maknaed.sock").display(),
             d.0.join("audit.jsonl").display(),
+            crate::test_fixtures::DEPLOYMENT_YAML,
         );
         put(&d.0, "maknae.yaml", &yaml, 0o640);
         accept_shown(&d);
@@ -12915,7 +13079,8 @@ mod reload_fixture {
             }
         }
         format!(
-            "core:\n  deployment_id: dev-01\n{core_extra}vault:\n  addr: {vault_addr}\ntransport:\n  socket_path: {socket}\n{transport}audit:\n  jsonl_path: {trail}\n{audit}principal:\n  name: op\n  uid: {uid}\n{rest}",
+            "core:\n  deployment_id: dev-01\n{core_extra}vault:\n  addr: {vault_addr}\ntransport:\n  socket_path: {socket}\n{transport}audit:\n  jsonl_path: {trail}\n{audit}principal:\n  name: op\n  uid: {uid}\n{deployment}{rest}",
+            deployment = crate::test_fixtures::DEPLOYMENT_YAML,
         )
     }
 
@@ -13864,6 +14029,11 @@ mod baseline_accept_tests {
                 "{tag}: the running ceiling still refuses SECRET content"
             );
             assert_eq!(fx.stored().unwrap().ceiling, "SECRET", "{tag}");
+            assert_eq!(
+                fx.stored().unwrap().sections["deployment"],
+                crate::test_fixtures::DEPLOYMENT,
+                "{tag}"
+            );
         }
     }
 

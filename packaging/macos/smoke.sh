@@ -189,6 +189,10 @@ phase1() {
     grep -q 'usr/local/share/maknae/defaults' "$HERE/build-pkg.sh" \
         && ok "config defaults staged outside /etc" \
         || fail "config staged into /etc — upgrades would clobber enrollment"
+    grep -qxF "sed -i '' 's/^  mode: linux-host\$/  mode: macos-host/' \"\$D/usr/local/share/maknae/defaults/maknae.yaml\"" "$HERE/build-pkg.sh" \
+        && [ "$(grep -c '^  mode: linux-host$' "$REPO/packaging/common/maknae.yaml")" -eq 1 ] \
+        && ok "the staged maknae.yaml replaces the skeleton's one linux-host mode with macos-host" \
+        || fail "build-pkg.sh does not replace deployment.mode with macos-host — a macOS build refuses linux-host"
     grep -q 'install_name_tool -change' "$HERE/build-pkg.sh" \
         && ok "FIPS dylib pinned by absolute install name" \
         || fail "no install_name_tool — an unresolved @rpath can load SOME OTHER libcrypto"
@@ -368,6 +372,20 @@ phase1() {
             fi
         else
             fail "no Bom in the expanded daemon component"
+        fi
+        local payload="$x/exp/maknae-daemon.pkg/Payload" staged=""
+        if [ -f "$payload" ]; then
+            mkdir -p "$x/pay"
+            ( cd "$x/pay" && gzip -dc "$payload" | cpio -i --quiet ./usr/local/share/maknae/defaults/maknae.yaml ) 2>/dev/null
+            staged="$x/pay/usr/local/share/maknae/defaults/maknae.yaml"
+        fi
+        if [ -f "$staged" ] \
+            && [ "$(grep -c '^deployment:' "$staged")" -eq 1 ] \
+            && [ "$(grep -c '^  mode: ' "$staged")" -eq 1 ] \
+            && grep -q '^  mode: macos-host$' "$staged"; then
+            ok "the packaged maknae.yaml carries one deployment.mode: macos-host"
+        else
+            fail "the packaged maknae.yaml does not carry exactly one deployment.mode: macos-host"
         fi
         local cbom="$x/exp/maknae-cli.pkg/Bom"
         if [ -f "$cbom" ]; then

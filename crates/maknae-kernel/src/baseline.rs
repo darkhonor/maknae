@@ -10,7 +10,7 @@ use maknae_graph::identity::hex;
 use maknae_proto::BaselineView;
 
 pub const ROOT_FILE: &str = "root-file";
-pub const FOLLOWED_AT_BOOT: [&str; 2] = ["audit", "vault"];
+pub const FOLLOWED_AT_BOOT: [&str; 3] = ["audit", "deployment", "vault"];
 pub const SEEDED_EVENT: &str =
     "baseline seeded from maknae.yaml and config.d (no accepted baseline yet)";
 
@@ -313,7 +313,7 @@ pub fn at_boot(
         let cause = if mix == *acc {
             format!("the accepted baseline no longer validates: {cause}")
         } else {
-            format!("the file's vault and audit sections cannot start: {cause}")
+            format!("the file's vault, audit and deployment sections cannot start: {cause}")
         };
         return Ok(Start {
             run: acc.clone(),
@@ -968,7 +968,8 @@ mod tests {
         assert_eq!(
             p.state,
             PendingState::Invalid {
-                cause: "the file's vault and audit sections cannot start: not prepared".into(),
+                cause: "the file's vault, audit and deployment sections cannot start: not prepared"
+                    .into(),
                 proposed: Some(s(&[("core", CORE), ("audit", AUDIT_B)]))
             }
         );

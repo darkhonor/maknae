@@ -217,6 +217,12 @@ transport:
   # packaging/macos/scripts/preinstall.
   socket_path: /usr/local/var/run/maknae/maknaed.sock
 MACOS_TRANSPORT
+# The skeleton's one deployment mode is linux-host, which a macOS build refuses.
+sed -i '' 's/^  mode: linux-host$/  mode: macos-host/' "$D/usr/local/share/maknae/defaults/maknae.yaml"
+[ "$(grep -c '^deployment:' "$D/usr/local/share/maknae/defaults/maknae.yaml")" -eq 1 ] \
+    && [ "$(grep -c '^  mode: ' "$D/usr/local/share/maknae/defaults/maknae.yaml")" -eq 1 ] \
+    && grep -q '^  mode: macos-host$' "$D/usr/local/share/maknae/defaults/maknae.yaml" \
+    || { echo "build-pkg: the staged maknae.yaml must carry exactly one deployment.mode: macos-host" >&2; exit 1; }
 
 # Strip what CAN be stripped, then VERIFY BY RE-READING — never by exit status.
 #

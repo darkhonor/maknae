@@ -41,6 +41,9 @@ pub(crate) fn text(id: MsgId) -> &'static str {
         MsgId::EnrollGraphStoreExists => {
             "a kernel graph store already exists and cannot be opened with the new key; run sudo maknae reseed"
         }
+        MsgId::EnrollAccountSourceNone => {
+            "warning: this host has no systemd-userdbd, so enroll wrote deployment.account_source: none; locked and expired accounts are not refused until it is installed and the key is set to userdb"
+        }
         MsgId::EnrollProvisioningCli => "Writing your CLI configuration",
         MsgId::EnrollPostureSummary => "Enrollment complete. CLI config: {cli_dir}",
         MsgId::EnrollReloginNote => {

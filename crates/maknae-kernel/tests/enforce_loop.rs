@@ -1833,7 +1833,7 @@ async fn a_granted_status_reports_real_posture_from_the_real_pdp() {
     let cfg = fx.dir.join("maknae.yaml");
     std::fs::write(
         &cfg,
-        "core:\n  handling:\n    ceiling:\n      classification: protected\n      sci: false\n      releasable_to: []\n      cui_permitted: false\n      cui_categories_permitted: []\n      dissemination_permitted: [\"Distribution Statement A\"]\n    accreditation_ref: null\n    policy: aus\n",
+        "core:\n  handling:\n    ceiling:\n      classification: protected\n      sci: false\n      releasable_to: []\n      cui_permitted: false\n      cui_categories_permitted: []\n      dissemination_permitted: [\"Distribution Statement A\"]\n    accreditation_ref: null\n    policy: aus\ndeployment:\n  mode: linux-host\n",
     )
     .unwrap();
     std::fs::set_permissions(&cfg, std::fs::Permissions::from_mode(0o640)).unwrap();
