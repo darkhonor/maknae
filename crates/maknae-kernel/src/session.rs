@@ -26,11 +26,11 @@ pub trait SessionFacts: Send + Sync {
     fn account(&self, uid: u32) -> AccountFact;
 }
 
-/// The facts one decision is made on; `membership` is `None` when the lookup
+/// The facts one decision is made on; `membership` is `Err(Resolve)` when the lookup
 /// failed or did not answer in time.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Facts {
-    pub membership: Option<Membership>,
+    pub membership: Result<Membership, AuthzError>,
     pub login: LoginFact,
     pub account: AccountFact,
 }
@@ -38,7 +38,7 @@ pub struct Facts {
 impl Facts {
     fn unanswered(why: &str) -> Self {
         Facts {
-            membership: None,
+            membership: Err(AuthzError::Resolve(why.to_string())),
             login: LoginFact::Unavailable(why.to_string()),
             account: AccountFact::Checked(AccountState::Unknown(why.to_string())),
         }
@@ -126,8 +126,8 @@ pub(crate) async fn gather(
             let looked_up = tokio::time::timeout(
                 gate.bound,
                 tokio::task::spawn_blocking(move || {
-                    let membership = facts.membership(admission, uid).ok();
-                    let name = user.or_else(|| membership.as_ref().map(|m| m.user.clone()));
+                    let membership = facts.membership(admission, uid);
+                    let name = user.or_else(|| membership.as_ref().ok().map(|m| m.user.clone()));
                     let login = facts.login(&process, pid, uid, name.as_deref());
                     let account = facts.account(uid);
                     Facts {
@@ -309,7 +309,7 @@ mod tests {
         assert_eq!(
             got,
             Facts {
-                membership: resolved("ann").ok(),
+                membership: resolved("ann"),
                 login: LoginFact::NotActive,
                 account: AccountFact::Checked(AccountState::Expired),
             }
@@ -336,7 +336,7 @@ mod tests {
     async fn a_failed_membership_is_unanswered_and_names_no_user() {
         let probe = Probe::new(Duration::ZERO, Err(AuthzError::Resolve("nss".into())));
         let got = ask(&gate(&probe, Duration::from_secs(5)), None).await;
-        assert_eq!(got.membership, None);
+        assert_eq!(got.membership, Err(AuthzError::Resolve("nss".into())));
         assert_eq!(*probe.seen_user.lock().unwrap(), Some(None));
     }
 

@@ -1232,9 +1232,12 @@ impl maknae_kernel::SessionFacts for ScriptedFacts {
         }
         let facts = next.map(|(_, f)| f);
         self.current.lock().unwrap().clone_from(&facts);
-        facts
-            .and_then(|f| f.membership)
-            .ok_or_else(|| maknae_kernel::AuthzError::Resolve("scripted: no answer".into()))
+        match facts {
+            Some(f) => f.membership,
+            None => Err(maknae_kernel::AuthzError::Resolve(
+                "scripted: no answer".into(),
+            )),
+        }
     }
 
     fn login(
@@ -1261,7 +1264,7 @@ impl maknae_kernel::SessionFacts for ScriptedFacts {
 /// A live member whose account state is `account`.
 pub fn member_facts(account: AccountFact) -> maknae_kernel::Facts {
     maknae_kernel::Facts {
-        membership: Some(maknae_kernel::Membership {
+        membership: Ok(maknae_kernel::Membership {
             in_group: true,
             user: "scripted".into(),
             dir: fixture_home(),
@@ -1277,7 +1280,7 @@ pub fn active_member() -> maknae_kernel::Facts {
 
 pub fn non_member() -> maknae_kernel::Facts {
     let mut f = active_member();
-    if let Some(m) = f.membership.as_mut() {
+    if let Ok(m) = f.membership.as_mut() {
         m.in_group = false;
     }
     f

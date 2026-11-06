@@ -31,11 +31,17 @@ use tokio::time::Instant;
 /// Recording sink (never fails) shared with the accept loop.
 struct RecEmit {
     recs: Mutex<Vec<AuditRecord>>,
+    /// Appends of this event are offered (recorded) and then refused.
+    refuse: Option<&'static str>,
 }
 impl RecEmit {
     fn new() -> Arc<Self> {
+        Self::refusing(None)
+    }
+    fn refusing(refuse: Option<&'static str>) -> Arc<Self> {
         Arc::new(RecEmit {
             recs: Mutex::new(Vec::new()),
+            refuse,
         })
     }
     fn records(&self) -> Vec<AuditRecord> {
@@ -45,7 +51,14 @@ impl RecEmit {
 impl AuditEmit for RecEmit {
     fn emit(&self, rec: &AuditRecord) -> impl Future<Output = Result<(), AuditError>> + Send {
         self.recs.lock().unwrap().push(rec.clone());
-        async move { Ok(()) }
+        let refused = self.refuse == Some(rec.event.as_str());
+        async move {
+            if refused {
+                Err(AuditError::WritePrimary("refused".into()))
+            } else {
+                Ok(())
+            }
+        }
     }
 }
 
@@ -293,7 +306,18 @@ async fn drive_gated(
     gate: Arc<FactsGate>,
     lifetime: Duration,
 ) -> Vec<AuditRecord> {
-    let emit = RecEmit::new();
+    drive_into(RecEmit::new(), class, script, cfg, drain, gate, lifetime).await
+}
+
+async fn drive_into(
+    emit: Arc<RecEmit>,
+    class: ChannelClass,
+    script: Vec<Scripted>,
+    cfg: maknae_config::TransportConfig,
+    drain: tokio::sync::watch::Receiver<maknae_kernel::Drain>,
+    gate: Arc<FactsGate>,
+    lifetime: Duration,
+) -> Vec<AuditRecord> {
     let acceptor = FakeAccept::new(script);
     let session_ids = Arc::new(SessionIds::with_nonce(1));
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
@@ -1023,8 +1047,9 @@ async fn a_connection_during_the_drain_is_closed_unserved() {
 
 const SESSION_UID: u32 = 11_500;
 
-/// A connection that has already written one ping and closed its write side.
-async fn pinging() -> Scripted {
+/// A connection that has written one ping and closed its write side; the
+/// client end stays readable.
+async fn pinging() -> (Scripted, DuplexStream) {
     let (mut client, server) = tokio::io::duplex(4096);
     let ping = maknae_proto::encode_request(&maknae_proto::Request {
         protocol_version: maknae_proto::PROTOCOL_VERSION,
@@ -1032,8 +1057,49 @@ async fn pinging() -> Scripted {
     })
     .unwrap();
     common::write_frame(&mut client, &ping).await.unwrap();
-    drop(client);
-    Scripted::Ok(server, certified("spiffe://d/plane/cli"), SESSION_UID)
+    tokio::io::AsyncWriteExt::shutdown(&mut client)
+        .await
+        .unwrap();
+    (
+        Scripted::Ok(server, certified("spiffe://d/plane/cli"), SESSION_UID),
+        client,
+    )
+}
+
+/// What the client read back, as the CLI reads a control reply; `None` when the
+/// daemon closed without a frame.
+async fn answer(mut client: DuplexStream) -> Option<maknae_proto::RespResult> {
+    let mut bytes = Vec::new();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio::io::AsyncReadExt::read_to_end(&mut client, &mut bytes),
+    )
+    .await
+    .expect("the daemon closed the connection")
+    .unwrap();
+    if bytes.is_empty() {
+        return None;
+    }
+    let body = maknae_proto::read_frame_of_class(
+        &mut bytes.as_slice(),
+        maknae_proto::FrameClass::Control,
+        &maknae_proto::FrameCaps::responses(1 << 20),
+    )
+    .await
+    .expect("a control-class reply");
+    Some(maknae_proto::decode_response(&body).unwrap().result)
+}
+
+fn assert_unauthorized(got: Option<maknae_proto::RespResult>) {
+    match got {
+        Some(maknae_proto::RespResult::Err(e)) => {
+            assert_eq!(
+                (e.code, e.message.as_str()),
+                (maknae_proto::ProtoErrCode::Unauthorized, "not authorized")
+            );
+        }
+        other => panic!("expected the generic Unauthorized frame, got {other:?}"),
+    }
 }
 
 fn of_session(recs: &[AuditRecord]) -> Vec<&AuditRecord> {
@@ -1073,11 +1139,12 @@ fn terminated(result: &str, reason: &str) -> (String, String, String, String) {
     row("session", "terminate", result, reason)
 }
 
-/// A session refused at its request: admitted, the request refused for `reason`,
-/// the session ended for the same reason.
+/// A session refused at its request: admitted, the request refused for `reason`
+/// and answered with the generic frame, the session ended for the same reason.
 async fn refused_at_the_request(request: maknae_kernel::Facts, reason: &str) -> Vec<AuditRecord> {
+    let (conn, client) = pinging().await;
     let recs = drive_facts(
-        vec![pinging().await],
+        vec![conn],
         common::ScriptedFacts::gate(vec![common::active_member(), request]),
     )
     .await;
@@ -1095,13 +1162,15 @@ async fn refused_at_the_request(request: maknae_kernel::Facts, reason: &str) -> 
         session.iter().map(|r| r.seq).collect::<Vec<_>>(),
         vec![1, 2, 3]
     );
+    assert_unauthorized(answer(client).await);
     recs
 }
 
 #[tokio::test]
 async fn a_non_member_is_refused_at_connect() {
+    let (conn, client) = pinging().await;
     let recs = drive_facts(
-        vec![pinging().await],
+        vec![conn],
         common::ScriptedFacts::gate(vec![common::non_member()]),
     )
     .await;
@@ -1120,11 +1189,38 @@ async fn a_non_member_is_refused_at_connect() {
         deny.source.plane_uri_san.as_deref(),
         Some("spiffe://d/plane/cli")
     );
+    assert_eq!(
+        answer(client).await,
+        None,
+        "a connect-time deny writes no frame"
+    );
+}
+
+#[tokio::test]
+async fn a_deleted_account_is_refused_as_not_a_member() {
+    let mut deleted = common::active_member();
+    deleted.membership = Err(maknae_kernel::AuthzError::NoUser);
+    let (conn, client) = pinging().await;
+    let recs = drive_facts(vec![conn], common::ScriptedFacts::gate(vec![deleted])).await;
+    let session = of_session(&recs);
+    assert_eq!(
+        trail(&session),
+        vec![row("connection", "connect", "deny", "not-member")]
+    );
+    assert_eq!(session[0].outcome.posture, "unauthorized");
+    assert_eq!(answer(client).await, None);
 }
 
 #[tokio::test]
 async fn a_member_de_enrolled_before_the_request_is_refused_at_the_request() {
     refused_at_the_request(common::non_member(), "not-member").await;
+}
+
+#[tokio::test]
+async fn a_member_whose_account_was_deleted_is_refused_at_the_request() {
+    let mut deleted = common::active_member();
+    deleted.membership = Err(maknae_kernel::AuthzError::NoUser);
+    refused_at_the_request(deleted, "not-member").await;
 }
 
 #[tokio::test]
@@ -1136,21 +1232,19 @@ async fn a_logged_out_process_is_refused_at_the_request() {
 async fn a_locked_local_account_is_refused() {
     let locked = || common::member_facts(AccountFact::Checked(AccountState::Locked));
     refused_at_the_request(locked(), "account-locked").await;
-    let recs = drive_facts(
-        vec![pinging().await],
-        common::ScriptedFacts::gate(vec![locked()]),
-    )
-    .await;
+    let (conn, client) = pinging().await;
+    let recs = drive_facts(vec![conn], common::ScriptedFacts::gate(vec![locked()])).await;
     assert_eq!(
         trail(&of_session(&recs)),
         vec![row("connection", "connect", "deny", "account-locked")]
     );
+    assert_eq!(answer(client).await, None);
 }
 
 #[tokio::test]
 async fn an_unanswerable_source_is_an_infrastructure_denial() {
     let mut unanswered = common::active_member();
-    unanswered.membership = None;
+    unanswered.membership = Err(maknae_kernel::AuthzError::Resolve("nss".into()));
     let recs = refused_at_the_request(unanswered, "infrastructure").await;
     let session = of_session(&recs);
     assert_eq!(session[1].outcome.posture, "unavailable");
@@ -1158,11 +1252,58 @@ async fn an_unanswerable_source_is_an_infrastructure_denial() {
 }
 
 #[tokio::test]
+async fn a_refusal_whose_record_cannot_be_appended_writes_no_frame() {
+    let (conn, client) = pinging().await;
+    let recs = drive_into(
+        RecEmit::refusing(Some("request")),
+        client_class(),
+        vec![conn],
+        cfg_with(8, 150),
+        common::serving(),
+        common::ScriptedFacts::gate(vec![common::active_member(), common::non_member()]),
+        Duration::MAX,
+    )
+    .await;
+    assert_eq!(
+        trail(&of_session(&recs)),
+        vec![
+            admitted("active"),
+            row("request", "liveness.ping", "deny", "not-member"),
+            terminated("deny", "not-member"),
+        ]
+    );
+    assert_eq!(answer(client).await, None);
+}
+
+#[tokio::test]
+async fn a_failed_admission_append_ends_the_session_as_an_infrastructure_denial() {
+    let (conn, client) = pinging().await;
+    let recs = drive_into(
+        RecEmit::refusing(Some("connection")),
+        client_class(),
+        vec![conn],
+        cfg_with(8, 150),
+        common::serving(),
+        common::ScriptedFacts::gate(vec![common::active_member()]),
+        Duration::MAX,
+    )
+    .await;
+    let session = of_session(&recs);
+    assert_eq!(
+        trail(&session),
+        vec![admitted("active"), terminated("deny", "infrastructure")]
+    );
+    assert_eq!(session[1].outcome.posture, "unavailable");
+    assert_eq!(answer(client).await, None);
+}
+
+#[tokio::test]
 async fn a_directory_account_is_served_and_says_not_checked() {
     let directory =
         || common::member_facts(AccountFact::NotChecked(NotCheckedWhy::DirectoryAccount));
+    let (conn, _client) = pinging().await;
     let recs = drive_facts(
-        vec![pinging().await],
+        vec![conn],
         common::ScriptedFacts::gate(vec![directory(), directory()]),
     )
     .await;
@@ -1178,8 +1319,9 @@ async fn a_directory_account_is_served_and_says_not_checked() {
 
 #[tokio::test]
 async fn a_served_connection_ends_with_a_disconnect_record() {
+    let (conn, client) = pinging().await;
     let recs = drive_facts(
-        vec![pinging().await],
+        vec![conn],
         common::ScriptedFacts::gate(vec![common::active_member(), common::active_member()]),
     )
     .await;
@@ -1198,6 +1340,10 @@ async fn a_served_connection_ends_with_a_disconnect_record() {
     assert_eq!(last.seq, session[session.len() - 2].seq + 1);
     assert_eq!(last.session_id, session[0].session_id);
     assert_eq!(last.subject.user.as_deref(), Some("scripted"));
+    assert!(matches!(
+        answer(client).await,
+        Some(maknae_proto::RespResult::Ok(maknae_proto::Payload::Pong))
+    ));
 }
 
 #[tokio::test]
@@ -1207,9 +1353,10 @@ async fn a_connection_past_its_lifetime_ends_with_a_lifetime_record() {
         row("request", "liveness.ping", "deny", "lifetime"),
         terminated("deny", "lifetime"),
     ];
+    let (conn, client) = pinging().await;
     let slow_request_gather = drive_gated(
         client_class(),
-        vec![pinging().await],
+        vec![conn],
         cfg_with(8, 150),
         common::serving(),
         common::ScriptedFacts::gate_with(
@@ -1223,10 +1370,12 @@ async fn a_connection_past_its_lifetime_ends_with_a_lifetime_record() {
     )
     .await;
     assert_eq!(trail(&of_session(&slow_request_gather)), ended_by_lifetime);
+    assert_unauthorized(answer(client).await);
 
+    let (conn, client) = pinging().await;
     let spent_before_the_request = drive_gated(
         client_class(),
-        vec![pinging().await],
+        vec![conn],
         cfg_with(8, 150),
         common::serving(),
         common::ScriptedFacts::gate(vec![common::active_member()]),
@@ -1237,6 +1386,7 @@ async fn a_connection_past_its_lifetime_ends_with_a_lifetime_record() {
         trail(&of_session(&spent_before_the_request)),
         ended_by_lifetime
     );
+    assert_unauthorized(answer(client).await);
 }
 
 /// A verdict the real per-read check set: a read whose bytes carry no
@@ -1261,10 +1411,7 @@ async fn mismatched_sender() -> SenderVerdict {
     verdict
 }
 
-#[tokio::test]
-async fn a_sender_mismatch_read_is_refused() {
-    let (client, server) = tokio::io::duplex(1024);
-    drop(client);
+async fn refused_for_its_sender(server: DuplexStream, client: DuplexStream) {
     let recs = drive_facts(
         vec![Scripted::OkWith(
             server,
@@ -1284,11 +1431,27 @@ async fn a_sender_mismatch_read_is_refused() {
             terminated("deny", "sender-mismatch"),
         ]
     );
+    assert_unauthorized(answer(client).await);
+}
+
+#[tokio::test]
+async fn a_sender_mismatch_read_is_refused() {
+    let (mut client, server) = tokio::io::duplex(1024);
+    tokio::io::AsyncWriteExt::shutdown(&mut client)
+        .await
+        .unwrap();
+    refused_for_its_sender(server, client).await;
+}
+
+#[tokio::test]
+async fn a_sender_mismatch_that_reaches_the_read_timeout_is_refused() {
+    let (client, server) = tokio::io::duplex(1024);
+    refused_for_its_sender(server, client).await;
 }
 
 #[tokio::test]
 async fn a_frame_read_timeout_ends_idle() {
-    let (_client, server) = tokio::io::duplex(1024);
+    let (client, server) = tokio::io::duplex(1024);
     let recs = drive_facts(
         vec![Scripted::Ok(
             server,
@@ -1306,6 +1469,7 @@ async fn a_frame_read_timeout_ends_idle() {
             terminated("deny", "idle"),
         ]
     );
+    assert_eq!(answer(client).await, None);
 }
 
 /// A member whose process was alive at connect and is asked of the host's own
@@ -1319,7 +1483,7 @@ impl maknae_kernel::SessionFacts for ExitsAfterConnect {
         uid: u32,
     ) -> Result<maknae_kernel::Membership, maknae_kernel::AuthzError> {
         let _ = (admission, uid);
-        Ok(common::active_member().membership.unwrap())
+        common::active_member().membership
     }
 
     fn login(
@@ -1350,7 +1514,7 @@ impl maknae_kernel::SessionFacts for ExitsAfterConnect {
 
 #[tokio::test]
 async fn a_peer_process_that_exited_is_refused() {
-    let Scripted::Ok(server, peer, uid) = pinging().await else {
+    let (Scripted::Ok(server, peer, uid), client) = pinging().await else {
         unreachable!()
     };
     let recs = drive_facts(
@@ -1375,4 +1539,5 @@ async fn a_peer_process_that_exited_is_refused() {
             terminated("deny", "logout"),
         ]
     );
+    assert_unauthorized(answer(client).await);
 }

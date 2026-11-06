@@ -258,16 +258,21 @@ async fn deny_audits_then_closes() {
     assert_eq!(deny.outcome.reason, "not-member");
     assert_eq!(deny.session_id, 7);
 
-    // No response frame.
-    let r = tokio::time::timeout(
+    let frame = tokio::time::timeout(
         Duration::from_millis(200),
         common::read_frame(&mut c, 65536),
     )
-    .await;
-    assert!(
-        r.is_err() || r.unwrap().is_err(),
-        "deny must write no response"
-    );
+    .await
+    .expect("the refusal is answered")
+    .expect("a response frame");
+    match maknae_proto::decode_response(&frame).unwrap().result {
+        maknae_proto::RespResult::Err(e) => assert_eq!(
+            (e.code, e.message.as_str()),
+            (maknae_proto::ProtoErrCode::Unauthorized, "not authorized"),
+            "the cause stays in the trail"
+        ),
+        other => panic!("expected the generic Unauthorized frame, got {other:?}"),
+    }
 }
 
 #[tokio::test]

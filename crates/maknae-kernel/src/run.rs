@@ -858,6 +858,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 "maknaed: admission audit write failed for peer_uid={peer_uid} peer_uri={peer_uri:?} session_id={session_id} — closing without serving: {e}"
             ));
         }
+        session.end(Ending::Denied(DenyCause::Infrastructure("audit")));
         close_bounded(&mut stream).await;
         return;
     }
@@ -876,6 +877,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 (&host, &socket),
                 &session,
                 peer_uri.as_deref(),
+                (&cfg, FrameClass::Control),
                 "read",
                 Ending::Denied(DenyCause::SenderMismatch),
                 &au3_1,
@@ -987,6 +989,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             (&host, &socket),
             &session,
             peer_uri.as_deref(),
+            (&cfg, class),
             action,
             Ending::Lifetime,
             &au3_1,
@@ -1013,6 +1016,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 (&host, &socket),
                 &session,
                 peer_uri.as_deref(),
+                (&cfg, class),
                 action,
                 Ending::Denied(cause),
                 &au3_1,
@@ -1028,6 +1032,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             (&host, &socket),
             &session,
             peer_uri.as_deref(),
+            (&cfg, class),
             action,
             Ending::Lifetime,
             &au3_1,
@@ -2716,19 +2721,24 @@ async fn emit_request_deny<E: AuditEmit + Send + Sync>(
     }
 }
 
-/// Refuse the request this session is serving, record why the session ends, and close.
+/// Refuse the request this session is serving as the PDP-deny path does (the cause
+/// goes to the trail, the generic frame only after it is durable), record why the
+/// session ends, and close.
 #[allow(clippy::too_many_arguments)]
-async fn end_session<S: AsyncWrite + Unpin, E: AuditEmit + Send + Sync>(
+async fn end_session<S, E: AuditEmit + Send + Sync>(
     stream: &mut S,
     emit: &Arc<E>,
     (host, socket): (&str, &str),
     session: &SessionRecord,
     peer_uri: Option<&str>,
+    (cfg, class): (&TransportConfig, FrameClass),
     action: &str,
     ending: Ending,
     au3_1: &serde_json::Value,
-) {
-    emit_request_deny(
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let appended = emit_request_outcome(
         emit,
         host,
         socket,
@@ -2736,14 +2746,28 @@ async fn end_session<S: AsyncWrite + Unpin, E: AuditEmit + Send + Sync>(
         peer_uri,
         session.user.as_deref(),
         None,
+        None,
         session.session_id,
         session.seq.next(),
         action,
+        None,
+        None,
+        "deny",
         ending_reason(&ending),
         ending_posture(&ending),
         au3_1,
     )
     .await;
+    if may_respond(appended) {
+        write_error_bounded(
+            stream,
+            cfg,
+            class,
+            ProtoErrCode::Unauthorized,
+            "not authorized",
+        )
+        .await;
+    }
     session.end(ending);
     close_bounded(stream).await;
 }
@@ -3226,7 +3250,7 @@ where
                                             // #275, #435: the username and raw home ride the
                                             // membership lookup; a non-member's home is never carried.
                                             let (_, user, dir) =
-                                                admission_facts(facts.membership.clone());
+                                                admission_facts(facts.membership.clone().ok());
                                             match revalidate(uid, uid, &facts) {
                                                 Revalidation::Deny(cause) => {
                                                     report_unanswered(&cause, uid, session_id);

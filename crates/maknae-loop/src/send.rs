@@ -140,7 +140,7 @@ async fn await_reply<S: tokio::io::AsyncRead + Unpin>(
     match tokio::time::timeout(wait, read_reply(stream, class, &response_caps(transport))).await {
         Err(_elapsed) => Err(match class {
             maknae_proto::FrameClass::Control => format!(
-                "no response from daemon within {}ms; it may be slow admitting the connection (group lookup or admission audit)",
+                "no response from daemon within {}ms; it may be slow admitting the connection or re-checking the session (the session-fact lookups at connect and at the request, or the admission audit)",
                 wait.as_millis()
             ),
             maknae_proto::FrameClass::Attempt | maknae_proto::FrameClass::Prompt => format!(
@@ -629,7 +629,7 @@ mod tests {
     }
 
     fn control_stalled(wait_ms: u64) -> String {
-        format!("no response from daemon within {wait_ms}ms; it may be slow admitting the connection (group lookup or admission audit)")
+        format!("no response from daemon within {wait_ms}ms; it may be slow admitting the connection or re-checking the session (the session-fact lookups at connect and at the request, or the admission audit)")
     }
 
     #[test]

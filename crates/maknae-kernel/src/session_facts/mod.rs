@@ -186,9 +186,11 @@ mod tests {
             .membership(crate::handler::Admission::MaknaeGroupMember, me.as_raw())
             .expect("the euid resolves");
         assert_eq!(got.user, name);
-        assert!(host(AccountSource::None)
-            .membership(crate::handler::Admission::MaknaeGroupMember, 4_000_000_000)
-            .is_err());
+        assert_eq!(
+            host(AccountSource::None)
+                .membership(crate::handler::Admission::MaknaeGroupMember, 4_000_000_000),
+            Err(crate::groupres::AuthzError::NoUser)
+        );
     }
 
     #[cfg(target_os = "linux")]

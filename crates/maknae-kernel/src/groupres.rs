@@ -4,6 +4,8 @@ use nix::unistd::{Group, Uid, User};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthzError {
     Resolve(String),
+    /// The user database answered: no account has this uid.
+    NoUser,
 }
 
 /// Resolve the `maknae` group by name — shared by [`uid_in_maknae_group`] and
@@ -53,7 +55,7 @@ pub fn uid_in_maknae_group(uid: u32) -> Result<Membership, AuthzError> {
     // available. The membership answer may fail; the identity should survive it.
     let user = User::from_uid(Uid::from_raw(uid))
         .map_err(|e| AuthzError::Resolve(e.to_string()))?
-        .ok_or_else(|| AuthzError::Resolve(format!("no user for uid {uid}")))?;
+        .ok_or(AuthzError::NoUser)?;
     let name = user.name.clone();
     let member = |in_group: bool| {
         Ok(Membership {
@@ -110,6 +112,7 @@ mod tests {
         match maknae_gid() {
             Ok(_gid) => {} // a host that DOES have `maknae` — fine, resolved.
             Err(AuthzError::Resolve(msg)) => assert!(!msg.is_empty()),
+            Err(AuthzError::NoUser) => panic!("the group lookup names no user"),
         }
     }
 

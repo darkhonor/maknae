@@ -1,4 +1,5 @@
 //! Connection-admission and per-request session decisions (spec §5, #115). Pure; T1/0-missed.
+use crate::groupres::AuthzError;
 use crate::session::Facts;
 use crate::session_facts::{AccountFact, AccountState, LoginFact, NotCheckedWhy};
 
@@ -32,8 +33,11 @@ pub fn revalidate(bound_uid: u32, request_uid: u32, f: &Facts) -> Revalidation {
         return Revalidation::Deny(DenyCause::Infrastructure("session-map"));
     }
     match &f.membership {
-        None => return Revalidation::Deny(DenyCause::Infrastructure("group")),
-        Some(m) => {
+        Err(AuthzError::Resolve(_)) => {
+            return Revalidation::Deny(DenyCause::Infrastructure("group"));
+        }
+        Err(AuthzError::NoUser) => return Revalidation::Deny(DenyCause::NotMember),
+        Ok(m) => {
             if !m.in_group {
                 return Revalidation::Deny(DenyCause::NotMember);
             }
@@ -633,7 +637,7 @@ mod tests {
 
     fn member(in_group: bool) -> Facts {
         Facts {
-            membership: Some(membership(in_group, "s-115-sentinel")),
+            membership: Ok(membership(in_group, "s-115-sentinel")),
             login: LoginFact::Live,
             account: AccountFact::Checked(AccountState::Active),
         }
@@ -651,7 +655,7 @@ mod tests {
     #[test]
     fn a_uid_that_is_not_the_bound_uid_is_a_session_map_failure() {
         let mut f = member(false);
-        f.membership = None;
+        f.membership = Err(AuthzError::Resolve("nss".into()));
         assert_eq!(
             revalidate(7, 8, &f),
             deny(DenyCause::Infrastructure("session-map"))
@@ -661,12 +665,20 @@ mod tests {
     #[test]
     fn an_unanswered_membership_is_infrastructure() {
         let mut f = member(true);
-        f.membership = None;
+        f.membership = Err(AuthzError::Resolve("nss".into()));
         f.login = LoginFact::NoSession;
         assert_eq!(
             revalidate(7, 7, &f),
             deny(DenyCause::Infrastructure("group"))
         );
+    }
+
+    #[test]
+    fn a_deleted_account_is_not_a_member() {
+        let mut f = member(true);
+        f.membership = Err(AuthzError::NoUser);
+        f.login = LoginFact::Unavailable("x".into());
+        assert_eq!(revalidate(7, 7, &f), deny(DenyCause::NotMember));
     }
 
     #[test]
