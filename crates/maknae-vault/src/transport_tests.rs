@@ -246,7 +246,7 @@ async fn a_delegated_descriptor_survives_the_assembled_tls_path() {
     let (client_raw, server_raw) = tokio::net::UnixStream::pair().expect("socketpair");
     let sender = maknae_plane::FdSender::new(client_raw);
     let armer = sender.armer();
-    let collector = maknae_plane::FdCollector::new(server_raw, 8);
+    let collector = maknae_plane::FdCollector::new(server_raw, 8, None);
     let delegated = collector.delegated();
 
     let acceptor = TlsAcceptor::from(server);
@@ -614,6 +614,139 @@ mod accept_reject {
                 .await,
             Ok(ChannelPeer::Certless)
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_listener_passes_credentials_to_accepted_sockets() {
+        use nix::sys::socket::{getsockopt, sockopt::PassCred};
+        provider();
+        let server = Server::new("passcred", &mk_ca());
+        let _client = crate::socket::connect(&server.sock)
+            .await
+            .expect("client connect");
+        let (accepted, _) = server.listener.accept().await.expect("accept");
+        assert!(getsockopt(&accepted, PassCred).expect("SO_PASSCRED"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_bound_sender_completes_a_handshake_with_passcred_on() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        provider();
+        let ca = mk_ca();
+        let server = Server::new("bound-sender", &ca);
+        let (cchain, ckey) = mk_leaf(&ca, "spiffe://d/plane/cli", false);
+        let client_cfg = client_cfg(cchain, ckey, &cab(&ca), Plane::Kernel, false);
+        let trust = trust(&cab(&ca));
+        let client = async {
+            let raw = crate::socket::connect(&server.sock)
+                .await
+                .expect("client connect");
+            let name =
+                maknae_crypto::rustls::pki_types::ServerName::try_from("maknae.invalid").unwrap();
+            let mut tls = tokio_rustls::TlsConnector::from(client_cfg)
+                .connect(name, raw)
+                .await
+                .expect("client handshake");
+            tls.write_all(b"FRAME").await.expect("write the frame");
+            tls.flush().await.expect("flush");
+            tls
+        };
+        let accepted = accept_on(
+            &server.listener,
+            &server.resolver,
+            &trust,
+            &PeerAuth::Certless,
+            Duration::from_secs(5),
+        );
+        let (_client, accepted) = tokio::join!(client, accepted);
+        let mut stream = accepted.expect("the bound sender is admitted");
+        let mut buf = [0u8; 5];
+        stream.read_exact(&mut buf).await.expect("one frame");
+        assert_eq!(&buf, b"FRAME");
+        assert!(!stream.sender_verdict().mismatched());
+        assert!(matches!(
+            stream.take_peer_process(),
+            crate::PeerProcess::Pidfd(_)
+        ));
+        assert!(matches!(
+            stream.take_peer_process(),
+            crate::PeerProcess::Unavailable
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_mismatched_sender_is_refused_during_the_handshake() {
+        provider();
+        let ca = mk_ca();
+        let server = Server::new("mismatched-sender", &ca);
+        let (cchain, ckey) = mk_leaf(&ca, "spiffe://d/plane/cli", false);
+        let client_cfg = client_cfg(cchain, ckey, &cab(&ca), Plane::Kernel, false);
+        let trust = trust(&cab(&ca));
+        let client = async {
+            let raw = crate::socket::connect(&server.sock)
+                .await
+                .expect("client connect");
+            let name =
+                maknae_crypto::rustls::pki_types::ServerName::try_from("maknae.invalid").unwrap();
+            tokio_rustls::TlsConnector::from(client_cfg)
+                .connect(name, raw)
+                .await
+        };
+        let accepted = async {
+            let (raw, creds) = crate::stream::accept_raw_on(&server.listener)
+                .await
+                .expect("raw accept");
+            let foreign = crate::PeerCreds {
+                uid: creds.uid + 1,
+                ..creds
+            };
+            crate::stream::finish_handshake_on(
+                &server.resolver,
+                &trust,
+                &PeerAuth::Certless,
+                raw,
+                foreign,
+                Duration::from_secs(5),
+            )
+            .await
+        };
+        let (_client, accepted) = tokio::join!(client, accepted);
+        match accepted {
+            Err(AcceptRejection { reason, .. }) => assert_eq!(reason, RejectReason::SenderMismatch),
+            Ok(_) => panic!("a sender other than the connecting uid must be refused"),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_connection_without_a_peer_pid_is_refused() {
+        provider();
+        let ca = mk_ca();
+        let server = Server::new("no-peer-pid", &ca);
+        let _client = crate::socket::connect(&server.sock)
+            .await
+            .expect("client connect");
+        let (raw, creds) = crate::stream::accept_raw_on(&server.listener)
+            .await
+            .expect("raw accept");
+        let got = crate::stream::finish_handshake_on(
+            &server.resolver,
+            &trust(&cab(&ca)),
+            &PeerAuth::Certless,
+            raw,
+            crate::PeerCreds { pid: None, ..creds },
+            Duration::from_secs(5),
+        )
+        .await;
+        match got {
+            Err(AcceptRejection { reason, .. }) => {
+                assert_eq!(reason, RejectReason::PeerCredCapture)
+            }
+            Ok(_) => panic!("a connection with no peer pid cannot be bound to a sender"),
+        }
     }
 
     #[tokio::test]

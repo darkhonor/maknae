@@ -31,25 +31,57 @@
 
 use std::os::fd::AsFd;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use maknae_io::DelegatedFds;
 use tokio::io::{AsyncRead, ReadBuf};
 use tokio::net::UnixStream;
 
+/// The process every read on a connection must come from: the connecting process's
+/// pid and its `SO_PEERCRED` uid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExpectedSender {
+    pub pid: i32,
+    pub uid: u32,
+}
+
+/// Whether a read on this connection carried bytes from a sender other than the
+/// expected one. Shared with the collector, so the cause survives the read error
+/// that rustls and the frame layer flatten.
+#[derive(Clone, Default, Debug)]
+pub struct SenderVerdict(Arc<AtomicBool>);
+
+impl SenderVerdict {
+    pub fn mismatched(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+
+    fn set_mismatched(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
 /// An `AsyncRead` over a `UnixStream` that collects delegated descriptors instead of
 /// letting `read(2)` destroy them. Interposed between the socket and rustls.
 pub struct FdCollector {
     inner: UnixStream,
     fds: DelegatedFds,
+    expected: Option<ExpectedSender>,
+    verdict: SenderVerdict,
 }
 
 impl FdCollector {
     /// Wrap a stream, bounding how many descriptors this connection may hold at once.
-    pub fn new(inner: UnixStream, cap: usize) -> Self {
+    /// With `expected`, every read that returns bytes must carry `SCM_CREDENTIALS`
+    /// naming that pid and uid, so the socket must have `SO_PASSCRED` set.
+    pub fn new(inner: UnixStream, cap: usize, expected: Option<ExpectedSender>) -> Self {
         Self {
             inner,
             fds: DelegatedFds::new(cap),
+            expected,
+            verdict: SenderVerdict::default(),
         }
     }
 
@@ -57,12 +89,40 @@ impl FdCollector {
     pub fn delegated(&self) -> DelegatedFds {
         self.fds.clone()
     }
+
+    /// A handle onto whether a read was refused for its sender.
+    pub fn sender_verdict(&self) -> SenderVerdict {
+        self.verdict.clone()
+    }
 }
 
-fn recv_once(sock: &UnixStream, fds: &DelegatedFds, buf: &mut ReadBuf<'_>) -> std::io::Result<()> {
+fn sender_mismatch() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        "sender credentials do not match the connection",
+    )
+}
+
+fn recv_once(
+    sock: &UnixStream,
+    fds: &DelegatedFds,
+    expected: Option<ExpectedSender>,
+    verdict: &SenderVerdict,
+    buf: &mut ReadBuf<'_>,
+) -> std::io::Result<()> {
+    if verdict.mismatched() {
+        return Err(sender_mismatch());
+    }
     // `initialize_unfilled` rather than `unfilled_mut`: the latter hands out
     // `MaybeUninit` and every way to read into it is `unsafe`, forbidden workspace-wide.
     let got = maknae_io::recv_delegated(sock.as_fd(), buf.initialize_unfilled())?;
+    if let Some(e) = expected {
+        let bound = matches!(got.creds, Some(c) if c.pid == e.pid && c.uid == e.uid);
+        if got.bytes > 0 && !bound {
+            verdict.set_mismatched();
+            return Err(sender_mismatch());
+        }
+    }
     for fd in got.fds {
         fds.push(fd);
     }
@@ -123,7 +183,7 @@ impl AsyncRead for FdCollector {
         loop {
             std::task::ready!(me.inner.poll_read_ready(cx))?;
             let attempt = me.inner.try_io(tokio::io::Interest::READABLE, || {
-                recv_once(&me.inner, &me.fds, buf)
+                recv_once(&me.inner, &me.fds, me.expected, &me.verdict, buf)
             });
             match classify(attempt) {
                 Step::Done(r) => return Poll::Ready(r),
@@ -185,7 +245,7 @@ mod tests {
         delegate(&client, b"AA", &a_file(dir.path(), "one", b"first"));
         delegate(&client, b"BB", &a_file(dir.path(), "two", b"second"));
 
-        let mut collector = FdCollector::new(server, 1);
+        let mut collector = FdCollector::new(server, 1, None);
         let delegated = collector.delegated();
         let mut buf = [0u8; 4];
         collector.read_exact(&mut buf).await.expect("both frames");
@@ -208,7 +268,7 @@ mod tests {
         let second = delegate(&client, b"BB", &a_file(dir.path(), "two", b"second"));
         assert_ne!(first, second, "the fixture files must be distinguishable");
 
-        let mut collector = FdCollector::new(server, 4);
+        let mut collector = FdCollector::new(server, 4, None);
         let delegated = collector.delegated();
         let mut buf = [0u8; 4];
         collector.read_exact(&mut buf).await.expect("both frames");
@@ -226,7 +286,7 @@ mod tests {
     async fn writes_pass_through_untouched() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let (mut client, server) = tokio::net::UnixStream::pair().expect("socketpair");
-        let mut collector = FdCollector::new(server, 4);
+        let mut collector = FdCollector::new(server, 4, None);
         collector.write_all(b"RESPONSE").await.expect("write");
         collector.flush().await.expect("flush");
 
@@ -278,7 +338,7 @@ mod tests {
         let want = f.metadata().expect("stat").ino();
         send_with_fd(&client, b"FRAME", f.as_fd());
 
-        let mut collector = FdCollector::new(server, 4);
+        let mut collector = FdCollector::new(server, 4, None);
         let delegated = collector.delegated();
 
         let mut buf = [0u8; 5];
@@ -297,5 +357,117 @@ mod tests {
             want,
             "the received descriptor names the same object"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    mod sender {
+        use super::*;
+        use tokio::io::AsyncWriteExt;
+
+        fn own() -> ExpectedSender {
+            ExpectedSender {
+                pid: std::process::id() as i32,
+                uid: rustix::process::getuid().as_raw(),
+            }
+        }
+
+        async fn first_read(
+            expected: Option<ExpectedSender>,
+            passcred: bool,
+        ) -> (std::io::Result<usize>, SenderVerdict) {
+            let (mut client, server) = tokio::net::UnixStream::pair().expect("socketpair");
+            rustix::net::sockopt::set_socket_passcred(&server, passcred).expect("SO_PASSCRED");
+            client.write_all(b"FRAME").await.expect("write");
+            let mut collector = FdCollector::new(server, 4, expected);
+            let verdict = collector.sender_verdict();
+            let mut buf = [0u8; 5];
+            (collector.read(&mut buf).await, verdict)
+        }
+
+        fn assert_refused((got, verdict): (std::io::Result<usize>, SenderVerdict)) {
+            let e = got.expect_err("the read must be refused");
+            assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied);
+            assert!(verdict.mismatched(), "the cause must be recorded");
+        }
+
+        #[tokio::test]
+        async fn a_foreign_uid_is_refused() {
+            let e = ExpectedSender {
+                uid: own().uid + 1,
+                ..own()
+            };
+            assert_refused(first_read(Some(e), true).await);
+        }
+
+        #[tokio::test]
+        async fn a_foreign_pid_is_refused() {
+            let e = ExpectedSender {
+                pid: own().pid + 1,
+                ..own()
+            };
+            assert_refused(first_read(Some(e), true).await);
+        }
+
+        #[tokio::test]
+        async fn missing_credentials_are_refused() {
+            assert_refused(first_read(Some(own()), false).await);
+        }
+
+        #[tokio::test]
+        async fn the_bound_sender_reads() {
+            let (got, verdict) = first_read(Some(own()), true).await;
+            assert_eq!(got.expect("the bound sender reads"), 5);
+            assert!(!verdict.mismatched());
+        }
+
+        #[tokio::test]
+        async fn no_expectation_reads_without_credentials() {
+            let (got, verdict) = first_read(None, false).await;
+            assert_eq!(got.expect("no expectation, no check"), 5);
+            assert!(!verdict.mismatched());
+        }
+
+        #[tokio::test]
+        async fn a_refused_connection_stays_refused() {
+            let (mut client, server) = tokio::net::UnixStream::pair().expect("socketpair");
+            client.write_all(b"AA").await.expect("write");
+            let mut collector = FdCollector::new(server, 4, Some(own()));
+            let mut buf = [0u8; 2];
+            assert!(collector.read(&mut buf).await.is_err());
+            rustix::net::sockopt::set_socket_passcred(&collector.inner, true).expect("SO_PASSCRED");
+            client.write_all(b"BB").await.expect("write");
+            assert!(
+                collector.read(&mut buf).await.is_err(),
+                "a later read must not succeed once the sender was refused"
+            );
+        }
+
+        #[tokio::test]
+        async fn end_of_stream_needs_no_credentials() {
+            let (client, server) = tokio::net::UnixStream::pair().expect("socketpair");
+            rustix::net::sockopt::set_socket_passcred(&server, true).expect("SO_PASSCRED");
+            drop(client);
+            let mut collector = FdCollector::new(server, 4, Some(own()));
+            let verdict = collector.sender_verdict();
+            let mut buf = [0u8; 1];
+            assert_eq!(collector.read(&mut buf).await.expect("EOF"), 0);
+            assert!(!verdict.mismatched());
+        }
+
+        #[tokio::test]
+        async fn descriptors_of_a_refused_read_are_not_queued() {
+            let (client, server) = tokio::net::UnixStream::pair().expect("socketpair");
+            let dir = tempfile::tempdir().expect("tempdir");
+            delegate(&client, b"AA", &a_file(dir.path(), "one", b"first"));
+            let wrong = ExpectedSender {
+                uid: own().uid + 1,
+                ..own()
+            };
+            let mut collector = FdCollector::new(server, 4, Some(wrong));
+            let delegated = collector.delegated();
+            let mut buf = [0u8; 2];
+            assert!(collector.read(&mut buf).await.is_err());
+            assert!(delegated.take().is_none());
+        }
     }
 }

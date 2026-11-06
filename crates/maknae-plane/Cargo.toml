@@ -40,5 +40,5 @@ tempfile = "3"
 # rustix 1.1.5 does not compile with only "std"+"net" -- `mod timespec` is not
 # gated on `net` while the net sockopt code uses it. Upstream
 # bytecodealliance/rustix#1681 is the upstream fix. Lift both pins at >=1.1.6.
-rustix = { version = "=1.1.6", default-features = false, features = ["std", "net"] }
+rustix = { version = "=1.1.6", default-features = false, features = ["std", "net", "process"] }
 tokio = { version = "1", default-features = false, features = ["net", "io-util", "rt", "macros"] }

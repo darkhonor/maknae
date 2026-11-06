@@ -649,6 +649,10 @@ path = "crates/maknae-vault/src/peercred.rs"
 why = "nix getsockopt peer-creds (Stage 2); syscall I/O, cross-platform"
 
 [[t3]]
+path = "crates/maknae-vault/src/peer_process.rs"
+why = "#115: the peer-process handle (SO_PEERPIDFD, the pidfd_open fallback, LOCAL_PEERTOKEN); syscall I/O whose arms depend on the host kernel, like peercred.rs. The fallback's uid and liveness checks and the exited-peer mapping are proven by tests on el9 (fallback) and el10 (SO_PEERPIDFD); the decisions on the handle are the kernel's"
+
+[[t3]]
 path = "crates/maknae-vault/src/stream.rs"
 why = "PlaneListener/PlaneConnector/AuthenticatedStream (Stage 2); async I/O"
 

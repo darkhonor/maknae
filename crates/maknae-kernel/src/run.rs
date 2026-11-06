@@ -699,6 +699,7 @@ fn reject_reason_str(reason: &RejectReason) -> &'static str {
         RejectReason::UnexpectedClientCert => "unexpected client certificate",
         RejectReason::PeerCredCapture => "peer-credential capture failed",
         RejectReason::Io => "socket accept io error",
+        RejectReason::SenderMismatch => "sender-mismatch",
     }
 }
 
@@ -7312,6 +7313,7 @@ mod tests {
             RejectReason::UnexpectedClientCert,
             RejectReason::PeerCredCapture,
             RejectReason::Io,
+            RejectReason::SenderMismatch,
         ];
         let labels: Vec<&str> = all.iter().map(reject_reason_str).collect();
         for l in &labels {

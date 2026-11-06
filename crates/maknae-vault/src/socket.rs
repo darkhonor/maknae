@@ -46,6 +46,9 @@ fn verify_parent_dir(path: &Path) -> Result<(), VaultError> {
 /// `maknae-kernel::groupres::maknae_gid`); `None` is for callers that don't need the
 /// group-gate to actually gate (tests, the CLI-side connector never binds).
 ///
+/// On Linux the listener sets `SO_PASSCRED`, which accepted sockets inherit, so every
+/// read carries the sender's `SCM_CREDENTIALS`.
+///
 /// **Must be called from within a Tokio runtime** — `tokio::net::UnixListener::bind`
 /// registers with the reactor and panics ("there is no reactor running") otherwise.
 pub fn bind_listener(
@@ -70,6 +73,9 @@ pub fn bind_listener(
         let _ = std::fs::remove_file(path);
         e
     };
+    #[cfg(target_os = "linux")]
+    nix::sys::socket::setsockopt(&listener, nix::sys::socket::sockopt::PassCred, &true)
+        .map_err(|e| cleanup(VaultError::SocketBind(format!("SO_PASSCRED: {e}"))))?;
     if let Some(gid) = group {
         nix::unistd::chown(path, None, Some(gid)).map_err(|e| {
             cleanup(VaultError::SocketGroupOwn(format!(

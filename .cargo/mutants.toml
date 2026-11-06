@@ -152,6 +152,7 @@ exclude_globs = [
   "crates/maknae-vault/src/resolver.rs",      # ArcSwapOption cert resolver — TLS hot path (T3)
   "crates/maknae-vault/src/socket.rs",        # UDS bind/accept/connect + fs hardening — I/O (T3)
   "crates/maknae-vault/src/peercred.rs",      # nix getsockopt peer-creds — syscall I/O (T3)
+  "crates/maknae-vault/src/peer_process.rs",  # #115: pidfd / audit-token capture — syscall I/O whose arms depend on the host kernel (T3)
   "crates/maknae-vault/src/stream.rs",        # PlaneListener/Connector/AuthenticatedStream — I/O (T3)
   "crates/maknae-vault/src/transport_tests.rs", # #[cfg(test)] loopback suite — test-only, uniform T3 story
   "crates/maknae-vault/src/secret_io.rs",      # PR-J1 Task 4: reads an already-resolved secret source — file I/O; the fail-closed precedence decisions it consumes stay in secret_source.rs (T1), NOT excluded

@@ -2,6 +2,7 @@
 //! transport REPORTS the authenticated channel peer + captured peer-creds; it does NOT
 //! decide uid policy or emit audit (Boundary A — those are the Stage-3 daemon's).
 use crate::peer_auth::{decide, PeerAuthRefusal};
+use crate::peer_process::{self, PeerProcess};
 use crate::peercred::{self, PeerCreds};
 use crate::resolver::PlaneCertResolver;
 use crate::{
@@ -41,6 +42,9 @@ pub enum RejectReason {
     /// The raw accept on the listening socket itself failed (no peer connected yet, so no
     /// creds exist to capture).
     Io,
+    /// Bytes arrived from a process other than the one that connected (Linux
+    /// `SCM_CREDENTIALS` disagreed with `SO_PEERCRED`, or were absent).
+    SenderMismatch,
 }
 
 /// A refused `accept()` — carries whatever `PeerCreds` were captured before the failure
@@ -112,6 +116,8 @@ pub struct AuthenticatedStream {
     peer: ChannelPeer,
     peer_creds: PeerCreds,
     delegated: maknae_io::DelegatedFds,
+    peer_process: PeerProcess,
+    sender_verdict: maknae_plane::SenderVerdict,
     /// Present only on a CLIENT stream: the handle for arming the descriptor the next
     /// request carries. `None` server-side — delegation is one-directional.
     armer: Option<maknae_plane::FdArmer>,
@@ -139,6 +145,17 @@ impl AuthenticatedStream {
     /// stream. Arming earlier would have let the handshake's own writes consume it.
     pub fn armer(&self) -> Option<maknae_plane::FdArmer> {
         self.armer.clone()
+    }
+
+    /// The handle on the connecting process taken at the handshake, moved out;
+    /// `Unavailable` on a client stream and after the first take.
+    pub fn take_peer_process(&mut self) -> PeerProcess {
+        std::mem::replace(&mut self.peer_process, PeerProcess::Unavailable)
+    }
+
+    /// Whether a read on this connection was refused for its sender.
+    pub fn sender_verdict(&self) -> maknae_plane::SenderVerdict {
+        self.sender_verdict.clone()
     }
 }
 
@@ -354,13 +371,29 @@ pub(crate) async fn finish_handshake_on(
     let Ok(acceptor) = acceptor_over(resolver, trust, auth) else {
         return Err(refuse(peer_creds, RejectReason::Handshake));
     };
+    let Ok(expected) = expected_sender(&peer_creds) else {
+        return Err(refuse(peer_creds, RejectReason::PeerCredCapture));
+    };
+    let peer_process = {
+        use std::os::fd::AsFd;
+        peer_process::capture(raw.0.as_fd(), &peer_creds)
+    };
     // Interposed BEFORE the acceptor: rustls reads through this, and tokio's own
     // `read(2)` path would destroy every attached descriptor with no error at all.
-    let collector = maknae_plane::FdCollector::new(raw.0, maknae_io::DELEGATED_FDS_PER_CONNECTION);
+    let collector =
+        maknae_plane::FdCollector::new(raw.0, maknae_io::DELEGATED_FDS_PER_CONNECTION, expected);
     let delegated = collector.delegated();
+    let sender_verdict = collector.sender_verdict();
+    let failed = |reason| {
+        if sender_verdict.mismatched() {
+            RejectReason::SenderMismatch
+        } else {
+            reason
+        }
+    };
     let tls = match tokio::time::timeout(handshake_timeout, acceptor.accept(collector)).await {
-        Err(_elapsed) => return Err(refuse(peer_creds, RejectReason::HandshakeTimeout)),
-        Ok(Err(e)) => return Err(refuse(peer_creds, classify_handshake_error(&e))),
+        Err(_elapsed) => return Err(refuse(peer_creds, failed(RejectReason::HandshakeTimeout))),
+        Ok(Err(e)) => return Err(refuse(peer_creds, failed(classify_handshake_error(&e)))),
         Ok(Ok(tls)) => tls,
     };
     let reason = match decide(auth, tls.get_ref().1.peer_certificates()) {
@@ -370,6 +403,8 @@ pub(crate) async fn finish_handshake_on(
                 peer,
                 peer_creds,
                 delegated,
+                peer_process,
+                sender_verdict,
                 // Server-side: nothing to arm. The daemon never delegates outward.
                 armer: None,
             });
@@ -379,6 +414,23 @@ pub(crate) async fn finish_handshake_on(
         Err(PeerAuthRefusal::San(_)) => RejectReason::WrongPlane,
     };
     Err(refuse(peer_creds, reason))
+}
+
+/// The sender every read on a server connection must come from. Linux binds the
+/// connecting pid and uid; a connection with no pid is refused (`Err`). Other
+/// platforms carry no per-message credentials.
+#[cfg(target_os = "linux")]
+fn expected_sender(creds: &PeerCreds) -> Result<Option<maknae_plane::ExpectedSender>, ()> {
+    let pid = creds.pid.and_then(|p| i32::try_from(p).ok()).ok_or(())?;
+    Ok(Some(maknae_plane::ExpectedSender {
+        pid,
+        uid: creds.uid,
+    }))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn expected_sender(_creds: &PeerCreds) -> Result<Option<maknae_plane::ExpectedSender>, ()> {
+    Ok(None)
 }
 
 /// CLI (client) side.
@@ -421,6 +473,8 @@ impl PlaneConnector {
             // daemon), so a CLIENT-side stream can never legitimately receive a
             // descriptor. A queue that cannot hold one says so structurally.
             delegated: maknae_io::DelegatedFds::new(0),
+            peer_process: PeerProcess::Unavailable,
+            sender_verdict: maknae_plane::SenderVerdict::default(),
             armer: Some(armer),
         })
     }
