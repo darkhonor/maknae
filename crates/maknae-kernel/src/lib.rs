@@ -27,6 +27,7 @@ mod posture;
 mod provider_choice;
 pub mod reload;
 mod run;
+pub mod session_facts;
 pub mod sync;
 mod uid_gate;
 pub mod vocabulary;

@@ -34,7 +34,7 @@ maknae-io = { path = "../maknae-io" }
 maknae-state = { path = "../maknae-state" }
 maknae-graph = { path = "../maknae-graph" }
 maknae-msgs = { path = "../maknae-msgs" }
-nix = { version = "0.31", default-features = false, features = ["user", "poll"] } # poll: the egress socket's wall-clock read budget (egress_socket.rs)
+nix = { version = "0.31", default-features = false, features = ["user", "poll", "socket"] } # poll: the egress socket's and userdb call's wall-clock budgets; socket: the userdb call's non-blocking connect (session_facts/varlink.rs)
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "signal", "io-util"] }
 serde_json = "1"
 

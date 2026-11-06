@@ -65,6 +65,12 @@ files = [
   # records, and what admin.status and admin.subject.list report for each subject;
   # a wrong arm hides a released containment or mislabels a contained subject.
   "crates/maknae-kernel/src/identity_report.rs",
+  # #115: the session facts each request is re-decided on. A wrong arm reads a
+  # logged-out, background or delegated-subtree process as a live login, or a
+  # locked or expired account as active. The Varlink socket I/O is varlink.rs (T3).
+  "crates/maknae-kernel/src/session_facts/logind.rs",
+  "crates/maknae-kernel/src/session_facts/userdb.rs",
+  "crates/maknae-kernel/src/session_facts/macos_login.rs",
   # The CBOR byte-string content codec (#77): a wrong major type halves the
   # read ceiling and mis-routes oversize; the visitor is a refusal surface.
   "crates/maknae-proto/src/bytes.rs",
@@ -500,6 +506,14 @@ path = "crates/maknae-kernel/src/lib.rs"
 why = "module declarations + re-exports + PRIVILEGED_MARKER; the boot logic is boot.rs (T1)"
 
 [[t3]]
+path = "crates/maknae-kernel/src/session_facts/mod.rs"
+why = "#115: the session-fact types and module declarations; the decisions are logind.rs, userdb.rs and macos_login.rs (T1)"
+
+[[t3]]
+path = "crates/maknae-kernel/src/session_facts/varlink.rs"
+why = "#115: one Varlink call's socket I/O (non-blocking connect, the listener-uid check, the polled write and the NUL-framed read under one deadline), whose error arms depend on the peer, like egress_socket.rs's. The reply mapping is userdb.rs (T1); the check-before-write ordering, the deadline, the cap and the framing are proven by userdb.rs's fake-server tests"
+
+[[t3]]
 path = "crates/maknae-agent/src/lib.rs"
 why = "module declarations only; the loop logic is transcript.rs (T1) and the other module files (route.rs, render.rs, drive.rs, budget.rs, session.rs, wire.rs)"
 
@@ -838,6 +852,17 @@ path = "crates/maknae-kernel/src/egress_socket.rs"
 anchor = "continue; // EAGAIN or EINTR: re-ask the budget"
 why = "the write-leg retry taken (EAGAIN after poll reported writable, or EINTR): not controllable through a real socket; the decision (`write_is_retried`) is proven on a table and the hard-error direction on the wire"
 
+# #115: pidfd liveness. The decisions are provoked for real (a live and an exited process).
+[[exception]]
+path = "crates/maknae-kernel/src/session_facts/logind.rs"
+anchor = "Err(Errno::EINTR) => continue,"
+why = "a zero-timeout poll interrupted by a signal: retried; cannot be provoked without a signal delivered mid-syscall"
+
+[[exception]]
+path = "crates/maknae-kernel/src/session_facts/logind.rs"
+anchor = "Err(_) => return false,"
+why = "poll on a borrowed, open pidfd cannot fail (a closed fd reports POLLNVAL, which is not alive); the fail-closed arm of an errno passthrough"
+
 # [[env_bound_override]] — §9 discriminator. t1/t2 only;
 # closed grammar ^target_os:(linux|macos|windows)$.
 [[env_bound_override]]
@@ -854,6 +879,21 @@ why = "the getutxent FFI loop (ADR-0027) compiles only on macOS, so the Linux CI
 path = "crates/maknae-vault/src/peer_process_rules.rs"
 env_bound = "target_os:linux"
 why = "the pidfd decisions exist only where pidfds do, so a macOS coverage run has no regions for it. The Linux CI lane enforces its floor"
+
+[[env_bound_override]]
+path = "crates/maknae-kernel/src/session_facts/logind.rs"
+env_bound = "target_os:linux"
+why = "logind and pidfds exist only on Linux, so a macOS coverage run has no regions for it. The Linux CI lane enforces its floor"
+
+[[env_bound_override]]
+path = "crates/maknae-kernel/src/session_facts/userdb.rs"
+env_bound = "target_os:linux"
+why = "systemd-userdbd and /etc/passwd locality are Linux account sources, so a macOS coverage run has no regions for it. The Linux CI lane enforces its floor"
+
+[[env_bound_override]]
+path = "crates/maknae-kernel/src/session_facts/macos_login.rs"
+env_bound = "target_os:macos"
+why = "the audit-token and utmpx login fact is macOS-only, so the Linux CI lane has no regions for it. Its floor is enforced where coverage-tiers.sh runs on a macOS host, as for maknae-sys's macos.rs"
 
 [[env_bound_override]]
 path = "crates/maknae-sys/src/linux.rs"
