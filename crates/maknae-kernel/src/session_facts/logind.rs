@@ -104,7 +104,8 @@ pub(crate) fn session_id_from_cgroup(text: &str, uid: u32) -> Option<String> {
 
 fn session_in_path(path: &str, uid: u32) -> Option<String> {
     let mut parts = path.strip_prefix('/')?.split('/');
-    if parts.next()? != "user.slice" || parts.next()? != format!("user-{uid}.slice") {
+    let user_slice = format!("user-{uid}.slice");
+    if parts.next() != Some("user.slice") || parts.next() != Some(user_slice.as_str()) {
         return None;
     }
     let unit = parts.find(|c| !c.ends_with(".slice"))?;
@@ -533,10 +534,21 @@ mod tests {
     }
 
     #[test]
-    fn this_process_yields_a_login_fact() {
-        let pid = std::process::id() as i32;
+    fn the_host_entry_point_reports_an_exited_process_as_gone() {
+        let mut child = std::process::Command::new("true").spawn().expect("spawn");
+        let pid = child.id() as i32;
         let pidfd = maknae_io::pidfd_open(pid).expect("pidfd");
-        let got = login_linux(pidfd.as_fd(), pid, uid());
-        eprintln!("login_linux(self) = {got:?}");
+        child.wait().expect("wait");
+        assert_eq!(
+            login_linux(pidfd.as_fd(), pid, uid()),
+            LoginFact::ProcessGone
+        );
+    }
+
+    #[test]
+    fn the_host_entry_point_reports_an_unreadable_cgroup_of_a_live_process_as_unavailable() {
+        let pidfd = maknae_io::pidfd_open(std::process::id() as i32).expect("pidfd");
+        let got = login_linux(pidfd.as_fd(), i32::MAX, uid());
+        assert!(matches!(got, LoginFact::Unavailable(_)), "{got:?}");
     }
 }

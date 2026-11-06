@@ -12,7 +12,7 @@ use super::AccountState;
 pub const USERDB_DEADLINE: Duration = Duration::from_secs(2);
 
 const MULTIPLEXER: &str = "/run/systemd/userdb/io.systemd.Multiplexer";
-const REPLY_CAP: usize = 1024 * 1024;
+const REPLY_CAP: usize = 64 * 1024;
 const PASSWD: &str = "/etc/passwd";
 
 const PASSWD_FILE: TargetRequired = TargetRequired {
@@ -88,6 +88,14 @@ pub(crate) fn map_record(json: &serde_json::Value, uid: u32, now_usec: u64) -> A
         };
         if not_after < now_usec {
             return AccountState::Expired;
+        }
+    }
+    if let Some(not_before) = record.get("notBeforeUSec") {
+        let Some(not_before) = not_before.as_u64() else {
+            return unknown("userdb: malformed notBeforeUSec");
+        };
+        if not_before > now_usec {
+            return AccountState::Disabled;
         }
     }
     if !AGING_FIELDS
@@ -222,6 +230,54 @@ mod tests {
     fn a_malformed_not_after_is_unknown() {
         let got = map_record(&with("notAfterUSec", json!(-1)), 1000, NOW);
         assert!(matches!(got, AccountState::Unknown(_)), "{got:?}");
+    }
+
+    #[test]
+    fn a_future_not_before_is_disabled() {
+        assert_eq!(
+            map_record(&with("notBeforeUSec", json!(NOW + 1)), 1000, NOW),
+            AccountState::Disabled
+        );
+    }
+
+    #[test]
+    fn a_not_before_equal_to_now_is_active() {
+        assert_eq!(
+            map_record(&with("notBeforeUSec", json!(NOW)), 1000, NOW),
+            AccountState::Active
+        );
+    }
+
+    #[test]
+    fn a_past_not_before_is_active() {
+        assert_eq!(
+            map_record(&with("notBeforeUSec", json!(NOW - 1)), 1000, NOW),
+            AccountState::Active
+        );
+    }
+
+    #[test]
+    fn a_malformed_not_before_is_unknown() {
+        assert_eq!(
+            map_record(&with("notBeforeUSec", json!("soon")), 1000, NOW),
+            AccountState::Unknown("userdb: malformed notBeforeUSec".into())
+        );
+    }
+
+    #[test]
+    fn an_expiry_outranks_a_future_start() {
+        let mut r = aging();
+        r["notAfterUSec"] = json!(NOW - 1);
+        r["notBeforeUSec"] = json!(NOW + 1);
+        assert_eq!(map_record(&reply(r), 1000, NOW), AccountState::Expired);
+    }
+
+    #[test]
+    fn a_lock_outranks_a_future_start() {
+        let mut r = aging();
+        r["locked"] = json!(true);
+        r["notBeforeUSec"] = json!(NOW + 1);
+        assert_eq!(map_record(&reply(r), 1000, NOW), AccountState::Locked);
     }
 
     #[test]
@@ -514,9 +570,9 @@ mod tests {
     }
 
     #[test]
-    fn the_host_multiplexer_yields_a_state() {
-        let got = account_linux(me(), USERDB_DEADLINE);
-        eprintln!("account_linux(self) = {got:?}");
+    fn the_host_entry_point_with_a_spent_deadline_is_unknown() {
+        let got = account_linux(me(), Duration::ZERO);
+        assert!(matches!(got, AccountState::Unknown(_)), "{got:?}");
     }
 
     #[test]

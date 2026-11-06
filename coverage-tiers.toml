@@ -67,7 +67,7 @@ files = [
   "crates/maknae-kernel/src/identity_report.rs",
   # #115: the session facts each request is re-decided on. A wrong arm reads a
   # logged-out, background or delegated-subtree process as a live login, or a
-  # locked or expired account as active. The Varlink socket I/O is varlink.rs (T3).
+  # locked, expired or not-yet-valid account as active. The Varlink transport is varlink.rs (T2).
   "crates/maknae-kernel/src/session_facts/logind.rs",
   "crates/maknae-kernel/src/session_facts/userdb.rs",
   "crates/maknae-kernel/src/session_facts/macos_login.rs",
@@ -383,6 +383,11 @@ files = [
   # Vault key path on the wire to an unauthenticated peer, and the test failed
   # on the byte count.
   "crates/maknae-kernel/src/egress_socket.rs",
+  # #115: the userdb Varlink transport, tiered as egress_socket.rs: socket I/O whose
+  # retry predicates and frame end are table-tested, and whose listener check
+  # before the write is proven by userdb.rs's fake-server test. The reply mapping
+  # is userdb.rs (T1).
+  "crates/maknae-kernel/src/session_facts/varlink.rs",
   # #421: the bounded, non-blocking diagnostic sink for the admission path. T2:
   # a broken queue wedges a connection handler or drops diagnostics (availability),
   # and it carries no verdict. Mutation-visible: the tests pin the drop count.
@@ -508,10 +513,6 @@ why = "module declarations + re-exports + PRIVILEGED_MARKER; the boot logic is b
 [[t3]]
 path = "crates/maknae-kernel/src/session_facts/mod.rs"
 why = "#115: the session-fact types and module declarations; the decisions are logind.rs, userdb.rs and macos_login.rs (T1)"
-
-[[t3]]
-path = "crates/maknae-kernel/src/session_facts/varlink.rs"
-why = "#115: one Varlink call's socket I/O (non-blocking connect, the listener-uid check, the polled write and the NUL-framed read under one deadline), whose error arms depend on the peer, like egress_socket.rs's. The reply mapping is userdb.rs (T1); the check-before-write ordering, the deadline, the cap and the framing are proven by userdb.rs's fake-server tests"
 
 [[t3]]
 path = "crates/maknae-agent/src/lib.rs"
@@ -863,6 +864,22 @@ path = "crates/maknae-kernel/src/session_facts/logind.rs"
 anchor = "Err(_) => return false,"
 why = "poll on a borrowed, open pidfd cannot fail (a closed fd reports POLLNVAL, which is not alive); the fail-closed arm of an errno passthrough"
 
+# #115: the userdb Varlink transport (varlink.rs). Errno passthroughs with no decision.
+[[exception]]
+path = "crates/maknae-kernel/src/session_facts/varlink.rs"
+anchor = "Err(e) => return Err(io::Error::other(format!(\"poll: {e}\"))),"
+why = "poll on a live, borrowed fd cannot fail (a closed fd reports POLLNVAL as ready, not an error); pure errno passthrough"
+
+[[exception]]
+path = "crates/maknae-kernel/src/session_facts/varlink.rs"
+anchor = "Err(e) => return Err(io::Error::other(format!(\"socket: {e}\"))),"
+why = "socket(2) fails only at the descriptor or memory limit, which a unit test cannot impose without starving the parallel harness; pure errno passthrough"
+
+[[exception]]
+path = "crates/maknae-kernel/src/session_facts/varlink.rs"
+anchor = "Err(e) => return Err(io::Error::other(format!(\"listener credentials: {e}\"))),"
+why = "SO_PEERCRED / LOCAL_PEERCRED on a socket that has just connected cannot fail; pure passthrough. The admit and refuse arms are tested over a real listener"
+
 # [[env_bound_override]] — §9 discriminator. t1/t2 only;
 # closed grammar ^target_os:(linux|macos|windows)$.
 [[env_bound_override]]
@@ -889,6 +906,11 @@ why = "logind and pidfds exist only on Linux, so a macOS coverage run has no reg
 path = "crates/maknae-kernel/src/session_facts/userdb.rs"
 env_bound = "target_os:linux"
 why = "systemd-userdbd and /etc/passwd locality are Linux account sources, so a macOS coverage run has no regions for it. The Linux CI lane enforces its floor"
+
+[[env_bound_override]]
+path = "crates/maknae-kernel/src/session_facts/varlink.rs"
+env_bound = "target_os:linux"
+why = "the userdb transport is compiled only on Linux, so a macOS coverage run has no regions for it. The Linux CI lane enforces its floor"
 
 [[env_bound_override]]
 path = "crates/maknae-kernel/src/session_facts/macos_login.rs"

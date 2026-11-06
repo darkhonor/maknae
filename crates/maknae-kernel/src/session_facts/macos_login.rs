@@ -161,13 +161,4 @@ mod tests {
             LoginFact::Live
         );
     }
-
-    #[test]
-    fn this_host_yields_a_login_fact() {
-        let uid = nix::unistd::getuid().as_raw();
-        let mut token = HUMAN;
-        token[0] = uid;
-        let got = login_macos(&token, uid, std::env::var("USER").ok().as_deref());
-        eprintln!("login_macos(self) = {got:?}");
-    }
 }
