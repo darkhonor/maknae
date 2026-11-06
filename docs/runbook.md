@@ -1395,7 +1395,7 @@ The `syncing` records are written ahead of the store transition at their revisio
 - **Account state** (Linux, `deployment.account_source: userdb`). `systemd-userdbd` reports the local account neither locked, expired nor not yet valid. A directory-backed account (SSSD, LDAP, AD), every macOS account and a host set to `account_source: none` are not checked; the admission record says which (`not-checked:directory`, `not-checked:platform`, `not-checked:configured`).
 - **The sender** (Linux). Every read on the connection comes from the process that connected, by its kernel-attested pid and uid.
 
-The three host lookups share one 5-second bound and a circuit breaker. The connection also ends after `transport.read_timeout_ms` without a request (`idle`), and the daemon refuses a request on a connection older than its absolute lifetime (`lifetime`, 336 s at the defaults).
+The three host lookups share one 5-second bound and a circuit breaker. The connection also ends after `transport.read_timeout_ms` without a request (`idle`), and the daemon refuses a request on a connection older than its absolute lifetime (`lifetime`). That lifetime is the handler drain bound: 56 s at the defaults, plus `egress.deadline_ms` when a provider is configured (336 s at the default deadline; 821 s at every ceiling).
 
 Run `maknae` from your own console or SSH login. These are refused, by design: a cron or at job, a systemd service or `systemd-run` unit, a lingering user manager, a process left behind after its session logged out, `sudo -u <other>` or `su - <other>` (both keep your session), and a terminal that current GNOME starts, which runs outside any session scope.
 
@@ -1425,7 +1425,7 @@ A session's records share its `session_id`.
 
 - `group`: the user database did not answer (NSS, SSSD). Check `getent group maknae`.
 - `login`: the cgroup or the session record could not be read. A `/proc` mounted with `hidepid` hides other users' processes from `_maknae` and denies every connection here: `findmnt -o OPTIONS /proc`. On el9 (kernel before 6.5) a client that has exited but not yet been reaped lands here, not under `logout`.
-- `account`: `systemd-userdbd` did not answer in 2 seconds, its socket is absent, or its record has no password-aging fields (an account with no shadow entry). Check `systemctl status systemd-userdbd.socket` and `userdbctl user <name>`. On a host without `systemd-userdbd`, set `deployment.account_source: none` (configuration §6.5) and restart.
+- `account`: `/etc/passwd` could not be read, `systemd-userdbd` did not answer in 2 seconds, its socket is absent, or its record has no password-aging fields (an account with no shadow entry). Check `systemctl status systemd-userdbd.socket` and `userdbctl user <name>`. On a host without `systemd-userdbd`, set `deployment.account_source: none` (configuration §6.5) and restart.
 - The journal line `session fact lookup circuit breaker open` or `... tripped` means lookups kept timing out; connections are denied without a lookup while it is open.
 
 **The host's own caches still apply.** Maknae asks the host every time, but SSSD (`entry_cache_timeout`, and its offline cache during a directory outage) and nscd may answer from cache. A user removed from `maknae` in the directory is refused once the host's cache says so; to make it immediate, clear the entry (`sss_cache -u <user>`, `nscd -i group`). Maknae requires no setting for these caches.

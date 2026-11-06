@@ -1015,6 +1015,8 @@ core:
       cui_categories_permitted: ["SP-PRVCY"]
       dissemination_permitted: ["Distribution Statement C"]
     accreditation_ref: "ATO-2026-0042"
+deployment:
+  mode: linux-host
 ```
 
 > Remember: the whole block is required and strict. Setting only `cui_permitted: true`
