@@ -348,7 +348,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "linux")]
     mod sender {
         use super::*;
         use tokio::io::AsyncWriteExt;
@@ -365,7 +364,10 @@ mod tests {
             passcred: bool,
         ) -> (std::io::Result<usize>, SenderVerdict) {
             let (mut client, server) = tokio::net::UnixStream::pair().expect("socketpair");
+            #[cfg(target_os = "linux")]
             rustix::net::sockopt::set_socket_passcred(&server, passcred).expect("SO_PASSCRED");
+            #[cfg(not(target_os = "linux"))]
+            assert!(!passcred, "SCM_CREDENTIALS is Linux-only");
             client.write_all(b"FRAME").await.expect("write");
             let mut collector = FdCollector::new(server, 4, expected);
             let verdict = collector.sender_verdict();
@@ -379,6 +381,7 @@ mod tests {
             assert!(verdict.mismatched(), "the cause must be recorded");
         }
 
+        #[cfg(target_os = "linux")]
         #[tokio::test]
         async fn a_foreign_uid_is_refused() {
             let e = ExpectedSender {
@@ -388,6 +391,7 @@ mod tests {
             assert_refused(first_read(Some(e), true).await);
         }
 
+        #[cfg(target_os = "linux")]
         #[tokio::test]
         async fn a_foreign_pid_is_refused() {
             let e = ExpectedSender {
@@ -402,6 +406,7 @@ mod tests {
             assert_refused(first_read(Some(own()), false).await);
         }
 
+        #[cfg(target_os = "linux")]
         #[tokio::test]
         async fn the_bound_sender_reads() {
             let (got, verdict) = first_read(Some(own()), true).await;
@@ -423,6 +428,7 @@ mod tests {
             let mut collector = FdCollector::new(server, 4, Some(own()));
             let mut buf = [0u8; 2];
             assert!(collector.read(&mut buf).await.is_err());
+            #[cfg(target_os = "linux")]
             rustix::net::sockopt::set_socket_passcred(&collector.inner, true).expect("SO_PASSCRED");
             client.write_all(b"BB").await.expect("write");
             assert!(
@@ -434,6 +440,7 @@ mod tests {
         #[tokio::test]
         async fn end_of_stream_needs_no_credentials() {
             let (client, server) = tokio::net::UnixStream::pair().expect("socketpair");
+            #[cfg(target_os = "linux")]
             rustix::net::sockopt::set_socket_passcred(&server, true).expect("SO_PASSCRED");
             drop(client);
             let mut collector = FdCollector::new(server, 4, Some(own()));

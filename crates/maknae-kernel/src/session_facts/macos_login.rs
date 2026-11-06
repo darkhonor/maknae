@@ -151,6 +151,31 @@ mod tests {
     }
 
     #[test]
+    fn the_host_sources_decide_the_login_fact() {
+        let console = maknae_io::console_owner_uid().expect("/dev/console owner");
+        assert_eq!(login_macos(&HUMAN, console, None), LoginFact::Live);
+        assert_eq!(
+            login_macos(&background(), console, None),
+            LoginFact::NotUserClass
+        );
+        let stranger = login_macos(&HUMAN, console.wrapping_add(1), Some("maknae-no-such-user"));
+        assert!(
+            matches!(stranger, LoginFact::NoSession | LoginFact::Unavailable(_)),
+            "{stranger:?}"
+        );
+        if let Some(name) = maknae_io::logged_in_users()
+            .expect("utmpx")
+            .into_iter()
+            .next()
+        {
+            assert_eq!(
+                login_macos(&HUMAN, console.wrapping_add(1), Some(&name)),
+                LoginFact::Live
+            );
+        }
+    }
+
+    #[test]
     fn one_positive_outweighs_a_failed_source() {
         assert_eq!(
             login_from(&HUMAN, 501, Some("alice"), broken, owner(501)),
