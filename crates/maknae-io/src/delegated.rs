@@ -107,13 +107,23 @@ impl DelegatedFds {
     }
 }
 
-/// How many descriptors one message may carry.
+/// How many descriptors one message may carry; a message with more is refused and
+/// every descriptor it brought is closed.
 ///
-/// The protocol delegates exactly one per request. The headroom exists so an
-/// over-eager peer is *seen* rather than silently truncated: `MSG_CTRUNC` is the only
-/// signal that the kernel dropped descriptors it had already installed, and a control
-/// buffer sized to exactly one would raise it for an honest client that sent two.
+/// The protocol delegates exactly one per request; the rest is headroom. The receive
+/// buffer is sized so that whatever the peer sends arrives owned:
+///
+/// - **Linux** sizes it for this many plus credentials. A larger message raises
+///   `MSG_CTRUNC`, and the kernel itself closes the descriptors it did not deliver.
+/// - **macOS** installs every descriptor of a truncated message in the receiver and
+///   returns only those that fit, so the rest would be open with no owner. The buffer
+///   is therefore [`XNU_MAX_CONTROL`], the largest control data XNU accepts on send,
+///   so truncation cannot occur and the cap is applied to descriptors already owned.
 const MAX_DELEGATED_FDS_PER_MESSAGE: usize = 4;
+
+/// XNU's `sockargs` refuses control data larger than `MCLBYTES`.
+#[cfg(not(target_os = "linux"))]
+const XNU_MAX_CONTROL: usize = 2048;
 
 /// What one `recvmsg` yielded: stream bytes, plus any descriptors the peer delegated
 /// alongside them.
@@ -130,8 +140,13 @@ pub struct Received {
     pub creds: Option<SenderCreds>,
 }
 
-/// What the kernel attached to a message as `SCM_CREDENTIALS`: the sender's
-/// thread-group id and real ids.
+/// What the kernel attached to a message as `SCM_CREDENTIALS`.
+///
+/// When the sender attaches none, these are its thread-group id and real uid and gid.
+/// A sender may attach its own; the kernel (`scm_check_creds`) then accepts any of
+/// its real, effective or saved uid and gid (any value with `CAP_SETUID` /
+/// `CAP_SETGID`), and a pid naming any process with `CAP_SYS_ADMIN` in its pid
+/// namespace, its own tgid otherwise.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SenderCreds {
     pub pid: i32,
@@ -212,7 +227,7 @@ pub fn recv_delegated(sock: BorrowedFd<'_>, buf: &mut [u8]) -> std::io::Result<R
         rustix::cmsg_space!(ScmRights(MAX_DELEGATED_FDS_PER_MESSAGE), ScmCredentials(1))];
     #[cfg(not(target_os = "linux"))]
     let mut space =
-        [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(MAX_DELEGATED_FDS_PER_MESSAGE))];
+        [MaybeUninit::uninit(); XNU_MAX_CONTROL + std::mem::align_of::<nix::libc::cmsghdr>()];
     let mut anc = rustix::net::RecvAncillaryBuffer::new(&mut space);
     let mut iov = [std::io::IoSliceMut::new(buf)];
     // `MSG_CMSG_CLOEXEC` is a Linux extension. Where it exists it closes the window
@@ -258,6 +273,15 @@ pub fn recv_delegated(sock: BorrowedFd<'_>, buf: &mut [u8]) -> std::io::Result<R
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "control data truncated: the peer sent more ancillary data than one message may carry",
+        ));
+    }
+    if fds.len() > MAX_DELEGATED_FDS_PER_MESSAGE {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "the peer delegated {} descriptors in one message; at most {MAX_DELEGATED_FDS_PER_MESSAGE} are accepted",
+                fds.len()
+            ),
         ));
     }
     Ok(Received {
@@ -972,26 +996,78 @@ mod tests {
         .expect("sendmsg");
     }
 
-    #[test]
-    fn control_truncation_is_refused() {
+    fn descriptors_open_on(obj: &std::path::Path) -> usize {
+        use std::os::unix::fs::MetadataExt;
+        let want = std::fs::metadata(obj).expect("stat obj");
+        std::fs::read_dir("/dev/fd")
+            .expect("list /dev/fd")
+            .filter_map(|e| std::fs::File::open(e.ok()?.path()).ok()?.metadata().ok())
+            .filter(|m| m.dev() == want.dev() && m.ino() == want.ino())
+            .count()
+    }
+
+    fn over_send(count: usize) -> (std::io::Error, usize) {
         let dir = tempfile::tempdir().expect("tempdir");
         let obj = a_file(dir.path(), "obj", b"x");
         let (tx, rx) = std::os::unix::net::UnixStream::pair().expect("socketpair");
         #[cfg(target_os = "linux")]
         rustix::net::sockopt::set_socket_passcred(&rx, true).expect("passcred");
-        // rustix pads the receive buffer by the cmsghdr alignment, so a few more than
-        // MAX_DELEGATED_FDS_PER_MESSAGE can still fit without MSG_CTRUNC.
-        let files: Vec<std::fs::File> = (0..=4 * MAX_DELEGATED_FDS_PER_MESSAGE)
+        let files: Vec<std::fs::File> = (0..count)
             .map(|_| std::fs::File::open(&obj).expect("open"))
             .collect();
         let fds: Vec<BorrowedFd<'_>> = files.iter().map(|f| f.as_fd()).collect();
         send_fds(tx.as_fd(), &fds);
+        assert_eq!(
+            descriptors_open_on(&obj),
+            count,
+            "premise: the count sees them"
+        );
+        drop(fds);
+        drop(files);
 
         let mut buf = [0u8; 64];
         let err = recv_delegated(rx.as_fd(), &mut buf)
-            .expect_err("a message whose descriptors did not all fit must be refused");
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData, "{err:?}");
+            .expect_err("a message carrying more descriptors than the cap must be refused");
+        (err, descriptors_open_on(&obj))
+    }
+
+    #[test]
+    fn an_over_send_is_refused_and_leaves_no_descriptor_open() {
+        for count in [
+            4 * MAX_DELEGATED_FDS_PER_MESSAGE + 1,
+            MAX_DELEGATED_FDS_PER_MESSAGE + 1,
+        ] {
+            let (err, open) = over_send(count);
+            assert_eq!(
+                err.kind(),
+                std::io::ErrorKind::InvalidData,
+                "{count}: {err:?}"
+            );
+            assert_eq!(open, 0, "{count}: every received descriptor must be closed");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn control_truncation_is_refused() {
+        let (err, open) = over_send(4 * MAX_DELEGATED_FDS_PER_MESSAGE + 1);
         assert!(err.to_string().contains("truncat"), "{err}");
+        assert_eq!(open, 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_descriptor_and_credentials_arrive_together() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let obj = a_file(dir.path(), "obj", b"x");
+        let (tx, rx) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+        rustix::net::sockopt::set_socket_passcred(&rx, true).expect("passcred");
+        let f = std::fs::File::open(&obj).expect("open");
+        send_fds(tx.as_fd(), &[f.as_fd()]);
+        let mut buf = [0u8; 64];
+        let got = recv_delegated(rx.as_fd(), &mut buf).expect("recvmsg");
+        assert_eq!(got.fds.len(), 1);
+        assert_eq!(got.creds, Some(own_creds()));
     }
 
     #[cfg(target_os = "linux")]

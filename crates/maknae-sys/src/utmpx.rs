@@ -1,6 +1,8 @@
 use std::io;
 use std::sync::{Mutex, PoisonError};
 
+/// Serializes callers of [`utmpx_user_processes`]. Nothing else in the workspace calls
+/// a utmpx function, so this is the only user of libc's process-wide utmpx cursor.
 static UTMPX: Mutex<()> = Mutex::new(());
 
 /// The `ut_user` of every `USER_PROCESS` record in the login records. A name that is
@@ -8,19 +10,19 @@ static UTMPX: Mutex<()> = Mutex::new(());
 #[allow(unsafe_code)]
 pub fn utmpx_user_processes() -> io::Result<Vec<String>> {
     let _serialized = UTMPX.lock().unwrap_or_else(PoisonError::into_inner);
-    // SAFETY: takes no arguments and only rewinds libc's process-wide utmpx cursor,
-    // which `UTMPX` serializes within this process.
+    // SAFETY: takes no arguments and only rewinds libc's utmpx cursor. `UTMPX` is held,
+    // and this function is the cursor's only user (see `UTMPX`).
     unsafe { libc::setutxent() };
     let mut users = Vec::new();
     loop {
-        // SAFETY: takes no arguments; the cursor it advances is serialized by `UTMPX`.
+        // SAFETY: takes no arguments; `UTMPX` is held, so no other caller moves the cursor.
         let entry = unsafe { libc::getutxent() };
         if entry.is_null() {
             break;
         }
-        // SAFETY: `entry` is non-null and points to libc's static `utmpx` record,
-        // valid until the next utmpx call, which `UTMPX` holds off. `read` copies it
-        // out, so nothing refers to libc's buffer after this line.
+        // SAFETY: `entry` is non-null and points to libc's static `utmpx` record, valid
+        // until the next utmpx call. `UTMPX` is held and this function is the only
+        // caller, so none runs before `read` copies the record out.
         let record = unsafe { entry.read() };
         if record.ut_type == libc::USER_PROCESS {
             if let Some(user) = user_name(&record.ut_user) {
@@ -28,7 +30,7 @@ pub fn utmpx_user_processes() -> io::Result<Vec<String>> {
             }
         }
     }
-    // SAFETY: takes no arguments and closes libc's utmpx handle under `UTMPX`.
+    // SAFETY: takes no arguments and closes libc's utmpx handle; `UTMPX` is still held.
     unsafe { libc::endutxent() };
     Ok(users)
 }

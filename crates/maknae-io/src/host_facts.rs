@@ -106,9 +106,21 @@ pub fn presence(path: &Path) -> io::Result<bool> {
     }
 }
 
-/// The user names of the current `USER_PROCESS` login records.
+/// The user names of the current `USER_PROCESS` login records. A record file that is
+/// absent or cannot be examined is an error, never an empty list.
 #[cfg(target_os = "macos")]
 pub fn logged_in_users() -> io::Result<Vec<String>> {
+    logged_in_users_from(Path::new("/var/run/utmpx"))
+}
+
+#[cfg(target_os = "macos")]
+fn logged_in_users_from(records: &Path) -> io::Result<Vec<String>> {
+    if !presence(records)? {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("{} is absent", records.display()),
+        ));
+    }
     maknae_sys::utmpx_user_processes()
 }
 
@@ -252,7 +264,12 @@ mod tests {
 
     #[test]
     fn a_character_device_reports_its_owner() {
-        assert_eq!(char_device_owner(Path::new("/dev/null")).expect("owner"), 0);
+        use std::os::unix::fs::MetadataExt;
+        let want = std::fs::symlink_metadata("/dev/null").expect("stat").uid();
+        assert_eq!(
+            char_device_owner(Path::new("/dev/null")).expect("owner"),
+            want
+        );
     }
 
     #[test]
@@ -275,7 +292,7 @@ mod tests {
     }
 
     #[test]
-    fn presence_reports_absent_present_and_refuses_on_eacces() {
+    fn presence_reports_absent_and_present() {
         let d = tempfile::tempdir().expect("tempdir");
         assert!(!presence(&d.path().join("missing")).expect("absent"));
         let f = d.path().join("f");
@@ -290,24 +307,41 @@ mod tests {
                 .kind(),
             std::io::ErrorKind::InvalidInput
         );
-        if nix::unistd::geteuid().is_root() {
-            eprintln!("SKIP: root ignores the permission bits the EACCES probe sets");
-            return;
-        }
-        let locked = d.path().join("locked");
-        std::fs::create_dir(&locked).expect("mkdir");
-        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("lock");
-        let got = presence(&locked.join("inner"));
-        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).expect("restore");
-        assert_eq!(
-            got.expect_err("EACCES is not absence").kind(),
-            std::io::ErrorKind::PermissionDenied
-        );
+    }
+
+    #[test]
+    fn presence_refuses_on_eacces() {
+        crate::testutil::unprivileged("host_facts::tests::presence_refuses_on_eacces", || {
+            let d = tempfile::tempdir().expect("tempdir");
+            let locked = d.path().join("locked");
+            std::fs::create_dir(&locked).expect("mkdir");
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+                .expect("lock");
+            let got = presence(&locked.join("inner"));
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700))
+                .expect("restore");
+            assert_eq!(
+                got.expect_err("EACCES is not absence").kind(),
+                std::io::ErrorKind::PermissionDenied
+            );
+        });
     }
 
     #[cfg(target_os = "macos")]
     #[test]
     fn logged_in_users_lists() {
         assert!(logged_in_users().is_ok());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn absent_login_records_are_an_error() {
+        let d = tempfile::tempdir().expect("tempdir");
+        assert_eq!(
+            logged_in_users_from(&d.path().join("utmpx"))
+                .expect_err("absent")
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
     }
 }
