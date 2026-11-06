@@ -11,7 +11,13 @@ mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 
+#[cfg(target_os = "macos")]
+mod utmpx;
+
 pub use flags::is_append_only;
 
 #[cfg(target_os = "macos")]
 pub use macos::full_path;
+
+#[cfg(target_os = "macos")]
+pub use utmpx::utmpx_user_processes;

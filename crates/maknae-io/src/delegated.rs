@@ -125,6 +125,18 @@ pub struct Received {
     /// closes them, including on the refusal path, which is the path an attacker
     /// controls.
     pub fds: Vec<OwnedFd>,
+    /// The sender's credentials, present when the receiving socket has `SO_PASSCRED`
+    /// set. Linux only; always `None` elsewhere.
+    pub creds: Option<SenderCreds>,
+}
+
+/// What the kernel attached to a message as `SCM_CREDENTIALS`: the sender's
+/// thread-group id and real ids.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SenderCreds {
+    pub pid: i32,
+    pub uid: u32,
+    pub gid: u32,
 }
 
 /// The subject's own open for delegation: location only (Linux `O_PATH`; macOS `O_RDONLY` pending #368).
@@ -195,6 +207,10 @@ pub fn send_delegated(
 /// no path to name, and its caller is an `AsyncRead` that needs `io::Error` anyway.
 /// A `WouldBlock` propagates unchanged so a non-blocking caller can retry.
 pub fn recv_delegated(sock: BorrowedFd<'_>, buf: &mut [u8]) -> std::io::Result<Received> {
+    #[cfg(target_os = "linux")]
+    let mut space = [MaybeUninit::uninit();
+        rustix::cmsg_space!(ScmRights(MAX_DELEGATED_FDS_PER_MESSAGE), ScmCredentials(1))];
+    #[cfg(not(target_os = "linux"))]
     let mut space =
         [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(MAX_DELEGATED_FDS_PER_MESSAGE))];
     let mut anc = rustix::net::RecvAncillaryBuffer::new(&mut space);
@@ -207,7 +223,18 @@ pub fn recv_delegated(sock: BorrowedFd<'_>, buf: &mut [u8]) -> std::io::Result<R
     let flags = rustix::net::RecvFlags::empty();
     let msg = rustix::net::recvmsg(sock, &mut iov, &mut anc, flags)?;
     let mut fds = Vec::new();
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+    let mut creds = None;
     for message in anc.drain() {
+        #[cfg(target_os = "linux")]
+        if let rustix::net::RecvAncillaryMessage::ScmCredentials(ucred) = message {
+            creds = Some(SenderCreds {
+                pid: ucred.pid.as_raw_nonzero().get(),
+                uid: ucred.uid.as_raw(),
+                gid: ucred.gid.as_raw(),
+            });
+            continue;
+        }
         if let rustix::net::RecvAncillaryMessage::ScmRights(received) = message {
             for fd in received {
                 // PLATFORM DELTA, stated rather than silently accepted: without
@@ -227,9 +254,16 @@ pub fn recv_delegated(sock: BorrowedFd<'_>, buf: &mut [u8]) -> std::io::Result<R
             }
         }
     }
+    if msg.flags.contains(rustix::net::ReturnFlags::CTRUNC) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "control data truncated: the peer sent more ancillary data than one message may carry",
+        ));
+    }
     Ok(Received {
         bytes: msg.bytes,
         fds,
+        creds,
     })
 }
 
@@ -923,5 +957,91 @@ mod tests {
             );
         }
         assert_eq!(std::fs::read(&p).expect("read"), b"safe");
+    }
+
+    fn send_fds(tx: BorrowedFd<'_>, fds: &[BorrowedFd<'_>]) {
+        let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(32))];
+        let mut anc = rustix::net::SendAncillaryBuffer::new(&mut space);
+        assert!(anc.push(rustix::net::SendAncillaryMessage::ScmRights(fds)));
+        rustix::net::sendmsg(
+            tx,
+            &[std::io::IoSlice::new(b"FRAME")],
+            &mut anc,
+            rustix::net::SendFlags::empty(),
+        )
+        .expect("sendmsg");
+    }
+
+    #[test]
+    fn control_truncation_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let obj = a_file(dir.path(), "obj", b"x");
+        let (tx, rx) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+        #[cfg(target_os = "linux")]
+        rustix::net::sockopt::set_socket_passcred(&rx, true).expect("passcred");
+        // rustix pads the receive buffer by the cmsghdr alignment, so a few more than
+        // MAX_DELEGATED_FDS_PER_MESSAGE can still fit without MSG_CTRUNC.
+        let files: Vec<std::fs::File> = (0..=4 * MAX_DELEGATED_FDS_PER_MESSAGE)
+            .map(|_| std::fs::File::open(&obj).expect("open"))
+            .collect();
+        let fds: Vec<BorrowedFd<'_>> = files.iter().map(|f| f.as_fd()).collect();
+        send_fds(tx.as_fd(), &fds);
+
+        let mut buf = [0u8; 64];
+        let err = recv_delegated(rx.as_fd(), &mut buf)
+            .expect_err("a message whose descriptors did not all fit must be refused");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData, "{err:?}");
+        assert!(err.to_string().contains("truncat"), "{err}");
+    }
+
+    #[cfg(target_os = "linux")]
+    fn own_creds() -> SenderCreds {
+        SenderCreds {
+            pid: std::process::id() as i32,
+            uid: nix::unistd::getuid().as_raw(),
+            gid: nix::unistd::getgid().as_raw(),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn credentials_arrive_when_the_receiver_passes_creds() {
+        use std::io::Write;
+        let (mut tx, rx) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+        rustix::net::sockopt::set_socket_passcred(&rx, true).expect("passcred");
+        tx.write_all(b"abc").expect("write");
+        let mut buf = [0u8; 64];
+        let got = recv_delegated(rx.as_fd(), &mut buf).expect("recvmsg");
+        assert_eq!(got.bytes, 3);
+        assert_eq!(got.creds, Some(own_creds()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn no_credentials_without_passcred() {
+        use std::io::Write;
+        let (mut tx, rx) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+        tx.write_all(b"abc").expect("write");
+        let mut buf = [0u8; 64];
+        let got = recv_delegated(rx.as_fd(), &mut buf).expect("recvmsg");
+        assert_eq!(got.bytes, 3);
+        assert_eq!(got.creds, None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn credentials_survive_a_write_before_accept() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("s");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).expect("bind");
+        rustix::net::sockopt::set_socket_passcred(&listener, true).expect("passcred");
+        let mut tx = std::os::unix::net::UnixStream::connect(&sock).expect("connect");
+        tx.write_all(b"abc").expect("write");
+        let (rx, _) = listener.accept().expect("accept");
+        let mut buf = [0u8; 64];
+        let got = recv_delegated(rx.as_fd(), &mut buf).expect("recvmsg");
+        assert_eq!(got.bytes, 3);
+        assert_eq!(got.creds, Some(own_creds()));
     }
 }

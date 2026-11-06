@@ -126,6 +126,16 @@ pub(crate) fn check_owner_mode(
     Ok(())
 }
 
+pub(crate) fn require_regular_file(st: &FileStat, path: &Path) -> Result<(), IoError> {
+    let fmt = mode_bits(st.st_mode) & mode_bits(nix::libc::S_IFMT);
+    if fmt != mode_bits(nix::libc::S_IFREG) {
+        return Err(IoError::NotRegularFile {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(())
+}
+
 /// The fused target check, in the PINNED order:
 ///   symlink -> regular-file -> mode -> owner -> nlink -> max_bytes
 ///
@@ -144,12 +154,7 @@ pub(crate) fn check_target(
     req: &TargetRequired,
 ) -> Result<(), IoError> {
     if req.regular_file {
-        let fmt = mode_bits(st.st_mode) & mode_bits(nix::libc::S_IFMT);
-        if fmt != mode_bits(nix::libc::S_IFREG) {
-            return Err(IoError::NotRegularFile {
-                path: path.to_path_buf(),
-            });
-        }
+        require_regular_file(st, path)?;
     }
     check_owner_mode(st, path, req.owner, req.mode_mask)?;
     if req.nlink_exactly_one && nlink_count(st.st_nlink) != 1 {

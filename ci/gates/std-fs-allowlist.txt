@@ -96,6 +96,10 @@ crates/maknae-kernel/src/handler.rs|mode_mask: None,
 # #158 audit admission retains OS DAC on its configured parent; the leaf has artifact checks.
 crates/maknae-audit-append/src/sink.rs|&maknae_io::AnchorRequired::OS_DAC,
 
+# #115 read_pseudo_file's parent has no fixed owner: /proc/<pid> belongs to the process's
+# uid, /run/systemd/sessions to root. The parent is still refused if group or other may write.
+crates/maknae-io/src/host_facts.rs|owner: None,
+
 # #158 delegated directories prove location; subject namespace syscalls decide OS permission.
 crates/maknae-io/src/mutation.rs|owner: None,
 crates/maknae-io/src/mutation.rs|mode_mask: None,

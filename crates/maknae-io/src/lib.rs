@@ -52,6 +52,7 @@ pub mod delegated;
 mod dir;
 pub mod error;
 mod home;
+mod host_facts;
 pub mod mutation;
 pub mod normalize;
 mod page;
@@ -69,10 +70,15 @@ pub use checks::{AnchorRequired, DescendantRequired, TargetRequired};
 pub use delegated::{
     open_directory_for_delegation, open_path_for_delegation, recv_delegated, refuse_access_bearing,
     send_delegated, verify_delegated, Delegated, DelegatedFds, DelegatedRequired, Received,
-    DELEGATED_FDS_PER_CONNECTION,
+    SenderCreds, DELEGATED_FDS_PER_CONNECTION,
 };
 pub use error::{IoError, IoKind};
 pub use home::{canonical_home, session_home};
+#[cfg(target_os = "macos")]
+pub use host_facts::logged_in_users;
+#[cfg(target_os = "linux")]
+pub use host_facts::pidfd_open;
+pub use host_facts::{console_owner_uid, presence, read_pseudo_file};
 pub use mutation::{
     read_held_file, read_held_page, replace_held_file, verify_mutation_directory, DirectoryCursor,
     EffectState, FileVersion, MutationDirectory, MutationEffect, MutationEffectKind,
