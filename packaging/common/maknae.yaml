@@ -32,7 +32,8 @@ audit:
 deployment:
   # The kind of host: linux-host, macos-host or container. The daemon checks it
   # against the host at boot and refuses a mismatch. Set by enroll, which also
-  # writes account_source (userdb, or none on a host without systemd-userdbd).
+  # writes account_source on linux-host (userdb, or none without
+  # systemd-userdbd); the key must be absent on container.
   mode: linux-host
 
 # principal: written by `maknae enroll` (name / uid). Absent by design in

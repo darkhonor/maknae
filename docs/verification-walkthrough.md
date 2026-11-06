@@ -462,7 +462,7 @@ Remove `/tmp/maknae-c14.sock` afterwards.
 
 **Control.** ADR-0006 decision 4, boot self-verification. Tests: `a_linux_host_needs_systemd_and_no_file_marker`, `a_probe_that_cannot_answer_refuses` (`crates/maknae-kernel/src/deployment.rs`), `the_deployment_is_validated_and_carried`.
 
-**Command.** On a Linux host, the administrator sets `mode: container` under `deployment:` in `/etc/maknae/maknae.yaml` and runs `sudo systemctl restart maknaed`, then `sudo journalctl -u maknaed -n 20`. Then restores `mode: linux-host` and restarts.
+**Command.** On a Linux host, the administrator notes the `account_source` line under `deployment:` in `/etc/maknae/maknae.yaml`, sets `mode: container` and removes that line (`container` refuses the key), and runs `sudo systemctl restart maknaed`, then `sudo journalctl -u maknaed -n 20`. Then restores `mode: linux-host` and the `account_source` line as it was (`userdb` or `none`) and restarts.
 
 **Expected.** On a host that has run before, the daemon keeps running the accepted `linux-host` mode, and the trail has a `graph.baseline` deny, `baseline change refused: invalid (cause in the journal)`; the journal names the cause, `deployment.mode is container, but no container marker is present`. On a freshly enrolled host before its first start, the start itself is refused (exit 1) with the same cause.
 
@@ -474,7 +474,7 @@ Remove `/tmp/maknae-c14.sock` afterwards.
 
 **Control.** ADR-0006 decision 4 §Platform scope, T12. Test: `only_a_container_binds_no_client_listener` (`crates/maknae-kernel/src/deployment.rs`).
 
-**Command.** On a Linux test host, the administrator gives the unit a corroborating marker with `sudo systemctl edit maknaed` (`[Service]` and `Environment=container=c16`), sets `mode: container`, restarts `maknaed`, and runs `maknae ping` as A. Then removes the drop-in, restores `mode: linux-host` and restarts.
+**Command.** On a Linux test host, the administrator gives the unit a corroborating marker with `sudo systemctl edit maknaed` (`[Service]` and `Environment=container=c16`), sets `mode: container` and removes the `account_source` line under `deployment:`, restarts `maknaed`, and runs `maknae ping` as A. Then removes the drop-in, restores `mode: linux-host` and the `account_source` line as it was (`userdb` or `none`) and restarts.
 
 **Expected.** The journal has `maknaed: deployment.mode is container; no client listener is bound`, `/run/maknae/maknaed.sock` does not exist, and `maknae ping` fails to connect. The daemon writes no record for the attempt: there is nothing daemon-side to refuse it.
 
