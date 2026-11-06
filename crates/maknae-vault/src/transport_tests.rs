@@ -631,6 +631,36 @@ mod accept_reject {
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
+    async fn bytes_written_before_accept_carry_credentials() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        provider();
+        let server = Server::new("before-accept", &mk_ca());
+        let mut client = crate::socket::connect(&server.sock)
+            .await
+            .expect("client connect");
+        client
+            .write_all(b"EARLY")
+            .await
+            .expect("write before accept");
+        let (accepted, _) = server.listener.accept().await.expect("accept");
+        let creds = crate::peercred::capture(&accepted).expect("peer creds");
+        let expected = maknae_plane::ExpectedSender {
+            pid: i32::try_from(creds.pid.expect("pid")).expect("pid fits"),
+            uid: creds.uid,
+        };
+        let mut collector = maknae_plane::FdCollector::new(accepted, 4, Some(expected));
+        let verdict = collector.sender_verdict();
+        let mut buf = [0u8; 5];
+        collector
+            .read_exact(&mut buf)
+            .await
+            .expect("the early bytes carry the sender's credentials");
+        assert_eq!(&buf, b"EARLY");
+        assert!(!verdict.mismatched());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
     async fn the_bound_sender_completes_a_handshake_with_passcred_on() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         provider();

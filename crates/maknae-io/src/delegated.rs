@@ -154,6 +154,30 @@ pub struct SenderCreds {
     pub gid: u32,
 }
 
+/// The process every read on a connection must come from: the connecting process's
+/// pid and its `SO_PEERCRED` uid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExpectedSender {
+    pub pid: i32,
+    pub uid: u32,
+}
+
+/// Whether a read of `bytes` with `creds` attached may be taken as the connection's.
+/// With no expectation every read is; with one, a read that returned bytes must carry
+/// credentials naming that pid and uid. End of stream carries none and needs none.
+pub fn sender_admitted(
+    expected: Option<ExpectedSender>,
+    creds: Option<SenderCreds>,
+    bytes: usize,
+) -> bool {
+    match (expected, creds) {
+        (None, _) => true,
+        (Some(_), _) if bytes == 0 => true,
+        (Some(e), Some(c)) => c.pid == e.pid && c.uid == e.uid,
+        (Some(_), None) => false,
+    }
+}
+
 /// The subject's own open for delegation: location only (Linux `O_PATH`; macOS `O_RDONLY` pending #368).
 pub fn open_path_for_delegation(path: &std::path::Path) -> std::io::Result<OwnedFd> {
     crate::syscall::open_path_delegation(path).map_err(Into::into)
@@ -337,6 +361,31 @@ pub fn verify_delegated(fd: BorrowedFd<'_>, req: DelegatedRequired) -> Result<De
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sender_admitted_decides_every_case() {
+        let e = ExpectedSender { pid: 10, uid: 20 };
+        let c = |pid, uid| Some(SenderCreds { pid, uid, gid: 0 });
+        let rows: [(Option<ExpectedSender>, Option<SenderCreds>, usize, bool); 9] = [
+            (None, None, 5, true),
+            (None, c(1, 2), 5, true),
+            (Some(e), c(10, 20), 5, true),
+            (Some(e), c(10, 20), 1, true),
+            (Some(e), c(11, 20), 5, false),
+            (Some(e), c(10, 21), 5, false),
+            (Some(e), c(11, 21), 1, false),
+            (Some(e), None, 1, false),
+            (Some(e), None, 0, true),
+        ];
+        for (expected, creds, bytes, want) in rows {
+            assert_eq!(
+                sender_admitted(expected, creds, bytes),
+                want,
+                "{expected:?} {creds:?} {bytes}"
+            );
+        }
+        assert!(sender_admitted(Some(e), c(11, 21), 0));
+    }
     use crate::{IoError, TargetRequired};
     use std::os::fd::{AsFd, OwnedFd};
     use std::os::unix::fs::PermissionsExt;

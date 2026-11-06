@@ -35,17 +35,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use maknae_io::DelegatedFds;
+use maknae_io::{DelegatedFds, ExpectedSender};
 use tokio::io::{AsyncRead, ReadBuf};
 use tokio::net::UnixStream;
-
-/// The process every read on a connection must come from: the connecting process's
-/// pid and its `SO_PEERCRED` uid.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ExpectedSender {
-    pub pid: i32,
-    pub uid: u32,
-}
 
 /// Whether a read on this connection carried bytes from a sender other than the
 /// expected one. Shared with the collector, so the cause survives the read error
@@ -116,12 +108,9 @@ fn recv_once(
     // `initialize_unfilled` rather than `unfilled_mut`: the latter hands out
     // `MaybeUninit` and every way to read into it is `unsafe`, forbidden workspace-wide.
     let got = maknae_io::recv_delegated(sock.as_fd(), buf.initialize_unfilled())?;
-    if let Some(e) = expected {
-        let bound = matches!(got.creds, Some(c) if c.pid == e.pid && c.uid == e.uid);
-        if got.bytes > 0 && !bound {
-            verdict.set_mismatched();
-            return Err(sender_mismatch());
-        }
+    if !maknae_io::sender_admitted(expected, got.creds, got.bytes) {
+        verdict.set_mismatched();
+        return Err(sender_mismatch());
     }
     for fd in got.fds {
         fds.push(fd);

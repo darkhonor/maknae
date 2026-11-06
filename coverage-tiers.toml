@@ -164,6 +164,10 @@ files = [
   # peercred.rs because that one is whole-file mutation-excluded (syscall I/O),
   # which would make a T1 tier there vacuous — zero mutants, zero missed.
   "crates/maknae-vault/src/peer_identity.rs",
+  # #115: the peer-process handle's decisions (errno classification, the fallback's
+  # uid and liveness admission, the status parse), split from the whole-file
+  # mutation-excluded syscall wrappers in peer_process.rs.
+  "crates/maknae-vault/src/peer_process_rules.rs",
   # #240b: the provider request/response MAPPING, T1 by #240's own declaration.
   # Everything it parses is bytes from a third party outside the enforcement
   # boundary; a shape we do not recognise must be a refusal the loop sees, never
@@ -351,15 +355,15 @@ mutants_features = { maknae-config = ["hermetic-test-seam"], maknae-authz-basic 
 
 [t2]
 floor_production_region = 90
-# The client-plane descriptor adapter (ADR-0009). NOT T1, by the line-drawing rule
-# above and not by convenience: if this silently breaks, delegated descriptors are
-# LOST, and an absent descriptor is a `Deny` (ADR-0009 decision 2) -- it cannot yield
-# a Permit for an access policy denies. The queue is per-connection, so a mis-ordered
-# take stays within one subject, and the PDP decides on the path of whichever
-# descriptor is actually used (decision 6), so the verdict follows the object rather
-# than diverging from it. What IS at stake here is availability and descriptor
-# exhaustion, which is a T2 concern. The security-relevant half -- the recvmsg,
-# CMSG_CLOEXEC, the per-message bound, the checks -- is in maknae-io and is T1.
+# The client-plane descriptor adapter (ADR-0009) and its per-read sender check.
+# The adapter's own failure modes are availability: a lost descriptor is a `Deny`
+# (ADR-0009 decision 2), the queue is per-connection, and the PDP decides on the
+# path of the descriptor actually used (decision 6). The sender check IS an
+# authorization control (another process's bytes taken as the subject's request),
+# so its decision, `maknae_io::sender_admitted`, is T1 in maknae-io's delegated.rs
+# with the recvmsg, CMSG_CLOEXEC, the per-message bound and the descriptor checks.
+# What stays here is the I/O around it: calling it on every read, the sticky
+# verdict, and queueing descriptors only after it admits.
 files = [
   # #240a: the kernel-side egress transport. T2, not T1, and by the repo's own
   # line-drawing rather than by convenience: this file is socket I/O — connect,
@@ -650,7 +654,7 @@ why = "nix getsockopt peer-creds (Stage 2); syscall I/O, cross-platform"
 
 [[t3]]
 path = "crates/maknae-vault/src/peer_process.rs"
-why = "#115: the peer-process handle (SO_PEERPIDFD, the pidfd_open fallback, LOCAL_PEERTOKEN); syscall I/O whose arms depend on the host kernel, like peercred.rs. The fallback's uid and liveness checks and the exited-peer mapping are proven by tests on el9 (fallback) and el10 (SO_PEERPIDFD); the decisions on the handle are the kernel's"
+why = "#115: the peer-process handle's syscalls (SO_PEERPIDFD, pidfd_open, the /proc status read, the pidfd poll, LOCAL_PEERTOKEN), whose reachable arms depend on the host kernel, like peercred.rs. Every decision they feed is in peer_process_rules.rs (T1); the wiring is proven by tests on el9 (fallback) and el10 (SO_PEERPIDFD)"
 
 [[t3]]
 path = "crates/maknae-vault/src/stream.rs"
@@ -845,6 +849,11 @@ why = "the getattrlist FFI call (ADR-0027) compiles only on macOS, so the Linux 
 path = "crates/maknae-sys/src/utmpx.rs"
 env_bound = "target_os:macos"
 why = "the getutxent FFI loop (ADR-0027) compiles only on macOS, so the Linux CI lane has no regions for it. Its floor is enforced where coverage-tiers.sh runs on a macOS host, as for macos.rs"
+
+[[env_bound_override]]
+path = "crates/maknae-vault/src/peer_process_rules.rs"
+env_bound = "target_os:linux"
+why = "the pidfd decisions exist only where pidfds do, so a macOS coverage run has no regions for it. The Linux CI lane enforces its floor"
 
 [[env_bound_override]]
 path = "crates/maknae-sys/src/linux.rs"

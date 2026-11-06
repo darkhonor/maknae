@@ -29,6 +29,8 @@ mod peer_auth;
 mod peer_identity;
 #[cfg(unix)]
 mod peer_process;
+#[cfg(target_os = "linux")]
+mod peer_process_rules;
 mod peercred;
 mod plane;
 mod refusal;

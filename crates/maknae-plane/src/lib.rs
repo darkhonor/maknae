@@ -23,8 +23,9 @@
 pub mod fd;
 pub mod send;
 
-pub use fd::{ExpectedSender, FdCollector, SenderVerdict};
+pub use fd::{FdCollector, SenderVerdict};
 /// Re-exported for callers that only need the queue: descriptor custody lives in
 /// [`maknae_io`], and the kernel consumes it without linking `tokio::net`.
 pub use maknae_io::DelegatedFds;
+pub use maknae_io::ExpectedSender;
 pub use send::{FdArmer, FdSender};

@@ -24,13 +24,16 @@ const STATUS_CAP: usize = 16 * 1024;
 
 #[cfg(target_os = "linux")]
 pub fn capture(fd: BorrowedFd<'_>, creds: &PeerCreds) -> PeerProcess {
-    use nix::errno::Errno;
+    use crate::peer_process_rules::{classify_peer_pidfd_errno, Next};
     use nix::sys::socket::{getsockopt, sockopt::PeerPidfd};
     match getsockopt(&fd, PeerPidfd) {
-        Ok(pidfd) => PeerProcess::Pidfd(pidfd),
-        Err(Errno::ESRCH | Errno::EINVAL) => PeerProcess::Gone,
-        Err(Errno::ENOPROTOOPT) => pidfd_fallback(creds),
-        Err(_) => PeerProcess::Unavailable,
+        Ok(pidfd) if pidfd_alive(&pidfd) => PeerProcess::Pidfd(pidfd),
+        Ok(_) => PeerProcess::Gone,
+        Err(e) => match classify_peer_pidfd_errno(e) {
+            Next::Gone => PeerProcess::Gone,
+            Next::Fallback => pidfd_fallback(creds),
+            Next::Unavailable => PeerProcess::Unavailable,
+        },
     }
 }
 
@@ -38,20 +41,30 @@ pub fn capture(fd: BorrowedFd<'_>, creds: &PeerCreds) -> PeerProcess {
 /// process it names has the peer's uid and was still alive after that read.
 #[cfg(target_os = "linux")]
 fn pidfd_fallback(creds: &PeerCreds) -> PeerProcess {
+    use crate::peer_process_rules::{fallback_admits, pidfd_open_says_gone, status_uids};
     let Some(pid) = creds.pid.and_then(|p| i32::try_from(p).ok()) else {
         return PeerProcess::Unavailable;
     };
-    let Ok(pidfd) = maknae_io::pidfd_open(pid) else {
-        return PeerProcess::Unavailable;
+    let pidfd = match maknae_io::pidfd_open(pid) {
+        Ok(pidfd) => pidfd,
+        Err(e) => {
+            let errno = nix::errno::Errno::from_raw(e.raw_os_error().unwrap_or(0));
+            return if pidfd_open_says_gone(errno) {
+                PeerProcess::Gone
+            } else {
+                PeerProcess::Unavailable
+            };
+        }
     };
     let status_path = std::path::PathBuf::from(format!("/proc/{pid}/status"));
     let Ok(status) = maknae_io::read_pseudo_file(&status_path, STATUS_CAP) else {
         return PeerProcess::Unavailable;
     };
-    if status_uids(&status) != Some((creds.uid, creds.uid)) || !pidfd_alive(&pidfd) {
-        return PeerProcess::Unavailable;
+    if fallback_admits(status_uids(&status), creds.uid, pidfd_alive(&pidfd)) {
+        PeerProcess::Pidfd(pidfd)
+    } else {
+        PeerProcess::Unavailable
     }
-    PeerProcess::Pidfd(pidfd)
 }
 
 /// A pidfd polls readable once its process has exited.
@@ -61,18 +74,6 @@ pub(crate) fn pidfd_alive(pidfd: &OwnedFd) -> bool {
     use std::os::fd::AsFd;
     let mut fds = [PollFd::new(pidfd.as_fd(), PollFlags::POLLIN)];
     matches!(poll(&mut fds, PollTimeout::ZERO), Ok(0))
-}
-
-/// The real and effective uid from a `/proc/<pid>/status` `Uid:` line.
-#[cfg(target_os = "linux")]
-fn status_uids(status: &[u8]) -> Option<(u32, u32)> {
-    let text = std::str::from_utf8(status).ok()?;
-    let line = text.lines().find_map(|l| l.strip_prefix("Uid:"))?;
-    let mut ids = line.split_whitespace().map(str::parse::<u32>);
-    match (ids.next(), ids.next()) {
-        (Some(Ok(real)), Some(Ok(effective))) => Some((real, effective)),
-        _ => None,
-    }
 }
 
 #[cfg(target_os = "macos")]
@@ -136,7 +137,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn the_fallback_refuses_a_dead_pid() {
+    fn the_fallback_reports_a_reaped_pid_as_gone() {
         let mut child = std::process::Command::new("true").spawn().expect("spawn");
         let pid = child.id();
         child.wait().expect("reap");
@@ -144,14 +145,11 @@ mod tests {
             pid: Some(pid),
             ..own_creds()
         };
-        assert!(matches!(pidfd_fallback(&creds), PeerProcess::Unavailable));
+        assert!(matches!(pidfd_fallback(&creds), PeerProcess::Gone));
     }
 
     #[cfg(target_os = "linux")]
-    #[test]
-    fn the_fallback_refuses_an_exited_unreaped_child() {
-        let mut child = std::process::Command::new("true").spawn().expect("spawn");
-        let pid = child.id();
+    fn wait_until_zombie(pid: u32) {
         let status = format!("/proc/{pid}/status");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while !std::fs::read_to_string(&status)
@@ -161,6 +159,14 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "child never exited");
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_fallback_refuses_an_exited_unreaped_child() {
+        let mut child = std::process::Command::new("true").spawn().expect("spawn");
+        let pid = child.id();
+        wait_until_zombie(pid);
         let creds = PeerCreds {
             pid: Some(pid),
             ..own_creds()
@@ -191,45 +197,61 @@ mod tests {
         }
     }
 
+    /// The test binary re-run as a process that connects to `path` and exits.
     #[cfg(target_os = "linux")]
-    #[test]
-    fn an_exited_peer_yields_no_handle() {
-        use nix::sys::socket::{getsockopt, sockopt::PeerPidfd};
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("s.sock");
-        let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind");
-        let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
+    fn spawn_connecting_helper(path: &std::path::Path) -> std::process::Child {
+        std::process::Command::new(std::env::current_exe().expect("test binary"))
             .args([
                 "--exact",
                 "peer_process::tests::connect_then_exit_helper",
                 "--test-threads=1",
             ])
-            .env(CONNECT_TO, &path)
+            .env(CONNECT_TO, path)
             .stdout(std::process::Stdio::null())
-            .status()
-            .expect("run the helper");
-        assert!(status.success(), "the helper connected and exited");
-        let (accepted, _) = listener.accept().expect("accept the exited peer");
-        let creds = crate::peercred::capture(&accepted).expect("peer creds");
+            .spawn()
+            .expect("run the helper")
+    }
 
+    #[cfg(target_os = "linux")]
+    fn kernel_has_peer_pidfd() -> bool {
+        use nix::sys::socket::{getsockopt, sockopt::PeerPidfd};
         let (a, _b) = std::os::unix::net::UnixStream::pair().expect("socketpair");
-        let kernel_has_peer_pidfd = getsockopt(&a, PeerPidfd).is_ok();
-        match capture(accepted.as_fd(), &creds) {
-            PeerProcess::Gone => assert!(kernel_has_peer_pidfd),
-            PeerProcess::Unavailable => assert!(!kernel_has_peer_pidfd),
-            other => panic!("an exited peer must yield no handle, got {other:?}"),
-        }
+        getsockopt(&a, PeerPidfd).is_ok()
     }
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn status_uids_reads_the_real_and_effective_uid() {
-        let status = b"Name:\tx\nPid:\t7\nUid:\t1001\t1002\t1003\t1004\nGid:\t5\t5\t5\t5\n";
-        assert_eq!(status_uids(status), Some((1001, 1002)));
-        assert_eq!(status_uids(b"Name:\tx\n"), None);
-        assert_eq!(status_uids(b"Uid:\t1001\n"), None);
-        assert_eq!(status_uids(b"Uid:\tx\t1\t1\t1\n"), None);
-        assert_eq!(status_uids(b"XUid:\t1\t1\t1\t1\n"), None);
+    fn a_reaped_peer_is_gone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("s.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind");
+        let status = spawn_connecting_helper(&path)
+            .wait()
+            .expect("reap the helper");
+        assert!(status.success(), "the helper connected and exited");
+        let (accepted, _) = listener.accept().expect("accept the exited peer");
+        let creds = crate::peercred::capture(&accepted).expect("peer creds");
+        let got = capture(accepted.as_fd(), &creds);
+        assert!(matches!(got, PeerProcess::Gone), "{got:?}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_exited_unreaped_peer_yields_no_handle() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("s.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind");
+        let mut helper = spawn_connecting_helper(&path);
+        wait_until_zombie(helper.id());
+        let (accepted, _) = listener.accept().expect("accept the exited peer");
+        let creds = crate::peercred::capture(&accepted).expect("peer creds");
+        let got = capture(accepted.as_fd(), &creds);
+        assert!(helper.wait().expect("reap the helper").success());
+        match got {
+            PeerProcess::Gone => assert!(kernel_has_peer_pidfd()),
+            PeerProcess::Unavailable => assert!(!kernel_has_peer_pidfd()),
+            other => panic!("an exited peer must yield no handle, got {other:?}"),
+        }
     }
 
     #[cfg(target_os = "macos")]

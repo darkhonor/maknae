@@ -47,7 +47,9 @@ fn verify_parent_dir(path: &Path) -> Result<(), VaultError> {
 /// group-gate to actually gate (tests, the CLI-side connector never binds).
 ///
 /// On Linux the listener sets `SO_PASSCRED`, which accepted sockets inherit, so every
-/// read carries the sender's `SCM_CREDENTIALS`.
+/// read carries the sender's `SCM_CREDENTIALS` for the plane's per-read sender check.
+/// The egress deputy's listener, bound here too, reads with plain `read(2)`, which
+/// discards the credentials unread.
 ///
 /// **Must be called from within a Tokio runtime** — `tokio::net::UnixListener::bind`
 /// registers with the reactor and panics ("there is no reactor running") otherwise.
