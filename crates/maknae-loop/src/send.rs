@@ -24,9 +24,15 @@ async fn read_reply<S: tokio::io::AsyncRead + Unpin>(
         .map_err(|e| e.to_string())
 }
 
-// The group lookup, one PDP decision and the audit appends, beyond the egress deadline
-// and the reply write.
-const PROMPT_REPLY_MARGIN: std::time::Duration = std::time::Duration::from_secs(30);
+// Beyond the egress deadline and the reply write: the connect-time session-fact gather
+// (5 s), the admission audit (5 s), the request's gather (5 s), the PDP decision (5 s)
+// and two audit appends (10 s) are 30 s; 10 s of slack.
+const PROMPT_REPLY_MARGIN: std::time::Duration = std::time::Duration::from_secs(40);
+
+// A small frame finishes writing right after the handshake, so both session-fact
+// gathers and the admission audit run inside the reply wait.
+const SESSION_CHECKS_MS: u64 =
+    2 * maknae_config::GROUP_LOOKUP_TIMEOUT_MS + maknae_config::ADMISSION_AUDIT_TIMEOUT_MS;
 
 fn reply_wait(
     verb: &maknae_proto::Verb,
@@ -59,10 +65,10 @@ fn class_wait(
             ) + PROMPT_REPLY_MARGIN
         }
         maknae_proto::FrameClass::Attempt => std::time::Duration::from_millis(
-            transport.read_timeout_ms + maknae_config::HOME_RESOLVE_TIMEOUT_MS,
+            transport.read_timeout_ms + maknae_config::HOME_RESOLVE_TIMEOUT_MS + SESSION_CHECKS_MS,
         ),
         maknae_proto::FrameClass::Control => {
-            std::time::Duration::from_millis(transport.read_timeout_ms)
+            std::time::Duration::from_millis(transport.read_timeout_ms + SESSION_CHECKS_MS)
         }
     }
 }
@@ -442,7 +448,7 @@ mod tests {
         let err = reply_after(delay, maknae_proto::FrameClass::Prompt, 5_000)
             .await
             .unwrap_err();
-        assert_eq!(err, "no response from daemon within 690000ms (stalled?)");
+        assert_eq!(err, "no response from daemon within 700000ms (stalled?)");
     }
 
     const READ_TIMEOUT_MS: u64 = 5_000;
@@ -626,17 +632,40 @@ mod tests {
         format!("no response from daemon within {wait_ms}ms; it may be slow admitting the connection (group lookup or admission audit)")
     }
 
+    #[test]
+    fn control_and_attempt_waits_include_the_request_gather() {
+        let transport = maknae_config::TransportConfig {
+            read_timeout_ms: READ_TIMEOUT_MS,
+            ..Default::default()
+        };
+        let session =
+            2 * maknae_config::GROUP_LOOKUP_TIMEOUT_MS + maknae_config::ADMISSION_AUDIT_TIMEOUT_MS;
+        assert_eq!(session, 15_000);
+        assert_eq!(
+            class_wait(maknae_proto::FrameClass::Control, &transport),
+            std::time::Duration::from_millis(READ_TIMEOUT_MS + session)
+        );
+        assert_eq!(
+            class_wait(maknae_proto::FrameClass::Attempt, &transport),
+            std::time::Duration::from_millis(
+                READ_TIMEOUT_MS + maknae_config::HOME_RESOLVE_TIMEOUT_MS + session
+            )
+        );
+        assert_eq!(PROMPT_REPLY_MARGIN, std::time::Duration::from_secs(40));
+    }
+
     #[tokio::test(start_paused = true)]
-    async fn control_replies_are_bounded_by_read_timeout_ms() {
-        let read = std::time::Duration::from_millis(READ_TIMEOUT_MS);
+    async fn control_replies_are_bounded_by_read_timeout_ms_and_the_session_checks() {
+        let wait_ms = READ_TIMEOUT_MS + SESSION_CHECKS_MS;
+        let wait = std::time::Duration::from_millis(wait_ms);
         let class = maknae_proto::FrameClass::Control;
-        assert!(reply_after(read - TICK, class, READ_TIMEOUT_MS)
+        assert!(reply_after(wait - TICK, class, READ_TIMEOUT_MS)
             .await
             .is_ok());
-        let err = reply_after(read + TICK, class, READ_TIMEOUT_MS)
+        let err = reply_after(wait + TICK, class, READ_TIMEOUT_MS)
             .await
             .unwrap_err();
-        assert_eq!(err, control_stalled(READ_TIMEOUT_MS));
+        assert_eq!(err, control_stalled(wait_ms));
     }
 
     #[test]
@@ -667,19 +696,21 @@ mod tests {
             assert!(stages > 0);
             assert!(
                 reply_wait(&verb, &transport)
-                    >= std::time::Duration::from_millis(READ_TIMEOUT_MS + stages * stage),
+                    >= std::time::Duration::from_millis(
+                        READ_TIMEOUT_MS + SESSION_CHECKS_MS + stages * stage
+                    ),
                 "{verb:?}"
             );
         }
         assert_eq!(
             reply_wait(&maknae_proto::Verb::AdminStatus, &transport),
-            std::time::Duration::from_millis(READ_TIMEOUT_MS)
+            std::time::Duration::from_millis(READ_TIMEOUT_MS + SESSION_CHECKS_MS)
         );
     }
 
     #[tokio::test(start_paused = true)]
     async fn attempt_replies_also_wait_out_the_kernels_home_resolution() {
-        let wait_ms = READ_TIMEOUT_MS + maknae_config::HOME_RESOLVE_TIMEOUT_MS;
+        let wait_ms = READ_TIMEOUT_MS + maknae_config::HOME_RESOLVE_TIMEOUT_MS + SESSION_CHECKS_MS;
         let wait = std::time::Duration::from_millis(wait_ms);
         let class = maknae_proto::FrameClass::Attempt;
         assert!(reply_after(wait - TICK, class, READ_TIMEOUT_MS)
