@@ -31,26 +31,7 @@ fn lookup_why(e: AccountLookupError) -> String {
     }
 }
 
-/// Membership AND the peer's OS username, from the ONE `User::from_uid` this
-/// function already performs (#275).
-///
-/// The name rides along rather than being fetched by a sibling helper for two
-/// reasons. First, this function needs `user.name` for `gr_mem` AND `user.gid`
-/// for the primary and supplementary tests, so a name-only helper could not
-/// substitute for it — an edit that tried would silently delete the primary-gid
-/// and `getgrouplist` branches and deny every member whose membership is not
-/// explicit. Second, the caller runs this on the BLOCKING pool under a timeout
-/// and a circuit breaker precisely because NSS can stall; resolving the name
-/// anywhere else would put an unbounded `getpwuid` back on the async worker.
-///
-/// The raw home rides the same record so that the PDP and the PEP get one value (#435).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Membership {
-    pub in_group: bool,
-    pub user: String,
-    pub dir: std::path::PathBuf,
-}
-
+pub use crate::membership::Membership;
 pub use maknae_io::canonical_home;
 
 pub fn uid_in_maknae_group(uid: u32) -> Result<Membership, AuthzError> {
@@ -64,11 +45,7 @@ pub fn uid_in_maknae_group(uid: u32) -> Result<Membership, AuthzError> {
         user: account.name.clone(),
         why: lookup_why(e),
     })?;
-    Ok(Membership {
-        in_group: gid.is_some_and(|g| account.groups.contains(&g)),
-        user: account.name,
-        dir: account.dir,
-    })
+    Ok(crate::membership::membership(account, gid))
 }
 
 #[cfg(test)]

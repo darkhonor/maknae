@@ -46,6 +46,7 @@
 // `pub mod` lines accrete per commit — declaring a module before its file exists is E0583.
 
 mod account;
+mod account_facts;
 pub mod anchor;
 mod audit_append;
 pub mod checks;
@@ -62,9 +63,10 @@ mod syscall;
 mod walk;
 mod write;
 
-pub use account::{
-    daemon_facts, group_gid, host_account, AccountLookupError, DaemonFacts, HostAccount,
-    MAKNAE_AGENTS_GROUP, MAKNAE_DAEMON_ACCOUNTS, MAKNAE_GROUP,
+pub use account::{daemon_facts, group_gid, host_account};
+pub use account_facts::{
+    AccountLookupError, DaemonFacts, HostAccount, MAKNAE_AGENTS_GROUP, MAKNAE_DAEMON_ACCOUNTS,
+    MAKNAE_GROUP,
 };
 pub use anchor::{
     open_anchor, open_anchor_resolved, read_absolute, resolve_dir, Anchor, AnchorLock, Entry,

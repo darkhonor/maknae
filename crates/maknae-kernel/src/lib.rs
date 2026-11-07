@@ -22,6 +22,7 @@ mod handler;
 mod host_env;
 pub mod identity_report;
 pub mod live;
+mod membership;
 mod mutation;
 mod mutation_exchange;
 mod posture;

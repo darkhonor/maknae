@@ -82,6 +82,10 @@ files = [
   "crates/maknae-io/src/anchor.rs",
   # #596: the one "this user's home" translation, shared by the client and the kernel.
   "crates/maknae-io/src/home.rs",
+  # #609: a host account assembled from passwd and group sources; a wrong arm reads a
+  # non-member as a maknae member or a failed group source as an empty one.
+  "crates/maknae-io/src/account_facts.rs",
+  "crates/maknae-kernel/src/membership.rs",
   # #115: path presence; reading a refusal as absence misjudges the deployment-mode self-check.
   "crates/maknae-io/src/host_facts.rs",
   "crates/maknae-io/src/checks.rs",
@@ -704,7 +708,7 @@ why = "#490: the validator's host environment — the egress bounds file, NSS, t
 
 [[t3]]
 path = "crates/maknae-io/src/account.rs"
-why = "nix User/Group/getgrouplist resolution — syscall I/O, cross-platform; the pure account assembly is unit-tested. Mutation-excluded (mutants.toml)"
+why = "nix User/Group/getgrouplist calls — syscall I/O, cross-platform; the pure assembly it feeds is account_facts.rs (T1). Mutation-excluded (mutants.toml)"
 
 [[t3]]
 path = "crates/maknae-kernel/src/groupres.rs"
