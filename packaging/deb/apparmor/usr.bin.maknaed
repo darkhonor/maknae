@@ -78,7 +78,7 @@ profile maknaed /usr/bin/maknaed {
 
   # /proc and /sys runtime introspection.
   @{PROC}/sys/net/core/somaxconn         r,
-  # cgroup detection: the runtime reads its own (and connecting peers') cgroup
+  # cgroup detection: the runtime reads its own cgroup
   # membership and the cgroup-v2 cpu limits (resource/parallelism detection).
   @{PROC}/*/cgroup                       r,
   # #115: the account facts. maknae-io opens each file's parent directory as an

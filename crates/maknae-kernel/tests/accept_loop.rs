@@ -1560,7 +1560,7 @@ impl maknae_kernel::SessionFacts for AlwaysActiveMember {
 }
 
 #[tokio::test]
-async fn a_member_whose_process_has_no_login_is_admitted() {
+async fn an_active_member_is_admitted_and_served_without_a_login_session() {
     let (conn, client) = pinging().await;
     let recs = drive_facts(
         vec![conn],
