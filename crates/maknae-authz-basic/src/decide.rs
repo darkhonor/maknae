@@ -502,12 +502,9 @@ pub(crate) fn decide_loaded_cited(
             None,
         ),
         Role::Admin | Role::User | Role::Guest
-            if action_limit(lp.subjects.get(uid), &req.action.0).is_some() =>
+            if let Some(limited) = action_limit(lp.subjects.get(uid), &req.action.0) =>
         {
-            (
-                action_limit(lp.subjects.get(uid), &req.action.0).unwrap_or(Verdict::Indeterminate),
-                None,
-            )
+            (limited, None)
         }
         // #158, operator ruling 2026-09-07: admin governs Maknae management,
         // not filesystem privilege. Users and admins share the universal path
