@@ -606,6 +606,7 @@ impl PolicySource {
                 })
                 .collect(),
             aliases: std::collections::BTreeMap::new(),
+            agents: Default::default(),
         }
         .with_claims(self.resolved.adversary_names.clone())
     }
@@ -3219,6 +3220,7 @@ mod tests {
             maknae_graph::identity::build(
                 &maknae_graph::identity::IdentityLayer {
                     aliases: Default::default(),
+                    agents: Default::default(),
                     source: PATH.into(),
                     label: LABEL.into(),
                     bindings_sha256: Some([7; 32]),
@@ -3275,6 +3277,7 @@ mod tests {
             maknae_graph::identity::build(
                 &maknae_graph::identity::IdentityLayer {
                     aliases: Default::default(),
+                    agents: Default::default(),
                     source: PATH.into(),
                     label: LABEL.into(),
                     bindings_sha256: Some([7; 32]),
@@ -4244,6 +4247,7 @@ mod tests {
             layer,
             maknae_graph::identity::IdentityLayer {
                 aliases: Default::default(),
+                agents: Default::default(),
                 source: "/etc/maknae/bindings.yaml".into(),
                 label: "UNCLASSIFIED".into(),
                 bindings_sha256: Some([4; 32]),

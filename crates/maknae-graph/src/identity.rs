@@ -1,10 +1,10 @@
 use crate::baseline::{BaselineLayer, ATTR_MOVED_FROM, BASELINE_SOURCE_KEY, INSTANCE_KEY};
 use crate::graph::{Graph, GraphBuilder, GraphError};
 use crate::kernel::{
-    ADVERSARY, ATTR_ALIASES, ATTR_BASE, ATTR_CONFLICTS, ATTR_LIVE, ATTR_NAME, ATTR_SHA256,
-    ATTR_UID, ATTR_VALUE, BINDS, CLASSIFICATION_SYSTEM, CONFIG_SOURCE, CONTAINED, CONTAINMENT,
-    DECLARED_BY, DECLARES, INSTANCE, LEVEL, LEVEL_OF, PART_OF, ROLE, SCHEMA, SECTION, SUBJECT,
-    SYNC_BASE, VOCABULARY_SOURCE_KEY,
+    agent_key, ADMIN, ADVERSARY, AGENT, ATTR_ALIASES, ATTR_BASE, ATTR_CONFLICTS, ATTR_LIVE,
+    ATTR_NAME, ATTR_SHA256, ATTR_UID, ATTR_VALUE, BINDS, CLASSIFICATION_SYSTEM, CONFIG_SOURCE,
+    CONTAINED, CONTAINMENT, DECLARED_BY, DECLARES, ENROLLS, INSTANCE, LEVEL, LEVEL_OF, PART_OF,
+    ROLE, SCHEMA, SECTION, SUBJECT, SYNC_BASE, VOCABULARY_SOURCE_KEY,
 };
 use crate::record::{
     AttrValue, Attrs, EdgeId, EdgeKind, EdgeRecord, GraphSpace, NodeId, NodeKind, NodeRecord,
@@ -31,6 +31,7 @@ pub struct IdentityLayer {
     /// Adversary names, with the contained uid each last resolved to, other than the
     /// name a contained subject carries itself.
     pub aliases: BTreeMap<String, u32>,
+    pub agents: BTreeMap<String, u32>,
 }
 
 impl IdentityLayer {
@@ -95,6 +96,8 @@ pub enum IdentityError {
     Alias(String),
     SyncAttr { node: u64, attr: &'static str },
     SyncAmbiguous { node: u64, what: &'static str },
+    AgentAdmin(String),
+    AgentUnbound(String),
 }
 
 impl fmt::Display for IdentityError {
@@ -125,6 +128,13 @@ impl fmt::Display for IdentityError {
                 f,
                 "identity layer: compiled node `{key}` is labelled differently from the layer"
             ),
+            Self::AgentAdmin(id) => write!(
+                f,
+                "identity layer: agent `{id}` is bound to admin; an agent never holds admin"
+            ),
+            Self::AgentUnbound(id) => {
+                write!(f, "identity layer: agent `{id}` enrolls no bound subject")
+            }
             Self::Alias(name) => write!(
                 f,
                 "identity layer: adversary name `{name}` does not name one contained subject"
@@ -281,6 +291,7 @@ pub fn build(
     }
 
     let mut containment_id = None;
+    let mut subject_ids: BTreeMap<u32, (NodeId, &str)> = BTreeMap::new();
     let mut subjects: Vec<&SubjectEntry> = layer.subjects.iter().collect();
     subjects.sort_by_key(|s| s.uid);
     for s in subjects {
@@ -295,6 +306,7 @@ pub fn build(
         }
         let n = a.node(SUBJECT, subject_key(s.uid), attrs);
         let sid = n.id;
+        subject_ids.insert(s.uid, (sid, s.role.as_str()));
         b = b.node(n);
         if s.role == ADVERSARY {
             let cid = match containment_id {
@@ -317,6 +329,18 @@ pub fn build(
         if let Some(sec) = section_id {
             b = b.edge(a.edge(sid, DECLARED_BY, sec));
         }
+    }
+    for (id, &uid) in &layer.agents {
+        let sid = match subject_ids.get(&uid) {
+            None => return Err(IdentityError::AgentUnbound(id.clone())),
+            Some(&(_, ADMIN)) => return Err(IdentityError::AgentAdmin(id.clone())),
+            Some(&(sid, _)) => sid,
+        };
+        let mut attrs = Attrs::new();
+        attrs.insert(ATTR_UID.into(), AttrValue::U64(u64::from(uid)));
+        let n = a.node(AGENT, agent_key(id), attrs);
+        let aid = n.id;
+        b = b.node(n).edge(a.edge(aid, ENROLLS, sid));
     }
     if let Some(s) = sync {
         let mut attrs = Attrs::new();
@@ -498,6 +522,7 @@ pub fn extract(g: &Graph) -> Result<Extracted, IdentityError> {
         }
     }
     layer.subjects.sort_by_key(|s| s.uid);
+    layer.agents = extract_agents(g, &layer.subjects)?;
     if let Some(s) = layer.subjects.iter().find(|s| {
         s.role == ADVERSARY && layer.aliases.contains_key(&s.name) && s.name != subject_key(s.uid)
     }) {
@@ -511,6 +536,47 @@ pub fn extract(g: &Graph) -> Result<Extracted, IdentityError> {
         baseline: crate::baseline::extract(g)?,
         sync: crate::sync::extract(g, source)?,
     })
+}
+
+fn extract_agents(
+    g: &Graph,
+    subjects: &[SubjectEntry],
+) -> Result<BTreeMap<String, u32>, IdentityError> {
+    let mut agents = BTreeMap::new();
+    for n in g.nodes().iter().filter(|n| n.kind == AGENT) {
+        let ambiguous = |what| IdentityError::Ambiguous { node: n.id.0, what };
+        let id = n
+            .key
+            .strip_prefix(&agent_key(""))
+            .filter(|id| !id.is_empty())
+            .ok_or(ambiguous("agent key without an id"))?;
+        let uid = match n.attrs.get(ATTR_UID) {
+            Some(AttrValue::U64(u)) => u32::try_from(*u).ok(),
+            _ => None,
+        }
+        .ok_or(IdentityError::BadAttr {
+            node: n.id.0,
+            attr: ATTR_UID,
+        })?;
+        let mut enrolls = g.out_edges(n.id, ENROLLS);
+        let subject = enrolls
+            .next()
+            .and_then(|e| g.node(e.to))
+            .ok_or_else(|| IdentityError::AgentUnbound(id.to_string()))?;
+        if enrolls.next().is_some() {
+            return Err(ambiguous("more than one enrolls edge"));
+        }
+        if subject.key != subject_key(uid) {
+            return Err(ambiguous("enrolls a subject with another uid"));
+        }
+        match subjects.iter().find(|s| s.uid == uid) {
+            None => return Err(IdentityError::AgentUnbound(id.to_string())),
+            Some(s) if s.role == ADMIN => return Err(IdentityError::AgentAdmin(id.to_string())),
+            Some(_) => {}
+        }
+        agents.insert(id.to_string(), uid);
+    }
+    Ok(agents)
 }
 
 pub const BINDINGS_MISSING: &str = "bindings.yaml is missing but the store holds explicit bindings; restore it, or run sudo maknae reseed to return to principal-as-admin";
@@ -568,6 +634,39 @@ pub fn carry_forward(
     }
     out.subjects.sort_by_key(|e| e.uid);
     (out.with_claims(claims), carried)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentChange {
+    Enrolled { agent: String, uid: u32 },
+    Removed { agent: String, uid: u32 },
+}
+
+/// Every enrollment `next` ends or begins relative to `persisted`, in agent order; a uid
+/// change under one id is its removal followed by its enrollment.
+pub fn agent_changes(persisted: &IdentityLayer, next: &IdentityLayer) -> Vec<AgentChange> {
+    let ids: std::collections::BTreeSet<&String> =
+        persisted.agents.keys().chain(next.agents.keys()).collect();
+    let mut out = Vec::new();
+    for id in ids {
+        let (was, now) = (persisted.agents.get(id), next.agents.get(id));
+        if was == now {
+            continue;
+        }
+        if let Some(&uid) = was {
+            out.push(AgentChange::Removed {
+                agent: id.clone(),
+                uid,
+            });
+        }
+        if let Some(&uid) = now {
+            out.push(AgentChange::Enrolled {
+                agent: id.clone(),
+                uid,
+            });
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -678,6 +777,7 @@ mod tests {
     fn layer(bindings: Option<&str>, subjects: &[(u32, &str, &str)]) -> IdentityLayer {
         IdentityLayer {
             aliases: Default::default(),
+            agents: Default::default(),
             source: "/etc/maknae/authz.yaml".into(),
             label: "UNCLASSIFIED".into(),
             bindings_sha256: bindings.map(|s| {
@@ -1250,6 +1350,7 @@ mod tests {
         ));
         let no_label = IdentityLayer {
             aliases: Default::default(),
+            agents: Default::default(),
             source: "p".into(),
             label: String::new(),
             bindings_sha256: None,
@@ -1691,6 +1792,14 @@ mod tests {
                 },
                 "sync base: node 8 is ambiguous: more than one sync base",
             ),
+            (
+                IdentityError::AgentAdmin("hobi".into()),
+                "identity layer: agent `hobi` is bound to admin; an agent never holds admin",
+            ),
+            (
+                IdentityError::AgentUnbound("hobi".into()),
+                "identity layer: agent `hobi` enrolls no bound subject",
+            ),
         ];
         for (e, want) in cases {
             assert_eq!(e.to_string(), want);
@@ -1883,6 +1992,244 @@ mod tests {
                 name: "alicia".into(),
                 cause: ReleaseCause::NameNowResolvesTo(1003)
             }]
+        );
+    }
+
+    fn enrolled(mut l: IdentityLayer, agents: &[(&str, u32)]) -> IdentityLayer {
+        l.agents = agents.iter().map(|(n, u)| ((*n).into(), *u)).collect();
+        l
+    }
+
+    fn built(l: &IdentityLayer) -> Result<Graph, IdentityError> {
+        build(l, None, None, &roles(), VOCAB, 3, ProvenanceKind::Seed)
+    }
+
+    fn agent_node(g: &Graph, id: &str) -> NodeRecord {
+        g.lookup(crate::kernel::AGENT, &crate::kernel::agent_key(id))
+            .unwrap_or_else(|| panic!("no agent node for {id}"))
+            .clone()
+    }
+
+    #[test]
+    fn an_agent_round_trips_through_build_and_extract() {
+        let l = enrolled(
+            layer(
+                Some("x"),
+                &[
+                    (1000, "alex", "admin"),
+                    (2001, "hobi", "user"),
+                    (2002, "suga", "guest"),
+                ],
+            ),
+            &[("hobi", 2001), ("suga", 2002)],
+        );
+        let g = built(&l).unwrap();
+        assert_eq!(
+            g.nodes()
+                .iter()
+                .filter(|n| n.kind == crate::kernel::AGENT)
+                .count(),
+            2
+        );
+        for (id, uid) in [("hobi", 2001), ("suga", 2002)] {
+            let n = agent_node(&g, id);
+            assert_eq!(n.label, "UNCLASSIFIED");
+            assert_eq!(
+                n.attrs,
+                [(ATTR_UID.to_string(), AttrValue::U64(u64::from(uid)))].into()
+            );
+            let to: Vec<String> = g
+                .out_edges(n.id, crate::kernel::ENROLLS)
+                .map(|e| g.node(e.to).unwrap().key.clone())
+                .collect();
+            assert_eq!(to, [subject_key(uid)]);
+        }
+        assert_eq!(extract(&g).unwrap().layer, l);
+    }
+
+    #[test]
+    fn build_refuses_an_agent_bound_to_admin() {
+        let l = enrolled(
+            layer(
+                Some("x"),
+                &[(1000, "alex", "admin"), (2001, "hobi", "user")],
+            ),
+            &[("hobi", 2001), ("root-agent", 1000)],
+        );
+        assert_eq!(
+            built(&l),
+            Err(IdentityError::AgentAdmin("root-agent".into()))
+        );
+    }
+
+    #[test]
+    fn extract_refuses_an_agent_bound_to_admin() {
+        let g = one_admin();
+        let subject = g
+            .lookup(crate::kernel::SUBJECT, "uid:1000")
+            .unwrap()
+            .clone();
+        let agent = NodeRecord {
+            id: NodeId(100),
+            kind: crate::kernel::AGENT,
+            key: crate::kernel::agent_key("alex"),
+            attrs: [(ATTR_UID.to_string(), AttrValue::U64(1000))].into(),
+            ..subject.clone()
+        };
+        let enrolls = EdgeRecord {
+            id: EdgeId(100),
+            from: NodeId(100),
+            to: subject.id,
+            kind: crate::kernel::ENROLLS,
+            ..g.edges()[0].clone()
+        };
+        let stored = regraph(&g, |_| true, vec![agent], vec![enrolls]);
+        assert_eq!(
+            extract(&stored),
+            Err(IdentityError::AgentAdmin("alex".into()))
+        );
+    }
+
+    #[test]
+    fn extract_refuses_an_agent_that_enrolls_no_subject_or_another_uid() {
+        let l = enrolled(
+            layer(Some("x"), &[(2001, "hobi", "user"), (2002, "suga", "user")]),
+            &[("hobi", 2001)],
+        );
+        let g = built(&l).unwrap();
+        let agent = agent_node(&g, "hobi");
+        let unenrolled = rebuild(&g, |e| e.kind != crate::kernel::ENROLLS, vec![], |n| n).unwrap();
+        assert_eq!(
+            extract(&unenrolled),
+            Err(IdentityError::AgentUnbound("hobi".into()))
+        );
+        let suga = g.lookup(crate::kernel::SUBJECT, "uid:2002").unwrap().id;
+        let mismatched = rebuild(
+            &g,
+            |e| e.kind != crate::kernel::ENROLLS,
+            vec![EdgeRecord {
+                id: EdgeId(100),
+                from: agent.id,
+                to: suga,
+                kind: crate::kernel::ENROLLS,
+                ..g.edges()[0].clone()
+            }],
+            |n| n,
+        )
+        .unwrap();
+        assert_eq!(
+            extract(&mismatched),
+            Err(IdentityError::Ambiguous {
+                node: agent.id.0,
+                what: "enrolls a subject with another uid"
+            })
+        );
+        let two = rebuild(
+            &g,
+            |_| true,
+            vec![EdgeRecord {
+                id: EdgeId(101),
+                from: agent.id,
+                to: suga,
+                kind: crate::kernel::ENROLLS,
+                ..g.edges()[0].clone()
+            }],
+            |n| n,
+        )
+        .unwrap();
+        assert_eq!(
+            extract(&two),
+            Err(IdentityError::Ambiguous {
+                node: agent.id.0,
+                what: "more than one enrolls edge"
+            })
+        );
+        let hobi = g.lookup(crate::kernel::SUBJECT, "uid:2001").unwrap().id;
+        let unbound = rebuild(&g, |e| !(e.kind == BINDS && e.from == hobi), vec![], |n| n).unwrap();
+        assert_eq!(
+            extract(&unbound),
+            Err(IdentityError::AgentUnbound("hobi".into()))
+        );
+    }
+
+    #[test]
+    fn build_refuses_an_agent_with_no_subject() {
+        let l = enrolled(
+            layer(Some("x"), &[(1000, "alex", "admin")]),
+            &[("hobi", 2001)],
+        );
+        assert_eq!(built(&l), Err(IdentityError::AgentUnbound("hobi".into())));
+    }
+
+    #[test]
+    fn a_contained_agent_is_allowed() {
+        let l = enrolled(
+            layer(Some("x"), &[(2001, "hobi", ADVERSARY)]),
+            &[("hobi", 2001)],
+        );
+        let g = built(&l).unwrap();
+        let n = agent_node(&g, "hobi");
+        let subject = g.lookup(crate::kernel::SUBJECT, "uid:2001").unwrap().id;
+        assert_eq!(
+            g.out_edges(n.id, crate::kernel::ENROLLS)
+                .map(|e| e.to)
+                .collect::<Vec<_>>(),
+            [subject]
+        );
+        assert!(g.out_edges(subject, CONTAINED).next().is_some());
+        assert_eq!(extract(&g).unwrap().layer, l);
+    }
+
+    #[test]
+    fn agents_are_never_carried_forward() {
+        let persisted = enrolled(
+            layer(Some("x"), &[(2001, "hobi", "user"), (2002, "suga", "user")]),
+            &[("hobi", 2001), ("suga", 2002)],
+        );
+        let file = layer(Some("y"), &[(2001, "hobi", "user"), (2002, "suga", "user")]);
+        let (out, carried) = carry_forward(&file, &[], &persisted);
+        assert!(out.agents.is_empty());
+        assert!(carried.is_empty());
+        let file = enrolled(file, &[("jin", 2002)]);
+        assert_eq!(carry_forward(&file, &[], &persisted).0.agents, file.agents);
+    }
+
+    #[test]
+    fn agent_changes_names_enrolled_and_removed() {
+        let persisted = enrolled(layer(None, &[]), &[("hobi", 2001), ("jin", 2003)]);
+        let next = enrolled(layer(None, &[]), &[("hobi", 2001), ("suga", 2002)]);
+        assert_eq!(
+            agent_changes(&persisted, &next),
+            [
+                AgentChange::Removed {
+                    agent: "jin".into(),
+                    uid: 2003
+                },
+                AgentChange::Enrolled {
+                    agent: "suga".into(),
+                    uid: 2002
+                },
+            ]
+        );
+        assert!(agent_changes(&next, &next).is_empty());
+    }
+
+    #[test]
+    fn a_uid_change_is_removed_then_enrolled() {
+        let persisted = enrolled(layer(None, &[]), &[("hobi", 2001)]);
+        let next = enrolled(layer(None, &[]), &[("hobi", 2005)]);
+        assert_eq!(
+            agent_changes(&persisted, &next),
+            [
+                AgentChange::Removed {
+                    agent: "hobi".into(),
+                    uid: 2001
+                },
+                AgentChange::Enrolled {
+                    agent: "hobi".into(),
+                    uid: 2005
+                },
+            ]
         );
     }
 }

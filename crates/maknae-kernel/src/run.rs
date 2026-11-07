@@ -8523,6 +8523,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         let old = maknae_graph::identity::build(
             &maknae_graph::identity::IdentityLayer {
                 aliases: Default::default(),
+                agents: Default::default(),
                 source: d.0.join("authz.yaml").to_str().unwrap().to_string(),
                 label: "UNCLASSIFIED".into(),
                 bindings_sha256: Some([1; 32]),
@@ -9017,6 +9018,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         let inputs = GraphInputs::new(&source, "UNCLASSIFIED", test_baseline()).unwrap();
         let old = maknae_graph::identity::IdentityLayer {
             aliases: Default::default(),
+            agents: Default::default(),
             source: paths.authz.to_str().unwrap().to_string(),
             label: "UNCLASSIFIED".into(),
             bindings_sha256: inputs.identity.bindings_sha256,

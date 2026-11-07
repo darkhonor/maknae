@@ -229,6 +229,7 @@ impl Inputs {
 fn layer_at(label: &str, bindings: Option<&[u8]>, subjects: &[(u32, &str, &str)]) -> IdentityLayer {
     IdentityLayer {
         aliases: Default::default(),
+        agents: Default::default(),
         source: SOURCE.into(),
         label: label.into(),
         bindings_sha256: bindings.map(maknae_crypto::sha256),

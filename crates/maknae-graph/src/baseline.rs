@@ -161,6 +161,7 @@ mod tests {
                 role: "admin".into(),
             }],
             aliases: Default::default(),
+            agents: Default::default(),
         }
     }
 
@@ -356,6 +357,7 @@ mod tests {
                 },
             ],
             aliases: [("eve".to_string(), 666)].into_iter().collect(),
+            agents: Default::default(),
         };
         assert_eq!(e.layer, want);
         assert_eq!(encoded(&g), bytes);

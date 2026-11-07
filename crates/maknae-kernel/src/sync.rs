@@ -427,6 +427,7 @@ mod tests {
                 role: "admin".into(),
             }],
             aliases: Default::default(),
+            agents: Default::default(),
         }
     }
 

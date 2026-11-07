@@ -1244,6 +1244,7 @@ mod tests {
     fn file() -> IdentityLayer {
         IdentityLayer {
             aliases: Default::default(),
+            agents: Default::default(),
             source: "/etc/maknae/authz.yaml".into(),
             label: "UNOFFICIAL".into(),
             bindings_sha256: Some([1; 32]),
@@ -1306,6 +1307,7 @@ mod tests {
             l,
             IdentityLayer {
                 aliases: Default::default(),
+                agents: Default::default(),
                 source: "/etc/maknae/authz.yaml".into(),
                 label: "UNOFFICIAL".into(),
                 bindings_sha256: None,
@@ -1319,6 +1321,7 @@ mod tests {
     fn a_populated_layer_keeps_its_source_bindings_and_subjects_under_the_binarys_label() {
         let stored = IdentityLayer {
             aliases: Default::default(),
+            agents: Default::default(),
             source: "/old/authz.yaml".into(),
             label: "UNCLASSIFIED".into(),
             bindings_sha256: Some([2; 32]),
@@ -1365,6 +1368,7 @@ mod tests {
             aliases: [("keep", 5), ("bound", 0), ("gone", 4)]
                 .map(|(n, u)| (n.to_string(), u))
                 .into(),
+            agents: Default::default(),
             ..file()
         };
         let (l, _) = migrated_layer(&stored, &file(), &persisted_compiled_set("UNOFFICIAL"));

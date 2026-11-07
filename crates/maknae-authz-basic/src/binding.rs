@@ -965,6 +965,7 @@ mod tests {
         .unwrap();
         let layer = maknae_graph::identity::IdentityLayer {
             aliases: Default::default(),
+            agents: Default::default(),
             source: SOURCE.into(),
             label: "UNCLASSIFIED".into(),
             bindings_sha256: Some([3; 32]),
@@ -997,6 +998,7 @@ mod tests {
     fn layer(explicit: bool, subjects: &[(u32, &str, &str)]) -> IdentityLayer {
         IdentityLayer {
             aliases: Default::default(),
+            agents: Default::default(),
             source: SOURCE.into(),
             label: "UNCLASSIFIED".into(),
             bindings_sha256: explicit.then_some([3; 32]),
