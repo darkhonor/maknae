@@ -478,9 +478,9 @@ on the wire (the client sees the generic `not authorized`):
 accept; seq 2+ are the per-request records above. Exact key order is
 canonical-sorted — `maknae-audit-append/src/record.rs` — not declaration order.)
 
-### 7. Grants and destinations (`authz.yaml`)
+### 7. Grants, destinations and subjects (`authz.yaml`)
 
-Two additive keys govern what a role may DO beyond the built-in rules. The packaged
+Three additive keys govern what a role, and with `subjects:` an individual account, may DO beyond the built-in rules. The packaged
 `authz.yaml` grants `admin` five terms and allowlists nothing: no prompt is permitted
 until you write a `destinations:` entry.
 
@@ -506,6 +506,27 @@ destinations:                # #172: per-role egress allowlist for session.promp
   matching the `name` of an entry in the authorized `providers` list. URL patterns are a later grammar and are
   refused now. An absent or empty allowlist refuses every prompt: the second condition of
   `session.prompt` is the destination, and it never defaults open.
+- **Action patterns.** Wherever policy names actions, an entry is an exact term
+  (`fs.read`, `session.prompt`) or a family wildcard `<family>.*` (`fs.*`, `admin.*`):
+  lowercase `[a-z0-9_]` segments separated by `.`, with `*` only as the whole last
+  segment. Anything else (`*`, `fs*`, `fs.*.x`, `FS.*`) refuses at load. Role `allow` and
+  `deny` lists take the same syntax.
+- **`subjects:` (#608).** Maps an account name to up to three optional keys:
+  `permissions: {allow, deny}` (the `permissions:` path grammar), `actions: {allow, deny}`
+  (action patterns) and `models: {allow}` (`<provider>/<model>`, split on the first `/`).
+  Unknown keys at any level refuse. When a subject has `permissions`, its `allow`
+  replaces the site `allow` for that subject; the site `deny` always applies as a floor
+  and the subject's own `deny` adds to it. Absent, the site set applies. An entry for an
+  account that does not resolve is inert, as for `bindings.yaml`; a `models:` entry that
+  names an unlisted provider or model is inert too.
+- **Deny beats allow, whatever the specificity.** Patterns expand at load, then a deny
+  removes its terms from the allow list; there is no most-specific-wins rule. Two worked
+  examples: `allow: [admin.*]` with `deny: [admin.contain]` is every admin action but
+  `contain`; `deny: [admin.*]` with `allow: [admin.status]` is no admin action. The same
+  holds in `roles:` lists and in a subject's `actions:` (`allow: [fs.*]`, `deny: [fs.delete]`
+  reads "everything in fs except delete"). A wildcard also covers members a later release
+  adds to its family; list exact terms to avoid that growth. `kernel`, `liveness` and
+  `admin.whoami` cannot be named or limited.
 - **Separation of duties (recommended).** Bind the loop's account to `user`. An
   admin-bound loop also holds the disclosure verbs, and a loop that has been injected can
   quote `admin.config.show` into its next prompt; a `user`-bound loop cannot ask. The
@@ -542,6 +563,61 @@ destinations:                # #172: per-role egress allowlist for session.promp
   provider.
 - **When an edit applies.** `maknaed` decides from a snapshot of `authz.yaml` compiled at
   start; an edit applies at the next [reload](#reload-the-policy) or restart.
+
+Two worked `subjects:` entries. `actions` and `models` only narrow what the account's role
+holds, and neither entry grants an action its role lacks. `permissions.allow` replaces the
+site `allow` for that account, so it may reach paths the site `allow` does not cover; the
+site `deny` list still applies, and so do the account's own uid and gid. A HomeLab entry,
+written with family wildcards:
+
+```yaml
+subjects:
+  notes-agent:                   # an account bound to user in bindings.yaml
+    permissions:
+      allow:
+        - "Read(~/notes/**)"
+        - "Write(~/notes/**)"
+    actions:
+      allow:
+        - "fs.*"
+        - "session.*"
+      deny:
+        - "fs.delete"
+    models:
+      allow:
+        - "local/llama"
+```
+
+`notes-agent` reads and writes `~/notes` only, may create directories there but never
+delete, and prompts only `local/llama`, and only if its role is granted `session.prompt`
+and `provider:local` is in its role's `destinations:`. The site `deny` list still applies
+under its own `allow`, so `~/.ssh` and the other credential paths stay out of reach. `fs.*` and
+`session.*` also cover any action a later release adds to those families.
+
+An enterprise entry, written with exact terms so a new release adds nothing:
+
+```yaml
+subjects:
+  build-svc:
+    permissions:
+      allow:
+        - "Read(~/src/**)"
+      deny:
+        - "Read(~/src/secrets/**)"
+    actions:
+      allow:
+        - "fs.read"
+        - "session.prompt"
+    models:
+      allow:
+        - "openai/gpt-5.6"
+```
+
+`build-svc` reads `~/src` except `~/src/secrets`, writes nothing, and prompts only
+`openai/gpt-5.6`, and only if its role is granted `session.prompt` and `provider:openai`
+is in its role's `destinations:`. An `actions:` entry is a complete list: an action in a
+limited family that its `allow` does not name is refused, so an entry with only `deny`
+refuses every limited action.
 
 ### What it proves
 

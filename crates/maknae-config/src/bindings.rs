@@ -115,17 +115,39 @@ fn yaml(m: &str) -> BindingsError {
     BindingsError::Yaml(m.into())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NameFault {
+    Empty,
+    Colon,
+    Comma,
+    Control,
+}
+
+pub(crate) fn name_fault(s: &str) -> Option<NameFault> {
+    if s.is_empty() {
+        Some(NameFault::Empty)
+    } else if s.contains(':') {
+        Some(NameFault::Colon)
+    } else if s.contains(',') {
+        Some(NameFault::Comma)
+    } else if s.chars().any(char::is_control) {
+        Some(NameFault::Control)
+    } else {
+        None
+    }
+}
+
 pub(crate) fn entry(v: &Value) -> Result<BindingEntry, BindingsError> {
     match v {
-        Value::Str(s) if s.is_empty() => Err(yaml("an empty name binds nobody; remove it")),
-        Value::Str(s) if s.contains(':') => Err(yaml(
-            "a name cannot contain ':'; write `uid: 7` for a numeric uid",
-        )),
-        Value::Str(s) if s.contains(',') => Err(yaml("a name cannot contain ','")),
-        Value::Str(s) if s.chars().any(char::is_control) => {
-            Err(yaml("a name cannot contain a control character"))
-        }
-        Value::Str(s) => Ok(BindingEntry::Name(s.clone())),
+        Value::Str(s) => match name_fault(s) {
+            None => Ok(BindingEntry::Name(s.clone())),
+            Some(NameFault::Empty) => Err(yaml("an empty name binds nobody; remove it")),
+            Some(NameFault::Colon) => Err(yaml(
+                "a name cannot contain ':'; write `uid: 7` for a numeric uid",
+            )),
+            Some(NameFault::Comma) => Err(yaml("a name cannot contain ','")),
+            Some(NameFault::Control) => Err(yaml("a name cannot contain a control character")),
+        },
         Value::Map(m) => match m.as_slice() {
             [(k, Value::Int(n))] if k == "uid" => u32::try_from(*n)
                 .ok()

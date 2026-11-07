@@ -1259,6 +1259,7 @@ mod tests {
             roles: Roles::Graph(GraphBindings::new(g, SOURCE)),
             action_grants: crate::validate_grants(&policy.action_grants).unwrap(),
             destinations: crate::validate_destinations(&policy.destinations).unwrap(),
+            subjects: crate::decide::SubjectGrants::default(),
             policy,
         }
     }

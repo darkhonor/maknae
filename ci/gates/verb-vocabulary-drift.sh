@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Exact-inventory gate over the action vocabulary (#67, spec R7).
 #
-# Four closed vocabularies must each match the manifest exactly, BOTH
+# Five closed vocabularies must each match the manifest exactly, BOTH
 # directions: a term with no manifest entry fails, and a manifest entry with no
 # term fails. The gate asserts a DECISION WAS RECORDED for every term — it never
 # asserts a grant exists; "not-granted" is a valid and usually correct entry.
@@ -44,6 +44,16 @@ awk '/fn parse_pattern/{f=1} f && /^        "[A-Z]/{ if (match($0, /"[A-Za-z]+"/
 # line because this reads terms only off the matched line.
 awk '/^pub\(crate\) const GRANTABLE_ACTIONS/{ while (match($0, /"[a-z0-9_.]+"/)) { print "grantable\t" substr($0,RSTART+1,RLENGTH-2); $0=substr($0,RSTART+RLENGTH) } }' \
   "$DECIDE" | sort -u >> "$tmp/code"
+
+# 5. the action vocabulary — the ACTION_VOCABULARY constant (#608), one line like
+# GRANTABLE_ACTIONS. Zero rows fails: a reflowed constant must not read as empty.
+awk '/^pub\(crate\) const ACTION_VOCABULARY/{ while (match($0, /"[a-z0-9_.]+"/)) { print "action-vocab\t" substr($0,RSTART+1,RLENGTH-2); $0=substr($0,RSTART+RLENGTH) } }' \
+  "$DECIDE" | sort -u > "$tmp/vocab"
+if [ ! -s "$tmp/vocab" ]; then
+  echo "FAIL: no ACTION_VOCABULARY terms read from $DECIDE (want one line: pub(crate) const ACTION_VOCABULARY ...)"
+  exit 1
+fi
+cat "$tmp/vocab" >> "$tmp/code"
 
 sort -u "$tmp/code" -o "$tmp/code"
 grep -v '^#' "$MANIFEST" | grep -v '^[[:space:]]*$' | cut -f1,2 | sort -u > "$tmp/manifest"
@@ -111,6 +121,7 @@ bad_clause=$(awk -F'	' '
     clause["grantable|grantable-not-granted"]   = "operator MAY grant per-role via `roles:`"
     clause["action|granted-in-shipped-file"]      = "granted to admin by the shipped authz.yaml; an install'\''s own authz.yaml decides"
     clause["grantable|grantable-shipped-granted"] = "operator MAY grant per-role via `roles:`; the shipped authz.yaml grants it to admin"
+    clause["action-vocab|subject-limitable"]      = "a `subjects:` actions list may limit it; it never grants"
   }
   /^#/ || !NF { next }
   {

@@ -1443,6 +1443,71 @@ async fn a_provider_the_role_is_not_granted_is_denied_by_the_pdp_on_its_admitted
 }
 
 #[tokio::test]
+async fn a_subject_prompt_on_an_unlisted_model_is_denied_end_to_end() {
+    let name = common::euid_name();
+    let mut fx = Fixture::with_policy(
+        "prompt-subject-model",
+        "Read",
+        &format!(
+            "{GRANTED}subjects:\n  {name}:\n    models:\n      allow: [\"openai/other-model\"]\n"
+        ),
+    );
+    fx.principal.uid = fx.principal.uid.wrapping_add(1);
+    let records = Records::new(0);
+    let eg = Arc::new(Recording::default());
+    let resp = fx
+        .roundtrip_with_authorizer(
+            fx.authorizer(),
+            prompt_choosing("hello", Some(common::test_choice())),
+            Arc::clone(&records),
+            Some("openai"),
+            eg.clone(),
+        )
+        .await
+        .expect("a refusal frame");
+    assert!(matches!(resp.result, RespResult::Err(ref e) if e.code == ProtoErrCode::Unauthorized));
+    let rec = last_prompt_record(&records);
+    assert_eq!(rec.outcome.result, "deny");
+    assert!(
+        rec.outcome.reason.contains(&name) && rec.outcome.reason.contains("openai/test-model"),
+        "{}",
+        rec.outcome.reason
+    );
+    assert!(eg.calls().is_empty());
+}
+
+#[tokio::test]
+async fn a_subject_prompt_on_a_listed_model_is_permitted_end_to_end() {
+    let name = common::euid_name();
+    let mut fx = Fixture::with_policy(
+        "prompt-subject-model-listed",
+        "Read",
+        &format!(
+            "{GRANTED}subjects:\n  {name}:\n    models:\n      allow: [\"openai/other-model\", \"openai/{}\"]\n",
+            common::TEST_MODEL
+        ),
+    );
+    fx.principal.uid = fx.principal.uid.wrapping_add(1);
+    let records = Records::new(0);
+    let eg = Arc::new(Recording::default());
+    let resp = fx
+        .roundtrip_with_authorizer(
+            fx.authorizer(),
+            prompt_choosing("hello", Some(common::test_choice())),
+            Arc::clone(&records),
+            Some("openai"),
+            eg.clone(),
+        )
+        .await
+        .expect("a reply frame");
+    assert!(
+        matches!(resp.result, RespResult::Ok(Payload::PromptReply(_))),
+        "{resp:?}"
+    );
+    assert_eq!(eg.chosen().len(), 1);
+}
+
+#[tokio::test]
 async fn the_key_path_is_the_peers_own_username_under_the_root_prefix_and_only_the_model_reaches_the_trail(
 ) {
     let mut fx = Fixture::with_policy("prompt-keypath", "Read", GRANTED);

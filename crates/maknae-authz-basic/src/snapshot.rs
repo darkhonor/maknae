@@ -233,10 +233,13 @@ fn permissions_declared(
     )))
 }
 
-fn static_role(key: &str) -> Result<&'static str, CompileError> {
+fn role_of(key: &str) -> Result<crate::role::Role, CompileError> {
     crate::role::Role::from_key(key)
-        .map(|r| r.key())
         .ok_or_else(|| CompileError::Policy(format!("`{key}` is not a role")))
+}
+
+fn static_role(key: &str) -> Result<&'static str, CompileError> {
+    role_of(key).map(|r| r.key())
 }
 
 pub fn compile(
@@ -349,16 +352,18 @@ pub fn compile(
             }
         }
     }
-    for (role, (allow, deny)) in &action_grants.0 {
+    for (role, grants) in &policy.action_grants {
         let role_key = static_role(role)?;
         let role_id = c.id_of(ROLE, role_key)?;
         let sec = c.section(&format!("roles.{role}"), section_sha256, "roles")?;
-        for (effect, terms) in [(Effect::Deny, deny), (Effect::Allow, allow)] {
+        for (effect, entries) in [(Effect::Deny, &grants.deny), (Effect::Allow, &grants.allow)] {
             let (edge, word) = effect_attrs(effect);
-            for (i, term) in terms.iter().enumerate() {
-                let term_id = c.id_of(TERM, term.as_str())?;
+            for (i, entry) in entries.iter().enumerate() {
+                let terms = crate::role_terms(role, role_of(role)?, entry)
+                    .map_err(|e| CompileError::Policy(e.to_string()))?;
+                let written = entry.source();
                 let mut attrs = Attrs::new();
-                attrs.insert(ATTR_TERM.into(), AttrValue::Str(term.as_str().into()));
+                attrs.insert(ATTR_TERM.into(), AttrValue::Str(written.clone()));
                 attrs.insert(ATTR_EFFECT.into(), AttrValue::Str(word.into()));
                 let id = c.rule(
                     format!("rule:roles.{role}:{word}:{i}"),
@@ -366,11 +371,14 @@ pub fn compile(
                     &sec,
                     Cited::Grant {
                         role: role_key,
-                        term: term.as_str().into(),
+                        term: written,
                         effect,
                     },
                 );
-                c.add_edge(id, MATCHES, term_id);
+                for t in terms {
+                    let term_id = c.id_of(TERM, t)?;
+                    c.add_edge(id, MATCHES, term_id);
+                }
                 c.add_edge(role_id, edge, id);
             }
         }
@@ -399,6 +407,38 @@ pub fn compile(
         }
     }
 
+    let limited: Vec<_> = policy
+        .subjects
+        .iter()
+        .filter_map(|(name, entry)| entry.permissions.as_ref().map(|p| (name, p)))
+        .collect();
+    if !limited.is_empty() {
+        let sec = c.section("subjects", section_sha256, "subjects")?;
+        for (name, permissions) in limited {
+            for (effect, entries) in [
+                (Effect::Deny, permissions.deny_sources()),
+                (Effect::Allow, permissions.allow_sources()),
+            ] {
+                let word = effect_attrs(effect).1;
+                for (i, entry) in entries.iter().enumerate() {
+                    let mut attrs = Attrs::new();
+                    attrs.insert(ATTR_ENTRY.into(), AttrValue::Str(entry.clone()));
+                    attrs.insert(ATTR_EFFECT.into(), AttrValue::Str(word.into()));
+                    c.rule(
+                        format!("rule:subjects.{name}.permissions:{word}:{i}"),
+                        attrs,
+                        &sec,
+                        Cited::SubjectPath {
+                            subject: name.clone(),
+                            effect,
+                            source: entry.clone(),
+                        },
+                    );
+                }
+            }
+        }
+    }
+
     let builder = c.nodes.into_iter().fold(
         GraphBuilder::new(GraphSpace::Kernel, revision),
         GraphBuilder::node,
@@ -414,6 +454,7 @@ pub fn compile(
         roles: Roles::Graph(GraphBindings::new(graph.clone(), &declared.source)),
         action_grants,
         destinations,
+        subjects: source.subject_grants().clone(),
     };
     Ok(Snapshot {
         graph,
@@ -1266,7 +1307,7 @@ mod tests {
     #[test]
     fn every_citation_the_decision_core_emits_resolves_in_the_index() {
         let s = source_with(&format!(
-            "{}roles:\n  admin:\n    allow: [\"admin.status\", \"session.prompt\"]\n    deny: [\"admin.config.show\"]\n  user:\n    allow: [\"session.prompt\"]\n    deny: [\"session.prompt\"]\ndestinations:\n  admin:\n    allow: [\"provider:openai\"]\n",
+            "{}roles:\n  admin:\n    allow: [\"admin.*\", \"session.prompt\"]\n    deny: [\"admin.config.show\"]\n  user:\n    allow: [\"session.prompt\"]\n    deny: [\"session.prompt\"]\ndestinations:\n  admin:\n    allow: [\"provider:openai\"]\n",
             crate::tests::shipped_without_roles()
         ), Some(BINDINGS));
         let snap = snap(&s);
@@ -1281,6 +1322,7 @@ mod tests {
             sec_request(1001, "fs.read", Some("/home/operator/notes"), None),
             sec_request(1000, "admin.config.show", None, None),
             sec_request(1000, "admin.status", None, None),
+            sec_request(1000, "admin.contain", None, None),
             sec_request(1000, "session.prompt", None, Some("provider:openai")),
             sec_request(1001, "session.prompt", None, Some("provider:openai")),
         ];
@@ -1313,5 +1355,127 @@ mod tests {
                 ),
             }
         }
+        let contain = crate::decide::decide_loaded_cited(
+            &snap.loaded,
+            &principal(),
+            &sec_request(1000, "admin.contain", None, None),
+        );
+        assert_eq!(
+            contain.cited,
+            Some(Cited::Grant {
+                role: "admin",
+                term: "admin.*".into(),
+                effect: Effect::Allow
+            })
+        );
+        let hit = snap.cite(&contain.cited.unwrap()).unwrap();
+        assert_eq!(hit.key, "rule:roles.admin:allow:0");
+        let g = snap.graph();
+        let rule = g.node(NodeId(hit.node)).unwrap();
+        assert_eq!(str_attr(rule, ATTR_TERM), Some("admin.*"));
+        let mut matched: Vec<&str> = g
+            .out_edges(rule.id, MATCHES)
+            .map(|e| g.node(e.to).unwrap().key.as_str())
+            .collect();
+        matched.sort_unstable();
+        assert_eq!(
+            matched,
+            [
+                "admin.baseline.accept",
+                "admin.baseline.show",
+                "admin.config.show",
+                "admin.contain",
+                "admin.release",
+                "admin.status",
+                "admin.subject.list"
+            ]
+        );
+        let admin = g.lookup(ROLE, "admin").unwrap();
+        assert_eq!(
+            g.out_edges(admin.id, PERMITS)
+                .filter(|e| e.to == rule.id)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn subject_path_patterns_are_rule_nodes_declared_by_the_subjects_section() {
+        let s = source_with(
+            &format!("{SHIPPED}subjects:\n  ursula:\n    permissions:\n      allow: [\"Read(~/docs/**)\", \"Write(~/docs/drafts/**)\"]\n      deny: [\"Read(~/docs/secret/**)\"]\n    actions:\n      allow: [\"fs.*\"]\n  gus:\n    models:\n      allow: [\"openai/gpt-5\"]\n"),
+            Some(BINDINGS),
+        );
+        let compiled = snap(&s);
+        let g = compiled.graph();
+        let section = g
+            .lookup(SECTION, "/etc/maknae/authz.yaml#subjects")
+            .unwrap();
+        assert_eq!(
+            g.out_edges(section.id, PART_OF)
+                .map(|e| g.node(e.to).unwrap().key.as_str())
+                .collect::<Vec<_>>(),
+            ["/etc/maknae/authz.yaml"]
+        );
+        let mut declared: Vec<&str> = g
+            .in_edges(section.id, DECLARED_BY)
+            .map(|e| g.node(e.from).unwrap().key.as_str())
+            .collect();
+        declared.sort_unstable();
+        assert_eq!(
+            declared,
+            [
+                "rule:subjects.ursula.permissions:allow:0",
+                "rule:subjects.ursula.permissions:allow:1",
+                "rule:subjects.ursula.permissions:deny:0",
+            ]
+        );
+        for (key, effect, source) in [
+            (
+                "rule:subjects.ursula.permissions:allow:0",
+                Effect::Allow,
+                "Read(~/docs/**)",
+            ),
+            (
+                "rule:subjects.ursula.permissions:allow:1",
+                Effect::Allow,
+                "Write(~/docs/drafts/**)",
+            ),
+            (
+                "rule:subjects.ursula.permissions:deny:0",
+                Effect::Deny,
+                "Read(~/docs/secret/**)",
+            ),
+        ] {
+            let rule = g.lookup(RULE, key).unwrap();
+            assert_eq!(str_attr(rule, ATTR_ENTRY), Some(source));
+            assert_eq!(str_attr(rule, ATTR_EFFECT), Some(effect_attrs(effect).1));
+            let out: Vec<_> = g.out_edges(rule.id, DECLARED_BY).map(|e| e.to).collect();
+            assert_eq!(out, [section.id], "{key}");
+            assert_eq!(g.in_edges(rule.id, PERMITS).count(), 0);
+            assert_eq!(g.in_edges(rule.id, DENIES).count(), 0);
+            let hit = compiled
+                .cite(&Cited::SubjectPath {
+                    subject: "ursula".into(),
+                    effect,
+                    source: source.into(),
+                })
+                .unwrap();
+            assert_eq!(
+                (hit.node, hit.key.as_str(), hit.section.as_str()),
+                (rule.id.0, key, "/etc/maknae/authz.yaml#subjects")
+            );
+        }
+        assert!(compiled
+            .cite(&Cited::SubjectPath {
+                subject: "gus".into(),
+                effect: Effect::Allow,
+                source: "Read(~/docs/**)".into(),
+            })
+            .is_none());
+        let none = snap(&shipped_with_bindings());
+        assert!(none
+            .graph()
+            .lookup(SECTION, "/etc/maknae/authz.yaml#subjects")
+            .is_none());
     }
 }

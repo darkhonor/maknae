@@ -24,6 +24,7 @@ pub(crate) const RESOURCE_PATH: &str = "path";
 /// `session.prompt` (#172): `provider:<name>` from the admitted provider choice.
 /// Set by the kernel, never the client; the arm refuses it absent.
 pub(crate) const RESOURCE_DESTINATION: &str = "destination";
+pub(crate) const RESOURCE_MODEL: &str = "model";
 
 /// One loaded policy snapshot: the parsed grammar + validated bindings.
 pub(crate) struct LoadedPolicy {
@@ -31,6 +32,31 @@ pub(crate) struct LoadedPolicy {
     pub(crate) roles: Roles,
     pub(crate) action_grants: ActionGrants,
     pub(crate) destinations: DestinationGrants,
+    pub(crate) subjects: SubjectGrants,
+}
+
+/// `subjects:` entries by resolved uid; a name that resolves to no account has none.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub(crate) struct SubjectGrants(pub(crate) std::collections::BTreeMap<u32, SubjectEntry>);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SubjectEntry {
+    pub(crate) name: String,
+    pub(crate) permissions: Option<maknae_config::SubjectPermissions>,
+    pub(crate) actions: Option<SubjectActionSet>,
+    pub(crate) models: Option<Vec<maknae_config::ModelRef>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub(crate) struct SubjectActionSet {
+    pub(crate) allow: std::collections::BTreeMap<&'static str, String>,
+    pub(crate) deny: std::collections::BTreeMap<&'static str, String>,
+}
+
+impl SubjectGrants {
+    pub(crate) fn get(&self, uid: u32) -> Option<&SubjectEntry> {
+        self.0.get(&uid)
+    }
 }
 
 /// The policy entry a verdict was decided by, in the terms the rule index keys on.
@@ -48,6 +74,11 @@ pub(crate) enum Cited {
     Destination {
         role: &'static str,
         destination: String,
+    },
+    SubjectPath {
+        subject: String,
+        effect: Effect,
+        source: String,
     },
 }
 
@@ -84,6 +115,37 @@ impl DestinationGrants {
 // One line: the drift gate's extractor reads only the matched line.
 #[rustfmt::skip]
 pub(crate) const GRANTABLE_ACTIONS: [&str; 8] = ["admin.status", "admin.config.show", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.contain", "admin.release", "session.prompt"];
+
+/// The terms a `subjects:` action list or a family wildcard can name.
+#[rustfmt::skip]
+pub(crate) const ACTION_VOCABULARY: [&str; 12] = ["admin.status", "admin.config.show", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.contain", "admin.release", "session.prompt", "fs.read", "fs.write", "fs.delete", "fs.mkdir"];
+
+/// An action entry as compiled against [`ACTION_VOCABULARY`]: `(term, entry as written)`.
+pub(crate) fn expand(
+    p: &maknae_config::ActionPattern,
+) -> Result<Vec<(&'static str, String)>, crate::AuthzBasicError> {
+    use crate::AuthzBasicError::{UngrantableAction, UnknownAction};
+    let source = p.source();
+    let (maknae_config::ActionPattern::Exact(name) | maknae_config::ActionPattern::Family(name)) =
+        p;
+    let class = match class_of(name) {
+        Some(Class::Kernel | Class::Liveness) => return Err(UngrantableAction(source)),
+        Some(c) => c,
+        None => return Err(UnknownAction(source)),
+    };
+    let terms: Vec<_> = ACTION_VOCABULARY
+        .into_iter()
+        .filter(|t| match p {
+            maknae_config::ActionPattern::Exact(e) => t == e,
+            maknae_config::ActionPattern::Family(_) => class_of(t) == Some(class),
+        })
+        .map(|t| (t, source.clone()))
+        .collect();
+    match p {
+        maknae_config::ActionPattern::Exact(_) if terms.is_empty() => Err(UnknownAction(source)),
+        _ => Ok(terms),
+    }
+}
 
 /// Byte-wise `&str` equality usable in a `const` context.
 ///
@@ -136,37 +198,21 @@ const _: () = {
     assert!(!str_eq(h, "admin.whoami"), "{}", WHY);
 };
 
-/// A validated action term: it appeared in [`GRANTABLE_ACTIONS`] at load time.
-/// A newtype rather than a bare `String` so the type system carries the
-/// validation -- an unvalidated term cannot be constructed here by accident.
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
-pub(crate) struct ActionTerm(String);
+/// One expanded grant: the term and the entry it was written as.
+pub(crate) type Grant = (&'static str, String);
 
-impl ActionTerm {
-    /// Only `validate_grants` calls this, and only after checking membership
-    /// in [`GRANTABLE_ACTIONS`]. The name states the precondition the type
-    /// exists to carry.
-    pub(crate) fn validated(term: String) -> Self {
-        ActionTerm(term)
-    }
-
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-/// Validated per-role action grants: role key → (allow terms, deny terms).
+/// Validated per-role action grants: role key → (allow, deny), each expanded.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub(crate) struct ActionGrants(
-    pub(crate) std::collections::BTreeMap<String, (Vec<ActionTerm>, Vec<ActionTerm>)>,
+    pub(crate) std::collections::BTreeMap<String, (Vec<Grant>, Vec<Grant>)>,
 );
 
 impl ActionGrants {
     /// Construct from already-validated parts. Private to the crate, and the
-    /// only constructor besides `Default`, so every `ActionTerm` inside has
-    /// been through `validate_grants`.
+    /// only constructor besides `Default`, so every term inside has been
+    /// through `validate_grants`.
     pub(crate) fn from_validated(
-        m: std::collections::BTreeMap<String, (Vec<ActionTerm>, Vec<ActionTerm>)>,
+        m: std::collections::BTreeMap<String, (Vec<Grant>, Vec<Grant>)>,
     ) -> Self {
         ActionGrants(m)
     }
@@ -184,14 +230,14 @@ impl ActionGrants {
         let Some((allow, deny)) = self.0.get(role_key) else {
             return maknae_config::Match3::NoMatch;
         };
-        if let Some(t) = deny.iter().find(|t| t.as_str() == action) {
+        if let Some((_, source)) = deny.iter().find(|(t, _)| *t == action) {
             return maknae_config::Match3::DenyMatch {
-                source: t.as_str().to_string(),
+                source: source.clone(),
             };
         }
-        if let Some(t) = allow.iter().find(|t| t.as_str() == action) {
+        if let Some((_, source)) = allow.iter().find(|(t, _)| *t == action) {
             return maknae_config::Match3::AllowMatch {
-                source: t.as_str().to_string(),
+                source: source.clone(),
             };
         }
         maknae_config::Match3::NoMatch
@@ -286,15 +332,14 @@ fn no_rule_note(role_key: &str, action: &str) -> String {
     format!("role {role_key}: no rule for {action}")
 }
 
-/// The `session.prompt` arm (#172): the role's own action grant AND the
-/// kernel-resolved destination in the role's allowlist. Deny-overrides inside
-/// the role; an absent grant is an absence (finalize refuses once). An absent
-/// destination attribute means no provider is registered: a Deny the trail
-/// must show, not a policy gap.
+/// The `session.prompt` arm (#172, #608): the role's grant, the kernel-resolved
+/// destination in the role's allowlist, and, when the subject lists `models`, the
+/// admitted model in that list. A missing destination is a Deny, not a policy gap.
 fn decide_prompt(
     lp: &LoadedPolicy,
     req: &SecRequest,
     role_key: &'static str,
+    subject: Option<&SubjectEntry>,
 ) -> (Verdict, Option<Cited>) {
     match lp
         .action_grants
@@ -334,22 +379,37 @@ fn decide_prompt(
             )
         }
     };
-    if lp.destinations.allows(role_key, destination) {
-        (
-            permit_with_audit(),
-            Some(Cited::Destination {
-                role: role_key,
-                destination: destination.to_string(),
-            }),
-        )
-    } else {
-        (
+    if !lp.destinations.allows(role_key, destination) {
+        return (
             Verdict::Deny {
                 reason: format!("destination not allowlisted for role {role_key}: {destination}"),
             },
             None,
-        )
+        );
     }
+    if let Some((name, listed)) = subject.and_then(|s| Some((&s.name, s.models.as_ref()?))) {
+        let model = match req.resource.0.get(RESOURCE_MODEL) {
+            Some(AttrValue::Str(m)) => m.as_str(),
+            _ => return (Verdict::Indeterminate, None),
+        };
+        if !listed.iter().any(|m| m.as_resource() == model) {
+            return (
+                Verdict::Deny {
+                    reason: format!(
+                        "subject {name}: model {model} is not in subjects.{name}.models allow"
+                    ),
+                },
+                None,
+            );
+        }
+    }
+    (
+        permit_with_audit(),
+        Some(Cited::Destination {
+            role: role_key,
+            destination: destination.to_string(),
+        }),
+    )
 }
 
 /// (loaded policy, principal, request) → verdict. Spec §4 steps 2–6.
@@ -435,6 +495,20 @@ pub(crate) fn decide_loaded_cited(
     // expression exactly as before.
     let class = class_of(&req.action.0);
     let (verdict, cited) = match role {
+        Role::Adversary => (
+            Verdict::Deny {
+                reason: "subject contained: role=adversary".into(),
+            },
+            None,
+        ),
+        Role::Admin | Role::User | Role::Guest
+            if action_limit(lp.subjects.get(uid), &req.action.0).is_some() =>
+        {
+            (
+                action_limit(lp.subjects.get(uid), &req.action.0).unwrap_or(Verdict::Indeterminate),
+                None,
+            )
+        }
         // #158, operator ruling 2026-09-07: admin governs Maknae management,
         // not filesystem privilege. Users and admins share the universal path
         // policy. Key the implemented terms exactly; adding a path to an unbuilt
@@ -446,7 +520,7 @@ pub(crate) fn decide_loaded_cited(
             ) =>
         {
             match attempt_scope(req) {
-                Ok(scope) => decide_fs(lp, req, role.key(), scope),
+                Ok(scope) => decide_fs(lp, req, role.key(), scope, lp.subjects.get(uid)),
                 Err(verdict) => (verdict, None),
             }
         }
@@ -457,14 +531,8 @@ pub(crate) fn decide_loaded_cited(
         // precede both or it is dead for that role; it sits after the fs arms
         // only for reading order (their guards key on other action strings).
         Role::Admin | Role::User if req.action.0 == "session.prompt" => {
-            decide_prompt(lp, req, role.key())
+            decide_prompt(lp, req, role.key(), lp.subjects.get(uid))
         }
-        Role::Adversary => (
-            Verdict::Deny {
-                reason: "subject contained: role=adversary".into(),
-            },
-            None,
-        ),
         Role::Guest | Role::User => match class {
             Some(Class::Liveness) => (permit_with_audit(), None),
             // Case-2 testimony: ROLE-REACH OUTRANKS BUILD-STATE (#181 D4).
@@ -570,6 +638,31 @@ pub(crate) fn decide_loaded_cited(
     }
 }
 
+fn action_limit(entry: Option<&SubjectEntry>, action: &str) -> Option<Verdict> {
+    let entry = entry?;
+    let set = entry.actions.as_ref()?;
+    match class_of(action) {
+        Some(Class::Liveness | Class::Kernel) | None => return None,
+        Some(Class::Admin) if action == "admin.whoami" => return None,
+        Some(Class::Admin | Class::Session | Class::Fs | Class::Terminal | Class::Mcp) => {}
+    }
+    let name = &entry.name;
+    if let Some(source) = set.deny.get(action) {
+        return Some(Verdict::Deny {
+            reason: format!(
+                "subject {name}: {action} denied by subjects.{name}.actions entry {source}"
+            ),
+        });
+    }
+    if set.allow.contains_key(action) {
+        None
+    } else {
+        Some(Verdict::Deny {
+            reason: format!("subject {name}: {action} is not in subjects.{name}.actions allow"),
+        })
+    }
+}
+
 fn kernel_decided(req: &SecRequest) -> Verdict {
     let kernel = matches!(
         req.subject.0.get(maknae_security::SUBJECT_INITIATOR),
@@ -635,6 +728,7 @@ fn decide_fs(
     req: &SecRequest,
     role_key: &str,
     scope: FsScope,
+    entry: Option<&SubjectEntry>,
 ) -> (Verdict, Option<Cited>) {
     let path = match req.resource.0.get(RESOURCE_PATH) {
         Some(AttrValue::Str(s)) => s.as_str(),
@@ -657,20 +751,38 @@ fn decide_fs(
         Some(AttrValue::Str(h)) => Some(std::path::Path::new(h.as_str())),
         Some(_) => return (Verdict::Indeterminate, None),
     };
+    let subject = entry.and_then(|e| e.permissions.as_ref().map(|p| (e.name.as_str(), p)));
+    let set = subject.map(|(_, p)| p);
     let matched = match scope {
-        FsScope::Read => lp
-            .policy
-            .evaluate3(&maknae_config::Request::Read(path), home),
-        FsScope::Write => lp
-            .policy
-            .evaluate3(&maknae_config::Request::Write(path), home),
-        FsScope::WriteSubtree => lp.policy.evaluate_write_subtree(path, home),
+        FsScope::Read => {
+            lp.policy
+                .evaluate3_floored(set, &maknae_config::Request::Read(path), home)
+        }
+        FsScope::Write => {
+            lp.policy
+                .evaluate3_floored(set, &maknae_config::Request::Write(path), home)
+        }
+        FsScope::WriteSubtree => lp.policy.evaluate_write_subtree_floored(set, path, home),
     };
     let Ok(matched) = matched else {
         return (Verdict::Indeterminate, None);
     };
-    match matched {
-        maknae_config::Match3::DenyMatch { source } => (
+    match (matched, subject) {
+        (maknae_config::Match3::DenyMatch { source }, Some((name, _)))
+            if !lp.policy.deny_sources().contains(&source) =>
+        {
+            (
+                Verdict::Deny {
+                    reason: format!("denied by subjects.{name}.permissions entry {source}"),
+                },
+                Some(Cited::SubjectPath {
+                    subject: name.to_string(),
+                    effect: Effect::Deny,
+                    source,
+                }),
+            )
+        }
+        (maknae_config::Match3::DenyMatch { source }, _) => (
             Verdict::Deny {
                 // Audit-only provenance (spec §4.4): this reason reaches the
                 // audit record; #77's wiring must never copy it onto the wire.
@@ -681,7 +793,15 @@ fn decide_fs(
                 source,
             }),
         ),
-        maknae_config::Match3::AllowMatch { source } => (
+        (maknae_config::Match3::AllowMatch { source }, Some((name, _))) => (
+            permit_with_audit(),
+            Some(Cited::SubjectPath {
+                subject: name.to_string(),
+                effect: Effect::Allow,
+                source,
+            }),
+        ),
+        (maknae_config::Match3::AllowMatch { source }, None) => (
             permit_with_audit(),
             Some(Cited::Path {
                 effect: Effect::Allow,
@@ -691,7 +811,7 @@ fn decide_fs(
         // Case-5 testimony (#181): role and term ONLY -- never the path (the
         // D9 hazard). "No capability entry" is accurate where "no rule" would
         // be false: a rule for fs.read exists; no ENTRY matched this request.
-        maknae_config::Match3::NoMatch => (
+        (maknae_config::Match3::NoMatch, _) => (
             Verdict::NotApplicable {
                 note: Some(format!(
                     "role {role_key}: no capability entry for {}",
@@ -746,6 +866,7 @@ mod tests {
             // seeing an empty grant map, or the pin stops pinning.
             action_grants: ActionGrants::default(),
             destinations: DestinationGrants::default(),
+            subjects: SubjectGrants::default(),
         }
     }
 
@@ -1493,6 +1614,90 @@ mod tests {
         assert!(str_eq(GRANTABLE_ACTIONS[0], "admin.status"));
     }
 
+    fn expanded(p: &str) -> Result<Vec<(&'static str, String)>, crate::AuthzBasicError> {
+        expand(&maknae_config::ActionPattern::parse(p).unwrap())
+    }
+
+    #[test]
+    fn a_family_wildcard_expands_to_its_members() {
+        let terms = |p: &str| -> Vec<&'static str> {
+            let got = expanded(p).unwrap();
+            assert!(got.iter().all(|(_, s)| s == p), "{p}: {got:?}");
+            got.into_iter().map(|(t, _)| t).collect()
+        };
+        assert_eq!(
+            terms("fs.*"),
+            ["fs.read", "fs.write", "fs.delete", "fs.mkdir"]
+        );
+        assert_eq!(
+            terms("admin.*"),
+            [
+                "admin.status",
+                "admin.config.show",
+                "admin.subject.list",
+                "admin.baseline.show",
+                "admin.baseline.accept",
+                "admin.contain",
+                "admin.release"
+            ]
+        );
+        assert_eq!(terms("session.*"), ["session.prompt"]);
+        assert!(terms("terminal.*").is_empty());
+        assert!(terms("mcp.*").is_empty());
+        assert_eq!(terms("fs.write"), ["fs.write"]);
+        assert_eq!(terms("admin.status"), ["admin.status"]);
+    }
+
+    #[test]
+    fn kernel_and_liveness_are_never_patterns() {
+        for p in ["kernel.*", "liveness.*", "kernel.contain", "liveness.ping"] {
+            assert_eq!(
+                expanded(p),
+                Err(crate::AuthzBasicError::UngrantableAction(p.into())),
+                "{p}"
+            );
+        }
+        for p in ["nope.*", "fs.exec", "admin.whoami", "admin.policy.reload"] {
+            assert_eq!(
+                expanded(p),
+                Err(crate::AuthzBasicError::UnknownAction(p.into())),
+                "{p}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_vocabulary_is_the_grantable_terms_and_the_four_fs_terms() {
+        assert_eq!(ACTION_VOCABULARY[..8], GRANTABLE_ACTIONS);
+        assert_eq!(
+            ACTION_VOCABULARY[8..],
+            ["fs.read", "fs.write", "fs.delete", "fs.mkdir"]
+        );
+    }
+
+    #[test]
+    fn the_fs_terms_of_the_vocabulary_are_the_fs_arm_guard() {
+        let lp = lp_with(Some(&[("admin", &["alex"])]), &[("alex", 1001)]);
+        let unbuilt = |t: &str| Verdict::NotApplicable {
+            note: Some(format!("term enumerated, not implemented: {t}")),
+        };
+        let fs_terms: Vec<&str> = crate::ACTION_TERMS
+            .iter()
+            .copied()
+            .filter(|t| class_of(t) == Some(Class::Fs))
+            .collect();
+        assert_eq!(fs_terms.len(), 10);
+        for t in fs_terms {
+            let mut req = request(Some(1001), t, Some("/home/operator/x"));
+            req.context.0.insert(
+                maknae_security::CONTEXT_FS_OPERATION,
+                AttrValue::Str("mkdir".into()),
+            );
+            let keyed = decide_loaded(&lp, &principal(), &req) != unbuilt(t);
+            assert_eq!(keyed, ACTION_VOCABULARY.contains(&t), "{t}");
+        }
+    }
+
     /// The arm's guard is a SECOND lock, and this is what proves it locks.
     ///
     /// `validate_grants` already refuses a term outside `GRANTABLE_ACTIONS` at
@@ -1506,7 +1711,7 @@ mod tests {
         let forged = ActionGrants::from_validated(std::collections::BTreeMap::from([(
             "admin".to_string(),
             (
-                vec![ActionTerm::validated("admin.policy.reload".into())],
+                vec![("admin.policy.reload", "admin.policy.reload".into())],
                 Vec::new(),
             ),
         )]));
@@ -1788,6 +1993,7 @@ mod tests {
             roles: Roles::File(resolve(&Some(bindings), &lookup).unwrap()),
             action_grants: crate::validate_grants(&policy.action_grants).unwrap(),
             destinations,
+            subjects: SubjectGrants::default(),
             policy,
         }
     }
@@ -1968,8 +2174,8 @@ mod tests {
         let grants = ActionGrants::from_validated(std::collections::BTreeMap::from([(
             "admin".to_string(),
             (
-                vec![ActionTerm::validated("admin.status".into())],
-                vec![ActionTerm::validated("admin.config.show".into())],
+                vec![("admin.status", "admin.status".into())],
+                vec![("admin.config.show", "admin.config.show".into())],
             ),
         )]));
         assert_eq!(
@@ -2299,6 +2505,63 @@ mod tests {
                 );
             }
         }
+
+        let mut lp = lp_with(
+            Some(&[("user", &["ursula", SENTINEL][..])]),
+            &[("ursula", 1002), (SENTINEL, SENTINEL_UID)],
+        );
+        let entry = maknae_config::parse_authz(&format!(
+            "schema_version: 1\n{}",
+            sentinel_entry(
+                "    permissions:\n      allow: [\"Read(~/notes/**)\"]\n    actions:\n      allow: [\"fs.read\"]\n"
+            )
+        ))
+        .unwrap();
+        let lookups: crate::Lookups = [(SENTINEL.to_string(), Some(SENTINEL_UID))].into();
+        lp.subjects = crate::validate_subjects(&entry, &lookups).unwrap();
+        let limited = |a: &str| Verdict::Deny {
+            reason: format!("subject {SENTINEL}: {a} is not in subjects.{SENTINEL}.actions allow"),
+        };
+        let subject_row: &[(&str, Option<&str>, Verdict)] = &[
+            ("liveness.ping", None, permit()),
+            (
+                "admin.whoami",
+                None,
+                na("role user: no rule for admin.whoami"),
+            ),
+            ("admin.status", None, limited("admin.status")),
+            ("admin.config.show", None, limited("admin.config.show")),
+            ("admin.subject.list", None, limited("admin.subject.list")),
+            ("admin.baseline.show", None, limited("admin.baseline.show")),
+            (
+                "admin.baseline.accept",
+                None,
+                limited("admin.baseline.accept"),
+            ),
+            (
+                "fs.read",
+                Some("/home/operator/x"),
+                na("role user: no capability entry for fs.read"),
+            ),
+            ("fs.read", Some("/home/operator/.ssh/k"), policy_deny()),
+            (
+                "unknown.thing",
+                None,
+                na("role user: no rule for unknown.thing"),
+            ),
+        ];
+        assert_eq!(subject_row.len(), matrix.len());
+        for (action, path, expected) in subject_row {
+            assert_eq!(
+                &decide_loaded(
+                    &lp,
+                    &principal(),
+                    &request(Some(i64::from(SENTINEL_UID)), action, *path)
+                ),
+                expected,
+                "subject action={action} path={path:?}"
+            );
+        }
     }
 
     /// Each new class RESOLVES (so this cannot pass merely because `class_of`
@@ -2482,5 +2745,509 @@ mod tests {
                 assert!(!matches!(d.verdict, Verdict::NotApplicable { .. }));
             }
         }
+    }
+
+    const SENTINEL: &str = "subject-608-sentinel";
+    const SENTINEL_UID: u32 = 1608;
+    const SUBJECT_SITE: &str = "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\", \"Write(~/**)\"]\n  deny: [\"Read(~/.ssh/**)\"]\nroles:\n  admin:\n    allow: [\"admin.status\", \"session.prompt\"]\n  user:\n    allow: [\"session.prompt\"]\ndestinations:\n  admin:\n    allow: [\"provider:openai\"]\n  user:\n    allow: [\"provider:openai\"]\n";
+
+    fn subject_lookups() -> crate::Lookups {
+        [("operator", OPERATOR_UID), (SENTINEL, SENTINEL_UID)]
+            .into_iter()
+            .map(|(n, u)| (n.to_string(), Some(u)))
+            .collect()
+    }
+
+    fn lp_subject(role: &str, subjects_block: &str) -> LoadedPolicy {
+        let policy =
+            maknae_config::parse_authz(&format!("{SUBJECT_SITE}{subjects_block}")).unwrap();
+        let mut bindings: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        bindings.insert("admin".into(), vec!["operator".into()]);
+        bindings
+            .entry(role.into())
+            .or_default()
+            .push(SENTINEL.into());
+        let lookups = subject_lookups();
+        let uid_map: UidMap = crate::found(&lookups);
+        LoadedPolicy {
+            roles: Roles::File(resolve(&Some(bindings), &uid_map).unwrap()),
+            action_grants: crate::validate_grants(&policy.action_grants).unwrap(),
+            destinations: crate::validate_destinations(&policy.destinations).unwrap(),
+            subjects: crate::validate_subjects(&policy, &lookups).unwrap(),
+            policy,
+        }
+    }
+
+    fn sentinel_entry(body: &str) -> String {
+        format!("subjects:\n  {SENTINEL}:\n{body}")
+    }
+
+    fn fs_op(uid: u32, action: &str, rel: &str) -> SecRequest {
+        let mut r = request(
+            Some(i64::from(uid)),
+            action,
+            Some(&format!("{REQUESTER_HOME}/{rel}")),
+        );
+        let op = match action {
+            "fs.read" => "read",
+            "fs.write" => "write-existing",
+            "fs.delete" => "delete-entry",
+            _ => "mkdir",
+        };
+        r.context.0.insert(
+            maknae_security::CONTEXT_FS_OPERATION,
+            AttrValue::Str(op.into()),
+        );
+        r
+    }
+
+    fn any_action(uid: u32, action: &str) -> SecRequest {
+        match action {
+            "session.prompt" => prompt_req(uid, Some("provider:openai")),
+            a if a.starts_with("fs.") => fs_op(uid, a, "x"),
+            a => request(Some(i64::from(uid)), a, None),
+        }
+    }
+
+    fn assert_limited(d: &Decided, action: &str) {
+        assert!(
+            matches!(&d.verdict, Verdict::Deny { reason } if reason.contains(SENTINEL) && reason.contains(action) && reason.contains("subjects")),
+            "{action}: {d:?}"
+        );
+        assert_eq!(d.cited, None, "{action}");
+    }
+
+    fn site(effect: Effect, source: &str) -> Option<Cited> {
+        Some(Cited::Path {
+            effect,
+            source: source.into(),
+        })
+    }
+
+    fn by_subject(effect: Effect, source: &str) -> Option<Cited> {
+        Some(Cited::SubjectPath {
+            subject: SENTINEL.into(),
+            effect,
+            source: source.into(),
+        })
+    }
+
+    #[test]
+    fn a_subject_allow_replaces_the_site_allow() {
+        let lp = lp_subject(
+            "user",
+            &sentinel_entry("    permissions:\n      allow: [\"Read(~/notes/**)\"]\n"),
+        );
+        let notes = decide_loaded_cited(
+            &lp,
+            &principal(),
+            &fs_op(SENTINEL_UID, "fs.read", "notes/a"),
+        );
+        assert_eq!(
+            (notes.verdict, notes.cited),
+            (
+                permit_with_audit(),
+                by_subject(Effect::Allow, "Read(~/notes/**)")
+            )
+        );
+        let other = decide_loaded_cited(&lp, &principal(), &fs_op(SENTINEL_UID, "fs.read", "b"));
+        assert!(
+            matches!(
+                maknae_security::finalize(other.verdict),
+                maknae_security::Decision::Deny { .. }
+            ),
+            "the site allow Read(~/**) must not reach a subject with its own set"
+        );
+        assert_eq!(other.cited, None);
+    }
+
+    #[test]
+    fn the_site_deny_floor_holds_under_a_subject_set() {
+        let lp = lp_subject(
+            "user",
+            &sentinel_entry(
+                "    permissions:\n      allow: [\"Read(~/**)\"]\n      deny: [\"Read(~/private/**)\"]\n",
+            ),
+        );
+        let ask = |rel: &str| {
+            let d = decide_loaded_cited(&lp, &principal(), &fs_op(SENTINEL_UID, "fs.read", rel));
+            (d.verdict, d.cited)
+        };
+        assert_eq!(
+            ask(".ssh/id_ed25519"),
+            (
+                Verdict::Deny {
+                    reason: "denied by policy entry Read(~/.ssh/**)".into()
+                },
+                site(Effect::Deny, "Read(~/.ssh/**)")
+            )
+        );
+        assert_eq!(
+            ask("private/k"),
+            (
+                Verdict::Deny {
+                    reason: format!(
+                        "denied by subjects.{SENTINEL}.permissions entry Read(~/private/**)"
+                    )
+                },
+                by_subject(Effect::Deny, "Read(~/private/**)")
+            )
+        );
+        assert_eq!(
+            ask("notes"),
+            (permit_with_audit(), by_subject(Effect::Allow, "Read(~/**)"))
+        );
+    }
+
+    #[test]
+    fn a_delete_tree_is_decided_by_the_subject_set() {
+        let delete_tree = |rel: &str| {
+            let mut r = fs_op(SENTINEL_UID, "fs.delete", rel);
+            r.context.0.insert(
+                maknae_security::CONTEXT_FS_OPERATION,
+                AttrValue::Str("delete-tree".into()),
+            );
+            r
+        };
+        let narrow = lp_subject(
+            "user",
+            &sentinel_entry("    permissions:\n      allow: [\"Read(~/notes/**)\"]\n"),
+        );
+        let refused = decide_loaded_cited(&narrow, &principal(), &delete_tree("x"));
+        assert!(
+            matches!(
+                maknae_security::finalize(refused.verdict.clone()),
+                maknae_security::Decision::Deny { .. }
+            ),
+            "the site Write(~/**) must not reach a subject with its own set: {refused:?}"
+        );
+        assert_eq!(refused.cited, None);
+        let covering = lp_subject(
+            "user",
+            &sentinel_entry("    permissions:\n      allow: [\"Write(~/scratch/**)\"]\n"),
+        );
+        let permitted = decide_loaded_cited(&covering, &principal(), &delete_tree("scratch/x"));
+        assert_eq!(
+            (permitted.verdict, permitted.cited),
+            (
+                permit_with_audit(),
+                by_subject(Effect::Allow, "Write(~/scratch/**)")
+            )
+        );
+    }
+
+    #[test]
+    fn an_empty_subject_permission_set_grants_no_file_access() {
+        let lp = lp_subject("admin", &sentinel_entry("    permissions: {}\n"));
+        for action in ["fs.read", "fs.write", "fs.delete", "fs.mkdir"] {
+            let d = decide_loaded_cited(&lp, &principal(), &fs_op(SENTINEL_UID, action, "x"));
+            assert_eq!(
+                (d.verdict, d.cited),
+                (
+                    Verdict::NotApplicable {
+                        note: Some(format!("role admin: no capability entry for {action}"))
+                    },
+                    None
+                ),
+                "{action}"
+            );
+        }
+        let ssh = decide_loaded_cited(&lp, &principal(), &fs_op(SENTINEL_UID, "fs.read", ".ssh/k"));
+        assert_eq!(ssh.cited, site(Effect::Deny, "Read(~/.ssh/**)"));
+    }
+
+    #[test]
+    fn a_subject_without_an_entry_is_decided_as_today() {
+        let with = lp_subject(
+            "user",
+            "subjects:\n  operator:\n    permissions:\n      allow: []\n    actions:\n      allow: []\n",
+        );
+        let without = lp_subject("user", "");
+        assert_eq!(without.subjects, SubjectGrants::default());
+        assert!(with.subjects.get(OPERATOR_UID).is_some());
+        for action in [
+            "fs.read",
+            "fs.write",
+            "fs.delete",
+            "fs.mkdir",
+            "session.prompt",
+            "admin.status",
+            "liveness.ping",
+        ] {
+            let req = any_action(SENTINEL_UID, action);
+            assert_eq!(
+                decide_loaded_cited(&with, &principal(), &req),
+                decide_loaded_cited(&without, &principal(), &req),
+                "{action}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_entry_is_keyed_on_the_requester_not_the_principal() {
+        let lp = lp_subject(
+            "admin",
+            &sentinel_entry(
+                "    permissions:\n      allow: [\"Read(~/notes/**)\"]\n    actions:\n      allow: [\"fs.read\"]\n",
+            ),
+        );
+        let sentinel_read =
+            decide_loaded_cited(&lp, &principal(), &fs_op(SENTINEL_UID, "fs.read", "b"));
+        assert!(matches!(
+            sentinel_read.verdict,
+            Verdict::NotApplicable { .. }
+        ));
+        assert_limited(
+            &decide_loaded_cited(&lp, &principal(), &any_action(SENTINEL_UID, "admin.status")),
+            "admin.status",
+        );
+        let principal_read =
+            decide_loaded_cited(&lp, &principal(), &fs_op(OPERATOR_UID, "fs.read", "b"));
+        assert_eq!(
+            (principal_read.verdict, principal_read.cited),
+            (permit_with_audit(), site(Effect::Allow, "Read(~/**)"))
+        );
+        assert!(matches!(
+            decide_loaded(&lp, &principal(), &any_action(OPERATOR_UID, "admin.status")),
+            Verdict::Permit { .. }
+        ));
+    }
+
+    #[test]
+    fn a_subject_action_limit_refuses_unlisted_actions() {
+        let lp = lp_subject(
+            "user",
+            &sentinel_entry("    actions:\n      allow: [\"fs.read\"]\n"),
+        );
+        for action in ["fs.write", "fs.delete", "fs.mkdir", "session.prompt"] {
+            assert_limited(
+                &decide_loaded_cited(&lp, &principal(), &any_action(SENTINEL_UID, action)),
+                action,
+            );
+        }
+        let read = decide_loaded_cited(&lp, &principal(), &fs_op(SENTINEL_UID, "fs.read", "x"));
+        assert_eq!(
+            (read.verdict, read.cited),
+            (permit_with_audit(), site(Effect::Allow, "Read(~/**)"))
+        );
+        let ssh = decide_loaded_cited(&lp, &principal(), &fs_op(SENTINEL_UID, "fs.read", ".ssh/k"));
+        assert_eq!(ssh.cited, site(Effect::Deny, "Read(~/.ssh/**)"));
+    }
+
+    fn model_req(uid: u32, model: Option<AttrValue>) -> SecRequest {
+        let mut r = prompt_req(uid, Some("provider:openai"));
+        if let Some(m) = model {
+            r.resource.0.insert("model", m);
+        }
+        r
+    }
+
+    #[test]
+    fn a_subject_model_limit_refuses_an_unlisted_model() {
+        let lp = lp_subject(
+            "user",
+            &sentinel_entry("    models:\n      allow: [\"openai/a\"]\n"),
+        );
+        let b = decide_loaded_cited(
+            &lp,
+            &principal(),
+            &model_req(SENTINEL_UID, Some(AttrValue::Str("openai/b".into()))),
+        );
+        assert!(
+            matches!(&b.verdict, Verdict::Deny { reason } if reason.contains(SENTINEL) && reason.contains("openai/b") && reason.contains("subjects")),
+            "{b:?}"
+        );
+        assert_eq!(b.cited, None);
+        let a = decide_loaded_cited(
+            &lp,
+            &principal(),
+            &model_req(SENTINEL_UID, Some(AttrValue::Str("openai/a".into()))),
+        );
+        assert!(matches!(a.verdict, Verdict::Permit { .. }), "{a:?}");
+        for bad in [None, Some(AttrValue::Int(1))] {
+            let d = decide_loaded_cited(&lp, &principal(), &model_req(SENTINEL_UID, bad));
+            assert_eq!(d.verdict, Verdict::Indeterminate);
+        }
+    }
+
+    #[test]
+    fn an_extra_model_entry_does_not_block_a_listed_model_and_an_entry_free_subject_is_not_asked_for_a_model(
+    ) {
+        let lp = lp_subject(
+            "user",
+            &sentinel_entry("    models:\n      allow: [\"openai/gone\", \"openai/a\"]\n"),
+        );
+        let a = decide_loaded_cited(
+            &lp,
+            &principal(),
+            &model_req(SENTINEL_UID, Some(AttrValue::Str("openai/a".into()))),
+        );
+        assert!(matches!(a.verdict, Verdict::Permit { .. }), "{a:?}");
+        let lp = lp_subject(
+            "user",
+            &sentinel_entry("    actions:\n      allow: [\"session.prompt\"]\n"),
+        );
+        let d = decide_loaded_cited(&lp, &principal(), &model_req(SENTINEL_UID, None));
+        assert!(matches!(d.verdict, Verdict::Permit { .. }), "{d:?}");
+    }
+
+    #[test]
+    fn a_family_wildcard_admits_the_whole_family() {
+        let lp = lp_subject(
+            "user",
+            &sentinel_entry("    actions:\n      allow: [\"fs.*\"]\n"),
+        );
+        for action in ["fs.read", "fs.write", "fs.delete", "fs.mkdir"] {
+            assert_eq!(
+                decide_loaded(&lp, &principal(), &fs_op(SENTINEL_UID, action, "x")),
+                permit_with_audit(),
+                "{action}"
+            );
+        }
+        assert_limited(
+            &decide_loaded_cited(
+                &lp,
+                &principal(),
+                &any_action(SENTINEL_UID, "session.prompt"),
+            ),
+            "session.prompt",
+        );
+    }
+
+    #[test]
+    fn a_specific_deny_beats_a_family_allow() {
+        let lp = lp_subject(
+            "user",
+            &sentinel_entry("    actions:\n      allow: [\"fs.*\"]\n      deny: [\"fs.delete\"]\n"),
+        );
+        assert_limited(
+            &decide_loaded_cited(&lp, &principal(), &fs_op(SENTINEL_UID, "fs.delete", "x")),
+            "fs.delete",
+        );
+        for action in ["fs.read", "fs.write", "fs.mkdir"] {
+            assert_eq!(
+                decide_loaded(&lp, &principal(), &fs_op(SENTINEL_UID, action, "x")),
+                permit_with_audit(),
+                "{action}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_family_deny_beats_a_specific_allow() {
+        let lp = lp_subject(
+            "user",
+            &sentinel_entry("    actions:\n      allow: [\"fs.read\"]\n      deny: [\"fs.*\"]\n"),
+        );
+        let d = decide_loaded_cited(&lp, &principal(), &fs_op(SENTINEL_UID, "fs.read", "x"));
+        assert_limited(&d, "fs.read");
+        assert!(
+            matches!(&d.verdict, Verdict::Deny { reason } if reason.contains("fs.*")),
+            "the deny names the entry as written: {d:?}"
+        );
+    }
+
+    #[test]
+    fn an_empty_action_list_refuses_every_limited_action_but_not_liveness() {
+        for role in ["admin", "user"] {
+            let lp = lp_subject(role, &sentinel_entry("    actions:\n      allow: []\n"));
+            for action in [
+                "fs.read",
+                "fs.write",
+                "session.prompt",
+                "admin.status",
+                "terminal.create",
+                "mcp.tool.call",
+            ] {
+                assert_limited(
+                    &decide_loaded_cited(&lp, &principal(), &any_action(SENTINEL_UID, action)),
+                    action,
+                );
+            }
+            assert_eq!(
+                decide_loaded(
+                    &lp,
+                    &principal(),
+                    &any_action(SENTINEL_UID, "liveness.ping")
+                ),
+                permit_with_audit(),
+                "{role}"
+            );
+            let unknown = decide_loaded(
+                &lp,
+                &principal(),
+                &any_action(SENTINEL_UID, "unknown.thing"),
+            );
+            assert!(
+                matches!(unknown, Verdict::NotApplicable { .. }),
+                "{role}: {unknown:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_subject_entry_cannot_widen_a_structural_role() {
+        let wide = "    permissions:\n      allow: [\"Read(~/**)\", \"Write(~/**)\"]\n    actions:\n      allow: [\"fs.*\", \"session.*\", \"admin.*\"]\n";
+        let guest = lp_subject("guest", &sentinel_entry(wide));
+        let bare_guest = lp_subject("guest", "");
+        for action in ["fs.read", "fs.write", "session.prompt", "admin.status"] {
+            let got = decide_loaded_cited(&guest, &principal(), &any_action(SENTINEL_UID, action));
+            assert_eq!(
+                got,
+                decide_loaded_cited(&bare_guest, &principal(), &any_action(SENTINEL_UID, action)),
+                "{action}"
+            );
+            assert!(
+                matches!(got.verdict, Verdict::NotApplicable { .. }),
+                "{action}"
+            );
+        }
+        let adversary = lp_subject(
+            "adversary",
+            &sentinel_entry("    actions:\n      allow: [\"fs.read\"]\n"),
+        );
+        for action in ["fs.write", "fs.read", "session.prompt", "liveness.ping"] {
+            assert_eq!(
+                decide_loaded_cited(&adversary, &principal(), &any_action(SENTINEL_UID, action)),
+                Decided {
+                    verdict: Verdict::Deny {
+                        reason: "subject contained: role=adversary".into()
+                    },
+                    role: Some("adversary"),
+                    cited: None,
+                },
+                "{action}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_actions_limit_never_revokes_whoami() {
+        let today = decide_loaded_cited(
+            &lp_subject("admin", ""),
+            &principal(),
+            &any_action(SENTINEL_UID, "admin.whoami"),
+        );
+        assert_eq!(today.verdict, permit_with_audit());
+        for list in ["[\"admin.*\"]", "[]"] {
+            let lp = lp_subject(
+                "admin",
+                &sentinel_entry(&format!("    actions:\n      allow: {list}\n")),
+            );
+            assert_eq!(
+                decide_loaded_cited(&lp, &principal(), &any_action(SENTINEL_UID, "admin.whoami")),
+                today,
+                "{list}"
+            );
+        }
+        let named = maknae_config::parse_authz(&format!(
+            "{SUBJECT_SITE}{}",
+            sentinel_entry("    actions:\n      allow: [\"admin.whoami\"]\n")
+        ))
+        .unwrap();
+        assert_eq!(
+            crate::validate_subjects(&named, &subject_lookups()),
+            Err(crate::AuthzBasicError::UnknownAction("admin.whoami".into()))
+        );
     }
 }
