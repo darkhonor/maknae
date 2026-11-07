@@ -149,8 +149,14 @@ impl ModelRef {
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct SubjectPolicy {
     pub permissions: Option<SubjectPermissions>,
-    pub actions: Option<Vec<ActionPattern>>,
+    pub actions: Option<SubjectActions>,
     pub models: Option<Vec<ModelRef>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct SubjectActions {
+    pub allow: Vec<ActionPattern>,
+    pub deny: Vec<ActionPattern>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -903,15 +909,21 @@ fn parse_subject(name: &str, body: &Value) -> Result<SubjectPolicy, AuthzError> 
             })
         })
         .transpose()?;
-    let actions = subject_section(name, body, "actions", &["allow"])?
+    let actions = subject_section(name, body, "actions", &["allow", "deny"])?
         .map(|am| {
-            get(am, "allow")
-                .map(|v| subject_list(v, "actions"))
-                .transpose()?
-                .unwrap_or_default()
-                .iter()
-                .map(|s| ActionPattern::parse(s))
-                .collect::<Result<Vec<_>, _>>()
+            let list = |key: &str| {
+                get(am, key)
+                    .map(|v| subject_list(v, "actions"))
+                    .transpose()?
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|s| ActionPattern::parse(s))
+                    .collect::<Result<Vec<_>, _>>()
+            };
+            Ok::<_, AuthzError>(SubjectActions {
+                allow: list("allow")?,
+                deny: list("deny")?,
+            })
         })
         .transpose()?;
     let models = subject_section(name, body, "models", &["allow"])?
@@ -2949,10 +2961,13 @@ mod tests {
         assert_eq!(perms.deny_sources(), ["Write(~/x/**)".to_string()]);
         assert_eq!(
             a.actions,
-            Some(vec![
-                ActionPattern::Family("fs".into()),
-                ActionPattern::Exact("session.prompt".into())
-            ])
+            Some(SubjectActions {
+                allow: vec![
+                    ActionPattern::Family("fs".into()),
+                    ActionPattern::Exact("session.prompt".into())
+                ],
+                deny: vec![],
+            })
         );
         assert_eq!(
             a.models,
@@ -2972,6 +2987,36 @@ mod tests {
             "openrouter/meta/llama-3"
         );
         assert_eq!(p.subjects["bob"], SubjectPolicy::default());
+    }
+
+    #[test]
+    fn subject_actions_parse_allow_and_deny() {
+        let p = subj(
+            "subjects:\n  alice:\n    actions:\n      allow: [\"fs.*\"]\n      deny: [\"fs.delete\", \"admin.*\"]\n  bob:\n    actions:\n      deny: [\"fs.write\"]\n  carol:\n    actions: {}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            p.subjects["alice"].actions,
+            Some(SubjectActions {
+                allow: vec![ActionPattern::Family("fs".into())],
+                deny: vec![
+                    ActionPattern::Exact("fs.delete".into()),
+                    ActionPattern::Family("admin".into())
+                ],
+            })
+        );
+        assert_eq!(
+            p.subjects["bob"].actions,
+            Some(SubjectActions {
+                allow: vec![],
+                deny: vec![ActionPattern::Exact("fs.write".into())],
+            })
+        );
+        assert_eq!(p.subjects["carol"].actions, Some(SubjectActions::default()));
+        assert!(matches!(
+            subj("subjects:\n  alice:\n    actions:\n      deny: [\"fs.*.x\"]\n"),
+            Err(AuthzError::BadPattern(_))
+        ));
     }
 
     #[test]
@@ -3011,9 +3056,9 @@ mod tests {
                 "extra",
             ),
             (
-                "subjects:\n  alice:\n    actions:\n      deny: []\n",
+                "subjects:\n  alice:\n    actions:\n      other: []\n",
                 "authz.subjects.alice.actions",
-                "deny",
+                "other",
             ),
             (
                 "subjects:\n  alice:\n    permissions:\n      other: []\n",

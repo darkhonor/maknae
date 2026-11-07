@@ -43,8 +43,14 @@ pub(crate) struct SubjectGrants(pub(crate) std::collections::BTreeMap<u32, Subje
 pub(crate) struct SubjectEntry {
     pub(crate) name: String,
     pub(crate) permissions: Option<maknae_config::SubjectPermissions>,
-    pub(crate) actions: Option<std::collections::BTreeMap<&'static str, String>>,
+    pub(crate) actions: Option<SubjectActionSet>,
     pub(crate) models: Option<Vec<maknae_config::ModelRef>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub(crate) struct SubjectActionSet {
+    pub(crate) allow: std::collections::BTreeMap<&'static str, String>,
+    pub(crate) deny: std::collections::BTreeMap<&'static str, String>,
 }
 
 impl SubjectGrants {

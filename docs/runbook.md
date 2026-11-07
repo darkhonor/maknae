@@ -512,13 +512,21 @@ destinations:                # #172: per-role egress allowlist for session.promp
   segment. Anything else (`*`, `fs*`, `fs.*.x`, `FS.*`) refuses at load. Role `allow` and
   `deny` lists take the same syntax.
 - **`subjects:` (#608).** Maps an account name to up to three optional keys:
-  `permissions: {allow, deny}` (the `permissions:` path grammar), `actions: {allow}`
+  `permissions: {allow, deny}` (the `permissions:` path grammar), `actions: {allow, deny}`
   (action patterns) and `models: {allow}` (`<provider>/<model>`, split on the first `/`).
   Unknown keys at any level refuse. When a subject has `permissions`, its `allow`
   replaces the site `allow` for that subject; the site `deny` always applies as a floor
   and the subject's own `deny` adds to it. Absent, the site set applies. An entry for an
   account that does not resolve is inert, as for `bindings.yaml`; a `models:` entry that
   names an unlisted provider or model is inert too.
+- **Deny beats allow, whatever the specificity.** Patterns expand at load, then a deny
+  removes its terms from the allow list; there is no most-specific-wins rule. Two worked
+  examples: `allow: [admin.*]` with `deny: [admin.contain]` is every admin action but
+  `contain`; `deny: [admin.*]` with `allow: [admin.status]` is no admin action. The same
+  holds in `roles:` lists and in a subject's `actions:` (`allow: [fs.*]`, `deny: [fs.delete]`
+  reads "everything in fs except delete"). A wildcard also covers members a later release
+  adds to its family; list exact terms to avoid that growth. `kernel`, `liveness` and
+  `admin.whoami` cannot be named or limited.
 - **Separation of duties (recommended).** Bind the loop's account to `user`. An
   admin-bound loop also holds the disclosure verbs, and a loop that has been injected can
   quote `admin.config.show` into its next prompt; a `user`-bound loop cannot ask. The

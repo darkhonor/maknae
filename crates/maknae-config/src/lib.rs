@@ -83,7 +83,7 @@ pub use bindings_sync::{
 pub use authz::{
     destination_entry_is_acceptable, load_authz, parse_authz, ActionPattern, AuthzError,
     AuthzPolicy, HomeUnbound, Match3, ModelRef, PathGlob, Pattern, RawActionGrants,
-    RawDestinations, Request, SubjectPermissions, SubjectPolicy,
+    RawDestinations, Request, SubjectActions, SubjectPermissions, SubjectPolicy,
 };
 pub use baseline_doc::{document_sections, value_from_canonical_json, BaselineSections};
 pub use bounds::{

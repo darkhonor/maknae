@@ -76,6 +76,8 @@ pub enum AuthzBasicError {
     UnknownAction(String),
     /// A `subjects:` list names a `kernel` or `liveness` family or term.
     UngrantableAction(String),
+    /// An account lookup for a `subjects:` name failed.
+    SubjectLookup(String),
     /// Two `subjects:` names resolve to one account.
     DuplicateSubjectUid { uid: u32, names: (String, String) },
     /// The snapshot compiler refused the policy against the persisted identity
@@ -88,6 +90,7 @@ impl std::fmt::Display for AuthzBasicError {
         match self {
             AuthzBasicError::Load(m) => write!(f, "authz policy load refused: {m}"),
             AuthzBasicError::Bindings(m) => write!(f, "authz bindings invalid: {m}"),
+            AuthzBasicError::SubjectLookup(m) => write!(f, "authz subjects: {m}"),
             AuthzBasicError::UnknownRole(k) => {
                 write!(f, "authz roles: unknown role `{k}`")
             }
@@ -721,14 +724,20 @@ fn validate_subjects(
     for (name, entry) in &policy.subjects {
         let actions = match &entry.actions {
             None => None,
-            Some(patterns) => {
-                let mut terms = std::collections::BTreeMap::new();
-                for p in patterns {
-                    for (t, source) in decide::expand(p)? {
-                        terms.entry(t).or_insert(source);
+            Some(lists) => {
+                let expand_all = |patterns: &[maknae_config::ActionPattern]| {
+                    let mut terms = std::collections::BTreeMap::new();
+                    for p in patterns {
+                        for (t, source) in decide::expand(p)? {
+                            terms.entry(t).or_insert(source);
+                        }
                     }
-                }
-                Some(terms)
+                    Ok::<_, AuthzBasicError>(terms)
+                };
+                Some(decide::SubjectActionSet {
+                    allow: expand_all(&lists.allow)?,
+                    deny: expand_all(&lists.deny)?,
+                })
             }
         };
         let Some(&Some(uid)) = lookups.get(name) else {
@@ -801,7 +810,7 @@ fn resolve_uid_map_with(
 ) -> Result<Lookups, AuthzBasicError> {
     let mut map = Lookups::new();
     let mut asked = std::collections::BTreeSet::new();
-    let bound = bindings
+    let bound: Vec<&String> = bindings
         .roles
         .iter()
         .flat_map(|r| r.values())
@@ -809,8 +818,10 @@ fn resolve_uid_map_with(
         .filter_map(|e| match e {
             maknae_config::BindingEntry::Name(name) => Some(name),
             maknae_config::BindingEntry::Uid(_) => None,
-        });
-    for name in bound.chain(policy.subjects.keys()) {
+        })
+        .collect();
+    let bound_names: std::collections::BTreeSet<&str> = bound.iter().map(|n| n.as_str()).collect();
+    for name in bound.iter().copied().chain(policy.subjects.keys()) {
         if !asked.insert(name.as_str()) {
             continue;
         }
@@ -822,9 +833,12 @@ fn resolve_uid_map_with(
                 map.insert(name.clone(), None);
             }
             Lookup::Failed(errno) => {
-                return Err(AuthzBasicError::Bindings(format!(
-                    "looking up '{name}' failed (errno {errno}); nothing was changed"
-                )))
+                let m = format!("looking up '{name}' failed (errno {errno}); nothing was changed");
+                return Err(if bound_names.contains(name.as_str()) {
+                    AuthzBasicError::Bindings(m)
+                } else {
+                    AuthzBasicError::SubjectLookup(m)
+                });
             }
         }
     }
@@ -2267,10 +2281,19 @@ mod tests {
     #[test]
     fn the_shipped_authz_yaml_still_decides_identically() {
         let got = shipped_decisions();
-        assert!(
-            got == include_str!("testdata/shipped-decisions.txt"),
-            "{got}"
-        );
+        let want = include_str!("testdata/shipped-decisions.txt");
+        if got != want {
+            let (i, (g, w)) = got
+                .lines()
+                .zip(want.lines())
+                .enumerate()
+                .find(|(_, (g, w))| g != w)
+                .unwrap_or((
+                    got.lines().count().min(want.lines().count()),
+                    ("<length differs>", "<length differs>"),
+                ));
+            panic!("first difference at line {i}:\n expected: {w}\n      got: {g}");
+        }
     }
 
     #[test]
@@ -3493,9 +3516,10 @@ mod tests {
             zed.permissions.as_ref().unwrap().deny_sources(),
             ["Read(~/docs/secret/**)"]
         );
+        let actions = zed.actions.as_ref().unwrap();
         assert_eq!(
-            zed.actions.as_ref().unwrap(),
-            &[
+            actions.allow,
+            [
                 ("fs.delete", "fs.*".to_string()),
                 ("fs.mkdir", "fs.*".to_string()),
                 ("fs.read", "fs.*".to_string()),
@@ -3505,6 +3529,7 @@ mod tests {
             .into_iter()
             .collect()
         );
+        assert!(actions.deny.is_empty());
         assert_eq!(
             zed.models.as_ref().unwrap(),
             &[maknae_config::ModelRef {
@@ -3554,7 +3579,7 @@ mod tests {
         });
         assert_eq!(
             got.err(),
-            Some(AuthzBasicError::Bindings(
+            Some(AuthzBasicError::SubjectLookup(
                 "looking up 'zed' failed (errno 5); nothing was changed".into()
             ))
         );
@@ -3602,6 +3627,76 @@ mod tests {
                 assert_eq!(got.err(), Some(want.clone()), "{entry} {lookup:?}");
             }
         }
+    }
+
+    #[test]
+    fn subject_action_deny_expands_like_allow() {
+        let src = finish_looking_up(
+            with_subjects("  zed:\n    actions:\n      allow: [\"fs.*\"]\n      deny: [\"fs.*\", \"terminal.*\", \"admin.status\"]\n"),
+            |n| if n == "zed" { Lookup::Found(7001) } else { Lookup::Found(0) },
+        )
+        .unwrap();
+        let actions = src
+            .subject_grants()
+            .get(7001)
+            .unwrap()
+            .actions
+            .clone()
+            .unwrap();
+        assert_eq!(actions.allow.len(), 4);
+        assert_eq!(
+            actions.deny,
+            [
+                ("admin.status", "admin.status".to_string()),
+                ("fs.delete", "fs.*".to_string()),
+                ("fs.mkdir", "fs.*".to_string()),
+                ("fs.read", "fs.*".to_string()),
+                ("fs.write", "fs.*".to_string()),
+            ]
+            .into_iter()
+            .collect()
+        );
+        for (entry, want) in [
+            (
+                "kernel.*",
+                AuthzBasicError::UngrantableAction("kernel.*".into()),
+            ),
+            (
+                "liveness.ping",
+                AuthzBasicError::UngrantableAction("liveness.ping".into()),
+            ),
+            ("fs.exec", AuthzBasicError::UnknownAction("fs.exec".into())),
+            (
+                "admin.whoami",
+                AuthzBasicError::UnknownAction("admin.whoami".into()),
+            ),
+        ] {
+            for lookup in [Lookup::Found(7001), Lookup::Absent] {
+                let got = finish_looking_up(
+                    with_subjects(&format!(
+                        "  zed:\n    actions:\n      deny: [\"{entry}\"]\n"
+                    )),
+                    |n| if n == "zed" { lookup } else { Lookup::Found(0) },
+                );
+                assert_eq!(got.err(), Some(want.clone()), "{entry} {lookup:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_failed_subject_lookup_names_the_subjects_section() {
+        let got = finish_looking_up(with_subjects(ZED), |n| match n {
+            "zed" => Lookup::Failed(5),
+            _ => Lookup::Found(0),
+        })
+        .err()
+        .unwrap();
+        let text = got.to_string();
+        assert!(
+            text.contains("subjects") && !text.contains("bindings"),
+            "{text}"
+        );
+        assert!(text.contains("'zed'") && text.contains("errno 5"), "{text}");
     }
 
     #[test]
