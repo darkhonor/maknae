@@ -173,6 +173,11 @@
 1002 session.compact None -> NotApplicable { note: Some("role guest: no rule for session.compact") } Some("guest") None
 666 session.compact None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
 4242 session.compact None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 session.task None -> Deny { reason: "no agent on session.task" } Some("admin") None
+1001 session.task None -> Deny { reason: "no agent on session.task" } Some("user") None
+1002 session.task None -> NotApplicable { note: Some("role guest: no rule for session.task") } Some("guest") None
+666 session.task None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 session.task None -> NotApplicable { note: Some("subject resolves to no role") } None None
 1000 fs.read Some("/home/operator/notes") -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:permissions:allow:0 in /etc/maknae/authz.yaml#permissions")
 1000 fs.read Some("/home/operator/projects/x") -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:permissions:allow:0 in /etc/maknae/authz.yaml#permissions")
 1000 fs.read Some("/home/operator/.ssh/id") -> Deny { reason: "denied by policy entry Read(~/.ssh/**)" } Some("admin") Some("rule:permissions:deny:0 in /etc/maknae/authz.yaml#permissions")

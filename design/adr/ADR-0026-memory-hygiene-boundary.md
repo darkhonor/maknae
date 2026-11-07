@@ -39,6 +39,8 @@ Every buffer **Maknae owns** that holds secret-class bytes — in `maknaed`, `ma
 
 Each is converted by the change that next touches it, or filed as its own issue after the Cooky freeze at the maintainer's word. Until then they are **known**, not disputed.
 
+**Amended 2026-11-08 (#609):** the task object's prompt meets the rule and so has no row in the table above. `Ask::Prompt` in `crates/maknae-proto/src/task.rs` holds it as a `SecretText`, which is zeroizing and never grows, inside both `TaskSubmission` (what a tasker sends, as `Verb::TaskSubmit`) and `TaskObject` (the kernel's record). Both types and `Ask` have a redacting `Debug` that prints the prompt's length only. The submission is encoded through `encode_request_zeroizing`, a prompt-class frame. Decoding it is `decode_request`, so the `from_reader` row above and decision 2's ciborium row cover what the decoder leaves.
+
 **Amended 2026-10-12 (#512):** two rows are removed because that change touched them and converted them. `crates/maknae-llm/src/client.rs`'s reply body is a `Zeroizing<Vec<u8>>` sized to `max_body_bytes` once and filled through `take_capped`, so it never grows. `crates/maknae-llm/src/wire.rs`'s response DTOs (`RespMessage.content`, `reasoning_content`, `reasoning` and `RespToolFn.arguments`) deserialize straight into `SecretText`. What serde_json holds while parsing stays a decision-2 path.
 
 ### 2. The residual — the authoritative list

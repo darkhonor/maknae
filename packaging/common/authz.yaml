@@ -55,3 +55,7 @@ roles:
       - "admin.baseline.show"
       - "admin.baseline.accept"
       - "admin.release"
+      - "session.task"
+  user:
+    allow:
+      - "session.task"

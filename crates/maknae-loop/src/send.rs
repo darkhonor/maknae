@@ -206,6 +206,7 @@ pub async fn send_verb(
     }
 
     let request = Request {
+        task: None,
         protocol_version: PROTOCOL_VERSION,
         verb: prepared
             .as_ref()

@@ -12375,6 +12375,7 @@ mod home_resolution_tests {
     ) -> (RespResult, Vec<AuditRecord>) {
         let (mut client, server) = tokio::io::duplex(256 * 1024);
         let body = maknae_proto::encode_request(&maknae_proto::Request {
+            task: None,
             protocol_version: PROTOCOL_VERSION,
             verb: verb.clone(),
         })
@@ -12682,6 +12683,7 @@ mod admission_bound_tests {
         let (mut client, server) = tokio::io::duplex(256 * 1024);
         let verb = Verb::Ping;
         let body = maknae_proto::encode_request(&maknae_proto::Request {
+            task: None,
             protocol_version: PROTOCOL_VERSION,
             verb: verb.clone(),
         })

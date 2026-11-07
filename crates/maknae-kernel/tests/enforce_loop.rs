@@ -167,6 +167,7 @@ fn published_status(
 
 fn request_frame(verb: maknae_proto::Verb) -> Vec<u8> {
     maknae_proto::encode_request(&maknae_proto::Request {
+        task: None,
         protocol_version: maknae_proto::PROTOCOL_VERSION,
         verb,
     })

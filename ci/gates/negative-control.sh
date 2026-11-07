@@ -903,6 +903,47 @@ fx="$(vocab_fixture "$SHIPPED_VOCAB" "$SHIPPED_CONST" "" "${SHIPPED_FILE}  user:
 expect_reject_because "verb-vocab/shipped-grant-to-another-role" \
   "may grant only roles.admin.allow" "$fx/ci/gates/verb-vocabulary-drift.sh"
 
+# H-1 (#609): roles.user.allow may carry exactly the terms whose grantable row has the
+# admin-and-user disposition, and such a term is granted to both roles.
+USER_VOCAB="${SHIPPED_VOCAB}action	session.task	granted-in-shipped-file	granted to admin by the shipped authz.yaml; an install's own authz.yaml decides
+grantable	session.task	grantable-shipped-granted-admin-and-user	operator MAY grant per-role via roles:; the shipped authz.yaml grants it to admin and user
+"
+USER_CONST='pub(crate) const GRANTABLE_ACTIONS: [&str; 2] = ["admin.status", "session.task"];'
+USER_ARM='        Verb::TaskSubmit { .. } => "session.task",'
+USER_FILE="${SHIPPED_FILE}      - \"session.task\"
+  user:
+    allow:
+      - \"session.task\"
+"
+fx="$(vocab_fixture "$USER_VOCAB" "$USER_CONST" "$USER_ARM" "$USER_FILE")"
+expect_accept "verb-vocab/user-grant-with-the-admin-and-user-disposition" \
+  ": 8 terms, manifest exact, 2 shipped grants" "$fx/ci/gates/verb-vocabulary-drift.sh"
+
+fx="$(vocab_fixture "$USER_VOCAB" "$USER_CONST" "$USER_ARM" "${USER_FILE}      - \"admin.status\"
+")"
+expect_reject_because "verb-vocab/user-grant-of-a-term-without-the-disposition" \
+  "roles.user.allow only a term whose grantable row is grantable-shipped-granted-admin-and-user" \
+  "$fx/ci/gates/verb-vocabulary-drift.sh"
+
+fx="$(vocab_fixture "$USER_VOCAB" "$USER_CONST" "$USER_ARM" "${USER_FILE}  guest:
+    allow:
+      - \"session.task\"
+")"
+expect_reject_because "verb-vocab/guest-grant-of-an-admin-and-user-term" \
+  "may grant only roles.admin.allow" "$fx/ci/gates/verb-vocabulary-drift.sh"
+
+fx="$(vocab_fixture "$USER_VOCAB" "$USER_CONST" "$USER_ARM" "${SHIPPED_FILE}      - \"session.task\"
+")"
+expect_reject_because "verb-vocab/admin-and-user-term-granted-to-admin-only" \
+  "to both admin and user" "$fx/ci/gates/verb-vocabulary-drift.sh"
+
+fx="$(vocab_fixture "$USER_VOCAB" "$USER_CONST" "$USER_ARM" "${SHIPPED_FILE}  user:
+    allow:
+      - \"session.task\"
+")"
+expect_reject_because "verb-vocab/admin-and-user-term-granted-to-user-only" \
+  "to both admin and user" "$fx/ci/gates/verb-vocabulary-drift.sh"
+
 fx="$(vocab_fixture "$SHIPPED_VOCAB" "$SHIPPED_CONST" "" 'schema_version: 1
 roles:
   admin:

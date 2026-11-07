@@ -672,6 +672,7 @@ impl Fixture {
             served.await
         });
         let body = maknae_proto::encode_request(&maknae_proto::Request {
+            task: None,
             protocol_version: maknae_proto::PROTOCOL_VERSION,
             verb,
         })

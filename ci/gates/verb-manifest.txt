@@ -37,6 +37,7 @@ action	session.request_permission	not-granted	enumerated, decided, unbuilt — a
 action	session.elicit.create	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
 action	session.elicit.complete	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
 action	session.compact	not-granted	enumerated, decided, unbuilt — answers Unauthorized like every refusal (roadmap undisclosed on the wire; #181, wire ruling 2026-09-02)
+action	session.task	granted-in-shipped-file	BUILT as a decision only (#609): decided by the role's own grant, an enrolled target agent (resource attribute `agent`) and that agent's `taskers:` list, within the subject's `subjects:` or agent policy actions limit; the verb's behaviour and delivery are #610's, so in #609 every request answers Unauthorized. granted to admin by the shipped authz.yaml; an install's own authz.yaml decides. The shipped file grants it to user as well; see the grantable row
 action	fs.read	granted	shipped; a subject-side attempt: the daemon holds only a location descriptor, decides, records intent and grants; the CLI reads and reports (#365)
 action	fs.write	granted	shipped; Write path policy shared by user/admin, or the subject's own `subjects:` permissions under the site deny floor, within its actions limit (#608); replacement and exclusive creation are audited subject-side attempts; the daemon holds only a no-access descriptor (#158, #365)
 action	fs.delete	granted	shipped; Write path policy shared by user/admin, or the subject's own `subjects:` permissions under the site deny floor, within its actions limit (#608); audited subject-side delete attempt, recursive scopes require whole-subtree authority (#158)
@@ -71,6 +72,7 @@ grantable	admin.baseline.accept	grantable-shipped-granted	operator MAY grant per
 grantable	admin.contain	grantable-not-granted	operator MAY grant per-role via `roles:` (#165); ships ungranted
 grantable	admin.release	grantable-shipped-granted	operator MAY grant per-role via `roles:`; the shipped authz.yaml grants it to admin (#165)
 grantable	session.prompt	grantable-not-granted	operator MAY grant per-role via `roles:` (#162), admin or user, with a destination via destinations: (#172); ships ungranted and unlisted
+grantable	session.task	grantable-shipped-granted-admin-and-user	operator MAY grant per-role via roles:; the shipped authz.yaml grants it to admin and user (#609, H-1)
 capability	Write	granted	grammar capability; shipped Write(~/projects/**) allow, independent of Read; paired sensitive-path denies (#158)
 action-vocab	admin.status	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608)
 action-vocab	admin.config.show	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608)
@@ -85,3 +87,4 @@ action-vocab	fs.write	subject-limitable	a `subjects:` actions list may limit it;
 action-vocab	fs.delete	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608)
 action-vocab	fs.mkdir	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608)
 action-vocab	session.new	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608); an agent's policy.yaml allow lifts only its default deny (#609, R-S); no role may grant it until #170
+action-vocab	session.task	subject-limitable	a `subjects:` actions list may limit it; it never grants (#608); an agent's policy.yaml actions list limits it the same way (#609)

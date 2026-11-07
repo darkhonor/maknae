@@ -69,7 +69,7 @@ pub enum AuthzBasicError {
     /// (#162). Carries the offending term.
     UnknownActionTerm(String),
     /// A `roles:` list names a grantable term that THIS role may not hold
-    /// (#172: `user` may hold `session.prompt` only; the admin disclosure
+    /// (#172, #609: `user` may hold `session.prompt` and `session.task` only; the admin disclosure
     /// terms are admin-only, ADR-0010 decision 4 as superseded 2026-09-08).
     TermNotGrantableForRole { role: String, term: String },
     /// A `subjects:` list names no family or term in the action vocabulary.
@@ -115,7 +115,7 @@ impl std::fmt::Display for AuthzBasicError {
             ),
             AuthzBasicError::TermNotGrantableForRole { role, term } => write!(
                 f,
-                "authz roles: `{term}` is not grantable to role `{role}` (admin: {}; user: session.prompt)",
+                "authz roles: `{term}` is not grantable to role `{role}` (admin: {}; user: session.prompt, session.task)",
                 decide::GRANTABLE_ACTIONS.join(", ")
             ),
             AuthzBasicError::UnknownAction(a) => {
@@ -1251,7 +1251,7 @@ fn validate_destinations(
 /// Three checks, because `Role::from_key` answers only the first: the key is
 /// a role; the role may hold grants at all (`admin` and, since #172, `user`;
 /// `guest`/`adversary` are structural); and the term is one that role may
-/// hold (`user`: `session.prompt` only — the admin disclosure terms stay
+/// hold (`user`: `session.prompt` and `session.task` only — the admin disclosure terms stay
 /// admin-only, ADR-0010 decision 4 as superseded 2026-09-08). Gates **both**
 /// `allow` and `deny`, so a typo'd deny cannot be silently accepted as an
 /// unenforced denial. *(Corrected 2026-09-09: this said Phase 1 grants
@@ -1287,7 +1287,8 @@ pub(crate) fn role_terms(
     p: &maknae_config::ActionPattern,
 ) -> Result<Vec<&'static str>, AuthzBasicError> {
     let unknown = || AuthzBasicError::UnknownActionTerm(p.source());
-    let holds = |t: &str| role != role::Role::User || t == "session.prompt";
+    let holds =
+        |t: &str| role != role::Role::User || matches!(t, "session.prompt" | "session.task");
     let terms: Vec<&'static str> = decide::expand(p)
         .map_err(|_| unknown())?
         .into_iter()
@@ -1887,7 +1888,8 @@ mod tests {
                 "admin.baseline.accept",
                 "admin.contain",
                 "admin.release",
-                "session.prompt"
+                "session.prompt",
+                "session.task"
             ]
         );
     }
@@ -2827,21 +2829,24 @@ mod tests {
     }
 
     #[test]
-    fn the_shipped_file_grants_admin_exactly_the_five_terms() {
+    fn the_shipped_file_grants_admin_the_five_terms_and_both_roles_session_task() {
         let policy = maknae_config::parse_authz(SHIPPED).expect("shipped authz.yaml parses");
         let roles: Vec<&String> = policy.action_grants.keys().collect();
-        assert_eq!(roles, ["admin"]);
-        let admin = &policy.action_grants["admin"];
-        assert_eq!(
-            admin
+        assert_eq!(roles, ["admin", "user"]);
+        let allowed = |role: &str| -> Vec<String> {
+            policy.action_grants[role]
                 .allow
                 .iter()
                 .map(maknae_config::ActionPattern::source)
-                .collect::<Vec<_>>(),
-            SHIPPED_ADMIN_TERMS
-        );
-        assert!(admin.deny.is_empty());
+                .collect()
+        };
+        let mut admin_terms = SHIPPED_ADMIN_TERMS.to_vec();
+        admin_terms.push("session.task");
+        assert_eq!(allowed("admin"), admin_terms);
+        assert_eq!(allowed("user"), ["session.task"]);
+        assert!(policy.action_grants.values().all(|g| g.deny.is_empty()));
         assert!(policy.destinations.is_empty());
+        assert!(validate_grants(&policy.action_grants).is_ok());
     }
 
     /// The decision names its rule, from the snapshot it was made on.
@@ -4131,6 +4136,37 @@ mod tests {
     }
 
     #[test]
+    fn user_may_hold_session_task_and_its_family_keeps_both_session_terms() {
+        assert_eq!(
+            role_terms(
+                "user",
+                role::Role::User,
+                &maknae_config::ActionPattern::Exact("session.task".into())
+            ),
+            Ok(vec!["session.task"])
+        );
+        assert_eq!(
+            role_terms(
+                "user",
+                role::Role::User,
+                &maknae_config::ActionPattern::Family("session".into())
+            ),
+            Ok(vec!["session.prompt", "session.task"])
+        );
+        assert!(finish(parse_with_roles(
+            "roles:\n  user:\n    allow: [\"session.task\"]\n    deny: [\"session.task\"]\n  admin:\n    allow: [\"session.task\"]\n"
+        ))
+        .is_ok());
+        let got = finish(parse_with_roles(
+            "roles:\n  user:\n    allow: [\"admin.subject.list\"]\n",
+        ));
+        assert!(
+            matches!(got, Err(AuthzBasicError::TermNotGrantableForRole { ref role, ref term }) if role == "user" && term == "admin.subject.list"),
+            "{got:?}"
+        );
+    }
+
+    #[test]
     fn destinations_for_a_structural_or_unknown_role_refuse_at_boot_naming_the_role() {
         for (role, want_unknown) in [("guest", false), ("adversary", false), ("ghost", true)] {
             let got = finish(parse_with_roles(&format!(
@@ -4234,12 +4270,19 @@ mod tests {
                 ("admin.status", "admin.*"),
                 ("admin.subject.list", "admin.*"),
                 ("session.prompt", "session.*"),
+                ("session.task", "session.*"),
             ]
         );
         assert_eq!(deny, &[("admin.contain", "admin.contain".to_string())]);
         assert_eq!(
             grants.0["user"],
-            (vec![("session.prompt", "session.*".to_string())], vec![])
+            (
+                vec![
+                    ("session.prompt", "session.*".to_string()),
+                    ("session.task", "session.*".to_string())
+                ],
+                vec![]
+            )
         );
         assert_eq!(
             grants.evaluate3_action("admin", "admin.status"),
@@ -5975,7 +6018,7 @@ mod tests {
                 .chain(KERNEL_TERMS.iter())
                 .copied()
                 .collect();
-            assert_eq!(terms.len(), 60);
+            assert_eq!(terms.len(), 61);
             let (uids, paths, homes, ops) = (uids(), paths(), homes(), operations());
             assert_eq!(
                 (uids.len(), paths.len(), homes.len(), ops.len()),
@@ -6003,7 +6046,7 @@ mod tests {
                     distinct(&ops),
                     distinct(&destinations),
                 ),
-                (60, 9, 22, 5, 7, 4)
+                (61, 9, 22, 5, 7, 4)
             );
             let mut cells = 0usize;
             let mut mismatches: Vec<String> = Vec::new();
@@ -6136,7 +6179,7 @@ mod tests {
                 &mismatches[..mismatches.len().min(10)]
             );
             let fs_cells = 4 * 7 * 22 * 5 + 7 * 22 * 5;
-            let other_cells = 55 + 4;
+            let other_cells = 56 + 4;
             assert_eq!(cells, 12 * 9 * (fs_cells + other_cells));
             assert_eq!(subject_entries, 1);
             assert_eq!(

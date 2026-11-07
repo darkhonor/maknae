@@ -1033,6 +1033,7 @@ const SESSION_UID: u32 = 11_500;
 async fn pinging() -> (Scripted, DuplexStream) {
     let (mut client, server) = tokio::io::duplex(4096);
     let ping = maknae_proto::encode_request(&maknae_proto::Request {
+        task: None,
         protocol_version: maknae_proto::PROTOCOL_VERSION,
         verb: maknae_proto::Verb::Ping,
     })

@@ -143,7 +143,8 @@ pub fn dispatch_verb(verb: &Verb) -> Dispatch {
         | Verb::McpToolCall
         | Verb::McpResourceRead
         | Verb::McpPromptGet
-        | Verb::McpSamplingCreate => Dispatch::NoBehaviour,
+        | Verb::McpSamplingCreate
+        | Verb::TaskSubmit { .. } => Dispatch::NoBehaviour,
     }
 }
 
@@ -316,6 +317,7 @@ pub fn verb_to_action(verb: &Verb) -> &'static str {
         Verb::McpResourceRead => "mcp.resource.read",
         Verb::McpPromptGet => "mcp.prompt.get",
         Verb::McpSamplingCreate => "mcp.sampling.create",
+        Verb::TaskSubmit { .. } => "session.task",
     }
 }
 
@@ -826,12 +828,19 @@ mod tests {
                 "admin.baseline.accept",
                 "admin.contain",
                 "admin.release",
-                "session.prompt"
+                "session.prompt",
+                "session.task"
             ],
             "the hand-copied list in the class test above must match the constant"
         );
+        let (unbuilt, built): (Vec<&str>, Vec<&str>) =
+            real.iter().partition(|t| **t == "session.task");
         assert!(
-            all_dispatch(real),
+            !all_dispatch(&unbuilt),
+            "session.task is decided in #609 and built by #610 (ruling Q2)"
+        );
+        assert!(
+            all_dispatch(&built),
             "every grantable term must dispatch to a real arm — a grantable \
              term with NoBehaviour is granted-but-unbuilt, which ADR-0010 \
              defines out of existence"
@@ -1410,12 +1419,23 @@ mod tests {
             Verb::McpResourceRead,
             Verb::McpPromptGet,
             Verb::McpSamplingCreate,
+            Verb::TaskSubmit {
+                task: maknae_proto::TaskSubmission {
+                    schema: maknae_proto::TASK_SCHEMA.into(),
+                    version: maknae_proto::TASK_VERSION,
+                    agent: "hobi".into(),
+                    ask: maknae_proto::Ask::Prompt {
+                        prompt: maknae_proto::SecretText(maknae_io::Zeroizing::new("p".into())),
+                    },
+                    labels: maknae_proto::Labels {},
+                },
+            },
         ]
     }
 
     /// #148: every term is EXACTLY one of control plane or content-bearing, and
     /// the split is what the vocabulary says it is. Pinned over `all_verbs()`
-    /// (58 client action terms) + the two `kernel.*` pseudo-actions, AND
+    /// (59 client action terms) + the two `kernel.*` pseudo-actions, AND
     /// `all_verbs()` is cross-checked against `ci/gates/verb-manifest.txt`'s
     /// `action` rows (critical-review round 1 of PR B: the manifest is
     /// extracted from `verb_to_action`, which the compiler forces a new
@@ -1555,8 +1575,8 @@ mod tests {
 
     /// #67 D4: the vocabulary is the size the spec says.
     #[test]
-    fn the_vocabulary_is_fifty_eight_client_reachable_terms() {
-        assert_eq!(all_verbs().len(), 58);
+    fn the_vocabulary_is_fifty_nine_client_reachable_terms() {
+        assert_eq!(all_verbs().len(), 59);
     }
 
     /// Two terms sharing an action string would be decided as one another —
@@ -1642,6 +1662,7 @@ mod tests {
             ),
         ] {
             let bytes = maknae_proto::encode_request(&maknae_proto::Request {
+                task: None,
                 protocol_version: maknae_proto::PROTOCOL_VERSION,
                 verb,
             })

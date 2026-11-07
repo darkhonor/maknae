@@ -90,6 +90,7 @@ fn default_cfg() -> maknae_config::TransportConfig {
 
 fn ping_frame_bytes() -> Vec<u8> {
     maknae_proto::encode_request(&maknae_proto::Request {
+        task: None,
         protocol_version: maknae_proto::PROTOCOL_VERSION,
         verb: maknae_proto::Verb::Ping,
     })
@@ -388,6 +389,7 @@ async fn happy_whoami_carries_peer_facts() {
     let (mut c, s) = tokio::io::duplex(4096);
     let emit = RecEmit::new(false);
     let whoami = maknae_proto::encode_request(&maknae_proto::Request {
+        task: None,
         protocol_version: maknae_proto::PROTOCOL_VERSION,
         verb: maknae_proto::Verb::Whoami,
     })
@@ -639,6 +641,7 @@ fn raw_frame(class: u8, body: &[u8]) -> Vec<u8> {
 
 fn request_bytes(verb: maknae_proto::Verb) -> Vec<u8> {
     maknae_proto::encode_request(&maknae_proto::Request {
+        task: None,
         protocol_version: maknae_proto::PROTOCOL_VERSION,
         verb,
     })
